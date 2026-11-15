@@ -1,0 +1,11 @@
+cond 1
+a 1
+b 2
+picked 10
+cond 2
+a 3
+b 4
+picked 40
+bump 1
+bump 2
+count 2 1

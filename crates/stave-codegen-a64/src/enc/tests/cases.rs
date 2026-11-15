@@ -679,3 +679,49 @@ fn long_branches() {
     b.bind(l).unwrap();
     assert_eq!(b.finish().unwrap_err(), EncError::BranchRange(l));
 }
+
+/// The instructions of a branch-free `select`: `cmp`, `csel` on X and W registers, `fcsel` on S
+/// and D, the post-indexed word loop of a long aggregate with its `cbnz` counter, and the narrow
+/// tail loads and stores.
+#[test]
+fn select_sequences() {
+    check(
+        |a| {
+            a.cmp_imm(W, x(3), 0)?;
+            a.csel(X, x(15), x(15), x(16), Cond::Ne)?;
+            a.csel(W, x(15), x(15), x(16), Cond::Ne)?;
+            a.fcsel(Fp::S, vr(0), vr(1), vr(2), Cond::Ne);
+            a.fcsel(Fp::D, vr(3), vr(4), vr(5), Cond::Ne);
+            let top = a.new_label();
+            a.bind(top)?;
+            a.ldr(MemSize::X, x(15), Addr::Post(x(9), 8))?;
+            a.ldr(MemSize::X, x(16), Addr::Post(x(10), 8))?;
+            a.csel(X, x(15), x(15), x(16), Cond::Ne)?;
+            a.str(MemSize::X, x(15), Addr::Post(x(11), 8))?;
+            a.addsub_imm(AddSub::Sub, X, x(17), x(17), 1)?;
+            a.cbnz(X, x(17), top)?;
+            a.ldr(MemSize::H, x(16), Addr::Off(SP, 6))?;
+            a.ldr(MemSize::B, x(15), Addr::Off(x(9), -3))?;
+            a.str(MemSize::H, x(15), Addr::Off(SP, 22))?;
+            a.str(MemSize::B, x(15), Addr::Off(x(11), 2))?;
+            Ok(())
+        },
+        &[
+            "cmp w3, #0x0",
+            "csel x15, x15, x16, ne",
+            "csel w15, w15, w16, ne",
+            "fcsel s0, s1, s2, ne",
+            "fcsel d3, d4, d5, ne",
+            "ldr x15, [x9], #8",
+            "ldr x16, [x10], #8",
+            "csel x15, x15, x16, ne",
+            "str x15, [x11], #8",
+            "sub x17, x17, #0x1",
+            "cbnz x17, 0x14",
+            "ldrh w16, [sp, #6]",
+            "ldurb w15, [x9, #-3]",
+            "strh w15, [sp, #22]",
+            "strb w15, [x11, #2]",
+        ],
+    );
+}

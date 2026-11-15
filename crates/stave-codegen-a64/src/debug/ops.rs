@@ -15,6 +15,9 @@ use crate::enc::{
     AddSub, Addr, Cond, Ext, Fp, FpBin, FpUn, Label, Logic, MemSize, Reg, Shift, VReg, encode_logical,
 };
 
+/// Words of an aggregate `select` emitted straight-line; longer values use a counted loop.
+const SELECT_UNROLL: i64 = 64;
+
 /// A cast-try payload in a register.
 #[derive(Clone, Copy)]
 enum Payload {
@@ -917,17 +920,107 @@ impl<'a, 'm> Gen<'a, 'm> {
             Ty::Fat | Ty::Mem { .. } => {
                 let rc = self.use_g(c)?;
                 let h = self.home(v);
-                let (l1, l2) = (self.a.new_label(), self.a.new_label());
-                self.a.cbz(W, rc, l1)?;
-                self.put(a, t, SP, h)?;
-                self.a.b(l2)?;
-                self.a.bind(l1)?;
-                self.put(bo, t, SP, h)?;
-                self.a.bind(l2)?;
-                Ok(())
+                self.select_mem(rc, h, a, bo, t.size())
             }
             Ty::Bad(why) => Err(unsupported(why)),
         }
+    }
+
+    /// Chunk `k` (`sz` bytes at offset `k`) of an aggregate-class operand into `rt`. Changes
+    /// no flags: loads, `adrp`/`add`, and `mov` only.
+    fn mchunk(&mut self, o: Operand, sz: MemSize, k: i64, rt: Reg) -> R<()> {
+        match o {
+            Operand::Value(x) => {
+                let h = self.home(x);
+                self.ld(sz, false, rt, SP, h + k)
+            }
+            Operand::Str(s) if sz == MemSize::X => {
+                let (sym, so, len) = self.str_ref(s)?;
+                if k == 0 {
+                    self.a.addr_of_sym(rt, sym, so)?;
+                } else {
+                    self.a.mov_imm(X, rt, len)?;
+                }
+                Ok(())
+            }
+            Operand::Func(f) if sz == MemSize::X => {
+                if k == 0 {
+                    let s = self.cg.func_sym(f)?;
+                    self.a.addr_of_sym(rt, s, 0)?;
+                } else {
+                    self.a.mov_imm(X, rt, 0)?;
+                }
+                Ok(())
+            }
+            _ => Err(bad("aggregate operand must be a value")),
+        }
+    }
+
+    /// `home h = rc ? a : bo` over `size` bytes, without a branch on `rc`: one `cmp`, then per
+    /// 8-byte word both words loaded, `csel`, stored (the flags survive the loads and stores).
+    /// Up to [`SELECT_UNROLL`] words are unrolled; a longer value loops over its words with
+    /// post-incremented pointers and a `cbnz` counter (the loop branch depends on the size only,
+    /// never on `rc`). The tail below 8 bytes is selected in 4/2/1-byte chunks.
+    fn select_mem(&mut self, rc: Reg, h: i64, a: Operand, bo: Operand, size: u32) -> R<()> {
+        let n8 = i64::from(size / 8);
+        let tail = !size.is_multiple_of(8);
+        let homes = match (a, bo) {
+            (Operand::Value(av), Operand::Value(bv)) => Some((self.home(av), self.home(bv))),
+            _ if !tail && n8 <= SELECT_UNROLL => None,
+            _ => return Err(bad("aggregate operand must be a value")),
+        };
+        if n8 <= SELECT_UNROLL {
+            self.a.cmp_imm(W, rc, 0)?;
+            for k in 0..n8 {
+                self.mchunk(bo, MemSize::X, 8 * k, S16)?;
+                self.mchunk(a, MemSize::X, 8 * k, S15)?;
+                self.a.csel(X, S15, S15, S16, Cond::Ne)?;
+                self.st(MemSize::X, S15, SP, h + 8 * k)?;
+            }
+            return match homes {
+                Some((ha, hb)) if tail => self.select_tail([(SP, ha), (SP, hb), (SP, h)], n8 * 8, size),
+                _ => Ok(()),
+            };
+        }
+        let Some((ha, hb)) = homes else { return Err(bad("aggregate operand must be a value")) };
+        let (pa, pb, pd) = (self.tmp_g()?, self.tmp_g()?, self.tmp_g()?);
+        self.add_imm(pa, SP, ha)?;
+        self.add_imm(pb, SP, hb)?;
+        self.add_imm(pd, SP, h)?;
+        self.a.mov_imm(X, S17, n8 as u64)?;
+        self.a.cmp_imm(W, rc, 0)?;
+        let top = self.a.new_label();
+        self.a.bind(top)?;
+        self.a.ldr(MemSize::X, S15, Addr::Post(pa, 8))?;
+        self.a.ldr(MemSize::X, S16, Addr::Post(pb, 8))?;
+        self.a.csel(X, S15, S15, S16, Cond::Ne)?;
+        self.a.str(MemSize::X, S15, Addr::Post(pd, 8))?;
+        self.a.addsub_imm(AddSub::Sub, X, S17, S17, 1)?;
+        self.a.cbnz(X, S17, top)?;
+        if !tail {
+            return Ok(());
+        }
+        // the pointers now stand at byte `n8 * 8` of their values
+        let at = -n8 * 8;
+        self.select_tail([(pa, at), (pb, at), (pd, at)], n8 * 8, size)
+    }
+
+    /// Bytes `from..size` of [`Self::select_mem`], after its `cmp`. `loc` holds where byte 0 of
+    /// `a`, `b`, and the result is, as `(base, offset)`.
+    fn select_tail(&mut self, loc: [(Reg, i64); 3], from: i64, size: u32) -> R<()> {
+        let [(ab, ao), (bb, bo), (db, dof)] = loc;
+        let mut k = from;
+        for (c, sz) in [(4i64, MemSize::W), (2, MemSize::H), (1, MemSize::B)] {
+            if i64::from(size) - k < c {
+                continue;
+            }
+            self.ld(sz, false, S16, bb, bo + k)?;
+            self.ld(sz, false, S15, ab, ao + k)?;
+            self.a.csel(W, S15, S15, S16, Cond::Ne)?;
+            self.st(sz, S15, db, dof + k)?;
+            k += c;
+        }
+        Ok(())
     }
 
     fn copy_into(&mut self, v: Value, t: Ty, o: Operand) -> R<()> {

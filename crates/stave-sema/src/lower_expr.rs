@@ -1640,6 +1640,28 @@ impl<'a> FnCx<'a> {
                 self.f.b.store(v, x);
                 E::Unit
             }
+            "select" => {
+                if !matches!(self.kind(p.ty), TypeKind::Bool) {
+                    return self.vector_unsupported(Some(seg), "mask select");
+                }
+                let Some(c) = self.read(&p) else { return E::Never };
+                let (Some(&an), Some(&bn)) = (args.first(), args.get(1)) else {
+                    return self.fail_at(Some(seg), "select operands");
+                };
+                // both operands are evaluated, left to right, whatever `c` is
+                let Some(a) = self.val(an, Some(rt)) else { return E::Never };
+                let Some(b) = self.val(bn, Some(rt)) else { return E::Never };
+                if self.is_unit(rt) {
+                    return E::Unit;
+                }
+                let r = self.opn(Op::Select, rt, &[c, a, b]);
+                if self.needs_drop(rt) {
+                    // the operand not selected is a statement temporary, picked without a branch
+                    let u = self.opn(Op::Select, rt, &[c, b, a]);
+                    self.spill(u, rt, true);
+                }
+                E::V(r, rt)
+            }
             s if s.starts_with("prefetch_") => {
                 // a hint: no effect on results, no IR op yet
                 for &a in args {

@@ -1,0 +1,55 @@
+//~ STDOUT select_drop.stdout
+// `c.select(a, b)` moves both operands; the one not selected is dropped exactly once, at the
+// end of the statement (a statement temporary), and the selected one lives on in its new owner.
+import std.io;
+import std.string;
+import std.vec;
+
+struct Loud {
+    pub id: u32,
+}
+
+impl Drop for Loud {
+    fn drop(&mut self) {
+        let id = self.id;
+        io.print(f"drop {id}\n");
+    }
+}
+
+fn pick_loud(c: bool, a: Loud, b: Loud) -> Loud {
+    return c.select(a, b);
+}
+
+fn pick_string(c: bool, a: string.String, b: string.String) -> string.String {
+    return c.select(a, b);
+}
+
+fn pick_vec(c: bool, a: vec.Vec<Loud>, b: vec.Vec<Loud>) -> vec.Vec<Loud> {
+    return c.select(a, b);
+}
+
+fn main() -> i32 {
+    let a = Loud.{ id: 1 };
+    let b = Loud.{ id: 2 };
+    let kept = pick_loud(true, a, b);
+    io.print("picked\n");
+    let k = kept.id;
+    io.print(f"kept {k}\n");
+    let flag = k == 1;
+    let other = flag.select(Loud.{ id: 4 }, Loud.{ id: 5 });
+    io.print("inline\n");
+    let o = other.id;
+    io.print(f"other {o}\n");
+    let s = pick_string(false, f"left", f"right");
+    io.print(&s);
+    io.print("\n");
+    let mut va = vec.Vec::<Loud>.new();
+    va.push(Loud.{ id: 6 });
+    let mut vb = vec.Vec::<Loud>.new();
+    vb.push(Loud.{ id: 7 });
+    vb.push(Loud.{ id: 8 });
+    let v = pick_vec(false, va, vb);
+    let len = v.len();
+    io.print(f"len {len}\n");
+    return 0;
+}

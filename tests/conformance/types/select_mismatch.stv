@@ -1,0 +1,31 @@
+//~ CHECK-ONLY
+// The two operands of `c.select(a, b)` have one type (E0201 at the second, no implicit
+// conversion); `select` exists on `bool` only among the scalars (E0208), and takes exactly two
+// operands (E0201, case `arity`).
+fn widths(c: bool, a: u8, b: u16) -> u16 {
+    return c.select(a, b); //~ ERROR E0201
+}
+
+fn kinds(c: bool, a: u32) -> u32 {
+    let s = c.select(a, "text");      //~ ERROR E0201
+    let f = c.select(1.0f32, 2.0f64); //~ ERROR E0201
+    return a;
+}
+
+fn not_bool(k: u32, a: u32) -> u32 {
+    return k.select(a, a); //~ ERROR E0208
+}
+
+fn arity(c: bool, a: u32) -> u32 {
+    return c.select(a); //~ ERROR E0201
+}
+
+fn ok(c: bool, a: u32, b: &u32) -> u32 {
+    let x = c.select(a, *b);
+    let y: u64 = c.select(1, 2);
+    return x;
+}
+
+fn main() -> i32 {
+    return 0;
+}
