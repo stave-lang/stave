@@ -816,7 +816,7 @@ impl Cg<'_, '_> {
     // ---------------------------------------------------------------- compare, select
 
     /// Whether `o` is a fn value (a 16-byte `(code, environment)` pair) or a fn item.
-    fn is_fn_operand(&self, o: Operand) -> bool {
+    pub(crate) fn is_fn_operand(&self, o: Operand) -> bool {
         match o {
             Operand::Func(_) => true,
             Operand::Value(_) => {
@@ -839,6 +839,57 @@ impl Cg<'_, '_> {
                 Ok(())
             }
             MSrc::Str(_) => Err(bad("string literal compared as a fn value")),
+        }
+    }
+
+    /// Compares two scalars (ints, pointers, `bool`, `char`, `f32`, `f64`) and leaves the result
+    /// in the flags: the returned test holds iff `a op b`.
+    pub(crate) fn compare_flags(&mut self, op: Op, a: Operand, b: Operand) -> Res<Jc> {
+        match self.osk(a).or(self.osk(b)) {
+            Some(Sk::Float(f)) => {
+                let p = if f == FloatBits::F32 { Prec::F32 } else { Prec::F64 };
+                let ax = self.read_x(a, p)?;
+                let bx = self.read_x(b, p)?;
+                Ok(match op {
+                    Op::Eq | Op::Ne => {
+                        self.a.ucomis(p, ax, bx)?;
+                        if op == Op::Eq { Jc::FloatEq } else { Jc::FloatNe }
+                    }
+                    // unordered sets CF: `a` / `ae` are false, as the compare is
+                    Op::Lt | Op::Le => {
+                        self.a.ucomis(p, bx, ax)?;
+                        Jc::Flag(if op == Op::Lt { Cond::A } else { Cond::Ae })
+                    }
+                    _ => {
+                        self.a.ucomis(p, ax, bx)?;
+                        Jc::Flag(if op == Op::Gt { Cond::A } else { Cond::Ae })
+                    }
+                })
+            }
+            Some(sk) => {
+                let signed = matches!(sk, Sk::Int(t) if t.signed);
+                let (a, b, op) = if matches!(a, Operand::Const(_)) && !matches!(b, Operand::Const(_)) {
+                    (b, a, mirror(op))
+                } else {
+                    (a, b, op)
+                };
+                let ar = self.read_g(a)?;
+                let bo = self.read_gi(b)?;
+                self.alu_gi(AluOp::Cmp, Size::Q, ar, bo)?;
+                Ok(Jc::Flag(match (op, signed) {
+                    (Op::Eq, _) => Cond::E,
+                    (Op::Ne, _) => Cond::Ne,
+                    (Op::Lt, true) => Cond::L,
+                    (Op::Le, true) => Cond::Le,
+                    (Op::Gt, true) => Cond::G,
+                    (Op::Ge, true) => Cond::Ge,
+                    (Op::Lt, false) => Cond::B,
+                    (Op::Le, false) => Cond::Be,
+                    (Op::Gt, false) => Cond::A,
+                    _ => Cond::Ae,
+                }))
+            }
+            None => Err(bad("compare of non-scalar operands")),
         }
     }
 

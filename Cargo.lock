@@ -484,6 +484,7 @@ dependencies = [
  "proptest",
  "stave-ir",
  "stave-obj",
+ "stave-opt",
  "stave-target",
 ]
 
@@ -495,6 +496,7 @@ dependencies = [
  "rustc-hash",
  "stave-ir",
  "stave-obj",
+ "stave-opt",
  "stave-target",
 ]
 
@@ -519,6 +521,7 @@ dependencies = [
  "stave-diag",
  "stave-ir",
  "stave-obj",
+ "stave-opt",
  "stave-sema",
  "stave-syntax",
  "stave-target",
@@ -552,6 +555,9 @@ dependencies = [
 [[package]]
 name = "stave-opt"
 version = "0.0.1"
+dependencies = [
+ "stave-ir",
+]
 
 [[package]]
 name = "stave-sema"

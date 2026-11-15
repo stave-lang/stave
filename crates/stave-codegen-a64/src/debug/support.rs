@@ -120,6 +120,7 @@ pub struct Codegen<'a> {
     pub(crate) layouts: Layouts,
     pub(crate) tys: Vec<Ty>,
     pub(crate) intr: Vec<Intr>,
+    pub(crate) release: bool,
 }
 
 /// Per-thread reusable buffers.
@@ -134,7 +135,14 @@ impl<'a> Codegen<'a> {
         let layouts = Layouts::compute(&m.types);
         let tys = (0..m.types.len()).map(|i| classify(&m.types, &layouts, TypeId(i as u32))).collect();
         let intr = m.intrinsics.iter().map(|n| intr_kind(n)).collect();
-        Codegen { m, syms, layouts, tys, intr }
+        Codegen { m, syms, layouts, tys, intr, release: false }
+    }
+
+    /// Release code generation: values used across blocks own a callee-saved register for their
+    /// whole life (`analysis`, stave-opt `regalloc`). Off: they live in their home slots.
+    pub fn release(mut self, on: bool) -> Codegen<'a> {
+        self.release = on;
+        self
     }
 
     pub(crate) fn ty(&self, t: TypeId) -> Ty {
@@ -179,11 +187,13 @@ pub struct BuildConfig {
     pub opts: Options,
     /// The program's `main` (for `__stave_main`); `None`: no `__stave_main` stub.
     pub main: Option<FuncId>,
+    /// [`Codegen::release`].
+    pub release: bool,
 }
 
 impl BuildConfig {
     pub fn new(main: Option<FuncId>) -> BuildConfig {
-        BuildConfig { opts: Options::release(Machine::Aarch64), main }
+        BuildConfig { opts: Options::release(Machine::Aarch64), main, release: false }
     }
 }
 
@@ -497,7 +507,7 @@ fn fmod_code() -> R<FuncCode> {
 pub fn build_image(m: &Module, cfg: &BuildConfig) -> Result<ObjectImage, Error> {
     let mut b = ImageBuilder::new(Machine::Aarch64, cfg.opts.clone());
     let syms = prepare(&mut b, m, cfg.main)?;
-    let cg = Codegen::new(m, &syms);
+    let cg = Codegen::new(m, &syms).release(cfg.release);
     let mut s = FuncScratch::default();
     for fid in stave_ir::link::text_order(m) {
         let code = cg.compile(fid, &mut s)?;

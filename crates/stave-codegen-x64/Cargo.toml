@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 stave-ir = { workspace = true }
 stave-obj = { workspace = true }
+stave-opt = { workspace = true }
 rustc-hash = { workspace = true }
 
 [dev-dependencies]

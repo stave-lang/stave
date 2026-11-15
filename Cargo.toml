@@ -34,6 +34,7 @@ stave-sema = { path = "crates/stave-sema" }
 stave-borrow = { path = "crates/stave-borrow" }
 stave-target = { path = "crates/stave-target" }
 stave-ir = { path = "crates/stave-ir" }
+stave-opt = { path = "crates/stave-opt" }
 stave-codegen-x64 = { path = "crates/stave-codegen-x64" }
 stave-codegen-a64 = { path = "crates/stave-codegen-a64" }
 stave-obj = { path = "crates/stave-obj" }

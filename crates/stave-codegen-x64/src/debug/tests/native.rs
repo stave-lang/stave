@@ -9,7 +9,7 @@ use super::harness::*;
 use crate::debug::{Error, Options, SiteRow, compile_module};
 
 fn release() -> Options {
-    Options { image: stave_obj::Options::release(Machine::X86_64), ..Options::default() }
+    Options { image: stave_obj::Options::release(Machine::X86_64), release: true, ..Options::default() }
 }
 
 fn run_native(p: &Prog, name: &str, opts: &Options) -> Option<RunOut> {
@@ -242,7 +242,7 @@ fn tables_and_sites() {
         2, 12, 3, 6, 5, 10, b's', b't', nfuncs, 1, 0
     );
     for (n, img) in [("debug", o.image.clone()), ("release", stave_obj::Options::release(Machine::X86_64))] {
-        let o = Options { image: img, ..o.clone() };
+        let o = Options { image: img, release: n == "release", ..o.clone() };
         if let Some(r) = run_native(&p, &format!("tables-{n}"), &o) {
             assert_eq!(String::from_utf8_lossy(&r.stdout), want, "{n}");
             assert_eq!(r.code, 1, "{n}: trap site");

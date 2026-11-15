@@ -198,7 +198,14 @@ pub fn codegen_link(
     let owned;
     let m = if release {
         let mut c = m.clone();
+        c.funcs.par_iter_mut().filter_map(|f| f.body.as_mut()).for_each(stave_opt::before_elision);
         elided = stave_ir::bounds::elide(&mut c);
+        stave_opt::slices::declare_elem_pointers(&mut c.types);
+        let types = &c.types;
+        c.funcs
+            .par_iter_mut()
+            .filter_map(|f| f.body.as_mut())
+            .for_each(|b| stave_opt::after_elision(types, b));
         owned = c;
         &owned
     } else {
@@ -232,6 +239,7 @@ fn x64(
         // The driver verified the module after lowering.
         verify: false,
         threads: threads.unwrap_or(0),
+        release,
         ..stave_codegen_x64::Options::default()
     };
     let t0 = Instant::now();
@@ -254,7 +262,7 @@ fn a64(m: &Module, main: FuncId, release: bool, funcs: u64) -> Result<Built, Fai
     let t0 = Instant::now();
     let mut b = ImageBuilder::new(Machine::Aarch64, image_options(Machine::Aarch64, release));
     let syms = prepare(&mut b, m, Some(main)).map_err(|e| classify(Stage::Codegen, e))?;
-    let cg = Codegen::new(m, &syms);
+    let cg = Codegen::new(m, &syms).release(release);
     let ids: Vec<FuncId> =
         (0..m.funcs.len()).filter(|&i| m.funcs[i].body.is_some()).map(|i| FuncId(i as u32)).collect();
     let codes: Vec<Result<FuncCode, Error>> =

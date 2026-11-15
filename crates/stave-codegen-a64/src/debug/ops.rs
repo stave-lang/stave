@@ -781,6 +781,42 @@ impl<'a, 'm> Gen<'a, 'm> {
 
     // ---------------------------------------------------------------- compare / select
 
+    /// Emits compare instruction `i` (on int or float scalars) as flags only; the returned
+    /// condition holds iff the compare is true. `b.cond` on its negation branches when the
+    /// compare is false, also for unordered floats.
+    pub(crate) fn compare_flags(&mut self, i: u32) -> R<Cond> {
+        let op = self.b.insts.op[i as usize];
+        let (mut a, mut bo, mut op) = match self.b.args(i) {
+            &[a, bo] => (a, bo, op),
+            _ => return Err(bad("compare operands")),
+        };
+        match self.otype(a).or(self.otype(bo)) {
+            Some(Ty::Sc(s)) if s.is_fp() => {
+                let fa = self.use_f(a, s)?;
+                let fb = self.use_f(bo, s)?;
+                self.a.fcmp(s.fp(), fa, fb);
+                Ok(fcond(op))
+            }
+            Some(Ty::Sc(s)) => {
+                if self.b.int_const(a).is_some() && self.b.int_const(bo).is_none() {
+                    std::mem::swap(&mut a, &mut bo);
+                    op = mirror(op);
+                }
+                let ra = self.use_g(a)?;
+                match self.b.int_const(bo) {
+                    Some(k) if (0..4096).contains(&k) => self.a.cmp_imm(X, ra, k as u64)?,
+                    Some(k) if (-4095..0).contains(&k) => self.a.cmn_imm(X, ra, (-k) as u64)?,
+                    _ => {
+                        let rb = self.use_g(bo)?;
+                        self.a.cmp(X, ra, rb)?;
+                    }
+                }
+                Ok(icond(op, s.signed()))
+            }
+            _ => Err(bad("fused compare of a non-scalar")),
+        }
+    }
+
     fn compare(&mut self, op: Op, a: Operand, bo: Operand, v: Value) -> R<()> {
         let is_fn = |g: &Self, o: Operand| match o {
             Operand::Func(_) => true,

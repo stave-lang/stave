@@ -1,9 +1,11 @@
-//! Debug backend tests: differential runs against the stave-ir interpreter (`harness`), the
-//! hand-written programs (`cases`), native-only intrinsics (`native`), random programs
-//! (`randgen`, `props`), and the codegen speed measurement (`bench`).
+//! Backend tests: differential runs against the stave-ir interpreter (`harness`, each program as
+//! a debug and as a release build), the hand-written programs (`cases`), native-only intrinsics
+//! (`native`), random programs (`randgen`, `props`), the layout of cold code (`cold`), and the
+//! codegen speed measurement (`bench`).
 
 mod bench;
 mod cases;
+mod cold;
 mod harness;
 mod native;
 mod props;

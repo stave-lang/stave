@@ -380,16 +380,20 @@ fn show(b: &[u8]) -> String {
     if s.len() > 4000 { format!("{}…", &s[..4000]) } else { s.into_owned() }
 }
 
-/// Runs in both and compares; returns the interpreter's result.
+/// The release configuration: packed image, release code generation.
+pub fn release_options() -> Options {
+    Options {
+        image: stave_obj::Options::release(stave_obj::Machine::X86_64),
+        release: true,
+        ..Options::default()
+    }
+}
+
+/// Runs in the interpreter and natively, as a debug and as a release build, and compares;
+/// returns the interpreter's result.
 pub fn check(p: &Prog, name: &str) -> RunOut {
     let want = interp(p);
-    for (oname, opts) in [
-        ("debug", Options::default()),
-        (
-            "release",
-            Options { image: stave_obj::Options::release(stave_obj::Machine::X86_64), ..Options::default() },
-        ),
-    ] {
+    for (oname, opts) in [("debug", Options::default()), ("release", release_options())] {
         if let Some(got) = native(p, &format!("{name}-{oname}"), &opts) {
             if std::env::var_os("STAVE_TEST_VERBOSE").is_some() {
                 eprintln!("{name} ({oname}): native exit {} stdout {} bytes", got.code, got.stdout.len());

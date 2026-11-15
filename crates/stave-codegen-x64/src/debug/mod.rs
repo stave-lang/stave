@@ -83,6 +83,9 @@ pub struct Options {
     pub verify: bool,
     /// Worker threads for per-function codegen (0 = available parallelism).
     pub threads: usize,
+    /// Release code generation: values used across blocks get registers for their whole life
+    /// (`func`, stave-opt `regalloc`). Off: every such value lives in its frame home.
+    pub release: bool,
 }
 
 impl Default for Options {
@@ -95,6 +98,7 @@ impl Default for Options {
             main: None,
             verify: true,
             threads: 0,
+            release: false,
         }
     }
 }
@@ -197,6 +201,8 @@ pub struct Ctx<'m> {
     pub(crate) fn_sites: Vec<Site>,
     /// Per `Module::statics` index.
     pub(crate) static_sym: Vec<SymbolId>,
+    /// [`Options::release`].
+    pub(crate) release: bool,
 }
 
 /// What [`emit_module`] defined: the symbols of the functions, and the PC table rows still to
@@ -316,6 +322,7 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
         lines,
         fn_sites: fn_sites.clone(),
         static_sym,
+        release: o.release,
     };
     let (codes, nanos) = compile_all(&cx, &order, o.threads);
     for (f, code) in order.iter().zip(codes) {
@@ -430,6 +437,7 @@ pub fn bench_ctx(m: &Module) -> Ctx<'_> {
         lines: Vec::new(),
         fn_sites: Vec::new(),
         static_sym: (0..m.statics.len() as u32).map(|i| SymbolId(u32::MAX - 7 - i)).collect(),
+        release: false,
     }
 }
 

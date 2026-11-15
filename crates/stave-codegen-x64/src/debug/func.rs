@@ -3,16 +3,17 @@
 //! individual ops is in `ops`, `cast`, and `intrin`.
 
 use stave_ir::arith::IntTy;
-use stave_ir::ir::Target;
+use stave_ir::ir::{Target, ValueDef};
 use stave_ir::layout::Layout;
 use stave_ir::{
-    Body, Const, FloatBits, Func, FuncId, Operand, PanicKind, Site, StrId, Term, TypeId, TypeKey, Value,
+    Body, Const, FloatBits, Func, FuncId, Op, Operand, PanicKind, Site, StrId, Term, TypeId, TypeKey, Value,
 };
 use stave_obj::{FuncCode, SymbolId};
+use stave_opt::regalloc;
 
 use super::abi::{self, CallAbi, Loc, Piece, RetLoc, VCls};
 use super::analysis::{self, Analysis, NONE};
-use super::{Ctx, Res, bad, unsup};
+use super::{Ctx, Error, Res, bad, unsup};
 use crate::enc::*;
 
 /// Scratch GPRs, never allocated to values.
@@ -49,6 +50,14 @@ pub(crate) const CALLER_SAVED: [Gpr; 7] =
 const CALLEE_SAVED: [Gpr; 5] = [Gpr::RBX, Gpr::R12, Gpr::R13, Gpr::R14, Gpr::R15];
 /// `xmm0`..`xmm13` hold values.
 const NXMM: u8 = 14;
+/// Release: call-clobbered registers a value may own for its whole life (the rest of the
+/// allocatable ones always stay with the block-local cache; `rax`, `rcx`, `rdx` have fixed uses).
+const OWN_G_SCRATCH: [Gpr; 2] = [Gpr::R9, Gpr::R8];
+/// Release: `xmm6`..`xmm13` may be owned (all vector registers are call-clobbered).
+const OWN_X_FIRST: u8 = 6;
+const OWN_X_COUNT: u8 = 8;
+const OUT_OF_G: &str = "internal: out of general registers";
+const OUT_OF_X: &str = "internal: out of vector registers";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum R {
@@ -61,6 +70,37 @@ enum Occ {
     Free,
     Val(Value),
     Temp,
+}
+
+/// A place a parallel move reads or writes: a register or an 8-byte frame home (`rbp` offset).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PLoc {
+    G(Gpr),
+    X(Xmm),
+    M(i32),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PSrc {
+    Loc(PLoc),
+    Imm(i64),
+    Sym(SymbolId),
+    /// The frame address `rbp + off`.
+    Addr(i32),
+}
+
+struct PMove {
+    dst: PLoc,
+    src: PSrc,
+    /// `Some`: a float-class value.
+    prec: Option<Prec>,
+}
+
+fn ploc(r: R) -> PLoc {
+    match r {
+        R::G(g) => PLoc::G(g),
+        R::X(x) => PLoc::X(x),
+    }
 }
 
 /// An integer operand: a register or a sign-extended 32-bit immediate.
@@ -89,6 +129,17 @@ pub(crate) enum Sk {
     Float(FloatBits),
     /// Thin pointer or fn value.
     Ptr,
+}
+
+/// How a conditional branch tests its condition.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Jc {
+    /// One flag condition.
+    Flag(Cond),
+    /// Float `==` after `ucomis`: equal and ordered (`ZF` and not `PF`).
+    FloatEq,
+    /// Float `!=` after `ucomis`: not equal or unordered.
+    FloatNe,
 }
 
 pub(crate) enum Callee {
@@ -131,13 +182,179 @@ pub(crate) struct Cg<'a, 'm> {
     cur_site: u32,
     line_site: u32,
     ret_abi: RetLoc,
+    /// Release code generation. The callee-saved registers in use are then known up front (the
+    /// owned ones; the cache keeps to call-clobbered registers) and saved at fixed slots at the
+    /// top of the frame, so the epilogue can be emitted at a `ret`.
+    rel: bool,
+    /// Release: the register a value owns from its definition to its last use (stave-opt
+    /// `regalloc`). Empty in a debug build. An owned register is outside the block-local cache:
+    /// its `Occ` is `Free` between instructions and `vreg` of its value stays set across blocks.
+    own: Vec<Option<R>>,
+    /// Registers owned by some value of this function; the cache never allocates them.
+    gown: u16,
+    xown: u16,
+    /// General registers the cache does not allocate: the owned ones and, in a release build,
+    /// every callee-saved one.
+    gskip: u16,
+    /// Release: the epilogue label is bound (the first `ret` emitted it).
+    epilogue_bound: bool,
+    /// Release: per owned value, the first and last block (emission index) of its interval. No
+    /// other value has its register in those blocks.
+    first: Vec<u32>,
+    last: Vec<u32>,
+    /// Emission index of the block being compiled.
+    cur_at: u32,
+    /// The register the current instruction's result should end up in (its owned register, or
+    /// [`Self::edge_hint`]): the next temporary an op asks for lands there.
+    hint: Option<R>,
+    /// Release: uses per value, saturating. Empty in a debug build.
+    uses: Vec<u8>,
+    /// Release: the compare of the current block that its `cbr` emits (`cmp` + `jcc`, no bool
+    /// value); `NONE` otherwise.
+    fused: u32,
 }
 
 pub(crate) fn compile(cx: &Ctx<'_>, fid: FuncId) -> Res<FuncCode> {
     let f = cx.m.func(fid).ok_or_else(|| bad("unknown function"))?;
     let b = f.body.as_ref().ok_or_else(|| bad("function has no body"))?;
-    let an = analysis::analyze(b);
+    // `cpuid` writes `rbx`, which a release build may have given to a value.
+    let cpuid = b
+        .insts
+        .op
+        .iter()
+        .any(|op| matches!(op, Op::Intrinsic(id) if cx.m.intrinsic_name(*id) == Some("cpuid")));
+    if cx.release && !cpuid {
+        match compile_with(cx, fid, true) {
+            // An instruction that needs more temporaries than the cache keeps next to the owned
+            // registers: this function is compiled without them.
+            Err(Error::Malformed { what, .. }) if what == OUT_OF_G || what == OUT_OF_X => {}
+            r => return r,
+        }
+    }
+    compile_with(cx, fid, false)
+}
+
+/// Release register ownership: the owned register per value, the masks of owned general and
+/// vector registers, and the intervals.
+struct Owned {
+    reg: Vec<Option<R>>,
+    gown: u16,
+    xown: u16,
+    first: Vec<u32>,
+    last: Vec<u32>,
+}
+
+fn ownership(cx: &Ctx<'_>, b: &Body, an: &Analysis) -> Owned {
     let nv = b.values.len();
+    let mut class = vec![regalloc::CLASS_NONE; nv];
+    for (c, vd) in class.iter_mut().zip(&b.values) {
+        *c = match cx.cls.get(vd.ty.index()).copied().flatten() {
+            Some(VCls::G { .. }) => regalloc::CLASS_INT,
+            Some(VCls::X(_)) => regalloc::CLASS_FLOAT,
+            _ => regalloc::CLASS_NONE,
+        };
+    }
+    let mut clobbers = vec![false; b.insts.len()];
+    // Frame addresses (a `slot` and constant offsets into one) are rematerialized, not held.
+    let mut frame_addr = vec![false; nv];
+    for (i, &op) in b.insts.op.iter().enumerate() {
+        let res = b.insts.result.get(i).copied().flatten().filter(|v| v.index() < nv);
+        match op {
+            Op::Call | Op::CallInd | Op::Intrinsic(_) => clobbers[i] = true,
+            Op::Slot => {
+                if let Some(v) = res {
+                    frame_addr[v.index()] = true;
+                }
+            }
+            Op::FieldAddr | Op::EnumFieldAddr | Op::ElemAddr => {
+                let args = b.args(i as u32);
+                let base = matches!(args.first(), Some(Operand::Value(p))
+                    if frame_addr.get(p.index()).copied().unwrap_or(false));
+                let fixed = op != Op::ElemAddr || args.get(1).is_some_and(|o| b.int_const(*o).is_some());
+                if base
+                    && fixed
+                    && let Some(v) = res
+                {
+                    frame_addr[v.index()] = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    for (c, fa) in class.iter_mut().zip(&frame_addr) {
+        if *fa {
+            *c = regalloc::CLASS_NONE;
+        }
+    }
+    let saved = CALLEE_SAVED.len() as u8;
+    let pools = regalloc::Pools {
+        int_saved: saved,
+        int_scratch: OWN_G_SCRATCH.len() as u8,
+        float_saved: 0,
+        float_scratch: OWN_X_COUNT,
+    };
+    let asg = regalloc::assign(b, &an.rpo, &class, &clobbers, pools);
+    let (mut gown, mut xown) = (0u16, 0u16);
+    let reg = asg
+        .reg
+        .iter()
+        .zip(&class)
+        .map(|(&r, &c)| {
+            if r == regalloc::NO_REG {
+                return None;
+            }
+            if c == regalloc::CLASS_FLOAT {
+                let x = Xmm::masked(OWN_X_FIRST + r % OWN_X_COUNT);
+                xown |= xbit(x);
+                Some(R::X(x))
+            } else {
+                let g = if r < saved {
+                    CALLEE_SAVED[usize::from(r)]
+                } else {
+                    OWN_G_SCRATCH[usize::from(r - saved) % OWN_G_SCRATCH.len()]
+                };
+                gown |= bit(g);
+                Some(R::G(g))
+            }
+        })
+        .collect();
+    Owned { reg, gown, xown, first: asg.first, last: asg.last }
+}
+
+fn use_counts(b: &Body) -> Vec<u8> {
+    let mut n = vec![0u8; b.values.len()];
+    let mut add = |o: Operand| {
+        if let Operand::Value(v) = o
+            && let Some(c) = n.get_mut(v.index())
+        {
+            *c = c.saturating_add(1);
+        }
+    };
+    b.operands.iter().for_each(|o| add(*o));
+    for bd in &b.blocks {
+        match bd.term {
+            Term::Cbr { cond: o, .. } | Term::Switch { scrut: o, .. } | Term::Ret(Some(o)) => add(o),
+            _ => {}
+        }
+    }
+    n
+}
+
+fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
+    let f = cx.m.func(fid).ok_or_else(|| bad("unknown function"))?;
+    let b = f.body.as_ref().ok_or_else(|| bad("function has no body"))?;
+    let mut an = analysis::analyze(b);
+    let nv = b.values.len();
+    if release {
+        an.rpo = stave_opt::layout::order(b);
+    }
+    let Owned { reg: own, gown, xown, first, last } = if release {
+        ownership(cx, b, &an)
+    } else {
+        Owned { reg: Vec::new(), gown: 0, xown: 0, first: Vec::new(), last: Vec::new() }
+    };
+    let uses = if release { use_counts(b) } else { Vec::new() };
+    let callee_saved = CALLEE_SAVED.iter().fold(0, |m, g| m | bit(*g));
     let mut stable = vec![true; nv];
     for (bi, bd) in b.blocks.iter().enumerate() {
         if bi != 0 {
@@ -169,8 +386,9 @@ pub(crate) fn compile(cx: &Ctx<'_>, fid: FuncId) -> Res<FuncCode> {
         xocc: [Occ::Free; 16],
         glock: 0,
         xlock: 0,
-        used_callee: 0,
-        frame: 0,
+        used_callee: gown & callee_saved,
+        // release: the save slots of the owned callee-saved registers come first
+        frame: 8 * (gown & callee_saved).count_ones(),
         labels,
         traps: Vec::new(),
         trap_index: rustc_hash::FxHashMap::default(),
@@ -181,6 +399,18 @@ pub(crate) fn compile(cx: &Ctx<'_>, fid: FuncId) -> Res<FuncCode> {
         cur_site: Site::NONE.0,
         line_site: Site::NONE.0,
         ret_abi: RetLoc::None,
+        rel: release,
+        own,
+        gown,
+        xown,
+        gskip: if release { gown | callee_saved } else { 0 },
+        epilogue_bound: false,
+        first,
+        last,
+        cur_at: 0,
+        hint: None,
+        uses,
+        fused: NONE,
     };
     let fs = cx.fn_sites.get(fid.index()).copied().unwrap_or(Site::NONE);
     cg.run(fs)
@@ -530,9 +760,31 @@ impl<'a, 'm> Cg<'a, 'm> {
         }
     }
 
+    /// The register `v` owns, if any.
+    fn owned(&self, v: Value) -> Option<R> {
+        self.own.get(v.index()).copied().flatten()
+    }
+
+    /// The hinted register as a temporary, when it is idle.
+    fn take_hint(&mut self, want_x: bool) -> Option<R> {
+        let h = self.hint?;
+        if matches!(h, R::X(_)) != want_x || self.locked(h) || self.occ(h) != Occ::Free {
+            return None;
+        }
+        self.set_occ(h, Occ::Temp);
+        self.lock(h);
+        Some(h)
+    }
+
     pub fn alloc_g(&mut self) -> Res<Gpr> {
+        if let Some(R::G(g)) = self.take_hint(false) {
+            return Ok(g);
+        }
         let mut best: Option<(u32, Gpr)> = None;
         for g in ALLOC_G {
+            if self.gskip & bit(g) != 0 {
+                continue;
+            }
             if let Some(s) = self.victim_score(R::G(g)) {
                 if s == 0 {
                     best = Some((0, g));
@@ -543,7 +795,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                 }
             }
         }
-        let (_, g) = best.ok_or_else(|| bad("internal: out of general registers"))?;
+        let (_, g) = best.ok_or_else(|| bad(OUT_OF_G))?;
         self.evict(R::G(g))?;
         self.set_occ(R::G(g), Occ::Temp);
         self.lock(R::G(g));
@@ -551,9 +803,15 @@ impl<'a, 'm> Cg<'a, 'm> {
     }
 
     pub fn alloc_x(&mut self) -> Res<Xmm> {
+        if let Some(R::X(x)) = self.take_hint(true) {
+            return Ok(x);
+        }
         let mut best: Option<(u32, Xmm)> = None;
         for n in 0..NXMM {
             let x = Xmm::masked(n);
+            if self.xown & xbit(x) != 0 {
+                continue;
+            }
             if let Some(s) = self.victim_score(R::X(x)) {
                 if s == 0 {
                     best = Some((0, x));
@@ -564,11 +822,27 @@ impl<'a, 'm> Cg<'a, 'm> {
                 }
             }
         }
-        let (_, x) = best.ok_or_else(|| bad("internal: out of vector registers"))?;
+        let (_, x) = best.ok_or_else(|| bad(OUT_OF_X))?;
         self.evict(R::X(x))?;
         self.set_occ(R::X(x), Occ::Temp);
         self.lock(R::X(x));
         Ok(x)
+    }
+
+    /// A cache register for an operand: never the hinted one, which the result is about to
+    /// overwrite.
+    fn alloc_g_cache(&mut self) -> Res<Gpr> {
+        let h = self.hint.take();
+        let r = self.alloc_g();
+        self.hint = h;
+        r
+    }
+
+    fn alloc_x_cache(&mut self) -> Res<Xmm> {
+        let h = self.hint.take();
+        let r = self.alloc_x();
+        self.hint = h;
+        r
     }
 
     /// Takes a specific register as a temporary (its value is saved / moved out first).
@@ -602,9 +876,48 @@ impl<'a, 'm> Cg<'a, 'm> {
         self.vreg[vi] = Some(r);
         self.lock(r);
         self.in_home[vi] = false;
-        if self.an.escapes[vi] {
+        if self.an.escapes[vi] && self.owned(v).is_none() {
             self.store_home(v, r)?;
         }
+        Ok(())
+    }
+
+    /// Moves the result `v` of the instruction just emitted into the register `rv` it owns and
+    /// takes that register out of the cache.
+    fn settle(&mut self, v: Value, rv: R) -> Res<()> {
+        let vi = v.index();
+        match self.vreg[vi] {
+            Some(r) if r == rv => {}
+            Some(r) => {
+                if let Occ::Val(u) = self.occ(rv)
+                    && u != v
+                {
+                    self.evict(rv)?;
+                }
+                match (rv, r) {
+                    (R::G(d), R::G(s)) => self.a.mov_rr(Size::Q, d, s),
+                    (R::X(d), R::X(s)) => self.a.movaps(d, s),
+                    _ => return Err(bad("internal: result in a register of the wrong class")),
+                }
+                self.free_reg(r);
+            }
+            None if self.is_slot[vi] => {
+                // a frame address after all: rematerialized, the register stays unused
+                self.own[vi] = None;
+                return Ok(());
+            }
+            None if self.in_home[vi] => {
+                if let Occ::Val(_) = self.occ(rv) {
+                    self.evict(rv)?;
+                }
+                self.load_val(v, rv)?;
+                self.in_home[vi] = false;
+            }
+            // an unused pure op: nothing was emitted
+            None => return Ok(()),
+        }
+        self.set_occ(rv, Occ::Free);
+        self.vreg[vi] = Some(rv);
         Ok(())
     }
 
@@ -634,12 +947,20 @@ impl<'a, 'm> Cg<'a, 'm> {
         self.xlock = 0;
     }
 
-    fn end_inst(&mut self, i: u32) {
+    fn end_inst(&mut self, i: u32) -> Res<()> {
         let pos = self.pos;
         let b = self.b;
+        self.hint = None;
+        if let Some(Some(v)) = b.insts.result.get(i as usize)
+            && let Some(rv) = self.owned(*v)
+        {
+            self.settle(*v, rv)?;
+        }
         for &o in b.args(i) {
+            // an owned register is not the cache's to free (it may hold this result by now)
             if let Operand::Value(v) = o
                 && self.last_use.get(v.index()).copied() == Some(pos)
+                && self.owned(v).is_none()
                 && let Some(r) = self.vreg[v.index()]
             {
                 self.free_reg(r);
@@ -664,6 +985,7 @@ impl<'a, 'm> Cg<'a, 'm> {
         }
         self.glock = 0;
         self.xlock = 0;
+        Ok(())
     }
 
     fn needed_after(&self, v: Value) -> bool {
@@ -767,13 +1089,13 @@ impl<'a, 'm> Cg<'a, 'm> {
                 self.lock(R::G(g));
                 return Ok(g);
             }
-            let g = self.alloc_g()?;
+            let g = self.alloc_g_cache()?;
             self.load_val(v, R::G(g))?;
             self.set_occ(R::G(g), Occ::Val(v));
             self.vreg[vi] = Some(R::G(g));
             return Ok(g);
         }
-        let g = self.alloc_g()?;
+        let g = self.alloc_g_cache()?;
         self.copy_to_g(o, g)?;
         Ok(g)
     }
@@ -796,13 +1118,13 @@ impl<'a, 'm> Cg<'a, 'm> {
                 self.lock(R::X(x));
                 return Ok(x);
             }
-            let x = self.alloc_x()?;
+            let x = self.alloc_x_cache()?;
             self.load_val(v, R::X(x))?;
             self.set_occ(R::X(x), Occ::Val(v));
             self.vreg[vi] = Some(R::X(x));
             return Ok(x);
         }
-        let x = self.alloc_x()?;
+        let x = self.alloc_x_cache()?;
         self.copy_to_x(o, p, x)?;
         Ok(x)
     }
@@ -822,6 +1144,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             if let Some(R::G(g)) = self.vreg.get(vi).copied().flatten()
                 && self.last_use.get(vi).copied() == Some(self.pos)
                 && (self.in_home[vi] || !self.an.escapes[vi])
+                && self.owned(v).is_none()
             {
                 self.vreg[vi] = None;
                 self.set_occ(R::G(g), Occ::Temp);
@@ -844,6 +1167,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             if let Some(R::X(x)) = self.vreg.get(vi).copied().flatten()
                 && self.last_use.get(vi).copied() == Some(self.pos)
                 && (self.in_home[vi] || !self.an.escapes[vi])
+                && self.owned(v).is_none()
             {
                 self.vreg[vi] = None;
                 self.set_occ(R::X(x), Occ::Temp);
@@ -1383,17 +1707,23 @@ impl<'a, 'm> Cg<'a, 'm> {
         let b = self.b;
         let Some(bd) = b.blocks.get(bi as usize) else { return };
         let nv = self.last_use.len();
+        self.fused = if self.rel { self.fusable(bd) } else { NONE };
+        let n = bd.insts.len;
         for (k, i) in bd.insts.indices().enumerate() {
+            // the operands of a fused compare are read by the terminator
+            let at = if i == self.fused { n } else { k as u32 };
             for &o in b.args(i) {
                 if let Operand::Value(v) = o
                     && v.index() < nv
                 {
-                    self.last_use[v.index()] = k as u32;
+                    let lu = &mut self.last_use[v.index()];
+                    if *lu == NONE || *lu < at {
+                        *lu = at;
+                    }
                     self.touched.push(v.0);
                 }
             }
         }
-        let n = bd.insts.len;
         let (lu, touched) = (&mut self.last_use, &mut self.touched);
         analysis::for_term_operands(b, &bd.term, |o| {
             if let Operand::Value(v) = o
@@ -1403,6 +1733,104 @@ impl<'a, 'm> Cg<'a, 'm> {
                 touched.push(v.0);
             }
         });
+    }
+
+    /// The compare instruction of block `bd` that its `cbr` can emit itself: defined in the
+    /// block, used by nothing else, on scalars.
+    fn fusable(&self, bd: &stave_ir::ir::BlockData) -> u32 {
+        let b = self.b;
+        let Term::Cbr { cond: Operand::Value(c), .. } = bd.term else { return NONE };
+        let Some(ValueDef::Inst(j)) = b.values.get(c.index()).map(|v| v.def) else { return NONE };
+        if !bd.insts.indices().contains(&j) || self.uses.get(c.index()).copied() != Some(1) {
+            return NONE;
+        }
+        let op = b.insts.op.get(j as usize).copied();
+        if !matches!(op, Some(Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge)) {
+            return NONE;
+        }
+        let &[x, y] = b.args(j) else { return NONE };
+        if self.is_fn_operand(x) || self.is_fn_operand(y) {
+            return NONE;
+        }
+        match self.osk(x).or(self.osk(y)) {
+            Some(Sk::Float(FloatBits::F32 | FloatBits::F64) | Sk::Int(_) | Sk::Bool | Sk::Char | Sk::Ptr) => {
+                j
+            }
+            _ => NONE,
+        }
+    }
+
+    /// The owned register of a param of the block's only successor, when the result of
+    /// instruction `i` is nothing but that param's next value (a loop counter's increment): the
+    /// op then computes into the param's register and the branch has nothing to move.
+    ///
+    /// Writing the register early is safe when the param's old value is dead: the block has one
+    /// successor (which redefines the param), nothing after `i` reads the param, and the block
+    /// lies in the param's interval, so no other value lives in that register here. Only ops that
+    /// read all their operands before they write the result qualify.
+    fn edge_hint(&self, bd: &stave_ir::ir::BlockData, i: u32) -> Option<R> {
+        let b = self.b;
+        let v = b.insts.result.get(i as usize).copied().flatten()?;
+        if self.uses.get(v.index()).copied() != Some(1) {
+            return None;
+        }
+        let Term::Br(t) = bd.term else { return None };
+        let j = b.target_args(&t).iter().position(|o| *o == Operand::Value(v))?;
+        let p = *b.params(t.block).get(j)?;
+        let rp = self.owned(p)?;
+        let pi = p.index();
+        if self.cur_at < self.first.get(pi).copied()? || self.cur_at > self.last.get(pi).copied()? {
+            return None;
+        }
+        let lu = self.last_use.get(pi).copied().unwrap_or(NONE);
+        if lu != NONE && lu > self.pos {
+            return None;
+        }
+        let simple = matches!(
+            b.insts.op.get(i as usize)?,
+            Op::Add
+                | Op::Sub
+                | Op::Mul
+                | Op::Neg
+                | Op::AddWrap
+                | Op::SubWrap
+                | Op::MulWrap
+                | Op::And
+                | Op::Or
+                | Op::Xor
+                | Op::Not
+                | Op::Shl
+                | Op::Shr
+                | Op::ShlWrap
+        );
+        simple.then_some(rp)
+    }
+
+    /// `jcc` to `l` when the condition holds.
+    fn jump_if(&mut self, jc: Jc, l: Label) -> Res<()> {
+        match jc {
+            Jc::Flag(c) => self.a.jcc(c, l)?,
+            Jc::FloatEq => {
+                let skip = self.a.new_label();
+                self.a.jcc(Cond::P, skip)?;
+                self.a.jcc(Cond::E, l)?;
+                self.a.bind(skip)?;
+            }
+            Jc::FloatNe => {
+                self.a.jcc(Cond::P, l)?;
+                self.a.jcc(Cond::Ne, l)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `jcc` to `l` when the condition does not hold.
+    fn jump_unless(&mut self, jc: Jc, l: Label) -> Res<()> {
+        match jc {
+            Jc::Flag(c) => Ok(self.a.jcc(c.negate(), l)?),
+            Jc::FloatEq => self.jump_if(Jc::FloatNe, l),
+            Jc::FloatNe => self.jump_if(Jc::FloatEq, l),
+        }
     }
 
     fn line_for(&mut self, i: u32) {
@@ -1459,8 +1887,12 @@ impl<'a, 'm> Cg<'a, 'm> {
         }
         self.glock = 0;
         self.xlock = 0;
+        if self.rel {
+            self.settle_params(params)?;
+        }
         let rpo = std::mem::take(&mut self.an.rpo);
         for (k, &bi) in rpo.iter().enumerate() {
+            self.cur_at = k as u32;
             let next = rpo.get(k + 1).copied();
             let Some(bd) = b.blocks.get(bi as usize) else { return Err(bad("block out of range")) };
             let l = self.labels[bi as usize];
@@ -1469,6 +1901,11 @@ impl<'a, 'm> Cg<'a, 'm> {
                 self.reset_regs();
                 self.prescan(bi);
                 for &p in bd.params.of(&b.block_params) {
+                    if let Some(r) = self.owned(p) {
+                        // written by the branches into this block
+                        self.vreg[p.index()] = Some(r);
+                        continue;
+                    }
                     self.home(p)?;
                     if let Some(h) = self.in_home.get_mut(p.index()) {
                         *h = true;
@@ -1478,8 +1915,14 @@ impl<'a, 'm> Cg<'a, 'm> {
             for (pos, i) in bd.insts.indices().enumerate() {
                 self.pos = pos as u32;
                 self.line_for(i);
-                self.inst(i)?;
-                self.end_inst(i);
+                if self.rel {
+                    let res = b.insts.result.get(i as usize).copied().flatten();
+                    self.hint = res.and_then(|v| self.owned(v)).or_else(|| self.edge_hint(bd, i));
+                }
+                if i != self.fused {
+                    self.inst(i)?;
+                }
+                self.end_inst(i)?;
             }
             self.pos = bd.insts.len;
             self.term(&bd.term, next)?;
@@ -1512,6 +1955,9 @@ impl<'a, 'm> Cg<'a, 'm> {
         let args = b.target_args(t);
         if params.len() != args.len() {
             return Err(bad("branch argument count differs from the target's params"));
+        }
+        if self.rel {
+            return self.edge_moves(params, args);
         }
         // Sources that are params of the target (other than in place) are saved first.
         let mut saved: Vec<Option<i32>> = vec![None; args.len()];
@@ -1551,6 +1997,186 @@ impl<'a, 'm> Cg<'a, 'm> {
             }
         }
         Ok(())
+    }
+
+    /// Release form of [`Self::edge`]: aggregates go home to home; scalars are one parallel move
+    /// into the params' owned registers and homes. Uses scratch registers only.
+    fn edge_moves(&mut self, params: &[Value], args: &[Operand]) -> Res<()> {
+        // An aggregate source that is another param of the target is saved first.
+        let mut saved: Vec<Option<i32>> = vec![None; args.len()];
+        for (j, &o) in args.iter().enumerate() {
+            if let Operand::Value(v) = o
+                && params[j] != v
+                && let VCls::M { size, .. } = self.vcls(self.vty(v)?)?
+                && params.contains(&v)
+            {
+                let tmp = self.alloc_frame(size.div_ceil(8) * 8, 16)?;
+                let src = self.msrc(o)?;
+                self.copy_mem(Mem::base(RBP, tmp), src, size)?;
+                saved[j] = Some(tmp);
+            }
+        }
+        let mut moves = Vec::new();
+        for (j, (&p, &o)) in params.iter().zip(args).enumerate() {
+            if o == Operand::Value(p) {
+                continue;
+            }
+            match self.vcls(self.vty(p)?)? {
+                VCls::M { size, .. } => {
+                    let dst = self.hmem(p)?;
+                    let src = match saved[j] {
+                        Some(tmp) => MSrc::Mem(Mem::base(RBP, tmp)),
+                        None => self.msrc(o)?,
+                    };
+                    self.copy_mem(dst, src, size)?;
+                }
+                c => {
+                    let dst = match self.owned(p) {
+                        Some(r) => ploc(r),
+                        None => PLoc::M(self.home(p)?),
+                    };
+                    let prec = match c {
+                        VCls::X(p) => Some(p),
+                        _ => None,
+                    };
+                    moves.push(PMove { dst, src: self.psrc(o)?, prec });
+                }
+            }
+        }
+        self.par_moves(moves)
+    }
+
+    /// Where a scalar operand is right now (no cache change).
+    fn psrc(&self, o: Operand) -> Res<PSrc> {
+        match o {
+            Operand::Value(v) => {
+                let vi = v.index();
+                if let Some(r) = self.vreg.get(vi).copied().flatten() {
+                    return Ok(PSrc::Loc(ploc(r)));
+                }
+                if !self.in_home.get(vi).copied().unwrap_or(false) {
+                    return Err(bad(format!("internal: %{} has no location", v.0)));
+                }
+                Ok(if self.is_slot[vi] {
+                    PSrc::Addr(self.home[vi])
+                } else {
+                    PSrc::Loc(PLoc::M(self.home[vi]))
+                })
+            }
+            Operand::Const(_) => Ok(PSrc::Imm(self.const_bits(o).ok_or_else(|| bad("constant"))?)),
+            Operand::Func(f) => Ok(PSrc::Sym(self.func_sym(f)?)),
+            Operand::Str(_) => Err(bad("string literal where a scalar is expected")),
+            Operand::Type(_) => Err(bad("type operand used as a value")),
+        }
+    }
+
+    /// Emits the moves as one parallel move: every source is read before its place is written.
+    /// A cycle is broken by parking one source in `r10` / `xmm14`; memory-to-memory moves and
+    /// wide immediates go through `r11`. Flags are not preserved.
+    fn par_moves(&mut self, mut ms: Vec<PMove>) -> Res<()> {
+        ms.retain(|m| m.src != PSrc::Loc(m.dst));
+        while !ms.is_empty() {
+            let read = |ms: &[PMove], l: PLoc, but: usize| {
+                ms.iter().enumerate().any(|(j, o)| j != but && o.src == PSrc::Loc(l))
+            };
+            if let Some(k) = (0..ms.len()).find(|&k| !read(&ms, ms[k].dst, k)) {
+                let m = ms.swap_remove(k);
+                self.emit_move(m.dst, m.src, m.prec)?;
+                continue;
+            }
+            // Only cycles are left: every destination is still read. Park one of them.
+            let l = ms[0].dst;
+            let prec = ms[0].prec;
+            let tmp = if prec.is_some() { PLoc::X(XS1) } else { PLoc::G(S1) };
+            self.emit_move(tmp, PSrc::Loc(l), prec)?;
+            for o in ms.iter_mut() {
+                if o.src == PSrc::Loc(l) {
+                    o.src = PSrc::Loc(tmp);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_move(&mut self, dst: PLoc, src: PSrc, prec: Option<Prec>) -> Res<()> {
+        let p = prec.unwrap_or(Prec::F64);
+        let at = |off: i32| Mem::base(RBP, off);
+        match (dst, src) {
+            (PLoc::G(d), PSrc::Loc(PLoc::G(s))) => self.a.mov_rr(Size::Q, d, s),
+            (PLoc::G(d), PSrc::Loc(PLoc::M(o))) => self.a.mov_rm(Size::Q, d, at(o))?,
+            (PLoc::G(d), PSrc::Loc(PLoc::X(s))) => self.a.mov_gx(Size::Q, d, s)?,
+            (PLoc::G(d), PSrc::Imm(0)) => self.a.alu_rr(AluOp::Xor, Size::D, d, d),
+            (PLoc::G(d), PSrc::Imm(x)) => self.a.mov_ri(Size::Q, d, x)?,
+            (PLoc::G(d), PSrc::Sym(s)) => self.a.lea(Size::Q, d, Mem::rip_sym(s, 0))?,
+            (PLoc::G(d), PSrc::Addr(o)) => self.a.lea(Size::Q, d, at(o))?,
+            (PLoc::X(d), PSrc::Loc(PLoc::X(s))) => self.a.movaps(d, s),
+            (PLoc::X(d), PSrc::Loc(PLoc::M(o))) => self.a.movs(p, d, at(o))?,
+            (PLoc::X(d), PSrc::Loc(PLoc::G(s))) => self.a.mov_xg(Size::Q, d, s)?,
+            (PLoc::X(d), PSrc::Imm(0)) => self.a.logic_p(PLogic::Xor, p, d, d)?,
+            (PLoc::X(d), PSrc::Imm(x)) => {
+                self.a.mov_ri(Size::Q, S0, x)?;
+                self.a.mov_xg(Size::Q, d, S0)?;
+            }
+            (PLoc::M(o), PSrc::Loc(PLoc::G(s))) => self.a.mov_mr(Size::Q, at(o), s)?,
+            (PLoc::M(o), PSrc::Loc(PLoc::X(s))) => self.a.movs_store(p, at(o), s)?,
+            (PLoc::M(o), PSrc::Loc(PLoc::M(o2))) => {
+                self.a.mov_rm(Size::Q, S0, at(o2))?;
+                self.a.mov_mr(Size::Q, at(o), S0)?;
+            }
+            (PLoc::M(o), PSrc::Imm(x)) => self.store_imm(at(o), 8, x)?,
+            (PLoc::M(o), PSrc::Sym(s)) => {
+                self.a.lea(Size::Q, S0, Mem::rip_sym(s, 0))?;
+                self.a.mov_mr(Size::Q, at(o), S0)?;
+            }
+            (PLoc::M(o), PSrc::Addr(o2)) => {
+                self.a.lea(Size::Q, S0, at(o2))?;
+                self.a.mov_mr(Size::Q, at(o), S0)?;
+            }
+            (PLoc::X(_), PSrc::Sym(_) | PSrc::Addr(_)) => {
+                return Err(bad("internal: an address moved into a vector register"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Release: moves the entry params that own a register out of their ABI locations, and the
+    /// other params out of registers owned by some value.
+    fn settle_params(&mut self, params: &[Value]) -> Res<()> {
+        for n in 0..16u8 {
+            for r in [Gpr::new(n).map(R::G), Some(R::X(Xmm::masked(n)))].into_iter().flatten() {
+                let is_owned = match r {
+                    R::G(g) => self.gown & bit(g) != 0,
+                    R::X(x) => self.xown & xbit(x) != 0,
+                };
+                if is_owned
+                    && let Occ::Val(q) = self.occ(r)
+                    && self.owned(q).is_none()
+                {
+                    self.evict(r)?;
+                }
+            }
+        }
+        let mut moves = Vec::new();
+        for &p in params {
+            let Some(rp) = self.owned(p) else { continue };
+            let pi = p.index();
+            let src = match self.vreg[pi] {
+                Some(r) => {
+                    self.set_occ(r, Occ::Free);
+                    ploc(r)
+                }
+                None if self.in_home[pi] => PLoc::M(self.home[pi]),
+                None => continue,
+            };
+            let prec = match self.vcls(self.vty(p)?)? {
+                VCls::X(p) => Some(p),
+                _ => None,
+            };
+            moves.push(PMove { dst: ploc(rp), src: PSrc::Loc(src), prec });
+            self.vreg[pi] = Some(rp);
+            self.in_home[pi] = false;
+        }
+        self.par_moves(moves)
     }
 
     /// Writes operand `o` (class `c`) to a home-format location (8 bytes for scalars) without
@@ -1607,31 +2233,41 @@ impl<'a, 'm> Cg<'a, 'm> {
                     self.edge(&tg)?;
                     return self.jump_block(tg.block, next);
                 }
-                let c = self.read_g(cond)?;
-                self.a.test_rr(Size::D, c, c);
+                let jc = if self.fused == NONE {
+                    let c = self.read_g(cond)?;
+                    self.a.test_rr(Size::D, c, c);
+                    Jc::Flag(Cond::Ne)
+                } else {
+                    let b = self.b;
+                    let op = b.insts.op.get(self.fused as usize).copied();
+                    match (op, b.args(self.fused)) {
+                        (Some(op), &[x, y]) => self.compare_flags(op, x, y)?,
+                        _ => return Err(bad("internal: fused compare")),
+                    }
+                };
                 let (tl, el) = (self.block_label(then.block)?, self.block_label(els.block)?);
                 match (self.has_copies(&then), self.has_copies(&els)) {
                     (false, false) => {
                         if next == Some(then.block.0) {
-                            self.a.jcc(Cond::E, el)?;
+                            self.jump_unless(jc, el)?;
                         } else {
-                            self.a.jcc(Cond::Ne, tl)?;
+                            self.jump_if(jc, tl)?;
                             self.jump_block(els.block, next)?;
                         }
                     }
                     (false, true) => {
-                        self.a.jcc(Cond::Ne, tl)?;
+                        self.jump_if(jc, tl)?;
                         self.edge(&els)?;
                         self.jump_block(els.block, next)?;
                     }
                     (true, false) => {
-                        self.a.jcc(Cond::E, el)?;
+                        self.jump_unless(jc, el)?;
                         self.edge(&then)?;
                         self.jump_block(then.block, next)?;
                     }
                     (true, true) => {
                         let l = self.a.new_label();
-                        self.a.jcc(Cond::E, l)?;
+                        self.jump_unless(jc, l)?;
                         self.edge(&then)?;
                         self.a.jmp(tl)?;
                         self.a.bind(l)?;
@@ -1644,6 +2280,11 @@ impl<'a, 'm> Cg<'a, 'm> {
             Term::Switch { scrut, cases, default } => self.switch(scrut, cases, default, next),
             Term::Ret(o) => {
                 self.ret(o)?;
+                // Release: the first `ret` carries the epilogue, and so does every other one
+                // while the epilogue is as short as a jump to it.
+                if self.rel && (!self.epilogue_bound || self.used_callee.count_ones() <= 1) {
+                    return self.emit_epilogue();
+                }
                 let l = self.epilogue;
                 Ok(self.a.jmp(l)?)
             }
@@ -1770,19 +2411,46 @@ impl<'a, 'm> Cg<'a, 'm> {
 
     // ---------------------------------------------------------------- prologue, epilogue
 
-    fn finish(mut self, fn_site: Site) -> Res<FuncCode> {
-        let locals = self.frame.div_ceil(16) * 16;
-        let saved: Vec<Gpr> =
-            CALLEE_SAVED.iter().copied().filter(|g| self.used_callee & bit(*g) != 0).collect();
-        let total = (locals + 8 * saved.len() as u32).div_ceil(16) * 16;
-        let save_off = |k: usize| -((locals + 8 * (k as u32 + 1)) as i32);
-        let ep = self.epilogue;
-        self.a.bind(ep)?;
-        for (k, g) in saved.iter().enumerate() {
-            self.a.mov_rm(Size::Q, *g, Mem::base(RBP, save_off(k)))?;
+    /// Release: the epilogue, here (the save slots are fixed and `leave` needs no frame size).
+    fn emit_epilogue(&mut self) -> Res<()> {
+        if !self.epilogue_bound {
+            let ep = self.epilogue;
+            self.a.bind(ep)?;
+            self.epilogue_bound = true;
+        }
+        let saved = CALLEE_SAVED.iter().copied().filter(|g| self.used_callee & bit(*g) != 0);
+        for (k, g) in saved.enumerate() {
+            self.a.mov_rm(Size::Q, g, Mem::base(RBP, -8 * (k as i32 + 1)))?;
         }
         self.a.leave();
         self.a.ret();
+        Ok(())
+    }
+
+    fn finish(mut self, fn_site: Site) -> Res<FuncCode> {
+        let saved: Vec<Gpr> =
+            CALLEE_SAVED.iter().copied().filter(|g| self.used_callee & bit(*g) != 0).collect();
+        // Debug: the registers the cache happened to use are saved below the locals. Release:
+        // the owned ones, at the top of the frame.
+        let (total, first_save) = if self.rel {
+            (self.frame.div_ceil(16) * 16, 0)
+        } else {
+            let locals = self.frame.div_ceil(16) * 16;
+            ((locals + 8 * saved.len() as u32).div_ceil(16) * 16, locals)
+        };
+        let save_off = |k: usize| -((first_save + 8 * (k as u32 + 1)) as i32);
+        let ep = self.epilogue;
+        if !self.rel {
+            self.a.bind(ep)?;
+            for (k, g) in saved.iter().enumerate() {
+                self.a.mov_rm(Size::Q, *g, Mem::base(RBP, save_off(k)))?;
+            }
+            self.a.leave();
+            self.a.ret();
+        } else if !self.epilogue_bound {
+            // no `ret` in the function
+            self.a.bind(ep)?;
+        }
         let traps = std::mem::take(&mut self.traps);
         let trap_sym = self.cx.trap_sym;
         for (k, site, l) in traps {
