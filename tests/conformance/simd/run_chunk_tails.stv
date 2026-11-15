@@ -1,0 +1,116 @@
+//~ CHECK-ONLY
+// Chunk loops with every tail form over slices of length 0 to 3 * 4 + 1, and `&mut` chunk
+// bindings (a masked tail writes back its active lanes only). Vector programs do not build yet;
+// crates/stave-driver/tests/interp_vs_native.rs runs this one in the IR interpreter against
+// run_chunk_tails.stdout.
+import std.io;
+import std.vec;
+
+fn sum_masked(xs: &[u32]) -> u32 {
+    let mut acc = u32x4.splat(0);
+    let mut tails: u32 = 0;
+    for v: u32x4 in xs {
+        acc = acc +% v;
+    } tail masked (v, m) {
+        acc = acc +% m.select(v, u32x4.splat(1000));
+        tails = tails + 1;
+    }
+    return acc.reduce_add() +% tails * 100000;
+}
+
+fn sum_scalar(xs: &[u32]) -> u32 {
+    let mut acc = u32x4.splat(0);
+    let mut rest: u32 = 0;
+    for v: u32x4 in xs {
+        acc = acc +% v;
+    } tail scalar (x) {
+        rest = rest + x;
+    }
+    return acc.reduce_add() + rest * 1000;
+}
+
+fn chunks_exact(xs: &[f32]) -> f32 {
+    let mut acc = f32x4.splat(0.0);
+    for v: f32x4 in xs {
+        acc = acc + v;
+    } tail exact;
+    return acc.reduce_add();
+}
+
+fn scale(xs: &mut [u32], k: u32) {
+    let kk = u32x4.splat(k);
+    for v: &mut u32x4 in xs {
+        *v = *v *% kk;
+    } tail masked (v, m) {
+        *v = *v *% kk +% u32x4.splat(1);
+    }
+}
+
+fn first_big(xs: &[u32]) -> u32 {
+    let mut seen: u32 = 0;
+    for v: u32x4 in xs {
+        if (v > u32x4.splat(6)).to_bits() != 0 {
+            break;
+        }
+        seen = seen + 4;
+    } tail scalar (x) {
+        seen = seen + x;
+    }
+    return seen;
+}
+
+/// A `&mut` binding is written back when the body is left by `break` or `return` too.
+fn mark(xs: &mut [u32]) {
+    for v: &mut u32x4 in xs {
+        *v = u32x4.splat(0);
+        break;
+    } tail masked (v, m) {
+        *v = u32x4.splat(7);
+        return;
+    }
+}
+
+fn main() -> i32 {
+    let mut n: u32 = 0;
+    while n <= 13 {
+        let mut xs = vec.Vec::<u32>.new();
+        let mut fs = vec.Vec::<f32>.new();
+        let mut k: u32 = 1;
+        while k <= n {
+            xs.push(k);
+            fs.push(1.5);
+            k = k + 1;
+        }
+        let a = sum_masked(xs.as_slice());
+        let b = sum_scalar(xs.as_slice());
+        let f = first_big(xs.as_slice());
+        scale(xs.as_mut_slice(), 3);
+        let mut ss: u32 = 0;
+        let mut j: usize = 0;
+        while j < xs.len() {
+            ss = ss + *xs.get_ref(j);
+            j = j + 1;
+        }
+        mark(xs.as_mut_slice());
+        let mut ms: u32 = 0;
+        let mut q: usize = 0;
+        while q < xs.len() {
+            ms = ms + *xs.get_ref(q);
+            q = q + 1;
+        }
+        io.print(f"len {n}: masked {a} scalar {b} break {f} scaled {ss} marked {ms}\n");
+        if n % 4 == 0 {
+            let e = chunks_exact(fs.as_slice());
+            io.print(f"  exact {e}\n");
+        }
+        n = n + 1;
+    }
+    let arr: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let mut t = u32x4.splat(0);
+    for v: u32x4 in &arr {
+        t = t +% v;
+    }
+    let ts = t.reduce_add();
+    io.print(f"array of 8, no tail: {ts}\n");
+    return 0;
+}

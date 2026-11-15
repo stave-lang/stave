@@ -338,6 +338,9 @@ impl<'a> Ck<'a> {
                 if b == ids::NEVER {
                     return Ty::Lit(g);
                 }
+                if matches!(self.tys.kind(b), TypeKind::Vector { .. }) {
+                    return self.lit_with_vector(r, g, b);
+                }
                 if self.fix(g, b) {
                     Ty::T(b)
                 } else {
@@ -352,6 +355,9 @@ impl<'a> Ck<'a> {
                 }
                 if a == ids::NEVER {
                     return Ty::Lit(g);
+                }
+                if matches!(self.tys.kind(a), TypeKind::Vector { .. }) {
+                    return self.lit_with_vector(r, g, a);
                 }
                 if self.fix(g, a) {
                     Ty::T(a)
@@ -384,6 +390,24 @@ impl<'a> Ck<'a> {
                 }
             }
         }
+    }
+
+    /// E0602 at `r`: a literal operand of a vector operator (a scalar; `TxN.splat` broadcasts it).
+    fn lit_with_vector(&mut self, r: u32, g: u32, v: TypeId) -> Ty {
+        let float = self.lit_root(g).1.float;
+        let _ = self.fix(g, ids::ERROR);
+        let vs = self.show(v);
+        let operand = self.icx.node_text(r).to_string();
+        let scalar = if float { "{float}" } else { "{integer}" };
+        let d = mk(
+            "E0602",
+            None,
+            &[("scalar", scalar), ("vector", &vs), ("operand", &operand)],
+            self.icx.node_span(r),
+            &[],
+        );
+        self.report(d);
+        Ty::ERR
     }
 
     /// A stand-in for printing a pending group's kind in E0201 (`{integer}` is printed by
@@ -426,7 +450,12 @@ impl<'a> Ck<'a> {
         } else {
             at
         };
-        let _ = l;
+        // a literal left operand of a vector operator: E0602 at the literal
+        if let (Ty::Lit(g), Ty::T(v)) = (self.resolve(lt), self.resolve(rt))
+            && matches!(self.tys.kind(v), TypeKind::Vector { .. })
+        {
+            return self.lit_with_vector(l, g, v);
+        }
         if is_shift(op) {
             // a literal amount of a vector shift is a lane value: `v << 3`
             if let (Ty::T(vt), Ty::Lit(g)) = (self.resolve(lt), self.resolve(rt))

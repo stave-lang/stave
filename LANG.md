@@ -162,6 +162,7 @@ for v: u8x16 in xs { .. } tail scalar (x) { .. }      // remaining elements one 
 for v: f32x4 in xs { .. } tail exact;                 // traps if len % N != 0
 for v: &mut f32x4 in xs { *v = *v * k; } tail ..      // in-place
 ```
+The tail runs after the full chunks and only when elements remain (`masked`: once, `scalar`: per element). `break`/`continue` inside a tail belong to the enclosing loop. A `&mut` binding is written back whenever its block is left (end, `break`, `continue`, `return`, `?`).
 
 **Hot loops over one field**: store records as columns, `import std.soa;` → `soa.Soa3::<f32, f32, u32>.new()`, `push(a, b, c)`, `len()`, `get(i)`, `set(i, ..)`, `col0()`/`col0_mut()` (`&[A]`/`&mut [A]`), `cols_mut()` (all columns at once, to read one and write another). Loop: `for v: f32x8 in ps.col0() { .. } tail ..`. Types `Soa2`..`Soa4` (no variadic generics); name fields with a wrapper struct whose methods return `self.s.col0()`. Why: SIMD over a field of `Vec<Struct>` needs gathers; a column is one contiguous slice.
 

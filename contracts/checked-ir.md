@@ -232,6 +232,14 @@ b2():
   such as `std.debug.assert`, and trapping `add`/`sub` of constants).
   Compiler-made accesses (`for` over an array or slice, drop loops, array → slice coercion
   `addr.elem p 0` + `slice.make`) index below a length the generated code compares against.
+- **Chunk loops** (`for v: TxN in s`): `s` becomes a slice (an array: `addr.elem p 0` +
+  `slice.make`), then `lim = sub.sat (slice.len s) N-1` before the head. The head tests
+  `lt i lim` (`i + N <= len`: the proof of the body's `vec.load s i`), the body steps `i` by N
+  (`add.wrap`). `tail masked (v, m)`: a block testing `ne (sub.wrap len i) 0`, then a block with
+  `m = mask.first_n (len - i)` and `v = vec.load_masked s i m`. `tail scalar (x)`: a counted loop
+  (head join with the counter, body binding `x = load (addr.elem s j)`). `tail exact;`: one block
+  with `check.bounds (sub.wrap len i) 1`. A `&mut` binding is a `slot` holding the vector, stored
+  back (`vec.store`, in a masked tail `vec.store_masked`) wherever the block is left.
 - **`Range<T>`** values are the tuple `(T, T)` (`type` lines show `tuple t<T> t<T>`).
 - **Fn values**: a fn item bound to an SSA local stays the constant `@<inst>`, so a call through it
   is `call.ind @<inst> args..` (the rebinding emits nothing). The stage0 verifier accepts an

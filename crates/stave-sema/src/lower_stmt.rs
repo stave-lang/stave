@@ -5,12 +5,12 @@
 //! patterns, closures, the fn body driver, drop glue, and the body pre-pass (locals, slots,
 //! assignment sites, closures).
 
-use stave_ir::{Block, FuncBuilder, Op, Operand, Value};
+use stave_ir::{Block, FuncBuilder, Op, Operand, Value, VecOp};
 use stave_syntax::{NodeKind, Term};
 
 use crate::decls::DeclKind;
 use crate::lower_fn::{
-    Base, E, Env, FnCx, FnOut, FnState, LocalInfo, LoopCx, LoopKind, MState, Place, Proj, Ty,
+    Base, E, Env, FnCx, FnOut, FnState, LocalInfo, LoopCx, LoopKind, MState, Place, Proj, Ty, WriteBack,
 };
 use crate::mono::{InstKey, Req, Resolved};
 use crate::resolve::Res;
@@ -823,8 +823,8 @@ impl<'a> FnCx<'a> {
     fn step_counter(&mut self, kind: &LoopKind) -> Vec<Operand> {
         match kind {
             LoopKind::Plain => Vec::new(),
-            LoopKind::Count { i, ty, end } => {
-                let one = self.int(1);
+            LoopKind::Count { i, ty, end, step } => {
+                let one = self.int(*step as i128);
                 let next = self.op2(Op::AddWrap, *ty, *i, one);
                 match end {
                     Some(e) => {
@@ -890,16 +890,21 @@ impl<'a> FnCx<'a> {
         let Some(&pat) = kids.first() else { return };
         let Some(iter) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Expr)) else { return };
         let Some(body) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Block)) else { return };
-        if kids.iter().any(|&c| icx.kind(c) == Some(NodeKind::TailClause)) {
-            self.unsupported(f, "vector code generation is not implemented yet: SIMD chunk loop");
-            return;
-        }
+        let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
         if let Some(bt) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type)) {
             let t = self.lower_type(bt);
-            if matches!(self.kind(t), TypeKind::Vector { .. } | TypeKind::Ref { .. }) {
-                self.unsupported(f, "vector code generation is not implemented yet: SIMD chunk loop");
+            let vt = match self.kind(t) {
+                TypeKind::Ref { inner, .. } => inner,
+                _ => t,
+            };
+            if matches!(self.kind(vt), TypeKind::Vector { .. }) {
+                self.chunk_loop(f, pat, t, iter, body, tail);
                 return;
             }
+        }
+        if tail.is_some() {
+            self.unsupported(f, "a tail clause on an element loop is not supported");
+            return;
         }
         let core = self.core(iter);
         let it_ty = self.nty(iter);
@@ -994,7 +999,7 @@ impl<'a> FnCx<'a> {
         self.f.b.cbr(c, bb, &[], eb, &args);
         self.f.b.switch_to(bb);
         let scope = self.f.scopes.len();
-        let kind = LoopKind::Count { i, ty, end: inclusive.then_some(end) };
+        let kind = LoopKind::Count { i, ty, end: inclusive.then_some(end), step: 1 };
         self.f.loops.push(LoopCx { head, exit, scope, kind: kind.clone() });
         self.push_scope();
         let item = match seq {
@@ -1031,6 +1036,243 @@ impl<'a> FnCx<'a> {
         }
         self.f.loops.pop();
         self.enter_live(exit);
+    }
+
+    /// `for v: TxN in s { .. } tail ..` (contracts/simd-ops.md "Chunk loops and tails"). Blocks:
+    /// head, body, the tail's blocks, exit. The head tests `i < lim` with
+    /// `lim = sub.sat (slice.len s) N-1` (`i + N <= len`, the chunk-loop proof of the body's
+    /// `vec.load s i`). A `&mut` binding is a slot written back to `s[i..i+N]` whenever the body
+    /// scope ends or is left. Tails:
+    /// - `masked (v, m)`: when `r = len - i` is not 0, `m = mask.first_n r` and
+    ///   `v = vec.load_masked s i m` (inactive lanes 0, nothing read past the slice); a `&mut v`
+    ///   writes back its active lanes only (`vec.store_masked`).
+    /// - `scalar (x)`: a counted loop `i..len` binding `x = s[j]`.
+    /// - `exact;`: `check.bounds (len - i) 1` (traps `Bounds` unless `len % N == 0`).
+    fn chunk_loop(&mut self, f: u32, pat: u32, bind_t: Ty, iter: u32, body: u32, tail: Option<u32>) {
+        let icx = self.icx;
+        let (vt, by_ref) = match self.kind(bind_t) {
+            TypeKind::Ref { inner, .. } => (inner, true),
+            _ => (bind_t, false),
+        };
+        let (lane, lanes) = match self.kind(vt) {
+            TypeKind::Vector { lane, n: crate::prim::Lanes::Fixed(k) } => (lane, k as u32),
+            _ => {
+                self.vector_unsupported(Some(icx.a(f)), "sizeless chunk loops");
+                return;
+            }
+        };
+        // the sequence as a slice reference
+        let e = self.expr(iter, None);
+        let Some(p) = self.place_of(e) else { return };
+        let (s, mutable) = match self.kind(p.ty) {
+            TypeKind::Ref { mutable, inner } => {
+                let Some(v) = self.read(&p) else { return };
+                match self.kind(inner) {
+                    TypeKind::Slice { .. } => {
+                        let st = self.slice_ref_ty(mutable, lane);
+                        (self.convert_ptr(v, p.ty, st), mutable)
+                    }
+                    TypeKind::Array { len, .. } => {
+                        (self.array_slice(v, mutable, lane, len.value().unwrap_or(0)), mutable)
+                    }
+                    _ => {
+                        self.fail(f, "chunk loop over a non-sequence");
+                        return;
+                    }
+                }
+            }
+            TypeKind::Array { len, .. } => {
+                let n = len.value().unwrap_or(0);
+                let Some(a) = self.addr(&p, None) else { return };
+                (self.array_slice(a, true, lane, n), true)
+            }
+            _ => {
+                self.fail(f, "chunk loop over a non-sequence");
+                return;
+            }
+        };
+        let _ = mutable;
+        let us = self.t_usize();
+        let bt = self.t_bool();
+        let n = self.op1(Op::SliceLen, us, s);
+        let k = self.int(lanes as i128 - 1);
+        let lim = self.op2(Op::SubSat, us, n, k);
+        let tail_kind = tail.map(|tc| {
+            let a = icx.a(tc);
+            if icx.is(a + 1, Term::KwMasked) {
+                1
+            } else if icx.is(a + 1, Term::KwScalar) {
+                2
+            } else {
+                3
+            }
+        });
+        // blocks in contract order: head, body, tail blocks, exit
+        let head = self.join(f, &[us]);
+        let bb = self.f.b.create_block();
+        let tb = match tail_kind {
+            Some(1) => TailBlocks::Masked(self.f.b.create_block(), self.f.b.create_block()),
+            Some(2) => {
+                let th = self.join(f, &[us]);
+                TailBlocks::Scalar(th, self.f.b.create_block())
+            }
+            Some(_) => TailBlocks::Exact(self.f.b.create_block()),
+            None => TailBlocks::None,
+        };
+        let exit = self.join(f, &[]);
+        let z = self.int(0);
+        self.br_join(head, &[z]);
+        self.enter(head);
+        let i = Operand::Value(self.f.joins[head].prefix[0]);
+        let c = self.op2(Op::Lt, bt, i, lim);
+        let snap = self.f.env.clone();
+        match tb {
+            TailBlocks::Scalar(th, _) => {
+                let args = self.edge(th, &[i]);
+                let hb = self.f.joins[th].block;
+                self.f.b.cbr(c, bb, &[], hb, &args);
+            }
+            TailBlocks::Masked(t, _) | TailBlocks::Exact(t) => self.f.b.cbr(c, bb, &[], t, &[]),
+            TailBlocks::None => {
+                let args = self.edge(exit, &[]);
+                let eb = self.f.joins[exit].block;
+                self.f.b.cbr(c, bb, &[], eb, &args);
+            }
+        }
+        // full chunks
+        self.f.b.switch_to(bb);
+        let scope = self.f.scopes.len();
+        let kind = LoopKind::Count { i, ty: us, end: None, step: lanes };
+        self.f.loops.push(LoopCx { head, exit, scope, kind: kind.clone() });
+        self.push_scope();
+        let tok = icx.a(f);
+        let Some(x) = self.vop(tok, VecOp::Load, Some(vt), &[s, i]) else { return };
+        let item = self.chunk_item(x, vt, bind_t, by_ref, s, i, None, tok);
+        let _ = self.pat(pat, item, Mode::Move, None, false);
+        self.block(body);
+        self.pop_scope();
+        if self.open() {
+            let pre = self.step_counter(&kind);
+            self.br_join(head, &pre);
+        }
+        self.f.loops.pop();
+        // the tail
+        let Some(tc) = tail else {
+            self.enter_live(exit);
+            return;
+        };
+        let tkids = self.kids(tc);
+        let binds: Vec<u32> =
+            tkids.iter().copied().filter(|&c| icx.kind(c) == Some(NodeKind::TailBind)).collect();
+        let tbody = tkids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Block));
+        let ttok = icx.a(tc);
+        match tb {
+            TailBlocks::Masked(tb, tm) => {
+                self.f.env = snap;
+                self.f.b.switch_to(tb);
+                let r = self.op2(Op::SubWrap, us, n, i);
+                let z = self.int(0);
+                let any = self.op2(Op::Ne, bt, r, z);
+                let args = self.edge(exit, &[]);
+                let eb = self.f.joins[exit].block;
+                self.f.b.cbr(any, tm, &[], eb, &args);
+                self.f.b.switch_to(tm);
+                let w = crate::types::lane_bits(&self.kind(lane)) as u8;
+                let mt =
+                    self.tys.intern(TypeKind::Mask { width: w, n: crate::prim::Lanes::Fixed(lanes as u8) });
+                let Some(m) = self.vop(ttok, VecOp::FirstN, Some(mt), &[r]) else { return };
+                let Some(x) = self.vop(ttok, VecOp::LoadMasked, Some(vt), &[s, i, m]) else { return };
+                self.push_scope();
+                let item = self.chunk_item(x, vt, bind_t, by_ref, s, i, Some(m), ttok);
+                if let Some(&vb) = binds.first() {
+                    let _ = self.pat(vb, item, Mode::Move, None, false);
+                }
+                if let Some(&mb) = binds.get(1) {
+                    let mp = Place { base: Base::Val(m, mt), proj: Vec::new(), ty: mt, root: None };
+                    let _ = self.pat(mb, mp, Mode::Move, None, false);
+                }
+                if let Some(b) = tbody {
+                    self.block(b);
+                }
+                self.pop_scope();
+                self.br_join(exit, &[]);
+            }
+            TailBlocks::Scalar(th, tl) => {
+                self.enter(th);
+                let j = Operand::Value(self.f.joins[th].prefix[0]);
+                let c2 = self.op2(Op::Lt, bt, j, n);
+                let args = self.edge(exit, &[]);
+                let eb = self.f.joins[exit].block;
+                self.f.b.cbr(c2, tl, &[], eb, &args);
+                self.f.b.switch_to(tl);
+                self.push_scope();
+                let ep = self.t_ref(false, lane);
+                let a = self.op2(Op::ElemAddr, ep, s, j);
+                let xv = Operand::Value(self.f.b.load(Self::ir(lane), a));
+                if let Some(&xb) = binds.first() {
+                    let xp = Place { base: Base::Val(xv, lane), proj: Vec::new(), ty: lane, root: None };
+                    let _ = self.pat(xb, xp, Mode::Move, None, false);
+                }
+                if let Some(b) = tbody {
+                    self.block(b);
+                }
+                self.pop_scope();
+                if self.open() {
+                    let one = self.int(1);
+                    let next = self.op2(Op::AddWrap, us, j, one);
+                    self.br_join(th, &[next]);
+                }
+            }
+            TailBlocks::Exact(tb) => {
+                self.f.env = snap;
+                self.f.b.switch_to(tb);
+                let r = self.op2(Op::SubWrap, us, n, i);
+                let one = self.int(1);
+                self.trapping(ttok, Op::BoundsCheck, None, &[r, one]);
+                self.br_join(exit, &[]);
+            }
+            TailBlocks::None => {}
+        }
+        self.enter_live(exit);
+    }
+
+    /// The chunk binding's value: the vector `x`, or for a `&mut` binding a slot holding it,
+    /// written back to `s[i..]` (active lanes of `mask`) when the current scope ends or is left.
+    #[allow(clippy::too_many_arguments)]
+    fn chunk_item(
+        &mut self,
+        x: Operand,
+        vt: Ty,
+        bind_t: Ty,
+        by_ref: bool,
+        s: Operand,
+        i: Operand,
+        mask: Option<Operand>,
+        tok: u32,
+    ) -> Place {
+        if !by_ref {
+            return Place { base: Base::Val(x, vt), proj: Vec::new(), ty: vt, root: None };
+        }
+        let slot = self.new_slot(vt);
+        self.f.b.store(slot, x);
+        let d = self.f.scopes.len();
+        self.f.write_backs.push((d, WriteBack { slot, vt, s, i, mask, tok }));
+        Place { base: Base::Val(slot, bind_t), proj: Vec::new(), ty: bind_t, root: None }
+    }
+
+    fn slice_ref_ty(&mut self, mutable: bool, elem: Ty) -> Ty {
+        let s = self.tys.intern(TypeKind::Slice { elem, align: 0 });
+        self.t_ref(mutable, s)
+    }
+
+    /// `&[T]` over the `len` elements of the array at pointer `a`.
+    fn array_slice(&mut self, a: Operand, mutable: bool, elem: Ty, len: u64) -> Operand {
+        let ep = self.t_ref(mutable, elem);
+        let z = self.int(0);
+        let p = self.op2(Op::ElemAddr, ep, a, z);
+        let st = self.slice_ref_ty(mutable, elem);
+        let n = self.int(len as i128);
+        self.op2(Op::SliceMake, st, p, n)
     }
 
     fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place) {
@@ -1647,6 +1889,16 @@ impl<'a> FnCx<'a> {
 }
 
 /// Element source of a counted `for` loop.
+/// The tail blocks of a chunk loop: masked (the `len - i != 0` test, the body), scalar (the
+/// counted loop's head join and body), exact (the check), or none.
+#[derive(Clone, Copy)]
+enum TailBlocks {
+    None,
+    Masked(Block, Block),
+    Scalar(usize, Block),
+    Exact(Block),
+}
+
 enum Seq {
     /// `&[T]` / `&[T; N]`: the pointer and its type; the binding is `&T` (`&mut T`).
     Ref(Operand, Ty),
