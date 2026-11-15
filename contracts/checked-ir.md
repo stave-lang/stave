@@ -108,7 +108,7 @@ ops take the lane semantics of the scalar op; V = the vector result type, M = `m
 | `vec.shl shr` † `vec.shl.wrap` | `a amount` | amount: V or an int; as scalar shifts |
 | `vec.eq ne lt le gt ge` | `a b` | result M |
 | `vec.reduce_add reduce_add_wrap reduce_min reduce_max reduce_and reduce_or` | `v` | lane type; tree: lane i with lane i+N/2 until one lane remains (`reduce_add`: float lanes; `reduce_add_wrap`: int lanes, wrapping) |
-| `vec.reduce_add_ordered` / `vec.scan_add` | `v init` / `v` | sequential from lane 0 |
+| `vec.reduce_add_ordered` / `vec.scan_add scan_add_wrap` | `v init` / `v` | sequential from lane 0; `reduce_add_ordered` and `scan_add`: float lanes; `scan_add_wrap`: int lanes, wrapping |
 | `vec.cast cast.wrap cast.sat cast.round cast.try` | `v` | `as as% as\| as~ as?` per lane (`try`: `Option<V>`, `Some` iff every lane converts) |
 | `vec.bitcast split join widen_lo widen_hi narrow_wrap narrow_sat permute lookup compress expand` | | shape ops (`permute v k0 ..`: constant lane indices) |
 | `vec.load` / `vec.store` | `s i` / `s i v` | lanes `s[i..i+N]`, after `check.bounds i (sub.sat (slice.len s) N-1)` or under a chunk loop's head test |

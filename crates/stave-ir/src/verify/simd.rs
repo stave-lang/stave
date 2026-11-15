@@ -154,7 +154,13 @@ impl FnVerifier<'_> {
             ScanAdd => {
                 arity(1)?;
                 let t = res()?;
-                self.vshape(t)?;
+                self.float_lanes(t)?;
+                self.check_args(b, args, &[t])
+            }
+            ScanAddWrap => {
+                arity(1)?;
+                let t = res()?;
+                self.int_lanes(t)?;
                 self.check_args(b, args, &[t])
             }
             Shl | Shr | ShlWrap => {
@@ -202,6 +208,7 @@ impl FnVerifier<'_> {
                 arity(2)?;
                 let t = res()?;
                 let vt = self.value_ty(b, args[0])?;
+                self.float_lanes(vt)?;
                 let (lane, _, _) = self.vshape(vt)?;
                 if t != lane {
                     return Err(format!("reduction result {} is not the lane type", self.tname(t)));
