@@ -11,6 +11,8 @@ PTX for NVIDIA GPUs is designed. Goal: whole programs and the compiler itself ru
 - A language change updates `LANG.md`, the grammar, the diagnostic registry, and
   `tests/conformance/` together.
 - Build/test through `tools/ci-step/run.sh <step>` (`check`, `test`, `gen`, ...), Linux only.
+- `std/`, `runtime/`, and `stage1/src/` stay `stave fmt`-clean: `check` runs `stave fmt --check`
+  on them.
 - Goldens: `STAVE_BLESS=1` rewrites them. Review the diff.
 
 ## Comments
