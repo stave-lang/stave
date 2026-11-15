@@ -1,6 +1,7 @@
 //! Features, triples, lowering tables (contracts/simd-ops.md §Features).
 
 pub mod features;
+pub mod lowering;
 pub mod triple;
 
 pub use features::{Arch, ArchSet, Feature, FeatureError, FeatureSet};

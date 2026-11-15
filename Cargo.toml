@@ -4,7 +4,7 @@ members = [
     "crates/stave-diag", "crates/stave-syntax", "crates/stave-intern", "crates/stave-sema", "crates/stave-borrow",
     "crates/stave-target", "crates/stave-ir", "crates/stave-opt", "crates/stave-codegen-x64", "crates/stave-codegen-a64",
     "crates/stave-obj", "crates/stave-driver", "crates/stave-cli",
-    "tools/ll1gen", "tools/diaggen", "tools/gen-corpus", "tools/touch-fn",
+    "tools/ll1gen", "tools/diaggen", "tools/gen-tables", "tools/gen-corpus", "tools/touch-fn",
 ]
 
 [workspace.package]

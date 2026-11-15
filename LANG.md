@@ -130,7 +130,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 
 ## 4. SIMD
 
-**Status.** Stage0 checks vector code and lowers it to checked IR (fixed lane counts; the IR interpreter runs it), but generates no vector machine code: `stave build` of a program with vector values stops with "not implemented yet", so SIMD examples are check-only. Planned (not enforced yet): E0700 E0701 E0702 E0703 E0705 E0706 E0709 E0710-E0717, `emulate`/`strict`, `stave lowering`, sizeless vectors past type checking. E0601-E0604, E0607, E0704, E0707 are checked in part.
+**Status.** Stage0 checks vector code and lowers it to checked IR (fixed lane counts; the IR interpreter runs it), but generates no vector machine code: `stave build` of a program with vector values stops with "not implemented yet", so SIMD examples are check-only. Planned (not enforced yet): E0700 E0701 E0702 E0703 E0705 E0706 E0709 E0710-E0717, `emulate`/`strict`, sizeless vectors past type checking. E0601-E0604, E0607, E0704, E0707 are checked in part.
 
 **Types.** `TxN`: T ∈ `i8..i64 u8..u64 f32 f64 f16 bf16`, N a power of two from 2 to 64. Total width ≤ target register: 128 bits everywhere (portable), 256 needs `avx2`, 512 needs `avx512f`. Too wide = E0702. Masks `maskWxN` are typed by lane **width** and count: `i32x8`, `u32x8` and `f32x8` compares all give `mask32x8`. Generic spelling `vec<T, N>` / `mask<W, N>` only when an argument is generic.
 
@@ -179,7 +179,7 @@ dispatch fn sum(xs: &[f32]) -> f32 { avx512f => sum_v4, avx2 => sum_v3, sve => s
 - Each arm target has the dispatch's signature, with needs = dispatch needs + the arm's features (else E0705). The `_` target needs ⊆ dispatch needs (E0706).
 - Arms of another arch are dropped. A `cuda` arm picks a GPU path when a usable NVIDIA device exists (planned, §7).
 
-**Lowering gates.** Some ops are unavailable on some targets: `fma` on v2, gather on v2/neon, scatter below v4, `div_lanes` outside sve, `load_first_fault` outside sve, f16↔f32 without `f16c`. Using one is E0700, unless it is inside `emulate { }` (scalar loop, the only opt-in). `strict { }` rejects multi-instruction ops too (E0701). Planned: `stave lowering --target T --op OP` prints the per-target table.
+**Lowering gates.** Some ops are unavailable on some targets: `fma` on v2, gather on v2/neon, scatter below v4, `div_lanes` outside sve, `load_first_fault` outside sve, f16↔f32 without `f16c`. Using one is E0700, unless it is inside `emulate { }` (scalar loop, the only opt-in). `strict { }` rejects multi-instruction ops too (E0701). `stave lowering --target T [--op OP]` prints the per-target table.
 
 **Sizeless (SVE).** `f32xn`, `mask32xn`: lane count fixed per run, legal only under `needs(sve)` (E0710). Allowed only in locals, params, and returns: not fields, array elements, globals, closure captures, or sized generic args (E0711–E0716). Loops need no tail clause. Float `reduce_add` on them = E0717: use `acc = v.reduce_add_ordered(acc);`.
 
@@ -369,7 +369,7 @@ fn double_all(xs: &mut [u64]) {
 ## 6. Tooling
 
 - Package: `stave.toml` (`name` required, `kind = "bin" | "lib"`, `version`, path-only `[dependencies]`, per-target `[target.gpu-sm86.dependencies] prims = { path = "prims/gpu" }` merged over `[dependencies]` by exact target name; `[target.x86_64-linux]` / `[target.aarch64-linux]` cover every target of that arch; no `cfg`) plus `src/main.stv` or `src/lib.stv`. Bad manifest = E1002 (in `stave.toml`).
-- `stave check` (fast, no codegen), `stave build [--release] [--target x86_64-linux-v3|aarch64-linux+sve]`, `stave run`, `stave test [--filter S] [--runner CMD]`, `stave unsafe-report`, `stave fmt [--check]` (the one layout), `stave fix [--dry-run]` (applies fixes whose `applicability` is `exact`, re-checks). Planned: `stave explain E0601`, `stave lowering --target T`, `stave grammar --format lark|gbnf|ebnf` (for constrained decoding of the code region), `stave caps-report` (OS capabilities each package reaches).
+- `stave check` (fast, no codegen), `stave build [--release] [--target x86_64-linux-v3|aarch64-linux+sve]`, `stave run`, `stave test [--filter S] [--runner CMD]`, `stave unsafe-report`, `stave fmt [--check]` (the one layout), `stave fix [--dry-run]` (applies fixes whose `applicability` is `exact`, re-checks), `stave lowering --target T [--op OP]` (the target's lowering table). Planned: `stave explain E0601`, `stave grammar --format lark|gbnf|ebnf` (for constrained decoding of the code region), `stave caps-report` (OS capabilities each package reaches).
 - `--diagnostics json` emits one JSON diagnostic per line, each with a fix and its `applicability` (`exact`, `maybe`, `placeholder`). Exit codes: 0 ok, 1 diagnostics, 2 usage, 3 compiler bug.
 - The default target is the baseline (v2 / neon), never auto-upgraded.
 - No warnings in v1 for unused imports, variables, `mut`, or private fns (no lints yet).

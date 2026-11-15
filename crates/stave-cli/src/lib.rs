@@ -26,6 +26,7 @@
 //!   run tests, natively or through `--runner`; `--target` applies to tests without `TARGET`);
 //!   when DIR is a package, also its `test fn`s (stave_driver::harness).
 //! - `fix [--dry-run]`: `check` in rounds, applying the `exact` fixes between them ([`fix`]).
+//! - `lowering --target T [--op OP]`: the lowering table of the target's tier ([`lowering`]).
 //!
 //! `--features` beyond the target's baseline and `--cache` are parsed and validated, then refused
 //! as not implemented (exit 2): no flag is accepted and ignored.
@@ -36,6 +37,7 @@
 pub mod args;
 pub mod fix;
 pub mod fmt;
+pub mod lowering;
 pub mod unsafe_report;
 
 use std::io::Write;
@@ -89,7 +91,7 @@ pub fn run(argv: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
     }
 }
 
-fn not_implemented(what: &str, reason: &str, err: &mut dyn Write) -> i32 {
+pub(crate) fn not_implemented(what: &str, reason: &str, err: &mut dyn Write) -> i32 {
     let _ = writeln!(err, "stave: `{what}` is not implemented yet ({reason})");
     EXIT_USAGE
 }
@@ -145,6 +147,7 @@ fn dispatch(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         (Cmd::UnsafeReport, _) => unsafe_report::run(a, out, err),
         (Cmd::Fix, _) => fix::run(a, out, err),
         (Cmd::Fmt, _) => fmt::run(a, out, err),
+        (Cmd::Lowering, _) => lowering::run(a, out, err),
         (cmd, _) => not_implemented(cmd.name(), "planned", err),
     }
 }
