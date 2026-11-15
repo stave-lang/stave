@@ -1015,6 +1015,7 @@ impl<'a> FnVerifier<'a> {
                 let name = self.m.intrinsic_name(id).ok_or("intrinsic id out of range")?;
                 self.check_intrinsic(b, name, args, ty)
             }
+            Op::Vec(v) => self.check_vec(b, v, ty, args),
             Op::Panic(_) => {
                 arity(0)?;
                 no_res()
@@ -1056,8 +1057,8 @@ impl<'a> FnVerifier<'a> {
             }
             self.check_args(b, args, &ps).map_err(|e| format!("intrinsic.{name}: {e}"))
         };
-        if let Some(v) = crate::simd::VecOp::from_name(name) {
-            return self.check_vec(b, v, ty, args);
+        if name.starts_with("vec.") || name.starts_with("mask.") {
+            return Err(format!("intrinsic.{name}: reserved for vector and mask ops"));
         }
         let numbered = |prefix: &str, max: usize| -> Option<usize> {
             name.strip_prefix(prefix).and_then(|d| d.parse::<usize>().ok()).filter(|&k| k <= max)

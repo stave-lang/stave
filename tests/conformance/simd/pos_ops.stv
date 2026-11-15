@@ -43,6 +43,15 @@ fn ints(a: u8x16, b: u8x16, k: u32x4, s: &[u32], d: &mut [u32]) -> u32 {
     return n +% f.reduce_and();
 }
 
+// A gather / scatter index is any unsigned vector of the same lane count.
+fn mixed(s: &[f64], e: &mut [f64], i: u32x2, k: u64x2, b: &[u8], d: &mut [u8], j: u16x8) -> f64 {
+    let g = f64x2.gather(s, i) + f64x2.gather(s, k);
+    let h = u8x8.gather(b, j);
+    h.scatter(d, j);
+    g.scatter(e, i);
+    return g.reduce_add();
+}
+
 fn aligned(s: &[f32]) -> f32 {
     match s.align_to::<16>() {
         Option.Some(a) => {

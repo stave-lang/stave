@@ -443,6 +443,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.put(arg(1)?, Ty::Sc(Sc::USIZE), SP, h + 8)
             }
             Op::Intrinsic(id) => self.intrinsic(id, i),
+            Op::Vec(v) => Err(unsupported(v.name())),
             Op::Panic(kind) => {
                 let l = self.trap(kind, site)?;
                 self.a.b(l)?;

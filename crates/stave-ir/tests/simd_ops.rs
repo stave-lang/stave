@@ -59,7 +59,7 @@ fn one(
 ) -> Result<Val, PanicKind> {
     let mut m = Module::new();
     let (ps, rt, extra) = build(&mut m);
-    let o = m.vec_intrinsic(op);
+    let o = Op::Vec(op);
     let f = m.declare(inst(&[0]), "t.f", ps.clone(), rt);
     let mut b = FuncBuilder::new(&ps);
     let mut ops: Vec<Operand> = b.params().iter().map(|v| (*v).into()).collect();
@@ -334,11 +334,11 @@ fn every_lane_count() {
             let ut = m.types.u64();
             let float = matches!(lane, TypeKey::Float(_));
             let (splat, add, red, lt, tb) = (
-                m.vec_intrinsic(VecOp::Splat),
-                m.vec_intrinsic(if float { VecOp::Add } else { VecOp::AddWrap }),
-                m.vec_intrinsic(if float { VecOp::ReduceAdd } else { VecOp::ReduceAddWrap }),
-                m.vec_intrinsic(VecOp::Lt),
-                m.vec_intrinsic(VecOp::ToBits),
+                Op::Vec(VecOp::Splat),
+                Op::Vec(if float { VecOp::Add } else { VecOp::AddWrap }),
+                Op::Vec(if float { VecOp::ReduceAdd } else { VecOp::ReduceAddWrap }),
+                Op::Vec(VecOp::Lt),
+                Op::Vec(VecOp::ToBits),
             );
             let tbt = match n {
                 2..=8 => m.types.u8(),
@@ -420,7 +420,7 @@ fn int_wrap_saturate_trap() {
     assert_eq!(d, Err(PanicKind::DivByZero));
     let mut m = Module::new();
     let t = i32x4(&mut m);
-    let dc = m.vec_intrinsic(VecOp::DivConst);
+    let dc = Op::Vec(VecOp::DivConst);
     let f = define(&mut m, &[0], "t.f", &[t], Some(t), |b, _| {
         let x = b.param(0).unwrap();
         let k = b.int(-3);
@@ -472,7 +472,7 @@ fn shifts_trap_or_mask() {
 fn shift_by_scalar_constant() {
     let mut m = Module::new();
     let t = i32x4(&mut m);
-    let shr = m.vec_intrinsic(VecOp::Shr);
+    let shr = Op::Vec(VecOp::Shr);
     let f = define(&mut m, &[0], "t.f", &[t], Some(t), |b, _| {
         let x = b.param(0).unwrap();
         let k = b.int(2);
@@ -634,7 +634,7 @@ fn shapes() {
     // permute
     let mut m = Module::new();
     let t = i32x4(&mut m);
-    let p = m.vec_intrinsic(VecOp::Permute);
+    let p = Op::Vec(VecOp::Permute);
     let f = define(&mut m, &[0], "t.f", &[t], Some(t), |b, _| {
         let x = b.param(0).unwrap();
         let ks: Vec<Operand> = [3, 3, 0, 1].iter().map(|&k| b.int(k)).collect();
@@ -821,8 +821,8 @@ fn mem_fn(op: VecOp, checked: bool) -> (Module, stave_ir::FuncId) {
     let mt = m.types.intern(mk(32, 4));
     let k = vk(&mut m, int(false, 32), 4);
     let v = m.types.intern(k);
-    let o = m.vec_intrinsic(op);
-    let splat = m.vec_intrinsic(VecOp::Splat);
+    let o = Op::Vec(op);
+    let splat = Op::Vec(VecOp::Splat);
     let ret = if op.is_store() { None } else { Some(v) };
     let f = define(&mut m, &[0], "t.f", &[rs, us, mt], ret, |b, _| {
         let (s, i, mk_) = (b.param(0).unwrap(), b.param(1).unwrap(), b.param(2).unwrap());
@@ -921,7 +921,7 @@ fn aligned_forms_trap_on_misaligned_index() {
     let us = m.types.usize();
     let k = vk(&mut m, int(false, 32), 4);
     let v = m.types.intern(k);
-    let o = m.vec_intrinsic(VecOp::LoadAligned);
+    let o = Op::Vec(VecOp::LoadAligned);
     let f = define(&mut m, &[0], "t.f", &[rs, us], Some(v), |b, _| {
         let (s, i) = (b.param(0).unwrap(), b.param(1).unwrap());
         let n = b.op(Op::SliceLen, us, &[s.into()]);
@@ -945,7 +945,7 @@ fn aligned_forms_trap_on_misaligned_index() {
     let us = m2.types.usize();
     let k = vk(&mut m2, int(false, 32), 4);
     let v = m2.types.intern(k);
-    let o = m2.vec_intrinsic(VecOp::LoadAligned);
+    let o = Op::Vec(VecOp::LoadAligned);
     define(&mut m2, &[0], "t.f", &[rs, us], Some(v), |b, _| {
         let (s, i) = (b.param(0).unwrap(), b.param(1).unwrap());
         let r = b.op(o, v, &[s.into(), i.into()]);
@@ -955,20 +955,20 @@ fn aligned_forms_trap_on_misaligned_index() {
     assert!(e[0].msg.contains("aligned"), "{e:?}");
 }
 
-fn gather_scatter(op: VecOp) -> (Module, stave_ir::FuncId) {
+/// A gather / scatter of `u32x4` on `&mut [u32]` with index lanes `idx` (any width).
+fn gather_scatter_with(op: VecOp, idx: TypeKey) -> (Module, stave_ir::FuncId) {
     let mut m = Module::new();
     let u = m.types.u32();
     let sl = m.types.slice(u);
     let rs = m.types.ref_(true, sl);
-    let it = i32x4(&mut m);
+    let ik = vk(&mut m, idx, 4);
+    let it = m.types.intern(ik);
     let k = vk(&mut m, int(false, 32), 4);
     let v = m.types.intern(k);
-    let o = m.vec_intrinsic(op);
-    let splat = m.vec_intrinsic(VecOp::Splat);
+    let o = Op::Vec(op);
     let ret = if op == VecOp::Gather { Some(v) } else { None };
     let f = define(&mut m, &[0], "t.f", &[rs, it, v], ret, |b, _| {
         let (s, idx, x) = (b.param(0).unwrap(), b.param(1).unwrap(), b.param(2).unwrap());
-        let _ = splat;
         if op == VecOp::Gather {
             let r = b.op(o, v, &[s.into(), idx.into()]);
             b.ret(Some(r.into()));
@@ -977,6 +977,11 @@ fn gather_scatter(op: VecOp) -> (Module, stave_ir::FuncId) {
             b.ret(None);
         }
     });
+    (m, f)
+}
+
+fn gather_scatter(op: VecOp) -> (Module, stave_ir::FuncId) {
+    let (m, f) = gather_scatter_with(op, int(false, 16));
     verify_module(&m).unwrap();
     (m, f)
 }
@@ -986,19 +991,31 @@ fn gather_scatter_bounds_and_duplicates() {
     let data: Vec<u32> = (10..16).collect();
     let (m, f) = gather_scatter(VecOp::Gather);
     stave_ir::bounds::audit(&m).unwrap();
-    let (o, _) = run_slice(&m, f, &data, vec![ilanes(&[5, 0, 5, 2]), lanes(&[0; 4])]);
+    let (o, _) = run_slice(&m, f, &data, vec![lanes(&[5, 0, 5, 2]), lanes(&[0; 4])]);
     assert_eq!(out_lanes(&ret_val(o)), vec![15, 10, 15, 12]);
-    let (o, _) = run_slice(&m, f, &data, vec![ilanes(&[0, 6, 0, 0]), lanes(&[0; 4])]);
+    let (o, _) = run_slice(&m, f, &data, vec![lanes(&[0, 6, 0, 0]), lanes(&[0; 4])]);
     assert_eq!(trap_kind(&o), Some(PanicKind::Bounds));
-    let (o, _) = run_slice(&m, f, &data, vec![ilanes(&[0, -1, 0, 0]), lanes(&[0; 4])]);
-    assert_eq!(trap_kind(&o), Some(PanicKind::Bounds), "negative index");
+    let (o, _) = run_slice(&m, f, &data, vec![lanes(&[0, 0xffff, 0, 0]), lanes(&[0; 4])]);
+    assert_eq!(trap_kind(&o), Some(PanicKind::Bounds), "index lanes are zero-extended");
     let (m, f) = gather_scatter(VecOp::Scatter);
-    let (o, after) = run_slice(&m, f, &data, vec![ilanes(&[1, 3, 1, 1]), lanes(&[7, 8, 9, 20])]);
+    let (o, after) = run_slice(&m, f, &data, vec![lanes(&[1, 3, 1, 1]), lanes(&[7, 8, 9, 20])]);
     assert_eq!(o, Outcome::Return(None));
     assert_eq!(after, vec![10, 20, 12, 8, 14, 15], "duplicate index: the highest lane wins");
-    let (o, after) = run_slice(&m, f, &data, vec![ilanes(&[0, 1, 2, 6]), lanes(&[1, 2, 3, 4])]);
+    let (o, after) = run_slice(&m, f, &data, vec![lanes(&[0, 1, 2, 6]), lanes(&[1, 2, 3, 4])]);
     assert_eq!(trap_kind(&o), Some(PanicKind::Bounds));
     assert_eq!(after, data, "nothing written on a trap");
+}
+
+#[test]
+fn gather_scatter_index_types() {
+    for op in [VecOp::Gather, VecOp::Scatter] {
+        for bits in [8, 16, 32, 64] {
+            let (m, _) = gather_scatter_with(op, int(false, bits));
+            verify_module(&m).unwrap_or_else(|e| panic!("{op:?} u{bits}: {e:?}"));
+            let (m, _) = gather_scatter_with(op, int(true, bits));
+            assert!(verify_module(&m).is_err(), "{op:?} i{bits} index accepted");
+        }
+    }
 }
 
 /// A chunk loop `for i = 0; i < len -| 3; i += 4 { load s i }` proves its loads.
@@ -1012,9 +1029,9 @@ fn chunk_loop_proof() {
     let bt = m.types.bool();
     let k = vk(&mut m, int(false, 32), 4);
     let v = m.types.intern(k);
-    let load = m.vec_intrinsic(VecOp::Load);
-    let add = m.vec_intrinsic(VecOp::AddWrap);
-    let splat = m.vec_intrinsic(VecOp::Splat);
+    let load = Op::Vec(VecOp::Load);
+    let add = Op::Vec(VecOp::AddWrap);
+    let splat = Op::Vec(VecOp::Splat);
     let f = define(&mut m, &[0], "t.f", &[rs], Some(v), |b, _| {
         let s = b.param(0).unwrap();
         let n = b.op(Op::SliceLen, us, &[s.into()]);
@@ -1113,7 +1130,7 @@ fn verifier_rejects_mistyped_vector_ops() {
     for (op, build) in cases {
         let mut m = Module::new();
         let (ps, rt) = build(&mut m);
-        let o = m.vec_intrinsic(op);
+        let o = Op::Vec(op);
         define(&mut m, &[0], "t.f", &ps, rt, |b, _| {
             let ops: Vec<Operand> = b.params().iter().map(|v| (*v).into()).collect();
             let r = b.inst(o, rt, &ops);
@@ -1128,8 +1145,8 @@ fn printed_as_ops() {
     let mut m = Module::new();
     let t = i32x4(&mut m);
     let mt = m.types.intern(mk(32, 4));
-    let lt = m.vec_intrinsic(VecOp::Lt);
-    let sel = m.vec_intrinsic(VecOp::Select);
+    let lt = Op::Vec(VecOp::Lt);
+    let sel = Op::Vec(VecOp::Select);
     define(&mut m, &[0], "t.f", &[t, t], Some(t), |b, _| {
         let (x, y) = (b.param(0).unwrap(), b.param(1).unwrap());
         let c = b.op(lt, mt, &[x.into(), y.into()]);
@@ -1141,8 +1158,22 @@ fn printed_as_ops() {
     assert!(text.contains("= vec.lt t"), "{text}");
     assert!(text.contains("= mask.select t"), "{text}");
     assert!(!text.contains("intrinsic."), "{text}");
-    assert_eq!(VecOp::from_name("vec.add.wrap"), Some(VecOp::AddWrap));
-    for v in VecOp::ALL {
-        assert_eq!(VecOp::from_name(v.name()), Some(v), "{v:?}");
-    }
+    let mut names: Vec<&str> = VecOp::ALL.iter().map(|v| v.name()).collect();
+    assert!(names.iter().all(|n| n.starts_with("vec.") || n.starts_with("mask.")), "{names:?}");
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), VecOp::ALL.len());
+}
+
+#[test]
+fn reserved_intrinsic_name_rejected() {
+    let mut m = Module::new();
+    let t = i32x4(&mut m);
+    let id = m.intrinsic("vec.add.wrap");
+    define(&mut m, &[0], "t.f", &[t, t], Some(t), |b, _| {
+        let ops: Vec<Operand> = b.params().iter().map(|v| (*v).into()).collect();
+        let r = b.intrinsic(id, Some(t), &ops);
+        b.ret(r.map(Operand::from));
+    });
+    assert!(verify_module(&m).is_err());
 }

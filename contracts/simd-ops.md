@@ -77,6 +77,10 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 - Memory and bounds:
   - `TxN.load(s, i)` / `v.store(s, i)` trap if `i + N > s.len()`. Checks are elided only when
     proved (chunk loops prove them).
+  - The index vector of `TxN.gather(s, idx)` / `v.scatter(s, idx)` is any unsigned-int vector with
+    N lanes (`f64x4.gather(s, idx: u32x4)`, `u8x16.gather(s, idx: u16x16)`); each lane is
+    zero-extended to `usize`. A sizeless `Txn` takes `uWxn` of its own lane width W. Another index
+    type is E0201.
   - Gather traps if any active index is ≥ len. Scatter traps on an out-of-range active index. On
     duplicate indices the highest lane wins (defined, not UB).
   - Aligned forms require `s: &[T align A]` with A ≥ the vector size in bytes (E0606), obtained

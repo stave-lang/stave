@@ -2,8 +2,9 @@
 //!
 //! Only ops that cannot trap and have no effect besides their result go (wrapping and saturating
 //! integer arithmetic, bit ops, compares, `select`, casts, float arithmetic, aggregate and enum
-//! construction and field reads, address arithmetic, slice parts). Trapping arithmetic, checks,
-//! loads, stores, calls, intrinsics, and slots stay.
+//! construction and field reads, address arithmetic, slice parts, vector and mask ops that neither
+//! trap nor touch memory). Trapping arithmetic, checks, loads, stores, calls, intrinsics, and slots
+//! stay.
 
 use stave_ir::{Body, Op, Operand, TypeKey, TypeTable};
 
@@ -54,6 +55,7 @@ fn removable(types: &TypeTable, b: &Body, i: usize) -> bool {
         | Op::SliceLen
         | Op::SlicePtr
         | Op::FnMake => true,
+        Op::Vec(v) => v.trap_kinds().is_empty() && !v.is_memory(),
         Op::Shl
         | Op::Shr
         | Op::Slot

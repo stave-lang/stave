@@ -1,9 +1,8 @@
 //! Vector and mask ops (contracts/simd-ops.md "Operation table") and their lane semantics.
 //!
 //! One [`VecOp`] per portable operation, printed `vec.<name>` (vectors) or `mask.<name>` (masks).
-//! In a body a vector op is an `intrinsic` instruction whose name is the op name
-//! ([`crate::Module::vec_intrinsic`], [`crate::Module::vec_op`]); the checked-IR printer prints the
-//! name alone.
+//! In a body a vector op is the instruction op [`crate::Op::Vec`]; the checked-IR printer prints
+//! its name.
 //! Operands and result types (V = `vec L n`, M = `mask W n` with W = bits of L, `s` = a reference to
 //! a slice or array of L, `i` a `usize` index):
 //!
@@ -39,7 +38,7 @@
 //! | `vec.load` / `vec.store` | `s i` / `s i v` | V / — | lanes `s[i..i+n]`; no check of their own (a dominating `check.bounds i lim`, `lim = sub.sat len n-1`, or a chunk-loop proof guards them) |
 //! | `vec.load_aligned` † / `vec.store_aligned` † | `s i` / `s i v` | V / — | as `load` / `store`; `i % n != 0` traps `Bounds` |
 //! | `vec.load_masked` † / `vec.store_masked` † | `s i m` / `s i v m` | V / — | active lanes only (inactive lanes read 0, are never written); an active lane at `i + k ≥ len` traps `Bounds` |
-//! | `vec.gather` † / `vec.scatter` † | `s idx` / `s idx v` | V / — | lane j at `s[idx[j]]`; any index ≥ len traps `Bounds` before any lane is written; duplicate indices: the highest lane wins |
+//! | `vec.gather` † / `vec.scatter` † | `s idx` / `s idx v` | V / — | lane j at `s[idx[j]]`, `idx` unsigned lanes of any width (zero-extended); any index ≥ len traps `Bounds` before any lane is written; duplicate indices: the highest lane wins |
 //! | `mask.and or xor`, `mask.not` | `a b`, `a` | M | lane-wise logic |
 //! | `mask.select` | `m a b` | V or M | lanes of `a` where `m` is set, else `b` (both evaluated) |
 //! | `mask.to_bits` | `m` | `u8 u16 u32 u64` | bit j = lane j, smallest type holding n bits |
@@ -343,14 +342,6 @@ impl VecOp {
             MaskAll => "mask.all",
             MaskNone => "mask.none",
         }
-    }
-
-    /// The op named `name` ([`VecOp::name`]).
-    pub fn from_name(name: &str) -> Option<VecOp> {
-        if !(name.starts_with("vec.") || name.starts_with("mask.")) {
-            return None;
-        }
-        VecOp::ALL.iter().copied().find(|v| v.name() == name)
     }
 
     /// The trap kinds this op can raise.
@@ -770,15 +761,14 @@ pub fn first_vector_func(m: &crate::ir::Module) -> Option<crate::ir::FuncId> {
     let simd: Vec<bool> =
         m.types.keys().iter().map(|k| matches!(k, TypeKey::Vec { .. } | TypeKey::Mask { .. })).collect();
     let is = |t: TypeId| simd.get(t.index()).copied().unwrap_or(false);
-    let vops = m.vec_ops();
-    m.funcs.iter().position(|f| {
-        f.params.iter().chain(f.ret.iter()).any(|&t| is(t))
-            || f.body.as_ref().is_some_and(|b| {
-                b.values.iter().any(|v| is(v.ty))
-                    || b.insts.op.iter().any(|op| {
-                        matches!(op, crate::ir::Op::Intrinsic(i) if vops.get(i.index()).copied().flatten().is_some())
-                    })
-            })
-    })
-    .map(|i| crate::ir::FuncId(i as u32))
+    m.funcs
+        .iter()
+        .position(|f| {
+            f.params.iter().chain(f.ret.iter()).any(|&t| is(t))
+                || f.body.as_ref().is_some_and(|b| {
+                    b.values.iter().any(|v| is(v.ty))
+                        || b.insts.op.iter().any(|op| matches!(op, crate::ir::Op::Vec(_)))
+                })
+        })
+        .map(|i| crate::ir::FuncId(i as u32))
 }
