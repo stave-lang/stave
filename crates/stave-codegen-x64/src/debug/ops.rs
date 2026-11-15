@@ -18,6 +18,9 @@ use crate::enc::*;
 
 const MIN64: i64 = i64::MIN;
 
+/// Words of an aggregate `select` emitted straight-line; longer values use a counted loop.
+const SELECT_UNROLL: u32 = 64;
+
 fn int_min(t: IntTy) -> i64 {
     t.min() as i64
 }
@@ -1092,6 +1095,10 @@ impl Cg<'_, '_> {
         }
     }
 
+    /// `c ? a : b` without a branch on `c`: one `cmov` for an integer-class value; a float goes
+    /// through GPRs (`movd`/`movq`, `cmov`, back), which needs nothing beyond the baseline; an
+    /// aggregate or fat pointer is selected word by word (both words loaded, `cmov`, stored), so
+    /// the memory accesses do not depend on `c` either.
     fn select(&mut self, c: Operand, a: Operand, b: Operand, rt: TypeId, v: Value) -> Res<()> {
         let cls = self.vcls(rt)?;
         if let Some(k) = self.int_const(c) {
@@ -1126,31 +1133,106 @@ impl Cg<'_, '_> {
                 let ax = self.read_x(a, p)?;
                 let bx = self.read_x(b, p)?;
                 let r = self.alloc_x()?;
-                let (l1, l2) = (self.a.new_label(), self.a.new_label());
+                let s = if p == Prec::F32 { Size::D } else { Size::Q };
+                self.a.mov_gx(s, S0, bx)?;
+                self.a.mov_gx(s, S1, ax)?;
                 self.a.test_rr(Size::D, cr, cr);
-                self.a.jcc(Cond::E, l1)?;
-                self.a.movaps(r, ax);
-                self.a.jmp(l2)?;
-                self.a.bind(l1)?;
-                self.a.movaps(r, bx);
-                self.a.bind(l2)?;
+                self.a.cmov(Cond::Ne, s, S0, S1)?;
+                self.a.mov_xg(s, r, S0)?;
                 self.bind(v, R::X(r))
             }
             VCls::M { size, .. } => {
                 let cr = self.read_g(c)?;
                 let (sa, sb) = (self.msrc(a)?, self.msrc(b)?);
+                let t = self.alloc_g()?;
                 let d = self.def_mem(v)?;
-                let (l1, l2) = (self.a.new_label(), self.a.new_label());
-                self.a.test_rr(Size::D, cr, cr);
-                self.a.jcc(Cond::E, l1)?;
-                self.copy_mem(d, sa, size)?;
-                self.a.jmp(l2)?;
-                self.a.bind(l1)?;
-                self.copy_mem(d, sb, size)?;
-                self.a.bind(l2)?;
-                Ok(())
+                self.select_mem(cr, t, d, sa, sb, size)
             }
         }
+    }
+
+    /// Word `k` (8 bytes at offset `8 * k`) of an aggregate-class operand into `dst`, without
+    /// changing the flags.
+    fn mword(&mut self, s: MSrc, k: i64, dst: Gpr) -> Res<()> {
+        match s {
+            MSrc::Mem(m) => Ok(self.a.mov_rm(Size::Q, dst, disp(m, 8 * k)?)?),
+            MSrc::Str(st) if k == 0 => {
+                let sym = self.str_sym(st)?;
+                Ok(self.a.lea(Size::Q, dst, Mem::rip_sym(sym, 0))?)
+            }
+            MSrc::Str(st) => {
+                let n = self.str_len(st)?;
+                Ok(self.a.mov_ri(Size::Q, dst, n)?)
+            }
+            MSrc::Func(f) if k == 0 => {
+                let sym = self.func_sym(f)?;
+                Ok(self.a.lea(Size::Q, dst, Mem::rip_sym(sym, 0))?)
+            }
+            MSrc::Func(_) => Ok(self.a.mov_ri(Size::Q, dst, 0)?),
+        }
+    }
+
+    /// `d = cr ? sa : sb` over `size` bytes: per word `S0 = b`, `t = a`, `test`, `cmovne`,
+    /// store. Up to [`SELECT_UNROLL`] words are unrolled; a longer value loops over its words
+    /// with a counter (the loop branch depends on the size only, never on `cr`). The tail below
+    /// 8 bytes uses 4/2/1-byte loads and a 32-bit `cmov`.
+    fn select_mem(&mut self, cr: Gpr, t: Gpr, d: Mem, sa: MSrc, sb: MSrc, size: u32) -> Res<()> {
+        let n8 = size / 8;
+        if n8 <= SELECT_UNROLL {
+            for k in 0..i64::from(n8) {
+                self.mword(sb, k, S0)?;
+                self.mword(sa, k, t)?;
+                self.a.test_rr(Size::D, cr, cr);
+                self.a.cmov(Cond::Ne, Size::Q, S0, t)?;
+                self.a.mov_mr(Size::Q, disp(d, 8 * k)?, S0)?;
+            }
+        } else {
+            let (
+                MSrc::Mem(Mem::Sib { base: Some(ab), index: None, disp: ad }),
+                MSrc::Mem(Mem::Sib { base: Some(bb), index: None, disp: bd }),
+                Mem::Sib { base: Some(db), index: None, disp: dd },
+            ) = (sa, sb, d)
+            else {
+                return Err(bad("internal: word select needs base+disp operands"));
+            };
+            if [ab, bb, db].iter().any(|r| *r == S0 || *r == S1) {
+                return Err(bad("internal: word select base is a scratch register"));
+            }
+            let at = |base: Gpr, dsp: i32| -> Res<Mem> {
+                Ok(Mem::index(base, S1, Scale::S8, dsp.checked_sub(8).ok_or_else(|| unsup("disp"))?))
+            };
+            self.a.mov_ri(Size::Q, S1, i64::from(n8))?;
+            let top = self.a.new_label();
+            self.a.bind(top)?;
+            self.a.mov_rm(Size::Q, S0, at(bb, bd)?)?;
+            self.a.mov_rm(Size::Q, t, at(ab, ad)?)?;
+            self.a.test_rr(Size::D, cr, cr);
+            self.a.cmov(Cond::Ne, Size::Q, S0, t)?;
+            self.a.mov_mr(Size::Q, at(db, dd)?, S0)?;
+            self.a.alu_ri(AluOp::Sub, Size::Q, S1, 1)?;
+            self.a.jcc(Cond::Ne, top)?;
+        }
+        let mut rest = size % 8;
+        if rest == 0 {
+            return Ok(());
+        }
+        let mut off = i64::from(n8) * 8;
+        let (MSrc::Mem(ma), MSrc::Mem(mb)) = (sa, sb) else {
+            return Err(bad("internal: a string or fn operand selected as a non-fat value"));
+        };
+        for (w, s) in [(4u32, Size::D), (2, Size::W), (1, Size::B)] {
+            if rest >= w {
+                let bytes = w as u8;
+                self.sized_load(S0, disp(mb, off)?, bytes, false)?;
+                self.sized_load(t, disp(ma, off)?, bytes, false)?;
+                self.a.test_rr(Size::D, cr, cr);
+                self.a.cmov(Cond::Ne, Size::D, S0, t)?;
+                self.a.mov_mr(s, disp(d, off)?, S0)?;
+                off += i64::from(w);
+                rest -= w;
+            }
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------- aggregates

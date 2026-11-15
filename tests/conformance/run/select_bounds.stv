@@ -1,0 +1,22 @@
+//~ EXIT 101
+//~ STDOUT select_bounds.stdout
+//~ STDERR-CONTAINS "panic: Bounds at select_bounds.stv:12:29 in main.at_or_zero (thread 0)"
+// Both operands of `select` are evaluated whatever the condition: `(i < n).select(xs[i], 0)`
+// still checks `xs[i]`, so it traps `Bounds` for `i >= xs.len()` even though the condition
+// would pick 0. In-range calls print; the first out-of-range one stops the program.
+import std.io;
+
+fn at_or_zero(xs: &[u32], i: usize) -> u32 {
+    let n = xs.len();
+    // `select` is not a guard: `if i < n then xs[i] else 0` skips the read
+    return (i < n).select(xs[i], 0);
+}
+
+fn main() -> i32 {
+    let a: [u32; 3] = [7, 8, 9];
+    for i in 0usize..5 {
+        let v = at_or_zero(&a, i);
+        io.print(f"{v}\n");
+    }
+    return 0;
+}

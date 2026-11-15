@@ -1,0 +1,34 @@
+//~ CHECK-ONLY
+// `c.select(a, b)` moves both operands, whichever is selected (E0502 on a later use of
+// either), and its result borrows from both: it keeps both loans live (E0501) and needs both
+// origins in `from` (E0510).
+struct S { pub v: u32 }
+
+fn moved(c: bool) -> u32 {
+    let a = S.{ v: 1 };
+    let b = S.{ v: 2 };
+    let r = c.select(a, b);
+    let x = a.v; //~ ERROR E0502
+    let y = b.v; //~ ERROR E0502
+    return r.v;
+}
+
+fn loans(c: bool) -> u32 {
+    let mut x: u32 = 1;
+    let mut y: u32 = 2;
+    let r = c.select(&x, &y);
+    y = 3; //~ ERROR E0501
+    return *r;
+}
+
+fn origins(c: bool, a: &u32, b: &u32) -> &u32 from a {
+    return c.select(a, b); //~ ERROR E0510
+}
+
+fn ok(c: bool, a: &u32, b: &u32) -> &u32 from a + b {
+    return c.select(a, b);
+}
+
+fn main() -> i32 {
+    return 0;
+}

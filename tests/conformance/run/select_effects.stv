@@ -1,0 +1,42 @@
+//~ STDOUT select_effects.stdout
+// `c.select(a, b)` evaluates the condition, then both operands, left to right, every time:
+// the effects of the operand not selected happen too.
+import std.io;
+
+fn cond(k: u32, v: bool) -> bool {
+    io.print(f"cond {k}\n");
+    return v;
+}
+
+fn val(tag: &str, k: u32, v: u32) -> u32 {
+    io.print(tag);
+    io.print(f" {k}\n");
+    return v;
+}
+
+struct Counter { pub n: u32 }
+
+impl Counter {
+    fn bump(&mut self) -> u32 {
+        self.n = self.n + 1;
+        let n = self.n;
+        io.print(f"bump {n}\n");
+        return n;
+    }
+}
+
+fn pick_bumped(c: bool, k: &mut Counter) -> u32 {
+    return c.select(k.bump(), k.bump());
+}
+
+fn main() -> i32 {
+    let x = cond(1, true).select(val("a", 1, 10), val("b", 2, 20));
+    io.print(f"picked {x}\n");
+    let y = cond(2, false).select(val("a", 3, 30), val("b", 4, 40));
+    io.print(f"picked {y}\n");
+    let mut c = Counter.{ n: 0 };
+    let z = pick_bumped(y > 0, &mut c);
+    let n = c.n;
+    io.print(f"count {n} {z}\n");
+    return 0;
+}
