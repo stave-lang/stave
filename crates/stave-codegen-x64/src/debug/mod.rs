@@ -12,6 +12,24 @@
 //! the branches (parallel copy through scratch memory when a source is overwritten). Calls follow
 //! [`abi`] (the Stave calling convention = System V AMD64, documented there).
 //!
+//! Release code generation ([`Options::release`]) keeps this structure and changes where values
+//! live and how blocks are laid out:
+//!
+//! - A value used in another block, and every param of a later block, owns a register from its
+//!   definition to its last use when stave-opt's `regalloc` finds one: `rbx`, `r12`–`r15` across
+//!   calls; `r8`, `r9`, `xmm6`–`xmm13` where no call intervenes. The cache keeps to the other
+//!   call-clobbered registers; the rest of the values live in homes as above.
+//! - Branch arguments and the register arguments of a call are parallel moves from where the
+//!   values are.
+//! - Blocks are emitted loop by loop with the blocks that cannot return last (stave-opt
+//!   `layout`); callee-saved registers have fixed save slots and the first `ret` carries the
+//!   epilogue.
+//! - A compare read only by its block's `cbr` is flags and a jump; an address read by one load or
+//!   store is its addressing mode; a loop counter's increment computes into the param's register.
+//!
+//! A function that uses `cpuid`, or needs more temporaries in one instruction than the cache has
+//! left, is compiled the debug way.
+//!
 //! Traps (overflow `jo`/`jc`/range checks, division by zero, `MIN / -1`, shift amount ≥ width,
 //! bounds, `panic.*`) jump to one out-of-line stub per (kind, site) that calls
 //! `runtime.panic.trap(kind, site)` (contracts/intrinsics.md, runtime/README.md). Without that

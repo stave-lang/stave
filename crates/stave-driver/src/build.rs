@@ -8,8 +8,9 @@
 //!   ([`Failure::Internal`]).
 //! - [`lower`] also runs the bounds audit ([`stave_ir::bounds::audit`]): an element access without a
 //!   check or proof is a compiler bug.
-//! - [`codegen_link`]: release builds first elide the bounds checks that have a recorded proof
-//!   ([`stave_ir::bounds::elide`], records in [`Built::elided`]); then per-function code generation in parallel (rayon on the caller's pool for
+//! - [`codegen_link`]: release builds first run the IR passes of stave-opt around the elision of
+//!   the bounds checks that have a recorded proof ([`stave_ir::bounds::elide`], records in
+//!   [`Built::elided`]); then per-function code generation in parallel (rayon on the caller's pool for
 //!   AArch64; stave-codegen-x64 uses its own scoped threads), then the link. Debug builds use
 //!   stave-obj's debug layout (padded slots, jump table), release builds the packed one. Backend
 //!   errors on valid IR (vectors, f16) are [`Failure::Unsupported`].
