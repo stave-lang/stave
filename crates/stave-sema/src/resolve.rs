@@ -761,7 +761,8 @@ impl<'t, 'a> W<'t, 'a> {
     }
 
     /// Resolves the paths of the pattern rooted at `root` and binds its names (after the whole
-    /// pattern, so bindings never affect its own paths).
+    /// pattern, so bindings never affect its own paths). A name the pattern binds twice is E0105
+    /// at each later binding.
     fn bind_pattern(&mut self, root: u32, bk: BindKind) {
         let lo = self.ast.descendants(root).start;
         let mut pending: Vec<(Sym, BindingRef, bool, u32)> = Vec::new();
@@ -804,7 +805,11 @@ impl<'t, 'a> W<'t, 'a> {
                 _ => {}
             }
         }
-        for (s, at, m, t) in pending {
+        for (i, &(s, at, m, t)) in pending.iter().enumerate() {
+            if let Some(first) = pending[..i].iter().find(|p| p.0 == s) {
+                let (ps, fs) = (self.span(t), self.span(first.3));
+                self.e0105(s, ps, fs);
+            }
             self.bind(s, at, bk, m, t);
         }
     }
