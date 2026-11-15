@@ -273,6 +273,7 @@ impl Cg<'_, '_> {
                 let name = self.cx.m.intrinsic_name(id).ok_or_else(|| bad("intrinsic id out of range"))?;
                 self.intrinsic(name, args, ty, res)
             }
+            Op::Vec(v) => Err(unsup(format!("{} on x86-64", v.name()))),
             Op::Panic(k) => self.trap_now(k),
         }
     }

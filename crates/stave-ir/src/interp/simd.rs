@@ -444,6 +444,9 @@ impl<H: Host> Interp<'_, H> {
                     if op == Gather { self.vshape(rt()?)? } else { self.operand_vshape(body, arg(2)?)? };
                 let (_, il, _) = self.operand_vshape(body, arg(1)?)?;
                 let LaneTy::Int(it) = il else { return Err(malformed("gather index")) };
+                if it.signed {
+                    return Err(malformed("signed gather index"));
+                }
                 let (base, len) = self.mem_of(body, regs, arg(0)?)?;
                 let idx: Vec<i128> =
                     self.lanes(body, regs, arg(1)?)?.into_iter().map(|x| it.value(x)).collect();

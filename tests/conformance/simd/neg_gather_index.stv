@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// E0201: a gather / scatter index must be an unsigned vector with the data's lane count.
+fn f(s: &[u32], d: &mut [u32], a: u32x4, i: i32x4, j: u16x8, k: u8x4) -> u32x4 {
+    let g = u32x4.gather(s, i); //~ ERROR E0201
+    let h = u32x4.gather(s, j); //~ ERROR E0201
+    a.scatter(d, i); //~ ERROR E0201
+    a.scatter(d, k);
+    return u32x4.gather(s, k);
+}
+
+fn main() -> i32 {
+    return 0;
+}

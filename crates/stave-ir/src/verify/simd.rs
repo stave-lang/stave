@@ -63,6 +63,18 @@ impl FnVerifier<'_> {
         }
     }
 
+    /// A gather / scatter index: unsigned lanes of any width, `n` of them.
+    fn index_lanes(&self, t: TypeId, n: u32) -> Result<(), String> {
+        let (_, it, k) = self.int_lanes(t)?;
+        if it.signed {
+            Err(format!("signed gather / scatter index {}", self.tname(t)))
+        } else if k != n {
+            Err("gather / scatter index lane count differs".into())
+        } else {
+            Ok(())
+        }
+    }
+
     fn float_lanes(&self, t: TypeId) -> Result<(), String> {
         match self.vshape(t)? {
             (_, LaneTy::Float(_), _) => Ok(()),
@@ -330,16 +342,14 @@ impl FnVerifier<'_> {
                 let t = res()?;
                 let (lane, _, k) = self.vshape(t)?;
                 self.mem(b, args[0], lane, false)?;
-                let (_, _, k1) = self.int_lanes(self.value_ty(b, args[1])?)?;
-                if k1 != k { Err("gather index lane count differs".into()) } else { Ok(()) }
+                self.index_lanes(self.value_ty(b, args[1])?, k)
             }
             Scatter => {
                 arity(3)?;
                 let vt = self.value_ty(b, args[2])?;
                 let (lane, _, k) = self.vshape(vt)?;
                 self.mem(b, args[0], lane, true)?;
-                let (_, _, k1) = self.int_lanes(self.value_ty(b, args[1])?)?;
-                if k1 != k { Err("scatter index lane count differs".into()) } else { Ok(()) }
+                self.index_lanes(self.value_ty(b, args[1])?, k)
             }
             MaskAnd | MaskOr | MaskXor => {
                 arity(2)?;

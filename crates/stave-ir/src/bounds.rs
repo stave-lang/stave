@@ -157,8 +157,7 @@ pub fn audit_func(m: &Module, fid: FuncId) -> (Vec<Access>, Vec<Unguarded>) {
     let Some(f) = m.func(fid) else { return (ok, bad) };
     let Some(b) = &f.body else { return (ok, bad) };
     // Only these ops can be element accesses: without one there is nothing to analyse.
-    let vops = m.vec_ops();
-    let is_vec_access = |op: &Op| matches!(op, Op::Intrinsic(id) if vops.get(id.index()).copied().flatten().is_some_and(|v| v.is_memory()));
+    let is_vec_access = |op: &Op| matches!(op, Op::Vec(v) if v.is_memory());
     if !b.insts.op.iter().any(|op| matches!(op, Op::ElemAddr | Op::Get | Op::Set) || is_vec_access(op)) {
         return (ok, bad);
     }
@@ -230,8 +229,6 @@ struct Cx<'a> {
     /// The reachable `check.bounds` instructions, in order.
     checks: Vec<u32>,
     facts: facts::Facts,
-    /// The vector op of each intrinsic id.
-    vops: Vec<Option<VecOp>>,
 }
 
 impl<'a> Cx<'a> {
@@ -253,17 +250,7 @@ impl<'a> Cx<'a> {
                     && block_of.get(i as usize).is_some_and(|&bk| dom.reachable(bk as usize))
             })
             .collect();
-        Cx {
-            types,
-            funcs,
-            b,
-            dom,
-            block_of,
-            preds,
-            checks,
-            facts: facts::Facts::default(),
-            vops: m.vec_ops(),
-        }
+        Cx { types, funcs, b, dom, block_of, preds, checks, facts: facts::Facts::default() }
     }
 
     fn reachable_inst(&self, i: u32) -> bool {
@@ -321,7 +308,7 @@ impl<'a> Cx<'a> {
                     AccessKind::Set
                 })
             }
-            Op::Intrinsic(_) if self.vop(i).is_some_and(|v| v.is_memory()) => {
+            Op::Vec(v) if v.is_memory() => {
                 crate::simd::mem_operand(self.types, self.ty(*args.first()?)?).map(|_| AccessKind::Vector)
             }
             _ => None,
@@ -331,7 +318,7 @@ impl<'a> Cx<'a> {
     /// The vector op of instruction `i`, if it is one.
     fn vop(&self, i: u32) -> Option<VecOp> {
         match self.b.insts.op.get(i as usize)? {
-            Op::Intrinsic(id) => self.vops.get(id.index()).copied().flatten(),
+            Op::Vec(v) => Some(*v),
             _ => None,
         }
     }

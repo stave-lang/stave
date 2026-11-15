@@ -264,7 +264,7 @@ fn ownership(cx: &Ctx<'_>, b: &Body, an: &Analysis) -> Owned {
     for (i, &op) in b.insts.op.iter().enumerate() {
         let res = b.insts.result.get(i).copied().flatten().filter(|v| v.index() < nv);
         match op {
-            Op::Call | Op::CallInd | Op::Intrinsic(_) => clobbers[i] = true,
+            Op::Call | Op::CallInd | Op::Intrinsic(_) | Op::Vec(_) => clobbers[i] = true,
             Op::Slot => {
                 if let Some(v) = res {
                     frame_addr[v.index()] = true;

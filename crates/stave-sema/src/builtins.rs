@@ -160,6 +160,10 @@ pub enum ArgTy {
     Select,
     /// A mask of exactly this type; another mask is E0605.
     Mask(TypeId),
+    /// The index vector of a gather / scatter: an unsigned-lane vector with the lane count of this
+    /// type (same-width unsigned lanes, the expected type of a mismatch). A sizeless index takes
+    /// exactly this type, as sizeless lane counts differ by lane width.
+    Index(TypeId),
     /// `&[T align A]` (`&mut` when `mutable`) with A ≥ `bytes`; a smaller alignment is E0606.
     Aligned {
         elem: TypeId,
@@ -250,7 +254,7 @@ fn narrow_lane<I: Interner + ?Sized>(cx: &mut I, lane: TypeId) -> Option<TypeId>
     }
 }
 
-/// The index vector of a gather / scatter on `lane x n`: unsigned lanes of the same width.
+/// The same-width index vector of a gather / scatter on `lane x n` ([`ArgTy::Index`]).
 fn index_vec<I: Interner + ?Sized>(cx: &mut I, lane: TypeId, n: Lanes) -> TypeId {
     use types::IntBits as B;
     let bits = match types::lane_bits(cx.kind(lane)) {
@@ -322,7 +326,7 @@ fn vector_method<I: Interner + ?Sized>(
         "store_masked" => (vec![ArgTy::Is(rms), ArgTy::Is(us), ArgTy::Mask(mask)], unit),
         "scatter" => {
             let idx = index_vec(cx, lane, n);
-            (vec![ArgTy::Is(rms), ArgTy::Is(idx)], unit)
+            (vec![ArgTy::Is(rms), ArgTy::Index(idx)], unit)
         }
         "lookup" if !float => (vec![ArgTy::Is(t)], t),
         "compress" | "expand" => (vec![ArgTy::Mask(mask)], t),
@@ -428,7 +432,7 @@ pub fn builtin_assoc<I: Interner + ?Sized>(
                 "load_first_fault" => (vec![ArgTy::Is(rs), ArgTy::Is(us)], t),
                 "gather" => {
                     let idx = index_vec(cx, lane, n);
-                    (vec![ArgTy::Is(rs), ArgTy::Is(idx)], t)
+                    (vec![ArgTy::Is(rs), ArgTy::Index(idx)], t)
                 }
                 "join" => {
                     let Lanes::Fixed(k) = n else { return None };

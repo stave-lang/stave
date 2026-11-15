@@ -27,7 +27,7 @@ impl FnCx<'_> {
 
     /// Emits vector op `v` with result type `ty`; a trapping op gets the site of `tok`.
     pub fn vop(&mut self, tok: u32, v: VecOp, ty: Option<Ty>, args: &[Operand]) -> Option<Operand> {
-        let op = Op::Intrinsic(self.intrinsic(v.name()));
+        let op = Op::Vec(v);
         if v.trap_kinds().is_empty() {
             self.f.b.inst(op, ty.map(Self::ir), args).map(Operand::Value)
         } else {
