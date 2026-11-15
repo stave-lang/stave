@@ -889,7 +889,11 @@ pub(crate) fn check_impls(
                 && let Some(t) = pub_token(&icx, md.node)
             {
                 let n = prog.strings.get(md.name);
-                out.extend(mk("E0907", None, &[("name", n)], icx.tok_span(t), &[]));
+                // the edit ends where the next token starts: no blank is left behind
+                let at = icx.tok_span(t);
+                let next = icx.tok_span(t + 1).offset;
+                let cut = Span::new(at.file, at.offset, next.saturating_sub(at.offset).max(at.len));
+                out.extend(mk("E0907", None, &[("name", n)], at, &[("cut", cut)]));
             }
         }
         // E0906: missing and extra methods; E0905: signature mismatch.

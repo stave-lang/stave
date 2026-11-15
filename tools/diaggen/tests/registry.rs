@@ -224,7 +224,15 @@ fn exact_fixes_of_the_registry() {
     }
     assert_eq!(
         exact,
-        [("E0023", ""), ("E0024", "ref"), ("E0026", "unit"), ("E0027", "ret"), ("E0210", "")],
+        [
+            ("E0017", ""),
+            ("E0023", ""),
+            ("E0024", "ref"),
+            ("E0026", "unit"),
+            ("E0027", "ret"),
+            ("E0210", ""),
+            ("E0907", ""),
+        ],
         "an exact fix is applied unreviewed by `stave fix`: extend this list on purpose"
     );
 }

@@ -380,7 +380,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the byte-order mark: save the file as UTF-8 without BOM",
-                    applicability: Applicability::Maybe,
+                    applicability: Applicability::Exact,
                     edits: &[
                         EditTemplate { at: "primary", replacement: "" },
                     ],
@@ -565,7 +565,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     description: "remove `{text}`; name a returned borrow's origin with `-> &T from x`",
                     applicability: Applicability::Exact,
                     edits: &[
-                        EditTemplate { at: "primary", replacement: "" },
+                        EditTemplate { at: "cut", replacement: "" },
                     ],
                 }),
             },
@@ -3329,9 +3329,9 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `pub`: `{name}` is visible wherever its trait is",
-                    applicability: Applicability::Maybe,
+                    applicability: Applicability::Exact,
                     edits: &[
-                        EditTemplate { at: "primary", replacement: "" },
+                        EditTemplate { at: "cut", replacement: "" },
                     ],
                 }),
             },
