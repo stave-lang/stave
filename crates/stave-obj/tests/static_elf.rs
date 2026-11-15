@@ -176,6 +176,7 @@ fn line_table_readelf() {
             continue;
         }
         let p = tmp(&format!("lines-{}", tag(m)));
+        img.write_file(&p).unwrap();
         let out = std::process::Command::new(tool)
             .arg("-e")
             .arg(&p)
