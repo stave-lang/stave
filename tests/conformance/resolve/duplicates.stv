@@ -1,7 +1,7 @@
 //~ CHECK-ONLY
 // E0105: two declarations of one name in one scope, reported at the later one: module items,
-// struct fields, enum variants, fields of a struct variant, params, generic params, and methods
-// of a type (across all its inherent impls).
+// struct fields, enum variants, fields of a struct variant, params, generic params, methods
+// of a type (across all its inherent impls), and names bound by one pattern.
 struct Pair { a: i32, a: i32 } //~ ERROR E0105
 
 enum Dir { Up, Down, Up } //~ ERROR E0105
@@ -29,6 +29,22 @@ impl S {
 }
 
 fn twice() { //~ ERROR E0105
+}
+
+struct Two { x: i32, y: i32 }
+
+enum Pick { One(i32, i32), Other(i32, i32) }
+
+fn patterns(p: (i32, i32), t: Two, k: Pick) -> i32 {
+    let (a, a) = p; //~ ERROR E0105
+    match t {
+        Two.{ x, y: x } => { } //~ ERROR E0105
+    }
+    match k {
+        // the alternatives of an arm bind the same names: no duplicate
+        Pick.One(m, n) | Pick.Other(n, m) => { let _ = m + n; }
+    }
+    return a;
 }
 
 fn main() -> i32 {

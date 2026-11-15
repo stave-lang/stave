@@ -851,7 +851,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0105",
         severity: Severity::Error,
         area: "resolve",
-        rule: "duplicate declaration of `<name>` in `<scope>`; reported at each later declaration, related span: the first declaration",
+        rule: "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern); reported at each later declaration, related span: the first declaration",
         retired: false,
         located: true,
         holes: &[
