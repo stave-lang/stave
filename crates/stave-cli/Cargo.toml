@@ -28,6 +28,7 @@ alloc-count = []
 stave-diag.workspace = true
 stave-driver.workspace = true
 stave-sema.workspace = true
+stave-syntax.workspace = true
 stave-target.workspace = true
 
 [dev-dependencies]

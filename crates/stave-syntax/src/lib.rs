@@ -11,7 +11,8 @@
 //!    in parallel → per-item postorder [`Node`]s or the item's first syntax error.
 //! 4. [`parse_file`] runs all three and returns a [`ParsedFile`]; [`ParsedFile::item_ast`] gives
 //!    an [`ItemAst`] view with child accessors.
-//! 5. [`print_file`]: the pretty-printer; its output re-parses to the same tokens and AST.
+//! 5. [`print_file`] / [`format_source`]: the pretty-printer (`stave fmt`); comments are kept and
+//!    its output re-parses to the same tokens and AST.
 //!
 //! Every function is total: no input makes it panic (the fuzz targets in `fuzz/` check this).
 //! Diagnostics are built only through `stave_diag::Diagnostic::new` from the registry templates.
@@ -36,7 +37,7 @@ pub use lex::{
 pub use parse::{
     FileStop, ItemInfo, ParsedFile, ParsedItem, parse_file, parse_file_stepwise, parse_item, parse_items,
 };
-pub use print::{Printed, print_file};
+pub use print::{FormatError, Printed, format_source, print_file};
 
 /// Maps a file into memory for [`lex`] / [`parse_file`].
 /// An empty file maps to an empty buffer.

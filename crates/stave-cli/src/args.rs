@@ -18,6 +18,7 @@ pub enum Cmd {
     Test,
     Fix,
     UnsafeReport,
+    Fmt,
     Lowering,
     Explain,
     Daemon,
@@ -32,6 +33,7 @@ impl Cmd {
             Cmd::Test => "test",
             Cmd::Fix => "fix",
             Cmd::UnsafeReport => "unsafe-report",
+            Cmd::Fmt => "fmt",
             Cmd::Lowering => "lowering",
             Cmd::Explain => "explain",
             Cmd::Daemon => "daemon",
@@ -46,6 +48,7 @@ impl Cmd {
             Cmd::Test,
             Cmd::Fix,
             Cmd::UnsafeReport,
+            Cmd::Fmt,
             Cmd::Lowering,
             Cmd::Explain,
             Cmd::Daemon,
@@ -111,6 +114,10 @@ pub struct Args {
     pub json: bool,
     /// `fix --dry-run`.
     pub dry_run: bool,
+    /// `fmt` paths: files, and directories standing for every `.stv` file below them.
+    pub paths: Vec<PathBuf>,
+    /// `fmt --check`.
+    pub check: bool,
     /// `lowering --op OP`.
     pub op: Option<String>,
     /// `explain EXXXX`.
@@ -154,6 +161,9 @@ commands:
   fix [PKG_DIR] [--dry-run] [--target T] [--diagnostics human|json]
                         (apply the exact fixes, re-check, repeat; --dry-run prints a diff)
   unsafe-report [PKG_DIR] [--json]
+  fmt [PKG_DIR | FILE...] [--check]
+                        rewrite sources in the canonical layout (a directory: every
+                        .stv file below it; --check: list the files that would change)
   lowering --target T [--op OP]
   explain EXXXX
   daemon status|stop|evict [PKG_DIR]
@@ -196,6 +206,7 @@ fn allowed(cmd: Cmd, flag: &str) -> bool {
         Cmd::Fix => matches!(flag, "--dry-run" | "--target" | "--diagnostics"),
         // These always run in stage0 whatever --compiler says (cli-stage1.md).
         Cmd::UnsafeReport => matches!(flag, "--json" | "--compiler"),
+        Cmd::Fmt => flag == "--check",
         Cmd::Lowering => matches!(flag, "--target" | "--op" | "--compiler"),
         Cmd::Explain => flag == "--compiler",
         Cmd::Daemon => false,
@@ -219,7 +230,7 @@ fn takes_value(flag: &str) -> bool {
     )
 }
 
-const KNOWN_FLAGS: [&str; 18] = [
+const KNOWN_FLAGS: [&str; 19] = [
     "--release",
     "--target",
     "--features",
@@ -236,6 +247,7 @@ const KNOWN_FLAGS: [&str; 18] = [
     "--alloc-check",
     "--json",
     "--dry-run",
+    "--check",
     "--op",
     "--help",
 ];
@@ -281,8 +293,8 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
     let (mut out, mut compiler, mut dump, mut dump_dir, mut diagnostics, mut cache) =
         (None, None, None, None, None, None);
     let (mut runner, mut filter, mut op) = (None, None, None);
-    let (mut release, mut timings, mut watch, mut alloc_check, mut json, mut dry_run) =
-        (false, false, false, false, false, false);
+    let (mut release, mut timings, mut watch, mut alloc_check, mut json, mut dry_run, mut check) =
+        (false, false, false, false, false, false, false);
 
     let mut i = 1;
     while i < argv.len() {
@@ -340,6 +352,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
             "--alloc-check" => set_flag(&mut alloc_check, flag)?,
             "--json" => set_flag(&mut json, flag)?,
             "--dry-run" => set_flag(&mut dry_run, flag)?,
+            "--check" => set_flag(&mut check, flag)?,
             "--target" => set_once(&mut target, value, flag)?,
             // A list: repeated --features accumulate.
             "--features" => features.push(value),
@@ -372,8 +385,10 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
     let mut pkg_dir = None;
     let mut code = None;
     let mut daemon = None;
+    let mut paths = Vec::new();
     let mut pos = positional.into_iter();
     match cmd {
+        Cmd::Fmt => paths.extend(pos.by_ref().map(PathBuf::from)),
         Cmd::Explain => {
             let Some(c) = pos.next() else { return err("`stave explain` needs a diagnostic code EXXXX") };
             let digits = c.strip_prefix('E').unwrap_or("");
@@ -463,6 +478,8 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
         alloc_check,
         json,
         dry_run,
+        paths,
+        check,
         op,
         code,
         daemon,
@@ -550,6 +567,10 @@ mod tests {
         assert_eq!((a.cmd, a.dry_run, a.diagnostics), (Cmd::Fix, true, DiagFormat::Json));
         assert_eq!(a.pkg_dir, Some(PathBuf::from("pkg")));
         assert!(!args("fix").dry_run);
+        let a = args("fmt std runtime/os.stv --check");
+        assert_eq!(a.paths, [PathBuf::from("std"), PathBuf::from("runtime/os.stv")]);
+        assert!(a.check && a.pkg_dir.is_none());
+        assert!(args("fmt").paths.is_empty() && !args("fmt").check);
         let a = args("lowering --target aarch64-linux --op gather");
         assert_eq!(a.op.as_deref(), Some("gather"));
         assert_eq!(args("explain E0201").code.as_deref(), Some("E0201"));
@@ -594,6 +615,9 @@ mod tests {
         assert!(usage("fix --release").contains("does not take --release"));
         assert!(usage("fix --compiler gpu").contains("does not take --compiler"));
         assert!(usage("fix --dry-run --dry-run").contains("given twice"));
+        assert!(usage("check --check").contains("does not take --check"));
+        assert!(usage("fmt --json").contains("does not take --json"));
+        assert!(usage("fmt --check --check").contains("given twice"));
         assert!(usage("lowering").contains("needs --target"));
         assert!(usage("lowering --release --target x86_64-linux").contains("does not take"));
         assert!(usage("explain").contains("needs a diagnostic code"));
