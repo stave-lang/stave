@@ -1,0 +1,21 @@
+name: check
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v4
+      # AArch64 programs built by the tests run under user-mode emulation.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-user binutils-aarch64-linux-gnu
+      - run: sh tools/ci-step/run.sh check
