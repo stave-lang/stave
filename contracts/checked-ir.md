@@ -114,8 +114,11 @@ ops take the lane semantics of the scalar op; V = the vector result type, M = `m
 | `vec.load` / `vec.store` | `s i` / `s i v` | lanes `s[i..i+N]`, after `check.bounds i (sub.sat (slice.len s) N-1)` or under a chunk loop's head test |
 | `vec.load_aligned` † / `vec.store_aligned` † | `s i` / `s i v` | as `load` / `store`; `i % N != 0` traps `Bounds` |
 | `vec.load_masked` † / `vec.store_masked` † | `s i m` / `s i v m` | active lanes only (inactive read 0); an active lane past the end traps `Bounds` |
-| `vec.gather` † / `vec.scatter` † | `s idx` / `s idx v` | any index ≥ len traps `Bounds` before any write; duplicate indices: highest lane wins |
+| `vec.gather` † / `vec.scatter` † | `s idx` / `s idx v` | `idx`: unsigned lanes of any width, N of them, zero-extended; any index ≥ len traps `Bounds` before any write; duplicate indices: highest lane wins |
 | `mask.and or xor not select to_bits to_vec first_n rewiden all none` | | mask ops (`mask.select m a b`) |
+
+Vector and mask ops are ops of their own, not intrinsics: `vec.*` and `mask.*` are not intrinsic
+names (`intrinsic.vec.add` is rejected).
 
 Mask `==` / `!=` are `mask.not (mask.xor a b)` / `mask.xor a b`. `s.align_to::<A>()` is
 `slice.ptr`, `cast` to `usize`, `rem` by A, `eq 0`, and a `select` between the two `enum.make`s.

@@ -2642,6 +2642,7 @@ impl<'a> Ck<'a> {
                     out.push(t2);
                 }
                 Some(ArgTy::Mask(m)) => out.push(self.mask_arg(a, *m)),
+                Some(&ArgTy::Index(want)) => out.push(self.index_arg(a, want)),
                 Some(&ArgTy::Aligned { elem, mutable, bytes }) => {
                     let t = self.aligned_arg(a, elem, mutable, bytes);
                     self.note_reborrow(a, t, t);
@@ -2680,6 +2681,21 @@ impl<'a> Ck<'a> {
         {
             self.e0605(a, t, width, n);
             return ids::ERROR;
+        }
+        self.coerce(a, Ty::T(t), want, None)
+    }
+
+    /// A gather / scatter index ([`ArgTy::Index`]): an unsigned-lane vector of `want`'s fixed lane
+    /// count as is, anything else coerced to `want`.
+    fn index_arg(&mut self, a: u32, want: TypeId) -> TypeId {
+        let t = self.expr(a, Some(want));
+        let t = self.force(t);
+        if let (TypeKind::Vector { lane, n: Lanes::Fixed(k) }, TypeKind::Vector { n: Lanes::Fixed(wk), .. }) =
+            (self.tys.kind(t).clone(), self.tys.kind(want).clone())
+            && k == wk
+            && matches!(self.tys.kind(lane), TypeKind::Int { signed: false, .. })
+        {
+            return t;
         }
         self.coerce(a, Ty::T(t), want, None)
     }

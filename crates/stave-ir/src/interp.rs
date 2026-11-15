@@ -198,8 +198,6 @@ pub struct Interp<'m, H: Host> {
     cfg: Config,
     steps: u64,
     scratch: Vec<Val>,
-    /// The vector op of each intrinsic id.
-    vops: Vec<Option<crate::simd::VecOp>>,
 }
 
 fn malformed(s: &'static str) -> InterpError {
@@ -225,21 +223,7 @@ impl<'m, H: Host> Interp<'m, H> {
             mem.write(a, &st.init[..n]).map_err(|_| oom())?;
             statics.push(a);
         }
-        let vops = m.vec_ops();
-        Ok(Interp {
-            m,
-            cls,
-            pointee,
-            layouts,
-            strs,
-            statics,
-            host,
-            mem,
-            cfg,
-            steps: 0,
-            scratch: Vec::new(),
-            vops,
-        })
+        Ok(Interp { m, cls, pointee, layouts, strs, statics, host, mem, cfg, steps: 0, scratch: Vec::new() })
     }
 
     /// Instructions + terminators executed so far.
@@ -905,14 +889,11 @@ impl<'m, H: Host> Interp<'m, H> {
                 let dest = body.insts.result.get(iu).copied().flatten();
                 return Ok(Step::Call(f, vals, dest));
             }
-            Op::Intrinsic(id) if self.vops.get(id.index()).copied().flatten().is_some() => {
-                let v = self.vops.get(id.index()).copied().flatten().ok_or(malformed("vector op"))?;
-                match self.exec_vec(body, fid, regs, v, ty, args, site)? {
-                    simd::VOut::Val(x) => x,
-                    simd::VOut::None => return Ok(Step::Next),
-                    simd::VOut::Trap(k) => return Ok(Step::Trap(k)),
-                }
-            }
+            Op::Vec(v) => match self.exec_vec(body, fid, regs, v, ty, args, site)? {
+                simd::VOut::Val(x) => x,
+                simd::VOut::None => return Ok(Step::Next),
+                simd::VOut::Trap(k) => return Ok(Step::Trap(k)),
+            },
             Op::Intrinsic(id) => {
                 let name = m.intrinsic_name(id).ok_or(malformed("intrinsic"))?;
                 let mut vals = Vec::with_capacity(args.len());
