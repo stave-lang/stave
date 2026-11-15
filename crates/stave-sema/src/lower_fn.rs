@@ -205,7 +205,8 @@ pub(crate) struct FnState {
     pub temps: Vec<(Operand, Ty)>,
     pub ret: Ty,
     pub site_consts: Vec<ConstId>,
-    pub kvals: FxHashMap<ConstId, i128>,
+    /// The values of the int constants made by [`FnCx::int`], by constant index.
+    pub kvals: Vec<Option<i128>>,
     /// The user site stored last in the current block (no store between: std code stores none).
     pub last_site: Option<(Block, u32)>,
     /// Open `scope` statements: (scope depth of their block, the `&mut usize` thread-list
@@ -521,7 +522,7 @@ impl<'a> FnCx<'a> {
             return Site::NONE;
         }
         let icx = self.icx;
-        let off = icx.tok_span(tok).offset;
+        let off = icx.tok_start(tok);
         if let Some(&i) = self.site_map.get(&off) {
             return Site(i);
         }
@@ -536,7 +537,11 @@ impl<'a> FnCx<'a> {
     pub fn int(&mut self, v: i128) -> Operand {
         let o = self.f.b.int(v);
         if let Operand::Const(c) = o {
-            self.f.kvals.insert(c, v);
+            let i = c.index();
+            if self.f.kvals.len() <= i {
+                self.f.kvals.resize(i + 1, None);
+            }
+            self.f.kvals[i] = Some(v);
         }
         o
     }
@@ -544,7 +549,7 @@ impl<'a> FnCx<'a> {
     /// The int value of a constant operand made by [`FnCx::int`].
     pub fn kval(&self, o: Operand) -> Option<i128> {
         match o {
-            Operand::Const(c) => self.f.kvals.get(&c).copied(),
+            Operand::Const(c) => self.f.kvals.get(c.index()).copied().flatten(),
             _ => None,
         }
     }
@@ -1285,7 +1290,7 @@ impl FnState {
             temps: Vec::new(),
             ret,
             site_consts: Vec::new(),
-            kvals: FxHashMap::default(),
+            kvals: Vec::new(),
             last_site: None,
             scope_handles: Vec::new(),
         }

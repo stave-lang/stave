@@ -65,14 +65,14 @@ pub(crate) fn finalize(b: Body) -> Body {
         if !reach[bi] {
             continue;
         }
-        for t in b.successors(Block(bi as u32)) {
+        b.for_each_successor(Block(bi as u32), |t| {
             let ps = b.params(t.block);
             for (k, o) in b.target_args(&t).iter().enumerate() {
                 if let (Some(&p), Operand::Value(v)) = (ps.get(k), o) {
                     edges.push((p, *v));
                 }
             }
-        }
+        });
     }
     loop {
         let mut changed = false;
@@ -101,11 +101,18 @@ pub(crate) fn finalize(b: Body) -> Body {
     let keep_param = |v: Value| useful.get(v.index()).copied().unwrap_or(false);
     // value renumbering
     let mut vmap = vec![u32::MAX; nv];
-    let mut values: Vec<ValueData> = Vec::new();
-    let mut block_params: Vec<Value> = Vec::new();
-    let mut blocks: Vec<BlockData> = Vec::new();
+    // the new body is at most as large as the old one
+    let mut values: Vec<ValueData> = Vec::with_capacity(nv);
+    let mut block_params: Vec<Value> = Vec::with_capacity(b.block_params.len());
+    let mut blocks: Vec<BlockData> = Vec::with_capacity(nb);
     let mut insts = Insts::default();
-    let mut operands: Vec<Operand> = Vec::new();
+    let ni = b.insts.op.len();
+    insts.op.reserve(ni);
+    insts.ty.reserve(ni);
+    insts.result.reserve(ni);
+    insts.args.reserve(ni);
+    insts.site.reserve(ni);
+    let mut operands: Vec<Operand> = Vec::with_capacity(b.operands.len());
     let mut cases: Vec<SwitchCase> = Vec::new();
     // first pass: number values
     for &bi in &order {
@@ -141,16 +148,15 @@ pub(crate) fn finalize(b: Body) -> Body {
     };
     let target = |operands: &mut Vec<Operand>, t: &Target| -> Target {
         let ps = b.params(t.block);
-        let args: Vec<Operand> = b
-            .target_args(t)
-            .iter()
-            .enumerate()
-            .filter(|(k, _)| ps.get(*k).is_some_and(|&p| keep_param(p)))
-            .map(|(_, o)| *o)
-            .collect();
+        let start = operands.len() as u32;
+        for (k, o) in b.target_args(t).iter().enumerate() {
+            if ps.get(k).is_some_and(|&p| keep_param(p)) {
+                operands.push(mv(*o));
+            }
+        }
         Target {
             block: Block(new_block.get(t.block.index()).copied().unwrap_or(u32::MAX)),
-            args: push_ops(operands, &args),
+            args: Span { start, len: operands.len() as u32 - start },
         }
     };
     for &bi in &order {

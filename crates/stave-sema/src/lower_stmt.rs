@@ -191,7 +191,22 @@ impl<'a> FnCx<'a> {
         let lo = icx.ast.descendants(root).start;
         let mut autoref: Vec<usize> = Vec::new();
         let mut assigns: Vec<(u32, usize)> = Vec::new();
-        for m in lo..=root {
+        // a postfix chain adds to `autoref` only at a method call with an auto-referenced
+        // receiver: without one in the body the chains (most nodes of a body) are not walked
+        let autoref_calls = tb.targets.iter().any(
+            |(_, t)| matches!(t, Target::Method { adjust, .. } if adjust.autoref.is_some() && adjust.derefs == 0),
+        );
+        // most nodes are expression wrappers: the three kinds of interest are picked by their raw
+        // ids
+        let hi = (root as usize + 1).min(icx.ast.nodes.len());
+        let nodes = &icx.ast.nodes[(lo as usize).min(hi)..hi];
+        let (unary, postfix, expr_stmt) =
+            (NodeKind::Unary as u8, NodeKind::Postfix as u8, NodeKind::ExprStmt as u8);
+        for (i, node) in nodes.iter().enumerate() {
+            if node.kind != unary && node.kind != postfix && node.kind != expr_stmt {
+                continue;
+            }
+            let m = lo + i as u32;
             match icx.kind(m) {
                 Some(NodeKind::Unary) => {
                     let a = icx.a(m);
@@ -202,7 +217,7 @@ impl<'a> FnCx<'a> {
                         autoref.push(l);
                     }
                 }
-                Some(NodeKind::Postfix) => {
+                Some(NodeKind::Postfix) if autoref_calls => {
                     let _ = self.chain_root(m, Some(&mut autoref));
                 }
                 Some(NodeKind::ExprStmt) => {
@@ -385,7 +400,7 @@ impl<'a> FnCx<'a> {
         self.end_fn();
         let site_consts = std::mem::take(&mut self.f.site_consts);
         let body = self.finish_fn();
-        let name_off = Some((self.icx.fid(), self.icx.tok_span(self.icx.a(n)).offset));
+        let name_off = Some((self.icx.fid(), self.icx.tok_start(self.icx.a(n))));
         let out = FnOut { closure: Some(k), params: all, ret: self.ret_of(ret), body, site_consts, name_off };
         self.f = saved;
         self.outs.push(out);

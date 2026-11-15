@@ -178,12 +178,7 @@ impl<'a> FnCx<'a> {
         let icx = self.icx;
         let k = icx.kind(n)?;
         if passthrough_kind(k) {
-            let mut it = icx.ast.children_rev(n);
-            let c = it.next()?;
-            if it.next().is_some() {
-                return None;
-            }
-            return Some(c);
+            return icx.only_child(n);
         }
         if k == NodeKind::Unary {
             let c = icx.first_child(n)?;
@@ -207,6 +202,13 @@ impl<'a> FnCx<'a> {
 
     fn coercion_of(&self, n: u32) -> Option<&'a Coercion> {
         let tb = self.tb();
+        // a coercion of `n`'s chain is keyed at `n` or a descendant: none in that range, none at
+        // all (most expressions have none, and the chain is not walked for them)
+        let lo = self.icx.ast.descendants(n).start;
+        let k = tb.coercions.partition_point(|c| c.0 < lo);
+        if tb.coercions.get(k).is_none_or(|c| c.0 > n) {
+            return None;
+        }
         let mut cur = n;
         for _ in 0..1_000_000 {
             if let Some(c) = tb.coercion(cur) {

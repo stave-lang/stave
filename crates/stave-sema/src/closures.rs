@@ -108,7 +108,18 @@ pub fn closures(
 ) -> Vec<ClosureInfo> {
     let lo = icx.ast.descendants(root).start;
     let mut out: Vec<ClosureInfo> = Vec::new();
-    for m in lo..=root {
+    // A closure body starts at a `fn` or `spawn` token. The tokens of the fn's block are far fewer
+    // than its nodes: a block without such a token has no closure body, and its nodes are skipped.
+    let skip = icx.child(root, NodeKind::Block).and_then(|b| {
+        let open = icx.a(b);
+        let close = icx.close(open);
+        let toks = icx.toks.get(open as usize..=close as usize)?;
+        let none =
+            close > open && !toks.iter().any(|t| t.kind == Term::KwFn as u8 || t.kind == Term::KwSpawn as u8);
+        none.then(|| icx.ast.descendants(b).start..b + 1)
+    });
+    let skip = skip.unwrap_or(lo..lo);
+    for m in (lo..skip.start).chain(skip.end..root + 1) {
         if let Some(kind) = closure_kind(icx, m) {
             out.push(ClosureInfo {
                 node: m,

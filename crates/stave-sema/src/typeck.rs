@@ -619,6 +619,9 @@ pub(crate) struct Ck<'a> {
     /// The current position is reachable (no earlier diverging statement).
     pub reachable: bool,
     pub kids_buf: Vec<Vec<u32>>,
+    /// The pass-through wrapper nodes of the expressions being typed ([`Ck::expr`]), innermost
+    /// expression last.
+    pub chain_buf: Vec<u32>,
 }
 
 fn check_body(
@@ -672,6 +675,7 @@ fn check_body(
         diverges: false,
         reachable: true,
         kids_buf: Vec::new(),
+        chain_buf: Vec::new(),
     };
     match j.kind {
         JobKind::Fn => {

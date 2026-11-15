@@ -157,12 +157,7 @@ impl<'a> Ck<'a> {
         let icx = self.icx;
         let k = icx.kind(n)?;
         if passthrough_kind(k) {
-            let mut it = icx.ast.children_rev(n);
-            let c = it.next()?;
-            if it.next().is_some() {
-                return None;
-            }
-            return Some(c);
+            return icx.only_child(n);
         }
         if k == NodeKind::Unary {
             let c = icx.first_child(n)?;
@@ -180,20 +175,24 @@ impl<'a> Ck<'a> {
             self.set(n, Ty::ERR);
             return Ty::ERR;
         }
-        let mut chain: Vec<u32> = Vec::new();
+        // the wrappers of this expression are the tail of `chain_buf` from `base` on (nested
+        // expressions push and pop their own above it)
+        let base = self.chain_buf.len();
         let mut cur = n;
         while let Some(c) = self.passthrough(cur) {
-            chain.push(cur);
+            self.chain_buf.push(cur);
             cur = c;
-            if chain.len() > 1_000_000 {
+            if self.chain_buf.len() - base > 1_000_000 {
                 break;
             }
         }
         let t = self.expr_node(cur, hint);
         self.set(cur, t);
-        for &c in &chain {
+        for i in base..self.chain_buf.len() {
+            let c = self.chain_buf[i];
             self.set(c, t);
         }
+        self.chain_buf.truncate(base);
         self.leave();
         t
     }

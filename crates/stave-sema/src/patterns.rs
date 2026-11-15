@@ -658,6 +658,11 @@ pub(crate) fn check_match(ck: &mut Ck<'_>, scrut: u32, t: TypeId, rows: &[(Pat, 
 
 /// A `let`/`for` pattern must cover every value (E0300 at the pattern).
 pub(crate) fn irrefutable(ck: &mut Ck<'_>, node: u32, p: &Pat, t: TypeId) {
+    // A plain binding or `_` covers every value. The search is still run for ADTs and tuples:
+    // describing their constructors interns the field types.
+    if matches!(p, Pat::Wild) && !matches!(ck.tys.kind(t), TypeKind::Adt { .. } | TypeKind::Tuple(_)) {
+        return;
+    }
     if t == ids::ERROR || ck.tys.has_error(t) || has_err(p) {
         return;
     }

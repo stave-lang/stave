@@ -72,6 +72,15 @@ impl Ck<'_> {
         if fns.iter().all(|f| f.0.is_none()) {
             return out;
         }
+        // the walk below only looks at calls of these fns: a body that calls none has nothing to
+        // check
+        let calls_one = body
+            .targets
+            .iter()
+            .any(|(_, t)| matches!(t, Target::Fn { decl, .. } if fns.iter().any(|f| f.0 == Some(*decl))));
+        if !calls_one {
+            return out;
+        }
         let lo = icx.ast.descendants(body.node).start;
         for n in lo..=body.node {
             if icx.kind(n) != Some(NodeKind::Postfix) {

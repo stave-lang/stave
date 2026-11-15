@@ -342,6 +342,22 @@ pub trait Interner {
 
     /// Whether `t` mentions the error type anywhere.
     fn has_error(&self, t: TypeId) -> bool {
+        // a type without components (most operands) needs no walk
+        if matches!(
+            self.kind(t),
+            TypeKind::Int { .. }
+                | TypeKind::Float(_)
+                | TypeKind::Bool
+                | TypeKind::Char
+                | TypeKind::Str
+                | TypeKind::Never
+                | TypeKind::Mask { .. }
+                | TypeKind::Param(_)
+                | TypeKind::ConstParam(_)
+                | TypeKind::SelfTy
+        ) {
+            return false;
+        }
         let mut stack = vec![t];
         let mut kids = Vec::new();
         while let Some(x) = stack.pop() {

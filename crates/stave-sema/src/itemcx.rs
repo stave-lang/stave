@@ -225,6 +225,13 @@ impl<'p> ItemCx<'p> {
         self.prog.strings.get(s)
     }
 
+    /// The byte offset of token `t`: [`ItemCx::tok_span`]'s offset, without finding the token's
+    /// end (which re-lexes it).
+    #[inline]
+    pub fn tok_start(&self, t: u32) -> u32 {
+        self.toks.get(t as usize).map_or(0, |x| x.start)
+    }
+
     pub fn tok_span(&self, t: u32) -> Span {
         scan::tok_span(self.file.id, &self.file.bytes, self.toks, t as usize)
     }
@@ -263,11 +270,17 @@ impl<'p> ItemCx<'p> {
         Kids::from_rev(self.ast.children_rev(n))
     }
 
-    /// The child of `n` if it has exactly one.
+    /// The child of `n` if it has exactly one. The nodes are in postorder: the last child is
+    /// `n - 1`, and it is the only one when its subtree starts where `n`'s descendants do.
+    #[inline]
     pub fn only_child(&self, n: u32) -> Option<u32> {
-        let mut it = self.ast.children_rev(n);
-        let c = it.next()?;
-        it.next().is_none().then_some(c)
+        let nodes = self.ast.nodes;
+        let lo = n.saturating_sub(nodes.get(n as usize)?.b);
+        if n <= lo {
+            return None;
+        }
+        let c = n - 1;
+        (c.saturating_sub(nodes.get(c as usize)?.b) <= lo).then_some(c)
     }
 
     pub fn child(&self, n: u32, k: NodeKind) -> Option<u32> {

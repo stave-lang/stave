@@ -542,6 +542,9 @@ fn assemble(
     let mut tr = Tr { tmp: IrTypes::new(), memo: FxHashMap::default(), adt_sema: FxHashMap::default() };
     // 1. translate every used type; the printed set P
     let mut used: Vec<stave_ir::TypeId> = Vec::new();
+    // the types of the values and results of the bodies (a handful, on every value): each is
+    // translated and added to `used` once
+    let mut seen = vec![false; table.len()];
     let mut job_targs: Vec<Vec<GenericArg>> = Vec::with_capacity(jobs.len());
     for (ji, job) in jobs.iter().enumerate() {
         let targs: Vec<GenericArg> = match job {
@@ -571,10 +574,16 @@ fn assemble(
                     used.push(tr.tr(table, r, 0));
                 }
                 for v in &b.values {
-                    used.push(tr.tr(table, TypeId(v.ty.0), 0));
+                    let t = TypeId(v.ty.0);
+                    if first_use(&mut seen, t) {
+                        used.push(tr.tr(table, t, 0));
+                    }
                 }
                 for t in b.insts.ty.iter().flatten() {
-                    used.push(tr.tr(table, TypeId(t.0), 0));
+                    let t = TypeId(t.0);
+                    if first_use(&mut seen, t) {
+                        used.push(tr.tr(table, t, 0));
+                    }
                 }
             }
         }
@@ -733,6 +742,16 @@ fn assemble(
     let mut all_intrs: Vec<String> = outs.iter().flat_map(|o| o.intrs.iter().cloned()).collect();
     all_intrs.sort();
     all_intrs.dedup();
+    // the final id of every sema type translated so far, by sema id (`u32::MAX`: none yet, ask
+    // `tr`): the bodies map the type of every value and result
+    let mut fin_of = vec![stave_ir::TypeId(u32::MAX); table.len()];
+    for (s, x) in &tr.memo {
+        if !s.is_local()
+            && let Some(slot) = fin_of.get_mut(s.idx())
+        {
+            *slot = fin.get(x.index()).copied().unwrap_or(stave_ir::TypeId(u32::MAX));
+        }
+    }
     // 6. functions
     let mut module = Module::new();
     module.strings = all_strs.clone();
@@ -818,7 +837,10 @@ fn assemble(
                         *v = site_map.get(&(*v as u32)).copied().unwrap_or(u32::MAX) as i128;
                     }
                 }
-                let tyf = |t: u32| ty_final_pure(&tr, &fin, t);
+                let tyf = |t: u32| match fin_of.get(TypeId(t).idx()) {
+                    Some(&f) if f.0 != u32::MAX && !TypeId(t).is_local() => f,
+                    _ => ty_final_pure(&tr, &fin, t),
+                };
                 let func = |i: u32| -> FuncId {
                     match reqs.get(i as usize) {
                         Some(Req::Inst(k)) => {
@@ -887,6 +909,17 @@ fn assemble(
         module.statics.push(Static { path: prog.decl_path(d), ty, init });
     }
     Ok(module)
+}
+
+/// Whether sema type `t` is met for the first time (always for an id outside `seen`).
+fn first_use(seen: &mut [bool], t: TypeId) -> bool {
+    if t.is_local() || t.is_none() {
+        return true;
+    }
+    match seen.get_mut(t.idx()) {
+        Some(s) => !std::mem::replace(s, true),
+        None => true,
+    }
 }
 
 fn ty_final_pure(tr: &Tr, fin: &[stave_ir::TypeId], t: u32) -> stave_ir::TypeId {
