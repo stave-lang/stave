@@ -1,0 +1,39 @@
+type t0 int u 32
+type t1 int u size
+type t2 int s 32
+type t3 bool
+type t4 str
+type t5 ref t4
+type t6 ref t7
+type t7 slice t0
+type t8 vec t0 4
+fn @0 std.io.print {
+b0(%0: t5):
+  ret
+}
+fn @1 main.total {
+b0(%0: t6):
+  %1 = vec.splat t8 0
+  %2 = slice.len t1 %0
+  %3 = sub.sat t1 %2 3
+  br b1(0, %1)
+b1(%4: t1, %5: t8):
+  %6 = lt t3 %4 %3
+  cbr %6 b2() b3()
+b2():
+  %7 = vec.load t8 %0 %4
+  %8 = vec.add.wrap t8 %5 %7
+  %9 = add.wrap t1 %4 4
+  br b1(%9, %8)
+b3():
+  %10 = sub.wrap t1 %2 %4
+  check.bounds () %10 1
+  br b4(%5)
+b4(%11: t8):
+  %12 = vec.reduce_add t0 %11
+  ret %12
+}
+fn @2 main.main {
+b0():
+  ret 0
+}

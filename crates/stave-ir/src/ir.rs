@@ -35,9 +35,11 @@
 //! | `call` / `call.ind` | `@f args..` / `f args..` | direct / fn-value call (`call.ind` passes the value's environment as a trailing argument) |
 //! | `intrinsic.<name>` | args.. | contracts/intrinsics.md |
 //! | `panic.<kind>` | — | unconditional trap (`panic.unwrap`, `panic.assert`, ...) |
+//! | `vec.<name>` / `mask.<name>` | | vector and mask ops ([`crate::simd`]): `intrinsic` with a reserved name, printed without the `intrinsic.` prefix |
 
 use stave_target::FeatureSet;
 
+use crate::simd::VecOp;
 use crate::types::{GenericArg, TypeId, TypeTable};
 
 macro_rules! id {
@@ -675,6 +677,32 @@ impl Module {
 
     pub fn intrinsic_name(&self, i: IntrinsicId) -> Option<&str> {
         self.intrinsics.get(i.index()).map(|s| s.as_str())
+    }
+
+    /// The op of vector or mask op `v`: an `intrinsic` with the op's reserved name.
+    pub fn vec_intrinsic(&mut self, v: VecOp) -> Op {
+        Op::Intrinsic(self.intrinsic(v.name()))
+    }
+
+    /// The vector or mask op `op` denotes, if it is one.
+    pub fn vec_op(&self, op: Op) -> Option<VecOp> {
+        match op {
+            Op::Intrinsic(i) => self.intrinsic_name(i).and_then(VecOp::from_name),
+            _ => None,
+        }
+    }
+
+    /// [`Module::vec_op`] of every intrinsic id, for lookups in a loop.
+    pub fn vec_ops(&self) -> Vec<Option<VecOp>> {
+        self.intrinsics.iter().map(|n| VecOp::from_name(n)).collect()
+    }
+
+    /// The trap kinds instruction op `op` can raise (vector ops included).
+    pub fn trap_kinds(&self, op: Op) -> &'static [PanicKind] {
+        match self.vec_op(op) {
+            Some(v) => v.trap_kinds(),
+            None => op.trap_kinds(),
+        }
     }
 
     /// Renumbers the type table canonically ([`TypeTable::canonicalize`]) and rewrites every type

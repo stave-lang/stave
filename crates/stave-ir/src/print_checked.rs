@@ -197,9 +197,13 @@ fn print_func(m: &Module, f: &Func, lay: &FnLayout, out: &mut String) {
                 let _ = write!(out, "{} = ", lay.val(*v));
             }
             match op {
-                Some(Op::Intrinsic(id)) => {
-                    let _ = write!(out, "intrinsic.{}", m.intrinsic_name(id).unwrap_or("?"));
-                }
+                Some(Op::Intrinsic(id)) => match m.intrinsic_name(id).unwrap_or("?") {
+                    // vector and mask ops are ops of their own (`vec.add`, `mask.select`)
+                    n if crate::simd::VecOp::from_name(n).is_some() => out.push_str(n),
+                    n => {
+                        let _ = write!(out, "intrinsic.{n}");
+                    }
+                },
                 Some(op) => out.push_str(op.name().unwrap_or("?")),
                 None => out.push('?'),
             }

@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// ir golden: `tail scalar (x)`: head, body, tail head, tail body, exit.
+fn count(xs: &[u8], b: u8) -> u32 {
+    let key = u8x16.splat(b);
+    let mut n: u32 = 0;
+    for v: u8x16 in xs {
+        n = n + ((v == key).to_bits().popcount() as u32);
+    } tail scalar (x) {
+        if x == b {
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+fn main() -> i32 {
+    return 0;
+}

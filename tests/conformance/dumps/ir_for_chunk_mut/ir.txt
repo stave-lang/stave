@@ -1,0 +1,84 @@
+type t0 int u size
+type t1 int s 32
+type t2 bool
+type t3 str
+type t4 ref t3
+type t5 ref mut t1
+type t6 ref mut t9
+type t7 ref mut t10
+type t8 ref mut t11
+type t9 array t1 8
+type t10 slice t1
+type t11 vec t1 4
+type t12 mask 32 4
+fn @0 std.io.print {
+b0(%0: t4):
+  ret
+}
+fn @1 main.add {
+b0(%0: t7, %1: t1):
+  %2 = slot t8
+  %3 = slot t8
+  %4 = vec.splat t11 %1
+  %5 = slice.len t0 %0
+  %6 = sub.sat t0 %5 3
+  br b1(0)
+b1(%7: t0):
+  %8 = lt t2 %7 %6
+  cbr %8 b2() b3()
+b2():
+  %9 = vec.load t11 %0 %7
+  store () %2 %9
+  %10 = load t11 %2
+  %11 = vec.add.wrap t11 %10 %4
+  store () %2 %11
+  %12 = load t11 %2
+  vec.store () %0 %7 %12
+  %13 = add.wrap t0 %7 4
+  br b1(%13)
+b3():
+  %14 = sub.wrap t0 %5 %7
+  %15 = ne t2 %14 0
+  cbr %15 b4() b5()
+b4():
+  %16 = mask.first_n t12 %14
+  %17 = vec.load_masked t11 %0 %7 %16
+  store () %3 %17
+  %18 = load t11 %3
+  %19 = vec.add.wrap t11 %18 %4
+  store () %3 %19
+  %20 = load t11 %3
+  vec.store_masked () %0 %7 %20 %16
+  br b5()
+b5():
+  ret
+}
+fn @2 main.main {
+b0():
+  ret 0
+}
+fn @3 main.scale {
+b0(%0: t6, %1: t1):
+  %2 = slot t8
+  %3 = vec.splat t11 %1
+  %4 = addr.elem t5 %0 0
+  %5 = slice.make t7 %4 8
+  %6 = slice.len t0 %5
+  %7 = sub.sat t0 %6 3
+  br b1(0)
+b1(%8: t0):
+  %9 = lt t2 %8 %7
+  cbr %9 b2() b3()
+b2():
+  %10 = vec.load t11 %5 %8
+  store () %2 %10
+  %11 = load t11 %2
+  %12 = vec.mul.wrap t11 %11 %3
+  store () %2 %12
+  %13 = load t11 %2
+  vec.store () %5 %8 %13
+  %14 = add.wrap t0 %8 4
+  br b1(%14)
+b3():
+  ret
+}

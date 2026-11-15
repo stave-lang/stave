@@ -1,7 +1,7 @@
 # Stave language reference for agents (v0.7; grammar: contracts/grammar.ebnf)
 
 Stave = Rust-family syntax + borrow checker, **no lifetimes, no macros, no implicit anything**, SIMD in type system.
-Read whole file before writing Stave. Assume Rust **only** where this file is silent. Compiler is truth; error codes are in contracts/diagnostic-codes.md (`stave explain` is planned). Stage0 builds scalar code only: SIMD is only partly type-checked, and vector code generation, the optimizer, and the GPU are not built. Items marked *planned*, §4, and §7 describe design. Planned syntax that already parses (a `from` on a parameter, `requires`/`ensures`) stops `stave check` and `stave build` with "not implemented yet".
+Read whole file before writing Stave. Assume Rust **only** where this file is silent. Compiler is truth; error codes are in contracts/diagnostic-codes.md (`stave explain` is planned). Stage0 builds scalar code only: SIMD code is checked and lowered (the IR interpreter runs it), but vector code generation, the optimizer, and the GPU are not built. Items marked *planned*, §4, and §7 describe design. Planned syntax that already parses (a `from` on a parameter, `requires`/`ensures`) stops `stave check` and `stave build` with "not implemented yet".
 
 ## 1. Differences from Rust (most common agent mistakes first)
 
@@ -130,7 +130,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 
 ## 4. SIMD
 
-**Status.** Stage0 checks and builds scalar code only; vector code generation is not implemented, so SIMD examples are check-only. Planned (not enforced yet): E0605 E0606 E0700 E0701 E0702 E0703 E0705 E0706 E0709 E0710-E0717, `emulate`/`strict`, `stave lowering`. E0601-E0604, E0607, E0704, E0707 are checked in part.
+**Status.** Stage0 checks vector code and lowers it to checked IR (fixed lane counts; the IR interpreter runs it), but generates no vector machine code: `stave build` of a program with vector values stops with "not implemented yet", so SIMD examples are check-only. Planned (not enforced yet): E0700 E0701 E0702 E0703 E0705 E0706 E0709 E0710-E0717, `emulate`/`strict`, `stave lowering`, sizeless vectors past type checking. E0601-E0604, E0607, E0704, E0707 are checked in part.
 
 **Types.** `TxN`: T ∈ `i8..i64 u8..u64 f32 f64 f16 bf16`, N a power of two from 2 to 64. Total width ≤ target register: 128 bits everywhere (portable), 256 needs `avx2`, 512 needs `avx512f`. Too wide = E0702. Masks `maskWxN` are typed by lane **width** and count: `i32x8`, `u32x8` and `f32x8` compares all give `mask32x8`. Generic spelling `vec<T, N>` / `mask<W, N>` only when an argument is generic.
 
@@ -142,17 +142,17 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 - Int vector division: `a.div_const::<K>()` or `a.div_lanes(b)` (E0607).
 
 **Ops** (method form unless shown):
-- arithmetic: `sqrt abs copysign(s) floor ceil round trunc fma(b, c) min max min_num max_num min_x86 abs_wrap`
+- arithmetic: `sqrt abs copysign(s) floor ceil round trunc fma(b, c) min max min_num max_num min_x86 max_x86` (floats; `round` ties to even), `abs_wrap div_lanes(b) div_const::<K>()` (ints), `min max` (both)
   - `min`/`max` propagate NaN. `min_num`/`max_num` treat NaN as missing. `min_x86` uses x86 semantics.
-- bitwise: `& | ^ ~ andnot(b)`, shifts `<< >> <<%`
+- bitwise: `& | ^ ~ andnot(b)` (`a & ~b`), shifts `<< >> <<%` by a vector or a literal (`v << 3`: a lane value)
 - lane counting: `popcount clz`
-- compare `a < b` → mask. Masks: `& | ^ ~`, `m.select(a, b)` (a where set), `m.to_bits()` → smallest uint, `m.to_vec::<i32>()`, `maskWxN.first_n(k)`, `.all()`, `.none()`
+- compare `a < b` → mask. Masks: `& | ^ ~`, `m.select(a, b)` (a where set), `m.to_bits()` → smallest uint, `m.to_vec::<i32>()`, `m.rewiden::<16>()`; constructors `maskWxN.first_n(k)`, `maskWxN.all()`, `maskWxN.none()`. A mask of another lane width or count than the vector = E0605
 - reductions (fixed tree): `reduce_add reduce_min reduce_max reduce_and reduce_or`, `reduce_add_ordered(init)` (sequential, init + v[0] + ..)
 - `scan_add`
 - shape: `TxN.splat(x)`, `v.bitcast::<UxM>()`, `v.split()`, `TxN.join(a, b)`, `widen_lo widen_hi`, `narrow_wrap(w) narrow_sat(w)`, `permute::<[i0, ..]>()`, `tbl.lookup(idx)` (out of range → 0), `compress(m) expand(m)`
 - convert: `v as f64x4` (exact), `v as~ f32x4` (rounding), `v as| i32x4`, `v as? i32x4`
-- memory: `TxN.load(s, i)`, `v.store(s, i)` (trap if `i+N > len`), `TxN.load_masked(s, i, m)`, `v.store_masked(s, i, m)`, `TxN.gather(s, idx)`, `v.scatter(s, idx)` (bounds-checked; duplicate index → highest lane wins)
-- aligned: `TxN.load_aligned(s, i)` needs `s: &[T align A]` with A ≥ vector bytes (E0606). Get one with `s.align_to::<32>() -> Option<&[T align 32]>`.
+- memory: `TxN.load(s, i)`, `v.store(s, i)` (trap if `i+N > len`), `TxN.load_masked(s, i, m)`, `v.store_masked(s, i, m)`, `TxN.gather(s, idx)`, `v.scatter(s, idx)` (`idx`: unsigned lanes of the element's width, `u32x4` for `f32x4`; bounds-checked; duplicate index → highest lane wins). Masked forms touch active lanes only: inactive lanes read 0, are never written, and are not bounds-checked
+- aligned: `TxN.load_aligned(s, i)`, `v.store_aligned(s, i)` need `s: &[T align A]` with A ≥ vector bytes (E0606) and trap unless `i % N == 0`. Get one with `s.align_to::<32>() -> Option<&[T align 32]>` (`Some` iff the address is a multiple of 32); `&[T align A]` coerces to `&[T]`.
 - memory hints (no effect on results; Why: bandwidth-bound loops need them and auto-hinting is guesswork): `s.prefetch_read_l1(i)`, generally `prefetch_{read,write}_{l1,l2,l3,nta}`, on a slice (any `i`, even ≥ len: never faults, no check) or raw pointer `p.prefetch_read_l1()`, both safe. Streaming store bypassing caches: `v.store_stream(s, i)` (`s: &mut [T align A]`, A ≥ vector bytes; traps unless `i % N == 0` and `i+N ≤ len`), scalar `x.store_stream(s, i)`, unsafe `p.write_stream(v)`. The compiler adds the needed fence (x86 `sfence`) before returns and calls: never write one in safe code.
 
 **Chunk loops.** A tail clause is required (E0601), except over an array whose length is a multiple of N. Syntax summary (`..` = elided; complete examples in §5):
@@ -162,6 +162,7 @@ for v: u8x16 in xs { .. } tail scalar (x) { .. }      // remaining elements one 
 for v: f32x4 in xs { .. } tail exact;                 // traps if len % N != 0
 for v: &mut f32x4 in xs { *v = *v * k; } tail ..      // in-place
 ```
+The tail runs after the full chunks and only when elements remain (`masked`: once, `scalar`: per element). `break`/`continue` inside a tail belong to the enclosing loop. A `&mut` binding is written back whenever its block is left (end, `break`, `continue`, `return`, `?`).
 
 **Hot loops over one field**: store records as columns, `import std.soa;` → `soa.Soa3::<f32, f32, u32>.new()`, `push(a, b, c)`, `len()`, `get(i)`, `set(i, ..)`, `col0()`/`col0_mut()` (`&[A]`/`&mut [A]`), `cols_mut()` (all columns at once, to read one and write another). Loop: `for v: f32x8 in ps.col0() { .. } tail ..`. Types `Soa2`..`Soa4` (no variadic generics); name fields with a wrapper struct whose methods return `self.s.col0()`. Why: SIMD over a field of `Vec<Struct>` needs gathers; a column is one contiguous slice.
 

@@ -7,6 +7,7 @@
 //! - [`verify`]: structure, dominance, block params, terminators, op typing.
 //! - [`interp`]: the scalar reference interpreter (oracle) over [`mem`] with a pluggable [`host`].
 //! - [`print_checked`]: the canonical checked-IR text of contracts/checked-ir.md.
+//! - [`simd`]: vector and mask ops ([`VecOp`]) and their lane semantics.
 //! - [`arith`]: scalar op and cast semantics; [`layout`]: memory layout of IR types.
 //! - [`link`]: text order and symbol names of a module's functions and statics (both backends).
 
@@ -20,6 +21,7 @@ pub mod layout;
 pub mod link;
 pub mod mem;
 pub mod print_checked;
+pub mod simd;
 pub mod types;
 pub mod verify;
 
@@ -31,5 +33,6 @@ pub use ir::{
     Site, SiteInfo, Static, StrId, Term, Value,
 };
 pub use print_checked::print_checked;
+pub use simd::VecOp;
 pub use types::{AdtShape, DeclId, FloatBits, GenericArg, IntBits, Lanes, TypeId, TypeKey, TypeTable};
 pub use verify::{VerifyError, verify_func, verify_module};

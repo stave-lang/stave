@@ -336,6 +336,21 @@ impl<'a> FnCx<'a> {
                 let r = self.op2(Op::SliceMake, w, p, n);
                 E::V(r, w)
             }
+            Coercion::Unalign => {
+                let t = self.e_ty(&e);
+                let Some(v) = self.operand_of(e) else { return E::Never };
+                let Some((inner, m, _)) = self.pointee(t) else { return E::V(v, t) };
+                let TypeKind::Slice { elem, .. } = self.kind(inner) else { return E::V(v, t) };
+                let w = match want {
+                    Some(w) => w,
+                    None => {
+                        let s = self.tys.intern(TypeKind::Slice { elem, align: 0 });
+                        self.t_ref(m, s)
+                    }
+                };
+                let r = self.convert_ptr(v, t, w);
+                E::V(r, w)
+            }
             Coercion::StringToStr => {
                 let t = self.e_ty(&e);
                 let Some(v) = self.operand_of(e) else { return E::Never };
@@ -374,7 +389,18 @@ impl<'a> FnCx<'a> {
                     && want
                         .and_then(|w| self.pointee(w))
                         .is_some_and(|(i, _, _)| matches!(self.kind(i), TypeKind::Slice { .. }));
-                if to_slice { self.coerce(e, &Coercion::ArrayToSlice, want) } else { e }
+                // and `&mut [T align A]` for a `&mut [T]` param
+                let unalign = want.is_some_and(|w| w != t)
+                    && self.pointee(t).is_some_and(
+                        |(i, _, _)| matches!(self.kind(i), TypeKind::Slice { align, .. } if align != 0),
+                    );
+                if to_slice {
+                    self.coerce(e, &Coercion::ArrayToSlice, want)
+                } else if unalign {
+                    self.coerce(e, &Coercion::Unalign, want)
+                } else {
+                    e
+                }
             }
             Coercion::NeverToAny | Coercion::FnItem => e,
         }
@@ -479,7 +505,8 @@ impl<'a> FnCx<'a> {
         };
         let rt = self.nty(n);
         if !matches!(self.kind(rt), TypeKind::Bool) {
-            return self.unsupported(n, "vector code generation is not implemented yet: vector comparison");
+            let ot = self.nty(l);
+            return self.vec_compare(icx.a(opn), o, a, b, ot, rt);
         }
         E::V(self.op2(o, rt, a, b), rt)
     }
@@ -524,14 +551,13 @@ impl<'a> FnCx<'a> {
                 }
             }
         }
-        if matches!(self.kind(ty), TypeKind::Vector { .. } | TypeKind::Mask { .. }) {
-            self.vector_unsupported(Some(tok), "vector operator");
-            return None;
-        }
         let Some((o, trap)) = bin_op(op) else {
             self.fail_at(Some(tok), "unknown operator");
             return None;
         };
+        if self.is_simd(ty) {
+            return self.vec_binop(tok, o, a, b, ty);
+        }
         let float = matches!(self.kind(ty), TypeKind::Float(_));
         if trap && !float { self.trapping(tok, o, Some(ty), &[a, b]) } else { Some(self.op2(o, ty, a, b)) }
     }
@@ -599,8 +625,8 @@ impl<'a> FnCx<'a> {
     }
 
     fn builtin_unop(&mut self, tok: u32, op: Op, v: Operand, ty: Ty) -> E {
-        if matches!(self.kind(ty), TypeKind::Vector { .. } | TypeKind::Mask { .. }) {
-            return self.vector_unsupported(Some(tok), "vector operator");
+        if self.is_simd(ty) {
+            return self.vec_unop(tok, op, v, ty);
         }
         let r = if op == Op::Neg && matches!(self.kind(ty), TypeKind::Int { .. }) {
             match self.trapping(tok, op, Some(ty), &[v]) {
@@ -681,7 +707,10 @@ impl<'a> FnCx<'a> {
                 return self.fail(tn, "cast type");
             }
             if matches!(self.kind(from), TypeKind::Vector { .. }) {
-                return self.unsupported(tn, "vector code generation is not implemented yet: vector cast");
+                let Some(r) = self.vec_cast(optok, kind, acc, rt) else { return E::Never };
+                acc = r;
+                from = rt;
+                continue;
             }
             // `&x as *const T` (thin ref to raw pointer) and fat refs to fat raw pointers
             let fat_from = self
@@ -1384,8 +1413,10 @@ impl<'a> FnCx<'a> {
             Some(_) => self.vector_unsupported(Some(ctok), "vector built-in"),
             // A type-relative built-in (`f32x4.splat(x)`) has its target at the name token.
             None => match self.target(ctok) {
-                Some(Target::Builtin { name, .. }) => {
-                    self.vector_unsupported(Some(ctok), &format!("type-relative built-in `{name}`"))
+                Some(Target::Builtin { name, recv, ret, .. }) => {
+                    let (name, recv, ret) = (*name, *recv, *ret);
+                    let (t, rt) = (self.sub(recv), self.sub(ret));
+                    self.vec_assoc(rt, t, name, args, ctok)
                 }
                 _ => self.fail_at(Some(ctok), "call without a target"),
             },
@@ -1575,18 +1606,39 @@ impl<'a> FnCx<'a> {
                 }
                 None => self.fail_at(Some(seg), "unresolved method"),
             },
-            Some(Target::Builtin { name, adjust, .. }) => {
-                self.builtin_method(n, recv, name, adjust, args, seg)
+            Some(Target::Builtin { name, adjust, ret, consts, .. }) => {
+                let rt = self.sub(ret);
+                self.builtin_method(n, recv, name, adjust, args, seg, (rt, &consts))
             }
             _ => self.fail_at(Some(seg), "method call without a target"),
         }
     }
 
-    fn builtin_method(&mut self, n: u32, recv: E, name: &str, adj: Adjust, args: &[u32], seg: u32) -> E {
+    #[allow(clippy::too_many_arguments)]
+    fn builtin_method(
+        &mut self,
+        n: u32,
+        recv: E,
+        name: &str,
+        adj: Adjust,
+        args: &[u32],
+        seg: u32,
+        (rt, consts): (Ty, &[u64]),
+    ) -> E {
         let Some(p) = self.place_of(recv) else { return E::Never };
         let Some(p) = self.derefs(p, adj.derefs) else { return E::Never };
-        let rt = self.nty(n);
+        if self.is_simd(p.ty) {
+            return self.vec_method(rt, p, name, args, seg, consts);
+        }
         match name {
+            "align_to" => match &p.base {
+                Base::Mem(v, _) if p.proj.is_empty() => {
+                    let v = *v;
+                    let st = self.t_ref(false, p.ty);
+                    self.align_to(rt, v, st, seg)
+                }
+                _ => self.fail_at(Some(seg), "align_to of an unsized place"),
+            },
             "len" => {
                 let us = self.t_usize();
                 match self.kind(p.ty) {
@@ -1610,9 +1662,6 @@ impl<'a> FnCx<'a> {
             }
             "popcount" | "clz" | "ctz" => {
                 let t = p.ty;
-                if !matches!(self.kind(t), TypeKind::Int { .. }) {
-                    return self.vector_unsupported(Some(seg), "vector bit count");
-                }
                 let Some(a) = self.read(&p) else { return E::Never };
                 let o = match name {
                     "popcount" => Op::Popcount,
@@ -1644,6 +1693,8 @@ impl<'a> FnCx<'a> {
                 if !matches!(self.kind(p.ty), TypeKind::Bool) {
                     return self.vector_unsupported(Some(seg), "mask select");
                 }
+                // the operands' type: the checker records no result type for this built-in
+                let rt = self.nty(n);
                 let Some(c) = self.read(&p) else { return E::Never };
                 let (Some(&an), Some(&bn)) = (args.first(), args.get(1)) else {
                     return self.fail_at(Some(seg), "select operands");

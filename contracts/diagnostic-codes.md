@@ -108,8 +108,8 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0602 | scalar and vector mixed (use `TxN.splat`) |
 | E0603 | vector types differ in lane type or count (use widen/narrow/split/join/bitcast) |
 | E0604 | plain `+ - *` on an integer vector (choose `+%`, `+|`, or `checked_add`) |
-| E0605 | mask width or count does not match the vector (use `m.rewiden::<W>()`). Planned |
-| E0606 | aligned load or store on a slice whose type lacks that alignment (use `align_to`). Planned |
+| E0605 | mask width or count does not match the vector (use `m.rewiden::<W>()`) |
+| E0606 | aligned load or store on a slice whose type lacks that alignment (use `align_to`) |
 | E0607 | vector integer division by a non-constant (use `div_lanes`) |
 | E0608 | permute or table index out of range at compile time |
 | E0609 | generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument. Write `f32x8` / `mask32x8` |

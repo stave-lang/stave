@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// ir golden: `for v: TxN in s` with `tail masked (v, m)`: head, body, tail test, tail body, exit.
+fn sum(xs: &[f32]) -> f32 {
+    let mut acc = f32x4.splat(0.0);
+    for v: f32x4 in xs {
+        acc = acc + v;
+    } tail masked (v, m) {
+        acc = acc + m.select(v, f32x4.splat(0.0));
+    }
+    return acc.reduce_add();
+}
+
+fn main() -> i32 {
+    return 0;
+}
