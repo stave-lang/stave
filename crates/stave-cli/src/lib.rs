@@ -354,6 +354,7 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
         print_timings(&output, total_ms, a.diagnostics, err);
     }
     let _ = writeln!(err, "{}", select::summary_line(selection, total_ms as u64));
+    release(output);
     if code != EXIT_OK || a.cmd != Cmd::Run {
         return code;
     }
@@ -367,6 +368,14 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
             EXIT_USAGE
         }
     }
+}
+
+/// Frees a finished run's output off the calling thread: the command does not wait for the
+/// millions of small frees (the `stave` process exits meanwhile; an in-process caller gets its
+/// memory back when the thread is done).
+fn release(output: Output) {
+    // a thread that cannot start drops the closure, and with it the output, right here
+    let _ = std::thread::Builder::new().name("release".to_string()).spawn(move || drop(output));
 }
 
 /// The `compiler` field of `--timings` for a stage0 run.
