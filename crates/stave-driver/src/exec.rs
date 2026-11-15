@@ -8,18 +8,19 @@
 //!   inherited stdio. A signal-terminated program reports `128 + signal`.
 //! - [`Executable`]: a linked program that runs without ever being a file. On x86-64 and AArch64
 //!   Linux its ELF image lives in an anonymous memory file (`memfd_create`, close-on-exec). A
-//!   native run forks and the child calls `execveat(fd, "", argv, envp, AT_EMPTY_PATH)`; the
-//!   descriptor closes in the new program. A runner gets the path `/dev/fd/N`, and only its
-//!   child keeps descriptor `N` open across the exec: the flag is cleared after the fork, so
-//!   the parent's descriptor stays close-on-exec and no other child started meanwhile inherits
-//!   the image. Both ways the child is started and awaited like a file ([`run`]): same stdio,
-//!   working directory, environment, and exit status. A kernel without one of the two system
-//!   calls (ENOSYS, nothing else) makes this process fall back to a temporary file per program
+//!   native run starts the path `/proc/self/fd/N` (the child's own copy of the descriptor)
+//!   with the program's name as `argv[0]`; the descriptor closes in the new program. A runner
+//!   gets the path `/dev/fd/N`, and only its child keeps descriptor `N` open across the exec:
+//!   the flag is cleared after the fork, so the parent's descriptor stays close-on-exec and no
+//!   other child started meanwhile inherits the image. Both ways the child is started and
+//!   awaited like a file ([`run`]): same stdio, working directory, environment, and exit
+//!   status. A kernel without `memfd_create` (ENOSYS, nothing else) or a system without
+//!   `/proc/self/fd` makes this process fall back to a temporary file per program
 //!   ([`fallback_note`]); other systems always use the file.
 //! - [`test_fns`]: the `test fn`s of the root package, in canonical decl order.
 
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -147,14 +148,12 @@ fn run_command(mut make: impl FnMut() -> io::Result<Command>, spec: &RunSpec<'_>
     }
 }
 
-/// The system call whose absence (ENOSYS) made this process run programs from temporary files.
+/// What this system lacks, once that made this process run programs from temporary files.
 static FALLBACK: OnceLock<&'static str> = OnceLock::new();
 
 /// Why programs of this process run from temporary files instead of memory, once that is so.
 pub fn fallback_note() -> Option<String> {
-    FALLBACK.get().map(|call| {
-        format!("the kernel has no `{call}` (ENOSYS): programs run from temporary files, not from memory")
-    })
+    FALLBACK.get().map(|missing| format!("{missing}: programs run from temporary files, not from memory"))
 }
 
 /// Where an [`Executable`] holds its ELF image.
@@ -178,9 +177,15 @@ impl Executable {
         let name = name.to_string();
         if sys::IN_MEMORY && FALLBACK.get().is_none() {
             match sys::memory_file(&name, elf) {
-                Ok(f) => return Ok(Executable { name, image: Image::Memory(f) }),
+                // both ways to start the image name the descriptor by a path
+                Ok(f) if sys::fd_path(&f).exists() => {
+                    return Ok(Executable { name, image: Image::Memory(f) });
+                }
+                Ok(_) => {
+                    let _ = FALLBACK.set("this system has no `/proc/self/fd`");
+                }
                 Err(e) if sys::no_such_call(&e) => {
-                    let _ = FALLBACK.set("memfd_create");
+                    let _ = FALLBACK.set("the kernel has no `memfd_create` (ENOSYS)");
                 }
                 Err(e) => return Err(e),
             }
@@ -196,23 +201,10 @@ impl Executable {
 
     /// Runs the program and waits for it, like [`run`].
     pub fn run(&mut self, spec: &RunSpec<'_>) -> io::Result<Ran> {
-        let f = match &self.image {
-            Image::OnDisk { path, .. } => return run(path, spec),
-            Image::Memory(f) => f,
-        };
-        match run_command(|| sys::command(f, &self.name, spec), spec) {
-            // Only a native run makes the call, in the child, which then never became the program.
-            Err(e) if sys::no_such_call(&e) && runner_words(spec).is_empty() => {}
-            r => return r,
+        match &self.image {
+            Image::OnDisk { path, .. } => run(path, spec),
+            Image::Memory(f) => run_command(|| sys::command(f, &self.name, spec), spec),
         }
-        let mut elf = Vec::new();
-        let mut r = f;
-        r.seek(SeekFrom::Start(0))?;
-        r.read_to_end(&mut elf)?;
-        let image = on_disk(&self.name, &elf)?;
-        self.image = image;
-        let _ = FALLBACK.set("execveat");
-        self.run(spec)
     }
 }
 
@@ -241,17 +233,16 @@ fn on_disk(name: &str, elf: &[u8]) -> io::Result<Image> {
     Ok(Image::OnDisk { path, _dir: dir })
 }
 
-/// The Linux system calls behind [`Executable`]. They go through libc's `syscall`: the wrappers
-/// `memfd_create` and `execveat` are missing from older C libraries.
+/// The Linux system calls behind [`Executable`]. They go through libc's `syscall`: the wrapper
+/// `memfd_create` is missing from older C libraries.
 #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod sys {
-    use std::ffi::{CString, c_char, c_long};
+    use std::ffi::{CString, c_long};
     use std::fs::File;
     use std::io::{self, Write};
     use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::process::CommandExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use super::{RunSpec, runner_words};
@@ -262,14 +253,12 @@ mod sys {
     mod nr {
         pub const FCNTL: std::ffi::c_long = 72;
         pub const MEMFD_CREATE: std::ffi::c_long = 319;
-        pub const EXECVEAT: std::ffi::c_long = 322;
     }
 
     #[cfg(target_arch = "aarch64")]
     mod nr {
         pub const FCNTL: std::ffi::c_long = 25;
         pub const MEMFD_CREATE: std::ffi::c_long = 279;
-        pub const EXECVEAT: std::ffi::c_long = 281;
     }
 
     const EINVAL: i32 = 22;
@@ -279,7 +268,6 @@ mod sys {
     const F_SETFD: c_long = 2;
     /// The descriptor flags without FD_CLOEXEC.
     const FD_KEEP: c_long = 0;
-    const AT_EMPTY_PATH: c_long = 0x1000;
     /// Bytes of the program name used as the memory file's label (the kernel allows 249).
     const MAX_LABEL: usize = 200;
 
@@ -317,37 +305,16 @@ mod sys {
         Ok(f)
     }
 
-    /// A NULL-terminated `char *` array (`argv`, `envp`) and the strings it points to.
-    struct CStrings {
-        _strings: Vec<CString>,
-        ptrs: Vec<*const c_char>,
+    /// The path that names the descriptor of `file` in this process and, until it runs another
+    /// program, in a child.
+    pub fn fd_path(file: &File) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
     }
 
-    // SAFETY: `ptrs` points into the heap buffers of `_strings`, which the value owns and never
-    // changes or frees before it is dropped: sending it moves both together.
-    unsafe impl Send for CStrings {}
-    // SAFETY: no method writes through the pointers: sharing it shares immutable bytes.
-    unsafe impl Sync for CStrings {}
-
-    impl CStrings {
-        /// A string with a NUL byte cannot be passed to a program: an error, as in `Command`.
-        fn new(strings: impl Iterator<Item = Vec<u8>>) -> io::Result<CStrings> {
-            let strings: Vec<CString> = strings
-                .map(|s| CString::new(s).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e)))
-                .collect::<io::Result<_>>()?;
-            let mut ptrs: Vec<*const c_char> = strings.iter().map(|s| s.as_ptr()).collect();
-            ptrs.push(std::ptr::null());
-            Ok(CStrings { _strings: strings, ptrs })
-        }
-
-        fn as_ptr(&self) -> *const *const c_char {
-            self.ptrs.as_ptr()
-        }
-    }
-
-    /// The command that runs the image in `file` under `spec`. Natively the forked child calls
-    /// `execveat` on the descriptor itself, with `name` as `argv[0]` and this process's
-    /// environment; a runner gets `/dev/fd/N`, with `N` kept open across its exec.
+    /// The command that runs the image in `file` under `spec`. Natively the child starts its
+    /// own `/proc/self/fd/N` with `name` as `argv[0]`: no code runs between fork and exec, so
+    /// the standard library may spawn without a fork. A runner gets `/dev/fd/N`, with `N` kept
+    /// open across its exec.
     pub fn command(file: &File, name: &str, spec: &RunSpec<'_>) -> io::Result<Command> {
         let fd = c_long::from(file.as_raw_fd());
         if !runner_words(spec).is_empty() {
@@ -364,31 +331,8 @@ mod sys {
             unsafe { cmd.pre_exec(keep_open) };
             return Ok(cmd);
         }
-        let args = std::iter::once(name).chain(spec.args.iter().map(String::as_str));
-        let argv = CStrings::new(args.map(|a| a.as_bytes().to_vec()))?;
-        let envp = CStrings::new(std::env::vars_os().map(|(k, v)| {
-            let mut kv = k.into_vec();
-            kv.push(b'=');
-            kv.extend(v.into_vec());
-            kv
-        }))?;
-        // The program of this command is never looked up: the child replaces itself in
-        // `exec_image` or reports the error.
-        let mut cmd = Command::new(name);
-        if let Some(d) = spec.cwd {
-            cmd.current_dir(d);
-        }
-        let exec_image = move || {
-            // SAFETY: `fd` is open in the child (inherited by the fork), the path is an empty
-            // NUL-terminated string, and both arrays are NULL-terminated arrays of
-            // NUL-terminated strings owned by this closure, so alive in the child.
-            unsafe { syscall(nr::EXECVEAT, fd, c"".as_ptr(), argv.as_ptr(), envp.as_ptr(), AT_EMPTY_PATH) };
-            // the call returns only when it failed
-            Err(io::Error::last_os_error())
-        };
-        // SAFETY: the closure runs in the forked child and only makes a system call and reads
-        // errno: no allocation, no lock (the strings were built before the fork).
-        unsafe { cmd.pre_exec(exec_image) };
+        let mut cmd = super::command(&fd_path(file), spec)?;
+        cmd.arg0(name);
         Ok(cmd)
     }
 }
@@ -397,6 +341,7 @@ mod sys {
 mod sys {
     use std::fs::File;
     use std::io;
+    use std::path::PathBuf;
     use std::process::Command;
 
     use super::RunSpec;
@@ -409,6 +354,10 @@ mod sys {
 
     pub fn memory_file(_: &str, _: &[u8]) -> io::Result<File> {
         Err(io::ErrorKind::Unsupported.into())
+    }
+
+    pub fn fd_path(_: &File) -> PathBuf {
+        PathBuf::new()
     }
 
     pub fn command(_: &File, _: &str, _: &RunSpec<'_>) -> io::Result<Command> {

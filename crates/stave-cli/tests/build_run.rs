@@ -174,20 +174,30 @@ fn shebang_script_runs_directly() {
          io.print(a.as_str());\n            io.print(\"\\n\");\n        }\n        Option.None => { }\n    }\n    \
          return 7;\n}\n",
     );
+    // A script run prints no summary line: stderr is the program's.
     let (c, out, err) = run_script(&greet, &["one", "two"]);
-    assert_eq!((c, out.as_str()), (7, "args 3\ntwo\n"), "{err}");
+    assert_eq!((c, out.as_str(), err.as_str()), (7, "args 3\ntwo\n", ""));
     let (c, out, err) = run_script(&greet, &[]);
-    assert_eq!((c, out.as_str()), (7, "args 1\n"), "{err}");
+    assert_eq!((c, out.as_str(), err.as_str()), (7, "args 1\n", ""));
     // The same file through the commands that take a root.
     let p = greet.display().to_string();
-    assert_eq!(stave_in(&d, &["check", &p]).0, 0);
+    let (c, _, err) = stave_in(&d, &["check", &p]);
+    assert_eq!(c, 0, "{err}");
+    assert!(err.contains("compiled on "), "{err}");
     let (c, out, err) = stave_in(&d, &["run", &p, "one", "--", "-x", "y"]);
-    assert_eq!((c, out.as_str()), (7, "args 4\n-x\n"), "{err}");
+    assert_eq!((c, out.as_str(), err.as_str()), (7, "args 4\n-x\n", ""));
+    // Without a shebang line the run names the compiler.
+    let plain = d.join("plain.stv");
+    std::fs::write(&plain, "fn main() -> i32 {\n    return 0;\n}\n").unwrap();
+    let (c, _, err) = stave_in(&d, &["run", &plain.display().to_string()]);
+    assert_eq!(c, 0, "{err}");
+    assert!(err.contains("compiled on "), "{err}");
     // Line 3 of the file is line 3 of the diagnostic.
     let bad = script("bad.stv", "fn main() -> i32 {\n    return nope;\n}\n");
     let (c, out, err) = run_script(&bad, &[]);
     assert_eq!((c, out.as_str()), (1, ""), "{err}");
     assert!(err.starts_with("bad.stv:3:12: error[E0101]: "), "{err}");
+    assert!(!err.contains("compiled on "), "{err}");
 }
 
 /// `stave` in `dir` with `TMPDIR` set to `tmpdir`, optionally under `strace` with the flags
@@ -231,8 +241,8 @@ fn have_qemu_aarch64() -> bool {
 
 /// `stave run` and `stave test` hold every executable in memory. They work where nothing can
 /// be written (no temporary directory, a read-only working directory), and under `strace` no
-/// system call creates a file or directory: the image is a `memfd_create` file started with
-/// `execveat(.., AT_EMPTY_PATH)`, or handed to the runner as `/dev/fd/N`.
+/// system call creates a file or directory: the image is a `memfd_create` file started as
+/// `/proc/self/fd/N`, or handed to the runner as `/dev/fd/N`.
 #[cfg(unix)]
 #[test]
 fn run_and_test_write_no_file() {
@@ -271,7 +281,7 @@ fn run_and_test_write_no_file() {
     }
     let log = d.join("trace.log");
     let log_arg = log.display().to_string();
-    let flags = ["-f", "-e", "trace=%file,memfd_create,execveat", "-o", log_arg.as_str()];
+    let flags = ["-f", "-e", "trace=%file,memfd_create", "-o", log_arg.as_str()];
     let creating = [
         "O_CREAT",
         "O_TMPFILE",
@@ -301,16 +311,16 @@ fn run_and_test_write_no_file() {
             assert!(trace.lines().any(|l| l.contains(" execve(") && l.contains("\"/dev/fd/")), "{trace}");
         } else {
             assert!(
-                trace.lines().any(|l| l.contains(" execveat(") && l.contains("AT_EMPTY_PATH")),
+                trace.lines().any(|l| l.contains(" execve(") && l.contains("\"/proc/self/fd/")),
                 "{trace}"
             );
         }
     }
 }
 
-/// Without `memfd_create` or `execveat` in the kernel (ENOSYS, injected by `strace`) the program
-/// runs from a temporary file, removed afterwards, and stderr says so. Any other error is
-/// reported, not worked around.
+/// Without `memfd_create` in the kernel (ENOSYS, injected by `strace`) the program runs from a
+/// temporary file, removed afterwards, and stderr says so. Any other error is reported, not
+/// worked around.
 #[cfg(unix)]
 #[test]
 fn run_falls_back_to_a_file_only_on_enosys() {
@@ -324,21 +334,20 @@ fn run_falls_back_to_a_file_only_on_enosys() {
     let d = tmp("fallback");
     let tmpdir = d.join("tmp");
     std::fs::create_dir_all(&tmpdir).unwrap();
-    for call in ["memfd_create", "execveat"] {
-        let (trace, inject) = (format!("trace={call}"), format!("inject={call}:error=ENOSYS"));
-        let flags = ["-f", "-o", "/dev/null", "-e", trace.as_str(), "-e", inject.as_str()];
-        let note = format!("stave: the kernel has no `{call}` (ENOSYS): programs run from temporary files");
-        let (c, out, err) = stave_env(&d, &tmpdir, Some(&flags), &["run", &run_prog("hello"), "--", "a"]);
-        assert_eq!((c, out.as_str()), (0, "hello\n"), "{call}: {err}");
-        assert_eq!(err.matches(&note).count(), 1, "{call}: {err}");
-        let (c, _, err) = stave_env(&d, &tmpdir, Some(&flags), &["run", &run_prog("exit_code.stv")]);
-        assert_eq!(c, 7, "{call}: {err}");
-        let (c, out, err) = stave_env(&d, &tmpdir, Some(&flags), &["test", &run_prog("test_fn")]);
-        assert_eq!(c, 0, "{call}: {out}{err}");
-        assert!(out.ends_with("test fns: 3 passed, 0 failed, 0 not run\n"), "{call}: {out}");
-        assert_eq!(err.matches(&note).count(), 1, "{call}: {err}");
-        assert_eq!(std::fs::read_dir(&tmpdir).unwrap().count(), 0, "{call}: temporary files left");
-    }
+    let call = "memfd_create";
+    let (trace, inject) = (format!("trace={call}"), format!("inject={call}:error=ENOSYS"));
+    let flags = ["-f", "-o", "/dev/null", "-e", trace.as_str(), "-e", inject.as_str()];
+    let note = format!("stave: the kernel has no `{call}` (ENOSYS): programs run from temporary files");
+    let (c, out, err) = stave_env(&d, &tmpdir, Some(&flags), &["run", &run_prog("hello"), "--", "a"]);
+    assert_eq!((c, out.as_str()), (0, "hello\n"), "{call}: {err}");
+    assert_eq!(err.matches(&note).count(), 1, "{call}: {err}");
+    let (c, _, err) = stave_env(&d, &tmpdir, Some(&flags), &["run", &run_prog("exit_code.stv")]);
+    assert_eq!(c, 7, "{call}: {err}");
+    let (c, out, err) = stave_env(&d, &tmpdir, Some(&flags), &["test", &run_prog("test_fn")]);
+    assert_eq!(c, 0, "{call}: {out}{err}");
+    assert!(out.ends_with("test fns: 3 passed, 0 failed, 0 not run\n"), "{call}: {out}");
+    assert_eq!(err.matches(&note).count(), 1, "{call}: {err}");
+    assert_eq!(std::fs::read_dir(&tmpdir).unwrap().count(), 0, "{call}: temporary files left");
     let flags =
         ["-f", "-o", "/dev/null", "-e", "trace=memfd_create", "-e", "inject=memfd_create:error=EACCES"];
     let (c, out, err) = stave_env(&d, &tmpdir, Some(&flags), &["run", &run_prog("hello")]);

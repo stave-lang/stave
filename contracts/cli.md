@@ -50,11 +50,11 @@ Outputs and statuses of the code-generating commands:
   exits 0; their summary line is `test fns: P passed, F failed, N not run`.
 - In-memory execution (`stave run`, `stave test`, on x86-64 and AArch64 Linux): the ELF image is
   held in an anonymous memory file (`memfd_create`, close-on-exec) and a child process starts it
-  with `execveat(fd, "", argv, envp, AT_EMPTY_PATH)`; `argv[0]` is the program's name. With
-  `--runner CMD` the child runs `CMD /dev/fd/N`, and only that child keeps descriptor `N` across
-  its exec. Stdio, working directory, environment, and exit status are those of a run from a
-  file. If the kernel lacks `memfd_create` or `execveat` (ENOSYS, no other error), the programs
-  of that `stave` process run from files in a fresh private temporary directory instead, and one
+  as `/proc/self/fd/N`; `argv[0]` is the program's name. With `--runner CMD` the child runs
+  `CMD /dev/fd/N`, and only that child keeps descriptor `N` across its exec. Stdio, working
+  directory, environment, and exit status are those of a run from a file. If the kernel lacks
+  `memfd_create` (ENOSYS, no other error) or the system has no `/proc/self/fd`, the programs of
+  that `stave` process run from files in a fresh private temporary directory instead, and one
   line on stderr says so.
 
 - `stave unsafe-report [PKG_DIR] [--json]`: checks the program
@@ -180,7 +180,8 @@ Common flags come after the subcommand (`stave build --release`, not `stave --re
 `compiled on GPU (stage1, NVIDIA RTX A6000) in 412 ms`, `compiled on CPU (--compiler cpu)`, or
 `compiled on CPU (no usable GPU: <reason>)`; for steps 1 and 1a the reason stands alone,
 `compiled on CPU (target aarch64-linux not supported by stage1)`. It is never part of a compared
-dump.
+dump. `stave run` of a file whose first line is a shebang line prints no summary line: the stderr
+of a script holds only diagnostics and what the program writes.
 
 **Shipped library**: the built-in packages `std` and `runtime` are read from a *library
 directory* `D` (`D/std/`, holding `core.stv`, and `D/runtime/`). The compiler uses the first of:
