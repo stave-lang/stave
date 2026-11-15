@@ -130,9 +130,9 @@ impl Stage {
     /// | Stage | Codes |
     /// |---|---|
     /// | read | E1002 (manifests), E1003 (unreadable source) |
-    /// | lex | E0001 E0002 E0003 E0006 E0015 E0017 E0018 |
+    /// | lex | E0001 E0002 E0003 E0006 E0015 E0017 E0018 E0024 E0029 |
     /// | items | E0016 |
-    /// | parse | E0004 E0011–E0014 |
+    /// | parse | E0004 E0011–E0014 E0019–E0023 E0025–E0028 |
     /// | resolve | E0101–E0107 |
     /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0702–E0717, E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck); the signature's `from` clause E0520 E0521; E0503 case `static` (writes to a `static`) |
     /// | borrowck | E05xx except E0520 E0521 (accesses, loans, returned origins) |
@@ -140,13 +140,18 @@ impl Stage {
     /// | (none) | retired codes: E0511 |
     pub fn of_code(code: &str) -> Option<Stage> {
         match code {
-            "E0001" | "E0002" | "E0003" | "E0006" | "E0015" | "E0017" | "E0018" => return Some(Stage::Lex),
+            "E0001" | "E0002" | "E0003" | "E0006" | "E0015" | "E0017" | "E0018" | "E0024" | "E0029" => {
+                return Some(Stage::Lex);
+            }
             "E0016" => return Some(Stage::Items),
             // The bracket-depth case comes from the item cut, case `expr` from typeck: the set
             // is final after typeck.
             "E0005" => return Some(Stage::Typeck),
             // E0004 also comes from the item cut (pre-item run, late import): both are front end.
             "E0004" | "E0011" | "E0012" | "E0013" | "E0014" => return Some(Stage::Parse),
+            "E0019" | "E0020" | "E0021" | "E0022" | "E0023" | "E0025" | "E0026" | "E0027" | "E0028" => {
+                return Some(Stage::Parse);
+            }
             "E1002" | "E1003" => return Some(Stage::Read),
             // a build without `main` (stave build/run/test only; reported before lowering)
             "E0108" => return Some(Stage::Lower),
@@ -565,6 +570,8 @@ mod tests {
         let of = |c| Stage::of_code(c);
         assert_eq!(of("E0016"), Some(Stage::Items));
         assert_eq!(of("E0004"), Some(Stage::Parse));
+        assert_eq!(of("E0021"), Some(Stage::Parse));
+        assert_eq!(of("E0024"), Some(Stage::Lex));
         assert_eq!(of("E1002"), Some(Stage::Read));
         assert_eq!(of("E0101"), Some(Stage::Resolve));
         assert_eq!(of("E0107"), Some(Stage::Resolve));

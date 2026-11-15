@@ -7,12 +7,12 @@ Read whole file before writing Stave. Assume Rust **only** where this file is si
 
 | Rust | Stave | Note | Why |
 |---|---|---|---|
-| `x` tail expr returns | `return x;` | Blocks are statements, never values. Non-unit fns: missing return on a path = E0207. Unit fns may fall off the end | blocks are not values; one way to return |
+| `x` tail expr returns | `return x;` | Blocks are statements, never values (E0021). Non-unit fns: missing return on a path = E0207. Unit fns may fall off the end | blocks are not values; one way to return |
 | `let v = if c { a } else { b };` | `let v = if c then a else b;` | Value-if: `then`/`else`, no braces. Chains: `if a then 1 else if b then 2 else 3` | blocks are not values |
 | `match` as value | `match x { P => e, P2 => e2 }` | Value arms: expressions, comma-separated | blocks are not values |
 | `match` as statement | `match x { P => { ... } P2 => { ... } }` | Statement arms: blocks, **no commas** | one spelling per construct |
 | `Some(x)`, `None`, `Ok(v)` | `Option.Some(x)`, `Option.None`, `Result.Ok(v)`, `Result.Err(e)` | Variants **always qualified** (E0103), in patterns too | a bare pattern name is always a binding |
-| `a::b::C`, `use a::b;` | `a.b.C`, `import a.b;` / `import a.b as c;` | `.` is the only path separator. `import a.b;` binds `b`; `as c` binds `c`. `::` only before generic args: `f::<T>()`, `v.m::<4>()`. First segment: own package name, else a dependency, else a module of this package; dependency and module both named `x` = E0107 (write `import mypkg.x;`) | one separator; parse with no symbol table (grammar rule D4) |
+| `a::b::C`, `use a::b;` | `a.b.C`, `import a.b;` / `import a.b as c;` | `.` is the only path separator (`a::b` = E0023). `import a.b;` binds `b`; `as c` binds `c`. `::` only before generic args: `f::<T>()`, `v.m::<4>()`. First segment: own package name, else a dependency, else a module of this package; dependency and module both named `x` = E0107 (write `import mypkg.x;`) | one separator; parse with no symbol table (grammar rule D4) |
 | `pub use`, `geo::shapes` via `use geo` | none | No re-exports: `import geo;` gives `geo`'s items only, not `geo.shapes`: `import geo.shapes;` | one path per item |
 | prelude `Vec`, `String`, `drop` | `import std.vec;` → `vec.Vec::<u8>.new()`; `import std.string;` → `string.String` | Prelude = `pub` items of `std.core` (`Option Result Copy Send Sync Drop Display Write`, operator traits) + built-in type names | small, explicit prelude |
 | `mod`, `use {..}`, `crate::` | none | Module = file. `src/a/b.stv` is `a.b`; `src/a.stv` and `src/a/` may coexist. Imports acyclic (E0102) | file tree is the module tree |
@@ -26,7 +26,7 @@ Read whole file before writing Stave. Assume Rust **only** where this file is si
 | `+` wraps in release | `+ - *` **trap** on overflow, every build | Wrapping/saturating forms: see list below table. `/` by 0, `MIN / -1`, `MIN % -1` trap. `255u8 + 1` compiles and traps at run time (no folding outside `const`) | debug = release; no silent wrap |
 | `x << 40` on u32 | traps (const amount: E0205) | Amount has the left operand's type (`x << 3`: `3` is u32). `<<%` masks amount by bits-1. `>>` arithmetic if signed, logical if unsigned | CPUs disagree on big shifts; trap is portable |
 | `!x` on int | `~x` | `~` = bitwise NOT. `!` = bool NOT | `!` is bool-only: no truthiness |
-| `'a` lifetimes | none | References are second-class (see §3) | borrow check per function, no lifetime solver |
+| `'a` lifetimes | none (E0024) | References are second-class (see §3) | borrow check per function, no lifetime solver |
 | `static mut X: T` | `static X: T = e;`, `const X: T = e;` | A `static` is one immutable global shared by all threads: reads and `&X` are safe, assignment, `&mut X`, and `&mut self` calls are E0503. T must be `Sync` (E0417): plain data, `atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>` (changed through `&self` methods). `e` is a const-expr; no ref/view types (E0413) except `&str` literals (a `&str` static checks but does not build yet: use `const`). `static mut` = E0809 (std/runtime only) | shared globals must be Sync |
 | `-> !`, `loop {}` as a value | `-> never` | `never` is a built-in type name, only after `->` (E0209). A call to a `-> never` fn ends the path (no `return` needed after it, E0207); a `-> never` fn must end every path in such a call or a `loop` without `break` | `!` stays bool-only |
 | `impl Drop`, `drop(x)`, `x.drop()` | `impl Drop for S { fn drop(&mut self) { .. } }`; `mem.drop(x)` (`import std.mem;`) | Runs at scope end (reverse declaration order) and when an initialized place is overwritten (`x = v`, `*p = v`). `x.drop()` = E0909. `impl Drop` on a Copy type = E0416 | destruction is never written by hand |
@@ -34,12 +34,12 @@ Read whole file before writing Stave. Assume Rust **only** where this file is si
 | `std::mem::size_of::<T>()` | `size_of::<T>()`, `align_of::<T>()` | Built-in, no import; const-evaluable (`const N: usize = size_of::<u64>();`) | layout queries without a module |
 | `-> &T` | `-> &T from x` | Returning a borrow of a param **must** name it (E0510); no `from` = result borrows nothing (literals, fn items) | names the origin without lifetime params |
 | `unsafe { }` | `unsafe("why this is sound") { }` | Obligation string mandatory (E0013). Also `unsafe("..") expr`, `unsafe("..") fn`, `unsafe("..") trait`, `unsafe("..") impl` | every obligation is written and inventoried |
-| `where T: X` | `<T: X + Y>` | Bounds inline only | one spelling per construct |
+| `where T: X` | `<T: X + Y>` | Bounds inline only (E0022) | one spelling per construct |
 | closure syntax | `fn(x: i32) -> i32 { return x + 1; }` | Closures: explicit param types, captures by ref only (`&mut` if the body mutates it), no copy/move captures. Type is the fn type `fn(i32) -> i32`, a view (§3) | no inference; non-escaping needs no heap |
 | `println!`, `vec!`, `format!`, `assert!`, `#[derive]` | none | No macros, no attributes. Output: `io.print(f"n = {n}\n")` | no hidden code; linear compile time |
 | `#[derive(Clone, Copy)]` | `impl Copy for S {}` | Empty impl; every field must be Copy (E0415). Built-in Copy: ints, floats, `bool`, `char`, `&T`, raw pointers, arrays/tuples of Copy. `&mut T` never | no attributes; one spelling |
 | `format!("{}", a + b)` | `f"{name}"`, `f"{p.x}"` | f-strings take **names or field paths only** (E0006); value must impl `Display` (ints, floats; `bool` → `true`/`false`, `char` → the character). An f-string is an owned `String`; passed where `&str` is expected it is borrowed automatically (`&String` → `&str`): `io.print(f"n = {n}\n")`. Keep it: `let s = f"..";`, pass `&s` | lexer stays regular (parallel lexing) |
-| `/* */` | `//` only | No block comments | no nesting state: regular, parallel lexer |
+| `/* */` | `//` only | No block comments (E0029; write `a / *p`, not `a/*p`) | no nesting state: regular, parallel lexer |
 | `0..`, `..n`, `..` | `a..b`, `a..=b` | Both ends required, same type | only two range types, no open ranges |
 | `'label: loop`, `break v` | `loop { }`, `break;`, `continue;` | No labels, no break-with-value | blocks are statements; simpler CFG |
 | default trait methods | none | Trait bodies hold signatures only: `fn f(&self) -> T;` | signatures only: per-function checking |
@@ -56,15 +56,15 @@ Casts and overflow operators (kept out of the table because they contain `|`):
 
 | Rust form | Stave |
 |---|---|
-| `if let`, `while let`, `let … else` | `match` (statement or value form) |
+| `if let`, `while let` (E0019), `let … else` (E0020) | `match` (statement or value form) |
 | `let x;` (no initializer) | `let x: T = e;` (initializer required) |
 | `ref x`, `&x` patterns, slice patterns `[a, b]` | bind by value, then borrow; index the slice |
-| tuple structs `S(i32)`, unit structs `S;` | `struct S { v: i32 }`, `struct S {}` |
-| `mut x: T` params | `x: T` then `let mut y = x;` |
+| tuple structs `S(i32)`, unit structs `S;` (E0026) | `struct S { v: i32 }`, `struct S {}` |
+| `mut x: T` params (E0025) | `x: T` then `let mut y = x;` |
 | supertraits `trait A: B`, associated types/consts | separate bounds `<T: A + B>`; generic params; top-level `const` |
 | nested `fn` items | top-level `fn` |
-| `!` (never type), `impl Trait for !` | `-> never` (return position only) |
-| `dyn Trait`, `impl Trait` | generics `<T: Trait>`, or fn types |
+| `!` (never type, E0027), `impl Trait for !` | `-> never` (return position only) |
+| `dyn Trait`, `impl Trait` (E0028) | generics `<T: Trait>`, or fn types |
 | `pub(crate)`, struct update `..base`, `A = 1` discriminants | `pub`; write every field; undecided (§8) |
 | `b'a'`, `b".."`, `r".."` | the byte value (`97u8`); `"…"` with `\` escapes |
 | `i128`, `u128` (no such types) | multi-word math on `a.mul_wide(b) -> (hi, lo)` (u32/u64) |

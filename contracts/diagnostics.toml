@@ -221,7 +221,7 @@ fix = { description = "remove it: identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`
 code = "E0019"
 severity = "error"
 area = "lex-parse"
-rule = "`if let` or `while let` (Rust): Stave has no `let` conditions; write a `match` (planned)"
+rule = "`if let` or `while let` (Rust): Stave has no `let` conditions; write a `match`"
 holes = { kw = "text-literal" }
 choices = { kw = ["if", "while"] }
 message = "`{kw} let` is not Stave: use `match`"
@@ -232,7 +232,7 @@ fix = { description = "write `match e {{ P => {{ .. }} _ => {{ }} }}` (`while le
 code = "E0020"
 severity = "error"
 area = "lex-parse"
-rule = "`let P = e else { .. };` (Rust `let … else`): write a `match` (planned)"
+rule = "`let P = e else { .. };` (Rust `let … else`): write a `match`"
 message = "`let … else` is not Stave: use `match`"
 labels = [{ at = "primary", text = "`else` after a `let` initializer" }]
 fix = { description = "write `let x = match e {{ P(x) => x, _ => {{ .. }} }};` as a `match` statement whose other arm leaves the function" }
@@ -241,7 +241,7 @@ fix = { description = "write `let x = match e {{ P(x) => x, _ => {{ .. }} }};` a
 code = "E0021"
 severity = "error"
 area = "lex-parse"
-rule = "expression without `;` before `}` (a Rust tail expression): blocks are not values; return with `return e;` (planned)"
+rule = "expression without `;` before `}` (a Rust tail expression): blocks are not values; return with `return e;`"
 message = "blocks are not values: write `return` and `;`"
 labels = [{ at = "primary", text = "tail expression" }]
 fix = { description = "write `return e;` to return the value, or end the statement with `;`" }
@@ -250,7 +250,7 @@ fix = { description = "write `return e;` to return the value, or end the stateme
 code = "E0022"
 severity = "error"
 area = "lex-parse"
-rule = "`where` clause (Rust): bounds are written inline only, `<T: A + B>` (planned)"
+rule = "`where` clause (Rust): bounds are written inline only, `<T: A + B>`"
 message = "`where` clauses are not Stave: write the bounds inline"
 labels = [{ at = "primary", text = "`where` here" }]
 fix = { description = "move each bound into the generic parameter list: `fn f<T: A + B>(..)`" }
@@ -259,7 +259,7 @@ fix = { description = "move each bound into the generic parameter list: `fn f<T:
 code = "E0023"
 severity = "error"
 area = "lex-parse"
-rule = "`::` as a path separator (Rust `a::b`): `.` is the only path separator; `::` only before generic args (planned)"
+rule = "`::` as a path separator (Rust `a::b`): `.` is the only path separator; `::` only before generic args"
 message = "`::` is not a path separator: write `.`"
 labels = [{ at = "primary", text = "`::` in a path" }]
 fix = { description = "replace `::` with `.`", edits = [{ at = "primary", replacement = "." }] }
@@ -268,7 +268,7 @@ fix = { description = "replace `::` with `.`", edits = [{ at = "primary", replac
 code = "E0024"
 severity = "error"
 area = "lex-parse"
-rule = "lifetime `'a` (a `'` followed by an identifier and no closing `'`): Stave has no lifetimes; a lexical error, one per occurrence (planned)"
+rule = "lifetime `'a` (a `'` followed by an identifier and no closing `'`): Stave has no lifetimes; a lexical error, one per occurrence"
 holes = { text = "source" }
 message = "lifetime `{text}` is not Stave: references have no lifetimes"
 labels = [{ at = "primary", text = "lifetime here" }]
@@ -278,7 +278,7 @@ fix = { description = "remove `{text}`; name a returned borrow's origin with `->
 code = "E0025"
 severity = "error"
 area = "lex-parse"
-rule = "`mut x: T` parameter (Rust): params are immutable bindings; rebind with `let mut` in the body (planned)"
+rule = "`mut x: T` parameter (Rust): params are immutable bindings; rebind with `let mut` in the body"
 message = "`mut` parameters are not Stave"
 labels = [{ at = "primary", text = "`mut` before a parameter name" }]
 fix = { description = "remove `mut` and write `let mut y = x;` at the start of the body" }
@@ -287,7 +287,7 @@ fix = { description = "remove `mut` and write `let mut y = x;` at the start of t
 code = "E0026"
 severity = "error"
 area = "lex-parse"
-rule = "tuple struct `struct S(T);` or unit struct `struct S;` (Rust): structs have named fields, `struct S { v: T }`, `struct S {}` (planned)"
+rule = "tuple struct `struct S(T);` or unit struct `struct S;` (Rust): structs have named fields, `struct S { v: T }`, `struct S {}`"
 holes = { name = "name" }
 message = "struct `{name}` needs named fields in `{{ }}`"
 labels = [{ at = "primary", text = "tuple or unit struct" }]
@@ -302,7 +302,7 @@ fix = { description = "replace `;` with `{{}}`", edits = [{ at = "primary", repl
 code = "E0027"
 severity = "error"
 area = "lex-parse"
-rule = "`!` as a type (Rust never type): write `never`, only after `->` (planned)"
+rule = "`!` as a type (Rust never type): write `never`, only after `->`"
 message = "`!` is not a type: write `never`"
 labels = [{ at = "primary", text = "`!` in a type position" }]
 fix = { description = "replace `!` with `never`", edits = [{ at = "primary", replacement = "never" }] }
@@ -311,7 +311,7 @@ fix = { description = "replace `!` with `never`", edits = [{ at = "primary", rep
 code = "E0028"
 severity = "error"
 area = "lex-parse"
-rule = "`dyn Trait` or `impl Trait` in a type position (Rust): use a generic `<T: Trait>` or a fn type (planned)"
+rule = "`dyn Trait` or `impl Trait` in a type position (Rust): use a generic `<T: Trait>` or a fn type"
 holes = { kw = "text-literal" }
 choices = { kw = ["dyn", "impl"] }
 message = "`{kw} Trait` types are not Stave: use a generic parameter"
@@ -322,7 +322,7 @@ fix = { description = "add a generic parameter `<T: Trait>` and write `T`, or us
 code = "E0029"
 severity = "error"
 area = "lex-parse"
-rule = "block comment `/*` (Rust/C): Stave has `//` line comments only; the token `/*` is a lexical error through the end of its line or the first `*/` on it (`a / *p` needs the space) (planned)"
+rule = "block comment `/*` (Rust/C): Stave has `//` line comments only; the token `/*` is a lexical error through the end of its line or the first `*/` on it (`a / *p` needs the space)"
 message = "block comments are not Stave: use `//`"
 labels = [{ at = "primary", text = "`/*` here" }]
 fix = { description = "start each comment line with `//`" }

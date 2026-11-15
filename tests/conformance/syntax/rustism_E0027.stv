@@ -1,0 +1,21 @@
+//~ PARSE-ONLY
+// E0027: Rust's never type `!`. Write `never`, only after `->`.
+fn halt() -> ! { //~ ERROR E0027
+    loop { }
+}
+
+fn param(f: fn() -> !) { } //~ ERROR E0027
+
+fn local() {
+    let x: ! = halt(); //~ ERROR E0027
+}
+
+struct S { f: ! } //~ ERROR E0027
+
+fn stave_form() -> never {
+    loop { }
+}
+
+fn not(b: bool) -> bool {
+    return !b;
+}

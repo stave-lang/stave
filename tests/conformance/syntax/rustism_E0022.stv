@@ -1,0 +1,28 @@
+//~ PARSE-ONLY
+// E0022: a Rust `where` clause. Bounds are written inline: `<T: A + B>`.
+fn max<T>(a: T, b: T) -> T where T: Less + Copy { //~ ERROR E0022
+    return a;
+}
+
+struct Wrap<T> where T: Copy { v: T } //~ ERROR E0022
+
+impl<T> Wrap<T> where T: Copy { //~ ERROR E0022
+    fn get(&self) -> T { return self.v; }
+}
+
+trait Shape<T> where T: Copy { fn area(&self) -> T; } //~ ERROR E0022
+
+// `where` is not a keyword: inside a body it is an ordinary name
+fn local() -> u32 {
+    let where: u32 = 1;
+    return where;
+}
+
+fn body_error() -> u32 {
+    let x = 1 where; //~ ERROR E0004
+    return x;
+}
+
+fn stave_form<T: Less + Copy>(a: T, b: T) -> T {
+    return a;
+}

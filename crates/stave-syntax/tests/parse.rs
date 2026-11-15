@@ -213,7 +213,7 @@ fn e0016_locations() {
     assert_eq!(one_at("fn f() { if a { let s = S.{ b: 1 "), ("E0016", ".{".into()));
     assert_eq!(one("fn f() { if a { let s = S.{ b: 1 ").message(), ".{ is never closed");
     // exactly one E0016 and no E0004; lexical diagnostics still reported
-    let pf = parse_file(b"fn f() { let = ; let s = f\"{1}\"; let c = 'x\n}}\nfn g() { let", F);
+    let pf = parse_file(b"fn f() { let = ; let s = f\"{1}\"; let c = '+\n}}\nfn g() { let", F);
     let mut c: Vec<&str> = pf.diagnostics.iter().map(|d| d.code()).collect();
     c.sort();
     assert_eq!(c, vec!["E0006", "E0015", "E0016"]);

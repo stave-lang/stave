@@ -1,0 +1,26 @@
+//~ PARSE-ONLY
+// E0020: Rust `let P = e else { .. };`. Write a `match` whose other arm leaves the function.
+fn head(o: Option<u32>) -> u32 {
+    let Option.Some(x) = o else { return 0; }; //~ ERROR E0020
+    return x;
+}
+
+fn typed(o: Option<u32>) -> u32 {
+    let Option.Some(x): Option<u32> = o else { //~ ERROR E0020
+        return 0;
+    };
+    return x;
+}
+
+// `else` after other statements stays E0004
+fn not_a_let(o: u32) -> u32 {
+    return o else { 1 }; //~ ERROR E0004
+}
+
+fn stave_form(o: Option<u32>) -> u32 {
+    let x = match o {
+        Option.Some(x) => x,
+        Option.None => 0,
+    };
+    return x;
+}

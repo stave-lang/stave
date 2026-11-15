@@ -1,0 +1,41 @@
+//~ PARSE-ONLY
+// E0025: Rust `mut x: T` parameters. Params are immutable bindings: rebind in the body.
+fn first(mut n: u32) -> u32 { //~ ERROR E0025
+    n = n + 1;
+    return n;
+}
+
+fn second(a: u32, mut b: u32) -> u32 { //~ ERROR E0025
+    b = b + a;
+    return b;
+}
+
+struct S { v: u32 }
+
+impl S {
+    fn take(mut self) -> u32 { //~ ERROR E0025
+        return self.v;
+    }
+}
+
+impl S {
+    fn set(&mut self, mut v: u32) { //~ ERROR E0025
+        self.v = v;
+    }
+}
+
+trait Sink { fn put(&mut self, mut v: u32); } //~ ERROR E0025
+
+fn closure() -> u32 {
+    let f = fn(mut x: u32) -> u32 { return x; }; //~ ERROR E0025
+    return f(1);
+}
+
+// `mut` in patterns is Stave
+fn stave_form(n: u32, t: (u32, u32)) -> u32 {
+    let mut m = n;
+    let (mut a, b) = t;
+    m = m + 1;
+    a = a + b;
+    return m + a;
+}

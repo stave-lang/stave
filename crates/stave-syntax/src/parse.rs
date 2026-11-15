@@ -13,11 +13,12 @@
 //! leaves the rest (`>` / `=` / `>=`, or `&`) as the lookahead.
 //!
 //! **Errors.** Each item reports only its first error and is then dropped. The code is
-//! refined per contracts/parse-errors.md (E0013, E0011, E0014, E0012, in that order), otherwise
-//! E0004. The E0004 expected set is the set of terminals with an action in the failing state: the
-//! terminal on top of the stack, or every terminal with a table entry in the top nonterminal's
-//! row, listed in table terminal order. At the virtual `EOF` the reported (found) token
-//! is the real token after the item (the next item's first token, or `EOF`).
+//! refined per contracts/parse-errors.md (E0013, E0011, E0014, E0012, then the Rust forms
+//! E0019–E0023 and E0025–E0028, in that order), otherwise E0004. The E0004 expected set is the
+//! set of terminals with an action in the failing state: the terminal on top of the stack, or
+//! every terminal with a table entry in the top nonterminal's row, listed in table terminal
+//! order. At the virtual `EOF` the reported (found) token is the real token after the item (the
+//! next item's first token, or `EOF`).
 //!
 //! **AST.** Each named-rule expansion opens a node at the current token and closes it when its
 //! right-hand side is done (a close marker under the pushed symbols), which yields postorder
@@ -328,6 +329,8 @@ pub(crate) struct Fail {
     d2_lt: Option<u32>,
     /// The innermost open named node.
     open_kind: Option<u8>,
+    /// Its first token.
+    open_tok: Option<u32>,
 }
 
 #[inline(always)]
@@ -474,7 +477,15 @@ fn push_flagged(t: &Tables, e: u32, p: usize, nt: usize, rhs: &[u32], i: usize, 
 
 #[cold]
 fn fail(top: u32, la: usize, la_kind: u16, shift: u32, s: &Scratch) -> Fail {
-    Fail { top, la, la_kind, shift, d2_lt: s.d2.last().copied(), open_kind: s.open.last().map(|o| o.0) }
+    Fail {
+        top,
+        la,
+        la_kind,
+        shift,
+        d2_lt: s.d2.last().copied(),
+        open_kind: s.open.last().map(|o| o.0),
+        open_tok: s.open.last().map(|o| o.1),
+    }
 }
 
 /// Terminals with an entry in nonterminal `nt`'s row, in terminal order.
@@ -582,6 +593,12 @@ fn error_diag(
     {
         return make_diag("E0012", None, &[], tok_span(src, toks, file, li, f.shift), &[]);
     }
+    // 5–13: Rust forms.
+    if f.shift == 0
+        && let Some(d) = rust_form(src, toks, file, begin, end, f)
+    {
+        return Some(d);
+    }
     // E0004.
     let expected = match (top_term, top_nt) {
         (Some(tt), _) => vec![tt],
@@ -594,6 +611,124 @@ fn error_diag(
         toks.get(li).map_or("EOF", |t| kind_name(t.kind))
     };
     e0004(src, toks, file, li, f.shift, found, &expected)
+}
+
+/// Rules 5–13 of contracts/parse-errors.md: the Rust forms with their own codes.
+fn rust_form(
+    src: &[u8],
+    toks: &[Token],
+    file: FileId,
+    begin: usize,
+    end: usize,
+    f: &Fail,
+) -> Option<Diagnostic> {
+    let sym = f.top & SYM_MASK;
+    let top_term = (sym & NT_BIT == 0).then_some(sym as u16);
+    // the origin rule of the nonterminal on top / of the rule that pushed the terminal on top
+    let origin = |nt: u32| lt::NT_ORIGIN.get(nt as usize).copied();
+    let top_origin = if sym & NT_BIT != 0 { origin(sym & !NT_BIT) } else { None };
+    let term_origin = if sym & NT_BIT == 0 { origin((f.top >> PROD_SHIFT) & PROD_MASK) } else { None };
+    let of = |o: Option<u16>, k: NodeKind| o == Some(k.nt());
+    let li = f.la;
+    let la = f.la_kind;
+    let kind = |j: usize| -> Option<u8> { (j >= begin && j < end).then(|| toks[j].kind) };
+    let is = |j: Option<usize>, t: Term| j.and_then(kind) == Some(t as u8);
+    let back = |k: usize| li.checked_sub(k);
+    let word = |j: Option<usize>, w: &[u8]| {
+        is(j, Term::Ident) && j.is_some_and(|j| crate::lex::token_text(src, toks, j) == w)
+    };
+    let at = |j: usize| tok_span(src, toks, file, j, 0);
+    // 5. E0019: `if let` / `while let`.
+    if la == Term::KwLet as u16 {
+        for (t, kw) in [(Term::KwIf, "if"), (Term::KwWhile, "while")] {
+            if is(back(1), t) {
+                return make_diag("E0019", None, &[("kw", kw)], at(li - 1), &[]);
+            }
+        }
+    }
+    // 6. E0020: `let P = e else`.
+    if la == Term::KwElse as u16
+        && top_term == Some(Term::Semi as u16)
+        && of(term_origin, NodeKind::Stmt)
+        && is(f.open_tok.map(|t| t as usize), Term::KwLet)
+    {
+        return make_diag("E0020", None, &[], at(li), &[]);
+    }
+    // 7. E0021: an expression statement with no AssignOp and no `;` before `}`.
+    if la == Term::RBrace as u16
+        && of(top_origin, NodeKind::ExprStmt)
+        && let Some(first) = f.open_tok
+    {
+        return make_diag("E0021", None, &[], at(first as usize), &[]);
+    }
+    // 8. E0022: `where` in the item header (before the item's first depth-0 `{`).
+    if word(Some(li), b"where") {
+        let mut depth = 0i32;
+        let mut header = true;
+        for t in &toks[begin..li] {
+            match t.term() {
+                Some(Term::LBrace) if depth == 0 => {
+                    header = false;
+                    break;
+                }
+                Some(Term::LParen | Term::LBracket | Term::LBrace | Term::DotLBrace) => depth += 1,
+                Some(Term::RParen | Term::RBracket | Term::RBrace) => depth -= 1,
+                _ => {}
+            }
+        }
+        if header {
+            return make_diag("E0022", None, &[], at(li), &[]);
+        }
+    }
+    // 9. E0023: `::` not before generic args.
+    if is(back(1), Term::ColonColon) && la != Term::Lt as u16 {
+        return make_diag("E0023", None, &[], at(li - 1), &[]);
+    }
+    if la == Term::ColonColon as u16 && !is(Some(li + 1), Term::Lt) {
+        return make_diag("E0023", None, &[], at(li), &[]);
+    }
+    // 10. E0025: `mut` before a parameter.
+    if la == Term::KwMut as u16 && (is(Some(li + 1), Term::Ident) || is(Some(li + 1), Term::KwSelf)) {
+        let list = [
+            NodeKind::Param,
+            NodeKind::Params,
+            NodeKind::XParams,
+            NodeKind::FnDecl,
+            NodeKind::TraitFn,
+            NodeKind::KernelDecl,
+            NodeKind::DispatchDecl,
+            NodeKind::ExternItem,
+            NodeKind::ExternFn,
+        ];
+        let closure =
+            of(top_origin, NodeKind::Primary) && is(back(1), Term::LParen) && is(back(2), Term::KwFn);
+        if closure || list.iter().any(|&k| of(top_origin, k)) {
+            return make_diag("E0025", None, &[], at(li), &[]);
+        }
+    }
+    // 11. E0026: tuple struct / unit struct.
+    if (la == Term::LParen as u16 || la == Term::Semi as u16)
+        && is(back(1), Term::Ident)
+        && is(back(2), Term::KwStruct)
+        && of(top_origin, NodeKind::AdtDecl)
+    {
+        let name = String::from_utf8_lossy(crate::lex::token_text(src, toks, li - 1)).into_owned();
+        let case = (la == Term::Semi as u16).then_some("unit");
+        return make_diag("E0026", case, &[("name", &name)], at(li), &[]);
+    }
+    let in_type = of(top_origin, NodeKind::Type) || of(top_origin, NodeKind::TypeBase);
+    // 12. E0027: `!` as a type.
+    if la == Term::Bang as u16 && (in_type || of(top_origin, NodeKind::RetClause)) {
+        return make_diag("E0027", None, &[], at(li), &[]);
+    }
+    // 13. E0028: `impl Trait` / `dyn Trait`.
+    if la == Term::KwImpl as u16 && in_type {
+        return make_diag("E0028", None, &[("kw", "impl")], at(li), &[]);
+    }
+    if la == Term::Ident as u16 && word(back(1), b"dyn") {
+        return make_diag("E0028", None, &[("kw", "dyn")], at(li - 1), &[]);
+    }
+    None
 }
 
 /// Source text of the dotted name chain `Ident ('.' Ident)*` ending at token `last`.

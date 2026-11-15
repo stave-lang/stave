@@ -50,17 +50,17 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0016 | unbalanced brackets: unmatched closer, or closer of another kind (at the first such closer), else the innermost opener unclosed at end of file. One per file; no other parse diagnostics for the file |
 | E0017 | byte-order mark at file start. Remove it (UTF-8 without BOM) |
 | E0018 | unexpected character: a byte that starts no token (`@ $ \ #`, backtick, a control byte other than tab/LF/CR, DEL) or any non-ASCII byte outside string, char, and f-string literals and comments (identifiers are ASCII). One per run of consecutive such bytes, at its start; the item is dropped without E0004 |
-| E0019 | `if let` / `while let` (Rust): write a `match` (statement or value form). Parse rule 5 (parse-errors.md). Planned |
-| E0020 | `let P = e else { .. };` (Rust `let … else`): write a `match`. Parse rule 6. Planned |
-| E0021 | expression without `;` directly before `}` (Rust tail expression, no assignment): blocks are not values; write `return e;`, or end it with `;`. Parse rule 7. Planned |
-| E0022 | `where` clause (Rust): bounds go inline, `<T: A + B>`. Parse rule 8. Planned |
-| E0023 | `::` as a path separator (`a::b`, `Vec::new()`, `Option::Some`): write `.`; `::` only before generic args. Exact fix. Parse rule 9. Planned |
-| E0024 | lifetime `'a`: a `'` followed by an identifier with no closing `'` is one lexical error token (like E0018, no E0004); Stave has no lifetimes. Planned |
-| E0025 | `mut x: T` parameter (Rust): params are immutable; write `x: T` and `let mut y = x;`. Parse rule 10. Planned |
-| E0026 | tuple struct `struct S(T);` or (case `unit`) unit struct `struct S;`: structs have named fields, `struct S { v: T }`, `struct S {}`. Parse rule 11. Planned |
-| E0027 | `!` as a type (Rust never type): write `never` (only after `->`). Exact fix after `->`. Parse rule 12. Planned |
-| E0028 | `dyn Trait` / `impl Trait` in a type position: use a generic `<T: Trait>` or a fn type. Parse rule 13. Planned |
-| E0029 | block comment: the token `/*` is a lexical error through the first `*/` on its line or the end of the line (newlines stay lexer restart points; `a/*p` must be written `a / *p`); write `//`. Planned |
+| E0019 | `if let` / `while let` (Rust): write a `match` (statement or value form). Parse rule 5 (parse-errors.md) |
+| E0020 | `let P = e else { .. };` (Rust `let … else`): write a `match`. Parse rule 6 |
+| E0021 | expression statement without `;` directly before `}` (Rust tail expression, no assignment): blocks are not values; write `return e;`, or end it with `;`. Parse rule 7 |
+| E0022 | `where` clause (Rust): bounds go inline, `<T: A + B>`. Parse rule 8 |
+| E0023 | `::` as a path separator (`a::b`, `Vec::new()`, `Option::Some`): write `.`; `::` only before generic args. Exact fix. Parse rule 9 |
+| E0024 | lifetime `'a`: a `'` followed by an identifier with no closing `'` is one lexical error token (like E0018, no E0004); Stave has no lifetimes |
+| E0025 | `mut x: T` parameter (Rust): params are immutable; write `x: T` and `let mut y = x;`. Parse rule 10 |
+| E0026 | tuple struct `struct S(T);` or (case `unit`) unit struct `struct S;`: structs have named fields, `struct S { v: T }`, `struct S {}`. Parse rule 11 |
+| E0027 | `!` as a type (Rust never type): write `never` (only after `->`). Exact fix after `->`. Parse rule 12 |
+| E0028 | `dyn Trait` / `impl Trait` in a type position: use a generic `<T: Trait>` or a fn type. Parse rule 13 |
+| E0029 | block comment: the token `/*` is a lexical error through the first `*/` on its line or the end of the line (newlines stay lexer restart points; `a/*p` must be written `a / *p`); write `//` |
 | E0101 | unresolved name |
 | E0102 | import cycle. One per strongly connected component; the cycle is listed starting at its lexicographically smallest module path, following import order |
 | E0103 | unqualified enum variant in a pattern or expression |

@@ -1,0 +1,29 @@
+//~ PARSE-ONLY
+// E0024: Rust lifetimes. A `'` followed by an identifier with no closing `'` is a lexical
+// error, one per occurrence; char literals are unaffected.
+fn longest<'a>(a: &'a str, b: &'a str) -> &'a str {
+//~^ ERROR E0024
+//~^^ ERROR E0024
+//~^^^ ERROR E0024
+//~^^^^ ERROR E0024
+    return a;
+}
+
+struct Lexer<'src> { src: &'src str }
+//~^ ERROR E0024
+//~^^ ERROR E0024
+
+const NAME: &'static str = "x";
+//~^ ERROR E0024
+
+fn chars() -> char {
+    let a = 'a';
+    let n = '\n';
+    let q = '\'';
+    let u = '_';
+    return a;
+}
+
+fn stave_form(a: &str, b: &str) -> &str from a + b {
+    return a;
+}

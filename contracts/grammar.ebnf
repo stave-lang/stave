@@ -47,7 +47,10 @@ FmtLit       = 'f"' (StrChar | "{" (Ident | "self") ("." Ident)* "}")* '"' ;
                (* names/fields only, no exprs. The head may be `self`: f"{self.x}". Tuple
                   steps (`.0`) are excluded: bind to a local first *)
 CharLit      = "'" Char "'" ;
-LineComment  = "//" ~"\n"* ;                           (* no block comments: no nesting state *)
+LineComment  = "//" ~"\n"* ;                           (* no block comments: no nesting state. `/*` is an error
+                                                         token through the first `*/` on its line, else the
+                                                         end of the line (E0029) *)
+               (* `'` Ident with no `'` directly after it (a Rust lifetime) is an error token (E0024) *)
                (* a UTF-8 byte-order mark at file start is E0017 *)
 Keywords     = "fn" "let" "mut" "const" "struct" "enum" "trait" "impl" "for" "in" "while" "loop"
                "if" "then" "else" "match" "return" "break" "continue" "pub" "import" "as" "from"
