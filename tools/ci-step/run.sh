@@ -18,9 +18,11 @@ case "$step" in
   test)    cargo test --locked --workspace "$@" ;;
   gen-check)
            cargo run -q --locked -p ll1gen -- --check
-           cargo run -q --locked -p diaggen -- --check ;;
+           cargo run -q --locked -p diaggen -- --check
+           cargo run -q --locked -p gen-tables -- --check ;;
   gen)     cargo run -q --locked -p ll1gen
-           cargo run -q --locked -p diaggen ;;
+           cargo run -q --locked -p diaggen
+           cargo run -q --locked -p gen-tables ;;
   check)   "$0" fmt; "$0" stave-fmt; "$0" clippy; "$0" test; "$0" gen-check ;;
   unsafe-diff) sh tools/ci-step/unsafe-diff.sh ;;
   bench)   sh bench/run.sh "$@" ;;

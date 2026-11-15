@@ -6,7 +6,8 @@ PTX for NVIDIA GPUs is designed. Goal: whole programs and the compiler itself ru
 - Stave is new: read `LANG.md` before writing Stave code. Don't guess syntax from Rust.
 - `crates/`: stage0 compiler (Rust). `std/`, `runtime/`: Stave sources linked into every program.
 - `contracts/`: the one copy of machine-read contracts (grammar, diagnostic registry, formats).
-  `*/generated/` comes from them via `tools/ll1gen` and `tools/diaggen`: run the `gen` step,
+  `*/generated/` comes from them via `tools/ll1gen` and `tools/diaggen` (the SIMD lowering tables
+  from `crates/stave-target/tables/` via `tools/gen-tables`): run the `gen` step,
   never edit generated files by hand.
 - A language change updates `LANG.md`, the grammar, the diagnostic registry, and
   `tests/conformance/` together.

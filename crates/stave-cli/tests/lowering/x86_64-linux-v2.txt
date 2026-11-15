@@ -1,0 +1,275 @@
+# stave lowering --target x86_64-linux-v2: tier v2
+# op, types, class (N native, M multi-instruction, U unavailable), cost (instructions), recipe
+# recipe placeholders: * lane size letter, # lane bits, % float letter, ? s or u
+vec.add                 float                       N    1  addp%
+vec.sub                 float                       N    1  subp%
+vec.mul                 float                       N    1  mulp%
+vec.div                 float                       N    1  divp%
+vec.sqrt                float                       N    1  sqrtp%
+vec.neg                 float                       N    1  xorp%
+vec.abs                 float                       N    1  andp%
+vec.copysign            float                       N    3  andp%; andp%; orp%  | note: magnitude and sign masks, then or: 3 instructions
+vec.floor               float                       N    1  roundp% 9
+vec.ceil                float                       N    1  roundp% 10
+vec.round               float                       N    1  roundp% 8
+vec.trunc               float                       N    1  roundp% 11
+vec.add.wrap            int                         N    1  padd*
+vec.sub.wrap            int                         N    1  psub*
+vec.abs_wrap            i8/i16/i32                  N    1  pabs*
+vec.abs_wrap            i64                         N    2  psubq; blendvpd
+vec.abs_wrap            uint                        N    0  none
+vec.mul.wrap            int16/int32                 N    1  pmull*
+vec.mul.wrap            int8                        M    6  pmullw; psrlw; pand; pmullw; pand; por
+vec.mul.wrap            int64                       M    8  psrlq; pmuludq; psrlq; pmuludq; paddq; psllq; pmuludq; paddq
+vec.add.sat             i8/i16                      N    1  padds*
+vec.add.sat             u8/u16                      N    1  paddus*
+vec.sub.sat             i8/i16                      N    1  psubs*
+vec.sub.sat             u8/u16                      N    1  psubus*
+vec.add.sat             i32                         M    7  paddd; pxor; pxor; pand; psrad; pxor; blendvps
+vec.add.sat             i64                         M    7  paddq; pxor; pxor; pand; pcmpgtq; pxor; blendvpd
+vec.add.sat             u32                         M    3  pxor; pminud; paddd
+vec.add.sat             u64                         M    5  paddq; pxor; pxor; pcmpgtq; por
+vec.sub.sat             i32                         M    7  psubd; pxor; pxor; pand; psrad; pxor; blendvps
+vec.sub.sat             i64                         M    7  psubq; pxor; pxor; pand; pcmpgtq; pxor; blendvpd
+vec.sub.sat             u32                         M    2  pmaxud; psubd
+vec.sub.sat             u64                         M    5  psubq; pxor; pxor; pcmpgtq; pandn
+vec.checked_add         sint                        M    6  padd*; pxor; pxor; pand; ptest; setz
+vec.checked_add         u8/u16/u32                  M    5  padd*; pmaxu*; pxor; ptest; setz
+vec.checked_add         u64                         M    6  paddq; pxor; pxor; pcmpgtq; ptest; setz
+vec.checked_sub         sint                        M    6  psub*; pxor; pxor; pand; ptest; setz
+vec.checked_sub         u8/u16/u32                  M    5  psub*; pmaxu*; pxor; ptest; setz
+vec.checked_sub         u64                         M    6  psubq; pxor; pxor; pcmpgtq; ptest; setz
+vec.checked_mul         i8                          M   14  psrldq x2; pmovsxbw x4; pmullw x2; packsswb; paddw x2; por; ptest; setz
+vec.checked_mul         u8                          M   10  pmovzxbw x2; punpckhbw x2; pmullw x2; packuswb; por; ptest; setz
+vec.checked_mul         i16                         M    6  pmullw; pmulhw; psraw; pxor; ptest; setz
+vec.checked_mul         u16                         M    4  pmullw; pmulhuw; ptest; setz
+vec.checked_mul         i32                         M   11  pmulld; pmuldq; psrlq x3; pmuldq; pblendw; psrad; pxor; ptest; setz
+vec.checked_mul         u32                         M    9  pmulld; pmuludq; psrlq x3; pmuludq; pblendw; ptest; setz
+vec.checked_mul         i64                         M   12  movq x2; pextrq x2; imul x2; seto x2; or; xor; movq; pinsrq
+vec.checked_mul         u64                         M   12  movq x2; pextrq x2; mul x2; seto x2; or; xor; movq; pinsrq
+vec.and                 int                         N    1  pand
+vec.or                  int                         N    1  por
+vec.xor                 int                         N    1  pxor
+vec.not                 int                         N    1  pxor
+vec.andnot              int                         N    1  pandn
+vec.shl                 int16/int32/int64 by const  N    1  psll*
+vec.shl                 int8 by const               M    2  psllw; pand
+vec.shl.wrap            int16/int32/int64 by const  N    1  psll*
+vec.shl.wrap            int8 by const               M    2  psllw; pand
+vec.shr                 u16/u32/u64 by const        N    1  psrl*
+vec.shr                 i16/i32 by const            N    1  psra*
+vec.shr                 i64 by const                N    3  psrlq; pxor; psubq  | note: no psraq below AVX-512: logical shift, then sign extension
+vec.shr                 u8 by const                 M    2  psrlw; pand
+vec.shr                 i8 by const                 M    4  psrlw; pand; pxor; psubb
+vec.shl                 int16 by vector             M    6  psllw; por; pshufb x2; pblendvb; pmullw
+vec.shl                 int32 by vector             M    4  pslld; paddd; cvttps2dq; pmulld
+vec.shl                 int64 by vector             M    4  pshufd; psllq x2; pblendw
+vec.shl.wrap            int16 by vector             M    7  pand; psllw; por; pshufb x2; pblendvb; pmullw
+vec.shl.wrap            int32 by vector             M    5  pand; pslld; paddd; cvttps2dq; pmulld
+vec.shl.wrap            int64 by vector             M    5  pand; pshufd; psllq x2; pblendw
+vec.shr                 u16 by vector               M    8  psllw; por; pshufb x2; pblendvb; pmulhuw; pcmpeqw; pblendvb
+vec.shr                 i16 by vector               M   11  psllw; por; pshufb x2; pblendvb; pmulhuw; pcmpeqw; pblendvb; pmulhuw; pxor; psubw
+vec.shr                 u32 by vector               M   11  pmovzxdq; psrlq; punpckhdq; psrldq; psrld x4; pblendw x3
+vec.shr                 i32 by vector               M   11  pmovzxdq; psrlq; punpckhdq; psrldq; psrad x4; pblendw x3
+vec.shr                 u64 by vector               M    4  pshufd; psrlq x2; pblendw
+vec.shr                 i64 by vector               M    9  pshufd; psrlq x4; pblendw x2; pxor; psubq
+vec.shl                 int8 by vector              M    7  pshufb; pmullw; psrlw; pand; pmullw; pand; por
+vec.shl.wrap            int8 by vector              M    8  pand; pshufb; pmullw; psrlw; pand; pmullw; pand; por
+vec.shr                 u8 by vector                M   12  psllw; psrlw; pand; pblendvb; paddb; psrlw; pand; pblendvb; paddb; psrlw; pand; pblendvb
+vec.shr                 i8 by vector                M   15  psllw; psrlw; pand; pblendvb; paddb; psrlw; pand; pblendvb; paddb; psrlw; pand; pblendvb; pshufb; pxor; psubb
+vec.div_const           u16                         M    5  pmulhuw; psubw; psrlw; paddw; psrlw
+vec.div_const           i16                         M    5  pmulhw; paddw; psraw; psrlw; paddw
+vec.div_const           u32                         M    9  psrlq; pmuludq x2; psrlq; pblendw; psubd; psrld; paddd; psrld
+vec.div_const           i32                         M    9  psrlq; pmuldq x2; psrlq; pblendw; paddd; psrad; psrld; paddd
+vec.div_const           u8                          M    5  punpcklbw; punpckhbw; pmulhuw x2; packuswb
+vec.div_const           i8                          M   11  punpcklbw; punpckhbw; psraw x2; pmulhw x2; psrlw x2; paddw x2; packsswb
+vec.div_const           u64                         M   14  movq; pextrq; mul x2; sub x2; shr x4; add x2; movq; pinsrq
+vec.div_const           i64                         M   14  movq; pextrq; imul x2; add x2; sar x2; shr x2; add x2; movq; pinsrq
+vec.div_lanes           int                         U    -  -
+vec.fma                 float                       U    -  -
+vec.min                 float                       M    6  minp%; minp%; orp%; cmpunordp%; addp%; blendvp%
+vec.max                 float                       M    6  maxp%; maxp%; andp%; cmpunordp%; addp%; blendvp%
+vec.min_num             float                       M    8  cmpunordp% x2; blendvp% x2; minp% x2; orp%; addp%
+vec.max_num             float                       M    8  cmpunordp% x2; blendvp% x2; maxp% x2; andp%; addp%
+vec.min_x86             float                       N    1  minp%
+vec.max_x86             float                       N    1  maxp%
+vec.min                 int8/int16/int32            N    1  pmin?*
+vec.min                 i64                         M    2  pcmpgtq; blendvpd
+vec.min                 u64                         M    4  pxor x2; pcmpgtq; blendvpd
+vec.max                 int8/int16/int32            N    1  pmax?*
+vec.max                 i64                         M    2  pcmpgtq; blendvpd
+vec.max                 u64                         M    4  pxor x2; pcmpgtq; blendvpd
+vec.eq                  int                         N    1  pcmpeq*
+vec.eq                  float                       N    1  cmpeqp%
+vec.ne                  int                         N    2  pcmpeq*; pxor
+vec.ne                  float                       N    1  cmpneqp%
+vec.lt                  sint                        N    1  pcmpgt*
+vec.lt                  float                       N    1  cmpltp%
+vec.lt                  uint                        M    3  pxor x2; pcmpgt*
+vec.gt                  sint                        N    1  pcmpgt*
+vec.gt                  float                       N    1  cmpltp%
+vec.gt                  uint                        M    3  pxor x2; pcmpgt*
+vec.le                  sint                        N    2  pcmpgt*; pxor
+vec.le                  float                       N    1  cmplep%
+vec.le                  u8/u16/u32                  M    2  pminu*; pcmpeq*
+vec.le                  u64                         M    4  pxor x2; pcmpgtq; pxor
+vec.ge                  sint                        N    2  pcmpgt*; pxor
+vec.ge                  float                       N    1  cmplep%
+vec.ge                  u8/u16/u32                  M    2  pmaxu*; pcmpeq*
+vec.ge                  u64                         M    4  pxor x2; pcmpgtq; pxor
+mask.and                mask                        N    1  pand
+mask.or                 mask                        N    1  por
+mask.xor                mask                        N    1  pxor
+mask.not                mask                        N    1  pxor
+mask.rewiden            mask                        M    3  pshufd; packssdw; packsswb  | note: worst case m64 to m8; one pack or pmovsx per width step
+mask.to_bits            m8                          N    1  pmovmskb
+mask.to_bits            m16                         N    2  packsswb; pmovmskb
+mask.to_bits            m32                         N    1  movmskps
+mask.to_bits            m64                         N    1  movmskpd
+mask.select             any                         N    1  pblendvb
+vec.load                any                         N    1  movdqu
+vec.store               any                         N    1  movdqu
+vec.load_aligned        any                         N    1  movdqa
+vec.store_aligned       any                         N    1  movdqa
+vec.load_masked         any32                       M    8  movdqa; movmskps; bsf; mov; mov; btr; jnz; movdqa
+vec.load_masked         any64                       M    8  movdqa; movmskpd; bsf; mov; mov; btr; jnz; movdqa
+vec.store_masked        any32                       M    7  movdqa; movmskps; bsf; mov; mov; btr; jnz
+vec.store_masked        any64                       M    7  movdqa; movmskpd; bsf; mov; mov; btr; jnz
+vec.load_masked         any8                        M    8  movdqa; pmovmskb; bsf; mov; mov; btr; jnz; movdqa
+vec.load_masked         any16                       M    9  movdqa; packsswb; pmovmskb; bsf; mov; mov; btr; jnz; movdqa
+vec.store_masked        any8                        M    7  movdqa; pmovmskb; bsf; mov; mov; btr; jnz
+vec.store_masked        any16                       M    8  movdqa; packsswb; pmovmskb; bsf; mov; mov; btr; jnz
+vec.load_first_fault    any                         U    -  -
+vec.gather              any32                       U    -  -
+vec.gather              any64                       U    -  -
+vec.scatter             any32                       U    -  -
+vec.scatter             any64                       U    -  -
+vec.compress            any32                       M    3  movmskps; shl; pshufb
+vec.compress            any64                       M    3  movmskpd; shl; pshufb
+vec.compress            any16                       M    4  packsswb; pmovmskb; shl; pshufb
+vec.compress            any8                        M   15  pmovmskb; movzx; shr; movq x2; paddb; punpcklqdq; pshufb; popcnt x2; movdqu; psrldq; movq; movdqu; pand
+vec.expand              any32                       M    3  movmskps; shl; pshufb
+vec.expand              any64                       M    3  movmskpd; shl; pshufb
+vec.expand              any16                       M    4  packsswb; pmovmskb; shl; pshufb
+vec.expand              any8                        M   11  pmovmskb; movzx; shr; movq x2; popcnt; movd; pshufb; paddb; punpcklqdq; pshufb
+vec.reduce_add          f32                         M    4  movhlps; addps; movshdup; addss
+vec.reduce_add          f64                         M    2  unpckhpd; addsd
+vec.reduce_add_wrap     int8                        M    4  psadbw; pshufd; paddq; movd
+vec.reduce_add_wrap     int16                       M    6  pmaddwd; pshufd; paddd; pshufd; paddd; movd
+vec.reduce_add_wrap     int32                       M    5  pshufd; paddd; pshufd; paddd; movd
+vec.reduce_add_wrap     int64                       M    3  pshufd; paddq; movq
+vec.reduce_min          f32                         M   14  movhlps; minps x2; orps; cmpunordps; addps; blendvps; movshdup; minps x2; orps; cmpunordps; addps; blendvps
+vec.reduce_min          f64                         M    7  unpckhpd; minpd x2; orpd; cmpunordpd; addpd; blendvpd
+vec.reduce_max          f32                         M   14  movhlps; maxps x2; andps; cmpunordps; addps; blendvps; movshdup; maxps x2; andps; cmpunordps; addps; blendvps
+vec.reduce_max          f64                         M    7  unpckhpd; maxpd x2; andpd; cmpunordpd; addpd; blendvpd
+vec.reduce_min          int8                        M    9  pshufd; pmin?b; pshufd; pmin?b; pshuflw; pmin?b; psrlw; pmin?b; movd
+vec.reduce_min          int16                       M    7  pshufd; pmin?w; pshufd; pmin?w; pshuflw; pmin?w; movd
+vec.reduce_min          int32                       M    5  pshufd; pmin?d; pshufd; pmin?d; movd
+vec.reduce_min          i64                         M    4  pshufd; pcmpgtq; blendvpd; movq
+vec.reduce_min          u64                         M    6  pshufd; pxor x2; pcmpgtq; blendvpd; movq
+vec.reduce_max          int8                        M    9  pshufd; pmax?b; pshufd; pmax?b; pshuflw; pmax?b; psrlw; pmax?b; movd
+vec.reduce_max          int16                       M    7  pshufd; pmax?w; pshufd; pmax?w; pshuflw; pmax?w; movd
+vec.reduce_max          int32                       M    5  pshufd; pmax?d; pshufd; pmax?d; movd
+vec.reduce_max          i64                         M    4  pshufd; pcmpgtq; blendvpd; movq
+vec.reduce_max          u64                         M    6  pshufd; pxor x2; pcmpgtq; blendvpd; movq
+vec.reduce_and          int8                        M    9  pshufd; pand; pshufd; pand; pshuflw; pand; psrlw; pand; movd
+vec.reduce_and          int16                       M    7  pshufd; pand; pshufd; pand; pshuflw; pand; movd
+vec.reduce_and          int32                       M    5  pshufd; pand; pshufd; pand; movd
+vec.reduce_and          int64                       M    3  pshufd; pand; movq
+vec.reduce_or           int8                        M    9  pshufd; por; pshufd; por; pshuflw; por; psrlw; por; movd
+vec.reduce_or           int16                       M    7  pshufd; por; pshufd; por; pshuflw; por; movd
+vec.reduce_or           int32                       M    5  pshufd; por; pshufd; por; movd
+vec.reduce_or           int64                       M    3  pshufd; por; movq
+vec.reduce_add_ordered  f32                         M    7  addss; movshdup; addss; movhlps; addss; shufps; addss
+vec.reduce_add_ordered  f64                         M    3  addsd; unpckhpd; addsd
+vec.scan_add            f32                         M    9  movshdup; addss; movhlps; addss; shufps; addss; insertps x3
+vec.scan_add            f64                         M    3  unpckhpd; addsd; unpcklpd
+vec.scan_add_wrap       int8                        M    8  pslldq; paddb; pslldq; paddb; pslldq; paddb; pslldq; paddb
+vec.scan_add_wrap       int16                       M    6  pslldq; paddw; pslldq; paddw; pslldq; paddw
+vec.scan_add_wrap       int32                       M    4  pslldq; paddd; pslldq; paddd
+vec.scan_add_wrap       int64                       M    2  pslldq; paddq
+vec.permute             any8                        N    1  pshufb
+vec.permute             any16                       N    1  pshufb
+vec.permute             any32                       N    1  pshufd
+vec.permute             any64                       N    1  pshufd
+vec.lookup              int8                        N    2  paddusb; pshufb
+vec.popcount            int8                        M    6  psrlw; pand x2; pshufb x2; paddb
+vec.popcount            int16                       M    7  psrlw; pand x2; pshufb x2; paddb; pmaddubsw
+vec.popcount            int32                       M    8  psrlw; pand x2; pshufb x2; paddb; pmaddubsw; pmaddwd
+vec.popcount            int64                       M    7  psrlw; pand x2; pshufb x2; paddb; psadbw
+vec.clz                 int8                        M    8  psrlw; pand x2; pshufb x2; pcmpeqb; pand; paddb
+vec.clz                 int16                       M   13  psrlw; pand x2; pshufb x2; pcmpeqb; pand; paddb; psrlw; pand; pcmpeqw; pand; paddw
+vec.clz                 int32                       M   18  psrlw; pand x2; pshufb x2; pcmpeqb; pand; paddb; psrlw; pand; pcmpeqw; pand; paddw; psrld; pand; pcmpeqd; pand; paddd
+vec.clz                 int64                       M   23  psrlw; pand x2; pshufb x2; pcmpeqb; pand; paddb; psrlw; pand; pcmpeqw; pand; paddw; psrld; pand; pcmpeqd; pand; paddd; psrlq; pand; pcmpeqq; pand; paddq
+vec.widen_lo            i8                          N    1  pmovsxbw
+vec.widen_lo            u8                          N    1  pmovzxbw
+vec.widen_lo            i16                         N    1  pmovsxwd
+vec.widen_lo            u16                         N    1  pmovzxwd
+vec.widen_lo            i32                         N    1  pmovsxdq
+vec.widen_lo            u32                         N    1  pmovzxdq
+vec.widen_lo            f32                         N    1  cvtps2pd
+vec.widen_hi            i8                          N    2  pshufd; pmovsxbw
+vec.widen_hi            u8                          N    1  punpckhbw
+vec.widen_hi            i16                         N    2  pshufd; pmovsxwd
+vec.widen_hi            u16                         N    1  punpckhwd
+vec.widen_hi            i32                         N    2  pshufd; pmovsxdq
+vec.widen_hi            u32                         N    1  punpckhdq
+vec.widen_hi            f32                         N    2  movhlps; cvtps2pd
+vec.narrow_wrap         int16                       M    3  pand x2; packuswb
+vec.narrow_wrap         int32                       M    3  pand x2; packusdw
+vec.narrow_wrap         int64                       M    1  shufps
+vec.narrow_sat          i16                         N    1  packsswb
+vec.narrow_sat          u16                         N    3  pminuw x2; packuswb  | note: packuswb reads its input as signed: clamp first
+vec.narrow_sat          i32                         N    1  packssdw
+vec.narrow_sat          u32                         N    3  pminud x2; packusdw  | note: packusdw reads its input as signed: clamp first
+vec.narrow_sat          i64                         N    9  pcmpgtq x4; blendvpd x4; shufps  | note: no 64-bit pack below AVX-512: clamp by compare and blend
+vec.narrow_sat          u64                         N    7  pxor x2; pcmpgtq x2; blendvpd x2; shufps  | note: no 64-bit pack below AVX-512: clamp by compare and blend
+vec.cast                i8>f32/i16>f32              N    2  pmovsx*d; cvtdq2ps
+vec.cast                u8>f32/u16>f32              N    2  pmovzx*d; cvtdq2ps
+vec.cast                i32>f64                     N    1  cvtdq2pd
+vec.cast                u32>f64                     N    2  punpckldq; subpd
+vec.cast.round          i32>f32                     N    1  cvtdq2ps
+vec.cast.round          u32>f32                     M    5  pblendw; psrld; pblendw; subps; addps
+vec.cast.round          i64>f64                     M    5  movq; pextrq; cvtsi2sd x2; unpcklpd
+vec.cast.round          u64>f64                     M    5  pblendw; psrlq; por; subpd; addpd
+vec.cast.sat            f32>i32                     M    5  cvttps2dq; cmpleps; pxor; cmpordps; pand
+vec.cast.sat            f32>u32                     M    9  maxps; cvttps2dq; subps; cvttps2dq; pxor; cmpleps; blendvps; cmpleps; por
+vec.cast.sat            f64>i64                     M    9  unpckhpd; cvttsd2si x2; movq; pinsrq; cmplepd; pxor; cmpordpd; pand
+vec.cast.sat            f64>u64                     M   17  maxpd; subpd; unpckhpd x2; cvttsd2si x4; movq x2; pinsrq x2; pxor; cmplepd; blendvpd; cmplepd; por
+vec.cast.try            f32>i32                     M    7  cvttps2dq; cmpltps; cmpleps; andps; movmskps; cmp; sete
+vec.cast.try            f32>u32                     M   12  subps; cvttps2dq x2; pxor; cmpleps; blendvps; cmpltps x2; andps; movmskps; cmp; sete
+vec.cast.try            f64>i64                     M   11  unpckhpd; cvttsd2si x2; movq; pinsrq; cmpltpd; cmplepd; andpd; movmskpd; cmp; sete
+vec.cast.try            f64>u64                     M   20  subpd; unpckhpd x2; cvttsd2si x4; movq x2; pinsrq x2; pxor; cmplepd; blendvpd; cmpltpd x2; andpd; movmskpd; cmp; sete
+vec.cast                f16>f32                     U    -  -
+vec.cast.round          f32>f16                     U    -  -
+vec.splat               any8/any16                  N    2  movd; pshufb
+vec.splat               int32                       N    2  movd; pshufd
+vec.splat               int64                       N    2  movq; punpcklqdq
+vec.splat               f32                         N    1  shufps
+vec.splat               f64                         N    1  movddup
+vec.bitcast             any                         N    0  none
+vec.split               any                         N    1  pshufd
+vec.join                any                         N    1  punpcklqdq
+mask.first_n            mask                        M    4  cmp; cmova; neg; movdqu
+loop.chunk              any                         N    1  movdqu
+loop.tail_masked        any32/any64                 M    8  movdqa; mov; lea x2; rep movsb; movdqa; neg; movdqu
+loop.tail_masked        any8/any16                  M    8  movdqa; mov; lea x2; rep movsb; movdqa; neg; movdqu
+loop.tail_masked_mut    any32/any64                 M    5  movdqa; mov; lea x2; rep movsb
+loop.tail_masked_mut    any8/any16                  M    5  movdqa; mov; lea x2; rep movsb
+loop.tail_scalar        any                         N    0  none
+loop.tail_exact         any                         N    2  test; jnz
+mem.prefetch_read_l1    any                         N    1  prefetcht0
+mem.prefetch_read_l2    any                         N    1  prefetcht1
+mem.prefetch_read_l3    any                         N    1  prefetcht2
+mem.prefetch_read_nta   any                         N    1  prefetchnta
+mem.prefetch_write_l1   any                         N    1  prefetcht0  | note: prefetchw needs PRFCHW, not implied by v2: the read hint
+mem.prefetch_write_l2   any                         N    1  prefetcht1  | note: prefetchw needs PRFCHW, not implied by v2: the read hint
+mem.prefetch_write_l3   any                         N    1  prefetcht2  | note: prefetchw needs PRFCHW, not implied by v2: the read hint
+mem.prefetch_write_nta  any                         N    1  prefetchnta  | note: prefetchw needs PRFCHW, not implied by v2: the read hint
+vec.store_stream        float                       N    1  movntp%
+vec.store_stream        int                         N    1  movntdq
+mem.store_stream        int32/int64                 N    1  movnti
+mem.store_stream        f32                         N    2  movd; movnti
+mem.store_stream        f64                         N    2  movq; movnti
+mem.store_stream        any8/any16                  N    1  mov  | note: no 8/16-bit non-temporal store: a plain store
+mem.fence_stream        any                         N    1  sfence

@@ -14,7 +14,7 @@ GPU) both implement them.
 | `conformance-annotations.md` | `//~` / `#~` test annotations read by `stave test` |
 | `diagnostics.schema.json` | JSON diagnostics, timings, and the `gpu-sm86` parallelism report |
 | `cli.md` | `stave` command line |
-| `simd-ops.md` | portable vector ops and lowering classes |
+| `simd-ops.md` | portable vector ops and lowering classes (stave-target's tests check `crates/stave-target/tables/` against it) |
 | `checked-ir.md` | canonical checked-IR print format |
 | `intrinsics.md` | `extern "stave-intrinsic"` operations and program entry |
 | `gpu-lang.md`, `gpu-ops.md`, `gpu-diagnostics.md` | GPU kernels (PTX) |
