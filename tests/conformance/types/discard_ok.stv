@@ -1,0 +1,58 @@
+//~ STDOUT discard_ok.stdout
+// `let _ = e;` discards a value explicitly and drops it at once. Statements of type `()` or
+// `never` need no discard; `e?;` on a `Result<(), E>` has type `()`.
+import std.io;
+import std.vec;
+
+struct Loud { pub id: u32 }
+
+impl Drop for Loud {
+    fn drop(&mut self) {
+        let id = self.id;
+        io.print(f"drop {id}\n");
+    }
+}
+
+fn make(id: u32) -> Loud {
+    return Loud.{ id: id };
+}
+
+fn halt() -> never {
+    loop { }
+}
+
+fn pick(x: u32) -> u32 {
+    if x < 10 { return x; }
+    halt();
+}
+
+fn step(ok: bool) -> Result<(), u8> {
+    if ok { return Result.Ok(()); }
+    return Result.Err(1);
+}
+
+fn steps(last: bool) -> Result<(), u8> {
+    step(true)?;
+    step(last)?;
+    return Result.Ok(());
+}
+
+fn bump(n: &mut u32) {
+    *n = *n + 1;
+}
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(1);
+    v.push(2);
+    let _ = v.pop();
+    let _ = make(1);
+    io.print("after\n");
+    let mut n: u32 = 0;
+    bump(&mut n);
+    let _ = steps(false);
+    let _ = pick(3);
+    let len = v.len();
+    io.print(f"len = {len}, n = {n}\n");
+    return 0;
+}

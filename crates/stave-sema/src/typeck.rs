@@ -1476,7 +1476,15 @@ impl<'a> Ck<'a> {
             }
         } else if let Some(&e) = kids.first() {
             let t = self.expr(e, None);
-            let _ = self.force(t);
+            let t = self.force(t);
+            // a type holding the error type already has its diagnostic
+            if t != ids::UNIT && t != ids::NEVER && !t.is_none() && !self.tys.has_error(t) {
+                let at = icx.node_span(e);
+                let ty = self.show(t);
+                let insert = Span::new(at.file, at.offset, 0);
+                let d = mk("E0210", None, &[("type", &ty)], at, &[("start", insert)]);
+                self.report(d);
+            }
         }
         self.free_kids(kids);
         std::mem::take(&mut self.diverges)

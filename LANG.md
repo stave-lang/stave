@@ -46,7 +46,7 @@ Read whole file before writing Stave. Assume Rust **only** where this file is si
 | overloading, truthiness, null | none | `if n != 0`, not `if n` | one meaning per name; explicit tests |
 | `mut self` param | `self`, `&self`, `&mut self` only | Rebind: `let mut s = self;` | params are immutable bindings |
 | `x @ P`, `..` rest | not in grammar | Write the full pattern; bind the value by name to reuse it | not admitted yet (simplicity) |
-| `v.pop();` (value ignored) | `let _ = v.pop();` | Planned: a non-`()` expression statement is E0210 | an ignored `Result` is always visible |
+| `v.pop();` (value ignored) | `let _ = v.pop();` | A non-`()`, non-`never` expression statement is E0210 | an ignored `Result` is always visible |
 
 Casts and overflow operators (kept out of the table because they contain `|`):
 - `as` lossless only. `as%` wraps or truncates. `as|` saturates (float NaN → 0). `as?` returns `Option`. `as~` converts to a float type, rounding to nearest even (int→float, f64→f32, f32→f16 lanes).

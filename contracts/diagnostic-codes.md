@@ -78,7 +78,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0207 | non-unit function can reach its end without `return` (a `()` function falling off its end is an implicit `return;`). Case `never`: a `-> never` function with a reachable `return` or a reachable end of body |
 | E0208 | no method or field `<name>` on type `<T>` (e.g. `mul_wide` on `u16`: it exists on `u32` and `u64` only) |
 | E0209 | `never` used outside a return type: it is legal only after `->` of a fn signature or a fn type |
-| E0210 | expression statement whose type is not `()` or `never` (discarded value, e.g. an ignored `Result`). Discard explicitly with `let _ = e;` (drops at once). Exact fix. Planned |
+| E0210 | expression statement whose type is not `()` or `never` (discarded value, e.g. an ignored `Result`). Discard explicitly with `let _ = e;` (drops at once). Exact fix |
 | E0211 | contract operand not allowed: `requires`/`ensures` take a `bool` expression over params, fields, `.len()`, literals, arithmetic, comparison, `&&` `||` `!`, and calls of safe fns whose args are `&` or Copy; no `unsafe`, `&mut`, `static`/`static mut`. Case `trait-impl`: a contract on a trait impl method. Planned |
 | E0212 | parameter named `result` in a fn with `ensures` (`result` is a contextual name inside `ensures`, not a keyword). Planned |
 | E0300 | non-exhaustive match. Case `limit`: the exhaustiveness check exceeds its search limit (patterns nested more than 2,000 levels deep, or over 1,000,000 search steps); the match is rejected |

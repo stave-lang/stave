@@ -564,11 +564,11 @@ fix = { description = "use `never` only after `->` of a fn signature or a fn typ
 code = "E0210"
 severity = "error"
 area = "types"
-rule = "expression statement whose type is not `()` or `never` (a discarded value); discard explicitly with `let _ = e;` (planned)"
+rule = "expression statement whose type is not `()` or `never` (a discarded value); discard explicitly with `let _ = e;`"
 holes = { type = "type" }
 message = "unused value of type `{type}`"
 labels = [{ at = "primary", text = "value discarded here" }]
-fix = { description = "use the value, or discard it explicitly with `let _ = ..;`", edits = [{ at = "primary", replacement = "let _ = " }] }
+fix = { description = "use the value, or discard it explicitly with `let _ = ..;`", edits = [{ at = "start", replacement = "let _ = " }] }
 
 [[diag]]
 code = "E0211"

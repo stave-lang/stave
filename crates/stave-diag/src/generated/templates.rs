@@ -1247,7 +1247,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0210",
         severity: Severity::Error,
         area: "types",
-        rule: "expression statement whose type is not `()` or `never` (a discarded value); discard explicitly with `let _ = e;` (planned)",
+        rule: "expression statement whose type is not `()` or `never` (a discarded value); discard explicitly with `let _ = e;`",
         retired: false,
         located: true,
         holes: &[
@@ -1263,7 +1263,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 fix: Some(FixTemplate {
                     description: "use the value, or discard it explicitly with `let _ = ..;`",
                     edits: &[
-                        EditTemplate { at: "primary", replacement: "let _ = " },
+                        EditTemplate { at: "start", replacement: "let _ = " },
                     ],
                 }),
             },
