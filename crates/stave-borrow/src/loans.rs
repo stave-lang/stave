@@ -98,21 +98,32 @@ impl<'b> Flow<'b> {
         let nparams = body.n_params();
         let atoms = Atoms { nloans: body.loans.len(), nparams };
         let mut ref_like: FxHashMap<TypeId, bool> = FxHashMap::default();
-        let mut note = |t: TypeId, tys: &mut Tys<'_>| {
-            ref_like.entry(t).or_insert_with(|| tys.ref_like(t));
+        // Notes type `t` and returns its ref-likeness. Consecutive locals and places mostly have
+        // the same type: the one noted last is not looked up again.
+        let mut last: Option<(TypeId, bool)> = None;
+        let mut note = |t: TypeId, tys: &mut Tys<'_>| -> bool {
+            if let Some((lt, r)) = last
+                && lt == t
+            {
+                return r;
+            }
+            let r = *ref_like.entry(t).or_insert_with(|| tys.ref_like(t));
+            last = Some((t, r));
+            r
         };
         let mut tracked = vec![u32::MAX; body.locals.len()];
         let mut ntracked = 0usize;
         for (i, l) in body.locals.iter().enumerate() {
-            note(l.ty, tys);
-            if tys.ref_like(l.ty) {
+            if note(l.ty, tys) {
                 tracked[i] = ntracked as u32;
                 ntracked += 1;
             }
         }
         for b in &body.blocks {
             for s in &b.stmts {
-                for_each_place(&s.kind, |p| note(p.ty, tys));
+                for_each_place(&s.kind, |p| {
+                    note(p.ty, tys);
+                });
             }
         }
         for l in &body.loans {
@@ -162,9 +173,28 @@ impl<'b> Flow<'b> {
         State { o, moved: Bits::new(self.body.move_sites.len()) }
     }
 
+    /// Whether the body has no state to track: no ref-like local, no loan, no move site. Then no
+    /// statement changes the dataflow state (origin sets belong to tracked locals, loan contents
+    /// to loans, moved sites to move operands), so every reachable block starts in the initial
+    /// state, every origin set read from it is empty, and no access conflicts with a loan or
+    /// uses a moved place.
+    pub fn stateless(&self) -> bool {
+        self.ntracked == 0 && self.body.loans.is_empty() && self.body.move_sites.is_empty()
+    }
+
     /// Solves the forward dataflow.
     pub fn solve(&mut self) {
         if self.body.blocks.is_empty() {
+            return;
+        }
+        if self.stateless() {
+            // The fixpoint without iterating: the first round reaches every block of the reverse
+            // postorder, and a second one finds nothing new if it set any entry but block 0's.
+            let init = self.initial();
+            for &b in &self.rpo {
+                self.entry[b as usize] = Some(init.clone());
+            }
+            self.rounds = if self.rpo.len() > 1 { 2 } else { 1 };
             return;
         }
         self.entry[0] = Some(self.initial());

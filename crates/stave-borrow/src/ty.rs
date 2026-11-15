@@ -81,7 +81,14 @@ pub struct Tys<'a> {
     shared: Memo,
     share: Option<u64>,
     drop_impls: &'a [DeclId],
+    /// The last Copy and drop-glue answers, by the low bits of the type id: the builder asks for
+    /// every operand and temporary, and a body uses a handful of types.
+    hot_copy: [(TypeId, bool); HOT],
+    hot_drop: [(TypeId, bool); HOT],
 }
+
+/// Slots of the per-body answer caches of [`Tys`].
+const HOT: usize = 8;
 
 /// Memoized type answers.
 #[derive(Default)]
@@ -123,7 +130,18 @@ impl<'a> Tys<'a> {
             }),
             None => Memo::default(),
         };
-        Tys { prog, sigs, ov: Overlay::new(types), env, local: Memo::default(), shared, share, drop_impls }
+        Tys {
+            prog,
+            sigs,
+            ov: Overlay::new(types),
+            env,
+            local: Memo::default(),
+            shared,
+            share,
+            drop_impls,
+            hot_copy: [(TypeId::NONE, false); HOT],
+            hot_drop: [(TypeId::NONE, false); HOT],
+        }
     }
 
     fn memo(&mut self, t: TypeId) -> &mut Memo {
@@ -197,19 +215,36 @@ impl<'a> Tys<'a> {
         if self.is_unknown(t) {
             return true;
         }
-        if let Some(&b) = self.memo(t).copy.get(&t) {
-            return b;
+        let h = t.0 as usize % HOT;
+        if self.hot_copy[h].0 == t {
+            return self.hot_copy[h].1;
         }
-        let w = World { prog: self.prog, sigs: self.sigs };
-        let b = w.is_copy(&mut self.ov, t, self.env);
-        self.memo(t).copy.insert(t, b);
+        let b = match self.memo(t).copy.get(&t) {
+            Some(&b) => b,
+            None => {
+                let w = World { prog: self.prog, sigs: self.sigs };
+                let b = w.is_copy(&mut self.ov, t, self.env);
+                self.memo(t).copy.insert(t, b);
+                b
+            }
+        };
+        self.hot_copy[h] = (t, b);
         b
     }
 
     /// Whether dropping a value of `t` runs code (a `Drop` impl inside, not behind a pointer); a
     /// generic param that is not Copy may.
     pub fn needs_drop(&mut self, t: TypeId) -> bool {
-        self.needs_drop_d(t, 0)
+        if self.is_unknown(t) {
+            return false;
+        }
+        let h = t.0 as usize % HOT;
+        if self.hot_drop[h].0 == t {
+            return self.hot_drop[h].1;
+        }
+        let r = self.needs_drop_d(t, 0);
+        self.hot_drop[h] = (t, r);
+        r
     }
 
     fn needs_drop_d(&mut self, t: TypeId, depth: u32) -> bool {

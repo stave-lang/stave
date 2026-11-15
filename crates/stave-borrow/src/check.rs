@@ -491,8 +491,28 @@ impl Cx<'_, '_> {
 
 /// Checks a solved body.
 pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
-    let lo = live_out(flow);
     let body = flow.body;
+    if flow.stateless() && !want_dump {
+        // Nothing is tracked ([`Flow::stateless`]): the only findings left are the ones that need
+        // no dataflow state, writes to immutable places (in the reachable blocks) and the bad
+        // moves. The dump lists every access, so it takes the general path.
+        let mut findings = Vec::new();
+        for (b, blk) in body.blocks.iter().enumerate() {
+            if flow.entry[b].is_none() {
+                continue;
+            }
+            for s in &blk.stmts {
+                if let StmtKind::Assign { dest, init: false, .. } = &s.kind
+                    && let Err((shared, blame)) = mutability(body, dest)
+                {
+                    findings.push(Finding::Immutable { place: dest.clone(), span: s.span, shared, blame });
+                }
+            }
+        }
+        bad_moves(body, &mut findings);
+        return Checked { findings, dump: Vec::new() };
+    }
+    let lo = live_out(flow);
     let mut cx = Cx { flow, findings: Vec::new(), dump: Vec::new(), want_dump };
     for b in 0..body.blocks.len() {
         let Some(mut st) = cx.flow.entry[b].clone() else { continue };
@@ -513,6 +533,12 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         }
     }
     let mut findings = cx.findings;
+    bad_moves(body, &mut findings);
+    Checked { findings, dump: cx.dump }
+}
+
+/// E0504: one finding per span of the body's bad moves.
+fn bad_moves(body: &Body, findings: &mut Vec<Finding>) {
     let mut seen: Vec<Span> = Vec::new();
     for (place, span, capture) in &body.bad_moves {
         if seen.contains(span) {
@@ -521,7 +547,6 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         seen.push(*span);
         findings.push(Finding::MoveOut { place: place.clone(), span: *span, capture: *capture });
     }
-    Checked { findings, dump: cx.dump }
 }
 
 /// The span of the first use (smallest offset) reachable from statement `at` (inclusive) of a

@@ -289,6 +289,10 @@ pub struct Builder<'a, 'b> {
     loops: Vec<LoopCx>,
     temps: Vec<LocalId>,
     by_node: FxHashMap<u32, LocalId>,
+    /// The node spans computed so far, by node index from the body's first node (sized on first
+    /// use): a node's span is taken for its temporary, its statement, and each of its operands,
+    /// and finding a node's end walks down to its last token and re-lexes it.
+    spans: Vec<Option<Span>>,
     depth: u32,
     /// Nested body: the closure (or spawn) node range; outer locals become captures.
     range: Option<(u32, u32)>,
@@ -369,6 +373,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             loops: Vec::new(),
             temps: Vec::new(),
             by_node: FxHashMap::default(),
+            spans: Vec::new(),
             depth: 0,
             range,
             captures: Vec::new(),
@@ -424,7 +429,19 @@ impl<'a, 'b> Builder<'a, 'b> {
     // ---------- locals, temps, loans ----------
 
     fn span(&mut self, n: u32) -> Span {
-        self.icx.node_span(n)
+        let lo = self.tb.lo;
+        if self.spans.is_empty() {
+            self.spans = vec![None; (self.tb.node + 1).saturating_sub(lo) as usize];
+        }
+        let slot = n.checked_sub(lo).map(|i| i as usize).filter(|&i| i < self.spans.len());
+        if let Some(s) = slot.and_then(|i| self.spans[i]) {
+            return s;
+        }
+        let s = self.icx.node_span(n);
+        if let Some(i) = slot {
+            self.spans[i] = Some(s);
+        }
+        s
     }
 
     fn nty(&self, n: u32) -> TypeId {
@@ -1648,12 +1665,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         let icx = self.icx;
         let k = icx.kind(n)?;
         if passthrough_kind(k) {
-            let mut it = icx.ast.children_rev(n);
-            let c = it.next()?;
-            if it.next().is_some() {
-                return None;
-            }
-            return Some(c);
+            return icx.only_child(n);
         }
         if k == NodeKind::Unary {
             let c = icx.first_child(n)?;
