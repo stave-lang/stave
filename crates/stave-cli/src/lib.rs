@@ -251,6 +251,16 @@ fn note_fallback(said: &mut bool, err: &mut dyn Write) {
     }
 }
 
+/// Whether this is `stave run` of a file that starts with a shebang line. Such a run prints no
+/// summary line: stderr holds only the diagnostics and what the program writes.
+fn runs_shebang_script(a: &Args, root: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 2];
+    a.cmd == Cmd::Run
+        && std::fs::File::open(root).and_then(|mut f| f.read_exact(&mut head)).is_ok()
+        && head == *b"#!"
+}
+
 /// `stave check`, `stave build`, `stave run`, and the `STAVE_PROFILE` step profile of the run.
 fn compile(a: &Args, threads: Option<usize>, selection: &Selection, err: &mut dyn Write) -> i32 {
     prof::start();
@@ -366,7 +376,9 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
     if a.timings {
         print_timings(&output, total_ms, a.diagnostics, err);
     }
-    let _ = writeln!(err, "{}", select::summary_line(selection, total_ms as u64));
+    if !runs_shebang_script(a, &path) {
+        let _ = writeln!(err, "{}", select::summary_line(selection, total_ms as u64));
+    }
     release(output);
     let Some(mut program) = program else { return code };
     let mut said = false;
