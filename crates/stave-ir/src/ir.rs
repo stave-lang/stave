@@ -21,7 +21,7 @@
 //! | `popcount clz ctz` | `a` | bit counts within `a`'s type width; result type = operand type |
 //! | `mul.wide` | `a b` | u32/u64 → `tuple (hi, lo)` |
 //! | `eq ne lt le gt ge` | `a b` | result bool; ints by signedness, floats IEEE (unordered: only `ne` true) |
-//! | `select` | `c a b` | `c ? a : b` |
+//! | `select` | `c a b` | `c ? a : b` for a `bool` `c` and any one type of `a`, `b`; branch-free in every backend |
 //! | `cast cast.wrap cast.sat cast.round cast.try` | `x` | `as as% as\| as~ as?`; `cast.try` yields the `Option` instance |
 //! | `make` | elems.. | tuple / struct / array value |
 //! | `get` / `set` | `agg idx` / `agg idx v` | field or element; a dynamic array index traps `Bounds` |

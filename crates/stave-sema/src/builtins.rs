@@ -1,8 +1,8 @@
 //! Built-ins: methods of the built-in types (`u32`/`u64` `mul_wide`, int bit counts,
-//! raw-pointer `read`/`write` and memory hints, `len`, SIMD vector and mask operations), the
-//! type-relative fns of vector and mask types (`f32x4.splat`, `u8x16.load`), and the
-//! `extern "stave-intrinsic"` table of contracts/intrinsics.md (E0805; E0704 when called on another
-//! arch). `size_of` / `align_of` are typed by the body checker.
+//! raw-pointer `read`/`write` and memory hints, `len`, `bool` and mask `select`, SIMD vector and
+//! mask operations), the type-relative fns of vector and mask types (`f32x4.splat`,
+//! `u8x16.load`), and the `extern "stave-intrinsic"` table of contracts/intrinsics.md (E0805;
+//! E0704 when called on another arch). `size_of` / `align_of` are typed by the body checker.
 //!
 //! `mul_wide` exists on `u32` and `u64` only: on any other type the lookup fails and the
 //! checker reports E0208.
@@ -95,6 +95,9 @@ fn intern_name(list: &[&'static str], name: &str) -> Option<&'static str> {
 /// The built-in method `name` of exactly type `t` (no auto-deref), if any.
 pub fn builtin_method<I: Interner + ?Sized>(cx: &I, t: TypeId, name: &str) -> Option<BuiltinMethod> {
     match cx.kind(t) {
+        TypeKind::Bool => {
+            (name == "select").then_some(BuiltinMethod { name: "select", by_ref: false, is_unsafe: false })
+        }
         TypeKind::Int { signed, bits } => {
             let n = intern_name(INT_METHODS, name)?;
             if n == "mul_wide" && (*signed || !matches!(bits, types::IntBits::B32 | types::IntBits::B64)) {
@@ -149,6 +152,9 @@ pub enum ArgTy {
     Is(TypeId),
     /// Any vector type (checked by its use).
     AnyVec,
+    /// An operand of `c.select(a, b)`: typed by the body checker (`a` and `b` have one type,
+    /// the result's).
+    Select,
 }
 
 /// The signature of built-in method `m` on receiver type `t` with turbofish args `gargs`:
@@ -166,6 +172,7 @@ pub fn builtin_method_sig<I: Interner + ?Sized>(
         if lang_option.is_none() { cx.error_ty() } else { cx.mk_adt(lang_option, vec![GArg::Type(x)]) }
     };
     Some(match (&k, m.name) {
+        (TypeKind::Bool, "select") => (vec![ArgTy::Select, ArgTy::Select], cx.error_ty()),
         (TypeKind::Int { .. }, "mul_wide") => {
             let tup = cx.mk_tuple(vec![t, t]);
             (vec![ArgTy::Is(t)], tup)
@@ -263,7 +270,7 @@ fn mask_method<I: Interner + ?Sized>(
     gargs: &[GArg],
 ) -> Option<(Vec<ArgTy>, TypeId)> {
     Some(match name {
-        "select" => (vec![ArgTy::AnyVec, ArgTy::AnyVec], cx.error_ty()),
+        "select" => (vec![ArgTy::Select, ArgTy::Select], cx.error_ty()),
         "all" | "none" => (vec![], cx.fixed_ty(ids::BOOL)),
         "to_bits" => {
             let bits = match n {

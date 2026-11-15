@@ -2595,6 +2595,26 @@ impl<'a> Ck<'a> {
         out
     }
 
+    /// The operands of `recv.select(a, b)`, in order, and the result type. On a `bool` receiver
+    /// `a` and `b` have one type T of any kind (E0201 at `b` otherwise), which is the result's:
+    /// `a` takes the expected type, `b` takes `a`'s (so `(i < n).select(xs[i], 0)` types the
+    /// literal). A mask receiver takes vector operands (checked by their use) and yields `a`'s
+    /// type.
+    fn select_operands(&mut self, recv: TypeId, ps: &[ArgTy], args: &[u32], hint: Option<TypeId>) -> Ty {
+        if !matches!(self.tys.kind(recv), TypeKind::Bool) {
+            let ats = self.builtin_args(ps, args);
+            return Ty::T(ats.first().copied().unwrap_or(ids::ERROR));
+        }
+        let (Some(&a), Some(&b)) = (args.first(), args.get(1)) else { return Ty::ERR };
+        let at = self.expr(a, hint);
+        let bh = match self.resolve(at) {
+            Ty::T(t) if !t.is_none() && t != ids::NEVER && t != ids::ERROR => Some(t),
+            _ => hint,
+        };
+        let bt = self.expr(b, bh);
+        self.unify_operands(b, at, bt)
+    }
+
     fn intrinsic_arch(&mut self, at: Span, decl: DeclId) {
         let name = self.prog.decl(decl).map_or("", |d| self.prog.strings.get(d.name));
         let Some((arch, _, _)) = builtins::intrinsic(name) else { return };
@@ -2780,16 +2800,19 @@ impl<'a> Ck<'a> {
                     if !self.arity(n, paren, ps.len(), args.len(), false) {
                         return self.args_only(args);
                     }
-                    let ats = self.builtin_args(&ps, args);
-                    let ret =
-                        if b.name == "select" { ats.first().copied().unwrap_or(ids::ERROR) } else { ret };
+                    let ret = if b.name == "select" {
+                        self.select_operands(c, &ps, args, hint)
+                    } else {
+                        self.builtin_args(&ps, args);
+                        Ty::T(ret)
+                    };
                     let adjust = Adjust {
                         derefs: level,
                         autoref: if b.by_ref { Some(false) } else { None },
                         reborrow: false,
                     };
                     self.target(seg, Target::Builtin { name: b.name, recv: c, adjust });
-                    Ty::T(ret)
+                    ret
                 }
                 MethodRef::Impl { method, ref impl_args, .. } => {
                     let Some(sig) = self.sigs.fn_sig(method) else { return self.args_only(args) };

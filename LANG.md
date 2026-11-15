@@ -72,7 +72,7 @@ Casts and overflow operators (kept out of the table because they contain `|`):
 Notes:
 - `unsafe("..") expr` is for value positions only. At statement start `unsafe` always opens a block: write `unsafe("..") { *p = 1; }`, not `unsafe("..") *p = 1;`.
 - An `unsafe("..") fn` states the **caller's** obligation (calls need `unsafe`). Its body is not unsafe: unsafe operations inside still need their own `unsafe("..")` (E0803). Methods may be unsafe too: `pub unsafe("..") fn` inside `impl`.
-- Planned: `c.select(a, b)` on a `bool` (`(x < y).select(x, y)`), like mask `m.select(a, b)`: both operands are evaluated (`xs[i]` still bounds-checks), always branchless (constant time). Plain `if`/`match` stay fine.
+- `c.select(a, b)` on a `bool` (built in, no import): `a` if `c`, else `b`, as in `let lo = (x < y).select(x, y);`. `a` and `b` have one type, any type (E0201). Both are always evaluated, left to right, so `(i < n).select(xs[i], 0)` still bounds-checks `xs[i]` and traps for `i >= len`; then one is picked without a branch (constant time); the other is dropped at the end of the statement. The mask form `m.select(a, b)` is lane-wise (§4). Plain `if`/`match` stay fine and evaluate one arm.
 - Or-patterns, at the top of a `match` arm only (not nested, not in `let`/`for`): `Tok.Plus | Tok.Minus => 1u8,`. Every alternative binds the same names with the same types and modes (E0302). The first alternative that matches binds them; the guard then runs once (false: next arm). An alternative that never matches is E0301.
 - A pattern binds a name once: `(a, a)` or `P.{ x, y: x }` is E0105.
 - f-string holes: a name, `self`, or a field path (`{n}`, `{self.n}`, `{p.x}`). No tuple steps (`{t.0}`) or expressions: bind to a local first (`let a = t.0;` then `{a}`).

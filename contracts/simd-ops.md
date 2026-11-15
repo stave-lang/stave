@@ -60,11 +60,12 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 - An arithmetic op that yields NaN yields a quiet NaN with unspecified sign and payload. Scalars
   follow the same rule. `neg`, `abs`, `copysign`, loads, stores, `select`, and `bitcast` are
   bit-exact. Differential tests compare NaN-ness, not NaN bits.
-- `select` (planned): one method spelling, `m.select(a, b)` on a
-  mask (lanes of `a` where `m` is set, else `b`) and `c.select(a, b)` on a `bool` (scalar or any
-  type). Both operands are evaluated first. It is always branchless: v2 `pblendvb`/`blendvps`
-  (class N), v3 `vblendv*`, v4 mask-register moves, NEON `bsl`, SVE `sel`, PTX `selp`; the bool form
-  is `cmov`/`csel` per 8-byte word (aggregates word by word). No pass turns it into a branch.
+- `select`: one method spelling, `m.select(a, b)` on a mask (lanes of `a` where `m` is set,
+  else `b`; planned) and `c.select(a, b)` on a `bool` (any type; implemented). Both operands are
+  evaluated first. It is always branchless: v2 `pblendvb`/`blendvps` (class N), v3 `vblendv*`, v4
+  mask-register moves, NEON `bsl`, SVE `sel`, PTX `selp`; the bool form is `cmov`/`csel` per
+  8-byte word (aggregates word by word; f32/f64 through GPRs on x86-64, `fcsel` on AArch64). No
+  pass turns it into a branch.
 - Reductions use a fixed tree: halve by lane index (lane i with i+N/2) until one lane remains.
   `v.reduce_add_ordered(init)` is strictly sequential (`init + v[0] + v[1] + …`). Threading the
   accumulator through a loop makes a whole-slice sum independent of chunk boundaries, and so of VL. On sizeless vectors, float

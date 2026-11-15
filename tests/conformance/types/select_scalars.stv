@@ -1,0 +1,105 @@
+//~ STDOUT select_scalars.stdout
+// `c.select(a, b)` on a `bool` is `a` when `c` is true, else `b`, for every scalar type: ints,
+// floats (bits kept: -0.0 and NaN pass through), `bool`, `char`, raw pointers, `&T`, `&[T]`,
+// `&str`. The second operand takes the first's type (a literal needs no suffix).
+import std.io;
+
+fn min_u8(x: u8, y: u8) -> u8 {
+    return (x < y).select(x, y);
+}
+
+fn min_i32(x: i32, y: i32) -> i32 {
+    return (x < y).select(x, y);
+}
+
+fn max_i64(x: i64, y: i64) -> i64 {
+    return (x > y).select(x, y);
+}
+
+fn pick_u64(c: bool, a: u64, b: u64) -> u64 {
+    return c.select(a, b);
+}
+
+fn pick_usize(c: bool, a: usize) -> usize {
+    return c.select(a, 0);
+}
+
+fn pick_lit(c: bool, b: u16) -> u16 {
+    return c.select(7, b);
+}
+
+fn min_f32(x: f32, y: f32) -> f32 {
+    return (x < y).select(x, y);
+}
+
+fn pick_f64(c: bool, a: f64, b: f64) -> f64 {
+    return c.select(a, b);
+}
+
+fn pick_bool(c: bool, a: bool, b: bool) -> bool {
+    return c.select(a, b);
+}
+
+fn pick_char(c: bool, a: char, b: char) -> char {
+    return c.select(a, b);
+}
+
+fn pick_ptr(c: bool, a: *const u32, b: *const u32) -> *const u32 {
+    return c.select(a, b);
+}
+
+fn pick_ref(c: bool, a: &u32, b: &u32) -> &u32 from a + b {
+    return c.select(a, b);
+}
+
+fn pick_slice(c: bool, a: &[u32], b: &[u32]) -> &[u32] from a + b {
+    return c.select(a, b);
+}
+
+fn pick_str(c: bool, a: &str) -> &str from a {
+    return c.select(a, "literal");
+}
+
+fn main() -> i32 {
+    let a = min_u8(200, 9);
+    let b = min_i32(-5, 3);
+    let d = max_i64(-9000000000, -1);
+    let e = pick_u64(true, 18446744073709551615, 1);
+    let f = pick_u64(false, 18446744073709551615, 1);
+    let g = pick_usize(false, 5);
+    let h = pick_lit(true, 300);
+    let k = pick_lit(false, 300);
+    io.print(f"{a} {b} {d} {e} {f} {g} {h} {k}\n");
+    let x = min_f32(2.5, -0.5);
+    let y = pick_f64(true, -0.0, 1.0);
+    let nan: f64 = 0.0 / 0.0;
+    let z = pick_f64(false, 1.0, nan);
+    let w = pick_f64(true, 2.0, nan);
+    io.print(f"{x} {y} {z} {w}\n");
+    let p = pick_bool(true, false, true);
+    let q = pick_bool(false, false, true);
+    let ch = pick_char(true, 'é', 'x');
+    let ch2 = pick_char(false, 'é', 'x');
+    io.print(f"{p} {q} {ch} {ch2}\n");
+    let u: u32 = 11;
+    let v: u32 = 22;
+    let pu = &u as *const u32;
+    let pv = &v as *const u32;
+    let r1 = pick_ptr(true, pu, pv) == pu;
+    let r2 = pick_ptr(false, pu, pv) == pv;
+    let ru = pick_ref(false, &u, &v);
+    let rv = *ru;
+    io.print(f"{r1} {r2} {rv}\n");
+    let xs: [u32; 3] = [1, 2, 3];
+    let ys: [u32; 2] = [8, 9];
+    let s1 = pick_slice(true, &xs, &ys);
+    let s2 = pick_slice(false, &xs, &ys);
+    let n1 = s1.len();
+    let n2 = s2.len();
+    let last = s2[1];
+    io.print(f"{n1} {n2} {last}\n");
+    io.print(pick_str(true, "given\n"));
+    io.print(pick_str(false, "given\n"));
+    io.print("\n");
+    return 0;
+}

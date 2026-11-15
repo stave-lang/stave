@@ -1,0 +1,103 @@
+//~ STDOUT select_aggregates.stdout
+// `c.select(a, b)` on aggregates: a struct, a tuple, arrays (one below a word, one with a
+// tail of 4 + 2 + 1 bytes, one longer than 16 words), an enum, and a fn value. The value is
+// selected as a whole.
+import std.io;
+
+struct P {
+    pub x: i32,
+    pub y: u8,
+    pub z: f64,
+}
+
+impl Copy for P {}
+
+fn pick_struct(c: bool, a: P, b: P) -> P {
+    return c.select(a, b);
+}
+
+fn pick_tuple(c: bool, a: (u16, bool, char), b: (u16, bool, char)) -> (u16, bool, char) {
+    return c.select(a, b);
+}
+
+fn pick_small(c: bool, a: [u8; 3], b: [u8; 3]) -> [u8; 3] {
+    return c.select(a, b);
+}
+
+fn pick_tail(c: bool, a: [u8; 15], b: [u8; 15]) -> [u8; 15] {
+    return c.select(a, b);
+}
+
+fn pick_big(c: bool, a: [u64; 20], b: [u64; 20]) -> [u64; 20] {
+    return c.select(a, b);
+}
+
+fn pick_opt(c: bool, a: u32) -> Option<u32> {
+    return c.select(Option.Some(a), Option.None);
+}
+
+fn pick_fn(c: bool, a: fn(u32) -> u32, b: fn(u32) -> u32) -> fn(u32) -> u32 from a + b {
+    return c.select(a, b);
+}
+
+fn double(x: u32) -> u32 {
+    return x * 2;
+}
+
+fn triple(x: u32) -> u32 {
+    return x * 3;
+}
+
+fn show_opt(o: Option<u32>) {
+    match o {
+        Option.Some(v) => { io.print(f"some {v}\n"); }
+        Option.None => { io.print("none\n"); }
+    }
+}
+
+fn main() -> i32 {
+    let p = P.{ x: -1, y: 2, z: 0.5 };
+    let q = P.{ x: 7, y: 8, z: -4.0 };
+    let r = pick_struct(false, p, q);
+    let (rx, ry, rz) = (r.x, r.y, r.z);
+    io.print(f"{rx} {ry} {rz}\n");
+    let t = pick_tuple(true, (1, true, 'a'), (2, false, 'b'));
+    let (t0, t1, t2) = t;
+    io.print(f"{t0} {t1} {t2}\n");
+    let s = pick_small(false, [1, 2, 3], [4, 5, 6]);
+    let (s0, s2) = (s[0], s[2]);
+    io.print(f"{s0} {s2}\n");
+    let mut ta: [u8; 15] = [0; 15];
+    let mut tb: [u8; 15] = [0; 15];
+    for i in 0usize..15 {
+        ta[i] = i as% u8;
+        tb[i] = (100 + i) as% u8;
+    }
+    let u = pick_tail(true, ta, tb);
+    let w = pick_tail(false, ta, tb);
+    let mut su: u32 = 0;
+    let mut sw: u32 = 0;
+    for i in 0usize..15 {
+        su = su + (u[i] as u32);
+        sw = sw + (w[i] as u32);
+    }
+    io.print(f"{su} {sw}\n");
+    let mut ba: [u64; 20] = [0; 20];
+    let mut bb: [u64; 20] = [0; 20];
+    for i in 0usize..20 {
+        ba[i] = i as u64;
+        bb[i] = (1000 + i) as u64;
+    }
+    let x = pick_big(true, ba, bb);
+    let y = pick_big(false, ba, bb);
+    let (x0, x19, y0, y19) = (x[0], x[19], y[0], y[19]);
+    io.print(f"{x0} {x19} {y0} {y19}\n");
+    show_opt(pick_opt(true, 5));
+    show_opt(pick_opt(false, 5));
+    let f = pick_fn(false, double, triple);
+    let g = pick_fn(true, double, triple);
+    let fv = f(10);
+    let gv = g(10);
+    io.print(f"{fv} {gv}\n");
+    return 0;
+}

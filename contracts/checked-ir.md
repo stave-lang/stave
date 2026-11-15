@@ -77,7 +77,7 @@ instructions; the trap kind is the matching panic kind (`Overflow`, `Bounds`, `D
 | `popcount clz ctz` | `a` | bit counts within the type's width; result type = operand type |
 | `mul.wide` | `a b` | `u32`/`u64` → `tuple (hi, lo)` |
 | `eq ne lt le gt ge` | `a b` | result `bool`; ints by signedness, floats IEEE (unordered: only `ne` true); pointers and fn values `eq`/`ne` only |
-| `select` | `c a b` | `c ? a : b` |
+| `select` | `c a b` | `c ? a : b`: `c` is `bool`, `a` and `b` have the result type (any type, aggregates included). Both operands are already computed; a backend emits no branch on `c` and no memory access whose address depends on `c` (a conditional move per scalar or per 8-byte word). A mask `c` with vector operands of its shape is the lane-wise form, verified when vector lowering lands |
 | `cast cast.wrap cast.sat cast.round cast.try` | `x` | `as as% as\| as~ as?` (allowed pairs: below); `cast.try` yields the `Option` instance |
 | `make` | elems.. | tuple, struct, or array value (SSA aggregate) |
 | `get` † / `set` † | `agg idx` / `agg idx v` | field (constant index) or array element; `set` yields the updated aggregate; a dynamic array index traps `Bounds` |

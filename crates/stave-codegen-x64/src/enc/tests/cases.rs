@@ -554,3 +554,46 @@ fn invalid_operands() {
     assert_eq!(c.finish().unwrap_err(), EncError::LabelUnbound(m));
     assert!(Gpr::new(16).is_none() && Xmm::new(16).is_none());
 }
+
+/// The instructions of a branch-free `select`: `cmov` on 64- and 32-bit registers, float bits
+/// through GPRs, narrow tail loads and stores, and the indexed word loop of a long aggregate.
+#[test]
+fn select_sequences() {
+    check(
+        |a| {
+            a.test_rr(Size::D, RAX, RAX);
+            a.cmov(Cond::Ne, Size::Q, R11, R10)?;
+            a.cmov(Cond::Ne, Size::Q, R11, Mem::base(RBP, -0x28))?;
+            a.cmov(Cond::Ne, Size::D, R11, RBX)?;
+            a.mov_gx(Size::D, R11, x(3))?;
+            a.mov_gx(Size::Q, R10, x(14))?;
+            a.mov_xg(Size::Q, x(2), R11)?;
+            a.mov_xg(Size::D, x(9), R11)?;
+            a.movzx(Size::D, R11, Size::W, Mem::base(RBP, -0x13))?;
+            a.movzx(Size::D, RBX, Size::B, Mem::base(RBP, -0x11))?;
+            a.mov_mr(Size::B, Mem::base(RBP, -0x8), R11)?;
+            a.mov_mr(Size::W, Mem::base(RBP, -0x6), R11)?;
+            a.mov_rm(Size::Q, R11, Mem::index(RBP, R10, Scale::S8, -0x208))?;
+            a.mov_mr(Size::Q, Mem::index(RBP, R10, Scale::S8, -0x8), R11)?;
+            a.mov_ri(Size::Q, RBX, 0)?;
+            Ok(())
+        },
+        &[
+            "test eax,eax",
+            "cmovne r11,r10",
+            "cmovne r11,QWORD PTR [rbp-0x28]",
+            "cmovne r11d,ebx",
+            "movd r11d,xmm3",
+            "movq r10,xmm14",
+            "movq xmm2,r11",
+            "movd xmm9,r11d",
+            "movzx r11d,WORD PTR [rbp-0x13]",
+            "movzx ebx,BYTE PTR [rbp-0x11]",
+            "mov BYTE PTR [rbp-0x8],r11b",
+            "mov WORD PTR [rbp-0x6],r11w",
+            "mov r11,QWORD PTR [rbp+r10*8-0x208]",
+            "mov QWORD PTR [rbp+r10*8-0x8],r11",
+            "mov ebx,0x0",
+        ],
+    );
+}
