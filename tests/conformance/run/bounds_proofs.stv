@@ -1,0 +1,118 @@
+//~ ARGS --release
+//~ STDOUT bounds_proofs.stdout
+// Release builds drop the bounds checks a proof covers (equal lengths, constant offsets from the
+// loop bound) and keep the others; every result is the same as in a debug build.
+import std.debug;
+import std.io;
+
+fn dot(a: &[u32], b: &[u32]) -> u32 {
+    debug.assert(a.len() == b.len(), "dot: lengths differ");
+    let mut s: u32 = 0;
+    for i in 0..a.len() {
+        s += a[i] * b[i];
+    }
+    return s;
+}
+
+fn dot_or_zero(a: &[u32], b: &[u32]) -> u32 {
+    if a.len() != b.len() {
+        return 0;
+    }
+    let mut s: u32 = 0;
+    for i in 0..a.len() {
+        s += a[i] * b[i];
+    }
+    return s;
+}
+
+fn rises(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 1..xs.len() {
+        s += xs[i] -% xs[i - 1];
+    }
+    return s;
+}
+
+fn tail_sum(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..xs.len() - 1 {
+        s += xs[i + 1];
+    }
+    return s;
+}
+
+fn pair_sum(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    while i + 1 < xs.len() {
+        s += xs[i] + xs[i + 1];
+        i += 1;
+    }
+    return s;
+}
+
+// The look-alikes below keep their checks: each would trap on some input, just not on these.
+
+fn le_only(a: &[u32], b: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    if b.len() <= a.len() {
+        for i in 0..a.len() {
+            s += b[i];
+        }
+    }
+    return s;
+}
+
+fn eq_on_one_path(a: &[u32], b: &[u32]) -> u32 {
+    if a.len() < 2 {
+        debug.assert(a.len() == b.len(), "short: lengths differ");
+    }
+    let mut s: u32 = 0;
+    for i in 0..a.len() {
+        s += b[i];
+    }
+    return s;
+}
+
+fn next_under_len(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..xs.len() {
+        s += xs[i] + xs[i + 1];
+    }
+    return s;
+}
+
+fn prev_wrapping(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..xs.len() {
+        s += xs[i -% 1];
+    }
+    return s;
+}
+
+fn at_offset(xs: &[u32], k: usize) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..xs.len() {
+        s += xs[i + k];
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let a: [u32; 4] = [1, 3, 6, 10];
+    let b: [u32; 4] = [2, 2, 2, 2];
+    let none: [u32; 0] = [];
+    let v1 = dot(&a, &b);
+    let v2 = dot_or_zero(&a, &b);
+    let v3 = rises(&a);
+    let v4 = tail_sum(&a);
+    let v5 = pair_sum(&a);
+    let v6 = le_only(&a, &b);
+    let v7 = eq_on_one_path(&a, &b);
+    let v8 = next_under_len(&none);
+    let v9 = prev_wrapping(&none);
+    let v10 = at_offset(&a, 0);
+    io.print(f"{v1} {v2} {v3} {v4} {v5}\n");
+    io.print(f"{v6} {v7} {v8} {v9} {v10}\n");
+    return 0;
+}
