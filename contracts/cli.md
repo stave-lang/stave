@@ -9,7 +9,7 @@ built program's exit codes are in LANG.md §3 (101 on a panic).
 | Command | Purpose |
 |---|---|
 | `stave build [PKG_DIR] [--release] [--target T] [--features F,...] [-o OUT]` | Build an executable or static library |
-| `stave run [PKG_DIR] [--release] [--target T] [-- ARGS...]` | Build, then exec. `--target` only the host's targets (the triples of the host's arch, at any level the host CPU supports) or `gpu-sm86`; otherwise E1001 |
+| `stave run [PKG_DIR [ARGS...]] [--release] [--target T] [-- ARGS...]` | Build, then exec. `--target` only the host's targets (the triples of the host's arch, at any level the host CPU supports) or `gpu-sm86`; otherwise E1001 |
 | `stave check [PKG_DIR]` | Parse, resolve, type check, and borrow check. No codegen |
 | `stave test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD]` | Build and run `test fn`s and the conformance files. `--runner` wraps execution (e.g. `sde64 -icx --`, `qemu-aarch64 -cpu max,...`). A target the host cannot run without a runner is E1001: reported as not run, never as passed |
 | `stave unsafe-report [PKG_DIR] [--json]` | List the unsafe inventory |
@@ -37,7 +37,11 @@ Outputs and statuses of the code-generating commands:
 - `stave run`: builds to a temporary file (named as the `stave build` default, refused the same way, in
   a fresh private directory), runs it with `ARGS` and the inherited stdio, and exits
   with the program's status (`128 + n` when killed by signal `n`). A target the host cannot run
-  is E1001 (exit 1) before anything is built.
+  is E1001 (exit 1) before anything is built. `ARGS` are the words after `PKG_DIR` that are not
+  flags, then everything after `--` (an argument starting with `-` must come after `--`).
+- Scripts: `PKG_DIR` may be one `.stv` file, a program without a manifest, in every command. Its
+  first line may be a shebang line (LANG.md §2), so an executable file starting with
+  `#!/usr/bin/env -S stave run` runs directly: `./hello.stv a b` is `stave run ./hello.stv a b`.
 - `stave test [DIR]`: the conformance runner over DIR (contracts/conformance-annotations.md);
   `--target T` applies to tests without a `TARGET` annotation, `--runner CMD` (split at
   whitespace, the binary and its arguments appended) runs every binary. When DIR is a package,

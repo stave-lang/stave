@@ -18,9 +18,9 @@
 //!   (exit 2) unless `-o` is given. A program without `fn main` is E0108 (exit 1). A program stage0
 //!   cannot compile yet (vectors, closure captures, ...) exits 2 with the reason; any other
 //!   back-end failure on a valid program is exit 3. `kind = "lib"` packages are not built yet.
-//! - `run [-- ARGS]`: `build` to a temporary file, then runs it with ARGS and the inherited stdio;
-//!   the exit status is the program's (`128 + signal` if killed). A target the host cannot run is
-//!   E1001 (exit 1), checked before building.
+//! - `run [PKG_DIR [ARGS]] [-- ARGS]`: `build` to a temporary file, then runs it with ARGS and the
+//!   inherited stdio; the exit status is the program's (`128 + signal` if killed). A target the
+//!   host cannot run is E1001 (exit 1), checked before building.
 //! - `test [DIR]`: the conformance runner over DIR with the stage0 test compiler (builds and runs
 //!   run tests, natively or through `--runner`; `--target` applies to tests without `TARGET`);
 //!   when DIR is a package, also its `test fn`s (stave_driver::harness).

@@ -114,6 +114,80 @@ fn run_exits_with_the_program_status() {
     assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
 }
 
+/// Runs the executable script `script` with `stave` first on `PATH`, as a shell would.
+#[cfg(unix)]
+fn run_script(script: &Path, args: &[&str]) -> (i32, String, String) {
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_stave")).parent().unwrap().to_path_buf();
+    let rest = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(&rest))).unwrap();
+    let mut tries = 0;
+    loop {
+        let r = Command::new(script)
+            .args(args)
+            .current_dir(script.parent().unwrap())
+            .env("PATH", &path)
+            .env_remove("STAVE_THREADS")
+            .env_remove("STAVE_STD_DIR")
+            .env_remove("STAVE_SEMA_SHUFFLE")
+            .output();
+        match r {
+            // ETXTBSY: another test thread forked a child while this one held the script open
+            // for writing; the child closes its copy when it execs.
+            Err(e) if e.raw_os_error() == Some(26) && tries < 100 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            r => {
+                let o = r.unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+                return (
+                    o.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&o.stdout).into(),
+                    String::from_utf8_lossy(&o.stderr).into(),
+                );
+            }
+        }
+    }
+}
+
+/// An executable `.stv` file that starts with `#!/usr/bin/env -S stave run` runs directly: the
+/// kernel starts `stave run SCRIPT ARGS...`. The shebang line is line 1 of the diagnostics.
+#[cfg(unix)]
+#[test]
+fn shebang_script_runs_directly() {
+    use std::os::unix::fs::PermissionsExt;
+    if !host_runs() {
+        return;
+    }
+    let d = tmp("shebang");
+    let script = |name: &str, body: &str| {
+        let p = d.join(name);
+        std::fs::write(&p, format!("#!/usr/bin/env -S stave run\n{body}")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    };
+    let greet = script(
+        "greet.stv",
+        "import std.env;\nimport std.io;\n\nfn main() -> i32 {\n    let n = env.count();\n    \
+         io.print(f\"args {n}\\n\");\n    match env.arg(2) {\n        Option.Some(a) => {\n            \
+         io.print(a.as_str());\n            io.print(\"\\n\");\n        }\n        Option.None => { }\n    }\n    \
+         return 7;\n}\n",
+    );
+    let (c, out, err) = run_script(&greet, &["one", "two"]);
+    assert_eq!((c, out.as_str()), (7, "args 3\ntwo\n"), "{err}");
+    let (c, out, err) = run_script(&greet, &[]);
+    assert_eq!((c, out.as_str()), (7, "args 1\n"), "{err}");
+    // The same file through the commands that take a root.
+    let p = greet.display().to_string();
+    assert_eq!(stave_in(&d, &["check", &p]).0, 0);
+    let (c, out, err) = stave_in(&d, &["run", &p, "one", "--", "-x", "y"]);
+    assert_eq!((c, out.as_str()), (7, "args 4\n-x\n"), "{err}");
+    // Line 3 of the file is line 3 of the diagnostic.
+    let bad = script("bad.stv", "fn main() -> i32 {\n    return nope;\n}\n");
+    let (c, out, err) = run_script(&bad, &[]);
+    assert_eq!((c, out.as_str()), (1, ""), "{err}");
+    assert!(err.starts_with("bad.stv:3:12: error[E0101]: "), "{err}");
+}
+
 #[test]
 fn run_foreign_target_is_e1001() {
     let foreign = if cfg!(target_arch = "x86_64") { "aarch64-linux" } else { "x86_64-linux" };

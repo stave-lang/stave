@@ -4,7 +4,7 @@
 mod common;
 
 use common::{F, kinds, lex_diags, toks};
-use stave_syntax::{KIND_ERROR, LexStop, Term, lex, token_end};
+use stave_syntax::{KIND_ERROR, LexStop, Term, lex, shebang_end, token_end};
 
 #[test]
 fn single_tokens_fr002a() {
@@ -163,6 +163,48 @@ fn bom_e0017_resumes() {
     assert!(l.stop.is_none());
     // a BOM later in the file is not E0017: three non-ASCII bytes, one E0018
     assert_eq!(lex_diags("a\u{FEFF}b".as_bytes()), vec![("E0018", 1)]);
+}
+
+#[test]
+fn shebang_line_only_at_offset_0() {
+    // a comment up to the first newline, whatever it holds
+    assert_eq!(toks("#!/usr/bin/env -S stave run\nfn f"), vec!["fn:fn", "Ident:f"]);
+    assert_eq!(toks("#! \"open 'x /* @ $ é\nx"), vec!["Ident:x"]);
+    assert_eq!(kinds("#!"), Vec::<&str>::new());
+    assert_eq!(kinds("#!x"), Vec::<&str>::new());
+    assert_eq!(kinds("#!\n"), Vec::<&str>::new());
+    assert_eq!(kinds("#!\r\nx"), vec!["Ident"]);
+    for src in ["#!/bin/x\nfn f() { }", "#!", "#!\n", "#!a\n\n"] {
+        let l = lex(src.as_bytes(), F);
+        assert!(l.diagnostics.is_empty() && l.stop.is_none(), "{src:?}");
+        assert_eq!(l.tokens.last().unwrap().start as usize, src.len(), "{src:?}");
+        assert_eq!(shebang_end(src.as_bytes()), src.find('\n').unwrap_or(src.len()), "{src:?}");
+    }
+    // offsets after the line are file offsets
+    let src = b"#!/bin/x\nfn f() { @ }\n";
+    let l = lex(src, F);
+    assert_eq!(l.tokens[0].start, 9);
+    assert_eq!(lex_diags(src), vec![("E0018", 18)]);
+    // only `#!`, only at offset 0
+    assert_eq!(lex_diags(b"# !x\ny"), vec![("E0018", 0)]);
+    assert_eq!(lex_diags(b"#x"), vec![("E0018", 0)]);
+    assert_eq!(lex_diags(b"\n#!/bin/x\nfn"), vec![("E0018", 1)]);
+    assert_eq!(lex_diags(b" #!/bin/x"), vec![("E0018", 1)]);
+    assert_eq!(lex_diags(b"#!/bin/x\n#!/bin/y\n"), vec![("E0018", 9)]);
+    assert_eq!(toks("x\n#!y"), vec!["Ident:x", "ERROR:#", "!:!", "Ident:y"]);
+    for src in [b"" as &[u8], b"#", b"!#", b"x#!", b"\n#!"] {
+        assert_eq!(shebang_end(src), 0, "{src:?}");
+    }
+    // after a byte-order mark the `#!` is not at offset 0
+    assert_eq!(lex_diags(b"\xEF\xBB\xBF#!/bin/x\nfn"), vec![("E0017", 0), ("E0018", 3)]);
+    // invalid UTF-8 inside the line: E0001 there, nothing lexed
+    let src = b"#!/bin/\xff\nfn f() { }";
+    let l = lex(src, F);
+    assert_eq!(lex_diags(src), vec![("E0001", 7)]);
+    assert_eq!(l.stop, Some(LexStop::InvalidUtf8 { offset: 7 }));
+    assert_eq!(l.tokens.iter().map(|t| (t.kind, t.start)).collect::<Vec<_>>(), [(Term::Eof as u8, 7)]);
+    // and after it
+    assert_eq!(lex_diags(b"#!/bin/x\nfn \xff"), vec![("E0001", 12)]);
 }
 
 #[test]
