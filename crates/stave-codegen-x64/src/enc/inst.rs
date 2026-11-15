@@ -2,7 +2,7 @@
 
 use stave_obj::{Reloc, RelocKind, SymbolId};
 
-use super::{Asm, Cond, EncError, Gpr, Label, Mem, Rm, Size, Target, Xmm};
+use super::{Asm, Cond, EncError, Gpr, Label, Mem, Rm, Scale, Size, Target, Xmm};
 
 /// Two-operand integer ALU operations (the `/digit` of opcodes 80/81/83).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -103,9 +103,16 @@ impl From<Mem> for XRm {
 }
 
 #[derive(Clone, Copy)]
-enum RmEnc {
+pub(super) enum RmEnc {
     Reg(u8),
     Mem(Mem),
+    /// Vector-indexed memory (gathers): the index is a vector register number.
+    Vsib {
+        base: Option<Gpr>,
+        index: u8,
+        scale: Scale,
+        disp: i32,
+    },
 }
 
 impl From<Rm> for RmEnc {
@@ -128,14 +135,14 @@ impl From<XRm> for RmEnc {
 
 /// One encoding: prefix, REX.W, forced REX (byte registers `spl..dil`), opcode, ModRM.reg (a
 /// register number or `/digit`), ModRM.rm operand, and the immediate bytes that follow.
-struct Enc<'a> {
-    pfx: Option<u8>,
-    w: bool,
-    rex8: bool,
-    opc: &'a [u8],
-    reg: u8,
-    rm: RmEnc,
-    trailing: u8,
+pub(super) struct Enc<'a> {
+    pub(super) pfx: Option<u8>,
+    pub(super) w: bool,
+    pub(super) rex8: bool,
+    pub(super) opc: &'a [u8],
+    pub(super) reg: u8,
+    pub(super) rm: RmEnc,
+    pub(super) trailing: u8,
 }
 
 fn fits_i8(v: i64) -> bool {
@@ -168,7 +175,7 @@ fn byte_reg(s: Size, r: u8) -> bool {
 fn byte_rm(s: Size, rm: &RmEnc) -> bool {
     match rm {
         RmEnc::Reg(r) => byte_reg(s, *r),
-        RmEnc::Mem(_) => false,
+        RmEnc::Mem(_) | RmEnc::Vsib { .. } => false,
     }
 }
 
@@ -177,8 +184,9 @@ fn size_pfx(s: Size) -> Option<u8> {
 }
 
 impl Asm {
-    fn enc(&mut self, e: Enc<'_>) -> Result<(), EncError> {
-        let (x, b) = match &e.rm {
+    /// The REX/VEX `X` and `B` bits an r/m operand needs; validates the operand.
+    pub(super) fn rm_xb(&self, rm: &RmEnc) -> Result<(u8, u8), EncError> {
+        Ok(match rm {
             RmEnc::Reg(r) => (0, (r >> 3) & 1),
             RmEnc::Mem(Mem::Sib { base, index, .. }) => {
                 if let Some((i, _)) = index
@@ -194,7 +202,12 @@ impl Asm {
                 }
                 (0, 0)
             }
-        };
+            RmEnc::Vsib { base, index, .. } => ((index >> 3) & 1, base.map_or(0, |r| (r.0 >> 3) & 1)),
+        })
+    }
+
+    pub(super) fn enc(&mut self, e: Enc<'_>) -> Result<(), EncError> {
+        let (x, b) = self.rm_xb(&e.rm)?;
         if let Some(p) = e.pfx {
             self.buf.push(p);
         }
@@ -203,53 +216,66 @@ impl Asm {
             self.buf.push(rex);
         }
         self.buf.extend_from_slice(e.opc);
-        let reg3 = (e.reg & 7) << 3;
-        match e.rm {
+        self.emit_modrm(e.reg, e.rm, e.trailing);
+        Ok(())
+    }
+
+    /// ModRM, SIB, and displacement for `reg` and `rm`; `trailing` is the number of immediate
+    /// bytes that follow (a RIP-relative displacement counts from the end of the instruction).
+    pub(super) fn emit_modrm(&mut self, reg: u8, rm: RmEnc, trailing: u8) {
+        let reg3 = (reg & 7) << 3;
+        match rm {
             RmEnc::Reg(r) => self.buf.push(0xc0 | reg3 | (r & 7)),
             RmEnc::Mem(Mem::Sib { base, index, disp }) => {
-                let d = i64::from(disp);
-                match base {
-                    None => {
-                        let sib = index.map_or(0x25, |(i, s)| ((s as u8) << 6) | ((i.0 & 7) << 3) | 5);
-                        self.buf.extend_from_slice(&[reg3 | 4, sib]);
-                        self.buf.extend_from_slice(&disp.to_le_bytes());
-                    }
-                    Some(bs) => {
-                        let b3 = bs.0 & 7;
-                        let md = if d == 0 && b3 != 5 {
-                            0
-                        } else if fits_i8(d) {
-                            1
-                        } else {
-                            2
-                        };
-                        if index.is_some() || b3 == 4 {
-                            let sib = match index {
-                                Some((i, s)) => ((s as u8) << 6) | ((i.0 & 7) << 3) | b3,
-                                None => 0x20 | b3,
-                            };
-                            self.buf.extend_from_slice(&[(md << 6) | reg3 | 4, sib]);
-                        } else {
-                            self.buf.push((md << 6) | reg3 | b3);
-                        }
-                        match md {
-                            1 => self.buf.push(disp as i8 as u8),
-                            2 => self.buf.extend_from_slice(&disp.to_le_bytes()),
-                            _ => {}
-                        }
-                    }
-                }
+                self.emit_sib(reg3, base.map(|r| r.0), index.map(|(i, s)| (i.0, s as u8)), disp)
+            }
+            RmEnc::Vsib { base, index, scale, disp } => {
+                self.emit_sib(reg3, base.map(|r| r.0), Some((index, scale as u8)), disp)
             }
             RmEnc::Mem(Mem::Rip { target, disp }) => {
                 self.buf.push(reg3 | 5);
-                let bias = i64::from(disp) - i64::from(e.trailing);
+                let bias = i64::from(disp) - i64::from(trailing);
                 match target {
                     Target::Label(l) => self.rel32_label(l, bias),
                     Target::Sym(s) => self.rel32_sym(s, bias - 4),
                 }
             }
         }
-        Ok(())
+    }
+
+    fn emit_sib(&mut self, reg3: u8, base: Option<u8>, index: Option<(u8, u8)>, disp: i32) {
+        let d = i64::from(disp);
+        match base {
+            None => {
+                let sib = index.map_or(0x25, |(i, s)| (s << 6) | ((i & 7) << 3) | 5);
+                self.buf.extend_from_slice(&[reg3 | 4, sib]);
+                self.buf.extend_from_slice(&disp.to_le_bytes());
+            }
+            Some(bs) => {
+                let b3 = bs & 7;
+                let md = if d == 0 && b3 != 5 {
+                    0
+                } else if fits_i8(d) {
+                    1
+                } else {
+                    2
+                };
+                if index.is_some() || b3 == 4 {
+                    let sib = match index {
+                        Some((i, s)) => (s << 6) | ((i & 7) << 3) | b3,
+                        None => 0x20 | b3,
+                    };
+                    self.buf.extend_from_slice(&[(md << 6) | reg3 | 4, sib]);
+                } else {
+                    self.buf.push((md << 6) | reg3 | b3);
+                }
+                match md {
+                    1 => self.buf.push(disp as i8 as u8),
+                    2 => self.buf.extend_from_slice(&disp.to_le_bytes()),
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Register-only encodings cannot fail.
@@ -257,7 +283,7 @@ impl Asm {
         let _ = self.enc(e);
     }
 
-    fn imm(&mut self, v: i64, n: u8) {
+    pub(super) fn imm(&mut self, v: i64, n: u8) {
         self.buf.extend_from_slice(&v.to_le_bytes()[..n as usize]);
     }
 

@@ -1,5 +1,6 @@
-//! x86-64 instruction encoder: general-purpose integer instructions and the SSE2 scalar float
-//! subset a template/greedy debug backend needs.
+//! x86-64 instruction encoder: general-purpose integer instructions, the SSE2 scalar float subset
+//! a template/greedy debug backend needs, and packed-vector instructions in legacy SSE and VEX
+//! encodings (see [`Asm::sse_bin`], [`Asm::vex_bin`]).
 //!
 //! [`Asm`] is a byte buffer with labels and fixups. Branches to labels are always `rel32` (so code
 //! size does not depend on label distance and patching is predictable). References to other
@@ -10,12 +11,19 @@
 //! `r` register, `m` memory, `i` immediate (e.g. [`Asm::alu_mi`]: memory ← memory op imm).
 
 mod inst;
+mod simd;
+mod simd_ops;
 
 use std::fmt;
 
 use stave_obj::{FileId, FuncCode, LineRow, Reloc, RelocKind, SymbolId};
 
 pub use inst::{AluOp, PLogic, Prec, ShiftOp, SseOp, UnaryOp, XRm};
+pub use simd::{VLen, VReg, VRm, VecReg};
+pub use simd_ops::{
+    CmpPred, PExtr, PInsr, Prefetch, VBin, VBinI, VBlendV, VCvtN, VExtract, VGather, VMaskStore, VMovMsk,
+    VShiftI, VStore, VUn, VUnI,
+};
 
 /// A general-purpose register; `Gpr(n)` for n in 0..16 (`rax`..`r15`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -87,6 +95,25 @@ impl Xmm {
     /// `xmm(n & 15)`: total, for register tables.
     pub const fn masked(n: u8) -> Xmm {
         Xmm(n & 15)
+    }
+
+    pub fn num(self) -> u8 {
+        self.0
+    }
+}
+
+/// An AVX register `ymm0`..`ymm15` (the 256-bit view of `xmm0`..`xmm15`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Ymm(u8);
+
+impl Ymm {
+    pub fn new(n: u8) -> Option<Ymm> {
+        (n < 16).then_some(Ymm(n))
+    }
+
+    /// `ymm(n & 15)`: total, for register tables.
+    pub const fn masked(n: u8) -> Ymm {
+        Ymm(n & 15)
     }
 
     pub fn num(self) -> u8 {

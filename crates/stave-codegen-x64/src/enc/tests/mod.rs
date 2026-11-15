@@ -5,6 +5,7 @@ mod cases;
 mod elf;
 mod props;
 mod random;
+mod simd;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
