@@ -612,16 +612,21 @@ fix = { description = "split the match: match on fewer or less deeply nested val
 code = "E0301"
 severity = "error"
 area = "patterns"
-rule = "unreachable match arm"
+rule = "unreachable match arm. Case `alternative`: an alternative of an or-pattern (`A | B =>`) that never matches (covered by earlier arms or by earlier alternatives of its arm)"
 message = "unreachable match arm"
 labels = [{ at = "primary", text = "this arm never matches" }, { at = "covering", text = "earlier arm that already covers it" }]
 fix = { description = "remove this arm, or move it before the arm that covers it" }
+
+[diag.cases.alternative]
+message = "unreachable alternative of a match arm"
+labels = [{ at = "primary", text = "this alternative never matches" }, { at = "covering", text = "earlier pattern that already covers it" }]
+fix = { description = "remove this alternative" }
 
 [[diag]]
 code = "E0302"
 severity = "error"
 area = "patterns"
-rule = "or-pattern alternatives bind different names, or a name with a different type or binding mode (planned)"
+rule = "or-pattern alternatives bind different names, or a name with a different type or binding mode (by value or by reference, `mut` or not)"
 holes = { name = "name" }
 message = "`{name}` is not bound the same way in every alternative of this pattern"
 labels = [{ at = "primary", text = "alternative that differs" }, { at = "first", text = "first alternative" }]

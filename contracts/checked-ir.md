@@ -160,7 +160,7 @@ b2():
    | `while` | head, body, exit |
    | `loop` | body, exit |
    | `for` (element or chunk) | head, body, tail (one per tail block or check), exit |
-   | `match` statement or expression | per arm in source order: test, guard (if present), body; then join |
+   | `match` statement or expression | per arm in source order: test (one per alternative of an or-pattern, in source order), guard (if present), body; then join |
    | `&&`, `\|\|` | right operand, join |
    | `?` | error return, continue |
    | anything else | none |
@@ -182,6 +182,12 @@ b2():
   block param per SSA local that is assigned inside the construct (a branch, arm, or loop body) and
   is live at the join's entry. Liveness is computed by path exploration. Params are ordered by local index (fn params, then `let`s in source order). An expression
   join (`if then else`, match expression, `&&`/`||`) has one more param, first, for the value.
+- **Or-pattern arm** (`P1 | P2 =>`): every alternative has its own test block, which binds the
+  arm's locals from that alternative and branches to the arm's guard block (its body block when
+  the arm has no guard). That block has one param per SSA local the alternatives bind, ordered by
+  local index (the first alternative's bindings are the locals), and is pruned like a join's: a
+  bound name that is not used has no param. Locals in a `slot` are stored by each test block. The
+  guard and the body are lowered once; a false guard continues with the next arm.
 - No other block params. No folding (except literal `-`), copy propagation, or dead-code
   removal beyond unreachable blocks.
 - **Slots**: every `slot` is in `b0`, before any other instruction of `b0`, one per address-taken
@@ -205,8 +211,14 @@ b2():
   `@<inst>` callee.
 - **Exhaustive match**: a `match` whose arms test a discriminant (enum variant, int, `bool`,
   `char`) lowers its arm tests to one `switch` on the discriminant (`enum.tag` for an enum): a
-  case per tested value to that arm's test block, and the last arm's test block as the default
-  `_` (the match is exhaustive, E0300, so no extra trap block exists).
+  case per tested value to the test block of the first alternative testing it, and the last
+  alternative's test block as the default `_` (the match is exhaustive, E0300, so no extra trap
+  block exists). A test block that fails (a nested pattern, a false guard) branches to the next
+  alternative that tests the same value or accepts every value. A guarded arm must make that
+  target independent of the value: its alternatives test one value, or the alternative after
+  the arm accepts every value. Otherwise the match has no `switch`: every alternative tests the
+  discriminant itself, a failed test branches to the next alternative, and a false guard to the
+  first alternative of the next arm.
 
 ## Types and fntype
 

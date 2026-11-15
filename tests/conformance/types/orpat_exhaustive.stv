@@ -1,0 +1,106 @@
+//~ CHECK-ONLY
+// Exhaustiveness (E0300) counts every alternative of an or-pattern. An alternative that can
+// never match is unreachable (E0301, at that alternative): covered by earlier arms, or by
+// earlier alternatives of its own arm (the first alternative that matches wins, guard or not).
+enum Tok { Plus, Minus, Star, Num(u32), Eof }
+
+fn all(t: Tok) -> u32 {
+    return match t {
+        Tok.Plus | Tok.Minus | Tok.Star => 1,
+        Tok.Num(_) | Tok.Eof => 2,
+    };
+}
+
+fn gap(t: Tok) -> u32 {
+    return match t { //~ ERROR E0300
+        Tok.Plus | Tok.Minus => 1,
+        Tok.Num(_) | Tok.Eof => 2,
+    };
+}
+
+fn bytes(b: u8) -> u32 {
+    return match b {
+        0..=9 | 20..=29 => 1,
+        10..=19 | 30..=255 => 2,
+    };
+}
+
+fn bytes_gap(b: u8) -> u32 {
+    return match b { //~ ERROR E0300
+        0..=9 | 20..=29 => 1,
+        10..=18 | 30..=255 => 2,
+    };
+}
+
+fn tuples(p: (bool, bool)) -> u32 {
+    return match p {
+        (true, _) | (_, true) => 1,
+        (false, false) => 2,
+    };
+}
+
+fn guarded_covers_nothing(t: Tok, c: bool) -> u32 {
+    return match t { //~ ERROR E0300
+        Tok.Plus | Tok.Minus | Tok.Star if c => 1,
+        Tok.Num(_) | Tok.Eof => 2,
+    };
+}
+
+fn guarded_then_plain(t: Tok, c: bool) -> u32 {
+    return match t {
+        Tok.Plus | Tok.Minus if c => 1,
+        Tok.Plus | Tok.Minus => 2,
+        _ => 3,
+    };
+}
+
+fn covered_by_arm(t: Tok) -> u32 {
+    return match t {
+        Tok.Plus => 1,
+        Tok.Minus | Tok.Plus => 2, //~ ERROR E0301
+        _ => 3,
+    };
+}
+
+fn covered_in_arm(t: Tok) -> u32 {
+    return match t {
+        Tok.Plus | Tok.Minus | Tok.Plus => 1, //~ ERROR E0301
+        _ => 3,
+    };
+}
+
+fn covered_in_guarded_arm(t: Tok, c: bool) -> u32 {
+    return match t {
+        Tok.Num(_) | Tok.Num(0) if c => 1, //~ ERROR E0301
+        _ => 2,
+    };
+}
+
+fn each_alternative(b: bool) -> u32 {
+    match b {
+        true | false => { return 1; }
+        false //~ ERROR E0301
+        | true => { return 2; } //~ ERROR E0301
+    }
+}
+
+fn after_wildcard(x: u8) -> u32 {
+    return match x {
+        0 | _ => 1,
+        1 //~ ERROR E0301
+        | 2 => 2, //~ ERROR E0301
+    };
+}
+
+fn ranges(x: u8) -> u32 {
+    return match x {
+        0..=9 | 5..=20 => 1,
+        3..=7 //~ ERROR E0301
+        | 21 => 2,
+        _ => 3,
+    };
+}
+
+fn main() -> i32 {
+    return 0;
+}

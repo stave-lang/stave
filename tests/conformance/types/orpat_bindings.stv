@@ -1,0 +1,94 @@
+//~ CHECK-ONLY
+// Every alternative of an or-pattern binds the same names, each with the same type and binding
+// mode (by value or by reference, `mut` or not): E0302 at each alternative that differs from
+// the first, once per name.
+enum Tok { Num(u32), Wide(u64), Pair { a: u32, b: u32 }, Name(u32), Eof }
+
+view enum Seen { Own(&u32), In(&Tok), Nothing }
+
+fn same(t: Tok) -> u32 {
+    return match t {
+        Tok.Num(n) | Tok.Name(n) => n,
+        Tok.Pair.{ a, b: 0 } | Tok.Pair.{ a: _, b: a } => a,
+        Tok.Wide(_) | Tok.Eof => 0,
+    };
+}
+
+fn swapped(p: (u32, u32, bool)) -> u32 {
+    return match p {
+        (a, b, true) | (b, a, false) => a - b,
+    };
+}
+
+fn other_name(t: Tok) -> u32 {
+    return match t {
+        Tok.Num(n) | Tok.Name(m) => 1, //~ ERROR E0302
+        //~^ ERROR E0302
+        _ => 0,
+    };
+}
+
+fn missing(t: Tok) -> u32 {
+    return match t {
+        Tok.Num(n)
+        | Tok.Eof //~ ERROR E0302
+        | Tok.Name(n) => 1,
+        _ => 0,
+    };
+}
+
+fn extra(t: Tok) -> u32 {
+    match t {
+        Tok.Eof | Tok.Num(n) => { return 1; } //~ ERROR E0302
+        _ => { return 0; }
+    }
+}
+
+fn other_type(t: Tok) -> u32 {
+    return match t {
+        Tok.Num(n) | Tok.Wide(n) => 1, //~ ERROR E0302
+        _ => 0,
+    };
+}
+
+fn ref_or_value(p: (u32, &u32)) -> u32 {
+    return match p {
+        (0, n) | (n, _) => 1, //~ ERROR E0302
+    };
+}
+
+fn other_mode(s: Seen) -> u32 {
+    return match s {
+        Seen.Own(r) | Seen.In(Tok.Num(r)) => *r, //~ ERROR E0302
+        _ => 0,
+    };
+}
+
+fn other_mut(t: Tok) -> u32 {
+    return match t {
+        Tok.Num(mut n) | Tok.Name(n) => n, //~ ERROR E0302
+        _ => 0,
+    };
+}
+
+fn each_alternative(t: Tok) -> u32 {
+    return match t {
+        Tok.Num(n)
+        | Tok.Wide(n) //~ ERROR E0302
+        | Tok.Name(n)
+        | Tok.Pair.{ a: _, b: _ } => 1, //~ ERROR E0302
+        Tok.Eof => 0,
+    };
+}
+
+fn two_names(t: Tok) -> u32 {
+    return match t {
+        Tok.Pair.{ a, b }
+        | Tok.Num(a) => a, //~ ERROR E0302
+        _ => 0,
+    };
+}
+
+fn main() -> i32 {
+    return 0;
+}

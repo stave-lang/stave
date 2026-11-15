@@ -129,6 +129,10 @@ pub struct ItemRes {
     pub deferred: Vec<Deferred>,
     /// Sorted by binding node.
     pub bindings: Vec<Binding>,
+    /// Or-pattern bindings: (binding node in a later alternative, the first alternative's
+    /// binding node of that name), sorted by the first component. A later alternative's binding
+    /// with no entry has a name the first alternative does not bind.
+    pub aliases: Vec<(u32, u32)>,
     /// The first use of syntax that parses but has no semantics in stage0 yet: its first token
     /// and what it is. A program with one is not checked further.
     pub unimplemented: Option<(u32, &'static str)>,
@@ -138,6 +142,21 @@ impl ItemRes {
     /// The binding `at` (bindings are sorted by node).
     pub fn binding(&self, at: BindingRef) -> Option<&Binding> {
         self.bindings.binary_search_by(|b| b.at.cmp(&at)).ok().map(|i| &self.bindings[i])
+    }
+
+    /// The first alternative's binding that binding node `node` of a later or-pattern
+    /// alternative stands for.
+    pub fn alias(&self, node: u32) -> Option<u32> {
+        if self.aliases.is_empty() {
+            return None;
+        }
+        self.aliases.binary_search_by_key(&node, |a| a.0).ok().map(|i| self.aliases[i].1)
+    }
+
+    /// The binding node that owns the local of binding node `node`: itself, or the first
+    /// alternative's binding when `node` is in a later or-pattern alternative.
+    pub fn canonical(&self, node: u32) -> u32 {
+        self.alias(node).unwrap_or(node)
     }
 
     /// The uses keyed at `node`, in offset order.
@@ -305,6 +324,7 @@ enum Task {
     PopLocals(u32),
     PopGenerics(u32),
     BindPattern(u32, BindKind),
+    BindArm(u32),
     BindParam(u32, BindKind),
     EndFn { gmark: u32, lmark: u32, self_param: Option<BindingRef>, param_mark: u32, level: u8 },
     EndClosure { lmark: u32, param_mark: u32 },
@@ -789,6 +809,39 @@ impl<'t, 'a> W<'t, 'a> {
         }
     }
 
+    /// Binds the alternatives of arm pattern `ap` (`P1 | P2 | ..`). Only the names of the first
+    /// alternative enter the scope: a name of a later alternative is another occurrence of the
+    /// first alternative's binding of that name ([`ItemRes::aliases`]; the k-th occurrence of a
+    /// name pairs with the k-th there).
+    fn bind_arm(&mut self, ap: u32) {
+        let mut rev = self.ast.children_rev(ap);
+        let Some(last) = rev.next() else { return };
+        if rev.next().is_none() {
+            self.bind_pattern(last, BindKind::Arm);
+            return;
+        }
+        let alts = self.ast.children(ap);
+        let lo = self.locals.len();
+        self.bind_pattern(alts[0], BindKind::Arm);
+        let hi = self.locals.len();
+        let mut taken: Vec<bool> = Vec::new();
+        for &alt in &alts[1..] {
+            let bmark = self.res.bindings.len();
+            self.bind_pattern(alt, BindKind::Arm);
+            self.locals.truncate(hi);
+            taken.clear();
+            taken.resize(hi - lo, false);
+            for k in bmark..self.res.bindings.len() {
+                let b = self.res.bindings[k];
+                let free = (0..hi - lo).find(|&i| !taken[i] && self.locals[lo + i].0 == b.name);
+                if let Some(i) = free {
+                    taken[i] = true;
+                    self.res.aliases.push((b.at.node, self.locals[lo + i].1.node));
+                }
+            }
+        }
+    }
+
     fn bind_param(&mut self, p: u32, bk: BindKind) {
         let a = self.a(p);
         if kind(self.toks, a as usize) != T_IDENT {
@@ -1005,17 +1058,8 @@ impl<'t, 'a> W<'t, 'a> {
                 for &c in kids.iter().skip(1).rev() {
                     self.stack.push(Task::Visit(c));
                 }
-                // kids[0] is the ArmPattern; only its first alternative is bound
                 if let Some(&ap) = kids.first() {
-                    let mut alts = self.ast.children_rev(ap);
-                    let last = alts.next();
-                    let first = alts.last().or(last);
-                    if first != last {
-                        self.unimplemented(ap, "an or-pattern (`A | B`)");
-                    }
-                    if let Some(p) = first {
-                        self.stack.push(Task::BindPattern(p, BindKind::Arm));
-                    }
+                    self.stack.push(Task::BindArm(ap));
                 }
             }
             NodeKind::Requires | NodeKind::Ensures => {
@@ -1109,6 +1153,7 @@ impl<'t, 'a> W<'t, 'a> {
                 Task::PopLocals(m) => self.locals.truncate(m as usize),
                 Task::PopGenerics(m) => self.generics.truncate(m as usize),
                 Task::BindPattern(p, bk) => self.bind_pattern(p, bk),
+                Task::BindArm(ap) => self.bind_arm(ap),
                 Task::BindParam(p, bk) => self.bind_param(p, bk),
                 Task::EndFn { gmark, lmark, self_param, param_mark, level } => {
                     self.generics.truncate(gmark as usize);
@@ -1171,6 +1216,7 @@ pub(crate) fn resolve_item(t: &Tables<'_>, item: ItemId) -> (ItemRes, Vec<Diagno
     res.uses.sort_by_key(|u| (u.node, u.offset));
     res.deferred.sort_by_key(|d| (d.node, d.offset));
     res.bindings.sort_by_key(|b| b.at);
+    res.aliases.sort_unstable();
     (res, w.diags)
 }
 

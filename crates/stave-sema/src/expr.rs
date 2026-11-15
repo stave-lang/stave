@@ -3124,15 +3124,15 @@ impl<'a> Ck<'a> {
         let mut result: Option<Ty> = None;
         let mut rows = Vec::new();
         let mut arm_ts: Vec<(u32, Ty)> = Vec::new();
-        for &arm in &kids[1..] {
-            let ak = icx.arm_kids(arm);
-            let Some(&pat) = ak.first() else { continue };
-            let p = self.pattern(pat, st, crate::patterns::Mode::Move);
+        for (k, &arm) in kids[1..].iter().enumerate() {
+            // [ArmPattern, guard?, value]
+            let ak = icx.kids_vec(arm);
+            let Some(&ap) = ak.first() else { continue };
             let guard = if ak.len() >= 3 { Some(ak[1]) } else { None };
+            crate::patterns::check_arm(self, ap, st, guard.is_some(), k as u32, &mut rows);
             if let Some(g) = guard {
                 self.check_expr(g, ids::BOOL, None);
             }
-            rows.push((p, guard.is_some(), pat));
             let Some(&e) = ak.last() else { continue };
             self.diverges = false;
             let h = match result.map(|r| self.resolve(r)) {
@@ -3164,15 +3164,15 @@ impl<'a> Ck<'a> {
         let mut rows = Vec::new();
         let mut all_div = true;
         let reach = self.reachable;
-        for &arm in &kids[1..] {
-            let ak = icx.arm_kids(arm);
-            let Some(&pat) = ak.first() else { continue };
-            let p = self.pattern(pat, st, crate::patterns::Mode::Move);
+        for (k, &arm) in kids[1..].iter().enumerate() {
+            // [ArmPattern, guard?, block]
+            let ak = icx.kids_vec(arm);
+            let Some(&ap) = ak.first() else { continue };
             let guard = if ak.len() >= 3 { Some(ak[1]) } else { None };
+            crate::patterns::check_arm(self, ap, st, guard.is_some(), k as u32, &mut rows);
             if let Some(g) = guard {
                 self.check_expr(g, ids::BOOL, None);
             }
-            rows.push((p, guard.is_some(), pat));
             if let Some(&b) = ak.last() {
                 let d = self.block(b);
                 self.reachable = reach;

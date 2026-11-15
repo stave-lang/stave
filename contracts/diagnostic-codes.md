@@ -82,8 +82,8 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0211 | contract operand not allowed: `requires`/`ensures` take a `bool` expression over params, fields, `.len()`, literals, arithmetic, comparison, `&&` `||` `!`, and calls of safe fns whose args are `&` or Copy; no `unsafe`, `&mut`, `static`/`static mut`. Case `trait-impl`: a contract on a trait impl method. Planned |
 | E0212 | parameter named `result` in a fn with `ensures` (`result` is a contextual name inside `ensures`, not a keyword). Planned |
 | E0300 | non-exhaustive match. Case `limit`: the exhaustiveness check exceeds its search limit (patterns nested more than 2,000 levels deep, or over 1,000,000 search steps); the match is rejected |
-| E0301 | unreachable match arm |
-| E0302 | or-pattern alternatives (`A | B =>`) bind different names, or a name with a different type or binding mode. Related span: the first alternative. Planned |
+| E0301 | unreachable match arm. Case `alternative`: an alternative of an or-pattern (`A | B =>`) that never matches: covered by earlier arms or by earlier alternatives of its arm (reported at each such alternative) |
+| E0302 | or-pattern alternatives (`A | B =>`) bind different names, or a name with a different type or binding mode (by value or by reference, `mut` or not). Reported at each alternative that differs from the first, once per name. Related span: the first alternative |
 | E0410 | reference- or view-typed field in a non-view ADT |
 | E0411 | view in a heap or container type (Box, Vec, Map, ...). To be retired: `vec.Vec`, `Box`, `Option`, `Result` take `T: view` and become conditional views; a container without the bound is E0414 case `container` |
 | E0412 | view passed to `forget` |

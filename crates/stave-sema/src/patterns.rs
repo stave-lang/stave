@@ -12,13 +12,19 @@
 //! **References** (not in LANG.md): a constructor or literal pattern matched against `&T` or
 //! `&mut T` peels the reference, and the bindings below bind by reference (`&F` / `&mut F`).
 //! A `let`/`for` pattern must be irrefutable (E0300 at the pattern).
+//!
+//! **Or-patterns** (`P1 | P2 =>`, match arms only): every alternative is one row of the match.
+//! The alternatives are tried in order and the first that matches binds the names, so within
+//! its arm an alternative is unreachable when the earlier ones cover it, guard or not. Only the
+//! first alternative's bindings are locals; the later alternatives must bind the same names with
+//! the same types and modes (E0302) and bind those locals.
 
 use stave_diag::Span;
 use stave_syntax::{NodeKind, Term};
 
 use crate::decls::DeclKind;
 use crate::diag::mk;
-use crate::resolve::Res;
+use crate::resolve::{Binding, Res};
 use crate::sigs::VariantShape;
 use crate::typeck::{Ck, Ty};
 use crate::types::{GArg, Interner, TypeId, TypeKind, ids};
@@ -57,6 +63,15 @@ fn bind_ty(ck: &mut Ck<'_>, t: TypeId, mode: Mode) -> TypeId {
     match mode {
         Mode::Move => t,
         Mode::Ref(m) => ck.tys.mk_ref(m, t),
+    }
+}
+
+/// Gives binding node `node` its type: `t` bound through `mode`.
+fn bind(ck: &mut Ck<'_>, node: u32, t: TypeId, mode: Mode) {
+    let bt = bind_ty(ck, t, mode);
+    ck.locals.insert(node, bt);
+    if let Some(binds) = &mut ck.or_binds {
+        binds.push((node, bt, mode));
     }
 }
 
@@ -105,8 +120,7 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
         return Pat::Wild;
     }
     if tk == Term::KwMut as u8 {
-        let bt = bind_ty(ck, t, mode);
-        ck.locals.insert(p, bt);
+        bind(ck, p, t, mode);
         return Pat::Wild;
     }
     let kids = icx.kids_vec(p);
@@ -149,8 +163,7 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
     let has_paren = icx.is(e + 1, Term::LParen);
     let has_rec = icx.is(e + 1, Term::DotLBrace);
     if e == a && !has_paren && !has_rec {
-        let bt = bind_ty(ck, t, mode);
-        ck.locals.insert(p, bt);
+        bind(ck, p, t, mode);
         return Pat::Wild;
     }
     let Some(u) = icx.uses(p).last() else { return sub_err(ck, &kids) };
@@ -193,16 +206,13 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
                         if let Some(sp) = icx.child(fp, NodeKind::Pattern) {
                             check_pattern(ck, sp, ids::ERROR, pm);
                         } else {
-                            ck.locals.insert(fp, ids::ERROR);
+                            bind(ck, fp, ids::ERROR, Mode::Move);
                         }
                         continue;
                     };
                     match icx.child(fp, NodeKind::Pattern) {
                         Some(sp) => subs[fi] = check_pattern(ck, sp, ftys[fi], pm),
-                        None => {
-                            let bt = bind_ty(ck, ftys[fi], pm);
-                            ck.locals.insert(fp, bt);
-                        }
+                        None => bind(ck, fp, ftys[fi], pm),
                     }
                 }
                 return Pat::Ctor(ctor, subs);
@@ -270,9 +280,7 @@ fn sub_err(ck: &mut Ck<'_>, kids: &[u32]) -> Pat {
                 Some(sp) => {
                     check_pattern(ck, sp, ids::ERROR, Mode::Move);
                 }
-                None => {
-                    ck.locals.insert(k, ids::ERROR);
-                }
+                None => bind(ck, k, ids::ERROR, Mode::Move),
             },
             _ => {}
         }
@@ -612,19 +620,129 @@ fn too_large(ck: &mut Ck<'_>, node: u32, t: TypeId) {
     ck.report(d);
 }
 
-/// E0301 for unreachable arms, E0300 when not exhaustive; returns whether the match is
-/// exhaustive. `rows`: (pattern, guarded, pattern node).
-pub(crate) fn check_match(ck: &mut Ck<'_>, scrut: u32, t: TypeId, rows: &[(Pat, bool, u32)]) -> bool {
-    if t == ids::ERROR || ck.tys.has_error(t) || rows.iter().any(|r| has_err(&r.0)) {
+/// One alternative of a match arm (an arm without `|` has one).
+pub(crate) struct Row {
+    pub pat: Pat,
+    /// The arm has a guard.
+    pub guarded: bool,
+    /// The alternative's pattern node.
+    pub node: u32,
+    /// The arm's index in its match.
+    pub arm: u32,
+    /// The arm has several alternatives.
+    pub alt: bool,
+}
+
+/// The bindings of the pattern rooted at `p`, in source order.
+fn bindings_in<'p>(ck: &Ck<'p>, p: u32) -> &'p [Binding] {
+    let icx = ck.icx;
+    let lo = icx.ast.descendants(p).start;
+    let b = &icx.res.bindings;
+    let i = b.partition_point(|x| x.at.node < lo);
+    let j = b.partition_point(|x| x.at.node <= p);
+    &b[i..j]
+}
+
+/// E0302 for every name that alternative `alt` (typed bindings `binds`) does not bind the way
+/// the first alternative `first_alt` (typed bindings `first`) does: a name only one of them
+/// binds, or one bound with another type, by value in one and by reference in the other, or
+/// `mut` in only one.
+fn same_bindings(
+    ck: &mut Ck<'_>,
+    first_alt: u32,
+    first: &[(u32, TypeId, Mode)],
+    alt: u32,
+    binds: &[(u32, TypeId, Mode)],
+) {
+    let icx = ck.icx;
+    let typed =
+        |list: &[(u32, TypeId, Mode)], node: u32| list.iter().find(|x| x.0 == node).map(|x| (x.1, x.2));
+    let fb = bindings_in(ck, first_alt);
+    let mut seen = vec![false; fb.len()];
+    let mut bad: Vec<u32> = Vec::new();
+    for b in bindings_in(ck, alt) {
+        let pair = icx.res.alias(b.at.node).and_then(|c| fb.iter().position(|f| f.at.node == c));
+        let Some(i) = pair else {
+            bad.push(b.token);
+            continue;
+        };
+        seen[i] = true;
+        let f = &fb[i];
+        let differs = match (typed(binds, b.at.node), typed(first, f.at.node)) {
+            (Some((bt, bm)), Some((ft, fm))) => {
+                bm != fm || (bt != ft && !ck.tys.has_error(bt) && !ck.tys.has_error(ft))
+            }
+            _ => false,
+        };
+        if differs || b.mutable != f.mutable {
+            bad.push(b.token);
+        }
+    }
+    bad.extend(fb.iter().zip(&seen).filter(|x| !*x.1).map(|x| x.0.token));
+    let mut reported: Vec<&str> = Vec::new();
+    for tok in bad {
+        let name = icx.tok_str(tok);
+        if reported.contains(&name) {
+            continue;
+        }
+        reported.push(name);
+        let roles = [("first", icx.node_span(first_alt))];
+        let d = mk("E0302", None, &[("name", name)], icx.node_span(alt), &roles);
+        ck.report(d);
+    }
+}
+
+/// Types the alternatives of arm pattern `ap` (`P1 | P2 | ..`) of arm number `arm` against `t`,
+/// binds the names of the first one, and appends a row per alternative to `rows`.
+pub(crate) fn check_arm(ck: &mut Ck<'_>, ap: u32, t: TypeId, guarded: bool, arm: u32, rows: &mut Vec<Row>) {
+    let icx = ck.icx;
+    if let Some(p) = icx.only_child(ap) {
+        let pat = check_pattern(ck, p, t, Mode::Move);
+        rows.push(Row { pat, guarded, node: p, arm, alt: false });
+        return;
+    }
+    let alts = icx.kids_vec(ap);
+    let mut first: Vec<(u32, TypeId, Mode)> = Vec::new();
+    for (k, &p) in alts.iter().enumerate() {
+        ck.or_binds = Some(Vec::new());
+        let pat = check_pattern(ck, p, t, Mode::Move);
+        rows.push(Row { pat, guarded, node: p, arm, alt: true });
+        let binds = ck.or_binds.take().unwrap_or_default();
+        if k == 0 {
+            first = binds;
+            continue;
+        }
+        // a later alternative's bindings are occurrences of the first one's locals
+        for b in &binds {
+            ck.locals.remove(&b.0);
+        }
+        same_bindings(ck, alts[0], &first, p, &binds);
+    }
+}
+
+/// E0301 for unreachable alternatives, E0300 when not exhaustive; returns whether the match is
+/// exhaustive. `rows`: the alternatives of every arm, in source order.
+pub(crate) fn check_match(ck: &mut Ck<'_>, scrut: u32, t: TypeId, rows: &[Row]) -> bool {
+    if t == ids::ERROR || ck.tys.has_error(t) || rows.iter().any(|r| has_err(&r.pat)) {
         return true;
     }
     let tys = [t];
     let mut prev: Vec<Vec<Pat>> = Vec::new();
     let mut prev_nodes: Vec<u32> = Vec::new();
     let s = &mut Search::default();
-    for (p, guarded, node) in rows {
+    // where the rows of the current arm start in `prev`
+    let mut arm_start = 0;
+    for (i, r) in rows.iter().enumerate() {
+        if i > 0 && rows[i - 1].arm != r.arm {
+            if rows[i - 1].guarded {
+                prev.truncate(arm_start);
+                prev_nodes.truncate(arm_start);
+            }
+            arm_start = prev.len();
+        }
+        let p = &r.pat;
         if !useful(ck, &prev, std::slice::from_ref(p), &tys, 0, s) {
-            // the covering arm: the first k such that arms 0..=k cover it
+            // the covering row: the first k such that rows 0..=k cover it
             let mut cover = prev_nodes.last().copied();
             for k in 0..prev.len() {
                 if !useful(ck, &prev[..=k], std::slice::from_ref(p), &tys, 0, s) {
@@ -634,13 +752,20 @@ pub(crate) fn check_match(ck: &mut Ck<'_>, scrut: u32, t: TypeId, rows: &[(Pat, 
             }
             let roles: Vec<(&str, Span)> =
                 cover.map(|c| ("covering", ck.icx.node_span(c))).into_iter().collect();
-            let d = mk("E0301", None, &[], ck.icx.node_span(*node), &roles);
+            let case = if r.alt { Some("alternative") } else { None };
+            let d = mk("E0301", case, &[], ck.icx.node_span(r.node), &roles);
             ck.report(d);
         }
-        if !guarded {
+        // A guarded arm covers nothing for the later arms. Inside the arm its alternatives still
+        // count: the guard runs once, after the first alternative that matches, so a later
+        // alternative is not tried for that value.
+        if !r.guarded || r.alt {
             prev.push(vec![p.clone()]);
-            prev_nodes.push(*node);
+            prev_nodes.push(r.node);
         }
+    }
+    if rows.last().is_some_and(|r| r.guarded) {
+        prev.truncate(arm_start);
     }
     let open = useful(ck, &prev, &[Pat::Wild], &tys, 0, s);
     if s.exceeded {

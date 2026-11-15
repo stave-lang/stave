@@ -1,0 +1,67 @@
+//~ CHECK-ONLY
+// The names of an or-pattern are one local each, bound by whichever alternative matches: a
+// by-value binding moves out of the scrutinee in every alternative (E0502 on a later use), a
+// binding by reference borrows it (E0501), and in the guard the names are read-only (E0504,
+// E0503) whichever alternative bound them.
+import std.string;
+
+enum Msg { Text(string.String), Note(string.String), Code(u32) }
+
+fn eat(s: string.String) -> bool {
+    return s.len() == 0;
+}
+
+fn grow(s: &mut string.String) -> bool {
+    return true;
+}
+
+fn moved(m: Msg) -> usize {
+    let mut n: usize = 0;
+    match m {
+        Msg.Text(s) | Msg.Note(s) => { n = s.len(); }
+        Msg.Code(_) => {}
+    }
+    let again = m; //~ ERROR E0502
+    return n;
+}
+
+fn moved_in_body(m: Msg) -> usize {
+    match m {
+        Msg.Text(s) | Msg.Note(s) => {
+            let t = s;
+            return s.len() + t.len(); //~ ERROR E0502
+        }
+        Msg.Code(_) => { return 0; }
+    }
+}
+
+fn borrowed(c: bool) -> usize {
+    let mut m = Msg.Code(1);
+    let mut n: usize = 0;
+    match &m {
+        Msg.Text(s) | Msg.Note(s) => {
+            m = Msg.Code(2); //~ ERROR E0501
+            n = s.len();
+        }
+        Msg.Code(_) => {}
+    }
+    return n;
+}
+
+fn guard_moves(m: Msg) -> usize {
+    match m {
+        Msg.Text(s) | Msg.Note(s) if eat(s) => { return 1; } //~ ERROR E0504
+        _ => { return 0; }
+    }
+}
+
+fn guard_mutates(m: Msg) -> usize {
+    match m {
+        Msg.Text(mut s) | Msg.Note(mut s) if grow(&mut s) => { return s.len(); } //~ ERROR E0503
+        _ => { return 0; }
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}
