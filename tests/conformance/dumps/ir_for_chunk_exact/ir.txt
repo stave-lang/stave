@@ -30,7 +30,7 @@ b3():
   check.bounds () %10 1
   br b4(%5)
 b4(%11: t8):
-  %12 = vec.reduce_add t0 %11
+  %12 = vec.reduce_add_wrap t0 %11
   ret %12
 }
 fn @2 main.main {

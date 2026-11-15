@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// E0208: `reduce_add` is float-only and `reduce_add_wrap` is int-only: an integer sum names its
+// overflow mode, as `+%` does.
+fn f(a: u32x4, x: f32x4) -> u32 {
+    let s = a.reduce_add(); //~ ERROR E0208
+    let t = x.reduce_add_wrap(); //~ ERROR E0208
+    return a.reduce_add_wrap() +% (x.reduce_add() as~ u32);
+}
+
+fn main() -> i32 {
+    return 0;
+}

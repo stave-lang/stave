@@ -242,7 +242,7 @@ impl<H: Host> Interp<'_, H> {
                 let (a, b) = (self.lanes(body, regs, arg(0)?)?, self.lanes(body, regs, arg(1)?)?);
                 mask_val(a.iter().zip(&b).map(|(&x, &y)| simd::compare(op, lane, x, y)))
             }
-            ReduceAdd | ReduceMin | ReduceMax | ReduceAnd | ReduceOr => {
+            ReduceAdd | ReduceAddWrap | ReduceMin | ReduceMax | ReduceAnd | ReduceOr => {
                 let (_, lane, _) = self.operand_vshape(body, arg(0)?)?;
                 let mut a = self.lanes(body, regs, arg(0)?)?;
                 let r = simd::reduce_tree(&mut a, |x, y| simd::reduce_step(op, lane, x, y))
