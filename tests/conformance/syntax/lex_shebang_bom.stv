@@ -1,0 +1,5 @@
+﻿#!/usr/bin/env -S stave run //~ ERROR E0017
+//~^ ERROR E0018
+//~ CHECK-ONLY
+// After a byte-order mark (E0017) the `#!` is not at byte offset 0: no shebang line, so `#` is E0018.
+fn f() { }

@@ -1,6 +1,8 @@
 //! `stave build`, `stave run`, `stave test` end to end (contracts/cli.md): static
 //! executables named after the package (or `-o`), `stave run` exits with the program's status,
 //! E1001 for a target the host cannot run, `test fn`s under `stave test PKG_DIR`, the `ir` dump.
+//! `stave run` and `stave test` run programs from memory: no file is written (checked on the
+//! system calls when `strace` works here), and the results equal those of the built file.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -112,6 +114,266 @@ fn run_exits_with_the_program_status() {
     assert!(err.contains("panic: Overflow at overflow_add.stv:5:14 in main.add_one (thread 0)"), "{err}");
     // The binary was temporary: nothing left in the working directory.
     assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
+}
+
+/// Runs the executable script `script` with `stave` first on `PATH`, as a shell would.
+#[cfg(unix)]
+fn run_script(script: &Path, args: &[&str]) -> (i32, String, String) {
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_stave")).parent().unwrap().to_path_buf();
+    let rest = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(&rest))).unwrap();
+    let mut tries = 0;
+    loop {
+        let r = Command::new(script)
+            .args(args)
+            .current_dir(script.parent().unwrap())
+            .env("PATH", &path)
+            .env_remove("STAVE_THREADS")
+            .env_remove("STAVE_STD_DIR")
+            .env_remove("STAVE_SEMA_SHUFFLE")
+            .output();
+        match r {
+            // ETXTBSY: another test thread forked a child while this one held the script open
+            // for writing; the child closes its copy when it execs.
+            Err(e) if e.raw_os_error() == Some(26) && tries < 100 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            r => {
+                let o = r.unwrap_or_else(|e| panic!("{}: {e}", script.display()));
+                return (
+                    o.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&o.stdout).into(),
+                    String::from_utf8_lossy(&o.stderr).into(),
+                );
+            }
+        }
+    }
+}
+
+/// An executable `.stv` file that starts with `#!/usr/bin/env -S stave run` runs directly: the
+/// kernel starts `stave run SCRIPT ARGS...`. The shebang line is line 1 of the diagnostics.
+#[cfg(unix)]
+#[test]
+fn shebang_script_runs_directly() {
+    use std::os::unix::fs::PermissionsExt;
+    if !host_runs() {
+        return;
+    }
+    let d = tmp("shebang");
+    let script = |name: &str, body: &str| {
+        let p = d.join(name);
+        std::fs::write(&p, format!("#!/usr/bin/env -S stave run\n{body}")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    };
+    let greet = script(
+        "greet.stv",
+        "import std.env;\nimport std.io;\n\nfn main() -> i32 {\n    let n = env.count();\n    \
+         io.print(f\"args {n}\\n\");\n    match env.arg(2) {\n        Option.Some(a) => {\n            \
+         io.print(a.as_str());\n            io.print(\"\\n\");\n        }\n        Option.None => { }\n    }\n    \
+         return 7;\n}\n",
+    );
+    let (c, out, err) = run_script(&greet, &["one", "two"]);
+    assert_eq!((c, out.as_str()), (7, "args 3\ntwo\n"), "{err}");
+    let (c, out, err) = run_script(&greet, &[]);
+    assert_eq!((c, out.as_str()), (7, "args 1\n"), "{err}");
+    // The same file through the commands that take a root.
+    let p = greet.display().to_string();
+    assert_eq!(stave_in(&d, &["check", &p]).0, 0);
+    let (c, out, err) = stave_in(&d, &["run", &p, "one", "--", "-x", "y"]);
+    assert_eq!((c, out.as_str()), (7, "args 4\n-x\n"), "{err}");
+    // Line 3 of the file is line 3 of the diagnostic.
+    let bad = script("bad.stv", "fn main() -> i32 {\n    return nope;\n}\n");
+    let (c, out, err) = run_script(&bad, &[]);
+    assert_eq!((c, out.as_str()), (1, ""), "{err}");
+    assert!(err.starts_with("bad.stv:3:12: error[E0101]: "), "{err}");
+}
+
+/// `stave` in `dir` with `TMPDIR` set to `tmpdir`, optionally under `strace` with the flags
+/// `trace`.
+#[cfg(unix)]
+fn stave_env(dir: &Path, tmpdir: &Path, trace: Option<&[&str]>, args: &[&str]) -> (i32, String, String) {
+    let mut cmd = match trace {
+        Some(flags) => {
+            let mut c = Command::new("strace");
+            c.args(flags).arg(env!("CARGO_BIN_EXE_stave"));
+            c
+        }
+        None => Command::new(env!("CARGO_BIN_EXE_stave")),
+    };
+    let o = cmd
+        .args(args)
+        .current_dir(dir)
+        .env("TMPDIR", tmpdir)
+        .env_remove("STAVE_THREADS")
+        .env_remove("STAVE_STD_DIR")
+        .env_remove("STAVE_SEMA_SHUFFLE")
+        .output()
+        .unwrap();
+    (
+        o.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&o.stdout).into(),
+        String::from_utf8_lossy(&o.stderr).into(),
+    )
+}
+
+/// Whether `strace` can trace a process here (installed, and ptrace allowed).
+#[cfg(unix)]
+fn strace_works() -> bool {
+    Command::new("strace").args(["-o", "/dev/null", "true"]).output().is_ok_and(|o| o.status.success())
+}
+
+#[cfg(unix)]
+fn have_qemu_aarch64() -> bool {
+    Command::new("qemu-aarch64").arg("--version").output().is_ok_and(|o| o.status.success())
+}
+
+/// `stave run` and `stave test` hold every executable in memory. They work where nothing can
+/// be written (no temporary directory, a read-only working directory), and under `strace` no
+/// system call creates a file or directory: the image is a `memfd_create` file started with
+/// `execveat(.., AT_EMPTY_PATH)`, or handed to the runner as `/dev/fd/N`.
+#[cfg(unix)]
+#[test]
+fn run_and_test_write_no_file() {
+    use std::os::unix::fs::PermissionsExt;
+    if !host_runs() {
+        return;
+    }
+    let d = tmp("nofile");
+    let cwd = d.join("readonly");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::set_permissions(&cwd, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let no_tmp = d.join("no-such-directory");
+    let (hello, test_fn) = (run_prog("hello"), run_prog("test_fn"));
+    let (hello, test_fn) = (hello.as_str(), test_fn.as_str());
+    let mut commands: Vec<(Vec<&str>, &str)> = vec![
+        (vec!["run", hello], "hello\n"),
+        (vec!["run", hello, "--release", "--", "a"], "hello\n"),
+        (vec!["test", test_fn], "test fns: 3 passed, 0 failed, 0 not run\n"),
+    ];
+    if have_qemu_aarch64() {
+        commands.push((
+            vec!["test", hello, "--target", "aarch64-linux", "--runner", "qemu-aarch64"],
+            "1 passed, 0 failed, 0 malformed, 0 not run, 0 not run (stage not implemented)\n",
+        ));
+    }
+    for (args, want) in &commands {
+        let (c, out, err) = stave_env(&cwd, &no_tmp, None, args);
+        assert_eq!(c, 0, "{args:?}: {out}{err}");
+        assert!(out.contains(want), "{args:?}: {out}");
+        assert!(!err.contains("temporary file"), "{args:?}: {err}");
+    }
+    assert_eq!(std::fs::read_dir(&cwd).unwrap().count(), 0);
+    if !strace_works() {
+        eprintln!("note: strace cannot trace here: system calls not checked");
+        return;
+    }
+    let log = d.join("trace.log");
+    let log_arg = log.display().to_string();
+    let flags = ["-f", "-e", "trace=%file,memfd_create,execveat", "-o", log_arg.as_str()];
+    let creating = [
+        "O_CREAT",
+        "O_TMPFILE",
+        " creat(",
+        " mkdir(",
+        " mkdirat(",
+        " mknod(",
+        " mknodat(",
+        " symlink(",
+        " symlinkat(",
+        " link(",
+        " linkat(",
+        " rename(",
+        " renameat(",
+        " renameat2(",
+    ];
+    for (args, want) in &commands {
+        let (c, out, err) = stave_env(&cwd, &no_tmp, Some(&flags), args);
+        assert_eq!(c, 0, "{args:?}: {out}{err}");
+        assert!(out.contains(want), "{args:?}: {out}");
+        let trace = std::fs::read_to_string(&log).unwrap();
+        for l in trace.lines() {
+            assert!(!creating.iter().any(|c| l.contains(c)), "{args:?} creates a file: {l}");
+        }
+        assert!(trace.contains(" memfd_create("), "{args:?}:\n{trace}");
+        if args.contains(&"--runner") {
+            assert!(trace.lines().any(|l| l.contains(" execve(") && l.contains("\"/dev/fd/")), "{trace}");
+        } else {
+            assert!(
+                trace.lines().any(|l| l.contains(" execveat(") && l.contains("AT_EMPTY_PATH")),
+                "{trace}"
+            );
+        }
+    }
+}
+
+/// Without `memfd_create` or `execveat` in the kernel (ENOSYS, injected by `strace`) the program
+/// runs from a temporary file, removed afterwards, and stderr says so. Any other error is
+/// reported, not worked around.
+#[cfg(unix)]
+#[test]
+fn run_falls_back_to_a_file_only_on_enosys() {
+    if !host_runs() {
+        return;
+    }
+    if !strace_works() {
+        eprintln!("note: skipped (strace cannot trace here)");
+        return;
+    }
+    let d = tmp("fallback");
+    let tmpdir = d.join("tmp");
+    std::fs::create_dir_all(&tmpdir).unwrap();
+    for call in ["memfd_create", "execveat"] {
+        let (trace, inject) = (format!("trace={call}"), format!("inject={call}:error=ENOSYS"));
+        let flags = ["-f", "-o", "/dev/null", "-e", trace.as_str(), "-e", inject.as_str()];
+        let note = format!("stave: the kernel has no `{call}` (ENOSYS): programs run from temporary files");
+        let (c, out, err) = stave_env(&d, &tmpdir, Some(&flags), &["run", &run_prog("hello"), "--", "a"]);
+        assert_eq!((c, out.as_str()), (0, "hello\n"), "{call}: {err}");
+        assert_eq!(err.matches(&note).count(), 1, "{call}: {err}");
+        let (c, _, err) = stave_env(&d, &tmpdir, Some(&flags), &["run", &run_prog("exit_code.stv")]);
+        assert_eq!(c, 7, "{call}: {err}");
+        let (c, out, err) = stave_env(&d, &tmpdir, Some(&flags), &["test", &run_prog("test_fn")]);
+        assert_eq!(c, 0, "{call}: {out}{err}");
+        assert!(out.ends_with("test fns: 3 passed, 0 failed, 0 not run\n"), "{call}: {out}");
+        assert_eq!(err.matches(&note).count(), 1, "{call}: {err}");
+        assert_eq!(std::fs::read_dir(&tmpdir).unwrap().count(), 0, "{call}: temporary files left");
+    }
+    let flags =
+        ["-f", "-o", "/dev/null", "-e", "trace=memfd_create", "-e", "inject=memfd_create:error=EACCES"];
+    let (c, out, err) = stave_env(&d, &tmpdir, Some(&flags), &["run", &run_prog("hello")]);
+    assert_eq!((c, out.as_str()), (2, ""), "{err}");
+    assert!(err.contains("stave: cannot load the program: "), "{err}");
+    assert!(!err.contains("temporary files"), "{err}");
+}
+
+/// `stave run` gives the exit status, stdout, and stderr of the file `stave build` writes.
+#[test]
+fn run_equals_the_built_binary() {
+    if !host_runs() {
+        return;
+    }
+    let d = tmp("same");
+    for (k, prog) in
+        ["hello", "exit_code.stv", "overflow_add.stv", "env_args.stv", "fib"].into_iter().enumerate()
+    {
+        for release in [false, true] {
+            let (bin, p) = (format!("bin{k}{release}"), run_prog(prog));
+            let mut build = vec!["build", "-o", bin.as_str(), p.as_str()];
+            let mut run = vec!["run", p.as_str()];
+            if release {
+                build.push("--release");
+                run.push("--release");
+            }
+            let (c, _, err) = stave_in(&d, &build);
+            assert_eq!(c, 0, "{prog}: {err}");
+            let (code, out, err) = run_bin(&d.join(&bin));
+            let (run_code, run_out, run_err) = stave_in(&d, &run);
+            assert_eq!((run_code, &run_out), (code, &out), "{prog}: {run_err}");
+            // after the compiler's summary line
+            assert!(run_err.ends_with(&err), "{prog}: {run_err:?} does not end with {err:?}");
+        }
+    }
 }
 
 #[test]

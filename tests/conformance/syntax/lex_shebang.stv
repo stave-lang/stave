@@ -1,0 +1,7 @@
+#!/usr/bin/env -S stave run --release @ $ ` é
+fn after() { let x: i32 = 1 @ 2; } //~ ERROR E0018
+//~ CHECK-ONLY
+// The shebang line holds any bytes and is still a line: the error above is on line 2.
+fn fine() -> i32 {
+    return 0;
+}

@@ -5,13 +5,14 @@
 //! harness entry table is the list of the root package's `test fn`s in canonical decl order
 //! ([`crate::exec::test_fns`]). Each entry is linked as its own executable whose `__stave_main`
 //! calls that test (one process per test, so a panic, exit 101, fails only that test), and run
-//! with the package directory as the working directory. A test passes iff it exits 0.
+//! from memory ([`crate::exec::Executable`]) with the package directory as the working
+//! directory. A test passes iff it exits 0.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::build::{self, Failure};
-use crate::exec::{self, RunSpec, TempDir};
+use crate::exec::{self, Executable, RunSpec};
 use crate::pipeline::{self, Goal, Options};
 use crate::shipped::Library;
 
@@ -119,7 +120,6 @@ pub fn run(
         .or_else(stave_target::Triple::host)
         .ok_or(HarnessError::Failure(Failure::NoHostTarget))?;
     let runnable = runner.is_some_and(|r| !r.trim().is_empty()) || exec::can_run(triple);
-    let tmp = TempDir::new("testfn").map_err(|e| HarnessError::Io(e.to_string()))?;
     let cwd = if root.is_dir() { root.to_path_buf() } else { root.parent().unwrap_or(root).to_path_buf() };
     let mut report = TestFnReport::default();
     for (k, (name, f)) in exec::test_fns(&out.program, module).into_iter().enumerate() {
@@ -129,14 +129,13 @@ pub fn run(
         let built = pool
             .install(|| build::codegen_link(module, f, triple, opts.release, opts.threads))
             .map_err(HarnessError::Failure)?;
-        let bin = tmp.path().join(format!("test{k}"));
-        built.image.write_file(&bin).map_err(|e| HarnessError::Io(format!("{}: {e}", bin.display())))?;
         let outcome = if !runnable {
             TestFnOutcome::NotRun
         } else {
             let spec = RunSpec { args: &[], runner, cwd: Some(&cwd), inherit: false };
-            let r =
-                exec::run(&bin, &spec).map_err(|e| HarnessError::Io(format!("{}: {e}", bin.display())))?;
+            let r = Executable::new(&format!("test{k}"), built.image.bytes())
+                .and_then(|mut x| x.run(&spec))
+                .map_err(|e| HarnessError::Io(format!("test {name}: {e}")))?;
             if r.exit == 0 {
                 TestFnOutcome::Passed
             } else {

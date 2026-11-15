@@ -1,0 +1,9 @@
+#!/usr/bin/env -S stave run
+//~ STDOUT shebang.stdout
+// A file whose first two bytes are `#!` starts with a shebang line: a comment up to the newline.
+import std.io;
+
+fn main() -> i32 {
+    io.print("shebang\n");
+    return 0;
+}

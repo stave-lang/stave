@@ -1,0 +1,7 @@
+//~ CHECK-ONLY
+#!/usr/bin/env -S stave run //~ ERROR E0018
+// `#!` starts a shebang line only at byte offset 0 of the file. Anywhere else `#` starts no token
+// (E0018), and the item holding it is dropped with that diagnostic only.
+fn f() { }
+
+fn g() { let x: bool = #!true; } //~ ERROR E0018
