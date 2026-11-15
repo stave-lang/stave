@@ -14,6 +14,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use stave_driver::conformance::stage0::{Stage0, registry_codes};
+use stave_driver::conformance::{Config, Outcome, run_suite};
 use stave_driver::exec::{self, Executable, Ran, RunSpec, TempDir};
 use stave_driver::interp::{self, Limits};
 use stave_driver::pipeline::{self, Goal, Options, Output};
@@ -291,6 +293,24 @@ fn simd_files(prefix: &str) -> Vec<PathBuf> {
         .collect();
     v.sort();
     v
+}
+
+/// Every file of `tests/conformance/simd/` passes under `stave test`: the negatives report exactly
+/// their `//~ ERROR` codes, the others no diagnostic.
+#[test]
+fn simd_suite_passes() {
+    let mut c = Stage0::new(Some(4), Library::in_dir(&repo())).unwrap();
+    let cfg = Config { known_codes: Some(registry_codes()), ..Config::default() };
+    let r = run_suite(&repo().join("tests/conformance/simd"), &cfg, &mut c).unwrap();
+    eprintln!("{}", r.render());
+    assert!(r.results.len() >= 10, "suite too small: {}", r.results.len());
+    let bad: Vec<String> = r
+        .results
+        .iter()
+        .filter(|t| t.outcome != Outcome::Passed)
+        .map(|t| format!("{}: {:?}", t.name, t.outcome))
+        .collect();
+    assert!(bad.is_empty(), "{bad:#?}");
 }
 
 /// The checked IR of `p` for `target` (no code generation).
