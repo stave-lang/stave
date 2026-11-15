@@ -9,6 +9,27 @@ use std::fmt::Write;
 
 const W: usize = 100;
 
+/// Writes the lines `(code, comment)`, a comment after its code. The comments of consecutive
+/// commented lines start in one column, one space after the longest code of the run: the layout
+/// `stave fmt` gives.
+fn commented(o: &mut String, lines: &[(String, String)]) {
+    let mut k = 0;
+    while k < lines.len() {
+        let run = lines[k..].iter().take_while(|l| !l.1.is_empty()).count();
+        if run == 0 {
+            let _ = writeln!(o, "{}", lines[k].0);
+            k += 1;
+            continue;
+        }
+        let width = lines[k..k + run].iter().map(|l| l.0.chars().count()).max().unwrap_or(0);
+        for (code, comment) in &lines[k..k + run] {
+            let pad = width - code.chars().count();
+            let _ = writeln!(o, "{code}{:pad$} // {comment}", "");
+        }
+        k += run;
+    }
+}
+
 fn nums<T: ToString>(xs: &[T]) -> impl Iterator<Item = String> + '_ {
     xs.iter().map(|x| x.to_string())
 }
@@ -39,9 +60,10 @@ fn terminals_stave(t: &Tables, names: &Names, header: &str) -> String {
     o += "// Terminals in sorted spelling order (byte order), which is the E0004 expected-set order.\n";
     o += "// T_* are the terminal ids of ll1_table.stv.\n\n";
     let _ = writeln!(o, "pub const NTERM: usize = {n};\n");
-    for (i, (c, s)) in names.term_const.iter().zip(&t.terms).enumerate() {
-        let _ = writeln!(o, "pub const T_{c}: u16 = {i}; // {s}");
-    }
+    let consts: Vec<(String, String)> = (names.term_const.iter().zip(&t.terms).enumerate())
+        .map(|(i, (c, s))| (format!("pub const T_{c}: u16 = {i};"), s.clone()))
+        .collect();
+    commented(&mut o, &consts);
     o.push('\n');
     let texts: Vec<&str> = t.terms.iter().map(String::as_str).collect();
     strings(&mut o, "TERM_TEXT", "Spelling of terminal", &texts);
@@ -74,9 +96,10 @@ fn node_kinds_stave(t: &Tables, names: &Names, header: &str) -> String {
     o += "// AST node kinds: one per named grammar rule. Helper nonterminals make no\n";
     o += "// node. A kind's id equals its nonterminal id in ll1_table.stv.\n\n";
     let _ = writeln!(o, "pub const NKIND: usize = {};\n", t.nkind);
-    for (i, (c, k)) in names.kind_const.iter().zip(&names.kind).enumerate() {
-        let _ = writeln!(o, "pub const KIND_{c}: u8 = {i}; // {k}");
-    }
+    let consts: Vec<(String, String)> = (names.kind_const.iter().zip(&names.kind).enumerate())
+        .map(|(i, (c, k))| (format!("pub const KIND_{c}: u8 = {i};"), k.clone()))
+        .collect();
+    commented(&mut o, &consts);
     o.push('\n');
     let ks: Vec<&str> = names.kind.iter().map(String::as_str).collect();
     strings(&mut o, "NODE_KIND_NAME", "Rule name of node kind", &ks);
