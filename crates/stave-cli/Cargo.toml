@@ -20,6 +20,10 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+# Count allocation calls and bytes for the `STAVE_PROFILE` step profile (stave_driver::prof).
+alloc-count = []
+
 [dependencies]
 stave-diag.workspace = true
 stave-driver.workspace = true

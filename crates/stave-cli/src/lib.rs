@@ -29,7 +29,7 @@
 //! as not implemented (exit 2): no flag is accepted and ignored.
 //!
 //! `STAVE_THREADS` sets the worker count; `STAVE_SEMA_SHUFFLE` is stave-sema's test knob (dumps must not
-//! change).
+//! change); `STAVE_PROFILE` prints the step profile of a compile on stderr (`stave_driver::prof`).
 
 pub mod args;
 pub mod unsafe_report;
@@ -47,6 +47,7 @@ use stave_driver::exec::{self, RunSpec, TempDir};
 use stave_driver::harness::{self, HarnessError};
 use stave_driver::package;
 use stave_driver::pipeline::{self, Goal, Options, Output, StageTiming};
+use stave_driver::prof;
 use stave_driver::select::{self, ProbeInput, SelectError, Selection};
 use stave_driver::shipped::{self, Library};
 use stave_sema::PackageKind;
@@ -240,8 +241,17 @@ fn artifact_path(a: &Args, output: &Output, root: &Path) -> Result<(PathBuf, Opt
     }
 }
 
-/// `stave check`, `stave build`, `stave run`.
+/// `stave check`, `stave build`, `stave run`, and the `STAVE_PROFILE` step profile of the run.
 fn compile(a: &Args, threads: Option<usize>, selection: &Selection, err: &mut dyn Write) -> i32 {
+    prof::start();
+    let code = compile_steps(a, threads, selection, err);
+    // the pipeline's output and the worker pool are released by now
+    prof::mark("release");
+    let _ = err.write_all(prof::report().as_bytes());
+    code
+}
+
+fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &mut dyn Write) -> i32 {
     let path = pkg_path(a);
     if let Err(e) = package::check_root(&path) {
         let _ = writeln!(err, "stave: {e}");
@@ -272,6 +282,7 @@ fn compile(a: &Args, threads: Option<usize>, selection: &Selection, err: &mut dy
     opts.release = a.release;
     opts.lower = a.dump.contains(&"ir");
     opts.borrow_dump = a.dump.contains(&"borrow");
+    prof::mark("setup");
     let output = pipeline::run_on(&pool, &path, &lib, &opts);
 
     let text = match a.diagnostics {
@@ -284,6 +295,7 @@ fn compile(a: &Args, threads: Option<usize>, selection: &Selection, err: &mut dy
         }
         Err(e) => return internal_error(&e.to_string(), err),
     }
+    prof::mark("emit-diagnostics");
 
     if let Some(dir) = &a.dump_dir {
         let stages: Vec<DumpStage> = a.dump.iter().filter_map(|s| DumpStage::parse(s)).collect();
@@ -336,6 +348,7 @@ fn compile(a: &Args, threads: Option<usize>, selection: &Selection, err: &mut dy
     } else {
         EXIT_OK
     };
+    prof::mark("write");
     let total_ms = start.elapsed().as_secs_f64() * 1000.0;
     if a.timings {
         print_timings(&output, total_ms, a.diagnostics, err);

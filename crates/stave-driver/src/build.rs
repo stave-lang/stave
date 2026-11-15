@@ -25,6 +25,7 @@ use stave_sema::{DeclKind, LowerErrorKind, Mode, Program, Typeck};
 use stave_target::{Arch, Triple};
 
 use crate::pipeline::Stage;
+use crate::prof;
 
 /// Why the back end produced no executable for a program without error diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,7 +107,11 @@ pub fn no_main(prog: &Program) -> Option<stave_diag::Diagnostic> {
 
 /// Lowers (mono + lower) and verifies. The program must have no error diagnostics.
 pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Module, Failure> {
-    let m = stave_sema::lower(prog, tc, mode).map_err(|es| {
+    let (lowered, tm) = stave_sema::lower_timed(prog, tc, mode);
+    prof::part(".rounds", tm.rounds);
+    prof::part(".assemble", tm.assemble);
+    prof::mark("lower");
+    let m = lowered.map_err(|es| {
         let message = listed(&es);
         if es.iter().all(|e| e.kind == LowerErrorKind::Unsupported) {
             Failure::Unsupported { stage: Stage::Lower, message }
@@ -124,11 +129,13 @@ pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Module, Failure>
             .collect();
         Failure::Internal { stage: Stage::Lower, message: format!("IR verifier: {}", listed(&named)) }
     })?;
+    prof::mark("verify");
     // Every element access keeps its bounds check or a proof.
     stave_ir::bounds::audit(&m).map_err(|bad| Failure::Internal {
         stage: Stage::Lower,
         message: format!("bounds audit: {}", listed(&bad)),
     })?;
+    prof::mark("bounds-audit");
     Ok(m)
 }
 
@@ -207,8 +214,10 @@ fn x64(
     let mut b = ImageBuilder::new(Machine::X86_64, image);
     let e = stave_codegen_x64::emit_module(m, &o, &mut b).map_err(|e| classify(Stage::Codegen, e))?;
     let codegen_ms = ms(t0);
+    prof::mark("codegen");
     let t1 = Instant::now();
     let img = stave_codegen_x64::link(b, &e).map_err(|e| classify(Stage::Link, e))?;
+    prof::mark("link");
     Ok(Built { image: img, codegen_ms, link_ms: ms(t1), funcs, elided: Vec::new() })
 }
 
@@ -236,8 +245,10 @@ fn a64(m: &Module, main: FuncId, release: bool, funcs: u64) -> Result<Built, Fai
             .map_err(|e| Failure::Internal { stage: Stage::Codegen, message: e.to_string() })?;
     }
     let codegen_ms = ms(t0);
+    prof::mark("codegen");
     let t1 = Instant::now();
     let img = b.link().map_err(|e| Failure::Internal { stage: Stage::Link, message: e.to_string() })?;
+    prof::mark("link");
     Ok(Built { image: img, codegen_ms, link_ms: ms(t1), funcs, elided: Vec::new() })
 }
 

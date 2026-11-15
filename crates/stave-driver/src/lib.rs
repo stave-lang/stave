@@ -14,6 +14,7 @@
 //! - [`dump`]: `--dump=STAGE --dump-dir DIR` printers.
 //! - [`conformance`]: the `stave test` runner and its stage0 compiler.
 //! - [`select`]: `--compiler auto|cpu|gpu` and the stage1 probe (contracts/cli.md).
+//! - [`prof`]: the `STAVE_PROFILE` step profile (wall time and allocations per pipeline step).
 
 pub mod build;
 pub mod conformance;
@@ -23,5 +24,6 @@ pub mod harness;
 pub mod interp;
 pub mod package;
 pub mod pipeline;
+pub mod prof;
 pub mod select;
 pub mod shipped;

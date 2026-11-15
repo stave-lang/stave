@@ -42,6 +42,7 @@ use stave_sema::{DeclKind, Mode, Program, Typeck};
 use stave_target::Triple;
 
 use crate::build::{self, Failure};
+use crate::prof;
 use crate::shipped::Library;
 
 /// A pipeline stage, named as in the `timings` enum of `contracts/diagnostics.schema.json`
@@ -381,6 +382,17 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
         };
         timings.push(timing(stage, ms(d), n));
     }
+    if prof::enabled() {
+        let t = &program.timings;
+        prof::part(".discover", t.load);
+        prof::part(".read", t.read);
+        prof::part(".lex", t.lex);
+        prof::part(".items", t.items);
+        prof::part(".parse", t.parse_items);
+        prof::part(".intern", t.intern);
+        prof::part(".resolve", t.resolve);
+        prof::mark("load");
+    }
 
     if parse_only {
         let diagnostics = stave_diag::canonical_order(program.diagnostics.clone(), &program.source_map);
@@ -402,12 +414,21 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     let t0 = Instant::now();
     let tc = stave_sema::check(&program);
     timings.push(timing(Stage::Typeck, ms(t0.elapsed()), tc.bodies.len() as u64));
+    prof::part(".sigs", tc.timings.sigs);
+    prof::part(".bodies", tc.timings.bodies);
+    prof::part(".canon", tc.timings.canon);
+    prof::mark("typeck");
     let mut diagnostics = tc.all_diagnostics(&program);
+    prof::mark("diag-order");
 
     // ---- borrowck (per body, parallel; bodies with a type error are skipped).
     let t0 = Instant::now();
     let bc = stave_borrow::check(&program, &tc, stave_borrow::Options { dump: opts.borrow_dump });
     timings.push(timing(Stage::Borrowck, ms(t0.elapsed()), bc.checked));
+    prof::part(".cfg-cpu", bc.phases[0]);
+    prof::part(".dataflow-cpu", bc.phases[1]);
+    prof::part(".check-cpu", bc.phases[2]);
+    prof::mark("borrowck");
     if !bc.diagnostics.is_empty() {
         diagnostics.extend(bc.diagnostics.iter().cloned());
         diagnostics = stave_diag::canonical_order(diagnostics, &program.source_map);
@@ -460,6 +481,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
         }
     };
     out.main = build::main_path(&out.program).and_then(|p| module.find_func(&p));
+    prof::mark("find-main");
     if opts.goal == Goal::Build {
         // ---- codegen + link.
         let triple = opts.target.or_else(Triple::host);

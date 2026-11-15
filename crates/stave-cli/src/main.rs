@@ -3,6 +3,10 @@
 // System allocator: mimalloc measured ~5x slower here on cold multi-threaded runs (57 ms vs 11 ms
 // for `stave check` on 100k lines at 16 threads).
 
+#[cfg(feature = "alloc-count")]
+#[global_allocator]
+static ALLOC: stave_driver::prof::CountingAlloc = stave_driver::prof::CountingAlloc;
+
 fn main() {
     let code = stave_cli::guarded(|| {
         let mut argv = Vec::new();

@@ -3,6 +3,10 @@
 # program written in both languages, plus three hand-written kernels. Prints a markdown report on
 # stdout; progress goes to stderr. Linux only. See bench/README.md.
 #   bench/run.sh [--lines N] [--seed S] [--runs R] [--reps P]
+#   bench/run.sh --stages [--alloc-count] [--lines N] [--seed S] [--runs R]
+# --stages: only the step profile of `stave build` on the corpus (STAVE_PROFILE, stave_driver::prof):
+# median ms per step on 1 thread and on all threads. --alloc-count builds stave with its counting
+# allocator (in target/alloc-count) and adds allocation calls and bytes; its times are slower.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -10,13 +14,17 @@ LINES=100000
 SEED=1
 RUNS=5
 REPS=500
+STAGES=0
+ALLOC_COUNT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --lines) LINES=$2; shift 2 ;;
     --seed) SEED=$2; shift 2 ;;
     --runs) RUNS=$2; shift 2 ;;
     --reps) REPS=$2; shift 2 ;;
-    *) echo "usage: bench/run.sh [--lines N] [--seed S] [--runs R] [--reps P]" >&2; exit 2 ;;
+    --stages) STAGES=1; shift ;;
+    --alloc-count) ALLOC_COUNT=1; shift ;;
+    *) echo "usage: bench/run.sh [--stages [--alloc-count]] [--lines N] [--seed S] [--runs R] [--reps P]" >&2; exit 2 ;;
   esac
 done
 
@@ -88,10 +96,61 @@ c_split() { # c_split CMD OUT DIR (OUT relative to the repository root)
   (cd "$3" && rm -f ./*.o && xargs -P "$NPROC" -n 1 $1 -c < files.txt && $1 -o "$out" $(sed 's/\.c$/.o/' files.txt))
 }
 
+# Step profile: per step the median over $RUNS builds, 1 thread and all threads; `process` is the
+# wall time of the whole process, `total` the profiled part of it.
+stages() {
+  : > "$WORK/prof"
+  for t in 1 "$NPROC"; do
+    i=0
+    while [ "$i" -lt "$RUNS" ]; do
+      t0=$(date +%s%N)
+      STAVE_PROFILE=1 STAVE_THREADS=$t "$STAVE" build "$CORPUS/stave" --compiler cpu -o "$WORK/x" \
+        >/dev/null 2>"$WORK/err" || { cat "$WORK/err" >&2; die "stave build failed on the corpus"; }
+      t1=$(date +%s%N)
+      sed -n "s/^profile: /$t /p" "$WORK/err" >> "$WORK/prof"
+      echo "$t process $((t1 - t0))" | awk '{ printf "%s %s %.3f 0 0\n", $1, $2, $3 / 1e6 }' >> "$WORK/prof"
+      i=$((i + 1))
+    done
+  done
+  awk -v n="$NPROC" -v lines="$S_LINES" -v runs="$RUNS" '
+    function med(t, name,   c, i, j, x, a) {
+      c = cnt[t, name]
+      if (c == 0) return 0
+      for (i = 1; i <= c; i++) a[i] = v[t, name, i]
+      for (i = 2; i <= c; i++) {
+        x = a[i]
+        for (j = i - 1; j >= 1 && a[j] > x; j--) a[j + 1] = a[j]
+        a[j + 1] = x
+      }
+      return (c % 2) ? a[(c + 1) / 2] : (a[c / 2] + a[c / 2 + 1]) / 2
+    }
+    {
+      if (!($2 in seen)) { seen[$2] = 1; order[++no] = $2 }
+      cnt[$1, $2]++
+      v[$1, $2, cnt[$1, $2]] = $3
+      if ($1 == 1) { allocs[$2] = $4; bytes[$2] = $5 }
+    }
+    END {
+      printf "- corpus: %d Stave lines; times: median of %d runs, ms\n\n", lines, runs
+      printf "| step | 1 thread | %d threads | allocations | bytes |\n|---|---:|---:|---:|---:|\n", n
+      for (i = 1; i <= no; i++) {
+        s = order[i]
+        printf "| %s | %.1f | %.1f | %.0f | %.0f |\n", s, med(1, s), med(n, s), allocs[s], bytes[s]
+      }
+      printf "\nK lines/s, 1 thread (process): %.0f\n", lines / med(1, "process")
+    }' "$WORK/prof"
+}
+
 # ---------- build the tools ----------
 say "building stave and gen-corpus (cargo --release)"
-cargo build -q --release --locked -p stave-cli -p gen-corpus >&2
-STAVE=target/release/stave
+if [ "$ALLOC_COUNT" = 1 ]; then
+  cargo build -q --release --locked --target-dir target/alloc-count -p stave-cli --features stave-cli/alloc-count >&2
+  cargo build -q --release --locked -p gen-corpus >&2
+  STAVE=target/alloc-count/release/stave
+else
+  cargo build -q --release --locked -p stave-cli -p gen-corpus >&2
+  STAVE=target/release/stave
+fi
 GEN=target/release/gen-corpus
 rm -rf "$WORK"
 mkdir -p "$BIN"
@@ -120,6 +179,11 @@ C_LINES=$(wc -l < "$CORPUS/c/single.c" | tr -d ' ')
 UNITS=$(wc -l < "$CORPUS/c/split/files.txt" | tr -d ' ')
 UNITS=$((UNITS - 1))
 FNS=$(sed -n 's/.* \([0-9]*\) fns$/\1/p' "$WORK/gen.txt")
+
+if [ "$STAGES" = 1 ]; then
+  stages
+  exit 0
+fi
 
 say "correctness builds"
 stave_build "$BIN/corpus-stave" "$CORPUS/stave" || die "stave build failed on the corpus"
