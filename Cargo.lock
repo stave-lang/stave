@@ -473,6 +473,7 @@ dependencies = [
  "stave-diag",
  "stave-driver",
  "stave-sema",
+ "stave-syntax",
  "stave-target",
  "toml",
 ]

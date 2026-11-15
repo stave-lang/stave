@@ -270,7 +270,7 @@ pub fn sched_yield() -> isize {
 // Never returns (the kernel ends the process; the `loop` only gives the body type `never`).
 pub fn exit_group(code: i32) -> never {
     let r = sys.sc1(SYS_EXIT_GROUP, code as% usize);
-    loop { }
+    loop {}
 }
 
 pub fn getpid() -> i32 {

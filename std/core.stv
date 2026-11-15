@@ -49,7 +49,7 @@ impl<T: view> Option<T> {
     pub fn unwrap(self) -> T from self {
         match self {
             Option.Some(v) => { return v; }
-            Option.None => { }
+            Option.None => {}
         }
         panic.trap(panic.KIND_UNWRAP, panic.user_site());
     }
@@ -83,7 +83,7 @@ impl<T: view, E: view> Result<T, E> {
     pub fn unwrap(self) -> T from self {
         match self {
             Result.Ok(v) => { return v; }
-            Result.Err(_) => { }
+            Result.Err(_) => {}
         }
         panic.trap(panic.KIND_UNWRAP, panic.user_site());
     }
