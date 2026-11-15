@@ -55,6 +55,113 @@ impl Brackets {
     }
 }
 
+/// A node's children in source order. Up to [`Kids::INLINE`] are stored in place: most nodes have
+/// one or two, and the walks ask for them at every node.
+#[derive(Clone, Debug, Default)]
+pub struct Kids {
+    len: u32,
+    inline: [u32; Kids::INLINE],
+    /// All the children when they do not fit in place (else empty).
+    spill: Vec<u32>,
+}
+
+impl Kids {
+    pub const INLINE: usize = 8;
+
+    /// The children of the iterator, which yields them last first.
+    fn from_rev(rev: impl Iterator<Item = u32>) -> Kids {
+        let mut k = Kids::default();
+        for c in rev {
+            if !k.spill.is_empty() {
+                k.spill.push(c);
+            } else if (k.len as usize) < Kids::INLINE {
+                k.inline[k.len as usize] = c;
+                k.len += 1;
+            } else {
+                k.spill.reserve(2 * Kids::INLINE);
+                k.spill.extend_from_slice(&k.inline);
+                k.spill.push(c);
+            }
+        }
+        if k.spill.is_empty() {
+            k.inline[..k.len as usize].reverse();
+        } else {
+            k.spill.reverse();
+        }
+        k
+    }
+
+    #[inline]
+    pub fn as_slice(&self) -> &[u32] {
+        if self.spill.is_empty() { &self.inline[..self.len as usize] } else { &self.spill }
+    }
+}
+
+impl std::ops::Deref for Kids {
+    type Target = [u32];
+
+    #[inline]
+    fn deref(&self) -> &[u32] {
+        self.as_slice()
+    }
+}
+
+impl<'k> IntoIterator for &'k Kids {
+    type Item = &'k u32;
+    type IntoIter = std::slice::Iter<'k, u32>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl IntoIterator for Kids {
+    type Item = u32;
+    type IntoIter = KidsIter;
+
+    fn into_iter(self) -> KidsIter {
+        let end = self.as_slice().len();
+        KidsIter { kids: self, at: 0, end }
+    }
+}
+
+/// [`Kids`] by value.
+#[derive(Clone, Debug)]
+pub struct KidsIter {
+    kids: Kids,
+    at: usize,
+    end: usize,
+}
+
+impl Iterator for KidsIter {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        if self.at >= self.end {
+            return None;
+        }
+        self.at += 1;
+        self.kids.as_slice().get(self.at - 1).copied()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.end - self.at;
+        (n, Some(n))
+    }
+}
+
+impl DoubleEndedIterator for KidsIter {
+    fn next_back(&mut self) -> Option<u32> {
+        if self.at >= self.end {
+            return None;
+        }
+        self.end -= 1;
+        self.kids.as_slice().get(self.end).copied()
+    }
+}
+
+impl ExactSizeIterator for KidsIter {}
+
 /// One item's syntax.
 #[derive(Clone, Copy)]
 pub struct ItemCx<'p> {
@@ -152,10 +259,15 @@ impl<'p> ItemCx<'p> {
         out.reverse();
     }
 
-    pub fn kids_vec(&self, n: u32) -> Vec<u32> {
-        let mut v = Vec::new();
-        self.kids(n, &mut v);
-        v
+    pub fn kids_vec(&self, n: u32) -> Kids {
+        Kids::from_rev(self.ast.children_rev(n))
+    }
+
+    /// The child of `n` if it has exactly one.
+    pub fn only_child(&self, n: u32) -> Option<u32> {
+        let mut it = self.ast.children_rev(n);
+        let c = it.next()?;
+        it.next().is_none().then_some(c)
     }
 
     pub fn child(&self, n: u32, k: NodeKind) -> Option<u32> {
@@ -367,6 +479,22 @@ impl<'p> ItemCx<'p> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kids_in_place_and_spilled() {
+        for n in [0u32, 1, 2, Kids::INLINE as u32, Kids::INLINE as u32 + 1, 40] {
+            let want: Vec<u32> = (0..n).collect();
+            let k = Kids::from_rev(want.iter().rev().copied());
+            assert_eq!(k.as_slice(), &want[..], "{n}");
+            assert_eq!(k.len(), n as usize);
+            assert_eq!(k.clone().into_iter().collect::<Vec<_>>(), want);
+            let mut back: Vec<u32> = k.clone().into_iter().rev().collect();
+            back.reverse();
+            assert_eq!(back, want);
+            assert_eq!((&k).into_iter().copied().collect::<Vec<_>>(), want);
+            assert_eq!(k.into_iter().len(), n as usize);
+        }
+    }
 
     #[test]
     fn brackets_match() {

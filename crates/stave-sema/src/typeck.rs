@@ -1136,7 +1136,7 @@ impl<'a> Ck<'a> {
     fn fn_body(&mut self, sig: &'a FnSig, n: u32) {
         let icx = self.icx;
         // parameters
-        let mut params: Vec<u32> = Vec::new();
+        let mut params = crate::itemcx::Kids::default();
         if let Some(p) = icx.child(n, NodeKind::Params) {
             params = icx.kids_vec(p);
         }

@@ -633,9 +633,9 @@ pub(crate) fn lower_gargs<H: LowerHost>(
     at: u32,
 ) -> Option<Vec<GArg>> {
     let icx = env.icx;
-    let kids: Vec<u32> = match gargs {
+    let kids = match gargs {
         Some(g) => icx.kids_vec(g),
-        None => Vec::new(),
+        None => crate::itemcx::Kids::default(),
     };
     if kids.len() != shape.len() {
         let text = icx.node_text(at).to_string();
@@ -769,7 +769,7 @@ fn lower_prim<H: LowerHost>(
         Prim::Mask { width, n: lanes } => h.intern(TypeKind::Mask { width, n: lanes }),
         Prim::VecGeneric | Prim::MaskGeneric => {
             // `vec<T, N>` / `mask<W, N>` (E0609 when no argument is generic).
-            let kids: Vec<u32> = gargs.map(|g| icx.kids_vec(g)).unwrap_or_default();
+            let kids = gargs.map(|g| icx.kids_vec(g)).unwrap_or_default();
             if kids.len() != 2 {
                 let _ = lower_gargs(h, env, gargs, &[false, true], n);
                 return h.error_ty();

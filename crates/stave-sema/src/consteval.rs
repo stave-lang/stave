@@ -887,8 +887,8 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
             if t == Term::LParen as u8 {
                 // A variant constructor is const; any other call is not.
                 let close = icx.close(p);
-                let args: Vec<u32> = if close == p + 1 {
-                    Vec::new()
+                let args = if close == p + 1 {
+                    crate::itemcx::Kids::default()
                 } else {
                     let a = *kids.get(kid)?;
                     kid += 1;

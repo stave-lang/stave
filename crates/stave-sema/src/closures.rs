@@ -120,6 +120,9 @@ pub fn closures(
             });
         }
     }
+    if out.is_empty() {
+        return out;
+    }
     out.sort_by_key(|c| c.token);
     for (k, c) in out.iter_mut().enumerate() {
         c.index = k as u32;
@@ -232,11 +235,8 @@ fn core(icx: &ItemCx<'_>, n: u32) -> u32 {
                 | NodeKind::Cast
         );
         if wrapper {
-            let kids = icx.kids_vec(cur);
-            if kids.len() != 1 {
-                break;
-            }
-            cur = kids[0];
+            let Some(c) = icx.only_child(cur) else { break };
+            cur = c;
         } else if k == NodeKind::Unary
             && let Some(c) = icx.first_child(cur)
             && icx.kind(c) == Some(NodeKind::Postfix)

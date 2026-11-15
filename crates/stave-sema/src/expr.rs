@@ -1775,7 +1775,7 @@ impl<'a> Ck<'a> {
                 if icx.is(q, Term::LParen) {
                     let close = icx.close(q);
                     let args = if close == q + 1 {
-                        Vec::new()
+                        crate::itemcx::Kids::default()
                     } else {
                         let a = kids.get(kid).copied();
                         kid += 1;
@@ -1836,7 +1836,7 @@ impl<'a> Ck<'a> {
             if t == Term::LParen as u8 {
                 let close = icx.close(p);
                 let args = if close == p + 1 {
-                    Vec::new()
+                    crate::itemcx::Kids::default()
                 } else {
                     let a = kids.get(kid).copied();
                     kid += 1;

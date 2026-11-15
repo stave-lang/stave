@@ -1263,7 +1263,7 @@ impl<'a> FnCx<'a> {
         self.g.prog.decl(d).map(|x| x.kind)
     }
 
-    pub fn kids(&self, n: u32) -> Vec<u32> {
+    pub fn kids(&self, n: u32) -> crate::itemcx::Kids {
         self.icx().kids_vec(n)
     }
 
