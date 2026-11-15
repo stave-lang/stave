@@ -82,6 +82,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 
 - Strings and chars must end on their line: no raw newline inside `"…"`, `f"…"`, `'…'` (E0015). Use `\n`.
 - Identifiers are ASCII: `[A-Za-z_][A-Za-z0-9_]*`. Non-ASCII only inside literals and comments; `@ $ \ #`, backtick, control bytes elsewhere = E0018.
+- A first line starting `#!` is a comment (shebang: `#!/usr/bin/env -S stave run`). `#!` anywhere else = E0018.
 - Float text (`Display`, f-strings): shortest round-trip digits, `6.0`, `0.1`, `1e-6`, `1.5e-7`, `1e21`, `inf`, `-inf`, `NaN`, `-0.0`. Decimal form for exponents −5..16.
 - Ints: `1_000`, `0xff`, `0b1010`, `0o17`, suffix `5u8`. Floats need a digit after `.` (`1.0`, not `1.`), suffix `1.0f32`. `-128i8` legal (minus folded in), `128i8` = E0203.
 - Statements end with `;`. `if`/`while`/`for`/`loop`/`match` statements take no `;` after the block.

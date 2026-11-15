@@ -116,7 +116,7 @@ pub struct Args {
     /// `explain EXXXX`.
     pub code: Option<String>,
     pub daemon: Option<DaemonCmd>,
-    /// `run ... -- ARGS`.
+    /// `run PKG_DIR ARGS... -- ARGS...`: the program's arguments.
     pub run_args: Vec<String>,
 }
 
@@ -146,8 +146,9 @@ usage: stave <command> [args]
 commands:
   build [PKG_DIR] [--release] [--target T] [--features F,...] [-o OUT] [--watch]
                         (default OUT: ./<package name>)
-  run [PKG_DIR] [--release] [--target T] [-- ARGS...]
-                        (host targets only, else E1001)
+  run [PKG_DIR [ARGS...]] [--release] [--target T] [-- ARGS...]
+                        (host targets only, else E1001; ARGS go to the program,
+                        those starting with `-` only after `--`)
   check [PKG_DIR]
   test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD]
   fix [PKG_DIR] [--dry-run] [--target T] [--diagnostics human|json]
@@ -396,6 +397,13 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
             daemon = Some(d);
         }
         Cmd::Lowering => {}
+        // `stave run SCRIPT a b` is what the kernel runs for `./SCRIPT a b` when SCRIPT starts
+        // with `#!/usr/bin/env -S stave run`: the words after the root are the program's.
+        Cmd::Run => {
+            pkg_dir = pos.next().map(PathBuf::from);
+            let after_dashes = std::mem::replace(&mut run_args, pos.by_ref().collect());
+            run_args.extend(after_dashes);
+        }
         _ => pkg_dir = pos.next().map(PathBuf::from),
     }
     if let Some(extra) = pos.next() {
@@ -531,6 +539,12 @@ mod tests {
         let Ok(Parsed::Args(a)) = parse(&v) else { panic!() };
         assert_eq!(a.run_args, ["-x", "--target", "y"]);
         assert!(a.release);
+        // Words after the root are program arguments too, before those after `--`.
+        let a = args("run s.stv a --release b -- -c d");
+        assert_eq!(a.pkg_dir, Some(PathBuf::from("s.stv")));
+        assert_eq!(a.run_args, ["a", "b", "-c", "d"]);
+        assert!(a.release);
+        assert!(args("run s.stv").run_args.is_empty());
         assert!(args("unsafe-report --json").json);
         let a = args("fix pkg --dry-run --diagnostics json");
         assert_eq!((a.cmd, a.dry_run, a.diagnostics), (Cmd::Fix, true, DiagFormat::Json));
@@ -570,6 +584,8 @@ mod tests {
         assert!(usage("test --dump=tokens --dump-dir d").contains("does not take --dump"));
         assert!(usage("build --alloc-check").contains("gpu-sm86"));
         assert!(usage("build a b").contains("unexpected argument `b`"));
+        assert!(usage("check a.stv b").contains("unexpected argument `b`"));
+        assert!(usage("run a.stv -x").contains("unknown flag `-x`"));
         assert!(usage("build -- x").contains("only accepted by `stave run`"));
         assert!(usage("check --watch").contains("does not take --watch"));
         assert!(usage("check -o x").contains("does not take -o"));

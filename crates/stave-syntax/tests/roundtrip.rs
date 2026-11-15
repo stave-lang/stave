@@ -844,6 +844,30 @@ fn printer_keeps_a_leading_feff_identifier() {
 }
 
 #[test]
+fn printer_keeps_the_shebang_line() {
+    let src = "#!/usr/bin/env -S stave run\n// c\nimport std.io;\nfn main()->i32{return 0;}";
+    let pf = check_roundtrip("shebang", src.as_bytes());
+    assert!(pf.diagnostics.is_empty());
+    assert_eq!(
+        print_file(&pf, src.as_bytes()).text,
+        "#!/usr/bin/env -S stave run\nimport std.io;\n\nfn main() -> i32 {\n    return 0;\n}\n"
+    );
+    for src in
+        ["#!", "#!x", "#!x\n", "#!x\r\nfn f() { }", "#! \"a\nfn f() { let = 1; }\n", "#!a\n#!b\nfn f() { }"]
+    {
+        let pf = check_roundtrip(src, src.as_bytes());
+        let text = print_file(&pf, src.as_bytes()).text;
+        let line = src.split('\n').next().unwrap();
+        assert!(text.starts_with(&format!("{line}\n")), "{src:?}: {text:?}");
+    }
+    // a dropped first item that starts with `#!` (not at offset 0) must not become a shebang line
+    for src in ["\n#!x y\nfn f() { }", " #!", "x\n#!y", "\n\n#!/bin/x\nfn f() { let = 1; }"] {
+        let pf = check_roundtrip(src, src.as_bytes());
+        assert!(!print_file(&pf, src.as_bytes()).text.starts_with("#!"), "{src:?}");
+    }
+}
+
+#[test]
 fn printer_layout_example() {
     let src = "fn f(x:i32)->i32{let v:Vec<Vec<i32>> =g::<u8>(x);if x<1{return -x;}else{loop{break;}}\
                match x{1=>{}_=>{}}return t.0.1+a[i]?;}";

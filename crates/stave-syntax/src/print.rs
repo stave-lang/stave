@@ -3,8 +3,8 @@
 //! Prints a parsed file in one canonical layout: one statement or member per line, 4-space
 //! indentation inside function bodies, trait/impl/extern bodies and statement `match` arms;
 //! spaces around binary operators; none inside paths, calls, indexing, type arguments, or after
-//! unary operators. Comments are not kept. Dropped items (and the run before the first item) are
-//! copied verbatim.
+//! unary operators. Comments are not kept, except the shebang line, which stays the first line.
+//! Dropped items (and the run before the first item) are copied verbatim.
 //!
 //! The layout comes from the parser itself: each item is re-run through the PDA with a trace that
 //! records, per token, the grammar rule whose production consumed it (so `-` in `Unary` differs
@@ -18,7 +18,7 @@ use crate::generated::ll1_table as lt;
 use crate::generated::node_kinds::NodeKind;
 use crate::generated::terminals::Term;
 use crate::items::ItemKind;
-use crate::lex::{Token, lex_kinds, token_end};
+use crate::lex::{Token, lex_kinds, shebang_end, token_end};
 use crate::parse::{ParsedFile, Scratch, Trace, run};
 
 /// The printer's output.
@@ -37,6 +37,11 @@ pub fn print_file(pf: &ParsedFile, src: &[u8]) -> Printed {
         return Printed { text: String::from_utf8_lossy(src).into_owned(), fallbacks: 1 };
     }
     let mut text = String::new();
+    let shebang = shebang_end(src);
+    if shebang > 0 {
+        text.push_str(&String::from_utf8_lossy(&src[..shebang]));
+        text.push('\n');
+    }
     let mut fallbacks = 0;
     let mut scratch = Scratch::default();
     let mut prev_kind: Option<ItemKind> = None;
@@ -64,6 +69,11 @@ pub fn print_file(pf: &ParsedFile, src: &[u8]) -> Printed {
         // the first item is a dropped item, copied verbatim, that starts with a run of bad bytes
         // beginning with U+FEFF (a U+FEFF that was not at offset 0 of the source): keep it off
         // offset 0, where it would read as a byte-order mark (E0017)
+        text.insert(0, '\n');
+    }
+    if shebang == 0 && text.starts_with("#!") {
+        // likewise a dropped item that starts with `#!` (not at offset 0 of the source): at
+        // offset 0 it would read as a shebang line
         text.insert(0, '\n');
     }
     Printed { text, fallbacks }

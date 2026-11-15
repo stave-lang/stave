@@ -9,6 +9,9 @@
 //! - whitespace is ` \t\r\n`; comments are `//` up to the newline. Neither makes a token. There
 //!   are no block comments: `/*` starts one [`KIND_ERROR`] token (E0029) that ends after the first
 //!   `*/` on its line, else at the end of the line (`a / *p` needs the space).
+//! - a file whose first two bytes are `#!` starts with a shebang line: a comment up to the first
+//!   newline ([`shebang_end`]). Only offset 0 has this rule, so it adds no state to a restart
+//!   point: `#!` anywhere else (after a byte-order mark too) is E0018.
 //! - identifiers are ASCII only: `[A-Za-z_][A-Za-z0-9_]*`; the text decides keyword, `_` (the
 //!   wildcard token, while `_x` is an `Ident`), or `Ident`. `as` immediately followed by `%`, `|`,
 //!   `?` or `~` is the single token `as%`/`as|`/`as?`/`as~` (`as %` is two tokens).
@@ -395,7 +398,8 @@ pub fn lex(src: &[u8], file: FileId) -> Lexed {
         Err(e) => (e.valid_up_to(), e.error_len().unwrap_or(src.len() - e.valid_up_to())),
     };
     let stopped = limit < src.len();
-    let mut i = 0;
+    // past `limit` when the shebang line holds the invalid byte: nothing is lexed then
+    let mut i = shebang_end(src);
     if src.starts_with(BOM) {
         diagnostics.extend(make_diag("E0017", None, &[], Span::new(file, 0, 3), &[]));
         i = BOM.len();
@@ -483,6 +487,13 @@ fn line_end(src: &[u8], j: usize) -> usize {
     }
 }
 
+/// The end of the shebang line of `src`: the offset of the first `\n` (or the end of `src`) when
+/// `src` starts with `#!`, else 0. The line is a comment.
+#[inline]
+pub fn shebang_end(src: &[u8]) -> usize {
+    if src.starts_with(b"#!") { line_end(src, 2) } else { 0 }
+}
+
 /// The byte offset just after token `i` (the end is recomputed by re-lexing). The
 /// `EOF` token, and an index or offset out of range, give the token's own start (or the end of
 /// `src`).
@@ -512,9 +523,9 @@ pub fn token_text<'a>(src: &'a [u8], tokens: &[Token], i: usize) -> &'a [u8] {
     &src[s..e]
 }
 
-/// Lexes `text` (no BOM handling, no UTF-8 check) into `(kind, start)` pairs, without `EOF`.
-/// `after_dot`: the text directly follows a `.` token. Used by the printer to check that its
-/// output re-lexes to the same tokens.
+/// Lexes `text` (no BOM or shebang handling, no UTF-8 check) into `(kind, start)` pairs, without
+/// `EOF`. `after_dot`: the text directly follows a `.` token. Used by the printer to check that
+/// its output re-lexes to the same tokens.
 pub(crate) fn lex_kinds(text: &[u8], after_dot: bool, out: &mut Vec<(u8, usize)>) {
     let mut i = 0;
     let mut dot_end = if after_dot { 0 } else { usize::MAX };

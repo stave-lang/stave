@@ -2,7 +2,8 @@
 //! every program of `tests/conformance/run/` is built by the driver pipeline (debug and release
 //! layouts) into a static ELF executable, which runs natively (x86-64 host) or under
 //! `qemu-aarch64`, and in the stave-ir reference interpreter from the same checked IR. stdout,
-//! stderr, and the exit status must be identical. The executables have no `PT_INTERP` or
+//! stderr, and the exit status must be identical, and identical again when the same executable
+//! runs from memory instead of from its file. The executables have no `PT_INTERP` or
 //! `PT_DYNAMIC`, and make only system calls of `runtime/syscalls.list`: checked on the
 //! interpreter's syscall log (same IR, same runtime) and, when `strace` is installed, on the
 //! native x86-64 runs under `strace -c`.
@@ -13,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use stave_driver::exec::{self, Ran, RunSpec, TempDir};
+use stave_driver::exec::{self, Executable, Ran, RunSpec, TempDir};
 use stave_driver::interp::{self, Limits};
 use stave_driver::pipeline::{self, Goal, Options, Output};
 use stave_driver::shipped::Library;
@@ -161,17 +162,24 @@ fn native_equals_interpreter_on_both_arches() {
             let Some(runner) = how else { continue };
             for release in [false, true] {
                 let bin = tmp.path().join(format!("{name}-{target}-{release}"));
-                if release {
-                    let rel = build(p, target, true);
-                    let img = rel.image.as_ref().unwrap();
-                    assert_static(img.bytes(), target, &name);
-                    img.write_file(&bin).unwrap();
-                } else {
-                    img.write_file(&bin).unwrap();
-                }
+                let rel = release.then(|| build(p, target, true));
+                let img = rel.as_ref().map_or(img, |r| r.image.as_ref().unwrap());
+                assert_static(img.bytes(), target, &name);
+                img.write_file(&bin).unwrap();
                 let spec = RunSpec { args: &[], runner, cwd: Some(&base_dir(p)), inherit: false };
                 let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
                 native_runs += 1;
+                let mut held = Executable::new(&name, img.bytes()).unwrap();
+                assert!(held.in_memory(), "{name}: {:?}", exec::fallback_note());
+                let from_memory = held.run(&spec).unwrap_or_else(|e| panic!("{name} from memory: {e}"));
+                if from_memory != got {
+                    failures.push(format!(
+                        "{name} [{target}{}]: the run from memory differs from the file's\n== memory\n{}== file\n{}",
+                        if release { ", release" } else { "" },
+                        show(&from_memory),
+                        show(&got)
+                    ));
+                }
                 // The interpreter's status is the full `exit_group` argument; the kernel keeps 8 bits.
                 let want = Ran { exit: want.exit & 0xff, ..want.clone() };
                 if got != want {

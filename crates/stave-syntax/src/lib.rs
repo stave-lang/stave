@@ -30,7 +30,9 @@ pub use ast::{Ast, ChildrenRev, ItemAst, Node};
 pub use generated::node_kinds::NodeKind;
 pub use generated::terminals::Term;
 pub use items::{ItemKind, ItemSpan, ItemTable, ItemsError, MAX_DEPTH, items};
-pub use lex::{KIND_ERROR, LexStop, Lexed, MAX_FILE_LEN, Token, kind_name, lex, token_end, token_text};
+pub use lex::{
+    KIND_ERROR, LexStop, Lexed, MAX_FILE_LEN, Token, kind_name, lex, shebang_end, token_end, token_text,
+};
 pub use parse::{
     FileStop, ItemInfo, ParsedFile, ParsedItem, parse_file, parse_file_stepwise, parse_item, parse_items,
 };

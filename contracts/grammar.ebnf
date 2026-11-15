@@ -50,6 +50,9 @@ CharLit      = "'" Char "'" ;
 LineComment  = "//" ~"\n"* ;                           (* no block comments: no nesting state. `/*` is an error
                                                          token through the first `*/` on its line, else the
                                                          end of the line (E0029) *)
+Shebang      = "#!" ~"\n"* ;                           (* a comment, only at byte offset 0 of a file (`#!/usr/bin/env -S
+                                                         stave run`). `#!` anywhere else, also after a byte-order
+                                                         mark, is E0018 *)
                (* `'` Ident with no `'` directly after it (a Rust lifetime) is an error token (E0024) *)
                (* a UTF-8 byte-order mark at file start is E0017 *)
 Keywords     = "fn" "let" "mut" "const" "struct" "enum" "trait" "impl" "for" "in" "while" "loop"
