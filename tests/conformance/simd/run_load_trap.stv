@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// `TxN.load(s, i)` traps `Bounds` when `i + N > s.len()`. Run by the interpreter harness
+// (crates/stave-driver/tests/interp_vs_native.rs): exit 101, run_load_trap.stderr.
+import std.io;
+
+fn main() -> i32 {
+    let xs: [u32; 6] = [1, 2, 3, 4, 5, 6];
+    let v = u32x4.load(&xs, 2);
+    let s = v.reduce_add();
+    io.print(f"in range: {s}\n");
+    let w = u32x4.load(&xs, 3);
+    let t = w.reduce_add();
+    io.print(f"not reached: {t}\n");
+    return 0;
+}

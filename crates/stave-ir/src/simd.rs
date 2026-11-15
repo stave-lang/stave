@@ -759,3 +759,22 @@ pub fn mem_operand(types: &TypeTable, t: TypeId) -> Option<MemOperand> {
         _ => None,
     }
 }
+
+/// The first function (by id) whose body holds a vector or mask value or op: what a backend
+/// without vector code generation cannot compile.
+pub fn first_vector_func(m: &crate::ir::Module) -> Option<crate::ir::FuncId> {
+    let simd: Vec<bool> =
+        m.types.keys().iter().map(|k| matches!(k, TypeKey::Vec { .. } | TypeKey::Mask { .. })).collect();
+    let is = |t: TypeId| simd.get(t.index()).copied().unwrap_or(false);
+    let vops = m.vec_ops();
+    m.funcs.iter().position(|f| {
+        f.params.iter().chain(f.ret.iter()).any(|&t| is(t))
+            || f.body.as_ref().is_some_and(|b| {
+                b.values.iter().any(|v| is(v.ty))
+                    || b.insts.op.iter().any(|op| {
+                        matches!(op, crate::ir::Op::Intrinsic(i) if vops.get(i.index()).copied().flatten().is_some())
+                    })
+            })
+    })
+    .map(|i| crate::ir::FuncId(i as u32))
+}

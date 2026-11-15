@@ -267,3 +267,109 @@ fn native_binaries_use_only_listed_syscalls() {
     // `strace -c` never counts `exit_group`: it does not return, so only `write` is required.
     assert!(seen.contains("write"), "write never traced: {seen:?}");
 }
+
+/// Targets whose native vector code is compared with the interpreter on the SIMD programs. None
+/// yet: no backend generates vector code (`stave build` of these programs stops at `codegen`).
+/// A target joins this list when its backend lowers every vector op.
+const SIMD_NATIVE: &[&str] = &[];
+
+/// `tests/conformance/simd/run_*.stv`, sorted.
+fn simd_programs() -> Vec<PathBuf> {
+    simd_files("run_")
+}
+
+/// `tests/conformance/simd/<prefix>*.stv`, sorted.
+fn simd_files(prefix: &str) -> Vec<PathBuf> {
+    let dir = repo().join("tests/conformance/simd");
+    let mut v: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy();
+            name.starts_with(prefix) && p.extension().is_some_and(|x| x == "stv")
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// The checked IR of `p` for `target` (no code generation).
+fn lower_only(p: &Path, target: Triple) -> Output {
+    let mut o = Options::new(Goal::Check).threads(Some(4));
+    o.lower = true;
+    o.target = Some(target);
+    let out = pipeline::run(p, &Library::in_dir(&repo()), &o).unwrap();
+    assert!(!out.has_errors(), "{}: diagnostics {:?}", p.display(), out.diagnostics);
+    assert!(out.failure.is_none(), "{} ({target}): {}", p.display(), out.failure.as_ref().unwrap());
+    assert!(out.module.is_some(), "{}: no module", p.display());
+    out
+}
+
+/// Every SIMD program runs in the interpreter on both arches: stdout equals `<name>.stdout`, the
+/// exit status `<name>.exit` (default 0), and stderr contains `<name>.stderr` when present
+/// (`STAVE_BLESS=1` rewrites the stdout files). On the targets of [`SIMD_NATIVE`] the native
+/// build must also match.
+#[test]
+fn simd_programs_run_in_the_interpreter() {
+    let progs = simd_programs();
+    assert!(progs.len() >= 4, "SIMD run programs: {progs:?}");
+    let bless = std::env::var_os("STAVE_BLESS").is_some();
+    let tmp = TempDir::new("ivn-simd").unwrap();
+    let mut failures = Vec::new();
+    for target in ["x86_64-linux", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
+        for p in &progs {
+            let name = p.file_stem().unwrap().to_string_lossy().into_owned();
+            let side = |ext: &str| p.with_extension(ext);
+            let out = lower_only(p, target);
+            let m = out.module.as_ref().unwrap();
+            let r = match interp::run(m, "main.main", target, &[], &[], Limits::default()) {
+                Ok(r) => r.ran,
+                Err(e) => {
+                    failures.push(format!("{name} [{target}]: interpreter: {e}"));
+                    continue;
+                }
+            };
+            if bless {
+                std::fs::write(side("stdout"), &r.stdout).unwrap();
+            }
+            let want_out = std::fs::read(side("stdout")).unwrap_or_default();
+            let want_exit: i32 =
+                std::fs::read_to_string(side("exit")).map_or(0, |s| s.trim().parse().unwrap());
+            let want_err = std::fs::read_to_string(side("stderr")).unwrap_or_default();
+            let stderr = String::from_utf8_lossy(&r.stderr).into_owned();
+            if r.stdout != want_out || r.exit & 0xff != want_exit || !stderr.contains(want_err.trim_end()) {
+                failures.push(format!(
+                    "{name} [{target}]: interpreter run differs from the expectation\n{}",
+                    show(&r)
+                ));
+            }
+            if !SIMD_NATIVE.contains(&target.to_string().as_str()) {
+                continue;
+            }
+            let Some(runner) = runner(target) else { continue };
+            let built = build(p, target, false);
+            let bin = tmp.path().join(format!("{name}-{target}"));
+            built.image.as_ref().unwrap().write_file(&bin).unwrap();
+            let spec = RunSpec { args: &[], runner, cwd: Some(&base_dir(p)), inherit: false };
+            let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
+            let want = Ran { exit: r.exit & 0xff, ..r.clone() };
+            if got != want {
+                failures
+                    .push(format!("{name} [{target}]: native differs from the interpreter\n{}", show(&got)));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} failure(s):\n{}", failures.len(), failures.join("\n"));
+}
+
+/// The check-only SIMD positives lower to verified checked IR on both arches.
+#[test]
+fn simd_positives_lower() {
+    let files = simd_files("pos_");
+    assert!(!files.is_empty());
+    for target in ["x86_64-linux", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
+        for p in &files {
+            lower_only(p, target);
+        }
+    }
+}

@@ -428,6 +428,18 @@ impl<'a> Ck<'a> {
         };
         let _ = l;
         if is_shift(op) {
+            // a literal amount of a vector shift is a lane value: `v << 3`
+            if let (Ty::T(vt), Ty::Lit(g)) = (self.resolve(lt), self.resolve(rt))
+                && let TypeKind::Vector { lane, .. } = self.tys.kind(vt).clone()
+            {
+                if self.fix(g, lane) {
+                    if op != Term::LtLtPercent as u8 {
+                        self.const_shift_amount(r, vt);
+                    }
+                    return self.op_on(at_tok, op, vt);
+                }
+                return Ty::ERR;
+            }
             // the amount has the left operand's type
             let t = self.unify_operands(r, lt, rt);
             match self.resolve(t) {
@@ -2458,7 +2470,16 @@ impl<'a> Ck<'a> {
                 }
                 self.builtin_args(&ps, args);
                 let nm = builtins::builtin_assoc_name(text);
-                self.target(tok, Target::Builtin { name: nm, recv: ty, adjust: Adjust::default() });
+                self.target(
+                    tok,
+                    Target::Builtin {
+                        name: nm,
+                        recv: ty,
+                        adjust: Adjust::default(),
+                        ret,
+                        consts: Vec::new(),
+                    },
+                );
                 Ty::T(ret)
             }
             St::Val(t) => {
@@ -2585,7 +2606,18 @@ impl<'a> Ck<'a> {
         let mut out = Vec::new();
         for (i, &a) in args.iter().enumerate() {
             match ps.get(i) {
-                Some(ArgTy::Is(t)) => out.push(self.check_expr(a, *t, None)),
+                Some(&ArgTy::Is(t)) => {
+                    // a `&mut` argument is reborrowed, as for fn params
+                    let t2 = self.check_expr(a, t, None);
+                    self.note_reborrow(a, t2, t);
+                    out.push(t2);
+                }
+                Some(ArgTy::Mask(m)) => out.push(self.mask_arg(a, *m)),
+                Some(&ArgTy::Aligned { elem, mutable, bytes }) => {
+                    let t = self.aligned_arg(a, elem, mutable, bytes);
+                    self.note_reborrow(a, t, t);
+                    out.push(t);
+                }
                 _ => {
                     let t = self.expr(a, None);
                     out.push(self.force(t));
@@ -2595,16 +2627,10 @@ impl<'a> Ck<'a> {
         out
     }
 
-    /// The operands of `recv.select(a, b)`, in order, and the result type. On a `bool` receiver
-    /// `a` and `b` have one type T of any kind (E0201 at `b` otherwise), which is the result's:
-    /// `a` takes the expected type, `b` takes `a`'s (so `(i < n).select(xs[i], 0)` types the
-    /// literal). A mask receiver takes vector operands (checked by their use) and yields `a`'s
-    /// type.
-    fn select_operands(&mut self, recv: TypeId, ps: &[ArgTy], args: &[u32], hint: Option<TypeId>) -> Ty {
-        if !matches!(self.tys.kind(recv), TypeKind::Bool) {
-            let ats = self.builtin_args(ps, args);
-            return Ty::T(ats.first().copied().unwrap_or(ids::ERROR));
-        }
+    /// The operands of `c.select(a, b)` on a `bool` `c`, in order, and the result type: `a` and
+    /// `b` have one type of any kind (E0201 at `b` otherwise), which is the result's. `a` takes
+    /// the expected type, `b` takes `a`'s (so `(i < n).select(xs[i], 0)` types the literal).
+    fn select_operands(&mut self, args: &[u32], hint: Option<TypeId>) -> Ty {
         let (Some(&a), Some(&b)) = (args.first(), args.get(1)) else { return Ty::ERR };
         let at = self.expr(a, hint);
         let bh = match self.resolve(at) {
@@ -2613,6 +2639,146 @@ impl<'a> Ck<'a> {
         };
         let bt = self.expr(b, bh);
         self.unify_operands(b, at, bt)
+    }
+
+    /// A mask argument of type `want`: a mask of another width or lane count is E0605.
+    fn mask_arg(&mut self, a: u32, want: TypeId) -> TypeId {
+        let t = self.expr(a, Some(want));
+        let t = self.force(t);
+        if t != want
+            && let (TypeKind::Mask { .. }, TypeKind::Mask { width, n }) =
+                (self.tys.kind(t).clone(), self.tys.kind(want).clone())
+        {
+            self.e0605(a, t, width, n);
+            return ids::ERROR;
+        }
+        self.coerce(a, Ty::T(t), want, None)
+    }
+
+    /// E0605 at `a`: mask `found` where `mask{width}x{n}` lanes are needed.
+    fn e0605(&mut self, a: u32, found: TypeId, width: u8, n: Lanes) {
+        let lane = match width {
+            8 => ids::U8,
+            16 => ids::U16,
+            64 => ids::U64,
+            _ => ids::U32,
+        };
+        let v = self.tys.intern(TypeKind::Vector { lane, n });
+        let (ms, vs) = (self.show(found), self.show(v));
+        let w = width.to_string();
+        let d =
+            mk("E0605", None, &[("mask", &ms), ("vector", &vs), ("width", &w)], self.icx.node_span(a), &[]);
+        self.report(d);
+    }
+
+    /// An `&[elem align A]` argument (`&mut` when `mutable`) with A ≥ `bytes` (E0606).
+    fn aligned_arg(&mut self, a: u32, elem: TypeId, mutable: bool, bytes: u32) -> TypeId {
+        let t = self.expr(a, None);
+        let t = self.force(t);
+        if t == ids::ERROR || self.tys.has_error(t) {
+            return ids::ERROR;
+        }
+        if let TypeKind::Ref { mutable: m, inner } = self.tys.kind(t).clone()
+            && (m || !mutable)
+            && let TypeKind::Slice { elem: e, align } = self.tys.kind(inner).clone()
+            && e == elem
+        {
+            if align < bytes {
+                let tn = self.show(t);
+                let b = bytes.to_string();
+                let d = mk("E0606", None, &[("type", &tn), ("align", &b)], self.icx.node_span(a), &[]);
+                self.report(d);
+                return ids::ERROR;
+            }
+            return t;
+        }
+        let s = self.tys.intern(TypeKind::Slice { elem, align: bytes });
+        let want = self.tys.mk_ref(mutable, s);
+        self.mismatch(a, Ty::T(t), want, None);
+        ids::ERROR
+    }
+
+    /// The type of `m.select(a, b)`: `a` and `b` of one vector (or mask) type whose lanes match the
+    /// mask `m` (E0603, E0605).
+    fn select_ty(&mut self, m: TypeId, ats: &[TypeId], args: &[u32]) -> TypeId {
+        let (Some(&a), Some(&b)) = (ats.first(), ats.get(1)) else { return ids::ERROR };
+        if a == ids::ERROR || b == ids::ERROR || self.tys.has_error(a) || self.tys.has_error(b) {
+            return ids::ERROR;
+        }
+        let TypeKind::Mask { width, n } = self.tys.kind(m).clone() else { return ids::ERROR };
+        let shape = |s: &Self, t: TypeId| match s.tys.kind(t) {
+            TypeKind::Vector { lane, n } => Some((types::lane_bits(s.tys.kind(*lane)), *n)),
+            TypeKind::Mask { width, n } => Some((*width as u32, *n)),
+            _ => None,
+        };
+        let Some(sa) = shape(self, a) else {
+            self.mismatch(args[0], Ty::T(a), m, None);
+            return ids::ERROR;
+        };
+        if a != b {
+            if shape(self, b).is_some() {
+                let (ls, rs) = (self.show(a), self.show(b));
+                let d = mk("E0603", None, &[("left", &ls), ("right", &rs)], self.icx.node_span(args[1]), &[]);
+                self.report(d);
+            } else {
+                self.mismatch(args[1], Ty::T(b), a, None);
+            }
+            return ids::ERROR;
+        }
+        if sa != (width as u32, n) {
+            let at = self.icx.node_span(args[0]);
+            let ms = self.show(m);
+            let vs = self.show(a);
+            let w = sa.0.to_string();
+            let d = mk("E0605", None, &[("mask", &ms), ("vector", &vs), ("width", &w)], at, &[]);
+            self.report(d);
+            return ids::ERROR;
+        }
+        a
+    }
+
+    /// The lane indices of `v.permute::<[i0, ..]>()` on vector `v` (E0608 for an index past the
+    /// lanes); `None` after a reported error.
+    fn permute_indices(&mut self, g: u32, v: TypeId) -> Option<Vec<u64>> {
+        let icx = self.icx;
+        let n = match self.tys.kind(v) {
+            TypeKind::Vector { n: Lanes::Fixed(k), .. } => *k as u64,
+            _ => return Some(Vec::new()),
+        };
+        let kids = icx.kids_vec(g);
+        let mut out = Vec::new();
+        let bad = |s: &mut Self| {
+            let text = icx.node_text(g).to_string();
+            let d = mk("E0201", Some("const-arg"), &[("operand", &text)], icx.node_span(g), &[]);
+            s.report(d);
+            None
+        };
+        let [x] = kids[..] else { return bad(self) };
+        let a = icx.a(x);
+        if !icx.is(a, Term::LBracket) {
+            return bad(self);
+        }
+        let close = icx.close(a);
+        for t in a + 1..close {
+            if icx.is(t, Term::Comma) {
+                continue;
+            }
+            if !icx.is(t, Term::IntLit) {
+                return bad(self);
+            }
+            let Some((k, _)) = crate::literals::parse_int(icx.tok_str(t)) else { return bad(self) };
+            if k >= n as u128 {
+                let (ks, ns) = (k.to_string(), n.to_string());
+                let d = mk("E0608", None, &[("index", &ks), ("lanes", &ns)], icx.tok_span(t), &[]);
+                self.report(d);
+                return None;
+            }
+            out.push(k as u64);
+        }
+        if out.len() as u64 != n {
+            return bad(self);
+        }
+        Some(out)
     }
 
     fn intrinsic_arch(&mut self, at: Span, decl: DeclId) {
@@ -2771,7 +2937,15 @@ impl<'a> Ck<'a> {
         match lk {
             Lookup::Found { m, level, recv: c } => match m {
                 MethodRef::Builtin(b) => {
+                    let mut consts: Vec<u64> = Vec::new();
                     let gargs: Vec<GArg> = match targs_node {
+                        Some(g) if b.name == "permute" => {
+                            match self.permute_indices(g, c) {
+                                Some(ks) => consts = ks,
+                                None => return self.args_only(args),
+                            }
+                            Vec::new()
+                        }
                         Some(g) => {
                             let k = icx.kids_vec(g);
                             let shape: Vec<bool> = k
@@ -2800,19 +2974,27 @@ impl<'a> Ck<'a> {
                     if !self.arity(n, paren, ps.len(), args.len(), false) {
                         return self.args_only(args);
                     }
-                    let ret = if b.name == "select" {
-                        self.select_operands(c, &ps, args, hint)
+                    // `select` on a `bool` takes its type from its operands; on a mask from the
+                    // vector operands.
+                    let (ret, out) = if b.name == "select" && matches!(self.tys.kind(c), TypeKind::Bool) {
+                        (ret, self.select_operands(args, hint))
                     } else {
-                        self.builtin_args(&ps, args);
-                        Ty::T(ret)
+                        let ats = self.builtin_args(&ps, args);
+                        let ret = if b.name == "select" { self.select_ty(c, &ats, args) } else { ret };
+                        if let [GArg::Const(ConstArg::Value(k))] = gargs[..]
+                            && b.name == "div_const"
+                        {
+                            consts.push(k);
+                        }
+                        (ret, Ty::T(ret))
                     };
                     let adjust = Adjust {
                         derefs: level,
                         autoref: if b.by_ref { Some(false) } else { None },
                         reborrow: false,
                     };
-                    self.target(seg, Target::Builtin { name: b.name, recv: c, adjust });
-                    ret
+                    self.target(seg, Target::Builtin { name: b.name, recv: c, adjust, ret, consts });
+                    out
                 }
                 MethodRef::Impl { method, ref impl_args, .. } => {
                     let Some(sig) = self.sigs.fn_sig(method) else { return self.args_only(args) };

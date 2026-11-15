@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// E0605: a mask must have the vector's lane width and lane count (`m.rewiden::<W>()` converts).
+fn f(a: f32x4, b: i16x8, s: &[f32]) -> f32x4 {
+    let m = b < b;
+    let x = m.select(a, a); //~ ERROR E0605
+    let y = f32x4.load_masked(s, 0, m); //~ ERROR E0605
+    let w = m.rewiden::<32>();
+    return a.compress(w); //~ ERROR E0605
+}
+
+fn g(a: f32x4, b: i32x4) -> f32x4 {
+    let m = b < b;
+    let n = m.rewiden::<32>();
+    return n.select(a, a);
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,8 @@
+mul then sub: 0.0
+fma: 2.3841858e-7
+nan lanes: 15 15 0 0 0
+tree: 2.0
+ordered: 1.0
+min(-0, 0): -0.0
+neg 0: -0.0
+round 2.5: 8.0

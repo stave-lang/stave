@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// E0606: aligned loads and stores need `&[T align A]` with A at least the vector's size in bytes.
+fn f(s: &[f32], t: &[f32 align 8], u: &mut [f32 align 16], w: &mut [f32]) -> f32x4 {
+    let a = f32x4.load_aligned(s, 0); //~ ERROR E0606
+    let b = f32x4.load_aligned(t, 0); //~ ERROR E0606
+    a.store_aligned(u, 0);
+    b.store_aligned(w, 4); //~ ERROR E0606
+    b.store_stream(w, 0); //~ ERROR E0606
+    return b;
+}
+
+fn main() -> i32 {
+    return 0;
+}

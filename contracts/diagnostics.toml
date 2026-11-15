@@ -915,7 +915,7 @@ fix = { description = "choose wrapping `{op}%`, saturating `{op}|`, or a checked
 code = "E0605"
 severity = "error"
 area = "simd"
-rule = "mask width or count does not match the vector (use `m.rewiden::<W>()`) (planned)"
+rule = "mask width or count does not match the vector (use `m.rewiden::<W>()`)"
 holes = { mask = "type", vector = "type", width = "int" }
 message = "mask `{mask}` does not match vector `{vector}`"
 labels = [{ at = "primary", text = "`{mask}` here" }]
@@ -925,7 +925,7 @@ fix = { description = "convert the mask to {width}-bit lanes with `m.rewiden::<{
 code = "E0606"
 severity = "error"
 area = "simd"
-rule = "aligned load or store on a slice whose type lacks that alignment (use `align_to`) (planned)"
+rule = "aligned load or store on a slice whose type lacks that alignment (use `align_to`)"
 holes = { type = "type", align = "int" }
 message = "aligned access needs a slice aligned to {align} bytes, found `{type}`"
 labels = [{ at = "primary", text = "slice without the alignment" }]

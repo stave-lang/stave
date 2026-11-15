@@ -92,8 +92,33 @@ instructions; the trap kind is the matching panic kind (`Overflow`, `Bounds`, `D
 | `intrinsic.<name>` | args.. | contracts/intrinsics.md |
 | `panic.<kind>` | — | unconditional trap: `panic.bounds panic.overflow panic.div_by_zero panic.assert panic.out_of_memory panic.stack_overflow panic.unwrap` |
 
-Vector ops (one per simd-ops portable op) and GPU ops (`gpu.<name>`, gpu-ops.md) extend this list
-when their lowering lands.
+GPU ops (`gpu.<name>`, gpu-ops.md) extend this list when their lowering lands.
+
+**Vector and mask ops** (one per simd-ops.md portable op; full table in stave-ir `simd`). Lane-wise
+ops take the lane semantics of the scalar op; V = the vector result type, M = `mask W n`:
+
+| Op | Operands | Meaning |
+|---|---|---|
+| `vec.splat` | `x` | every lane `x` |
+| `vec.add sub mul div neg abs copysign sqrt floor ceil round trunc fma` | lanes | float lanes, IEEE (`round` ties to even, `fma` one rounding) |
+| `vec.min max min_num max_num min_x86 max_x86` | `a b` | IEEE minimum / maximum, minimumNumber / maximumNumber, `a < b ? a : b`; int `min max` by value |
+| `vec.add.wrap sub.wrap mul.wrap add.sat sub.sat mul.sat checked_add checked_sub checked_mul` | `a b` | int lanes; `checked_*` yield `Option<V>` |
+| `vec.div_lanes` † `vec.div_const` † | `a b` / `a K` | int division per lane (traps as scalar `div`) |
+| `vec.and or xor andnot not abs_wrap popcount clz` | lanes | int lanes; `andnot` = `a & ~b` |
+| `vec.shl shr` † `vec.shl.wrap` | `a amount` | amount: V or an int; as scalar shifts |
+| `vec.eq ne lt le gt ge` | `a b` | result M |
+| `vec.reduce_add reduce_min reduce_max reduce_and reduce_or` | `v` | lane type; tree: lane i with lane i+N/2 until one lane remains (int add wraps) |
+| `vec.reduce_add_ordered` / `vec.scan_add` | `v init` / `v` | sequential from lane 0 |
+| `vec.cast cast.wrap cast.sat cast.round cast.try` | `v` | `as as% as\| as~ as?` per lane (`try`: `Option<V>`, `Some` iff every lane converts) |
+| `vec.bitcast split join widen_lo widen_hi narrow_wrap narrow_sat permute lookup compress expand` | | shape ops (`permute v k0 ..`: constant lane indices) |
+| `vec.load` / `vec.store` | `s i` / `s i v` | lanes `s[i..i+N]`, after `check.bounds i (sub.sat (slice.len s) N-1)` or under a chunk loop's head test |
+| `vec.load_aligned` † / `vec.store_aligned` † | `s i` / `s i v` | as `load` / `store`; `i % N != 0` traps `Bounds` |
+| `vec.load_masked` † / `vec.store_masked` † | `s i m` / `s i v m` | active lanes only (inactive read 0); an active lane past the end traps `Bounds` |
+| `vec.gather` † / `vec.scatter` † | `s idx` / `s idx v` | any index ≥ len traps `Bounds` before any write; duplicate indices: highest lane wins |
+| `mask.and or xor not select to_bits to_vec first_n rewiden all none` | | mask ops (`mask.select m a b`) |
+
+Mask `==` / `!=` are `mask.not (mask.xor a b)` / `mask.xor a b`. `s.align_to::<A>()` is
+`slice.ptr`, `cast` to `usize`, `rem` by A, `eq 0`, and a `select` between the two `enum.make`s.
 
 **Casts** (`arith::cast_allowed`): `cast` = lossless only (ints when the target holds every
 value; `bool` → int; `char` → `u32 u64 i64 usize isize`; `u8` → `char`; int → float when the
