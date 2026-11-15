@@ -193,6 +193,14 @@ pub fn codegen_link(
     release: bool,
     threads: Option<usize>,
 ) -> Result<Built, Failure> {
+    // No backend generates vector code yet: a vector value or op stops the build here.
+    if let Some(f) = stave_ir::simd::first_vector_func(m) {
+        let path = m.func(f).map_or("?", |f| f.path.as_str());
+        return Err(Failure::Unsupported {
+            stage: Stage::Codegen,
+            message: format!("vector code generation (in `{path}`)"),
+        });
+    }
     let funcs = m.funcs.iter().filter(|f| f.body.is_some()).count() as u64;
     // Release: drop the bounds checks that have a recorded proof (the checked IR keeps them).
     let mut elided = Vec::new();

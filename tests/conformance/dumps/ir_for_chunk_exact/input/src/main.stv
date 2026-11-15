@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// ir golden: `tail exact;`: head, body, the check, exit.
+fn total(xs: &[u32]) -> u32 {
+    let mut acc = u32x4.splat(0);
+    for v: u32x4 in xs {
+        acc = acc +% v;
+    } tail exact;
+    return acc.reduce_add();
+}
+
+fn main() -> i32 {
+    return 0;
+}

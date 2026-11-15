@@ -180,9 +180,9 @@ pub(crate) struct Join {
 pub(crate) enum LoopKind {
     /// `while` / `loop`: `continue` goes to the head with no prefix.
     Plain,
-    /// `for` over a range or a sequence: `continue` steps the counter (`i + 1`); inclusive
-    /// ranges also carry the `more` flag (`i != end`).
-    Count { i: Operand, ty: Ty, end: Option<Operand> },
+    /// `for` over a range or a sequence: `continue` steps the counter (`i + step`: 1, or the
+    /// lane count of a chunk loop); inclusive ranges also carry the `more` flag (`i != end`).
+    Count { i: Operand, ty: Ty, end: Option<Operand>, step: u32 },
 }
 
 #[derive(Clone, Debug)]
@@ -212,6 +212,21 @@ pub(crate) struct FnState {
     /// Open `scope` statements: (scope depth of their block, the `&mut usize` thread-list
     /// handle); their spawns are joined when that scope ends or is left.
     pub scope_handles: Vec<(usize, Operand)>,
+    /// `&mut` chunk bindings: (scope depth of the chunk body, the write-back of the binding's
+    /// slot); written back when that scope ends or is left.
+    pub write_backs: Vec<(usize, WriteBack)>,
+}
+
+/// The write-back of a `&mut` chunk binding: the vector in `slot` goes to `s[i..i+N]`, only the
+/// active lanes of `mask` in a masked tail.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WriteBack {
+    pub slot: Operand,
+    pub vt: Ty,
+    pub s: Operand,
+    pub i: Operand,
+    pub mask: Option<Operand>,
+    pub tok: u32,
 }
 
 /// The lowered function.
@@ -1108,6 +1123,11 @@ impl<'a> FnCx<'a> {
     pub fn drop_scopes(&mut self, from: usize) {
         let n = self.f.scopes.len();
         for s in (from..n).rev() {
+            let wbs: Vec<WriteBack> =
+                self.f.write_backs.iter().rev().filter(|w| w.0 == s + 1).map(|w| w.1).collect();
+            for w in wbs {
+                self.write_back(w);
+            }
             // threads spawned in a `scope` block are joined before its locals are dropped
             let hs: Vec<Operand> =
                 self.f.scope_handles.iter().rev().filter(|h| h.0 == s + 1).map(|h| h.1).collect();
@@ -1128,6 +1148,12 @@ impl<'a> FnCx<'a> {
     /// Ends the innermost scope: drops its locals (if the block is still open).
     pub fn pop_scope(&mut self) {
         let d = self.f.scopes.len();
+        while let Some(&(wd, w)) = self.f.write_backs.last()
+            && wd == d
+        {
+            self.f.write_backs.pop();
+            self.write_back(w);
+        }
         while let Some(&(hd, h)) = self.f.scope_handles.last()
             && hd == d
         {
@@ -1139,6 +1165,18 @@ impl<'a> FnCx<'a> {
             self.drop_local(l);
             self.f.env.st[l] = MState::Uninit;
         }
+    }
+
+    /// Stores a `&mut` chunk binding's vector back to its slice (active lanes only when masked).
+    pub fn write_back(&mut self, w: WriteBack) {
+        if !self.open() {
+            return;
+        }
+        let v = Operand::Value(self.f.b.load(Self::ir(w.vt), w.slot));
+        match w.mask {
+            Some(m) => self.vop(w.tok, stave_ir::VecOp::StoreMasked, None, &[w.s, w.i, v, m]),
+            None => self.vop(w.tok, stave_ir::VecOp::Store, None, &[w.s, w.i, v]),
+        };
     }
 
     /// `runtime.thread.scope_join(h)`: waits for the threads spawned into the `scope` handle `h`.
@@ -1293,6 +1331,7 @@ impl FnState {
             kvals: Vec::new(),
             last_site: None,
             scope_handles: Vec::new(),
+            write_backs: Vec::new(),
         }
     }
 }

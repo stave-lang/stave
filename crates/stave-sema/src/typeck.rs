@@ -64,8 +64,10 @@ pub enum Target {
     Method { method: MethodRef, args: Vec<GArg>, adjust: Adjust },
     /// A trait method called through a bound or a qualified `Trait.m(x)` with `Self` = `self_ty`.
     TraitMethod { method: DeclId, self_ty: TypeId, args: Vec<GArg> },
-    /// A built-in method of a built-in type, or a type-relative built-in (`f32x4.splat`).
-    Builtin { name: &'static str, recv: TypeId, adjust: Adjust },
+    /// A built-in method of a built-in type, or a type-relative built-in (`f32x4.splat`);
+    /// `ret`: the call's result type; `consts`: its constant generic arguments (`div_const::<K>`,
+    /// the `permute` lane indices).
+    Builtin { name: &'static str, recv: TypeId, adjust: Adjust, ret: TypeId, consts: Vec<u64> },
     /// A user-type operator: the trait method (`Add.add`) through the impl or a bound.
     Op { method: MethodRef, args: Vec<GArg> },
     /// An enum variant constructor or value.
@@ -99,6 +101,8 @@ pub enum Coercion {
     Reborrow,
     /// `&[T; N]` (or `&mut`) to `&[T]`.
     ArrayToSlice,
+    /// `&[T align A]` (or `&mut`) to `&[T]`.
+    Unalign,
     /// `&String` to `&str` (`String.as_str`).
     StringToStr,
     /// An f-string temporary borrowed as `&str` (`String.as_str`, lives to the end of the statement).
@@ -476,7 +480,10 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
                 *self_ty = f(*self_ty);
                 map_gargs(args, f);
             }
-            Target::Builtin { recv, .. } => *recv = f(*recv),
+            Target::Builtin { recv, ret, .. } => {
+                *recv = f(*recv);
+                *ret = f(*ret);
+            }
             Target::SizeOf { ty, .. } => *ty = f(*ty),
             _ => {}
         }
@@ -1076,6 +1083,14 @@ impl<'a> Ck<'a> {
                 {
                     return Some(Coercion::ArrayToSlice);
                 }
+                // &[T align A] -> &[T]
+                if let (TypeKind::Slice { elem, align }, TypeKind::Slice { elem: we, align: 0 }) =
+                    (self.tys.kind(*ti), self.tys.kind(*wi))
+                    && elem == we
+                    && *align != 0
+                {
+                    return Some(Coercion::Unalign);
+                }
                 // &String -> &str
                 if *wi == ids::STR
                     && let TypeKind::Adt { def, .. } = self.tys.kind(*ti)
@@ -1092,6 +1107,13 @@ impl<'a> Ck<'a> {
                     && elem == we
                 {
                     return Some(Coercion::ArrayToSlice);
+                }
+                if let (TypeKind::Slice { elem, align }, TypeKind::Slice { elem: we, align: 0 }) =
+                    (self.tys.kind(*ti), self.tys.kind(*wi))
+                    && elem == we
+                    && *align != 0
+                {
+                    return Some(Coercion::Unalign);
                 }
                 None
             }

@@ -1,0 +1,10 @@
+//~ CHECK-ONLY
+// E0608: a `permute` lane index must be below the lane count.
+fn f(a: u32x4) -> u32x4 {
+    let b = a.permute::<[0, 1, 2, 3]>();
+    return b.permute::<[3, 4, 0, 1]>(); //~ ERROR E0608
+}
+
+fn main() -> i32 {
+    return 0;
+}

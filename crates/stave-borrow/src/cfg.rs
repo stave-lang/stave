@@ -1795,7 +1795,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 self.borrow(p, false, false, span, n).0
             }
             Coercion::FnItem => V::Const,
-            Coercion::NeverToAny | Coercion::ArrayToSlice | Coercion::StringToStr => v,
+            Coercion::NeverToAny | Coercion::ArrayToSlice | Coercion::Unalign | Coercion::StringToStr => v,
         }
     }
 

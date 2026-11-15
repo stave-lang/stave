@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// E0602: a literal operand of a vector operator is a scalar (write `TxN.splat(x)`), except a
+// shift amount, which is a lane value.
+fn f(a: u32x4, x: f32x4) -> u32x4 {
+    let b = 0 -% a; //~ ERROR E0602
+    let c = a +% 1; //~ ERROR E0602
+    let m = x < 1.0; //~ ERROR E0602
+    return a << 3;
+}
+
+fn main() -> i32 {
+    return 0;
+}

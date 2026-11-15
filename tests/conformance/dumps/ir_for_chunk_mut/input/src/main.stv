@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// ir golden: a `&mut` chunk binding over an array (no tail: 8 is a multiple of 4): a slot written back after the body; the masked tail of a slice writes back its active lanes.
+fn scale(xs: &mut [i32; 8], k: i32) {
+    let kk = i32x4.splat(k);
+    for v: &mut i32x4 in xs {
+        *v = *v *% kk;
+    }
+}
+
+fn add(xs: &mut [i32], k: i32) {
+    let kk = i32x4.splat(k);
+    for v: &mut i32x4 in xs {
+        *v = *v +% kk;
+    } tail masked (v, m) {
+        *v = *v +% kk;
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

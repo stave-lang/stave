@@ -1,0 +1,19 @@
+len 0: masked 0 scalar 0 break 0 scaled 0 marked 0
+  exact 0.0
+len 1: masked 103001 scalar 1000 break 1 scaled 4 marked 7
+len 2: masked 102003 scalar 3000 break 3 scaled 11 marked 14
+len 3: masked 101006 scalar 6000 break 6 scaled 21 marked 21
+len 4: masked 10 scalar 10 break 4 scaled 30 marked 0
+  exact 6.0
+len 5: masked 103015 scalar 5010 break 9 scaled 46 marked 16
+len 6: masked 102021 scalar 11010 break 15 scaled 65 marked 35
+len 7: masked 101028 scalar 18010 break 22 scaled 87 marked 57
+len 8: masked 36 scalar 36 break 4 scaled 108 marked 78
+  exact 12.0
+len 9: masked 103045 scalar 9036 break 4 scaled 136 marked 106
+len 10: masked 102055 scalar 19036 break 4 scaled 167 marked 137
+len 11: masked 101066 scalar 30036 break 4 scaled 201 marked 171
+len 12: masked 78 scalar 78 break 4 scaled 234 marked 204
+  exact 18.0
+len 13: masked 103091 scalar 13078 break 4 scaled 274 marked 244
+array of 8, no tail: 36

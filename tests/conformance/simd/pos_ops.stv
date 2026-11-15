@@ -1,0 +1,59 @@
+//~ CHECK-ONLY
+// The portable vector and mask operations type-check with their result types.
+fn floats(a: f32x4, b: f32x4, s: &[f32], d: &mut [f32]) -> f32 {
+    let c = (a + b) * (a - b) / b;
+    let n = -c;
+    let r = n.sqrt().abs().copysign(a).floor().ceil().round().trunc();
+    let m = r.fma(a, b).min(a).max(b).min_num(a).max_num(b).min_x86(a).max_x86(b);
+    let lt = m < a;
+    let sel = lt.select(m, a);
+    let w: f64x2 = sel.widen_lo();
+    let i = sel as| i32x4;
+    let o: Option<i32x4> = sel as? i32x4;
+    let back = i as~ f32x4;
+    let (lo, hi) = back.split();
+    let j = f32x4.join(lo, hi);
+    let l = f32x4.load(s, 0);
+    let mk = f32x4.load_masked(s, 1, mask32x4.first_n(3));
+    j.store(d, 0);
+    mk.store_masked(d, 0, lt);
+    let bits: u8 = lt.to_bits();
+    let sum = l.reduce_add() + (w.reduce_max() as~ f32) + j.reduce_add_ordered(1.0) + j.scan_add().reduce_min();
+    return sum;
+}
+
+fn ints(a: u8x16, b: u8x16, k: u32x4, s: &[u32], d: &mut [u32]) -> u32 {
+    let w = (a +% b) -| (a *% b) +| a;
+    let x = (w & b) | (w ^ a) | ~w | w.andnot(b);
+    let y = (x << 2) >> 1;
+    let z = y <<% b;
+    let p = z.popcount().clz().abs_wrap().lookup(a);
+    let q: u16x8 = p.widen_hi();
+    let r: u8x16 = q.narrow_wrap(q);
+    let t = k.div_const::<7>().div_lanes(k).min(k).max(k);
+    let c: Option<u32x4> = t.checked_add(k);
+    let g = u32x4.gather(s, k);
+    g.scatter(d, k);
+    let m = mask32x4.all() & ~mask32x4.none() ^ (t == k);
+    let v: i32x4 = m.to_vec::<i32>();
+    let e = (m.rewiden::<8>() | mask8x4.first_n(2)).to_bits();
+    let f = t.compress(m).expand(m).permute::<[1, 0, 3, 2]>();
+    let h: u8x16 = f.bitcast::<u8x16>();
+    let n = r.reduce_add() as u32 + h.reduce_or() as u32 + (e as u32);
+    return n +% f.reduce_and();
+}
+
+fn aligned(s: &[f32]) -> f32 {
+    match s.align_to::<16>() {
+        Option.Some(a) => {
+            let v = f32x4.load_aligned(a, 0);
+            let u = f32x4.load(a, 0);
+            return (v + u).reduce_add();
+        }
+        Option.None => { return 0.0; }
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

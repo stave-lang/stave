@@ -55,6 +55,7 @@ const VEC_METHODS: &[&str] = &[
     "min_num",
     "max_num",
     "min_x86",
+    "max_x86",
     "abs_wrap",
     "andnot",
     "popcount",
@@ -77,6 +78,7 @@ const VEC_METHODS: &[&str] = &[
     "compress",
     "expand",
     "store",
+    "store_aligned",
     "store_masked",
     "scatter",
     "checked_add",
@@ -86,7 +88,7 @@ const VEC_METHODS: &[&str] = &[
     "div_lanes",
     "store_stream",
 ];
-const MASK_METHODS: &[&str] = &["select", "to_bits", "to_vec", "all", "none", "rewiden"];
+const MASK_METHODS: &[&str] = &["select", "to_bits", "to_vec", "rewiden"];
 
 fn intern_name(list: &[&'static str], name: &str) -> Option<&'static str> {
     list.iter().copied().find(|&n| n == name)
@@ -146,7 +148,7 @@ pub fn builtin_method<I: Interner + ?Sized>(cx: &I, t: TypeId, name: &str) -> Op
     }
 }
 
-/// Expected argument shape of a built-in call: a fixed type, or "the same as argument k".
+/// Expected argument shape of a built-in call.
 #[derive(Clone, Copy, Debug)]
 pub enum ArgTy {
     Is(TypeId),
@@ -155,6 +157,14 @@ pub enum ArgTy {
     /// An operand of `c.select(a, b)`: typed by the body checker (`a` and `b` have one type,
     /// the result's).
     Select,
+    /// A mask of exactly this type; another mask is E0605.
+    Mask(TypeId),
+    /// `&[T align A]` (`&mut` when `mutable`) with A ≥ `bytes`; a smaller alignment is E0606.
+    Aligned {
+        elem: TypeId,
+        mutable: bool,
+        bytes: u32,
+    },
 }
 
 /// The signature of built-in method `m` on receiver type `t` with turbofish args `gargs`:
@@ -203,6 +213,63 @@ fn mask_of<I: Interner + ?Sized>(cx: &mut I, lane: TypeId, n: Lanes) -> TypeId {
     cx.intern(TypeKind::Mask { width: w, n })
 }
 
+/// The lane type `lane` widened to twice its bits (`widen_lo`), if there is one.
+fn wide_lane<I: Interner + ?Sized>(cx: &mut I, lane: TypeId) -> Option<TypeId> {
+    use types::{FloatBits as F, IntBits as B};
+    Some(match cx.kind(lane).clone() {
+        TypeKind::Int { signed, bits } => {
+            let bits = match bits {
+                B::B8 => B::B16,
+                B::B16 => B::B32,
+                B::B32 => B::B64,
+                _ => return None,
+            };
+            cx.intern(TypeKind::Int { signed, bits })
+        }
+        TypeKind::Float(F::F16 | F::B16) => cx.intern(TypeKind::Float(F::F32)),
+        TypeKind::Float(F::F32) => cx.intern(TypeKind::Float(F::F64)),
+        _ => return None,
+    })
+}
+
+/// The int lane type of half the bits (`narrow_wrap`), if there is one.
+fn narrow_lane<I: Interner + ?Sized>(cx: &mut I, lane: TypeId) -> Option<TypeId> {
+    use types::IntBits as B;
+    match cx.kind(lane).clone() {
+        TypeKind::Int { signed, bits } => {
+            let bits = match bits {
+                B::B16 => B::B8,
+                B::B32 => B::B16,
+                B::B64 => B::B32,
+                _ => return None,
+            };
+            Some(cx.intern(TypeKind::Int { signed, bits }))
+        }
+        _ => None,
+    }
+}
+
+/// The index vector of a gather / scatter on `lane x n`: unsigned lanes of the same width.
+fn index_vec<I: Interner + ?Sized>(cx: &mut I, lane: TypeId, n: Lanes) -> TypeId {
+    use types::IntBits as B;
+    let bits = match types::lane_bits(cx.kind(lane)) {
+        8 => B::B8,
+        16 => B::B16,
+        32 => B::B32,
+        _ => B::B64,
+    };
+    let u = cx.intern(TypeKind::Int { signed: false, bits });
+    cx.intern(TypeKind::Vector { lane: u, n })
+}
+
+/// Bytes of `lane x n` (0 for a sizeless vector).
+pub fn vec_bytes<I: Interner + ?Sized>(cx: &I, lane: TypeId, n: Lanes) -> u32 {
+    match n {
+        Lanes::Fixed(k) => types::lane_bits(cx.kind(lane)) / 8 * k as u32,
+        Lanes::Native => 0,
+    }
+}
+
 fn vector_method<I: Interner + ?Sized>(
     cx: &mut I,
     t: TypeId,
@@ -214,19 +281,25 @@ fn vector_method<I: Interner + ?Sized>(
 ) -> Option<(Vec<ArgTy>, TypeId)> {
     let (us, unit) = (cx.fixed_ty(ids::USIZE), cx.fixed_ty(ids::UNIT));
     let slice = cx.intern(TypeKind::Slice { elem: lane, align: 0 });
-    let rs = cx.mk_ref(false, slice);
     let rms = cx.mk_ref(true, slice);
     let mask = mask_of(cx, lane, n);
+    let float = matches!(cx.kind(lane), TypeKind::Float(_));
+    let half = |cx: &mut I, lane: TypeId| match n {
+        Lanes::Fixed(k) if k >= 4 => Some(cx.intern(TypeKind::Vector { lane, n: Lanes::Fixed(k / 2) })),
+        _ => None,
+    };
     Some(match name {
-        "sqrt" | "abs" | "floor" | "ceil" | "round" | "trunc" | "abs_wrap" | "popcount" | "clz"
-        | "scan_add" => (vec![], t),
-        "copysign" | "min" | "max" | "min_num" | "max_num" | "min_x86" | "andnot" | "div_lanes" => {
-            (vec![ArgTy::Is(t)], t)
-        }
-        "fma" => (vec![ArgTy::Is(t), ArgTy::Is(t)], t),
-        "reduce_add" | "reduce_min" | "reduce_max" | "reduce_and" | "reduce_or" => (vec![], lane),
+        "sqrt" | "abs" | "floor" | "ceil" | "round" | "trunc" if float => (vec![], t),
+        "abs_wrap" | "popcount" | "clz" if !float => (vec![], t),
+        "scan_add" => (vec![], t),
+        "copysign" | "min_num" | "max_num" | "min_x86" | "max_x86" if float => (vec![ArgTy::Is(t)], t),
+        "andnot" | "div_lanes" if !float => (vec![ArgTy::Is(t)], t),
+        "min" | "max" => (vec![ArgTy::Is(t)], t),
+        "fma" if float => (vec![ArgTy::Is(t), ArgTy::Is(t)], t),
+        "reduce_add" | "reduce_min" | "reduce_max" => (vec![], lane),
+        "reduce_and" | "reduce_or" if !float => (vec![], lane),
         "reduce_add_ordered" => (vec![ArgTy::Is(lane)], lane),
-        "checked_add" | "checked_sub" | "checked_mul" => {
+        "checked_add" | "checked_sub" | "checked_mul" if !float => {
             let o = if lang_option.is_none() {
                 cx.error_ty()
             } else {
@@ -234,28 +307,49 @@ fn vector_method<I: Interner + ?Sized>(
             };
             (vec![ArgTy::Is(t)], o)
         }
-        "div_const" => (vec![], t),
-        "store" | "store_stream" => (vec![ArgTy::Is(rms), ArgTy::Is(us)], unit),
-        "store_masked" => (vec![ArgTy::Is(rms), ArgTy::Is(us), ArgTy::Is(mask)], unit),
-        "scatter" => (vec![ArgTy::Is(rms), ArgTy::AnyVec], unit),
-        "lookup" | "compress" | "expand" => (vec![ArgTy::AnyVec], t),
+        "div_const" if !float => match gargs {
+            [GArg::Const(ConstArg::Value(_))] => (vec![], t),
+            _ => return None,
+        },
+        "store" => (vec![ArgTy::Is(rms), ArgTy::Is(us)], unit),
+        "store_aligned" | "store_stream" => {
+            let bytes = vec_bytes(cx, lane, n);
+            (vec![ArgTy::Aligned { elem: lane, mutable: true, bytes }, ArgTy::Is(us)], unit)
+        }
+        "store_masked" => (vec![ArgTy::Is(rms), ArgTy::Is(us), ArgTy::Mask(mask)], unit),
+        "scatter" => {
+            let idx = index_vec(cx, lane, n);
+            (vec![ArgTy::Is(rms), ArgTy::Is(idx)], unit)
+        }
+        "lookup" if !float => (vec![ArgTy::Is(t)], t),
+        "compress" | "expand" => (vec![ArgTy::Mask(mask)], t),
         "split" => {
-            let Lanes::Fixed(k) = n else { return None };
-            if k < 4 {
-                return None;
-            }
-            let h = cx.intern(TypeKind::Vector { lane, n: Lanes::Fixed(k / 2) });
+            let h = half(cx, lane)?;
             let tup = cx.mk_tuple(vec![h, h]);
             (vec![], tup)
         }
         "bitcast" => match gargs {
-            [GArg::Type(u)] if matches!(cx.kind(*u), TypeKind::Vector { .. }) => (vec![], *u),
+            [GArg::Type(u)] => match cx.kind(*u).clone() {
+                TypeKind::Vector { lane: ul, n: un } if vec_bytes(cx, ul, un) == vec_bytes(cx, lane, n) => {
+                    (vec![], *u)
+                }
+                _ => return None,
+            },
             _ => return None,
         },
         "permute" => (vec![], t),
-        "widen_lo" | "widen_hi" | "narrow_wrap" | "narrow_sat" => {
-            let _ = rs;
-            (vec![ArgTy::AnyVec], t)
+        "widen_lo" | "widen_hi" => {
+            let w = wide_lane(cx, lane)?;
+            (vec![], half(cx, w)?)
+        }
+        "narrow_wrap" | "narrow_sat" => {
+            let l = narrow_lane(cx, lane)?;
+            let Lanes::Fixed(k) = n else { return None };
+            if k > 32 {
+                return None;
+            }
+            let r = cx.intern(TypeKind::Vector { lane: l, n: Lanes::Fixed(k * 2) });
+            (vec![ArgTy::Is(t)], r)
         }
         _ => return None,
     })
@@ -270,8 +364,7 @@ fn mask_method<I: Interner + ?Sized>(
     gargs: &[GArg],
 ) -> Option<(Vec<ArgTy>, TypeId)> {
     Some(match name {
-        "select" => (vec![ArgTy::Select, ArgTy::Select], cx.error_ty()),
-        "all" | "none" => (vec![], cx.fixed_ty(ids::BOOL)),
+        "select" => (vec![ArgTy::AnyVec, ArgTy::AnyVec], cx.error_ty()),
         "to_bits" => {
             let bits = match n {
                 Lanes::Fixed(k) => k as u32,
@@ -286,7 +379,10 @@ fn mask_method<I: Interner + ?Sized>(
             (vec![], u)
         }
         "to_vec" => match gargs {
-            [GArg::Type(l)] => {
+            [GArg::Type(l)]
+                if matches!(cx.kind(*l), TypeKind::Int { .. })
+                    && types::lane_bits(cx.kind(*l)) == width as u32 =>
+            {
                 let v = cx.intern(TypeKind::Vector { lane: *l, n });
                 (vec![], v)
             }
@@ -300,7 +396,7 @@ fn mask_method<I: Interner + ?Sized>(
             _ => return None,
         },
         _ => {
-            let _ = (t, width);
+            let _ = t;
             return None;
         }
     })
@@ -321,10 +417,16 @@ pub fn builtin_assoc<I: Interner + ?Sized>(
             Some(match name {
                 "splat" => (vec![ArgTy::Is(lane)], t),
                 "load" => (vec![ArgTy::Is(rs), ArgTy::Is(us)], t),
-                "load_aligned" => (vec![ArgTy::AnyVec, ArgTy::Is(us)], t),
-                "load_masked" => (vec![ArgTy::Is(rs), ArgTy::Is(us), ArgTy::Is(mask)], t),
+                "load_aligned" => {
+                    let bytes = vec_bytes(cx, lane, n);
+                    (vec![ArgTy::Aligned { elem: lane, mutable: false, bytes }, ArgTy::Is(us)], t)
+                }
+                "load_masked" => (vec![ArgTy::Is(rs), ArgTy::Is(us), ArgTy::Mask(mask)], t),
                 "load_first_fault" => (vec![ArgTy::Is(rs), ArgTy::Is(us)], t),
-                "gather" => (vec![ArgTy::Is(rs), ArgTy::AnyVec], t),
+                "gather" => {
+                    let idx = index_vec(cx, lane, n);
+                    (vec![ArgTy::Is(rs), ArgTy::Is(idx)], t)
+                }
                 "join" => {
                     let Lanes::Fixed(k) = n else { return None };
                     if k < 4 {
@@ -338,6 +440,7 @@ pub fn builtin_assoc<I: Interner + ?Sized>(
         }
         TypeKind::Mask { .. } => Some(match name {
             "first_n" => (vec![ArgTy::Is(us)], t),
+            "all" | "none" => (vec![], t),
             _ => return None,
         }),
         _ => None,
@@ -505,7 +608,17 @@ pub fn cpuid_ok<I: Interner + ?Sized>(cx: &I, t: TypeId) -> bool {
 
 /// The static name of a type-relative built-in (for [`crate::typeck::Target::Builtin`]).
 pub fn builtin_assoc_name(name: &str) -> &'static str {
-    const NAMES: &[&str] =
-        &["splat", "load", "load_aligned", "load_masked", "load_first_fault", "gather", "join", "first_n"];
+    const NAMES: &[&str] = &[
+        "splat",
+        "load",
+        "load_aligned",
+        "load_masked",
+        "load_first_fault",
+        "gather",
+        "join",
+        "first_n",
+        "all",
+        "none",
+    ];
     NAMES.iter().copied().find(|&n| n == name).unwrap_or("?")
 }

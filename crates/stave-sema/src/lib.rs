@@ -44,6 +44,7 @@ pub mod lower;
 mod lower_expr;
 mod lower_fn;
 mod lower_post;
+mod lower_simd;
 mod lower_stmt;
 pub mod modules;
 pub mod mono;

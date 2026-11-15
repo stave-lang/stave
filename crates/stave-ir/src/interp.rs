@@ -1,4 +1,4 @@
-//! Scalar reference interpreter: the semantic oracle for differential tests.
+//! Reference interpreter: the semantic oracle for differential tests.
 //!
 //! Executes a verified [`Module`] from an entry function over a simulated [`Memory`], with the
 //! exact trap semantics (returns [`Outcome::Trap`] with the kind,
@@ -9,12 +9,15 @@
 //! Values ([`Val`]): scalars are raw `u64` bits (ints normalized to their type, floats as IEEE
 //! bits, `bool` 0/1, `char` code point, pointers and fn values as addresses / function indices);
 //! fat pointers are `(address, length)`; tuples, structs and arrays are `Agg` of their fields;
-//! an enum is `Agg[tag, fields of that variant..]`.
+//! an enum is `Agg[tag, fields of that variant..]`; a vector or mask is `Agg` of its lanes (mask
+//! lanes 0 / 1).
 //!
 //! The interpreter never recurses on the host stack per Stave call (explicit frame stack), and
 //! malformed input yields an [`InterpError`], never a panic.
 
 use std::rc::Rc;
+
+mod simd;
 
 use crate::arith::{self, IntTy};
 use crate::host::{Host, SysResult};
@@ -195,6 +198,8 @@ pub struct Interp<'m, H: Host> {
     cfg: Config,
     steps: u64,
     scratch: Vec<Val>,
+    /// The vector op of each intrinsic id.
+    vops: Vec<Option<crate::simd::VecOp>>,
 }
 
 fn malformed(s: &'static str) -> InterpError {
@@ -220,7 +225,21 @@ impl<'m, H: Host> Interp<'m, H> {
             mem.write(a, &st.init[..n]).map_err(|_| oom())?;
             statics.push(a);
         }
-        Ok(Interp { m, cls, pointee, layouts, strs, statics, host, mem, cfg, steps: 0, scratch: Vec::new() })
+        let vops = m.vec_ops();
+        Ok(Interp {
+            m,
+            cls,
+            pointee,
+            layouts,
+            strs,
+            statics,
+            host,
+            mem,
+            cfg,
+            steps: 0,
+            scratch: Vec::new(),
+            vops,
+        })
     }
 
     /// Instructions + terminators executed so far.
@@ -518,7 +537,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 }
                 Val::agg(v)
             }
-            Shape::Bytes => return Err(InterpError::Unsupported("vector load".into())),
+            Shape::Bytes => self.load_bytes(t, addr, func, site)?,
         })
     }
 
@@ -560,7 +579,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 }
                 Ok(())
             }
-            (Shape::Bytes, _) => Err(InterpError::Unsupported("vector store".into())),
+            (Shape::Bytes, _) => self.store_bytes(t, addr, v, func, site),
             _ => Err(malformed("stored value does not match its type")),
         }
     }
@@ -885,6 +904,14 @@ impl<'m, H: Host> Interp<'m, H> {
                 }
                 let dest = body.insts.result.get(iu).copied().flatten();
                 return Ok(Step::Call(f, vals, dest));
+            }
+            Op::Intrinsic(id) if self.vops.get(id.index()).copied().flatten().is_some() => {
+                let v = self.vops.get(id.index()).copied().flatten().ok_or(malformed("vector op"))?;
+                match self.exec_vec(body, fid, regs, v, ty, args, site)? {
+                    simd::VOut::Val(x) => x,
+                    simd::VOut::None => return Ok(Step::Next),
+                    simd::VOut::Trap(k) => return Ok(Step::Trap(k)),
+                }
             }
             Op::Intrinsic(id) => {
                 let name = m.intrinsic_name(id).ok_or(malformed("intrinsic"))?;

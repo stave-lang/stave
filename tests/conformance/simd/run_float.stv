@@ -1,0 +1,44 @@
+//~ CHECK-ONLY
+// Vector float semantics: no contraction outside `fma`, NaN-ness, the fixed reduction tree.
+// Vector programs do not build yet; crates/stave-driver/tests/interp_vs_native.rs runs this one
+// in the IR interpreter against run_float.stdout.
+import std.io;
+
+fn bits(m: mask32x4) -> u8 {
+    return m.to_bits();
+}
+
+fn main() -> i32 {
+    // x = 1 + 2^-12: `x * x - c` rounds twice (0), `fma` once (2^-24 per lane)
+    let x = f32x4.splat(1.000244140625);
+    let c = f32x4.splat(1.00048828125);
+    let twice = (x * x - c).reduce_add();
+    let fused = x.fma(x, f32x4.splat(0.0) - c).reduce_add();
+    io.print(f"mul then sub: {twice}\nfma: {fused}\n");
+    // NaN: compares are unordered, `min` propagates it, `min_num` skips it
+    let z = f32x4.splat(0.0);
+    let one = f32x4.splat(1.0);
+    let nan = z / z;
+    let mn = nan.min(one);
+    let mnum = nan.min_num(one);
+    let a = bits(nan != nan);
+    let b = bits(mn != mn);
+    let d = bits(mnum != mnum);
+    let e = bits(nan < one);
+    let s = nan.sqrt();
+    let f = bits(s == s);
+    io.print(f"nan lanes: {a} {b} {d} {e} {f}\n");
+    // the fixed tree pairs lane i with lane i + 2; the ordered sum goes lane by lane
+    let xs: [f32; 4] = [100000000.0, 1.0, -100000000.0, 1.0];
+    let v = f32x4.load(&xs, 0);
+    let tree = v.reduce_add();
+    let ordered = v.reduce_add_ordered(0.0);
+    io.print(f"tree: {tree}\nordered: {ordered}\n");
+    // -0 is below +0 for `min`; `neg` flips the sign bit
+    let nz = f32x4.splat(-0.0);
+    let m0 = nz.min(z).reduce_add();
+    let negz = (-z).reduce_add();
+    let r = f32x4.splat(2.5).round().reduce_add();
+    io.print(f"min(-0, 0): {m0}\nneg 0: {negz}\nround 2.5: {r}\n");
+    return 0;
+}

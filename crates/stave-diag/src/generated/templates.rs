@@ -2212,7 +2212,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0605",
         severity: Severity::Error,
         area: "simd",
-        rule: "mask width or count does not match the vector (use `m.rewiden::<W>()`) (planned)",
+        rule: "mask width or count does not match the vector (use `m.rewiden::<W>()`)",
         retired: false,
         located: true,
         holes: &[
@@ -2239,7 +2239,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0606",
         severity: Severity::Error,
         area: "simd",
-        rule: "aligned load or store on a slice whose type lacks that alignment (use `align_to`) (planned)",
+        rule: "aligned load or store on a slice whose type lacks that alignment (use `align_to`)",
         retired: false,
         located: true,
         holes: &[

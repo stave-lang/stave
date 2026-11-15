@@ -1,0 +1,56 @@
+//~ CHECK-ONLY
+// Integer vectors: wrapping, saturating, shifts, masks, gather / scatter, shapes, casts.
+// Vector programs do not build yet; crates/stave-driver/tests/interp_vs_native.rs runs this one
+// in the IR interpreter against run_int.stdout.
+import std.io;
+
+fn show(v: u32x4) {
+    let mut out: [u32; 4] = [0, 0, 0, 0];
+    v.store(&mut out, 0);
+    let a = out[0];
+    let b = out[1];
+    let c = out[2];
+    let d = out[3];
+    io.print(f"{a} {b} {c} {d}\n");
+}
+
+fn main() -> i32 {
+    let xs: [u32; 6] = [10, 11, 12, 13, 14, 15];
+    let a = u32x4.load(&xs, 2);
+    show(a);
+    let big = u32x4.splat(4294967295);
+    show(a +% big);
+    show(a +| big);
+    show(a -| u32x4.splat(13));
+    show(a << 2);
+    show(a <<% u32x4.splat(33));
+    show(a.div_const::<4>());
+    show(a.permute::<[3, 2, 1, 0]>());
+    let ix: [u32; 4] = [5, 0, 5, 1];
+    show(u32x4.gather(&xs, u32x4.load(&ix, 0)));
+    let mut ys: [u32; 4] = [0, 0, 0, 0];
+    let dup: [u32; 4] = [1, 3, 1, 1];
+    let vals: [u32; 4] = [7, 8, 9, 20];
+    u32x4.load(&vals, 0).scatter(&mut ys, u32x4.load(&dup, 0));
+    show(u32x4.load(&ys, 0));
+    let m = a > u32x4.splat(13);
+    let mb = m.to_bits();
+    let first = mask32x4.first_n(3).to_bits();
+    io.print(f"mask bits: {mb} first_n(3): {first}\n");
+    show(m.select(a, u32x4.splat(0)));
+    show(a.compress(m));
+    let sum = a.reduce_add();
+    let mx = a.reduce_max();
+    io.print(f"sum {sum} max {mx}\n");
+    match a.checked_add(big) {
+        Option.Some(_) => { io.print("no overflow\n"); }
+        Option.None => { io.print("overflow\n"); }
+    }
+    let f = a as~ f32x4;
+    show((f * f32x4.splat(0.5)) as| u32x4);
+    let w = i16x8.splat(-300).widen_lo();
+    let wl = w.reduce_add();
+    let n = i32x4.splat(70000).narrow_sat(i32x4.splat(-5)).reduce_min();
+    io.print(f"widen {wl} narrow {n}\n");
+    return 0;
+}

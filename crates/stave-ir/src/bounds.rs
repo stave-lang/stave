@@ -12,9 +12,10 @@
 //!   access is never emitted).
 //! - compiler-made element accesses (`for` over an array or slice, drop loops over arrays, the
 //!   array → slice coercion) index below a length the generated code itself compares against.
-//! - `TxN.load/store`, gathers, scatters, chunk loops: their ops do
-//!   not exist yet; when they land, [`AccessKind::Vector`] accesses need `check.bounds i+N-1 n` or a
-//!   `ChunkLoop` proof (the chunk loop's own `i + N <= len` head test).
+//! - `vec.load` / `vec.store` (and their aligned forms) of N lanes at `i`: `check.bounds i lim`
+//!   with `lim = sub.sat n N-1` (so `i < lim` iff `i + N <= n`), or the `ChunkLoop` proof: a chunk
+//!   loop's own head test `cbr (lt i lim)` with the same `lim`. Masked loads and stores, gathers and
+//!   scatters check their active lanes themselves.
 //!
 //! **Audit** ([`audit`]): every element access is classified with its [`Guard`]: a dominating
 //! `check.bounds` on the same index and length, the op's own trap, or a [`Proof`]. An access with
@@ -45,6 +46,7 @@
 mod facts;
 
 use crate::ir::{Block, Body, Func, FuncId, Module, Op, Operand, Term, Value, ValueDef};
+use crate::simd::VecOp;
 use crate::types::{TypeId, TypeKey, TypeTable};
 use crate::verify::Dominators;
 
@@ -61,7 +63,7 @@ pub enum AccessKind {
     Get,
     /// `set a i v` on an array value.
     Set,
-    /// A vector load/store (no such op exists yet).
+    /// A vector load or store (`vec.load`, `vec.store_masked`, `vec.gather`, ...).
     Vector,
 }
 
@@ -78,7 +80,7 @@ pub enum Proof {
     LoopBound { branch: u32 },
     /// An identical `check.bounds` (instruction `first`) dominates this one.
     Dominated { first: u32 },
-    /// A chunk loop's head test covers the whole vector.
+    /// A chunk loop's head test `lt i (sub.sat n N-1)` covers the whole vector.
     ChunkLoop,
     /// The index is below the length by facts that include the equality tested by instruction
     /// `cmp` (an `eq` or `ne`, through a branch or an asserting call).
@@ -155,10 +157,12 @@ pub fn audit_func(m: &Module, fid: FuncId) -> (Vec<Access>, Vec<Unguarded>) {
     let Some(f) = m.func(fid) else { return (ok, bad) };
     let Some(b) = &f.body else { return (ok, bad) };
     // Only these ops can be element accesses: without one there is nothing to analyse.
-    if !b.insts.op.iter().any(|op| matches!(op, Op::ElemAddr | Op::Get | Op::Set)) {
+    let vops = m.vec_ops();
+    let is_vec_access = |op: &Op| matches!(op, Op::Intrinsic(id) if vops.get(id.index()).copied().flatten().is_some_and(|v| v.is_memory()));
+    if !b.insts.op.iter().any(|op| matches!(op, Op::ElemAddr | Op::Get | Op::Set) || is_vec_access(op)) {
         return (ok, bad);
     }
-    let cx = Cx::new(&m.types, &m.funcs, b);
+    let cx = Cx::new(m, b);
     for i in 0..b.insts.len() as u32 {
         let Some(kind) = cx.access_kind(i) else { continue };
         if !cx.reachable_inst(i) {
@@ -183,7 +187,7 @@ pub fn elide(m: &mut Module) -> Vec<Elided> {
             if !b.insts.op.contains(&Op::BoundsCheck) {
                 continue;
             }
-            let cx = Cx::new(&m.types, &m.funcs, b);
+            let cx = Cx::new(m, b);
             (0..b.insts.len() as u32)
                 .filter(|&i| b.insts.op[i as usize] == Op::BoundsCheck && cx.reachable_inst(i))
                 .filter_map(|i| cx.check_proof(i).map(|p| (i, p)))
@@ -226,10 +230,13 @@ struct Cx<'a> {
     /// The reachable `check.bounds` instructions, in order.
     checks: Vec<u32>,
     facts: facts::Facts,
+    /// The vector op of each intrinsic id.
+    vops: Vec<Option<VecOp>>,
 }
 
 impl<'a> Cx<'a> {
-    fn new(types: &'a TypeTable, funcs: &'a [Func], b: &'a Body) -> Cx<'a> {
+    fn new(m: &'a Module, b: &'a Body) -> Cx<'a> {
+        let (types, funcs) = (&m.types, &m.funcs[..]);
         let mut block_of = vec![u32::MAX; b.insts.len()];
         for (bi, bd) in b.blocks.iter().enumerate() {
             for i in bd.insts.indices() {
@@ -246,7 +253,17 @@ impl<'a> Cx<'a> {
                     && block_of.get(i as usize).is_some_and(|&bk| dom.reachable(bk as usize))
             })
             .collect();
-        Cx { types, funcs, b, dom, block_of, preds, checks, facts: facts::Facts::default() }
+        Cx {
+            types,
+            funcs,
+            b,
+            dom,
+            block_of,
+            preds,
+            checks,
+            facts: facts::Facts::default(),
+            vops: m.vec_ops(),
+        }
     }
 
     fn reachable_inst(&self, i: u32) -> bool {
@@ -304,8 +321,44 @@ impl<'a> Cx<'a> {
                     AccessKind::Set
                 })
             }
+            Op::Intrinsic(_) if self.vop(i).is_some_and(|v| v.is_memory()) => {
+                crate::simd::mem_operand(self.types, self.ty(*args.first()?)?).map(|_| AccessKind::Vector)
+            }
             _ => None,
         }
+    }
+
+    /// The vector op of instruction `i`, if it is one.
+    fn vop(&self, i: u32) -> Option<VecOp> {
+        match self.b.insts.op.get(i as usize)? {
+            Op::Intrinsic(id) => self.vops.get(id.index()).copied().flatten(),
+            _ => None,
+        }
+    }
+
+    /// Lane count of vector access `i`.
+    fn vec_lanes(&self, i: u32) -> Option<u64> {
+        let t = if self.vop(i)?.is_store() {
+            self.ty(*self.b.args(i).get(2)?)?
+        } else {
+            (*self.b.insts.ty.get(i as usize)?)?
+        };
+        crate::simd::vec_shape(self.types, t).map(|s| s.2 as u64)
+    }
+
+    /// Whether `lim` is `sub.sat n N-1` with `n` the length of what `p` points to.
+    fn is_vec_lim(&self, lim: Operand, p: Operand, len: Option<u64>, lanes: u64) -> bool {
+        if let (Some(l), Some(k)) = (len, self.konst(lim)) {
+            return k.saturating_add(lanes - 1) <= l;
+        }
+        let Operand::Value(v) = lim else { return false };
+        self.def(v).is_some_and(|d| {
+            let a = self.b.args(d);
+            self.b.insts.op.get(d as usize) == Some(&Op::SubSat)
+                && a.len() == 2
+                && self.konst(a[1]) == Some(lanes - 1)
+                && self.is_len_of(a[0], p, len)
+        })
     }
 
     /// Whether length operand `n` is the length of the object `p` points to (`len`: its array
@@ -368,7 +421,27 @@ impl<'a> Cx<'a> {
                     None => Some(Guard::SelfChecked),
                 }
             }
-            AccessKind::Vector => None,
+            AccessKind::Vector => {
+                if matches!(
+                    self.vop(i),
+                    Some(VecOp::LoadMasked | VecOp::StoreMasked | VecOp::Gather | VecOp::Scatter)
+                ) {
+                    return Some(Guard::SelfChecked);
+                }
+                let (p, idx) = (args[0], *args.get(1)?);
+                let len = self.len_of_ptr(p).ok()?;
+                let lanes = self.vec_lanes(i)?;
+                if let (Some(k), Some(l)) = (self.konst(idx), len)
+                    && k.checked_add(lanes).is_some_and(|e| e <= l)
+                {
+                    return Some(Guard::Proof(Proof::ConstInRange { index: k, len: l }));
+                }
+                if let Some(c) = self.dominating_check(i, idx, |n| self.is_vec_lim(n, p, len, lanes)) {
+                    return Some(Guard::Check(c));
+                }
+                self.loop_bound(i, idx, |n| self.is_vec_lim(n, p, len, lanes))
+                    .map(|_| Guard::Proof(Proof::ChunkLoop))
+            }
         }
     }
 
