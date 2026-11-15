@@ -1627,7 +1627,6 @@ impl<'a> FnCx<'a> {
     ) -> E {
         let Some(p) = self.place_of(recv) else { return E::Never };
         let Some(p) = self.derefs(p, adj.derefs) else { return E::Never };
-        let _ = n;
         if self.is_simd(p.ty) {
             return self.vec_method(rt, p, name, args, seg, consts);
         }
@@ -1694,6 +1693,8 @@ impl<'a> FnCx<'a> {
                 if !matches!(self.kind(p.ty), TypeKind::Bool) {
                     return self.vector_unsupported(Some(seg), "mask select");
                 }
+                // the operands' type: the checker records no result type for this built-in
+                let rt = self.nty(n);
                 let Some(c) = self.read(&p) else { return E::Never };
                 let (Some(&an), Some(&bn)) = (args.first(), args.get(1)) else {
                     return self.fail_at(Some(seg), "select operands");
