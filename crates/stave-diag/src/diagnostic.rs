@@ -35,9 +35,33 @@ pub struct Edit {
     pub replacement: String,
 }
 
+/// How far a fix can be trusted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Applicability {
+    /// Applying the edits removes the diagnostic and changes no other behavior.
+    Exact,
+    /// A likely fix, to be reviewed.
+    Maybe,
+    /// The edits or the description hold text to fill in; every fix without edits.
+    Placeholder,
+}
+
+impl Applicability {
+    /// The spelling in the registry and in the JSON form.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Applicability::Exact => "exact",
+            Applicability::Maybe => "maybe",
+            Applicability::Placeholder => "placeholder",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fix {
     pub description: String,
+    /// [`Applicability::Placeholder`] whenever `edits` is empty.
+    pub applicability: Applicability,
     pub edits: Vec<Edit>,
 }
 
@@ -141,7 +165,9 @@ impl Diagnostic {
                     edits.push(Edit { span, replacement: e.replacement.clone() });
                 }
             }
-            Fix { description: f.description, edits }
+            // edits at roles the caller did not supply are left out: nothing is left to apply
+            let applicability = if edits.is_empty() { Applicability::Placeholder } else { f.applicability };
+            Fix { description: f.description, applicability, edits }
         });
         if entry.severity == Severity::Error && fix.is_none() {
             return Err(DiagError::MissingFix(entry.code));

@@ -120,6 +120,9 @@ pub struct Config {
     /// the rest of std need an import.
     pub prelude: (String, Vec<String>),
     pub fs: Fs,
+    /// Contents that stand in for source files: a `.stv` file whose [`File::abs_path`] is a key
+    /// is not read from `fs`. The set of files and the manifests still come from `fs`.
+    pub sources: std::collections::BTreeMap<PathBuf, Vec<u8>>,
     /// Shuffle test knob (see [`SHUFFLE_ENV`]); `None` reads the environment.
     pub shuffle_seed: Option<u64>,
     /// Parse only (`//~ PARSE-ONLY`, see [`Config::parse_only`]).
@@ -134,6 +137,7 @@ impl Config {
             builtins: Vec::new(),
             prelude: ("std".into(), vec!["core".into()]),
             fs: Fs::Disk,
+            sources: std::collections::BTreeMap::new(),
             shuffle_seed: None,
             parse_only: false,
         }
@@ -428,9 +432,12 @@ impl Program {
         let reads: Vec<(FileBytes, [u64; 2], Option<&'static str>)> = pending
             .par_iter()
             .map(|l| {
-                let (bytes, err) = match fs.read(&l.pf.abs_path) {
-                    Ok(b) => (b, None),
-                    Err(e) => (FileBytes::Owned(Vec::new()), Some(read_reason(&e))),
+                let (bytes, err) = match cfg.sources.get(&l.pf.abs_path) {
+                    Some(text) => (FileBytes::Owned(text.clone()), None),
+                    None => match fs.read(&l.pf.abs_path) {
+                        Ok(b) => (b, None),
+                        Err(e) => (FileBytes::Owned(Vec::new()), Some(read_reason(&e))),
+                    },
                 };
                 let hash = stave_intern::hash::xxh3_128_parts(&bytes);
                 (bytes, hash, err)

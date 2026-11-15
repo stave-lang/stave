@@ -173,6 +173,63 @@ fn errors_need_message_and_fix() {
 }
 
 #[test]
+fn fix_applicability() {
+    use diaggen::registry::Applicability::{Exact, Maybe, Placeholder};
+    let edits = "edits = [{ at = \"primary\", replacement = \"x\" }]";
+    let with = |fix: &str| two(&format!("{OK2}\nfix = {{ description = \"d\", {fix} }}"));
+    let of = |toml: &str| {
+        let reg = check(toml, &[("codes.md", MD)]).unwrap_or_else(|e| panic!("{e}"));
+        reg.entries[1].shapes.iter().map(|s| s.fix.as_ref().map(|f| f.applicability)).collect::<Vec<_>>()
+    };
+    // defaults: `placeholder` without edits, `maybe` with edits
+    assert_eq!(of(&two(&format!("{OK2}\nfix = {{ description = \"d\" }}"))), [Some(Placeholder)]);
+    assert_eq!(of(&with(edits)), [Some(Maybe)]);
+    assert_eq!(of(&with(&format!("applicability = \"exact\", {edits}"))), [Some(Exact)]);
+    assert_eq!(of(&with(&format!("applicability = \"placeholder\", {edits}"))), [Some(Placeholder)]);
+    assert_eq!(of(&with("applicability = \"placeholder\"")), [Some(Placeholder)]);
+    // a case's fix replaces the entry's whole fix, applicability included
+    let case = format!(
+        "{}\n[diag.cases.c]\nfix = {{ description = \"e\", {edits} }}",
+        with(&format!("applicability = \"exact\", {edits}"))
+    );
+    assert_eq!(of(&case), [Some(Exact), Some(Maybe)]);
+    fails_with(&with(&format!("applicability = \"sure\", {edits}")), "applicability \"sure\" is not");
+    fails_with(&with("applicability = \"exact\""), "on a fix without edits");
+    fails_with(&with("applicability = \"maybe\""), "on a fix without edits");
+    let bad_case = format!(
+        "{}\n[diag.cases.c]\nfix = {{ description = \"e\", applicability = \"exact\" }}",
+        with(edits)
+    );
+    fails_with(&bad_case, "case c: fix: applicability \"exact\" on a fix without edits");
+}
+
+#[test]
+fn exact_fixes_of_the_registry() {
+    use diaggen::registry::Applicability;
+    let reg = load(&root()).unwrap_or_else(|e| panic!("{e}"));
+    let mut exact = Vec::new();
+    for e in &reg.entries {
+        for s in &e.shapes {
+            let Some(f) = &s.fix else { continue };
+            assert!(
+                !f.edits.is_empty() || f.applicability == Applicability::Placeholder,
+                "{} {:?}: a fix without edits is a placeholder",
+                e.code,
+                s.case
+            );
+            if f.applicability == Applicability::Exact {
+                exact.push((e.code.as_str(), s.case.as_str()));
+            }
+        }
+    }
+    assert_eq!(
+        exact,
+        [("E0023", ""), ("E0024", "ref"), ("E0026", "unit"), ("E0027", "ret"), ("E0210", "")],
+        "an exact fix is applied unreviewed by `stave fix`: extend this list on purpose"
+    );
+}
+
+#[test]
 fn hole_kinds_and_choices() {
     fails_with(
         &two(&format!("{OK2}\nholes = {{ a = \"colour\" }}").replace("\"w\"", "\"w {a}\"")),

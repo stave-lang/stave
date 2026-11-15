@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// An expression statement of the error type reports its own error only, never E0210 on top.
+struct Stats { pub n: u32 }
+
+fn chain(s: &Stats) {
+    missing(); //~ ERROR E0101
+    s.nope; //~ ERROR E0208
+    s.nope.more(); //~ ERROR E0208
+    7; //~ ERROR E0202
+}
+
+fn main() -> i32 {
+    return 0;
+}

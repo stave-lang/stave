@@ -1,6 +1,7 @@
 //! JSON form (`--diagnostics json`): one object per line, per `contracts/diagnostics.schema.json`
 //! (`$defs/diagnostic`). Keys in a fixed order: kind, code, severity, message, primary, related,
-//! fix. `primary` is absent only for location-less codes; `related` is always present.
+//! fix (description, applicability, edits). `primary` is absent only for location-less codes;
+//! `related` is always present.
 
 use std::fmt::Write;
 
@@ -74,6 +75,8 @@ pub fn write_json(out: &mut String, d: &Diagnostic, files: &SourceFiles) -> Resu
     if let Some(f) = d.fix() {
         out.push_str(",\"fix\":{\"description\":");
         push_json_string(out, &f.description);
+        out.push_str(",\"applicability\":");
+        push_json_string(out, f.applicability.as_str());
         out.push_str(",\"edits\":[");
         for (i, (e, loc)) in f.edits.iter().zip(&edits).enumerate() {
             if i > 0 {

@@ -46,7 +46,7 @@ Read whole file before writing Stave. Assume Rust **only** where this file is si
 | overloading, truthiness, null | none | `if n != 0`, not `if n` | one meaning per name; explicit tests |
 | `mut self` param | `self`, `&self`, `&mut self` only | Rebind: `let mut s = self;` | params are immutable bindings |
 | `x @ P`, `..` rest | not in grammar | Write the full pattern; bind the value by name to reuse it | not admitted yet (simplicity) |
-| `v.pop();` (value ignored) | `let _ = v.pop();` | Planned: a non-`()` expression statement is E0210 | an ignored `Result` is always visible |
+| `v.pop();` (value ignored) | `let _ = v.pop();` | A non-`()`, non-`never` expression statement is E0210 | an ignored `Result` is always visible |
 
 Casts and overflow operators (kept out of the table because they contain `|`):
 - `as` lossless only. `as%` wraps or truncates. `as|` saturates (float NaN → 0). `as?` returns `Option`. `as~` converts to a float type, rounding to nearest even (int→float, f64→f32, f32→f16 lanes).
@@ -366,8 +366,8 @@ fn double_all(xs: &mut [u64]) {
 ## 6. Tooling
 
 - Package: `stave.toml` (`name` required, `kind = "bin" | "lib"`, `version`, path-only `[dependencies]`, per-target `[target.gpu-sm86.dependencies] prims = { path = "prims/gpu" }` merged over `[dependencies]` by exact target name; `[target.x86_64-linux]` / `[target.aarch64-linux]` cover every target of that arch; no `cfg`) plus `src/main.stv` or `src/lib.stv`. Bad manifest = E1002 (in `stave.toml`).
-- `stave check` (fast, no codegen), `stave build [--release] [--target x86_64-linux-v3|aarch64-linux+sve]`, `stave run`, `stave test [--filter S] [--runner CMD]`, `stave unsafe-report`. Planned: `stave explain E0601`, `stave lowering --target T`, `stave fix` (applies fixes whose `applicability` is `exact`, re-checks), `stave fmt [--check]` (the one layout), `stave grammar --format lark|gbnf|ebnf` (for constrained decoding of the code region), `stave caps-report` (OS capabilities each package reaches).
-- `--diagnostics json` emits one JSON diagnostic per line, each with a fix. Exit codes: 0 ok, 1 diagnostics, 2 usage, 3 compiler bug.
+- `stave check` (fast, no codegen), `stave build [--release] [--target x86_64-linux-v3|aarch64-linux+sve]`, `stave run`, `stave test [--filter S] [--runner CMD]`, `stave unsafe-report`, `stave fix [--dry-run]` (applies fixes whose `applicability` is `exact`, re-checks). Planned: `stave explain E0601`, `stave lowering --target T`, `stave fmt [--check]` (the one layout), `stave grammar --format lark|gbnf|ebnf` (for constrained decoding of the code region), `stave caps-report` (OS capabilities each package reaches).
+- `--diagnostics json` emits one JSON diagnostic per line, each with a fix and its `applicability` (`exact`, `maybe`, `placeholder`). Exit codes: 0 ok, 1 diagnostics, 2 usage, 3 compiler bug.
 - The default target is the baseline (v2 / neon), never auto-upgraded.
 - No warnings in v1 for unused imports, variables, `mut`, or private fns (no lints yet).
 

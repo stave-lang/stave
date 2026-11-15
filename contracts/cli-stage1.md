@@ -9,6 +9,8 @@
 
 **Commands that stage1 does not run**: `stave unsafe-report`, `stave lowering`, and `stave explain` always
 run in stage0, whatever `--compiler` says. They compile no program and print no summary line.
+`stave fix` checks in stage0 too (its rounds check edits that are not written yet); it takes no
+`--compiler` and prints no summary line.
 
 **Summary line** (always printed):
 - `compiled on GPU (stage1, NVIDIA RTX A6000) in 412 ms`

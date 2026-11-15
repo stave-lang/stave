@@ -69,7 +69,8 @@
         "fix": {
           "type": "object",
           "required": [
-            "description"
+            "description",
+            "applicability"
           ],
           "additionalProperties": false,
           "properties": {
@@ -82,7 +83,7 @@
                 "maybe",
                 "placeholder"
               ],
-              "description": "exact = applying the edits removes this diagnostic and changes no other behavior (`stave fix` applies only these); maybe = likely fix, review it; placeholder = the edits or description hold text to fill in. Optional for now, later required on every fix"
+              "description": "exact = applying the edits removes this diagnostic and changes no other behavior (`stave fix` applies only these); maybe = likely fix, review it; placeholder = the edits or description hold text to fill in, and every fix without edits"
             },
             "edits": {
               "type": "array",

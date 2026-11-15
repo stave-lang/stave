@@ -719,7 +719,9 @@ fn rust_form(
     let in_type = of(top_origin, NodeKind::Type) || of(top_origin, NodeKind::TypeBase);
     // 12. E0027: `!` as a type.
     if la == Term::Bang as u16 && (in_type || of(top_origin, NodeKind::RetClause)) {
-        return make_diag("E0027", None, &[], at(li), &[]);
+        // after `->` the fix is exact: `never` is a type there
+        let case = is(back(1), Term::MinusGt).then_some("ret");
+        return make_diag("E0027", case, &[], at(li), &[]);
     }
     // 13. E0028: `impl Trait` / `dyn Trait`.
     if la == Term::KwImpl as u16 && in_type {

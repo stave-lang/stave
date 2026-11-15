@@ -55,10 +55,10 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0021 | expression statement without `;` directly before `}` (Rust tail expression, no assignment): blocks are not values; write `return e;`, or end it with `;`. Parse rule 7 |
 | E0022 | `where` clause (Rust): bounds go inline, `<T: A + B>`. Parse rule 8 |
 | E0023 | `::` as a path separator (`a::b`, `Vec::new()`, `Option::Some`): write `.`; `::` only before generic args. Exact fix. Parse rule 9 |
-| E0024 | lifetime `'a`: a `'` followed by an identifier with no closing `'` is one lexical error token (like E0018, no E0004); Stave has no lifetimes |
+| E0024 | lifetime `'a`: a `'` followed by an identifier with no closing `'` is one lexical error token (like E0018, no E0004); Stave has no lifetimes. Case `ref`: directly after `&` (`&'a T`), where removing it is an exact fix |
 | E0025 | `mut x: T` parameter (Rust): params are immutable; write `x: T` and `let mut y = x;`. Parse rule 10 |
-| E0026 | tuple struct `struct S(T);` or (case `unit`) unit struct `struct S;`: structs have named fields, `struct S { v: T }`, `struct S {}`. Parse rule 11 |
-| E0027 | `!` as a type (Rust never type): write `never` (only after `->`). Exact fix after `->`. Parse rule 12 |
+| E0026 | tuple struct `struct S(T);` or (case `unit`) unit struct `struct S;`: structs have named fields, `struct S { v: T }`, `struct S {}`. Exact fix for case `unit`. Parse rule 11 |
+| E0027 | `!` as a type (Rust never type): write `never` (only after `->`). Exact fix after `->` (case `ret`). Parse rule 12 |
 | E0028 | `dyn Trait` / `impl Trait` in a type position: use a generic `<T: Trait>` or a fn type. Parse rule 13 |
 | E0029 | block comment: the token `/*` is a lexical error through the first `*/` on its line or the end of the line (newlines stay lexer restart points; `a/*p` must be written `a / *p`); write `//` |
 | E0101 | unresolved name |
@@ -78,7 +78,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0207 | non-unit function can reach its end without `return` (a `()` function falling off its end is an implicit `return;`). Case `never`: a `-> never` function with a reachable `return` or a reachable end of body |
 | E0208 | no method or field `<name>` on type `<T>` (e.g. `mul_wide` on `u16`: it exists on `u32` and `u64` only) |
 | E0209 | `never` used outside a return type: it is legal only after `->` of a fn signature or a fn type |
-| E0210 | expression statement whose type is not `()` or `never` (discarded value, e.g. an ignored `Result`). Discard explicitly with `let _ = e;` (drops at once). Exact fix. Planned |
+| E0210 | expression statement whose type is not `()` or `never` (discarded value, e.g. an ignored `Result`). Discard explicitly with `let _ = e;` (drops at once). Exact fix |
 | E0211 | contract operand not allowed: `requires`/`ensures` take a `bool` expression over params, fields, `.len()`, literals, arithmetic, comparison, `&&` `||` `!`, and calls of safe fns whose args are `&` or Copy; no `unsafe`, `&mut`, `static`/`static mut`. Case `trait-impl`: a contract on a trait impl method. Planned |
 | E0212 | parameter named `result` in a fn with `ensures` (`result` is a contextual name inside `ensures`, not a keyword). Planned |
 | E0300 | non-exhaustive match. Case `limit`: the exhaustiveness check exceeds its search limit (patterns nested more than 2,000 levels deep, or over 1,000,000 search steps); the match is rejected |
