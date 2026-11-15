@@ -1,5 +1,5 @@
-//! AArch64 (A64) instruction encoder: the integer and scalar floating-point subset a
-//! template/greedy debug backend needs.
+//! AArch64 (A64) instruction encoder: the integer, scalar floating-point, and Advanced SIMD
+//! (NEON) subset the backends need.
 //!
 //! [`Asm`] is a buffer of 32-bit instruction words with labels and fixups. References to other
 //! symbols become [`stave_obj::Reloc`]s (`BL`/`B` → `A64Branch26`, `ADRP` → `A64AdrPage21`,
@@ -10,6 +10,7 @@
 
 mod imm;
 mod inst;
+mod simd;
 
 use std::fmt;
 
@@ -18,6 +19,10 @@ use stave_obj::{FileId, FuncCode, LineRow, Reloc, RelocKind, SymbolId};
 pub use imm::{decode_logical, encode_fp8, encode_logical};
 pub use inst::{
     AddSub, Addr, Ext, FcvtRound, FpBin, FpFma, FpUn, IdxExt, Logic, MemSize, Shift, ShiftR, VecSize,
+};
+pub use simd::{
+    Across, Arr, CmpZ, ImmShift, Lane, Narrow, Perm, PrefKind, PrefLevel, Prefetch, Rev, Sign, Tbl, VBin,
+    VFpBin, VFpUn, VIntUn, VLogic, VShift, VecAddr,
 };
 
 /// A general register `x0`..`x30`, or [`Reg::SP`], or [`Reg::ZR`].

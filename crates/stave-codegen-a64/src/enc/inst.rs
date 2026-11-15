@@ -90,7 +90,7 @@ pub enum VecSize {
 }
 
 impl VecSize {
-    fn scale(self) -> u32 {
+    pub(super) fn scale(self) -> u32 {
         match self {
             VecSize::S => 2,
             VecSize::D => 3,
@@ -207,7 +207,7 @@ impl FcvtRound {
 }
 
 /// Register number where operand 31 means the zero register.
-fn zr(r: Reg) -> Result<u32, EncError> {
+pub(super) fn zr(r: Reg) -> Result<u32, EncError> {
     if r.is_sp() {
         return Err(EncError::Invalid("sp is not allowed here (register 31 is xzr)"));
     }
@@ -215,7 +215,7 @@ fn zr(r: Reg) -> Result<u32, EncError> {
 }
 
 /// Register number where operand 31 means the stack pointer.
-fn sp(r: Reg) -> Result<u32, EncError> {
+pub(super) fn sp(r: Reg) -> Result<u32, EncError> {
     if r.is_zr() {
         return Err(EncError::Invalid("xzr is not allowed here (register 31 is sp)"));
     }
@@ -223,27 +223,27 @@ fn sp(r: Reg) -> Result<u32, EncError> {
 }
 
 /// A plain general register (branch targets).
-fn gpr(r: Reg) -> Result<u32, EncError> {
+pub(super) fn gpr(r: Reg) -> Result<u32, EncError> {
     if r.is_sp() || r.is_zr() {
         return Err(EncError::Invalid("needs x0..x30"));
     }
     Ok(u32::from(r.num()))
 }
 
-fn v(r: VReg) -> u32 {
+pub(super) fn v(r: VReg) -> u32 {
     u32::from(r.num())
 }
 
-fn range(imm: i64, lo: i64, hi: i64, bits: u32) -> Result<(), EncError> {
+pub(super) fn range(imm: i64, lo: i64, hi: i64, bits: u32) -> Result<(), EncError> {
     if (lo..=hi).contains(&imm) { Ok(()) } else { Err(EncError::ImmRange { imm, bits }) }
 }
 
 /// Encoding class of a single-register load/store.
-struct Ls {
-    size: u32,
-    v: u32,
-    opc: u32,
-    scale: u32,
+pub(super) struct Ls {
+    pub(super) size: u32,
+    pub(super) v: u32,
+    pub(super) opc: u32,
+    pub(super) scale: u32,
 }
 
 impl Asm {
@@ -821,7 +821,7 @@ impl Asm {
 
     // ---- loads and stores ----
 
-    fn ls(&mut self, c: Ls, rt: u32, wb_check: Option<Reg>, addr: Addr) -> Result<(), EncError> {
+    pub(super) fn ls(&mut self, c: Ls, rt: u32, wb_check: Option<Reg>, addr: Addr) -> Result<(), EncError> {
         let base = (c.size << 30) | (7 << 27) | (c.v << 26) | (c.opc << 22) | rt;
         let wb = |rn: Reg| -> Result<(), EncError> {
             if let Some(t) = wb_check
@@ -940,6 +940,22 @@ impl Asm {
         gpr_regs: Option<(Reg, Reg)>,
         addr: Addr,
     ) -> Result<(), EncError> {
+        let w = Asm::pair_word(opc, vbit, scale, load, t1, t2, gpr_regs, addr)?;
+        self.word(w);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn pair_word(
+        opc: u32,
+        vbit: u32,
+        scale: u32,
+        load: bool,
+        t1: u32,
+        t2: u32,
+        gpr_regs: Option<(Reg, Reg)>,
+        addr: Addr,
+    ) -> Result<u32, EncError> {
         let (rn, off, mode) = match addr {
             Addr::Off(rn, off) => (rn, off, 2),
             Addr::Pre(rn, off) => (rn, off, 3),
@@ -963,18 +979,15 @@ impl Asm {
             return Err(EncError::Invalid("writeback with the base as transfer register"));
         }
         let imm7 = ((off / unit) as u32) & 0x7f;
-        self.word(
-            (opc << 30)
-                | (5 << 27)
-                | (vbit << 26)
-                | (mode << 23)
-                | (u32::from(load) << 22)
-                | (imm7 << 15)
-                | (t2 << 10)
-                | (n << 5)
-                | t1,
-        );
-        Ok(())
+        Ok((opc << 30)
+            | (5 << 27)
+            | (vbit << 26)
+            | (mode << 23)
+            | (u32::from(load) << 22)
+            | (imm7 << 15)
+            | (t2 << 10)
+            | (n << 5)
+            | t1)
     }
 
     /// `ldp rt1, rt2, addr` (offset a multiple of the size, scaled 7-bit signed).
@@ -991,7 +1004,7 @@ impl Asm {
         self.pair(opc, 0, scale, false, a, b, Some((rt1, rt2)), addr)
     }
 
-    fn fp_pair_class(vs: VecSize) -> u32 {
+    pub(super) fn fp_pair_class(vs: VecSize) -> u32 {
         match vs {
             VecSize::S => 0,
             VecSize::D => 1,
