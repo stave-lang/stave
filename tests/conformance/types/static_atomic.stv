@@ -1,0 +1,27 @@
+//~ STDOUT static_atomic.stdout
+// A `static` of an atomic type is shared by every thread and changed through `&self` methods:
+// no `unsafe`. `atomic.X.new(e)` is a const-expr.
+import std.atomic;
+import std.io;
+import std.thread;
+
+static HITS: atomic.U64 = atomic.U64.new(5);
+static SUM: atomic.Usize = atomic.Usize.new(0);
+static SEEN: atomic.Bool = atomic.Bool.new(false);
+static WORD: atomic.U32 = atomic.U32.new(1);
+
+fn main() -> i32 {
+    thread.par_for(0, 1000, fn(i: usize) {
+        let h = HITS.fetch_add(1);
+        let s = SUM.fetch_add(i);
+        SEEN.store(true);
+    });
+    let hits = HITS.load();
+    let sum = SUM.load();
+    let seen = SEEN.load();
+    let old = WORD.swap(9);
+    let r: &atomic.U32 = &WORD;
+    let now = r.load();
+    io.print(f"{hits} {sum} {seen} {old} {now}\n");
+    return 0;
+}

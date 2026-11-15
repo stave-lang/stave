@@ -1486,7 +1486,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0413",
         severity: Severity::Error,
         area: "kinds",
-        rule: "view or reference in a `const` or `static mut` (except `&str` initialized by a string literal or another such const: static strings)",
+        rule: "view or reference in a `const`, `static`, or `static mut` (except `&str` initialized by a string literal or another such const: static strings)",
         retired: false,
         located: true,
         holes: &[
@@ -1613,7 +1613,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0417",
         severity: Severity::Error,
         area: "kinds",
-        rule: "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T>`, or `sync.Once<T>` (planned)",
+        rule: "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T>`, or `sync.Once<T>`",
         retired: false,
         located: true,
         holes: &[
@@ -1691,7 +1691,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0503",
         severity: Severity::Error,
         area: "borrow",
-        rule: "assignment to an immutable binding or through `&`",
+        rule: "assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
         retired: false,
         located: true,
         holes: &[
@@ -1719,6 +1719,17 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "create a `&mut` reference instead of `&` where this reference comes from",
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "static",
+                message: "cannot assign to or mutably borrow `{place}`: a `static` is immutable",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "mutation of a `static`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T>`) and change it through its `&self` methods",
                     edits: &[],
                 }),
             },
@@ -2879,7 +2890,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0809",
         severity: Severity::Error,
         area: "threads-unsafe-ffi",
-        rule: "`static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` packages: user code uses `static` with a `Sync` type (planned)",
+        rule: "`static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` packages: user code uses `static` with a `Sync` type",
         retired: false,
         located: true,
         holes: &[

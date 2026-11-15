@@ -17,7 +17,7 @@
 //! - **sites**: `Module::sites` rows by (fn instance, source offset) (contracts/intrinsics.md site
 //!   table); every trapping instruction, call, and user-site store carries its row; `Func::name_site`
 //!   is the fn's name token (PC table).
-//! - **statics**: `static mut`s by decl, with their initial bytes; `intrinsic.static_addr <i>`.
+//! - **statics**: `static` and `static mut` items by decl, with their initial bytes; `intrinsic.static_addr <i>`.
 //!
 //! **Paths** (`fn @i <path>`): a fn's decl path; a method `<module>.<Type>.<name>` (the impl's
 //! self-type head: an ADT path or a built-in type name); drop glue `drop_glue`.
@@ -904,6 +904,15 @@ fn assemble(
         let size = layouts.size_of(ty).unwrap_or(0) as usize;
         let mut init = vec![0u8; size];
         if let Some(v) = &c.value {
+            if has_str(v) {
+                // the image has no relocations inside a static's bytes
+                return Err(LowerError {
+                    kind: LowerErrorKind::Unsupported,
+                    func: prog.decl_path(d),
+                    at: String::new(),
+                    msg: "a `static` holding a `&str` is not implemented yet (use a `const`)".into(),
+                });
+            }
             write_val(&module.types, &layouts, ty, v, &mut init, 0);
         }
         module.statics.push(Static { path: prog.decl_path(d), ty, init });
@@ -930,6 +939,16 @@ fn ty_final_pure(tr: &Tr, fin: &[stave_ir::TypeId], t: u32) -> stave_ir::TypeId 
 }
 
 /// Writes a const value's bytes at `off` (stave-ir layout).
+/// Whether a const value holds a string (a pointer into program data).
+fn has_str(v: &crate::consteval::Val) -> bool {
+    use crate::consteval::Val;
+    match v {
+        Val::Str(_) => true,
+        Val::Agg(vs) | Val::Variant(_, vs) => vs.iter().any(has_str),
+        _ => false,
+    }
+}
+
 fn write_val(
     types: &IrTypes,
     lay: &stave_ir::layout::Layouts,

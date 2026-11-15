@@ -93,9 +93,17 @@ fn generated_corpus_checks_clean_and_canonically() {
 }
 
 fn mem(src: &str) -> (Program, Typeck) {
+    mem_with(src, &[])
+}
+
+/// [`mem`] with extra files (absolute path, text), e.g. a module added to the built-in `std`.
+fn mem_with(src: &str, extra: &[(&str, &str)]) -> (Program, Typeck) {
     let mut m = BTreeMap::new();
     m.insert(PathBuf::from("/m/stave.toml"), b"name = \"m\"\nkind = \"bin\"\n".to_vec());
     m.insert(PathBuf::from("/m/src/main.stv"), src.as_bytes().to_vec());
+    for (path, text) in extra {
+        m.insert(PathBuf::from(path), text.as_bytes().to_vec());
+    }
     for e in std::fs::read_dir(repo().join("std")).unwrap() {
         let e = e.unwrap().path();
         if e.extension().is_some_and(|x| x == "stv") {
@@ -178,6 +186,40 @@ fn reports_core_errors() {
          fn main() -> i32 { return 0; }\n");
     let codes: Vec<&str> = tc.diagnostics.iter().map(|d| d.code()).collect();
     assert_eq!(codes, ["E0201", "E0202", "E0207"]);
+}
+
+/// `static mut` in a built-in package: no E0809, and every use outside `unsafe(..)` (read, write,
+/// borrow, f-string hole) is E0803. In the root package the declaration itself is E0809.
+#[test]
+fn static_mut_rules_by_package() {
+    let fixture = "static mut HITS: u32 = 0;\n\
+         pub fn bump() -> u32 {\n\
+             HITS = 1;\n\
+             let a: u32 = HITS;\n\
+             let p = &mut HITS as *mut u32;\n\
+             unsafe(\"test fixture: one thread\") { HITS = HITS + a; }\n\
+             return unsafe(\"test fixture: one thread\") HITS;\n\
+         }\n";
+    let main = "import std.zz_fixture;\n\
+         static mut LOCAL: u32 = 0;\n\
+         fn main() -> i32 {\n\
+             let n = zz_fixture.bump();\n\
+             return unsafe(\"test: one thread\") LOCAL as% i32;\n\
+         }\n";
+    let (p, tc) = mem_with(main, &[("/std/zz_fixture.stv", fixture)]);
+    let mut got: Vec<(&str, bool, u32)> = tc
+        .diagnostics
+        .iter()
+        .map(|d| {
+            let sp = d.primary().unwrap();
+            let f = p.file(sp.file).unwrap();
+            let root = p.packages[f.package.idx()].is_root;
+            let line = 1 + f.bytes[..sp.offset as usize].iter().filter(|&&b| b == b'\n').count() as u32;
+            (d.code(), root, line)
+        })
+        .collect();
+    got.sort();
+    assert_eq!(got, [("E0803", false, 3), ("E0803", false, 4), ("E0803", false, 5), ("E0809", true, 2)]);
 }
 
 #[test]

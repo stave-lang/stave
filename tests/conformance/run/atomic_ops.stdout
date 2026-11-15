@@ -1,0 +1,5 @@
+u32 7 8 4294967295 1 1 1050 50
+u64 1 0 0 true 5
+usize 10 30 101
+bool false false true true false
+static 40 42 true false

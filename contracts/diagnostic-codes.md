@@ -87,14 +87,14 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0410 | reference- or view-typed field in a non-view ADT |
 | E0411 | view in a heap or container type (Box, Vec, Map, ...). To be retired: `vec.Vec`, `Box`, `Option`, `Result` take `T: view` and become conditional views; a container without the bound is E0414 case `container` |
 | E0412 | view passed to `forget` |
-| E0413 | view or reference in a `const` or `static mut` (except `&str` initialized by a string literal or another such const: static strings) |
+| E0413 | view or reference in a `const`, `static`, or `static mut` (except `&str` initialized by a string literal or another such const: static strings) |
 | E0414 | generic parameter instantiated with a view without the `T: view` bound. Case `container` (planned): a heap type that does not accept views, e.g. `Rc`/`Arc` |
 | E0415 | `impl Copy for T {}` where a field or variant payload of T is not Copy (Copy: scalars, `&T`, raw pointers, arrays and tuples of Copy types, ADTs with `impl Copy`; `&mut T` never). Related span: the field |
 | E0416 | `impl Drop` for a Copy type (built-in Copy, or an ADT with `impl Copy`; related span: the `impl Copy`) |
-| E0417 | `static X: T` where T is not `Sync` (a `static` is shared by every thread): use an atomic (`atomic.U64`), `sync.Mutex<T>`, or `sync.Once<T>`. Planned |
+| E0417 | `static X: T` where T is not `Sync` (a `static` is shared by every thread): use an atomic (`atomic.U64`), `sync.Mutex<T>`, or `sync.Once<T>` |
 | E0501 | borrow conflict (borrow site, conflicting access, later use). When an access conflicts with several live loans, the loan with the smallest creation offset is reported (ties: `&mut` before `&`, then place path); the later use is the first use after the access that keeps that loan live |
 | E0502 | use after move |
-| E0503 | assignment to an immutable binding or through `&` |
+| E0503 | assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`, reported by the type checker) |
 | E0504 | move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference (`r.f`), an element `v[i]`, or a closure capture (captures are references) |
 | E0510 | returned reference or view not covered by the `from` clause |
 | E0511 | retired: a missing `from` clause declares the empty origin set; a returned borrow of a parameter not named is E0510 |
@@ -139,12 +139,12 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0806 | argument of `thread.join`, `thread.par_for`, or `thread.par_for_mut` is a fn value whose captures are unknown (not a closure literal or fn item) |
 | E0807 | an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through it would skip E0802/E0806) |
 | E0808 | `spawn` inside a closure body: a closure is not part of the `scope` block around it, so its `spawn` has no scope to join |
-| E0809 | `static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` packages (user code: `static` with a `Sync` type). Planned |
+| E0809 | `static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` packages (user code: `static` with a `Sync` type) |
 | E0810 | impl of an unsafe trait (`Send`, `Sync`, or any trait declared `unsafe("..") trait`) without `unsafe("..")`. At the `impl` |
 | E0901 | method or operator not provided by the generic's bounds (reported at the definition) |
 | E0902 | instantiation depth limit (64) exceeded: an instance of a generic fn or method, reached from a non-generic fn through calls, would be the 65th instance of that generic on its own instantiation chain (polymorphic recursion such as `f::<[T; 1]>(..)` inside `f<T>`). At the call that requests it, once per generic |
 | E0903 | overlapping impls |
-| E0904 | const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id) |
+| E0904 | const-expr uses a call (other than a constructor fixed by path, intrinsics.md), a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id) |
 | E0905 | impl method signature differs from the trait's (params, return, `from`, `needs`, or `unsafe`). The fix shows the trait's signature |
 | E0906 | impl lacks a trait method, or defines a method the trait does not declare |
 | E0907 | `pub` on a method of a trait impl (it has the trait's visibility). At the `pub` |

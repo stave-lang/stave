@@ -7,4 +7,3 @@
 {"file":"src/main.stv","line":32,"col":1,"fn":"main.say","kind":"fn","obligation":"s is NUL-terminated"}
 {"file":"src/main.stv","line":33,"col":5,"fn":"main.say","kind":"block","obligation":"the caller guarantees s is NUL-terminated"}
 {"file":"src/main.stv","line":33,"col":72,"fn":"main.say","kind":"extern-call","obligation":"the caller guarantees s is NUL-terminated"}
-{"file":"src/main.stv","line":39,"col":5,"fn":"main.main","kind":"block","obligation":"single-threaded program: nothing else touches CALLS"}

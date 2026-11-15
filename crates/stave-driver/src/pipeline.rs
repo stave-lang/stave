@@ -134,7 +134,7 @@ impl Stage {
     /// | items | E0016 |
     /// | parse | E0004 E0011–E0014 |
     /// | resolve | E0101–E0107 |
-    /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0702–E0717, E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck); the signature's `from` clause E0520 E0521 |
+    /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0702–E0717, E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck); the signature's `from` clause E0520 E0521; E0503 case `static` (writes to a `static`) |
     /// | borrowck | E05xx except E0520 E0521 (accesses, loans, returned origins) |
     /// | lower | E0108 (no `fn main`, builds only, reported before lowering), E0700 E0701 (lowering-class gates, not implemented) |
     /// | (none) | retired codes: E0511 |

@@ -203,6 +203,9 @@ pub struct LangItems {
     pub unsafe_cell: DeclId,
     /// Operator traits by name (`Add`, `WrapAdd`, ...).
     pub ops: FxHashMap<&'static str, DeclId>,
+    /// The constructors a const-expr may call (fixed paths): `new` of `std.cell.UnsafeCell`,
+    /// `std.atomic.{U32, U64, Usize, Bool}`, `std.sync.{Mutex, Once}`.
+    pub const_ctors: Vec<DeclId>,
 }
 
 impl Default for LangItems {
@@ -219,6 +222,7 @@ impl Default for LangItems {
             write: DeclId::NONE,
             unsafe_cell: DeclId::NONE,
             ops: FxHashMap::default(),
+            const_ctors: Vec::new(),
         }
     }
 }
@@ -926,6 +930,24 @@ impl<'p> SigBuilder<'p> {
                 self.lang.ops.insert(t, d);
             }
         }
+        let ctors: [(&[&str], &str); 7] = [
+            (&["std", "cell"], "UnsafeCell"),
+            (&["std", "atomic"], "U32"),
+            (&["std", "atomic"], "U64"),
+            (&["std", "atomic"], "Usize"),
+            (&["std", "atomic"], "Bool"),
+            (&["std", "sync"], "Mutex"),
+            (&["std", "sync"], "Once"),
+        ];
+        if let Some(new) = p.strings.lookup("new") {
+            for (module, name) in ctors {
+                let adt = find(module, name);
+                let m = p.methods.inherent.get(&(TypeHead::Adt(adt), new)).and_then(|v| v.first());
+                if let (true, Some(&m)) = (adt.is_some(), m) {
+                    self.lang.const_ctors.push(m);
+                }
+            }
+        }
     }
 
     pub fn icx(&self, item: ItemId) -> Option<ItemCx<'p>> {
@@ -1546,6 +1568,15 @@ impl<'p> SigBuilder<'p> {
         self.ensure(d);
         match &self.sigs.get(d.idx())? {
             DeclSig::Const(c) => Some((c.ty, c.value.clone()?)),
+            _ => None,
+        }
+    }
+
+    /// The parameter types and return type of fn `d` (demand-driven).
+    pub fn fn_types(&mut self, d: DeclId) -> Option<(Vec<TypeId>, TypeId)> {
+        self.ensure(d);
+        match &self.sigs.get(d.idx())? {
+            DeclSig::Fn(f) => Some((f.params.clone(), f.ret)),
             _ => None,
         }
     }

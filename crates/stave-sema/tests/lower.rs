@@ -467,10 +467,11 @@ fn main() -> i32 {
 /// A tour of the lowered constructs: user operator impls, trait methods through a bound,
 /// matches by reference, guards and ranges (chain mode), `?`, fn items and closures as fn
 /// values, `loop`/`break`, arrays (SSA `set`), `for` over `&[T; N]`, casts, tuples, consts,
-/// `static mut`, `size_of`, chars, floats.
+/// statics, `size_of`, chars, floats.
 #[test]
 fn language_tour_runs() {
-    let src = r#"import std.io;
+    let src = r#"import std.atomic;
+import std.io;
 
 struct P { pub x: i32, pub y: i32 }
 
@@ -528,11 +529,11 @@ fn apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x); }
 fn double(x: i32) -> i32 { return x * 2; }
 
 const K: i32 = 7;
-static mut COUNT: u32 = 0;
+static COUNT: atomic.U32 = atomic.U32.new(0);
+static BASE: u32 = 1;
 
 fn bump() -> u32 {
-    unsafe("single thread") { COUNT = COUNT + 1; }
-    return unsafe("single thread") COUNT;
+    return COUNT.fetch_add(1) + BASE;
 }
 
 fn main() -> i32 {

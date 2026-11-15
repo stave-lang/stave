@@ -1192,6 +1192,40 @@ impl<'a> Ck<'a> {
         if self.sigs.konst(self.decl).is_some_and(|c| c.value.is_none()) {
             self.has_error = true;
         }
+        self.static_rules(n, ty, tspan);
+    }
+
+    /// The rules of a `static` item: an immutable one is shared by every thread, so its type
+    /// must be Sync (E0417); `static mut` belongs to the built-in packages only (E0809).
+    fn static_rules(&mut self, n: u32, ty: TypeId, tspan: Option<Span>) {
+        let icx = self.icx;
+        let Some(decl) = self.prog.decl(self.decl).copied() else { return };
+        if decl.kind != DeclKind::Static {
+            return;
+        }
+        if decl.flags.has(DeclFlags::MUT) {
+            let pkg = self.prog.files.get(icx.fid().0 as usize).map(|f| f.package);
+            let builtin = pkg
+                .and_then(|p| self.prog.packages.get(p.idx()))
+                .is_some_and(|p| p.kind == crate::package::PackageKind::Builtin);
+            if !builtin {
+                let a = icx.a(n);
+                let name = self.prog.strings.get(decl.name).to_string();
+                let d = mk("E0809", None, &[("name", &name)], icx.range_span(a, a + 1), &[]);
+                self.report(d);
+            }
+        } else if ty != ids::ERROR
+            && !self.tys.has_error(ty)
+            && !crate::kinds::is_view_concrete(self.prog, &self.tys, ty)
+        {
+            // (a reference or view type is E0413, from the signature phase)
+            let sync = sigs::TraitRef { trait_decl: self.sigs.lang.sync, args: Vec::new() };
+            if sync.trait_decl.is_some() && !self.w.implements(&mut self.tys, ty, &sync, &[]) {
+                let tn = self.show(ty);
+                let d = mk("E0417", None, &[("type", &tn)], tspan.unwrap_or(decl.name_span), &[]);
+                self.report(d);
+            }
+        }
     }
 
     fn finish(mut self, j: Job) -> (TypedBody, Vec<TypeKind>, Vec<Diagnostic>) {
@@ -1444,8 +1478,12 @@ impl<'a> Ck<'a> {
         std::mem::take(&mut self.diverges)
     }
 
-    /// E0803 for a `static mut` written through an assignment is reported by the path use itself.
-    fn assign_target(&mut self, _lhs: u32) {}
+    /// E0803 for a `static mut` written through an assignment is reported by the path use itself;
+    /// an assignment into an immutable `static` is E0503.
+    fn assign_target(&mut self, lhs: u32) {
+        let at = self.icx.node_span(lhs);
+        self.static_mutation(lhs, at);
+    }
 
     fn return_stmt(&mut self, s: u32, e: Option<u32>) {
         let icx = self.icx;
@@ -1647,6 +1685,10 @@ impl crate::consteval::CEnv for Ck<'_> {
 
     fn lang(&self) -> &sigs::LangItems {
         &self.sigs.lang
+    }
+
+    fn fn_types(&mut self, d: DeclId) -> Option<(Vec<TypeId>, TypeId)> {
+        self.sigs.fn_sig(d).map(|f| (f.params.clone(), f.ret))
     }
 }
 

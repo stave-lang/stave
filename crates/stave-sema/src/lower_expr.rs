@@ -1913,4 +1913,7 @@ impl crate::consteval::CEnv for TyHost<'_, '_> {
     fn lang(&self) -> &crate::sigs::LangItems {
         &self.sigs.lang
     }
+    fn fn_types(&mut self, d: crate::ids::DeclId) -> Option<(Vec<TypeId>, TypeId)> {
+        self.sigs.fn_sig(d).map(|f| (f.params.clone(), f.ret))
+    }
 }

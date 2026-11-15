@@ -1021,12 +1021,6 @@ impl<'t, 'a> W<'t, 'a> {
             NodeKind::Requires | NodeKind::Ensures => {
                 self.unimplemented(n, "a `requires` / `ensures` contract");
             }
-            NodeKind::StaticDecl => {
-                if !is(self.toks, self.a(n) as usize + 1, Term::KwMut) {
-                    self.unimplemented(n, "a `static` without `mut`");
-                }
-                self.push_children(n);
-            }
             NodeKind::Primary => {
                 let a = self.a(n) as usize;
                 if is(self.toks, a, Term::KwFn) {

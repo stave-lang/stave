@@ -1,0 +1,58 @@
+//~ STDOUT atomic_ops.stdout
+// std.atomic: load, store, swap, fetch_add (wrapping), compare_exchange on U32, U64, Usize,
+// Bool, as locals and as statics.
+import std.atomic;
+import std.io;
+
+static TICKS: atomic.U64 = atomic.U64.new(40);
+static READY: atomic.Bool = atomic.Bool.new(true);
+
+fn cas32(a: &atomic.U32, old: u32, new: u32) -> u32 {
+    return match a.compare_exchange(old, new) {
+        Result.Ok(was) => was,
+        Result.Err(was) => was + 1000,
+    };
+}
+
+fn main() -> i32 {
+    let a = atomic.U32.new(7);
+    let a0 = a.load();
+    a.store(8);
+    let a1 = a.swap(4294967295);
+    let a2 = a.fetch_add(2);
+    let a3 = a.load();
+    let a4 = cas32(&a, 1, 50);
+    let a5 = cas32(&a, 3, 60);
+    let a6 = a.load();
+    io.print(f"u32 {a0} {a1} {a2} {a3} {a4} {a5} {a6}\n");
+
+    let b = atomic.U64.new(1);
+    let b0 = b.fetch_add(18446744073709551615);
+    let b1 = b.load();
+    let b2 = b.swap(1234567890123);
+    let ok = match b.compare_exchange(1234567890123, 5) { Result.Ok(_) => true, Result.Err(_) => false };
+    let b3 = b.load();
+    io.print(f"u64 {b0} {b1} {b2} {ok} {b3}\n");
+
+    let c = atomic.Usize.new(10);
+    let c0 = c.fetch_add(5);
+    c.store(c.load() * 2);
+    let c1 = c.swap(1);
+    let c2 = match c.compare_exchange(2, 3) { Result.Ok(v) => v, Result.Err(v) => v + 100 };
+    io.print(f"usize {c0} {c1} {c2}\n");
+
+    let d = atomic.Bool.new(false);
+    let d0 = d.load();
+    let d1 = d.swap(true);
+    let d2 = match d.compare_exchange(false, true) { Result.Ok(v) => v, Result.Err(v) => v };
+    let d3 = match d.compare_exchange(true, false) { Result.Ok(v) => v, Result.Err(v) => !v };
+    let d4 = d.load();
+    io.print(f"bool {d0} {d1} {d2} {d3} {d4}\n");
+
+    let t0 = TICKS.fetch_add(2);
+    let t1 = TICKS.load();
+    let r0 = READY.swap(false);
+    let r1 = READY.load();
+    io.print(f"static {t0} {t1} {r0} {r1}\n");
+    return 0;
+}

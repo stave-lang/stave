@@ -1,0 +1,38 @@
+//~ STDOUT once_init.stdout
+// sync.Once: the first `get_or_init` runs its `f` and stores the value; later calls return the
+// same value without running theirs. As a static (`Once.new()` is a const-expr) and as a local.
+import std.atomic;
+import std.io;
+import std.sync;
+
+struct Table { pub id: u64, pub cells: [u32; 4] }
+
+static RUNS: atomic.U32 = atomic.U32.new(0);
+static TABLE: sync.Once<Table> = sync.Once::<Table>.new();
+
+fn build() -> Table {
+    let n = RUNS.fetch_add(1);
+    return Table.{ id: 42 + (n as u64), cells: [1, 2, 3, 4] };
+}
+
+fn cell(i: usize) -> u32 {
+    let t: &Table = TABLE.get_or_init(build);
+    return t.cells[i];
+}
+
+fn main() -> i32 {
+    let before = RUNS.load();
+    let a = cell(0) + cell(3);
+    let first: &Table = TABLE.get_or_init(build);
+    let again: &Table = TABLE.get_or_init(fn() -> Table { return Table.{ id: 0, cells: [0; 4] }; });
+    let id1 = first.id;
+    let id2 = again.id;
+    let runs = RUNS.load();
+    io.print(f"{before} {a} {id1} {id2} {runs}\n");
+
+    let local = sync.Once::<u32>.new();
+    let x = *local.get_or_init(fn() -> u32 { return 7; });
+    let y = *local.get_or_init(fn() -> u32 { return 8; });
+    io.print(f"{x} {y}\n");
+    return 0;
+}

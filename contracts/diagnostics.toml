@@ -661,7 +661,7 @@ fix = { description = "remove the `forget` call and let the view go out of scope
 code = "E0413"
 severity = "error"
 area = "kinds"
-rule = "view or reference in a `const` or `static mut` (except `&str` initialized by a string literal or another such const: static strings)"
+rule = "view or reference in a `const`, `static`, or `static mut` (except `&str` initialized by a string literal or another such const: static strings)"
 holes = { name = "name", type = "type" }
 message = "const `{name}` has reference or view type `{type}`"
 labels = [{ at = "primary", text = "borrowed type in a const" }]
@@ -711,7 +711,7 @@ fix = { description = "remove `impl Copy for {type}` (a type with a destructor m
 code = "E0417"
 severity = "error"
 area = "kinds"
-rule = "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T>`, or `sync.Once<T>` (planned)"
+rule = "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T>`, or `sync.Once<T>`"
 holes = { type = "type" }
 message = "`static` of type `{type}`, which is not `Sync`"
 labels = [{ at = "primary", text = "`static` type" }]
@@ -742,7 +742,7 @@ fix = { description = "use `{place}` before it is moved, or pass a reference (`&
 code = "E0503"
 severity = "error"
 area = "borrow"
-rule = "assignment to an immutable binding or through `&`"
+rule = "assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)"
 holes = { place = "place" }
 message = "cannot assign to `{place}`: the binding is not `mut`"
 labels = [{ at = "primary", text = "assignment here" }, { at = "binding", text = "declared without `mut` here" }]
@@ -752,6 +752,11 @@ fix = { description = "declare the binding with `let mut`" }
 message = "cannot assign to `{place}` through a `&` reference"
 labels = [{ at = "primary", text = "assignment through `&`" }, { at = "binding", text = "`&` reference created here" }]
 fix = { description = "create a `&mut` reference instead of `&` where this reference comes from" }
+
+[diag.cases.static]
+message = "cannot assign to or mutably borrow `{place}`: a `static` is immutable"
+labels = [{ at = "primary", text = "mutation of a `static`" }]
+fix = { description = "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T>`) and change it through its `&self` methods" }
 
 [[diag]]
 code = "E0504"
@@ -1228,7 +1233,7 @@ fix = { description = "move the `spawn` out of the closure into the `scope` bloc
 code = "E0809"
 severity = "error"
 area = "threads-unsafe-ffi"
-rule = "`static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` packages: user code uses `static` with a `Sync` type (planned)"
+rule = "`static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` packages: user code uses `static` with a `Sync` type"
 holes = { name = "name" }
 message = "`static mut {name}` is only allowed in the `std` and `runtime` packages"
 labels = [{ at = "primary", text = "`static mut` here" }]

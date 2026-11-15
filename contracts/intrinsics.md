@@ -119,6 +119,10 @@ list):
   `__stave_site_table`, `__stave_pc_table` (and `__stave_rt` on PTX);
 - `std.cell.UnsafeCell`, the only interior-mutability type: `&T` is readonly for the optimizer
   unless T contains it;
+- constructors a const-expr may call: `new` of `std.cell.UnsafeCell`, `std.atomic.U32`, `U64`,
+  `Usize`, `Bool`, `std.sync.Mutex`, and `std.sync.Once`. The call is evaluated as the struct
+  literal the constructor returns, with its parameters bound to the (const) arguments, so each
+  body is exactly `return <struct literal>;` over const-exprs and the parameters;
 - `std.thread.join`, `std.thread.par_for`, `std.thread.par_for_mut`, whose fn-value arguments get
   the thread capture checks (E0802, E0806);
 - language items of std: the prelude module `std.core` and its

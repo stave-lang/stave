@@ -27,7 +27,7 @@ Read whole file before writing Stave. Assume Rust **only** where this file is si
 | `x << 40` on u32 | traps (const amount: E0205) | Amount has the left operand's type (`x << 3`: `3` is u32). `<<%` masks amount by bits-1. `>>` arithmetic if signed, logical if unsigned | CPUs disagree on big shifts; trap is portable |
 | `!x` on int | `~x` | `~` = bitwise NOT. `!` = bool NOT | `!` is bool-only: no truthiness |
 | `'a` lifetimes | none | References are second-class (see §3) | borrow check per function, no lifetime solver |
-| `static X: T`, `static mut X: T` | `const X: T = e;`, `static mut X: T = e;` | Every use of a `static mut` (read, write, `&X`) is unsafe (E0803); `e` is a const-expr; no ref/view types (E0413) except `&str` literals. Planned: safe `static X: T = e;` with T `Sync` (`atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>`; else E0417); `static mut` only in std/runtime (E0809) | shared globals must be Sync; unsafe ones are inventoried |
+| `static mut X: T` | `static X: T = e;`, `const X: T = e;` | A `static` is one immutable global shared by all threads: reads and `&X` are safe, assignment, `&mut X`, and `&mut self` calls are E0503. T must be `Sync` (E0417): plain data, `atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>` (changed through `&self` methods). `e` is a const-expr; no ref/view types (E0413) except `&str` literals (a `&str` static checks but does not build yet: use `const`). `static mut` = E0809 (std/runtime only) | shared globals must be Sync |
 | `-> !`, `loop {}` as a value | `-> never` | `never` is a built-in type name, only after `->` (E0209). A call to a `-> never` fn ends the path (no `return` needed after it, E0207); a `-> never` fn must end every path in such a call or a `loop` without `break` | `!` stays bool-only |
 | `impl Drop`, `drop(x)`, `x.drop()` | `impl Drop for S { fn drop(&mut self) { .. } }`; `mem.drop(x)` (`import std.mem;`) | Runs at scope end (reverse declaration order) and when an initialized place is overwritten (`x = v`, `*p = v`). `x.drop()` = E0909. `impl Drop` on a Copy type = E0416 | destruction is never written by hand |
 | `ptr::read(p)`, `ptr::write(p, v)` | `p.read()`, `p.write(v)` (unsafe) | `*p = v` drops the old pointee; `p.write(v)` does not (uninitialized slot); `p.read()` moves out, the slot is then logically uninitialized. `*p` by value only for Copy | the drop is visible at the call |
@@ -62,7 +62,7 @@ Casts and overflow operators (kept out of the table because they contain `|`):
 | tuple structs `S(i32)`, unit structs `S;` | `struct S { v: i32 }`, `struct S {}` |
 | `mut x: T` params | `x: T` then `let mut y = x;` |
 | supertraits `trait A: B`, associated types/consts | separate bounds `<T: A + B>`; generic params; top-level `const` |
-| nested `fn` items, immutable `static` | top-level `fn`; top-level `const` |
+| nested `fn` items | top-level `fn` |
 | `!` (never type), `impl Trait for !` | `-> never` (return position only) |
 | `dyn Trait`, `impl Trait` | generics `<T: Trait>`, or fn types |
 | `pub(crate)`, struct update `..base`, `A = 1` discriminants | `pub`; write every field; undecided (§8) |
@@ -93,7 +93,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 - C FFI: `extern "C" { fn puts(s: *const u8) -> i32; fn printf(f: *const u8, ...) -> i32; }` (calls are unsafe). Export: `extern "C" fn add(a: i32, b: i32) -> i32 { return a + b; }`. No vectors or views in C signatures (E0804). No libc is linked by default (std makes raw Linux syscalls), so imports cannot be linked yet: how is undecided (§8).
 - Planned: `allocator my.alloc;` replaces the global allocator. Today it only parses and is checked (at most one per binary, E0104); std keeps the runtime allocator. Allocation failure aborts.
 - Contracts (planned), after `-> R needs(..)`: `fn at(xs: &[u32], i: usize) -> u32 requires(i < xs.len()) ensures(result <= 1000) { .. }`. Checked in every build; a false clause panics `Contract` (`requires`: at the call). Operands: params, fields, `.len()`, literals, arithmetic, compares, calls with `&`/Copy args; no `&mut`, `unsafe`, statics (E0211). `result` only in `ensures` (E0212). Not on trait methods.
-- const-expr (`const`, `static mut` initializers, array lengths): literals, consts, arithmetic, compare, `as`-family, `size_of::<T>()`, `align_of::<T>()`, `if then else`, and array/tuple/struct/variant literals of const-exprs. No other calls, no loops (E0904).
+- const-expr (`const`, `static` initializers, array lengths): literals, consts, arithmetic, compare, `as`-family, `size_of::<T>()`, `align_of::<T>()`, `if then else`, array/tuple/struct/variant literals of const-exprs, and the constructors `atomic.U64.new(e)` (also `U32 Usize Bool`), `sync.Mutex::<T>.new(e)`, `sync.Once::<T>.new()`. No other calls, no loops (E0904).
 - Generics are monomorphized and checked at the definition (E0901). An instantiation chain may hold at most 64 instances of one generic (E0902: `f::<[T; 1]>(..)` inside `f<T>` grows forever). Const generics: `<const N: usize>`. Generic args: types, int literals, `{const-expr}`, `[i0, i1, ..]`. Operator traits: one per mode, `Add` (`+`), `WrapAdd` (`+%`), `SatAdd` (`+|`), same for Sub/Mul/shifts, plus `Div Rem BitAnd BitOr BitXor`; all `fn add(self, rhs: Self) -> Self` (one type in and out), unary `Neg` (`-`), `Not` (`~`): `fn neg(self) -> Self`.
 
 ## 3. Ownership, references, views
@@ -101,7 +101,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 - Single owner. Assignment and pass-by-value move unless the type is Copy (E0502 use after move). Moving a non-Copy value out of `*r`, `r.f` through a ref, `v[i]`, or a closure capture = E0504: borrow it, or `mem.replace(&mut x, v)` / `mem.swap(&mut a, &mut b)`. Drop (`std.core.Drop`) runs at scope end and on overwrite of an initialized place; never call it (E0909). `match` on an owned value moves only the parts bound by value; a match with no by-value binding of a non-Copy part moves nothing. A guard (`P if c =>`) runs after P's names are bound: in `c` they are read-only (moving one = E0504, writing or `&mut` = E0503) and the scrutinee is borrowed (`&mut` or writing it = E0501). Assigning into a part of a moved value (`s.f = v` after `let t = s;`) = E0502; assigning the whole value re-initializes it.
 - `&T` xor `&mut T` (E0501). Checked per function, from signatures only.
 - References may appear **only** in locals, params, returns, and fields of `view` types. Exception: string literals are static `&str` (program data, never a loan): `const GREETING: &str = "hi";` is allowed, and a literal satisfies any `from` clause.
-- `view struct` / `view enum` may hold references. It is non-escapable: never a field of a non-view type (E0410), never in Box/Vec/Map (E0411), never passed to `forget` (E0412), never `const` or `static mut` (E0413). A tuple or Option that contains a ref or view is a view too, and so is **every fn value** (closure or fn item used as `fn(..)`): only a local, a param, or a view field. Writing a value through `&mut V` (V a view) needs the value's origins ⊆ the target's (E0513); so does assigning a captured ref or view inside a closure (`r = &z;` with `z` the closure's local = E0513).
+- `view struct` / `view enum` may hold references. It is non-escapable: never a field of a non-view type (E0410), never in Box/Vec/Map (E0411), never passed to `forget` (E0412), never `const` or `static` (E0413). A tuple or Option that contains a ref or view is a view too, and so is **every fn value** (closure or fn item used as `fn(..)`): only a local, a param, or a view field. Writing a value through `&mut V` (V a view) needs the value's origins ⊆ the target's (E0513); so does assigning a captured ref or view inside a closure (`r = &z;` with `z` the closure's local = E0513).
 - Return a ref or view with `from`:
 
 | param `x` | `-> R from x` | `-> R from copy x` |
@@ -261,15 +261,16 @@ unsafe("p is valid for reads") fn read_raw(p: *const u8) -> u8 {
 ```
 
 ```stave
-// mutable globals, never, Drop
+// globals, never, Drop
+import std.atomic;
 import std.io;
 import std.mem;
 
-static mut CALLS: u64 = 0;
+static LIMIT: u32 = 100;
+static CALLS: atomic.U64 = atomic.U64.new(0);
 
 fn count() -> u64 {
-    unsafe("single-threaded program: nothing else touches CALLS") { CALLS = CALLS + 1; }
-    return unsafe("single-threaded program") CALLS;
+    return CALLS.fetch_add(1) + 1;      // fetch_add returns the previous value
 }
 
 fn halt() -> never {
@@ -277,7 +278,7 @@ fn halt() -> never {
 }
 
 fn checked(x: u32) -> u32 {
-    if x <= 100 { return x; }
+    if x <= LIMIT { return x; }
     halt();                             // ends the path: no `return` needed after it
 }
 
@@ -379,4 +380,4 @@ NVIDIA GPUs through PTX (sm_86). The full GPU section is added when that compile
 
 ## 8. Not yet specified: don't guess, check `std/` or ask
 
-Stdlib API beyond `io.print`, `vec.Vec` (`push`, `get_ref`), `String.as_str`, `.len()`, `.unwrap()`, `mul_wide`, `std.thread` (§3), `std.debug.assert`, `std.mem` (`drop forget replace swap`), `std.soa` (§4); planned: `std.arena` (`Arena`, `alloc`, `reset`), `std.idx` (`IdVec`, `Id<T>`); planned: `std.atomic` (`U32 U64 Usize Bool`), `sync.Once`; scalar int methods such as `u16.popcount()` (used above) are assumed, not yet specified. Full trait/impl conformance rules (signature matching, missing or extra methods). How C objects and libraries are linked (`stave build` has no flag yet). Closure copy or move captures (none in v1: closures capture by reference only, no copy-capture syntax). Slicing `xs[a..b]`. Array→slice coercion (`&[T; N]` as `&[T]`). Binding types when matching on `&self`. Element binding type of `for x in slice` (`tail scalar (x)` binds by value). Enum↔int casts and explicit discriminants. String escapes and format specs. Moving a field out of a value whose type implements `Drop`.
+Stdlib API beyond `io.print`, `vec.Vec` (`push`, `get_ref`), `String.as_str`, `.len()`, `.unwrap()`, `mul_wide`, `std.thread` (§3), `std.debug.assert`, `std.mem` (`drop forget replace swap`), `std.soa` (§4); `std.atomic` (`U32 U64 Usize Bool`: `new load store swap fetch_add compare_exchange`, sequentially consistent; `Bool` has no `fetch_add`), `std.sync` (`Mutex<T>`: `new lock with_lock(f)`; `Once<T>`: `new`, `get_or_init(f: fn() -> T) -> &T`, `f` runs once); planned: `std.arena` (`Arena`, `alloc`, `reset`), `std.idx` (`IdVec`, `Id<T>`); scalar int methods such as `u16.popcount()` (used above) are assumed, not yet specified. Full trait/impl conformance rules (signature matching, missing or extra methods). How C objects and libraries are linked (`stave build` has no flag yet). Closure copy or move captures (none in v1: closures capture by reference only, no copy-capture syntax). Slicing `xs[a..b]`. Array→slice coercion (`&[T; N]` as `&[T]`). Binding types when matching on `&self`. Element binding type of `for x in slice` (`tail scalar (x)` binds by value). Enum↔int casts and explicit discriminants. String escapes and format specs. Moving a field out of a value whose type implements `Drop`.

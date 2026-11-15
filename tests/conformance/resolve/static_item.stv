@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// `static` declares a module item like `const`: duplicates are E0105, uses resolve to the
+// decl.
+static COUNT: u64 = 0;
+pub static TABLE: [u8; 4] = [1, 2, 3, 4];
+static COUNT: u32 = 1; //~ ERROR E0105
+
+fn next() -> u64 {
+    return COUNT + 1;
+}
+
+fn main() -> i32 {
+    let t: u8 = TABLE[0];
+    let n: u64 = next();
+    return 0;
+}

@@ -6,4 +6,4 @@ fn one() -> u32 {
 
 const F: fn() -> u32 = one; //~ ERROR E0413
 
-static mut G: fn() -> u32 = one; //~ ERROR E0413
+static G: fn() -> u32 = one; //~ ERROR E0413
