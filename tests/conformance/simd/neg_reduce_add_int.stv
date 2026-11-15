@@ -1,10 +1,15 @@
 //~ CHECK-ONLY
-// E0208: `reduce_add` is float-only and `reduce_add_wrap` is int-only: an integer sum names its
-// overflow mode, as `+%` does.
+// E0208: `reduce_add` and `scan_add` are float-only, `reduce_add_wrap` and `scan_add_wrap`
+// int-only: an integer sum names its overflow mode, as `+%` does. `reduce_add_ordered` is
+// float-only: a wrapping integer sum does not depend on the order.
 fn f(a: u32x4, x: f32x4) -> u32 {
     let s = a.reduce_add(); //~ ERROR E0208
     let t = x.reduce_add_wrap(); //~ ERROR E0208
-    return a.reduce_add_wrap() +% (x.reduce_add() as| u32);
+    let p = a.scan_add(); //~ ERROR E0208
+    let q = x.scan_add_wrap(); //~ ERROR E0208
+    let o = a.reduce_add_ordered(0); //~ ERROR E0208
+    let fl = x.scan_add().reduce_add_ordered(0.0);
+    return a.scan_add_wrap().reduce_add_wrap() +% (x.reduce_add() as| u32) +% (fl as| u32);
 }
 
 fn main() -> i32 {

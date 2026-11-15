@@ -258,7 +258,7 @@ impl<H: Host> Interp<'_, H> {
                 }
                 Val::S(acc)
             }
-            ScanAdd => {
+            ScanAdd | ScanAddWrap => {
                 let (_, lane, _) = self.vshape(rt()?)?;
                 let a = self.lanes(body, regs, arg(0)?)?;
                 let mut out = Vec::with_capacity(a.len());

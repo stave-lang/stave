@@ -68,6 +68,7 @@ const VEC_METHODS: &[&str] = &[
     "reduce_or",
     "reduce_add_ordered",
     "scan_add",
+    "scan_add_wrap",
     "bitcast",
     "split",
     "widen_lo",
@@ -296,7 +297,8 @@ fn vector_method<I: Interner + ?Sized>(
     Some(match name {
         "sqrt" | "abs" | "floor" | "ceil" | "round" | "trunc" if float => (vec![], t),
         "abs_wrap" | "popcount" | "clz" if !float => (vec![], t),
-        "scan_add" => (vec![], t),
+        "scan_add" if float => (vec![], t),
+        "scan_add_wrap" if !float => (vec![], t),
         "copysign" | "min_num" | "max_num" | "min_x86" | "max_x86" if float => (vec![ArgTy::Is(t)], t),
         "andnot" | "div_lanes" if !float => (vec![ArgTy::Is(t)], t),
         "min" | "max" => (vec![ArgTy::Is(t)], t),
@@ -305,7 +307,7 @@ fn vector_method<I: Interner + ?Sized>(
         "reduce_add_wrap" if !float => (vec![], lane),
         "reduce_min" | "reduce_max" => (vec![], lane),
         "reduce_and" | "reduce_or" if !float => (vec![], lane),
-        "reduce_add_ordered" => (vec![ArgTy::Is(lane)], lane),
+        "reduce_add_ordered" if float => (vec![ArgTy::Is(lane)], lane),
         "checked_add" | "checked_sub" | "checked_mul" if !float => {
             let o = if lang_option.is_none() {
                 cx.error_ty()

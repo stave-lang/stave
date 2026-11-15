@@ -67,7 +67,9 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
   8-byte word (aggregates word by word; f32/f64 through GPRs on x86-64, `fcsel` on AArch64). No
   pass turns it into a branch.
 - Reductions use a fixed tree: halve by lane index (lane i with i+N/2) until one lane remains.
-  `reduce_add` is float-only; the integer sum is `reduce_add_wrap` (wrapping, as `+%`).
+  `reduce_add` and `scan_add` are float-only; the integer forms are `reduce_add_wrap` and
+  `scan_add_wrap` (wrapping, as `+%`). `reduce_add_ordered` is float-only: a wrapping integer sum
+  does not depend on the order (`init +% v.reduce_add_wrap()`).
   `v.reduce_add_ordered(init)` is strictly sequential (`init + v[0] + v[1] + …`). Threading the
   accumulator through a loop makes a whole-slice sum independent of chunk boundaries, and so of VL. On sizeless vectors, float
   `reduce_add`/`reduce_mul` are E0717.
@@ -150,8 +152,8 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 | compress 8/16 | same | M | M | N (+avx512vbmi2), M | M | M |
 | expand | `v.expand(m)` | M | M | N | M | M |
 | reduce add/min/max/and/or (fixed tree) | `v.reduce_add()`, `v.reduce_add_wrap()` (int) | M | M | M | N int, M fp | N int, E0717 fp |
-| reduce add ordered | `v.reduce_add_ordered(init)` | M | M | M | M | N (fadda) |
-| prefix scan add | `v.scan_add()` | M | M | M | M | M |
+| reduce add ordered (float) | `v.reduce_add_ordered(init)` | M | M | M | M | N (fadda) |
+| prefix scan add | `v.scan_add()`, `v.scan_add_wrap()` (int) | M | M | M | M | M |
 | permute (const indices) | `v.permute::<[i0, …]>()` | N (≤16 B), M | M (cross-lane) | N | N | N |
 | table lookup bytes (out-of-range → 0) | `tbl.lookup(idx)` | N (16 B) | M | N (+avx512vbmi), M | N | N |
 | popcount | `v.popcount()` | M | M | N 32/64 (+avx512vpopcntdq), N 8/16 (+avx512bitalg), else M | N u8, M wider | N |

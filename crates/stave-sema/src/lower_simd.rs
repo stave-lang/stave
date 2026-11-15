@@ -181,6 +181,7 @@ impl FnCx<'_> {
             "popcount" => Some(VecOp::Popcount),
             "clz" => Some(VecOp::Clz),
             "scan_add" => Some(VecOp::ScanAdd),
+            "scan_add_wrap" => Some(VecOp::ScanAddWrap),
             "reduce_add" => Some(VecOp::ReduceAdd),
             "reduce_add_wrap" => Some(VecOp::ReduceAddWrap),
             "reduce_min" => Some(VecOp::ReduceMin),
