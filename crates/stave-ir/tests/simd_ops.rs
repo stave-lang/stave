@@ -745,9 +745,11 @@ fn shapes() {
     )
     .unwrap();
     assert_eq!(ival(&j), vec![1, 2, 3, 4]);
-    // scan_add
-    let s = same(int(false, 8), 4, 1, VecOp::ScanAdd, vec![lanes(&[200, 50, 10, 1])]).unwrap();
+    // scan_add_wrap / scan_add
+    let s = same(int(false, 8), 4, 1, VecOp::ScanAddWrap, vec![lanes(&[200, 50, 10, 1])]).unwrap();
     assert_eq!(out_lanes(&s), vec![200, 250, 4, 5]);
+    let s = same(F32, 4, 1, VecOp::ScanAdd, vec![f32s(&[1e8, 1.0, -1e8, 1.0])]).unwrap();
+    assert_eq!(out_f32(&s), vec![1e8, 1e8, 0.0, 1.0]);
     // popcount / clz / not / andnot
     let pc = same(int(false, 16), 2, 1, VecOp::Popcount, vec![lanes(&[0xffff, 0x0101])]).unwrap();
     assert_eq!(out_lanes(&pc), vec![16, 2]);
@@ -1112,6 +1114,23 @@ fn verifier_rejects_mistyped_vector_ops() {
             let t = m.types.intern(k);
             let f = m.types.f32();
             (vec![t], Some(f))
+        }),
+        // the plain prefix sum takes float lanes only
+        (VecOp::ScanAdd, |m| {
+            let t = i32x4(m);
+            (vec![t], Some(t))
+        }),
+        // the wrapping prefix sum takes int lanes only
+        (VecOp::ScanAddWrap, |m| {
+            let k = vk(m, F32, 4);
+            let t = m.types.intern(k);
+            (vec![t], Some(t))
+        }),
+        // the ordered sum takes float lanes only
+        (VecOp::ReduceAddOrdered, |m| {
+            let t = i32x4(m);
+            let i = m.types.i32();
+            (vec![t, i], Some(i))
         }),
         // to_bits of 8 lanes is u8, not u16
         (VecOp::ToBits, |m| {

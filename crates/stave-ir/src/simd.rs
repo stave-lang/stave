@@ -25,8 +25,8 @@
 //! | `vec.shl shr` † / `vec.shl.wrap` | `a amount` | V (int) | amount: V or an int scalar; an amount ≥ bits traps `Overflow` / is masked by bits-1 |
 //! | `vec.eq ne lt le gt ge` | `a b` | M | ints by signedness, floats IEEE (unordered: only `ne`) |
 //! | `vec.reduce_add reduce_add_wrap reduce_min reduce_max reduce_and reduce_or` | `v` | L | fixed tree: lane i with lane i+N/2 until one lane remains; `reduce_add` float lanes, `reduce_add_wrap` int lanes (wrapping) |
-//! | `vec.reduce_add_ordered` | `v init` | L | `((init + v[0]) + v[1]) + …`; int wraps |
-//! | `vec.scan_add` | `v` | V | inclusive prefix sum, lane by lane from lane 0; int wraps |
+//! | `vec.reduce_add_ordered` | `v init` | L (float) | `((init + v[0]) + v[1]) + …` |
+//! | `vec.scan_add scan_add_wrap` | `v` | V | inclusive prefix sum, lane by lane from lane 0; `scan_add` float lanes, `scan_add_wrap` int lanes (wrapping) |
 //! | `vec.cast cast.wrap cast.sat cast.round cast.try` | `v` | V' (`Option<V'>` for `try`) | the scalar cast per lane; `try` is `Some` iff every lane converts |
 //! | `vec.bitcast` | `v` | V' | same bytes (little-endian lanes), equal total width |
 //! | `vec.split` / `vec.join` | `v` / `a b` | `(H, H)` / V | halves: lanes `0..n/2` and `n/2..n` |
@@ -114,6 +114,7 @@ pub enum VecOp {
     ReduceOr,
     ReduceAddOrdered,
     ScanAdd,
+    ScanAddWrap,
     Cast(CastKind),
     Bitcast,
     Split,
@@ -149,7 +150,7 @@ pub enum VecOp {
 
 impl VecOp {
     /// Every op, in declaration order (tests and tables iterate it).
-    pub const ALL: [VecOp; 91] = {
+    pub const ALL: [VecOp; 92] = {
         use VecOp::*;
         [
             Splat,
@@ -208,6 +209,7 @@ impl VecOp {
             ReduceOr,
             ReduceAddOrdered,
             ScanAdd,
+            ScanAddWrap,
             Cast(CastKind::Exact),
             Cast(CastKind::Wrap),
             Cast(CastKind::Sat),
@@ -306,6 +308,7 @@ impl VecOp {
             ReduceOr => "vec.reduce_or",
             ReduceAddOrdered => "vec.reduce_add_ordered",
             ScanAdd => "vec.scan_add",
+            ScanAddWrap => "vec.scan_add_wrap",
             Cast(CastKind::Exact) => "vec.cast",
             Cast(CastKind::Wrap) => "vec.cast.wrap",
             Cast(CastKind::Sat) => "vec.cast.sat",
