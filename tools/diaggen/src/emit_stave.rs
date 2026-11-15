@@ -55,16 +55,33 @@ fn applicability_id(a: Applicability) -> u8 {
     }
 }
 
+/// Writes the lines `(code, comment)`, a comment after its code. The comments of consecutive
+/// commented lines start in one column, one space after the longest code of the run: the layout
+/// `stave fmt` gives.
+fn commented(o: &mut String, lines: &[(String, String)]) {
+    let mut k = 0;
+    while k < lines.len() {
+        let run = lines[k..].iter().take_while(|l| !l.1.is_empty()).count();
+        if run == 0 {
+            let _ = writeln!(o, "{}", lines[k].0);
+            k += 1;
+            continue;
+        }
+        let width = lines[k..k + run].iter().map(|l| l.0.chars().count()).max().unwrap_or(0);
+        for (code, comment) in &lines[k..k + run] {
+            let pad = width - code.chars().count();
+            let _ = writeln!(o, "{code}{:pad$} // {comment}", "");
+        }
+        k += run;
+    }
+}
+
 /// One `const` array: elements one per line, each with a trailing comment.
 fn array(o: &mut String, name: &str, elem: &str, items: &[(String, String)]) {
     let _ = writeln!(o, "\nconst {name}: [{elem}; {}] = [", items.len());
-    for (value, comment) in items {
-        if comment.is_empty() {
-            let _ = writeln!(o, "    {value},");
-        } else {
-            let _ = writeln!(o, "    {value}, // {comment}");
-        }
-    }
+    let lines: Vec<(String, String)> =
+        items.iter().map(|(value, comment)| (format!("    {value},"), comment.clone())).collect();
+    commented(o, &lines);
     o.push_str("];\n");
 }
 

@@ -12,7 +12,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 step="${1:-}"; [ $# -gt 0 ] && shift
 case "$step" in
   fmt)     cargo fmt --all --check ;;
-  stave-fmt) cargo run -q --locked -p stave-cli -- fmt --check std runtime ;;
+  stave-fmt) cargo run -q --locked -p stave-cli -- fmt --check std runtime stage1/src ;;
   clippy)  cargo clippy --locked --workspace --all-targets -- -D warnings ;;
   build)   cargo build --locked --workspace "$@" ;;
   test)    cargo test --locked --workspace "$@" ;;
