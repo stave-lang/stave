@@ -202,7 +202,9 @@ b2():
   value is `get`/`set`, which check a dynamic index themselves. A constant index ≥ a constant array
   length is `panic.bounds ()` + `unreachable` (the only index folding; the trap is kept). No check is
   ever removed in the checked IR; release code generation may drop a check only with a recorded
-  proof (constant index < length, a dominating identical check, a dominating `lt i n` branch).
+  proof (constant index < length, a dominating identical check, a dominating `lt i n` branch,
+  and `LenEq`/`Offset`: `i + k < n` derived from dominating unsigned compares, asserting calls
+  such as `std.debug.assert`, and trapping `add`/`sub` of constants).
   Compiler-made accesses (`for` over an array or slice, drop loops, array → slice coercion
   `addr.elem p 0` + `slice.make`) index below a length the generated code compares against.
 - **`Range<T>`** values are the tuple `(T, T)` (`type` lines show `tuple t<T> t<T>`).

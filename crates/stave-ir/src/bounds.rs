@@ -30,13 +30,27 @@
 //! | `ConstInRange` | index and length are constants and index < length |
 //! | `Dominated` | an identical `check.bounds` (same index and length operands) dominates it |
 //! | `LoopBound` | a dominating `cbr (lt i n') T F` reaches the check only through `T` (T's only predecessor), `i` unsigned, and `n'` is the same length operand (or a constant ≤ a constant length) |
+//! | `LenEq` | the facts below prove `i < n` through an equality of two lengths, e.g. `i < len(a)` and `len(a) == len(b)` for `check.bounds i len(b)` |
+//! | `Offset` | the facts below prove `i + k < n` for the index `i + k` (`k` a constant, possibly negative or 0) without an equality |
+//!
+//! `LenEq` and `Offset` come from one difference-constraint graph per function (`bounds/facts.rs`):
+//! facts `x <= y + c` over SSA values from dominating branches (unsigned compares, a loop's
+//! `lt i n` among them) and asserting calls (`std.debug.assert(a.len() == b.len(), ..)`), with
+//! trapping `add`/`sub` by a constant folded into offsets. Each check is a query on it, explored
+//! from the index for at most [`BOUNDS_STEP_LIMIT`] edges.
 //!
 //! The checked IR is printed before elision (it is pre-optimization IR); stage0 runs [`elide`] for
 //! `--release` code generation only.
 
+mod facts;
+
 use crate::ir::{Block, Body, Func, FuncId, Module, Op, Operand, Term, Value, ValueDef};
 use crate::types::{TypeId, TypeKey, TypeTable};
 use crate::verify::Dominators;
+
+/// The most graph edges one bounds query follows before it gives up and keeps the check: compile
+/// time stays linear in the number of checks.
+pub const BOUNDS_STEP_LIMIT: u32 = 64;
 
 /// What kind of element access an instruction is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -66,6 +80,12 @@ pub enum Proof {
     Dominated { first: u32 },
     /// A chunk loop's head test covers the whole vector.
     ChunkLoop,
+    /// The index is below the length by facts that include the equality tested by instruction
+    /// `cmp` (an `eq` or `ne`, through a branch or an asserting call).
+    LenEq { cmp: u32 },
+    /// The index is `base + k` (`base` an SSA value number, `None` for a constant index) and the
+    /// facts prove it below the length without an equality.
+    Offset { base: Option<u32>, k: i64 },
 }
 
 /// How an access is guarded.
@@ -138,7 +158,7 @@ pub fn audit_func(m: &Module, fid: FuncId) -> (Vec<Access>, Vec<Unguarded>) {
     if !b.insts.op.iter().any(|op| matches!(op, Op::ElemAddr | Op::Get | Op::Set)) {
         return (ok, bad);
     }
-    let cx = Cx::new(&m.types, b);
+    let cx = Cx::new(&m.types, &m.funcs, b);
     for i in 0..b.insts.len() as u32 {
         let Some(kind) = cx.access_kind(i) else { continue };
         if !cx.reachable_inst(i) {
@@ -160,7 +180,10 @@ pub fn elide(m: &mut Module) -> Vec<Elided> {
         let removed: Vec<(u32, Proof)> = {
             let f = &m.funcs[fi];
             let Some(b) = &f.body else { continue };
-            let cx = Cx::new(&m.types, b);
+            if !b.insts.op.contains(&Op::BoundsCheck) {
+                continue;
+            }
+            let cx = Cx::new(&m.types, &m.funcs, b);
             (0..b.insts.len() as u32)
                 .filter(|&i| b.insts.op[i as usize] == Op::BoundsCheck && cx.reachable_inst(i))
                 .filter_map(|i| cx.check_proof(i).map(|p| (i, p)))
@@ -192,6 +215,8 @@ fn label(f: &Func) -> String {
 /// Per-function analysis context.
 struct Cx<'a> {
     types: &'a TypeTable,
+    /// The module's functions (callee bodies for asserting calls).
+    funcs: &'a [Func],
     b: &'a Body,
     dom: Dominators,
     /// Block of each instruction.
@@ -200,10 +225,11 @@ struct Cx<'a> {
     preds: Vec<Vec<(u32, bool)>>,
     /// The reachable `check.bounds` instructions, in order.
     checks: Vec<u32>,
+    facts: facts::Facts,
 }
 
 impl<'a> Cx<'a> {
-    fn new(types: &'a TypeTable, b: &'a Body) -> Cx<'a> {
+    fn new(types: &'a TypeTable, funcs: &'a [Func], b: &'a Body) -> Cx<'a> {
         let mut block_of = vec![u32::MAX; b.insts.len()];
         for (bi, bd) in b.blocks.iter().enumerate() {
             for i in bd.insts.indices() {
@@ -213,39 +239,14 @@ impl<'a> Cx<'a> {
             }
         }
         let dom = Dominators::compute(b);
-        // (pred block, is the true edge of a cbr) per block.
-        let mut preds: Vec<Vec<(u32, bool)>> = vec![Vec::new(); b.blocks.len()];
-        for (bi, bd) in b.blocks.iter().enumerate() {
-            if !dom.reachable(bi) {
-                continue;
-            }
-            let mut add = |t: Block, is_then: bool| {
-                if let Some(p) = preds.get_mut(t.index()) {
-                    p.push((bi as u32, is_then));
-                }
-            };
-            match bd.term {
-                Term::Br(t) => add(t.block, false),
-                Term::Cbr { then, els, .. } => {
-                    add(then.block, true);
-                    add(els.block, false);
-                }
-                Term::Switch { cases, default, .. } => {
-                    for c in b.switch_cases(cases) {
-                        add(c.target.block, false);
-                    }
-                    add(default.block, false);
-                }
-                Term::Ret(_) | Term::Unreachable => {}
-            }
-        }
+        let preds = preds_of(b, &dom);
         let checks = (0..b.insts.len() as u32)
             .filter(|&i| {
                 b.insts.op[i as usize] == Op::BoundsCheck
                     && block_of.get(i as usize).is_some_and(|&bk| dom.reachable(bk as usize))
             })
             .collect();
-        Cx { types, b, dom, block_of, preds, checks }
+        Cx { types, funcs, b, dom, block_of, preds, checks, facts: facts::Facts::default() }
     }
 
     fn reachable_inst(&self, i: u32) -> bool {
@@ -347,8 +348,14 @@ impl<'a> Cx<'a> {
                 if self.konst(idx) == Some(0) && self.only_slice_base(i) {
                     return Some(Guard::Proof(Proof::SliceBase));
                 }
-                self.loop_bound(i, idx, |n| self.is_len_of(n, p, len))
-                    .map(|br| Guard::Proof(Proof::LoopBound { branch: br }))
+                if let Some(br) = self.loop_bound(i, idx, |n| self.is_len_of(n, p, len)) {
+                    return Some(Guard::Proof(Proof::LoopBound { branch: br }));
+                }
+                let n = match len {
+                    Some(l) => facts::Term::constant(l)?,
+                    None => self.slice_len_term(p)?,
+                };
+                self.prove_lt(i, self.term(idx)?, n).map(Guard::Proof)
             }
             AccessKind::Get | AccessKind::Set => {
                 let (a, idx) = (args[0], *args.get(1)?);
@@ -459,8 +466,41 @@ impl<'a> Cx<'a> {
         }
         let same_len =
             |m: Operand| m == n || matches!((self.konst(m), self.konst(n)), (Some(a), Some(b)) if a <= b);
-        self.loop_bound(i, idx, same_len).map(|branch| Proof::LoopBound { branch })
+        if let Some(branch) = self.loop_bound(i, idx, same_len) {
+            return Some(Proof::LoopBound { branch });
+        }
+        self.prove_lt(i, self.term(idx)?, self.term(n)?)
     }
+}
+
+/// Predecessor edges per block: (reachable predecessor, is the true edge of a `cbr`).
+fn preds_of(b: &Body, dom: &Dominators) -> Vec<Vec<(u32, bool)>> {
+    let mut preds: Vec<Vec<(u32, bool)>> = vec![Vec::new(); b.blocks.len()];
+    for (bi, bd) in b.blocks.iter().enumerate() {
+        if !dom.reachable(bi) {
+            continue;
+        }
+        let mut add = |t: Block, is_then: bool| {
+            if let Some(p) = preds.get_mut(t.index()) {
+                p.push((bi as u32, is_then));
+            }
+        };
+        match bd.term {
+            Term::Br(t) => add(t.block, false),
+            Term::Cbr { then, els, .. } => {
+                add(then.block, true);
+                add(els.block, false);
+            }
+            Term::Switch { cases, default, .. } => {
+                for c in b.switch_cases(cases) {
+                    add(c.target.block, false);
+                }
+                add(default.block, false);
+            }
+            Term::Ret(_) | Term::Unreachable => {}
+        }
+    }
+    preds
 }
 
 /// Removes instructions `dead` (sorted, none with a result) from `b`, keeping block order.

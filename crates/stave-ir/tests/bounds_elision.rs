@@ -5,9 +5,11 @@
 mod common;
 
 use common::*;
-use stave_ir::bounds::{AccessKind, Guard, Proof, audit, elide};
+use stave_ir::bounds::{AccessKind, BOUNDS_STEP_LIMIT, Elided, Guard, Proof, audit, elide};
 use stave_ir::interp::Val;
-use stave_ir::{FuncId, Module, Op, Outcome, PanicKind, TypeId, verify_module};
+use stave_ir::{
+    CastKind, FuncBuilder, FuncId, Module, Op, Operand, Outcome, PanicKind, TypeId, Value, verify_module,
+};
 
 struct T {
     u32t: TypeId,
@@ -218,4 +220,450 @@ fn aggregate_get_set() {
         (acc[1].kind, acc[1].guard),
         (AccessKind::Get, Guard::Proof(Proof::ConstInRange { index: 3, len: 4 }))
     );
+}
+
+// Difference-constraint proofs: `LenEq` and `Offset`.
+
+struct S {
+    u32t: TypeId,
+    us: TypeId,
+    i64t: TypeId,
+    bt: TypeId,
+    parr8: TypeId,
+    pe: TypeId,
+    psl: TypeId,
+    pce: TypeId,
+}
+
+fn stypes(m: &mut Module) -> S {
+    let u32t = m.types.u32();
+    let us = m.types.usize();
+    let i64t = m.types.i64();
+    let bt = m.types.bool();
+    let arr8 = m.types.array(u32t, 8);
+    let parr8 = m.types.ref_(true, arr8);
+    let pe = m.types.ref_(true, u32t);
+    let sl = m.types.slice(u32t);
+    let psl = m.types.ref_(false, sl);
+    let pce = m.types.ref_(false, u32t);
+    S { u32t, us, i64t, bt, parr8, pe, psl, pce }
+}
+
+/// The front end's slice read `s[idx]` (`n` = `slice.len s`): `check.bounds idx n`,
+/// `addr.elem s idx`, `load`.
+fn read(b: &mut FuncBuilder, t: &S, s: Value, n: Value, idx: impl Into<Operand>) -> Value {
+    let idx = idx.into();
+    b.bounds_check(idx, n);
+    let p = b.op(Op::ElemAddr, t.pce, &[s.into(), idx]);
+    b.load(t.u32t, p)
+}
+
+/// `for i in lo..hi { acc = step(i, acc) }` from `acc = 0` (the front end's loop: head test
+/// `lt i hi`, increment `add.wrap i 1`); returns the final `acc`, the builder in the exit block.
+fn for_range(
+    b: &mut FuncBuilder,
+    t: &S,
+    lo: Operand,
+    hi: Operand,
+    step: impl FnOnce(&mut FuncBuilder, Value, Value) -> Value,
+) -> Value {
+    let (head, hv) = b.create_block_with(&[t.us, t.u32t]);
+    let body = b.create_block();
+    let (exit, ev) = b.create_block_with(&[t.u32t]);
+    let z = b.int(0);
+    b.br(head, &[lo, z]);
+    b.switch_to(head);
+    let c = b.cmp(Op::Lt, t.bt, hv[0], hi);
+    b.cbr(c, body, &[], exit, &[hv[1].into()]);
+    b.switch_to(body);
+    let acc = step(b, hv[0], hv[1]);
+    let one = b.int(1);
+    let i2 = b.binary(Op::AddWrap, t.us, hv[0], one);
+    b.br(head, &[i2.into(), acc.into()]);
+    b.switch_to(exit);
+    ev[0]
+}
+
+/// `app.check(c: bool)`: `std.debug.assert`'s shape (`if !c { panic }`, returns only when `c`);
+/// with `asserting = false`, `app.note`, a look-alike that returns on both paths.
+fn check_fn(m: &mut Module, t: &S, asserting: bool) -> FuncId {
+    let (id, path) = if asserting { (10, "app.check") } else { (11, "app.note") };
+    define(m, &[id], path, &[t.bt], None, |b, _| {
+        let c = b.param(0).unwrap();
+        let nc = b.unary(Op::Not, t.bt, c);
+        let (fail, ok) = (b.create_block(), b.create_block());
+        b.cbr(nc, fail, &[], ok, &[]);
+        b.switch_to(fail);
+        if asserting {
+            b.panic(PanicKind::Assert);
+            b.unreachable();
+        } else {
+            b.ret(None);
+        }
+        b.switch_to(ok);
+        b.ret(None);
+    })
+}
+
+/// What a [`two_slices`] body builder gets: the callees and `app.f`'s slices and their lengths.
+struct Two {
+    check: FuncId,
+    note: FuncId,
+    a: Value,
+    b: Value,
+    na: Value,
+    nb: Value,
+}
+
+type BodyFn = fn(&mut FuncBuilder, &S, &Two) -> Value;
+
+/// `app.f(a: &[u32], b: &[u32]) -> u32` with the body `f` builds (from the entry block, which
+/// already holds `na = slice.len a`, `nb = slice.len b`; `f` returns the value to `ret`), and
+/// `app.main(na, nb)`, which calls it on the prefixes of lengths `na`, `nb` of `[1, 2, .., 8]`.
+fn two_slices(f: BodyFn) -> (Module, FuncId, FuncId) {
+    let mut m = Module::new();
+    let t = stypes(&mut m);
+    let check = check_fn(&mut m, &t, true);
+    let note = check_fn(&mut m, &t, false);
+    let fid = define(&mut m, &[1], "app.f", &[t.psl, t.psl], Some(t.u32t), |b, _| {
+        let (a, bb) = (b.param(0).unwrap(), b.param(1).unwrap());
+        let na = b.op(Op::SliceLen, t.us, &[a.into()]);
+        let nb = b.op(Op::SliceLen, t.us, &[bb.into()]);
+        let r = f(b, &t, &Two { check, note, a, b: bb, na, nb });
+        b.ret(Some(r.into()));
+    });
+    let main = define(&mut m, &[2], "app.main", &[t.us, t.us], Some(t.u32t), |b, _| {
+        let (na, nb) = (b.param(0).unwrap(), b.param(1).unwrap());
+        let s = b.slot(t.parr8);
+        for j in 0..8 {
+            let k = b.int(j);
+            let p = b.op(Op::ElemAddr, t.pe, &[s.into(), k]);
+            let v = b.int(j + 1);
+            b.store(p, v);
+        }
+        let z = b.int(0);
+        let base = b.op(Op::ElemAddr, t.pce, &[s.into(), z]);
+        let sa = b.op(Op::SliceMake, t.psl, &[base.into(), na.into()]);
+        let sb = b.op(Op::SliceMake, t.psl, &[base.into(), nb.into()]);
+        let r = b.call(fid, Some(t.u32t), &[sa.into(), sb.into()]).unwrap();
+        b.ret(Some(r.into()));
+    });
+    verify_module(&m).unwrap_or_else(|e| panic!("{e:?}"));
+    audit(&m).unwrap();
+    (m, fid, main)
+}
+
+/// Elides; the result verifies, audits, and `main` returns or traps the same on every `(na, nb)`
+/// up to 8. Returns the elided module and the proofs recorded for `f`.
+fn elide_same(m: &Module, f: FuncId, main: FuncId) -> (Module, Vec<Proof>) {
+    let mut o = m.clone();
+    let e = elide(&mut o);
+    verify_module(&o).unwrap_or_else(|e| panic!("{e:?}"));
+    audit(&o).unwrap_or_else(|u| panic!("unguarded after elision: {u:?}"));
+    for na in 0..=8u64 {
+        for nb in 0..=8u64 {
+            let args = vec![Val::S(na), Val::S(nb)];
+            assert_eq!(run(&o, main, args.clone()), run(m, main, args), "na = {na}, nb = {nb}");
+        }
+    }
+    (o, e.iter().filter(|x| x.func == f).map(|x| x.proof).collect())
+}
+
+fn trap(m: &Module, main: FuncId, na: u64, nb: u64) -> Option<PanicKind> {
+    match run(m, main, vec![Val::S(na), Val::S(nb)]) {
+        Outcome::Trap(t) => Some(t.kind),
+        _ => None,
+    }
+}
+
+/// `acc + a[i] * b[i]`.
+fn dot_step(b: &mut FuncBuilder, t: &S, x: &Two, i: Value, acc: Value) -> Value {
+    let p = read(b, t, x.a, x.na, i);
+    let q = read(b, t, x.b, x.nb, i);
+    let pq = b.binary(Op::MulWrap, t.u32t, p, q);
+    b.binary(Op::AddWrap, t.u32t, acc, pq)
+}
+
+/// `for i in 0..a.len() { acc += a[i] * b[i] }`.
+fn dot_loop(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let z = b.int(0);
+    for_range(b, t, z, x.na.into(), |b, i, acc| dot_step(b, t, x, i, acc))
+}
+
+/// `if c { } else { return 0; }` then the loop `then` builds.
+fn guarded(b: &mut FuncBuilder, t: &S, x: &Two, c: Value, then: BodyFn) -> Value {
+    let ((out, ov), go) = (b.create_block_with(&[t.u32t]), b.create_block());
+    let z = b.int(0);
+    b.cbr(c, go, &[], out, &[z]);
+    b.switch_to(go);
+    let r = then(b, t, x);
+    b.br(out, &[r.into()]);
+    b.switch_to(out);
+    ov[0]
+}
+
+/// `dot(a, b)` with `debug.assert(a.len() == b.len(), ..)`: no check is left, the loop bound
+/// proves `a[i]` and the equality `b[i]`.
+#[test]
+fn dot_with_assert_has_no_check() {
+    let (m, f, main) = two_slices(|b, t, x| {
+        let eq = b.cmp(Op::Eq, t.bt, x.na, x.nb);
+        b.call(x.check, None, &[eq.into()]);
+        dot_loop(b, t, x)
+    });
+    assert_eq!(checks(&m, f), 2);
+    let (o, proofs) = elide_same(&m, f, main);
+    assert_eq!(checks(&o, f), 0);
+    assert!(matches!(proofs[..], [Proof::LoopBound { .. }, Proof::LenEq { .. }]), "{proofs:?}");
+    assert_eq!(trap(&o, main, 3, 2), Some(PanicKind::Assert));
+    assert_eq!(run(&o, main, vec![Val::S(3), Val::S(3)]), Outcome::Return(Some(Val::S(14))));
+}
+
+/// `if a.len() != b.len() { return 0; }` before the loop proves `b[i]` as well.
+#[test]
+fn dot_with_early_return_has_no_check() {
+    let (m, f, main) = two_slices(|b, t, x| {
+        let ne = b.cmp(Op::Ne, t.bt, x.na, x.nb);
+        let ((out, ov), go) = (b.create_block_with(&[t.u32t]), b.create_block());
+        let z = b.int(0);
+        b.cbr(ne, out, &[z], go, &[]);
+        b.switch_to(go);
+        let r = dot_loop(b, t, x);
+        b.br(out, &[r.into()]);
+        b.switch_to(out);
+        ov[0]
+    });
+    let (o, proofs) = elide_same(&m, f, main);
+    assert_eq!(checks(&o, f), 0);
+    assert!(matches!(proofs[..], [Proof::LoopBound { .. }, Proof::LenEq { .. }]), "{proofs:?}");
+}
+
+/// `for i in 1..a.len() { acc += a[i] - a[i - 1] }`: `a[i - 1]` is `Offset { k: -1 }`.
+#[test]
+fn diff_previous_element_has_no_check() {
+    let (m, f, main) = two_slices(|b, t, x| {
+        let one = b.int(1);
+        for_range(b, t, one, x.na.into(), |b, i, acc| {
+            let p = read(b, t, x.a, x.na, i);
+            let one = b.int(1);
+            let im1 = b.binary(Op::Sub, t.us, i, one);
+            let q = read(b, t, x.a, x.na, im1);
+            let d = b.binary(Op::SubWrap, t.u32t, p, q);
+            b.binary(Op::AddWrap, t.u32t, acc, d)
+        })
+    });
+    let (o, proofs) = elide_same(&m, f, main);
+    assert_eq!(checks(&o, f), 0);
+    assert!(
+        matches!(proofs[..], [Proof::LoopBound { .. }, Proof::Offset { base: Some(_), k: -1 }]),
+        "{proofs:?}"
+    );
+}
+
+/// `for i in 0..a.len() - 1 { acc += a[i + 1] }`: `Offset { k: 1 }`; an empty slice traps
+/// `Overflow` at `a.len() - 1`, before and after.
+#[test]
+fn next_element_below_len_minus_one_has_no_check() {
+    let (m, f, main) = two_slices(|b, t, x| {
+        let one = b.int(1);
+        let hi = b.binary(Op::Sub, t.us, x.na, one);
+        let z = b.int(0);
+        for_range(b, t, z, hi.into(), |b, i, acc| {
+            let one = b.int(1);
+            let ip1 = b.binary(Op::Add, t.us, i, one);
+            let q = read(b, t, x.a, x.na, ip1);
+            b.binary(Op::AddWrap, t.u32t, acc, q)
+        })
+    });
+    let (o, proofs) = elide_same(&m, f, main);
+    assert_eq!(checks(&o, f), 0);
+    assert!(matches!(proofs[..], [Proof::Offset { base: Some(_), k: 1 }]), "{proofs:?}");
+    assert_eq!(trap(&o, main, 0, 0), Some(PanicKind::Overflow));
+}
+
+/// `while i + 1 < a.len() { acc += a[i + 1] + a[i]; i += 1; }`, each `slice.len` and `i + 1`
+/// computed again at its use (the checked IR before the optimizer unifies the lengths): both
+/// checks go.
+#[test]
+fn while_offset_bound_with_separate_reads() {
+    let (m, f, main) = two_slices(|b, t, x| {
+        let (head, hv) = b.create_block_with(&[t.us, t.u32t]);
+        let body = b.create_block();
+        let (exit, ev) = b.create_block_with(&[t.u32t]);
+        let z = b.int(0);
+        b.br(head, &[z, z]);
+        b.switch_to(head);
+        let one = b.int(1);
+        let ip1 = b.binary(Op::Add, t.us, hv[0], one);
+        let n0 = b.op(Op::SliceLen, t.us, &[x.a.into()]);
+        let c = b.cmp(Op::Lt, t.bt, ip1, n0);
+        b.cbr(c, body, &[], exit, &[hv[1].into()]);
+        b.switch_to(body);
+        let ip1b = b.binary(Op::Add, t.us, hv[0], one);
+        let n1 = b.op(Op::SliceLen, t.us, &[x.a.into()]);
+        let p = read(b, t, x.a, n1, ip1b);
+        let n2 = b.op(Op::SliceLen, t.us, &[x.a.into()]);
+        let q = read(b, t, x.a, n2, hv[0]);
+        let s = b.binary(Op::AddWrap, t.u32t, p, q);
+        let acc = b.binary(Op::AddWrap, t.u32t, hv[1], s);
+        b.br(head, &[ip1b.into(), acc.into()]);
+        b.switch_to(exit);
+        ev[0]
+    });
+    let (o, proofs) = elide_same(&m, f, main);
+    assert_eq!(checks(&o, f), 0);
+    assert!(matches!(proofs[..], [Proof::Offset { k: 1, .. }, Proof::Offset { k: 0, .. }]), "{proofs:?}");
+}
+
+/// `if b.len() <= a.len()`: `b` is no longer than `a`, so `b[i]` over `a`'s range can fail.
+fn le_only(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let le = b.cmp(Op::Le, t.bt, x.nb, x.na);
+    guarded(b, t, x, le, dot_loop)
+}
+
+/// The equality is asserted on one path only (`if a.len() < 5`).
+fn eq_on_one_path(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let five = b.int(5);
+    let c = b.cmp(Op::Lt, t.bt, x.na, five);
+    let (yes, join) = (b.create_block(), b.create_block());
+    b.cbr(c, yes, &[], join, &[]);
+    b.switch_to(yes);
+    let eq = b.cmp(Op::Eq, t.bt, x.na, x.nb);
+    b.call(x.check, None, &[eq.into()]);
+    b.br(join, &[]);
+    b.switch_to(join);
+    dot_loop(b, t, x)
+}
+
+/// A callee that returns whether or not its argument holds asserts nothing.
+fn non_asserting_callee(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let eq = b.cmp(Op::Eq, t.bt, x.na, x.nb);
+    b.call(x.note, None, &[eq.into()]);
+    dot_loop(b, t, x)
+}
+
+/// `a[i + b.len()]`: the offset is a value, not a constant.
+fn non_constant_offset(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let z = b.int(0);
+    for_range(b, t, z, x.na.into(), |b, i, acc| {
+        let ik = b.binary(Op::Add, t.us, i, x.nb);
+        let q = read(b, t, x.a, x.na, ik);
+        b.binary(Op::AddWrap, t.u32t, acc, q)
+    })
+}
+
+/// `a[i] + a[i + 1]` under `i < a.len()` (not `i + 1 < a.len()`): the last `a[i + 1]` is out of
+/// range; `a[i]` is proven.
+fn plus_one_under_lt_len(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let z = b.int(0);
+    for_range(b, t, z, x.na.into(), |b, i, acc| {
+        let p = read(b, t, x.a, x.na, i);
+        let one = b.int(1);
+        let ip1 = b.binary(Op::Add, t.us, i, one);
+        let q = read(b, t, x.a, x.na, ip1);
+        let s = b.binary(Op::AddWrap, t.u32t, p, q);
+        b.binary(Op::AddWrap, t.u32t, acc, s)
+    })
+}
+
+/// `a[i -% 1]`: wrapping arithmetic is opaque (`i = 0` wraps to `usize::MAX`).
+fn wrapping_offset(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let z = b.int(0);
+    for_range(b, t, z, x.na.into(), |b, i, acc| {
+        let one = b.int(1);
+        let im1 = b.binary(Op::SubWrap, t.us, i, one);
+        let q = read(b, t, x.a, x.na, im1);
+        b.binary(Op::AddWrap, t.u32t, acc, q)
+    })
+}
+
+/// `b` re-sliced to its first `b.len() - 1` elements after the equality: the new slice is shorter.
+fn resliced_after_eq(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let eq = b.cmp(Op::Eq, t.bt, x.na, x.nb);
+    b.call(x.check, None, &[eq.into()]);
+    let one = b.int(1);
+    let n = b.binary(Op::Sub, t.us, x.nb, one);
+    let z = b.int(0);
+    let base = b.op(Op::ElemAddr, t.pce, &[x.b.into(), z]);
+    let c = b.op(Op::SliceMake, t.psl, &[base.into(), n.into()]);
+    let nc = b.op(Op::SliceLen, t.us, &[c.into()]);
+    for_range(b, t, z, x.na.into(), |b, i, acc| {
+        let q = read(b, t, c, nc, i);
+        b.binary(Op::AddWrap, t.u32t, acc, q)
+    })
+}
+
+/// `a[(i as i64 + 1) as usize]`: signed arithmetic and casts are opaque.
+fn signed_index(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let z = b.int(0);
+    for_range(b, t, z, x.na.into(), |b, i, acc| {
+        let j = b.cast(CastKind::Wrap, t.i64t, i);
+        let one = b.int(1);
+        let j1 = b.binary(Op::Add, t.i64t, j, one);
+        let k = b.cast(CastKind::Wrap, t.us, j1);
+        let q = read(b, t, x.a, x.na, k);
+        b.binary(Op::AddWrap, t.u32t, acc, q)
+    })
+}
+
+/// Look-alikes the proofs must not fire on: each keeps the check that can fail, and still traps
+/// `Bounds` where the unoptimized code does.
+#[test]
+fn look_alikes_keep_their_checks() {
+    let cases: [(&str, BodyFn, usize, (u64, u64)); 8] = [
+        ("le only", le_only, 1, (4, 2)),
+        ("eq on one path", eq_on_one_path, 1, (6, 2)),
+        ("non-asserting callee", non_asserting_callee, 1, (3, 1)),
+        ("non-constant offset", non_constant_offset, 1, (3, 1)),
+        ("i + 1 under i < len", plus_one_under_lt_len, 1, (3, 0)),
+        ("wrapping offset", wrapping_offset, 1, (3, 0)),
+        ("re-sliced after eq", resliced_after_eq, 1, (3, 3)),
+        ("signed index", signed_index, 1, (3, 0)),
+    ];
+    for (name, body, kept, (na, nb)) in cases {
+        let (m, f, main) = two_slices(body);
+        let (o, _) = elide_same(&m, f, main);
+        assert_eq!(checks(&o, f), kept, "{name}");
+        assert_eq!(trap(&o, main, na, nb), Some(PanicKind::Bounds), "{name}");
+    }
+}
+
+/// Guards `x0 < x1 < .. < xk <= a.len()` around `a[x0]`: proven when the chain is short, given up
+/// (check kept) when it is longer than `BOUNDS_STEP_LIMIT` edges.
+#[test]
+fn search_stops_at_the_step_limit() {
+    for (len, kept) in [(3usize, 0usize), (BOUNDS_STEP_LIMIT as usize + 8, 1)] {
+        let mut m = Module::new();
+        let t = stypes(&mut m);
+        let mut params = vec![t.psl];
+        params.extend(std::iter::repeat_n(t.us, len + 1));
+        let f = define(&mut m, &[1], "app.chain", &params, Some(t.u32t), |b, _| {
+            let a = b.param(0).unwrap();
+            let xs: Vec<Value> = (0..=len).map(|k| b.param(k + 1).unwrap()).collect();
+            let na = b.op(Op::SliceLen, t.us, &[a.into()]);
+            let (out, ov) = b.create_block_with(&[t.u32t]);
+            let z = b.int(0);
+            for w in xs.windows(2) {
+                let c = b.cmp(Op::Lt, t.bt, w[0], w[1]);
+                let go = b.create_block();
+                b.cbr(c, go, &[], out, &[z]);
+                b.switch_to(go);
+            }
+            let c = b.cmp(Op::Le, t.bt, xs[len], na);
+            let go = b.create_block();
+            b.cbr(c, go, &[], out, &[z]);
+            b.switch_to(go);
+            let v = read(b, &t, a, na, xs[0]);
+            b.br(out, &[v.into()]);
+            b.switch_to(out);
+            b.ret(Some(ov[0].into()));
+        });
+        verify_module(&m).unwrap();
+        let e = elide(&mut m);
+        assert_eq!(checks(&m, f), kept, "chain of {len}");
+        if kept == 0 {
+            assert!(matches!(e[..], [Elided { proof: Proof::Offset { k: 0, .. }, .. }]), "{e:?}");
+        }
+        audit(&m).unwrap();
+    }
 }
