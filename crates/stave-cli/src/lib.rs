@@ -18,7 +18,8 @@
 //!   (exit 2) unless `-o` is given. A program without `fn main` is E0108 (exit 1). A program stage0
 //!   cannot compile yet (vectors, closure captures, ...) exits 2 with the reason; any other
 //!   back-end failure on a valid program is exit 3. `kind = "lib"` packages are not built yet.
-//! - `run [PKG_DIR [ARGS]] [-- ARGS]`: `build` to a temporary file, then runs it with ARGS and the
+//! - `run [PKG_DIR [ARGS]] [-- ARGS]`: builds like `build`, keeps the executable in memory
+//!   (`stave_driver::exec::Executable`: no file is written), then runs it with ARGS and the
 //!   inherited stdio; the exit status is the program's (`128 + signal` if killed). A target the
 //!   host cannot run is E1001 (exit 1), checked before building.
 //! - `test [DIR]`: the conformance runner over DIR with the stage0 test compiler (builds and runs
@@ -43,7 +44,7 @@ use args::{Args, Cmd, DaemonCmd, DiagFormat, Parsed, USAGE};
 use stave_driver::build::Failure;
 use stave_driver::conformance::{self, Config, stage0};
 use stave_driver::dump::{self, DumpError, DumpStage};
-use stave_driver::exec::{self, RunSpec, TempDir};
+use stave_driver::exec::{self, Executable, RunSpec};
 use stave_driver::harness::{self, HarnessError};
 use stave_driver::package;
 use stave_driver::pipeline::{self, Goal, Options, Output, StageTiming};
@@ -225,19 +226,23 @@ fn default_out_name(output: &Output, root: &Path) -> Result<String, String> {
     output_file_name(&name).map(str::to_string).map_err(|e| format!("{what} {e}"))
 }
 
-/// Where `stave build` / `stave run` writes the executable: `-o OUT`, else the default name in the
-/// current directory (`build`) or in a fresh private temporary directory (`run`).
-fn artifact_path(a: &Args, output: &Output, root: &Path) -> Result<(PathBuf, Option<TempDir>), String> {
+/// Where `stave build` writes the executable: `-o OUT`, else the default name in the current
+/// directory.
+fn artifact_path(a: &Args, output: &Output, root: &Path) -> Result<PathBuf, String> {
     if let Some(o) = &a.out {
-        return Ok((o.clone(), None));
+        return Ok(o.clone());
     }
-    let name = default_out_name(output, root)
-        .map_err(|e| if a.cmd == Cmd::Build { format!("{e}; name the executable with -o OUT") } else { e })?;
-    if a.cmd == Cmd::Run {
-        let d = TempDir::new("run").map_err(|e| format!("cannot create a temporary directory: {e}"))?;
-        Ok((d.path().join(name), Some(d)))
-    } else {
-        Ok((PathBuf::from(name), None))
+    default_out_name(output, root)
+        .map(PathBuf::from)
+        .map_err(|e| format!("{e}; name the executable with -o OUT"))
+}
+
+/// Says on `err`, once per `said`, that programs run from temporary files
+/// (`stave_driver::exec::fallback_note`).
+fn note_fallback(said: &mut bool, err: &mut dyn Write) {
+    if !*said && let Some(note) = exec::fallback_note() {
+        let _ = writeln!(err, "stave: {note}");
+        *said = true;
     }
 }
 
@@ -311,7 +316,7 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
     }
 
     let lib_pkg = output.program.packages.iter().any(|p| p.is_root && p.kind == PackageKind::Lib);
-    let mut artifact: Option<(PathBuf, Option<TempDir>)> = None;
+    let mut program: Option<Executable> = None;
     let code = if output.has_errors() {
         EXIT_USER
     } else if goal == Goal::Build && lib_pkg {
@@ -329,21 +334,24 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
             }
         }
     } else if let Some(img) = &output.image {
-        match artifact_path(a, &output, &path) {
+        let done = if a.cmd == Cmd::Run {
+            // The program is named like the file `build` would write, and refused the same way.
+            default_out_name(&output, &path).and_then(|name| {
+                let x = Executable::new(&name, img.bytes())
+                    .map_err(|e| format!("cannot load the program: {e}"))?;
+                program = Some(x);
+                Ok(())
+            })
+        } else {
+            artifact_path(a, &output, &path)
+                .and_then(|p| img.write_file(&p).map_err(|e| format!("cannot write {}: {e}", p.display())))
+        };
+        match done {
+            Ok(()) => EXIT_OK,
             Err(e) => {
                 let _ = writeln!(err, "stave: {e}");
                 EXIT_USAGE
             }
-            Ok((p, tmp)) => match img.write_file(&p) {
-                Ok(()) => {
-                    artifact = Some((p, tmp));
-                    EXIT_OK
-                }
-                Err(e) => {
-                    let _ = writeln!(err, "stave: cannot write {}: {e}", p.display());
-                    EXIT_USAGE
-                }
-            },
         }
     } else {
         EXIT_OK
@@ -355,16 +363,17 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
     }
     let _ = writeln!(err, "{}", select::summary_line(selection, total_ms as u64));
     release(output);
-    if code != EXIT_OK || a.cmd != Cmd::Run {
-        return code;
-    }
-    let Some((bin, _tmp)) = artifact else { return code };
+    let Some(mut program) = program else { return code };
+    let mut said = false;
+    note_fallback(&mut said, err);
     let _ = err.flush();
     let spec = RunSpec { args: &a.run_args, runner: None, cwd: None, inherit: true };
-    match exec::run(&bin, &spec) {
+    let ran = program.run(&spec);
+    note_fallback(&mut said, err);
+    match ran {
         Ok(r) => r.exit,
         Err(e) => {
-            let _ = writeln!(err, "stave: cannot run {}: {e}", bin.display());
+            let _ = writeln!(err, "stave: cannot run the program: {e}");
             EXIT_USAGE
         }
     }
@@ -495,6 +504,7 @@ fn test(
             }
         }
     }
+    note_fallback(&mut false, err);
     let ms = start.elapsed().as_millis() as u64;
     let _ = writeln!(err, "{}", select::summary_line(selection, ms));
     if ok { EXIT_OK } else { EXIT_USER }

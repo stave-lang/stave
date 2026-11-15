@@ -34,11 +34,12 @@ Outputs and statuses of the code-generating commands:
   build has error diagnostics (exit 1); a program without `fn main` is E0108 (exit 1). A valid
   program the compiler cannot build yet (a construct its back end does not support, `kind = "lib"`
   until the static-library output exists) exits 2 with the reason, like any unimplemented command.
-- `stave run`: builds to a temporary file (named as the `stave build` default, refused the same way, in
-  a fresh private directory), runs it with `ARGS` and the inherited stdio, and exits
-  with the program's status (`128 + n` when killed by signal `n`). A target the host cannot run
-  is E1001 (exit 1) before anything is built. `ARGS` are the words after `PKG_DIR` that are not
-  flags, then everything after `--` (an argument starting with `-` must come after `--`).
+- `stave run`: builds the executable in memory and writes no file (`stave build -o OUT` is the
+  way to get one). The program is named as the `stave build` default (refused the same way), runs
+  with `ARGS` and the inherited stdio, and `stave run` exits with the program's status (`128 + n`
+  when killed by signal `n`). A target the host cannot run is E1001 (exit 1) before anything is
+  built. `ARGS` are the words after `PKG_DIR` that are not flags, then everything after `--` (an
+  argument starting with `-` must come after `--`).
 - Scripts: `PKG_DIR` may be one `.stv` file, a program without a manifest, in every command. Its
   first line may be a shebang line (LANG.md §2), so an executable file starting with
   `#!/usr/bin/env -S stave run` runs directly: `./hello.stv a b` is `stave run ./hello.stv a b`.
@@ -47,6 +48,14 @@ Outputs and statuses of the code-generating commands:
   whitespace, the binary and its arguments appended) runs every binary. When DIR is a package,
   its `test fn`s run too, each as its own executable from the package directory, passing iff it
   exits 0; their summary line is `test fns: P passed, F failed, N not run`.
+- In-memory execution (`stave run`, `stave test`, on x86-64 and AArch64 Linux): the ELF image is
+  held in an anonymous memory file (`memfd_create`, close-on-exec) and a child process starts it
+  with `execveat(fd, "", argv, envp, AT_EMPTY_PATH)`; `argv[0]` is the program's name. With
+  `--runner CMD` the child runs `CMD /dev/fd/N`, and only that child keeps descriptor `N` across
+  its exec. Stdio, working directory, environment, and exit status are those of a run from a
+  file. If the kernel lacks `memfd_create` or `execveat` (ENOSYS, no other error), the programs
+  of that `stave` process run from files in a fresh private temporary directory instead, and one
+  line on stderr says so.
 
 - `stave unsafe-report [PKG_DIR] [--json]`: checks the program
   through type checking; with error diagnostics they go to stderr (`--json`: as JSON lines),

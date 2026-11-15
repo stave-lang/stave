@@ -12,9 +12,10 @@
 //!   A program the back end cannot compile yet ([`Failure::Unsupported`]) is "needs
 //!   lower/codegen"; any other back-end failure is exit 3 with the message.
 //!
-//! Binaries go to a private temporary directory (removed when the compiler is dropped) and run
-//! with the test's base directory (the package directory, or the directory of the file) as the
-//! working directory, natively or through `--runner`.
+//! Binaries are not written to files: the image of the latest build is kept until its run, which
+//! is from memory ([`crate::exec::Executable`]), with the test's base directory (the package
+//! directory, or the directory of the file) as the working directory, natively or through
+//! `--runner`.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -24,7 +25,7 @@ use super::{
     Severity, TestCompiler,
 };
 use crate::build::Failure;
-use crate::exec::{self, RunSpec, TempDir};
+use crate::exec::{self, Executable, RunSpec};
 use crate::package;
 use crate::pipeline::{self, Goal, Options, PipelineError, Stage};
 use crate::shipped::Library;
@@ -50,8 +51,9 @@ pub struct Stage0 {
     threads: Option<usize>,
     lib: Library,
     final_codes: BTreeSet<Code>,
-    /// Built binaries (created on the first build).
-    out: Option<TempDir>,
+    /// The latest build's artifact name and ELF image, until it runs or the next build. A test
+    /// runs right after its build, and most builds are never run: one image is enough.
+    image: Option<(PathBuf, Vec<u8>)>,
     built: u64,
 }
 
@@ -64,19 +66,16 @@ impl Stage0 {
             threads,
             lib,
             final_codes: final_codes(),
-            out: None,
+            image: None,
             built: 0,
         })
     }
 
-    fn artifact_path(&mut self, name: &str) -> Result<PathBuf, String> {
-        if self.out.is_none() {
-            self.out = Some(TempDir::new("test").map_err(|e| format!("temporary directory: {e}"))?);
-        }
-        let dir = self.out.as_ref().map(|d| d.path().to_path_buf()).unwrap_or_default();
+    /// The artifact name of the next build: unique in this compiler, one path component.
+    fn artifact_name(&mut self, name: &str) -> PathBuf {
         self.built += 1;
         let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-        Ok(dir.join(format!("{}-{safe}", self.built)))
+        PathBuf::from(format!("{}-{safe}", self.built))
     }
 }
 
@@ -126,7 +125,7 @@ impl TestCompiler for Stage0 {
         let mut opts = Options::new(goal).threads(self.threads);
         opts.target = req.target;
         opts.release = release_from_args(req.args)?;
-        let out = pipeline::run_on(&self.pool, &req.test.path, &self.lib, &opts);
+        let mut out = pipeline::run_on(&self.pool, &req.test.path, &self.lib, &opts);
         let mut diagnostics = Vec::with_capacity(out.diagnostics.len());
         for d in &out.diagnostics {
             let primary = match d.primary() {
@@ -164,10 +163,11 @@ impl TestCompiler for Stage0 {
                 b.error = Some(f.to_string());
             }
         }
-        if let Some(img) = &out.image {
-            let path = self.artifact_path(&req.test.name)?;
-            img.write_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            b.artifact = Some(path);
+        self.image = None;
+        if let Some(img) = out.image.take() {
+            let name = self.artifact_name(&req.test.name);
+            self.image = Some((name.clone(), img.into_bytes()));
+            b.artifact = Some(name);
         }
         Ok(b)
     }
@@ -179,9 +179,16 @@ impl TestCompiler for Stage0 {
 
     fn run(&mut self, req: &RunRequest<'_>) -> Result<RunOutcome, String> {
         let bin = req.artifact.ok_or("no binary was built")?;
+        let (_, elf) = self
+            .image
+            .take()
+            .filter(|(name, _)| name == bin)
+            .ok_or_else(|| format!("{}: not the latest build", bin.display()))?;
         let base = req.test.base_dir();
         let spec = RunSpec { args: &[], runner: req.runner, cwd: Some(&base), inherit: false };
-        let r = exec::run(bin, &spec).map_err(|e| format!("cannot run {}: {e}", bin.display()))?;
+        let r = Executable::new(&bin.to_string_lossy(), &elf)
+            .and_then(|mut x| x.run(&spec))
+            .map_err(|e| format!("cannot run {}: {e}", bin.display()))?;
         Ok(RunOutcome { exit: r.exit, stdout: r.stdout, stderr: r.stderr })
     }
 }
