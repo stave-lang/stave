@@ -162,7 +162,7 @@ fn e0004_expected_sets_in_terminal_order() {
     // a byte that starts no token is E0018 (lexical), and its item gets no E0004
     assert_eq!(one_at("fn f() { let x = @; }"), ("E0018", "@".into()));
     // fn types have no `from`
-    assert_eq!(one_at("fn f(g: fn(&T) -> &T from x) { }").0, "E0004");
+    assert_eq!(one_at("struct S { g: fn(&T) -> &T from x }").0, "E0004");
 }
 
 #[test]

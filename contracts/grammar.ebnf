@@ -1,5 +1,4 @@
-(* Stave surface grammar, v0.6, contract for the stage0 parser and the stage1 GPU parser.
-   The v0.7 candidate, contracts/grammar-v07-candidate.ebnf, is not read by any tool.
+(* Stave surface grammar, v0.7, contract for the stage0 parser and the stage1 GPU parser.
    Struct literals and patterns use `.{`, so a `{` after a name always starts a block.
 
    Notation: X? optional, X* zero or more, X+ one or more, "t" terminal, A | B alternatives.
@@ -54,7 +53,7 @@ Keywords     = "fn" "let" "mut" "const" "struct" "enum" "trait" "impl" "for" "in
                "if" "then" "else" "match" "return" "break" "continue" "pub" "import" "as" "from"
                "needs" "dispatch" "unsafe" "extern" "self" "Self" "true" "false" "tail" "masked"
                "scalar" "exact" "align" "copy" "type" "view" "scope" "spawn" "strict" "emulate"
-               "test" "allocator" "kernel" "static" ;
+               "test" "allocator" "kernel" "static" "requires" "ensures" ;
 
 (* Operator tokens (maximal munch, then D3 splitting):
    +  -  *  /  %       trapping on scalar ints, IEEE on floats, E0604 on int vectors
@@ -74,12 +73,16 @@ KernelDecl   = "kernel" "fn" Ident "(" Params? ")" Block ;   (* GPU kernel, rule
 Unsafe       = "unsafe" "(" StrLit ")" ;              (* the stated obligation, mandatory:
                                                          unsafe fn = caller obligation; unsafe trait/impl = implementer obligation *)
 
-FnDecl       = "fn" Ident Generics? "(" Params? ")" RetClause? Needs? Block ;
+FnDecl       = "fn" Ident Generics? "(" Params? ")" RetClause? Needs? Requires* Ensures* Block ;
+Requires     = "requires" "(" Expr ")" ;               (* checked at entry, panic Contract at the caller *)
+Ensures      = "ensures" "(" Expr ")" ;                (* checked at each return; inside it the identifier `result` names the returned value (contextual, not a keyword) *)
 Params       = Param ("," Param)* ","? ;
-Param        = SelfParam | Ident ":" Type ;
+Param        = (SelfParam | Ident ":" Type) ParamFrom? ;
+ParamFrom    = From ;                                 (* only on a `&mut V` param of a fn item or method (E0514): what the
+                                                         callee may store into *p; not naming the param itself (E0515) *)
 SelfParam    = "self" | "&" "mut"? "self" ;
 RetClause    = "->" Type From? ;
-From         = "from" Origin ("," Origin)* ;          (* required iff Type is/contains a ref or view *)
+From         = "from" Origin ("+" Origin)* ;          (* `+` joins origins. Missing = empty set *)
 Origin       = "copy"? (Ident | "self") ;             (* meaning: the origin table of LANG.md §3 *)
 Needs        = "needs" "(" Feature ("," Feature)* ")" ;
 Feature      = Ident ;                                (* closed set per arch: contracts/simd-ops.md §Features *)
@@ -97,9 +100,10 @@ TraitDecl    = "trait" Ident Generics? "{" TraitFn* "}" ;
 TraitFn      = Unsafe? "fn" Ident Generics? "(" Params? ")" RetClause? Needs? ";" ;
 ImplDecl     = "impl" Generics? Type ("for" Type)? "{" ("pub"? Unsafe? FnDecl)* "}" ;   (* unsafe methods allowed *)
 ConstDecl    = "const" Ident ":" Type "=" Expr ";" ;  (* const-expr subset only *)
-StaticDecl   = "static" "mut" Ident ":" Type "=" Expr ";" ;   (* mutable global: const-expr
-                                                         initializer; every read, write, or borrow
-                                                         is unsafe (E0803). No immutable `static` *)
+StaticDecl   = "static" "mut"? Ident ":" Type "=" Expr ";" ;   (* global, const-expr initializer.
+                                                         `static`: immutable, T must be Sync (E0417), safe.
+                                                         `static mut`: std/runtime packages only (E0809),
+                                                         every read, write, or borrow is unsafe (E0803) *)
 TypeAlias    = "type" Ident Generics? "=" Type ";" ;
 AllocatorDecl = "allocator" Ident ("." Ident)* ";" ;  (* replaces the global allocator; at most one per binary *)
 
@@ -152,7 +156,9 @@ ExprStmt     = OrExpr (AssignOp Expr)? ";" ;
                   "unsafe": at statement start, "unsafe" always selects the Unsafe Block form, and
                   unary `unsafe(..) e` is for value positions only. That keeps Stmt LL(1). *)
 IfStmt       = "if" Expr Block ("else" (IfStmt | Block))? ;
-StmtArm      = Pattern ("if" Expr)? "=>" Block ;
+StmtArm      = ArmPattern ("if" Expr)? "=>" Block ;
+ArmPattern   = Pattern ("|" Pattern)* ;               (* or-patterns, match arms only (not let/for): every alternative
+                                                         binds the same names with the same types and modes (E0302) *)
 AssignOp     = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "+%=" | "-%=" | "*%=" | "+|=" | "-|=" | "*|="
              | "&=" | "|=" | "^=" | "<<=" | ">>=" | "<<%=" ;
 
@@ -172,7 +178,7 @@ TailBind     = Ident ;                                (* one node per bound name
 Expr         = IfExpr | MatchExpr | RangeExpr ;
 IfExpr       = "if" Expr "then" Expr "else" Expr ;   (* the value-producing form *)
 MatchExpr    = "match" Expr "{" ExprArm ("," ExprArm)* ","? "}" ;
-ExprArm      = Pattern ("if" Expr)? "=>" Expr ;
+ExprArm      = ArmPattern ("if" Expr)? "=>" Expr ;
 RangeExpr    = OrExpr ((".." | "..=") OrExpr)? ;      (* non-associative; both ends required *)
 OrExpr       = AndExpr ("||" AndExpr)* ;
 AndExpr      = CmpExpr ("&&" CmpExpr)* ;

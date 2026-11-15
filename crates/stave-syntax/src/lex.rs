@@ -234,6 +234,7 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
             b"extern" => KwExtern,
             b"exact" => KwExact,
             b"emulate" => KwEmulate,
+            b"ensures" => KwEnsures,
             _ => return None,
         },
         b'f' => match s {
@@ -275,6 +276,7 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
         },
         b'r' => match s {
             b"return" => KwReturn,
+            b"requires" => KwRequires,
             _ => return None,
         },
         b's' => match s {

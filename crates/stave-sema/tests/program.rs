@@ -261,7 +261,7 @@ fn origins_and_self() {
         ("stave.toml", TOML),
         (
             "src/main.stv",
-            "fn first(xs: &[u8], ys: &[u8]) -> &u8 from xs, zs {\n    return &xs[0];\n}\nfn main() -> i32 {\n    let v: u8 = self;\n    return 0;\n}\n",
+            "fn first(xs: &[u8], ys: &[u8]) -> &u8 from xs + zs {\n    return &xs[0];\n}\nfn main() -> i32 {\n    let v: u8 = self;\n    return 0;\n}\n",
         ),
     ]);
     assert_eq!(codes(&p), ["E0101", "E0101"]);

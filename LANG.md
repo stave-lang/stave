@@ -1,7 +1,7 @@
-# Stave language reference for agents (v0.6; grammar: contracts/grammar.ebnf)
+# Stave language reference for agents (v0.7; grammar: contracts/grammar.ebnf)
 
 Stave = Rust-family syntax + borrow checker, **no lifetimes, no macros, no implicit anything**, SIMD in type system.
-Read whole file before writing Stave. Assume Rust **only** where this file is silent. Compiler is truth; error codes are in contracts/diagnostic-codes.md (`stave explain` is planned). Stage0 builds scalar code only: SIMD is only partly type-checked, and vector code generation, the optimizer, and the GPU are not built. Items marked *planned*, §4, and §7 describe design.
+Read whole file before writing Stave. Assume Rust **only** where this file is silent. Compiler is truth; error codes are in contracts/diagnostic-codes.md (`stave explain` is planned). Stage0 builds scalar code only: SIMD is only partly type-checked, and vector code generation, the optimizer, and the GPU are not built. Items marked *planned*, §4, and §7 describe design. Planned syntax that already parses (or-patterns, a `from` on a parameter, `requires`/`ensures`) stops `stave check` and `stave build` with "not implemented yet".
 
 ## 1. Differences from Rust (most common agent mistakes first)
 
@@ -27,7 +27,7 @@ Read whole file before writing Stave. Assume Rust **only** where this file is si
 | `x << 40` on u32 | traps (const amount: E0205) | Amount has the left operand's type (`x << 3`: `3` is u32). `<<%` masks amount by bits-1. `>>` arithmetic if signed, logical if unsigned | CPUs disagree on big shifts; trap is portable |
 | `!x` on int | `~x` | `~` = bitwise NOT. `!` = bool NOT | `!` is bool-only: no truthiness |
 | `'a` lifetimes | none | References are second-class (see §3) | borrow check per function, no lifetime solver |
-| `static X: T`, `static mut X: T` | `const X: T = e;`, `static mut X: T = e;` | Every use of a `static mut` (read, write, `&X`) is unsafe (E0803); `e` is a const-expr; no ref/view types (E0413) except `&str` literals. Planned v0.7: safe `static X: T = e;` with T `Sync` (`atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>`; else E0417); `static mut` only in std/runtime (E0809) | shared globals must be Sync; unsafe ones are inventoried |
+| `static X: T`, `static mut X: T` | `const X: T = e;`, `static mut X: T = e;` | Every use of a `static mut` (read, write, `&X`) is unsafe (E0803); `e` is a const-expr; no ref/view types (E0413) except `&str` literals. Planned: safe `static X: T = e;` with T `Sync` (`atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>`; else E0417); `static mut` only in std/runtime (E0809) | shared globals must be Sync; unsafe ones are inventoried |
 | `-> !`, `loop {}` as a value | `-> never` | `never` is a built-in type name, only after `->` (E0209). A call to a `-> never` fn ends the path (no `return` needed after it, E0207); a `-> never` fn must end every path in such a call or a `loop` without `break` | `!` stays bool-only |
 | `impl Drop`, `drop(x)`, `x.drop()` | `impl Drop for S { fn drop(&mut self) { .. } }`; `mem.drop(x)` (`import std.mem;`) | Runs at scope end (reverse declaration order) and when an initialized place is overwritten (`x = v`, `*p = v`). `x.drop()` = E0909. `impl Drop` on a Copy type = E0416 | destruction is never written by hand |
 | `ptr::read(p)`, `ptr::write(p, v)` | `p.read()`, `p.write(v)` (unsafe) | `*p = v` drops the old pointee; `p.write(v)` does not (uninitialized slot); `p.read()` moves out, the slot is then logically uninitialized. `*p` by value only for Copy | the drop is visible at the call |
@@ -73,7 +73,7 @@ Notes:
 - `unsafe("..") expr` is for value positions only. At statement start `unsafe` always opens a block: write `unsafe("..") { *p = 1; }`, not `unsafe("..") *p = 1;`.
 - An `unsafe("..") fn` states the **caller's** obligation (calls need `unsafe`). Its body is not unsafe: unsafe operations inside still need their own `unsafe("..")` (E0803). Methods may be unsafe too: `pub unsafe("..") fn` inside `impl`.
 - Planned: `c.select(a, b)` on a `bool` (`(x < y).select(x, y)`), like mask `m.select(a, b)`: both operands are evaluated (`xs[i]` still bounds-checks), always branchless (constant time). Plain `if`/`match` stay fine.
-- Or-patterns (planned v0.7), in `match` arms only: `Tok.Plus | Tok.Minus => 1u8,`. Every alternative binds the same names and types (E0302).
+- Or-patterns (planned), in `match` arms only: `Tok.Plus | Tok.Minus => 1u8,`. Every alternative binds the same names and types (E0302).
 - f-string holes: a name, `self`, or a field path (`{n}`, `{self.n}`, `{p.x}`). No tuple steps (`{t.0}`) or expressions: bind to a local first (`let a = t.0;` then `{a}`).
 
 Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl Trait for T`, `trait`, `pub` (items, fields, methods private to their module otherwise, E0106; trait impl methods take no `pub`, E0907), method auto-ref (`x.m()` with `&self`/`&mut self`), auto-deref on `.` through any number of `&`/`&mut`, implicit reborrow of `&mut` args, `&T`/`&mut T` (shared xor exclusive), moves, `?`, `[T; N]`, `[T]`, tuples (`t.0`), `[e; n]`, `while`, `for x in a..b`, `match` exhaustive (E0300), guards `P if c =>`, `*const T`/`*mut T` (deref unsafe; `&x as *const T` and `&mut x as *mut T` are safe casts), `type A = B;`, `const X: T = e;`, `Self`.
@@ -86,7 +86,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 - Ints: `1_000`, `0xff`, `0b1010`, `0o17`, suffix `5u8`. Floats need a digit after `.` (`1.0`, not `1.`), suffix `1.0f32`. `-128i8` legal (minus folded in), `128i8` = E0203.
 - Statements end with `;`. `if`/`while`/`for`/`loop`/`match` statements take no `;` after the block.
 - Syntax errors: a file with unbalanced brackets gets one E0016 and nothing else. Otherwise each item shows only its **first** syntax error and is dropped: fix it and rebuild to see the next.
-- Reserved (never use as names): `fn let mut const static struct enum trait impl for in while loop if then else match return break continue pub import as from needs dispatch unsafe extern self Self true false tail masked scalar exact align copy type view scope spawn strict emulate test allocator kernel`; from v0.7 also `requires ensures` (`result` is not reserved: only inside `ensures(..)` it names the returned value; a param named `result` there is E0212).
+- Reserved (never use as names): `fn let mut const static struct enum trait impl for in while loop if then else match return break continue pub import as from needs dispatch unsafe extern self Self true false tail masked scalar exact align copy type view scope spawn strict emulate test allocator kernel requires ensures` (`result` is not reserved: only inside `ensures(..)` it names the returned value; a param named `result` there is E0212).
 - Integer types: `i8..i64 u8..u64 isize usize`. Also `f32 f64 bool char str`, and `never` (return type only). Built-in names, not keywords: a local of the same name shadows them. `usize`/`isize` are 64-bit on every target: `u32 as usize`, `u64 as usize`, `usize as u64` are lossless `as`; `usize as u32` needs `as%`/`as|`/`as?`.
 - `test fn name() { }` runs under `stave test` and is excluded from builds.
 - Fn types: `fn(i32, &T) -> &T needs(avx2)`. Closures and fn items both coerce to fn types. No `from` in fn types: a call through a fn value borrows from **all** its ref/view args and from the fn value itself (a closure may return a borrow of a capture). `needs` after a fn type belongs to that fn type: `fn f() -> fn() needs(x)` = returned fn needs x; for f write `-> (fn()) needs(x)`. A `fn(..) needs(F)` value is usable as `fn(..) needs(G)` only if F ⊆ G (E0707).
@@ -111,7 +111,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 | `&V` / `&mut V` (V view) | reborrows the view object | inherits V's origins and may outlive the borrow (iterator `next`) |
 | owned non-view by value | E0520 | E0521 |
 
-  Multiple origins: `from a, b` (v0.7: `from a + b`). Returning an uncovered origin = E0510. Borrowing a local = E0512.
+  Multiple origins: `from a + b`. Returning an uncovered origin = E0510. Borrowing a local = E0512.
 - Planned: `vec.Vec`, `Box`, `Option`, `Result` may hold views, and then are views themselves (`vec.Vec<&u32>` in a local is fine; `Rc` never: E0414). A `&mut` view param names what the callee may store into it: `fn push(&mut self from x, x: T)` (E0513 if missing; only on `&mut` view params, E0514). Pushing a borrow into a local container keeps that borrow alive as long as the container; dropping the container is a use, so declare the data first.
 - Generic params reject views unless bound `T: view` (E0414).
 - Threads borrow stack data only through structured forms: `scope { spawn { .. } spawn { .. } }` (spawns join at `}` and wherever the scope is left: `return`, `break`, `continue`, `?`; a spawn in a loop runs alongside the earlier iterations' threads; `spawn` outside `scope` = E0801, in a closure inside `scope` = E0808) and `import std.thread;`:

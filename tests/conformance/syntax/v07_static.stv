@@ -1,0 +1,12 @@
+//~ PARSE-ONLY
+// StaticDecl: `mut` is optional; the type and the initializer are not.
+static LIMIT: u32 = 16;
+pub static NAME: &str = "stave";
+static mut HITS: u64 = 0;
+pub static mut TABLE: [u8; 4] = [0; 4];
+
+static NO_TYPE = 1; //~ ERROR E0004
+
+static NO_INIT: u32; //~ ERROR E0004
+
+static mut mut TWICE: u32 = 0; //~ ERROR E0004

@@ -1,0 +1,31 @@
+//~ PARSE-ONLY
+// ArmPattern: alternatives joined by `|` in statement and value arms, with guards, literals,
+// ranges, and struct patterns. `|` in a guard or arm value stays the bitwise operator.
+enum Tok { Plus, Minus, Num(u32), Pair { a: u32, b: u32 } }
+
+fn prec(t: Tok) -> u8 {
+    return match t {
+        Tok.Plus | Tok.Minus => 1u8,
+        Tok.Num(n) | Tok.Pair.{ a: n, b: _ } if n | 1 == 3 => 2u8 | 4u8,
+        _ => 0u8,
+    };
+}
+
+fn class(c: u8) -> u8 {
+    match c {
+        0 | 1 | 2 => { return 0; }
+        48..=57 | 65..=70 | 97..=102 => { return 1; }
+        _ => { return 2; }
+    }
+}
+
+fn no_leading_bar(c: u8) -> u8 {
+    return match c {
+        | 0 => 1u8, //~ ERROR E0004
+        _ => 0u8,
+    };
+}
+
+fn not_in_let(t: (u8, u8)) {
+    let (a, _) | (_, a) = t; //~ ERROR E0004
+}

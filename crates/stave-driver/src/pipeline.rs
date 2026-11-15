@@ -410,6 +410,25 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
         };
     }
 
+    // Syntax without semantics yet: its checks would be wrong, so nothing after resolve runs.
+    if !program.has_errors()
+        && let Some(what) = program.unimplemented()
+    {
+        let diagnostics = stave_diag::canonical_order(program.diagnostics.clone(), &program.source_map);
+        return Output {
+            program,
+            typeck: None,
+            borrowck: None,
+            diagnostics,
+            timings,
+            module: None,
+            main: None,
+            image: None,
+            failure: Some(Failure::Unsupported { stage: Stage::Typeck, message: what }),
+            lines,
+        };
+    }
+
     // ---- typeck (per body, parallel; canonical type ids).
     let t0 = Instant::now();
     let tc = stave_sema::check(&program);

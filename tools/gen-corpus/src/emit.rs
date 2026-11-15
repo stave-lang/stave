@@ -145,13 +145,13 @@ impl<'a> Emitter<'_, 'a> {
                 let _ = write!(o, " -> &{} from p0", t.name());
             }
             Ret::RefS(s) => {
-                let _ = write!(o, " -> &{} from p0, p1", p.structs[s as usize].name);
+                let _ = write!(o, " -> &{} from p0 + p1", p.structs[s as usize].name);
             }
             Ret::MutSc(t) => {
                 let _ = write!(o, " -> &mut {} from p0", t.name());
             }
             Ret::T => o.push_str(" -> T"),
-            Ret::RefT => o.push_str(" -> &T from p0, p1"),
+            Ret::RefT => o.push_str(" -> &T from p0 + p1"),
             Ret::Cell(g) => {
                 let _ = write!(o, " -> {}<T>", p.structs[g as usize].name);
             }

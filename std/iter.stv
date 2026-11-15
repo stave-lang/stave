@@ -33,7 +33,7 @@ impl<T> SliceIter<T> {
         return self.s.len() - self.i;
     }
 
-    pub fn map<U>(self, f: fn(&T) -> U) -> Map<T, U> from self, f {
+    pub fn map<U>(self, f: fn(&T) -> U) -> Map<T, U> from self + f {
         return Map::<T, U>.{ it: self, f: f };
     }
 }
@@ -58,7 +58,7 @@ pub view struct Zip<A, B> {
     b: SliceIter<B>,
 }
 
-pub fn zip<A, B>(xs: &[A], ys: &[B]) -> Zip<A, B> from xs, ys {
+pub fn zip<A, B>(xs: &[A], ys: &[B]) -> Zip<A, B> from xs + ys {
     return Zip::<A, B>.{ a: iter(xs), b: iter(ys) };
 }
 

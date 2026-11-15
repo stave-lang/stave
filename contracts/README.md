@@ -7,7 +7,6 @@ GPU) both implement them.
 | File | What |
 |---|---|
 | `grammar.ebnf` | surface grammar, LL(1)-checked; source of the parse tables |
-| `grammar-v07-candidate.ebnf` | next grammar (v0.7), LL(1)-checked by hand with `ll1gen --grammar`; not read by any tool until it replaces `grammar.ebnf` |
 | `opt-rules.txt` | release optimizer rewrite rules (planned, to be read by `tools/rulegen`) |
 | `diagnostic-codes.md` | the one diagnostic registry, human table (E0001–E13xx) |
 | `diagnostics.toml` | the same registry, machine-readable: message, label, fix templates (read by `tools/diaggen`) |

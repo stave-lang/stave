@@ -3056,7 +3056,7 @@ impl<'a> Ck<'a> {
         let mut rows = Vec::new();
         let mut arm_ts: Vec<(u32, Ty)> = Vec::new();
         for &arm in &kids[1..] {
-            let ak = icx.kids_vec(arm);
+            let ak = icx.arm_kids(arm);
             let Some(&pat) = ak.first() else { continue };
             let p = self.pattern(pat, st, crate::patterns::Mode::Move);
             let guard = if ak.len() >= 3 { Some(ak[1]) } else { None };
@@ -3096,7 +3096,7 @@ impl<'a> Ck<'a> {
         let mut all_div = true;
         let reach = self.reachable;
         for &arm in &kids[1..] {
-            let ak = icx.kids_vec(arm);
+            let ak = icx.arm_kids(arm);
             let Some(&pat) = ak.first() else { continue };
             let p = self.pattern(pat, st, crate::patterns::Mode::Move);
             let guard = if ak.len() >= 3 { Some(ak[1]) } else { None };

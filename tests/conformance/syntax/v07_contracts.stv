@@ -1,0 +1,50 @@
+//~ PARSE-ONLY
+// Requires* then Ensures* after RetClause and Needs. `requires` and `ensures` are keywords;
+// `result` is an ordinary identifier.
+fn at(xs: &[u32], i: usize) -> u32 requires(i < xs.len()) ensures(result <= 1000) {
+    return xs[i];
+}
+
+fn clamp(x: u32, lo: u32, hi: u32) -> u32
+    requires(lo <= hi)
+    requires(hi < 4096)
+    ensures(result >= lo)
+    ensures(result <= hi)
+{
+    return if x < lo then lo else if x > hi then hi else x;
+}
+
+fn wide(xs: &[f32]) -> f32 needs(avx2) requires(xs.len() > 0) {
+    return xs[0];
+}
+
+fn no_ret(n: u32) requires(n != 0) { }
+
+struct S { n: u32 }
+
+impl S {
+    pub fn get(&self) -> u32 ensures(result == self.n) {
+        return self.n;
+    }
+}
+
+fn result_is_a_name(result: u32) -> u32 {
+    let result = result + 1;
+    return result;
+}
+
+fn wrong_order(n: u32) -> u32 ensures(result > 0) requires(n > 0) { //~ ERROR E0004
+    return n;
+}
+
+fn before_needs(n: u32) -> u32 requires(n > 0) needs(avx2) { //~ ERROR E0004
+    return n;
+}
+
+fn no_parens(n: u32) -> u32 requires n > 0 { //~ ERROR E0004
+    return n;
+}
+
+fn requires() { } //~ ERROR E0004
+
+trait T { fn f(&self) -> u32 requires(true); } //~ ERROR E0004
