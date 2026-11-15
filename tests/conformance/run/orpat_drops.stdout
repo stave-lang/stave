@@ -1,0 +1,14 @@
+drop 1
+ids 1 1
+drop 2
+after
+drop 3
+early
+after
+after
+maybe 2 3 0
+drop 7
+drop 4
+pick 7 104
+drop 8
+nested 8 0

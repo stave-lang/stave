@@ -1,7 +1,7 @@
 # Stave language reference for agents (v0.7; grammar: contracts/grammar.ebnf)
 
 Stave = Rust-family syntax + borrow checker, **no lifetimes, no macros, no implicit anything**, SIMD in type system.
-Read whole file before writing Stave. Assume Rust **only** where this file is silent. Compiler is truth; error codes are in contracts/diagnostic-codes.md (`stave explain` is planned). Stage0 builds scalar code only: SIMD is only partly type-checked, and vector code generation, the optimizer, and the GPU are not built. Items marked *planned*, §4, and §7 describe design. Planned syntax that already parses (or-patterns, a `from` on a parameter, `requires`/`ensures`) stops `stave check` and `stave build` with "not implemented yet".
+Read whole file before writing Stave. Assume Rust **only** where this file is silent. Compiler is truth; error codes are in contracts/diagnostic-codes.md (`stave explain` is planned). Stage0 builds scalar code only: SIMD is only partly type-checked, and vector code generation, the optimizer, and the GPU are not built. Items marked *planned*, §4, and §7 describe design. Planned syntax that already parses (a `from` on a parameter, `requires`/`ensures`) stops `stave check` and `stave build` with "not implemented yet".
 
 ## 1. Differences from Rust (most common agent mistakes first)
 
@@ -73,7 +73,7 @@ Notes:
 - `unsafe("..") expr` is for value positions only. At statement start `unsafe` always opens a block: write `unsafe("..") { *p = 1; }`, not `unsafe("..") *p = 1;`.
 - An `unsafe("..") fn` states the **caller's** obligation (calls need `unsafe`). Its body is not unsafe: unsafe operations inside still need their own `unsafe("..")` (E0803). Methods may be unsafe too: `pub unsafe("..") fn` inside `impl`.
 - Planned: `c.select(a, b)` on a `bool` (`(x < y).select(x, y)`), like mask `m.select(a, b)`: both operands are evaluated (`xs[i]` still bounds-checks), always branchless (constant time). Plain `if`/`match` stay fine.
-- Or-patterns (planned), in `match` arms only: `Tok.Plus | Tok.Minus => 1u8,`. Every alternative binds the same names and types (E0302).
+- Or-patterns, at the top of a `match` arm only (not nested, not in `let`/`for`): `Tok.Plus | Tok.Minus => 1u8,`. Every alternative binds the same names with the same types and modes (E0302). The first alternative that matches binds them; the guard then runs once (false: next arm). An alternative that never matches is E0301.
 - f-string holes: a name, `self`, or a field path (`{n}`, `{self.n}`, `{p.x}`). No tuple steps (`{t.0}`) or expressions: bind to a local first (`let a = t.0;` then `{a}`).
 
 Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl Trait for T`, `trait`, `pub` (items, fields, methods private to their module otherwise, E0106; trait impl methods take no `pub`, E0907), method auto-ref (`x.m()` with `&self`/`&mut self`), auto-deref on `.` through any number of `&`/`&mut`, implicit reborrow of `&mut` args, `&T`/`&mut T` (shared xor exclusive), moves, `?`, `[T; N]`, `[T]`, tuples (`t.0`), `[e; n]`, `while`, `for x in a..b`, `match` exhaustive (E0300), guards `P if c =>`, `*const T`/`*mut T` (deref unsafe; `&x as *const T` and `&mut x as *mut T` are safe casts), `type A = B;`, `const X: T = e;`, `Self`.

@@ -463,12 +463,14 @@ impl<'a, 'b> Builder<'a, 'b> {
         (self.body.locals.len() - 1) as LocalId
     }
 
-    /// The local of binding node `b` (created on first sight: patterns bind in place).
+    /// The local of binding node `b` (created on first sight: patterns bind in place). A
+    /// binding in a later alternative of an or-pattern names the first alternative's local.
     fn binding_local(&mut self, b: u32) -> LocalId {
+        let icx = self.icx;
+        let b = icx.res.canonical(b);
         if let Some(&l) = self.by_node.get(&b) {
             return l;
         }
-        let icx = self.icx;
         let ty = self.tb.local(BindingRef { node: b }).unwrap_or(TypeId::NONE);
         let bind = icx.res.binding(BindingRef { node: b });
         let mutable = bind.is_some_and(|x| x.mutable);
@@ -1246,8 +1248,10 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
         let mut reached = false;
         for (k, &arm) in arms.iter().enumerate() {
-            let ak = icx.arm_kids(arm);
-            let (Some(&pat), Some(&body)) = (ak.first(), ak.last()) else { continue };
+            // [ArmPattern, guard?, body]
+            let ak = icx.kids_vec(arm);
+            let (Some(&ap), Some(&body)) = (ak.first(), ak.last()) else { continue };
+            let alts = icx.kids_vec(ap);
             let guard = if ak.len() >= 3 { Some(ak[1]) } else { None };
             self.switch_to(tests[k]);
             self.push_scope();
@@ -1256,7 +1260,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 // borrowed (shared) for the whole guard, and the bindings are read-only there
                 let hold = self.guard_hold(&sp, scrut);
                 let gmark = self.guard_binds.len();
-                self.bind_pattern(pat, sp.clone(), Mode::Peek, scrut);
+                self.bind_alts(&alts, &sp, Mode::Peek, scrut);
                 let mark = self.temps.len();
                 let gv = self.expr(g);
                 let _ = self.read(gv, g);
@@ -1275,7 +1279,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 self.terminate(Terminator::Branch(next));
                 self.switch_to(ok);
             }
-            self.bind_pattern(pat, sp.clone(), Mode::Move, scrut);
+            self.bind_alts(&alts, &sp, Mode::Move, scrut);
             if is_expr {
                 let mark = self.temps.len();
                 let v = self.expr(body);
@@ -1320,6 +1324,27 @@ impl<'a, 'b> Builder<'a, 'b> {
         } else {
             self.scopes.pop();
         }
+    }
+
+    /// Binds the alternatives `alts` of an arm's pattern against `src`. An or-pattern is a
+    /// branch to one block per alternative: each binds the arm's locals, then they meet again.
+    fn bind_alts(&mut self, alts: &[u32], src: &Place, mode: Mode, n: u32) {
+        if let [p] = alts {
+            self.bind_pattern(*p, src.clone(), mode, n);
+            return;
+        }
+        if !self.open() {
+            return;
+        }
+        let blocks: Vec<BlockId> = alts.iter().map(|_| self.new_block()).collect();
+        let meet = self.new_block();
+        self.terminate(Terminator::Branch(blocks.clone()));
+        for (&p, &b) in alts.iter().zip(&blocks) {
+            self.switch_to(b);
+            self.bind_pattern(p, src.clone(), mode, n);
+            self.goto(meet);
+        }
+        self.switch_to(meet);
     }
 
     /// Binds pattern `p` against place `src` (by move, by reference after peeling references,
@@ -1472,19 +1497,27 @@ impl<'a, 'b> Builder<'a, 'b> {
     }
 
     /// A guard's view of binding `b`: a read-only local (not in any scope: it is never dropped)
-    /// holding the bound value, or a shared borrow for a binding by reference.
+    /// holding the bound value, or a shared borrow for a binding by reference. Every alternative
+    /// of an or-pattern binds the one guard local of the first alternative's binding.
     fn bind_guard_name(&mut self, b: u32, src: Place) {
         let icx = self.icx;
-        let ty = self.tb.local(BindingRef { node: b }).unwrap_or(TypeId::NONE);
         let span = match icx.res.binding(BindingRef { node: b }) {
             Some(x) => icx.tok_span(x.token),
             None => icx.node_span(b),
         };
-        let g = self.new_local(ty, false, span, String::new(), false);
-        self.body.locals[g as usize].guard = true;
-        self.body.locals[g as usize].node = b;
-        self.by_node.insert(b, g);
-        self.guard_binds.push(b);
+        let first = icx.res.canonical(b);
+        let ty = self.tb.local(BindingRef { node: first }).unwrap_or(TypeId::NONE);
+        let g = match self.by_node.get(&first) {
+            Some(&g) if first != b && self.guard_binds.contains(&first) => g,
+            _ => {
+                let g = self.new_local(ty, false, span, String::new(), false);
+                self.body.locals[g as usize].guard = true;
+                self.body.locals[g as usize].node = first;
+                self.by_node.insert(first, g);
+                self.guard_binds.push(first);
+                g
+            }
+        };
         let by_ref = ty != src.ty && matches!(self.tys.kind(ty), TypeKind::Ref { .. });
         let rv = if by_ref {
             let loan = self.new_loan(&src, false, span, b, false);
@@ -1502,7 +1535,10 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
         let l = self.binding_local(b);
         let lt = self.body.locals[l as usize].ty;
-        let span = self.body.locals[l as usize].span;
+        let span = match self.icx.res.alias(b).and(self.icx.res.binding(BindingRef { node: b })) {
+            Some(x) => self.icx.tok_span(x.token),
+            None => self.body.locals[l as usize].span,
+        };
         match mode {
             Mode::Peek => {}
             Mode::Move => {

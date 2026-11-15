@@ -1,0 +1,304 @@
+//~ STDOUT orpat_arms.stdout
+// Or-patterns: whichever alternative matches, the arm's one body runs with the names bound from
+// that alternative. Statement and value arms over enum variants, literals, ranges, and tuples;
+// guards (run once, after the first alternative that matches: when false, the next arm is
+// tried); bindings by value, by reference, `mut`, captured, and droppable.
+import std.io;
+import std.string;
+
+enum Tok { Plus, Minus, Star, Num(u32), Pair { a: u32, b: u32 }, Name(u32), Eof }
+
+fn prec(t: Tok) -> u32 {
+    return match t {
+        Tok.Plus | Tok.Minus => 1,
+        Tok.Star => 2,
+        Tok.Num(n) | Tok.Pair.{ a: n, b: _ } | Tok.Name(n) => n + 10,
+        Tok.Eof => 0,
+    };
+}
+
+fn class(c: u8) -> u32 {
+    let mut r: u32 = 0;
+    match c {
+        0 | 1 | 2 => { r = 1; }
+        48..=57 | 65..=70 | 97..=102 => { r = 2; }
+        9 | 10 | 13 | 32 => { r = 3; }
+        _ => { r = 4; }
+    }
+    return r;
+}
+
+fn small(x: i32) -> u32 {
+    return match x {
+        -1 | 1 => 1,
+        -2 | 2 | 0 => 2,
+        _ => 3,
+    };
+}
+
+fn vowel(c: char) -> bool {
+    return match c {
+        'a' | 'e' | 'i' | 'o' | 'u' => true,
+        _ => false,
+    };
+}
+
+fn pairs(p: (u32, u32)) -> u32 {
+    return match p {
+        (0, n) | (n, 0) => n,
+        (1, n) | (n, 1) if n > 5 => n * 2,
+        (a, b) => a + b,
+    };
+}
+
+fn first_wins(p: (Option<u32>, Option<u32>)) -> u32 {
+    return match p {
+        (Option.Some(n), _) | (_, Option.Some(n)) if n > 5 => n,
+        (Option.Some(n), _) | (_, Option.Some(n)) => n + 100,
+        _ => 0,
+    };
+}
+
+fn over(t: Tok, lim: u32) -> u32 {
+    return match t {
+        Tok.Num(n) | Tok.Name(n) if n > lim => n,
+        Tok.Num(_) | Tok.Name(_) => lim,
+        Tok.Plus | Tok.Minus | Tok.Star if lim == 0 => 100,
+        Tok.Plus | Tok.Minus => 101,
+        _ => 0,
+    };
+}
+
+fn first_guard(x: u8, big: bool) -> u32 {
+    return match x {
+        n if big => n as u32 + 100,
+        0 | 1 => 1,
+        2 => 2,
+        _ => 3,
+    };
+}
+
+fn same_top(t: Tok, c: bool) -> u32 {
+    return match t {
+        Tok.Pair.{ a: 0, b: n } | Tok.Pair.{ a: n, b: 0 } if c => n,
+        Tok.Pair.{ a, b } => a + b + 50,
+        Tok.Num(n) | Tok.Name(n) => n,
+        _ => 0,
+    };
+}
+
+fn mixed(t: Tok, c: bool) -> u32 {
+    return match t {
+        Tok.Eof => 9,
+        Tok.Plus | Tok.Minus if c => 1,
+        _ => 0,
+    };
+}
+
+enum Msg { Text(string.String), Note(string.String), Code(u32) }
+
+fn size(m: &Msg) -> usize {
+    return match m {
+        Msg.Text(s) | Msg.Note(s) => s.len(),
+        Msg.Code(_) => 0,
+    };
+}
+
+fn take(m: Msg) -> usize {
+    match m {
+        Msg.Text(s) | Msg.Note(s) => { return s.len(); }
+        Msg.Code(c) => { return c as usize; }
+    }
+}
+
+fn bump(t: &mut Tok) {
+    match t {
+        Tok.Num(n) | Tok.Name(n) | Tok.Pair.{ a: n, b: _ } => { *n = *n + 1; }
+        _ => {}
+    }
+}
+
+fn twice(t: Tok) -> u32 {
+    match t {
+        Tok.Num(mut n) | Tok.Name(mut n) => {
+            n = n * 2;
+            let r = &n;
+            return *r;
+        }
+        _ => { return 0; }
+    }
+}
+
+fn apply(f: fn(u32) -> u32, x: u32) -> u32 {
+    return f(x);
+}
+
+fn captured(t: Tok) -> u32 {
+    return match t {
+        Tok.Num(n) | Tok.Name(n) => apply(fn(x: u32) -> u32 { return x + n; }, 1),
+        _ => 0,
+    };
+}
+
+struct Loud { pub id: u32 }
+
+impl Drop for Loud {
+    fn drop(&mut self) { io.print(f"drop {self.id}\n"); }
+}
+
+enum Slot { A(Loud), B(Loud), Empty }
+
+fn id_of(s: Slot) -> u32 {
+    let mut r: u32 = 0;
+    match s {
+        Slot.A(l) | Slot.B(l) => { r = l.id; }
+        Slot.Empty => {}
+    }
+    return r;
+}
+
+fn count(xs: &[u8]) -> u32 {
+    let mut n: u32 = 0;
+    for i in 0..xs.len() {
+        match xs[i] {
+            32 | 9 | 10 => { continue; }
+            48..=57 | 95 => { n = n + 1; }
+            _ => { n = n + 100; }
+        }
+    }
+    return n;
+}
+
+fn main() -> i32 {
+    let p0 = prec(Tok.Plus);
+    let p1 = prec(Tok.Minus);
+    let p2 = prec(Tok.Star);
+    let p3 = prec(Tok.Num(1));
+    let p4 = prec(Tok.Pair.{ a: 2, b: 9 });
+    let p5 = prec(Tok.Name(3));
+    let p6 = prec(Tok.Eof);
+    io.print(f"prec {p0} {p1} {p2} {p3} {p4} {p5} {p6}\n");
+
+    let c0 = class(0);
+    let c1 = class(2);
+    let c2 = class(50);
+    let c3 = class(70);
+    let c4 = class(71);
+    let c5 = class(100);
+    let c6 = class(13);
+    let c7 = class(32);
+    let c8 = class(255);
+    io.print(f"class {c0} {c1} {c2} {c3} {c4} {c5} {c6} {c7} {c8}\n");
+
+    let s0 = small(-1);
+    let s1 = small(1);
+    let s2 = small(0);
+    let s3 = small(-2);
+    let s4 = small(2);
+    let s5 = small(7);
+    io.print(f"small {s0} {s1} {s2} {s3} {s4} {s5}\n");
+
+    let v0 = vowel('e');
+    let v1 = vowel('u');
+    let v2 = vowel('x');
+    io.print(f"vowel {v0} {v1} {v2}\n");
+
+    let q0 = pairs((0, 7));
+    let q1 = pairs((7, 0));
+    let q2 = pairs((0, 0));
+    let q3 = pairs((1, 9));
+    let q4 = pairs((9, 1));
+    let q5 = pairs((1, 3));
+    let q6 = pairs((1, 1));
+    let q7 = pairs((6, 1));
+    let q8 = pairs((2, 3));
+    io.print(f"pairs {q0} {q1} {q2} {q3} {q4} {q5} {q6} {q7} {q8}\n");
+
+    let f0 = first_wins((Option.Some(1), Option.Some(9)));
+    let f1 = first_wins((Option.None, Option.Some(9)));
+    let f2 = first_wins((Option.Some(7), Option.None));
+    let f3 = first_wins((Option.None, Option.None));
+    let f4 = first_wins((Option.None, Option.Some(2)));
+    io.print(f"first_wins {f0} {f1} {f2} {f3} {f4}\n");
+
+    let o0 = over(Tok.Num(9), 5);
+    let o1 = over(Tok.Name(9), 5);
+    let o2 = over(Tok.Num(3), 5);
+    let o3 = over(Tok.Name(3), 5);
+    let o4 = over(Tok.Star, 0);
+    let o5 = over(Tok.Plus, 0);
+    let o6 = over(Tok.Plus, 1);
+    let o7 = over(Tok.Star, 1);
+    let o8 = over(Tok.Eof, 0);
+    io.print(f"over {o0} {o1} {o2} {o3} {o4} {o5} {o6} {o7} {o8}\n");
+
+    let g0 = first_guard(0, true);
+    let g1 = first_guard(0, false);
+    let g2 = first_guard(1, false);
+    let g3 = first_guard(2, false);
+    let g4 = first_guard(7, false);
+    let g5 = first_guard(2, true);
+    io.print(f"first_guard {g0} {g1} {g2} {g3} {g4} {g5}\n");
+
+    let t0 = same_top(Tok.Pair.{ a: 0, b: 4 }, true);
+    let t1 = same_top(Tok.Pair.{ a: 4, b: 0 }, true);
+    let t2 = same_top(Tok.Pair.{ a: 0, b: 4 }, false);
+    let t3 = same_top(Tok.Pair.{ a: 2, b: 3 }, true);
+    let t4 = same_top(Tok.Num(8), true);
+    let t5 = same_top(Tok.Name(6), false);
+    let t6 = same_top(Tok.Eof, true);
+    io.print(f"same_top {t0} {t1} {t2} {t3} {t4} {t5} {t6}\n");
+
+    let m0 = mixed(Tok.Eof, true);
+    let m1 = mixed(Tok.Plus, true);
+    let m2 = mixed(Tok.Minus, true);
+    let m3 = mixed(Tok.Plus, false);
+    let m4 = mixed(Tok.Star, true);
+    io.print(f"mixed {m0} {m1} {m2} {m3} {m4}\n");
+
+    let text = Msg.Text(string.String.from_str("abc"));
+    let note = Msg.Note(string.String.from_str("hello"));
+    let code = Msg.Code(7);
+    let z0 = size(&text);
+    let z1 = size(&note);
+    let z2 = size(&code);
+    io.print(f"size {z0} {z1} {z2}\n");
+    let k0 = take(text);
+    let k1 = take(note);
+    let k2 = take(code);
+    io.print(f"take {k0} {k1} {k2}\n");
+
+    let mut num = Tok.Num(1);
+    let mut name = Tok.Name(5);
+    let mut pair = Tok.Pair.{ a: 1, b: 2 };
+    let mut eof = Tok.Eof;
+    bump(&mut num);
+    bump(&mut name);
+    bump(&mut pair);
+    bump(&mut eof);
+    let b0 = prec(num);
+    let b1 = prec(name);
+    let b2 = prec(pair);
+    let b3 = prec(eof);
+    io.print(f"bump {b0} {b1} {b2} {b3}\n");
+
+    let w0 = twice(Tok.Num(4));
+    let w1 = twice(Tok.Name(5));
+    let w2 = twice(Tok.Eof);
+    io.print(f"twice {w0} {w1} {w2}\n");
+
+    let a0 = captured(Tok.Num(4));
+    let a1 = captured(Tok.Name(9));
+    let a2 = captured(Tok.Star);
+    io.print(f"captured {a0} {a1} {a2}\n");
+
+    let d0 = id_of(Slot.A(Loud.{ id: 1 }));
+    let d1 = id_of(Slot.B(Loud.{ id: 2 }));
+    let d2 = id_of(Slot.Empty);
+    io.print(f"slot {d0} {d1} {d2}\n");
+
+    let xs: [u8; 6] = [32, 49, 95, 10, 65, 57];
+    let n = count(&xs);
+    io.print(f"count {n}\n");
+    return 0;
+}

@@ -1363,7 +1363,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0301",
         severity: Severity::Error,
         area: "patterns",
-        rule: "unreachable match arm",
+        rule: "unreachable match arm. Case `alternative`: an alternative of an or-pattern (`A | B =>`) that never matches (covered by earlier arms or by earlier alternatives of its arm)",
         retired: false,
         located: true,
         holes: &[],
@@ -1380,13 +1380,25 @@ pub(super) static ENTRIES: &[Entry] = &[
                     edits: &[],
                 }),
             },
+            Shape {
+                case: "alternative",
+                message: "unreachable alternative of a match arm",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this alternative never matches" },
+                    LabelTemplate { at: "covering", text: "earlier pattern that already covers it" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove this alternative",
+                    edits: &[],
+                }),
+            },
         ],
     },
     Entry {
         code: "E0302",
         severity: Severity::Error,
         area: "patterns",
-        rule: "or-pattern alternatives bind different names, or a name with a different type or binding mode (planned)",
+        rule: "or-pattern alternatives bind different names, or a name with a different type or binding mode (by value or by reference, `mut` or not)",
         retired: false,
         located: true,
         holes: &[

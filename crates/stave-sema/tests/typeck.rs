@@ -188,6 +188,67 @@ fn reports_core_errors() {
     assert_eq!(codes, ["E0201", "E0202", "E0207"]);
 }
 
+/// Or-pattern diagnostics are located at the alternative: E0302 names the binding and has the
+/// first alternative as related span; E0301 (case `alternative`) has the covering pattern. Only
+/// the first alternative's bindings are locals, with a resolver alias from each later one.
+#[test]
+fn or_pattern_diagnostics_point_at_the_alternative() {
+    let src = "enum T { A(u32), B(u64), C }\n\
+         fn f(t: T) -> u32 {\n\
+         \x20   return match t {\n\
+         \x20       T.A(n) | T.B(n) => 1,\n\
+         \x20       T.C | T.A(_) => 2,\n\
+         \x20   };\n\
+         }\n\
+         fn g(t: T) -> u32 {\n\
+         \x20   return match t { T.A(n) | T.B(_) | T.C if true => 1, T.A(n) => n, _ => 0 };\n\
+         }\n\
+         fn ok(p: (u32, u32, bool)) -> u32 {\n\
+         \x20   return match p { (a, b, true) | (b, a, false) => a - b };\n\
+         }\n\
+         fn main() -> i32 { return 0; }\n";
+    let (p, tc) = mem(src);
+    let at = |s: stave_diag::Span| {
+        let l = p.source_map.locate(s).unwrap();
+        (l.line, l.col, l.len)
+    };
+    let got: Vec<_> = tc
+        .diagnostics
+        .iter()
+        .map(|d| {
+            // the labelled spans: the primary one, then the related one
+            let rel: Vec<_> = d.related().iter().map(|r| (r.label.as_str(), at(r.span))).collect();
+            (d.code(), d.message(), rel)
+        })
+        .collect();
+    let e0302 = "`n` is not bound the same way in every alternative of this pattern";
+    let differs = "alternative that differs";
+    let want = [
+        ("E0302", e0302, vec![(differs, (4, 18, 6)), ("first alternative", (4, 9, 6))]),
+        (
+            "E0301",
+            "unreachable alternative of a match arm",
+            vec![
+                ("this alternative never matches", (5, 15, 6)),
+                ("earlier pattern that already covers it", (4, 9, 6)),
+            ],
+        ),
+        ("E0302", e0302, vec![(differs, (9, 31, 6)), ("first alternative", (9, 22, 6))]),
+        ("E0302", e0302, vec![(differs, (9, 40, 3)), ("first alternative", (9, 22, 6))]),
+    ];
+    assert_eq!(got, want);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
+    let body = main_body(&p, &tc, "ok");
+    assert_eq!(body.locals.len(), 3, "the param and the first alternative's `a` and `b`");
+    let res = &p.res[body.item.idx()];
+    assert_eq!(res.aliases.len(), 2);
+    assert!(
+        res.aliases
+            .iter()
+            .all(|&(alt, first)| alt > first && body.local(stave_sema::BindingRef { node: first }).is_some())
+    );
+}
+
 /// `static mut` in a built-in package: no E0809, and every use outside `unsafe(..)` (read, write,
 /// borrow, f-string hole) is E0803. In the root package the declaration itself is E0809.
 #[test]
