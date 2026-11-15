@@ -36,10 +36,11 @@ are not keywords). "The open node" is the innermost named rule being parsed at t
 | 9 | E0023 | (a) prev is `::` and la is not `<`; or (b) la is `::` and the token after la is not `<` | the `::` |
 | 10 | E0025 | la is `mut`, the token after la is an `Ident` or `self`, and top's origin rule is `Param`, `Params`, `XParams`, or a rule holding the parameter list (`FnDecl`, `TraitFn`, `KernelDecl`, `DispatchDecl`, `ExternItem`, `ExternFn`; `Primary` when prev is `(` after `fn`: a closure) | la |
 | 11 | E0026 | la is `(` (case: tuple) or `;` (case `unit`), prev is the `Ident` after `struct`, and top's origin rule is `AdtDecl` | la |
-| 12 | E0027 | la is `!` and top's origin rule is `Type`, `TypeBase`, or `RetClause` | la |
+| 12 | E0027 | la is `!` and top's origin rule is `Type`, `TypeBase`, or `RetClause` (case `ret`: prev is `->`) | la |
 | 13 | E0028 | (a) la is `impl` and top's origin rule is `Type` or `TypeBase`; or (b) prev is Ident `dyn` and la is an `Ident` | the `impl` / `dyn` token |
 
-E0024 (`'a`) and E0029 (`/*`) are lexical error tokens (no E0004 in that item, see below).
+E0024 (`'a`) and E0029 (`/*`) are lexical error tokens (no E0004 in that item, see below). E0024
+is case `ref` when the last byte before the lifetime, skipping spaces, tabs, and line ends, is `&`.
 Each rule has a conformance test `tests/conformance/syntax/rustism_E00xx.stv`. The origin rules
 named here are in `REQUIRED_RULES` of `tools/ll1gen` (generation fails if one is missing).
 

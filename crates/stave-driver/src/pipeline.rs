@@ -216,6 +216,9 @@ pub struct Options {
     pub lower: bool,
     /// Collect the borrow checker's per-access lines (the `borrow` dump).
     pub borrow_dump: bool,
+    /// Contents that stand in for source files on disk ([`stave_sema::Config::sources`]): a
+    /// check of edits that are not written yet.
+    pub sources: std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
 }
 
 impl Options {
@@ -229,6 +232,7 @@ impl Options {
             tests: false,
             lower: false,
             borrow_dump: false,
+            sources: std::collections::BTreeMap::new(),
         }
     }
 
@@ -366,6 +370,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     }
     cfg.target = opts.target;
     cfg.shuffle_seed = opts.shuffle_seed;
+    cfg.sources = opts.sources.clone();
 
     // ---- read, lex, items, parse, intern, resolve (+ canonical ids): stave-sema's loader.
     let program = Program::load(&cfg);

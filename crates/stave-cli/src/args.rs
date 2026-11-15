@@ -16,6 +16,7 @@ pub enum Cmd {
     Run,
     Check,
     Test,
+    Fix,
     UnsafeReport,
     Lowering,
     Explain,
@@ -29,6 +30,7 @@ impl Cmd {
             Cmd::Run => "run",
             Cmd::Check => "check",
             Cmd::Test => "test",
+            Cmd::Fix => "fix",
             Cmd::UnsafeReport => "unsafe-report",
             Cmd::Lowering => "lowering",
             Cmd::Explain => "explain",
@@ -42,6 +44,7 @@ impl Cmd {
             Cmd::Run,
             Cmd::Check,
             Cmd::Test,
+            Cmd::Fix,
             Cmd::UnsafeReport,
             Cmd::Lowering,
             Cmd::Explain,
@@ -106,6 +109,8 @@ pub struct Args {
     pub alloc_check: bool,
     /// `unsafe-report --json`.
     pub json: bool,
+    /// `fix --dry-run`.
+    pub dry_run: bool,
     /// `lowering --op OP`.
     pub op: Option<String>,
     /// `explain EXXXX`.
@@ -145,6 +150,8 @@ commands:
                         (host targets only, else E1001)
   check [PKG_DIR]
   test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD]
+  fix [PKG_DIR] [--dry-run] [--target T] [--diagnostics human|json]
+                        (apply the exact fixes, re-check, repeat; --dry-run prints a diff)
   unsafe-report [PKG_DIR] [--json]
   lowering --target T [--op OP]
   explain EXXXX
@@ -184,6 +191,8 @@ fn allowed(cmd: Cmd, flag: &str) -> bool {
         Cmd::Build => COMPILE.contains(&flag) || matches!(flag, "-o" | "--watch"),
         Cmd::Run | Cmd::Check => COMPILE.contains(&flag),
         Cmd::Test => COMPILE.contains(&flag) || matches!(flag, "--filter" | "--runner"),
+        // Always stage0: the check of a round reads edits that are not written yet.
+        Cmd::Fix => matches!(flag, "--dry-run" | "--target" | "--diagnostics"),
         // These always run in stage0 whatever --compiler says (cli-stage1.md).
         Cmd::UnsafeReport => matches!(flag, "--json" | "--compiler"),
         Cmd::Lowering => matches!(flag, "--target" | "--op" | "--compiler"),
@@ -209,7 +218,7 @@ fn takes_value(flag: &str) -> bool {
     )
 }
 
-const KNOWN_FLAGS: [&str; 17] = [
+const KNOWN_FLAGS: [&str; 18] = [
     "--release",
     "--target",
     "--features",
@@ -225,6 +234,7 @@ const KNOWN_FLAGS: [&str; 17] = [
     "--watch",
     "--alloc-check",
     "--json",
+    "--dry-run",
     "--op",
     "--help",
 ];
@@ -270,8 +280,8 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
     let (mut out, mut compiler, mut dump, mut dump_dir, mut diagnostics, mut cache) =
         (None, None, None, None, None, None);
     let (mut runner, mut filter, mut op) = (None, None, None);
-    let (mut release, mut timings, mut watch, mut alloc_check, mut json) =
-        (false, false, false, false, false);
+    let (mut release, mut timings, mut watch, mut alloc_check, mut json, mut dry_run) =
+        (false, false, false, false, false, false);
 
     let mut i = 1;
     while i < argv.len() {
@@ -328,6 +338,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
             "--watch" => set_flag(&mut watch, flag)?,
             "--alloc-check" => set_flag(&mut alloc_check, flag)?,
             "--json" => set_flag(&mut json, flag)?,
+            "--dry-run" => set_flag(&mut dry_run, flag)?,
             "--target" => set_once(&mut target, value, flag)?,
             // A list: repeated --features accumulate.
             "--features" => features.push(value),
@@ -443,6 +454,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
         watch,
         alloc_check,
         json,
+        dry_run,
         op,
         code,
         daemon,
@@ -520,6 +532,10 @@ mod tests {
         assert_eq!(a.run_args, ["-x", "--target", "y"]);
         assert!(a.release);
         assert!(args("unsafe-report --json").json);
+        let a = args("fix pkg --dry-run --diagnostics json");
+        assert_eq!((a.cmd, a.dry_run, a.diagnostics), (Cmd::Fix, true, DiagFormat::Json));
+        assert_eq!(a.pkg_dir, Some(PathBuf::from("pkg")));
+        assert!(!args("fix").dry_run);
         let a = args("lowering --target aarch64-linux --op gather");
         assert_eq!(a.op.as_deref(), Some("gather"));
         assert_eq!(args("explain E0201").code.as_deref(), Some("E0201"));
@@ -558,6 +574,10 @@ mod tests {
         assert!(usage("check --watch").contains("does not take --watch"));
         assert!(usage("check -o x").contains("does not take -o"));
         assert!(usage("run --filter x").contains("does not take --filter"));
+        assert!(usage("check --dry-run").contains("does not take --dry-run"));
+        assert!(usage("fix --release").contains("does not take --release"));
+        assert!(usage("fix --compiler gpu").contains("does not take --compiler"));
+        assert!(usage("fix --dry-run --dry-run").contains("given twice"));
         assert!(usage("lowering").contains("needs --target"));
         assert!(usage("lowering --release --target x86_64-linux").contains("does not take"));
         assert!(usage("explain").contains("needs a diagnostic code"));

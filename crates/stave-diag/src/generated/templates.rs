@@ -5,7 +5,7 @@
 #![allow(unused_imports)]
 
 use super::{EditTemplate, Entry, FixTemplate, Hole, HoleKind, LabelTemplate, Shape};
-use crate::diagnostic::Severity;
+use crate::diagnostic::{Applicability, Severity};
 
 pub(super) static ENTRIES: &[Entry] = &[
     Entry {
@@ -25,6 +25,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "re-encode the file as UTF-8 (without byte-order mark), or remove the invalid bytes",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -49,6 +50,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "split the file into several modules, each smaller than 4 GiB",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -73,6 +75,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add the closing quote of this {what} literal before the end of the file, on the same line",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -98,6 +101,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write one of {expected} here, or remove {found}",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -120,6 +124,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "reduce the nesting: move inner expressions into local bindings, functions, or consts",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -131,6 +136,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "reduce the nesting: move inner expressions into local bindings, functions, or consts",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -155,6 +161,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "bind the value to a local first (`let v = {hole};`), then write `{{v}}` in the f-string",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -177,6 +184,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `(x as T) < y`, or close the type arguments",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -199,6 +207,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "split the chain with `&&`: write `a < b && b < c`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -221,6 +230,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "state why the code is sound: write `unsafe(\"<obligation>\")` before the block, expression, or item",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -232,6 +242,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "state why the code is sound in the string: `unsafe(\"<obligation>\")`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -256,6 +267,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `{path}.{{ ... }}`",
+                    applicability: Applicability::Maybe,
                     edits: &[
                         EditTemplate { at: "primary", replacement: ".{{" },
                     ],
@@ -282,6 +294,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `\\n` for the newline and close the {what} literal on this line",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -307,6 +320,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "balance the brackets of this file",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -319,6 +333,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "close the inner {opener} first, or change this {closer}",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -330,6 +345,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add the closer of this {opener} before the end of the file",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -341,6 +357,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove this {closer}, or add its opener before it",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -363,6 +380,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the byte-order mark: save the file as UTF-8 without BOM",
+                    applicability: Applicability::Maybe,
                     edits: &[
                         EditTemplate { at: "primary", replacement: "" },
                     ],
@@ -387,6 +405,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove it: identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`, and other text belongs in a string literal or a comment",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -411,6 +430,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `match e {{ P => {{ .. }} _ => {{ }} }}` (`while let`: `loop {{ match e {{ P => {{ .. }} _ => {{ break; }} }} }}`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -433,6 +453,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `let x = match e {{ P(x) => x, _ => {{ .. }} }};` as a `match` statement whose other arm leaves the function",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -455,6 +476,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `return e;` to return the value, or end the statement with `;`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -477,6 +499,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "move each bound into the generic parameter list: `fn f<T: A + B>(..)`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -499,6 +522,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "replace `::` with `.`",
+                    applicability: Applicability::Exact,
                     edits: &[
                         EditTemplate { at: "primary", replacement: "." },
                     ],
@@ -525,6 +549,21 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `{text}`; name a returned borrow's origin with `-> &T from x`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "" },
+                    ],
+                }),
+            },
+            Shape {
+                case: "ref",
+                message: "lifetime `{text}` is not Stave: references have no lifetimes",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "lifetime here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `{text}`; name a returned borrow's origin with `-> &T from x`",
+                    applicability: Applicability::Exact,
                     edits: &[
                         EditTemplate { at: "primary", replacement: "" },
                     ],
@@ -549,6 +588,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `mut` and write `let mut y = x;` at the start of the body",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -573,6 +613,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "declare named fields: `struct {name} {{ v: T }}` (a unit struct is `struct {name} {{}}`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -584,6 +625,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "replace `;` with `{{}}`",
+                    applicability: Applicability::Exact,
                     edits: &[
                         EditTemplate { at: "primary", replacement: " {{}}" },
                     ],
@@ -608,6 +650,21 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "replace `!` with `never`",
+                    applicability: Applicability::Maybe,
+                    edits: &[
+                        EditTemplate { at: "primary", replacement: "never" },
+                    ],
+                }),
+            },
+            Shape {
+                case: "ret",
+                message: "`!` is not a type: write `never`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`!` in a type position" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "replace `!` with `never`",
+                    applicability: Applicability::Exact,
                     edits: &[
                         EditTemplate { at: "primary", replacement: "never" },
                     ],
@@ -634,6 +691,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add a generic parameter `<T: Trait>` and write `T`, or use a fn type `fn(..) -> R`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -656,6 +714,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "start each comment line with `//`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -680,6 +739,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "declare `{name}`, import the module that defines it, or correct the spelling",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -691,6 +751,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "name a trait in the bound or after `impl`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -702,6 +763,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "name a struct, enum, type alias, generic parameter, or built-in type",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -727,6 +789,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "break the cycle: move the shared items into a module that none of these modules import",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -752,6 +815,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `{enum}.{name}`",
+                    applicability: Applicability::Maybe,
                     edits: &[
                         EditTemplate { at: "primary", replacement: "{enum}.{name}" },
                     ],
@@ -777,6 +841,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "keep one `allocator` declaration in the binary and remove the others",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -803,6 +868,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "rename this `{name}`, or remove one of the two declarations",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -829,6 +895,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "mark `{name}` `pub` in `{module}`, or use it only inside `{module}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -854,6 +921,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "for the module, start the path with the package's own name: `import {package}.{name}` (add `as` to pick the bound name); for the dependency, rename the module `{name}` or rename the dependency in `stave.toml`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -876,6 +944,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `fn main() -> i32 {{ return 0; }}` to the root module, or set `kind = \"lib\"` in `stave.toml` for a library",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -905,6 +974,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "convert explicitly: `{operand} as {expected}` (or `as%`, `as|`, `as?`, `as~` when lossy)",
+                    applicability: Applicability::Maybe,
                     edits: &[
                         EditTemplate { at: "primary", replacement: "{operand} as {expected}" },
                     ],
@@ -918,6 +988,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "pass exactly {count} arguments",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -929,6 +1000,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "pass a const-expr, braced when it is not a literal or a name: `{{N + 1}}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -940,6 +1012,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call a fn item, a method, a variant constructor, or a value of fn type",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -951,6 +1024,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `{operand}` only inside a loop body; to leave a fn, use `return`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -962,6 +1036,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use a value here: a local, a const, a fn, or a variant",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -973,6 +1048,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give exactly {count} generic arguments",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -997,6 +1073,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add a type suffix (`{literal}i32`) or annotate the binding (`let x: i32 = {literal};`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1008,6 +1085,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add a type suffix (`{literal}f64`) or annotate the binding (`let x: f64 = {literal};`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1019,6 +1097,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give them with `::<..>` or annotate the binding: `let x: Option<u32> = {literal};`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1046,6 +1125,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write a value from {min} to {max}, or use a wider type than `{type}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1057,6 +1137,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write a value within the finite range of `{type}`, or use `f64`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1068,6 +1149,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write digits of the literal's base and an int or float type suffix (`5u8`, `1.0f32`), or a valid escape",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1093,6 +1175,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "name the lossy conversion: `as%` wraps or truncates, `as|` saturates, `as?` returns `Option`, `as~` rounds to a float type",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1119,6 +1202,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "shift by less than {bits}, or use `<<%` to mask the amount of a left shift",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1144,6 +1228,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use an operator that `{type}` defines (floats: plain `+ - * /`), or convert the operands with `as` first",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1169,6 +1254,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `return <value>;` of type `{type}` on every path that reaches the end of `{name}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1180,6 +1266,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "end every path of `{name}` with a call of a `-> never` fn or a `loop` without `break`, and remove its `return`s",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1205,6 +1292,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "correct the spelling, or convert the value to a type that has `{name}` (`stave explain E0208`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1216,6 +1304,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give every field: `{name}: <value>`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1238,6 +1327,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `never` only after `->` of a fn signature or a fn type; for a value with no type of its own, write the type it is used as",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1247,7 +1337,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0210",
         severity: Severity::Error,
         area: "types",
-        rule: "expression statement whose type is not `()` or `never` (a discarded value); discard explicitly with `let _ = e;` (planned)",
+        rule: "expression statement whose type is not `()` or `never` (a discarded value); discard explicitly with `let _ = e;`",
         retired: false,
         located: true,
         holes: &[
@@ -1262,8 +1352,9 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use the value, or discard it explicitly with `let _ = ..;`",
+                    applicability: Applicability::Exact,
                     edits: &[
-                        EditTemplate { at: "primary", replacement: "let _ = " },
+                        EditTemplate { at: "start", replacement: "let _ = " },
                     ],
                 }),
             },
@@ -1286,6 +1377,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "keep contracts side-effect free: compare params, fields, and `.len()`; move other checks into the body with `std.debug.assert`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1297,6 +1389,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "move the check into the method body with `std.debug.assert`, or into an inherent method",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1319,6 +1412,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "rename the parameter",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1343,6 +1437,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add arms for the missing variants or values, or a final `_` arm",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1354,6 +1449,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "split the match: match on fewer or less deeply nested values at a time, or add a final `_` arm",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1377,6 +1473,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove this arm, or move it before the arm that covers it",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1389,6 +1486,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove this alternative",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1414,6 +1512,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "bind `{name}` in every alternative with the same type and mode, or split the arm",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1440,6 +1539,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "declare `{adt}` as `view struct` or `view enum`, or give `{field}` an owned type",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1465,6 +1565,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "store an owned value in `{container}`, or keep the view `{type}` in a local",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1489,6 +1590,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the `forget` call and let the view go out of scope",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1514,6 +1616,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give `{name}` an owned type (an array `[T; N]` instead of `&[T]`), or build the value in a function (only `&str` from a string literal or another such const may be borrowed)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1525,6 +1628,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give `{name}` an owned type, or store a raw pointer (`*const T`, `*mut T`) and keep its pointee alive yourself (only `&str` from a string literal may be borrowed)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1552,6 +1656,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add the bound `{param}: view` to `{generic}`, or pass an owned type",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1564,6 +1669,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "keep `{type}` in a local or in a container whose parameter is `view`-bounded (`vec.Vec`, `Box`, `Option`), or store an owned value",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1591,6 +1697,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `impl Copy for {type}`, or give `{field}` a Copy type (`&mut T` is never Copy)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1616,6 +1723,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `impl Copy for {type}` (a type with a destructor must move), or remove this `impl Drop`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1640,6 +1748,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}>`, or `sync.Once<{type}>`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1669,6 +1778,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "end the borrow before this point: move the later use before it, or copy the value out first",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1694,6 +1804,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `{place}` before it is moved, or pass a reference (`&{place}`) instead of moving it",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1719,6 +1830,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "declare the binding with `let mut`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1731,6 +1843,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "create a `&mut` reference instead of `&` where this reference comes from",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1742,6 +1855,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T>`) and change it through its `&self` methods",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1766,6 +1880,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "borrow it instead (`&{place}`), or take the value out and leave another in its place with `mem.replace(&mut {place}, other)` or `mem.swap` (`import std.mem;`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1778,6 +1893,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `&{place}` inside the closure, or take the value out with `mem.replace(&mut {place}, other)` (`import std.mem;`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1803,6 +1919,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `{origin}` to the `from` clause, or return a value borrowed from a listed parameter",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1815,6 +1932,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `from {origin}` after the return type, or return a value that borrows nothing",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1850,6 +1968,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "return an owned value, or borrow from a parameter named in the `from` clause",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1874,6 +1993,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write a value that borrows only from the origins of `{place}`, or add the origin to the `from` clause that created `{place}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1898,6 +2018,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the `from` clause: only a `&mut` parameter whose pointee is a view declares what may be stored into it",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1922,6 +2043,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "name the parameters whose borrows may be stored into `*{param}`, or remove the clause",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1947,6 +2069,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `{param}` from the `from` clause, or take `{param}` by reference (`&{type}`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1972,6 +2095,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `from {param}` instead of `from copy {param}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -1996,6 +2120,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add a tail clause after the loop body: `tail masked (v, m) {{ ... }}`, `tail scalar (x) {{ ... }}`, or `tail exact;`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2022,6 +2147,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "broadcast the scalar: `{vector}.splat({operand})`",
+                    applicability: Applicability::Maybe,
                     edits: &[
                         EditTemplate { at: "primary", replacement: "{vector}.splat({operand})" },
                     ],
@@ -2050,6 +2176,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "convert one side with `widen_lo`/`widen_hi`, `narrow_wrap`/`narrow_sat`, `split`, `join`, or `bitcast`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2075,6 +2202,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "choose wrapping `{op}%`, saturating `{op}|`, or a checked method (`checked_add`, `checked_sub`, `checked_mul`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2101,6 +2229,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "convert the mask to {width}-bit lanes with `m.rewiden::<{width}>()`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2126,6 +2255,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "get an aligned slice with `s.align_to::<{align}>()`, or use the unaligned `load`/`store`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2150,6 +2280,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `a.div_lanes(b)` for a run-time divisor, or `a.div_const::<K>()` for a constant one",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2175,6 +2306,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use lane indices from 0 to {lanes} - 1",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2200,6 +2332,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `{concrete}`",
+                    applicability: Applicability::Maybe,
                     edits: &[
                         EditTemplate { at: "primary", replacement: "{concrete}" },
                     ],
@@ -2228,6 +2361,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "wrap the code in `emulate {{ ... }}`, or move it to a function with `needs(...)` called through `dispatch` (`stave lowering --target {target} --op {op}`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2255,6 +2389,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "move `{op}` out of the `strict` block, or use an operation of class N on this target (`stave lowering --op {op}`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2281,6 +2416,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use a vector of at most {max} bits, or add `needs(...)` with a feature that has wider registers (`avx2`: 256, `avx512f`: 512)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2306,6 +2442,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `needs({feature})` to the signature, or use a vector of at most 128 bits",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2332,6 +2469,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `needs({feature})` to the caller, or call `{callee}` through a `dispatch` function",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2358,6 +2496,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give the arm's function the type `{expected}` (the dispatch signature, with needs = dispatch needs + the arm's features)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2382,6 +2521,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add a final `_ => f_base,` arm whose function needs no features beyond the dispatch's",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2393,6 +2533,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "point the `_` arm at a function without `needs({feature})`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2418,6 +2559,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add the features to the target type (`{to}` with `needs(...)`), or use a function that needs no extra features",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2442,6 +2584,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "correct the feature name (`stave lowering --target T` lists the target's features)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2466,6 +2609,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `needs(...)` here, and call the feature-specific code through a `dispatch` function",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2490,6 +2634,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `needs(sve)` to the enclosing function",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2514,6 +2659,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "store the lanes in a slice or a fixed-size vector, and load `{type}` inside the function",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2538,6 +2684,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use an array or slice of the lane type, and load `{type}` from it",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2562,6 +2709,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "keep a scalar const and build the vector inside the function with `splat`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2586,6 +2734,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "compute with the lane type's size times the run-time lane count instead",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2611,6 +2760,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "pass `{name}` to the closure as a parameter instead of capturing it",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2636,6 +2786,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use a fixed-size vector type here, or pass the lanes as a slice",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2661,6 +2812,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `acc = v.reduce_add_ordered(acc);`, whose result does not depend on the vector length",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2683,6 +2835,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "put the `spawn` inside `scope {{ ... }}`; its threads join at the closing `}}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2708,6 +2861,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "capture a `Send` value instead of `{name}`, or create it inside the thread",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2719,6 +2873,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give each call its own element through `thread.par_for_mut(xs, fn(i: usize, x: &mut T) {{ ... }})`, or capture `&{name}` only",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2730,6 +2885,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "share a `Sync` value instead of `{name}`, or move `{name}` into the thread",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2752,6 +2908,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "wrap it in `unsafe(\"<obligation>\") {{ ... }}`, or `unsafe(\"<obligation>\") expr` in a value position",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2776,6 +2933,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "pass a raw pointer and a length (`*const T`, `usize`) instead of `{type}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2800,6 +2958,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the intrinsic import and call the `std` function that wraps it",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2811,6 +2970,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use the name and signature exactly as listed in contracts/intrinsics.md",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2835,6 +2995,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "pass a closure literal or a fn item directly to {callee}",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2859,6 +3020,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "wrap the call in a safe fn or closure with its own `unsafe(\"..\")`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2870,6 +3032,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call `{name}` directly with a closure literal or fn item",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2893,6 +3056,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "move the `spawn` out of the closure into the `scope` block, or open a `scope {{ ... }}` inside the closure body",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2917,6 +3081,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2942,6 +3107,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "state why the type meets the obligation of `{trait}`: write `unsafe(\"<obligation>\") impl`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2968,6 +3134,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add a trait bound that provides `{name}`: `<{param}: Trait>`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -2980,6 +3147,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "implement `{param}` for `{name}`, or pass a type that implements it",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3004,6 +3172,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "stop the recursive instantiation of `{generic}`: its type arguments must not grow on each level",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3030,6 +3199,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove one of the two impls of `{trait}`, or narrow one so that their types differ",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3055,6 +3225,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "compute the value with literals, consts, arithmetic, comparisons, `as`, `size_of`, and `if then else` only",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3067,6 +3238,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "break the cycle: define one of these consts without using the others",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3093,6 +3265,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use the trait's signature: `{signature}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3119,6 +3292,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `fn {name}` with the trait's signature to this impl",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3130,6 +3304,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `{name}` from this impl, or move it to an inherent `impl` block",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3154,6 +3329,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `pub`: `{name}` is visible wherever its trait is",
+                    applicability: Applicability::Maybe,
                     edits: &[
                         EditTemplate { at: "primary", replacement: "" },
                     ],
@@ -3185,6 +3361,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call it qualified, with the receiver as first argument: `{first}.{name}(x)` or `{second}.{name}(x)`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3207,6 +3384,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the call: the value is dropped when it goes out of scope or is overwritten; to end its life early, move it into `std.mem.drop(x)`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3229,6 +3407,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 labels: &[],
                 fix: Some(FixTemplate {
                     description: "run on a `{target}` host, or pass `--runner CMD` (e.g. `--runner \"qemu-aarch64 -cpu max\"`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3255,6 +3434,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `{key}`, or correct its spelling",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3266,6 +3446,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `kind = \"bin\"` (a program, `src/main.stv`) or `kind = \"lib\"` (a library, `src/lib.stv`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3277,6 +3458,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use a name that is one path component: not empty, `.`, or `..`, without `/`, `\\`, or NUL, and not starting with `-`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3288,6 +3470,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "keep one definition of `{key}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3299,6 +3482,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "point `path` at a package directory (one with `stave.toml`), relative to this `stave.toml`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3310,6 +3494,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `name = \"<package>\"` at the top of `stave.toml`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3321,6 +3506,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "create `{root}`, or change `kind` to match the root file that exists (`bin`: `src/main.stv`, `lib`: `src/lib.stv`)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3332,6 +3518,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `{key} = {{ path = \"<dir>\" }}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3343,6 +3530,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "correct the TOML syntax (stave.toml takes `key = value` lines, `[table]` headers, strings, integers, booleans, arrays, and one-line inline tables)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3354,6 +3542,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use a target name: `x86_64-linux`, `x86_64-linux-v2`, `-v3`, `-v4`, `aarch64-linux`, `aarch64-linux+sve`, `+sve2`, or `gpu-sm86`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3365,6 +3554,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "make `stave.toml` readable (check that it exists and its permissions)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3376,6 +3566,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write the value of `{key}` as a TOML {expected}",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3400,6 +3591,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "make the file readable (check that it exists and its permissions), or remove it from `src/`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3426,6 +3618,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "move this work to the host, or pass the data in to `{kernel}` as a buffer",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3451,6 +3644,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "rewrite the recursion through `{name}` as a loop",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3462,6 +3656,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call the function directly by name, or `match` over an enum of the cases",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3486,6 +3681,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write through `out.at(t)`, use an atomic operation, or wrap the write in `unsafe(\"<obligation>\")`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3511,6 +3707,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call `{name}.wait()?` before the end of the scope",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3536,6 +3733,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "hoist `{op}` out of the branch, or make the condition depend only on uniform values",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3562,6 +3760,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "pass a `{expected}`: copy host data to the device with `dev.alloc_copy`, or use the buffer of the right kind",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3586,6 +3785,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "pass `&t` to device functions instead",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3611,6 +3811,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "make the first parameter `t: gpu.Thread1` (or `t: gpu.Thread2` for a 2-D grid)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3622,6 +3823,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the generic parameters: write one kernel per concrete type",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3633,6 +3835,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove `needs(...)` from the signature of `{name}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3644,6 +3847,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `gpu.In<T>`, `gpu.Out<T>`, `gpu.AtomicOut<T>`, or a `gpu.Plain` scalar or vector instead of `{type}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3655,6 +3859,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the return type and write results through a `gpu.Out` parameter",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3680,6 +3885,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "launch blocks of at most {limit} threads, e.g. `gpu.Grid1.cover(n, 256)`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3691,6 +3897,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use at most {limit} bytes of shared memory per block: load smaller tiles, or launch smaller blocks",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3715,6 +3922,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use plain data: numbers, `bool`, fixed vectors, and arrays or structs of those",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3740,6 +3948,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `{name}` before that collective, or copy the needed elements into locals first; call `gpu.tile_load` again after the collective if the data is still needed",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3763,6 +3972,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `c.select(a, b)` (lowers to `selp`, no divergence), or hoist the condition out of the loop",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3788,6 +3998,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "GPU programs cannot call C code: all user code runs on the GPU. Write the function in Stave, or build for a CPU target",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3799,6 +4010,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "GPU programs cannot call C code: all user code runs on the GPU. Write the function in Stave, or build for a CPU target",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3824,6 +4036,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "launch with a block size that is a multiple of 32 and divides {resident} (at most 15 such blocks when it is above 32), or set `[gpu] block = <value>` in `stave.toml` to a multiple of {block} (itself a multiple of 32, at most 1024)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3848,6 +4061,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write a size as a string of digits and one unit `B`, `KiB`, `MiB`, `GiB`, or `TiB`, e.g. `{key} = \"8MiB\"`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3859,6 +4073,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write an integer multiple of 32 from 32 to 1024, e.g. `block = 256`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3870,6 +4085,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write a size of at least 64MiB or a percentage from 1 to 100, e.g. `heap_max = \"40GiB\"` or `heap_max = \"90%\"`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3881,6 +4097,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `poll = \"adaptive\"` or `poll = \"busy\"`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3892,6 +4109,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write a size of at least 4KiB, e.g. `stack = \"8MiB\"`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3917,6 +4135,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "lower `[gpu] block` in `stave.toml`, launch `{kernel}` with a larger block size, or reduce the shared memory of `{kernel}`",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3942,6 +4161,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "rewrite the recursion through `{name}` as a loop, with an explicit stack (`Vec`) if needed",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3966,6 +4186,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `match` over an enum of the cases, or a generic parameter, instead of a fn value",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -3989,6 +4210,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 labels: &[],
                 fix: Some(FixTemplate {
                     description: "use `--compiler cpu`, raise `[compiler] gpu_mem`, or free GPU memory (`stave daemon stop` frees the daemon's own)",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -4013,6 +4235,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 labels: &[],
                 fix: Some(FixTemplate {
                     description: "use `--compiler auto` or `--compiler cpu`; or make the GPU usable ({reason}): install the NVIDIA driver, check the device, or reinstall Stave with the GPU compiler image",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -4022,6 +4245,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 labels: &[],
                 fix: Some(FixTemplate {
                     description: "use `--compiler auto` or `--compiler cpu`: stage1 needs compute capability 8.6 or higher",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -4044,6 +4268,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 labels: &[],
                 fix: Some(FixTemplate {
                     description: "use `--compiler auto` or `--compiler cpu`: stage0 builds this target",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
@@ -4066,6 +4291,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `--compiler auto` or `--compiler cpu`: stage0 links C objects",
+                    applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },

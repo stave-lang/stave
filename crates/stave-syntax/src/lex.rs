@@ -464,7 +464,11 @@ fn pending_diag(src: &[u8], file: FileId, p: Pending) -> Option<Diagnostic> {
         Pending::BadChar { start, end } => make_diag("E0018", None, &[], span(start, end), &[]),
         Pending::Lifetime { start, end } => {
             let text = String::from_utf8_lossy(src.get(start..end).unwrap_or_default());
-            make_diag("E0024", None, &[("text", &text)], span(start, end), &[])
+            // directly after `&` the lifetime can be removed with nothing else to change
+            let head = src.get(..start).unwrap_or_default();
+            let before = head.iter().rev().copied().find(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r'));
+            let case = (before == Some(b'&')).then_some("ref");
+            make_diag("E0024", case, &[("text", &text)], span(start, end), &[])
         }
         Pending::BlockComment { start } => make_diag("E0029", None, &[], span(start, start + 2), &[]),
     }

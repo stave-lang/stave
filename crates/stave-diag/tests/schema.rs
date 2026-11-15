@@ -224,6 +224,32 @@ fn errors_carry_a_fix_and_messages_are_one_line() {
 }
 
 #[test]
+fn every_fix_states_its_applicability() {
+    let (files, file) = common::sample_files();
+    let mut exact = std::collections::BTreeSet::new();
+    for line in json_lines(&common::all_diagnostics(file), &files) {
+        let v: Value = serde_json::from_str(&line).expect("JSON");
+        let Some(fix) = v.get("fix") else { continue };
+        let a = fix["applicability"].as_str().expect("applicability on every fix");
+        let edits = fix["edits"].as_array().expect("edits");
+        assert!(matches!(a, "exact" | "maybe" | "placeholder"), "{line}");
+        assert!(!edits.is_empty() || a == "placeholder", "a fix without edits is a placeholder: {line}");
+        if a == "exact" {
+            exact.insert(v["code"].as_str().expect("code").to_string());
+        }
+    }
+    assert_eq!(exact.into_iter().collect::<Vec<_>>(), ["E0023", "E0024", "E0026", "E0027", "E0210"]);
+    // an edit whose role span is not supplied is left out: the fix has nothing to apply
+    let d =
+        Diagnostic::new("E0210", None, &[("type", "u32")], Some(Span::new(file, 0, 1)), &[]).expect("E0210");
+    let fix = d.fix().expect("fix");
+    assert!(fix.edits.is_empty());
+    assert_eq!(fix.applicability, stave_diag::Applicability::Placeholder);
+    let line = &json_lines(std::slice::from_ref(&d), &files)[0];
+    assert!(line.contains(r#""applicability":"placeholder","edits":[]"#), "{line}");
+}
+
+#[test]
 fn primary_absent_only_for_locationless_codes() {
     let locationless: Vec<&str> =
         stave_diag::entries().iter().filter(|e| !e.retired && !e.located).map(|e| e.code).collect();
@@ -275,6 +301,10 @@ fn validator_rejects_bad_lines() {
     let bad = [
         // error without fix
         r#"{"kind":"diagnostic","code":"E0101","severity":"error","message":"m"}"#,
+        // fix without applicability
+        r#"{"kind":"diagnostic","code":"E0101","severity":"error","message":"m","fix":{"description":"d","edits":[]}}"#,
+        // unknown applicability
+        r#"{"kind":"diagnostic","code":"E0101","severity":"error","message":"m","fix":{"description":"d","applicability":"sure","edits":[]}}"#,
         // bad code
         r#"{"kind":"diagnostic","code":"X0101","severity":"warning","message":"m"}"#,
         // unknown key
@@ -287,6 +317,7 @@ fn validator_rejects_bad_lines() {
     }
     let good = [
         r#"{"kind":"diagnostic","code":"E1205","severity":"warning","message":"m"}"#,
+        r#"{"kind":"diagnostic","code":"E0101","severity":"error","message":"m","fix":{"description":"d","applicability":"placeholder","edits":[]}}"#,
         r#"{"kind":"timings","stages":[{"stage":"lex","ms":1.5,"items":10}]}"#,
     ];
     for line in good {

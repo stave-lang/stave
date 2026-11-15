@@ -12,7 +12,7 @@ mod order;
 mod span;
 mod template;
 
-pub use diagnostic::{DiagError, Diagnostic, Edit, Fix, Related, Severity};
+pub use diagnostic::{Applicability, DiagError, Diagnostic, Edit, Fix, Related, Severity};
 pub use emit_human::{emit_human, write_human};
 pub use emit_json::{emit_json, json_string, push_json_string, write_json};
 pub use order::{Sink, canonical_order};

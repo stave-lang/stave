@@ -63,6 +63,7 @@ struct RawLabel {
 #[serde(deny_unknown_fields)]
 struct RawFix {
     description: String,
+    applicability: Option<String>,
     #[serde(default)]
     edits: Vec<RawEdit>,
 }
@@ -107,9 +108,33 @@ pub struct Edit {
     pub replacement: String,
 }
 
+/// How far a fix can be trusted (the registry header defines the three values).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Applicability {
+    Exact,
+    Maybe,
+    Placeholder,
+}
+
+impl Applicability {
+    pub const ALL: [Applicability; 3] =
+        [Applicability::Exact, Applicability::Maybe, Applicability::Placeholder];
+
+    /// The registry spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Applicability::Exact => "exact",
+            Applicability::Maybe => "maybe",
+            Applicability::Placeholder => "placeholder",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fix {
     pub description: String,
+    /// Stated or defaulted; `Placeholder` whenever `edits` is empty.
+    pub applicability: Applicability,
     pub edits: Vec<Edit>,
 }
 
@@ -257,9 +282,30 @@ fn convert_labels(ls: &[RawLabel]) -> Vec<Label> {
     ls.iter().map(|l| Label { at: l.at.clone(), text: l.text.clone() }).collect()
 }
 
-fn convert_fix(f: &RawFix) -> Fix {
+/// The applicability of a fix: the stated one, else `maybe` with edits and `placeholder`
+/// without. A fix without edits has nothing to apply, so it cannot state another value.
+fn applicability(f: &RawFix) -> Result<Applicability, String> {
+    let default = if f.edits.is_empty() { Applicability::Placeholder } else { Applicability::Maybe };
+    let Some(stated) = f.applicability.as_deref() else { return Ok(default) };
+    let Some(a) = Applicability::ALL.into_iter().find(|a| a.as_str() == stated) else {
+        return Err(format!("applicability {stated:?} is not \"exact\", \"maybe\", or \"placeholder\""));
+    };
+    if f.edits.is_empty() && a != Applicability::Placeholder {
+        return Err(format!("applicability {stated:?} on a fix without edits (always \"placeholder\")"));
+    }
+    Ok(a)
+}
+
+/// Converts a fix. A bad `applicability` is reported for `case` (`""`: the base) and replaced by
+/// the default.
+fn convert_fix(f: &RawFix, case: &str, c: &mut Checker) -> Fix {
+    let applicability = applicability(f).unwrap_or_else(|e| {
+        c.err(if case.is_empty() { format!("fix: {e}") } else { format!("case {case}: fix: {e}") });
+        if f.edits.is_empty() { Applicability::Placeholder } else { Applicability::Maybe }
+    });
     Fix {
         description: f.description.clone(),
+        applicability,
         edits: f
             .edits
             .iter()
@@ -370,7 +416,7 @@ fn check_entry(raw: RawEntry, errs: &mut Vec<String>) -> Option<Entry> {
         return None;
     };
     let base_labels = convert_labels(raw.labels.as_deref().unwrap_or_default());
-    let base_fix = raw.fix.as_ref().map(convert_fix);
+    let base_fix = raw.fix.as_ref().map(|f| convert_fix(f, "", &mut c));
     if severity == Severity::Error && base_fix.is_none() {
         c.err("error entry has no `fix`".to_string());
     }
@@ -389,7 +435,10 @@ fn check_entry(raw: RawEntry, errs: &mut Vec<String>) -> Option<Entry> {
             case: name.clone(),
             message: case.message.clone().unwrap_or_else(|| base.message.clone()),
             labels: case.labels.as_deref().map(convert_labels).unwrap_or_else(|| base.labels.clone()),
-            fix: case.fix.as_ref().map(convert_fix).or_else(|| base.fix.clone()),
+            fix: match &case.fix {
+                Some(f) => Some(convert_fix(f, name, &mut c)),
+                None => base.fix.clone(),
+            },
         };
         c.shape(name, &shape, located, &declared, &mut used);
         shapes.push(shape);

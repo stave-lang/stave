@@ -1,0 +1,47 @@
+//~ CHECK-ONLY
+// A value is never dropped silently: an expression statement whose type is not `()` or
+// `never` is E0210, in every block.
+import std.vec;
+
+struct Stats { pub n: u32 }
+
+impl Stats {
+    pub fn total(&self) -> u32 { return self.n; }
+}
+
+fn digit(c: u8) -> Result<u32, u8> {
+    if c < 48 || c > 57 { return Result.Err(c); }
+    return Result.Ok((c - 48) as u32);
+}
+
+fn popped(v: &mut vec.Vec<u32>) {
+    v.pop(); //~ ERROR E0210
+}
+
+fn ignored_result() {
+    digit(55); //~ ERROR E0210
+}
+
+fn propagated() -> Result<u32, u8> {
+    digit(55)?; //~ ERROR E0210
+    return Result.Ok(0);
+}
+
+fn plain_values(s: &Stats, x: u32) {
+    x; //~ ERROR E0210
+    x + 1; //~ ERROR E0210
+    s.total(); //~ ERROR E0210
+    s.n; //~ ERROR E0210
+    (x, x); //~ ERROR E0210
+}
+
+fn nested(v: &mut vec.Vec<u32>, c: bool) {
+    if c { v.pop(); } //~ ERROR E0210
+    while v.len() > 4 { v.pop(); } //~ ERROR E0210
+    let f = fn(x: u32) { x; }; //~ ERROR E0210
+    f(1);
+}
+
+fn main() -> i32 {
+    return 0;
+}
