@@ -6,16 +6,43 @@ program written in both languages. `bench/run.sh` prints a markdown report on st
 ```sh
 tools/ci-step/run.sh bench                      # or: sh bench/run.sh
 sh bench/run.sh --lines 100000 --seed 1 --runs 5 --reps 500   # the defaults
+sh bench/run.sh --tier quick                    # stave only, small corpus: see Tiers
 ```
 
 Linux only. Needs the Rust toolchain, coreutils, awk, xargs, and any of `tcc`, `gcc`, `clang`; a
 compiler that is not installed is skipped and named in the report. Work files go to
-`target/bench/` and are never checked in.
+`target/bench/` and `target/bench-cache/` and are never checked in.
 
 `sh bench/run.sh --stages` prints only where `stave build` spends its time on the corpus: the
 median wall time of every pipeline step (`STAVE_PROFILE`, `stave_driver::prof`) on 1 thread and on
 all threads. With `--alloc-count` it builds `stave` with a counting allocator and adds allocation
 calls and bytes per step (those times are slower: count and time in separate runs).
+
+## Tiers
+
+`--tier` picks how much is measured. C compiler numbers do not change between Stave commits, so
+only `full` measures them.
+
+| tier | measured | defaults | C rows | output checked against |
+|---|---|---|---|---|
+| `full` (default) | stave and every C configuration | 100,000 lines, 5 runs | measured, then cached | every C build |
+| `stave` | stave, debug and `--release` | 100,000 lines, 5 runs | read from the cache | one C build |
+| `quick` | stave, debug and `--release` | 20,000 lines, 3 runs | none | one C build |
+
+`--lines` and `--runs` override a tier's defaults. The one C build of `stave` and `quick` is the
+first installed of tcc, `gcc -O0`, `clang -O0`; the report names it.
+
+`full` writes each C row to `target/bench-cache/c-<config>-<lines>-<seed>-<reps>.txt` with what it
+was measured on: `--lines`, `--seed`, `--reps`, the compiler's command line and version string,
+and a hash of the generated `single.c` and the kernels' `main.c`. `stave` prints a row only when
+all of that still matches (`--runs` is not compared: the row keeps the run count of the `full` run
+that wrote it); otherwise the row reads `n/a (run --tier full)`.
+
+Every tier also keeps its stave rows in `target/bench-cache/last-<tier>-<lines>.txt` and, when the
+file exists from an earlier run with the same `--seed` and `--reps`, ends the report with a table
+of each stave number (compile time on 1 thread and on all threads, binary size, corpus and kernel
+run times) against that run. A number more than 5% worse is marked `SLOWER`; the exit status
+stays 0.
 
 ## What is measured
 
