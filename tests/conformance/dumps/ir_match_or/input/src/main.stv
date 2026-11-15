@@ -1,0 +1,59 @@
+//~ CHECK-ONLY
+// ir golden: or-patterns: one test block per alternative, all branching to the arm's one guard
+// or body block, whose params are the SSA locals the alternatives bind. A switch on the
+// discriminant where the arms test one; a guarded arm whose alternatives test different values
+// keeps the switch only when the row after it accepts every value.
+enum Tok { Plus, Minus, Num(u32), Pair { a: u32, b: u32 }, Eof }
+
+fn prec(t: Tok) -> u32 {
+    return match t {
+        Tok.Plus | Tok.Minus => 1,
+        Tok.Num(n) | Tok.Pair.{ a: n, b: _ } => n,
+        Tok.Eof => 0,
+    };
+}
+
+fn class(c: u8) -> u32 {
+    let mut r: u32 = 0;
+    match c {
+        0 | 1 => { r = 1; }
+        48..=57 | 97..=102 => { r = 2; }
+        _ => {}
+    }
+    return r;
+}
+
+fn over(t: Tok, lim: u32) -> u32 {
+    return match t {
+        Tok.Num(n) | Tok.Pair.{ a: n, b: 0 } if n > lim => n,
+        Tok.Plus | Tok.Minus if lim == 0 => 1,
+        _ => 0,
+    };
+}
+
+fn linear(t: Tok, c: bool) -> u32 {
+    return match t {
+        Tok.Plus | Tok.Minus if c => 1,
+        Tok.Plus => 2,
+        _ => 0,
+    };
+}
+
+fn slot(t: Tok) -> u32 {
+    match t {
+        Tok.Num(n) | Tok.Pair.{ a: _, b: n } => {
+            let r = &n;
+            return *r;
+        }
+        _ => { return 0; }
+    }
+}
+
+fn main() -> i32 {
+    let a = prec(Tok.Pair.{ a: 2, b: 3 });
+    let b = class(50);
+    let c = over(Tok.Num(9), 5);
+    let d = linear(Tok.Minus, true);
+    let e = slot(Tok.Num(4));
+    return if a + b + c + d + e == 18 then 0 else 1;
+}

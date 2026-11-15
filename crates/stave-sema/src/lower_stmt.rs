@@ -1,10 +1,11 @@
 //! Statement lowering: blocks and scopes (drops), `let`, assignments, `if`,
 //! `while`, `loop`, `for` (ranges, arrays and slices, iterators), `match` (statement and value
-//! form, one `switch` on the discriminant when the arms test one), `return`/`break`/`continue`,
+//! form, one `switch` on the discriminant when the arms test one, or-patterns: a test per
+//! alternative into the arm's one guard and body), `return`/`break`/`continue`,
 //! patterns, closures, the fn body driver, drop glue, and the body pre-pass (locals, slots,
 //! assignment sites, closures).
 
-use stave_ir::{Block, FuncBuilder, Op, Operand};
+use stave_ir::{Block, FuncBuilder, Op, Operand, Value};
 use stave_syntax::{NodeKind, Term};
 
 use crate::decls::DeclKind;
@@ -186,6 +187,12 @@ impl<'a> FnCx<'a> {
                 && let Some(sp) = icx.child(node, NodeKind::SelfParam)
             {
                 self.by_node.insert(sp, idx);
+            }
+        }
+        // a later alternative of an or-pattern binds the first alternative's locals
+        for &(alt, first) in &icx.res.aliases {
+            if let Some(&l) = self.by_node.get(&first) {
+                self.by_node.insert(alt, l);
             }
         }
         let lo = icx.ast.descendants(root).start;
@@ -1170,30 +1177,59 @@ impl<'a> FnCx<'a> {
         Some((p, mode))
     }
 
+    /// The SSA locals the first alternative `p` of an or-pattern binds, in local order.
+    fn ssa_bindings(&self, p: u32) -> Vec<usize> {
+        let icx = self.icx;
+        let lo = icx.ast.descendants(p).start;
+        let bs = &icx.res.bindings;
+        let i = bs.partition_point(|x| x.at.node < lo);
+        let j = bs.partition_point(|x| x.at.node <= p);
+        let mut ls: Vec<usize> = bs[i..j]
+            .iter()
+            .filter_map(|b| self.by_node.get(&b.at.node).copied())
+            .filter(|&l| self.f.slot.get(l).copied().flatten().is_none())
+            .collect();
+        ls.sort_unstable();
+        ls.dedup();
+        ls
+    }
+
     pub fn lower_match(&mut self, n: u32, kids: &[u32], is_expr: bool) -> E {
         let icx = self.icx;
         let Some(&scrut) = kids.first() else { return self.fail(n, "match") };
         let arms = &kids[1..];
         let ty = if is_expr { self.nty(n) } else { TypeId::NONE };
         let vt = if !is_expr || ty.is_none() || self.is_never(ty) { self.t_unit() } else { ty };
-        // blocks: per arm test, guard, body; then join
+        // blocks: per arm a test per alternative, guard, body; then join
         struct ArmB {
-            pat: u32,
             guard: Option<u32>,
             body: u32,
-            test: Block,
+            /// Its alternatives are rows `lo..hi`.
+            lo: usize,
+            hi: usize,
             gb: Option<Block>,
             bb: Block,
         }
+        // one alternative of an arm: its pattern and test block
+        let mut rows: Vec<(u32, Block)> = Vec::with_capacity(arms.len());
         let mut ab: Vec<ArmB> = Vec::with_capacity(arms.len());
         for &arm in arms {
-            let ak = icx.arm_kids(arm);
-            let (Some(&pat), Some(&body)) = (ak.first(), ak.last()) else { continue };
+            // [ArmPattern, guard?, body]
+            let ak = icx.kids_vec(arm);
+            let (Some(&ap), Some(&body)) = (ak.first(), ak.last()) else { continue };
             let guard = if ak.len() >= 3 { Some(ak[1]) } else { None };
-            let test = self.f.b.create_block();
+            let lo = rows.len();
+            match icx.only_child(ap) {
+                Some(pat) => rows.push((pat, self.f.b.create_block())),
+                None => {
+                    for &pat in &icx.kids_vec(ap) {
+                        rows.push((pat, self.f.b.create_block()));
+                    }
+                }
+            }
             let gb = guard.map(|_| self.f.b.create_block());
             let bb = self.f.b.create_block();
-            ab.push(ArmB { pat, guard, body, test, gb, bb });
+            ab.push(ArmB { guard, body, lo, hi: rows.len(), gb, bb });
         }
         let pre: Vec<Ty> = if is_expr { vec![vt] } else { Vec::new() };
         let j = self.join(n, &pre);
@@ -1201,18 +1237,39 @@ impl<'a> FnCx<'a> {
         let Some(sp) = self.place_of(e) else { return E::Never };
         let Some((dp, _)) = self.peel(sp.clone(), Mode::Move) else { return E::Never };
         let dk = self.kind(dp.ty);
-        let tops: Vec<Top> = ab.iter().map(|a| self.top_of(a.pat, dp.ty)).collect();
+        let tops: Vec<Top> = rows.iter().map(|r| self.top_of(r.0, dp.ty)).collect();
+        let nr = rows.len();
         let discr = matches!(dk, TypeKind::Int { .. } | TypeKind::Bool | TypeKind::Char)
             || matches!(&dk, TypeKind::Adt { def, .. } if self.g.sigs.adt(*def).is_some_and(|a| a.is_enum));
+        // the value every alternative of the arm tests, if it is one value
+        let arm_top = |a: &ArmB| match tops[a.lo] {
+            Top::Value(_) if tops[a.lo..a.hi].iter().all(|t| *t == tops[a.lo]) => tops[a.lo],
+            _ => Top::Any,
+        };
+        // After a failed guard the rows of the later arms are tried. Their tests rely on the
+        // switch having picked them, so the next row must be known without the discriminant:
+        // either the arm tests one value, or the row after it accepts every value.
         let switch_mode = discr
-            && !ab.is_empty()
+            && nr > 0
             && tops.iter().all(|t| *t != Top::Complex)
-            && tops.iter().any(|t| matches!(t, Top::Value(_)));
+            && tops.iter().any(|t| matches!(t, Top::Value(_)))
+            && ab
+                .iter()
+                .all(|a| a.guard.is_none() || arm_top(a) != Top::Any || a.hi == nr || tops[a.hi] == Top::Any);
+        // the first row from `from` on that a value passing a row with top `top` can still match
+        let next_row = |from: usize, top: Top| {
+            if !switch_mode {
+                return (from < nr).then_some(from);
+            }
+            (from..nr).find(|&m| match (top, tops[m]) {
+                (_, Top::Any) => true,
+                (Top::Value(a), Top::Value(b)) => a == b,
+                _ => false,
+            })
+        };
         let snap = self.f.env.clone();
         let scope_base = self.f.scopes.len();
-        let nb = ab.len();
         let mut unreach: Option<Block> = None;
-        let mut fail_of: Vec<Option<Block>> = vec![None; nb];
         if switch_mode {
             let d = if matches!(dk, TypeKind::Adt { .. }) {
                 let Some(v) = self.peek(&dp) else { return E::Never };
@@ -1234,63 +1291,122 @@ impl<'a> FnCx<'a> {
                     _ => v,
                 }
             };
-            let default = tops.iter().position(|t| *t == Top::Any).unwrap_or(nb - 1);
+            let default = tops.iter().position(|t| *t == Top::Any).unwrap_or(nr - 1);
             let mut cases: Vec<(i128, Block, &[Operand])> = Vec::new();
             for (k, t) in tops.iter().enumerate().take(default) {
                 if let Top::Value(v) = t
                     && !cases.iter().any(|c| c.0 == *v)
                 {
-                    cases.push((*v, ab[k].test, &[]));
+                    cases.push((*v, rows[k].1, &[]));
                 }
             }
-            self.f.b.switch(d, &cases, ab[default].test, &[]);
-            for (k, f) in fail_of.iter_mut().enumerate() {
-                let next = ((k + 1)..nb).find(|&m| match (tops[k], tops[m]) {
-                    (_, Top::Any) => true,
-                    (Top::Value(a), Top::Value(b)) => a == b,
-                    _ => false,
-                });
-                *f = next.map(|m| ab[m].test);
-            }
+            self.f.b.switch(d, &cases, rows[default].1, &[]);
         } else {
-            match ab.first() {
-                Some(a0) => self.f.b.br(a0.test, &[]),
+            match rows.first() {
+                Some(r0) => self.f.b.br(r0.1, &[]),
                 None => self.f.b.unreachable(),
             }
-            for (k, f) in fail_of.iter_mut().enumerate() {
-                *f = ab.get(k + 1).map(|a| a.test);
-            }
         }
-        for k in 0..nb {
-            let fail = match fail_of[k] {
-                Some(b) => b,
-                None => *unreach.get_or_insert_with(|| self.f.b.create_block()),
+        for a in &ab {
+            let mut target = |s: &mut Self, row: Option<usize>| match row {
+                Some(m) => rows[m].1,
+                None => *unreach.get_or_insert_with(|| s.f.b.create_block()),
             };
-            self.f.env = snap.clone();
-            self.f.b.switch_to(ab[k].test);
-            self.push_scope();
-            let ok = self.pat(ab[k].pat, sp.clone(), Mode::Move, Some(fail), switch_mode);
+            let guard_fail = target(self, next_row(a.hi, arm_top(a)));
+            let ok = if a.hi - a.lo == 1 {
+                let fail = target(self, next_row(a.lo + 1, tops[a.lo]));
+                self.f.env = snap.clone();
+                self.f.b.switch_to(rows[a.lo].1);
+                self.push_scope();
+                let ok = self.pat(rows[a.lo].0, sp.clone(), Mode::Move, Some(fail), switch_mode);
+                if ok {
+                    match a.gb {
+                        Some(gb) => self.f.b.br(gb, &[]),
+                        None if self.open() => self.f.b.br(a.bb, &[]),
+                        None => {}
+                    }
+                }
+                ok
+            } else {
+                // An or-pattern: every alternative binds the same locals and branches to the
+                // one block the arm continues in, which takes the SSA locals as params.
+                let shared = a.gb.unwrap_or(a.bb);
+                let ls = self.ssa_bindings(rows[a.lo].0);
+                let params: Vec<Value> = ls
+                    .iter()
+                    .map(|&l| {
+                        let t = self.locals[l].ty;
+                        self.f.b.add_param(shared, Self::ir(t))
+                    })
+                    .collect();
+                // the env and the scope's locals after the first alternative that lowers
+                let mut bound: Option<(Env, Vec<usize>)> = None;
+                for k in a.lo..a.hi {
+                    let fail = target(self, next_row(k + 1, tops[k]));
+                    self.f.env = snap.clone();
+                    self.f.b.switch_to(rows[k].1);
+                    self.push_scope();
+                    let ok = self.pat(rows[k].0, sp.clone(), Mode::Move, Some(fail), switch_mode);
+                    if !ok || !self.open() {
+                        self.f.scopes.truncate(scope_base);
+                        continue;
+                    }
+                    let mut args: Vec<Operand> = Vec::with_capacity(ls.len());
+                    for &l in &ls {
+                        let v = match self.f.env.vals.get(l).copied().flatten() {
+                            Some(v) => v,
+                            None => {
+                                let t = self.locals[l].ty;
+                                self.dummy(t)
+                            }
+                        };
+                        args.push(v);
+                    }
+                    self.f.b.br(shared, &args);
+                    let mut scope = self.f.scopes.pop().unwrap_or_default();
+                    if let Some((env, first)) = &bound {
+                        // the alternatives bind the same names with the same types and modes,
+                        // so they initialize and move the same locals
+                        let mut first = first.clone();
+                        first.sort_unstable();
+                        scope.sort_unstable();
+                        if env.st != self.f.env.st || first != scope {
+                            self.fail(rows[k].0, "or-pattern alternatives bind differently");
+                        }
+                    } else {
+                        bound = Some((self.f.env.clone(), scope));
+                    }
+                }
+                match bound {
+                    Some((env, scope)) => {
+                        self.f.env = env;
+                        self.f.scopes.push(scope);
+                        for (&l, &p) in ls.iter().zip(&params) {
+                            self.f.env.vals[l] = Some(Operand::Value(p));
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            };
             if ok {
-                if let (Some(g), Some(gb)) = (ab[k].guard, ab[k].gb) {
-                    self.f.b.br(gb, &[]);
+                if let (Some(g), Some(gb)) = (a.guard, a.gb) {
                     self.f.b.switch_to(gb);
                     let bt = self.t_bool();
                     if let Some(gv) = self.val(g, Some(bt)) {
-                        self.f.b.cbr(gv, ab[k].bb, &[], fail, &[]);
+                        self.f.b.cbr(gv, a.bb, &[], guard_fail, &[]);
                     }
-                } else if self.open() {
-                    self.f.b.br(ab[k].bb, &[]);
                 }
-                self.f.b.switch_to(ab[k].bb);
+                self.f.b.switch_to(a.bb);
                 if is_expr {
                     let w = Some(vt);
-                    if let Some(v) = self.val(ab[k].body, w) {
+                    if let Some(v) = self.val(a.body, w) {
                         self.drop_temps_keep();
                         self.pop_scope();
                         self.br_join(j, &[v]);
                     }
                 } else {
-                    self.block(ab[k].body);
+                    self.block(a.body);
                     self.pop_scope();
                     self.br_join(j, &[]);
                 }

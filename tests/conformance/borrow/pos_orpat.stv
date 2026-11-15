@@ -1,0 +1,64 @@
+//~ CHECK-ONLY
+// Or-pattern bindings pass the borrow checker like the bindings of a single pattern: moved out
+// of an owned scrutinee, borrowed from a reference, read in a guard and owned in the body.
+import std.string;
+
+enum Msg { Text(string.String), Note(string.String), Code(u32) }
+
+fn eat(s: string.String) -> usize {
+    return s.len();
+}
+
+fn owned(m: Msg) -> usize {
+    match m {
+        Msg.Text(s) | Msg.Note(s) => { return eat(s); }
+        Msg.Code(c) => { return c as usize; }
+    }
+}
+
+fn shared(m: &Msg) -> usize {
+    return match m {
+        Msg.Text(s) | Msg.Note(s) => s.len(),
+        Msg.Code(_) => 0,
+    };
+}
+
+fn exclusive(m: &mut Msg) {
+    match m {
+        Msg.Text(s) | Msg.Note(s) => { s.push('x'); }
+        Msg.Code(c) => { *c = *c + 1; }
+    }
+}
+
+fn guarded(m: Msg) -> usize {
+    match m {
+        Msg.Text(s) | Msg.Note(s) if s.len() > 3 => { return eat(s); }
+        Msg.Text(s) | Msg.Note(s) => { return eat(s) + 100; }
+        Msg.Code(_) => { return 0; }
+    }
+}
+
+fn untouched(m: Msg) -> usize {
+    let mut n: usize = 0;
+    match m {
+        Msg.Text(_) | Msg.Note(_) => { n = 1; }
+        Msg.Code(_) => {}
+    }
+    let keep = m;
+    return n;
+}
+
+fn reused(c: bool) -> usize {
+    let mut m = Msg.Code(1);
+    let mut n: usize = 0;
+    match &m {
+        Msg.Text(s) | Msg.Note(s) => { n = s.len(); }
+        Msg.Code(_) => {}
+    }
+    m = Msg.Code(2);
+    return n;
+}
+
+fn main() -> i32 {
+    return 0;
+}

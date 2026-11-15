@@ -622,6 +622,9 @@ pub(crate) struct Ck<'a> {
     /// The pass-through wrapper nodes of the expressions being typed ([`Ck::expr`]), innermost
     /// expression last.
     pub chain_buf: Vec<u32>,
+    /// While the alternatives of an or-pattern are typed: the bindings of the current
+    /// alternative (binding node, type, mode), in source order.
+    pub or_binds: Option<Vec<(u32, TypeId, crate::patterns::Mode)>>,
 }
 
 fn check_body(
@@ -676,6 +679,7 @@ fn check_body(
         reachable: true,
         kids_buf: Vec::new(),
         chain_buf: Vec::new(),
+        or_binds: None,
     };
     match j.kind {
         JobKind::Fn => {

@@ -1,0 +1,79 @@
+//~ STDOUT orpat_drops.stdout
+// Droppable or-pattern bindings: the value bound by whichever alternative matched is dropped
+// exactly once: at the end of the arm, earlier when the body moves it, and by the next arm when
+// a false guard leaves it in the scrutinee.
+import std.io;
+import std.mem;
+
+struct Loud { pub id: u32 }
+
+impl Drop for Loud {
+    fn drop(&mut self) { io.print(f"drop {self.id}\n"); }
+}
+
+enum Slot { A(Loud), B(Loud), Empty }
+
+impl Slot {
+    fn id(&self) -> u32 {
+        return match self {
+            Slot.A(l) | Slot.B(l) => l.id,
+            Slot.Empty => 0,
+        };
+    }
+
+    fn into_id(self) -> u32 {
+        match self {
+            Slot.A(l) | Slot.B(l) => { return l.id; }
+            Slot.Empty => { return 0; }
+        }
+    }
+}
+
+fn maybe(s: Slot, keep: bool) -> u32 {
+    let mut r: u32 = 0;
+    match s {
+        Slot.A(l) | Slot.B(l) => {
+            r = l.id;
+            if !keep {
+                mem.drop(l);
+                io.print("early\n");
+            }
+        }
+        Slot.Empty => {}
+    }
+    io.print("after\n");
+    return r;
+}
+
+fn pick(s: Slot, lim: u32) -> u32 {
+    match s {
+        Slot.A(l) | Slot.B(l) if l.id > lim => { return l.id; }
+        Slot.A(l) | Slot.B(l) => { return l.id + 100; }
+        Slot.Empty => { return 0; }
+    }
+}
+
+fn nested(o: Option<Slot>) -> u32 {
+    return match o {
+        Option.Some(Slot.A(l)) | Option.Some(Slot.B(l)) => l.id,
+        Option.Some(Slot.Empty) | Option.None => 0,
+    };
+}
+
+fn main() -> i32 {
+    let a = Slot.A(Loud.{ id: 1 });
+    let i0 = a.id();
+    let i1 = a.into_id();
+    io.print(f"ids {i0} {i1}\n");
+    let m0 = maybe(Slot.A(Loud.{ id: 2 }), true);
+    let m1 = maybe(Slot.B(Loud.{ id: 3 }), false);
+    let m2 = maybe(Slot.Empty, false);
+    io.print(f"maybe {m0} {m1} {m2}\n");
+    let p0 = pick(Slot.A(Loud.{ id: 7 }), 5);
+    let p1 = pick(Slot.B(Loud.{ id: 4 }), 5);
+    io.print(f"pick {p0} {p1}\n");
+    let n0 = nested(Option.Some(Slot.B(Loud.{ id: 8 })));
+    let n1 = nested(Option.None);
+    io.print(f"nested {n0} {n1}\n");
+    return 0;
+}

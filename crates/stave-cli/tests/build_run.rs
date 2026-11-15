@@ -271,7 +271,7 @@ fn vector_program_is_not_implemented() {
     }
 }
 
-/// Syntax that parses but has no semantics yet (parameter `from`, contracts, or-patterns) is
+/// Syntax that parses but has no semantics yet (parameter `from`, contracts) is
 /// "not implemented yet" for `stave check` and `stave build` (exit 2, naming the construct and
 /// its place); an error in the same program is reported instead (exit 1).
 #[test]
@@ -291,13 +291,6 @@ fn parsed_only_syntax_is_not_implemented() {
              fn main() -> i32 {\n    return 0;\n}\n",
             "a `from` clause on a parameter at ",
             ":2:18",
-        ),
-        (
-            "or_pattern.stv",
-            "fn main() -> i32 {\n    let x: u8 = 1;\n    return match x {\n        0 | 1 => 0,\n        \
-             _ => 1,\n    };\n}\n",
-            "an or-pattern (`A | B`) at ",
-            ":4:9",
         ),
     ];
     for (name, src, what, at) in cases {
