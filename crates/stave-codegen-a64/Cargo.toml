@@ -14,6 +14,7 @@ workspace = true
 
 [dependencies]
 stave-obj = { workspace = true }
+stave-opt = { workspace = true }
 stave-ir = { workspace = true }
 
 [dev-dependencies]

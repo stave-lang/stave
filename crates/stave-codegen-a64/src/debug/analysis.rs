@@ -10,8 +10,10 @@
 
 use stave_ir::ir::{Target, ValueDef};
 use stave_ir::{Body, Func, Op, Operand, Term};
+use stave_opt::regalloc;
 
 use super::abi;
+use super::emit::NOREG;
 use super::support::{Codegen, Intr};
 use super::ty::{Sc, Ty};
 use super::{R, bad, unsupported};
@@ -67,6 +69,9 @@ pub struct Analysis {
     pub(crate) rpo: Vec<u32>,
     /// Block → RPO index, `NONE` if unreachable.
     pub(crate) rpo_of: Vec<u32>,
+    /// The reachable blocks in emission order: `rpo`, in a release build with the cold blocks
+    /// last (stave-opt `layout`). Liveness stays in RPO indices whatever this order is.
+    pub(crate) emit: Vec<u32>,
     /// Per value: RPO index of the defining block.
     pub(crate) def_rpo: Vec<u32>,
     pub(crate) start: Vec<u32>,
@@ -82,6 +87,21 @@ pub struct Analysis {
     pub(crate) scratch_off: u32,
     pub(crate) x8_off: u32,
     pub(crate) args: Vec<abi::Arg>,
+    /// Release: per value, the callee-saved register it owns from its definition to its last
+    /// use (`x19`–`x28` for an integer-class value, `v8`–`v15` for a float), `NOREG` for none.
+    /// Empty in a debug build.
+    pub(crate) own: Vec<u8>,
+    /// Per owned value: the first and last block (index into `emit`) of its interval. No other
+    /// value has its register in those blocks.
+    pub(crate) own_first: Vec<u32>,
+    pub(crate) own_last: Vec<u32>,
+    /// Release: uses per value, saturating. Empty in a debug build.
+    pub(crate) uses: Vec<u8>,
+    /// The owned registers as (is FP, number); entry `k` is saved at `[x29 - 8 * (k + 1)]`.
+    pub(crate) saved: Vec<(bool, u8)>,
+    /// Release: per block, the compare instruction its `cbr` emits itself (`cmp` + `b.cond`, no
+    /// bool value); `NONE` otherwise. Empty in a debug build.
+    pub(crate) fused: Vec<u32>,
     // scratch
     tin: Vec<u32>,
     tout: Vec<u32>,
@@ -224,7 +244,116 @@ impl Analysis {
             }
         }
         self.last_uses(body, nr);
-        self.frame(cg, f, body, nr, scratch_need)
+        self.frame(cg, f, body, nr, scratch_need)?;
+        self.own.clear();
+        self.own_first.clear();
+        self.own_last.clear();
+        self.uses.clear();
+        self.saved.clear();
+        self.fused.clear();
+        self.emit.clear();
+        if cg.release {
+            self.emit = stave_opt::layout::order(body);
+            self.ownership(body)?;
+            self.fusion(cg, body);
+        } else {
+            self.emit.extend_from_slice(&self.rpo);
+        }
+        Ok(())
+    }
+
+    /// Release: finds the compares a `cbr` can emit itself: defined in the branch's block, used
+    /// by nothing else, on scalars. Their operands stay bound up to the terminator (no last-use
+    /// mark in the block).
+    fn fusion(&mut self, cg: &Codegen<'_>, body: &Body) {
+        self.uses.resize(body.values.len(), 0);
+        let uses = &mut self.uses;
+        let mut add = |o: Operand| {
+            if let Operand::Value(v) = o
+                && let Some(c) = uses.get_mut(v.index())
+            {
+                *c = c.saturating_add(1);
+            }
+        };
+        body.operands.iter().for_each(|o| add(*o));
+        for bd in &body.blocks {
+            match bd.term {
+                Term::Cbr { cond: o, .. } | Term::Switch { scrut: o, .. } | Term::Ret(Some(o)) => add(o),
+                _ => {}
+            }
+        }
+        self.fused.resize(body.blocks.len(), NONE);
+        for &blk in &self.rpo {
+            let bd = &body.blocks[blk as usize];
+            let Term::Cbr { cond: Operand::Value(c), .. } = bd.term else { continue };
+            let Some(ValueDef::Inst(j)) = body.values.get(c.index()).map(|v| v.def) else { continue };
+            if !bd.insts.indices().contains(&j) || self.uses[c.index()] != 1 {
+                continue;
+            }
+            if !matches!(body.insts.op[j as usize], Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge) {
+                continue;
+            }
+            let scalar = |o: &Operand| match o {
+                Operand::Value(v) => {
+                    body.value_ty(*v).is_some_and(|t| matches!(cg.ty(t), Ty::Sc(_)))
+                        && !matches!(self.kind[v.index()], Vk::Slot)
+                }
+                Operand::Const(_) => true,
+                _ => false,
+            };
+            let args = body.args(j);
+            if args.len() != 2
+                || !args.iter().all(scalar)
+                || args.iter().all(|o| matches!(o, Operand::Const(_)))
+            {
+                continue;
+            }
+            self.fused[blk as usize] = j;
+            for oi in body.insts.args[j as usize].indices() {
+                self.last_use[oi as usize] = false;
+            }
+        }
+    }
+
+    /// Release: which values own a register, and the save area for those registers at the top
+    /// of the frame.
+    fn ownership(&mut self, body: &Body) -> R<()> {
+        const INTS: u8 = 10;
+        const FLOATS: u8 = 8;
+        let class: Vec<u8> = self
+            .kind
+            .iter()
+            .map(|k| match k {
+                Vk::Gpr(_) => regalloc::CLASS_INT,
+                Vk::Fpr(_) => regalloc::CLASS_FLOAT,
+                _ => regalloc::CLASS_NONE,
+            })
+            .collect();
+        let pools =
+            regalloc::Pools { int_saved: INTS, int_scratch: 0, float_saved: FLOATS, float_scratch: 0 };
+        let asg = regalloc::assign(body, &self.emit, &class, &[], pools);
+        if asg.is_empty() {
+            return Ok(());
+        }
+        self.own_first.extend_from_slice(&asg.first);
+        self.own_last.extend_from_slice(&asg.last);
+        self.own.extend(asg.reg.iter().zip(&class).map(|(&r, &c)| {
+            if r == regalloc::NO_REG {
+                NOREG
+            } else if c == regalloc::CLASS_FLOAT {
+                8 + r % FLOATS
+            } else {
+                19 + r % INTS
+            }
+        }));
+        self.saved.extend((0..INTS).filter(|r| asg.int_used & (1 << r) != 0).map(|r| (false, 19 + r)));
+        self.saved.extend((0..FLOATS).filter(|r| asg.float_used & (1 << r) != 0).map(|r| (true, 8 + r)));
+        let frame = align_up64(u64::from(self.frame) + 8 * self.saved.len() as u64, 16);
+        if frame >= FRAME_MAX {
+            return Err(frame_too_large());
+        }
+        self.frame = frame as u32;
+        Ok(())
     }
 
     fn use_at(&mut self, o: Operand, i: u32) -> R<()> {

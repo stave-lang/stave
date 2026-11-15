@@ -33,7 +33,8 @@ diagnostics); they say so where they do.
 
 - Memory safety is the aim, not yet a guarantee: the borrow checker is young, and soundness bugs
   are expected. A safe program that corrupts memory is a compiler bug; please report it.
-- Generated code is slow: no register allocation, no optimizer, no vector code generation.
+- Generated code is slow next to `-O2`: `--release` assigns registers and cleans up slice accesses,
+  but nothing is inlined, hoisted out of loops, or vectorized.
 - The borrow checker's memory use grows quadratically with the number of borrows in one function.
 - Linux only. No C interop yet (`extern "C"` imports cannot be linked).
 
@@ -50,18 +51,19 @@ build), and three small kernels. Milliseconds, wall clock; C at 16 threads = 81 
 
 | compiler | compile, 1 thread | compile, 16 threads | binary, MB | corpus run | nbody | hashmix | sieve |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| stave | 1569 | 299 | 7.6 | 213 | 240 | 297 | 1024 |
-| stave --release | 1573 | 332 | 6.2 | 193 | 239 | 304 | 1194 |
-| tcc | 83 | 33 | 3.1 | 174 | 332 | 320 | 880 |
-| gcc -O0 | 6452 | 812 | 2.8 | 153 | 304 | 300 | 1086 |
-| gcc -O2 | 35625 | 3767 | 1.4 | 40 | 89 | 120 | 215 |
-| clang -O0 | 3303 | 581 | 2.9 | 159 | 330 | 306 | 796 |
-| clang -O2 | 21203 | 2358 | 2.0 | 31 | 89 | 119 | 258 |
+| stave | 997 | 198 | 7.6 | 220 | 244 | 351 | 1068 |
+| stave --release | 1099 | 228 | 5.4 | 165 | 123 | 256 | 637 |
+| tcc | 84 | 35 | 3.1 | 176 | 372 | 376 | 815 |
+| gcc -O0 | 6617 | 939 | 2.8 | 157 | 345 | 444 | 864 |
+| gcc -O2 | 40393 | 4339 | 1.4 | 40 | 90 | 127 | 248 |
+| clang -O0 | 3338 | 642 | 2.9 | 159 | 331 | 301 | 743 |
+| clang -O2 | 22668 | 3355 | 2.0 | 32 | 89 | 124 | 272 |
 
 i7-10700F (8 cores / 16 threads), Debian 13, gcc 14.2.0, clang 19.1.7, tcc 0.9.27; 101,042-line
-corpus (seed 1); median of 5. On one thread Stave compiles 4x faster than gcc -O0 and 19x slower
-than tcc; its code runs at about `-O0` speed (1.4x slower on the corpus, faster on nbody) and 2.5x
-to 7x slower than `-O2`. C binaries exclude libc (dynamically linked).
+corpus (seed 1); median of 5. On one thread Stave compiles 7x faster than gcc -O0 and 12x slower
+than tcc. A debug build runs at about `-O0` speed. A `--release` build compiles 10% slower than a
+debug build and runs 1.4x (nbody) to 4x (the call-heavy corpus) slower than gcc `-O2`.
+C binaries exclude libc (dynamically linked).
 
 ## A taste
 
@@ -149,8 +151,8 @@ tools/ci-step/run.sh check                           # fmt, clippy, tests, gener
 ## Layout
 
 - `LANG.md`: language reference. `contracts/`: grammar, diagnostic registry, file formats.
-- `crates/`: stage0, the compiler in Rust (bootstrap and reference). `crates/stave-opt` is an empty
-  placeholder for the optimizer. `std/`, `runtime/`: Stave sources.
+- `crates/`: stage0, the compiler in Rust (bootstrap and reference). `crates/stave-opt` holds the IR
+  passes and the register assignment of `--release`. `std/`, `runtime/`: Stave sources.
 - `stage1/`: the planned compiler written in Stave; only generated tables so far, no compiler yet.
 - `tests/conformance/`: language conformance suite. `fuzz/`: cargo-fuzz targets for the front end.
   `tools/`: generators and CI steps.

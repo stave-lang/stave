@@ -11,6 +11,14 @@
 //! Register classes: GPR and FP scalar. Aggregates (tuples, structs, arrays, enums) and fat
 //! pointers live in memory (their home slot); scalars live in registers.
 //!
+//! Release code generation ([`Codegen::release`]) keeps this structure. A value used in another
+//! block, and every param of a later block, owns a callee-saved register (`x19`–`x28`, `v8`–`v15`)
+//! from its definition to its last use when stave-opt's `regalloc` finds one; those registers are
+//! saved below the frame pointer. Branch arguments are one parallel move. Blocks are emitted loop
+//! by loop with the blocks that cannot return last (stave-opt `layout`). A compare read only by
+//! its block's `cbr` is flags and a `b.cond`; a loop counter's increment is defined in the param's
+//! register.
+//!
 //! # Calling convention (Stave → Stave calls, AAPCS64-based)
 //!
 //! - Integer-class scalars (ints, `bool`, `char`, thin pointers, fn values) go in the next free
@@ -32,7 +40,7 @@
 //!   aggregate result is written to the buffer whose address the caller passes in `x8`
 //!   (AAPCS64 indirect result location); unit returns nothing.
 //! - Caller-saved: `x0–x18`, `v0–v7`, `v16–v31`, flags. Callee-saved: `x19–x28`, `x29` (frame
-//!   pointer), `v8–v15` (low 64 bits). The debug backend never allocates callee-saved registers;
+//!   pointer), `v8–v15` (low 64 bits). A debug build never allocates callee-saved registers;
 //!   every frame saves `x29, x30` with `stp x29, x30, [sp, #-16]!; mov x29, sp`.
 //! - `sp` is 16-byte aligned at every call. Frames larger than 4 KiB are probed page by page in
 //!   the prologue (runtime/README.md, guard page).

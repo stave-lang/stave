@@ -181,7 +181,7 @@ fn thread_child_stack_is_aligned() {
         b.switch_to(done);
         p.out(b, v, t.u64);
     });
-    if let Some(r) = native(&p.m, "thread_align") {
+    if let Some(r) = native(&p.m, "thread_align", false) {
         assert_eq!(r.code, 0, "{r:?}");
         assert_eq!(r.stdout, 1u64.to_le_bytes(), "child frame address mod 16, plus 1");
     }

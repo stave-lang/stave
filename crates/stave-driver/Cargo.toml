@@ -19,6 +19,7 @@ stave-codegen-x64.workspace = true
 stave-diag.workspace = true
 stave-ir.workspace = true
 stave-obj.workspace = true
+stave-opt.workspace = true
 stave-sema.workspace = true
 stave-syntax.workspace = true
 stave-target.workspace = true

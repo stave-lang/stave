@@ -105,14 +105,14 @@ flags above.
 - The corpus is synthetic: dense integer expressions, small fns, shallow loops. Real programs
   have other mixes; gcc and clang at `-O2` spend unusually long on it. Lines are about 42 bytes
   long on average.
-- Stave run time comes from a debug-quality back end: no register allocation, no optimizer, no
-  vector code generation. It is expected to lose to `-O2`, and it does. `--release` today only
-  lowers what `main` reaches, removes the bounds checks it has a proof for, and packs the image.
-  On the build host that makes no measurable difference to 1-thread compile time or to the kernel
-  run times; the all-threads build is about 10% slower, the corpus runs about 9% faster, and the
-  binary is about 18% smaller.
-- Stave binaries are large: debug-layout code with no register allocation, statically linked.
-  C binaries are dynamically linked, so their sizes exclude libc.
+- A debug build keeps every value that crosses a block in its stack slot and optimizes nothing.
+  `--release` lowers only what `main` reaches, reads each slice's address and length once,
+  removes the bounds checks it has a proof for, keeps values that cross blocks in registers,
+  folds addresses into loads and stores, puts cold code last, and packs the image. It does not
+  inline, hoist loop-invariant code, or build vector code, so it is expected to lose to `-O2`,
+  and it does.
+- Stave binaries are large: statically linked, with the runtime and its panic reports in every
+  program. C binaries are dynamically linked, so their sizes exclude libc.
 - The corpus run time measures calls and branches more than arithmetic; the kernels measure
   loops over arrays. Neither uses SIMD: stage0 cannot build vector code yet, and the C compilers
   run at their baseline x86-64 target.
