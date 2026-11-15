@@ -39,7 +39,7 @@ fn locationless_human_and_json() {
         "{\"kind\":\"diagnostic\",\"code\":\"E1302\",\"severity\":\"error\",\
          \"message\":\"`--compiler gpu`: no usable GPU (compute capability 7.5 < 8.6)\",\"related\":[],\
          \"fix\":{\"description\":\"use `--compiler auto` or `--compiler cpu`: stage1 needs compute \
-         capability 8.6 or higher\",\"edits\":[]}}\n"
+         capability 8.6 or higher\",\"applicability\":\"placeholder\",\"edits\":[]}}\n"
     );
 }
 

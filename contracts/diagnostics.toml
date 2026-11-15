@@ -9,6 +9,8 @@
 #     (E12xx), retired ones included, has no entry here, or an entry has no row there, or a code
 #     appears twice, or the entries are not sorted by code;
 #   - an error entry lacks `message` or `fix`;
+#   - a fix states an `applicability` outside the three values, or a fix without edits states
+#     one other than "placeholder";
 #   - a template uses a hole not declared in `holes`, or a declared hole is unused by the entry
 #     and all its cases together;
 #   - a hole kind is not one of the kinds below, or a `text-literal` hole has no `choices`.
@@ -39,15 +41,19 @@
 #             compiler supplies; related spans print in the order of this list. A role may be
 #             supplied several times (a call chain, a cycle): its label prints once per span, in
 #             the order supplied. A label whose role is not supplied is not printed
-#   fix       { description = template, edits = [{ at = "primary" | "<role>", replacement = template }] }
-#             Planned (diaggen rejects the key until then): `applicability = "exact" | "maybe" |
-#             "placeholder"` on a fix with edits (default "maybe"; a fix without edits is
-#             "placeholder"). Only "exact" fixes are applied by `stave fix`. Entries whose edits are
-#             already token-local (E0023, E0024, E0026 case unit, E0027, E0210) become "exact".
+#   fix       { description = template, applicability = "exact" | "maybe" | "placeholder",
+#               edits = [{ at = "primary" | "<role>", replacement = template }] }
+#             applicability: "exact" = applying the edits removes this diagnostic and changes no
+#             other behavior (the only fixes `stave fix` applies); "maybe" = a likely fix to
+#             review (the default for a fix with edits); "placeholder" = the edits or the
+#             description hold text to fill in (always for a fix without edits). A diagnostic
+#             whose edit roles the compiler does not supply carries no edits and is "placeholder".
+#             An edit at a role may be an insertion: the compiler supplies a span of length 0
 #   Codes whose rule ends "(planned)" are registered before the compiler emits them.
 #   cases     optional { case-name = { message, labels, fix } } for a code with several shapes;
 #             the compiler picks the case, keys not given in a case come from the entry (each key
-#             is replaced whole: a case `fix` replaces the entry's description and edits)
+#             is replaced whole: a case `fix` replaces the entry's description, applicability, and
+#             edits)
 # Template syntax: {hole} inserts a hole; {{ and }} are literal braces; backticks are literal.
 # Style: types, code (names, paths, operators, source text, target and feature names), and flags
 # are always in backticks in message, label, and fix text, e.g. "expected `{expected}`",
@@ -262,7 +268,7 @@ area = "lex-parse"
 rule = "`::` as a path separator (Rust `a::b`): `.` is the only path separator; `::` only before generic args"
 message = "`::` is not a path separator: write `.`"
 labels = [{ at = "primary", text = "`::` in a path" }]
-fix = { description = "replace `::` with `.`", edits = [{ at = "primary", replacement = "." }] }
+fix = { description = "replace `::` with `.`", applicability = "exact", edits = [{ at = "primary", replacement = "." }] }
 
 [[diag]]
 code = "E0024"
@@ -273,6 +279,9 @@ holes = { text = "source" }
 message = "lifetime `{text}` is not Stave: references have no lifetimes"
 labels = [{ at = "primary", text = "lifetime here" }]
 fix = { description = "remove `{text}`; name a returned borrow's origin with `-> &T from x`", edits = [{ at = "primary", replacement = "" }] }
+
+[diag.cases.ref]
+fix = { description = "remove `{text}`; name a returned borrow's origin with `-> &T from x`", applicability = "exact", edits = [{ at = "primary", replacement = "" }] }
 
 [[diag]]
 code = "E0025"
@@ -296,7 +305,7 @@ fix = { description = "declare named fields: `struct {name} {{ v: T }}` (a unit 
 [diag.cases.unit]
 message = "unit struct `{name}` is written `struct {name} {{}}`"
 labels = [{ at = "primary", text = "unit struct" }]
-fix = { description = "replace `;` with `{{}}`", edits = [{ at = "primary", replacement = " {{}}" }] }
+fix = { description = "replace `;` with `{{}}`", applicability = "exact", edits = [{ at = "primary", replacement = " {{}}" }] }
 
 [[diag]]
 code = "E0027"
@@ -306,6 +315,9 @@ rule = "`!` as a type (Rust never type): write `never`, only after `->`"
 message = "`!` is not a type: write `never`"
 labels = [{ at = "primary", text = "`!` in a type position" }]
 fix = { description = "replace `!` with `never`", edits = [{ at = "primary", replacement = "never" }] }
+
+[diag.cases.ret]
+fix = { description = "replace `!` with `never`", applicability = "exact", edits = [{ at = "primary", replacement = "never" }] }
 
 [[diag]]
 code = "E0028"
@@ -568,7 +580,7 @@ rule = "expression statement whose type is not `()` or `never` (a discarded valu
 holes = { type = "type" }
 message = "unused value of type `{type}`"
 labels = [{ at = "primary", text = "value discarded here" }]
-fix = { description = "use the value, or discard it explicitly with `let _ = ..;`", edits = [{ at = "start", replacement = "let _ = " }] }
+fix = { description = "use the value, or discard it explicitly with `let _ = ..;`", applicability = "exact", edits = [{ at = "start", replacement = "let _ = " }] }
 
 [[diag]]
 code = "E0211"

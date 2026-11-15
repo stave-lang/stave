@@ -1,7 +1,7 @@
 //! The diagnostic templates (generated from `contracts/diagnostics.toml` by `tools/diaggen`) and
 //! the renderer that fills their holes. Every message, label, and fix text comes from here.
 
-use crate::diagnostic::Severity;
+use crate::diagnostic::{Applicability, Severity};
 
 #[rustfmt::skip]
 #[path = "generated/templates.rs"]
@@ -61,6 +61,8 @@ pub struct EditTemplate {
 #[derive(Debug, PartialEq, Eq)]
 pub struct FixTemplate {
     pub description: &'static str,
+    /// [`Applicability::Placeholder`] whenever `edits` is empty.
+    pub applicability: Applicability,
     pub edits: &'static [EditTemplate],
 }
 
@@ -192,6 +194,7 @@ pub struct RenderedEdit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderedFix {
     pub description: String,
+    pub applicability: Applicability,
     pub edits: Vec<RenderedEdit>,
 }
 
@@ -235,6 +238,7 @@ pub fn render(code: &str, case: Option<&str>, holes: &[(&str, &str)]) -> Result<
         None => None,
         Some(f) => Some(RenderedFix {
             description: one_line(f.description)?,
+            applicability: f.applicability,
             edits: f
                 .edits
                 .iter()

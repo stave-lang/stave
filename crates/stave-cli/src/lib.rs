@@ -24,6 +24,7 @@
 //! - `test [DIR]`: the conformance runner over DIR with the stage0 test compiler (builds and runs
 //!   run tests, natively or through `--runner`; `--target` applies to tests without `TARGET`);
 //!   when DIR is a package, also its `test fn`s (stave_driver::harness).
+//! - `fix [--dry-run]`: `check` in rounds, applying the `exact` fixes between them ([`fix`]).
 //!
 //! `--features` beyond the target's baseline and `--cache` are parsed and validated, then refused
 //! as not implemented (exit 2): no flag is accepted and ignored.
@@ -32,6 +33,7 @@
 //! change); `STAVE_PROFILE` prints the step profile of a compile on stderr (`stave_driver::prof`).
 
 pub mod args;
+pub mod fix;
 pub mod unsafe_report;
 
 use std::io::Write;
@@ -139,6 +141,7 @@ fn dispatch(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         }
         (Cmd::Daemon, _) => not_implemented("daemon evict", "needs the stage1 daemon", err),
         (Cmd::UnsafeReport, _) => unsafe_report::run(a, out, err),
+        (Cmd::Fix, _) => fix::run(a, out, err),
         (cmd, _) => not_implemented(cmd.name(), "planned", err),
     }
 }

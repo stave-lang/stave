@@ -16,7 +16,7 @@ built program's exit codes are in LANG.md §3 (101 on a panic).
 | `stave caps-report [PKG_DIR] [--json]` | Planned: per package, the OS capability classes its code can reach |
 | `stave bounds-report [PKG_DIR] [--target T] [--json]` | Planned: every bounds check kept in release code, with the reason |
 | `stave branch-report [PKG_DIR] [--target T] [--json]` | Planned: branches in loops whose condition depends on loaded data, with a suggested fix |
-| `stave fix [PKG_DIR] [--dry-run]` | Planned: apply the `exact` fixes of the diagnostics, re-check, repeat |
+| `stave fix [PKG_DIR] [--dry-run] [--target T] [--diagnostics human\|json]` | Apply the `exact` fixes of the diagnostics, re-check, repeat |
 | `stave fmt [PKG_DIR \| FILE...] [--check]` | Planned: rewrite sources in the one canonical layout |
 | `stave grammar [--format ebnf\|lark\|gbnf]` | Planned: print the grammar for constrained decoding |
 | `stave lowering --target T [--op OP]` | Print the lowering-class table |
@@ -60,15 +60,21 @@ Outputs and statuses of the code-generating commands:
   head); strings are JSON-escaped in both forms. The package set follows `--target` selection of
   dependencies (the host baseline: no `--target` flag).
 
+- `stave fix [PKG_DIR] [--dry-run]`: runs `stave check` (always stage0), applies every fix whose
+  `applicability` is `exact` to the source files of the root package (never `std`, `runtime`, or
+  another dependency, inside the root directory or not), in canonical diagnostic order, skipping a
+  fix with an edit that overlaps one already applied in the round (sharing a byte, an insertion
+  inside a replaced range, or two insertions at one offset); then re-checks and repeats, at most 8
+  rounds or until a round applies nothing. Prints one line per applied fix on stdout,
+  `<file>:<line>:<col>: <code> fixed` (the diagnostic's location in the round that reported it),
+  then the remaining diagnostics on stderr (`--diagnostics` format). Exit 0 if no error remains,
+  1 otherwise. The files are written once, after the last round. `--dry-run` writes nothing and
+  prints, in place of the `fixed` lines, the edits as a unified diff (`--- a/<file>`,
+  `+++ b/<file>`, three context lines); the remaining diagnostics and the exit status are those
+  of the run without it.
+
 Planned commands (exit codes as above):
 
-- `stave fix [PKG_DIR] [--dry-run]`: runs `stave check`, applies every fix whose
-  `applicability` is `exact` to the files of the root package (never `std`, `runtime`, or a
-  dependency outside the root directory), in canonical diagnostic order, skipping an edit
-  that overlaps one already applied in the round; then re-checks and repeats, at most 8 rounds or
-  until a round applies nothing. Prints one line per applied fix, `<file>:<line>:<col>: <code>
-  fixed`, then the remaining diagnostics. Exit 0 if none remain, 1 otherwise. `--dry-run` writes
-  nothing and prints the edits as a unified diff.
 - `stave fmt [PKG_DIR | FILE...] [--check]`: rewrites each source file in the canonical
   layout printed by `stave-syntax`'s round-trip printer; comments are kept; the result is
   idempotent and parses to the same AST. A file with any lexical or syntax error is left unchanged

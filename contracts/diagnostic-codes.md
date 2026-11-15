@@ -55,10 +55,10 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0021 | expression statement without `;` directly before `}` (Rust tail expression, no assignment): blocks are not values; write `return e;`, or end it with `;`. Parse rule 7 |
 | E0022 | `where` clause (Rust): bounds go inline, `<T: A + B>`. Parse rule 8 |
 | E0023 | `::` as a path separator (`a::b`, `Vec::new()`, `Option::Some`): write `.`; `::` only before generic args. Exact fix. Parse rule 9 |
-| E0024 | lifetime `'a`: a `'` followed by an identifier with no closing `'` is one lexical error token (like E0018, no E0004); Stave has no lifetimes |
+| E0024 | lifetime `'a`: a `'` followed by an identifier with no closing `'` is one lexical error token (like E0018, no E0004); Stave has no lifetimes. Case `ref`: directly after `&` (`&'a T`), where removing it is an exact fix |
 | E0025 | `mut x: T` parameter (Rust): params are immutable; write `x: T` and `let mut y = x;`. Parse rule 10 |
-| E0026 | tuple struct `struct S(T);` or (case `unit`) unit struct `struct S;`: structs have named fields, `struct S { v: T }`, `struct S {}`. Parse rule 11 |
-| E0027 | `!` as a type (Rust never type): write `never` (only after `->`). Exact fix after `->`. Parse rule 12 |
+| E0026 | tuple struct `struct S(T);` or (case `unit`) unit struct `struct S;`: structs have named fields, `struct S { v: T }`, `struct S {}`. Exact fix for case `unit`. Parse rule 11 |
+| E0027 | `!` as a type (Rust never type): write `never` (only after `->`). Exact fix after `->` (case `ret`). Parse rule 12 |
 | E0028 | `dyn Trait` / `impl Trait` in a type position: use a generic `<T: Trait>` or a fn type. Parse rule 13 |
 | E0029 | block comment: the token `/*` is a lexical error through the first `*/` on its line or the end of the line (newlines stay lexer restart points; `a/*p` must be written `a / *p`); write `//` |
 | E0101 | unresolved name |
