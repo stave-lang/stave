@@ -6,7 +6,7 @@ mod elf;
 mod props;
 mod random;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -14,10 +14,42 @@ use super::{Asm, EncError};
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
 
-pub(super) fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("stave-x64-test-{}", std::process::id()));
+/// A scratch path in a directory of its own; the directory is removed when this is dropped.
+pub(super) struct Tmp(PathBuf);
+
+pub(super) fn tmp(name: &str) -> Tmp {
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("stave-x64-test-{}-{seq}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
-    d.join(format!("{name}-{}", SEQ.fetch_add(1, Ordering::Relaxed)))
+    Tmp(d.join(name))
+}
+
+impl Drop for Tmp {
+    fn drop(&mut self) {
+        if let Some(d) = self.0.parent() {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+}
+
+impl std::ops::Deref for Tmp {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Tmp {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for Tmp {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_os_str()
+    }
 }
 
 pub(super) fn have(tool: &str) -> bool {
@@ -54,7 +86,6 @@ pub(super) fn objdump(code: &[u8]) -> Option<Vec<(u32, String)>> {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let _ = std::fs::remove_file(&p);
     let text = String::from_utf8(out.stdout).unwrap();
     let mut v = Vec::new();
     for l in text.lines() {

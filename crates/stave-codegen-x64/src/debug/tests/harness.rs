@@ -4,7 +4,7 @@
 //! stave-ir interpreter (the oracle) and, compiled by the debug backend into a static ELF, natively;
 //! stdout and the exit status must agree (a trap in the interpreter = exit `100 + kind` natively).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -335,10 +335,42 @@ pub fn interp(p: &Prog) -> RunOut {
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
 
-pub fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("stave-x64-debug-{}", std::process::id()));
+/// A scratch path in a directory of its own; the directory is removed when this is dropped.
+pub struct Tmp(PathBuf);
+
+pub fn tmp(name: &str) -> Tmp {
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("stave-x64-debug-{}-{seq}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
-    d.join(format!("{name}-{}", SEQ.fetch_add(1, Ordering::Relaxed)))
+    Tmp(d.join(name))
+}
+
+impl Drop for Tmp {
+    fn drop(&mut self) {
+        if let Some(d) = self.0.parent() {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+}
+
+impl std::ops::Deref for Tmp {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Tmp {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for Tmp {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_os_str()
+    }
 }
 
 pub fn native_host() -> bool {
@@ -371,7 +403,6 @@ pub fn native(p: &Prog, name: &str, opts: &Options) -> Option<RunOut> {
     let path = tmp(name);
     img.write_file(&path).unwrap();
     let r = run_file(&path);
-    let _ = std::fs::remove_file(&path);
     Some(r)
 }
 
