@@ -2,34 +2,51 @@
 # Compile-time and run-time benchmark: stave (stage0) against tcc, gcc and clang on one generated
 # program written in both languages, plus three hand-written kernels. Prints a markdown report on
 # stdout; progress goes to stderr. Linux only. See bench/README.md.
-#   bench/run.sh [--lines N] [--seed S] [--runs R] [--reps P]
+#   bench/run.sh [--tier quick|stave|full] [--lines N] [--seed S] [--runs R] [--reps P]
 #   bench/run.sh --stages [--alloc-count] [--lines N] [--seed S] [--runs R]
 # --stages: only the step profile of `stave build` on the corpus (STAVE_PROFILE, stave_driver::prof):
 # median ms per step on 1 thread and on all threads. --alloc-count builds stave with its counting
 # allocator (in target/alloc-count) and adds allocation calls and bytes; its times are slower.
+# --tier: full (default) measures every compiler and caches each C row in target/bench-cache;
+# stave measures stave alone and prints the C rows from that cache; quick is stave alone on 20000
+# lines, 3 runs, no C rows. stave and quick check the output against one C build only. After the
+# report every tier compares its stave numbers with its previous run at the same --lines.
 set -eu
 cd "$(dirname "$0")/.."
 
-LINES=100000
+TIER=full
+LINES=""
 SEED=1
-RUNS=5
+RUNS=""
 REPS=500
 STAGES=0
 ALLOC_COUNT=0
+usage() {
+  echo "usage: bench/run.sh [--tier quick|stave|full | --stages [--alloc-count]] [--lines N] [--seed S] [--runs R] [--reps P]" >&2
+  exit 2
+}
 while [ $# -gt 0 ]; do
   case "$1" in
+    --tier) TIER=$2; shift 2 ;;
     --lines) LINES=$2; shift 2 ;;
     --seed) SEED=$2; shift 2 ;;
     --runs) RUNS=$2; shift 2 ;;
     --reps) REPS=$2; shift 2 ;;
     --stages) STAGES=1; shift ;;
     --alloc-count) ALLOC_COUNT=1; shift ;;
-    *) echo "usage: bench/run.sh [--stages [--alloc-count]] [--lines N] [--seed S] [--runs R] [--reps P]" >&2; exit 2 ;;
+    *) usage ;;
   esac
 done
+case "$TIER" in
+  quick) : "${LINES:=20000}" "${RUNS:=3}" ;;
+  stave|full) : "${LINES:=100000}" "${RUNS:=5}" ;;
+  *) usage ;;
+esac
 
 unset STAVE_THREADS
 WORK=target/bench
+# Outlives $WORK, which every run starts by deleting.
+CACHE=target/bench-cache
 BIN=$WORK/bin
 CORPUS=$WORK/corpus
 NPROC=$(nproc)
@@ -61,6 +78,8 @@ measure() {
 
 size_of() { wc -c < "$1" | tr -d ' '; }
 
+ver() { if have "$1"; then "$@" 2>&1 | head -1; fi; }
+
 # C compiler command for a config label, flags included. Plain C99: no FMA contraction, no
 # extensions.
 c_cmd() {
@@ -88,6 +107,13 @@ stave_build_1t() { # stave_build_1t OUT PKG [--release]
 
 c_single() { # c_single CMD OUT SRC
   $1 -o "$2" "$3"
+}
+
+# What a cached C row was measured on: the row is reused only while all of it is the same.
+c_key() { # c_key CFG
+  cmd=$(c_cmd "$1")
+  case "$1" in tcc*) v=$(ver tcc -v) ;; *) v=$(ver "${1%% *}" --version) ;; esac
+  echo "key: lines=$LINES seed=$SEED reps=$REPS src=$SRC_HASH cmd=$cmd cc=$v"
 }
 
 # Parallel split build: every unit with `xargs -P`, then one link.
@@ -153,7 +179,7 @@ else
 fi
 GEN=target/release/gen-corpus
 rm -rf "$WORK"
-mkdir -p "$BIN"
+mkdir -p "$BIN" "$CACHE"
 
 CCS=""
 SKIPPED=""
@@ -170,6 +196,23 @@ unset IFS
 CCS=${CCS#|}
 [ -n "$SKIPPED" ] && say "not installed, skipped:$SKIPPED"
 
+# The C builds the output is checked against: all of them when they are timed anyway, otherwise
+# the first one without an optimizer, which is the cheapest to build.
+CHECK_CCS=$CCS
+CHECKED="every build"
+if [ "$TIER" != full ]; then
+  CHECK_CCS=""
+  CHECKED="both stave builds; no C build was checked (no tcc, gcc or clang)"
+  IFS='|'
+  for cfg in $CCS; do
+    case "$cfg" in
+      *-O2) ;;
+      *) CHECK_CCS=$cfg; CHECKED="both stave builds and $cfg"; break ;;
+    esac
+  done
+  unset IFS
+fi
+
 # ---------- generate and check the corpus ----------
 say "generating the corpus: $LINES lines, seed $SEED"
 "$GEN" --pair --lines "$LINES" --seed "$SEED" --reps "$REPS" -o "$CORPUS" --force 2> "$WORK/gen.txt" \
@@ -179,6 +222,7 @@ C_LINES=$(wc -l < "$CORPUS/c/single.c" | tr -d ' ')
 UNITS=$(wc -l < "$CORPUS/c/split/files.txt" | tr -d ' ')
 UNITS=$((UNITS - 1))
 FNS=$(sed -n 's/.* \([0-9]*\) fns$/\1/p' "$WORK/gen.txt")
+SRC_HASH=$(cat "$CORPUS/c/single.c" bench/kernels/*/main.c | sha256sum | cut -d' ' -f1)
 
 if [ "$STAGES" = 1 ]; then
   stages
@@ -192,7 +236,7 @@ want=$("$BIN/corpus-stave") || die "the Stave corpus program failed"
 got=$("$BIN/corpus-stave-release") || die "the Stave corpus program (--release) failed"
 [ "$got" = "$want" ] || die "stave --release prints '$got', debug prints '$want'"
 IFS='|'
-for cfg in $CCS; do
+for cfg in $CHECK_CCS; do
   unset IFS
   s=$(slug "$cfg")
   $(c_strict "$cfg") -o "$BIN/corpus-$s" "$CORPUS/c/single.c" || die "$cfg: the C corpus does not compile cleanly"
@@ -204,7 +248,7 @@ for cfg in $CCS; do
   IFS='|'
 done
 unset IFS
-say "corpus: $want in every build"
+say "corpus: $want in $CHECKED"
 
 for k in $KERNELS; do
   d=bench/kernels/$k
@@ -214,7 +258,7 @@ for k in $KERNELS; do
   "$BIN/$k-stave-release" > "$WORK/$k.got" || die "$k: the Stave program (--release) failed"
   cmp -s "$WORK/$k.want" "$WORK/$k.got" || die "$k: stave --release output differs from debug"
   IFS='|'
-  for cfg in $CCS; do
+  for cfg in $CHECK_CCS; do
     unset IFS
     s=$(slug "$cfg")
     $(c_strict "$cfg") -o "$BIN/$k-$s" "$d/main.c" || die "$k: $cfg: does not compile cleanly"
@@ -224,7 +268,7 @@ for k in $KERNELS; do
   done
   unset IFS
 done
-say "kernels: identical output in every build"
+say "kernels: identical output in $CHECKED"
 
 # ---------- measure ----------
 ROWS=""
@@ -254,17 +298,28 @@ run=$(measure "$BIN/corpus-stave-release")
 kr=$(kernel_runs stave-release)
 row "| stave --release | $t1 | $tn | $(klps "$S_LINES" "$t1") | $(size_of "$BIN/corpus-stave-release") | $run$kr |"
 
+[ "$TIER" = quick ] && CCS=""
 IFS='|'
 for cfg in $CCS; do
   unset IFS
-  say "measuring $cfg (median of $RUNS)"
   s=$(slug "$cfg")
-  cmd=$(c_cmd "$cfg")
-  t1=$(measure c_single "$cmd" "$WORK/x" "$CORPUS/c/single.c")
-  tn=$(measure c_split "$cmd" "$WORK/x" "$CORPUS/c/split")
-  run=$(measure "$BIN/corpus-$s")
-  kr=$(kernel_runs "$s")
-  row "| $cfg | $t1 | $tn | $(klps "$C_LINES" "$t1") | $(size_of "$BIN/corpus-$s") | $run$kr |"
+  f=$CACHE/c-$s-$LINES-$SEED-$REPS.txt
+  key=$(c_key "$cfg")
+  if [ "$TIER" = full ]; then
+    say "measuring $cfg (median of $RUNS)"
+    cmd=$(c_cmd "$cfg")
+    t1=$(measure c_single "$cmd" "$WORK/x" "$CORPUS/c/single.c")
+    tn=$(measure c_split "$cmd" "$WORK/x" "$CORPUS/c/split")
+    run=$(measure "$BIN/corpus-$s")
+    kr=$(kernel_runs "$s")
+    r="| $cfg | $t1 | $tn | $(klps "$C_LINES" "$t1") | $(size_of "$BIN/corpus-$s") | $run$kr |"
+    { echo "$key"; echo "$r"; } > "$f"
+  elif [ -f "$f" ] && [ "$(head -1 "$f")" = "$key" ]; then
+    r=$(sed -n 2p "$f")
+  else
+    r="| $cfg | n/a (run --tier full) | | | | | | | |"
+  fi
+  row "$r"
   IFS='|'
 done
 unset IFS
@@ -273,7 +328,6 @@ unset IFS
 cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)
 cores=$(sed -n 's/^cpu cores[[:space:]]*: //p' /proc/cpuinfo | head -1)
 os=$(sed -n 's/^PRETTY_NAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' /etc/os-release 2>/dev/null | head -1)
-ver() { if have "$1"; then "$@" 2>&1 | head -1; fi; }
 
 cat <<EOF
 ## Stave stage0 vs C compilers
@@ -289,9 +343,13 @@ done
 v=$(ver tcc -v)
 [ -n "$v" ] && echo "- tcc: $v"
 [ -n "$SKIPPED" ] && echo "- not installed, skipped:$SKIPPED"
+case "$TIER" in
+  quick) echo "- tier quick: stave only, no C compiler is timed" ;;
+  stave) echo "- tier stave: stave only; the C rows are the ones \`--tier full\` cached for these compilers and this corpus" ;;
+esac
 cat <<EOF
 - corpus: gen-corpus --pair, seed $SEED: $S_LINES Stave lines, $C_LINES C lines, $UNITS units, $FNS fns + drivers, $REPS passes at run time
-- output check: corpus checksum \`${want#checksum }\` and kernel outputs identical in every build
+- output check: corpus checksum \`${want#checksum }\` and kernel outputs identical in $CHECKED
 - times: wall clock, median of $RUNS runs, in ms
 
 | compiler | compile, 1 thread | compile, $NPROC threads | K lines/s, 1 thread | binary bytes | corpus run | nbody run | hashmix run | sieve run |
@@ -300,3 +358,34 @@ $ROWS
 "compile, 1 thread": stave with STAVE_THREADS=1; C as one process on single.c.
 "compile, $NPROC threads": stave with default threads; C as $UNITS+1 files with xargs -P $NPROC, then one link.
 EOF
+
+# ---------- change since the previous run of this tier ----------
+# Informational: a slower run is marked, never an error.
+LAST=$CACHE/last-$TIER-$LINES.txt
+{ echo "# seed=$SEED reps=$REPS"; echo "$ROWS" | sed -n '/^| stave/p'; } > "$WORK/last"
+if [ -f "$LAST" ]; then
+  awk -F ' *[|] *' -v kernels="$KERNELS" -v tier="$TIER" -v lines="$LINES" '
+    BEGIN {
+      m[3] = "compile, 1 thread"; m[4] = "compile, all threads"; m[6] = "binary bytes"; m[7] = "corpus run"
+      last = 7 + split(kernels, k, " ")
+      for (i = 8; i <= last; i++) m[i] = k[i - 7] " run"
+      printf "\n## stave against the previous `--tier %s` run at --lines %d\n\n", tier, lines
+    }
+    /^#/ {
+      if (NR == FNR) was = $0
+      else if ($0 != was) { printf "Not compared: that run had %s, this one %s.\n", substr(was, 3), substr($0, 3); exit }
+      else printf "More than 5%% worse is marked SLOWER.\n\n| metric | previous | now | change | |\n|---|---:|---:|---:|---|\n"
+      next
+    }
+    NR == FNR { for (i = 3; i <= last; i++) old[$2, i] = $i; next }
+    {
+      for (i = 3; i <= last; i++) {
+        if (!(i in m)) continue
+        o = old[$2, i]
+        if (o + 0 == 0) { printf "| %s: %s | - | %s | | |\n", $2, m[i], $i; continue }
+        d = ($i - o) / o * 100
+        printf "| %s: %s | %s | %s | %+.1f%% | %s |\n", $2, m[i], o, $i, d, (d > 5) ? "SLOWER" : ""
+      }
+    }' "$LAST" "$WORK/last"
+fi
+mv "$WORK/last" "$LAST"
