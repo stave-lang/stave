@@ -15,7 +15,7 @@ fn sum_masked(xs: &[u32]) -> u32 {
         acc = acc +% m.select(v, u32x4.splat(1000));
         tails = tails + 1;
     }
-    return acc.reduce_add() +% tails * 100000;
+    return acc.reduce_add_wrap() +% tails * 100000;
 }
 
 fn sum_scalar(xs: &[u32]) -> u32 {
@@ -26,7 +26,7 @@ fn sum_scalar(xs: &[u32]) -> u32 {
     } tail scalar (x) {
         rest = rest + x;
     }
-    return acc.reduce_add() + rest * 1000;
+    return acc.reduce_add_wrap() + rest * 1000;
 }
 
 fn chunks_exact(xs: &[f32]) -> f32 {
@@ -110,7 +110,7 @@ fn main() -> i32 {
     for v: u32x4 in &arr {
         t = t +% v;
     }
-    let ts = t.reduce_add();
+    let ts = t.reduce_add_wrap();
     io.print(f"array of 8, no tail: {ts}\n");
     return 0;
 }

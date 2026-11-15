@@ -61,6 +61,7 @@ const VEC_METHODS: &[&str] = &[
     "popcount",
     "clz",
     "reduce_add",
+    "reduce_add_wrap",
     "reduce_min",
     "reduce_max",
     "reduce_and",
@@ -296,7 +297,9 @@ fn vector_method<I: Interner + ?Sized>(
         "andnot" | "div_lanes" if !float => (vec![ArgTy::Is(t)], t),
         "min" | "max" => (vec![ArgTy::Is(t)], t),
         "fma" if float => (vec![ArgTy::Is(t), ArgTy::Is(t)], t),
-        "reduce_add" | "reduce_min" | "reduce_max" => (vec![], lane),
+        "reduce_add" if float => (vec![], lane),
+        "reduce_add_wrap" if !float => (vec![], lane),
+        "reduce_min" | "reduce_max" => (vec![], lane),
         "reduce_and" | "reduce_or" if !float => (vec![], lane),
         "reduce_add_ordered" => (vec![ArgTy::Is(lane)], lane),
         "checked_add" | "checked_sub" | "checked_mul" if !float => {

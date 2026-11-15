@@ -39,7 +39,7 @@ fn main() -> i32 {
     io.print(f"mask bits: {mb} first_n(3): {first}\n");
     show(m.select(a, u32x4.splat(0)));
     show(a.compress(m));
-    let sum = a.reduce_add();
+    let sum = a.reduce_add_wrap();
     let mx = a.reduce_max();
     io.print(f"sum {sum} max {mx}\n");
     match a.checked_add(big) {
@@ -49,7 +49,7 @@ fn main() -> i32 {
     let f = a as~ f32x4;
     show((f * f32x4.splat(0.5)) as| u32x4);
     let w = i16x8.splat(-300).widen_lo();
-    let wl = w.reduce_add();
+    let wl = w.reduce_add_wrap();
     let n = i32x4.splat(70000).narrow_sat(i32x4.splat(-5)).reduce_min();
     io.print(f"widen {wl} narrow {n}\n");
     return 0;
