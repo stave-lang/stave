@@ -4,6 +4,8 @@
 
 use std::fmt;
 
+mod simd;
+
 use crate::arith::{self, CastTy, IntTy};
 use crate::ir::{
     Block, Body, CastKind, Const, Func, FuncId, Module, Op, Operand, Target, Term, Value, ValueDef,
@@ -1054,6 +1056,9 @@ impl<'a> FnVerifier<'a> {
             }
             self.check_args(b, args, &ps).map_err(|e| format!("intrinsic.{name}: {e}"))
         };
+        if let Some(v) = crate::simd::VecOp::from_name(name) {
+            return self.check_vec(b, v, ty, args);
+        }
         let numbered = |prefix: &str, max: usize| -> Option<usize> {
             name.strip_prefix(prefix).and_then(|d| d.parse::<usize>().ok()).filter(|&k| k <= max)
         };
