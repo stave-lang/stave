@@ -65,7 +65,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0102 | import cycle. One per strongly connected component; the cycle is listed starting at its lexicographically smallest module path, following import order |
 | E0103 | unqualified enum variant in a pattern or expression |
 | E0104 | more than one `allocator` declaration in a binary |
-| E0105 | duplicate declaration of `<name>` in `<scope>` (module items and import names, fields, variants, methods of a type, params, generic params). Reported at each later declaration; related span: the first declaration |
+| E0105 | duplicate declaration of `<name>` in `<scope>` (module items and import names, fields, variants, methods of a type, params, generic params, names bound by one pattern: `(a, a)`). Reported at each later declaration; related span: the first declaration |
 | E0106 | `<name>` is private to module `<module>`: an item, field, or method used outside its module without `pub` (trait impl methods have the trait's visibility). Related span: the declaration |
 | E0107 | import path is ambiguous: its first segment is both a dependency name of the package and a module (`src/x.stv`) or module directory (`src/x/`) of the package. At the first segment; the import binds an error decl. Fix: `import <package>.x` for the module (the package's own name first), or rename the module or the dependency |
 | E0108 | a `bin` package has no `fn main` in its root module (`stave build`, `stave run`, `stave test`; `stave check` does not need it). At offset 0 of the root module; reported only when there is no other error (a dropped or invalid item may be `main`) |
