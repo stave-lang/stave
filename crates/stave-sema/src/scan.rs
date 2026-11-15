@@ -207,7 +207,10 @@ pub(crate) fn dropped_names(toks: &[Token], start: usize, end: usize) -> Dropped
         Some(Term::KwFn) | Some(Term::KwStruct) | Some(Term::KwEnum) | Some(Term::KwTrait)
         | Some(Term::KwConst) | Some(Term::KwType) => name_at(i + 1, &mut out),
         Some(Term::KwView) => name_at(i + 2, &mut out),
-        Some(Term::KwDispatch) | Some(Term::KwKernel) | Some(Term::KwStatic) => name_at(i + 2, &mut out),
+        Some(Term::KwDispatch) | Some(Term::KwKernel) => name_at(i + 2, &mut out),
+        Some(Term::KwStatic) => {
+            name_at(if is(toks, i + 1, Term::KwMut) { i + 2 } else { i + 1 }, &mut out);
+        }
         Some(Term::KwExtern) => {
             if is(toks, i + 2, Term::KwFn) {
                 name_at(i + 3, &mut out);

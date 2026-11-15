@@ -380,6 +380,19 @@ impl Program {
         self.diagnostics.iter().any(|d| d.severity() == stave_diag::Severity::Error)
     }
 
+    /// The first use (in item order) of syntax that parses but has no semantics in stage0 yet
+    /// ([`ItemRes::unimplemented`]), as `<what> at <path>:<line>:<col>`.
+    pub fn unimplemented(&self) -> Option<String> {
+        let (i, &(tok, what)) =
+            self.res.iter().enumerate().find_map(|(i, r)| Some((i, r.unimplemented.as_ref()?)))?;
+        let file = self.item(ItemId(i as u32)).and_then(|it| self.file(it.file))?;
+        let span = scan::tok_span(file.id, &file.bytes, &file.parsed.tokens, tok as usize);
+        Some(match self.source_map.locate(span) {
+            Ok(l) => format!("{what} at {}:{}:{}", l.path, l.line, l.col),
+            Err(_) => what.to_string(),
+        })
+    }
+
     /// Builds the program.
     pub fn load(cfg: &Config) -> Program {
         let shuffle =

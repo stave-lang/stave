@@ -2,7 +2,7 @@
 // An item holding an error token reports its lexical diagnostics only, with no E0004.
 fn f() {
     let = ;
-    let s = 'unterminated
+    let s = "unterminated
 //~^ ERROR E0015
 }
 

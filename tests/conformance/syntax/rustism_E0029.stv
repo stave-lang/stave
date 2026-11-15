@@ -1,0 +1,25 @@
+//~ PARSE-ONLY
+// E0029: C / Rust block comments. `/*` is a lexical error through the first `*/` on its line
+// or the end of the line; use `//`.
+/* a block comment */ //~ ERROR E0029
+fn documented() -> u32 {
+    return 1; /* trailing */ //~ ERROR E0029
+}
+
+fn inline(a: u32 /* count */, b: u32) -> u32 { //~ ERROR E0029
+    return a + b;
+}
+
+fn div(a: u32, p: &u32) -> u32 {
+    return a/*p; //~ ERROR E0029
+}
+
+fn two(a: u32) -> u32 {
+    return a /* one */ + /* two */ 1; //~ ERROR E0029
+    //~^ ERROR E0029
+}
+
+fn stave_form(a: u32, p: &u32) -> u32 {
+    // a line comment
+    return a / *p;
+}

@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// E0809: `static mut` is for the `std` and `runtime` packages only. In any other package the
+// declaration is an error (its uses still follow the `static mut` rule: unsafe, E0803).
+static mut COUNT: u64 = 0; //~ ERROR E0809
+pub static mut TABLE: [u8; 4] = [1, 2, 3, 4]; //~ ERROR E0809
+
+fn bump() -> u64 {
+    unsafe("single-threaded test program") { COUNT = COUNT + 1; }
+    return unsafe("single-threaded test program") COUNT;
+}
+
+fn main() -> i32 {
+    let n = bump();
+    let t: u8 = TABLE[0]; //~ ERROR E0803
+    return 0;
+}

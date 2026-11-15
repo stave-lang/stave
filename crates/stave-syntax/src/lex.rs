@@ -6,8 +6,9 @@
 //! (stage1); this sequential scanner is the reference.
 //!
 //! Rules (contracts/grammar.ebnf §lexical, and the header's "single tokens" list):
-//! - whitespace is ` \t\r\n`; comments are `//` up to the newline (no block comments: `/*` is `/`
-//!   `*`). Neither makes a token.
+//! - whitespace is ` \t\r\n`; comments are `//` up to the newline. Neither makes a token. There
+//!   are no block comments: `/*` starts one [`KIND_ERROR`] token (E0029) that ends after the first
+//!   `*/` on its line, else at the end of the line (`a / *p` needs the space).
 //! - identifiers are ASCII only: `[A-Za-z_][A-Za-z0-9_]*`; the text decides keyword, `_` (the
 //!   wildcard token, while `_x` is an `Ident`), or `Ident`. `as` immediately followed by `%`, `|`,
 //!   `?` or `~` is the single token `as%`/`as|`/`as?`/`as~` (`as %` is two tokens).
@@ -20,6 +21,8 @@
 //!   `FmtLit` token; each `{…}` hole must be `(Ident | self) ('.' Ident)* }` (E0006 per bad hole).
 //!   A literal reaching a raw newline is E0015 and ends at the newline; reaching the end of the
 //!   file first is E0003. Both are reported at the literal's start.
+//! - a `'` followed by an identifier with no `'` directly after it is a lifetime, not a char
+//!   literal: one [`KIND_ERROR`] token (the `'` and the identifier) with E0024.
 //! - operators: longest match over the grammar's punctuation terminals.
 //! - any other byte (`@ $ \ # \``, a control byte, DEL, any byte >= 0x80) starts no token: a run of
 //!   consecutive such bytes is one [`KIND_ERROR`] token with one E0018 at its start. Non-ASCII text
@@ -44,9 +47,9 @@ pub struct Token {
     pub start: u32,
 }
 
-/// A token with a lexical diagnostic: a literal with E0003, E0006, or E0015, or a run of bytes that
-/// start no token (E0018). An item that contains one is dropped with its lexical diagnostics only
-/// (no E0004).
+/// A token with a lexical diagnostic: a literal with E0003, E0006, or E0015, a run of bytes that
+/// start no token (E0018), a lifetime (E0024), or a block comment (E0029). An item that contains
+/// one is dropped with its lexical diagnostics only (no E0004).
 pub const KIND_ERROR: u8 = NTERM as u8;
 
 const _: () = assert!(NTERM < 256, "token kinds must fit a u8");
@@ -89,7 +92,8 @@ pub struct Lexed {
     /// The tokens, ending with exactly one `EOF` token (at the end of the file, or at the stop
     /// point: offset 0 for E0002, the invalid byte for E0001).
     pub tokens: Vec<Token>,
-    /// Lexical diagnostics in offset order: E0001, E0002, E0003, E0006, E0015, E0017, E0018.
+    /// Lexical diagnostics in offset order: E0001, E0002, E0003, E0006, E0015, E0017, E0018,
+    /// E0024, E0029.
     pub diagnostics: Vec<Diagnostic>,
     /// Set for E0001 / E0002: the file was not lexed to its end.
     pub stop: Option<LexStop>,
@@ -234,6 +238,7 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
             b"extern" => KwExtern,
             b"exact" => KwExact,
             b"emulate" => KwEmulate,
+            b"ensures" => KwEnsures,
             _ => return None,
         },
         b'f' => match s {
@@ -275,6 +280,7 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
         },
         b'r' => match s {
             b"return" => KwReturn,
+            b"requires" => KwRequires,
             _ => return None,
         },
         b's' => match s {
@@ -346,6 +352,10 @@ enum Pending {
     Hole { start: usize, end: usize, text: usize, text_end: usize },
     /// E0018: the run `[start, end)` of bytes that start no token.
     BadChar { start: usize, end: usize },
+    /// E0024: the lifetime `[start, end)` (`'` and an identifier).
+    Lifetime { start: usize, end: usize },
+    /// E0029: `/*` at `start`.
+    BlockComment { start: usize },
 }
 
 /// Where the scanner reports lexical errors; [`NoErrs`] when only the token's end is wanted.
@@ -452,6 +462,11 @@ fn pending_diag(src: &[u8], file: FileId, p: Pending) -> Option<Diagnostic> {
             make_diag("E0006", None, &[("hole", &hole)], span(start, end), &[])
         }
         Pending::BadChar { start, end } => make_diag("E0018", None, &[], span(start, end), &[]),
+        Pending::Lifetime { start, end } => {
+            let text = String::from_utf8_lossy(src.get(start..end).unwrap_or_default());
+            make_diag("E0024", None, &[("text", &text)], span(start, end), &[])
+        }
+        Pending::BlockComment { start } => make_diag("E0029", None, &[], span(start, start + 2), &[]),
     }
 }
 
@@ -540,8 +555,31 @@ fn scan<E: ErrSink>(src: &[u8], i: usize, after_dot: bool, errs: &mut E) -> (u8,
     }
     match c {
         b'"' => scan_quoted(src, i, What::Str, errs),
-        b'\'' => scan_quoted(src, i, What::Char, errs),
+        b'\'' => {
+            if is_idstart(at(src, i + 1)) {
+                let j = skip_idcont(src, i + 2);
+                if at(src, j) != b'\'' {
+                    errs.push(Pending::Lifetime { start: i, end: j });
+                    return (KIND_ERROR, j);
+                }
+            }
+            scan_quoted(src, i, What::Char, errs)
+        }
+        b'/' if at(src, i + 1) == b'*' => {
+            errs.push(Pending::BlockComment { start: i });
+            (KIND_ERROR, block_comment_end(src, i))
+        }
         _ => scan_punct(src, i),
+    }
+}
+
+/// The end of the `/*` error token at `i`: after the first `*/` on its line, else the end of the
+/// line.
+fn block_comment_end(src: &[u8], i: usize) -> usize {
+    let e = line_end(src, i + 2);
+    match src[i + 2..e].windows(2).position(|w| w == b"*/") {
+        Some(p) => i + 2 + p + 2,
+        None => e,
     }
 }
 

@@ -247,13 +247,24 @@ fn style(pk: u8, po: Option<NodeKind>, ck: u8, co: Option<NodeKind>) -> Sep {
     {
         return Sep::None;
     }
-    // Call, parameter list, tuple variant / pattern, `needs(`, `unsafe(`, `fn(`.
+    // Call, parameter list, tuple variant / pattern, `needs(`, `requires(`, `ensures(`,
+    // `unsafe(`, `fn(`.
     if is(ck, T::LParen) && co != Some(N::TailClause) {
-        let operand_end =
-            [T::Ident, T::KwFn, T::KwNeeds, T::KwUnsafe, T::KwSelfType, T::RParen, T::RBracket, T::Question]
-                .iter()
-                .any(|&t| is(pk, t))
-                || (is(pk, T::Gt) && generic(po));
+        let operand_end = [
+            T::Ident,
+            T::KwFn,
+            T::KwNeeds,
+            T::KwRequires,
+            T::KwEnsures,
+            T::KwUnsafe,
+            T::KwSelfType,
+            T::RParen,
+            T::RBracket,
+            T::Question,
+        ]
+        .iter()
+        .any(|&t| is(pk, t))
+            || (is(pk, T::Gt) && generic(po));
         if operand_end {
             return Sep::None;
         }

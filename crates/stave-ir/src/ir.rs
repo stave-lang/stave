@@ -582,7 +582,7 @@ pub struct SiteInfo {
     pub func: String,
 }
 
-/// A `static mut` global: zero or more initialized bytes (little-endian, the [`crate::layout`]
+/// A `static` or `static mut` global: zero or more initialized bytes (little-endian, the [`crate::layout`]
 /// layout of `ty`), addressed by `intrinsic.static_addr <index>` (result: a pointer to `ty`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Static {
@@ -603,7 +603,7 @@ pub struct Module {
     pub intrinsics: Vec<String>,
     /// The site table: row `i` is what `Site(i)` means.
     pub sites: Vec<SiteInfo>,
-    /// `static mut` globals by index (`intrinsic.static_addr <index>`).
+    /// `static` and `static mut` globals by index (`intrinsic.static_addr <index>`).
     pub statics: Vec<Static>,
 }
 

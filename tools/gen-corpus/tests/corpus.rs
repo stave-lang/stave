@@ -246,7 +246,7 @@ fn construct_mix_is_covered() {
         "Result.Err(",
         "&mut ",
         "from p0",
-        "from p0, p1",
+        "from p0 + p1",
         "from self",
         ".{ ",
         "(&self",

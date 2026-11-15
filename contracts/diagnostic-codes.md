@@ -50,17 +50,17 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0016 | unbalanced brackets: unmatched closer, or closer of another kind (at the first such closer), else the innermost opener unclosed at end of file. One per file; no other parse diagnostics for the file |
 | E0017 | byte-order mark at file start. Remove it (UTF-8 without BOM) |
 | E0018 | unexpected character: a byte that starts no token (`@ $ \ #`, backtick, a control byte other than tab/LF/CR, DEL) or any non-ASCII byte outside string, char, and f-string literals and comments (identifiers are ASCII). One per run of consecutive such bytes, at its start; the item is dropped without E0004 |
-| E0019 | `if let` / `while let` (Rust): write a `match` (statement or value form). Parse rule 5 (parse-errors.md). Planned |
-| E0020 | `let P = e else { .. };` (Rust `let … else`): write a `match`. Parse rule 6. Planned |
-| E0021 | expression without `;` directly before `}` (Rust tail expression, no assignment): blocks are not values; write `return e;`, or end it with `;`. Parse rule 7. Planned |
-| E0022 | `where` clause (Rust): bounds go inline, `<T: A + B>`. Parse rule 8. Planned |
-| E0023 | `::` as a path separator (`a::b`, `Vec::new()`, `Option::Some`): write `.`; `::` only before generic args. Exact fix. Parse rule 9. Planned |
-| E0024 | lifetime `'a`: a `'` followed by an identifier with no closing `'` is one lexical error token (like E0018, no E0004); Stave has no lifetimes. Planned |
-| E0025 | `mut x: T` parameter (Rust): params are immutable; write `x: T` and `let mut y = x;`. Parse rule 10. Planned |
-| E0026 | tuple struct `struct S(T);` or (case `unit`) unit struct `struct S;`: structs have named fields, `struct S { v: T }`, `struct S {}`. Parse rule 11. Planned |
-| E0027 | `!` as a type (Rust never type): write `never` (only after `->`). Exact fix after `->`. Parse rule 12. Planned |
-| E0028 | `dyn Trait` / `impl Trait` in a type position: use a generic `<T: Trait>` or a fn type. Parse rule 13. Planned |
-| E0029 | block comment: the token `/*` is a lexical error through the first `*/` on its line or the end of the line (newlines stay lexer restart points; `a/*p` must be written `a / *p`); write `//`. Planned |
+| E0019 | `if let` / `while let` (Rust): write a `match` (statement or value form). Parse rule 5 (parse-errors.md) |
+| E0020 | `let P = e else { .. };` (Rust `let … else`): write a `match`. Parse rule 6 |
+| E0021 | expression statement without `;` directly before `}` (Rust tail expression, no assignment): blocks are not values; write `return e;`, or end it with `;`. Parse rule 7 |
+| E0022 | `where` clause (Rust): bounds go inline, `<T: A + B>`. Parse rule 8 |
+| E0023 | `::` as a path separator (`a::b`, `Vec::new()`, `Option::Some`): write `.`; `::` only before generic args. Exact fix. Parse rule 9 |
+| E0024 | lifetime `'a`: a `'` followed by an identifier with no closing `'` is one lexical error token (like E0018, no E0004); Stave has no lifetimes |
+| E0025 | `mut x: T` parameter (Rust): params are immutable; write `x: T` and `let mut y = x;`. Parse rule 10 |
+| E0026 | tuple struct `struct S(T);` or (case `unit`) unit struct `struct S;`: structs have named fields, `struct S { v: T }`, `struct S {}`. Parse rule 11 |
+| E0027 | `!` as a type (Rust never type): write `never` (only after `->`). Exact fix after `->`. Parse rule 12 |
+| E0028 | `dyn Trait` / `impl Trait` in a type position: use a generic `<T: Trait>` or a fn type. Parse rule 13 |
+| E0029 | block comment: the token `/*` is a lexical error through the first `*/` on its line or the end of the line (newlines stay lexer restart points; `a/*p` must be written `a / *p`); write `//` |
 | E0101 | unresolved name |
 | E0102 | import cycle. One per strongly connected component; the cycle is listed starting at its lexicographically smallest module path, following import order |
 | E0103 | unqualified enum variant in a pattern or expression |
@@ -87,14 +87,14 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0410 | reference- or view-typed field in a non-view ADT |
 | E0411 | view in a heap or container type (Box, Vec, Map, ...). To be retired: `vec.Vec`, `Box`, `Option`, `Result` take `T: view` and become conditional views; a container without the bound is E0414 case `container` |
 | E0412 | view passed to `forget` |
-| E0413 | view or reference in a `const` or `static mut` (except `&str` initialized by a string literal or another such const: static strings) |
+| E0413 | view or reference in a `const`, `static`, or `static mut` (except `&str` initialized by a string literal or another such const: static strings) |
 | E0414 | generic parameter instantiated with a view without the `T: view` bound. Case `container` (planned): a heap type that does not accept views, e.g. `Rc`/`Arc` |
 | E0415 | `impl Copy for T {}` where a field or variant payload of T is not Copy (Copy: scalars, `&T`, raw pointers, arrays and tuples of Copy types, ADTs with `impl Copy`; `&mut T` never). Related span: the field |
 | E0416 | `impl Drop` for a Copy type (built-in Copy, or an ADT with `impl Copy`; related span: the `impl Copy`) |
-| E0417 | `static X: T` where T is not `Sync` (a `static` is shared by every thread): use an atomic (`atomic.U64`), `sync.Mutex<T>`, or `sync.Once<T>`. Planned |
+| E0417 | `static X: T` where T is not `Sync` (a `static` is shared by every thread): use an atomic (`atomic.U64`), `sync.Mutex<T>`, or `sync.Once<T>` |
 | E0501 | borrow conflict (borrow site, conflicting access, later use). When an access conflicts with several live loans, the loan with the smallest creation offset is reported (ties: `&mut` before `&`, then place path); the later use is the first use after the access that keeps that loan live |
 | E0502 | use after move |
-| E0503 | assignment to an immutable binding or through `&` |
+| E0503 | assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`, reported by the type checker) |
 | E0504 | move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference (`r.f`), an element `v[i]`, or a closure capture (captures are references) |
 | E0510 | returned reference or view not covered by the `from` clause |
 | E0511 | retired: a missing `from` clause declares the empty origin set; a returned borrow of a parameter not named is E0510 |
@@ -139,12 +139,12 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0806 | argument of `thread.join`, `thread.par_for`, or `thread.par_for_mut` is a fn value whose captures are unknown (not a closure literal or fn item) |
 | E0807 | an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through it would skip E0802/E0806) |
 | E0808 | `spawn` inside a closure body: a closure is not part of the `scope` block around it, so its `spawn` has no scope to join |
-| E0809 | `static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` packages (user code: `static` with a `Sync` type). Planned |
+| E0809 | `static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` packages (user code: `static` with a `Sync` type) |
 | E0810 | impl of an unsafe trait (`Send`, `Sync`, or any trait declared `unsafe("..") trait`) without `unsafe("..")`. At the `impl` |
 | E0901 | method or operator not provided by the generic's bounds (reported at the definition) |
 | E0902 | instantiation depth limit (64) exceeded: an instance of a generic fn or method, reached from a non-generic fn through calls, would be the 65th instance of that generic on its own instantiation chain (polymorphic recursion such as `f::<[T; 1]>(..)` inside `f<T>`). At the call that requests it, once per generic |
 | E0903 | overlapping impls |
-| E0904 | const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id) |
+| E0904 | const-expr uses a call (other than a constructor fixed by path, intrinsics.md), a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id) |
 | E0905 | impl method signature differs from the trait's (params, return, `from`, `needs`, or `unsafe`). The fix shows the trait's signature |
 | E0906 | impl lacks a trait method, or defines a method the trait does not declare |
 | E0907 | `pub` on a method of a trait impl (it has the trait's visibility). At the `pub` |

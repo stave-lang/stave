@@ -1,0 +1,151 @@
+// std.atomic: integers and a bool shared between threads.
+//
+// `U32`, `U64`, `Usize`, `Bool` wrap one `UnsafeCell` and reach it only through the CPU atomics
+// of runtime.atomic, so each is Sync and may be a `static`. Every operation is sequentially
+// consistent (the only ordering).
+//   new(v)                        const-evaluable: a `static` initializer may call it
+//   load() / store(v)
+//   swap(v)                       stores v, returns the previous value
+//   fetch_add(v)                  adds v (wrapping), returns the previous value (ints only)
+//   compare_exchange(old, new)    stores new if the value is old: Ok(old), else Err(the value)
+//
+// `new` of each type is a path fixed by the compiler (contracts/intrinsics.md): its body must
+// stay one `return` of a struct literal whose operands are const-exprs over the parameters.
+
+import runtime.atomic as rt;
+import std.cell;
+import std.core;
+
+pub struct U32 {
+    v: cell.UnsafeCell<u32>,
+}
+
+unsafe("the value is read and written only by atomic instructions") impl core.Sync for U32 {}
+
+impl U32 {
+    pub fn new(v: u32) -> U32 {
+        return U32.{ v: cell.UnsafeCell::<u32>.new(v) };
+    }
+
+    pub fn load(&self) -> u32 {
+        return unsafe("the cell is an aligned u32 that lives as long as self") rt.load_u32(self.v.get() as *const u32);
+    }
+
+    pub fn store(&self, x: u32) {
+        let _ = self.swap(x);
+    }
+
+    pub fn swap(&self, x: u32) -> u32 {
+        return unsafe("the cell is an aligned u32 that lives as long as self") rt.swap_u32(self.v.get(), x);
+    }
+
+    pub fn fetch_add(&self, x: u32) -> u32 {
+        return unsafe("the cell is an aligned u32 that lives as long as self") rt.fetch_add_u32(self.v.get(), x);
+    }
+
+    pub fn compare_exchange(&self, old: u32, new: u32) -> Result<u32, u32> {
+        let was = unsafe("the cell is an aligned u32 that lives as long as self") rt.cas_u32(self.v.get(), old, new);
+        return if was == old then Result.Ok(was) else Result.Err(was);
+    }
+}
+
+pub struct U64 {
+    v: cell.UnsafeCell<u64>,
+}
+
+unsafe("the value is read and written only by atomic instructions") impl core.Sync for U64 {}
+
+impl U64 {
+    pub fn new(v: u64) -> U64 {
+        return U64.{ v: cell.UnsafeCell::<u64>.new(v) };
+    }
+
+    pub fn load(&self) -> u64 {
+        return unsafe("the cell is an aligned u64 that lives as long as self") rt.load_u64(self.v.get() as *const u64);
+    }
+
+    pub fn store(&self, x: u64) {
+        let _ = self.swap(x);
+    }
+
+    pub fn swap(&self, x: u64) -> u64 {
+        return unsafe("the cell is an aligned u64 that lives as long as self") rt.swap_u64(self.v.get(), x);
+    }
+
+    pub fn fetch_add(&self, x: u64) -> u64 {
+        return unsafe("the cell is an aligned u64 that lives as long as self") rt.fetch_add_u64(self.v.get(), x);
+    }
+
+    pub fn compare_exchange(&self, old: u64, new: u64) -> Result<u64, u64> {
+        let was = unsafe("the cell is an aligned u64 that lives as long as self") rt.cas_u64(self.v.get(), old, new);
+        return if was == old then Result.Ok(was) else Result.Err(was);
+    }
+}
+
+// `usize` is 64-bit on every target: the value is kept as a u64.
+pub struct Usize {
+    v: U64,
+}
+
+impl Usize {
+    pub fn new(v: usize) -> Usize {
+        return Usize.{ v: U64.new(v as u64) };
+    }
+
+    pub fn load(&self) -> usize {
+        return self.v.load() as usize;
+    }
+
+    pub fn store(&self, x: usize) {
+        self.v.store(x as u64);
+    }
+
+    pub fn swap(&self, x: usize) -> usize {
+        return self.v.swap(x as u64) as usize;
+    }
+
+    pub fn fetch_add(&self, x: usize) -> usize {
+        return self.v.fetch_add(x as u64) as usize;
+    }
+
+    pub fn compare_exchange(&self, old: usize, new: usize) -> Result<usize, usize> {
+        return match self.v.compare_exchange(old as u64, new as u64) {
+            Result.Ok(was) => Result.Ok(was as usize),
+            Result.Err(was) => Result.Err(was as usize),
+        };
+    }
+}
+
+// The value is kept as a u32: 0 false, 1 true.
+pub struct Bool {
+    v: U32,
+}
+
+fn bit(b: bool) -> u32 {
+    return if b then 1 else 0;
+}
+
+impl Bool {
+    pub fn new(v: bool) -> Bool {
+        return Bool.{ v: U32.new(if v then 1 else 0) };
+    }
+
+    pub fn load(&self) -> bool {
+        return self.v.load() != 0;
+    }
+
+    pub fn store(&self, x: bool) {
+        self.v.store(bit(x));
+    }
+
+    pub fn swap(&self, x: bool) -> bool {
+        return self.v.swap(bit(x)) != 0;
+    }
+
+    pub fn compare_exchange(&self, old: bool, new: bool) -> Result<bool, bool> {
+        return match self.v.compare_exchange(bit(old), bit(new)) {
+            Result.Ok(_) => Result.Ok(old),
+            Result.Err(was) => Result.Err(was != 0),
+        };
+    }
+}

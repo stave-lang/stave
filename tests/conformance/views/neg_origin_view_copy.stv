@@ -11,7 +11,7 @@ fn pass(o: Option<&u8>) -> Option<&u8> from copy o { //~ ERROR E0521
     return o;
 }
 
-fn pick(f: fn() -> u8, g: fn() -> u8) -> fn() -> u8 from f, copy g { //~ ERROR E0521
+fn pick(f: fn() -> u8, g: fn() -> u8) -> fn() -> u8 from f + copy g { //~ ERROR E0521
     return f;
 }
 

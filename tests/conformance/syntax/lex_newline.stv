@@ -15,7 +15,7 @@ fn fstring(n: i32) {
 }
 
 fn character() {
-    let c = 'a
+    let c = '+
 //~^ ERROR E0015
     ;
 }

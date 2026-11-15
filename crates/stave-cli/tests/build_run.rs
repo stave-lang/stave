@@ -270,3 +270,52 @@ fn vector_program_is_not_implemented() {
         assert!(!d.join("simd").exists());
     }
 }
+
+/// Syntax that parses but has no semantics yet (parameter `from`, contracts, or-patterns) is
+/// "not implemented yet" for `stave check` and `stave build` (exit 2, naming the construct and
+/// its place); an error in the same program is reported instead (exit 1).
+#[test]
+fn parsed_only_syntax_is_not_implemented() {
+    let d = tmp("v07");
+    let cases = [
+        (
+            "contract.stv",
+            "fn at(xs: &[u32], i: usize) -> u32 requires(i < xs.len()) {\n    return xs[i];\n}\n\
+             fn main() -> i32 {\n    return 0;\n}\n",
+            "a `requires` / `ensures` contract at ",
+            ":1:36",
+        ),
+        (
+            "param_from.stv",
+            "view struct S { r: &u32 }\nfn put(s: &mut S from x, x: &u32) {\n    s.r = x;\n}\n\
+             fn main() -> i32 {\n    return 0;\n}\n",
+            "a `from` clause on a parameter at ",
+            ":2:18",
+        ),
+        (
+            "or_pattern.stv",
+            "fn main() -> i32 {\n    let x: u8 = 1;\n    return match x {\n        0 | 1 => 0,\n        \
+             _ => 1,\n    };\n}\n",
+            "an or-pattern (`A | B`) at ",
+            ":4:9",
+        ),
+    ];
+    for (name, src, what, at) in cases {
+        let f = d.join(name);
+        std::fs::write(&f, src).unwrap();
+        let p = f.display().to_string();
+        for cmd in ["check", "build"] {
+            let (c, _, err) = stave_in(&d, &[cmd, &p]);
+            assert_eq!(c, 2, "{name} {cmd}: {err}");
+            assert!(err.contains("is not implemented yet"), "{name} {cmd}: {err}");
+            assert!(err.contains(what) && err.contains(at), "{name} {cmd}: {err}");
+        }
+    }
+    let f = d.join("error.stv");
+    let src = "fn f(n: u32) -> u32 requires(n > 0) {\n    return n;\n}\n\
+               fn main() -> i32 {\n    return nope;\n}\n";
+    std::fs::write(&f, src).unwrap();
+    let (c, _, err) = stave_in(&d, &["check", &f.display().to_string()]);
+    assert_eq!(c, 1, "{err}");
+    assert!(err.contains("E0101"), "{err}");
+}

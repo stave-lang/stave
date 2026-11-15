@@ -1,0 +1,29 @@
+//~ PARSE-ONLY
+// E0023: Rust `::` paths. `.` is the only path separator; `::` appears only before generic
+// arguments (`f::<T>()`).
+import std::vec; //~ ERROR E0023
+
+fn value() -> u32 {
+    return Option::Some(1).unwrap(); //~ ERROR E0023
+}
+
+fn ty(v: std::vec::Vec<u8>) -> usize { //~ ERROR E0023
+    return v.len();
+}
+
+fn call() -> usize {
+    let v = vec.Vec::<u8>::new(); //~ ERROR E0023
+    return v.len();
+}
+
+fn pattern(o: Option<u32>) -> u32 {
+    return match o {
+        Option::Some(x) => x, //~ ERROR E0023
+        Option.None => 0,
+    };
+}
+
+fn stave_form() -> usize {
+    let v = vec.Vec::<u8>.new();
+    return size_of::<u64>() + v.len();
+}

@@ -6,7 +6,7 @@ extern "C" {
     fn puts(s: *const u8) -> i32;
 }
 
-static mut CALLS: u64 = 0;
+static CALLS: u64 = 0;
 
 unsafe("implementers return a valid address") trait Addr {
     fn bits(&self) -> usize;
@@ -36,6 +36,5 @@ unsafe("s is NUL-terminated") fn say(s: *const u8) {
 fn main() -> i32 {
     let x: u8 = 0;
     let b = read_raw(&x as *const u8);
-    unsafe("single-threaded program: nothing else touches CALLS") { CALLS = CALLS + 1; }
-    return b as i32;
+    return b as i32 + (CALLS as% i32);
 }

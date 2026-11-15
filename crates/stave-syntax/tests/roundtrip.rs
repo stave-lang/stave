@@ -165,7 +165,7 @@ impl Gen {
             self.w("{");
             let arms = 1 + self.pick(3);
             for k in 0..arms {
-                self.pattern(d - 1);
+                self.arm_pattern(d - 1);
                 if self.chance(20) {
                     self.w("if");
                     self.expr(d - 1);
@@ -377,6 +377,16 @@ impl Gen {
         }
     }
 
+    fn arm_pattern(&mut self, d: u32) {
+        self.pattern(d);
+        if self.chance(25) {
+            for _ in 0..1 + self.pick(2) {
+                self.w("|");
+                self.pattern(d);
+            }
+        }
+    }
+
     fn pattern(&mut self, d: u32) {
         match if d == 0 { self.pick(3) } else { self.pick(9) } {
             0 => self.w("_"),
@@ -501,7 +511,7 @@ impl Gen {
                 self.expr(d1);
                 self.w("{");
                 for _ in 0..self.pick(3) {
-                    self.pattern(d1);
+                    self.arm_pattern(d1);
                     if self.chance(20) {
                         self.w("if");
                         self.expr(d1);
@@ -556,15 +566,38 @@ impl Gen {
         self.w("(");
         if with_self {
             self.any(&["self", "&self", "&mut self"]);
+            self.param_from();
             self.w(",");
         }
         for _ in 0..self.pick(3) {
             self.ident();
             self.w(":");
             self.ty(2);
+            self.param_from();
             self.w(",");
         }
         self.w(")");
+    }
+
+    fn param_from(&mut self) {
+        if self.chance(10) {
+            self.either(50, "from x", "from copy x + self + y");
+        }
+    }
+
+    fn contracts(&mut self, d: u32) {
+        if self.chance(15) {
+            for _ in 0..self.pick(3) {
+                self.w("requires(");
+                self.expr(d);
+                self.w(")");
+            }
+            for _ in 0..self.pick(3) {
+                self.w("ensures(");
+                self.expr(d);
+                self.w(")");
+            }
+        }
     }
 
     fn fn_sig(&mut self, with_self: bool) {
@@ -576,7 +609,7 @@ impl Gen {
             self.w("->");
             self.ty(2);
             if self.chance(20) {
-                self.w("from a, copy self");
+                self.w("from a + copy self");
             }
         }
         if self.chance(15) {
@@ -585,7 +618,7 @@ impl Gen {
     }
 
     fn item(&mut self, d: u32) {
-        match self.pick(14) {
+        match self.pick(15) {
             0..=3 => {
                 if self.chance(30) {
                     self.w("pub");
@@ -594,6 +627,7 @@ impl Gen {
                     self.w("unsafe(\"why\")");
                 }
                 self.fn_sig(false);
+                self.contracts(d.min(1));
                 self.block(d);
             }
             4 => {
@@ -665,6 +699,7 @@ impl Gen {
                         self.w("unsafe(\"x\")");
                     }
                     self.fn_sig(true);
+                    self.contracts(d.min(1));
                     self.block(d.saturating_sub(1));
                     self.nl();
                 }
@@ -680,6 +715,13 @@ impl Gen {
             12 => {
                 self.either(50, "test fn t()", "kernel fn k(xs: &mut [f32])");
                 self.block(d);
+            }
+            13 => {
+                self.either(50, "static S :", "pub static mut S :");
+                self.ty(1);
+                self.w("=");
+                self.expr(d);
+                self.w(";");
             }
             _ => self.w("allocator my.alloc;"),
         }

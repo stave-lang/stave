@@ -1,8 +1,9 @@
 //~ CHECK-ONLY
-// Assigning to a `static mut` moves the right side like any other assignment.
+// Assigning to a `static mut` moves the right side like any other assignment. (The item
+// itself is E0809 here: `static mut` belongs to std and the runtime.)
 struct T { pub v: u32 }
 
-static mut G: T = T.{ v: 0 };
+static mut G: T = T.{ v: 0 }; //~ ERROR E0809
 
 fn store() -> u32 {
     let s = T.{ v: 1 };

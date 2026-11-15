@@ -54,7 +54,7 @@ impl<T: view> Option<T> {
         panic.trap(panic.KIND_UNWRAP, panic.user_site());
     }
 
-    pub fn unwrap_or(self, d: T) -> T from self, d {
+    pub fn unwrap_or(self, d: T) -> T from self + d {
         return match self { Option.Some(v) => v, Option.None => d };
     }
 
@@ -88,7 +88,7 @@ impl<T: view, E: view> Result<T, E> {
         panic.trap(panic.KIND_UNWRAP, panic.user_site());
     }
 
-    pub fn unwrap_or(self, d: T) -> T from self, d {
+    pub fn unwrap_or(self, d: T) -> T from self + d {
         return match self { Result.Ok(v) => v, Result.Err(_) => d };
     }
 

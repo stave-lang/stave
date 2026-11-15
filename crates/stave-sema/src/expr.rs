@@ -15,7 +15,7 @@ use stave_diag::Span;
 use stave_syntax::{NodeKind, Term};
 
 use crate::builtins::{self, ArgTy};
-use crate::decls::DeclKind;
+use crate::decls::{DeclFlags, DeclKind};
 use crate::diag::mk;
 use crate::ids::{DeclId, Sym};
 use crate::prim::{Builtin, Lanes, Prim};
@@ -765,6 +765,9 @@ impl<'a> Ck<'a> {
             });
             let ct = self.expr(c, inner_hint);
             let ct = self.force(ct);
+            if mutable {
+                self.static_mutation(c, icx.tok_span(a));
+            }
             if ct == ids::ERROR {
                 return Ty::ERR;
             }
@@ -1507,7 +1510,9 @@ impl<'a> Ck<'a> {
                         St::Val(Ty::T(self.sigs.konst(d).map_or(ids::ERROR, |c| c.ty)))
                     }
                     DeclKind::Static => {
-                        self.unsafe_op(icx.tok_span(tok));
+                        if decl.flags.has(DeclFlags::MUT) {
+                            self.unsafe_op(icx.tok_span(tok));
+                        }
                         self.target(tok, Target::Global { decl: d });
                         St::Val(Ty::T(self.sigs.konst(d).map_or(ids::ERROR, |c| c.ty)))
                     }
@@ -2819,6 +2824,9 @@ impl<'a> Ck<'a> {
                     let own: Vec<GenericParam> = sig.generics[np..].to_vec();
                     self.check_bounds_own(sspan, method, &own, &gargs, &[]);
                     let adjust = self.adjust_for(level, sk);
+                    if adjust.autoref == Some(true) && level == 0 {
+                        self.static_mutation_upto(n, Some(seg - 1), sspan);
+                    }
                     self.target(seg, Target::Method { method: m.clone(), args: gargs.clone(), adjust });
                     self.site(seg, method, &gargs);
                     Ty::T(self.tys.subst(sig.ret, &gargs, None))
@@ -2856,6 +2864,9 @@ impl<'a> Ck<'a> {
                     self.check_args(n, &params, &spans, &mut binds, args, ret, hint);
                     let gargs: Vec<GArg> = binds.into_iter().flatten().collect();
                     let adjust = self.adjust_for(level, sk);
+                    if adjust.autoref == Some(true) && level == 0 {
+                        self.static_mutation_upto(n, Some(seg - 1), sspan);
+                    }
                     self.target(seg, Target::Method { method: m.clone(), args: gargs.clone(), adjust });
                     let mut site_args = gargs.clone();
                     site_args.push(GArg::Type(self_ty));
@@ -2879,6 +2890,64 @@ impl<'a> Ck<'a> {
                 self.args_only(args)
             }
         }
+    }
+
+    /// The immutable `static` whose storage the place expression `n` names: the static itself,
+    /// or a field, tuple field, or element of it, through parentheses. `end` cuts the postfix
+    /// chain of `n` at that token (exclusive): the receiver of a method call.
+    fn static_place(&self, n: u32, end: Option<u32>) -> Option<DeclId> {
+        let icx = self.icx;
+        let mut cur = n;
+        while let Some(c) = self.passthrough(cur) {
+            cur = c;
+        }
+        let (prim, limit) = match icx.kind(cur)? {
+            NodeKind::Postfix => (icx.first_child(cur)?, end.unwrap_or(icx.postfix_end(cur) + 1)),
+            NodeKind::Primary => (cur, icx.primary_end(cur) + 1),
+            _ => return None,
+        };
+        let pa = icx.a(prim);
+        let (d, mut p) = if icx.is(pa, Term::LParen) {
+            let close = icx.close(pa);
+            let inner = icx.first_child(prim)?;
+            if icx.ast.children_rev(prim).count() != 1 || icx.is(close - 1, Term::Comma) {
+                return None;
+            }
+            (self.static_place(inner, None)?, close + 1)
+        } else {
+            let u = icx.uses(prim).last()?;
+            let Res::Decl(d) = u.res else { return None };
+            let decl = self.prog.decl(d)?;
+            if decl.kind != DeclKind::Static || decl.flags.has(DeclFlags::MUT) {
+                return None;
+            }
+            (d, u.token + 1)
+        };
+        while p < limit {
+            if icx.is(p, Term::Dot) && (icx.is(p + 1, Term::Ident) || icx.is(p + 1, Term::IntLit)) {
+                if icx.is(p + 2, Term::LParen) || icx.is(p + 2, Term::ColonColon) {
+                    return None; // a method call: its result is not the static's storage
+                }
+                p += 2;
+            } else if icx.is(p, Term::LBracket) {
+                p = icx.close(p) + 1;
+            } else {
+                return None;
+            }
+        }
+        Some(d)
+    }
+
+    /// E0503 case `static` at `at` when `n` names the storage of an immutable `static`.
+    pub fn static_mutation(&mut self, n: u32, at: Span) {
+        self.static_mutation_upto(n, None, at);
+    }
+
+    fn static_mutation_upto(&mut self, n: u32, end: Option<u32>, at: Span) {
+        let Some(d) = self.static_place(n, end) else { return };
+        let name = self.prog.decl(d).map_or("_", |x| self.prog.strings.get(x.name)).to_string();
+        let diag = mk("E0503", Some("static"), &[("place", &name)], at, &[]);
+        self.report(diag);
     }
 
     fn adjust_for(&self, level: u32, sk: crate::sigs::SelfKind) -> Adjust {
@@ -3056,7 +3125,7 @@ impl<'a> Ck<'a> {
         let mut rows = Vec::new();
         let mut arm_ts: Vec<(u32, Ty)> = Vec::new();
         for &arm in &kids[1..] {
-            let ak = icx.kids_vec(arm);
+            let ak = icx.arm_kids(arm);
             let Some(&pat) = ak.first() else { continue };
             let p = self.pattern(pat, st, crate::patterns::Mode::Move);
             let guard = if ak.len() >= 3 { Some(ak[1]) } else { None };
@@ -3096,7 +3165,7 @@ impl<'a> Ck<'a> {
         let mut all_div = true;
         let reach = self.reachable;
         for &arm in &kids[1..] {
-            let ak = icx.kids_vec(arm);
+            let ak = icx.arm_kids(arm);
             let Some(&pat) = ak.first() else { continue };
             let p = self.pattern(pat, st, crate::patterns::Mode::Move);
             let guard = if ak.len() >= 3 { Some(ak[1]) } else { None };

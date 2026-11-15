@@ -1,0 +1,31 @@
+//~ PARSE-ONLY
+// E0021: a Rust tail expression (an expression before `}` with no `;`). Blocks are not values:
+// return with `return e;`.
+fn add(a: i32, b: i32) -> i32 {
+    a + b //~ ERROR E0021
+}
+
+fn pick(c: bool) -> i32 {
+    if c {
+        1 //~ ERROR E0021
+    } else {
+        2
+    }
+}
+
+fn call(v: &mut Stack) {
+    v.push(1);
+    v.len() //~ ERROR E0021
+}
+
+fn closure() -> i32 {
+    let f = fn(x: i32) -> i32 { x + 1 }; //~ ERROR E0021
+    return f(1);
+}
+
+// an assignment without `;` stays E0004
+fn assign(a: &mut i32) { *a = 1 } //~ ERROR E0004
+
+fn stave_form(a: i32, b: i32) -> i32 {
+    return a + b;
+}

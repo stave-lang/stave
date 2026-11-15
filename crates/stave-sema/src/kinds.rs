@@ -17,8 +17,8 @@
 //!   the generic args of a call, expr `check_bounds`): a view argument for a param without
 //!   `view` is E0412 when the generic is `std.mem.forget`, E0411 when it is an ADT of the std
 //!   package or an impl of one (its heap containers: `Vec`, `Soa*`), else E0414.
-//! - E0413 (sigs, const build): a `const` or `static mut` of view type, except `&str` from a
-//!   string literal or another such const.
+//! - E0413 (sigs, const build): a `const`, `static`, or `static mut` of view type, except `&str`
+//!   from a string literal or another such const.
 //!
 //! **Copy / Send / Sync** come from [`World`] (built-in Copy; `impl Copy`; structural or
 //! `unsafe impl` Send/Sync). `std.cell.UnsafeCell<T>` (fixed path) is Send iff T is and never

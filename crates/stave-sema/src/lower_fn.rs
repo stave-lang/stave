@@ -45,7 +45,7 @@ pub(crate) struct G<'a> {
     pub table: &'a TypeTable,
     pub brackets: &'a [Brackets],
     pub lang: &'a LangFns,
-    /// `static mut` decl → index in `Module::statics`.
+    /// `static` / `static mut` decl → index in `Module::statics`.
     pub statics: &'a FxHashMap<DeclId, u32>,
     /// Per package: built-in (std, runtime, arch).
     pub builtin_pkg: &'a [bool],

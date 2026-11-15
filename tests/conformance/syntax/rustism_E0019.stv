@@ -1,0 +1,28 @@
+//~ PARSE-ONLY
+// E0019: Rust `if let` / `while let`. Stave has no `let` conditions: write a `match`.
+fn first(o: Option<u32>) -> u32 {
+    if let Option.Some(x) = o { //~ ERROR E0019
+        return x;
+    }
+    return 0;
+}
+
+fn drain(v: &mut Stack) {
+    while let Option.Some(x) = v.pop() { } //~ ERROR E0019
+}
+
+fn chained(o: Option<u32>) -> u32 {
+    if o.is_none() {
+        return 0;
+    } else if let Option.Some(x) = o { //~ ERROR E0019
+        return x;
+    }
+    return 1;
+}
+
+fn stave_form(o: Option<u32>) -> u32 {
+    match o {
+        Option.Some(x) => { return x; }
+        Option.None => { return 0; }
+    }
+}
