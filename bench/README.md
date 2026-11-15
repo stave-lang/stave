@@ -12,6 +12,11 @@ Linux only. Needs the Rust toolchain, coreutils, awk, xargs, and any of `tcc`, `
 compiler that is not installed is skipped and named in the report. Work files go to
 `target/bench/` and are never checked in.
 
+`sh bench/run.sh --stages` prints only where `stave build` spends its time on the corpus: the
+median wall time of every pipeline step (`STAVE_PROFILE`, `stave_driver::prof`) on 1 thread and on
+all threads. With `--alloc-count` it builds `stave` with a counting allocator and adds allocation
+calls and bytes per step (those times are slower: count and time in separate runs).
+
 ## What is measured
 
 Inputs:
