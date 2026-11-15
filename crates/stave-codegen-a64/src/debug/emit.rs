@@ -2,7 +2,7 @@
 //! helpers, prologue/epilogue, blocks, terminators with block-argument copies, calls.
 
 use stave_ir::ir::{Target, ValueDef};
-use stave_ir::{Body, Const, Func, Operand, PanicKind, Site, Term, Value};
+use stave_ir::{Body, Const, Func, Op, Operand, PanicKind, Site, Term, Value};
 use stave_obj::{FuncCode, SymbolId};
 
 use super::abi::{self, Loc, Ret};
@@ -113,6 +113,9 @@ pub(crate) struct Gen<'a, 'm> {
     pub cur: u32,
     /// Its index in the emission order.
     at: usize,
+    /// Release: the owned register of a target param that the current instruction's result is
+    /// the next value of ([`Self::edge_hint`]); the result is defined there. `NOREG` otherwise.
+    hint: u8,
     line_site: u32,
 }
 
@@ -153,6 +156,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             traps: Vec::new(),
             cur: 0,
             at: 0,
+            hint: NOREG,
             line_site: NONE,
         }
     }
@@ -601,8 +605,21 @@ impl<'a, 'm> Gen<'a, 'm> {
         }
     }
 
+    /// The hinted register for result `v`, which then lives there (outside the cache).
+    fn take_hint(&mut self, v: Value) -> Option<u8> {
+        let r = std::mem::replace(&mut self.hint, NOREG);
+        if r == NOREG {
+            return None;
+        }
+        self.vreg[v.index()] = r;
+        Some(r)
+    }
+
     pub fn def_g(&mut self, v: Value) -> R<Reg> {
         if let Some(r) = self.owned(v) {
+            return Ok(xr(r));
+        }
+        if let Some(r) = self.take_hint(v) {
             return Ok(xr(r));
         }
         let r = self.alloc_g()?;
@@ -612,6 +629,9 @@ impl<'a, 'm> Gen<'a, 'm> {
 
     pub fn def_f(&mut self, v: Value) -> R<VReg> {
         if let Some(r) = self.owned(v) {
+            return Ok(VReg::vn(r));
+        }
+        if let Some(r) = self.take_hint(v) {
             return Ok(VReg::vn(r));
         }
         let r = self.alloc_f()?;
@@ -625,6 +645,15 @@ impl<'a, 'm> Gen<'a, 'm> {
             return;
         }
         let Some(r) = self.cached(v) else { return };
+        // a hinted result sits in a param's owned register, which is not the cache's
+        let held = match self.vkind(v) {
+            Vk::Fpr(_) => self.fval[r as usize],
+            _ => self.gval[r as usize],
+        };
+        if held != v.0 {
+            self.vreg[v.index()] = NOREG;
+            return;
+        }
         let bit = 1u32 << r;
         match self.vkind(v) {
             Vk::Fpr(_) => {
@@ -886,7 +915,11 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let s = self.site(k);
                 self.line(s);
                 if k != fused {
+                    if !self.an.own.is_empty() {
+                        self.hint = self.edge_hint(blk, k);
+                    }
                     self.inst(k)?;
+                    self.hint = NOREG;
                 }
                 let res = self.b.insts.result.get(k as usize).copied().flatten();
                 self.end_inst(k, res);
@@ -1027,6 +1060,66 @@ impl<'a, 'm> Gen<'a, 'm> {
         Ok(())
     }
 
+    /// The owned register of a param of the block's only successor, when the result of
+    /// instruction `k` is nothing but that param's next value (a loop counter's increment): the
+    /// op then defines its result in the param's register and the branch has nothing to move.
+    ///
+    /// Writing the register early is safe when the param's old value is dead: the block has one
+    /// successor (which redefines the param), nothing after `k` reads the param, and the block
+    /// lies in the param's interval, so no other value lives in that register here. Only ops that
+    /// are one instruction reading all operands qualify.
+    fn edge_hint(&self, blk: usize, k: u32) -> u8 {
+        let b = self.b;
+        let bd = &b.blocks[blk];
+        let Some(v) = b.insts.result[k as usize] else { return NOREG };
+        if self.an.uses.get(v.index()).copied() != Some(1) || self.owned(v).is_some() {
+            return NOREG;
+        }
+        let Term::Br(t) = bd.term else { return NOREG };
+        let me = Operand::Value(v);
+        let Some(j) = b.target_args(&t).iter().position(|o| *o == me) else { return NOREG };
+        let Some(&p) = b.params(t.block).get(j) else { return NOREG };
+        let Some(rp) = self.owned(p) else { return NOREG };
+        let at = self.at as u32;
+        let (first, last) = (self.an.own_first.get(p.index()), self.an.own_last.get(p.index()));
+        if !matches!((first, last), (Some(&f), Some(&l)) if f <= at && at <= l) {
+            return NOREG;
+        }
+        let pv = Operand::Value(p);
+        let end = bd.insts.start + bd.insts.len;
+        if (k + 1..end).any(|i| b.args(i).contains(&pv)) || b.target_args(&t).contains(&pv) {
+            return NOREG;
+        }
+        let float = b.insts.ty[k as usize].is_some_and(|ty| matches!(self.cg.ty(ty), Ty::Sc(s) if s.is_fp()));
+        let simple = match b.insts.op[k as usize] {
+            Op::AddWrap | Op::SubWrap | Op::MulWrap | Op::And | Op::Or | Op::Xor | Op::Not | Op::Neg => true,
+            Op::Add | Op::Sub => true,
+            Op::Mul | Op::Div => float,
+            _ => false,
+        };
+        if simple { rp } else { NOREG }
+    }
+
+    /// Whether the edge to `t` moves anything. Release: an argument already in the param's
+    /// owned register moves nothing.
+    fn has_copies(&self, t: &Target) -> bool {
+        if self.an.own.is_empty() {
+            return t.args.len > 0;
+        }
+        let (params, args) = (self.b.params(t.block), self.b.target_args(t));
+        params.len() != args.len()
+            || params.iter().zip(args).any(|(&p, &o)| {
+                if o == Operand::Value(p) || self.vkind(p) == Vk::Dead {
+                    return false;
+                }
+                match (self.owned(p), self.vkind(p), self.psrc(o)) {
+                    (Some(r), Vk::Fpr(_), Ok(src)) => src != PSrc::Loc(PLoc::F(r)),
+                    (Some(r), Vk::Gpr(_), Ok(src)) => src != PSrc::Loc(PLoc::G(r)),
+                    _ => true,
+                }
+            })
+    }
+
     fn branch_if(&mut self, t: Test, l: Label) -> R<()> {
         match t {
             Test::Reg(r) => self.a.cbnz(W, r, l)?,
@@ -1080,7 +1173,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                     self.flush_live_out()?;
                     Test::Flags(self.compare_flags(fused)?)
                 };
-                let (ta, ea) = (then.args.len > 0, els.args.len > 0);
+                let (ta, ea) = (self.has_copies(&then), self.has_copies(&els));
                 let (lt, le) = (self.labels[then.block.index()], self.labels[els.block.index()]);
                 if !ta && !ea {
                     if self.next_block() == Some(els.block.0) {

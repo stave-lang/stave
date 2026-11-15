@@ -283,10 +283,117 @@ impl Cg<'_, '_> {
         }
     }
 
+    /// The displacement or index scale an address instruction adds to its base pointer, when
+    /// that fits one x86 addressing mode: `Ok(scale)` for `base + index * scale`, `Err(disp)`
+    /// for `base + disp`.
+    fn addr_form(&self, i: u32) -> Res<Option<Result<Scale, i32>>> {
+        let b = self.b;
+        let args = b.args(i);
+        let (Some(&p), Some(&k)) = (args.first(), args.get(1)) else { return Ok(None) };
+        let Some(pt) = self.oty(p) else { return Ok(None) };
+        let inner = self.pointee(pt)?;
+        let off = match b.insts.op[i as usize] {
+            Op::FieldAddr => self.field(inner, k)?.0,
+            Op::EnumFieldAddr => match args.get(2) {
+                Some(&f) => self.enum_field(inner, k, f)?.0,
+                None => return Ok(None),
+            },
+            Op::ElemAddr => {
+                let elem = match self.key(inner) {
+                    Some(TypeKey::Array { elem, .. }) => *elem,
+                    // a fat base is read from the slice value first
+                    Some(TypeKey::Slice { .. }) => return Ok(None),
+                    _ => inner,
+                };
+                let stride = self.layout(elem)?.size;
+                match self.int_const(k) {
+                    Some(c) => (c as i64).wrapping_mul(stride as i64),
+                    None => {
+                        return Ok(match stride {
+                            1 => Some(Ok(Scale::S1)),
+                            2 => Some(Ok(Scale::S2)),
+                            4 => Some(Ok(Scale::S4)),
+                            8 => Some(Ok(Scale::S8)),
+                            _ => None,
+                        });
+                    }
+                }
+            }
+            _ => return Ok(None),
+        };
+        Ok(i32::try_from(off).ok().map(Err))
+    }
+
+    /// Release: whether address instruction `i` is left to the load or store that reads its
+    /// result: the result has that one use, a few instructions further in the block, as the
+    /// address. The base and the index then stay alive up to that instruction.
+    pub(crate) fn fold_addr(&mut self, i: u32, bd: &stave_ir::ir::BlockData) -> Res<bool> {
+        const WINDOW: u32 = 4;
+        let b = self.b;
+        if !matches!(b.insts.op[i as usize], Op::ElemAddr | Op::FieldAddr | Op::EnumFieldAddr) {
+            return Ok(false);
+        }
+        let Some(v) = b.insts.result[i as usize] else { return Ok(false) };
+        if self.uses.get(v.index()).copied() != Some(1) {
+            return Ok(false);
+        }
+        let args = b.args(i);
+        let (Some(&base), Some(&index)) = (args.first(), args.get(1)) else { return Ok(false) };
+        // a frame address needs no register as it is
+        if !matches!(base, Operand::Value(_)) || self.slot_off(base).is_some() {
+            return Ok(false);
+        }
+        let Some(form) = self.addr_form(i)? else { return Ok(false) };
+        let end = bd.insts.start.saturating_add(bd.insts.len);
+        let me = Operand::Value(v);
+        for k in i + 1..end.min(i + 1 + WINDOW) {
+            let ka = b.args(k);
+            if !ka.contains(&me) {
+                continue;
+            }
+            // the class of what the instruction reads or writes through the address
+            let class = match b.insts.op[k as usize] {
+                Op::Load if ka == [me] => b.insts.ty[k as usize].map(|t| self.vcls(t)),
+                Op::Store if ka.len() == 2 && ka[0] == me && ka[1] != me => {
+                    Some(self.pointee(self.vty(v)?).and_then(|t| self.vcls(t)))
+                }
+                _ => None,
+            };
+            let Some(class) = class else { return Ok(false) };
+            // an aggregate is copied through `[base + disp]` only
+            if matches!(class?, VCls::M { .. }) && form.is_ok() {
+                return Ok(false);
+            }
+            let at = self.pos + (k - i);
+            self.extend_use(base, at);
+            if form.is_ok() {
+                self.extend_use(index, at);
+            }
+            self.folded[v.index()] = i;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// `[p]` for a thin pointer operand (a slot address needs no register).
     fn ptr_mem(&mut self, p: Operand) -> Res<Mem> {
         if let Some(off) = self.slot_off(p) {
             return Ok(Mem::base(RBP, off));
+        }
+        if let Operand::Value(v) = p
+            && let Some(&i) = self.folded.get(v.index())
+            && i != super::analysis::NONE
+        {
+            let b = self.b;
+            let (Some(&base), Some(&index)) = (b.args(i).first(), b.args(i).get(1)) else {
+                return Err(bad("internal: folded address"));
+            };
+            let base = self.read_g(base)?;
+            return Ok(match self.addr_form(i)? {
+                Some(Ok(scale)) => Mem::index(base, self.read_g(index)?, scale, 0),
+                Some(Err(d)) => Mem::base(base, d),
+                None => return Err(bad("internal: folded address")),
+            });
         }
         let r = self.read_g(p)?;
         Ok(Mem::base(r, 0))

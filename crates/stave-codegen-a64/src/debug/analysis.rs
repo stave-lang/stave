@@ -91,6 +91,12 @@ pub struct Analysis {
     /// use (`x19`–`x28` for an integer-class value, `v8`–`v15` for a float), `NOREG` for none.
     /// Empty in a debug build.
     pub(crate) own: Vec<u8>,
+    /// Per owned value: the first and last block (index into `emit`) of its interval. No other
+    /// value has its register in those blocks.
+    pub(crate) own_first: Vec<u32>,
+    pub(crate) own_last: Vec<u32>,
+    /// Release: uses per value, saturating. Empty in a debug build.
+    pub(crate) uses: Vec<u8>,
     /// The owned registers as (is FP, number); entry `k` is saved at `[x29 - 8 * (k + 1)]`.
     pub(crate) saved: Vec<(bool, u8)>,
     /// Release: per block, the compare instruction its `cbr` emits itself (`cmp` + `b.cond`, no
@@ -240,6 +246,9 @@ impl Analysis {
         self.last_uses(body, nr);
         self.frame(cg, f, body, nr, scratch_need)?;
         self.own.clear();
+        self.own_first.clear();
+        self.own_last.clear();
+        self.uses.clear();
         self.saved.clear();
         self.fused.clear();
         self.emit.clear();
@@ -257,7 +266,8 @@ impl Analysis {
     /// by nothing else, on scalars. Their operands stay bound up to the terminator (no last-use
     /// mark in the block).
     fn fusion(&mut self, cg: &Codegen<'_>, body: &Body) {
-        let mut uses = vec![0u8; body.values.len()];
+        self.uses.resize(body.values.len(), 0);
+        let uses = &mut self.uses;
         let mut add = |o: Operand| {
             if let Operand::Value(v) = o
                 && let Some(c) = uses.get_mut(v.index())
@@ -277,7 +287,7 @@ impl Analysis {
             let bd = &body.blocks[blk as usize];
             let Term::Cbr { cond: Operand::Value(c), .. } = bd.term else { continue };
             let Some(ValueDef::Inst(j)) = body.values.get(c.index()).map(|v| v.def) else { continue };
-            if !bd.insts.indices().contains(&j) || uses[c.index()] != 1 {
+            if !bd.insts.indices().contains(&j) || self.uses[c.index()] != 1 {
                 continue;
             }
             if !matches!(body.insts.op[j as usize], Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge) {
@@ -325,6 +335,8 @@ impl Analysis {
         if asg.is_empty() {
             return Ok(());
         }
+        self.own_first.extend_from_slice(&asg.first);
+        self.own_last.extend_from_slice(&asg.last);
         self.own.extend(asg.reg.iter().zip(&class).map(|(&r, &c)| {
             if r == regalloc::NO_REG {
                 NOREG

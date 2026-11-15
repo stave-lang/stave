@@ -208,7 +208,11 @@ pub(crate) struct Cg<'a, 'm> {
     /// [`Self::edge_hint`]): the next temporary an op asks for lands there.
     hint: Option<R>,
     /// Release: uses per value, saturating. Empty in a debug build.
-    uses: Vec<u8>,
+    pub(crate) uses: Vec<u8>,
+    /// Release: per value, the address instruction (`addr.elem`, `addr.field`,
+    /// `addr.enum_field`) that was not emitted because the one load or store reading the value
+    /// uses it as its addressing mode; `NONE` otherwise. Empty in a debug build.
+    pub(crate) folded: Vec<u32>,
     /// Release: the compare of the current block that its `cbr` emits (`cmp` + `jcc`, no bool
     /// value); `NONE` otherwise.
     fused: u32,
@@ -410,6 +414,7 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
         cur_at: 0,
         hint: None,
         uses,
+        folded: if release { vec![NONE; nv] } else { Vec::new() },
         fused: NONE,
     };
     let fs = cx.fn_sites.get(fid.index()).copied().unwrap_or(Site::NONE);
@@ -692,6 +697,18 @@ impl<'a, 'm> Cg<'a, 'm> {
         }
     }
 
+    /// Keeps `o` alive up to position `at` of the current block (a later instruction reads it
+    /// though it is not one of its operands).
+    pub(crate) fn extend_use(&mut self, o: Operand, at: u32) {
+        if let Operand::Value(v) = o
+            && let Some(lu) = self.last_use.get_mut(v.index())
+            && (*lu == NONE || *lu < at)
+        {
+            *lu = at;
+            self.touched.push(v.0);
+        }
+    }
+
     /// Still needed after the current instruction (or by it).
     fn needed(&self, v: Value) -> bool {
         let lu = self.last_use.get(v.index()).copied().unwrap_or(NONE);
@@ -934,6 +951,34 @@ impl<'a, 'm> Cg<'a, 'm> {
             self.evict(R::X(Xmm::masked(n)))?;
         }
         Ok(())
+    }
+
+    /// Release, before a call: stores the cached values that are read after the call. The
+    /// bindings stay, so the arguments can move straight out of their registers.
+    fn save_for_call(&mut self) -> Res<()> {
+        let regs = CALLER_SAVED.into_iter().map(R::G).chain((0..NXMM).map(|n| R::X(Xmm::masked(n))));
+        for r in regs {
+            match self.occ(r) {
+                Occ::Free => {}
+                Occ::Temp => return Err(bad("internal: a temporary register across a call")),
+                Occ::Val(v) => {
+                    if !self.in_home[v.index()] && self.needed_after(v) {
+                        self.store_home(v, r)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Forgets what the call-clobbered registers held.
+    fn drop_caller_saved(&mut self) {
+        for g in CALLER_SAVED {
+            self.free_reg(R::G(g));
+        }
+        for n in 0..NXMM {
+            self.free_reg(R::X(Xmm::masked(n)));
+        }
     }
 
     fn reset_regs(&mut self) {
@@ -1528,7 +1573,14 @@ impl<'a, 'm> Cg<'a, 'm> {
         if args.len() + usize::from(env.is_some()) != abi.args.len() {
             return Err(bad("call argument count differs from the callee's parameters"));
         }
-        self.spill_caller_saved()?;
+        // Release: register arguments are one parallel move from where the values are. (A code
+        // address operand is read after the arguments are in place, so it takes the other way.)
+        let direct = self.rel && !matches!(callee, Callee::Val(_));
+        if direct {
+            self.save_for_call()?;
+        } else {
+            self.spill_caller_saved()?;
+        }
         let res_home = match (&abi.ret, res) {
             (RetLoc::Sret, Some(v)) => Some(self.home(v)?),
             (RetLoc::Sret, None) => return Err(bad("internal: sret call without a result value")),
@@ -1562,8 +1614,29 @@ impl<'a, 'm> Cg<'a, 'm> {
             self.env_word(*e, S0)?;
             self.a.mov_mr(Size::Q, Mem::base(RSP, *off as i32), S0)?;
         }
+        if direct {
+            let mut moves = Vec::new();
+            for (&o, loc) in args.iter().zip(&abi.args) {
+                match loc {
+                    Loc::Reg(Piece::G(g)) => {
+                        moves.push(PMove { dst: PLoc::G(*g), src: self.psrc(o)?, prec: None })
+                    }
+                    Loc::Reg(Piece::X(x)) => {
+                        let p = match self.ocls(o, None)? {
+                            VCls::X(p) => p,
+                            _ => Prec::F64,
+                        };
+                        moves.push(PMove { dst: PLoc::X(*x), src: self.psrc(o)?, prec: Some(p) });
+                    }
+                    _ => {}
+                }
+            }
+            self.par_moves(moves)?;
+            self.drop_caller_saved();
+        }
         for (&o, loc) in args.iter().zip(&abi.args) {
             match loc {
+                Loc::Reg(_) if direct => {}
                 Loc::Reg(Piece::G(g)) => self.copy_to_g(o, *g)?,
                 Loc::Reg(Piece::X(x)) => {
                     let p = match self.ocls(o, None)? {
@@ -1919,7 +1992,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                     let res = b.insts.result.get(i as usize).copied().flatten();
                     self.hint = res.and_then(|v| self.owned(v)).or_else(|| self.edge_hint(bd, i));
                 }
-                if i != self.fused {
+                if i != self.fused && !(self.rel && self.fold_addr(i, bd)?) {
                     self.inst(i)?;
                 }
                 self.end_inst(i)?;
@@ -1944,7 +2017,22 @@ impl<'a, 'm> Cg<'a, 'm> {
     }
 
     fn has_copies(&self, t: &Target) -> bool {
-        t.args.len > 0
+        if !self.rel {
+            return t.args.len > 0;
+        }
+        // Release: an argument already where the param lives (its own register) moves nothing.
+        let b = self.b;
+        let (params, args) = (b.params(t.block), b.target_args(t));
+        params.len() != args.len()
+            || params.iter().zip(args).any(|(&p, &o)| {
+                if o == Operand::Value(p) {
+                    return false;
+                }
+                match (self.owned(p), self.psrc(o)) {
+                    (Some(r), Ok(src)) => src != PSrc::Loc(ploc(r)),
+                    _ => true,
+                }
+            })
     }
 
     /// Writes a branch's arguments into the target's param homes (parallel copy). Uses scratch
