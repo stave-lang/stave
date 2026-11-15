@@ -135,7 +135,7 @@ impl<T> Once<T> {
         let slot: &Option<T> = unsafe("state 3: the slot holds Some and is never written again") &*p;
         match slot {
             Option.Some(v) => { return v; }
-            Option.None => { }
+            Option.None => {}
         }
         panic.trap(panic.KIND_UNWRAP, panic.user_site());
     }

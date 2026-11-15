@@ -288,6 +288,8 @@ pub(crate) trait Trace {
     const ON: bool;
     /// A named node opens at token `tok`.
     fn open(&mut self, _kind: u8, _tok: usize) {}
+    /// The innermost open named node closes.
+    fn close(&mut self) {}
     /// A terminal is consumed from token `tok` (twice for a split token); `producer` is the
     /// nonterminal whose production pushed it.
     fn term(&mut self, _tok: usize, _term: u16, _producer: u16) {}
@@ -369,6 +371,9 @@ pub(crate) fn run<T: Trace>(
             if let Some((kind, a, c)) = s.open.pop() {
                 let b = (nodes.len() - base) as u32 - c;
                 nodes.push(Node { kind, a, b });
+                if T::ON {
+                    trace.close();
+                }
             }
             continue;
         }

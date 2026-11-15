@@ -35,6 +35,7 @@
 
 pub mod args;
 pub mod fix;
+pub mod fmt;
 pub mod unsafe_report;
 
 use std::io::Write;
@@ -143,6 +144,7 @@ fn dispatch(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         (Cmd::Daemon, _) => not_implemented("daemon evict", "needs the stage1 daemon", err),
         (Cmd::UnsafeReport, _) => unsafe_report::run(a, out, err),
         (Cmd::Fix, _) => fix::run(a, out, err),
+        (Cmd::Fmt, _) => fmt::run(a, out, err),
         (cmd, _) => not_implemented(cmd.name(), "planned", err),
     }
 }

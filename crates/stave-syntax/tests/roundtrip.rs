@@ -8,9 +8,9 @@
 
 mod common;
 
-use common::{F, lang_md_blocks, repo, stave_files};
+use common::{F, lang_md_blocks, relayout, repo, stave_files};
 use proptest::prelude::*;
-use stave_syntax::{ParsedFile, parse_file, parse_file_stepwise, print_file};
+use stave_syntax::{ParsedFile, format_source, parse_file, parse_file_stepwise, print_file};
 
 /// A deterministic random program generator over the grammar.
 struct Gen {
@@ -794,6 +794,17 @@ proptest! {
         prop_assert!(pf.diagnostics.is_empty(), "{:?}\n{}", pf.diagnostics.first(), src);
     }
 
+    /// Generated programs with other whitespace and comments between their tokens: the round
+    /// trip holds, and the formatter's own check of its output passes.
+    #[test]
+    fn roundtrip_generated_any_layout(seed in any::<u64>(), layout in any::<u64>(), items in 1usize..8, depth in 0u32..6) {
+        let src = relayout(Gen::program(seed, items, depth).as_bytes(), layout);
+        let pf = check_roundtrip(&format!("seed {seed} layout {layout}"), src.as_bytes());
+        prop_assert!(pf.diagnostics.is_empty(), "{:?}\n{}", pf.diagnostics.first(), src);
+        let formatted = format_source(src.as_bytes(), F);
+        prop_assert!(formatted.is_ok(), "{:?}\n{}", formatted, src);
+    }
+
     /// Arbitrary bytes: no panic, and the round trip holds whenever the file has items.
     #[test]
     fn roundtrip_arbitrary(bytes in proptest::collection::vec(any::<u8>(), 0..400)) {
@@ -850,14 +861,15 @@ fn printer_keeps_the_shebang_line() {
     assert!(pf.diagnostics.is_empty());
     assert_eq!(
         print_file(&pf, src.as_bytes()).text,
-        "#!/usr/bin/env -S stave run\nimport std.io;\n\nfn main() -> i32 {\n    return 0;\n}\n"
+        "#!/usr/bin/env -S stave run\n// c\nimport std.io;\nfn main() -> i32 { return 0; }\n"
     );
     for src in
         ["#!", "#!x", "#!x\n", "#!x\r\nfn f() { }", "#! \"a\nfn f() { let = 1; }\n", "#!a\n#!b\nfn f() { }"]
     {
         let pf = check_roundtrip(src, src.as_bytes());
         let text = print_file(&pf, src.as_bytes()).text;
-        let line = src.split('\n').next().unwrap();
+        // trailing whitespace of the line goes, as in a comment
+        let line = src.split('\n').next().unwrap().trim_end();
         assert!(text.starts_with(&format!("{line}\n")), "{src:?}: {text:?}");
     }
     // a dropped first item that starts with `#!` (not at offset 0) must not become a shebang line
@@ -873,8 +885,8 @@ fn printer_layout_example() {
                match x{1=>{}_=>{}}return t.0.1+a[i]?;}";
     let pf = parse_file(src.as_bytes(), F);
     let p = print_file(&pf, src.as_bytes());
-    let want = "fn f(x: i32) -> i32 {\n    let v: Vec<Vec<i32>> = g::<u8>(x);\n    if x < 1 {\n        return -x;\n    } \
-                else {\n        loop {\n            break;\n        }\n    }\n    match x {\n        1 => { }\n        _ => { }\n    }\n    \
+    let want = "fn f(x: i32) -> i32 {\n    let v: Vec<Vec<i32>> = g::<u8>(x);\n    \
+                if x < 1 { return -x; } else { loop { break; } }\n    match x {\n        1 => {}\n        _ => {}\n    }\n    \
                 return t.0.1 + a[i]?;\n}\n";
     assert_eq!(p.text, want);
 }

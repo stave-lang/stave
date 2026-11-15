@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use stave_diag::{Diagnostic, FileId, LineIndex};
-use stave_syntax::{ParsedFile, kind_name, lex, parse_file, token_text};
+use stave_syntax::{ParsedFile, kind_name, lex, parse_file, token_end, token_text};
 use std::path::{Path, PathBuf};
 
 pub const F: FileId = FileId(0);
@@ -99,5 +99,39 @@ pub fn stave_files(dir: &Path) -> Vec<PathBuf> {
         }
     }
     out.sort();
+    out
+}
+
+/// The tokens of `src` with other whitespace and comments between them, chosen from `seed`.
+/// Tokens with nothing between them stay glued.
+pub fn relayout(src: &[u8], seed: u64) -> String {
+    const BETWEEN: [&str; 12] = [
+        " ",
+        " ",
+        " ",
+        "  ",
+        "\t",
+        "\n",
+        "\n",
+        "\n\n\n",
+        "\r\n",
+        " // c\n",
+        "\n// c  \n",
+        "\n  // a\n\n// b\n   ",
+    ];
+    let pf = parse_file(src, F);
+    let mut s = seed | 1;
+    let mut out = String::new();
+    let mut from = 0;
+    for (i, t) in pf.tokens.iter().enumerate() {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        if t.start as usize > from || i == 0 || i + 1 == pf.tokens.len() {
+            out.push_str(BETWEEN[(s % BETWEEN.len() as u64) as usize]);
+        }
+        out.push_str(&String::from_utf8_lossy(token_text(src, &pf.tokens, i)));
+        from = token_end(src, &pf.tokens, i) as usize;
+    }
     out
 }
