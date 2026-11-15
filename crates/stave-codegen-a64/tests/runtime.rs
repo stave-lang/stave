@@ -213,7 +213,11 @@ fn debug_image_options() {
         p.out(b, r, t.i64);
     });
     let want = interp(&p.m, p.entry);
-    let img = build_image(&p.m, &BuildConfig { opts: Options::debug(Machine::Aarch64), main: None }).unwrap();
+    let img = build_image(
+        &p.m,
+        &BuildConfig { opts: Options::debug(Machine::Aarch64), main: None, release: false },
+    )
+    .unwrap();
     if !can_run() {
         return;
     }

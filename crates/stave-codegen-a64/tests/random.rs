@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::rgen::program;
+use common::rgen::{program, program_stress};
 use common::*;
 use proptest::prelude::*;
 
@@ -17,6 +17,22 @@ proptest! {
     fn random_programs(seed in any::<u64>()) {
         let p = program(seed);
         check(&p, &format!("rnd-{seed:x}"));
+    }
+
+    /// The stress shape: big frames, many params, deep nesting, fn values.
+    #[test]
+    fn random_stress_programs(seed in any::<u64>()) {
+        let p = program_stress(seed);
+        check(&p, &format!("stress-{seed:x}"));
+    }
+}
+
+/// A fixed set of stress-shape seeds.
+#[test]
+fn random_stress_fixed_seeds() {
+    for seed in 0..60u64 {
+        let p = program_stress(seed * 104_729 + 3);
+        check(&p, &format!("stress-seed-{seed}"));
     }
 }
 

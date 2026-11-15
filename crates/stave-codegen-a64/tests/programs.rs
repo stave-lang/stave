@@ -23,7 +23,7 @@ fn hello_and_exit_code() {
     assert_eq!(r.stdout, b"hello, world\n");
     assert_eq!(r.code, 42);
     if can_run() {
-        let n = native(&p.m, "hello-native").unwrap();
+        let n = native(&p.m, "hello-native", false).unwrap();
         assert_eq!((n.stdout.as_slice(), n.code), (&b"hello, world\n"[..], 42));
     }
 }

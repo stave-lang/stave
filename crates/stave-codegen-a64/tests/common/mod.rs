@@ -300,9 +300,10 @@ pub fn can_run() -> bool {
     cfg!(all(target_os = "linux", target_arch = "aarch64")) || have("qemu-aarch64")
 }
 
-/// Compiles, links, and runs natively; `None` without qemu.
-pub fn native(m: &Module, name: &str) -> Option<Run> {
-    let img = build_image(m, &BuildConfig::new(None)).unwrap_or_else(|e| panic!("codegen: {e}"));
+/// Compiles (debug or release code generation), links, and runs natively; `None` without qemu.
+pub fn native(m: &Module, name: &str, release: bool) -> Option<Run> {
+    let cfg = BuildConfig { release, ..BuildConfig::new(None) };
+    let img = build_image(m, &cfg).unwrap_or_else(|e| panic!("codegen: {e}"));
     if !can_run() {
         eprintln!("SKIP running AArch64 ELF: no qemu-aarch64");
         return None;
@@ -325,11 +326,20 @@ pub fn native(m: &Module, name: &str) -> Option<Run> {
     Some(Run { stdout: out.stdout, stderr: out.stderr, code: out.status.code().unwrap_or(-1) })
 }
 
-/// The differential check. Returns the interpreter's run.
+/// The differential check, for debug and for release code generation. Returns the interpreter's
+/// run.
 pub fn check(p: &Prog, name: &str) -> Run {
     let want = interp(&p.m, p.entry);
-    if let Some(got) = native(&p.m, name)
-        && got != want
+    for release in [false, true] {
+        check_one(p, name, release, &want);
+    }
+    want
+}
+
+fn check_one(p: &Prog, name: &str, release: bool, want: &Run) {
+    let name = &format!("{name}{}", if release { "-release" } else { "" });
+    if let Some(got) = native(&p.m, name, release)
+        && got != *want
     {
         let words = |b: &[u8]| -> Vec<u64> {
             b.chunks(8).map(|c| c.iter().rev().fold(0u64, |a, x| (a << 8) | u64::from(*x))).collect()
@@ -349,5 +359,4 @@ pub fn check(p: &Prog, name: &str) -> Run {
             want.code
         );
     }
-    want
 }

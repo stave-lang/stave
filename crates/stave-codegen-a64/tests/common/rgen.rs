@@ -1,6 +1,8 @@
 //! Random IR program generator for the differential tests and the benchmark: straight-line
 //! and branchy (if/else joins, switches, bounded loops with block params) int and float code with
-//! casts, selects, aggregates, stack slots, and calls between the generated functions.
+//! casts, selects, aggregates, stack slots, and calls between the generated functions. The stress
+//! shape ([`program_stress`]) adds frames of several pages, up to 22 params, nesting to depth 5,
+//! and fn values (closures and fn items through a join, called and compared).
 
 use super::*;
 use stave_ir::arith::{self, CastTy, IntTy};
@@ -44,7 +46,27 @@ struct G<'a> {
     callees: &'a [Callee],
     opt_of: &'a dyn Fn(TypeId) -> Option<TypeId>,
     strs: &'a [stave_ir::StrId],
+    /// Nesting limit of diamonds, loops, and switches.
+    max_depth: u32,
+    /// Nesting depth of the region being generated.
+    depth: u32,
+    extra: Option<Extra>,
 }
+
+/// What the stress shape needs declared up front.
+#[derive(Clone, Copy)]
+struct Extra {
+    /// `fn(u64) -> u64`.
+    fn_ty: TypeId,
+    /// `(x: u64, env: usize) -> u64`, a closure body.
+    closure: FuncId,
+    /// `(x: u64) -> u64`.
+    item: FuncId,
+    /// `&mut [u64; BIG]`.
+    big_ref: TypeId,
+}
+
+const BIG: u64 = 1500;
 
 /// A generated function: id, params, return type, fn type.
 type Callee = (FuncId, Vec<TypeId>, TypeId, TypeId);
@@ -151,8 +173,61 @@ impl G<'_> {
         b.set_site(Site(self.site));
     }
 
+    /// A slot of several pages: one element written and read back.
+    fn big_slot(&mut self, b: &mut FuncBuilder, x: Extra) {
+        let tt = self.p.t;
+        let Some(pel) = self.p.m.types.find(&stave_ir::TypeKey::Ref { mutable: true, inner: tt.u64 }) else {
+            return;
+        };
+        let s = b.slot(x.big_ref);
+        let idx: Operand = if self.r.chance(50) {
+            b.int(self.r.below(BIG as usize) as i128)
+        } else {
+            let i = self.val(b, tt.u32);
+            let iz = b.cast(CastKind::Exact, tt.usize, i);
+            let mask = b.int(1023);
+            b.binary(Op::And, tt.usize, iz, mask).into()
+        };
+        let v = self.val(b, tt.u64);
+        let q = b.op(Op::ElemAddr, pel, &[s.into(), idx]);
+        b.store(q, v);
+        let r = b.load(tt.u64, q);
+        self.push(r, tt.u64);
+    }
+
+    /// A closure and a fn item joined into one fn value, which is called and compared.
+    fn fn_value(&mut self, b: &mut FuncBuilder, x: Extra) {
+        let tt = self.p.t;
+        let env = self.val(b, tt.usize);
+        let fv = b.fn_make(x.fn_ty, x.closure, env);
+        let c = self.val(b, tt.bool);
+        let arg = self.val(b, tt.u64);
+        let (th, el) = (b.create_block(), b.create_block());
+        let (join, jp) = b.create_block_with(&[x.fn_ty]);
+        b.cbr(c, th, &[], el, &[]);
+        b.switch_to(th);
+        b.br(join, &[fv.into()]);
+        b.switch_to(el);
+        let fi = b.func(x.item);
+        b.br(join, &[fi]);
+        b.switch_to(join);
+        let g = jp[0];
+        self.site(b);
+        let r = b.call_ind(g, Some(tt.u64), &[arg]).unwrap();
+        self.push(r, tt.u64);
+        let op = if self.r.chance(50) { Op::Eq } else { Op::Ne };
+        let eq = b.op(op, tt.bool, &[g.into(), fv.into()]);
+        self.push(eq, tt.bool);
+    }
+
     /// One straight-line instruction.
     fn inst(&mut self, b: &mut FuncBuilder) {
+        if let Some(x) = self.extra
+            && self.r.chance(6)
+        {
+            self.site(b);
+            return if self.r.chance(40) { self.big_slot(b, x) } else { self.fn_value(b, x) };
+        }
         let t = self.pick_ty();
         let k = kind(self.p, t);
         let tt = self.p.t;
@@ -319,6 +394,11 @@ impl G<'_> {
     }
 
     fn call(&mut self, b: &mut FuncBuilder) {
+        // Calls nest multiplicatively through the generated fns: none below depth 2, so the
+        // run time stays bounded whatever the nesting limit is.
+        if self.depth > 2 {
+            return;
+        }
         let (f, ps, rt, fnty) = self.callees[self.r.below(self.callees.len())].clone();
         let args: Vec<Operand> = ps.iter().map(|&pt| self.arg(b, pt, 25)).collect();
         let v = if self.r.chance(30) {
@@ -391,14 +471,16 @@ impl G<'_> {
 
     /// Straight-line code, sometimes with a nested construct.
     fn region(&mut self, b: &mut FuncBuilder, depth: u32) {
+        self.depth = depth;
         let n = 2 + self.r.below(6);
         self.straight(b, n);
-        if depth < 2 && self.r.chance(60) {
+        if depth < self.max_depth && self.r.chance(60) {
             match self.r.below(3) {
                 0 => self.diamond(b, depth),
                 1 => self.loop_(b, depth),
                 _ => self.switch(b, depth),
             }
+            self.depth = depth;
             let n = self.r.below(4);
             self.straight(b, n);
         }
@@ -498,6 +580,15 @@ impl G<'_> {
 
 /// A random program of `nf` (default 2–6) functions.
 pub fn program_n(seed: u64, nf: Option<usize>) -> Prog {
+    program_shaped(seed, nf, false)
+}
+
+/// A random program in the stress shape.
+pub fn program_stress(seed: u64) -> Prog {
+    program_shaped(seed, None, true)
+}
+
+fn program_shaped(seed: u64, nf: Option<usize>, stress: bool) -> Prog {
     let mut p = Prog::new();
     let t = p.t;
     let mut tys: Vec<TypeId> = t.ints().to_vec();
@@ -533,12 +624,35 @@ pub fn program_n(seed: u64, nf: Option<usize>) -> Prog {
         opts.push((a, o));
     }
     let opt_of = move |a: TypeId| opts.iter().find(|x| x.0 == a).map(|x| x.1);
+    let extra = stress.then(|| {
+        let fn_ty = p.m.types.fn_type(vec![t.u64], t.u64, stave_target::FeatureSet::EMPTY);
+        let big = p.m.types.array(t.u64, BIG);
+        let big_ref = p.m.types.ref_(true, big);
+        let closure = p.declare("rnd.closure", &[t.u64, t.usize], Some(t.u64));
+        let mut b = FuncBuilder::new(&[t.u64, t.usize]);
+        let (x, e) = (b.param(0).unwrap(), b.param(1).unwrap());
+        let three = b.int(3);
+        let m = b.binary(Op::MulWrap, t.u64, x, three);
+        let e64 = b.cast(CastKind::Wrap, t.u64, e);
+        let v = b.binary(Op::AddWrap, t.u64, m, e64);
+        b.ret(Some(v.into()));
+        p.m.define(closure, b.finish().expect("builder"));
+        let item = p.declare("rnd.item", &[t.u64], Some(t.u64));
+        let mut b = FuncBuilder::new(&[t.u64]);
+        let x = b.param(0).unwrap();
+        let k = b.int(0x55);
+        let v = b.binary(Op::Xor, t.u64, x, k);
+        b.ret(Some(v.into()));
+        p.m.define(item, b.finish().expect("builder"));
+        Extra { fn_ty, closure, item, big_ref }
+    });
+    let (max_depth, max_params) = if stress { (5, 22) } else { (2, 11) };
     let mut r = Rng(seed);
     let mut funcs: Vec<Callee> = Vec::new();
     let nf = nf.unwrap_or(2 + r.below(5));
     let mut site = 0u32;
     for _ in 0..nf {
-        let np = 1 + r.below(11);
+        let np = 1 + r.below(max_params);
         let params: Vec<TypeId> = (0..np).map(|_| tys[r.below(tys.len())]).collect();
         let ret = tys[r.below(tys.len())];
         let f = p.declare("rnd.f", &params, Some(ret));
@@ -554,6 +668,9 @@ pub fn program_n(seed: u64, nf: Option<usize>) -> Prog {
             callees: &funcs,
             opt_of: &opt_of,
             strs: &strs,
+            max_depth,
+            depth: 0,
+            extra,
         };
         g.region(&mut b, 0);
         if g.r.chance(50) {
@@ -579,6 +696,9 @@ pub fn program_n(seed: u64, nf: Option<usize>) -> Prog {
                     callees: &[],
                     opt_of: &|_| None,
                     strs: &strs,
+                    max_depth: 0,
+                    depth: 0,
+                    extra: None,
                 };
                 let args: Vec<Operand> = ps.iter().map(|&pt| g.konst(b, pt)).collect();
                 let v = b.call(*f, Some(*rt), &args).unwrap();

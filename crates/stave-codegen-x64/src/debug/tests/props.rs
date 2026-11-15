@@ -4,12 +4,16 @@
 use proptest::prelude::*;
 
 use super::harness::{Prog, check};
-use super::randgen::Gen;
+use super::randgen::{Gen, Shape};
 
 fn program(seed: u64, size: usize, traps: bool) -> Prog {
+    shaped(seed, size, traps, Shape::default())
+}
+
+fn shaped(seed: u64, size: usize, traps: bool, shape: Shape) -> Prog {
     let mut p = Prog::new();
     let (u64_, i32_) = (p.t.u64, p.t.i32);
-    let (f, args, mut mb) = Gen::new(&mut p, seed, size, traps, true).function("t.rand");
+    let (f, args, mut mb) = Gen::shaped(&mut p, seed, size, traps, true, shape).function("t.rand");
     let r = mb.call(f, Some(u64_), &args).unwrap();
     p.print(&mut mb, r.into(), u64_);
     let z = mb.int(0);
@@ -27,6 +31,24 @@ proptest! {
     fn random_programs(seed in any::<u64>(), size in 1usize..70, traps in any::<bool>()) {
         let p = program(seed, size, traps);
         check(&p, &format!("rand-{seed:x}-{size}-{traps}"));
+    }
+
+    /// The stress shape: big frames, stack-passed arguments, deep nesting, rotating loop params,
+    /// fn values.
+    #[test]
+    fn random_stress_programs(seed in any::<u64>(), size in 10usize..130, traps in any::<bool>()) {
+        let p = shaped(seed, size, traps, Shape::stress());
+        check(&p, &format!("stress-{seed:x}-{size}-{traps}"));
+    }
+}
+
+/// A fixed set of stress-shape programs (`STAVE_RAND_LARGE=n` runs more).
+#[test]
+fn random_stress_programs_fixed() {
+    let n: u64 = std::env::var("STAVE_RAND_LARGE").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+    for seed in 0..n {
+        let p = shaped(seed * 104_729 + 3, 40 + (seed as usize * 17) % 260, seed % 4 == 0, Shape::stress());
+        check(&p, &format!("stress-fixed-{seed}"));
     }
 }
 

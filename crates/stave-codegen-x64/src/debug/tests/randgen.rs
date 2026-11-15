@@ -1,6 +1,8 @@
 //! Random IR function generator for the property test and the codegen benchmark: straight-line
 //! integer and float code with traps, casts, compares and selects, if/else diamonds with join
-//! params, counted loops, and calls.
+//! params, counted loops, and calls. [`Shape::stress`] adds what register assignment has to get
+//! right: frames of several pages, calls with stack-passed arguments, deep nesting, loops whose
+//! params rotate, and fn values.
 
 use stave_ir::arith::{self, CastTy, IntTy};
 use stave_ir::{CastKind, FuncBuilder, FuncId, Op, Operand, TypeId, TypeKey, Value};
@@ -40,9 +42,35 @@ enum K {
     Bool,
 }
 
+/// What the generator emits beyond the default mix.
+#[derive(Clone, Copy, Debug)]
+pub struct Shape {
+    /// The generated fn has up to this many params.
+    pub max_params: usize,
+    /// Nesting limit of diamonds, loops, and switches.
+    pub max_depth: u32,
+    /// Big slots, many-argument calls, rotating loops, fn values.
+    pub extras: bool,
+}
+
+impl Default for Shape {
+    fn default() -> Shape {
+        Shape { max_params: 7, max_depth: 3, extras: false }
+    }
+}
+
+impl Shape {
+    pub fn stress() -> Shape {
+        Shape { max_params: 24, max_depth: 6, extras: true }
+    }
+}
+
 pub struct Gen<'p> {
     p: &'p mut Prog,
     r: Rng,
+    shape: Shape,
+    /// Helper fns defined so far (unique names).
+    helpers: u32,
     tys: Vec<(TypeId, K)>,
     avail: Vec<(Value, TypeId)>,
     budget: usize,
@@ -77,6 +105,17 @@ const CMPS: [Op; 6] = [Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge];
 
 impl<'p> Gen<'p> {
     pub fn new(p: &'p mut Prog, seed: u64, budget: usize, traps: bool, print: bool) -> Gen<'p> {
+        Gen::shaped(p, seed, budget, traps, print, Shape::default())
+    }
+
+    pub fn shaped(
+        p: &'p mut Prog,
+        seed: u64,
+        budget: usize,
+        traps: bool,
+        print: bool,
+        shape: Shape,
+    ) -> Gen<'p> {
         let t = p.t;
         let mut tys: Vec<(TypeId, K)> = Vec::new();
         for ty in super::harness::int_types(&t) {
@@ -92,6 +131,8 @@ impl<'p> Gen<'p> {
         Gen {
             p,
             r: Rng::new(seed),
+            shape,
+            helpers: 0,
             tys,
             avail: Vec::new(),
             budget,
@@ -211,7 +252,8 @@ impl<'p> Gen<'p> {
         }
         self.budget -= 1;
         let tb = self.p.t.bool;
-        let r = self.r.below(112);
+        let deep = self.shape.max_depth;
+        let r = self.r.below(if self.shape.extras { 126 } else { 112 });
         match r {
             0..=34 => {
                 let (t, k) = self.rand_ty();
@@ -260,19 +302,161 @@ impl<'p> Gen<'p> {
                 let v = b.select(t, c, x, y);
                 self.push(v, t);
             }
-            85..=91 if depth < 3 => self.diamond(b, depth),
-            92..=95 if depth < 3 => self.counted_loop(b, depth),
+            85..=91 if depth < deep => self.diamond(b, depth),
+            92..=95 if depth < deep => self.counted_loop(b, depth),
             100..=103 => self.agg_make(b),
             104..=107 => self.agg_use(b),
             108 => self.slot(b),
-            109..=110 if depth < 3 => self.switch(b, depth),
+            109..=110 if depth < deep => self.switch(b, depth),
             111 => self.agg_copy(b),
+            112..=113 => self.big_slot(b),
+            114..=116 => self.many_args(b),
+            117..=119 => self.fn_values(b),
+            120..=125 if depth < deep => self.rotating_loop(b, depth),
             _ => {
                 let (t, _) = self.rand_ty();
                 let x = self.value(b, t);
                 let v = self.p.opaque(b, x.into(), t);
                 self.push(v, t);
             }
+        }
+    }
+
+    /// A slot of several pages: one element written and read back.
+    fn big_slot(&mut self, b: &mut FuncBuilder) {
+        let t = self.p.t;
+        let n = 600 + self.r.below(2500) as u64;
+        let arr = self.p.m.types.array(t.u64, n);
+        let parr = self.p.m.types.ref_(true, arr);
+        let pel = self.p.m.types.ref_(true, t.u64);
+        let s = b.slot(parr);
+        let k = b.int(self.r.below(n as usize) as i128);
+        let idx: Operand = if self.r.chance(50) { k } else { self.p.opaque(b, k, t.usize).into() };
+        let x = self.operand(b, t.u64, 30);
+        let q = b.op(Op::ElemAddr, pel, &[s.into(), idx]);
+        b.store(q, x);
+        let v = b.load(t.u64, q);
+        self.push(v, t.u64);
+    }
+
+    /// A call of a fn with 7 to 20 params (the later ones stack-passed) that folds them into a
+    /// `u64`.
+    fn many_args(&mut self, b: &mut FuncBuilder) {
+        let u64_ = self.p.t.u64;
+        let n = 7 + self.r.below(14);
+        let ptys: Vec<(TypeId, K)> = (0..n).map(|_| self.rand_ty()).collect();
+        let tys: Vec<TypeId> = ptys.iter().map(|x| x.0).collect();
+        self.helpers += 1;
+        let f = self.p.decl(&format!("t.many{}", self.helpers), &tys, Some(u64_));
+        let mut fb = FuncBuilder::new(&tys);
+        let mut acc: Operand = fb.int(0);
+        for (i, &(_, k)) in ptys.iter().enumerate() {
+            let v = fb.param(i).unwrap();
+            let x: Operand = match k {
+                K::Int(_) => fb.cast(CastKind::Wrap, u64_, v).into(),
+                K::Bool => fb.cast(CastKind::Exact, u64_, v).into(),
+                K::F32 | K::F64 => fb.cast(CastKind::Sat, u64_, v).into(),
+            };
+            let m = fb.int(31 + i as i128);
+            let a2 = fb.binary(Op::MulWrap, u64_, acc, m);
+            acc = fb.binary(Op::AddWrap, u64_, a2, x).into();
+        }
+        fb.ret(Some(acc));
+        self.p.def(f, fb);
+        let args: Vec<Operand> = tys.iter().map(|&t| self.operand(b, t, 25)).collect();
+        let v = b.call(f, Some(u64_), &args).unwrap();
+        self.push(v, u64_);
+    }
+
+    /// fn values: a closure over a captured word or a fn item, picked by a condition, called
+    /// through the value and compared; the value stays in scope for later calls.
+    fn fn_values(&mut self, b: &mut FuncBuilder) {
+        let t = self.p.t;
+        let ft = self.p.m.types.fn_type(vec![t.u64], t.u64, stave_target::FeatureSet::EMPTY);
+        let x = self.operand(b, t.u64, 30);
+        if self.r.chance(40)
+            && let Some(g) = self.pick(ft)
+        {
+            let r = b.call_ind(g, Some(t.u64), &[x]).unwrap();
+            return self.push(r, t.u64);
+        }
+        self.helpers += 1;
+        let clo = self.p.decl(&format!("t.clo{}", self.helpers), &[t.u64, t.usize], Some(t.u64));
+        {
+            let mut fb = FuncBuilder::new(&[t.u64, t.usize]);
+            let (a, e) = (fb.param(0).unwrap(), fb.param(1).unwrap());
+            let three = fb.int(3);
+            let m = fb.binary(Op::MulWrap, t.u64, a, three);
+            let e64 = fb.cast(CastKind::Wrap, t.u64, e);
+            let r = fb.binary(Op::AddWrap, t.u64, m, e64);
+            fb.ret(Some(r.into()));
+            self.p.def(clo, fb);
+        }
+        let item = self.p.decl(&format!("t.item{}", self.helpers), &[t.u64], Some(t.u64));
+        {
+            let mut fb = FuncBuilder::new(&[t.u64]);
+            let a = fb.param(0).unwrap();
+            let k = fb.int(0x55);
+            let r = fb.binary(Op::Xor, t.u64, a, k);
+            fb.ret(Some(r.into()));
+            self.p.def(item, fb);
+        }
+        let env = self.operand(b, t.usize, 30);
+        let fv = b.fn_make(ft, clo, env);
+        let c = self.value(b, t.bool);
+        let fi = b.func(item);
+        let g = b.select(ft, c, fv, fi);
+        let r = b.call_ind(g, Some(t.u64), &[x]).unwrap();
+        self.push(r, t.u64);
+        let eq = b.cmp(if self.r.chance(50) { Op::Eq } else { Op::Ne }, t.bool, g, fv);
+        self.push(eq, t.bool);
+        self.push(g, ft);
+    }
+
+    /// A loop whose 2 to 4 value params rotate every iteration (the back edge is a parallel copy
+    /// with a cycle), around a random body.
+    fn rotating_loop(&mut self, b: &mut FuncBuilder, depth: u32) {
+        let t = self.p.t;
+        let (vt, k) = self.rand_ty();
+        if k == K::Bool {
+            return;
+        }
+        let n = 2 + self.r.below(3);
+        let mut args: Vec<Operand> = vec![b.int(0)];
+        for _ in 0..n {
+            args.push(self.operand(b, vt, 40));
+        }
+        let mut tys = vec![t.u32];
+        tys.extend(std::iter::repeat_n(vt, n));
+        let (head, hp) = b.create_block_with(&tys);
+        let (body, exit) = (b.create_block(), b.create_block());
+        b.br(head, &args);
+        b.switch_to(head);
+        let trips = b.int(self.r.below(7) as i128);
+        let lt = b.cmp(Op::Lt, t.bool, hp[0], trips);
+        b.cbr(lt, body, &[], exit, &[]);
+        b.switch_to(body);
+        let (mark, amark) = (self.avail.len(), self.aggs.len());
+        for &v in &hp[1..] {
+            self.push(v, vt);
+        }
+        for _ in 0..self.r.below(3) {
+            self.step(b, depth + 1);
+        }
+        let one = b.int(1);
+        let i2 = b.binary(Op::Add, t.u32, hp[0], one);
+        let mut next: Vec<Operand> = vec![i2.into()];
+        next.extend((0..n).map(|j| Operand::from(hp[1 + (j + 1) % n])));
+        if self.r.chance(40) {
+            let j = 1 + self.r.below(n);
+            next[j] = self.operand(b, vt, 30);
+        }
+        b.br(head, &next);
+        self.avail.truncate(mark);
+        self.aggs.truncate(amark);
+        b.switch_to(exit);
+        for &v in &hp[1..] {
+            self.push(v, vt);
         }
     }
 
@@ -564,7 +748,7 @@ impl<'p> Gen<'p> {
     /// Generates and defines `fn(params) -> u64` (prints every value when `print`); returns it
     /// with a fresh builder holding constant arguments for a call.
     pub fn function(mut self, name: &str) -> (FuncId, Vec<Operand>, FuncBuilder) {
-        let nparams = self.r.below(8);
+        let nparams = self.r.below(self.shape.max_params + 1);
         let ptys: Vec<TypeId> = (0..nparams).map(|_| self.rand_ty().0).collect();
         let f = self.p.decl(name, &ptys, Some(self.p.t.u64));
         let mut b = FuncBuilder::new(&ptys);
@@ -593,6 +777,10 @@ impl<'p> Gen<'p> {
         let mut acc: Operand = b.int(0);
         let avail = std::mem::take(&mut self.avail);
         for &(v, t) in &avail {
+            // fn values in scope are not printable scalars
+            if !self.tys.iter().any(|x| x.0 == t) {
+                continue;
+            }
             if self.print {
                 self.p.print(&mut b, v.into(), t);
             }
