@@ -15,6 +15,7 @@ tools/ci-step/run.sh check
 `check` runs, in order:
 
 - `fmt`: `cargo fmt --all --check`
+- `stave-fmt`: `stave fmt --check std runtime` (`stave fmt std runtime` rewrites them)
 - `clippy`: `cargo clippy --workspace --all-targets -- -D warnings`
 - `test`: `cargo test --workspace`
 - `gen-check`: the generated tables are up to date
