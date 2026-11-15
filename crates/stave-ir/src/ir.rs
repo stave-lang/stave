@@ -506,6 +506,26 @@ impl Body {
         }
     }
 
+    /// Calls `f` with every successor target of block `b`, in the order of [`Body::successors`],
+    /// without building the list.
+    pub fn for_each_successor(&self, b: Block, mut f: impl FnMut(Target)) {
+        let Some(d) = self.block(b) else { return };
+        match d.term {
+            Term::Br(t) => f(t),
+            Term::Cbr { then, els, .. } => {
+                f(then);
+                f(els);
+            }
+            Term::Switch { cases, default, .. } => {
+                for c in self.switch_cases(cases) {
+                    f(c.target);
+                }
+                f(default);
+            }
+            Term::Ret(_) | Term::Unreachable => {}
+        }
+    }
+
     /// Blocks reachable from `b0`, as a flag per block.
     pub fn reachable(&self) -> Vec<bool> {
         let n = self.blocks.len();
@@ -516,14 +536,14 @@ impl Body {
         let mut stack = vec![Block(0)];
         seen[0] = true;
         while let Some(b) = stack.pop() {
-            for t in self.successors(b) {
+            self.for_each_successor(b, |t| {
                 if let Some(s) = seen.get_mut(t.block.index())
                     && !*s
                 {
                     *s = true;
                     stack.push(t.block);
                 }
-            }
+            });
         }
         seen
     }

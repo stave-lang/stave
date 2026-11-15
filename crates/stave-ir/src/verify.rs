@@ -39,6 +39,17 @@ impl fmt::Display for VerifyError {
 
 /// Verifies the whole module.
 pub fn verify_module(m: &Module) -> Result<(), Vec<VerifyError>> {
+    let mut errs = verify_types(m)?;
+    for fi in 0..m.funcs.len() {
+        errs.extend(verify_func_body(m, FuncId(fi as u32)));
+    }
+    if errs.is_empty() { Ok(()) } else { Err(errs) }
+}
+
+/// The module-level part of [`verify_module`]: the type table and the ADT shapes. `Ok`: the shape
+/// errors (the functions can still be verified); `Err`: the type table is malformed and the
+/// functions cannot be verified.
+pub fn verify_types(m: &Module) -> Result<Vec<VerifyError>, Vec<VerifyError>> {
     let mut errs = Vec::new();
     let module_err = |msg: String| VerifyError { func: None, block: None, inst: None, msg };
     let types_ok = match m.types.check_well_formed() {
@@ -61,15 +72,19 @@ pub fn verify_module(m: &Module) -> Result<(), Vec<VerifyError>> {
             }
         }
     }
-    if !types_ok {
-        return Err(errs);
+    if types_ok { Ok(errs) } else { Err(errs) }
+}
+
+/// The per-function part of [`verify_module`]: the errors of function `fid` (none for an unknown
+/// id). The type table must be well formed ([`verify_types`]). Functions are independent, so a
+/// caller may verify them in parallel; [`verify_module`]'s errors are [`verify_types`]'s, then
+/// every function's in id order.
+pub fn verify_func_body(m: &Module, fid: FuncId) -> Vec<VerifyError> {
+    let mut errs = Vec::new();
+    if let Some(f) = m.func(fid) {
+        FnVerifier { m, f, fid, errs: &mut errs, body: None }.run();
     }
-    for (fi, f) in m.funcs.iter().enumerate() {
-        let fid = FuncId(fi as u32);
-        let mut v = FnVerifier { m, f, fid, errs: &mut errs, body: None };
-        v.run();
-    }
-    if errs.is_empty() { Ok(()) } else { Err(errs) }
+    errs
 }
 
 /// Verifies one function of the module.
@@ -1075,7 +1090,13 @@ impl Dominators {
         let n = b.blocks.len();
         let succ: Vec<Vec<usize>> = (0..n)
             .map(|i| {
-                b.successors(Block(i as u32)).iter().map(|t| t.block.index()).filter(|&s| s < n).collect()
+                let mut v = Vec::new();
+                b.for_each_successor(Block(i as u32), |t| {
+                    if t.block.index() < n {
+                        v.push(t.block.index());
+                    }
+                });
+                v
             })
             .collect();
         // Iterative DFS postorder from b0.

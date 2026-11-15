@@ -119,7 +119,7 @@ pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Module, Failure>
             Failure::Internal { stage: Stage::Lower, message }
         }
     })?;
-    stave_ir::verify_module(&m).map_err(|es| {
+    verify(&m).map_err(|es| {
         let named: Vec<String> = es
             .iter()
             .map(|e| {
@@ -131,12 +131,36 @@ pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Module, Failure>
     })?;
     prof::mark("verify");
     // Every element access keeps its bounds check or a proof.
-    stave_ir::bounds::audit(&m).map_err(|bad| Failure::Internal {
-        stage: Stage::Lower,
-        message: format!("bounds audit: {}", listed(&bad)),
-    })?;
+    let bad = unguarded(&m);
+    if !bad.is_empty() {
+        return Err(Failure::Internal {
+            stage: Stage::Lower,
+            message: format!("bounds audit: {}", listed(&bad)),
+        });
+    }
     prof::mark("bounds-audit");
     Ok(m)
+}
+
+/// [`stave_ir::verify_module`] with the functions verified in parallel (same errors, same order).
+fn verify(m: &Module) -> Result<(), Vec<stave_ir::VerifyError>> {
+    let mut errs = stave_ir::verify::verify_types(m)?;
+    let per_fn: Vec<Vec<stave_ir::VerifyError>> = (0..m.funcs.len() as u32)
+        .into_par_iter()
+        .map(|f| stave_ir::verify::verify_func_body(m, FuncId(f)))
+        .collect();
+    errs.extend(per_fn.into_iter().flatten());
+    if errs.is_empty() { Ok(()) } else { Err(errs) }
+}
+
+/// The unguarded element accesses of [`stave_ir::bounds::audit`], the functions audited in
+/// parallel (same list, same order).
+fn unguarded(m: &Module) -> Vec<stave_ir::bounds::Unguarded> {
+    let per_fn: Vec<Vec<stave_ir::bounds::Unguarded>> = (0..m.funcs.len() as u32)
+        .into_par_iter()
+        .map(|f| stave_ir::bounds::audit_func(m, FuncId(f)).1)
+        .collect();
+    per_fn.into_iter().flatten().collect()
 }
 
 /// A linked executable and the back-end timings.

@@ -425,6 +425,13 @@ impl FuncBuilder {
             ..Body::default()
         };
         let mut insts = Insts::default();
+        let n: usize = self.blocks.iter().map(|b| b.insts.len()).sum();
+        insts.op.reserve(n);
+        insts.ty.reserve(n);
+        insts.result.reserve(n);
+        insts.args.reserve(n);
+        insts.site.reserve(n);
+        body.blocks.reserve(self.blocks.len());
         for (bi, blk) in self.blocks.into_iter().enumerate() {
             let Some(term) = blk.term else { return Err(BuildError::Unterminated(Block(bi as u32))) };
             let params = Span { start: body.block_params.len() as u32, len: blk.params.len() as u32 };

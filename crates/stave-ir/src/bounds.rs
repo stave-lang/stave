@@ -118,21 +118,38 @@ pub struct Elided {
 pub fn audit(m: &Module) -> Result<Vec<Access>, Vec<Unguarded>> {
     let mut ok = Vec::new();
     let mut bad = Vec::new();
-    for (fi, f) in m.funcs.iter().enumerate() {
-        let Some(b) = &f.body else { continue };
-        let cx = Cx::new(&m.types, b);
-        for i in 0..b.insts.len() as u32 {
-            let Some(kind) = cx.access_kind(i) else { continue };
-            if !cx.reachable_inst(i) {
-                continue;
-            }
-            match cx.guard(i, kind) {
-                Some(guard) => ok.push(Access { func: FuncId(fi as u32), inst: i, kind, guard }),
-                None => bad.push(Unguarded { func: FuncId(fi as u32), path: label(f), inst: i, kind }),
-            }
-        }
+    for fi in 0..m.funcs.len() {
+        let (o, b) = audit_func(m, FuncId(fi as u32));
+        ok.extend(o);
+        bad.extend(b);
     }
     if bad.is_empty() { Ok(ok) } else { Err(bad) }
+}
+
+/// [`audit`] for one function: its guarded and its unguarded element accesses, in instruction
+/// order (none for an unknown id or a function without a body). Functions are independent, so a
+/// caller may audit them in parallel; [`audit`]'s lists are every function's in id order.
+pub fn audit_func(m: &Module, fid: FuncId) -> (Vec<Access>, Vec<Unguarded>) {
+    let mut ok = Vec::new();
+    let mut bad = Vec::new();
+    let Some(f) = m.func(fid) else { return (ok, bad) };
+    let Some(b) = &f.body else { return (ok, bad) };
+    // Only these ops can be element accesses: without one there is nothing to analyse.
+    if !b.insts.op.iter().any(|op| matches!(op, Op::ElemAddr | Op::Get | Op::Set)) {
+        return (ok, bad);
+    }
+    let cx = Cx::new(&m.types, b);
+    for i in 0..b.insts.len() as u32 {
+        let Some(kind) = cx.access_kind(i) else { continue };
+        if !cx.reachable_inst(i) {
+            continue;
+        }
+        match cx.guard(i, kind) {
+            Some(guard) => ok.push(Access { func: fid, inst: i, kind, guard }),
+            None => bad.push(Unguarded { func: fid, path: label(f), inst: i, kind }),
+        }
+    }
+    (ok, bad)
 }
 
 /// Removes every `check.bounds` that has a proof; returns the records, in (function, instruction)
