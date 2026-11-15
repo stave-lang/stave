@@ -1,0 +1,21 @@
+//~ PARSE-ONLY
+// E0028: Rust `dyn Trait` and `impl Trait` types. Use a generic parameter `<T: Trait>` or a fn
+// type.
+fn show(x: impl Display) { } //~ ERROR E0028
+
+fn make() -> impl Display { //~ ERROR E0028
+    return 1u32;
+}
+
+fn boxed(x: &dyn Display) { } //~ ERROR E0028
+
+struct Holder { f: Box<dyn Display> } //~ ERROR E0028
+
+fn local() {
+    let f: &dyn Shape = get(); //~ ERROR E0028
+}
+
+// `dyn` is not a keyword
+fn stave_form<T: Display>(x: T, dyn: u32) -> u32 {
+    return dyn;
+}

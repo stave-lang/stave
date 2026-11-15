@@ -1,4 +1,4 @@
-# Contract: parse-error codes and the E0004 report (v0.2)
+# Contract: parse-error codes and the E0004 report (v0.3)
 
 At an item's first syntax error, the parser reports E0004 unless one rule below matches.
 stage0 and stage1 implement exactly this table, so they pick the same code and span. The rules are
@@ -23,26 +23,25 @@ Inputs at the error, all available in both parsers:
 | 4 | E0012 | la is a CmpOp (`== != < <= > >=`) and top's origin rule is `AndExpr` (the `("&&" CmpExpr)*` helper). With a CmpOp lookahead every helper below CmpExpr reduces to ε, so this state means a CmpExpr that already has its CmpOp is followed by another (`a < b < c`) | la |
 | – | E0004 | otherwise | la (expected set: below) |
 
-**Planned rules 5–13** (v0.3; not yet implemented: until they land
-these errors are E0004). Evaluated after rule 4, in this order. "Ident `w`" means an `Ident` token
-spelled `w` (`where`, `dyn` are not keywords).
+**Rules 5–13: Rust forms.** Evaluated after rule 4, in this order, only when la is a whole token
+(not the rest of a split token). "Ident `w`" means an `Ident` token spelled `w` (`where`, `dyn`
+are not keywords). "The open node" is the innermost named rule being parsed at the error.
 
 | # | Code | Condition | Primary span |
 |---|---|---|---|
 | 5 | E0019 | la is `let` and prev is `if` or `while` | prev |
-| 6 | E0020 | la is `else` and top is the `;` terminal of the `let` alternative of `Stmt` | la |
-| 7 | E0021 | la is `}` and top is the `;` terminal of `ExprStmt`, whose statement has no `AssignOp` | the statement's first token |
+| 6 | E0020 | la is `else`, top is a `;` terminal pushed by rule `Stmt`, and the open node (that `Stmt`) starts with `let` | la |
+| 7 | E0021 | la is `}` and top is a nonterminal whose origin rule is `ExprStmt` (its `(AssignOp Expr)?` helper: the statement has no `AssignOp` and no `;`) | the open node's (the statement's) first token |
 | 8 | E0022 | la is Ident `where` and la lies before the item's first depth-0 `{` (the item header) | la |
 | 9 | E0023 | (a) prev is `::` and la is not `<`; or (b) la is `::` and the token after la is not `<` | the `::` |
-| 10 | E0025 | la is `mut` and top's origin rule is `Param` or `Params` | la |
+| 10 | E0025 | la is `mut`, the token after la is an `Ident` or `self`, and top's origin rule is `Param`, `Params`, `XParams`, or a rule holding the parameter list (`FnDecl`, `TraitFn`, `KernelDecl`, `DispatchDecl`, `ExternItem`, `ExternFn`; `Primary` when prev is `(` after `fn`: a closure) | la |
 | 11 | E0026 | la is `(` (case: tuple) or `;` (case `unit`), prev is the `Ident` after `struct`, and top's origin rule is `AdtDecl` | la |
 | 12 | E0027 | la is `!` and top's origin rule is `Type`, `TypeBase`, or `RetClause` | la |
 | 13 | E0028 | (a) la is `impl` and top's origin rule is `Type` or `TypeBase`; or (b) prev is Ident `dyn` and la is an `Ident` | the `impl` / `dyn` token |
 
 E0024 (`'a`) and E0029 (`/*`) are lexical error tokens (no E0004 in that item, see below).
-Each rule gets a conformance test `tests/conformance/syntax/rustism_E00xx.stv`. The origin
-rules named here (`Stmt`, `ExprStmt`, `Param`, `Params`, `AdtDecl`, `Type`, `TypeBase`,
-`RetClause`) join `REQUIRED` in `tools/ll1gen` when these rules land.
+Each rule has a conformance test `tests/conformance/syntax/rustism_E00xx.stv`. The origin rules
+named here are in `REQUIRED_RULES` of `tools/ll1gen` (generation fails if one is missing).
 
 **Empty obligation**: an item that parses without error but
 contains `unsafe` `(` StrLit where the literal is exactly `""` gets E0013 (case `empty`) at the
@@ -68,7 +67,7 @@ with these inputs:
   of `File`'s row (every terminal that can start the file).
 - **A late import** (an `import` after a non-import item): E0004 at the `import` token, with the
   expected set of `File`'s row minus `import`.
-- An item that contains an error token (E0003, E0006, E0015, E0018) gets no E0004.
+- An item that contains an error token (E0003, E0006, E0015, E0018, E0024, E0029) gets no E0004.
 
 Notes:
 - Rule 2 also fires for a genuine type-argument error after a cast (`x as Vec<u8 ;`). The E0011

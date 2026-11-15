@@ -8,7 +8,7 @@ fn text(s: string.String, keep: &str) -> &str from s { //~ ERROR E0520
     return keep;
 }
 
-fn number(n: u32, r: &u32) -> &u32 from r, n { //~ ERROR E0520
+fn number(n: u32, r: &u32) -> &u32 from r + n { //~ ERROR E0520
     return r;
 }
 

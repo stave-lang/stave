@@ -63,7 +63,8 @@ fn comments_and_whitespace() {
     assert_eq!(kinds(""), Vec::<&str>::new());
     assert_eq!(kinds("// only a comment"), Vec::<&str>::new());
     assert_eq!(kinds("a // c\nb"), vec!["Ident", "Ident"]);
-    assert_eq!(kinds("a /* b */"), vec!["Ident", "/", "*", "Ident", "*", "/"]);
+    assert_eq!(kinds("a /* b */"), vec!["Ident", "ERROR"]);
+    assert_eq!(kinds("a / * b * /"), vec!["Ident", "/", "*", "Ident", "*", "/"]);
     assert_eq!(kinds("\t\r\n x"), vec!["Ident"]);
     let l = lex(b"", F);
     assert_eq!(l.tokens.len(), 1);
@@ -101,7 +102,7 @@ fn fstring_holes_e0006() {
 
 #[test]
 fn unterminated_e0003_vs_newline_e0015() {
-    for (src, what) in [("\"abc", "string"), ("'a", "char"), ("f\"abc", "f-string"), ("x = \"a\\", "string")]
+    for (src, what) in [("\"abc", "string"), ("'+", "char"), ("f\"abc", "f-string"), ("x = \"a\\", "string")]
     {
         let l = lex(src.as_bytes(), F);
         assert_eq!(l.diagnostics.len(), 1, "{src}");
@@ -111,7 +112,7 @@ fn unterminated_e0003_vs_newline_e0015() {
         assert_eq!(l.tokens[l.tokens.len() - 2].kind, KIND_ERROR);
     }
     for (src, what) in
-        [("\"abc\nx", "string"), ("'a\nx", "char"), ("f\"a{b}\nx", "f-string"), ("\"a\\\nx", "string")]
+        [("\"abc\nx", "string"), ("'+\nx", "char"), ("f\"a{b}\nx", "f-string"), ("\"a\\\nx", "string")]
     {
         let l = lex(src.as_bytes(), F);
         assert_eq!(l.diagnostics.len(), 1, "{src:?}");
@@ -199,6 +200,29 @@ fn unexpected_characters_e0018() {
     let codes: Vec<&str> = pf.diagnostics.iter().map(|d| d.code()).collect();
     assert_eq!(codes, vec!["E0018"]);
     assert_eq!(pf.items.iter().map(|i| i.ok).collect::<Vec<_>>(), vec![false, true]);
+}
+
+#[test]
+fn lifetimes_e0024_and_block_comments_e0029() {
+    // a `'` and an identifier with no `'` directly after it: one error token
+    assert_eq!(toks("&'a str"), vec!["&:&", "ERROR:'a", "Ident:str"]);
+    assert_eq!(toks("'static"), vec!["ERROR:'static"]);
+    assert_eq!(
+        lex_diags(b"fn f<'a>(x: &'a u8, c: char) { let c = 'a'; let d = '_'; }"),
+        vec![("E0024", 5), ("E0024", 13)]
+    );
+    assert_eq!(kinds("'a' 'ab' '\\n' ' '"), vec!["CharLit", "CharLit", "CharLit", "CharLit"]);
+    let l = lex(b"&'long x", F);
+    assert_eq!(l.diagnostics[0].message(), "lifetime `'long` is not Stave: references have no lifetimes");
+    // `/*`: an error token through the first `*/` on its line, else the end of the line
+    assert_eq!(toks("a /* c */ b"), vec!["Ident:a", "ERROR:/* c */", "Ident:b"]);
+    assert_eq!(toks("a /* c\nb */"), vec!["Ident:a", "ERROR:/* c", "Ident:b", "*:*", "/:/"]);
+    assert_eq!(toks("a/*p"), vec!["Ident:a", "ERROR:/*p"]);
+    assert_eq!(toks("a / *p"), vec!["Ident:a", "/:/", "*:*", "Ident:p"]);
+    assert_eq!(toks("/*/ x */ y"), vec!["ERROR:/*/ x */", "Ident:y"]);
+    assert_eq!(lex_diags(b"x /* a */ /* b"), vec![("E0029", 2), ("E0029", 10)]);
+    assert_eq!(kinds("// /* in a line comment"), Vec::<&str>::new());
+    assert_eq!(kinds("\"/* in a string */\""), vec!["StrLit"]);
 }
 
 #[test]

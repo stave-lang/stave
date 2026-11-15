@@ -136,12 +136,12 @@ pub enum Ret {
     Tup(Sc, Sc),
     /// `&sc from p0` (p0: `&S`).
     RefSc(Sc),
-    /// `&S from p0, p1`.
+    /// `&S from p0 + p1`.
     RefS(u32),
     /// `&mut sc from p0` (p0: `&mut S`).
     MutSc(Sc),
     T,
-    /// `&T from p0, p1`.
+    /// `&T from p0 + p1`.
     RefT,
     /// `Cell<T>` for a generic struct.
     Cell(u32),
@@ -152,7 +152,7 @@ pub enum FnKind {
     Plain,
     /// `<T>(p0: bool, p1: T, p2: T) -> T`.
     Pick,
-    /// `<T>(p0: &T, p1: &T, p2: bool) -> &T from p0, p1`.
+    /// `<T>(p0: &T, p1: &T, p2: bool) -> &T from p0 + p1`.
     RefPick,
     /// `<T: Tr>(p0: &T, p1: sc) -> sc`, calling method 0 of trait `Tr` (own module).
     Bound(u32),

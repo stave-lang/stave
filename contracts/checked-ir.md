@@ -55,9 +55,8 @@ stages' numbering, except `d<D>`):
 - `s<S>`: the rank of the string constant among the module's distinct string constants by
   (xxHash32 seed 0 over the bytes, bytes), like interned strings; literals are not interned
   strings, so these ids are not the `strings` dump's S.
-- `intrinsic.static_addr <i>` (contracts/intrinsics.md): `i` is the rank of the `static mut` decl
-  by D among the program's `static mut`s. Planned (grammar v0.7): immutable `static` decls
-  join the same ranking (one sequence over `static` and `static mut`, by D).
+- `intrinsic.static_addr <i>` (contracts/intrinsics.md): `i` is the rank of the decl by D among
+  the program's `static` and `static mut` decls (one sequence over both forms).
   Every static occupies at least one byte in the image (a zero-size static gets one zero
   byte, aligned as its type), so distinct statics have distinct addresses on every target.
 

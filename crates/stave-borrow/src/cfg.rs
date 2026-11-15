@@ -1246,7 +1246,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
         let mut reached = false;
         for (k, &arm) in arms.iter().enumerate() {
-            let ak = icx.kids_vec(arm);
+            let ak = icx.arm_kids(arm);
             let (Some(&pat), Some(&body)) = (ak.first(), ak.last()) else { continue };
             let guard = if ak.len() >= 3 { Some(ak[1]) } else { None };
             self.switch_to(tests[k]);

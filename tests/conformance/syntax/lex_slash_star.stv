@@ -1,6 +1,11 @@
 //~ CHECK-ONLY
-// No block comments: `/*` lexes as `/` `*`, so `b /*c` is `b / *c`.
+// No block comments: `/*` is a lexical error (E0029), so a division by a dereference needs the
+// space, `b / *c`.
 fn div_deref(b: i32, c: &i32) -> i32 {
-    return b /*c;
+    return b / *c;
 }
-/* not a comment */ //~ ERROR E0004
+
+fn glued(b: i32, c: &i32) -> i32 {
+    return b /*c; //~ ERROR E0029
+}
+/* not a comment */ //~ ERROR E0029

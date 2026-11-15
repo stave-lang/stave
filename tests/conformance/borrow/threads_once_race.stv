@@ -1,0 +1,45 @@
+//~ STDOUT threads_once_race.stdout
+// sync.Once: 16 threads race `get_or_init`; the initializer runs once, every caller gets the
+// same value, and later calls return it without running their `f`.
+import std.atomic;
+import std.io;
+import std.sync;
+
+struct Table { pub id: u64, pub cells: [u32; 4] }
+
+static RUNS: atomic.U32 = atomic.U32.new(0);
+static SUM: atomic.U64 = atomic.U64.new(0);
+static TABLE: sync.Once<Table> = sync.Once::<Table>.new();
+
+fn build() -> Table {
+    let n = RUNS.fetch_add(1);
+    // keep the first caller inside `f` long enough for the others to arrive
+    let mut spin: u64 = 0;
+    for i in 0..2000000u64 {
+        spin = spin +% i;
+    }
+    return Table.{ id: 42 + (n as u64), cells: [1, 2, 3, (spin % 2) as% u32] };
+}
+
+fn main() -> i32 {
+    scope {
+        for t in 0..16usize {
+            spawn {
+                let tab: &Table = TABLE.get_or_init(build);
+                let s = SUM.fetch_add(tab.id + (tab.cells[2] as u64));
+            }
+        }
+    }
+    let runs = RUNS.load();
+    let sum = SUM.load();
+    let again: &Table = TABLE.get_or_init(fn() -> Table { return Table.{ id: 0, cells: [0; 4] }; });
+    let id = again.id;
+    let runs2 = RUNS.load();
+    io.print(f"{runs} {sum} {id} {runs2}\n");
+
+    let local = sync.Once::<u32>.new();
+    let a = *local.get_or_init(fn() -> u32 { return 7; });
+    let b = *local.get_or_init(fn() -> u32 { return 8; });
+    io.print(f"{a} {b}\n");
+    return 0;
+}

@@ -2,7 +2,7 @@
 // Terminals in sorted spelling order (byte order), which is the E0004 expected-set order.
 // T_* are the terminal ids of ll1_table.stv.
 
-pub const NTERM: usize = 122;
+pub const NTERM: usize = 124;
 
 pub const T_BANG: u16 = 0; // !
 pub const T_BANG_EQ: u16 = 1; // !=
@@ -84,59 +84,61 @@ pub const T_KW_COPY: u16 = 76; // copy
 pub const T_KW_DISPATCH: u16 = 77; // dispatch
 pub const T_KW_ELSE: u16 = 78; // else
 pub const T_KW_EMULATE: u16 = 79; // emulate
-pub const T_KW_ENUM: u16 = 80; // enum
-pub const T_KW_EXACT: u16 = 81; // exact
-pub const T_KW_EXTERN: u16 = 82; // extern
-pub const T_KW_FALSE: u16 = 83; // false
-pub const T_KW_FN: u16 = 84; // fn
-pub const T_KW_FOR: u16 = 85; // for
-pub const T_KW_FROM: u16 = 86; // from
-pub const T_KW_IF: u16 = 87; // if
-pub const T_KW_IMPL: u16 = 88; // impl
-pub const T_KW_IMPORT: u16 = 89; // import
-pub const T_KW_IN: u16 = 90; // in
-pub const T_KW_KERNEL: u16 = 91; // kernel
-pub const T_KW_LET: u16 = 92; // let
-pub const T_KW_LOOP: u16 = 93; // loop
-pub const T_KW_MASKED: u16 = 94; // masked
-pub const T_KW_MATCH: u16 = 95; // match
-pub const T_KW_MUT: u16 = 96; // mut
-pub const T_KW_NEEDS: u16 = 97; // needs
-pub const T_KW_PUB: u16 = 98; // pub
-pub const T_KW_RETURN: u16 = 99; // return
-pub const T_KW_SCALAR: u16 = 100; // scalar
-pub const T_KW_SCOPE: u16 = 101; // scope
-pub const T_KW_SELF: u16 = 102; // self
-pub const T_KW_SPAWN: u16 = 103; // spawn
-pub const T_KW_STATIC: u16 = 104; // static
-pub const T_KW_STRICT: u16 = 105; // strict
-pub const T_KW_STRUCT: u16 = 106; // struct
-pub const T_KW_TAIL: u16 = 107; // tail
-pub const T_KW_TEST: u16 = 108; // test
-pub const T_KW_THEN: u16 = 109; // then
-pub const T_KW_TRAIT: u16 = 110; // trait
-pub const T_KW_TRUE: u16 = 111; // true
-pub const T_KW_TYPE: u16 = 112; // type
-pub const T_KW_UNSAFE: u16 = 113; // unsafe
-pub const T_KW_VIEW: u16 = 114; // view
-pub const T_KW_WHILE: u16 = 115; // while
-pub const T_L_BRACE: u16 = 116; // {
-pub const T_PIPE: u16 = 117; // |
-pub const T_PIPE_EQ: u16 = 118; // |=
-pub const T_PIPE_PIPE: u16 = 119; // ||
-pub const T_R_BRACE: u16 = 120; // }
-pub const T_TILDE: u16 = 121; // ~
+pub const T_KW_ENSURES: u16 = 80; // ensures
+pub const T_KW_ENUM: u16 = 81; // enum
+pub const T_KW_EXACT: u16 = 82; // exact
+pub const T_KW_EXTERN: u16 = 83; // extern
+pub const T_KW_FALSE: u16 = 84; // false
+pub const T_KW_FN: u16 = 85; // fn
+pub const T_KW_FOR: u16 = 86; // for
+pub const T_KW_FROM: u16 = 87; // from
+pub const T_KW_IF: u16 = 88; // if
+pub const T_KW_IMPL: u16 = 89; // impl
+pub const T_KW_IMPORT: u16 = 90; // import
+pub const T_KW_IN: u16 = 91; // in
+pub const T_KW_KERNEL: u16 = 92; // kernel
+pub const T_KW_LET: u16 = 93; // let
+pub const T_KW_LOOP: u16 = 94; // loop
+pub const T_KW_MASKED: u16 = 95; // masked
+pub const T_KW_MATCH: u16 = 96; // match
+pub const T_KW_MUT: u16 = 97; // mut
+pub const T_KW_NEEDS: u16 = 98; // needs
+pub const T_KW_PUB: u16 = 99; // pub
+pub const T_KW_REQUIRES: u16 = 100; // requires
+pub const T_KW_RETURN: u16 = 101; // return
+pub const T_KW_SCALAR: u16 = 102; // scalar
+pub const T_KW_SCOPE: u16 = 103; // scope
+pub const T_KW_SELF: u16 = 104; // self
+pub const T_KW_SPAWN: u16 = 105; // spawn
+pub const T_KW_STATIC: u16 = 106; // static
+pub const T_KW_STRICT: u16 = 107; // strict
+pub const T_KW_STRUCT: u16 = 108; // struct
+pub const T_KW_TAIL: u16 = 109; // tail
+pub const T_KW_TEST: u16 = 110; // test
+pub const T_KW_THEN: u16 = 111; // then
+pub const T_KW_TRAIT: u16 = 112; // trait
+pub const T_KW_TRUE: u16 = 113; // true
+pub const T_KW_TYPE: u16 = 114; // type
+pub const T_KW_UNSAFE: u16 = 115; // unsafe
+pub const T_KW_VIEW: u16 = 116; // view
+pub const T_KW_WHILE: u16 = 117; // while
+pub const T_L_BRACE: u16 = 118; // {
+pub const T_PIPE: u16 = 119; // |
+pub const T_PIPE_EQ: u16 = 120; // |=
+pub const T_PIPE_PIPE: u16 = 121; // ||
+pub const T_R_BRACE: u16 = 122; // }
+pub const T_TILDE: u16 = 123; // ~
 
 // Spelling of terminal i (UTF-8) is TERM_TEXT[TERM_TEXT_OFF[i]..TERM_TEXT_OFF[i + 1]].
-pub const TERM_TEXT_OFF: [u32; 123] = [
+pub const TERM_TEXT_OFF: [u32; 125] = [
     0, 1, 3, 4, 6, 7, 9, 11, 12, 13, 14, 16, 19, 21, 23, 26, 27, 29, 32, 34, 36, 39, 40, 41, 43,
     46, 48, 50, 52, 55, 56, 58, 61, 64, 66, 67, 69, 70, 72, 73, 74, 76, 79, 83, 86, 88, 89, 91, 93,
     94, 96, 98, 101, 102, 109, 112, 120, 126, 131, 137, 141, 147, 148, 149, 150, 152, 153, 158,
-    167, 169, 172, 175, 178, 181, 186, 191, 199, 203, 211, 215, 222, 226, 231, 237, 242, 244, 247,
-    251, 253, 257, 263, 265, 271, 274, 278, 284, 289, 292, 297, 300, 306, 312, 317, 321, 326, 332,
-    338, 344, 348, 352, 356, 361, 365, 369, 375, 379, 384, 385, 386, 388, 390, 391, 392,
+    167, 169, 172, 175, 178, 181, 186, 191, 199, 203, 211, 215, 222, 229, 233, 238, 244, 249, 251,
+    254, 258, 260, 264, 270, 272, 278, 281, 285, 291, 296, 299, 304, 307, 315, 321, 327, 332, 336,
+    341, 347, 353, 359, 363, 367, 371, 376, 380, 384, 390, 394, 399, 400, 401, 403, 405, 406, 407,
 ];
-pub const TERM_TEXT: [u8; 392] = [
+pub const TERM_TEXT: [u8; 407] = [
     33, 33, 61, 37, 37, 61, 38, 38, 38, 38, 61, 40, 41, 42, 42, 37, 42, 37, 61, 42, 61, 42, 124,
     42, 124, 61, 43, 43, 37, 43, 37, 61, 43, 61, 43, 124, 43, 124, 61, 44, 45, 45, 37, 45, 37, 61,
     45, 61, 45, 62, 45, 124, 45, 124, 61, 46, 46, 46, 46, 46, 46, 46, 46, 61, 46, 123, 47, 47, 61,
@@ -147,20 +149,20 @@ pub const TERM_TEXT: [u8; 392] = [
     103, 110, 97, 108, 108, 111, 99, 97, 116, 111, 114, 97, 115, 97, 115, 37, 97, 115, 63, 97, 115,
     124, 97, 115, 126, 98, 114, 101, 97, 107, 99, 111, 110, 115, 116, 99, 111, 110, 116, 105, 110,
     117, 101, 99, 111, 112, 121, 100, 105, 115, 112, 97, 116, 99, 104, 101, 108, 115, 101, 101,
-    109, 117, 108, 97, 116, 101, 101, 110, 117, 109, 101, 120, 97, 99, 116, 101, 120, 116, 101,
-    114, 110, 102, 97, 108, 115, 101, 102, 110, 102, 111, 114, 102, 114, 111, 109, 105, 102, 105,
-    109, 112, 108, 105, 109, 112, 111, 114, 116, 105, 110, 107, 101, 114, 110, 101, 108, 108, 101,
-    116, 108, 111, 111, 112, 109, 97, 115, 107, 101, 100, 109, 97, 116, 99, 104, 109, 117, 116,
-    110, 101, 101, 100, 115, 112, 117, 98, 114, 101, 116, 117, 114, 110, 115, 99, 97, 108, 97, 114,
-    115, 99, 111, 112, 101, 115, 101, 108, 102, 115, 112, 97, 119, 110, 115, 116, 97, 116, 105, 99,
-    115, 116, 114, 105, 99, 116, 115, 116, 114, 117, 99, 116, 116, 97, 105, 108, 116, 101, 115,
-    116, 116, 104, 101, 110, 116, 114, 97, 105, 116, 116, 114, 117, 101, 116, 121, 112, 101, 117,
-    110, 115, 97, 102, 101, 118, 105, 101, 119, 119, 104, 105, 108, 101, 123, 124, 124, 61, 124,
-    124, 125, 126,
+    109, 117, 108, 97, 116, 101, 101, 110, 115, 117, 114, 101, 115, 101, 110, 117, 109, 101, 120,
+    97, 99, 116, 101, 120, 116, 101, 114, 110, 102, 97, 108, 115, 101, 102, 110, 102, 111, 114,
+    102, 114, 111, 109, 105, 102, 105, 109, 112, 108, 105, 109, 112, 111, 114, 116, 105, 110, 107,
+    101, 114, 110, 101, 108, 108, 101, 116, 108, 111, 111, 112, 109, 97, 115, 107, 101, 100, 109,
+    97, 116, 99, 104, 109, 117, 116, 110, 101, 101, 100, 115, 112, 117, 98, 114, 101, 113, 117,
+    105, 114, 101, 115, 114, 101, 116, 117, 114, 110, 115, 99, 97, 108, 97, 114, 115, 99, 111, 112,
+    101, 115, 101, 108, 102, 115, 112, 97, 119, 110, 115, 116, 97, 116, 105, 99, 115, 116, 114,
+    105, 99, 116, 115, 116, 114, 117, 99, 116, 116, 97, 105, 108, 116, 101, 115, 116, 116, 104,
+    101, 110, 116, 114, 97, 105, 116, 116, 114, 117, 101, 116, 121, 112, 101, 117, 110, 115, 97,
+    102, 101, 118, 105, 101, 119, 119, 104, 105, 108, 101, 123, 124, 124, 61, 124, 124, 125, 126,
 ];
 
 // True for a lexical class (Ident, IntLit, ..., EOF), false for a fixed spelling.
-pub const TERM_IS_CLASS: [bool; 122] = [
+pub const TERM_IS_CLASS: [bool; 124] = [
     false, false, false, false, false, false, false, false, false, false, false, false, false,
     false, false, false, false, false, false, false, false, false, false, false, false, false,
     false, false, false, false, false, false, false, false, false, false, false, false, false,
@@ -170,7 +172,7 @@ pub const TERM_IS_CLASS: [bool; 122] = [
     false, false, false, false, false, false, false, false, false, false, false, false, false,
     false, false, false, false, false, false, false, false, false, false, false, false, false,
     false, false, false, false, false, false, false, false, false, false, false, false, false,
-    false, false, false, false,
+    false, false, false, false, false, false,
 ];
 
 // Split actions (grammar header): D3 `>>` `>=` `>>=` start with the `>` that closes type
@@ -178,20 +180,20 @@ pub const TERM_IS_CLASS: [bool; 122] = [
 // split token uses the action of the token's first terminal; an expected first terminal
 // consumes that part of the token and leaves the rest as the lookahead.
 // The first terminal of a split token (>> -> >, >= -> >, >>= -> >, && -> &); -1 otherwise.
-pub const SPLIT_FIRST: [i16; 122] = [
+pub const SPLIT_FIRST: [i16; 124] = [
     -1, -1, -1, -1, -1, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, 48, 48, 48, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1,
+    -1, -1, -1, -1,
 ];
 // The terminal left after the first one (>> -> >, >= -> =, >>= -> >=, && -> &); -1 otherwise.
-pub const SPLIT_REST: [i16; 122] = [
+pub const SPLIT_REST: [i16; 124] = [
     -1, -1, -1, -1, -1, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, 45, 48, 49, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1,
+    -1, -1, -1, -1,
 ];

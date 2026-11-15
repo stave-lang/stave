@@ -1,0 +1,42 @@
+//~ PARSE-ONLY
+// From: origins joined by `+` (never `,`). ParamFrom: a `from` clause after a parameter, on
+// `self` forms and named parameters, in fn items, methods, and trait signatures.
+view struct Pair { a: &u32, b: &u32 }
+
+fn pick(a: &u32, b: &u32, c: &u32) -> &u32 from a + b + c {
+    return a;
+}
+
+fn either(p: &Pair, x: &u32) -> &u32 from copy p + x {
+    return x;
+}
+
+view struct Stack { top: &u32 }
+
+impl Stack {
+    fn push(&mut self from x, x: &u32) {
+        self.top = x;
+    }
+
+    fn push2(&mut self from x + copy y, x: &u32, y: &Pair) -> &u32 from self {
+        return self.top;
+    }
+}
+
+fn store(dst: &mut Stack from x, x: &u32,) {
+    dst.top = x;
+}
+
+trait Sink { fn put(&mut self from x, x: &u32); }
+
+fn comma(a: &u32, b: &u32) -> &u32 from a, b { //~ ERROR E0004
+    return a;
+}
+
+fn empty_from(a: &u32) -> &u32 from { //~ ERROR E0004
+    return a;
+}
+
+fn trailing_plus(a: &u32) -> &u32 from a + { //~ ERROR E0004
+    return a;
+}

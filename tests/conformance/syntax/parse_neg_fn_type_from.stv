@@ -1,3 +1,8 @@
 //~ CHECK-ONLY
-// Fn types have no `from` clause.
-fn takes(g: fn(&i32) -> &i32 from x) { } //~ ERROR E0004
+// Fn types have no `from` clause. (After a parameter or a return type that is a fn type, `from`
+// belongs to that parameter or return clause.)
+view struct S { f: fn(&i32) -> &i32 from x } //~ ERROR E0004
+
+fn takes(g: fn(&i32) -> &i32) {
+    let h: fn(&i32) -> &i32 from g = g; //~ ERROR E0004
+}

@@ -1,0 +1,28 @@
+//~ STDOUT static_read.stdout
+// A `static` is an immutable global with a const-expr initializer: reading it, borrowing it
+// with `&`, and reading its fields and elements are safe.
+import std.io;
+
+struct Limits { pub lo: u32, pub hi: u32 }
+
+static N: u32 = 7;
+static LIM: Limits = Limits.{ lo: 1, hi: 9 };
+pub static TABLE: [u8; 4] = [1, 2, 3, 4];
+
+fn deref(r: &u32) -> u32 {
+    return *r;
+}
+
+fn third(t: &[u8; 4]) -> u8 {
+    return t[2];
+}
+
+fn main() -> i32 {
+    let a: u32 = N;
+    let r: &u32 = &N;
+    let b = deref(r) + deref(&LIM.lo) + LIM.hi;
+    let c = third(&TABLE);
+    let d = TABLE[3];
+    io.print(f"{a} {b} {c} {d}\n");
+    return 0;
+}

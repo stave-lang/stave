@@ -77,7 +77,27 @@ pub const SPLIT: [(&str, &str, &str); 4] =
     [(">>", ">", ">"), (">=", ">", "="), (">>=", ">", ">="), ("&&", "&", "&")];
 
 /// Rules and overrides that `contracts/parse-errors.md` names; generation fails without them.
-pub const REQUIRED_RULES: [&str; 3] = ["Unsafe", "AndExpr", "CmpOp"];
+pub const REQUIRED_RULES: [&str; 19] = [
+    "Unsafe",
+    "AndExpr",
+    "CmpOp",
+    "Stmt",
+    "ExprStmt",
+    "Param",
+    "Params",
+    "XParams",
+    "FnDecl",
+    "TraitFn",
+    "KernelDecl",
+    "DispatchDecl",
+    "ExternItem",
+    "ExternFn",
+    "Primary",
+    "AdtDecl",
+    "Type",
+    "TypeBase",
+    "RetClause",
+];
 pub const REQUIRED_OVERRIDES: [(&str, &str); 1] = [("TypeBase", "<")];
 
 /// What the generator enforces.

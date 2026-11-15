@@ -35,7 +35,7 @@ pub enum DeclKind {
     Enum,
     Trait,
     Const,
-    /// `static mut NAME: T = e;` (every use is unsafe).
+    /// `static NAME: T = e;` or `static mut NAME: T = e;` ([`DeclFlags::MUT`]: every use is unsafe).
     Static,
     TypeAlias,
     Impl,
@@ -74,6 +74,8 @@ impl DeclFlags {
     pub const RECORD: u16 = 1 << 10;
     /// Method or trait method with a `self` parameter.
     pub const HAS_SELF: u16 = 1 << 11;
+    /// `static mut` (a `static` without it is immutable).
+    pub const MUT: u16 = 1 << 12;
 
     pub fn has(self, f: u16) -> bool {
         self.0 & f != 0
@@ -338,7 +340,12 @@ impl Collector<'_> {
                     self.main(d);
                 }
                 Some(NodeKind::StaticDecl) => {
-                    let d = self.push(DeclKind::Static, a + 2, c, u32::MAX, pub_flag, 0);
+                    let (name, m) = if is(self.toks(), a as usize + 1, Term::KwMut) {
+                        (a + 2, DeclFlags::MUT)
+                    } else {
+                        (a + 1, 0)
+                    };
+                    let d = self.push(DeclKind::Static, name, c, u32::MAX, pub_flag | m, 0);
                     self.main(d);
                 }
                 Some(NodeKind::TypeAlias) => {

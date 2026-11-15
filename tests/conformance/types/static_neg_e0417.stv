@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// E0417: a `static` is shared by every thread, so its type must be Sync. A type holding an
+// `UnsafeCell` is not, unless it has an `unsafe(..) impl Sync`. A reference or view type is
+// E0413 only.
+import std.atomic;
+import std.cell;
+import std.sync;
+
+struct Slot { pub c: cell.UnsafeCell<u32> }
+
+struct Shared { pub c: cell.UnsafeCell<u32> }
+
+unsafe("test fixture: the cell is never written") impl Sync for Shared {}
+
+static A: Slot = Slot.{ c: cell.UnsafeCell::<u32>.new(0) }; //~ ERROR E0417
+static B: Shared = Shared.{ c: cell.UnsafeCell::<u32>.new(0) };
+static M: sync.Mutex<cell.UnsafeCell<u32>> = sync.Mutex::<cell.UnsafeCell<u32>>.new(cell.UnsafeCell::<u32>.new(1));
+static N: (u32, atomic.U32) = (1, atomic.U32.new(2));
+
+// `Cell.new` and `RefCell.new` are not const-exprs either (E0904).
+static C: cell.Cell<u32> = cell.Cell::<u32>.new(0); //~ ERROR E0417
+//~^ ERROR E0904
+static R: cell.RefCell<u32> = cell.RefCell::<u32>.new(0); //~ ERROR E0417
+//~^ ERROR E0904
+
+fn main() -> i32 {
+    return 0;
+}

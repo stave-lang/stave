@@ -7,11 +7,10 @@ GPU) both implement them.
 | File | What |
 |---|---|
 | `grammar.ebnf` | surface grammar, LL(1)-checked; source of the parse tables |
-| `grammar-v07-candidate.ebnf` | next grammar (v0.7), LL(1)-checked by hand with `ll1gen --grammar`; not read by any tool until it replaces `grammar.ebnf` |
 | `opt-rules.txt` | release optimizer rewrite rules (planned, to be read by `tools/rulegen`) |
 | `diagnostic-codes.md` | the one diagnostic registry, human table (E0001–E13xx) |
 | `diagnostics.toml` | the same registry, machine-readable: message, label, fix templates (read by `tools/diaggen`) |
-| `parse-errors.md` | when E0011–E0014 (planned: E0019–E0028) replace E0004; the E0004 expected set and found token (both parsers) |
+| `parse-errors.md` | when E0011–E0014 and the Rust forms E0019–E0028 replace E0004; the E0004 expected set and found token (both parsers) |
 | `conformance-annotations.md` | `//~` / `#~` test annotations read by `stave test` |
 | `diagnostics.schema.json` | JSON diagnostics, timings, and the `gpu-sm86` parallelism report |
 | `cli.md` | `stave` command line |

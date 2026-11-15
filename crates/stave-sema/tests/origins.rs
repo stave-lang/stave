@@ -63,9 +63,9 @@ fn root_fn(p: &Program, name: &str) -> DeclId {
 }
 
 const SRC: &str = "view struct Lexer { src: &str, pos: usize }\n\
-    fn by_ref(x: &u32, y: &u32) -> &u32 from y, y { return y; }\n\
+    fn by_ref(x: &u32, y: &u32) -> &u32 from y + y { return y; }\n\
     fn by_view(l: Lexer) -> Lexer from l { return l; }\n\
-    fn by_ref_view(l: &mut Lexer, n: u32) -> &str from copy l, l { return l.src; }\n\
+    fn by_ref_view(l: &mut Lexer, n: u32) -> &str from copy l + l { return l.src; }\n\
     fn owned(x: &u32, n: u32) -> u32 { return n; }\n\
     fn generic<T: view>(x: T, y: &T) -> T from x { return x; }\n";
 

@@ -9,7 +9,7 @@ struct Pool { g: Guard } //~ ERROR E0410
 
 fn many(gs: vec.Vec<Guard>) { } //~ ERROR E0411
 
-static mut CURRENT: Option<Guard> = Option.None; //~ ERROR E0413
+static CURRENT: Option<Guard> = Option.None; //~ ERROR E0413
 
 fn ret(c: &mut u32) -> Guard {
     return Guard.{ cell: c }; //~ ERROR E0510

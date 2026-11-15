@@ -1,13 +1,16 @@
 //! Const-expr evaluation: literals, consts, arithmetic, comparison, the `as`
 //! family, `size_of::<T>()` / `align_of::<T>()`, `if then else`, and aggregate literals (array
 //! `[a, b]` / `[e; n]`, tuple, struct, variant); also indexing and field access of const
-//! aggregates (an extension LANG.md does not list). Anything else (calls, loops, non-const items such as fns,
+//! aggregates (an extension LANG.md does not list), and a call of a constructor fixed by path
+//! ([`LangItems::const_ctors`], contracts/intrinsics.md "Paths fixed by the compiler"), which is
+//! evaluated as the struct literal its body returns, with the parameters bound to the
+//! arguments. Anything else (calls, loops, non-const items such as fns,
 //! statics, locals, references, f-strings, ranges, `match`) is E0904. A const that depends on
 //! itself is E0904 case `cycle` (reported by the signature builder, which evaluates consts on
 //! demand). Evaluation is linear in the expression size: every node is visited once.
 //!
 //! Type errors inside a const initializer are reported by the body checker (which also types
-//! const and `static mut` initializers for the `types` dump), so evaluation fails silently on them.
+//! const and `static` initializers for the `types` dump), so evaluation fails silently on them.
 //! Arithmetic overflow and division by zero in a const are errors (const contexts keep
 //! their errors): E0203 at the operation (no dedicated code). A shift amount at or above
 //! the bit width is E0205, reported by the body checker.
@@ -17,6 +20,7 @@ use stave_syntax::{NodeKind, Term};
 use crate::decls::DeclKind;
 use crate::diag::mk;
 use crate::ids::DeclId;
+use crate::itemcx::{Brackets, ItemCx};
 use crate::literals::{self, Suffix};
 use crate::prim::Builtin;
 use crate::resolve::Res;
@@ -45,6 +49,8 @@ pub(crate) trait CEnv: LowerHost {
     fn adt_def(&mut self, d: DeclId) -> Option<AdtDef>;
     fn layout(&mut self, t: TypeId) -> Option<(u64, u64)>;
     fn lang(&self) -> &LangItems;
+    /// The parameter types and return type of fn `d`.
+    fn fn_types(&mut self, d: DeclId) -> Option<(Vec<TypeId>, TypeId)>;
 }
 
 impl CEnv for SigBuilder<'_> {
@@ -63,6 +69,10 @@ impl CEnv for SigBuilder<'_> {
     fn lang(&self) -> &LangItems {
         &self.lang
     }
+
+    fn fn_types(&mut self, d: DeclId) -> Option<(Vec<TypeId>, TypeId)> {
+        SigBuilder::fn_types(self, d)
+    }
 }
 
 /// A partial result: the type (`NONE` = an unsuffixed literal still pending) and the value.
@@ -72,13 +82,15 @@ struct Ev<'e, 'a, E: CEnv> {
     env: &'e mut E,
     te: &'e TyEnv<'a>,
     depth: u32,
+    /// Inside a constructor body: its parameters (`Param` node, value).
+    params: Vec<(u32, (TypeId, Val))>,
 }
 
 const MAX_DEPTH: u32 = 2000;
 
-/// Evaluates the initializer `e` of a const or `static mut` of type `ty`.
+/// Evaluates the initializer `e` of a const or `static` of type `ty`.
 pub(crate) fn eval_item_const<E: CEnv>(env: &mut E, te: &TyEnv<'_>, e: u32, ty: TypeId) -> Option<Val> {
-    let mut ev = Ev { env, te, depth: 0 };
+    let mut ev = Ev { env, te, depth: 0, params: Vec::new() };
     let (t, v) = ev.eval(e, Some(ty))?;
     ev.fix(e, t, v, ty)
 }
@@ -89,7 +101,7 @@ pub(crate) fn eval_u64<E: CEnv>(env: &mut E, te: &TyEnv<'_>, n: u32, ty: TypeId)
     if let Some(p) = const_param_path(te, n) {
         return ConstArg::Param(p);
     }
-    let mut ev = Ev { env, te, depth: 0 };
+    let mut ev = Ev { env, te, depth: 0, params: Vec::new() };
     let Some((t, v)) = ev.eval(n, Some(ty)) else { return ConstArg::Error };
     match ev.fix(n, t, v, ty) {
         Some(Val::Int(i)) if i >= 0 && i <= u64::MAX as i128 => ConstArg::Value(i as u64),
@@ -779,8 +791,81 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 }
             }
             Res::Unresolved => None,
+            Res::Local(b) => match self.params.iter().find(|p| p.0 == b.node) {
+                Some(p) => Some(p.1.clone()),
+                None => self.e0904(n, "a non-const item"),
+            },
             _ => self.e0904(n, "a non-const item"),
         }
+    }
+
+    /// A call of the constructor `m` ([`LangItems::const_ctors`]): the value of the struct
+    /// literal its body returns, with its parameters bound to the argument values.
+    fn ctor_call(&mut self, n: u32, m: DeclId, args: &[u32], want: Option<TypeId>) -> R {
+        let prog = self.te.icx.prog;
+        let decl = *prog.decl(m)?;
+        let (ptys, ret) = self.env.fn_types(m)?;
+        if ptys.len() != args.len() {
+            return None;
+        }
+        // The type arguments come from the expected type: the return type is the constructed
+        // ADT over the constructor's own generic params.
+        let gargs: Option<Vec<GArg>> =
+            match (want.map(|w| self.env.kind(w).clone()), self.env.kind(ret).clone()) {
+                (Some(TypeKind::Adt { def, args }), TypeKind::Adt { def: rd, .. }) if def == rd => {
+                    Some(args.to_vec())
+                }
+                _ => None,
+            };
+        let mut vals = Vec::with_capacity(args.len());
+        for (&a, &pt) in args.iter().zip(&ptys) {
+            let pw = match &gargs {
+                Some(g) => Some(self.env.subst(pt, g, None)),
+                None if !self.env.has_params(pt) => Some(pt),
+                None => None,
+            };
+            let (t, v) = self.eval(a, pw)?;
+            vals.push(match pw {
+                Some(w) if t.is_none() => (w, self.fix_lit(a, v, w)?),
+                _ => (t, v),
+            });
+        }
+        let want = match want {
+            Some(w) => Some(w),
+            None if !self.env.has_params(ret) => Some(ret),
+            None => None,
+        };
+        let item = prog.item(decl.item)?;
+        let file = prog.file(item.file)?;
+        let info = file.parsed.items.get(item.index as usize)?;
+        let br = Brackets::new(&file.parsed.tokens, info.start, info.end);
+        let icx = ItemCx::new(prog, decl.item, &br)?;
+        let pnodes: Vec<u32> = icx
+            .child(decl.node, NodeKind::Params)
+            .map(|p| icx.kids_vec(p))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&c| icx.kind(c) == Some(NodeKind::Param))
+            .collect();
+        if pnodes.len() != vals.len() {
+            return None;
+        }
+        // The body is exactly `return e;`.
+        let body = icx.child(decl.node, NodeKind::Block)?;
+        let stmts = icx.kids_vec(body);
+        let e = match stmts[..] {
+            [s] if icx.is(icx.a(s), Term::KwReturn) => icx.first_child(s),
+            _ => None,
+        };
+        let Some(e) = e else { return self.e0904(n, "a call") };
+        let te = TyEnv { icx, n_parent: 0, self_ty: None };
+        let mut inner = Ev {
+            env: &mut *self.env,
+            te: &te,
+            depth: self.depth,
+            params: pnodes.into_iter().zip(vals).collect(),
+        };
+        inner.eval(e, want)
     }
 
     fn variant_value(&mut self, n: u32, v: DeclId, args: &[u32], want: Option<TypeId>) -> R {
@@ -900,6 +985,15 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 {
                     path = None;
                     cur = Some(self.variant_value(n, d, &args, want)?);
+                    p = close + 1;
+                    continue;
+                }
+                if cur.is_none()
+                    && let Some(Res::Decl(d)) = path
+                    && self.env.lang().const_ctors.contains(&d)
+                {
+                    path = None;
+                    cur = Some(self.ctor_call(n, d, &args, want)?);
                     p = close + 1;
                     continue;
                 }

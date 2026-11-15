@@ -1187,7 +1187,7 @@ impl<'a> FnCx<'a> {
         }
         let mut ab: Vec<ArmB> = Vec::with_capacity(arms.len());
         for &arm in arms {
-            let ak = icx.kids_vec(arm);
+            let ak = icx.arm_kids(arm);
             let (Some(&pat), Some(&body)) = (ak.first(), ak.last()) else { continue };
             let guard = if ak.len() >= 3 { Some(ak[1]) } else { None };
             let test = self.f.b.create_block();

@@ -6,7 +6,7 @@ fn pick(a: &u32, b: &u32) -> &u32 from a {
 }
 
 // fine
-fn pick_ok(a: &u32, b: &u32) -> &u32 from a, b {
+fn pick_ok(a: &u32, b: &u32) -> &u32 from a + b {
     return b;
 }
 

@@ -1,0 +1,16 @@
+//~ PARSE-ONLY
+// E0026: Rust tuple structs and unit structs. Stave structs have named fields in `{ }`.
+struct Meters(f64); //~ ERROR E0026
+
+pub struct Pair(u32, u32); //~ ERROR E0026
+
+struct Marker; //~ ERROR E0026
+
+view struct Ref(&u32); //~ ERROR E0026
+
+struct Good { v: f64 }
+
+struct Empty {}
+
+// an enum variant with a payload is Stave
+enum Shape { Circle(f64), Unit }

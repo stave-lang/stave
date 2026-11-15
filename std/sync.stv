@@ -1,4 +1,4 @@
-// std.sync: Mutex.
+// std.sync: Mutex, Once.
 //
 // `Mutex<T>` guards a T with a futex lock (runtime.atomic: three-state futex mutex, waiters
 // sleep in FUTEX_WAIT). `lock()` returns a `MutexGuard` view; its destructor unlocks, so the
@@ -7,8 +7,19 @@
 // and Sync when T is Send. A MutexGuard<T> is never Send (it stays on the locking thread) and is
 // Sync only when T is Sync (a shared guard hands out `&T` to every thread holding it). Not
 // poisoned: a panic ends the process.
+//
+// `Once<T>` holds a value computed at most once: `get_or_init(f)` runs `f` in the first caller,
+// callers arriving meanwhile sleep on a futex, and every call returns a reference to the one
+// value. Sync when T is Send and Sync. Calling `get_or_init` of the same Once from inside `f`
+// never returns.
+//
+// `Mutex.new` and `Once.new` are paths fixed by the compiler (contracts/intrinsics.md): a
+// `static` initializer may call them, so each body must stay one `return` of a struct literal
+// whose operands are const-exprs over the parameters.
 
 import runtime.atomic;
+import runtime.os;
+import runtime.panic;
 import std.core;
 import std.cell;
 
@@ -78,5 +89,54 @@ impl<T> MutexGuard<T> {
 impl<T> core.Drop for MutexGuard<T> {
     fn drop(&mut self) {
         unsafe("this guard holds the lock") { atomic.unlock(self.m.word.get()); }
+    }
+}
+
+// A value computed once, by the first caller of `get_or_init`.
+pub struct Once<T> {
+    // 0 empty, 1 the first caller is running `f`, 2 the same with callers asleep, 3 ready
+    state: cell.UnsafeCell<u32>,
+    v: cell.UnsafeCell<Option<T>>,
+}
+
+unsafe("the slot is written once, by the thread that moved the state from 0 to 1, before the state becomes 3; every other thread reads it only after that") impl<T: core.Send + core.Sync> core.Sync for Once<T> {}
+
+impl<T> Once<T> {
+    pub fn new() -> Once<T> {
+        return Once::<T>.{ state: cell.UnsafeCell::<u32>.new(0), v: cell.UnsafeCell::<Option<T>>.new(Option.None) };
+    }
+
+    // The value; the first caller computes it with `f`, callers arriving meanwhile wait for it.
+    pub fn get_or_init(&self, f: fn() -> T) -> &T from self {
+        let w = self.state.get();
+        let p = self.v.get();
+        loop {
+            let s = unsafe("w is this Once's state word") atomic.load_u32(w as *const u32);
+            if s == 3 { break; }
+            if s == 0 {
+                let was = unsafe("w is this Once's state word") atomic.cas_u32(w, 0, 1);
+                if was == 0 {
+                    let val = f();
+                    unsafe("state 1 or 2: only this thread touches the slot") { *p = Option.Some(val); }
+                    let prev = unsafe("w is this Once's state word") atomic.swap_u32(w, 3);
+                    if prev == 2 {
+                        let r = unsafe("w is a valid futex word") os.futex(w, os.FUTEX_WAKE | os.FUTEX_PRIVATE, 2147483647, 0, 0, 0);
+                    }
+                    break;
+                }
+            } else {
+                // the first caller is running `f`: mark the word and sleep until it changes
+                let c = if s == 1 then unsafe("w is this Once's state word") atomic.cas_u32(w, 1, 2) else s;
+                if c == 1 || c == 2 {
+                    let r = unsafe("w is a valid futex word") os.futex(w, os.FUTEX_WAIT | os.FUTEX_PRIVATE, 2, 0, 0, 0);
+                }
+            }
+        }
+        let slot: &Option<T> = unsafe("state 3: the slot holds Some and is never written again") &*p;
+        match slot {
+            Option.Some(v) => { return v; }
+            Option.None => { }
+        }
+        panic.trap(panic.KIND_UNWRAP, panic.user_site());
     }
 }

@@ -95,6 +95,15 @@ impl Kids {
     pub fn as_slice(&self) -> &[u32] {
         if self.spill.is_empty() { &self.inline[..self.len as usize] } else { &self.spill }
     }
+
+    /// Replaces the first child (no effect on an empty list).
+    fn set_first(&mut self, c: u32) {
+        let s =
+            if self.spill.is_empty() { &mut self.inline[..self.len as usize] } else { &mut self.spill[..] };
+        if let Some(x) = s.first_mut() {
+            *x = c;
+        }
+    }
 }
 
 impl std::ops::Deref for Kids {
@@ -281,6 +290,19 @@ impl<'p> ItemCx<'p> {
         }
         let c = n - 1;
         (c.saturating_sub(nodes.get(c as usize)?.b) <= lo).then_some(c)
+    }
+
+    /// Children of a match arm in order, with its `ArmPattern` replaced by the first alternative:
+    /// `[Pattern, guard?, body]`.
+    pub fn arm_kids(&self, arm: u32) -> Kids {
+        let mut v = self.kids_vec(arm);
+        if let Some(&p) = v.first()
+            && self.kind(p) == Some(NodeKind::ArmPattern)
+            && let Some(c) = self.first_child(p)
+        {
+            v.set_first(c);
+        }
+        v
     }
 
     pub fn child(&self, n: u32, k: NodeKind) -> Option<u32> {

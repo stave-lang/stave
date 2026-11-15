@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// A `static` may be a `&str` initialized by a string literal or a `&str` const (the one
+// reference type a global may have).
+const GREETING: &str = "hello";
+
+static NAME: &str = "stave";
+pub static HELLO: &str = GREETING;
+
+fn total() -> usize {
+    let n: &str = NAME;
+    return n.len() + HELLO.len();
+}
+
+fn main() -> i32 {
+    let t = total();
+    return 0;
+}

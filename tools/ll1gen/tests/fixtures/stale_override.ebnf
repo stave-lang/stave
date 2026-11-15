@@ -17,3 +17,17 @@ Type        = TypeBase ;
 TypeBase    = Ident GenericArgs? | "fn" "(" ")" ("->" Type)? ;
 GenericArgs = "<" Type ("," Type)* ">" ;
 Needs       = "needs" "(" Ident ")" ;
+
+(* The origin rules that rules 5-13 of contracts/parse-errors.md name (not reachable from File). *)
+FnDecl       = "fn" Ident "(" Params ")" RetClause Block ;
+TraitFn      = "fn" Ident "(" Params ")" ";" ;
+KernelDecl   = "kernel" "fn" Ident "(" Params ")" Block ;
+DispatchDecl = "dispatch" "fn" Ident "(" Params ")" ";" ;
+ExternItem   = "extern" "{" ExternFn "}" ;
+ExternFn     = "fn" Ident "(" XParams ")" ";" ;
+XParams      = "..." | Param ;
+Params       = Param ("," Param)* ;
+Param        = Primary ":" Type ;
+Primary      = Ident ;
+RetClause    = "->" Type ;
+AdtDecl      = "struct" Ident "{" "}" ;

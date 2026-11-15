@@ -162,7 +162,7 @@ fn e0004_expected_sets_in_terminal_order() {
     // a byte that starts no token is E0018 (lexical), and its item gets no E0004
     assert_eq!(one_at("fn f() { let x = @; }"), ("E0018", "@".into()));
     // fn types have no `from`
-    assert_eq!(one_at("fn f(g: fn(&T) -> &T from x) { }").0, "E0004");
+    assert_eq!(one_at("struct S { g: fn(&T) -> &T from x }").0, "E0004");
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn e0016_locations() {
     assert_eq!(one_at("fn f() { if a { let s = S.{ b: 1 "), ("E0016", ".{".into()));
     assert_eq!(one("fn f() { if a { let s = S.{ b: 1 ").message(), ".{ is never closed");
     // exactly one E0016 and no E0004; lexical diagnostics still reported
-    let pf = parse_file(b"fn f() { let = ; let s = f\"{1}\"; let c = 'x\n}}\nfn g() { let", F);
+    let pf = parse_file(b"fn f() { let = ; let s = f\"{1}\"; let c = '+\n}}\nfn g() { let", F);
     let mut c: Vec<&str> = pf.diagnostics.iter().map(|d| d.code()).collect();
     c.sort();
     assert_eq!(c, vec!["E0006", "E0015", "E0016"]);

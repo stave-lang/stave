@@ -129,6 +129,9 @@ pub struct ItemRes {
     pub deferred: Vec<Deferred>,
     /// Sorted by binding node.
     pub bindings: Vec<Binding>,
+    /// The first use of syntax that parses but has no semantics in stage0 yet: its first token
+    /// and what it is. A program with one is not checked further.
+    pub unimplemented: Option<(u32, &'static str)>,
 }
 
 impl ItemRes {
@@ -372,6 +375,13 @@ impl<'t, 'a> W<'t, 'a> {
 
     fn diag(&mut self, d: Option<Diagnostic>) {
         self.diags.extend(d);
+    }
+
+    fn unimplemented(&mut self, n: u32, what: &'static str) {
+        let tok = self.a(n);
+        if self.res.unimplemented.is_none_or(|(t, _)| tok < t) {
+            self.res.unimplemented = Some((tok, what));
+        }
     }
 
     fn e0101(&mut self, seg: &Seg) {
@@ -796,6 +806,9 @@ impl<'t, 'a> W<'t, 'a> {
     }
 
     fn param(&mut self, p: u32, bk: BindKind) {
+        if let Some(pf) = self.ast.child(p, NodeKind::ParamFrom) {
+            self.unimplemented(pf, "a `from` clause on a parameter");
+        }
         if let Some(sp) = self.ast.child(p, NodeKind::SelfParam) {
             let at = BindingRef { node: sp };
             self.self_param = Some(at);
@@ -992,9 +1005,21 @@ impl<'t, 'a> W<'t, 'a> {
                 for &c in kids.iter().skip(1).rev() {
                     self.stack.push(Task::Visit(c));
                 }
-                if let Some(&p) = kids.first() {
-                    self.stack.push(Task::BindPattern(p, BindKind::Arm));
+                // kids[0] is the ArmPattern; only its first alternative is bound
+                if let Some(&ap) = kids.first() {
+                    let mut alts = self.ast.children_rev(ap);
+                    let last = alts.next();
+                    let first = alts.last().or(last);
+                    if first != last {
+                        self.unimplemented(ap, "an or-pattern (`A | B`)");
+                    }
+                    if let Some(p) = first {
+                        self.stack.push(Task::BindPattern(p, BindKind::Arm));
+                    }
                 }
+            }
+            NodeKind::Requires | NodeKind::Ensures => {
+                self.unimplemented(n, "a `requires` / `ensures` contract");
             }
             NodeKind::Primary => {
                 let a = self.a(n) as usize;

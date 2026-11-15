@@ -1,0 +1,30 @@
+//~ STDOUT static_mutex_once.stdout
+// `sync.Mutex<T>` and `sync.Once<T>` are Sync, so they can be statics; `Mutex.new(e)` and
+// `Once.new()` are const-exprs.
+import std.io;
+import std.sync;
+import std.thread;
+
+struct Config { pub width: u32, pub depth: u32 }
+
+static TOTAL: sync.Mutex<u64> = sync.Mutex::<u64>.new(0);
+static PAIR: sync.Mutex<[u32; 2]> = sync.Mutex::<[u32; 2]>.new([3, 4]);
+static CONFIG: sync.Once<Config> = sync.Once::<Config>.new();
+
+fn load() -> Config {
+    return Config.{ width: 80, depth: 3 };
+}
+
+fn main() -> i32 {
+    thread.par_for(0, 500, fn(i: usize) {
+        TOTAL.with_lock(fn(t: &mut u64) { *t = *t + (i as u64); });
+    });
+    let total = TOTAL.with_lock(fn(t: &mut u64) -> u64 { return *t; });
+    let pair = PAIR.with_lock(fn(p: &mut [u32; 2]) -> u32 { p[0] = p[0] + 10; return p[0] + p[1]; });
+    let c: &Config = CONFIG.get_or_init(load);
+    let again: &Config = CONFIG.get_or_init(fn() -> Config { return Config.{ width: 1, depth: 1 }; });
+    let w = c.width;
+    let d = again.depth;
+    io.print(f"{total} {pair} {w} {d}\n");
+    return 0;
+}
