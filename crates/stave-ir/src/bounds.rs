@@ -253,7 +253,17 @@ impl<'a> Cx<'a> {
                     && block_of.get(i as usize).is_some_and(|&bk| dom.reachable(bk as usize))
             })
             .collect();
-        Cx { types, funcs, b, dom, block_of, preds, checks, facts: facts::Facts::default(), vops: m.vec_ops() }
+        Cx {
+            types,
+            funcs,
+            b,
+            dom,
+            block_of,
+            preds,
+            checks,
+            facts: facts::Facts::default(),
+            vops: m.vec_ops(),
+        }
     }
 
     fn reachable_inst(&self, i: u32) -> bool {
