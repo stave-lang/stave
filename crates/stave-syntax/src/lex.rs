@@ -472,7 +472,12 @@ fn pending_diag(src: &[u8], file: FileId, p: Pending) -> Option<Diagnostic> {
             let head = src.get(..start).unwrap_or_default();
             let before = head.iter().rev().copied().find(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r'));
             let case = (before == Some(b'&')).then_some("ref");
-            make_diag("E0024", case, &[("text", &text)], span(start, end), &[])
+            // the edit takes the blanks after the lifetime too: `&'a T` becomes `&T`
+            let rest = src.get(end..).unwrap_or_default();
+            let blanks = rest.iter().take_while(|c| matches!(c, b' ' | b'\t')).count();
+            let cut = [("cut", span(start, end + blanks))];
+            let roles: &[(&str, Span)] = if case.is_some() { &cut } else { &[] };
+            make_diag("E0024", case, &[("text", &text)], span(start, end), roles)
         }
         Pending::BlockComment { start } => make_diag("E0029", None, &[], span(start, start + 2), &[]),
     }

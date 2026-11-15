@@ -53,12 +53,15 @@ fn codes(diags: &[serde_json::Value]) -> Vec<&str> {
 const MAIN: &str = "fn main() -> i32 {\n    return 0;\n}\n";
 
 /// (code, the faulty item, the fixed item, `line:col` of the diagnostic).
-const EXACT: [(&str, &str, &str, &str); 5] = [
+const EXACT: [(&str, &str, &str, &str); 7] = [
+    // the byte-order mark is an error only at the start of the file: this entry stays first,
+    // so it is an import
+    ("E0017", "\u{feff}import std.mem;\n", "import std.mem;\n", "1:1"),
     ("E0023", "import std::io;\n", "import std.io;\n", "1:11"),
     (
         "E0024",
         "fn total(xs: &'a [u8]) -> usize {\n    return xs.len();\n}\n",
-        "fn total(xs: & [u8]) -> usize {\n    return xs.len();\n}\n",
+        "fn total(xs: &[u8]) -> usize {\n    return xs.len();\n}\n",
         "1:15",
     ),
     ("E0026", "struct Marker;\n", "struct Marker {}\n", "1:14"),
@@ -68,6 +71,14 @@ const EXACT: [(&str, &str, &str, &str); 5] = [
         "fn seven() -> u32 {\n    return 7;\n}\n\nfn user() {\n    seven();\n}\n",
         "fn seven() -> u32 {\n    return 7;\n}\n\nfn user() {\n    let _ = seven();\n}\n",
         "6:5",
+    ),
+    (
+        "E0907",
+        "trait Named {\n    fn name(&self) -> u32;\n}\n\nstruct Unit {}\n\n\
+         impl Named for Unit {\n    pub fn name(&self) -> u32 {\n        return 1;\n    }\n}\n",
+        "trait Named {\n    fn name(&self) -> u32;\n}\n\nstruct Unit {}\n\n\
+         impl Named for Unit {\n    fn name(&self) -> u32 {\n        return 1;\n    }\n}\n",
+        "8:5",
     ),
 ];
 
@@ -113,7 +124,7 @@ fn all_exact_fixes_in_one_file() {
     let fixed_codes: Vec<&str> = out.lines().map(|l| l.split(' ').nth(1).unwrap()).collect();
     let mut sorted = fixed_codes.clone();
     sorted.sort();
-    assert_eq!(sorted, ["E0023", "E0024", "E0026", "E0027", "E0210"], "{out}");
+    assert_eq!(sorted, ["E0017", "E0023", "E0024", "E0026", "E0027", "E0210", "E0907"], "{out}");
     assert!(out.lines().all(|l| l.starts_with("all.stv:") && l.ends_with(" fixed")), "{out}");
     assert_eq!(read(&file), format!("{fixed}{MAIN}"));
     assert_eq!(stave(&["fix", path]), (0, String::new(), String::new()));
@@ -278,7 +289,7 @@ fn usage_errors() {
 
 fn lifetime(offset: u32) -> Diagnostic {
     let span = Span::new(FileId(0), offset, 2);
-    Diagnostic::new("E0024", Some("ref"), &[("text", "'a")], Some(span), &[]).unwrap()
+    Diagnostic::new("E0024", Some("ref"), &[("text", "'a")], Some(span), &[("cut", span)]).unwrap()
 }
 
 fn path_sep(file: u32, offset: u32) -> Diagnostic {

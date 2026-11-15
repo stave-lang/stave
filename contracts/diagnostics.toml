@@ -212,7 +212,7 @@ area = "lex-parse"
 rule = "byte-order mark at file start; remove it (UTF-8 without BOM)"
 message = "file starts with a byte-order mark"
 labels = [{ at = "primary", text = "byte-order mark" }]
-fix = { description = "remove the byte-order mark: save the file as UTF-8 without BOM", edits = [{ at = "primary", replacement = "" }] }
+fix = { description = "remove the byte-order mark: save the file as UTF-8 without BOM", applicability = "exact", edits = [{ at = "primary", replacement = "" }] }
 
 [[diag]]
 code = "E0018"
@@ -281,7 +281,7 @@ labels = [{ at = "primary", text = "lifetime here" }]
 fix = { description = "remove `{text}`; name a returned borrow's origin with `-> &T from x`", edits = [{ at = "primary", replacement = "" }] }
 
 [diag.cases.ref]
-fix = { description = "remove `{text}`; name a returned borrow's origin with `-> &T from x`", applicability = "exact", edits = [{ at = "primary", replacement = "" }] }
+fix = { description = "remove `{text}`; name a returned borrow's origin with `-> &T from x`", applicability = "exact", edits = [{ at = "cut", replacement = "" }] }
 
 [[diag]]
 code = "E0025"
@@ -1350,7 +1350,7 @@ rule = "`pub` on a method of a trait impl (trait impl methods have the trait's v
 holes = { name = "name" }
 message = "trait impl method `{name}` cannot be `pub`"
 labels = [{ at = "primary", text = "`pub` here" }]
-fix = { description = "remove `pub`: `{name}` is visible wherever its trait is", edits = [{ at = "primary", replacement = "" }] }
+fix = { description = "remove `pub`: `{name}` is visible wherever its trait is", applicability = "exact", edits = [{ at = "cut", replacement = "" }] }
 
 [[diag]]
 code = "E0908"

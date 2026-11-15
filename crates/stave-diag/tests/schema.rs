@@ -238,7 +238,10 @@ fn every_fix_states_its_applicability() {
             exact.insert(v["code"].as_str().expect("code").to_string());
         }
     }
-    assert_eq!(exact.into_iter().collect::<Vec<_>>(), ["E0023", "E0024", "E0026", "E0027", "E0210"]);
+    assert_eq!(
+        exact.into_iter().collect::<Vec<_>>(),
+        ["E0017", "E0023", "E0024", "E0026", "E0027", "E0210", "E0907"]
+    );
     // an edit whose role span is not supplied is left out: the fix has nothing to apply
     let d =
         Diagnostic::new("E0210", None, &[("type", "u32")], Some(Span::new(file, 0, 1)), &[]).expect("E0210");
