@@ -9,7 +9,7 @@ fn total(xs: &[u32]) -> u32 {
     for v: u32x4 in xs {
         acc = acc +% v;
     } tail exact;
-    return acc.reduce_add();
+    return acc.reduce_add_wrap();
 }
 
 fn main() -> i32 {

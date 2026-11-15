@@ -167,7 +167,7 @@ impl FnVerifier<'_> {
                 self.mask_for(t, lane, k)?;
                 self.check_args(b, args, &[vt, vt])
             }
-            ReduceAdd | ReduceMin | ReduceMax | ReduceAnd | ReduceOr => {
+            ReduceAdd | ReduceAddWrap | ReduceMin | ReduceMax | ReduceAnd | ReduceOr => {
                 arity(1)?;
                 let t = res()?;
                 let vt = self.value_ty(b, args[0])?;
@@ -177,6 +177,12 @@ impl FnVerifier<'_> {
                 }
                 if matches!(op, ReduceAnd | ReduceOr) && !matches!(lc, LaneTy::Int(_)) {
                     return Err("bitwise reduction of float lanes".into());
+                }
+                if op == ReduceAdd && !matches!(lc, LaneTy::Float(_)) {
+                    return Err("`vec.reduce_add` of int lanes (use `vec.reduce_add_wrap`)".into());
+                }
+                if op == ReduceAddWrap && !matches!(lc, LaneTy::Int(_)) {
+                    return Err("wrapping reduction of float lanes".into());
                 }
                 Ok(())
             }

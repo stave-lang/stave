@@ -25,7 +25,7 @@
 //! | `vec.and or xor andnot`, `vec.not` | `a b`, `a` | V (int) | bitwise; `andnot` = `a & ~b` |
 //! | `vec.shl shr` † / `vec.shl.wrap` | `a amount` | V (int) | amount: V or an int scalar; an amount ≥ bits traps `Overflow` / is masked by bits-1 |
 //! | `vec.eq ne lt le gt ge` | `a b` | M | ints by signedness, floats IEEE (unordered: only `ne`) |
-//! | `vec.reduce_add reduce_min reduce_max reduce_and reduce_or` | `v` | L | fixed tree: lane i with lane i+N/2 until one lane remains; int `add` wraps |
+//! | `vec.reduce_add reduce_add_wrap reduce_min reduce_max reduce_and reduce_or` | `v` | L | fixed tree: lane i with lane i+N/2 until one lane remains; `reduce_add` float lanes, `reduce_add_wrap` int lanes (wrapping) |
 //! | `vec.reduce_add_ordered` | `v init` | L | `((init + v[0]) + v[1]) + …`; int wraps |
 //! | `vec.scan_add` | `v` | V | inclusive prefix sum, lane by lane from lane 0; int wraps |
 //! | `vec.cast cast.wrap cast.sat cast.round cast.try` | `v` | V' (`Option<V'>` for `try`) | the scalar cast per lane; `try` is `Some` iff every lane converts |
@@ -108,6 +108,7 @@ pub enum VecOp {
     Gt,
     Ge,
     ReduceAdd,
+    ReduceAddWrap,
     ReduceMin,
     ReduceMax,
     ReduceAnd,
@@ -149,7 +150,7 @@ pub enum VecOp {
 
 impl VecOp {
     /// Every op, in declaration order (tests and tables iterate it).
-    pub const ALL: [VecOp; 90] = {
+    pub const ALL: [VecOp; 91] = {
         use VecOp::*;
         [
             Splat,
@@ -201,6 +202,7 @@ impl VecOp {
             Gt,
             Ge,
             ReduceAdd,
+            ReduceAddWrap,
             ReduceMin,
             ReduceMax,
             ReduceAnd,
@@ -298,6 +300,7 @@ impl VecOp {
             Gt => "vec.gt",
             Ge => "vec.ge",
             ReduceAdd => "vec.reduce_add",
+            ReduceAddWrap => "vec.reduce_add_wrap",
             ReduceMin => "vec.reduce_min",
             ReduceMax => "vec.reduce_max",
             ReduceAnd => "vec.reduce_and",
@@ -640,10 +643,11 @@ pub fn reduce_tree(lanes: &mut [u64], mut f: impl FnMut(u64, u64) -> Option<u64>
     lanes.first().copied()
 }
 
-/// The reduction op of a lane: `reduce_add reduce_min reduce_max reduce_and reduce_or`.
+/// The reduction op of a lane: `reduce_add reduce_add_wrap reduce_min reduce_max reduce_and
+/// reduce_or`. `None` when the op does not take the lane class.
 pub fn reduce_step(op: VecOp, lane: LaneTy, a: u64, b: u64) -> Option<u64> {
     match (op, lane) {
-        (VecOp::ReduceAdd, _) => lane_add(lane, a, b),
+        (VecOp::ReduceAdd, LaneTy::Float(_)) | (VecOp::ReduceAddWrap, LaneTy::Int(_)) => lane_add(lane, a, b),
         (VecOp::ReduceMin | VecOp::ReduceMax, LaneTy::Float(f)) => {
             float_binary(if op == VecOp::ReduceMin { VecOp::Min } else { VecOp::Max }, f, a, b)
         }

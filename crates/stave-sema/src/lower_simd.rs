@@ -182,6 +182,7 @@ impl FnCx<'_> {
             "clz" => Some(VecOp::Clz),
             "scan_add" => Some(VecOp::ScanAdd),
             "reduce_add" => Some(VecOp::ReduceAdd),
+            "reduce_add_wrap" => Some(VecOp::ReduceAddWrap),
             "reduce_min" => Some(VecOp::ReduceMin),
             "reduce_max" => Some(VecOp::ReduceMax),
             "reduce_and" => Some(VecOp::ReduceAnd),

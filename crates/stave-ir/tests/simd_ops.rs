@@ -292,11 +292,11 @@ fn reduce(lane: TypeKey, n: u8, op: VecOp, v: Vec<u64>) -> u64 {
 fn int_reductions_wrap() {
     let i8t = int(true, 8);
     let v: Vec<u64> = [127i64, 1, -128, -1].iter().map(|&x| x as u64).collect();
-    assert_eq!(reduce(i8t.clone(), 4, VecOp::ReduceAdd, v.clone()) as i64, -1);
+    assert_eq!(reduce(i8t.clone(), 4, VecOp::ReduceAddWrap, v.clone()) as i64, -1);
     assert_eq!(reduce(i8t.clone(), 4, VecOp::ReduceMin, v.clone()) as i64, -128);
     assert_eq!(reduce(i8t.clone(), 4, VecOp::ReduceMax, v.clone()) as i64, 127);
     let u = int(false, 16);
-    assert_eq!(reduce(u.clone(), 2, VecOp::ReduceAdd, vec![0xffff, 2]), 1);
+    assert_eq!(reduce(u.clone(), 2, VecOp::ReduceAddWrap, vec![0xffff, 2]), 1);
     assert_eq!(
         reduce(u.clone(), 4, VecOp::ReduceAnd, vec![0xff0f, 0x0fff, 0xffff, 0xf0ff]),
         0x000f & 0x00ff & 0x0f0f
@@ -336,7 +336,7 @@ fn every_lane_count() {
             let (splat, add, red, lt, tb) = (
                 m.vec_intrinsic(VecOp::Splat),
                 m.vec_intrinsic(if float { VecOp::Add } else { VecOp::AddWrap }),
-                m.vec_intrinsic(VecOp::ReduceAdd),
+                m.vec_intrinsic(if float { VecOp::ReduceAdd } else { VecOp::ReduceAddWrap }),
                 m.vec_intrinsic(VecOp::Lt),
                 m.vec_intrinsic(VecOp::ToBits),
             );
@@ -1078,10 +1078,23 @@ fn verifier_rejects_mistyped_vector_ops() {
             (vec![mt, t, t], Some(t))
         }),
         // reduction to the wrong type
-        (VecOp::ReduceAdd, |m| {
+        (VecOp::ReduceAddWrap, |m| {
             let t = i32x4(m);
             let u = m.types.u64();
             (vec![t], Some(u))
+        }),
+        // the plain add reduction takes float lanes only
+        (VecOp::ReduceAdd, |m| {
+            let t = i32x4(m);
+            let i = m.types.i32();
+            (vec![t], Some(i))
+        }),
+        // the wrapping add reduction takes int lanes only
+        (VecOp::ReduceAddWrap, |m| {
+            let k = vk(m, F32, 4);
+            let t = m.types.intern(k);
+            let f = m.types.f32();
+            (vec![t], Some(f))
         }),
         // to_bits of 8 lanes is u8, not u16
         (VecOp::ToBits, |m| {

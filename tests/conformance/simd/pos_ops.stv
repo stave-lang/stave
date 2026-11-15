@@ -39,7 +39,7 @@ fn ints(a: u8x16, b: u8x16, k: u32x4, s: &[u32], d: &mut [u32]) -> u32 {
     let e = (m.rewiden::<8>() | mask8x4.first_n(2)).to_bits();
     let f = t.compress(m).expand(m).permute::<[1, 0, 3, 2]>();
     let h: u8x16 = f.bitcast::<u8x16>();
-    let n = r.reduce_add() as u32 + h.reduce_or() as u32 + (e as u32);
+    let n = r.reduce_add_wrap() as u32 + h.reduce_or() as u32 + (e as u32);
     return n +% f.reduce_and();
 }
 
