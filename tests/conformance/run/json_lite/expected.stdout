@@ -1,0 +1,4 @@
+{"name":"stave","version":6,"ok":true,"none":null,"nums":[0,-42,9007199254740993,-9223372036854775808,7],"floats":[0.1,1.5,1e21,-0.0,2.5e-7,100.0,0.00001,10000000000000000.0,123.456,6.02e23],"nested":{"a":[],"b":{},"c":[false,[1,2.0,"x y"]]}}
+nulls 1 bools 2 strings 2 arrays 5 objects 3
+ints 7 sum -9214364837600034843
+floats 11 sum 6.0300001e23

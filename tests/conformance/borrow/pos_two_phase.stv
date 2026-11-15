@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// Two-phase borrows: the auto-referenced `&mut self` of `push` is activated after its argument
+// `v.len()` (a shared borrow of the same vector) is evaluated.
+import std.vec;
+
+fn grow(v: &mut vec.Vec<usize>) {
+    v.push(v.len());
+}
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<usize>.new();
+    v.push(v.len());
+    v.push(v.len() + 1);
+    grow(&mut v);
+    return 0;
+}

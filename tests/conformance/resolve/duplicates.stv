@@ -1,0 +1,38 @@
+//~ CHECK-ONLY
+// E0105: two declarations of one name in one scope, reported at the later one: module items,
+// struct fields, enum variants, fields of a struct variant, params, generic params, and methods
+// of a type (across all its inherent impls).
+struct Pair { a: i32, a: i32 } //~ ERROR E0105
+
+enum Dir { Up, Down, Up } //~ ERROR E0105
+
+enum Box2 { Sized { w: f64, w: f64 } } //~ ERROR E0105
+
+fn twice(x: i32, x: i32) -> i32 { //~ ERROR E0105
+    return 0;
+}
+
+fn generic<T, T>(v: u8) -> u8 { //~ ERROR E0105
+    return v;
+}
+
+struct S { v: i32 }
+
+impl S {
+    fn get(&self) -> i32 { return self.v; }
+    fn get(&self) -> i32 { return 0; } //~ ERROR E0105
+}
+
+impl S {
+    fn other(&self) -> i32 { return 1; }
+    fn get(&self) -> i32 { return 2; } //~ ERROR E0105
+}
+
+fn twice() { //~ ERROR E0105
+}
+
+fn main() -> i32 {
+    let x: i32 = 1;
+    let x: i32 = x + 1;
+    return x;
+}

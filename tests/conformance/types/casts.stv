@@ -1,0 +1,49 @@
+//~ CHECK-ONLY
+// The `as` family: `as` only when lossless (E0204); `as%` wraps, `as|` saturates (NaN
+// -> 0), `as?` gives an Option, `as~` rounds to a float type.
+fn lossless(a: u8, b: u32, c: i16, d: char, e: f32, f: bool) -> u64 {
+    let w: u16 = a as u16;
+    let x: i64 = b as i64;
+    let y: usize = b as usize;
+    let z: u64 = y as u64;
+    let q: i32 = c as i32;
+    let r: u32 = d as u32;
+    let s: f64 = e as f64;
+    let t: f64 = b as f64;
+    let u: u8 = f as u8;
+    let ch: char = a as char;
+    return z;
+}
+
+fn lossy(a: u32, b: i32, c: f64, d: usize) {
+    let x: u8 = a as u8; //~ ERROR E0204
+    let y: u32 = b as u32; //~ ERROR E0204
+    let z: f32 = c as f32; //~ ERROR E0204
+    let w: u32 = d as u32; //~ ERROR E0204
+    let v: f32 = a as f32; //~ ERROR E0204
+    let k: i32 = c as% i32; //~ ERROR E0204
+}
+
+fn named(a: u32, b: i32, c: f64, d: usize) {
+    let x: u8 = a as% u8;
+    let y: u32 = b as| u32;
+    let z: f32 = c as~ f32;
+    let w: Option<u32> = d as? u32;
+    let n: i32 = c as| i32;
+    let o: Option<i64> = c as? i64;
+    let f: f32 = a as~ f32;
+    let nan: f64 = 0.0 / 0.0;
+    let zero: i32 = nan as| i32;
+}
+
+fn pointers(x: &u32, y: &mut u64) {
+    let p = x as *const u32;
+    let q = y as *mut u64;
+    let a = p as usize;
+    let b = a as *const u8;
+    let c = x as% *const u32; //~ ERROR E0204
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+// Safe C++ catalogue, `Option<&T>`: an optional reference kept across a mutation
+// of its container. Stave: E0501.
+import std.vec;
+
+fn find(xs: &[u32], k: u32) -> Option<&u32> from xs {
+    for i in 0..xs.len() {
+        if xs[i] == k { return Option.Some(&xs[i]); }
+    }
+    return Option.None;
+}
+
+fn stale(v: &mut vec.Vec<u32>) -> u32 {
+    let r = find(v.as_slice(), 3);
+    v.push(4); //~ ERROR E0501
+    return match r {
+        Option.Some(x) => *x,
+        Option.None => 0u32,
+    };
+}

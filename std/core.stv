@@ -1,0 +1,156 @@
+// std.core: core types and traits.
+//
+// The prelude is exactly the `pub` items of this module, plus the built-in type names
+// (ints, floats, bool, char, str, never): every module of a package that depends on std sees
+// them without an import. Everything else needs one (`import std.vec;` for `vec.Vec`). Variants
+// are always qualified (`Option.Some(x)`, E0103). The parameters of Option and Result
+// are `T: view` because `Option<&T>` and `Result<&str, E>` are ordinary (LANG.md §3:
+// an Option holding a reference is a view); methods returning a payload therefore name
+// `from self` (a view by value inherits its origins; for non-view payloads it is vacuous).
+//
+// Marker traits: `Copy` is safe and built in for ints, floats, bool, char, &T, raw pointers, and
+// arrays/tuples of Copy; an ADT opts in with an empty `impl Copy for S {}`. `Send` and
+// `Sync` are unsafe traits: an impl states why the type may cross / be shared between threads.
+//
+// Operator traits: one trait per operator and overflow mode, every one of the shape
+// `fn op(self, rhs: Self) -> Self` (unary: `fn op(self) -> Self`): operands and result have one
+// type (no implicit conversion; a shift amount has the left operand's type). Built in
+// for the scalar types; an impl for a user type makes the operator usable on it. Compound
+// assignment (`a += b`) uses the same trait as its operator. `!` (bool only), `&&`, `||`, and
+// the comparisons are not traits.
+//
+// Drop: `fn drop(&mut self)` runs automatically for an owned value at scope end (in
+// reverse declaration order) and when an initialized place is overwritten (`x = v`, `*p = v`).
+// It is never called explicitly (E0909); a Copy type cannot implement it (E0416).
+//
+// Display: f-strings call `Display.fmt` for each hole (std/README.md has the lowering).
+
+import runtime.panic;
+
+// ---- Option / Result ----
+
+pub enum Option<T: view> {
+    None,
+    Some(T),
+}
+
+impl<T: Copy + view> Copy for Option<T> {}
+
+impl<T: view> Option<T> {
+    pub fn is_some(&self) -> bool {
+        return match self { Option.Some(_) => true, Option.None => false };
+    }
+
+    pub fn is_none(&self) -> bool {
+        return match self { Option.Some(_) => false, Option.None => true };
+    }
+
+    // Panics `Unwrap` at the caller (user site) on None.
+    pub fn unwrap(self) -> T from self {
+        match self {
+            Option.Some(v) => { return v; }
+            Option.None => { }
+        }
+        panic.trap(panic.KIND_UNWRAP, panic.user_site());
+    }
+
+    pub fn unwrap_or(self, d: T) -> T from self, d {
+        return match self { Option.Some(v) => v, Option.None => d };
+    }
+
+    pub fn ok_or<E>(self, e: E) -> Result<T, E> from self {
+        return match self { Option.Some(v) => Result.Ok(v), Option.None => Result.Err(e) };
+    }
+}
+
+pub enum Result<T: view, E: view> {
+    Ok(T),
+    Err(E),
+}
+
+impl<T: Copy + view, E: Copy + view> Copy for Result<T, E> {}
+
+impl<T: view, E: view> Result<T, E> {
+    pub fn is_ok(&self) -> bool {
+        return match self { Result.Ok(_) => true, Result.Err(_) => false };
+    }
+
+    pub fn is_err(&self) -> bool {
+        return match self { Result.Ok(_) => false, Result.Err(_) => true };
+    }
+
+    // Panics `Unwrap` at the caller (user site) on Err.
+    pub fn unwrap(self) -> T from self {
+        match self {
+            Result.Ok(v) => { return v; }
+            Result.Err(_) => { }
+        }
+        panic.trap(panic.KIND_UNWRAP, panic.user_site());
+    }
+
+    pub fn unwrap_or(self, d: T) -> T from self, d {
+        return match self { Result.Ok(v) => v, Result.Err(_) => d };
+    }
+
+    pub fn ok(self) -> Option<T> from self {
+        return match self { Result.Ok(v) => Option.Some(v), Result.Err(_) => Option.None };
+    }
+
+    pub fn err(self) -> Option<E> from self {
+        return match self { Result.Ok(_) => Option.None, Result.Err(e) => Option.Some(e) };
+    }
+}
+
+// ---- marker traits ----
+
+pub trait Copy {}
+
+pub unsafe("an implementer guarantees that a value of the type may be moved to another thread") trait Send {}
+
+pub unsafe("an implementer guarantees that &Self may be used from several threads at once") trait Sync {}
+
+// The destructor of a type (Vec): run by the compiler only (see the header).
+pub trait Drop {
+    fn drop(&mut self);
+}
+
+// ---- operator traits (one per mode) ----
+
+pub trait Add { fn add(self, rhs: Self) -> Self; }          // +   traps on overflow
+pub trait WrapAdd { fn wrap_add(self, rhs: Self) -> Self; } // +%
+pub trait SatAdd { fn sat_add(self, rhs: Self) -> Self; }   // +|
+pub trait Sub { fn sub(self, rhs: Self) -> Self; }          // -
+pub trait WrapSub { fn wrap_sub(self, rhs: Self) -> Self; } // -%
+pub trait SatSub { fn sat_sub(self, rhs: Self) -> Self; }   // -|
+pub trait Mul { fn mul(self, rhs: Self) -> Self; }          // *
+pub trait WrapMul { fn wrap_mul(self, rhs: Self) -> Self; } // *%
+pub trait SatMul { fn sat_mul(self, rhs: Self) -> Self; }   // *|
+pub trait Div { fn div(self, rhs: Self) -> Self; }          // /
+pub trait Rem { fn rem(self, rhs: Self) -> Self; }          // %
+pub trait Shl { fn shl(self, rhs: Self) -> Self; }          // <<  traps if the amount >= width
+pub trait WrapShl { fn wrap_shl(self, rhs: Self) -> Self; } // <<% masks the amount
+pub trait Shr { fn shr(self, rhs: Self) -> Self; }          // >>
+pub trait BitAnd { fn bitand(self, rhs: Self) -> Self; }    // &
+pub trait BitOr { fn bitor(self, rhs: Self) -> Self; }      // |
+pub trait BitXor { fn bitxor(self, rhs: Self) -> Self; }    // ^
+pub trait Neg { fn neg(self) -> Self; }                     // unary -  traps on MIN
+pub trait Not { fn not(self) -> Self; }                     // ~ (bitwise; `!` is bool-only)
+
+// ---- text output ----
+
+// A sink for UTF-8 text: std.string.String, the stdout/stderr writers of std.io.
+pub trait Write {
+    fn write_str(&mut self, s: &str);
+}
+
+// The text form of a value, used by f-string holes. Implemented for the integer types, f32,
+// f64, bool, char (std.fmt), str, and String (std.string).
+pub trait Display {
+    fn fmt<W: Write>(&self, w: &mut W);
+}
+
+impl Display for str {
+    fn fmt<W: Write>(&self, w: &mut W) {
+        w.write_str(self);
+    }
+}

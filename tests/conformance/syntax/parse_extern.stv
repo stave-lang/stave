@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// ExternItem: an import block (XParams with `...` last) and an export definition.
+extern "C" {
+    fn puts(s: *const u8) -> i32;
+    fn printf(f: *const u8, ...) -> i32;
+    fn abort();
+}
+
+extern "C" fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+extern "C" { }

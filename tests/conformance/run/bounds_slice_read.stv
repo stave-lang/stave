@@ -1,0 +1,19 @@
+//~ EXIT 101
+//~ STDOUT bounds_slice_read.stdout
+//~ STDERR-CONTAINS "panic: Bounds at bounds_slice_read.stv:9:14 in main.at (thread 0)"
+// A slice index ≥ len traps with Bounds at the `[` before the read: the in-range reads
+// print, the first out-of-range one stops the program.
+import std.io;
+
+fn at(xs: &[u32], i: usize) -> u32 {
+    return xs[i];
+}
+
+fn main() -> i32 {
+    let a: [u32; 3] = [7, 8, 9];
+    for i in 0usize..5 {
+        let v = at(&a, i);
+        io.print(f"{v}\n");
+    }
+    return 0;
+}

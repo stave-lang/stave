@@ -1,0 +1,43 @@
+// Fibonacci two ways: naive recursion (u64, n <= 20) and an iterative loop (u64 up to fib(92),
+// the last value whose successor the loop computes without overflow). Both must agree.
+import std.io;
+
+fn fib_rec(n: u32) -> u64 {
+    if n < 2 {
+        return n as u64;
+    }
+    return fib_rec(n - 1) + fib_rec(n - 2);
+}
+
+// a, b = fib(i), fib(i + 1); n steps compute up to fib(n + 1), so n <= 92 stays in u64.
+fn fib_iter(n: u32) -> u64 {
+    let mut a: u64 = 0;
+    let mut b: u64 = 1;
+    let mut i: u32 = 0;
+    while i < n {
+        let t = a + b;
+        a = b;
+        b = t;
+        i = i + 1;
+    }
+    return a;
+}
+
+fn main() -> i32 {
+    for n in 0u32..=20 {
+        let r = fib_rec(n);
+        let it = fib_iter(n);
+        if r != it {
+            io.print(f"mismatch at {n}: {r} != {it}\n");
+            return 1;
+        }
+        io.print(f"fib({n}) = {r}\n");
+    }
+    let n90: u32 = 90;
+    let f90 = fib_iter(n90);
+    io.print(f"fib({n90}) = {f90}\n");
+    let n92: u32 = 92;
+    let f92 = fib_iter(n92);
+    io.print(f"fib({n92}) = {f92}\n");
+    return 0;
+}

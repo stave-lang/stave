@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// Origin table (LANG.md §3), row "`&T` / `&mut T`, T not a view", column `from copy x`: E0521 (`x`
+// points to no view whose origins could be inherited; write `from x`).
+fn first(xs: &[u32]) -> &u32 from copy xs { //~ ERROR E0521
+    return &xs[0];
+}
+
+fn first_mut(xs: &mut [u32]) -> &mut u32 from copy xs { //~ ERROR E0521
+    return &mut xs[0];
+}
+
+fn text(s: &str) -> &str from copy s { //~ ERROR E0521
+    return s;
+}
+
+// fine: `from x`
+fn first_ok(xs: &[u32]) -> &u32 from xs {
+    return &xs[0];
+}

@@ -1,0 +1,3 @@
+name = "ir_if_stmt"
+kind = "bin"
+version = "0.1.0"

@@ -1,0 +1,22 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Unwrap at panic_unwrap.stv:14:24 in main.index_of (thread 0)"
+// `Option.None.unwrap()` panics with Unwrap, reported at the caller's `unwrap` token.
+fn find(xs: [u32; 4], k: u32) -> Option<usize> {
+    for i in 0usize..4 {
+        if xs[i] == k {
+            return Option.Some(i);
+        }
+    }
+    return Option.None;
+}
+
+fn index_of(xs: [u32; 4], k: u32) -> usize {
+    return find(xs, k).unwrap();
+}
+
+fn main() -> i32 {
+    let xs: [u32; 4] = [2, 3, 5, 7];
+    let a = index_of(xs, 5);
+    let b = index_of(xs, 9);
+    return 0;
+}

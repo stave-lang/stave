@@ -1,0 +1,28 @@
+//~ STDOUT closure_fn_item_no_from.stdout
+// A fn item holds no loan, so returning one needs no `from`; a fn value
+// passed in is returned with `from f`, and the result keeps the closure's capture (a reference
+// to `x`) borrowed while it lives.
+import std.io;
+
+fn one() -> u32 {
+    return 1;
+}
+
+fn make() -> fn() -> u32 {
+    return one;
+}
+
+fn keep(f: fn() -> u32) -> fn() -> u32 from f {
+    return f;
+}
+
+fn main() -> i32 {
+    let x: u32 = 41;
+    let r: &u32 = &x;
+    let m = make();
+    let g = keep(fn() -> u32 { return *r + 1; });
+    let a = m();
+    let b = g();
+    io.print(f"{a} {b}\n");
+    return 0;
+}

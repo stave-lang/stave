@@ -1,0 +1,4 @@
+// Module `geo` (src/geo.stv) coexists with the directory src/geo/ (modules `geo.*`).
+pub fn origin() -> i32 {
+    return 0;
+}

@@ -1,0 +1,27 @@
+type t0 int s 32
+type t1 bool
+type t2 str
+type t3 ref t2
+fn @0 std.io.print {
+b0(%0: t3):
+  ret
+}
+fn @1 main.greet {
+b0(%0: t1):
+  cbr %0 b1() b2()
+b1():
+  call () @0 s1
+  br b3()
+b2():
+  call () @0 s2
+  br b3()
+b3():
+  call () @0 s2
+  call () @0 s0
+  ret
+}
+fn @2 main.main {
+b0():
+  call () @1 1
+  ret 0
+}

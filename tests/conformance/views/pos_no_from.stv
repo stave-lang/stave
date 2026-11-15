@@ -1,0 +1,36 @@
+//~ CHECK-ONLY
+// A signature without `from` declares the empty origin set.
+// It may return a reference or view that holds no loan: a string literal, a fn item, `None`, or
+// a view built only from such values; callers see a result that borrows nothing.
+view struct Lexer { src: &str, pos: usize }
+
+fn noop() { }
+
+fn greeting() -> &str {
+    return "hi";
+}
+
+fn fixed() -> fn() {
+    return noop;
+}
+
+fn nothing(xs: &[u8]) -> Option<&u8> {
+    return Option.None;
+}
+
+fn literal_lexer() -> Lexer {
+    return Lexer.{ src: "static", pos: 0 };
+}
+
+trait Source {
+    fn text(&self) -> &str;
+}
+
+// the result borrows nothing, so `s` may change while it lives
+fn caller(s: &mut u32) -> usize {
+    let g = greeting();
+    *s = 1;
+    let l = literal_lexer();
+    *s = 2;
+    return g.len() + l.pos;
+}

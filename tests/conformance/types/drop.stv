@@ -1,0 +1,27 @@
+//~ CHECK-ONLY
+// Drop: runs at scope end and when an initialized place is overwritten; an explicit
+// call is E0909; a Copy type cannot implement it (E0416).
+import std.mem;
+
+struct Buf { pub n: u32 }
+
+impl Drop for Buf {
+    fn drop(&mut self) { }
+}
+
+struct Pt { pub x: u32 }
+
+impl Copy for Pt {}
+
+impl Drop for Pt { //~ ERROR E0416
+    fn drop(&mut self) { }
+}
+
+fn main() -> i32 {
+    let mut a = Buf.{ n: 1 };
+    a.drop(); //~ ERROR E0909
+    Drop.drop(&mut a); //~ ERROR E0909
+    a = Buf.{ n: 2 };                   // drops the Buf with n = 1 first
+    mem.drop(a);                        // ends a's life now
+    return 0;
+}

@@ -1,0 +1,35 @@
+//~ CHECK-ONLY
+// The prelude: the `pub` items of std.core (Option, Result, Drop, operator traits, ...)
+// and the built-in type names, `never` included. `size_of` / `align_of` are built-in generic
+// fns. `Vec` and `String` are not in the prelude: `import std.vec;` then `vec.Vec`.
+import std.vec;
+
+struct Buf { len: usize }
+
+impl Drop for Buf {
+    fn drop(&mut self) { }
+}
+
+const WORD: usize = size_of::<u64>();
+const ALIGN: usize = align_of::<Buf>();
+
+fn stop() -> never {
+    loop { }
+}
+
+fn wrap(o: Option<u8>, v: vec.Vec<u8>) -> u8 {
+    return 0;
+}
+
+fn no_import(v: Vec<u8>) -> u8 { //~ ERROR E0101
+    return 0;
+}
+
+fn no_string(s: String) -> u8 { //~ ERROR E0101
+    return 0;
+}
+
+fn main() -> i32 {
+    let n: usize = size_of::<Buf>() + ALIGN + WORD;
+    return 0;
+}

@@ -1,0 +1,15 @@
+// runtime.config: per-binary settings fixed at build time.
+//
+// The driver must emit this module for each binary from the package's stave.toml (no mechanism
+// exists yet: ASSUMPTION, see runtime/README.md). The shipped file holds the defaults.
+
+// `[run] stack`: stack bytes of `main` and of every runtime thread (contracts/cli.md, default
+// "8MiB", at least "4KiB"). Rounded up to the page size by runtime.start.
+pub const RUN_STACK: usize = 8388608;
+
+// PROT_NONE guard region below every stack. 64 KiB rather than one page so that a
+// frame of up to 64 KiB still faults inside it; larger frames must be probed by the compiler.
+pub const GUARD: usize = 65536;
+
+// Alternate signal stack per thread for the SIGSEGV handler (>= MINSIGSTKSZ on both arches).
+pub const ALTSTACK: usize = 65536;

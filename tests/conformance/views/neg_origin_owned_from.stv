@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// Origin table (LANG.md §3), row "owned non-view by value", column `from x`: E0520 (the parameter dies
+// at return, so there is nothing to borrow from). Raw pointers and unbounded generic params are
+// owned non-view values.
+import std.string;
+
+fn text(s: string.String, keep: &str) -> &str from s { //~ ERROR E0520
+    return keep;
+}
+
+fn number(n: u32, r: &u32) -> &u32 from r, n { //~ ERROR E0520
+    return r;
+}
+
+fn generic<T>(x: T, r: &u8) -> &u8 from x { //~ ERROR E0520
+    return r;
+}
+
+fn raw(p: *const u8, r: &u8) -> &u8 from p { //~ ERROR E0520
+    return r;
+}
+
+// fine: a by-value `T: view` param is a view by value (row 2)
+fn generic_view<T: view>(x: T) -> T from x {
+    return x;
+}

@@ -1,0 +1,33 @@
+# LANG.md examples as tests. Every ```stave block of LANG.md is extracted, in
+# order, to block_<n>.stv (checked in; crates/stave-cli/tests/langmd.rs fails on a stale or missing
+# file, `STAVE_BLESS=1` rewrites them) and tested here:
+#   mode            check: `stave check` exits 0. build: `stave build` exits 0. run: build, then the
+#                   binary exits 0 with stdout equal to `stdout`.
+#   target          `--target` (default: the host baseline).
+#   needs           optional: the stage0 feature the block waits for (a string). While set, the block
+#                   is only parsed (its file is PARSE-ONLY for `stave test tests/conformance`); remove
+#                   the key once stage0 implements the feature.
+# The file header carries the matching conformance annotations, so `stave test` runs them too.
+
+[[block]]
+n = 0
+mode = "run"
+stdout = "block_0.stdout"
+
+[[block]]
+n = 1
+mode = "check"
+# views and `from`: borrow-checked (`stave check` runs the borrow checker).
+
+[[block]]
+n = 2
+mode = "check"
+
+[[block]]
+n = 3
+mode = "check"
+
+[[block]]
+n = 4
+mode = "check"
+# threads: `thread.join`, `thread.par_for_mut` (std.thread).

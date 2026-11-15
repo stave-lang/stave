@@ -1,0 +1,11 @@
+//~ CHECK-ONLY
+// Origin table (LANG.md §3), row "owned non-view by value", column `from copy x`: E0521.
+import std.string;
+
+fn text(s: string.String, keep: &str) -> &str from copy s { //~ ERROR E0521
+    return keep;
+}
+
+fn number(n: u32, r: &u32) -> &u32 from r, copy n { //~ ERROR E0521
+    return r;
+}

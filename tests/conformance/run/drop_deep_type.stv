@@ -1,0 +1,39 @@
+//~ STDOUT drop_deep_type.stdout
+// Drop glue reaches a `Drop` impl however deeply its type is nested: `W256<Loud>` holds the
+// `Loud` 341 containment levels down (ADT fields, each `W4` adds five), and dropping it still
+// runs `Loud.drop`.
+import std.io;
+
+struct Loud {
+    pub id: u32,
+}
+
+impl Drop for Loud {
+    fn drop(&mut self) {
+        let id = self.id;
+        io.print(f"drop {id}\n");
+    }
+}
+
+struct W<T> { pub v: T }
+struct W4<T> { pub v: W<W<W<W<T>>>> }
+struct W16<T> { pub v: W4<W4<W4<W4<T>>>> }
+struct W64<T> { pub v: W16<W16<W16<W16<T>>>> }
+struct W256<T> { pub v: W64<W64<W64<W64<T>>>> }
+
+fn w<T>(x: T) -> W<T> { return W.{ v: x }; }
+fn w4<T>(x: T) -> W4<T> { return W4.{ v: w(w(w(w(x)))) }; }
+fn w16<T>(x: T) -> W16<T> { return W16.{ v: w4(w4(w4(w4(x)))) }; }
+fn w64<T>(x: T) -> W64<T> { return W64.{ v: w16(w16(w16(w16(x)))) }; }
+fn w256<T>(x: T) -> W256<T> { return W256.{ v: w64(w64(w64(w64(x)))) }; }
+
+fn make() {
+    let deep = w256(Loud.{ id: 7 });
+    io.print("built\n");
+}
+
+fn main() -> i32 {
+    make();
+    io.print("end\n");
+    return 0;
+}

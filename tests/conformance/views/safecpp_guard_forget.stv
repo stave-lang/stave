@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// Safe C++ catalogue, guards: a guard whose destructor can be skipped is not a
+// guard. A view is never passed to `forget` (E0412), so its destructor always runs.
+import std.mem;
+
+view struct Guard { cell: &mut u32 }
+
+impl Drop for Guard {
+    fn drop(&mut self) { *self.cell = 0; }
+}
+
+fn lock(c: &mut u32) -> Guard from c {
+    return Guard.{ cell: c };
+}
+
+fn leak_guard(c: &mut u32) {
+    let g = lock(c);
+    mem.forget(g); //~ ERROR E0412
+}

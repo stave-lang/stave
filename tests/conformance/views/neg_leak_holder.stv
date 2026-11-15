@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// `leak` names a by-value non-view parameter in `from` (E0520), and
+// `Holder` puts a view in a non-view struct (E0410). `bad` (E0501) is in borrow/.
+import std.string;
+
+view struct Lexer { src: &str, pos: usize }
+
+fn lexer(src: &str) -> Lexer from src {
+    return Lexer.{ src: src, pos: 0 };
+}
+
+fn leak(s: string.String) -> Lexer from s { //~ ERROR E0520
+    return lexer(s.as_str());
+}
+
+struct Holder { l: Lexer } //~ ERROR E0410
+
+fn read_raw(p: *const u8) -> u8 {
+    let b: u8 = unsafe("p is valid for reads: caller passes &x as *const u8") *p;
+    return b;
+}

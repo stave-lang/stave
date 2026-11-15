@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// A reference from a guard view cannot outlive the guard: the guard's drop at the end of its
+// block conflicts with the reference still used after it.
+import std.cell;
+
+fn escape(c: &cell.RefCell<u32>) -> u32 {
+    let zero: u32 = 0;
+    let mut p: &u32 = &zero;
+    {
+        let r = c.borrow();
+        p = r.get();
+    } //~ ERROR E0501
+    return *p;
+}
+
+fn main() -> i32 {
+    return 0;
+}

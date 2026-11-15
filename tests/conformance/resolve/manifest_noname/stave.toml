@@ -1,0 +1,3 @@
+#~ ERROR E1002
+kind = "lib" #~ ERROR E1002
+version = "0.1.0"

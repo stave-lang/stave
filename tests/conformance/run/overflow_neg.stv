@@ -1,0 +1,15 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Overflow at overflow_neg.stv:5:12 in main.negate (thread 0)"
+// Unary `-` traps on i32 MIN (its negation is not an i32); MIN is reached at run time.
+fn negate(x: i32) -> i32 {
+    return -x;
+}
+
+fn main() -> i32 {
+    let mut v: i32 = -2147483646;
+    for i in 0u32..5 {
+        let n = negate(v);
+        v = v - 1;
+    }
+    return 0;
+}

@@ -1,0 +1,14 @@
+//~ STDOUT run_directives.stdout
+//~ STDERR-CONTAINS "warn: \"x\"\n"
+//~ STDERR-CONTAINS "tab\there"
+//~ EXIT 7
+//~ TARGET x86_64-linux-v3
+//~ TARGET aarch64-linux+sve2
+//~ ARGS --release --compiler cpu
+//~ RESOURCE-LIMIT
+import std.io;
+
+fn main() -> i32 {
+    io.print(f"hello\n"); //~ WARNING E1206
+    return 7;
+}

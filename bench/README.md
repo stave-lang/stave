@@ -1,0 +1,90 @@
+# Benchmark
+
+Compile time and run time of the stage0 `stave` compiler against tcc, gcc, and clang, on the same
+program written in both languages. `bench/run.sh` prints a markdown report on stdout.
+
+```sh
+tools/ci-step/run.sh bench                      # or: sh bench/run.sh
+sh bench/run.sh --lines 100000 --seed 1 --runs 5 --reps 500   # the defaults
+```
+
+Linux only. Needs the Rust toolchain, coreutils, awk, xargs, and any of `tcc`, `gcc`, `clang`; a
+compiler that is not installed is skipped and named in the report. Work files go to
+`target/bench/` and are never checked in.
+
+## What is measured
+
+Inputs:
+
+- **corpus**: `gen-corpus --pair` writes one synthetic program of about N lines (default 100,000,
+  seed 1) in Stave (`stave/`, one module per unit) and in C99 (`c/single.c`, and `c/split/`: one
+  `.c` file and header per unit, a shared `corpus.h`, `main.c`, and the file list `files.txt`).
+  Default: 80 units, about 4,500 fns of 3 to 120 lines: `u32`/`u64`/`f64` arithmetic, `if`,
+  `for`, `while`, `break`, early returns, small local arrays, calls to earlier fns. `main` runs
+  every unit's driver `--reps` times and prints one checksum.
+- **kernels** (`bench/kernels/`, hand-written, scalar code): `nbody` (f64 pair loop and energy
+  reduction), `hashmix` (u64 hash mixing and an open-addressing table), `sieve` (sieve of
+  Eratosthenes over 16M bytes). Each is a Stave package (`src/main.stv`) and its C twin `main.c`.
+
+Columns (wall clock of the whole process, median of `--runs`, default 5):
+
+| column | Stave | C |
+|---|---|---|
+| compile, 1 thread | `STAVE_THREADS=1 stave build stave/ --compiler cpu -o OUT [--release]` | `CC -std=c99 [-O0\|-O2] -o OUT single.c` (tcc: no `-O`) |
+| compile, all threads | the same without `STAVE_THREADS` (one worker per hardware thread) | `xargs -P $(nproc) -n 1 CC -std=c99 [-O..] -c < files.txt`, then `CC -o OUT *.o` |
+| K lines/s | Stave lines / 1-thread time | C lines of `single.c` / 1-thread time |
+| binary bytes | `stave build` output: a static ELF, no libc | the single-file build: dynamically linked against glibc, not stripped |
+| corpus run, kernel runs | the debug or `--release` build | the build with that compiler and `-O` level |
+
+Every compile column produces a runnable executable: C times include the system linker, Stave
+writes the ELF itself. Stave times include compiling `std` and `runtime` (about 4,800 lines,
+about 15 ms), which every Stave build does.
+
+## Why two compile columns
+
+`stave` parallelises inside one invocation: the grammar is LL(1) and every item parses and
+checks on its own, so one `stave build` uses every core. A C compiler is one single-threaded
+process per translation unit; C build parallelism comes from the build system running many
+processes. So the 1-thread column compares compilers on one core (Stave pinned to one worker, C on
+one file), and the all-threads column compares each language's own way of using the machine: one
+`stave build` against a parallel build of the same program split into translation units, plus
+the link.
+
+## How the two programs are kept equal
+
+Both texts come from the same generator calls (`tools/gen-corpus/src/pair.rs`): the same fns,
+statements, and expressions, written twice. Every operation is defined and identical in both
+languages: unsigned integers only, Stave's wrapping `+% -% *%` for C's unsigned `+ - *`, constant
+shifts below the width, `<<%` as `<< (b & (bits - 1))`, division and remainder by `b | 1`, f64
+`+ - * /` with divisors `x * x + 1.0` (C99 mode, so no FMA contraction), `as| u32` as a
+saturating helper in C, no side effects in expressions (so C's evaluation order does not
+matter), bounded loops. Every local is folded into a per-fn accumulator, so an optimizer finds no
+dead code, and no operation has only constant operands, so C compilers fold nothing Stave does not
+also compute.
+
+`run.sh` enforces it: it builds every configuration (Stave debug and `--release`, every C compiler
+and level, single-file and split), runs each, and stops with an error unless all print the same
+checksum; kernel outputs must match byte for byte. The C correctness builds use `-pedantic -Wall
+-Wextra -Werror` (tcc: `-Wall -Werror`), so the C is also warning-free. Timed builds use the plain
+flags above.
+
+## Caveats
+
+- The corpus is synthetic: dense integer expressions, small fns, shallow loops. Real programs
+  have other mixes; gcc and clang at `-O2` spend unusually long on it. Lines are about 42 bytes
+  long on average.
+- Stave run time comes from a debug-quality back end: no register allocation, no optimizer, no
+  vector code generation. It is expected to lose to `-O2`, and it does. `--release` today only
+  lowers what `main` reaches, removes the bounds checks it has a proof for, and packs the image.
+  On the build host that makes no measurable difference to 1-thread compile time or to the kernel
+  run times; the all-threads build is about 10% slower, the corpus runs about 9% faster, and the
+  binary is about 18% smaller.
+- Stave binaries are large: debug-layout code with no register allocation, statically linked.
+  C binaries are dynamically linked, so their sizes exclude libc.
+- The corpus run time measures calls and branches more than arithmetic; the kernels measure
+  loops over arrays. Neither uses SIMD: stage0 cannot build vector code yet, and the C compilers
+  run at their baseline x86-64 target.
+- Times are wall clock of whole processes, including process start. Two runs of the script on an
+  otherwise idle machine agree within 1% on compile times and within about 5% on run times,
+  except `sieve` built without an optimizer (Stave, tcc, `-O0`), which varies by 10 to 15%
+  between runs.

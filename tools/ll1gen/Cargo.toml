@@ -1,0 +1,18 @@
+[package]
+name = "ll1gen"
+description = "LL(1) checker and parse-table generator for contracts/grammar.ebnf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+stave-syntax = { workspace = true }

@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// Operators not defined for a type are E0206: wrapping and saturating forms on floats, `~` on
+// floats and bools, `!` on ints, unary `-` on unsigned ints, comparisons of compound types.
+struct P { pub x: i32 }
+
+fn ops(a: f32, b: f32, i: u32, k: bool, p: P, q: P) {
+    let s: f32 = a + b;
+    let w: f32 = a +% b; //~ ERROR E0206
+    let t: f32 = a *| b; //~ ERROR E0206
+    let n: f32 = ~a; //~ ERROR E0206
+    let m: bool = !i; //~ ERROR E0201
+    let u: u32 = -i; //~ ERROR E0206
+    let c: bool = p == q; //~ ERROR E0206
+    let ok: bool = !k && (i > 3 || a < b);
+    let bits: u32 = (i & 0xff) | (i ^ 1) | ~i;
+    let wrap: u32 = i +% 1 -% 2 *% 3;
+    let sat: u32 = i +| 1 -| 2 *| 3;
+}
+
+fn main() -> i32 {
+    return 0;
+}

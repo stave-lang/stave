@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// `RefCell` borrows are views with destructors: several `Ref`s may live at once, and a
+// reference from a `Ref` borrows it.
+import std.cell;
+
+fn read(c: &cell.RefCell<u32>) -> u32 {
+    let r = c.borrow();
+    let x: &u32 = r.get();
+    return *x;
+}
+
+fn main() -> i32 {
+    let c = cell.RefCell::<u32>.new(5);
+    let a: u32 = read(&c);
+    let r1 = c.borrow();
+    let r2 = c.borrow();
+    let s: u32 = *r1.get() + *r2.get();
+    return 0;
+}

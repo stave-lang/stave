@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// A fn value carries the loans of its captures. `keep` returns
+// its fn-value param without `from`, which declares the empty origin set: E0510 (`no-from`
+// case, label at the return type). The caller's closure captures the reference `r`.
+fn keep(f: fn() -> u32) -> fn() -> u32 {
+    return f; //~ ERROR E0510
+}
+
+fn main() -> i32 {
+    let x: u32 = 1;
+    let r: &u32 = &x;
+    let g = keep(fn() -> u32 { return *r; });
+    return 0;
+}

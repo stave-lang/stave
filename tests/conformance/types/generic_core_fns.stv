@@ -1,0 +1,56 @@
+//~ CHECK-ONLY
+// Core generics: generic fns and ADTs with two instances each, type args inferred from
+// the arguments or given by turbofish; bodies checked at the definition against their bounds
+// (E0901).
+struct Cell<T> { pub v: T }
+
+enum Either<A, B> { Left(A), Right(B) }
+
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+fn pick<T>(c: bool, a: T, b: T) -> T {
+    return if c then a else b;
+}
+
+fn wrap<T>(v: T) -> Cell<T> {
+    return Cell.{ v: v };
+}
+
+fn first<T>(xs: &[T]) -> &T from xs {
+    return &xs[0];
+}
+
+fn sum<T: Add>(a: T, b: T) -> T {
+    return a + b;
+}
+
+fn bad_sum<T>(a: T, b: T) -> T {
+    return a + b; //~ ERROR E0901
+}
+
+fn bad_method<T>(a: T) -> u32 {
+    return a.len(); //~ ERROR E0901
+}
+
+fn main() -> i32 {
+    let a: u32 = id(3u32);
+    let b: f64 = id::<f64>(1.5);
+    let c: u8 = pick(true, 1u8, 2);
+    let d: u64 = pick(false, 1, 2u64);
+    let e = pick(true, 1, 2); //~ ERROR E0202
+    //~^ ERROR E0202
+    let w1: Cell<u32> = wrap(5u32);
+    let w2 = wrap(true);
+    let w3: Cell<i64> = Cell.{ v: 4 };
+    let w4 = Cell::<u16>.{ v: 9 };
+    let l: Either<u8, bool> = Either.Left(1);
+    let r = Either::<u8, bool>.Right(false);
+    let xs: [u32; 2] = [1, 2];
+    let f: &u32 = first(&xs);
+    let s: u32 = sum(1u32, 2);
+    let n = Option.None; //~ ERROR E0202
+    let m: Option<u8> = Option.None;
+    return 0;
+}

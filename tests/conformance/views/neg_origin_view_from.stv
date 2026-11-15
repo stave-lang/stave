@@ -1,0 +1,30 @@
+//~ CHECK-ONLY
+// Origin table (LANG.md §3), row "view `V` by value", column `from x`: the result inherits `x`'s
+// origins (here the loan on `s`), while `x` itself dies at the return.
+import std.string;
+
+view struct Lexer { src: &str, pos: usize }
+
+fn lexer(src: &str) -> Lexer from src {
+    return Lexer.{ src: src, pos: 0 };
+}
+
+fn advance(l: Lexer) -> Lexer from l {
+    return Lexer.{ src: l.src, pos: l.pos + 1 };
+}
+
+fn conflict() -> usize {
+    let mut s = string.String.from_str("ab");
+    let l = advance(lexer(s.as_str()));
+    s.push_str("c"); //~ ERROR E0501
+    return l.pos;
+}
+
+// fine: the result is dead before the push
+fn ok() -> usize {
+    let mut s = string.String.from_str("ab");
+    let l = advance(lexer(s.as_str()));
+    let p = l.pos;
+    s.push_str("c");
+    return p;
+}

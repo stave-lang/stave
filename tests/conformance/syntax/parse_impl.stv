@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// ImplDecl: inherent and trait impls, generic impls, `pub unsafe("..") fn` methods.
+struct S { v: i32 }
+
+trait Get { fn get(&self) -> i32; }
+
+impl S {
+    pub fn new() -> S { return S.{ v: 0 }; }
+    pub unsafe("v is initialized") fn raw(&self) -> i32 { return self.v; }
+    unsafe("v is initialized") fn raw2(&self) -> i32 { return self.v; }
+    fn private(&self) { }
+}
+
+impl Get for S {
+    fn get(&self) -> i32 { return self.v; }
+}
+
+struct W<A> { a: A }
+
+impl<A: Copy> W<A> {
+    fn get(&self) -> A { return self.a; }
+}

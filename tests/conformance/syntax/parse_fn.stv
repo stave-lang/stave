@@ -1,0 +1,27 @@
+//~ PARSE-ONLY
+// FnDecl: Generics with bounds `A + B`, `view` and const params; RetClause with `from`; Needs.
+trait Less { fn less(&self, o: &Self) -> bool; }
+
+fn max<T: Less + Copy>(a: T, b: T) -> T {
+    return if b.less(&a) then a else b;
+}
+
+fn first<T: view, const N: usize>(xs: &[T; N]) -> &T from xs {
+    return &xs[0];
+}
+
+view struct Pair { a: &i32, b: &i32 }
+
+fn pick(x: &i32, p: &Pair) -> &i32 from x, copy p {
+    return x;
+}
+
+fn wide(xs: &[f32]) -> f32 needs(avx2, fma) {
+    return 0.0;
+}
+
+fn bound_path<T: std.ops.Add<T>>(a: T) -> T {
+    return a;
+}
+
+fn no_params() { }

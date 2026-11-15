@@ -1,0 +1,107 @@
+# gen-corpus construct mix.
+# All numbers are tunable. Changes are reviewed: they move the compile-time budget baselines.
+# Plain numbers are relative weights; `*_permille` values are probabilities in 1/1000.
+# This file is compiled into the binary (the default mix); `--mix PATH` overrides it.
+
+[tiers]
+m1 = true    # scalar fns, structs, enums, match, core generics, traits with impls
+m2 = true    # borrows and views: &/&mut params, ref returns with `from`, generic ref picks, ref blocks, closures with &/&mut captures
+m3 = false   # SIMD kernels (10% of fns): not implemented yet
+m6 = false   # full traits (std Display/Option combinators): not implemented yet
+
+[modules]
+per_10k_lines = 8        # modules per 10k lines (main.stv not counted)
+max_depth = 3            # module path segments (src/a/b/c.stv = a.b.c)
+max_imports = 4          # imports of earlier modules per module (acyclic by construction)
+io_permille = 850        # modules that `import std.io;` and may print
+
+[items]                  # item mix
+fn = 60
+adt = 20                 # structs and enums
+impl = 10                # inherent impl blocks and trait impls
+other = 10               # consts, type aliases, traits, extra imports
+
+[fn_body]                # body length in lines: lognormal, median 12, sigma 0.8, capped
+median = 12.0
+sigma = 0.8
+cap = 400
+doc_permille = 150       # fns preceded by a `//` comment line
+private_permille = 200   # fns without `pub` (called only inside their module)
+
+[generics]
+share_permille = 150     # of all items: generic fns, generic structs, and their (generic) impls
+
+[adt]
+struct = 60
+enum = 40
+max_fields = 6
+max_variants = 5
+nested_field_permille = 150   # struct fields whose type is an earlier struct of the module
+
+[other]
+const = 40
+alias = 20
+trait = 30
+import = 10
+
+[fns]                    # non-generic signature shapes
+scalar = 40              # scalars -> scalar or ()
+struct_ref = 10          # (&S, scalars) -> scalar                       [m2]
+struct_mut = 6           # (&mut S, scalar) -> ()                        [m2]
+ctor = 6                 # scalars -> S
+enum_make = 5            # scalar -> E
+enum_eval = 5            # (E, scalar) -> scalar
+struct_val = 3           # (S, scalar) -> scalar
+ref_field = 4            # (&S, bool) -> &scalar from p0                 [m2]
+ref_pick = 2             # (&S, &S, bool) -> &S from p0, p1              [m2]
+mut_field = 2            # (&mut S) -> &mut scalar from p0               [m2]
+option = 5               # scalars -> Option<scalar>
+result = 4               # scalars -> Result<scalar, E>
+tuple = 3                # scalars -> (scalar, scalar)
+
+[generic_fns]
+pick = 4                 # <T>(bool, T, T) -> T
+ref_pick = 3             # <T>(&T, &T, bool) -> &T from p0, p1           [m2]
+bound = 3                # <T: Trait>(&T, k) -> scalar
+const_n = 2              # <const N: u32>(u32) -> u32
+ctor = 2                 # <T>(T) -> Cell<T>
+
+[stmt]
+compound_permille = 300  # chance that a statement slot with room becomes a compound statement
+max_nest = 4
+# simple statements (one line)
+let = 30
+assign = 14
+print = 6
+let_struct = 6
+field_write = 6
+mut_call = 6
+call = 3
+consume = 2
+tuple = 2
+early_return = 3
+let_enum = 2
+try = 3
+array = 2
+comment = 1
+# compound statements
+if = 30
+while = 10
+for = 14
+loop = 4
+match_int = 10
+match_enum = 12
+block = 3
+ref_block = 6            # [m2]
+closure = 4              # [m2] closures: `&` capture, nested `&mut` capture, call through fn values
+
+[expr]
+max_depth = 3
+leaf = 40
+binop = 30
+cast = 8
+unary = 3
+call = 16
+if = 4
+match = 3
+trapping_permille = 100  # binops using trapping + - * (the rest wrap, saturate, or are bitwise)

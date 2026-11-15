@@ -1,0 +1,5 @@
+import other;
+
+fn main() -> i32 {
+    return other.code();
+}

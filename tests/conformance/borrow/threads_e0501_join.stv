@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// The two closures of one thread.join call are live at the same time, so two `&mut`
+// captures of the same local conflict (E0501). A `scope` keeps its spawns' loans live until `}`.
+import std.thread;
+
+fn both(n: u32) -> u32 {
+    let mut x: u32 = n;
+    let (a, b) = thread.join(fn() -> u32 { x = x + 1; return 0; }, fn() -> u32 { x = x + 2; return 0; }); //~ ERROR E0501
+    return x + a + b;
+}
+
+fn scoped(n: u32) -> u32 {
+    let mut x: u32 = n;
+    scope {
+        spawn { x = x + 1; }
+        x = 5; //~ ERROR E0501
+    }
+    return x;
+}

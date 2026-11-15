@@ -1,0 +1,125 @@
+// N bodies under a softened inverse-cube attraction (no square root needed), symplectic Euler
+// steps over all ordered pairs. Prints the energy before and after and a position checksum,
+// scaled to integers so both languages print the same text. Same operation order as main.c.
+import std.io;
+import std.vec;
+
+const N: usize = 256;
+const STEPS: u32 = 600;
+const DT: f64 = 0.001;
+const EPS: f64 = 0.01;
+
+fn next(s: u64) -> u64 {
+    let mut x: u64 = s;
+    x = x ^ (x << 13);
+    x = x ^ (x >> 7);
+    x = x ^ (x << 17);
+    return x;
+}
+
+// Uniform in [0, 1): the top 32 bits over 2^32, exact in f64.
+fn unit(s: u64) -> f64 {
+    let hi: u32 = (s >> 32) as% u32;
+    return (hi as f64) / 4294967296.0;
+}
+
+fn zeros(n: usize) -> vec.Vec<f64> {
+    let mut v = vec.Vec::<f64>.with_capacity(n);
+    for i in 0..n {
+        v.push(0.0f64);
+    }
+    return v;
+}
+
+fn init(x: &mut [f64], y: &mut [f64], z: &mut [f64], vx: &mut [f64], vy: &mut [f64], vz: &mut [f64], m: &mut [f64]) {
+    let mut s: u64 = 88172645463325252;
+    for i in 0..N {
+        s = next(s);
+        x[i] = 2.0 * unit(s) - 1.0;
+        s = next(s);
+        y[i] = 2.0 * unit(s) - 1.0;
+        s = next(s);
+        z[i] = 2.0 * unit(s) - 1.0;
+        s = next(s);
+        vx[i] = 0.1 * (unit(s) - 0.5);
+        s = next(s);
+        vy[i] = 0.1 * (unit(s) - 0.5);
+        s = next(s);
+        vz[i] = 0.1 * (unit(s) - 0.5);
+        s = next(s);
+        m[i] = (0.5 + unit(s)) / 256.0;
+    }
+}
+
+fn energy(x: &[f64], y: &[f64], z: &[f64], vx: &[f64], vy: &[f64], vz: &[f64], m: &[f64]) -> f64 {
+    let mut e: f64 = 0.0;
+    for i in 0..N {
+        e = e + 0.5 * m[i] * (vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i]);
+        for j in (i + 1)..N {
+            let dx = x[i] - x[j];
+            let dy = y[i] - y[j];
+            let dz = z[i] - z[j];
+            let r2 = dx * dx + dy * dy + dz * dz + EPS;
+            e = e - 0.5 * m[i] * m[j] / r2;
+        }
+    }
+    return e;
+}
+
+fn step(x: &mut [f64], y: &mut [f64], z: &mut [f64], vx: &mut [f64], vy: &mut [f64], vz: &mut [f64], m: &[f64]) {
+    for i in 0..N {
+        let mut ax: f64 = 0.0;
+        let mut ay: f64 = 0.0;
+        let mut az: f64 = 0.0;
+        for j in 0..N {
+            if j != i {
+                let dx = x[j] - x[i];
+                let dy = y[j] - y[i];
+                let dz = z[j] - z[i];
+                let r2 = dx * dx + dy * dy + dz * dz + EPS;
+                let f = m[j] / (r2 * r2);
+                ax = ax + f * dx;
+                ay = ay + f * dy;
+                az = az + f * dz;
+            }
+        }
+        vx[i] = vx[i] + DT * ax;
+        vy[i] = vy[i] + DT * ay;
+        vz[i] = vz[i] + DT * az;
+    }
+    for i in 0..N {
+        x[i] = x[i] + DT * vx[i];
+        y[i] = y[i] + DT * vy[i];
+        z[i] = z[i] + DT * vz[i];
+    }
+}
+
+fn position_sum(x: &[f64], y: &[f64], z: &[f64]) -> f64 {
+    let mut s: f64 = 0.0;
+    for i in 0..N {
+        s = s + x[i] * 3.0 + y[i] * 5.0 + z[i] * 7.0;
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let mut x = zeros(N);
+    let mut y = zeros(N);
+    let mut z = zeros(N);
+    let mut vx = zeros(N);
+    let mut vy = zeros(N);
+    let mut vz = zeros(N);
+    let mut m = zeros(N);
+    init(x.as_mut_slice(), y.as_mut_slice(), z.as_mut_slice(), vx.as_mut_slice(), vy.as_mut_slice(), vz.as_mut_slice(), m.as_mut_slice());
+    let e0 = energy(x.as_slice(), y.as_slice(), z.as_slice(), vx.as_slice(), vy.as_slice(), vz.as_slice(), m.as_slice());
+    for k in 0..STEPS {
+        step(x.as_mut_slice(), y.as_mut_slice(), z.as_mut_slice(), vx.as_mut_slice(), vy.as_mut_slice(), vz.as_mut_slice(), m.as_slice());
+    }
+    let e1 = energy(x.as_slice(), y.as_slice(), z.as_slice(), vx.as_slice(), vy.as_slice(), vz.as_slice(), m.as_slice());
+    let p = position_sum(x.as_slice(), y.as_slice(), z.as_slice());
+    let q0: i64 = (e0 * 1000000000000.0) as| i64;
+    let q1: i64 = (e1 * 1000000000000.0) as| i64;
+    let qp: i64 = (p * 1000000000000.0) as| i64;
+    io.print(f"energy {q0} -> {q1} positions {qp}\n");
+    return 0;
+}

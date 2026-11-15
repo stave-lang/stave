@@ -1,0 +1,503 @@
+// std.num: text -> number.
+//
+// Integers: decimal digits, optional leading "-" for signed types; None on overflow or any
+// other byte.
+// Floats, correctly rounded to nearest even: Eisel-Lemire on the first 19 significant digits
+// (fast_float's `compute_float`; with an exact 64-bit significand it is always correct,
+// Mushtak & Lemire 2023). When digits were dropped, w and w + 1 are both converted; if they
+// differ, an exact big-integer comparison against the halfway point decides.
+// Accepted float text (every form std.fmt prints, plus "E" and a "+" on the exponent):
+//     "-"? digits ("." digits)? (("e" | "E") ("+" | "-")? digits)?  |  "-"? "inf"  |  "NaN"
+// The tests that cover this file: std/README.md "Floats".
+
+import std.core;
+import std.mem;
+import std.pow10;
+
+// ---- integers ----
+
+const U64_MAX: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+
+pub fn parse_u64(s: &str) -> Option<u64> {
+    return digits_u64(mem.str_bytes(s), 0);
+}
+
+fn digits_u64(b: &[u8], lo: usize) -> Option<u64> {
+    if lo >= b.len() { return Option.None; }
+    let mut v: u64 = 0;
+    for i in lo..b.len() {
+        let c = b[i];
+        if c < 48 || c > 57 { return Option.None; }
+        let d = (c - 48) as u64;
+        if v > (U64_MAX - d) / 10 { return Option.None; }
+        v = v * 10 + d;
+    }
+    return Option.Some(v);
+}
+
+pub fn parse_i64(s: &str) -> Option<i64> {
+    let b = mem.str_bytes(s);
+    let neg = b.len() > 0 && b[0] == 45;
+    let lo: usize = if neg then 1 else 0;
+    return match digits_u64(b, lo) {
+        Option.None => Option.None,
+        Option.Some(m) => signed_of(neg, m),
+    };
+}
+
+fn signed_of(neg: bool, m: u64) -> Option<i64> {
+    if !neg { return m as? i64; }
+    if m <= 0x8000_0000_0000_0000 { return Option.Some(((~m) +% 1) as% i64); }
+    return Option.None;
+}
+
+pub fn parse_u32(s: &str) -> Option<u32> {
+    return match parse_u64(s) { Option.Some(v) => v as? u32, Option.None => Option.None };
+}
+
+pub fn parse_i32(s: &str) -> Option<i32> {
+    return match parse_i64(s) { Option.Some(v) => v as? i32, Option.None => Option.None };
+}
+
+pub fn parse_usize(s: &str) -> Option<usize> {
+    return match parse_u64(s) { Option.Some(v) => Option.Some(v as usize), Option.None => Option.None };
+}
+
+// ---- floats ----
+
+pub fn parse_f64(s: &str) -> Option<f64> {
+    let f = f64_format();
+    return match parse_bits(&f, mem.str_bytes(s)) {
+        Option.Some(b) => Option.Some(mem.f64_from_bits(b)),
+        Option.None => Option.None,
+    };
+}
+
+pub fn parse_f32(s: &str) -> Option<f32> {
+    let f = f32_format();
+    return match parse_bits(&f, mem.str_bytes(s)) {
+        Option.Some(b) => Option.Some(mem.f32_from_bits(b as% u32)),
+        Option.None => Option.None,
+    };
+}
+
+// binary64 / binary32 parameters (fast_float binary_format).
+struct FloatFormat {
+    mbits: u32,
+    min_exp: i32,
+    inf_pow: i32,
+    min_rte: i32,
+    max_rte: i32,
+    small10: i32,
+    large10: i32,
+    bias: i32,
+    sign: u32,
+}
+
+fn f64_format() -> FloatFormat {
+    return FloatFormat.{
+        mbits: 52, min_exp: -1023, inf_pow: 0x7FF, min_rte: -4, max_rte: 23,
+        small10: -342, large10: 308, bias: 1075, sign: 63,
+    };
+}
+
+fn f32_format() -> FloatFormat {
+    return FloatFormat.{
+        mbits: 23, min_exp: -127, inf_pow: 0xFF, min_rte: -17, max_rte: 10,
+        small10: -64, large10: 38, bias: 150, sign: 31,
+    };
+}
+
+// mant: significand field; pow2: biased exponent field.
+struct Am {
+    mant: u64,
+    pow2: i32,
+}
+
+impl core.Copy for Am {}
+
+fn clz64(x0: u64) -> u32 {
+    if x0 == 0 { return 64; }
+    let mut x = x0;
+    let mut n: u32 = 0;
+    if x & 0xFFFF_FFFF_0000_0000 == 0 { n = n + 32; x = x << 32; }
+    if x & 0xFFFF_0000_0000_0000 == 0 { n = n + 16; x = x << 16; }
+    if x & 0xFF00_0000_0000_0000 == 0 { n = n + 8; x = x << 8; }
+    if x & 0xF000_0000_0000_0000 == 0 { n = n + 4; x = x << 4; }
+    if x & 0xC000_0000_0000_0000 == 0 { n = n + 2; x = x << 2; }
+    if x & 0x8000_0000_0000_0000 == 0 { n = n + 1; }
+    return n;
+}
+
+// floor(log2(10^q)) + 63
+fn power(q: i32) -> i32 {
+    return ((217706 * q) >> 16) + 63;
+}
+
+// w * 5^q truncated to 128 bits, refined with the low table word when the high word's low
+// bits are all ones.
+fn product_approx(q: i32, w: u64, bitprec: u32) -> (u64, u64) {
+    let idx = ((q - pow10.POW10_MIN) as% usize) * 2;
+    let (mut fhi, mut flo) = w.mul_wide(pow10.POW10[idx]);
+    let mask = U64_MAX >> (bitprec as u64);
+    if fhi & mask == mask {
+        let (shi, slo) = w.mul_wide(pow10.POW10[idx + 1]);
+        let flo2 = flo +% shi;
+        if shi > flo2 { fhi = fhi + 1; }
+        flo = flo2;
+    }
+    return (fhi, flo);
+}
+
+// Eisel-Lemire: w * 10^q rounded to nearest even (fast_float compute_float).
+fn compute_float(f: &FloatFormat, q: i32, w0: u64) -> Am {
+    if w0 == 0 || q < f.small10 { return Am.{ mant: 0, pow2: 0 }; }
+    if q > f.large10 { return Am.{ mant: 0, pow2: f.inf_pow }; }
+    let lz = clz64(w0);
+    let w = w0 << (lz as u64);
+    let (phi, plo) = product_approx(q, w, f.mbits + 3);
+    let upper = (phi >> 63) as% i32;
+    let shift = upper + 64 - (f.mbits as% i32) - 3;
+    let mut mant = phi >> (shift as% u64);
+    let mut pow2 = power(q) + upper - (lz as% i32) - f.min_exp;
+    if pow2 <= 0 {
+        if -pow2 + 1 >= 64 { return Am.{ mant: 0, pow2: 0 }; }
+        mant = mant >> ((-pow2 + 1) as% u64);
+        mant = mant + (mant & 1);
+        mant = mant >> 1;
+        let p: i32 = if mant < (1u64 << (f.mbits as u64)) then 0 else 1;
+        return Am.{ mant: mant, pow2: p };
+    }
+    if plo <= 1 && q >= f.min_rte && q <= f.max_rte && (mant & 3) == 1 {
+        if (mant << (shift as% u64)) == phi {
+            mant = mant & (~1u64);
+        }
+    }
+    mant = mant + (mant & 1);
+    mant = mant >> 1;
+    if mant >= (2u64 << (f.mbits as u64)) {
+        mant = 1u64 << (f.mbits as u64);
+        pow2 = pow2 + 1;
+    }
+    mant = mant & (~(1u64 << (f.mbits as u64)));
+    if pow2 >= f.inf_pow { return Am.{ mant: 0, pow2: f.inf_pow }; }
+    return Am.{ mant: mant, pow2: pow2 };
+}
+
+// ---- big-integer fallback ----
+
+// 80 limbs = 5120 bits: the largest operand is below 3500 bits (800 digits, 5^1143, shifts).
+const NLIMB: usize = 80;
+// Digits kept for the exact comparison. A halfway point between adjacent f64 values has at
+// most 767 significant digits, so a nonzero digit after the 800th only breaks a tie.
+const MAXDIG: usize = 800;
+
+struct Big {
+    n: usize,
+    d: [u64; NLIMB],
+}
+
+fn big_new() -> Big {
+    return Big.{ n: 0, d: [0u64; NLIMB] };
+}
+
+fn big_mul_small(b: &mut Big, x: u64) {
+    let mut carry: u64 = 0;
+    for i in 0..b.n {
+        let (hi, lo) = b.d[i].mul_wide(x);
+        let lo2 = lo +% carry;
+        let c = (lo2 < lo) as u64;
+        b.d[i] = lo2;
+        carry = hi + c;
+    }
+    if carry != 0 {
+        b.d[b.n] = carry;
+        b.n = b.n + 1;
+    }
+}
+
+fn big_add_small(b: &mut Big, x: u64) {
+    let mut i: usize = 0;
+    let mut carry = x;
+    while carry != 0 {
+        if i == b.n {
+            b.d[i] = 0;
+            b.n = b.n + 1;
+        }
+        let s = b.d[i] +% carry;
+        carry = (s < carry) as u64;
+        b.d[i] = s;
+        i = i + 1;
+    }
+}
+
+fn big_mul_pow5(b: &mut Big, n: usize) {
+    let mut left = n;
+    while left >= 27 {
+        big_mul_small(b, 7450580596923828125);
+        left = left - 27;
+    }
+    let mut p: u64 = 1;
+    for i in 0..left { p = p * 5; }
+    if p != 1 { big_mul_small(b, p); }
+}
+
+fn big_shl(b: &mut Big, n: usize) {
+    if b.n == 0 { return; }
+    let words = n / 64;
+    let bits = (n % 64) as u64;
+    if bits != 0 {
+        let mut carry: u64 = 0;
+        for i in 0..b.n {
+            let v = b.d[i];
+            b.d[i] = (v << bits) | carry;
+            carry = v >> (64 - bits);
+        }
+        if carry != 0 {
+            b.d[b.n] = carry;
+            b.n = b.n + 1;
+        }
+    }
+    if words != 0 {
+        let mut i = b.n;
+        while i > 0 {
+            i = i - 1;
+            b.d[i + words] = b.d[i];
+        }
+        for j in 0..words { b.d[j] = 0; }
+        b.n = b.n + words;
+    }
+}
+
+// -1, 0, 1 as a <, ==, > b
+fn big_cmp(a: &Big, b: &Big) -> i32 {
+    if a.n != b.n { return if a.n < b.n then -1 else 1; }
+    let mut i = a.n;
+    while i > 0 {
+        i = i - 1;
+        if a.d[i] != b.d[i] { return if a.d[i] < b.d[i] then -1 else 1; }
+    }
+    return 0;
+}
+
+// The input's digits are s[int_lo..int_hi] then s[frac_lo..frac_hi], times 10^exp10.
+struct Scan {
+    neg: bool,
+    int_lo: usize,
+    int_hi: usize,
+    frac_lo: usize,
+    frac_hi: usize,
+    exp10: i64,
+    w: u64,
+    q: i32,
+    many: bool,
+    zero: bool,
+}
+
+fn scan_new() -> Scan {
+    return Scan.{
+        neg: false, int_lo: 0, int_hi: 0, frac_lo: 0, frac_hi: 0, exp10: 0, w: 0, q: 0,
+        many: false, zero: true,
+    };
+}
+
+// Exact comparison of the decimal input with the halfway point above the candidate am:
+// returns am, or the next value up.
+fn big_resolve(f: &FloatFormat, s: &[u8], sc: &Scan, am: Am) -> Am {
+    let mut m = am.mant;
+    let mut e2: i32 = 0;
+    if am.pow2 == 0 {
+        e2 = 1 - f.bias;
+    } else {
+        m = m | (1u64 << (f.mbits as u64));
+        e2 = am.pow2 - f.bias;
+    }
+    let mut l = big_new();
+    let mut sticky = false;
+    let mut kept: usize = 0;
+    let mut dropped_exp: i32 = 0;
+    let mut chunk: u64 = 0;
+    let mut nchunk: usize = 0;
+    let mut started = false;
+    let mut i = sc.int_lo;
+    while i < sc.frac_hi {
+        if i == sc.int_hi {
+            i = sc.frac_lo;
+            if i >= sc.frac_hi { break; }
+        }
+        let c = s[i] - 48;
+        i = i + 1;
+        if !started {
+            // leading zeros carry no weight; the exponent counts fraction digits separately
+            if c == 0 { continue; }
+            started = true;
+        }
+        if kept < MAXDIG {
+            chunk = chunk * 10 + (c as u64);
+            nchunk = nchunk + 1;
+            kept = kept + 1;
+            if nchunk == 19 {
+                big_mul_small(&mut l, 10000000000000000000);
+                big_add_small(&mut l, chunk);
+                chunk = 0;
+                nchunk = 0;
+            }
+        } else {
+            dropped_exp = dropped_exp + 1;
+            if c != 0 { sticky = true; }
+        }
+    }
+    if nchunk != 0 {
+        let mut p: u64 = 1;
+        for j in 0..nchunk { p = p * 10; }
+        big_mul_small(&mut l, p);
+        big_add_small(&mut l, chunk);
+    }
+    // value = l * 10^ee; halfway = (2m + 1) * 2^(e2 - 1). Here sc.q is in the format's range
+    // and ee is within MAXDIG of it, so the saturating conversion keeps the value.
+    let ee64 = sc.exp10 - ((sc.frac_hi - sc.frac_lo) as% i64) + (dropped_exp as i64);
+    let ee = ee64 as| i32;
+    let mut r = big_new();
+    big_add_small(&mut r, (m << 1) + 1);
+    if ee >= 0 {
+        big_mul_pow5(&mut l, ee as% usize);
+    } else {
+        big_mul_pow5(&mut r, (-ee) as% usize);
+    }
+    let t = ee - (e2 - 1);
+    if t >= 0 {
+        big_shl(&mut l, t as% usize);
+    } else {
+        big_shl(&mut r, (-t) as% usize);
+    }
+    let c = big_cmp(&l, &r);
+    let up = c > 0 || (c == 0 && (sticky || (m & 1) == 1));
+    if !up { return am; }
+    let mut mant = am.mant + 1;
+    let mut pow2 = am.pow2;
+    if mant == (1u64 << (f.mbits as u64)) {
+        mant = 0;
+        pow2 = pow2 + 1;
+    }
+    return Am.{ mant: mant, pow2: pow2 };
+}
+
+// Once the exponent reaches EXP_CAP its further digits are skipped: with fewer than MAX_LEN
+// digits the result is then inf (or 0 for a negative exponent) whatever they are, and
+// exp * 10 + 9 stays far inside i64.
+const EXP_CAP: i64 = 100_000_000_000;
+// Longer inputs are rejected so that every digit count fits an i32.
+const MAX_LEN: usize = 0x7FFF_0000;
+
+fn is_digit(c: u8) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+fn scan(s: &[u8], sc: &mut Scan) -> bool {
+    let n = s.len();
+    if n > MAX_LEN { return false; }
+    let mut i: usize = 0;
+    if i < n && s[i] == 45 {
+        sc.neg = true;
+        i = i + 1;
+    }
+    sc.int_lo = i;
+    while i < n && is_digit(s[i]) { i = i + 1; }
+    sc.int_hi = i;
+    if sc.int_hi == sc.int_lo { return false; }
+    sc.frac_lo = i;
+    sc.frac_hi = i;
+    if i < n && s[i] == 46 {
+        i = i + 1;
+        sc.frac_lo = i;
+        while i < n && is_digit(s[i]) { i = i + 1; }
+        sc.frac_hi = i;
+        if sc.frac_hi == sc.frac_lo { return false; }
+    }
+    let mut exp: i64 = 0;
+    if i < n && (s[i] == 101 || s[i] == 69) {
+        i = i + 1;
+        let mut eneg = false;
+        if i < n && (s[i] == 43 || s[i] == 45) {
+            eneg = s[i] == 45;
+            i = i + 1;
+        }
+        let lo = i;
+        while i < n && is_digit(s[i]) {
+            if exp < EXP_CAP { exp = exp * 10 + ((s[i] - 48) as i64); }
+            i = i + 1;
+        }
+        if i == lo { return false; }
+        if eneg { exp = -exp; }
+    }
+    if i != n { return false; }
+    sc.exp10 = exp;
+    // first 19 significant digits -> w and q; `many` if a dropped digit is nonzero
+    let mut w: u64 = 0;
+    let mut nd: usize = 0;
+    let mut dropped: i32 = 0;
+    let mut many = false;
+    let mut j = sc.int_lo;
+    while j < sc.frac_hi {
+        if j == sc.int_hi {
+            j = sc.frac_lo;
+            if j >= sc.frac_hi { break; }
+        }
+        let c = s[j] - 48;
+        j = j + 1;
+        if nd == 0 && c == 0 { continue; }
+        if nd < 19 {
+            w = w * 10 + (c as u64);
+            nd = nd + 1;
+        } else {
+            dropped = dropped + 1;
+            if c != 0 { many = true; }
+        }
+    }
+    sc.w = w;
+    sc.zero = w == 0;
+    // the exponent and the digit counts together may exceed i32; a q saturated to i32 is still
+    // outside [small10, large10], so it gives the same 0 or inf
+    let q = exp - ((sc.frac_hi - sc.frac_lo) as% i64) + (dropped as i64);
+    sc.q = q as| i32;
+    sc.many = many;
+    return true;
+}
+
+fn is_word(s: &[u8], lo: usize, word: &str) -> bool {
+    let wb = mem.str_bytes(word);
+    if s.len() - lo != wb.len() { return false; }
+    for i in 0..wb.len() {
+        if s[lo + i] != wb[i] { return false; }
+    }
+    return true;
+}
+
+// IEEE bits of the value of s, or None if s is not float text.
+fn parse_bits(f: &FloatFormat, s: &[u8]) -> Option<u64> {
+    let lo: usize = if s.len() > 0 && s[0] == 45 then 1 else 0;
+    let sign = 1u64 << (f.sign as u64);
+    let mb = f.mbits as u64;
+    if is_word(s, lo, "inf") {
+        let b = ((f.inf_pow as% u64) << mb);
+        return Option.Some(if lo == 1 then b | sign else b);
+    }
+    if lo == 0 && is_word(s, 0, "NaN") {
+        return Option.Some(((f.inf_pow as% u64) << mb) | (1u64 << (mb - 1)));
+    }
+    let mut sc = scan_new();
+    if !scan(s, &mut sc) { return Option.None; }
+    let mut am = Am.{ mant: 0, pow2: 0 };
+    if !sc.zero {
+        am = compute_float(f, sc.q, sc.w);
+        if sc.many {
+            let am2 = compute_float(f, sc.q, sc.w + 1);
+            if am.mant != am2.mant || am.pow2 != am2.pow2 {
+                am = big_resolve(f, s, &sc, am);
+            }
+        }
+    }
+    let mut bits = ((am.pow2 as% u64) << mb) | am.mant;
+    if sc.neg { bits = bits | sign; }
+    return Option.Some(bits);
+}

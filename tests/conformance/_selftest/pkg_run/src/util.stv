@@ -1,0 +1,3 @@
+pub fn answer() -> i32 { //~ WARNING E1205
+    return 42;
+}

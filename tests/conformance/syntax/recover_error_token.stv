@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// An item holding an error token reports its lexical diagnostics only, with no E0004.
+fn f() {
+    let = ;
+    let s = 'unterminated
+//~^ ERROR E0015
+}
+
+fn g() { let = ; } //~ ERROR E0004

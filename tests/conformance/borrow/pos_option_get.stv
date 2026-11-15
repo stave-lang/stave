@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// `Option<&T>` lookups: the found reference borrows the container while it is used, and the
+// container is free again afterwards.
+import std.vec;
+
+fn find(v: &vec.Vec<u32>, k: u32) -> Option<&u32> from v {
+    let mut i: usize = 0;
+    while i < v.len() {
+        let x: &u32 = v.get_ref(i);
+        if *x == k {
+            return Option.Some(x);
+        }
+        i = i + 1;
+    }
+    return Option.None;
+}
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(3);
+    let r: Option<&u32> = find(&v, 3);
+    let mut n: u32 = 0;
+    match r {
+        Option.Some(x) => { n = *x; }
+        Option.None => { }
+    }
+    v.push(n);
+    let g: Option<&u32> = v.get(0);
+    let m: &u32 = g.unwrap_or(&n);
+    let k: u32 = *m;
+    return 0;
+}

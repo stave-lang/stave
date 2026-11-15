@@ -1,0 +1,33 @@
+//~ CHECK-ONLY
+// Safe C++ catalogue, iterators: a view-typed iterator whose `next` is
+// `from copy it` yields references that outlive each `&mut it` borrow. Stave accepts.
+view struct It { xs: &[u32], i: usize }
+
+fn next_of(it: &mut It) -> Option<&u32> from copy it {
+    if it.i >= it.xs.len() { return Option.None; }
+    let r = &it.xs[it.i];
+    it.i = it.i + 1;
+    return Option.Some(r);
+}
+
+fn first_two(xs: &[u32]) -> u32 {
+    let mut it = It.{ xs: xs, i: 0 };
+    let a = next_of(&mut it);
+    let b = next_of(&mut it);
+    return match (a, b) {
+        (Option.Some(x), Option.Some(y)) => *x + *y,
+        _ => 0u32,
+    };
+}
+
+fn drain(xs: &[u32]) -> u32 {
+    let mut it = It.{ xs: xs, i: 0 };
+    let mut total: u32 = 0;
+    loop {
+        match next_of(&mut it) {
+            Option.Some(x) => { total = total + *x; }
+            Option.None => { break; }
+        }
+    }
+    return total;
+}

@@ -1,0 +1,36 @@
+//~ CHECK-ONLY
+// A literal's type comes from (1) its suffix, (2) the declared type it initializes or is
+// passed to, (3) the return type, (4) the other operand or arm; contexts pass through
+// parentheses, unary `-`, arms, and same-type operators.
+struct S { pub f: u16 }
+
+enum E { V(i8) }
+
+fn take(x: u64) { }
+
+fn ret() -> i16 {
+    return 7;
+}
+
+fn rules(x: u8, xs: &[u32]) -> u8 {
+    let a = 5u8;                         // rule 1
+    let b: u32 = 1 + 2;                  // rule 2, through `+`
+    take(3);                             // rule 2: parameter
+    let s = S.{ f: 9 };                  // rule 2: field
+    let e = E.V(-3);                     // rule 2: payload, through unary `-`
+    let t: (u8, i64) = (1, 2);           // rule 2: tuple element
+    let i: u32 = xs[0];                  // index: usize
+    let mut m: u16 = 0;
+    m = 4;                               // rule 2: assignment target
+    let c = x + 1;                       // rule 4: other operand
+    let d = 1 + x;                       // rule 4, either side
+    let k = if x > 0 then x else 0;      // rule 4: other arm
+    let p: i32 = -(2 * 3);               // pass-through `-` and parens
+    let w = x +% 1;
+    let big: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+    return c;
+}
+
+fn main() -> i32 {
+    return 0;
+}

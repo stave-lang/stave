@@ -1,0 +1,37 @@
+//~ CHECK-ONLY
+// Generic params (type and const), bounds, `Self` in impls and traits, origins (`from`),
+// qualified trait calls.
+trait Shape { fn sides(&self) -> u32; }
+
+struct Tri { s: u32 }
+
+impl Shape for Tri {
+    fn sides(&self) -> u32 { return self.s; }
+}
+
+struct Wrap<T> { v: T }
+
+impl<T: Shape> Wrap<T> {
+    fn new(v: T) -> Self { return Self.{ v: v }; }
+    fn count(&self) -> u32 { return self.v.sides(); }
+}
+
+fn first<T>(xs: &[T]) -> &T from xs {
+    return &xs[0];
+}
+
+fn sum<const N: usize>(a: [u32; N]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..N {
+        s = s + a[i];
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let w = Wrap.new(Tri.{ s: 3 });
+    let n: u32 = w.count();
+    let m: u32 = Shape.sides(&Tri.{ s: 4 });
+    let t: u32 = sum::<2>([1u32, 2u32]);
+    return 0;
+}

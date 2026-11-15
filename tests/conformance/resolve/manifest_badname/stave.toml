@@ -1,0 +1,3 @@
+name = "../escape" #~ ERROR E1002
+kind = "bin"
+version = "0.1.0"

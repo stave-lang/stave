@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+// E0018: a byte that starts no token, one per run of consecutive such bytes, at the run's start.
+// The item holding it is dropped with its lexical diagnostics only (no E0004, bracket-scan rule 3).
+fn at_sign() { let x: i32 = 1 @ 2; } //~ ERROR E0018
+
+fn one_run() { let y: i32 = $#` 3; } //~ ERROR E0018
+
+fn two_runs() { let a: i32 = @1 $ 2; } //~ ERROR E0018
+//~^ ERROR E0018
+
+fn backslash() { let b: u8 = \ 1; } //~ ERROR E0018
+
+fn control() { let c: i32 = 1; } //~ ERROR E0018
+
+// Inside literals and comments every byte is fine: @ $ \ # ` é
+fn fine() -> i32 {
+    let s = "@ $ \\ # ` é";
+    let c: char = '@';
+    return 0;
+}

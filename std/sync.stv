@@ -1,0 +1,82 @@
+// std.sync: Mutex.
+//
+// `Mutex<T>` guards a T with a futex lock (runtime.atomic: three-state futex mutex, waiters
+// sleep in FUTEX_WAIT). `lock()` returns a `MutexGuard` view; its destructor unlocks, so the
+// lock is held exactly while the guard lives (a guard cannot be forgotten: E0412).
+// `with_lock(f)` runs `f(&mut value)` under the lock and returns its result. Mutex<T> is Send
+// and Sync when T is Send. A MutexGuard<T> is never Send (it stays on the locking thread) and is
+// Sync only when T is Sync (a shared guard hands out `&T` to every thread holding it). Not
+// poisoned: a panic ends the process.
+
+import runtime.atomic;
+import std.core;
+import std.cell;
+
+pub struct Mutex<T> {
+    word: cell.UnsafeCell<u32>,
+    v: cell.UnsafeCell<T>,
+}
+
+unsafe("the value is reached only under the lock; moving the mutex moves the value") impl<T: core.Send> core.Send for Mutex<T> {}
+unsafe("the lock serializes every access to the value") impl<T: core.Send> core.Sync for Mutex<T> {}
+
+impl<T> Mutex<T> {
+    pub fn new(v: T) -> Mutex<T> {
+        return Mutex::<T>.{ word: cell.UnsafeCell::<u32>.new(0), v: cell.UnsafeCell::<T>.new(v) };
+    }
+
+    // Blocks until the lock is free, then holds it while the guard lives.
+    pub fn lock(&self) -> MutexGuard<T> from self {
+        unsafe("word is this mutex's lock word; it lives as long as self") { atomic.lock(self.word.get()); }
+        return MutexGuard::<T>.{ m: self, marker: 0usize as *const u8 };
+    }
+
+    pub fn try_lock(&self) -> Option<MutexGuard<T>> from self {
+        let ok = unsafe("word is this mutex's lock word") atomic.try_lock(self.word.get());
+        return if ok then Option.Some(MutexGuard::<T>.{ m: self, marker: 0usize as *const u8 }) else Option.None;
+    }
+
+    // f(&mut value) under the lock.
+    pub fn with_lock<R>(&self, f: fn(&mut T) -> R) -> R {
+        let mut g = self.lock();
+        let r = f(g.get_mut());
+        return r;
+    }
+
+    pub fn get_mut(&mut self) -> &mut T from self {
+        return self.v.get_mut();
+    }
+
+    pub fn into_inner(self) -> T {
+        return self.v.into_inner();
+    }
+}
+
+// The lock of a Mutex, held while this view lives.
+pub view struct MutexGuard<T> {
+    m: &Mutex<T>,
+    // A raw pointer is neither Send nor Sync, so the structural rule gives the guard neither;
+    // Sync comes back only through the impl below. Without it, `&Mutex<T>` would make the guard
+    // Sync for every T: Send (Mutex<T> is Sync then), sharing `&T` of a non-Sync T.
+    marker: *const u8,
+}
+
+unsafe("a shared guard only gives out &T, which is safe to share when T is Sync") impl<T: core.Sync> core.Sync for MutexGuard<T> {}
+
+impl<T> MutexGuard<T> {
+    pub fn get(&self) -> &T from self {
+        let p = self.m.v.get();
+        return unsafe("this guard holds the lock: no other access to the value") &*p;
+    }
+
+    pub fn get_mut(&mut self) -> &mut T from self {
+        let p = self.m.v.get();
+        return unsafe("this guard holds the lock and is itself borrowed mutably") &mut *p;
+    }
+}
+
+impl<T> core.Drop for MutexGuard<T> {
+    fn drop(&mut self) {
+        unsafe("this guard holds the lock") { atomic.unlock(self.m.word.get()); }
+    }
+}

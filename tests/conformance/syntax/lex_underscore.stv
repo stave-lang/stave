@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// `_` alone is the wildcard token; `_x` is an identifier.
+fn f(v: i32) -> i32 {
+    let _x: i32 = v;
+    match v {
+        _ => { }
+    }
+    return _x;
+}
+
+fn g() -> i32 {
+    return _; //~ ERROR E0004
+}

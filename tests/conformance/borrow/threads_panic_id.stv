@@ -1,0 +1,18 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at threads_panic_id.stv:14:21 in main.main (thread 1)\n"
+// A panic in a spawned thread reports that thread's id (creation order, main = 0) and
+// the enclosing fn of the spawn body; the whole process exits 101.
+fn index(k: usize) -> usize {
+    return k + 3;
+}
+
+fn main() -> i32 {
+    let xs: [u32; 2] = [1, 2];
+    let mut got: u32 = 0;
+    scope {
+        spawn {
+            got = xs[index(1)];
+        }
+    }
+    return got as% i32;
+}

@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// No failing closer: E0016 at the innermost opener left unclosed at end of file.
+fn f() {
+    if true { //~ ERROR E0016
+        let a = 1;

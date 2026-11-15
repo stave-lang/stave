@@ -1,0 +1,21 @@
+[package]
+name = "gen-corpus"
+description = "Generates deterministic, semantically plausible Stave corpus packages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+stave-diag = { workspace = true }
+stave-syntax = { workspace = true }

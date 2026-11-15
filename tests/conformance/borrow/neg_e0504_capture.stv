@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// Closures capture by reference only: moving a non-Copy capture out
+// of a closure body is E0504 (`capture` case, related span: the closure). Reading through it is
+// fine.
+import std.string;
+
+fn main() -> i32 {
+    let s = string.String.new();
+    let n = fn() -> usize { return s.len(); };
+    let f = fn() { let t = s; }; //~ ERROR E0504
+    f();
+    let k = n();
+    return 0;
+}

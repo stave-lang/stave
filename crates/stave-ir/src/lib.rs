@@ -1,0 +1,35 @@
+//! SSA IR, reference interpreter, checked-IR printer.
+//!
+//! - [`types`]: the type key ([`TypeKey`]), interned in a [`TypeTable`]; TypeKey
+//!   text; canonical renumbering.
+//! - [`ir`]: SSA with block params, struct-of-arrays bodies, `u32` ids; the op set ([`Op`]).
+//! - [`build`]: [`FuncBuilder`] for the front end's lowering.
+//! - [`verify`]: structure, dominance, block params, terminators, op typing.
+//! - [`interp`]: the scalar reference interpreter (oracle) over [`mem`] with a pluggable [`host`].
+//! - [`print_checked`]: the canonical checked-IR text of contracts/checked-ir.md.
+//! - [`arith`]: scalar op and cast semantics; [`layout`]: memory layout of IR types.
+//! - [`link`]: text order and symbol names of a module's functions and statics (both backends).
+
+pub mod arith;
+pub mod bounds;
+pub mod build;
+pub mod host;
+pub mod interp;
+pub mod ir;
+pub mod layout;
+pub mod link;
+pub mod mem;
+pub mod print_checked;
+pub mod types;
+pub mod verify;
+
+pub use build::{BuildError, FuncBuilder};
+pub use host::{BufferHost, Host, SysResult, SyscallAbi};
+pub use interp::{Config, Interp, InterpError, Outcome, Trap, Val};
+pub use ir::{
+    Block, Body, CastKind, Const, Func, FuncId, InstanceId, IntrinsicId, Module, Op, Operand, PanicKind,
+    Site, SiteInfo, Static, StrId, Term, Value,
+};
+pub use print_checked::print_checked;
+pub use types::{AdtShape, DeclId, FloatBits, GenericArg, IntBits, Lanes, TypeId, TypeKey, TypeTable};
+pub use verify::{VerifyError, verify_func, verify_module};

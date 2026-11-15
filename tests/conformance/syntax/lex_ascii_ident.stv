@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// Identifiers are ASCII only: `[A-Za-z_][A-Za-z0-9_]*`. A non-ASCII byte outside literals and
+// comments is E0018, one per run of consecutive such bytes.
+fn naïve() { } //~ ERROR E0018
+
+fn f() { let größe: u32 = 1; } //~ ERROR E0018
+
+fn g() { let x: u32 = 1; let y = x€€; } //~ ERROR E0018
+
+fn ascii_Name_9() -> char {
+    let c: char = 'é';
+    return c;
+}

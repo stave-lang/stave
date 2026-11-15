@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// ir golden: `if` statement without and with `else`; the join gets one param per SSA
+// local assigned inside and live after it (by local index).
+fn clamp(x: i32, lo: i32) -> i64 {
+    let mut r = x;
+    let mut n: u32 = 0;
+    if x < lo {
+        r = lo;
+        n = 1;
+    }
+    if r > 100 {
+        r = 100;
+    } else {
+        n = n + 2;
+    }
+    return (r as i64) + (n as i64);
+}
+
+fn main() -> i32 {
+    return if clamp(3, 5) == 7 then 0 else 1;
+}

@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// `size_of::<T>()` / `align_of::<T>()`: built-in generic fns, const-evaluable, usable in
+// generic code (after monomorphization).
+struct Pair { a: u8, b: u64 }
+
+const PAIR_SIZE: usize = size_of::<Pair>();
+const PAIR_ALIGN: usize = align_of::<Pair>();
+const WORDS: [usize; 2] = [size_of::<u64>(), align_of::<u32>()];
+
+fn bytes<T>(n: usize) -> usize {
+    return n * size_of::<T>();
+}
+
+fn main() -> i32 {
+    let total: usize = bytes::<Pair>(4) + PAIR_SIZE + PAIR_ALIGN + WORDS[0];
+    return 0;
+}

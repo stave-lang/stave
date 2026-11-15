@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// E0802 (shared): a thread.par_for / par_for_mut body runs on many threads at once:
+// a `&mut` capture is E0802, and a captured `&T` needs T: Sync.
+import std.thread;
+
+struct Raw {
+    p: *const u8,
+}
+
+fn count_up(n: usize) -> u64 {
+    let mut total: u64 = 0;
+    thread.par_for(0, n, fn(i: usize) { total = total + 1; }); //~ ERROR E0802
+    return total;
+}
+
+fn not_sync(r: Raw, xs: &mut [u32]) {
+    thread.par_for_mut(xs, fn(i: usize, x: &mut u32) { *x = (r.p as usize) as% u32; }); //~ ERROR E0802
+}

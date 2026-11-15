@@ -1,0 +1,21 @@
+// `std.sync.Mutex<T>` is Sync through its explicit `unsafe(..) impl Sync`
+// (T: Send), although it holds an UnsafeCell: both `join` closures may capture `&Mutex<u32>`.
+//~ STDOUT threads_mutex_join.stdout
+import std.io;
+import std.sync;
+import std.thread;
+
+fn add(m: &sync.Mutex<u32>, k: u32) -> u32 {
+    let mut g = m.lock();
+    let v = g.get_mut();
+    *v = *v + k;
+    return k;
+}
+
+fn main() -> i32 {
+    let m = sync.Mutex::<u32>.new(0);
+    let (a, b) = thread.join(fn() -> u32 { return add(&m, 1); }, fn() -> u32 { return add(&m, 2); });
+    let total = m.into_inner();
+    io.print(f"{a} {b} {total}\n");
+    return 0;
+}

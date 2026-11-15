@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// An f-string is an owned `String`. Where `&str` is expected it is borrowed
+// automatically, and `&String` converts to `&str` (String derefs to str).
+import std.io;
+import std.string;
+
+fn shout(s: &str) {
+    io.print(s);
+}
+
+fn main() -> i32 {
+    let n: u32 = 7;
+    io.print(f"n = {n}\n");
+    shout(f"again {n}\n");
+    let s: string.String = f"kept {n}\n";
+    shout(&s);
+    shout(s.as_str());
+    return 0;
+}

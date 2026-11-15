@@ -1,0 +1,299 @@
+// runtime.alloc: the global allocator, over mmap/munmap/mremap.
+//
+// API (the one std uses; an `allocator my.alloc;` module provides the same three fns):
+//   alloc(size, alignment) -> *mut u8                  never null; OutOfMemory panic on failure
+//   free(p, size, alignment)                           size and alignment as passed to alloc/realloc
+//   realloc(p, old_size, alignment, new_size) -> *mut u8
+// `alignment` is a power of two. size 0 returns `alignment` itself as a dangling, aligned, non-null
+// pointer that is never dereferenced; freeing it is a no-op. The caller passes the size back
+// (sized deallocation), so blocks carry no header.
+//
+// Small sizes (<= 32 KiB) use 23 size classes, 16 B to 32 KiB at powers of two and 1.5x in
+// between. Each class has a free list threaded through the first word of its free blocks. An
+// empty list is refilled from a 64 KiB slab cut from the current 4 MiB arena chunk (one mmap
+// per chunk). A class block of size c is aligned to
+// min(lowbit(c), 4096) (chunks are page-aligned, slabs are 64 KiB multiples), so a request is
+// served by the first class >= size whose alignment is >= alignment. Larger requests, and
+// alignments above 4096, are direct page mappings; realloc of those uses mremap.
+//
+// OutOfMemory reports the user site: the compiler stores it with
+// runtime.panic.set_user_site before a call from user code into a std fn that may allocate.
+// A size whose page rounding overflows usize is OutOfMemory too, never an Overflow panic.
+//
+// Threads: the shared lists, the arena, and the mapped-byte counters are guarded by one futex
+// lock (`state.alloc_lock`, runtime.atomic), held only inside small_alloc / small_free /
+// add_large / sub_large (never across a call that locks again). There are no per-thread
+// caches: every small allocation and free takes the lock.
+
+import runtime.os;
+import runtime.state;
+import runtime.panic;
+import runtime.atomic;
+
+pub const NCLASS: usize = state.NCLASS;
+pub const MAX_SMALL: usize = 32768;
+
+const CLASS: [usize; 23] = [
+    16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144,
+    8192, 12288, 16384, 24576, 32768,
+];
+
+const SLAB: usize = 65536;
+const CHUNK: usize = 4194304;
+const SMALL_ALIGN_MAX: usize = 4096;
+
+pub fn alloc(size: usize, alignment: usize) -> *mut u8 {
+    check_align(alignment);
+    if size == 0 { return alignment as *mut u8; }
+    let c = class_of(size, alignment);
+    if c < NCLASS { return small_alloc(c); }
+    return large_alloc(size, alignment);
+}
+
+pub unsafe("p came from alloc/realloc with this size and alignment and is not used afterwards")
+fn free(p: *mut u8, size: usize, alignment: usize) {
+    if size == 0 { return; }
+    let c = class_of(size, alignment);
+    if c < NCLASS {
+        unsafe("p is a free block of class c owned by the allocator from now on") { small_free(p, c); }
+        return;
+    }
+    let len = round_up(size, state.page_size());
+    let r = unsafe("p..p+len is a large mapping the caller no longer uses") os.munmap(p as usize, len);
+    sub_large(len);
+}
+
+pub unsafe("p came from alloc/realloc with old_size and alignment; on return only the result is used")
+fn realloc(p: *mut u8, old_size: usize, alignment: usize, new_size: usize) -> *mut u8 {
+    check_align(alignment);
+    if old_size == 0 { return alloc(new_size, alignment); }
+    if new_size == 0 {
+        unsafe("caller obligation") { free(p, old_size, alignment); }
+        return alignment as *mut u8;
+    }
+    let co = class_of(old_size, alignment);
+    let cn = class_of(new_size, alignment);
+    if co < NCLASS && co == cn { return p; }
+    let page = state.page_size();
+    if co >= NCLASS && cn >= NCLASS && alignment <= page {
+        let lo = round_up(old_size, page);
+        let ln = round_up(new_size, page);
+        if lo == ln { return p; }
+        let r = unsafe("p..p+lo is a large mapping owned by the caller") os.mremap(p as usize, lo, ln, os.MREMAP_MAYMOVE);
+        if r < 0 { oom(); }
+        add_large(ln);
+        sub_large(lo);
+        return (r as% usize) as *mut u8;
+    }
+    let q = alloc(new_size, alignment);
+    let n = if old_size < new_size then old_size else new_size;
+    unsafe("p and q are distinct live blocks of at least n bytes") {
+        copy_bytes(q, p as *const u8, n);
+        free(p, old_size, alignment);
+    }
+    return q;
+}
+
+// Total bytes mapped for small blocks and for large blocks (diagnostics, tests).
+pub fn mapped() -> (usize, usize) {
+    let st = state.get();
+    let s = unsafe("st is runtime.state.STATE; the allocator lock is held or the field is only read for diagnostics") (*st).small_mapped;
+    let l = unsafe("st is runtime.state.STATE; the allocator lock is held or the field is only read for diagnostics") (*st).large_mapped;
+    return (s, l);
+}
+
+fn check_align(alignment: usize) {
+    if alignment == 0 || (alignment & (alignment - 1)) != 0 {
+        panic.abort(panic_str("runtime.alloc: alignment is not a power of two"));
+    }
+}
+
+// A string literal's bytes for runtime.panic (no std.mem in the runtime package).
+fn panic_str(s: &str) -> &[u8] from s {
+    return unsafe("&str and &[u8] are both (data pointer, byte length)") *(&s as *const &str as *const &[u8]);
+}
+
+fn oom() -> never {
+    panic.trap(panic.KIND_OUT_OF_MEMORY, panic.user_site());
+}
+
+const USIZE_MAX: usize = 0xFFFF_FFFF_FFFF_FFFF;
+
+// x rounded up to a multiple of a (a >= 1); OutOfMemory if that exceeds usize.
+fn round_up(x: usize, a: usize) -> usize {
+    if x > USIZE_MAX - (a - 1) { oom(); }
+    return (x + a - 1) / a * a;
+}
+
+fn lowbit(x: usize) -> usize {
+    return x & ((~x) +% 1);
+}
+
+fn floor_log2(x: usize) -> usize {
+    let mut n: usize = 0;
+    let mut v = x;
+    while v > 1 {
+        v = v >> 1;
+        n = n + 1;
+    }
+    return n;
+}
+
+// Smallest class >= size whose block alignment covers alignment; NCLASS = large.
+fn class_of(size: usize, alignment: usize) -> usize {
+    if size > MAX_SMALL || alignment > SMALL_ALIGN_MAX { return NCLASS; }
+    let mut c: usize = 0;
+    if size > 16 {
+        let p = floor_log2(size - 1);
+        let base: usize = 1usize << p;
+        c = 2 * (p - 4) + (if size <= base + base / 2 then 1 else 2);
+    }
+    while c < NCLASS {
+        let a = lowbit(CLASS[c]);
+        let blk = if a < SMALL_ALIGN_MAX then a else SMALL_ALIGN_MAX;
+        if blk >= alignment { return c; }
+        c = c + 1;
+    }
+    return NCLASS;
+}
+
+fn alloc_lock() -> *mut u32 {
+    let st = state.get();
+    return unsafe("st is runtime.state.STATE; only the field address is taken") &mut (*st).alloc_lock as *mut u32;
+}
+
+fn small_alloc(c: usize) -> *mut u8 {
+    let w = alloc_lock();
+    unsafe("w is the allocator lock word in the state block") { atomic.lock(w); }
+    let p = small_alloc_locked(c);
+    unsafe("this thread holds the allocator lock") { atomic.unlock(w); }
+    return p;
+}
+
+unsafe("p is a block of class c that nothing else uses") fn small_free(p: *mut u8, c: usize) {
+    let w = alloc_lock();
+    unsafe("w is the allocator lock word in the state block") { atomic.lock(w); }
+    unsafe("caller obligation") { small_free_locked(p, c); }
+    unsafe("this thread holds the allocator lock") { atomic.unlock(w); }
+}
+
+// The bodies below run with the allocator lock held.
+fn small_alloc_locked(c: usize) -> *mut u8 {
+    let st = state.get();
+    let head = unsafe("st is runtime.state.STATE; the allocator lock is held or the field is only read for diagnostics") (*st).free[c];
+    if head != 0 {
+        let next = unsafe("head is a free block of class c: its first word links the list") *(head as *const usize);
+        unsafe("st is runtime.state.STATE; the allocator lock is held or the field is only read for diagnostics") { (*st).free[c] = next; }
+        return head as *mut u8;
+    }
+    return refill(c);
+}
+
+unsafe("p is a block of class c that nothing else uses") fn small_free_locked(p: *mut u8, c: usize) {
+    let st = state.get();
+    unsafe("st is runtime.state.STATE (allocator lock held); p is a dead block of class c (caller)") {
+        *(p as *mut usize) = (*st).free[c];
+        (*st).free[c] = p as usize;
+    }
+}
+
+// Cuts one slab into class-c blocks: returns the first, pushes the rest (lowest address on top).
+fn refill(c: usize) -> *mut u8 {
+    let slab = take_slab();
+    let size = CLASS[c];
+    let n = SLAB / size;
+    let mut i = n;
+    while i > 1 {
+        i = i - 1;
+        let b = slab + i * size;
+        unsafe("b is inside the fresh slab, a dead block of class c") { small_free_locked(b as *mut u8, c); }
+    }
+    return slab as *mut u8;
+}
+
+fn take_slab() -> usize {
+    let st = state.get();
+    let cur = unsafe("st is runtime.state.STATE; the allocator lock is held or the field is only read for diagnostics") (*st).arena_cur;
+    let end = unsafe("st is runtime.state.STATE; the allocator lock is held or the field is only read for diagnostics") (*st).arena_end;
+    if cur != 0 && cur + SLAB <= end {
+        unsafe("st is runtime.state.STATE; the allocator lock is held or the field is only read for diagnostics") { (*st).arena_cur = cur + SLAB; }
+        return cur;
+    }
+    let prot = os.PROT_READ | os.PROT_WRITE;
+    let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS | os.MAP_NORESERVE;
+    let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, CHUNK, prot, flags, -1, 0);
+    if r < 0 { oom(); }
+    let base = r as% usize;
+    unsafe("st is runtime.state.STATE; the allocator lock is held or the field is only read for diagnostics") {
+        (*st).arena_cur = base + SLAB;
+        (*st).arena_end = base + CHUNK;
+        (*st).small_mapped = (*st).small_mapped + CHUNK;
+    }
+    return base;
+}
+
+fn large_alloc(size: usize, alignment: usize) -> *mut u8 {
+    let page = state.page_size();
+    let len = round_up(size, page);
+    let prot = os.PROT_READ | os.PROT_WRITE;
+    let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS | os.MAP_NORESERVE;
+    if alignment <= page {
+        let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, len, prot, flags, -1, 0);
+        if r < 0 { oom(); }
+        add_large(len);
+        return (r as% usize) as *mut u8;
+    }
+    // Over-map by alignment, then return the unaligned head and the tail_len to the kernel, so the
+    // mapping is exactly [p, p + len) as free() expects.
+    if len > USIZE_MAX - alignment { oom(); }
+    let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, len + alignment, prot, flags, -1, 0);
+    if r < 0 { oom(); }
+    let base = r as% usize;
+    let p = round_up(base, alignment);
+    let head = p - base;
+    let tail_len = alignment - head;
+    unsafe("the head and tail_len pages belong to this fresh mapping and hold no objects") {
+        if head != 0 { let r1 = os.munmap(base, head); }
+        if tail_len != 0 { let r2 = os.munmap(p + len, tail_len); }
+    }
+    add_large(len);
+    return p as *mut u8;
+}
+
+fn add_large(n: usize) {
+    let st = state.get();
+    let w = alloc_lock();
+    unsafe("st is runtime.state.STATE; the counter is guarded by the allocator lock") {
+        atomic.lock(w);
+        (*st).large_mapped = (*st).large_mapped + n;
+        atomic.unlock(w);
+    }
+}
+
+fn sub_large(n: usize) {
+    let st = state.get();
+    let w = alloc_lock();
+    unsafe("st is runtime.state.STATE; the counter is guarded by the allocator lock") {
+        atomic.lock(w);
+        (*st).large_mapped = (*st).large_mapped - n;
+        atomic.unlock(w);
+    }
+}
+
+// Copies n bytes; 8 bytes at a time when both pointers are 8-byte aligned.
+pub unsafe("dst..dst+n is writable, src..src+n readable, and they do not overlap")
+fn copy_bytes(dst: *mut u8, src: *const u8, n: usize) {
+    let d = dst as usize;
+    let s = src as usize;
+    let mut i: usize = 0;
+    if ((d | s) & 7) == 0 {
+        while i + 8 <= n {
+            unsafe("i + 8 <= n: inside both ranges (caller)") { *((d + i) as *mut u64) = *((s + i) as *const u64); }
+            i = i + 8;
+        }
+    }
+    while i < n {
+        unsafe("i < n: inside both ranges (caller)") { *((d + i) as *mut u8) = *((s + i) as *const u8); }
+        i = i + 1;
+    }
+}

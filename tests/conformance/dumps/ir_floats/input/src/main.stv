@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// ir golden: float constants print as `0x` + their IEEE bits (8 hex digits for f32, 16
+// for f64); `-` on a literal is folded; char and bool constants as integers.
+fn mix(x: f64, y: f32) -> f64 {
+    let a = x * 0.1 + -2.5;
+    let b = y + 1.0e10;
+    let c: char = 'A';
+    let t: bool = true;
+    let d = if t then a else -0.0;
+    return d + (b as f64) + ((c as u32) as f64);
+}
+
+fn main() -> i32 {
+    let r = mix(1.0, 0.5);
+    return if r > 0.0 then 0 else 1;
+}

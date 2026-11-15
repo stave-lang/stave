@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// A closure inside a `scope` block is not part of it (it is a separate body and may run
+// later, on another thread), so a `spawn` in its body has no scope to join: E0808, not E0801.
+// A `scope` opened inside the closure is fine.
+fn main() -> i32 {
+    let mut a: u32 = 0;
+    let mut b: u32 = 0;
+    scope {
+        let f = fn() { spawn { a = 1; } }; //~ ERROR E0808
+        f();
+    }
+    let g = fn() { scope { spawn { b = 2; } } };
+    g();
+    return 0;
+}

@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// ir golden: `for` over a range: head, body, exit.
+fn sum(n: u64) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..n {
+        s = s + i;
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    return if sum(4) == 6 then 0 else 1;
+}

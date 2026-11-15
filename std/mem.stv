@@ -1,0 +1,126 @@
+// std.mem: raw memory helpers for std's own types (Vec, String, fmt, num, io).
+//
+// Language rules std relies on, and the representation assumptions it makes (std/README.md
+// lists them):
+//   size_of / align_of: the built-in generic fns `size_of::<T>()` and `align_of::<T>()`
+//       (const-evaluable, usable in generic code after monomorphization).
+//   Raw pointers: `*p = v` is a place assignment, so it drops the old pointee first
+//       (only for an initialized slot); `p.write(v)` (unsafe) stores v without dropping
+//       anything (uninitialized slots); `p.read()` (unsafe) moves the pointee out by a bitwise
+//       copy, after which the slot is logically uninitialized (never dropped through p).
+//       `*p` by value is allowed only for a Copy pointee.
+//   A3  `&[T]`, `&mut [T]`, and `&str` are (data pointer, length) pairs: two words, data first.
+//   A4  A value read through a raw pointer carries no loan, so it satisfies any `from` clause of
+//       the function returning it (the unsafe obligation covers its validity).
+
+import runtime.alloc;
+
+pub fn type_size<T>() -> usize {
+    return size_of::<T>();
+}
+
+pub fn type_align<T>() -> usize {
+    return align_of::<T>();
+}
+
+// Ends the life of x now: x moves in and is dropped at the end of this body (the fix of E0909;
+// `x.drop()` cannot be called).
+pub fn drop<T>(x: T) {
+}
+
+// Puts v into *dst and returns the old value (the fix of E0504: a value cannot be moved out of a
+// borrow, but it can be exchanged for another).
+pub fn replace<T>(dst: &mut T, v: T) -> T {
+    let p = &mut *dst as *mut T;
+    let old = unsafe("p comes from dst: valid, aligned, initialized, and not aliased while dst lives") p.read();
+    unsafe("the slot was moved out by read: write fills it without dropping") { p.write(v); }
+    return old;
+}
+
+// Exchanges *a and *b (two `&mut` never overlap).
+pub fn swap<T>(a: &mut T, b: &mut T) {
+    let pa = &mut *a as *mut T;
+    let pb = &mut *b as *mut T;
+    let t = unsafe("pa comes from a: valid and initialized") pa.read();
+    unsafe("pa was moved out, pb is valid and distinct from pa (a and b are both &mut)") { pa.write(pb.read()); }
+    unsafe("pb was moved out by the read above") { pb.write(t); }
+}
+
+// Ends the ownership of x without running its destructor: x moves into a scratch block by a
+// bitwise write (no drop), and the block is freed as raw bytes, so nothing x owned is released
+// (its heap memory leaks) but the scratch block does not. A view cannot be forgotten (E0412: a
+// guard's destructor always runs).
+pub fn forget<T>(x: T) {
+    let size = type_size::<T>();
+    let al = type_align::<T>();
+    let p = alloc.alloc(size, al) as *mut T;
+    unsafe("p is a fresh block for one T (size 0: aligned and dangling, a zero-sized write)") { p.write(x); }
+    unsafe("p came from alloc with this size and alignment; its bytes are discarded, never read or dropped") { alloc.free(p as *mut u8, size, al); }
+}
+
+// A non-null, aligned pointer for empty buffers; never dereferenced.
+pub fn dangling<T>() -> *mut T {
+    return type_align::<T>() as *mut T;
+}
+
+pub fn add<T>(p: *const T, i: usize) -> *const T {
+    return ((p as usize) + i * type_size::<T>()) as *const T;
+}
+
+pub fn add_mut<T>(p: *mut T, i: usize) -> *mut T {
+    return ((p as usize) + i * type_size::<T>()) as *mut T;
+}
+
+// (data, len) of a slice and of a str (A3).
+pub fn slice_ptr<T>(xs: &[T]) -> *const T {
+    let parts = unsafe("a slice reference is (data pointer, length)") *(&xs as *const &[T] as *const [usize; 2]);
+    return parts[0] as *const T;
+}
+
+pub fn str_ptr(s: &str) -> *const u8 {
+    let parts = unsafe("a str reference is (data pointer, length)") *(&s as *const &str as *const [usize; 2]);
+    return parts[0] as *const u8;
+}
+
+pub fn str_bytes(s: &str) -> &[u8] from s {
+    return unsafe("&str and &[u8] are both (data pointer, byte length); str holds UTF-8 bytes") *(&s as *const &str as *const &[u8]);
+}
+
+// The slice of len elements at p, borrowed from owner (A3, A4).
+pub unsafe("p..p+len holds initialized T that owner keeps alive and unmodified while the result lives")
+fn slice<O, T>(owner: &O, p: *const T, len: usize) -> &[T] from owner {
+    let parts: [usize; 2] = [p as usize, len];
+    return unsafe("a slice reference is (data pointer, length)") *(&parts as *const [usize; 2] as *const &[T]);
+}
+
+pub unsafe("p..p+len holds initialized T that owner keeps alive and lends exclusively while the result lives")
+fn slice_mut<O, T>(owner: &mut O, p: *mut T, len: usize) -> &mut [T] from owner {
+    let parts: [usize; 2] = [p as usize, len];
+    // `&mut [T]` is not Copy: moved out with `read` (`*p` by value is for Copy pointees only).
+    let q = &parts as *const [usize; 2] as *const &mut [T];
+    return unsafe("a slice reference is (data pointer, length)") q.read();
+}
+
+pub unsafe("p..p+len is valid UTF-8 that owner keeps alive and unmodified while the result lives")
+fn str_from<O>(owner: &O, p: *const u8, len: usize) -> &str from owner {
+    let parts: [usize; 2] = [p as usize, len];
+    return unsafe("a str reference is (data pointer, byte length)") *(&parts as *const [usize; 2] as *const &str);
+}
+
+// ---- float bits (same size, every bit pattern valid) ----
+
+pub fn f64_bits(x: f64) -> u64 {
+    return unsafe("f64 and u64 have the same size and every u64 is valid") *(&x as *const f64 as *const u64);
+}
+
+pub fn f64_from_bits(b: u64) -> f64 {
+    return unsafe("f64 and u64 have the same size and every bit pattern is an f64") *(&b as *const u64 as *const f64);
+}
+
+pub fn f32_bits(x: f32) -> u32 {
+    return unsafe("f32 and u32 have the same size and every u32 is valid") *(&x as *const f32 as *const u32);
+}
+
+pub fn f32_from_bits(b: u32) -> f32 {
+    return unsafe("f32 and u32 have the same size and every bit pattern is an f32") *(&b as *const u32 as *const f32);
+}

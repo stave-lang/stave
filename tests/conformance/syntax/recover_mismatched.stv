@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// A closer of another kind: E0016 at the closer.
+fn f() {
+    let a = (1 ]; //~ ERROR E0016
+}

@@ -1,0 +1,25 @@
+//~ STDOUT fnval_coerce.stdout
+// Lowering regressions: a fn item in a typed fn-value local called through it (`call.ind @f`),
+// `&mut [T; N]` passed as `&mut [T]`, and a closure capturing a local by reference.
+import std.io;
+
+fn twice(x: u32) -> u32 {
+    return x * 2;
+}
+
+fn bump_all(xs: &mut [u32]) {
+    for i in 0..xs.len() { xs[i] = xs[i] + 1; }
+}
+
+fn main() -> i32 {
+    let f: fn(u32) -> u32 = twice;
+    let a = f(2);
+    let mut xs: [u32; 3] = [1, 2, 3];
+    bump_all(&mut xs);
+    let b = xs[0] + xs[1] + xs[2];
+    let k: u32 = 5;
+    let g = fn(x: u32) -> u32 { return x + k; };
+    let c = g(a);
+    io.print(f"{a} {b} {c}\n");
+    return 0;
+}

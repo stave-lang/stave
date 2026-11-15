@@ -1,0 +1,14 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Overflow at overflow_add.stv:5:14 in main.add_one (thread 0)"
+// `+` traps when the sum leaves the type: 255u8 + 1, the operand coming from a loop.
+fn add_one(x: u8) -> u8 {
+    return x + 1;
+}
+
+fn main() -> i32 {
+    let mut v: u8 = 250;
+    for i in 0u32..10 {
+        v = add_one(v);
+    }
+    return 0;
+}

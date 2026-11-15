@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// StructLit after a type path with `::<..>` on its last step, and `Self.{ .. }` inside an impl
+// (both parse as StructLit). Type args may also come from the expected type.
+struct Cell<T> { v: T }
+
+impl<T> Cell<T> {
+    fn new(v: T) -> Self {
+        return Self.{ v: v };
+    }
+}
+
+fn make() -> Cell<u32> {
+    let a = Cell::<u32>.{ v: 1u32 };
+    let b: Cell<u32> = Cell.{ v: 2 };
+    let c = Cell::<Option<u32>>.{ v: Option.None };
+    return a;
+}

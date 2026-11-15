@@ -1,0 +1,11 @@
+//~ CHECK-ONLY
+// f-string holes take no tuple steps and no expressions (E0006).
+import std.io;
+
+fn tuple_step(t: (i32, i32)) {
+    io.print(f"{t.0}\n"); //~ ERROR E0006
+}
+
+fn expression(a: i32, b: i32) {
+    io.print(f"{a+b}\n"); //~ ERROR E0006
+}

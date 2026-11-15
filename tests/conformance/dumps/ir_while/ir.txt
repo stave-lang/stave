@@ -1,0 +1,44 @@
+type t0 int u 32
+type t1 int s 32
+type t2 bool
+type t3 str
+type t4 ref t3
+fn @0 std.io.print {
+b0(%0: t4):
+  ret
+}
+fn @1 main.count {
+b0(%0: t0):
+  br b1(0, 0)
+b1(%1: t0, %2: t0):
+  %3 = lt t2 %1 %0
+  cbr %3 b2() b3(%2)
+b2():
+  %4 = add t0 %1 1
+  %5 = eq t2 %4 3
+  cbr %5 b4() b5()
+b3(%6: t0):
+  ret %6
+b4():
+  br b1(%4, %2)
+b5():
+  %7 = gt t2 %4 10
+  cbr %7 b6() b7()
+b6():
+  br b3(%2)
+b7():
+  %8 = add t0 %2 1
+  br b1(%4, %8)
+}
+fn @2 main.main {
+b0():
+  %0 = call t0 @1 5
+  %1 = eq t2 %0 4
+  cbr %1 b1() b2()
+b1():
+  br b3(0)
+b2():
+  br b3(1)
+b3(%2: t1):
+  ret %2
+}

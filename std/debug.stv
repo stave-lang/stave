@@ -1,0 +1,12 @@
+// std.debug: assertions.
+
+import runtime.panic;
+import std.mem;
+
+// Panics `Assert` at the call (the user site the compiler stores before calling into std,
+// runtime.panic) when cond is false. The report line is followed by one stderr line: msg.
+pub fn assert(cond: bool, msg: &str) {
+    if !cond {
+        panic.trap_msg(panic.KIND_ASSERT, panic.user_site(), mem.str_bytes(msg));
+    }
+}

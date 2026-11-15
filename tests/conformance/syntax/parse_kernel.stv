@@ -1,0 +1,7 @@
+//~ PARSE-ONLY
+// KernelDecl (kernel rules belong to the GPU target).
+kernel fn scale(xs: &mut [f32], k: f32) {
+    for x in xs { }
+}
+
+kernel fn nothing() { }

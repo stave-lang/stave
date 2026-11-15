@@ -1,0 +1,22 @@
+//~ STDOUT closure_fn_item.stdout
+// A closure literal and a fn item are both values of the fn type `fn(&u32) -> u32`;
+// they can be passed, stored in a local, compared with a call through either.
+import std.io;
+
+fn double(x: &u32) -> u32 {
+    return *x * 2;
+}
+
+fn run_all(fs: fn(&u32) -> u32, gs: fn(&u32) -> u32, v: u32) -> u32 {
+    return fs(&v) + gs(&v);
+}
+
+fn main() -> i32 {
+    let k: u32 = 7;
+    let plus_k = fn(x: &u32) -> u32 { return *x + k; };
+    let r1 = run_all(double, plus_k, 5);
+    let r2 = run_all(plus_k, plus_k, 1);
+    let r3 = run_all(double, double, 0);
+    io.print(f"{r1} {r2} {r3}\n");
+    return 0;
+}

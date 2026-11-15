@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// An unbalanced file: exactly one E0016 and no E0004; its lexical diagnostics are still reported.
+fn f() {
+    let = ;
+    let s = f"{a+b}"; //~ ERROR E0006
+    let t = "raw
+//~^ ERROR E0015
+}
+} //~ ERROR E0016

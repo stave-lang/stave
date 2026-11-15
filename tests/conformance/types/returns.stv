@@ -1,0 +1,44 @@
+//~ CHECK-ONLY
+// Blocks are statements; a unit fn may fall off its end, a non-unit fn that can reach its
+// end is E0207. `if c then a else b` and value `match` produce values.
+fn unit(x: u32) {
+    if x > 3 { return; }
+}
+
+fn value(x: u32) -> u32 {
+    let y: u32 = if x > 3 then x else 0;
+    let z: u32 = match y { 0 => 1, 1 => 2, _ => y };
+    return z;
+}
+
+fn both(c: bool) -> u32 {
+    if c { return 1; } else { return 2; }
+}
+
+fn looped() -> u32 {
+    loop { }
+}
+
+fn missing(c: bool) -> u32 {
+    if c { return 1; }
+} //~ ERROR E0207
+
+fn after_break() -> u32 {
+    loop { break; }
+} //~ ERROR E0207
+
+fn matched(x: Option<u32>) -> u32 {
+    match x {
+        Option.Some(v) => { return v; }
+        Option.None => { return 0; }
+    }
+}
+
+fn empty_return() -> u32 {
+    return; //~ ERROR E0201
+}
+
+fn main() -> i32 {
+    unit(1);
+    return (value(2) + both(true) + matched(Option.None)) as% i32;
+}

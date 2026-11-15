@@ -1,0 +1,35 @@
+//~ CHECK-ONLY
+// A fn item with `from copy it`, coerced to a fn value, is weakened to `from it`:
+// through the value, the result borrows the view object `it` itself, so `it` cannot be borrowed
+// again while the result lives. A direct call keeps `from copy` (as an iterator `next` does).
+view struct It { xs: &[u32], i: usize }
+
+fn next_of(it: &mut It) -> Option<&u32> from copy it {
+    if it.i >= it.xs.len() { return Option.None; }
+    let r = &it.xs[it.i];
+    it.i = it.i + 1;
+    return Option.Some(r);
+}
+
+fn weakened(xs: &[u32]) -> u32 {
+    let g: fn(&mut It) -> Option<&u32> = next_of;
+    let mut it = It.{ xs: xs, i: 0 };
+    let a = g(&mut it).unwrap();
+    let b = g(&mut it).unwrap(); //~ ERROR E0501
+    return *a + *b;
+}
+
+fn param(f: fn(&mut It) -> Option<&u32>, xs: &[u32]) -> u32 {
+    let mut it = It.{ xs: xs, i: 0 };
+    let a = f(&mut it).unwrap();
+    it.i = 0; //~ ERROR E0501
+    return *a;
+}
+
+// fine: `from copy`, the results borrow `xs`, not `it`
+fn direct(xs: &[u32]) -> u32 {
+    let mut it = It.{ xs: xs, i: 0 };
+    let a = next_of(&mut it).unwrap();
+    let b = next_of(&mut it).unwrap();
+    return *a + *b;
+}

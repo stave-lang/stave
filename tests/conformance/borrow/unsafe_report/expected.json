@@ -1,0 +1,10 @@
+{"file":"src/main.stv","line":11,"col":1,"fn":"main.Addr","kind":"trait","obligation":"implementers return a valid address"}
+{"file":"src/main.stv","line":13,"col":5,"fn":"main.Addr.raw","kind":"fn","obligation":"the caller keeps the Slot alive while using the result"}
+{"file":"src/main.stv","line":18,"col":1,"fn":"main.Slot","kind":"impl","obligation":"bits is the address of a live Slot"}
+{"file":"src/main.stv","line":20,"col":5,"fn":"main.Slot.raw","kind":"fn","obligation":"the caller keeps the Slot alive while using the result"}
+{"file":"src/main.stv","line":24,"col":9,"fn":"main.Slot.peek","kind":"fn","obligation":"v was written before"}
+{"file":"src/main.stv","line":28,"col":17,"fn":"main.read_raw","kind":"expr","obligation":"p is valid for reads: caller passes &x as *const u8"}
+{"file":"src/main.stv","line":32,"col":1,"fn":"main.say","kind":"fn","obligation":"s is NUL-terminated"}
+{"file":"src/main.stv","line":33,"col":5,"fn":"main.say","kind":"block","obligation":"the caller guarantees s is NUL-terminated"}
+{"file":"src/main.stv","line":33,"col":72,"fn":"main.say","kind":"extern-call","obligation":"the caller guarantees s is NUL-terminated"}
+{"file":"src/main.stv","line":39,"col":5,"fn":"main.main","kind":"block","obligation":"single-threaded program: nothing else touches CALLS"}

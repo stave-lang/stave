@@ -1,0 +1,6 @@
+name = "manifest_kind"
+kind = "exe" #~ ERROR E1002
+version = "0.1.0"
+
+[dependencies]
+gone = { path = "nowhere" } #~ ERROR E1002

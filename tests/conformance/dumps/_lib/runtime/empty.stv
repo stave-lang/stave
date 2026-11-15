@@ -1,0 +1,3 @@
+// Stand-in runtime for the dump goldens: intentionally empty. `_lib` is a Stave
+// library directory (`STAVE_STD_DIR=tests/conformance/dumps/_lib`), so `stave check --dump` and the
+// in-process golden test build the cases with the same pinned std.

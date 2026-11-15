@@ -1,0 +1,6 @@
+//~ ERROR E0108
+// A program (here a single file) built without `fn main` in its root module: E0108 at
+// offset 0. `stave check` does not need `main` (CHECK-ONLY tests may omit it).
+fn helper() -> i32 {
+    return 0;
+}

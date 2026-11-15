@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// A fn value may be a local, a param, and a field of a view struct; a fn value
+// returned from a view param with `from` is fine.
+view struct Pair {
+    f: fn(u32) -> u32,
+    g: fn(u32) -> u32,
+}
+
+fn pick(p: Pair, first: bool) -> fn(u32) -> u32 from p {
+    return if first then p.f else p.g;
+}
+
+fn use_pair(k: u32) -> u32 {
+    let a = fn(x: u32) -> u32 { return x + k; };
+    let b = fn(x: u32) -> u32 { return x * k; };
+    let p = Pair.{ f: a, g: b };
+    let f = pick(p, true);
+    return f(1);
+}

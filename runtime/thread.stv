@@ -1,0 +1,247 @@
+// runtime.thread: CPU threads.
+//
+// A thread runs one fn value `fn()` (a closure: code + environment, contracts/checked-ir.md
+// "Closures") on its own mapping, laid out bottom to top as
+//     [guard: config.GUARD, PROT_NONE][stack: config.RUN_STACK][altstack: config.ALTSTACK][record]
+// The record (one page) holds the futex word `tid`, the fn value, and the mapping. The thread
+// is created with clone3 (or `clone` where clone3 is ENOSYS: qemu-user), sharing the address
+// space, files, and signal handlers (runtime.os.spawn_thread); the kernel writes its tid into
+// `tid` and, when it exits, clears `tid` and wakes the futex: that is the join. The child starts
+// in `entry` (through the compiler's `__stave_thread_start` stub and the `thread_clone`
+// intrinsic), installs its alternate signal stack, runs the fn value, and returns; the intrinsic
+// then makes the `exit` system call.
+//
+// Thread ids: main is 0; each created thread takes the next number, process-wide
+// (`state.next_thread`, atomic). The mapping is entered in the registry (`state.reg`), so the
+// panic report finds a thread's id from a stack address and the signal handler finds its guard.
+//
+// Entry points fixed by the compiler (contracts/intrinsics.md "Paths fixed by the compiler"):
+// `entry` (thread start), `scope_spawn` and `scope_join` (the lowering of `scope { spawn { } }`:
+// the scope holds a `usize` list head, 0 = empty; each `spawn` body is a closure added to it by
+// `scope_spawn`; `scope_join` runs at every exit of the scope block). std.thread uses `start` /
+// `join` / `scope_spawn` / `scope_join`.
+//
+// If a thread cannot be created (no memory for the mapping, the guard pages cannot be
+// protected, clone failing: EAGAIN) the program panics with "cannot create thread". Exception:
+// the IR interpreter has one thread and makes clone fail with ENOSYS (native kernels have
+// clone); there the fn value runs on the calling thread before `start` returns, which gives the
+// same result for `join`, `par_for`, and `scope` (their bodies only communicate through results
+// the caller reads after the join).
+
+import runtime.os;
+import runtime.state;
+import runtime.atomic;
+import runtime.panic;
+import runtime.config;
+
+struct Thread {
+    // kernel tid while the thread runs; 0 once it has exited (futex word, CLONE_CHILD_CLEARTID)
+    tid: u32,
+    pad: u32,
+    // the fn value to run: (code, environment)
+    code: usize,
+    env: usize,
+    map: usize,
+    map_len: usize,
+    alt: usize,
+    alt_len: usize,
+    // registry entry (state.MAX_THREADS: none)
+    entry: usize,
+    // next record of a scope's list (0: end)
+    next: usize,
+}
+
+fn round_up(x: usize, a: usize) -> usize {
+    return (x + a - 1) / a * a;
+}
+
+// A fn value's two words (ASSUMPTION A5, runtime/README.md: a fn value is (code, environment)).
+fn fn_words(f: fn()) -> [usize; 2] {
+    return unsafe("a fn value is two words, code then environment") *(&f as *const fn() as *const [usize; 2]);
+}
+
+// Starts a thread running f; returns its handle for `join` (0 if f already ran here).
+pub unsafe("f and everything it captures stay valid until join(handle) returns")
+fn start(f: fn()) -> usize {
+    let page = state.page_size();
+    let guard = round_up(config.GUARD, page);
+    let size = round_up(config.RUN_STACK, page);
+    let alt = round_up(config.ALTSTACK, page);
+    let len = guard + size + alt + page;
+    let prot = os.PROT_READ | os.PROT_WRITE;
+    let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS | os.MAP_NORESERVE | os.MAP_STACK;
+    let m = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, len, prot, flags, -1, 0);
+    if m < 0 {
+        cannot_create();
+    }
+    let base = m as% usize;
+    let g = unsafe("the guard pages are part of the fresh mapping and hold no objects") os.mprotect(base, guard, os.PROT_NONE);
+    if g < 0 {
+        // a thread is never run without its guard
+        let u = unsafe("the mapping is fresh: no object and no thread uses it") os.munmap(base, len);
+        cannot_create();
+    }
+    let w = fn_words(f);
+    let rec = (base + guard + size + alt) as *mut Thread;
+    let st = state.get();
+    let idp = unsafe("st is runtime.state.STATE; only the field address is taken") &mut (*st).next_thread as *mut u64;
+    let id = unsafe("idp is the thread counter of the state block") atomic.fetch_add_u64(idp, 1) + 1;
+    let e = register(base, base + len, base + guard, id);
+    unsafe("rec is the record page of the fresh mapping; no thread uses it yet") {
+        rec.write(Thread.{
+            tid: 0,
+            pad: 0,
+            code: w[0],
+            env: w[1],
+            map: base,
+            map_len: len,
+            alt: base + guard + size,
+            alt_len: alt,
+            entry: e,
+            next: 0,
+        });
+    }
+    let tidp = unsafe("rec is the record (above)") &mut (*rec).tid as *mut u32;
+    let r = unsafe("[base + guard, + size) is the fresh stack; tid lives in the record until join unmaps it; entry reads rec") os.spawn_thread(base + guard, size, tidp, rec as usize);
+    if r < 0 {
+        unsafe("the thread was not created: nothing else uses the mapping") { release(rec); }
+        if r != -os.ENOSYS {
+            cannot_create();
+        }
+        // the IR interpreter (one thread): run f here
+        f();
+        return 0;
+    }
+    return rec as usize;
+}
+
+// The panic of a failed thread creation (kind Assert at the user site, message on the next line).
+fn cannot_create() -> never {
+    let msg = "cannot create thread";
+    panic.abort(unsafe("&str and &[u8] are both (data pointer, byte length)") *(&msg as *const &str as *const &[u8]));
+}
+
+// Waits until the thread of handle h has exited, then frees its mapping (h = 0: nothing).
+pub unsafe("h came from start and is joined once")
+fn join(h: usize) {
+    if h == 0 { return; }
+    let rec = h as *mut Thread;
+    let tidp = unsafe("rec is a live record (caller)") &mut (*rec).tid as *mut u32;
+    loop {
+        let t = unsafe("tidp is the record's futex word") atomic.load_u32(tidp as *const u32);
+        if t == 0 { break; }
+        // not FUTEX_PRIVATE: the kernel's exit-time wake of CLONE_CHILD_CLEARTID is a shared one
+        let r = unsafe("tidp is a valid futex word") os.futex(tidp, os.FUTEX_WAIT, t, 0, 0, 0);
+    }
+    unsafe("the thread has exited: nothing else uses the record or its mapping") { release(rec); }
+}
+
+unsafe("rec is the record of a mapping no thread uses any more") fn release(rec: *mut Thread) {
+    let e = unsafe("caller obligation") (*rec).entry;
+    let base = unsafe("caller obligation") (*rec).map;
+    let len = unsafe("caller obligation") (*rec).map_len;
+    unregister(e);
+    let r = unsafe("the mapping holds no live object (caller)") os.munmap(base, len);
+}
+
+// ---- `scope { spawn { } }` (compiler-emitted calls) ----
+
+// Starts f on a new thread and adds it to the scope list `list`.
+pub unsafe("f's captures stay valid until scope_join(list) returns (the lowering calls it at every exit of the scope)")
+fn scope_spawn(list: &mut usize, f: fn()) {
+    let h = unsafe("caller obligation") start(f);
+    if h == 0 { return; }
+    let rec = h as *mut Thread;
+    unsafe("rec is the live record start returned; only the spawning thread links it") { (*rec).next = *list; }
+    *list = h;
+}
+
+// Joins every thread of the scope list (newest first) and empties it.
+pub fn scope_join(list: &mut usize) {
+    let mut h = *list;
+    while h != 0 {
+        let rec = h as *mut Thread;
+        let next = unsafe("h is a live record of this list") (*rec).next;
+        unsafe("h came from spawn and is in this list once") { join(h); }
+        h = next;
+    }
+    *list = 0;
+}
+
+// ---- thread start (called by `__stave_thread_start`) ----
+
+pub fn entry(arg: usize) -> usize {
+    let rec = arg as *const Thread;
+    let alt = unsafe("arg is the record start passed to spawn_thread") (*rec).alt;
+    let alt_len = unsafe("arg is the record start passed to spawn_thread") (*rec).alt_len;
+    let ok = panic.set_altstack(alt, alt_len);
+    let code = unsafe("arg is the record start passed to spawn_thread") (*rec).code;
+    let env = unsafe("arg is the record start passed to spawn_thread") (*rec).env;
+    let w: [usize; 2] = [code, env];
+    let f = unsafe("w holds the two words of the fn value start was given") *(&w as *const [usize; 2] as *const fn());
+    f();
+    return 0;
+}
+
+// ---- CPUs ----
+
+// The number of CPUs in this process's sched_getaffinity mask (at least 1), cached.
+pub fn cpu_count() -> usize {
+    let st = state.get();
+    let np = unsafe("st is runtime.state.STATE; only the field address is taken") &mut (*st).ncpu as *mut u64;
+    let c = unsafe("np is the CPU count word of the state block") atomic.load_u64(np as *const u64);
+    if c != 0 { return c as usize; }
+    let mut mask: [u64; 16] = [0u64; 16];
+    let r = unsafe("mask is 128 writable bytes") os.sched_getaffinity(0, 128, &mut mask as *mut [u64; 16] as *mut u8);
+    let mut n: u64 = 0;
+    if r > 0 {
+        let words = ((r as% usize) + 7) / 8;
+        for i in 0..words {
+            if i < 16 { n = n + (mask[i].popcount() as u64); }
+        }
+    }
+    if n == 0 { n = 1; }
+    let old = unsafe("np is the CPU count word of the state block") atomic.swap_u64(np, n);
+    return n as usize;
+}
+
+// ---- registry (state.reg) ----
+
+fn reg_lock() -> *mut u32 {
+    let st = state.get();
+    return unsafe("st is runtime.state.STATE; only the field address is taken") &mut (*st).reg_lock as *mut u32;
+}
+
+// Enters [lo, hi) (guard [lo, guard_hi)) with thread id `id`; returns the entry or MAX_THREADS
+// when the registry is full (the thread then reports id 0 and its overflows are plain faults).
+fn register(lo: usize, hi: usize, guard_hi: usize, id: u64) -> usize {
+    let st = state.get();
+    let w = reg_lock();
+    let mut found = state.MAX_THREADS;
+    unsafe("w is the registry lock word in the state block") { atomic.lock(w); }
+    for e in 0..state.MAX_THREADS {
+        let k = e * state.REG_WORDS;
+        let used = unsafe("the registry lock is held") (*st).reg[k];
+        if used == 0 {
+            unsafe("the registry lock is held; lo is written last (readers skip lo == 0)") {
+                (*st).reg[k + 1] = hi;
+                (*st).reg[k + 2] = guard_hi;
+                (*st).reg[k + 3] = id as usize;
+                (*st).reg[k] = lo;
+            }
+            found = e;
+            break;
+        }
+    }
+    unsafe("this thread holds the registry lock") { atomic.unlock(w); }
+    return found;
+}
+
+fn unregister(e: usize) {
+    if e >= state.MAX_THREADS { return; }
+    let st = state.get();
+    let w = reg_lock();
+    unsafe("w is the registry lock word in the state block") { atomic.lock(w); }
+    unsafe("the registry lock is held") { (*st).reg[e * state.REG_WORDS] = 0; }
+    unsafe("this thread holds the registry lock") { atomic.unlock(w); }
+}

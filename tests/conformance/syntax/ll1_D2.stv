@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// D2: after a cast, a `<` following the type name always opens type arguments.
+import std.vec;
+
+fn bad(x: u32, y: usize) -> bool {
+    return x as usize < y; //~ ERROR E0011
+}
+
+fn good(x: u32, y: usize) -> bool {
+    return (x as usize) < y;
+}
+
+fn generic_cast(v: vec.Vec<u8>) -> vec.Vec<u8> {
+    return v as vec.Vec<u8>;
+}

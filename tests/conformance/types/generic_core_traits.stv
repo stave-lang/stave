@@ -1,0 +1,53 @@
+//~ CHECK-ONLY
+// Traits: inherent and trait impls, method lookup without import, a qualified
+// call `Trait.m(x)`, auto-ref and auto-deref of receivers, user `Add` used by `+` and `WrapAdd` by
+// `+%`, `Display` used by an f-string.
+import std.io;
+import std.string;
+
+struct V2 { pub x: i32, pub y: i32 }
+
+impl Copy for V2 {}
+
+impl Add for V2 {
+    fn add(self, rhs: V2) -> V2 { return V2.{ x: self.x + rhs.x, y: self.y + rhs.y }; }
+}
+
+impl WrapAdd for V2 {
+    fn wrap_add(self, rhs: V2) -> V2 { return V2.{ x: self.x +% rhs.x, y: self.y +% rhs.y }; }
+}
+
+impl Display for V2 {
+    fn fmt<W: Write>(&self, w: &mut W) {
+        w.write_str("v2");
+    }
+}
+
+trait Area { fn area(&self) -> i32; }
+
+impl Area for V2 {
+    fn area(&self) -> i32 { return self.x * self.y; }
+}
+
+impl V2 {
+    pub fn new(x: i32, y: i32) -> V2 { return V2.{ x: x, y: y }; }
+    pub fn grow(&mut self) { self.x = self.x + 1; }
+}
+
+fn twice<T: Area>(t: &T) -> i32 {
+    return t.area() * 2;
+}
+
+fn main() -> i32 {
+    let a = V2.new(1, 2);
+    let b = a + V2.new(3, 4);
+    let c = a +% b;
+    let mut d = b;
+    d.grow();
+    let r = &d;
+    let n: i32 = r.area() + Area.area(&a) + twice(&c);
+    io.print(f"a = {a}\n");
+    let s: string.String = f"{d}";
+    let bad = a - b; //~ ERROR E0206
+    return n;
+}

@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// Dump golden: the middle item has a syntax error and is dropped.
+fn good() -> i32 {
+    return 1;
+}
+
+fn bad() -> i32 {
+    let = 2; //~ ERROR E0004
+    return 0;
+}
+
+fn main() -> i32 {
+    return good();
+}

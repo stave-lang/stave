@@ -1,0 +1,31 @@
+//~ CHECK-ONLY
+// E0013: an empty obligation `unsafe("")` is the same error
+// as a missing one, at every unsafe site: block, expression, fn, method, trait, impl. The item
+// is dropped (contracts/parse-errors.md "Empty obligation"), so it is never in the inventory.
+fn block_form(p: *mut i32) {
+    unsafe("") { *p = 1; } //~ ERROR E0013
+}
+
+fn expr_form(p: *const i32) -> i32 {
+    return unsafe("") *p; //~ ERROR E0013
+}
+
+unsafe("") fn fn_form() { } //~ ERROR E0013
+
+unsafe("") trait TraitForm { } //~ ERROR E0013
+
+trait Marker { }
+
+struct S { pub v: u32 }
+
+unsafe("") impl Marker for S { } //~ ERROR E0013
+
+impl S {
+    pub unsafe("") fn method_form(&self) { } //~ ERROR E0013
+}
+
+// fine: a non-empty obligation, and an empty string outside `unsafe(..)`
+fn ok(p: *const i32) -> i32 {
+    let s: &str = "";
+    return unsafe("p is valid for reads") *p;
+}

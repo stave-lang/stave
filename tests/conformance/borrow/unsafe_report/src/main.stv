@@ -1,0 +1,41 @@
+//~ CHECK-ONLY
+// `stave unsafe-report --json` golden: expected.json lists every site in
+// (file, offset) order: the `read_raw` expression of LANG.md §5, plus sites of every other kind (unsafe trait
+// method signature, trait impl method, and inherent method included).
+extern "C" {
+    fn puts(s: *const u8) -> i32;
+}
+
+static mut CALLS: u64 = 0;
+
+unsafe("implementers return a valid address") trait Addr {
+    fn bits(&self) -> usize;
+    unsafe("the caller keeps the Slot alive while using the result") fn raw(&self) -> usize;
+}
+
+struct Slot { pub v: u64 }
+
+unsafe("bits is the address of a live Slot") impl Addr for Slot {
+    fn bits(&self) -> usize { return 8; }
+    unsafe("the caller keeps the Slot alive while using the result") fn raw(&self) -> usize { return 0; }
+}
+
+impl Slot {
+    pub unsafe("v was written before") fn peek(&self) -> u64 { return self.v; }
+}
+
+fn read_raw(p: *const u8) -> u8 {
+    let b: u8 = unsafe("p is valid for reads: caller passes &x as *const u8") *p;
+    return b;
+}
+
+unsafe("s is NUL-terminated") fn say(s: *const u8) {
+    unsafe("the caller guarantees s is NUL-terminated") { let n: i32 = puts(s); }
+}
+
+fn main() -> i32 {
+    let x: u8 = 0;
+    let b = read_raw(&x as *const u8);
+    unsafe("single-threaded program: nothing else touches CALLS") { CALLS = CALLS + 1; }
+    return b as i32;
+}

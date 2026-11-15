@@ -1,0 +1,8 @@
+//~ CHECK-ONLY
+// A fn value is a view and cannot be passed to `forget`.
+import std.mem;
+
+fn forget_closure(k: u32) {
+    let f = fn() -> u32 { return k; };
+    mem.forget(f); //~ ERROR E0412
+}

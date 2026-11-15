@@ -1,0 +1,27 @@
+//~ STDOUT threads_par_for_run.stdout
+// thread.par_for calls body(i) for every i in lo..hi, concurrently, in any order; the
+// body shares a std.sync.Mutex (Sync) by reference. An empty range calls nothing. with_lock runs
+// a closure under the lock.
+import std.io;
+import std.sync;
+import std.thread;
+
+fn main() -> i32 {
+    let m = sync.Mutex::<u64>.new(0);
+    let hits = sync.Mutex::<u64>.new(0);
+    thread.par_for(0, 10000, fn(i: usize) {
+        let mut g = m.lock();
+        let v = g.get_mut();
+        *v = *v + (i as u64);
+        let n = hits.with_lock(fn(h: &mut u64) -> u64 { *h = *h + 1; return *h; });
+    });
+    thread.par_for(5, 5, fn(i: usize) {
+        let mut g = hits.lock();
+        let v = g.get_mut();
+        *v = *v + 1000000;
+    });
+    let sum = m.into_inner();
+    let n = hits.into_inner();
+    io.print(f"{sum} {n}\n");
+    return 0;
+}

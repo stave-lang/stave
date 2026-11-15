@@ -1,0 +1,3 @@
+//~ CHECK-ONLY
+// Fn types have no `from` clause.
+fn takes(g: fn(&i32) -> &i32 from x) { } //~ ERROR E0004

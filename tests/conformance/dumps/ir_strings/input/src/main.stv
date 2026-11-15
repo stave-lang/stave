@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// ir golden: string literals print as `s` ids (deduplicated, ranked by (xxHash32, bytes)).
+import std.io;
+
+fn greet(loud: bool) {
+    if loud {
+        io.print("HELLO\n");
+    } else {
+        io.print("hello\n");
+    }
+    io.print("hello\n");
+    io.print("");
+}
+
+fn main() -> i32 {
+    greet(true);
+    return 0;
+}

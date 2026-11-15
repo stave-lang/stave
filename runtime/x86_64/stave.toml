@@ -1,0 +1,4 @@
+# Raw Linux system calls on x86-64: a built-in package, bound as `arch` by runtime/stave.toml for
+# every x86-64 target. Its one module is `runtime_x86_64.sys`, imported only by `runtime.os`.
+name = "runtime_x86_64"
+kind = "lib"

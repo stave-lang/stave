@@ -1,0 +1,5 @@
+import b; //~ ERROR E0102
+
+pub fn one() -> i32 {
+    return b.two();
+}

@@ -1,0 +1,55 @@
+//~ STDOUT std_cell_iter_run.stdout
+// std.cell (Cell, RefCell with Ref / RefMut views), std.sync.Mutex (guard view, with_lock),
+// std.iter (SliceIter driving `for`, map, zip) on one thread.
+import std.io;
+import std.cell;
+import std.iter;
+import std.sync;
+
+fn sq(x: &u32) -> u32 {
+    return *x * *x;
+}
+
+fn main() -> i32 {
+    let c = cell.Cell::<u32>.new(1);
+    c.set(c.get() + 41);
+    let cv = c.get();
+    let r = cell.RefCell::<u64>.new(5);
+    let mut b1: u64 = 0;
+    let mut b2: u64 = 0;
+    {
+        let x = r.borrow();
+        let y = r.borrow();
+        b1 = *x.get() + *y.get();
+    }
+    {
+        let mut w = r.borrow_mut();
+        let v = w.get_mut();
+        *v = *v * 10;
+    }
+    b2 = r.into_inner();
+    let m = sync.Mutex::<u32>.new(3);
+    {
+        let mut g = m.lock();
+        let v = g.get_mut();
+        *v = *v + 1;
+    }
+    let got = m.with_lock(fn(v: &mut u32) -> u32 { *v = *v * 2; return *v; });
+    let xs: [u32; 4] = [1, 2, 3, 4];
+    let mut s: u32 = 0;
+    for x in iter.iter(&xs) {
+        s = s + *x;
+    }
+    let mut q: u32 = 0;
+    for y in iter.iter(&xs).map(sq) {
+        q = q + y;
+    }
+    let ys: [u32; 3] = [10, 20, 30];
+    let mut z: u32 = 0;
+    for p in iter.zip(&xs, &ys) {
+        let (a, bb) = p;
+        z = z + *a * *bb;
+    }
+    io.print(f"{cv} {b1} {b2} {got} {s} {q} {z}\n");
+    return 0;
+}

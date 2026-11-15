@@ -1,0 +1,32 @@
+// std.io path functions reject a path holding a NUL byte with `Error.InvalidInput` instead of
+// opening the part before it ("data.txt\0junk" is not "data.txt").
+import std.io;
+
+fn report(path: &str) {
+    match io.read_file(path) {
+        Result.Ok(b) => {
+            let n = b.len();
+            io.print(f"ok {n}\n");
+        }
+        Result.Err(e) => { io.print(f"err {e}\n"); }
+    }
+}
+
+fn main() -> i32 {
+    report("data.txt");
+    report("data.txt\0junk");
+    report("\0");
+    report("missing.txt");
+    match io.read_to_string("data.txt\0") {
+        Result.Ok(s) => { io.print("ok\n"); }
+        Result.Err(e) => { io.print(f"err {e}\n"); }
+    }
+    match io.read_to_string("data.txt") {
+        Result.Ok(s) => {
+            let n = s.len();
+            io.print(f"ok {n}\n");
+        }
+        Result.Err(e) => { io.print(f"err {e}\n"); }
+    }
+    return 0;
+}

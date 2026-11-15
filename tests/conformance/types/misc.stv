@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// Ranges with same-type ends, type aliases, `import a.b as c`, loop/break/continue.
+import std.mem as m;
+
+type Count = u32;
+
+fn count(xs: &[u32]) -> Count {
+    let mut n: Count = 0;
+    for i in 0..xs.len() {
+        if xs[i] == 0 { continue; }
+        n = n + 1;
+    }
+    for j in 1u8..=3 { }
+    let r = 0u32..10u64; //~ ERROR E0201
+    loop {
+        if n > 3 { break; }
+        n = n + 1;
+    }
+    let s: usize = m.type_size::<u64>();
+    return n;
+}
+
+fn main() -> i32 {
+    break; //~ ERROR E0201
+    return 0;
+}

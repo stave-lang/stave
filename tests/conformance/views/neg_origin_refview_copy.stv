@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// Origin table (LANG.md §3), row "`&V` / `&mut V`, V a view", column `from copy x`: the result inherits
+// V's origins and may outlive the borrow of the view object (the iterator `next` shape), but not
+// the data V borrows.
+import std.string;
+
+view struct Lexer { src: &str, pos: usize }
+
+fn lexer(src: &str) -> Lexer from src {
+    return Lexer.{ src: src, pos: 0 };
+}
+
+fn text_copy(l: &Lexer) -> &str from copy l {
+    return l.src;
+}
+
+fn conflict() -> usize {
+    let mut s = string.String.from_str("ab");
+    let mut l = lexer(s.as_str());
+    let t = text_copy(&l);
+    l.pos = 1;
+    s.push_str("c"); //~ ERROR E0501
+    return t.len();
+}
+
+// fine: writing the view object while the result lives
+fn outlives(s: &str) -> usize {
+    let mut l = lexer(s);
+    let t = text_copy(&l);
+    l.pos = 1;
+    return t.len() + l.pos;
+}

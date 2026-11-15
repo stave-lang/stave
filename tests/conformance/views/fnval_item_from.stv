@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// A fn item with `from a` coerces to a fn value (its `from` set is a subset of its
+// ref/view params), as an argument and as a typed local.
+fn first_of(a: &u32, b: &u32) -> &u32 from a {
+    return a;
+}
+
+fn apply(f: fn(&u32, &u32) -> &u32, a: &u32, b: &u32) -> u32 {
+    let r = f(a, b);
+    return *r;
+}
+
+fn use_items() -> u32 {
+    let x: u32 = 1;
+    let y: u32 = 2;
+    let f: fn(&u32, &u32) -> &u32 = first_of;
+    let r = f(&x, &y);
+    return apply(first_of, &x, &y) + *r;
+}

@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// ir golden: value `if then else`, chained; the expression value is the join's first
+// param.
+fn sign(x: i64) -> i64 {
+    let s: i64 = if x < 0 then -1 else if x == 0 then 0 else 1;
+    return s;
+}
+
+fn main() -> i32 {
+    let a = sign(-7);
+    return if a == -1 then 0 else 1;
+}

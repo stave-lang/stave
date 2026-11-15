@@ -1,0 +1,11 @@
+//~ CHECK-ONLY
+// A closure's own parameters are its locals: returning a borrow of one is E0512. A borrow of a
+// capture may be returned (the closure value holds its loan).
+fn main() -> i32 {
+    let a: u32 = 1;
+    let f = fn(x: u32) -> &u32 { return &x; }; //~ ERROR E0512
+    let g = fn() -> &u32 { return &a; };
+    let r: &u32 = g();
+    let v: u32 = *r;
+    return 0;
+}

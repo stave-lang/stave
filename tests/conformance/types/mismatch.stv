@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// No implicit numeric conversion (E0201): the message names both types and the fix is an
+// explicit `as`.
+fn add(a: i32, b: i64) -> i64 {
+    let bad = a + b; //~ ERROR E0201
+    return a as i64 + b;
+}
+
+fn pass(x: u8) -> u16 {
+    return x; //~ ERROR E0201
+}
+
+fn arg(x: u64) { }
+
+fn main() -> i32 {
+    let t: u32 = 7;
+    arg(t); //~ ERROR E0201
+    let s: bool = 1; //~ ERROR E0201
+    let f: f64 = 2; //~ ERROR E0201
+    return 0;
+}

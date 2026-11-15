@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// D3: inside type arguments `>>`, `>=`, `>>=` are split and their first `>` closes the list.
+fn nested(o: Option<Option<i32>>) -> Option<Option<i32>> {
+    let v: Option<Option<i32>>= o;
+    let w: Option<i32>= Option.None;
+    return v;
+}
+
+// outside type arguments `>>`, `>=`, `>>=` stay operators
+fn shifts(a: u32, b: u32) -> u32 {
+    let mut x: u32 = a >> b;
+    x >>= 1;
+    let c: bool = a >= b;
+    return x;
+}

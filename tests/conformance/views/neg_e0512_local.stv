@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// E0512: a returned value never borrows a local (it is dropped at the return).
+import std.string;
+
+view struct Lexer { src: &str, pos: usize }
+
+fn lexer(src: &str) -> Lexer from src {
+    return Lexer.{ src: src, pos: 0 };
+}
+
+fn local(x: &u32) -> &u32 from x {
+    let y: u32 = *x + 1;
+    return &y; //~ ERROR E0512
+}
+
+fn local_view(s: &str) -> Lexer from s {
+    let owned = string.String.from_str(s);
+    return lexer(owned.as_str()); //~ ERROR E0512
+}

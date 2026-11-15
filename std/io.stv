@@ -1,0 +1,137 @@
+// std.io: console output and whole-file reads, over runtime.os.
+//
+// `print` / `eprint` write their bytes to fd 1 / fd 2 at once (no buffering, so output order
+// with a panic report is the program order). They take `&str`: an f-string argument is an
+// owned `string.String`, borrowed automatically and passed as `&str` through the String → str
+// deref rule (std/string.stv).
+
+import runtime.os;
+import std.core;
+import std.mem;
+import std.vec;
+import std.string;
+
+pub enum Error {
+    NotFound,
+    PermissionDenied,
+    IsDirectory,
+    InvalidData,
+    // a path holding a NUL byte (a kernel path ends at its first NUL)
+    InvalidInput,
+    Os(i32),
+}
+
+impl core.Copy for Error {}
+
+impl core.Display for Error {
+    fn fmt<W: core.Write>(&self, w: &mut W) {
+        match self {
+            Error.NotFound => { w.write_str("not found"); }
+            Error.PermissionDenied => { w.write_str("permission denied"); }
+            Error.IsDirectory => { w.write_str("is a directory"); }
+            Error.InvalidData => { w.write_str("invalid UTF-8 data"); }
+            Error.InvalidInput => { w.write_str("path contains a NUL byte"); }
+            Error.Os(_) => { w.write_str("os error"); }
+        }
+    }
+}
+
+fn error_of(r: isize) -> Error {
+    let e = -r;
+    if e == os.ENOENT { return Error.NotFound; }
+    if e == os.EACCES { return Error.PermissionDenied; }
+    if e == os.EISDIR { return Error.IsDirectory; }
+    return Error.Os(e as% i32);
+}
+
+pub fn print(s: &str) {
+    let r = write_all(os.STDOUT, mem.str_bytes(s));
+}
+
+pub fn eprint(s: &str) {
+    let r = write_all(os.STDERR, mem.str_bytes(s));
+}
+
+// Writes all of b, retrying partial writes and EINTR.
+pub fn write_all(fd: i32, b: &[u8]) -> Result<(), Error> {
+    let p = mem.slice_ptr(b);
+    let n = b.len();
+    let mut done: usize = 0;
+    while done < n {
+        let r = unsafe("p+done..p+n lies inside b") os.write(fd, mem.add(p, done), n - done);
+        if r == -os.EINTR { continue; }
+        if r < 0 { return Result.Err(error_of(r)); }
+        done = done + (r as% usize);
+    }
+    return Result.Ok(());
+}
+
+// A Write sink on a file descriptor (unbuffered).
+pub struct FdWriter {
+    pub fd: i32,
+}
+
+impl core.Write for FdWriter {
+    fn write_str(&mut self, s: &str) {
+        let r = write_all(self.fd, mem.str_bytes(s));
+    }
+}
+
+pub fn stdout() -> FdWriter {
+    return FdWriter.{ fd: os.STDOUT };
+}
+
+pub fn stderr() -> FdWriter {
+    return FdWriter.{ fd: os.STDERR };
+}
+
+const READ_CHUNK: usize = 65536;
+
+// Reads fd to its end.
+pub fn read_all(fd: i32) -> Result<vec.Vec<u8>, Error> {
+    let mut v = vec.Vec::<u8>.new();
+    loop {
+        v.reserve(READ_CHUNK);
+        let room = v.capacity() - v.len();
+        let r = unsafe("spare_ptr..spare_ptr+room is the vector's uninitialized capacity") os.read(fd, v.spare_ptr(), room);
+        if r == -os.EINTR { continue; }
+        if r < 0 { return Result.Err(error_of(r)); }
+        if r == 0 { break; }
+        let n = v.len() + (r as% usize);
+        unsafe("the kernel initialized r more bytes after len, within capacity") { v.set_len(n); }
+    }
+    return Result.Ok(v);
+}
+
+// Opens path read-only (relative to the working directory). A path with a NUL byte is
+// `InvalidInput`: the kernel would see only the part before it.
+fn open_read(path: &str) -> Result<i32, Error> {
+    let pb = mem.str_bytes(path);
+    for i in 0..pb.len() {
+        if pb[i] == 0 { return Result.Err(Error.InvalidInput); }
+    }
+    let mut z = vec.Vec::<u8>.with_capacity(pb.len() + 1);
+    z.extend_from_slice(pb);
+    z.push(0);
+    let zp = mem.slice_ptr(z.as_slice());
+    let fd = unsafe("z is NUL-terminated and alive during the call") os.openat(os.AT_FDCWD, zp, os.O_RDONLY | os.O_CLOEXEC, 0);
+    if fd < 0 { return Result.Err(error_of(fd)); }
+    return Result.Ok(fd as% i32);
+}
+
+// The whole file at path (openat, read, close).
+pub fn read_file(path: &str) -> Result<vec.Vec<u8>, Error> {
+    let fd = open_read(path)?;
+    let r = read_all(fd);
+    let c = os.close(fd);
+    return r;
+}
+
+// The whole file at path as UTF-8 text.
+pub fn read_to_string(path: &str) -> Result<string.String, Error> {
+    let bytes = read_file(path)?;
+    return match string.String.from_utf8(bytes) {
+        Result.Ok(s) => Result.Ok(s),
+        Result.Err(_) => Result.Err(Error.InvalidData),
+    };
+}

@@ -1,0 +1,4 @@
+//~ CHECK-ONLY
+fn helper(x: i32) -> i32 { //~ WARNING E1205
+    return x;
+}

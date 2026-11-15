@@ -1,0 +1,11 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: OutOfMemory at vec_oom_mul.stv:9:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// A Vec capacity whose size in bytes overflows usize is an allocation failure: OutOfMemory at
+// the caller, not an Overflow panic inside std.
+import std.vec;
+
+fn main() -> i32 {
+    let v = vec.Vec::<u64>.with_capacity(0x4000_0000_0000_0000);
+    return 0;
+}

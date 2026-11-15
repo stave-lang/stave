@@ -1,0 +1,4 @@
+//~ CHECK-ONLY
+// Bracket-scan rule 1: one E0016 at an unmatched closer, and no other parse diagnostics.
+fn f() { let = ; }
+) //~ ERROR E0016

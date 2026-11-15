@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// contracts/parse-errors.md rule 2: an error inside type arguments opened after a cast type.
+fn lt_after_cast(x: u32, y: usize) -> bool {
+    return x as usize < y; //~ ERROR E0011
+}
+
+fn unclosed_type_args(x: u32) {
+    let v = x as Vec<u8 ; //~ ERROR E0011
+}

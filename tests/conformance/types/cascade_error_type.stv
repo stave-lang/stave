@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// An expression of the error type suppresses every dependent diagnostic: one error per
+// root cause.
+struct P { pub x: u32 }
+
+fn chain(p: P) -> u32 {
+    let a = p.nope; //~ ERROR E0208
+    let b: u32 = a + 1;
+    let c = a.method().other;
+    let d: bool = a;
+    let e = missing_fn(a); //~ ERROR E0101
+    let f: u8 = e * 2 + c;
+    return b;
+}
+
+fn main() -> i32 {
+    return 0;
+}

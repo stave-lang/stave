@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// E1002 case `duplicate-key`, at the second definition.
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,23 @@
+//~ CHECK-ONLY
+// Item: `pub`, `test`, and `unsafe("..")` prefixes (fn, trait, impl).
+pub fn visible() -> i32 {
+    return 1;
+}
+
+test fn checks() {
+    let x: i32 = visible();
+}
+
+unsafe("the caller passes a valid pointer") fn raw(p: *const u8) -> u8 {
+    return unsafe("the caller guarantees p is valid") *p;
+}
+
+pub unsafe("the caller passes a valid pointer") fn raw_pub(p: *const u8) -> u8 {
+    return unsafe("the caller guarantees p is valid") *p;
+}
+
+unsafe("implementers keep the invariant") trait Marker { }
+
+struct W { v: i32 }
+
+unsafe("W holds no thread-bound state") impl Marker for W { }

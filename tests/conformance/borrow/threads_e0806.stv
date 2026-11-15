@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// E0806: join / par_for / par_for_mut need a closure literal or a fn item, whose
+// captures are known; a fn-typed param passed on is rejected. A fn item is fine.
+import std.thread;
+
+fn square(i: usize) {
+    let s = i * i;
+}
+
+fn forward(body: fn(usize)) {
+    thread.par_for(0, 8, body); //~ ERROR E0806
+    thread.par_for(0, 8, square);
+}
+
+fn forward_join(a: fn() -> u32) -> u32 {
+    let (x, y) = thread.join(a, fn() -> u32 { return 1; }); //~ ERROR E0806
+    return x + y;
+}

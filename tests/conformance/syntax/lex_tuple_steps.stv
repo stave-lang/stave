@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// After a `.` token the lexer produces IntLit only: `t.0.1` is two tuple-field steps.
+// `0..n` is IntLit `..` Ident.
+fn steps(t: ((i32, i32), i32), n: usize) -> i32 {
+    let a = t.0.1;
+    let b = t.0 .0;
+    for i in 0..n { }
+    return a + b;
+}

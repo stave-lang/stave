@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// Every precedence level of the expression grammar, and unary `&&x` as two `&`.
+fn prec(a: i32, b: i32, c: bool, d: bool, x: u32) -> bool {
+    let r = a..b;
+    let ri = a..=b;
+    let o = c || d && c;
+    let eq = a == b;
+    let ne = a != b;
+    let lt = a < b;
+    let le = a <= b;
+    let gt = a > b;
+    let ge = a >= b;
+    let bits = x | x ^ x & x;
+    let sh = x << 1 >> 2 <<% 3;
+    let ad = a + b - a +% b -% a +| b -| a;
+    let mu = a * b / b % b *% a *| b;
+    let ca = a as i64 as% u8 as| u16;
+    let ch = a as? u8;
+    let fl = a as~ f32;
+    let neg = -a;
+    let not = !c;
+    let inv = ~x;
+    let de = *&a;
+    let rf = &a;
+    let mut m = 1i32;
+    let rm = &mut m;
+    let rr = &&a;
+    return o;
+}

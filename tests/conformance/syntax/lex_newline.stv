@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// A raw newline ends a string, f-string, or char literal: E0015 at the literal's start; lexing
+// resumes on the next line. (E0003, a literal reaching the end of the file, cannot carry a
+// located annotation: crates/stave-syntax/tests/lex.rs covers it.)
+fn string() {
+    let s = "no closing quote
+//~^ ERROR E0015
+    ;
+}
+
+fn fstring(n: i32) {
+    let s = f"n = {n}
+//~^ ERROR E0015
+    ;
+}
+
+fn character() {
+    let c = 'a
+//~^ ERROR E0015
+    ;
+}

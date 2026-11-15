@@ -1,0 +1,11 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: OutOfMemory at vec_oom_round.stv:9:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// A request whose page rounding overflows usize (runtime.alloc) is OutOfMemory at the caller,
+// not an Overflow panic inside the allocator.
+import std.vec;
+
+fn main() -> i32 {
+    let v = vec.Vec::<u8>.with_capacity(0xFFFF_FFFF_FFFF_FFF0);
+    return 0;
+}

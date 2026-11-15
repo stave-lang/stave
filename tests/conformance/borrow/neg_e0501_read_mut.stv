@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// Reading a place while a `&mut` loan of it is live.
+fn main() -> i32 {
+    let mut x: i32 = 1;
+    let r: &mut i32 = &mut x;
+    let y: i32 = x; //~ ERROR E0501
+    *r = 2;
+    return 0;
+}

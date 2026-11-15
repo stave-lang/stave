@@ -1,0 +1,25 @@
+//~ CHECK-ONLY
+// A name declared only by an item dropped for a syntax error resolves to an error
+// declaration; its uses get no diagnostic (no cascade). That covers dropped structs, enums,
+// fns, imports, and the methods of a dropped impl.
+struct Broken { a: i32 b: i32 } //~ ERROR E0004
+
+enum Bad { A(i32 i32) } //~ ERROR E0004
+
+fn broken() -> i32 { return 1 + ; } //~ ERROR E0004
+
+struct Thing { v: i32 }
+
+impl Thing { fn get(&self) -> { return self.v; } } //~ ERROR E0004
+
+import std.io; //~ ERROR E0004
+
+fn main() -> i32 {
+    let s: Broken = Broken.{ a: 1, b: 2 };
+    let e = Bad.A(1);
+    let n: i32 = broken();
+    let t = Thing.{ v: 1 };
+    let g: i32 = Thing.get(&t);
+    io.print("x\n");
+    return n;
+}

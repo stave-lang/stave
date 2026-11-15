@@ -1,0 +1,352 @@
+// runtime.panic: the panic report and the stack-overflow handler.
+//
+// Report: one line on fd 2, then exit_group(101):
+//     panic: <Kind> at <file>:<line>:<col> in <fn> (thread <n>)
+// `trap_msg` adds one more line holding the message (std.debug.assert).
+//
+// Compiler interface (runtime/README.md has the full contract):
+// - every trapping operation calls `trap(kind, site) -> never`: `kind` one of the KIND_* consts,
+//   `site` an index into the compiler-emitted site table (`site_table()` intrinsic, layout below);
+// - before a call from user code into a std fn that may allocate or panic at its caller
+//   (the `user_site` rule), the compiler calls `set_user_site(site)` (or stores
+//   the word directly); std passes `user_site()` as the site of OutOfMemory, Assert, Unwrap,
+//   and Bounds panics raised for its caller;
+// - the compiler's C-ABI stub `__stave_signal(sig, info, uctx)` calls `on_signal`.
+//
+// Site table (read-only data, address from `site_table()`; contracts/intrinsics.md is the source
+// of truth for both layouts), all little-endian:
+//     u64 count; then count rows of 32 bytes:
+//     +0 file: u64 address of UTF-8 bytes   +8  file_len: u32   +12 line: u32 (1-based)
+//     +16 fn: u64 address of UTF-8 bytes    +24 fn_len: u32     +28 col: u32 (1-based, bytes)
+// PC table (address from `pc_table()`): u64 count; then count rows of 16 bytes sorted by pc_lo:
+//     +0 pc_lo: u64 (first instruction of a fn)   +8 site: u32 (the fn's name token)   +12 pad
+//
+// The runtime does not depend on std: no Option, Result, traits, or std.mem helpers here.
+
+import runtime.os;
+import runtime.state;
+import runtime.config;
+import runtime.atomic;
+
+extern "stave-intrinsic" {
+    // contracts/intrinsics.md "Runtime start and traps": addresses of compiler-emitted data and
+    // of the `__stave_signal` C-ABI stub.
+    fn site_table() -> usize;
+    fn pc_table() -> usize;
+    fn signal_handler_addr() -> usize;
+}
+
+pub const KIND_BOUNDS: u32 = 0;
+pub const KIND_OVERFLOW: u32 = 1;
+pub const KIND_DIV_BY_ZERO: u32 = 2;
+pub const KIND_ASSERT: u32 = 3;
+pub const KIND_OUT_OF_MEMORY: u32 = 4;
+pub const KIND_STACK_OVERFLOW: u32 = 5;
+pub const KIND_UNWRAP: u32 = 6;
+pub const NKIND: u32 = 7;
+
+// A site the table does not hold (runtime start-up failures): printed as `<unknown>:0:0`.
+pub const SITE_NONE: u32 = 0xFFFF_FFFF;
+
+pub const EXIT_PANIC: i32 = 101;
+
+const SITE_ROW: usize = 32;
+const PC_ROW: usize = 16;
+const LINE_CAP: usize = 1024;
+
+// ---- user site word ----
+// Process-wide (runtime.state header): with several threads, a report may name the last user
+// site stored by another thread.
+pub fn set_user_site(site: u32) {
+    let st = state.get();
+    unsafe("st is runtime.state.STATE; a racy word store only affects a report's location") { (*st).user_site = site; }
+}
+
+pub fn user_site() -> u32 {
+    let st = state.get();
+    return unsafe("st is runtime.state.STATE; a racy word load only affects a report's location") (*st).user_site;
+}
+
+// CPU thread id: 0 for the thread running main, then creation order. Found from the
+// address of a local: the registry entry (runtime.state `reg`) whose range holds this stack (a
+// thread's stack mapping includes its alternate signal stack); 0 if none does.
+pub fn thread_id() -> u64 {
+    let here: u8 = 0;
+    let a = &here as *const u8 as usize;
+    let e = find_entry(a);
+    if e == state.MAX_THREADS { return 0; }
+    let st = state.get();
+    return unsafe("e < MAX_THREADS: an entry of the registry") (*st).reg[e * state.REG_WORDS + 3] as u64;
+}
+
+// The registry entry whose [lo, hi) holds address a; MAX_THREADS if none. Reads without the
+// registry lock: an entry is complete before it is published (lo is written last) and is
+// removed only after its thread has exited.
+fn find_entry(a: usize) -> usize {
+    let st = state.get();
+    for e in 0..state.MAX_THREADS {
+        let k = e * state.REG_WORDS;
+        let lo = unsafe("k < REG_LEN: inside the registry") (*st).reg[k];
+        let hi = unsafe("k + 1 < REG_LEN: inside the registry") (*st).reg[k + 1];
+        if lo != 0 && a >= lo && a < hi { return e; }
+    }
+    return state.MAX_THREADS;
+}
+
+// ---- report line buffer ----
+struct Line {
+    b: [u8; LINE_CAP],
+    n: usize,
+}
+
+impl Line {
+    fn new() -> Line {
+        return Line.{ b: [0u8; LINE_CAP], n: 0 };
+    }
+
+    fn flush(&mut self) {
+        let p = &self.b as *const [u8; LINE_CAP] as *const u8;
+        let mut done: usize = 0;
+        while done < self.n {
+            let q = ((p as usize) + done) as *const u8;
+            let r = unsafe("q..q+(n-done) lies inside self.b") os.write(os.STDERR, q, self.n - done);
+            if r == -os.EINTR { continue; }
+            if r <= 0 { break; }
+            done = done + (r as% usize);
+        }
+        self.n = 0;
+    }
+
+    fn byte(&mut self, c: u8) {
+        if self.n == LINE_CAP { self.flush(); }
+        self.b[self.n] = c;
+        self.n = self.n + 1;
+    }
+
+    fn bytes(&mut self, s: &[u8]) {
+        for i in 0..s.len() { self.byte(s[i]); }
+    }
+
+    fn lit(&mut self, s: &str) {
+        self.bytes(str_bytes(s));
+    }
+
+    // Copies len bytes from address a (site-table strings).
+    unsafe("a..a+len is readable") fn raw(&mut self, a: usize, len: usize) {
+        for i in 0..len {
+            let c = unsafe("a..a+len is readable (caller)") *((a + i) as *const u8);
+            self.byte(c);
+        }
+    }
+
+    fn dec(&mut self, v: u64) {
+        let mut t: [u8; 20] = [0u8; 20];
+        let mut n: usize = 0;
+        let mut x = v;
+        loop {
+            t[n] = 48 + ((x % 10) as% u8);
+            x = x / 10;
+            n = n + 1;
+            if x == 0 { break; }
+        }
+        while n > 0 {
+            n = n - 1;
+            self.byte(t[n]);
+        }
+    }
+}
+
+// &str -> its UTF-8 bytes. ASSUMPTION (runtime/README.md): `&str` and `&[u8]` share the
+// (data, len) representation. std.mem.str_bytes is the std copy of this helper.
+fn str_bytes(s: &str) -> &[u8] from s {
+    return unsafe("&str and &[u8] are both (data pointer, byte length); str holds UTF-8 bytes") *(&s as *const &str as *const &[u8]);
+}
+
+unsafe("a is 4-byte aligned and readable") fn ld32(a: usize) -> u32 {
+    return unsafe("a is 4-byte aligned and readable (caller)") *(a as *const u32);
+}
+
+unsafe("a is 8-byte aligned and readable") fn ld64(a: usize) -> u64 {
+    return unsafe("a is 8-byte aligned and readable (caller)") *(a as *const u64);
+}
+
+fn put_kind(l: &mut Line, kind: u32) {
+    if kind == KIND_BOUNDS { l.lit("Bounds"); }
+    else if kind == KIND_OVERFLOW { l.lit("Overflow"); }
+    else if kind == KIND_DIV_BY_ZERO { l.lit("DivByZero"); }
+    else if kind == KIND_ASSERT { l.lit("Assert"); }
+    else if kind == KIND_OUT_OF_MEMORY { l.lit("OutOfMemory"); }
+    else if kind == KIND_STACK_OVERFLOW { l.lit("StackOverflow"); }
+    else if kind == KIND_UNWRAP { l.lit("Unwrap"); }
+    else { l.lit("Unknown"); }
+}
+
+// "<file>:<line>:<col> in <fn>"
+fn put_site(l: &mut Line, site: u32) {
+    let t = unsafe("intrinsic: address of the compiler-emitted site table") site_table();
+    let count = unsafe("the site table is compiler-emitted read-only data, 8-byte aligned") ld64(t);
+    if site == SITE_NONE || (site as u64) >= count {
+        l.lit("<unknown>:0:0 in <unknown>");
+        return;
+    }
+    let row = t + 8 + (site as usize) * SITE_ROW;
+    unsafe("row is inside the site table; its string addresses point to read-only UTF-8 bytes") {
+        let file = ld64(row) as usize;
+        let file_len = ld32(row + 8) as usize;
+        let line = ld32(row + 12);
+        let func = ld64(row + 16) as usize;
+        let func_len = ld32(row + 24) as usize;
+        let col = ld32(row + 28);
+        l.raw(file, file_len);
+        l.byte(58);
+        l.dec(line as u64);
+        l.byte(58);
+        l.dec(col as u64);
+        l.lit(" in ");
+        l.raw(func, func_len);
+    }
+}
+
+// Marks the process as panicking. A panic while this thread reports one (or in its signal
+// handler) exits 101 at once, without a second report; a panic in another thread meanwhile
+// waits for the first report's exit_group.
+fn begin() {
+    let st = state.get();
+    let me = (thread_id() + 1) as% u32;
+    let w = unsafe("st is runtime.state.STATE; only the field address is taken") &mut (*st).panicking as *mut u32;
+    let prev = unsafe("w is the panicking word of the state block") atomic.cas_u32(w, 0, me);
+    if prev == 0 { return; }
+    if prev == me { os.exit_group(EXIT_PANIC); }
+    loop {
+        let r = os.sched_yield();
+    }
+}
+
+fn head(l: &mut Line, kind: u32, site: u32) {
+    l.lit("panic: ");
+    put_kind(l, kind);
+    l.lit(" at ");
+    put_site(l, site);
+    l.lit(" (thread ");
+    l.dec(thread_id());
+    l.lit(")\n");
+}
+
+// The trap entry the compiler calls for every failing check.
+pub fn trap(kind: u32, site: u32) -> never {
+    begin();
+    let mut l = Line.new();
+    head(&mut l, kind, site);
+    l.flush();
+    os.exit_group(EXIT_PANIC);
+}
+
+// As `trap`, then `msg` and a newline on the next stderr line (std.debug.assert).
+pub fn trap_msg(kind: u32, site: u32, msg: &[u8]) -> never {
+    begin();
+    let mut l = Line.new();
+    head(&mut l, kind, site);
+    l.bytes(msg);
+    l.byte(10);
+    l.flush();
+    os.exit_group(EXIT_PANIC);
+}
+
+// An explicit std abort: kind Assert at the user site.
+pub fn abort(msg: &[u8]) -> never {
+    trap_msg(KIND_ASSERT, user_site(), msg);
+}
+
+// Site of the fn containing pc (its name token), from the PC table; SITE_NONE if pc precedes
+// every fn.
+pub fn site_for_pc(pc: usize) -> u32 {
+    let t = unsafe("intrinsic: address of the compiler-emitted PC table") pc_table();
+    let count = unsafe("the PC table is compiler-emitted read-only data, 8-byte aligned") ld64(t) as usize;
+    let mut lo: usize = 0;
+    let mut hi: usize = count;
+    // invariant: rows [0, lo) have pc_lo <= pc, rows [hi, count) have pc_lo > pc
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let start = unsafe("mid < count: inside the PC table") ld64(t + 8 + mid * PC_ROW) as usize;
+        if start <= pc { lo = mid + 1; } else { hi = mid; }
+    }
+    if lo == 0 { return SITE_NONE; }
+    return unsafe("lo - 1 < count: inside the PC table") ld32(t + 8 + (lo - 1) * PC_ROW + 8);
+}
+
+// ---- signals ----
+// Installs main's alternate signal stack and the process-wide SIGSEGV/SIGBUS handler. Called
+// by runtime.start.entry before main. Returns false if a call failed.
+pub fn install() -> bool {
+    let st = state.get();
+    let size = round_up(config.ALTSTACK, state.page_size());
+    let prot = os.PROT_READ | os.PROT_WRITE;
+    let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS;
+    let p = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, size, prot, flags, -1, 0);
+    if p < 0 { return false; }
+    let base = p as% usize;
+    unsafe("st is runtime.state.STATE; no other thread exists yet") {
+        (*st).altstack = base;
+        (*st).altstack_size = size;
+    }
+    if !set_altstack(base, size) { return false; }
+    let none = 0usize as *mut u64;
+    let h = unsafe("intrinsic: address of the compiler-emitted __stave_signal stub") signal_handler_addr() as u64;
+    // The restorer is never used: the handler either exits or re-raises with the default
+    // action. x86-64 still requires SA_RESTORER and a non-zero address.
+    let act: [u64; 4] = [h, os.SA_SIGINFO | os.SA_ONSTACK | os.SA_RESTORER, h, 0];
+    let ap = &act as *const [u64; 4] as *const u64;
+    let r1 = unsafe("act is the kernel's four-word struct sigaction") os.rt_sigaction(os.SIGSEGV, ap, none);
+    let r2 = unsafe("act is the kernel's four-word struct sigaction") os.rt_sigaction(os.SIGBUS, ap, none);
+    return r1 == 0 && r2 == 0;
+}
+
+// The calling thread's alternate signal stack (per thread; runtime.thread calls it for each
+// new thread). Returns false if the call failed.
+pub fn set_altstack(base: usize, size: usize) -> bool {
+    let ss: [u64; 3] = [base as u64, 0, size as u64];
+    let none = 0usize as *mut u64;
+    let r = unsafe("ss is three words; the altstack stays mapped while the thread runs") os.sigaltstack(&ss as *const [u64; 3] as *const u64, none);
+    return r >= 0;
+}
+
+// Whether addr is in a guard region: main's (state), or the bottom [lo, guard_hi) of a
+// registered thread stack.
+fn in_guard(addr: usize) -> bool {
+    let st = state.get();
+    let lo = unsafe("st is runtime.state.STATE; main's guard is written before main runs") (*st).guard_lo;
+    let hi = unsafe("st is runtime.state.STATE; main's guard is written before main runs") (*st).guard_hi;
+    if lo != 0 && addr >= lo && addr < hi { return true; }
+    let e = find_entry(addr);
+    if e == state.MAX_THREADS { return false; }
+    let k = e * state.REG_WORDS;
+    let glo = unsafe("k < REG_LEN: inside the registry") (*st).reg[k];
+    let ghi = unsafe("k + 2 < REG_LEN: inside the registry") (*st).reg[k + 2];
+    return addr >= glo && addr < ghi;
+}
+
+fn round_up(x: usize, page: usize) -> usize {
+    return (x + page - 1) / page * page;
+}
+
+// Called by the compiler's `__stave_signal(sig, info, uctx)` stub on the alternate stack.
+// A fault inside a guard region is a StackOverflow panic located at the faulting fn's name
+// token (PC table). Any other fault is not a panic: the default action runs.
+pub unsafe("sig, info, uctx are the arguments the kernel passed to an SA_SIGINFO handler")
+fn on_signal(sig: usize, info: usize, uctx: usize) -> never {
+    // siginfo_t.si_addr is at offset 16 on x86-64 and AArch64
+    let addr = unsafe("info is the kernel's siginfo_t") ld64(info + 16) as usize;
+    if sig == (os.SIGSEGV as% usize) && in_guard(addr) {
+        let pc = unsafe("uctx is the kernel's ucontext_t for this handler") os.signal_pc(uctx);
+        trap(KIND_STACK_OVERFLOW, site_for_pc(pc));
+    }
+    // Default action: restore SIG_DFL, unblock the signal, raise it again.
+    let none = 0usize as *mut u64;
+    let dfl: [u64; 4] = [0, 0, 0, 0];
+    let sig32 = sig as% i32;
+    let r = unsafe("dfl is the kernel's four-word struct sigaction") os.rt_sigaction(sig32, &dfl as *const [u64; 4] as *const u64, none);
+    let set: [u64; 1] = [1u64 << ((sig as u64) - 1)];
+    let r2 = unsafe("set is one sigset word") os.rt_sigprocmask(os.SIG_UNBLOCK, &set as *const [u64; 1] as *const u64, none);
+    let r3 = os.kill(os.getpid(), sig32);
+    os.exit_group(128 + sig32);
+}

@@ -1,0 +1,332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "stave/diagnostic-stream/v1",
+  "title": "stave --diagnostics json stream: one object per line on stderr",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/diagnostic"
+    },
+    {
+      "$ref": "#/$defs/timings"
+    },
+    {
+      "$ref": "#/$defs/parallelism"
+    }
+  ],
+  "$defs": {
+    "diagnostic": {
+      "type": "object",
+      "required": [
+        "kind",
+        "code",
+        "severity",
+        "message"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "diagnostic"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^E[0-9]{4}$",
+          "description": "stable across releases; see `stave explain`"
+        },
+        "severity": {
+          "enum": [
+            "error",
+            "warning",
+            "note"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "description": "one line, no trailing period"
+        },
+        "primary": {
+          "$ref": "#/$defs/span",
+          "description": "absent only for location-less (NOLOC) diagnostics: exactly E1001, E1301, E1302, E1303; those sort first"
+        },
+        "related": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "span",
+              "label"
+            ],
+            "properties": {
+              "span": {
+                "$ref": "#/$defs/span"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "fix": {
+          "type": "object",
+          "required": [
+            "description"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "applicability": {
+              "enum": [
+                "exact",
+                "maybe",
+                "placeholder"
+              ],
+              "description": "exact = applying the edits removes this diagnostic and changes no other behavior (`stave fix` applies only these); maybe = likely fix, review it; placeholder = the edits or description hold text to fill in. Optional for now, later required on every fix"
+            },
+            "edits": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "span",
+                  "replacement"
+                ],
+                "properties": {
+                  "span": {
+                    "$ref": "#/$defs/span"
+                  },
+                  "replacement": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "severity": {
+                "const": "error"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "fix"
+            ]
+          }
+        }
+      ]
+    },
+    "timings": {
+      "type": "object",
+      "required": [
+        "kind",
+        "stages"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "timings"
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "stage",
+              "ms",
+              "items"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "stage": {
+                "enum": [
+                  "request",
+                  "daemon-start",
+                  "read",
+                  "lex",
+                  "items",
+                  "parse",
+                  "resolve",
+                  "intern",
+                  "typeck",
+                  "borrowck",
+                  "mono",
+                  "lower",
+                  "opt",
+                  "regalloc",
+                  "codegen",
+                  "ptx-emit",
+                  "nvptx",
+                  "dwarf",
+                  "link",
+                  "incremental"
+                ]
+              },
+              "ms": {
+                "type": "number",
+                "minimum": 0
+              },
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "lines for read/lex/parse, items for items, strings for intern, functions otherwise"
+              },
+              "rounds": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "optional: parallel rounds the stage ran (stage1)"
+              },
+              "fallbacks": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "optional: times the stage left its parallel path (stage1, cli-stage1.md)"
+              }
+            }
+          }
+        },
+        "compiler": {
+          "type": "string",
+          "description": "e.g. `cpu (stage0)` or `gpu (stage1, NVIDIA RTX A6000)` (cli-stage1.md)"
+        }
+      }
+    },
+    "span": {
+      "type": "object",
+      "required": [
+        "file",
+        "line",
+        "col",
+        "len"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "col": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based, in UTF-8 bytes"
+        },
+        "len": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "parallelism": {
+      "type": "object",
+      "description": "parallelism report (`--timings --diagnostics json` on gpu-sm86), fields as in gpu-program.md \"Build reports\"",
+      "required": [
+        "kind",
+        "sequential",
+        "parallel",
+        "both",
+        "longest_sequential",
+        "recursion",
+        "indirect_in_region"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "parallelism"
+        },
+        "sequential": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "fn paths reachable only outside regions"
+        },
+        "parallel": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "fn paths reachable only from region bodies"
+        },
+        "both": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "longest_sequential": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "fn",
+              "instrs"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "fn": {
+                "type": "string"
+              },
+              "instrs": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "PTX instructions after inlining"
+              }
+            }
+          }
+        },
+        "recursion": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "fns",
+              "in_region"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "fns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "in_region": {
+                "type": "boolean",
+                "description": "true gives warning E1205"
+              }
+            }
+          }
+        },
+        "indirect_in_region": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "span",
+              "fn_type"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "span": {
+                "$ref": "#/$defs/span"
+              },
+              "fn_type": {
+                "type": "string",
+                "description": "canonically printed fn type; each entry gives warning E1206"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,122 @@
+// Integer hashing: fill an array with xorshift keys, mix every key with a neighbour for a few
+// rounds, insert the keys into an open-addressing table (linear probing), then look up a probe
+// stream of which half was inserted. u64 wrapping arithmetic only. Same steps as main.c.
+import std.io;
+import std.vec;
+
+const N: usize = 1048576;
+const SLOTS: usize = 2097152;
+const MASK: u64 = 2097151;
+const ROUNDS: u32 = 4;
+const PASSES: u32 = 3;
+
+fn mix64(x0: u64) -> u64 {
+    let mut x: u64 = x0;
+    x = x ^ (x >> 30);
+    x = x *% 0xBF58476D1CE4E5B9;
+    x = x ^ (x >> 27);
+    x = x *% 0x94D049BB133111EB;
+    x = x ^ (x >> 31);
+    return x;
+}
+
+fn zeros(n: usize) -> vec.Vec<u64> {
+    let mut v = vec.Vec::<u64>.with_capacity(n);
+    for i in 0..n {
+        v.push(0u64);
+    }
+    return v;
+}
+
+fn fill(xs: &mut [u64], seed: u64) {
+    let mut s: u64 = seed;
+    for i in 0..xs.len() {
+        s = s ^ (s << 13);
+        s = s ^ (s >> 7);
+        s = s ^ (s << 17);
+        xs[i] = s;
+    }
+}
+
+// The length of xs is a power of two.
+fn scramble(xs: &mut [u64], rounds: u32) {
+    let n = xs.len();
+    for r in 0..rounds {
+        for i in 0..n {
+            let j = (i * 7 + 1) & (n - 1);
+            xs[i] = mix64(xs[i] ^ xs[j]) +% (r as u64);
+        }
+    }
+}
+
+// Inserts the nonzero key k; returns 1 if it was not in the table yet.
+fn insert(t: &mut [u64], k: u64) -> u64 {
+    let mut i: u64 = mix64(k) & MASK;
+    while t[i as usize] != 0 {
+        if t[i as usize] == k {
+            return 0;
+        }
+        i = (i + 1) & MASK;
+    }
+    t[i as usize] = k;
+    return 1;
+}
+
+fn contains(t: &[u64], k: u64) -> u64 {
+    let mut i: u64 = mix64(k) & MASK;
+    while t[i as usize] != 0 {
+        if t[i as usize] == k {
+            return 1;
+        }
+        i = (i + 1) & MASK;
+    }
+    return 0;
+}
+
+fn build(t: &mut [u64], keys: &[u64]) -> u64 {
+    for i in 0..t.len() {
+        t[i] = 0;
+    }
+    let mut fresh: u64 = 0;
+    for i in 0..keys.len() {
+        fresh = fresh + insert(t, keys[i] | 1);
+    }
+    return fresh;
+}
+
+// Even probes are inserted keys, odd ones come from another stream.
+fn probe(t: &[u64], keys: &[u64], other: &[u64]) -> u64 {
+    let mut hits: u64 = 0;
+    for i in 0..keys.len() {
+        let k = if (i & 1) == 0 then keys[i] | 1 else other[i] | 1;
+        hits = hits + contains(t, k);
+    }
+    return hits;
+}
+
+fn digest(t: &[u64]) -> u64 {
+    let mut c: u64 = 14695981039346656037;
+    for i in 0..t.len() {
+        c = (c ^ t[i]) *% 1099511628211;
+    }
+    return c;
+}
+
+fn main() -> i32 {
+    let mut keys = zeros(N);
+    let mut other = zeros(N);
+    let mut table = zeros(SLOTS);
+    let mut sum: u64 = 0;
+    for p in 0..PASSES {
+        fill(keys.as_mut_slice(), 88172645463325252 +% (p as u64));
+        fill(other.as_mut_slice(), 2463534242 +% (p as u64));
+        scramble(keys.as_mut_slice(), ROUNDS);
+        let fresh = build(table.as_mut_slice(), keys.as_slice());
+        let hits = probe(table.as_slice(), keys.as_slice(), other.as_slice());
+        let c = digest(table.as_slice());
+        io.print(f"pass {p}: inserted {fresh} hits {hits} digest {c}\n");
+        sum = sum ^ c;
+    }
+    io.print(f"checksum {sum}\n");
+    return 0;
+}

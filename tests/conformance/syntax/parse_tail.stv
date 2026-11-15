@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// ForStmt with the three TailClause forms.
+fn tails(xs: &[f32], ys: &mut [i32], zs: &[u8]) {
+    let mut acc = f32x4.splat(0.0);
+    for v: f32x4 in xs {
+        acc = acc + v;
+    } tail masked (v, m) {
+        acc = acc + m.select(v, f32x4.splat(0.0));
+    }
+    for v: &mut i32x4 in ys { *v = *v +% i32x4.splat(1); } tail exact;
+    for v: u8x16 in zs { } tail scalar (x) { }
+}

@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// E0101: a name that resolves to nothing, as an expression, a type, a call, a chain step, a
+// generic param, or `Self` outside an impl. Each unresolved use is reported once, at the name.
+enum Shape { Circle(f64), Empty }
+
+struct Point { pub x: i32, pub y: i32 }
+
+fn take(p: Point) -> i32 {
+    return p.x;
+}
+
+fn wrong_param<T>(v: U) -> u8 { //~ ERROR E0101
+    return 0;
+}
+
+fn no_self() -> Self { //~ ERROR E0101
+    return 0;
+}
+
+fn main() -> i32 {
+    let a: i32 = missing; //~ ERROR E0101
+    let b: Nope = 1i32; //~ ERROR E0101
+    let c: i32 = undefined_fn(a); //~ ERROR E0101
+    let s = Shape.Triangle; //~ ERROR E0101
+    let e: i32 = Point.nothing(); //~ ERROR E0101
+    let p = Point.{ x: a, y: c };
+    let d: i32 = take(p);
+    return d;
+}

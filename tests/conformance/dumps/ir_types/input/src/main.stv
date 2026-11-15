@@ -1,0 +1,27 @@
+//~ CHECK-ONLY
+// ir golden: `type` lines in TypeKey text, by canonical id: ints, floats, bool, char, str,
+// refs, raw pointers, arrays, slices, tuples, structs, enums, generic instances, fn types.
+struct Pair<T> { pub a: T, pub b: T }
+
+enum Tag { A, B(char) }
+
+fn take(p: Pair<u16>, t: Tag, xs: &[i8], arr: [u64; 3], raw: *const f32, tup: (bool, f64)) -> usize {
+    return xs.len();
+}
+
+fn apply(f: fn(u32) -> u32, x: u32) -> u32 {
+    return f(x);
+}
+
+fn twice(x: u32) -> u32 {
+    return x *% 2;
+}
+
+fn main() -> i32 {
+    let x: f32 = 1.5;
+    let arr: [u64; 3] = [1, 2, 3];
+    let xs: [i8; 2] = [1, 2];
+    let n = take(Pair::<u16>.{ a: 1, b: 2 }, Tag.B('z'), &xs, arr, &x as *const f32, (true, 2.0));
+    let k = apply(twice, 2);
+    return if n == 2 && k == 4 then 0 else 1;
+}

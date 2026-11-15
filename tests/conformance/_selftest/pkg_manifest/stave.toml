@@ -1,0 +1,8 @@
+name = "pkg_manifest"
+kind = "bin"
+version = "0.1.0"
+colour = "blue" #~ ERROR E1002
+
+[dependencies]
+prims = { git = "https://example.com/prims" }
+#~^ ERROR E1002

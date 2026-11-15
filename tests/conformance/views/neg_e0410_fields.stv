@@ -1,0 +1,27 @@
+//~ CHECK-ONLY
+// E0410: a field of reference or view type needs a `view` ADT. Views are
+// references, view ADTs, fn values, and tuples, arrays, and Options holding one. A field of type
+// `T` with `T: view` is allowed: the instance is a view through its argument.
+view struct Lexer { src: &str, pos: usize }
+
+struct RefField { r: &u32 } //~ ERROR E0410
+struct ViewField { l: Lexer } //~ ERROR E0410
+struct FnField { f: fn(u32) -> u32 } //~ ERROR E0410
+struct OptField { o: Option<&u8> } //~ ERROR E0410
+struct TupleField { t: (u8, &u8) } //~ ERROR E0410
+struct ArrayField { a: [&u8; 2] } //~ ERROR E0410
+
+enum Payload {
+    Plain(u32),
+    Borrowed(&u32), //~ ERROR E0410
+    Rec { l: Lexer }, //~ ERROR E0410
+}
+
+struct Generic<T: view> { v: T }
+struct NestedView { g: Generic<&u32> } //~ ERROR E0410
+
+// fine: view ADTs hold views; raw pointers and owned instances are not views
+view struct Callback { f: fn(u32) -> u32, l: Lexer, o: Option<&u8> }
+view enum Token { Word(&str), End }
+struct Raw { p: *const u8 }
+struct Nested { g: Generic<u32>, o: Option<u8> }

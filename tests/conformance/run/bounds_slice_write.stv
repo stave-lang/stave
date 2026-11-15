@@ -1,0 +1,21 @@
+//~ EXIT 101
+//~ STDOUT bounds_slice_write.stdout
+//~ STDERR-CONTAINS "panic: Bounds at bounds_slice_write.stv:10:7 in main.put (thread 0)"
+// A slice write `xs[i] = v` with i ≥ len traps before the store.
+import std.io;
+import std.vec;
+
+fn put(xs: &mut [u64], i: usize, v: u64) {
+    io.print(f"put {i}\n");
+    xs[i] = v;
+}
+
+fn main() -> i32 {
+    let mut a = vec.Vec::<u64>.new();
+    a.push(0);
+    a.push(0);
+    put(a.as_mut_slice(), 1, 5);
+    put(a.as_mut_slice(), 2, 6);
+    io.print("not reached\n");
+    return 0;
+}

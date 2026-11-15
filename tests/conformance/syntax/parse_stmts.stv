@@ -1,0 +1,52 @@
+//~ CHECK-ONLY
+// Every Stmt form and every AssignOp.
+fn work() { }
+
+fn stmts(c: bool, xs: &[i32], p: *mut i32) -> i32 {
+    let a: i32 = 1;
+    let mut b = 2i32;
+    if c { b = 3; }
+    if c { } else { }
+    if c { } else if !c { } else { }
+    while c { break; }
+    loop { continue; }
+    for x in xs { }
+    for i: usize in 0..4 { }
+    match a {
+        1 => { }
+        n if n > 1 => { }
+        _ => { }
+    }
+    unsafe("p is valid for writes") { *p = 1; }
+    strict { b += 1; }
+    emulate { b -= 1; }
+    scope {
+        spawn { work(); }
+        spawn { work(); }
+    }
+    { let inner = 1i32; }
+    b = a;
+    b += a;
+    b -= a;
+    b *= a;
+    b /= a;
+    b %= a;
+    b +%= a;
+    b -%= a;
+    b *%= a;
+    b +|= a;
+    b -|= a;
+    b *|= a;
+    b &= a;
+    b |= a;
+    b ^= a;
+    b <<= 1;
+    b >>= 1;
+    b <<%= 1;
+    work();
+    return b;
+}
+
+fn unit() {
+    return;
+}

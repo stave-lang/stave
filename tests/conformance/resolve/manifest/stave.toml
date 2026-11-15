@@ -1,0 +1,16 @@
+name = "manifest"
+kind = "bin"
+version = 1 #~ ERROR E1002
+colour = "blue" #~ ERROR E1002
+
+[dependencies]
+prims = { version = "1.0" } #~ ERROR E1002
+
+[target.riscv64-linux.dependencies] #~ ERROR E1002
+x = { path = "x" }
+
+[target.gpu-sm86.dependencies]
+y = { path = "y", branch = "main" } #~ ERROR E1002
+
+[run]
+stack = "8MiB"

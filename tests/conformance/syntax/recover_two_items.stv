@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// Two broken items: two E0004, the first error of each; the item between them is fine.
+fn a() {
+    let = 1; //~ ERROR E0004
+    let = 2;
+}
+
+fn ok() { }
+
+fn b() -> i32 {
+    return 1 2; //~ ERROR E0004
+}

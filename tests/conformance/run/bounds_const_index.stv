@@ -1,0 +1,12 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at bounds_const_index.stv:5:14 in main.last (thread 0)"
+// A constant index into a slice cannot be proven in range: checked at run time.
+fn last(xs: &[i64]) -> i64 {
+    return xs[3];
+}
+
+fn main() -> i32 {
+    let a: [i64; 3] = [1, 2, 3];
+    let v = last(&a);
+    return 0;
+}

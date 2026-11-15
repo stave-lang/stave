@@ -1,0 +1,9 @@
+//~ STDOUT exit_101.stdout
+//~ EXIT 101
+// Exit status 101 returned by main (the panic status) without a panic: no report is printed.
+import std.io;
+
+fn main() -> i32 {
+    io.print("returning 101\n");
+    return 101;
+}

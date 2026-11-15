@@ -1,0 +1,7 @@
+//~ CHECK-ONLY
+// `)` cannot close `.{`.
+struct S { a: i32 }
+
+fn f() {
+    let s = S.{ a: 1 ); //~ ERROR E0016
+}

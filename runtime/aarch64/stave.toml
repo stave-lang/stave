@@ -1,0 +1,4 @@
+# Raw Linux system calls on AArch64: a built-in package, bound as `arch` by runtime/stave.toml for
+# every AArch64 target. Its one module is `runtime_aarch64.sys`, imported only by `runtime.os`.
+name = "runtime_aarch64"
+kind = "lib"

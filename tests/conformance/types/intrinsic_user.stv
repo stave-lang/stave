@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// `extern "stave-intrinsic"` is reserved for the shipped std and runtime packages (E0805).
+extern "stave-intrinsic" { //~ ERROR E0805
+    fn syscall0(nr: usize) -> isize;
+}
+
+fn main() -> i32 {
+    return 0;
+}

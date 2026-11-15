@@ -1,0 +1,7 @@
+//~ CHECK-ONLY
+// Imports precede items: a later `import` starts an item that is E0004 at `import`.
+import std.io;
+
+fn f() { }
+
+import std.thread; //~ ERROR E0004

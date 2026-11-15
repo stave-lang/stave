@@ -1,0 +1,1584 @@
+//! Statement lowering: blocks and scopes (drops), `let`, assignments, `if`,
+//! `while`, `loop`, `for` (ranges, arrays and slices, iterators), `match` (statement and value
+//! form, one `switch` on the discriminant when the arms test one), `return`/`break`/`continue`,
+//! patterns, closures, the fn body driver, drop glue, and the body pre-pass (locals, slots,
+//! assignment sites, closures).
+
+use stave_ir::{Block, FuncBuilder, Op, Operand};
+use stave_syntax::{NodeKind, Term};
+
+use crate::decls::DeclKind;
+use crate::lower_fn::{
+    Base, E, Env, FnCx, FnOut, FnState, LocalInfo, LoopCx, LoopKind, MState, Place, Proj, Ty,
+};
+use crate::mono::{InstKey, Req, Resolved};
+use crate::resolve::Res;
+use crate::typeck::Target;
+use crate::types::{ConstArg, GArg, Interner, TypeId, TypeKind};
+
+/// A closure environment: (tuple type, `&mut` tuple type, per capture (local, `&mut T` type)).
+pub(crate) type EnvType = (Ty, Ty, Vec<(usize, Ty)>);
+
+/// How a pattern binds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Move,
+    Ref(bool),
+}
+
+/// The top-level test of a match arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Top {
+    Value(i128),
+    Any,
+    Complex,
+}
+
+impl<'a> FnCx<'a> {
+    // ---------- pre-pass ----------
+
+    /// The local a place expression is rooted at (no dereference on the way).
+    pub fn place_root(&self, n: u32) -> Option<usize> {
+        let icx = self.icx;
+        let c = self.core(n);
+        match icx.kind(c)? {
+            NodeKind::Unary => {
+                if icx.is(icx.a(c), Term::KwUnsafe) {
+                    return self.place_root(icx.last_child(c)?);
+                }
+                None
+            }
+            NodeKind::Postfix => self.chain_root(c, None),
+            NodeKind::Primary => {
+                let a = icx.a(c);
+                if icx.is(a, Term::KwSelf) {
+                    return icx.uses(c).first().and_then(|u| self.local_of(u.res));
+                }
+                if icx.is(a, Term::LParen) {
+                    let kids = icx.kids_vec(c);
+                    let close = icx.close(a);
+                    if kids.len() == 1 && !icx.is(close - 1, Term::Comma) {
+                        return self.place_root(kids[0]);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Walks a postfix chain's steps: the root local of the place it denotes; method calls whose
+    /// receiver is auto-referenced at a local root are reported to `autoref`.
+    fn chain_root(&self, n: u32, mut autoref: Option<&mut Vec<usize>>) -> Option<usize> {
+        let icx = self.icx;
+        let kids = icx.kids_vec(n);
+        let prim = *kids.first()?;
+        let pa = icx.a(prim);
+        let mut root = if icx.is(pa, Term::Ident) {
+            icx.use_at(prim, pa).and_then(|u| self.local_of(u.res))
+        } else if icx.is(pa, Term::KwSelf) {
+            icx.uses(prim).first().and_then(|u| self.local_of(u.res))
+        } else if icx.is(pa, Term::LParen) {
+            self.place_root(prim)
+        } else {
+            None
+        };
+        let mut p = icx.primary_end(prim) + 1;
+        for _ in 0..10_000_000 {
+            let t = icx.tk(p);
+            if t == Term::Dot as u8 && icx.is(p + 1, Term::Ident) {
+                let seg = p + 1;
+                let mut q = p + 2;
+                if icx.is(q, Term::ColonColon) {
+                    let (e, partial) = icx.angle_end(q + 1);
+                    q = if partial { e - 1 } else { e };
+                }
+                if icx.use_at(prim, seg).is_some() {
+                    root = None;
+                    p = q;
+                    continue;
+                }
+                if icx.is(q, Term::LParen) {
+                    if let Some(Target::Method { adjust, .. }) = self.target(seg)
+                        && adjust.autoref.is_some()
+                        && adjust.derefs == 0
+                        && let (Some(r), Some(out)) = (root, autoref.as_deref_mut())
+                    {
+                        out.push(r);
+                    }
+                    root = None;
+                    p = icx.close(q) + 1;
+                    continue;
+                }
+                match self.target(seg) {
+                    Some(Target::Field { derefs, .. }) if *derefs == 0 => {}
+                    _ => root = None,
+                }
+                p = q;
+                continue;
+            }
+            if t == Term::Dot as u8 && icx.is(p + 1, Term::IntLit) {
+                match self.target(p + 1) {
+                    Some(Target::TupleField { derefs, .. }) if *derefs == 0 => {}
+                    _ => root = None,
+                }
+                p += 2;
+                continue;
+            }
+            if t == Term::LBracket as u8 {
+                match self.target(p) {
+                    Some(Target::Index { derefs }) if *derefs == 0 => {}
+                    _ => root = None,
+                }
+                p = icx.close(p) + 1;
+                continue;
+            }
+            if t == Term::LParen as u8 || t == Term::DotLBrace as u8 {
+                root = None;
+                p = icx.close(p) + 1;
+                continue;
+            }
+            if t == Term::Question as u8 {
+                root = None;
+                p += 1;
+                continue;
+            }
+            break;
+        }
+        root
+    }
+
+    /// The innermost closure containing node `n`.
+    fn owner(&self, n: u32) -> Option<u32> {
+        let icx = self.icx;
+        let mut best: Option<(u32, u32)> = None;
+        for &c in &self.closure_nodes {
+            let r = icx.ast.descendants(c);
+            if n >= r.start && n < c {
+                let size = c - r.start;
+                if best.is_none_or(|(_, s)| size < s) {
+                    best = Some((c, size));
+                }
+            }
+        }
+        best.map(|b| b.0)
+    }
+
+    /// Locals, slots, assignment sites, and closures of the body at `root`.
+    pub fn setup(&mut self, root: u32) {
+        let icx = self.icx;
+        let tb = self.tb();
+        let mut binds: Vec<(u32, u32, Ty)> = Vec::new();
+        for &(node, t) in &tb.locals {
+            if icx.kind(node) == Some(NodeKind::SelfParam) {
+                continue;
+            }
+            let t = self.sub(t);
+            binds.push((icx.a(node), node, t));
+        }
+        binds.sort_unstable();
+        for (_, node, ty) in binds {
+            let drop = self.needs_drop(ty);
+            let idx = self.locals.len();
+            self.locals.push(LocalInfo { node, ty, mem: drop, drop, flag: None });
+            self.by_node.insert(node, idx);
+            if icx.kind(node) == Some(NodeKind::Param)
+                && let Some(sp) = icx.child(node, NodeKind::SelfParam)
+            {
+                self.by_node.insert(sp, idx);
+            }
+        }
+        let lo = icx.ast.descendants(root).start;
+        let mut autoref: Vec<usize> = Vec::new();
+        let mut assigns: Vec<(u32, usize)> = Vec::new();
+        for m in lo..=root {
+            match icx.kind(m) {
+                Some(NodeKind::Unary) => {
+                    let a = icx.a(m);
+                    if (icx.is(a, Term::Amp) || icx.is(a, Term::AmpAmp))
+                        && let Some(c) = icx.last_child(m)
+                        && let Some(l) = self.place_root(c)
+                    {
+                        autoref.push(l);
+                    }
+                }
+                Some(NodeKind::Postfix) => {
+                    let _ = self.chain_root(m, Some(&mut autoref));
+                }
+                Some(NodeKind::ExprStmt) => {
+                    let kids = icx.kids_vec(m);
+                    if kids.len() >= 3
+                        && let Some(l) = self.place_root(kids[0])
+                    {
+                        assigns.push((m, l));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for l in autoref {
+            if let Some(li) = self.locals.get_mut(l) {
+                li.mem = true;
+            }
+        }
+        assigns.sort_unstable();
+        self.assigns = assigns;
+        // closure bodies and their captures: a captured local lives in a slot (the environment
+        // holds its address)
+        let tys = &self.tys;
+        let infos = crate::closures::closures(&icx, tb, |t| crate::closures::is_mut_ref(tys, t), root);
+        for c in &infos {
+            for cap in &c.captures {
+                if let Some(&l) = self.by_node.get(&cap.binding) {
+                    self.locals[l].mem = true;
+                }
+            }
+        }
+        self.closure_nodes = infos.iter().map(|c| c.node).collect();
+        self.closure_info = infos;
+        // dynamic drop flags
+        let n = self.locals.len();
+        for l in 0..n {
+            if self.locals[l].drop && self.flagged.contains(&self.locals[l].node) {
+                let fl = self.locals.len();
+                let bt = self.t_bool();
+                let node = self.locals[l].node;
+                self.locals.push(LocalInfo { node, ty: bt, mem: false, drop: false, flag: None });
+                self.locals[l].flag = Some(fl);
+            }
+        }
+    }
+
+    fn fresh_env(&mut self, params: &[Ty], ret: Ty) {
+        self.f = FnState::new(params, ret);
+        let n = self.locals.len();
+        self.f.slot = vec![None; n];
+        self.f.env = Env { vals: vec![None; n], st: vec![MState::Uninit; n] };
+    }
+
+    /// Slots of the mem locals owned by `owner` (`None`: the fn itself), in local order.
+    fn make_slots(&mut self, owner: Option<u32>) {
+        for l in 0..self.locals.len() {
+            let li = self.locals[l].clone();
+            if li.mem && self.owner(li.node) == owner {
+                let p = self.new_slot(li.ty);
+                self.f.slot[l] = Some(p);
+            }
+        }
+    }
+
+    fn bind_params(&mut self, params_node: Option<u32>) {
+        let Some(ps) = params_node else { return };
+        let kids = self.icx.kids_vec(ps);
+        for (i, &p) in kids.iter().enumerate() {
+            let Some(&l) = self.by_node.get(&p) else { continue };
+            let v = self.f.b.param(i).map(Operand::Value);
+            self.bind(l, v);
+        }
+    }
+
+    fn finish_fn(&mut self) -> Option<stave_ir::Body> {
+        let b = std::mem::replace(&mut self.f.b, FuncBuilder::new(&[]));
+        match b.finish() {
+            Ok(body) => Some(crate::lower_post::finalize(body)),
+            Err(e) => {
+                self.fail_at(None, format!("internal: {e}"));
+                None
+            }
+        }
+    }
+
+    fn end_fn(&mut self) {
+        if self.open() {
+            while !self.f.scopes.is_empty() {
+                self.pop_scope();
+            }
+            let r = self.f.ret;
+            if self.open() {
+                if self.ret_of(r).is_none() && !self.is_never(r) {
+                    self.f.b.ret(None);
+                } else {
+                    self.f.b.unreachable();
+                }
+            }
+        }
+    }
+
+    /// Lowers the fn body at `fn_node` (a `FnDecl`, `ExternItem` export, or `KernelDecl`).
+    pub fn lower_body(&mut self, fn_node: u32, params: &[Ty], ret: Ty) -> FnOut {
+        self.fresh_env(params, ret);
+        self.make_slots(None);
+        self.push_scope();
+        let icx = self.icx;
+        self.bind_params(icx.child(fn_node, NodeKind::Params));
+        if let Some(b) = icx.child(fn_node, NodeKind::Block) {
+            self.block(b);
+        }
+        self.end_fn();
+        let site_consts = std::mem::take(&mut self.f.site_consts);
+        let body = self.finish_fn();
+        FnOut {
+            closure: None,
+            params: params.to_vec(),
+            ret: self.ret_of(ret),
+            body,
+            site_consts,
+            name_off: None,
+        }
+    }
+
+    /// The environment type of closure body `k`: `&mut (&mut T0, &mut T1, ..)`, one element per
+    /// capture (crate::closures); `None` without captures.
+    pub fn env_type(&mut self, k: usize) -> Option<EnvType> {
+        let caps = self.closure_info.get(k)?.captures.clone();
+        if caps.is_empty() {
+            return None;
+        }
+        let mut elems = Vec::with_capacity(caps.len());
+        let mut locals = Vec::with_capacity(caps.len());
+        for c in &caps {
+            let l = *self.by_node.get(&c.binding)?;
+            let t = self.locals[l].ty;
+            let rt = self.t_ref(true, t);
+            elems.push(rt);
+            locals.push((l, rt));
+        }
+        let tup = self.tys.intern(TypeKind::Tuple(elems.into_boxed_slice()));
+        let pt = self.t_ref(true, tup);
+        Some((tup, pt, locals))
+    }
+
+    pub fn lower_closure(&mut self, n: u32, k: u32, ty: Ty) -> Result<(), String> {
+        let TypeKind::Fn { params, ret, .. } = self.kind(ty) else { return Err("closure type".into()) };
+        let env = self.env_type(k as usize);
+        let mut all = params.to_vec();
+        if let Some((_, pt, _)) = &env {
+            all.push(*pt);
+        }
+        let saved = std::mem::replace(&mut self.f, FnState::new(&all, ret));
+        let nl = self.locals.len();
+        self.f.slot = vec![None; nl];
+        self.f.env = Env { vals: vec![None; nl], st: vec![MState::Uninit; nl] };
+        // captured locals: their slots are the addresses in the environment
+        if let Some((_, _, locals)) = &env
+            && let Some(ep) = self.f.b.param(params.len()).map(Operand::Value)
+        {
+            for (i, &(l, rt)) in locals.iter().enumerate() {
+                let fp = self.t_ref(true, rt);
+                let ix = self.int(i as i128);
+                let a = self.op2(Op::FieldAddr, fp, ep, ix);
+                let p = Operand::Value(self.f.b.load(FnCx::ir(rt), a));
+                self.f.slot[l] = Some(p);
+            }
+        }
+        self.make_slots(Some(n));
+        self.push_scope();
+        let icx = self.icx;
+        self.bind_params(icx.child(n, NodeKind::Params));
+        let body = match icx.kind(n) {
+            Some(NodeKind::Stmt) => icx.first_child(n).filter(|&b| icx.kind(b) == Some(NodeKind::Block)),
+            _ => icx.child(n, NodeKind::Block),
+        };
+        if let Some(b) = body {
+            self.block(b);
+        }
+        self.end_fn();
+        let site_consts = std::mem::take(&mut self.f.site_consts);
+        let body = self.finish_fn();
+        let name_off = Some((self.icx.fid(), self.icx.tok_span(self.icx.a(n)).offset));
+        let out = FnOut { closure: Some(k), params: all, ret: self.ret_of(ret), body, site_consts, name_off };
+        self.f = saved;
+        self.outs.push(out);
+        Ok(())
+    }
+
+    // ---------- drop glue ----------
+
+    /// The drop glue of `t`: `fn(p: &mut T)`.
+    pub fn lower_glue(&mut self, t: Ty) -> FnOut {
+        let pt = self.t_ref(true, t);
+        self.fresh_env(&[pt], TypeId::NONE);
+        let unit = self.t_unit();
+        self.f.ret = unit;
+        let Some(p) = self.f.b.param(0).map(Operand::Value) else {
+            return FnOut {
+                closure: None,
+                params: vec![pt],
+                ret: None,
+                body: None,
+                site_consts: Vec::new(),
+                name_off: None,
+            };
+        };
+        let w = self.g.world();
+        if let Some(k) = crate::mono::drop_method(&w, &mut self.tys, t) {
+            let f = self.req(Req::Inst(k));
+            self.f.b.call(f, None, &[p]);
+        }
+        match self.kind(t) {
+            TypeKind::Adt { def, .. } => {
+                let is_enum = self.g.sigs.adt(def).is_some_and(|a| a.is_enum);
+                let vs = self.adt_fields(t).unwrap_or_default();
+                if !is_enum {
+                    let fs = vs.into_iter().next().unwrap_or_default();
+                    for (i, f) in fs.into_iter().enumerate() {
+                        if self.needs_drop(f) {
+                            let fp = self.t_ref(true, f);
+                            let i = self.int(i as i128);
+                            let a = self.op2(Op::FieldAddr, fp, p, i);
+                            self.drop_ptr(a, f);
+                        }
+                    }
+                } else {
+                    let mut blocks = Vec::new();
+                    for (vi, fs) in vs.iter().enumerate() {
+                        if fs.iter().any(|&f| self.needs_drop(f)) {
+                            blocks.push((vi, self.f.b.create_block()));
+                        }
+                    }
+                    let end = self.f.b.create_block();
+                    let v = Operand::Value(self.f.b.load(FnCx::ir(t), p));
+                    let u32t = self.t_u32();
+                    let tag = self.op1(Op::EnumTag, u32t, v);
+                    let cases: Vec<(i128, Block, &[Operand])> =
+                        blocks.iter().map(|&(vi, b)| (vi as i128, b, &[][..])).collect();
+                    self.f.b.switch(tag, &cases, end, &[]);
+                    for (vi, b) in blocks {
+                        self.f.b.switch_to(b);
+                        for (fi, &f) in vs[vi].iter().enumerate() {
+                            if self.needs_drop(f) {
+                                let fp = self.t_ref(true, f);
+                                let (a, c) = (self.int(vi as i128), self.int(fi as i128));
+                                let addr = self.opn(Op::EnumFieldAddr, fp, &[p, a, c]);
+                                self.drop_ptr(addr, f);
+                            }
+                        }
+                        self.f.b.br(end, &[]);
+                    }
+                    self.f.b.switch_to(end);
+                }
+            }
+            TypeKind::Tuple(ts) => {
+                for (i, &f) in ts.iter().enumerate() {
+                    if self.needs_drop(f) {
+                        let fp = self.t_ref(true, f);
+                        let i = self.int(i as i128);
+                        let a = self.op2(Op::FieldAddr, fp, p, i);
+                        self.drop_ptr(a, f);
+                    }
+                }
+            }
+            TypeKind::Array { elem, len: ConstArg::Value(n) } => {
+                let us = self.t_usize();
+                let (head, hv) = self.f.b.create_block_with(&[FnCx::ir(us)]);
+                let body = self.f.b.create_block();
+                let exit = self.f.b.create_block();
+                let z = self.int(0);
+                self.f.b.br(head, &[z]);
+                self.f.b.switch_to(head);
+                let i = Operand::Value(hv[0]);
+                let nn = self.int(n as i128);
+                let bt = self.t_bool();
+                let c = self.op2(Op::Lt, bt, i, nn);
+                self.f.b.cbr(c, body, &[], exit, &[]);
+                self.f.b.switch_to(body);
+                let ep = self.t_ref(true, elem);
+                let a = self.op2(Op::ElemAddr, ep, p, i);
+                self.drop_ptr(a, elem);
+                let one = self.int(1);
+                let next = self.op2(Op::AddWrap, us, i, one);
+                self.f.b.br(head, &[next]);
+                self.f.b.switch_to(exit);
+            }
+            _ => {}
+        }
+        self.f.b.ret(None);
+        let body = self.finish_fn();
+        FnOut { closure: None, params: vec![pt], ret: None, body, site_consts: Vec::new(), name_off: None }
+    }
+
+    // ---------- statements ----------
+
+    pub fn block(&mut self, b: u32) {
+        self.push_scope();
+        let kids = self.kids(b);
+        for s in kids {
+            if !self.open() {
+                break;
+            }
+            self.stmt(s);
+        }
+        self.pop_scope();
+    }
+
+    fn stmt(&mut self, s: u32) {
+        let icx = self.icx;
+        let a = icx.a(s);
+        let t = icx.tk(a);
+        let kids = self.kids(s);
+        if t == Term::KwLet as u8 {
+            self.let_stmt(&kids);
+        } else if t == Term::KwIf as u8 {
+            if let Some(&i) = kids.first() {
+                self.if_stmt(i);
+            }
+        } else if t == Term::KwWhile as u8 {
+            if let (Some(&c), Some(&b)) = (kids.first(), kids.get(1)) {
+                self.while_stmt(s, c, b);
+            }
+        } else if t == Term::KwLoop as u8 {
+            if let Some(&b) = kids.first() {
+                self.loop_stmt(s, b);
+            }
+        } else if t == Term::KwFor as u8 {
+            if let Some(&f) = kids.first() {
+                self.for_stmt(f);
+            }
+        } else if t == Term::KwMatch as u8 {
+            self.lower_match(s, &kids, false);
+        } else if t == Term::KwReturn as u8 {
+            self.return_stmt(kids.first().copied());
+        } else if t == Term::KwBreak as u8 || t == Term::KwContinue as u8 {
+            self.break_continue(a, t == Term::KwBreak as u8);
+        } else if t == Term::KwSpawn as u8 {
+            self.spawn_stmt(s);
+        } else if t == Term::KwUnsafe as u8 {
+            if let Some(&b) = kids.iter().find(|&&c| icx.kind(c) == Some(NodeKind::Block)) {
+                self.block(b);
+            }
+        } else if t == Term::KwScope as u8 {
+            if let Some(&b) = kids.first() {
+                self.scope_stmt(b);
+            }
+        } else if t == Term::KwStrict as u8 || t == Term::KwEmulate as u8 || t == Term::LBrace as u8 {
+            if let Some(&b) = kids.first() {
+                self.block(b);
+            }
+        } else if let Some(&e) = kids.first() {
+            self.expr_stmt(e);
+        }
+        self.drop_temps();
+    }
+
+    /// `scope { .. }`: a thread-list handle (`usize`, 0 = empty) in a slot; the block's spawns
+    /// add to it, and `runtime.thread.scope_join` waits for them when the block ends or is left.
+    fn scope_stmt(&mut self, b: u32) {
+        let us = self.t_usize();
+        let h = self.new_slot(us);
+        let z = self.int(0);
+        self.f.b.store(h, z);
+        self.push_scope();
+        let d = self.f.scopes.len();
+        self.f.scope_handles.push((d, h));
+        for s in self.kids(b) {
+            if !self.open() {
+                break;
+            }
+            self.stmt(s);
+        }
+        self.pop_scope();
+        // a handle left behind by a block that ended early (closed): already joined on the exit
+        self.f.scope_handles.retain(|x| x.0 < d);
+    }
+
+    /// `spawn { .. }`: its body is closure `@<enclosing>.<k>` of type `fn()`;
+    /// `runtime.thread.scope_spawn(handle, f)` runs it on a new thread.
+    fn spawn_stmt(&mut self, s: u32) {
+        let Some(&(_, h)) = self.f.scope_handles.last() else {
+            self.fail(s, "spawn outside scope");
+            return;
+        };
+        let Some(k) = self.closure_nodes.iter().position(|&c| c == s) else {
+            self.fail(s, "spawn body");
+            return;
+        };
+        let unit = self.t_unit();
+        let ft = self.tys.intern(TypeKind::Fn { params: Box::new([]), ret: unit, features: 0 });
+        let Some(fv) = self.closure_value(s, k, ft) else { return };
+        let Some(d) = crate::mono::item_at(self.g.prog, "runtime.thread", "scope_spawn") else {
+            self.fail(s, "`runtime.thread.scope_spawn` not found");
+            return;
+        };
+        let tok = self.icx.a(s);
+        let _ = self.call_inst(InstKey { decl: d, args: Vec::new() }, &[h, fv], tok);
+    }
+
+    /// Lowers closure body `k` (node `n`, fn type `ty`) and returns its fn value: `@f` without
+    /// captures, else `fn.make @f env` with the environment (the captured locals' addresses) in a
+    /// slot of the current fn.
+    pub fn closure_value(&mut self, n: u32, k: usize, ty: Ty) -> Option<Operand> {
+        if let Err(e) = self.lower_closure(n, k as u32, ty) {
+            self.fail(n, e);
+            return None;
+        }
+        let f = self.req(Req::Closure(k as u32));
+        let Some((tup, pt, locals)) = self.env_type(k) else { return Some(Operand::Func(f)) };
+        let env = self.new_slot(tup);
+        for (i, &(l, rt)) in locals.iter().enumerate() {
+            let Some(p) = self.f.slot.get(l).copied().flatten() else {
+                self.fail(n, "captured local without a slot");
+                return None;
+            };
+            let fp = self.t_ref(true, rt);
+            let ix = self.int(i as i128);
+            let a = self.op2(Op::FieldAddr, fp, env, ix);
+            self.f.b.store(a, p);
+        }
+        let _ = pt;
+        Some(Operand::Value(self.f.b.fn_make(FnCx::ir(ty), f, env)))
+    }
+
+    /// The type of a binding pattern (a single name), for the coercion site of its initializer.
+    fn binding_ty(&self, pat: u32) -> Option<Ty> {
+        let icx = self.icx;
+        let a = icx.a(pat);
+        let single = icx.is(a, Term::KwMut)
+            || (icx.is(a, Term::Ident)
+                && icx.chain_end(a) == a
+                && !icx.is(a + 1, Term::LParen)
+                && !icx.is(a + 1, Term::DotLBrace));
+        if !single {
+            return None;
+        }
+        self.by_node.get(&pat).map(|&l| self.locals[l].ty)
+    }
+
+    fn let_stmt(&mut self, kids: &[u32]) {
+        let icx = self.icx;
+        let Some(&pat) = kids.first() else { return };
+        let Some(init) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Expr)) else { return };
+        let want = self.binding_ty(pat);
+        let e = self.expr(init, want);
+        if matches!(e, E::Never) {
+            return;
+        }
+        let Some(p) = self.place_of(e) else { return };
+        self.bind_irrefutable(pat, p);
+    }
+
+    fn bind_irrefutable(&mut self, pat: u32, p: Place) {
+        let icx = self.icx;
+        if icx.is(icx.a(pat), Term::Underscore) {
+            // `let _ = e;`: an owned temporary is dropped at the end of the statement
+            if let Base::Val(v, t) = p.base
+                && p.proj.is_empty()
+                && self.needs_drop(t)
+            {
+                let _ = self.spill(v, t, true);
+            }
+            return;
+        }
+        let _ = self.pat(pat, p, Mode::Move, None, false);
+    }
+
+    fn expr_stmt(&mut self, es: u32) {
+        let icx = self.icx;
+        let kids = self.kids(es);
+        if kids.len() >= 3 {
+            let (lhs, op, rhs) = (kids[0], kids[1], kids[2]);
+            let opt = icx.tk(icx.a(op));
+            let le = self.expr(lhs, None);
+            let Some(lp) = self.place_of(le) else { return };
+            if opt == Term::Eq as u8 {
+                let lt = lp.ty;
+                let Some(v) = self.val(rhs, Some(lt)) else { return };
+                self.assign(&lp, v);
+            } else {
+                let bin = compound_op(opt);
+                let lt = lp.ty;
+                let Some(old) = self.peek(&lp) else { return };
+                let Some(r) = self.val(rhs, Some(lt)) else { return };
+                let tok = icx.a(op);
+                let Some(nv) = self.binop(tok, bin as u8, old, r, lt) else { return };
+                self.assign(&lp, nv);
+            }
+            return;
+        }
+        let Some(&e) = kids.first() else { return };
+        let ex = self.expr(e, None);
+        match ex {
+            E::V(v, t) => {
+                if self.needs_drop(t) {
+                    let _ = self.spill(v, t, true);
+                }
+            }
+            E::P(p) => {
+                // a place statement reads nothing; an owned f-string temporary is dropped
+                if let Base::Mem(m, _) = p.base
+                    && p.root.is_none()
+                    && p.proj.is_empty()
+                    && self.is_fmt_temp(e)
+                {
+                    let t = p.ty;
+                    self.f.temps.push((m, t));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn is_fmt_temp(&self, e: u32) -> bool {
+        self.down_to_primary(e).is_some_and(|p| self.icx.is(self.icx.a(p), Term::FmtLit))
+    }
+
+    fn if_stmt(&mut self, n: u32) {
+        let kids = self.kids(n);
+        let (Some(&c), Some(&tb)) = (kids.first(), kids.get(1)) else { return };
+        let els = kids.get(2).copied();
+        let then = self.f.b.create_block();
+        let eb = els.map(|_| self.f.b.create_block());
+        let j = self.join(n, &[]);
+        let bt = self.t_bool();
+        let Some(cv) = self.val(c, Some(bt)) else { return };
+        let snap = self.f.env.clone();
+        match eb {
+            Some(eb) => self.f.b.cbr(cv, then, &[], eb, &[]),
+            None => {
+                let args = self.edge(j, &[]);
+                let jb = self.f.joins[j].block;
+                self.f.b.cbr(cv, then, &[], jb, &args);
+            }
+        }
+        self.f.b.switch_to(then);
+        self.block(tb);
+        self.br_join(j, &[]);
+        if let (Some(eb), Some(e)) = (eb, els) {
+            self.f.env = snap;
+            self.f.b.switch_to(eb);
+            if self.nkind(e) == Some(NodeKind::IfStmt) {
+                self.if_stmt(e);
+            } else {
+                self.block(e);
+            }
+            self.br_join(j, &[]);
+        }
+        self.enter_live(j);
+    }
+
+    /// Enters join `j`; if no edge reached it, the code after it is unreachable.
+    fn enter_live(&mut self, j: usize) -> bool {
+        let reached = self.f.joins[j].st.is_some();
+        self.enter(j);
+        if !reached {
+            self.f.b.unreachable();
+        }
+        reached
+    }
+
+    fn while_stmt(&mut self, s: u32, c: u32, b: u32) {
+        let head = self.join(s, &[]);
+        let body = self.f.b.create_block();
+        let exit = self.join(s, &[]);
+        self.br_join(head, &[]);
+        self.enter(head);
+        let bt = self.t_bool();
+        let Some(cv) = self.val(c, Some(bt)) else { return };
+        let args = self.edge(exit, &[]);
+        let eb = self.f.joins[exit].block;
+        self.f.b.cbr(cv, body, &[], eb, &args);
+        self.f.b.switch_to(body);
+        let scope = self.f.scopes.len();
+        self.f.loops.push(LoopCx { head, exit, scope, kind: LoopKind::Plain });
+        self.block(b);
+        self.br_join(head, &[]);
+        self.f.loops.pop();
+        self.enter_live(exit);
+    }
+
+    fn loop_stmt(&mut self, s: u32, b: u32) {
+        let body = self.join(s, &[]);
+        let exit = self.join(s, &[]);
+        self.br_join(body, &[]);
+        self.enter(body);
+        let scope = self.f.scopes.len();
+        self.f.loops.push(LoopCx { head: body, exit, scope, kind: LoopKind::Plain });
+        self.block(b);
+        self.br_join(body, &[]);
+        self.f.loops.pop();
+        self.enter_live(exit);
+    }
+
+    fn step_counter(&mut self, kind: &LoopKind) -> Vec<Operand> {
+        match kind {
+            LoopKind::Plain => Vec::new(),
+            LoopKind::Count { i, ty, end } => {
+                let one = self.int(1);
+                let next = self.op2(Op::AddWrap, *ty, *i, one);
+                match end {
+                    Some(e) => {
+                        let bt = self.t_bool();
+                        let more = self.op2(Op::Ne, bt, *i, *e);
+                        vec![next, more]
+                    }
+                    None => vec![next],
+                }
+            }
+        }
+    }
+
+    fn break_continue(&mut self, tok: u32, is_break: bool) {
+        let Some(lp) = self.f.loops.last().cloned() else {
+            self.fail_at(Some(tok), "break outside a loop");
+            return;
+        };
+        self.drop_temps_keep();
+        self.drop_scopes(lp.scope);
+        if is_break {
+            self.br_join(lp.exit, &[]);
+        } else {
+            let pre = self.step_counter(&lp.kind);
+            self.br_join(lp.head, &pre);
+        }
+        if self.open() {
+            self.f.b.unreachable();
+        }
+    }
+
+    fn return_stmt(&mut self, e: Option<u32>) {
+        let rt = self.f.ret;
+        let v = match e {
+            Some(e) => {
+                let ex = self.expr(e, Some(rt));
+                if matches!(ex, E::Never) {
+                    return;
+                }
+                if self.ret_of(rt).is_some() {
+                    match self.operand_of(ex) {
+                        Some(v) => Some(v),
+                        None => return,
+                    }
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        self.drop_temps_keep();
+        self.drop_scopes(0);
+        if self.open() {
+            self.f.b.ret(v);
+        }
+    }
+
+    // ---------- for ----------
+
+    fn for_stmt(&mut self, f: u32) {
+        let icx = self.icx;
+        let kids = self.kids(f);
+        let Some(&pat) = kids.first() else { return };
+        let Some(iter) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Expr)) else { return };
+        let Some(body) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Block)) else { return };
+        if kids.iter().any(|&c| icx.kind(c) == Some(NodeKind::TailClause)) {
+            self.unsupported(f, "vector code generation is not implemented yet: SIMD chunk loop");
+            return;
+        }
+        if let Some(bt) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type)) {
+            let t = self.lower_type(bt);
+            if matches!(self.kind(t), TypeKind::Vector { .. } | TypeKind::Ref { .. }) {
+                self.unsupported(f, "vector code generation is not implemented yet: SIMD chunk loop");
+                return;
+            }
+        }
+        let core = self.core(iter);
+        let it_ty = self.nty(iter);
+        // ranges: counted loop
+        if let TypeKind::Range { elem, inclusive } = self.kind(it_ty) {
+            if !matches!(self.kind(elem), TypeKind::Int { .. }) {
+                self.unsupported(f, "char ranges in for loops are not supported yet");
+                return;
+            }
+            let bounds = if icx.kind(core) == Some(NodeKind::RangeExpr) {
+                let rk = self.kids(core);
+                let (Some(&l), Some(&r)) = (rk.first(), rk.get(1)) else { return };
+                let Some(a) = self.val(l, Some(elem)) else { return };
+                let Some(b) = self.val(r, Some(elem)) else { return };
+                (a, b)
+            } else {
+                let Some(rv) = self.val(iter, None) else { return };
+                let z = self.int(0);
+                let o = self.int(1);
+                (self.op2(Op::Get, elem, rv, z), self.op2(Op::Get, elem, rv, o))
+            };
+            self.counted_loop(f, pat, body, elem, bounds.0, bounds.1, inclusive, None);
+            return;
+        }
+        // arrays and slices
+        let e = self.expr(iter, None);
+        let Some(p) = self.place_of(e) else { return };
+        match self.kind(p.ty) {
+            TypeKind::Ref { inner, .. } => {
+                let (elem, len) = match self.kind(inner) {
+                    TypeKind::Array { elem, len } => (elem, len.value()),
+                    TypeKind::Slice { elem, .. } => (elem, None),
+                    _ => {
+                        self.iter_loop(f, pat, body, p);
+                        return;
+                    }
+                };
+                let pt = p.ty;
+                let Some(v) = self.read(&p) else { return };
+                let us = self.t_usize();
+                let n = match len {
+                    Some(n) => self.int(n as i128),
+                    None => self.op1(Op::SliceLen, us, v),
+                };
+                let z = self.int(0);
+                let _ = elem;
+                self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Ref(v, pt)));
+            }
+            TypeKind::Array { len, .. } => {
+                let us = self.t_usize();
+                let n = self.int(len.value().unwrap_or(0) as i128);
+                let z = self.int(0);
+                self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Val(p, iter)));
+            }
+            _ => self.iter_loop(f, pat, body, p),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn counted_loop(
+        &mut self,
+        f: u32,
+        pat: u32,
+        body: u32,
+        ty: Ty,
+        start: Operand,
+        end: Operand,
+        inclusive: bool,
+        seq: Option<Seq>,
+    ) {
+        let bt = self.t_bool();
+        let prefix: Vec<Ty> = if inclusive { vec![ty, bt] } else { vec![ty] };
+        let head = self.join(f, &prefix);
+        let bb = self.f.b.create_block();
+        let exit = self.join(f, &[]);
+        let first: Vec<Operand> = if inclusive {
+            let more = self.op2(Op::Le, bt, start, end);
+            vec![start, more]
+        } else {
+            vec![start]
+        };
+        self.br_join(head, &first);
+        self.enter(head);
+        let i = Operand::Value(self.f.joins[head].prefix[0]);
+        let c = if inclusive {
+            Operand::Value(self.f.joins[head].prefix[1])
+        } else {
+            self.op2(Op::Lt, bt, i, end)
+        };
+        let args = self.edge(exit, &[]);
+        let eb = self.f.joins[exit].block;
+        self.f.b.cbr(c, bb, &[], eb, &args);
+        self.f.b.switch_to(bb);
+        let scope = self.f.scopes.len();
+        let kind = LoopKind::Count { i, ty, end: inclusive.then_some(end) };
+        self.f.loops.push(LoopCx { head, exit, scope, kind: kind.clone() });
+        self.push_scope();
+        let item = match seq {
+            None => Some(Place { base: Base::Val(i, ty), proj: Vec::new(), ty, root: None }),
+            Some(Seq::Ref(v, pt)) => {
+                let (inner, m, _) = self.pointee(pt).unwrap_or((TypeId::NONE, false, false));
+                let elem = match self.kind(inner) {
+                    TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => elem,
+                    _ => TypeId::NONE,
+                };
+                let et = self.t_ref(m, elem);
+                let a = self.op2(Op::ElemAddr, et, v, i);
+                Some(Place { base: Base::Val(a, et), proj: Vec::new(), ty: et, root: None })
+            }
+            Some(Seq::Val(mut p, iter)) => {
+                let elem = match self.kind(p.ty) {
+                    TypeKind::Array { elem, .. } => elem,
+                    _ => TypeId::NONE,
+                };
+                let tok = self.icx.a(iter);
+                p.proj.push(Proj::Elem(i, elem, tok));
+                p.ty = elem;
+                Some(p)
+            }
+        };
+        if let Some(item) = item {
+            let _ = self.pat(pat, item, Mode::Move, None, false);
+        }
+        self.block(body);
+        self.pop_scope();
+        if self.open() {
+            let pre = self.step_counter(&kind);
+            self.br_join(head, &pre);
+        }
+        self.f.loops.pop();
+        self.enter_live(exit);
+    }
+
+    fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place) {
+        let it = match it.base {
+            Base::Val(..) | Base::Local(_) => {
+                let t = it.ty;
+                let Some(v) = self.read(&it) else { return };
+                let (s, st) = self.spill(v, t, false);
+                Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: None }
+            }
+            _ => it,
+        };
+        let w = self.g.world();
+        let Some(next) = self.g.prog.strings.lookup("next") else {
+            self.fail(f, "no `next` method");
+            return;
+        };
+        let m = match w.lookup_method(&mut self.tys, it.ty, next, &[]) {
+            crate::traits::Lookup::Found { m, .. } => m,
+            _ => {
+                self.fail(f, "no `next` method");
+                return;
+            }
+        };
+        let gargs: Vec<GArg> = match &m {
+            crate::traits::MethodRef::Impl { impl_args, .. } => impl_args.clone(),
+            _ => Vec::new(),
+        };
+        let Some(Resolved::Inst(k)) = self.resolve_method(&m, &gargs) else {
+            self.fail(f, "unresolved `next`");
+            return;
+        };
+        let Some((ps, ret)) = self.inst_sig(&k) else { return };
+        let head = self.join(f, &[]);
+        let bb = self.f.b.create_block();
+        let exit = self.join(f, &[]);
+        self.br_join(head, &[]);
+        self.enter(head);
+        let want = ps.first().copied();
+        let Some(a) = self.addr(&it, want) else { return };
+        let tok = self.icx.a(f);
+        let r = self.call_inst(k, &[a], tok);
+        let Some(rv) = self.operand_of(r) else { return };
+        let u32t = self.t_u32();
+        let tag = self.op1(Op::EnumTag, u32t, rv);
+        let some = self.int(self.g.opt_some as i128);
+        let bt = self.t_bool();
+        let c = self.op2(Op::Eq, bt, tag, some);
+        let args = self.edge(exit, &[]);
+        let eb = self.f.joins[exit].block;
+        self.f.b.cbr(c, bb, &[], eb, &args);
+        self.f.b.switch_to(bb);
+        let scope = self.f.scopes.len();
+        self.f.loops.push(LoopCx { head, exit, scope, kind: LoopKind::Plain });
+        self.push_scope();
+        let xt = match self.kind(ret) {
+            TypeKind::Adt { args, .. } => match args.first() {
+                Some(GArg::Type(t)) => *t,
+                _ => TypeId::NONE,
+            },
+            _ => TypeId::NONE,
+        };
+        let (s, z) = (self.int(self.g.opt_some as i128), self.int(0));
+        let x = self.opn(Op::EnumGet, xt, &[rv, s, z]);
+        let item = Place { base: Base::Val(x, xt), proj: Vec::new(), ty: xt, root: None };
+        let _ = self.pat(pat, item, Mode::Move, None, false);
+        self.block(body);
+        self.pop_scope();
+        self.br_join(head, &[]);
+        self.f.loops.pop();
+        self.enter_live(exit);
+    }
+
+    // ---------- match ----------
+
+    pub fn match_expr(&mut self, n: u32) -> E {
+        let kids = self.kids(n);
+        self.lower_match(n, &kids, true)
+    }
+
+    /// The top-level test of pattern `p` against a value of (peeled) type `t`.
+    fn top_of(&self, p: u32, t: Ty) -> Top {
+        let icx = self.icx;
+        let a = icx.a(p);
+        if icx.is(a, Term::Underscore) || icx.is(a, Term::KwMut) {
+            return Top::Any;
+        }
+        let kids = icx.kids_vec(p);
+        if let Some(&l) = kids.first()
+            && icx.kind(l) == Some(NodeKind::Literal)
+        {
+            if kids.len() != 1 {
+                return Top::Complex;
+            }
+            return match lit_int(icx, l) {
+                Some(v) if !matches!(self.tys.kind(t), TypeKind::Float(_)) => Top::Value(v),
+                _ => Top::Complex,
+            };
+        }
+        if icx.is(a, Term::LParen) {
+            let close = icx.close(a);
+            if kids.len() == 1 && !icx.is(close - 1, Term::Comma) {
+                return self.top_of(kids[0], t);
+            }
+            return Top::Complex;
+        }
+        if !icx.is(a, Term::Ident) {
+            return Top::Complex;
+        }
+        let e = icx.chain_end(a);
+        if e == a && !icx.is(e + 1, Term::LParen) && !icx.is(e + 1, Term::DotLBrace) {
+            return Top::Any;
+        }
+        let Some(u) = icx.uses(p).last() else { return Top::Complex };
+        let Res::Decl(d) = u.res else { return Top::Complex };
+        match self.decl_kind(d) {
+            Some(DeclKind::Variant) => Top::Value(self.g.prog.decl(d).map_or(0, |x| x.index) as i128),
+            Some(DeclKind::Const) => match self.g.sigs.konst(d).and_then(|c| c.value.clone()) {
+                Some(crate::consteval::Val::Int(v)) => Top::Value(v),
+                Some(crate::consteval::Val::Bool(b)) => Top::Value(i128::from(b)),
+                Some(crate::consteval::Val::Char(c)) => Top::Value(c as i128),
+                _ => Top::Complex,
+            },
+            _ => Top::Complex,
+        }
+    }
+
+    /// Peels references of a scrutinee place (pattern binding modes, patterns.rs).
+    fn peel(&mut self, mut p: Place, mut mode: Mode) -> Option<(Place, Mode)> {
+        for _ in 0..1_000_000 {
+            match self.kind(p.ty) {
+                TypeKind::Ref { mutable, .. } => {
+                    let v = self.peek(&p)?;
+                    let t = p.ty;
+                    p = self.deref(v, t);
+                    mode = match mode {
+                        Mode::Move => Mode::Ref(mutable),
+                        Mode::Ref(m) => Mode::Ref(m && mutable),
+                    };
+                }
+                _ => break,
+            }
+        }
+        Some((p, mode))
+    }
+
+    pub fn lower_match(&mut self, n: u32, kids: &[u32], is_expr: bool) -> E {
+        let icx = self.icx;
+        let Some(&scrut) = kids.first() else { return self.fail(n, "match") };
+        let arms = &kids[1..];
+        let ty = if is_expr { self.nty(n) } else { TypeId::NONE };
+        let vt = if !is_expr || ty.is_none() || self.is_never(ty) { self.t_unit() } else { ty };
+        // blocks: per arm test, guard, body; then join
+        struct ArmB {
+            pat: u32,
+            guard: Option<u32>,
+            body: u32,
+            test: Block,
+            gb: Option<Block>,
+            bb: Block,
+        }
+        let mut ab: Vec<ArmB> = Vec::with_capacity(arms.len());
+        for &arm in arms {
+            let ak = icx.kids_vec(arm);
+            let (Some(&pat), Some(&body)) = (ak.first(), ak.last()) else { continue };
+            let guard = if ak.len() >= 3 { Some(ak[1]) } else { None };
+            let test = self.f.b.create_block();
+            let gb = guard.map(|_| self.f.b.create_block());
+            let bb = self.f.b.create_block();
+            ab.push(ArmB { pat, guard, body, test, gb, bb });
+        }
+        let pre: Vec<Ty> = if is_expr { vec![vt] } else { Vec::new() };
+        let j = self.join(n, &pre);
+        let e = self.expr(scrut, None);
+        let Some(sp) = self.place_of(e) else { return E::Never };
+        let Some((dp, _)) = self.peel(sp.clone(), Mode::Move) else { return E::Never };
+        let dk = self.kind(dp.ty);
+        let tops: Vec<Top> = ab.iter().map(|a| self.top_of(a.pat, dp.ty)).collect();
+        let discr = matches!(dk, TypeKind::Int { .. } | TypeKind::Bool | TypeKind::Char)
+            || matches!(&dk, TypeKind::Adt { def, .. } if self.g.sigs.adt(*def).is_some_and(|a| a.is_enum));
+        let switch_mode = discr
+            && !ab.is_empty()
+            && tops.iter().all(|t| *t != Top::Complex)
+            && tops.iter().any(|t| matches!(t, Top::Value(_)));
+        let snap = self.f.env.clone();
+        let scope_base = self.f.scopes.len();
+        let nb = ab.len();
+        let mut unreach: Option<Block> = None;
+        let mut fail_of: Vec<Option<Block>> = vec![None; nb];
+        if switch_mode {
+            let d = if matches!(dk, TypeKind::Adt { .. }) {
+                let Some(v) = self.peek(&dp) else { return E::Never };
+                let u32t = self.t_u32();
+                self.op1(Op::EnumTag, u32t, v)
+            } else {
+                let Some(v) = self.peek(&dp) else { return E::Never };
+                // a constant scrutinee: `switch` takes a value
+                match (v, &dk) {
+                    (Operand::Const(_), TypeKind::Bool) => {
+                        let one = self.int(1);
+                        let bt = self.t_bool();
+                        self.op2(Op::Eq, bt, v, one)
+                    }
+                    (Operand::Const(_), _) => {
+                        let t = dp.ty;
+                        self.op1(Op::Cast(stave_ir::CastKind::Exact), t, v)
+                    }
+                    _ => v,
+                }
+            };
+            let default = tops.iter().position(|t| *t == Top::Any).unwrap_or(nb - 1);
+            let mut cases: Vec<(i128, Block, &[Operand])> = Vec::new();
+            for (k, t) in tops.iter().enumerate().take(default) {
+                if let Top::Value(v) = t
+                    && !cases.iter().any(|c| c.0 == *v)
+                {
+                    cases.push((*v, ab[k].test, &[]));
+                }
+            }
+            self.f.b.switch(d, &cases, ab[default].test, &[]);
+            for (k, f) in fail_of.iter_mut().enumerate() {
+                let next = ((k + 1)..nb).find(|&m| match (tops[k], tops[m]) {
+                    (_, Top::Any) => true,
+                    (Top::Value(a), Top::Value(b)) => a == b,
+                    _ => false,
+                });
+                *f = next.map(|m| ab[m].test);
+            }
+        } else {
+            match ab.first() {
+                Some(a0) => self.f.b.br(a0.test, &[]),
+                None => self.f.b.unreachable(),
+            }
+            for (k, f) in fail_of.iter_mut().enumerate() {
+                *f = ab.get(k + 1).map(|a| a.test);
+            }
+        }
+        for k in 0..nb {
+            let fail = match fail_of[k] {
+                Some(b) => b,
+                None => *unreach.get_or_insert_with(|| self.f.b.create_block()),
+            };
+            self.f.env = snap.clone();
+            self.f.b.switch_to(ab[k].test);
+            self.push_scope();
+            let ok = self.pat(ab[k].pat, sp.clone(), Mode::Move, Some(fail), switch_mode);
+            if ok {
+                if let (Some(g), Some(gb)) = (ab[k].guard, ab[k].gb) {
+                    self.f.b.br(gb, &[]);
+                    self.f.b.switch_to(gb);
+                    let bt = self.t_bool();
+                    if let Some(gv) = self.val(g, Some(bt)) {
+                        self.f.b.cbr(gv, ab[k].bb, &[], fail, &[]);
+                    }
+                } else if self.open() {
+                    self.f.b.br(ab[k].bb, &[]);
+                }
+                self.f.b.switch_to(ab[k].bb);
+                if is_expr {
+                    let w = Some(vt);
+                    if let Some(v) = self.val(ab[k].body, w) {
+                        self.drop_temps_keep();
+                        self.pop_scope();
+                        self.br_join(j, &[v]);
+                    }
+                } else {
+                    self.block(ab[k].body);
+                    self.pop_scope();
+                    self.br_join(j, &[]);
+                }
+            }
+            // keep the scope stack balanced on diverging arms
+            self.f.scopes.truncate(scope_base);
+        }
+        if let Some(u) = unreach {
+            self.f.b.switch_to(u);
+            self.f.b.unreachable();
+        }
+        let reached = self.enter_live(j);
+        if !reached {
+            return E::Never;
+        }
+        if is_expr { E::V(Operand::Value(self.f.joins[j].prefix[0]), vt) } else { E::Unit }
+    }
+
+    /// Tests pattern `p` against place `place` (branching to `fail` on mismatch) and binds its
+    /// names. `skip_top`: the top-level discriminant was already tested (switch).
+    fn pat(&mut self, p: u32, place: Place, mode: Mode, fail: Option<Block>, skip_top: bool) -> bool {
+        let icx = self.icx;
+        let a = icx.a(p);
+        if icx.is(a, Term::Underscore) {
+            return true;
+        }
+        if icx.is(a, Term::KwMut) {
+            return self.bind_name(p, place, mode);
+        }
+        let kids = icx.kids_vec(p);
+        if let Some(&l0) = kids.first()
+            && icx.kind(l0) == Some(NodeKind::Literal)
+        {
+            if icx.is(icx.a(l0), Term::StrLit) {
+                self.unsupported(p, "string literal patterns are not supported yet");
+                return false;
+            }
+            let Some((dp, _)) = self.peel(place, mode) else { return false };
+            if skip_top {
+                return true;
+            }
+            return self.lit_test(p, &kids, dp, fail);
+        }
+        if icx.is(a, Term::LParen) {
+            let close = icx.close(a);
+            if kids.len() == 1 && !icx.is(close - 1, Term::Comma) {
+                return self.pat(kids[0], place, mode, fail, skip_top);
+            }
+            let Some((dp, pm)) = self.peel(place, mode) else { return false };
+            let ets = match self.kind(dp.ty) {
+                TypeKind::Tuple(ts) => ts.to_vec(),
+                _ => {
+                    self.fail(p, "tuple pattern type");
+                    return false;
+                }
+            };
+            for (i, &k) in kids.iter().enumerate() {
+                let mut sp = dp.clone();
+                let et = ets.get(i).copied().unwrap_or(TypeId::NONE);
+                sp.proj.push(Proj::Field(i as u32, et));
+                sp.ty = et;
+                if !self.pat(k, sp, pm, fail, false) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if !icx.is(a, Term::Ident) {
+            self.fail(p, "pattern");
+            return false;
+        }
+        let e = icx.chain_end(a);
+        let has_paren = icx.is(e + 1, Term::LParen);
+        let has_rec = icx.is(e + 1, Term::DotLBrace);
+        if e == a && !has_paren && !has_rec {
+            return self.bind_name(p, place, mode);
+        }
+        let Some(u) = icx.uses(p).last() else {
+            self.fail(p, "unresolved pattern");
+            return false;
+        };
+        let Res::Decl(d) = u.res else {
+            self.fail(p, "pattern");
+            return false;
+        };
+        let Some((dp, pm)) = self.peel(place, mode) else { return false };
+        match self.decl_kind(d) {
+            Some(DeclKind::Variant | DeclKind::Struct) => {
+                let is_variant = self.decl_kind(d) == Some(DeclKind::Variant);
+                let vi = if is_variant { self.g.prog.decl(d).map_or(0, |x| x.index) } else { 0 };
+                let Some(fts) = self.adt_fields(dp.ty).and_then(|v| v.get(vi as usize).cloned()) else {
+                    self.fail(p, "pattern type");
+                    return false;
+                };
+                if is_variant && !skip_top {
+                    let Some(v) = self.peek(&dp) else { return false };
+                    let u32t = self.t_u32();
+                    let tag = self.op1(Op::EnumTag, u32t, v);
+                    let want = self.int(vi as i128);
+                    let bt = self.t_bool();
+                    let c = self.op2(Op::Eq, bt, tag, want);
+                    if !self.test(c, fail) {
+                        return false;
+                    }
+                }
+                let sub = |s: &mut Self, fi: usize| -> Place {
+                    let mut sp = dp.clone();
+                    let ft = fts.get(fi).copied().unwrap_or(TypeId::NONE);
+                    if is_variant {
+                        sp.proj.push(Proj::EnumField(vi, fi as u32, ft));
+                    } else {
+                        sp.proj.push(Proj::Field(fi as u32, ft));
+                    }
+                    sp.ty = ft;
+                    let _ = s;
+                    sp
+                };
+                if has_rec {
+                    let adt = match self.kind(dp.ty) {
+                        TypeKind::Adt { def, .. } => def,
+                        _ => return false,
+                    };
+                    let names: Vec<crate::ids::Sym> = self
+                        .g
+                        .sigs
+                        .adt(adt)
+                        .and_then(|ad| ad.variants.get(vi as usize))
+                        .map(|v| v.fields.iter().map(|f| f.name).collect())
+                        .unwrap_or_default();
+                    for fp in kids {
+                        if icx.kind(fp) != Some(NodeKind::FieldPat) {
+                            continue;
+                        }
+                        let name = icx.sym(icx.a(fp));
+                        let Some(fi) = names.iter().position(|&x| x == name) else {
+                            self.fail(fp, "unknown field");
+                            return false;
+                        };
+                        let sp = sub(self, fi);
+                        let ok = match icx.child(fp, NodeKind::Pattern) {
+                            Some(sub_p) => self.pat(sub_p, sp, pm, fail, false),
+                            None => self.bind_name(fp, sp, pm),
+                        };
+                        if !ok {
+                            return false;
+                        }
+                    }
+                } else if has_paren {
+                    for (fi, &k) in kids.iter().enumerate() {
+                        let sp = sub(self, fi);
+                        if !self.pat(k, sp, pm, fail, false) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            Some(DeclKind::Const) => {
+                if skip_top {
+                    return true;
+                }
+                let Some(c) = self.g.sigs.konst(d) else { return false };
+                let (ct, Some(cv)) = (c.ty, c.value.clone()) else { return false };
+                let ce = self.const_val(&cv, ct, a);
+                let Some(k) = self.operand_of(ce) else { return false };
+                let Some(v) = self.peek(&dp) else { return false };
+                let bt = self.t_bool();
+                let c = self.op2(Op::Eq, bt, v, k);
+                self.test(c, fail)
+            }
+            _ => {
+                self.fail(p, "pattern");
+                false
+            }
+        }
+    }
+
+    /// Branches to `fail` unless `c`; continues in a fresh block.
+    fn test(&mut self, c: Operand, fail: Option<Block>) -> bool {
+        let Some(fail) = fail else {
+            // an irrefutable context: the test cannot fail
+            return true;
+        };
+        let cont = self.f.b.create_block();
+        self.f.b.cbr(c, cont, &[], fail, &[]);
+        self.f.b.switch_to(cont);
+        true
+    }
+
+    fn lit_test(&mut self, p: u32, lits: &[u32], dp: Place, fail: Option<Block>) -> bool {
+        let icx = self.icx;
+        let t = dp.ty;
+        let Some(v) = self.peek(&dp) else { return false };
+        let bt = self.t_bool();
+        let lit = |s: &mut Self, l: u32| -> Option<Operand> {
+            let a = s.icx.a(l);
+            let (neg, tok) = if s.icx.is(a, Term::Minus) { (true, a + 1) } else { (false, a) };
+            if s.icx.is(tok, Term::KwTrue) || s.icx.is(tok, Term::KwFalse) {
+                return Some(s.int(i128::from(s.icx.is(tok, Term::KwTrue))));
+            }
+            if s.icx.is(tok, Term::CharLit) {
+                let c = crate::literals::parse_char(s.icx.tok_str(tok))?;
+                return Some(s.int(c as i128));
+            }
+            let e = s.literal(tok, neg, t);
+            s.operand_of(e)
+        };
+        let c = if lits.len() == 2 {
+            let inclusive = icx.is(icx.end_tok(lits[0]) + 1, Term::DotDotEq);
+            let Some(lo) = lit(self, lits[0]) else { return false };
+            let Some(hi) = lit(self, lits[1]) else { return false };
+            let a = self.op2(Op::Ge, bt, v, lo);
+            let b = self.op2(if inclusive { Op::Le } else { Op::Lt }, bt, v, hi);
+            self.op2(Op::And, bt, a, b)
+        } else {
+            let Some(k) = lit(self, lits[0]) else { return false };
+            self.op2(Op::Eq, bt, v, k)
+        };
+        let _ = p;
+        self.test(c, fail)
+    }
+
+    /// Binds the local of binding node `b` to the place (by value or by reference).
+    fn bind_name(&mut self, b: u32, place: Place, mode: Mode) -> bool {
+        let Some(&l) = self.by_node.get(&b) else {
+            self.fail(b, "binding without a local");
+            return false;
+        };
+        let lt = self.locals[l].ty;
+        let v = match mode {
+            Mode::Move => self.read(&place),
+            Mode::Ref(_) => self.addr(&place, Some(lt)),
+        };
+        let Some(v) = v else { return false };
+        self.bind(l, Some(v));
+        true
+    }
+}
+
+/// Element source of a counted `for` loop.
+enum Seq {
+    /// `&[T]` / `&[T; N]`: the pointer and its type; the binding is `&T` (`&mut T`).
+    Ref(Operand, Ty),
+    /// An array value (place) and the iterable's node; the binding is `T`.
+    Val(Place, u32),
+}
+
+fn compound_op(opt: u8) -> Term {
+    let m = |t: Term| t as u8 == opt;
+    if m(Term::PlusEq) {
+        Term::Plus
+    } else if m(Term::MinusEq) {
+        Term::Minus
+    } else if m(Term::StarEq) {
+        Term::Star
+    } else if m(Term::SlashEq) {
+        Term::Slash
+    } else if m(Term::PercentEq) {
+        Term::Percent
+    } else if m(Term::PlusPercentEq) {
+        Term::PlusPercent
+    } else if m(Term::MinusPercentEq) {
+        Term::MinusPercent
+    } else if m(Term::StarPercentEq) {
+        Term::StarPercent
+    } else if m(Term::PlusPipeEq) {
+        Term::PlusPipe
+    } else if m(Term::MinusPipeEq) {
+        Term::MinusPipe
+    } else if m(Term::StarPipeEq) {
+        Term::StarPipe
+    } else if m(Term::AmpEq) {
+        Term::Amp
+    } else if m(Term::PipeEq) {
+        Term::Pipe
+    } else if m(Term::CaretEq) {
+        Term::Caret
+    } else if m(Term::LtLtEq) {
+        Term::LtLt
+    } else if m(Term::GtGtEq) {
+        Term::GtGt
+    } else {
+        Term::LtLtPercent
+    }
+}
+
+/// The int value of an int, char, or bool literal node.
+fn lit_int(icx: crate::itemcx::ItemCx<'_>, l: u32) -> Option<i128> {
+    let a = icx.a(l);
+    let (neg, t) = if icx.is(a, Term::Minus) { (true, a + 1) } else { (false, a) };
+    if icx.is(t, Term::IntLit) {
+        let (mag, _) = crate::literals::parse_int(icx.tok_str(t))?;
+        let v = mag as i128;
+        return Some(if neg { -v } else { v });
+    }
+    if icx.is(t, Term::CharLit) {
+        return crate::literals::parse_char(icx.tok_str(t)).map(|c| c as i128);
+    }
+    if icx.is(t, Term::KwTrue) {
+        return Some(1);
+    }
+    if icx.is(t, Term::KwFalse) {
+        return Some(0);
+    }
+    None
+}

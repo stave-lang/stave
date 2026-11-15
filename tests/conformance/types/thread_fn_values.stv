@@ -1,0 +1,23 @@
+//~ CHECK-ONLY
+// `thread.join`, `thread.par_for`, and `thread.par_for_mut` check the captures of the closure
+// passed to them at the call. They are never fn values (E0807 case `thread`): a call through
+// the value would skip E0802 and E0806.
+import std.thread;
+
+fn par_for_value() -> usize {
+    let mut n: usize = 0;
+    let pf = thread.par_for; //~ ERROR E0807
+    pf(0, 8, fn(i: usize) { n = n + i; });
+    return n;
+}
+
+fn join_value() -> u32 {
+    let j: fn(fn() -> u32, fn() -> u32) -> (u32, u32) = thread.join; //~ ERROR E0807
+    let (a, b) = j(fn() -> u32 { return 1; }, fn() -> u32 { return 2; });
+    return a + b;
+}
+
+fn par_for_mut_value(xs: &mut [u64]) {
+    let m: fn(&mut [u64], fn(usize, &mut u64)) = thread.par_for_mut; //~ ERROR E0807
+    m(xs, fn(i: usize, x: &mut u64) { *x = 0; });
+}

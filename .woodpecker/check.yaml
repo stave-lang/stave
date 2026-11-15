@@ -1,0 +1,16 @@
+# Per-change gates.
+when:
+  - event: [push, pull_request]
+steps:
+  - name: check
+    image: rust:1.100
+    environment: { CI: "1" }
+    commands:
+      - rustup component add rustfmt clippy
+      - sh tools/ci-step/run.sh check
+  # `stave unsafe-report --json` diff against main, printed in the run log.
+  - name: unsafe-report-diff
+    image: rust:1.100
+    environment: { CI: "1" }
+    commands:
+      - sh tools/ci-step/run.sh unsafe-diff

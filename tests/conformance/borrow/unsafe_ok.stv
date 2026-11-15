@@ -1,0 +1,31 @@
+//~ CHECK-ONLY
+// Every unsafe form with its obligation string: accepted, and listed by
+// `stave unsafe-report`.
+extern "C" {
+    fn puts(s: *const u8) -> i32;
+}
+
+unsafe("implementers keep `bits` a valid address") trait Addr {
+    fn bits(&self) -> usize;
+}
+
+struct Slot { pub v: u64 }
+
+unsafe("`bits` is the address of a live Slot") impl Addr for Slot {
+    fn bits(&self) -> usize { return 8; }
+}
+
+unsafe("p is valid for reads") fn read_raw(p: *const u8) -> u8 {
+    return unsafe("the caller guarantees p is valid") *p;
+}
+
+fn main() -> i32 {
+    let x: u8 = 7;
+    let p = &x as *const u8;
+    let a: u8 = unsafe("p points to x") read_raw(p);
+    unsafe("puts is given a NUL-terminated string") {
+        let s: [u8; 3] = [104, 105, 0];
+        let n: i32 = puts(&s[0] as *const u8);
+    }
+    return 0;
+}

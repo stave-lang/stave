@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// `import a.b;` binds `b`, `import a.b as c;` binds `c`; a path starts with the package's own
+// name, a dependency name, or a module of the package. `src/geo.stv` and `src/geo/` coexist.
+import geo;
+import geo.shapes;
+import geo.shapes as s;
+import util;
+import util.extra;
+import imports.geo.shapes as again;
+import geo.missing; //~ ERROR E0101
+import nowhere.at.all as gone; //~ ERROR E0101
+
+fn s() -> i32 { //~ ERROR E0105
+    return 0;
+}
+
+fn main() -> i32 {
+    let a: i32 = geo.origin();
+    let b: i32 = shapes.unit();
+    let c: i32 = s.unit();
+    let d: i32 = util.base() + extra.more();
+    let e: i32 = again.unit();
+    let f: i32 = missing.anything() + gone.nothing();
+    let g: i32 = geo.shapes.unit(); //~ ERROR E0101
+    return a + b + c + d + e + f + g;
+}

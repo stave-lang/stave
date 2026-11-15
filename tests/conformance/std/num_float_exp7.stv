@@ -1,0 +1,32 @@
+//~ STDOUT num_float_exp7.stdout
+// std.num.parse_f64 reads seven-digit exponents exactly: they matter only with about 10^6
+// digits, as in 0.(M zeros)1e(M + 1) = 1 and 1(M zeros)e-M = 1 (an exponent cut at six digits
+// gives 0 and inf).
+import std.io;
+import std.num;
+import std.string;
+
+const M: usize = 1000000;
+
+fn zeros(s: &mut string.String, n: usize) {
+    for i in 0..(n / 10) { s.push_str("0000000000"); }
+}
+
+fn show(label: &str, t: &string.String) {
+    match num.parse_f64(t.as_str()) {
+        Option.Some(x) => { io.print(label); io.print(f" {x}\n"); }
+        Option.None => { io.print(label); io.print(" none\n"); }
+    }
+}
+
+fn main() -> i32 {
+    let mut p = string.String.from_str("0.");
+    zeros(&mut p, M);
+    p.push_str("1e1000001");
+    show("frac", &p);
+    let mut q = string.String.from_str("1");
+    zeros(&mut q, M);
+    q.push_str("e-1000000");
+    show("int", &q);
+    return 0;
+}

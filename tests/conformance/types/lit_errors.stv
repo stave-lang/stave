@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+// E0202: a literal with no context; E0201: a lower rule disagrees with a higher one; E0203: out
+// of range (a folded `-` included).
+fn errors() {
+    let k = 1 + 2; //~ ERROR E0202
+    let f = 1.5; //~ ERROR E0202
+    let x: u8 = 5u16; //~ ERROR E0201
+    let ok: i8 = -128i8;
+    let too: i8 = 128i8; //~ ERROR E0203
+    let low: i8 = -129; //~ ERROR E0203
+    let neg: u32 = -1; //~ ERROR E0203
+    let big: u8 = 256; //~ ERROR E0203
+    let fl: f32 = 1e39; //~ ERROR E0203
+    let bad = 12abc; //~ ERROR E0203
+    5; //~ ERROR E0202
+}
+
+fn main() -> i32 {
+    return 0;
+}

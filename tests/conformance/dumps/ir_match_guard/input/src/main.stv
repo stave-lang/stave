@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// ir golden: `match` statement and expression with guards over an enum: per arm test,
+// guard, body; then the join.
+enum Shape { Dot, Line(u32), Box { w: u32, h: u32 } }
+
+fn area(s: Shape, big: bool) -> u32 {
+    let mut a: u32 = 0;
+    match s {
+        Shape.Dot => { a = 1; }
+        Shape.Line(n) if big => { a = n * 2; }
+        Shape.Line(n) => { a = n; }
+        Shape.Box.{ w, h } => { a = w * h; }
+    }
+    return a;
+}
+
+fn kind(x: u8, odd: bool) -> u32 {
+    return match x {
+        0 => 10,
+        1 if odd => 11,
+        _ => 12,
+    };
+}
+
+fn main() -> i32 {
+    let a = area(Shape.Box.{ w: 2, h: 3 }, false);
+    let k = kind(1, true);
+    return if a + k == 17 then 0 else 1;
+}

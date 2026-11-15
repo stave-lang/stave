@@ -1,0 +1,43 @@
+//~ CHECK-ONLY
+// D4: each step of a dotted chain resolves left to right to a module, type, variant, or
+// method; after the first value, steps are fields and methods (type checking).
+import std.io;
+
+enum Shape { Circle(f64), Rect { w: f64, h: f64 }, Empty }
+
+struct Outer { pub inner: Inner }
+
+struct Inner { pub w: f64 }
+
+impl Inner {
+    pub fn new(w: f64) -> Inner { return Inner.{ w: w }; }
+    pub fn twice(&self) -> f64 { return self.w * 2.0; }
+}
+
+trait Area { fn area(&self) -> f64; }
+
+impl Area for Inner {
+    fn area(&self) -> f64 { return self.w * self.w; }
+}
+
+fn width(o: Outer) -> f64 {
+    return o.inner.w;
+}
+
+fn main() -> i32 {
+    let c = Shape.Circle(1.0);
+    let r = Shape.Rect.{ w: 2.0, h: 3.0 };
+    let e = Shape.Empty;
+    let i = Inner.new(4.0);
+    let a: f64 = Area.area(&i);
+    let t: f64 = i.twice();
+    let o = Outer.{ inner: Inner.new(1.0) };
+    io.print(f"w = {o.inner.w}\n");
+    let w0: f64 = width(o);
+    match r {
+        Shape.Rect.{ w, h: hh } => { io.print(f"{w} {hh}\n"); }
+        Shape.Circle(x) => { io.print(f"{x}\n"); }
+        Shape.Empty => { }
+    }
+    return 0;
+}

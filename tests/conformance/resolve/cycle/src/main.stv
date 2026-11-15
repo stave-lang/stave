@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// E0102: imports must be acyclic. One error per strongly connected component, at the import
+// of the cycle's smallest module (`a`) of the next one; the module importing itself is a cycle.
+import a;
+import solo;
+
+fn main() -> i32 {
+    return a.one() + solo.x();
+}

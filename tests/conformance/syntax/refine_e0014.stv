@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// contracts/parse-errors.md rule 3: `Name { .. }` struct literals and patterns.
+struct S { a: i32 }
+
+fn literal() {
+    let s = S { a: 1 }; //~ ERROR E0014
+}
+
+fn empty_literal() {
+    let s = S {}; //~ ERROR E0014
+}
+
+fn pattern(x: S) {
+    match x {
+        S { a } => { } //~ ERROR E0014
+    }
+}
+
+fn block_shape(x: S) {
+    if x == S { a: 1 } { } //~ ERROR E0014
+}

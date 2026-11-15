@@ -1,0 +1,13 @@
+// Root for checking the shipped std and runtime: every std module is imported.
+import std.io;
+import std.vec;
+import std.string;
+import std.fmt;
+import std.num;
+import std.mem;
+import std.debug;
+
+fn main() -> i32 {
+    io.print("ok\n");
+    return 0;
+}

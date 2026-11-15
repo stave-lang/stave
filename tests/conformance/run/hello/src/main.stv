@@ -1,0 +1,7 @@
+// The smallest run test: one line on stdout, exit 0.
+import std.io;
+
+fn main() -> i32 {
+    io.print("hello\n");
+    return 0;
+}

@@ -1,0 +1,50 @@
+//~ CHECK-ONLY
+// Assigning to a part of a maybe-moved value uses the moved value (the assignment would drop
+// the old part, which the move took). Assigning the whole value, or a part that was moved out
+// itself, re-initializes it.
+import std.string;
+
+struct S { pub a: string.String, pub b: string.String }
+
+fn mk() -> S {
+    return S.{ a: string.String.new(), b: string.String.new() };
+}
+
+fn take(s: S) -> usize {
+    return s.a.len();
+}
+
+fn partial(c: bool) {
+    let mut s = mk();
+    if c {
+        let t = s;
+    }
+    s.a = string.String.new(); //~ ERROR E0502
+}
+
+fn same_stmt() {
+    let mut s = mk();
+    s.a = string.String.new();
+    let n: usize = take(s);
+    s.b = string.String.new(); //~ ERROR E0502
+}
+
+fn whole(c: bool) -> usize {
+    let mut s = mk();
+    if c {
+        let n: usize = take(s);
+    }
+    s = mk();
+    return s.a.len();
+}
+
+fn field_moved() -> usize {
+    let mut s = mk();
+    let t = s.a;
+    s.a = string.String.new();
+    return s.a.len() + t.len();
+}
+
+fn main() -> i32 {
+    return 0;
+}

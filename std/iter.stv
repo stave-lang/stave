@@ -1,0 +1,72 @@
+// std.iter: view iterators.
+//
+// A `for` loop over a value with `fn next(&mut self) -> Option<X>` calls it until None.
+// Iterators over borrowed data are views: `next` returns `Option<&T> from copy self`, so an
+// item may outlive the borrow of the iterator itself (LANG.md §3 origin table, `from copy`).
+//   iter(xs)        SliceIter over &[T], items &T
+//   it.map(f)       Map: items f(&T) (f a fn value, so Map is a view)
+//   zip(xs, ys)     Zip: items (&A, &B) until the shorter slice ends
+// ASSUMPTION: no iterator trait yet (generic adapters need trait methods returning views);
+// map and zip are defined over SliceIter only.
+
+import std.core;
+
+pub view struct SliceIter<T> {
+    s: &[T],
+    i: usize,
+}
+
+pub fn iter<T>(xs: &[T]) -> SliceIter<T> from xs {
+    return SliceIter::<T>.{ s: xs, i: 0 };
+}
+
+impl<T> SliceIter<T> {
+    pub fn next(&mut self) -> Option<&T> from copy self {
+        if self.i >= self.s.len() { return Option.None; }
+        let k = self.i;
+        self.i = k + 1;
+        return Option.Some(&self.s[k]);
+    }
+
+    // Items not yet returned.
+    pub fn len(&self) -> usize {
+        return self.s.len() - self.i;
+    }
+
+    pub fn map<U>(self, f: fn(&T) -> U) -> Map<T, U> from self, f {
+        return Map::<T, U>.{ it: self, f: f };
+    }
+}
+
+pub view struct Map<T, U> {
+    it: SliceIter<T>,
+    f: fn(&T) -> U,
+}
+
+impl<T, U> Map<T, U> {
+    pub fn next(&mut self) -> Option<U> from copy self {
+        let f = self.f;
+        return match self.it.next() {
+            Option.Some(x) => Option.Some(f(x)),
+            Option.None => Option.None,
+        };
+    }
+}
+
+pub view struct Zip<A, B> {
+    a: SliceIter<A>,
+    b: SliceIter<B>,
+}
+
+pub fn zip<A, B>(xs: &[A], ys: &[B]) -> Zip<A, B> from xs, ys {
+    return Zip::<A, B>.{ a: iter(xs), b: iter(ys) };
+}
+
+impl<A, B> Zip<A, B> {
+    pub fn next(&mut self) -> Option<(&A, &B)> from copy self {
+        if self.a.len() == 0 || self.b.len() == 0 { return Option.None; }
+        let x = self.a.next().unwrap();
+        let y = self.b.next().unwrap();
+        return Option.Some((x, y));
+    }
+}

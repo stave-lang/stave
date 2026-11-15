@@ -1,0 +1,352 @@
+// std.fmt: Display for the integer types, bool, char, f32, and f64.
+//
+// Floats print the shortest digits that parse back to the same value, the nearest such digits
+// to the exact value when several qualify (Schubfach, R. Giulietti; integer only, on
+// `mul_wide`), in the Stave float text form:
+//   decimal notation when the exponent e of the first digit is in -5 <= e < 17, with ".0" when
+//   there are no fractional digits (6.0, 0.1, 0.00001, 12345678901234568.0);
+//   otherwise d[.ddd]e[-]x with no "+" and no leading exponent zeros (1e-6, 1.5e-7, 1e17);
+//   inf, -inf, NaN, -0.0.
+// f32 runs the same algorithm with f32's significand and exponent (the 128-bit table is more
+// than precise enough for 24-bit significands).
+// The tests that cover this file and std/num.stv: std/README.md "Floats".
+// f-string holes call these `Display.fmt` impls with the f-string's own String as the writer
+// (`core.Write`; the f-string value is that owned String).
+
+import std.core;
+import std.mem;
+import std.pow10;
+
+// ---- integers ----
+
+pub fn write_u64<W: core.Write>(w: &mut W, v: u64) {
+    let mut buf: [u8; 20] = [0u8; 20];
+    let mut i: usize = 20;
+    let mut x = v;
+    loop {
+        i = i - 1;
+        buf[i] = 48 + ((x % 10) as% u8);
+        x = x / 10;
+        if x == 0 { break; }
+    }
+    let p = &buf as *const [u8; 20] as *const u8;
+    let s = unsafe("buf[i..20] are ASCII digits, alive while s is used") mem.str_from(&buf, mem.add(p, i), 20 - i);
+    w.write_str(s);
+}
+
+pub fn write_i64<W: core.Write>(w: &mut W, v: i64) {
+    if v < 0 {
+        w.write_str("-");
+        write_u64(w, (~(v as% u64)) +% 1);
+    } else {
+        write_u64(w, v as% u64);
+    }
+}
+
+impl core.Display for u8 { fn fmt<W: core.Write>(&self, w: &mut W) { write_u64(w, *self as u64); } }
+impl core.Display for u16 { fn fmt<W: core.Write>(&self, w: &mut W) { write_u64(w, *self as u64); } }
+impl core.Display for u32 { fn fmt<W: core.Write>(&self, w: &mut W) { write_u64(w, *self as u64); } }
+impl core.Display for u64 { fn fmt<W: core.Write>(&self, w: &mut W) { write_u64(w, *self); } }
+impl core.Display for usize { fn fmt<W: core.Write>(&self, w: &mut W) { write_u64(w, *self as u64); } }
+impl core.Display for i8 { fn fmt<W: core.Write>(&self, w: &mut W) { write_i64(w, *self as i64); } }
+impl core.Display for i16 { fn fmt<W: core.Write>(&self, w: &mut W) { write_i64(w, *self as i64); } }
+impl core.Display for i32 { fn fmt<W: core.Write>(&self, w: &mut W) { write_i64(w, *self as i64); } }
+impl core.Display for i64 { fn fmt<W: core.Write>(&self, w: &mut W) { write_i64(w, *self); } }
+impl core.Display for isize { fn fmt<W: core.Write>(&self, w: &mut W) { write_i64(w, *self as i64); } }
+
+impl core.Display for bool {
+    fn fmt<W: core.Write>(&self, w: &mut W) {
+        if *self { w.write_str("true"); } else { w.write_str("false"); }
+    }
+}
+
+// The character, UTF-8 encoded.
+pub fn write_char<W: core.Write>(w: &mut W, c: char) {
+    let u = c as u32;
+    let mut b: [u8; 4] = [0u8; 4];
+    let mut n: usize = 0;
+    if u < 0x80 {
+        b[0] = u as% u8;
+        n = 1;
+    } else if u < 0x800 {
+        b[0] = (0xC0 | (u >> 6)) as% u8;
+        b[1] = (0x80 | (u & 0x3F)) as% u8;
+        n = 2;
+    } else if u < 0x10000 {
+        b[0] = (0xE0 | (u >> 12)) as% u8;
+        b[1] = (0x80 | ((u >> 6) & 0x3F)) as% u8;
+        b[2] = (0x80 | (u & 0x3F)) as% u8;
+        n = 3;
+    } else {
+        b[0] = (0xF0 | (u >> 18)) as% u8;
+        b[1] = (0x80 | ((u >> 12) & 0x3F)) as% u8;
+        b[2] = (0x80 | ((u >> 6) & 0x3F)) as% u8;
+        b[3] = (0x80 | (u & 0x3F)) as% u8;
+        n = 4;
+    }
+    let p = &b as *const [u8; 4] as *const u8;
+    let s = unsafe("b[0..n] is the UTF-8 encoding of a char, alive while s is used") mem.str_from(&b, p, n);
+    w.write_str(s);
+}
+
+impl core.Display for char {
+    fn fmt<W: core.Write>(&self, w: &mut W) {
+        write_char(w, *self);
+    }
+}
+
+// ---- floats ----
+
+impl core.Display for f64 {
+    fn fmt<W: core.Write>(&self, w: &mut W) {
+        let t = f64_text(*self);
+        t.write_to(w);
+    }
+}
+
+impl core.Display for f32 {
+    fn fmt<W: core.Write>(&self, w: &mut W) {
+        let t = f32_text(*self);
+        t.write_to(w);
+    }
+}
+
+// At most 25 bytes: "-", 17 digits, ".", "e-", 3 exponent digits.
+pub const TEXT_CAP: usize = 40;
+
+// A float's text, built in place (no allocation).
+pub struct Text {
+    b: [u8; TEXT_CAP],
+    n: usize,
+}
+
+impl Text {
+    fn put(&mut self, c: u8) {
+        self.b[self.n] = c;
+        self.n = self.n + 1;
+    }
+
+    pub fn len(&self) -> usize {
+        return self.n;
+    }
+
+    pub fn as_str(&self) -> &str from self {
+        let p = &self.b as *const [u8; TEXT_CAP] as *const u8;
+        return unsafe("b[0..n] is ASCII text owned by self") mem.str_from(self, p, self.n);
+    }
+
+    pub fn write_to<W: core.Write>(&self, w: &mut W) {
+        w.write_str(self.as_str());
+    }
+}
+
+fn text_new() -> Text {
+    return Text.{ b: [0u8; TEXT_CAP], n: 0 };
+}
+
+pub fn f64_text(x: f64) -> Text {
+    let bits = mem.f64_bits(x);
+    let neg = (bits >> 63) != 0;
+    let bexp = ((bits >> 52) & 0x7FF) as% u32;
+    let frac = bits & 0xF_FFFF_FFFF_FFFF;
+    return float_text(neg, frac, bexp, 52, 0x7FF, 1075);
+}
+
+pub fn f32_text(x: f32) -> Text {
+    let bits = mem.f32_bits(x) as u64;
+    let neg = (bits >> 31) != 0;
+    let bexp = ((bits >> 23) & 0xFF) as% u32;
+    let frac = bits & 0x7F_FFFF;
+    return float_text(neg, frac, bexp, 23, 0xFF, 150);
+}
+
+// frac: significand field; bexp: exponent field; mbits: 52 or 23; emax: all-ones exponent;
+// bias: exponent bias + mbits (1075 or 150).
+fn float_text(neg: bool, frac: u64, bexp: u32, mbits: u32, emax: u32, bias: i32) -> Text {
+    let mut t = text_new();
+    if bexp == emax {
+        if frac != 0 {
+            lit(&mut t, "NaN");
+            return t;
+        }
+        if neg { lit(&mut t, "-inf"); } else { lit(&mut t, "inf"); }
+        return t;
+    }
+    if bexp == 0 && frac == 0 {
+        if neg { lit(&mut t, "-0.0"); } else { lit(&mut t, "0.0"); }
+        return t;
+    }
+    format_dec(&mut t, neg, shortest(frac, bexp, mbits, bias));
+    return t;
+}
+
+fn lit(t: &mut Text, s: &str) {
+    let b = mem.str_bytes(s);
+    for i in 0..b.len() { t.put(b[i]); }
+}
+
+// digits * 10^exp, digits != 0.
+pub struct Dec {
+    pub digits: u64,
+    pub exp: i32,
+}
+
+impl core.Copy for Dec {}
+
+fn floor_log10_pow2(q: i32) -> i32 {
+    return (q * 1262611) >> 22;
+}
+
+fn floor_log10_three_quarters_pow2(q: i32) -> i32 {
+    return (q * 1262611 - 524031) >> 22;
+}
+
+fn floor_log2_pow10(e: i32) -> i32 {
+    return (e * 1741647) >> 19;
+}
+
+fn pow10_hi(e: i32) -> u64 {
+    return pow10.POW10[((e - pow10.POW10_MIN) as% usize) * 2];
+}
+
+fn pow10_lo(e: i32) -> u64 {
+    return pow10.POW10[((e - pow10.POW10_MIN) as% usize) * 2 + 1];
+}
+
+// The upper 64 bits of the 192-bit product g * cp, with the lowest bit set if the discarded
+// part is above 1 (round to odd, Schubfach).
+fn round_to_odd(ghi: u64, glo: u64, cp: u64) -> u64 {
+    let (xhi, xlo) = glo.mul_wide(cp);
+    let (yhi, ylo) = ghi.mul_wide(cp);
+    let y0 = ylo +% xhi;
+    let y1 = yhi + ((y0 < xhi) as u64);
+    return y1 | ((y0 > 1) as u64);
+}
+
+// Shortest decimal in the rounding interval of c * 2^q (c < 2^55), nearest to it.
+// lower_closer: the next value down is at half the distance (c is a power of two that is not
+// the smallest normal significand).
+fn to_decimal(c: u64, q: i32, lower_closer: bool) -> Dec {
+    let is_even = (c & 1) == 0;
+    let mut cbl = 4 * c - 2;
+    if lower_closer { cbl = cbl + 1; }
+    let cb = 4 * c;
+    let cbr = 4 * c + 2;
+    let k = if lower_closer then floor_log10_three_quarters_pow2(q) else floor_log10_pow2(q);
+    let h = q + floor_log2_pow10(-k) + 1;
+    let e = -k;
+    let mut ghi = pow10_hi(e);
+    let mut glo = pow10_lo(e);
+    if e >= 0 || e < -27 {
+        let glo2 = glo +% 1;
+        if glo2 == 0 { ghi = ghi + 1; }
+        glo = glo2;
+    }
+    let hs = h as% u64;
+    let vbl = round_to_odd(ghi, glo, cbl << hs);
+    let vb = round_to_odd(ghi, glo, cb << hs);
+    let vbr = round_to_odd(ghi, glo, cbr << hs);
+    let lower = if is_even then vbl else vbl + 1;
+    let upper = if is_even then vbr else vbr - 1;
+    let s = vb / 4;
+    if s >= 10 {
+        let sp = s / 10;
+        let up_inside = lower <= 40 * sp;
+        let wp_inside = 40 * sp + 40 <= upper;
+        if up_inside != wp_inside {
+            return Dec.{ digits: sp + (wp_inside as u64), exp: k + 1 };
+        }
+    }
+    let u_inside = lower <= 4 * s;
+    let w_inside = 4 * s + 4 <= upper;
+    if u_inside != w_inside {
+        return Dec.{ digits: s + (w_inside as u64), exp: k };
+    }
+    let mid = 4 * s + 2;
+    let round_up = vb > mid || (vb == mid && (s & 1) != 0);
+    return Dec.{ digits: s + (round_up as u64), exp: k };
+}
+
+// Finite nonzero value: frac / bexp fields (see float_text).
+fn shortest(frac: u64, bexp: u32, mbits: u32, bias: i32) -> Dec {
+    if bexp != 0 {
+        let c = (1u64 << (mbits as u64)) | frac;
+        let q = (bexp as% i32) - bias;
+        if q <= 0 && q > -((mbits + 1) as% i32) {
+            // an integer below 2^(mbits+1): its own digits are the shortest
+            let sh = (-q) as% u64;
+            if c & ((1u64 << sh) - 1) == 0 {
+                return trim(Dec.{ digits: c >> sh, exp: 0 });
+            }
+        }
+        let lower_closer = frac == 0 && bexp > 1;
+        return trim(to_decimal(c, q, lower_closer));
+    }
+    return trim(to_decimal(frac, 1 - bias, false));
+}
+
+fn trim(d: Dec) -> Dec {
+    let mut digits = d.digits;
+    let mut exp = d.exp;
+    while digits % 10 == 0 {
+        digits = digits / 10;
+        exp = exp + 1;
+    }
+    return Dec.{ digits: digits, exp: exp };
+}
+
+// The Stave float text form of (-1)^neg * d.digits * 10^d.exp.
+fn format_dec(t: &mut Text, neg: bool, d: Dec) {
+    let mut tmp: [u8; 20] = [0u8; 20];
+    let mut nd: usize = 0;
+    let mut v = d.digits;
+    while v != 0 {
+        tmp[nd] = 48 + ((v % 10) as% u8);
+        v = v / 10;
+        nd = nd + 1;
+    }
+    // tmp holds the digits least significant first
+    let n = nd as% i32;
+    let e = d.exp + n - 1;
+    if neg { t.put(45); }
+    if e >= -5 && e < 17 {
+        if d.exp >= 0 {
+            for i in 0..nd { t.put(tmp[nd - 1 - i]); }
+            for i in 0..(d.exp as% usize) { t.put(48); }
+            t.put(46);
+            t.put(48);
+        } else if e >= 0 {
+            let ip = (e + 1) as% usize;
+            for i in 0..nd {
+                if i == ip { t.put(46); }
+                t.put(tmp[nd - 1 - i]);
+            }
+        } else {
+            t.put(48);
+            t.put(46);
+            for i in 0..((-e - 1) as% usize) { t.put(48); }
+            for i in 0..nd { t.put(tmp[nd - 1 - i]); }
+        }
+    } else {
+        t.put(tmp[nd - 1]);
+        if nd > 1 {
+            t.put(46);
+            for i in 1..nd { t.put(tmp[nd - 1 - i]); }
+        }
+        t.put(101);
+        let mut ee = e;
+        if ee < 0 {
+            t.put(45);
+            ee = -ee;
+        }
+        let mut etmp: [u8; 4] = [0u8; 4];
+        let mut ne: usize = 0;
+        loop {
+            etmp[ne] = 48 + ((ee % 10) as% u8);
+            ee = ee / 10;
+            ne = ne + 1;
+            if ee == 0 { break; }
+        }
+        for i in 0..ne { t.put(etmp[ne - 1 - i]); }
+    }
+}

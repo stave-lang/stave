@@ -1,0 +1,33 @@
+//~ CHECK-ONLY
+// Lock guards are views with destructors: a guard borrows its mutex until it is dropped
+// at the end of its scope, and references from the guard borrow the guard; `with_lock` takes a
+// closure instead.
+import std.sync;
+
+fn bump(m: &sync.Mutex<u32>) -> u32 {
+    let mut g = m.lock();
+    let r: &mut u32 = g.get_mut();
+    *r = *r + 1;
+    let v: u32 = *g.get();
+    return v;
+}
+
+fn twice(m: &sync.Mutex<u32>) -> u32 {
+    let a: u32 = bump(m);
+    {
+        let g = m.lock();
+        let x: u32 = *g.get();
+    }
+    return a + bump(m);
+}
+
+fn add(m: &sync.Mutex<u32>, k: u32) -> u32 {
+    return m.with_lock(fn(v: &mut u32) -> u32 { *v = *v + k; return *v; });
+}
+
+fn main() -> i32 {
+    let m = sync.Mutex::<u32>.new(1);
+    let a: u32 = twice(&m);
+    let b: u32 = add(&m, 2);
+    return 0;
+}

@@ -1,0 +1,36 @@
+//~ CHECK-ONLY
+// No `from` clause declares the empty origin set: returning a borrow of a
+// param is E0510; static-origin values (literals, fn items, views of them) are fine, and callers
+// see a result that holds no loan.
+view struct Name { s: &str }
+
+fn first(xs: &[u32]) -> &u32 {
+    return &xs[0]; //~ ERROR E0510
+}
+
+fn name(x: &u32) -> &str {
+    return "fixed";
+}
+
+fn wrapped() -> Name {
+    return Name.{ s: "static" };
+}
+
+fn id(x: u32) -> u32 {
+    return x;
+}
+
+fn pick() -> fn(u32) -> u32 {
+    return id;
+}
+
+fn main() -> i32 {
+    let mut v: u32 = 1;
+    let s: &str = name(&v);
+    v = 2;
+    let n: usize = s.len();
+    let w = wrapped();
+    let f = pick();
+    let k: u32 = f(v);
+    return 0;
+}

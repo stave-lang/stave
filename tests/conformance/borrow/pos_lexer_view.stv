@@ -1,0 +1,37 @@
+//~ CHECK-ONLY
+// The LANG.md `Lexer` view: it borrows its source, advances in place, and hands out slices of
+// the source (`from copy self`) that outlive the borrow of the lexer.
+import std.string;
+
+view struct Lexer { src: &str, pos: usize }
+
+fn lexer(src: &str) -> Lexer from src {
+    return Lexer.{ src: src, pos: 0 };
+}
+
+impl Lexer {
+    pub fn bump(&mut self) {
+        self.pos = self.pos + 1;
+    }
+
+    pub fn source(&self) -> &str from copy self {
+        return self.src;
+    }
+}
+
+fn lengths(text: &string.String) -> usize {
+    let mut l = lexer(text.as_str());
+    l.bump();
+    let s: &str = l.source();
+    l.bump();
+    return s.len() + l.pos;
+}
+
+fn main() -> i32 {
+    let mut l = lexer("abc");
+    l.bump();
+    let s: &str = l.source();
+    l.bump();
+    let n: usize = s.len();
+    return 0;
+}

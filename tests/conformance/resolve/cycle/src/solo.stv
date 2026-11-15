@@ -1,0 +1,5 @@
+import solo; //~ ERROR E0102
+
+pub fn x() -> i32 {
+    return 1;
+}

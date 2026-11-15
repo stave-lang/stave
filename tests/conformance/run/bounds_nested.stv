@@ -1,0 +1,13 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at bounds_nested.stv:5:16 in main.get (thread 0)"
+// Each index of `m[i][j]` is checked; the second (`j`) fails here.
+fn get(m: &[[u32; 2]], i: usize, j: usize) -> u32 {
+    return m[i][j];
+}
+
+fn main() -> i32 {
+    let m: [[u32; 2]; 2] = [[1, 2], [3, 4]];
+    let a = get(&m, 1, 1);
+    let b = get(&m, 1, 2);
+    return 0;
+}

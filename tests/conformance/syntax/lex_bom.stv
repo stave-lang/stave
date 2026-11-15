@@ -1,0 +1,4 @@
+﻿//~ ERROR E0017
+//~ CHECK-ONLY
+// A byte-order mark at offset 0 is E0017; lexing resumes after it.
+fn f() { }

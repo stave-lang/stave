@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// A returned reference or view borrows a local (or a by-value param).
+view struct Wrap { s: &u32 }
+
+fn local(x: &u32) -> &u32 from x {
+    let y: u32 = *x;
+    return &y; //~ ERROR E0512
+}
+
+fn param_slot(x: &u32) -> Wrap from x {
+    let k: u32 = 1;
+    return Wrap.{ s: &k }; //~ ERROR E0512
+}
+
+fn ok(x: &u32) -> &u32 from x {
+    let y: &u32 = x;
+    return y;
+}
+
+fn main() -> i32 {
+    return 0;
+}

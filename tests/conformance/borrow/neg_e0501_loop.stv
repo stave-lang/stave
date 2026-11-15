@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// A loan used on the next iteration stays live around the loop.
+import std.vec;
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(1);
+    let first: &u32 = v.get_ref(0);
+    let mut i: u32 = 0;
+    while i < 3 {
+        v.push(*first); //~ ERROR E0501
+        i = i + 1;
+    }
+    return 0;
+}

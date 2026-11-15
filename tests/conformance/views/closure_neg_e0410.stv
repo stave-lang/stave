@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// Every fn value is a view; a non-view struct cannot hold one.
+struct Callback {
+    f: fn(u32) -> u32, //~ ERROR E0410
+}

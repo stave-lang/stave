@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// AdtDecl: structs, view structs, enums with tuple and struct variants, view enums, generics.
+struct Empty {}
+struct Point { pub x: i32, pub y: i32, }
+view struct Lexer { src: &str, pos: usize }
+enum E { A, B(i32, u8,), C { w: f64, h: f64 }, }
+view enum Tok { Word(&str), End }
+struct G<T, const N: usize> { items: [T; N] }
+enum Choice<T> { One(T), Other }

@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// Dump golden: a small valid package.
+import std.io;
+
+struct Point { pub x: i32, pub y: i32 }
+
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+fn main() -> i32 {
+    let p = Point.{ x: 1, y: 2 };
+    let s = add(p.x, p.y);
+    io.print(f"s = {s}\n");
+    return if s > 2 then 0 else 1;
+}

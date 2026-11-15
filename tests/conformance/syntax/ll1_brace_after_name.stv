@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// `{` after a name always opens a block: struct literals are `Name.{ .. }`, and `S { a: 1 }`
+// is E0014.
+struct S { a: i32 }
+
+fn bad() -> S {
+    let s = S { a: 1 }; //~ ERROR E0014
+    return s;
+}
+
+fn good(x: S) {
+    if x.a == S.{ a: 1 }.a { }
+}

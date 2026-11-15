@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// Names declared only by a dropped item resolve to an error declaration: their uses,
+// and everything computed from them, produce no further diagnostic.
+struct Gone { a: i32 b: i32 } //~ ERROR E0004
+
+fn broken() -> u8 { return ; + } //~ ERROR E0004
+
+fn uses() -> u32 {
+    let g: Gone = Gone.{ a: 1, b: 2 };
+    let x = g.a + 1;
+    let y: u32 = broken() as u32 + x.field.more;
+    let z = g.method(1, 2, 3);
+    return y;
+}
+
+fn main() -> i32 {
+    return 0;
+}

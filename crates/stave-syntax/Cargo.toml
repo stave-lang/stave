@@ -1,0 +1,21 @@
+[package]
+name = "stave-syntax"
+description = "Lexer, item finder, table-driven LL(1) parser, and pretty-printer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+stave-diag = { workspace = true }
+rayon = { workspace = true }
+memmap2 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

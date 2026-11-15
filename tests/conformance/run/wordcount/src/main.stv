@@ -1,0 +1,124 @@
+// wc-like counts of input.txt (relative to the working directory): lines (newline bytes),
+// words (maximal runs of non-whitespace bytes), bytes; then every word seen at least twice,
+// in first-seen order. A read error prints a message on stderr and exits 1.
+import std.io;
+import std.string;
+import std.vec;
+
+struct Counts {
+    pub lines: u64,
+    pub words: u64,
+    pub bytes: u64,
+}
+
+// A distinct word: its first occurrence in the text and how often it occurs.
+struct Word {
+    pub start: usize,
+    pub len: usize,
+    pub n: u64,
+}
+
+// ASCII whitespace: space, \t, \n, \v, \f, \r.
+fn is_space(c: u8) -> bool {
+    return c == 32 || (c >= 9 && c <= 13);
+}
+
+fn same(b: &[u8], s1: usize, s2: usize, len: usize) -> bool {
+    for k in 0..len {
+        if b[s1 + k] != b[s2 + k] {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Index of the distinct word equal to b[start..start + len], if any.
+fn lookup(words: &vec.Vec<Word>, b: &[u8], start: usize, len: usize) -> Option<usize> {
+    for i in 0..words.len() {
+        let w = words.get_ref(i);
+        if w.len == len && same(b, w.start, start, len) {
+            return Option.Some(i);
+        }
+    }
+    return Option.None;
+}
+
+fn note(words: &mut vec.Vec<Word>, b: &[u8], start: usize, len: usize) {
+    match lookup(words, b, start, len) {
+        Option.Some(i) => {
+            let w = words.get_mut(i);
+            w.n = w.n + 1;
+        }
+        Option.None => {
+            words.push(Word.{ start: start, len: len, n: 1 });
+        }
+    }
+}
+
+fn count(b: &[u8], words: &mut vec.Vec<Word>) -> Counts {
+    let mut c = Counts.{ lines: 0, words: 0, bytes: 0 };
+    let mut in_word = false;
+    let mut start: usize = 0;
+    for i in 0..b.len() {
+        let x = b[i];
+        if x == 10 {
+            c.lines = c.lines + 1;
+        }
+        if is_space(x) {
+            if in_word {
+                note(words, b, start, i - start);
+                in_word = false;
+            }
+        } else if !in_word {
+            in_word = true;
+            start = i;
+            c.words = c.words + 1;
+        }
+    }
+    if in_word {
+        note(words, b, start, b.len() - start);
+    }
+    c.bytes = b.len() as u64;
+    return c;
+}
+
+fn text_of(b: &[u8], start: usize, len: usize) -> string.String {
+    let mut s = string.String.new();
+    for k in 0..len {
+        s.push(b[start + k] as char);
+    }
+    return s;
+}
+
+fn run(text: &string.String) -> i32 {
+    let b = text.as_bytes();
+    let mut words = vec.Vec::<Word>.new();
+    let c = count(b, &mut words);
+    let lines = c.lines;
+    let nwords = c.words;
+    let bytes = c.bytes;
+    io.print(f"{lines} {nwords} {bytes}\n");
+    let distinct = words.len();
+    io.print(f"distinct {distinct}\n");
+    for i in 0..words.len() {
+        let w = words.get_ref(i);
+        if w.n >= 2 {
+            let s = text_of(b, w.start, w.len);
+            let n = w.n;
+            io.print(f"{s} {n}\n");
+        }
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    match io.read_to_string("input.txt") {
+        Result.Ok(text) => {
+            return run(&text);
+        }
+        Result.Err(e) => {
+            io.eprint(f"wordcount: input.txt: {e}\n");
+            return 1;
+        }
+    }
+}

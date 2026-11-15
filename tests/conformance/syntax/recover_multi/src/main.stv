@@ -1,0 +1,8 @@
+//~ CHECK-ONLY
+// Syntax errors in two files of a package: both reported, in canonical order.
+import other;
+
+fn main() -> i32 {
+    let = 1; //~ ERROR E0004
+    return other.code();
+}

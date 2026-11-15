@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// Safe C++ catalogue, `Option<&T>`: an optional reference into an argument is a
+// borrow the signature must name; without `from` it declares no origin. Stave: E0510.
+fn find(xs: &[u32], k: u32) -> Option<&u32> {
+    for i in 0..xs.len() {
+        if xs[i] == k { return Option.Some(&xs[i]); } //~ ERROR E0510
+    }
+    return Option.None;
+}

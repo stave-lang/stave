@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// ir golden: `loop` with `break`: body, exit.
+fn first_pow(limit: u64) -> u64 {
+    let mut p: u64 = 1;
+    loop {
+        if p >= limit {
+            break;
+        }
+        p = p * 2;
+    }
+    return p;
+}
+
+fn main() -> i32 {
+    return if first_pow(10) == 16 then 0 else 1;
+}

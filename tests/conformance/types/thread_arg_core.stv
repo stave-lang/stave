@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// The body of `thread.par_for` must itself be a closure literal or a fn item (E0806): a value
+// `if` or `match` choosing between fn values hides the closure, whose captures are then unknown,
+// even when one of the choices is a fn item.
+import std.thread;
+
+fn nop(i: usize) {
+    let s = i;
+}
+
+fn by_if(c: bool) -> usize {
+    let mut n: usize = 0;
+    thread.par_for(0, 8, if c then fn(i: usize) { n = n + i; } else nop); //~ ERROR E0806
+    return n;
+}
+
+fn by_match(k: u8) -> usize {
+    let mut n: usize = 0;
+    thread.par_for(0, 8, match k { 0 => nop, _ => fn(i: usize) { n = n + i; }, }); //~ ERROR E0806
+    return n;
+}
+
+fn direct() {
+    thread.par_for(0, 8, nop);
+    thread.par_for(0, 8, fn(i: usize) { let s = i; });
+}

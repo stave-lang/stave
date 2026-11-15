@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// A fn value taken from `b` is returned, but the result is declared `from a` only.
+view struct Holder {
+    f: fn(u32) -> u32,
+}
+
+fn pick(a: Holder, b: Holder) -> fn(u32) -> u32 from a {
+    return b.f; //~ ERROR E0510
+}

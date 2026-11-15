@@ -1,0 +1,15 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at bounds_array_value.stv:6:30 in main.sum_to (thread 0)"
+// An array held as a value (SSA `get`): a dynamic index ≥ N traps.
+fn sum_to(a: [i32; 4], n: usize) -> i32 {
+    let mut s: i32 = 0;
+    for i in 0..n { s = s + a[i]; }
+    return s;
+}
+
+fn main() -> i32 {
+    let a: [i32; 4] = [1, 2, 3, 4];
+    let ok = sum_to(a, 4);
+    let bad = sum_to(a, 5);
+    return 0;
+}

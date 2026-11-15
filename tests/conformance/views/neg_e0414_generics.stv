@@ -1,0 +1,31 @@
+//~ CHECK-ONLY
+// E0414: a generic param without the `view` bound rejects views, in a type and at a
+// call; a `T: view` param is a view at its definition site.
+view struct Lexer { src: &str, pos: usize }
+
+struct W<T> { pub v: T }
+struct V<T: view> { pub v: T }
+
+fn keep<T>(x: T) -> u32 { return 0; }
+fn keep_view<T: view>(x: T) -> u32 { return 0; }
+
+fn in_type(x: W<&u32>) { } //~ ERROR E0414
+fn in_type_view(x: W<Lexer>) { } //~ ERROR E0414
+fn in_type_fn(x: W<fn()>) { } //~ ERROR E0414
+fn generic_in_type<T: view>(x: W<T>) { } //~ ERROR E0414
+
+fn calls(r: &u32, l: Lexer) {
+    let a: u32 = keep(r); //~ ERROR E0414
+    let b: u32 = keep(l); //~ ERROR E0414
+    let c: u32 = keep_view(r);
+}
+
+fn generic_call<T: view>(x: T) -> u32 {
+    return keep(x); //~ ERROR E0414
+}
+
+// fine: `view`-bound params take views; unbounded ones take owned values
+fn ok(x: V<&u32>, y: W<u32>, z: V<Lexer>) { }
+fn generic_ok<T>(x: W<T>, y: V<T>) -> u32 {
+    return keep(y);
+}

@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// A float needs a digit after `.`: `1.` is IntLit `.`, so a field or method name must follow.
+fn f() -> f64 {
+    return 1.; //~ ERROR E0004
+}

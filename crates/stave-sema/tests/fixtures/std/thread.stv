@@ -1,0 +1,10 @@
+// Test stand-in for std/thread.stv (LANG.md §3 signatures).
+pub fn join<A, B>(a: fn() -> A, b: fn() -> B) -> (A, B) {
+    return (a(), b());
+}
+
+pub fn par_for(lo: usize, hi: usize, body: fn(usize)) {
+    for i in lo..hi {
+        body(i);
+    }
+}

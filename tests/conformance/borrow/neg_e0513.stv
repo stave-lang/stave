@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// Writing a ref through `&mut View` needs its origins inside the view's.
+view struct Holder { r: &u32 }
+
+fn store(h: &mut Holder, v: &u32) {
+    h.r = v; //~ ERROR E0513
+}
+
+fn keep(h: &mut Holder) {
+    let old: &u32 = h.r;
+    h.r = old;
+}
+
+fn main() -> i32 {
+    return 0;
+}

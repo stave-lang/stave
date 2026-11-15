@@ -1,0 +1,21 @@
+//~ PARSE-ONLY
+// Postfix: `::<>` turbofish, tuple IntLit steps, StructLit, calls, indexing, `?`.
+struct P { x: i32, y: i32 }
+struct Empty {}
+
+fn g<T>() -> i32 { return 0; }
+
+fn parse(s: &[u8]) -> Result<u32, u8> { return Result.Ok(0); }
+
+fn postfix(t: (i32, (u8, u8)), s: &[u8], v: Vec<i32>) -> Result<u32, u8> {
+    let a = g::<i32>();
+    let b = v.len();
+    let c = t.1.0;
+    let p = P.{ x: 1, y: 2, };
+    let q = P.{ x: 1, y: 2 };
+    let z = Empty.{};
+    let e = s[0];
+    let n = parse(s)?;
+    let w = v.get_ref::<4>(0);
+    return Result.Ok(n);
+}

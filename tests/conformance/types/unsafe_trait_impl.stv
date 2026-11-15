@@ -1,0 +1,25 @@
+//~ CHECK-ONLY
+// E0810: an impl of an unsafe trait needs `unsafe("..")`. `Send` and `Sync` are unsafe traits
+// (std.core), so safe code cannot declare a type thread-safe; so is any `unsafe("..") trait`.
+// A safe trait needs no marker.
+unsafe("implementers keep the invariant") trait Marker { }
+
+trait Plain { }
+
+struct S { pub v: *const u32 }
+
+impl Send for S {} //~ ERROR E0810
+
+impl Sync for S {} //~ ERROR E0810
+
+impl Marker for S {} //~ ERROR E0810
+
+impl Plain for S {}
+
+struct T { pub v: *const u32 }
+
+unsafe("T never dereferences v") impl Send for T {}
+
+unsafe("T never dereferences v") impl Sync for T {}
+
+unsafe("T keeps the invariant") impl Marker for T {}

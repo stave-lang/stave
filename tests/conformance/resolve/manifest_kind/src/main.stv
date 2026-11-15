@@ -1,0 +1,6 @@
+//~ CHECK-ONLY
+// E1002 cases `bad-kind` (at the value) and `missing-dependency` (at the `path` value). The
+// package kind falls back to the root file present (`src/main.stv`: bin).
+fn main() -> i32 {
+    return 0;
+}

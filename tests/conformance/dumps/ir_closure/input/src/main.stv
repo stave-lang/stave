@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// ir golden (checked-ir.md "Closures"): closure bodies `@<enclosing>.<k>` printed after
+// the enclosing fn; captured locals live in slots, the environment tuple of their addresses is
+// the closure's last param, `fn.make` builds the fn value, `call.ind` calls it; a closure
+// without captures and a fn item are constants `@<inst>`.
+fn twice(x: u32) -> u32 {
+    return x * 2;
+}
+
+fn apply(f: fn(u32) -> u32, x: u32) -> u32 {
+    return f(x);
+}
+
+fn main() -> i32 {
+    let k: u32 = 3;
+    let mut n: u32 = 0;
+    let add = fn(x: u32) -> u32 { n = n + 1; return x + k; };
+    let plain = fn(x: u32) -> u32 { return x + 1; };
+    let a = apply(add, 1) + apply(plain, 1) + apply(twice, 1);
+    let g: fn(u32) -> u32 = twice;
+    return (a + g(n)) as% i32;
+}

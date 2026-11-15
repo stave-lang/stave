@@ -1,0 +1,27 @@
+//! Pipeline, dumps, conformance runner.
+//!
+//! - [`package`]: checks the build root argument (a package directory or a `.stv` file);
+//!   packages are loaded by stave-sema ([`stave_sema::Program::load`]).
+//! - [`shipped`]: locates the shipped `std` and `runtime` (`STAVE_STD_DIR`, the install layout,
+//!   the repository root; contracts/cli.md).
+//! - [`pipeline`]: the stage0 pipeline: stave-sema's loader (read, lex, items,
+//!   parse, intern, resolve), type checker, lowering, and [`build`] (code generation and the
+//!   static ELF link); `--timings` stage names.
+//! - [`build`]: the back end (lower + verify, x86-64 / AArch64 debug codegen, link).
+//! - [`exec`]: running built executables (natively or through a `--runner`); `test fn` discovery.
+//! - [`harness`]: the `test fn` harness of `stave test PKG_DIR`.
+//! - [`interp`]: runs a lowered program in the stave-ir reference interpreter (the oracle).
+//! - [`dump`]: `--dump=STAGE --dump-dir DIR` printers.
+//! - [`conformance`]: the `stave test` runner and its stage0 compiler.
+//! - [`select`]: `--compiler auto|cpu|gpu` and the stage1 probe (contracts/cli.md).
+
+pub mod build;
+pub mod conformance;
+pub mod dump;
+pub mod exec;
+pub mod harness;
+pub mod interp;
+pub mod package;
+pub mod pipeline;
+pub mod select;
+pub mod shipped;

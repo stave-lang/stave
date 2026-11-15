@@ -1,0 +1,4 @@
+//~ PARSE-ONLY
+kernel fn scale(xs: &mut [f32], k: f32) {
+    for x in xs { }
+}

@@ -1,0 +1,8 @@
+import std.io;
+import util;
+
+fn main() -> i32 {
+    let n = util.answer();
+    io.print(f"answer {n}\n");
+    return 3;
+}

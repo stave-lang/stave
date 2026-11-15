@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// A non-Copy value cannot be moved out of a dereference (`*r`) or out of a field reached
+// through a reference (`r.name`, auto-deref): E0504. `mem.replace` is the fix (pos_mem_replace).
+import std.string;
+
+struct S { pub name: string.String }
+
+fn take(r: &mut string.String) -> string.String {
+    return *r; //~ ERROR E0504
+}
+
+fn name_of(r: &S) -> string.String {
+    return r.name; //~ ERROR E0504
+}
+
+fn main() -> i32 {
+    return 0;
+}

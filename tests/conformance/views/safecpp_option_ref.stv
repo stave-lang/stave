@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// Safe C++ catalogue, `Option<&T>`: a lookup returning an optional reference into
+// its argument. Stave accepts (`from xs`).
+fn find(xs: &[u32], k: u32) -> Option<&u32> from xs {
+    for i in 0..xs.len() {
+        if xs[i] == k { return Option.Some(&xs[i]); }
+    }
+    return Option.None;
+}
+
+fn lookup(xs: &[u32]) -> u32 {
+    return match find(xs, 3) {
+        Option.Some(r) => *r,
+        Option.None => 0u32,
+    };
+}

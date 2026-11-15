@@ -1,0 +1,6 @@
+ok 4
+err path contains a NUL byte
+err path contains a NUL byte
+err not found
+err path contains a NUL byte
+ok 4

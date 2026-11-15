@@ -1,0 +1,3 @@
+name = "ir_closure"
+kind = "bin"
+version = "0.1.0"

@@ -1,0 +1,15 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: DivByZero at panic_rem_zero.stv:5:14 in main.rem (thread 0)"
+// `%` by zero traps with DivByZero, as `/` does; the divisor counts down to 0.
+fn rem(a: i32, b: i32) -> i32 {
+    return a % b;
+}
+
+fn main() -> i32 {
+    let mut d: i32 = 2;
+    for i in 0u32..5 {
+        let r = rem(7, d);
+        d = d - 1;
+    }
+    return 0;
+}

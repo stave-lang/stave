@@ -1,0 +1,103 @@
+//~ CHECK-ONLY
+// Every thread a `scope` spawns runs until the scope is left: the spawns of a loop are all live
+// at once, and leaving the scope early (`return`, `break`, `continue`, `?`) joins the threads
+// only after the value is computed and the inner blocks' locals are dropped.
+struct D { pub v: u32 }
+
+impl Drop for D {
+    fn drop(&mut self) { }
+}
+
+fn looped() -> u64 {
+    let mut x: u64 = 0;
+    scope {
+        for i in 0..4u64 {
+            spawn { x = x + 1; } //~ ERROR E0501
+        }
+    }
+    return x;
+}
+
+fn read_loop() -> u64 {
+    let x: u64 = 7;
+    scope {
+        for i in 0..4u64 {
+            spawn { let y: u64 = x; }
+        }
+    }
+    return x;
+}
+
+fn early(c: bool) -> u64 {
+    let mut x: u64 = 0;
+    scope {
+        spawn { x = x + 1; }
+        if c {
+            return x; //~ ERROR E0501
+        }
+    }
+    return x;
+}
+
+fn dropped() -> usize {
+    scope {
+        {
+            let s = D.{ v: 1 };
+            spawn { let n: u32 = s.v; }
+            return 0; //~ ERROR E0501
+        }
+    }
+    return 1;
+}
+
+fn broke() {
+    loop {
+        scope {
+            {
+                let s = D.{ v: 1 };
+                spawn { let n: u32 = s.v; }
+                break; //~ ERROR E0501
+            }
+        }
+    }
+}
+
+fn continued(c: bool) {
+    let mut i: u32 = 0;
+    while i < 3 {
+        i = i + 1;
+        scope {
+            {
+                let s = D.{ v: 1 };
+                spawn { let n: u32 = s.v; }
+                continue; //~ ERROR E0501
+            }
+        }
+    }
+}
+
+fn tried(r: Result<u64, u64>) -> Result<u64, u64> {
+    scope {
+        {
+            let s = D.{ v: 1 };
+            spawn { let n: u32 = s.v; }
+            let v: u64 = r?; //~ ERROR E0501
+        } //~ ERROR E0501
+    }
+    return Result.Ok(0);
+}
+
+fn joined() -> u64 {
+    let mut x: u64 = 0;
+    loop {
+        scope {
+            spawn { x = x + 1; }
+            break;
+        }
+    }
+    return x;
+}
+
+fn main() -> i32 {
+    return 0;
+}

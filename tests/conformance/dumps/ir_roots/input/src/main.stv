@@ -1,0 +1,45 @@
+//~ CHECK-ONLY
+// ir golden: instance root sets. Debug (ir.txt): every non-generic fn (`unused`,
+// `helper`, both dispatch arms, the export, `main`, std) plus the instances they request
+// (`ident<u8>`, `ident<u32>`); never a `test fn` outside `stave test`, never a generic decl.
+// Release (ir.release.txt): what `main` and the `extern "C"` export reach (plus the runtime entry
+// points, none in the pinned library); the reachable dispatch `pick` makes both arms reachable.
+fn ident<T>(x: T) -> T {
+    return x;
+}
+
+fn helper(x: u8) -> u8 {
+    return ident(x);
+}
+
+fn unused() -> u32 {
+    return ident(5u32);
+}
+
+fn pick_v3(x: u32) -> u32 needs(avx2) {
+    return x + 1;
+}
+
+fn pick_base(x: u32) -> u32 {
+    return x + 2;
+}
+
+dispatch fn pick(x: u32) -> u32 { avx2 => pick_v3, _ => pick_base, }
+
+fn for_export(x: i32) -> i32 {
+    return x;
+}
+
+extern "C" fn exported(x: i32) -> i32 {
+    return for_export(x);
+}
+
+test fn checks_helper() {
+    let v = helper(1);
+}
+
+fn main() -> i32 {
+    let v = helper(3);
+    let p = pick(1);
+    return (v as i32) - 3 + ((p - p) as% i32);
+}

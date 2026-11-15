@@ -1,0 +1,64 @@
+//~ STDOUT closure_run.stdout
+// Closures with explicit param types; captures by reference (read and
+// write); a closure and a fn item both coerce to `fn(..) -> R`; a fn value as a local, a
+// param, and a view-struct field; nested closures; the body is checked with the outer
+// environment (outer locals, params, and `self` are in scope).
+import std.io;
+
+fn add1(x: i32) -> i32 {
+    return x + 1;
+}
+
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
+    return f(x);
+}
+
+view struct Holder {
+    f: fn(i32) -> i32,
+    k: i32,
+}
+
+fn twice(h: Holder) -> i32 {
+    let f = h.f;
+    return f(f(h.k));
+}
+
+struct Acc {
+    total: i64,
+}
+
+impl Acc {
+    fn add_all(&mut self, xs: &[i64]) {
+        let step = fn(x: i64) { self.total = self.total + x; };
+        for i in 0..xs.len() {
+            step(xs[i]);
+        }
+    }
+}
+
+fn main() -> i32 {
+    let base: i32 = 10;
+    let add_base = fn(x: i32) -> i32 { return x + base; };
+    let a = apply(add_base, 5);
+    let b = apply(add1, 5);
+    let mut count: u32 = 0;
+    let bump = fn() { count = count + 1; };
+    bump();
+    bump();
+    bump();
+    let h = Holder.{ f: add_base, k: 1 };
+    let c = twice(h);
+    let nested = fn(x: i32) -> i32 {
+        let inner = fn(y: i32) -> i32 { return y * base; };
+        return inner(x) + 1;
+    };
+    let d = nested(3);
+    let g: fn(i32) -> i32 = add1;
+    let e = g(41);
+    let mut acc = Acc.{ total: 0 };
+    let xs: [i64; 4] = [1, 2, 3, 4];
+    acc.add_all(&xs);
+    let t = acc.total;
+    io.print(f"{a} {b} {count} {c} {d} {e} {t}\n");
+    return 0;
+}

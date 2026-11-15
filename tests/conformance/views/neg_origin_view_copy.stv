@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// Origin table (LANG.md §3), row "view `V` by value", column `from copy x`: E0521 (redundant: `from x`
+// already inherits the view's origins). Fn values and Options of references are views.
+view struct Lexer { src: &str, pos: usize }
+
+fn rest(l: Lexer) -> &str from copy l { //~ ERROR E0521
+    return l.src;
+}
+
+fn pass(o: Option<&u8>) -> Option<&u8> from copy o { //~ ERROR E0521
+    return o;
+}
+
+fn pick(f: fn() -> u8, g: fn() -> u8) -> fn() -> u8 from f, copy g { //~ ERROR E0521
+    return f;
+}
+
+// fine: `from x`
+fn rest_ok(l: Lexer) -> &str from l {
+    return l.src;
+}

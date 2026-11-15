@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// NLL: a borrow returned on one path is not live on the other (the push after the `if`).
+import std.vec;
+
+fn first_or_push(v: &mut vec.Vec<u32>) -> &u32 from v {
+    if v.len() > 0 {
+        return v.get_ref(0);
+    }
+    v.push(7);
+    return v.get_ref(0);
+}
+
+fn last_use(v: &mut vec.Vec<u32>) -> u32 {
+    let r: &u32 = v.get_ref(0);
+    let x: u32 = *r;
+    v.push(x);
+    let mut a: u32 = 1;
+    let mut p: &u32 = &a;
+    let b: u32 = 2;
+    p = &b;
+    a = 3;
+    return *p + a;
+}
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.new();
+    let r: &u32 = first_or_push(&mut v);
+    let x: u32 = *r;
+    v.push(x);
+    let y: u32 = last_use(&mut v);
+    return 0;
+}

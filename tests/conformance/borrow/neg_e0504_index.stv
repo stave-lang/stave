@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// A non-Copy element cannot be moved out of an index, of an owned array or of a slice:
+// E0504 (a Copy element is copied).
+import std.string;
+
+fn first(v: [string.String; 2]) -> string.String {
+    return v[0]; //~ ERROR E0504
+}
+
+fn from_slice(xs: &[string.String]) -> string.String {
+    let s = xs[0]; //~ ERROR E0504
+    return s;
+}
+
+fn copy_ok(xs: &[u32]) -> u32 {
+    return xs[0];
+}
+
+fn main() -> i32 {
+    return 0;
+}

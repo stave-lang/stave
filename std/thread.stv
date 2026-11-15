@@ -1,0 +1,75 @@
+// std.thread: structured threads on the CPU.
+//
+// Ordinary std functions (not lang items) whose paths the compiler knows for the thread
+// capture checks (E0802, E0806; contracts/intrinsics.md "Paths fixed by the compiler"):
+//   join(a, b)              a() here and b() on a new thread; returns both results.
+//   par_for(lo, hi, body)   body(i) for i in lo..hi on cpu_count() workers (this thread is one),
+//                           in unspecified order; returns when all calls have returned.
+//   par_for_mut(xs, body)   body(i, &mut xs[i]) for every index, each element borrowed by one call.
+// CPU backend: one worker per CPU in the sched_getaffinity mask (runtime.thread.cpu_count), no
+// flag or variable. Workers claim index chunks from one atomic counter. Threads are created per
+// call (runtime.thread: clone3 + guard page + altstack) and joined before the call returns, so
+// a body may borrow the caller's stack.
+
+import runtime.thread as rt;
+import runtime.atomic;
+import std.core;
+import std.cell;
+import std.mem;
+
+pub fn join<A: core.Send, B: core.Send>(a: fn() -> A, b: fn() -> B) -> (A, B) {
+    let mut rb: Option<B> = Option.None;
+    let h = unsafe("rb and b outlive the thread: it is joined below, before they die") rt.start(fn() { rb = Option.Some(b()); });
+    let ra = a();
+    unsafe("h came from start and is joined once") { rt.join(h); }
+    return (ra, rb.unwrap());
+}
+
+// The number of workers par_for uses: CPUs in the affinity mask.
+pub fn workers() -> usize {
+    return rt.cpu_count();
+}
+
+pub fn par_for(lo: usize, hi: usize, body: fn(usize)) {
+    run(lo, hi, body);
+}
+
+// par_for's loop. A separate private fn: its callers' bodies capture fn values (not Sync), which
+// the E0802 check of std.thread.par_for itself would reject; the workers only call them.
+fn run(lo: usize, hi: usize, body: fn(usize)) {
+    if lo >= hi { return; }
+    let n = hi - lo;
+    let mut w = rt.cpu_count();
+    if w > n { w = n; }
+    let mut ch = n / (w * 16);
+    if ch == 0 { ch = 1; }
+    let next = cell.UnsafeCell::<u64>.new(lo as u64);
+    let end = hi as u64;
+    let step = ch as u64;
+    let work = fn() {
+        loop {
+            let i = unsafe("next lives until every worker is joined") atomic.fetch_add_u64(next.get(), step);
+            if i >= end { break; }
+            let stop = if end - i < step then end else i + step;
+            for k in (i as usize)..(stop as usize) {
+                body(k);
+            }
+        }
+    };
+    let mut list: usize = 0;
+    for k in 1..w {
+        unsafe("work's captures live until scope_join below") { rt.scope_spawn(&mut list, work); }
+    }
+    work();
+    rt.scope_join(&mut list);
+}
+
+pub fn par_for_mut<T: core.Send>(xs: &mut [T], body: fn(usize, &mut T)) {
+    let n = xs.len();
+    let base = mem.slice_ptr(xs) as usize;
+    let size = mem.type_size::<T>();
+    run(0, n, fn(i: usize) {
+        let p = (base + i * size) as *mut T;
+        body(i, unsafe("par_for calls each i < len once: the elements handed out are disjoint; xs is borrowed for the whole call") &mut *p);
+    });
+}

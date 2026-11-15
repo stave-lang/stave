@@ -1,0 +1,11 @@
+//~ CHECK-ONLY
+// A call through a closure that returns a reference to a capture keeps the capture's
+// loan live while the result lives (the result takes the fn value's origins).
+fn main() -> i32 {
+    let mut x: u32 = 1;
+    let get = fn() -> &u32 { return &x; };
+    let p = get();
+    x = 2; //~ ERROR E0501
+    let y: u32 = *p;
+    return 0;
+}

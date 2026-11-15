@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// DispatchDecl: arms with `+` features, `_` last, optional trailing comma.
+fn sum_v4(xs: &[f32]) -> f32 needs(avx512f) { return 0.0; }
+fn sum_fma(xs: &[f32]) -> f32 needs(avx2, fma) { return 0.0; }
+fn sum_base(xs: &[f32]) -> f32 { return 0.0; }
+
+dispatch fn sum(xs: &[f32]) -> f32 { avx512f => sum_v4, avx2 + fma => sum_fma, _ => sum_base, }
+
+dispatch fn sum2(xs: &[f32]) -> f32 { _ => sum_base }

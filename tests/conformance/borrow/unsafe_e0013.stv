@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// E0013: every `unsafe` form needs its obligation string: block, expression, fn,
+// method, trait, impl. Each item shows only its first syntax error and is dropped.
+fn block_form(p: *mut i32) {
+    unsafe { *p = 1; } //~ ERROR E0013
+}
+
+fn expr_form(p: *const i32) -> i32 {
+    return unsafe *p; //~ ERROR E0013
+}
+
+unsafe fn fn_form() { } //~ ERROR E0013
+
+unsafe trait TraitForm { } //~ ERROR E0013
+
+trait Marker { }
+
+struct S { pub v: u32 }
+
+unsafe impl Marker for S { } //~ ERROR E0013
+
+impl S {
+    pub unsafe fn method_form(&self) { } //~ ERROR E0013
+}
+
+fn main() -> i32 {
+    return 0;
+}

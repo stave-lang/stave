@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// Loan choice with mixed kinds at different offsets: the `&` created first is named, not the
+// later `&mut` (kind breaks ties of equal offsets only).
+struct P { pub a: u32, pub b: u32 }
+
+fn main() -> i32 {
+    let mut p = P.{ a: 1, b: 2 };
+    let ra: &u32 = &p.a;
+    let mb: &mut u32 = &mut p.b;
+    p = P.{ a: 3, b: 4 }; //~ ERROR E0501
+    *mb = 5;
+    let s: u32 = *ra;
+    return 0;
+}

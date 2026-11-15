@@ -1,0 +1,19 @@
+(* Fixture for tools/ll1gen/tests/conflicts.rs: a small grammar with exactly the three listed
+   conflicts (Stmt,"unsafe"), (TypeBase,"<"), (TypeBase,"needs") and the rules that
+   contracts/parse-errors.md names. *)
+
+(* ---------- items ---------- *)
+File        = Stmt* EOF ;
+Stmt        = Unsafe Block | Block | ExprStmt ;
+Unsafe      = "unsafe" "(" StrLit ")" ;
+Block       = "{" Stmt* "}" ;
+ExprStmt    = AndExpr ";" ;
+AndExpr     = CmpExpr ("&&" CmpExpr)* ;
+CmpExpr     = Cast (CmpOp Cast)? ;
+CmpOp       = "<" | ">" ;
+Cast        = Unary ("as" Type)* ;
+Unary       = Unsafe Unary | Ident | IntLit ;
+Type        = TypeBase ;
+TypeBase    = Ident GenericArgs? | "fn" "(" ")" ("->" Type)? Needs? ;
+GenericArgs = "<" Type ("," Type)* ">" ;
+Needs       = "needs" "(" Ident ")" ;

@@ -1,0 +1,4 @@
+pub fn f() -> i32 {
+    let y: bool = 1; //~ ERROR E0201
+    return 0;
+}

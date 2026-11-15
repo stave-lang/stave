@@ -1,0 +1,38 @@
+//~ CHECK-ONLY
+// Send/Sync: an ADT with an explicit `unsafe(..) impl` of the trait gets it from its impls only,
+// never from the structural rule. `H<T>` is structurally Sync for any Sync `T`, but its impl asks
+// `T: Copy`: `H<Plain>` (Plain is not Copy) is not Sync. Recursive types are Sync coinductively.
+import std.thread;
+
+struct Plain {
+    pub x: u32,
+}
+
+struct H<T> {
+    pub v: T,
+}
+
+unsafe("H<T> is shared only for Copy payloads") impl<T: Copy> Sync for H<T> {}
+
+struct P<T> {
+    pub p: *const T,
+}
+
+unsafe("P<T> only reads through p, and only when T is Sync") impl<T: Sync> Sync for P<T> {}
+
+struct L {
+    pub v: u32,
+    pub next: P<L>,
+}
+
+fn impl_applies(h: &H<u32>, n: usize) {
+    thread.par_for(0, n, fn(i: usize) { let r = h; });
+}
+
+fn bound_fails(h: &H<Plain>, n: usize) {
+    thread.par_for(0, n, fn(i: usize) { let r = h; }); //~ ERROR E0802
+}
+
+fn recursive(l: &L, n: usize) {
+    thread.par_for(0, n, fn(i: usize) { let r = l; });
+}

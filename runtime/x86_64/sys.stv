@@ -1,0 +1,151 @@
+// runtime_x86_64.sys: raw Linux system calls on x86-64.
+// Package `runtime_x86_64` (runtime/x86_64/stave.toml), selected for every x86-64 target by
+// runtime/stave.toml (`[target.x86_64-linux.dependencies] arch`). Imported only by runtime.os
+// (`import arch.sys;`). Intrinsic lowering: contracts/intrinsics.md (`syscall`: rax = nr,
+// rdi rsi rdx r10 r8 r9).
+//
+// Call ids are arch-neutral: id i is line i + 1 of runtime/syscalls.list. NR[id] is this
+// arch's number. A test checks that the NR_* values equal syscalls.list and the kernel ABI.
+
+extern "stave-intrinsic" {
+    fn syscall0(nr: usize) -> isize;
+    fn syscall1(nr: usize, a1: usize) -> isize;
+    fn syscall2(nr: usize, a1: usize, a2: usize) -> isize;
+    fn syscall3(nr: usize, a1: usize, a2: usize, a3: usize) -> isize;
+    fn syscall4(nr: usize, a1: usize, a2: usize, a3: usize, a4: usize) -> isize;
+    fn syscall5(nr: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> isize;
+    fn syscall6(nr: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize) -> isize;
+    // A thread-creating system call `nr` with a1..a5 (contracts/intrinsics.md): the child, on
+    // its new stack, calls `__stave_thread_start(arg)` (runtime.thread.entry), then the `exit`
+    // system call (NR_EXIT) with its result; the parent gets the call's result.
+    fn thread_clone(nr: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, arg: usize) -> isize;
+}
+
+pub const NR_READ: usize = 0;
+pub const NR_WRITE: usize = 1;
+pub const NR_PREAD64: usize = 17;
+pub const NR_PWRITE64: usize = 18;
+pub const NR_OPENAT: usize = 257;
+pub const NR_CLOSE: usize = 3;
+pub const NR_FSTAT: usize = 5;
+pub const NR_LSEEK: usize = 8;
+pub const NR_FSYNC: usize = 74;
+pub const NR_FDATASYNC: usize = 75;
+pub const NR_FTRUNCATE: usize = 77;
+pub const NR_FCNTL: usize = 72;
+pub const NR_FLOCK: usize = 73;
+pub const NR_MMAP: usize = 9;
+pub const NR_MUNMAP: usize = 11;
+pub const NR_MREMAP: usize = 25;
+pub const NR_MPROTECT: usize = 10;
+pub const NR_MADVISE: usize = 28;
+pub const NR_CLONE3: usize = 435;
+pub const NR_FUTEX: usize = 202;
+pub const NR_EXIT_GROUP: usize = 231;
+pub const NR_GETRANDOM: usize = 318;
+pub const NR_CLOCK_GETTIME: usize = 228;
+pub const NR_RT_SIGACTION: usize = 13;
+pub const NR_RT_SIGPROCMASK: usize = 14;
+pub const NR_SIGALTSTACK: usize = 131;
+pub const NR_SCHED_GETAFFINITY: usize = 204;
+pub const NR_SCHED_YIELD: usize = 24;
+pub const NR_GETDENTS64: usize = 217;
+pub const NR_UNLINKAT: usize = 263;
+pub const NR_MKDIRAT: usize = 258;
+pub const NR_RENAMEAT2: usize = 316;
+pub const NR_KILL: usize = 62;
+pub const NR_GETPID: usize = 39;
+pub const NR_CLONE: usize = 56;
+pub const NR_EXIT: usize = 60;
+
+pub const NCALLS: usize = 36;
+
+// Indexed by call id (syscalls.list order).
+pub const NR: [usize; 36] = [
+    NR_READ,
+    NR_WRITE,
+    NR_PREAD64,
+    NR_PWRITE64,
+    NR_OPENAT,
+    NR_CLOSE,
+    NR_FSTAT,
+    NR_LSEEK,
+    NR_FSYNC,
+    NR_FDATASYNC,
+    NR_FTRUNCATE,
+    NR_FCNTL,
+    NR_FLOCK,
+    NR_MMAP,
+    NR_MUNMAP,
+    NR_MREMAP,
+    NR_MPROTECT,
+    NR_MADVISE,
+    NR_CLONE3,
+    NR_FUTEX,
+    NR_EXIT_GROUP,
+    NR_GETRANDOM,
+    NR_CLOCK_GETTIME,
+    NR_RT_SIGACTION,
+    NR_RT_SIGPROCMASK,
+    NR_SIGALTSTACK,
+    NR_SCHED_GETAFFINITY,
+    NR_SCHED_YIELD,
+    NR_GETDENTS64,
+    NR_UNLINKAT,
+    NR_MKDIRAT,
+    NR_RENAMEAT2,
+    NR_KILL,
+    NR_GETPID,
+    NR_CLONE,
+    NR_EXIT,
+];
+
+// Offset of the interrupted PC inside the kernel's `ucontext_t` passed to an SA_SIGINFO handler
+// (uc_mcontext.gregs[REG_RIP]: 40 + 16 * 8).
+pub const UCONTEXT_PC: usize = 168;
+
+pub fn sc0(id: usize) -> isize {
+    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall0(NR[id]);
+}
+
+pub fn sc1(id: usize, a1: usize) -> isize {
+    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall1(NR[id], a1);
+}
+
+pub fn sc2(id: usize, a1: usize, a2: usize) -> isize {
+    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall2(NR[id], a1, a2);
+}
+
+pub fn sc3(id: usize, a1: usize, a2: usize, a3: usize) -> isize {
+    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall3(NR[id], a1, a2, a3);
+}
+
+pub fn sc4(id: usize, a1: usize, a2: usize, a3: usize, a4: usize) -> isize {
+    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall4(NR[id], a1, a2, a3, a4);
+}
+
+pub fn sc5(id: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> isize {
+    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall5(NR[id], a1, a2, a3, a4, a5);
+}
+
+pub fn sc6(id: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize) -> isize {
+    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall6(NR[id], a1, a2, a3, a4, a5, a6);
+}
+
+// PC of the interrupted instruction, read from a signal handler's ucontext.
+pub fn ucontext_pc(uctx: usize) -> usize {
+    return unsafe("uctx is the ucontext_t the kernel passed to the running SA_SIGINFO handler") *((uctx + UCONTEXT_PC) as *const usize);
+}
+
+// A new thread with clone3 (`args` = `struct clone_args`, `size` bytes); its entry is
+// runtime.thread.entry(arg).
+pub unsafe("args is a struct clone_args of size bytes whose stack is valid; arg is what runtime.thread.entry expects")
+fn clone3_thread(args: usize, size: usize, arg: usize) -> isize {
+    return unsafe("caller obligation") thread_clone(NR_CLONE3, args, size, 0, 0, 0, arg);
+}
+
+// A new thread with the older `clone` (clone(flags, newsp, parent_tid, child_tid, tls) on x86-64), for kernels and emulators without clone3.
+pub unsafe("sp is the 16-byte aligned top of a fresh stack; ptid and ctid are valid u32 words; arg is what runtime.thread.entry expects")
+fn clone_thread(flags: usize, sp: usize, ptid: usize, ctid: usize, arg: usize) -> isize {
+    return unsafe("caller obligation") thread_clone(NR_CLONE, flags, sp, ptid, ctid, 0, arg);
+}

@@ -1,0 +1,4 @@
+//~ CHECK-ONLY
+fn u(p: *mut i32) {
+    unsafe { *p = 1; } //~ ERROR E0013
+}

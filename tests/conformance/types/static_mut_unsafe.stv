@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// Every use of a `static mut` (read, write, borrow) is unsafe (E0803); its type must not
+// be or hold a reference or view (E0413), except `&str` from a string literal.
+static mut COUNT: u64 = 0;
+static mut NAME: &str = "ok";
+static mut FIRST: Option<&u8> = Option.None; //~ ERROR E0413
+
+fn main() -> i32 {
+    COUNT = 1; //~ ERROR E0803
+    let a: u64 = COUNT; //~ ERROR E0803
+    let p = &mut COUNT as *mut u64; //~ ERROR E0803
+    let b: u64 = unsafe("single-threaded test program") COUNT;
+    unsafe("single-threaded test program") { COUNT = COUNT + b; }
+    return 0;
+}

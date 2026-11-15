@@ -1,0 +1,25 @@
+//~ CHECK-ONLY
+// Safe C++ catalogue, guards: touching the guarded value while the guard lives.
+// Stave: E0501.
+view struct Guard { cell: &mut u32 }
+
+fn lock(c: &mut u32) -> Guard from c {
+    return Guard.{ cell: c };
+}
+
+fn alias() -> u32 {
+    let mut x: u32 = 1;
+    let mut g = lock(&mut x);
+    x = 2; //~ ERROR E0501
+    *g.cell = 3;
+    return x;
+}
+
+// fine: the guard is dead before the direct write
+fn sequential() -> u32 {
+    let mut x: u32 = 1;
+    let mut g = lock(&mut x);
+    *g.cell = 3;
+    x = x + 1;
+    return x;
+}

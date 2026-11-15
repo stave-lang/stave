@@ -1,0 +1,68 @@
+//~ STDOUT num_float_long.stdout
+// std.num.parse_f64 / parse_f32 on long inputs with six-digit exponents: the
+// exponent is read exactly and combined with the digit counts without overflow, so
+// 0.(n zeros)1e(n + 1) is 1.0, 1(n zeros)e-n is 1.0, and a halfway case decided by a digit
+// past the 800th rounds up. Huge exponents give inf or 0. Seven-digit exponents need 10^6-digit
+// inputs: tests/conformance/std/num_float_exp7.stv.
+import std.io;
+import std.num;
+import std.string;
+
+const N: usize = 200000;
+
+fn zeros(s: &mut string.String, n: usize) {
+    for i in 0..(n / 10) { s.push_str("0000000000"); }
+    for i in 0..(n % 10) { s.push_str("0"); }
+}
+
+fn show(label: &str, t: &string.String) {
+    match num.parse_f64(t.as_str()) {
+        Option.Some(x) => { io.print(label); io.print(f" {x}\n"); }
+        Option.None => { io.print(label); io.print(" none\n"); }
+    }
+}
+
+fn main() -> i32 {
+    // 0.(N zeros)1e(N + 1) = 1
+    let mut a = string.String.from_str("0.");
+    zeros(&mut a, N);
+    a.push_str("1e200001");
+    show("frac", &a);
+
+    // 1(N zeros)e-N = 1
+    let mut b = string.String.from_str("1");
+    zeros(&mut b, N);
+    b.push_str("e-200000");
+    show("int", &b);
+
+    // 2^53 + 1 (halfway between two f64), then N zeros and a 1: just above halfway, rounds up
+    let mut c = string.String.from_str("9007199254740993");
+    zeros(&mut c, N);
+    c.push_str("1e-200001");
+    show("half", &c);
+
+    // the same without the final 1: exactly halfway, ties to even
+    let mut d = string.String.from_str("9007199254740993");
+    zeros(&mut d, N);
+    d.push_str("e-200000");
+    show("tie", &d);
+
+    // 0.(N zeros)1e(N + 1) as f32
+    match num.parse_f32(a.as_str()) {
+        Option.Some(x) => { io.print(f"frac32 {x}\n"); }
+        Option.None => { io.print(f"frac32 none\n"); }
+    }
+
+    let e = string.String.from_str("1e999999999999999999999");
+    show("big", &e);
+    let f = string.String.from_str("-1.5e-999999999999999999999");
+    show("tiny", &f);
+    let mut g = string.String.from_str("0.");
+    zeros(&mut g, N);
+    g.push_str("1e-999999");
+    show("tiny2", &g);
+
+    let h = string.String.from_str("1e");
+    show("bad", &h);
+    return 0;
+}

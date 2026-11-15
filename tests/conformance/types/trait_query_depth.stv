@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+// Copy and Sync of deeply nested types are computed, not assumed: a `Cell` under 40 wrappers is
+// still not Sync (E0802), and an array nested 40 deep of `String` is still not Copy (E0415).
+import std.cell;
+import std.string;
+import std.thread;
+
+struct W<T> {
+    pub v: T,
+}
+
+fn deep_cell(c: &W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<cell.Cell<u32>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>, n: usize) {
+    thread.par_for(0, n, fn(i: usize) { let r = c; }); //~ ERROR E0802
+}
+
+struct Deep {
+    pub a: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[string.String; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1]; 1],
+}
+
+impl Copy for Deep {} //~ ERROR E0415

@@ -1,0 +1,13 @@
+//~ STDOUT run_golden.stdout
+//~ EXIT 3
+import std.io;
+
+fn fib(n: u32) -> u32 {
+    return if n < 2 then n else fib(n - 1) + fib(n - 2);
+}
+
+fn main() -> i32 {
+    let f = fib(10);
+    io.print(f"fib {f}\n");
+    return 3;
+}

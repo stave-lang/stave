@@ -1,0 +1,155 @@
+// std.cell: interior mutability.
+//
+// `UnsafeCell<T>` is the only interior-mutability type: `&T` is read-only for the optimizer
+// unless T contains it (its path std.cell.UnsafeCell is fixed by the compiler,
+// contracts/intrinsics.md "Paths fixed by the compiler"). Every other type here wraps it:
+//   Cell<T: Copy>  get / set / replace by value; never hands out a reference into itself.
+//   RefCell<T>     dynamically checked borrows: `borrow()` gives a `Ref` view, `borrow_mut()` a
+//                  `RefMut` view; each view's destructor ends its borrow. A conflicting borrow
+//                  panics `Assert` at the caller ("already borrowed").
+// None of them is Sync (shared across threads, use std.sync.Mutex): the checker never treats
+// UnsafeCell<T> as Sync (Send iff T is), and the structural rule carries that to every type
+// containing it unless it has an explicit `unsafe(..) impl Sync` (stave-sema kinds). The views
+// `Ref<T>` / `RefMut<T>` are never Send (their `&RefCell<T>` is not, the borrow count is not
+// atomic) and are Sync when T is: through `&Ref` / `&RefMut` only `get() -> &T` is reachable.
+
+import runtime.panic;
+import std.core;
+import std.mem;
+
+pub struct UnsafeCell<T> {
+    value: T,
+}
+
+impl<T> UnsafeCell<T> {
+    pub fn new(v: T) -> UnsafeCell<T> {
+        return UnsafeCell::<T>.{ value: v };
+    }
+
+    // A pointer to the value; reading or writing through it is the caller's unsafe operation.
+    pub fn get(&self) -> *mut T {
+        return &self.value as *const T as *mut T;
+    }
+
+    pub fn get_mut(&mut self) -> &mut T from self {
+        return &mut self.value;
+    }
+
+    pub fn into_inner(self) -> T {
+        return self.value;
+    }
+}
+
+pub struct Cell<T: Copy> {
+    v: UnsafeCell<T>,
+}
+
+impl<T: Copy> Cell<T> {
+    pub fn new(v: T) -> Cell<T> {
+        return Cell::<T>.{ v: UnsafeCell::<T>.new(v) };
+    }
+
+    pub fn get(&self) -> T {
+        return unsafe("no reference into a Cell's value ever exists; one thread (Cell is not Sync)") *self.v.get();
+    }
+
+    pub fn set(&self, x: T) {
+        let p = self.v.get();
+        unsafe("no reference into a Cell's value ever exists; one thread (Cell is not Sync)") { *p = x; }
+    }
+
+    pub fn replace(&self, x: T) -> T {
+        let old = self.get();
+        self.set(x);
+        return old;
+    }
+}
+
+// borrow state: 0 free, n > 0 shared borrows, -1 one mutable borrow
+pub struct RefCell<T> {
+    state: Cell<isize>,
+    v: UnsafeCell<T>,
+}
+
+fn already(what: &str) -> never {
+    panic.trap_msg(panic.KIND_ASSERT, panic.user_site(), mem.str_bytes(what));
+}
+
+impl<T> RefCell<T> {
+    pub fn new(v: T) -> RefCell<T> {
+        return RefCell::<T>.{ state: Cell::<isize>.new(0), v: UnsafeCell::<T>.new(v) };
+    }
+
+    // A shared borrow; panics `Assert` if the value is mutably borrowed.
+    pub fn borrow(&self) -> Ref<T> from self {
+        let s = self.state.get();
+        if s < 0 { already("RefCell already mutably borrowed"); }
+        self.state.set(s + 1);
+        return Ref::<T>.{ c: self };
+    }
+
+    // A unique borrow; panics `Assert` if the value is borrowed.
+    pub fn borrow_mut(&self) -> RefMut<T> from self {
+        if self.state.get() != 0 { already("RefCell already borrowed"); }
+        self.state.set(-1);
+        return RefMut::<T>.{ c: self };
+    }
+
+    pub fn is_borrowed(&self) -> bool {
+        return self.state.get() != 0;
+    }
+
+    pub fn get_mut(&mut self) -> &mut T from self {
+        return self.v.get_mut();
+    }
+
+    pub fn into_inner(self) -> T {
+        return self.v.into_inner();
+    }
+}
+
+// A shared borrow of a RefCell's value; ends when the view is dropped.
+pub view struct Ref<T> {
+    c: &RefCell<T>,
+}
+
+unsafe("&Ref<T> only reads the value (get), safe from several threads when T is Sync") impl<T: core.Sync> core.Sync for Ref<T> {}
+
+impl<T> Ref<T> {
+    pub fn get(&self) -> &T from self {
+        let p = self.c.v.get();
+        return unsafe("the RefCell is shared-borrowed while this Ref lives: no &mut to the value exists") &*p;
+    }
+}
+
+impl<T> core.Drop for Ref<T> {
+    fn drop(&mut self) {
+        let s = self.c.state.get();
+        self.c.state.set(s - 1);
+    }
+}
+
+// The unique borrow of a RefCell's value; ends when the view is dropped.
+pub view struct RefMut<T> {
+    c: &RefCell<T>,
+}
+
+unsafe("&RefMut<T> only reads the value (get), safe from several threads when T is Sync") impl<T: core.Sync> core.Sync for RefMut<T> {}
+
+impl<T> RefMut<T> {
+    pub fn get(&self) -> &T from self {
+        let p = self.c.v.get();
+        return unsafe("the RefCell is uniquely borrowed by this RefMut") &*p;
+    }
+
+    pub fn get_mut(&mut self) -> &mut T from self {
+        let p = self.c.v.get();
+        return unsafe("the RefCell is uniquely borrowed by this RefMut, itself borrowed mutably here") &mut *p;
+    }
+}
+
+impl<T> core.Drop for RefMut<T> {
+    fn drop(&mut self) {
+        self.c.state.set(0);
+    }
+}

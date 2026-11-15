@@ -1,0 +1,15 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: DivByZero at panic_div_zero.stv:5:18 in main.per (thread 0)"
+// `/` by zero traps with DivByZero; the divisor counts down to 0.
+fn per(total: u64, n: u64) -> u64 {
+    return total / n;
+}
+
+fn main() -> i32 {
+    let mut n: u64 = 3;
+    for i in 0u32..5 {
+        let q = per(100, n);
+        n = n - 1;
+    }
+    return 0;
+}

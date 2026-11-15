@@ -1,0 +1,11 @@
+//~ CHECK-ONLY
+// contracts/parse-errors.md rule 1: `unsafe` not followed by `("..."`.
+fn no_obligation(p: *mut i32) {
+    unsafe { *p = 1; } //~ ERROR E0013
+}
+
+fn not_a_string(p: *mut i32, x: i32) {
+    unsafe(x) { *p = 1; } //~ ERROR E0013
+}
+
+unsafe fn no_obligation_item() { } //~ ERROR E0013

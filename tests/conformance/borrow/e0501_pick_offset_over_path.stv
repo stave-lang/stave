@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// Loan choice: the creation offset decides before the place path (`p.b`, created first, is
+// named although `p.a` sorts first); the later use is the use of `rb`.
+struct P { pub a: u32, pub b: u32 }
+
+fn main() -> i32 {
+    let mut p = P.{ a: 1, b: 2 };
+    let rb: &u32 = &p.b;
+    let ra: &u32 = &p.a;
+    p = P.{ a: 3, b: 4 }; //~ ERROR E0501
+    let s: u32 = *ra + *rb;
+    return 0;
+}

@@ -1,0 +1,10 @@
+//~ CHECK-ONLY
+// `static mut` items (grammar v0.6 StaticDecl): `static` is a keyword and always takes
+// `mut`; there is no immutable `static` (write `const`).
+static mut HITS: u32 = 0;
+pub static mut LIMIT: usize = 16;
+static ONCE: u32 = 0; //~ ERROR E0004
+
+fn hit() {
+    unsafe("single-threaded test program") { HITS = HITS + 1; }
+}

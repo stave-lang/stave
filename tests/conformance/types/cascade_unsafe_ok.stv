@@ -1,0 +1,11 @@
+//~ CHECK-ONLY
+// A body with a type error is flagged (borrowck skips it): no E05xx appears for it.
+fn moved(v: u32) -> u32 {
+    let s: u32 = v;
+    let bad: bool = s; //~ ERROR E0201
+    return v;
+}
+
+fn main() -> i32 {
+    return 0;
+}

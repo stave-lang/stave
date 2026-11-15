@@ -1,0 +1,45 @@
+//~ CHECK-ONLY
+// Impl conformance: E0905 (signature differs from the trait's), E0906 (missing or extra method),
+// E0907 (`pub` on a trait impl method), E0908 (two traits supply the method: use `Trait.m(x)`),
+// E0415 (`impl Copy` with a non-Copy field).
+import std.vec;
+
+trait Name { fn name(&self) -> u32; }
+trait Tag { fn name(&self) -> u32; }
+trait Two { fn one(&self) -> u32; fn two(&self) -> u32; }
+
+struct A { pub v: u32 }
+struct B { pub v: vec.Vec<u8> }
+struct C { pub r: u32 }
+
+impl Name for A {
+    pub fn name(&self) -> u32 { return 1; } //~ ERROR E0907
+}
+
+impl Tag for A {
+    fn name(&self) -> u32 { return 2; }
+}
+
+impl Two for A { //~ ERROR E0906
+    fn one(&self) -> u32 { return 1; }
+    fn three(&self) -> u32 { return 3; } //~ ERROR E0906
+}
+
+impl Name for C {
+    fn name(&self) -> u64 { return 1; } //~ ERROR E0905
+}
+
+impl Tag for C {
+    fn name(self) -> u32 { return 1; } //~ ERROR E0905
+}
+
+impl Copy for A {}
+
+impl Copy for B {} //~ ERROR E0415
+
+fn main() -> i32 {
+    let a = A.{ v: 1 };
+    let x: u32 = a.name(); //~ ERROR E0908
+    let y: u32 = Name.name(&a) + Tag.name(&a);
+    return 0;
+}

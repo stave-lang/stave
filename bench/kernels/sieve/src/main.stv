@@ -1,0 +1,78 @@
+// Sieve of Eratosthenes over [0, N), REPS times: marks composites in a byte array, then counts
+// the primes, sums them, and hashes the gaps between them. Same steps as main.c.
+import std.io;
+import std.vec;
+
+const N: usize = 16777216;
+const REPS: u32 = 4;
+
+fn sieve(f: &mut [u8]) {
+    let n = f.len();
+    for i in 0..n {
+        f[i] = 0;
+    }
+    f[0] = 1;
+    f[1] = 1;
+    let mut i: usize = 2;
+    while i * i < n {
+        if f[i] == 0 {
+            let mut j = i * i;
+            while j < n {
+                f[j] = 1;
+                j = j + i;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+fn count(f: &[u8]) -> u64 {
+    let mut c: u64 = 0;
+    for i in 0..f.len() {
+        if f[i] == 0 {
+            c = c + 1;
+        }
+    }
+    return c;
+}
+
+fn sum(f: &[u8]) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..f.len() {
+        if f[i] == 0 {
+            s = s + (i as u64);
+        }
+    }
+    return s;
+}
+
+fn gaps(f: &[u8]) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    let mut last: u64 = 2;
+    for i in 3..f.len() {
+        if f[i] == 0 {
+            let p = i as u64;
+            h = (h ^ (p - last)) *% 1099511628211;
+            last = p;
+        }
+    }
+    return h;
+}
+
+fn main() -> i32 {
+    let mut flags = vec.Vec::<u8>.with_capacity(N);
+    for i in 0..N {
+        flags.push(1u8);
+    }
+    let mut total: u64 = 0;
+    for r in 0..REPS {
+        sieve(flags.as_mut_slice());
+        let c = count(flags.as_slice());
+        let s = sum(flags.as_slice());
+        let g = gaps(flags.as_slice());
+        total = total ^ g ^ s ^ c;
+        io.print(f"rep {r}: primes {c} sum {s} gaps {g}\n");
+    }
+    io.print(f"checksum {total}\n");
+    return 0;
+}

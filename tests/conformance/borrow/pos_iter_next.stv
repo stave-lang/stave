@@ -1,0 +1,51 @@
+//~ CHECK-ONLY
+// An iterator view `next(&mut self) -> Option<&T> from copy self` drives `for`: the items borrow
+// the slice, not the iterator, so one may outlive the next call of `next`.
+view struct Iter { xs: &[u32], i: usize }
+
+impl Iter {
+    pub fn next(&mut self) -> Option<&u32> from copy self {
+        if self.i >= self.xs.len() {
+            return Option.None;
+        }
+        let k: usize = self.i;
+        self.i = self.i + 1;
+        return Option.Some(&self.xs[k]);
+    }
+}
+
+fn iter(xs: &[u32]) -> Iter from xs {
+    return Iter.{ xs: xs, i: 0 };
+}
+
+fn last(xs: &[u32]) -> u32 {
+    let zero: u32 = 0;
+    let mut keep: &u32 = &zero;
+    for x in iter(xs) {
+        keep = x;
+    }
+    return *keep;
+}
+
+fn sum(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    let mut it = iter(xs);
+    let a: Option<&u32> = it.next();
+    let b: Option<&u32> = it.next();
+    match a {
+        Option.Some(x) => { s = s + *x; }
+        Option.None => { }
+    }
+    match b {
+        Option.Some(x) => { s = s + *x; }
+        Option.None => { }
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let xs: [u32; 3] = [1, 2, 3];
+    let a: u32 = last(&xs);
+    let b: u32 = sum(&xs);
+    return 0;
+}

@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// `as %` with a space is two tokens: `as`, then `%` where a cast type must start.
+fn f(x: i64) -> u8 {
+    return x as % u8; //~ ERROR E0004
+}

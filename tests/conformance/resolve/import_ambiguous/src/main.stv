@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// E0107: `util` names both the dependency `util` and the module `src/util.stv`, and
+// `std` both the implicit dependency and the directory `src/std/`. The package's own name first
+// selects the module; there is no way to reach a dependency past a module of the same name.
+import util; //~ ERROR E0107
+import import_ambiguous.util as mine;
+import std.io; //~ ERROR E0107
+import import_ambiguous.std.extra;
+
+fn main() -> i32 {
+    let a: i32 = mine.local();
+    let b: i32 = util.base();
+    io.print("x");
+    return a + b + extra.e();
+}

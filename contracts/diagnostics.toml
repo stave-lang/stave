@@ -1,0 +1,1711 @@
+# Stave diagnostic registry, machine-readable source (v0.2)
+#
+# The registry is the union of three human tables: diagnostic-codes.md (E00xx-E10xx, E13xx),
+# gpu-diagnostics.md (E11xx, GPU kernels), and gpu-program-diagnostics.md (E12xx, `gpu-sm86`). They
+# hold the rule text; this file holds one entry per code of that union, with its templates.
+# tools/diaggen reads it and generates crates/stave-diag/src/generated/templates.rs (stage0) and
+# stage1/src/generated/diag_templates.stv (stage1). diaggen fails if:
+#   - a code of diagnostic-codes.md, gpu-diagnostics.md (E11xx) or gpu-program-diagnostics.md
+#     (E12xx), retired ones included, has no entry here, or an entry has no row there, or a code
+#     appears twice, or the entries are not sorted by code;
+#   - an error entry lacks `message` or `fix`;
+#   - a template uses a hole not declared in `holes`, or a declared hole is unused by the entry
+#     and all its cases together;
+#   - a hole kind is not one of the kinds below, or a `text-literal` hole has no `choices`.
+#
+# Entry format, one [[diag]] table per code, sorted by code:
+#   code      "E0000"                               required
+#   severity  "error" | "warning"                   required
+#   area      range name of diagnostic-codes.md: "lex-parse" "resolve" "types" "patterns" "kinds"
+#             "borrow" "simd" "features" "threads-unsafe-ffi" "generics" "driver" "gpu-kernel"
+#             "gpu-program" "gpu-compiler"
+#   rule      one line, same meaning as the diagnostic-codes.md row
+#   retired   true for a retired code (then only code, rule, retired)
+#   located   false for codes with no primary span (they sort first); default true. Exactly
+#             E1001, E1301, E1302, E1303 are location-less
+#   holes     { name = kind }. Kinds (all canonical, identical in both compilers):
+#               name        an identifier as written
+#               path        a dotted module/item path (checked-IR Path)
+#               type        a canonically printed type (Stave surface spelling, e.g. `&mut [u8]`)
+#               token-kinds a list of terminal names (KIND spelling of the tokens dump),
+#                           in generated-table terminal order, joined by ", "
+#               int         a decimal integer
+#               place       a borrow place: local name, then `.field`, `[_]`, prefixed `*` per deref
+#               source      the exact source bytes of a span
+#               text-literal one of the strings listed for that hole in `choices`
+#   choices   { hole = ["...", ...] } for text-literal holes
+#   message   template, one line, no trailing period
+#   labels    [{ at = "primary" | "<role>", text = template }]. A role names a related span the
+#             compiler supplies; related spans print in the order of this list. A role may be
+#             supplied several times (a call chain, a cycle): its label prints once per span, in
+#             the order supplied. A label whose role is not supplied is not printed
+#   fix       { description = template, edits = [{ at = "primary" | "<role>", replacement = template }] }
+#             Planned (diaggen rejects the key until then): `applicability = "exact" | "maybe" |
+#             "placeholder"` on a fix with edits (default "maybe"; a fix without edits is
+#             "placeholder"). Only "exact" fixes are applied by `stave fix`. Entries whose edits are
+#             already token-local (E0023, E0024, E0026 case unit, E0027, E0210) become "exact".
+#   Codes whose rule ends "(planned)" are registered before the compiler emits them.
+#   cases     optional { case-name = { message, labels, fix } } for a code with several shapes;
+#             the compiler picks the case, keys not given in a case come from the entry (each key
+#             is replaced whole: a case `fix` replaces the entry's description and edits)
+# Template syntax: {hole} inserts a hole; {{ and }} are literal braces; backticks are literal.
+# Style: types, code (names, paths, operators, source text, target and feature names), and flags
+# are always in backticks in message, label, and fix text, e.g. "expected `{expected}`",
+# "`--compiler gpu`: ...". Holes of kind text-literal whose choices are prose stay bare.
+# Rendered message, label, and fix description text is one line. In those positions a `source`
+# hole value is normalized: every run of whitespace (space, tab, LF, VT, FF, CR; newlines
+# included) becomes one space, and leading and trailing whitespace is removed. Any other hole value
+# with a newline there is a render error. Edit replacements take hole values unchanged (they may
+# span lines).
+
+[[diag]]
+code = "E0001"
+severity = "error"
+area = "lex-parse"
+rule = "source is not valid UTF-8"
+message = "source is not valid UTF-8"
+labels = [{ at = "primary", text = "invalid UTF-8 byte sequence starts here" }]
+fix = { description = "re-encode the file as UTF-8 (without byte-order mark), or remove the invalid bytes" }
+
+[[diag]]
+code = "E0002"
+severity = "error"
+area = "lex-parse"
+rule = "source file exceeds 4 GiB (u32 offsets); files up to that size are accepted"
+holes = { size = "int" }
+message = "source file is {size} bytes, over the 4 GiB limit"
+labels = [{ at = "primary", text = "file too large" }]
+fix = { description = "split the file into several modules, each smaller than 4 GiB" }
+
+[[diag]]
+code = "E0003"
+severity = "error"
+area = "lex-parse"
+rule = "unterminated string, char, or f-string literal: it reaches end of file before its closing quote, with no newline in between (a raw newline first is E0015)"
+holes = { what = "text-literal" }
+choices = { what = ["string", "f-string", "char"] }
+message = "unterminated {what} literal"
+labels = [{ at = "primary", text = "{what} literal starts here and is never closed" }]
+fix = { description = "add the closing quote of this {what} literal before the end of the file, on the same line" }
+
+[[diag]]
+code = "E0004"
+severity = "error"
+area = "lex-parse"
+rule = "unexpected token (the message lists the expected set); only the first per item, the item is dropped"
+holes = { found = "token-kinds", expected = "token-kinds" }
+message = "unexpected {found}, expected one of: {expected}"
+labels = [{ at = "primary", text = "unexpected {found}" }]
+fix = { description = "write one of {expected} here, or remove {found}" }
+
+[[diag]]
+code = "E0005"
+severity = "error"
+area = "lex-parse"
+rule = "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit"
+message = "brackets nested deeper than 10000 levels"
+labels = [{ at = "primary", text = "this opener reaches nesting depth 10001" }]
+fix = { description = "reduce the nesting: move inner expressions into local bindings, functions, or consts" }
+
+[diag.cases.expr]
+message = "expression nested deeper than 20000 levels"
+labels = [{ at = "primary", text = "this node reaches nesting depth 20001" }]
+
+[[diag]]
+code = "E0006"
+severity = "error"
+area = "lex-parse"
+rule = "f-string interpolation is not a name or field path"
+holes = { hole = "source" }
+message = "f-string hole `{{{hole}}}` is not a name or field path"
+labels = [{ at = "primary", text = "only a name, `self`, or a field path may appear here" }]
+fix = { description = "bind the value to a local first (`let v = {hole};`), then write `{{v}}` in the f-string" }
+
+[[diag]]
+code = "E0011"
+severity = "error"
+area = "lex-parse"
+rule = "`<` after a cast type (rule D2); write `(x as T) < y`"
+message = "`<` after a cast type opens type arguments"
+labels = [{ at = "primary", text = "`<` here starts type arguments of the cast type" }]
+fix = { description = "write `(x as T) < y`, or close the type arguments" }
+
+[[diag]]
+code = "E0012"
+severity = "error"
+area = "lex-parse"
+rule = "chained comparison `a < b < c`"
+message = "comparison operators cannot be chained"
+labels = [{ at = "primary", text = "second comparison here" }]
+fix = { description = "split the chain with `&&`: write `a < b && b < c`" }
+
+[[diag]]
+code = "E0013"
+severity = "error"
+area = "lex-parse"
+rule = "`unsafe` without an obligation string, or with an empty one (`unsafe(\"\")`)"
+message = "`unsafe` needs an obligation string"
+labels = [{ at = "primary", text = "`unsafe` without `(\"...\")`" }]
+fix = { description = "state why the code is sound: write `unsafe(\"<obligation>\")` before the block, expression, or item" }
+
+[diag.cases.empty]
+message = "`unsafe` has an empty obligation string"
+labels = [{ at = "primary", text = "empty obligation" }]
+fix = { description = "state why the code is sound in the string: `unsafe(\"<obligation>\")`" }
+
+[[diag]]
+code = "E0014"
+severity = "error"
+area = "lex-parse"
+rule = "struct literal or struct pattern written `Name { ... }`; write `Name.{ ... }`"
+holes = { path = "source" }
+message = "struct literal or pattern after `{path}` needs `.{{`"
+labels = [{ at = "primary", text = "`{{` here opens a block" }]
+fix = { description = "write `{path}.{{ ... }}`", edits = [{ at = "primary", replacement = ".{{" }] }
+
+[[diag]]
+code = "E0015"
+severity = "error"
+area = "lex-parse"
+rule = "raw newline inside a string, f-string, or char literal (before its closing quote; reported at the literal's start, the literal ends at the newline; end of file first is E0003); write `\\n`, the literal must end on its line"
+holes = { what = "text-literal" }
+choices = { what = ["string", "f-string", "char"] }
+message = "raw newline inside a {what} literal"
+labels = [{ at = "primary", text = "{what} literal starts here; the line ends before its closing quote" }]
+fix = { description = "write `\\n` for the newline and close the {what} literal on this line" }
+
+[[diag]]
+code = "E0016"
+severity = "error"
+area = "lex-parse"
+rule = "unbalanced brackets; one per file, no other parse diagnostics for the file"
+holes = { closer = "token-kinds", opener = "token-kinds" }
+message = "unbalanced brackets"
+labels = [{ at = "primary", text = "unbalanced" }]
+fix = { description = "balance the brackets of this file" }
+
+[diag.cases.unmatched]
+message = "unmatched closing {closer}"
+labels = [{ at = "primary", text = "no opener for this {closer}" }]
+fix = { description = "remove this {closer}, or add its opener before it" }
+
+[diag.cases.mismatched]
+message = "{closer} closes {opener}"
+labels = [{ at = "primary", text = "{closer} here" }, { at = "opener", text = "{opener} opened here" }]
+fix = { description = "close the inner {opener} first, or change this {closer}" }
+
+[diag.cases.unclosed]
+message = "{opener} is never closed"
+labels = [{ at = "primary", text = "{opener} opened here, still open at end of file" }]
+fix = { description = "add the closer of this {opener} before the end of the file" }
+
+[[diag]]
+code = "E0017"
+severity = "error"
+area = "lex-parse"
+rule = "byte-order mark at file start; remove it (UTF-8 without BOM)"
+message = "file starts with a byte-order mark"
+labels = [{ at = "primary", text = "byte-order mark" }]
+fix = { description = "remove the byte-order mark: save the file as UTF-8 without BOM", edits = [{ at = "primary", replacement = "" }] }
+
+[[diag]]
+code = "E0018"
+severity = "error"
+area = "lex-parse"
+rule = "unexpected character: a byte that starts no token (`@ $ \\ #` backtick, a control byte other than tab/LF/CR, DEL) or any non-ASCII byte outside string, char, and f-string literals and comments (identifiers are ASCII); one per run of consecutive such bytes, at its start; the item is dropped without E0004"
+message = "unexpected character"
+labels = [{ at = "primary", text = "starts no token" }]
+fix = { description = "remove it: identifiers are ASCII `[A-Za-z_][A-Za-z0-9_]*`, and other text belongs in a string literal or a comment" }
+
+[[diag]]
+code = "E0019"
+severity = "error"
+area = "lex-parse"
+rule = "`if let` or `while let` (Rust): Stave has no `let` conditions; write a `match` (planned)"
+holes = { kw = "text-literal" }
+choices = { kw = ["if", "while"] }
+message = "`{kw} let` is not Stave: use `match`"
+labels = [{ at = "primary", text = "`{kw} let` here" }]
+fix = { description = "write `match e {{ P => {{ .. }} _ => {{ }} }}` (`while let`: `loop {{ match e {{ P => {{ .. }} _ => {{ break; }} }} }}`)" }
+
+[[diag]]
+code = "E0020"
+severity = "error"
+area = "lex-parse"
+rule = "`let P = e else { .. };` (Rust `let … else`): write a `match` (planned)"
+message = "`let … else` is not Stave: use `match`"
+labels = [{ at = "primary", text = "`else` after a `let` initializer" }]
+fix = { description = "write `let x = match e {{ P(x) => x, _ => {{ .. }} }};` as a `match` statement whose other arm leaves the function" }
+
+[[diag]]
+code = "E0021"
+severity = "error"
+area = "lex-parse"
+rule = "expression without `;` before `}` (a Rust tail expression): blocks are not values; return with `return e;` (planned)"
+message = "blocks are not values: write `return` and `;`"
+labels = [{ at = "primary", text = "tail expression" }]
+fix = { description = "write `return e;` to return the value, or end the statement with `;`" }
+
+[[diag]]
+code = "E0022"
+severity = "error"
+area = "lex-parse"
+rule = "`where` clause (Rust): bounds are written inline only, `<T: A + B>` (planned)"
+message = "`where` clauses are not Stave: write the bounds inline"
+labels = [{ at = "primary", text = "`where` here" }]
+fix = { description = "move each bound into the generic parameter list: `fn f<T: A + B>(..)`" }
+
+[[diag]]
+code = "E0023"
+severity = "error"
+area = "lex-parse"
+rule = "`::` as a path separator (Rust `a::b`): `.` is the only path separator; `::` only before generic args (planned)"
+message = "`::` is not a path separator: write `.`"
+labels = [{ at = "primary", text = "`::` in a path" }]
+fix = { description = "replace `::` with `.`", edits = [{ at = "primary", replacement = "." }] }
+
+[[diag]]
+code = "E0024"
+severity = "error"
+area = "lex-parse"
+rule = "lifetime `'a` (a `'` followed by an identifier and no closing `'`): Stave has no lifetimes; a lexical error, one per occurrence (planned)"
+holes = { text = "source" }
+message = "lifetime `{text}` is not Stave: references have no lifetimes"
+labels = [{ at = "primary", text = "lifetime here" }]
+fix = { description = "remove `{text}`; name a returned borrow's origin with `-> &T from x`", edits = [{ at = "primary", replacement = "" }] }
+
+[[diag]]
+code = "E0025"
+severity = "error"
+area = "lex-parse"
+rule = "`mut x: T` parameter (Rust): params are immutable bindings; rebind with `let mut` in the body (planned)"
+message = "`mut` parameters are not Stave"
+labels = [{ at = "primary", text = "`mut` before a parameter name" }]
+fix = { description = "remove `mut` and write `let mut y = x;` at the start of the body" }
+
+[[diag]]
+code = "E0026"
+severity = "error"
+area = "lex-parse"
+rule = "tuple struct `struct S(T);` or unit struct `struct S;` (Rust): structs have named fields, `struct S { v: T }`, `struct S {}` (planned)"
+holes = { name = "name" }
+message = "struct `{name}` needs named fields in `{{ }}`"
+labels = [{ at = "primary", text = "tuple or unit struct" }]
+fix = { description = "declare named fields: `struct {name} {{ v: T }}` (a unit struct is `struct {name} {{}}`)" }
+
+[diag.cases.unit]
+message = "unit struct `{name}` is written `struct {name} {{}}`"
+labels = [{ at = "primary", text = "unit struct" }]
+fix = { description = "replace `;` with `{{}}`", edits = [{ at = "primary", replacement = " {{}}" }] }
+
+[[diag]]
+code = "E0027"
+severity = "error"
+area = "lex-parse"
+rule = "`!` as a type (Rust never type): write `never`, only after `->` (planned)"
+message = "`!` is not a type: write `never`"
+labels = [{ at = "primary", text = "`!` in a type position" }]
+fix = { description = "replace `!` with `never`", edits = [{ at = "primary", replacement = "never" }] }
+
+[[diag]]
+code = "E0028"
+severity = "error"
+area = "lex-parse"
+rule = "`dyn Trait` or `impl Trait` in a type position (Rust): use a generic `<T: Trait>` or a fn type (planned)"
+holes = { kw = "text-literal" }
+choices = { kw = ["dyn", "impl"] }
+message = "`{kw} Trait` types are not Stave: use a generic parameter"
+labels = [{ at = "primary", text = "`{kw}` in a type position" }]
+fix = { description = "add a generic parameter `<T: Trait>` and write `T`, or use a fn type `fn(..) -> R`" }
+
+[[diag]]
+code = "E0029"
+severity = "error"
+area = "lex-parse"
+rule = "block comment `/*` (Rust/C): Stave has `//` line comments only; the token `/*` is a lexical error through the end of its line or the first `*/` on it (`a / *p` needs the space) (planned)"
+message = "block comments are not Stave: use `//`"
+labels = [{ at = "primary", text = "`/*` here" }]
+fix = { description = "start each comment line with `//`" }
+
+[[diag]]
+code = "E0101"
+severity = "error"
+area = "resolve"
+rule = "unresolved name"
+holes = { name = "name" }
+message = "cannot find `{name}` in this scope"
+labels = [{ at = "primary", text = "not found" }]
+fix = { description = "declare `{name}`, import the module that defines it, or correct the spelling" }
+
+[diag.cases.not-type]
+message = "`{name}` is not a type"
+labels = [{ at = "primary", text = "expected a type here" }]
+fix = { description = "name a struct, enum, type alias, generic parameter, or built-in type" }
+
+[diag.cases.not-trait]
+message = "`{name}` is not a trait"
+labels = [{ at = "primary", text = "expected a trait here" }]
+fix = { description = "name a trait in the bound or after `impl`" }
+
+[[diag]]
+code = "E0102"
+severity = "error"
+area = "resolve"
+rule = "import cycle; one per strongly connected component, listed from its lexicographically smallest module path, following import order"
+holes = { module = "path" }
+message = "import cycle through module `{module}`"
+labels = [{ at = "primary", text = "`{module}` starts the cycle here" }, { at = "import", text = "next import of the cycle" }]
+fix = { description = "break the cycle: move the shared items into a module that none of these modules import" }
+
+[[diag]]
+code = "E0103"
+severity = "error"
+area = "resolve"
+rule = "unqualified enum variant in a pattern or expression"
+holes = { name = "name", enum = "path" }
+message = "enum variant `{name}` must be qualified as `{enum}.{name}`"
+labels = [{ at = "primary", text = "unqualified variant" }]
+fix = { description = "write `{enum}.{name}`", edits = [{ at = "primary", replacement = "{enum}.{name}" }] }
+
+[[diag]]
+code = "E0104"
+severity = "error"
+area = "resolve"
+rule = "more than one `allocator` declaration in a binary"
+message = "more than one `allocator` declaration in this binary"
+labels = [{ at = "primary", text = "another `allocator` declaration" }, { at = "first", text = "first `allocator` declaration here" }]
+fix = { description = "keep one `allocator` declaration in the binary and remove the others" }
+
+[[diag]]
+code = "E0105"
+severity = "error"
+area = "resolve"
+rule = "duplicate declaration of `<name>` in `<scope>`; reported at each later declaration, related span: the first declaration"
+holes = { name = "name", scope = "path" }
+message = "duplicate declaration of `{name}` in `{scope}`"
+labels = [{ at = "primary", text = "`{name}` declared again here" }, { at = "first", text = "first declaration of `{name}`" }]
+fix = { description = "rename this `{name}`, or remove one of the two declarations" }
+
+[[diag]]
+code = "E0106"
+severity = "error"
+area = "resolve"
+rule = "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility)"
+holes = { name = "name", module = "path" }
+message = "`{name}` is private to module `{module}`"
+labels = [{ at = "primary", text = "private `{name}` used here" }, { at = "decl", text = "`{name}` declared here without `pub`" }]
+fix = { description = "mark `{name}` `pub` in `{module}`, or use it only inside `{module}`" }
+
+[[diag]]
+code = "E0107"
+severity = "error"
+area = "resolve"
+rule = "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package"
+holes = { name = "name", package = "name" }
+message = "import path is ambiguous between dependency `{name}` and module `{name}`"
+labels = [{ at = "primary", text = "`{name}` names a dependency and a module of `{package}`" }]
+fix = { description = "for the module, start the path with the package's own name: `import {package}.{name}` (add `as` to pick the bound name); for the dependency, rename the module `{name}` or rename the dependency in `stave.toml`" }
+
+[[diag]]
+code = "E0108"
+severity = "error"
+area = "resolve"
+rule = "a `bin` package (or single-file program) has no `fn main` in its root module; builds only, at offset 0 of the root module, only when there is no other error"
+message = "the program has no `fn main` in its root module"
+labels = [{ at = "primary", text = "root module without `fn main`" }]
+fix = { description = "add `fn main() -> i32 {{ return 0; }}` to the root module, or set `kind = \"lib\"` in `stave.toml` for a library" }
+
+[[diag]]
+code = "E0201"
+severity = "error"
+area = "types"
+rule = "mismatched types, with no implicit conversion"
+holes = { expected = "type", found = "type", operand = "source", count = "int", given = "int" }
+message = "mismatched types: expected `{expected}`, found `{found}`"
+labels = [{ at = "primary", text = "this is `{found}`" }, { at = "expected", text = "`{expected}` required by this" }]
+fix = { description = "convert explicitly: `{operand} as {expected}` (or `as%`, `as|`, `as?`, `as~` when lossy)", edits = [{ at = "primary", replacement = "{operand} as {expected}" }] }
+
+[diag.cases.type-args]
+message = "`{operand}` takes {count} generic arguments, found {given}"
+labels = [{ at = "primary", text = "wrong number of generic arguments" }]
+fix = { description = "give exactly {count} generic arguments" }
+
+[diag.cases.const-arg]
+message = "`{operand}` is not a const generic argument"
+labels = [{ at = "primary", text = "expected an int literal, a const, or `{{ const-expr }}`" }]
+fix = { description = "pass a const-expr, braced when it is not a literal or a name: `{{N + 1}}`" }
+
+[diag.cases.arity]
+message = "`{operand}` takes {count} arguments, found {given}"
+labels = [{ at = "primary", text = "wrong number of arguments" }]
+fix = { description = "pass exactly {count} arguments" }
+
+[diag.cases.not-value]
+message = "`{operand}` is not a value"
+labels = [{ at = "primary", text = "a module, type, or trait used as a value" }]
+fix = { description = "use a value here: a local, a const, a fn, or a variant" }
+
+[diag.cases.not-callable]
+message = "`{operand}` of type `{found}` cannot be called"
+labels = [{ at = "primary", text = "not a fn" }]
+fix = { description = "call a fn item, a method, a variant constructor, or a value of fn type" }
+
+[diag.cases.not-in-loop]
+message = "`{operand}` outside of a loop"
+labels = [{ at = "primary", text = "no enclosing `loop`, `while`, or `for`" }]
+fix = { description = "use `{operand}` only inside a loop body; to leave a fn, use `return`" }
+
+[[diag]]
+code = "E0202"
+severity = "error"
+area = "types"
+rule = "literal has no type context (no default type); add a suffix or an annotation"
+holes = { literal = "source" }
+message = "literal `{literal}` has no type context"
+labels = [{ at = "primary", text = "type of this literal is unknown" }]
+fix = { description = "add a type suffix (`{literal}i32`) or annotate the binding (`let x: i32 = {literal};`)" }
+
+[diag.cases.float]
+fix = { description = "add a type suffix (`{literal}f64`) or annotate the binding (`let x: f64 = {literal};`)" }
+
+[diag.cases.infer]
+message = "the generic arguments of `{literal}` cannot be inferred"
+labels = [{ at = "primary", text = "generic arguments unknown" }]
+fix = { description = "give them with `::<..>` or annotate the binding: `let x: Option<u32> = {literal};`" }
+
+[[diag]]
+code = "E0203"
+severity = "error"
+area = "types"
+rule = "literal out of range for its type"
+holes = { literal = "source", type = "type", min = "int", max = "int" }
+message = "literal `{literal}` is out of range for `{type}`"
+labels = [{ at = "primary", text = "does not fit in `{type}`" }]
+fix = { description = "write a value from {min} to {max}, or use a wider type than `{type}`" }
+
+[diag.cases.float]
+fix = { description = "write a value within the finite range of `{type}`, or use `f64`" }
+
+[diag.cases.malformed]
+message = "literal `{literal}` is malformed"
+labels = [{ at = "primary", text = "bad digits, suffix, or escape" }]
+fix = { description = "write digits of the literal's base and an int or float type suffix (`5u8`, `1.0f32`), or a valid escape" }
+
+[[diag]]
+code = "E0204"
+severity = "error"
+area = "types"
+rule = "lossy `as`; use `as%`, `as|`, `as?` or `as~`"
+holes = { from = "type", to = "type" }
+message = "`as` from `{from}` to `{to}` can lose information"
+labels = [{ at = "primary", text = "lossy conversion" }]
+fix = { description = "name the lossy conversion: `as%` wraps or truncates, `as|` saturates, `as?` returns `Option`, `as~` rounds to a float type" }
+
+[[diag]]
+code = "E0205"
+severity = "error"
+area = "types"
+rule = "constant shift amount >= bit width"
+holes = { amount = "int", bits = "int", type = "type" }
+message = "shift amount {amount} is not less than the bit width {bits} of `{type}`"
+labels = [{ at = "primary", text = "shift by {amount}" }]
+fix = { description = "shift by less than {bits}, or use `<<%` to mask the amount of a left shift" }
+
+[[diag]]
+code = "E0206"
+severity = "error"
+area = "types"
+rule = "operator not defined for type (e.g. `+%` on a float)"
+holes = { op = "source", type = "type" }
+message = "operator `{op}` is not defined for `{type}`"
+labels = [{ at = "primary", text = "`{op}` on `{type}`" }]
+fix = { description = "use an operator that `{type}` defines (floats: plain `+ - * /`), or convert the operands with `as` first" }
+
+[[diag]]
+code = "E0207"
+severity = "error"
+area = "types"
+rule = "non-unit function can reach its end without `return` (a `()` function falling off its end is an implicit `return;`); a `-> never` function that can return (case `never`: a reachable `return` or end of body)"
+holes = { name = "name", type = "type" }
+message = "function `{name}` can reach its end without returning `{type}`"
+labels = [{ at = "primary", text = "end of the body reached without `return`" }]
+fix = { description = "add `return <value>;` of type `{type}` on every path that reaches the end of `{name}`" }
+
+[diag.cases.never]
+message = "function `{name}` returns `never` but can return"
+labels = [{ at = "primary", text = "this `return`, or the end of the body, is reachable" }]
+fix = { description = "end every path of `{name}` with a call of a `-> never` fn or a `loop` without `break`, and remove its `return`s" }
+
+[[diag]]
+code = "E0208"
+severity = "error"
+area = "types"
+rule = "no method or field `<name>` on type `<T>`"
+holes = { name = "name", type = "type" }
+message = "no method or field `{name}` on type `{type}`"
+labels = [{ at = "primary", text = "`{type}` has no `{name}`" }]
+fix = { description = "correct the spelling, or convert the value to a type that has `{name}` (`stave explain E0208`)" }
+
+[diag.cases.missing-field]
+message = "missing field `{name}` in a literal of `{type}`"
+labels = [{ at = "primary", text = "`{name}` not given" }]
+fix = { description = "give every field: `{name}: <value>`" }
+
+[[diag]]
+code = "E0209"
+severity = "error"
+area = "types"
+rule = "`never` used outside a return type (it is legal only after `->` in a fn signature or a fn type)"
+message = "`never` can only be a return type"
+labels = [{ at = "primary", text = "`never` used here" }]
+fix = { description = "use `never` only after `->` of a fn signature or a fn type; for a value with no type of its own, write the type it is used as" }
+
+[[diag]]
+code = "E0210"
+severity = "error"
+area = "types"
+rule = "expression statement whose type is not `()` or `never` (a discarded value); discard explicitly with `let _ = e;` (planned)"
+holes = { type = "type" }
+message = "unused value of type `{type}`"
+labels = [{ at = "primary", text = "value discarded here" }]
+fix = { description = "use the value, or discard it explicitly with `let _ = ..;`", edits = [{ at = "primary", replacement = "let _ = " }] }
+
+[[diag]]
+code = "E0211"
+severity = "error"
+area = "types"
+rule = "contract operand not allowed: a `requires`/`ensures` expression may use params, fields, `.len()`, literals, arithmetic, comparison, `&&`/`||`/`!`, and calls of safe fns whose args are `&` or Copy; not `unsafe`, `&mut`, a `static`/`static mut`, or a non-bool result (planned)"
+message = "this expression is not allowed in a contract"
+labels = [{ at = "primary", text = "not allowed in `requires`/`ensures`" }]
+fix = { description = "keep contracts side-effect free: compare params, fields, and `.len()`; move other checks into the body with `std.debug.assert`" }
+
+[diag.cases.trait-impl]
+message = "a trait impl method cannot have contracts"
+labels = [{ at = "primary", text = "contract on a trait impl method" }]
+fix = { description = "move the check into the method body with `std.debug.assert`, or into an inherent method" }
+
+[[diag]]
+code = "E0212"
+severity = "error"
+area = "types"
+rule = "a parameter named `result` in a fn with an `ensures` clause: inside `ensures(..)` the name `result` means the returned value (contextual name, not a keyword; planned)"
+message = "parameter `result` conflicts with the returned value named `result` in `ensures(..)`"
+labels = [{ at = "primary", text = "parameter `result`" }]
+fix = { description = "rename the parameter" }
+
+[[diag]]
+code = "E0300"
+severity = "error"
+area = "patterns"
+rule = "non-exhaustive match. Case `limit`: the exhaustiveness check of the match exceeds its search limit (patterns nested more than 2,000 levels deep, or over 1,000,000 search steps); the match is rejected"
+holes = { type = "type" }
+message = "non-exhaustive match on `{type}`"
+labels = [{ at = "primary", text = "not every value of `{type}` is covered" }]
+fix = { description = "add arms for the missing variants or values, or a final `_` arm" }
+
+[diag.cases.limit]
+message = "match on `{type}` is too large to check for exhaustiveness"
+labels = [{ at = "primary", text = "exhaustiveness check limit exceeded" }]
+fix = { description = "split the match: match on fewer or less deeply nested values at a time, or add a final `_` arm" }
+
+[[diag]]
+code = "E0301"
+severity = "error"
+area = "patterns"
+rule = "unreachable match arm"
+message = "unreachable match arm"
+labels = [{ at = "primary", text = "this arm never matches" }, { at = "covering", text = "earlier arm that already covers it" }]
+fix = { description = "remove this arm, or move it before the arm that covers it" }
+
+[[diag]]
+code = "E0302"
+severity = "error"
+area = "patterns"
+rule = "or-pattern alternatives bind different names, or a name with a different type or binding mode (planned)"
+holes = { name = "name" }
+message = "`{name}` is not bound the same way in every alternative of this pattern"
+labels = [{ at = "primary", text = "alternative that differs" }, { at = "first", text = "first alternative" }]
+fix = { description = "bind `{name}` in every alternative with the same type and mode, or split the arm" }
+
+[[diag]]
+code = "E0410"
+severity = "error"
+area = "kinds"
+rule = "reference- or view-typed field in a non-view ADT"
+holes = { field = "name", type = "type", adt = "name" }
+message = "field `{field}` has reference or view type `{type}`, but `{adt}` is not a view type"
+labels = [{ at = "primary", text = "borrowed type in a non-view type" }]
+fix = { description = "declare `{adt}` as `view struct` or `view enum`, or give `{field}` an owned type" }
+
+[[diag]]
+code = "E0411"
+severity = "error"
+area = "kinds"
+rule = "view in a heap or container type (Box, Vec, Map, ...)"
+holes = { type = "type", container = "type" }
+message = "view type `{type}` cannot be stored in `{container}`"
+labels = [{ at = "primary", text = "view inside a heap or container type" }]
+fix = { description = "store an owned value in `{container}`, or keep the view `{type}` in a local" }
+
+[[diag]]
+code = "E0412"
+severity = "error"
+area = "kinds"
+rule = "view passed to `forget`"
+holes = { type = "type" }
+message = "view of type `{type}` passed to `forget`"
+labels = [{ at = "primary", text = "view argument" }]
+fix = { description = "remove the `forget` call and let the view go out of scope" }
+
+[[diag]]
+code = "E0413"
+severity = "error"
+area = "kinds"
+rule = "view or reference in a `const` or `static mut` (except `&str` initialized by a string literal or another such const: static strings)"
+holes = { name = "name", type = "type" }
+message = "const `{name}` has reference or view type `{type}`"
+labels = [{ at = "primary", text = "borrowed type in a const" }]
+fix = { description = "give `{name}` an owned type (an array `[T; N]` instead of `&[T]`), or build the value in a function (only `&str` from a string literal or another such const may be borrowed)" }
+
+[diag.cases.static]
+message = "static `{name}` has reference or view type `{type}`"
+labels = [{ at = "primary", text = "borrowed type in a static" }]
+fix = { description = "give `{name}` an owned type, or store a raw pointer (`*const T`, `*mut T`) and keep its pointee alive yourself (only `&str` from a string literal may be borrowed)" }
+
+[[diag]]
+code = "E0414"
+severity = "error"
+area = "kinds"
+rule = "generic parameter instantiated with a view without the `T: view` bound"
+holes = { param = "name", type = "type", generic = "path" }
+message = "`{type}` is a view, but parameter `{param}` of `{generic}` has no `view` bound"
+labels = [{ at = "primary", text = "view type argument" }, { at = "param", text = "`{param}` declared here" }]
+fix = { description = "add the bound `{param}: view` to `{generic}`, or pass an owned type" }
+
+[diag.cases.container]
+message = "`{type}` is a view, and `{generic}` does not accept views: its parameter `{param}` has no `view` bound"
+labels = [{ at = "primary", text = "view type argument" }, { at = "param", text = "`{param}` declared here" }]
+fix = { description = "keep `{type}` in a local or in a container whose parameter is `view`-bounded (`vec.Vec`, `Box`, `Option`), or store an owned value" }
+
+[[diag]]
+code = "E0415"
+severity = "error"
+area = "kinds"
+rule = "`impl Copy for T {}` where a field or variant payload of T is not Copy (Copy: scalars, `&T`, raw pointers, arrays and tuples of Copy types, and ADTs with `impl Copy`; `&mut T` never)"
+holes = { type = "type", field = "name", field_type = "type" }
+message = "`{type}` cannot implement `Copy`: field `{field}` has type `{field_type}`, which is not Copy"
+labels = [{ at = "primary", text = "`impl Copy` here" }, { at = "field", text = "`{field}` declared here" }]
+fix = { description = "remove `impl Copy for {type}`, or give `{field}` a Copy type (`&mut T` is never Copy)" }
+
+[[diag]]
+code = "E0416"
+severity = "error"
+area = "kinds"
+rule = "`impl Drop` for a Copy type (built-in Copy, or an ADT with `impl Copy`)"
+holes = { type = "type" }
+message = "`{type}` is Copy, so it cannot implement `Drop`"
+labels = [{ at = "primary", text = "`impl Drop` here" }, { at = "copy", text = "`impl Copy for {type}` here" }]
+fix = { description = "remove `impl Copy for {type}` (a type with a destructor must move), or remove this `impl Drop`" }
+
+[[diag]]
+code = "E0417"
+severity = "error"
+area = "kinds"
+rule = "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T>`, or `sync.Once<T>` (planned)"
+holes = { type = "type" }
+message = "`static` of type `{type}`, which is not `Sync`"
+labels = [{ at = "primary", text = "`static` type" }]
+fix = { description = "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}>`, or `sync.Once<{type}>`" }
+
+[[diag]]
+code = "E0501"
+severity = "error"
+area = "borrow"
+rule = "borrow conflict (borrow site, conflicting access, later use)"
+holes = { access = "text-literal", place = "place", loan = "text-literal", loaned = "place" }
+choices = { access = ["borrow mutably", "borrow", "move", "assign to", "drop"], loan = ["`&mut`", "`&`"] }
+message = "cannot {access} `{place}`: it has a live {loan} borrow"
+labels = [{ at = "primary", text = "{access} here" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used later here" }]
+fix = { description = "end the borrow before this point: move the later use before it, or copy the value out first" }
+
+[[diag]]
+code = "E0502"
+severity = "error"
+area = "borrow"
+rule = "use after move"
+holes = { place = "place" }
+message = "use of moved value `{place}`"
+labels = [{ at = "primary", text = "used here after the move" }, { at = "move", text = "`{place}` moved here" }]
+fix = { description = "use `{place}` before it is moved, or pass a reference (`&{place}`) instead of moving it" }
+
+[[diag]]
+code = "E0503"
+severity = "error"
+area = "borrow"
+rule = "assignment to an immutable binding or through `&`"
+holes = { place = "place" }
+message = "cannot assign to `{place}`: the binding is not `mut`"
+labels = [{ at = "primary", text = "assignment here" }, { at = "binding", text = "declared without `mut` here" }]
+fix = { description = "declare the binding with `let mut`" }
+
+[diag.cases.shared-ref]
+message = "cannot assign to `{place}` through a `&` reference"
+labels = [{ at = "primary", text = "assignment through `&`" }, { at = "binding", text = "`&` reference created here" }]
+fix = { description = "create a `&mut` reference instead of `&` where this reference comes from" }
+
+[[diag]]
+code = "E0504"
+severity = "error"
+area = "borrow"
+rule = "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture"
+holes = { place = "place" }
+message = "cannot move `{place}` out of a borrow or an index: its type is not `Copy`"
+labels = [{ at = "primary", text = "moved here" }]
+fix = { description = "borrow it instead (`&{place}`), or take the value out and leave another in its place with `mem.replace(&mut {place}, other)` or `mem.swap` (`import std.mem;`)" }
+
+[diag.cases.capture]
+message = "cannot move captured `{place}` out of a closure: closures capture by reference"
+labels = [{ at = "primary", text = "moved here" }, { at = "capture", text = "captured by reference by this closure" }]
+fix = { description = "use `&{place}` inside the closure, or take the value out with `mem.replace(&mut {place}, other)` (`import std.mem;`)" }
+
+[[diag]]
+code = "E0510"
+severity = "error"
+area = "borrow"
+rule = "returned reference or view not covered by the `from` clause"
+holes = { origin = "name" }
+message = "returned value borrows from `{origin}`, which the `from` clause does not name"
+labels = [{ at = "primary", text = "returned here" }, { at = "from", text = "`from` clause" }]
+fix = { description = "add `{origin}` to the `from` clause, or return a value borrowed from a listed parameter" }
+
+[diag.cases.no-from]
+message = "returned value borrows from `{origin}`, but the signature has no `from` clause"
+labels = [{ at = "primary", text = "returned here" }, { at = "from", text = "return type without `from`: the result may borrow nothing" }]
+fix = { description = "write `from {origin}` after the return type, or return a value that borrows nothing" }
+
+[[diag]]
+code = "E0511"
+rule = "retired: a missing `from` clause declares the empty origin set; returning a borrow of a parameter not in `from` is E0510"
+retired = true
+
+[[diag]]
+code = "E0512"
+severity = "error"
+area = "borrow"
+rule = "returned value borrows a local"
+holes = { place = "place" }
+message = "returned value borrows local `{place}`"
+labels = [{ at = "primary", text = "returned here" }, { at = "local", text = "`{place}` is dropped when the function returns" }]
+fix = { description = "return an owned value, or borrow from a parameter named in the `from` clause" }
+
+[[diag]]
+code = "E0513"
+severity = "error"
+area = "borrow"
+rule = "write through `&mut View` with origins not contained in the target's"
+holes = { place = "place" }
+message = "cannot write into `{place}`: the value borrows from origins `{place}` does not have"
+labels = [{ at = "primary", text = "write here" }]
+fix = { description = "write a value that borrows only from the origins of `{place}`, or add the origin to the `from` clause that created `{place}`" }
+
+[[diag]]
+code = "E0514"
+severity = "error"
+area = "borrow"
+rule = "`from` on a parameter that is not `&mut V` (V a view) of a fn item or method (closures, extern and kernel fns take no parameter `from`) (planned)"
+holes = { param = "name" }
+message = "parameter `{param}` cannot have a `from` clause"
+labels = [{ at = "primary", text = "`from` here" }]
+fix = { description = "remove the `from` clause: only a `&mut` parameter whose pointee is a view declares what may be stored into it" }
+
+[[diag]]
+code = "E0515"
+severity = "error"
+area = "borrow"
+rule = "a parameter's `from` clause names the parameter itself (planned)"
+holes = { param = "name" }
+message = "the `from` clause of `{param}` names `{param}` itself"
+labels = [{ at = "primary", text = "`{param}` in its own `from`" }]
+fix = { description = "name the parameters whose borrows may be stored into `*{param}`, or remove the clause" }
+
+[[diag]]
+code = "E0520"
+severity = "error"
+area = "borrow"
+rule = "`from x` names a by-value non-view parameter"
+holes = { param = "name", type = "type" }
+message = "`from {param}` names a by-value parameter of non-view type `{type}`"
+labels = [{ at = "primary", text = "nothing to borrow from" }]
+fix = { description = "remove `{param}` from the `from` clause, or take `{param}` by reference (`&{type}`)" }
+
+[[diag]]
+code = "E0521"
+severity = "error"
+area = "borrow"
+rule = "`from copy x` where x is not a reference to a view"
+holes = { param = "name", type = "type" }
+message = "`from copy {param}` needs a reference to a view, found `{type}`"
+labels = [{ at = "primary", text = "`from copy` on a non-view-reference parameter" }]
+fix = { description = "write `from {param}` instead of `from copy {param}`" }
+
+[[diag]]
+code = "E0601"
+severity = "error"
+area = "simd"
+rule = "chunk loop without a tail policy"
+holes = { type = "type" }
+message = "chunk loop over `{type}` has no tail clause"
+labels = [{ at = "primary", text = "remaining elements are not handled" }]
+fix = { description = "add a tail clause after the loop body: `tail masked (v, m) {{ ... }}`, `tail scalar (x) {{ ... }}`, or `tail exact;`" }
+
+[[diag]]
+code = "E0602"
+severity = "error"
+area = "simd"
+rule = "scalar and vector mixed (use `TxN.splat`)"
+holes = { scalar = "type", vector = "type", operand = "source" }
+message = "scalar `{scalar}` and vector `{vector}` mixed in one operation"
+labels = [{ at = "primary", text = "this is a scalar `{scalar}`" }]
+fix = { description = "broadcast the scalar: `{vector}.splat({operand})`", edits = [{ at = "primary", replacement = "{vector}.splat({operand})" }] }
+
+[[diag]]
+code = "E0603"
+severity = "error"
+area = "simd"
+rule = "vector types differ in lane type or count (use widen/narrow/split/join/bitcast)"
+holes = { left = "type", right = "type" }
+message = "vector types differ: `{left}` and `{right}`"
+labels = [{ at = "primary", text = "`{right}` here" }, { at = "other", text = "`{left}` here" }]
+fix = { description = "convert one side with `widen_lo`/`widen_hi`, `narrow_wrap`/`narrow_sat`, `split`, `join`, or `bitcast`" }
+
+[[diag]]
+code = "E0604"
+severity = "error"
+area = "simd"
+rule = "plain `+ - *` on an integer vector (choose `+%`, `+|`, or `checked_add`)"
+holes = { op = "text-literal", type = "type" }
+choices = { op = ["+", "-", "*"] }
+message = "plain `{op}` on integer vector `{type}`"
+labels = [{ at = "primary", text = "overflow behavior not chosen" }]
+fix = { description = "choose wrapping `{op}%`, saturating `{op}|`, or a checked method (`checked_add`, `checked_sub`, `checked_mul`)" }
+
+[[diag]]
+code = "E0605"
+severity = "error"
+area = "simd"
+rule = "mask width or count does not match the vector (use `m.rewiden::<W>()`) (planned)"
+holes = { mask = "type", vector = "type", width = "int" }
+message = "mask `{mask}` does not match vector `{vector}`"
+labels = [{ at = "primary", text = "`{mask}` here" }]
+fix = { description = "convert the mask to {width}-bit lanes with `m.rewiden::<{width}>()`" }
+
+[[diag]]
+code = "E0606"
+severity = "error"
+area = "simd"
+rule = "aligned load or store on a slice whose type lacks that alignment (use `align_to`) (planned)"
+holes = { type = "type", align = "int" }
+message = "aligned access needs a slice aligned to {align} bytes, found `{type}`"
+labels = [{ at = "primary", text = "slice without the alignment" }]
+fix = { description = "get an aligned slice with `s.align_to::<{align}>()`, or use the unaligned `load`/`store`" }
+
+[[diag]]
+code = "E0607"
+severity = "error"
+area = "simd"
+rule = "vector integer division by a non-constant (use `div_lanes`)"
+holes = { type = "type" }
+message = "integer vector division of `{type}` by a non-constant"
+labels = [{ at = "primary", text = "run-time divisor" }]
+fix = { description = "use `a.div_lanes(b)` for a run-time divisor, or `a.div_const::<K>()` for a constant one" }
+
+[[diag]]
+code = "E0608"
+severity = "error"
+area = "simd"
+rule = "permute or table index out of range at compile time"
+holes = { index = "int", lanes = "int" }
+message = "index {index} out of range for {lanes} lanes"
+labels = [{ at = "primary", text = "index {index}" }]
+fix = { description = "use lane indices from 0 to {lanes} - 1" }
+
+[[diag]]
+code = "E0609"
+severity = "error"
+area = "simd"
+rule = "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`"
+holes = { spelled = "source", concrete = "type" }
+message = "`{spelled}` has no generic argument: write `{concrete}`"
+labels = [{ at = "primary", text = "generic spelling of a concrete type" }]
+fix = { description = "write `{concrete}`", edits = [{ at = "primary", replacement = "{concrete}" }] }
+
+[[diag]]
+code = "E0700"
+severity = "error"
+area = "features"
+rule = "operation unavailable (class U) on the target, outside `emulate { }` (planned)"
+holes = { op = "name", type = "type", target = "text-literal" }
+choices = { target = ["x86_64-linux", "x86_64-linux-v2", "x86_64-linux-v3", "x86_64-linux-v4", "aarch64-linux", "aarch64-linux+sve", "aarch64-linux+sve2", "gpu-sm86"] }
+message = "`{op}` on `{type}` is not available on target `{target}`"
+labels = [{ at = "primary", text = "class U on `{target}`" }]
+fix = { description = "wrap the code in `emulate {{ ... }}`, or move it to a function with `needs(...)` called through `dispatch` (`stave lowering --target {target} --op {op}`)" }
+
+[[diag]]
+code = "E0701"
+severity = "error"
+area = "features"
+rule = "class M or U operation inside `strict { }` (planned)"
+holes = { op = "name", type = "type", class = "text-literal" }
+choices = { class = ["M", "U"] }
+message = "`{op}` on `{type}` is class {class} on this target, not allowed in `strict`"
+labels = [{ at = "primary", text = "class {class} operation" }, { at = "strict", text = "`strict` block here" }]
+fix = { description = "move `{op}` out of the `strict` block, or use an operation of class N on this target (`stave lowering --op {op}`)" }
+
+[[diag]]
+code = "E0702"
+severity = "error"
+area = "features"
+rule = "vector type wider than the target's register (planned)"
+holes = { type = "type", bits = "int", max = "int" }
+message = "`{type}` is {bits} bits wide, the target's vector registers have {max}"
+labels = [{ at = "primary", text = "too wide for this target" }]
+fix = { description = "use a vector of at most {max} bits, or add `needs(...)` with a feature that has wider registers (`avx2`: 256, `avx512f`: 512)" }
+
+[[diag]]
+code = "E0703"
+severity = "error"
+area = "features"
+rule = "vector in a signature whose `needs` does not cover its width (`extern \"C\"` signatures: E0804) (planned)"
+holes = { type = "type", feature = "name" }
+message = "`{type}` in this signature needs `{feature}`, which the function's `needs` does not list"
+labels = [{ at = "primary", text = "`{type}` needs `{feature}`" }]
+fix = { description = "add `needs({feature})` to the signature, or use a vector of at most 128 bits" }
+
+[[diag]]
+code = "E0704"
+severity = "error"
+area = "features"
+rule = "callee needs features the caller lacks"
+holes = { callee = "path", feature = "name" }
+message = "`{callee}` needs `{feature}`, which the caller does not have"
+labels = [{ at = "primary", text = "call needs `{feature}`" }, { at = "callee", text = "`{callee}` declares `needs({feature})` here" }]
+fix = { description = "add `needs({feature})` to the caller, or call `{callee}` through a `dispatch` function" }
+
+[[diag]]
+code = "E0705"
+severity = "error"
+area = "features"
+rule = "dispatch arm signature differs from the dispatch signature (planned)"
+holes = { expected = "type", found = "type" }
+message = "dispatch arm has type `{found}`, expected `{expected}`"
+labels = [{ at = "primary", text = "this arm's function" }, { at = "dispatch", text = "dispatch signature" }]
+fix = { description = "give the arm's function the type `{expected}` (the dispatch signature, with needs = dispatch needs + the arm's features)" }
+
+[[diag]]
+code = "E0706"
+severity = "error"
+area = "features"
+rule = "dispatch without a final `_` arm, or a `_` target needing extra features (planned)"
+holes = { feature = "name" }
+message = "`dispatch` has no final `_` arm"
+labels = [{ at = "primary", text = "last arm is not `_`" }]
+fix = { description = "add a final `_ => f_base,` arm whose function needs no features beyond the dispatch's" }
+
+[diag.cases.extra-needs]
+message = "the `_` arm of `dispatch` needs `{feature}`, which the dispatch does not have"
+labels = [{ at = "primary", text = "`_` target needs `{feature}`" }]
+fix = { description = "point the `_` arm at a function without `needs({feature})`" }
+
+[[diag]]
+code = "E0707"
+severity = "error"
+area = "features"
+rule = "fn value coercion would drop required features"
+holes = { from = "type", to = "type" }
+message = "`{from}` cannot be used as `{to}`: its required features would be dropped"
+labels = [{ at = "primary", text = "coerced here" }]
+fix = { description = "add the features to the target type (`{to}` with `needs(...)`), or use a function that needs no extra features" }
+
+[[diag]]
+code = "E0708"
+severity = "error"
+area = "features"
+rule = "unknown feature name, or a feature not owned by any arch (`cuda` is owned by x86-64, AArch64, and `gpu-sm86`)"
+holes = { name = "name" }
+message = "unknown feature `{name}`"
+labels = [{ at = "primary", text = "not a feature of any target" }]
+fix = { description = "correct the feature name (`stave lowering --target T` lists the target's features)" }
+
+[[diag]]
+code = "E0709"
+severity = "error"
+area = "features"
+rule = "`main`, a trait method, or an `extern` export declares `needs` (planned)"
+holes = { what = "text-literal" }
+choices = { what = ["`main`", "a trait method", "an `extern` export"] }
+message = "{what} cannot declare `needs`"
+labels = [{ at = "primary", text = "`needs` here" }]
+fix = { description = "remove `needs(...)` here, and call the feature-specific code through a `dispatch` function" }
+
+[[diag]]
+code = "E0710"
+severity = "error"
+area = "features"
+rule = "sizeless vector used without `needs(sve)` (planned)"
+holes = { type = "type" }
+message = "sizeless vector `{type}` used without `needs(sve)`"
+labels = [{ at = "primary", text = "sizeless vector" }]
+fix = { description = "add `needs(sve)` to the enclosing function" }
+
+[[diag]]
+code = "E0711"
+severity = "error"
+area = "features"
+rule = "sizeless vector as an ADT field (planned)"
+holes = { type = "type" }
+message = "sizeless vector `{type}` cannot be a field"
+labels = [{ at = "primary", text = "sizeless field type" }]
+fix = { description = "store the lanes in a slice or a fixed-size vector, and load `{type}` inside the function" }
+
+[[diag]]
+code = "E0712"
+severity = "error"
+area = "features"
+rule = "sizeless vector as an array element (planned)"
+holes = { type = "type" }
+message = "sizeless vector `{type}` cannot be an array element"
+labels = [{ at = "primary", text = "sizeless element type" }]
+fix = { description = "use an array or slice of the lane type, and load `{type}` from it" }
+
+[[diag]]
+code = "E0713"
+severity = "error"
+area = "features"
+rule = "sizeless vector as a global or const (planned)"
+holes = { type = "type" }
+message = "sizeless vector `{type}` cannot be a const"
+labels = [{ at = "primary", text = "sizeless const type" }]
+fix = { description = "keep a scalar const and build the vector inside the function with `splat`" }
+
+[[diag]]
+code = "E0714"
+severity = "error"
+area = "features"
+rule = "`size_of` or pointer arithmetic on a sizeless type (planned)"
+holes = { type = "type" }
+message = "`size_of` or pointer arithmetic on sizeless type `{type}`"
+labels = [{ at = "primary", text = "size unknown at compile time" }]
+fix = { description = "compute with the lane type's size times the run-time lane count instead" }
+
+[[diag]]
+code = "E0715"
+severity = "error"
+area = "features"
+rule = "sizeless vector captured by a closure (planned)"
+holes = { name = "name", type = "type" }
+message = "closure captures `{name}` of sizeless vector type `{type}`"
+labels = [{ at = "primary", text = "captured here" }]
+fix = { description = "pass `{name}` to the closure as a parameter instead of capturing it" }
+
+[[diag]]
+code = "E0716"
+severity = "error"
+area = "features"
+rule = "sizeless vector as a generic argument that needs a size (planned)"
+holes = { type = "type", generic = "path" }
+message = "sizeless vector `{type}` as a type argument of `{generic}`, which needs a sized type"
+labels = [{ at = "primary", text = "sizeless type argument" }]
+fix = { description = "use a fixed-size vector type here, or pass the lanes as a slice" }
+
+[[diag]]
+code = "E0717"
+severity = "error"
+area = "features"
+rule = "VL-dependent float reduction on a sizeless vector (use `reduce_add_ordered`) (planned)"
+holes = { op = "name", type = "type" }
+message = "`{op}` on sizeless `{type}` gives a result that depends on the vector length"
+labels = [{ at = "primary", text = "vector-length-dependent reduction" }]
+fix = { description = "use `acc = v.reduce_add_ordered(acc);`, whose result does not depend on the vector length" }
+
+[[diag]]
+code = "E0801"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "`spawn` outside a `scope` block"
+message = "`spawn` outside a `scope` block"
+labels = [{ at = "primary", text = "no enclosing `scope`" }]
+fix = { description = "put the `spawn` inside `scope {{ ... }}`; its threads join at the closing `}}`" }
+
+[[diag]]
+code = "E0802"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body: a capture that is not `Sync`, or a `&mut` capture"
+holes = { name = "name", type = "type" }
+message = "captured `{name}` of type `{type}` is not `Send`"
+labels = [{ at = "primary", text = "captured here" }]
+fix = { description = "capture a `Send` value instead of `{name}`, or create it inside the thread" }
+
+[diag.cases.sync]
+message = "captured `&{name}` needs `Sync`, and `{type}` is not `Sync`"
+fix = { description = "share a `Sync` value instead of `{name}`, or move `{name}` into the thread" }
+
+[diag.cases.par-mut]
+message = "parallel loop body captures `{name}` by `&mut`"
+labels = [{ at = "primary", text = "`&mut` capture shared by many threads" }]
+fix = { description = "give each call its own element through `thread.par_for_mut(xs, fn(i: usize, x: &mut T) {{ ... }})`, or capture `&{name}` only" }
+
+[[diag]]
+code = "E0803"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "unsafe operation outside `unsafe(..)`: a raw-pointer dereference, `read`, or `write`, a call of an `unsafe` fn or `extern` import, or any use (read, write, borrow) of a `static mut`"
+message = "unsafe operation outside `unsafe(..)`"
+labels = [{ at = "primary", text = "unsafe operation" }]
+fix = { description = "wrap it in `unsafe(\"<obligation>\") {{ ... }}`, or `unsafe(\"<obligation>\") expr` in a value position" }
+
+[[diag]]
+code = "E0804"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "vector or view type in an `extern \"C\"` signature"
+holes = { type = "type" }
+message = "`{type}` cannot appear in an `extern \"C\"` signature"
+labels = [{ at = "primary", text = "vector or view type" }]
+fix = { description = "pass a raw pointer and a length (`*const T`, `usize`) instead of `{type}`" }
+
+[[diag]]
+code = "E0805"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "`extern \"stave-intrinsic\"` outside the shipped `std`, `runtime`, and `runtime-gpu` packages, or a name or signature not in `contracts/intrinsics.md`"
+holes = { name = "name" }
+message = "`extern \"stave-intrinsic\"` is only allowed in the `std`, `runtime`, and `runtime-gpu` packages"
+labels = [{ at = "primary", text = "intrinsic import outside the shipped packages" }]
+fix = { description = "remove the intrinsic import and call the `std` function that wraps it" }
+
+[diag.cases.unknown]
+message = "`{name}` is not a Stave intrinsic with this signature"
+labels = [{ at = "primary", text = "not in the intrinsic table" }]
+fix = { description = "use the name and signature exactly as listed in contracts/intrinsics.md" }
+
+[[diag]]
+code = "E0806"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "argument of `thread.join`, `thread.par_for`, or `thread.par_for_mut` is a fn value whose captures are unknown (not a closure literal or fn item)"
+holes = { callee = "text-literal" }
+choices = { callee = ["`thread.join`", "`thread.par_for`", "`thread.par_for_mut`"] }
+message = "argument of {callee} is a fn value whose captures are unknown"
+labels = [{ at = "primary", text = "fn value with unknown captures" }]
+fix = { description = "pass a closure literal or a fn item directly to {callee}" }
+
+[[diag]]
+code = "E0807"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker, so a call through the value would skip E0803). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through the value would skip E0802 and E0806)"
+holes = { name = "path" }
+message = "unsafe fn `{name}` cannot become a fn value"
+labels = [{ at = "primary", text = "unsafe fn used as a fn value" }]
+fix = { description = "wrap the call in a safe fn or closure with its own `unsafe(\"..\")`" }
+
+[diag.cases.thread]
+message = "`{name}` cannot become a fn value: its calls check the captures of their closure arguments"
+labels = [{ at = "primary", text = "thread fn used as a fn value" }]
+fix = { description = "call `{name}` directly with a closure literal or fn item" }
+
+[[diag]]
+code = "E0808"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "`spawn` inside a closure body: a closure is not part of the `scope` block around it, so its `spawn` has no scope to join"
+message = "`spawn` inside a closure is not part of the enclosing `scope` block"
+labels = [{ at = "primary", text = "`spawn` in a closure body" }, { at = "closure", text = "closure starts here" }]
+fix = { description = "move the `spawn` out of the closure into the `scope` block, or open a `scope {{ ... }}` inside the closure body" }
+
+[[diag]]
+code = "E0809"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "`static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` packages: user code uses `static` with a `Sync` type (planned)"
+holes = { name = "name" }
+message = "`static mut {name}` is only allowed in the `std` and `runtime` packages"
+labels = [{ at = "primary", text = "`static mut` here" }]
+fix = { description = "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>`)" }
+
+[[diag]]
+code = "E0810"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "impl of an unsafe trait (`Send`, `Sync`, or a trait declared `unsafe(\"..\") trait`) without `unsafe(\"..\")`: the impl must state why the type meets the trait's obligation"
+holes = { trait = "path" }
+message = "impl of unsafe trait `{trait}` needs `unsafe(\"..\")`"
+labels = [{ at = "primary", text = "impl without an obligation" }, { at = "trait", text = "`{trait}` declared unsafe here" }]
+fix = { description = "state why the type meets the obligation of `{trait}`: write `unsafe(\"<obligation>\") impl`" }
+
+[[diag]]
+code = "E0901"
+severity = "error"
+area = "generics"
+rule = "method or operator not provided by the generic's bounds (reported at the definition)"
+holes = { name = "source", param = "name" }
+message = "`{name}` is not provided by the bounds of `{param}`"
+labels = [{ at = "primary", text = "needs a bound on `{param}`" }, { at = "param", text = "`{param}` declared here" }]
+fix = { description = "add a trait bound that provides `{name}`: `<{param}: Trait>`" }
+
+[diag.cases.unsatisfied]
+message = "`{name}` does not implement `{param}`"
+labels = [{ at = "primary", text = "required by a bound here" }, { at = "param", text = "the bound's parameter is declared here" }]
+fix = { description = "implement `{param}` for `{name}`, or pass a type that implements it" }
+
+[[diag]]
+code = "E0902"
+severity = "error"
+area = "generics"
+rule = "instantiation depth limit (64) exceeded: an instance of a generic fn or method, reached from a non-generic fn through calls, would be the 65th instance of that generic on its own instantiation chain (polymorphic recursion such as `f::<[T; 1]>(..)` inside `f<T>`); at the call that requests it, once per generic"
+holes = { generic = "path" }
+message = "instantiation depth limit (64) exceeded at `{generic}`"
+labels = [{ at = "primary", text = "instantiated here" }]
+fix = { description = "stop the recursive instantiation of `{generic}`: its type arguments must not grow on each level" }
+
+[[diag]]
+code = "E0903"
+severity = "error"
+area = "generics"
+rule = "overlapping impls"
+holes = { trait = "path", type = "type" }
+message = "overlapping impls of `{trait}` for `{type}`"
+labels = [{ at = "primary", text = "this impl" }, { at = "other", text = "overlapping impl here" }]
+fix = { description = "remove one of the two impls of `{trait}`, or narrow one so that their types differ" }
+
+[[diag]]
+code = "E0904"
+severity = "error"
+area = "generics"
+rule = "const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id)"
+holes = { what = "text-literal", name = "name" }
+choices = { what = ["a call", "a loop", "a non-const item"] }
+message = "const-expr contains {what}"
+labels = [{ at = "primary", text = "{what} in a const-expr" }]
+fix = { description = "compute the value with literals, consts, arithmetic, comparisons, `as`, `size_of`, and `if then else` only" }
+
+[diag.cases.cycle]
+message = "const `{name}` depends on itself"
+labels = [{ at = "primary", text = "`{name}` starts the cycle" }, { at = "cycle", text = "next const of the cycle" }]
+fix = { description = "break the cycle: define one of these consts without using the others" }
+
+[[diag]]
+code = "E0905"
+severity = "error"
+area = "generics"
+rule = "impl method signature differs from the trait's (params, return, `from`, `needs`, or `unsafe`); the fix shows the trait's signature"
+holes = { name = "name", signature = "source" }
+message = "method `{name}` does not match the trait's signature"
+labels = [{ at = "primary", text = "impl signature" }, { at = "trait", text = "trait declares `{name}` here" }]
+fix = { description = "use the trait's signature: `{signature}`" }
+
+[[diag]]
+code = "E0906"
+severity = "error"
+area = "generics"
+rule = "impl lacks a trait method, or defines a method the trait does not declare"
+holes = { name = "name", trait = "path" }
+message = "impl of `{trait}` lacks method `{name}`"
+labels = [{ at = "primary", text = "impl without `{name}`" }, { at = "trait", text = "`{name}` declared here" }]
+fix = { description = "add `fn {name}` with the trait's signature to this impl" }
+
+[diag.cases.extra]
+message = "method `{name}` is not declared by `{trait}`"
+labels = [{ at = "primary", text = "not a method of `{trait}`" }]
+fix = { description = "remove `{name}` from this impl, or move it to an inherent `impl` block" }
+
+[[diag]]
+code = "E0907"
+severity = "error"
+area = "generics"
+rule = "`pub` on a method of a trait impl (trait impl methods have the trait's visibility)"
+holes = { name = "name" }
+message = "trait impl method `{name}` cannot be `pub`"
+labels = [{ at = "primary", text = "`pub` here" }]
+fix = { description = "remove `pub`: `{name}` is visible wherever its trait is", edits = [{ at = "primary", replacement = "" }] }
+
+[[diag]]
+code = "E0908"
+severity = "error"
+area = "generics"
+rule = "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type) finds the method in two traits"
+holes = { name = "name", type = "type", first = "path", second = "path" }
+message = "method `{name}` of `{type}` is ambiguous: both `{first}` and `{second}` supply it"
+labels = [{ at = "primary", text = "ambiguous call" }, { at = "first", text = "`{first}.{name}` declared here" }, { at = "second", text = "`{second}.{name}` declared here" }]
+fix = { description = "call it qualified, with the receiver as first argument: `{first}.{name}(x)` or `{second}.{name}(x)`" }
+
+[[diag]]
+code = "E0909"
+severity = "error"
+area = "generics"
+rule = "explicit call of `Drop.drop` (as `x.drop()` or `Drop.drop(&mut x)`): drop runs only automatically, at scope end and when a place is overwritten"
+message = "`drop` cannot be called explicitly"
+labels = [{ at = "primary", text = "explicit `drop` call" }]
+fix = { description = "remove the call: the value is dropped when it goes out of scope or is overwritten; to end its life early, move it into `std.mem.drop(x)`" }
+
+[[diag]]
+code = "E1001"
+severity = "error"
+area = "driver"
+rule = "target not runnable on this host (binary built, tests reported as not run, never as passed); reported by `stave test` and `stave run`; no location"
+located = false
+holes = { target = "text-literal" }
+choices = { target = ["x86_64-linux", "x86_64-linux-v2", "x86_64-linux-v3", "x86_64-linux-v4", "aarch64-linux", "aarch64-linux+sve", "aarch64-linux+sve2", "gpu-sm86"] }
+message = "target `{target}` cannot run on this host; the binary was built but not run"
+fix = { description = "run on a `{target}` host, or pass `--runner CMD` (e.g. `--runner \"qemu-aarch64 -cpu max\"`)" }
+
+[[diag]]
+code = "E1002"
+severity = "error"
+area = "driver"
+rule = "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, or unreadable manifest; located in `stave.toml`"
+holes = { key = "source", expected = "text-literal", root = "text-literal" }
+choices = { expected = ["string", "integer", "boolean", "array", "table"], root = ["src/main.stv", "src/lib.stv"] }
+message = "unknown key `{key}` in `stave.toml`"
+labels = [{ at = "primary", text = "unknown key" }]
+fix = { description = "remove `{key}`, or correct its spelling" }
+
+[diag.cases.wrong-type]
+message = "`{key}` in `stave.toml` must be a {expected}"
+labels = [{ at = "primary", text = "not a {expected}" }]
+fix = { description = "write the value of `{key}` as a TOML {expected}" }
+
+[diag.cases.non-path-dependency]
+message = "dependency `{key}` is not a path dependency"
+labels = [{ at = "primary", text = "only path dependencies are supported" }]
+fix = { description = "write `{key} = {{ path = \"<dir>\" }}`" }
+
+[diag.cases.unknown-target]
+message = "`[target.{key}]` names no known target"
+labels = [{ at = "primary", text = "unknown target" }]
+fix = { description = "use a target name: `x86_64-linux`, `x86_64-linux-v2`, `-v3`, `-v4`, `aarch64-linux`, `aarch64-linux+sve`, `+sve2`, or `gpu-sm86`" }
+
+[diag.cases.syntax]
+message = "invalid TOML in `stave.toml` at `{key}`"
+labels = [{ at = "primary", text = "TOML syntax error" }]
+fix = { description = "correct the TOML syntax (stave.toml takes `key = value` lines, `[table]` headers, strings, integers, booleans, arrays, and one-line inline tables)" }
+
+[diag.cases.duplicate-key]
+message = "`{key}` is defined twice in `stave.toml`"
+labels = [{ at = "primary", text = "second definition" }]
+fix = { description = "keep one definition of `{key}`" }
+
+[diag.cases.bad-kind]
+message = "`kind` in `stave.toml` must be `\"bin\"` or `\"lib\"`, not {key}"
+labels = [{ at = "primary", text = "unknown package kind" }]
+fix = { description = "write `kind = \"bin\"` (a program, `src/main.stv`) or `kind = \"lib\"` (a library, `src/lib.stv`)" }
+
+[diag.cases.missing-name]
+message = "`stave.toml` has no `name`"
+labels = [{ at = "primary", text = "package without a name" }]
+fix = { description = "add `name = \"<package>\"` at the top of `stave.toml`" }
+
+[diag.cases.bad-name]
+message = "`name` in `stave.toml` cannot be {key}"
+labels = [{ at = "primary", text = "not a plain file name" }]
+fix = { description = "use a name that is one path component: not empty, `.`, or `..`, without `/`, `\\`, or NUL, and not starting with `-`" }
+
+[diag.cases.missing-root]
+message = "the package has no root module `{root}`"
+labels = [{ at = "primary", text = "`{root}` is missing" }]
+fix = { description = "create `{root}`, or change `kind` to match the root file that exists (`bin`: `src/main.stv`, `lib`: `src/lib.stv`)" }
+
+[diag.cases.missing-dependency]
+message = "dependency `{key}`: its `path` holds no `stave.toml`"
+labels = [{ at = "primary", text = "no package at this path" }]
+fix = { description = "point `path` at a package directory (one with `stave.toml`), relative to this `stave.toml`" }
+
+[diag.cases.unreadable]
+message = "`stave.toml` cannot be read"
+labels = [{ at = "primary", text = "unreadable manifest" }]
+fix = { description = "make `stave.toml` readable (check that it exists and its permissions)" }
+
+[[diag]]
+code = "E1003"
+severity = "error"
+area = "driver"
+rule = "a source file of a package cannot be read (it vanished after discovery, permissions, or an I/O error); located at offset 0 of that file"
+holes = { reason = "text-literal" }
+choices = { reason = ["not found", "permission denied", "is a directory", "read error"] }
+message = "this source file cannot be read: {reason}"
+labels = [{ at = "primary", text = "unreadable file" }]
+fix = { description = "make the file readable (check that it exists and its permissions), or remove it from `src/`" }
+
+[[diag]]
+code = "E1101"
+severity = "error"
+area = "gpu-kernel"
+rule = "a CPU-only feature (heap, I/O, threads, `extern`, `dispatch`, f-strings) is reachable from a kernel; the shortest call chain from a kernel is listed, ties broken by the smallest caller decl id"
+holes = { feature = "text-literal", kernel = "path" }
+choices = { feature = ["heap allocation", "I/O", "threads", "an `extern` call", "`dispatch`", "an f-string"] }
+message = "{feature} is reachable from kernel `{kernel}`"
+labels = [{ at = "primary", text = "{feature} here" }, { at = "call", text = "on the call chain from `{kernel}`" }]
+fix = { description = "move this work to the host, or pass the data in to `{kernel}` as a buffer" }
+
+[[diag]]
+code = "E1102"
+severity = "error"
+area = "gpu-kernel"
+rule = "recursion or a call through a fn value in device code"
+holes = { name = "path" }
+message = "recursive call of `{name}` in device code"
+labels = [{ at = "primary", text = "recursive call" }, { at = "cycle", text = "part of the recursion cycle" }]
+fix = { description = "rewrite the recursion through `{name}` as a loop" }
+
+[diag.cases.indirect]
+message = "call through a fn value in device code"
+labels = [{ at = "primary", text = "indirect call" }]
+fix = { description = "call the function directly by name, or `match` over an enum of the cases" }
+
+[[diag]]
+code = "E1103"
+severity = "error"
+area = "gpu-kernel"
+rule = "write to `gpu.Out`, `gpu.AtomicOut`, or `gpu.Shared` other than through `at(t)` or an atomic operation"
+holes = { memory = "text-literal" }
+choices = { memory = ["`gpu.Out`", "`gpu.AtomicOut`", "`gpu.Shared`"] }
+message = "write to {memory} not through `at(t)` or an atomic operation"
+labels = [{ at = "primary", text = "direct write" }]
+fix = { description = "write through `out.at(t)`, use an atomic operation, or wrap the write in `unsafe(\"<obligation>\")`" }
+
+[[diag]]
+code = "E1104"
+severity = "error"
+area = "gpu-kernel"
+rule = "a `gpu.Launch` goes out of scope without `wait()`"
+holes = { name = "name" }
+message = "`gpu.Launch` `{name}` goes out of scope without `wait()`"
+labels = [{ at = "primary", text = "scope ends here" }, { at = "launch", text = "`{name}` launched here" }]
+fix = { description = "call `{name}.wait()?` before the end of the scope" }
+
+[[diag]]
+code = "E1105"
+severity = "error"
+area = "gpu-kernel"
+rule = "a collective in non-uniform control flow (the non-uniform source is shown)"
+holes = { op = "name" }
+message = "collective `{op}` in non-uniform control flow"
+labels = [{ at = "primary", text = "collective here" }, { at = "source", text = "non-uniform value here" }]
+fix = { description = "hoist `{op}` out of the branch, or make the condition depend only on uniform values" }
+
+[[diag]]
+code = "E1106"
+severity = "error"
+area = "gpu-kernel"
+rule = "memory-space mismatch (host vs device, `In` vs `Out`, global vs shared)"
+holes = { expected = "type", found = "type" }
+message = "memory-space mismatch: expected `{expected}`, found `{found}`"
+labels = [{ at = "primary", text = "this is `{found}`" }, { at = "expected", text = "`{expected}` required by this" }]
+fix = { description = "pass a `{expected}`: copy host data to the device with `dev.alloc_copy`, or use the buffer of the right kind" }
+
+[[diag]]
+code = "E1107"
+severity = "error"
+area = "gpu-kernel"
+rule = "thread witness copied, stored, returned, or captured"
+holes = { how = "text-literal" }
+choices = { how = ["copied", "stored", "returned", "captured"] }
+message = "thread witness {how}"
+labels = [{ at = "primary", text = "witness {how} here" }]
+fix = { description = "pass `&t` to device functions instead" }
+
+[[diag]]
+code = "E1108"
+severity = "error"
+area = "gpu-kernel"
+rule = "invalid kernel signature (first parameter not a witness, return type, `needs`, generics, or a parameter type that is not a device-parameter type)"
+holes = { name = "name", type = "type" }
+message = "first parameter of kernel `{name}` must be the thread witness"
+labels = [{ at = "primary", text = "not a thread witness" }]
+fix = { description = "make the first parameter `t: gpu.Thread1` (or `t: gpu.Thread2` for a 2-D grid)" }
+
+[diag.cases.return]
+message = "kernel `{name}` must return `()`"
+labels = [{ at = "primary", text = "return type `{type}`" }]
+fix = { description = "remove the return type and write results through a `gpu.Out` parameter" }
+
+[diag.cases.needs]
+message = "kernel `{name}` cannot declare `needs`"
+labels = [{ at = "primary", text = "`needs` here" }]
+fix = { description = "remove `needs(...)` from the signature of `{name}`" }
+
+[diag.cases.generic]
+message = "kernel `{name}` cannot be generic"
+labels = [{ at = "primary", text = "generic parameters" }]
+fix = { description = "remove the generic parameters: write one kernel per concrete type" }
+
+[diag.cases.param]
+message = "parameter type `{type}` of kernel `{name}` is not a device-parameter type"
+labels = [{ at = "primary", text = "not a device-parameter type" }]
+fix = { description = "use `gpu.In<T>`, `gpu.Out<T>`, `gpu.AtomicOut<T>`, or a `gpu.Plain` scalar or vector instead of `{type}`" }
+
+[[diag]]
+code = "E1109"
+severity = "error"
+area = "gpu-kernel"
+rule = "a constant launch configuration exceeds the target's limits (threads per block, shared memory)"
+holes = { value = "int", limit = "int" }
+message = "block of {value} threads exceeds the limit of {limit} threads per block"
+labels = [{ at = "primary", text = "{value} threads per block" }]
+fix = { description = "launch blocks of at most {limit} threads, e.g. `gpu.Grid1.cover(n, 256)`" }
+
+[diag.cases.shared]
+message = "block uses {value} bytes of shared memory, over the limit of {limit} bytes"
+labels = [{ at = "primary", text = "{value} bytes of shared memory per block" }]
+fix = { description = "use at most {limit} bytes of shared memory per block: load smaller tiles, or launch smaller blocks" }
+
+[[diag]]
+code = "E1110"
+severity = "error"
+area = "gpu-kernel"
+rule = "a type that is not `gpu.Plain` used as a buffer element or kernel parameter"
+holes = { type = "type" }
+message = "`{type}` is not `gpu.Plain`"
+labels = [{ at = "primary", text = "not plain data" }]
+fix = { description = "use plain data: numbers, `bool`, fixed vectors, and arrays or structs of those" }
+
+[[diag]]
+code = "E1111"
+severity = "error"
+area = "gpu-kernel"
+rule = "a `gpu.Tile` used after the next collective (including another `tile_load` or a call to a device fn that runs one); the collective that ended the borrow is a related span"
+holes = { name = "name" }
+message = "tile `{name}` used after the collective that ended its borrow"
+labels = [{ at = "primary", text = "used here" }, { at = "collective", text = "this collective ends the borrow of `{name}`" }]
+fix = { description = "use `{name}` before that collective, or copy the needed elements into locals first; call `gpu.tile_load` again after the collective if the data is still needed" }
+
+[[diag]]
+code = "E1112"
+severity = "warning"
+area = "gpu-kernel"
+rule = "a branch on a thread-varying value inside a loop of a kernel or device fn; the non-uniform source is a related span; uniform branches and branches outside loops are not warned (planned)"
+message = "branch on a thread-varying value inside a loop: the warp diverges each iteration"
+labels = [{ at = "primary", text = "thread-varying condition" }, { at = "source", text = "varies per thread here" }]
+fix = { description = "use `c.select(a, b)` (lowers to `selp`, no divergence), or hoist the condition out of the loop" }
+
+[[diag]]
+code = "E1201"
+severity = "error"
+area = "gpu-program"
+rule = "`extern \"C\"` function declared or called in a program built for `gpu-sm86`; the call chain from `main` is listed"
+holes = { name = "path" }
+message = "`extern \"C\"` function `{name}` called in a program built for `gpu-sm86`"
+labels = [{ at = "primary", text = "C call" }, { at = "call", text = "on the call chain from `main`" }]
+fix = { description = "GPU programs cannot call C code: all user code runs on the GPU. Write the function in Stave, or build for a CPU target" }
+
+[diag.cases.declared]
+message = "`extern \"C\"` function `{name}` declared in a program built for `gpu-sm86`"
+labels = [{ at = "primary", text = "C declaration" }]
+
+[[diag]]
+code = "E1202"
+severity = "error"
+area = "gpu-program"
+rule = "a kernel launched from a GPU program with a constant block size B that breaks the virtual-grid rules: B not a multiple of 32, B > R, R % B != 0, or R/B > 15 when B > 32"
+holes = { block = "int", resident = "int" }
+message = "kernel block size {block} does not fit the runtime block size {resident}"
+labels = [{ at = "primary", text = "block size {block}" }]
+fix = { description = "launch with a block size that is a multiple of 32 and divides {resident} (at most 15 such blocks when it is above 32), or set `[gpu] block = <value>` in `stave.toml` to a multiple of {block} (itself a multiple of 32, at most 1024)" }
+
+[[diag]]
+code = "E1203"
+severity = "error"
+area = "gpu-program"
+rule = "invalid `[run]` or `[gpu]` manifest value (gpu-program.md \"Manifest keys\"); the primary span is the value in `stave.toml`"
+holes = { key = "source" }
+message = "invalid value for `{key}` in `stave.toml`"
+labels = [{ at = "primary", text = "invalid value" }]
+fix = { description = "write a size as a string of digits and one unit `B`, `KiB`, `MiB`, `GiB`, or `TiB`, e.g. `{key} = \"8MiB\"`" }
+
+[diag.cases.stack]
+fix = { description = "write a size of at least 4KiB, e.g. `stack = \"8MiB\"`" }
+
+[diag.cases.heap-max]
+fix = { description = "write a size of at least 64MiB or a percentage from 1 to 100, e.g. `heap_max = \"40GiB\"` or `heap_max = \"90%\"`" }
+
+[diag.cases.block]
+fix = { description = "write an integer multiple of 32 from 32 to 1024, e.g. `block = 256`" }
+
+[diag.cases.poll]
+fix = { description = "write `poll = \"adaptive\"` or `poll = \"busy\"`" }
+
+[[diag]]
+code = "E1204"
+severity = "error"
+area = "gpu-program"
+rule = "shared memory per resident block exceeds 101,120 B (99 KiB opt-in on sm_86 minus the runtime's 256 B): max over kernels of block-shared bytes x R/B; the largest kernel and its share are listed"
+holes = { amount = "int", kernel = "path" }
+message = "shared memory per resident block is {amount} bytes, over the limit of 101120 bytes"
+labels = [{ at = "primary", text = "kernel `{kernel}` needs {amount} bytes per resident block" }]
+fix = { description = "lower `[gpu] block` in `stave.toml`, launch `{kernel}` with a larger block size, or reduce the shared memory of `{kernel}`" }
+
+[[diag]]
+code = "E1205"
+severity = "warning"
+area = "gpu-program"
+rule = "a recursion cycle (call-graph SCC) is reachable from a `par_for`, `join`, or `scope` body; it runs with explicit frames per lane; the cycle is listed; runtime-internal cycles are not reported"
+holes = { name = "path" }
+message = "recursion cycle through `{name}` is reachable from a parallel region"
+labels = [{ at = "primary", text = "recursive call" }, { at = "cycle", text = "part of the recursion cycle" }]
+fix = { description = "rewrite the recursion through `{name}` as a loop, with an explicit stack (`Vec`) if needed" }
+
+[[diag]]
+code = "E1206"
+severity = "warning"
+area = "gpu-program"
+rule = "an indirect call (through a fn value) inside a `par_for`, `join`, or `scope` body; the call site and the fn type are shown"
+holes = { type = "type" }
+message = "indirect call through a fn value of type `{type}` in a parallel region"
+labels = [{ at = "primary", text = "indirect call" }]
+fix = { description = "use `match` over an enum of the cases, or a generic parameter, instead of a fn value" }
+
+[[diag]]
+code = "E1301"
+severity = "error"
+area = "gpu-compiler"
+rule = "project needs more device memory than the daemon may use (estimate after lexing vs the daemon's `heap_max`, bounded by free memory); shows needed and available bytes; no location"
+located = false
+holes = { needed = "int", available = "int" }
+message = "project needs {needed} bytes of device memory, the GPU compiler may use {available}"
+fix = { description = "use `--compiler cpu`, raise `[compiler] gpu_mem`, or free GPU memory (`stave daemon stop` frees the daemon's own)" }
+
+[[diag]]
+code = "E1302"
+severity = "error"
+area = "gpu-compiler"
+rule = "`--compiler gpu` but no usable GPU (reason as in the summary line); no location"
+located = false
+holes = { reason = "text-literal", major = "int", minor = "int" }
+choices = { reason = ["stage1 image missing", "no NVIDIA driver", "no device", "daemon not reachable"] }
+message = "`--compiler gpu`: no usable GPU ({reason})"
+fix = { description = "use `--compiler auto` or `--compiler cpu`; or make the GPU usable ({reason}): install the NVIDIA driver, check the device, or reinstall Stave with the GPU compiler image" }
+
+[diag.cases.cc]
+message = "`--compiler gpu`: no usable GPU (compute capability {major}.{minor} < 8.6)"
+fix = { description = "use `--compiler auto` or `--compiler cpu`: stage1 needs compute capability 8.6 or higher" }
+
+[[diag]]
+code = "E1303"
+severity = "error"
+area = "gpu-compiler"
+rule = "`--compiler gpu` with a code-generating command (`build`, `run`, `test`) for a target stage1 does not support (AArch64 in v1); `stave check` is not affected; reported instead of E1302 when both apply; no location"
+located = false
+holes = { target = "text-literal" }
+choices = { target = ["aarch64-linux", "aarch64-linux+sve", "aarch64-linux+sve2"] }
+message = "`--compiler gpu`: target `{target}` not supported by stage1"
+fix = { description = "use `--compiler auto` or `--compiler cpu`: stage0 builds this target" }
+
+[[diag]]
+code = "E1304"
+severity = "error"
+area = "gpu-compiler"
+rule = "`--compiler gpu` and the package links C objects, which stage1 v1 does not support; located at the first C-link input in stave.toml (or the first `extern \"C\"` import block); `stave check` is not affected"
+message = "`--compiler gpu`: C linking not supported by stage1"
+labels = [{ at = "primary", text = "the package links C objects here" }]
+fix = { description = "use `--compiler auto` or `--compiler cpu`: stage0 links C objects" }

@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// lit_order_a / lit_order_b: the same statements in two orders give identical types and
+// diagnostics (no inference across statements).
+fn f(x: u16) -> u16 {
+    let d = 3 * x;
+    let b = 2; //~ ERROR E0202
+    let a = x + 1;
+    let c: u16 = b;
+    return a + c + d;
+}
+
+fn main() -> i32 {
+    return 0;
+}

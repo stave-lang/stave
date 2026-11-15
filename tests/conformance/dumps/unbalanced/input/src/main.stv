@@ -1,0 +1,6 @@
+//~ CHECK-ONLY
+// Dump golden: unbalanced brackets, one E0016 at the mismatched closer, no items.
+fn main() -> i32 {
+    let a: i32 = (1 + 2;
+    return a;
+} //~ ERROR E0016

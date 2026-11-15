@@ -1,0 +1,6 @@
+//~ CHECK-ONLY
+// ir golden: a build with an error diagnostic writes no ir.txt.
+fn main() -> i32 {
+    let x: u32 = true; //~ ERROR E0201
+    return 0;
+}

@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// A borrow of a block-local value still used after the block: the local dies at `}`.
+fn main() -> i32 {
+    let a: u32 = 1;
+    let mut r: &u32 = &a;
+    {
+        let b: u32 = 2;
+        r = &b;
+    } //~ ERROR E0501
+    let x: u32 = *r;
+    return 0;
+}

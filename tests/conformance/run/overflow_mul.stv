@@ -1,0 +1,14 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Overflow at overflow_mul.stv:5:14 in main.square (thread 0)"
+// `*` traps on i64 overflow: repeated squaring of 3 (the 6th call computes 3^64 > i64 max).
+fn square(x: i64) -> i64 {
+    return x * x;
+}
+
+fn main() -> i32 {
+    let mut v: i64 = 3;
+    for i in 0u32..10 {
+        v = square(v);
+    }
+    return 0;
+}

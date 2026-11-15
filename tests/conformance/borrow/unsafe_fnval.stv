@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// E0807: an `unsafe` fn never becomes a fn value: fn types
+// carry no `unsafe` marker, so a call through the value would skip E0803. Wrap it in a safe fn
+// or closure with its own `unsafe(..)`.
+unsafe("p is valid for reads") fn read(p: *const u8) -> u8 {
+    return unsafe("the caller guarantees p is valid") *p;
+}
+
+fn apply(f: fn(*const u8) -> u8, p: *const u8) -> u8 {
+    return f(p);
+}
+
+fn as_local() {
+    let f: fn(*const u8) -> u8 = read; //~ ERROR E0807
+}
+
+fn as_arg(x: &u8) -> u8 {
+    return apply(read, x as *const u8); //~ ERROR E0807
+}
+
+// fine: a safe wrapper states the obligation at the call
+fn read_ok(p: *const u8) -> u8 {
+    return unsafe("callers of read_ok pass a valid pointer") read(p);
+}
+
+fn wrapped(x: &u8) -> u8 {
+    return apply(read_ok, x as *const u8);
+}

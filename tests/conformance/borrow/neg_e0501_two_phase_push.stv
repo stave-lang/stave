@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// E0501 `bad`: `first` keeps a `&` loan of `*v` live across `v.push`, which borrows `*v`
+// mutably (two-phase: the conflict is at the activation). Related spans: the loan (`v` of
+// `v.get_ref(0)`) and the later use (`first` in the f-string).
+import std.io;
+import std.vec;
+
+fn bad(v: &mut vec.Vec<i32>) {
+    let first: &i32 = v.get_ref(0);
+    v.push(1); //~ ERROR E0501
+    io.print(f"{first}\n");
+}
+
+fn main() -> i32 {
+    return 0;
+}

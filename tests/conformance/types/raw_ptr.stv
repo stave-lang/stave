@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// Raw pointers: `*p = v` drops the old pointee, `p.write(v)` does not, `p.read()` moves
+// the pointee out (the slot is then logically uninitialized). All three are unsafe.
+import std.string;
+
+fn first(p: *const u32) -> u32 {
+    return p.read(); //~ ERROR E0803
+}
+
+fn main() -> i32 {
+    let mut a = string.String.from_str("a");
+    let p = &mut a as *mut string.String;
+    unsafe("p points to the live local a") { *p = string.String.from_str("b"); }    // drops "a"
+    let b = unsafe("a holds \"b\" and is rewritten before its next use") p.read();
+    unsafe("a's slot is uninitialized after read") { p.write(string.String.from_str("c")); }
+    return 0;
+}

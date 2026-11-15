@@ -1,0 +1,33 @@
+//~ CHECK-ONLY
+// Kinds: a reference or view field needs a `view` ADT (E0410); consts hold no references
+// except `&str` literals (E0413); a generic param without `view` rejects views (E0414), and a
+// std container rejects them as E0411.
+import std.vec;
+struct Bad { r: &u32 } //~ ERROR E0410
+
+view struct Lex { src: &str, pos: usize }
+
+struct Holds { l: Lex } //~ ERROR E0410
+
+const NAME: &str = "ok";
+const ALIAS: &str = NAME;
+const REF: &u32 = &1u32; //~ ERROR E0413
+
+fn keep<T>(x: T) -> u32 { return 0; }
+
+fn keep_view<T: view>(x: T) -> u32 { return 0; }
+
+struct W<T> { pub v: T }
+
+fn in_type(x: W<&u32>) { } //~ ERROR E0414
+
+fn in_vec(x: vec.Vec<&u8>) { } //~ ERROR E0411
+
+fn ok_option(x: Option<&u8>) { }
+
+fn main() -> i32 {
+    let v: u32 = 1;
+    let a: u32 = keep(&v); //~ ERROR E0414
+    let b: u32 = keep_view(&v);
+    return 0;
+}

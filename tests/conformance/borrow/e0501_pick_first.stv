@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// Loan choice: of several live loans the access conflicts with, the one created first
+// (smallest offset) is named; "later use" is the first use after the access of a value holding
+// that loan (`*a`, not the earlier `*b`).
+fn main() -> i32 {
+    let mut x: i32 = 1;
+    let a: &i32 = &x;
+    let b: &i32 = &x;
+    x = 2; //~ ERROR E0501
+    let s: i32 = *b + *a;
+    return 0;
+}

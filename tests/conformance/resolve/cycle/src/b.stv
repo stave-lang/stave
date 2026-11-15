@@ -1,0 +1,9 @@
+import a;
+
+pub fn two() -> i32 {
+    return 2;
+}
+
+pub fn three() -> i32 {
+    return a.one();
+}

@@ -1,0 +1,6 @@
+//~ CHECK-ONLY
+// E1002: an invalid `stave.toml` is reported in the manifest (wrong value type, unknown key,
+// non-path dependency, unknown target table, unknown key in a dependency).
+fn main() -> i32 {
+    return 0;
+}

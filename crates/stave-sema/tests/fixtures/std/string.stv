@@ -1,0 +1,4 @@
+// Test stand-in for std/string.stv (not in the prelude).
+pub struct String {
+    len: usize,
+}

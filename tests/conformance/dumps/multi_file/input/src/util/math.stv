@@ -1,0 +1,7 @@
+pub fn two() -> i32 {
+    return 2;
+}
+
+fn broken() {
+    let x: i32 = 1 2; //~ ERROR E0004
+}

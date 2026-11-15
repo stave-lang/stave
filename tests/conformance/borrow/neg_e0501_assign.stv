@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// Assigning a place while a `&` loan of it is live; a field assignment conflicts with a loan of the
+// whole struct, not with a loan of a sibling field.
+struct P { pub a: u32, pub b: u32 }
+
+fn main() -> i32 {
+    let mut x: i32 = 1;
+    let r: &i32 = &x;
+    x = 2; //~ ERROR E0501
+    let y: i32 = *r;
+    let mut p = P.{ a: 1, b: 2 };
+    let pa: &u32 = &p.a;
+    p.b = 3;
+    let whole: &P = &p;
+    p.a = 4; //~ ERROR E0501
+    let s: u32 = *pa + whole.b;
+    return 0;
+}

@@ -1,0 +1,4 @@
+//~ CHECK-ONLY
+// Tokens before the first item start are an E0004.
+garbage tokens here //~ ERROR E0004
+fn f() { }

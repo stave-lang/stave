@@ -1,0 +1,44 @@
+//~ CHECK-ONLY
+// Inside a guard the arm's bindings are read-only views of the scrutinee: moving one is E0504
+// (a later arm binds the same value again), and writing or `&mut`-borrowing one is E0503.
+import std.string;
+
+fn eat(s: string.String) -> bool {
+    return s.len() == 0;
+}
+
+fn grow(s: &mut string.String) -> bool {
+    return true;
+}
+
+fn moved(o: Option<string.String>) -> usize {
+    let mut n: usize = 0;
+    match o {
+        Option.Some(x) if eat(x) => { n = 1; } //~ ERROR E0504
+        Option.Some(y) => { n = y.len(); }
+        Option.None => {}
+    }
+    return n;
+}
+
+fn mutated(o: Option<string.String>) -> usize {
+    let mut n: usize = 0;
+    match o {
+        Option.Some(mut x) if grow(&mut x) => { n = x.len(); } //~ ERROR E0503
+        _ => {}
+    }
+    return n;
+}
+
+fn body_owns(o: Option<string.String>) -> bool {
+    let mut b: bool = false;
+    match o {
+        Option.Some(x) if x.len() == 0 => { b = eat(x); }
+        _ => {}
+    }
+    return b;
+}
+
+fn main() -> i32 {
+    return 0;
+}

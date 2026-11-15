@@ -1,0 +1,19 @@
+[package]
+name = "stave-diag"
+description = "Diagnostics: spans, canonical order, human and JSON emitters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+serde_json = { workspace = true }
+proptest = { workspace = true }

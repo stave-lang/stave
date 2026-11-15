@@ -1,0 +1,10 @@
+//~ CHECK-ONLY
+// Two live `&mut` loans of one place.
+fn main() -> i32 {
+    let mut x: i32 = 1;
+    let a: &mut i32 = &mut x;
+    let b: &mut i32 = &mut x; //~ ERROR E0501
+    *a = 2;
+    *b = 3;
+    return 0;
+}

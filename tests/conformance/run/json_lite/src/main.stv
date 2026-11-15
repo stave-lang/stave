@@ -1,0 +1,354 @@
+// A tiny JSON subset parser over an embedded text: objects, arrays, integers (i64), floats
+// (f64, any number with "." or an exponent), true, false, null, and strings without escapes.
+// Prints the value tree back in compact form, then per-kind counts and the sums of the
+// integers and of the floats (depth-first, left to right).
+import std.io;
+import std.mem;
+import std.num;
+import std.string;
+import std.vec;
+
+const SRC: &str = "{\n  \"name\": \"stave\",\n  \"version\": 6,\n  \"ok\": true,\n  \"none\": null,\n\t\"nums\": [0, -42, 9007199254740993, -9223372036854775808, 7],\n  \"floats\": [0.1, 1.5, 1e21, -0.0, 2.5e-7, 1e2, 1E-5, 1e16, 123.456, 6.02e+23],\n  \"nested\": {\"a\": [], \"b\": {}, \"c\": [false, [1, 2.0, \"x y\"]]}\n}\n";
+
+enum Json {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(string.String),
+    Arr(vec.Vec<Json>),
+    Obj(vec.Vec<Member>),
+}
+
+struct Member {
+    pub key: string.String,
+    pub val: Json,
+}
+
+// Err holds the byte offset of the first unexpected input.
+fn skip_ws(b: &[u8], p: &mut usize) {
+    while *p < b.len() {
+        let c = b[*p];
+        if c != 32 && c != 9 && c != 10 && c != 13 {
+            return;
+        }
+        *p = *p + 1;
+    }
+}
+
+fn expect_byte(b: &[u8], p: &mut usize, c: u8) -> Result<(), usize> {
+    skip_ws(b, p);
+    if *p >= b.len() || b[*p] != c {
+        return Result.Err(*p);
+    }
+    *p = *p + 1;
+    return Result.Ok(());
+}
+
+fn expect_word(b: &[u8], p: &mut usize, w: &str) -> Result<(), usize> {
+    let wb = mem.str_bytes(w);
+    for k in 0..wb.len() {
+        let i = *p + k;
+        if i >= b.len() || b[i] != wb[k] {
+            return Result.Err(i);
+        }
+    }
+    *p = *p + wb.len();
+    return Result.Ok(());
+}
+
+fn is_digit(c: u8) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+// Appends the digits at *p to t; Err if there is none.
+fn digits(b: &[u8], p: &mut usize, t: &mut string.String) -> Result<(), usize> {
+    let lo = *p;
+    while *p < b.len() && is_digit(b[*p]) {
+        t.push(b[*p] as char);
+        *p = *p + 1;
+    }
+    if *p == lo {
+        return Result.Err(lo);
+    }
+    return Result.Ok(());
+}
+
+// "-"? digits ("." digits)? (("e" | "E") ("+" | "-")? digits)?
+fn parse_number(b: &[u8], p: &mut usize) -> Result<Json, usize> {
+    let start = *p;
+    let mut t = string.String.new();
+    let mut is_float = false;
+    if b[*p] == 45 {
+        t.push('-');
+        *p = *p + 1;
+    }
+    digits(b, p, &mut t)?;
+    if *p < b.len() && b[*p] == 46 {
+        is_float = true;
+        t.push('.');
+        *p = *p + 1;
+        digits(b, p, &mut t)?;
+    }
+    if *p < b.len() && (b[*p] == 101 || b[*p] == 69) {
+        is_float = true;
+        t.push(b[*p] as char);
+        *p = *p + 1;
+        if *p < b.len() && (b[*p] == 43 || b[*p] == 45) {
+            t.push(b[*p] as char);
+            *p = *p + 1;
+        }
+        digits(b, p, &mut t)?;
+    }
+    if is_float {
+        return match num.parse_f64(t.as_str()) {
+            Option.Some(x) => Result.Ok(Json.Float(x)),
+            Option.None => Result.Err(start),
+        };
+    }
+    return match num.parse_i64(t.as_str()) {
+        Option.Some(n) => Result.Ok(Json.Int(n)),
+        Option.None => Result.Err(start),
+    };
+}
+
+// A string without escapes: the bytes between two '"'.
+fn parse_string(b: &[u8], p: &mut usize) -> Result<string.String, usize> {
+    expect_byte(b, p, 34)?;
+    let mut s = string.String.new();
+    while *p < b.len() && b[*p] != 34 {
+        if b[*p] == 92 {
+            return Result.Err(*p);
+        }
+        s.push(b[*p] as char);
+        *p = *p + 1;
+    }
+    expect_byte(b, p, 34)?;
+    return Result.Ok(s);
+}
+
+fn parse_array(b: &[u8], p: &mut usize) -> Result<Json, usize> {
+    expect_byte(b, p, 91)?;
+    let mut items = vec.Vec::<Json>.new();
+    skip_ws(b, p);
+    if *p < b.len() && b[*p] == 93 {
+        *p = *p + 1;
+        return Result.Ok(Json.Arr(items));
+    }
+    loop {
+        let v = parse_value(b, p)?;
+        items.push(v);
+        skip_ws(b, p);
+        if *p < b.len() && b[*p] == 44 {
+            *p = *p + 1;
+            continue;
+        }
+        expect_byte(b, p, 93)?;
+        break;
+    }
+    return Result.Ok(Json.Arr(items));
+}
+
+fn parse_object(b: &[u8], p: &mut usize) -> Result<Json, usize> {
+    expect_byte(b, p, 123)?;
+    let mut members = vec.Vec::<Member>.new();
+    skip_ws(b, p);
+    if *p < b.len() && b[*p] == 125 {
+        *p = *p + 1;
+        return Result.Ok(Json.Obj(members));
+    }
+    loop {
+        let k = parse_string(b, p)?;
+        expect_byte(b, p, 58)?;
+        let v = parse_value(b, p)?;
+        members.push(Member.{ key: k, val: v });
+        skip_ws(b, p);
+        if *p < b.len() && b[*p] == 44 {
+            *p = *p + 1;
+            continue;
+        }
+        expect_byte(b, p, 125)?;
+        break;
+    }
+    return Result.Ok(Json.Obj(members));
+}
+
+fn parse_value(b: &[u8], p: &mut usize) -> Result<Json, usize> {
+    skip_ws(b, p);
+    if *p >= b.len() {
+        return Result.Err(*p);
+    }
+    let c = b[*p];
+    if c == 123 {
+        return parse_object(b, p);
+    }
+    if c == 91 {
+        return parse_array(b, p);
+    }
+    if c == 34 {
+        let s = parse_string(b, p)?;
+        return Result.Ok(Json.Str(s));
+    }
+    if c == 116 {
+        expect_word(b, p, "true")?;
+        return Result.Ok(Json.Bool(true));
+    }
+    if c == 102 {
+        expect_word(b, p, "false")?;
+        return Result.Ok(Json.Bool(false));
+    }
+    if c == 110 {
+        expect_word(b, p, "null")?;
+        return Result.Ok(Json.Null);
+    }
+    if c == 45 || is_digit(c) {
+        return parse_number(b, p);
+    }
+    return Result.Err(*p);
+}
+
+// The whole text is one value, optionally surrounded by whitespace.
+fn parse(b: &[u8]) -> Result<Json, usize> {
+    let mut p: usize = 0;
+    let v = parse_value(b, &mut p)?;
+    skip_ws(b, &mut p);
+    if p != b.len() {
+        return Result.Err(p);
+    }
+    return Result.Ok(v);
+}
+
+fn write(v: &Json, out: &mut string.String) {
+    match v {
+        Json.Null => {
+            out.push_str("null");
+        }
+        Json.Bool(x) => {
+            out.push_str(if *x then "true" else "false");
+        }
+        Json.Int(n) => {
+            let x: i64 = *n;
+            out.push_str(f"{x}");
+        }
+        Json.Float(f) => {
+            let x: f64 = *f;
+            out.push_str(f"{x}");
+        }
+        Json.Str(s) => {
+            out.push_str("\"");
+            out.push_str(s.as_str());
+            out.push_str("\"");
+        }
+        Json.Arr(items) => {
+            out.push_str("[");
+            for i in 0..items.len() {
+                if i > 0 {
+                    out.push_str(",");
+                }
+                write(items.get_ref(i), out);
+            }
+            out.push_str("]");
+        }
+        Json.Obj(members) => {
+            out.push_str("{");
+            for i in 0..members.len() {
+                if i > 0 {
+                    out.push_str(",");
+                }
+                let m = members.get_ref(i);
+                out.push_str("\"");
+                out.push_str(m.key.as_str());
+                out.push_str("\":");
+                write(&m.val, out);
+            }
+            out.push_str("}");
+        }
+    }
+}
+
+struct Stats {
+    pub nulls: u32,
+    pub bools: u32,
+    pub ints: u32,
+    pub floats: u32,
+    pub strings: u32,
+    pub arrays: u32,
+    pub objects: u32,
+    pub int_sum: i64,
+    pub float_sum: f64,
+}
+
+fn walk(v: &Json, st: &mut Stats) {
+    match v {
+        Json.Null => {
+            st.nulls = st.nulls + 1;
+        }
+        Json.Bool(_) => {
+            st.bools = st.bools + 1;
+        }
+        Json.Int(n) => {
+            st.ints = st.ints + 1;
+            st.int_sum = st.int_sum + *n;
+        }
+        Json.Float(f) => {
+            st.floats = st.floats + 1;
+            st.float_sum = st.float_sum + *f;
+        }
+        Json.Str(_) => {
+            st.strings = st.strings + 1;
+        }
+        Json.Arr(items) => {
+            st.arrays = st.arrays + 1;
+            for i in 0..items.len() {
+                walk(items.get_ref(i), st);
+            }
+        }
+        Json.Obj(members) => {
+            st.objects = st.objects + 1;
+            for i in 0..members.len() {
+                walk(&members.get_ref(i).val, st);
+            }
+        }
+    }
+}
+
+fn main() -> i32 {
+    let b = mem.str_bytes(SRC);
+    match parse(b) {
+        Result.Err(at) => {
+            io.eprint(f"json_lite: parse error at byte {at}\n");
+            return 1;
+        }
+        Result.Ok(v) => {
+            let mut out = string.String.new();
+            write(&v, &mut out);
+            out.push_str("\n");
+            io.print(&out);
+            let mut st = Stats.{
+                nulls: 0,
+                bools: 0,
+                ints: 0,
+                floats: 0,
+                strings: 0,
+                arrays: 0,
+                objects: 0,
+                int_sum: 0,
+                float_sum: 0.0,
+            };
+            walk(&v, &mut st);
+            let nulls = st.nulls;
+            let bools = st.bools;
+            let strings = st.strings;
+            let arrays = st.arrays;
+            let objects = st.objects;
+            io.print(f"nulls {nulls} bools {bools} strings {strings} arrays {arrays} objects {objects}\n");
+            let ints = st.ints;
+            let int_sum = st.int_sum;
+            io.print(f"ints {ints} sum {int_sum}\n");
+            let floats = st.floats;
+            let float_sum = st.float_sum;
+            io.print(f"floats {floats} sum {float_sum}\n");
+            return 0;
+        }
+    }
+}

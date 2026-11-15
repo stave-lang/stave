@@ -1,0 +1,4 @@
+//~ EXIT 4
+pub fn code() -> i32 {
+    return 4;
+}

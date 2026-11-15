@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// E0510: a returned reference or view borrows only from the origins its `from` clause
+// names. A string literal has the static origin and satisfies every `from`.
+fn pick(a: &u32, b: &u32) -> &u32 from a {
+    return b; //~ ERROR E0510
+}
+
+// fine
+fn pick_ok(a: &u32, b: &u32) -> &u32 from a, b {
+    return b;
+}
+
+fn literal(a: &u32) -> &str from a {
+    return "static";
+}

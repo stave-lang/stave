@@ -1,0 +1,42 @@
+//~ CHECK-ONLY
+// E0510: a signature without `from` declares the empty origin
+// set, so returning a borrow of a parameter is E0510 (fix: name it in `from`). Views: references,
+// view ADTs, fn values, Options and tuples holding one, `T: view` params.
+view struct Lexer { src: &str, pos: usize }
+
+fn first(xs: &[u32]) -> &u32 {
+    return &xs[0]; //~ ERROR E0510
+}
+
+fn lexer(src: &str) -> Lexer {
+    return Lexer.{ src: src, pos: 0 }; //~ ERROR E0510
+}
+
+fn find(xs: &[u8]) -> Option<&u8> {
+    return Option.Some(&xs[0]); //~ ERROR E0510
+}
+
+fn pair(xs: &[u8]) -> (usize, &[u8]) {
+    return (0, xs); //~ ERROR E0510
+}
+
+fn callback(f: fn() -> u8) -> fn() -> u8 {
+    return f; //~ ERROR E0510
+}
+
+fn id<T: view>(x: T) -> T {
+    return x; //~ ERROR E0510
+}
+
+struct Doc { pub n: u32 }
+
+impl Doc {
+    pub fn n_ref(&self) -> &u32 {
+        return &self.n; //~ ERROR E0510
+    }
+}
+
+// fine: `from` names the borrowed parameters
+fn first_ok(xs: &[u32]) -> &u32 from xs {
+    return &xs[0];
+}

@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+// `static mut` declares a module item like `const`: duplicates are E0105, uses resolve
+// to the decl. That every use sits inside `unsafe(..)` is the unsafe checker's rule (E0803,
+// tests/conformance/types/static_mut_unsafe.stv).
+static mut COUNT: u64 = 0;
+pub static mut TABLE: [u8; 4] = [1, 2, 3, 4];
+static mut COUNT: u32 = 1; //~ ERROR E0105
+
+fn bump() -> u64 {
+    unsafe("single-threaded test program") {
+        COUNT = COUNT + 1;
+    }
+    return unsafe("single-threaded test program") COUNT;
+}
+
+fn main() -> i32 {
+    let t: u8 = unsafe("single-threaded test program") TABLE[0];
+    let n: u64 = bump();
+    return 0;
+}

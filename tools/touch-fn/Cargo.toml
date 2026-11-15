@@ -1,0 +1,19 @@
+[package]
+name = "touch-fn"
+description = "Edits one Stave fn body without changing any signature"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+stave-syntax = { workspace = true }
+gen-corpus = { path = "../gen-corpus" }

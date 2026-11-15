@@ -1,0 +1,32 @@
+// `stave test` builds and runs the `test fn`s of a package (one process each, passing iff it
+// exits 0); `stave build` leaves them out. As a conformance run test, `main` runs.
+import std.debug;
+import std.io;
+
+fn square(x: u32) -> u32 {
+    return x * x;
+}
+
+fn main() -> i32 {
+    let s = square(5);
+    io.print(f"main: 5 squared is {s}\n");
+    return 0;
+}
+
+test fn adds_up() {
+    let a: u32 = 2;
+    debug.assert(a + 3 == 5, "2 + 3 is 5");
+}
+
+test fn squares() {
+    debug.assert(square(7) == 49, "7 squared is 49");
+    debug.assert(square(0) == 0, "0 squared is 0");
+}
+
+// The working directory is the package directory.
+test fn reads_input() {
+    match io.read_file("input.txt") {
+        Result.Ok(b) => { debug.assert(b.len() == 4, "input.txt has 4 bytes"); }
+        Result.Err(_) => { debug.assert(false, "input.txt is readable"); }
+    }
+}

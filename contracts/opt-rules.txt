@@ -1,0 +1,29 @@
+# Stave release optimizer rewrite rules (v0.1, PLANNED). Not read by any tool yet. Once the
+# optimizer lands, `tools/rulegen` compiles this file into the stage0 optimizer (Rust,
+# crates/stave-opt) and the stage1 optimizer (Stave, stage1/src/opt), like ll1gen and diaggen, so
+# both compilers apply the same rules by construction.
+#
+# Format: one rule per line, `lhs => rhs`; `#` starts a comment. Terms are s-expressions over
+# checked-IR op names (contracts/checked-ir.md); lower-case names other than op names are pattern
+# variables; `(const N)` matches an integer constant, `(const pow2 k)` one that is 2^k (binds k).
+# Types come from the lhs; a rule applies to every int type unless it names one.
+#
+# rulegen rejects a rule (generation fails) if:
+#   - cost(rhs) >= cost(lhs) under the integer cost table of the generated optimizer (rules apply
+#     eagerly at node creation with no fixpoint, so only cost-decreasing rules are safe);
+#   - it removes, adds, or moves a trap: trapping ops (`add sub mul div rem shl shr`, checks) only
+#     rewrite to trapping ops at the same site (`mul x 8 => shl` is illegal, the `.wrap` forms are
+#     legal);
+#   - it reassociates or contracts float ops (IEEE, no fast-math);
+#   - it touches memory ops (loads and stores stay in the CFG; borrow-derived alias facts are separate).
+# Each rule is tested against the IR interpreter oracle: exhaustively on 8-bit types, randomly on
+# wider ones. Rule order is the file order (determinism).
+#
+# If-conversion is a rule family here too: a diamond whose two arms are
+# pure, trap-free, and below an integer cost limit becomes a `select`. No rule ever rewrites a
+# `select` (user-written or produced) into a branch.
+
+(add.wrap x (const 0))       => x
+(mul.wrap x (const pow2 k))  => (shl.wrap x (const k))
+(sub.wrap x x)               => (const 0)
+(and x (const all_ones))     => x

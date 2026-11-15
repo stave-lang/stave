@@ -1,0 +1,13 @@
+# The built-in `runtime` package. Built-in packages have their
+# modules at the directory root (`os.stv` is `runtime.os`); the loader reads this manifest for
+# them too. The per-target tables bind `arch` to the syscall layer of the build target's
+# architecture, so `runtime.os` needs no per-arch code and no `dispatch`. `gpu-sm86` builds use
+# `runtime-gpu/` instead of this package.
+name = "runtime"
+kind = "lib"
+
+[target.x86_64-linux.dependencies]
+arch = { path = "x86_64" }
+
+[target.aarch64-linux.dependencies]
+arch = { path = "aarch64" }

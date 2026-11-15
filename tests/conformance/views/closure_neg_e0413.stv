@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// A fn value is a view: never a const or a global.
+fn one() -> u32 {
+    return 1;
+}
+
+const F: fn() -> u32 = one; //~ ERROR E0413
+
+static mut G: fn() -> u32 = one; //~ ERROR E0413

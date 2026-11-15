@@ -1,0 +1,14 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Overflow at overflow_sub.stv:5:14 in main.prev (thread 0)"
+// `-` traps below zero on an unsigned type: 0u32 - 1, counting down from 3.
+fn prev(x: u32) -> u32 {
+    return x - 1;
+}
+
+fn main() -> i32 {
+    let mut v: u32 = 3;
+    for i in 0u32..10 {
+        v = prev(v);
+    }
+    return 0;
+}

@@ -1,0 +1,48 @@
+//~ CHECK-ONLY
+// Use after move: plain, through a field, after a move on one branch, and on the next iteration.
+struct S { pub v: u32 }
+
+fn take(s: S) -> u32 {
+    return s.v;
+}
+
+fn twice() -> u32 {
+    let s = S.{ v: 1 };
+    let a: u32 = take(s);
+    let b: u32 = take(s); //~ ERROR E0502
+    return a + b;
+}
+
+fn field() -> u32 {
+    let s = S.{ v: 1 };
+    let t = s;
+    return s.v; //~ ERROR E0502
+}
+
+fn branch(c: bool) -> u32 {
+    let s = S.{ v: 1 };
+    if c {
+        let a: u32 = take(s);
+    }
+    return take(s); //~ ERROR E0502
+}
+
+fn looped() {
+    let s = S.{ v: 1 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        let a: u32 = take(s); //~ ERROR E0502
+        i = i + 1;
+    }
+}
+
+fn reinit() -> u32 {
+    let mut s = S.{ v: 1 };
+    let a: u32 = take(s);
+    s = S.{ v: 2 };
+    return take(s);
+}
+
+fn main() -> i32 {
+    return 0;
+}

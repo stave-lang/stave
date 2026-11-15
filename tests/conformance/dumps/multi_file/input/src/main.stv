@@ -1,0 +1,8 @@
+//~ CHECK-ONLY
+// Dump golden: three files; `src/util.stv` and `src/util/` coexist.
+import util;
+import util.math;
+
+fn main() -> i32 {
+    return util.one() + math.two();
+}

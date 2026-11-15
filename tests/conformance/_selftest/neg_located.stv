@@ -1,0 +1,11 @@
+//~ NOLOC ERROR E1302
+//~ NOLOC WARNING E1205
+fn main() -> i32 {
+    let a: i32 = 1;
+    let b: i64 = 2;
+    let c = a + b; //~ ERROR E0201
+    let s = "unterminated //~ ERROR E0201
+//~^ ERROR E0015
+    return 0;
+}
+//~^^ WARNING E1206

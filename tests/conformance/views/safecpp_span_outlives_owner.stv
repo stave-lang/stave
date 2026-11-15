@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// Safe C++ catalogue, spans: a span used after its owner is dropped. Stave: E0501 at
+// the move of the owner into `mem.drop`.
+import std.mem;
+import std.vec;
+
+fn outlive() -> u32 {
+    let mut v: vec.Vec<u32> = vec.Vec.new();
+    v.push(7);
+    let s = v.as_slice();
+    mem.drop(v); //~ ERROR E0501
+    return s[0];
+}

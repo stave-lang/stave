@@ -1,0 +1,8 @@
+//~ CHECK-ONLY
+// An item keyword starts an item only at depth 0 after `;`, `}`, or the start of the file.
+const X: i32 = 1 fn g() { } //~ ERROR E0004
+
+fn f() {
+    let x = 1
+    fn h() { } //~ ERROR E0004
+}

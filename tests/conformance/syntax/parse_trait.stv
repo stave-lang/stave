@@ -1,0 +1,10 @@
+//~ CHECK-ONLY
+// TraitDecl and TraitFn, with an `unsafe("..")` signature and generics.
+trait Area {
+    fn area(&self) -> f64;
+    unsafe("the shape is initialized") fn raw_area(&self) -> f64;
+    fn scaled<T: Copy>(&self, k: T) -> f64;
+    fn consume(self);
+}
+
+trait Empty { }

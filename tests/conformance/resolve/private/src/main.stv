@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// E0106: items, types, and methods are private to their module unless `pub`.
+import shapes;
+
+fn show(h: shapes.Hidden) -> i32 { //~ ERROR E0106
+    return 0;
+}
+
+fn main() -> i32 {
+    let a: i32 = shapes.area(2);
+    let b: i32 = shapes.secret(); //~ ERROR E0106
+    let sq: shapes.Square = shapes.Square.new(3);
+    let c: i32 = sq.side();
+    let k: i32 = shapes.Square.hidden_new(); //~ ERROR E0106
+    let u: u32 = shapes.Unit.size(&shapes.Unit.{ });
+    return a + b + c + k;
+}

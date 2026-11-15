@@ -1,0 +1,39 @@
+//~ PARSE-ONLY
+// Every Type form and every GenericArg form.
+struct V<T> { v: T }
+const N: usize = 3;
+
+fn types(
+    a: [i32; 4],
+    s: &[u8],
+    al: &[f32 align 32],
+    r: &i32,
+    m: &mut i32,
+    rp: *const u8,
+    mp: *mut u8,
+    u: (),
+    paren: (i32),
+    one: (i32,),
+    two: (i32, u8),
+    three: (i32, u8, bool,),
+    f: fn(i32, &u8) -> bool,
+    g: fn(),
+    h: fn() -> i32 needs(avx2),
+    q: std.vec.Vec<i32>,
+    gi: V<4>,
+    ge: V<{N + 1}>,
+    gl: V<[0, 1, 2]>,
+    gn: V<[]>,
+    ga: V<[i32; 4]>,
+    gs: V<[u8]>,
+    gal: V<[f32 align 16]>,
+    gr: V<&i32>,
+    rr: &&i32,
+    gf: V<fn(i32)>,
+) { }
+
+struct Me { v: i32 }
+
+impl Me {
+    fn same(&self, o: Self) -> Self { return o; }
+}

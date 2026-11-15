@@ -1,0 +1,28 @@
+//~ PARSE-ONLY
+// Every Pattern form: `_`, literals incl. `-1` and literal ranges, `mut x`, qualified variants
+// (tuple and struct, FieldPat shorthand), tuples.
+enum Shape { Circle(f64), Rect { w: f64, h: f64 }, Dot }
+
+fn pats(s: Shape, n: i32, t: (i32, i32), c: char, b: bool, st: &str, f: f64) -> i32 {
+    match s {
+        Shape.Circle(r) => { }
+        Shape.Rect.{ w, h: hh } => { }
+        Shape.Rect.{ w: _, h, } => { }
+        Shape.Dot => { }
+    }
+    match n {
+        -1 => { }
+        0..=9 => { }
+        -20..-10 => { }
+        mut k => { }
+    }
+    match t { (x, y) => { } }
+    match t { (x, _,) => { } }
+    match c { 'a' => { } _ => { } }
+    match b { true => { } false => { } }
+    match st { "x" => { } _ => { } }
+    match f { 1.5 => { } -2.5..=3.0 => { } _ => { } }
+    let (p, q) = t;
+    let (one,) = (1i32,);
+    return 0;
+}

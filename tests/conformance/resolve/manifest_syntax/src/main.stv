@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// E1002 case `syntax`: one diagnostic at the error; the rest of the manifest is ignored.
+fn main() -> i32 {
+    return 0;
+}

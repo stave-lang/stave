@@ -1,0 +1,37 @@
+//~ CHECK-ONLY
+// A guard runs after the arm's bindings are bound from the scrutinee: the scrutinee stays
+// borrowed for the whole guard, so the guard cannot mutate it. Reading it is fine.
+import std.string;
+
+fn clear(o: &mut Option<string.String>) -> bool {
+    *o = Option.None;
+    return true;
+}
+
+fn peek(o: &Option<string.String>) -> bool {
+    return true;
+}
+
+fn mutate(c: bool) -> usize {
+    let mut o: Option<string.String> = Option.Some(string.String.new());
+    let mut n: usize = 0;
+    match o {
+        Option.Some(x) if clear(&mut o) => { n = x.len(); } //~ ERROR E0501
+        _ => {}
+    }
+    return n;
+}
+
+fn read(c: bool) -> usize {
+    let o: Option<string.String> = Option.Some(string.String.new());
+    let mut n: usize = 0;
+    match o {
+        Option.Some(x) if peek(&o) && x.len() == 0 => { n = x.len(); }
+        _ => {}
+    }
+    return n;
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,63 @@
+//~ STDOUT threads_std_send_sync.stdout
+// Owning std containers cross threads: `vec.Vec<T>` is Send / Sync when T is (explicit impls),
+// `string.String` and `std.soa` types through their Vec fields (a Soa3 is shared by two join
+// closures). A Vec and a String move out of
+// `thread.join`, a `&mut Vec` is captured by a join closure, `&Vec` and `Mutex<Vec<u64>>` are
+// shared by a par_for body. A MutexGuard over a Sync value and a RefCell `Ref` of a Sync value
+// may be shared by par_for_mut workers.
+import std.cell;
+import std.io;
+import std.soa;
+import std.string;
+import std.sync;
+import std.thread;
+import std.vec;
+
+fn fill(n: u64) -> vec.Vec<u64> {
+    let mut v = vec.Vec::<u64>.new();
+    for i in 0..n { v.push(i); }
+    return v;
+}
+
+fn main() -> i32 {
+    let (a, s) = thread.join(fn() -> vec.Vec<u64> { return fill(100); }, fn() -> string.String { return string.String.from_str("from b"); });
+    let mut w = vec.Vec::<u64>.new();
+    let (x, y) = thread.join(fn() -> u64 { w.push(7); return 1; }, fn() -> u64 { return 2; });
+    let m = sync.Mutex::<vec.Vec<u64>>.new(vec.Vec::<u64>.new());
+    thread.par_for(0, 100, fn(i: usize) {
+        let k = *a.get_ref(i);
+        let mut g = m.lock();
+        g.get_mut().push(k);
+    });
+    let got = m.into_inner();
+    let mut total: u64 = 0;
+    for i in 0..got.len() { total = total + *got.get_ref(i); }
+    let n = a.len();
+    let wl = w.len();
+    let xy = x + y;
+    let gl = got.len();
+    io.print(f"{n} {s} {wl} {xy}\n");
+    io.print(f"{total} {gl}\n");
+
+    let lk = sync.Mutex::<u64>.new(5);
+    let mut out = vec.Vec::<u64>.new();
+    for i in 0u64..8 { out.push(0); }
+    {
+        let g = lk.lock();
+        thread.par_for_mut(out.as_mut_slice(), fn(i: usize, o: &mut u64) { *o = *g.get() + (i as u64); });
+    }
+    let c = cell.RefCell::<u64>.new(100);
+    {
+        let r = c.borrow();
+        thread.par_for_mut(out.as_mut_slice(), fn(i: usize, o: &mut u64) { *o = *o + *r.get(); });
+    }
+    let mut sum: u64 = 0;
+    for i in 0..out.len() { sum = sum + *out.get_ref(i); }
+    io.print(f"{sum}\n");
+
+    let mut ps = soa.Soa3::<f32, f32, u32>.new();
+    for i in 0u32..10 { ps.push(1.0, 2.0, i); }
+    let (t1, t2) = thread.join(fn() -> u32 { let (ra, rb, rc) = ps.get_ref(1); return *rc; }, fn() -> usize { return ps.len(); });
+    io.print(f"{t1} {t2}\n");
+    return 0;
+}

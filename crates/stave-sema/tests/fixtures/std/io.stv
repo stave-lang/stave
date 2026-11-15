@@ -1,0 +1,6 @@
+// Test stand-in for std/io.stv.
+pub fn print(s: &str) {
+}
+
+pub fn eprint(s: &str) {
+}

@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// Polymorphic recursion: each level instantiates `grow` with a larger type argument, so the
+// instances never end. The 65th nested instance of `grow` is E0902, at the call requesting it.
+fn grow<T>(x: T) {
+    if false {
+        grow::<[T; 1]>([x]); //~ ERROR E0902
+    }
+}
+
+fn main() {
+    grow::<u8>(1u8);
+}

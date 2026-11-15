@@ -1,0 +1,30 @@
+//~ CHECK-ONLY
+// E0802 (sent): a `spawn` body or a thread.join closure captures `&T` only for
+// T: Sync, and `&mut T` or a copied T only for T: Send. A raw pointer is neither.
+import std.thread;
+
+struct Raw {
+    p: *const u8,
+}
+
+fn read(r: &Raw) -> usize {
+    return r.p as usize;
+}
+
+fn spawn_shared(r: Raw) {
+    scope {
+        spawn { let a = read(&r); } //~ ERROR E0802
+    }
+}
+
+fn spawn_mut(r: Raw) {
+    let mut q = r;
+    scope {
+        spawn { q = Raw.{ p: 0usize as *const u8 }; } //~ ERROR E0802
+    }
+}
+
+fn join_shared(r: Raw) -> usize {
+    let (a, b) = thread.join(fn() -> usize { return read(&r); }, fn() -> usize { return 0; }); //~ ERROR E0802
+    return a + b;
+}

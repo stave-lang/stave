@@ -1,0 +1,80 @@
+//~ CHECK-ONLY
+// `match` must be exhaustive (E0300) and every arm reachable (E0301); constructors are variants
+// in declaration order, `false`/`true`, and int ranges split at the patterns' bounds.
+enum Shape { Circle(f64), Rect { w: f64, h: f64 }, Empty }
+
+fn area(s: Shape) -> f64 {
+    return match s {
+        Shape.Circle(r) => r * r,
+        Shape.Rect.{ w, h } => w * h,
+        Shape.Empty => 0.0,
+    };
+}
+
+fn partial(s: Shape) -> u32 {
+    return match s { //~ ERROR E0300
+        Shape.Circle(_) => 1,
+        Shape.Empty => 2,
+    };
+}
+
+fn unreachable(s: Shape) -> u32 {
+    return match s {
+        Shape.Circle(_) => 1,
+        _ => 2,
+        Shape.Empty => 3, //~ ERROR E0301
+    };
+}
+
+fn bytes(b: u8) -> u32 {
+    return match b {
+        0..=127 => 1,
+        128..=254 => 2,
+        255 => 3,
+    };
+}
+
+fn bytes_gap(b: u8) -> u32 {
+    return match b { //~ ERROR E0300
+        0..=127 => 1,
+        129..=255 => 2,
+    };
+}
+
+fn ints(x: i32) -> u32 {
+    match x { //~ ERROR E0300
+        0 => { return 1; }
+        1 => { return 2; }
+    }
+    return 0;
+}
+
+fn bools(a: bool, b: bool) -> u32 {
+    return match (a, b) {
+        (true, true) => 1,
+        (true, false) => 2,
+        (false, _) => 3,
+        (false, true) => 4, //~ ERROR E0301
+    };
+}
+
+fn guards(x: Option<u32>) -> u32 {
+    return match x { //~ ERROR E0300
+        Option.Some(v) if v > 3 => v,
+        Option.None => 0,
+    };
+}
+
+fn refs(x: &Option<u32>) -> u32 {
+    return match x {
+        Option.Some(v) => *v,
+        Option.None => 0,
+    };
+}
+
+fn main() -> i32 {
+    let s = Shape.Rect.{ w: 1.0, h: 2.0 };
+    let (a, b) = (1u32, 2u32);
+    let Shape.Circle(r) = Shape.Circle(1.0); //~ ERROR E0300
+    return 0;
+}

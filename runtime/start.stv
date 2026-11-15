@@ -1,0 +1,134 @@
+// runtime.start: program entry (contracts/intrinsics.md "Program entry").
+//
+// The compiler emits `_start`, which calls `entry(sp)` with the initial stack pointer (pointing
+// at argc). entry never returns: it ends with exit_group(main's exit code).
+//
+// Steps: read argc, argv, envp, and auxv (AT_PAGESZ, AT_HWCAP, AT_HWCAP2, AT_RANDOM) into the
+// state block (runtime.state, a `static mut`); install the alternate signal stack and the
+// SIGSEGV handler (runtime.panic); map main's stack of `[run] stack` bytes
+// (runtime.config.RUN_STACK) with a PROT_NONE guard region below it (mmap + mprotect); run main
+// on that stack; exit_group.
+//
+// Main runs on the calling thread, switched onto the new stack by the intrinsic
+// `call_on_stack` (contracts/intrinsics.md), with thread id 0; it is not in the thread
+// registry. Other threads are created by runtime.thread with the same stack layout
+// (guard + stack + altstack).
+
+import runtime.os;
+import runtime.state;
+import runtime.panic;
+import runtime.config;
+
+extern "stave-intrinsic" {
+    // contracts/intrinsics.md "Runtime start and traps":
+    // main_addr(): address of the compiler-emitted C-ABI stub `__stave_main(arg: usize) -> usize`,
+    //   which calls the program's `main` and returns its exit status (i32 sign-extended; 0 for a
+    //   unit main).
+    // call_on_stack(f, arg, top): calls the C-ABI function at f with arg on a stack whose top is
+    //   `top` (16-byte aligned), then restores the caller's stack pointer and returns f's result.
+    fn main_addr() -> usize;
+    fn call_on_stack(f: usize, arg: usize, top: usize) -> usize;
+}
+
+pub unsafe("sp is the initial stack pointer the kernel passed to _start; called once, by _start")
+fn entry(sp: *const usize) -> never {
+    let prot = os.PROT_READ | os.PROT_WRITE;
+    let anon = os.MAP_PRIVATE | os.MAP_ANONYMOUS;
+    let st = state.get();
+
+    // 1. argc, argv, envp, auxv
+    let argc = unsafe("sp points at argc (caller)") *sp;
+    let argv = (sp as usize) + 8;
+    let envp = argv + (argc + 1) * 8;
+    let mut p = envp;
+    while unsafe("envp is a NULL-terminated array on the initial stack") *(p as *const usize) != 0 {
+        p = p + 8;
+    }
+    let auxv = p + 8;
+    let mut page: usize = 4096;
+    let mut hwcap: u64 = 0;
+    let mut hwcap2: u64 = 0;
+    let mut random: usize = 0;
+    let mut a = auxv;
+    loop {
+        let key = unsafe("auxv is an AT_NULL-terminated array of (key, value) pairs") *(a as *const usize);
+        let val = unsafe("auxv is an AT_NULL-terminated array of (key, value) pairs") *((a + 8) as *const usize);
+        if key == os.AT_NULL { break; }
+        if key == os.AT_PAGESZ { page = val; }
+        if key == os.AT_HWCAP { hwcap = val as u64; }
+        if key == os.AT_HWCAP2 { hwcap2 = val as u64; }
+        if key == os.AT_RANDOM { random = val; }
+        a = a + 16;
+    }
+    unsafe("st is runtime.state.STATE; no other thread exists yet") {
+        (*st).argc = argc;
+        (*st).argv = argv;
+        (*st).envp = envp;
+        (*st).auxv = auxv;
+        (*st).page_size = page;
+        (*st).hwcap = hwcap;
+        (*st).hwcap2 = hwcap2;
+        (*st).at_random = random;
+        (*st).thread_id = 0;
+    }
+
+    // 2. alternate signal stack and SIGSEGV/SIGBUS handler
+    if !panic.install() { early_fail(); }
+
+    // 3. main's stack: [base, base + guard) PROT_NONE, then `size` usable bytes
+    let size = round_up(config.RUN_STACK, page);
+    let guard = round_up(config.GUARD, page);
+    let flags = anon | os.MAP_NORESERVE | os.MAP_STACK;
+    let m = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, size + guard, prot, flags, -1, 0);
+    if m < 0 { early_fail(); }
+    let base = m as% usize;
+    let g = unsafe("the guard pages are part of the fresh stack mapping and hold no objects") os.mprotect(base, guard, os.PROT_NONE);
+    if g < 0 { early_fail(); }
+    unsafe("st is runtime.state.STATE; no other thread exists yet") {
+        (*st).guard_lo = base;
+        (*st).guard_hi = base + guard;
+        (*st).stack_lo = base + guard;
+        (*st).stack_hi = base + guard + size;
+    }
+
+    // 4. run main, 5. exit with its status
+    let top = base + guard + size;
+    let f = unsafe("intrinsic: address of the compiler-emitted __stave_main stub") main_addr();
+    let code = unsafe("top is the 16-byte aligned top of a fresh stack; f is the __stave_main stub") call_on_stack(f, 0, top);
+    os.exit_group(code as% i32);
+}
+
+pub fn argc() -> usize {
+    let st = state.get();
+    return unsafe("st is runtime.state.STATE, filled by entry before main") (*st).argc;
+}
+
+// Address of the NUL-terminated argument i (0 = program path); 0 if i >= argc.
+pub fn arg(i: usize) -> usize {
+    let st = state.get();
+    let n = unsafe("st is runtime.state.STATE, filled by entry before main") (*st).argc;
+    if i >= n { return 0; }
+    let v = unsafe("st is runtime.state.STATE, filled by entry before main") (*st).argv;
+    return unsafe("argv[i] with i < argc lies in the initial stack, which stays mapped") *((v + i * 8) as *const usize);
+}
+
+// AT_HWCAP and AT_HWCAP2 (AArch64 feature detection, contracts/intrinsics.md).
+pub fn hwcap() -> (u64, u64) {
+    let st = state.get();
+    let a = unsafe("st is runtime.state.STATE, filled by entry before main") (*st).hwcap;
+    let b = unsafe("st is runtime.state.STATE, filled by entry before main") (*st).hwcap2;
+    return (a, b);
+}
+
+fn round_up(x: usize, a: usize) -> usize {
+    return (x + a - 1) / a * a;
+}
+
+// Start-up failure before main (no memory for main's stack or the signal stack): the panic
+// line with an unknown site, exit 101. Writes fixed bytes only (no allocation).
+fn early_fail() -> never {
+    let msg = "panic: OutOfMemory at <unknown>:0:0 in runtime.start.entry (thread 0)\n";
+    let parts = unsafe("a &str is (data pointer, byte length)") *(&msg as *const &str as *const [usize; 2]);
+    let r = unsafe("parts is a string literal in read-only program data") os.write(os.STDERR, parts[0] as *const u8, parts[1]);
+    os.exit_group(panic.EXIT_PANIC);
+}

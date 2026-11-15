@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// `spawn` is allowed only inside a `scope` block (E0801).
+fn work(x: &u32) -> u32 {
+    return *x;
+}
+
+fn f(x: u32) {
+    spawn { let y = work(&x); } //~ ERROR E0801
+    scope {
+        spawn { let z = work(&x); }
+    }
+}

@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// contracts/parse-errors.md rule 4: chained comparisons.
+fn lt_lt(a: i32, b: i32, c: i32) -> bool {
+    return a < b < c; //~ ERROR E0012
+}
+
+fn eq_ne(a: bool, b: bool, c: bool) -> bool {
+    return a == b != c; //~ ERROR E0012
+}

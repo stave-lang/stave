@@ -1,0 +1,25 @@
+//~ CHECK-ONLY
+// ir golden: blocks unreachable from b0 (code after `return`, after a `-> never` call,
+// after `break`) are deleted and the rest renumbered densely.
+fn halt() -> never {
+    loop { }
+}
+
+fn pick(x: u32) -> u32 {
+    if x > 5 {
+        return 5;
+        let y: u32 = x + 1;
+    }
+    loop {
+        break;
+        let z: u32 = 2;
+    }
+    if x == 0 {
+        halt();
+    }
+    return x;
+}
+
+fn main() -> i32 {
+    return if pick(3) == 3 then 0 else 1;
+}

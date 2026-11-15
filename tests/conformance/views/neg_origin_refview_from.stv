@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// Origin table (LANG.md §3), row "`&V` / `&mut V`, V a view", column `from x`: the result reborrows the
+// view object itself, so the view object stays borrowed while the result lives.
+view struct Lexer { src: &str, pos: usize }
+
+fn lexer(src: &str) -> Lexer from src {
+    return Lexer.{ src: src, pos: 0 };
+}
+
+fn text_of(l: &Lexer) -> &str from l {
+    return l.src;
+}
+
+fn conflict(s: &str) -> usize {
+    let mut l = lexer(s);
+    let t = text_of(&l);
+    l.pos = 1; //~ ERROR E0501
+    return t.len();
+}
+
+// fine: the result is dead before the write
+fn ok(s: &str) -> usize {
+    let mut l = lexer(s);
+    let t = text_of(&l);
+    let n = t.len();
+    l.pos = 1;
+    return n + l.pos;
+}

@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// f-string holes: a name, `self`, or a field path. Each f-string is one FmtLit token.
+import std.io;
+
+struct P { pub x: i32 }
+
+impl P {
+    pub fn show(&self) {
+        io.print(f"x = {self.x}\n");
+    }
+}
+
+fn show(n: i32, p: P) {
+    io.print(f"n = {n}, p.x = {p.x}, \"quoted\"\n");
+}

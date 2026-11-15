@@ -1,0 +1,382 @@
+# Stave language reference for agents (v0.6; grammar: contracts/grammar.ebnf)
+
+Stave = Rust-family syntax + borrow checker, **no lifetimes, no macros, no implicit anything**, SIMD in type system.
+Read whole file before writing Stave. Assume Rust **only** where this file is silent. Compiler is truth; error codes are in contracts/diagnostic-codes.md (`stave explain` is planned). Stage0 builds scalar code only: SIMD is only partly type-checked, and vector code generation, the optimizer, and the GPU are not built. Items marked *planned*, §4, and §7 describe design.
+
+## 1. Differences from Rust (most common agent mistakes first)
+
+| Rust | Stave | Note | Why |
+|---|---|---|---|
+| `x` tail expr returns | `return x;` | Blocks are statements, never values. Non-unit fns: missing return on a path = E0207. Unit fns may fall off the end | blocks are not values; one way to return |
+| `let v = if c { a } else { b };` | `let v = if c then a else b;` | Value-if: `then`/`else`, no braces. Chains: `if a then 1 else if b then 2 else 3` | blocks are not values |
+| `match` as value | `match x { P => e, P2 => e2 }` | Value arms: expressions, comma-separated | blocks are not values |
+| `match` as statement | `match x { P => { ... } P2 => { ... } }` | Statement arms: blocks, **no commas** | one spelling per construct |
+| `Some(x)`, `None`, `Ok(v)` | `Option.Some(x)`, `Option.None`, `Result.Ok(v)`, `Result.Err(e)` | Variants **always qualified** (E0103), in patterns too | a bare pattern name is always a binding |
+| `a::b::C`, `use a::b;` | `a.b.C`, `import a.b;` / `import a.b as c;` | `.` is the only path separator. `import a.b;` binds `b`; `as c` binds `c`. `::` only before generic args: `f::<T>()`, `v.m::<4>()`. First segment: own package name, else a dependency, else a module of this package; dependency and module both named `x` = E0107 (write `import mypkg.x;`) | one separator; parse with no symbol table (grammar rule D4) |
+| `pub use`, `geo::shapes` via `use geo` | none | No re-exports: `import geo;` gives `geo`'s items only, not `geo.shapes`: `import geo.shapes;` | one path per item |
+| prelude `Vec`, `String`, `drop` | `import std.vec;` → `vec.Vec::<u8>.new()`; `import std.string;` → `string.String` | Prelude = `pub` items of `std.core` (`Option Result Copy Send Sync Drop Display Write`, operator traits) + built-in type names | small, explicit prelude |
+| `mod`, `use {..}`, `crate::` | none | Module = file. `src/a/b.stv` is `a.b`; `src/a.stv` and `src/a/` may coexist. Imports acyclic (E0102) | file tree is the module tree |
+| `use Trait;` to call its methods | no import needed | `x.m()` looks in inherent impls, then every trait impl of x's type. Two traits with `m` = E0908: call `Trait.m(x)` | method lookup needs no import state |
+| `let k = 7;` | `let k: i32 = 7;` or `7i32` | Literals have **no default type** (E0202). Type comes from annotation, param, field, variant payload, tuple element, other operand, or return type; an index is `usize`; a generic arg position takes the type inferred from the non-literal args, else needs a suffix | no inference across uses |
+| `S { a: 1, b: 2 }` | `S.{ a: 1, b: 2 }` | Struct literals **and** struct patterns use `.{` (one token, no space): `Shape.Rect.{ w, h }`. `S { … }` = E0014. Generic: `Cell::<u32>.{ v: 1u32 }`, or args inferred from the expected type or fields. `Self.{ .. }` inside impls | `{` after a name always opens a block: LL(1), parallel parse |
+| `S { a, b }` (shorthand) | `S.{ a: a, b: b }` | No field-init shorthand in literals. Pattern shorthand `S.{ a, b: p }` is allowed. Declarations keep plain `{`: `struct S { a: i32 }` | one spelling per construct |
+| `x as usize < y` | `(x as usize) < y` | E0011. Also `a < b < c` is E0012 | `<` after a cast type is always generic args (grammar rule D2) |
+| `x as u8` (truncates) | `as` lossless only | Lossy `as` = E0204. Other cast forms: see list below table | every lossy conversion is named |
+| `i32 + i64` | `a as i64 + b` | No implicit numeric conversion (E0201) | conversions are always visible |
+| `+` wraps in release | `+ - *` **trap** on overflow, every build | Wrapping/saturating forms: see list below table. `/` by 0, `MIN / -1`, `MIN % -1` trap. `255u8 + 1` compiles and traps at run time (no folding outside `const`) | debug = release; no silent wrap |
+| `x << 40` on u32 | traps (const amount: E0205) | Amount has the left operand's type (`x << 3`: `3` is u32). `<<%` masks amount by bits-1. `>>` arithmetic if signed, logical if unsigned | CPUs disagree on big shifts; trap is portable |
+| `!x` on int | `~x` | `~` = bitwise NOT. `!` = bool NOT | `!` is bool-only: no truthiness |
+| `'a` lifetimes | none | References are second-class (see §3) | borrow check per function, no lifetime solver |
+| `static X: T`, `static mut X: T` | `const X: T = e;`, `static mut X: T = e;` | Every use of a `static mut` (read, write, `&X`) is unsafe (E0803); `e` is a const-expr; no ref/view types (E0413) except `&str` literals. Planned v0.7: safe `static X: T = e;` with T `Sync` (`atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>`; else E0417); `static mut` only in std/runtime (E0809) | shared globals must be Sync; unsafe ones are inventoried |
+| `-> !`, `loop {}` as a value | `-> never` | `never` is a built-in type name, only after `->` (E0209). A call to a `-> never` fn ends the path (no `return` needed after it, E0207); a `-> never` fn must end every path in such a call or a `loop` without `break` | `!` stays bool-only |
+| `impl Drop`, `drop(x)`, `x.drop()` | `impl Drop for S { fn drop(&mut self) { .. } }`; `mem.drop(x)` (`import std.mem;`) | Runs at scope end (reverse declaration order) and when an initialized place is overwritten (`x = v`, `*p = v`). `x.drop()` = E0909. `impl Drop` on a Copy type = E0416 | destruction is never written by hand |
+| `ptr::read(p)`, `ptr::write(p, v)` | `p.read()`, `p.write(v)` (unsafe) | `*p = v` drops the old pointee; `p.write(v)` does not (uninitialized slot); `p.read()` moves out, the slot is then logically uninitialized. `*p` by value only for Copy | the drop is visible at the call |
+| `std::mem::size_of::<T>()` | `size_of::<T>()`, `align_of::<T>()` | Built-in, no import; const-evaluable (`const N: usize = size_of::<u64>();`) | layout queries without a module |
+| `-> &T` | `-> &T from x` | Returning a borrow of a param **must** name it (E0510); no `from` = result borrows nothing (literals, fn items) | names the origin without lifetime params |
+| `unsafe { }` | `unsafe("why this is sound") { }` | Obligation string mandatory (E0013). Also `unsafe("..") expr`, `unsafe("..") fn`, `unsafe("..") trait`, `unsafe("..") impl` | every obligation is written and inventoried |
+| `where T: X` | `<T: X + Y>` | Bounds inline only | one spelling per construct |
+| closure syntax | `fn(x: i32) -> i32 { return x + 1; }` | Closures: explicit param types, captures by ref only (`&mut` if the body mutates it), no copy/move captures. Type is the fn type `fn(i32) -> i32`, a view (§3) | no inference; non-escaping needs no heap |
+| `println!`, `vec!`, `format!`, `assert!`, `#[derive]` | none | No macros, no attributes. Output: `io.print(f"n = {n}\n")` | no hidden code; linear compile time |
+| `#[derive(Clone, Copy)]` | `impl Copy for S {}` | Empty impl; every field must be Copy (E0415). Built-in Copy: ints, floats, `bool`, `char`, `&T`, raw pointers, arrays/tuples of Copy. `&mut T` never | no attributes; one spelling |
+| `format!("{}", a + b)` | `f"{name}"`, `f"{p.x}"` | f-strings take **names or field paths only** (E0006); value must impl `Display` (ints, floats; `bool` → `true`/`false`, `char` → the character). An f-string is an owned `String`; passed where `&str` is expected it is borrowed automatically (`&String` → `&str`): `io.print(f"n = {n}\n")`. Keep it: `let s = f"..";`, pass `&s` | lexer stays regular (parallel lexing) |
+| `/* */` | `//` only | No block comments | no nesting state: regular, parallel lexer |
+| `0..`, `..n`, `..` | `a..b`, `a..=b` | Both ends required, same type | only two range types, no open ranges |
+| `'label: loop`, `break v` | `loop { }`, `break;`, `continue;` | No labels, no break-with-value | blocks are statements; simpler CFG |
+| default trait methods | none | Trait bodies hold signatures only: `fn f(&self) -> T;` | signatures only: per-function checking |
+| overloading, truthiness, null | none | `if n != 0`, not `if n` | one meaning per name; explicit tests |
+| `mut self` param | `self`, `&self`, `&mut self` only | Rebind: `let mut s = self;` | params are immutable bindings |
+| `x @ P`, `..` rest | not in grammar | Write the full pattern; bind the value by name to reuse it | not admitted yet (simplicity) |
+| `v.pop();` (value ignored) | `let _ = v.pop();` | Planned: a non-`()` expression statement is E0210 | an ignored `Result` is always visible |
+
+Casts and overflow operators (kept out of the table because they contain `|`):
+- `as` lossless only. `as%` wraps or truncates. `as|` saturates (float NaN → 0). `as?` returns `Option`. `as~` converts to a float type, rounding to nearest even (int→float, f64→f32, f32→f16 lanes).
+- `+% -% *% <<%` wrap. `+| -| *|` saturate. Compound forms: `+%= -%= *%= <<%= +|= -|= *|=`.
+
+**Not in Stave** (rejected; write the right column instead):
+
+| Rust form | Stave |
+|---|---|
+| `if let`, `while let`, `let … else` | `match` (statement or value form) |
+| `let x;` (no initializer) | `let x: T = e;` (initializer required) |
+| `ref x`, `&x` patterns, slice patterns `[a, b]` | bind by value, then borrow; index the slice |
+| tuple structs `S(i32)`, unit structs `S;` | `struct S { v: i32 }`, `struct S {}` |
+| `mut x: T` params | `x: T` then `let mut y = x;` |
+| supertraits `trait A: B`, associated types/consts | separate bounds `<T: A + B>`; generic params; top-level `const` |
+| nested `fn` items, immutable `static` | top-level `fn`; top-level `const` |
+| `!` (never type), `impl Trait for !` | `-> never` (return position only) |
+| `dyn Trait`, `impl Trait` | generics `<T: Trait>`, or fn types |
+| `pub(crate)`, struct update `..base`, `A = 1` discriminants | `pub`; write every field; undecided (§8) |
+| `b'a'`, `b".."`, `r".."` | the byte value (`97u8`); `"…"` with `\` escapes |
+| `i128`, `u128` (no such types) | multi-word math on `a.mul_wide(b) -> (hi, lo)` (u32/u64) |
+
+Notes:
+- `unsafe("..") expr` is for value positions only. At statement start `unsafe` always opens a block: write `unsafe("..") { *p = 1; }`, not `unsafe("..") *p = 1;`.
+- An `unsafe("..") fn` states the **caller's** obligation (calls need `unsafe`). Its body is not unsafe: unsafe operations inside still need their own `unsafe("..")` (E0803). Methods may be unsafe too: `pub unsafe("..") fn` inside `impl`.
+- Planned: `c.select(a, b)` on a `bool` (`(x < y).select(x, y)`), like mask `m.select(a, b)`: both operands are evaluated (`xs[i]` still bounds-checks), always branchless (constant time). Plain `if`/`match` stay fine.
+- Or-patterns (planned v0.7), in `match` arms only: `Tok.Plus | Tok.Minus => 1u8,`. Every alternative binds the same names and types (E0302).
+- f-string holes: a name, `self`, or a field path (`{n}`, `{self.n}`, `{p.x}`). No tuple steps (`{t.0}`) or expressions: bind to a local first (`let a = t.0;` then `{a}`).
+
+Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl Trait for T`, `trait`, `pub` (items, fields, methods private to their module otherwise, E0106; trait impl methods take no `pub`, E0907), method auto-ref (`x.m()` with `&self`/`&mut self`), auto-deref on `.` through any number of `&`/`&mut`, implicit reborrow of `&mut` args, `&T`/`&mut T` (shared xor exclusive), moves, `?`, `[T; N]`, `[T]`, tuples (`t.0`), `[e; n]`, `while`, `for x in a..b`, `match` exhaustive (E0300), guards `P if c =>`, `*const T`/`*mut T` (deref unsafe; `&x as *const T` and `&mut x as *mut T` are safe casts), `type A = B;`, `const X: T = e;`, `Self`.
+
+## 2. Lexical, keywords, items
+
+- Strings and chars must end on their line: no raw newline inside `"…"`, `f"…"`, `'…'` (E0015). Use `\n`.
+- Identifiers are ASCII: `[A-Za-z_][A-Za-z0-9_]*`. Non-ASCII only inside literals and comments; `@ $ \ #`, backtick, control bytes elsewhere = E0018.
+- Float text (`Display`, f-strings): shortest round-trip digits, `6.0`, `0.1`, `1e-6`, `1.5e-7`, `1e21`, `inf`, `-inf`, `NaN`, `-0.0`. Decimal form for exponents −5..16.
+- Ints: `1_000`, `0xff`, `0b1010`, `0o17`, suffix `5u8`. Floats need a digit after `.` (`1.0`, not `1.`), suffix `1.0f32`. `-128i8` legal (minus folded in), `128i8` = E0203.
+- Statements end with `;`. `if`/`while`/`for`/`loop`/`match` statements take no `;` after the block.
+- Syntax errors: a file with unbalanced brackets gets one E0016 and nothing else. Otherwise each item shows only its **first** syntax error and is dropped: fix it and rebuild to see the next.
+- Reserved (never use as names): `fn let mut const static struct enum trait impl for in while loop if then else match return break continue pub import as from needs dispatch unsafe extern self Self true false tail masked scalar exact align copy type view scope spawn strict emulate test allocator kernel`; from v0.7 also `requires ensures` (`result` is not reserved: only inside `ensures(..)` it names the returned value; a param named `result` there is E0212).
+- Integer types: `i8..i64 u8..u64 isize usize`. Also `f32 f64 bool char str`, and `never` (return type only). Built-in names, not keywords: a local of the same name shadows them. `usize`/`isize` are 64-bit on every target: `u32 as usize`, `u64 as usize`, `usize as u64` are lossless `as`; `usize as u32` needs `as%`/`as|`/`as?`.
+- `test fn name() { }` runs under `stave test` and is excluded from builds.
+- Fn types: `fn(i32, &T) -> &T needs(avx2)`. Closures and fn items both coerce to fn types. No `from` in fn types: a call through a fn value borrows from **all** its ref/view args and from the fn value itself (a closure may return a borrow of a capture). `needs` after a fn type belongs to that fn type: `fn f() -> fn() needs(x)` = returned fn needs x; for f write `-> (fn()) needs(x)`. A `fn(..) needs(F)` value is usable as `fn(..) needs(G)` only if F ⊆ G (E0707).
+- C FFI: `extern "C" { fn puts(s: *const u8) -> i32; fn printf(f: *const u8, ...) -> i32; }` (calls are unsafe). Export: `extern "C" fn add(a: i32, b: i32) -> i32 { return a + b; }`. No vectors or views in C signatures (E0804). No libc is linked by default (std makes raw Linux syscalls), so imports cannot be linked yet: how is undecided (§8).
+- Planned: `allocator my.alloc;` replaces the global allocator. Today it only parses and is checked (at most one per binary, E0104); std keeps the runtime allocator. Allocation failure aborts.
+- Contracts (planned), after `-> R needs(..)`: `fn at(xs: &[u32], i: usize) -> u32 requires(i < xs.len()) ensures(result <= 1000) { .. }`. Checked in every build; a false clause panics `Contract` (`requires`: at the call). Operands: params, fields, `.len()`, literals, arithmetic, compares, calls with `&`/Copy args; no `&mut`, `unsafe`, statics (E0211). `result` only in `ensures` (E0212). Not on trait methods.
+- const-expr (`const`, `static mut` initializers, array lengths): literals, consts, arithmetic, compare, `as`-family, `size_of::<T>()`, `align_of::<T>()`, `if then else`, and array/tuple/struct/variant literals of const-exprs. No other calls, no loops (E0904).
+- Generics are monomorphized and checked at the definition (E0901). An instantiation chain may hold at most 64 instances of one generic (E0902: `f::<[T; 1]>(..)` inside `f<T>` grows forever). Const generics: `<const N: usize>`. Generic args: types, int literals, `{const-expr}`, `[i0, i1, ..]`. Operator traits: one per mode, `Add` (`+`), `WrapAdd` (`+%`), `SatAdd` (`+|`), same for Sub/Mul/shifts, plus `Div Rem BitAnd BitOr BitXor`; all `fn add(self, rhs: Self) -> Self` (one type in and out), unary `Neg` (`-`), `Not` (`~`): `fn neg(self) -> Self`.
+
+## 3. Ownership, references, views
+
+- Single owner. Assignment and pass-by-value move unless the type is Copy (E0502 use after move). Moving a non-Copy value out of `*r`, `r.f` through a ref, `v[i]`, or a closure capture = E0504: borrow it, or `mem.replace(&mut x, v)` / `mem.swap(&mut a, &mut b)`. Drop (`std.core.Drop`) runs at scope end and on overwrite of an initialized place; never call it (E0909). `match` on an owned value moves only the parts bound by value; a match with no by-value binding of a non-Copy part moves nothing. A guard (`P if c =>`) runs after P's names are bound: in `c` they are read-only (moving one = E0504, writing or `&mut` = E0503) and the scrutinee is borrowed (`&mut` or writing it = E0501). Assigning into a part of a moved value (`s.f = v` after `let t = s;`) = E0502; assigning the whole value re-initializes it.
+- `&T` xor `&mut T` (E0501). Checked per function, from signatures only.
+- References may appear **only** in locals, params, returns, and fields of `view` types. Exception: string literals are static `&str` (program data, never a loan): `const GREETING: &str = "hi";` is allowed, and a literal satisfies any `from` clause.
+- `view struct` / `view enum` may hold references. It is non-escapable: never a field of a non-view type (E0410), never in Box/Vec/Map (E0411), never passed to `forget` (E0412), never `const` or `static mut` (E0413). A tuple or Option that contains a ref or view is a view too, and so is **every fn value** (closure or fn item used as `fn(..)`): only a local, a param, or a view field. Writing a value through `&mut V` (V a view) needs the value's origins ⊆ the target's (E0513); so does assigning a captured ref or view inside a closure (`r = &z;` with `z` the closure's local = E0513).
+- Return a ref or view with `from`:
+
+| param `x` | `-> R from x` | `-> R from copy x` |
+|---|---|---|
+| `&T` / `&mut T` (T not view) | borrows `*x`; caller's loan lives while result lives | E0521 |
+| view `V` by value | inherits x's origins | E0521 |
+| `&V` / `&mut V` (V view) | reborrows the view object | inherits V's origins and may outlive the borrow (iterator `next`) |
+| owned non-view by value | E0520 | E0521 |
+
+  Multiple origins: `from a, b` (v0.7: `from a + b`). Returning an uncovered origin = E0510. Borrowing a local = E0512.
+- Planned: `vec.Vec`, `Box`, `Option`, `Result` may hold views, and then are views themselves (`vec.Vec<&u32>` in a local is fine; `Rc` never: E0414). A `&mut` view param names what the callee may store into it: `fn push(&mut self from x, x: T)` (E0513 if missing; only on `&mut` view params, E0514). Pushing a borrow into a local container keeps that borrow alive as long as the container; dropping the container is a use, so declare the data first.
+- Generic params reject views unless bound `T: view` (E0414).
+- Threads borrow stack data only through structured forms: `scope { spawn { .. } spawn { .. } }` (spawns join at `}` and wherever the scope is left: `return`, `break`, `continue`, `?`; a spawn in a loop runs alongside the earlier iterations' threads; `spawn` outside `scope` = E0801, in a closure inside `scope` = E0808) and `import std.thread;`:
+  - `thread.join<A: Send, B: Send>(a: fn() -> A, b: fn() -> B) -> (A, B)`: runs both concurrently.
+  - `thread.par_for(lo: usize, hi: usize, body: fn(usize))`: `body(i)` for `i` in `lo..hi`, concurrently, any order.
+  - `thread.par_for_mut<T: Send>(xs: &mut [T], body: fn(usize, &mut T))`: `body(i, &mut xs[i])`, concurrently.
+  - `spawn` and `join` args: captured `&T` needs `T: Sync`, captured `&mut T` or copied `T` needs `Send` (E0802). A `par_for`/`par_for_mut` body runs on many threads at once: captures need `Sync`, no `&mut` captures (E0802). The argument itself must be a closure literal or fn item: not a fn-typed param, a local, or an `if`/`match` choosing one (E0806). `thread.join`, `par_for`, `par_for_mut` are never fn values (E0807).
+  - Send/Sync are structural (an ADT is Send/Sync if its fields are) unless the ADT has an `unsafe("..") impl` of that trait: then only its impls count, e.g. `unsafe("..") impl<T: Sync> Sync for G<T> {}` makes `G<Cell<u32>>` not Sync. An impl of `Send`, `Sync`, or any `unsafe("..") trait` must be an `unsafe("..") impl` (E0810).
+- Planned (not in std yet): std slice combinators are SIMD inside (`xs.sum()`, `min max count any all find`, `find_byte`, `eq fill copy_from`, `map_into(dst, f)` with `f: fn(f32xn) -> f32xn`, `sort`, `par_sum par_map_into par_sort`). Float `sum` uses the fixed lane-tree order, not left-to-right. Why: regular code, explicit SIMD stays in std, no auto-vectorization cliffs.
+- Planned (no optimizer yet): release builds treat `&mut T` as noalias and `&T` as read-only unless T contains `std.cell.UnsafeCell` (the only way to mutate through `&`; Cell/RefCell/Mutex wrap it). In `unsafe`, never make a `&mut` overlap another live ref, never write behind a live `&` except through UnsafeCell: UB. Why: borrow rules become free optimizer facts.
+- Release builds drop a bounds check only with a proof: `for i in 0..xs.len()`, chunk loops; planned: slices compared equal earlier (`debug.assert(a.len() == b.len(), "..")`) and constant offsets (`xs[i - 1]` in `for i in 1..xs.len()`). Planned: `stave bounds-report` lists the checks kept.
+- Slice index out of range traps at runtime. Never UB. A trap (panic) prints `panic: <Kind> at <file>:<line>:<col> in <fn> (thread <n>)` and exits with code 101 on every target. Kinds: `Bounds Overflow DivByZero Assert OutOfMemory StackOverflow Unwrap` (planned: `Contract`). Planned: a `panic: Unwrap` of an `Err` that came through `?` also prints one `  via <file>:<line>:<col> in <fn>` line per `?` it passed.
+- Assertions: `std.debug.assert(cond: bool, msg: &str)` panics with `Assert` when `cond` is false (exit 101, `msg` on the next stderr line). No `assert!` macro.
+
+## 4. SIMD
+
+**Status.** Stage0 checks and builds scalar code only; vector code generation is not implemented, so SIMD examples are check-only. Planned (not enforced yet): E0605 E0606 E0700 E0701 E0702 E0703 E0705 E0706 E0709 E0710-E0717, `emulate`/`strict`, `stave lowering`. E0601-E0604, E0607, E0704, E0707 are checked in part.
+
+**Types.** `TxN`: T ∈ `i8..i64 u8..u64 f32 f64 f16 bf16`, N a power of two from 2 to 64. Total width ≤ target register: 128 bits everywhere (portable), 256 needs `avx2`, 512 needs `avx512f`. Too wide = E0702. Masks `maskWxN` are typed by lane **width** and count: `i32x8`, `u32x8` and `f32x8` compares all give `mask32x8`. Generic spelling `vec<T, N>` / `mask<W, N>` only when an argument is generic.
+
+**Strictness.**
+- Only identical vector types combine (E0603). Scalar with vector = E0602: write `f32x4.splat(1.0)`.
+- Int vectors: plain `+ - *` = E0604. Use `+%`, `+|`, or `a.checked_add(b) -> Option`.
+- Floats: plain `+ - * /`. `+%` on float = E0206.
+- Wrong mask width or count = E0605: use `m.rewiden::<64>()`.
+- Int vector division: `a.div_const::<K>()` or `a.div_lanes(b)` (E0607).
+
+**Ops** (method form unless shown):
+- arithmetic: `sqrt abs copysign(s) floor ceil round trunc fma(b, c) min max min_num max_num min_x86 abs_wrap`
+  - `min`/`max` propagate NaN. `min_num`/`max_num` treat NaN as missing. `min_x86` uses x86 semantics.
+- bitwise: `& | ^ ~ andnot(b)`, shifts `<< >> <<%`
+- lane counting: `popcount clz`
+- compare `a < b` → mask. Masks: `& | ^ ~`, `m.select(a, b)` (a where set), `m.to_bits()` → smallest uint, `m.to_vec::<i32>()`, `maskWxN.first_n(k)`, `.all()`, `.none()`
+- reductions (fixed tree): `reduce_add reduce_min reduce_max reduce_and reduce_or`, `reduce_add_ordered(init)` (sequential, init + v[0] + ..)
+- `scan_add`
+- shape: `TxN.splat(x)`, `v.bitcast::<UxM>()`, `v.split()`, `TxN.join(a, b)`, `widen_lo widen_hi`, `narrow_wrap(w) narrow_sat(w)`, `permute::<[i0, ..]>()`, `tbl.lookup(idx)` (out of range → 0), `compress(m) expand(m)`
+- convert: `v as f64x4` (exact), `v as~ f32x4` (rounding), `v as| i32x4`, `v as? i32x4`
+- memory: `TxN.load(s, i)`, `v.store(s, i)` (trap if `i+N > len`), `TxN.load_masked(s, i, m)`, `v.store_masked(s, i, m)`, `TxN.gather(s, idx)`, `v.scatter(s, idx)` (bounds-checked; duplicate index → highest lane wins)
+- aligned: `TxN.load_aligned(s, i)` needs `s: &[T align A]` with A ≥ vector bytes (E0606). Get one with `s.align_to::<32>() -> Option<&[T align 32]>`.
+- memory hints (no effect on results; Why: bandwidth-bound loops need them and auto-hinting is guesswork): `s.prefetch_read_l1(i)`, generally `prefetch_{read,write}_{l1,l2,l3,nta}`, on a slice (any `i`, even ≥ len: never faults, no check) or raw pointer `p.prefetch_read_l1()`, both safe. Streaming store bypassing caches: `v.store_stream(s, i)` (`s: &mut [T align A]`, A ≥ vector bytes; traps unless `i % N == 0` and `i+N ≤ len`), scalar `x.store_stream(s, i)`, unsafe `p.write_stream(v)`. The compiler adds the needed fence (x86 `sfence`) before returns and calls: never write one in safe code.
+
+**Chunk loops.** A tail clause is required (E0601), except over an array whose length is a multiple of N. Syntax summary (`..` = elided; complete examples in §5):
+```text
+for v: f32x8 in xs { .. } tail masked (v, m) { .. }   // inactive lanes read 0; &mut binding writes active lanes only
+for v: u8x16 in xs { .. } tail scalar (x) { .. }      // remaining elements one by one
+for v: f32x4 in xs { .. } tail exact;                 // traps if len % N != 0
+for v: &mut f32x4 in xs { *v = *v * k; } tail ..      // in-place
+```
+
+**Hot loops over one field**: store records as columns, `import std.soa;` → `soa.Soa3::<f32, f32, u32>.new()`, `push(a, b, c)`, `len()`, `get(i)`, `set(i, ..)`, `col0()`/`col0_mut()` (`&[A]`/`&mut [A]`), `cols_mut()` (all columns at once, to read one and write another). Loop: `for v: f32x8 in ps.col0() { .. } tail ..`. Types `Soa2`..`Soa4` (no variadic generics); name fields with a wrapper struct whose methods return `self.s.col0()`. Why: SIMD over a field of `Vec<Struct>` needs gathers; a column is one contiguous slice.
+
+**Features.** Signature form: `fn f(..) -> R needs(avx2, fma) { }`. Features are part of the fn type. A callee's needs must be ⊆ the caller's (E0704). A vector in a signature needs features that cover its width (E0703). `main`, trait methods, and extern exports cannot have `needs` (E0709).
+- x86-64: `sse42 ⊂ avx ⊂ avx2`, `fma bmi2 f16c` (v3 = avx2+fma+bmi2+f16c), `avx512f ⊂ avx512bw/vl/dq/cd` (v4), extras `avx512vbmi avx512vbmi2 avx512vpopcntdq avx512bitalg avx512fp16 avx512bf16`.
+- AArch64: `neon` (baseline), `fp16 dotprod bf16`, `sve ⊂ sve2`.
+- Fns needing another arch's features are skipped on that arch. 128-bit code with no `needs` is portable.
+
+**Dispatch** (runtime CPU pick, arms tried top-down, `_` required last; full example in §5):
+```text
+dispatch fn sum(xs: &[f32]) -> f32 { avx512f => sum_v4, avx2 => sum_v3, sve => sum_sve, _ => sum_base, }
+```
+- An arm may name several features: `avx2 + fma => sum_fma,`. The dispatch fn may have its own `needs(..)`.
+- Each arm target has the dispatch's signature, with needs = dispatch needs + the arm's features (else E0705). The `_` target needs ⊆ dispatch needs (E0706).
+- Arms of another arch are dropped. A `cuda` arm picks a GPU path when a usable NVIDIA device exists (planned, §7).
+
+**Lowering gates.** Some ops are unavailable on some targets: `fma` on v2, gather on v2/neon, scatter below v4, `div_lanes` outside sve, `load_first_fault` outside sve, f16↔f32 without `f16c`. Using one is E0700, unless it is inside `emulate { }` (scalar loop, the only opt-in). `strict { }` rejects multi-instruction ops too (E0701). Planned: `stave lowering --target T --op OP` prints the per-target table.
+
+**Sizeless (SVE).** `f32xn`, `mask32xn`: lane count fixed per run, legal only under `needs(sve)` (E0710). Allowed only in locals, params, and returns: not fields, array elements, globals, closure captures, or sized generic args (E0711–E0716). Loops need no tail clause. Float `reduce_add` on them = E0717: use `acc = v.reduce_add_ordered(acc);`.
+
+**Float semantics.** IEEE, round-nearest-even, no FTZ, no auto-FMA. NaN results are quiet NaN with unspecified sign and payload. Lane op = scalar op per lane.
+
+## 5. Examples
+
+Every code block tagged `stave` is a complete source file: no placeholders, it passes `stave check` (CI checks every block); blocks with `main` also run. SIMD blocks are check-only.
+
+```stave
+import std.io;
+
+enum Shape { Circle(f64), Rect { w: f64, h: f64 } }
+
+trait Area { fn area(self) -> f64; }
+
+impl Area for Shape {
+    fn area(self) -> f64 {                  // by value: consumes the shape
+        return match self {
+            Shape.Circle(r) => 3.14159 * r * r,
+            Shape.Rect.{ w, h } => w * h,
+        };
+    }
+}
+
+struct Counter { pub n: u32 }
+
+impl Counter {
+    pub fn bump(&mut self) { self.n = self.n +| 1; }
+}
+
+enum ParseErr { Empty, Bad(u8) }
+
+fn digit(c: u8) -> Result<u32, ParseErr> {
+    if c < 48 || c > 57 { return Result.Err(ParseErr.Bad(c)); }
+    return Result.Ok((c - 48) as u32);
+}
+
+fn parse(s: &[u8]) -> Result<u32, ParseErr> {
+    if s.len() == 0 { return Result.Err(ParseErr.Empty); }
+    let mut acc: u32 = 0;
+    for i in 0..s.len() {
+        acc = acc * 10 + digit(s[i])?;      // traps on overflow; use *% / +% to wrap
+    }
+    return Result.Ok(acc);
+}
+
+fn report(s: &[u8]) -> i32 {
+    match parse(s) {
+        Result.Ok(v) => { io.print(f"v = {v}\n"); }
+        Result.Err(_) => { return 1; }
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    let s = Shape.Rect.{ w: 2.0, h: 3.0 };
+    let a = s.area();
+    io.print(f"area = {a}\n");
+    let mut c = Counter.{ n: 0 };
+    c.bump();
+    let big: i64 = 300;
+    let b: u8 = big as| u8;                 // 255
+    let t: Option<u8> = big as? u8;         // Option.None
+    return 0;
+}
+```
+
+```stave
+// views: borrowed data without lifetimes
+view struct Lexer { src: &str, pos: usize }
+
+fn lexer(src: &str) -> Lexer from src { return Lexer.{ src: src, pos: 0 }; }
+
+fn first<T>(xs: &[T]) -> Option<&T> from xs {
+    return if xs.len() == 0 then Option.None else Option.Some(&xs[0]);
+}
+
+unsafe("p is valid for reads") fn read_raw(p: *const u8) -> u8 {
+    return unsafe("the caller guarantees p is valid") *p;
+}
+```
+
+```stave
+// mutable globals, never, Drop
+import std.io;
+import std.mem;
+
+static mut CALLS: u64 = 0;
+
+fn count() -> u64 {
+    unsafe("single-threaded program: nothing else touches CALLS") { CALLS = CALLS + 1; }
+    return unsafe("single-threaded program") CALLS;
+}
+
+fn halt() -> never {
+    loop { }
+}
+
+fn checked(x: u32) -> u32 {
+    if x <= 100 { return x; }
+    halt();                             // ends the path: no `return` needed after it
+}
+
+struct Guard { pub id: u32 }
+
+impl Drop for Guard {
+    fn drop(&mut self) { io.print(f"drop {self.id}\n"); }
+}
+
+fn guards() {
+    let a = Guard.{ id: 1 };
+    let b = Guard.{ id: 2 };
+    mem.drop(a);                        // "drop 1" now
+}                                       // "drop 2" at scope end
+```
+
+```stave
+// portable 128-bit kernels: no needs, run on every target
+fn sum_base(xs: &[f32]) -> f32 {
+    let mut acc = f32x4.splat(0.0);
+    for v: f32x4 in xs {
+        acc = acc + v;
+    } tail masked (v, m) {
+        acc = acc + m.select(v, f32x4.splat(0.0));
+    }
+    return acc.reduce_add();
+}
+
+fn count_eq(xs: &[u8], b: u8) -> usize {
+    let mut n: usize = 0;
+    let key = u8x16.splat(b);
+    for v: u8x16 in xs {
+        n = n + ((v == key).to_bits().popcount() as usize);
+    } tail scalar (x) {
+        if x == b { n = n + 1; }
+    }
+    return n;
+}
+
+fn add_wrap(a: &mut [i32], k: i32) {
+    let kk = i32x4.splat(k);
+    for v: &mut i32x4 in a {
+        *v = *v +% kk;
+    } tail masked (v, m) {
+        *v = *v +% kk;                       // only active lanes are written back
+    }
+}
+
+// x86 256-bit variant + dispatch
+fn sum_v3(xs: &[f32]) -> f32 needs(avx2) {
+    let mut acc = f32x8.splat(0.0);
+    for v: f32x8 in xs { acc = acc + v; } tail masked (v, m) { acc = acc + m.select(v, f32x8.splat(0.0)); }
+    return acc.reduce_add();
+}
+
+fn sum_sve(xs: &[f32]) -> f32 needs(sve) {
+    let mut acc: f32 = 0.0;
+    for v: f32xn in xs { acc = v.reduce_add_ordered(acc); }
+    return acc;
+}
+
+dispatch fn sum(xs: &[f32]) -> f32 { avx2 => sum_v3, sve => sum_sve, _ => sum_base, }
+```
+
+```stave
+// threads: closures passed as fn values
+import std.thread;
+
+fn total(xs: &[u64]) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..xs.len() { s = s + xs[i]; }
+    return s;
+}
+
+fn sum_halves(a: &[u64], b: &[u64]) -> u64 {
+    let (x, y) = thread.join(fn() -> u64 { return total(a); }, fn() -> u64 { return total(b); });
+    return x + y;
+}
+
+fn double_all(xs: &mut [u64]) {
+    thread.par_for_mut(xs, fn(i: usize, x: &mut u64) { *x = *x * 2; });   // each element borrowed by one call
+}
+```
+
+## 6. Tooling
+
+- Package: `stave.toml` (`name` required, `kind = "bin" | "lib"`, `version`, path-only `[dependencies]`, per-target `[target.gpu-sm86.dependencies] prims = { path = "prims/gpu" }` merged over `[dependencies]` by exact target name; `[target.x86_64-linux]` / `[target.aarch64-linux]` cover every target of that arch; no `cfg`) plus `src/main.stv` or `src/lib.stv`. Bad manifest = E1002 (in `stave.toml`).
+- `stave check` (fast, no codegen), `stave build [--release] [--target x86_64-linux-v3|aarch64-linux+sve]`, `stave run`, `stave test [--filter S] [--runner CMD]`, `stave unsafe-report`. Planned: `stave explain E0601`, `stave lowering --target T`, `stave fix` (applies fixes whose `applicability` is `exact`, re-checks), `stave fmt [--check]` (the one layout), `stave grammar --format lark|gbnf|ebnf` (for constrained decoding of the code region), `stave caps-report` (OS capabilities each package reaches).
+- `--diagnostics json` emits one JSON diagnostic per line, each with a fix. Exit codes: 0 ok, 1 diagnostics, 2 usage, 3 compiler bug.
+- The default target is the baseline (v2 / neon), never auto-upgraded.
+- No warnings in v1 for unused imports, variables, `mut`, or private fns (no lints yet).
+
+## 7. GPU (designed, not yet implemented)
+
+NVIDIA GPUs through PTX (sm_86). The full GPU section is added when that compiler code lands; until then, don't write GPU Stave code. Already fixed:
+- `--target gpu-sm86` runs the whole program on the GPU. `kernel fn` keeps the kernel subset on every target: no heap or I/O (E1101), no recursion or fn-value calls (E1102).
+- `extern "C"` is not allowed in GPU programs (E1201). Panics exit 101, as on the CPU; 125 = the GPU program cannot start.
+- Recursion and fn-value calls inside `par_for` bodies are slow on the GPU (lint warning): prefer loops and `match`.
+
+## 8. Not yet specified: don't guess, check `std/` or ask
+
+Stdlib API beyond `io.print`, `vec.Vec` (`push`, `get_ref`), `String.as_str`, `.len()`, `.unwrap()`, `mul_wide`, `std.thread` (§3), `std.debug.assert`, `std.mem` (`drop forget replace swap`), `std.soa` (§4); planned: `std.arena` (`Arena`, `alloc`, `reset`), `std.idx` (`IdVec`, `Id<T>`); planned: `std.atomic` (`U32 U64 Usize Bool`), `sync.Once`; scalar int methods such as `u16.popcount()` (used above) are assumed, not yet specified. Full trait/impl conformance rules (signature matching, missing or extra methods). How C objects and libraries are linked (`stave build` has no flag yet). Closure copy or move captures (none in v1: closures capture by reference only, no copy-capture syntax). Slicing `xs[a..b]`. Array→slice coercion (`&[T; N]` as `&[T]`). Binding types when matching on `&self`. Element binding type of `for x in slice` (`tail scalar (x)` binds by value). Enum↔int casts and explicit discriminants. String escapes and format specs. Moving a field out of a value whose type implements `Drop`.

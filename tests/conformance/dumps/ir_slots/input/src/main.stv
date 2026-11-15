@@ -1,0 +1,31 @@
+//~ CHECK-ONLY
+// ir golden: address-taken locals (`&mut`, `&`, autoref) live in `slot`s created first in
+// `b0`, fn params first, then `let`s in source order; the rest are SSA values.
+struct Counter { pub n: u32 }
+
+impl Counter {
+    pub fn bump(&mut self) { self.n = self.n + 1; }
+}
+
+fn bump(p: &mut u32) {
+    *p = *p + 1;
+}
+
+fn read(p: &u32) -> u32 {
+    return *p;
+}
+
+fn work(start: u32) -> u32 {
+    let mut a = start;
+    let plain: u32 = 7;
+    let mut b: u32 = 1;
+    let mut c = Counter.{ n: 0 };
+    bump(&mut a);
+    bump(&mut b);
+    c.bump();
+    return a + read(&b) + plain + c.n;
+}
+
+fn main() -> i32 {
+    return if work(1) == 12 then 0 else 1;
+}

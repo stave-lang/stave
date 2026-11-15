@@ -1,0 +1,5 @@
+// E1002 cases `missing-name` (at offset 0) and `missing-root` (at the `kind` value): a `lib`
+// needs `src/lib.stv`. No directives: the package has no root module to hold them.
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,36 @@
+//~ STDOUT threads_scope_run.stdout
+// `scope { spawn { } spawn { } }`: the spawns run on new threads and are joined at the
+// scope's `}`, so they may borrow the caller's locals until then; a `return` out of a scope
+// joins first. Thread ids are not printed: creation order is process-wide.
+import std.io;
+
+fn sum(xs: &[u32]) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..xs.len() { s = s + (xs[i] as u64); }
+    return s;
+}
+
+fn early(xs: &[u32], stop: bool) -> u64 {
+    let mut r: u64 = 0;
+    scope {
+        spawn { r = sum(xs); }
+        if stop { return 7; }
+    }
+    return r;
+}
+
+fn main() -> i32 {
+    let xs: [u32; 4] = [1, 2, 3, 4];
+    let ys: [u32; 3] = [100, 200, 300];
+    let mut a: u64 = 0;
+    let mut b: u64 = 0;
+    scope {
+        spawn { a = sum(&xs); }
+        spawn { b = sum(&ys); }
+    }
+    let total = a + b;
+    let e1 = early(&xs, false);
+    let e2 = early(&xs, true);
+    io.print(f"{a} {b} {total} {e1} {e2}\n");
+    return 0;
+}

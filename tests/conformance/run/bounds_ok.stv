@@ -1,0 +1,21 @@
+//~ STDOUT bounds_ok.stdout
+// In-range indexing never traps: slices, array values, arrays in memory, nested, constant
+// indices, last element.
+import std.io;
+
+fn total(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..xs.len() { s = s + xs[i]; }
+    return s;
+}
+
+fn main() -> i32 {
+    let mut a: [u32; 4] = [1, 2, 3, 4];
+    a[3] = 10;
+    let b = a;
+    let t = total(&a);
+    let m: [[u32; 2]; 2] = [[1, 2], [3, 4]];
+    let last = b[3] + m[1][1] + a[0];
+    io.print(f"{t} {last}\n");
+    return 0;
+}

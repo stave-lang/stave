@@ -1,0 +1,15 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at bounds_array_mem.stv:7:19 in main.bump (thread 0)"
+// An array in memory (address-taken local, through `&mut`): `a[i]` checks before the access; the read on the right runs first
+// (bounds check before the load).
+fn bump(a: &mut [u16; 4], i: usize) {
+    let k: usize = i;
+    (*a)[k] = (*a)[k] + 1;
+}
+
+fn main() -> i32 {
+    let mut a: [u16; 4] = [0, 0, 0, 0];
+    bump(&mut a, 3);
+    bump(&mut a, 4);
+    return 0;
+}

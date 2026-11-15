@@ -1,0 +1,24 @@
+//~ CHECK-ONLY
+// `for x in [a, b]` over an owned array moves each element into the loop binding (no E0504:
+// the loop owns the array).
+import std.string;
+
+fn total(a: string.String, b: string.String) -> usize {
+    let mut n: usize = 0;
+    for s in [a, b] {
+        n = n + s.len();
+    }
+    return n;
+}
+
+fn pairs(a: string.String, b: string.String) -> usize {
+    let mut n: usize = 0;
+    for (x, y) in [(a, b)] {
+        n = n + x.len() + y.len();
+    }
+    return n;
+}
+
+fn main() -> i32 {
+    return 0;
+}

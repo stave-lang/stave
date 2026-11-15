@@ -1,0 +1,5 @@
+// Test stand-in for std/vec.stv (not in the prelude: `import std.vec;`, then `vec.Vec<T>`).
+pub struct Vec<T> {
+    ptr: *mut T,
+    len: usize,
+}

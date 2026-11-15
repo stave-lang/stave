@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// ir golden: `while` with `break` and `continue`: head, body, exit; the head carries the
+// loop-assigned locals.
+fn count(n: u32) -> u32 {
+    let mut i: u32 = 0;
+    let mut c: u32 = 0;
+    while i < n {
+        i = i + 1;
+        if i == 3 {
+            continue;
+        }
+        if i > 10 {
+            break;
+        }
+        c = c + 1;
+    }
+    return c;
+}
+
+fn main() -> i32 {
+    return if count(5) == 4 then 0 else 1;
+}

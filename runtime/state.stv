@@ -1,0 +1,98 @@
+// runtime.state: the process-wide runtime state block.
+//
+// One `static mut`: zero-initialized program data (.bss), so it exists before
+// runtime.start.entry runs and needs no mapping. Every runtime module reaches it through `get()`,
+// the only place that names STATE; each use of the raw pointer is an `unsafe` operation whose
+// obligation is the field rules below.
+//
+// Threads (runtime.thread) share this block. Fields written after start-up are guarded:
+// the allocator fields by `alloc_lock`, the thread registry by `reg_lock` (runtime.atomic
+// futex locks); `next_thread` and `ncpu` change only through atomics. `thread_id` is main's
+// (0); other threads' ids are in the registry. `user_site` and `panicking` stay process-wide
+// (ASSUMPTION: a report from a thread may name another thread's last user site).
+
+// Number of allocator size classes (runtime.alloc CLASS).
+pub const NCLASS: usize = 23;
+
+// Thread registry (runtime.thread): MAX_THREADS live entries of REG_WORDS words each:
+// [lo, hi) address range of a stack mapping (its guard region at the bottom: [lo, guard_hi)),
+// guard_hi, thread id. lo == 0: a free entry.
+pub const MAX_THREADS: usize = 1024;
+pub const REG_WORDS: usize = 4;
+pub const REG_LEN: usize = 4096; // MAX_THREADS * REG_WORDS
+
+pub struct State {
+    // process start (runtime.start)
+    pub argc: usize,
+    pub argv: usize,
+    pub envp: usize,
+    pub auxv: usize,
+    pub page_size: usize,
+    pub hwcap: u64,
+    pub hwcap2: u64,
+    pub at_random: usize,
+    // main stack: [stack_lo, stack_hi) usable, [guard_lo, guard_hi) PROT_NONE below it
+    pub stack_lo: usize,
+    pub stack_hi: usize,
+    pub guard_lo: usize,
+    pub guard_hi: usize,
+    pub altstack: usize,
+    pub altstack_size: usize,
+    // panics (runtime.panic)
+    pub user_site: u32,
+    pub panicking: u32,
+    pub thread_id: u64,
+    // allocator (runtime.alloc): free-list heads (0 = empty) and the current arena chunk
+    pub free: [usize; NCLASS],
+    pub arena_cur: usize,
+    pub arena_end: usize,
+    pub small_mapped: usize,
+    pub large_mapped: usize,
+    // threads (runtime.thread, runtime.atomic locks)
+    pub alloc_lock: u32,
+    pub reg_lock: u32,
+    pub next_thread: u64,
+    pub ncpu: u64,
+    pub reg: [usize; REG_LEN],
+}
+
+static mut STATE: State = State.{
+    argc: 0,
+    argv: 0,
+    envp: 0,
+    auxv: 0,
+    page_size: 0,
+    hwcap: 0,
+    hwcap2: 0,
+    at_random: 0,
+    stack_lo: 0,
+    stack_hi: 0,
+    guard_lo: 0,
+    guard_hi: 0,
+    altstack: 0,
+    altstack_size: 0,
+    user_site: 0,
+    panicking: 0,
+    thread_id: 0,
+    free: [0; NCLASS],
+    arena_cur: 0,
+    arena_end: 0,
+    small_mapped: 0,
+    large_mapped: 0,
+    alloc_lock: 0,
+    reg_lock: 0,
+    next_thread: 0,
+    ncpu: 0,
+    reg: [0; REG_LEN],
+};
+
+pub fn get() -> *mut State {
+    return unsafe("only the address is taken; callers dereference it inside their own unsafe(..) under the field rules of the header") &mut STATE as *mut State;
+}
+
+// Page size from AT_PAGESZ (4096 until runtime.start has read the auxiliary vector).
+pub fn page_size() -> usize {
+    let st = get();
+    let p = unsafe("st is runtime.state.STATE; page_size is written only at start-up, before any other thread") (*st).page_size;
+    return if p == 0 then 4096 else p;
+}

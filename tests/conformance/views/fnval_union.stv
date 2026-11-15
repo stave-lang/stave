@@ -1,0 +1,23 @@
+//~ CHECK-ONLY
+// Fn types carry no `from`. A call through a `fn(&A, &B) -> &A` value borrows from
+// every ref/view argument, so the loans on both arguments stay live while the result lives.
+fn first_of(a: &u32, b: &u32) -> &u32 from a {
+    return a;
+}
+
+fn through(f: fn(&u32, &u32) -> &u32) -> u32 {
+    let x: u32 = 1;
+    let mut y: u32 = 2;
+    let r = f(&x, &y);
+    y = 3; //~ ERROR E0501
+    return *r;
+}
+
+// fine: a direct call borrows only from the `from` params
+fn direct() -> u32 {
+    let x: u32 = 1;
+    let mut y: u32 = 2;
+    let r = first_of(&x, &y);
+    y = 3;
+    return *r + y;
+}

@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// E0513: writing through `&mut V` (V a view) needs the written value's origins to be
+// contained in the target's. A string literal (static origin) always is.
+view struct Lexer { src: &str, pos: usize }
+
+fn reset(l: &mut Lexer, s: &str) {
+    l.src = s; //~ ERROR E0513
+}
+
+// fine
+fn reset_ok(l: &mut Lexer) {
+    l.pos = 0;
+    l.src = "static";
+}

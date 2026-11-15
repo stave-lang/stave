@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// E0208: no method or field. `mul_wide` exists on `u32` and `u64` only.
+struct Pt { pub x: u32, pub y: u32 }
+
+impl Pt {
+    pub fn sum(&self) -> u32 { return self.x + self.y; }
+    pub fn scale(&mut self, k: u32) { self.x = self.x * k; }
+}
+
+fn wide(a: u32, b: u64, c: u16) -> u64 {
+    let (hi, lo) = a.mul_wide(a);
+    let (h2, l2) = b.mul_wide(b);
+    let bad = c.mul_wide(c); //~ ERROR E0208
+    return h2 + l2 + (hi as u64) + (lo as u64);
+}
+
+fn fields(p: Pt, r: &Pt, m: &mut Pt) -> u32 {
+    let a: u32 = p.x + r.y + m.x;
+    let b: u32 = p.z; //~ ERROR E0208
+    let c: u32 = r.sum();
+    m.scale(2);
+    let d: u32 = p.nothing(); //~ ERROR E0208
+    let e: u32 = (a as% u16).popcount() as u32;
+    return a + c + e;
+}
+
+fn main() -> i32 {
+    return 0;
+}

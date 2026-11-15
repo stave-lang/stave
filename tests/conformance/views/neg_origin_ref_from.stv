@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// Origin table (LANG.md §3), row "`&T` / `&mut T`, T not a view", column `from x`: the result borrows
+// what `x` points to, so the caller's loan on the argument stays live while the result lives.
+import std.vec;
+
+fn first(v: &vec.Vec<u32>) -> &u32 from v {
+    return v.get_ref(0);
+}
+
+fn conflict(v: &mut vec.Vec<u32>) -> u32 {
+    let f = first(v);
+    v.push(1); //~ ERROR E0501
+    return *f;
+}
+
+// fine: the result is dead before the push
+fn ok(v: &mut vec.Vec<u32>) -> u32 {
+    let f = first(v);
+    let x = *f;
+    v.push(1);
+    return x;
+}

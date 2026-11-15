@@ -1,0 +1,30 @@
+//~ CHECK-ONLY
+// `never`: a call of a `-> never` fn ends its path and converts to any type; a
+// `-> never` fn must not return (E0207 case `never`); `never` is only a return type (E0209).
+fn halt() -> never {
+    loop { }
+}
+
+fn pick(x: u32) -> u32 {
+    if x < 10 { return x; }
+    halt();
+}
+
+fn as_value(x: u32) -> u32 {
+    let y: u32 = if x < 10 then x else halt();
+    return y;
+}
+
+fn leaks() -> never { let a: u32 = 1; } //~ ERROR E0207
+
+fn returns(c: bool) -> never { if c { return; } loop { } } //~ ERROR E0207
+
+fn breaks() -> never { loop { break; } } //~ ERROR E0207
+
+fn param(x: never) -> u32 { //~ ERROR E0209
+    return 0;
+}
+
+fn main() -> i32 {
+    return (pick(3) + as_value(4)) as% i32;
+}

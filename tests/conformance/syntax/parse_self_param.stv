@@ -1,0 +1,10 @@
+//~ CHECK-ONLY
+// SelfParam: `self`, `&self`, `&mut self`.
+struct C { n: u32 }
+
+impl C {
+    fn by_value(self) -> u32 { return self.n; }
+    fn by_ref(&self) -> u32 { return self.n; }
+    fn by_mut(&mut self) { self.n = self.n +| 1; }
+    fn with_args(&self, k: u32,) -> u32 { return self.n + k; }
+}

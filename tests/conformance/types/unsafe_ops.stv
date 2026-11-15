@@ -1,0 +1,24 @@
+//~ CHECK-ONLY
+// Unsafe operations (E0803): raw-pointer deref, unsafe fn and extern import calls. An
+// `unsafe fn` body is not an unsafe context.
+extern "C" {
+    fn puts(s: *const u8) -> i32;
+}
+
+unsafe("p is valid for reads") fn get(p: *const u32) -> u32 {
+    return *p; //~ ERROR E0803
+}
+
+fn main() -> i32 {
+    let x: u32 = 5;
+    let p = &x as *const u32;
+    let a: u32 = *p; //~ ERROR E0803
+    let b: u32 = unsafe("p points to x") *p;
+    let c: u32 = get(p); //~ ERROR E0803
+    let d: u32 = unsafe("p points to x") get(p);
+    let e: i32 = puts(0usize as *const u8); //~ ERROR E0803
+    unsafe("x lives") {
+        let f: u32 = *p + get(p);
+    }
+    return 0;
+}

@@ -1,0 +1,14 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at bounds_empty.stv:5:14 in main.first (thread 0)"
+// Index 0 of an empty slice traps.
+fn first(xs: &[u8]) -> u8 {
+    return xs[0];
+}
+
+fn main() -> i32 {
+    let a: [u8; 4] = [1, 2, 3, 4];
+    let none: [u8; 0] = [];
+    let x = first(&a);
+    let y = first(&none);
+    return 0;
+}

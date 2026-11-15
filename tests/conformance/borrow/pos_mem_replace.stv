@@ -1,0 +1,24 @@
+//~ STDOUT pos_mem_replace.stdout
+// The fixes of E0504: `mem.replace` takes a value out of a borrow and leaves another in
+// its place; `mem.swap` exchanges two places.
+import std.io;
+import std.mem;
+import std.string;
+
+struct S { pub name: string.String }
+
+fn take(r: &mut S) -> string.String {
+    return mem.replace(&mut r.name, string.String.new());
+}
+
+fn main() -> i32 {
+    let mut s = S.{ name: string.String.new() };
+    s.name.push_str("ab");
+    let mut t = string.String.new();
+    t.push_str("cd");
+    mem.swap(&mut s.name, &mut t);
+    let old = take(&mut s);
+    let n = s.name.len();
+    io.print(f"{t} {old} {n}\n");
+    return 0;
+}

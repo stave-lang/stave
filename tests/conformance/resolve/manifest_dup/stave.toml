@@ -1,0 +1,4 @@
+name = "manifest_dup"
+kind = "bin"
+version = "0.1.0"
+version = "0.2.0" #~ ERROR E1002

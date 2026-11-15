@@ -1,0 +1,25 @@
+// Stand-in std for the dump goldens: small and pinned, so the goldens do not
+// change with the shipped std/ (every dump covers the whole program, std included). Used through
+// `STAVE_STD_DIR=tests/conformance/dumps/_lib`. `stave test` skips `_lib` (leading `_`).
+pub enum Option<T> { None, Some(T) }
+
+pub trait Copy {}
+
+pub trait Write {
+    fn write_str(&mut self, s: &str);
+}
+
+pub trait Display {
+    fn fmt<W: Write>(&self, w: &mut W);
+}
+
+impl Display for i32 {
+    fn fmt<W: Write>(&self, w: &mut W) {
+    }
+}
+
+impl Display for str {
+    fn fmt<W: Write>(&self, w: &mut W) {
+        w.write_str(self);
+    }
+}

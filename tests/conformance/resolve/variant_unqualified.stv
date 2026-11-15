@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// E0103: variants are always qualified, in expressions and in patterns. A bare name in a
+// pattern with no payload is a binding, never a variant.
+enum Color { Red, Green, Blue(u8) }
+
+fn pick(c: Color) -> u8 {
+    return match c {
+        Color.Red => 1u8,
+        Color.Green => 2u8,
+        Blue(v) => v, //~ ERROR E0103
+        _ => 0u8,
+    };
+}
+
+fn main() -> i32 {
+    let c: Color = Red; //~ ERROR E0103
+    let d: Color = Color.Blue(3u8);
+    let x: u8 = pick(d);
+    let o: Option<u8> = Some(x); //~ ERROR E0103
+    let q: Option<u8> = Option.Some(x);
+    return 0;
+}

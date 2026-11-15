@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// Closures: `fn(params) -> T { .. }` as values.
+import std.thread;
+
+fn total(xs: &[u64]) -> u64 { return 0; }
+
+fn closures(a: &[u64], b: &[u64]) -> u64 {
+    let add1 = fn(x: i32) -> i32 { return x + 1; };
+    let unit = fn() { };
+    let (x, y) = thread.join(fn() -> u64 { return total(a); }, fn() -> u64 { return total(b); });
+    return x + y;
+}

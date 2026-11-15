@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// D4: a dotted chain is Primary(Ident) plus `.Ident` steps; name resolution decides whether a
+// step is a module, type, variant, or field.
+import std.io;
+
+enum Shape { Circle(f64), Rect { w: f64, h: f64 } }
+
+struct Outer { pub inner: Inner }
+
+struct Inner { pub w: f64 }
+
+fn chains(o: Outer) -> f64 {
+    let s = Shape.Circle(1.0);
+    let r = Shape.Rect.{ w: 2.0, h: 3.0 };
+    io.print(f"w = {o.inner.w}\n");
+    return o.inner.w;
+}

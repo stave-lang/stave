@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// Safe C++ catalogue, iterators: a slice view of a Vec is invalidated by a push
+// (the reallocation would leave it dangling). Stave: E0501.
+import std.vec;
+
+fn invalidate(v: &mut vec.Vec<u32>) -> u32 {
+    let s = v.as_slice();
+    v.push(1); //~ ERROR E0501
+    return s[0];
+}
+
+// fine: the view is dead before the push
+fn copy_then_push(v: &mut vec.Vec<u32>) -> u32 {
+    let x = v.as_slice()[0];
+    v.push(x);
+    return x;
+}

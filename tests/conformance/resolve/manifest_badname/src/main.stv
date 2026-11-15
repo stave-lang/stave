@@ -1,0 +1,6 @@
+//~ CHECK-ONLY
+// E1002 case `bad-name` (at the value): a package name must be one plain path component (it
+// names the default executable), so `stave check` rejects `../escape`, not only `stave build`.
+fn main() -> i32 {
+    return 0;
+}

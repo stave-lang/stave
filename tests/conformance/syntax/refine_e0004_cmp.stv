@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// A CmpOp error outside an expression stays E0004.
+fn not_an_expression() {
+    let x < 3; //~ ERROR E0004
+}

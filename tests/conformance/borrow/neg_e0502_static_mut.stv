@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// Assigning to a `static mut` moves the right side like any other assignment.
+struct T { pub v: u32 }
+
+static mut G: T = T.{ v: 0 };
+
+fn store() -> u32 {
+    let s = T.{ v: 1 };
+    unsafe("single-threaded test program") { G = s; }
+    return s.v; //~ ERROR E0502
+}
+
+fn main() -> i32 {
+    return 0;
+}

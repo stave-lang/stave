@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// ir golden: `?` on Option: error return, continue.
+fn half(x: u32) -> Option<u32> {
+    if x % 2 != 0 {
+        return Option.None;
+    }
+    return Option.Some(x / 2);
+}
+
+fn quarter(x: u32) -> Option<u32> {
+    let h = half(x)?;
+    let q = half(h)?;
+    return Option.Some(q);
+}
+
+fn main() -> i32 {
+    return match quarter(8) {
+        Option.Some(v) => if v == 2 then 0 else 1,
+        Option.None => 2,
+    };
+}

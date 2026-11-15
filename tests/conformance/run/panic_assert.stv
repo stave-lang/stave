@@ -1,0 +1,15 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Assert at panic_assert.stv:7:11 in main.check (thread 0)\nn must stay below 3\n"
+// std.debug.assert panics with Assert at the call (the `assert` token), then prints msg.
+import std.debug;
+
+fn check(n: u32) {
+    debug.assert(n < 3, "n must stay below 3");
+}
+
+fn main() -> i32 {
+    for n in 0u32..10 {
+        check(n);
+    }
+    return 0;
+}

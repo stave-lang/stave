@@ -1,0 +1,10 @@
+//~ CHECK-ONLY
+// Closures capture by reference, so a closure capturing a parameter borrows
+// the parameter's own slot, which dies at return: E0512 even with `from a`.
+fn mk(a: &u32) -> fn() -> u32 from a {
+    return fn() -> u32 { return *a; }; //~ ERROR E0512
+}
+
+fn main() -> i32 {
+    return 0;
+}

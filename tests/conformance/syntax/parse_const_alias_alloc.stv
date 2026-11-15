@@ -1,0 +1,8 @@
+//~ PARSE-ONLY
+// ConstDecl, TypeAlias, AllocatorDecl.
+const N: usize = 4 * 2;
+const GREETING: &str = "hi";
+const M: usize = if N > 4 then N else 4;
+type Bytes = [u8; 16];
+type Two<T> = (T, T);
+allocator my.alloc;

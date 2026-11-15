@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// E0412: a view is never passed to `forget`, so a view's destructor (a
+// lock guard's unlock) always runs. References and fn values are views too.
+import std.mem;
+import std.vec;
+
+view struct Lexer { src: &str, pos: usize }
+
+fn lexer(src: &str) -> Lexer from src {
+    return Lexer.{ src: src, pos: 0 };
+}
+
+fn step(x: u32) -> u32 {
+    return x + 1;
+}
+
+fn views(s: &str, r: &u32) {
+    mem.forget(lexer(s)); //~ ERROR E0412
+    mem.forget(r); //~ ERROR E0412
+    let o: Option<&u32> = Option.Some(r);
+    mem.forget(o); //~ ERROR E0412
+}
+
+fn fn_value(f: fn(u32) -> u32) {
+    mem.forget(f); //~ ERROR E0412
+}
+
+// fine: an owned value is leaked
+fn owned() {
+    let v: vec.Vec<u8> = vec.Vec.new();
+    mem.forget(v);
+}

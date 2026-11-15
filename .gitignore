@@ -1,0 +1,6 @@
+target/
+.env
+.claude/
+.DS_Store
+*.swp
+CLAUDE.local.md

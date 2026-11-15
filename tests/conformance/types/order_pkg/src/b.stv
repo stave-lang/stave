@@ -1,0 +1,4 @@
+pub fn g() -> i32 {
+    let z = 7; //~ ERROR E0202
+    return 0;
+}

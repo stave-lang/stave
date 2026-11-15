@@ -1,0 +1,13 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Overflow at overflow_shift.stv:5:14 in main.shl (thread 0)"
+// `<<` with a run-time amount >= the bit width traps with Overflow (a constant one is E0205).
+fn shl(x: u32, n: u32) -> u32 {
+    return x << n;
+}
+
+fn main() -> i32 {
+    for n in 28u32..40 {
+        let y = shl(1, n);
+    }
+    return 0;
+}

@@ -1,0 +1,47 @@
+//~ STDOUT mem_forget.stdout
+// std.mem.forget ends ownership without running the destructor: neither the value's nor its
+// elements' (a forgotten Vec keeps its elements undropped). Its scratch block is freed, so
+// forgetting in a loop needs no memory per call; small, large (page-mapped), and zero-sized
+// values all work.
+import std.io;
+import std.mem;
+import std.vec;
+
+struct Loud {
+    pub id: u32,
+}
+
+impl Drop for Loud {
+    fn drop(&mut self) {
+        let id = self.id;
+        io.print(f"drop {id}\n");
+    }
+}
+
+struct Big {
+    pub words: [u64; 8192],
+}
+
+struct Empty {}
+
+fn main() -> i32 {
+    let a = Loud.{ id: 1 };
+    mem.forget(a);
+    let b = Loud.{ id: 2 };
+    let mut v = vec.Vec::<Loud>.new();
+    v.push(Loud.{ id: 3 });
+    v.push(Loud.{ id: 4 });
+    mem.forget(v);
+    for i in 0u32..10000 {
+        mem.forget(Loud.{ id: i });
+    }
+    let mut total: u64 = 0;
+    for i in 0u64..20 {
+        let big = Big.{ words: [i; 8192] };
+        total = total + big.words[8191];
+        mem.forget(big);
+    }
+    mem.forget(Empty.{});
+    io.print(f"done {total}\n");
+    return 0;
+}

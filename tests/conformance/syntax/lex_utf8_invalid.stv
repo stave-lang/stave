@@ -1,0 +1,6 @@
+//~ CHECK-ONLY
+// Invalid UTF-8: one E0001 at the first invalid byte; the rest is not lexed.
+fn ok() { }
+ÿ //~ ERROR E0001
+fn later() { let s = "unterminated
+þ

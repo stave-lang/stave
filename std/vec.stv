@@ -1,0 +1,168 @@
+// std.vec: Vec<T>, a growable array on the global allocator (runtime.alloc).
+//
+// Layout: `ptr` to `cap` slots of T, the first `len` initialized. `cap == 0` means no
+// allocation (ptr is mem.dangling). A zero-sized T never allocates (cap is usize max).
+// Out-of-range `get_ref` / `get_mut` panic `Bounds` at the caller (user site, as for every std
+// panic raised for its caller); allocation failure panics `OutOfMemory` there too.
+// Slots are filled with `p.write(v)` (no drop of the uninitialized old content) and emptied
+// with `p.read()` (moves out); `*p = v` would drop the old content.
+// Send / Sync: the raw `ptr` field makes the structural rule give neither, so the explicit
+// impls below state them: a Vec owns its elements, so it is Send when T is and Sync when T is.
+// Types built on Vec (String, std.soa) get both structurally from their Vec fields.
+// Capacity arithmetic that overflows usize is an allocation failure (`OutOfMemory`), never an
+// `Overflow` panic.
+
+import runtime.alloc;
+import runtime.panic;
+import std.core;
+import std.mem;
+
+pub struct Vec<T> {
+    ptr: *mut T,
+    len: usize,
+    cap: usize,
+}
+
+unsafe("a Vec uniquely owns its buffer and elements; moving it moves them") impl<T: core.Send> core.Send for Vec<T> {}
+unsafe("&Vec<T> gives only &T and &[T]; every mutation needs &mut Vec<T>") impl<T: core.Sync> core.Sync for Vec<T> {}
+
+const USIZE_MAX: usize = 0xFFFF_FFFF_FFFF_FFFF;
+
+fn oom() -> never {
+    panic.trap(panic.KIND_OUT_OF_MEMORY, panic.user_site());
+}
+
+impl<T> Vec<T> {
+    pub fn new() -> Vec<T> {
+        let zst = mem.type_size::<T>() == 0;
+        let cap: usize = if zst then USIZE_MAX else 0;
+        return Vec.{ ptr: mem.dangling::<T>(), len: 0, cap: cap };
+    }
+
+    pub fn with_capacity(n: usize) -> Vec<T> {
+        let mut v: Vec<T> = Self.new();
+        v.reserve(n);
+        return v;
+    }
+
+    pub fn len(&self) -> usize {
+        return self.len;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        return self.len == 0;
+    }
+
+    pub fn capacity(&self) -> usize {
+        return self.cap;
+    }
+
+    // Ensures room for `extra` more elements.
+    pub fn reserve(&mut self, extra: usize) {
+        if extra > USIZE_MAX - self.len { oom(); }
+        let need = self.len + extra;
+        if need <= self.cap { return; }
+        let mut c = if self.cap < 4 then 4 else self.cap *| 2;
+        if c < need { c = need; }
+        self.grow_to(c);
+    }
+
+    fn grow_to(&mut self, new_cap: usize) {
+        let size = mem.type_size::<T>();
+        let al = mem.type_align::<T>();
+        if size != 0 && new_cap > USIZE_MAX / size { oom(); }
+        let bytes = new_cap * size;
+        let p = if self.cap == 0 then alloc.alloc(bytes, al) else unsafe("ptr holds cap * size bytes from alloc with this alignment") alloc.realloc(self.ptr as *mut u8, self.cap * size, al, bytes);
+        self.ptr = p as *mut T;
+        self.cap = new_cap;
+    }
+
+    pub fn push(&mut self, x: T) {
+        if self.len == self.cap { self.reserve(1); }
+        let slot = mem.add_mut(self.ptr, self.len);
+        unsafe("len < cap: slot is inside the buffer and uninitialized") { slot.write(x); }
+        self.len = self.len + 1;
+    }
+
+    pub fn pop(&mut self) -> Option<T> {
+        if self.len == 0 { return Option.None; }
+        self.len = self.len - 1;
+        let slot = mem.add(self.ptr as *const T, self.len);
+        return Option.Some(unsafe("slot was element len - 1, initialized; len no longer covers it") slot.read());
+    }
+
+    pub fn get(&self, i: usize) -> Option<&T> from self {
+        if i >= self.len { return Option.None; }
+        let slot = mem.add(self.ptr as *const T, i);
+        return Option.Some(unsafe("i < len: an initialized element owned by self") &*slot);
+    }
+
+    // The element at i; panics `Bounds` if i >= len.
+    pub fn get_ref(&self, i: usize) -> &T from self {
+        if i >= self.len {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        let slot = mem.add(self.ptr as *const T, i);
+        return unsafe("i < len: an initialized element owned by self") &*slot;
+    }
+
+    pub fn get_mut(&mut self, i: usize) -> &mut T from self {
+        if i >= self.len {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        let slot = mem.add_mut(self.ptr, i);
+        return unsafe("i < len: an initialized element owned exclusively through self") &mut *slot;
+    }
+
+    pub fn as_slice(&self) -> &[T] from self {
+        return unsafe("ptr..ptr+len are the initialized elements owned by self") mem.slice(self, self.ptr as *const T, self.len);
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [T] from self {
+        let p = self.ptr;
+        let n = self.len;
+        return unsafe("ptr..ptr+len are the initialized elements owned exclusively through self") mem.slice_mut(self, p, n);
+    }
+
+    // Drops every element; keeps the buffer.
+    pub fn clear(&mut self) {
+        while self.len > 0 {
+            self.len = self.len - 1;
+            let slot = mem.add(self.ptr as *const T, self.len);
+            let dead = unsafe("slot was initialized; len no longer covers it") slot.read();
+        }
+    }
+
+    // Spare capacity for writers that fill the buffer directly (std.io reads).
+    pub fn spare_ptr(&mut self) -> *mut T {
+        return mem.add_mut(self.ptr, self.len);
+    }
+
+    pub unsafe("the first n elements are initialized and n <= capacity")
+    fn set_len(&mut self, n: usize) {
+        self.len = n;
+    }
+}
+
+impl<T: Copy> Vec<T> {
+    pub fn extend_from_slice(&mut self, xs: &[T]) {
+        self.reserve(xs.len());
+        for i in 0..xs.len() {
+            let slot = mem.add_mut(self.ptr, self.len);
+            unsafe("reserve made room: slot is inside the buffer and uninitialized") { slot.write(xs[i]); }
+            self.len = self.len + 1;
+        }
+    }
+}
+
+impl<T> core.Drop for Vec<T> {
+    fn drop(&mut self) {
+        self.clear();
+        let size = mem.type_size::<T>();
+        if self.cap != 0 && size != 0 {
+            unsafe("ptr holds cap * size bytes from alloc with this alignment; no element is left") {
+                alloc.free(self.ptr as *mut u8, self.cap * size, mem.type_align::<T>());
+            }
+        }
+    }
+}

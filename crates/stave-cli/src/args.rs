@@ -1,0 +1,575 @@
+//! Hand-written argument parser for contracts/cli.md (no external parser crate).
+//!
+//! Form: `stave <command> [args...]`. Flags come after the command. A value flag takes its value
+//! as `--flag=value` or as the next argument (`-o OUT` only in the second form). Every error is
+//! a [`UsageError`] (exit 2).
+
+use std::fmt;
+use std::path::PathBuf;
+
+use stave_driver::select::{CompileCommand, CompilerChoice};
+use stave_target::{Target, Triple};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cmd {
+    Build,
+    Run,
+    Check,
+    Test,
+    UnsafeReport,
+    Lowering,
+    Explain,
+    Daemon,
+}
+
+impl Cmd {
+    pub fn name(self) -> &'static str {
+        match self {
+            Cmd::Build => "build",
+            Cmd::Run => "run",
+            Cmd::Check => "check",
+            Cmd::Test => "test",
+            Cmd::UnsafeReport => "unsafe-report",
+            Cmd::Lowering => "lowering",
+            Cmd::Explain => "explain",
+            Cmd::Daemon => "daemon",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Cmd> {
+        [
+            Cmd::Build,
+            Cmd::Run,
+            Cmd::Check,
+            Cmd::Test,
+            Cmd::UnsafeReport,
+            Cmd::Lowering,
+            Cmd::Explain,
+            Cmd::Daemon,
+        ]
+        .into_iter()
+        .find(|c| c.name() == s)
+    }
+
+    /// The commands that compile a program (and print a summary line).
+    pub fn compile_command(self) -> Option<CompileCommand> {
+        match self {
+            Cmd::Build => Some(CompileCommand::Build),
+            Cmd::Run => Some(CompileCommand::Run),
+            Cmd::Check => Some(CompileCommand::Check),
+            Cmd::Test => Some(CompileCommand::Test),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DaemonCmd {
+    Status,
+    Stop,
+    Evict,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DiagFormat {
+    #[default]
+    Human,
+    Json,
+}
+
+/// `--dump` stages, in contract order (stage-gates.md).
+pub const DUMP_STAGES: [&str; 10] =
+    ["tokens", "items", "ast", "strings", "names", "types", "borrow", "ir", "diags", "stats"];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Args {
+    pub cmd: Cmd,
+    /// `PKG_DIR` (default: the current directory).
+    pub pkg_dir: Option<PathBuf>,
+    pub release: bool,
+    /// Target and features, validated (baseline ∪ `--features`; default: host baseline).
+    pub target: Target,
+    /// `--target` was given.
+    pub explicit_target: bool,
+    pub out: Option<PathBuf>,
+    pub compiler: CompilerChoice,
+    /// Distinct stages in the order given.
+    pub dump: Vec<&'static str>,
+    pub dump_dir: Option<PathBuf>,
+    pub diagnostics: DiagFormat,
+    pub timings: bool,
+    /// `--cache DIR` (refused as not implemented by every command).
+    pub cache: Option<PathBuf>,
+    pub runner: Option<String>,
+    pub filter: Option<String>,
+    pub watch: bool,
+    pub alloc_check: bool,
+    /// `unsafe-report --json`.
+    pub json: bool,
+    /// `lowering --op OP`.
+    pub op: Option<String>,
+    /// `explain EXXXX`.
+    pub code: Option<String>,
+    pub daemon: Option<DaemonCmd>,
+    /// `run ... -- ARGS`.
+    pub run_args: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Parsed {
+    Help,
+    Version,
+    Args(Box<Args>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsageError(pub String);
+
+impl fmt::Display for UsageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn err<T>(msg: impl Into<String>) -> Result<T, UsageError> {
+    Err(UsageError(msg.into()))
+}
+
+pub const USAGE: &str = "\
+usage: stave <command> [args]
+
+commands:
+  build [PKG_DIR] [--release] [--target T] [--features F,...] [-o OUT] [--watch]
+                        (default OUT: ./<package name>)
+  run [PKG_DIR] [--release] [--target T] [-- ARGS...]
+                        (host targets only, else E1001)
+  check [PKG_DIR]
+  test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD]
+  unsafe-report [PKG_DIR] [--json]
+  lowering --target T [--op OP]
+  explain EXXXX
+  daemon status|stop|evict [PKG_DIR]
+
+flags of build, run, check, test:
+  --target T            x86_64-linux[-v2|-v3|-v4], aarch64-linux[+sve|+sve2], gpu-sm86
+                        (default: the host baseline, never auto-upgraded)
+  --features F,...      add features to the target baseline (not implemented yet)
+  --compiler auto|cpu|gpu
+  --dump=STAGE,... --dump-dir DIR
+                        stages: tokens items ast strings names types borrow ir diags
+                        stats
+  --diagnostics human|json
+  --timings             per-stage times on stderr
+  --cache DIR           incremental cache (not implemented yet)
+  --alloc-check         device allocator checks (gpu-sm86 only)
+
+exit status: 0 ok, 1 diagnostics, 2 usage error, 3 internal compiler error (a bug)
+";
+
+/// Which flags a command accepts.
+fn allowed(cmd: Cmd, flag: &str) -> bool {
+    const COMPILE: [&str; 10] = [
+        "--release",
+        "--target",
+        "--features",
+        "--compiler",
+        "--dump",
+        "--dump-dir",
+        "--diagnostics",
+        "--timings",
+        "--cache",
+        "--alloc-check",
+    ];
+    match cmd {
+        Cmd::Build => COMPILE.contains(&flag) || matches!(flag, "-o" | "--watch"),
+        Cmd::Run | Cmd::Check => COMPILE.contains(&flag),
+        Cmd::Test => COMPILE.contains(&flag) || matches!(flag, "--filter" | "--runner"),
+        // These always run in stage0 whatever --compiler says (cli-stage1.md).
+        Cmd::UnsafeReport => matches!(flag, "--json" | "--compiler"),
+        Cmd::Lowering => matches!(flag, "--target" | "--op" | "--compiler"),
+        Cmd::Explain => flag == "--compiler",
+        Cmd::Daemon => false,
+    }
+}
+
+fn takes_value(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--target"
+            | "--features"
+            | "-o"
+            | "--compiler"
+            | "--dump"
+            | "--dump-dir"
+            | "--diagnostics"
+            | "--cache"
+            | "--runner"
+            | "--filter"
+            | "--op"
+    )
+}
+
+const KNOWN_FLAGS: [&str; 17] = [
+    "--release",
+    "--target",
+    "--features",
+    "-o",
+    "--compiler",
+    "--dump",
+    "--dump-dir",
+    "--diagnostics",
+    "--timings",
+    "--cache",
+    "--runner",
+    "--filter",
+    "--watch",
+    "--alloc-check",
+    "--json",
+    "--op",
+    "--help",
+];
+
+fn set_once<T>(slot: &mut Option<T>, v: T, flag: &str) -> Result<(), UsageError> {
+    if slot.is_some() {
+        return err(format!("{flag} given twice"));
+    }
+    *slot = Some(v);
+    Ok(())
+}
+
+fn set_flag(slot: &mut bool, flag: &str) -> Result<(), UsageError> {
+    if *slot {
+        return err(format!("{flag} given twice"));
+    }
+    *slot = true;
+    Ok(())
+}
+
+/// Parse the arguments after the program name.
+pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
+    let Some(first) = argv.first() else {
+        return err("no command given");
+    };
+    match first.as_str() {
+        "-h" | "--help" | "help" => return Ok(Parsed::Help),
+        "-V" | "--version" => return Ok(Parsed::Version),
+        _ => {}
+    }
+    let Some(cmd) = Cmd::parse(first) else {
+        return if first.starts_with('-') {
+            err(format!("expected a command before `{first}`"))
+        } else {
+            err(format!("unknown command `{first}`"))
+        };
+    };
+
+    let mut positional: Vec<String> = Vec::new();
+    let mut run_args = Vec::new();
+    let mut target: Option<String> = None;
+    let mut features: Vec<String> = Vec::new();
+    let (mut out, mut compiler, mut dump, mut dump_dir, mut diagnostics, mut cache) =
+        (None, None, None, None, None, None);
+    let (mut runner, mut filter, mut op) = (None, None, None);
+    let (mut release, mut timings, mut watch, mut alloc_check, mut json) =
+        (false, false, false, false, false);
+
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = argv[i].as_str();
+        i += 1;
+        if arg == "--" {
+            if cmd != Cmd::Run {
+                return err(format!("`--` is only accepted by `stave run`, not `stave {}`", cmd.name()));
+            }
+            run_args = argv[i..].to_vec();
+            break;
+        }
+        if arg == "-h" || arg == "--help" {
+            return Ok(Parsed::Help);
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            positional.push(arg.to_string());
+            continue;
+        }
+        let (flag, inline) = match arg.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f, Some(v)),
+            _ => (arg, None),
+        };
+        if !KNOWN_FLAGS.contains(&flag) {
+            return err(format!("unknown flag `{flag}`"));
+        }
+        if !allowed(cmd, flag) {
+            return err(format!("`stave {}` does not take {flag}", cmd.name()));
+        }
+        let value = if takes_value(flag) {
+            let v = match inline {
+                Some(v) => v.to_string(),
+                None => match argv.get(i) {
+                    Some(v) => {
+                        i += 1;
+                        v.clone()
+                    }
+                    None => return err(format!("{flag} needs a value")),
+                },
+            };
+            if v.is_empty() {
+                return err(format!("{flag} needs a non-empty value"));
+            }
+            v
+        } else {
+            if inline.is_some() {
+                return err(format!("{flag} takes no value"));
+            }
+            String::new()
+        };
+        match flag {
+            "--release" => set_flag(&mut release, flag)?,
+            "--timings" => set_flag(&mut timings, flag)?,
+            "--watch" => set_flag(&mut watch, flag)?,
+            "--alloc-check" => set_flag(&mut alloc_check, flag)?,
+            "--json" => set_flag(&mut json, flag)?,
+            "--target" => set_once(&mut target, value, flag)?,
+            // A list: repeated --features accumulate.
+            "--features" => features.push(value),
+            "-o" => set_once(&mut out, PathBuf::from(value), flag)?,
+            "--compiler" => {
+                let c = CompilerChoice::parse(&value).ok_or_else(|| {
+                    UsageError(format!("--compiler takes auto, cpu, or gpu, not `{value}`"))
+                })?;
+                set_once(&mut compiler, c, flag)?;
+            }
+            "--dump" => set_once(&mut dump, value, flag)?,
+            "--dump-dir" => set_once(&mut dump_dir, PathBuf::from(value), flag)?,
+            "--diagnostics" => {
+                let d = match value.as_str() {
+                    "human" => DiagFormat::Human,
+                    "json" => DiagFormat::Json,
+                    _ => return err(format!("--diagnostics takes human or json, not `{value}`")),
+                };
+                set_once(&mut diagnostics, d, flag)?;
+            }
+            "--cache" => set_once(&mut cache, PathBuf::from(value), flag)?,
+            "--runner" => set_once(&mut runner, value, flag)?,
+            "--filter" => set_once(&mut filter, value, flag)?,
+            "--op" => set_once(&mut op, value, flag)?,
+            _ => return err(format!("unknown flag `{flag}`")),
+        }
+    }
+
+    // Positional arguments.
+    let mut pkg_dir = None;
+    let mut code = None;
+    let mut daemon = None;
+    let mut pos = positional.into_iter();
+    match cmd {
+        Cmd::Explain => {
+            let Some(c) = pos.next() else { return err("`stave explain` needs a diagnostic code EXXXX") };
+            let digits = c.strip_prefix('E').unwrap_or("");
+            let well_formed = digits.len() == 4 && digits.bytes().all(|b| b.is_ascii_digit());
+            if !well_formed {
+                return err(format!("`{c}` is not a diagnostic code EXXXX"));
+            }
+            code = Some(c);
+        }
+        Cmd::Daemon => {
+            let Some(sub) = pos.next() else { return err("`stave daemon` needs status, stop, or evict") };
+            let d = match sub.as_str() {
+                "status" => DaemonCmd::Status,
+                "stop" => DaemonCmd::Stop,
+                "evict" => DaemonCmd::Evict,
+                _ => return err(format!("`stave daemon` takes status, stop, or evict, not `{sub}`")),
+            };
+            if d == DaemonCmd::Evict {
+                pkg_dir = pos.next().map(PathBuf::from);
+            }
+            daemon = Some(d);
+        }
+        Cmd::Lowering => {}
+        _ => pkg_dir = pos.next().map(PathBuf::from),
+    }
+    if let Some(extra) = pos.next() {
+        return err(format!("unexpected argument `{extra}`"));
+    }
+
+    // Cross-flag rules.
+    let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
+    let tgt = Target::from_cli(target.as_deref(), &feature_refs).map_err(|e| UsageError(e.to_string()))?;
+    if cmd == Cmd::Lowering && target.is_none() {
+        return err("`stave lowering` needs --target T");
+    }
+    if alloc_check && tgt.triple != Triple::GpuSm86 {
+        return err(format!("--alloc-check needs --target gpu-sm86 (target is {})", tgt.triple));
+    }
+    let dump = match dump {
+        Some(list) => {
+            let mut stages: Vec<&'static str> = Vec::new();
+            for s in list.split(',') {
+                let Some(stage) = DUMP_STAGES.iter().copied().find(|d| *d == s) else {
+                    return err(format!("unknown --dump stage `{s}` (stages: {})", DUMP_STAGES.join(" ")));
+                };
+                if !stages.contains(&stage) {
+                    stages.push(stage);
+                }
+            }
+            stages
+        }
+        None => Vec::new(),
+    };
+    if cmd == Cmd::Test && !dump.is_empty() {
+        return err("`stave test` does not take --dump");
+    }
+    if !dump.is_empty() && dump_dir.is_none() {
+        return err("--dump needs --dump-dir DIR");
+    }
+    if dump.is_empty() && dump_dir.is_some() {
+        return err("--dump-dir needs --dump=STAGE,...");
+    }
+
+    Ok(Parsed::Args(Box::new(Args {
+        cmd,
+        pkg_dir,
+        release,
+        target: tgt,
+        explicit_target: target.is_some(),
+        out,
+        compiler: compiler.unwrap_or_default(),
+        dump,
+        dump_dir,
+        diagnostics: diagnostics.unwrap_or_default(),
+        timings,
+        cache,
+        runner,
+        filter,
+        watch,
+        alloc_check,
+        json,
+        op,
+        code,
+        daemon,
+        run_args,
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> Result<Parsed, UsageError> {
+        let v: Vec<String> = s.split_whitespace().map(String::from).collect();
+        parse(&v)
+    }
+
+    fn args(s: &str) -> Args {
+        match p(s) {
+            Ok(Parsed::Args(a)) => *a,
+            other => panic!("{s}: {other:?}"),
+        }
+    }
+
+    fn usage(s: &str) -> String {
+        match p(s) {
+            Err(UsageError(m)) => m,
+            other => panic!("{s}: expected a usage error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commands_and_defaults() {
+        let a = args("build");
+        assert_eq!(a.cmd, Cmd::Build);
+        assert_eq!(a.pkg_dir, None);
+        assert_eq!(a.compiler, CompilerChoice::Auto);
+        assert_eq!(a.diagnostics, DiagFormat::Human);
+        assert_eq!(a.target, Target::host().unwrap());
+        assert!(!a.explicit_target);
+        for c in ["build", "run", "check", "test", "unsafe-report"] {
+            assert_eq!(args(c).cmd.name(), c);
+        }
+        assert_eq!(args("check pkg").pkg_dir, Some(PathBuf::from("pkg")));
+        assert_eq!(p("--help"), Ok(Parsed::Help));
+        assert_eq!(p("help"), Ok(Parsed::Help));
+        assert_eq!(p("build --help"), Ok(Parsed::Help));
+        assert_eq!(p("--version"), Ok(Parsed::Version));
+    }
+
+    #[test]
+    fn build_flags() {
+        let a = args(
+            "build app --release --target x86_64-linux-v3 --features avx512f -o out/app --compiler=cpu --dump=tokens,ast,tokens --dump-dir d --diagnostics json --timings --cache c --watch",
+        );
+        assert_eq!(a.pkg_dir, Some(PathBuf::from("app")));
+        assert!(a.release && a.timings && a.watch && a.explicit_target);
+        assert_eq!(a.target.triple, Triple::parse("x86_64-linux-v3").unwrap());
+        assert!(a.target.features.contains(stave_target::Feature::Avx512f));
+        assert_eq!(a.out, Some(PathBuf::from("out/app")));
+        assert_eq!(a.compiler, CompilerChoice::Cpu);
+        assert_eq!(a.dump, ["tokens", "ast"]);
+        assert_eq!(a.dump_dir, Some(PathBuf::from("d")));
+        assert_eq!(a.diagnostics, DiagFormat::Json);
+        assert_eq!(a.cache, Some(PathBuf::from("c")));
+        let a = args("build --features avx2 --features=fma,bmi2 --target=x86_64-linux");
+        assert_eq!(a.target.features.to_string(), "sse42,avx,avx2,fma,bmi2");
+    }
+
+    #[test]
+    fn test_run_and_others() {
+        let a = args("test t --filter lex --runner qemu-aarch64 --target aarch64-linux+sve");
+        assert_eq!((a.filter.as_deref(), a.runner.as_deref()), (Some("lex"), Some("qemu-aarch64")));
+        let v: Vec<String> = ["run", "--release", "--", "-x", "--target", "y"].map(String::from).to_vec();
+        let Ok(Parsed::Args(a)) = parse(&v) else { panic!() };
+        assert_eq!(a.run_args, ["-x", "--target", "y"]);
+        assert!(a.release);
+        assert!(args("unsafe-report --json").json);
+        let a = args("lowering --target aarch64-linux --op gather");
+        assert_eq!(a.op.as_deref(), Some("gather"));
+        assert_eq!(args("explain E0201").code.as_deref(), Some("E0201"));
+        assert_eq!(args("daemon status").daemon, Some(DaemonCmd::Status));
+        let a = args("daemon evict pkg");
+        assert_eq!((a.daemon, a.pkg_dir), (Some(DaemonCmd::Evict), Some(PathBuf::from("pkg"))));
+        assert_eq!(args("build --target gpu-sm86 --alloc-check").target.triple, Triple::GpuSm86);
+        assert_eq!(args("run --target gpu-sm86").target.triple, Triple::GpuSm86);
+    }
+
+    #[test]
+    fn usage_errors() {
+        assert_eq!(usage(""), "no command given");
+        assert!(usage("frobnicate").contains("unknown command"));
+        assert!(usage("--release build").contains("expected a command"));
+        assert!(usage("build --bogus").contains("unknown flag `--bogus`"));
+        assert!(usage("build --target").contains("needs a value"));
+        assert!(usage("build --target=").contains("non-empty"));
+        assert!(usage("build --target x86_64-linux-v5").contains("unknown target"));
+        assert!(usage("build --features avx3").contains("unknown feature `avx3`"));
+        assert!(usage("build --target x86_64-linux --features neon").contains("not available on target"));
+        assert!(usage("build --target x86_64-linux --target x86_64-linux").contains("given twice"));
+        assert!(usage("build --release --release").contains("given twice"));
+        assert!(usage("build --release=yes").contains("takes no value"));
+        assert!(usage("build --compiler fast").contains("auto, cpu, or gpu"));
+        assert!(usage("build --diagnostics xml").contains("human or json"));
+        assert!(usage("build --dump=tokens").contains("--dump-dir"));
+        assert!(usage("build --dump-dir d").contains("--dump=STAGE"));
+        assert!(usage("build --dump=lex --dump-dir d").contains("unknown --dump stage"));
+        assert_eq!(args("check --dump=tokens,borrow --dump-dir d").dump, ["tokens", "borrow"]);
+        assert_eq!(args("build --dump=ir,types --dump-dir d").dump, ["ir", "types"]);
+        assert!(usage("test --dump=tokens --dump-dir d").contains("does not take --dump"));
+        assert!(usage("build --alloc-check").contains("gpu-sm86"));
+        assert!(usage("build a b").contains("unexpected argument `b`"));
+        assert!(usage("build -- x").contains("only accepted by `stave run`"));
+        assert!(usage("check --watch").contains("does not take --watch"));
+        assert!(usage("check -o x").contains("does not take -o"));
+        assert!(usage("run --filter x").contains("does not take --filter"));
+        assert!(usage("lowering").contains("needs --target"));
+        assert!(usage("lowering --release --target x86_64-linux").contains("does not take"));
+        assert!(usage("explain").contains("needs a diagnostic code"));
+        assert!(usage("explain E201").contains("not a diagnostic code"));
+        assert!(usage("explain e0201").contains("not a diagnostic code"));
+        assert!(usage("explain E0201 E0202").contains("unexpected argument"));
+        assert!(usage("daemon").contains("status, stop, or evict"));
+        assert!(usage("daemon restart").contains("status, stop, or evict"));
+        assert!(usage("daemon status pkg").contains("unexpected argument"));
+        assert!(usage("daemon status --json").contains("does not take"));
+        // `stave run` of a foreign target parses; running it is E1001 (stave_cli::run).
+        let foreign = if cfg!(target_arch = "x86_64") { "aarch64-linux" } else { "x86_64-linux" };
+        assert_eq!(args(&format!("run --target {foreign}")).cmd, Cmd::Run);
+    }
+}

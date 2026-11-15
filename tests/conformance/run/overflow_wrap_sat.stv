@@ -1,0 +1,106 @@
+//~ STDOUT overflow_wrap_sat.stdout
+//~ EXIT 0
+// Wrapping (`+% -% *% <<%`) and saturating (`+| -| *|`) forms never trap. Operands are
+// parameters, so nothing folds. `<<%` masks the amount by bits - 1.
+import std.io;
+
+fn u8_ops(a: u8, b: u8) {
+    let wa = a +% b;
+    let ws = a -% b;
+    let wm = a *% b;
+    let sa = a +| b;
+    let ss = a -| b;
+    let sm = a *| b;
+    io.print(f"u8 {a} {b}: wrap {wa} {ws} {wm} sat {sa} {ss} {sm}\n");
+}
+
+fn i8_ops(a: i8, b: i8) {
+    let wa = a +% b;
+    let ws = a -% b;
+    let wm = a *% b;
+    let sa = a +| b;
+    let ss = a -| b;
+    let sm = a *| b;
+    io.print(f"i8 {a} {b}: wrap {wa} {ws} {wm} sat {sa} {ss} {sm}\n");
+}
+
+fn i32_ops(a: i32, b: i32) {
+    let wa = a +% b;
+    let ws = a -% b;
+    let wm = a *% b;
+    let sa = a +| b;
+    let ss = a -| b;
+    let sm = a *| b;
+    io.print(f"i32 {a} {b}: wrap {wa} {ws} {wm} sat {sa} {ss} {sm}\n");
+}
+
+fn u64_ops(a: u64, b: u64) {
+    let wa = a +% b;
+    let ws = a -% b;
+    let wm = a *% b;
+    let sa = a +| b;
+    let ss = a -| b;
+    let sm = a *| b;
+    io.print(f"u64 {a} {b}: wrap {wa} {ws} {wm} sat {sa} {ss} {sm}\n");
+}
+
+fn shl_u8(x: u8, n: u8) {
+    let r = x <<% n;
+    io.print(f"u8 {x} <<% {n} = {r}\n");
+}
+
+fn shl_u32(x: u32, n: u32) {
+    let r = x <<% n;
+    io.print(f"u32 {x} <<% {n} = {r}\n");
+}
+
+fn shl_i64(x: i64, n: i64) {
+    let r = x <<% n;
+    io.print(f"i64 {x} <<% {n} = {r}\n");
+}
+
+fn compound(start: u8) {
+    let mut c: u8 = start;
+    c +%= 10;
+    let c1 = c;
+    c *%= 100;
+    let c2 = c;
+    c +|= 200;
+    let c3 = c;
+    c -|= 100;
+    let c4 = c;
+    c <<%= 9;
+    let c5 = c;
+    c -%= 60;
+    let c6 = c;
+    c *|= 3;
+    let c7 = c;
+    c -|= 255;
+    let c8 = c;
+    io.print(f"compound {start}: {c1} {c2} {c3} {c4} {c5} {c6} {c7} {c8}\n");
+}
+
+fn main() -> i32 {
+    u8_ops(200, 100);
+    u8_ops(3, 5);
+    u8_ops(16, 16);
+    i8_ops(-100, 100);
+    i8_ops(-128, -1);
+    i8_ops(127, 2);
+    i32_ops(2147483647, 1);
+    i32_ops(-2147483648, 2);
+    i32_ops(65536, 65536);
+    u64_ops(18446744073709551615, 2);
+    u64_ops(1, 2);
+    shl_u8(1, 9);
+    shl_u8(255, 4);
+    shl_u32(1, 31);
+    shl_u32(1, 32);
+    shl_u32(3, 33);
+    shl_u32(4294967295, 36);
+    shl_i64(1, 63);
+    shl_i64(1, 64);
+    shl_i64(-1, 70);
+    compound(250);
+    return 0;
+}

@@ -1,0 +1,7 @@
+//~ CHECK-ONLY
+// Safe C++ catalogue, spans: a span of a local array returned from the function
+// would dangle. Stave: E0512.
+fn span(x: &u32) -> &[u32] from x {
+    let a: [u32; 2] = [*x, *x];
+    return &a; //~ ERROR E0512
+}

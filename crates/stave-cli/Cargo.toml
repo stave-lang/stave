@@ -1,0 +1,31 @@
+[package]
+name = "stave-cli"
+description = "The `stave` command"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lib]
+name = "stave_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stave"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+stave-diag.workspace = true
+stave-driver.workspace = true
+stave-sema.workspace = true
+stave-target.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+toml.workspace = true

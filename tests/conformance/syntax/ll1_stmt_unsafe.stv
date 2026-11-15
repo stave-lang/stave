@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// At statement start `unsafe` always opens `Unsafe Block`; `unsafe("..") e` is for values.
+fn write(p: *mut i32) {
+    unsafe("p is valid for writes") { *p = 1; }
+}
+
+fn read(p: *const i32) -> i32 {
+    let b = unsafe("p is valid for reads") *p;
+    return b;
+}
+
+fn bad(p: *mut i32) {
+    unsafe("p is valid for writes") *p = 1; //~ ERROR E0004
+}

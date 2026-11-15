@@ -1,0 +1,30 @@
+//~ CHECK-ONLY
+// Assignment to an immutable binding (local, param, field) and through a `&` reference.
+struct S { pub v: u32 }
+
+fn param(x: u32) {
+    x = 1; //~ ERROR E0503
+}
+
+fn through(r: &u32) {
+    *r = 1; //~ ERROR E0503
+}
+
+fn field_through(s: &S) {
+    s.v = 2; //~ ERROR E0503
+}
+
+fn ok_through(s: &mut S, r: &mut u32) {
+    s.v = 2;
+    *r = 3;
+}
+
+fn main() -> i32 {
+    let x: i32 = 1;
+    x = 2; //~ ERROR E0503
+    let s = S.{ v: 1 };
+    s.v = 2; //~ ERROR E0503
+    let mut t = S.{ v: 1 };
+    t.v = 2;
+    return 0;
+}

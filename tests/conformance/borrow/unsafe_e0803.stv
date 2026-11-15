@@ -1,0 +1,48 @@
+//~ CHECK-ONLY
+// E0803: unsafe operations outside `unsafe(..)`: raw-pointer `*p`, `p.read()`,
+// `p.write(v)`, a call of an `unsafe` fn or method or of an `extern` import, any use of a
+// `static mut`. An `unsafe fn` body is not an unsafe context: each operation inside still needs
+// its own `unsafe(..)`.
+extern "C" {
+    fn puts(s: *const u8) -> i32;
+}
+
+static mut HITS: u32 = 0;
+
+unsafe("p is valid for reads") fn get(p: *const u32) -> u32 {
+    let a: u32 = *p; //~ ERROR E0803
+    let b: u32 = unsafe("the caller guarantees p is valid") *p;
+    return a + b;
+}
+
+struct Raw { pub p: *mut u32 }
+
+impl Raw {
+    pub unsafe("self.p is valid for writes") fn set(&self, v: u32) {
+        self.p.write(v); //~ ERROR E0803
+        unsafe("the caller guarantees self.p is valid") { self.p.write(v); }
+    }
+}
+
+fn main() -> i32 {
+    let mut x: u32 = 5;
+    let p = &mut x as *mut u32;
+    let q = p as *const u32;
+    let a: u32 = *q; //~ ERROR E0803
+    let b: u32 = q.read(); //~ ERROR E0803
+    p.write(1); //~ ERROR E0803
+    let c: u32 = get(q); //~ ERROR E0803
+    let r = Raw.{ p: p };
+    r.set(2); //~ ERROR E0803
+    let e: i32 = puts(0usize as *const u8); //~ ERROR E0803
+    HITS = 1; //~ ERROR E0803
+    let h: u32 = HITS; //~ ERROR E0803
+    unsafe("p and q point to x, which lives to the end of main") {
+        let d: u32 = *q + q.read() + get(q);
+        p.write(d);
+        r.set(3);
+        HITS = HITS + 1;
+    }
+    let f: u32 = unsafe("q points to x") get(q);
+    return 0;
+}

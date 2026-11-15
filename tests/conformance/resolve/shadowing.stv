@@ -1,0 +1,45 @@
+//~ CHECK-ONLY
+// Locals: `let` rebinding (the initializer sees the old binding), block scopes, `for` and
+// `tail` bindings, match arm bindings, closure params; a local shadows an item.
+fn g() -> i32 {
+    return 3;
+}
+
+fn f(x: i32) -> i32 {
+    let x: i32 = x + 1;
+    {
+        let z: i32 = x;
+        let x: i32 = z * 2;
+    }
+    let w: i32 = z; //~ ERROR E0101
+    for i in 0..x {
+        let k: i32 = i;
+    }
+    let q: i32 = i; //~ ERROR E0101
+    let add = fn(a: i32, b: i32) -> i32 { return a + b + x; };
+    let r: i32 = add(1, 2);
+    let s: i32 = a; //~ ERROR E0101
+    match x {
+        0 => { }
+        n => { let m: i32 = n; }
+    }
+    let t: i32 = n; //~ ERROR E0101
+    let g: i32 = 4;
+    let h: i32 = g;
+    return r + h;
+}
+
+fn tails(xs: &[u8]) -> usize {
+    let mut n: usize = 0;
+    for v: u8x16 in xs {
+        n = n + 1;
+    } tail scalar (b) {
+        let c: u8 = b;
+    }
+    let d: u8 = b; //~ ERROR E0101
+    return n;
+}
+
+fn main() -> i32 {
+    return f(1);
+}

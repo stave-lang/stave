@@ -1,0 +1,12 @@
+//~ PARSE-ONLY
+// IfExpr (chains), MatchExpr (guards, trailing comma), RangeExpr.
+enum E { A, B(i32) }
+
+fn values(e: E, n: i32) -> i32 {
+    let v = if n < 3 then 1 else if n < 5 then 2 else 3;
+    let m = match e { E.A => 10, E.B(k) if k > 0 => k, E.B(_) => 0, };
+    let m2 = match n { 1 => 1, _ => 2 };
+    for i in 0..n { }
+    for j in 0..=n { }
+    return v + m + m2;
+}

@@ -1,0 +1,28 @@
+//~ PARSE-ONLY
+// Single tokens: `as%` `as|` `as?` `as~` `...` `..` `..=` `.{` and the wrapping and
+// saturating operators with their compound forms.
+extern "C" {
+    fn printf(f: *const u8, ...) -> i32;
+}
+
+struct P { x: u32 }
+
+fn ops(a: u32, b: u32, big: i64) -> u32 {
+    let mut x: u32 = a +% b -% 1 *% 2 <<% 3;
+    x +%= 1;
+    x -%= 1;
+    x *%= 2;
+    x <<%= 1;
+    let mut y: u32 = a +| b -| 1 *| 2;
+    y +|= 1;
+    y -|= 1;
+    y *|= 2;
+    let w: u8 = big as% u8;
+    let s: u8 = big as| u8;
+    let c: Option<u8> = big as? u8;
+    let f: f32 = big as~ f32;
+    for i in 0..10 { }
+    for j in 0..=10 { }
+    let p = P.{ x: 1 };
+    return x +% y;
+}

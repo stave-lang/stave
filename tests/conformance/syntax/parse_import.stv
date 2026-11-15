@@ -1,0 +1,9 @@
+//~ CHECK-ONLY
+// Import, with and without `as`.
+import std.io;
+import std.thread as th;
+
+fn main() -> i32 {
+    io.print(f"hi\n");
+    return 0;
+}

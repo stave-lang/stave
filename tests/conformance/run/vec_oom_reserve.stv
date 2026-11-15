@@ -1,0 +1,13 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: OutOfMemory at vec_oom_reserve.stv:11:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// `reserve(extra)` with len + extra past usize is OutOfMemory at the caller, not Overflow.
+import std.vec;
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u8>.new();
+    v.push(1);
+    let n: usize = 0xFFFF_FFFF_FFFF_FFFF;
+    v.reserve(n);
+    return 0;
+}

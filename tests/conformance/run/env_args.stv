@@ -1,0 +1,13 @@
+//~ STDOUT env_args.stdout
+// std.env: argument count and argument 0 (the program path) exist; an index past the end is None.
+import std.io;
+import std.env;
+
+fn main() -> i32 {
+    let n = env.count();
+    let has0 = env.arg(0).is_some();
+    let past = env.arg(n).is_none();
+    let ok = n >= 1 && has0 && past;
+    io.print(f"{ok}\n");
+    return 0;
+}

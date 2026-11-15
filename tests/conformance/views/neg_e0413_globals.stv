@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// E0413: a `const` or `static mut` never has a reference or view type, except `&str`
+// from a string literal or another such const (static strings).
+view struct Lexer { src: &str, pos: usize }
+
+const NAME: &str = "stave";
+const ALIAS: &str = NAME;
+
+const REF: &u32 = &1u32; //~ ERROR E0413
+const BYTES: &[u8] = &[1u8, 2u8]; //~ ERROR E0413
+const LEX: Lexer = Lexer.{ src: "x", pos: 0 }; //~ ERROR E0413
+const PAIR: (u32, &str) = (1, "x"); //~ ERROR E0413
+static mut LAST: Option<&u8> = Option.None; //~ ERROR E0413
+static mut WORD: &str = "w"; // a static string: allowed (every use is unsafe, E0803)
