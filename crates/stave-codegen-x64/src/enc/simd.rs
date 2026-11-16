@@ -107,17 +107,17 @@ impl VecReg for Ymm {
 
 /// One VEX encoding: `[C5 | C4] opcode ModRM [SIB] [disp]` (an immediate is written by the
 /// caller; `trailing` is its length, for RIP-relative displacements).
-struct Vex {
-    pp: Pp,
-    map: Map,
-    w: bool,
-    l: VLen,
-    opc: u8,
-    reg: u8,
+pub(super) struct Vex {
+    pub(super) pp: Pp,
+    pub(super) map: Map,
+    pub(super) w: bool,
+    pub(super) l: VLen,
+    pub(super) opc: u8,
+    pub(super) reg: u8,
     /// `vvvv`: the extra source register number (0 when unused).
-    vvvv: u8,
-    rm: RmEnc,
-    trailing: u8,
+    pub(super) vvvv: u8,
+    pub(super) rm: RmEnc,
+    pub(super) trailing: u8,
 }
 
 fn check_len(d: Desc, l: VLen) -> Result<(), EncError> {
@@ -157,7 +157,7 @@ fn vrm(d: Desc, l: VLen, rm: VRm) -> Result<RmEnc, EncError> {
 impl Asm {
     /// Writes a VEX prefix, the opcode, and the ModRM operand, using the 2-byte prefix when it can
     /// express the instruction.
-    fn vex(&mut self, v: Vex) -> Result<(), EncError> {
+    pub(super) fn vex(&mut self, v: Vex) -> Result<(), EncError> {
         let (x, b) = self.rm_xb(&v.rm)?;
         let r = (v.reg >> 3) & 1;
         let l = u8::from(v.l == VLen::X256);

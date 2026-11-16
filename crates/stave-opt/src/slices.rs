@@ -10,7 +10,11 @@
 //!   `addr.elem p i` on the element pointer, so the address is such a part too. Run it after
 //!   bounds-check elision: a check guards the access by its slice operand.
 //!
-//! Both parts are pure and trap-free, so moving them up to the definition changes no behavior.
+//! - [`unify_chunk_bounds`]: all `n -| k` of one value `n` and one constant `k` (the bound of a
+//!   vector access of `k + 1` lanes, checked against the length `n`) become a single instruction
+//!   right after the definition of `n`, so a loop compares its index with a register.
+//!
+//! All of these are pure and trap-free, so moving them up to the definition changes no behavior.
 
 use stave_ir::ir::ValueDef;
 use stave_ir::{Body, Op, Operand, TypeId, TypeKey, TypeTable, Value};
@@ -39,17 +43,42 @@ pub fn declare_elem_pointers(types: &mut TypeTable) {
 /// is defined outside of. Returns whether the body changed.
 pub fn unify_parts(b: &mut Body, op: Op) -> bool {
     debug_assert!(matches!(op, Op::SliceLen | Op::SlicePtr));
-    // (slice value, result type, instruction), grouped by sorting.
-    let mut parts: Vec<(u32, u32, u32)> = Vec::new();
+    // (slice value, result type, 0, instruction), grouped by sorting.
+    let mut parts: Vec<(u32, u32, i128, u32)> = Vec::new();
     for (i, &o) in b.insts.op.iter().enumerate() {
         if o == op
             && let [Operand::Value(s)] = b.args(i as u32)
             && let Some(Some(t)) = b.insts.ty.get(i)
             && b.insts.result[i].is_some()
         {
-            parts.push((s.0, t.0, i as u32));
+            parts.push((s.0, t.0, 0, i as u32));
         }
     }
+    unify(b, parts)
+}
+
+/// Unifies the `n -| k` instructions (a constant `k`) per value `n` and `k`, under the rule of
+/// [`unify_parts`]. Returns whether the body changed.
+pub fn unify_chunk_bounds(b: &mut Body) -> bool {
+    // (value, result type, constant, instruction), grouped by sorting.
+    let mut parts: Vec<(u32, u32, i128, u32)> = Vec::new();
+    for (i, &o) in b.insts.op.iter().enumerate() {
+        if o == Op::SubSat
+            && let [Operand::Value(n), k] = b.args(i as u32)
+            && let Some(k) = b.int_const(*k)
+            && let Some(Some(t)) = b.insts.ty.get(i)
+            && b.insts.result[i].is_some()
+        {
+            parts.push((n.0, t.0, k, i as u32));
+        }
+    }
+    unify(b, parts)
+}
+
+/// Makes every group of instructions with one operand value, type, and constant a single
+/// instruction right after the definition of the operand value: the group's first instruction,
+/// moved there. `parts`: (operand value, result type, constant, instruction).
+fn unify(b: &mut Body, mut parts: Vec<(u32, u32, i128, u32)>) -> bool {
     if parts.is_empty() {
         return false;
     }
@@ -61,9 +90,9 @@ pub fn unify_parts(b: &mut Body, op: Op) -> bool {
     let mut edit = Edit::new(b);
     let mut k = 0;
     while k < parts.len() {
-        let (s, t) = (parts[k].0, parts[k].1);
+        let (s, t, c) = (parts[k].0, parts[k].1, parts[k].2);
         let mut end = k;
-        while end < parts.len() && parts[end].0 == s && parts[end].1 == t {
+        while end < parts.len() && parts[end].0 == s && parts[end].1 == t && parts[end].2 == c {
             end += 1;
         }
         let group = &parts[k..end];
@@ -80,21 +109,22 @@ pub fn unify_parts(b: &mut Body, op: Op) -> bool {
             continue;
         }
         let deeper = group.iter().any(|p| {
-            let blk = block_of[p.2 as usize];
+            let blk = block_of[p.3 as usize];
             blk != NONE && depth_of(blk) > depth_of(def_block)
         });
         if group.len() < 2 && !deeper {
             continue;
         }
         // The first instruction moves to the definition; the others read its value.
-        let first = group[0].2;
+        let first = group[0].3;
         let Some(v) = b.insts.result[first as usize] else { continue };
         let site = b.insts.site[first as usize];
-        edit.insert(at, op, Some(TypeId(t)), &[Operand::Value(Value(s))], site, Some(v));
+        let (op, args) = (b.insts.op[first as usize], b.args(first).to_vec());
+        edit.insert(at, op, Some(TypeId(t)), &args, site, Some(v));
         for p in group {
-            edit.remove(p.2);
-            if p.2 != first
-                && let Some(w) = b.insts.result[p.2 as usize]
+            edit.remove(p.3);
+            if p.3 != first
+                && let Some(w) = b.insts.result[p.3 as usize]
             {
                 edit.replace(w, Operand::Value(v));
             }

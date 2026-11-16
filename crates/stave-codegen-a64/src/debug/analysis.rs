@@ -331,8 +331,13 @@ impl Analysis {
                 _ => regalloc::CLASS_NONE,
             })
             .collect();
-        let pools =
-            regalloc::Pools { int_saved: INTS, int_scratch: 0, float_saved: FLOATS, float_scratch: 0 };
+        let pools = regalloc::Pools {
+            int_saved: INTS,
+            int_scratch: 0,
+            float_saved: FLOATS,
+            float_scratch: 0,
+            vec_saved: 0,
+        };
         let asg = regalloc::assign(body, &self.emit, &class, &[], pools);
         if asg.is_empty() {
             return Ok(());

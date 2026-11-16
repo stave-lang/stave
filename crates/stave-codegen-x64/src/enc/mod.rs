@@ -324,6 +324,8 @@ pub struct Asm {
     fixups: Vec<Fixup>,
     relocs: Vec<Reloc>,
     lines: Vec<LineRow>,
+    /// The scalar SSE functions (`sse`, `movs`, `movaps`, ...) emit their VEX forms.
+    vex_scalars: bool,
 }
 
 const MAX_CODE: usize = i32::MAX as usize;
@@ -336,6 +338,13 @@ impl Asm {
     /// An empty buffer with room for `bytes` of code and `labels` labels.
     pub fn with_capacity(bytes: usize, labels: usize) -> Asm {
         Asm { buf: Vec::with_capacity(bytes), labels: Vec::with_capacity(labels), ..Asm::default() }
+    }
+
+    /// Makes the scalar SSE functions (`sse`, `movs`, `movaps`, ...) emit their VEX forms with
+    /// the destination as the first source: the same result in the low 128 bits, zeros above
+    /// them, and no dependence on the `ymm` upper halves.
+    pub fn set_vex_scalars(&mut self, on: bool) {
+        self.vex_scalars = on;
     }
 
     /// Current offset.

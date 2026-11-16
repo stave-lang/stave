@@ -134,6 +134,10 @@ impl Cg<'_, '_> {
                 self.a.raw(&[0x4C, 0x89, 0xCF]); // mov rdi, r9
                 self.a.raw(&[0x31, 0xED]); // xor ebp, ebp
                 self.a.raw(&[0x48, 0x83, 0xE4, 0xF0]); // and rsp, -16
+                // only the child runs this: the parent keeps its upper halves
+                if self.rel && self.ydirty {
+                    self.a.vzeroupper();
+                }
                 self.a.call_sym(thread);
                 self.a.raw(&[0x89, 0xC7]); // mov edi, eax
                 self.a.raw(&[0xB8, 60, 0, 0, 0]); // mov eax, 60 (exit)
@@ -207,7 +211,11 @@ impl Cg<'_, '_> {
                 self.a.push(RBX);
                 self.a.mov_rr(Size::Q, RBX, RSP);
                 self.a.mov_rr(Size::Q, RSP, RAX);
+                if self.rel {
+                    self.vclean();
+                }
                 self.a.call_rm(S0)?;
+                self.ydirty = false;
                 self.a.mov_rr(Size::Q, RSP, RBX);
                 self.a.pop(RBX);
                 match res {

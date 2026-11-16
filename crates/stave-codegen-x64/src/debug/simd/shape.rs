@@ -325,9 +325,8 @@ impl Cg<'_, '_> {
     /// Same bytes under another vector type (`bitcast`, `mask.to_vec`).
     pub(super) fn v_copy(&mut self, a: Operand, rt: TypeId, rv: Value) -> Res<()> {
         let sh = self.vshape(rt)?;
-        let m = self.vmem(a)?;
-        let d = self.def_mem(rv)?;
-        self.copy_mem(d, MSrc::Mem(m), sh.size)
+        let x = self.vget(a, sh.size)?;
+        self.vput(rv, x, sh.size)
     }
 
     pub(super) fn v_split(&mut self, a: Operand, rt: TypeId, rv: Value) -> Res<()> {
@@ -604,15 +603,19 @@ impl Cg<'_, '_> {
             // `pblendvb` reads its mask from `xmm0`
             let x0 = Xmm::masked(0);
             self.reserve(R::X(x0))?;
-            let mm = self.vmem(m)?;
-            self.vload(x0, mm, sh.size)?;
-            let x = self.vget(a, sh.size)?;
+            if self.rel {
+                self.vec_copy(m, x0)?;
+            } else {
+                let mm = self.vmem(m)?;
+                self.vload(x0, mm, sh.size)?;
+            }
+            let x = self.vread(a, sh.size)?;
             let s = self.vget(b, sh.size)?;
             self.a.sse_blendv(VBlendV::Pblendvb, s, x)?;
             return self.vput(rv, s, sh.size);
         }
-        let mx = self.vget(m, sh.size)?;
-        let x = self.vget(a, sh.size)?;
+        let mx = self.vread(m, sh.size)?;
+        let x = self.vread(a, sh.size)?;
         let s = self.vget(b, sh.size)?;
         match self.vform(sh.wide())? {
             Form::Y => self.a.vex_blendv(VBlendV::Pblendvb, y(s), y(s), y(x), y(mx))?,
@@ -648,7 +651,7 @@ impl Cg<'_, '_> {
 
     pub(super) fn v_to_bits(&mut self, m: Operand, rv: Value) -> Res<()> {
         let sh = self.voshape(m)?;
-        let x = self.vget(m, sh.size)?;
+        let x = self.vread(m, sh.size)?;
         let g = self.alloc_g()?;
         self.vmask_bits(g, x, sh)?;
         self.bind_g(rv, g)

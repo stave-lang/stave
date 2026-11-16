@@ -1,10 +1,11 @@
 //! Register assignment: hand-written shapes, and random control flow checked against an
 //! independent liveness (iterative dataflow): values that share a register are never live in
-//! the same block, and a value in a scratch register never lives across a clobber.
+//! the same block, and a value in a scratch register never lives across a clobber. Floats and
+//! vectors share the float registers and differ in which of them survive a clobber.
 
 use stave_ir::ir::Target;
 use stave_ir::{Block, Body, FuncBuilder, IntrinsicId, Op, Operand, Term, TypeId, TypeTable, Value};
-use stave_opt::regalloc::{self, Assignment, CLASS_FLOAT, CLASS_INT, CLASS_NONE, NO_REG, Pools};
+use stave_opt::regalloc::{self, Assignment, CLASS_FLOAT, CLASS_INT, CLASS_NONE, CLASS_VEC, NO_REG, Pools};
 
 struct Tys {
     u64: TypeId,
@@ -17,12 +18,15 @@ fn tys() -> Tys {
     Tys { u64: t.u64(), f64: t.f64(), bool: t.bool() }
 }
 
-fn classes(b: &Body, t: &Tys) -> Vec<u8> {
+/// `vecs`: every `f64` value with an odd number stands for a vector (the allocator sees
+/// classes only).
+fn classes(b: &Body, t: &Tys, vecs: bool) -> Vec<u8> {
     b.values
         .iter()
-        .map(|v| {
+        .enumerate()
+        .map(|(k, v)| {
             if v.ty == t.f64 {
-                CLASS_FLOAT
+                if vecs && k % 2 == 1 { CLASS_VEC } else { CLASS_FLOAT }
             } else if v.ty == t.u64 || v.ty == t.bool {
                 CLASS_INT
             } else {
@@ -144,10 +148,14 @@ fn occupied(b: &Body, order: &[u32]) -> Vec<Vec<bool>> {
 }
 
 fn check(b: &Body, t: &Tys, pools: Pools) -> Assignment {
+    let class = classes(b, t, false);
+    check_classes(b, &class, pools)
+}
+
+fn check_classes(b: &Body, class: &[u8], pools: Pools) -> Assignment {
     let order = rpo(b);
-    let class = classes(b, t);
     let clob = clobbers(b);
-    let a = regalloc::assign(b, &order, &class, &clob, pools);
+    let a = regalloc::assign(b, &order, class, &clob, pools);
     let occ = occupied(b, &order);
     let nv = b.values.len();
     for v in 0..nv {
@@ -156,14 +164,15 @@ fn check(b: &Body, t: &Tys, pools: Pools) -> Assignment {
             continue;
         }
         assert_ne!(class[v], CLASS_NONE, "%{v} has a register but no class");
-        let (saved, total) = if class[v] == CLASS_FLOAT {
-            (pools.float_saved, pools.float_saved + pools.float_scratch)
-        } else {
-            (pools.int_saved, pools.int_saved + pools.int_scratch)
+        let floats = pools.float_saved + pools.float_scratch;
+        let (saved, total) = match class[v] {
+            CLASS_FLOAT => (pools.float_saved, floats),
+            CLASS_VEC => (pools.vec_saved.min(pools.float_saved), floats),
+            _ => (pools.int_saved, pools.int_saved + pools.int_scratch),
         };
         assert!(r < total, "%{v}: register {r} outside the pool");
         for w in v + 1..nv {
-            if a.reg[w] == r && class[w] == class[v] {
+            if a.reg[w] == r && (class[w] == CLASS_INT) == (class[v] == CLASS_INT) {
                 let both = (0..b.blocks.len()).find(|&k| occ[v][k] && occ[w][k]);
                 assert_eq!(both, None, "%{v} and %{w} share register {r} in a block");
             }
@@ -186,7 +195,7 @@ fn check(b: &Body, t: &Tys, pools: Pools) -> Assignment {
     a
 }
 
-const POOLS: Pools = Pools { int_saved: 5, int_scratch: 2, float_saved: 0, float_scratch: 8 };
+const POOLS: Pools = Pools { int_saved: 5, int_scratch: 2, float_saved: 0, float_scratch: 8, vec_saved: 0 };
 
 /// `for i in 0..n { acc += x }; return acc`: the counter, the accumulator, and the invariants
 /// all get registers.
@@ -273,7 +282,7 @@ fn the_lowest_weights_stay_in_memory() {
     }
     b.ret(Some(acc.into()));
     let body = b.finish().unwrap();
-    let pools = Pools { int_saved: 3, int_scratch: 0, float_saved: 0, float_scratch: 0 };
+    let pools = Pools { int_saved: 3, int_scratch: 0, float_saved: 0, float_scratch: 0, vec_saved: 0 };
     let a = check(&body, &t, pools);
     for v in [ps[0], ps[1], hp[0]] {
         assert_ne!(a.reg[v.index()], NO_REG, "%{} is used in the loop", v.0);
@@ -282,6 +291,59 @@ fn the_lowest_weights_stay_in_memory() {
         assert_eq!(a.reg[p.index()], NO_REG, "%{} is used once after the loop", p.0);
     }
     assert_eq!(a.int_used, 0b111);
+}
+
+/// A float and a vector cross a call, another pair lives in a loop without one. The float
+/// registers that survive a call as floats do not keep a whole vector: the vector across the
+/// call stays in memory, the one in the loop takes a scratch register first.
+#[test]
+fn vectors_share_the_float_registers() {
+    let t = tys();
+    let mut b = FuncBuilder::new(&[t.u64, t.f64, t.f64, t.f64, t.f64]);
+    let n = b.param(0).unwrap();
+    let (f_call, v_call, f_loop, v_loop) =
+        (b.param(1).unwrap(), b.param(2).unwrap(), b.param(3).unwrap(), b.param(4).unwrap());
+    let next = b.create_block();
+    b.br(next, &[]);
+    b.switch_to(next);
+    b.intrinsic(IntrinsicId(0), Some(t.u64), &[]).unwrap();
+    let after = b.create_block();
+    b.br(after, &[]);
+    b.switch_to(after);
+    let s1 = b.binary(Op::Add, t.f64, f_call, v_call);
+    let (head, hp) = b.create_block_with(&[t.u64, t.f64, t.f64]);
+    let (body, exit) = (b.create_block(), b.create_block());
+    let z = b.int(0);
+    b.br(head, &[z, f_loop.into(), v_loop.into()]);
+    b.switch_to(head);
+    let c = b.cmp(Op::Lt, t.bool, hp[0], n);
+    b.cbr(c, body, &[], exit, &[]);
+    b.switch_to(body);
+    let one = b.int(1);
+    let i2 = b.binary(Op::AddWrap, t.u64, hp[0], one);
+    let f2 = b.binary(Op::Add, t.f64, hp[1], s1);
+    let v2 = b.binary(Op::Add, t.f64, hp[2], hp[2]);
+    b.br(head, &[i2.into(), f2.into(), v2.into()]);
+    b.switch_to(exit);
+    let r = b.binary(Op::Add, t.f64, hp[1], hp[2]);
+    b.ret(Some(r.into()));
+    let body = b.finish().unwrap();
+    let mut class = classes(&body, &t, false);
+    for v in [v_call, v_loop, hp[2]] {
+        class[v.index()] = CLASS_VEC;
+    }
+    let pools = Pools { int_saved: 4, int_scratch: 0, float_saved: 2, float_scratch: 3, vec_saved: 0 };
+    let a = check_classes(&body, &class, pools);
+    assert!(a.reg[f_call.index()] < pools.float_saved, "the float crosses the call in a saved register");
+    assert_eq!(a.reg[v_call.index()], NO_REG, "no register keeps a vector across the call");
+    assert!(a.reg[hp[2].index()] >= pools.float_saved && a.reg[hp[2].index()] != NO_REG);
+    assert_ne!(a.reg[hp[1].index()], NO_REG);
+    assert_ne!(a.reg[hp[1].index()], a.reg[hp[2].index()], "a float and a vector live together");
+    // with a register that keeps a vector, the vector crosses the call in it
+    let keep = Pools { vec_saved: 1, ..pools };
+    let a = check_classes(&body, &class, keep);
+    assert_eq!(a.reg[v_call.index()], 0);
+    assert_eq!(a.reg[f_call.index()], 1);
 }
 
 #[test]
@@ -434,10 +496,14 @@ fn random_control_flow() {
         let body = random_body(seed, &t);
         for pools in [
             POOLS,
-            Pools { int_saved: 10, int_scratch: 0, float_saved: 8, float_scratch: 0 },
-            Pools { int_saved: 1, int_scratch: 1, float_saved: 1, float_scratch: 1 },
+            Pools { int_saved: 10, int_scratch: 0, float_saved: 8, float_scratch: 0, vec_saved: 0 },
+            Pools { int_saved: 1, int_scratch: 1, float_saved: 1, float_scratch: 1, vec_saved: 0 },
+            Pools { int_saved: 2, int_scratch: 1, float_saved: 4, float_scratch: 3, vec_saved: 2 },
         ] {
             let a = check(&body, &t, pools);
+            assigned += a.reg.iter().filter(|r| **r != NO_REG).count();
+            let class = classes(&body, &t, true);
+            let a = check_classes(&body, &class, pools);
             assigned += a.reg.iter().filter(|r| **r != NO_REG).count();
         }
     }

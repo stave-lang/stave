@@ -2,7 +2,9 @@
 
 use stave_obj::{Reloc, RelocKind, SymbolId};
 
-use super::{Asm, Cond, EncError, Gpr, Label, Mem, Rm, Scale, Size, Target, Xmm};
+use super::simd::Vex;
+use super::simd_ops::{Map, Pp};
+use super::{Asm, Cond, EncError, Gpr, Label, Mem, Rm, Scale, Size, Target, VLen, Xmm};
 
 /// Two-operand integer ALU operations (the `/digit` of opcodes 80/81/83).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -703,33 +705,53 @@ impl Asm {
 
     // ---- SSE2 scalar ----
 
-    fn sse_enc(&mut self, pfx: Option<u8>, w: bool, opc: &[u8], reg: u8, rm: RmEnc) -> Result<(), EncError> {
-        self.enc(Enc { pfx, w, rex8: false, opc, reg, rm, trailing: 0 })
+    /// One scalar SSE instruction `[pfx] 0F opc`, or its VEX form ([`Asm::set_vex_scalars`]).
+    /// Where the legacy form keeps or merges into its destination the VEX form has one more
+    /// source operand: the destination again.
+    fn sse_enc(&mut self, pfx: Option<u8>, w: bool, opc: u8, reg: u8, rm: RmEnc) -> Result<(), EncError> {
+        if !self.vex_scalars {
+            return self.enc(Enc { pfx, w, rex8: false, opc: &[0x0f, opc], reg, rm, trailing: 0 });
+        }
+        let pp = match pfx {
+            None => Pp::N,
+            Some(0x66) => Pp::P66,
+            Some(0xf3) => Pp::F3,
+            _ => Pp::F2,
+        };
+        let two_operand = match opc {
+            // `movss` / `movsd`: a load replaces the register, a register move merges
+            0x10 => matches!(rm, RmEnc::Mem(_)),
+            // stores, `movaps`, conversions to an integer, compares, `movd` / `movq`
+            0x11 | 0x28 | 0x2c | 0x2d | 0x2e | 0x2f | 0x6e | 0x7e => true,
+            _ => false,
+        };
+        let vvvv = if two_operand { 0 } else { reg };
+        self.vex(Vex { pp, map: Map::M0F, w, l: VLen::X128, opc, reg, vvvv, rm, trailing: 0 })
     }
 
     /// `addsd/subsd/mulsd/divsd/minsd/maxsd/sqrtsd dst, src` (or the `ss` forms).
     pub fn sse(&mut self, op: SseOp, p: Prec, dst: Xmm, src: impl Into<XRm>) -> Result<(), EncError> {
-        self.sse_enc(Some(p.scalar_prefix()), false, &[0x0f, op as u8], dst.0, src.into().into())
+        self.sse_enc(Some(p.scalar_prefix()), false, op as u8, dst.0, src.into().into())
     }
 
     /// `movsd/movss dst, src` (register move or load).
     pub fn movs(&mut self, p: Prec, dst: Xmm, src: impl Into<XRm>) -> Result<(), EncError> {
-        self.sse_enc(Some(p.scalar_prefix()), false, &[0x0f, 0x10], dst.0, src.into().into())
+        self.sse_enc(Some(p.scalar_prefix()), false, 0x10, dst.0, src.into().into())
     }
 
     /// `movsd/movss [m], src` (store).
     pub fn movs_store(&mut self, p: Prec, m: Mem, src: Xmm) -> Result<(), EncError> {
-        self.sse_enc(Some(p.scalar_prefix()), false, &[0x0f, 0x11], src.0, RmEnc::Mem(m))
+        self.sse_enc(Some(p.scalar_prefix()), false, 0x11, src.0, RmEnc::Mem(m))
     }
 
     /// `ucomisd/ucomiss a, b` (unordered compare: ZF PF CF; PF=1 for NaN).
     pub fn ucomis(&mut self, p: Prec, a: Xmm, b: impl Into<XRm>) -> Result<(), EncError> {
-        self.sse_enc(p.packed_prefix(), false, &[0x0f, 0x2e], a.0, b.into().into())
+        self.sse_enc(p.packed_prefix(), false, 0x2e, a.0, b.into().into())
     }
 
     /// `comisd/comiss a, b` (signalling compare).
     pub fn comis(&mut self, p: Prec, a: Xmm, b: impl Into<XRm>) -> Result<(), EncError> {
-        self.sse_enc(p.packed_prefix(), false, &[0x0f, 0x2f], a.0, b.into().into())
+        self.sse_enc(p.packed_prefix(), false, 0x2f, a.0, b.into().into())
     }
 
     /// `cvtsi2sd/cvtsi2ss dst, src` from a 32- or 64-bit signed integer.
@@ -737,7 +759,7 @@ impl Asm {
         if s < Size::D {
             return Err(EncError::Invalid("cvtsi2s needs a 32- or 64-bit source"));
         }
-        self.sse_enc(Some(p.scalar_prefix()), s == Size::Q, &[0x0f, 0x2a], dst.0, src.into().into())
+        self.sse_enc(Some(p.scalar_prefix()), s == Size::Q, 0x2a, dst.0, src.into().into())
     }
 
     /// `cvttsd2si/cvttss2si dst, src` (truncating) into a 32- or 64-bit register.
@@ -745,7 +767,7 @@ impl Asm {
         if s < Size::D {
             return Err(EncError::Invalid("cvtts2si needs a 32- or 64-bit destination"));
         }
-        self.sse_enc(Some(p.scalar_prefix()), s == Size::Q, &[0x0f, 0x2c], dst.0, src.into().into())
+        self.sse_enc(Some(p.scalar_prefix()), s == Size::Q, 0x2c, dst.0, src.into().into())
     }
 
     /// `cvtsd2si/cvtss2si dst, src` (current rounding mode).
@@ -753,12 +775,12 @@ impl Asm {
         if s < Size::D {
             return Err(EncError::Invalid("cvts2si needs a 32- or 64-bit destination"));
         }
-        self.sse_enc(Some(p.scalar_prefix()), s == Size::Q, &[0x0f, 0x2d], dst.0, src.into().into())
+        self.sse_enc(Some(p.scalar_prefix()), s == Size::Q, 0x2d, dst.0, src.into().into())
     }
 
     /// `cvtsd2ss` (`from = F64`) or `cvtss2sd` (`from = F32`).
     pub fn cvts2s(&mut self, from: Prec, dst: Xmm, src: impl Into<XRm>) -> Result<(), EncError> {
-        self.sse_enc(Some(from.scalar_prefix()), false, &[0x0f, 0x5a], dst.0, src.into().into())
+        self.sse_enc(Some(from.scalar_prefix()), false, 0x5a, dst.0, src.into().into())
     }
 
     /// `movd/movq xmm, r32/r64` (bit copy).
@@ -766,7 +788,7 @@ impl Asm {
         if s < Size::D {
             return Err(EncError::Invalid("movd/movq needs a 32- or 64-bit register"));
         }
-        self.sse_enc(Some(0x66), s == Size::Q, &[0x0f, 0x6e], dst.0, RmEnc::Reg(src.0))
+        self.sse_enc(Some(0x66), s == Size::Q, 0x6e, dst.0, RmEnc::Reg(src.0))
     }
 
     /// `movd/movq r32/r64, xmm` (bit copy).
@@ -774,12 +796,12 @@ impl Asm {
         if s < Size::D {
             return Err(EncError::Invalid("movd/movq needs a 32- or 64-bit register"));
         }
-        self.sse_enc(Some(0x66), s == Size::Q, &[0x0f, 0x7e], src.0, RmEnc::Reg(dst.0))
+        self.sse_enc(Some(0x66), s == Size::Q, 0x7e, src.0, RmEnc::Reg(dst.0))
     }
 
     /// `andps/andnps/orps/xorps` (`F32`) or the `pd` forms (`F64`).
     pub fn logic_p(&mut self, op: PLogic, p: Prec, dst: Xmm, src: impl Into<XRm>) -> Result<(), EncError> {
-        self.sse_enc(p.packed_prefix(), false, &[0x0f, op as u8], dst.0, src.into().into())
+        self.sse_enc(p.packed_prefix(), false, op as u8, dst.0, src.into().into())
     }
 
     // ---- bit scans (baseline x86-64) ----
@@ -839,6 +861,6 @@ impl Asm {
 
     /// `movaps dst, src` (full-register move).
     pub fn movaps(&mut self, dst: Xmm, src: Xmm) {
-        let _ = self.sse_enc(None, false, &[0x0f, 0x28], dst.0, RmEnc::Reg(src.0));
+        let _ = self.sse_enc(None, false, 0x28, dst.0, RmEnc::Reg(src.0));
     }
 }

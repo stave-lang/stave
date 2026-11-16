@@ -66,10 +66,11 @@ vectorized loop inside the kernel's functions, at `-O2` and at `-O3`.
 
 ## Caveats
 
-- Stage0 keeps every vector value in a stack slot between operations: each vector op loads its
-  operands from memory and stores its result. Expect Stave to lose to `gcc -O2`, and 256-bit
-  code to gain little or nothing over 128-bit code; the numbers measure that gap, not the
-  language.
+- A debug build keeps every vector value in a stack slot between operations: each vector op
+  loads its operands from memory and stores its result. A release build keeps vectors in
+  registers, but stage0 has no loop optimizer: bounds checks, slice addresses, and other
+  loop-invariant work stay inside the loops.
+- `compress` (`filter`) runs lane by lane on the stack copy of the vector.
 - `histogram` uses gather and scatter, which lower to scalar loops on x86_64-linux (both) and
   x86_64-linux-v3 (scatter).
 - Times include process start and data generation (a few ms).

@@ -19,6 +19,12 @@
 //! calls). An interval takes a scratch register only if no block of it holds a clobbering
 //! instruction after the definition.
 //!
+//! Vector values ([`CLASS_VEC`]) take the float registers: a vector register and the float
+//! register of the same number are one register, so the two classes share one pool and only
+//! differ in which of its registers survive a call ([`Pools::vec_saved`]). A value without a
+//! register lives in its frame home, which the backend sizes and aligns for the value (16 or 32
+//! bytes for a vector).
+//!
 //! On an edge `P -> T`, the register of a param of `T` is written at the end of `P`. Any other
 //! value holding that register at the end of `P` is not live into `T` (it would overlap the param
 //! at `T`'s first block), so the write is safe on the edge.
@@ -33,6 +39,8 @@ pub const NO_REG: u8 = u8::MAX;
 pub const CLASS_NONE: u8 = 0;
 pub const CLASS_INT: u8 = 1;
 pub const CLASS_FLOAT: u8 = 2;
+/// A vector or mask value: a register of the float pool, whole.
+pub const CLASS_VEC: u8 = 3;
 
 /// Blocks visited by the liveness walk before a function is left unassigned.
 const WALK_LIMIT: u64 = 50_000_000;
@@ -44,6 +52,10 @@ pub struct Pools {
     pub int_scratch: u8,
     pub float_saved: u8,
     pub float_scratch: u8,
+    /// How many of the float registers, from index 0, keep a whole vector across a clobbering
+    /// instruction (at most `float_saved`). The other float registers hold a vector only where
+    /// no clobber intervenes.
+    pub vec_saved: u8,
 }
 
 /// The result: per value, a register index within its class or [`NO_REG`]. Indices below the
@@ -57,6 +69,7 @@ pub struct Assignment {
     pub last: Vec<u32>,
     /// Bit `i`: int register index `i` is assigned to some value.
     pub int_used: u32,
+    /// The same for the float registers, whether a float or a vector has them.
     pub float_used: u32,
 }
 
@@ -71,7 +84,7 @@ struct Interval {
     lo: u32,
     hi: u32,
     weight: u64,
-    float: bool,
+    class: u8,
     clobbered: bool,
 }
 
@@ -109,8 +122,8 @@ fn for_uses(b: &Body, order: &[u32], mut f: impl FnMut(u32, u32)) {
 /// Assigns registers to the values of `b`.
 ///
 /// - `order`: the reachable blocks in emission order, entry first.
-/// - `class`: per value, [`CLASS_INT`] / [`CLASS_FLOAT`] for values that can live in a register
-///   of that class, [`CLASS_NONE`] for the rest.
+/// - `class`: per value, [`CLASS_INT`] / [`CLASS_FLOAT`] / [`CLASS_VEC`] for values that can live
+///   in a register of that class, [`CLASS_NONE`] for the rest.
 /// - `clobbers`: per instruction, whether it destroys the scratch registers (a call).
 pub fn assign(b: &Body, order: &[u32], class: &[u8], clobbers: &[bool], pools: Pools) -> Assignment {
     let nb = b.blocks.len();
@@ -259,38 +272,45 @@ pub fn assign(b: &Body, order: &[u32], class: &[u8], clobbers: &[bool], pools: P
             lo,
             hi,
             weight: weight[v],
-            float: class[v] == CLASS_FLOAT,
+            class: class[v],
             clobbered: in_def || before + after > 0,
         });
     }
     intervals.sort_by_key(|i| (i.lo, i.value));
 
-    // Linear scan. `owner[class][reg]` = index into `intervals`.
+    // Linear scan. `owner[pool][reg]` = index into `intervals`; pool 0 is the int registers,
+    // pool 1 the float registers.
     let mut owner = [[NONE; 32]; 2];
     for k in 0..intervals.len() {
-        let (lo, float, clobbered, w) = {
+        let (lo, cls, clobbered, w) = {
             let i = &intervals[k];
-            (i.lo, i.float, i.clobbered, i.weight)
+            (i.lo, i.class, i.clobbered, i.weight)
         };
-        let (saved, total) = if float {
-            (usize::from(pools.float_saved), floats)
-        } else {
-            (usize::from(pools.int_saved), ints)
+        // `saved`: the registers that keep a value of this class across a clobber; `pushed`:
+        // the ones the prologue saves when used.
+        let (saved, pushed, total) = match cls {
+            CLASS_INT => (usize::from(pools.int_saved), usize::from(pools.int_saved), ints),
+            CLASS_VEC => {
+                (usize::from(pools.vec_saved.min(pools.float_saved)), usize::from(pools.float_saved), floats)
+            }
+            _ => (usize::from(pools.float_saved), usize::from(pools.float_saved), floats),
         };
-        let own = &mut owner[usize::from(float)];
+        let own = &mut owner[usize::from(cls != CLASS_INT)];
         for o in own.iter_mut().take(total) {
             if *o != NONE && intervals[*o as usize].hi < lo {
                 *o = NONE;
             }
         }
-        // Scratch registers first (no save in the prologue), saved ones for clobbered intervals.
+        // Scratch registers first (no save in the prologue), saved ones for clobbered intervals:
+        // a float leaves the ones that keep a vector for last.
         let candidates = if clobbered { 0..saved } else { 0..total };
+        let vsaved = if cls == CLASS_FLOAT { usize::from(pools.vec_saved).min(saved) } else { 0 };
         let pick = |own: &[u32; 32]| {
             let free = |r: &usize| own[*r] == NONE;
             if clobbered {
-                candidates.clone().find(free)
+                (vsaved..saved).find(free).or_else(|| (0..vsaved).find(free))
             } else {
-                (saved..total).find(free).or_else(|| (0..saved).find(free))
+                (pushed..total).find(free).or_else(|| (0..pushed).find(free))
             }
         };
         let r = match pick(own) {
@@ -316,10 +336,10 @@ pub fn assign(b: &Body, order: &[u32], class: &[u8], clobbers: &[bool], pools: P
         if r != NO_REG {
             out.first[i.value as usize] = i.lo;
             out.last[i.value as usize] = i.hi;
-            if i.float {
-                out.float_used |= 1 << r;
-            } else {
+            if i.class == CLASS_INT {
                 out.int_used |= 1 << r;
+            } else {
+                out.float_used |= 1 << r;
             }
         }
     }

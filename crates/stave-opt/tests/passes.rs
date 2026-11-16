@@ -1,6 +1,7 @@
 //! The IR passes of a release build keep what a program computes: the same result and the same
 //! trap in the reference interpreter before and after, with verified IR in between. Plus the
-//! shapes the passes exist for: one length and one address per slice, read outside the loop.
+//! shapes the passes exist for: one length, one address, and one bound per vector width per
+//! slice, read outside the loop.
 
 use stave_ir::bounds;
 use stave_ir::{
@@ -113,6 +114,92 @@ fn same_results_and_traps() {
         assert_eq!(run(&o, main, k), want, "k = {k}");
     }
     for k in [8u64, 9, u64::MAX] {
+        let (want, got) = (run(&m, main, k), run(&o, main, k));
+        assert!(matches!(want, Outcome::Trap(t) if t.kind == PanicKind::Bounds), "{want:?}");
+        assert_eq!(got, want, "k = {k}");
+    }
+}
+
+/// `t.windows(s: &mut [u64], k: usize) -> u64`: the sum of `s[i]` for `i < k`, where every
+/// iteration checks `i` against `len -| 3` twice and against `len -| 1` once, each check with
+/// its own `slice.len` and `sub.sat`; and `t.main(k: usize) -> u64`, which calls it on eight
+/// elements `3 j + 1`.
+fn windows() -> (Module, FuncId, FuncId) {
+    let mut m = Module::new();
+    let (u64_, usize_, bool_) = (m.types.u64(), m.types.usize(), m.types.bool());
+    let arr = m.types.array(u64_, 8);
+    let parr = m.types.ref_(true, arr);
+    let pel = m.types.ref_(true, u64_);
+    let sl = m.types.slice(u64_);
+    let psl = m.types.ref_(true, sl);
+
+    let f = m.declare(InstanceId(vec![1]), "t.windows", vec![psl, usize_], Some(u64_));
+    let mut b = FuncBuilder::new(&[psl, usize_]);
+    let (s, k) = (b.param(0).unwrap(), b.param(1).unwrap());
+    let (head, hp) = b.create_block_with(&[usize_, u64_]);
+    let (body, exit) = (b.create_block(), b.create_block());
+    let (z, z2) = (b.int(0), b.int(0));
+    b.br(head, &[z, z2]);
+    b.switch_to(head);
+    let c = b.cmp(Op::Lt, bool_, hp[0], k);
+    b.cbr(c, body, &[], exit, &[]);
+    b.switch_to(body);
+    for lanes in [3, 3, 1] {
+        let n = b.op(Op::SliceLen, usize_, &[s.into()]);
+        let w = b.int(lanes);
+        let lim = b.binary(Op::SubSat, usize_, n, w);
+        b.bounds_check(hp[0], lim);
+    }
+    let p = b.op(Op::ElemAddr, pel, &[s.into(), hp[0].into()]);
+    let x = b.load(u64_, p);
+    let acc = b.binary(Op::AddWrap, u64_, hp[1], x);
+    let one = b.int(1);
+    let i2 = b.binary(Op::AddWrap, usize_, hp[0], one);
+    b.br(head, &[i2.into(), acc.into()]);
+    b.switch_to(exit);
+    b.ret(Some(hp[1].into()));
+    assert!(m.define(f, b.finish().unwrap()));
+
+    let main = m.declare(InstanceId(vec![2]), "t.main", vec![usize_], Some(u64_));
+    let mut b = FuncBuilder::new(&[usize_]);
+    let k = b.param(0).unwrap();
+    let a = b.slot(parr);
+    for j in 0..8 {
+        let idx = b.int(j);
+        let q = b.op(Op::ElemAddr, pel, &[a.into(), idx]);
+        let v = b.int(3 * j + 1);
+        b.store(q, v);
+    }
+    let zero = b.int(0);
+    let base = b.op(Op::ElemAddr, pel, &[a.into(), zero]);
+    let len = b.int(8);
+    let s = b.op(Op::SliceMake, psl, &[base.into(), len]);
+    let r = b.call(f, Some(u64_), &[s.into(), k.into()]).unwrap();
+    b.ret(Some(r.into()));
+    assert!(m.define(main, b.finish().unwrap()));
+    verify_module(&m).unwrap();
+    (m, f, main)
+}
+
+#[test]
+fn one_bound_per_slice_and_width() {
+    let (m, f, main) = windows();
+    let before = m.func(f).unwrap().body.as_ref().unwrap();
+    assert_eq!(count(before, Op::SubSat), 3);
+    let o = optimized(&m);
+    let b = o.func(f).unwrap().body.as_ref().unwrap();
+    assert_eq!(count(b, Op::SubSat), 2);
+    assert_eq!(count(b, Op::SliceLen), 1);
+    assert_eq!(count(b, Op::BoundsCheck), 3);
+    let entry = b.blocks[0].insts;
+    let in_entry = entry.indices().filter(|&i| b.insts.op[i as usize] == Op::SubSat).count();
+    assert_eq!(in_entry, 2, "both bounds are computed where the slice is defined");
+    for k in [0u64, 1, 5] {
+        let want = run(&m, main, k);
+        assert_eq!(want, Outcome::Return(Some(Val::S(3 * k * k.saturating_sub(1) / 2 + k))));
+        assert_eq!(run(&o, main, k), want, "k = {k}");
+    }
+    for k in [6u64, 8, u64::MAX] {
         let (want, got) = (run(&m, main, k), run(&o, main, k));
         assert!(matches!(want, Outcome::Trap(t) if t.kind == PanicKind::Bounds), "{want:?}");
         assert_eq!(got, want, "k = {k}");
