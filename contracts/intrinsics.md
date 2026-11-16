@@ -98,7 +98,8 @@ truth):
 
 - **site table** `__stave_site_table`: `u64 count`, then `count` rows of 32 bytes, one per trap
   site (`runtime.panic.trap(kind, site)`'s `site` is a row index; `0xFFFF_FFFF` = unknown):
-  `+0 file: u64` address of the UTF-8 file path (the path diagnostics use), `+8 file_len: u32`,
+  `+0 file: u64` address of the UTF-8 file path (the path diagnostics use; for `std`, `runtime`, and the
+  packages they depend on `<package>/<path in the package>`, e.g. `std/vec.stv`), `+8 file_len: u32`,
   `+12 line: u32` (1-based), `+16 fn: u64` address of the UTF-8 checked-IR path of the enclosing
   fn, `+24 fn_len: u32`, `+28 col: u32` (1-based, in bytes). Rows are in canonical order (by fn
   instance id, then source offset), so the table is identical in stage0 and stage1.

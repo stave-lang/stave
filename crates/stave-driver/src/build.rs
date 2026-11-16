@@ -16,6 +16,7 @@
 //!   errors on valid IR (vectors, f16) are [`Failure::Unsupported`].
 //! - [`main_path`]: the checked-IR path of the root package's `main`.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;
 
@@ -112,7 +113,7 @@ pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Module, Failure>
     prof::part(".rounds", tm.rounds);
     prof::part(".assemble", tm.assemble);
     prof::mark("lower");
-    let m = lowered.map_err(|es| {
+    let mut m = lowered.map_err(|es| {
         let message = listed(&es);
         if es.iter().all(|e| e.kind == LowerErrorKind::Unsupported) {
             Failure::Unsupported { stage: Stage::Lower, message }
@@ -140,7 +141,28 @@ pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Module, Failure>
         });
     }
     prof::mark("bounds-audit");
+    embed_site_paths(&mut m, prog);
     Ok(m)
+}
+
+/// Names the files of built-in packages in the site table by `<package>/<path in package>`
+/// (`std/vec.stv`), so what goes into a binary does not depend on where the library is
+/// installed. The sites of other packages keep the path diagnostics print.
+fn embed_site_paths(m: &mut Module, prog: &Program) {
+    use stave_sema::package::PackageKind;
+    let embedded: HashMap<&str, String> = prog
+        .files
+        .iter()
+        .filter_map(|f| {
+            let p = prog.packages.get(f.package.0 as usize).filter(|p| p.kind == PackageKind::Builtin)?;
+            Some((f.display_path.as_str(), format!("{}/{}", p.name, f.rel_path)))
+        })
+        .collect();
+    for site in &mut m.sites {
+        if let Some(e) = embedded.get(site.file.as_str()) {
+            site.file.clone_from(e);
+        }
+    }
 }
 
 /// [`stave_ir::verify_module`] with the functions verified in parallel (same errors, same order).
