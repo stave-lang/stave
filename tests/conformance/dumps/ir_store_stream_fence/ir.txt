@@ -5,35 +5,29 @@ type t3 int u size
 type t4 int s 32
 type t5 float 32
 type t6 bool
-type t7 str
-type t8 ref t7
-type t9 ref t16
-type t10 ref mut t5
-type t11 ref mut t17
-type t12 ref mut t18
-type t13 ptr const t0
-type t14 ptr const t1
-type t15 ptr mut t2
-type t16 slice t0
-type t17 slice t5
-type t18 slice t5 align 16
-type t19 vec t5 4
-fn @0 std.io.print {
-b0(%0: t8):
-  ret
-}
-fn @1 main.observe {
+type t7 ref t14
+type t8 ref mut t5
+type t9 ref mut t15
+type t10 ref mut t16
+type t11 ptr const t0
+type t12 ptr const t1
+type t13 ptr mut t2
+type t14 slice t0
+type t15 slice t5
+type t16 slice t5 align 16
+type t17 vec t5 4
+fn @0 main.observe {
 b0(%0: t5):
   ret %0
 }
-fn @2 main.explicit {
-b0(%0: t15, %1: t2):
+fn @1 main.explicit {
+b0(%0: t13, %1: t2):
   mem.store_stream () %0 %1
   mem.fence_stream ()
   ret
 }
-fn @3 main.fill {
-b0(%0: t12, %1: t19, %2: t5):
+fn @2 main.fill {
+b0(%0: t10, %1: t17, %2: t5):
   br b1(0, 0x00000000)
 b1(%3: t3, %4: t5):
   %5 = add t3 %3 4
@@ -52,7 +46,7 @@ b3(%11: t5):
   ret %11
 b4():
   mem.fence_stream ()
-  %12 = call t5 @1 %2
+  %12 = call t5 @0 %2
   br b5(%12)
 b5(%13: t5):
   %14 = gt t6 %13 0x42c80000
@@ -64,27 +58,27 @@ b7():
   %15 = add t3 %3 4
   br b1(%15, %13)
 }
-fn @4 main.two {
-b0(%0: t11, %1: t5):
+fn @3 main.two {
+b0(%0: t9, %1: t5):
   %2 = slice.len t3 %0
   check.bounds () 0 %2
-  %3 = addr.elem t10 %0 0
+  %3 = addr.elem t8 %0 0
   mem.store_stream () %3 %1
   %4 = slice.len t3 %0
   check.bounds () 1 %4
-  %5 = addr.elem t10 %0 1
+  %5 = addr.elem t8 %0 1
   mem.store_stream () %5 %1
   mem.fence_stream ()
   ret
 }
-fn @5 main.hints {
-b0(%0: t9, %1: t14):
-  %2 = slice.ptr t13 %0
+fn @4 main.hints {
+b0(%0: t7, %1: t12):
+  %2 = slice.ptr t11 %0
   mem.prefetch_read_l1 () %2 64
   mem.prefetch_write_nta () %1 0
   ret
 }
-fn @6 main.main {
+fn @5 main.main {
 b0():
   ret 0
 }
