@@ -406,6 +406,31 @@ fn run_foreign_target_is_e1001() {
     assert_eq!(v["code"], "E1001");
 }
 
+fn contains(hay: &[u8], needle: &str) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
+/// A debug build roots the program's own fns but only the `std` and `runtime` fns it reaches.
+#[test]
+fn debug_build_roots_own_fns_not_unused_std() {
+    let d = tmp("roots");
+    std::fs::create_dir_all(d.join("p/src")).unwrap();
+    std::fs::write(d.join("p/stave.toml"), "name = \"p\"\nkind = \"bin\"\n").unwrap();
+    std::fs::write(
+        d.join("p/src/main.stv"),
+        "import std.io;\n\nfn never_called() -> i32 {\n    return 7;\n}\n\nfn main() -> i32 {\n    io.print(\"hi\\n\");\n    return 0;\n}\n",
+    )
+    .unwrap();
+    let pkg = d.join("p").display().to_string();
+    let (c, _, err) = stave_in(&d, &["build", &pkg, "-o", "p.bin"]);
+    assert_eq!(c, 0, "{err}");
+    let bin = std::fs::read(d.join("p.bin")).unwrap();
+    assert!(contains(&bin, "main.never_called"), "own fn is a root");
+    assert!(contains(&bin, "std.io.print"), "reached std fn is kept");
+    assert!(!contains(&bin, "std.num.parse_f64"), "unreached std fn is not lowered");
+    assert!(!contains(&bin, "std.env.count"), "unreached std fn is not lowered");
+}
+
 #[test]
 fn ir_dump_written_without_errors_only() {
     let d = tmp("ir");

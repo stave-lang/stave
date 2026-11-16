@@ -1,13 +1,7 @@
 type t0 int s 32
 type t1 int s 64
 type t2 bool
-type t3 str
-type t4 ref t3
-fn @0 std.io.print {
-b0(%0: t4):
-  ret
-}
-fn @1 main.sign {
+fn @0 main.sign {
 b0(%0: t1):
   %1 = lt t2 %0 0
   cbr %1 b1() b2()
@@ -25,9 +19,9 @@ b5():
 b6(%4: t1):
   br b3(%4)
 }
-fn @2 main.main {
+fn @1 main.main {
 b0():
-  %0 = call t1 @1 -7
+  %0 = call t1 @0 -7
   %1 = eq t2 %0 -1
   cbr %1 b1() b2()
 b1():

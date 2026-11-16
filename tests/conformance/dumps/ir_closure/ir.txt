@@ -1,55 +1,49 @@
 type t0 int u 32
 type t1 int s 32
-type t2 str
-type t3 ref t2
-type t4 ref mut t0
-type t5 ref mut t4
-type t6 ref mut t7
-type t7 tuple t4 t4
-type t8 fntype t0 -> t0
-fn @0 std.io.print {
-b0(%0: t3):
-  ret
-}
-fn @1 main.twice {
+type t2 ref mut t0
+type t3 ref mut t2
+type t4 ref mut t5
+type t5 tuple t2 t2
+type t6 fntype t0 -> t0
+fn @0 main.twice {
 b0(%0: t0):
   %1 = mul t0 %0 2
   ret %1
 }
-fn @2 main.apply {
-b0(%0: t8, %1: t0):
+fn @1 main.apply {
+b0(%0: t6, %1: t0):
   %2 = call.ind t0 %0 %1
   ret %2
 }
-fn @3 main.main {
+fn @2 main.main {
 b0():
-  %0 = slot t4
-  %1 = slot t4
-  %2 = slot t6
+  %0 = slot t2
+  %1 = slot t2
+  %2 = slot t4
   store () %0 3
   store () %1 0
-  %3 = addr.field t5 %2 0
+  %3 = addr.field t3 %2 0
   store () %3 %0
-  %4 = addr.field t5 %2 1
+  %4 = addr.field t3 %2 1
   store () %4 %1
-  %5 = fn.make t8 @3.0 %2
-  %6 = call t0 @2 %5 1
-  %7 = call t0 @2 @3.1 1
+  %5 = fn.make t6 @2.0 %2
+  %6 = call t0 @1 %5 1
+  %7 = call t0 @1 @2.1 1
   %8 = add t0 %6 %7
-  %9 = call t0 @2 @1 1
+  %9 = call t0 @1 @0 1
   %10 = add t0 %8 %9
   %11 = load t0 %1
-  %12 = call.ind t0 @1 %11
+  %12 = call.ind t0 @0 %11
   %13 = add t0 %10 %12
   %14 = cast.wrap t1 %13
   ret %14
 }
-fn @3.0 main.main {
-b0(%0: t0, %1: t6):
-  %2 = addr.field t5 %1 0
-  %3 = load t4 %2
-  %4 = addr.field t5 %1 1
-  %5 = load t4 %4
+fn @2.0 main.main {
+b0(%0: t0, %1: t4):
+  %2 = addr.field t3 %1 0
+  %3 = load t2 %2
+  %4 = addr.field t3 %1 1
+  %5 = load t2 %4
   %6 = load t0 %5
   %7 = add t0 %6 1
   store () %5 %7
@@ -57,7 +51,7 @@ b0(%0: t0, %1: t6):
   %9 = add t0 %0 %8
   ret %9
 }
-fn @3.1 main.main {
+fn @2.1 main.main {
 b0(%0: t0):
   %1 = add t0 %0 1
   ret %1

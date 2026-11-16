@@ -7,59 +7,53 @@ type t5 int s 32
 type t6 float 32
 type t7 float 64
 type t8 bool
-type t9 str
-type t10 ref t4
-type t11 ref t6
-type t12 ref t9
-type t13 ref t19
-type t14 ref t20
-type t15 ref mut t6
-type t16 ref mut t19
-type t17 ptr const t6
-type t18 array t2 3
-type t19 array t4 2
-type t20 slice t4
-type t21 tuple t8 t7
-type t22 adt d17
-type t23 adt d24 t0
-type t24 fntype t1 -> t1
-fn @0 std.io.print {
-b0(%0: t12):
-  ret
-}
-fn @1 main.twice {
+type t9 ref t4
+type t10 ref t6
+type t11 ref t17
+type t12 ref t18
+type t13 ref mut t6
+type t14 ref mut t17
+type t15 ptr const t6
+type t16 array t2 3
+type t17 array t4 2
+type t18 slice t4
+type t19 tuple t8 t7
+type t20 adt d17
+type t21 adt d24 t0
+type t22 fntype t1 -> t1
+fn @0 main.twice {
 b0(%0: t1):
   %1 = mul.wrap t1 %0 2
   ret %1
 }
-fn @2 main.take {
-b0(%0: t23, %1: t22, %2: t14, %3: t18, %4: t17, %5: t21):
+fn @1 main.take {
+b0(%0: t21, %1: t20, %2: t12, %3: t16, %4: t15, %5: t19):
   %6 = slice.len t3 %2
   ret %6
 }
-fn @3 main.apply {
-b0(%0: t24, %1: t1):
+fn @2 main.apply {
+b0(%0: t22, %1: t1):
   %2 = call.ind t1 %0 %1
   ret %2
 }
-fn @4 main.main {
+fn @3 main.main {
 b0():
-  %0 = slot t15
-  %1 = slot t16
+  %0 = slot t13
+  %1 = slot t14
   store () %0 0x3fc00000
-  %2 = make t18 1 2 3
-  %3 = make t19 1 2
+  %2 = make t16 1 2 3
+  %3 = make t17 1 2
   store () %1 %3
-  %4 = make t23 1 2
-  %5 = enum.make t22 1 122
-  %6 = cast t13 %1
-  %7 = addr.elem t10 %6 0
-  %8 = slice.make t14 %7 2
-  %9 = cast t11 %0
-  %10 = cast t17 %9
-  %11 = make t21 1 0x4000000000000000
-  %12 = call t3 @2 %4 %5 %8 %2 %10 %11
-  %13 = call t1 @3 @1 2
+  %4 = make t21 1 2
+  %5 = enum.make t20 1 122
+  %6 = cast t11 %1
+  %7 = addr.elem t9 %6 0
+  %8 = slice.make t12 %7 2
+  %9 = cast t10 %0
+  %10 = cast t15 %9
+  %11 = make t19 1 0x4000000000000000
+  %12 = call t3 @1 %4 %5 %8 %2 %10 %11
+  %13 = call t1 @2 @0 2
   %14 = eq t8 %12 2
   cbr %14 b4() b5(0)
 b1():

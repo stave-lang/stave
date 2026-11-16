@@ -1,13 +1,7 @@
 type t0 int u 64
 type t1 int s 32
 type t2 bool
-type t3 str
-type t4 ref t3
-fn @0 std.io.print {
-b0(%0: t4):
-  ret
-}
-fn @1 main.sum {
+fn @0 main.sum {
 b0(%0: t0):
   br b1(0, 0)
 b1(%1: t0, %2: t0):
@@ -20,9 +14,9 @@ b2():
 b3(%6: t0):
   ret %6
 }
-fn @2 main.main {
+fn @1 main.main {
 b0():
-  %0 = call t0 @1 4
+  %0 = call t0 @0 4
   %1 = eq t2 %0 6
   cbr %1 b1() b2()
 b1():

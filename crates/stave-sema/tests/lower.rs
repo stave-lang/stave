@@ -253,7 +253,7 @@ fn ir_dump_is_deterministic() {
 fn std_and_runtime_lower_and_verify_on_both_arches() {
     let p = repo().join("tests/conformance/run/hello");
     for t in ["x86_64-linux", "aarch64-linux"] {
-        let m = lowered(&p, t, Mode::Debug, None);
+        let m = lowered(&p, t, Mode::DebugAll, None);
         assert!(m.funcs.len() > 100, "{t}: {} funcs", m.funcs.len());
         let text = stave_ir::print_checked(&m);
         assert!(!text.contains(" ?") && !text.contains("%?") && !text.contains("b?"), "{t}: unresolved ids");
