@@ -79,8 +79,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f32", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "bit", recipes: &["bit", "bit"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 3, recipe: "and x2; orr", recipes: &["and x2; orr", "and x2; orr"], note: "bsl is SVE2: magnitude and sign masks, then or", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "bsl", recipes: &["bsl", "bsl"], note: "the sign-bit mask is a constant splat", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "and x2; orr", recipes: &["and x2; orr", "and x2; orr"], note: "bsl is SVE2: magnitude and sign masks, then or", unverified: false },
         ],
     },
     Entry {
@@ -169,8 +169,48 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "rev64; mul; xtn x2; uaddlp; shl; umlal", recipes: &["rev64; mul; xtn x2; uaddlp; shl; umlal", "rev64; mul; xtn x2; uaddlp; shl; umlal"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 8, recipe: "umov x4; mul x2; ins x2", recipes: &["umov x4; mul x2; ins x2", "umov x4; mul x2; ins x2"], note: "no 64-bit lane mul: per lane through general registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "mul", recipes: &["mul", "mul"], note: "", unverified: false },
+        ],
+    },
+    Entry {
+        op: "vec.mul.sat",
+        ty: "i8/i16/i32",
+        form: "",
+        keys: &["i8", "i16", "i32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "?mull; ?qxtn; ?mull2; ?qxtn2", recipes: &["smull; sqxtn; smull2; sqxtn2", "smull; sqxtn; smull2; sqxtn2", "smull; sqxtn; smull2; sqxtn2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 8, recipe: "mul; smulh; asr; eor; asr; eor; cmpne; sel", recipes: &["mul; smulh; asr; eor; asr; eor; cmpne; sel", "mul; smulh; asr; eor; asr; eor; cmpne; sel", "mul; smulh; asr; eor; asr; eor; cmpne; sel"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.mul.sat",
+        ty: "u8/u16/u32",
+        form: "",
+        keys: &["u8", "u16", "u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "?mull; ?qxtn; ?mull2; ?qxtn2", recipes: &["umull; uqxtn; umull2; uqxtn2", "umull; uqxtn; umull2; uqxtn2", "umull; uqxtn; umull2; uqxtn2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "mul; umulh; cmpne; sel", recipes: &["mul; umulh; cmpne; sel", "mul; umulh; cmpne; sel", "mul; umulh; cmpne; sel"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.mul.sat",
+        ty: "i64",
+        form: "",
+        keys: &["i64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 20, recipe: "umov x4; eor x4; asr x2; mul x2; smulh x2; cmp x2; csel x2; ins x2", recipes: &["umov x4; eor x4; asr x2; mul x2; smulh x2; cmp x2; csel x2; ins x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 8, recipe: "mul; smulh; asr; eor; asr; eor; cmpne; sel", recipes: &["mul; smulh; asr; eor; asr; eor; cmpne; sel"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.mul.sat",
+        ty: "u64",
+        form: "",
+        keys: &["u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 14, recipe: "umov x4; umulh x2; mul x2; cmp x2; csinv x2; ins x2", recipes: &["umov x4; umulh x2; mul x2; cmp x2; csinv x2; ins x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "mul; umulh; cmpne; sel", recipes: &["mul; umulh; cmpne; sel"], note: "", unverified: true },
         ],
     },
     Entry {
@@ -199,7 +239,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "add; ?qadd; eor; umaxv; fmov; cmp; cset", recipes: &["add; sqadd; eor; umaxv; fmov; cmp; cset", "add; sqadd; eor; umaxv; fmov; cmp; cset", "add; sqadd; eor; umaxv; fmov; cmp; cset", "add; sqadd; eor; umaxv; fmov; cmp; cset", "add; uqadd; eor; umaxv; fmov; cmp; cset", "add; uqadd; eor; umaxv; fmov; cmp; cset", "add; uqadd; eor; umaxv; fmov; cmp; cset", "add; uqadd; eor; umaxv; fmov; cmp; cset"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 12, recipe: "add; ?qadd; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", recipes: &["add; sqadd; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "add; sqadd; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "add; sqadd; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "add; sqadd; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "add; uqadd; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "add; uqadd; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "add; uqadd; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "add; uqadd; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and"], note: "a lane overflows where the saturating result differs from the wrapping one", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "add; ?qadd; cmpne; cset", recipes: &["add; sqadd; cmpne; cset", "add; sqadd; cmpne; cset", "add; sqadd; cmpne; cset", "add; sqadd; cmpne; cset", "add; uqadd; cmpne; cset", "add; uqadd; cmpne; cset", "add; uqadd; cmpne; cset", "add; uqadd; cmpne; cset"], note: "", unverified: false },
         ],
     },
@@ -209,7 +249,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "sub; ?qsub; eor; umaxv; fmov; cmp; cset", recipes: &["sub; sqsub; eor; umaxv; fmov; cmp; cset", "sub; sqsub; eor; umaxv; fmov; cmp; cset", "sub; sqsub; eor; umaxv; fmov; cmp; cset", "sub; sqsub; eor; umaxv; fmov; cmp; cset", "sub; uqsub; eor; umaxv; fmov; cmp; cset", "sub; uqsub; eor; umaxv; fmov; cmp; cset", "sub; uqsub; eor; umaxv; fmov; cmp; cset", "sub; uqsub; eor; umaxv; fmov; cmp; cset"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 12, recipe: "sub; ?qsub; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", recipes: &["sub; sqsub; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "sub; sqsub; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "sub; sqsub; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "sub; sqsub; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "sub; uqsub; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "sub; uqsub; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "sub; uqsub; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "sub; uqsub; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and"], note: "a lane overflows where the saturating result differs from the wrapping one", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "sub; ?qsub; cmpne; cset", recipes: &["sub; sqsub; cmpne; cset", "sub; sqsub; cmpne; cset", "sub; sqsub; cmpne; cset", "sub; sqsub; cmpne; cset", "sub; uqsub; cmpne; cset", "sub; uqsub; cmpne; cset", "sub; uqsub; cmpne; cset", "sub; uqsub; cmpne; cset"], note: "", unverified: false },
         ],
     },
@@ -219,7 +259,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "i16", "i32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 10, recipe: "mul; smull; smull2; sqxtn; sqxtn2; eor; umaxv; fmov; cmp; cset", recipes: &["mul; smull; smull2; sqxtn; sqxtn2; eor; umaxv; fmov; cmp; cset", "mul; smull; smull2; sqxtn; sqxtn2; eor; umaxv; fmov; cmp; cset", "mul; smull; smull2; sqxtn; sqxtn2; eor; umaxv; fmov; cmp; cset"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 18, recipe: "smull; xtn; sxtl; cmeq; smull2; xtn2; sxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and", recipes: &["smull; xtn; sxtl; cmeq; smull2; xtn2; sxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "smull; xtn; sxtl; cmeq; smull2; xtn2; sxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "smull; xtn; sxtl; cmeq; smull2; xtn2; sxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and"], note: "a lane overflows where the double-width product differs from the truncated one extended back", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "mul; smulh; asr; cmpne; cset", recipes: &["mul; smulh; asr; cmpne; cset", "mul; smulh; asr; cmpne; cset", "mul; smulh; asr; cmpne; cset"], note: "", unverified: false },
         ],
     },
@@ -229,7 +269,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["u8", "u16", "u32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 10, recipe: "mul; umull; umull2; uqxtn; uqxtn2; eor; umaxv; fmov; cmp; cset", recipes: &["mul; umull; umull2; uqxtn; uqxtn2; eor; umaxv; fmov; cmp; cset", "mul; umull; umull2; uqxtn; uqxtn2; eor; umaxv; fmov; cmp; cset", "mul; umull; umull2; uqxtn; uqxtn2; eor; umaxv; fmov; cmp; cset"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 18, recipe: "umull; xtn; uxtl; cmeq; umull2; xtn2; uxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and", recipes: &["umull; xtn; uxtl; cmeq; umull2; xtn2; uxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "umull; xtn; uxtl; cmeq; umull2; xtn2; uxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and", "umull; xtn; uxtl; cmeq; umull2; xtn2; uxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and"], note: "a lane overflows where the double-width product differs from the truncated one extended back", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "mul; umulh; cmpne; cset", recipes: &["mul; umulh; cmpne; cset", "mul; umulh; cmpne; cset", "mul; umulh; cmpne; cset"], note: "", unverified: false },
         ],
     },
@@ -239,7 +279,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 15, recipe: "umov x4; mul x2; smulh x2; asr x2; cmp; ccmp; cset; fmov; ins", recipes: &["umov x4; mul x2; smulh x2; asr x2; cmp; ccmp; cset; fmov; ins"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 21, recipe: "umov x4; mul x2; smulh x2; cmp x2; cset x2; orr x2; ins x2; cmp; csel; csetm; dup; and", recipes: &["umov x4; mul x2; smulh x2; cmp x2; cset x2; orr x2; ins x2; cmp; csel; csetm; dup; and"], note: "per lane through general registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "mul; smulh; asr; cmpne; cset", recipes: &["mul; smulh; asr; cmpne; cset"], note: "", unverified: false },
         ],
     },
@@ -249,7 +289,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 13, recipe: "umov x4; mul x2; umulh x2; orr; cmp; cset; fmov; ins", recipes: &["umov x4; mul x2; umulh x2; orr; cmp; cset; fmov; ins"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 21, recipe: "umov x4; mul x2; umulh x2; cmp x2; cset x2; orr x2; ins x2; cmp; csel; csetm; dup; and", recipes: &["umov x4; mul x2; umulh x2; cmp x2; cset x2; orr x2; ins x2; cmp; csel; csetm; dup; and"], note: "per lane through general registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "mul; umulh; cmpne; cset", recipes: &["mul; umulh; cmpne; cset"], note: "", unverified: false },
         ],
     },
@@ -309,7 +349,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "const",
         keys: &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "shl", recipes: &["shl", "shl", "shl", "shl", "shl", "shl", "shl", "shl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "ushl", recipes: &["ushl", "ushl", "ushl", "ushl", "ushl", "ushl", "ushl", "ushl"], note: "no immediate form: the splat of the constant amount, and its negation or mask, are constants", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "lsl", recipes: &["lsl", "lsl", "lsl", "lsl", "lsl", "lsl", "lsl", "lsl"], note: "", unverified: false },
         ],
     },
@@ -319,7 +359,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "const",
         keys: &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "shl", recipes: &["shl", "shl", "shl", "shl", "shl", "shl", "shl", "shl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "ushl", recipes: &["ushl", "ushl", "ushl", "ushl", "ushl", "ushl", "ushl", "ushl"], note: "no immediate form: the splat of the constant amount, and its negation or mask, are constants", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "lsl", recipes: &["lsl", "lsl", "lsl", "lsl", "lsl", "lsl", "lsl", "lsl"], note: "", unverified: false },
         ],
     },
@@ -329,7 +369,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "const",
         keys: &["u8", "u16", "u32", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "ushr", recipes: &["ushr", "ushr", "ushr", "ushr"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "ushl", recipes: &["ushl", "ushl", "ushl", "ushl"], note: "no immediate form: the splat of the constant amount, and its negation or mask, are constants", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "lsr", recipes: &["lsr", "lsr", "lsr", "lsr"], note: "", unverified: false },
         ],
     },
@@ -339,7 +379,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "const",
         keys: &["i8", "i16", "i32", "i64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "sshr", recipes: &["sshr", "sshr", "sshr", "sshr"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "sshl", recipes: &["sshl", "sshl", "sshl", "sshl"], note: "no immediate form: the splat of the constant amount, and its negation or mask, are constants", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "asr", recipes: &["asr", "asr", "asr", "asr"], note: "", unverified: false },
         ],
     },
@@ -385,22 +425,32 @@ pub(super) static ENTRIES: &[Entry] = &[
     },
     Entry {
         op: "vec.div_const",
-        ty: "u8/u16/u32",
+        ty: "u8",
         form: "",
-        keys: &["u8", "u16", "u32"],
+        keys: &["u8"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 6, recipe: "umull; umull2; uzp2; sub; usra; ushr", recipes: &["umull; umull2; uzp2; sub; usra; ushr", "umull; umull2; uzp2; sub; usra; ushr", "umull; umull2; uzp2; sub; usra; ushr"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "umulh; sub; lsr; add; lsr", recipes: &["umulh; sub; lsr; add; lsr", "umulh; sub; lsr; add; lsr", "umulh; sub; lsr; add; lsr"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 48, recipe: "umov x16; udiv x16; ins x16", recipes: &["umov x16; udiv x16; ins x16"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "umulh; sub; lsr; add; lsr", recipes: &["umulh; sub; lsr; add; lsr"], note: "", unverified: false },
         ],
     },
     Entry {
         op: "vec.div_const",
-        ty: "i8/i16/i32",
+        ty: "u16",
         form: "",
-        keys: &["i8", "i16", "i32"],
+        keys: &["u16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 6, recipe: "smull; smull2; uzp2; add; sshr; usra", recipes: &["smull; smull2; uzp2; add; sshr; usra", "smull; smull2; uzp2; add; sshr; usra", "smull; smull2; uzp2; add; sshr; usra"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "smulh; add; asr; lsr; add", recipes: &["smulh; add; asr; lsr; add", "smulh; add; asr; lsr; add", "smulh; add; asr; lsr; add"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 24, recipe: "umov x8; udiv x8; ins x8", recipes: &["umov x8; udiv x8; ins x8"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "umulh; sub; lsr; add; lsr", recipes: &["umulh; sub; lsr; add; lsr"], note: "", unverified: false },
+        ],
+    },
+    Entry {
+        op: "vec.div_const",
+        ty: "u32",
+        form: "",
+        keys: &["u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 12, recipe: "umov x4; udiv x4; ins x4", recipes: &["umov x4; udiv x4; ins x4"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "umulh; sub; lsr; add; lsr", recipes: &["umulh; sub; lsr; add; lsr"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -409,8 +459,38 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 12, recipe: "umov x2; umulh x2; sub x2; add x2; lsr x2; fmov; ins", recipes: &["umov x2; umulh x2; sub x2; add x2; lsr x2; fmov; ins"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 6, recipe: "umov x2; udiv x2; ins x2", recipes: &["umov x2; udiv x2; ins x2"], note: "per lane through general registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "umulh; sub; lsr; add; lsr", recipes: &["umulh; sub; lsr; add; lsr"], note: "", unverified: false },
+        ],
+    },
+    Entry {
+        op: "vec.div_const",
+        ty: "i8",
+        form: "",
+        keys: &["i8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 48, recipe: "smov x16; sdiv x16; ins x16", recipes: &["smov x16; sdiv x16; ins x16"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "smulh; add; asr; lsr; add", recipes: &["smulh; add; asr; lsr; add"], note: "", unverified: false },
+        ],
+    },
+    Entry {
+        op: "vec.div_const",
+        ty: "i16",
+        form: "",
+        keys: &["i16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 24, recipe: "smov x8; sdiv x8; ins x8", recipes: &["smov x8; sdiv x8; ins x8"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "smulh; add; asr; lsr; add", recipes: &["smulh; add; asr; lsr; add"], note: "", unverified: false },
+        ],
+    },
+    Entry {
+        op: "vec.div_const",
+        ty: "i32",
+        form: "",
+        keys: &["i32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 12, recipe: "smov x4; sdiv x4; ins x4", recipes: &["smov x4; sdiv x4; ins x4"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "smulh; add; asr; lsr; add", recipes: &["smulh; add; asr; lsr; add"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -419,7 +499,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 12, recipe: "umov x2; smulh x2; add x2; asr x2; add x2; fmov; ins", recipes: &["umov x2; smulh x2; add x2; asr x2; add x2; fmov; ins"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 6, recipe: "umov x2; sdiv x2; ins x2", recipes: &["umov x2; sdiv x2; ins x2"], note: "per lane through general registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "smulh; add; asr; lsr; add", recipes: &["smulh; add; asr; lsr; add"], note: "", unverified: false },
         ],
     },
@@ -519,7 +599,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f32", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "fminnm", recipes: &["fminnm", "fminnm"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "fmin; fcmeq x2; bic x2; bit x2", recipes: &["fmin; fcmeq x2; bic x2; bit x2", "fmin; fcmeq x2; bic x2; bit x2"], note: "fminnm would keep a signaling NaN: a NaN lane whose other operand is a number takes the number", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fminnm", recipes: &["fminnm", "fminnm"], note: "", unverified: false },
         ],
     },
@@ -529,7 +609,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f32", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "fmaxnm", recipes: &["fmaxnm", "fmaxnm"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "fmax; fcmeq x2; bic x2; bit x2", recipes: &["fmax; fcmeq x2; bic x2; bit x2", "fmax; fcmeq x2; bic x2; bit x2"], note: "fmaxnm would keep a signaling NaN: a NaN lane whose other operand is a number takes the number", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fmaxnm", recipes: &["fmaxnm", "fmaxnm"], note: "", unverified: false },
         ],
     },
@@ -539,8 +619,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f32", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 2, recipe: "fcmgt; bsl", recipes: &["fcmgt; bsl", "fcmgt; bsl"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 2, recipe: "fcmgt; sel", recipes: &["fcmgt; sel", "fcmgt; sel"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "fcmgt; bsl; fmin", recipes: &["fcmgt; bsl; fmin", "fcmgt; bsl; fmin"], note: "the fmin of the result with itself quiets a NaN that came through", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "fcmgt; sel", recipes: &["fcmgt; sel", "fcmgt; sel"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -549,8 +629,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f32", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 2, recipe: "fcmgt; bsl", recipes: &["fcmgt; bsl", "fcmgt; bsl"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 2, recipe: "fcmgt; sel", recipes: &["fcmgt; sel", "fcmgt; sel"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "fcmgt; bsl; fmin", recipes: &["fcmgt; bsl; fmin", "fcmgt; bsl; fmin"], note: "the fmin of the result with itself quiets a NaN that came through", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "fcmgt; sel", recipes: &["fcmgt; sel", "fcmgt; sel"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -569,7 +649,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 2, recipe: "cmgt; bsl", recipes: &["cmgt; bsl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "cmgt; bsl", recipes: &["cmgt; bsl"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "smin", recipes: &["smin"], note: "", unverified: false },
         ],
     },
@@ -579,7 +659,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 2, recipe: "cmhi; bsl", recipes: &["cmhi; bsl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "cmhi; bsl", recipes: &["cmhi; bsl"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "umin", recipes: &["umin"], note: "", unverified: false },
         ],
     },
@@ -599,7 +679,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 2, recipe: "cmgt; bsl", recipes: &["cmgt; bsl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "cmgt; bsl", recipes: &["cmgt; bsl"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "smax", recipes: &["smax"], note: "", unverified: false },
         ],
     },
@@ -609,7 +689,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 2, recipe: "cmhi; bsl", recipes: &["cmhi; bsl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "cmhi; bsl", recipes: &["cmhi; bsl"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "umax", recipes: &["umax"], note: "", unverified: false },
         ],
     },
@@ -820,7 +900,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         keys: &["m8", "m16", "m32", "m64"],
         cells: &[
             Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "xtn x3", recipes: &["xtn x3", "xtn x3", "xtn x3", "xtn x3"], note: "worst case m64 to m8; one xtn or sxtl per width step", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 3, recipe: "uzp1 x3", recipes: &["uzp1 x3", "uzp1 x3", "uzp1 x3", "uzp1 x3"], note: "worst case m64 to m8: predicate lanes are spaced by width, one uzp1 or punpklo per width step", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "uzp1 x3", recipes: &["uzp1 x3", "uzp1 x3", "uzp1 x3", "uzp1 x3"], note: "worst case m64 to m8: predicate lanes are spaced by width, one uzp1 or punpklo per width step", unverified: false },
         ],
     },
     Entry {
@@ -829,18 +909,28 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["m8"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "and; ext; zip1; addv; umov", recipes: &["and; ext; zip1; addv; umov"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 2, recipe: "str; ldr", recipes: &["str; ldr"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 9, recipe: "umov x2; and x2; mul x2; lsr x2; orr", recipes: &["umov x2; and x2; mul x2; lsr x2; orr"], note: "lanes narrowed to bytes, bit 0 of each byte gathered by one multiply per 8 lanes", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "str; ldr", recipes: &["str; ldr"], note: "", unverified: false },
         ],
     },
     Entry {
         op: "mask.to_bits",
-        ty: "m16/m32",
+        ty: "m16",
         form: "",
-        keys: &["m16", "m32"],
+        keys: &["m16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "and; addv; umov", recipes: &["and; addv; umov", "and; addv; umov"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "cpy; lsl; uaddv; fmov", recipes: &["cpy; lsl; uaddv; fmov", "cpy; lsl; uaddv; fmov"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "xtn; umov; and; mul; lsr", recipes: &["xtn; umov; and; mul; lsr"], note: "lanes narrowed to bytes, bit 0 of each byte gathered by one multiply", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "cpy; lsl; uaddv; fmov", recipes: &["cpy; lsl; uaddv; fmov"], note: "", unverified: false },
+        ],
+    },
+    Entry {
+        op: "mask.to_bits",
+        ty: "m32",
+        form: "",
+        keys: &["m32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 6, recipe: "xtn x2; umov; and; mul; lsr", recipes: &["xtn x2; umov; and; mul; lsr"], note: "lanes narrowed to bytes, bit 0 of each byte gathered by one multiply", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "cpy; lsl; uaddv; fmov", recipes: &["cpy; lsl; uaddv; fmov"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -849,7 +939,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["m64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "and; addp; fmov", recipes: &["and; addp; fmov"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "xtn x3; umov; and; mul; lsr", recipes: &["xtn x3; umov; and; mul; lsr"], note: "lanes narrowed to bytes, bit 0 of each byte gathered by one multiply", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "cpy; lsl; uaddv; fmov", recipes: &["cpy; lsl; uaddv; fmov"], note: "", unverified: false },
         ],
     },
@@ -861,6 +951,36 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "bsl", recipes: &["bsl", "bsl", "bsl", "bsl", "bsl", "bsl", "bsl", "bsl", "bsl", "bsl", "bsl", "bsl"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "sel", recipes: &["sel", "sel", "sel", "sel", "sel", "sel", "sel", "sel", "sel", "sel", "sel", "sel"], note: "", unverified: false },
+        ],
+    },
+    Entry {
+        op: "mask.to_vec",
+        ty: "mask",
+        form: "",
+        keys: &["m8", "m16", "m32", "m64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none"], note: "a mask lane is already all ones or zero", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "cpy", recipes: &["cpy", "cpy", "cpy", "cpy"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "mask.all",
+        ty: "mask",
+        form: "",
+        keys: &["m8", "m16", "m32", "m64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "movi", recipes: &["movi", "movi", "movi", "movi"], note: "the constant is the whole op", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "ptrue", recipes: &["ptrue", "ptrue", "ptrue", "ptrue"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "mask.none",
+        ty: "mask",
+        form: "",
+        keys: &["m8", "m16", "m32", "m64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "movi", recipes: &["movi", "movi", "movi", "movi"], note: "the constant is the whole op", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "pfalse", recipes: &["pfalse", "pfalse", "pfalse", "pfalse"], note: "", unverified: true },
         ],
     },
     Entry {
@@ -909,18 +1029,28 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "u8"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 14, recipe: "and; ext; zip1; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", recipes: &["and; ext; zip1; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", "and; ext; zip1; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 80, recipe: "umov x16; cbz x16; adds x16; ldr x16; ins x16", recipes: &["umov x16; cbz x16; adds x16; ldr x16; ins x16", "umov x16; cbz x16; adds x16; ldr x16; ins x16"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "ld1*", recipes: &["ld1b", "ld1b"], note: "", unverified: false },
         ],
     },
     Entry {
         op: "vec.load_masked",
-        ty: "any16/any32",
+        ty: "any16",
         form: "",
-        keys: &["i16", "u16", "f16", "bf16", "i32", "u32", "f32"],
+        keys: &["i16", "u16", "f16", "bf16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 12, recipe: "and; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", recipes: &["and; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", "and; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", "and; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", "and; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", "and; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", "and; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", "and; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "ld1*", recipes: &["ld1h", "ld1h", "ld1h", "ld1h", "ld1w", "ld1w", "ld1w"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 40, recipe: "umov x8; cbz x8; adds x8; ldr x8; ins x8", recipes: &["umov x8; cbz x8; adds x8; ldr x8; ins x8", "umov x8; cbz x8; adds x8; ldr x8; ins x8", "umov x8; cbz x8; adds x8; ldr x8; ins x8", "umov x8; cbz x8; adds x8; ldr x8; ins x8"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "ld1*", recipes: &["ld1h", "ld1h", "ld1h", "ld1h"], note: "", unverified: false },
+        ],
+    },
+    Entry {
+        op: "vec.load_masked",
+        ty: "any32",
+        form: "",
+        keys: &["i32", "u32", "f32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 20, recipe: "umov x4; cbz x4; adds x4; ldr x4; ins x4", recipes: &["umov x4; cbz x4; adds x4; ldr x4; ins x4", "umov x4; cbz x4; adds x4; ldr x4; ins x4", "umov x4; cbz x4; adds x4; ldr x4; ins x4"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "ld1*", recipes: &["ld1w", "ld1w", "ld1w"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -929,7 +1059,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64", "u64", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 12, recipe: "and; addp; fmov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", recipes: &["and; addp; fmov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", "and; addp; fmov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q", "and; addp; fmov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 10, recipe: "umov x2; cbz x2; adds x2; ldr x2; ins x2", recipes: &["umov x2; cbz x2; adds x2; ldr x2; ins x2", "umov x2; cbz x2; adds x2; ldr x2; ins x2", "umov x2; cbz x2; adds x2; ldr x2; ins x2"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "ld1*", recipes: &["ld1d", "ld1d", "ld1d"], note: "", unverified: false },
         ],
     },
@@ -939,18 +1069,28 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "u8"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 13, recipe: "str q; and; ext; zip1; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne", recipes: &["str q; and; ext; zip1; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne", "str q; and; ext; zip1; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 80, recipe: "umov x32; cbz x16; add x16; str x16", recipes: &["umov x32; cbz x16; add x16; str x16", "umov x32; cbz x16; add x16; str x16"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "st1*", recipes: &["st1b", "st1b"], note: "", unverified: false },
         ],
     },
     Entry {
         op: "vec.store_masked",
-        ty: "any16/any32",
+        ty: "any16",
         form: "",
-        keys: &["i16", "u16", "f16", "bf16", "i32", "u32", "f32"],
+        keys: &["i16", "u16", "f16", "bf16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 11, recipe: "str q; and; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne", recipes: &["str q; and; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne", "str q; and; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne", "str q; and; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne", "str q; and; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne", "str q; and; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne", "str q; and; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne", "str q; and; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "st1*", recipes: &["st1h", "st1h", "st1h", "st1h", "st1w", "st1w", "st1w"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 40, recipe: "umov x16; cbz x8; add x8; str x8", recipes: &["umov x16; cbz x8; add x8; str x8", "umov x16; cbz x8; add x8; str x8", "umov x16; cbz x8; add x8; str x8", "umov x16; cbz x8; add x8; str x8"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "st1*", recipes: &["st1h", "st1h", "st1h", "st1h"], note: "", unverified: false },
+        ],
+    },
+    Entry {
+        op: "vec.store_masked",
+        ty: "any32",
+        form: "",
+        keys: &["i32", "u32", "f32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 20, recipe: "umov x8; cbz x4; add x4; str x4", recipes: &["umov x8; cbz x4; add x4; str x4", "umov x8; cbz x4; add x4; str x4", "umov x8; cbz x4; add x4; str x4"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "st1*", recipes: &["st1w", "st1w", "st1w"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -959,7 +1099,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64", "u64", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 11, recipe: "str q; and; addp; fmov; rbit; clz; ldr; str; sub; ands; b.ne", recipes: &["str q; and; addp; fmov; rbit; clz; ldr; str; sub; ands; b.ne", "str q; and; addp; fmov; rbit; clz; ldr; str; sub; ands; b.ne", "str q; and; addp; fmov; rbit; clz; ldr; str; sub; ands; b.ne"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 10, recipe: "umov x4; cbz x2; add x2; str x2", recipes: &["umov x4; cbz x2; add x2; str x2", "umov x4; cbz x2; add x2; str x2", "umov x4; cbz x2; add x2; str x2"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "st1*", recipes: &["st1d", "st1d", "st1d"], note: "", unverified: false },
         ],
     },
@@ -970,7 +1110,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         keys: &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f16", "bf16", "f32", "f64"],
         cells: &[
             Cell { tier: Tier::Neon, feature: None, class: Class::U, cost: 0, recipe: "", recipes: &["", "", "", "", "", "", "", "", "", "", "", ""], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 3, recipe: "setffr; ldff1*; rdffr", recipes: &["setffr; ldff1b; rdffr", "setffr; ldff1h; rdffr", "setffr; ldff1w; rdffr", "setffr; ldff1d; rdffr", "setffr; ldff1b; rdffr", "setffr; ldff1h; rdffr", "setffr; ldff1w; rdffr", "setffr; ldff1d; rdffr", "setffr; ldff1h; rdffr", "setffr; ldff1h; rdffr", "setffr; ldff1w; rdffr", "setffr; ldff1d; rdffr"], note: "the first-fault register is set before and read after the load", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "setffr; ldff1*; rdffr", recipes: &["setffr; ldff1b; rdffr", "setffr; ldff1h; rdffr", "setffr; ldff1w; rdffr", "setffr; ldff1d; rdffr", "setffr; ldff1b; rdffr", "setffr; ldff1h; rdffr", "setffr; ldff1w; rdffr", "setffr; ldff1d; rdffr", "setffr; ldff1h; rdffr", "setffr; ldff1h; rdffr", "setffr; ldff1w; rdffr", "setffr; ldff1d; rdffr"], note: "the first-fault register is set before and read after the load", unverified: false },
         ],
     },
     Entry {
@@ -999,7 +1139,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i32", "u32", "f32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "and; addv; umov; ldr; tbl", recipes: &["and; addv; umov; ldr; tbl", "and; addv; umov; ldr; tbl", "and; addv; umov; ldr; tbl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 23, recipe: "and x5; umov x8; str q; str x4; add x4; ldr q", recipes: &["and x5; umov x8; str q; str x4; add x4; ldr q", "and x5; umov x8; str q; str x4; add x4; ldr q", "and x5; umov x8; str q; str x4; add x4; ldr q"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "compact", recipes: &["compact", "compact", "compact"], note: "", unverified: false },
         ],
     },
@@ -1009,7 +1149,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64", "u64", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "and; addp; fmov; ldr; tbl", recipes: &["and; addp; fmov; ldr; tbl", "and; addp; fmov; ldr; tbl", "and; addp; fmov; ldr; tbl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 13, recipe: "and x3; umov x4; str q; str x2; add x2; ldr q", recipes: &["and x3; umov x4; str q; str x2; add x2; ldr q", "and x3; umov x4; str q; str x2; add x2; ldr q", "and x3; umov x4; str q; str x2; add x2; ldr q"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "compact", recipes: &["compact", "compact", "compact"], note: "", unverified: false },
         ],
     },
@@ -1019,7 +1159,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i16", "u16", "f16", "bf16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "and; addv; umov; ldr; tbl", recipes: &["and; addv; umov; ldr; tbl", "and; addv; umov; ldr; tbl", "and; addv; umov; ldr; tbl", "and; addv; umov; ldr; tbl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 43, recipe: "and x9; umov x16; str q; str x8; add x8; ldr q", recipes: &["and x9; umov x16; str q; str x8; add x8; ldr q", "and x9; umov x16; str q; str x8; add x8; ldr q", "and x9; umov x16; str q; str x8; add x8; ldr q", "and x9; umov x16; str q; str x8; add x8; ldr q"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 10, recipe: "uunpklo; uunpkhi; punpklo; punpkhi; compact x2; cntp; whilelo; splice; uzp1", recipes: &["uunpklo; uunpkhi; punpklo; punpkhi; compact x2; cntp; whilelo; splice; uzp1", "uunpklo; uunpkhi; punpklo; punpkhi; compact x2; cntp; whilelo; splice; uzp1", "uunpklo; uunpkhi; punpklo; punpkhi; compact x2; cntp; whilelo; splice; uzp1", "uunpklo; uunpkhi; punpklo; punpkhi; compact x2; cntp; whilelo; splice; uzp1"], note: "", unverified: false },
         ],
     },
@@ -1029,7 +1169,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "u8"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 21, recipe: "and; ext; zip1; addv; umov; and; lsr; ldr x2; add; ins; tbl; fmov; cnt; addv; fmov; stp; str; dup; str; ldr q", recipes: &["and; ext; zip1; addv; umov; and; lsr; ldr x2; add; ins; tbl; fmov; cnt; addv; fmov; stp; str; dup; str; ldr q", "and; ext; zip1; addv; umov; and; lsr; ldr x2; add; ins; tbl; fmov; cnt; addv; fmov; stp; str; dup; str; ldr q"], note: "", unverified: true },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 83, recipe: "and x17; umov x32; str q; str x16; add x16; ldr q", recipes: &["and x17; umov x32; str q; str x16; add x16; ldr q", "and x17; umov x32; str q; str x16; add x16; ldr q"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 29, recipe: "uunpklo; uunpkhi; punpklo; punpkhi; uunpklo x2; uunpkhi x2; punpklo x2; punpkhi x2; compact x4; cntp x3; whilelo x3; splice x3; uzp1 x4", recipes: &["uunpklo; uunpkhi; punpklo; punpkhi; uunpklo x2; uunpkhi x2; punpklo x2; punpkhi x2; compact x4; cntp x3; whilelo x3; splice x3; uzp1 x4", "uunpklo; uunpkhi; punpklo; punpkhi; uunpklo x2; uunpkhi x2; punpklo x2; punpkhi x2; compact x4; cntp x3; whilelo x3; splice x3; uzp1 x4"], note: "", unverified: true },
         ],
     },
@@ -1039,7 +1179,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i32", "u32", "f32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "and; addv; umov; ldr; tbl", recipes: &["and; addv; umov; ldr; tbl", "and; addv; umov; ldr; tbl", "and; addv; umov; ldr; tbl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 25, recipe: "str q; ldr x4; umov x4; and x8; ins x4; add x4", recipes: &["str q; ldr x4; umov x4; and x8; ins x4; add x4", "str q; ldr x4; umov x4; and x8; ins x4; add x4", "str q; ldr x4; umov x4; and x8; ins x4; add x4"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "compact; cntp; whilelo; st1*; ld1*", recipes: &["compact; cntp; whilelo; st1w; ld1w", "compact; cntp; whilelo; st1w; ld1w", "compact; cntp; whilelo; st1w; ld1w"], note: "", unverified: false },
         ],
     },
@@ -1049,7 +1189,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64", "u64", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "and; addp; fmov; ldr; tbl", recipes: &["and; addp; fmov; ldr; tbl", "and; addp; fmov; ldr; tbl", "and; addp; fmov; ldr; tbl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 13, recipe: "str q; ldr x2; umov x2; and x4; ins x2; add x2", recipes: &["str q; ldr x2; umov x2; and x4; ins x2; add x2", "str q; ldr x2; umov x2; and x4; ins x2; add x2", "str q; ldr x2; umov x2; and x4; ins x2; add x2"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "compact; cntp; whilelo; st1*; ld1*", recipes: &["compact; cntp; whilelo; st1d; ld1d", "compact; cntp; whilelo; st1d; ld1d", "compact; cntp; whilelo; st1d; ld1d"], note: "", unverified: false },
         ],
     },
@@ -1059,7 +1199,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i16", "u16", "f16", "bf16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "and; addv; umov; ldr; tbl", recipes: &["and; addv; umov; ldr; tbl", "and; addv; umov; ldr; tbl", "and; addv; umov; ldr; tbl", "and; addv; umov; ldr; tbl"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 49, recipe: "str q; ldr x8; umov x8; and x16; ins x8; add x8", recipes: &["str q; ldr x8; umov x8; and x16; ins x8; add x8", "str q; ldr x8; umov x8; and x16; ins x8; add x8", "str q; ldr x8; umov x8; and x16; ins x8; add x8", "str q; ldr x8; umov x8; and x16; ins x8; add x8"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 15, recipe: "punpklo; punpkhi; compact x2; cntp x2; whilelo x2; st1h; ld1h; uunpklo x2; st1h x2; ld1h", recipes: &["punpklo; punpkhi; compact x2; cntp x2; whilelo x2; st1h; ld1h; uunpklo x2; st1h x2; ld1h", "punpklo; punpkhi; compact x2; cntp x2; whilelo x2; st1h; ld1h; uunpklo x2; st1h x2; ld1h", "punpklo; punpkhi; compact x2; cntp x2; whilelo x2; st1h; ld1h; uunpklo x2; st1h x2; ld1h", "punpklo; punpkhi; compact x2; cntp x2; whilelo x2; st1h; ld1h; uunpklo x2; st1h x2; ld1h"], note: "", unverified: true },
         ],
     },
@@ -1069,7 +1209,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "u8"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 17, recipe: "and; ext; zip1; addv; umov; and; lsr; ldr x2; fmov; cnt; addv; fmov; dup; add; ins; tbl", recipes: &["and; ext; zip1; addv; umov; and; lsr; ldr x2; fmov; cnt; addv; fmov; dup; add; ins; tbl", "and; ext; zip1; addv; umov; and; lsr; ldr x2; fmov; cnt; addv; fmov; dup; add; ins; tbl"], note: "", unverified: true },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 97, recipe: "str q; ldr x16; umov x16; and x32; ins x16; add x16", recipes: &["str q; ldr x16; umov x16; and x32; ins x16; add x16", "str q; ldr x16; umov x16; and x32; ins x16; add x16"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 37, recipe: "punpklo x3; punpkhi x3; compact x4; cntp x4; whilelo x4; st1b; ld1b x3; uunpklo x8; add x2; st1b x4; ld1b", recipes: &["punpklo x3; punpkhi x3; compact x4; cntp x4; whilelo x4; st1b; ld1b x3; uunpklo x8; add x2; st1b x4; ld1b", "punpklo x3; punpkhi x3; compact x4; cntp x4; whilelo x4; st1b; ld1b x3; uunpklo x8; add x2; st1b x4; ld1b"], note: "", unverified: true },
         ],
     },
@@ -1079,7 +1219,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "ext; fadd; faddp", recipes: &["ext; fadd; faddp"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "ext; fadd; ushr; fadd", recipes: &["ext; fadd; ushr; fadd"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "ext; fadd; faddp", recipes: &["ext; fadd; faddp"], note: "NEON; sizeless vectors: E0717", unverified: false },
         ],
     },
@@ -1089,8 +1229,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 1, recipe: "faddp", recipes: &["faddp"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 1, recipe: "faddp", recipes: &["faddp"], note: "NEON; sizeless vectors: E0717", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "ext; fadd", recipes: &["ext; fadd"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "faddp", recipes: &["faddp"], note: "NEON; sizeless vectors: E0717", unverified: false },
         ],
     },
     Entry {
@@ -1099,7 +1239,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "u8", "i16", "u16", "i32", "u32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "addv; umov", recipes: &["addv; umov", "addv; umov", "addv; umov", "addv; umov", "addv; umov", "addv; umov"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "addv; ?mov", recipes: &["addv; smov", "addv; umov", "addv; smov", "addv; umov", "addv; smov", "addv; umov"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "uaddv; fmov", recipes: &["uaddv; fmov", "uaddv; fmov", "uaddv; fmov", "uaddv; fmov", "uaddv; fmov", "uaddv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1109,7 +1249,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "addp; fmov", recipes: &["addp; fmov", "addp; fmov"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "addp; umov", recipes: &["addp; umov", "addp; umov"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "uaddv; fmov", recipes: &["uaddv; fmov", "uaddv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1119,7 +1259,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 1, recipe: "fminv", recipes: &["fminv"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "fminv", recipes: &["fminv"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fminv", recipes: &["fminv"], note: "", unverified: false },
         ],
     },
@@ -1129,7 +1269,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 1, recipe: "fminp", recipes: &["fminp"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "fminp", recipes: &["fminp"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fminv", recipes: &["fminv"], note: "", unverified: false },
         ],
     },
@@ -1139,7 +1279,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 1, recipe: "fmaxv", recipes: &["fmaxv"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "fmaxv", recipes: &["fmaxv"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fmaxv", recipes: &["fmaxv"], note: "", unverified: false },
         ],
     },
@@ -1149,7 +1289,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 1, recipe: "fmaxp", recipes: &["fmaxp"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "fmaxp", recipes: &["fmaxp"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fmaxv", recipes: &["fmaxv"], note: "", unverified: false },
         ],
     },
@@ -1159,7 +1299,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "u8", "i16", "u16", "i32", "u32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "?minv; umov", recipes: &["sminv; umov", "uminv; umov", "sminv; umov", "uminv; umov", "sminv; umov", "uminv; umov"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "?minv; ?mov", recipes: &["sminv; smov", "uminv; umov", "sminv; smov", "uminv; umov", "sminv; smov", "uminv; umov"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "?minv; fmov", recipes: &["sminv; fmov", "uminv; fmov", "sminv; fmov", "uminv; fmov", "sminv; fmov", "uminv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1169,7 +1309,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 4, recipe: "ext; cmgt; bsl; fmov", recipes: &["ext; cmgt; bsl; fmov"], note: "no sminv for 64-bit lanes", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "ext; cmgt; bsl; umov", recipes: &["ext; cmgt; bsl; umov"], note: "no sminv for 64-bit lanes", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "sminv; fmov", recipes: &["sminv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1179,7 +1319,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 4, recipe: "ext; cmhi; bsl; fmov", recipes: &["ext; cmhi; bsl; fmov"], note: "no uminv for 64-bit lanes", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "ext; cmhi; bsl; umov", recipes: &["ext; cmhi; bsl; umov"], note: "no uminv for 64-bit lanes", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "uminv; fmov", recipes: &["uminv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1189,7 +1329,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "u8", "i16", "u16", "i32", "u32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "?maxv; umov", recipes: &["smaxv; umov", "umaxv; umov", "smaxv; umov", "umaxv; umov", "smaxv; umov", "umaxv; umov"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "?maxv; ?mov", recipes: &["smaxv; smov", "umaxv; umov", "smaxv; smov", "umaxv; umov", "smaxv; smov", "umaxv; umov"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "?maxv; fmov", recipes: &["smaxv; fmov", "umaxv; fmov", "smaxv; fmov", "umaxv; fmov", "smaxv; fmov", "umaxv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1199,7 +1339,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 4, recipe: "ext; cmgt; bsl; fmov", recipes: &["ext; cmgt; bsl; fmov"], note: "no smaxv for 64-bit lanes", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "ext; cmgt; bsl; umov", recipes: &["ext; cmgt; bsl; umov"], note: "no smaxv for 64-bit lanes", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "smaxv; fmov", recipes: &["smaxv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1209,7 +1349,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 4, recipe: "ext; cmhi; bsl; fmov", recipes: &["ext; cmhi; bsl; fmov"], note: "no umaxv for 64-bit lanes", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "ext; cmhi; bsl; umov", recipes: &["ext; cmhi; bsl; umov"], note: "no umaxv for 64-bit lanes", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "umaxv; fmov", recipes: &["umaxv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1219,7 +1359,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "u8"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 6, recipe: "ext; and; fmov; and x3", recipes: &["ext; and; fmov; and x3", "ext; and; fmov; and x3"], note: "NEON has no andv: fold in general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 9, recipe: "ext; ushr x3; and x4; ?mov", recipes: &["ext; ushr x3; and x4; smov", "ext; ushr x3; and x4; umov"], note: "NEON has no andv: halves folded in vector registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "andv; fmov", recipes: &["andv; fmov", "andv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1229,7 +1369,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i16", "u16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 5, recipe: "ext; and; fmov; and x2", recipes: &["ext; and; fmov; and x2", "ext; and; fmov; and x2"], note: "NEON has no andv: fold in general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "ext; ushr x2; and x3; ?mov", recipes: &["ext; ushr x2; and x3; smov", "ext; ushr x2; and x3; umov"], note: "NEON has no andv: halves folded in vector registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "andv; fmov", recipes: &["andv; fmov", "andv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1239,7 +1379,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i32", "u32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 4, recipe: "ext; and; fmov; and", recipes: &["ext; and; fmov; and", "ext; and; fmov; and"], note: "NEON has no andv: fold in general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "ext; ushr; and x2; ?mov", recipes: &["ext; ushr; and x2; smov", "ext; ushr; and x2; umov"], note: "NEON has no andv: halves folded in vector registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "andv; fmov", recipes: &["andv; fmov", "andv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1249,7 +1389,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 3, recipe: "ext; and; fmov", recipes: &["ext; and; fmov", "ext; and; fmov"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "ext; and; umov", recipes: &["ext; and; umov", "ext; and; umov"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "andv; fmov", recipes: &["andv; fmov", "andv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1259,7 +1399,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "u8"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 6, recipe: "ext; orr; fmov; orr x3", recipes: &["ext; orr; fmov; orr x3", "ext; orr; fmov; orr x3"], note: "NEON has no orv: fold in general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 9, recipe: "ext; ushr x3; orr x4; ?mov", recipes: &["ext; ushr x3; orr x4; smov", "ext; ushr x3; orr x4; umov"], note: "NEON has no orv: halves folded in vector registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "orv; fmov", recipes: &["orv; fmov", "orv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1269,7 +1409,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i16", "u16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 5, recipe: "ext; orr; fmov; orr x2", recipes: &["ext; orr; fmov; orr x2", "ext; orr; fmov; orr x2"], note: "NEON has no orv: fold in general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "ext; ushr x2; orr x3; ?mov", recipes: &["ext; ushr x2; orr x3; smov", "ext; ushr x2; orr x3; umov"], note: "NEON has no orv: halves folded in vector registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "orv; fmov", recipes: &["orv; fmov", "orv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1279,7 +1419,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i32", "u32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 4, recipe: "ext; orr; fmov; orr", recipes: &["ext; orr; fmov; orr", "ext; orr; fmov; orr"], note: "NEON has no orv: fold in general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "ext; ushr; orr x2; ?mov", recipes: &["ext; ushr; orr x2; smov", "ext; ushr; orr x2; umov"], note: "NEON has no orv: halves folded in vector registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "orv; fmov", recipes: &["orv; fmov", "orv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1289,7 +1429,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 3, recipe: "ext; orr; fmov", recipes: &["ext; orr; fmov", "ext; orr; fmov"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "ext; orr; umov", recipes: &["ext; orr; umov", "ext; orr; umov"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "orv; fmov", recipes: &["orv; fmov", "orv; fmov"], note: "", unverified: false },
         ],
     },
@@ -1299,7 +1439,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "fadd; dup; fadd; dup; fadd; dup; fadd", recipes: &["fadd; dup; fadd; dup; fadd; dup; fadd"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 8, recipe: "dup x4; fadd x4", recipes: &["dup x4; fadd x4"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fadda", recipes: &["fadda"], note: "", unverified: false },
         ],
     },
@@ -1309,7 +1449,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "fadd; dup; fadd", recipes: &["fadd; dup; fadd"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "dup x2; fadd x2", recipes: &["dup x2; fadd x2"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fadda", recipes: &["fadda"], note: "", unverified: false },
         ],
     },
@@ -1319,7 +1459,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 9, recipe: "dup; fadd; dup; fadd; dup; fadd; ins x3", recipes: &["dup; fadd; dup; fadd; dup; fadd; ins x3"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 10, recipe: "dup x4; fadd x3; ins x3", recipes: &["dup x4; fadd x3; ins x3"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 9, recipe: "dup; fadd; dup; fadd; dup; fadd; ins x3", recipes: &["dup; fadd; dup; fadd; dup; fadd; ins x3"], note: "NEON; sizeless vectors take log2(VL) steps", unverified: false },
         ],
     },
@@ -1329,7 +1469,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "dup; fadd; ins", recipes: &["dup; fadd; ins"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "dup x2; fadd; ins", recipes: &["dup x2; fadd; ins"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "dup; fadd; ins", recipes: &["dup; fadd; ins"], note: "NEON; sizeless vectors take log2(VL) steps", unverified: false },
         ],
     },
@@ -1369,8 +1509,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 2, recipe: "ext; add", recipes: &["ext; add", "ext; add"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 2, recipe: "ext; add", recipes: &["ext; add", "ext; add"], note: "NEON; sizeless vectors take log2(VL) steps", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "ext; add", recipes: &["ext; add", "ext; add"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "ext; add", recipes: &["ext; add", "ext; add"], note: "NEON; sizeless vectors take log2(VL) steps", unverified: false },
         ],
     },
     Entry {
@@ -1394,6 +1534,36 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        op: "vec.lookup",
+        ty: "int16",
+        form: "",
+        keys: &["i16", "u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 49, recipe: "str q; umov x8; cmp x8; csel x16; ldr x8; ins x8", recipes: &["str q; umov x8; cmp x8; csel x16; ldr x8; ins x8", "str q; umov x8; cmp x8; csel x16; ldr x8; ins x8"], note: "an index past the table loads lane 0 and selects 0", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "tbl", recipes: &["tbl", "tbl"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.lookup",
+        ty: "int32",
+        form: "",
+        keys: &["i32", "u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 25, recipe: "str q; umov x4; cmp x4; csel x8; ldr x4; ins x4", recipes: &["str q; umov x4; cmp x4; csel x8; ldr x4; ins x4", "str q; umov x4; cmp x4; csel x8; ldr x4; ins x4"], note: "an index past the table loads lane 0 and selects 0", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "tbl", recipes: &["tbl", "tbl"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.lookup",
+        ty: "int64",
+        form: "",
+        keys: &["i64", "u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 13, recipe: "str q; umov x2; cmp x2; csel x4; ldr x2; ins x2", recipes: &["str q; umov x2; cmp x2; csel x4; ldr x2; ins x2", "str q; umov x2; cmp x2; csel x4; ldr x2; ins x2"], note: "an index past the table loads lane 0 and selects 0", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "tbl", recipes: &["tbl", "tbl"], note: "", unverified: true },
+        ],
+    },
+    Entry {
         op: "vec.popcount",
         ty: "int8",
         form: "",
@@ -1409,7 +1579,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i16", "u16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 2, recipe: "cnt; uaddlp", recipes: &["cnt; uaddlp", "cnt; uaddlp"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "cnt; uaddlp", recipes: &["cnt; uaddlp", "cnt; uaddlp"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "cnt", recipes: &["cnt", "cnt"], note: "", unverified: false },
         ],
     },
@@ -1449,7 +1619,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i64", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 6, recipe: "clz; ushr; cmeq; and x2; add", recipes: &["clz; ushr; cmeq; and x2; add", "clz; ushr; cmeq; and x2; add"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 6, recipe: "umov x2; clz x2; ins x2", recipes: &["umov x2; clz x2; ins x2", "umov x2; clz x2; ins x2"], note: "no 64-bit lane clz: per lane through general registers", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "clz", recipes: &["clz", "clz"], note: "", unverified: false },
         ],
     },
@@ -1499,8 +1669,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i16", "u16", "i32", "u32", "i64", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "uzp1", recipes: &["uzp1", "uzp1", "uzp1", "uzp1", "uzp1", "uzp1"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 1, recipe: "uzp1", recipes: &["uzp1", "uzp1", "uzp1", "uzp1", "uzp1", "uzp1"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "xtn; xtn; ins", recipes: &["xtn; xtn; ins", "xtn; xtn; ins", "xtn; xtn; ins", "xtn; xtn; ins", "xtn; xtn; ins", "xtn; xtn; ins"], note: "the key is the source lane type", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "uzp1", recipes: &["uzp1", "uzp1", "uzp1", "uzp1", "uzp1", "uzp1"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -1509,7 +1679,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i16", "i32", "i64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "sqxtn; sqxtn2", recipes: &["sqxtn; sqxtn2", "sqxtn; sqxtn2", "sqxtn; sqxtn2"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "sqxtn; sqxtn; ins", recipes: &["sqxtn; sqxtn; ins", "sqxtn; sqxtn; ins", "sqxtn; sqxtn; ins"], note: "the key is the source lane type", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "smax x2; smin x2; uzp1", recipes: &["smax x2; smin x2; uzp1", "smax x2; smin x2; uzp1", "smax x2; smin x2; uzp1"], note: "", unverified: false },
         ],
     },
@@ -1519,58 +1689,1058 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["u16", "u32", "u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "uqxtn; uqxtn2", recipes: &["uqxtn; uqxtn2", "uqxtn; uqxtn2", "uqxtn; uqxtn2"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "uqxtn; uqxtn; ins", recipes: &["uqxtn; uqxtn; ins", "uqxtn; uqxtn; ins", "uqxtn; uqxtn; ins"], note: "the key is the source lane type", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "umin x2; uzp1", recipes: &["umin x2; uzp1", "umin x2; uzp1", "umin x2; uzp1"], note: "", unverified: false },
         ],
     },
     Entry {
         op: "vec.cast",
-        ty: "int8>f32",
+        ty: "i8>i8/i16>i16/i32>i32/i64>i64/u8>u8/u16>u16/u32>u32/u64>u64/f32>f32/f64>f64",
         form: "",
-        keys: &["i8>f32", "u8>f32"],
+        keys: &["i8>i8", "i16>i16", "i32>i32", "i64>i64", "u8>u8", "u16>u16", "u32>u32", "u64>u64", "f32>f32", "f64>f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 3, recipe: "?xtl x2; ?cvtf", recipes: &["sxtl x2; scvtf", "uxtl x2; ucvtf"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 3, recipe: "?unpklo x2; ?cvtf", recipes: &["sunpklo x2; scvtf", "uunpklo x2; ucvtf"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none", "none", "none", "none", "none", "none", "none"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none", "none", "none", "none", "none", "none", "none"], note: "", unverified: true },
         ],
     },
     Entry {
         op: "vec.cast",
-        ty: "int16>f32/int32>f64",
+        ty: "i8>i16/i16>i32/i32>i64/u8>i16/u8>u16/u16>i32/u16>u32/u32>i64/u32>u64",
         form: "",
-        keys: &["i16>f32", "u16>f32", "i32>f64", "u32>f64"],
+        keys: &["i8>i16", "i16>i32", "i32>i64", "u8>i16", "u8>u16", "u16>i32", "u16>u32", "u32>i64", "u32>u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "?xtl; ?cvtf", recipes: &["sxtl; scvtf", "uxtl; ucvtf", "sxtl; scvtf", "uxtl; ucvtf"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "?unpklo; ?cvtf", recipes: &["sunpklo; scvtf", "uunpklo; ucvtf", "sunpklo; scvtf", "uunpklo; ucvtf"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "?xtl", recipes: &["sxtl", "sxtl", "sxtl", "uxtl", "uxtl", "uxtl", "uxtl", "uxtl", "uxtl"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "?unpklo", recipes: &["sunpklo", "sunpklo", "sunpklo", "uunpklo", "uunpklo", "uunpklo", "uunpklo", "uunpklo", "uunpklo"], note: "", unverified: true },
         ],
     },
     Entry {
-        op: "vec.cast.round",
-        ty: "int32>f32/int64>f64",
+        op: "vec.cast",
+        ty: "f32>f64",
         form: "",
-        keys: &["i32>f32", "u32>f32", "i64>f64", "u64>f64"],
+        keys: &["f32>f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "?cvtf", recipes: &["scvtf", "ucvtf", "scvtf", "ucvtf"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "?cvtf", recipes: &["scvtf", "ucvtf", "scvtf", "ucvtf"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "fcvtl", recipes: &["fcvtl"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "uunpklo; fcvt", recipes: &["uunpklo; fcvt"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast",
+        ty: "i8>i32/i16>i64/u8>i32/u8>u32/u16>i64/u16>u64",
+        form: "",
+        keys: &["i8>i32", "i16>i64", "u8>i32", "u8>u32", "u16>i64", "u16>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "?xtl x2", recipes: &["sxtl x2", "sxtl x2", "uxtl x2", "uxtl x2", "uxtl x2", "uxtl x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "?unpklo x2", recipes: &["sunpklo x2", "sunpklo x2", "uunpklo x2", "uunpklo x2", "uunpklo x2", "uunpklo x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast",
+        ty: "i16>f32/i32>f64/u16>f32/u32>f64",
+        form: "",
+        keys: &["i16>f32", "i32>f64", "u16>f32", "u32>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "?xtl; ?cvtf", recipes: &["sxtl; scvtf", "sxtl; scvtf", "uxtl; ucvtf", "uxtl; ucvtf"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "?unpklo; ?cvtf", recipes: &["sunpklo; scvtf", "sunpklo; scvtf", "uunpklo; ucvtf", "uunpklo; ucvtf"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast",
+        ty: "i8>f32/i16>f64/u8>f32/u16>f64",
+        form: "",
+        keys: &["i8>f32", "i16>f64", "u8>f32", "u16>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "?xtl x2; ?cvtf", recipes: &["sxtl x2; scvtf", "sxtl x2; scvtf", "uxtl x2; ucvtf", "uxtl x2; ucvtf"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "?unpklo x2; ?cvtf", recipes: &["sunpklo x2; scvtf", "sunpklo x2; scvtf", "uunpklo x2; ucvtf", "uunpklo x2; ucvtf"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast",
+        ty: "i8>i64/u8>i64/u8>u64",
+        form: "",
+        keys: &["i8>i64", "u8>i64", "u8>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "?xtl x3", recipes: &["sxtl x3", "uxtl x3", "uxtl x3"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "?unpklo x3", recipes: &["sunpklo x3", "uunpklo x3", "uunpklo x3"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast",
+        ty: "i8>f64/u8>f64",
+        form: "",
+        keys: &["i8>f64", "u8>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "?xtl x3; ?cvtf", recipes: &["sxtl x3; scvtf", "uxtl x3; ucvtf"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "?unpklo x3; ?cvtf", recipes: &["sunpklo x3; scvtf", "uunpklo x3; ucvtf"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.wrap",
+        ty: "int8>int8/int16>int16/int32>int32/int64>int64",
+        form: "",
+        keys: &["i8>i8", "i8>u8", "u8>i8", "u8>u8", "i16>i16", "i16>u16", "u16>i16", "u16>u16", "i32>i32", "i32>u32", "u32>i32", "u32>u32", "i64>i64", "i64>u64", "u64>i64", "u64>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.wrap",
+        ty: "int8>int16/int16>int32/int32>int64",
+        form: "",
+        keys: &["i8>i16", "i8>u16", "u8>i16", "u8>u16", "i16>i32", "i16>u32", "u16>i32", "u16>u32", "i32>i64", "i32>u64", "u32>i64", "u32>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "?xtl", recipes: &["sxtl", "sxtl", "uxtl", "uxtl", "sxtl", "sxtl", "uxtl", "uxtl", "sxtl", "sxtl", "uxtl", "uxtl"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "?unpklo", recipes: &["sunpklo", "sunpklo", "uunpklo", "uunpklo", "sunpklo", "sunpklo", "uunpklo", "uunpklo", "sunpklo", "sunpklo", "uunpklo", "uunpklo"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.wrap",
+        ty: "int16>int8/int32>int16/int64>int32",
+        form: "",
+        keys: &["i16>i8", "i16>u8", "u16>i8", "u16>u8", "i32>i16", "i32>u16", "u32>i16", "u32>u16", "i64>i32", "i64>u32", "u64>i32", "u64>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "xtn", recipes: &["xtn", "xtn", "xtn", "xtn", "xtn", "xtn", "xtn", "xtn", "xtn", "xtn", "xtn", "xtn"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "uzp1", recipes: &["uzp1", "uzp1", "uzp1", "uzp1", "uzp1", "uzp1", "uzp1", "uzp1", "uzp1", "uzp1", "uzp1", "uzp1"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.wrap",
+        ty: "int8>int32/int16>int64",
+        form: "",
+        keys: &["i8>i32", "i8>u32", "u8>i32", "u8>u32", "i16>i64", "i16>u64", "u16>i64", "u16>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "?xtl x2", recipes: &["sxtl x2", "sxtl x2", "uxtl x2", "uxtl x2", "sxtl x2", "sxtl x2", "uxtl x2", "uxtl x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "?unpklo x2", recipes: &["sunpklo x2", "sunpklo x2", "uunpklo x2", "uunpklo x2", "sunpklo x2", "sunpklo x2", "uunpklo x2", "uunpklo x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.wrap",
+        ty: "int32>int8/int64>int16",
+        form: "",
+        keys: &["i32>i8", "i32>u8", "u32>i8", "u32>u8", "i64>i16", "i64>u16", "u64>i16", "u64>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "xtn x2", recipes: &["xtn x2", "xtn x2", "xtn x2", "xtn x2", "xtn x2", "xtn x2", "xtn x2", "xtn x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "uzp1 x2", recipes: &["uzp1 x2", "uzp1 x2", "uzp1 x2", "uzp1 x2", "uzp1 x2", "uzp1 x2", "uzp1 x2", "uzp1 x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.wrap",
+        ty: "int8>int64",
+        form: "",
+        keys: &["i8>i64", "i8>u64", "u8>i64", "u8>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "?xtl x3", recipes: &["sxtl x3", "sxtl x3", "uxtl x3", "uxtl x3"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "?unpklo x3", recipes: &["sunpklo x3", "sunpklo x3", "uunpklo x3", "uunpklo x3"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.wrap",
+        ty: "int64>int8",
+        form: "",
+        keys: &["i64>i8", "i64>u8", "u64>i8", "u64>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "xtn x3", recipes: &["xtn x3", "xtn x3", "xtn x3", "xtn x3"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "uzp1 x3", recipes: &["uzp1 x3", "uzp1 x3", "uzp1 x3", "uzp1 x3"], note: "", unverified: true },
         ],
     },
     Entry {
         op: "vec.cast.sat",
-        ty: "f32>int32/f64>int64",
+        ty: "i8>i8/i16>i16/i32>i32/i64>i64/u8>u8/u16>u16/u32>u32/u64>u64",
+        form: "",
+        keys: &["i8>i8", "i16>i16", "i32>i32", "i64>i64", "u8>u8", "u16>u16", "u32>u32", "u64>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none", "none", "none", "none", "none"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none", "none", "none", "none", "none"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i8>i16/i16>i32/i32>i64/u8>i16/u8>u16/u16>i32/u16>u32/u32>i64/u32>u64",
+        form: "",
+        keys: &["i8>i16", "i16>i32", "i32>i64", "u8>i16", "u8>u16", "u16>i32", "u16>u32", "u32>i64", "u32>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "?xtl", recipes: &["sxtl", "sxtl", "sxtl", "uxtl", "uxtl", "uxtl", "uxtl", "uxtl", "uxtl"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "?unpklo", recipes: &["sunpklo", "sunpklo", "sunpklo", "uunpklo", "uunpklo", "uunpklo", "uunpklo", "uunpklo", "uunpklo"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "f32>i32/f32>u32/f64>i64/f64>u64",
         form: "",
         keys: &["f32>i32", "f32>u32", "f64>i64", "f64>u64"],
         cells: &[
             Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "fcvtz?", recipes: &["fcvtzs", "fcvtzu", "fcvtzs", "fcvtzu"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fcvtz?", recipes: &["fcvtzs", "fcvtzu", "fcvtzs", "fcvtzu"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fcvtz?", recipes: &["fcvtzs", "fcvtzu", "fcvtzs", "fcvtzu"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i16>i8/i32>i16/i64>i32",
+        form: "",
+        keys: &["i16>i8", "i32>i16", "i64>i32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "sqxtn", recipes: &["sqxtn", "sqxtn", "sqxtn"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "smin; smax; uzp1", recipes: &["smin; smax; uzp1", "smin; smax; uzp1", "smin; smax; uzp1"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i16>u8/i32>u16/i64>u32",
+        form: "",
+        keys: &["i16>u8", "i32>u16", "i64>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "sqxtun", recipes: &["sqxtun", "sqxtun", "sqxtun"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "smax; umin; uzp1", recipes: &["smax; umin; uzp1", "smax; umin; uzp1", "smax; umin; uzp1"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "u16>u8/u32>u16/u64>u32",
+        form: "",
+        keys: &["u16>u8", "u32>u16", "u64>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "uqxtn", recipes: &["uqxtn", "uqxtn", "uqxtn"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "umin; uzp1", recipes: &["umin; uzp1", "umin; uzp1", "umin; uzp1"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i8>i32/i16>i64/u8>i32/u8>u32/u16>i64/u16>u64",
+        form: "",
+        keys: &["i8>i32", "i16>i64", "u8>i32", "u8>u32", "u16>i64", "u16>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "?xtl x2", recipes: &["sxtl x2", "sxtl x2", "uxtl x2", "uxtl x2", "uxtl x2", "uxtl x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "?unpklo x2", recipes: &["sunpklo x2", "sunpklo x2", "uunpklo x2", "uunpklo x2", "uunpklo x2", "uunpklo x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i8>u8/i16>u16/i32>u32/i64>u64",
+        form: "",
+        keys: &["i8>u8", "i16>u16", "i32>u32", "i64>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "cmlt; bic", recipes: &["cmlt; bic", "cmlt; bic", "cmlt; bic", "cmlt; bic"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "smax", recipes: &["smax", "smax", "smax", "smax"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "u8>i8/u16>i16/u32>i32/u64>i64",
+        form: "",
+        keys: &["u8>i8", "u16>i16", "u32>i32", "u64>i64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "cmlt; bit", recipes: &["cmlt; bit", "cmlt; bit", "cmlt; bit", "cmlt; bit"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "umin", recipes: &["umin", "umin", "umin", "umin"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "f32>i64/f32>u64",
+        form: "",
+        keys: &["f32>i64", "f32>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "fcvtl; fcvtz?", recipes: &["fcvtl; fcvtzs", "fcvtl; fcvtzu"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fcvtz?", recipes: &["fcvtzs", "fcvtzu"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "f64>i32/f64>u32",
+        form: "",
+        keys: &["f64>i32", "f64>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "fcvtz?; ?qxtn", recipes: &["fcvtzs; sqxtn", "fcvtzu; uqxtn"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "fcvtz?", recipes: &["fcvtzs", "fcvtzu"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "f32>i16",
+        form: "",
+        keys: &["f32>i16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "fcvtz?; ?qxtn", recipes: &["fcvtzs; sqxtn"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "fcvtz?; smin; smax; uzp1", recipes: &["fcvtzs; smin; smax; uzp1"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "f32>u16",
+        form: "",
+        keys: &["f32>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "fcvtz?; ?qxtn", recipes: &["fcvtzu; uqxtn"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "fcvtz?; umin; uzp1", recipes: &["fcvtzu; umin; uzp1"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i32>i8/i64>i16",
+        form: "",
+        keys: &["i32>i8", "i64>i16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "sqxtn x2", recipes: &["sqxtn x2", "sqxtn x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "smin; smax; uzp1 x2", recipes: &["smin; smax; uzp1 x2", "smin; smax; uzp1 x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i32>u8/i64>u16",
+        form: "",
+        keys: &["i32>u8", "i64>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "sqxtun; uqxtn", recipes: &["sqxtun; uqxtn", "sqxtun; uqxtn"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "smax; umin; uzp1 x2", recipes: &["smax; umin; uzp1 x2", "smax; umin; uzp1 x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "u32>u8/u64>u16",
+        form: "",
+        keys: &["u32>u8", "u64>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "uqxtn x2", recipes: &["uqxtn x2", "uqxtn x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "umin; uzp1 x2", recipes: &["umin; uzp1 x2", "umin; uzp1 x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i8>i64/u8>i64/u8>u64",
+        form: "",
+        keys: &["i8>i64", "u8>i64", "u8>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "?xtl x3", recipes: &["sxtl x3", "uxtl x3", "uxtl x3"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "?unpklo x3", recipes: &["sunpklo x3", "uunpklo x3", "uunpklo x3"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i8>u16/i16>u32/i32>u64",
+        form: "",
+        keys: &["i8>u16", "i16>u32", "i32>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "cmlt; bic; uxtl", recipes: &["cmlt; bic; uxtl", "cmlt; bic; uxtl", "cmlt; bic; uxtl"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "smax; uunpklo", recipes: &["smax; uunpklo", "smax; uunpklo", "smax; uunpklo"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "f64>i16",
+        form: "",
+        keys: &["f64>i16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "fcvtz?; ?qxtn x2", recipes: &["fcvtzs; sqxtn x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "fcvtz?; smin; smax; uzp1", recipes: &["fcvtzs; smin; smax; uzp1"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "f32>i8",
+        form: "",
+        keys: &["f32>i8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "fcvtz?; ?qxtn x2", recipes: &["fcvtzs; sqxtn x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "fcvtz?; smin; smax; uzp1 x2", recipes: &["fcvtzs; smin; smax; uzp1 x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "f64>u16",
+        form: "",
+        keys: &["f64>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "fcvtz?; ?qxtn x2", recipes: &["fcvtzu; uqxtn x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "fcvtz?; umin; uzp1", recipes: &["fcvtzu; umin; uzp1"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "f32>u8",
+        form: "",
+        keys: &["f32>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "fcvtz?; ?qxtn x2", recipes: &["fcvtzu; uqxtn x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "fcvtz?; umin; uzp1 x2", recipes: &["fcvtzu; umin; uzp1 x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i64>i8",
+        form: "",
+        keys: &["i64>i8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "sqxtn x3", recipes: &["sqxtn x3"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "smin; smax; uzp1 x3", recipes: &["smin; smax; uzp1 x3"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i64>u8",
+        form: "",
+        keys: &["i64>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "sqxtun; uqxtn x2", recipes: &["sqxtun; uqxtn x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "smax; umin; uzp1 x3", recipes: &["smax; umin; uzp1 x3"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "u64>u8",
+        form: "",
+        keys: &["u64>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "uqxtn x3", recipes: &["uqxtn x3"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "umin; uzp1 x3", recipes: &["umin; uzp1 x3"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "u16>i8/u32>i16/u64>i32",
+        form: "",
+        keys: &["u16>i8", "u32>i16", "u64>i32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "uqxtn; cmlt; bit", recipes: &["uqxtn; cmlt; bit", "uqxtn; cmlt; bit", "uqxtn; cmlt; bit"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "umin; uzp1", recipes: &["umin; uzp1", "umin; uzp1", "umin; uzp1"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i8>u32/i16>u64",
+        form: "",
+        keys: &["i8>u32", "i16>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "cmlt; bic; uxtl x2", recipes: &["cmlt; bic; uxtl x2", "cmlt; bic; uxtl x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "smax; uunpklo x2", recipes: &["smax; uunpklo x2", "smax; uunpklo x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "f64>i8",
+        form: "",
+        keys: &["f64>i8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "fcvtz?; ?qxtn x3", recipes: &["fcvtzs; sqxtn x3"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "fcvtz?; smin; smax; uzp1 x2", recipes: &["fcvtzs; smin; smax; uzp1 x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "f64>u8",
+        form: "",
+        keys: &["f64>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "fcvtz?; ?qxtn x3", recipes: &["fcvtzu; uqxtn x3"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "fcvtz?; umin; uzp1 x2", recipes: &["fcvtzu; umin; uzp1 x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "u32>i8/u64>i16",
+        form: "",
+        keys: &["u32>i8", "u64>i16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "uqxtn x2; cmlt; bit", recipes: &["uqxtn x2; cmlt; bit", "uqxtn x2; cmlt; bit"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "umin; uzp1 x2", recipes: &["umin; uzp1 x2", "umin; uzp1 x2"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "i8>u64",
+        form: "",
+        keys: &["i8>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "cmlt; bic; uxtl x3", recipes: &["cmlt; bic; uxtl x3"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "smax; uunpklo x3", recipes: &["smax; uunpklo x3"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.sat",
+        ty: "u64>i8",
+        form: "",
+        keys: &["u64>i8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "uqxtn x3; cmlt; bit", recipes: &["uqxtn x3; cmlt; bit"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "umin; uzp1 x3", recipes: &["umin; uzp1 x3"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.round",
+        ty: "f32>f32/f64>f64",
+        form: "",
+        keys: &["f32>f32", "f64>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.round",
+        ty: "i32>f32/i64>f64/u32>f32/u64>f64",
+        form: "",
+        keys: &["i32>f32", "i64>f64", "u32>f32", "u64>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "?cvtf", recipes: &["scvtf", "scvtf", "ucvtf", "ucvtf"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "?cvtf", recipes: &["scvtf", "scvtf", "ucvtf", "ucvtf"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.round",
+        ty: "f32>f64",
+        form: "",
+        keys: &["f32>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "fcvtl", recipes: &["fcvtl"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "uunpklo; fcvt", recipes: &["uunpklo; fcvt"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.round",
+        ty: "f64>f32",
+        form: "",
+        keys: &["f64>f32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "fcvtn", recipes: &["fcvtn"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "fcvt; uzp1", recipes: &["fcvt; uzp1"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.round",
+        ty: "i16>f32/i32>f64/u16>f32/u32>f64",
+        form: "",
+        keys: &["i16>f32", "i32>f64", "u16>f32", "u32>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "?xtl; ?cvtf", recipes: &["sxtl; scvtf", "sxtl; scvtf", "uxtl; ucvtf", "uxtl; ucvtf"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "?unpklo; ?cvtf", recipes: &["sunpklo; scvtf", "sunpklo; scvtf", "uunpklo; ucvtf", "uunpklo; ucvtf"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.round",
+        ty: "i8>f32/i16>f64/u8>f32/u16>f64",
+        form: "",
+        keys: &["i8>f32", "i16>f64", "u8>f32", "u16>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "?xtl x2; ?cvtf", recipes: &["sxtl x2; scvtf", "sxtl x2; scvtf", "uxtl x2; ucvtf", "uxtl x2; ucvtf"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "?unpklo x2; ?cvtf", recipes: &["sunpklo x2; scvtf", "sunpklo x2; scvtf", "uunpklo x2; ucvtf", "uunpklo x2; ucvtf"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.round",
+        ty: "i8>f64/u8>f64",
+        form: "",
+        keys: &["i8>f64", "u8>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "?xtl x3; ?cvtf", recipes: &["sxtl x3; scvtf", "uxtl x3; ucvtf"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "?unpklo x3; ?cvtf", recipes: &["sunpklo x3; scvtf", "uunpklo x3; ucvtf"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.round",
+        ty: "i64>f32/u64>f32",
+        form: "",
+        keys: &["i64>f32", "u64>f32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 6, recipe: "umov x2; ?cvtf x2; ins x2", recipes: &["umov x2; scvtf x2; ins x2", "umov x2; ucvtf x2; ins x2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "?cvtf; uzp1", recipes: &["scvtf; uzp1", "ucvtf; uzp1"], note: "", unverified: true },
         ],
     },
     Entry {
         op: "vec.cast.try",
-        ty: "f32>int32/f64>int64",
+        ty: "i16>i64/u16>i64/u16>u64",
         form: "",
-        keys: &["f32>i32", "f32>u32", "f64>i64", "f64>u64"],
+        keys: &["i16>i64", "u16>i64", "u16>u64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 8, recipe: "fcvtz?; fcmgt; fcmge; and; uminv; fmov; cmp; cset", recipes: &["fcvtzs; fcmgt; fcmge; and; uminv; fmov; cmp; cset", "fcvtzu; fcmgt; fcmge; and; uminv; fmov; cmp; cset", "fcvtzs; fcmgt; fcmge; and; uminv; fmov; cmp; cset", "fcvtzu; fcmgt; fcmge; and; uminv; fmov; cmp; cset"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "fcvtz?; fcmlt; fcmge; nots; cset", recipes: &["fcvtzs; fcmlt; fcmge; nots; cset", "fcvtzu; fcmlt; fcmge; nots; cset", "fcvtzs; fcmlt; fcmge; nots; cset", "fcvtzu; fcmlt; fcmge; nots; cset"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 13, recipe: "?mov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["smov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "?unpklo x2; ptest; cset", recipes: &["sunpklo x2; ptest; cset", "uunpklo x2; ptest; cset", "uunpklo x2; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i8>i64/u8>i64/u8>u64",
+        form: "",
+        keys: &["i8>i64", "u8>i64", "u8>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 13, recipe: "?mov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["smov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "?unpklo x3; ptest; cset", recipes: &["sunpklo x3; ptest; cset", "uunpklo x3; ptest; cset", "uunpklo x3; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i32>i64/u32>i64/u32>u64",
+        form: "",
+        keys: &["i32>i64", "u32>i64", "u32>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 13, recipe: "?mov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["smov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "?unpklo; ptest; cset", recipes: &["sunpklo; ptest; cset", "uunpklo; ptest; cset", "uunpklo; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "f64>f64",
+        form: "",
+        keys: &["f64>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 13, recipe: "dup x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["dup x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "cset", recipes: &["cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i64>i64/u64>u64",
+        form: "",
+        keys: &["i64>i64", "u64>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 13, recipe: "umov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["umov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "ptest; cset", recipes: &["ptest; cset", "ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "f32>f64",
+        form: "",
+        keys: &["f32>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 15, recipe: "dup x2; fcvt x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["dup x2; fcvt x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "uunpklo; fcvt; cset", recipes: &["uunpklo; fcvt; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "u64>i64",
+        form: "",
+        keys: &["u64>i64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 17, recipe: "umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "cmpgt; ptest; cset", recipes: &["cmpgt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "u64>i16/u64>u16",
+        form: "",
+        keys: &["u64>i16", "u64>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 17, recipe: "umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "uzp1 x2; cmpgt; ptest; cset", recipes: &["uzp1 x2; cmpgt; ptest; cset", "uzp1 x2; cmpgt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "u64>i8/u64>u8",
+        form: "",
+        keys: &["u64>i8", "u64>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 17, recipe: "umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 6, recipe: "uzp1 x3; cmpgt; ptest; cset", recipes: &["uzp1 x3; cmpgt; ptest; cset", "uzp1 x3; cmpgt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "u64>i32/u64>u32",
+        form: "",
+        keys: &["u64>i32", "u64>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 17, recipe: "umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "uzp1; cmpgt; ptest; cset", recipes: &["uzp1; cmpgt; ptest; cset", "uzp1; cmpgt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i16>u64",
+        form: "",
+        keys: &["i16>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 19, recipe: "?mov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["smov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "?unpklo x2; cmplt; ptest; cset", recipes: &["sunpklo x2; cmplt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i8>u64",
+        form: "",
+        keys: &["i8>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 19, recipe: "?mov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["smov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 6, recipe: "?unpklo x3; cmplt; ptest; cset", recipes: &["sunpklo x3; cmplt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i32>u64",
+        form: "",
+        keys: &["i32>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 19, recipe: "?mov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["smov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "?unpklo; cmplt; ptest; cset", recipes: &["sunpklo; cmplt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i64>u64",
+        form: "",
+        keys: &["i64>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 19, recipe: "umov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["umov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "cmplt; ptest; cset", recipes: &["cmplt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i8>i32/u8>i32/u8>u32",
+        form: "",
+        keys: &["i8>i32", "u8>i32", "u8>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 21, recipe: "?mov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["smov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "umov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "umov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "?unpklo x2; ptest; cset", recipes: &["sunpklo x2; ptest; cset", "uunpklo x2; ptest; cset", "uunpklo x2; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i16>i32/u16>i32/u16>u32",
+        form: "",
+        keys: &["i16>i32", "u16>i32", "u16>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 21, recipe: "?mov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["smov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "umov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "umov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "?unpklo; ptest; cset", recipes: &["sunpklo; ptest; cset", "uunpklo; ptest; cset", "uunpklo; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i32>i32/u32>u32",
+        form: "",
+        keys: &["i32>i32", "u32>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 21, recipe: "?mov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["smov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "umov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "ptest; cset", recipes: &["ptest; cset", "ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "f32>f32",
+        form: "",
+        keys: &["f32>f32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 21, recipe: "dup x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["dup x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "cset", recipes: &["cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i64>i16/i64>u16",
+        form: "",
+        keys: &["i64>i16", "i64>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 23, recipe: "umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 7, recipe: "uzp1 x2; cmpgt; cmplt; orr; ptest; cset", recipes: &["uzp1 x2; cmpgt; cmplt; orr; ptest; cset", "uzp1 x2; cmpgt; cmplt; orr; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i64>i8/i64>u8",
+        form: "",
+        keys: &["i64>i8", "i64>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 23, recipe: "umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 8, recipe: "uzp1 x3; cmpgt; cmplt; orr; ptest; cset", recipes: &["uzp1 x3; cmpgt; cmplt; orr; ptest; cset", "uzp1 x3; cmpgt; cmplt; orr; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i64>i32/i64>u32",
+        form: "",
+        keys: &["i64>i32", "i64>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 23, recipe: "umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 6, recipe: "uzp1; cmpgt; cmplt; orr; ptest; cset", recipes: &["uzp1; cmpgt; cmplt; orr; ptest; cset", "uzp1; cmpgt; cmplt; orr; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "f64>f32",
+        form: "",
+        keys: &["f64>f32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 25, recipe: "dup x2; fcvt x4; fcmp x2; cset x4; orr x4; ins x2; eor x2; cmp; csel; csetm; dup; and", recipes: &["dup x2; fcvt x4; fcmp x2; cset x4; orr x4; ins x2; eor x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "fcvt x2; fcmne; ptest; cset", recipes: &["fcvt x2; fcmne; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i16>f64/u16>f64",
+        form: "",
+        keys: &["i16>f64", "u16>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 27, recipe: "?mov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["smov x2; scvtf x2; fcmp x2; cset x4; fcvtzs x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ucvtf x2; fcmp x2; cset x4; fcvtzu x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 7, recipe: "?unpklo x2; ?cvtf; fcvtz?; cmpne; ptest; cset", recipes: &["sunpklo x2; scvtf; fcvtzs; cmpne; ptest; cset", "uunpklo x2; ucvtf; fcvtzu; cmpne; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i8>f64/u8>f64",
+        form: "",
+        keys: &["i8>f64", "u8>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 27, recipe: "?mov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["smov x2; scvtf x2; fcmp x2; cset x4; fcvtzs x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ucvtf x2; fcmp x2; cset x4; fcvtzu x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 8, recipe: "?unpklo x3; ?cvtf; fcvtz?; cmpne; ptest; cset", recipes: &["sunpklo x3; scvtf; fcvtzs; cmpne; ptest; cset", "uunpklo x3; ucvtf; fcvtzu; cmpne; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i32>f64/u32>f64",
+        form: "",
+        keys: &["i32>f64", "u32>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 27, recipe: "?mov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["smov x2; scvtf x2; fcmp x2; cset x4; fcvtzs x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ucvtf x2; fcmp x2; cset x4; fcvtzu x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 6, recipe: "?unpklo; ?cvtf; fcvtz?; cmpne; ptest; cset", recipes: &["sunpklo; scvtf; fcvtzs; cmpne; ptest; cset", "uunpklo; ucvtf; fcvtzu; cmpne; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i64>f64/u64>f64",
+        form: "",
+        keys: &["i64>f64", "u64>f64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 27, recipe: "umov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["umov x2; scvtf x2; fcmp x2; cset x4; fcvtzs x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ucvtf x2; fcmp x2; cset x4; fcvtzu x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "?cvtf; fcvtz?; cmpne; ptest; cset", recipes: &["scvtf; fcvtzs; cmpne; ptest; cset", "ucvtf; fcvtzu; cmpne; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i64>f32/u64>f32",
+        form: "",
+        keys: &["i64>f32", "u64>f32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 27, recipe: "umov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["umov x2; scvtf x2; fcmp x2; cset x4; fcvtzs x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "umov x2; ucvtf x2; fcmp x2; cset x4; fcvtzu x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 6, recipe: "?cvtf; uzp1; fcvtz?; cmpne; ptest; cset", recipes: &["scvtf; uzp1; fcvtzs; cmpne; ptest; cset", "ucvtf; uzp1; fcvtzu; cmpne; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "u32>i32",
+        form: "",
+        keys: &["u32>i32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 29, recipe: "?mov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["umov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "cmpgt; ptest; cset", recipes: &["cmpgt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "u32>i8/u32>u8",
+        form: "",
+        keys: &["u32>i8", "u32>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 29, recipe: "?mov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["umov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "umov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "uzp1 x2; cmpgt; ptest; cset", recipes: &["uzp1 x2; cmpgt; ptest; cset", "uzp1 x2; cmpgt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "u32>i16/u32>u16",
+        form: "",
+        keys: &["u32>i16", "u32>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 29, recipe: "?mov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["umov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "umov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "uzp1; cmpgt; ptest; cset", recipes: &["uzp1; cmpgt; ptest; cset", "uzp1; cmpgt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i8>u32",
+        form: "",
+        keys: &["i8>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 33, recipe: "?mov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["smov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "?unpklo x2; cmplt; ptest; cset", recipes: &["sunpklo x2; cmplt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i16>u32",
+        form: "",
+        keys: &["i16>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 33, recipe: "?mov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["smov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "?unpklo; cmplt; ptest; cset", recipes: &["sunpklo; cmplt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i32>u32",
+        form: "",
+        keys: &["i32>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 33, recipe: "?mov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["smov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "cmplt; ptest; cset", recipes: &["cmplt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "f32>i64/f32>u64/f64>i8/f64>i16/f64>i32/f64>i64/f64>u8/f64>u16/f64>u32/f64>u64",
+        form: "",
+        keys: &["f32>i64", "f32>u64", "f64>i8", "f64>i16", "f64>i32", "f64>i64", "f64>u8", "f64>u16", "f64>u32", "f64>u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 33, recipe: "dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtz? x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", recipes: &["dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtzs x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtzu x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtzs x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtzs x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtzs x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtzs x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtzu x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtzu x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtzu x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and", "dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtzu x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "fcvtz?; fcmlt; fcmge; nots; cset", recipes: &["fcvtzs; fcmlt; fcmge; nots; cset", "fcvtzu; fcmlt; fcmge; nots; cset", "fcvtzs; fcmlt; fcmge; nots; cset", "fcvtzs; fcmlt; fcmge; nots; cset", "fcvtzs; fcmlt; fcmge; nots; cset", "fcvtzs; fcmlt; fcmge; nots; cset", "fcvtzu; fcmlt; fcmge; nots; cset", "fcvtzu; fcmlt; fcmge; nots; cset", "fcvtzu; fcmlt; fcmge; nots; cset", "fcvtzu; fcmlt; fcmge; nots; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i8>i16/u8>i16/u8>u16",
+        form: "",
+        keys: &["i8>i16", "u8>i16", "u8>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 37, recipe: "?mov x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", recipes: &["smov x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", "umov x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", "umov x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "?unpklo; ptest; cset", recipes: &["sunpklo; ptest; cset", "uunpklo; ptest; cset", "uunpklo; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i16>i16/u16>u16",
+        form: "",
+        keys: &["i16>i16", "u16>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 37, recipe: "?mov x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", recipes: &["smov x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", "umov x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "ptest; cset", recipes: &["ptest; cset", "ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i32>i8/i32>u8",
+        form: "",
+        keys: &["i32>i8", "i32>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 41, recipe: "?mov x4; cmp x8; cset x8; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["smov x4; cmp x8; cset x8; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "smov x4; cmp x8; cset x8; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 7, recipe: "uzp1 x2; cmpgt; cmplt; orr; ptest; cset", recipes: &["uzp1 x2; cmpgt; cmplt; orr; ptest; cset", "uzp1 x2; cmpgt; cmplt; orr; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i32>i16/i32>u16",
+        form: "",
+        keys: &["i32>i16", "i32>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 41, recipe: "?mov x4; cmp x8; cset x8; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["smov x4; cmp x8; cset x8; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "smov x4; cmp x8; cset x8; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 6, recipe: "uzp1; cmpgt; cmplt; orr; ptest; cset", recipes: &["uzp1; cmpgt; cmplt; orr; ptest; cset", "uzp1; cmpgt; cmplt; orr; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i32>f32/u32>f32",
+        form: "",
+        keys: &["i32>f32", "u32>f32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 49, recipe: "?mov x4; ?cvtf x4; fcmp x4; cset x8; fcvtz? x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["smov x4; scvtf x4; fcmp x4; cset x8; fcvtzs x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "umov x4; ucvtf x4; fcmp x4; cset x8; fcvtzu x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "?cvtf; fcvtz?; cmpne; ptest; cset", recipes: &["scvtf; fcvtzs; cmpne; ptest; cset", "ucvtf; fcvtzu; cmpne; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i8>f32/u8>f32",
+        form: "",
+        keys: &["i8>f32", "u8>f32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 49, recipe: "?mov x4; ?cvtf x4; fcmp x4; cset x8; fcvtz? x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["smov x4; scvtf x4; fcmp x4; cset x8; fcvtzs x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "umov x4; ucvtf x4; fcmp x4; cset x8; fcvtzu x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 7, recipe: "?unpklo x2; ?cvtf; fcvtz?; cmpne; ptest; cset", recipes: &["sunpklo x2; scvtf; fcvtzs; cmpne; ptest; cset", "uunpklo x2; ucvtf; fcvtzu; cmpne; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i16>f32/u16>f32",
+        form: "",
+        keys: &["i16>f32", "u16>f32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 49, recipe: "?mov x4; ?cvtf x4; fcmp x4; cset x8; fcvtz? x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["smov x4; scvtf x4; fcmp x4; cset x8; fcvtzs x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "umov x4; ucvtf x4; fcmp x4; cset x8; fcvtzu x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 6, recipe: "?unpklo; ?cvtf; fcvtz?; cmpne; ptest; cset", recipes: &["sunpklo; scvtf; fcvtzs; cmpne; ptest; cset", "uunpklo; ucvtf; fcvtzu; cmpne; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "u16>i16",
+        form: "",
+        keys: &["u16>i16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 53, recipe: "?mov x8; cmp x8; cset x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", recipes: &["umov x8; cmp x8; cset x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "cmpgt; ptest; cset", recipes: &["cmpgt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "u16>i8/u16>u8",
+        form: "",
+        keys: &["u16>i8", "u16>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 53, recipe: "?mov x8; cmp x8; cset x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", recipes: &["umov x8; cmp x8; cset x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", "umov x8; cmp x8; cset x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "uzp1; cmpgt; ptest; cset", recipes: &["uzp1; cmpgt; ptest; cset", "uzp1; cmpgt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i8>u16",
+        form: "",
+        keys: &["i8>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 61, recipe: "?mov x8; cmp x8; cset x8; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", recipes: &["smov x8; cmp x8; cset x8; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 4, recipe: "?unpklo; cmplt; ptest; cset", recipes: &["sunpklo; cmplt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i16>u16",
+        form: "",
+        keys: &["i16>u16"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 61, recipe: "?mov x8; cmp x8; cset x8; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", recipes: &["smov x8; cmp x8; cset x8; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "cmplt; ptest; cset", recipes: &["cmplt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "f32>i8/f32>i16/f32>i32/f32>u8/f32>u16/f32>u32",
+        form: "",
+        keys: &["f32>i8", "f32>i16", "f32>i32", "f32>u8", "f32>u16", "f32>u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 61, recipe: "dup x4; frintz x4; fcmp x12; cset x12; and x8; fcvtz? x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", recipes: &["dup x4; frintz x4; fcmp x12; cset x12; and x8; fcvtzs x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "dup x4; frintz x4; fcmp x12; cset x12; and x8; fcvtzs x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "dup x4; frintz x4; fcmp x12; cset x12; and x8; fcvtzs x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "dup x4; frintz x4; fcmp x12; cset x12; and x8; fcvtzu x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "dup x4; frintz x4; fcmp x12; cset x12; and x8; fcvtzu x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and", "dup x4; frintz x4; fcmp x12; cset x12; and x8; fcvtzu x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "fcvtz?; fcmlt; fcmge; nots; cset", recipes: &["fcvtzs; fcmlt; fcmge; nots; cset", "fcvtzs; fcmlt; fcmge; nots; cset", "fcvtzs; fcmlt; fcmge; nots; cset", "fcvtzu; fcmlt; fcmge; nots; cset", "fcvtzu; fcmlt; fcmge; nots; cset", "fcvtzu; fcmlt; fcmge; nots; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i8>i8/u8>u8",
+        form: "",
+        keys: &["i8>i8", "u8>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 69, recipe: "?mov x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and", recipes: &["smov x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and", "umov x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 2, recipe: "ptest; cset", recipes: &["ptest; cset", "ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i16>i8/i16>u8",
+        form: "",
+        keys: &["i16>i8", "i16>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 77, recipe: "?mov x8; cmp x16; cset x16; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", recipes: &["smov x8; cmp x16; cset x16; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and", "smov x8; cmp x16; cset x16; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 6, recipe: "uzp1; cmpgt; cmplt; orr; ptest; cset", recipes: &["uzp1; cmpgt; cmplt; orr; ptest; cset", "uzp1; cmpgt; cmplt; orr; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "u8>i8",
+        form: "",
+        keys: &["u8>i8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 101, recipe: "?mov x16; cmp x16; cset x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and", recipes: &["umov x16; cmp x16; cset x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "cmpgt; ptest; cset", recipes: &["cmpgt; ptest; cset"], note: "", unverified: true },
+        ],
+    },
+    Entry {
+        op: "vec.cast.try",
+        ty: "i8>u8",
+        form: "",
+        keys: &["i8>u8"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 117, recipe: "?mov x16; cmp x16; cset x16; and x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and", recipes: &["smov x16; cmp x16; cset x16; and x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 3, recipe: "cmplt; ptest; cset", recipes: &["cmplt; ptest; cset"], note: "", unverified: true },
         ],
     },
     Entry {
@@ -1635,22 +2805,12 @@ pub(super) static ENTRIES: &[Entry] = &[
     },
     Entry {
         op: "mask.first_n",
-        ty: "m8/m16/m32",
+        ty: "mask",
         form: "",
-        keys: &["m8", "m16", "m32"],
+        keys: &["m8", "m16", "m32", "m64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "cmp; csel; dup; cmhi", recipes: &["cmp; csel; dup; cmhi", "cmp; csel; dup; cmhi", "cmp; csel; dup; cmhi"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "whilelo", recipes: &["whilelo", "whilelo", "whilelo"], note: "", unverified: false },
-        ],
-    },
-    Entry {
-        op: "mask.first_n",
-        ty: "m64",
-        form: "",
-        keys: &["m64"],
-        cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 2, recipe: "dup; cmhi", recipes: &["dup; cmhi"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "whilelo", recipes: &["whilelo"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 4, recipe: "cmp; csel; dup; cmhi", recipes: &["cmp; csel; dup; cmhi", "cmp; csel; dup; cmhi", "cmp; csel; dup; cmhi", "cmp; csel; dup; cmhi"], note: "the lane-index constant is compared with the splat of min(k, lanes)", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "whilelo", recipes: &["whilelo", "whilelo", "whilelo", "whilelo"], note: "", unverified: false },
         ],
     },
     Entry {

@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// A mask lane is all zeros or all ones. Any other bit pattern, which only `unsafe` code can make
+// by reading a mask from memory, is undefined behaviour: the IR interpreter stops with a fault
+// when it loads one (crates/stave-driver/tests/interp_vs_native.rs); native code may read any bit
+// of the lane.
+import std.io;
+
+fn main() -> i32 {
+    let raw: [u32; 4] = [4294967295, 0, 1, 0];
+    let p = &raw as *const [u32; 4] as *const mask32x4;
+    let m = unsafe("lane 2 is neither all zeros nor all ones: undefined behaviour") *p;
+    let b = m.to_bits();
+    io.print(f"{b}\n");
+    return 0;
+}

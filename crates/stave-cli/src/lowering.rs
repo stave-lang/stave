@@ -56,7 +56,9 @@ fn cost_recipe(c: &Cell) -> (String, &'static str) {
 pub fn render(triple: Triple, tier: Tier, op: Option<&str>) -> Result<String, String> {
     let entries = tier.entries();
     let wop = entries.iter().map(|e| e.op.len()).max().unwrap_or(0);
-    let wty = entries.iter().map(|e| types(e).len()).max().unwrap_or(0);
+    // a longer type list (a cast entry naming many pairs) overflows the column instead of widening
+    // every line
+    let wty = entries.iter().map(|e| types(e).len()).max().unwrap_or(0).min(26);
     let mut o = String::new();
     let _ = writeln!(o, "# stave lowering --target {triple}: tier {}", tier.name());
     o.push_str(

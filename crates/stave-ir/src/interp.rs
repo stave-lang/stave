@@ -128,7 +128,8 @@ pub enum InterpError {
     },
     /// `max_steps` exhausted.
     Fuel,
-    /// An access outside any live region (a native run would fault).
+    /// An access outside any live region (a native run would fault), or a load of a mask whose
+    /// lane at `fault.addr` is neither all zeros nor all ones (undefined behaviour).
     Fault {
         fault: Fault,
         func: FuncId,

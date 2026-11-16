@@ -1,0 +1,58 @@
+//~ CHECK-ONLY
+// `min_num` / `max_num` treat every NaN, quiet or signaling, as missing: the result is the other
+// operand, bit for bit; two NaNs give a quiet NaN (its sign and payload are unspecified, so only
+// NaN-ness and the quiet bit are printed). Run by the interpreter harness
+// (crates/stave-driver/tests/interp_vs_native.rs) against run_min_num_snan.stdout.
+import std.io;
+
+fn show32(v: f32x4) {
+    let mut out: [u32; 4] = [0, 0, 0, 0];
+    v.bitcast::<u32x4>().store(&mut out, 0);
+    for k in 0..out.len() {
+        let b = out[k];
+        if (b & 2139095040) == 2139095040 && (b & 8388607) != 0 {
+            let quiet = (b & 4194304) != 0;
+            io.print(f" nan quiet={quiet}");
+        } else {
+            io.print(f" {b}");
+        }
+    }
+    io.print("\n");
+}
+
+fn show64(v: f64x2) {
+    let mut out: [u64; 2] = [0, 0];
+    v.bitcast::<u64x2>().store(&mut out, 0);
+    for k in 0..out.len() {
+        let b = out[k];
+        if (b & 9218868437227405312) == 9218868437227405312 && (b & 4503599627370495) != 0 {
+            let quiet = (b & 2251799813685248) != 0;
+            io.print(f" nan quiet={quiet}");
+        } else {
+            io.print(f" {b}");
+        }
+    }
+    io.print("\n");
+}
+
+fn main() -> i32 {
+    // a: signaling NaN, 1.0, signaling NaN, negative signaling NaN with a payload
+    // b: 2.0, negative signaling NaN, quiet NaN, signaling NaN
+    let abits: [u32; 4] = [2139095041, 1065353216, 2139095041, 4286653253];
+    let bbits: [u32; 4] = [1073741824, 4286653253, 2143289345, 2139095041];
+    let a = u32x4.load(&abits, 0).bitcast::<f32x4>();
+    let b = u32x4.load(&bbits, 0).bitcast::<f32x4>();
+    show32(a.min_num(b));
+    show32(a.max_num(b));
+    show32(b.min_num(a));
+    show32(b.max_num(a));
+    // c: signaling NaN, 3.0; d: -1.5, signaling NaN
+    let cbits: [u64; 2] = [9218868437227405313, 4613937818241073152];
+    let dbits: [u64; 2] = [13832806255468478464, 9218868437227405313];
+    let c = u64x2.load(&cbits, 0).bitcast::<f64x2>();
+    let d = u64x2.load(&dbits, 0).bitcast::<f64x2>();
+    show64(c.min_num(d));
+    show64(c.max_num(d));
+    show64(c.min_num(c));
+    return 0;
+}

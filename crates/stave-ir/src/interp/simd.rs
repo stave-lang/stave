@@ -5,6 +5,7 @@ use super::{Interp, InterpError, R, malformed};
 use crate::arith;
 use crate::host::Host;
 use crate::ir::{Body, CastKind, FuncId, Operand, PanicKind, Site};
+use crate::mem::Fault;
 use crate::simd::{self, LaneTy, VecOp};
 use crate::types::TypeId;
 
@@ -93,11 +94,21 @@ impl<H: Host> Interp<'_, H> {
             }
             return Ok(lanes_val(out));
         }
-        if let Some((w, n)) = simd::mask_shape(&self.m.types, t) {
-            let w = (w / 8) as u64;
+        if let Some((bits, n)) = simd::mask_shape(&self.m.types, t) {
+            let w = (bits / 8) as u64;
+            let ones = u64::MAX >> (64 - bits);
             let mut out = Vec::with_capacity(n as usize);
             for k in 0..n as u64 {
-                let raw = self.mem.read_uint(addr.wrapping_add(k * w), w).map_err(Self::fault(func, site))?;
+                let at = addr.wrapping_add(k * w);
+                let raw = self.mem.read_uint(at, w).map_err(Self::fault(func, site))?;
+                // a mask lane is all zeros or all ones; any other pattern is undefined behaviour
+                if raw != 0 && raw != ones {
+                    return Err(InterpError::Fault {
+                        fault: Fault { addr: at, len: w, write: false },
+                        func,
+                        site,
+                    });
+                }
                 out.push(raw != 0);
             }
             return Ok(mask_val(out));

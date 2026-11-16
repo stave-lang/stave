@@ -21,7 +21,13 @@
 # copies, loop-invariant constants (memory operands or hoisted), loop control, and the trap checks
 # an op implies (bounds, shift amount, divisor). An op whose sequence depends on a constant
 # (div_const, permute) lists the worst case. The cost is the number of instructions in the recipe,
-# a loop body counted once.
+# a loop body counted once. The class follows from it: N at most 2, M more (gen-tables checks).
+# Recipes of tiers with a backend (v2, v3) are what it emits; moves between frame homes are
+# memory traffic, not counted.
+#
+# Ops without a vector instruction run lane by lane on the home bytes in general registers: the
+# recipe counts every lane's loads, work and stores (one instruction repeated as `xK`), and `movx`
+# is a sign- or zero-extending load or move chosen by the lane type.
 
 # float add/sub/mul/div
 
@@ -65,22 +71,22 @@ v4 = { class = "N", recipe = "vsqrtp%" }
 [[op]]
 op = "vec.neg"
 ty = ["float"]
-v2 = { class = "N", recipe = "xorp%" }
-v3 = { class = "N", recipe = "vxorp%" }
+v2 = { class = "N", recipe = "pxor" }
+v3 = { class = "N", recipe = "vpxor" }
 v4 = { class = "N", recipe = "vxorp%" }
 
 [[op]]
 op = "vec.abs"
 ty = ["float"]
-v2 = { class = "N", recipe = "andp%" }
-v3 = { class = "N", recipe = "vandp%" }
+v2 = { class = "N", recipe = "pand" }
+v3 = { class = "N", recipe = "vpand" }
 v4 = { class = "N", recipe = "vandp%" }
 
 [[op]]
 op = "vec.copysign"
 ty = ["float"]
-v2 = { class = "N", recipe = "andp%; andp%; orp%", note = "magnitude and sign masks, then or: 3 instructions" }
-v3 = { class = "N", recipe = "vandp%; vandp%; vorp%", note = "magnitude and sign masks, then or: 3 instructions" }
+v2 = { class = "M", recipe = "pand; pandn; por", note = "and with the sign mask, andn with the magnitude, then or: 3 instructions" }
+v3 = { class = "M", recipe = "vpand; vpandn; vpor", note = "and with the sign mask, andn with the magnitude, then or: 3 instructions" }
 v4 = { class = "N", recipe = "vpternlogq" }
 
 [[op]]
@@ -137,8 +143,8 @@ v4 = { class = "N", recipe = "vpabs*" }
 [[op]]
 op = "vec.abs_wrap"
 ty = ["i64"]
-v2 = { class = "N", recipe = "psubq; blendvpd" }
-v3 = { class = "N", recipe = "vpsubq; vblendvpd" }
+v2 = { class = "M", recipe = "pcmpgtq; pxor; psubq", note = "no pabsq below AVX-512: sign mask, xor, subtract" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpsubq", note = "no pabsq below AVX-512: sign mask, xor, subtract" }
 v4 = { class = "N", recipe = "vpabsq" }
 
 # int mul wrapping
@@ -153,8 +159,8 @@ v4 = { class = "N", recipe = "vpmull*" }
 [[op]]
 op = "vec.mul.wrap"
 ty = ["int8"]
-v2 = { class = "M", recipe = "pmullw; psrlw; pand; pmullw; pand; por" }
-v3 = { class = "M", recipe = "vpmullw; vpsrlw; vpand; vpmullw; vpand; vpor" }
+v2 = { class = "M", recipe = "psrlw x2; pmullw; psllw; pmullw; pand; por" }
+v3 = { class = "M", recipe = "vpsrlw x2; vpmullw; vpsllw; vpmullw; vpand; vpor" }
 v4 = { class = "M", recipe = "vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq" }
 
 [[op]]
@@ -197,22 +203,22 @@ v4 = { class = "N", recipe = "vpsubus*" }
 [[op]]
 op = "vec.add.sat"
 ty = ["i32"]
-v2 = { class = "M", recipe = "paddd; pxor; pxor; pand; psrad; pxor; blendvps" }
-v3 = { class = "M", recipe = "vpaddd; vpxor; vpxor; vpand; vpsrad; vpxor; vblendvps" }
+v2 = { class = "M", recipe = "paddd; pxor x2; pand; pcmpgtd x2; pxor x2; pand; pxor" }
+v3 = { class = "M", recipe = "vpaddd; vpxor x2; vpand; vpcmpgtd x2; vpxor x2; vpand; vpxor" }
 v4 = { class = "M", recipe = "vpaddd; vpternlogd; vpmovd2m; vpsrad; vpxord; vmovdqa32 {k}" }
 
 [[op]]
 op = "vec.add.sat"
 ty = ["i64"]
-v2 = { class = "M", recipe = "paddq; pxor; pxor; pand; pcmpgtq; pxor; blendvpd" }
-v3 = { class = "M", recipe = "vpaddq; vpxor; vpxor; vpand; vpcmpgtq; vpxor; vblendvpd" }
+v2 = { class = "M", recipe = "paddq; pxor x2; pand; pcmpgtq x2; pxor x2; pand; pxor" }
+v3 = { class = "M", recipe = "vpaddq; vpxor x2; vpand; vpcmpgtq x2; vpxor x2; vpand; vpxor" }
 v4 = { class = "M", recipe = "vpaddq; vpternlogq; vpmovq2m; vpsraq; vpxorq; vmovdqa64 {k}" }
 
 [[op]]
 op = "vec.add.sat"
 ty = ["u32"]
-v2 = { class = "M", recipe = "pxor; pminud; paddd" }
-v3 = { class = "M", recipe = "vpxor; vpminud; vpaddd" }
+v2 = { class = "M", recipe = "paddd; pxor x2; pcmpgtd; por" }
+v3 = { class = "M", recipe = "vpaddd; vpxor x2; vpcmpgtd; vpor" }
 v4 = { class = "M", recipe = "vpternlogd; vpminud; vpaddd" }
 
 [[op]]
@@ -225,129 +231,185 @@ v4 = { class = "M", recipe = "vpternlogq; vpminuq; vpaddq" }
 [[op]]
 op = "vec.sub.sat"
 ty = ["i32"]
-v2 = { class = "M", recipe = "psubd; pxor; pxor; pand; psrad; pxor; blendvps" }
-v3 = { class = "M", recipe = "vpsubd; vpxor; vpxor; vpand; vpsrad; vpxor; vblendvps" }
+v2 = { class = "M", recipe = "psubd; pxor x2; pand; pcmpgtd x2; pxor x2; pand; pxor" }
+v3 = { class = "M", recipe = "vpsubd; vpxor x2; vpand; vpcmpgtd x2; vpxor x2; vpand; vpxor" }
 v4 = { class = "M", recipe = "vpsubd; vpternlogd; vpmovd2m; vpsrad; vpxord; vmovdqa32 {k}" }
 
 [[op]]
 op = "vec.sub.sat"
 ty = ["i64"]
-v2 = { class = "M", recipe = "psubq; pxor; pxor; pand; pcmpgtq; pxor; blendvpd" }
-v3 = { class = "M", recipe = "vpsubq; vpxor; vpxor; vpand; vpcmpgtq; vpxor; vblendvpd" }
+v2 = { class = "M", recipe = "psubq; pxor x2; pand; pcmpgtq x2; pxor x2; pand; pxor" }
+v3 = { class = "M", recipe = "vpsubq; vpxor x2; vpand; vpcmpgtq x2; vpxor x2; vpand; vpxor" }
 v4 = { class = "M", recipe = "vpsubq; vpternlogq; vpmovq2m; vpsraq; vpxorq; vmovdqa64 {k}" }
 
 [[op]]
 op = "vec.sub.sat"
 ty = ["u32"]
-v2 = { class = "M", recipe = "pmaxud; psubd" }
-v3 = { class = "M", recipe = "vpmaxud; vpsubd" }
-v4 = { class = "M", recipe = "vpmaxud; vpsubd" }
+v2 = { class = "M", recipe = "psubd; pxor x2; pcmpgtd; pandn" }
+v3 = { class = "M", recipe = "vpsubd; vpxor x2; vpcmpgtd; vpandn" }
+v4 = { class = "N", recipe = "vpmaxud; vpsubd" }
 
 [[op]]
 op = "vec.sub.sat"
 ty = ["u64"]
 v2 = { class = "M", recipe = "psubq; pxor; pxor; pcmpgtq; pandn" }
 v3 = { class = "M", recipe = "vpsubq; vpxor; vpxor; vpcmpgtq; vpandn" }
-v4 = { class = "M", recipe = "vpmaxuq; vpsubq" }
+v4 = { class = "N", recipe = "vpmaxuq; vpsubq" }
 
-# checked add/sub/mul: the result, an any-lane overflow test, the Option tag
+[[op]]
+op = "vec.mul.sat"
+ty = ["i8"]
+v2 = { class = "M", recipe = "movx x32; imul x16; cmp x32; cmov x32; mov x16" }
+v3 = { class = "M", recipe = "movx x64; imul x32; cmp x64; cmov x64; mov x32" }
+v4 = { class = "M", recipe = "vextracti64x4 x2; vpmovsxbw x4; vpmullw x2; vpmovswb x2; vinserti64x4", unverified = true }
+
+[[op]]
+op = "vec.mul.sat"
+ty = ["u8"]
+v2 = { class = "M", recipe = "movx x32; imul x16; cmp x16; cmov x16; mov x16" }
+v3 = { class = "M", recipe = "movx x64; imul x32; cmp x32; cmov x32; mov x32" }
+v4 = { class = "M", recipe = "vextracti64x4 x2; vpmovzxbw x4; vpmullw x2; vpmovuswb x2; vinserti64x4", unverified = true }
+
+[[op]]
+op = "vec.mul.sat"
+ty = ["i16"]
+v2 = { class = "M", recipe = "movx x16; imul x8; cmp x16; cmov x16; mov x8" }
+v3 = { class = "M", recipe = "movx x32; imul x16; cmp x32; cmov x32; mov x16" }
+v4 = { class = "M", recipe = "vextracti64x4 x2; vpmovsxwd x4; vpmulld x2; vpmovsdw x2; vinserti64x4", unverified = true }
+
+[[op]]
+op = "vec.mul.sat"
+ty = ["u16"]
+v2 = { class = "M", recipe = "movx x16; imul x8; cmp x8; cmov x8; mov x8" }
+v3 = { class = "M", recipe = "movx x32; imul x16; cmp x16; cmov x16; mov x16" }
+v4 = { class = "M", recipe = "vextracti64x4 x2; vpmovzxwd x4; vpmulld x2; vpmovusdw x2; vinserti64x4", unverified = true }
+
+[[op]]
+op = "vec.mul.sat"
+ty = ["i32"]
+v2 = { class = "M", recipe = "movx x8; imul x4; cmp x8; cmov x8; mov x4" }
+v3 = { class = "M", recipe = "movx x16; imul x8; cmp x16; cmov x16; mov x8" }
+v4 = { class = "M", recipe = "vextracti64x4 x2; vpmovsxdq x4; vpmullq x2; vpmovsqd x2; vinserti64x4", unverified = true }
+
+[[op]]
+op = "vec.mul.sat"
+ty = ["u32"]
+v2 = { class = "M", recipe = "movx x8; imul x4; cmp x4; cmov x4; mov x4" }
+v3 = { class = "M", recipe = "movx x16; imul x8; cmp x8; cmov x8; mov x8" }
+v4 = { class = "M", recipe = "vextracti64x4 x2; vpmovzxdq x4; vpmullq x2; vpmovusqd x2; vinserti64x4", unverified = true }
+
+[[op]]
+op = "vec.mul.sat"
+ty = ["i64"]
+v2 = { class = "M", recipe = "mov x8; imul x2; jno x2; xor x4; sar x2" }
+v3 = { class = "M", recipe = "mov x16; imul x4; jno x4; xor x8; sar x4" }
+v4 = { class = "M", recipe = "vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; imul x8; sar x8; xor x16; cmovo x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4", unverified = true }
+
+[[op]]
+op = "vec.mul.sat"
+ty = ["u64"]
+v2 = { class = "M", recipe = "mov x8; mul x2; jnc x2" }
+v3 = { class = "M", recipe = "mov x16; mul x4; jnc x4" }
+v4 = { class = "M", recipe = "vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; mul x8; sbb x8; or x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4", unverified = true }
+
+# checked add/sub: the result, an any-lane overflow test, the Option tag; checked mul runs lane by lane
 
 [[op]]
 op = "vec.checked_add"
 ty = ["sint"]
-v2 = { class = "M", recipe = "padd*; pxor; pxor; pand; ptest; setz" }
-v3 = { class = "M", recipe = "vpadd*; vpxor; vpxor; vpand; vptest; setz" }
+v2 = { class = "M", recipe = "padd*; pxor x2; pand; ptest; jne; mov; jmp; mov" }
+v3 = { class = "M", recipe = "vpadd*; vpxor x2; vpand; vptest; jne; mov; jmp; mov" }
 v4 = { class = "M", recipe = "vpadd*; vpternlogd; vptestmq; kortestb; setz" }
 
 [[op]]
 op = "vec.checked_add"
 ty = ["u8", "u16", "u32"]
-v2 = { class = "M", recipe = "padd*; pmaxu*; pxor; ptest; setz" }
-v3 = { class = "M", recipe = "vpadd*; vpmaxu*; vpxor; vptest; setz" }
+v2 = { class = "M", recipe = "padd*; pxor x2; pcmpgt*; ptest; jne; mov; jmp; mov" }
+v3 = { class = "M", recipe = "vpadd*; vpxor x2; vpcmpgt*; vptest; jne; mov; jmp; mov" }
 v4 = { class = "M", recipe = "vpadd*; vpcmpu*; kortestq; setz" }
 
 [[op]]
 op = "vec.checked_add"
 ty = ["u64"]
-v2 = { class = "M", recipe = "paddq; pxor; pxor; pcmpgtq; ptest; setz" }
-v3 = { class = "M", recipe = "vpaddq; vpxor; vpxor; vpcmpgtq; vptest; setz" }
+v2 = { class = "M", recipe = "paddq; pxor x2; pcmpgtq; ptest; jne; mov; jmp; mov" }
+v3 = { class = "M", recipe = "vpaddq; vpxor x2; vpcmpgtq; vptest; jne; mov; jmp; mov" }
 v4 = { class = "M", recipe = "vpaddq; vpcmpuq; kortestq; setz" }
 
 [[op]]
 op = "vec.checked_sub"
 ty = ["sint"]
-v2 = { class = "M", recipe = "psub*; pxor; pxor; pand; ptest; setz" }
-v3 = { class = "M", recipe = "vpsub*; vpxor; vpxor; vpand; vptest; setz" }
+v2 = { class = "M", recipe = "psub*; pxor x2; pand; ptest; jne; mov; jmp; mov" }
+v3 = { class = "M", recipe = "vpsub*; vpxor x2; vpand; vptest; jne; mov; jmp; mov" }
 v4 = { class = "M", recipe = "vpsub*; vpternlogd; vptestmq; kortestb; setz" }
 
 [[op]]
 op = "vec.checked_sub"
 ty = ["u8", "u16", "u32"]
-v2 = { class = "M", recipe = "psub*; pmaxu*; pxor; ptest; setz" }
-v3 = { class = "M", recipe = "vpsub*; vpmaxu*; vpxor; vptest; setz" }
+v2 = { class = "M", recipe = "psub*; pxor x2; pcmpgt*; ptest; jne; mov; jmp; mov" }
+v3 = { class = "M", recipe = "vpsub*; vpxor x2; vpcmpgt*; vptest; jne; mov; jmp; mov" }
 v4 = { class = "M", recipe = "vpsub*; vpcmpu*; kortestq; setz" }
 
 [[op]]
 op = "vec.checked_sub"
 ty = ["u64"]
-v2 = { class = "M", recipe = "psubq; pxor; pxor; pcmpgtq; ptest; setz" }
-v3 = { class = "M", recipe = "vpsubq; vpxor; vpxor; vpcmpgtq; vptest; setz" }
+v2 = { class = "M", recipe = "psubq; pxor x2; pcmpgtq; ptest; jne; mov; jmp; mov" }
+v3 = { class = "M", recipe = "vpsubq; vpxor x2; vpcmpgtq; vptest; jne; mov; jmp; mov" }
 v4 = { class = "M", recipe = "vpsubq; vpcmpuq; kortestq; setz" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["i8"]
-v2 = { class = "M", recipe = "psrldq x2; pmovsxbw x4; pmullw x2; packsswb; paddw x2; por; ptest; setz" }
-v3 = { class = "M", recipe = "vextracti128 x2; vpmovsxbw x4; vpmullw x2; vpacksswb; vpermq; vpaddw x2; vpor; vptest; setz" }
+v2 = { class = "M", recipe = "movx x48; imul x16; cmp x16; jne x16; mov x18; jmp" }
+v3 = { class = "M", recipe = "movx x96; imul x32; cmp x32; jne x32; mov x34; jmp" }
 v4 = { class = "M", recipe = "vextracti64x4 x2; vpmovsxbw x4; vpmullw x2; vpmovswb x2; vinserti64x4; vpaddw x2; vpor; vptestmw; kortestd; setz" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["u8"]
-v2 = { class = "M", recipe = "pmovzxbw x2; punpckhbw x2; pmullw x2; packuswb; por; ptest; setz" }
-v3 = { class = "M", recipe = "vextracti128 x2; vpmovzxbw x4; vpmullw x2; vpackuswb; vpermq; vpor; vptest; setz" }
+v2 = { class = "M", recipe = "movx x48; imul x16; cmp x16; jne x16; mov x18; jmp" }
+v3 = { class = "M", recipe = "movx x96; imul x32; cmp x32; jne x32; mov x34; jmp" }
 v4 = { class = "M", recipe = "vextracti64x4 x2; vpmovzxbw x4; vpmullw x2; vpmovwb x2; vinserti64x4; vpor; vptestmw; kortestd; setz" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["i16"]
-v2 = { class = "M", recipe = "pmullw; pmulhw; psraw; pxor; ptest; setz" }
-v3 = { class = "M", recipe = "vpmullw; vpmulhw; vpsraw; vpxor; vptest; setz" }
+v2 = { class = "M", recipe = "movx x24; imul x8; cmp x8; jne x8; mov x10; jmp" }
+v3 = { class = "M", recipe = "movx x48; imul x16; cmp x16; jne x16; mov x18; jmp" }
 v4 = { class = "M", recipe = "vpmullw; vpmulhw; vpsraw; vpcmpw; kortestd; setz" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["u16"]
-v2 = { class = "M", recipe = "pmullw; pmulhuw; ptest; setz" }
-v3 = { class = "M", recipe = "vpmullw; vpmulhuw; vptest; setz" }
+v2 = { class = "M", recipe = "movx x24; imul x8; cmp x8; jne x8; mov x10; jmp" }
+v3 = { class = "M", recipe = "movx x48; imul x16; cmp x16; jne x16; mov x18; jmp" }
 v4 = { class = "M", recipe = "vpmullw; vpmulhuw; vptestmw; kortestd; setz" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["i32"]
-v2 = { class = "M", recipe = "pmulld; pmuldq; psrlq x3; pmuldq; pblendw; psrad; pxor; ptest; setz" }
-v3 = { class = "M", recipe = "vpmulld; vpmuldq; vpsrlq x3; vpmuldq; vpblendd; vpsrad; vpxor; vptest; setz" }
+v2 = { class = "M", recipe = "movx x12; imul x4; cmp x4; jne x4; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x24; imul x8; cmp x8; jne x8; mov x10; jmp" }
 v4 = { class = "M", recipe = "vpmulld; vpmuldq; vpsrlq x3; vpmuldq; vpblendmd; vpsrad; vpcmpd; kortestw; setz" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["u32"]
-v2 = { class = "M", recipe = "pmulld; pmuludq; psrlq x3; pmuludq; pblendw; ptest; setz" }
-v3 = { class = "M", recipe = "vpmulld; vpmuludq; vpsrlq x3; vpmuludq; vpblendd; vptest; setz" }
+v2 = { class = "M", recipe = "movx x12; imul x4; cmp x4; jne x4; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x24; imul x8; cmp x8; jne x8; mov x10; jmp" }
 v4 = { class = "M", recipe = "vpmulld; vpmuludq; vpsrlq x3; vpmuludq; vpblendmd; vptestmd; kortestw; setz" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["i64"]
-v2 = { class = "M", recipe = "movq x2; pextrq x2; imul x2; seto x2; or; xor; movq; pinsrq" }
-v3 = { class = "M", recipe = "vextracti128 x2; vmovq x4; vpextrq x4; imul x4; seto x4; or x3; xor; vmovq x2; vpinsrq x2; vinserti128" }
+v2 = { class = "M", recipe = "mov x8; imul x2; jo x2; jmp" }
+v3 = { class = "M", recipe = "mov x14; imul x4; jo x4; jmp" }
 v4 = { class = "M", recipe = "vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; imul x8; seto x8; or x7; xor; vpmullq" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["u64"]
-v2 = { class = "M", recipe = "movq x2; pextrq x2; mul x2; seto x2; or; xor; movq; pinsrq" }
-v3 = { class = "M", recipe = "vextracti128 x2; vmovq x4; vpextrq x4; mul x4; seto x4; or x3; xor; vmovq x2; vpinsrq x2; vinserti128" }
+v2 = { class = "M", recipe = "mov x8; mul x2; jc x2; jmp" }
+v3 = { class = "M", recipe = "mov x14; mul x4; jc x4; jmp" }
 v4 = { class = "M", recipe = "vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; mul x8; seto x8; or x7; xor; vpmullq" }
 
 # bitwise
@@ -401,9 +463,9 @@ v4 = { class = "N", recipe = "vpsll*" }
 op = "vec.shl"
 ty = ["int8"]
 form = "const"
-v2 = { class = "M", recipe = "psllw; pand" }
-v3 = { class = "M", recipe = "vpsllw; vpand" }
-v4 = { class = "M", recipe = "vpsllw; vpandq" }
+v2 = { class = "M", recipe = "psrlw; psllw; pand; psllw; pand; psllw; por" }
+v3 = { class = "M", recipe = "vpsrlw; vpsllw; vpand; vpsllw; vpand; vpsllw; vpor" }
+v4 = { class = "N", recipe = "vpsllw; vpandq" }
 
 [[op]]
 op = "vec.shl.wrap"
@@ -417,9 +479,9 @@ v4 = { class = "N", recipe = "vpsll*" }
 op = "vec.shl.wrap"
 ty = ["int8"]
 form = "const"
-v2 = { class = "M", recipe = "psllw; pand" }
-v3 = { class = "M", recipe = "vpsllw; vpand" }
-v4 = { class = "M", recipe = "vpsllw; vpandq" }
+v2 = { class = "M", recipe = "psrlw; psllw; pand; psllw; pand; psllw; por" }
+v3 = { class = "M", recipe = "vpsrlw; vpsllw; vpand; vpsllw; vpand; vpsllw; vpor" }
+v4 = { class = "N", recipe = "vpsllw; vpandq" }
 
 [[op]]
 op = "vec.shr"
@@ -441,24 +503,24 @@ v4 = { class = "N", recipe = "vpsra*" }
 op = "vec.shr"
 ty = ["i64"]
 form = "const"
-v2 = { class = "N", recipe = "psrlq; pxor; psubq", note = "no psraq below AVX-512: logical shift, then sign extension" }
-v3 = { class = "N", recipe = "vpsrlq; vpxor; vpsubq", note = "no vpsraq below AVX-512: logical shift, then sign extension" }
+v2 = { class = "M", recipe = "pcmpgtq; pxor; psrlq; pxor", note = "no psraq below AVX-512: sign mask, xor, logical shift, xor" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpsrlq; vpxor", note = "no psraq below AVX-512: sign mask, xor, logical shift, xor" }
 v4 = { class = "N", recipe = "vpsraq" }
 
 [[op]]
 op = "vec.shr"
 ty = ["u8"]
 form = "const"
-v2 = { class = "M", recipe = "psrlw; pand" }
-v3 = { class = "M", recipe = "vpsrlw; vpand" }
-v4 = { class = "M", recipe = "vpsrlw; vpandq" }
+v2 = { class = "M", recipe = "psrlw x2; pand; psrlw; psllw; por" }
+v3 = { class = "M", recipe = "vpsrlw x2; vpand; vpsrlw; vpsllw; vpor" }
+v4 = { class = "N", recipe = "vpsrlw; vpandq" }
 
 [[op]]
 op = "vec.shr"
 ty = ["i8"]
 form = "const"
-v2 = { class = "M", recipe = "psrlw; pand; pxor; psubb" }
-v3 = { class = "M", recipe = "vpsrlw; vpand; vpxor; vpsubb" }
+v2 = { class = "M", recipe = "psraw x2; psllw; psraw x2; pand; psllw; por" }
+v3 = { class = "M", recipe = "vpsraw x2; vpsllw; vpsraw x2; vpand; vpsllw; vpor" }
 v4 = { class = "M", recipe = "vpsrlw; vpternlogq; vpsubb" }
 
 # shift by vector amount: 16/32/64-bit lanes
@@ -467,15 +529,15 @@ v4 = { class = "M", recipe = "vpsrlw; vpternlogq; vpsubb" }
 op = "vec.shl"
 ty = ["int16"]
 form = "vector"
-v2 = { class = "M", recipe = "psllw; por; pshufb x2; pblendvb; pmullw" }
-v3 = { class = "M", recipe = "vpsllw; vpor; vpshufb x2; vpblendvb; vpmullw" }
+v2 = { class = "M", recipe = "movx x16; shl x8; mov x8" }
+v3 = { class = "M", recipe = "movx x32; shl x16; mov x16" }
 v4 = { class = "N", recipe = "vpsllvw" }
 
 [[op]]
 op = "vec.shl"
 ty = ["int32"]
 form = "vector"
-v2 = { class = "M", recipe = "pslld; paddd; cvttps2dq; pmulld" }
+v2 = { class = "M", recipe = "movx x8; shl x4; mov x4" }
 v3 = { class = "N", recipe = "vpsllvd" }
 v4 = { class = "N", recipe = "vpsllvd" }
 
@@ -483,7 +545,7 @@ v4 = { class = "N", recipe = "vpsllvd" }
 op = "vec.shl"
 ty = ["int64"]
 form = "vector"
-v2 = { class = "M", recipe = "pshufd; psllq x2; pblendw" }
+v2 = { class = "M", recipe = "mov x6; shl x2" }
 v3 = { class = "N", recipe = "vpsllvq" }
 v4 = { class = "N", recipe = "vpsllvq" }
 
@@ -491,15 +553,15 @@ v4 = { class = "N", recipe = "vpsllvq" }
 op = "vec.shl.wrap"
 ty = ["int16"]
 form = "vector"
-v2 = { class = "M", recipe = "pand; psllw; por; pshufb x2; pblendvb; pmullw" }
-v3 = { class = "M", recipe = "vpand; vpsllw; vpor; vpshufb x2; vpblendvb; vpmullw" }
+v2 = { class = "M", recipe = "movx x16; and x8; shl x8; mov x8" }
+v3 = { class = "M", recipe = "movx x32; and x16; shl x16; mov x16" }
 v4 = { class = "N", recipe = "vpandq; vpsllvw" }
 
 [[op]]
 op = "vec.shl.wrap"
 ty = ["int32"]
 form = "vector"
-v2 = { class = "M", recipe = "pand; pslld; paddd; cvttps2dq; pmulld" }
+v2 = { class = "M", recipe = "movx x8; and x4; shl x4; mov x4" }
 v3 = { class = "N", recipe = "vpand; vpsllvd" }
 v4 = { class = "N", recipe = "vpandd; vpsllvd" }
 
@@ -507,7 +569,7 @@ v4 = { class = "N", recipe = "vpandd; vpsllvd" }
 op = "vec.shl.wrap"
 ty = ["int64"]
 form = "vector"
-v2 = { class = "M", recipe = "pand; pshufd; psllq x2; pblendw" }
+v2 = { class = "M", recipe = "mov x6; and x2; shl x2" }
 v3 = { class = "N", recipe = "vpand; vpsllvq" }
 v4 = { class = "N", recipe = "vpandq; vpsllvq" }
 
@@ -515,23 +577,23 @@ v4 = { class = "N", recipe = "vpandq; vpsllvq" }
 op = "vec.shr"
 ty = ["u16"]
 form = "vector"
-v2 = { class = "M", recipe = "psllw; por; pshufb x2; pblendvb; pmulhuw; pcmpeqw; pblendvb" }
-v3 = { class = "M", recipe = "vpsllw; vpor; vpshufb x2; vpblendvb; vpmulhuw; vpcmpeqw; vpblendvb" }
+v2 = { class = "M", recipe = "movx x16; shr x8; mov x8" }
+v3 = { class = "M", recipe = "movx x32; shr x16; mov x16" }
 v4 = { class = "N", recipe = "vpsrlvw" }
 
 [[op]]
 op = "vec.shr"
 ty = ["i16"]
 form = "vector"
-v2 = { class = "M", recipe = "psllw; por; pshufb x2; pblendvb; pmulhuw; pcmpeqw; pblendvb; pmulhuw; pxor; psubw" }
-v3 = { class = "M", recipe = "vpsllw; vpor; vpshufb x2; vpblendvb; vpmulhuw; vpcmpeqw; vpblendvb; vpmulhuw; vpxor; vpsubw" }
+v2 = { class = "M", recipe = "movx x16; sar x8; mov x8" }
+v3 = { class = "M", recipe = "movx x32; sar x16; mov x16" }
 v4 = { class = "N", recipe = "vpsravw" }
 
 [[op]]
 op = "vec.shr"
 ty = ["u32"]
 form = "vector"
-v2 = { class = "M", recipe = "pmovzxdq; psrlq; punpckhdq; psrldq; psrld x4; pblendw x3" }
+v2 = { class = "M", recipe = "movx x8; shr x4; mov x4" }
 v3 = { class = "N", recipe = "vpsrlvd" }
 v4 = { class = "N", recipe = "vpsrlvd" }
 
@@ -539,7 +601,7 @@ v4 = { class = "N", recipe = "vpsrlvd" }
 op = "vec.shr"
 ty = ["i32"]
 form = "vector"
-v2 = { class = "M", recipe = "pmovzxdq; psrlq; punpckhdq; psrldq; psrad x4; pblendw x3" }
+v2 = { class = "M", recipe = "movx x8; sar x4; mov x4" }
 v3 = { class = "N", recipe = "vpsravd" }
 v4 = { class = "N", recipe = "vpsravd" }
 
@@ -547,7 +609,7 @@ v4 = { class = "N", recipe = "vpsravd" }
 op = "vec.shr"
 ty = ["u64"]
 form = "vector"
-v2 = { class = "M", recipe = "pshufd; psrlq x2; pblendw" }
+v2 = { class = "M", recipe = "mov x6; shr x2" }
 v3 = { class = "N", recipe = "vpsrlvq" }
 v4 = { class = "N", recipe = "vpsrlvq" }
 
@@ -555,8 +617,8 @@ v4 = { class = "N", recipe = "vpsrlvq" }
 op = "vec.shr"
 ty = ["i64"]
 form = "vector"
-v2 = { class = "M", recipe = "pshufd; psrlq x4; pblendw x2; pxor; psubq" }
-v3 = { class = "N", recipe = "vpsrlvq x2; vpxor; vpsubq", note = "no vpsravq below AVX-512: logical shifts, then sign extension" }
+v2 = { class = "M", recipe = "mov x6; sar x2" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpsrlvq; vpxor", note = "no vpsravq below AVX-512: sign mask, xor, logical shift, xor" }
 v4 = { class = "N", recipe = "vpsravq" }
 
 # shift by vector amount: 8-bit lanes
@@ -565,32 +627,32 @@ v4 = { class = "N", recipe = "vpsravq" }
 op = "vec.shl"
 ty = ["int8"]
 form = "vector"
-v2 = { class = "M", recipe = "pshufb; pmullw; psrlw; pand; pmullw; pand; por" }
-v3 = { class = "M", recipe = "vpshufb; vpmullw; vpsrlw; vpand; vpmullw; vpand; vpor" }
+v2 = { class = "M", recipe = "movx x32; shl x16; mov x16" }
+v3 = { class = "M", recipe = "movx x64; shl x32; mov x32" }
 v4 = { class = "M", recipe = "vpshufb; vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq" }
 
 [[op]]
 op = "vec.shl.wrap"
 ty = ["int8"]
 form = "vector"
-v2 = { class = "M", recipe = "pand; pshufb; pmullw; psrlw; pand; pmullw; pand; por" }
-v3 = { class = "M", recipe = "vpand; vpshufb; vpmullw; vpsrlw; vpand; vpmullw; vpand; vpor" }
+v2 = { class = "M", recipe = "movx x32; and x16; shl x16; mov x16" }
+v3 = { class = "M", recipe = "movx x64; and x32; shl x32; mov x32" }
 v4 = { class = "M", recipe = "vpandq; vpshufb; vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq" }
 
 [[op]]
 op = "vec.shr"
 ty = ["u8"]
 form = "vector"
-v2 = { class = "M", recipe = "psllw; psrlw; pand; pblendvb; paddb; psrlw; pand; pblendvb; paddb; psrlw; pand; pblendvb" }
-v3 = { class = "M", recipe = "vpsllw; vpsrlw; vpand; vpblendvb; vpaddb; vpsrlw; vpand; vpblendvb; vpaddb; vpsrlw; vpand; vpblendvb" }
+v2 = { class = "M", recipe = "movx x32; shr x16; mov x16" }
+v3 = { class = "M", recipe = "movx x64; shr x32; mov x32" }
 v4 = { class = "M", recipe = "vextracti64x4 x2; vpmovzxbw x4; vpsrlvw x2; vpmovwb x2; vinserti64x4" }
 
 [[op]]
 op = "vec.shr"
 ty = ["i8"]
 form = "vector"
-v2 = { class = "M", recipe = "psllw; psrlw; pand; pblendvb; paddb; psrlw; pand; pblendvb; paddb; psrlw; pand; pblendvb; pshufb; pxor; psubb" }
-v3 = { class = "M", recipe = "vpsllw; vpsrlw; vpand; vpblendvb; vpaddb; vpsrlw; vpand; vpblendvb; vpaddb; vpsrlw; vpand; vpblendvb; vpshufb; vpxor; vpsubb" }
+v2 = { class = "M", recipe = "movx x32; sar x16; mov x16" }
+v3 = { class = "M", recipe = "movx x64; sar x32; mov x32" }
 v4 = { class = "M", recipe = "vextracti64x4 x2; vpmovsxbw x2; vpmovzxbw x2; vpsravw x2; vpmovwb x2; vinserti64x4" }
 
 # int div by const splat
@@ -598,57 +660,57 @@ v4 = { class = "M", recipe = "vextracti64x4 x2; vpmovsxbw x2; vpmovzxbw x2; vpsr
 [[op]]
 op = "vec.div_const"
 ty = ["u16"]
-v2 = { class = "M", recipe = "pmulhuw; psubw; psrlw; paddw; psrlw" }
-v3 = { class = "M", recipe = "vpmulhuw; vpsubw; vpsrlw; vpaddw; vpsrlw" }
+v2 = { class = "M", recipe = "movx x8; xor x8; div x8; mov x8", note = "a hardware divide per lane" }
+v3 = { class = "M", recipe = "movx x16; xor x16; div x16; mov x16", note = "a hardware divide per lane" }
 v4 = { class = "M", recipe = "vpmulhuw; vpsubw; vpsrlw; vpaddw; vpsrlw" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["i16"]
-v2 = { class = "M", recipe = "pmulhw; paddw; psraw; psrlw; paddw" }
-v3 = { class = "M", recipe = "vpmulhw; vpaddw; vpsraw; vpsrlw; vpaddw" }
+v2 = { class = "M", recipe = "movx x8; cqo x8; idiv x8; mov x8", note = "a hardware divide per lane" }
+v3 = { class = "M", recipe = "movx x16; cqo x16; idiv x16; mov x16", note = "a hardware divide per lane" }
 v4 = { class = "M", recipe = "vpmulhw; vpaddw; vpsraw; vpsrlw; vpaddw" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["u32"]
-v2 = { class = "M", recipe = "psrlq; pmuludq x2; psrlq; pblendw; psubd; psrld; paddd; psrld" }
-v3 = { class = "M", recipe = "vpsrlq; vpmuludq x2; vpsrlq; vpblendd; vpsubd; vpsrld; vpaddd; vpsrld" }
+v2 = { class = "M", recipe = "movx x4; xor x4; div x4; mov x4", note = "a hardware divide per lane" }
+v3 = { class = "M", recipe = "movx x8; xor x8; div x8; mov x8", note = "a hardware divide per lane" }
 v4 = { class = "M", recipe = "vpsrlq; vpmuludq x2; vpsrlq; vpblendmd; vpsubd; vpsrld; vpaddd; vpsrld" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["i32"]
-v2 = { class = "M", recipe = "psrlq; pmuldq x2; psrlq; pblendw; paddd; psrad; psrld; paddd" }
-v3 = { class = "M", recipe = "vpsrlq; vpmuldq x2; vpsrlq; vpblendd; vpaddd; vpsrad; vpsrld; vpaddd" }
+v2 = { class = "M", recipe = "movx x4; cqo x4; idiv x4; mov x4", note = "a hardware divide per lane" }
+v3 = { class = "M", recipe = "movx x8; cqo x8; idiv x8; mov x8", note = "a hardware divide per lane" }
 v4 = { class = "M", recipe = "vpsrlq; vpmuldq x2; vpsrlq; vpblendmd; vpaddd; vpsrad; vpsrld; vpaddd" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["u8"]
-v2 = { class = "M", recipe = "punpcklbw; punpckhbw; pmulhuw x2; packuswb" }
-v3 = { class = "M", recipe = "vpunpcklbw; vpunpckhbw; vpmulhuw x2; vpackuswb" }
+v2 = { class = "M", recipe = "movx x16; xor x16; div x16; mov x16", note = "a hardware divide per lane" }
+v3 = { class = "M", recipe = "movx x32; xor x32; div x32; mov x32", note = "a hardware divide per lane" }
 v4 = { class = "M", recipe = "vpunpcklbw; vpunpckhbw; vpmulhuw x2; vpackuswb" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["i8"]
-v2 = { class = "M", recipe = "punpcklbw; punpckhbw; psraw x2; pmulhw x2; psrlw x2; paddw x2; packsswb" }
-v3 = { class = "M", recipe = "vpunpcklbw; vpunpckhbw; vpsraw x2; vpmulhw x2; vpsrlw x2; vpaddw x2; vpacksswb" }
+v2 = { class = "M", recipe = "movx x16; cqo x16; idiv x16; mov x16", note = "a hardware divide per lane" }
+v3 = { class = "M", recipe = "movx x32; cqo x32; idiv x32; mov x32", note = "a hardware divide per lane" }
 v4 = { class = "M", recipe = "vpunpcklbw; vpunpckhbw; vpsraw x2; vpmulhw x2; vpsrlw x2; vpaddw x2; vpacksswb" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["u64"]
-v2 = { class = "M", recipe = "movq; pextrq; mul x2; sub x2; shr x4; add x2; movq; pinsrq" }
-v3 = { class = "M", recipe = "vextracti128; vmovq x2; vpextrq x2; mul x4; sub x4; shr x8; add x4; vmovq x2; vpinsrq x2; vinserti128" }
+v2 = { class = "M", recipe = "mov x4; xor x2; div x2", note = "a hardware divide per lane" }
+v3 = { class = "M", recipe = "mov x8; xor x4; div x4", note = "a hardware divide per lane" }
 v4 = { class = "M", recipe = "vextracti64x4; vextracti128 x2; vmovq x4; vpextrq x4; mul x8; sub x8; shr x16; add x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["i64"]
-v2 = { class = "M", recipe = "movq; pextrq; imul x2; add x2; sar x2; shr x2; add x2; movq; pinsrq" }
-v3 = { class = "M", recipe = "vextracti128; vmovq x2; vpextrq x2; imul x4; add x4; sar x4; shr x4; add x4; vmovq x2; vpinsrq x2; vinserti128" }
+v2 = { class = "M", recipe = "mov x4; cqo x2; idiv x2", note = "a hardware divide per lane" }
+v3 = { class = "M", recipe = "mov x8; cqo x4; idiv x4", note = "a hardware divide per lane" }
 v4 = { class = "M", recipe = "vextracti64x4; vextracti128 x2; vmovq x4; vpextrq x4; imul x8; add x8; sar x8; shr x8; add x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4" }
 
 # int div by vector
@@ -672,29 +734,29 @@ v4 = { class = "N", recipe = "vfmadd213p%" }
 [[op]]
 op = "vec.min"
 ty = ["float"]
-v2 = { class = "M", recipe = "minp%; minp%; orp%; cmpunordp%; addp%; blendvp%" }
-v3 = { class = "M", recipe = "vminp%; vminp%; vorp%; vcmpunordp%; vaddp%; vblendvp%" }
+v2 = { class = "M", recipe = "minp%; cmpunordp%; minp%; por x2" }
+v3 = { class = "M", recipe = "vminp%; vcmpunordp%; vminp%; vpor x2" }
 v4 = { class = "M", recipe = "vminp%; vminp%; vorp%; vcmpunordp%; vaddp% {k}" }
 
 [[op]]
 op = "vec.max"
 ty = ["float"]
-v2 = { class = "M", recipe = "maxp%; maxp%; andp%; cmpunordp%; addp%; blendvp%" }
-v3 = { class = "M", recipe = "vmaxp%; vmaxp%; vandp%; vcmpunordp%; vaddp%; vblendvp%" }
+v2 = { class = "M", recipe = "maxp%; cmpunordp%; maxp%; pand; por" }
+v3 = { class = "M", recipe = "vmaxp%; vcmpunordp%; vmaxp%; vpand; vpor" }
 v4 = { class = "M", recipe = "vmaxp%; vmaxp%; vandp%; vcmpunordp%; vaddp% {k}" }
 
 [[op]]
 op = "vec.min_num"
 ty = ["float"]
-v2 = { class = "M", recipe = "cmpunordp% x2; blendvp% x2; minp% x2; orp%; addp%" }
-v3 = { class = "M", recipe = "vcmpunordp% x2; vblendvp% x2; vminp% x2; vorp%; vaddp%" }
+v2 = { class = "M", recipe = "minp% x2; por; cmpunordp% x2; pxor; pand; pxor x2; pand; pxor; pand; por" }
+v3 = { class = "M", recipe = "vminp% x2; vpor; vcmpunordp% x2; vpxor; vpand; vpxor x2; vpand; vpxor; vpand; vpor" }
 v4 = { class = "M", recipe = "vcmpunordp% x2; vmovap% {k} x2; vminp% x2; vorp%; vaddp%" }
 
 [[op]]
 op = "vec.max_num"
 ty = ["float"]
-v2 = { class = "M", recipe = "cmpunordp% x2; blendvp% x2; maxp% x2; andp%; addp%" }
-v3 = { class = "M", recipe = "vcmpunordp% x2; vblendvp% x2; vmaxp% x2; vandp%; vaddp%" }
+v2 = { class = "M", recipe = "maxp% x2; pand; cmpunordp% x2; pxor; pand; pxor x2; pand; pxor; pand; por" }
+v3 = { class = "M", recipe = "vmaxp% x2; vpand; vcmpunordp% x2; vpxor; vpand; vpxor x2; vpand; vpxor; vpand; vpor" }
 v4 = { class = "M", recipe = "vcmpunordp% x2; vmovap% {k} x2; vmaxp% x2; vandp%; vaddp%" }
 
 [[op]]
@@ -721,15 +783,15 @@ v4 = { class = "N", recipe = "vpmin?*" }
 [[op]]
 op = "vec.min"
 ty = ["i64"]
-v2 = { class = "M", recipe = "pcmpgtq; blendvpd" }
-v3 = { class = "M", recipe = "vpcmpgtq; vblendvpd" }
+v2 = { class = "M", recipe = "pcmpgtq; pxor; pand; pxor" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpand; vpxor" }
 v4 = { class = "N", recipe = "vpminsq" }
 
 [[op]]
 op = "vec.min"
 ty = ["u64"]
-v2 = { class = "M", recipe = "pxor x2; pcmpgtq; blendvpd" }
-v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vblendvpd" }
+v2 = { class = "M", recipe = "pxor x2; pcmpgtq; pxor; pand; pxor" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vpxor; vpand; vpxor" }
 v4 = { class = "N", recipe = "vpminuq" }
 
 [[op]]
@@ -742,15 +804,15 @@ v4 = { class = "N", recipe = "vpmax?*" }
 [[op]]
 op = "vec.max"
 ty = ["i64"]
-v2 = { class = "M", recipe = "pcmpgtq; blendvpd" }
-v3 = { class = "M", recipe = "vpcmpgtq; vblendvpd" }
+v2 = { class = "M", recipe = "pcmpgtq; pxor; pandn; pxor" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpandn; vpxor" }
 v4 = { class = "N", recipe = "vpmaxsq" }
 
 [[op]]
 op = "vec.max"
 ty = ["u64"]
-v2 = { class = "M", recipe = "pxor x2; pcmpgtq; blendvpd" }
-v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vblendvpd" }
+v2 = { class = "M", recipe = "pxor x2; pcmpgtq; pxor; pandn; pxor" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vpxor; vpandn; vpxor" }
 v4 = { class = "N", recipe = "vpmaxuq" }
 
 # compare -> mask
@@ -815,7 +877,7 @@ v4 = { class = "N", recipe = "vpcmpgt*" }
 op = "vec.gt"
 ty = ["float"]
 v2 = { class = "N", recipe = "cmpltp%" }
-v3 = { class = "N", recipe = "vcmpgtp%" }
+v3 = { class = "N", recipe = "vcmpltp%" }
 v4 = { class = "N", recipe = "vcmpgtp%" }
 
 [[op]]
@@ -842,8 +904,8 @@ v4 = { class = "N", recipe = "vcmplep%" }
 [[op]]
 op = "vec.le"
 ty = ["u8", "u16", "u32"]
-v2 = { class = "M", recipe = "pminu*; pcmpeq*" }
-v3 = { class = "M", recipe = "vpminu*; vpcmpeq*" }
+v2 = { class = "M", recipe = "pxor x2; pcmpgt*; pxor" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgt*; vpxor" }
 v4 = { class = "N", recipe = "vpcmpu*" }
 
 [[op]]
@@ -864,14 +926,14 @@ v4 = { class = "N", recipe = "vpcmp*" }
 op = "vec.ge"
 ty = ["float"]
 v2 = { class = "N", recipe = "cmplep%" }
-v3 = { class = "N", recipe = "vcmpgep%" }
+v3 = { class = "N", recipe = "vcmplep%" }
 v4 = { class = "N", recipe = "vcmpgep%" }
 
 [[op]]
 op = "vec.ge"
 ty = ["u8", "u16", "u32"]
-v2 = { class = "M", recipe = "pmaxu*; pcmpeq*" }
-v3 = { class = "M", recipe = "vpmaxu*; vpcmpeq*" }
+v2 = { class = "M", recipe = "pxor x2; pcmpgt*; pxor" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgt*; vpxor" }
 v4 = { class = "N", recipe = "vpcmpu*" }
 
 [[op]]
@@ -912,10 +974,31 @@ v3 = { class = "N", recipe = "vpxor" }
 v4 = { class = "N", recipe = "knotq" }
 
 [[op]]
+op = "mask.all"
+ty = ["mask"]
+v2 = { class = "N", recipe = "pcmpeqd" }
+v3 = { class = "N", recipe = "vpcmpeqd" }
+v4 = { class = "N", recipe = "kxnor*", unverified = true }
+
+[[op]]
+op = "mask.none"
+ty = ["mask"]
+v2 = { class = "N", recipe = "pxor" }
+v3 = { class = "N", recipe = "vpxor" }
+v4 = { class = "N", recipe = "kxor*", unverified = true }
+
+[[op]]
+op = "mask.to_vec"
+ty = ["mask"]
+v2 = { class = "N", recipe = "none" }
+v3 = { class = "N", recipe = "none" }
+v4 = { class = "N", recipe = "vpmovm2*", unverified = true }
+
+[[op]]
 op = "mask.rewiden"
 ty = ["mask"]
-v2 = { class = "M", recipe = "pshufd; packssdw; packsswb", note = "worst case m64 to m8; one pack or pmovsx per width step" }
-v3 = { class = "M", recipe = "vextracti128; vshufps; vpackssdw; vpacksswb", note = "worst case m64 to m8" }
+v2 = { class = "N", recipe = "pshufb", note = "narrowing; widening is one pmovsx" }
+v3 = { class = "M", recipe = "vpshufb; vextracti128; vpunpcklwd", note = "narrowing a 256-bit mask (m64 to m8 shown); a 128-bit source takes one vpshufb to narrow, one vpmovsx to widen" }
 v4 = { class = "N", recipe = "none" }
 
 [[op]]
@@ -928,7 +1011,7 @@ v4 = { class = "N", recipe = "kmovq" }
 [[op]]
 op = "mask.to_bits"
 ty = ["m16"]
-v2 = { class = "N", recipe = "packsswb; pmovmskb" }
+v2 = { class = "M", recipe = "packsswb; pmovmskb; and", note = "packsswb leaves two bits per lane: masked to the lane count" }
 v3 = { class = "N", recipe = "vpmovmskb; pext" }
 v4 = { class = "N", recipe = "kmovd" }
 
@@ -972,74 +1055,103 @@ v4 = { class = "N", recipe = "vmovdqu64" }
 [[op]]
 op = "vec.load_aligned"
 ty = ["any"]
-v2 = { class = "N", recipe = "movdqa" }
-v3 = { class = "N", recipe = "vmovdqa" }
+v2 = { class = "N", recipe = "movdqu" }
+v3 = { class = "N", recipe = "vmovdqu" }
 v4 = { class = "N", recipe = "vmovdqa64" }
 
 [[op]]
 op = "vec.store_aligned"
 ty = ["any"]
-v2 = { class = "N", recipe = "movdqa" }
-v3 = { class = "N", recipe = "vmovdqa" }
+v2 = { class = "N", recipe = "movdqu" }
+v3 = { class = "N", recipe = "vmovdqu" }
 v4 = { class = "N", recipe = "vmovdqa64" }
 
-# masked loads copy the active lanes into a zeroed stack buffer; masked stores write the vector to
-# the buffer and copy the active lanes back (the contract's (a) and (b))
+# masked load and store without a masked-move instruction (8/16-bit lanes at v2 and v3, every width at v2): a
+# load zeroes the result home and copies the active lanes in; a store of up to 8 lanes stores every lane (an
+# inactive one back to its own bytes), a longer one loops over the set mask bits
 
 [[op]]
 op = "vec.load_masked"
-ty = ["any32"]
-v2 = { class = "M", recipe = "movdqa; movmskps; bsf; mov; mov; btr; jnz; movdqa" }
+ty = ["int32"]
+v2 = { class = "M", recipe = "mov x6; cmp x4; je x4; movx x4", note = "copies the active lanes into a zeroed home" }
 v3 = { class = "N", recipe = "vpmaskmov*" }
 v4 = { class = "N", recipe = "vmovdqu# {k}{z}" }
 
 [[op]]
 op = "vec.load_masked"
-ty = ["any64"]
-v2 = { class = "M", recipe = "movdqa; movmskpd; bsf; mov; mov; btr; jnz; movdqa" }
+ty = ["f32"]
+v2 = { class = "M", recipe = "mov x6; cmp x4; je x4; movx x4", note = "copies the active lanes into a zeroed home" }
+v3 = { class = "N", recipe = "vmaskmovps" }
+v4 = { class = "N", recipe = "vmovdqu# {k}{z}" }
+
+[[op]]
+op = "vec.load_masked"
+ty = ["int64"]
+v2 = { class = "M", recipe = "mov x6; cmp x2; je x2", note = "copies the active lanes into a zeroed home" }
 v3 = { class = "N", recipe = "vpmaskmov*" }
+v4 = { class = "N", recipe = "vmovdqu# {k}{z}" }
+
+[[op]]
+op = "vec.load_masked"
+ty = ["f64"]
+v2 = { class = "M", recipe = "mov x6; cmp x2; je x2", note = "copies the active lanes into a zeroed home" }
+v3 = { class = "N", recipe = "vmaskmovpd" }
 v4 = { class = "N", recipe = "vmovdqu# {k}{z}" }
 
 [[op]]
 op = "vec.store_masked"
-ty = ["any32"]
-v2 = { class = "M", recipe = "movdqa; movmskps; bsf; mov; mov; btr; jnz" }
+ty = ["int32"]
+v2 = { class = "M", recipe = "movmskps; lea x8; test x4; cmovne x4; movx x4; mov x4", note = "up to 8 lanes: every lane is stored, an inactive one back to its own bytes; more: a loop over the set mask bits" }
 v3 = { class = "N", recipe = "vpmaskmov*" }
 v4 = { class = "N", recipe = "vmovdqu# {k}" }
 
 [[op]]
 op = "vec.store_masked"
-ty = ["any64"]
-v2 = { class = "M", recipe = "movdqa; movmskpd; bsf; mov; mov; btr; jnz" }
+ty = ["f32"]
+v2 = { class = "M", recipe = "movmskps; lea x8; test x4; cmovne x4; movx x4; mov x4", note = "up to 8 lanes: every lane is stored, an inactive one back to its own bytes; more: a loop over the set mask bits" }
+v3 = { class = "N", recipe = "vmaskmovps" }
+v4 = { class = "N", recipe = "vmovdqu# {k}" }
+
+[[op]]
+op = "vec.store_masked"
+ty = ["int64"]
+v2 = { class = "M", recipe = "movmskpd; lea x4; test x2; cmovne x2; mov x4", note = "up to 8 lanes: every lane is stored, an inactive one back to its own bytes; more: a loop over the set mask bits" }
 v3 = { class = "N", recipe = "vpmaskmov*" }
+v4 = { class = "N", recipe = "vmovdqu# {k}" }
+
+[[op]]
+op = "vec.store_masked"
+ty = ["f64"]
+v2 = { class = "M", recipe = "movmskpd; lea x4; test x2; cmovne x2; mov x4", note = "up to 8 lanes: every lane is stored, an inactive one back to its own bytes; more: a loop over the set mask bits" }
+v3 = { class = "N", recipe = "vmaskmovpd" }
 v4 = { class = "N", recipe = "vmovdqu# {k}" }
 
 [[op]]
 op = "vec.load_masked"
 ty = ["any8"]
-v2 = { class = "M", recipe = "movdqa; pmovmskb; bsf; mov; mov; btr; jnz; movdqa" }
-v3 = { class = "M", recipe = "vmovdqa; vpmovmskb; bsf; mov; mov; btr; jnz; vmovdqa" }
+v2 = { class = "M", recipe = "mov x18; cmp x16; je x16; movx x16", note = "copies the active lanes into a zeroed home" }
+v3 = { class = "M", recipe = "mov x36; cmp x32; je x32; movx x32", note = "copies the active lanes into a zeroed home" }
 v4 = { class = "N", recipe = "vmovdqu# {k}{z}" }
 
 [[op]]
 op = "vec.load_masked"
 ty = ["any16"]
-v2 = { class = "M", recipe = "movdqa; packsswb; pmovmskb; bsf; mov; mov; btr; jnz; movdqa" }
-v3 = { class = "M", recipe = "vmovdqa; vpmovmskb; pext; bsf; mov; mov; btr; jnz; vmovdqa" }
+v2 = { class = "M", recipe = "mov x10; cmp x8; je x8; movx x8", note = "copies the active lanes into a zeroed home" }
+v3 = { class = "M", recipe = "mov x20; cmp x16; je x16; movx x16", note = "copies the active lanes into a zeroed home" }
 v4 = { class = "N", recipe = "vmovdqu# {k}{z}" }
 
 [[op]]
 op = "vec.store_masked"
 ty = ["any8"]
-v2 = { class = "M", recipe = "movdqa; pmovmskb; bsf; mov; mov; btr; jnz" }
-v3 = { class = "M", recipe = "vmovdqa; vpmovmskb; bsf; mov; mov; btr; jnz" }
+v2 = { class = "M", recipe = "pmovmskb; lea x3; test; je; bsf; movx; mov; and; jmp", note = "up to 8 lanes: every lane is stored, an inactive one back to its own bytes; more: a loop over the set mask bits" }
+v3 = { class = "M", recipe = "vpmovmskb; lea x3; test; je; bsf; movx; mov; and; jmp", note = "up to 8 lanes: every lane is stored, an inactive one back to its own bytes; more: a loop over the set mask bits" }
 v4 = { class = "N", recipe = "vmovdqu# {k}" }
 
 [[op]]
 op = "vec.store_masked"
 ty = ["any16"]
-v2 = { class = "M", recipe = "movdqa; packsswb; pmovmskb; bsf; mov; mov; btr; jnz" }
-v3 = { class = "M", recipe = "vmovdqa; vpmovmskb; pext; bsf; mov; mov; btr; jnz" }
+v2 = { class = "M", recipe = "packsswb; pmovmskb; and; lea x16; test x8; cmovne x8; movx x8; mov x8", note = "up to 8 lanes: every lane is stored, an inactive one back to its own bytes; more: a loop over the set mask bits" }
+v3 = { class = "M", recipe = "vpmovmskb; pext; lea x3; test; je; bsf; movx; mov; and; jmp", note = "up to 8 lanes: every lane is stored, an inactive one back to its own bytes; more: a loop over the set mask bits" }
 v4 = { class = "N", recipe = "vmovdqu# {k}" }
 
 [[op]]
@@ -1056,7 +1168,7 @@ v4 = { class = "U" }
 op = "vec.gather"
 ty = ["any32"]
 v2 = { class = "U" }
-v3 = { class = "N", recipe = "vpcmpeqd; vpgatherdd", note = "an index of 2^31 or more needs 64-bit indices (vpgatherqd, two gathers)" }
+v3 = { class = "M", recipe = "vextracti128; vpmovzxdq x2; vpcmpeqd x2; vpgatherqd x2; vinserti128", note = "32-bit indices into a slice go through 64-bit indices, two gathers of four; a fixed-length array of at most 2^31 elements takes them directly: vpcmpeqd; vpgatherdd (N)" }
 v4 = { class = "N", recipe = "kxnorw; vpgatherdd", note = "an index of 2^31 or more needs 64-bit indices (vpgatherqd, two gathers)" }
 
 [[op]]
@@ -1086,29 +1198,29 @@ v4 = { class = "N", recipe = "kxnorb; vpscatterqq" }
 op = "vec.compress"
 ty = ["any32"]
 v2 = { class = "M", recipe = "movmskps; shl; pshufb" }
-v3 = { class = "M", recipe = "vmovmskps; shl; vmovdqa; vpermd; vpand" }
+v3 = { class = "M", recipe = "vmovmskps; vpmovsxbd; vpermd; vpsrad; vpandn" }
 v4 = { class = "N", recipe = "vpcompressd {z}" }
 
 [[op]]
 op = "vec.compress"
 ty = ["any64"]
 v2 = { class = "M", recipe = "movmskpd; shl; pshufb" }
-v3 = { class = "M", recipe = "vmovmskpd; shl; vmovdqa; vpermd; vpand" }
+v3 = { class = "M", recipe = "vmovmskpd; vpmovsxbd; vpermd; vpsrad; vpandn" }
 v4 = { class = "N", recipe = "vpcompressq {z}" }
 
 [[op]]
 op = "vec.compress"
 ty = ["any16"]
-v2 = { class = "M", recipe = "packsswb; pmovmskb; shl; pshufb" }
-v3 = { class = "M", recipe = "vextracti128 x2; vpacksswb; vpmovmskb; movzx; shr; shl x2; vpshufb x2; popcnt x2; vmovdqu x3; vpand", unverified = true }
+v2 = { class = "M", recipe = "packsswb; pmovmskb; and; shl; pshufb" }
+v3 = { class = "M", recipe = "vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; shl; vpshufb; neg; vmovdqu; vpshufb; vpor; vmovdqu; vpshufb; vinserti128" }
 v4 = { class = "M", recipe = "vextracti64x4; vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; vpmovdw x2; kmovw; popcnt; vmovdqu64; vmovdqu16 x3", unverified = true }
 "v4+avx512vbmi2" = { class = "N", recipe = "vpcompress* {z}" }
 
 [[op]]
 op = "vec.compress"
 ty = ["any8"]
-v2 = { class = "M", recipe = "pmovmskb; movzx; shr; movq x2; paddb; punpcklqdq; pshufb; popcnt x2; movdqu; psrldq; movq; movdqu; pand" }
-v3 = { class = "M", recipe = "vpmovmskb; shr x3; movzx x4; vmovq x4; vpaddb x2; vpunpcklqdq x2; vextracti128; vpshufb x2; popcnt x4; add x2; vmovdqu x2; vpsrldq x2; vmovq x2; vmovdqu; vpand", unverified = true }
+v2 = { class = "M", recipe = "pmovmskb; shr; movzx; movq x2; pshufb; movq; psrldq; pshufb; movq; popcnt; neg; movdqu; pshufb; por" }
+v3 = { class = "M", recipe = "vpmovmskb; shr x3; and; popcnt x3; vextracti128; movzx x2; vmovq x8; vpshufb x8; vpsrldq x2; neg x3; vmovdqu x4; vpor x3; vinserti128" }
 v4 = { class = "M", recipe = "vextracti32x4 x3; vpmovzxbd x4; kshiftrq x3; vpcompressd {z} x4; vpmovdb x4; kmovq; movzx x3; shr x2; popcnt x3; add x2; vmovdqu64; vmovdqu8 x5", unverified = true }
 "v4+avx512vbmi2" = { class = "N", recipe = "vpcompress* {z}" }
 
@@ -1116,30 +1228,30 @@ v4 = { class = "M", recipe = "vextracti32x4 x3; vpmovzxbd x4; kshiftrq x3; vpcom
 op = "vec.expand"
 ty = ["any32"]
 v2 = { class = "M", recipe = "movmskps; shl; pshufb" }
-v3 = { class = "M", recipe = "vmovmskps; shl; vmovdqa; vpermd; vpand" }
+v3 = { class = "M", recipe = "vmovmskps; vpmovsxbd; vpermd; vpsrad; vpandn" }
 v4 = { class = "N", recipe = "vpexpandd {z}" }
 
 [[op]]
 op = "vec.expand"
 ty = ["any64"]
 v2 = { class = "M", recipe = "movmskpd; shl; pshufb" }
-v3 = { class = "M", recipe = "vmovmskpd; shl; vmovdqa; vpermd; vpand" }
+v3 = { class = "M", recipe = "vmovmskpd; vpmovsxbd; vpermd; vpsrad; vpandn" }
 v4 = { class = "N", recipe = "vpexpandq {z}" }
 
 [[op]]
 op = "vec.expand"
 ty = ["any16"]
-v2 = { class = "M", recipe = "packsswb; pmovmskb; shl; pshufb" }
-v3 = { class = "M", recipe = "vextracti128; vpacksswb; vpmovmskb; movzx; shr; shl x2; popcnt; vmovdqu x2; vpshufb x2; vinserti128", unverified = true }
-v4 = { class = "N", recipe = "vpmovzxwd x2; kshiftrd; kmovw; popcnt; vmovdqu16 x2; vpexpandd {z} x2; vpmovdw x2; vinserti64x4", note = "vpexpandw needs avx512vbmi2: dword expands", unverified = true }
+v2 = { class = "M", recipe = "packsswb; pmovmskb; and; shl; pshufb" }
+v3 = { class = "M", recipe = "vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; vmovdqu; vpshufb; vmovdqu; vpshufb; vpor; shl; vpshufb; vinserti128" }
+v4 = { class = "M", recipe = "vpmovzxwd x2; kshiftrd; kmovw; popcnt; vmovdqu16 x2; vpexpandd {z} x2; vpmovdw x2; vinserti64x4", note = "vpexpandw needs avx512vbmi2: dword expands", unverified = true }
 "v4+avx512vbmi2" = { class = "N", recipe = "vpexpand* {z}" }
 
 [[op]]
 op = "vec.expand"
 ty = ["any8"]
-v2 = { class = "M", recipe = "pmovmskb; movzx; shr; movq x2; popcnt; movd; pshufb; paddb; punpcklqdq; pshufb" }
-v3 = { class = "M", recipe = "vpmovmskb; shr x3; movzx x4; vmovq x4; popcnt x3; add; vmovd x2; vpbroadcastb x2; vpaddb x2; vpunpcklqdq x2; vmovdqu x2; vpshufb x2; vinserti128", unverified = true }
-v4 = { class = "N", recipe = "vmovdqu8 x4; vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; vpmovdb x4; vinserti32x4 x3; kmovq; movzx x3; shr x2; popcnt x3; add x2", note = "vpexpandb needs avx512vbmi2: dword expands", unverified = true }
+v2 = { class = "M", recipe = "pmovmskb; shr; movzx; popcnt; imul; add; movq x2; punpcklqdq; pshufb" }
+v3 = { class = "M", recipe = "vpmovmskb; shr x3; and; popcnt x3; vextracti128; movzx x2; imul x2; add x2; vmovq x4; vpunpcklqdq x2; vpshufb x4; vmovdqu x2; vpor; vinserti128" }
+v4 = { class = "M", recipe = "vmovdqu8 x4; vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; vpmovdb x4; vinserti32x4 x3; kmovq; movzx x3; shr x2; popcnt x3; add x2", note = "vpexpandb needs avx512vbmi2: dword expands", unverified = true }
 "v4+avx512vbmi2" = { class = "N", recipe = "vpexpand* {z}" }
 
 # reductions (fixed tree: lane i with lane i+N/2)
@@ -1147,211 +1259,211 @@ v4 = { class = "N", recipe = "vmovdqu8 x4; vpmovzxbd x4; kshiftrq x3; vpexpandd 
 [[op]]
 op = "vec.reduce_add"
 ty = ["f32"]
-v2 = { class = "M", recipe = "movhlps; addps; movshdup; addss" }
-v3 = { class = "M", recipe = "vextractf128; vaddps; vmovhlps; vaddps; vmovshdup; vaddss" }
+v2 = { class = "M", recipe = "psrldq; addp%; psrldq; addp%" }
+v3 = { class = "M", recipe = "vextracti128; vaddp%; vpsrldq; vaddp%; vpsrldq; vaddp%" }
 v4 = { class = "M", recipe = "vextractf64x4; vaddps; vextractf128; vaddps; vmovhlps; vaddps; vmovshdup; vaddss" }
 
 [[op]]
 op = "vec.reduce_add"
 ty = ["f64"]
-v2 = { class = "M", recipe = "unpckhpd; addsd" }
-v3 = { class = "M", recipe = "vextractf128; vaddpd; vunpckhpd; vaddsd" }
+v2 = { class = "N", recipe = "psrldq; addp%" }
+v3 = { class = "M", recipe = "vextracti128; vaddp%; vpsrldq; vaddp%" }
 v4 = { class = "M", recipe = "vextractf64x4; vaddpd; vextractf128; vaddpd; vunpckhpd; vaddsd" }
 
 [[op]]
 op = "vec.reduce_add_wrap"
 ty = ["int8"]
-v2 = { class = "M", recipe = "psadbw; pshufd; paddq; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpaddb; vpsadbw; vpshufd; vpaddq; vmovd" }
+v2 = { class = "M", recipe = "psrldq; padd*; psrldq; padd*; psrldq; padd*; psrldq; padd*; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpadd*; vpsrldq; vpadd*; vpsrldq; vpadd*; vpsrldq; vpadd*; vpsrldq; vpadd*; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpaddb; vextracti128; vpaddb; vpsadbw; vpshufd; vpaddq; vmovd" }
 
 [[op]]
 op = "vec.reduce_add_wrap"
 ty = ["int16"]
-v2 = { class = "M", recipe = "pmaddwd; pshufd; paddd; pshufd; paddd; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpaddw; vpmaddwd; vpshufd; vpaddd; vpshufd; vpaddd; vmovd" }
+v2 = { class = "M", recipe = "psrldq; padd*; psrldq; padd*; psrldq; padd*; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpadd*; vpsrldq; vpadd*; vpsrldq; vpadd*; vpsrldq; vpadd*; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpaddw; vextracti128; vpaddw; vpmaddwd; vpshufd; vpaddd; vpshufd; vpaddd; vmovd" }
 
 [[op]]
 op = "vec.reduce_add_wrap"
 ty = ["int32"]
-v2 = { class = "M", recipe = "pshufd; paddd; pshufd; paddd; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpaddd; vpshufd; vpaddd; vpshufd; vpaddd; vmovd" }
+v2 = { class = "M", recipe = "psrldq; padd*; psrldq; padd*; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpadd*; vpsrldq; vpadd*; vpsrldq; vpadd*; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpaddd; vextracti128; vpaddd; vpshufd; vpaddd; vpshufd; vpaddd; vmovd" }
 
 [[op]]
 op = "vec.reduce_add_wrap"
 ty = ["int64"]
-v2 = { class = "M", recipe = "pshufd; paddq; movq" }
-v3 = { class = "M", recipe = "vextracti128; vpaddq; vpshufd; vpaddq; vmovq" }
+v2 = { class = "M", recipe = "psrldq; padd*; movq" }
+v3 = { class = "M", recipe = "vextracti128; vpadd*; vpsrldq; vpadd*; vmovq" }
 v4 = { class = "M", recipe = "vextracti64x4; vpaddq; vextracti128; vpaddq; vpshufd; vpaddq; vmovq" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["f32"]
-v2 = { class = "M", recipe = "movhlps; minps x2; orps; cmpunordps; addps; blendvps; movshdup; minps x2; orps; cmpunordps; addps; blendvps" }
-v3 = { class = "M", recipe = "vextractf128; vmovhlps; vmovshdup; vminps x6; vorps x3; vcmpunordps x3; vaddps x3; vblendvps x3" }
+v2 = { class = "M", recipe = "psrldq; minp%; cmpunordp%; minp%; por x2; psrldq; minp%; cmpunordp%; minp%; por x2" }
+v3 = { class = "M", recipe = "vextracti128; vminp%; vcmpunordp%; vminp%; vpor x2; vpsrldq; vminp%; vcmpunordp%; vminp%; vpor x2; vpsrldq; vminp%; vcmpunordp%; vminp%; vpor x2" }
 v4 = { class = "M", recipe = "vextractf64x4; vextractf128; vmovhlps; vmovshdup; vminps x8; vorps x4; vcmpunordps x4; vaddps {k} x4" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["f64"]
-v2 = { class = "M", recipe = "unpckhpd; minpd x2; orpd; cmpunordpd; addpd; blendvpd" }
-v3 = { class = "M", recipe = "vextractf128; vunpckhpd; vminpd x4; vorpd x2; vcmpunordpd x2; vaddpd x2; vblendvpd x2" }
+v2 = { class = "M", recipe = "psrldq; minp%; cmpunordp%; minp%; por x2" }
+v3 = { class = "M", recipe = "vextracti128; vminp%; vcmpunordp%; vminp%; vpor x2; vpsrldq; vminp%; vcmpunordp%; vminp%; vpor x2" }
 v4 = { class = "M", recipe = "vextractf64x4; vextractf128; vunpckhpd; vminpd x6; vorpd x3; vcmpunordpd x3; vaddpd {k} x3" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["f32"]
-v2 = { class = "M", recipe = "movhlps; maxps x2; andps; cmpunordps; addps; blendvps; movshdup; maxps x2; andps; cmpunordps; addps; blendvps" }
-v3 = { class = "M", recipe = "vextractf128; vmovhlps; vmovshdup; vmaxps x6; vandps x3; vcmpunordps x3; vaddps x3; vblendvps x3" }
+v2 = { class = "M", recipe = "psrldq; maxp%; cmpunordp%; maxp%; pand; por; psrldq; maxp%; cmpunordp%; maxp%; pand; por" }
+v3 = { class = "M", recipe = "vextracti128; vmaxp%; vcmpunordp%; vmaxp%; vpand; vpor; vpsrldq; vmaxp%; vcmpunordp%; vmaxp%; vpand; vpor; vpsrldq; vmaxp%; vcmpunordp%; vmaxp%; vpand; vpor" }
 v4 = { class = "M", recipe = "vextractf64x4; vextractf128; vmovhlps; vmovshdup; vmaxps x8; vandps x4; vcmpunordps x4; vaddps {k} x4" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["f64"]
-v2 = { class = "M", recipe = "unpckhpd; maxpd x2; andpd; cmpunordpd; addpd; blendvpd" }
-v3 = { class = "M", recipe = "vextractf128; vunpckhpd; vmaxpd x4; vandpd x2; vcmpunordpd x2; vaddpd x2; vblendvpd x2" }
+v2 = { class = "M", recipe = "psrldq; maxp%; cmpunordp%; maxp%; pand; por" }
+v3 = { class = "M", recipe = "vextracti128; vmaxp%; vcmpunordp%; vmaxp%; vpand; vpor; vpsrldq; vmaxp%; vcmpunordp%; vmaxp%; vpand; vpor" }
 v4 = { class = "M", recipe = "vextractf64x4; vextractf128; vunpckhpd; vmaxpd x6; vandpd x3; vcmpunordpd x3; vaddpd {k} x3" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["int8"]
-v2 = { class = "M", recipe = "pshufd; pmin?b; pshufd; pmin?b; pshuflw; pmin?b; psrlw; pmin?b; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpmin?b; vpshufd; vpmin?b; vpshufd; vpmin?b; vpshuflw; vpmin?b; vpsrlw; vpmin?b; vmovd" }
+v2 = { class = "M", recipe = "psrldq; pmin?*; psrldq; pmin?*; psrldq; pmin?*; psrldq; pmin?*; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpmin?*; vpsrldq; vpmin?*; vpsrldq; vpmin?*; vpsrldq; vpmin?*; vpsrldq; vpmin?*; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpmin?b; vextracti128; vpmin?b; vpshufd; vpmin?b; vpshufd; vpmin?b; vpshuflw; vpmin?b; vpsrlw; vpmin?b; vmovd" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["int16"]
-v2 = { class = "M", recipe = "pshufd; pmin?w; pshufd; pmin?w; pshuflw; pmin?w; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpmin?w; vpshufd; vpmin?w; vpshufd; vpmin?w; vpshuflw; vpmin?w; vmovd" }
+v2 = { class = "M", recipe = "psrldq; pmin?*; psrldq; pmin?*; psrldq; pmin?*; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpmin?*; vpsrldq; vpmin?*; vpsrldq; vpmin?*; vpsrldq; vpmin?*; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpmin?w; vextracti128; vpmin?w; vpshufd; vpmin?w; vpshufd; vpmin?w; vpshuflw; vpmin?w; vmovd" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["int32"]
-v2 = { class = "M", recipe = "pshufd; pmin?d; pshufd; pmin?d; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpmin?d; vpshufd; vpmin?d; vpshufd; vpmin?d; vmovd" }
+v2 = { class = "M", recipe = "psrldq; pmin?*; psrldq; pmin?*; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpmin?*; vpsrldq; vpmin?*; vpsrldq; vpmin?*; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpmin?d; vextracti128; vpmin?d; vpshufd; vpmin?d; vpshufd; vpmin?d; vmovd" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["i64"]
-v2 = { class = "M", recipe = "pshufd; pcmpgtq; blendvpd; movq" }
-v3 = { class = "M", recipe = "vextracti128; vpcmpgtq; vblendvpd; vpshufd; vpcmpgtq; vblendvpd; vmovq" }
+v2 = { class = "M", recipe = "psrldq; pcmpgtq; pxor; pand; pxor; movq" }
+v3 = { class = "M", recipe = "vextracti128; vpcmpgtq; vpxor; vpand; vpxor; vpsrldq; vpcmpgtq; vpxor; vpand; vpxor; vmovq" }
 v4 = { class = "M", recipe = "vextracti64x4; vpminsq; vextracti128; vpminsq; vpshufd; vpminsq; vmovq" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["u64"]
-v2 = { class = "M", recipe = "pshufd; pxor x2; pcmpgtq; blendvpd; movq" }
-v3 = { class = "M", recipe = "vextracti128; vpxor x2; vpcmpgtq; vblendvpd; vpshufd; vpxor x2; vpcmpgtq; vblendvpd; vmovq" }
+v2 = { class = "M", recipe = "psrldq; pxor x2; pcmpgtq; pxor; pand; pxor; movq" }
+v3 = { class = "M", recipe = "vextracti128; vpxor x2; vpcmpgtq; vpxor; vpand; vpxor; vpsrldq; vpxor x2; vpcmpgtq; vpxor; vpand; vpxor; vmovq" }
 v4 = { class = "M", recipe = "vextracti64x4; vpminuq; vextracti128; vpminuq; vpshufd; vpminuq; vmovq" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["int8"]
-v2 = { class = "M", recipe = "pshufd; pmax?b; pshufd; pmax?b; pshuflw; pmax?b; psrlw; pmax?b; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpmax?b; vpshufd; vpmax?b; vpshufd; vpmax?b; vpshuflw; vpmax?b; vpsrlw; vpmax?b; vmovd" }
+v2 = { class = "M", recipe = "psrldq; pmax?*; psrldq; pmax?*; psrldq; pmax?*; psrldq; pmax?*; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpmax?*; vpsrldq; vpmax?*; vpsrldq; vpmax?*; vpsrldq; vpmax?*; vpsrldq; vpmax?*; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpmax?b; vextracti128; vpmax?b; vpshufd; vpmax?b; vpshufd; vpmax?b; vpshuflw; vpmax?b; vpsrlw; vpmax?b; vmovd" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["int16"]
-v2 = { class = "M", recipe = "pshufd; pmax?w; pshufd; pmax?w; pshuflw; pmax?w; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpmax?w; vpshufd; vpmax?w; vpshufd; vpmax?w; vpshuflw; vpmax?w; vmovd" }
+v2 = { class = "M", recipe = "psrldq; pmax?*; psrldq; pmax?*; psrldq; pmax?*; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpmax?*; vpsrldq; vpmax?*; vpsrldq; vpmax?*; vpsrldq; vpmax?*; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpmax?w; vextracti128; vpmax?w; vpshufd; vpmax?w; vpshufd; vpmax?w; vpshuflw; vpmax?w; vmovd" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["int32"]
-v2 = { class = "M", recipe = "pshufd; pmax?d; pshufd; pmax?d; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpmax?d; vpshufd; vpmax?d; vpshufd; vpmax?d; vmovd" }
+v2 = { class = "M", recipe = "psrldq; pmax?*; psrldq; pmax?*; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpmax?*; vpsrldq; vpmax?*; vpsrldq; vpmax?*; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpmax?d; vextracti128; vpmax?d; vpshufd; vpmax?d; vpshufd; vpmax?d; vmovd" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["i64"]
-v2 = { class = "M", recipe = "pshufd; pcmpgtq; blendvpd; movq" }
-v3 = { class = "M", recipe = "vextracti128; vpcmpgtq; vblendvpd; vpshufd; vpcmpgtq; vblendvpd; vmovq" }
+v2 = { class = "M", recipe = "psrldq; pcmpgtq; pxor; pandn; pxor; movq" }
+v3 = { class = "M", recipe = "vextracti128; vpcmpgtq; vpxor; vpandn; vpxor; vpsrldq; vpcmpgtq; vpxor; vpandn; vpxor; vmovq" }
 v4 = { class = "M", recipe = "vextracti64x4; vpmaxsq; vextracti128; vpmaxsq; vpshufd; vpmaxsq; vmovq" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["u64"]
-v2 = { class = "M", recipe = "pshufd; pxor x2; pcmpgtq; blendvpd; movq" }
-v3 = { class = "M", recipe = "vextracti128; vpxor x2; vpcmpgtq; vblendvpd; vpshufd; vpxor x2; vpcmpgtq; vblendvpd; vmovq" }
+v2 = { class = "M", recipe = "psrldq; pxor x2; pcmpgtq; pxor; pandn; pxor; movq" }
+v3 = { class = "M", recipe = "vextracti128; vpxor x2; vpcmpgtq; vpxor; vpandn; vpxor; vpsrldq; vpxor x2; vpcmpgtq; vpxor; vpandn; vpxor; vmovq" }
 v4 = { class = "M", recipe = "vextracti64x4; vpmaxuq; vextracti128; vpmaxuq; vpshufd; vpmaxuq; vmovq" }
 
 [[op]]
 op = "vec.reduce_and"
 ty = ["int8"]
-v2 = { class = "M", recipe = "pshufd; pand; pshufd; pand; pshuflw; pand; psrlw; pand; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpand; vpshufd; vpand; vpshufd; vpand; vpshuflw; vpand; vpsrlw; vpand; vmovd" }
+v2 = { class = "M", recipe = "psrldq; pand; psrldq; pand; psrldq; pand; psrldq; pand; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpand; vpsrldq; vpand; vpsrldq; vpand; vpsrldq; vpand; vpsrldq; vpand; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpandq; vextracti128; vpand; vpshufd; vpand; vpshufd; vpand; vpshuflw; vpand; vpsrlw; vpand; vmovd" }
 
 [[op]]
 op = "vec.reduce_and"
 ty = ["int16"]
-v2 = { class = "M", recipe = "pshufd; pand; pshufd; pand; pshuflw; pand; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpand; vpshufd; vpand; vpshufd; vpand; vpshuflw; vpand; vmovd" }
+v2 = { class = "M", recipe = "psrldq; pand; psrldq; pand; psrldq; pand; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpand; vpsrldq; vpand; vpsrldq; vpand; vpsrldq; vpand; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpandq; vextracti128; vpand; vpshufd; vpand; vpshufd; vpand; vpshuflw; vpand; vmovd" }
 
 [[op]]
 op = "vec.reduce_and"
 ty = ["int32"]
-v2 = { class = "M", recipe = "pshufd; pand; pshufd; pand; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpand; vpshufd; vpand; vpshufd; vpand; vmovd" }
+v2 = { class = "M", recipe = "psrldq; pand; psrldq; pand; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpand; vpsrldq; vpand; vpsrldq; vpand; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vpandq; vextracti128; vpand; vpshufd; vpand; vpshufd; vpand; vmovd" }
 
 [[op]]
 op = "vec.reduce_and"
 ty = ["int64"]
-v2 = { class = "M", recipe = "pshufd; pand; movq" }
-v3 = { class = "M", recipe = "vextracti128; vpand; vpshufd; vpand; vmovq" }
+v2 = { class = "M", recipe = "psrldq; pand; movq" }
+v3 = { class = "M", recipe = "vextracti128; vpand; vpsrldq; vpand; vmovq" }
 v4 = { class = "M", recipe = "vextracti64x4; vpandq; vextracti128; vpand; vpshufd; vpand; vmovq" }
 
 [[op]]
 op = "vec.reduce_or"
 ty = ["int8"]
-v2 = { class = "M", recipe = "pshufd; por; pshufd; por; pshuflw; por; psrlw; por; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpor; vpshufd; vpor; vpshufd; vpor; vpshuflw; vpor; vpsrlw; vpor; vmovd" }
+v2 = { class = "M", recipe = "psrldq; por; psrldq; por; psrldq; por; psrldq; por; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpor; vpsrldq; vpor; vpsrldq; vpor; vpsrldq; vpor; vpsrldq; vpor; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vporq; vextracti128; vpor; vpshufd; vpor; vpshufd; vpor; vpshuflw; vpor; vpsrlw; vpor; vmovd" }
 
 [[op]]
 op = "vec.reduce_or"
 ty = ["int16"]
-v2 = { class = "M", recipe = "pshufd; por; pshufd; por; pshuflw; por; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpor; vpshufd; vpor; vpshufd; vpor; vpshuflw; vpor; vmovd" }
+v2 = { class = "M", recipe = "psrldq; por; psrldq; por; psrldq; por; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpor; vpsrldq; vpor; vpsrldq; vpor; vpsrldq; vpor; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vporq; vextracti128; vpor; vpshufd; vpor; vpshufd; vpor; vpshuflw; vpor; vmovd" }
 
 [[op]]
 op = "vec.reduce_or"
 ty = ["int32"]
-v2 = { class = "M", recipe = "pshufd; por; pshufd; por; movd" }
-v3 = { class = "M", recipe = "vextracti128; vpor; vpshufd; vpor; vpshufd; vpor; vmovd" }
+v2 = { class = "M", recipe = "psrldq; por; psrldq; por; movd; movx" }
+v3 = { class = "M", recipe = "vextracti128; vpor; vpsrldq; vpor; vpsrldq; vpor; vmovd; movx" }
 v4 = { class = "M", recipe = "vextracti64x4; vporq; vextracti128; vpor; vpshufd; vpor; vpshufd; vpor; vmovd" }
 
 [[op]]
 op = "vec.reduce_or"
 ty = ["int64"]
-v2 = { class = "M", recipe = "pshufd; por; movq" }
-v3 = { class = "M", recipe = "vextracti128; vpor; vpshufd; vpor; vmovq" }
+v2 = { class = "M", recipe = "psrldq; por; movq" }
+v3 = { class = "M", recipe = "vextracti128; vpor; vpsrldq; vpor; vmovq" }
 v4 = { class = "M", recipe = "vextracti64x4; vporq; vextracti128; vpor; vpshufd; vpor; vmovq" }
 
 [[op]]
 op = "vec.reduce_add_ordered"
 ty = ["f32"]
-v2 = { class = "M", recipe = "addss; movshdup; addss; movhlps; addss; shufps; addss" }
-v3 = { class = "M", recipe = "vaddss; vmovshdup; vaddss; vmovhlps; vaddss; vshufps; vaddss; vextractf128; vaddss; vmovshdup; vaddss; vmovhlps; vaddss; vshufps; vaddss" }
+v2 = { class = "M", recipe = "addss x4" }
+v3 = { class = "M", recipe = "vaddss x8" }
 v4 = { class = "M", recipe = "vextractf32x4 x3; vmovshdup x4; vmovhlps x4; vshufps x4; vaddss x16" }
 
 [[op]]
 op = "vec.reduce_add_ordered"
 ty = ["f64"]
-v2 = { class = "M", recipe = "addsd; unpckhpd; addsd" }
-v3 = { class = "M", recipe = "vaddsd; vunpckhpd; vaddsd; vextractf128; vaddsd; vunpckhpd; vaddsd" }
+v2 = { class = "N", recipe = "addsd x2" }
+v3 = { class = "M", recipe = "vaddsd x4" }
 v4 = { class = "M", recipe = "vextractf32x4 x3; vunpckhpd x4; vaddsd x8" }
 
 # prefix scan add: floats lane by lane from lane 0, ints by log steps (wrapping, order-free)
@@ -1359,43 +1471,43 @@ v4 = { class = "M", recipe = "vextractf32x4 x3; vunpckhpd x4; vaddsd x8" }
 [[op]]
 op = "vec.scan_add"
 ty = ["f32"]
-v2 = { class = "M", recipe = "movshdup; addss; movhlps; addss; shufps; addss; insertps x3" }
-v3 = { class = "M", recipe = "vmovshdup; vaddss; vmovhlps; vaddss; vpermilps; vaddss; vinsertps x3; vextractf128; vaddss; vmovshdup; vaddss; vmovhlps; vaddss; vpermilps; vaddss; vinsertps x4; vinsertf128" }
+v2 = { class = "M", recipe = "movss x5; addss x3", note = "lane by lane in order, the running sum in a register" }
+v3 = { class = "M", recipe = "vmovss x9; vaddss x7", note = "lane by lane in order, the running sum in a register" }
 v4 = { class = "M", recipe = "vextractf32x4 x3; vmovshdup x4; vmovhlps x4; vpermilps x4; vaddss x15; vinsertps x15; vinsertf32x4 x3" }
 
 [[op]]
 op = "vec.scan_add"
 ty = ["f64"]
-v2 = { class = "M", recipe = "unpckhpd; addsd; unpcklpd" }
-v3 = { class = "M", recipe = "vunpckhpd; vaddsd; vunpcklpd; vextractf128; vaddsd; vunpckhpd; vaddsd; vunpcklpd; vinsertf128" }
+v2 = { class = "M", recipe = "movsd x3; addsd", note = "lane by lane in order, the running sum in a register" }
+v3 = { class = "M", recipe = "vmovsd x5; vaddsd x3", note = "lane by lane in order, the running sum in a register" }
 v4 = { class = "M", recipe = "vextractf32x4 x3; vunpckhpd x4; vaddsd x7; vunpcklpd x4; vinsertf32x4 x3" }
 
 [[op]]
 op = "vec.scan_add_wrap"
 ty = ["int8"]
-v2 = { class = "M", recipe = "pslldq; paddb; pslldq; paddb; pslldq; paddb; pslldq; paddb" }
-v3 = { class = "M", recipe = "vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpshufb; vperm2i128; vpaddb" }
+v2 = { class = "M", recipe = "pslldq; padd*; pslldq; padd*; pslldq; padd*; pslldq; padd*", note = "log steps of a byte shift and an add" }
+v3 = { class = "M", recipe = "vpslldq; vpadd*; vpslldq; vpadd*; vpslldq; vpadd*; vpslldq; vpadd*; vpsrldq; vpbroadcast*; vinserti128; vpadd*", note = "log steps within each 128-bit half, then the total of the lower half added to the upper" }
 v4 = { class = "M", recipe = "vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpshufb; vshufi64x2 x3; vpaddb x3" }
 
 [[op]]
 op = "vec.scan_add_wrap"
 ty = ["int16"]
-v2 = { class = "M", recipe = "pslldq; paddw; pslldq; paddw; pslldq; paddw" }
-v3 = { class = "M", recipe = "vpslldq; vpaddw; vpslldq; vpaddw; vpslldq; vpaddw; vpshufb; vperm2i128; vpaddw" }
+v2 = { class = "M", recipe = "pslldq; padd*; pslldq; padd*; pslldq; padd*", note = "log steps of a byte shift and an add" }
+v3 = { class = "M", recipe = "vpslldq; vpadd*; vpslldq; vpadd*; vpslldq; vpadd*; vpsrldq; vpbroadcast*; vinserti128; vpadd*", note = "log steps within each 128-bit half, then the total of the lower half added to the upper" }
 v4 = { class = "M", recipe = "vpslldq; vpaddw; vpslldq; vpaddw; vpslldq; vpaddw; vpshufb; vshufi64x2 x3; vpaddw x3" }
 
 [[op]]
 op = "vec.scan_add_wrap"
 ty = ["int32"]
-v2 = { class = "M", recipe = "pslldq; paddd; pslldq; paddd" }
-v3 = { class = "M", recipe = "vpslldq; vpaddd; vpslldq; vpaddd; vpshufd; vperm2i128; vpaddd" }
+v2 = { class = "M", recipe = "pslldq; padd*; pslldq; padd*", note = "log steps of a byte shift and an add" }
+v3 = { class = "M", recipe = "vpslldq; vpadd*; vpslldq; vpadd*; vpsrldq; vpbroadcast*; vinserti128; vpadd*", note = "log steps within each 128-bit half, then the total of the lower half added to the upper" }
 v4 = { class = "M", recipe = "vpslldq; vpaddd; vpslldq; vpaddd; vpshufd; vshufi64x2 x3; vpaddd x3" }
 
 [[op]]
 op = "vec.scan_add_wrap"
 ty = ["int64"]
-v2 = { class = "M", recipe = "pslldq; paddq" }
-v3 = { class = "M", recipe = "vpslldq; vpaddq; vpshufd; vperm2i128; vpaddq" }
+v2 = { class = "N", recipe = "pslldq; padd*", note = "log steps of a byte shift and an add" }
+v3 = { class = "M", recipe = "vpslldq; vpadd*; vpsrldq; vpbroadcast*; vinserti128; vpadd*", note = "log steps within each 128-bit half, then the total of the lower half added to the upper" }
 v4 = { class = "M", recipe = "vpslldq; vpaddq; vpshufd; vshufi64x2 x3; vpaddq x3" }
 
 # permute, lookup
@@ -1404,38 +1516,59 @@ v4 = { class = "M", recipe = "vpslldq; vpaddq; vpshufd; vshufi64x2 x3; vpaddq x3
 op = "vec.permute"
 ty = ["any8"]
 v2 = { class = "N", recipe = "pshufb" }
-v3 = { class = "M", recipe = "vpermq; vpshufb x2; vpblendvb" }
-v4 = { class = "N", recipe = "vshufi64x2 x4; vpshufb x4; vpblendmb x3", note = "vpermb needs avx512vbmi: per-128-bit-lane shuffles and blends" }
+v3 = { class = "M", recipe = "vpermq; vpshufb x2; vpor", note = "worst case, a lane crosses the 128-bit halves: the operand and its halves swapped are shuffled and or-ed; otherwise one or two instructions" }
+v4 = { class = "M", recipe = "vshufi64x2 x4; vpshufb x4; vpblendmb x3", note = "vpermb needs avx512vbmi: per-128-bit-lane shuffles and blends" }
 "v4+avx512vbmi" = { class = "N", recipe = "vpermb" }
 
 [[op]]
 op = "vec.permute"
 ty = ["any16"]
 v2 = { class = "N", recipe = "pshufb" }
-v3 = { class = "M", recipe = "vpermq; vpshufb x2; vpblendvb" }
+v3 = { class = "M", recipe = "vpermq; vpshufb x2; vpor", note = "worst case, a lane crosses the 128-bit halves: the operand and its halves swapped are shuffled and or-ed; otherwise one or two instructions" }
 v4 = { class = "N", recipe = "vpermw" }
 
 [[op]]
 op = "vec.permute"
 ty = ["any32"]
-v2 = { class = "N", recipe = "pshufd" }
-v3 = { class = "M", recipe = "vpermd", note = "one cross-lane instruction" }
+v2 = { class = "N", recipe = "pshufb", note = "a byte shuffle with a constant control" }
+v3 = { class = "N", recipe = "vpermd", note = "one cross-lane instruction" }
 v4 = { class = "N", recipe = "vpermd" }
 
 [[op]]
 op = "vec.permute"
 ty = ["any64"]
-v2 = { class = "N", recipe = "pshufd" }
-v3 = { class = "M", recipe = "vpermq", note = "one cross-lane instruction" }
+v2 = { class = "N", recipe = "pshufb", note = "a byte shuffle with a constant control" }
+v3 = { class = "N", recipe = "vpermd", note = "one cross-lane instruction, on pairs of dword indices" }
 v4 = { class = "N", recipe = "vpermq" }
 
 [[op]]
 op = "vec.lookup"
 ty = ["int8"]
 v2 = { class = "N", recipe = "paddusb; pshufb" }
-v3 = { class = "M", recipe = "vpaddusb; vpermq x2; vpshufb x2; vpsllw; vpblendvb" }
+v3 = { class = "M", recipe = "vpermq x2; vpxor; vpaddusb x2; vpshufb x2; vpor", note = "the table is looked up half by half, the upper half with bit 4 of the indices flipped" }
 v4 = { class = "M", recipe = "vpaddusb; vshufi64x2 x4; vpshufb x4; vpsllw x2; vpmovb2m x2; vpblendmb x3", unverified = true }
 "v4+avx512vbmi" = { class = "N", recipe = "vpcmpub; vpermb {z}" }
+
+[[op]]
+op = "vec.lookup"
+ty = ["int16"]
+v2 = { class = "M", recipe = "movx x16; xor x8; cmp x8; jae x8; mov x8" }
+v3 = { class = "M", recipe = "movx x32; xor x16; cmp x16; jae x16; mov x16" }
+v4 = { class = "N", recipe = "vpcmpu*; vperm* {k}{z}", unverified = true }
+
+[[op]]
+op = "vec.lookup"
+ty = ["int32"]
+v2 = { class = "M", recipe = "movx x8; xor x4; cmp x4; jae x4; mov x4" }
+v3 = { class = "M", recipe = "movx x16; xor x8; cmp x8; jae x8; mov x8" }
+v4 = { class = "N", recipe = "vpcmpu*; vperm* {k}{z}", unverified = true }
+
+[[op]]
+op = "vec.lookup"
+ty = ["int64"]
+v2 = { class = "M", recipe = "mov x6; xor x2; cmp x2; jae x2" }
+v3 = { class = "M", recipe = "mov x12; xor x4; cmp x4; jae x4" }
+v4 = { class = "N", recipe = "vpcmpu*; vperm* {k}{z}", unverified = true }
 
 # bit counts
 
@@ -1450,24 +1583,24 @@ v4 = { class = "M", recipe = "vpsrlw; vpandq x2; vpshufb x2; vpaddb" }
 [[op]]
 op = "vec.popcount"
 ty = ["int16"]
-v2 = { class = "M", recipe = "psrlw; pand x2; pshufb x2; paddb; pmaddubsw" }
-v3 = { class = "M", recipe = "vpsrlw; vpand x2; vpshufb x2; vpaddb; vpmaddubsw" }
+v2 = { class = "M", recipe = "psrlw; pand x2; pshufb x2; paddb; psrlw; paddw; pand" }
+v3 = { class = "M", recipe = "vpsrlw; vpand x2; vpshufb x2; vpaddb; vpsrlw; vpaddw; vpand" }
 v4 = { class = "M", recipe = "vpsrlw; vpandq x2; vpshufb x2; vpaddb; vpmaddubsw" }
 "v4+avx512bitalg" = { class = "N", recipe = "vpopcntw" }
 
 [[op]]
 op = "vec.popcount"
 ty = ["int32"]
-v2 = { class = "M", recipe = "psrlw; pand x2; pshufb x2; paddb; pmaddubsw; pmaddwd" }
-v3 = { class = "M", recipe = "vpsrlw; vpand x2; vpshufb x2; vpaddb; vpmaddubsw; vpmaddwd" }
+v2 = { class = "M", recipe = "psrlw; pand x2; pshufb x2; paddb; psrlw; paddw; pand; psrld; paddd; pand" }
+v3 = { class = "M", recipe = "vpsrlw; vpand x2; vpshufb x2; vpaddb; vpsrlw; vpaddw; vpand; vpsrld; vpaddd; vpand" }
 v4 = { class = "M", recipe = "vpsrlw; vpandq x2; vpshufb x2; vpaddb; vpmaddubsw; vpmaddwd" }
 "v4+avx512vpopcntdq" = { class = "N", recipe = "vpopcntd" }
 
 [[op]]
 op = "vec.popcount"
 ty = ["int64"]
-v2 = { class = "M", recipe = "psrlw; pand x2; pshufb x2; paddb; psadbw" }
-v3 = { class = "M", recipe = "vpsrlw; vpand x2; vpshufb x2; vpaddb; vpsadbw" }
+v2 = { class = "M", recipe = "psrlw; pand x2; pshufb x2; paddb; psrlw; paddw; pand; psrld; paddd; pand; psrlq; paddq; pand" }
+v3 = { class = "M", recipe = "vpsrlw; vpand x2; vpshufb x2; vpaddb; vpsrlw; vpaddw; vpand; vpsrld; vpaddd; vpand; vpsrlq; vpaddq; vpand" }
 v4 = { class = "M", recipe = "vpsrlw; vpandq x2; vpshufb x2; vpaddb; vpsadbw" }
 "v4+avx512vpopcntdq" = { class = "N", recipe = "vpopcntq" }
 
@@ -1553,50 +1686,50 @@ v4 = { class = "N", recipe = "vcvtps2pd" }
 [[op]]
 op = "vec.widen_hi"
 ty = ["i8"]
-v2 = { class = "N", recipe = "pshufd; pmovsxbw" }
+v2 = { class = "N", recipe = "psrldq; pmovsxbw" }
 v3 = { class = "N", recipe = "vextracti128; vpmovsxbw" }
 v4 = { class = "N", recipe = "vextracti64x4; vpmovsxbw" }
 
 [[op]]
 op = "vec.widen_hi"
 ty = ["u8"]
-v2 = { class = "N", recipe = "punpckhbw" }
+v2 = { class = "N", recipe = "psrldq; pmovzxbw" }
 v3 = { class = "N", recipe = "vextracti128; vpmovzxbw" }
 v4 = { class = "N", recipe = "vextracti64x4; vpmovzxbw" }
 
 [[op]]
 op = "vec.widen_hi"
 ty = ["i16"]
-v2 = { class = "N", recipe = "pshufd; pmovsxwd" }
+v2 = { class = "N", recipe = "psrldq; pmovsxwd" }
 v3 = { class = "N", recipe = "vextracti128; vpmovsxwd" }
 v4 = { class = "N", recipe = "vextracti64x4; vpmovsxwd" }
 
 [[op]]
 op = "vec.widen_hi"
 ty = ["u16"]
-v2 = { class = "N", recipe = "punpckhwd" }
+v2 = { class = "N", recipe = "psrldq; pmovzxwd" }
 v3 = { class = "N", recipe = "vextracti128; vpmovzxwd" }
 v4 = { class = "N", recipe = "vextracti64x4; vpmovzxwd" }
 
 [[op]]
 op = "vec.widen_hi"
 ty = ["i32"]
-v2 = { class = "N", recipe = "pshufd; pmovsxdq" }
+v2 = { class = "N", recipe = "psrldq; pmovsxdq" }
 v3 = { class = "N", recipe = "vextracti128; vpmovsxdq" }
 v4 = { class = "N", recipe = "vextracti64x4; vpmovsxdq" }
 
 [[op]]
 op = "vec.widen_hi"
 ty = ["u32"]
-v2 = { class = "N", recipe = "punpckhdq" }
+v2 = { class = "N", recipe = "psrldq; pmovzxdq" }
 v3 = { class = "N", recipe = "vextracti128; vpmovzxdq" }
 v4 = { class = "N", recipe = "vextracti64x4; vpmovzxdq" }
 
 [[op]]
 op = "vec.widen_hi"
 ty = ["f32"]
-v2 = { class = "N", recipe = "movhlps; cvtps2pd" }
-v3 = { class = "N", recipe = "vextractf128; vcvtps2pd" }
+v2 = { class = "N", recipe = "psrldq; cvtps2pd" }
+v3 = { class = "N", recipe = "vextracti128; vcvtps2pd" }
 v4 = { class = "N", recipe = "vextractf64x4; vcvtps2pd" }
 
 [[op]]
@@ -1604,7 +1737,7 @@ op = "vec.narrow_wrap"
 ty = ["int16"]
 v2 = { class = "M", recipe = "pand x2; packuswb" }
 v3 = { class = "M", recipe = "vpand x2; vpackuswb; vpermq" }
-v4 = { class = "N", recipe = "vpmovwb x2; vinserti64x4", note = "vpermt2b needs avx512vbmi" }
+v4 = { class = "M", recipe = "vpmovwb x2; vinserti64x4", note = "vpermt2b needs avx512vbmi" }
 
 [[op]]
 op = "vec.narrow_wrap"
@@ -1616,51 +1749,51 @@ v4 = { class = "N", recipe = "vpermt2w" }
 [[op]]
 op = "vec.narrow_wrap"
 ty = ["int64"]
-v2 = { class = "M", recipe = "shufps" }
-v3 = { class = "M", recipe = "vshufps; vpermpd" }
+v2 = { class = "N", recipe = "shufps" }
+v3 = { class = "N", recipe = "vshufps; vpermq" }
 v4 = { class = "N", recipe = "vpermt2d" }
 
 [[op]]
 op = "vec.narrow_sat"
 ty = ["i16"]
 v2 = { class = "N", recipe = "packsswb" }
-v3 = { class = "M", recipe = "vpacksswb; vpermq" }
+v3 = { class = "N", recipe = "vpacksswb; vpermq" }
 v4 = { class = "N", recipe = "vpacksswb; vpermq" }
 
 [[op]]
 op = "vec.narrow_sat"
 ty = ["u16"]
-v2 = { class = "N", recipe = "pminuw x2; packuswb", note = "packuswb reads its input as signed: clamp first" }
+v2 = { class = "M", recipe = "pminuw x2; packuswb", note = "packuswb reads its input as signed: clamp first" }
 v3 = { class = "M", recipe = "vpminuw x2; vpackuswb; vpermq" }
-v4 = { class = "N", recipe = "vpmovuswb x2; vinserti64x4" }
+v4 = { class = "M", recipe = "vpmovuswb x2; vinserti64x4" }
 
 [[op]]
 op = "vec.narrow_sat"
 ty = ["i32"]
 v2 = { class = "N", recipe = "packssdw" }
-v3 = { class = "M", recipe = "vpackssdw; vpermq" }
+v3 = { class = "N", recipe = "vpackssdw; vpermq" }
 v4 = { class = "N", recipe = "vpackssdw; vpermq" }
 
 [[op]]
 op = "vec.narrow_sat"
 ty = ["u32"]
-v2 = { class = "N", recipe = "pminud x2; packusdw", note = "packusdw reads its input as signed: clamp first" }
+v2 = { class = "M", recipe = "pminud x2; packusdw", note = "packusdw reads its input as signed: clamp first" }
 v3 = { class = "M", recipe = "vpminud x2; vpackusdw; vpermq" }
-v4 = { class = "N", recipe = "vpmovusdw x2; vinserti64x4" }
+v4 = { class = "M", recipe = "vpmovusdw x2; vinserti64x4" }
 
 [[op]]
 op = "vec.narrow_sat"
 ty = ["i64"]
-v2 = { class = "N", recipe = "pcmpgtq x4; blendvpd x4; shufps", note = "no 64-bit pack below AVX-512: clamp by compare and blend" }
-v3 = { class = "M", recipe = "vpcmpgtq x4; vblendvpd x4; vshufps; vpermpd" }
-v4 = { class = "N", recipe = "vpmovsqd x2; vinserti64x4" }
+v2 = { class = "M", recipe = "pcmpgtq; pxor; pand; pxor; pcmpgtq; pxor; pandn; pxor; pcmpgtq; pxor; pand; pxor; pcmpgtq; pxor; pandn; pxor; shufps", note = "no 64-bit pack below AVX-512: each operand is clamped with compare, xor, and, xor, then shufps picks the low halves" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpand; vpxor; vpcmpgtq; vpxor; vpandn; vpxor; vpcmpgtq; vpxor; vpand; vpxor; vpcmpgtq; vpxor; vpandn; vpxor; vshufps; vpermq", note = "no 64-bit pack below AVX-512: each operand is clamped with compare, xor, and, xor, then shufps picks the low halves" }
+v4 = { class = "M", recipe = "vpmovsqd x2; vinserti64x4" }
 
 [[op]]
 op = "vec.narrow_sat"
 ty = ["u64"]
-v2 = { class = "N", recipe = "pxor x2; pcmpgtq x2; blendvpd x2; shufps", note = "no 64-bit pack below AVX-512: clamp by compare and blend" }
-v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq x2; vblendvpd x2; vshufps; vpermpd" }
-v4 = { class = "N", recipe = "vpmovusqd x2; vinserti64x4" }
+v2 = { class = "M", recipe = "pxor x2; pcmpgtq; pxor; pand; pxor x3; pcmpgtq; pxor; pand; pxor; shufps", note = "no 64-bit pack below AVX-512: each operand is clamped with xor, xor, compare, xor, and, xor, then shufps picks the low halves" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vpxor; vpand; vpxor x3; vpcmpgtq; vpxor; vpand; vpxor; vshufps; vpermq", note = "no 64-bit pack below AVX-512: each operand is clamped with xor, xor, compare, xor, and, xor, then shufps picks the low halves" }
+v4 = { class = "M", recipe = "vpmovusqd x2; vinserti64x4" }
 
 # conversions
 
@@ -1688,8 +1821,8 @@ v4 = { class = "N", recipe = "vcvtdq2pd" }
 [[op]]
 op = "vec.cast"
 ty = ["u32>f64"]
-v2 = { class = "N", recipe = "punpckldq; subpd" }
-v3 = { class = "N", recipe = "vpmovzxdq; vpor; vsubpd" }
+v2 = { class = "M", recipe = "pxor; cvtdq2pd; addpd" }
+v3 = { class = "M", recipe = "vpxor; vcvtdq2pd; vaddpd" }
 v4 = { class = "N", recipe = "vcvtudq2pd" }
 
 [[op]]
@@ -1702,79 +1835,1081 @@ v4 = { class = "N", recipe = "vcvtdq2ps" }
 [[op]]
 op = "vec.cast.round"
 ty = ["u32>f32"]
-v2 = { class = "M", recipe = "pblendw; psrld; pblendw; subps; addps" }
-v3 = { class = "M", recipe = "vpblendw; vpsrld; vpblendw; vsubps; vaddps" }
+v2 = { class = "M", recipe = "psrld; cvtdq2ps; mulps; pand; cvtdq2ps; addps" }
+v3 = { class = "M", recipe = "vpsrld; vcvtdq2ps; vmulps; vpand; vcvtdq2ps; vaddps" }
 v4 = { class = "N", recipe = "vcvtudq2ps" }
 
 [[op]]
 op = "vec.cast.round"
 ty = ["i64>f64"]
-v2 = { class = "M", recipe = "movq; pextrq; cvtsi2sd x2; unpcklpd" }
-v3 = { class = "M", recipe = "vextracti128; vmovq x2; vpextrq x2; vcvtsi2sd x4; vunpcklpd x2; vinsertf128" }
+v2 = { class = "M", recipe = "mov x2; cvtsi2s% x2; movs% x2" }
+v3 = { class = "M", recipe = "mov x4; vcvtsi2s% x4; vmovs% x4" }
 v4 = { class = "N", recipe = "vcvtqq2pd" }
 
 [[op]]
 op = "vec.cast.round"
 ty = ["u64>f64"]
-v2 = { class = "M", recipe = "pblendw; psrlq; por; subpd; addpd" }
-v3 = { class = "M", recipe = "vpblendd; vpsrlq; vpor; vsubpd; vaddpd" }
+v2 = { class = "M", recipe = "mov x2; test x2; js x2; cvtsi2s% x4; jmp x2; shr x2; and x2; or x2; adds% x2; movs% x2" }
+v3 = { class = "M", recipe = "mov x4; test x4; js x4; vcvtsi2s% x8; jmp x4; shr x4; and x4; or x4; vadds% x4; vmovs% x4" }
 v4 = { class = "N", recipe = "vcvtuqq2pd" }
 
 [[op]]
 op = "vec.cast.sat"
 ty = ["f32>i32"]
-v2 = { class = "M", recipe = "cvttps2dq; cmpleps; pxor; cmpordps; pand" }
-v3 = { class = "M", recipe = "vcvttps2dq; vcmpleps; vpxor; vcmpordps; vpand" }
+v2 = { class = "M", recipe = "cmpordps; pand; cvttps2dq; cmpleps; pxor" }
+v3 = { class = "M", recipe = "vcmpordps; vpand; vcvttps2dq; vcmpleps; vpxor" }
 v4 = { class = "M", recipe = "vcvttps2dq; vcmpps; vmovdqa32 {k}; vcmpps; vmovdqa32 {k}{z}" }
 
 [[op]]
 op = "vec.cast.sat"
 ty = ["f32>u32"]
-v2 = { class = "M", recipe = "maxps; cvttps2dq; subps; cvttps2dq; pxor; cmpleps; blendvps; cmpleps; por" }
-v3 = { class = "M", recipe = "vmaxps; vcvttps2dq; vsubps; vcvttps2dq; vpxor; vcmpleps; vblendvps; vcmpleps; vpor" }
-v4 = { class = "M", recipe = "vmaxps; vcvttps2udq" }
+v2 = { class = "M", recipe = "maxps; cvttps2dq; subps; cvttps2dq; psrad; por; psrad; pand; por" }
+v3 = { class = "M", recipe = "vmaxps; vcvttps2dq; vsubps; vcvttps2dq; vpsrad; vpor; vpsrad; vpand; vpor" }
+v4 = { class = "N", recipe = "vmaxps; vcvttps2udq" }
 
 [[op]]
 op = "vec.cast.sat"
 ty = ["f64>i64"]
-v2 = { class = "M", recipe = "unpckhpd; cvttsd2si x2; movq; pinsrq; cmplepd; pxor; cmpordpd; pand" }
-v3 = { class = "M", recipe = "vextractf128; vunpckhpd x2; vcvttsd2si x4; vmovq x2; vpinsrq x2; vinserti128; vcmplepd; vpxor; vcmpordpd; vpand" }
+v2 = { class = "M", recipe = "movsd x2; ucomisd x4; jae x2; jp x2; cvttsd2si x2; jmp x4; mov x4; xor x2" }
+v3 = { class = "M", recipe = "vmovsd x4; vucomisd x8; jae x4; jp x4; vcvttsd2si x4; jmp x8; mov x8; xor x4" }
 v4 = { class = "M", recipe = "vcvttpd2qq; vcmppd; vmovdqa64 {k}; vcmppd; vmovdqa64 {k}{z}" }
 
 [[op]]
 op = "vec.cast.sat"
 ty = ["f64>u64"]
-v2 = { class = "M", recipe = "maxpd; subpd; unpckhpd x2; cvttsd2si x4; movq x2; pinsrq x2; pxor; cmplepd; blendvpd; cmplepd; por" }
-v3 = { class = "M", recipe = "vmaxpd; vsubpd; vextractf128 x2; vunpckhpd x4; vcvttsd2si x8; vmovq x4; vpinsrq x4; vinserti128 x2; vpxor; vcmplepd; vblendvpd; vcmplepd; vpor" }
-v4 = { class = "M", recipe = "vmaxpd; vcvttpd2uqq" }
+v2 = { class = "M", recipe = "movsd x2; ucomisd x6; jae x4; jbe x2; cvttsd2si x4; jmp x6; subsd x2; xor x4; mov x4" }
+v3 = { class = "M", recipe = "vmovsd x4; vucomisd x12; jae x8; jbe x4; vcvttsd2si x8; jmp x12; vsubsd x4; xor x8; mov x8" }
+v4 = { class = "N", recipe = "vmaxpd; vcvttpd2uqq" }
 
 [[op]]
 op = "vec.cast.try"
 ty = ["f32>i32"]
-v2 = { class = "M", recipe = "cvttps2dq; cmpltps; cmpleps; andps; movmskps; cmp; sete" }
-v3 = { class = "M", recipe = "vcvttps2dq; vcmpltps; vcmpleps; vandps; vmovmskps; cmp; sete" }
+v2 = { class = "M", recipe = "cvtss2sd x4; ucomisd x12; jb x4; jae x4; cvttsd2si x4; cvtsi2sd x4; jne x4; cmp x8; jcc x8; jmp x9; mov x6" }
+v3 = { class = "M", recipe = "vcvtss2sd x8; vucomisd x24; jb x8; jae x8; vcvttsd2si x8; vcvtsi2sd x8; jne x8; cmp x16; jcc x16; jmp x17; mov x10" }
 v4 = { class = "M", recipe = "vcvttps2dq; vcmpps; vcmpps {k}; kortestw; setc" }
 
 [[op]]
 op = "vec.cast.try"
 ty = ["f32>u32"]
-v2 = { class = "M", recipe = "subps; cvttps2dq x2; pxor; cmpleps; blendvps; cmpltps x2; andps; movmskps; cmp; sete" }
-v3 = { class = "M", recipe = "vsubps; vcvttps2dq x2; vpxor; vcmpleps; vblendvps; vcmpltps x2; vandps; vmovmskps; cmp; sete" }
+v2 = { class = "M", recipe = "cvtss2sd x4; ucomisd x12; jb x4; jae x4; cvttsd2si x4; cvtsi2sd x4; jne x4; cmp x8; jcc x8; jmp x9; mov x6" }
+v3 = { class = "M", recipe = "vcvtss2sd x8; vucomisd x24; jb x8; jae x8; vcvttsd2si x8; vcvtsi2sd x8; jne x8; cmp x16; jcc x16; jmp x17; mov x10" }
 v4 = { class = "M", recipe = "vcvttps2udq; vcmpps; vcmpps {k}; kortestw; setc" }
 
 [[op]]
 op = "vec.cast.try"
 ty = ["f64>i64"]
-v2 = { class = "M", recipe = "unpckhpd; cvttsd2si x2; movq; pinsrq; cmpltpd; cmplepd; andpd; movmskpd; cmp; sete" }
-v3 = { class = "M", recipe = "vextractf128; vunpckhpd x2; vcvttsd2si x4; vmovq x2; vpinsrq x2; vinserti128; vcmpltpd; vcmplepd; vandpd; vmovmskpd; cmp; sete" }
+v2 = { class = "M", recipe = "movsd x2; ucomisd x6; jb x2; jae x2; cvttsd2si x2; cvtsi2sd x2; jne x2; jmp x5; mov x4" }
+v3 = { class = "M", recipe = "vmovsd x4; vucomisd x12; jb x4; jae x4; vcvttsd2si x4; vcvtsi2sd x4; jne x4; jmp x9; mov x6" }
 v4 = { class = "M", recipe = "vcvttpd2qq; vcmppd; vcmppd {k}; kortestb; setc" }
 
 [[op]]
 op = "vec.cast.try"
 ty = ["f64>u64"]
-v2 = { class = "M", recipe = "subpd; unpckhpd x2; cvttsd2si x4; movq x2; pinsrq x2; pxor; cmplepd; blendvpd; cmpltpd x2; andpd; movmskpd; cmp; sete" }
-v3 = { class = "M", recipe = "vsubpd; vextractf128 x2; vunpckhpd x4; vcvttsd2si x8; vmovq x4; vpinsrq x4; vinserti128 x2; vpxor; vcmplepd; vblendvpd; vcmpltpd x2; vandpd; vmovmskpd; cmp; sete" }
+v2 = { class = "M", recipe = "movsd x2; ucomisd x8; jb x2; jae x4; cvttsd2si x4; cvtsi2sd x2; jne x2; cmp x2; jcc x2; jmp x5; subsd x2; xor x2; mov x4" }
+v3 = { class = "M", recipe = "vmovsd x4; vucomisd x16; jb x4; jae x8; vcvttsd2si x8; vcvtsi2sd x4; jne x4; cmp x4; jcc x4; jmp x9; vsubsd x4; xor x4; mov x6" }
 v4 = { class = "M", recipe = "vcvttpd2uqq; vcmppd; vcmppd {k}; kortestb; setc" }
+
+# casts of the other lane pairs: packed where the lanes allow, else lane by lane
+
+[[op]]
+op = "vec.cast"
+ty = [
+    "i8>i8", "i16>i16", "i32>i32", "i64>i64", "u8>u8", "u16>u16", "u32>u32", "u64>u64", "f32>f32",
+    "f64>f64",
+]
+v2 = { class = "N", recipe = "none" }
+v3 = { class = "N", recipe = "none" }
+v4 = { class = "N", recipe = "none", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["i8>i16"]
+v2 = { class = "N", recipe = "pmovsx*w" }
+v3 = { class = "N", recipe = "vpmovsx*w" }
+v4 = { class = "N", recipe = "vpmovsx*w", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["i8>i32", "i16>i32"]
+v2 = { class = "N", recipe = "pmovsx*d" }
+v3 = { class = "N", recipe = "vpmovsx*d" }
+v4 = { class = "N", recipe = "vpmovsx*d", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["i8>i64", "i16>i64", "i32>i64"]
+v2 = { class = "N", recipe = "pmovsx*q" }
+v3 = { class = "N", recipe = "vpmovsx*q" }
+v4 = { class = "N", recipe = "vpmovsx*q", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["i8>f64", "i16>f64"]
+v2 = { class = "N", recipe = "pmovsx*d; cvtdq2pd" }
+v3 = { class = "N", recipe = "vpmovsx*d; vcvtdq2pd" }
+v4 = { class = "N", recipe = "vpmovsx*d; vcvtdq2p%", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["u8>i16", "u8>u16"]
+v2 = { class = "N", recipe = "pmovzx*w" }
+v3 = { class = "N", recipe = "vpmovzx*w" }
+v4 = { class = "N", recipe = "vpmovzx*w", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["u8>i32", "u8>u32", "u16>i32", "u16>u32"]
+v2 = { class = "N", recipe = "pmovzx*d" }
+v3 = { class = "N", recipe = "vpmovzx*d" }
+v4 = { class = "N", recipe = "vpmovzx*d", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["u8>i64", "u8>u64", "u16>i64", "u16>u64", "u32>i64", "u32>u64"]
+v2 = { class = "N", recipe = "pmovzx*q" }
+v3 = { class = "N", recipe = "vpmovzx*q" }
+v4 = { class = "N", recipe = "vpmovzx*q", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["u8>f64", "u16>f64"]
+v2 = { class = "N", recipe = "pmovzx*d; cvtdq2pd" }
+v3 = { class = "N", recipe = "vpmovzx*d; vcvtdq2pd" }
+v4 = { class = "N", recipe = "vpmovzx*d; vcvtdq2p%", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["f32>f64"]
+v2 = { class = "N", recipe = "cvtps2pd" }
+v3 = { class = "N", recipe = "vcvtps2pd" }
+v4 = { class = "N", recipe = "vcvtps2pd", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = [
+    "i8>i8", "i8>u8", "i16>i16", "i16>u16", "i32>i32", "i32>u32", "i64>i64", "i64>u64", "u8>i8",
+    "u8>u8", "u16>i16", "u16>u16", "u32>i32", "u32>u32", "u64>i64", "u64>u64",
+]
+v2 = { class = "N", recipe = "none" }
+v3 = { class = "N", recipe = "none" }
+v4 = { class = "N", recipe = "none", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["i8>i16", "i8>u16"]
+v2 = { class = "N", recipe = "pmovsx*w" }
+v3 = { class = "N", recipe = "vpmovsx*w" }
+v4 = { class = "N", recipe = "vpmovsx*w", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["i8>i32", "i8>u32", "i16>i32", "i16>u32"]
+v2 = { class = "N", recipe = "pmovsx*d" }
+v3 = { class = "N", recipe = "vpmovsx*d" }
+v4 = { class = "N", recipe = "vpmovsx*d", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["i8>i64", "i8>u64", "i16>i64", "i16>u64", "i32>i64", "i32>u64"]
+v2 = { class = "N", recipe = "pmovsx*q" }
+v3 = { class = "N", recipe = "vpmovsx*q" }
+v4 = { class = "N", recipe = "vpmovsx*q", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["i16>i8", "i16>u8", "u16>i8", "u16>u8"]
+v2 = { class = "N", recipe = "pshufb" }
+v3 = { class = "M", recipe = "vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmov*b", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["i32>i8", "i32>u8", "u32>i8", "u32>u8"]
+v2 = { class = "N", recipe = "pshufb" }
+v3 = { class = "M", recipe = "vpshufb; vextracti128; vpunpckldq" }
+v4 = { class = "N", recipe = "vpmov*b", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["i32>i16", "i32>u16", "u32>i16", "u32>u16"]
+v2 = { class = "N", recipe = "pshufb" }
+v3 = { class = "M", recipe = "vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmov*w", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["i64>i8", "i64>u8", "u64>i8", "u64>u8"]
+v2 = { class = "N", recipe = "pshufb" }
+v3 = { class = "M", recipe = "vpshufb; vextracti128; vpunpcklwd" }
+v4 = { class = "N", recipe = "vpmov*b", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["i64>i16", "i64>u16", "u64>i16", "u64>u16"]
+v2 = { class = "N", recipe = "pshufb" }
+v3 = { class = "M", recipe = "vpshufb; vextracti128; vpunpckldq" }
+v4 = { class = "N", recipe = "vpmov*w", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["i64>i32", "i64>u32", "u64>i32", "u64>u32"]
+v2 = { class = "N", recipe = "pshufb" }
+v3 = { class = "M", recipe = "vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmov*d", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["u8>i16", "u8>u16"]
+v2 = { class = "N", recipe = "pmovzx*w" }
+v3 = { class = "N", recipe = "vpmovzx*w" }
+v4 = { class = "N", recipe = "vpmovzx*w", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["u8>i32", "u8>u32", "u16>i32", "u16>u32"]
+v2 = { class = "N", recipe = "pmovzx*d" }
+v3 = { class = "N", recipe = "vpmovzx*d" }
+v4 = { class = "N", recipe = "vpmovzx*d", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["u8>i64", "u8>u64", "u16>i64", "u16>u64", "u32>i64", "u32>u64"]
+v2 = { class = "N", recipe = "pmovzx*q" }
+v3 = { class = "N", recipe = "vpmovzx*q" }
+v4 = { class = "N", recipe = "vpmovzx*q", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>i8", "i16>i16", "i32>i32", "i64>i64", "u8>u8", "u16>u16", "u32>u32", "u64>u64"]
+v2 = { class = "N", recipe = "none" }
+v3 = { class = "N", recipe = "none" }
+v4 = { class = "N", recipe = "none", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>i16"]
+v2 = { class = "N", recipe = "pmovsx*w" }
+v3 = { class = "N", recipe = "vpmovsx*w" }
+v4 = { class = "N", recipe = "vpmovsx*w", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>i32", "i16>i32"]
+v2 = { class = "N", recipe = "pmovsx*d" }
+v3 = { class = "N", recipe = "vpmovsx*d" }
+v4 = { class = "N", recipe = "vpmovsx*d", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>i64", "i16>i64", "i32>i64"]
+v2 = { class = "N", recipe = "pmovsx*q" }
+v3 = { class = "N", recipe = "vpmovsx*q" }
+v4 = { class = "N", recipe = "vpmovsx*q", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>u8", "i16>u16", "i32>u32"]
+v2 = { class = "N", recipe = "pmax?*" }
+v3 = { class = "N", recipe = "vpmax?*" }
+v4 = { class = "N", recipe = "vpmaxs*", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>u16"]
+v2 = { class = "N", recipe = "pmax?*; pmovsx*w" }
+v3 = { class = "N", recipe = "vpmax?*; vpmovsx*w" }
+v4 = { class = "N", recipe = "vpmaxs*; vpmovsx*w", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>u32", "i16>u32"]
+v2 = { class = "N", recipe = "pmax?*; pmovsx*d" }
+v3 = { class = "N", recipe = "vpmax?*; vpmovsx*d" }
+v4 = { class = "N", recipe = "vpmaxs*; vpmovsx*d", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>u64", "i16>u64", "i32>u64"]
+v2 = { class = "N", recipe = "pmax?*; pmovsx*q" }
+v3 = { class = "N", recipe = "vpmax?*; vpmovsx*q" }
+v4 = { class = "N", recipe = "vpmaxs*; vpmovsx*q", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i16>i8"]
+v2 = { class = "M", recipe = "pmin?*; pmax?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpmax?*; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmovs*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i16>u8"]
+v2 = { class = "M", recipe = "pmin?*; pmax?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpmax?*; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmaxs*; vpmovus*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i32>i8"]
+v2 = { class = "M", recipe = "pmin?*; pmax?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpmax?*; vpshufb; vextracti128; vpunpckldq" }
+v4 = { class = "N", recipe = "vpmovs*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i32>i16"]
+v2 = { class = "M", recipe = "pmin?*; pmax?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpmax?*; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmovs*w", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i32>u8"]
+v2 = { class = "M", recipe = "pmin?*; pmax?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpmax?*; vpshufb; vextracti128; vpunpckldq" }
+v4 = { class = "N", recipe = "vpmaxs*; vpmovus*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i32>u16"]
+v2 = { class = "M", recipe = "pmin?*; pmax?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpmax?*; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmaxs*; vpmovus*w", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i64>i8"]
+v2 = { class = "M", recipe = "pcmpgtq; pxor; pand; pxor; pcmpgtq; pxor; pandn; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpand; vpxor; vpcmpgtq; vpxor; vpandn; vpxor; vpshufb; vextracti128; vpunpcklwd" }
+v4 = { class = "N", recipe = "vpmovs*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i64>i16"]
+v2 = { class = "M", recipe = "pcmpgtq; pxor; pand; pxor; pcmpgtq; pxor; pandn; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpand; vpxor; vpcmpgtq; vpxor; vpandn; vpxor; vpshufb; vextracti128; vpunpckldq" }
+v4 = { class = "N", recipe = "vpmovs*w", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i64>i32"]
+v2 = { class = "M", recipe = "pcmpgtq; pxor; pand; pxor; pcmpgtq; pxor; pandn; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpand; vpxor; vpcmpgtq; vpxor; vpandn; vpxor; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmovs*d", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i64>u8"]
+v2 = { class = "M", recipe = "pcmpgtq; pxor; pand; pxor; pcmpgtq; pxor; pandn; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpand; vpxor; vpcmpgtq; vpxor; vpandn; vpxor; vpshufb; vextracti128; vpunpcklwd" }
+v4 = { class = "N", recipe = "vpmaxs*; vpmovus*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i64>u16"]
+v2 = { class = "M", recipe = "pcmpgtq; pxor; pand; pxor; pcmpgtq; pxor; pandn; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpand; vpxor; vpcmpgtq; vpxor; vpandn; vpxor; vpshufb; vextracti128; vpunpckldq" }
+v4 = { class = "N", recipe = "vpmaxs*; vpmovus*w", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i64>u32"]
+v2 = { class = "M", recipe = "pcmpgtq; pxor; pand; pxor; pcmpgtq; pxor; pandn; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpand; vpxor; vpcmpgtq; vpxor; vpandn; vpxor; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmaxs*; vpmovus*d", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i64>u64"]
+v2 = { class = "M", recipe = "pcmpgtq; pxor; pandn; pxor" }
+v3 = { class = "M", recipe = "vpcmpgtq; vpxor; vpandn; vpxor" }
+v4 = { class = "N", recipe = "vpmaxs*", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u8>i8", "u16>i16", "u32>i32"]
+v2 = { class = "N", recipe = "pmin?*" }
+v3 = { class = "N", recipe = "vpmin?*" }
+v4 = { class = "N", recipe = "vpminu*", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u8>i16", "u8>u16"]
+v2 = { class = "N", recipe = "pmovzx*w" }
+v3 = { class = "N", recipe = "vpmovzx*w" }
+v4 = { class = "N", recipe = "vpmovzx*w", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u8>i32", "u8>u32", "u16>i32", "u16>u32"]
+v2 = { class = "N", recipe = "pmovzx*d" }
+v3 = { class = "N", recipe = "vpmovzx*d" }
+v4 = { class = "N", recipe = "vpmovzx*d", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u8>i64", "u8>u64", "u16>i64", "u16>u64", "u32>i64", "u32>u64"]
+v2 = { class = "N", recipe = "pmovzx*q" }
+v3 = { class = "N", recipe = "vpmovzx*q" }
+v4 = { class = "N", recipe = "vpmovzx*q", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u16>i8"]
+v2 = { class = "N", recipe = "pmin?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpminu*; vpmov*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u16>u8"]
+v2 = { class = "N", recipe = "pmin?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmovus*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u32>i8"]
+v2 = { class = "N", recipe = "pmin?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpshufb; vextracti128; vpunpckldq" }
+v4 = { class = "N", recipe = "vpminu*; vpmov*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u32>i16"]
+v2 = { class = "N", recipe = "pmin?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpminu*; vpmov*w", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u32>u8"]
+v2 = { class = "N", recipe = "pmin?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpshufb; vextracti128; vpunpckldq" }
+v4 = { class = "N", recipe = "vpmovus*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u32>u16"]
+v2 = { class = "N", recipe = "pmin?*; pshufb" }
+v3 = { class = "M", recipe = "vpmin?*; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmovus*w", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u64>i8"]
+v2 = { class = "M", recipe = "pxor x2; pcmpgtq; pxor; pand; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vpxor; vpand; vpxor; vpshufb; vextracti128; vpunpcklwd" }
+v4 = { class = "N", recipe = "vpminu*; vpmov*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u64>i16"]
+v2 = { class = "M", recipe = "pxor x2; pcmpgtq; pxor; pand; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vpxor; vpand; vpxor; vpshufb; vextracti128; vpunpckldq" }
+v4 = { class = "N", recipe = "vpminu*; vpmov*w", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u64>i32"]
+v2 = { class = "M", recipe = "pxor x2; pcmpgtq; pxor; pand; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vpxor; vpand; vpxor; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpminu*; vpmov*d", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u64>i64"]
+v2 = { class = "M", recipe = "pxor x2; pcmpgtq; pxor; pand; pxor" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vpxor; vpand; vpxor" }
+v4 = { class = "N", recipe = "vpminu*", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u64>u8"]
+v2 = { class = "M", recipe = "pxor x2; pcmpgtq; pxor; pand; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vpxor; vpand; vpxor; vpshufb; vextracti128; vpunpcklwd" }
+v4 = { class = "N", recipe = "vpmovus*b", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u64>u16"]
+v2 = { class = "M", recipe = "pxor x2; pcmpgtq; pxor; pand; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vpxor; vpand; vpxor; vpshufb; vextracti128; vpunpckldq" }
+v4 = { class = "N", recipe = "vpmovus*w", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u64>u32"]
+v2 = { class = "M", recipe = "pxor x2; pcmpgtq; pxor; pand; pxor; pshufb" }
+v3 = { class = "M", recipe = "vpxor x2; vpcmpgtq; vpxor; vpand; vpxor; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "N", recipe = "vpmovus*d", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f32>i8", "f32>u8"]
+v2 = { class = "M", recipe = "cmpordp%; pand; maxp%; minp%; cvttps2dq; pshufb" }
+v3 = { class = "M", recipe = "vcmpordp%; vpand; vmaxp%; vminp%; vcvttps2dq; vpshufb; vextracti128; vpunpckldq" }
+v4 = { class = "M", recipe = "vcmpp%; vmaxp%; vminp%; vcvttp%2dq {k}{z}; vpmovd*", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f32>i16", "f32>u16"]
+v2 = { class = "M", recipe = "cmpordp%; pand; maxp%; minp%; cvttps2dq; pshufb" }
+v3 = { class = "M", recipe = "vcmpordp%; vpand; vmaxp%; vminp%; vcvttps2dq; vpshufb; vextracti128; vpunpcklqdq" }
+v4 = { class = "M", recipe = "vcmpp%; vmaxp%; vminp%; vcvttp%2dq {k}{z}; vpmovd*", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f32>i64"]
+v2 = { class = "M", recipe = "cvtss2sd x2; ucomisd x4; jae x2; jp x2; cvttsd2si x2; jmp x4; mov x4; xor x2" }
+v3 = { class = "M", recipe = "vcvtss2sd x4; vucomisd x8; jae x4; jp x4; vcvttsd2si x4; jmp x8; mov x8; xor x4" }
+v4 = { class = "M", recipe = "vcvttp%2qq; vcmpp%; vmovdqa64 {k}; vcmpp%; vmovdqa64 {k}{z}", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f32>u64"]
+v2 = { class = "M", recipe = "cvtss2sd x2; ucomisd x6; jae x4; jbe x2; cvttsd2si x4; jmp x6; subsd x2; xor x4; mov x4" }
+v3 = { class = "M", recipe = "vcvtss2sd x4; vucomisd x12; jae x8; jbe x4; vcvttsd2si x8; jmp x12; vsubsd x4; xor x8; mov x8" }
+v4 = { class = "N", recipe = "vmaxp%; vcvttp%2uqq", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f64>i8", "f64>i16", "f64>u8", "f64>u16"]
+v2 = { class = "M", recipe = "cmpordp%; pand; maxp%; minp%; cvttpd2dq; pshufb" }
+v3 = { class = "M", recipe = "vcmpordp%; vpand; vmaxp%; vminp%; vcvttpd2dq; vpshufb" }
+v4 = { class = "M", recipe = "vcmpp%; vmaxp%; vminp%; vcvttp%2dq {k}{z}; vpmovd*", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f64>i32"]
+v2 = { class = "M", recipe = "cmpordp%; pand; maxp%; minp%; cvttpd2dq" }
+v3 = { class = "M", recipe = "vcmpordp%; vpand; vmaxp%; vminp%; vcvttpd2dq" }
+v4 = { class = "M", recipe = "vcmpp%; vmaxp%; vminp%; vcvttp%2dq {k}{z}", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f64>u32"]
+v2 = { class = "M", recipe = "cmpordp%; pand; maxp%; minp%; roundpd 11; addpd; cvttpd2dq; pxor" }
+v3 = { class = "M", recipe = "vcmpordp%; vpand; vmaxp%; vminp%; vroundpd 11; vaddpd; vcvttpd2dq; vpxor" }
+v4 = { class = "N", recipe = "vmaxp%; vcvttp%2udq", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["i8>f32", "i16>f32"]
+v2 = { class = "N", recipe = "pmovsx*d; cvtdq2ps" }
+v3 = { class = "N", recipe = "vpmovsx*d; vcvtdq2ps" }
+v4 = { class = "N", recipe = "vpmovsx*d; vcvtdq2p%", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["i8>f64", "i16>f64"]
+v2 = { class = "N", recipe = "pmovsx*d; cvtdq2pd" }
+v3 = { class = "N", recipe = "vpmovsx*d; vcvtdq2pd" }
+v4 = { class = "N", recipe = "vpmovsx*d; vcvtdq2p%", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["i32>f64"]
+v2 = { class = "N", recipe = "cvtdq2pd" }
+v3 = { class = "N", recipe = "vcvtdq2pd" }
+v4 = { class = "N", recipe = "vcvtdq2p%", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["i64>f32"]
+v2 = { class = "M", recipe = "mov x2; cvtsi2s% x2; movs% x2" }
+v3 = { class = "M", recipe = "mov x4; vcvtsi2s% x4; vmovs% x4" }
+v4 = { class = "N", recipe = "vcvtqq2p%", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["u8>f32", "u16>f32"]
+v2 = { class = "N", recipe = "pmovzx*d; cvtdq2ps" }
+v3 = { class = "N", recipe = "vpmovzx*d; vcvtdq2ps" }
+v4 = { class = "N", recipe = "vpmovzx*d; vcvtdq2p%", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["u8>f64", "u16>f64"]
+v2 = { class = "N", recipe = "pmovzx*d; cvtdq2pd" }
+v3 = { class = "N", recipe = "vpmovzx*d; vcvtdq2pd" }
+v4 = { class = "N", recipe = "vpmovzx*d; vcvtdq2p%", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["u32>f64"]
+v2 = { class = "M", recipe = "pxor; cvtdq2pd; addpd" }
+v3 = { class = "M", recipe = "vpxor; vcvtdq2pd; vaddpd" }
+v4 = { class = "N", recipe = "vcvtudq2p%", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["u64>f32"]
+v2 = { class = "M", recipe = "mov x2; test x2; js x2; cvtsi2s% x4; jmp x2; shr x2; and x2; or x2; adds% x2; movs% x2" }
+v3 = { class = "M", recipe = "mov x4; test x4; js x4; vcvtsi2s% x8; jmp x4; shr x4; and x4; or x4; vadds% x4; vmovs% x4" }
+v4 = { class = "N", recipe = "vcvtuqq2p%", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["f32>f32", "f64>f64"]
+v2 = { class = "N", recipe = "none" }
+v3 = { class = "N", recipe = "none" }
+v4 = { class = "N", recipe = "none", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["f32>f64"]
+v2 = { class = "N", recipe = "cvtps2pd" }
+v3 = { class = "N", recipe = "vcvtps2pd" }
+v4 = { class = "N", recipe = "vcvtps2pd", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["f64>f32"]
+v2 = { class = "N", recipe = "cvtpd2ps" }
+v3 = { class = "N", recipe = "vcvtpd2ps" }
+v4 = { class = "N", recipe = "vcvtpd2ps", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>i8", "u8>u8"]
+v2 = { class = "M", recipe = "movx x16; mov x18; jmp" }
+v3 = { class = "M", recipe = "movx x32; mov x34; jmp" }
+v4 = { class = "N", recipe = "mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>i16"]
+v2 = { class = "M", recipe = "movx x8; mov x10; jmp" }
+v3 = { class = "M", recipe = "movx x16; mov x18; jmp" }
+v4 = { class = "N", recipe = "vpmovsx*w; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>i32", "i16>i32"]
+v2 = { class = "M", recipe = "movx x4; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; mov x10; jmp" }
+v4 = { class = "N", recipe = "vpmovsx*d; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>i64", "i16>i64", "i32>i64"]
+v2 = { class = "M", recipe = "movx x2; mov x4; jmp" }
+v3 = { class = "M", recipe = "movx x4; mov x6; jmp" }
+v4 = { class = "N", recipe = "vpmovsx*q; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>u8", "u8>i8"]
+v2 = { class = "M", recipe = "movx x16; cmp x16; jcc x16; mov x18; jmp" }
+v3 = { class = "M", recipe = "movx x32; cmp x32; jcc x32; mov x34; jmp" }
+v4 = { class = "M", recipe = "vpmov*2m; kortest*; setz", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>u16"]
+v2 = { class = "M", recipe = "movx x8; cmp x8; jcc x8; mov x10; jmp" }
+v3 = { class = "M", recipe = "movx x16; cmp x16; jcc x16; mov x18; jmp" }
+v4 = { class = "M", recipe = "vpmovsx*w; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>u32", "i16>u32"]
+v2 = { class = "M", recipe = "movx x4; cmp x4; jcc x4; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; cmp x8; jcc x8; mov x10; jmp" }
+v4 = { class = "M", recipe = "vpmovsx*d; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>u64", "i16>u64", "i32>u64"]
+v2 = { class = "M", recipe = "movx x2; cmp x2; jcc x2; mov x4; jmp" }
+v3 = { class = "M", recipe = "movx x4; cmp x4; jcc x4; mov x6; jmp" }
+v4 = { class = "M", recipe = "vpmovsx*q; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>f32", "i16>f32"]
+v2 = { class = "M", recipe = "movx x4; sar x4; xor x4; sub x8; test x4; je x4; bsr x4; bsf x4; cmp x4; jae x4; cvtsi2s% x4; movs% x4; mov x2; jmp" }
+v3 = { class = "M", recipe = "movx x8; sar x8; xor x8; sub x16; test x8; je x8; bsr x8; bsf x8; cmp x8; jae x8; vcvtsi2s% x8; vmovs% x8; mov x2; jmp" }
+v4 = { class = "M", recipe = "vpmovsx*d; vcvtdq2p%; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>f64", "i16>f64"]
+v2 = { class = "M", recipe = "movx x2; sar x2; xor x2; sub x4; test x2; je x2; bsr x2; bsf x2; cmp x2; jae x2; cvtsi2s% x2; movs% x2; mov x2; jmp" }
+v3 = { class = "M", recipe = "movx x4; sar x4; xor x4; sub x8; test x4; je x4; bsr x4; bsf x4; cmp x4; jae x4; vcvtsi2s% x4; vmovs% x4; mov x2; jmp" }
+v4 = { class = "M", recipe = "vpmovsx*d; vcvtdq2p%; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>i8"]
+v2 = { class = "M", recipe = "movx x8; cmp x16; jcc x16; mov x10; jmp" }
+v3 = { class = "M", recipe = "movx x16; cmp x32; jcc x32; mov x18; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>i16", "u16>u16"]
+v2 = { class = "M", recipe = "movx x8; mov x10; jmp" }
+v3 = { class = "M", recipe = "movx x16; mov x18; jmp" }
+v4 = { class = "N", recipe = "mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>u8"]
+v2 = { class = "M", recipe = "movx x8; cmp x16; jcc x16; mov x10; jmp" }
+v3 = { class = "M", recipe = "movx x16; cmp x32; jcc x32; mov x18; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>u16", "u16>i16"]
+v2 = { class = "M", recipe = "movx x8; cmp x8; jcc x8; mov x10; jmp" }
+v3 = { class = "M", recipe = "movx x16; cmp x16; jcc x16; mov x18; jmp" }
+v4 = { class = "M", recipe = "vpmov*2m; kortest*; setz", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>i8"]
+v2 = { class = "M", recipe = "movx x4; cmp x8; jcc x8; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; cmp x16; jcc x16; mov x10; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>i16"]
+v2 = { class = "M", recipe = "movx x4; cmp x8; jcc x8; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; cmp x16; jcc x16; mov x10; jmp" }
+v4 = { class = "M", recipe = "vpmov*w; vpmovsxw*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>i32", "u32>u32"]
+v2 = { class = "M", recipe = "movx x4; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; mov x10; jmp" }
+v4 = { class = "N", recipe = "mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>u8"]
+v2 = { class = "M", recipe = "movx x4; cmp x8; jcc x8; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; cmp x16; jcc x16; mov x10; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>u16"]
+v2 = { class = "M", recipe = "movx x4; cmp x8; jcc x8; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; cmp x16; jcc x16; mov x10; jmp" }
+v4 = { class = "M", recipe = "vpmov*w; vpmovzxw*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>u32", "u32>i32"]
+v2 = { class = "M", recipe = "movx x4; cmp x4; jcc x4; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; cmp x8; jcc x8; mov x10; jmp" }
+v4 = { class = "M", recipe = "vpmov*2m; kortest*; setz", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>f32"]
+v2 = { class = "M", recipe = "movx x4; sar x4; xor x4; sub x8; test x4; je x4; bsr x4; bsf x4; cmp x4; jae x4; cvtsi2s% x4; movs% x4; mov x2; jmp" }
+v3 = { class = "M", recipe = "movx x8; sar x8; xor x8; sub x16; test x8; je x8; bsr x8; bsf x8; cmp x8; jae x8; vcvtsi2s% x8; vmovs% x8; mov x2; jmp" }
+v4 = { class = "M", recipe = "vcvtdq2p%; vcvttp%2dq; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>f64"]
+v2 = { class = "M", recipe = "movx x2; sar x2; xor x2; sub x4; test x2; je x2; bsr x2; bsf x2; cmp x2; jae x2; cvtsi2s% x2; movs% x2; mov x2; jmp" }
+v3 = { class = "M", recipe = "movx x4; sar x4; xor x4; sub x8; test x4; je x4; bsr x4; bsf x4; cmp x4; jae x4; vcvtsi2s% x4; vmovs% x4; mov x2; jmp" }
+v4 = { class = "N", recipe = "vcvtdq2p%; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>i8"]
+v2 = { class = "M", recipe = "mov x6; cmp x4; jcc x4; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x8; jcc x8; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>i16"]
+v2 = { class = "M", recipe = "mov x6; cmp x4; jcc x4; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x8; jcc x8; jmp" }
+v4 = { class = "M", recipe = "vpmov*w; vpmovsxw*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>i32"]
+v2 = { class = "M", recipe = "mov x6; cmp x4; jcc x4; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x8; jcc x8; jmp" }
+v4 = { class = "M", recipe = "vpmov*d; vpmovsxd*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>i64", "u64>u64"]
+v2 = { class = "M", recipe = "mov x6; jmp" }
+v3 = { class = "M", recipe = "mov x10; jmp" }
+v4 = { class = "N", recipe = "mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>u8"]
+v2 = { class = "M", recipe = "mov x6; cmp x4; jcc x4; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x8; jcc x8; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>u16"]
+v2 = { class = "M", recipe = "mov x6; cmp x4; jcc x4; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x8; jcc x8; jmp" }
+v4 = { class = "M", recipe = "vpmov*w; vpmovzxw*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>u32"]
+v2 = { class = "M", recipe = "mov x6; cmp x4; jcc x4; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x8; jcc x8; jmp" }
+v4 = { class = "M", recipe = "vpmov*d; vpmovzxd*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>u64", "u64>i64"]
+v2 = { class = "M", recipe = "mov x6; cmp x2; jcc x2; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x4; jcc x4; jmp" }
+v4 = { class = "M", recipe = "vpmov*2m; kortest*; setz", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>f32", "i64>f64"]
+v2 = { class = "M", recipe = "mov x4; sar x2; xor x2; sub x4; test x2; je x2; bsr x2; bsf x2; cmp x2; jae x2; cvtsi2s% x2; movs% x2; jmp" }
+v3 = { class = "M", recipe = "mov x6; sar x4; xor x4; sub x8; test x4; je x4; bsr x4; bsf x4; cmp x4; jae x4; vcvtsi2s% x4; vmovs% x4; jmp" }
+v4 = { class = "M", recipe = "vcvtqq2p%; vcvttp%2qq; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u8>i16", "u8>u16"]
+v2 = { class = "M", recipe = "movx x8; mov x10; jmp" }
+v3 = { class = "M", recipe = "movx x16; mov x18; jmp" }
+v4 = { class = "N", recipe = "vpmovzx*w; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u8>i32", "u8>u32", "u16>i32", "u16>u32"]
+v2 = { class = "M", recipe = "movx x4; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; mov x10; jmp" }
+v4 = { class = "N", recipe = "vpmovzx*d; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u8>i64", "u8>u64", "u16>i64", "u16>u64", "u32>i64", "u32>u64"]
+v2 = { class = "M", recipe = "movx x2; mov x4; jmp" }
+v3 = { class = "M", recipe = "movx x4; mov x6; jmp" }
+v4 = { class = "N", recipe = "vpmovzx*q; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u8>f32", "u16>f32"]
+v2 = { class = "M", recipe = "movx x4; test x4; je x4; bsr x4; bsf x4; sub x4; cmp x4; jae x4; cvtsi2s% x4; movs% x4; mov x2; jmp" }
+v3 = { class = "M", recipe = "movx x8; test x8; je x8; bsr x8; bsf x8; sub x8; cmp x8; jae x8; vcvtsi2s% x8; vmovs% x8; mov x2; jmp" }
+v4 = { class = "M", recipe = "vpmovzx*d; vcvtdq2p%; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u8>f64", "u16>f64"]
+v2 = { class = "M", recipe = "movx x2; test x2; je x2; bsr x2; bsf x2; sub x2; cmp x2; jae x2; cvtsi2s% x2; movs% x2; mov x2; jmp" }
+v3 = { class = "M", recipe = "movx x4; test x4; je x4; bsr x4; bsf x4; sub x4; cmp x4; jae x4; vcvtsi2s% x4; vmovs% x4; mov x2; jmp" }
+v4 = { class = "M", recipe = "vpmovzx*d; vcvtdq2p%; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u16>i8"]
+v2 = { class = "M", recipe = "movx x8; cmp x8; jcc x8; mov x10; jmp" }
+v3 = { class = "M", recipe = "movx x16; cmp x16; jcc x16; mov x18; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u16>u8"]
+v2 = { class = "M", recipe = "movx x8; cmp x8; jcc x8; mov x10; jmp" }
+v3 = { class = "M", recipe = "movx x16; cmp x16; jcc x16; mov x18; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u32>i8"]
+v2 = { class = "M", recipe = "movx x4; cmp x4; jcc x4; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; cmp x8; jcc x8; mov x10; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u32>i16"]
+v2 = { class = "M", recipe = "movx x4; cmp x4; jcc x4; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; cmp x8; jcc x8; mov x10; jmp" }
+v4 = { class = "M", recipe = "vpmov*w; vpmovsxw*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u32>u8"]
+v2 = { class = "M", recipe = "movx x4; cmp x4; jcc x4; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; cmp x8; jcc x8; mov x10; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u32>u16"]
+v2 = { class = "M", recipe = "movx x4; cmp x4; jcc x4; mov x6; jmp" }
+v3 = { class = "M", recipe = "movx x8; cmp x8; jcc x8; mov x10; jmp" }
+v4 = { class = "M", recipe = "vpmov*w; vpmovzxw*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u32>f32"]
+v2 = { class = "M", recipe = "movx x4; test x4; je x4; bsr x4; bsf x4; sub x4; cmp x4; jae x4; cvtsi2s% x4; movs% x4; mov x2; jmp" }
+v3 = { class = "M", recipe = "movx x8; test x8; je x8; bsr x8; bsf x8; sub x8; cmp x8; jae x8; vcvtsi2s% x8; vmovs% x8; mov x2; jmp" }
+v4 = { class = "M", recipe = "vcvtudq2p%; vcvttp%2udq; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u32>f64"]
+v2 = { class = "M", recipe = "movx x2; test x2; je x2; bsr x2; bsf x2; sub x2; cmp x2; jae x2; cvtsi2s% x2; movs% x2; mov x2; jmp" }
+v3 = { class = "M", recipe = "movx x4; test x4; je x4; bsr x4; bsf x4; sub x4; cmp x4; jae x4; vcvtsi2s% x4; vmovs% x4; mov x2; jmp" }
+v4 = { class = "N", recipe = "vcvtudq2p%; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u64>i8"]
+v2 = { class = "M", recipe = "mov x6; cmp x2; jcc x2; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x4; jcc x4; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u64>i16"]
+v2 = { class = "M", recipe = "mov x6; cmp x2; jcc x2; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x4; jcc x4; jmp" }
+v4 = { class = "M", recipe = "vpmov*w; vpmovsxw*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u64>i32"]
+v2 = { class = "M", recipe = "mov x6; cmp x2; jcc x2; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x4; jcc x4; jmp" }
+v4 = { class = "M", recipe = "vpmov*d; vpmovsxd*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u64>u8"]
+v2 = { class = "M", recipe = "mov x6; cmp x2; jcc x2; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x4; jcc x4; jmp" }
+v4 = { class = "M", recipe = "vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u64>u16"]
+v2 = { class = "M", recipe = "mov x6; cmp x2; jcc x2; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x4; jcc x4; jmp" }
+v4 = { class = "M", recipe = "vpmov*w; vpmovzxw*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u64>u32"]
+v2 = { class = "M", recipe = "mov x6; cmp x2; jcc x2; jmp" }
+v3 = { class = "M", recipe = "mov x10; cmp x4; jcc x4; jmp" }
+v4 = { class = "M", recipe = "vpmov*d; vpmovzxd*; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u64>f32", "u64>f64"]
+v2 = { class = "M", recipe = "mov x4; test x4; je x2; bsr x2; bsf x2; sub x2; cmp x2; jae x2; js x2; cvtsi2s% x4; jmp x3; shr x2; and x2; or x2; adds% x2; movs% x2" }
+v3 = { class = "M", recipe = "mov x6; test x8; je x4; bsr x4; bsf x4; sub x4; cmp x4; jae x4; js x4; vcvtsi2s% x8; jmp x5; shr x4; and x4; or x4; vadds% x4; vmovs% x4" }
+v4 = { class = "M", recipe = "vcvtuqq2p%; vcvttp%2uqq; vpcmpneq*; kortest*; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f32>i8", "f32>i16"]
+v2 = { class = "M", recipe = "cvtss2sd x4; ucomisd x12; jb x4; jae x4; cvttsd2si x4; cvtsi2sd x4; jne x4; cmp x8; jcc x8; jmp x9; mov x6" }
+v3 = { class = "M", recipe = "vcvtss2sd x8; vucomisd x24; jb x8; jae x8; vcvttsd2si x8; vcvtsi2sd x8; jne x8; cmp x16; jcc x16; jmp x17; mov x10" }
+v4 = { class = "M", recipe = "vcvttp%2dq; vcmpp%; vcmpp% {k}; kortestw; setc; vpmovd*", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f32>i64"]
+v2 = { class = "M", recipe = "cvtss2sd x2; ucomisd x6; jb x2; jae x2; cvttsd2si x2; cvtsi2sd x2; jne x2; jmp x5; mov x4" }
+v3 = { class = "M", recipe = "vcvtss2sd x4; vucomisd x12; jb x4; jae x4; vcvttsd2si x4; vcvtsi2sd x4; jne x4; jmp x9; mov x6" }
+v4 = { class = "M", recipe = "vcvttp%2qq; vcmpp%; vcmpp% {k}; kortestb; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f32>u8", "f32>u16"]
+v2 = { class = "M", recipe = "cvtss2sd x4; ucomisd x12; jb x4; jae x4; cvttsd2si x4; cvtsi2sd x4; jne x4; cmp x8; jcc x8; jmp x9; mov x6" }
+v3 = { class = "M", recipe = "vcvtss2sd x8; vucomisd x24; jb x8; jae x8; vcvttsd2si x8; vcvtsi2sd x8; jne x8; cmp x16; jcc x16; jmp x17; mov x10" }
+v4 = { class = "M", recipe = "vcvttp%2udq; vcmpp%; vcmpp% {k}; kortestw; setc; vpmovd*", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f32>u64"]
+v2 = { class = "M", recipe = "cvtss2sd x2; ucomisd x8; jb x2; jae x4; cvttsd2si x4; cvtsi2sd x2; jne x2; cmp x2; jcc x2; jmp x5; subsd x2; xor x2; mov x4" }
+v3 = { class = "M", recipe = "vcvtss2sd x4; vucomisd x16; jb x4; jae x8; vcvttsd2si x8; vcvtsi2sd x4; jne x4; cmp x4; jcc x4; jmp x9; vsubsd x4; xor x4; mov x6" }
+v4 = { class = "M", recipe = "vcvttp%2uqq; vcmpp%; vcmpp% {k}; kortestb; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f32>f32"]
+v2 = { class = "M", recipe = "movs% x8; mov x2; jmp" }
+v3 = { class = "M", recipe = "vmovs% x16; mov x2; jmp" }
+v4 = { class = "N", recipe = "mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f32>f64"]
+v2 = { class = "M", recipe = "cvtss2sd x2; movsd x2; mov x2; jmp" }
+v3 = { class = "M", recipe = "vcvtss2sd x4; vmovsd x4; mov x2; jmp" }
+v4 = { class = "N", recipe = "vcvtps2pd; mov", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f64>i8", "f64>i16"]
+v2 = { class = "M", recipe = "movsd x2; ucomisd x6; jb x2; jae x2; cvttsd2si x2; cvtsi2sd x2; jne x2; cmp x4; jcc x4; jmp x5; mov x4" }
+v3 = { class = "M", recipe = "vmovsd x4; vucomisd x12; jb x4; jae x4; vcvttsd2si x4; vcvtsi2sd x4; jne x4; cmp x8; jcc x8; jmp x9; mov x6" }
+v4 = { class = "M", recipe = "vcvttp%2dq; vcmpp%; vcmpp% {k}; kortestw; setc; vpmovd*", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f64>i32"]
+v2 = { class = "M", recipe = "movsd x2; ucomisd x6; jb x2; jae x2; cvttsd2si x2; cvtsi2sd x2; jne x2; cmp x4; jcc x4; jmp x5; mov x4" }
+v3 = { class = "M", recipe = "vmovsd x4; vucomisd x12; jb x4; jae x4; vcvttsd2si x4; vcvtsi2sd x4; jne x4; cmp x8; jcc x8; jmp x9; mov x6" }
+v4 = { class = "M", recipe = "vcvttp%2dq; vcmpp%; vcmpp% {k}; kortestw; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f64>u8", "f64>u16"]
+v2 = { class = "M", recipe = "movsd x2; ucomisd x6; jb x2; jae x2; cvttsd2si x2; cvtsi2sd x2; jne x2; cmp x4; jcc x4; jmp x5; mov x4" }
+v3 = { class = "M", recipe = "vmovsd x4; vucomisd x12; jb x4; jae x4; vcvttsd2si x4; vcvtsi2sd x4; jne x4; cmp x8; jcc x8; jmp x9; mov x6" }
+v4 = { class = "M", recipe = "vcvttp%2udq; vcmpp%; vcmpp% {k}; kortestw; setc; vpmovd*", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f64>u32"]
+v2 = { class = "M", recipe = "movsd x2; ucomisd x6; jb x2; jae x2; cvttsd2si x2; cvtsi2sd x2; jne x2; cmp x4; jcc x4; jmp x5; mov x4" }
+v3 = { class = "M", recipe = "vmovsd x4; vucomisd x12; jb x4; jae x4; vcvttsd2si x4; vcvtsi2sd x4; jne x4; cmp x8; jcc x8; jmp x9; mov x6" }
+v4 = { class = "M", recipe = "vcvttp%2udq; vcmpp%; vcmpp% {k}; kortestw; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f64>f32"]
+v2 = { class = "M", recipe = "cvtsd2ss x2; cvtss2sd x2; ucomisd x2; jne x2; movss x2; mov x2; jmp" }
+v3 = { class = "M", recipe = "vcvtsd2ss x4; vcvtss2sd x4; vucomisd x4; jne x4; vmovss x4; mov x2; jmp" }
+v4 = { class = "M", recipe = "vcvtpd2ps; vcvtps2pd; vcmppd; kortestb; setc", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f64>f64"]
+v2 = { class = "M", recipe = "movs% x4; mov x2; jmp" }
+v3 = { class = "M", recipe = "vmovs% x8; mov x2; jmp" }
+v4 = { class = "N", recipe = "mov", unverified = true }
 
 [[op]]
 op = "vec.cast"
@@ -1794,9 +2929,16 @@ v4 = { class = "N", recipe = "vcvtps2ph 0" }
 
 [[op]]
 op = "vec.splat"
-ty = ["any8", "any16"]
+ty = ["any8"]
 v2 = { class = "N", recipe = "movd; pshufb" }
-v3 = { class = "N", recipe = "vmovd; vpbroadcast*" }
+v3 = { class = "N", recipe = "vmovd; vpbroadcastb" }
+v4 = { class = "N", recipe = "vpbroadcast*" }
+
+[[op]]
+op = "vec.splat"
+ty = ["any16"]
+v2 = { class = "M", recipe = "movd; pshuflw; punpcklqdq" }
+v3 = { class = "N", recipe = "vmovd; vpbroadcastw" }
 v4 = { class = "N", recipe = "vpbroadcast*" }
 
 [[op]]
@@ -1816,15 +2958,15 @@ v4 = { class = "N", recipe = "vpbroadcastq" }
 [[op]]
 op = "vec.splat"
 ty = ["f32"]
-v2 = { class = "N", recipe = "shufps" }
-v3 = { class = "N", recipe = "vbroadcastss" }
+v2 = { class = "N", recipe = "pshufd" }
+v3 = { class = "N", recipe = "vpbroadcastd" }
 v4 = { class = "N", recipe = "vbroadcastss" }
 
 [[op]]
 op = "vec.splat"
 ty = ["f64"]
-v2 = { class = "N", recipe = "movddup" }
-v3 = { class = "N", recipe = "vbroadcastsd" }
+v2 = { class = "N", recipe = "punpcklqdq" }
+v3 = { class = "N", recipe = "vpbroadcastq" }
 v4 = { class = "N", recipe = "vbroadcastsd" }
 
 [[op]]
@@ -1837,23 +2979,44 @@ v4 = { class = "N", recipe = "none" }
 [[op]]
 op = "vec.split"
 ty = ["any"]
-v2 = { class = "N", recipe = "pshufd" }
-v3 = { class = "N", recipe = "vextracti128" }
+v2 = { class = "N", recipe = "none", note = "the halves are copied between homes (memory traffic, not counted)" }
+v3 = { class = "N", recipe = "none", note = "the halves are copied between homes (memory traffic, not counted)" }
 v4 = { class = "N", recipe = "vextracti64x4" }
 
 [[op]]
 op = "vec.join"
 ty = ["any"]
-v2 = { class = "N", recipe = "punpcklqdq" }
-v3 = { class = "N", recipe = "vinserti128" }
+v2 = { class = "N", recipe = "none", note = "the halves are copied between homes (memory traffic, not counted)" }
+v3 = { class = "N", recipe = "none", note = "the halves are copied between homes (memory traffic, not counted)" }
 v4 = { class = "N", recipe = "vinserti64x4" }
 
 [[op]]
 op = "mask.first_n"
-ty = ["mask"]
-v2 = { class = "M", recipe = "cmp; cmova; neg; movdqu" }
-v3 = { class = "M", recipe = "cmp; cmova; neg; vmovdqu" }
-v4 = { class = "N", recipe = "cmp; cmova; bzhi; kmovq", note = "k is clamped to the lane count first" }
+ty = ["m8"]
+v2 = { class = "M", recipe = "cmp; cmovb; movd; pshufb; pcmpgtb" }
+v3 = { class = "M", recipe = "cmp; cmovb; vmovd; vpbroadcastb; vpcmpgtb" }
+v4 = { class = "M", recipe = "cmp; cmova; bzhi; kmovq", note = "k is clamped to the lane count first" }
+
+[[op]]
+op = "mask.first_n"
+ty = ["m16"]
+v2 = { class = "M", recipe = "cmp; cmovb; movd; pshuflw; punpcklqdq; pcmpgtw" }
+v3 = { class = "M", recipe = "cmp; cmovb; vmovd; vpbroadcastw; vpcmpgtw" }
+v4 = { class = "M", recipe = "cmp; cmova; bzhi; kmovq", note = "k is clamped to the lane count first" }
+
+[[op]]
+op = "mask.first_n"
+ty = ["m32"]
+v2 = { class = "M", recipe = "cmp; cmovb; movd; pshufd; pcmpgtd" }
+v3 = { class = "M", recipe = "cmp; cmovb; vmovd; vpbroadcastd; vpcmpgtd" }
+v4 = { class = "M", recipe = "cmp; cmova; bzhi; kmovq", note = "k is clamped to the lane count first" }
+
+[[op]]
+op = "mask.first_n"
+ty = ["m64"]
+v2 = { class = "M", recipe = "cmp; cmovb; movd; punpcklqdq; pcmpgtq" }
+v3 = { class = "M", recipe = "cmp; cmovb; vmovd; vpbroadcastq; vpcmpgtq" }
+v4 = { class = "M", recipe = "cmp; cmova; bzhi; kmovq", note = "k is clamped to the lane count first" }
 
 # chunk loops and tails
 
@@ -1868,15 +3031,15 @@ v4 = { class = "N", recipe = "vmovdqu64" }
 op = "loop.tail_masked"
 ty = ["any32", "any64"]
 v2 = { class = "M", recipe = "movdqa; mov; lea x2; rep movsb; movdqa; neg; movdqu" }
-v3 = { class = "N", recipe = "neg; vmovdqu; vpmaskmov*" }
-v4 = { class = "N", recipe = "bzhi; kmovq; vmovdqu# {k}{z}" }
+v3 = { class = "M", recipe = "neg; vmovdqu; vpmaskmov*" }
+v4 = { class = "M", recipe = "bzhi; kmovq; vmovdqu# {k}{z}" }
 
 [[op]]
 op = "loop.tail_masked"
 ty = ["any8", "any16"]
 v2 = { class = "M", recipe = "movdqa; mov; lea x2; rep movsb; movdqa; neg; movdqu" }
 v3 = { class = "M", recipe = "vmovdqa; mov; lea x2; rep movsb; vmovdqa; neg; vmovdqu" }
-v4 = { class = "N", recipe = "bzhi; kmovq; vmovdqu# {k}{z}" }
+v4 = { class = "M", recipe = "bzhi; kmovq; vmovdqu# {k}{z}" }
 
 [[op]]
 op = "loop.tail_masked_mut"

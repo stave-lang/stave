@@ -101,7 +101,7 @@ ops take the lane semantics of the scalar op; V = the vector result type, M = `m
 |---|---|---|
 | `vec.splat` | `x` | every lane `x` |
 | `vec.add sub mul div neg abs copysign sqrt floor ceil round trunc fma` | lanes | float lanes, IEEE (`round` ties to even, `fma` one rounding) |
-| `vec.min max min_num max_num min_x86 max_x86` | `a b` | IEEE minimum / maximum, minimumNumber / maximumNumber, `a < b ? a : b` (a NaN result is some NaN: quiet bit and payload unspecified); int `min max` by value |
+| `vec.min max min_num max_num min_x86 max_x86` | `a b` | IEEE minimum / maximum, minimumNumber / maximumNumber (a quiet or signaling NaN is missing: the other operand; two NaNs: a quiet NaN), `a < b ? a : b` (a NaN result is some NaN: quiet bit and payload unspecified); int `min max` by value |
 | `vec.add.wrap sub.wrap mul.wrap add.sat sub.sat mul.sat checked_add checked_sub checked_mul` | `a b` | int lanes; `checked_*` yield `Option<V>` |
 | `vec.div_lanes` † `vec.div_const` † | `a b` / `a K` | int division per lane (traps as scalar `div`) |
 | `vec.and or xor andnot not abs_wrap popcount clz` | lanes | int lanes (`abs_wrap`: signed); `andnot` = `a & ~b` |
@@ -113,9 +113,9 @@ ops take the lane semantics of the scalar op; V = the vector result type, M = `m
 | `vec.bitcast split join widen_lo widen_hi narrow_wrap narrow_sat permute lookup compress expand` | | shape ops (`permute v k0 ..`: constant lane indices) |
 | `vec.load` / `vec.store` | `s i` / `s i v` | lanes `s[i..i+N]`, after `check.bounds i (sub.sat (slice.len s) N-1)` or under a chunk loop's head test; release passes after bounds-check elision may replace a slice `s` by its `slice.ptr` (unchecked `*T`) |
 | `vec.load_aligned` † / `vec.store_aligned` † | `s i` / `s i v` | as `load` / `store`; `i % N != 0` traps `Bounds` |
-| `vec.load_masked` † / `vec.store_masked` † | `s i m` / `s i v m` | active lanes only (inactive read 0); an active lane past the end traps `Bounds` |
+| `vec.load_masked` † / `vec.store_masked` † | `s i m` / `s i v m` | active lanes only (inactive read 0); an active lane past the end traps `Bounds` before any lane is written |
 | `vec.gather` † / `vec.scatter` † | `s idx` / `s idx v` | `idx`: unsigned lanes of any width, N of them, zero-extended; any index ≥ len traps `Bounds` before any write; duplicate indices: highest lane wins |
-| `mask.and or xor not select to_bits to_vec first_n rewiden all none` | | mask ops (`mask.select m a b`) |
+| `mask.and or xor not select to_bits to_vec first_n rewiden all none` | | mask ops (`mask.select m a b`); a mask lane is all zeros or all ones, a load of any other pattern is undefined behaviour (the interpreter faults) |
 
 Vector and mask ops are ops of their own, not intrinsics: `vec.*` and `mask.*` are not intrinsic
 names (`intrinsic.vec.add` is rejected).
@@ -131,7 +131,8 @@ value operand and a fn-type target are rejected. `cast.wrap`: int, `bool`, `char
 rejected: use `cast.sat` or `cast.try`). `cast.sat`: int, `char`, or float → int, NaN → 0
 (float → float is rejected: use `cast.round`). `cast.round`: int or float → float, nearest even.
 `cast.try`: int, `char`, or float → int; int → `char` or float; float → float; `Some` only when
-the value converts exactly (float → int: integral and in range).
+the value converts exactly (float → int: integral and in range). A float cast to its own type
+(any kind, scalar or per lane) is a bit copy: a signaling NaN keeps its bits.
 
 ## TypeKey text (canonical type-key printer)
 

@@ -30,8 +30,16 @@ vec.add.sat             u32                         M    3  vpternlogd; vpminud;
 vec.add.sat             u64                         M    3  vpternlogq; vpminuq; vpaddq
 vec.sub.sat             i32                         M    6  vpsubd; vpternlogd; vpmovd2m; vpsrad; vpxord; vmovdqa32 {k}
 vec.sub.sat             i64                         M    6  vpsubq; vpternlogq; vpmovq2m; vpsraq; vpxorq; vmovdqa64 {k}
-vec.sub.sat             u32                         M    2  vpmaxud; vpsubd
-vec.sub.sat             u64                         M    2  vpmaxuq; vpsubq
+vec.sub.sat             u32                         N    2  vpmaxud; vpsubd
+vec.sub.sat             u64                         N    2  vpmaxuq; vpsubq
+vec.mul.sat             i8                          M   11  vextracti64x4 x2; vpmovsxbw x4; vpmullw x2; vpmovswb x2; vinserti64x4  | unverified
+vec.mul.sat             u8                          M   11  vextracti64x4 x2; vpmovzxbw x4; vpmullw x2; vpmovuswb x2; vinserti64x4  | unverified
+vec.mul.sat             i16                         M   11  vextracti64x4 x2; vpmovsxwd x4; vpmulld x2; vpmovsdw x2; vinserti64x4  | unverified
+vec.mul.sat             u16                         M   11  vextracti64x4 x2; vpmovzxwd x4; vpmulld x2; vpmovusdw x2; vinserti64x4  | unverified
+vec.mul.sat             i32                         M   11  vextracti64x4 x2; vpmovsxdq x4; vpmullq x2; vpmovsqd x2; vinserti64x4  | unverified
+vec.mul.sat             u32                         M   11  vextracti64x4 x2; vpmovzxdq x4; vpmullq x2; vpmovusqd x2; vinserti64x4  | unverified
+vec.mul.sat             i64                         M   73  vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; imul x8; sar x8; xor x16; cmovo x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4  | unverified
+vec.mul.sat             u64                         M   57  vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; mul x8; sbb x8; or x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4  | unverified
 vec.checked_add         sint                        M    5  vpadd*; vpternlogd; vptestmq; kortestb; setz
 vec.checked_add         u8/u16/u32                  M    4  vpadd*; vpcmpu*; kortestq; setz
 vec.checked_add         u64                         M    4  vpaddq; vpcmpuq; kortestq; setz
@@ -52,13 +60,13 @@ vec.xor                 int                         N    1  vpxorq
 vec.not                 int                         N    1  vpternlogq
 vec.andnot              int                         N    1  vpandnq
 vec.shl                 int16/int32/int64 by const  N    1  vpsll*
-vec.shl                 int8 by const               M    2  vpsllw; vpandq
+vec.shl                 int8 by const               N    2  vpsllw; vpandq
 vec.shl.wrap            int16/int32/int64 by const  N    1  vpsll*
-vec.shl.wrap            int8 by const               M    2  vpsllw; vpandq
+vec.shl.wrap            int8 by const               N    2  vpsllw; vpandq
 vec.shr                 u16/u32/u64 by const        N    1  vpsrl*
 vec.shr                 i16/i32 by const            N    1  vpsra*
 vec.shr                 i64 by const                N    1  vpsraq
-vec.shr                 u8 by const                 M    2  vpsrlw; vpandq
+vec.shr                 u8 by const                 N    2  vpsrlw; vpandq
 vec.shr                 i8 by const                 M    3  vpsrlw; vpternlogq; vpsubb
 vec.shl                 int16 by vector             N    1  vpsllvw
 vec.shl                 int32 by vector             N    1  vpsllvd
@@ -120,6 +128,9 @@ mask.and                mask                        N    1  kandq
 mask.or                 mask                        N    1  korq
 mask.xor                mask                        N    1  kxorq
 mask.not                mask                        N    1  knotq
+mask.all                mask                        N    1  kxnor*  | unverified
+mask.none               mask                        N    1  kxor*  | unverified
+mask.to_vec             mask                        N    1  vpmovm2*  | unverified
 mask.rewiden            mask                        N    0  none
 mask.to_bits            m8                          N    1  kmovq
 mask.to_bits            m16                         N    1  kmovd
@@ -130,10 +141,14 @@ vec.load                any                         N    1  vmovdqu64
 vec.store               any                         N    1  vmovdqu64
 vec.load_aligned        any                         N    1  vmovdqa64
 vec.store_aligned       any                         N    1  vmovdqa64
-vec.load_masked         any32                       N    1  vmovdqu# {k}{z}
-vec.load_masked         any64                       N    1  vmovdqu# {k}{z}
-vec.store_masked        any32                       N    1  vmovdqu# {k}
-vec.store_masked        any64                       N    1  vmovdqu# {k}
+vec.load_masked         int32                       N    1  vmovdqu# {k}{z}
+vec.load_masked         f32                         N    1  vmovdqu# {k}{z}
+vec.load_masked         int64                       N    1  vmovdqu# {k}{z}
+vec.load_masked         f64                         N    1  vmovdqu# {k}{z}
+vec.store_masked        int32                       N    1  vmovdqu# {k}
+vec.store_masked        f32                         N    1  vmovdqu# {k}
+vec.store_masked        int64                       N    1  vmovdqu# {k}
+vec.store_masked        f64                         N    1  vmovdqu# {k}
 vec.load_masked         any8                        N    1  vmovdqu# {k}{z}
 vec.load_masked         any16                       N    1  vmovdqu# {k}{z}
 vec.store_masked        any8                        N    1  vmovdqu# {k}
@@ -149,8 +164,8 @@ vec.compress            any16                       M   14  vextracti64x4; vpmov
 vec.compress            any8                        M   35  vextracti32x4 x3; vpmovzxbd x4; kshiftrq x3; vpcompressd {z} x4; vpmovdb x4; kmovq; movzx x3; shr x2; popcnt x3; add x2; vmovdqu64; vmovdqu8 x5  | +avx512vbmi2: N 1 vpcompress* {z}  | unverified
 vec.expand              any32                       N    1  vpexpandd {z}
 vec.expand              any64                       N    1  vpexpandq {z}
-vec.expand              any16                       N   12  vpmovzxwd x2; kshiftrd; kmovw; popcnt; vmovdqu16 x2; vpexpandd {z} x2; vpmovdw x2; vinserti64x4  | +avx512vbmi2: N 1 vpexpand* {z}  | note: vpexpandw needs avx512vbmi2: dword expands  | unverified
-vec.expand              any8                        N   33  vmovdqu8 x4; vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; vpmovdb x4; vinserti32x4 x3; kmovq; movzx x3; shr x2; popcnt x3; add x2  | +avx512vbmi2: N 1 vpexpand* {z}  | note: vpexpandb needs avx512vbmi2: dword expands  | unverified
+vec.expand              any16                       M   12  vpmovzxwd x2; kshiftrd; kmovw; popcnt; vmovdqu16 x2; vpexpandd {z} x2; vpmovdw x2; vinserti64x4  | +avx512vbmi2: N 1 vpexpand* {z}  | note: vpexpandw needs avx512vbmi2: dword expands  | unverified
+vec.expand              any8                        M   33  vmovdqu8 x4; vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; vpmovdb x4; vinserti32x4 x3; kmovq; movzx x3; shr x2; popcnt x3; add x2  | +avx512vbmi2: N 1 vpexpand* {z}  | note: vpexpandb needs avx512vbmi2: dword expands  | unverified
 vec.reduce_add          f32                         M    8  vextractf64x4; vaddps; vextractf128; vaddps; vmovhlps; vaddps; vmovshdup; vaddss
 vec.reduce_add          f64                         M    6  vextractf64x4; vaddpd; vextractf128; vaddpd; vunpckhpd; vaddsd
 vec.reduce_add_wrap     int8                        M    8  vextracti64x4; vpaddb; vextracti128; vpaddb; vpsadbw; vpshufd; vpaddq; vmovd
@@ -187,11 +202,14 @@ vec.scan_add_wrap       int8                        M   15  vpslldq; vpaddb; vps
 vec.scan_add_wrap       int16                       M   13  vpslldq; vpaddw; vpslldq; vpaddw; vpslldq; vpaddw; vpshufb; vshufi64x2 x3; vpaddw x3
 vec.scan_add_wrap       int32                       M   11  vpslldq; vpaddd; vpslldq; vpaddd; vpshufd; vshufi64x2 x3; vpaddd x3
 vec.scan_add_wrap       int64                       M    9  vpslldq; vpaddq; vpshufd; vshufi64x2 x3; vpaddq x3
-vec.permute             any8                        N   11  vshufi64x2 x4; vpshufb x4; vpblendmb x3  | +avx512vbmi: N 1 vpermb  | note: vpermb needs avx512vbmi: per-128-bit-lane shuffles and blends
+vec.permute             any8                        M   11  vshufi64x2 x4; vpshufb x4; vpblendmb x3  | +avx512vbmi: N 1 vpermb  | note: vpermb needs avx512vbmi: per-128-bit-lane shuffles and blends
 vec.permute             any16                       N    1  vpermw
 vec.permute             any32                       N    1  vpermd
 vec.permute             any64                       N    1  vpermq
 vec.lookup              int8                        M   16  vpaddusb; vshufi64x2 x4; vpshufb x4; vpsllw x2; vpmovb2m x2; vpblendmb x3  | +avx512vbmi: N 2 vpcmpub; vpermb {z}  | unverified
+vec.lookup              int16                       N    2  vpcmpu*; vperm* {k}{z}  | unverified
+vec.lookup              int32                       N    2  vpcmpu*; vperm* {k}{z}  | unverified
+vec.lookup              int64                       N    2  vpcmpu*; vperm* {k}{z}  | unverified
 vec.popcount            int8                        M    6  vpsrlw; vpandq x2; vpshufb x2; vpaddb  | +avx512bitalg: N 1 vpopcntb
 vec.popcount            int16                       M    7  vpsrlw; vpandq x2; vpshufb x2; vpaddb; vpmaddubsw  | +avx512bitalg: N 1 vpopcntw
 vec.popcount            int32                       M    8  vpsrlw; vpandq x2; vpshufb x2; vpaddb; vpmaddubsw; vpmaddwd  | +avx512vpopcntdq: N 1 vpopcntd
@@ -214,15 +232,15 @@ vec.widen_hi            u16                         N    2  vextracti64x4; vpmov
 vec.widen_hi            i32                         N    2  vextracti64x4; vpmovsxdq
 vec.widen_hi            u32                         N    2  vextracti64x4; vpmovzxdq
 vec.widen_hi            f32                         N    2  vextractf64x4; vcvtps2pd
-vec.narrow_wrap         int16                       N    3  vpmovwb x2; vinserti64x4  | note: vpermt2b needs avx512vbmi
+vec.narrow_wrap         int16                       M    3  vpmovwb x2; vinserti64x4  | note: vpermt2b needs avx512vbmi
 vec.narrow_wrap         int32                       N    1  vpermt2w
 vec.narrow_wrap         int64                       N    1  vpermt2d
 vec.narrow_sat          i16                         N    2  vpacksswb; vpermq
-vec.narrow_sat          u16                         N    3  vpmovuswb x2; vinserti64x4
+vec.narrow_sat          u16                         M    3  vpmovuswb x2; vinserti64x4
 vec.narrow_sat          i32                         N    2  vpackssdw; vpermq
-vec.narrow_sat          u32                         N    3  vpmovusdw x2; vinserti64x4
-vec.narrow_sat          i64                         N    3  vpmovsqd x2; vinserti64x4
-vec.narrow_sat          u64                         N    3  vpmovusqd x2; vinserti64x4
+vec.narrow_sat          u32                         M    3  vpmovusdw x2; vinserti64x4
+vec.narrow_sat          i64                         M    3  vpmovsqd x2; vinserti64x4
+vec.narrow_sat          u64                         M    3  vpmovusqd x2; vinserti64x4
 vec.cast                i8>f32/i16>f32              N    2  vpmovsx*d; vcvtdq2ps
 vec.cast                u8>f32/u16>f32              N    2  vpmovzx*d; vcvtdq2ps
 vec.cast                i32>f64                     N    1  vcvtdq2pd
@@ -232,16 +250,159 @@ vec.cast.round          u32>f32                     N    1  vcvtudq2ps
 vec.cast.round          i64>f64                     N    1  vcvtqq2pd
 vec.cast.round          u64>f64                     N    1  vcvtuqq2pd
 vec.cast.sat            f32>i32                     M    5  vcvttps2dq; vcmpps; vmovdqa32 {k}; vcmpps; vmovdqa32 {k}{z}
-vec.cast.sat            f32>u32                     M    2  vmaxps; vcvttps2udq
+vec.cast.sat            f32>u32                     N    2  vmaxps; vcvttps2udq
 vec.cast.sat            f64>i64                     M    5  vcvttpd2qq; vcmppd; vmovdqa64 {k}; vcmppd; vmovdqa64 {k}{z}
-vec.cast.sat            f64>u64                     M    2  vmaxpd; vcvttpd2uqq
+vec.cast.sat            f64>u64                     N    2  vmaxpd; vcvttpd2uqq
 vec.cast.try            f32>i32                     M    5  vcvttps2dq; vcmpps; vcmpps {k}; kortestw; setc
 vec.cast.try            f32>u32                     M    5  vcvttps2udq; vcmpps; vcmpps {k}; kortestw; setc
 vec.cast.try            f64>i64                     M    5  vcvttpd2qq; vcmppd; vcmppd {k}; kortestb; setc
 vec.cast.try            f64>u64                     M    5  vcvttpd2uqq; vcmppd; vcmppd {k}; kortestb; setc
+vec.cast                i8>i8/i16>i16/i32>i32/i64>i64/u8>u8/u16>u16/u32>u32/u64>u64/f32>f32/f64>f64  N    0  none  | unverified
+vec.cast                i8>i16                      N    1  vpmovsx*w  | unverified
+vec.cast                i8>i32/i16>i32              N    1  vpmovsx*d  | unverified
+vec.cast                i8>i64/i16>i64/i32>i64      N    1  vpmovsx*q  | unverified
+vec.cast                i8>f64/i16>f64              N    2  vpmovsx*d; vcvtdq2p%  | unverified
+vec.cast                u8>i16/u8>u16               N    1  vpmovzx*w  | unverified
+vec.cast                u8>i32/u8>u32/u16>i32/u16>u32  N    1  vpmovzx*d  | unverified
+vec.cast                u8>i64/u8>u64/u16>i64/u16>u64/u32>i64/u32>u64  N    1  vpmovzx*q  | unverified
+vec.cast                u8>f64/u16>f64              N    2  vpmovzx*d; vcvtdq2p%  | unverified
+vec.cast                f32>f64                     N    1  vcvtps2pd  | unverified
+vec.cast.wrap           i8>i8/i8>u8/i16>i16/i16>u16/i32>i32/i32>u32/i64>i64/i64>u64/u8>i8/u8>u8/u16>i16/u16>u16/u32>i32/u32>u32/u64>i64/u64>u64  N    0  none  | unverified
+vec.cast.wrap           i8>i16/i8>u16               N    1  vpmovsx*w  | unverified
+vec.cast.wrap           i8>i32/i8>u32/i16>i32/i16>u32  N    1  vpmovsx*d  | unverified
+vec.cast.wrap           i8>i64/i8>u64/i16>i64/i16>u64/i32>i64/i32>u64  N    1  vpmovsx*q  | unverified
+vec.cast.wrap           i16>i8/i16>u8/u16>i8/u16>u8  N    1  vpmov*b  | unverified
+vec.cast.wrap           i32>i8/i32>u8/u32>i8/u32>u8  N    1  vpmov*b  | unverified
+vec.cast.wrap           i32>i16/i32>u16/u32>i16/u32>u16  N    1  vpmov*w  | unverified
+vec.cast.wrap           i64>i8/i64>u8/u64>i8/u64>u8  N    1  vpmov*b  | unverified
+vec.cast.wrap           i64>i16/i64>u16/u64>i16/u64>u16  N    1  vpmov*w  | unverified
+vec.cast.wrap           i64>i32/i64>u32/u64>i32/u64>u32  N    1  vpmov*d  | unverified
+vec.cast.wrap           u8>i16/u8>u16               N    1  vpmovzx*w  | unverified
+vec.cast.wrap           u8>i32/u8>u32/u16>i32/u16>u32  N    1  vpmovzx*d  | unverified
+vec.cast.wrap           u8>i64/u8>u64/u16>i64/u16>u64/u32>i64/u32>u64  N    1  vpmovzx*q  | unverified
+vec.cast.sat            i8>i8/i16>i16/i32>i32/i64>i64/u8>u8/u16>u16/u32>u32/u64>u64  N    0  none  | unverified
+vec.cast.sat            i8>i16                      N    1  vpmovsx*w  | unverified
+vec.cast.sat            i8>i32/i16>i32              N    1  vpmovsx*d  | unverified
+vec.cast.sat            i8>i64/i16>i64/i32>i64      N    1  vpmovsx*q  | unverified
+vec.cast.sat            i8>u8/i16>u16/i32>u32       N    1  vpmaxs*  | unverified
+vec.cast.sat            i8>u16                      N    2  vpmaxs*; vpmovsx*w  | unverified
+vec.cast.sat            i8>u32/i16>u32              N    2  vpmaxs*; vpmovsx*d  | unverified
+vec.cast.sat            i8>u64/i16>u64/i32>u64      N    2  vpmaxs*; vpmovsx*q  | unverified
+vec.cast.sat            i16>i8                      N    1  vpmovs*b  | unverified
+vec.cast.sat            i16>u8                      N    2  vpmaxs*; vpmovus*b  | unverified
+vec.cast.sat            i32>i8                      N    1  vpmovs*b  | unverified
+vec.cast.sat            i32>i16                     N    1  vpmovs*w  | unverified
+vec.cast.sat            i32>u8                      N    2  vpmaxs*; vpmovus*b  | unverified
+vec.cast.sat            i32>u16                     N    2  vpmaxs*; vpmovus*w  | unverified
+vec.cast.sat            i64>i8                      N    1  vpmovs*b  | unverified
+vec.cast.sat            i64>i16                     N    1  vpmovs*w  | unverified
+vec.cast.sat            i64>i32                     N    1  vpmovs*d  | unverified
+vec.cast.sat            i64>u8                      N    2  vpmaxs*; vpmovus*b  | unverified
+vec.cast.sat            i64>u16                     N    2  vpmaxs*; vpmovus*w  | unverified
+vec.cast.sat            i64>u32                     N    2  vpmaxs*; vpmovus*d  | unverified
+vec.cast.sat            i64>u64                     N    1  vpmaxs*  | unverified
+vec.cast.sat            u8>i8/u16>i16/u32>i32       N    1  vpminu*  | unverified
+vec.cast.sat            u8>i16/u8>u16               N    1  vpmovzx*w  | unverified
+vec.cast.sat            u8>i32/u8>u32/u16>i32/u16>u32  N    1  vpmovzx*d  | unverified
+vec.cast.sat            u8>i64/u8>u64/u16>i64/u16>u64/u32>i64/u32>u64  N    1  vpmovzx*q  | unverified
+vec.cast.sat            u16>i8                      N    2  vpminu*; vpmov*b  | unverified
+vec.cast.sat            u16>u8                      N    1  vpmovus*b  | unverified
+vec.cast.sat            u32>i8                      N    2  vpminu*; vpmov*b  | unverified
+vec.cast.sat            u32>i16                     N    2  vpminu*; vpmov*w  | unverified
+vec.cast.sat            u32>u8                      N    1  vpmovus*b  | unverified
+vec.cast.sat            u32>u16                     N    1  vpmovus*w  | unverified
+vec.cast.sat            u64>i8                      N    2  vpminu*; vpmov*b  | unverified
+vec.cast.sat            u64>i16                     N    2  vpminu*; vpmov*w  | unverified
+vec.cast.sat            u64>i32                     N    2  vpminu*; vpmov*d  | unverified
+vec.cast.sat            u64>i64                     N    1  vpminu*  | unverified
+vec.cast.sat            u64>u8                      N    1  vpmovus*b  | unverified
+vec.cast.sat            u64>u16                     N    1  vpmovus*w  | unverified
+vec.cast.sat            u64>u32                     N    1  vpmovus*d  | unverified
+vec.cast.sat            f32>i8/f32>u8               M    5  vcmpp%; vmaxp%; vminp%; vcvttp%2dq {k}{z}; vpmovd*  | unverified
+vec.cast.sat            f32>i16/f32>u16             M    5  vcmpp%; vmaxp%; vminp%; vcvttp%2dq {k}{z}; vpmovd*  | unverified
+vec.cast.sat            f32>i64                     M    5  vcvttp%2qq; vcmpp%; vmovdqa64 {k}; vcmpp%; vmovdqa64 {k}{z}  | unverified
+vec.cast.sat            f32>u64                     N    2  vmaxp%; vcvttp%2uqq  | unverified
+vec.cast.sat            f64>i8/f64>i16/f64>u8/f64>u16  M    5  vcmpp%; vmaxp%; vminp%; vcvttp%2dq {k}{z}; vpmovd*  | unverified
+vec.cast.sat            f64>i32                     M    4  vcmpp%; vmaxp%; vminp%; vcvttp%2dq {k}{z}  | unverified
+vec.cast.sat            f64>u32                     N    2  vmaxp%; vcvttp%2udq  | unverified
+vec.cast.round          i8>f32/i16>f32              N    2  vpmovsx*d; vcvtdq2p%  | unverified
+vec.cast.round          i8>f64/i16>f64              N    2  vpmovsx*d; vcvtdq2p%  | unverified
+vec.cast.round          i32>f64                     N    1  vcvtdq2p%  | unverified
+vec.cast.round          i64>f32                     N    1  vcvtqq2p%  | unverified
+vec.cast.round          u8>f32/u16>f32              N    2  vpmovzx*d; vcvtdq2p%  | unverified
+vec.cast.round          u8>f64/u16>f64              N    2  vpmovzx*d; vcvtdq2p%  | unverified
+vec.cast.round          u32>f64                     N    1  vcvtudq2p%  | unverified
+vec.cast.round          u64>f32                     N    1  vcvtuqq2p%  | unverified
+vec.cast.round          f32>f32/f64>f64             N    0  none  | unverified
+vec.cast.round          f32>f64                     N    1  vcvtps2pd  | unverified
+vec.cast.round          f64>f32                     N    1  vcvtpd2ps  | unverified
+vec.cast.try            i8>i8/u8>u8                 N    1  mov  | unverified
+vec.cast.try            i8>i16                      N    2  vpmovsx*w; mov  | unverified
+vec.cast.try            i8>i32/i16>i32              N    2  vpmovsx*d; mov  | unverified
+vec.cast.try            i8>i64/i16>i64/i32>i64      N    2  vpmovsx*q; mov  | unverified
+vec.cast.try            i8>u8/u8>i8                 M    3  vpmov*2m; kortest*; setz  | unverified
+vec.cast.try            i8>u16                      M    4  vpmovsx*w; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i8>u32/i16>u32              M    4  vpmovsx*d; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i8>u64/i16>u64/i32>u64      M    4  vpmovsx*q; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i8>f32/i16>f32              M    3  vpmovsx*d; vcvtdq2p%; mov  | unverified
+vec.cast.try            i8>f64/i16>f64              M    3  vpmovsx*d; vcvtdq2p%; mov  | unverified
+vec.cast.try            i16>i8                      M    5  vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i16>i16/u16>u16             N    1  mov  | unverified
+vec.cast.try            i16>u8                      M    5  vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i16>u16/u16>i16             M    3  vpmov*2m; kortest*; setz  | unverified
+vec.cast.try            i32>i8                      M    5  vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i32>i16                     M    5  vpmov*w; vpmovsxw*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i32>i32/u32>u32             N    1  mov  | unverified
+vec.cast.try            i32>u8                      M    5  vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i32>u16                     M    5  vpmov*w; vpmovzxw*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i32>u32/u32>i32             M    3  vpmov*2m; kortest*; setz  | unverified
+vec.cast.try            i32>f32                     M    5  vcvtdq2p%; vcvttp%2dq; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i32>f64                     N    2  vcvtdq2p%; mov  | unverified
+vec.cast.try            i64>i8                      M    5  vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i64>i16                     M    5  vpmov*w; vpmovsxw*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i64>i32                     M    5  vpmov*d; vpmovsxd*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i64>i64/u64>u64             N    1  mov  | unverified
+vec.cast.try            i64>u8                      M    5  vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i64>u16                     M    5  vpmov*w; vpmovzxw*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i64>u32                     M    5  vpmov*d; vpmovzxd*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            i64>u64/u64>i64             M    3  vpmov*2m; kortest*; setz  | unverified
+vec.cast.try            i64>f32/i64>f64             M    5  vcvtqq2p%; vcvttp%2qq; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u8>i16/u8>u16               N    2  vpmovzx*w; mov  | unverified
+vec.cast.try            u8>i32/u8>u32/u16>i32/u16>u32  N    2  vpmovzx*d; mov  | unverified
+vec.cast.try            u8>i64/u8>u64/u16>i64/u16>u64/u32>i64/u32>u64  N    2  vpmovzx*q; mov  | unverified
+vec.cast.try            u8>f32/u16>f32              M    3  vpmovzx*d; vcvtdq2p%; mov  | unverified
+vec.cast.try            u8>f64/u16>f64              M    3  vpmovzx*d; vcvtdq2p%; mov  | unverified
+vec.cast.try            u16>i8                      M    5  vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u16>u8                      M    5  vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u32>i8                      M    5  vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u32>i16                     M    5  vpmov*w; vpmovsxw*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u32>u8                      M    5  vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u32>u16                     M    5  vpmov*w; vpmovzxw*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u32>f32                     M    5  vcvtudq2p%; vcvttp%2udq; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u32>f64                     N    2  vcvtudq2p%; mov  | unverified
+vec.cast.try            u64>i8                      M    5  vpmov*b; vpmovsxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u64>i16                     M    5  vpmov*w; vpmovsxw*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u64>i32                     M    5  vpmov*d; vpmovsxd*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u64>u8                      M    5  vpmov*b; vpmovzxb*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u64>u16                     M    5  vpmov*w; vpmovzxw*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u64>u32                     M    5  vpmov*d; vpmovzxd*; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            u64>f32/u64>f64             M    5  vcvtuqq2p%; vcvttp%2uqq; vpcmpneq*; kortest*; setc  | unverified
+vec.cast.try            f32>i8/f32>i16              M    6  vcvttp%2dq; vcmpp%; vcmpp% {k}; kortestw; setc; vpmovd*  | unverified
+vec.cast.try            f32>i64                     M    5  vcvttp%2qq; vcmpp%; vcmpp% {k}; kortestb; setc  | unverified
+vec.cast.try            f32>u8/f32>u16              M    6  vcvttp%2udq; vcmpp%; vcmpp% {k}; kortestw; setc; vpmovd*  | unverified
+vec.cast.try            f32>u64                     M    5  vcvttp%2uqq; vcmpp%; vcmpp% {k}; kortestb; setc  | unverified
+vec.cast.try            f32>f32                     N    1  mov  | unverified
+vec.cast.try            f32>f64                     N    2  vcvtps2pd; mov  | unverified
+vec.cast.try            f64>i8/f64>i16              M    6  vcvttp%2dq; vcmpp%; vcmpp% {k}; kortestw; setc; vpmovd*  | unverified
+vec.cast.try            f64>i32                     M    5  vcvttp%2dq; vcmpp%; vcmpp% {k}; kortestw; setc  | unverified
+vec.cast.try            f64>u8/f64>u16              M    6  vcvttp%2udq; vcmpp%; vcmpp% {k}; kortestw; setc; vpmovd*  | unverified
+vec.cast.try            f64>u32                     M    5  vcvttp%2udq; vcmpp%; vcmpp% {k}; kortestw; setc  | unverified
+vec.cast.try            f64>f32                     M    5  vcvtpd2ps; vcvtps2pd; vcmppd; kortestb; setc  | unverified
+vec.cast.try            f64>f64                     N    1  mov  | unverified
 vec.cast                f16>f32                     N    1  vcvtph2ps
 vec.cast.round          f32>f16                     N    1  vcvtps2ph 0
-vec.splat               any8/any16                  N    1  vpbroadcast*
+vec.splat               any8                        N    1  vpbroadcast*
+vec.splat               any16                       N    1  vpbroadcast*
 vec.splat               int32                       N    1  vpbroadcastd
 vec.splat               int64                       N    1  vpbroadcastq
 vec.splat               f32                         N    1  vbroadcastss
@@ -249,10 +410,13 @@ vec.splat               f64                         N    1  vbroadcastsd
 vec.bitcast             any                         N    0  none
 vec.split               any                         N    1  vextracti64x4
 vec.join                any                         N    1  vinserti64x4
-mask.first_n            mask                        N    4  cmp; cmova; bzhi; kmovq  | note: k is clamped to the lane count first
+mask.first_n            m8                          M    4  cmp; cmova; bzhi; kmovq  | note: k is clamped to the lane count first
+mask.first_n            m16                         M    4  cmp; cmova; bzhi; kmovq  | note: k is clamped to the lane count first
+mask.first_n            m32                         M    4  cmp; cmova; bzhi; kmovq  | note: k is clamped to the lane count first
+mask.first_n            m64                         M    4  cmp; cmova; bzhi; kmovq  | note: k is clamped to the lane count first
 loop.chunk              any                         N    1  vmovdqu64
-loop.tail_masked        any32/any64                 N    3  bzhi; kmovq; vmovdqu# {k}{z}
-loop.tail_masked        any8/any16                  N    3  bzhi; kmovq; vmovdqu# {k}{z}
+loop.tail_masked        any32/any64                 M    3  bzhi; kmovq; vmovdqu# {k}{z}
+loop.tail_masked        any8/any16                  M    3  bzhi; kmovq; vmovdqu# {k}{z}
 loop.tail_masked_mut    any32/any64                 N    1  vmovdqu# {k}
 loop.tail_masked_mut    any8/any16                  N    1  vmovdqu# {k}
 loop.tail_scalar        any                         N    0  none

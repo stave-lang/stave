@@ -6,7 +6,9 @@
 # on sve a predicate register. An sve recipe marked "NEON" covers fixed 128-bit vectors only.
 #
 # Schema, placeholders and counting rules: as in x86.toml. Here `*` is the SVE size letter
-# (b h w d), `?` s or u, `#` bits.
+# (b h w d), `?` s or u, `#` bits. A per-lane sequence lists each instruction with its count over
+# the lanes (`umov x4`); the work-area address and the zeroing of a result are not counted. Recipes
+# of the neon tier are what the backend emits.
 
 # float add/sub/mul/div
 
@@ -57,8 +59,8 @@ sve = { class = "N", recipe = "fabs" }
 [[op]]
 op = "vec.copysign"
 ty = ["float"]
-neon = { class = "N", recipe = "bit" }
-sve = { class = "N", recipe = "and x2; orr", note = "bsl is SVE2: magnitude and sign masks, then or" }
+neon = { class = "N", recipe = "bsl", note = "the sign-bit mask is a constant splat" }
+sve = { class = "M", recipe = "and x2; orr", note = "bsl is SVE2: magnitude and sign masks, then or" }
 
 [[op]]
 op = "vec.floor"
@@ -113,8 +115,35 @@ sve = { class = "N", recipe = "mul" }
 [[op]]
 op = "vec.mul.wrap"
 ty = ["int64"]
-neon = { class = "M", recipe = "rev64; mul; xtn x2; uaddlp; shl; umlal" }
+neon = { class = "M", recipe = "umov x4; mul x2; ins x2", note = "no 64-bit lane mul: per lane through general registers" }
 sve = { class = "N", recipe = "mul" }
+
+# the exact double-width products narrowed with saturation; 64-bit lanes per lane through general
+# registers
+
+[[op]]
+op = "vec.mul.sat"
+ty = ["i8", "i16", "i32"]
+neon = { class = "M", recipe = "?mull; ?qxtn; ?mull2; ?qxtn2" }
+sve = { class = "M", recipe = "mul; smulh; asr; eor; asr; eor; cmpne; sel", unverified = true }
+
+[[op]]
+op = "vec.mul.sat"
+ty = ["u8", "u16", "u32"]
+neon = { class = "M", recipe = "?mull; ?qxtn; ?mull2; ?qxtn2" }
+sve = { class = "M", recipe = "mul; umulh; cmpne; sel", unverified = true }
+
+[[op]]
+op = "vec.mul.sat"
+ty = ["i64"]
+neon = { class = "M", recipe = "umov x4; eor x4; asr x2; mul x2; smulh x2; cmp x2; csel x2; ins x2" }
+sve = { class = "M", recipe = "mul; smulh; asr; eor; asr; eor; cmpne; sel", unverified = true }
+
+[[op]]
+op = "vec.mul.sat"
+ty = ["u64"]
+neon = { class = "M", recipe = "umov x4; umulh x2; mul x2; cmp x2; csinv x2; ins x2" }
+sve = { class = "M", recipe = "mul; umulh; cmpne; sel", unverified = true }
 
 # saturating add/sub
 
@@ -130,42 +159,43 @@ ty = ["int"]
 neon = { class = "N", recipe = "?qsub" }
 sve = { class = "N", recipe = "?qsub" }
 
-# checked add/sub/mul: the result, an any-lane overflow test, the Option tag
+# checked add/sub/mul: the result, an any-lane overflow test, the Option (tag select and payload mask:
+# the last five instructions)
 
 [[op]]
 op = "vec.checked_add"
 ty = ["int"]
-neon = { class = "M", recipe = "add; ?qadd; eor; umaxv; fmov; cmp; cset" }
+neon = { class = "M", recipe = "add; ?qadd; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", note = "a lane overflows where the saturating result differs from the wrapping one" }
 sve = { class = "M", recipe = "add; ?qadd; cmpne; cset" }
 
 [[op]]
 op = "vec.checked_sub"
 ty = ["int"]
-neon = { class = "M", recipe = "sub; ?qsub; eor; umaxv; fmov; cmp; cset" }
+neon = { class = "M", recipe = "sub; ?qsub; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and", note = "a lane overflows where the saturating result differs from the wrapping one" }
 sve = { class = "M", recipe = "sub; ?qsub; cmpne; cset" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["i8", "i16", "i32"]
-neon = { class = "M", recipe = "mul; smull; smull2; sqxtn; sqxtn2; eor; umaxv; fmov; cmp; cset" }
+neon = { class = "M", recipe = "smull; xtn; sxtl; cmeq; smull2; xtn2; sxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and", note = "a lane overflows where the double-width product differs from the truncated one extended back" }
 sve = { class = "M", recipe = "mul; smulh; asr; cmpne; cset" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["u8", "u16", "u32"]
-neon = { class = "M", recipe = "mul; umull; umull2; uqxtn; uqxtn2; eor; umaxv; fmov; cmp; cset" }
+neon = { class = "M", recipe = "umull; xtn; uxtl; cmeq; umull2; xtn2; uxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and", note = "a lane overflows where the double-width product differs from the truncated one extended back" }
 sve = { class = "M", recipe = "mul; umulh; cmpne; cset" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["i64"]
-neon = { class = "M", recipe = "umov x4; mul x2; smulh x2; asr x2; cmp; ccmp; cset; fmov; ins" }
+neon = { class = "M", recipe = "umov x4; mul x2; smulh x2; cmp x2; cset x2; orr x2; ins x2; cmp; csel; csetm; dup; and", note = "per lane through general registers" }
 sve = { class = "M", recipe = "mul; smulh; asr; cmpne; cset" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["u64"]
-neon = { class = "M", recipe = "umov x4; mul x2; umulh x2; orr; cmp; cset; fmov; ins" }
+neon = { class = "M", recipe = "umov x4; mul x2; umulh x2; cmp x2; cset x2; orr x2; ins x2; cmp; csel; csetm; dup; and", note = "per lane through general registers" }
 sve = { class = "M", recipe = "mul; umulh; cmpne; cset" }
 
 # bitwise
@@ -206,28 +236,28 @@ sve = { class = "N", recipe = "bic" }
 op = "vec.shl"
 ty = ["int"]
 form = "const"
-neon = { class = "N", recipe = "shl" }
+neon = { class = "N", recipe = "ushl", note = "no immediate form: the splat of the constant amount, and its negation or mask, are constants" }
 sve = { class = "N", recipe = "lsl" }
 
 [[op]]
 op = "vec.shl.wrap"
 ty = ["int"]
 form = "const"
-neon = { class = "N", recipe = "shl" }
+neon = { class = "N", recipe = "ushl", note = "no immediate form: the splat of the constant amount, and its negation or mask, are constants" }
 sve = { class = "N", recipe = "lsl" }
 
 [[op]]
 op = "vec.shr"
 ty = ["uint"]
 form = "const"
-neon = { class = "N", recipe = "ushr" }
+neon = { class = "N", recipe = "ushl", note = "no immediate form: the splat of the constant amount, and its negation or mask, are constants" }
 sve = { class = "N", recipe = "lsr" }
 
 [[op]]
 op = "vec.shr"
 ty = ["sint"]
 form = "const"
-neon = { class = "N", recipe = "sshr" }
+neon = { class = "N", recipe = "sshl", note = "no immediate form: the splat of the constant amount, and its negation or mask, are constants" }
 sve = { class = "N", recipe = "asr" }
 
 [[op]]
@@ -262,26 +292,50 @@ sve = { class = "N", recipe = "asr" }
 
 [[op]]
 op = "vec.div_const"
-ty = ["u8", "u16", "u32"]
-neon = { class = "M", recipe = "umull; umull2; uzp2; sub; usra; ushr" }
+ty = ["u8"]
+neon = { class = "M", recipe = "umov x16; udiv x16; ins x16", note = "per lane through general registers" }
 sve = { class = "M", recipe = "umulh; sub; lsr; add; lsr" }
 
 [[op]]
 op = "vec.div_const"
-ty = ["i8", "i16", "i32"]
-neon = { class = "M", recipe = "smull; smull2; uzp2; add; sshr; usra" }
-sve = { class = "M", recipe = "smulh; add; asr; lsr; add" }
+ty = ["u16"]
+neon = { class = "M", recipe = "umov x8; udiv x8; ins x8", note = "per lane through general registers" }
+sve = { class = "M", recipe = "umulh; sub; lsr; add; lsr" }
+
+[[op]]
+op = "vec.div_const"
+ty = ["u32"]
+neon = { class = "M", recipe = "umov x4; udiv x4; ins x4", note = "per lane through general registers" }
+sve = { class = "M", recipe = "umulh; sub; lsr; add; lsr" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["u64"]
-neon = { class = "M", recipe = "umov x2; umulh x2; sub x2; add x2; lsr x2; fmov; ins" }
+neon = { class = "M", recipe = "umov x2; udiv x2; ins x2", note = "per lane through general registers" }
 sve = { class = "M", recipe = "umulh; sub; lsr; add; lsr" }
 
 [[op]]
 op = "vec.div_const"
+ty = ["i8"]
+neon = { class = "M", recipe = "smov x16; sdiv x16; ins x16", note = "per lane through general registers" }
+sve = { class = "M", recipe = "smulh; add; asr; lsr; add" }
+
+[[op]]
+op = "vec.div_const"
+ty = ["i16"]
+neon = { class = "M", recipe = "smov x8; sdiv x8; ins x8", note = "per lane through general registers" }
+sve = { class = "M", recipe = "smulh; add; asr; lsr; add" }
+
+[[op]]
+op = "vec.div_const"
+ty = ["i32"]
+neon = { class = "M", recipe = "smov x4; sdiv x4; ins x4", note = "per lane through general registers" }
+sve = { class = "M", recipe = "smulh; add; asr; lsr; add" }
+
+[[op]]
+op = "vec.div_const"
 ty = ["i64"]
-neon = { class = "M", recipe = "umov x2; smulh x2; add x2; asr x2; add x2; fmov; ins" }
+neon = { class = "M", recipe = "umov x2; sdiv x2; ins x2", note = "per lane through general registers" }
 sve = { class = "M", recipe = "smulh; add; asr; lsr; add" }
 
 [[op]]
@@ -343,26 +397,26 @@ sve = { class = "N", recipe = "fmax" }
 [[op]]
 op = "vec.min_num"
 ty = ["float"]
-neon = { class = "N", recipe = "fminnm" }
+neon = { class = "M", recipe = "fmin; fcmeq x2; bic x2; bit x2", note = "fminnm would keep a signaling NaN: a NaN lane whose other operand is a number takes the number" }
 sve = { class = "N", recipe = "fminnm" }
 
 [[op]]
 op = "vec.max_num"
 ty = ["float"]
-neon = { class = "N", recipe = "fmaxnm" }
+neon = { class = "M", recipe = "fmax; fcmeq x2; bic x2; bit x2", note = "fmaxnm would keep a signaling NaN: a NaN lane whose other operand is a number takes the number" }
 sve = { class = "N", recipe = "fmaxnm" }
 
 [[op]]
 op = "vec.min_x86"
 ty = ["float"]
-neon = { class = "M", recipe = "fcmgt; bsl" }
-sve = { class = "M", recipe = "fcmgt; sel" }
+neon = { class = "M", recipe = "fcmgt; bsl; fmin", note = "the fmin of the result with itself quiets a NaN that came through" }
+sve = { class = "N", recipe = "fcmgt; sel" }
 
 [[op]]
 op = "vec.max_x86"
 ty = ["float"]
-neon = { class = "M", recipe = "fcmgt; bsl" }
-sve = { class = "M", recipe = "fcmgt; sel" }
+neon = { class = "M", recipe = "fcmgt; bsl; fmin", note = "the fmin of the result with itself quiets a NaN that came through" }
+sve = { class = "N", recipe = "fcmgt; sel" }
 
 [[op]]
 op = "vec.min"
@@ -373,13 +427,13 @@ sve = { class = "N", recipe = "?min" }
 [[op]]
 op = "vec.min"
 ty = ["i64"]
-neon = { class = "M", recipe = "cmgt; bsl" }
+neon = { class = "N", recipe = "cmgt; bsl" }
 sve = { class = "N", recipe = "smin" }
 
 [[op]]
 op = "vec.min"
 ty = ["u64"]
-neon = { class = "M", recipe = "cmhi; bsl" }
+neon = { class = "N", recipe = "cmhi; bsl" }
 sve = { class = "N", recipe = "umin" }
 
 [[op]]
@@ -391,13 +445,13 @@ sve = { class = "N", recipe = "?max" }
 [[op]]
 op = "vec.max"
 ty = ["i64"]
-neon = { class = "M", recipe = "cmgt; bsl" }
+neon = { class = "N", recipe = "cmgt; bsl" }
 sve = { class = "N", recipe = "smax" }
 
 [[op]]
 op = "vec.max"
 ty = ["u64"]
-neon = { class = "M", recipe = "cmhi; bsl" }
+neon = { class = "N", recipe = "cmhi; bsl" }
 sve = { class = "N", recipe = "umax" }
 
 # compare -> mask
@@ -528,24 +582,30 @@ sve = { class = "N", recipe = "not" }
 op = "mask.rewiden"
 ty = ["mask"]
 neon = { class = "M", recipe = "xtn x3", note = "worst case m64 to m8; one xtn or sxtl per width step" }
-sve = { class = "N", recipe = "uzp1 x3", note = "worst case m64 to m8: predicate lanes are spaced by width, one uzp1 or punpklo per width step" }
+sve = { class = "M", recipe = "uzp1 x3", note = "worst case m64 to m8: predicate lanes are spaced by width, one uzp1 or punpklo per width step" }
 
 [[op]]
 op = "mask.to_bits"
 ty = ["m8"]
-neon = { class = "M", recipe = "and; ext; zip1; addv; umov" }
-sve = { class = "M", recipe = "str; ldr" }
+neon = { class = "M", recipe = "umov x2; and x2; mul x2; lsr x2; orr", note = "lanes narrowed to bytes, bit 0 of each byte gathered by one multiply per 8 lanes" }
+sve = { class = "N", recipe = "str; ldr" }
 
 [[op]]
 op = "mask.to_bits"
-ty = ["m16", "m32"]
-neon = { class = "M", recipe = "and; addv; umov" }
+ty = ["m16"]
+neon = { class = "M", recipe = "xtn; umov; and; mul; lsr", note = "lanes narrowed to bytes, bit 0 of each byte gathered by one multiply" }
+sve = { class = "M", recipe = "cpy; lsl; uaddv; fmov" }
+
+[[op]]
+op = "mask.to_bits"
+ty = ["m32"]
+neon = { class = "M", recipe = "xtn x2; umov; and; mul; lsr", note = "lanes narrowed to bytes, bit 0 of each byte gathered by one multiply" }
 sve = { class = "M", recipe = "cpy; lsl; uaddv; fmov" }
 
 [[op]]
 op = "mask.to_bits"
 ty = ["m64"]
-neon = { class = "M", recipe = "and; addp; fmov" }
+neon = { class = "M", recipe = "xtn x3; umov; and; mul; lsr", note = "lanes narrowed to bytes, bit 0 of each byte gathered by one multiply" }
 sve = { class = "M", recipe = "cpy; lsl; uaddv; fmov" }
 
 [[op]]
@@ -553,6 +613,24 @@ op = "mask.select"
 ty = ["any"]
 neon = { class = "N", recipe = "bsl" }
 sve = { class = "N", recipe = "sel" }
+
+[[op]]
+op = "mask.to_vec"
+ty = ["mask"]
+neon = { class = "N", recipe = "none", note = "a mask lane is already all ones or zero" }
+sve = { class = "N", recipe = "cpy", unverified = true }
+
+[[op]]
+op = "mask.all"
+ty = ["mask"]
+neon = { class = "N", recipe = "movi", note = "the constant is the whole op" }
+sve = { class = "N", recipe = "ptrue", unverified = true }
+
+[[op]]
+op = "mask.none"
+ty = ["mask"]
+neon = { class = "N", recipe = "movi", note = "the constant is the whole op" }
+sve = { class = "N", recipe = "pfalse", unverified = true }
 
 # loads and stores
 
@@ -580,50 +658,62 @@ ty = ["any"]
 neon = { class = "N", recipe = "str q" }
 sve = { class = "N", recipe = "st1*" }
 
-# masked loads copy the active lanes into a zeroed stack buffer; masked stores write the vector to
-# the buffer and copy the active lanes back (the contract's (a) and (b))
+# masked loads and stores access one lane at a time, branching over the inactive ones (the per-lane
+# bounds checks are not counted)
 
 [[op]]
 op = "vec.load_masked"
 ty = ["any8"]
-neon = { class = "M", recipe = "and; ext; zip1; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q" }
+neon = { class = "M", recipe = "umov x16; cbz x16; adds x16; ldr x16; ins x16" }
 sve = { class = "N", recipe = "ld1*" }
 
 [[op]]
 op = "vec.load_masked"
-ty = ["any16", "any32"]
-neon = { class = "M", recipe = "and; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q" }
+ty = ["any16"]
+neon = { class = "M", recipe = "umov x8; cbz x8; adds x8; ldr x8; ins x8" }
+sve = { class = "N", recipe = "ld1*" }
+
+[[op]]
+op = "vec.load_masked"
+ty = ["any32"]
+neon = { class = "M", recipe = "umov x4; cbz x4; adds x4; ldr x4; ins x4" }
 sve = { class = "N", recipe = "ld1*" }
 
 [[op]]
 op = "vec.load_masked"
 ty = ["any64"]
-neon = { class = "M", recipe = "and; addp; fmov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q" }
+neon = { class = "M", recipe = "umov x2; cbz x2; adds x2; ldr x2; ins x2" }
 sve = { class = "N", recipe = "ld1*" }
 
 [[op]]
 op = "vec.store_masked"
 ty = ["any8"]
-neon = { class = "M", recipe = "str q; and; ext; zip1; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne" }
+neon = { class = "M", recipe = "umov x32; cbz x16; add x16; str x16" }
 sve = { class = "N", recipe = "st1*" }
 
 [[op]]
 op = "vec.store_masked"
-ty = ["any16", "any32"]
-neon = { class = "M", recipe = "str q; and; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne" }
+ty = ["any16"]
+neon = { class = "M", recipe = "umov x16; cbz x8; add x8; str x8" }
+sve = { class = "N", recipe = "st1*" }
+
+[[op]]
+op = "vec.store_masked"
+ty = ["any32"]
+neon = { class = "M", recipe = "umov x8; cbz x4; add x4; str x4" }
 sve = { class = "N", recipe = "st1*" }
 
 [[op]]
 op = "vec.store_masked"
 ty = ["any64"]
-neon = { class = "M", recipe = "str q; and; addp; fmov; rbit; clz; ldr; str; sub; ands; b.ne" }
+neon = { class = "M", recipe = "umov x4; cbz x2; add x2; str x2" }
 sve = { class = "N", recipe = "st1*" }
 
 [[op]]
 op = "vec.load_first_fault"
 ty = ["any"]
 neon = { class = "U" }
-sve = { class = "N", recipe = "setffr; ldff1*; rdffr", note = "the first-fault register is set before and read after the load" }
+sve = { class = "M", recipe = "setffr; ldff1*; rdffr", note = "the first-fault register is set before and read after the load" }
 
 [[op]]
 op = "vec.gather"
@@ -637,54 +727,54 @@ ty = ["any32", "any64"]
 neon = { class = "U" }
 sve = { class = "N", recipe = "st1* (vector index)", note = "duplicate indices: the highest lane must win", unverified = true }
 
-# compress and expand: shuffle controls come from tables indexed by the mask bits on neon
+# compress and expand on neon go lane by lane through the work area with a running position
 
 [[op]]
 op = "vec.compress"
 ty = ["any32"]
-neon = { class = "M", recipe = "and; addv; umov; ldr; tbl" }
+neon = { class = "M", recipe = "and x5; umov x8; str q; str x4; add x4; ldr q" }
 sve = { class = "N", recipe = "compact" }
 
 [[op]]
 op = "vec.compress"
 ty = ["any64"]
-neon = { class = "M", recipe = "and; addp; fmov; ldr; tbl" }
+neon = { class = "M", recipe = "and x3; umov x4; str q; str x2; add x2; ldr q" }
 sve = { class = "N", recipe = "compact" }
 
 [[op]]
 op = "vec.compress"
 ty = ["any16"]
-neon = { class = "M", recipe = "and; addv; umov; ldr; tbl" }
+neon = { class = "M", recipe = "and x9; umov x16; str q; str x8; add x8; ldr q" }
 sve = { class = "M", recipe = "uunpklo; uunpkhi; punpklo; punpkhi; compact x2; cntp; whilelo; splice; uzp1" }
 
 [[op]]
 op = "vec.compress"
 ty = ["any8"]
-neon = { class = "M", recipe = "and; ext; zip1; addv; umov; and; lsr; ldr x2; add; ins; tbl; fmov; cnt; addv; fmov; stp; str; dup; str; ldr q", unverified = true }
+neon = { class = "M", recipe = "and x17; umov x32; str q; str x16; add x16; ldr q" }
 sve = { class = "M", recipe = "uunpklo; uunpkhi; punpklo; punpkhi; uunpklo x2; uunpkhi x2; punpklo x2; punpkhi x2; compact x4; cntp x3; whilelo x3; splice x3; uzp1 x4", unverified = true }
 
 [[op]]
 op = "vec.expand"
 ty = ["any32"]
-neon = { class = "M", recipe = "and; addv; umov; ldr; tbl" }
+neon = { class = "M", recipe = "str q; ldr x4; umov x4; and x8; ins x4; add x4" }
 sve = { class = "M", recipe = "compact; cntp; whilelo; st1*; ld1*" }
 
 [[op]]
 op = "vec.expand"
 ty = ["any64"]
-neon = { class = "M", recipe = "and; addp; fmov; ldr; tbl" }
+neon = { class = "M", recipe = "str q; ldr x2; umov x2; and x4; ins x2; add x2" }
 sve = { class = "M", recipe = "compact; cntp; whilelo; st1*; ld1*" }
 
 [[op]]
 op = "vec.expand"
 ty = ["any16"]
-neon = { class = "M", recipe = "and; addv; umov; ldr; tbl" }
+neon = { class = "M", recipe = "str q; ldr x8; umov x8; and x16; ins x8; add x8" }
 sve = { class = "M", recipe = "punpklo; punpkhi; compact x2; cntp x2; whilelo x2; st1h; ld1h; uunpklo x2; st1h x2; ld1h", unverified = true }
 
 [[op]]
 op = "vec.expand"
 ty = ["any8"]
-neon = { class = "M", recipe = "and; ext; zip1; addv; umov; and; lsr; ldr x2; fmov; cnt; addv; fmov; dup; add; ins; tbl", unverified = true }
+neon = { class = "M", recipe = "str q; ldr x16; umov x16; and x32; ins x16; add x16" }
 sve = { class = "M", recipe = "punpklo x3; punpkhi x3; compact x4; cntp x4; whilelo x4; st1b; ld1b x3; uunpklo x8; add x2; st1b x4; ld1b", unverified = true }
 
 # reductions (fixed tree: lane i with lane i+N/2)
@@ -692,145 +782,145 @@ sve = { class = "M", recipe = "punpklo x3; punpkhi x3; compact x4; cntp x4; whil
 [[op]]
 op = "vec.reduce_add"
 ty = ["f32"]
-neon = { class = "M", recipe = "ext; fadd; faddp" }
+neon = { class = "M", recipe = "ext; fadd; ushr; fadd" }
 sve = { class = "M", recipe = "ext; fadd; faddp", note = "NEON; sizeless vectors: E0717" }
 
 [[op]]
 op = "vec.reduce_add"
 ty = ["f64"]
-neon = { class = "M", recipe = "faddp" }
-sve = { class = "M", recipe = "faddp", note = "NEON; sizeless vectors: E0717" }
+neon = { class = "N", recipe = "ext; fadd" }
+sve = { class = "N", recipe = "faddp", note = "NEON; sizeless vectors: E0717" }
 
 [[op]]
 op = "vec.reduce_add_wrap"
 ty = ["int8", "int16", "int32"]
-neon = { class = "N", recipe = "addv; umov" }
+neon = { class = "N", recipe = "addv; ?mov" }
 sve = { class = "N", recipe = "uaddv; fmov" }
 
 [[op]]
 op = "vec.reduce_add_wrap"
 ty = ["int64"]
-neon = { class = "N", recipe = "addp; fmov" }
+neon = { class = "N", recipe = "addp; umov" }
 sve = { class = "N", recipe = "uaddv; fmov" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["f32"]
-neon = { class = "M", recipe = "fminv" }
+neon = { class = "N", recipe = "fminv" }
 sve = { class = "N", recipe = "fminv" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["f64"]
-neon = { class = "M", recipe = "fminp" }
+neon = { class = "N", recipe = "fminp" }
 sve = { class = "N", recipe = "fminv" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["f32"]
-neon = { class = "M", recipe = "fmaxv" }
+neon = { class = "N", recipe = "fmaxv" }
 sve = { class = "N", recipe = "fmaxv" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["f64"]
-neon = { class = "M", recipe = "fmaxp" }
+neon = { class = "N", recipe = "fmaxp" }
 sve = { class = "N", recipe = "fmaxv" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["int8", "int16", "int32"]
-neon = { class = "N", recipe = "?minv; umov" }
+neon = { class = "N", recipe = "?minv; ?mov" }
 sve = { class = "N", recipe = "?minv; fmov" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["i64"]
-neon = { class = "N", recipe = "ext; cmgt; bsl; fmov", note = "no sminv for 64-bit lanes" }
+neon = { class = "M", recipe = "ext; cmgt; bsl; umov", note = "no sminv for 64-bit lanes" }
 sve = { class = "N", recipe = "sminv; fmov" }
 
 [[op]]
 op = "vec.reduce_min"
 ty = ["u64"]
-neon = { class = "N", recipe = "ext; cmhi; bsl; fmov", note = "no uminv for 64-bit lanes" }
+neon = { class = "M", recipe = "ext; cmhi; bsl; umov", note = "no uminv for 64-bit lanes" }
 sve = { class = "N", recipe = "uminv; fmov" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["int8", "int16", "int32"]
-neon = { class = "N", recipe = "?maxv; umov" }
+neon = { class = "N", recipe = "?maxv; ?mov" }
 sve = { class = "N", recipe = "?maxv; fmov" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["i64"]
-neon = { class = "N", recipe = "ext; cmgt; bsl; fmov", note = "no smaxv for 64-bit lanes" }
+neon = { class = "M", recipe = "ext; cmgt; bsl; umov", note = "no smaxv for 64-bit lanes" }
 sve = { class = "N", recipe = "smaxv; fmov" }
 
 [[op]]
 op = "vec.reduce_max"
 ty = ["u64"]
-neon = { class = "N", recipe = "ext; cmhi; bsl; fmov", note = "no umaxv for 64-bit lanes" }
+neon = { class = "M", recipe = "ext; cmhi; bsl; umov", note = "no umaxv for 64-bit lanes" }
 sve = { class = "N", recipe = "umaxv; fmov" }
 
 [[op]]
 op = "vec.reduce_and"
 ty = ["int8"]
-neon = { class = "N", recipe = "ext; and; fmov; and x3", note = "NEON has no andv: fold in general registers" }
+neon = { class = "M", recipe = "ext; ushr x3; and x4; ?mov", note = "NEON has no andv: halves folded in vector registers" }
 sve = { class = "N", recipe = "andv; fmov" }
 
 [[op]]
 op = "vec.reduce_and"
 ty = ["int16"]
-neon = { class = "N", recipe = "ext; and; fmov; and x2", note = "NEON has no andv: fold in general registers" }
+neon = { class = "M", recipe = "ext; ushr x2; and x3; ?mov", note = "NEON has no andv: halves folded in vector registers" }
 sve = { class = "N", recipe = "andv; fmov" }
 
 [[op]]
 op = "vec.reduce_and"
 ty = ["int32"]
-neon = { class = "N", recipe = "ext; and; fmov; and", note = "NEON has no andv: fold in general registers" }
+neon = { class = "M", recipe = "ext; ushr; and x2; ?mov", note = "NEON has no andv: halves folded in vector registers" }
 sve = { class = "N", recipe = "andv; fmov" }
 
 [[op]]
 op = "vec.reduce_and"
 ty = ["int64"]
-neon = { class = "N", recipe = "ext; and; fmov" }
+neon = { class = "M", recipe = "ext; and; umov" }
 sve = { class = "N", recipe = "andv; fmov" }
 
 [[op]]
 op = "vec.reduce_or"
 ty = ["int8"]
-neon = { class = "N", recipe = "ext; orr; fmov; orr x3", note = "NEON has no orv: fold in general registers" }
+neon = { class = "M", recipe = "ext; ushr x3; orr x4; ?mov", note = "NEON has no orv: halves folded in vector registers" }
 sve = { class = "N", recipe = "orv; fmov" }
 
 [[op]]
 op = "vec.reduce_or"
 ty = ["int16"]
-neon = { class = "N", recipe = "ext; orr; fmov; orr x2", note = "NEON has no orv: fold in general registers" }
+neon = { class = "M", recipe = "ext; ushr x2; orr x3; ?mov", note = "NEON has no orv: halves folded in vector registers" }
 sve = { class = "N", recipe = "orv; fmov" }
 
 [[op]]
 op = "vec.reduce_or"
 ty = ["int32"]
-neon = { class = "N", recipe = "ext; orr; fmov; orr", note = "NEON has no orv: fold in general registers" }
+neon = { class = "M", recipe = "ext; ushr; orr x2; ?mov", note = "NEON has no orv: halves folded in vector registers" }
 sve = { class = "N", recipe = "orv; fmov" }
 
 [[op]]
 op = "vec.reduce_or"
 ty = ["int64"]
-neon = { class = "N", recipe = "ext; orr; fmov" }
+neon = { class = "M", recipe = "ext; orr; umov" }
 sve = { class = "N", recipe = "orv; fmov" }
 
 [[op]]
 op = "vec.reduce_add_ordered"
 ty = ["f32"]
-neon = { class = "M", recipe = "fadd; dup; fadd; dup; fadd; dup; fadd" }
+neon = { class = "M", recipe = "dup x4; fadd x4" }
 sve = { class = "N", recipe = "fadda" }
 
 [[op]]
 op = "vec.reduce_add_ordered"
 ty = ["f64"]
-neon = { class = "M", recipe = "fadd; dup; fadd" }
+neon = { class = "M", recipe = "dup x2; fadd x2" }
 sve = { class = "N", recipe = "fadda" }
 
 # prefix scan add: floats lane by lane from lane 0, ints by log steps (wrapping, order-free)
@@ -838,13 +928,13 @@ sve = { class = "N", recipe = "fadda" }
 [[op]]
 op = "vec.scan_add"
 ty = ["f32"]
-neon = { class = "M", recipe = "dup; fadd; dup; fadd; dup; fadd; ins x3" }
+neon = { class = "M", recipe = "dup x4; fadd x3; ins x3" }
 sve = { class = "M", recipe = "dup; fadd; dup; fadd; dup; fadd; ins x3", note = "NEON; sizeless vectors take log2(VL) steps" }
 
 [[op]]
 op = "vec.scan_add"
 ty = ["f64"]
-neon = { class = "M", recipe = "dup; fadd; ins" }
+neon = { class = "M", recipe = "dup x2; fadd; ins" }
 sve = { class = "M", recipe = "dup; fadd; ins", note = "NEON; sizeless vectors take log2(VL) steps" }
 
 [[op]]
@@ -868,8 +958,8 @@ sve = { class = "M", recipe = "ext; add; ext; add", note = "NEON; sizeless vecto
 [[op]]
 op = "vec.scan_add_wrap"
 ty = ["int64"]
-neon = { class = "M", recipe = "ext; add" }
-sve = { class = "M", recipe = "ext; add", note = "NEON; sizeless vectors take log2(VL) steps" }
+neon = { class = "N", recipe = "ext; add" }
+sve = { class = "N", recipe = "ext; add", note = "NEON; sizeless vectors take log2(VL) steps" }
 
 # permute, lookup, bit counts
 
@@ -885,6 +975,26 @@ ty = ["int8"]
 neon = { class = "N", recipe = "tbl" }
 sve = { class = "N", recipe = "tbl", note = "NEON tbl for a 16-byte table" }
 
+# wider lanes: the table is spilled to the work area, each lane loads its entry
+
+[[op]]
+op = "vec.lookup"
+ty = ["int16"]
+neon = { class = "M", recipe = "str q; umov x8; cmp x8; csel x16; ldr x8; ins x8", note = "an index past the table loads lane 0 and selects 0" }
+sve = { class = "N", recipe = "tbl", unverified = true }
+
+[[op]]
+op = "vec.lookup"
+ty = ["int32"]
+neon = { class = "M", recipe = "str q; umov x4; cmp x4; csel x8; ldr x4; ins x4", note = "an index past the table loads lane 0 and selects 0" }
+sve = { class = "N", recipe = "tbl", unverified = true }
+
+[[op]]
+op = "vec.lookup"
+ty = ["int64"]
+neon = { class = "M", recipe = "str q; umov x2; cmp x2; csel x4; ldr x2; ins x2", note = "an index past the table loads lane 0 and selects 0" }
+sve = { class = "N", recipe = "tbl", unverified = true }
+
 [[op]]
 op = "vec.popcount"
 ty = ["int8"]
@@ -894,7 +1004,7 @@ sve = { class = "N", recipe = "cnt" }
 [[op]]
 op = "vec.popcount"
 ty = ["int16"]
-neon = { class = "M", recipe = "cnt; uaddlp" }
+neon = { class = "N", recipe = "cnt; uaddlp" }
 sve = { class = "N", recipe = "cnt" }
 
 [[op]]
@@ -918,7 +1028,7 @@ sve = { class = "N", recipe = "clz" }
 [[op]]
 op = "vec.clz"
 ty = ["int64"]
-neon = { class = "M", recipe = "clz; ushr; cmeq; and x2; add" }
+neon = { class = "M", recipe = "umov x2; clz x2; ins x2", note = "no 64-bit lane clz: per lane through general registers" }
 sve = { class = "N", recipe = "clz" }
 
 # widen and narrow
@@ -950,52 +1060,652 @@ sve = { class = "N", recipe = "uunpkhi; fcvt" }
 [[op]]
 op = "vec.narrow_wrap"
 ty = ["int16", "int32", "int64"]
-neon = { class = "N", recipe = "uzp1" }
-sve = { class = "M", recipe = "uzp1" }
+neon = { class = "M", recipe = "xtn; xtn; ins", note = "the key is the source lane type" }
+sve = { class = "N", recipe = "uzp1" }
 
 [[op]]
 op = "vec.narrow_sat"
 ty = ["i16", "i32", "i64"]
-neon = { class = "N", recipe = "sqxtn; sqxtn2" }
+neon = { class = "M", recipe = "sqxtn; sqxtn; ins", note = "the key is the source lane type" }
 sve = { class = "M", recipe = "smax x2; smin x2; uzp1" }
 
 [[op]]
 op = "vec.narrow_sat"
 ty = ["u16", "u32", "u64"]
-neon = { class = "N", recipe = "uqxtn; uqxtn2" }
+neon = { class = "M", recipe = "uqxtn; uqxtn; ins", note = "the key is the source lane type" }
 sve = { class = "M", recipe = "umin x2; uzp1" }
 
 # conversions
 
 [[op]]
 op = "vec.cast"
-ty = ["int8>f32"]
-neon = { class = "N", recipe = "?xtl x2; ?cvtf" }
-sve = { class = "N", recipe = "?unpklo x2; ?cvtf" }
+ty = ["i8>i8", "i16>i16", "i32>i32", "i64>i64", "u8>u8", "u16>u16", "u32>u32", "u64>u64", "f32>f32", "f64>f64"]
+neon = { class = "N", recipe = "none" }
+sve = { class = "N", recipe = "none", unverified = true }
 
 [[op]]
 op = "vec.cast"
-ty = ["int16>f32", "int32>f64"]
-neon = { class = "N", recipe = "?xtl; ?cvtf" }
-sve = { class = "N", recipe = "?unpklo; ?cvtf" }
+ty = ["i8>i16", "i16>i32", "i32>i64", "u8>i16", "u8>u16", "u16>i32", "u16>u32", "u32>i64", "u32>u64"]
+neon = { class = "N", recipe = "?xtl" }
+sve = { class = "N", recipe = "?unpklo", unverified = true }
 
 [[op]]
-op = "vec.cast.round"
-ty = ["int32>f32", "int64>f64"]
-neon = { class = "N", recipe = "?cvtf" }
-sve = { class = "N", recipe = "?cvtf" }
+op = "vec.cast"
+ty = ["f32>f64"]
+neon = { class = "N", recipe = "fcvtl" }
+sve = { class = "N", recipe = "uunpklo; fcvt", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["i8>i32", "i16>i64", "u8>i32", "u8>u32", "u16>i64", "u16>u64"]
+neon = { class = "N", recipe = "?xtl x2" }
+sve = { class = "N", recipe = "?unpklo x2", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["i16>f32", "i32>f64", "u16>f32", "u32>f64"]
+neon = { class = "N", recipe = "?xtl; ?cvtf" }
+sve = { class = "N", recipe = "?unpklo; ?cvtf", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["i8>f32", "i16>f64", "u8>f32", "u16>f64"]
+neon = { class = "M", recipe = "?xtl x2; ?cvtf" }
+sve = { class = "M", recipe = "?unpklo x2; ?cvtf", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["i8>i64", "u8>i64", "u8>u64"]
+neon = { class = "M", recipe = "?xtl x3" }
+sve = { class = "M", recipe = "?unpklo x3", unverified = true }
+
+[[op]]
+op = "vec.cast"
+ty = ["i8>f64", "u8>f64"]
+neon = { class = "M", recipe = "?xtl x3; ?cvtf" }
+sve = { class = "M", recipe = "?unpklo x3; ?cvtf", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["int8>int8", "int16>int16", "int32>int32", "int64>int64"]
+neon = { class = "N", recipe = "none" }
+sve = { class = "N", recipe = "none", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["int8>int16", "int16>int32", "int32>int64"]
+neon = { class = "N", recipe = "?xtl" }
+sve = { class = "N", recipe = "?unpklo", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["int16>int8", "int32>int16", "int64>int32"]
+neon = { class = "N", recipe = "xtn" }
+sve = { class = "N", recipe = "uzp1", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["int8>int32", "int16>int64"]
+neon = { class = "N", recipe = "?xtl x2" }
+sve = { class = "N", recipe = "?unpklo x2", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["int32>int8", "int64>int16"]
+neon = { class = "N", recipe = "xtn x2" }
+sve = { class = "N", recipe = "uzp1 x2", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["int8>int64"]
+neon = { class = "M", recipe = "?xtl x3" }
+sve = { class = "M", recipe = "?unpklo x3", unverified = true }
+
+[[op]]
+op = "vec.cast.wrap"
+ty = ["int64>int8"]
+neon = { class = "M", recipe = "xtn x3" }
+sve = { class = "M", recipe = "uzp1 x3", unverified = true }
 
 [[op]]
 op = "vec.cast.sat"
-ty = ["f32>int32", "f64>int64"]
+ty = ["i8>i8", "i16>i16", "i32>i32", "i64>i64", "u8>u8", "u16>u16", "u32>u32", "u64>u64"]
+neon = { class = "N", recipe = "none" }
+sve = { class = "N", recipe = "none", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>i16", "i16>i32", "i32>i64", "u8>i16", "u8>u16", "u16>i32", "u16>u32", "u32>i64", "u32>u64"]
+neon = { class = "N", recipe = "?xtl" }
+sve = { class = "N", recipe = "?unpklo", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f32>i32", "f32>u32", "f64>i64", "f64>u64"]
 neon = { class = "N", recipe = "fcvtz?" }
-sve = { class = "N", recipe = "fcvtz?" }
+sve = { class = "N", recipe = "fcvtz?", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i16>i8", "i32>i16", "i64>i32"]
+neon = { class = "N", recipe = "sqxtn" }
+sve = { class = "M", recipe = "smin; smax; uzp1", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i16>u8", "i32>u16", "i64>u32"]
+neon = { class = "N", recipe = "sqxtun" }
+sve = { class = "M", recipe = "smax; umin; uzp1", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u16>u8", "u32>u16", "u64>u32"]
+neon = { class = "N", recipe = "uqxtn" }
+sve = { class = "N", recipe = "umin; uzp1", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>i32", "i16>i64", "u8>i32", "u8>u32", "u16>i64", "u16>u64"]
+neon = { class = "N", recipe = "?xtl x2" }
+sve = { class = "N", recipe = "?unpklo x2", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>u8", "i16>u16", "i32>u32", "i64>u64"]
+neon = { class = "N", recipe = "cmlt; bic" }
+sve = { class = "N", recipe = "smax", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u8>i8", "u16>i16", "u32>i32", "u64>i64"]
+neon = { class = "N", recipe = "cmlt; bit" }
+sve = { class = "N", recipe = "umin", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f32>i64", "f32>u64"]
+neon = { class = "N", recipe = "fcvtl; fcvtz?" }
+sve = { class = "N", recipe = "fcvtz?", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f64>i32", "f64>u32"]
+neon = { class = "N", recipe = "fcvtz?; ?qxtn" }
+sve = { class = "N", recipe = "fcvtz?", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f32>i16"]
+neon = { class = "N", recipe = "fcvtz?; ?qxtn" }
+sve = { class = "M", recipe = "fcvtz?; smin; smax; uzp1", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f32>u16"]
+neon = { class = "N", recipe = "fcvtz?; ?qxtn" }
+sve = { class = "M", recipe = "fcvtz?; umin; uzp1", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i32>i8", "i64>i16"]
+neon = { class = "N", recipe = "sqxtn x2" }
+sve = { class = "M", recipe = "smin; smax; uzp1 x2", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i32>u8", "i64>u16"]
+neon = { class = "N", recipe = "sqxtun; uqxtn" }
+sve = { class = "M", recipe = "smax; umin; uzp1 x2", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u32>u8", "u64>u16"]
+neon = { class = "N", recipe = "uqxtn x2" }
+sve = { class = "M", recipe = "umin; uzp1 x2", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>i64", "u8>i64", "u8>u64"]
+neon = { class = "M", recipe = "?xtl x3" }
+sve = { class = "M", recipe = "?unpklo x3", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>u16", "i16>u32", "i32>u64"]
+neon = { class = "M", recipe = "cmlt; bic; uxtl" }
+sve = { class = "N", recipe = "smax; uunpklo", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f64>i16"]
+neon = { class = "M", recipe = "fcvtz?; ?qxtn x2" }
+sve = { class = "M", recipe = "fcvtz?; smin; smax; uzp1", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f32>i8"]
+neon = { class = "M", recipe = "fcvtz?; ?qxtn x2" }
+sve = { class = "M", recipe = "fcvtz?; smin; smax; uzp1 x2", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f64>u16"]
+neon = { class = "M", recipe = "fcvtz?; ?qxtn x2" }
+sve = { class = "M", recipe = "fcvtz?; umin; uzp1", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f32>u8"]
+neon = { class = "M", recipe = "fcvtz?; ?qxtn x2" }
+sve = { class = "M", recipe = "fcvtz?; umin; uzp1 x2", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i64>i8"]
+neon = { class = "M", recipe = "sqxtn x3" }
+sve = { class = "M", recipe = "smin; smax; uzp1 x3", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i64>u8"]
+neon = { class = "M", recipe = "sqxtun; uqxtn x2" }
+sve = { class = "M", recipe = "smax; umin; uzp1 x3", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u64>u8"]
+neon = { class = "M", recipe = "uqxtn x3" }
+sve = { class = "M", recipe = "umin; uzp1 x3", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u16>i8", "u32>i16", "u64>i32"]
+neon = { class = "M", recipe = "uqxtn; cmlt; bit" }
+sve = { class = "N", recipe = "umin; uzp1", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>u32", "i16>u64"]
+neon = { class = "M", recipe = "cmlt; bic; uxtl x2" }
+sve = { class = "M", recipe = "smax; uunpklo x2", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f64>i8"]
+neon = { class = "M", recipe = "fcvtz?; ?qxtn x3" }
+sve = { class = "M", recipe = "fcvtz?; smin; smax; uzp1 x2", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["f64>u8"]
+neon = { class = "M", recipe = "fcvtz?; ?qxtn x3" }
+sve = { class = "M", recipe = "fcvtz?; umin; uzp1 x2", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u32>i8", "u64>i16"]
+neon = { class = "M", recipe = "uqxtn x2; cmlt; bit" }
+sve = { class = "M", recipe = "umin; uzp1 x2", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["i8>u64"]
+neon = { class = "M", recipe = "cmlt; bic; uxtl x3" }
+sve = { class = "M", recipe = "smax; uunpklo x3", unverified = true }
+
+[[op]]
+op = "vec.cast.sat"
+ty = ["u64>i8"]
+neon = { class = "M", recipe = "uqxtn x3; cmlt; bit" }
+sve = { class = "M", recipe = "umin; uzp1 x3", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["f32>f32", "f64>f64"]
+neon = { class = "N", recipe = "none" }
+sve = { class = "N", recipe = "none", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["i32>f32", "i64>f64", "u32>f32", "u64>f64"]
+neon = { class = "N", recipe = "?cvtf" }
+sve = { class = "N", recipe = "?cvtf", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["f32>f64"]
+neon = { class = "N", recipe = "fcvtl" }
+sve = { class = "N", recipe = "uunpklo; fcvt", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["f64>f32"]
+neon = { class = "N", recipe = "fcvtn" }
+sve = { class = "N", recipe = "fcvt; uzp1", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["i16>f32", "i32>f64", "u16>f32", "u32>f64"]
+neon = { class = "N", recipe = "?xtl; ?cvtf" }
+sve = { class = "N", recipe = "?unpklo; ?cvtf", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["i8>f32", "i16>f64", "u8>f32", "u16>f64"]
+neon = { class = "M", recipe = "?xtl x2; ?cvtf" }
+sve = { class = "M", recipe = "?unpklo x2; ?cvtf", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["i8>f64", "u8>f64"]
+neon = { class = "M", recipe = "?xtl x3; ?cvtf" }
+sve = { class = "M", recipe = "?unpklo x3; ?cvtf", unverified = true }
+
+[[op]]
+op = "vec.cast.round"
+ty = ["i64>f32", "u64>f32"]
+neon = { class = "M", recipe = "umov x2; ?cvtf x2; ins x2" }
+sve = { class = "N", recipe = "?cvtf; uzp1", unverified = true }
 
 [[op]]
 op = "vec.cast.try"
-ty = ["f32>int32", "f64>int64"]
-neon = { class = "M", recipe = "fcvtz?; fcmgt; fcmge; and; uminv; fmov; cmp; cset" }
-sve = { class = "M", recipe = "fcvtz?; fcmlt; fcmge; nots; cset" }
+ty = ["i16>i64", "u16>i64", "u16>u64"]
+neon = { class = "M", recipe = "?mov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo x2; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>i64", "u8>i64", "u8>u64"]
+neon = { class = "M", recipe = "?mov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo x3; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>i64", "u32>i64", "u32>u64"]
+neon = { class = "M", recipe = "?mov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f64>f64"]
+neon = { class = "M", recipe = "dup x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "N", recipe = "cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>i64", "u64>u64"]
+neon = { class = "M", recipe = "umov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "N", recipe = "ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f32>f64"]
+neon = { class = "M", recipe = "dup x2; fcvt x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uunpklo; fcvt; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u64>i64"]
+neon = { class = "M", recipe = "umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "cmpgt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u64>i16", "u64>u16"]
+neon = { class = "M", recipe = "umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1 x2; cmpgt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u64>i8", "u64>u8"]
+neon = { class = "M", recipe = "umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1 x3; cmpgt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u64>i32", "u64>u32"]
+neon = { class = "M", recipe = "umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1; cmpgt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>u64"]
+neon = { class = "M", recipe = "?mov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo x2; cmplt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>u64"]
+neon = { class = "M", recipe = "?mov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo x3; cmplt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>u64"]
+neon = { class = "M", recipe = "?mov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo; cmplt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>u64"]
+neon = { class = "M", recipe = "umov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "cmplt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>i32", "u8>i32", "u8>u32"]
+neon = { class = "M", recipe = "?mov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo x2; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>i32", "u16>i32", "u16>u32"]
+neon = { class = "M", recipe = "?mov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>i32", "u32>u32"]
+neon = { class = "M", recipe = "?mov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "N", recipe = "ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f32>f32"]
+neon = { class = "M", recipe = "dup x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "N", recipe = "cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>i16", "i64>u16"]
+neon = { class = "M", recipe = "umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1 x2; cmpgt; cmplt; orr; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>i8", "i64>u8"]
+neon = { class = "M", recipe = "umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1 x3; cmpgt; cmplt; orr; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>i32", "i64>u32"]
+neon = { class = "M", recipe = "umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1; cmpgt; cmplt; orr; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f64>f32"]
+neon = { class = "M", recipe = "dup x2; fcvt x4; fcmp x2; cset x4; orr x4; ins x2; eor x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "fcvt x2; fcmne; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>f64", "u16>f64"]
+neon = { class = "M", recipe = "?mov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo x2; ?cvtf; fcvtz?; cmpne; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>f64", "u8>f64"]
+neon = { class = "M", recipe = "?mov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo x3; ?cvtf; fcvtz?; cmpne; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>f64", "u32>f64"]
+neon = { class = "M", recipe = "?mov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo; ?cvtf; fcvtz?; cmpne; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>f64", "u64>f64"]
+neon = { class = "M", recipe = "umov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?cvtf; fcvtz?; cmpne; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i64>f32", "u64>f32"]
+neon = { class = "M", recipe = "umov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?cvtf; uzp1; fcvtz?; cmpne; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u32>i32"]
+neon = { class = "M", recipe = "?mov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "cmpgt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u32>i8", "u32>u8"]
+neon = { class = "M", recipe = "?mov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1 x2; cmpgt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u32>i16", "u32>u16"]
+neon = { class = "M", recipe = "?mov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1; cmpgt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>u32"]
+neon = { class = "M", recipe = "?mov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo x2; cmplt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>u32"]
+neon = { class = "M", recipe = "?mov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo; cmplt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>u32"]
+neon = { class = "M", recipe = "?mov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "cmplt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f32>i64", "f32>u64", "f64>i8", "f64>i16", "f64>i32", "f64>i64", "f64>u8", "f64>u16", "f64>u32", "f64>u64"]
+neon = { class = "M", recipe = "dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtz? x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "fcvtz?; fcmlt; fcmge; nots; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>i16", "u8>i16", "u8>u16"]
+neon = { class = "M", recipe = "?mov x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>i16", "u16>u16"]
+neon = { class = "M", recipe = "?mov x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and" }
+sve = { class = "N", recipe = "ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>i8", "i32>u8"]
+neon = { class = "M", recipe = "?mov x4; cmp x8; cset x8; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1 x2; cmpgt; cmplt; orr; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>i16", "i32>u16"]
+neon = { class = "M", recipe = "?mov x4; cmp x8; cset x8; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1; cmpgt; cmplt; orr; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i32>f32", "u32>f32"]
+neon = { class = "M", recipe = "?mov x4; ?cvtf x4; fcmp x4; cset x8; fcvtz? x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?cvtf; fcvtz?; cmpne; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>f32", "u8>f32"]
+neon = { class = "M", recipe = "?mov x4; ?cvtf x4; fcmp x4; cset x8; fcvtz? x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo x2; ?cvtf; fcvtz?; cmpne; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>f32", "u16>f32"]
+neon = { class = "M", recipe = "?mov x4; ?cvtf x4; fcmp x4; cset x8; fcvtz? x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo; ?cvtf; fcvtz?; cmpne; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u16>i16"]
+neon = { class = "M", recipe = "?mov x8; cmp x8; cset x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "cmpgt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u16>i8", "u16>u8"]
+neon = { class = "M", recipe = "?mov x8; cmp x8; cset x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1; cmpgt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>u16"]
+neon = { class = "M", recipe = "?mov x8; cmp x8; cset x8; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "?unpklo; cmplt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>u16"]
+neon = { class = "M", recipe = "?mov x8; cmp x8; cset x8; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "cmplt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["f32>i8", "f32>i16", "f32>i32", "f32>u8", "f32>u16", "f32>u32"]
+neon = { class = "M", recipe = "dup x4; frintz x4; fcmp x12; cset x12; and x8; fcvtz? x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "fcvtz?; fcmlt; fcmge; nots; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>i8", "u8>u8"]
+neon = { class = "M", recipe = "?mov x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and" }
+sve = { class = "N", recipe = "ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i16>i8", "i16>u8"]
+neon = { class = "M", recipe = "?mov x8; cmp x16; cset x16; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "uzp1; cmpgt; cmplt; orr; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["u8>i8"]
+neon = { class = "M", recipe = "?mov x16; cmp x16; cset x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "cmpgt; ptest; cset", unverified = true }
+
+[[op]]
+op = "vec.cast.try"
+ty = ["i8>u8"]
+neon = { class = "M", recipe = "?mov x16; cmp x16; cset x16; and x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and" }
+sve = { class = "M", recipe = "cmplt; ptest; cset", unverified = true }
 
 [[op]]
 op = "vec.cast"
@@ -1037,14 +1747,8 @@ sve = { class = "N", recipe = "splice" }
 
 [[op]]
 op = "mask.first_n"
-ty = ["m8", "m16", "m32"]
-neon = { class = "M", recipe = "cmp; csel; dup; cmhi" }
-sve = { class = "N", recipe = "whilelo" }
-
-[[op]]
-op = "mask.first_n"
-ty = ["m64"]
-neon = { class = "M", recipe = "dup; cmhi" }
+ty = ["mask"]
+neon = { class = "M", recipe = "cmp; csel; dup; cmhi", note = "the lane-index constant is compared with the splat of min(k, lanes)" }
 sve = { class = "N", recipe = "whilelo" }
 
 # chunk loops and tails

@@ -14,7 +14,7 @@
 //! | `vec.sqrt floor ceil round trunc` | `a` | V (float) | per lane; `round` = ties to even |
 //! | `vec.fma` | `a b c` | V (float) | `a * b + c` with one rounding |
 //! | `vec.min max` | `a b` | V | float: IEEE minimum / maximum (NaN propagates, -0 < +0); int: by value |
-//! | `vec.min_num max_num` | `a b` | V (float) | IEEE minimumNumber / maximumNumber (a NaN lane is missing) |
+//! | `vec.min_num max_num` | `a b` | V (float) | IEEE minimumNumber / maximumNumber (a quiet or signaling NaN lane is missing; two NaNs: a quiet NaN) |
 //! | `vec.min_x86 max_x86` | `a b` | V (float) | `a < b ? a : b` / `a > b ? a : b` (else `b`) |
 //! | `vec.add.wrap sub.wrap mul.wrap` | `a b` | V (int) | wrapping |
 //! | `vec.add.sat sub.sat mul.sat` | `a b` | V (int) | saturating |
@@ -27,7 +27,7 @@
 //! | `vec.reduce_add reduce_add_wrap reduce_min reduce_max reduce_and reduce_or` | `v` | L | fixed tree: lane i with lane i+N/2 until one lane remains; `reduce_add` float lanes, `reduce_add_wrap` int lanes (wrapping) |
 //! | `vec.reduce_add_ordered` | `v init` | L (float) | `((init + v[0]) + v[1]) + …` |
 //! | `vec.scan_add scan_add_wrap` | `v` | V | inclusive prefix sum, lane by lane from lane 0; `scan_add` float lanes, `scan_add_wrap` int lanes (wrapping) |
-//! | `vec.cast cast.wrap cast.sat cast.round cast.try` | `v` | V' (`Option<V'>` for `try`) | the scalar cast per lane; `try` is `Some` iff every lane converts |
+//! | `vec.cast cast.wrap cast.sat cast.round cast.try` | `v` | V' (`Option<V'>` for `try`) | the scalar cast per lane; `try` is `Some` iff every lane converts; a float lane cast to its own type is a bit copy |
 //! | `vec.bitcast` | `v` | V' | same bytes (little-endian lanes), equal total width |
 //! | `vec.split` / `vec.join` | `v` / `a b` | `(H, H)` / V | halves: lanes `0..n/2` and `n/2..n` |
 //! | `vec.widen_lo widen_hi` | `v` | `vec L2 n/2` | low / high half converted exactly to the double-width lane |
@@ -37,7 +37,7 @@
 //! | `vec.compress` / `vec.expand` | `v m` | V | active lanes packed low / low lanes spread to active positions; other lanes 0 |
 //! | `vec.load` / `vec.store` | `s i` / `s i v` | V / — | lanes `s[i..i+n]`; no check of their own (a dominating `check.bounds i lim`, `lim = sub.sat len n-1`, or a chunk-loop proof guards them) |
 //! | `vec.load_aligned` † / `vec.store_aligned` † | `s i` / `s i v` | V / — | as `load` / `store`; `i % n != 0` traps `Bounds` |
-//! | `vec.load_masked` † / `vec.store_masked` † | `s i m` / `s i v m` | V / — | active lanes only (inactive lanes read 0, are never written); an active lane at `i + k ≥ len` traps `Bounds` |
+//! | `vec.load_masked` † / `vec.store_masked` † | `s i m` / `s i v m` | V / — | active lanes only (inactive lanes read 0, are never written); an active lane at `i + k ≥ len` traps `Bounds` before any lane is written |
 //! | `vec.gather` † / `vec.scatter` † | `s idx` / `s idx v` | V / — | lane j at `s[idx[j]]`, `idx` unsigned lanes of any width (zero-extended); any index ≥ len traps `Bounds` before any lane is written; duplicate indices: the highest lane wins |
 //! | `mask.and or xor`, `mask.not` | `a b`, `a` | M | lane-wise logic |
 //! | `mask.select` | `m a b` | V or M | lanes of `a` where `m` is set, else `b` (both evaluated) |
@@ -49,7 +49,8 @@
 //!
 //! Floats are IEEE 754 binary16/32/64 and bfloat16, round to nearest even, no flush to zero, no
 //! contraction. A NaN produced by an arithmetic lane op is quiet (sign and payload unspecified);
-//! `neg abs copysign select bitcast`, loads and stores are bit-exact.
+//! `neg abs copysign select bitcast`, loads, stores, and a float cast to its own type are bit-exact.
+//! A mask lane is all zeros or all ones; loading any other pattern is undefined behaviour.
 
 use crate::arith::{self, CastTy, IntTy};
 use crate::ir::{CastKind, Op, PanicKind};
