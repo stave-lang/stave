@@ -9,6 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "../../../tests/support/legs.rs"]
+mod legs;
+
 use stave_driver::conformance::stage0::{Stage0, registry_codes};
 use stave_driver::conformance::{Config, Outcome, Report, run_suite};
 use stave_driver::shipped::Library;
@@ -64,7 +67,7 @@ fn run_suite_for(target: Option<Triple>, runner: Option<&str>) -> Report {
 /// Every run test of the host architecture passes natively.
 #[test]
 fn run_suite_passes_natively() {
-    let Some(host) = Triple::host().filter(|t| stave_driver::exec::can_run(*t)) else {
+    let Some(host) = Triple::host().filter(|t| legs::gate(t.name(), stave_driver::exec::can_run(*t))) else {
         eprintln!("note: skipped (not a Linux host)");
         return;
     };
@@ -84,7 +87,8 @@ fn run_suite_aarch64() {
         assert!(r.is_success());
         assert!(r.render().contains("E1001: target aarch64-linux is not runnable"), "{}", r.render());
     }
-    if cfg!(all(target_os = "linux", target_arch = "x86_64")) && have("qemu-aarch64") {
+    let qemu = cfg!(all(target_os = "linux", target_arch = "x86_64")) && have("qemu-aarch64");
+    if legs::gate(a64.name(), qemu || stave_driver::exec::can_run(a64)) && qemu {
         let r = run_suite_for(Some(a64), Some("qemu-aarch64"));
         assert_eq!(r.passed(), r.results.len(), "{}", r.render());
     } else {
@@ -113,7 +117,7 @@ fn threads_and_std(target: Triple, runner: Option<&str>) -> (usize, usize, Strin
 /// Threaded and `std/` programs pass natively on the host architecture.
 #[test]
 fn threads_and_std_natively() {
-    let Some(host) = Triple::host().filter(|t| stave_driver::exec::can_run(*t)) else {
+    let Some(host) = Triple::host().filter(|t| legs::gate(t.name(), stave_driver::exec::can_run(*t))) else {
         eprintln!("note: skipped (not a Linux host)");
         return;
     };
@@ -128,7 +132,10 @@ fn threads_and_std_aarch64() {
     let a64 = Triple::parse("aarch64-linux").unwrap();
     let runner = if stave_driver::exec::can_run(a64) {
         None
-    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) && have("qemu-aarch64") {
+    } else if legs::gate(
+        a64.name(),
+        cfg!(all(target_os = "linux", target_arch = "x86_64")) && have("qemu-aarch64"),
+    ) {
         Some("qemu-aarch64")
     } else {
         eprintln!("note: qemu-aarch64 not installed: AArch64 threaded tests not executed");

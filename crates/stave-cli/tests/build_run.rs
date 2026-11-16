@@ -7,6 +7,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "../../../tests/support/legs.rs"]
+mod legs;
+
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -236,7 +239,10 @@ fn strace_works() -> bool {
 
 #[cfg(unix)]
 fn have_qemu_aarch64() -> bool {
-    Command::new("qemu-aarch64").arg("--version").output().is_ok_and(|o| o.status.success())
+    legs::gate(
+        "aarch64-linux",
+        Command::new("qemu-aarch64").arg("--version").output().is_ok_and(|o| o.status.success()),
+    )
 }
 
 /// `stave run` and `stave test` hold every executable in memory. They work where nothing can

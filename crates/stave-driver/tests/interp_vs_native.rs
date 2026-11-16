@@ -8,11 +8,14 @@
 //! interpreter's syscall log (same IR, same runtime) and, when `strace` is installed, on the
 //! native x86-64 runs under `strace -c`.
 //!
-//! A run that cannot happen here (no qemu-aarch64, not Linux) is skipped with a message; the
-//! interpreter side always runs.
+//! A run that cannot happen here (no qemu-aarch64, not Linux) is skipped with a message, or
+//! fails when `STAVE_REQUIRE_LEGS` lists its leg; the interpreter side always runs.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[path = "../../../tests/support/legs.rs"]
+mod legs;
 
 use stave_driver::conformance::stage0::{Stage0, registry_codes};
 use stave_driver::conformance::{Config, Outcome, run_suite};
@@ -79,14 +82,18 @@ fn have(tool: &str) -> bool {
 /// The runner for `target` here: `Some(None)` native, `Some(Some(cmd))` through `cmd`, `None`
 /// not runnable.
 fn runner(target: Triple) -> Option<Option<&'static str>> {
-    if exec::can_run(target) {
-        return Some(None);
-    }
-    if target == Triple::parse("aarch64-linux").unwrap() && cfg!(target_os = "linux") && have("qemu-aarch64")
+    let how = if exec::can_run(target) {
+        Some(None)
+    } else if target == Triple::parse("aarch64-linux").unwrap()
+        && cfg!(target_os = "linux")
+        && have("qemu-aarch64")
     {
-        return Some(Some("qemu-aarch64"));
-    }
-    None
+        Some(Some("qemu-aarch64"))
+    } else {
+        None
+    };
+    legs::gate(target.name(), how.is_some());
+    how
 }
 
 fn u16_at(b: &[u8], o: usize) -> u16 {

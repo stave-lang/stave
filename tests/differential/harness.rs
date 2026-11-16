@@ -5,7 +5,7 @@
 //! interpreter prints. Legs: the stave-ir interpreter, then native debug and release builds for
 //! x86_64-linux, x86_64-linux-v3 and aarch64-linux (under qemu-aarch64 on an x86-64 host);
 //! a `_v3` kernel builds for x86_64-linux-v3 only. A leg that cannot run here is skipped with a
-//! note.
+//! note, or fails when `STAVE_REQUIRE_LEGS` lists it.
 //!
 //! Env: `STAVE_DIFF_SEED` (u64), `STAVE_DIFF_FULL=1` (every misalignment), `STAVE_DIFF_RANDOM`
 //! (random cases per kind, default 24), `STAVE_DIFF_KERNELS` (comma-separated names).
@@ -13,6 +13,8 @@
 
 #[path = "gen.rs"]
 mod generate;
+#[path = "../support/legs.rs"]
+mod legs;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -168,14 +170,18 @@ fn have(tool: &str) -> bool {
 
 /// `Some(None)` native, `Some(Some(cmd))` through `cmd`, `None` not runnable here.
 fn runner(target: Triple) -> Option<Option<&'static str>> {
-    if exec::can_run(target) {
-        return Some(None);
-    }
-    if target == Triple::parse("aarch64-linux").unwrap() && cfg!(target_os = "linux") && have("qemu-aarch64")
+    let how = if exec::can_run(target) {
+        Some(None)
+    } else if target == Triple::parse("aarch64-linux").unwrap()
+        && cfg!(target_os = "linux")
+        && have("qemu-aarch64")
     {
-        return Some(Some("qemu-aarch64"));
-    }
-    None
+        Some(Some("qemu-aarch64"))
+    } else {
+        None
+    };
+    legs::gate(target.name(), how.is_some());
+    how
 }
 
 /// The package of one kernel: `stave.toml`, `src/main.stv` (the kernel file), `src/diff.stv`,

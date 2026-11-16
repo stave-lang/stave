@@ -7,6 +7,8 @@
 //! exits 101. An interpreter trap is expected to look exactly like that natively.
 #![allow(dead_code)]
 
+#[path = "../../../../tests/support/legs.rs"]
+pub mod legs;
 pub mod rgen;
 pub mod vgen;
 
@@ -329,8 +331,12 @@ pub fn output_retry(cmd: &mut Command) -> std::process::Output {
     cmd.output().unwrap()
 }
 
+/// Whether AArch64 binaries run here; fails instead when `STAVE_REQUIRE_LEGS` lists `aarch64`.
 pub fn can_run() -> bool {
-    cfg!(all(target_os = "linux", target_arch = "aarch64")) || have("qemu-aarch64")
+    legs::gate(
+        "aarch64-linux",
+        cfg!(all(target_os = "linux", target_arch = "aarch64")) || have("qemu-aarch64"),
+    )
 }
 
 /// Compiles (debug or release code generation), links, and runs natively; `None` without qemu.
