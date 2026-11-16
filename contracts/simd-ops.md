@@ -117,7 +117,7 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 | float neg/abs/copysign | `-v`, `v.abs()`, `v.copysign(s)` | N | N | N | N | N |
 | float floor/ceil/round/trunc | `v.floor()` … | N | N | N | N | N |
 | int add/sub wrapping | `a +% b` | N | N | N | N | N |
-| int neg wrapping / abs | `0 -% v`, `v.abs_wrap()` | N | N | N | N | N |
+| int neg wrapping / abs | `0 -% v`, `v.abs_wrap()` (signed) | N | N | N | N | N |
 | int mul wrapping i16/i32 | `a *% b` | N | N | N | N | N |
 | int mul wrapping i8 | `a *% b` | M | M | M | N | N |
 | int mul wrapping i64 | `a *% b` | M | M | N | M | N |

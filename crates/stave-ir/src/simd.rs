@@ -20,7 +20,7 @@
 //! | `vec.add.sat sub.sat mul.sat` | `a b` | V (int) | saturating |
 //! | `vec.checked_add checked_sub checked_mul` | `a b` | `Option<V>` | `Some` iff no lane overflows |
 //! | `vec.div_lanes` † / `vec.div_const` † | `a b` / `a K` | V (int) | truncating division per lane; a zero divisor traps `DivByZero`, `MIN / -1` traps `Overflow` (lowest lane first) |
-//! | `vec.abs_wrap popcount clz` | `a` | V (int) | `|MIN|` = MIN; bit counts within the lane |
+//! | `vec.abs_wrap popcount clz` | `a` | V (int; `abs_wrap` signed) | `|MIN|` = MIN; bit counts within the lane |
 //! | `vec.and or xor andnot`, `vec.not` | `a b`, `a` | V (int) | bitwise; `andnot` = `a & ~b` |
 //! | `vec.shl shr` † / `vec.shl.wrap` | `a amount` | V (int) | amount: V or an int scalar; an amount ≥ bits traps `Overflow` / is masked by bits-1 |
 //! | `vec.eq ne lt le gt ge` | `a b` | M | ints by signedness, floats IEEE (unordered: only `ne`) |

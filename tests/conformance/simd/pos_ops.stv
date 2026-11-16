@@ -27,7 +27,7 @@ fn ints(a: u8x16, b: u8x16, k: u32x4, s: &[u32], d: &mut [u32]) -> u32 {
     let x = (w & b) | (w ^ a) | ~w | w.andnot(b);
     let y = (x << 2) >> 1;
     let z = y <<% b;
-    let p = z.popcount().clz().abs_wrap().lookup(a);
+    let p = z.popcount().clz().lookup(a);
     let q: u16x8 = p.widen_hi();
     let r: u8x16 = q.narrow_wrap(q);
     let t = k.div_const::<7>().div_lanes(k).min(k).max(k);
@@ -35,7 +35,7 @@ fn ints(a: u8x16, b: u8x16, k: u32x4, s: &[u32], d: &mut [u32]) -> u32 {
     let g = u32x4.gather(s, k);
     g.scatter(d, k);
     let m = mask32x4.all() & ~mask32x4.none() ^ (t == k);
-    let v: i32x4 = m.to_vec::<i32>();
+    let v: i32x4 = m.to_vec::<i32>().abs_wrap();
     let e = (m.rewiden::<8>() | mask8x4.first_n(2)).to_bits();
     let f = t.compress(m).expand(m).permute::<[1, 0, 3, 2]>();
     let h: u8x16 = f.bitcast::<u8x16>();

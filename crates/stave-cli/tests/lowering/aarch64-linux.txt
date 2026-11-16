@@ -16,7 +16,6 @@ vec.trunc               float                N    1  frintz
 vec.add.wrap            int                  N    1  add
 vec.sub.wrap            int                  N    1  sub
 vec.abs_wrap            sint                 N    1  abs
-vec.abs_wrap            uint                 N    0  none
 vec.mul.wrap            int8/int16/int32     N    1  mul
 vec.mul.wrap            int64                M    7  rev64; mul; xtn x2; uaddlp; shl; umlal
 vec.add.sat             int                  N    1  ?qadd

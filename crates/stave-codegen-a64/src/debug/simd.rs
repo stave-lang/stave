@@ -547,7 +547,6 @@ impl<'a, 'm> Gen<'a, 'm> {
         match op {
             Neg | Abs | Sqrt | Floor | Ceil | Round | Trunc => self.a.vfp_un(fp(op), arr, rd, a)?,
             AbsWrap if vt.signed() => self.a.vint_un(VIntUn::Abs, arr, rd, a)?,
-            AbsWrap => self.a.vmov(B16, rd, a)?,
             Not | MaskNot => self.a.vint_un(VIntUn::Not, B16, rd, a)?,
             Popcount => {
                 // per byte, then adjacent counts added up to the lane width

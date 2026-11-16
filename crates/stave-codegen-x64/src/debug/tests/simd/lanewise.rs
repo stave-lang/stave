@@ -140,6 +140,9 @@ pub fn int_arith() -> Vec<Case> {
                 out.extend(batch(op, Res::V(s), false, pairs(s, &ps, &ps)));
             }
             for op in [AbsWrap, Popcount, Clz, Not] {
+                if op == AbsWrap && !l.signed() {
+                    continue;
+                }
                 out.extend(batch(op, Res::V(s), false, unary(s, &ed)));
             }
             for op in [CheckedAdd, CheckedSub, CheckedMul] {

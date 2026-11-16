@@ -104,7 +104,7 @@ ops take the lane semantics of the scalar op; V = the vector result type, M = `m
 | `vec.min max min_num max_num min_x86 max_x86` | `a b` | IEEE minimum / maximum, minimumNumber / maximumNumber, `a < b ? a : b` (a NaN result is some NaN: quiet bit and payload unspecified); int `min max` by value |
 | `vec.add.wrap sub.wrap mul.wrap add.sat sub.sat mul.sat checked_add checked_sub checked_mul` | `a b` | int lanes; `checked_*` yield `Option<V>` |
 | `vec.div_lanes` † `vec.div_const` † | `a b` / `a K` | int division per lane (traps as scalar `div`) |
-| `vec.and or xor andnot not abs_wrap popcount clz` | lanes | int lanes; `andnot` = `a & ~b` |
+| `vec.and or xor andnot not abs_wrap popcount clz` | lanes | int lanes (`abs_wrap`: signed); `andnot` = `a & ~b` |
 | `vec.shl shr` † `vec.shl.wrap` | `a amount` | amount: V or an int; as scalar shifts |
 | `vec.eq ne lt le gt ge` | `a b` | result M |
 | `vec.reduce_add reduce_add_wrap reduce_min reduce_max reduce_and reduce_or` | `v` | lane type; tree: lane i with lane i+N/2 until one lane remains (`reduce_add`: float lanes; `reduce_add_wrap`: int lanes, wrapping) |
