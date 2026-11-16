@@ -10,14 +10,15 @@
 //! round lowers the instances first requested by the previous one, until no new instance appears.
 //!
 //! **Root set** (contracts/checked-ir.md "Instance root set"). debug: every
-//! non-generic fn and method with a checked body, of the root package, its dependencies, and the
-//! built-in packages (fns dropped for another arch have none: typeck makes no body for them;
-//! `test fn`s only under `stave test`, [`crate::lower::Mode::Test`] /
-//! [`crate::lower::Mode::ReleaseTest`]); release: `main`
+//! non-generic fn and method with a checked body, of the root package and its dependencies (fns
+//! dropped for another arch have none: typeck makes no body for them; `test fn`s only under
+//! `stave test`, [`crate::lower::Mode::Test`] / [`crate::lower::Mode::ReleaseTest`]), plus the
+//! release roots below, so built-in package fns are lowered only when reachable; release: `main`
 //! of the root package, the `extern "C"` exports, the `allocator` module's `alloc`/`free`/`realloc`,
 //! `test fn`s under `stave test`, and the runtime entry points the compiler's own stubs call
 //! (`runtime.start.entry`, `runtime.panic.trap`, `runtime.panic.trap_msg`,
-//! `runtime.panic.on_signal`; contracts/intrinsics.md "Paths fixed by the compiler"). Both modes
+//! `runtime.panic.on_signal`; contracts/intrinsics.md "Paths fixed by the compiler"; a debug build
+//! also roots `runtime.thread.entry`, which the thread start stub calls). Both modes
 //! then add every instance a lowered body requests (calls, fn-value uses, drop glue), round by
 //! round; a lowered `dispatch fn` requests its arm targets ([`dispatch_arms`]), so a reachable
 //! dispatch makes them reachable.
@@ -36,6 +37,7 @@ use crate::Program;
 use crate::decls::{DeclFlags, DeclKind};
 use crate::ids::{DeclId, Sym};
 use crate::itemcx::{Brackets, ItemCx};
+use crate::package::PackageKind;
 use crate::sigs::{Sigs, TraitRef};
 use crate::traits::World;
 use crate::typeck::{Typeck, TypedBody};
@@ -116,10 +118,21 @@ impl LangFns {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RootMode {
     Debug,
+    /// Debug with every built-in package fn a root too.
+    DebugAll,
     Release,
 }
 
-/// The instance root set, in decl order.
+/// Whether `d` is declared in a built-in package (`std`, `runtime`, and the packages they
+/// depend on).
+fn in_builtin_package(prog: &Program, d: DeclId) -> bool {
+    prog.decl(d)
+        .and_then(|x| prog.module(x.module))
+        .is_some_and(|m| prog.packages.get(m.package.idx()).is_some_and(|p| p.kind == PackageKind::Builtin))
+}
+
+/// The instance root set: release order is sorted; debug lists the program's own fns in decl
+/// order, then the fixed roots sorted.
 pub(crate) fn roots(prog: &Program, tc: &Typeck, mode: RootMode, test: bool) -> Vec<InstKey> {
     let mut out: Vec<InstKey> = Vec::new();
     let is_fn = |d: DeclId| {
@@ -127,56 +140,59 @@ pub(crate) fn roots(prog: &Program, tc: &Typeck, mode: RootMode, test: bool) -> 
             && tc.body(d).is_some_and(|b| !b.has_error)
             && tc.sigs.fn_sig(d).is_some_and(|s| s.generics.is_empty())
     };
-    match mode {
-        RootMode::Debug => {
-            for b in &tc.bodies {
-                let Some(d) = prog.decl(b.decl) else { continue };
-                if d.flags.has(DeclFlags::TEST) && !test {
-                    continue;
-                }
-                if is_fn(b.decl) {
-                    out.push(InstKey { decl: b.decl, args: Vec::new() });
-                }
+    if mode != RootMode::Release {
+        for b in &tc.bodies {
+            let Some(d) = prog.decl(b.decl) else { continue };
+            if d.flags.has(DeclFlags::TEST) && !test {
+                continue;
+            }
+            if is_fn(b.decl) && (mode == RootMode::DebugAll || !in_builtin_package(prog, b.decl)) {
+                out.push(InstKey { decl: b.decl, args: Vec::new() });
             }
         }
-        RootMode::Release => {
-            let mut add = |d: Option<DeclId>| {
-                if let Some(d) = d
-                    && is_fn(d)
-                    && !out.iter().any(|k| k.decl == d)
-                {
-                    out.push(InstKey { decl: d, args: Vec::new() });
-                }
-            };
-            for p in &prog.packages {
-                if p.is_root
-                    && let Some(m) = p.root_module.get()
-                    && let Some(s) = sym(prog, "main")
-                {
-                    add(prog.module_item(m, s));
-                }
-            }
-            for (k, d) in prog.decls.iter().enumerate() {
-                let id = DeclId(k as u32);
-                if d.flags.has(DeclFlags::EXTERN_EXPORT) || (test && d.flags.has(DeclFlags::TEST)) {
-                    add(Some(id));
-                }
-            }
-            for m in allocator_module(prog) {
-                for n in ["alloc", "free", "realloc"] {
-                    add(sym(prog, n).and_then(|s| prog.module_item(m, s)));
-                }
-            }
-            for (m, n) in [
-                ("runtime.start", "entry"),
-                ("runtime.panic", "trap"),
-                ("runtime.panic", "trap_msg"),
-                ("runtime.panic", "on_signal"),
-            ] {
-                add(item_at(prog, m, n));
-            }
-            out.sort();
+    }
+    let own = out.len();
+    let add = |out: &mut Vec<InstKey>, d: Option<DeclId>| {
+        if let Some(d) = d
+            && is_fn(d)
+            && !out.iter().any(|k| k.decl == d)
+        {
+            out.push(InstKey { decl: d, args: Vec::new() });
         }
+    };
+    for p in &prog.packages {
+        if p.is_root
+            && let Some(m) = p.root_module.get()
+            && let Some(s) = sym(prog, "main")
+        {
+            add(&mut out, prog.module_item(m, s));
+        }
+    }
+    for (k, d) in prog.decls.iter().enumerate() {
+        let id = DeclId(k as u32);
+        if d.flags.has(DeclFlags::EXTERN_EXPORT) || (test && d.flags.has(DeclFlags::TEST)) {
+            add(&mut out, Some(id));
+        }
+    }
+    for m in allocator_module(prog) {
+        for n in ["alloc", "free", "realloc"] {
+            add(&mut out, sym(prog, n).and_then(|s| prog.module_item(m, s)));
+        }
+    }
+    for (m, n) in [
+        ("runtime.start", "entry"),
+        ("runtime.panic", "trap"),
+        ("runtime.panic", "trap_msg"),
+        ("runtime.panic", "on_signal"),
+    ] {
+        add(&mut out, item_at(prog, m, n));
+    }
+    if mode != RootMode::Release {
+        add(&mut out, item_at(prog, "runtime.thread", "entry"));
+    }
+    out[own..].sort();
+    if mode == RootMode::Release {
+        out.sort();
     }
     out
 }

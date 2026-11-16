@@ -3,13 +3,7 @@ type t1 int s 32
 type t2 float 32
 type t3 float 64
 type t4 bool
-type t5 str
-type t6 ref t5
-fn @0 std.io.print {
-b0(%0: t6):
-  ret
-}
-fn @1 main.mix {
+fn @0 main.mix {
 b0(%0: t3, %1: t2):
   %2 = mul t3 %0 0x3fb999999999999a
   %3 = add t3 %2 0xc004000000000000
@@ -27,9 +21,9 @@ b3(%5: t3):
   %10 = add t3 %7 %9
   ret %10
 }
-fn @2 main.main {
+fn @1 main.main {
 b0():
-  %0 = call t3 @1 0x3ff0000000000000 0x3f000000
+  %0 = call t3 @0 0x3ff0000000000000 0x3f000000
   %1 = gt t4 %0 0x0000000000000000
   cbr %1 b1() b2()
 b1():

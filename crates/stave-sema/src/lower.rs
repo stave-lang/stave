@@ -43,8 +43,12 @@ use crate::types::{ConstArg, FloatBits, GArg, IntBits, Interner, TypeId, TypeKin
 /// Which build to lower for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Every non-generic fn plus the instances they request (contracts/checked-ir.md).
+    /// Every non-generic fn of the program's own packages, the release roots, and the instances
+    /// they request (contracts/checked-ir.md).
     Debug,
+    /// [`Mode::Debug`] with every fn of the built-in packages a root too (covers all of `std` and
+    /// `runtime`).
+    DebugAll,
     /// Only what is reachable from `main`, exports, the allocator, and the runtime entry points.
     Release,
     /// Debug plus the `test fn`s (`stave test`).
@@ -136,6 +140,7 @@ fn lower_in_pool(prog: &Program, tc: &Typeck, mode: Mode) -> (Result<Module, Vec
 
     let (rmode, test) = match mode {
         Mode::Debug => (RootMode::Debug, false),
+        Mode::DebugAll => (RootMode::DebugAll, false),
         Mode::Release => (RootMode::Release, false),
         Mode::Test => (RootMode::Debug, true),
         Mode::ReleaseTest => (RootMode::Release, true),

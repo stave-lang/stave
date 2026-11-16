@@ -2,13 +2,7 @@ type t0 int u 32
 type t1 int s 32
 type t2 int s 64
 type t3 bool
-type t4 str
-type t5 ref t4
-fn @0 std.io.print {
-b0(%0: t5):
-  ret
-}
-fn @1 main.clamp {
+fn @0 main.clamp {
 b0(%0: t1, %1: t1):
   %2 = lt t3 %0 %1
   cbr %2 b1() b2(%0, 0)
@@ -28,9 +22,9 @@ b5(%7: t1, %8: t0):
   %11 = add t2 %9 %10
   ret %11
 }
-fn @2 main.main {
+fn @1 main.main {
 b0():
-  %0 = call t2 @1 3 5
+  %0 = call t2 @0 3 5
   %1 = eq t3 %0 7
   cbr %1 b1() b2()
 b1():

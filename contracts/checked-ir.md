@@ -314,8 +314,9 @@ reference (`Ref` / `RefMut`); `copy` captures are reserved (no syntax yet, LANG.
 ## Instance root set
 
 - **debug**: every non-generic fn of the package and its dependencies (not fns dropped for
-  needing another arch's features; `test fn`s only under `stave test`), plus every instance they
-  request, transitively.
+  needing another arch's features; `test fn`s only under `stave test`), plus the release roots
+  below and `runtime.thread.entry`, plus every instance they request, transitively. Fns of the built-in packages (`std`,
+  `runtime`) are not roots: they are lowered only when reachable, as in release.
 - **release**: only instances reachable through calls and fn-value uses from the roots `main`,
   `extern "C"` exports, the `allocator` impl, and, under `stave test` (also `stave test --release`),
   `test fn`s, plus the runtime entry points the compiler's own startup, trap, and signal code calls

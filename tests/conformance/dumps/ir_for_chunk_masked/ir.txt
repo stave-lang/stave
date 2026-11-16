@@ -2,28 +2,22 @@ type t0 int u size
 type t1 int s 32
 type t2 float 32
 type t3 bool
-type t4 str
-type t5 ref t4
-type t6 ref t7
-type t7 slice t2
-type t8 vec t2 4
-type t9 mask 32 4
-fn @0 std.io.print {
-b0(%0: t5):
-  ret
-}
-fn @1 main.sum {
-b0(%0: t6):
-  %1 = vec.splat t8 0x00000000
+type t4 ref t5
+type t5 slice t2
+type t6 vec t2 4
+type t7 mask 32 4
+fn @0 main.sum {
+b0(%0: t4):
+  %1 = vec.splat t6 0x00000000
   %2 = slice.len t0 %0
   %3 = sub.sat t0 %2 3
   br b1(0, %1)
-b1(%4: t0, %5: t8):
+b1(%4: t0, %5: t6):
   %6 = lt t3 %4 %3
   cbr %6 b2() b3()
 b2():
-  %7 = vec.load t8 %0 %4
-  %8 = vec.add t8 %5 %7
+  %7 = vec.load t6 %0 %4
+  %8 = vec.add t6 %5 %7
   %9 = add.wrap t0 %4 4
   br b1(%9, %8)
 b3():
@@ -31,17 +25,17 @@ b3():
   %11 = ne t3 %10 0
   cbr %11 b4() b5(%5)
 b4():
-  %12 = mask.first_n t9 %10
-  %13 = vec.load_masked t8 %0 %4 %12
-  %14 = vec.splat t8 0x00000000
-  %15 = mask.select t8 %12 %13 %14
-  %16 = vec.add t8 %5 %15
+  %12 = mask.first_n t7 %10
+  %13 = vec.load_masked t6 %0 %4 %12
+  %14 = vec.splat t6 0x00000000
+  %15 = mask.select t6 %12 %13 %14
+  %16 = vec.add t6 %5 %15
   br b5(%16)
-b5(%17: t8):
+b5(%17: t6):
   %18 = vec.reduce_add t2 %17
   ret %18
 }
-fn @2 main.main {
+fn @1 main.main {
 b0():
   ret 0
 }
