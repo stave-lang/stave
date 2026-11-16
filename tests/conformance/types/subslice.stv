@@ -1,0 +1,37 @@
+//~ CHECK-ONLY
+// A range in index brackets slices an array or slice: `&xs[a..b]` is `&[T]`, `&mut xs[a..b]`
+// is `&mut [T]`. Both ends are `usize` (E0201); only arrays and slices are indexed (E0206); a
+// range held in a local is not an index (E0201).
+import std.vec;
+
+fn ok(xs: &[u8], a: [u8; 4], m: &mut [u8], v: &vec.Vec<u8>) -> usize {
+    let s: &[u8] = &xs[0..xs.len()];
+    let u: &[u8] = &v.as_slice()[0..1];
+    let t: &[u8] = &a[1..=2];
+    let w: &mut [u8] = &mut m[1..2];
+    w[0] = s[0];
+    return t.len() + u.len() + xs[1..1].len();
+}
+
+fn bad_end(xs: &[u8], n: u32) -> usize {
+    return xs[0..n].len(); //~ ERROR E0201
+}
+
+fn bad_operand(v: vec.Vec<u8>) -> usize {
+    let r = v[0..1]; //~ ERROR E0206
+    return 0;
+}
+
+fn range_local(xs: &[u8]) -> usize {
+    let r = 0usize..2;
+    let x: u8 = xs[r]; //~ ERROR E0201
+    return 0;
+}
+
+fn not_a_ref(xs: &[u8]) -> &[u8] from xs {
+    return xs[0..1]; //~ ERROR E0201
+}
+
+fn main() -> i32 {
+    return 0;
+}

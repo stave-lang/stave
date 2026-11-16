@@ -34,8 +34,9 @@ use crate::verify::Dominators;
 
 /// Folding depth of `add`/`sub` chains and `not` chains.
 const DEPTH: u32 = 8;
-/// Constants and offsets beyond this are opaque (keeps every weight sum far from `i64` overflow).
-const MAX_K: i64 = 1 << 40;
+/// Constants and offsets beyond this are opaque (keeps every weight sum far from `i128` overflow).
+/// Every `u64` constant is below it, so a constant index or length is never opaque.
+const MAX_K: i128 = 1 << 64;
 /// An asserting callee is recognized only in bodies of at most this many blocks.
 const ASSERT_BLOCKS: usize = 16;
 
@@ -53,14 +54,13 @@ fn len_node(s: Value) -> u32 {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Term {
     node: u32,
-    k: i64,
+    k: i128,
     root: Option<Value>,
 }
 
 impl Term {
-    pub(super) fn constant(c: u64) -> Option<Term> {
-        let k = i64::try_from(c).ok().filter(|&k| k <= MAX_K)?;
-        Some(Term { node: ZERO, k, root: None })
+    pub(super) fn constant(c: u64) -> Term {
+        Term { node: ZERO, k: i128::from(c), root: None }
     }
 }
 
@@ -76,7 +76,7 @@ struct Region {
 #[derive(Clone, Copy)]
 struct Fact {
     to: u32,
-    w: i64,
+    w: i128,
     at: Region,
     /// The `eq`/`ne` instruction when the fact is one half of a proved equality.
     eq: Option<u32>,
@@ -102,14 +102,14 @@ impl Cx<'_> {
             .is_some_and(|k| matches!(k, TypeKey::Int { signed: false, .. }))
     }
 
-    fn small_const(&self, o: Operand) -> Option<i64> {
-        self.b.int_const(o).and_then(|c| i64::try_from(c).ok()).filter(|c| (0..=MAX_K).contains(c))
+    fn small_const(&self, o: Operand) -> Option<i128> {
+        self.b.int_const(o).filter(|c| (0..=MAX_K).contains(c))
     }
 
     /// The term of an unsigned integer operand.
     pub(super) fn term(&self, o: Operand) -> Option<Term> {
         let mut o = o;
-        let mut k: i64 = 0;
+        let mut k: i128 = 0;
         for _ in 0..DEPTH {
             if let Some(c) = self.small_const(o) {
                 return Some(Term { node: ZERO, k: k.checked_add(c)?, root: None });
@@ -147,7 +147,7 @@ impl Cx<'_> {
     }
 
     /// `slice.len s + k` (the value `root` reads it).
-    fn slice_len(&self, s: Operand, k: i64, root: Value) -> Option<Term> {
+    fn slice_len(&self, s: Operand, k: i128, root: Value) -> Option<Term> {
         let Operand::Value(sv) = s else { return None };
         if let Some(d) = self.def(sv)
             && self.b.insts.op[d as usize] == Op::SliceMake
@@ -225,7 +225,7 @@ impl Cx<'_> {
             return;
         }
         let &[x, y] = args else { return };
-        let mut le = |a: Operand, b: Operand, w: i64, eq: Option<u32>| self.add_le(g, a, b, w, at, eq);
+        let mut le = |a: Operand, b: Operand, w: i128, eq: Option<u32>| self.add_le(g, a, b, w, at, eq);
         match (op, pol) {
             // x < y
             (Op::Lt, true) | (Op::Ge, false) => le(x, y, -1, None),
@@ -244,7 +244,7 @@ impl Cx<'_> {
     }
 
     /// Records `a <= b + w`.
-    fn add_le(&self, g: &mut Graph, a: Operand, b: Operand, w: i64, at: Region, eq: Option<u32>) {
+    fn add_le(&self, g: &mut Graph, a: Operand, b: Operand, w: i128, at: Region, eq: Option<u32>) {
         let (Some(ta), Some(tb)) = (self.term(a), self.term(b)) else { return };
         if ta.node == tb.node {
             return;
@@ -281,7 +281,7 @@ impl Cx<'_> {
         }
         let g = self.graph();
         let block = self.block_of[at as usize];
-        let mut dist: FxHashMap<u32, (i64, Option<u32>)> = FxHashMap::default();
+        let mut dist: FxHashMap<u32, (i128, Option<u32>)> = FxHashMap::default();
         dist.insert(idx.node, (0, None));
         let mut work = VecDeque::from([idx.node]);
         let mut steps = 0u32;
@@ -310,6 +310,11 @@ impl Cx<'_> {
             }
         }
         None
+    }
+
+    /// [`Cx::prove_lt`] for `idx <= n`.
+    pub(super) fn prove_le(&self, at: u32, idx: Term, n: Term) -> Option<Proof> {
+        self.prove_lt(at, idx, Term { k: n.k.checked_add(1)?, ..n })
     }
 }
 

@@ -1,0 +1,33 @@
+//~ EXIT 101
+//~ STDOUT subslice_trap_huge.stdout
+//~ STDERR-CONTAINS "panic: Bounds at subslice_trap_huge.stv:8:14 in main.from_huge (thread 0)"
+// Constant ends far beyond any length still compile; they trap `Bounds` at run time.
+import std.io;
+
+fn from_huge(xs: &[u8]) -> usize {
+    return xs[2000000000000..2000000000001].len();
+}
+
+fn to_huge(xs: &[u8], a: usize) -> usize {
+    return xs[a..3000000000000].len();
+}
+
+fn incl_huge(xs: &[u8]) -> usize {
+    return xs[2000000000000..=2000000000000].len() + xs[0..=18446744073709551615].len();
+}
+
+fn index_huge(xs: &[u8]) -> u8 {
+    return xs[2000000000000];
+}
+
+fn main() -> i32 {
+    let v: [u8; 3] = [1, 2, 3];
+    if v.len() > 5 {
+        let t = to_huge(&v, 0) + incl_huge(&v);
+        let x = index_huge(&v);
+    }
+    io.print("start\n");
+    let n = from_huge(&v);
+    io.print("not reached\n");
+    return 0;
+}

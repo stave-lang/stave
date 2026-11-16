@@ -51,6 +51,15 @@ fn pair_sum(xs: &[u32]) -> u32 {
     return s;
 }
 
+fn window_sum(xs: &[u32], n: usize) -> u32 {
+    let w = &xs[0..n];
+    let mut s: u32 = 0;
+    for i in 0..n {
+        s += w[i] + xs[i];
+    }
+    return s;
+}
+
 // The look-alikes below keep their checks: each would trap on some input, just not on these.
 
 fn le_only(a: &[u32], b: &[u32]) -> u32 {
@@ -112,7 +121,8 @@ fn main() -> i32 {
     let v8 = next_under_len(&none);
     let v9 = prev_wrapping(&none);
     let v10 = at_offset(&a, 0);
+    let v11 = window_sum(&a, 3);
     io.print(f"{v1} {v2} {v3} {v4} {v5}\n");
-    io.print(f"{v6} {v7} {v8} {v9} {v10}\n");
+    io.print(f"{v6} {v7} {v8} {v9} {v10} {v11}\n");
     return 0;
 }

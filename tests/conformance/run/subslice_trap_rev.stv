@@ -1,0 +1,18 @@
+//~ EXIT 101
+//~ STDOUT subslice_trap_rev.stdout
+//~ STDERR-CONTAINS "panic: Bounds at subslice_trap_rev.stv:8:14 in main.part (thread 0)"
+// `xs[a..b]` with `a > b` traps `Bounds`, even when both ends are within the length.
+import std.io;
+
+fn part(xs: &[u8], a: usize, b: usize) -> usize {
+    return xs[a..b].len();
+}
+
+fn main() -> i32 {
+    let v: [u8; 4] = [1, 2, 3, 4];
+    let n = part(&v, 2, 2);
+    io.print(f"empty {n}\n");
+    let m = part(&v, 3, 2);
+    io.print("not reached\n");
+    return 0;
+}

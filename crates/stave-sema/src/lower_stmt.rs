@@ -69,7 +69,8 @@ impl<'a> FnCx<'a> {
     }
 
     /// Walks a postfix chain's steps: the root local of the place it denotes; method calls whose
-    /// receiver is auto-referenced at a local root are reported to `autoref`.
+    /// receiver is auto-referenced at a local root, and sub-slices of a local root, are reported
+    /// to `autoref`.
     fn chain_root(&self, n: u32, mut autoref: Option<&mut Vec<usize>>) -> Option<usize> {
         let icx = self.icx;
         let kids = icx.kids_vec(n);
@@ -129,6 +130,12 @@ impl<'a> FnCx<'a> {
             if t == Term::LBracket as u8 {
                 match self.target(p) {
                     Some(Target::Index { derefs }) if *derefs == 0 => {}
+                    // a sub-slice is formed from the root's address
+                    Some(Target::Slice { derefs }) if *derefs == 0 => {
+                        if let (Some(r), Some(out)) = (root, autoref.as_deref_mut()) {
+                            out.push(r);
+                        }
+                    }
                     _ => root = None,
                 }
                 p = icx.close(p) + 1;
@@ -199,10 +206,12 @@ impl<'a> FnCx<'a> {
         let mut autoref: Vec<usize> = Vec::new();
         let mut assigns: Vec<(u32, usize)> = Vec::new();
         // a postfix chain adds to `autoref` only at a method call with an auto-referenced
-        // receiver: without one in the body the chains (most nodes of a body) are not walked
-        let autoref_calls = tb.targets.iter().any(
-            |(_, t)| matches!(t, Target::Method { adjust, .. } if adjust.autoref.is_some() && adjust.derefs == 0),
-        );
+        // receiver or at a sub-slice of the root: without one in the body the chains (most nodes
+        // of a body) are not walked
+        let autoref_calls = tb.targets.iter().any(|(_, t)| {
+            matches!(t, Target::Method { adjust, .. } if adjust.autoref.is_some() && adjust.derefs == 0)
+                || matches!(t, Target::Slice { derefs: 0 })
+        });
         // most nodes are expression wrappers: the three kinds of interest are picked by their raw
         // ids
         let hi = (root as usize + 1).min(icx.ast.nodes.len());

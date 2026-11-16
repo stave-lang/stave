@@ -1,0 +1,20 @@
+//~ EXIT 101
+//~ STDOUT subslice_trap_incl.stdout
+//~ STDERR-CONTAINS "panic: Bounds at subslice_trap_incl.stv:8:14 in main.upto (thread 0)"
+// `xs[a..=b]` needs `b < len`: an end of `usize` max traps `Bounds`, not `Overflow`.
+import std.io;
+
+fn upto(xs: &[i32], a: usize, b: usize) -> usize {
+    return xs[a..=b].len();
+}
+
+fn main() -> i32 {
+    let v: [i32; 3] = [7, 8, 9];
+    let n = upto(&v, 0, 2);
+    let e = upto(&v, 3, 2);
+    io.print(f"full {n} empty {e}\n");
+    let max: usize = 18446744073709551615;
+    let m = upto(&v, 0, max);
+    io.print("not reached\n");
+    return 0;
+}

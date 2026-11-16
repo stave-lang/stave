@@ -356,7 +356,7 @@ fn chain_binding(icx: &ItemCx<'_>, tb: &TypedBody, n: u32, recv_mut: bool) -> Op
         }
         if t == Term::LBracket as u8 {
             match tb.target(p) {
-                Some(Target::Index { derefs }) if *derefs == 0 => {}
+                Some(Target::Index { derefs } | Target::Slice { derefs }) if *derefs == 0 => {}
                 _ => root = None,
             }
             p = icx.close(p) + 1;

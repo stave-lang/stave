@@ -1,0 +1,15 @@
+//~ EXIT 101
+//~ STDOUT subslice_trap_const.stdout
+//~ STDERR-CONTAINS "panic: Bounds at subslice_trap_const.stv:12:14 in main.main (thread 0)"
+// A constant range past a constant array length compiles to an unconditional trap, as a
+// constant index does.
+import std.io;
+
+fn main() -> i32 {
+    let a: [u16; 4] = [1, 2, 3, 4];
+    let n = a[2..4].len();
+    io.print(f"ok {n}\n");
+    let m = a[2..5].len();
+    io.print("not reached\n");
+    return 0;
+}

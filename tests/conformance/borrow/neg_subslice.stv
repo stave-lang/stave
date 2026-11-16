@@ -1,0 +1,40 @@
+//~ CHECK-ONLY
+// A sub-slice borrows its whole operand: two loans of one array or slice conflict even for
+// disjoint ranges (E0501). `&mut xs[a..b]` needs a mutable place (E0503), and a sub-slice is
+// never moved out (E0504).
+fn disjoint(xs: &mut [u32]) {
+    let lo = &mut xs[0..2];
+    let hi = &mut xs[2..4]; //~ ERROR E0501
+    lo[0] = 1;
+    hi[0] = 2;
+}
+
+fn read_while_mut(a: &mut [u32; 4]) -> u32 {
+    let w = &mut a[1..3];
+    let x = a[0]; //~ ERROR E0501
+    w[0] = x;
+    return x;
+}
+
+fn through_shared(xs: &[u32]) {
+    let w = &mut xs[0..1]; //~ ERROR E0503
+    xs[0..1][0] = 5;       //~ ERROR E0503
+}
+
+fn by_value(xs: &[u32]) -> usize {
+    let s = xs[0..1]; //~ ERROR E0504
+    return 0;
+}
+
+fn sequential(xs: &mut [u32]) {
+    let lo = &mut xs[0..2];
+    lo[0] = 1;
+    let hi = &mut xs[2..4];
+    hi[0] = 2;
+}
+
+fn main() -> i32 {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    let w = &mut a[0..2]; //~ ERROR E0503
+    return 0;
+}
