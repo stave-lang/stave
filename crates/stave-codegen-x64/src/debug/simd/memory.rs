@@ -211,14 +211,16 @@ impl Cg<'_, '_> {
         Ok(())
     }
 
-    /// Active lanes only: the memory of inactive lanes is not touched.
+    /// Active lanes only: the memory of inactive lanes is not touched. Without a masked store
+    /// instruction: up to 8 lanes, every lane is stored without a branch, an inactive one back
+    /// to its own bytes in the home of `v`; more lanes, a loop over the set mask bits.
     pub(super) fn v_store_masked(&mut self, s: Operand, i: Operand, v: Operand, m: Operand) -> Res<()> {
         let sh = self.voshape(v)?;
         let packed = match self.vmaskmov(sh) {
             Some((_, op)) => Some((op, self.vread(v, sh.size)?)),
             None => None,
         };
-        let homes = if packed.is_none() { Some((self.vmem(v)?, self.vmem(m)?)) } else { None };
+        let home = if packed.is_none() { Some(self.vmem(v)?) } else { None };
         let (base, len) = self.vbase(s)?;
         let ig = self.read_g(i)?;
         let x = self.vread(m, sh.size)?;
@@ -234,16 +236,36 @@ impl Cg<'_, '_> {
             }
             return Ok(());
         }
-        let Some((mv, mm)) = homes else { return Err(bad("internal: masked store")) };
-        for k in 0..sh.n {
-            let skip = self.a.new_label();
-            self.a.alu_mi(AluOp::Cmp, Size::B, lane(mm, k, sh.w)?, 0)?;
-            self.a.jcc(Cond::E, skip)?;
-            self.sized_load(S0, lane(mv, k, sh.w)?, sh.w as u8, false)?;
-            self.a.mov_mr(size_of(sh.w), lane(mem, k, sh.w)?, S0)?;
-            self.a.bind(skip)?;
+        let Some(mv) = home else { return Err(bad("internal: masked store")) };
+        let (t, u) = (self.alloc_g()?, self.alloc_g()?);
+        let (wb, ws) = (sh.w as u8, size_of(sh.w));
+        if sh.n <= 8 {
+            for k in 0..sh.n {
+                let src = lane(mv, k, sh.w)?;
+                self.a.lea(Size::Q, t, src)?;
+                self.a.lea(Size::Q, u, lane(mem, k, sh.w)?)?;
+                self.a.test_ri(Size::D, bits, 1 << k)?;
+                self.a.cmov(Cond::Ne, Size::Q, t, u)?;
+                self.sized_load(S0, src, wb, false)?;
+                self.a.mov_mr(ws, Mem::base(t, 0), S0)?;
+            }
+            return Ok(());
         }
-        Ok(())
+        let (top, done) = (self.a.new_label(), self.a.new_label());
+        let sc = scale_of(sh.w);
+        self.a.lea(Size::Q, t, mv)?;
+        self.a.lea(Size::Q, u, mem)?;
+        self.a.bind(top)?;
+        self.a.test_rr(Size::D, bits, bits);
+        self.a.jcc(Cond::E, done)?;
+        self.a.bsf(Size::D, S1, bits)?;
+        self.sized_load(S0, Mem::index(t, S1, sc, 0), wb, false)?;
+        self.a.mov_mr(ws, Mem::index(u, S1, sc, 0), S0)?;
+        // clear the lowest set bit
+        self.a.lea(Size::D, S0, Mem::base(bits, -1))?;
+        self.a.alu_rr(AluOp::And, Size::D, bits, S0);
+        self.a.jmp(top)?;
+        Ok(self.a.bind(done)?)
     }
 
     /// Traps `Bounds` unless every index lane (zero-extended) is below `len`. Clobbers `S0`,

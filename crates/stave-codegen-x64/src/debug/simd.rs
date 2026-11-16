@@ -29,6 +29,7 @@
 //! values cleans after an op that used a `ymm` register inside.
 
 mod arith;
+pub(super) mod compress;
 mod memory;
 mod shape;
 
