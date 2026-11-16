@@ -6,10 +6,12 @@ import std.io;
 fn main() -> i32 {
     let xs: [u32; 6] = [1, 2, 3, 4, 5, 6];
     let ok: [u32; 4] = [5, 0, 5, 1];
-    let g = u32x4.gather(&xs, u32x4.load(&ok, 0)).reduce_add_wrap();
-    io.print(f"in range: {g}\n");
-    let bad: [u32; 4] = [0, 1, 6, 2];
-    let h = u32x4.gather(&xs, u32x4.load(&bad, 0)).reduce_add_wrap();
-    io.print(f"not reached: {h}\n");
+    emulate {
+        let g = u32x4.gather(&xs, u32x4.load(&ok, 0)).reduce_add_wrap();
+        io.print(f"in range: {g}\n");
+        let bad: [u32; 4] = [0, 1, 6, 2];
+        let h = u32x4.gather(&xs, u32x4.load(&bad, 0)).reduce_add_wrap();
+        io.print(f"not reached: {h}\n");
+    }
     return 0;
 }

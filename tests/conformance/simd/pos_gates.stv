@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+//~ TARGET x86_64-linux-v3
+//~ TARGET aarch64-linux
+// Ops of class U on a target are legal inside `emulate { }`; `strict { }` accepts native ops.
+fn strict_native(a: f32x4, b: i32x4, s: &[f32], d: &mut [f32]) -> f32x4 {
+    let mut r = a;
+    strict {
+        let x = f32x4.load(s, 0) * a + a - a / a;
+        let y = b +% b -% b;
+        let m = x < a;
+        r = m.select(x, a);
+        r.store(d, 0);
+        let z = (y & b) | (y ^ b);
+    }
+    return r;
+}
+
+fn emulated(a: f32x4, s: &[u32], d: &mut [u32], k: u32x4, j: u8x4) -> u32x4 {
+    let mut q = k;
+    emulate {
+        let x = a.fma(a, a);
+        let g = u32x4.gather(s, k) +% u32x4.gather(s, j);
+        g.scatter(d, k);
+        q = g.div_lanes(k);
+    }
+    return q;
+}
+
+fn main() -> i32 {
+    return 0;
+}

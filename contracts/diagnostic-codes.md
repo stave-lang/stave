@@ -113,9 +113,9 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0607 | vector integer division by a non-constant (use `div_lanes`) |
 | E0608 | permute or table index out of range at compile time |
 | E0609 | generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument. Write `f32x8` / `mask32x8` |
-| E0700 | operation unavailable (class U) on the target, outside `emulate { }`. Planned |
-| E0701 | class M or U operation inside `strict { }`. Planned |
-| E0702 | vector type wider than the target's register. Planned |
+| E0700 | operation unavailable (class U) on the target, outside `emulate { }` |
+| E0701 | class M or U operation inside `strict { }` |
+| E0702 | vector type wider than the target's register |
 | E0703 | vector in a signature whose `needs` does not cover its width (`extern "C"` signatures: E0804). Planned |
 | E0704 | callee needs features the caller lacks |
 | E0705 | dispatch arm signature differs from the dispatch signature. Planned |

@@ -148,6 +148,8 @@ pub struct TypedBody {
     pub coercions: Vec<(u32, Coercion)>,
     pub sites: Vec<CallSite>,
     pub has_error: bool,
+    /// Class U ops inside `emulate { }`, in source order ([`crate::gates`]).
+    pub emulated: Vec<crate::gates::Emulated>,
 }
 
 impl TypedBody {
@@ -197,6 +199,13 @@ pub struct Typeck {
 impl Typeck {
     pub fn body(&self, d: DeclId) -> Option<&TypedBody> {
         self.bodies.binary_search_by_key(&d, |b| b.decl).ok().map(|i| &self.bodies[i])
+    }
+
+    /// Every class U op inside `emulate { }`, sorted by span.
+    pub fn emulated(&self) -> Vec<&crate::gates::Emulated> {
+        let mut v: Vec<&crate::gates::Emulated> = self.bodies.iter().flat_map(|b| &b.emulated).collect();
+        v.sort_by_key(|e| e.span);
+        v
     }
 
     /// Resolution and type diagnostics together, canonical order (duplicates removed).
@@ -438,6 +447,7 @@ fn empty_body(j: Job) -> TypedBody {
         coercions: Vec::new(),
         sites: Vec::new(),
         has_error: true,
+        emulated: Vec::new(),
     }
 }
 
@@ -634,6 +644,7 @@ pub(crate) struct Ck<'a> {
     /// While the alternatives of an or-pattern are typed: the bindings of the current
     /// alternative (binding node, type, mode), in source order.
     pub or_binds: Option<Vec<(u32, TypeId, crate::patterns::Mode)>>,
+    pub gates: crate::gates::Gates,
 }
 
 fn check_body(
@@ -689,6 +700,7 @@ fn check_body(
         kids_buf: Vec::new(),
         chain_buf: Vec::new(),
         or_binds: None,
+        gates: crate::gates::Gates::default(),
     };
     match j.kind {
         JobKind::Fn => {
@@ -1291,6 +1303,7 @@ impl<'a> Ck<'a> {
             coercions: std::mem::take(&mut self.coercions),
             sites: std::mem::take(&mut self.sites),
             has_error,
+            emulated: std::mem::take(&mut self.gates.emulated),
         };
         // thread-crossing capture checks (E0802, E0806; crate::threads)
         let td = self.thread_checks(&body);
@@ -1428,7 +1441,12 @@ impl<'a> Ck<'a> {
             self.scope_depth = saved;
             self.closure_in_scope = saved_closure;
             false
-        } else if t == Term::KwStrict as u8 || t == Term::KwEmulate as u8 || t == Term::LBrace as u8 {
+        } else if t == Term::KwStrict as u8 || t == Term::KwEmulate as u8 {
+            let saved = self.gates.enter(a, t == Term::KwStrict as u8);
+            let r = kids.first().is_some_and(|&b| self.block(b));
+            self.gates.leave(saved);
+            r
+        } else if t == Term::LBrace as u8 {
             kids.first().is_some_and(|&b| self.block(b))
         } else {
             match kids.first() {
@@ -1699,6 +1717,10 @@ impl sigs::LowerHost for Ck<'_> {
 
     fn view_env(&self) -> &[GenericParam] {
         self.generics
+    }
+
+    fn vector_width(&mut self, span: Span, ty: &str, bits: u32) {
+        self.gate_width_of(span, ty, bits);
     }
 }
 

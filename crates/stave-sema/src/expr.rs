@@ -267,10 +267,14 @@ impl<'a> Ck<'a> {
             TypeKind::Int { .. } | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char => Ty::T(ids::BOOL),
             TypeKind::Ptr { .. } | TypeKind::Fn { .. } if eq_only => Ty::T(ids::BOOL),
             TypeKind::Vector { lane, n: lanes } => {
+                self.gate_compare(icx.a(opn), op, t);
                 let w = types::lane_bits(self.tys.kind(lane)) as u8;
                 Ty::T(self.tys.intern(TypeKind::Mask { width: w, n: lanes }))
             }
-            TypeKind::Mask { .. } if eq_only => Ty::T(t),
+            TypeKind::Mask { .. } if eq_only => {
+                self.gate_compare(icx.a(opn), op, t);
+                Ty::T(t)
+            }
             _ => {
                 self.e0206(icx.a(opn), t);
                 Ty::T(ids::BOOL)
@@ -465,7 +469,7 @@ impl<'a> Ck<'a> {
                     if op != Term::LtLtPercent as u8 {
                         self.const_shift_amount(r, vt);
                     }
-                    return self.op_on(at_tok, op, vt);
+                    return self.op_on_gated(at_tok, op, vt, "const");
                 }
                 return Ty::ERR;
             }
@@ -484,7 +488,7 @@ impl<'a> Ck<'a> {
                     if op != Term::LtLtPercent as u8 {
                         self.const_shift_amount(r, tt);
                     }
-                    return self.op_on(at_tok, op, tt);
+                    return self.op_on_gated(at_tok, op, tt, "vector");
                 }
             }
         }
@@ -502,8 +506,17 @@ impl<'a> Ck<'a> {
                 }
                 Ty::Lit(g)
             }
-            Ty::T(tt) => self.op_on(at_tok, op, tt),
+            Ty::T(tt) => self.op_on_gated(at_tok, op, tt, ""),
         }
+    }
+
+    /// [`Ck::op_on`], then the lowering gate of a vector or mask operator (crate::gates).
+    fn op_on_gated(&mut self, tok: u32, op: u8, t: TypeId, form: &str) -> Ty {
+        let r = self.op_on(tok, op, t);
+        if r == Ty::T(t) {
+            self.gate_binop(tok, op, t, form);
+        }
+        r
     }
 
     /// Validity of a binary operator on operand type `t` (both operands `t`): the result type.
@@ -851,7 +864,10 @@ impl<'a> Ck<'a> {
         }
         match self.tys.kind(t).clone() {
             TypeKind::Int { signed: true, .. } | TypeKind::Float(_) => Ty::T(t),
-            TypeKind::Vector { lane, .. } if self.tys.is_float(lane) => Ty::T(t),
+            TypeKind::Vector { lane, .. } if self.tys.is_float(lane) => {
+                self.gate(tok, "vec.neg", t, "");
+                Ty::T(t)
+            }
             TypeKind::Int { .. } | TypeKind::Vector { .. } | TypeKind::Bool | TypeKind::Char => {
                 self.e0206(tok, t);
                 Ty::ERR
@@ -865,8 +881,15 @@ impl<'a> Ck<'a> {
             return Ty::ERR;
         }
         match self.tys.kind(t).clone() {
-            TypeKind::Int { .. } | TypeKind::Mask { .. } => Ty::T(t),
-            TypeKind::Vector { lane, .. } if self.tys.int(lane).is_some() => Ty::T(t),
+            TypeKind::Int { .. } => Ty::T(t),
+            TypeKind::Mask { .. } => {
+                self.gate(tok, "mask.not", t, "");
+                Ty::T(t)
+            }
+            TypeKind::Vector { lane, .. } if self.tys.int(lane).is_some() => {
+                self.gate(tok, "vec.not", t, "");
+                Ty::T(t)
+            }
             TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char | TypeKind::Vector { .. } => {
                 self.e0206(tok, t);
                 Ty::ERR
@@ -900,7 +923,12 @@ impl<'a> Ck<'a> {
                 continue;
             }
             match self.cast_result(op, acc, to) {
-                Some(r) => acc = r,
+                Some(r) => {
+                    if let Some(name) = crate::gates::cast_name(op) {
+                        self.gate_cast(optok, name, acc, to);
+                    }
+                    acc = r;
+                }
                 None => {
                     let (f, t) = (self.show(acc), self.show(to));
                     let sp = icx.range_span(optok, icx.end_tok(tn));
@@ -1519,9 +1547,15 @@ impl<'a> Ck<'a> {
                 Prim::Scalar(s) => St::TypeVal(types::scalar_type(s)),
                 Prim::Vector { lane, n } => {
                     let l = types::scalar_type(lane);
-                    St::TypeVal(self.tys.intern(TypeKind::Vector { lane: l, n }))
+                    let t = self.tys.intern(TypeKind::Vector { lane: l, n });
+                    self.gate_width(icx.tok_span(tok), t);
+                    St::TypeVal(t)
                 }
-                Prim::Mask { width, n } => St::TypeVal(self.tys.intern(TypeKind::Mask { width, n })),
+                Prim::Mask { width, n } => {
+                    let t = self.tys.intern(TypeKind::Mask { width, n });
+                    self.gate_width(icx.tok_span(tok), t);
+                    St::TypeVal(t)
+                }
                 _ => St::Err,
             },
             Res::Builtin(b) => {
@@ -2520,7 +2554,7 @@ impl<'a> Ck<'a> {
                 if !self.arity(n, paren, ps.len(), args.len(), false) {
                     return self.args_only(args);
                 }
-                self.builtin_args(&ps, args);
+                let ats = self.builtin_args(&ps, args);
                 let nm = builtins::builtin_assoc_name(text);
                 self.target(
                     tok,
@@ -2532,6 +2566,7 @@ impl<'a> Ck<'a> {
                         consts: Vec::new(),
                     },
                 );
+                self.gate_assoc(tok, nm, ty, ret, &ats);
                 Ty::T(ret)
             }
             St::Val(t) => {
@@ -3044,10 +3079,11 @@ impl<'a> Ck<'a> {
                     }
                     // `select` on a `bool` takes its type from its operands; on a mask from the
                     // vector operands.
+                    let mut ats = Vec::new();
                     let (ret, out) = if b.name == "select" && matches!(self.tys.kind(c), TypeKind::Bool) {
                         (ret, self.select_operands(args, hint))
                     } else {
-                        let ats = self.builtin_args(&ps, args);
+                        ats = self.builtin_args(&ps, args);
                         let ret = if b.name == "select" { self.select_ty(c, &ats, args) } else { ret };
                         if let [GArg::Const(ConstArg::Value(k))] = gargs[..]
                             && b.name == "div_const"
@@ -3062,6 +3098,7 @@ impl<'a> Ck<'a> {
                         reborrow: false,
                     };
                     self.target(seg, Target::Builtin { name: b.name, recv: c, adjust, ret, consts });
+                    self.gate_method(seg, b.name, c, ret, &ats);
                     out
                 }
                 MethodRef::Impl { method, ref impl_args, .. } => {
@@ -3505,8 +3542,21 @@ impl<'a> Ck<'a> {
                     let d = mk("E0601", None, &[("type", &tn)], icx.node_span(iter), &[]);
                     self.report(d);
                 }
+                self.gate(icx.a(f), "loop.chunk", vec_t, "");
                 if let Some(tc) = tail {
                     self.tail_clause(tc, b, lane, n);
+                    let op = if icx.is(icx.a(tc) + 1, Term::KwMasked) {
+                        if matches!(self.tys.kind(b), TypeKind::Ref { mutable: true, .. }) {
+                            "loop.tail_masked_mut"
+                        } else {
+                            "loop.tail_masked"
+                        }
+                    } else if icx.is(icx.a(tc) + 1, Term::KwScalar) {
+                        "loop.tail_scalar"
+                    } else {
+                        "loop.tail_exact"
+                    };
+                    self.gate(icx.a(tc), op, vec_t, "");
                 }
             } else if b != ids::ERROR {
                 // a plain annotated element binding: it must be the element type

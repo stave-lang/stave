@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0701: inside `strict { }`, an op of class M or U, or one the lowering table does not list.
+// An `emulate` block inside does not lift it; a closure inside is inside it.
+fn f(a: f32x4, b: i8x16, c: i64x2, s: &[u32], k: u32x4) -> i8x16 {
+    let mut r = b;
+    strict {
+        let x = a * a + a;
+        let lt = (a < x).select(a, x);
+        r = b *% b; //~ ERROR E0701
+        let y = a.fma(a, a); //~ ERROR E0701
+        emulate {
+            let g = u32x4.gather(s, k); //~ ERROR E0701
+        }
+        let m = mask32x4.all(); //~ ERROR E0701
+        let h = fn(v: i64x2) -> i64x2 { return v *% v; }; //~ ERROR E0701
+    }
+    emulate {
+        strict {
+            let z = c *% c; //~ ERROR E0701
+        }
+    }
+    return r;
+}
+
+fn main() -> i32 {
+    return 0;
+}

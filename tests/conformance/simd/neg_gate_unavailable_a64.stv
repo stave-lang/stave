@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+//~ TARGET aarch64-linux
+// E0700 on AArch64 without SVE: gather, scatter, `div_lanes`; `fma` is native.
+fn f(a: f32x4, s: &[u32], d: &mut [u32], k: u32x4) -> u32x4 {
+    let x = a.fma(a, a);
+    let g = u32x4.gather(s, k); //~ ERROR E0700
+    g.scatter(d, k); //~ ERROR E0700
+    let q = k.div_lanes(k); //~ ERROR E0700
+    return q;
+}
+
+fn main() -> i32 {
+    return 0;
+}

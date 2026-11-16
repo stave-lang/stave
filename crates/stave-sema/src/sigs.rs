@@ -365,6 +365,8 @@ pub(crate) trait LowerHost: Interner {
     fn view_env(&self) -> &[GenericParam] {
         &[]
     }
+    /// A written fixed vector or mask type `ty` of `bits` bits at `span` (E0702, crate::gates).
+    fn vector_width(&mut self, _span: Span, _ty: &str, _bits: u32) {}
 }
 
 /// Lowers a `Type` or `TypeBase` node. `ret_pos`: directly after `->` (where `never` is legal).
@@ -768,9 +770,18 @@ fn lower_prim<H: LowerHost>(
         }
         Prim::Vector { lane, n: lanes } => {
             let l = h.scalar_ty(lane);
+            if let Lanes::Fixed(k) = lanes {
+                let bits = types::lane_bits(h.kind(l)) * k as u32;
+                h.vector_width(icx.node_span(n), icx.tok_str(icx.a(n)), bits);
+            }
             h.intern(TypeKind::Vector { lane: l, n: lanes })
         }
-        Prim::Mask { width, n: lanes } => h.intern(TypeKind::Mask { width, n: lanes }),
+        Prim::Mask { width, n: lanes } => {
+            if let Lanes::Fixed(k) = lanes {
+                h.vector_width(icx.node_span(n), icx.tok_str(icx.a(n)), width as u32 * k as u32);
+            }
+            h.intern(TypeKind::Mask { width, n: lanes })
+        }
         Prim::VecGeneric | Prim::MaskGeneric => {
             // `vec<T, N>` / `mask<W, N>` (E0609 when no argument is generic).
             let kids = gargs.map(|g| icx.kids_vec(g)).unwrap_or_default();
@@ -829,6 +840,10 @@ pub(crate) struct SigBuilder<'p> {
     /// The generics of the decl being built ([`LowerHost::view_env`]).
     cur_generics: Vec<GenericParam>,
     layout_busy: Vec<TypeId>,
+    /// Lowering the signature of a fn with `needs(...)`: no E0702 (crate::gates).
+    ungated: bool,
+    /// E0702 spans already reported.
+    wide: Vec<Span>,
 }
 
 impl Interner for SigBuilder<'_> {
@@ -877,6 +892,17 @@ impl<'p> LowerHost for SigBuilder<'p> {
     fn view_env(&self) -> &[GenericParam] {
         &self.cur_generics
     }
+
+    fn vector_width(&mut self, span: Span, ty: &str, bits: u32) {
+        if self.ungated || self.wide.contains(&span) {
+            return;
+        }
+        let d = crate::gates::too_wide(ty, bits, crate::gates::max_vector_bits(self.prog.target), span);
+        if d.is_some() {
+            self.wide.push(span);
+        }
+        self.diags.extend(d);
+    }
 }
 
 impl<'p> SigBuilder<'p> {
@@ -894,6 +920,8 @@ impl<'p> SigBuilder<'p> {
             const_stack: Vec::new(),
             layout_busy: Vec::new(),
             cur_generics: Vec::new(),
+            ungated: false,
+            wide: Vec::new(),
         };
         b.find_lang_items();
         b
@@ -1189,6 +1217,7 @@ impl<'p> SigBuilder<'p> {
         };
         let env = TyEnv { icx, n_parent, self_ty };
         let kind = icx.kind(n);
+        let ungated = std::mem::replace(&mut self.ungated, icx.child(n, NodeKind::Needs).is_some());
         let mut params = Vec::new();
         let mut param_spans = Vec::new();
         let mut param_nodes: Vec<u32> = Vec::new();
@@ -1263,6 +1292,7 @@ impl<'p> SigBuilder<'p> {
             Some(t) => lower_type(self, &env, t, true),
             None => ids::UNIT,
         };
+        self.ungated = ungated;
         let ret_span = ret_node.map(|t| icx.node_span(t));
         let mut origins = Vec::new();
         // span and written name of each origin (crate::origins::check_sig)

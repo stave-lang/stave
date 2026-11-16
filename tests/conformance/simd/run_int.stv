@@ -27,16 +27,24 @@ fn main() -> i32 {
     show(a.div_const::<4>());
     show(a.permute::<[3, 2, 1, 0]>());
     let ix: [u32; 4] = [5, 0, 5, 1];
-    show(u32x4.gather(&xs, u32x4.load(&ix, 0)));
+    emulate {
+        show(u32x4.gather(&xs, u32x4.load(&ix, 0)));
+    }
     let mut ys: [u32; 4] = [0, 0, 0, 0];
     let dup: [u32; 4] = [1, 3, 1, 1];
     let vals: [u32; 4] = [7, 8, 9, 20];
-    u32x4.load(&vals, 0).scatter(&mut ys, u32x4.load(&dup, 0));
+    emulate {
+        u32x4.load(&vals, 0).scatter(&mut ys, u32x4.load(&dup, 0));
+    }
     show(u32x4.load(&ys, 0));
     let ix16: [u16; 4] = [4, 4, 0, 3];
-    show(u32x4.gather(&xs, u16x4.load(&ix16, 0)));
+    emulate {
+        show(u32x4.gather(&xs, u16x4.load(&ix16, 0)));
+    }
     let ix8: [u8; 4] = [3, 2, 3, 0];
-    u32x4.load(&vals, 0).scatter(&mut ys, u8x4.load(&ix8, 0));
+    emulate {
+        u32x4.load(&vals, 0).scatter(&mut ys, u8x4.load(&ix8, 0));
+    }
     show(u32x4.load(&ys, 0));
     let m = a > u32x4.splat(13);
     let mb = m.to_bits();

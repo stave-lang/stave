@@ -2344,7 +2344,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0700",
         severity: Severity::Error,
         area: "features",
-        rule: "operation unavailable (class U) on the target, outside `emulate { }` (planned)",
+        rule: "operation unavailable (class U) on the target, outside `emulate { }`",
         retired: false,
         located: true,
         holes: &[
@@ -2371,7 +2371,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0701",
         severity: Severity::Error,
         area: "features",
-        rule: "class M or U operation inside `strict { }` (planned)",
+        rule: "class M or U operation inside `strict { }`",
         retired: false,
         located: true,
         holes: &[
@@ -2399,7 +2399,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0702",
         severity: Severity::Error,
         area: "features",
-        rule: "vector type wider than the target's register (planned)",
+        rule: "vector type wider than the target's register",
         retired: false,
         located: true,
         holes: &[
