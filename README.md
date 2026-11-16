@@ -53,19 +53,46 @@ build), and three small kernels. Milliseconds, wall clock; C at 16 threads = 81 
 
 | compiler | compile, 1 thread | compile, 16 threads | binary, MB | corpus run | nbody | hashmix | sieve |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| stave | 997 | 198 | 7.6 | 220 | 244 | 351 | 1068 |
-| stave --release | 1099 | 228 | 5.4 | 165 | 123 | 256 | 637 |
-| tcc | 84 | 35 | 3.1 | 176 | 372 | 376 | 815 |
-| gcc -O0 | 6617 | 939 | 2.8 | 157 | 345 | 444 | 864 |
-| gcc -O2 | 40393 | 4339 | 1.4 | 40 | 90 | 127 | 248 |
-| clang -O0 | 3338 | 642 | 2.9 | 159 | 331 | 301 | 743 |
-| clang -O2 | 22668 | 3355 | 2.0 | 32 | 89 | 124 | 272 |
+| stave | 988 | 179 | 7.6 | 212 | 239 | 302 | 1029 |
+| stave --release | 1087 | 207 | 5.4 | 162 | 120 | 218 | 568 |
+| tcc | 83 | 33 | 3.1 | 174 | 325 | 320 | 901 |
+| gcc -O0 | 6473 | 815 | 2.8 | 154 | 300 | 308 | 862 |
+| gcc -O2 | 35582 | 3771 | 1.4 | 40 | 89 | 118 | 218 |
+| clang -O0 | 3299 | 593 | 2.9 | 158 | 330 | 304 | 1001 |
+| clang -O2 | 21209 | 2373 | 2.0 | 31 | 87 | 122 | 256 |
 
 i7-10700F (8 cores / 16 threads), Debian 13, gcc 14.2.0, clang 19.1.7, tcc 0.9.27; 101,042-line
-corpus (seed 1); median of 5. On one thread Stave compiles 7x faster than gcc -O0 and 12x slower
+corpus (seed 1); median of 5. On one thread Stave compiles 6.5x faster than gcc -O0 and 12x slower
 than tcc. A debug build runs at about `-O0` speed. A `--release` build compiles 10% slower than a
 debug build and runs 1.4x (nbody) to 4x (the call-heavy corpus) slower than gcc `-O2`.
 C binaries exclude libc (dynamically linked).
+
+### SIMD kernels
+
+Nine kernels written with explicit vector ops in Stave, each against a plain C99 twin of the same
+algorithm built with `-march=x86-64-v3 -ffp-contract=off`, the instruction set of
+`x86_64-linux-v3`. Every build prints the same output. Milliseconds, whole process, median of 3.
+Details: [bench/simd/README.md](bench/simd/README.md).
+
+| build | sum | dot | minmax | filter | bytesearch | prefix | histogram | matmul4 | utf8 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| stave x86_64-linux-v3 --release | 141 | 150 | 293 | 252 | 52 | 115 | 292 | 79 | 161 |
+| stave x86_64-linux --release | 140 | 195 | 585 | 718 | 101 | 154 | 247 | 144 | 241 |
+| gcc -O2 | 140 | 142 | 1119 | 326 | 463 | 189 | 50 | 75 | 481 |
+| gcc -O3 | 138 | 142 | 1120 | 322 | 464 | 188 | 50 | 46 | 492 |
+| clang -O2 | 140 | 144 | 1119 | 299 | 282 | 171 | 50 | 95 | 507 |
+
+What the table compares: vector code written by hand in Stave with what a C compiler makes of a
+scalar loop. C with hand-written intrinsics is not measured.
+
+- gcc vectorizes the twins of sum, dot and matmul4 by itself (and one of the two bytesearch
+  loops). There Stave is within 6% of `gcc -O2`, and 1.7x behind `gcc -O3` on matmul4.
+- gcc leaves minmax, filter, prefix, utf8 and the bytesearch search loop scalar. There the
+  explicit vector code is 1.3x to 9x faster than `gcc -O2`. The utf8 twin is a scalar decoder, a
+  different algorithm from the table-driven vector one.
+- histogram is 6x slower. AVX2 has no scatter, so the vector form runs lane by lane inside
+  `emulate { }`; on this target a scalar loop is the right code.
+- The `x86_64-linux` row uses 128-bit SSE4.2 vectors, a smaller instruction set than the C rows.
 
 ## A taste
 
