@@ -129,6 +129,58 @@ impl Edges {
         }
         depth
     }
+
+    /// The natural loop of every block that is the target of a back edge of the depth-first search:
+    /// (header, its blocks, header first). The loops of one header are merged.
+    pub(crate) fn natural_loops(&self) -> Vec<(u32, Vec<u32>)> {
+        let nb = self.succ.len();
+        let mut out: Vec<(u32, Vec<u32>)> = Vec::new();
+        if nb == 0 {
+            return out;
+        }
+        let mut state = vec![0u8; nb];
+        let mut back: Vec<(u32, u32)> = Vec::new();
+        let mut stack: Vec<(u32, usize)> = vec![(0, 0)];
+        state[0] = 1;
+        while let Some(top) = stack.last_mut() {
+            let node = top.0;
+            if let Some(&s) = self.succ[node as usize].get(top.1) {
+                top.1 += 1;
+                match state[s as usize] {
+                    0 => {
+                        state[s as usize] = 1;
+                        stack.push((s, 0));
+                    }
+                    1 => back.push((s, node)),
+                    _ => {}
+                }
+            } else {
+                state[node as usize] = 2;
+                stack.pop();
+            }
+        }
+        back.sort_unstable();
+        let mut mark = vec![NONE; nb];
+        let mut work = Vec::new();
+        for (header, latch) in back {
+            if out.last().is_none_or(|l| l.0 != header) {
+                mark[header as usize] = header;
+                out.push((header, vec![header]));
+            }
+            let blocks = &mut out.last_mut().expect("pushed").1;
+            work.clear();
+            work.push(latch);
+            while let Some(x) = work.pop() {
+                if mark[x as usize] == header {
+                    continue;
+                }
+                mark[x as usize] = header;
+                blocks.push(x);
+                work.extend(self.preds[x as usize].iter().copied());
+            }
+        }
+        out
+    }
 }
 
 /// The block of every instruction (`NONE` for one outside every block's span).

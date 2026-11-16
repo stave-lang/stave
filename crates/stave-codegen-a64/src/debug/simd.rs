@@ -1153,6 +1153,12 @@ impl<'a, 'm> Gen<'a, 'm> {
     fn vmem(&mut self, s: Operand, want_len: bool) -> R<(Reg, Option<Reg>)> {
         let Operand::Value(sv) = s else { return Err(bad("vector memory operand")) };
         let st = self.b.value_ty(sv).ok_or_else(|| bad("value out of range"))?;
+        if simd::elem_ptr_operand(&self.cg.m.types, st).is_some() {
+            if want_len {
+                return Err(bad("vector memory operand without a length"));
+            }
+            return Ok((self.use_g(s)?, None));
+        }
         let mo = simd::mem_operand(&self.cg.m.types, st).ok_or_else(|| bad("vector memory operand type"))?;
         let (p, len) = match mo.len {
             Some(n) => {

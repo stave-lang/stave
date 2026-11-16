@@ -59,6 +59,13 @@ impl<H: Host> Interp<'_, H> {
             Operand::Value(v) => body.value_ty(v).ok_or(malformed("value"))?,
             _ => return Err(malformed("memory operand")),
         };
+        if simd::elem_ptr_operand(&self.m.types, t).is_some() {
+            // unchecked: its bounds check is a separate instruction
+            return match self.eval(body, regs, o)? {
+                Val::S(a) => Ok((a, u64::MAX)),
+                _ => Err(malformed("memory operand value")),
+            };
+        }
         let mo = simd::mem_operand(&self.m.types, t).ok_or(malformed("memory operand type"))?;
         match (self.eval(body, regs, o)?, mo.len) {
             (Val::Pair(a, n), None) => Ok((a, n)),

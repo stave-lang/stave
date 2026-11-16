@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// `while i <= xs.len() -| 3` holds at `i = 0` on every slice, also one shorter than the 4 lanes
+// loaded at `i`: release builds keep the load's bounds check, and every build traps `Bounds`.
+// Run by the interpreter harness (crates/stave-driver/tests/interp_vs_native.rs): exit 101,
+// run_while_sat_trap.stderr.
+import std.io;
+
+fn sum4(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    while i <= xs.len() -| 3 {
+        s = s +% u32x4.load(xs, i).reduce_add_wrap();
+        i = i + 4;
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let long: [u32; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    let short: [u32; 2] = [1, 2];
+    let a = sum4(&long);
+    io.print(f"{a}\n");
+    let b = sum4(&short);
+    io.print(f"not reached: {b}\n");
+    return 0;
+}

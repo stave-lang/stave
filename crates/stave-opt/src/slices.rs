@@ -6,9 +6,10 @@
 //!   bound against the length then name the same operand (what stave-ir's `bounds::elide`
 //!   compares), and inside a loop the part is a value defined outside it, which the backends
 //!   keep in a register.
-//! - [`split_elem_addrs`]: `addr.elem s i` on a slice reference becomes `p = slice.ptr s` and
-//!   `addr.elem p i` on the element pointer, so the address is such a part too. Run it after
-//!   bounds-check elision: a check guards the access by its slice operand.
+//! - [`split_elem_addrs`]: `addr.elem s i`, `vec.load s i`, and `vec.store s i v` on a slice
+//!   reference become `p = slice.ptr s` and the same op on the element pointer `p`, so the
+//!   address is such a part too. Run it after bounds-check elision: a check guards the access by
+//!   its slice operand.
 //!
 //! - [`unify_chunk_bounds`]: all `n -| k` of one value `n` and one constant `k` (the bound of a
 //!   vector access of `k + 1` lanes, checked against the length `n`) become a single instruction
@@ -17,7 +18,7 @@
 //! All of these are pure and trap-free, so moving them up to the definition changes no behavior.
 
 use stave_ir::ir::ValueDef;
-use stave_ir::{Body, Op, Operand, TypeId, TypeKey, TypeTable, Value};
+use stave_ir::{Body, Op, Operand, TypeId, TypeKey, TypeTable, Value, VecOp};
 
 use crate::cfg::{self, Edges, NONE};
 use crate::edit::{At, Edit};
@@ -135,18 +136,21 @@ fn unify(b: &mut Body, mut parts: Vec<(u32, u32, i128, u32)>) -> bool {
     changed
 }
 
-/// Rewrites every `addr.elem s i` whose `s` is a reference to a slice into `slice.ptr s` plus
-/// `addr.elem` on the element pointer. Returns whether the body changed.
+/// Rewrites every `addr.elem s i`, `vec.load s i`, and `vec.store s i v` whose `s` is a reference
+/// to a slice into `slice.ptr s` plus the same op on the element pointer. Returns whether the body
+/// changed.
 pub fn split_elem_addrs(types: &TypeTable, b: &mut Body) -> bool {
     let mut edit = Edit::new(b);
     let mut rewire: Vec<(u32, Value)> = Vec::new();
     for (i, &op) in b.insts.op.iter().enumerate() {
-        if op != Op::ElemAddr {
-            continue;
-        }
+        let arity = match op {
+            Op::ElemAddr | Op::Vec(VecOp::Load) => 2,
+            Op::Vec(VecOp::Store) => 3,
+            _ => continue,
+        };
         let Some(span) = b.insts.args.get(i) else { continue };
         let Some(Operand::Value(s)) = b.operands.get(span.start as usize).copied() else { continue };
-        if span.len != 2 {
+        if span.len != arity {
             continue;
         }
         let Some(TypeKey::Ref { inner, .. } | TypeKey::RawPtr { inner, .. }) =

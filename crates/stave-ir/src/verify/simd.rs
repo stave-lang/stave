@@ -51,6 +51,20 @@ impl FnVerifier<'_> {
         Ok(mo)
     }
 
+    /// Whether `s` is an element pointer operand ([`simd::elem_ptr_operand`]) of lane `lane`; an
+    /// element pointer of another lane type, or a shared one for a store, is an error.
+    fn elem_ptr(&self, b: &Body, s: Operand, lane: TypeId, store: bool) -> Result<bool, String> {
+        let st = self.value_ty(b, s)?;
+        let Some((elem, mutable)) = simd::elem_ptr_operand(&self.m.types, st) else { return Ok(false) };
+        if elem != lane {
+            return Err(format!("vector memory operand {} has another element type", self.tname(st)));
+        }
+        if store && !mutable {
+            return Err("vector store through a shared pointer".into());
+        }
+        Ok(true)
+    }
+
     fn usize_operand(&self, b: &Body, o: Operand) -> R {
         let us = self.find_ty(TypeKey::Int { signed: false, bits: IntBits::Size })?;
         self.check_operand(b, o, us)
@@ -334,6 +348,9 @@ impl FnVerifier<'_> {
                 arity(if op == LoadMasked { 3 } else { 2 })?;
                 let t = res()?;
                 let (lane, lc, k) = self.vshape(t)?;
+                if op == Load && self.elem_ptr(b, args[0], lane, false)? {
+                    return self.usize_operand(b, args[1]);
+                }
                 let mo = self.mem(b, args[0], lane, false)?;
                 if op == LoadAligned {
                     self.aligned(mo, lc, k)?;
@@ -345,6 +362,9 @@ impl FnVerifier<'_> {
                 arity(if op == StoreMasked { 4 } else { 3 })?;
                 let vt = self.value_ty(b, args[2])?;
                 let (lane, lc, k) = self.vshape(vt)?;
+                if op == Store && self.elem_ptr(b, args[0], lane, true)? {
+                    return self.usize_operand(b, args[1]);
+                }
                 let mo = self.mem(b, args[0], lane, true)?;
                 if op == StoreAligned {
                     self.aligned(mo, lc, k)?;

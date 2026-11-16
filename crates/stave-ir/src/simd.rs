@@ -758,6 +758,21 @@ pub fn mem_operand(types: &TypeTable, t: TypeId) -> Option<MemOperand> {
     }
 }
 
+/// The element pointer operand (`*T` / `*mut T`, `T` not a slice or array) that release passes
+/// give a `vec.load` / `vec.store` in place of its slice: the slice's `slice.ptr`. Lane `i` is at
+/// `p + i * size`, unchecked (the slice access's `check.bounds` stays a separate instruction).
+/// Returns the element type and whether the pointer is mutable.
+pub fn elem_ptr_operand(types: &TypeTable, t: TypeId) -> Option<(TypeId, bool)> {
+    match types.key(t)? {
+        TypeKey::RawPtr { mutable, inner }
+            if !matches!(types.key(*inner)?, TypeKey::Slice { .. } | TypeKey::Array { .. }) =>
+        {
+            Some((*inner, *mutable))
+        }
+        _ => None,
+    }
+}
+
 /// The first function (by id) whose body holds a vector or mask value or op: what a backend
 /// without vector code generation cannot compile.
 pub fn first_vector_func(m: &crate::ir::Module) -> Option<crate::ir::FuncId> {

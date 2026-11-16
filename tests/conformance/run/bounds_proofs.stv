@@ -60,6 +60,26 @@ fn window_sum(xs: &[u32], n: usize) -> u32 {
     return s;
 }
 
+fn chunk_sum(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    while i + 4 <= xs.len() {
+        s = s +% u32x4.load(xs, i).reduce_add_wrap();
+        i = i + 4;
+    }
+    return s;
+}
+
+fn quad_sum(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    while i + 4 <= xs.len() {
+        s += xs[i] + xs[i + 1] + xs[i + 2] + xs[i + 3];
+        i = i + 4;
+    }
+    return s;
+}
+
 // The look-alikes below keep their checks: each would trap on some input, just not on these.
 
 fn le_only(a: &[u32], b: &[u32]) -> u32 {
@@ -107,6 +127,68 @@ fn at_offset(xs: &[u32], k: usize) -> u32 {
     return s;
 }
 
+fn chunk_le_sat(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    while i <= xs.len() -| 3 {
+        s = s +% u32x4.load(xs, i).reduce_add_wrap();
+        i = i + 4;
+    }
+    return s;
+}
+
+fn chunk_short_test(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    while i + 3 <= xs.len() {
+        s = s +% u32x4.load(xs, i).reduce_add_wrap();
+        i = i + 4;
+    }
+    return s;
+}
+
+fn chunk_wrapping(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    while i +% 4 <= xs.len() {
+        s = s +% u32x4.load(xs, i).reduce_add_wrap();
+        i = i + 4;
+    }
+    return s;
+}
+
+fn chunk_other(xs: &[u32], ys: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    while i + 4 <= ys.len() {
+        s = s +% u32x4.load(xs, i).reduce_add_wrap();
+        i = i + 4;
+    }
+    return s;
+}
+
+fn chunk_shrunk(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    let mut w = xs;
+    while i + 4 <= w.len() {
+        w = &w[0..w.len() - 1];
+        s = s +% u32x4.load(w, i).reduce_add_wrap();
+        i = i + 4;
+    }
+    return s;
+}
+
+fn chunk_moved(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    while i + 4 <= xs.len() {
+        s = s +% u32x4.load(xs, i + 1).reduce_add_wrap();
+        i = i + 4;
+    }
+    return s;
+}
+
 fn main() -> i32 {
     let a: [u32; 4] = [1, 3, 6, 10];
     let b: [u32; 4] = [2, 2, 2, 2];
@@ -124,5 +206,15 @@ fn main() -> i32 {
     let v11 = window_sum(&a, 3);
     io.print(f"{v1} {v2} {v3} {v4} {v5}\n");
     io.print(f"{v6} {v7} {v8} {v9} {v10} {v11}\n");
+    let c: [u32; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let w1 = chunk_sum(&c);
+    let w2 = quad_sum(&c);
+    let w3 = chunk_le_sat(&c);
+    let w4 = chunk_short_test(&c);
+    let w5 = chunk_wrapping(&c);
+    let w6 = chunk_other(&c, &a);
+    let w7 = chunk_shrunk(&c);
+    let w8 = chunk_moved(&c);
+    io.print(f"{w1} {w2} {w3} {w4} {w5} {w6} {w7} {w8}\n");
     return 0;
 }

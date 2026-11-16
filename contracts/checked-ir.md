@@ -111,7 +111,7 @@ ops take the lane semantics of the scalar op; V = the vector result type, M = `m
 | `vec.reduce_add_ordered` / `vec.scan_add scan_add_wrap` | `v init` / `v` | sequential from lane 0; `reduce_add_ordered` and `scan_add`: float lanes; `scan_add_wrap`: int lanes, wrapping |
 | `vec.cast cast.wrap cast.sat cast.round cast.try` | `v` | `as as% as\| as~ as?` per lane (`try`: `Option<V>`, `Some` iff every lane converts) |
 | `vec.bitcast split join widen_lo widen_hi narrow_wrap narrow_sat permute lookup compress expand` | | shape ops (`permute v k0 ..`: constant lane indices) |
-| `vec.load` / `vec.store` | `s i` / `s i v` | lanes `s[i..i+N]`, after `check.bounds i (sub.sat (slice.len s) N-1)` or under a chunk loop's head test |
+| `vec.load` / `vec.store` | `s i` / `s i v` | lanes `s[i..i+N]`, after `check.bounds i (sub.sat (slice.len s) N-1)` or under a chunk loop's head test; release passes after bounds-check elision may replace a slice `s` by its `slice.ptr` (unchecked `*T`) |
 | `vec.load_aligned` † / `vec.store_aligned` † | `s i` / `s i v` | as `load` / `store`; `i % N != 0` traps `Bounds` |
 | `vec.load_masked` † / `vec.store_masked` † | `s i m` / `s i v m` | active lanes only (inactive read 0); an active lane past the end traps `Bounds` |
 | `vec.gather` † / `vec.scatter` † | `s idx` / `s idx v` | `idx`: unsigned lanes of any width, N of them, zero-extended; any index ≥ len traps `Bounds` before any write; duplicate indices: highest lane wins |
@@ -232,7 +232,8 @@ b2():
   No check is ever removed in the checked IR; release code generation may drop a check only with a
   recorded proof (constant index < length, a dominating identical check, a dominating `lt i n` branch,
   and `LenEq`/`Offset`: `i + k < n` derived from dominating unsigned compares, asserting calls
-  such as `std.debug.assert`, and trapping `add`/`sub` of constants).
+  such as `std.debug.assert`, and trapping `add`/`sub` of constants; a check or a strict compare
+  against `sub.sat n c` reads as `i + c < n`).
   Compiler-made accesses (`for` over an array or slice, drop loops, array → slice coercion
   `addr.elem p 0` + `slice.make`) index below a length the generated code compares against.
 - **Sub-slices** (`xs[a..b]`, a slice place; `n` as for `xs[i]`): `cbr (gt b n)` to a block

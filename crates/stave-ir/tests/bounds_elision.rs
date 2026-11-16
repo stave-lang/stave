@@ -8,7 +8,8 @@ use common::*;
 use stave_ir::bounds::{AccessKind, BOUNDS_STEP_LIMIT, Elided, Guard, Proof, audit, elide};
 use stave_ir::interp::Val;
 use stave_ir::{
-    CastKind, FuncBuilder, FuncId, Module, Op, Operand, Outcome, PanicKind, TypeId, Value, verify_module,
+    CastKind, FuncBuilder, FuncId, Lanes, Module, Op, Operand, Outcome, PanicKind, TypeId, TypeKey, Value,
+    VecOp, verify_module,
 };
 
 struct T {
@@ -233,6 +234,7 @@ struct S {
     pe: TypeId,
     psl: TypeId,
     pce: TypeId,
+    v4: TypeId,
 }
 
 fn stypes(m: &mut Module) -> S {
@@ -246,7 +248,8 @@ fn stypes(m: &mut Module) -> S {
     let sl = m.types.slice(u32t);
     let psl = m.types.ref_(false, sl);
     let pce = m.types.ref_(false, u32t);
-    S { u32t, us, i64t, bt, parr8, pe, psl, pce }
+    let v4 = m.types.intern(TypeKey::Vec { lane: u32t, n: Lanes::Fixed(4) });
+    S { u32t, us, i64t, bt, parr8, pe, psl, pce, v4 }
 }
 
 /// The front end's slice read `s[idx]` (`n` = `slice.len s`): `check.bounds idx n`,
@@ -665,5 +668,270 @@ fn search_stops_at_the_step_limit() {
             assert!(matches!(e[..], [Elided { proof: Proof::Offset { k: 0, .. }, .. }]), "{e:?}");
         }
         audit(&m).unwrap();
+    }
+}
+
+// Vector accesses under `while` tests: `u32x4.load(s, i)` is `check.bounds i (s.len() -| 3)`.
+
+/// The front end's `u32x4.load(s, idx)` (`n` = `slice.len s`), reduced to its lane sum.
+fn vload(b: &mut FuncBuilder, t: &S, s: Value, n: Value, idx: impl Into<Operand>) -> Value {
+    let idx = idx.into();
+    let three = b.int(3);
+    let lim = b.binary(Op::SubSat, t.us, n, three);
+    b.bounds_check(idx, lim);
+    let v = b.op(Op::Vec(VecOp::Load), t.v4, &[s.into(), idx]);
+    b.op(Op::Vec(VecOp::ReduceAddWrap), t.u32t, &[v.into()])
+}
+
+/// `let mut i = from; while test(i) { acc += step(i, acc); i = i + 4; }` (a trapping `add`),
+/// from `acc = 0`; returns the final `acc`, the builder in the exit block.
+fn while_step4(
+    b: &mut FuncBuilder,
+    t: &S,
+    from: i128,
+    test: impl FnOnce(&mut FuncBuilder, Value) -> Value,
+    step: impl FnOnce(&mut FuncBuilder, Value, Value) -> Value,
+) -> Value {
+    let (head, hv) = b.create_block_with(&[t.us, t.u32t]);
+    let body = b.create_block();
+    let (exit, ev) = b.create_block_with(&[t.u32t]);
+    let (i0, z) = (b.int(from), b.int(0));
+    b.br(head, &[i0, z]);
+    b.switch_to(head);
+    let c = test(b, hv[0]);
+    b.cbr(c, body, &[], exit, &[hv[1].into()]);
+    b.switch_to(body);
+    let acc = step(b, hv[0], hv[1]);
+    let four = b.int(4);
+    let i2 = b.binary(Op::Add, t.us, hv[0], four);
+    b.br(head, &[i2.into(), acc.into()]);
+    b.switch_to(exit);
+    ev[0]
+}
+
+/// `i + k <= n` with `add` (`wrap`: `add.wrap`).
+fn plus_le(b: &mut FuncBuilder, t: &S, i: Value, k: i128, n: Value, wrap: bool) -> Value {
+    let k = b.int(k);
+    let s = b.binary(if wrap { Op::AddWrap } else { Op::Add }, t.us, i, k);
+    b.cmp(Op::Le, t.bt, s, n)
+}
+
+fn add_u32(b: &mut FuncBuilder, t: &S, x: Value, y: Value) -> Value {
+    b.binary(Op::AddWrap, t.u32t, x, y)
+}
+
+/// `while i + 4 <= a.len() { acc += sum(u32x4.load(a, i)) }`.
+fn vec_while_le(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    while_step4(
+        b,
+        t,
+        0,
+        |b, i| plus_le(b, t, i, 4, x.na, false),
+        |b, i, acc| {
+            let v = vload(b, t, x.a, x.na, i);
+            add_u32(b, t, acc, v)
+        },
+    )
+}
+
+/// The same loop testing `i < a.len() -| 3`, written out.
+fn vec_while_lt_sat(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let test = |b: &mut FuncBuilder, i: Value| {
+        let three = b.int(3);
+        let lim = b.binary(Op::SubSat, t.us, x.na, three);
+        b.cmp(Op::Lt, t.bt, i, lim)
+    };
+    while_step4(b, t, 0, test, |b, i, acc| {
+        let v = vload(b, t, x.a, x.na, i);
+        add_u32(b, t, acc, v)
+    })
+}
+
+/// `while i + 8 <= a.len() { acc += sum(u32x4.load(a, i + 4)) }`: the second half of a wider step.
+fn vec_while_upper_half(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    while_step4(
+        b,
+        t,
+        0,
+        |b, i| plus_le(b, t, i, 8, x.na, false),
+        |b, i, acc| {
+            let four = b.int(4);
+            let j = b.binary(Op::Add, t.us, i, four);
+            let v = vload(b, t, x.a, x.na, j);
+            add_u32(b, t, acc, v)
+        },
+    )
+}
+
+/// The scalar shape `while i + 4 <= a.len() { acc += a[i] + a[i + 3] }`.
+fn scalar_while_le(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    while_step4(
+        b,
+        t,
+        0,
+        |b, i| plus_le(b, t, i, 4, x.na, false),
+        |b, i, acc| {
+            let p = read(b, t, x.a, x.na, i);
+            let three = b.int(3);
+            let j = b.binary(Op::Add, t.us, i, three);
+            let q = read(b, t, x.a, x.na, j);
+            let s = add_u32(b, t, p, q);
+            add_u32(b, t, acc, s)
+        },
+    )
+}
+
+/// `while i + 4 <= a.len()`, the vector load and the scalar reads of every lane all proven, and
+/// the result, the traps, and the audit unchanged.
+#[test]
+fn vector_and_scalar_while_le_have_no_check() {
+    let cases: [(&str, BodyFn, usize, i128); 4] = [
+        ("i + 4 <= len", vec_while_le, 1, 3),
+        ("i < len -| 3", vec_while_lt_sat, 1, 3),
+        ("i + 8 <= len, load at i + 4", vec_while_upper_half, 1, 7),
+        ("scalar i + 4 <= len", scalar_while_le, 2, 3),
+    ];
+    for (name, body, n, last) in cases {
+        let (m, f, main) = two_slices(body);
+        assert_eq!(checks(&m, f), n, "{name}");
+        let (o, proofs) = elide_same(&m, f, main);
+        assert_eq!(checks(&o, f), 0, "{name}: {proofs:?}");
+        assert!(
+            matches!(proofs.last(), Some(Proof::Offset { base: Some(_), k }) if *k == last),
+            "{name}: {proofs:?}"
+        );
+    }
+    let (m, f, main) = two_slices(vec_while_le);
+    let (o, _) = elide_same(&m, f, main);
+    // 1 + 2 + .. + 8: two whole vectors of the eight elements
+    assert_eq!(run(&o, main, vec![Val::S(8), Val::S(0)]), Outcome::Return(Some(Val::S(36))));
+    assert_eq!(run(&o, main, vec![Val::S(7), Val::S(0)]), Outcome::Return(Some(Val::S(10))));
+}
+
+/// `while i +% 4 <= a.len()` from `i = usize::MAX - 1`: the wrapped sum passes the test.
+fn vec_wrapping_test(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let from = i128::from(u64::MAX) - 1;
+    while_step4(
+        b,
+        t,
+        from,
+        |b, i| plus_le(b, t, i, 4, x.na, true),
+        |b, i, acc| {
+            let v = vload(b, t, x.a, x.na, i);
+            add_u32(b, t, acc, v)
+        },
+    )
+}
+
+/// `while i <= a.len() -| 3`: `0 <= n -| 3` holds for every `n`.
+fn vec_le_sat(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let test = |b: &mut FuncBuilder, i: Value| {
+        let three = b.int(3);
+        let lim = b.binary(Op::SubSat, t.us, x.na, three);
+        b.cmp(Op::Le, t.bt, i, lim)
+    };
+    while_step4(b, t, 0, test, |b, i, acc| {
+        let v = vload(b, t, x.a, x.na, i);
+        add_u32(b, t, acc, v)
+    })
+}
+
+/// `while i + 3 <= a.len()` around a load of 4 lanes.
+fn vec_test_shorter_than_lanes(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    while_step4(
+        b,
+        t,
+        0,
+        |b, i| plus_le(b, t, i, 3, x.na, false),
+        |b, i, acc| {
+            let v = vload(b, t, x.a, x.na, i);
+            add_u32(b, t, acc, v)
+        },
+    )
+}
+
+/// `while i + 4 <= b.len()` around a load from `a`.
+fn vec_other_slice(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    while_step4(
+        b,
+        t,
+        0,
+        |b, i| plus_le(b, t, i, 4, x.nb, false),
+        |b, i, acc| {
+            let v = vload(b, t, x.a, x.na, i);
+            add_u32(b, t, acc, v)
+        },
+    )
+}
+
+/// `while i + 4 <= a.len()` around a load from `&a[0..a.len() - 1]`, made in the body.
+fn vec_shorter_slice_in_body(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    while_step4(
+        b,
+        t,
+        0,
+        |b, i| plus_le(b, t, i, 4, x.na, false),
+        |b, i, acc| {
+            let (zero, one) = (b.int(0), b.int(1));
+            let base = b.op(Op::ElemAddr, t.pce, &[x.a.into(), zero]);
+            let n1 = b.binary(Op::Sub, t.us, x.na, one);
+            let c = b.op(Op::SliceMake, t.psl, &[base.into(), n1.into()]);
+            let nc = b.op(Op::SliceLen, t.us, &[c.into()]);
+            let v = vload(b, t, c, nc, i);
+            add_u32(b, t, acc, v)
+        },
+    )
+}
+
+/// `while i + 4 <= a.len()` around a load at `i + 1`.
+fn vec_index_moved(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    while_step4(
+        b,
+        t,
+        0,
+        |b, i| plus_le(b, t, i, 4, x.na, false),
+        |b, i, acc| {
+            let one = b.int(1);
+            let j = b.binary(Op::Add, t.us, i, one);
+            let v = vload(b, t, x.a, x.na, j);
+            add_u32(b, t, acc, v)
+        },
+    )
+}
+
+/// `while i + 4 <= a.len() { acc += a[i + 4] }`: `<=` proves `i + 3`, not `i + 4`.
+fn scalar_one_past(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    while_step4(
+        b,
+        t,
+        0,
+        |b, i| plus_le(b, t, i, 4, x.na, false),
+        |b, i, acc| {
+            let four = b.int(4);
+            let j = b.binary(Op::Add, t.us, i, four);
+            let q = read(b, t, x.a, x.na, j);
+            add_u32(b, t, acc, q)
+        },
+    )
+}
+
+/// Look-alikes of the `while i + N <= len` proofs: each keeps its check and traps `Bounds` where
+/// the unoptimized code does.
+#[test]
+fn while_le_look_alikes_keep_their_checks() {
+    let cases: [(&str, BodyFn, (u64, u64)); 7] = [
+        ("wrapping add in the test", vec_wrapping_test, (8, 0)),
+        ("<= against len -| 3", vec_le_sat, (2, 0)),
+        ("test shorter than the lanes", vec_test_shorter_than_lanes, (3, 0)),
+        ("another slice's length", vec_other_slice, (2, 4)),
+        ("shorter slice made in the body", vec_shorter_slice_in_body, (4, 0)),
+        ("index moved after the test", vec_index_moved, (4, 0)),
+        ("scalar one past the test", scalar_one_past, (4, 0)),
+    ];
+    for (name, body, (na, nb)) in cases {
+        let (m, f, main) = two_slices(body);
+        let (o, proofs) = elide_same(&m, f, main);
+        assert_eq!(checks(&o, f), 1, "{name}: {proofs:?}");
+        assert_eq!(trap(&o, main, na, nb), Some(PanicKind::Bounds), "{name}");
     }
 }
