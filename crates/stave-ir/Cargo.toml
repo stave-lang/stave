@@ -18,3 +18,5 @@ stave-target.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# Integration tests that compile Stave sources (std included) to checked IR.
+stave-driver.workspace = true

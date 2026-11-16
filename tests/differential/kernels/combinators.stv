@@ -1,0 +1,359 @@
+// The std.slice methods against element-by-element definitions. Float `sum` is the 16-lane
+// (f32) / 8-lane (f64) tree: element i into lane i % L, then the reduction tree. Float `min` /
+// `max` propagate NaN and order -0.0 below +0.0. Int sums run on values small enough never to
+// overflow (the trapping cases are conformance tests). `eq` compares element bits.
+import diff;
+import std.mem;
+
+fn nan32() -> f32 {
+    return mem.f32_from_bits(0x7fc00000);
+}
+
+fn nan64() -> f64 {
+    return mem.f64_from_bits(0x7ff8000000000000);
+}
+
+// Equal operands are equal or zeros of either sign: OR of the bits is -0.0 for a mixed pair.
+fn min_f32(a: f32, b: f32) -> f32 {
+    if a != a || b != b { return nan32(); }
+    if a == b { return mem.f32_from_bits(mem.f32_bits(a) | mem.f32_bits(b)); }
+    return if a < b then a else b;
+}
+
+fn max_f32(a: f32, b: f32) -> f32 {
+    if a != a || b != b { return nan32(); }
+    if a == b { return mem.f32_from_bits(mem.f32_bits(a) & mem.f32_bits(b)); }
+    return if a > b then a else b;
+}
+
+fn min_f64(a: f64, b: f64) -> f64 {
+    if a != a || b != b { return nan64(); }
+    if a == b { return mem.f64_from_bits(mem.f64_bits(a) | mem.f64_bits(b)); }
+    return if a < b then a else b;
+}
+
+fn max_f64(a: f64, b: f64) -> f64 {
+    if a != a || b != b { return nan64(); }
+    if a == b { return mem.f64_from_bits(mem.f64_bits(a) & mem.f64_bits(b)); }
+    return if a > b then a else b;
+}
+
+fn opt_f32(o: &mut diff.Out, x: Option<f32>) {
+    match x {
+        Option.Some(v) => { o.flag(true); o.f32(v); }
+        Option.None => { o.flag(false); }
+    }
+}
+
+fn opt_f64(o: &mut diff.Out, x: Option<f64>) {
+    match x {
+        Option.Some(v) => { o.flag(true); o.f64(v); }
+        Option.None => { o.flag(false); }
+    }
+}
+
+fn opt_i64(o: &mut diff.Out, x: Option<i64>) {
+    match x {
+        Option.Some(v) => { o.flag(true); o.i(v); }
+        Option.None => { o.flag(false); }
+    }
+}
+
+fn opt_usize(o: &mut diff.Out, x: Option<usize>) {
+    match x {
+        Option.Some(v) => { o.flag(true); o.u(v as u64); }
+        Option.None => { o.flag(false); }
+    }
+}
+
+// The index of the element eq must find different: param mod len.
+fn spot(len: usize, param: u32) -> usize {
+    return (param as usize) % len;
+}
+
+fn case_f32(c: &mut diff.Cases, o: &mut diff.Out, h: diff.Head) {
+    let b = c.f32s(h);
+    let xs = b.get();
+    let p = mem.f32_from_bits(h.param);
+    let gt = fn(x: f32) -> bool { return x > p; };
+    let mut cp = diff.Buf::<f32>.new(h.len, h.mis, nan32());
+    cp.get_mut().copy_from(xs);
+    let mut fl = diff.Buf::<f32>.new(h.len, h.mis, nan32());
+    fl.get_mut().fill(p);
+    let same = xs.eq(cp.get());
+    if h.len > 0 {
+        let k = spot(h.len, h.param);
+        cp.get_mut()[k] = mem.f32_from_bits(mem.f32_bits(xs[k]) ^ 0x80000000);
+    }
+    o.f32(xs.sum());
+    opt_f32(o, xs.min());
+    opt_f32(o, xs.max());
+    opt_usize(o, xs.find(p));
+    o.u(xs.count(gt) as u64);
+    o.flag(xs.any(gt));
+    o.flag(xs.all(gt));
+    o.flag(same);
+    o.flag(xs.eq(cp.get()));
+    o.f32s(fl.get());
+    o.flag(diff.guards_f32(&cp) && diff.guards_f32(&fl));
+    o.sep();
+    let n = xs.len();
+    o.f32(diff.tree_f32(diff.lanes_f32(xs, 16, 0.0, 0.0, diff.add_f32), 16, diff.add_f32));
+    if n == 0 {
+        o.flag(false);
+        o.flag(false);
+    } else {
+        let mut lo = xs[0];
+        let mut hi = xs[0];
+        for i in 1..n {
+            lo = min_f32(lo, xs[i]);
+            hi = max_f32(hi, xs[i]);
+        }
+        o.flag(true);
+        o.f32(lo);
+        o.flag(true);
+        o.f32(hi);
+    }
+    let mut at = n;
+    let mut cnt: u64 = 0;
+    for i in 0..n {
+        if xs[i] == p && at == n { at = i; }
+        if xs[i] > p { cnt = cnt + 1; }
+    }
+    opt_usize(o, if at < n then Option.Some(at) else Option.None);
+    o.u(cnt);
+    o.flag(cnt > 0);
+    o.flag(cnt == n as u64);
+    o.flag(true);
+    o.flag(n == 0);
+    let mut want = diff.Buf::<f32>.new(h.len, h.mis, nan32());
+    {
+        let w = want.get_mut();
+        for i in 0..n { w[i] = p; }
+    }
+    o.f32s(want.get());
+    o.flag(true);
+}
+
+fn case_f64(c: &mut diff.Cases, o: &mut diff.Out, h: diff.Head) {
+    let b = c.f64s(h);
+    let xs = b.get();
+    let n = xs.len();
+    let p = if n == 0 then 1.5 else xs[n / 2];
+    let mut cp = diff.Buf::<f64>.new(h.len, h.mis, nan64());
+    cp.get_mut().copy_from(xs);
+    let mut fl = diff.Buf::<f64>.new(h.len, h.mis, nan64());
+    fl.get_mut().fill(p);
+    o.f64(xs.sum());
+    opt_f64(o, xs.min());
+    opt_f64(o, xs.max());
+    opt_usize(o, xs.find(p));
+    o.flag(xs.eq(cp.get()));
+    o.f64s(cp.get());
+    o.f64s(fl.get());
+    o.flag(diff.guards_f64(&cp) && diff.guards_f64(&fl));
+    o.sep();
+    o.f64(diff.tree_f64(diff.lanes_f64(xs, 8, 0.0, 0.0, diff.add_f64), 8, diff.add_f64));
+    if n == 0 {
+        o.flag(false);
+        o.flag(false);
+    } else {
+        let mut lo = xs[0];
+        let mut hi = xs[0];
+        for i in 1..n {
+            lo = min_f64(lo, xs[i]);
+            hi = max_f64(hi, xs[i]);
+        }
+        o.flag(true);
+        o.f64(lo);
+        o.flag(true);
+        o.f64(hi);
+    }
+    let mut at = n;
+    for i in 0..n {
+        if xs[i] == p && at == n { at = i; }
+    }
+    opt_usize(o, if at < n then Option.Some(at) else Option.None);
+    o.flag(true);
+    o.f64s(xs);
+    let mut want = diff.Buf::<f64>.new(h.len, h.mis, nan64());
+    {
+        let w = want.get_mut();
+        for i in 0..n { w[i] = p; }
+    }
+    o.f64s(want.get());
+    o.flag(true);
+}
+
+fn case_i32(c: &mut diff.Cases, o: &mut diff.Out, h: diff.Head) {
+    let b = c.i32s(h);
+    let xs = b.get();
+    let n = xs.len();
+    let p = h.param as% i32;
+    let gt = fn(x: i32) -> bool { return x > p; };
+    // Values below 2^21 in magnitude: at most 3 * 4 + 257 of them never overflow an i32 sum.
+    let mut small = diff.Buf::<i32>.new(h.len, h.mis, 0);
+    {
+        let sm = small.get_mut();
+        for i in 0..n { sm[i] = xs[i] >> 10; }
+    }
+    let mut cp = diff.Buf::<i32>.new(h.len, h.mis, -1);
+    cp.get_mut().copy_from(xs);
+    let mut fl = diff.Buf::<i32>.new(h.len, h.mis, -1);
+    fl.get_mut().fill(p);
+    let same = xs.eq(cp.get());
+    if n > 0 {
+        let k = spot(n, h.param);
+        cp.get_mut()[k] = xs[k] ^ 1;
+    }
+    o.i(small.get().sum() as i64);
+    opt_i64(o, match xs.min() { Option.Some(v) => Option.Some(v as i64), Option.None => Option.None });
+    opt_i64(o, match xs.max() { Option.Some(v) => Option.Some(v as i64), Option.None => Option.None });
+    opt_usize(o, xs.find(p));
+    o.u(xs.count(gt) as u64);
+    o.flag(xs.any(gt));
+    o.flag(xs.all(gt));
+    o.flag(same);
+    o.flag(xs.eq(cp.get()));
+    o.i32s(fl.get());
+    o.flag(diff.guards_i32(&cp) && diff.guards_i32(&fl));
+    o.sep();
+    let s = small.get();
+    let mut t: i32 = 0;
+    for i in 0..n { t = t + s[i]; }
+    o.i(t as i64);
+    if n == 0 {
+        o.flag(false);
+        o.flag(false);
+    } else {
+        let mut lo = xs[0];
+        let mut hi = xs[0];
+        for i in 1..n {
+            if xs[i] < lo { lo = xs[i]; }
+            if xs[i] > hi { hi = xs[i]; }
+        }
+        o.flag(true);
+        o.i(lo as i64);
+        o.flag(true);
+        o.i(hi as i64);
+    }
+    let mut at = n;
+    let mut cnt: u64 = 0;
+    for i in 0..n {
+        if xs[i] == p && at == n { at = i; }
+        if xs[i] > p { cnt = cnt + 1; }
+    }
+    opt_usize(o, if at < n then Option.Some(at) else Option.None);
+    o.u(cnt);
+    o.flag(cnt > 0);
+    o.flag(cnt == n as u64);
+    o.flag(true);
+    o.flag(n == 0);
+    let mut want = diff.Buf::<i32>.new(h.len, h.mis, -1);
+    {
+        let w = want.get_mut();
+        for i in 0..n { w[i] = p; }
+    }
+    o.i32s(want.get());
+    o.flag(true);
+}
+
+fn case_u8(c: &mut diff.Cases, o: &mut diff.Out, h: diff.Head) {
+    let b = c.u8s(h);
+    let xs = b.get();
+    let n = xs.len();
+    let key = h.param as% u8;
+    let set: [u8; 2] = [key, key ^ 0x20];
+    let eqk = fn(x: u8) -> bool { return x == key; };
+    // Bits 0/1 of at most 255 elements: a u8 sum that never overflows.
+    let m = if n < 255 then n else 255;
+    let mut bits = diff.Buf::<u8>.new(m, h.mis, 0);
+    {
+        let bm = bits.get_mut();
+        for i in 0..m { bm[i] = xs[i] & 1; }
+    }
+    let mut cp = diff.Buf::<u8>.new(h.len, h.mis, 0xa5);
+    cp.get_mut().copy_from(xs);
+    let mut fl = diff.Buf::<u8>.new(h.len, h.mis, 0xa5);
+    fl.get_mut().fill(key);
+    let same = xs.eq(cp.get());
+    if n > 0 {
+        let k = spot(n, h.param >> 8);
+        cp.get_mut()[k] = xs[k] ^ 0x80;
+    }
+    o.u(bits.get().sum() as u64);
+    opt_i64(o, match xs.min() { Option.Some(v) => Option.Some(v as i64), Option.None => Option.None });
+    opt_i64(o, match xs.max() { Option.Some(v) => Option.Some(v as i64), Option.None => Option.None });
+    opt_usize(o, xs.find_byte(key));
+    opt_usize(o, xs.find_any_byte(&set[0..2]));
+    o.u(xs.count(eqk) as u64);
+    o.flag(xs.any(eqk));
+    o.flag(xs.all(eqk));
+    o.flag(same);
+    o.flag(xs.eq(cp.get()));
+    o.u8s(fl.get());
+    o.flag(diff.guards_u8(&cp) && diff.guards_u8(&fl));
+    o.sep();
+    let bs = bits.get();
+    let mut t: u8 = 0;
+    for i in 0..m { t = t + bs[i]; }
+    o.u(t as u64);
+    if n == 0 {
+        o.flag(false);
+        o.flag(false);
+    } else {
+        let mut lo = xs[0];
+        let mut hi = xs[0];
+        for i in 1..n {
+            if xs[i] < lo { lo = xs[i]; }
+            if xs[i] > hi { hi = xs[i]; }
+        }
+        o.flag(true);
+        o.i(lo as i64);
+        o.flag(true);
+        o.i(hi as i64);
+    }
+    let mut at = n;
+    let mut any_at = n;
+    let mut cnt: u64 = 0;
+    for i in 0..n {
+        if xs[i] == key && at == n { at = i; }
+        if (xs[i] == set[0] || xs[i] == set[1]) && any_at == n { any_at = i; }
+        if xs[i] == key { cnt = cnt + 1; }
+    }
+    opt_usize(o, if at < n then Option.Some(at) else Option.None);
+    opt_usize(o, if any_at < n then Option.Some(any_at) else Option.None);
+    o.u(cnt);
+    o.flag(cnt > 0);
+    o.flag(cnt == n as u64);
+    o.flag(true);
+    o.flag(n == 0);
+    let mut want = diff.Buf::<u8>.new(h.len, h.mis, 0xa5);
+    {
+        let w = want.get_mut();
+        for i in 0..n { w[i] = key; }
+    }
+    o.u8s(want.get());
+    o.flag(true);
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        if h.kind == 0 {
+            case_f32(&mut c, &mut o, h);
+        } else if h.kind == 1 {
+            case_f64(&mut c, &mut o, h);
+        } else if h.kind == 2 {
+            case_i32(&mut c, &mut o, h);
+        } else {
+            case_u8(&mut c, &mut o, h);
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

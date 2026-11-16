@@ -1,0 +1,154 @@
+//~ CHECK-ONLY
+// std.slice `sum` on every int and float element type, over prefixes of length 0, below one
+// vector, exact multiples, and with tails (LENS). Int sums are the sequential sums: slices whose
+// lanes would overflow but whose running sum never does (MAX, -MAX, ...) do not trap. Float sums
+// use the 16-lane (f32) / 8-lane (f64) tree; NaN, infinities, and -0.0 follow IEEE addition.
+// crates/stave-driver/tests/interp_vs_native.rs runs it in the IR interpreter and natively
+// against combinators_sum.stdout.
+import std.io;
+
+const LENS: [usize; 12] = [0, 1, 3, 4, 7, 8, 15, 16, 17, 31, 33, 40];
+
+fn sums_u8() {
+    let mut a: [u8; 40] = [0; 40];
+    for i in 0usize..40 { a[i] = (i % 6) as% u8; }
+    for k in 0usize..12 { let s = (&a[0..LENS[k]]).sum(); io.print(f"{s} "); }
+    let b: [u8; 18] = [255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let t = (&b[0..18]).sum();
+    io.print(f"| {t}\n");
+}
+
+fn sums_u16() {
+    let mut a: [u16; 40] = [0; 40];
+    for i in 0usize..40 { a[i] = ((i * 37) % 1600) as% u16; }
+    for k in 0usize..12 { let s = (&a[0..LENS[k]]).sum(); io.print(f"{s} "); }
+    io.print("\n");
+}
+
+fn sums_u32() {
+    let mut a: [u32; 40] = [0; 40];
+    for i in 0usize..40 { a[i] = ((i * 100000007) % 100000000) as% u32; }
+    for k in 0usize..12 { let s = (&a[0..LENS[k]]).sum(); io.print(f"{s} "); }
+    let b: [u32; 5] = [4294967295, 0, 0, 0, 0];
+    let t = (&b[0..5]).sum();
+    io.print(f"| {t}\n");
+}
+
+fn sums_u64() {
+    let mut a: [u64; 40] = [0; 40];
+    for i in 0usize..40 { a[i] = (i as u64) * 11000000000000007; }
+    for k in 0usize..12 { let s = (&a[0..LENS[k]]).sum(); io.print(f"{s} "); }
+    io.print("\n");
+}
+
+fn sums_i8() {
+    let mut a: [i8; 40] = [0; 40];
+    for i in 0usize..40 { a[i] = ((i % 7) as% i8) - 3; }
+    for k in 0usize..12 { let s = (&a[0..LENS[k]]).sum(); io.print(f"{s} "); }
+    let b: [i8; 19] = [127, -127, 127, -127, 127, -127, 127, -127, 127, -127, 127, -127, 127, -127, 127, -127, 127, -128, 1];
+    let t = (&b[0..19]).sum();
+    io.print(f"| {t}\n");
+}
+
+fn sums_i16() {
+    let mut a: [i16; 40] = [0; 40];
+    for i in 0usize..40 { a[i] = ((i % 9) as% i16) * 300 - 1200; }
+    for k in 0usize..12 { let s = (&a[0..LENS[k]]).sum(); io.print(f"{s} "); }
+    io.print("\n");
+}
+
+fn sums_i32() {
+    let mut a: [i32; 40] = [0; 40];
+    for i in 0usize..40 { a[i] = ((i % 11) as% i32) * 50000000 - 250000000; }
+    for k in 0usize..12 { let s = (&a[0..LENS[k]]).sum(); io.print(f"{s} "); }
+    let b: [i32; 9] = [2147483647, -2147483647, 2147483647, -2147483647, 2147483647, -2147483647, 2147483647, -2147483647, 2147483647];
+    let t = (&b[0..9]).sum();
+    io.print(f"| {t}\n");
+}
+
+fn sums_i64() {
+    let mut a: [i64; 40] = [0; 40];
+    for i in 0usize..40 { a[i] = ((i % 5) as% i64) * 2000000000000000000 - 4000000000000000000; }
+    for k in 0usize..12 { let s = (&a[0..LENS[k]]).sum(); io.print(f"{s} "); }
+    let b: [i64; 5] = [-9223372036854775808, 1, -1, 9223372036854775807, -9223372036854775807];
+    let t = (&b[0..5]).sum();
+    io.print(f"| {t}\n");
+}
+
+fn sums_size() {
+    let mut a: [usize; 40] = [0; 40];
+    let mut b: [isize; 40] = [0; 40];
+    for i in 0usize..40 {
+        a[i] = i * 3;
+        b[i] = 7 - (i as% isize);
+    }
+    for k in 0usize..12 {
+        let s = (&a[0..LENS[k]]).sum();
+        let t = (&b[0..LENS[k]]).sum();
+        io.print(f"{s}/{t} ");
+    }
+    io.print("\n");
+}
+
+fn sums_f32() {
+    let mut a: [f32; 40] = [0.0; 40];
+    let mut x: f32 = 1.0;
+    for i in 0usize..40 {
+        a[i] = x;
+        x = x * 1.7 - 2.3;
+    }
+    for k in 0usize..12 { let s = (&a[0..LENS[k]]).sum(); io.print(f"{s} "); }
+    io.print("\n");
+    // 2^24 + 1 + 1 + ... : sequentially every 1 rounds away; in 16 lanes they are added first.
+    let mut b: [f32; 33] = [1.0; 33];
+    b[0] = 16777216.0;
+    let t = (&b[0..33]).sum();
+    let z: f32 = 0.0;
+    let nan = z / z;
+    let inf = 1.0 / z;
+    let c: [f32; 5] = [1.0, 2.0, nan, 3.0, 4.0];
+    let d: [f32; 2] = [inf, -inf];
+    let e: [f32; 3] = [-0.0, -0.0, -0.0];
+    let f: [f32; 18] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, inf];
+    let s1 = (&c[0..5]).sum();
+    let s2 = (&d[0..2]).sum();
+    let s3 = (&e[0..3]).sum();
+    let s4 = (&f[0..18]).sum();
+    io.print(f"{t} {s1} {s2} {s3} {s4}\n");
+}
+
+fn sums_f64() {
+    let mut a: [f64; 40] = [0.0; 40];
+    let mut x: f64 = 1.0;
+    for i in 0usize..40 {
+        a[i] = x;
+        x = x * 1.7 - 2.3;
+    }
+    for k in 0usize..12 { let s = (&a[0..LENS[k]]).sum(); io.print(f"{s} "); }
+    io.print("\n");
+    let mut b: [f64; 17] = [1.0; 17];
+    b[0] = 9007199254740992.0;
+    let t = (&b[0..17]).sum();
+    let z: f64 = 0.0;
+    let nan = z / z;
+    let c: [f64; 3] = [nan, 1.0, 2.0];
+    let e: [f64; 1] = [-0.0];
+    let s1 = (&c[0..3]).sum();
+    let s3 = (&e[0..1]).sum();
+    io.print(f"{t} {s1} {s3}\n");
+}
+
+fn main() -> i32 {
+    sums_u8();
+    sums_u16();
+    sums_u32();
+    sums_u64();
+    sums_i8();
+    sums_i16();
+    sums_i32();
+    sums_i64();
+    sums_size();
+    sums_f32();
+    sums_f64();
+    return 0;
+}

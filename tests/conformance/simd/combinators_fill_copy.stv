@@ -1,0 +1,113 @@
+//~ CHECK-ONLY
+// std.slice `fill` on every element type and `copy_from` (any Copy element type) over sub-slices
+// of length 0, below one vector, exact multiples, and with tails; the elements around each
+// sub-slice must stay unchanged. Float fill and copy keep NaN bits and -0.0.
+// crates/stave-driver/tests/interp_vs_native.rs runs it in the IR interpreter and natively
+// against combinators_fill_copy.stdout.
+import std.io;
+import std.mem;
+
+// Sub-slices [lo, lo + n) of a 50-element array.
+const LO: [usize; 6] = [0, 1, 3, 5, 2, 9];
+const N: [usize; 6] = [0, 3, 8, 16, 33, 40];
+
+fn line_u64(xs: &[u64]) {
+    for i in 0..xs.len() {
+        let x = xs[i];
+        io.print(f"{x} ");
+    }
+    io.print("\n");
+}
+
+fn fills() {
+    for k in 0usize..6 {
+        let (lo, n) = (LO[k], N[k]);
+        let mut a8: [u8; 50] = [1; 50];
+        let mut b8: [i8; 50] = [1; 50];
+        let mut a16: [u16; 50] = [1; 50];
+        let mut b16: [i16; 50] = [1; 50];
+        let mut a32: [u32; 50] = [1; 50];
+        let mut b32: [i32; 50] = [1; 50];
+        let mut a64: [u64; 50] = [1; 50];
+        let mut b64: [i64; 50] = [1; 50];
+        let mut az: [usize; 50] = [1; 50];
+        let mut bz: [isize; 50] = [1; 50];
+        let mut f: [f32; 50] = [1.0; 50];
+        let mut d: [f64; 50] = [1.0; 50];
+        let mut bl: [bool; 50] = [false; 50];
+        (&mut a8[lo..lo + n]).fill(200);
+        (&mut b8[lo..lo + n]).fill(-7);
+        (&mut a16[lo..lo + n]).fill(60000);
+        (&mut b16[lo..lo + n]).fill(-300);
+        (&mut a32[lo..lo + n]).fill(4000000000);
+        (&mut b32[lo..lo + n]).fill(-70000);
+        (&mut a64[lo..lo + n]).fill(18000000000000000000);
+        (&mut b64[lo..lo + n]).fill(-5000000000000);
+        (&mut az[lo..lo + n]).fill(123456789012);
+        (&mut bz[lo..lo + n]).fill(-42);
+        (&mut f[lo..lo + n]).fill(-0.0);
+        (&mut d[lo..lo + n]).fill(2.5);
+        (&mut bl[lo..lo + n]).fill(true);
+        // Per array: a checksum over all 50 elements (filled ones count with their index).
+        let mut sums: [u64; 13] = [0; 13];
+        for i in 0usize..50 {
+            let w = (i as u64) + 1;
+            sums[0] = sums[0] +% w *% (a8[i] as u64);
+            sums[1] = sums[1] +% w *% (b8[i] as% u64);
+            sums[2] = sums[2] +% w *% (a16[i] as u64);
+            sums[3] = sums[3] +% w *% (b16[i] as% u64);
+            sums[4] = sums[4] +% w *% (a32[i] as u64);
+            sums[5] = sums[5] +% w *% (b32[i] as% u64);
+            sums[6] = sums[6] +% w *% a64[i];
+            sums[7] = sums[7] +% w *% (b64[i] as% u64);
+            sums[8] = sums[8] +% w *% (az[i] as u64);
+            sums[9] = sums[9] +% w *% (bz[i] as% u64);
+            sums[10] = sums[10] +% w *% (mem.f32_bits(f[i]) as u64);
+            sums[11] = sums[11] +% w *% mem.f64_bits(d[i]);
+            sums[12] = sums[12] +% w *% (bl[i].select(1u64, 0u64));
+        }
+        line_u64(&sums[0..13]);
+    }
+}
+
+fn copies() {
+    let z: f32 = 0.0;
+    let nan = mem.f32_from_bits(0x7f800001);
+    for k in 0usize..6 {
+        let (lo, n) = (LO[k], N[k]);
+        let mut src8: [u8; 50] = [0; 50];
+        let mut src32: [f32; 50] = [0.0; 50];
+        let mut src64: [i64; 50] = [0; 50];
+        for i in 0usize..50 {
+            src8[i] = (i as% u8) + 100;
+            src32[i] = if i % 7 == 3 then nan else if i % 7 == 5 then -z else ((i as% u32) as~ f32);
+            src64[i] = -(i as% i64) * 1000000007;
+        }
+        let mut d8: [u8; 50] = [9; 50];
+        let mut d32: [f32; 50] = [9.0; 50];
+        let mut d64: [i64; 50] = [9; 50];
+        (&mut d8[lo..lo + n]).copy_from(&src8[0..n]);
+        (&mut d32[lo..lo + n]).copy_from(&src32[0..n]);
+        (&mut d64[lo..lo + n]).copy_from(&src64[0..n]);
+        let mut sums: [u64; 3] = [0; 3];
+        for i in 0usize..50 {
+            let w = (i as u64) + 1;
+            sums[0] = sums[0] +% w *% (d8[i] as u64);
+            sums[1] = sums[1] +% w *% (mem.f32_bits(d32[i]) as u64);
+            sums[2] = sums[2] +% w *% (d64[i] as% u64);
+        }
+        line_u64(&sums[0..3]);
+    }
+    // A copy of a non-scalar Copy element type.
+    let src: [(u32, u32); 3] = [(1, 2), (3, 4), (5, 6)];
+    let mut dst: [(u32, u32); 3] = [(0, 0), (0, 0), (0, 0)];
+    (&mut dst[0..3]).copy_from(&src[0..3]);
+    let (a, b) = dst[2];
+    io.print(f"{a} {b}\n");
+}
+
+fn main() -> i32 {
+    fills();
+    copies();
+    return 0;
+}
