@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// Several shared references from one guard view may live at once, and each borrows the guard.
+import std.sync;
+
+fn read(m: &sync.Mutex<u32>) -> u32 {
+    let g = m.lock();
+    let x: &u32 = g.get();
+    return *x;
+}
+
+fn main() -> i32 {
+    let m = sync.Mutex::<u32>.new(5);
+    let a: u32 = read(&m);
+    let g = m.lock();
+    let r1 = g.get();
+    let r2 = g.get();
+    let s: u32 = *r1 + *r2;
+    return 0;
+}

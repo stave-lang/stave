@@ -22,7 +22,7 @@
 //!
 //! **Copy / Send / Sync** come from [`World`] (built-in Copy; `impl Copy`; structural or
 //! `unsafe impl` Send/Sync). `std.cell.UnsafeCell<T>` (fixed path) is Send iff T is and never
-//! Sync, and the structural rule carries that to every type containing it (`Cell`, `RefCell`, a
+//! Sync, and the structural rule carries that to every type containing it (`Cell`, a
 //! user struct with such a field): it is Sync only through an explicit `unsafe(..) impl Sync`
 //! (`std.sync.Mutex`). A fn type is Copy (its captures are by reference or `copy`), never
 //! Send or Sync (its captures are not in its type: [`crate::threads`] checks them where a closure crosses

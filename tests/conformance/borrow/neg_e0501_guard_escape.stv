@@ -1,13 +1,13 @@
 //~ CHECK-ONLY
 // A reference from a guard view cannot outlive the guard: the guard's drop at the end of its
 // block conflicts with the reference still used after it.
-import std.cell;
+import std.sync;
 
-fn escape(c: &cell.RefCell<u32>) -> u32 {
+fn escape(m: &sync.Mutex<u32>) -> u32 {
     let zero: u32 = 0;
     let mut p: &u32 = &zero;
     {
-        let r = c.borrow();
+        let r = m.lock();
         p = r.get();
     } //~ ERROR E0501
     return *p;

@@ -1,8 +1,7 @@
 //~ CHECK-ONLY
 // E0802 through std types: a `MutexGuard<T>` is Sync only when T is (a `Mutex<T>` is Sync for
 // T: Send, which must not make a shared guard hand `&Cell` to several threads) and is never
-// Send; `vec.Vec<T>` is Sync / Send only when T is; a RefCell `Ref` is never Send and Sync only
-// when T is.
+// Send; `vec.Vec<T>` is Sync / Send only when T is.
 import std.cell;
 import std.sync;
 import std.thread;
@@ -30,16 +29,5 @@ fn vec_shared(v: &vec.Vec<cell.Cell<u32>>, n: usize) {
 fn vec_sent() -> u32 {
     let mut v = vec.Vec::<Raw>.new();
     let (a, b) = thread.join(fn() -> u32 { v.clear(); return 1; }, fn() -> u32 { return 2; }); //~ ERROR E0802
-    return a + b;
-}
-
-fn ref_shared(c: &cell.RefCell<cell.Cell<u32>>, n: usize) {
-    let r = c.borrow();
-    thread.par_for(0, n, fn(i: usize) { r.get().set(1); }); //~ ERROR E0802
-}
-
-fn ref_sent(c: &cell.RefCell<u32>) -> u32 {
-    let mut r = c.borrow();
-    let (a, b) = thread.join(fn() -> u32 { let q = &mut r; return 1; }, fn() -> u32 { return 2; }); //~ ERROR E0802
     return a + b;
 }

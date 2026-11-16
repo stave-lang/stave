@@ -1,6 +1,6 @@
 //~ CHECK-ONLY
 // E0802: `std.cell.UnsafeCell` is never Sync, so neither is any type that
-// contains it without an explicit `unsafe(..) impl Sync`: `Cell`, `RefCell`, a user struct with a
+// contains it without an explicit `unsafe(..) impl Sync`: `Cell`, a user struct with a
 // Cell field. A `&Cell<u32>` captured by a `join` closure or a `par_for` body is E0802.
 import std.cell;
 import std.thread;
@@ -16,10 +16,6 @@ fn join_cell(c: &cell.Cell<u32>) -> u32 {
 
 fn par_for_cell(c: &cell.Cell<u32>, n: usize) {
     thread.par_for(0, n, fn(i: usize) { c.set(c.get() + 1); }); //~ ERROR E0802
-}
-
-fn par_for_refcell(r: &cell.RefCell<u32>, n: usize) {
-    thread.par_for(0, n, fn(i: usize) { let v = r.borrow(); }); //~ ERROR E0802
 }
 
 fn par_for_struct(k: &Counter, n: usize) {
