@@ -433,6 +433,10 @@ pub fn cast(kind: CastKind, from: CastTy, to: CastTy, v: u64) -> Result<Option<u
 /// a failed `Try` or a meaningless pair (e.g. to `bool`).
 pub fn convert(kind: CastKind, from: CastTy, to: CastTy, v: u64) -> Option<u64> {
     if let CastTy::Float(ff) = from {
+        if to == from {
+            // a bit copy: a signaling NaN stays signaling, with its payload
+            return Some(v);
+        }
         let x = to_f64(ff, v);
         return match to {
             CastTy::Int(t) => match kind {

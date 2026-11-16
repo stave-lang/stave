@@ -1,4 +1,4 @@
-# Contract: portable SIMD operations and lowering classes (v0.4)
+# Contract: portable SIMD operations and lowering classes (v0.5)
 
 This file is the source for `stave lowering`, the declarative target tables
 (`crates/stave-target/tables/*.toml`), and the SIMD conformance suite. If the
@@ -60,6 +60,13 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 - An arithmetic op that yields NaN yields a quiet NaN with unspecified sign and payload. Scalars
   follow the same rule. `neg`, `abs`, `copysign`, loads, stores, `select`, and `bitcast` are
   bit-exact. Differential tests compare NaN-ness, not NaN bits.
+- A float cast to its own type, scalar or lane-wise (`as~`, `as?`), is a bit copy: a signaling NaN
+  keeps its signaling bit and payload.
+- `min_num`/`max_num`: a NaN operand, quiet or signaling, is missing, and the result is the other
+  operand bit for bit; two NaNs give a quiet NaN.
+- A mask lane is all zeros (clear) or all ones (set). Any other bit pattern, which only `unsafe`
+  code can make (reading a mask from memory), is undefined behaviour: a backend may test any bit
+  of the lane, and the IR interpreter stops with a fault when it loads one.
 - `select`: one method spelling, `m.select(a, b)` on a mask (lanes of `a` where `m` is set,
   else `b`; planned) and `c.select(a, b)` on a `bool` (any type; implemented). Both operands are
   evaluated first. It is always branchless: v2 `pblendvb`/`blendvps` (class N), v3 `vblendv*`, v4
@@ -83,6 +90,10 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
     N lanes (`f64x4.gather(s, idx: u32x4)`, `u8x16.gather(s, idx: u16x16)`); each lane is
     zero-extended to `usize`. A sizeless `Txn` takes `uWxn` of its own lane width W. Another index
     type is E0201.
+  - `TxN.load_masked(s, i, m)` / `v.store_masked(s, i, m)` touch active lanes only: inactive lanes
+    read 0, are never written, and are not checked. If an active lane is out of range
+    (`i + k ≥ s.len()`), the op traps `Bounds`; a masked store checks every active lane before it
+    writes any.
   - Gather traps if any active index is ≥ len. Scatter traps on an out-of-range active index. On
     duplicate indices the highest lane wins (defined, not UB).
   - Aligned forms require `s: &[T align A]` with A ≥ the vector size in bytes (E0606), obtained
@@ -93,8 +104,8 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 | Construct | v2 | v3 | v4 | neon | sve |
 |---|---|---|---|---|---|
 | `for v: TxN in s` body (full chunks) | N | N | N | N | N |
-| `tail masked (v, m)`, 32/64-bit lanes | M (a) | N | N | M (a) | N |
-| `tail masked (v, m)`, 8/16-bit lanes | M (a) | M (a) | N | M (a) | N |
+| `tail masked (v, m)`, 32/64-bit lanes | M (a) | M | M | M (a) | N |
+| `tail masked (v, m)`, 8/16-bit lanes | M (a) | M (a) | M | M (a) | N |
 | `tail masked` with a `&mut` binding: write-back of active lanes only | M (b) | N 32/64, M (b) 8/16 | N | M (b) | N |
 | `tail scalar (x)` | N | N | N | N | N |
 | `tail exact;` | N (one compare plus a trap branch) | N | N | N | N |
@@ -114,60 +125,79 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 |---|---|---|---|---|---|---|
 | float add/sub/mul/div | `a + b` … | N | N | N | N | N |
 | float sqrt | `v.sqrt()` | N | N | N | N | N |
-| float neg/abs/copysign | `-v`, `v.abs()`, `v.copysign(s)` | N | N | N | N | N |
+| float neg/abs | `-v`, `v.abs()` | N | N | N | N | N |
+| float copysign | `v.copysign(s)` | M | M | N | N | M |
 | float floor/ceil/round/trunc | `v.floor()` … | N | N | N | N | N |
 | int add/sub wrapping | `a +% b` | N | N | N | N | N |
-| int neg wrapping / abs | `0 -% v`, `v.abs_wrap()` (signed) | N | N | N | N | N |
+| int neg wrapping / abs | `0 -% v`, `v.abs_wrap()` (signed) | N (8–32), M (64) | N (8–32), M (64) | N | N | N |
 | int mul wrapping i16/i32 | `a *% b` | N | N | N | N | N |
 | int mul wrapping i8 | `a *% b` | M | M | M | N | N |
 | int mul wrapping i64 | `a *% b` | M | M | N | M | N |
+| int mul saturating | `a *| b` | M | M | M | M | M |
 | sat add/sub i8/i16 | `a +| b` | N | N | N | N | N |
-| sat add/sub i32/i64 | `a +| b` | M | M | M | N | N |
+| sat add i32/i64 | `a +| b` | M | M | M | N | N |
+| sat sub i32/i64 | `a -| b` | M | M | N u32/u64, M | N | N |
 | checked add/sub/mul | `a.checked_add(b) -> Option<TxN>` | M | M | M | M | M |
 | bitwise and/or/xor/not, andnot | `a & b`, `a | b`, `a ^ b`, `~a`, `a.andnot(b)` | N | N | N | N | N |
-| shift by const amount | `v << 3`, `v <<% 3` | N (16/32/64), M (8) | N (16/32/64), M (8) | N (16/32/64), M (8) | N | N |
-| shift by vector amount (16/32/64) | `v << s`, `v <<% s` | M | N 32/64, M 16 | N | N | N |
-| shift by vector amount (8) | same | M | M | M | N | N |
+| shift left by const amount | `v << 3`, `v <<% 3` | N (16/32/64), M (8) | N (16/32/64), M (8) | N | N | N |
+| shift right by const amount | `v >> 3` | M i8/u8/i64, N | M i8/u8/i64, N | M i8, N | N | N |
+| shift left by vector amount (16/32/64) | `v << s`, `v <<% s` | M | N 32/64, M 16 | N | N | N |
+| shift right by vector amount (16/32/64) | `v >> s` | M | N i32/u32/u64, M | N | N | N |
+| shift by vector amount (8) | `v << s`, `v >> s`, `v <<% s` | M | M | M | N | N |
 | int div by const splat | `a.div_const::<K>()` | M | M | M | M | M |
 | int div by vector | `a.div_lanes(b)` | U | U | U | U | N (i32/i64), M (i8/i16) |
 | fma | `a.fma(b, c)` | U | N | N | N | N |
 | min/max (IEEE minimum, NaN propagates) | `a.min(b)`, `a.max(b)` | M | M | M | N | N |
-| min_num/max_num (NaN = missing) | `a.min_num(b)` | M | M | M | N | N |
-| min/max x86 semantics (named, order-dependent) | `a.min_x86(b)` | N | N | N | M | M |
-| int min/max | `a.min(b)` | N (8–32), M (64) | N (8–32), M (64) | N | N (8–32), M (64) | N |
+| min_num/max_num (NaN = missing) | `a.min_num(b)` | M | M | M | M | N |
+| min/max x86 semantics (named, order-dependent) | `a.min_x86(b)` | N | N | N | M | N |
+| int min/max | `a.min(b)` | N (8–32), M (64) | N (8–32), M (64) | N | N | N |
 | compare → mask, signed and float | `a < b` | N | N | N | N | N |
 | compare → mask, unsigned | `a < b` | M | M | N | N | N |
 | mask and/or/xor/not | `m & n` … | N | N | N | N | N |
-| mask rewiden | `m.rewiden::<W2>()` | M | M | N | M | N |
-| mask to_bits | `m.to_bits()` | N (movmsk) | N | N | M (≈3) | M |
+| mask constants | `maskWxN.all()`, `maskWxN.none()` | N | N | N | N | N |
+| mask to vector | `m.to_vec::<iW>()` | N | N | N | N | N |
+| mask rewiden | `m.rewiden::<W2>()` | N | M | N | M | M |
+| mask to_bits | `m.to_bits()` | M 16, N (movmsk) | N | N | M | N 8, M |
 | select | `m.select(a, b)` | N | N | N | N | N |
 | load/store unaligned | `TxN.load(s, i)` / `v.store(s, i)` | N | N | N | N | N |
 | load/store aligned | `TxN.load_aligned(s, i)` | N | N | N | N | N |
-| masked load/store 32/64-bit | `TxN.load_masked(s, i, m)`, `v.store_masked(s, i, m)` | M (a/b) | N | N | M (a/b) | N |
-| masked load/store 8/16-bit | same | M (a/b) | M (a/b) | N | M (a/b) | N |
-| first-fault load | `TxN.load_first_fault(s, i)` | U | U | U | U | N |
-| gather 32/64 | `TxN.gather(s, idx)` | U | N | N | U | N |
+| masked load/store 32/64-bit | `TxN.load_masked(s, i, m)`, `v.store_masked(s, i, m)` | M | N | N | M | N |
+| masked load/store 8/16-bit | same | M | M | N | M | N |
+| first-fault load | `TxN.load_first_fault(s, i)` | U | U | U | U | M |
+| gather 32/64 | `TxN.gather(s, idx)` | U | M 32, N | N | U | N |
 | scatter 32/64 | `v.scatter(s, idx)` | U | U | N | U | N |
 | compress 32/64 | `v.compress(m)` | M | M | N | M | N |
 | compress 8/16 | same | M | M | N (+avx512vbmi2), M | M | M |
-| expand | `v.expand(m)` | M | M | N | M | M |
-| reduce add/min/max/and/or (fixed tree) | `v.reduce_add()`, `v.reduce_add_wrap()` (int) | M | M | M | N int, M fp | N int, E0717 fp |
-| reduce add ordered (float) | `v.reduce_add_ordered(init)` | M | M | M | M | N (fadda) |
-| prefix scan add | `v.scan_add()`, `v.scan_add_wrap()` (int) | M | M | M | M | M |
-| permute (const indices) | `v.permute::<[i0, …]>()` | N (≤16 B), M | M (cross-lane) | N | N | N |
+| expand | `v.expand(m)` | M | M | M 8/16, N | M | M |
+| float reduce add (fixed tree) | `v.reduce_add()` | N f64, M | M | M | N f64, M | N f64, M |
+| int reduce add (wrapping) | `v.reduce_add_wrap()` | M | M | M | N | N |
+| reduce and/or | `v.reduce_and()`, `v.reduce_or()` | M | M | M | M | N |
+| reduce min/max (fixed tree) | `v.reduce_min()`, `v.reduce_max()` | M | M | M | M i64/u64, N | N |
+| reduce add ordered (float) | `v.reduce_add_ordered(init)` | N f64, M | M | M | M | N (fadda) |
+| prefix scan add | `v.scan_add()`, `v.scan_add_wrap()` (int) | N i64/u64, M | M | M | N i64/u64, M | N i64/u64, M |
+| permute (const indices) | `v.permute::<[i0, …]>()` | N | M 8/16, N | M 8, N | N | N |
 | table lookup bytes (out-of-range → 0) | `tbl.lookup(idx)` | N (16 B) | M | N (+avx512vbmi), M | N | N |
-| popcount | `v.popcount()` | M | M | N 32/64 (+avx512vpopcntdq), N 8/16 (+avx512bitalg), else M | N u8, M wider | N |
+| popcount | `v.popcount()` | M | M | N 32/64 (+avx512vpopcntdq), N 8/16 (+avx512bitalg), else M | N 8/16, M | N |
 | leading zeros | `v.clz()` | M | M | N 32/64, M 8/16 | N ≤32, M 64 | N |
 | widen | `v.widen_lo()`, `v.widen_hi()` | N | N | N | N | N |
-| narrow truncating | `v.narrow_wrap(w)` | M | M | N | N | M |
-| narrow saturating | `v.narrow_sat(w)` | N | M | N | N | M |
-| int → float exact (e.g. i32 → f64) | `v as f64x4` | N | N | N | N | N |
+| narrow truncating | `v.narrow_wrap(w)` | N 64, M | N 64, M | M 16, N | M | N |
+| narrow saturating | `v.narrow_sat(w)` | N i16/i32, M | N i16/i32, M | N i16/i32, M | M | M |
+| int widen one step | `v as i32x4`, `v as% i32x4` (from 16-bit lanes) | N | N | N | N | N |
+| int narrow one step, wrapping | `v as% i16x4` (from 32-bit lanes) | N | M | N | N | N |
+| int → float exact (e.g. i32 → f64) | `v as f64x4` | M u32, N | M u32, N | N | M 8, N | M 8, N |
 | int → float rounding (i32 → f32, i64 → f64) | `v as~ f32x4` | N (i32), M (u32/i64) | N (i32), M | N | N | N |
-| float → int saturating | `v as| i32x4` | M (fixup) | M | M | N | N |
+| f32 ↔ f64, float to its own type | `v as f64x2`, `v as~ f32x4` | N | N | N | N | N |
+| float → int saturating | `v as| i32x4` | M (fixup) | M | N u32/u64, M | N | N |
 | float → int checked | `v as? i32x4` (Option) | M | M | M | M | M |
 | f16 ↔ f32 convert | `v as f32x8` / `v as~ f16x8` | U | N (+f16c) | N | N | N |
-| splat / bitcast / split / join | `TxN.splat(x)`, `v.bitcast::<UxM>()`, `v.split()`, `TxN.join(a, b)` | N | N | N | N | N |
-| tail mask | `maskWxN.first_n(k)` | M | M | N | M | N (whilelt) |
+| splat | `TxN.splat(x)` | M 16, N | N | N | N | N |
+| bitcast / split / join | `v.bitcast::<UxM>()`, `v.split()`, `TxN.join(a, b)` | N | N | N | N | N |
+| tail mask | `maskWxN.first_n(k)` | M | M | M | M | N (whilelt) |
+
+The other lane casts (`as|` and `as?` between ints, int casts across two or more widths, `as?`
+between floats) have a class per (source, target) pair: their table entry is the contract
+(`stave lowering --op vec.cast.sat`). Class N is a recipe of at most 2 instructions, M one of
+more; `tools/gen-tables` rejects a table cell whose class disagrees with its recipe.
 
 ## Memory hints
 
@@ -221,7 +251,8 @@ Lowering notes the backend MUST respect:
 - **min/max on x86:** `min`/`min_num` use the fixed sequence. `minps` semantics are only
   available as `min_x86`, whose NaN result has an unspecified quiet bit and payload, so x86 emits
   the bare instruction and other targets need no payload-exact sequence.
-- **fixed reduce tree on neon:** pairwise `faddp` needs extra shuffles to match the tree, so the
-  op is class M.
+- **fixed reduce tree on neon:** pairwise `faddp` does not follow the tree on more than two
+  lanes: float `reduce_add` folds the upper half onto the lower half (`ext` + `fadd` per step),
+  class M on f32 and N on f64.
 - **x86 VEX/EVEX transitions:** VZEROUPPER is inserted before calls and returns out of 256/512-bit
   code.

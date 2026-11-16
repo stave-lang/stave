@@ -12,7 +12,8 @@ fn f(a: f32x4, b: i8x16, c: i64x2, s: &[u32], k: u32x4) -> i8x16 {
         emulate {
             let g = u32x4.gather(s, k); //~ ERROR E0701
         }
-        let m = mask32x4.all(); //~ ERROR E0701
+        let m = mask32x4.all();
+        let k = mask32x4.first_n(2); //~ ERROR E0701
         let h = fn(v: i64x2) -> i64x2 { return v *% v; }; //~ ERROR E0701
     }
     emulate {

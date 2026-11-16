@@ -1,0 +1,56 @@
+//~ CHECK-ONLY
+// A float cast to its own type is a bit copy: a signaling NaN keeps its signaling bit and its
+// payload, in the scalar forms `as`, `as~`, `as?` and the lane-wise `as~`, `as?`. Run by the
+// interpreter harness (crates/stave-driver/tests/interp_vs_native.rs) against
+// run_cast_same_float.stdout.
+import std.io;
+import std.mem;
+
+fn show32(v: f32x4) {
+    let mut out: [u32; 4] = [0, 0, 0, 0];
+    v.bitcast::<u32x4>().store(&mut out, 0);
+    let a = out[0];
+    let b = out[1];
+    let c = out[2];
+    let d = out[3];
+    io.print(f"{a} {b} {c} {d}\n");
+}
+
+fn show64(v: f64x2) {
+    let mut out: [u64; 2] = [0, 0];
+    v.bitcast::<u64x2>().store(&mut out, 0);
+    let a = out[0];
+    let b = out[1];
+    io.print(f"{a} {b}\n");
+}
+
+fn main() -> i32 {
+    // signaling NaN, negative signaling NaN with a payload, quiet NaN, 1.5
+    let bits32: [u32; 4] = [2139095041, 4286653253, 2143289345, 1069547520];
+    let v = u32x4.load(&bits32, 0).bitcast::<f32x4>();
+    show32(v as~ f32x4);
+    match v as? f32x4 {
+        Option.Some(w) => { show32(w); }
+        Option.None => { io.print("None\n"); }
+    }
+    let bits64: [u64; 2] = [9218868437227405313, 18442240474082255685];
+    let d = u64x2.load(&bits64, 0).bitcast::<f64x2>();
+    show64(d as~ f64x2);
+    match d as? f64x2 {
+        Option.Some(w) => { show64(w); }
+        Option.None => { io.print("None\n"); }
+    }
+    let s = mem.f32_from_bits(4286653253);
+    let e = mem.f32_bits(s as f32);
+    let r = mem.f32_bits(s as~ f32);
+    let t: u32 = match s as? f32 {
+        Option.Some(x) => mem.f32_bits(x),
+        Option.None => 0,
+    };
+    io.print(f"{e} {r} {t}\n");
+    let s64 = mem.f64_from_bits(9218868437227405313);
+    let e64 = mem.f64_bits(s64 as f64);
+    let r64 = mem.f64_bits(s64 as~ f64);
+    io.print(f"{e64} {r64}\n");
+    return 0;
+}

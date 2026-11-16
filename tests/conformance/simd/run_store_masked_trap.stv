@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// `v.store_masked(s, i, m)` traps `Bounds` if any active lane is out of range, before any lane is
+// written; inactive lanes are not checked. Run by the interpreter harness
+// (crates/stave-driver/tests/interp_vs_native.rs): exit 101, run_store_masked_trap.stderr.
+import std.io;
+
+fn show(xs: &[u32]) {
+    for k in 0..xs.len() {
+        let x = xs[k];
+        io.print(f" {x}");
+    }
+    io.print("\n");
+}
+
+fn main() -> i32 {
+    let mut xs: [u32; 6] = [0, 1, 2, 3, 4, 5];
+    let sel: [u32; 4] = [1, 0, 1, 0];
+    let m = u32x4.load(&sel, 0) == u32x4.splat(1);
+    let v = u32x4.splat(100);
+    // lanes 3 and 5 are written; lane 6 is inactive
+    v.store_masked(&mut xs, 3, m);
+    show(&xs);
+    let late: [u32; 4] = [1, 0, 0, 1];
+    let n = u32x4.load(&late, 0) == u32x4.splat(1);
+    // lane 0 (index 3) is in range, lane 3 (index 6) is not: nothing is written
+    v.store_masked(&mut xs, 3, n);
+    show(&xs);
+    return 0;
+}

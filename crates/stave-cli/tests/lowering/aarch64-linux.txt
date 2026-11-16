@@ -1,186 +1,302 @@
 # stave lowering --target aarch64-linux: tier neon
 # op, types, class (N native, M multi-instruction, U unavailable), cost (instructions), recipe
 # recipe placeholders: * lane size letter, # lane bits, % float letter, ? s or u
-vec.add                 float                N    1  fadd
-vec.sub                 float                N    1  fsub
-vec.mul                 float                N    1  fmul
-vec.div                 float                N    1  fdiv
-vec.sqrt                float                N    1  fsqrt
-vec.neg                 float                N    1  fneg
-vec.abs                 float                N    1  fabs
-vec.copysign            float                N    1  bit
-vec.floor               float                N    1  frintm
-vec.ceil                float                N    1  frintp
-vec.round               float                N    1  frintn
-vec.trunc               float                N    1  frintz
-vec.add.wrap            int                  N    1  add
-vec.sub.wrap            int                  N    1  sub
-vec.abs_wrap            sint                 N    1  abs
-vec.mul.wrap            int8/int16/int32     N    1  mul
-vec.mul.wrap            int64                M    7  rev64; mul; xtn x2; uaddlp; shl; umlal
-vec.add.sat             int                  N    1  ?qadd
-vec.sub.sat             int                  N    1  ?qsub
-vec.checked_add         int                  M    7  add; ?qadd; eor; umaxv; fmov; cmp; cset
-vec.checked_sub         int                  M    7  sub; ?qsub; eor; umaxv; fmov; cmp; cset
-vec.checked_mul         i8/i16/i32           M   10  mul; smull; smull2; sqxtn; sqxtn2; eor; umaxv; fmov; cmp; cset
-vec.checked_mul         u8/u16/u32           M   10  mul; umull; umull2; uqxtn; uqxtn2; eor; umaxv; fmov; cmp; cset
-vec.checked_mul         i64                  M   15  umov x4; mul x2; smulh x2; asr x2; cmp; ccmp; cset; fmov; ins
-vec.checked_mul         u64                  M   13  umov x4; mul x2; umulh x2; orr; cmp; cset; fmov; ins
-vec.and                 int                  N    1  and
-vec.or                  int                  N    1  orr
-vec.xor                 int                  N    1  eor
-vec.not                 int                  N    1  mvn
-vec.andnot              int                  N    1  bic
-vec.shl                 int by const         N    1  shl
-vec.shl.wrap            int by const         N    1  shl
-vec.shr                 uint by const        N    1  ushr
-vec.shr                 sint by const        N    1  sshr
-vec.shl                 int by vector        N    1  ushl
-vec.shl.wrap            int by vector        N    2  and; ushl
-vec.shr                 uint by vector       N    2  neg; ushl
-vec.shr                 sint by vector       N    2  neg; sshl
-vec.div_const           u8/u16/u32           M    6  umull; umull2; uzp2; sub; usra; ushr
-vec.div_const           i8/i16/i32           M    6  smull; smull2; uzp2; add; sshr; usra
-vec.div_const           u64                  M   12  umov x2; umulh x2; sub x2; add x2; lsr x2; fmov; ins
-vec.div_const           i64                  M   12  umov x2; smulh x2; add x2; asr x2; add x2; fmov; ins
-vec.div_lanes           i32/i64              U    -  -
-vec.div_lanes           u32/u64              U    -  -
-vec.div_lanes           i16                  U    -  -
-vec.div_lanes           u16                  U    -  -
-vec.div_lanes           i8                   U    -  -
-vec.div_lanes           u8                   U    -  -
-vec.fma                 float                N    1  fmla
-vec.min                 float                N    1  fmin
-vec.max                 float                N    1  fmax
-vec.min_num             float                N    1  fminnm
-vec.max_num             float                N    1  fmaxnm
-vec.min_x86             float                M    2  fcmgt; bsl
-vec.max_x86             float                M    2  fcmgt; bsl
-vec.min                 int8/int16/int32     N    1  ?min
-vec.min                 i64                  M    2  cmgt; bsl
-vec.min                 u64                  M    2  cmhi; bsl
-vec.max                 int8/int16/int32     N    1  ?max
-vec.max                 i64                  M    2  cmgt; bsl
-vec.max                 u64                  M    2  cmhi; bsl
-vec.eq                  int                  N    1  cmeq
-vec.eq                  float                N    1  fcmeq
-vec.ne                  int                  N    2  cmeq; mvn
-vec.ne                  float                N    2  fcmeq; mvn
-vec.lt                  sint                 N    1  cmgt
-vec.lt                  uint                 N    1  cmhi
-vec.lt                  float                N    1  fcmgt
-vec.gt                  sint                 N    1  cmgt
-vec.gt                  uint                 N    1  cmhi
-vec.gt                  float                N    1  fcmgt
-vec.le                  sint                 N    1  cmge
-vec.le                  uint                 N    1  cmhs
-vec.le                  float                N    1  fcmge
-vec.ge                  sint                 N    1  cmge
-vec.ge                  uint                 N    1  cmhs
-vec.ge                  float                N    1  fcmge
-mask.and                mask                 N    1  and
-mask.or                 mask                 N    1  orr
-mask.xor                mask                 N    1  eor
-mask.not                mask                 N    1  mvn
-mask.rewiden            mask                 M    3  xtn x3  | note: worst case m64 to m8; one xtn or sxtl per width step
-mask.to_bits            m8                   M    5  and; ext; zip1; addv; umov
-mask.to_bits            m16/m32              M    3  and; addv; umov
-mask.to_bits            m64                  M    3  and; addp; fmov
-mask.select             any                  N    1  bsl
-vec.load                any                  N    1  ldr q
-vec.store               any                  N    1  str q
-vec.load_aligned        any                  N    1  ldr q
-vec.store_aligned       any                  N    1  str q
-vec.load_masked         any8                 M   14  and; ext; zip1; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q
-vec.load_masked         any16/any32          M   12  and; addv; umov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q
-vec.load_masked         any64                M   12  and; addp; fmov; stp; rbit; clz; ldr; str; sub; ands; b.ne; ldr q
-vec.store_masked        any8                 M   13  str q; and; ext; zip1; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne
-vec.store_masked        any16/any32          M   11  str q; and; addv; umov; rbit; clz; ldr; str; sub; ands; b.ne
-vec.store_masked        any64                M   11  str q; and; addp; fmov; rbit; clz; ldr; str; sub; ands; b.ne
-vec.load_first_fault    any                  U    -  -
-vec.gather              any32/any64          U    -  -
-vec.scatter             any32/any64          U    -  -
-vec.compress            any32                M    5  and; addv; umov; ldr; tbl
-vec.compress            any64                M    5  and; addp; fmov; ldr; tbl
-vec.compress            any16                M    5  and; addv; umov; ldr; tbl
-vec.compress            any8                 M   21  and; ext; zip1; addv; umov; and; lsr; ldr x2; add; ins; tbl; fmov; cnt; addv; fmov; stp; str; dup; str; ldr q  | unverified
-vec.expand              any32                M    5  and; addv; umov; ldr; tbl
-vec.expand              any64                M    5  and; addp; fmov; ldr; tbl
-vec.expand              any16                M    5  and; addv; umov; ldr; tbl
-vec.expand              any8                 M   17  and; ext; zip1; addv; umov; and; lsr; ldr x2; fmov; cnt; addv; fmov; dup; add; ins; tbl  | unverified
-vec.reduce_add          f32                  M    3  ext; fadd; faddp
-vec.reduce_add          f64                  M    1  faddp
-vec.reduce_add_wrap     int8/int16/int32     N    2  addv; umov
-vec.reduce_add_wrap     int64                N    2  addp; fmov
-vec.reduce_min          f32                  M    1  fminv
-vec.reduce_min          f64                  M    1  fminp
-vec.reduce_max          f32                  M    1  fmaxv
-vec.reduce_max          f64                  M    1  fmaxp
-vec.reduce_min          int8/int16/int32     N    2  ?minv; umov
-vec.reduce_min          i64                  N    4  ext; cmgt; bsl; fmov  | note: no sminv for 64-bit lanes
-vec.reduce_min          u64                  N    4  ext; cmhi; bsl; fmov  | note: no uminv for 64-bit lanes
-vec.reduce_max          int8/int16/int32     N    2  ?maxv; umov
-vec.reduce_max          i64                  N    4  ext; cmgt; bsl; fmov  | note: no smaxv for 64-bit lanes
-vec.reduce_max          u64                  N    4  ext; cmhi; bsl; fmov  | note: no umaxv for 64-bit lanes
-vec.reduce_and          int8                 N    6  ext; and; fmov; and x3  | note: NEON has no andv: fold in general registers
-vec.reduce_and          int16                N    5  ext; and; fmov; and x2  | note: NEON has no andv: fold in general registers
-vec.reduce_and          int32                N    4  ext; and; fmov; and  | note: NEON has no andv: fold in general registers
-vec.reduce_and          int64                N    3  ext; and; fmov
-vec.reduce_or           int8                 N    6  ext; orr; fmov; orr x3  | note: NEON has no orv: fold in general registers
-vec.reduce_or           int16                N    5  ext; orr; fmov; orr x2  | note: NEON has no orv: fold in general registers
-vec.reduce_or           int32                N    4  ext; orr; fmov; orr  | note: NEON has no orv: fold in general registers
-vec.reduce_or           int64                N    3  ext; orr; fmov
-vec.reduce_add_ordered  f32                  M    7  fadd; dup; fadd; dup; fadd; dup; fadd
-vec.reduce_add_ordered  f64                  M    3  fadd; dup; fadd
-vec.scan_add            f32                  M    9  dup; fadd; dup; fadd; dup; fadd; ins x3
-vec.scan_add            f64                  M    3  dup; fadd; ins
-vec.scan_add_wrap       int8                 M    8  ext; add; ext; add; ext; add; ext; add
-vec.scan_add_wrap       int16                M    6  ext; add; ext; add; ext; add
-vec.scan_add_wrap       int32                M    4  ext; add; ext; add
-vec.scan_add_wrap       int64                M    2  ext; add
-vec.permute             any                  N    1  tbl
-vec.lookup              int8                 N    1  tbl
-vec.popcount            int8                 N    1  cnt
-vec.popcount            int16                M    2  cnt; uaddlp
-vec.popcount            int32                M    3  cnt; uaddlp x2
-vec.popcount            int64                M    4  cnt; uaddlp x3
-vec.clz                 int8/int16/int32     N    1  clz
-vec.clz                 int64                M    6  clz; ushr; cmeq; and x2; add
-vec.widen_lo            int8/int16/int32     N    1  ?xtl
-vec.widen_lo            f32                  N    1  fcvtl
-vec.widen_hi            int8/int16/int32     N    1  ?xtl2
-vec.widen_hi            f32                  N    1  fcvtl2
-vec.narrow_wrap         int16/int32/int64    N    1  uzp1
-vec.narrow_sat          i16/i32/i64          N    2  sqxtn; sqxtn2
-vec.narrow_sat          u16/u32/u64          N    2  uqxtn; uqxtn2
-vec.cast                int8>f32             N    3  ?xtl x2; ?cvtf
-vec.cast                int16>f32/int32>f64  N    2  ?xtl; ?cvtf
-vec.cast.round          int32>f32/int64>f64  N    1  ?cvtf
-vec.cast.sat            f32>int32/f64>int64  N    1  fcvtz?
-vec.cast.try            f32>int32/f64>int64  M    8  fcvtz?; fcmgt; fcmge; and; uminv; fmov; cmp; cset
-vec.cast                f16>f32              N    1  fcvtl
-vec.cast.round          f32>f16              N    1  fcvtn
-vec.splat               any                  N    1  dup
-vec.bitcast             any                  N    0  none
-vec.split               any                  N    1  ext
-vec.join                any                  N    1  ins
-mask.first_n            m8/m16/m32           M    4  cmp; csel; dup; cmhi
-mask.first_n            m64                  M    2  dup; cmhi
-loop.chunk              any                  N    1  ldr q
-loop.tail_masked        any                  M    8  stp; ldr; str; subs; b.ne; ldr q; dup; cmhi
-loop.tail_masked_mut    any                  M    5  str q; ldr; str; subs; b.ne
-loop.tail_scalar        any                  N    0  none
-loop.tail_exact         any                  N    2  tst; b.ne
-mem.prefetch_read_l1    any                  N    1  prfm pldl1keep
-mem.prefetch_read_l2    any                  N    1  prfm pldl2keep
-mem.prefetch_read_l3    any                  N    1  prfm pldl3keep
-mem.prefetch_read_nta   any                  N    1  prfm pldl1strm
-mem.prefetch_write_l1   any                  N    1  prfm pstl1keep
-mem.prefetch_write_l2   any                  N    1  prfm pstl2keep
-mem.prefetch_write_l3   any                  N    1  prfm pstl3keep
-mem.prefetch_write_nta  any                  N    1  prfm pstl1strm
-vec.store_stream        any                  N    2  dup; stnp
-mem.store_stream        any32/any64          N    1  str  | note: no single-register non-temporal store: a plain store
-mem.store_stream        any16                N    1  strh  | note: no single-register non-temporal store: a plain store
-mem.store_stream        any8                 N    1  strb  | note: no single-register non-temporal store: a plain store
-mem.fence_stream        any                  N    0  none  | note: stnp and stnt1 follow normal store ordering  | unverified
+vec.add                 float                       N    1  fadd
+vec.sub                 float                       N    1  fsub
+vec.mul                 float                       N    1  fmul
+vec.div                 float                       N    1  fdiv
+vec.sqrt                float                       N    1  fsqrt
+vec.neg                 float                       N    1  fneg
+vec.abs                 float                       N    1  fabs
+vec.copysign            float                       N    1  bsl  | note: the sign-bit mask is a constant splat
+vec.floor               float                       N    1  frintm
+vec.ceil                float                       N    1  frintp
+vec.round               float                       N    1  frintn
+vec.trunc               float                       N    1  frintz
+vec.add.wrap            int                         N    1  add
+vec.sub.wrap            int                         N    1  sub
+vec.abs_wrap            sint                        N    1  abs
+vec.mul.wrap            int8/int16/int32            N    1  mul
+vec.mul.wrap            int64                       M    8  umov x4; mul x2; ins x2  | note: no 64-bit lane mul: per lane through general registers
+vec.mul.sat             i8/i16/i32                  M    4  ?mull; ?qxtn; ?mull2; ?qxtn2
+vec.mul.sat             u8/u16/u32                  M    4  ?mull; ?qxtn; ?mull2; ?qxtn2
+vec.mul.sat             i64                         M   20  umov x4; eor x4; asr x2; mul x2; smulh x2; cmp x2; csel x2; ins x2
+vec.mul.sat             u64                         M   14  umov x4; umulh x2; mul x2; cmp x2; csinv x2; ins x2
+vec.add.sat             int                         N    1  ?qadd
+vec.sub.sat             int                         N    1  ?qsub
+vec.checked_add         int                         M   12  add; ?qadd; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and  | note: a lane overflows where the saturating result differs from the wrapping one
+vec.checked_sub         int                         M   12  sub; ?qsub; cmeq; mvn; umov x2; orr; cmp; csel; csetm; dup; and  | note: a lane overflows where the saturating result differs from the wrapping one
+vec.checked_mul         i8/i16/i32                  M   18  smull; xtn; sxtl; cmeq; smull2; xtn2; sxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and  | note: a lane overflows where the double-width product differs from the truncated one extended back
+vec.checked_mul         u8/u16/u32                  M   18  umull; xtn; uxtl; cmeq; umull2; xtn2; uxtl2; cmeq; and; mvn; umov x2; orr; cmp; csel; csetm; dup; and  | note: a lane overflows where the double-width product differs from the truncated one extended back
+vec.checked_mul         i64                         M   21  umov x4; mul x2; smulh x2; cmp x2; cset x2; orr x2; ins x2; cmp; csel; csetm; dup; and  | note: per lane through general registers
+vec.checked_mul         u64                         M   21  umov x4; mul x2; umulh x2; cmp x2; cset x2; orr x2; ins x2; cmp; csel; csetm; dup; and  | note: per lane through general registers
+vec.and                 int                         N    1  and
+vec.or                  int                         N    1  orr
+vec.xor                 int                         N    1  eor
+vec.not                 int                         N    1  mvn
+vec.andnot              int                         N    1  bic
+vec.shl                 int by const                N    1  ushl  | note: no immediate form: the splat of the constant amount, and its negation or mask, are constants
+vec.shl.wrap            int by const                N    1  ushl  | note: no immediate form: the splat of the constant amount, and its negation or mask, are constants
+vec.shr                 uint by const               N    1  ushl  | note: no immediate form: the splat of the constant amount, and its negation or mask, are constants
+vec.shr                 sint by const               N    1  sshl  | note: no immediate form: the splat of the constant amount, and its negation or mask, are constants
+vec.shl                 int by vector               N    1  ushl
+vec.shl.wrap            int by vector               N    2  and; ushl
+vec.shr                 uint by vector              N    2  neg; ushl
+vec.shr                 sint by vector              N    2  neg; sshl
+vec.div_const           u8                          M   48  umov x16; udiv x16; ins x16  | note: per lane through general registers
+vec.div_const           u16                         M   24  umov x8; udiv x8; ins x8  | note: per lane through general registers
+vec.div_const           u32                         M   12  umov x4; udiv x4; ins x4  | note: per lane through general registers
+vec.div_const           u64                         M    6  umov x2; udiv x2; ins x2  | note: per lane through general registers
+vec.div_const           i8                          M   48  smov x16; sdiv x16; ins x16  | note: per lane through general registers
+vec.div_const           i16                         M   24  smov x8; sdiv x8; ins x8  | note: per lane through general registers
+vec.div_const           i32                         M   12  smov x4; sdiv x4; ins x4  | note: per lane through general registers
+vec.div_const           i64                         M    6  umov x2; sdiv x2; ins x2  | note: per lane through general registers
+vec.div_lanes           i32/i64                     U    -  -
+vec.div_lanes           u32/u64                     U    -  -
+vec.div_lanes           i16                         U    -  -
+vec.div_lanes           u16                         U    -  -
+vec.div_lanes           i8                          U    -  -
+vec.div_lanes           u8                          U    -  -
+vec.fma                 float                       N    1  fmla
+vec.min                 float                       N    1  fmin
+vec.max                 float                       N    1  fmax
+vec.min_num             float                       M    7  fmin; fcmeq x2; bic x2; bit x2  | note: fminnm would keep a signaling NaN: a NaN lane whose other operand is a number takes the number
+vec.max_num             float                       M    7  fmax; fcmeq x2; bic x2; bit x2  | note: fmaxnm would keep a signaling NaN: a NaN lane whose other operand is a number takes the number
+vec.min_x86             float                       M    3  fcmgt; bsl; fmin  | note: the fmin of the result with itself quiets a NaN that came through
+vec.max_x86             float                       M    3  fcmgt; bsl; fmin  | note: the fmin of the result with itself quiets a NaN that came through
+vec.min                 int8/int16/int32            N    1  ?min
+vec.min                 i64                         N    2  cmgt; bsl
+vec.min                 u64                         N    2  cmhi; bsl
+vec.max                 int8/int16/int32            N    1  ?max
+vec.max                 i64                         N    2  cmgt; bsl
+vec.max                 u64                         N    2  cmhi; bsl
+vec.eq                  int                         N    1  cmeq
+vec.eq                  float                       N    1  fcmeq
+vec.ne                  int                         N    2  cmeq; mvn
+vec.ne                  float                       N    2  fcmeq; mvn
+vec.lt                  sint                        N    1  cmgt
+vec.lt                  uint                        N    1  cmhi
+vec.lt                  float                       N    1  fcmgt
+vec.gt                  sint                        N    1  cmgt
+vec.gt                  uint                        N    1  cmhi
+vec.gt                  float                       N    1  fcmgt
+vec.le                  sint                        N    1  cmge
+vec.le                  uint                        N    1  cmhs
+vec.le                  float                       N    1  fcmge
+vec.ge                  sint                        N    1  cmge
+vec.ge                  uint                        N    1  cmhs
+vec.ge                  float                       N    1  fcmge
+mask.and                mask                        N    1  and
+mask.or                 mask                        N    1  orr
+mask.xor                mask                        N    1  eor
+mask.not                mask                        N    1  mvn
+mask.rewiden            mask                        M    3  xtn x3  | note: worst case m64 to m8; one xtn or sxtl per width step
+mask.to_bits            m8                          M    9  umov x2; and x2; mul x2; lsr x2; orr  | note: lanes narrowed to bytes, bit 0 of each byte gathered by one multiply per 8 lanes
+mask.to_bits            m16                         M    5  xtn; umov; and; mul; lsr  | note: lanes narrowed to bytes, bit 0 of each byte gathered by one multiply
+mask.to_bits            m32                         M    6  xtn x2; umov; and; mul; lsr  | note: lanes narrowed to bytes, bit 0 of each byte gathered by one multiply
+mask.to_bits            m64                         M    7  xtn x3; umov; and; mul; lsr  | note: lanes narrowed to bytes, bit 0 of each byte gathered by one multiply
+mask.select             any                         N    1  bsl
+mask.to_vec             mask                        N    0  none  | note: a mask lane is already all ones or zero
+mask.all                mask                        N    1  movi  | note: the constant is the whole op
+mask.none               mask                        N    1  movi  | note: the constant is the whole op
+vec.load                any                         N    1  ldr q
+vec.store               any                         N    1  str q
+vec.load_aligned        any                         N    1  ldr q
+vec.store_aligned       any                         N    1  str q
+vec.load_masked         any8                        M   80  umov x16; cbz x16; adds x16; ldr x16; ins x16
+vec.load_masked         any16                       M   40  umov x8; cbz x8; adds x8; ldr x8; ins x8
+vec.load_masked         any32                       M   20  umov x4; cbz x4; adds x4; ldr x4; ins x4
+vec.load_masked         any64                       M   10  umov x2; cbz x2; adds x2; ldr x2; ins x2
+vec.store_masked        any8                        M   80  umov x32; cbz x16; add x16; str x16
+vec.store_masked        any16                       M   40  umov x16; cbz x8; add x8; str x8
+vec.store_masked        any32                       M   20  umov x8; cbz x4; add x4; str x4
+vec.store_masked        any64                       M   10  umov x4; cbz x2; add x2; str x2
+vec.load_first_fault    any                         U    -  -
+vec.gather              any32/any64                 U    -  -
+vec.scatter             any32/any64                 U    -  -
+vec.compress            any32                       M   23  and x5; umov x8; str q; str x4; add x4; ldr q
+vec.compress            any64                       M   13  and x3; umov x4; str q; str x2; add x2; ldr q
+vec.compress            any16                       M   43  and x9; umov x16; str q; str x8; add x8; ldr q
+vec.compress            any8                        M   83  and x17; umov x32; str q; str x16; add x16; ldr q
+vec.expand              any32                       M   25  str q; ldr x4; umov x4; and x8; ins x4; add x4
+vec.expand              any64                       M   13  str q; ldr x2; umov x2; and x4; ins x2; add x2
+vec.expand              any16                       M   49  str q; ldr x8; umov x8; and x16; ins x8; add x8
+vec.expand              any8                        M   97  str q; ldr x16; umov x16; and x32; ins x16; add x16
+vec.reduce_add          f32                         M    4  ext; fadd; ushr; fadd
+vec.reduce_add          f64                         N    2  ext; fadd
+vec.reduce_add_wrap     int8/int16/int32            N    2  addv; ?mov
+vec.reduce_add_wrap     int64                       N    2  addp; umov
+vec.reduce_min          f32                         N    1  fminv
+vec.reduce_min          f64                         N    1  fminp
+vec.reduce_max          f32                         N    1  fmaxv
+vec.reduce_max          f64                         N    1  fmaxp
+vec.reduce_min          int8/int16/int32            N    2  ?minv; ?mov
+vec.reduce_min          i64                         M    4  ext; cmgt; bsl; umov  | note: no sminv for 64-bit lanes
+vec.reduce_min          u64                         M    4  ext; cmhi; bsl; umov  | note: no uminv for 64-bit lanes
+vec.reduce_max          int8/int16/int32            N    2  ?maxv; ?mov
+vec.reduce_max          i64                         M    4  ext; cmgt; bsl; umov  | note: no smaxv for 64-bit lanes
+vec.reduce_max          u64                         M    4  ext; cmhi; bsl; umov  | note: no umaxv for 64-bit lanes
+vec.reduce_and          int8                        M    9  ext; ushr x3; and x4; ?mov  | note: NEON has no andv: halves folded in vector registers
+vec.reduce_and          int16                       M    7  ext; ushr x2; and x3; ?mov  | note: NEON has no andv: halves folded in vector registers
+vec.reduce_and          int32                       M    5  ext; ushr; and x2; ?mov  | note: NEON has no andv: halves folded in vector registers
+vec.reduce_and          int64                       M    3  ext; and; umov
+vec.reduce_or           int8                        M    9  ext; ushr x3; orr x4; ?mov  | note: NEON has no orv: halves folded in vector registers
+vec.reduce_or           int16                       M    7  ext; ushr x2; orr x3; ?mov  | note: NEON has no orv: halves folded in vector registers
+vec.reduce_or           int32                       M    5  ext; ushr; orr x2; ?mov  | note: NEON has no orv: halves folded in vector registers
+vec.reduce_or           int64                       M    3  ext; orr; umov
+vec.reduce_add_ordered  f32                         M    8  dup x4; fadd x4
+vec.reduce_add_ordered  f64                         M    4  dup x2; fadd x2
+vec.scan_add            f32                         M   10  dup x4; fadd x3; ins x3
+vec.scan_add            f64                         M    4  dup x2; fadd; ins
+vec.scan_add_wrap       int8                        M    8  ext; add; ext; add; ext; add; ext; add
+vec.scan_add_wrap       int16                       M    6  ext; add; ext; add; ext; add
+vec.scan_add_wrap       int32                       M    4  ext; add; ext; add
+vec.scan_add_wrap       int64                       N    2  ext; add
+vec.permute             any                         N    1  tbl
+vec.lookup              int8                        N    1  tbl
+vec.lookup              int16                       M   49  str q; umov x8; cmp x8; csel x16; ldr x8; ins x8  | note: an index past the table loads lane 0 and selects 0
+vec.lookup              int32                       M   25  str q; umov x4; cmp x4; csel x8; ldr x4; ins x4  | note: an index past the table loads lane 0 and selects 0
+vec.lookup              int64                       M   13  str q; umov x2; cmp x2; csel x4; ldr x2; ins x2  | note: an index past the table loads lane 0 and selects 0
+vec.popcount            int8                        N    1  cnt
+vec.popcount            int16                       N    2  cnt; uaddlp
+vec.popcount            int32                       M    3  cnt; uaddlp x2
+vec.popcount            int64                       M    4  cnt; uaddlp x3
+vec.clz                 int8/int16/int32            N    1  clz
+vec.clz                 int64                       M    6  umov x2; clz x2; ins x2  | note: no 64-bit lane clz: per lane through general registers
+vec.widen_lo            int8/int16/int32            N    1  ?xtl
+vec.widen_lo            f32                         N    1  fcvtl
+vec.widen_hi            int8/int16/int32            N    1  ?xtl2
+vec.widen_hi            f32                         N    1  fcvtl2
+vec.narrow_wrap         int16/int32/int64           M    3  xtn; xtn; ins  | note: the key is the source lane type
+vec.narrow_sat          i16/i32/i64                 M    3  sqxtn; sqxtn; ins  | note: the key is the source lane type
+vec.narrow_sat          u16/u32/u64                 M    3  uqxtn; uqxtn; ins  | note: the key is the source lane type
+vec.cast                i8>i8/i16>i16/i32>i32/i64>i64/u8>u8/u16>u16/u32>u32/u64>u64/f32>f32/f64>f64  N    0  none
+vec.cast                i8>i16/i16>i32/i32>i64/u8>i16/u8>u16/u16>i32/u16>u32/u32>i64/u32>u64  N    1  ?xtl
+vec.cast                f32>f64                     N    1  fcvtl
+vec.cast                i8>i32/i16>i64/u8>i32/u8>u32/u16>i64/u16>u64  N    2  ?xtl x2
+vec.cast                i16>f32/i32>f64/u16>f32/u32>f64  N    2  ?xtl; ?cvtf
+vec.cast                i8>f32/i16>f64/u8>f32/u16>f64  M    3  ?xtl x2; ?cvtf
+vec.cast                i8>i64/u8>i64/u8>u64        M    3  ?xtl x3
+vec.cast                i8>f64/u8>f64               M    4  ?xtl x3; ?cvtf
+vec.cast.wrap           int8>int8/int16>int16/int32>int32/int64>int64  N    0  none
+vec.cast.wrap           int8>int16/int16>int32/int32>int64  N    1  ?xtl
+vec.cast.wrap           int16>int8/int32>int16/int64>int32  N    1  xtn
+vec.cast.wrap           int8>int32/int16>int64      N    2  ?xtl x2
+vec.cast.wrap           int32>int8/int64>int16      N    2  xtn x2
+vec.cast.wrap           int8>int64                  M    3  ?xtl x3
+vec.cast.wrap           int64>int8                  M    3  xtn x3
+vec.cast.sat            i8>i8/i16>i16/i32>i32/i64>i64/u8>u8/u16>u16/u32>u32/u64>u64  N    0  none
+vec.cast.sat            i8>i16/i16>i32/i32>i64/u8>i16/u8>u16/u16>i32/u16>u32/u32>i64/u32>u64  N    1  ?xtl
+vec.cast.sat            f32>i32/f32>u32/f64>i64/f64>u64  N    1  fcvtz?
+vec.cast.sat            i16>i8/i32>i16/i64>i32      N    1  sqxtn
+vec.cast.sat            i16>u8/i32>u16/i64>u32      N    1  sqxtun
+vec.cast.sat            u16>u8/u32>u16/u64>u32      N    1  uqxtn
+vec.cast.sat            i8>i32/i16>i64/u8>i32/u8>u32/u16>i64/u16>u64  N    2  ?xtl x2
+vec.cast.sat            i8>u8/i16>u16/i32>u32/i64>u64  N    2  cmlt; bic
+vec.cast.sat            u8>i8/u16>i16/u32>i32/u64>i64  N    2  cmlt; bit
+vec.cast.sat            f32>i64/f32>u64             N    2  fcvtl; fcvtz?
+vec.cast.sat            f64>i32/f64>u32             N    2  fcvtz?; ?qxtn
+vec.cast.sat            f32>i16                     N    2  fcvtz?; ?qxtn
+vec.cast.sat            f32>u16                     N    2  fcvtz?; ?qxtn
+vec.cast.sat            i32>i8/i64>i16              N    2  sqxtn x2
+vec.cast.sat            i32>u8/i64>u16              N    2  sqxtun; uqxtn
+vec.cast.sat            u32>u8/u64>u16              N    2  uqxtn x2
+vec.cast.sat            i8>i64/u8>i64/u8>u64        M    3  ?xtl x3
+vec.cast.sat            i8>u16/i16>u32/i32>u64      M    3  cmlt; bic; uxtl
+vec.cast.sat            f64>i16                     M    3  fcvtz?; ?qxtn x2
+vec.cast.sat            f32>i8                      M    3  fcvtz?; ?qxtn x2
+vec.cast.sat            f64>u16                     M    3  fcvtz?; ?qxtn x2
+vec.cast.sat            f32>u8                      M    3  fcvtz?; ?qxtn x2
+vec.cast.sat            i64>i8                      M    3  sqxtn x3
+vec.cast.sat            i64>u8                      M    3  sqxtun; uqxtn x2
+vec.cast.sat            u64>u8                      M    3  uqxtn x3
+vec.cast.sat            u16>i8/u32>i16/u64>i32      M    3  uqxtn; cmlt; bit
+vec.cast.sat            i8>u32/i16>u64              M    4  cmlt; bic; uxtl x2
+vec.cast.sat            f64>i8                      M    4  fcvtz?; ?qxtn x3
+vec.cast.sat            f64>u8                      M    4  fcvtz?; ?qxtn x3
+vec.cast.sat            u32>i8/u64>i16              M    4  uqxtn x2; cmlt; bit
+vec.cast.sat            i8>u64                      M    5  cmlt; bic; uxtl x3
+vec.cast.sat            u64>i8                      M    5  uqxtn x3; cmlt; bit
+vec.cast.round          f32>f32/f64>f64             N    0  none
+vec.cast.round          i32>f32/i64>f64/u32>f32/u64>f64  N    1  ?cvtf
+vec.cast.round          f32>f64                     N    1  fcvtl
+vec.cast.round          f64>f32                     N    1  fcvtn
+vec.cast.round          i16>f32/i32>f64/u16>f32/u32>f64  N    2  ?xtl; ?cvtf
+vec.cast.round          i8>f32/i16>f64/u8>f32/u16>f64  M    3  ?xtl x2; ?cvtf
+vec.cast.round          i8>f64/u8>f64               M    4  ?xtl x3; ?cvtf
+vec.cast.round          i64>f32/u64>f32             M    6  umov x2; ?cvtf x2; ins x2
+vec.cast.try            i16>i64/u16>i64/u16>u64     M   13  ?mov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i8>i64/u8>i64/u8>u64        M   13  ?mov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i32>i64/u32>i64/u32>u64     M   13  ?mov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            f64>f64                     M   13  dup x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i64>i64/u64>u64             M   13  umov x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            f32>f64                     M   15  dup x2; fcvt x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            u64>i64                     M   17  umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            u64>i16/u64>u16             M   17  umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            u64>i8/u64>u8               M   17  umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            u64>i32/u64>u32             M   17  umov x2; cmp x2; cset x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i16>u64                     M   19  ?mov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i8>u64                      M   19  ?mov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i32>u64                     M   19  ?mov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i64>u64                     M   19  umov x2; cmp x2; cset x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i8>i32/u8>i32/u8>u32        M   21  ?mov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            i16>i32/u16>i32/u16>u32     M   21  ?mov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            i32>i32/u32>u32             M   21  ?mov x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            f32>f32                     M   21  dup x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            i64>i16/i64>u16             M   23  umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i64>i8/i64>u8               M   23  umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i64>i32/i64>u32             M   23  umov x2; cmp x4; cset x4; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            f64>f32                     M   25  dup x2; fcvt x4; fcmp x2; cset x4; orr x4; ins x2; eor x2; cmp; csel; csetm; dup; and
+vec.cast.try            i16>f64/u16>f64             M   27  ?mov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i8>f64/u8>f64               M   27  ?mov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i32>f64/u32>f64             M   27  ?mov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i64>f64/u64>f64             M   27  umov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i64>f32/u64>f32             M   27  umov x2; ?cvtf x2; fcmp x2; cset x4; fcvtz? x2; cmp x2; and x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            u32>i32                     M   29  ?mov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            u32>i8/u32>u8               M   29  ?mov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            u32>i16/u32>u16             M   29  ?mov x4; cmp x4; cset x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            i8>u32                      M   33  ?mov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            i16>u32                     M   33  ?mov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            i32>u32                     M   33  ?mov x4; cmp x4; cset x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            f32>i64/f32>u64/f64>i8/f64>i16/f64>i32/f64>i64/f64>u8/f64>u16/f64>u32/f64>u64  M   33  dup x2; frintz x2; fcmp x6; cset x6; and x4; fcvtz? x2; ins x2; eor x2; orr x2; cmp; csel; csetm; dup; and
+vec.cast.try            i8>i16/u8>i16/u8>u16        M   37  ?mov x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and
+vec.cast.try            i16>i16/u16>u16             M   37  ?mov x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and
+vec.cast.try            i32>i8/i32>u8               M   41  ?mov x4; cmp x8; cset x8; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            i32>i16/i32>u16             M   41  ?mov x4; cmp x8; cset x8; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            i32>f32/u32>f32             M   49  ?mov x4; ?cvtf x4; fcmp x4; cset x8; fcvtz? x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            i8>f32/u8>f32               M   49  ?mov x4; ?cvtf x4; fcmp x4; cset x8; fcvtz? x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            i16>f32/u16>f32             M   49  ?mov x4; ?cvtf x4; fcmp x4; cset x8; fcvtz? x4; cmp x4; and x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            u16>i16                     M   53  ?mov x8; cmp x8; cset x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and
+vec.cast.try            u16>i8/u16>u8               M   53  ?mov x8; cmp x8; cset x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and
+vec.cast.try            i8>u16                      M   61  ?mov x8; cmp x8; cset x8; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and
+vec.cast.try            i16>u16                     M   61  ?mov x8; cmp x8; cset x8; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and
+vec.cast.try            f32>i8/f32>i16/f32>i32/f32>u8/f32>u16/f32>u32  M   61  dup x4; frintz x4; fcmp x12; cset x12; and x8; fcvtz? x4; ins x4; eor x4; orr x4; cmp; csel; csetm; dup; and
+vec.cast.try            i8>i8/u8>u8                 M   69  ?mov x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and
+vec.cast.try            i16>i8/i16>u8               M   77  ?mov x8; cmp x16; cset x16; and x8; ins x8; eor x8; orr x8; cmp; csel; csetm; dup; and
+vec.cast.try            u8>i8                       M  101  ?mov x16; cmp x16; cset x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and
+vec.cast.try            i8>u8                       M  117  ?mov x16; cmp x16; cset x16; and x16; ins x16; eor x16; orr x16; cmp; csel; csetm; dup; and
+vec.cast                f16>f32                     N    1  fcvtl
+vec.cast.round          f32>f16                     N    1  fcvtn
+vec.splat               any                         N    1  dup
+vec.bitcast             any                         N    0  none
+vec.split               any                         N    1  ext
+vec.join                any                         N    1  ins
+mask.first_n            mask                        M    4  cmp; csel; dup; cmhi  | note: the lane-index constant is compared with the splat of min(k, lanes)
+loop.chunk              any                         N    1  ldr q
+loop.tail_masked        any                         M    8  stp; ldr; str; subs; b.ne; ldr q; dup; cmhi
+loop.tail_masked_mut    any                         M    5  str q; ldr; str; subs; b.ne
+loop.tail_scalar        any                         N    0  none
+loop.tail_exact         any                         N    2  tst; b.ne
+mem.prefetch_read_l1    any                         N    1  prfm pldl1keep
+mem.prefetch_read_l2    any                         N    1  prfm pldl2keep
+mem.prefetch_read_l3    any                         N    1  prfm pldl3keep
+mem.prefetch_read_nta   any                         N    1  prfm pldl1strm
+mem.prefetch_write_l1   any                         N    1  prfm pstl1keep
+mem.prefetch_write_l2   any                         N    1  prfm pstl2keep
+mem.prefetch_write_l3   any                         N    1  prfm pstl3keep
+mem.prefetch_write_nta  any                         N    1  prfm pstl1strm
+vec.store_stream        any                         N    2  dup; stnp
+mem.store_stream        any32/any64                 N    1  str  | note: no single-register non-temporal store: a plain store
+mem.store_stream        any16                       N    1  strh  | note: no single-register non-temporal store: a plain store
+mem.store_stream        any8                        N    1  strb  | note: no single-register non-temporal store: a plain store
+mem.fence_stream        any                         N    0  none  | note: stnp and stnt1 follow normal store ordering  | unverified

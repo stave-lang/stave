@@ -402,8 +402,8 @@ impl Rng {
         (0..vt.n).map(|_| self.lane(vt.l)).collect()
     }
 
-    /// A mask as raw lane values: all, none, or a random mix; a set lane is all ones or, some of
-    /// the time, another nonzero pattern (a mask read from memory is set where it is nonzero).
+    /// A mask as raw lane values: all, none, or a random mix. A lane is all zeros or all ones: any
+    /// other pattern is undefined behaviour.
     pub fn mask(&mut self, w: u32, n: u32) -> Vec<u64> {
         let ones = if w == 64 { u64::MAX } else { (1u64 << w) - 1 };
         let kind = self.below(6);
@@ -412,7 +412,6 @@ impl Rng {
                 0 => ones,
                 1 => 0,
                 _ if self.below(2) == 0 => 0,
-                _ if self.below(4) == 0 => 1 << self.below(u64::from(w)),
                 _ => ones,
             })
             .collect()

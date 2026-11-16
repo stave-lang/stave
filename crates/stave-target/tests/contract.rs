@@ -5,7 +5,7 @@
 //!
 //! Cell grammar: parts separated by `, `, each a class (N M U, `else M`, `E0717` = no class) with
 //! qualifiers: lane widths (`8/16`, `8–32`, `≤32`, `16/32/64`), typed widths (`i32/i64`, `u8`:
-//! by width, or by width and sign in rows marked signed), `int` / `fp`, a feature in parentheses
+//! by width, or by width and sign in rows marked signed; `f32`, `f64`: float lanes), `int` / `fp`, a feature in parentheses
 //! (`(+f16c)`; a feature in the tier baseline counts as baseline), and notes (`(a)`, `(movmsk)`,
 //! `(≈3)`, `(≤16 B)`, ...). A type takes the first baseline part whose qualifiers match it; a part
 //! without type qualifiers matches every type still unmatched, and a type no part names takes the
@@ -41,28 +41,46 @@ const fn row(
     Row { label, groups, signed: false }
 }
 
+/// A row whose typed qualifiers (`u32/i64`) name a sign.
+const fn signed_row(
+    label: &'static str,
+    groups: &'static [(&'static [&'static str], &'static str, &'static [&'static str])],
+) -> Row {
+    Row { label, groups, signed: true }
+}
+
+const WIDE16: &[&str] = &["i16", "u16", "i32", "u32", "i64", "u64"];
+const WIDEN1: &[&str] =
+    &["i8>i16", "i16>i32", "i32>i64", "u8>u16", "u16>u32", "u32>u64", "u8>i16", "u16>i32", "u32>i64"];
+const NARROW1: &[&str] = &[
+    "i16>i8", "i32>i16", "i64>i32", "u16>u8", "u32>u16", "u64>u32", "i16>u8", "i32>u16", "i64>u32", "u16>i8",
+    "u32>i16", "u64>i32",
+];
+
 const OPS: &[Row] = &[
     row("float add/sub/mul/div", &[(&["vec.add", "vec.sub", "vec.mul", "vec.div"], "", FLOAT)]),
     row("float sqrt", &[(&["vec.sqrt"], "", FLOAT)]),
-    row("float neg/abs/copysign", &[(&["vec.neg", "vec.abs", "vec.copysign"], "", FLOAT)]),
+    row("float neg/abs", &[(&["vec.neg", "vec.abs"], "", FLOAT)]),
+    row("float copysign", &[(&["vec.copysign"], "", FLOAT)]),
     row("float floor/ceil/round/trunc", &[(&["vec.floor", "vec.ceil", "vec.round", "vec.trunc"], "", FLOAT)]),
     row("int add/sub wrapping", &[(&["vec.add.wrap", "vec.sub.wrap"], "", INT)]),
     row("int neg wrapping / abs", &[(&["vec.abs_wrap"], "", SINT)]),
     row("int mul wrapping i16/i32", &[(&["vec.mul.wrap"], "", &["i16", "u16", "i32", "u32"])]),
     row("int mul wrapping i8", &[(&["vec.mul.wrap"], "", &["i8", "u8"])]),
     row("int mul wrapping i64", &[(&["vec.mul.wrap"], "", &["i64", "u64"])]),
+    row("int mul saturating", &[(&["vec.mul.sat"], "", INT)]),
     row("sat add/sub i8/i16", &[(&["vec.add.sat", "vec.sub.sat"], "", &["i8", "u8", "i16", "u16"])]),
-    row("sat add/sub i32/i64", &[(&["vec.add.sat", "vec.sub.sat"], "", &["i32", "u32", "i64", "u64"])]),
+    row("sat add i32/i64", &[(&["vec.add.sat"], "", &["i32", "u32", "i64", "u64"])]),
+    signed_row("sat sub i32/i64", &[(&["vec.sub.sat"], "", &["i32", "u32", "i64", "u64"])]),
     row("checked add/sub/mul", &[(&["vec.checked_add", "vec.checked_sub", "vec.checked_mul"], "", INT)]),
     row(
         "bitwise and/or/xor/not, andnot",
         &[(&["vec.and", "vec.or", "vec.xor", "vec.not", "vec.andnot"], "", INT)],
     ),
-    row("shift by const amount", &[(&["vec.shl", "vec.shl.wrap", "vec.shr"], "const", INT)]),
-    row(
-        "shift by vector amount (16/32/64)",
-        &[(&["vec.shl", "vec.shl.wrap", "vec.shr"], "vector", &["i16", "u16", "i32", "u32", "i64", "u64"])],
-    ),
+    row("shift left by const amount", &[(&["vec.shl", "vec.shl.wrap"], "const", INT)]),
+    signed_row("shift right by const amount", &[(&["vec.shr"], "const", INT)]),
+    row("shift left by vector amount (16/32/64)", &[(&["vec.shl", "vec.shl.wrap"], "vector", WIDE16)]),
+    signed_row("shift right by vector amount (16/32/64)", &[(&["vec.shr"], "vector", WIDE16)]),
     row("shift by vector amount (8)", &[(&["vec.shl", "vec.shl.wrap", "vec.shr"], "vector", &["i8", "u8"])]),
     row("int div by const splat", &[(&["vec.div_const"], "", INT)]),
     row("int div by vector", &[(&["vec.div_lanes"], "", INT)]),
@@ -81,6 +99,8 @@ const OPS: &[Row] = &[
     ),
     row("compare → mask, unsigned", &[(&["vec.lt", "vec.le", "vec.gt", "vec.ge"], "", UINT)]),
     row("mask and/or/xor/not", &[(&["mask.and", "mask.or", "mask.xor", "mask.not"], "", MASK)]),
+    row("mask constants", &[(&["mask.all", "mask.none"], "", MASK)]),
+    row("mask to vector", &[(&["mask.to_vec"], "", MASK)]),
     row("mask rewiden", &[(&["mask.rewiden"], "", MASK)]),
     row("mask to_bits", &[(&["mask.to_bits"], "", MASK)]),
     row("select", &[(&["mask.select"], "", ANY)]),
@@ -94,11 +114,12 @@ const OPS: &[Row] = &[
     row("compress 32/64", &[(&["vec.compress"], "", ANY32_64)]),
     row("compress 8/16", &[(&["vec.compress"], "", ANY8_16)]),
     row("expand", &[(&["vec.expand"], "", ANY)]),
+    row("float reduce add (fixed tree)", &[(&["vec.reduce_add"], "", FLOAT)]),
+    row("int reduce add (wrapping)", &[(&["vec.reduce_add_wrap"], "", INT)]),
+    row("reduce and/or", &[(&["vec.reduce_and", "vec.reduce_or"], "", INT)]),
     row(
-        "reduce add/min/max/and/or (fixed tree)",
+        "reduce min/max (fixed tree)",
         &[
-            (&["vec.reduce_add"], "", FLOAT),
-            (&["vec.reduce_add_wrap", "vec.reduce_and", "vec.reduce_or"], "", INT),
             (&["vec.reduce_min", "vec.reduce_max"], "", INT),
             (&["vec.reduce_min", "vec.reduce_max"], "", FLOAT),
         ],
@@ -114,23 +135,32 @@ const OPS: &[Row] = &[
         &[(&["vec.widen_lo", "vec.widen_hi"], "", &["i8", "i16", "i32", "u8", "u16", "u32", "f32"])],
     ),
     row("narrow truncating", &[(&["vec.narrow_wrap"], "", &["i16", "i32", "i64", "u16", "u32", "u64"])]),
-    row("narrow saturating", &[(&["vec.narrow_sat"], "", &["i16", "i32", "i64", "u16", "u32", "u64"])]),
-    row(
+    signed_row(
+        "narrow saturating",
+        &[(&["vec.narrow_sat"], "", &["i16", "i32", "i64", "u16", "u32", "u64"])],
+    ),
+    row("int widen one step", &[(&["vec.cast", "vec.cast.wrap"], "", WIDEN1)]),
+    row("int narrow one step, wrapping", &[(&["vec.cast.wrap"], "", NARROW1)]),
+    signed_row(
         "int → float exact (e.g. i32 → f64)",
         &[(&["vec.cast"], "", &["i8>f32", "u8>f32", "i16>f32", "u16>f32", "i32>f64", "u32>f64"])],
     ),
-    Row {
-        label: "int → float rounding (i32 → f32, i64 → f64)",
-        groups: &[(&["vec.cast.round"], "", &["i32>f32", "u32>f32", "i64>f64", "u64>f64"])],
-        signed: true,
-    },
-    row("float → int saturating", &[(&["vec.cast.sat"], "", &["f32>i32", "f32>u32", "f64>i64", "f64>u64"])]),
+    signed_row(
+        "int → float rounding (i32 → f32, i64 → f64)",
+        &[(&["vec.cast.round"], "", &["i32>f32", "u32>f32", "i64>f64", "u64>f64"])],
+    ),
+    row(
+        "f32 ↔ f64, float to its own type",
+        &[(&["vec.cast"], "", &["f32>f64"]), (&["vec.cast.round"], "", &["f64>f32", "f32>f32", "f64>f64"])],
+    ),
+    signed_row(
+        "float → int saturating",
+        &[(&["vec.cast.sat"], "", &["f32>i32", "f32>u32", "f64>i64", "f64>u64"])],
+    ),
     row("float → int checked", &[(&["vec.cast.try"], "", &["f32>i32", "f32>u32", "f64>i64", "f64>u64"])]),
     row("f16 ↔ f32 convert", &[(&["vec.cast"], "", &["f16>f32"]), (&["vec.cast.round"], "", &["f32>f16"])]),
-    row(
-        "splat / bitcast / split / join",
-        &[(&["vec.splat", "vec.bitcast", "vec.split", "vec.join"], "", ANY)],
-    ),
+    row("splat", &[(&["vec.splat"], "", ANY)]),
+    row("bitcast / split / join", &[(&["vec.bitcast", "vec.split", "vec.join"], "", ANY)]),
     row("tail mask", &[(&["mask.first_n"], "", MASK)]),
 ];
 
@@ -250,15 +280,20 @@ fn qualifier(word: &str, signed_row: bool) -> Option<Test> {
         return Some(Box::new(move |t| ws.contains(&t.bits)));
     }
     let typed = |p: &&str| {
-        (p.starts_with('i') || p.starts_with('u'))
+        (p.starts_with('i') || p.starts_with('u') || p.starts_with('f'))
             && p.len() > 1
             && p[1..].bytes().all(|b| b.is_ascii_digit())
     };
     if parts.iter().all(typed) {
-        let ts: Vec<(bool, u32)> =
-            parts.iter().map(|p| (p.starts_with('i'), p[1..].parse().unwrap())).collect();
+        let ts: Vec<(u8, u32)> = parts.iter().map(|p| (p.as_bytes()[0], p[1..].parse().unwrap())).collect();
         return Some(Box::new(move |t| {
-            !t.float && ts.iter().any(|&(s, b)| b == t.bits && (!signed_row || s == t.signed))
+            ts.iter().any(|&(c, b)| {
+                b == t.bits
+                    && match c {
+                        b'f' => t.float,
+                        _ => !t.float && (!signed_row || (c == b'i') == t.signed),
+                    }
+            })
         }));
     }
     None

@@ -3,7 +3,8 @@
 //!
 //! The format is described in the header of each table. Checks: every entry has one cell per tier
 //! of its architecture, a class N, M or U, a recipe unless U, known type tokens, placeholders that
-//! apply to every type of the entry, and no (op, form, type) covered twice. The generator expands
+//! apply to every type of the entry, a class that agrees with the recipe's instruction count (N at
+//! most [`NATIVE_MAX`], M more), and no (op, form, type) covered twice. The generator expands
 //! type groups to concrete keys, expands placeholders per key, and counts the cost.
 
 use std::collections::BTreeMap;
@@ -197,6 +198,10 @@ fn expand(recipe: &str, key: &str, arch: &Arch) -> Result<String, String> {
     Ok(out)
 }
 
+/// The most instructions a class N recipe has (contracts/simd-ops.md: N = native, ≤ 2
+/// instructions); a class M recipe has more.
+pub const NATIVE_MAX: u32 = 2;
+
 /// Instructions in a recipe: `; `-separated items, `xK` repeating one K times, `none` for none.
 pub fn cost(recipe: &str) -> Result<u32, String> {
     if recipe == "none" {
@@ -319,6 +324,11 @@ fn cell(
         (_, None) => return Err("no recipe".into()),
         (_, Some(r)) => {
             let n = cost(r)?;
+            if (class == 'N') != (n <= NATIVE_MAX) {
+                return Err(format!(
+                    "class {class} with {n} instructions (`{r}`): N is at most {NATIVE_MAX}, M more"
+                ));
+            }
             let rs = keys.iter().map(|k| expand(r, k, arch)).collect::<Result<Vec<_>, _>>()?;
             (r.clone(), n, rs)
         }
@@ -458,6 +468,13 @@ mod tests {
         );
         assert!(
             one(&ok.replace("class = \"N\", recipe = \"addps\"", "class = \"Q\", recipe = \"x\"")).is_err()
+        );
+        assert!(
+            one(&ok.replace("recipe = \"addps\"", "recipe = \"a; b; c\"")).unwrap_err().contains("class N")
+        );
+        assert!(
+            one(&ok.replace("class = \"N\", recipe = \"addps\"", "class = \"M\", recipe = \"addps\""))
+                .is_err()
         );
         let variant = format!("{ok}\"v4+avx512vbmi\" = {{ class = \"N\", recipe = \"vpermb\" }}\n");
         let e = one(&variant).unwrap();

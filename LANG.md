@@ -144,15 +144,15 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 
 **Ops** (method form unless shown):
 - arithmetic: `sqrt abs copysign(s) floor ceil round trunc fma(b, c) min max min_num max_num min_x86 max_x86` (floats; `round` ties to even), `div_lanes(b) div_const::<K>()` (ints), `abs_wrap` (signed ints), `min max` (both)
-  - `min`/`max` propagate NaN. `min_num`/`max_num` treat NaN as missing. `min_x86`/`max_x86` use x86 semantics (`a < b ? a : b`, `a > b ? a : b`); a NaN result has unspecified quiet bit and payload.
+  - `min`/`max` propagate NaN. `min_num`/`max_num` treat any NaN (quiet or signaling) as missing; two NaNs give a quiet NaN. `min_x86`/`max_x86` use x86 semantics (`a < b ? a : b`, `a > b ? a : b`); a NaN result has unspecified quiet bit and payload.
 - bitwise: `& | ^ ~ andnot(b)` (`a & ~b`), shifts `<< >> <<%` by a vector or a literal (`v << 3`: a lane value)
 - lane counting: `popcount clz`
-- compare `a < b` → mask. Masks: `& | ^ ~`, `m.select(a, b)` (a where set), `m.to_bits()` → smallest uint, `m.to_vec::<i32>()`, `m.rewiden::<16>()`; constructors `maskWxN.first_n(k)`, `maskWxN.all()`, `maskWxN.none()`. A mask of another lane width or count than the vector = E0605
+- compare `a < b` → mask. Masks: `& | ^ ~`, `m.select(a, b)` (a where set), `m.to_bits()` → smallest uint, `m.to_vec::<i32>()`, `m.rewiden::<16>()`; constructors `maskWxN.first_n(k)`, `maskWxN.all()`, `maskWxN.none()`. A mask of another lane width or count than the vector = E0605. A mask lane is all zeros or all ones: any other pattern (only `unsafe` code can read one from memory) is UB
 - reductions (fixed tree): `reduce_add` (floats), `reduce_add_wrap` (ints), `reduce_min reduce_max reduce_and reduce_or`, `reduce_add_ordered(init)` (floats; sequential, init + v[0] + ..)
 - `scan_add` (floats), `scan_add_wrap` (ints)
 - shape: `TxN.splat(x)`, `v.bitcast::<UxM>()`, `v.split()`, `TxN.join(a, b)`, `widen_lo widen_hi`, `narrow_wrap(w) narrow_sat(w)`, `permute::<[i0, ..]>()`, `tbl.lookup(idx)` (out of range → 0), `compress(m) expand(m)`
 - convert: `v as f64x4` (exact), `v as~ f32x4` (rounding), `v as| i32x4`, `v as? i32x4`
-- memory: `TxN.load(s, i)`, `v.store(s, i)` (trap if `i+N > len`), `TxN.load_masked(s, i, m)`, `v.store_masked(s, i, m)`, `TxN.gather(s, idx)`, `v.scatter(s, idx)` (`idx`: unsigned lanes of any width, same lane count, each zero-extended to `usize`: `u32x4` for `f64x4`, `u16x16` for `u8x16`; sizeless `Txn` takes `uWxn` of its own width; else E0201; bounds-checked; duplicate index → highest lane wins). Masked forms touch active lanes only: inactive lanes read 0, are never written, and are not bounds-checked
+- memory: `TxN.load(s, i)`, `v.store(s, i)` (trap if `i+N > len`), `TxN.load_masked(s, i, m)`, `v.store_masked(s, i, m)`, `TxN.gather(s, idx)`, `v.scatter(s, idx)` (`idx`: unsigned lanes of any width, same lane count, each zero-extended to `usize`: `u32x4` for `f64x4`, `u16x16` for `u8x16`; sizeless `Txn` takes `uWxn` of its own width; else E0201; bounds-checked; duplicate index → highest lane wins). Masked forms touch active lanes only: inactive lanes read 0, are never written, and are not bounds-checked; an out-of-range active lane traps before any lane is written
 - aligned: `TxN.load_aligned(s, i)`, `v.store_aligned(s, i)` need `s: &[T align A]` with A ≥ vector bytes (E0606) and trap unless `i % N == 0`. Get one with `s.align_to::<32>() -> Option<&[T align 32]>` (`Some` iff the address is a multiple of 32); `&[T align A]` coerces to `&[T]`.
 - memory hints (no effect on results; Why: bandwidth-bound loops need them and auto-hinting is guesswork): `s.prefetch_read_l1(i)`, generally `prefetch_{read,write}_{l1,l2,l3,nta}`, on a slice (any `i`, even ≥ len: never faults, no check) or raw pointer `p.prefetch_read_l1()`, both safe. Streaming store bypassing caches: `v.store_stream(s, i)` (`s: &mut [T align A]`, A ≥ vector bytes; traps unless `i % N == 0` and `i+N ≤ len`), scalar `x.store_stream(s, i)`, unsafe `p.write_stream(v)`. The compiler adds the needed fence (x86 `sfence`) before returns and calls: never write one in safe code.
 
@@ -184,7 +184,7 @@ dispatch fn sum(xs: &[f32]) -> f32 { avx512f => sum_v4, avx2 => sum_v3, sve => s
 
 **Sizeless (SVE).** `f32xn`, `mask32xn`: lane count fixed per run, legal only under `needs(sve)` (E0710). Allowed only in locals, params, and returns: not fields, array elements, globals, closure captures, or sized generic args (E0711–E0716). Loops need no tail clause. Float `reduce_add` on them = E0717: use `acc = v.reduce_add_ordered(acc);`.
 
-**Float semantics.** IEEE, round-nearest-even, no FTZ, no auto-FMA. NaN results are quiet NaN with unspecified sign and payload. Lane op = scalar op per lane.
+**Float semantics.** IEEE, round-nearest-even, no FTZ, no auto-FMA. NaN results are quiet NaN with unspecified sign and payload. A float cast to its own type is a bit copy (a signaling NaN stays signaling). Lane op = scalar op per lane.
 
 ## 5. Examples
 

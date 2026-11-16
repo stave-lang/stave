@@ -386,6 +386,21 @@ fn simd_programs_run_in_the_interpreter() {
     assert!(failures.is_empty(), "{} failure(s):\n{}", failures.len(), failures.join("\n"));
 }
 
+/// A mask loaded from memory with a lane that is neither all zeros nor all ones is undefined
+/// behaviour: the interpreter reports a fault at the load.
+#[test]
+fn malformed_mask_load_is_an_interpreter_fault() {
+    let p = repo().join("tests/conformance/simd/ub_mask_bits.stv");
+    for target in ["x86_64-linux", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
+        let out = lower_only(&p, target);
+        let m = out.module.as_ref().unwrap();
+        match interp::run(m, "main.main", target, &[], &[], Limits::default()) {
+            Err(e) => assert!(e.contains("Fault"), "{target}: {e}"),
+            Ok(r) => panic!("{target}: ran to the end\n{}", show(&r.ran)),
+        }
+    }
+}
+
 /// The check-only SIMD positives lower to verified checked IR on both arches.
 #[test]
 fn simd_positives_lower() {

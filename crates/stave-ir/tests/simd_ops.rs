@@ -181,6 +181,23 @@ fn min_max_forms() {
 }
 
 #[test]
+fn min_num_max_num_treat_signaling_nan_as_missing() {
+    let neg_snan = 0xff81_2345u64;
+    let a = lanes(&[SNAN as u64, 1f32.to_bits() as u64, SNAN as u64, neg_snan]);
+    let b = lanes(&[2f32.to_bits() as u64, neg_snan, QNAN as u64, SNAN as u64]);
+    for op in [VecOp::MinNum, VecOp::MaxNum] {
+        let r = same(F32, 4, 2, op, vec![a.clone(), b.clone()]).unwrap();
+        let r: Vec<u32> = out_lanes(&r).into_iter().map(|x| x as u32).collect();
+        assert_eq!(&r[..2], &[2f32.to_bits(), 1f32.to_bits()], "{op:?}: the number wins");
+        assert!(is_qnan32(r[2]) && is_qnan32(r[3]), "{op:?}: both NaN give a quiet NaN: {r:x?}");
+    }
+    let snan64 = 0x7ff0_0000_0000_0001u64;
+    let (x, y) = (lanes(&[snan64, 3f64.to_bits()]), lanes(&[(-1f64).to_bits(), snan64]));
+    let r = same(F64, 2, 2, VecOp::MinNum, vec![x, y]).unwrap();
+    assert_eq!(out_lanes(&r), vec![(-1f64).to_bits(), 3f64.to_bits()]);
+}
+
+#[test]
 fn denormals_are_kept() {
     let d = f32::from_bits(1);
     let r = f32_bin(VecOp::Add, &[d, d, f32::MIN_POSITIVE, 0.0], &[d, -d, -d, d]);
@@ -795,6 +812,25 @@ fn lane_casts() {
     assert_eq!(out_lanes(&r), vec![0x3c00, 0x7c00], "rounds to inf past f16 max");
     let r = cast(CastKind::Wrap, int(true, 32), int(false, 8), 2, ilanes(&[257, -1]), false);
     assert_eq!(out_lanes(&r), vec![1, 255]);
+    // a float cast to its own type is a bit copy: signaling NaNs keep their bits
+    let nans32 = [SNAN as u64, 0xff81_2345, QNAN as u64, 1.5f32.to_bits() as u64];
+    let nans64 = [0x7ff0_0000_0000_0001, 0xfff0_0000_0001_2345];
+    for kind in [CastKind::Exact, CastKind::Round, CastKind::Try] {
+        let try_ = kind == CastKind::Try;
+        for (ty, n, v) in [(F32, 4, &nans32[..]), (F64, 2, &nans64[..])] {
+            let r = cast(kind, ty.clone(), ty, n, lanes(v), try_);
+            let r = if try_ { r.fields().unwrap()[1].clone() } else { r };
+            assert_eq!(out_lanes(&r), v, "{kind:?}");
+        }
+    }
+    let f32_ = stave_ir::arith::CastTy::Float(FloatBits::F32);
+    for kind in [CastKind::Exact, CastKind::Round, CastKind::Try] {
+        assert_eq!(
+            stave_ir::arith::convert(kind, f32_, f32_, SNAN as u64),
+            Some(SNAN as u64),
+            "scalar {kind:?}"
+        );
+    }
 }
 
 /// Runs `f(slice, extra..)` over a `u32` slice of `data`; returns the outcome and the slice after.
