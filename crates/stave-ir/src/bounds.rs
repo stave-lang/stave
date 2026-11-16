@@ -16,8 +16,9 @@
 //!   `slice.make (addr.elem p a) (b - a)`; its start may be `n` (an empty slice at the end).
 //! - `vec.load` / `vec.store` (and their aligned forms) of N lanes at `i`: `check.bounds i lim`
 //!   with `lim = sub.sat n N-1` (so `i < lim` iff `i + N <= n`), or the `ChunkLoop` proof: a chunk
-//!   loop's own head test `cbr (lt i lim)` with the same `lim`. Masked loads and stores, gathers and
-//!   scatters check their active lanes themselves.
+//!   loop's own head test `cbr (lt i lim)` with the same `lim`, or the facts below proving
+//!   `i + N-1 < n` (`while i + N <= n`). Masked loads and stores, gathers and scatters check their
+//!   active lanes themselves.
 //!
 //! **Audit** ([`audit`]): every element access is classified with its [`Guard`]: a dominating
 //! `check.bounds` on the same index and length, the op's own trap, or a [`Proof`]. An access with
@@ -34,7 +35,7 @@
 //! | `Dominated` | an identical `check.bounds` (same index and length operands) dominates it |
 //! | `LoopBound` | a dominating `cbr (lt i n') T F` reaches the check only through `T` (T's only predecessor), `i` unsigned, and `n'` is the same length operand (or a constant ≤ a constant length) |
 //! | `LenEq` | the facts below prove `i < n` through an equality of two lengths, e.g. `i < len(a)` and `len(a) == len(b)` for `check.bounds i len(b)` |
-//! | `Offset` | the facts below prove `i + k < n` for the index `i + k` (`k` a constant, possibly negative or 0) without an equality |
+//! | `Offset` | the facts below prove `i + k < n` for the index `i + k` (`k` a constant, possibly negative or 0) without an equality; for a check against `n -| c` (a vector access), `k` includes `c`: the last lane |
 //!
 //! `LenEq` and `Offset` come from one difference-constraint graph per function (`bounds/facts.rs`):
 //! facts `x <= y + c` over SSA values from dominating branches (unsigned compares, a loop's
@@ -91,8 +92,8 @@ pub enum Proof {
     /// The index is below the length by facts that include the equality tested by instruction
     /// `cmp` (an `eq` or `ne`, through a branch or an asserting call).
     LenEq { cmp: u32 },
-    /// The index is `base + k` (`base` an SSA value number, `None` for a constant index) and the
-    /// facts prove it below the length without an equality.
+    /// The facts prove `base + k` below the length without an equality (`base` an SSA value
+    /// number, `None` for a constant index): the index, or a vector access's last lane.
     Offset { base: Option<u32>, k: i128 },
 }
 
@@ -437,8 +438,15 @@ impl<'a> Cx<'a> {
                 if let Some(c) = self.dominating_check(i, idx, |n| self.is_vec_lim(n, p, len, lanes)) {
                     return Some(Guard::Check(c));
                 }
-                self.loop_bound(i, idx, |n| self.is_vec_lim(n, p, len, lanes))
-                    .map(|_| Guard::Proof(Proof::ChunkLoop))
+                if self.loop_bound(i, idx, |n| self.is_vec_lim(n, p, len, lanes)).is_some() {
+                    return Some(Guard::Proof(Proof::ChunkLoop));
+                }
+                let n = match len {
+                    Some(l) => facts::Term::constant(l),
+                    None => self.slice_len_term(p)?,
+                };
+                let last = self.term(idx)?.plus(i128::from(lanes) - 1)?;
+                self.prove_lt(i, last, n).map(Guard::Proof)
             }
         }
     }
@@ -540,7 +548,13 @@ impl<'a> Cx<'a> {
         if let Some(branch) = self.loop_bound(i, idx, same_len) {
             return Some(Proof::LoopBound { branch });
         }
-        self.prove_lt(i, self.term(idx)?, self.term(n)?)
+        let t = self.term(idx)?;
+        if let Some(p) = self.term(n).and_then(|tn| self.prove_lt(i, t, tn)) {
+            return Some(p);
+        }
+        // `idx < n -| c` iff `idx + c < n` (the limit of a vector access of `c + 1` lanes)
+        let (n, c) = self.sat_bound(n)?;
+        self.prove_lt(i, t.plus(c)?, self.term(n)?)
     }
 }
 

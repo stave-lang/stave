@@ -19,8 +19,13 @@ impl Cg<'_, '_> {
     /// The address of element `i` (lanes of `w` bytes) of the slice or array behind `s`.
     pub(in crate::debug) fn vslice(&mut self, s: Operand, i: Operand, w: u32) -> Res<Mem> {
         let st = self.oty(s).ok_or_else(|| bad("vector memory operand must be a value"))?;
-        let mo = vs::mem_operand(&self.cx.m.types, st).ok_or_else(|| bad("vector memory operand type"))?;
-        let base = if mo.len.is_none() {
+        let ptr = vs::elem_ptr_operand(&self.cx.m.types, st).is_some();
+        let slice = !ptr
+            && vs::mem_operand(&self.cx.m.types, st)
+                .ok_or_else(|| bad("vector memory operand type"))?
+                .len
+                .is_none();
+        let base = if slice {
             // a slice reference: (address, length)
             let fat = self.vmem(s)?;
             let g = self.alloc_g()?;

@@ -211,6 +211,9 @@ pub(crate) struct Cg<'a, 'm> {
     /// `regalloc`). Empty in a debug build. An owned register is outside the block-local cache:
     /// its `Occ` is `Free` between instructions and `vreg` of its value stays set across blocks.
     own: Vec<Option<R>>,
+    /// Release: per value, read in a block emitted before its definition (each such value owns a
+    /// register): `vreg` holds that register from the start.
+    early: Vec<bool>,
     /// Registers owned by some value of this function; the cache never allocates them.
     gown: u16,
     xown: u16,
@@ -286,7 +289,9 @@ struct Owned {
     last: Vec<u32>,
 }
 
-fn ownership(cx: &Ctx<'_>, b: &Body, an: &Analysis) -> Owned {
+/// Per value its register class ([`regalloc::CLASS_NONE`] for values that live in memory and for
+/// frame addresses), and per instruction whether it clobbers the scratch registers.
+fn reg_classes(cx: &Ctx<'_>, b: &Body) -> (Vec<u8>, Vec<bool>) {
     let nv = b.values.len();
     let mut class = vec![regalloc::CLASS_NONE; nv];
     for (c, vd) in class.iter_mut().zip(&b.values) {
@@ -331,6 +336,10 @@ fn ownership(cx: &Ctx<'_>, b: &Body, an: &Analysis) -> Owned {
             *c = regalloc::CLASS_NONE;
         }
     }
+    (class, clobbers)
+}
+
+fn ownership(b: &Body, an: &Analysis, class: &[u8], clobbers: &[bool]) -> Owned {
     let saved = CALLEE_SAVED.len() as u8;
     let pools = regalloc::Pools {
         int_saved: saved,
@@ -339,12 +348,12 @@ fn ownership(cx: &Ctx<'_>, b: &Body, an: &Analysis) -> Owned {
         float_scratch: OWN_X_COUNT,
         vec_saved: 0,
     };
-    let asg = regalloc::assign(b, &an.rpo, &class, &clobbers, pools);
+    let asg = regalloc::assign(b, &an.rpo, class, clobbers, pools);
     let (mut gown, mut xown) = (0u16, 0u16);
     let reg = asg
         .reg
         .iter()
-        .zip(&class)
+        .zip(class)
         .map(|(&r, &c)| {
             if r == regalloc::NO_REG {
                 return None;
@@ -365,6 +374,34 @@ fn ownership(cx: &Ctx<'_>, b: &Body, an: &Analysis) -> Owned {
         })
         .collect();
     Owned { reg, gown, xown, first: asg.first, last: asg.last }
+}
+
+/// Per value: read in a block emitted before the block that defines it.
+fn early_uses(b: &Body, order: &[u32], def_block: &[u32]) -> Vec<bool> {
+    let nv = b.values.len();
+    let mut pos = vec![NONE; b.blocks.len()];
+    for (k, &bi) in order.iter().enumerate() {
+        if let Some(p) = pos.get_mut(bi as usize) {
+            *p = k as u32;
+        }
+    }
+    let mut early = vec![false; nv];
+    for (k, &bi) in order.iter().enumerate() {
+        let Some(bd) = b.blocks.get(bi as usize) else { continue };
+        let mut note = |o: Operand| {
+            if let Operand::Value(v) = o
+                && let Some(&d) = def_block.get(v.index())
+                && pos.get(d as usize).is_some_and(|&p| p != NONE && p > k as u32)
+            {
+                early[v.index()] = true;
+            }
+        };
+        for i in bd.insts.indices() {
+            b.args(i).iter().for_each(|&o| note(o));
+        }
+        analysis::for_term_operands(b, &bd.term, &mut note);
+    }
+    early
 }
 
 fn use_counts(b: &Body) -> Vec<u8> {
@@ -391,11 +428,21 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
     let b = f.body.as_ref().ok_or_else(|| bad("function has no body"))?;
     let mut an = analysis::analyze(b);
     let nv = b.values.len();
-    if release {
-        an.rpo = stave_opt::layout::order(b);
-    }
+    let mut early = Vec::new();
     let Owned { reg: own, gown, xown, first, last } = if release {
-        ownership(cx, b, &an)
+        // A rotated loop's test is emitted after the blocks that use its values: only values
+        // with a register for their whole life can be read there before their definition.
+        let (class, clobbers) = reg_classes(cx, b);
+        an.rpo = stave_opt::layout::rotated_order(b, |v| class[v.index()] != regalloc::CLASS_NONE);
+        let o = ownership(b, &an, &class, &clobbers);
+        early = early_uses(b, &an.rpo, &an.def_block);
+        if early.iter().zip(&o.reg).all(|(&e, r)| !e || r.is_some()) {
+            o
+        } else {
+            an.rpo = stave_opt::layout::order(b);
+            early = Vec::new();
+            ownership(b, &an, &class, &clobbers)
+        }
     } else {
         Owned { reg: Vec::new(), gown: 0, xown: 0, first: Vec::new(), last: Vec::new() }
     };
@@ -464,6 +511,7 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
         ret_abi: RetLoc::None,
         rel: release,
         own,
+        early,
         gown,
         xown,
         gskip: if release { gown | callee_saved } else { 0 },
@@ -2261,6 +2309,11 @@ impl<'a, 'm> Cg<'a, 'm> {
         if self.rel {
             self.settle_params(params)?;
         }
+        for (v, &e) in self.early.iter().enumerate() {
+            if e {
+                self.vreg[v] = self.own[v];
+            }
+        }
         let rpo = std::mem::take(&mut self.an.rpo);
         for (k, &bi) in rpo.iter().enumerate() {
             self.cur_at = k as u32;
@@ -2292,6 +2345,12 @@ impl<'a, 'm> Cg<'a, 'm> {
                 if self.rel {
                     let res = b.insts.result.get(i as usize).copied().flatten();
                     self.hint = res.and_then(|v| self.owned(v)).or_else(|| self.edge_hint(bd, i));
+                }
+                if let Some(Some(v)) = b.insts.result.get(i as usize)
+                    && self.early.get(v.index()).copied().unwrap_or(false)
+                {
+                    // defined here as if never read before
+                    self.vreg[v.index()] = None;
                 }
                 let folded = self.rel && (self.fold_addr(i, bd)? || self.fold_vload(i, bd)?);
                 if i != self.fused && !folded {

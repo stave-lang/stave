@@ -54,11 +54,19 @@ fn proofs_and_kept_checks() {
         ("main.tail_sum", 0),
         ("main.pair_sum", 0),
         ("main.window_sum", 0),
+        ("main.chunk_sum", 0),
+        ("main.quad_sum", 0),
         ("main.le_only", 1),
         ("main.eq_on_one_path", 1),
         ("main.next_under_len", 1),
         ("main.prev_wrapping", 1),
         ("main.at_offset", 1),
+        ("main.chunk_le_sat", 1),
+        ("main.chunk_short_test", 1),
+        ("main.chunk_wrapping", 1),
+        ("main.chunk_other", 1),
+        ("main.chunk_shrunk", 1),
+        ("main.chunk_moved", 1),
     ] {
         assert_eq!(kept(&m, path), n, "{path}: {:?}", of(path));
     }
@@ -71,6 +79,9 @@ fn proofs_and_kept_checks() {
     assert!(matches!(of("main.rises")[..], [Proof::LoopBound { .. }, Proof::Offset { k: -1, .. }]));
     assert!(matches!(of("main.tail_sum")[..], [Proof::Offset { k: 1, .. }]));
     assert!(matches!(of("main.pair_sum")[..], [Proof::Offset { k: 0, .. }, Proof::Offset { k: 1, .. }]));
+    // `i + 4 <= xs.len()` proves the vector's last lane `i + 3`, and every scalar read below it
+    assert!(matches!(of("main.chunk_sum")[..], [Proof::Offset { k: 3, .. }]), "{:?}", of("main.chunk_sum"));
+    assert!(matches!(of("main.quad_sum")[..], [Proof::Offset { k: 0, .. }, .., Proof::Offset { k: 3, .. }]));
     // `&xs[0..n]` has length `n` and tests `n <= xs.len()`
     assert!(
         matches!(of("main.window_sum")[..], [Proof::Offset { k: 0, .. }, Proof::Offset { k: 0, .. }]),

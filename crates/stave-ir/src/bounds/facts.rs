@@ -11,7 +11,8 @@
 //!
 //! - a branch: `cbr c T F` where `T` (or `F`) is the target's only predecessor edge; `c` (or `!c`)
 //!   holds in every block that target dominates. `c` is an unsigned `lt le gt ge eq ne`, or `not`
-//!   of one.
+//!   of one. A strict comparison with `n -| c` (`sub.sat`, constant `c`) also gives
+//!   `x + c < n` (`x < n -| c`) or `x + c >= n` (its negation): `n -| c` is `max(n - c, 0)`.
 //! - an asserting call: `call @f .. c ..` where every `ret` of `f` is reached only through a branch
 //!   on that parameter being true (`std.debug.assert`); `c` holds after the call.
 //!
@@ -61,6 +62,12 @@ pub(super) struct Term {
 impl Term {
     pub(super) fn constant(c: u64) -> Term {
         Term { node: ZERO, k: i128::from(c), root: None }
+    }
+
+    /// `self + c`.
+    pub(super) fn plus(self, c: i128) -> Option<Term> {
+        let k = self.k.checked_add(c).filter(|k| k.abs() <= MAX_K)?;
+        Some(Term { k, ..self })
     }
 }
 
@@ -225,6 +232,25 @@ impl Cx<'_> {
             return;
         }
         let &[x, y] = args else { return };
+        // `lo < hi` (or `lo >= hi`) with `hi = n -| c`: `lo < n -| c` iff `lo + c < n`, both false
+        // when `n < c`. `<=` has no such form: `0 <= n -| c` holds for every `n`.
+        let strict = match (op, pol) {
+            (Op::Lt, true) | (Op::Ge, false) => Some((x, y, true)),
+            (Op::Lt, false) | (Op::Ge, true) => Some((x, y, false)),
+            (Op::Gt, true) | (Op::Le, false) => Some((y, x, true)),
+            (Op::Gt, false) | (Op::Le, true) => Some((y, x, false)),
+            _ => None,
+        };
+        if let Some((lo, hi, lt)) = strict
+            && let Some((n, c)) = self.sat_bound(hi)
+            && let (Some(tlo), Some(tn)) = (self.term(lo).and_then(|t| t.plus(c)), self.term(n))
+        {
+            if lt {
+                self.add_term_le(g, tlo, tn, -1, at, None);
+            } else {
+                self.add_term_le(g, tn, tlo, 0, at, None);
+            }
+        }
         let mut le = |a: Operand, b: Operand, w: i128, eq: Option<u32>| self.add_le(g, a, b, w, at, eq);
         match (op, pol) {
             // x < y
@@ -243,9 +269,27 @@ impl Cx<'_> {
         }
     }
 
+    /// `(n, c)` when `o` is `sub.sat n c` on unsigned values with a constant `c`.
+    pub(super) fn sat_bound(&self, o: Operand) -> Option<(Operand, i128)> {
+        let Operand::Value(v) = o else { return None };
+        if !self.unsigned(v) {
+            return None;
+        }
+        let d = self.def(v)?;
+        match (self.b.insts.op[d as usize], self.b.args(d)) {
+            (Op::SubSat, &[n, c]) => Some((n, self.small_const(c)?)),
+            _ => None,
+        }
+    }
+
     /// Records `a <= b + w`.
     fn add_le(&self, g: &mut Graph, a: Operand, b: Operand, w: i128, at: Region, eq: Option<u32>) {
         let (Some(ta), Some(tb)) = (self.term(a), self.term(b)) else { return };
+        self.add_term_le(g, ta, tb, w, at, eq);
+    }
+
+    /// Records `ta <= tb + w`.
+    fn add_term_le(&self, g: &mut Graph, ta: Term, tb: Term, w: i128, at: Region, eq: Option<u32>) {
         if ta.node == tb.node {
             return;
         }
