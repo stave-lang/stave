@@ -1,0 +1,157 @@
+// UTF-8 validation by the Keiser–Lemire lookup method: three 16-entry `lookup` tables classify
+// each byte by the high nibble of its predecessor, the low nibble of its predecessor and its own
+// high nibble; the AND of the three is non-zero exactly where a two-byte pattern is invalid,
+// except that a continuation byte two or three places after a 3- or 4-byte lead must set bit
+// 0x80 (XORed in). Bytes before the start and past the end read as 0, so a sequence cut off at
+// the end is an error; blocks run until 3 bytes past the end. Also counts code points (bytes
+// that are not continuation bytes). The reference is a byte-by-byte decoder.
+import diff;
+
+const TOO_SHORT: u8 = 1;
+const TOO_LONG: u8 = 2;
+const OVERLONG_3: u8 = 4;
+const TOO_LARGE: u8 = 8;
+const SURROGATE: u8 = 16;
+const OVERLONG_2: u8 = 32;
+const TOO_LARGE_1000: u8 = 64;
+const OVERLONG_4: u8 = 64;
+const TWO_CONTS: u8 = 128;
+const CARRY: u8 = 131;
+
+pub struct Tables {
+    pub b1_high: u8x16,
+    pub b1_low: u8x16,
+    pub b2_high: u8x16,
+}
+
+pub fn tables() -> Tables {
+    let h1: [u8; 16] = [
+        TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG,
+        TWO_CONTS, TWO_CONTS, TWO_CONTS, TWO_CONTS,
+        TOO_SHORT | OVERLONG_2,
+        TOO_SHORT,
+        TOO_SHORT | OVERLONG_3 | SURROGATE,
+        TOO_SHORT | TOO_LARGE | TOO_LARGE_1000 | OVERLONG_4,
+    ];
+    let big = CARRY | TOO_LARGE | TOO_LARGE_1000;
+    let l1: [u8; 16] = [
+        CARRY | OVERLONG_3 | OVERLONG_2 | OVERLONG_4,
+        CARRY | OVERLONG_2,
+        CARRY,
+        CARRY,
+        CARRY | TOO_LARGE,
+        big, big, big, big, big, big, big, big,
+        big | SURROGATE,
+        big, big,
+    ];
+    let cont = TOO_LONG | OVERLONG_2 | TWO_CONTS;
+    let h2: [u8; 16] = [
+        TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+        cont | OVERLONG_3 | TOO_LARGE_1000 | OVERLONG_4,
+        cont | OVERLONG_3 | TOO_LARGE,
+        cont | SURROGATE | TOO_LARGE,
+        cont | SURROGATE | TOO_LARGE,
+        TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+    ];
+    return Tables.{
+        b1_high: u8x16.load(&h1[0..16], 0),
+        b1_low: u8x16.load(&l1[0..16], 0),
+        b2_high: u8x16.load(&h2[0..16], 0),
+    };
+}
+
+// Bytes i - back .. i - back + 16 of xs, 0 outside it: one load when the block is inside.
+fn block(xs: &[u8], i: usize, back: usize) -> u8x16 {
+    let n = xs.len();
+    if i >= back && i - back + 16 <= n { return u8x16.load(xs, i - back); }
+    let mut b: [u8; 16] = [0; 16];
+    for k in 0usize..16 {
+        if i + k >= back && i + k - back < n { b[k] = xs[i + k - back]; }
+    }
+    return u8x16.load(&b[0..16], 0);
+}
+
+fn valid_u8x16(xs: &[u8]) -> bool {
+    let t = tables();
+    let low = u8x16.splat(15);
+    let mut err = u8x16.splat(0);
+    let mut i: usize = 0;
+    while i < xs.len() + 3 {
+        let cur = block(xs, i, 0);
+        let p1 = block(xs, i, 1);
+        let p2 = block(xs, i, 2);
+        let p3 = block(xs, i, 3);
+        let special = t.b1_high.lookup(p1 >> 4) & t.b1_low.lookup(p1 & low) & t.b2_high.lookup(cur >> 4);
+        let third = p2 -| u8x16.splat(0x60);
+        let fourth = p3 -| u8x16.splat(0x70);
+        let must = ((third | fourth) >= u8x16.splat(0x80)).select(u8x16.splat(0x80), u8x16.splat(0));
+        err = err | (special ^ must);
+        i = i + 16;
+    }
+    return err.reduce_or() == 0;
+}
+
+fn code_points_u8x16(xs: &[u8]) -> usize {
+    let top = u8x16.splat(0xc0);
+    let cont = u8x16.splat(0x80);
+    let mut c: usize = 0;
+    for v: u8x16 in xs {
+        c = c + (((v & top) != cont).to_bits().popcount() as usize);
+    } tail scalar (x) {
+        if (x & 0xc0) != 0x80 { c = c + 1; }
+    }
+    return c;
+}
+
+fn in_range(x: u8, lo: u8, hi: u8) -> bool {
+    return x >= lo && x <= hi;
+}
+
+pub fn valid_ref(xs: &[u8]) -> bool {
+    let n = xs.len();
+    let mut i: usize = 0;
+    while i < n {
+        let b = xs[i];
+        if b < 0x80 {
+            i = i + 1;
+            continue;
+        }
+        let need: usize = if in_range(b, 0xc2, 0xdf) then 1 else if in_range(b, 0xe0, 0xef) then 2 else if in_range(b, 0xf0, 0xf4) then 3 else 0;
+        if need == 0 || i + need >= n { return false; }
+        let lo: u8 = if b == 0xe0 then 0xa0 else if b == 0xf0 then 0x90 else 0x80;
+        let hi: u8 = if b == 0xed then 0x9f else if b == 0xf4 then 0x8f else 0xbf;
+        if !in_range(xs[i + 1], lo, hi) { return false; }
+        for k in 2..need + 1 {
+            if !in_range(xs[i + k], 0x80, 0xbf) { return false; }
+        }
+        i = i + need + 1;
+    }
+    return true;
+}
+
+pub fn code_points_ref(xs: &[u8]) -> usize {
+    let mut c: usize = 0;
+    for i in 0..xs.len() {
+        if (xs[i] & 0xc0) != 0x80 { c = c + 1; }
+    }
+    return c;
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        let b = c.u8s(h);
+        let xs = b.get();
+        o.flag(valid_u8x16(xs));
+        o.u(code_points_u8x16(xs) as u64);
+        o.sep();
+        o.flag(valid_ref(xs));
+        o.u(code_points_ref(xs) as u64);
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

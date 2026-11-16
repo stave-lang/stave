@@ -1,0 +1,202 @@
+// 128-bit kernels of the SIMD benchmark. Each computes exactly what its 256-bit twin in
+// lanes256 computes: float sums keep eight lane accumulators as two 128-bit halves (lanes 0..4
+// and 4..8), and adding the halves is the first step of the 8-lane reduction tree. Slice lengths
+// are multiples of 32.
+
+pub fn sum(xs: &[f32]) -> f32 {
+    let mut lo = f32x4.splat(0.0);
+    let mut hi = f32x4.splat(0.0);
+    let mut i: usize = 0;
+    while i + 8 <= xs.len() {
+        lo = lo + f32x4.load(xs, i);
+        hi = hi + f32x4.load(xs, i + 4);
+        i = i + 8;
+    }
+    return (lo + hi).reduce_add();
+}
+
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut lo = f32x4.splat(0.0);
+    let mut hi = f32x4.splat(0.0);
+    let mut i: usize = 0;
+    while i + 8 <= a.len() {
+        lo = lo + f32x4.load(a, i) * f32x4.load(b, i);
+        hi = hi + f32x4.load(a, i + 4) * f32x4.load(b, i + 4);
+        i = i + 8;
+    }
+    return (lo + hi).reduce_add();
+}
+
+pub fn minmax(xs: &[f32]) -> (f32, f32) {
+    let mut lo = f32x4.load(xs, 0);
+    let mut hi = lo;
+    for v: f32x4 in xs {
+        lo = lo.min(v);
+        hi = hi.max(v);
+    } tail exact;
+    return (lo.reduce_min(), hi.reduce_max());
+}
+
+// The elements greater than k, in order, to the front of out; returns how many.
+pub fn filter(xs: &[f32], k: f32, out: &mut [f32]) -> usize {
+    let kk = f32x4.splat(k);
+    let mut n: usize = 0;
+    for v: f32x4 in xs {
+        let m = v > kk;
+        let c = m.to_bits().popcount() as usize;
+        v.compress(m).store_masked(out, n, mask32x4.first_n(c));
+        n = n + c;
+    } tail exact;
+    return n;
+}
+
+pub fn count_byte(xs: &[u8], b: u8) -> usize {
+    let key = u8x16.splat(b);
+    let mut c: usize = 0;
+    for v: u8x16 in xs {
+        c = c + ((v == key).to_bits().popcount() as usize);
+    } tail exact;
+    return c;
+}
+
+// The first index of b, or the length.
+pub fn find_byte(xs: &[u8], b: u8) -> usize {
+    let key = u8x16.splat(b);
+    let mut i: usize = 0;
+    while i + 16 <= xs.len() {
+        let bits = (u8x16.load(xs, i) == key).to_bits();
+        if bits != 0 { return i + (bits.ctz() as usize); }
+        i = i + 16;
+    }
+    return xs.len();
+}
+
+// Inclusive wrapping prefix sums of xs into ys.
+pub fn prefix(xs: &[u32], ys: &mut [u32]) {
+    let mut carry = u32x4.splat(0);
+    let mut i: usize = 0;
+    while i + 4 <= xs.len() {
+        let s = u32x4.load(xs, i).scan_add_wrap() +% carry;
+        s.store(ys, i);
+        carry = s.permute::<[3, 3, 3, 3]>();
+        i = i + 4;
+    }
+}
+
+// bins[b] += the number of bytes equal to b. Lane l counts into sub[b * 4 + l].
+pub fn histogram(xs: &[u8], bins: &mut [u32]) {
+    let mut sub: [u32; 1024] = [0; 1024];
+    let ids: [u32; 4] = [0, 1, 2, 3];
+    let lane = u32x4.load(&ids[0..4], 0);
+    let one = u32x4.splat(1);
+    for v: u8x16 in xs {
+        let lo: u16x8 = v.widen_lo();
+        let hi: u16x8 = v.widen_hi();
+        let q0: u32x4 = lo.widen_lo();
+        let q1: u32x4 = lo.widen_hi();
+        let q2: u32x4 = hi.widen_lo();
+        let q3: u32x4 = hi.widen_hi();
+        emulate {
+            let i0 = (q0 << 2) | lane;
+            (u32x4.gather(&sub[0..1024], i0) +% one).scatter(&mut sub[0..1024], i0);
+            let i1 = (q1 << 2) | lane;
+            (u32x4.gather(&sub[0..1024], i1) +% one).scatter(&mut sub[0..1024], i1);
+            let i2 = (q2 << 2) | lane;
+            (u32x4.gather(&sub[0..1024], i2) +% one).scatter(&mut sub[0..1024], i2);
+            let i3 = (q3 << 2) | lane;
+            (u32x4.gather(&sub[0..1024], i3) +% one).scatter(&mut sub[0..1024], i3);
+        }
+    } tail exact;
+    for b in 0usize..256 {
+        bins[b] = bins[b] +% ((sub[4 * b] +% sub[4 * b + 1]) +% (sub[4 * b + 2] +% sub[4 * b + 3]));
+    }
+}
+
+// Every 4-element point p of xs becomes M p in place; m holds M by columns.
+pub fn transform(xs: &mut [f32], m: &[f32; 16]) {
+    let c0 = f32x4.load(&m[0..16], 0);
+    let c1 = f32x4.load(&m[0..16], 4);
+    let c2 = f32x4.load(&m[0..16], 8);
+    let c3 = f32x4.load(&m[0..16], 12);
+    for v: &mut f32x4 in xs {
+        let x = *v;
+        let y0 = c0 * x.permute::<[0, 0, 0, 0]>();
+        let y1 = c1 * x.permute::<[1, 1, 1, 1]>();
+        let y2 = c2 * x.permute::<[2, 2, 2, 2]>();
+        let y3 = c3 * x.permute::<[3, 3, 3, 3]>();
+        *v = ((y0 + y1) + y2) + y3;
+    } tail exact;
+}
+
+const TOO_SHORT: u8 = 1;
+const TOO_LONG: u8 = 2;
+const OVERLONG_3: u8 = 4;
+const TOO_LARGE: u8 = 8;
+const SURROGATE: u8 = 16;
+const OVERLONG_2: u8 = 32;
+const TOO_LARGE_1000: u8 = 64;
+const OVERLONG_4: u8 = 64;
+const TWO_CONTS: u8 = 128;
+const CARRY: u8 = 131;
+
+// Bytes i - back .. i - back + 16 of xs, 0 outside it.
+fn block(xs: &[u8], i: usize, back: usize) -> u8x16 {
+    let n = xs.len();
+    if i >= back && i - back + 16 <= n { return u8x16.load(xs, i - back); }
+    let mut b: [u8; 16] = [0; 16];
+    for k in 0usize..16 {
+        if i + k >= back && i + k - back < n { b[k] = xs[i + k - back]; }
+    }
+    return u8x16.load(&b[0..16], 0);
+}
+
+// Whether xs is UTF-8 (Keiser–Lemire lookup tables).
+pub fn valid_utf8(xs: &[u8]) -> bool {
+    let h1: [u8; 16] = [
+        TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG, TOO_LONG,
+        TWO_CONTS, TWO_CONTS, TWO_CONTS, TWO_CONTS,
+        TOO_SHORT | OVERLONG_2,
+        TOO_SHORT,
+        TOO_SHORT | OVERLONG_3 | SURROGATE,
+        TOO_SHORT | TOO_LARGE | TOO_LARGE_1000 | OVERLONG_4,
+    ];
+    let big = CARRY | TOO_LARGE | TOO_LARGE_1000;
+    let l1: [u8; 16] = [
+        CARRY | OVERLONG_3 | OVERLONG_2 | OVERLONG_4,
+        CARRY | OVERLONG_2,
+        CARRY,
+        CARRY,
+        CARRY | TOO_LARGE,
+        big, big, big, big, big, big, big, big,
+        big | SURROGATE,
+        big, big,
+    ];
+    let cont = TOO_LONG | OVERLONG_2 | TWO_CONTS;
+    let h2: [u8; 16] = [
+        TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+        cont | OVERLONG_3 | TOO_LARGE_1000 | OVERLONG_4,
+        cont | OVERLONG_3 | TOO_LARGE,
+        cont | SURROGATE | TOO_LARGE,
+        cont | SURROGATE | TOO_LARGE,
+        TOO_SHORT, TOO_SHORT, TOO_SHORT, TOO_SHORT,
+    ];
+    let t1 = u8x16.load(&h1[0..16], 0);
+    let t2 = u8x16.load(&l1[0..16], 0);
+    let t3 = u8x16.load(&h2[0..16], 0);
+    let low = u8x16.splat(15);
+    let mut err = u8x16.splat(0);
+    let mut i: usize = 0;
+    while i < xs.len() + 3 {
+        let cur = block(xs, i, 0);
+        let p1 = block(xs, i, 1);
+        let p2 = block(xs, i, 2);
+        let p3 = block(xs, i, 3);
+        let special = t1.lookup(p1 >> 4) & t2.lookup(p1 & low) & t3.lookup(cur >> 4);
+        let third = p2 -| u8x16.splat(0x60);
+        let fourth = p3 -| u8x16.splat(0x70);
+        let must = ((third | fourth) >= u8x16.splat(0x80)).select(u8x16.splat(0x80), u8x16.splat(0));
+        err = err | (special ^ must);
+        i = i + 16;
+    }
+    return err.reduce_or() == 0;
+}

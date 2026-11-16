@@ -1,0 +1,161 @@
+// Dot products with one accumulator per lane, through explicit loads: lane l adds a[i] * b[i]
+// for every i with i % N == l, in order, then the lanes add by the fixed tree. Each product is
+// rounded before it is added (no FMA). A partial last chunk is a masked load: its inactive lanes
+// read 0, so they add 0 * 0 = +0.0.
+import diff;
+
+fn dot_f32x4(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len();
+    let mut acc = f32x4.splat(0.0);
+    let mut i: usize = 0;
+    while i + 4 <= n {
+        acc = acc + f32x4.load(a, i) * f32x4.load(b, i);
+        i = i + 4;
+    }
+    if i < n {
+        let m = mask32x4.first_n(n - i);
+        acc = acc + f32x4.load_masked(a, i, m) * f32x4.load_masked(b, i, m);
+    }
+    return acc.reduce_add();
+}
+
+fn dot_f64x2(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    let mut acc = f64x2.splat(0.0);
+    let mut i: usize = 0;
+    while i + 2 <= n {
+        acc = acc + f64x2.load(a, i) * f64x2.load(b, i);
+        i = i + 2;
+    }
+    if i < n {
+        let m = mask64x2.first_n(n - i);
+        acc = acc + f64x2.load_masked(a, i, m) * f64x2.load_masked(b, i, m);
+    }
+    return acc.reduce_add();
+}
+
+fn dot_i32x4(a: &[i32], b: &[i32]) -> i32 {
+    let n = a.len();
+    let mut acc = i32x4.splat(0);
+    let mut i: usize = 0;
+    while i + 4 <= n {
+        acc = acc +% (i32x4.load(a, i) *% i32x4.load(b, i));
+        i = i + 4;
+    }
+    if i < n {
+        let m = mask32x4.first_n(n - i);
+        acc = acc +% (i32x4.load_masked(a, i, m) *% i32x4.load_masked(b, i, m));
+    }
+    return acc.reduce_add_wrap();
+}
+
+// Bytes widened to u16 before the multiply, products widened to u32 before the add.
+fn dot_u8x16(a: &[u8], b: &[u8]) -> u32 {
+    let n = a.len();
+    let mut acc = u32x4.splat(0);
+    let mut i: usize = 0;
+    while i + 16 <= n {
+        acc = acc +% widen_dot(u8x16.load(a, i), u8x16.load(b, i));
+        i = i + 16;
+    }
+    if i < n {
+        let m = mask8x16.first_n(n - i);
+        acc = acc +% widen_dot(u8x16.load_masked(a, i, m), u8x16.load_masked(b, i, m));
+    }
+    return acc.reduce_add_wrap();
+}
+
+fn widen_dot(x: u8x16, y: u8x16) -> u32x4 {
+    let xl: u16x8 = x.widen_lo();
+    let xh: u16x8 = x.widen_hi();
+    let yl: u16x8 = y.widen_lo();
+    let yh: u16x8 = y.widen_hi();
+    let pl = xl *% yl;
+    let ph = xh *% yh;
+    let a: u32x4 = pl.widen_lo();
+    let b: u32x4 = pl.widen_hi();
+    let c: u32x4 = ph.widen_lo();
+    let d: u32x4 = ph.widen_hi();
+    return (a +% b) +% (c +% d);
+}
+
+pub fn dot_f32_ref(a: &[f32], b: &[f32], n: usize) -> f32 {
+    let mut acc: [f32; 32] = [0.0; 32];
+    for i in 0..a.len() {
+        acc[i % n] = acc[i % n] + a[i] * b[i];
+    }
+    let r = a.len() % n;
+    if r != 0 {
+        for j in r..n {
+            acc[j] = acc[j] + 0.0;
+        }
+    }
+    return diff.tree_f32(acc, n, diff.add_f32);
+}
+
+pub fn dot_f64_ref(a: &[f64], b: &[f64], n: usize) -> f64 {
+    let mut acc: [f64; 32] = [0.0; 32];
+    for i in 0..a.len() {
+        acc[i % n] = acc[i % n] + a[i] * b[i];
+    }
+    let r = a.len() % n;
+    if r != 0 {
+        for j in r..n {
+            acc[j] = acc[j] + 0.0;
+        }
+    }
+    return diff.tree_f64(acc, n, diff.add_f64);
+}
+
+pub fn dot_i32_ref(a: &[i32], b: &[i32]) -> i32 {
+    let mut s: i32 = 0;
+    for i in 0..a.len() {
+        s = s +% (a[i] *% b[i]);
+    }
+    return s;
+}
+
+pub fn dot_u8_ref(a: &[u8], b: &[u8]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..a.len() {
+        s = s +% ((a[i] as u32) * (b[i] as u32));
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        if h.kind == 0 {
+            let ba = c.f32s(h);
+            let bb = c.f32s(h);
+            o.f32(dot_f32x4(ba.get(), bb.get()));
+            o.sep();
+            o.f32(dot_f32_ref(ba.get(), bb.get(), 4));
+        } else if h.kind == 1 {
+            let ba = c.f64s(h);
+            let bb = c.f64s(h);
+            o.f64(dot_f64x2(ba.get(), bb.get()));
+            o.sep();
+            o.f64(dot_f64_ref(ba.get(), bb.get(), 2));
+        } else if h.kind == 2 {
+            let ba = c.i32s(h);
+            let bb = c.i32s(h);
+            o.i(dot_i32x4(ba.get(), bb.get()) as i64);
+            o.sep();
+            o.i(dot_i32_ref(ba.get(), bb.get()) as i64);
+        } else {
+            let ba = c.u8s(h);
+            let bb = c.u8s(h);
+            o.u(dot_u8x16(ba.get(), bb.get()) as u64);
+            o.sep();
+            o.u(dot_u8_ref(ba.get(), bb.get()) as u64);
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

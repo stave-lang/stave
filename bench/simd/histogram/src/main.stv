@@ -1,0 +1,37 @@
+// histogram: counts of each byte value over N bytes, added up over REPS passes; before each
+// pass one byte changes. Prints the FNV-1a hash of the 256 counts. Same steps as main.c.
+import lanes;
+import std.io;
+import std.vec;
+
+const N: usize = 65536;
+const REPS: usize = 2000;
+
+fn next(s: &mut u64) -> u64 {
+    *s = *s *% 6364136223846793005 +% 1442695040888963407;
+    return *s;
+}
+
+fn mix(h: u64, x: u64) -> u64 {
+    return (h ^ x) *% 1099511628211;
+}
+
+fn main() -> i32 {
+    let mut s: u64 = 7;
+    let mut v = vec.Vec::<u8>.with_capacity(N);
+    for i in 0..N {
+        v.push((next(&mut s) >> 56) as% u8);
+    }
+    let xs = v.as_mut_slice();
+    let mut bins: [u32; 256] = [0; 256];
+    for r in 0..REPS {
+        xs[r % N] = xs[r % N] +% 1;
+        lanes.histogram(xs, &mut bins[0..256]);
+    }
+    let mut h: u64 = 14695981039346656037;
+    for b in 0usize..256 {
+        h = mix(h, bins[b] as u64);
+    }
+    io.print(f"{h}\n");
+    return 0;
+}

@@ -1,0 +1,136 @@
+// In-place inclusive prefix sums through a `&mut` chunk binding: each chunk's `scan_add`
+// (sequential from lane 0) plus the carry, the previous chunk's last lane, broadcast with
+// `permute`. In floats that association is the result: out[i] = (x[c] + .. + x[i]) + carry, with
+// c the first index of i's chunk and the first carry +0.0.
+import diff;
+
+fn prefix_f32x4(xs: &mut [f32]) {
+    let mut carry = f32x4.splat(0.0);
+    for v: &mut f32x4 in xs {
+        let s = (*v).scan_add() + carry;
+        *v = s;
+        carry = s.permute::<[3, 3, 3, 3]>();
+    } tail masked (v, m) {
+        *v = (*v).scan_add() + carry;
+    }
+}
+
+fn prefix_f64x2(xs: &mut [f64]) {
+    let mut carry = f64x2.splat(0.0);
+    for v: &mut f64x2 in xs {
+        let s = (*v).scan_add() + carry;
+        *v = s;
+        carry = s.permute::<[1, 1]>();
+    } tail masked (v, m) {
+        *v = (*v).scan_add() + carry;
+    }
+}
+
+fn prefix_i32x4(xs: &mut [i32]) {
+    let mut carry = i32x4.splat(0);
+    for v: &mut i32x4 in xs {
+        let s = (*v).scan_add_wrap() +% carry;
+        *v = s;
+        carry = s.permute::<[3, 3, 3, 3]>();
+    } tail masked (v, m) {
+        *v = (*v).scan_add_wrap() +% carry;
+    }
+}
+
+pub fn prefix_f32_ref(xs: &mut [f32], n: usize) {
+    let mut carry: f32 = 0.0;
+    let mut c: usize = 0;
+    while c < xs.len() {
+        let e = if c + n <= xs.len() then c + n else xs.len();
+        let mut run = xs[c];
+        xs[c] = run + carry;
+        for i in c + 1..e {
+            run = run + xs[i];
+            xs[i] = run + carry;
+        }
+        carry = xs[e - 1];
+        c = e;
+    }
+}
+
+pub fn prefix_f64_ref(xs: &mut [f64], n: usize) {
+    let mut carry: f64 = 0.0;
+    let mut c: usize = 0;
+    while c < xs.len() {
+        let e = if c + n <= xs.len() then c + n else xs.len();
+        let mut run = xs[c];
+        xs[c] = run + carry;
+        for i in c + 1..e {
+            run = run + xs[i];
+            xs[i] = run + carry;
+        }
+        carry = xs[e - 1];
+        c = e;
+    }
+}
+
+pub fn prefix_i32_ref(xs: &mut [i32]) {
+    let mut s: i32 = 0;
+    for i in 0..xs.len() {
+        s = s +% xs[i];
+        xs[i] = s;
+    }
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        if h.kind == 0 {
+            let mut got = c.f32s(h);
+            let mut want = diff.Buf::<f32>.new(h.len, h.mis, 0.0);
+            let src = got.get();
+            let dst = want.get_mut();
+            for i in 0..src.len() {
+                dst[i] = src[i];
+            }
+            prefix_f32x4(got.get_mut());
+            prefix_f32_ref(want.get_mut(), 4);
+            o.f32s(got.get());
+            o.flag(diff.guards_f32(&got));
+            o.sep();
+            o.f32s(want.get());
+            o.flag(true);
+        } else if h.kind == 1 {
+            let mut got = c.f64s(h);
+            let mut want = diff.Buf::<f64>.new(h.len, h.mis, 0.0);
+            let src = got.get();
+            let dst = want.get_mut();
+            for i in 0..src.len() {
+                dst[i] = src[i];
+            }
+            prefix_f64x2(got.get_mut());
+            prefix_f64_ref(want.get_mut(), 2);
+            o.f64s(got.get());
+            o.flag(diff.guards_f64(&got));
+            o.sep();
+            o.f64s(want.get());
+            o.flag(true);
+        } else {
+            let mut got = c.i32s(h);
+            let mut want = diff.Buf::<i32>.new(h.len, h.mis, 0);
+            let src = got.get();
+            let dst = want.get_mut();
+            for i in 0..src.len() {
+                dst[i] = src[i];
+            }
+            prefix_i32x4(got.get_mut());
+            prefix_i32_ref(want.get_mut());
+            o.i32s(got.get());
+            o.flag(diff.guards_i32(&got));
+            o.sep();
+            o.i32s(want.get());
+            o.flag(true);
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

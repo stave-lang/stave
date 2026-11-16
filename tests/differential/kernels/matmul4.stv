@@ -1,0 +1,72 @@
+// A 4x4 f32 matrix times every 4-element point of a slice, in place. The matrix is held as its
+// four columns; each point lane is broadcast with `permute`, and y = ((c0 * x0 + c1 * x1) +
+// c2 * x2) + c3 * x3 lane by lane, each product rounded (no FMA). Elements past the last whole
+// point stay as they are. The matrix comes from the case's param p: m[j] = p + j / 4.
+import diff;
+import std.mem;
+
+pub fn matrix(p: f32) -> [f32; 16] {
+    let mut m: [f32; 16] = [0.0; 16];
+    let mut q: f32 = 0.0;
+    for j in 0usize..16 {
+        m[j] = p + q;
+        q = q + 0.25;
+    }
+    return m;
+}
+
+fn transform_f32x4(xs: &mut [f32], m: &[f32; 16]) {
+    let c0 = f32x4.load(&m[0..16], 0);
+    let c1 = f32x4.load(&m[0..16], 4);
+    let c2 = f32x4.load(&m[0..16], 8);
+    let c3 = f32x4.load(&m[0..16], 12);
+    for v: &mut f32x4 in xs {
+        let x = *v;
+        let y0 = c0 * x.permute::<[0, 0, 0, 0]>();
+        let y1 = c1 * x.permute::<[1, 1, 1, 1]>();
+        let y2 = c2 * x.permute::<[2, 2, 2, 2]>();
+        let y3 = c3 * x.permute::<[3, 3, 3, 3]>();
+        *v = ((y0 + y1) + y2) + y3;
+    } tail scalar (x) {}
+}
+
+pub fn transform_ref(xs: &mut [f32], m: &[f32; 16]) {
+    let mut p: usize = 0;
+    while p + 4 <= xs.len() {
+        let x0 = xs[p];
+        let x1 = xs[p + 1];
+        let x2 = xs[p + 2];
+        let x3 = xs[p + 3];
+        for r in 0usize..4 {
+            xs[p + r] = ((m[r] * x0 + m[4 + r] * x1) + m[8 + r] * x2) + m[12 + r] * x3;
+        }
+        p = p + 4;
+    }
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        let m = matrix(mem.f32_from_bits(h.param));
+        let mut got = c.f32s(h);
+        let mut want = diff.Buf::<f32>.new(h.len, h.mis, 0.0);
+        let src = got.get();
+        let dst = want.get_mut();
+        for i in 0..src.len() {
+            dst[i] = src[i];
+        }
+        transform_f32x4(got.get_mut(), &m);
+        transform_ref(want.get_mut(), &m);
+        o.f32s(got.get());
+        o.flag(diff.guards_f32(&got));
+        o.sep();
+        o.f32s(want.get());
+        o.flag(true);
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

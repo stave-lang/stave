@@ -1,0 +1,63 @@
+// utf8: validation of N bytes of mixed 1- to 4-byte UTF-8, REPS times; every third pass one
+// byte is 0xff. Prints the FNV-1a hash of every pass's verdict. Same steps as main.c, whose
+// validator decodes byte by byte.
+import lanes;
+import std.io;
+import std.vec;
+
+const N: usize = 65536;
+const REPS: usize = 4000;
+
+fn next(s: &mut u64) -> u64 {
+    *s = *s *% 6364136223846793005 +% 1442695040888963407;
+    return *s;
+}
+
+fn mix(h: u64, x: u64) -> u64 {
+    return (h ^ x) *% 1099511628211;
+}
+
+// Appends one scalar value of 1 to 4 bytes, or ASCII when fewer bytes are left.
+fn push_char(v: &mut vec.Vec<u8>, s: &mut u64) {
+    let r = next(s);
+    let room = N - v.len();
+    let kind = (r >> 62) as% usize;
+    let c = (r >> 8) as% u32;
+    if kind == 0 || room < kind + 1 {
+        v.push(32 + ((c % 95) as% u8));
+    } else if kind == 1 {
+        let x = 0x80 + c % 0x780;
+        v.push(0xc0 | ((x >> 6) as% u8));
+        v.push(0x80 | ((x & 0x3f) as% u8));
+    } else if kind == 2 {
+        let x = 0xe000 + c % 0x1000;
+        v.push(0xe0 | ((x >> 12) as% u8));
+        v.push(0x80 | (((x >> 6) & 0x3f) as% u8));
+        v.push(0x80 | ((x & 0x3f) as% u8));
+    } else {
+        let x = 0x10000 + c % 0x100000;
+        v.push(0xf0 | ((x >> 18) as% u8));
+        v.push(0x80 | (((x >> 12) & 0x3f) as% u8));
+        v.push(0x80 | (((x >> 6) & 0x3f) as% u8));
+        v.push(0x80 | ((x & 0x3f) as% u8));
+    }
+}
+
+fn main() -> i32 {
+    let mut s: u64 = 9;
+    let mut v = vec.Vec::<u8>.with_capacity(N);
+    while v.len() < N {
+        push_char(&mut v, &mut s);
+    }
+    let xs = v.as_mut_slice();
+    let mut h: u64 = 14695981039346656037;
+    for r in 0..REPS {
+        let at = (r * 7919) % N;
+        let was = xs[at];
+        if r % 3 == 0 { xs[at] = 0xff; }
+        h = mix(h, if lanes.valid_utf8(xs) then 1 else 0);
+        xs[at] = was;
+    }
+    io.print(f"{h}\n");
+    return 0;
+}

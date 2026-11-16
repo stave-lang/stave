@@ -1,0 +1,58 @@
+// The transform of matmul4.stv with 256-bit vectors (x86_64-linux-v3): two points per vector,
+// each column held twice (`join`), lanes broadcast within each half by `permute`. A masked tail
+// keeps the lanes of a partial point as they are (`select`).
+import base;
+import diff;
+import std.mem;
+
+fn transform_f32x8(xs: &mut [f32], m: &[f32; 16]) {
+    let a0 = f32x4.load(&m[0..16], 0);
+    let a1 = f32x4.load(&m[0..16], 4);
+    let a2 = f32x4.load(&m[0..16], 8);
+    let a3 = f32x4.load(&m[0..16], 12);
+    let c0 = f32x8.join(a0, a0);
+    let c1 = f32x8.join(a1, a1);
+    let c2 = f32x8.join(a2, a2);
+    let c3 = f32x8.join(a3, a3);
+    let whole = mask32x8.first_n(xs.len() % 8 / 4 * 4);
+    for v: &mut f32x8 in xs {
+        *v = apply(*v, c0, c1, c2, c3);
+    } tail masked (v, m) {
+        *v = whole.select(apply(*v, c0, c1, c2, c3), *v);
+    }
+}
+
+fn apply(x: f32x8, c0: f32x8, c1: f32x8, c2: f32x8, c3: f32x8) -> f32x8 {
+    let y0 = c0 * x.permute::<[0, 0, 0, 0, 4, 4, 4, 4]>();
+    let y1 = c1 * x.permute::<[1, 1, 1, 1, 5, 5, 5, 5]>();
+    let y2 = c2 * x.permute::<[2, 2, 2, 2, 6, 6, 6, 6]>();
+    let y3 = c3 * x.permute::<[3, 3, 3, 3, 7, 7, 7, 7]>();
+    return ((y0 + y1) + y2) + y3;
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        let m = base.matrix(mem.f32_from_bits(h.param));
+        let mut got = c.f32s(h);
+        let mut want = diff.Buf::<f32>.new(h.len, h.mis, 0.0);
+        let src = got.get();
+        let dst = want.get_mut();
+        for i in 0..src.len() {
+            dst[i] = src[i];
+        }
+        transform_f32x8(got.get_mut(), &m);
+        base.transform_ref(want.get_mut(), &m);
+        o.f32s(got.get());
+        o.flag(diff.guards_f32(&got));
+        o.sep();
+        o.f32s(want.get());
+        o.flag(true);
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

@@ -1,0 +1,63 @@
+// Byte histogram, 256 bins, by gather / add / scatter. Lane l counts into its own copy of the
+// bins (index bin * 4 + l), so the lanes of one vector never hit the same counter; the copies add
+// up at the end. gather and scatter lower to scalar loops on some targets, hence `emulate`.
+import diff;
+
+fn histogram_u32x4(xs: &[u8], bins: &mut [u32]) {
+    let mut sub: [u32; 1024] = [0; 1024];
+    let ids: [u32; 4] = [0, 1, 2, 3];
+    let lane = u32x4.load(&ids[0..4], 0);
+    let one = u32x4.splat(1);
+    for v: u8x16 in xs {
+        let lo: u16x8 = v.widen_lo();
+        let hi: u16x8 = v.widen_hi();
+        let q0: u32x4 = lo.widen_lo();
+        let q1: u32x4 = lo.widen_hi();
+        let q2: u32x4 = hi.widen_lo();
+        let q3: u32x4 = hi.widen_hi();
+        count4(&mut sub, (q0 << 2) | lane, one);
+        count4(&mut sub, (q1 << 2) | lane, one);
+        count4(&mut sub, (q2 << 2) | lane, one);
+        count4(&mut sub, (q3 << 2) | lane, one);
+    } tail scalar (x) {
+        let i = (x as usize) * 4;
+        sub[i] = sub[i] + 1;
+    }
+    for b in 0usize..256 {
+        bins[b] = (sub[4 * b] + sub[4 * b + 1]) + (sub[4 * b + 2] + sub[4 * b + 3]);
+    }
+}
+
+fn count4(sub: &mut [u32; 1024], idx: u32x4, one: u32x4) {
+    emulate {
+        let c = u32x4.gather(&sub[0..1024], idx);
+        (c +% one).scatter(&mut sub[0..1024], idx);
+    }
+}
+
+pub fn histogram_ref(xs: &[u8], bins: &mut [u32]) {
+    for i in 0..xs.len() {
+        let b = xs[i] as usize;
+        bins[b] = bins[b] + 1;
+    }
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        let b = c.u8s(h);
+        let mut got: [u32; 256] = [0; 256];
+        let mut want: [u32; 256] = [0; 256];
+        histogram_u32x4(b.get(), &mut got[0..256]);
+        histogram_ref(b.get(), &mut want[0..256]);
+        o.u32s(&got[0..256]);
+        o.sep();
+        o.u32s(&want[0..256]);
+        o.end();
+    }
+    o.flush();
+    return 0;
+}
