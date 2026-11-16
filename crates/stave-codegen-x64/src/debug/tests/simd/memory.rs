@@ -434,6 +434,68 @@ fn trap(ops: &[VecOp], bits: u32, k: PanicKind, emit: impl Fn(&mut Sp, &mut Func
     Case::new(ops, bits, 100, emit).traps(k)
 }
 
+/// The memory form of `compress`: `v.compress(m).store_masked(s, i, first_n(c))` with `c` the
+/// active count, in a slice that ends where the next page is unmapped. `i = len - c`: the packed
+/// lanes end at the last element (a write past it faults); `trap`: `i = len - c + 1`, one lane
+/// past the end.
+fn compress_store_case(s: Shape, masks: Vec<u64>, trap: bool) -> Case {
+    let n = s.n as u64;
+    let w = s.lane.bytes() as u64;
+    let cost = 40 * masks.len() + 20;
+    let c = Case::new(&[VecOp::Compress, VecOp::FirstN, VecOp::StoreMasked], s.bits(), cost, move |sp, b| {
+        let base = sp.region(b, 1);
+        let all = b.int(4096);
+        sp.fill(b, base.into(), all, 5 + w);
+        let len = 2 * n + 1;
+        let sl = sp.mk_slice(b, base, 4096 - len * w, len, s, None);
+        let (vt, mt) = (sp.vt(s), sp.mt(s.lane.bits(), s.n));
+        for (k, &m) in masks.iter().enumerate() {
+            let c = u64::from(m.count_ones());
+            let i = if trap {
+                len - c + 1
+            } else if c == 0 {
+                len + 5
+            } else {
+                len - c
+            };
+            sp.label(
+                b,
+                &format!("compress.store_masked {} at the page end i {i} mask {m:x}", s.name()),
+                None,
+            );
+            let x = sp.vec(b, s, &super::reshape::lane_ids(s, m));
+            let mk = sp.mask(b, s.lane.bits(), s.n, m);
+            let p = b.op(Op::Vec(VecOp::Compress), vt, &[x.into(), mk.into()]);
+            let co = sp.usize(b, c, false);
+            let f = b.op(Op::Vec(VecOp::FirstN), mt, &[co]);
+            let io = sp.usize(b, i, k % 2 == 0);
+            b.inst(Op::Vec(VecOp::StoreMasked), None, &[sl.v.into(), io, p.into(), f.into()]);
+            sp.dump_elems(b, &sl, len as i64 - n as i64 - 1, len);
+        }
+        sp.unmap(b, base, 2);
+    });
+    if trap { c.traps(PanicKind::Bounds) } else { c }
+}
+
+/// [`compress_store_case`] of every shape under every sweep mask, and the traps of the full,
+/// lowest-lane and highest-lane masks.
+pub fn compress_store() -> Vec<Case> {
+    let mut out = Vec::new();
+    for l in Lane::ALL {
+        for s in shapes(l) {
+            for chunk in super::reshape::sweep_masks(s.n).chunks(24) {
+                out.push(compress_store_case(s, chunk.to_vec(), false));
+            }
+            if matches!(l, Lane::U8 | Lane::I16 | Lane::F32 | Lane::U64) {
+                for m in [all_mask(s.n), 1, 1 << (s.n - 1)] {
+                    out.push(compress_store_case(s, vec![m], true));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Bounds traps of the aligned, masked, gather and scatter forms.
 pub fn traps() -> Vec<Case> {
     let mut out = Vec::new();

@@ -303,11 +303,60 @@ pub fn reshape() -> Vec<Case> {
                 let tuples = spread(&idx, n).into_iter().map(|c| vec![v(s, tbl.clone()), v(is, c)]).collect();
                 out.extend(batch(VecOp::Lookup, Res::V(s), false, tuples));
             }
-            // compress / expand under every mask pattern
+        }
+    }
+    out
+}
+
+/// Every mask of up to 8 lanes; for more, the masks at the edges of the 8-lane groups and the
+/// 128-bit halves (single lanes, prefixes, suffixes, whole groups) plus pseudo-random ones.
+pub fn sweep_masks(n: u32) -> Vec<u64> {
+    let all = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
+    if n <= 8 {
+        return (0..=all).collect();
+    }
+    let mut v = mask_patterns(n);
+    for k in [1, 7, 8, 9, n / 2 - 1, n / 2, n / 2 + 1, n - 9, n - 8, n - 1] {
+        v.extend([1 << k, all >> (n - k), all << k & all, !(1 << k) & all]);
+    }
+    for g in (0..n).step_by(8) {
+        v.push(0xff << g & all);
+        v.push(!(0xff << g) & all);
+    }
+    let mut r = Rng::new(u64::from(n) * 77);
+    v.extend((0..24).map(|_| r.next() & all));
+    let mut out = Vec::new();
+    for x in v {
+        if !out.contains(&x) {
+            out.push(x);
+        }
+    }
+    out
+}
+
+/// Lane bits that tell every lane apart and are never zero: the lane number in the low byte.
+pub fn lane_ids(s: Shape, salt: u64) -> Vec<u64> {
+    let mut r = Rng::new(salt + 5);
+    (0..u64::from(s.n))
+        .map(|j| {
+            if s.lane.bits() == 8 {
+                (salt % 4) * 0x40 + j + 1
+            } else {
+                (r.next() << 8 | (j + 1)) & s.lane.ones()
+            }
+        })
+        .collect()
+}
+
+/// `compress` / `expand` of every shape under [`sweep_masks`].
+pub fn compress() -> Vec<Case> {
+    let mut out = Vec::new();
+    for l in Lane::ALL {
+        for s in shapes(l) {
             for op in [VecOp::Compress, VecOp::Expand] {
-                let tuples = mask_patterns(s.n)
+                let tuples = sweep_masks(s.n)
                     .into_iter()
-                    .map(|m| vec![v(s, distinct(s, m)), Arg::M(l.bits(), s.n, m)])
+                    .map(|m| vec![v(s, lane_ids(s, m)), Arg::M(l.bits(), s.n, m)])
                     .collect();
                 out.extend(batch(op, Res::V(s), false, tuples));
             }

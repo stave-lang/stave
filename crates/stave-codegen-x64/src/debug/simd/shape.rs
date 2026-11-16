@@ -555,7 +555,8 @@ impl Cg<'_, '_> {
     }
 
     /// `compress`: the active lanes packed low; `expand`: the low lanes spread to the active
-    /// positions; other lanes zero. Lane by lane with a running count of active lanes.
+    /// positions; other lanes zero. Table-driven where the shape has tables, else lane by lane
+    /// with a running count of active lanes.
     pub(super) fn v_compress(
         &mut self,
         expand: bool,
@@ -564,6 +565,9 @@ impl Cg<'_, '_> {
         rt: TypeId,
         rv: Value,
     ) -> Res<()> {
+        if self.v_compress_packed(expand, a, m, rt, rv)? {
+            return Ok(());
+        }
         let sh = self.vshape(rt)?;
         let (ma, mm) = (self.vmem(a)?, self.vmem(m)?);
         let k = self.alloc_g()?;
@@ -643,7 +647,9 @@ impl Cg<'_, '_> {
                 self.vmsk(VMovMsk::Pmovmskb, false, g, XS0)?;
             }
         }
-        if sh.n < 32 {
+        // a full register gives one bit per lane, except two per lane from `packsswb`
+        let exact = (sh.size == 16 || sh.size == 32) && (sh.w != 2 || self.vex());
+        if sh.n < 32 && !exact {
             self.a.alu_ri(AluOp::And, Size::D, g, (1i64 << sh.n) - 1)?;
         }
         Ok(())

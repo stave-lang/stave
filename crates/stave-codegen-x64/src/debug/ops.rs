@@ -728,27 +728,8 @@ impl Cg<'_, '_> {
             self.norm_into(r, r, IntTy::new(t.bits, false))?;
         }
         match op {
-            Op::Popcount => {
-                self.a.mov_rr(Size::Q, S0, r);
-                self.a.shift_ri(ShiftOp::Shr, Size::Q, S0, 1)?;
-                self.a.mov_ri(Size::Q, S1, 0x5555_5555_5555_5555)?;
-                self.a.alu_rr(AluOp::And, Size::Q, S0, S1);
-                self.a.alu_rr(AluOp::Sub, Size::Q, r, S0);
-                self.a.mov_ri(Size::Q, S1, 0x3333_3333_3333_3333)?;
-                self.a.mov_rr(Size::Q, S0, r);
-                self.a.alu_rr(AluOp::And, Size::Q, S0, S1);
-                self.a.shift_ri(ShiftOp::Shr, Size::Q, r, 2)?;
-                self.a.alu_rr(AluOp::And, Size::Q, r, S1);
-                self.a.alu_rr(AluOp::Add, Size::Q, r, S0);
-                self.a.mov_rr(Size::Q, S0, r);
-                self.a.shift_ri(ShiftOp::Shr, Size::Q, S0, 4)?;
-                self.a.alu_rr(AluOp::Add, Size::Q, r, S0);
-                self.a.mov_ri(Size::Q, S1, 0x0f0f_0f0f_0f0f_0f0f)?;
-                self.a.alu_rr(AluOp::And, Size::Q, r, S1);
-                self.a.mov_ri(Size::Q, S1, 0x0101_0101_0101_0101)?;
-                self.a.imul_rr(Size::Q, r, S1)?;
-                self.a.shift_ri(ShiftOp::Shr, Size::Q, r, 56)?;
-            }
+            // every level has `popcnt` (x86-64-v2)
+            Op::Popcount => self.a.popcnt(Size::Q, r, r)?,
             Op::Clz => {
                 self.a.bsr(Size::Q, S0, r)?;
                 self.a.mov_ri(Size::Q, S1, -1)?;

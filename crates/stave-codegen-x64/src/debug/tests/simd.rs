@@ -1151,6 +1151,7 @@ fn all_cases() -> Vec<(&'static str, Vec<Case>)> {
         ("reductions", lanewise::reductions()),
         ("casts", reshape::casts()),
         ("reshape", reshape::reshape()),
+        ("compress", reshape::compress().into_iter().chain(memory::compress_store()).collect()),
         ("masks", reshape::masks()),
         ("memory", memory::memory()),
         ("traps", lanewise::traps().into_iter().chain(memory::traps()).collect()),
@@ -1219,6 +1220,11 @@ fn casts() {
 #[test]
 fn reshape() {
     run("simd-reshape", reshape::reshape());
+}
+
+#[test]
+fn compress() {
+    run("simd-compress", reshape::compress().into_iter().chain(memory::compress_store()).collect());
 }
 
 #[test]

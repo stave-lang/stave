@@ -266,6 +266,8 @@ pub struct Ctx<'m> {
     /// `__stave_fma32`, `__stave_fma64`: the software `fma` of one lane, where the level has no
     /// FMA instruction and the module has a `vec.fma`.
     pub(crate) fma_sym: Option<[SymbolId; 2]>,
+    /// The `compress` / `expand` tables the module's shapes use (`simd::compress::Tab`).
+    pub(crate) ctab: [Option<SymbolId>; simd::compress::NTAB],
 }
 
 /// What [`emit_module`] defined: the symbols of the functions, and the PC table rows still to
@@ -376,6 +378,7 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
             .filter_map(|f| m.funcs[f.index()].body.as_ref())
             .any(|b| b.insts.op.iter().any(|op| matches!(op, stave_ir::Op::Vec(stave_ir::simd::VecOp::Fma))));
     let fma_sym = if soft_fma { Some(softfma::define(b)?) } else { None };
+    let ctab = simd::compress::define(m, o.level, b)?;
     let cx = Ctx {
         m,
         layouts,
@@ -394,6 +397,7 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
         release: o.release,
         level: o.level,
         fma_sym,
+        ctab,
     };
     let (codes, nanos) = compile_all(&cx, &order, o.threads);
     for (f, code) in order.iter().zip(codes) {
@@ -511,6 +515,7 @@ pub fn bench_ctx(m: &Module) -> Ctx<'_> {
         release: false,
         level: Level::V2,
         fma_sym: Some([SymbolId(u32::MAX - 7), SymbolId(u32::MAX - 8)]),
+        ctab: simd::compress::placeholders(n + m.strings.len() as u32),
     }
 }
 
