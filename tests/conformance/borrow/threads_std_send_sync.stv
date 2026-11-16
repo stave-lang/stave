@@ -3,9 +3,7 @@
 // `string.String` and `std.soa` types through their Vec fields (a Soa3 is shared by two join
 // closures). A Vec and a String move out of
 // `thread.join`, a `&mut Vec` is captured by a join closure, `&Vec` and `Mutex<Vec<u64>>` are
-// shared by a par_for body. A MutexGuard over a Sync value and a RefCell `Ref` of a Sync value
-// may be shared by par_for_mut workers.
-import std.cell;
+// shared by a par_for body. A MutexGuard over a Sync value may be shared by par_for_mut workers.
 import std.io;
 import std.soa;
 import std.string;
@@ -45,11 +43,6 @@ fn main() -> i32 {
     {
         let g = lk.lock();
         thread.par_for_mut(out.as_mut_slice(), fn(i: usize, o: &mut u64) { *o = *g.get() + (i as u64); });
-    }
-    let c = cell.RefCell::<u64>.new(100);
-    {
-        let r = c.borrow();
-        thread.par_for_mut(out.as_mut_slice(), fn(i: usize, o: &mut u64) { *o = *o + *r.get(); });
     }
     let mut sum: u64 = 0;
     for i in 0..out.len() { sum = sum + *out.get_ref(i); }

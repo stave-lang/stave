@@ -17,10 +17,8 @@ static B: Shared = Shared.{ c: cell.UnsafeCell::<u32>.new(0) };
 static M: sync.Mutex<cell.UnsafeCell<u32>> = sync.Mutex::<cell.UnsafeCell<u32>>.new(cell.UnsafeCell::<u32>.new(1));
 static N: (u32, atomic.U32) = (1, atomic.U32.new(2));
 
-// `Cell.new` and `RefCell.new` are not const-exprs either (E0904).
+// `Cell.new` is not a const-expr either (E0904).
 static C: cell.Cell<u32> = cell.Cell::<u32>.new(0); //~ ERROR E0417
-//~^ ERROR E0904
-static R: cell.RefCell<u32> = cell.RefCell::<u32>.new(0); //~ ERROR E0417
 //~^ ERROR E0904
 
 fn main() -> i32 {

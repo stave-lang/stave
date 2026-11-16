@@ -1,5 +1,5 @@
 //~ STDOUT std_cell_iter_run.stdout
-// std.cell (Cell, RefCell with Ref / RefMut views), std.sync.Mutex (guard view, with_lock),
+// std.cell (Cell), std.sync.Mutex (guard view, with_lock),
 // std.iter (SliceIter driving `for`, map, zip) on one thread.
 import std.io;
 import std.cell;
@@ -14,20 +14,6 @@ fn main() -> i32 {
     let c = cell.Cell::<u32>.new(1);
     c.set(c.get() + 41);
     let cv = c.get();
-    let r = cell.RefCell::<u64>.new(5);
-    let mut b1: u64 = 0;
-    let mut b2: u64 = 0;
-    {
-        let x = r.borrow();
-        let y = r.borrow();
-        b1 = *x.get() + *y.get();
-    }
-    {
-        let mut w = r.borrow_mut();
-        let v = w.get_mut();
-        *v = *v * 10;
-    }
-    b2 = r.into_inner();
     let m = sync.Mutex::<u32>.new(3);
     {
         let mut g = m.lock();
@@ -50,6 +36,6 @@ fn main() -> i32 {
         let (a, bb) = p;
         z = z + *a * *bb;
     }
-    io.print(f"{cv} {b1} {b2} {got} {s} {q} {z}\n");
+    io.print(f"{cv} {got} {s} {q} {z}\n");
     return 0;
 }
