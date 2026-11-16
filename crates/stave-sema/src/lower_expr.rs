@@ -706,6 +706,9 @@ impl<'a> FnCx<'a> {
             if rt.is_none() {
                 return self.fail(tn, "cast type");
             }
+            if kind == CastKind::Exact && from == rt && self.is_simd(from) {
+                continue;
+            }
             if matches!(self.kind(from), TypeKind::Vector { .. }) {
                 let Some(r) = self.vec_cast(optok, kind, acc, rt) else { return E::Never };
                 acc = r;

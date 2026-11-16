@@ -60,8 +60,8 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 - An arithmetic op that yields NaN yields a quiet NaN with unspecified sign and payload. Scalars
   follow the same rule. `neg`, `abs`, `copysign`, loads, stores, `select`, and `bitcast` are
   bit-exact. Differential tests compare NaN-ness, not NaN bits.
-- A float cast to its own type, scalar or lane-wise (`as~`, `as?`), is a bit copy: a signaling NaN
-  keeps its signaling bit and payload.
+- A float cast to its own type, scalar or lane-wise (`as`, `as~`, `as?`), is a bit copy: a
+  signaling NaN keeps its signaling bit and payload.
 - `min_num`/`max_num`: a NaN operand, quiet or signaling, is missing, and the result is the other
   operand bit for bit; two NaNs give a quiet NaN.
 - A mask lane is all zeros (clear) or all ones (set). Any other bit pattern, which only `unsafe`
@@ -194,7 +194,8 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 | bitcast / split / join | `v.bitcast::<UxM>()`, `v.split()`, `TxN.join(a, b)` | N | N | N | N | N |
 | tail mask | `maskWxN.first_n(k)` | M | M | M | M | N (whilelt) |
 
-The other lane casts (`as|` and `as?` between ints, int casts across two or more widths, `as?`
+A plain `as` to the identical vector type is a bit copy of every lane (no op, no table entry, no
+gate). The other lane casts (`as|` and `as?` between ints, int casts across two or more widths, `as?`
 between floats) have a class per (source, target) pair: their table entry is the contract
 (`stave lowering --op vec.cast.sat`). Class N is a recipe of at most 2 instructions, M one of
 more; `tools/gen-tables` rejects a table cell whose class disagrees with its recipe.
