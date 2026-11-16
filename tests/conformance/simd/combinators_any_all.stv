@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// std.slice `any` / `all` give the right result whatever the position of the deciding element:
+// first, inside a block, at a block end, last, or absent, over one element, one block, and blocks
+// plus a tail. How often the predicate runs is not part of the contract and is not tested.
+// crates/stave-driver/tests/interp_vs_native.rs runs it in the IR interpreter and natively
+// against combinators_any_all.stdout.
+import std.io;
+
+const LENS: [usize; 4] = [1, 16, 17, 40];
+
+fn main() -> i32 {
+    let mut a: [i32; 40] = [0; 40];
+    for i in 0usize..40 { a[i] = i as% i32; }
+    for k in 0usize..4 {
+        let n = LENS[k];
+        let s = &a[0..n];
+        // The deciding element: first, in the middle of the first block, at its end, last, none.
+        let at: [i32; 5] = [0, (n / 2) as% i32, 15, (n - 1) as% i32, 99];
+        for j in 0usize..5 {
+            let key = at[j];
+            let hit = s.any(fn(x: i32) -> bool { return x == key; });
+            let all_other = s.all(fn(x: i32) -> bool { return x != key; });
+            io.print(f"{hit}/{all_other} ");
+        }
+        io.print("\n");
+    }
+    return 0;
+}

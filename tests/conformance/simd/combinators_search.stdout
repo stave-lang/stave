@@ -8,6 +8,7 @@
 20 69 - - 20 20 50 18 - - 
 true false true false true false
 true false true false true
-true true false false false true true
+false true false false false true true
+true false true
 8 19 0 true false false true false true
 18 37 1 true 1 false false true
