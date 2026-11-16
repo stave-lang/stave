@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+#[path = "../../../../tests/support/legs.rs"]
+mod legs;
+
 use stave_obj::{DataObj, FuncCode, ImageBuilder, LineRow, Machine, ObjectImage, Options, Reloc, RelocKind};
 
 pub fn u16_at(b: &[u8], o: usize) -> u16 {
@@ -224,7 +227,7 @@ pub fn have(tool: &str) -> bool {
 }
 
 /// Runs the image natively (x86-64 Linux host) or under `qemu-aarch64`; `None` (with a message)
-/// when neither is possible here.
+/// when neither is possible here, unless `STAVE_REQUIRE_LEGS` lists the machine's leg: then it fails.
 pub fn run(img: &ObjectImage, name: &str, args: &[&str]) -> Option<(String, i32)> {
     let p = tmp(name);
     img.write_file(&p).unwrap();
@@ -237,6 +240,7 @@ pub fn run(img: &ObjectImage, name: &str, args: &[&str]) -> Option<(String, i32)
             c
         }
         m => {
+            legs::gate(if m == Machine::X86_64 { "x86_64-linux" } else { "aarch64-linux" }, false);
             eprintln!("SKIP running {name}: no way to execute {m:?} binaries on this host");
             return None;
         }
