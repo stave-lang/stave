@@ -105,12 +105,6 @@ neon = { class = "N", recipe = "abs" }
 sve = { class = "N", recipe = "abs" }
 
 [[op]]
-op = "vec.abs_wrap"
-ty = ["uint"]
-neon = { class = "N", recipe = "none" }
-sve = { class = "N", recipe = "none" }
-
-[[op]]
 op = "vec.mul.wrap"
 ty = ["int8", "int16", "int32"]
 neon = { class = "N", recipe = "mul" }

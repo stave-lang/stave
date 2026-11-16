@@ -141,13 +141,6 @@ v2 = { class = "N", recipe = "psubq; blendvpd" }
 v3 = { class = "N", recipe = "vpsubq; vblendvpd" }
 v4 = { class = "N", recipe = "vpabsq" }
 
-[[op]]
-op = "vec.abs_wrap"
-ty = ["uint"]
-v2 = { class = "N", recipe = "none" }
-v3 = { class = "N", recipe = "none" }
-v4 = { class = "N", recipe = "none" }
-
 # int mul wrapping
 
 [[op]]

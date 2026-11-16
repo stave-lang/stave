@@ -17,7 +17,6 @@ vec.add.wrap            int                         N    1  vpadd*
 vec.sub.wrap            int                         N    1  vpsub*
 vec.abs_wrap            i8/i16/i32                  N    1  vpabs*
 vec.abs_wrap            i64                         N    1  vpabsq
-vec.abs_wrap            uint                        N    0  none
 vec.mul.wrap            int16/int32                 N    1  vpmull*
 vec.mul.wrap            int8                        M    5  vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq
 vec.mul.wrap            int64                       N    1  vpmullq

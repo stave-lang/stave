@@ -145,7 +145,15 @@ impl FnVerifier<'_> {
                     _ => Err("div_const divisor must be a lane-typed constant".into()),
                 }
             }
-            AbsWrap | Popcount | Clz | Not => {
+            AbsWrap => {
+                arity(1)?;
+                let t = res()?;
+                if !self.int_lanes(t)?.1.signed {
+                    return Err(format!("abs_wrap on unsigned lanes {}", self.tname(t)));
+                }
+                self.check_args(b, args, &[t])
+            }
+            Popcount | Clz | Not => {
                 arity(1)?;
                 let t = res()?;
                 self.int_lanes(t)?;

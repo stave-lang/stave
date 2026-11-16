@@ -47,7 +47,7 @@ const OPS: &[Row] = &[
     row("float neg/abs/copysign", &[(&["vec.neg", "vec.abs", "vec.copysign"], "", FLOAT)]),
     row("float floor/ceil/round/trunc", &[(&["vec.floor", "vec.ceil", "vec.round", "vec.trunc"], "", FLOAT)]),
     row("int add/sub wrapping", &[(&["vec.add.wrap", "vec.sub.wrap"], "", INT)]),
-    row("int neg wrapping / abs", &[(&["vec.abs_wrap"], "", INT)]),
+    row("int neg wrapping / abs", &[(&["vec.abs_wrap"], "", SINT)]),
     row("int mul wrapping i16/i32", &[(&["vec.mul.wrap"], "", &["i16", "u16", "i32", "u32"])]),
     row("int mul wrapping i8", &[(&["vec.mul.wrap"], "", &["i8", "u8"])]),
     row("int mul wrapping i64", &[(&["vec.mul.wrap"], "", &["i64", "u64"])]),

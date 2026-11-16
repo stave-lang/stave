@@ -290,13 +290,15 @@ fn vector_method<I: Interner + ?Sized>(
     let rms = cx.mk_ref(true, slice);
     let mask = mask_of(cx, lane, n);
     let float = matches!(cx.kind(lane), TypeKind::Float(_));
+    let signed = matches!(cx.kind(lane), TypeKind::Int { signed: true, .. });
     let half = |cx: &mut I, lane: TypeId| match n {
         Lanes::Fixed(k) if k >= 4 => Some(cx.intern(TypeKind::Vector { lane, n: Lanes::Fixed(k / 2) })),
         _ => None,
     };
     Some(match name {
         "sqrt" | "abs" | "floor" | "ceil" | "round" | "trunc" if float => (vec![], t),
-        "abs_wrap" | "popcount" | "clz" if !float => (vec![], t),
+        "abs_wrap" if signed => (vec![], t),
+        "popcount" | "clz" if !float => (vec![], t),
         "scan_add" if float => (vec![], t),
         "scan_add_wrap" if !float => (vec![], t),
         "copysign" | "min_num" | "max_num" | "min_x86" | "max_x86" if float => (vec![ArgTy::Is(t)], t),

@@ -143,7 +143,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 - Int vector division: `a.div_const::<K>()` or `a.div_lanes(b)` (E0607).
 
 **Ops** (method form unless shown):
-- arithmetic: `sqrt abs copysign(s) floor ceil round trunc fma(b, c) min max min_num max_num min_x86 max_x86` (floats; `round` ties to even), `abs_wrap div_lanes(b) div_const::<K>()` (ints), `min max` (both)
+- arithmetic: `sqrt abs copysign(s) floor ceil round trunc fma(b, c) min max min_num max_num min_x86 max_x86` (floats; `round` ties to even), `div_lanes(b) div_const::<K>()` (ints), `abs_wrap` (signed ints), `min max` (both)
   - `min`/`max` propagate NaN. `min_num`/`max_num` treat NaN as missing. `min_x86`/`max_x86` use x86 semantics (`a < b ? a : b`, `a > b ? a : b`); a NaN result has unspecified quiet bit and payload.
 - bitwise: `& | ^ ~ andnot(b)` (`a & ~b`), shifts `<< >> <<%` by a vector or a literal (`v << 3`: a lane value)
 - lane counting: `popcount clz`

@@ -35,6 +35,9 @@ fn lane_ops(name: &str, types: Vec<VT>, float: bool) {
             continue;
         }
         for &vt in &types {
+            if op == VecOp::AbsWrap && !vt.l.signed() {
+                continue;
+            }
             let v = cx.vty(vt);
             let func = cx.wrap_all(op, &vec![v; arity], Some(v));
             let out = O::V(vt, canon(op));

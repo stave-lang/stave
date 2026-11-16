@@ -1084,6 +1084,12 @@ fn verifier_rejects_mistyped_vector_ops() {
             let t = m.types.intern(k);
             (vec![t, t], Some(t))
         }),
+        // abs_wrap on unsigned lanes
+        (VecOp::AbsWrap, |m| {
+            let k = vk(m, int(false, 32), 4);
+            let t = m.types.intern(k);
+            (vec![t], Some(t))
+        }),
         // compare into a mask of the wrong width
         (VecOp::Lt, |m| {
             let t = i32x4(m);

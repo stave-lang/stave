@@ -154,16 +154,6 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
-        op: "vec.abs_wrap",
-        ty: "uint",
-        form: "",
-        keys: &["u8", "u16", "u32", "u64"],
-        cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none"], note: "", unverified: false },
-        ],
-    },
-    Entry {
         op: "vec.mul.wrap",
         ty: "int8/int16/int32",
         form: "",

@@ -1,0 +1,11 @@
+//~ CHECK-ONLY
+// E0208: `abs_wrap` exists on signed int lanes only: an unsigned lane is its own absolute value.
+fn f(a: u32x4, b: i32x4, x: f32x4) -> i32x4 {
+    let u = a.abs_wrap(); //~ ERROR E0208
+    let y = x.abs_wrap(); //~ ERROR E0208
+    return b.abs_wrap();
+}
+
+fn main() -> i32 {
+    return 0;
+}

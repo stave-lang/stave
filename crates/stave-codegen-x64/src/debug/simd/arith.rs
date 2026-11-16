@@ -565,6 +565,8 @@ impl Cg<'_, '_> {
                     self.vb(VBin::Pcmpgtq, wide, XS0, x)?;
                     self.vb(VBin::Pxor, wide, x, XS0)?;
                     self.vb(VBin::Psubq, wide, x, XS0)?;
+                } else {
+                    return Err(bad(format!("{} on these lanes", op.name())));
                 }
                 x
             }
