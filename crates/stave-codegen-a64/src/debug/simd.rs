@@ -499,10 +499,11 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.ld_bytes(rd, vt.size, pa, 0)?;
                 self.set_v(v, rd)
             }
-            Store | StoreAligned => {
+            // a streaming store is the aligned store: `stnp` is not used
+            Store | StoreAligned | StoreStream => {
                 let (p, _) = self.vmem(arg(0)?, false)?;
                 let (x, vt) = self.use_v(arg(2)?)?;
-                let pa = self.lane_ptr(p, arg(1)?, vt, op == StoreAligned, site)?;
+                let pa = self.lane_ptr(p, arg(1)?, vt, op != Store, site)?;
                 self.st_bytes(x, vt.size, pa, 0)
             }
             LoadMasked => self.load_masked(i, arg(0)?, arg(1)?, arg(2)?, site),

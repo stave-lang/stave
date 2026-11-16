@@ -358,7 +358,7 @@ impl FnVerifier<'_> {
                 self.usize_operand(b, args[1])?;
                 if op == LoadMasked { self.mask_for(self.value_ty(b, args[2])?, lc, k) } else { Ok(()) }
             }
-            Store | StoreAligned | StoreMasked => {
+            Store | StoreAligned | StoreStream | StoreMasked => {
                 arity(if op == StoreMasked { 4 } else { 3 })?;
                 let vt = self.value_ty(b, args[2])?;
                 let (lane, lc, k) = self.vshape(vt)?;
@@ -366,7 +366,7 @@ impl FnVerifier<'_> {
                     return self.usize_operand(b, args[1]);
                 }
                 let mo = self.mem(b, args[0], lane, true)?;
-                if op == StoreAligned {
+                if matches!(op, StoreAligned | StoreStream) {
                     self.aligned(mo, lc, k)?;
                 }
                 self.usize_operand(b, args[1])?;

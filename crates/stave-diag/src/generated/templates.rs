@@ -2895,7 +2895,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0803",
         severity: Severity::Error,
         area: "threads-unsafe-ffi",
-        rule: "unsafe operation outside `unsafe(..)`: a raw-pointer dereference, `read`, or `write`, a call of an `unsafe` fn or `extern` import, or any use (read, write, borrow) of a `static mut`",
+        rule: "unsafe operation outside `unsafe(..)`: a raw-pointer dereference, `read`, `write`, or `write_stream`, `fence_stream()`, a call of an `unsafe` fn or `extern` import, or any use (read, write, borrow) of a `static mut`",
         retired: false,
         located: true,
         holes: &[],

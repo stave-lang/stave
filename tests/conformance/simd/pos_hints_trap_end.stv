@@ -1,0 +1,25 @@
+//~ EXIT 101
+//~ STDOUT pos_hints_trap.stdout
+//~ STDERR-CONTAINS "panic: Bounds at pos_hints_trap_end.stv:22:"
+// `v.store_stream(s, i)` traps `Bounds` when `i + N > len`, an index that is a multiple of N
+// included.
+import std.io;
+
+fn aligned(buf: &mut [f32x4; 3]) -> &mut [f32 align 16] from buf {
+    let a = &mut buf[0] as *mut f32x4 as usize;
+    let parts: [usize; 2] = [a, 10];
+    let q = &parts as *const [usize; 2] as *const &mut [f32 align 16];
+    return unsafe("buf holds 12 f32 at a 16-byte aligned address, lent while the view lives") q.read();
+}
+
+fn main() -> i32 {
+    let mut buf: [f32x4; 3] = [f32x4.splat(0.0), f32x4.splat(0.0), f32x4.splat(0.0)];
+    let s = aligned(&mut buf);
+    let v = f32x4.splat(3.0);
+    v.store_stream(s, 4);
+    let x = s[7];
+    io.print(f"stored {x}\n");
+    v.store_stream(s, 8);
+    io.print("not reached\n");
+    return 0;
+}

@@ -123,6 +123,15 @@ impl Cg<'_, '_> {
         self.vstore(m, x, sh.size)
     }
 
+    /// `vec.store_stream s i v`: the alignment trap of `store_aligned`, then a non-temporal store.
+    pub(super) fn v_store_stream(&mut self, s: Operand, i: Operand, v: Operand) -> Res<()> {
+        let sh = self.voshape(v)?;
+        self.valigned(i, sh.n)?;
+        let m = self.vslice(s, i, sh.w)?;
+        let x = self.vread(v, sh.size)?;
+        self.vstore_nt(m, x, sh)
+    }
+
     /// The address and the length of the slice or array behind `s`.
     fn vbase(&mut self, s: Operand) -> Res<(Gpr, VLen)> {
         let st = self.oty(s).ok_or_else(|| bad("vector memory operand must be a value"))?;

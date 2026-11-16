@@ -31,6 +31,8 @@
 //! | `addr.field` / `addr.enum_field` / `addr.elem` | `p i` / `p v f` / `p i` | address arithmetic, unchecked |
 //! | `slice.make` / `slice.len` / `slice.ptr` | `p n` / `s` / `s` | fat pointer (`&[T]`, `&str`) parts |
 //! | `check.bounds` | `i n` | `i ≥ n` (unsigned) traps `Bounds` |
+//! | `mem.prefetch_<rw>_<loc>` | `p i` | a hint for the address `p + i * size` (wrapping, as `addr.elem`); no access, never traps |
+//! | `mem.store_stream` / `mem.fence_stream` | `p v` / — | a `store` with a non-temporal hint / orders earlier streaming stores |
 //! | `fn.make` | `@f env` | fn value `(code, environment)` of closure `@f` (its last param is `env`) |
 //! | `call` / `call.ind` | `@f args..` / `f args..` | direct / fn-value call (`call.ind` passes the value's environment as a trailing argument) |
 //! | `intrinsic.<name>` | args.. | contracts/intrinsics.md |
@@ -155,6 +157,60 @@ impl PanicKind {
     }
 }
 
+/// The cache level a prefetch targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PrefetchLoc {
+    L1,
+    L2,
+    L3,
+    /// Non-temporal: data used once, kept from displacing other cached data.
+    Nta,
+}
+
+/// A prefetch hint: read or write intent and the cache level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Prefetch {
+    pub write: bool,
+    pub loc: PrefetchLoc,
+}
+
+impl Prefetch {
+    /// Every hint, read hints first, in the order `l1 l2 l3 nta`.
+    pub const ALL: [Prefetch; 8] = {
+        use PrefetchLoc::*;
+        [
+            Prefetch { write: false, loc: L1 },
+            Prefetch { write: false, loc: L2 },
+            Prefetch { write: false, loc: L3 },
+            Prefetch { write: false, loc: Nta },
+            Prefetch { write: true, loc: L1 },
+            Prefetch { write: true, loc: L2 },
+            Prefetch { write: true, loc: L3 },
+            Prefetch { write: true, loc: Nta },
+        ]
+    };
+
+    /// The op name, also the source method name after `mem.` (`mem.prefetch_read_l1`).
+    pub fn name(self) -> &'static str {
+        use PrefetchLoc::*;
+        match (self.write, self.loc) {
+            (false, L1) => "mem.prefetch_read_l1",
+            (false, L2) => "mem.prefetch_read_l2",
+            (false, L3) => "mem.prefetch_read_l3",
+            (false, Nta) => "mem.prefetch_read_nta",
+            (true, L1) => "mem.prefetch_write_l1",
+            (true, L2) => "mem.prefetch_write_l2",
+            (true, L3) => "mem.prefetch_write_l3",
+            (true, Nta) => "mem.prefetch_write_nta",
+        }
+    }
+
+    /// The hint of source method `name` (`prefetch_read_l1`).
+    pub fn from_method(name: &str) -> Option<Prefetch> {
+        Prefetch::ALL.into_iter().find(|p| p.name().strip_prefix("mem.") == Some(name))
+    }
+}
+
 /// The `as` family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CastKind {
@@ -221,6 +277,12 @@ pub enum Op {
     SlicePtr,
     FnMake,
     BoundsCheck,
+    /// A prefetch hint: no access, no effect on results; kept in program order.
+    Prefetch(Prefetch),
+    /// A store with a non-temporal hint (same semantics as `Store`).
+    StoreStream,
+    /// Orders the streaming stores before it with every later store.
+    FenceStream,
     Call,
     CallInd,
     Intrinsic(IntrinsicId),
@@ -285,6 +347,9 @@ impl Op {
             Op::SlicePtr => "slice.ptr",
             Op::FnMake => "fn.make",
             Op::BoundsCheck => "check.bounds",
+            Op::Prefetch(p) => p.name(),
+            Op::StoreStream => "mem.store_stream",
+            Op::FenceStream => "mem.fence_stream",
             Op::Call => "call",
             Op::CallInd => "call.ind",
             Op::Panic(k) => k.op_name(),

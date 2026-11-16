@@ -239,6 +239,18 @@ impl Cg<'_, '_> {
                 self.bind_g(v, r)
             }
             Op::BoundsCheck => self.bounds(arg(0)?, arg(1)?),
+            Op::Prefetch(h) => self.prefetch(h, arg(0)?, arg(1)?),
+            Op::StoreStream => {
+                let p = arg(0)?;
+                let pt = self.oty(p).ok_or_else(|| bad("mem.store_stream through a non-value"))?;
+                let c = self.vcls(self.pointee(pt)?)?;
+                let m = self.ptr_mem(p)?;
+                self.store_stream_cls(arg(1)?, c, m)
+            }
+            Op::FenceStream => {
+                self.a.sfence();
+                Ok(())
+            }
             Op::Call => {
                 let Operand::Func(g) = arg(0)? else { return Err(bad("call callee must be a fn item")) };
                 let gf = self.cx.m.func(g).ok_or_else(|| bad("callee out of range"))?;
@@ -1404,6 +1416,55 @@ impl Cg<'_, '_> {
             self.index_into(r, ir, stride)?;
         }
         self.bind_g(v, r)
+    }
+
+    /// `prefetcht0/1/2/nta` at `p + i * size` (the size of `p`'s pointee). A write hint is the
+    /// read hint of its level: `prefetchw` needs PRFCHW, which neither v2 nor v3 implies.
+    fn prefetch(&mut self, h: stave_ir::Prefetch, p: Operand, i: Operand) -> Res<()> {
+        use stave_ir::PrefetchLoc as L;
+        let hint = match h.loc {
+            L::L1 => Prefetch::T0,
+            L::L2 => Prefetch::T1,
+            L::L3 => Prefetch::T2,
+            L::Nta => Prefetch::Nta,
+        };
+        let pt = self.oty(p).ok_or_else(|| bad("prefetch of a non-value"))?;
+        let stride = self.layout(self.pointee(pt)?)?.size;
+        let r = self.new_g(p)?;
+        let m = match self.int_const(i) {
+            Some(k) => match i32::try_from((k as i64).wrapping_mul(stride as i64)) {
+                Ok(d) => Mem::base(r, d),
+                Err(_) => {
+                    self.a.mov_ri(Size::Q, S0, (k as i64).wrapping_mul(stride as i64))?;
+                    self.a.alu_rr(AluOp::Add, Size::Q, r, S0);
+                    Mem::base(r, 0)
+                }
+            },
+            None => {
+                let ir = self.read_g(i)?;
+                self.index_into(r, ir, stride)?;
+                Mem::base(r, 0)
+            }
+        };
+        Ok(self.a.prefetch(hint, m)?)
+    }
+
+    /// The store of `o` (class `c`) to `dst` with a non-temporal hint: `movnti` for 32- and 64-bit
+    /// scalars (a float through a general register), `movntps/pd/dq` for 16- and 32-byte vectors;
+    /// other values have no non-temporal store and are stored plainly.
+    fn store_stream_cls(&mut self, o: Operand, c: VCls, dst: Mem) -> Res<()> {
+        let s = match c {
+            VCls::G { bytes: 4, .. } | VCls::X(Prec::F32) => Size::D,
+            VCls::G { bytes: 8, .. } | VCls::X(Prec::F64) => Size::Q,
+            VCls::V { size: 16 | 32 } => {
+                let sh = self.voshape(o)?;
+                let x = self.vread(o, sh.size)?;
+                return self.vstore_nt(dst, x, sh);
+            }
+            _ => return self.store_cls(o, c, dst),
+        };
+        self.copy_to_g(o, S0)?;
+        Ok(self.a.movnti(s, dst, S0)?)
     }
 
     fn bounds(&mut self, i: Operand, n: Operand) -> Res<()> {

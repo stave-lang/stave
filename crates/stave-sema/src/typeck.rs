@@ -82,6 +82,8 @@ pub enum Target {
     Global { decl: DeclId },
     /// `size_of::<T>()` / `align_of::<T>()`.
     SizeOf { ty: TypeId, align: bool },
+    /// `fence_stream()`.
+    FenceStream,
     /// An `extern "stave-intrinsic"` call (checked IR `intrinsic.<name>`).
     Intrinsic { decl: DeclId },
     /// A call through a fn value.

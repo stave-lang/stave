@@ -272,7 +272,11 @@ impl FnCx<'_> {
                     return E::Unit;
                 }
                 self.vec_bounds(seg, s, i, lanes);
-                let op = if name == "store" { VecOp::Store } else { VecOp::StoreAligned };
+                let op = match name {
+                    "store" => VecOp::Store,
+                    "store_stream" => VecOp::StoreStream,
+                    _ => VecOp::StoreAligned,
+                };
                 self.vop(seg, op, None, &[s, i, recv]);
                 E::Unit
             }

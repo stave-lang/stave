@@ -96,6 +96,15 @@ const KERNELS: &[Kernel] = &[
         ],
     },
     Kernel {
+        name: "stream_copy",
+        kinds: &[
+            kind(&[Elem::F32], 4, Param::None),
+            kind(&[Elem::F64], 2, Param::None),
+            kind(&[Elem::I32], 4, Param::None),
+            kind(&[Elem::U8], 16, Param::None),
+        ],
+    },
+    Kernel {
         name: "sum_v3",
         kinds: &[
             kind(&[Elem::F32], 8, Param::None),

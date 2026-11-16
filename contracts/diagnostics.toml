@@ -1181,7 +1181,7 @@ fix = { description = "give each call its own element through `thread.par_for_mu
 code = "E0803"
 severity = "error"
 area = "threads-unsafe-ffi"
-rule = "unsafe operation outside `unsafe(..)`: a raw-pointer dereference, `read`, or `write`, a call of an `unsafe` fn or `extern` import, or any use (read, write, borrow) of a `static mut`"
+rule = "unsafe operation outside `unsafe(..)`: a raw-pointer dereference, `read`, `write`, or `write_stream`, `fence_stream()`, a call of an `unsafe` fn or `extern` import, or any use (read, write, borrow) of a `static mut`"
 message = "unsafe operation outside `unsafe(..)`"
 labels = [{ at = "primary", text = "unsafe operation" }]
 fix = { description = "wrap it in `unsafe(\"<obligation>\") {{ ... }}`, or `unsafe(\"<obligation>\") expr` in a value position" }

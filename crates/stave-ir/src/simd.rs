@@ -37,6 +37,7 @@
 //! | `vec.compress` / `vec.expand` | `v m` | V | active lanes packed low / low lanes spread to active positions; other lanes 0 |
 //! | `vec.load` / `vec.store` | `s i` / `s i v` | V / — | lanes `s[i..i+n]`; no check of their own (a dominating `check.bounds i lim`, `lim = sub.sat len n-1`, or a chunk-loop proof guards them) |
 //! | `vec.load_aligned` † / `vec.store_aligned` † | `s i` / `s i v` | V / — | as `load` / `store`; `i % n != 0` traps `Bounds` |
+//! | `vec.store_stream` † | `s i v` | — | `store_aligned` with a non-temporal hint |
 //! | `vec.load_masked` † / `vec.store_masked` † | `s i m` / `s i v m` | V / — | active lanes only (inactive lanes read 0, are never written); an active lane at `i + k ≥ len` traps `Bounds` before any lane is written |
 //! | `vec.gather` † / `vec.scatter` † | `s idx` / `s idx v` | V / — | lane j at `s[idx[j]]`, `idx` unsigned lanes of any width (zero-extended); any index ≥ len traps `Bounds` before any lane is written; duplicate indices: the highest lane wins |
 //! | `mask.and or xor`, `mask.not` | `a b`, `a` | M | lane-wise logic |
@@ -132,6 +133,7 @@ pub enum VecOp {
     Store,
     LoadAligned,
     StoreAligned,
+    StoreStream,
     LoadMasked,
     StoreMasked,
     Gather,
@@ -151,7 +153,7 @@ pub enum VecOp {
 
 impl VecOp {
     /// Every op, in declaration order (tests and tables iterate it).
-    pub const ALL: [VecOp; 92] = {
+    pub const ALL: [VecOp; 93] = {
         use VecOp::*;
         [
             Splat,
@@ -231,6 +233,7 @@ impl VecOp {
             Store,
             LoadAligned,
             StoreAligned,
+            StoreStream,
             LoadMasked,
             StoreMasked,
             Gather,
@@ -330,6 +333,7 @@ impl VecOp {
             Store => "vec.store",
             LoadAligned => "vec.load_aligned",
             StoreAligned => "vec.store_aligned",
+            StoreStream => "vec.store_stream",
             LoadMasked => "vec.load_masked",
             StoreMasked => "vec.store_masked",
             Gather => "vec.gather",
@@ -354,7 +358,9 @@ impl VecOp {
         match self {
             Shl | Shr => &[PanicKind::Overflow],
             DivLanes | DivConst => &[PanicKind::DivByZero, PanicKind::Overflow],
-            LoadAligned | StoreAligned | LoadMasked | StoreMasked | Gather | Scatter => &[PanicKind::Bounds],
+            LoadAligned | StoreAligned | StoreStream | LoadMasked | StoreMasked | Gather | Scatter => {
+                &[PanicKind::Bounds]
+            }
             _ => &[],
         }
     }
@@ -364,13 +370,23 @@ impl VecOp {
         use VecOp::*;
         matches!(
             self,
-            Load | Store | LoadAligned | StoreAligned | LoadMasked | StoreMasked | Gather | Scatter
+            Load | Store
+                | LoadAligned
+                | StoreAligned
+                | StoreStream
+                | LoadMasked
+                | StoreMasked
+                | Gather
+                | Scatter
         )
     }
 
     /// A store (no result).
     pub fn is_store(self) -> bool {
-        matches!(self, VecOp::Store | VecOp::StoreAligned | VecOp::StoreMasked | VecOp::Scatter)
+        matches!(
+            self,
+            VecOp::Store | VecOp::StoreAligned | VecOp::StoreStream | VecOp::StoreMasked | VecOp::Scatter
+        )
     }
 
     /// The scalar op of a lane-wise int op, for [`arith::int_binary`] / [`arith::int_shift`].

@@ -4734,13 +4734,13 @@ pub(super) static ENTRIES: &[Entry] = &[
     },
     Entry {
         op: "vec.store_stream",
-        ty: "int",
+        ty: "int/f16/bf16",
         form: "",
-        keys: &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"],
+        keys: &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f16", "bf16"],
         cells: &[
-            Cell { tier: Tier::V2, feature: None, class: Class::N, cost: 1, recipe: "movntdq", recipes: &["movntdq", "movntdq", "movntdq", "movntdq", "movntdq", "movntdq", "movntdq", "movntdq"], note: "", unverified: false },
-            Cell { tier: Tier::V3, feature: None, class: Class::N, cost: 1, recipe: "vmovntdq", recipes: &["vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 1, recipe: "vmovntdq", recipes: &["vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq"], note: "", unverified: false },
+            Cell { tier: Tier::V2, feature: None, class: Class::N, cost: 1, recipe: "movntdq", recipes: &["movntdq", "movntdq", "movntdq", "movntdq", "movntdq", "movntdq", "movntdq", "movntdq", "movntdq", "movntdq"], note: "", unverified: false },
+            Cell { tier: Tier::V3, feature: None, class: Class::N, cost: 1, recipe: "vmovntdq", recipes: &["vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 1, recipe: "vmovntdq", recipes: &["vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq", "vmovntdq"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -4760,8 +4760,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["f32"],
         cells: &[
-            Cell { tier: Tier::V2, feature: None, class: Class::N, cost: 2, recipe: "movd; movnti", recipes: &["movd; movnti"], note: "", unverified: false },
-            Cell { tier: Tier::V3, feature: None, class: Class::N, cost: 2, recipe: "vmovd; movnti", recipes: &["vmovd; movnti"], note: "", unverified: false },
+            Cell { tier: Tier::V2, feature: None, class: Class::N, cost: 2, recipe: "movq; movnti", recipes: &["movq; movnti"], note: "", unverified: false },
+            Cell { tier: Tier::V3, feature: None, class: Class::N, cost: 2, recipe: "movq; movnti", recipes: &["movq; movnti"], note: "", unverified: false },
             Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 2, recipe: "vmovd; movnti", recipes: &["vmovd; movnti"], note: "", unverified: false },
         ],
     },
@@ -4772,7 +4772,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         keys: &["f64"],
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::N, cost: 2, recipe: "movq; movnti", recipes: &["movq; movnti"], note: "", unverified: false },
-            Cell { tier: Tier::V3, feature: None, class: Class::N, cost: 2, recipe: "vmovq; movnti", recipes: &["vmovq; movnti"], note: "", unverified: false },
+            Cell { tier: Tier::V3, feature: None, class: Class::N, cost: 2, recipe: "movq; movnti", recipes: &["movq; movnti"], note: "", unverified: false },
             Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 2, recipe: "vmovq; movnti", recipes: &["vmovq; movnti"], note: "", unverified: false },
         ],
     },

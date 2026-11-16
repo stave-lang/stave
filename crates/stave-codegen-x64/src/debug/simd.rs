@@ -400,6 +400,25 @@ impl Cg<'_, '_> {
         Ok(())
     }
 
+    /// The streaming store of a `size`-byte vector of shape `sh` to `m`: `movntps/pd/dq` (VEX at
+    /// v3) for 16 and 32 bytes, whose address is a multiple of the size; narrower vectors have no
+    /// non-temporal form and are stored plainly.
+    pub(super) fn vstore_nt(&mut self, m: Mem, x: Xmm, sh: Sh) -> Res<()> {
+        let op = match sh.float() {
+            Some(Prec::F32) => VStore::Movntps,
+            Some(Prec::F64) => VStore::Movntpd,
+            None => VStore::Movntdq,
+        };
+        let sse = self.vform(sh.wide())? == Form::Sse;
+        match sh.size {
+            32 => self.a.vex_store(op, m, y(x))?,
+            16 if sse => self.a.sse_store(op, m, x)?,
+            16 => self.a.vex_store(op, m, x)?,
+            size => return self.vstore(m, x, size),
+        }
+        Ok(())
+    }
+
     /// The home of a vector operand, holding its bytes (written here from the value's register
     /// when needed: call it where the code runs on every path through the op).
     pub(super) fn vmem(&mut self, o: Operand) -> Res<Mem> {
@@ -600,6 +619,7 @@ impl Cg<'_, '_> {
             Compress | Expand => self.v_compress(op == Expand, arg(0)?, arg(1)?, rt?, rv?),
             Load | LoadAligned => self.v_load(op == LoadAligned, arg(0)?, arg(1)?, rt?, rv?),
             Store | StoreAligned => self.v_store(op == StoreAligned, arg(0)?, arg(1)?, arg(2)?),
+            StoreStream => self.v_store_stream(arg(0)?, arg(1)?, arg(2)?),
             LoadMasked => self.v_load_masked(arg(0)?, arg(1)?, arg(2)?, rt?, rv?),
             StoreMasked => self.v_store_masked(arg(0)?, arg(1)?, arg(2)?, arg(3)?),
             Gather => self.v_gather(arg(0)?, arg(1)?, rt?, rv?),

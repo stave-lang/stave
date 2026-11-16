@@ -133,7 +133,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0717 | VL-dependent float reduction on a sizeless vector (use `reduce_add_ordered`). Planned |
 | E0801 | `spawn` outside a `scope` block |
 | E0802 | captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body (shared by many threads): a capture that is not `Sync`, or a `&mut` capture |
-| E0803 | unsafe operation outside `unsafe(..)`: raw-pointer `*p`, `p.read()`, `p.write(v)`; a call of an `unsafe` fn or `extern` import; any use (read, write, borrow) of a `static mut` |
+| E0803 | unsafe operation outside `unsafe(..)`: raw-pointer `*p`, `p.read()`, `p.write(v)`, `p.write_stream(v)`, `fence_stream()`; a call of an `unsafe` fn or `extern` import; any use (read, write, borrow) of a `static mut` |
 | E0804 | vector or view type in an `extern "C"` signature |
 | E0805 | `extern "stave-intrinsic"` outside the shipped `std`, `runtime`, and `runtime-gpu` packages, or a name or signature not in `contracts/intrinsics.md` |
 | E0806 | argument of `thread.join`, `thread.par_for`, or `thread.par_for_mut` is a fn value whose captures are unknown (not a closure literal or fn item) |

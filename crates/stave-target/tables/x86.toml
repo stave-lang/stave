@@ -3136,7 +3136,7 @@ v4 = { class = "N", recipe = "vmovntp%" }
 
 [[op]]
 op = "vec.store_stream"
-ty = ["int"]
+ty = ["int", "f16", "bf16"]
 v2 = { class = "N", recipe = "movntdq" }
 v3 = { class = "N", recipe = "vmovntdq" }
 v4 = { class = "N", recipe = "vmovntdq" }
@@ -3151,15 +3151,15 @@ v4 = { class = "N", recipe = "movnti" }
 [[op]]
 op = "mem.store_stream"
 ty = ["f32"]
-v2 = { class = "N", recipe = "movd; movnti" }
-v3 = { class = "N", recipe = "vmovd; movnti" }
+v2 = { class = "N", recipe = "movq; movnti" }
+v3 = { class = "N", recipe = "movq; movnti" }
 v4 = { class = "N", recipe = "vmovd; movnti" }
 
 [[op]]
 op = "mem.store_stream"
 ty = ["f64"]
 v2 = { class = "N", recipe = "movq; movnti" }
-v3 = { class = "N", recipe = "vmovq; movnti" }
+v3 = { class = "N", recipe = "movq; movnti" }
 v4 = { class = "N", recipe = "vmovq; movnti" }
 
 [[op]]

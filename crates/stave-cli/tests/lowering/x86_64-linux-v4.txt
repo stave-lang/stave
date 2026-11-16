@@ -430,7 +430,7 @@ mem.prefetch_write_l2   any                         N    1  prefetchw
 mem.prefetch_write_l3   any                         N    1  prefetchw
 mem.prefetch_write_nta  any                         N    1  prefetchw
 vec.store_stream        float                       N    1  vmovntp%
-vec.store_stream        int                         N    1  vmovntdq
+vec.store_stream        int/f16/bf16                N    1  vmovntdq
 mem.store_stream        int32/int64                 N    1  movnti
 mem.store_stream        f32                         N    2  vmovd; movnti
 mem.store_stream        f64                         N    2  vmovq; movnti

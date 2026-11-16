@@ -1,0 +1,78 @@
+//~ STDOUT pos_hints_prefetch.stdout
+// The eight prefetch hints on `&[f32]`, `&mut [u8]` and raw pointers, in safe code: no access,
+// no bounds check (an index past the end, or one whose address wraps, runs without a trap), no
+// effect on results. A hint is class N, so `strict { }` accepts it.
+import std.io;
+
+fn reads(xs: &[f32]) -> f32 {
+    xs.prefetch_read_l1(0);
+    xs.prefetch_read_l2(1);
+    xs.prefetch_read_l3(xs.len());
+    xs.prefetch_read_nta(xs.len() + 64);
+    xs.prefetch_write_l1(2);
+    xs.prefetch_write_l2(xs.len() + 4096);
+    xs.prefetch_write_l3(0xffff_ffff_ffff_fff0);
+    xs.prefetch_write_nta(3);
+    let mut s: f32 = 0.0;
+    for i in 0..xs.len() {
+        s = s + xs[i];
+    }
+    return s;
+}
+
+fn writes(bs: &mut [u8]) -> u32 {
+    bs.prefetch_write_l1(bs.len() + 64);
+    bs.prefetch_write_nta(0);
+    bs.prefetch_read_l2(1 << 40);
+    for i in 0..bs.len() {
+        bs[i] = (i * 3) as% u8;
+    }
+    let mut s: u32 = 0;
+    for i in 0..bs.len() {
+        s = s + bs[i] as u32;
+    }
+    return s;
+}
+
+fn pointers(p: *const u64, q: *mut i16) {
+    p.prefetch_read_l1();
+    p.prefetch_read_l2();
+    p.prefetch_read_l3();
+    p.prefetch_read_nta();
+    q.prefetch_write_l1();
+    q.prefetch_write_l2();
+    q.prefetch_write_l3();
+    q.prefetch_write_nta();
+}
+
+fn strict_sum(xs: &[f32]) -> f32 {
+    let mut acc = f32x4.splat(0.0);
+    strict {
+        let mut i: usize = 0;
+        while i + 4 <= xs.len() {
+            xs.prefetch_read_nta(i + 64);
+            xs.prefetch_write_l3(i + 4);
+            acc = acc + f32x4.load(xs, i);
+            i = i + 4;
+        }
+    }
+    return acc.reduce_add();
+}
+
+fn main() -> i32 {
+    let xs: [f32; 6] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let mut bs: [u8; 10] = [0; 10];
+    let a: u64 = 7;
+    let mut b: i16 = -3;
+    pointers(&a as *const u64, &mut b as *mut i16);
+    // a pointer to nothing is still a valid hint operand
+    pointers(16usize as *const u64, 0usize as *mut i16);
+    let r = reads(&xs);
+    let w = writes(&mut bs);
+    let t = strict_sum(&xs);
+    io.print(f"reads {r}\n");
+    io.print(f"writes {w}\n");
+    io.print(f"strict {t}\n");
+    io.print(f"a {a} b {b}\n");
+    return 0;
+}

@@ -31,6 +31,7 @@ differential` (part of `cargo test --workspace`); Linux, x86-64 host for the nat
 | matmul4 | 4x4 matrix times 4-element points | `permute` broadcasts, `join` (v3), `select` |
 | utf8 | UTF-8 validation (Keiser–Lemire), code points | `lookup`, `>>`, `-|`, `reduce_or` |
 | combinators | the `std.slice` methods (no `_v3` file: one std implementation per method) on f32 / f64 / i32 / u8 | `sum min max find find_byte find_any_byte count any all eq fill copy_from` |
+| stream_copy | copies f32 / f64 / i32 / u8 into a misaligned destination | `store_stream` (vector and scalar), `write_stream`, `fence_stream`, prefetches past the end |
 
 ## Cases
 

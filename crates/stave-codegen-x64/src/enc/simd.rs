@@ -374,6 +374,22 @@ impl Asm {
         })
     }
 
+    /// `movnti [m], src`: a non-temporal store of a 32- (`D`) or 64-bit (`Q`) register.
+    pub fn movnti(&mut self, s: Size, m: Mem, src: Gpr) -> Result<(), EncError> {
+        if !matches!(s, Size::D | Size::Q) {
+            return Err(EncError::Invalid("movnti stores 32 or 64 bits"));
+        }
+        self.enc(Enc {
+            pfx: None,
+            w: s == Size::Q,
+            rex8: false,
+            opc: &[0x0f, 0xc3],
+            reg: src.0,
+            rm: RmEnc::Mem(m),
+            trailing: 0,
+        })
+    }
+
     /// `sfence`: orders non-temporal stores.
     pub fn sfence(&mut self) {
         self.buf.extend_from_slice(&[0x0f, 0xae, 0xf8]);

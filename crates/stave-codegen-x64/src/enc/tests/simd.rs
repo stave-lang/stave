@@ -772,6 +772,14 @@ fn memory_hints_and_barriers() {
             b.add(format!("{mn} {text}"), |a| a.prefetch(h, *m));
         }
     }
+    for s in [Size::D, Size::Q] {
+        for (m, text) in &mems {
+            for r in [0, 7, 8, 15] {
+                b.add(format!("movnti {text},{}", g(r).name(s)), |a| a.movnti(s, *m, g(r)));
+            }
+        }
+    }
+    rejects(|a| a.movnti(Size::W, Mem::base(Gpr::RAX, 0), Gpr::RCX), "16-bit movnti");
     b.add("sfence", |a| {
         a.sfence();
         Ok(())

@@ -1,8 +1,9 @@
 //! Built-ins: methods of the built-in types (`u32`/`u64` `mul_wide`, int bit counts,
-//! raw-pointer `read`/`write` and memory hints, `len`, `bool` and mask `select`, SIMD vector and
-//! mask operations), the type-relative fns of vector and mask types (`f32x4.splat`,
-//! `u8x16.load`), and the `extern "stave-intrinsic"` table of contracts/intrinsics.md (E0805;
-//! E0704 when called on another arch). `size_of` / `align_of` are typed by the body checker.
+//! raw-pointer `read`/`write`, memory hints (prefetches, `write_stream`, scalar `store_stream`),
+//! `len`, `bool` and mask `select`, SIMD vector and mask operations), the type-relative fns of
+//! vector and mask types (`f32x4.splat`, `u8x16.load`), and the `extern "stave-intrinsic"` table
+//! of contracts/intrinsics.md (E0805; E0704 when called on another arch). `size_of` / `align_of`
+//! / `fence_stream` are typed by the body checker.
 //!
 //! `mul_wide` exists on `u32` and `u64` only: on any other type the lookup fails and the
 //! checker reports E0208.
@@ -92,6 +93,15 @@ const VEC_METHODS: &[&str] = &[
 ];
 const MASK_METHODS: &[&str] = &["select", "to_bits", "to_vec", "rewiden"];
 
+/// A SIMD lane type: the fixed-width ints and the floats (streaming stores take only these).
+fn is_lane<I: Interner + ?Sized>(cx: &I, t: TypeId) -> bool {
+    match cx.kind(t) {
+        TypeKind::Int { bits, .. } => *bits != types::IntBits::Size,
+        TypeKind::Float(_) => true,
+        _ => false,
+    }
+}
+
 fn intern_name(list: &[&'static str], name: &str) -> Option<&'static str> {
     list.iter().copied().find(|&n| n == name)
 }
@@ -102,6 +112,9 @@ pub fn builtin_method<I: Interner + ?Sized>(cx: &I, t: TypeId, name: &str) -> Op
         TypeKind::Bool => {
             (name == "select").then_some(BuiltinMethod { name: "select", by_ref: false, is_unsafe: false })
         }
+        TypeKind::Int { .. } | TypeKind::Float(_) if name == "store_stream" => {
+            is_lane(cx, t).then_some(BuiltinMethod { name: "store_stream", by_ref: false, is_unsafe: false })
+        }
         TypeKind::Int { signed, bits } => {
             let n = intern_name(INT_METHODS, name)?;
             if n == "mul_wide" && (*signed || !matches!(bits, types::IntBits::B32 | types::IntBits::B64)) {
@@ -109,15 +122,20 @@ pub fn builtin_method<I: Interner + ?Sized>(cx: &I, t: TypeId, name: &str) -> Op
             }
             Some(BuiltinMethod { name: n, by_ref: false, is_unsafe: false })
         }
-        TypeKind::Ptr { mutable, .. } => {
+        TypeKind::Ptr { mutable, inner } => {
             if name == "read" {
                 return Some(BuiltinMethod { name: "read", by_ref: false, is_unsafe: true });
             }
             if name == "write" && *mutable {
                 return Some(BuiltinMethod { name: "write", by_ref: false, is_unsafe: true });
             }
-            if name == "write_stream" && *mutable {
-                return Some(BuiltinMethod { name: "write_stream", by_ref: false, is_unsafe: true });
+            if name == "write_stream" {
+                let streamable = is_lane(cx, *inner) || matches!(cx.kind(*inner), TypeKind::Vector { .. });
+                return (*mutable && streamable).then_some(BuiltinMethod {
+                    name: "write_stream",
+                    by_ref: false,
+                    is_unsafe: true,
+                });
             }
             let n = intern_name(PTR_HINTS, name)?;
             Some(BuiltinMethod { name: n, by_ref: false, is_unsafe: false })
@@ -192,6 +210,11 @@ pub fn builtin_method_sig<I: Interner + ?Sized>(
         (TypeKind::Int { .. }, "mul_wide") => {
             let tup = cx.mk_tuple(vec![t, t]);
             (vec![ArgTy::Is(t)], tup)
+        }
+        (TypeKind::Int { .. } | TypeKind::Float(_), "store_stream") => {
+            let s = cx.intern(TypeKind::Slice { elem: t, align: 0 });
+            let rs = cx.mk_ref(true, s);
+            (vec![ArgTy::Is(rs), ArgTy::Is(us)], unit)
         }
         (TypeKind::Int { .. }, _) => (vec![], t),
         (TypeKind::Ptr { inner, .. }, "read") => (vec![], *inner),

@@ -1,0 +1,197 @@
+// Copies through memory hints: a scalar head up to the destination's first 16-byte boundary,
+// 16-byte vectors stored with `store_stream` on the aligned rest (the source prefetched ahead,
+// past its end too: a prefetch never faults), then a scalar tail. The scalar parts use
+// `x.store_stream(s, i)`, or `p.write_stream(x)` and an explicit `fence_stream()` (i32). The
+// reference is a plain element-by-element copy, so each result equals its input bit for bit.
+import diff;
+import std.mem;
+
+// Elements of `s` before its first 16-byte boundary (at most its length).
+fn head_len<T>(s: &mut [T]) -> usize {
+    let a = mem.slice_ptr(s) as usize;
+    let k = ((16 - a % 16) % 16) / size_of::<T>();
+    return if k < s.len() then k else s.len();
+}
+
+// `s` as a slice aligned to 16 bytes.
+fn align16<T>(s: &mut [T]) -> &mut [T align 16] from s {
+    let parts: [usize; 2] = [mem.slice_ptr(s) as usize, s.len()];
+    let q = &parts as *const [usize; 2] as *const &mut [T align 16];
+    return unsafe("the caller starts s at a 16-byte boundary; the view is s itself, lent while it lives") q.read();
+}
+
+fn copy_f32x4(dst: &mut [f32], src: &[f32]) {
+    let n = src.len();
+    let h = head_len(dst);
+    for i in 0..h {
+        src[i].store_stream(dst, i);
+    }
+    let a = align16(&mut dst[h..n]);
+    let s = &src[h..n];
+    let m = s.len();
+    let mut i: usize = 0;
+    while i + 4 <= m {
+        s.prefetch_read_nta(i + 64);
+        f32x4.load(s, i).store_stream(a, i);
+        i = i + 4;
+    }
+    while i < m {
+        s[i].store_stream(a, i);
+        i = i + 1;
+    }
+}
+
+fn copy_f64x2(dst: &mut [f64], src: &[f64]) {
+    let n = src.len();
+    let h = head_len(dst);
+    for i in 0..h {
+        src[i].store_stream(dst, i);
+    }
+    let a = align16(&mut dst[h..n]);
+    let s = &src[h..n];
+    let m = s.len();
+    let mut i: usize = 0;
+    while i + 2 <= m {
+        s.prefetch_read_l2(i + 16);
+        a.prefetch_write_l2(i + 16);
+        f64x2.load(s, i).store_stream(a, i);
+        i = i + 2;
+    }
+    while i < m {
+        s[i].store_stream(a, i);
+        i = i + 1;
+    }
+}
+
+fn copy_i32x4(dst: &mut [i32], src: &[i32]) {
+    let n = src.len();
+    let h = head_len(dst);
+    for i in 0..h {
+        let p = &mut dst[i] as *mut i32;
+        unsafe("p is dst[i], valid for writes and aligned") {
+            p.write_stream(src[i]);
+        }
+    }
+    let a = align16(&mut dst[h..n]);
+    let s = &src[h..n];
+    let m = s.len();
+    let mut i: usize = 0;
+    while i + 4 <= m {
+        s.prefetch_read_l1(i + 32);
+        i32x4.load(s, i).store_stream(a, i);
+        i = i + 4;
+    }
+    while i < m {
+        let p = &mut a[i] as *mut i32;
+        unsafe("p is a[i], valid for writes and aligned") {
+            p.write_stream(s[i]);
+        }
+        i = i + 1;
+    }
+    unsafe("orders the streaming stores above before the return") {
+        fence_stream();
+    }
+}
+
+fn copy_u8x16(dst: &mut [u8], src: &[u8]) {
+    let n = src.len();
+    let h = head_len(dst);
+    for i in 0..h {
+        src[i].store_stream(dst, i);
+    }
+    let a = align16(&mut dst[h..n]);
+    let s = &src[h..n];
+    let m = s.len();
+    let mut i: usize = 0;
+    while i + 16 <= m {
+        s.prefetch_read_l3(i + 256);
+        a.prefetch_write_nta(i + 256);
+        u8x16.load(s, i).store_stream(a, i);
+        i = i + 16;
+    }
+    while i < m {
+        s[i].store_stream(a, i);
+        i = i + 1;
+    }
+}
+
+pub fn copy_f32_ref(dst: &mut [f32], src: &[f32]) {
+    for i in 0..src.len() {
+        dst[i] = src[i];
+    }
+}
+
+pub fn copy_f64_ref(dst: &mut [f64], src: &[f64]) {
+    for i in 0..src.len() {
+        dst[i] = src[i];
+    }
+}
+
+pub fn copy_i32_ref(dst: &mut [i32], src: &[i32]) {
+    for i in 0..src.len() {
+        dst[i] = src[i];
+    }
+}
+
+pub fn copy_u8_ref(dst: &mut [u8], src: &[u8]) {
+    for i in 0..src.len() {
+        dst[i] = src[i];
+    }
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        if h.kind == 0 {
+            let src = c.f32s(h);
+            let mut got = diff.Buf::<f32>.new(h.len, h.mis, -1.5);
+            let mut want = diff.Buf::<f32>.new(h.len, h.mis, -1.5);
+            copy_f32x4(got.get_mut(), src.get());
+            copy_f32_ref(want.get_mut(), src.get());
+            o.f32s(got.get());
+            o.flag(diff.guards_f32(&got));
+            o.sep();
+            o.f32s(want.get());
+            o.flag(true);
+        } else if h.kind == 1 {
+            let src = c.f64s(h);
+            let mut got = diff.Buf::<f64>.new(h.len, h.mis, -1.5);
+            let mut want = diff.Buf::<f64>.new(h.len, h.mis, -1.5);
+            copy_f64x2(got.get_mut(), src.get());
+            copy_f64_ref(want.get_mut(), src.get());
+            o.f64s(got.get());
+            o.flag(diff.guards_f64(&got));
+            o.sep();
+            o.f64s(want.get());
+            o.flag(true);
+        } else if h.kind == 2 {
+            let src = c.i32s(h);
+            let mut got = diff.Buf::<i32>.new(h.len, h.mis, -7);
+            let mut want = diff.Buf::<i32>.new(h.len, h.mis, -7);
+            copy_i32x4(got.get_mut(), src.get());
+            copy_i32_ref(want.get_mut(), src.get());
+            o.i32s(got.get());
+            o.flag(diff.guards_i32(&got));
+            o.sep();
+            o.i32s(want.get());
+            o.flag(true);
+        } else {
+            let src = c.u8s(h);
+            let mut got = diff.Buf::<u8>.new(h.len, h.mis, 0x5a);
+            let mut want = diff.Buf::<u8>.new(h.len, h.mis, 0x5a);
+            copy_u8x16(got.get_mut(), src.get());
+            copy_u8_ref(want.get_mut(), src.get());
+            o.u8s(got.get());
+            o.flag(diff.guards_u8(&got));
+            o.sep();
+            o.u8s(want.get());
+            o.flag(true);
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

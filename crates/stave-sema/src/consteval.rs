@@ -882,6 +882,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         if icx.is(pa, Term::Ident)
             && let Some(u) = icx.uses(prim).first()
             && let Res::Builtin(b) = u.res
+            && b != Builtin::FenceStream
         {
             let pk = icx.kids_vec(prim);
             let ga = pk.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::GenericArgs))?;

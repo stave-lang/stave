@@ -1836,29 +1836,29 @@ sve = { class = "N", recipe = "prfm pstl1strm" }
 [[op]]
 op = "vec.store_stream"
 ty = ["any"]
-neon = { class = "N", recipe = "dup; stnp" }
-sve = { class = "N", recipe = "stnt1*" }
+neon = { class = "N", recipe = "str q", note = "a plain store: AArch64 code uses no non-temporal store" }
+sve = { class = "N", recipe = "st1*", note = "a plain store: AArch64 code uses no non-temporal store" }
 
 [[op]]
 op = "mem.store_stream"
 ty = ["any32", "any64"]
-neon = { class = "N", recipe = "str", note = "no single-register non-temporal store: a plain store" }
-sve = { class = "N", recipe = "str", note = "no single-register non-temporal store: a plain store" }
+neon = { class = "N", recipe = "str", note = "a plain store: AArch64 code uses no non-temporal store" }
+sve = { class = "N", recipe = "str", note = "a plain store: AArch64 code uses no non-temporal store" }
 
 [[op]]
 op = "mem.store_stream"
 ty = ["any16"]
-neon = { class = "N", recipe = "strh", note = "no single-register non-temporal store: a plain store" }
-sve = { class = "N", recipe = "strh", note = "no single-register non-temporal store: a plain store" }
+neon = { class = "N", recipe = "strh", note = "a plain store: AArch64 code uses no non-temporal store" }
+sve = { class = "N", recipe = "strh", note = "a plain store: AArch64 code uses no non-temporal store" }
 
 [[op]]
 op = "mem.store_stream"
 ty = ["any8"]
-neon = { class = "N", recipe = "strb", note = "no single-register non-temporal store: a plain store" }
-sve = { class = "N", recipe = "strb", note = "no single-register non-temporal store: a plain store" }
+neon = { class = "N", recipe = "strb", note = "a plain store: AArch64 code uses no non-temporal store" }
+sve = { class = "N", recipe = "strb", note = "a plain store: AArch64 code uses no non-temporal store" }
 
 [[op]]
 op = "mem.fence_stream"
 ty = ["any"]
-neon = { class = "N", recipe = "none", note = "stnp and stnt1 follow normal store ordering", unverified = true }
-sve = { class = "N", recipe = "none", note = "stnp and stnt1 follow normal store ordering", unverified = true }
+neon = { class = "N", recipe = "none", note = "streaming stores are plain stores" }
+sve = { class = "N", recipe = "none", note = "streaming stores are plain stores" }

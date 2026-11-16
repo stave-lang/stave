@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+// E0803: `p.write_stream(v)` and `fence_stream()` are unsafe operations; the prefetch hints and
+// `store_stream` are safe.
+fn f(p: *mut u32, q: *const u32, s: &mut [u32]) {
+    p.write_stream(1); //~ ERROR E0803
+    fence_stream(); //~ ERROR E0803
+    p.prefetch_write_l1();
+    q.prefetch_read_nta();
+    s.prefetch_read_l2(s.len() + 1);
+    let x: u32 = 2;
+    x.store_stream(s, 0);
+    unsafe("p is valid for writes and aligned") {
+        p.write_stream(3);
+        fence_stream();
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

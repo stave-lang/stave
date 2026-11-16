@@ -2949,8 +2949,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f16", "bf16", "f32", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 2, recipe: "dup; stnp", recipes: &["dup; stnp", "dup; stnp", "dup; stnp", "dup; stnp", "dup; stnp", "dup; stnp", "dup; stnp", "dup; stnp", "dup; stnp", "dup; stnp", "dup; stnp", "dup; stnp"], note: "", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "stnt1*", recipes: &["stnt1b", "stnt1h", "stnt1w", "stnt1d", "stnt1b", "stnt1h", "stnt1w", "stnt1d", "stnt1h", "stnt1h", "stnt1w", "stnt1d"], note: "", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "str q", recipes: &["str q", "str q", "str q", "str q", "str q", "str q", "str q", "str q", "str q", "str q", "str q", "str q"], note: "a plain store: AArch64 code uses no non-temporal store", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "st1*", recipes: &["st1b", "st1h", "st1w", "st1d", "st1b", "st1h", "st1w", "st1d", "st1h", "st1h", "st1w", "st1d"], note: "a plain store: AArch64 code uses no non-temporal store", unverified: false },
         ],
     },
     Entry {
@@ -2959,8 +2959,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i32", "u32", "f32", "i64", "u64", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "str", recipes: &["str", "str", "str", "str", "str", "str"], note: "no single-register non-temporal store: a plain store", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "str", recipes: &["str", "str", "str", "str", "str", "str"], note: "no single-register non-temporal store: a plain store", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "str", recipes: &["str", "str", "str", "str", "str", "str"], note: "a plain store: AArch64 code uses no non-temporal store", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "str", recipes: &["str", "str", "str", "str", "str", "str"], note: "a plain store: AArch64 code uses no non-temporal store", unverified: false },
         ],
     },
     Entry {
@@ -2969,8 +2969,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i16", "u16", "f16", "bf16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "strh", recipes: &["strh", "strh", "strh", "strh"], note: "no single-register non-temporal store: a plain store", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "strh", recipes: &["strh", "strh", "strh", "strh"], note: "no single-register non-temporal store: a plain store", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "strh", recipes: &["strh", "strh", "strh", "strh"], note: "a plain store: AArch64 code uses no non-temporal store", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "strh", recipes: &["strh", "strh", "strh", "strh"], note: "a plain store: AArch64 code uses no non-temporal store", unverified: false },
         ],
     },
     Entry {
@@ -2979,8 +2979,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "u8"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "strb", recipes: &["strb", "strb"], note: "no single-register non-temporal store: a plain store", unverified: false },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "strb", recipes: &["strb", "strb"], note: "no single-register non-temporal store: a plain store", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 1, recipe: "strb", recipes: &["strb", "strb"], note: "a plain store: AArch64 code uses no non-temporal store", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "strb", recipes: &["strb", "strb"], note: "a plain store: AArch64 code uses no non-temporal store", unverified: false },
         ],
     },
     Entry {
@@ -2989,8 +2989,8 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f16", "bf16", "f32", "f64"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"], note: "stnp and stnt1 follow normal store ordering", unverified: true },
-            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"], note: "stnp and stnt1 follow normal store ordering", unverified: true },
+            Cell { tier: Tier::Neon, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"], note: "streaming stores are plain stores", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 0, recipe: "none", recipes: &["none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"], note: "streaming stores are plain stores", unverified: false },
         ],
     },
 ];
