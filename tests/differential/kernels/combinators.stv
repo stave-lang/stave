@@ -1,7 +1,8 @@
 // The std.slice methods against element-by-element definitions. Float `sum` is the 16-lane
 // (f32) / 8-lane (f64) tree: element i into lane i % L, then the reduction tree. Float `min` /
 // `max` propagate NaN and order -0.0 below +0.0. Int sums run on values small enough never to
-// overflow (the trapping cases are conformance tests). `eq` compares element bits.
+// overflow (the trapping cases are conformance tests). `eq` is element-wise `==`: on ints the
+// same bits, on floats a NaN is never equal and -0.0 equals +0.0.
 import diff;
 import std.mem;
 
@@ -36,6 +37,23 @@ fn max_f64(a: f64, b: f64) -> f64 {
     if a != a || b != b { return nan64(); }
     if a == b { return mem.f64_from_bits(mem.f64_bits(a) & mem.f64_bits(b)); }
     return if a > b then a else b;
+}
+
+// Element-wise `==` over equal lengths.
+fn eq_f32(a: &[f32], b: &[f32]) -> bool {
+    if a.len() != b.len() { return false; }
+    for i in 0..a.len() {
+        if !(a[i] == b[i]) { return false; }
+    }
+    return true;
+}
+
+fn eq_f64(a: &[f64], b: &[f64]) -> bool {
+    if a.len() != b.len() { return false; }
+    for i in 0..a.len() {
+        if !(a[i] == b[i]) { return false; }
+    }
+    return true;
 }
 
 fn opt_f32(o: &mut diff.Out, x: Option<f32>) {
@@ -124,8 +142,8 @@ fn case_f32(c: &mut diff.Cases, o: &mut diff.Out, h: diff.Head) {
     o.u(cnt);
     o.flag(cnt > 0);
     o.flag(cnt == n as u64);
-    o.flag(true);
-    o.flag(n == 0);
+    o.flag(eq_f32(xs, xs));
+    o.flag(eq_f32(xs, cp.get()));
     let mut want = diff.Buf::<f32>.new(h.len, h.mis, nan32());
     {
         let w = want.get_mut();
@@ -174,7 +192,7 @@ fn case_f64(c: &mut diff.Cases, o: &mut diff.Out, h: diff.Head) {
         if xs[i] == p && at == n { at = i; }
     }
     opt_usize(o, if at < n then Option.Some(at) else Option.None);
-    o.flag(true);
+    o.flag(eq_f64(xs, cp.get()));
     o.f64s(xs);
     let mut want = diff.Buf::<f64>.new(h.len, h.mis, nan64());
     {

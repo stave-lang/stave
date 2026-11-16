@@ -6,11 +6,12 @@
 //   min() max()      Option (None when empty); floats as the vector `min`/`max`: NaN propagates,
 //                    -0.0 < +0.0
 //   find(x)          first index i with xs[i] == x (floats: NaN is never found, -0.0 == +0.0)
-//   eq(ys)           same length and the same element bits (memcmp: for floats NaN equals a NaN
-//                    of the same bits, -0.0 differs from +0.0)
+//   eq(ys)           same length and xs[i] == ys[i] for every i (ints, bool: the same bits;
+//                    floats: `==`, so a NaN element makes it false and -0.0 equals +0.0)
 //   fill(x)          every element = x
 //   [u8] find_byte(b), find_any_byte(set): first index of b / of any byte of set
-//   any T: Copy      count(pred), any(pred), all(pred) (pred: fn(T) -> bool), copy_from(src)
+//   any T: Copy      count(pred), any(pred), all(pred) (pred: fn(T) -> bool; it may be called
+//                    on any elements, in any order, any number of times), copy_from(src)
 //                    (lengths must match: `Assert` panic otherwise)
 //
 // One implementation per method, written in 128-bit vectors (the portable baseline of every CPU
@@ -24,9 +25,8 @@
 //   `reduce_add` tree: lane j with lane j + L/2, halving until one lane is left. Empty: +0.0.
 // - min, max and the searches do not depend on the order.
 // Branchless per element: sum, min, max, count, fill, copy_from (their loops branch only on the
-// loop test, never on element data; `count` calls pred once per element, in order). The
-// searches (find, find_byte, find_any_byte, eq, any, all) test once per vector or per 16
-// elements and return early: any/all may call pred on up to 15 elements past the deciding one.
+// loop test, never on element data). The searches (find, find_byte, find_any_byte, eq, any,
+// all) test once per vector or per block of 16 elements and may return after that test.
 
 import std.debug;
 import std.mem;
@@ -641,7 +641,15 @@ impl [f32] {
     }
 
     pub fn eq(&self, other: &[f32]) -> bool {
-        return bytes_eq(cast::<f32, u8>(self), cast::<f32, u8>(other));
+        if self.len() != other.len() { return false; }
+        let n = self.len();
+        let mut i: usize = 0;
+        while i + 4 <= n {
+            if (f32x4.load(self, i) != f32x4.load(other, i)).to_bits() != 0 { return false; }
+            i = i + 4;
+        }
+        let m = mask32x4.first_n(n - i);
+        return ((f32x4.load_masked(self, i, m) != f32x4.load_masked(other, i, m)) & m).to_bits() == 0;
     }
 
     pub fn fill(&mut self, x: f32) {
@@ -703,7 +711,15 @@ impl [f64] {
     }
 
     pub fn eq(&self, other: &[f64]) -> bool {
-        return bytes_eq(cast::<f64, u8>(self), cast::<f64, u8>(other));
+        if self.len() != other.len() { return false; }
+        let n = self.len();
+        let mut i: usize = 0;
+        while i + 2 <= n {
+            if (f64x2.load(self, i) != f64x2.load(other, i)).to_bits() != 0 { return false; }
+            i = i + 2;
+        }
+        let m = mask64x2.first_n(n - i);
+        return ((f64x2.load_masked(self, i, m) != f64x2.load_masked(other, i, m)) & m).to_bits() == 0;
     }
 
     pub fn fill(&mut self, x: f64) {
@@ -726,6 +742,9 @@ impl [bool] {
     }
 }
 
+// The predicate of count, any, and all may be called on any elements of the slice, in any order,
+// any number of times: a predicate that can trap may trap even where a sequential loop would have
+// stopped earlier.
 impl<T: Copy> [T] {
     pub fn count(&self, pred: fn(T) -> bool) -> usize {
         let mut n: usize = 0;
