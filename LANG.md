@@ -143,7 +143,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 
 **Ops** (method form unless shown):
 - arithmetic: `sqrt abs copysign(s) floor ceil round trunc fma(b, c) min max min_num max_num min_x86 max_x86` (floats; `round` ties to even), `abs_wrap div_lanes(b) div_const::<K>()` (ints), `min max` (both)
-  - `min`/`max` propagate NaN. `min_num`/`max_num` treat NaN as missing. `min_x86` uses x86 semantics.
+  - `min`/`max` propagate NaN. `min_num`/`max_num` treat NaN as missing. `min_x86`/`max_x86` use x86 semantics (`a < b ? a : b`, `a > b ? a : b`); a NaN result has unspecified quiet bit and payload.
 - bitwise: `& | ^ ~ andnot(b)` (`a & ~b`), shifts `<< >> <<%` by a vector or a literal (`v << 3`: a lane value)
 - lane counting: `popcount clz`
 - compare `a < b` → mask. Masks: `& | ^ ~`, `m.select(a, b)` (a where set), `m.to_bits()` → smallest uint, `m.to_vec::<i32>()`, `m.rewiden::<16>()`; constructors `maskWxN.first_n(k)`, `maskWxN.all()`, `maskWxN.none()`. A mask of another lane width or count than the vector = E0605

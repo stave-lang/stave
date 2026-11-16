@@ -219,7 +219,8 @@ Lowering notes the backend MUST respect:
 - **compress on v4:** compress to a register, then a masked store. Never use the memory form,
   which is microcoded on Zen 4.
 - **min/max on x86:** `min`/`min_num` use the fixed sequence. `minps` semantics are only
-  available as `min_x86`.
+  available as `min_x86`, whose NaN result has an unspecified quiet bit and payload, so x86 emits
+  the bare instruction and other targets need no payload-exact sequence.
 - **fixed reduce tree on neon:** pairwise `faddp` needs extra shuffles to match the tree, so the
   op is class M.
 - **x86 VEX/EVEX transitions:** VZEROUPPER is inserted before calls and returns out of 256/512-bit

@@ -101,7 +101,7 @@ ops take the lane semantics of the scalar op; V = the vector result type, M = `m
 |---|---|---|
 | `vec.splat` | `x` | every lane `x` |
 | `vec.add sub mul div neg abs copysign sqrt floor ceil round trunc fma` | lanes | float lanes, IEEE (`round` ties to even, `fma` one rounding) |
-| `vec.min max min_num max_num min_x86 max_x86` | `a b` | IEEE minimum / maximum, minimumNumber / maximumNumber, `a < b ? a : b`; int `min max` by value |
+| `vec.min max min_num max_num min_x86 max_x86` | `a b` | IEEE minimum / maximum, minimumNumber / maximumNumber, `a < b ? a : b` (a NaN result is some NaN: quiet bit and payload unspecified); int `min max` by value |
 | `vec.add.wrap sub.wrap mul.wrap add.sat sub.sat mul.sat checked_add checked_sub checked_mul` | `a b` | int lanes; `checked_*` yield `Option<V>` |
 | `vec.div_lanes` † `vec.div_const` † | `a b` / `a K` | int division per lane (traps as scalar `div`) |
 | `vec.and or xor andnot not abs_wrap popcount clz` | lanes | int lanes; `andnot` = `a & ~b` |
