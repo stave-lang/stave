@@ -118,7 +118,7 @@ impl Stage {
     }
 
     /// Whether the diagnostics of this stage are complete in stage0: the codes of every stage
-    /// through `borrowck`. `lower` implements no lowering-class gate (E0700, E0701) yet.
+    /// through `borrowck`.
     pub fn reports_all_codes(self) -> bool {
         self <= Stage::Borrowck
     }
@@ -134,9 +134,9 @@ impl Stage {
     /// | items | E0016 |
     /// | parse | E0004 E0011–E0014 E0019–E0023 E0025–E0028 |
     /// | resolve | E0101–E0107 |
-    /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0702–E0717, E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck); the signature's `from` clause E0520 E0521; E0503 case `static` (writes to a `static`) |
+    /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0700–E0717 (the lowering-class gates E0700 E0701 included), E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck); the signature's `from` clause E0520 E0521; E0503 case `static` (writes to a `static`) |
     /// | borrowck | E05xx except E0520 E0521 (accesses, loans, returned origins) |
-    /// | lower | E0108 (no `fn main`, builds only, reported before lowering), E0700 E0701 (lowering-class gates, not implemented) |
+    /// | lower | E0108 (no `fn main`, builds only, reported before lowering) |
     /// | (none) | retired codes: E0511 |
     pub fn of_code(code: &str) -> Option<Stage> {
         match code {
@@ -167,7 +167,6 @@ impl Stage {
         match n {
             101..=199 => Some(Stage::Resolve),
             501..=599 => Some(Stage::Borrowck),
-            700 | 701 => Some(Stage::Lower),
             200..=999 => Some(Stage::Typeck),
             _ => None,
         }
@@ -592,7 +591,8 @@ mod tests {
         for c in ["E0520", "E0521"] {
             assert_eq!(of(c), Some(Stage::Typeck), "{c}");
         }
-        assert_eq!(of("E0700"), Some(Stage::Lower));
+        assert_eq!(of("E0700"), Some(Stage::Typeck));
+        assert_eq!(of("E0701"), Some(Stage::Typeck));
         assert_eq!(of("E0902"), Some(Stage::Typeck));
         assert_eq!(of("E0005"), Some(Stage::Typeck));
         assert_eq!(of("E0300"), Some(Stage::Typeck));

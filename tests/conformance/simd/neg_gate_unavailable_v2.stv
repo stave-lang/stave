@@ -1,0 +1,27 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0700: an op of class U on the target, outside `emulate { }`. On v2: `fma`, gather, scatter,
+// `div_lanes`; a gather or scatter with 8- or 16-bit indices on every target.
+fn f(a: f32x4, s: &[u32], d: &mut [u32], k: u32x4, j: u16x4) -> u32x4 {
+    let x = a.fma(a, a); //~ ERROR E0700
+    let g = u32x4.gather(s, k); //~ ERROR E0700
+    g.scatter(d, k); //~ ERROR E0700
+    let q = k.div_lanes(k); //~ ERROR E0700
+    let h = u32x4.gather(s, j); //~ ERROR E0700
+    let c = fn(v: f32x4) -> f32x4 { return v.fma(v, v); }; //~ ERROR E0700
+    emulate {
+        let y = a.fma(a, a);
+        k.scatter(d, k);
+        let e = fn(v: f32x4) -> f32x4 { return v.fma(v, v); };
+    }
+    return q +% h;
+}
+
+// A fn with `needs(...)` is not gated: its features decide.
+fn fused(a: f32x4) -> f32x4 needs(fma) {
+    return a.fma(a, a);
+}
+
+fn main() -> i32 {
+    return 0;
+}

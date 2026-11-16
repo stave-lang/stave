@@ -13,7 +13,10 @@ fn main() -> i32 {
     let x = f32x4.splat(1.000244140625);
     let c = f32x4.splat(1.00048828125);
     let twice = (x * x - c).reduce_add();
-    let fused = x.fma(x, f32x4.splat(0.0) - c).reduce_add();
+    let mut fused: f32 = 0.0;
+    emulate {
+        fused = x.fma(x, f32x4.splat(0.0) - c).reduce_add();
+    }
     io.print(f"mul then sub: {twice}\nfma: {fused}\n");
     // NaN: compares are unordered, `min` propagates it, `min_num` skips it
     let z = f32x4.splat(0.0);

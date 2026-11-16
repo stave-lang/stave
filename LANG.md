@@ -131,7 +131,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 
 ## 4. SIMD
 
-**Status.** Stage0 checks vector code and lowers it to checked IR (fixed lane counts; the IR interpreter runs it). Vector machine code: x86-64 (`x86_64-linux`: vectors up to 128 bits, SSE4.2; `x86_64-linux-v3`: up to 256 bits, AVX2) and `aarch64-linux` (Advanced SIMD, up to 128 bits); no f16/bf16 lanes. Planned (not enforced yet): E0700 E0701 E0702 E0703 E0705 E0706 E0709 E0710-E0717, `emulate`/`strict`, sizeless vectors past type checking. E0601-E0604, E0607, E0704, E0707 are checked in part.
+**Status.** Stage0 checks vector code and lowers it to checked IR (fixed lane counts; the IR interpreter runs it). Vector machine code: x86-64 (`x86_64-linux`: vectors up to 128 bits, SSE4.2; `x86_64-linux-v3`: up to 256 bits, AVX2) and `aarch64-linux` (Advanced SIMD, up to 128 bits); no f16/bf16 lanes. Planned (not enforced yet): E0703 E0705 E0706 E0709 E0710-E0717, E0700/E0701 on `gpu-sm86`, sizeless vectors past type checking. E0601-E0604, E0607, E0704, E0707 are checked in part.
 
 **Types.** `TxN`: T ∈ `i8..i64 u8..u64 f32 f64 f16 bf16`, N a power of two from 2 to 64. Total width ≤ target register: 128 bits everywhere (portable), 256 needs `avx2`, 512 needs `avx512f`. Too wide = E0702. Masks `maskWxN` are typed by lane **width** and count: `i32x8`, `u32x8` and `f32x8` compares all give `mask32x8`. Generic spelling `vec<T, N>` / `mask<W, N>` only when an argument is generic.
 
@@ -180,7 +180,7 @@ dispatch fn sum(xs: &[f32]) -> f32 { avx512f => sum_v4, avx2 => sum_v3, sve => s
 - Each arm target has the dispatch's signature, with needs = dispatch needs + the arm's features (else E0705). The `_` target needs ⊆ dispatch needs (E0706).
 - Arms of another arch are dropped. A `cuda` arm picks a GPU path when a usable NVIDIA device exists (planned, §7).
 
-**Lowering gates.** Some ops are unavailable on some targets: `fma` on v2, gather on v2/neon, scatter below v4, `div_lanes` outside sve, `load_first_fault` outside sve, f16↔f32 without `f16c`. Using one is E0700, unless it is inside `emulate { }` (scalar loop, the only opt-in). `strict { }` rejects multi-instruction ops too (E0701). `stave lowering --target T [--op OP]` prints the per-target table.
+**Lowering gates.** Some ops are unavailable (class U) on some targets: `fma` on v2, gather on v2/neon, scatter below v4, `div_lanes` outside sve, `load_first_fault` outside sve, f16↔f32 without `f16c`, gather/scatter with 8- or 16-bit data or index lanes everywhere. Using one is E0700, unless it is inside `emulate { }` (scalar loop, the only opt-in; each one is listed as an `emulated:` line of the build summary). `strict { }` also rejects multi-instruction ops and ops the table does not list (E0701). Both blocks are lexical (a closure inside counts) and check the `--target` baseline; fns with `needs(..)` are not gated, nor is `gpu-sm86` (E0702 only, at 128 bits). `stave lowering --target T [--op OP]` prints the per-target table.
 
 **Sizeless (SVE).** `f32xn`, `mask32xn`: lane count fixed per run, legal only under `needs(sve)` (E0710). Allowed only in locals, params, and returns: not fields, array elements, globals, closure captures, or sized generic args (E0711–E0716). Loops need no tail clause. Float `reduce_add` on them = E0717: use `acc = v.reduce_add_ordered(acc);`.
 

@@ -965,7 +965,7 @@ fix = { description = "write `{concrete}`", edits = [{ at = "primary", replaceme
 code = "E0700"
 severity = "error"
 area = "features"
-rule = "operation unavailable (class U) on the target, outside `emulate { }` (planned)"
+rule = "operation unavailable (class U) on the target, outside `emulate { }`"
 holes = { op = "name", type = "type", target = "text-literal" }
 choices = { target = ["x86_64-linux", "x86_64-linux-v2", "x86_64-linux-v3", "x86_64-linux-v4", "aarch64-linux", "aarch64-linux+sve", "aarch64-linux+sve2", "gpu-sm86"] }
 message = "`{op}` on `{type}` is not available on target `{target}`"
@@ -976,7 +976,7 @@ fix = { description = "wrap the code in `emulate {{ ... }}`, or move it to a fun
 code = "E0701"
 severity = "error"
 area = "features"
-rule = "class M or U operation inside `strict { }` (planned)"
+rule = "class M or U operation inside `strict { }`"
 holes = { op = "name", type = "type", class = "text-literal" }
 choices = { class = ["M", "U"] }
 message = "`{op}` on `{type}` is class {class} on this target, not allowed in `strict`"
@@ -987,7 +987,7 @@ fix = { description = "move `{op}` out of the `strict` block, or use an operatio
 code = "E0702"
 severity = "error"
 area = "features"
-rule = "vector type wider than the target's register (planned)"
+rule = "vector type wider than the target's register"
 holes = { type = "type", bits = "int", max = "int" }
 message = "`{type}` is {bits} bits wide, the target's vector registers have {max}"
 labels = [{ at = "primary", text = "too wide for this target" }]

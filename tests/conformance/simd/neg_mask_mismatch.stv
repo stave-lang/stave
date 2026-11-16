@@ -4,7 +4,7 @@ fn f(a: f32x4, b: i16x8, s: &[f32]) -> f32x4 {
     let m = b < b;
     let x = m.select(a, a); //~ ERROR E0605
     let y = f32x4.load_masked(s, 0, m); //~ ERROR E0605
-    let w = m.rewiden::<32>();
+    let w = m.rewiden::<8>();
     return a.compress(w); //~ ERROR E0605
 }
 

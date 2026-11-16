@@ -171,7 +171,9 @@ Common flags come after the subcommand (`stave build --release`, not `stave --re
   `fallbacks` where a stage has them ([cli-stage1.md](cli-stage1.md)). With `--diagnostics json` they appear as a
   `{"kind":"timings",...}` line.
 - Scalar emulation of `unavailable` operations has no flag. The only opt-in is an `emulate { }`
-  block in the source, and every such block is listed in the build summary.
+  block in the source, and every class U operation inside one is listed in the build summary:
+  one line `emulated: <file>:<line>:<col>: <op> on <type> (<target>)` each, on stderr before the
+  summary line, in source order.
 - `--cache DIR`: incremental cache location. Default: `PKG_DIR/.stave-cache`. Planned: stage0 has
   no cache and refuses the flag as not implemented (exit 2).
 

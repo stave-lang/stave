@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v3
+// E0702 on v3: 256-bit vectors are legal without `needs`, 512-bit ones are not.
+fn f(a: f32x8, b: u8x32) -> f32x8 {
+    let x: f32x16 = f32x16.splat(0.0); //~ ERROR E0702
+    //~^ ERROR E0702
+    let m: mask32x8 = a < a;
+    return a;
+}
+
+fn main() -> i32 {
+    return 0;
+}

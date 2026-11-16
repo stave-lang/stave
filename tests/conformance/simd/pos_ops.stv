@@ -1,10 +1,15 @@
 //~ CHECK-ONLY
-// The portable vector and mask operations type-check with their result types.
+// The portable vector and mask operations type-check with their result types. Ops unavailable
+// on some target (fma, div_lanes, gather, scatter) are inside `emulate { }`.
 fn floats(a: f32x4, b: f32x4, s: &[f32], d: &mut [f32]) -> f32 {
     let c = (a + b) * (a - b) / b;
     let n = -c;
     let r = n.sqrt().abs().copysign(a).floor().ceil().round().trunc();
-    let m = r.fma(a, b).min(a).max(b).min_num(a).max_num(b).min_x86(a).max_x86(b);
+    let mut fm = r;
+    emulate {
+        fm = r.fma(a, b);
+    }
+    let m = fm.min(a).max(b).min_num(a).max_num(b).min_x86(a).max_x86(b);
     let lt = m < a;
     let sel = lt.select(m, a);
     let w: f64x2 = sel.widen_lo();
@@ -30,10 +35,16 @@ fn ints(a: u8x16, b: u8x16, k: u32x4, s: &[u32], d: &mut [u32]) -> u32 {
     let p = z.popcount().clz().lookup(a);
     let q: u16x8 = p.widen_hi();
     let r: u8x16 = q.narrow_wrap(q);
-    let t = k.div_const::<7>().div_lanes(k).min(k).max(k);
+    let mut dv = k.div_const::<7>();
+    emulate {
+        dv = dv.div_lanes(k);
+    }
+    let t = dv.min(k).max(k);
     let c: Option<u32x4> = t.checked_add(k);
-    let g = u32x4.gather(s, k);
-    g.scatter(d, k);
+    emulate {
+        let g = u32x4.gather(s, k);
+        g.scatter(d, k);
+    }
     let m = mask32x4.all() & ~mask32x4.none() ^ (t == k);
     let v: i32x4 = m.to_vec::<i32>().abs_wrap();
     let e = (m.rewiden::<8>() | mask8x4.first_n(2)).to_bits();
@@ -45,10 +56,13 @@ fn ints(a: u8x16, b: u8x16, k: u32x4, s: &[u32], d: &mut [u32]) -> u32 {
 
 // A gather / scatter index is any unsigned vector of the same lane count.
 fn mixed(s: &[f64], e: &mut [f64], i: u32x2, k: u64x2, b: &[u8], d: &mut [u8], j: u16x8) -> f64 {
-    let g = f64x2.gather(s, i) + f64x2.gather(s, k);
-    let h = u8x8.gather(b, j);
-    h.scatter(d, j);
-    g.scatter(e, i);
+    let mut g = f64x2.splat(0.0);
+    emulate {
+        g = f64x2.gather(s, i) + f64x2.gather(s, k);
+        let h = u8x8.gather(b, j);
+        h.scatter(d, j);
+        g.scatter(e, i);
+    }
     return g.reduce_add();
 }
 

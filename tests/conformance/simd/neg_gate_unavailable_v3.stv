@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v3
+// E0700 on v3: scatter (below v4), `div_lanes` (every x86 tier), 16-bit gather indices; `fma`
+// and 32-bit gathers are native.
+fn f(a: f32x8, s: &[u32], d: &mut [u32], k: u32x8, j: u16x8) -> u32x8 {
+    let x = a.fma(a, a);
+    let g = u32x8.gather(s, k);
+    g.scatter(d, k); //~ ERROR E0700
+    let q = k.div_lanes(k); //~ ERROR E0700
+    let h = u32x8.gather(s, j); //~ ERROR E0700
+    return q +% h +% g;
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,30 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+//~ TARGET aarch64-linux
+// E0702: a vector or mask wider than the target's vector registers (128 bits here), where the
+// type is written or a built-in returns a value wider than its receiver.
+struct S {
+    v: f32x8, //~ ERROR E0702
+}
+
+fn g(v: u8x32) { //~ ERROR E0702
+}
+
+fn f(a: f32x4, m: mask8x16) -> f32x4 {
+    let x: i64x4 = i64x4.splat(1); //~ ERROR E0702
+    //~^ ERROR E0702
+    let y = f32x8.splat(1.0); //~ ERROR E0702
+    let k = mask64x4.all(); //~ ERROR E0702
+    let w = m.rewiden::<16>(); //~ ERROR E0702
+    return a;
+}
+
+// A fn with `needs(...)` is not gated.
+fn wide(v: u8x32) -> u8x32 needs(avx2) {
+    let w: u8x32 = u8x32.splat(1);
+    return v +% w;
+}
+
+fn main() -> i32 {
+    return 0;
+}

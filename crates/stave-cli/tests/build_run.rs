@@ -541,6 +541,34 @@ fn vector_program_builds() {
     }
 }
 
+/// Every class U op inside `emulate { }` gets an `emulated:` line before the summary line; a U op
+/// outside one is E0700.
+#[test]
+fn emulated_ops_are_listed() {
+    let d = tmp("emulate");
+    let f = d.join("emu.stv");
+    std::fs::write(
+        &f,
+        "fn f(a: f32x4) -> f32x4 {\n    let mut r = a;\n    emulate {\n        r = a.fma(a, a);\n    }\n    return r;\n}\n\
+         fn main() -> i32 {\n    return 0;\n}\n",
+    )
+    .unwrap();
+    let p = f.display().to_string();
+    let (c, _, err) = stave_in(&d, &["check", &p, "--target", "x86_64-linux-v2"]);
+    assert_eq!(c, 0, "{err}");
+    let line = err.lines().find(|l| l.starts_with("emulated: ")).unwrap_or_else(|| panic!("{err}"));
+    assert!(line.ends_with("emu.stv:4:15: vec.fma on f32x4 (x86_64-linux-v2)"), "{line}");
+    let last = err.lines().last().unwrap();
+    assert!(!last.starts_with("emulated: "), "{err}");
+    let (c, _, err) = stave_in(&d, &["check", &p, "--target", "x86_64-linux-v3"]);
+    assert_eq!(c, 0, "{err}");
+    assert!(!err.contains("emulated: "), "{err}");
+    std::fs::write(&f, "fn f(a: f32x4) -> f32x4 {\n    return a.fma(a, a);\n}\n").unwrap();
+    let (c, _, err) = stave_in(&d, &["check", &p, "--target", "x86_64-linux-v2"]);
+    assert_eq!(c, 1, "{err}");
+    assert!(err.contains("E0700"), "{err}");
+}
+
 /// Syntax that parses but has no semantics yet (parameter `from`, contracts) is
 /// "not implemented yet" for `stave check` and `stave build` (exit 2, naming the construct and
 /// its place); an error in the same program is reported instead (exit 1).

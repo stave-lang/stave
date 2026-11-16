@@ -380,6 +380,13 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
         print_timings(&output, total_ms, a.diagnostics, err);
     }
     if !runs_shebang_script(a, &path) {
+        for e in output.typeck.iter().flat_map(|t| t.emulated()) {
+            let at = match output.files().locate(e.span) {
+                Ok(l) => format!("{}:{}:{}", l.path, l.line, l.col),
+                Err(_) => "?".to_string(),
+            };
+            let _ = writeln!(err, "emulated: {at}: {} on {} ({triple})", e.op, e.ty);
+        }
         let _ = writeln!(err, "{}", select::summary_line(selection, total_ms as u64));
     }
     release(output);
