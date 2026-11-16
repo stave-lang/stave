@@ -1,0 +1,38 @@
+// prefix: wrapping u32 inclusive prefix sums of N elements into a second slice, REPS times;
+// before each pass one element grows by 1. Prints the FNV-1a hash of every pass's last sum and
+// one other sum. Same steps as main.c.
+import lanes;
+import std.io;
+import std.vec;
+
+const N: usize = 32768;
+const REPS: usize = 20000;
+
+fn next(s: &mut u64) -> u64 {
+    *s = *s *% 6364136223846793005 +% 1442695040888963407;
+    return *s;
+}
+
+fn mix(h: u64, x: u64) -> u64 {
+    return (h ^ x) *% 1099511628211;
+}
+
+fn main() -> i32 {
+    let mut s: u64 = 6;
+    let mut v = vec.Vec::<u32>.with_capacity(N);
+    let mut w = vec.Vec::<u32>.with_capacity(N);
+    for i in 0..N {
+        v.push((next(&mut s) >> 32) as% u32);
+        w.push(0);
+    }
+    let xs = v.as_mut_slice();
+    let ys = w.as_mut_slice();
+    let mut h: u64 = 14695981039346656037;
+    for r in 0..REPS {
+        xs[r % N] = xs[r % N] +% 1;
+        lanes.prefix(xs, ys);
+        h = mix(mix(h, ys[N - 1] as u64), ys[(r * 31) % N] as u64);
+    }
+    io.print(f"{h}\n");
+    return 0;
+}

@@ -1,0 +1,143 @@
+// Sums over slices: the fixed lane tree of `reduce_add`, the sequential `reduce_add_ordered`, and
+// wrapping integer sums. Each scalar reference adds in the vector kernel's order: element i goes
+// to accumulator lane i % N, and a masked tail adds +0.0 to each inactive lane.
+import diff;
+
+fn sum_tree_f32x4(xs: &[f32]) -> f32 {
+    let mut acc = f32x4.splat(0.0);
+    for v: f32x4 in xs {
+        acc = acc + v;
+    } tail masked (v, m) {
+        acc = acc + v;
+    }
+    return acc.reduce_add();
+}
+
+fn sum_ordered_f32x4(xs: &[f32]) -> f32 {
+    let mut acc: f32 = 0.0;
+    for v: f32x4 in xs {
+        acc = v.reduce_add_ordered(acc);
+    } tail masked (v, m) {
+        acc = v.reduce_add_ordered(acc);
+    }
+    return acc;
+}
+
+fn sum_tree_f64x2(xs: &[f64]) -> f64 {
+    let mut acc = f64x2.splat(0.0);
+    for v: f64x2 in xs {
+        acc = acc + v;
+    } tail masked (v, m) {
+        acc = acc + m.select(v, f64x2.splat(0.0));
+    }
+    return acc.reduce_add();
+}
+
+fn sum_wrap_i32x4(xs: &[i32]) -> i32 {
+    let mut acc = i32x4.splat(0);
+    let mut rest: i32 = 0;
+    for v: i32x4 in xs {
+        acc = acc +% v;
+    } tail scalar (x) {
+        rest = rest +% x;
+    }
+    return acc.reduce_add_wrap() +% rest;
+}
+
+// Bytes widened to u32 lanes before they are added.
+fn sum_u8x16(xs: &[u8]) -> u32 {
+    let mut acc = u32x4.splat(0);
+    for v: u8x16 in xs {
+        acc = acc +% widen_sum(v);
+    } tail masked (v, m) {
+        acc = acc +% widen_sum(v);
+    }
+    return acc.reduce_add_wrap();
+}
+
+fn widen_sum(v: u8x16) -> u32x4 {
+    let lo: u16x8 = v.widen_lo();
+    let hi: u16x8 = v.widen_hi();
+    let a: u32x4 = lo.widen_lo();
+    let b: u32x4 = lo.widen_hi();
+    let c: u32x4 = hi.widen_lo();
+    let d: u32x4 = hi.widen_hi();
+    return (a +% b) +% (c +% d);
+}
+
+pub fn sum_tree_ref(xs: &[f32], n: usize) -> f32 {
+    return diff.tree_f32(diff.lanes_f32(xs, n, 0.0, 0.0, diff.add_f32), n, diff.add_f32);
+}
+
+pub fn sum_ordered_ref(xs: &[f32], n: usize) -> f32 {
+    let mut acc: f32 = 0.0;
+    for i in 0..xs.len() {
+        acc = acc + xs[i];
+    }
+    let r = xs.len() % n;
+    if r != 0 {
+        for j in r..n {
+            acc = acc + 0.0;
+        }
+    }
+    return acc;
+}
+
+pub fn sum_tree_f64_ref(xs: &[f64], n: usize) -> f64 {
+    return diff.tree_f64(diff.lanes_f64(xs, n, 0.0, 0.0, diff.add_f64), n, diff.add_f64);
+}
+
+pub fn sum_wrap_i32_ref(xs: &[i32]) -> i32 {
+    let mut s: i32 = 0;
+    for i in 0..xs.len() {
+        s = s +% xs[i];
+    }
+    return s;
+}
+
+pub fn sum_u8_ref(xs: &[u8]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..xs.len() {
+        s = s +% (xs[i] as u32);
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        if h.kind == 0 {
+            let b = c.f32s(h);
+            let xs = b.get();
+            o.f32(sum_tree_f32x4(xs));
+            o.f32(sum_ordered_f32x4(xs));
+            o.sep();
+            o.f32(sum_tree_ref(xs, 4));
+            o.f32(sum_ordered_ref(xs, 4));
+        } else if h.kind == 1 {
+            let b = c.f64s(h);
+            let xs = b.get();
+            o.f64(sum_tree_f64x2(xs));
+            o.sep();
+            o.f64(sum_tree_f64_ref(xs, 2));
+        } else if h.kind == 2 {
+            let b = c.i32s(h);
+            let xs = b.get();
+            o.i(sum_wrap_i32x4(xs) as i64);
+            o.sep();
+            o.i(sum_wrap_i32_ref(xs) as i64);
+        } else {
+            let b = c.u8s(h);
+            let xs = b.get();
+            o.u(sum_u8x16(xs) as u64);
+            o.sep();
+            o.u(sum_u8_ref(xs) as u64);
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

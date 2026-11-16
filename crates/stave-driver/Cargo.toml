@@ -28,3 +28,7 @@ rayon.workspace = true
 [dev-dependencies]
 gen-corpus = { path = "../../tools/gen-corpus" }
 serde_json.workspace = true
+
+[[test]]
+name = "differential"
+path = "../../tests/differential/harness.rs"

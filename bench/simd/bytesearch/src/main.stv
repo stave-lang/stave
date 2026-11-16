@@ -1,0 +1,38 @@
+// bytesearch: N bytes in 32..96; each pass plants one byte from 96..128 near the end, then
+// counts it and finds its first index, REPS times. Prints the FNV-1a hash of every count and
+// index. Same steps as main.c.
+import lanes;
+import std.io;
+import std.vec;
+
+const N: usize = 65536;
+const REPS: usize = 20000;
+
+fn next(s: &mut u64) -> u64 {
+    *s = *s *% 6364136223846793005 +% 1442695040888963407;
+    return *s;
+}
+
+fn mix(h: u64, x: u64) -> u64 {
+    return (h ^ x) *% 1099511628211;
+}
+
+fn main() -> i32 {
+    let mut s: u64 = 5;
+    let mut v = vec.Vec::<u8>.with_capacity(N);
+    for i in 0..N {
+        v.push(32 + ((next(&mut s) >> 58) as% u8));
+    }
+    let xs = v.as_mut_slice();
+    let mut h: u64 = 14695981039346656037;
+    for r in 0..REPS {
+        let key = 96 + ((r % 32) as% u8);
+        let at = N - 1 - (r * 97) % 1024;
+        let was = xs[at];
+        xs[at] = key;
+        h = mix(mix(h, lanes.count_byte(xs, key) as u64), lanes.find_byte(xs, key) as u64);
+        xs[at] = was;
+    }
+    io.print(f"{h}\n");
+    return 0;
+}

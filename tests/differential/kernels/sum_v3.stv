@@ -1,0 +1,104 @@
+// The sums of sum.stv with 256-bit vectors (x86_64-linux-v3), against the same references with
+// twice the lanes.
+import base;
+import diff;
+
+fn sum_tree_f32x8(xs: &[f32]) -> f32 {
+    let mut acc = f32x8.splat(0.0);
+    for v: f32x8 in xs {
+        acc = acc + v;
+    } tail masked (v, m) {
+        acc = acc + v;
+    }
+    return acc.reduce_add();
+}
+
+fn sum_ordered_f32x8(xs: &[f32]) -> f32 {
+    let mut acc: f32 = 0.0;
+    for v: f32x8 in xs {
+        acc = v.reduce_add_ordered(acc);
+    } tail masked (v, m) {
+        acc = v.reduce_add_ordered(acc);
+    }
+    return acc;
+}
+
+fn sum_tree_f64x4(xs: &[f64]) -> f64 {
+    let mut acc = f64x4.splat(0.0);
+    for v: f64x4 in xs {
+        acc = acc + v;
+    } tail masked (v, m) {
+        acc = acc + m.select(v, f64x4.splat(0.0));
+    }
+    return acc.reduce_add();
+}
+
+fn sum_wrap_i32x8(xs: &[i32]) -> i32 {
+    let mut acc = i32x8.splat(0);
+    let mut rest: i32 = 0;
+    for v: i32x8 in xs {
+        acc = acc +% v;
+    } tail scalar (x) {
+        rest = rest +% x;
+    }
+    return acc.reduce_add_wrap() +% rest;
+}
+
+fn sum_u8x32(xs: &[u8]) -> u32 {
+    let mut acc = u32x8.splat(0);
+    for v: u8x32 in xs {
+        acc = acc +% widen_sum(v);
+    } tail masked (v, m) {
+        acc = acc +% widen_sum(v);
+    }
+    return acc.reduce_add_wrap();
+}
+
+fn widen_sum(v: u8x32) -> u32x8 {
+    let lo: u16x16 = v.widen_lo();
+    let hi: u16x16 = v.widen_hi();
+    let a: u32x8 = lo.widen_lo();
+    let b: u32x8 = lo.widen_hi();
+    let c: u32x8 = hi.widen_lo();
+    let d: u32x8 = hi.widen_hi();
+    return (a +% b) +% (c +% d);
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        if h.kind == 0 {
+            let b = c.f32s(h);
+            let xs = b.get();
+            o.f32(sum_tree_f32x8(xs));
+            o.f32(sum_ordered_f32x8(xs));
+            o.sep();
+            o.f32(base.sum_tree_ref(xs, 8));
+            o.f32(base.sum_ordered_ref(xs, 8));
+        } else if h.kind == 1 {
+            let b = c.f64s(h);
+            let xs = b.get();
+            o.f64(sum_tree_f64x4(xs));
+            o.sep();
+            o.f64(base.sum_tree_f64_ref(xs, 4));
+        } else if h.kind == 2 {
+            let b = c.i32s(h);
+            let xs = b.get();
+            o.i(sum_wrap_i32x8(xs) as i64);
+            o.sep();
+            o.i(base.sum_wrap_i32_ref(xs) as i64);
+        } else {
+            let b = c.u8s(h);
+            let xs = b.get();
+            o.u(sum_u8x32(xs) as u64);
+            o.sep();
+            o.u(base.sum_u8_ref(xs) as u64);
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

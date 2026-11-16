@@ -1,0 +1,145 @@
+// Stream compaction: the elements greater than a threshold, in order, packed with `compress`
+// and written with a masked store of the first popcount lanes. A NaN is never greater than
+// anything, so a NaN threshold keeps nothing. The output buffer has guard elements around it:
+// a store past the kept elements changes them.
+import diff;
+import std.mem;
+
+fn filter_f32x4(xs: &[f32], k: f32, out: &mut [f32]) -> usize {
+    let kk = f32x4.splat(k);
+    let mut n: usize = 0;
+    for v: f32x4 in xs {
+        let m = v > kk;
+        let c = m.to_bits().popcount() as usize;
+        v.compress(m).store_masked(out, n, mask32x4.first_n(c));
+        n = n + c;
+    } tail masked (v, active) {
+        let m = (v > kk) & active;
+        let c = m.to_bits().popcount() as usize;
+        v.compress(m).store_masked(out, n, mask32x4.first_n(c));
+        n = n + c;
+    }
+    return n;
+}
+
+fn filter_i32x4(xs: &[i32], k: i32, out: &mut [i32]) -> usize {
+    let kk = i32x4.splat(k);
+    let mut n: usize = 0;
+    for v: i32x4 in xs {
+        let m = v > kk;
+        let c = m.to_bits().popcount() as usize;
+        v.compress(m).store_masked(out, n, mask32x4.first_n(c));
+        n = n + c;
+    } tail scalar (x) {
+        if x > k {
+            out[n] = x;
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+fn filter_u8x16(xs: &[u8], k: u8, out: &mut [u8]) -> usize {
+    let kk = u8x16.splat(k);
+    let mut n: usize = 0;
+    for v: u8x16 in xs {
+        let m = v > kk;
+        let c = m.to_bits().popcount() as usize;
+        v.compress(m).store_masked(out, n, mask8x16.first_n(c));
+        n = n + c;
+    } tail masked (v, active) {
+        let m = (v > kk) & active;
+        let c = m.to_bits().popcount() as usize;
+        v.compress(m).store_masked(out, n, mask8x16.first_n(c));
+        n = n + c;
+    }
+    return n;
+}
+
+pub fn filter_f32_ref(xs: &[f32], k: f32, out: &mut [f32]) -> usize {
+    let mut n: usize = 0;
+    for i in 0..xs.len() {
+        if xs[i] > k {
+            out[n] = xs[i];
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+pub fn filter_i32_ref(xs: &[i32], k: i32, out: &mut [i32]) -> usize {
+    let mut n: usize = 0;
+    for i in 0..xs.len() {
+        if xs[i] > k {
+            out[n] = xs[i];
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+pub fn filter_u8_ref(xs: &[u8], k: u8, out: &mut [u8]) -> usize {
+    let mut n: usize = 0;
+    for i in 0..xs.len() {
+        if xs[i] > k {
+            out[n] = xs[i];
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        if h.kind == 0 {
+            let b = c.f32s(h);
+            let t = mem.f32_from_bits(h.param);
+            let mut got = diff.Buf::<f32>.new(h.len, h.mis, mem.f32_from_bits(0x7fa5a5a5));
+            let mut want = diff.Buf::<f32>.new(h.len, h.mis, 0.0);
+            let g = filter_f32x4(b.get(), t, got.get_mut());
+            let w = filter_f32_ref(b.get(), t, want.get_mut());
+            o.u(g as u64);
+            o.f32s(&got.get()[0..g]);
+            o.flag(diff.guards_f32(&got));
+            o.sep();
+            o.u(w as u64);
+            o.f32s(&want.get()[0..w]);
+            o.flag(true);
+        } else if h.kind == 1 {
+            let b = c.i32s(h);
+            let t = h.param as% i32;
+            let mut got = diff.Buf::<i32>.new(h.len, h.mis, -1515870811);
+            let mut want = diff.Buf::<i32>.new(h.len, h.mis, 0);
+            let g = filter_i32x4(b.get(), t, got.get_mut());
+            let w = filter_i32_ref(b.get(), t, want.get_mut());
+            o.u(g as u64);
+            o.i32s(&got.get()[0..g]);
+            o.flag(diff.guards_i32(&got));
+            o.sep();
+            o.u(w as u64);
+            o.i32s(&want.get()[0..w]);
+            o.flag(true);
+        } else {
+            let b = c.u8s(h);
+            let t = h.param as% u8;
+            let mut got = diff.Buf::<u8>.new(h.len, h.mis, 0xa5);
+            let mut want = diff.Buf::<u8>.new(h.len, h.mis, 0);
+            let g = filter_u8x16(b.get(), t, got.get_mut());
+            let w = filter_u8_ref(b.get(), t, want.get_mut());
+            o.u(g as u64);
+            o.u8s(&got.get()[0..g]);
+            o.flag(diff.guards_u8(&got));
+            o.sep();
+            o.u(w as u64);
+            o.u8s(&want.get()[0..w]);
+            o.flag(true);
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

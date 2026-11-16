@@ -4,12 +4,13 @@
 # stdout; progress goes to stderr. Linux only. See bench/README.md.
 #   bench/run.sh [--tier quick|stave|full] [--lines N] [--seed S] [--runs R] [--reps P]
 #   bench/run.sh --stages [--alloc-count] [--lines N] [--seed S] [--runs R]
+#   bench/run.sh --simd [--runs R]
 # --stages: only the step profile of `stave build` on the corpus (STAVE_PROFILE, stave_driver::prof):
 # median ms per step on 1 thread and on all threads. --alloc-count builds stave with its counting
 # allocator (in target/alloc-count) and adds allocation calls and bytes; its times are slower.
 # --tier: full (default) measures every compiler and caches each C row in target/bench-cache;
 # stave measures stave alone and prints the C rows from that cache; quick is stave alone on 20000
-# lines, 3 runs, no C rows. stave and quick check the output against one C build only. After the
+# lines, 3 runs, no C rows. --simd runs bench/simd.sh (SIMD kernels against C twins) instead. stave and quick check the output against one C build only. After the
 # report every tier compares its stave numbers with its previous run at the same --lines.
 set -eu
 cd "$(dirname "$0")/.."
@@ -22,7 +23,7 @@ REPS=500
 STAGES=0
 ALLOC_COUNT=0
 usage() {
-  echo "usage: bench/run.sh [--tier quick|stave|full | --stages [--alloc-count]] [--lines N] [--seed S] [--runs R] [--reps P]" >&2
+  echo "usage: bench/run.sh [--tier quick|stave|full | --stages [--alloc-count]] [--lines N] [--seed S] [--runs R] [--reps P] | --simd [--runs R]" >&2
   exit 2
 }
 while [ $# -gt 0 ]; do
@@ -34,6 +35,7 @@ while [ $# -gt 0 ]; do
     --reps) REPS=$2; shift 2 ;;
     --stages) STAGES=1; shift ;;
     --alloc-count) ALLOC_COUNT=1; shift ;;
+    --simd) shift; exec sh bench/simd.sh "$@" ;;
     *) usage ;;
   esac
 done

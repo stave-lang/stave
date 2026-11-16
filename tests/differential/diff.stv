@@ -1,0 +1,385 @@
+// Shared part of every differential kernel program (module `diff` of the package the harness
+// assembles around a kernel file). It reads the cases the harness wrote to `cases.bin`, places
+// each input at the requested element offset from a 64-byte boundary, and prints one line per
+// case: the vector kernels' result tokens, ` =`, then the scalar references' tokens.
+//
+// cases.bin, little endian: u32 count, then per case u32 kind, u32 len, u32 mis, u32 param,
+// followed by the case's arrays (how many and of which element type depends on the kind).
+//
+// Tokens: `u<n>` / `i<n>` exact integers, `f<bits>` an f32, `d<bits>` an f64 (the harness
+// compares a NaN only for NaN-ness), `h<n>` a hash of an array with every NaN replaced by one
+// canonical NaN first. With any command-line argument, arrays print element by element instead
+// of as a hash (the harness asks for that to show a failing case).
+import std.env;
+import std.fmt;
+import std.io;
+import std.mem;
+import std.string;
+import std.vec;
+
+// Elements kept before and after each input: a kernel that writes outside its slice changes them.
+const GUARD: usize = 64;
+const FNV_START: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+
+pub struct Cases {
+    bytes: vec.Vec<u8>,
+    pos: usize,
+}
+
+pub struct Head {
+    pub kind: u32,
+    pub len: usize,
+    pub mis: usize,
+    pub param: u32,
+}
+
+impl Copy for Head {}
+
+pub fn open() -> Cases {
+    match io.read_file("cases.bin") {
+        Result.Ok(b) => { return Cases.{ bytes: b, pos: 0 }; }
+        Result.Err(_) => {
+            io.eprint("diff: cannot read cases.bin\n");
+            return Cases.{ bytes: vec.Vec::<u8>.new(), pos: 0 };
+        }
+    }
+}
+
+impl Cases {
+    pub fn u8(&mut self) -> u8 {
+        let b = *self.bytes.get_ref(self.pos);
+        self.pos = self.pos + 1;
+        return b;
+    }
+
+    pub fn u32(&mut self) -> u32 {
+        let s = self.bytes.as_slice();
+        let p = self.pos;
+        let v = (s[p] as u32) | ((s[p + 1] as u32) << 8) | ((s[p + 2] as u32) << 16) | ((s[p + 3] as u32) << 24);
+        self.pos = p + 4;
+        return v;
+    }
+
+    pub fn u64(&mut self) -> u64 {
+        let lo = self.u32() as u64;
+        let hi = self.u32() as u64;
+        return lo | (hi << 32);
+    }
+
+    pub fn count(&mut self) -> u32 {
+        if self.bytes.len() < 4 { return 0; }
+        return self.u32();
+    }
+
+    pub fn head(&mut self) -> Head {
+        let kind = self.u32();
+        let len = self.u32() as usize;
+        let mis = self.u32() as usize;
+        let param = self.u32();
+        return Head.{ kind: kind, len: len, mis: mis, param: param };
+    }
+
+    pub fn f32s(&mut self, h: Head) -> Buf<f32> {
+        let mut b = Buf::<f32>.new(h.len, h.mis, mem.f32_from_bits(0x7fa5a5a5));
+        let s = b.get_mut();
+        for i in 0..s.len() {
+            s[i] = mem.f32_from_bits(self.u32());
+        }
+        return b;
+    }
+
+    pub fn f64s(&mut self, h: Head) -> Buf<f64> {
+        let mut b = Buf::<f64>.new(h.len, h.mis, mem.f64_from_bits(0x7ff4a5a5a5a5a5a5));
+        let s = b.get_mut();
+        for i in 0..s.len() {
+            s[i] = mem.f64_from_bits(self.u64());
+        }
+        return b;
+    }
+
+    pub fn i32s(&mut self, h: Head) -> Buf<i32> {
+        let mut b = Buf::<i32>.new(h.len, h.mis, -1515870811);
+        let s = b.get_mut();
+        for i in 0..s.len() {
+            s[i] = self.u32() as% i32;
+        }
+        return b;
+    }
+
+    pub fn u8s(&mut self, h: Head) -> Buf<u8> {
+        let mut b = Buf::<u8>.new(h.len, h.mis, 0xa5);
+        let s = b.get_mut();
+        for i in 0..s.len() {
+            s[i] = self.u8();
+        }
+        return b;
+    }
+}
+
+// `len` elements starting `mis` elements past a 64-byte boundary, with GUARD elements of `fill`
+// on both sides.
+pub struct Buf<T> {
+    v: vec.Vec<T>,
+    start: usize,
+    len: usize,
+    fill: T,
+}
+
+impl<T: Copy> Buf<T> {
+    pub fn new(len: usize, mis: usize, fill: T) -> Buf<T> {
+        let size = size_of::<T>();
+        let slack = 64 / size;
+        let total = GUARD + slack + mis + len + GUARD;
+        let mut v = vec.Vec::<T>.with_capacity(total);
+        for i in 0..total {
+            v.push(fill);
+        }
+        let addr = mem.slice_ptr(v.as_slice()) as usize + GUARD * size;
+        let skip = ((64 - addr % 64) % 64) / size;
+        return Buf.{ v: v, start: GUARD + skip + mis, len: len, fill: fill };
+    }
+
+    pub fn get(&self) -> &[T] from self {
+        return &self.v.as_slice()[self.start..self.start + self.len];
+    }
+
+    pub fn get_mut(&mut self) -> &mut [T] from self {
+        let start = self.start;
+        let end = start + self.len;
+        return &mut self.v.as_mut_slice()[start..end];
+    }
+}
+
+// Whether every element outside the slice still holds the fill bits.
+pub fn guards_f32(b: &Buf<f32>) -> bool {
+    let s = b.v.as_slice();
+    let f = mem.f32_bits(b.fill);
+    for i in 0..s.len() {
+        if (i < b.start || i >= b.start + b.len) && mem.f32_bits(s[i]) != f { return false; }
+    }
+    return true;
+}
+
+pub fn guards_i32(b: &Buf<i32>) -> bool {
+    let s = b.v.as_slice();
+    for i in 0..s.len() {
+        if (i < b.start || i >= b.start + b.len) && s[i] != b.fill { return false; }
+    }
+    return true;
+}
+
+pub fn guards_u8(b: &Buf<u8>) -> bool {
+    let s = b.v.as_slice();
+    for i in 0..s.len() {
+        if (i < b.start || i >= b.start + b.len) && s[i] != b.fill { return false; }
+    }
+    return true;
+}
+
+pub fn guards_f64(b: &Buf<f64>) -> bool {
+    let s = b.v.as_slice();
+    let f = mem.f64_bits(b.fill);
+    for i in 0..s.len() {
+        if (i < b.start || i >= b.start + b.len) && mem.f64_bits(s[i]) != f { return false; }
+    }
+    return true;
+}
+
+// Lane accumulators of a vector loop over xs with n lanes: lane l starts at init and takes
+// op(acc, x) for every element i with i % n == l, in order; a partial last chunk then gives each
+// lane past it op(acc, pad), as a masked tail does.
+pub fn lanes_f32(xs: &[f32], n: usize, init: f32, pad: f32, op: fn(f32, f32) -> f32) -> [f32; 32] {
+    let mut acc: [f32; 32] = [init; 32];
+    for i in 0..xs.len() {
+        acc[i % n] = op(acc[i % n], xs[i]);
+    }
+    let r = xs.len() % n;
+    if r != 0 {
+        for j in r..n {
+            acc[j] = op(acc[j], pad);
+        }
+    }
+    return acc;
+}
+
+pub fn lanes_f64(xs: &[f64], n: usize, init: f64, pad: f64, op: fn(f64, f64) -> f64) -> [f64; 32] {
+    let mut acc: [f64; 32] = [init; 32];
+    for i in 0..xs.len() {
+        acc[i % n] = op(acc[i % n], xs[i]);
+    }
+    let r = xs.len() % n;
+    if r != 0 {
+        for j in r..n {
+            acc[j] = op(acc[j], pad);
+        }
+    }
+    return acc;
+}
+
+// The fixed reduction tree over the first n lanes (n a power of two): lane i with lane i + n/2,
+// halving until one lane is left.
+pub fn tree_f32(a: [f32; 32], n: usize, op: fn(f32, f32) -> f32) -> f32 {
+    let mut t = a;
+    let mut k = n;
+    while k > 1 {
+        k = k / 2;
+        for i in 0..k {
+            t[i] = op(t[i], t[i + k]);
+        }
+    }
+    return t[0];
+}
+
+pub fn tree_f64(a: [f64; 32], n: usize, op: fn(f64, f64) -> f64) -> f64 {
+    let mut t = a;
+    let mut k = n;
+    while k > 1 {
+        k = k / 2;
+        for i in 0..k {
+            t[i] = op(t[i], t[i + k]);
+        }
+    }
+    return t[0];
+}
+
+pub fn add_f32(a: f32, b: f32) -> f32 {
+    return a + b;
+}
+
+pub fn add_f64(a: f64, b: f64) -> f64 {
+    return a + b;
+}
+
+// A float with every NaN replaced by the canonical quiet NaN.
+pub fn canon_f32(x: f32) -> u32 {
+    return if x != x then 0x7fc00000 else mem.f32_bits(x);
+}
+
+pub fn canon_f64(x: f64) -> u64 {
+    return if x != x then 0x7ff8000000000000 else mem.f64_bits(x);
+}
+
+pub struct Out {
+    s: string.String,
+    full: bool,
+}
+
+pub fn out() -> Out {
+    return Out.{ s: string.String.new(), full: env.count() > 1 };
+}
+
+impl Out {
+    fn token(&mut self, tag: &str, v: u64) {
+        self.s.push_str(" ");
+        self.s.push_str(tag);
+        fmt.write_u64(&mut self.s, v);
+    }
+
+    pub fn u(&mut self, v: u64) {
+        self.token("u", v);
+    }
+
+    pub fn i(&mut self, v: i64) {
+        self.s.push_str(" i");
+        fmt.write_i64(&mut self.s, v);
+    }
+
+    pub fn flag(&mut self, b: bool) {
+        self.token("u", if b then 1 else 0);
+    }
+
+    pub fn f32(&mut self, x: f32) {
+        self.token("f", mem.f32_bits(x) as u64);
+    }
+
+    pub fn f64(&mut self, x: f64) {
+        self.token("d", mem.f64_bits(x));
+    }
+
+    pub fn f32s(&mut self, xs: &[f32]) {
+        if self.full {
+            for i in 0..xs.len() {
+                self.f32(xs[i]);
+            }
+            return;
+        }
+        let mut h = FNV_START;
+        for i in 0..xs.len() {
+            h = (h ^ (canon_f32(xs[i]) as u64)) *% FNV_PRIME;
+        }
+        self.token("h", h);
+    }
+
+    pub fn i32s(&mut self, xs: &[i32]) {
+        if self.full {
+            for i in 0..xs.len() {
+                self.i(xs[i] as i64);
+            }
+            return;
+        }
+        let mut h = FNV_START;
+        for i in 0..xs.len() {
+            h = (h ^ ((xs[i] as% u32) as u64)) *% FNV_PRIME;
+        }
+        self.token("h", h);
+    }
+
+    pub fn u32s(&mut self, xs: &[u32]) {
+        if self.full {
+            for i in 0..xs.len() {
+                self.u(xs[i] as u64);
+            }
+            return;
+        }
+        let mut h = FNV_START;
+        for i in 0..xs.len() {
+            h = (h ^ (xs[i] as u64)) *% FNV_PRIME;
+        }
+        self.token("h", h);
+    }
+
+    pub fn f64s(&mut self, xs: &[f64]) {
+        if self.full {
+            for i in 0..xs.len() {
+                self.f64(xs[i]);
+            }
+            return;
+        }
+        let mut h = FNV_START;
+        for i in 0..xs.len() {
+            h = (h ^ canon_f64(xs[i])) *% FNV_PRIME;
+        }
+        self.token("h", h);
+    }
+
+    pub fn u8s(&mut self, xs: &[u8]) {
+        if self.full {
+            for i in 0..xs.len() {
+                self.u(xs[i] as u64);
+            }
+            return;
+        }
+        let mut h = FNV_START;
+        for i in 0..xs.len() {
+            h = (h ^ (xs[i] as u64)) *% FNV_PRIME;
+        }
+        self.token("h", h);
+    }
+
+    // Between the vector results and the scalar references.
+    pub fn sep(&mut self) {
+        self.s.push_str(" =");
+    }
+
+    // Ends a case; the text goes out in pieces of about 64 KiB.
+    pub fn end(&mut self) {
+        self.s.push_str("\n");
+        if self.s.len() > 65536 { self.flush(); }
+    }
+
+    pub fn flush(&mut self) {
+        io.print(self.s.as_str());
+        self.s.clear();
+    }
+}

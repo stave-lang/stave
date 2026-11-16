@@ -18,6 +18,9 @@ median wall time of every pipeline step (`STAVE_PROFILE`, `stave_driver::prof`) 
 all threads. With `--alloc-count` it builds `stave` with a counting allocator and adds allocation
 calls and bytes per step (those times are slower: count and time in separate runs).
 
+`sh bench/run.sh --simd [--runs R]` runs `bench/simd.sh` instead: explicit vector kernels built
+by stave for x86_64-linux and x86_64-linux-v3 against their C99 twins (`simd/README.md`).
+
 ## Tiers
 
 `--tier` picks how much is measured. C compiler numbers do not change between Stave commits, so

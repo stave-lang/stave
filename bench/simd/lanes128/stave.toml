@@ -1,0 +1,3 @@
+# The 128-bit kernels of the SIMD benchmark: every target except x86_64-linux-v3.
+name = "lanes"
+kind = "lib"

@@ -1,0 +1,220 @@
+// Minimum and maximum: lane accumulators, then `reduce_min` / `reduce_max` (fixed tree) or the
+// accumulator lanes themselves. Float `min`/`max` propagate NaN and order -0.0 below +0.0;
+// `min_num` treats NaN as missing; `max_x86` is `a > b ? a : b` (its NaN bits are unspecified, so
+// only NaN-ness is compared). A masked tail feeds +inf (min) or -inf (max) to inactive lanes.
+import diff;
+import std.mem;
+
+fn inf() -> f32 {
+    return mem.f32_from_bits(0x7f800000);
+}
+
+fn ninf() -> f32 {
+    return mem.f32_from_bits(0xff800000);
+}
+
+// out: [min, max, min_num lanes 0..4, max_x86 lanes 0..4]
+fn minmax_f32x4(xs: &[f32], out: &mut [f32]) {
+    let hi_init = f32x4.splat(ninf());
+    let lo_init = f32x4.splat(inf());
+    let mut lo = lo_init;
+    let mut hi = hi_init;
+    let mut lo_num = lo_init;
+    let mut hi_x86 = hi_init;
+    for v: f32x4 in xs {
+        lo = lo.min(v);
+        hi = hi.max(v);
+        lo_num = lo_num.min_num(v);
+        hi_x86 = hi_x86.max_x86(v);
+    } tail masked (v, m) {
+        lo = lo.min(m.select(v, lo_init));
+        hi = hi.max(m.select(v, hi_init));
+        lo_num = lo_num.min_num(m.select(v, lo_init));
+        hi_x86 = hi_x86.max_x86(m.select(v, hi_init));
+    }
+    out[0] = lo.reduce_min();
+    out[1] = hi.reduce_max();
+    lo_num.store(out, 2);
+    hi_x86.store(out, 6);
+}
+
+fn minmax_f64x2(xs: &[f64]) -> (f64, f64) {
+    let lo_init = f64x2.splat(mem.f64_from_bits(0x7ff0000000000000));
+    let hi_init = f64x2.splat(mem.f64_from_bits(0xfff0000000000000));
+    let mut lo = lo_init;
+    let mut hi = hi_init;
+    for v: f64x2 in xs {
+        lo = lo.min(v);
+        hi = hi.max(v);
+    } tail masked (v, m) {
+        lo = lo.min(m.select(v, lo_init));
+        hi = hi.max(m.select(v, hi_init));
+    }
+    return (lo.reduce_min(), hi.reduce_max());
+}
+
+fn minmax_i32x4(xs: &[i32]) -> (i32, i32) {
+    let mut lo = i32x4.splat(2147483647);
+    let mut hi = i32x4.splat(-2147483648);
+    let mut slo: i32 = 2147483647;
+    let mut shi: i32 = -2147483648;
+    for v: i32x4 in xs {
+        lo = lo.min(v);
+        hi = hi.max(v);
+    } tail scalar (x) {
+        if x < slo { slo = x; }
+        if x > shi { shi = x; }
+    }
+    let a = lo.reduce_min();
+    let b = hi.reduce_max();
+    return (if a < slo then a else slo, if b > shi then b else shi);
+}
+
+fn minmax_u8x16(xs: &[u8]) -> (u8, u8) {
+    let lo_init = u8x16.splat(255);
+    let hi_init = u8x16.splat(0);
+    let mut lo = lo_init;
+    let mut hi = hi_init;
+    for v: u8x16 in xs {
+        lo = lo.min(v);
+        hi = hi.max(v);
+    } tail masked (v, m) {
+        lo = lo.min(m.select(v, lo_init));
+        hi = hi.max(v);
+    }
+    return (lo.reduce_min(), hi.reduce_max());
+}
+
+pub fn fmin(a: f32, b: f32) -> f32 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a < b { return a; }
+    if b < a { return b; }
+    return if mem.f32_bits(a) > mem.f32_bits(b) then a else b;
+}
+
+pub fn fmax(a: f32, b: f32) -> f32 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a > b { return a; }
+    if b > a { return b; }
+    return if mem.f32_bits(a) < mem.f32_bits(b) then a else b;
+}
+
+pub fn fmin_num(a: f32, b: f32) -> f32 {
+    if a != a { return b; }
+    if b != b { return a; }
+    return fmin(a, b);
+}
+
+pub fn fmax_x86(a: f32, b: f32) -> f32 {
+    return if a > b then a else b;
+}
+
+pub fn dmin(a: f64, b: f64) -> f64 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a < b { return a; }
+    if b < a { return b; }
+    return if mem.f64_bits(a) > mem.f64_bits(b) then a else b;
+}
+
+pub fn dmax(a: f64, b: f64) -> f64 {
+    if a != a { return a; }
+    if b != b { return b; }
+    if a > b { return a; }
+    if b > a { return b; }
+    return if mem.f64_bits(a) < mem.f64_bits(b) then a else b;
+}
+
+pub fn minmax_f32_ref(xs: &[f32], n: usize, out: &mut [f32]) {
+    out[0] = diff.tree_f32(diff.lanes_f32(xs, n, inf(), inf(), fmin), n, fmin);
+    out[1] = diff.tree_f32(diff.lanes_f32(xs, n, ninf(), ninf(), fmax), n, fmax);
+    let lo_num = diff.lanes_f32(xs, n, inf(), inf(), fmin_num);
+    let hi_x86 = diff.lanes_f32(xs, n, ninf(), ninf(), fmax_x86);
+    for l in 0..n {
+        out[2 + l] = lo_num[l];
+        out[2 + n + l] = hi_x86[l];
+    }
+}
+
+pub fn minmax_f64_ref(xs: &[f64], n: usize) -> (f64, f64) {
+    let pinf = mem.f64_from_bits(0x7ff0000000000000);
+    let minf = mem.f64_from_bits(0xfff0000000000000);
+    let lo = diff.tree_f64(diff.lanes_f64(xs, n, pinf, pinf, dmin), n, dmin);
+    let hi = diff.tree_f64(diff.lanes_f64(xs, n, minf, minf, dmax), n, dmax);
+    return (lo, hi);
+}
+
+pub fn minmax_i32_ref(xs: &[i32]) -> (i32, i32) {
+    let mut lo: i32 = 2147483647;
+    let mut hi: i32 = -2147483648;
+    for i in 0..xs.len() {
+        if xs[i] < lo { lo = xs[i]; }
+        if xs[i] > hi { hi = xs[i]; }
+    }
+    return (lo, hi);
+}
+
+pub fn minmax_u8_ref(xs: &[u8]) -> (u8, u8) {
+    let mut lo: u8 = 255;
+    let mut hi: u8 = 0;
+    for i in 0..xs.len() {
+        if xs[i] < lo { lo = xs[i]; }
+        if xs[i] > hi { hi = xs[i]; }
+    }
+    return (lo, hi);
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        if h.kind == 0 {
+            let b = c.f32s(h);
+            let mut got: [f32; 10] = [0.0; 10];
+            let mut want: [f32; 10] = [0.0; 10];
+            minmax_f32x4(b.get(), &mut got[0..10]);
+            minmax_f32_ref(b.get(), 4, &mut want[0..10]);
+            for i in 0usize..10 {
+                o.f32(got[i]);
+            }
+            o.sep();
+            for i in 0usize..10 {
+                o.f32(want[i]);
+            }
+        } else if h.kind == 1 {
+            let b = c.f64s(h);
+            let (lo, hi) = minmax_f64x2(b.get());
+            let (rlo, rhi) = minmax_f64_ref(b.get(), 2);
+            o.f64(lo);
+            o.f64(hi);
+            o.sep();
+            o.f64(rlo);
+            o.f64(rhi);
+        } else if h.kind == 2 {
+            let b = c.i32s(h);
+            let (lo, hi) = minmax_i32x4(b.get());
+            let (rlo, rhi) = minmax_i32_ref(b.get());
+            o.i(lo as i64);
+            o.i(hi as i64);
+            o.sep();
+            o.i(rlo as i64);
+            o.i(rhi as i64);
+        } else {
+            let b = c.u8s(h);
+            let (lo, hi) = minmax_u8x16(b.get());
+            let (rlo, rhi) = minmax_u8_ref(b.get());
+            o.u(lo as u64);
+            o.u(hi as u64);
+            o.sep();
+            o.u(rlo as u64);
+            o.u(rhi as u64);
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

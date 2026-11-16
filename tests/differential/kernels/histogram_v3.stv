@@ -1,0 +1,57 @@
+// The histogram of histogram.stv with 256-bit vectors (x86_64-linux-v3): eight copies of the
+// bins (index bin * 8 + lane). gather is native on v3, scatter is not: `emulate`.
+import base;
+import diff;
+
+fn histogram_u32x8(xs: &[u8], bins: &mut [u32]) {
+    let mut sub: [u32; 2048] = [0; 2048];
+    let ids: [u32; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+    let lane = u32x8.load(&ids[0..8], 0);
+    let one = u32x8.splat(1);
+    for v: u8x32 in xs {
+        let lo: u16x16 = v.widen_lo();
+        let hi: u16x16 = v.widen_hi();
+        let q0: u32x8 = lo.widen_lo();
+        let q1: u32x8 = lo.widen_hi();
+        let q2: u32x8 = hi.widen_lo();
+        let q3: u32x8 = hi.widen_hi();
+        count8(&mut sub, (q0 << 3) | lane, one);
+        count8(&mut sub, (q1 << 3) | lane, one);
+        count8(&mut sub, (q2 << 3) | lane, one);
+        count8(&mut sub, (q3 << 3) | lane, one);
+    } tail scalar (x) {
+        let i = (x as usize) * 8;
+        sub[i] = sub[i] + 1;
+    }
+    for b in 0usize..256 {
+        let s = 8 * b;
+        bins[b] = ((sub[s] + sub[s + 1]) + (sub[s + 2] + sub[s + 3])) + ((sub[s + 4] + sub[s + 5]) + (sub[s + 6] + sub[s + 7]));
+    }
+}
+
+fn count8(sub: &mut [u32; 2048], idx: u32x8, one: u32x8) {
+    let c = u32x8.gather(&sub[0..2048], idx);
+    emulate {
+        (c +% one).scatter(&mut sub[0..2048], idx);
+    }
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        let b = c.u8s(h);
+        let mut got: [u32; 256] = [0; 256];
+        let mut want: [u32; 256] = [0; 256];
+        histogram_u32x8(b.get(), &mut got[0..256]);
+        base.histogram_ref(b.get(), &mut want[0..256]);
+        o.u32s(&got[0..256]);
+        o.sep();
+        o.u32s(&want[0..256]);
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

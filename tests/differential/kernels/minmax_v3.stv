@@ -1,0 +1,138 @@
+// The kernels of minmax.stv with 256-bit vectors (x86_64-linux-v3), against the same
+// references with twice the lanes.
+import base;
+import diff;
+import std.mem;
+
+fn inf() -> f32 {
+    return mem.f32_from_bits(0x7f800000);
+}
+
+fn ninf() -> f32 {
+    return mem.f32_from_bits(0xff800000);
+}
+
+// out: [min, max, min_num lanes 0..8, max_x86 lanes 0..8]
+fn minmax_f32x8(xs: &[f32], out: &mut [f32]) {
+    let hi_init = f32x8.splat(ninf());
+    let lo_init = f32x8.splat(inf());
+    let mut lo = lo_init;
+    let mut hi = hi_init;
+    let mut lo_num = lo_init;
+    let mut hi_x86 = hi_init;
+    for v: f32x8 in xs {
+        lo = lo.min(v);
+        hi = hi.max(v);
+        lo_num = lo_num.min_num(v);
+        hi_x86 = hi_x86.max_x86(v);
+    } tail masked (v, m) {
+        lo = lo.min(m.select(v, lo_init));
+        hi = hi.max(m.select(v, hi_init));
+        lo_num = lo_num.min_num(m.select(v, lo_init));
+        hi_x86 = hi_x86.max_x86(m.select(v, hi_init));
+    }
+    out[0] = lo.reduce_min();
+    out[1] = hi.reduce_max();
+    lo_num.store(out, 2);
+    hi_x86.store(out, 10);
+}
+
+fn minmax_f64x4(xs: &[f64]) -> (f64, f64) {
+    let lo_init = f64x4.splat(mem.f64_from_bits(0x7ff0000000000000));
+    let hi_init = f64x4.splat(mem.f64_from_bits(0xfff0000000000000));
+    let mut lo = lo_init;
+    let mut hi = hi_init;
+    for v: f64x4 in xs {
+        lo = lo.min(v);
+        hi = hi.max(v);
+    } tail masked (v, m) {
+        lo = lo.min(m.select(v, lo_init));
+        hi = hi.max(m.select(v, hi_init));
+    }
+    return (lo.reduce_min(), hi.reduce_max());
+}
+
+fn minmax_i32x8(xs: &[i32]) -> (i32, i32) {
+    let mut lo = i32x8.splat(2147483647);
+    let mut hi = i32x8.splat(-2147483648);
+    let mut slo: i32 = 2147483647;
+    let mut shi: i32 = -2147483648;
+    for v: i32x8 in xs {
+        lo = lo.min(v);
+        hi = hi.max(v);
+    } tail scalar (x) {
+        if x < slo { slo = x; }
+        if x > shi { shi = x; }
+    }
+    let a = lo.reduce_min();
+    let b = hi.reduce_max();
+    return (if a < slo then a else slo, if b > shi then b else shi);
+}
+
+fn minmax_u8x32(xs: &[u8]) -> (u8, u8) {
+    let lo_init = u8x32.splat(255);
+    let hi_init = u8x32.splat(0);
+    let mut lo = lo_init;
+    let mut hi = hi_init;
+    for v: u8x32 in xs {
+        lo = lo.min(v);
+        hi = hi.max(v);
+    } tail masked (v, m) {
+        lo = lo.min(m.select(v, lo_init));
+        hi = hi.max(v);
+    }
+    return (lo.reduce_min(), hi.reduce_max());
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        if h.kind == 0 {
+            let b = c.f32s(h);
+            let mut got: [f32; 18] = [0.0; 18];
+            let mut want: [f32; 18] = [0.0; 18];
+            minmax_f32x8(b.get(), &mut got[0..18]);
+            base.minmax_f32_ref(b.get(), 8, &mut want[0..18]);
+            for i in 0usize..18 {
+                o.f32(got[i]);
+            }
+            o.sep();
+            for i in 0usize..18 {
+                o.f32(want[i]);
+            }
+        } else if h.kind == 1 {
+            let b = c.f64s(h);
+            let (lo, hi) = minmax_f64x4(b.get());
+            let (rlo, rhi) = base.minmax_f64_ref(b.get(), 4);
+            o.f64(lo);
+            o.f64(hi);
+            o.sep();
+            o.f64(rlo);
+            o.f64(rhi);
+        } else if h.kind == 2 {
+            let b = c.i32s(h);
+            let (lo, hi) = minmax_i32x8(b.get());
+            let (rlo, rhi) = base.minmax_i32_ref(b.get());
+            o.i(lo as i64);
+            o.i(hi as i64);
+            o.sep();
+            o.i(rlo as i64);
+            o.i(rhi as i64);
+        } else {
+            let b = c.u8s(h);
+            let (lo, hi) = minmax_u8x32(b.get());
+            let (rlo, rhi) = base.minmax_u8_ref(b.get());
+            o.u(lo as u64);
+            o.u(hi as u64);
+            o.sep();
+            o.u(rlo as u64);
+            o.u(rhi as u64);
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}
