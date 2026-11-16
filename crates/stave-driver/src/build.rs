@@ -234,8 +234,8 @@ pub fn codegen_link(
 /// Whether the backend of `triple` generates code for vector values and ops.
 fn generates_vector_code(triple: Triple) -> bool {
     match triple.arch() {
-        Arch::X86_64 => true,
-        Arch::Aarch64 | Arch::Gpu => false,
+        Arch::X86_64 | Arch::Aarch64 => true,
+        Arch::Gpu => false,
     }
 }
 

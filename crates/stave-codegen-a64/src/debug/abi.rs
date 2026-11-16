@@ -1,4 +1,12 @@
 //! The Stave calling convention (module doc of [`super`]): argument and result locations.
+//!
+//! Vectors and masks (at most 128 bits) travel like AAPCS64 short vectors. An argument takes the
+//! next free `v0..v7` (the counter floats use) as a whole register: lanes in order from bit 0,
+//! bits past the vector's size unspecified; a mask is its full-width lanes, each all ones or
+//! zero. Without a free register it goes to the stack by value: 16 bytes at a 16-byte aligned
+//! offset for a 128-bit vector, one 8-byte word for a narrower one. A vector result is in `v0`.
+//! No V register is preserved across a call as a vector: `v8–v15` keep their low 64 bits only,
+//! so a vector live across a call is in its frame home.
 
 use super::ty::Ty;
 
@@ -7,7 +15,7 @@ use super::ty::Ty;
 pub(crate) enum Loc {
     /// `x<n>`.
     X(u8),
-    /// `v<n>` (`s`/`d`).
+    /// `v<n>` (`s`/`d`; the whole register for a vector).
     V(u8),
     /// `x<n>, x<n+1>` (fat pointer).
     XPair(u8),
@@ -32,6 +40,18 @@ pub(crate) fn classify(params: impl Iterator<Item = Ty>, out: &mut Vec<Arg>) -> 
                 if nsrn < 8 {
                     nsrn += 1;
                     Arg { loc: Loc::V(nsrn - 1), by_ref: false }
+                } else {
+                    nsaa += 8;
+                    Arg { loc: Loc::Stack(nsaa - 8), by_ref: false }
+                }
+            }
+            Ty::Vec(v) => {
+                if nsrn < 8 {
+                    nsrn += 1;
+                    Arg { loc: Loc::V(nsrn - 1), by_ref: false }
+                } else if v.size == 16 {
+                    nsaa = nsaa.div_ceil(16) * 16 + 16;
+                    Arg { loc: Loc::Stack(nsaa - 16), by_ref: false }
                 } else {
                     nsaa += 8;
                     Arg { loc: Loc::Stack(nsaa - 8), by_ref: false }
@@ -69,6 +89,8 @@ pub(crate) enum Ret {
     None,
     X0,
     V0,
+    /// A vector or mask in `v0`.
+    Q0,
     X0X1,
     /// Written through the `x8` buffer.
     Indirect,
@@ -80,6 +102,7 @@ pub(crate) fn ret(t: Option<Ty>) -> Ret {
         Some(Ty::Sc(s)) if s.is_fp() => Ret::V0,
         Some(Ty::Sc(_)) => Ret::X0,
         Some(Ty::Fat) => Ret::X0X1,
+        Some(Ty::Vec(_)) => Ret::Q0,
         Some(_) => Ret::Indirect,
     }
 }

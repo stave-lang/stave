@@ -27,7 +27,7 @@ pub(crate) enum Vk {
     Dead,
     Gpr(Sc),
     Fpr(Sc),
-    /// Fat pointer or aggregate, always in its home slot.
+    /// Fat pointer, vector, mask, or aggregate, always in its home slot.
     Mem(Ty),
     /// The address of a `slot` (rematerialized from `sp`, never stored).
     Slot,
@@ -85,6 +85,8 @@ pub struct Analysis {
     pub(crate) home: Vec<u32>,
     pub(crate) frame: u32,
     pub(crate) scratch_off: u32,
+    /// A 32-byte, 16-byte aligned work area of the vector ops (in functions that have any).
+    pub(crate) vtmp_off: u32,
     pub(crate) x8_off: u32,
     pub(crate) args: Vec<abi::Arg>,
     /// Release: per value, the callee-saved register it owns from its definition to its last
@@ -543,7 +545,7 @@ impl Analysis {
             self.kind[v] = match cg.tys.get(t.index()).copied().unwrap_or(Ty::Bad("type id out of range")) {
                 Ty::Sc(s) if s.is_fp() => Vk::Fpr(s),
                 Ty::Sc(s) => Vk::Gpr(s),
-                t @ (Ty::Fat | Ty::Mem { .. }) => Vk::Mem(t),
+                t @ (Ty::Fat | Ty::Vec(_) | Ty::Mem { .. }) => Vk::Mem(t),
                 Ty::Bad(why) => return Err(unsupported(format!("%{v}: {why}"))),
             };
         }
@@ -605,6 +607,7 @@ impl Analysis {
         let mut out = 0u32;
         let mut slots = 0u64;
         let mut slot_list: Vec<(usize, u64)> = Vec::new();
+        let mut has_vec = false;
         for &blk in &self.rpo {
             for k in body.blocks[blk as usize].insts.indices() {
                 let args = body.args(k);
@@ -640,6 +643,7 @@ impl Analysis {
                             out = out.max(u32::from(n.saturating_sub(8)) * 8);
                         }
                     }
+                    Op::Vec(_) => has_vec = true,
                     Op::Slot => {
                         let Some(Some(r)) = body.insts.result.get(k as usize) else { continue };
                         let t = body.insts.ty[k as usize].ok_or_else(|| bad("slot without a type"))?;
@@ -663,13 +667,15 @@ impl Analysis {
         let out = align_up64(u64::from(out), 16);
         let slot_base = out;
         let scratch_off = align_up64(slot_base + slots, 16);
-        let x8_off = align_up64(scratch_off + scratch_need, 16);
+        let vtmp_off = align_up64(scratch_off + scratch_need, 16);
+        let x8_off = vtmp_off + if has_vec { 32 } else { 0 };
         let ret_mem = matches!(f.ret.map(|t| cg.ty(t)), Some(Ty::Mem { .. }));
         let homes_base = align_up64(x8_off + if ret_mem { 8 } else { 0 }, 16);
         if homes_base >= FRAME_MAX {
             return Err(frame_too_large());
         }
         self.scratch_off = scratch_off as u32;
+        self.vtmp_off = vtmp_off as u32;
         self.x8_off = x8_off as u32;
         let homes_base = homes_base as u32;
         let nv = body.values.len();
@@ -771,6 +777,8 @@ impl Analysis {
         match self.kind[v] {
             Vk::Mem(t) => match t {
                 Ty::Mem { size, align } => (align_up(size, 8), align.max(8)),
+                Ty::Vec(v) if v.size == 16 => (16, 16),
+                Ty::Vec(_) => (8, 8),
                 _ => (16, 8),
             },
             _ => (8, 8),

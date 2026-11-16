@@ -48,6 +48,19 @@ fn wide(a: Arr) -> &'static str {
     }
 }
 
+/// The arrangement of `a` with adjacent lanes merged (half the lanes, twice as wide).
+fn pair(a: Arr) -> &'static str {
+    match a {
+        Arr::B8 => "4h",
+        Arr::B16 => "8h",
+        Arr::H4 => "2s",
+        Arr::H8 => "4s",
+        Arr::S2 => "1d",
+        Arr::S4 => "2d",
+        Arr::D2 => unreachable!(),
+    }
+}
+
 /// `"2"` for the upper-half forms.
 fn two(a: Arr) -> &'static str {
     if a.is_q() { "2" } else { "" }
@@ -264,6 +277,15 @@ fn two_register_misc() {
                 lane_bit(arr) & mask != 0,
                 |a, d, n, _| a.vint_un(op, arr, vr(d), vr(n)),
                 |d, n, _| format!("{name} v{d}.{0}, v{n}.{0}", tx(arr)),
+            );
+        }
+    }
+    for (sign, name) in [(Sign::Signed, "saddlp"), (Sign::Unsigned, "uaddlp")] {
+        for arr in Arr::ALL {
+            b.case(
+                lane_bit(arr) & BHS != 0,
+                |a, d, n, _| a.vaddlp(sign, arr, vr(d), vr(n)),
+                |d, n, _| format!("{name} v{d}.{}, v{n}.{}", pair(arr), tx(arr)),
             );
         }
     }

@@ -273,7 +273,7 @@ fn native_binaries_use_only_listed_syscalls() {
 /// Targets whose native vector code is compared with the interpreter on the SIMD programs (as a
 /// debug and as a release build). A target joins this list when its backend lowers every vector
 /// op.
-const SIMD_NATIVE: &[&str] = &["x86_64-linux-v2", "x86_64-linux-v3"];
+const SIMD_NATIVE: &[&str] = &["x86_64-linux-v2", "x86_64-linux-v3", "aarch64-linux"];
 
 /// `tests/conformance/simd/run_*.stv`, sorted.
 fn simd_programs() -> Vec<PathBuf> {
@@ -328,7 +328,7 @@ fn lower_only(p: &Path, target: Triple) -> Output {
 /// Every SIMD program runs in the interpreter on both arches: stdout equals `<name>.stdout`, the
 /// exit status `<name>.exit` (default 0), and stderr contains `<name>.stderr` when present
 /// (`STAVE_BLESS=1` rewrites the stdout files). On the targets of [`SIMD_NATIVE`] the native
-/// build must also match.
+/// debug and release builds must also match.
 #[test]
 fn simd_programs_run_in_the_interpreter() {
     let progs = simd_programs();
@@ -367,14 +367,13 @@ fn simd_programs_run_in_the_interpreter() {
                 continue;
             }
             let Some(runner) = runner(target) else { continue };
-            for release in [false, true] {
-                let mode = if release { "release" } else { "debug" };
+            let want = Ran { exit: r.exit & 0xff, ..r.clone() };
+            for (release, mode) in [(false, "debug"), (true, "release")] {
                 let built = build(p, target, release);
                 let bin = tmp.path().join(format!("{name}-{target}-{mode}"));
                 built.image.as_ref().unwrap().write_file(&bin).unwrap();
                 let spec = RunSpec { args: &[], runner, cwd: Some(&base_dir(p)), inherit: false };
                 let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
-                let want = Ran { exit: r.exit & 0xff, ..r.clone() };
                 if got != want {
                     failures.push(format!(
                         "{name} [{target} {mode}]: native differs from the interpreter\n{}",

@@ -1,10 +1,12 @@
-//! Machine classification of IR types: register scalars, fat pointers, memory aggregates.
+//! Machine classification of IR types: register scalars, fat pointers, vectors and masks, memory
+//! aggregates.
 
 use stave_ir::TypeId;
 use stave_ir::layout::{Layout, Layouts, Shape};
-use stave_ir::types::{FloatBits, IntBits, TypeKey, TypeTable};
+use stave_ir::simd::{self, LaneTy};
+use stave_ir::types::{FloatBits, IntBits, Lanes, TypeKey, TypeTable};
 
-use crate::enc::{Fp, MemSize, VecSize};
+use crate::enc::{Arr, Fp, Lane, MemSize, VecSize};
 
 /// A scalar kept in one register.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,12 +84,92 @@ impl Sc {
     }
 }
 
+/// What the lanes of a vector hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaneKind {
+    Int {
+        signed: bool,
+    },
+    Float,
+    /// Mask lanes: all ones (set) or zero.
+    Mask,
+}
+
+/// A vector or mask of at most 128 bits: `size` bytes (2, 4, 8, 16) of little-endian lanes in
+/// lane order, in memory and in a V register alike. Bytes and register bits past `size` are
+/// unspecified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VTy {
+    pub size: u8,
+    pub lane: Lane,
+    pub kind: LaneKind,
+}
+
+impl VTy {
+    pub(crate) fn lane_bytes(self) -> u32 {
+        1 << (self.lane as u32)
+    }
+
+    pub(crate) fn lanes(self) -> u32 {
+        u32::from(self.size) / self.lane_bytes()
+    }
+
+    /// The arrangement holding the vector: the 128-bit one for 16 bytes, else the 64-bit one.
+    pub(crate) fn arr(self) -> Arr {
+        if self.size == 16 { self.lane.arr() } else { half_arr(self.lane) }
+    }
+
+    pub(crate) fn signed(self) -> bool {
+        matches!(self.kind, LaneKind::Int { signed: true })
+    }
+
+    pub(crate) fn is_float(self) -> bool {
+        self.kind == LaneKind::Float
+    }
+
+    /// The scalar class of one lane (a mask lane counts as an unsigned int).
+    pub(crate) fn sc(self) -> Sc {
+        match (self.kind, self.lane) {
+            (LaneKind::Float, Lane::S) => Sc::F32,
+            (LaneKind::Float, _) => Sc::F64,
+            _ => Sc::Int { bits: self.lane.bits() as u8, signed: self.signed() },
+        }
+    }
+
+    /// The access size of the register holding the whole vector in its frame home.
+    pub(crate) fn home_size(self) -> VecSize {
+        if self.size == 16 { VecSize::Q } else { VecSize::D }
+    }
+}
+
+/// The 64-bit arrangement of a lane size (`d` lanes have none: the 128-bit one).
+pub(crate) fn half_arr(lane: Lane) -> Arr {
+    match lane {
+        Lane::B => Arr::B8,
+        Lane::H => Arr::H4,
+        Lane::S => Arr::S2,
+        Lane::D => Arr::D2,
+    }
+}
+
+/// The lane size of `bytes` (1, 2, 4, 8).
+pub(crate) fn lane_of(bytes: u32) -> Lane {
+    match bytes {
+        1 => Lane::B,
+        2 => Lane::H,
+        4 => Lane::S,
+        _ => Lane::D,
+    }
+}
+
 /// How a value of a type is held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Ty {
     Sc(Sc),
     /// Fat pointer: 16 bytes in memory (address, length).
     Fat,
+    /// Vector or mask, in its frame home (loaded into a V register per use).
+    Vec(VTy),
     /// Aggregate in memory.
     Mem {
         size: u32,
@@ -102,6 +184,7 @@ impl Ty {
         match self {
             Ty::Sc(s) => 1 << (s.msize() as u32),
             Ty::Fat => 16,
+            Ty::Vec(v) => u32::from(v.size),
             Ty::Mem { size, .. } => size,
             Ty::Bad(_) => 0,
         }
@@ -141,10 +224,34 @@ pub(crate) fn classify(types: &TypeTable, layouts: &Layouts, t: TypeId) -> Ty {
             }
         }
         Some(TypeKey::Str | TypeKey::Slice { .. }) => Ty::Bad("unsized value"),
-        Some(TypeKey::Vec { .. } | TypeKey::Mask { .. }) => Ty::Bad("vector values"),
+        Some(TypeKey::Vec { .. } | TypeKey::Mask { .. }) => vector(types, t),
         Some(TypeKey::Param(_) | TypeKey::ConstParam(_)) => Ty::Bad("generic parameter type"),
         None => Ty::Bad("type id out of range"),
     }
+}
+
+/// The class of a vector or mask type.
+fn vector(types: &TypeTable, t: TypeId) -> Ty {
+    let (bits, n, kind) = match types.key(t) {
+        Some(TypeKey::Vec { lane, n: Lanes::Fixed(n) }) => match simd::lane_ty(types, *lane) {
+            Some(LaneTy::Int(it)) => (u32::from(it.bits), u32::from(*n), LaneKind::Int { signed: it.signed }),
+            Some(LaneTy::Float(FloatBits::F32)) => (32, u32::from(*n), LaneKind::Float),
+            Some(LaneTy::Float(FloatBits::F64)) => (64, u32::from(*n), LaneKind::Float),
+            Some(LaneTy::Float(_)) => return Ty::Bad("f16/bf16 vector lanes"),
+            None => return Ty::Bad("vector lane type"),
+        },
+        Some(TypeKey::Mask { width, n: Lanes::Fixed(n) }) => {
+            (u32::from(*width), u32::from(*n), LaneKind::Mask)
+        }
+        _ => return Ty::Bad("sizeless vectors"),
+    };
+    if !simd::valid_lanes(n) || !matches!(bits, 8 | 16 | 32 | 64) {
+        return Ty::Bad("vector shape");
+    }
+    if bits * n > 128 {
+        return Ty::Bad("vectors wider than 128 bits");
+    }
+    Ty::Vec(VTy { size: (bits * n / 8) as u8, lane: lane_of(bits / 8), kind })
 }
 
 /// Pointee of a ref / raw pointer type.

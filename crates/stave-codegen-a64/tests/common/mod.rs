@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod rgen;
+pub mod vgen;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

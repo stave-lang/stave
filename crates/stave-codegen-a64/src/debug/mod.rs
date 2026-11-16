@@ -8,8 +8,10 @@
 //!    register allocation (values are cached in caller-saved registers, written back to their
 //!    home slots when evicted, before calls, and at block ends when live out), and encoding.
 //!
-//! Register classes: GPR and FP scalar. Aggregates (tuples, structs, arrays, enums) and fat
-//! pointers live in memory (their home slot); scalars live in registers.
+//! Register classes: GPR and FP scalar. Aggregates (tuples, structs, arrays, enums), fat
+//! pointers, vectors and masks live in memory (their home slot); scalars live in registers.
+//! Vector ops load their operands into temporary V registers and store their result (`simd`); a
+//! 128-bit vector's home is 16-byte aligned.
 //!
 //! Release code generation ([`Codegen::release`]) keeps this structure. A value used in another
 //! block, and every param of a later block, owns a callee-saved register (`x19`–`x28`, `v8`–`v15`)
@@ -33,14 +35,19 @@
 //!   reference: the caller passes the address of a caller-owned copy (its home slot) in the next
 //!   GPR (or a stack word); the callee copies it into its own frame and never writes through the
 //!   pointer (AAPCS64 B.4 for composites > 16 bytes, applied to all sizes).
+//! - A vector or mask (at most 128 bits) goes in the next free `v0..v7` as a whole register, like
+//!   an AAPCS64 short vector: lanes in order from bit 0, bits past its size unspecified, a mask as
+//!   full-width lanes of all ones or zero. Without a free register it goes to the stack by value
+//!   (16 bytes, 16-byte aligned, for a 128-bit vector; one word for a narrower one).
 //! - Arguments that find no register go to the stack in order, each 8-byte aligned and rounded up
 //!   to 8 bytes (16 for a fat pointer), from `[sp]` at the call; the callee finds them at
 //!   `[x29 + 16]`.
-//! - Results: integer-class scalars in `x0`, floats in `v0`, a fat pointer in `x0, x1`; an
-//!   aggregate result is written to the buffer whose address the caller passes in `x8`
-//!   (AAPCS64 indirect result location); unit returns nothing.
+//! - Results: integer-class scalars in `x0`, floats in `v0`, a fat pointer in `x0, x1`, a vector
+//!   or mask in `v0`; an aggregate result is written to the buffer whose address the caller passes
+//!   in `x8` (AAPCS64 indirect result location); unit returns nothing.
 //! - Caller-saved: `x0–x18`, `v0–v7`, `v16–v31`, flags. Callee-saved: `x19–x28`, `x29` (frame
-//!   pointer), `v8–v15` (low 64 bits). A debug build never allocates callee-saved registers;
+//!   pointer), `v8–v15` (low 64 bits: no register keeps a vector across a call). A debug build
+//!   never allocates callee-saved registers;
 //!   every frame saves `x29, x30` with `stp x29, x30, [sp, #-16]!; mov x29, sp`.
 //! - `sp` is 16-byte aligned at every call. Frames larger than 4 KiB are probed page by page in
 //!   the prologue (runtime/README.md, guard page).
@@ -104,12 +111,14 @@
 //! - With stave-obj's jump table (debug [`stave_obj::Options`]), every function reference resolves
 //!   to the function's jump-table stub, except the `pc_lo` words of the PC table
 //!   ([`stave_obj::RelocKind::Abs64Body`]: the body's first instruction).
-//! - Vectors, masks, f16/bf16 values: [`ErrorKind::Unsupported`].
+//! - Vectors and masks wider than 128 bits, sizeless vectors, f16/bf16 values and lanes:
+//!   [`ErrorKind::Unsupported`].
 
 mod abi;
 mod analysis;
 mod emit;
 mod ops;
+mod simd;
 mod support;
 mod ty;
 
@@ -129,7 +138,8 @@ pub struct Error {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// Valid IR this backend does not support (vectors, f16 arithmetic, x86-only intrinsics, ...).
+    /// Valid IR this backend does not support (wide vectors, f16 arithmetic, x86-only intrinsics,
+    /// ...).
     Unsupported(String),
     /// IR the verifier should have rejected.
     BadIr(String),
