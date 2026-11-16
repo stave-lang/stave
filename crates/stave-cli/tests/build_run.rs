@@ -391,6 +391,104 @@ fn run_equals_the_built_binary() {
     }
 }
 
+const OVERFLOWING_SUM: &str = "import std.io;
+
+fn main() -> i32 {
+    let a: [u8; 40] = [7; 40];
+    let s = (&a[0..40]).sum();
+    io.print(f\"{s}\\n\");
+    return 0;
+}
+";
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let dst = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_tree(&e.path(), &dst);
+        } else {
+            std::fs::copy(e.path(), dst).unwrap();
+        }
+    }
+}
+
+/// Whatever goes into a binary names the files of `std` and `runtime` package-relative, so the
+/// bytes do not depend on where the library is installed.
+#[test]
+fn binaries_do_not_depend_on_the_library_location() {
+    let d = tmp("library_location");
+    let src = d.join("prog.stv");
+    std::fs::write(&src, OVERFLOWING_SUM).unwrap();
+    let libs: Vec<PathBuf> = ["lib", "a-much-longer-library-directory-name"]
+        .iter()
+        .map(|n| {
+            let lib = d.join(n);
+            for p in ["std", "runtime"] {
+                copy_tree(&repo().join(p), &lib.join(p));
+            }
+            lib
+        })
+        .collect();
+    for target in ["x86_64-linux", "aarch64-linux"] {
+        for release in [false, true] {
+            let mut bins = Vec::new();
+            for (i, lib) in libs.iter().enumerate() {
+                let out = d.join(format!("prog-{target}-{release}-{i}"));
+                let mut args = vec!["build", "prog.stv", "--target", target, "-o", out.to_str().unwrap()];
+                if release {
+                    args.push("--release");
+                }
+                let o = Command::new(env!("CARGO_BIN_EXE_stave"))
+                    .args(&args)
+                    .current_dir(&d)
+                    .env("STAVE_STD_DIR", lib)
+                    .env_remove("STAVE_THREADS")
+                    .env_remove("STAVE_SEMA_SHUFFLE")
+                    .output()
+                    .unwrap();
+                assert!(
+                    o.status.success(),
+                    "{target} release={release}: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                let bytes = std::fs::read(&out).unwrap();
+                let at = lib.display().to_string();
+                assert!(
+                    !bytes.windows(at.len()).any(|w| w == at.as_bytes()),
+                    "{target} release={release}: the binary names the library directory {at}"
+                );
+                bins.push(bytes);
+            }
+            assert!(bins[0] == bins[1], "{target} release={release}: the binaries differ");
+        }
+    }
+}
+
+/// A trap inside `std` names its file package-relative.
+#[test]
+fn panic_in_std_names_the_package_relative_file() {
+    if !host_runs() {
+        return;
+    }
+    let d = tmp("std_panic_path");
+    let src = d.join("prog.stv");
+    std::fs::write(&src, OVERFLOWING_SUM).unwrap();
+    for release in [false, true] {
+        let mut args = vec!["build", "prog.stv", "-o", "prog"];
+        if release {
+            args.push("--release");
+        }
+        let (c, _, err) = stave_in(&d, &args);
+        assert_eq!(c, 0, "{err}");
+        let (code, _, err) = run_bin(&d.join("prog"));
+        assert_eq!(code, 101, "{err}");
+        assert!(err.contains("panic: Overflow at std/slice.stv:"), "release={release}: {err}");
+        assert!(err.contains(" in std.slice.impl.sum "), "release={release}: {err}");
+    }
+}
+
 #[test]
 fn run_foreign_target_is_e1001() {
     let foreign = if cfg!(target_arch = "x86_64") { "aarch64-linux" } else { "x86_64-linux" };
