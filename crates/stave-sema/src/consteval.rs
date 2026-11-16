@@ -109,43 +109,19 @@ pub(crate) fn eval_u64<E: CEnv>(env: &mut E, te: &TyEnv<'_>, n: u32, ty: TypeId)
     }
 }
 
-/// If `n` is (wrappers around) a path naming a const generic param: its flat index.
+/// If `n` is a bare name of a const generic param: its flat index.
 fn const_param_path(te: &TyEnv<'_>, n: u32) -> Option<u32> {
     let icx = te.icx;
-    let mut n = n;
-    for _ in 0..64 {
-        let kids = icx.kids_vec(n);
-        match icx.kind(n)? {
-            NodeKind::Primary => {
-                let u = icx.uses(n).first()?;
-                return match u.res {
-                    Res::Generic(g) if g.is_const && icx.primary_end(n) == icx.a(n) => {
-                        Some(if g.level == 0 { g.index as u32 } else { te.n_parent + g.index as u32 })
-                    }
-                    _ => None,
-                };
-            }
-            NodeKind::Postfix => {
-                if kids.len() != 1 || icx.postfix_end(n) != icx.primary_end(kids[0]) {
-                    return None;
-                }
-                n = kids[0];
-            }
-            NodeKind::Unary => {
-                if kids.len() != 1 || icx.a(kids[0]) != icx.a(n) {
-                    return None;
-                }
-                n = kids[0];
-            }
-            _ => {
-                if kids.len() != 1 {
-                    return None;
-                }
-                n = kids[0];
-            }
-        }
+    if icx.kind(n)? != NodeKind::Primary {
+        return None;
     }
-    None
+    let u = icx.uses(n).first()?;
+    match u.res {
+        Res::Generic(g) if g.is_const && icx.primary_end(n) == icx.a(n) => {
+            Some(if g.level == 0 { g.index as u32 } else { te.n_parent + g.index as u32 })
+        }
+        _ => None,
+    }
 }
 
 fn wrap_int(v: i128, signed: bool, bits: u32) -> i128 {
@@ -233,7 +209,6 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         let kids = icx.kids_vec(n);
         let k = icx.kind(n)?;
         match k {
-            NodeKind::Expr => self.eval(*kids.first()?, want),
             NodeKind::IfExpr => {
                 let (ct, cv) = self.eval(kids[0], Some(self.fx(ids::BOOL)))?;
                 if ct != self.fx(ids::BOOL) {
@@ -350,9 +325,6 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 let a = icx.a(n);
                 let t = icx.tk(a);
                 let &c = kids.first()?;
-                if icx.kind(c) == Some(NodeKind::Postfix) && icx.a(c) == a {
-                    return self.eval(c, want);
-                }
                 if t == Term::Minus as u8 {
                     let (ct, cv) = self.eval(c, want)?;
                     return match cv {
@@ -395,6 +367,8 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 self.e0904(n, "a non-const item")
             }
             NodeKind::Postfix => self.postfix(n, &kids, want),
+            // a bare name is a path with no steps
+            NodeKind::Primary if icx.is_path_head(n) => self.postfix(n, &[n], want),
             NodeKind::Primary => self.primary(n, &kids, want),
             _ => None,
         }

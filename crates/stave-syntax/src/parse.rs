@@ -22,7 +22,10 @@
 //!
 //! **AST.** Each named-rule expansion opens a node at the current token and closes it when its
 //! right-hand side is done (a close marker under the pushed symbols), which yields postorder
-//! directly (see [`crate::ast`]).
+//! directly (see [`crate::ast`]). A pass-through rule's node (generated `NT_PASS`, grammar
+//! header) that closes with exactly one child and no terminal of its own is not emitted: its
+//! child already sits where the node would be, and every ancestor's subtree size is counted from
+//! the emitted nodes. The open stack, and so error reporting and the printer's trace, still see it.
 
 use std::sync::OnceLock;
 
@@ -65,6 +68,8 @@ struct Tables {
     rhs: Vec<u32>,
     off: Vec<u32>,
     named: Vec<bool>,
+    /// Per nonterminal: a pass-through rule (generated `NT_PASS`).
+    pass: Vec<bool>,
     nullable: Vec<bool>,
     /// Per production: 1 + index (in the reversed rhs) of the cast's `Type`, or 0.
     cast_seed: Vec<u8>,
@@ -165,6 +170,7 @@ fn build_tables() -> Tables {
         rhs,
         off,
         named: lt::NT_NAMED.to_vec(),
+        pass: lt::NT_PASS.to_vec(),
         nullable,
         cast_seed,
         split_first,
@@ -257,6 +263,10 @@ fn simulate(t: &Tables, nt: usize, c: u16) -> Option<(Vec<u32>, Vec<u32>, u32)> 
         let sym = e & SYM_MASK;
         if sym == CLOSE {
             let (k, at, evi) = open.pop()?;
+            if t.pass[k as usize] {
+                // never taken (pass-through rules do not derive ε); the omission rule runs in `run`
+                return None;
+            }
             ev[evi] = Ev::Open(k, false);
             ev.push(Ev::Emit(k, emitted - at));
             emitted += 1;
@@ -312,8 +322,26 @@ impl Trace for Plain {
 #[derive(Default)]
 pub(crate) struct Scratch {
     stack: Vec<u32>,
-    open: Vec<(u8, u32, u32)>,
+    open: Vec<OpenNode>,
     d2: Vec<u32>,
+}
+
+/// A named node whose right-hand side is not done yet.
+#[derive(Clone, Copy)]
+struct OpenNode {
+    kind: u8,
+    /// A terminal was consumed while this node was the innermost open one.
+    own: bool,
+    /// File index of its first token.
+    tok: u32,
+    /// Item-relative count of the nodes emitted before it opened.
+    at: u32,
+}
+
+impl OpenNode {
+    fn new(kind: u8, tok: usize, at: u32) -> OpenNode {
+        OpenNode { kind, own: false, tok: tok as u32, at }
+    }
 }
 
 /// The PDA state at an item's first error.
@@ -368,9 +396,15 @@ pub(crate) fn run<T: Trace>(
     while let Some(mut e) = s.stack.pop() {
         let sym = e & SYM_MASK;
         if sym == CLOSE {
-            if let Some((kind, a, c)) = s.open.pop() {
-                let b = (nodes.len() - base) as u32 - c;
-                nodes.push(Node { kind, a, b });
+            if let Some(o) = s.open.pop() {
+                let b = (nodes.len() - base) as u32 - o.at;
+                // a pass-through node over exactly one child (its last node, of subtree size
+                // b - 1) and no terminal of its own is left out
+                let bare =
+                    t.pass[o.kind as usize] && !o.own && b > 0 && nodes.last().is_some_and(|c| c.b + 1 == b);
+                if !bare {
+                    nodes.push(Node { kind: o.kind, a: o.tok, b });
+                }
                 if T::ON {
                     trace.close();
                 }
@@ -392,7 +426,7 @@ pub(crate) fn run<T: Trace>(
                         nodes.push(Node { kind: op as u8, a: i as u32, b: (op & !EMIT) >> 8 });
                         emitted += 1;
                     } else {
-                        s.open.push((op as u8, i as u32, count + emitted));
+                        s.open.push(OpenNode::new(op as u8, i, count + emitted));
                     }
                 }
                 push_all(&mut s.stack, &t.mpush[m.push as usize..m.push_end as usize]);
@@ -405,7 +439,7 @@ pub(crate) fn run<T: Trace>(
                     return Err(fail(e, i, cur, shift, s));
                 };
                 if t.named[nt] {
-                    s.open.push((nt as u8, i as u32, (nodes.len() - base) as u32));
+                    s.open.push(OpenNode::new(nt as u8, i, (nodes.len() - base) as u32));
                     s.stack.push(CLOSE);
                     if T::ON {
                         trace.open(nt as u8, i);
@@ -422,6 +456,9 @@ pub(crate) fn run<T: Trace>(
         }
         // A terminal on top.
         let sym = (e & SYM_MASK) as u16;
+        if let Some(o) = s.open.last_mut() {
+            o.own = true;
+        }
         if sym == cur {
             if T::ON {
                 trace.term(i, sym, ((e >> PROD_SHIFT) & PROD_MASK) as u16);
@@ -488,8 +525,8 @@ fn fail(top: u32, la: usize, la_kind: u16, shift: u32, s: &Scratch) -> Fail {
         la_kind,
         shift,
         d2_lt: s.d2.last().copied(),
-        open_kind: s.open.last().map(|o| o.0),
-        open_tok: s.open.last().map(|o| o.1),
+        open_kind: s.open.last().map(|o| o.kind),
+        open_tok: s.open.last().map(|o| o.tok),
     }
 }
 
@@ -886,7 +923,7 @@ fn parse_chunks<T: Trace + TraceNew>(
         .map_init(Scratch::default, |s, items| {
             let ntok: usize = items.iter().map(|it| it.end.saturating_sub(it.start) as usize).sum();
             let mut out = ChunkOut {
-                nodes: Vec::with_capacity(ntok * 5 / 2 + 16),
+                nodes: Vec::with_capacity(ntok * 3 / 5 + 16),
                 items: Vec::with_capacity(items.len()),
             };
             for &it in items {

@@ -128,6 +128,10 @@ fn ll1_table_stave(t: &Tables, names: &Names, header: &str) -> String {
     o += "\n// True for a named rule (makes an AST node), false for a helper.\n";
     let named: Vec<bool> = t.nts.iter().map(|n| n.named).collect();
     array(&mut o, "NT_NAMED", "bool", &named);
+    o += "\n// True for a pass-through rule: its node is omitted when it holds exactly one child node\n";
+    o += "// and consumed no terminal itself (the child takes its place).\n";
+    let pass: Vec<bool> = t.nts.iter().map(|n| n.pass).collect();
+    array(&mut o, "NT_PASS", "bool", &pass);
     o += "\n// Left-hand side per production.\n";
     let lhs: Vec<u16> = t.prods.iter().map(|p| p.lhs).collect();
     array(&mut o, "PROD_LHS", "u16", &lhs);

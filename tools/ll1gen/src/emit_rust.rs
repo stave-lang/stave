@@ -181,6 +181,10 @@ fn ll1_table_rs(t: &Tables, names: &Names, header: &str) -> String {
     o += "];\n\n/// True for a named rule (makes an AST node), false for a helper.\n";
     o += "pub static NT_NAMED: [bool; NNT] = [\n";
     o += &pack(t.nts.iter().map(|n| n.named.to_string()), "    ", W);
+    o += "];\n\n/// True for a pass-through rule: its node is omitted when it holds exactly one child node\n";
+    o += "/// and consumed no terminal itself (the child takes its place).\n";
+    o += "pub static NT_PASS: [bool; NNT] = [\n";
+    o += &pack(t.nts.iter().map(|n| n.pass.to_string()), "    ", W);
     o += "];\n\n// Productions:\n";
     for i in 0..t.prods.len() {
         let _ = writeln!(o, "//   {i}: {}", t.show_prod(i));

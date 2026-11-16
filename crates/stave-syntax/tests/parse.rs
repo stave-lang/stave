@@ -63,7 +63,8 @@ fn ast_children_in_source_order() {
     assert_eq!(kids.len(), 2);
     let a: Vec<u32> = kids.iter().map(|&k| ast.get(k).unwrap().a).collect();
     assert_eq!(a, vec![5, 7], "operands start at `a` and `b`");
-    assert_eq!(ast.child(add, NodeKind::Mul), Some(kids[0]));
+    assert_eq!(ast.kind(kids[0]), Some(NodeKind::Primary));
+    assert_eq!(ast.child(add, NodeKind::Mul), Some(kids[1]));
     // a node matching no token points at the next token (ArrOrIdx in `[]` permute args)
     let pf = parse_file(b"fn f() { let v = x.p::<[]>(); }", F);
     let ast = pf.item_ast(0);
@@ -71,6 +72,39 @@ fn ast_children_in_source_order() {
     let a = ast.get(n).unwrap().a as usize;
     assert_eq!(pf.tokens[a].kind, Term::RBracket as u8);
     assert_eq!(ast.get(n).unwrap().b, 0);
+}
+
+#[test]
+fn pass_through_levels_make_no_node() {
+    use NodeKind as K;
+    // `const X: i32 = e;` is TypeBase, Type, e's nodes, ConstDecl, ItemBody, Item
+    let expr = |e: &str| -> Vec<K> {
+        let src = format!("const X: i32 = {e};");
+        let pf = parse_file(src.as_bytes(), F);
+        assert!(pf.diagnostics.is_empty() && pf.items[0].ok, "{src}");
+        let kinds: Vec<K> = pf.item_ast(0).nodes.iter().map(|n| n.kind()).collect();
+        assert_eq!(kinds[..2], [K::TypeBase, K::Type], "{src}");
+        assert_eq!(kinds[kinds.len() - 3..], [K::ConstDecl, K::ItemBody, K::Item], "{src}");
+        kinds[2..kinds.len() - 3].to_vec()
+    };
+    assert_eq!(expr("x"), [K::Primary]);
+    assert_eq!(expr("(x)"), [K::Primary, K::Primary]);
+    assert_eq!(expr("-x"), [K::Primary, K::Unary]);
+    assert_eq!(expr("&&x"), [K::Primary, K::Unary, K::Unary]);
+    assert_eq!(expr("unsafe(\"ok\") *p"), [K::Unsafe, K::Primary, K::Unary, K::Unary]);
+    assert_eq!(expr("x?"), [K::Primary, K::Postfix]);
+    assert_eq!(expr("f()"), [K::Primary, K::Postfix]);
+    assert_eq!(expr("f(a)"), [K::Primary, K::Primary, K::Args, K::Postfix]);
+    assert_eq!(expr("S.{ a: 1 }"), [K::Primary, K::Primary, K::StructLit, K::Postfix]);
+    assert_eq!(expr("x as u8"), [K::Primary, K::TypeBase, K::Type, K::Cast]);
+    assert_eq!(expr("a + b * c"), [K::Primary, K::Primary, K::Primary, K::Mul, K::Add]);
+    assert_eq!(expr("a < b"), [K::Primary, K::CmpOp, K::Primary, K::CmpExpr]);
+    assert_eq!(expr("a || b && c"), [K::Primary, K::Primary, K::Primary, K::AndExpr, K::OrExpr]);
+    assert_eq!(expr("0..n"), [K::Primary, K::Primary, K::RangeExpr]);
+    assert_eq!(expr("if c then a else b"), [K::Primary, K::Primary, K::Primary, K::IfExpr]);
+    // the stepwise PDA omits the same nodes
+    let src = b"fn f() { let v = -a.b(c, d?)[0] as u8 + (x) * y; g(h); }";
+    assert_eq!(parse_file(src, F).ast, stave_syntax::parse_file_stepwise(src, F).ast);
 }
 
 #[test]

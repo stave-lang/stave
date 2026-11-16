@@ -9,7 +9,7 @@
 //!   (E0802, cases default / `sync`).
 //! - **shared**: the `body` of `std.thread.par_for` / `par_for_mut` (called from many threads at
 //!   once): every capture needs `T: Sync`, and a `&mut` capture is E0802 case `par-mut`.
-//! - the argument itself (after single-operand wrappers) must be a closure literal or a fn item:
+//! - the argument itself must be a closure literal or a fn item:
 //!   any other expression (a fn-typed param passed on, a local, a value `if` or `match` choosing
 //!   between fn values, a call returning one) is E0806.
 //! - the three functions are never fn values (E0807 case `thread`, at the coercion in
@@ -141,31 +141,17 @@ impl Ck<'_> {
     }
 }
 
-/// `n` and the single-operand expression wrappers below it, outermost first; the last node is
-/// the argument's core. A fn item argument has its `FnItem` coercion on one of these nodes; a
-/// coercion deeper inside (an operand of `if`, `match`, or a call) does not make the argument a
-/// fn item.
+/// `n` and the `Unary` / `Postfix` nodes below it that have one child starting at their own
+/// first token (a dotted path `m.f` is a `Postfix` over its `Primary`), outermost first; the last
+/// node is the argument's core. A fn item argument has its `FnItem` coercion on one of these
+/// nodes; a coercion deeper inside (an operand of `if`, `match`, or a call) does not make the
+/// argument a fn item.
 fn wrapper_chain(icx: &crate::itemcx::ItemCx<'_>, n: u32) -> Vec<u32> {
     let mut cur = n;
     let mut out = vec![n];
     for _ in 0..1_000_000 {
         match icx.kind(cur) {
-            Some(
-                NodeKind::Expr
-                | NodeKind::RangeExpr
-                | NodeKind::OrExpr
-                | NodeKind::AndExpr
-                | NodeKind::CmpExpr
-                | NodeKind::BitOr
-                | NodeKind::BitXor
-                | NodeKind::BitAnd
-                | NodeKind::Shift
-                | NodeKind::Add
-                | NodeKind::Mul
-                | NodeKind::Cast
-                | NodeKind::Unary
-                | NodeKind::Postfix,
-            ) => {
+            Some(NodeKind::Unary | NodeKind::Postfix) => {
                 let kids = icx.kids_vec(cur);
                 if kids.len() != 1 || icx.a(kids[0]) != icx.a(cur) {
                     break;

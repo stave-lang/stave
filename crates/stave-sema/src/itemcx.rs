@@ -297,6 +297,33 @@ impl<'p> ItemCx<'p> {
         self.ast.children_rev(n).next()
     }
 
+    /// Whether `n` is an expression node (any of them can stand in an expression position).
+    pub fn is_expr(&self, n: u32) -> bool {
+        self.kind(n).is_some_and(crate::typeck::is_expr_kind)
+    }
+
+    /// The first expression child of `n`.
+    pub fn expr_child(&self, n: u32) -> Option<u32> {
+        self.ast.children_rev(n).filter(|&c| self.is_expr(c)).last()
+    }
+
+    /// The head `Primary` of a postfix chain: a `Postfix` node's first child, or a bare
+    /// `Primary` (a chain without steps) itself.
+    pub fn chain_head(&self, n: u32) -> Option<u32> {
+        match self.kind(n)? {
+            NodeKind::Postfix => self.first_child(n),
+            NodeKind::Primary => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Whether the `Primary` `p` starts with a name (an identifier or `Self`): the head of a
+    /// path whose steps resolution recorded.
+    pub fn is_path_head(&self, p: u32) -> bool {
+        let a = self.a(p);
+        self.is(a, Term::Ident) || self.is(a, Term::KwSelfType)
+    }
+
     /// The uses keyed at `n`.
     pub fn uses(&self, n: u32) -> &'p [Use] {
         self.res.uses_at(n)
@@ -447,8 +474,11 @@ impl<'p> ItemCx<'p> {
         a
     }
 
-    /// The last token of a `Postfix` (its last suffix).
+    /// The last token of a postfix chain: a `Postfix` (its last suffix) or a bare `Primary`.
     pub fn postfix_end(&self, n: u32) -> u32 {
+        if self.kind(n) == Some(NodeKind::Primary) {
+            return self.primary_end(n);
+        }
         let Some(prim) = self.first_child(n) else { return self.a(n) };
         let mut p = self.primary_end(prim) + 1;
         loop {

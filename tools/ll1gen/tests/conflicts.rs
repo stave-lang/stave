@@ -152,13 +152,38 @@ fn rules_named_by_parse_errors_contract_are_required() {
     let src = fixture_src("base.ebnf").replace("AndExpr", "Conj");
     let all = joined(&errors(&src));
     assert!(all.contains("rule `AndExpr`"), "{all}");
-    let cfg =
-        Config { overrides: &OVERRIDES[..], required_rules: &[], required_overrides: &[("TypeBase", "<")] };
+    let cfg = Config {
+        overrides: &OVERRIDES[..],
+        required_rules: &[],
+        required_overrides: &[("TypeBase", "<")],
+        pass_through: &[],
+    };
     let no_d2 = Config { overrides: &OVERRIDES[..1], ..cfg };
     let Err(errs) = build_tables(&fixture_src("base.ebnf"), &no_d2) else { panic!("expected errors") };
     let all = joined(&errs);
     assert!(all.contains("(TypeBase, \"<\") named by contracts/parse-errors.md"), "{all}");
     assert!(all.contains("not in OVERRIDES: (TypeBase, \"<\")"), "{all}");
+}
+
+#[test]
+fn pass_through_rules_must_exist_and_not_derive_epsilon() {
+    let base = fixture_src("base.ebnf");
+    let cfg = Config { pass_through: &["Cast", "AndExpr"], ..Config::contract() };
+    let t = build_tables(&base, &cfg).expect("base");
+    let pass: Vec<&str> = t.nts.iter().filter(|n| n.pass).map(|n| n.name.as_str()).collect();
+    assert_eq!(pass, ["AndExpr", "Cast"]);
+    let t = build_tables(&base, &Config::contract()).expect("base");
+    assert_eq!(t.nts.iter().filter(|n| n.pass).count(), ll1gen::PASS_THROUGH.len());
+    let cfg = Config { pass_through: &["Cast", "Nope"], ..Config::contract() };
+    let Err(errs) = build_tables(&base, &cfg) else { panic!("expected errors") };
+    assert_eq!(errs.len(), 1, "{}", joined(&errs));
+    assert!(errs[0].msg.contains("pass-through rule `Nope` is missing"), "{}", errs[0]);
+    let src = format!("{base}Opt = Ident? ;\n");
+    let Err(errs) = build_tables(&src, &Config { pass_through: &["Opt"], ..Config::contract() }) else {
+        panic!("expected errors")
+    };
+    assert_eq!(errs.len(), 1, "{}", joined(&errs));
+    assert!(errs[0].msg.contains("pass-through rule `Opt` derives ε"), "{}", errs[0]);
 }
 
 #[test]

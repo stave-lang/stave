@@ -646,9 +646,9 @@ impl<'t, 'a> W<'t, 'a> {
         self.chain(n, ns, None, false, false);
     }
 
-    /// `Postfix`: resolve the head chain of its `Primary`.
-    fn postfix(&mut self, p: u32) {
-        let Some(prim) = self.ast.children_rev(p).last() else { return };
+    /// A `Primary` (every postfix chain starts with one): resolve its head chain, the name and
+    /// the `.Ident` steps that follow it.
+    fn chain_head(&mut self, prim: u32) {
         let a = self.a(prim) as usize;
         let k = kind(self.toks, a);
         let (head, mut pos) = if k == T_IDENT {
@@ -1071,6 +1071,7 @@ impl<'t, 'a> W<'t, 'a> {
                 self.unimplemented(n, "a `requires` / `ensures` contract");
             }
             NodeKind::Primary => {
+                self.chain_head(n);
                 let a = self.a(n) as usize;
                 if is(self.toks, a, Term::KwFn) {
                     self.stack.push(Task::EndClosure {
@@ -1080,10 +1081,6 @@ impl<'t, 'a> W<'t, 'a> {
                     self.param_mark = self.locals.len() as u32;
                     self.closures += 1;
                 }
-                self.push_children(n);
-            }
-            NodeKind::Postfix => {
-                self.postfix(n);
                 self.push_children(n);
             }
             NodeKind::TypeBase => {

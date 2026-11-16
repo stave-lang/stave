@@ -10,12 +10,12 @@
 5 16 -> local 5 14
 7 0 -> decl 3
 9 10 -> local 9 2
-9 15 -> local 9 5
+9 11 -> local 9 5
 10 4 -> decl 18
-10 52 -> decl 17
-10 53 -> local 10 3
-10 68 -> local 10 3
-10 99 -> decl 3
-10 99 -> decl 16
-10 100 -> local 10 51
-10 130 -> local 10 51
+10 11 -> decl 17
+10 12 -> local 10 3
+10 14 -> local 10 3
+10 19 -> decl 3
+10 19 -> decl 16
+10 20 -> local 10 10
+10 25 -> local 10 10

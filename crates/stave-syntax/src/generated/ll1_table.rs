@@ -92,6 +92,30 @@ pub static NT_NAMED: [bool; NNT] = [
     false, false, false, false, false, false, false, false, false, false,
 ];
 
+/// True for a pass-through rule: its node is omitted when it holds exactly one child node
+/// and consumed no terminal itself (the child takes its place).
+pub static NT_PASS: [bool; NNT] = [
+    false, true, false, false, true, false, false, false, false, true, true, true, false, false,
+    false, true, true, false, false, false, false, false, true, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, true, false, false, true, false, false, false, false,
+    false, true, false, true, false, false, false, true, false, false, false, false, false, false,
+    false, false, false, false, false, true, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false,
+];
+
 // Productions:
 //   0: File#1 -> Import File#1
 //   1: File#1 -> ε

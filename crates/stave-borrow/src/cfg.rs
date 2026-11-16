@@ -313,24 +313,6 @@ pub struct Builder<'a, 'b> {
     owned_elems: Option<LocalId>,
 }
 
-fn passthrough_kind(k: NodeKind) -> bool {
-    matches!(
-        k,
-        NodeKind::Expr
-            | NodeKind::RangeExpr
-            | NodeKind::OrExpr
-            | NodeKind::AndExpr
-            | NodeKind::CmpExpr
-            | NodeKind::BitOr
-            | NodeKind::BitXor
-            | NodeKind::BitAnd
-            | NodeKind::Shift
-            | NodeKind::Add
-            | NodeKind::Mul
-            | NodeKind::Cast
-    )
-}
-
 /// Builds the body of fn decl node `fn_node` (params in `params`, signature `from` list).
 pub fn build_fn<'a>(
     icx: ItemCx<'a>,
@@ -583,7 +565,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         match v {
             V::P(p) => Some(p),
             V::Const => {
-                let ty = self.nty(self.core(n));
+                let ty = self.nty(n);
                 let op = self.const_op(n);
                 match self.put_temp(Rvalue::Use(op), ty, n) {
                     V::P(p) => Some(p),
@@ -850,7 +832,7 @@ impl<'a, 'b> Builder<'a, 'b> {
     fn let_stmt(&mut self, kids: &[u32]) {
         let icx = self.icx;
         let Some(&pat) = kids.first() else { return };
-        let Some(init) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Expr)) else { return };
+        let Some(init) = kids.iter().copied().find(|&c| icx.is_expr(c)) else { return };
         let v = self.expr(init);
         if matches!(v, V::Never) || !self.open() {
             return;
@@ -1001,7 +983,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         let icx = self.icx;
         let kids = icx.kids_vec(f);
         let Some(&pat) = kids.first() else { return };
-        let Some(iter) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Expr)) else { return };
+        let Some(iter) = kids.iter().copied().find(|&c| icx.is_expr(c)) else { return };
         let Some(body) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Block)) else { return };
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
         let bind_ty = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type));
@@ -1697,59 +1679,8 @@ impl<'a, 'b> Builder<'a, 'b> {
 
     // ---------- expressions ----------
 
-    fn passthrough(&self, n: u32) -> Option<u32> {
-        let icx = self.icx;
-        let k = icx.kind(n)?;
-        if passthrough_kind(k) {
-            return icx.only_child(n);
-        }
-        if k == NodeKind::Unary {
-            let c = icx.first_child(n)?;
-            if icx.kind(c) == Some(NodeKind::Postfix) && icx.a(c) == icx.a(n) {
-                return Some(c);
-            }
-        }
-        None
-    }
-
-    fn core(&self, n: u32) -> u32 {
-        let mut cur = n;
-        for _ in 0..1_000_000 {
-            match self.passthrough(cur) {
-                Some(c) => cur = c,
-                None => break,
-            }
-        }
-        cur
-    }
-
     fn coercion_of(&self, n: u32) -> Option<Coercion> {
-        let tb = self.tb;
-        // a coercion of `n`'s chain is keyed at `n` or a descendant: none in that range, none at all
-        let lo = self.icx.ast.descendants(n).start;
-        let k = tb.coercions.partition_point(|c| c.0 < lo);
-        if tb.coercions.get(k).is_none_or(|c| c.0 > n) {
-            return None;
-        }
-        let mut cur = n;
-        for _ in 0..1_000_000 {
-            if let Some(c) = tb.coercion(cur) {
-                return Some(c.clone());
-            }
-            match self.passthrough(cur) {
-                Some(c) => cur = c,
-                None => break,
-            }
-        }
-        let icx = self.icx;
-        if icx.kind(cur) == Some(NodeKind::Postfix)
-            && let Some(p) = icx.first_child(cur)
-            && icx.postfix_end(cur) == icx.primary_end(p)
-            && let Some(c) = tb.coercion(p)
-        {
-            return Some(c.clone());
-        }
-        None
+        self.tb.coercion(n).cloned()
     }
 
     fn expr(&mut self, n: u32) -> V {
@@ -1763,14 +1694,13 @@ impl<'a, 'b> Builder<'a, 'b> {
             self.terminate(Terminator::Unreachable);
             return V::Never;
         }
-        let c = self.core(n);
-        let v = self.expr_node(c);
+        let v = self.expr_node(n);
         let v = match self.coercion_of(n) {
             Some(co) => self.coerce(v, &co, n),
             None => v,
         };
         self.depth -= 1;
-        if self.open() && self.tys.is_never(self.nty(c)) {
+        if self.open() && self.tys.is_never(self.nty(n)) {
             self.terminate(Terminator::Unreachable);
             return V::Never;
         }
@@ -1825,11 +1755,9 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
             NodeKind::Unary => self.unary(n),
             NodeKind::Postfix => self.postfix(n),
+            // a bare name is a path with no steps
+            NodeKind::Primary if self.icx.is_path_head(n) => self.postfix(n),
             NodeKind::Primary => self.primary(n),
-            NodeKind::Expr => match self.icx.first_child(n) {
-                Some(c) => self.expr(c),
-                None => V::Const,
-            },
             _ => V::Const,
         }
     }
@@ -2098,10 +2026,11 @@ impl<'a, 'b> Builder<'a, 'b> {
 
     // ---------- postfix chains ----------
 
+    /// A postfix chain: a `Postfix`, or a bare `Primary` path (no steps).
     fn postfix(&mut self, n: u32) -> V {
         let icx = self.icx;
         let kids = icx.kids_vec(n);
-        let Some(&prim) = kids.first() else { return V::Const };
+        let Some(prim) = icx.chain_head(n) else { return V::Const };
         let pa = icx.a(prim);
         let pend = icx.postfix_end(n);
         let prim_end = icx.primary_end(prim);

@@ -225,45 +225,9 @@ fn mutations(icx: &ItemCx<'_>, tb: &TypedBody, lo: u32, root: u32) -> Vec<(u32, 
     out
 }
 
-/// Skips single-child expression wrappers (precedence levels, casts with one operand).
-fn core(icx: &ItemCx<'_>, n: u32) -> u32 {
-    let mut cur = n;
-    for _ in 0..1_000_000 {
-        let Some(k) = icx.kind(cur) else { break };
-        let wrapper = matches!(
-            k,
-            NodeKind::Expr
-                | NodeKind::RangeExpr
-                | NodeKind::OrExpr
-                | NodeKind::AndExpr
-                | NodeKind::CmpExpr
-                | NodeKind::BitOr
-                | NodeKind::BitXor
-                | NodeKind::BitAnd
-                | NodeKind::Shift
-                | NodeKind::Add
-                | NodeKind::Mul
-                | NodeKind::Cast
-        );
-        if wrapper {
-            let Some(c) = icx.only_child(cur) else { break };
-            cur = c;
-        } else if k == NodeKind::Unary
-            && let Some(c) = icx.first_child(cur)
-            && icx.kind(c) == Some(NodeKind::Postfix)
-            && icx.a(c) == icx.a(cur)
-        {
-            cur = c;
-        } else {
-            break;
-        }
-    }
-    cur
-}
-
 /// The binding a place expression is rooted at without a dereference.
 fn root_binding(icx: &ItemCx<'_>, tb: &TypedBody, n: u32) -> Option<u32> {
-    let c = core(icx, n);
+    let c = n;
     match icx.kind(c)? {
         NodeKind::Unary if icx.is(icx.a(c), Term::KwUnsafe) => root_binding(icx, tb, icx.last_child(c)?),
         NodeKind::Postfix => chain_binding(icx, tb, c, false),

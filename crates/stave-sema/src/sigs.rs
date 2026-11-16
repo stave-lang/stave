@@ -447,7 +447,7 @@ fn lower_array<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32) -> TypeId {
         return h.error_ty();
     };
     let elem = lower_type(h, env, elem_n, false);
-    if let Some(&e) = kids.iter().find(|&&c| icx.kind(c) == Some(NodeKind::Expr)) {
+    if let Some(&e) = kids.iter().find(|&&c| icx.is_expr(c)) {
         let len = h.const_u64(env, e, h.fixed_ty(ids::USIZE));
         if h.is_error_ty(elem) {
             return h.error_ty();
@@ -676,7 +676,9 @@ pub(crate) fn lower_garg<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, ga: u32, want
         }
         if let Some(c) = child {
             match icx.kind(c) {
-                Some(NodeKind::Expr) => return GArg::Const(h.const_u64(env, c, h.fixed_ty(ids::USIZE))),
+                Some(k) if crate::typeck::is_expr_kind(k) => {
+                    return GArg::Const(h.const_u64(env, c, h.fixed_ty(ids::USIZE)));
+                }
                 Some(NodeKind::TypeBase) => {
                     // A const generic param or a const named like a type path.
                     if let Some(u) = icx.uses(c).last() {
@@ -711,7 +713,7 @@ pub(crate) fn lower_garg<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, ga: u32, want
                 return GArg::Type(h.error_ty());
             };
             let elem = lower_type(h, env, tn, false);
-            if let Some(&e) = kids.iter().find(|&&x| icx.kind(x) == Some(NodeKind::Expr)) {
+            if let Some(&e) = kids.iter().find(|&&x| icx.is_expr(x)) {
                 let len = h.const_u64(env, e, h.fixed_ty(ids::USIZE));
                 if h.is_error_ty(elem) || len == ConstArg::Error {
                     return GArg::Type(h.error_ty());
@@ -1514,7 +1516,7 @@ impl<'p> SigBuilder<'p> {
         let env = TyEnv { icx, n_parent: 0, self_ty: None };
         let kids = icx.kids_vec(decl.node);
         let ty_node = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type));
-        let init = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Expr));
+        let init = kids.iter().copied().find(|&c| icx.is_expr(c));
         let ty = match ty_node {
             Some(t) => lower_type(self, &env, t, false),
             None => ids::ERROR,
@@ -1546,49 +1548,30 @@ impl<'p> SigBuilder<'p> {
 
     /// Whether the const initializer `e` is a string literal or a path to a `&str` const.
     fn is_static_str_init(&mut self, icx: &ItemCx<'p>, e: u32) -> bool {
-        // Descend single-child wrappers to the Primary.
-        let mut n = e;
-        for _ in 0..64 {
-            match icx.kind(n) {
-                Some(NodeKind::Primary) => return icx.is(icx.a(n), Term::StrLit),
-                Some(NodeKind::Postfix) => {
-                    let kids = icx.kids_vec(n);
-                    if kids.len() == 1 && icx.postfix_end(n) == icx.primary_end(kids[0]) {
-                        n = kids[0];
-                        // a path `a.B` keyed at the Primary
-                        if let Some(u) = icx.uses(n).last()
-                            && let Res::Decl(d) = u.res
-                            && self.prog.decl(d).is_some_and(|x| x.kind == DeclKind::Const)
-                        {
-                            self.ensure(d);
-                            return matches!(&self.sigs[d.idx()], DeclSig::Const(c) if c.ty == ids::REF_STR);
-                        }
-                        continue;
-                    }
-                    // a dotted path to a const: `m.NAME`
-                    if kids.len() == 1
-                        && let Some(u) = icx.uses(kids[0]).last()
-                        && let Res::Decl(d) = u.res
-                        && self.prog.decl(d).is_some_and(|x| x.kind == DeclKind::Const)
-                    {
-                        self.ensure(d);
-                        return matches!(&self.sigs[d.idx()], DeclSig::Const(c) if c.ty == ids::REF_STR);
-                    }
+        let prim = match icx.kind(e) {
+            Some(NodeKind::Primary) => {
+                if icx.is(icx.a(e), Term::StrLit) {
+                    return true;
+                }
+                e
+            }
+            // a dotted path `m.NAME` (no child but the Primary)
+            Some(NodeKind::Postfix) => {
+                let kids = icx.kids_vec(e);
+                if kids.len() != 1 {
                     return false;
                 }
-                Some(_) => {
-                    let kids = icx.kids_vec(n);
-                    if kids.len() != 1 {
-                        return false;
-                    }
-                    // a unary/cast wrapper with an operator token is not a plain literal
-                    if matches!(icx.kind(n), Some(NodeKind::Unary)) && icx.a(kids[0]) != icx.a(n) {
-                        return false;
-                    }
-                    n = kids[0];
-                }
-                None => return false,
+                kids[0]
             }
+            _ => return false,
+        };
+        // the path's uses are keyed at the Primary, the last one names the const
+        if let Some(u) = icx.uses(prim).last()
+            && let Res::Decl(d) = u.res
+            && self.prog.decl(d).is_some_and(|x| x.kind == DeclKind::Const)
+        {
+            self.ensure(d);
+            return matches!(&self.sigs[d.idx()], DeclSig::Const(c) if c.ty == ids::REF_STR);
         }
         false
     }

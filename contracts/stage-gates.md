@@ -32,7 +32,9 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
 - `items` `O_end` = the byte offset just after the item's last token. The token run before the
   first item start is an item, always `dropped`. A file with E0001, E0002, E0005, or E0016 has no
   items.
-- `ast` `KIND`: the grammar rule name of the node.
+- `ast` `KIND`: the grammar rule name of the node. A node of a pass-through rule (the expression
+  levels `Expr` .. `Postfix`, grammar.ebnf header) with exactly one child node and no token of its
+  own does not exist: its child takes its place, in `N` numbering and in every other dump.
 - `strings` escaping: printed between double quotes. Bytes 0x20–0x7E print as themselves, except
   `\` → `\\` and `"` → `\"`. 0x0A → `\n`, 0x09 → `\t`. Every other byte → `\xHH` (2 lowercase hex
   digits).

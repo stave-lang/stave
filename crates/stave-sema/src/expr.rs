@@ -133,66 +133,15 @@ fn is_shift(op: u8) -> bool {
     op == Term::LtLt as u8 || op == Term::GtGt as u8 || op == Term::LtLtPercent as u8
 }
 
-fn passthrough_kind(k: NodeKind) -> bool {
-    matches!(
-        k,
-        NodeKind::Expr
-            | NodeKind::RangeExpr
-            | NodeKind::OrExpr
-            | NodeKind::AndExpr
-            | NodeKind::CmpExpr
-            | NodeKind::BitOr
-            | NodeKind::BitXor
-            | NodeKind::BitAnd
-            | NodeKind::Shift
-            | NodeKind::Add
-            | NodeKind::Mul
-            | NodeKind::Cast
-    )
-}
-
 impl<'a> Ck<'a> {
-    /// The single child a pass-through node forwards to.
-    fn passthrough(&self, n: u32) -> Option<u32> {
-        let icx = self.icx;
-        let k = icx.kind(n)?;
-        if passthrough_kind(k) {
-            return icx.only_child(n);
-        }
-        if k == NodeKind::Unary {
-            let c = icx.first_child(n)?;
-            if icx.kind(c) == Some(NodeKind::Postfix) && icx.a(c) == icx.a(n) {
-                return Some(c);
-            }
-        }
-        None
-    }
-
-    /// Types expression node `n` with context type `hint`; records the type on `n` and on the
-    /// pass-through wrappers below it.
+    /// Types expression node `n` with context type `hint` and records the type on `n`.
     pub fn expr(&mut self, n: u32, hint: Option<TypeId>) -> Ty {
         if !self.enter(n) {
             self.set(n, Ty::ERR);
             return Ty::ERR;
         }
-        // the wrappers of this expression are the tail of `chain_buf` from `base` on (nested
-        // expressions push and pop their own above it)
-        let base = self.chain_buf.len();
-        let mut cur = n;
-        while let Some(c) = self.passthrough(cur) {
-            self.chain_buf.push(cur);
-            cur = c;
-            if self.chain_buf.len() - base > 1_000_000 {
-                break;
-            }
-        }
-        let t = self.expr_node(cur, hint);
-        self.set(cur, t);
-        for i in base..self.chain_buf.len() {
-            let c = self.chain_buf[i];
-            self.set(c, t);
-        }
-        self.chain_buf.truncate(base);
+        let t = self.expr_node(n, hint);
+        self.set(n, t);
         self.leave();
         t
     }
@@ -214,11 +163,9 @@ impl<'a> Ck<'a> {
             NodeKind::Cast => self.cast_chain(n),
             NodeKind::Unary => self.unary(n, hint),
             NodeKind::Postfix => self.postfix(n, hint),
+            // a bare name is a path with no steps
+            NodeKind::Primary if self.icx.is_path_head(n) => self.postfix(n, hint),
             NodeKind::Primary => self.primary(n, hint),
-            NodeKind::Expr => match self.icx.first_child(n) {
-                Some(c) => self.expr(c, hint),
-                None => Ty::ERR,
-            },
             _ => Ty::ERR,
         }
     }
@@ -670,7 +617,7 @@ impl<'a> Ck<'a> {
         }
     }
 
-    /// The magnitude of a non-negative int literal at `n` (through pass-through wrappers).
+    /// The magnitude of a non-negative int literal at `n` (through parentheses).
     pub fn lit_value(&self, n: u32) -> Option<u128> {
         let p = self.down_to_primary(n)?;
         let a = self.icx.a(p);
@@ -680,20 +627,11 @@ impl<'a> Ck<'a> {
         crate::literals::parse_int(self.icx.tok_str(a)).map(|x| x.0)
     }
 
+    /// The value of a non-negative int const that `n` names by a plain path.
     fn const_value_of(&self, n: u32) -> Option<u128> {
-        let mut cur = n;
-        for _ in 0..64 {
-            match self.passthrough(cur) {
-                Some(c) => cur = c,
-                None => break,
-            }
-        }
-        if self.icx.kind(cur) != Some(NodeKind::Postfix) {
-            return None;
-        }
-        let u = self.icx.uses(self.icx.first_child(cur)?).last()?;
+        let u = self.icx.uses(self.icx.chain_head(n)?).last()?;
         let Res::Decl(d) = u.res else { return None };
-        if self.icx.postfix_end(cur) != self.icx.chain_end(self.icx.a(cur)) {
+        if self.icx.postfix_end(n) != self.icx.chain_end(self.icx.a(n)) {
             return None;
         }
         let c = self.sigs.konst(d)?;
@@ -703,27 +641,16 @@ impl<'a> Ck<'a> {
         }
     }
 
-    /// Whether `n` is an f-string literal (through wrappers).
+    /// Whether `n` is an f-string literal (through parentheses).
     pub fn fstring_node(&self, n: u32) -> bool {
         self.down_to_primary(n).is_some_and(|p| self.icx.is(self.icx.a(p), Term::FmtLit))
     }
 
-    /// The Primary below pass-through wrappers and suffix-less Postfix nodes.
+    /// The Primary that `n` is, through parentheses.
     fn down_to_primary(&self, n: u32) -> Option<u32> {
         let mut cur = n;
         for _ in 0..1_000_000 {
-            if let Some(c) = self.passthrough(cur) {
-                cur = c;
-                continue;
-            }
             match self.icx.kind(cur)? {
-                NodeKind::Postfix => {
-                    let p = self.icx.first_child(cur)?;
-                    if self.icx.postfix_end(cur) != self.icx.primary_end(p) {
-                        return None;
-                    }
-                    cur = p;
-                }
                 NodeKind::Primary => {
                     let a = self.icx.a(cur);
                     if self.icx.is(a, Term::LParen) {
@@ -834,15 +761,7 @@ impl<'a> Ck<'a> {
         let mut cur = top;
         for _ in 0..1_000_000 {
             self.set(cur, t);
-            if let Some(c) = self.passthrough(cur) {
-                cur = c;
-                continue;
-            }
             match self.icx.kind(cur) {
-                Some(NodeKind::Postfix) => match self.icx.first_child(cur) {
-                    Some(p) => cur = p,
-                    None => return,
-                },
                 Some(NodeKind::Primary) => {
                     let a = self.icx.a(cur);
                     if self.icx.is(a, Term::LParen)
@@ -1794,11 +1713,11 @@ impl<'a> Ck<'a> {
         Ty::T(t)
     }
 
-    /// A Postfix chain (see the module docs).
+    /// A postfix chain (see the module docs): a `Postfix`, or a bare `Primary` path (no steps).
     fn postfix(&mut self, n: u32, hint: Option<TypeId>) -> Ty {
         let icx = self.icx;
         let kids = self.kids(n);
-        let Some(&prim) = kids.first() else {
+        let Some(prim) = icx.chain_head(n) else {
             self.free_kids(kids);
             return Ty::ERR;
         };
@@ -2091,14 +2010,10 @@ impl<'a> Ck<'a> {
     /// `Some(inclusive)` when index expression `e` is a range written in the brackets.
     fn range_index(&self, e: u32) -> Option<bool> {
         let icx = self.icx;
-        let mut cur = e;
-        while let Some(c) = self.passthrough(cur) {
-            cur = c;
-        }
-        if icx.kind(cur) != Some(NodeKind::RangeExpr) {
+        if icx.kind(e) != Some(NodeKind::RangeExpr) {
             return None;
         }
-        let r = icx.kids_vec(cur).get(1).copied()?;
+        let r = icx.kids_vec(e).get(1).copied()?;
         Some(icx.is(icx.a(r).saturating_sub(1), Term::DotDotEq))
     }
 
@@ -3215,13 +3130,9 @@ impl<'a> Ck<'a> {
     /// chain of `n` at that token (exclusive): the receiver of a method call.
     fn static_place(&self, n: u32, end: Option<u32>) -> Option<DeclId> {
         let icx = self.icx;
-        let mut cur = n;
-        while let Some(c) = self.passthrough(cur) {
-            cur = c;
-        }
-        let (prim, limit) = match icx.kind(cur)? {
-            NodeKind::Postfix => (icx.first_child(cur)?, end.unwrap_or(icx.postfix_end(cur) + 1)),
-            NodeKind::Primary => (cur, icx.primary_end(cur) + 1),
+        let (prim, limit) = match icx.kind(n)? {
+            NodeKind::Postfix => (icx.first_child(n)?, end.unwrap_or(icx.postfix_end(n) + 1)),
+            NodeKind::Primary => (n, icx.primary_end(n) + 1),
             _ => return None,
         };
         let pa = icx.a(prim);
@@ -3507,7 +3418,7 @@ impl<'a> Ck<'a> {
         let kids = icx.kids_vec(f);
         let Some(&pat) = kids.first() else { return };
         let bind_ty = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type));
-        let Some(iter) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Expr)) else { return };
+        let Some(iter) = kids.iter().copied().find(|&c| icx.is_expr(c)) else { return };
         let body = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Block));
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
         // `for i: T in a..b`: the binding type is the context of the range's literals

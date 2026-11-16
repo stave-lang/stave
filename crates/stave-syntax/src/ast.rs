@@ -1,7 +1,12 @@
 //! The AST: per item, a flat postorder array of named-rule nodes.
 //!
 //! One node per expansion of a named grammar rule (every non-helper nonterminal of grammar.ebnf;
-//! helpers from `? * +` and groups make no node). Node indices restart at 0 for each item.
+//! helpers from `? * +` and groups make no node), except a pass-through rule's expansion (the
+//! expression levels `Expr` .. `Postfix`, grammar header) that holds exactly one child node and no
+//! terminal of its own: there the child stands in its place. So an `Add` node always has a `+`-like
+//! operator, a `Unary` its prefix, a `Postfix` at least one step, and an expression position holds
+//! whatever node its outermost operator (or `Primary`, `IfExpr`, `MatchExpr`) makes; an `Expr`
+//! node never occurs. Node indices restart at 0 for each item.
 //! `a` is the file token index of the node's first token (for a node that matched no token: the
 //! next token); `b` is the number of nodes in its subtree excluding itself, so the descendants of
 //! node `n` are `n - b .. n` and its last child is `n - 1`. The parser leaves `extra` empty; later

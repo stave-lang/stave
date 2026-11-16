@@ -100,12 +100,35 @@ pub const REQUIRED_RULES: [&str; 19] = [
 ];
 pub const REQUIRED_OVERRIDES: [(&str, &str); 1] = [("TypeBase", "<")];
 
+/// Pass-through rules (grammar header): the expression precedence levels. A node of one of them
+/// that holds exactly one child node and consumed no terminal itself is not emitted; its child
+/// takes its place in the parent.
+pub const PASS_THROUGH: [&str; 14] = [
+    "Expr",
+    "RangeExpr",
+    "OrExpr",
+    "AndExpr",
+    "CmpExpr",
+    "BitOr",
+    "BitXor",
+    "BitAnd",
+    "Shift",
+    "Add",
+    "Mul",
+    "Cast",
+    "Unary",
+    "Postfix",
+];
+
 /// What the generator enforces.
 #[derive(Debug, Clone, Copy)]
 pub struct Config<'a> {
     pub overrides: &'a [Override],
     pub required_rules: &'a [&'a str],
     pub required_overrides: &'a [(&'a str, &'a str)],
+    /// Named rules whose node is omitted when it is a bare wrapper ([`PASS_THROUGH`]); each must
+    /// exist and not derive ε.
+    pub pass_through: &'a [&'a str],
 }
 
 impl Config<'static> {
@@ -115,6 +138,7 @@ impl Config<'static> {
             overrides: &OVERRIDES,
             required_rules: &REQUIRED_RULES,
             required_overrides: &REQUIRED_OVERRIDES,
+            pass_through: &PASS_THROUGH,
         }
     }
 }
@@ -127,6 +151,8 @@ pub struct NtOut {
     /// Id of the origin rule (= its nonterminal id = its node kind).
     pub origin: u16,
     pub named: bool,
+    /// A pass-through rule ([`Config::pass_through`]); false for helpers.
+    pub pass: bool,
 }
 
 /// An output production: `rhs` in grammar order (emitters reverse it).
@@ -275,7 +301,8 @@ pub fn build_tables(src: &str, cfg: &Config) -> Result<Tables, Vec<Error>> {
         .iter()
         .map(|&old| {
             let n = &g.nts[old];
-            NtOut { name: n.name.clone(), origin: newid[n.origin], named: !n.helper }
+            let pass = !n.helper && cfg.pass_through.contains(&n.name.as_str());
+            NtOut { name: n.name.clone(), origin: newid[n.origin], named: !n.helper, pass }
         })
         .collect();
     let nkind = g.rules;
@@ -385,6 +412,16 @@ pub fn build_tables(src: &str, cfg: &Config) -> Result<Tables, Vec<Error>> {
             errors.push(Error::new(format!(
                 "override ({r}, \"{tok}\") named by contracts/parse-errors.md is not listed"
             )));
+        }
+    }
+    for r in cfg.pass_through {
+        match g.nts.iter().position(|n| !n.helper && n.name == *r) {
+            None => errors.push(Error::new(format!("pass-through rule `{r}` is missing"))),
+            Some(i) if an.nullable[i] => errors.push(Error::at(
+                g.nts[i].line,
+                format!("pass-through rule `{r}` derives ε: its node could have no child"),
+            )),
+            Some(_) => {}
         }
     }
     if !errors.is_empty() {
