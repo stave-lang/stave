@@ -4,7 +4,7 @@ use stave_ir::arith::IntTy;
 use stave_ir::simd::{LaneTy, VecOp};
 use stave_ir::{Operand, PanicKind, TypeId, Value};
 
-use super::{PADD, PCMPEQ, PCMPGT, PSUB, Sh, by_w, lane, size_of};
+use super::{PADD, PCMPEQ, PCMPGT, PSUB, Sh, by_w, lane, size_of, y};
 use crate::debug::func::*;
 use crate::debug::{Res, bad};
 use crate::enc::*;
@@ -54,9 +54,9 @@ impl Cg<'_, '_> {
             VecOp::MinX86 => ps_pd(p, VBin::Minps, VBin::Minpd),
             _ => ps_pd(p, VBin::Maxps, VBin::Maxpd),
         };
+        let s = self.vsrc(b, sh)?;
         let x = self.vget(a, sh.size)?;
-        let s = self.vget(b, sh.size)?;
-        self.vb(o, sh.wide(), x, s)?;
+        self.vb_rm(o, sh.wide(), x, s)?;
         self.vput(rv, x, sh.size)
     }
 
@@ -101,8 +101,8 @@ impl Cg<'_, '_> {
         let sh = self.vshape(rt)?;
         let p = self.vprec(sh)?;
         if self.vex() {
+            let (bx, cx) = (self.vread(b, sh.size)?, self.vread(c, sh.size)?);
             let x = self.vget(a, sh.size)?;
-            let (bx, cx) = (self.vget(b, sh.size)?, self.vget(c, sh.size)?);
             // x = bx * x + cx
             self.vb3(ps_pd(p, VBin::Fmadd213ps, VBin::Fmadd213pd), sh.wide(), x, bx, cx)?;
             return self.vput(rv, x, sh.size);
@@ -177,8 +177,8 @@ impl Cg<'_, '_> {
         let sh = self.vshape(rt)?;
         let wide = sh.wide();
         let min = matches!(op, VecOp::Min | VecOp::MinNum);
+        let s = self.vread(b, sh.size)?;
         let x = self.vget(a, sh.size)?;
-        let s = self.vget(b, sh.size)?;
         let t = match sh.lane {
             LaneTy::Int(t) => {
                 self.viminmax(sh.w, t.signed, wide, min, x, s)?;
@@ -250,40 +250,30 @@ impl Cg<'_, '_> {
     pub(super) fn v_int_bin(&mut self, op: VecOp, a: Operand, b: Operand, rt: TypeId, rv: Value) -> Res<()> {
         let sh = self.vshape(rt)?;
         let wide = sh.wide();
+        if op == VecOp::Andnot {
+            // a & ~b, computed into `b`'s register
+            let x = self.vread(a, sh.size)?;
+            let s = self.vget(b, sh.size)?;
+            self.vb(VBin::Pandn, wide, s, x)?;
+            return self.vput(rv, s, sh.size);
+        }
+        if op == VecOp::MulWrap {
+            let s = self.vread(b, sh.size)?;
+            let x = self.vget(a, sh.size)?;
+            self.vmul_wrap(sh, x, s)?;
+            return self.vput(rv, x, sh.size);
+        }
+        let s = self.vsrc(b, sh)?;
         let x = self.vget(a, sh.size)?;
-        let s = self.vget(b, sh.size)?;
-        let r = match op {
-            VecOp::AddWrap => {
-                self.vb(by_w(sh.w, PADD), wide, x, s)?;
-                x
-            }
-            VecOp::SubWrap => {
-                self.vb(by_w(sh.w, PSUB), wide, x, s)?;
-                x
-            }
-            VecOp::MulWrap => {
-                self.vmul_wrap(sh, x, s)?;
-                x
-            }
-            VecOp::And | VecOp::MaskAnd => {
-                self.vb(VBin::Pand, wide, x, s)?;
-                x
-            }
-            VecOp::Or | VecOp::MaskOr => {
-                self.vb(VBin::Por, wide, x, s)?;
-                x
-            }
-            VecOp::Xor | VecOp::MaskXor => {
-                self.vb(VBin::Pxor, wide, x, s)?;
-                x
-            }
-            // a & ~b
-            _ => {
-                self.vb(VBin::Pandn, wide, s, x)?;
-                s
-            }
+        let o = match op {
+            VecOp::AddWrap => by_w(sh.w, PADD),
+            VecOp::SubWrap => by_w(sh.w, PSUB),
+            VecOp::And | VecOp::MaskAnd => VBin::Pand,
+            VecOp::Or | VecOp::MaskOr => VBin::Por,
+            _ => VBin::Pxor,
         };
-        self.vput(rv, r, sh.size)
+        self.vb_rm(o, wide, x, s)?;
+        self.vput(rv, x, sh.size)
     }
 
     /// The wrapped sum or difference of signed lanes and a vector whose lane sign bits are set
@@ -752,47 +742,41 @@ impl Cg<'_, '_> {
     pub(super) fn v_compare(&mut self, op: VecOp, a: Operand, b: Operand, rv: Value) -> Res<()> {
         let sh = self.voshape(a)?;
         let wide = sh.wide();
-        let x = self.vget(a, sh.size)?;
-        let s = self.vget(b, sh.size)?;
-        let r = match sh.lane {
+        // The compare instructions test "less" on floats and "greater" on ints, into their
+        // first operand: the other orders swap the operands.
+        let swap = match sh.lane {
+            LaneTy::Float(_) => matches!(op, VecOp::Gt | VecOp::Ge),
+            LaneTy::Int(_) => matches!(op, VecOp::Lt | VecOp::Ge),
+        };
+        let (l, r) = if swap { (b, a) } else { (a, b) };
+        let s = self.vread(r, sh.size)?;
+        let x = self.vget(l, sh.size)?;
+        match sh.lane {
             LaneTy::Float(_) => {
                 let p = self.vprec(sh)?;
                 let cmp = if p == Prec::F32 { VBinI::Cmpps } else { VBinI::Cmppd };
                 // an unordered pair is only `ne`
-                let (l, r, pred) = match op {
-                    VecOp::Eq => (x, s, CmpPred::Eq),
-                    VecOp::Ne => (x, s, CmpPred::Neq),
-                    VecOp::Lt => (x, s, CmpPred::Lt),
-                    VecOp::Le => (x, s, CmpPred::Le),
-                    VecOp::Gt => (s, x, CmpPred::Lt),
-                    _ => (s, x, CmpPred::Le),
+                let pred = match op {
+                    VecOp::Eq => CmpPred::Eq,
+                    VecOp::Ne => CmpPred::Neq,
+                    VecOp::Lt | VecOp::Gt => CmpPred::Lt,
+                    _ => CmpPred::Le,
                 };
-                self.vbi(cmp, wide, l, r, pred as u8)?;
-                l
+                self.vbi(cmp, wide, x, s, pred as u8)?;
             }
             LaneTy::Int(t) => {
-                let (r, not) = match op {
-                    VecOp::Eq | VecOp::Ne => {
-                        self.vb(by_w(sh.w, PCMPEQ), wide, x, s)?;
-                        (x, op == VecOp::Ne)
-                    }
-                    VecOp::Gt | VecOp::Le => {
-                        self.vcmp_gt(sh.w, t.signed, wide, x, s)?;
-                        (x, op == VecOp::Le)
-                    }
-                    _ => {
-                        self.vcmp_gt(sh.w, t.signed, wide, s, x)?;
-                        (s, op == VecOp::Ge)
-                    }
-                };
-                if not {
-                    self.vones(wide, XS0)?;
-                    self.vb(VBin::Pxor, wide, r, XS0)?;
+                if matches!(op, VecOp::Eq | VecOp::Ne) {
+                    self.vb(by_w(sh.w, PCMPEQ), wide, x, s)?;
+                } else {
+                    self.vcmp_gt(sh.w, t.signed, wide, x, s)?;
                 }
-                r
+                if matches!(op, VecOp::Ne | VecOp::Le | VecOp::Ge) {
+                    self.vones(wide, XS0)?;
+                    self.vb(VBin::Pxor, wide, x, XS0)?;
+                }
             }
-        };
-        self.vput(rv, r, sh.size)
+        }
+        self.vput(rv, x, sh.size)
     }
 
     /// The fixed tree: lane i with lane i + n/2 until one lane is left.
@@ -854,11 +838,14 @@ impl Cg<'_, '_> {
         self.bind(rv, R::X(acc))
     }
 
-    /// Inclusive prefix sum from lane 0.
+    /// Inclusive prefix sum from lane 0. Float lanes add in lane order, one at a time. Int
+    /// lanes wrap, so any order gives the same sums: every lane gains the lane 1, then 2, 4, …
+    /// below it (byte shifts within each 128-bit half), and the upper half of a 256-bit value
+    /// then gains the total of the lower one.
     pub(super) fn v_scan(&mut self, a: Operand, rt: TypeId, rv: Value) -> Res<()> {
         let sh = self.vshape(rt)?;
-        let m = self.vmem(a)?;
         if let Some(p) = sh.float() {
+            let m = self.vmem(a)?;
             let acc = self.alloc_x()?;
             let d = self.def_mem(rv)?;
             self.a.movs(p, acc, m)?;
@@ -869,15 +856,27 @@ impl Cg<'_, '_> {
             }
             return Ok(());
         }
-        let r = self.alloc_g()?;
-        let d = self.def_mem(rv)?;
-        let s = size_of(sh.w);
-        self.sized_load(r, m, sh.w as u8, false)?;
-        self.a.mov_mr(s, d, r)?;
-        for k in 1..sh.n {
-            self.a.alu_rm(AluOp::Add, s, r, lane(m, k, sh.w)?)?;
-            self.a.mov_mr(s, lane(d, k, sh.w)?, r)?;
+        let wide = sh.wide();
+        let add = by_w(sh.w, PADD);
+        let x = self.vget(a, sh.size)?;
+        let t = self.alloc_x()?;
+        let mut step = sh.w;
+        while step < sh.size.min(16) {
+            self.vmov(wide, t, x)?;
+            self.vsh(VShiftI::Pslldq, wide, t, step as u8)?;
+            self.vb(add, wide, x, t)?;
+            step *= 2;
         }
-        Ok(())
+        if wide {
+            // XS0 = the last lane of the lower half in every lane of the upper half
+            self.vmov(false, t, x)?;
+            self.vsh(VShiftI::Psrldq, false, t, (16 - sh.w) as u8)?;
+            self.vbroadcast(sh.w, false, t)?;
+            self.vzero(XS0)?;
+            self.vform(true)?;
+            self.a.vex_bin_i(VBinI::Inserti128, y(XS0), y(XS0), t, 1)?;
+            self.vb(add, true, x, XS0)?;
+        }
+        self.vput(rv, x, sh.size)
     }
 }

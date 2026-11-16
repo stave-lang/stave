@@ -1,9 +1,15 @@
 //! Vector and mask ops (`vec.*`, `mask.*`; semantics in stave-ir `simd`).
 //!
-//! A vector value lives in its frame home (`VCls::V`). An op reads its operands into scratch
-//! registers ([`Cg::vget`]), computes register to register, and stores the result
-//! ([`Cg::vput`]); these two and [`Cg::vmem`] are the only places that know where a vector
-//! value is. Ops without an instruction at the level run lane by lane on the home bytes.
+//! An op takes its operands in registers ([`Cg::vget`]: one it may overwrite, [`Cg::vread`]: one
+//! it only reads), computes register to register, and defines the result ([`Cg::vput`]); these
+//! three and [`Cg::vmem`] are the only places that know where a vector value is. Ops without an
+//! instruction at the level run lane by lane on the home bytes.
+//!
+//! In a debug build a vector value lives in its frame home (`VCls::V`): every operand is loaded
+//! and every result stored. In a release build it lives in a register like a float: in the
+//! block-local cache, or in the register it owns across blocks, and its home is written only
+//! when a register is needed for something else, before a call, or for an op that works on
+//! the home bytes ([`Cg::vmem`]).
 //!
 //! Encoding follows the level: legacy SSE (128-bit, destructive) at `V2`, VEX at `V3` (the same
 //! destructive shape, `ymm` for 32-byte values). `xmm14` / `xmm15` are scratch here as in the
@@ -12,10 +18,15 @@
 //!
 //! A mask is a vector of its lane width with all-ones (set) or all-zero lanes. A value of fewer
 //! than 16 bytes is loaded and stored at its exact size, so nothing outside it is read or
-//! written, and its register has zeros above it after a load.
+//! written, and its register has zeros above it: after a load, and in a release build after
+//! [`Cg::vput`] too, since the next op reads that register.
 //!
-//! Every op ends with clean `ymm` upper halves ([`Cg::vclean`]): no 256-bit value stays in a
-//! register between instructions, and the scalar code is legacy SSE.
+//! `ymm` upper halves. Debug: every op ends with them clean ([`Cg::vclean`]); no 256-bit value
+//! stays in a register between instructions, and the scalar code is legacy SSE. Release: a
+//! function with 32-byte values keeps them in `ymm` registers and cleans before a call and
+//! before a return that carries no 32-byte value; its scalar float code is VEX-encoded
+//! (`Asm::set_vex_scalars`), so it never waits for an upper half. A function without 32-byte
+//! values cleans after an op that used a `ymm` register inside.
 
 mod arith;
 mod memory;
@@ -78,6 +89,14 @@ impl Sh {
     pub fn ones(self) -> u64 {
         if self.w == 8 { u64::MAX } else { (1u64 << self.bits()) - 1 }
     }
+}
+
+/// A vector operand an op only reads: its register, or the memory of the `vec.load` that was
+/// left to the op.
+#[derive(Clone, Copy)]
+pub(super) enum VSrc {
+    R(Xmm),
+    M(Mem),
 }
 
 /// The encoding of one vector instruction.
@@ -183,6 +202,20 @@ impl Cg<'_, '_> {
             Form::Sse => self.a.sse_bin(op, d, s)?,
             Form::X => self.a.vex_bin(op, d, d, s)?,
             Form::Y => self.a.vex_bin(op, y(d), y(d), y(s))?,
+        }
+        Ok(())
+    }
+
+    /// `d = d op s`, the second operand a register or unaligned memory (VEX only).
+    pub(super) fn vb_rm(&mut self, op: VBin, wide: bool, d: Xmm, s: VSrc) -> Res<()> {
+        let m = match s {
+            VSrc::R(s) => return self.vb(op, wide, d, s),
+            VSrc::M(m) => m,
+        };
+        match self.vform(wide)? {
+            Form::Sse => return Err(bad("internal: an unaligned memory operand at the SSE level")),
+            Form::X => self.a.vex_bin(op, d, d, m)?,
+            Form::Y => self.a.vex_bin(op, y(d), y(d), m)?,
         }
         Ok(())
     }
@@ -366,7 +399,8 @@ impl Cg<'_, '_> {
         Ok(())
     }
 
-    /// The home of a vector operand.
+    /// The home of a vector operand, holding its bytes (written here from the value's register
+    /// when needed: call it where the code runs on every path through the op).
     pub(super) fn vmem(&mut self, o: Operand) -> Res<Mem> {
         match self.msrc(o)? {
             MSrc::Mem(m) => Ok(m),
@@ -374,18 +408,57 @@ impl Cg<'_, '_> {
         }
     }
 
-    /// A vector operand in a fresh scratch register the op may overwrite.
+    /// A vector operand in a register the op may overwrite.
     pub(super) fn vget(&mut self, o: Operand, size: u32) -> Res<Xmm> {
+        if self.rel {
+            return self.vec_take(o);
+        }
         let m = self.vmem(o)?;
         let x = self.alloc_x()?;
         self.vload(x, m, size)?;
         Ok(x)
     }
 
-    /// Defines the vector result `v` from register `x`.
+    /// A vector operand in a register the op must not write. An op reads its other operands
+    /// this way before it takes the one it overwrites ([`Self::vget`]), so the register it
+    /// computes into can be the one a block param is about to leave.
+    pub(super) fn vread(&mut self, o: Operand, size: u32) -> Res<Xmm> {
+        if self.rel { self.vec_read(o) } else { self.vget(o, size) }
+    }
+
+    /// [`Self::vread`], or the memory of the load [`Self::fold_vload`] left to this op.
+    pub(super) fn vsrc(&mut self, o: Operand, sh: Sh) -> Res<VSrc> {
+        if let Operand::Value(v) = o
+            && let Some(&j) = self.folded.get(v.index())
+            && j != super::analysis::NONE
+        {
+            let b = self.b;
+            let &[s, i] = b.args(j) else { return Err(bad("internal: folded vector load")) };
+            return Ok(VSrc::M(self.vslice(s, i, sh.w)?));
+        }
+        Ok(VSrc::R(self.vread(o, sh.size)?))
+    }
+
+    /// Defines the vector result `v` from register `x`, which the op allocated or took.
     pub(super) fn vput(&mut self, v: Value, x: Xmm, size: u32) -> Res<()> {
+        if self.rel {
+            return self.vec_bind(v, x, size);
+        }
         let d = self.def_mem(v)?;
         self.vstore(d, x, size)
+    }
+
+    /// Zeroes the bytes of `x` above a value of `size` bytes.
+    pub(crate) fn vnorm(&mut self, x: Xmm, size: u32) -> Res<()> {
+        match size {
+            16.. => Ok(()),
+            8 => self.vu(VUn::Movq, false, x, x),
+            _ => {
+                let up = (16 - size) as u8;
+                self.vsh(VShiftI::Pslldq, false, x, up)?;
+                self.vsh(VShiftI::Psrldq, false, x, up)
+            }
+        }
     }
 
     // ---------------------------------------------------------------- constants
@@ -481,7 +554,9 @@ impl Cg<'_, '_> {
             return Ok(());
         }
         let r = self.vec_emit(op, args, ty, res);
-        self.vclean();
+        if !(self.rel && self.ywide) {
+            self.vclean();
+        }
         r
     }
 

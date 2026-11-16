@@ -460,6 +460,74 @@ fn sse2_scalar() {
 }
 
 #[test]
+fn sse2_scalar_vex() {
+    check(
+        |a| {
+            a.set_vex_scalars(true);
+            a.sse(SseOp::Add, Prec::F64, x(0), x(1))?;
+            a.sse(SseOp::Mul, Prec::F32, x(8), x(15))?;
+            a.sse(SseOp::Div, Prec::F64, x(2), Mem::base(RAX, 8))?;
+            a.sse(SseOp::Sqrt, Prec::F64, x(3), x(4))?;
+            a.sse(SseOp::Max, Prec::F32, x(5), Mem::base(R12, 0))?;
+            a.movs(Prec::F64, x(0), Mem::base(RSP, 0))?;
+            a.movs_store(Prec::F32, Mem::base(RAX, 4), x(9))?;
+            a.movs(Prec::F64, x(1), x(2))?;
+            a.movs(Prec::F32, x(9), x(10))?;
+            a.ucomis(Prec::F64, x(0), x(1))?;
+            a.ucomis(Prec::F32, x(10), Mem::base(RBX, 0))?;
+            a.comis(Prec::F64, x(0), x(1))?;
+            a.cvtsi2s(Prec::F64, x(0), Size::Q, RAX)?;
+            a.cvtsi2s(Prec::F32, x(1), Size::D, Mem::base(RAX, 0))?;
+            a.cvtts2si(Prec::F64, Size::Q, RAX, x(0))?;
+            a.cvtts2si(Prec::F32, Size::D, R8, x(12))?;
+            a.cvts2si(Prec::F32, Size::D, RCX, x(1))?;
+            a.cvts2s(Prec::F64, x(0), x(1))?;
+            a.cvts2s(Prec::F32, x(2), Mem::base(RAX, 0))?;
+            a.mov_xg(Size::Q, x(0), RAX)?;
+            a.mov_gx(Size::Q, RAX, x(0))?;
+            a.mov_xg(Size::D, x(3), R8)?;
+            a.mov_gx(Size::D, R11, x(14))?;
+            a.logic_p(PLogic::Xor, Prec::F64, x(0), x(0))?;
+            a.logic_p(PLogic::And, Prec::F32, x(1), Mem::base(RAX, 0))?;
+            a.logic_p(PLogic::Andn, Prec::F64, x(1), x(2))?;
+            a.movaps(x(0), x(1));
+            a.movaps(x(9), x(13));
+            Ok(())
+        },
+        &[
+            "vaddsd xmm0,xmm0,xmm1",
+            "vmulss xmm8,xmm8,xmm15",
+            "vdivsd xmm2,xmm2,QWORD PTR [rax+0x8]",
+            "vsqrtsd xmm3,xmm3,xmm4",
+            "vmaxss xmm5,xmm5,DWORD PTR [r12]",
+            "vmovsd xmm0,QWORD PTR [rsp]",
+            "vmovss DWORD PTR [rax+0x4],xmm9",
+            "vmovsd xmm1,xmm1,xmm2",
+            "vmovss xmm9,xmm9,xmm10",
+            "vucomisd xmm0,xmm1",
+            "vucomiss xmm10,DWORD PTR [rbx]",
+            "vcomisd xmm0,xmm1",
+            "vcvtsi2sd xmm0,xmm0,rax",
+            "vcvtsi2ss xmm1,xmm1,DWORD PTR [rax]",
+            "vcvttsd2si rax,xmm0",
+            "vcvttss2si r8d,xmm12",
+            "vcvtss2si ecx,xmm1",
+            "vcvtsd2ss xmm0,xmm0,xmm1",
+            "vcvtss2sd xmm2,xmm2,DWORD PTR [rax]",
+            "vmovq xmm0,rax",
+            "vmovq rax,xmm0",
+            "vmovd xmm3,r8d",
+            "vmovd r11d,xmm14",
+            "vxorpd xmm0,xmm0,xmm0",
+            "vandps xmm1,xmm1,XMMWORD PTR [rax]",
+            "vandnpd xmm1,xmm1,xmm2",
+            "vmovaps xmm0,xmm1",
+            "vmovaps xmm9,xmm13",
+        ],
+    );
+}
+
+#[test]
 fn bit_scans_and_x87() {
     check(
         |a| {

@@ -37,8 +37,9 @@
 //!   `ymm0`. A mask is passed as the vector it is held as: one lane of the mask's width per
 //!   lane, all ones where set, zero where clear. An aggregate with a vector or mask inside is
 //!   MEMORY whatever its size (stack argument, sret return).
-//! - The upper halves of `ymm0`–`ymm15` are clean at every call and return, except those of
-//!   registers that carry a 32-byte argument or return value.
+//! - The upper halves of `ymm0`–`ymm15` are clean at every call and return that carries no
+//!   32-byte value in a register. One that does leaves every upper half unspecified: the
+//!   receiver cleans them before its own calls and returns.
 
 use stave_ir::layout::{Layouts, Shape};
 use stave_ir::simd::{self, LaneTy};
@@ -57,8 +58,9 @@ pub(crate) enum VCls {
     M { size: u32, align: u32 },
     /// A vector or mask of `size` bytes (2, 4, 8, 16, or 32; its alignment): lanes in order from
     /// the lowest address, a mask as one lane of its width per lane, all ones (set) or zero. Its
-    /// home holds the bytes; an op reads it into an `xmm` / `ymm` register (the `ymm` view for
-    /// 32 bytes), where bytes above `size` are zero after a load and unspecified after an op.
+    /// home holds the bytes; an op has it in an `xmm` / `ymm` register (the `ymm` view for 32
+    /// bytes), where the bytes above `size` up to 16 are zero. A debug build loads it for every
+    /// op; a release build keeps it in the register.
     V { size: u32 },
 }
 

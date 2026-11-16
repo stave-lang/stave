@@ -14,6 +14,7 @@
 mod lanewise;
 mod memory;
 mod plumbing;
+mod regs;
 mod reshape;
 mod values;
 
@@ -1154,6 +1155,7 @@ fn all_cases() -> Vec<(&'static str, Vec<Case>)> {
         ("memory", memory::memory()),
         ("traps", lanewise::traps().into_iter().chain(memory::traps()).collect()),
         ("plumbing", plumbing::plumbing()),
+        ("registers", regs::registers()),
     ]
 }
 
@@ -1237,6 +1239,11 @@ fn traps() {
 #[test]
 fn plumbing() {
     run("simd-plumb", plumbing::plumbing());
+}
+
+#[test]
+fn registers() {
+    run("simd-regs", regs::registers());
 }
 
 /// The comparator: words under a NaN-insensitive label match when both lanes are NaN, everything

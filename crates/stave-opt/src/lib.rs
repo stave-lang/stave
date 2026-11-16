@@ -1,6 +1,7 @@
 //! Release optimization passes and analyses on the checked IR.
 //!
-//! - [`slices`]: slice addresses and lengths become values defined once, at the slice.
+//! - [`slices`]: slice addresses, lengths, and vector-access bounds become values defined once,
+//!   at the slice.
 //! - [`dce`]: dead pure instructions are removed.
 //! - [`regalloc`]: which values live in a register for their whole life (both backends).
 //! - [`layout`]: the block order of release code (cold blocks last).
@@ -29,5 +30,6 @@ pub fn after_elision(types: &TypeTable, b: &mut Body) {
     if slices::split_elem_addrs(types, b) {
         slices::unify_parts(b, Op::SlicePtr);
     }
+    slices::unify_chunk_bounds(b);
     dce::remove_dead(types, b);
 }

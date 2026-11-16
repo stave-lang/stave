@@ -19,13 +19,18 @@
 //!   definition to its last use when stave-opt's `regalloc` finds one: `rbx`, `r12`–`r15` across
 //!   calls; `r8`, `r9`, `xmm6`–`xmm13` where no call intervenes. The cache keeps to the other
 //!   call-clobbered registers; the rest of the values live in homes as above.
+//! - Vector and mask values live in `xmm` / `ymm` registers like floats: in the cache inside a
+//!   block, in `xmm6`–`xmm13` (their `ymm` views for 32 bytes) across blocks. No vector register
+//!   survives a call, so a vector that is live across one is in its home there.
 //! - Branch arguments and the register arguments of a call are parallel moves from where the
 //!   values are.
 //! - Blocks are emitted loop by loop with the blocks that cannot return last (stave-opt
 //!   `layout`); callee-saved registers have fixed save slots and the first `ret` carries the
 //!   epilogue.
 //! - A compare read only by its block's `cbr` is flags and a jump; an address read by one load or
-//!   store is its addressing mode; a loop counter's increment computes into the param's register.
+//!   store is its addressing mode; a loop counter's or an accumulator's next value computes into
+//!   the param's register; a `vec.load` read only by the next vector op is that op's memory
+//!   operand (VEX).
 //!
 //! A function that uses `cpuid`, or needs more temporaries in one instruction than the cache has
 //! left, is compiled the debug way.
@@ -42,10 +47,13 @@
 //! `__stave_site_table` and `__stave_pc_table` (layouts in contracts/intrinsics.md).
 //!
 //! Vector and mask values (`simd`): every `vec.*` / `mask.*` op at the target's [`Level`], 128-bit
-//! and narrower vectors with SSE4.2 instructions, 256-bit ones with AVX2. A vector value lives in
-//! its frame home; an op loads its operands into scratch `xmm` / `ymm` registers and stores the
-//! result. A function with a 32-byte-aligned value realigns its frame (`func`), and `ymm` upper
-//! halves are clean between instructions.
+//! and narrower vectors with SSE4.2 instructions, 256-bit ones with AVX2. In a debug build a
+//! vector value lives in its frame home: an op loads its operands into scratch `xmm` / `ymm`
+//! registers and stores the result, and `ymm` upper halves are clean between instructions. A
+//! release build keeps vectors in registers (above); a function with 32-byte values then cleans
+//! the upper halves before a call and before a return that carries no such value, and its
+//! scalar float instructions are VEX-encoded. A function with a 32-byte-aligned value realigns
+//! its frame (`func`).
 //!
 //! Not implemented (clean [`Error::Unsupported`]): sizeless vectors, vectors with f16 / bf16
 //! lanes, vectors wider than the level's registers, conversions *to* f16 / bf16, alignment above

@@ -1,7 +1,7 @@
 //! Vector loads, stores, gathers, and scatters.
 
-use stave_ir::simd as vs;
-use stave_ir::{Operand, PanicKind, TypeId, Value};
+use stave_ir::simd::{self as vs, VecOp};
+use stave_ir::{Op, Operand, PanicKind, TypeId, Value};
 
 use super::{Form, Sh, lane, pmovx, scale_of, size_of, y};
 use crate::debug::func::*;
@@ -17,7 +17,7 @@ enum VLen {
 
 impl Cg<'_, '_> {
     /// The address of element `i` (lanes of `w` bytes) of the slice or array behind `s`.
-    fn vslice(&mut self, s: Operand, i: Operand, w: u32) -> Res<Mem> {
+    pub(in crate::debug) fn vslice(&mut self, s: Operand, i: Operand, w: u32) -> Res<Mem> {
         let st = self.oty(s).ok_or_else(|| bad("vector memory operand must be a value"))?;
         let mo = vs::mem_operand(&self.cx.m.types, st).ok_or_else(|| bad("vector memory operand type"))?;
         let base = if mo.len.is_none() {
@@ -48,6 +48,55 @@ impl Cg<'_, '_> {
         self.jtrap(Cond::Ne, PanicKind::Bounds)
     }
 
+    /// Release: whether the `vec.load` `i` of a whole `xmm` / `ymm` is left to the vector op
+    /// right after it, its only reader, as that op's second operand. VEX only: a legacy SSE
+    /// memory operand must be aligned. The slice and the index then stay alive up to that op.
+    pub(crate) fn fold_vload(&mut self, i: u32, bd: &stave_ir::ir::BlockData) -> Res<bool> {
+        let b = self.b;
+        let iu = i as usize;
+        if b.insts.op[iu] != Op::Vec(VecOp::Load)
+            || !self.vex()
+            || i + 1 >= bd.insts.start.saturating_add(bd.insts.len)
+        {
+            return Ok(false);
+        }
+        let (Some(v), Some(t)) = (b.insts.result[iu], b.insts.ty[iu]) else { return Ok(false) };
+        let reads = matches!(
+            b.insts.op[iu + 1],
+            Op::Vec(
+                VecOp::Add
+                    | VecOp::Sub
+                    | VecOp::Mul
+                    | VecOp::Div
+                    | VecOp::MinX86
+                    | VecOp::MaxX86
+                    | VecOp::AddWrap
+                    | VecOp::SubWrap
+                    | VecOp::And
+                    | VecOp::Or
+                    | VecOp::Xor
+            )
+        );
+        let second = matches!(b.args(i + 1), &[x, y] if y == Operand::Value(v) && x != y);
+        // an op without a reader is not emitted, and would take the load with it
+        let emitted =
+            b.insts.result[iu + 1].is_some_and(|r| self.an.used.get(r.index()).copied().unwrap_or(true));
+        if !reads
+            || !second
+            || !emitted
+            || b.insts.ty[iu + 1] != Some(t)
+            || self.uses.get(v.index()).copied() != Some(1)
+            || self.vshape(t)?.size < 16
+        {
+            return Ok(false);
+        }
+        for &o in b.args(i) {
+            self.extend_use(o, self.pos + 1);
+        }
+        self.folded[v.index()] = i;
+        Ok(true)
+    }
+
     pub(super) fn v_load(&mut self, aligned: bool, s: Operand, i: Operand, rt: TypeId, rv: Value) -> Res<()> {
         let sh = self.vshape(rt)?;
         if aligned {
@@ -65,7 +114,7 @@ impl Cg<'_, '_> {
             self.valigned(i, sh.n)?;
         }
         let m = self.vslice(s, i, sh.w)?;
-        let x = self.vget(v, sh.size)?;
+        let x = self.vread(v, sh.size)?;
         self.vstore(m, x, sh.size)
     }
 
@@ -130,24 +179,26 @@ impl Cg<'_, '_> {
         rv: Value,
     ) -> Res<()> {
         let sh = self.vshape(rt)?;
-        let mm = self.vmem(m)?;
+        let packed = self.vmaskmov(sh);
+        let mm = if packed.is_none() { Some(self.vmem(m)?) } else { None };
         let (base, len) = self.vbase(s)?;
         let ig = self.read_g(i)?;
         let x = self.vget(m, sh.size)?;
         let bits = self.alloc_g()?;
-        let d = self.def_mem(rv)?;
         self.vmask_bits(bits, x, sh)?;
         self.vmasked_check(bits, ig, len)?;
         let mem = Mem::index(base, ig, scale_of(sh.w), 0);
-        if let Some((op, _)) = self.vmaskmov(sh) {
+        let Some(mm) = mm else {
+            let Some((op, _)) = packed else { return Err(bad("internal: masked load")) };
             // a mask of fewer than 16 bytes has zeros above it: those lanes are inactive
             if self.vform(sh.wide())? == Form::Y {
                 self.a.vex_bin(op, y(x), y(x), mem)?;
             } else {
                 self.a.vex_bin(op, x, x, mem)?;
             }
-            return self.vstore(d, x, sh.size);
-        }
+            return self.vput(rv, x, sh.size);
+        };
+        let d = self.def_mem(rv)?;
         self.zero_mem(d, sh.size)?;
         for k in 0..sh.n {
             let skip = self.a.new_label();
@@ -163,15 +214,15 @@ impl Cg<'_, '_> {
     /// Active lanes only: the memory of inactive lanes is not touched.
     pub(super) fn v_store_masked(&mut self, s: Operand, i: Operand, v: Operand, m: Operand) -> Res<()> {
         let sh = self.voshape(v)?;
-        let (mv, mm) = (self.vmem(v)?, self.vmem(m)?);
-        let (base, len) = self.vbase(s)?;
-        let ig = self.read_g(i)?;
-        let x = self.vget(m, sh.size)?;
-        let bits = self.alloc_g()?;
         let packed = match self.vmaskmov(sh) {
-            Some((_, op)) => Some((op, self.vget(v, sh.size)?)),
+            Some((_, op)) => Some((op, self.vread(v, sh.size)?)),
             None => None,
         };
+        let homes = if packed.is_none() { Some((self.vmem(v)?, self.vmem(m)?)) } else { None };
+        let (base, len) = self.vbase(s)?;
+        let ig = self.read_g(i)?;
+        let x = self.vread(m, sh.size)?;
+        let bits = self.alloc_g()?;
         self.vmask_bits(bits, x, sh)?;
         self.vmasked_check(bits, ig, len)?;
         let mem = Mem::index(base, ig, scale_of(sh.w), 0);
@@ -183,6 +234,7 @@ impl Cg<'_, '_> {
             }
             return Ok(());
         }
+        let Some((mv, mm)) = homes else { return Err(bad("internal: masked store")) };
         for k in 0..sh.n {
             let skip = self.a.new_label();
             self.a.alu_mi(AluOp::Cmp, Size::B, lane(mm, k, sh.w)?, 0)?;
