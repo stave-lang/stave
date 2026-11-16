@@ -28,8 +28,20 @@
 //!   ignores it (System V: the caller owns the argument area).
 //! - Stack arguments: 8-byte slots (aggregates rounded up to 8), first argument at the lowest
 //!   address, area size rounded up to 16.
+//! - **Vectors and masks** (`TxN`, `maskWxN`; C has neither, so this is Stave's own rule). A value
+//!   of up to 16 bytes is one argument in the next free register of `xmm0`–`xmm7` (the sequence
+//!   `f32`/`f64` arguments use), a 32-byte one in the `ymm` view of that register; lane 0 is in
+//!   the lowest bytes and bytes above the value's size are unspecified. With no vector register
+//!   left the value goes on the stack: its bytes at an offset aligned to its size, at most 16
+//!   (a 32-byte value on the stack is not 32-byte aligned). The return register is `xmm0` /
+//!   `ymm0`. A mask is passed as the vector it is held as: one lane of the mask's width per
+//!   lane, all ones where set, zero where clear. An aggregate with a vector or mask inside is
+//!   MEMORY whatever its size (stack argument, sret return).
+//! - The upper halves of `ymm0`–`ymm15` are clean at every call and return, except those of
+//!   registers that carry a 32-byte argument or return value.
 
 use stave_ir::layout::{Layouts, Shape};
+use stave_ir::simd::{self, LaneTy};
 use stave_ir::{FloatBits, TypeId, TypeKey, TypeTable};
 
 use crate::enc::{Gpr, Prec, Xmm};
@@ -43,19 +55,37 @@ pub(crate) enum VCls {
     X(Prec),
     /// A value in memory (aggregate or fat pointer): its home holds `size` bytes.
     M { size: u32, align: u32 },
+    /// A vector or mask of `size` bytes (2, 4, 8, 16, or 32; its alignment): lanes in order from
+    /// the lowest address, a mask as one lane of its width per lane, all ones (set) or zero. Its
+    /// home holds the bytes; an op reads it into an `xmm` / `ymm` register (the `ymm` view for
+    /// 32 bytes), where bytes above `size` are zero after a load and unspecified after an op.
+    V { size: u32 },
+}
+
+impl VCls {
+    /// Size and alignment of the frame home of a value of this class.
+    pub(crate) fn home(self) -> (u32, u32) {
+        match self {
+            VCls::G { .. } | VCls::X(_) => (8, 8),
+            VCls::M { size, align } => (size.div_ceil(8) * 8, align.max(8)),
+            VCls::V { size } => (size.max(8), size.max(8)),
+        }
+    }
 }
 
 /// Largest aggregate the backend keeps by value (frame offsets are `i32`).
 const MAX_VALUE_SIZE: u64 = 1 << 28;
 
 /// The class of every type of the table (`None`: no value of the type can be held: unsized,
-/// vector, generic, too large).
-pub(crate) fn classify_all(types: &TypeTable, layouts: &Layouts) -> Vec<Option<VCls>> {
-    (0..types.len()).map(|i| classify(types, layouts, TypeId(i as u32))).collect()
+/// generic, too large, a vector wider than `vmax` bytes or with f16 / bf16 lanes, a sizeless
+/// vector). `vmax`: the widest vector register of the target in bytes (16 or 32).
+pub(crate) fn classify_all(types: &TypeTable, layouts: &Layouts, vmax: u32) -> Vec<Option<VCls>> {
+    (0..types.len()).map(|i| classify(types, layouts, TypeId(i as u32), vmax)).collect()
 }
 
-fn classify(types: &TypeTable, layouts: &Layouts, t: TypeId) -> Option<VCls> {
+fn classify(types: &TypeTable, layouts: &Layouts, t: TypeId, vmax: u32) -> Option<VCls> {
     let key = types.key(t)?;
+    let vec = |size: u64| (size <= u64::from(vmax)).then_some(VCls::V { size: size as u32 });
     let g = |bytes: u8, signed: bool| Some(VCls::G { bytes, signed });
     match key {
         TypeKey::Int { signed, bits } => g(if bits.width() == 64 { 8 } else { bits.width() / 8 }, *signed),
@@ -74,13 +104,21 @@ fn classify(types: &TypeTable, layouts: &Layouts, t: TypeId) -> Option<VCls> {
             match l.shape {
                 Shape::Scalar => g(8, false),
                 Shape::Fat | Shape::Fields(_) | Shape::Array { .. } | Shape::Enum(_) => {
-                    if l.size > MAX_VALUE_SIZE || l.align > 16 {
+                    if l.size > MAX_VALUE_SIZE || l.align > u64::from(vmax) {
                         return None;
                     }
                     Some(VCls::M { size: l.size as u32, align: l.align.max(1) as u32 })
                 }
                 Shape::Bytes => None,
             }
+        }
+        TypeKey::Vec { .. } => match simd::vec_shape(types, t)? {
+            (_, LaneTy::Float(FloatBits::F16 | FloatBits::B16), _) => None,
+            (_, lane, n) => vec(u64::from(lane.bits() / 8 * n)),
+        },
+        TypeKey::Mask { .. } => {
+            let (w, n) = simd::mask_shape(types, t)?;
+            vec(u64::from(w / 8 * n))
         }
         _ => None,
     }
@@ -93,7 +131,8 @@ pub(crate) enum Eb {
     Sse,
 }
 
-/// The eightbyte classes of an aggregate of at most 16 bytes (`None` if larger or unclassifiable).
+/// The eightbyte classes of an aggregate of at most 16 bytes (`None` if larger, or with a vector
+/// or mask inside: such an aggregate is MEMORY).
 pub(crate) fn eightbytes(types: &TypeTable, layouts: &Layouts, t: TypeId, size: u32) -> Option<Vec<Eb>> {
     if size == 0 || size > 16 {
         return None;
@@ -176,8 +215,11 @@ pub(crate) enum Loc {
     Reg(Piece),
     /// An aggregate in one or two registers, eightbyte by eightbyte.
     Regs(Vec<Piece>),
+    /// A vector or mask in an `xmm` register (its `ymm` view for a 32-byte value).
+    Vec(Xmm),
     /// At this offset of the stack argument area (`[rsp + off]` at the call,
-    /// `[rbp + 16 + off]` in the callee).
+    /// `[rbp + 16 + off]` in the callee, or the same offset from the entry frame of a callee
+    /// that realigns its stack).
     Stack(u32),
 }
 
@@ -186,6 +228,8 @@ pub(crate) enum RetLoc {
     None,
     Reg(Piece),
     Regs(Vec<Piece>),
+    /// A vector or mask in `xmm0` (`ymm0` for a 32-byte value).
+    Vec,
     /// Through the hidden pointer in `rdi`; the callee returns it in `rax`.
     Sret,
 }
@@ -222,29 +266,31 @@ pub(crate) fn call_abi(
         Some(t) => match get(t)? {
             VCls::G { .. } => RetLoc::Reg(Piece::G(Gpr::RAX)),
             VCls::X(_) => RetLoc::Reg(Piece::X(xmm(0))),
+            VCls::V { .. } => RetLoc::Vec,
             VCls::M { size: 0, .. } => RetLoc::None,
-            VCls::M { size, .. } if size <= 16 => {
-                let ebs = eightbytes(types, layouts, t, size)?;
-                let (mut gi, mut xi) = (0usize, 0u8);
-                let ps = ebs
-                    .iter()
-                    .map(|e| match e {
-                        Eb::Int => {
-                            gi += 1;
-                            Piece::G(if gi == 1 { Gpr::RAX } else { Gpr::RDX })
-                        }
-                        Eb::Sse => {
-                            xi += 1;
-                            Piece::X(xmm(xi - 1))
-                        }
-                    })
-                    .collect();
-                RetLoc::Regs(ps)
-            }
-            VCls::M { .. } => {
-                ng = 1;
-                RetLoc::Sret
-            }
+            VCls::M { size, .. } => match eightbytes(types, layouts, t, size) {
+                Some(ebs) => {
+                    let (mut gi, mut xi) = (0usize, 0u8);
+                    let ps = ebs
+                        .iter()
+                        .map(|e| match e {
+                            Eb::Int => {
+                                gi += 1;
+                                Piece::G(if gi == 1 { Gpr::RAX } else { Gpr::RDX })
+                            }
+                            Eb::Sse => {
+                                xi += 1;
+                                Piece::X(xmm(xi - 1))
+                            }
+                        })
+                        .collect();
+                    RetLoc::Regs(ps)
+                }
+                None => {
+                    ng = 1;
+                    RetLoc::Sret
+                }
+            },
         },
     };
     let mut stack = 0u32;
@@ -273,6 +319,14 @@ pub(crate) fn call_abi(
                     Loc::Reg(Piece::X(xmm(nx - 1)))
                 } else {
                     Loc::Stack(on_stack(8, 8))
+                }
+            }
+            VCls::V { size } => {
+                if nx < 8 {
+                    nx += 1;
+                    Loc::Vec(xmm(nx - 1))
+                } else {
+                    Loc::Stack(on_stack(size, size))
                 }
             }
             VCls::M { size: 0, .. } => Loc::Ignore,

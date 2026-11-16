@@ -270,10 +270,10 @@ fn native_binaries_use_only_listed_syscalls() {
     assert!(seen.contains("write"), "write never traced: {seen:?}");
 }
 
-/// Targets whose native vector code is compared with the interpreter on the SIMD programs. None
-/// yet: no backend generates vector code (`stave build` of these programs stops at `codegen`).
-/// A target joins this list when its backend lowers every vector op.
-const SIMD_NATIVE: &[&str] = &[];
+/// Targets whose native vector code is compared with the interpreter on the SIMD programs (as a
+/// debug and as a release build). A target joins this list when its backend lowers every vector
+/// op.
+const SIMD_NATIVE: &[&str] = &["x86_64-linux-v2", "x86_64-linux-v3"];
 
 /// `tests/conformance/simd/run_*.stv`, sorted.
 fn simd_programs() -> Vec<PathBuf> {
@@ -336,7 +336,7 @@ fn simd_programs_run_in_the_interpreter() {
     let bless = std::env::var_os("STAVE_BLESS").is_some();
     let tmp = TempDir::new("ivn-simd").unwrap();
     let mut failures = Vec::new();
-    for target in ["x86_64-linux", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
+    for target in ["x86_64-linux", "x86_64-linux-v3", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
         for p in &progs {
             let name = p.file_stem().unwrap().to_string_lossy().into_owned();
             let side = |ext: &str| p.with_extension(ext);
@@ -367,15 +367,20 @@ fn simd_programs_run_in_the_interpreter() {
                 continue;
             }
             let Some(runner) = runner(target) else { continue };
-            let built = build(p, target, false);
-            let bin = tmp.path().join(format!("{name}-{target}"));
-            built.image.as_ref().unwrap().write_file(&bin).unwrap();
-            let spec = RunSpec { args: &[], runner, cwd: Some(&base_dir(p)), inherit: false };
-            let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
-            let want = Ran { exit: r.exit & 0xff, ..r.clone() };
-            if got != want {
-                failures
-                    .push(format!("{name} [{target}]: native differs from the interpreter\n{}", show(&got)));
+            for release in [false, true] {
+                let mode = if release { "release" } else { "debug" };
+                let built = build(p, target, release);
+                let bin = tmp.path().join(format!("{name}-{target}-{mode}"));
+                built.image.as_ref().unwrap().write_file(&bin).unwrap();
+                let spec = RunSpec { args: &[], runner, cwd: Some(&base_dir(p)), inherit: false };
+                let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
+                let want = Ran { exit: r.exit & 0xff, ..r.clone() };
+                if got != want {
+                    failures.push(format!(
+                        "{name} [{target} {mode}]: native differs from the interpreter\n{}",
+                        show(&got)
+                    ));
+                }
             }
         }
     }
