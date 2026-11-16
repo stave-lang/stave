@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// E0204: a vector `as` that is not lossless in every lane is rejected. The identical type is
+// accepted.
+fn f(a: i32x4, b: f32x4) {
+    let x: u32x4 = a as u32x4; //~ ERROR E0204
+    let y: f32x4 = a as f32x4; //~ ERROR E0204
+    let z: i32x4 = b as i32x4; //~ ERROR E0204
+    let w: f32x4 = b as f32x4;
+    let v: i32x4 = a as i32x4;
+}
+
+fn main() -> i32 {
+    return 0;
+}

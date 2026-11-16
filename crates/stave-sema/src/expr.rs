@@ -914,6 +914,7 @@ impl<'a> Ck<'a> {
         for &tn in &kids[1..] {
             let optok = icx.a(tn).saturating_sub(1);
             let op = icx.tk(optok);
+            let plain = op == Term::KwAs as u8;
             let to = self.lower_ty(tn, false);
             if acc == ids::ERROR || to == ids::ERROR || self.tys.has_error(acc) {
                 acc = if op == Term::AsQuestion as u8 { self.option_of(to) } else { to };
@@ -924,7 +925,10 @@ impl<'a> Ck<'a> {
             }
             match self.cast_result(op, acc, to) {
                 Some(r) => {
-                    if let Some(name) = crate::gates::cast_name(op) {
+                    let identity = plain && acc == to;
+                    if let Some(name) = crate::gates::cast_name(op)
+                        && !identity
+                    {
                         self.gate_cast(optok, name, acc, to);
                     }
                     acc = r;
@@ -959,6 +963,10 @@ impl<'a> Ck<'a> {
         let checked = op == Term::AsQuestion as u8;
         let fk = self.tys.kind(from).clone();
         let tk = self.tys.kind(to).clone();
+        // a plain cast to the identical type is a bit copy, for any type
+        if plain && from == to {
+            return Some(to);
+        }
         // vectors: lane-wise, equal lane counts
         if let (TypeKind::Vector { lane: fl, n: fnn }, TypeKind::Vector { lane: tl, n: tn }) = (&fk, &tk) {
             if fnn != tn {

@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// A plain `as` to the identical vector or mask type is a bit copy of every lane: a float lane
+// keeps the payload and the signaling bit of a NaN. Run by the interpreter harness
+// (crates/stave-driver/tests/interp_vs_native.rs) against run_cast_same_vec.stdout.
+import std.io;
+
+fn show(v: u32x4) {
+    let mut out: [u32; 4] = [0, 0, 0, 0];
+    v.store(&mut out, 0);
+    let a = out[0];
+    let b = out[1];
+    let c = out[2];
+    let d = out[3];
+    io.print(f"{a} {b} {c} {d}\n");
+}
+
+fn main() -> i32 {
+    // signaling NaN, negative signaling NaN with a payload, quiet NaN, 1.5
+    let bits: [u32; 4] = [2139095041, 4286653253, 2143289345, 1069547520];
+    let v = u32x4.load(&bits, 0).bitcast::<f32x4>();
+    let w = v as f32x4;
+    show(w.bitcast::<u32x4>());
+    let ints: [i32; 4] = [-1, 0, 2147483647, -2147483648];
+    let i = i32x4.load(&ints, 0);
+    show((i as i32x4).bitcast::<u32x4>());
+    let m = (i32x4.splat(0) < i) as mask32x4;
+    show(m.select(i32x4.splat(7), i32x4.splat(9)).bitcast::<u32x4>());
+    return 0;
+}
