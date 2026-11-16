@@ -11,7 +11,7 @@ use super::support::Codegen;
 use super::ty::{LaneKind, Sc, Ty, VTy};
 use super::{R, bad, unsupported};
 use crate::enc::{
-    AddSub, Addr, Asm, Cond, Fp, Label, MemSize, Reg, Shift, VBin, VReg, VecSize, Width, encode_fp8,
+    AddSub, Addr, Arr, Asm, Cond, Fp, Label, MemSize, Reg, Shift, VBin, VReg, VecSize, Width, encode_fp8,
 };
 
 /// Allocatable GPRs: `x0–x7`, `x9–x14`.
@@ -57,7 +57,7 @@ fn fits(off: i64, scale: u32) -> bool {
     (off >= 0 && off % unit == 0 && off / unit < 4096) || (-256..=255).contains(&off)
 }
 
-/// A place a parallel move reads or writes: a register or an 8-byte home slot (`sp` offset).
+/// A place a parallel move reads or writes: a register or a home slot (`sp` offset).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PLoc {
     G(u8),
@@ -74,10 +74,26 @@ enum PSrc {
     Addr(i64),
 }
 
+/// What a parallel move carries: a scalar (one word or one FP register), or a whole vector.
+#[derive(Clone, Copy)]
+enum PTy {
+    Sc(Sc),
+    Vec(VTy),
+}
+
+impl PTy {
+    fn in_fp(self) -> bool {
+        match self {
+            PTy::Sc(s) => s.is_fp(),
+            PTy::Vec(_) => true,
+        }
+    }
+}
+
 struct PMove {
     dst: PLoc,
     src: PSrc,
-    sc: Sc,
+    ty: PTy,
 }
 
 /// How a conditional branch tests its condition.
@@ -392,6 +408,7 @@ impl<'a, 'm> Gen<'a, 'm> {
         if fp {
             let vs = match self.vkind(v) {
                 Vk::Fpr(s) => s.vsize(),
+                Vk::Mem(Ty::Vec(vt)) => vt.home_size(),
                 _ => VecSize::D,
             };
             self.stf(vs, VReg::vn(r), SP, off)
@@ -499,6 +516,80 @@ impl<'a, 'm> Gen<'a, 'm> {
     /// The register currently holding `v`, if any.
     pub fn cached(&self, v: Value) -> Option<u8> {
         self.owned(v).or_else(|| self.vreg.get(v.index()).copied().filter(|&r| r != NOREG))
+    }
+
+    /// Release: vectors and masks are kept in V registers (an owned one, or the block cache with
+    /// the frame home as the spill slot). A debug build keeps them in their homes.
+    pub fn vregs(&self) -> bool {
+        self.cg.release
+    }
+
+    fn is_vec(&self, v: Value) -> bool {
+        matches!(self.vkind(v), Vk::Mem(Ty::Vec(_)))
+    }
+
+    /// The V register currently holding the vector `v`, if any.
+    fn vec_reg(&self, v: Value) -> Option<u8> {
+        self.cached(v).filter(|_| self.is_vec(v))
+    }
+
+    /// `d` = the vector `s` as a load from its home would leave it: a vector below 16 bytes
+    /// with the upper half of the register zero.
+    fn vec_move(&mut self, d: VReg, s: VReg, vt: VTy) -> R<()> {
+        if vt.size != 16 {
+            self.a.fmov(Fp::D, d, s);
+        } else if d != s {
+            self.a.vmov(Arr::B16, d, s)?;
+        }
+        Ok(())
+    }
+
+    /// Vector operand `o` in a V register, to read only: its own register in a release build,
+    /// else a temporary loaded from its home.
+    pub fn use_vec(&mut self, o: Operand, vt: VTy) -> R<VReg> {
+        if self.vregs()
+            && let Operand::Value(v) = o
+        {
+            if let Some(r) = self.vec_reg(v) {
+                self.touch_f(r);
+                return Ok(VReg::vn(r));
+            }
+            let r = self.alloc_f()?;
+            self.load_vec(r, o, vt)?;
+            self.bind_f(v, r.num(), false);
+            return Ok(r);
+        }
+        let r = self.tmp_f()?;
+        self.load_vec(r, o, vt)?;
+        Ok(r)
+    }
+
+    /// The register to compute the vector result `v` in, for [`Self::def_vec`]: the one `v`
+    /// owns or is hinted to, else a temporary. An owned register is no operand's; a hinted one
+    /// may be the param's that it replaces ([`Self::edge_hint`]).
+    pub fn dst_vec(&mut self, v: Value) -> R<VReg> {
+        match self.owned(v).or_else(|| self.take_hint(v)) {
+            Some(r) => Ok(VReg::vn(r)),
+            None => self.tmp_f(),
+        }
+    }
+
+    /// Defines the vector value `v` from `r`. A debug build stores it to its home. A release
+    /// build moves it to the register `v` owns or is hinted to; without one `v` stays in `r` (a
+    /// temporary of the current instruction), or in a copy when `r` holds another value.
+    pub fn def_vec(&mut self, v: Value, r: VReg, vt: VTy) -> R<()> {
+        if !self.vregs() {
+            let h = self.home(v);
+            return self.stf(vt.home_size(), r, SP, h);
+        }
+        if let Some(d) = self.cached(v).or_else(|| self.take_hint(v)) {
+            return self.vec_move(VReg::vn(d), r, vt);
+        }
+        let free = FPOOL & (1 << r.num()) != 0 && self.fval[r.num() as usize] == NONE;
+        let d = if free { r } else { self.alloc_f()? };
+        self.vec_move(d, r, vt)?;
+        self.bind_f(v, d.num(), true);
+        Ok(())
     }
 
     /// The bits of an int constant operand (normalized two's complement).
@@ -648,26 +739,21 @@ impl<'a, 'm> Gen<'a, 'm> {
         }
         let Some(r) = self.cached(v) else { return };
         // a hinted result sits in a param's owned register, which is not the cache's
-        let held = match self.vkind(v) {
-            Vk::Fpr(_) => self.fval[r as usize],
-            _ => self.gval[r as usize],
-        };
+        let fp = matches!(self.vkind(v), Vk::Fpr(_)) || self.is_vec(v);
+        let held = if fp { self.fval[r as usize] } else { self.gval[r as usize] };
         if held != v.0 {
             self.vreg[v.index()] = NOREG;
             return;
         }
         let bit = 1u32 << r;
-        match self.vkind(v) {
-            Vk::Fpr(_) => {
-                self.fval[r as usize] = NONE;
-                self.focc &= !bit;
-                self.fdirty &= !bit;
-            }
-            _ => {
-                self.gval[r as usize] = NONE;
-                self.gocc &= !bit;
-                self.gdirty &= !bit;
-            }
+        if fp {
+            self.fval[r as usize] = NONE;
+            self.focc &= !bit;
+            self.fdirty &= !bit;
+        } else {
+            self.gval[r as usize] = NONE;
+            self.gocc &= !bit;
+            self.gdirty &= !bit;
         }
         self.vreg[v.index()] = NOREG;
     }
@@ -846,6 +932,11 @@ impl<'a, 'm> Gen<'a, 'm> {
             }
             Ty::Fat | Ty::Vec(_) | Ty::Mem { .. } => match o {
                 Operand::Value(v) => {
+                    if let Ty::Vec(vt) = t
+                        && let Some(r) = self.vec_reg(v)
+                    {
+                        return self.st_bytes(VReg::vn(r), vt.size, base, off);
+                    }
                     let h = self.home(v);
                     self.memcpy(base, off, SP, h, t.size())
                 }
@@ -901,6 +992,15 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let h = self.home(v);
                 self.memcpy(SP, h, base, off, t.size())
             }
+            Ty::Vec(vt) if self.vregs() => {
+                let r = self.tmp_f()?;
+                self.ld_bytes(r, vt.size, base, off)?;
+                if vt.kind == LaneKind::Mask {
+                    // a mask lane in memory is set iff any of its bits is
+                    self.a.vbin(VBin::Cmtst, vt.arr(), r, r, r)?;
+                }
+                self.def_vec(v, r, vt)
+            }
             Ty::Vec(vt) => {
                 let h = self.home(v);
                 self.memcpy(SP, h, base, off, t.size())?;
@@ -916,9 +1016,12 @@ impl<'a, 'm> Gen<'a, 'm> {
         }
     }
 
-    /// Loads vector operand `o` from its home into `vd`.
+    /// Vector operand `o` into `vd`: from the register holding it, else from its home.
     pub fn load_vec(&mut self, vd: VReg, o: Operand, vt: VTy) -> R<()> {
         let Operand::Value(v) = o else { return Err(bad("vector operand must be a value")) };
+        if let Some(r) = self.vec_reg(v) {
+            return self.vec_move(vd, VReg::vn(r), vt);
+        }
         let h = self.home(v);
         self.ldf(vt.home_size(), vd, SP, h)
     }
@@ -1028,6 +1131,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 match (args[k].loc, t) {
                     (Loc::X(n), _) => self.a.mov(X, xr(r), xr(n))?,
                     (Loc::V(n), Ty::Sc(s)) => self.a.fmov(s.fp(), VReg::vn(r), VReg::vn(n)),
+                    (Loc::V(n), Ty::Vec(vt)) => self.vec_move(VReg::vn(r), VReg::vn(n), vt)?,
                     _ => {}
                 }
                 continue;
@@ -1055,6 +1159,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 if let Some(r) = self.owned(p) {
                     match t {
                         Ty::Sc(s) if s.is_fp() => self.ldf(s.vsize(), VReg::vn(r), Reg::FP, src)?,
+                        Ty::Vec(vt) => self.ld_bytes(VReg::vn(r), vt.size, Reg::FP, src)?,
                         _ => self.ld(MemSize::X, false, xr(r), Reg::FP, src)?,
                     }
                     continue;
@@ -1128,6 +1233,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             Op::AddWrap | Op::SubWrap | Op::MulWrap | Op::And | Op::Or | Op::Xor | Op::Not | Op::Neg => true,
             Op::Add | Op::Sub => true,
             Op::Mul | Op::Div => float,
+            Op::Vec(op) => self.in_place(op, k, p),
             _ => false,
         };
         if simple { rp } else { NOREG }
@@ -1146,7 +1252,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                     return false;
                 }
                 match (self.owned(p), self.vkind(p), self.psrc(o)) {
-                    (Some(r), Vk::Fpr(_), Ok(src)) => src != PSrc::Loc(PLoc::F(r)),
+                    (Some(r), Vk::Fpr(_) | Vk::Mem(Ty::Vec(_)), Ok(src)) => src != PSrc::Loc(PLoc::F(r)),
                     (Some(r), Vk::Gpr(_), Ok(src)) => src != PSrc::Loc(PLoc::G(r)),
                     _ => true,
                 }
@@ -1318,8 +1424,10 @@ impl<'a, 'm> Gen<'a, 'm> {
             return Ok(());
         }
         let params = self.b.params(t.block);
-        // Release: scalars are one parallel move (below); only aggregates are saved here.
+        // Release: scalars are one parallel move (below), and so are vectors, which are not in
+        // their homes; only aggregates are saved here.
         let release = !self.an.own.is_empty();
+        let vregs = self.vregs();
         let mut moves: Vec<PMove> = Vec::new();
         let mut saved: Vec<(usize, i64)> = Vec::new();
         let mut soff = i64::from(self.an.scratch_off);
@@ -1331,6 +1439,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                     || self.vkind(v) == Vk::Slot
                     || matches!(self.vkind(v), Vk::Mem(_)))
                 && (!release || matches!(self.vkind(v), Vk::Mem(_)))
+                && !(vregs && self.is_vec(v))
             {
                 let ty = self.vty(v);
                 let size = ty.size().max(8).div_ceil(8) * 8;
@@ -1362,7 +1471,12 @@ impl<'a, 'm> Gen<'a, 'm> {
                     Some(r) => PLoc::G(r),
                     None => PLoc::M(h),
                 };
-                moves.push(PMove { dst, src: self.psrc(o)?, sc });
+                moves.push(PMove { dst, src: self.psrc(o)?, ty: PTy::Sc(sc) });
+                continue;
+            }
+            if vregs && let Ty::Vec(vt) = ty {
+                let dst = self.owned(p).map_or(PLoc::M(h), PLoc::F);
+                moves.push(PMove { dst, src: self.psrc(o)?, ty: PTy::Vec(vt) });
                 continue;
             }
             if let Some(&(_, so)) = saved.iter().find(|s| s.0 == i) {
@@ -1385,17 +1499,17 @@ impl<'a, 'm> Gen<'a, 'm> {
         self.par_moves(moves)
     }
 
-    /// Where a scalar operand is right now (no binding change).
+    /// Where a scalar or (release) vector operand is right now (no binding change).
     fn psrc(&self, o: Operand) -> R<PSrc> {
         match o {
             Operand::Value(v) => {
                 let k = self.vkind(v);
                 let h = self.home(v);
                 match (self.cached(v), k) {
-                    (Some(r), Vk::Fpr(_)) => Ok(PSrc::Loc(PLoc::F(r))),
+                    (Some(r), Vk::Fpr(_) | Vk::Mem(Ty::Vec(_))) => Ok(PSrc::Loc(PLoc::F(r))),
                     (Some(r), Vk::Gpr(_) | Vk::Slot) => Ok(PSrc::Loc(PLoc::G(r))),
                     (None, Vk::Slot) => Ok(PSrc::Addr(h)),
-                    (None, Vk::Gpr(_) | Vk::Fpr(_)) => Ok(PSrc::Loc(PLoc::M(h))),
+                    (None, Vk::Gpr(_) | Vk::Fpr(_) | Vk::Mem(Ty::Vec(_))) => Ok(PSrc::Loc(PLoc::M(h))),
                     _ => Err(bad(format!("%{} ({k:?}) as a scalar", v.0))),
                 }
             }
@@ -1409,7 +1523,7 @@ impl<'a, 'm> Gen<'a, 'm> {
 
     /// Emits the moves as one parallel move: every source is read before its place is written.
     /// A cycle is broken by parking one source in `x16` / `v30`; memory-to-memory moves and
-    /// constants go through `x15`, unencodable addresses through `x17`.
+    /// constants go through `x15` (a vector through `v31`), unencodable addresses through `x17`.
     fn par_moves(&mut self, mut ms: Vec<PMove>) -> R<()> {
         ms.retain(|m| m.src != PSrc::Loc(m.dst));
         while !ms.is_empty() {
@@ -1418,14 +1532,15 @@ impl<'a, 'm> Gen<'a, 'm> {
             };
             if let Some(k) = (0..ms.len()).find(|&k| !read(&ms, ms[k].dst, k)) {
                 let m = ms.swap_remove(k);
-                self.emit_move(m.dst, m.src, m.sc)?;
+                self.emit_move(m.dst, m.src, m.ty)?;
                 continue;
             }
             // Only cycles are left: every destination is still read. Park one of them.
+            // The parked value is the one a move reads there, of that move's type.
             let l = ms[0].dst;
-            let sc = ms[0].sc;
-            let tmp = if sc.is_fp() { PLoc::F(PARK_F) } else { PLoc::G(PARK_G) };
-            self.emit_move(tmp, PSrc::Loc(l), sc)?;
+            let ty = ms.iter().find(|o| o.src == PSrc::Loc(l)).map_or(ms[0].ty, |o| o.ty);
+            let tmp = if ty.in_fp() { PLoc::F(PARK_F) } else { PLoc::G(PARK_G) };
+            self.emit_move(tmp, PSrc::Loc(l), ty)?;
             for o in ms.iter_mut() {
                 if o.src == PSrc::Loc(l) {
                     o.src = PSrc::Loc(tmp);
@@ -1435,7 +1550,23 @@ impl<'a, 'm> Gen<'a, 'm> {
         Ok(())
     }
 
-    fn emit_move(&mut self, dst: PLoc, src: PSrc, sc: Sc) -> R<()> {
+    fn emit_move(&mut self, dst: PLoc, src: PSrc, ty: PTy) -> R<()> {
+        let sc = match ty {
+            PTy::Sc(sc) => sc,
+            PTy::Vec(vt) => {
+                let size = vt.home_size();
+                return match (dst, src) {
+                    (PLoc::F(d), PSrc::Loc(PLoc::F(s))) => self.vec_move(VReg::vn(d), VReg::vn(s), vt),
+                    (PLoc::F(d), PSrc::Loc(PLoc::M(o))) => self.ldf(size, VReg::vn(d), SP, o),
+                    (PLoc::M(o), PSrc::Loc(PLoc::F(s))) => self.stf(size, VReg::vn(s), SP, o),
+                    (PLoc::M(o), PSrc::Loc(PLoc::M(o2))) => {
+                        self.ldf(size, V31, SP, o2)?;
+                        self.stf(size, V31, SP, o)
+                    }
+                    _ => Err(bad("parallel move of a vector")),
+                };
+            }
+        };
         let fsize = if sc.is_fp() { sc.vsize() } else { VecSize::D };
         match (dst, src) {
             (PLoc::G(d), PSrc::Loc(PLoc::G(s))) => self.a.mov(X, xr(d), xr(s))?,
@@ -1481,7 +1612,7 @@ impl<'a, 'm> Gen<'a, 'm> {
         match o {
             Operand::Value(v) => {
                 if let Some(r) = self.cached(v)
-                    && !matches!(self.vkind(v), Vk::Fpr(_))
+                    && matches!(self.vkind(v), Vk::Gpr(_) | Vk::Slot)
                 {
                     if r != rd.num() {
                         self.a.mov(X, rd, xr(r))?;
@@ -1725,8 +1856,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             }
             Ret::Q0 => {
                 let Ty::Vec(vt) = self.vty(r) else { return Err(bad("vector call result")) };
-                let h = self.home(r);
-                self.stf(vt.home_size(), VReg::vn(0), SP, h)?;
+                self.def_vec(r, VReg::vn(0), vt)?;
             }
             Ret::Indirect | Ret::None => {}
         }

@@ -11,15 +11,19 @@
 //! Register classes: GPR and FP scalar. Aggregates (tuples, structs, arrays, enums), fat
 //! pointers, vectors and masks live in memory (their home slot); scalars live in registers.
 //! Vector ops load their operands into temporary V registers and store their result (`simd`); a
-//! 128-bit vector's home is 16-byte aligned.
+//! 128-bit vector's home is 16-byte aligned. Release code generation keeps vectors and masks in
+//! registers instead (below).
 //!
 //! Release code generation ([`Codegen::release`]) keeps this structure. A value used in another
 //! block, and every param of a later block, owns a callee-saved register (`x19`–`x28`, `v8`–`v15`)
 //! from its definition to its last use when stave-opt's `regalloc` finds one; those registers are
-//! saved below the frame pointer. Branch arguments are one parallel move. Blocks are emitted loop
-//! by loop with the blocks that cannot return last (stave-opt `layout`). A compare read only by
-//! its block's `cbr` is flags and a `b.cond`; a loop counter's increment is defined in the param's
-//! register.
+//! saved below the frame pointer. Vectors and masks live in V registers too: in `v8`–`v15` across
+//! blocks where no call intervenes (a callee keeps only their low halves), else in the block
+//! cache, with the home slot as the spill slot. Branch arguments are one parallel move. Blocks
+//! are emitted loop by loop, a loop's test after its body when every value the test defines has a
+//! register, and the blocks that cannot return last (stave-opt `layout`). A compare read only by
+//! its block's `cbr` is flags and a `b.cond`; a loop variable's next value (a counter's
+//! increment, a vector accumulator's sum) is defined in the param's register.
 //!
 //! # Calling convention (Stave → Stave calls, AAPCS64-based)
 //!

@@ -1,8 +1,15 @@
 //! Vector and mask ops (`stave_ir::simd`) on Advanced SIMD.
 //!
-//! A vector or mask value lives in its frame home ([`VTy`]: lanes in order, a mask lane all ones
-//! or zero). An op loads its operands into temporary V registers, computes into another one, and
-//! stores the result. Operand registers are only read, never written.
+//! A vector or mask value ([`VTy`]: lanes in order, a mask lane all ones or zero) has a frame
+//! home. A debug build keeps it there: an op loads its operands into temporary V registers,
+//! computes into another one, and stores the result. A release build keeps it in a V register:
+//! the one it owns across blocks (`v8`–`v15`, never across a call), else one of the block cache,
+//! which spills to the home. Operand registers are only read, never written, so an op can read
+//! an operand where it lives; the result register is none of them, except for an op computed in
+//! place in a loop variable's register ([`Gen::in_place`]).
+//!
+//! A value below 16 bytes sits in a register as a load from its 8-byte home leaves it: the upper
+//! half of the register is zero.
 //!
 //! Register bits past the vector's size are unspecified (a `u8x4` is the low 4 bytes of a 64-bit
 //! arrangement). Lane-wise instructions compute garbage there, which nothing reads: an op that
@@ -98,24 +105,40 @@ impl<'a, 'm> Gen<'a, 'm> {
         }
     }
 
-    /// Operand `o` in a temporary V register, to read only.
-    fn use_v(&mut self, o: Operand) -> R<(VReg, VTy)> {
+    /// Operand `o` in a V register, to read only.
+    pub(super) fn use_v(&mut self, o: Operand) -> R<(VReg, VTy)> {
         let vt = self.vt(o)?;
-        let r = self.tmp_f()?;
-        self.load_vec(r, o, vt)?;
-        Ok((r, vt))
+        Ok((self.use_vec(o, vt)?, vt))
     }
 
-    /// Stores `r` as the vector value `v`.
-    fn set_v(&mut self, v: Value, r: VReg) -> R<()> {
+    /// Defines the vector value `v` from `r`.
+    pub(super) fn set_v(&mut self, v: Value, r: VReg) -> R<()> {
         let Ty::Vec(vt) = self.vty(v) else { return Err(bad("vector result expected")) };
-        let h = self.home(v);
-        self.stf(vt.home_size(), r, SP, h)
+        self.def_vec(v, r, vt)
+    }
+
+    /// Whether vector op `k` may compute its result in the register of `p` when `p` is one of
+    /// its operands: it is one instruction, which reads every operand before it writes.
+    pub(super) fn in_place(&self, op: VecOp, k: u32, p: Value) -> bool {
+        use VecOp::*;
+        let Ok(vt) = self.vt_of(self.b.insts.ty[k as usize]) else { return false };
+        match op {
+            Add | Sub | Mul | Div | AddWrap | SubWrap | AddSat | SubSat | And | Or | Xor | Andnot
+            | MaskAnd | MaskOr | MaskXor => true,
+            Min | Max => vt.is_float() || vt.lane != Lane::D,
+            MulWrap => vt.lane != Lane::D,
+            // the addend is copied to the result first
+            Fma => {
+                let p = Operand::Value(p);
+                matches!(self.b.args(k), [a, c, d] if *d == p || (*a != p && *c != p))
+            }
+            _ => false,
+        }
     }
 
     /// Loads exactly `size` bytes at `[base, #off]` into `r` (uses `x15`; `base` is not `x15`,
     /// `x17`).
-    fn ld_bytes(&mut self, r: VReg, size: u8, base: Reg, off: i64) -> R<()> {
+    pub(super) fn ld_bytes(&mut self, r: VReg, size: u8, base: Reg, off: i64) -> R<()> {
         match size {
             16 => self.ldf(VecSize::Q, r, base, off),
             8 => self.ldf(VecSize::D, r, base, off),
@@ -129,7 +152,7 @@ impl<'a, 'm> Gen<'a, 'm> {
 
     /// Stores exactly the low `size` bytes of `r` at `[base, #off]` (uses `x15`; `base` is not
     /// `x15`, `x17`).
-    fn st_bytes(&mut self, r: VReg, size: u8, base: Reg, off: i64) -> R<()> {
+    pub(super) fn st_bytes(&mut self, r: VReg, size: u8, base: Reg, off: i64) -> R<()> {
         match size {
             16 => self.stf(VecSize::Q, r, base, off),
             8 => self.stf(VecSize::D, r, base, off),
@@ -285,12 +308,12 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let vt = self.vt_of(ty)?;
                 let rd = if vt.is_float() {
                     let fx = self.use_f(arg(0)?, vt.sc())?;
-                    let rd = self.tmp_f()?;
+                    let rd = self.dst_vec(v)?;
                     self.a.dup_elem(vt.arr(), rd, fx, 0)?;
                     rd
                 } else {
                     let rx = self.use_g(arg(0)?)?;
-                    let rd = self.tmp_f()?;
+                    let rd = self.dst_vec(v)?;
                     self.a.dup_gpr(vt.arr(), rd, rx)?;
                     rd
                 };
@@ -299,7 +322,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             Neg | Abs | Sqrt | Floor | Ceil | Round | Trunc | AbsWrap | Popcount | Clz | Not | MaskNot => {
                 let v = self.res(i)?;
                 let (a, vt) = self.use_v(arg(0)?)?;
-                let rd = self.tmp_f()?;
+                let rd = self.dst_vec(v)?;
                 self.unary(op, vt, rd, a)?;
                 self.set_v(v, rd)
             }
@@ -309,7 +332,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let v = self.res(i)?;
                 let (a, vt) = self.use_v(arg(0)?)?;
                 let (c, _) = self.use_v(arg(1)?)?;
-                let rd = self.tmp_f()?;
+                let rd = self.dst_vec(v)?;
                 self.binary(op, vt, rd, a, c)?;
                 self.set_v(v, rd)
             }
@@ -318,8 +341,10 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let (a, vt) = self.use_v(arg(0)?)?;
                 let (c, _) = self.use_v(arg(1)?)?;
                 let (d, _) = self.use_v(arg(2)?)?;
-                let rd = self.tmp_f()?;
-                self.a.vmov(B16, rd, d)?;
+                let rd = self.dst_vec(v)?;
+                if rd != d {
+                    self.a.vmov(B16, rd, d)?;
+                }
                 self.a.vfp_bin(VFpBin::Fmla, vt.arr(), rd, a, c)?;
                 self.set_v(v, rd)
             }
@@ -470,7 +495,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let vt = self.vt_of(ty)?;
                 let (p, _) = self.vmem(arg(0)?, false)?;
                 let pa = self.lane_ptr(p, arg(1)?, vt, op == LoadAligned, site)?;
-                let rd = self.tmp_f()?;
+                let rd = self.dst_vec(v)?;
                 self.ld_bytes(rd, vt.size, pa, 0)?;
                 self.set_v(v, rd)
             }
@@ -489,7 +514,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let (m, _) = self.use_v(arg(0)?)?;
                 let (a, _) = self.use_v(arg(1)?)?;
                 let (c, _) = self.use_v(arg(2)?)?;
-                let rd = self.tmp_f()?;
+                let rd = self.dst_vec(v)?;
                 self.a.vmov(B16, rd, m)?;
                 self.a.vlogic(VLogic::Bsl, B16, rd, a, c)?;
                 self.set_v(v, rd)
@@ -828,7 +853,7 @@ impl<'a, 'm> Gen<'a, 'm> {
         let v = self.res(i)?;
         let (a, vt) = self.use_v(a)?;
         let (c, _) = self.use_v(c)?;
-        let rd = self.tmp_f()?;
+        let rd = self.dst_vec(v)?;
         let arr = vt.arr();
         // `lt`/`le` are `gt`/`ge` of the swapped operands; `ne` is `eq` inverted (true for
         // unordered floats)
