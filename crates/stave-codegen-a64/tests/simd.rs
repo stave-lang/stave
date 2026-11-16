@@ -1026,6 +1026,222 @@ fn values_and_calls() {
     cx.run("simd-values");
 }
 
+/// Starts a counted loop: branches to a new block `head(i, vars..)` with `i = 0` and the given
+/// initial values, and leaves the builder in it, for header instructions before [`loop_test`].
+fn loop_head(
+    b: &mut stave_ir::FuncBuilder,
+    usize_ty: stave_ir::TypeId,
+    vars: &[stave_ir::TypeId],
+    init: &[stave_ir::Operand],
+) -> (stave_ir::Block, Vec<stave_ir::Value>) {
+    let mut tys = vec![usize_ty];
+    tys.extend_from_slice(vars);
+    let (head, hp) = b.create_block_with(&tys);
+    let mut args = vec![b.int(0)];
+    args.extend_from_slice(init);
+    b.br(head, &args);
+    b.switch_to(head);
+    (head, hp)
+}
+
+/// Ends the head of [`loop_head`]: the loop runs its body, which the builder enters, while
+/// `i < n`. Returns the exit block.
+fn loop_test(
+    b: &mut stave_ir::FuncBuilder,
+    bool_ty: stave_ir::TypeId,
+    i: stave_ir::Value,
+    n: stave_ir::Value,
+) -> stave_ir::Block {
+    let (body, exit) = (b.create_block(), b.create_block());
+    let c = b.cmp(stave_ir::Op::Lt, bool_ty, i, n);
+    b.cbr(c, body, &[], exit, &[]);
+    b.switch_to(body);
+    exit
+}
+
+/// Ends the body of a loop of [`loop_head`] with the next values of its variables and moves to
+/// `exit`.
+fn loop_next(
+    b: &mut stave_ir::FuncBuilder,
+    usize_ty: stave_ir::TypeId,
+    head: stave_ir::Block,
+    i: stave_ir::Value,
+    next: &[stave_ir::Operand],
+    exit: stave_ir::Block,
+) {
+    let one = b.int(1);
+    let i1 = b.binary(stave_ir::Op::AddWrap, usize_ty, i, one);
+    let mut args = vec![i1.into()];
+    args.extend_from_slice(next);
+    b.br(head, &args);
+    b.switch_to(exit);
+}
+
+/// Vectors that live across blocks: a loop variable updated in place by a lane op, a value
+/// defined in a loop's header and read in its body, an `fma` that adds to a loop variable and
+/// one that multiplies it, three variables that rotate on the back edge next to two floats that
+/// swap, a value live across a call in a loop, and more live vectors than registers. Vectors
+/// below 16 bytes go through `not`, which sets the register bits past them.
+#[test]
+fn vectors_across_blocks() {
+    use stave_ir::{Op, Operand};
+    let mut cx = Cx::new(0x0a64_b10c);
+    let t = cx.p.t;
+    let shapes = [
+        VT { l: L::I(32, false), n: 4 },
+        VT { l: L::I(16, true), n: 4 },
+        VT { l: L::I(8, false), n: 4 },
+        VT { l: L::F(32), n: 4 },
+        VT { l: L::F(32), n: 2 },
+        VT { l: L::F(64), n: 2 },
+    ];
+    for vt in shapes {
+        let v = cx.vty(vt);
+        let bv = cx.vty(VT { l: vt.l.uint(), n: vt.n });
+        let exact = O::V(vt, Canon::Exact);
+        let name = vt.name();
+        let two =
+            |cx: &mut Cx, n: i128| vec![A::V(vt, cx.rng.lanes(vt)), A::V(vt, cx.rng.lanes(vt)), A::I(n)];
+
+        // acc = not(acc) + x, then acc ^= y: the second op is the variable's next value
+        cx.funcs += 1;
+        let accum = cx.p.func("t.accum", &[v, v, t.usize], Some(v), |b, _| {
+            let (x, y, n) = (b.param(0).unwrap(), b.param(1).unwrap(), b.param(2).unwrap());
+            let xb = b.op(Op::Vec(VecOp::Bitcast), bv, &[x.into()]);
+            let yb = b.op(Op::Vec(VecOp::Bitcast), bv, &[y.into()]);
+            let (head, hp) = loop_head(b, t.usize, &[bv], &[xb.into()]);
+            let exit = loop_test(b, t.bool, hp[0], n);
+            let na = b.op(Op::Vec(VecOp::Not), bv, &[hp[1].into()]);
+            let sum = b.op(Op::Vec(VecOp::AddWrap), bv, &[na.into(), xb.into()]);
+            let next = b.op(Op::Vec(VecOp::Xor), bv, &[sum.into(), yb.into()]);
+            loop_next(b, t.usize, head, hp[0], &[next.into()], exit);
+            let r = b.op(Op::Vec(VecOp::Bitcast), v, &[hp[1].into()]);
+            b.ret(Some(r.into()));
+        });
+        // h = not(acc) in the header; the body and the exit read it
+        cx.funcs += 1;
+        let header = cx.p.func("t.header", &[v, v, t.usize], Some(v), |b, _| {
+            let (x, y, n) = (b.param(0).unwrap(), b.param(1).unwrap(), b.param(2).unwrap());
+            let xb = b.op(Op::Vec(VecOp::Bitcast), bv, &[x.into()]);
+            let yb = b.op(Op::Vec(VecOp::Bitcast), bv, &[y.into()]);
+            let (head, hp) = loop_head(b, t.usize, &[bv], &[xb.into()]);
+            let h = b.op(Op::Vec(VecOp::Not), bv, &[hp[1].into()]);
+            let exit = loop_test(b, t.bool, hp[0], n);
+            let next = b.op(Op::Vec(VecOp::AddWrap), bv, &[h.into(), yb.into()]);
+            loop_next(b, t.usize, head, hp[0], &[next.into()], exit);
+            let mix = b.op(Op::Vec(VecOp::Xor), bv, &[h.into(), hp[1].into()]);
+            let both = b.op(Op::Vec(VecOp::SubWrap), bv, &[mix.into(), yb.into()]);
+            let r = b.op(Op::Vec(VecOp::Bitcast), v, &[both.into()]);
+            b.ret(Some(r.into()));
+        });
+        // (p, q, r) -> (q, r, p ^ q) and (f, g) -> (g, f) on the back edge
+        cx.funcs += 1;
+        let rotate = cx.p.func("t.rotate", &[v, v, v, t.f64, t.f64, t.usize], Some(v), |b, _| {
+            let p: Vec<Operand> = (0..3).map(|k| Operand::from(b.param(k).unwrap())).collect();
+            let (f, g, n) = (b.param(3).unwrap(), b.param(4).unwrap(), b.param(5).unwrap());
+            let init = [p[0], p[1], p[2], f.into(), g.into()];
+            let (head, hp) = loop_head(b, t.usize, &[v, v, v, t.f64, t.f64], &init);
+            let exit = loop_test(b, t.bool, hp[0], n);
+            let pb = b.op(Op::Vec(VecOp::Bitcast), bv, &[hp[1].into()]);
+            let qb = b.op(Op::Vec(VecOp::Bitcast), bv, &[hp[2].into()]);
+            let mix = b.op(Op::Vec(VecOp::Xor), bv, &[pb.into(), qb.into()]);
+            let last = b.op(Op::Vec(VecOp::Bitcast), v, &[mix.into()]);
+            let next: [Operand; 5] = [hp[2].into(), hp[3].into(), last.into(), hp[5].into(), hp[4].into()];
+            loop_next(b, t.usize, head, hp[0], &next, exit);
+            let c = b.cmp(Op::Lt, t.bool, hp[4], hp[5]);
+            let r = b.select(v, c, hp[1], hp[3]);
+            b.ret(Some(r.into()));
+        });
+        // acc = mix(acc, x) + y with x and y live across the call
+        cx.funcs += 1;
+        let mix = cx.p.func("t.mix", &[v, v], Some(v), |b, _| {
+            let (x, y) = (b.param(0).unwrap(), b.param(1).unwrap());
+            let xb = b.op(Op::Vec(VecOp::Bitcast), bv, &[x.into()]);
+            let yb = b.op(Op::Vec(VecOp::Bitcast), bv, &[y.into()]);
+            let one = b.int(1);
+            let sh = b.op(Op::Vec(VecOp::ShlWrap), bv, &[xb.into(), one]);
+            let r = b.op(Op::Vec(VecOp::Xor), bv, &[sh.into(), yb.into()]);
+            let r = b.op(Op::Vec(VecOp::Bitcast), v, &[r.into()]);
+            b.ret(Some(r.into()));
+        });
+        cx.funcs += 1;
+        let calls = cx.p.func("t.calls", &[v, v, t.usize], Some(v), |b, _| {
+            let (x, y, n) = (b.param(0).unwrap(), b.param(1).unwrap(), b.param(2).unwrap());
+            let yb = b.op(Op::Vec(VecOp::Bitcast), bv, &[y.into()]);
+            let ny = b.op(Op::Vec(VecOp::Not), bv, &[yb.into()]);
+            let (head, hp) = loop_head(b, t.usize, &[v], &[y.into()]);
+            let exit = loop_test(b, t.bool, hp[0], n);
+            let m = b.call(mix, Some(v), &[hp[1].into(), x.into()]).unwrap();
+            let mb = b.op(Op::Vec(VecOp::Bitcast), bv, &[m.into()]);
+            let sum = b.op(Op::Vec(VecOp::AddWrap), bv, &[mb.into(), ny.into()]);
+            let next = b.op(Op::Vec(VecOp::Bitcast), v, &[sum.into()]);
+            loop_next(b, t.usize, head, hp[0], &[next.into()], exit);
+            let ab = b.op(Op::Vec(VecOp::Bitcast), bv, &[hp[1].into()]);
+            let r = b.op(Op::Vec(VecOp::Xor), bv, &[ab.into(), ny.into()]);
+            let r = b.op(Op::Vec(VecOp::Bitcast), v, &[r.into()]);
+            b.ret(Some(r.into()));
+        });
+        // twelve values made before the loop, all read in it
+        cx.funcs += 1;
+        let many = cx.p.func("t.many_live", &[v, v, t.usize], Some(v), |b, _| {
+            let (x, y, n) = (b.param(0).unwrap(), b.param(1).unwrap(), b.param(2).unwrap());
+            let xb = b.op(Op::Vec(VecOp::Bitcast), bv, &[x.into()]);
+            let yb = b.op(Op::Vec(VecOp::Bitcast), bv, &[y.into()]);
+            let mut live = vec![xb];
+            for _ in 1..12 {
+                let one = b.int(1);
+                let sh = b.op(Op::Vec(VecOp::ShlWrap), bv, &[live[live.len() - 1].into(), one]);
+                live.push(b.op(Op::Vec(VecOp::Xor), bv, &[sh.into(), yb.into()]));
+            }
+            let (head, hp) = loop_head(b, t.usize, &[bv], &[yb.into()]);
+            let exit = loop_test(b, t.bool, hp[0], n);
+            let mut acc = hp[1];
+            for (k, e) in live.iter().enumerate() {
+                let op = if k % 2 == 0 { VecOp::AddWrap } else { VecOp::Xor };
+                acc = b.op(Op::Vec(op), bv, &[acc.into(), (*e).into()]);
+            }
+            loop_next(b, t.usize, head, hp[0], &[acc.into()], exit);
+            let r = b.op(Op::Vec(VecOp::Bitcast), v, &[hp[1].into()]);
+            b.ret(Some(r.into()));
+        });
+        for n in [0, 1, 2, 5] {
+            let args = two(&mut cx, n);
+            cx.case(&format!("loop variable in place {name}"), accum, Some(v), args, exact);
+            let args = two(&mut cx, n);
+            cx.case(&format!("value of a loop header {name}"), header, Some(v), args, exact);
+            let args = two(&mut cx, n);
+            cx.case(&format!("vectors across a call {name}"), calls, Some(v), args, exact);
+            let args = two(&mut cx, n);
+            cx.case(&format!("more vectors than registers {name}"), many, Some(v), args, exact);
+            for (f, g) in [(1.5f64, 2.5f64), (2.5, 1.5)] {
+                let mut args: Vec<A> = (0..3).map(|_| A::V(vt, cx.rng.lanes(vt))).collect();
+                args.extend([A::F(L::F(64), f.to_bits()), A::F(L::F(64), g.to_bits()), A::I(n)]);
+                cx.case(&format!("rotating block params {name}"), rotate, Some(v), args, exact);
+            }
+        }
+        if !vt.l.is_float() {
+            continue;
+        }
+        // acc = x * y + acc in place; alt = alt * x + y, which reads alt after writing the result
+        cx.funcs += 1;
+        let fma = cx.p.func("t.fma_loop", &[v, v, t.usize], Some(v), |b, _| {
+            let (x, y, n) = (b.param(0).unwrap(), b.param(1).unwrap(), b.param(2).unwrap());
+            let (head, hp) = loop_head(b, t.usize, &[v, v], &[x.into(), y.into()]);
+            let exit = loop_test(b, t.bool, hp[0], n);
+            let acc = b.op(Op::Vec(VecOp::Fma), v, &[x.into(), y.into(), hp[1].into()]);
+            let alt = b.op(Op::Vec(VecOp::Fma), v, &[hp[2].into(), x.into(), y.into()]);
+            loop_next(b, t.usize, head, hp[0], &[acc.into(), alt.into()], exit);
+            let r = b.op(Op::Vec(VecOp::Sub), v, &[hp[1].into(), hp[2].into()]);
+            b.ret(Some(r.into()));
+        });
+        for n in [0, 1, 3] {
+            let args = two(&mut cx, n);
+            cx.case(&format!("fma on loop variables {name}"), fma, Some(v), args, O::V(vt, Canon::Quiet));
+        }
+    }
+    cx.run("simd-blocks");
+}
+
 /// Vector shapes the backend does not generate code for are reported as unsupported.
 #[test]
 fn wide_vectors_are_unsupported() {

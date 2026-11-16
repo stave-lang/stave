@@ -12,7 +12,8 @@ use super::support::Intr;
 use super::ty::{self, Sc, Ty};
 use super::{R, bad, unsupported};
 use crate::enc::{
-    AddSub, Addr, Cond, Ext, Fp, FpBin, FpUn, Label, Logic, MemSize, Reg, Shift, VReg, encode_logical,
+    AddSub, Addr, Arr, Cond, Ext, Fp, FpBin, FpUn, Label, Logic, MemSize, Reg, Shift, VLogic, VReg,
+    encode_logical,
 };
 
 /// Words of an aggregate `select` emitted straight-line; longer values use a counted loop.
@@ -918,6 +919,18 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.a.csel(X, rd, ra, rb, Cond::Ne)?;
                 Ok(())
             }
+            Ty::Vec(_) if self.vregs() => {
+                // every bit of the result is taken from `a` where the condition is set
+                let rc = self.use_g(c)?;
+                let (va, _) = self.use_v(a)?;
+                let (vb, _) = self.use_v(bo)?;
+                let rd = self.dst_vec(v)?;
+                self.a.cmp_imm(W, rc, 0)?;
+                self.a.csetm(X, S15, Cond::Ne)?;
+                self.a.dup_gpr(Arr::D2, rd, S15)?;
+                self.a.vlogic(VLogic::Bsl, Arr::B16, rd, va, vb)?;
+                self.set_v(v, rd)
+            }
             Ty::Fat | Ty::Vec(_) | Ty::Mem { .. } => {
                 let rc = self.use_g(c)?;
                 let h = self.home(v);
@@ -1037,6 +1050,10 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let rd = self.def_g(v)?;
                 self.a.mov(X, rd, ra)?;
                 Ok(())
+            }
+            Ty::Vec(_) if self.vregs() => {
+                let (r, _) = self.use_v(o)?;
+                self.set_v(v, r)
             }
             Ty::Fat | Ty::Vec(_) | Ty::Mem { .. } => {
                 let h = self.home(v);

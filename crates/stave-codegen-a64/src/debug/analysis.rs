@@ -27,7 +27,8 @@ pub(crate) enum Vk {
     Dead,
     Gpr(Sc),
     Fpr(Sc),
-    /// Fat pointer, vector, mask, or aggregate, always in its home slot.
+    /// Fat pointer, vector, mask, or aggregate, in its home slot. A release build keeps a vector
+    /// or mask in a V register where it can; its home is then the spill slot.
     Mem(Ty),
     /// The address of a `slot` (rematerialized from `sp`, never stored).
     Slot,
@@ -69,8 +70,9 @@ pub struct Analysis {
     pub(crate) rpo: Vec<u32>,
     /// Block → RPO index, `NONE` if unreachable.
     pub(crate) rpo_of: Vec<u32>,
-    /// The reachable blocks in emission order: `rpo`, in a release build with the cold blocks
-    /// last (stave-opt `layout`). Liveness stays in RPO indices whatever this order is.
+    /// The reachable blocks in emission order: `rpo`, in a release build with loops rotated and
+    /// the cold blocks last (stave-opt `layout`). Liveness stays in RPO indices whatever this
+    /// order is.
     pub(crate) emit: Vec<u32>,
     /// Per value: RPO index of the defining block.
     pub(crate) def_rpo: Vec<u32>,
@@ -90,8 +92,9 @@ pub struct Analysis {
     pub(crate) x8_off: u32,
     pub(crate) args: Vec<abi::Arg>,
     /// Release: per value, the callee-saved register it owns from its definition to its last
-    /// use (`x19`–`x28` for an integer-class value, `v8`–`v15` for a float), `NOREG` for none.
-    /// Empty in a debug build.
+    /// use (`x19`–`x28` for an integer-class value, `v8`–`v15` for a float, a vector or a mask),
+    /// `NOREG` for none. A vector owns one only where no call can destroy it: a callee keeps
+    /// just the low 64 bits of `v8`–`v15`. Empty in a debug build.
     pub(crate) own: Vec<u8>,
     /// Per owned value: the first and last block (index into `emit`) of its interval. No other
     /// value has its register in those blocks.
@@ -138,6 +141,13 @@ fn align_up64(x: u64, a: u64) -> u64 {
 
 /// Frames must stay below 16 MiB: every SP offset is then reachable with two `add` immediates.
 const FRAME_MAX: u64 = 1 << 24;
+
+/// The registers values own in a release build: `x19`–`x28` and `v8`–`v15`. All are
+/// callee-saved, but none keeps a whole vector across a call.
+const INTS: u8 = 10;
+const FLOATS: u8 = 8;
+const POOLS: regalloc::Pools =
+    regalloc::Pools { int_saved: INTS, int_scratch: 0, float_saved: FLOATS, float_scratch: 0, vec_saved: 0 };
 
 fn frame_too_large() -> super::Error {
     unsupported("stack frame of 16 MiB or more")
@@ -255,8 +265,16 @@ impl Analysis {
         self.fused.clear();
         self.emit.clear();
         if cg.release {
-            self.emit = stave_opt::layout::order(body);
-            self.ownership(body)?;
+            let (class, clobbers) = self.reg_classes(cg, body);
+            // A rotated loop's test is emitted after the blocks that use its values: only values
+            // with a register for their whole life are read there before their definition.
+            self.emit = stave_opt::layout::rotated_order(body, |v| class[v.index()] != regalloc::CLASS_NONE);
+            let mut asg = regalloc::assign(body, &self.emit, &class, &clobbers, POOLS);
+            if self.early_without_register(body, &asg.reg) {
+                self.emit = stave_opt::layout::order(body);
+                asg = regalloc::assign(body, &self.emit, &class, &clobbers, POOLS);
+            }
+            self.ownership(&asg, &class)?;
             self.fusion(cg, body);
         } else {
             self.emit.extend_from_slice(&self.rpo);
@@ -317,40 +335,81 @@ impl Analysis {
         }
     }
 
-    /// Release: which values own a register, and the save area for those registers at the top
-    /// of the frame.
-    fn ownership(&mut self, body: &Body) -> R<()> {
-        const INTS: u8 = 10;
-        const FLOATS: u8 = 8;
-        let class: Vec<u8> = self
+    /// Release: per value its register class, and per instruction whether it destroys the
+    /// vector registers (a call: the callee keeps only the low halves of `v8`–`v15`).
+    fn reg_classes(&self, cg: &Codegen<'_>, body: &Body) -> (Vec<u8>, Vec<bool>) {
+        let class = self
             .kind
             .iter()
             .map(|k| match k {
                 Vk::Gpr(_) => regalloc::CLASS_INT,
                 Vk::Fpr(_) => regalloc::CLASS_FLOAT,
+                Vk::Mem(Ty::Vec(_)) => regalloc::CLASS_VEC,
                 _ => regalloc::CLASS_NONE,
             })
             .collect();
-        let pools = regalloc::Pools {
-            int_saved: INTS,
-            int_scratch: 0,
-            float_saved: FLOATS,
-            float_scratch: 0,
-            vec_saved: 0,
+        let float =
+            |t: &Option<stave_ir::TypeId>| matches!(t.map(|t| cg.ty(t)), Some(Ty::Sc(s)) if s.is_fp());
+        let clobbers = body
+            .insts
+            .op
+            .iter()
+            .zip(&body.insts.ty)
+            .map(|(op, ty)| match op {
+                Op::Call | Op::CallInd | Op::Intrinsic(_) => true,
+                // the float remainder is a call of the runtime routine
+                Op::Rem => float(ty),
+                _ => false,
+            })
+            .collect();
+        (class, clobbers)
+    }
+
+    /// Whether a value without a register is read in a block emitted before the block that
+    /// defines it.
+    fn early_without_register(&self, body: &Body, reg: &[u8]) -> bool {
+        let mut pos = vec![NONE; body.blocks.len()];
+        for (k, &blk) in self.emit.iter().enumerate() {
+            pos[blk as usize] = k as u32;
+        }
+        let early = |o: &Operand, k: usize| {
+            let Operand::Value(v) = o else { return false };
+            let d = self.def_rpo.get(v.index()).copied().unwrap_or(NONE);
+            d != NONE
+                && pos[self.rpo[d as usize] as usize] > k as u32
+                && reg.get(v.index()).is_none_or(|&r| r == regalloc::NO_REG)
         };
-        let asg = regalloc::assign(body, &self.emit, &class, &[], pools);
+        self.emit.iter().enumerate().any(|(k, &blk)| {
+            let bd = &body.blocks[blk as usize];
+            bd.insts.indices().any(|i| body.args(i).iter().any(|o| early(o, k)))
+                || match bd.term {
+                    Term::Cbr { cond: o, .. } | Term::Switch { scrut: o, .. } | Term::Ret(Some(o)) => {
+                        early(&o, k)
+                    }
+                    _ => false,
+                }
+                || (0..succ_count(body, blk as usize)).any(|j| {
+                    succ(body, blk as usize, j)
+                        .is_some_and(|t| body.target_args(&t).iter().any(|o| early(o, k)))
+                })
+        })
+    }
+
+    /// Release: records which values own a register, and reserves the save area for those
+    /// registers at the top of the frame.
+    fn ownership(&mut self, asg: &regalloc::Assignment, class: &[u8]) -> R<()> {
         if asg.is_empty() {
             return Ok(());
         }
         self.own_first.extend_from_slice(&asg.first);
         self.own_last.extend_from_slice(&asg.last);
-        self.own.extend(asg.reg.iter().zip(&class).map(|(&r, &c)| {
+        self.own.extend(asg.reg.iter().zip(class).map(|(&r, &c)| {
             if r == regalloc::NO_REG {
                 NOREG
-            } else if c == regalloc::CLASS_FLOAT {
-                8 + r % FLOATS
-            } else {
+            } else if c == regalloc::CLASS_INT {
                 19 + r % INTS
+            } else {
+                8 + r % FLOATS
             }
         }));
         self.saved.extend((0..INTS).filter(|r| asg.int_used & (1 << r) != 0).map(|r| (false, 19 + r)));
