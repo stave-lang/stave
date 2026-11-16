@@ -97,7 +97,7 @@ fn long_unary_chain_parses_iteratively() {
     assert!(pf.items[0].ok);
     assert_eq!(printed.fallbacks, 0);
     let unary = pf.item_ast(0).nodes.iter().filter(|n| n.kind() == stave_syntax::NodeKind::Unary).count();
-    assert_eq!(unary, 100_001);
+    assert_eq!(unary, 100_000);
 }
 
 #[test]

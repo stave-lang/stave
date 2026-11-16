@@ -230,8 +230,7 @@ impl Typeck {
 pub fn is_expr_kind(k: NodeKind) -> bool {
     matches!(
         k,
-        NodeKind::Expr
-            | NodeKind::IfExpr
+        NodeKind::IfExpr
             | NodeKind::MatchExpr
             | NodeKind::RangeExpr
             | NodeKind::OrExpr
@@ -638,9 +637,6 @@ pub(crate) struct Ck<'a> {
     /// The current position is reachable (no earlier diverging statement).
     pub reachable: bool,
     pub kids_buf: Vec<Vec<u32>>,
-    /// The pass-through wrapper nodes of the expressions being typed ([`Ck::expr`]), innermost
-    /// expression last.
-    pub chain_buf: Vec<u32>,
     /// While the alternatives of an or-pattern are typed: the bindings of the current
     /// alternative (binding node, type, mode), in source order.
     pub or_binds: Option<Vec<(u32, TypeId, crate::patterns::Mode)>>,
@@ -698,7 +694,6 @@ fn check_body(
         diverges: false,
         reachable: true,
         kids_buf: Vec::new(),
-        chain_buf: Vec::new(),
         or_binds: None,
         gates: crate::gates::Gates::default(),
     };
@@ -1069,11 +1064,11 @@ impl<'a> Ck<'a> {
         }
     }
 
-    /// Re-types a node chain whose value was a pending literal (pass-through parents keep the
-    /// group; the group is resolved at the end).
+    /// Re-types a node chain whose value was a pending literal (the group is resolved at the
+    /// end).
     fn set_lit_nodes(&mut self, _n: u32, _t: TypeId) {}
 
-    /// Whether node `n` is an f-string (through wrappers) of type `t` = `std.string.String`.
+    /// Whether node `n` is an f-string (through parentheses) of type `t` = `std.string.String`.
     fn is_fstring_string(&self, n: u32, t: TypeId) -> bool {
         let s = self.sigs.lang.string;
         if s.is_none() || !matches!(self.tys.kind(t), TypeKind::Adt { def, .. } if *def == s) {
@@ -1223,7 +1218,7 @@ impl<'a> Ck<'a> {
         let Some(c) = self.sigs.konst(self.decl) else { return };
         let ty = c.ty;
         let kids = icx.kids_vec(n);
-        let Some(&e) = kids.iter().find(|&&c| icx.kind(c) == Some(NodeKind::Expr)) else { return };
+        let Some(&e) = kids.iter().find(|&&c| icx.is_expr(c)) else { return };
         self.rets.push(RetCx { ty: ids::ERROR, span: None, loops: Vec::new(), is_never: false });
         let tspan = kids.iter().find(|&&c| icx.kind(c) == Some(NodeKind::Type)).map(|&t| icx.node_span(t));
         self.check_expr(e, ty, tspan);
@@ -1478,7 +1473,7 @@ impl<'a> Ck<'a> {
         let icx = self.icx;
         let Some(&pat) = kids.first() else { return false };
         let ty_node = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type));
-        let init = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Expr));
+        let init = kids.iter().copied().find(|&c| icx.is_expr(c));
         self.diverges = false;
         let t = match (ty_node, init) {
             (Some(tn), Some(e)) => {

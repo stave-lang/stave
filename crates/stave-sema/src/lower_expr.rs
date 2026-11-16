@@ -14,24 +14,6 @@ use crate::traits::Adjust;
 use crate::typeck::{Coercion, Target};
 use crate::types::{ConstArg, FloatBits, GArg, Interner, TypeId, TypeKind};
 
-fn passthrough_kind(k: NodeKind) -> bool {
-    matches!(
-        k,
-        NodeKind::Expr
-            | NodeKind::RangeExpr
-            | NodeKind::OrExpr
-            | NodeKind::AndExpr
-            | NodeKind::CmpExpr
-            | NodeKind::BitOr
-            | NodeKind::BitXor
-            | NodeKind::BitAnd
-            | NodeKind::Shift
-            | NodeKind::Add
-            | NodeKind::Mul
-            | NodeKind::Cast
-    )
-}
-
 /// A postfix chain's state between steps.
 enum Cur {
     Path(Res, u32),
@@ -173,62 +155,8 @@ pub(crate) fn fmt_parts(text: &[u8], base: u32) -> Option<Vec<FmtPart>> {
 }
 
 impl<'a> FnCx<'a> {
-    /// The single child a pass-through node forwards to.
-    pub fn passthrough(&self, n: u32) -> Option<u32> {
-        let icx = self.icx;
-        let k = icx.kind(n)?;
-        if passthrough_kind(k) {
-            return icx.only_child(n);
-        }
-        if k == NodeKind::Unary {
-            let c = icx.first_child(n)?;
-            if icx.kind(c) == Some(NodeKind::Postfix) && icx.a(c) == icx.a(n) {
-                return Some(c);
-            }
-        }
-        None
-    }
-
-    pub fn core(&self, n: u32) -> u32 {
-        let mut cur = n;
-        for _ in 0..1_000_000 {
-            match self.passthrough(cur) {
-                Some(c) => cur = c,
-                None => break,
-            }
-        }
-        cur
-    }
-
     fn coercion_of(&self, n: u32) -> Option<&'a Coercion> {
-        let tb = self.tb();
-        // a coercion of `n`'s chain is keyed at `n` or a descendant: none in that range, none at
-        // all (most expressions have none, and the chain is not walked for them)
-        let lo = self.icx.ast.descendants(n).start;
-        let k = tb.coercions.partition_point(|c| c.0 < lo);
-        if tb.coercions.get(k).is_none_or(|c| c.0 > n) {
-            return None;
-        }
-        let mut cur = n;
-        for _ in 0..1_000_000 {
-            if let Some(c) = tb.coercion(cur) {
-                return Some(c);
-            }
-            match self.passthrough(cur) {
-                Some(c) => cur = c,
-                None => break,
-            }
-        }
-        // `(e)` grouping
-        let icx = self.icx;
-        if icx.kind(cur) == Some(NodeKind::Postfix)
-            && let Some(p) = icx.first_child(cur)
-            && icx.postfix_end(cur) == icx.primary_end(p)
-            && let Some(c) = tb.coercion(p)
-        {
-            return Some(c);
-        }
-        None
+        self.tb().coercion(n)
     }
 
     /// Lowers expression `n`; `want` is the expected type of a coercion site.
@@ -242,8 +170,7 @@ impl<'a> FnCx<'a> {
             self.depth -= 1;
             return self.fail(n, "expression nesting too deep");
         }
-        let c = self.core(n);
-        let e = self.expr_node(c, want);
+        let e = self.expr_node(n, want);
         let e = match self.coercion_of(n) {
             Some(co) => self.coerce(e, co, want),
             None => e,
@@ -436,11 +363,9 @@ impl<'a> FnCx<'a> {
             NodeKind::Cast => self.cast_chain(n),
             NodeKind::Unary => self.unary(n, want),
             NodeKind::Postfix => self.postfix(n, want),
+            // a bare name is a path with no steps
+            NodeKind::Primary if self.icx.is_path_head(n) => self.postfix(n, want),
             NodeKind::Primary => self.primary(n, want),
-            NodeKind::Expr => match self.icx.first_child(n) {
-                Some(c) => self.expr(c, want),
-                None => self.fail(n, "empty expression"),
-            },
             _ => self.fail(n, "unexpected expression node"),
         }
     }
@@ -639,23 +564,12 @@ impl<'a> FnCx<'a> {
         E::V(r, ty)
     }
 
-    /// The Primary below pass-through wrappers and suffix-less Postfix nodes.
+    /// The Primary that `n` is, through parentheses.
     pub fn down_to_primary(&self, n: u32) -> Option<u32> {
         let icx = self.icx;
         let mut cur = n;
         for _ in 0..1_000_000 {
-            if let Some(c) = self.passthrough(cur) {
-                cur = c;
-                continue;
-            }
             match icx.kind(cur)? {
-                NodeKind::Postfix => {
-                    let p = icx.first_child(cur)?;
-                    if icx.postfix_end(cur) != icx.primary_end(p) {
-                        return None;
-                    }
-                    cur = p;
-                }
                 NodeKind::Primary => {
                     let a = icx.a(cur);
                     if icx.is(a, Term::LParen) {
@@ -1044,10 +958,11 @@ impl<'a> FnCx<'a> {
 
     // ---------- postfix chains ----------
 
+    /// A postfix chain: a `Postfix`, or a bare `Primary` path (no steps).
     fn postfix(&mut self, n: u32, want: Option<Ty>) -> E {
         let icx = self.icx;
         let kids = self.kids(n);
-        let Some(&prim) = kids.first() else { return self.fail(n, "empty postfix") };
+        let Some(prim) = icx.chain_head(n) else { return self.fail(n, "empty postfix") };
         let pa = icx.a(prim);
         let pend = icx.postfix_end(n);
         let prim_end = icx.primary_end(prim);
@@ -1257,11 +1172,10 @@ impl<'a> FnCx<'a> {
         let Some(p) = self.derefs(p, derefs) else { return E::Never };
         let rt = self.nty(ie);
         let inclusive = matches!(self.kind(rt), TypeKind::Range { inclusive: true, .. });
-        let core = self.core(ie);
-        if self.icx.kind(core) != Some(NodeKind::RangeExpr) {
+        if self.icx.kind(ie) != Some(NodeKind::RangeExpr) {
             return self.fail_at(Some(tok), "slice without a range");
         }
-        let rk = self.kids(core);
+        let rk = self.kids(ie);
         let (Some(&l), Some(&r)) = (rk.first(), rk.get(1)) else {
             return self.fail_at(Some(tok), "slice range");
         };

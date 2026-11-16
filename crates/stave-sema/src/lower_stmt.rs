@@ -41,7 +41,7 @@ impl<'a> FnCx<'a> {
     /// The local a place expression is rooted at (no dereference on the way).
     pub fn place_root(&self, n: u32) -> Option<usize> {
         let icx = self.icx;
-        let c = self.core(n);
+        let c = n;
         match icx.kind(c)? {
             NodeKind::Unary => {
                 if icx.is(icx.a(c), Term::KwUnsafe) {
@@ -52,6 +52,10 @@ impl<'a> FnCx<'a> {
             NodeKind::Postfix => self.chain_root(c, None),
             NodeKind::Primary => {
                 let a = icx.a(c);
+                if icx.is(a, Term::Ident) {
+                    // a bare name: a chain without steps
+                    return self.chain_root(c, None);
+                }
                 if icx.is(a, Term::KwSelf) {
                     return icx.uses(c).first().and_then(|u| self.local_of(u.res));
                 }
@@ -73,8 +77,7 @@ impl<'a> FnCx<'a> {
     /// to `autoref`.
     fn chain_root(&self, n: u32, mut autoref: Option<&mut Vec<usize>>) -> Option<usize> {
         let icx = self.icx;
-        let kids = icx.kids_vec(n);
-        let prim = *kids.first()?;
+        let prim = icx.chain_head(n)?;
         let pa = icx.a(prim);
         let mut root = if icx.is(pa, Term::Ident) {
             icx.use_at(prim, pa).and_then(|u| self.local_of(u.res))
@@ -212,8 +215,7 @@ impl<'a> FnCx<'a> {
             matches!(t, Target::Method { adjust, .. } if adjust.autoref.is_some() && adjust.derefs == 0)
                 || matches!(t, Target::Slice { derefs: 0 })
         });
-        // most nodes are expression wrappers: the three kinds of interest are picked by their raw
-        // ids
+        // the three kinds of interest are picked by their raw ids
         let hi = (root as usize + 1).min(icx.ast.nodes.len());
         let nodes = &icx.ast.nodes[(lo as usize).min(hi)..hi];
         let (unary, postfix, expr_stmt) =
@@ -677,7 +679,7 @@ impl<'a> FnCx<'a> {
     fn let_stmt(&mut self, kids: &[u32]) {
         let icx = self.icx;
         let Some(&pat) = kids.first() else { return };
-        let Some(init) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Expr)) else { return };
+        let Some(init) = kids.iter().copied().find(|&c| icx.is_expr(c)) else { return };
         let want = self.binding_ty(pat);
         let e = self.expr(init, want);
         if matches!(e, E::Never) {
@@ -897,7 +899,7 @@ impl<'a> FnCx<'a> {
         let icx = self.icx;
         let kids = self.kids(f);
         let Some(&pat) = kids.first() else { return };
-        let Some(iter) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Expr)) else { return };
+        let Some(iter) = kids.iter().copied().find(|&c| icx.is_expr(c)) else { return };
         let Some(body) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Block)) else { return };
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
         if let Some(bt) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type)) {
@@ -915,7 +917,6 @@ impl<'a> FnCx<'a> {
             self.unsupported(f, "a tail clause on an element loop is not supported");
             return;
         }
-        let core = self.core(iter);
         let it_ty = self.nty(iter);
         // ranges: counted loop
         if let TypeKind::Range { elem, inclusive } = self.kind(it_ty) {
@@ -923,8 +924,8 @@ impl<'a> FnCx<'a> {
                 self.unsupported(f, "char ranges in for loops are not supported yet");
                 return;
             }
-            let bounds = if icx.kind(core) == Some(NodeKind::RangeExpr) {
-                let rk = self.kids(core);
+            let bounds = if icx.kind(iter) == Some(NodeKind::RangeExpr) {
+                let rk = self.kids(iter);
                 let (Some(&l), Some(&r)) = (rk.first(), rk.get(1)) else { return };
                 let Some(a) = self.val(l, Some(elem)) else { return };
                 let Some(b) = self.val(r, Some(elem)) else { return };

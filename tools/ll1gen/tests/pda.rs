@@ -175,6 +175,7 @@ fn generated_tables_equal_a_fresh_build() {
     }
     for (i, n) in t.nts.iter().enumerate() {
         assert_eq!((lt::NT_NAME[i], lt::NT_ORIGIN[i], lt::NT_NAMED[i]), (n.name.as_str(), n.origin, n.named));
+        assert_eq!(lt::NT_PASS[i], n.pass, "{}", n.name);
     }
     for (i, k) in NodeKind::ALL.iter().enumerate() {
         assert_eq!((k.id() as usize, k.nt() as usize, k.name()), (i, i, KIND_NAME[i]));

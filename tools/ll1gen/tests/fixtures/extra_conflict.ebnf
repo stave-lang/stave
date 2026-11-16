@@ -31,3 +31,15 @@ Param        = Primary ":" Type ;
 Primary      = Ident ;
 RetClause    = "->" Type ;
 AdtDecl      = "struct" Ident "{" "}" ;
+
+(* The other pass-through rules (tools/ll1gen PASS_THROUGH; not reachable from File). *)
+Expr        = RangeExpr ;
+RangeExpr   = OrExpr ;
+OrExpr      = AndExpr ;
+BitOr       = BitXor ;
+BitXor      = BitAnd ;
+BitAnd      = Shift ;
+Shift       = Add ;
+Add         = Mul ;
+Mul         = Postfix ;
+Postfix     = Primary ;
