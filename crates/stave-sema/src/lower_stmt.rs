@@ -313,7 +313,11 @@ impl<'a> FnCx<'a> {
     fn finish_fn(&mut self) -> Option<stave_ir::Body> {
         let b = std::mem::replace(&mut self.f.b, FuncBuilder::new(&[]));
         match b.finish() {
-            Ok(body) => Some(crate::lower_post::finalize(body)),
+            Ok(body) => {
+                let mut body = crate::lower_post::finalize(body);
+                stave_ir::fence::place_stream_fences(&mut body);
+                Some(body)
+            }
             Err(e) => {
                 self.fail_at(None, format!("internal: {e}"));
                 None

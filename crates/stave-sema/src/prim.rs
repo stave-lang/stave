@@ -1,8 +1,9 @@
 //! Built-in names (LANG.md §2, §4; prelude): the type names
 //! (scalars, `str`, `never`, fixed and sizeless vectors and masks, the generic spellings `vec` /
-//! `mask`) and the built-in generic fns `size_of` / `align_of`. They are not declarations and not
-//! keywords: a use resolves to [`crate::Res::Prim`] or [`crate::Res::Builtin`] and has no `names`
-//! dump line. Every module sees them, after its own scope and the prelude.
+//! `mask`), the built-in generic fns `size_of` / `align_of`, and `fence_stream`. They are not
+//! declarations and not keywords: a use resolves to [`crate::Res::Prim`] or
+//! [`crate::Res::Builtin`] and has no `names` dump line. Every module sees them, after its own
+//! scope and the prelude.
 
 /// A scalar type name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -111,22 +112,25 @@ pub enum Prim {
     Never,
 }
 
-/// A built-in generic fn (const-evaluable).
+/// A built-in fn: the generic layout queries (const-evaluable) and the stream fence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Builtin {
     /// `size_of::<T>() -> usize`.
     SizeOf,
     /// `align_of::<T>() -> usize`.
     AlignOf,
+    /// `fence_stream()`: orders earlier streaming stores (an unsafe operation).
+    FenceStream,
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 2] = [Builtin::SizeOf, Builtin::AlignOf];
+    pub const ALL: [Builtin; 3] = [Builtin::SizeOf, Builtin::AlignOf, Builtin::FenceStream];
 
     pub fn name(self) -> &'static str {
         match self {
             Builtin::SizeOf => "size_of",
             Builtin::AlignOf => "align_of",
+            Builtin::FenceStream => "fence_stream",
         }
     }
 

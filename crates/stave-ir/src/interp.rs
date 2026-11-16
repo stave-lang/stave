@@ -780,7 +780,9 @@ impl<'m, H: Host> Interp<'m, H> {
                 let a = s!(0);
                 self.load_val(t, a, 0, fid, site)?
             }
-            Op::Store => {
+            // hints: no effect on the program's state
+            Op::Prefetch(_) | Op::FenceStream => return Ok(Step::Next),
+            Op::Store | Op::StoreStream => {
                 let p = arg(0)?;
                 let pt = match p {
                     Operand::Value(v) => body.value_ty(v),

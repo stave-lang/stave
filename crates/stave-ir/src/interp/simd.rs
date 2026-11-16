@@ -432,13 +432,13 @@ impl<H: Host> Interp<'_, H> {
                 }
                 lanes_val(out)
             }
-            Store | StoreAligned | StoreMasked => {
+            Store | StoreAligned | StoreStream | StoreMasked => {
                 let (_, lane, n) = self.operand_vshape(body, arg(2)?)?;
                 let (base, len) = self.mem_of(body, regs, arg(0)?)?;
                 let i = self.scalar(body, regs, arg(1)?)? as u128;
                 let v = self.lanes(body, regs, arg(2)?)?;
                 let mask = if op == StoreMasked { Some(self.mask(body, regs, arg(3)?)?) } else { None };
-                if op == StoreAligned && !i.is_multiple_of(n as u128) {
+                if matches!(op, StoreAligned | StoreStream) && !i.is_multiple_of(n as u128) {
                     return Ok(VOut::Trap(PanicKind::Bounds));
                 }
                 if self.bad_lane(i, n, len, mask.as_deref()).is_some() {

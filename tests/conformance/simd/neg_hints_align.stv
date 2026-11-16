@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// E0606: `v.store_stream(s, i)` needs `s: &mut [T align A]` with A at least the vector's size in
+// bytes; the scalar form takes any `&mut [T]`.
+fn f(a: &mut [f32], b: &mut [f32 align 8], c: &mut [f32 align 16], d: &mut [f64 align 8], e: &mut [u8 align 32]) {
+    let v = f32x4.splat(1.0);
+    v.store_stream(a, 0); //~ ERROR E0606
+    v.store_stream(b, 0); //~ ERROR E0606
+    v.store_stream(c, 0);
+    f64x2.splat(2.0).store_stream(d, 0); //~ ERROR E0606
+    u8x16.splat(7).store_stream(e, 16);
+    let x: f32 = 3.0;
+    x.store_stream(a, 1);
+    x.store_stream(b, 1);
+}
+
+fn main() -> i32 {
+    return 0;
+}

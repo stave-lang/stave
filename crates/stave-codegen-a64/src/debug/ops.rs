@@ -12,8 +12,8 @@ use super::support::Intr;
 use super::ty::{self, Sc, Ty};
 use super::{R, bad, unsupported};
 use crate::enc::{
-    AddSub, Addr, Arr, Cond, Ext, Fp, FpBin, FpUn, Label, Logic, MemSize, Reg, Shift, VLogic, VReg,
-    encode_logical,
+    AddSub, Addr, Arr, Cond, Ext, Fp, FpBin, FpUn, Label, Logic, MemSize, PrefKind, PrefLevel, Prefetch, Reg,
+    Shift, VLogic, VReg, encode_logical,
 };
 
 /// Words of an aggregate `select` emitted straight-line; longer values use a counted loop.
@@ -359,7 +359,9 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let t = self.cg.ty(t);
                 self.take(v, t, rp, 0)
             }
-            Op::Store => {
+            // AArch64 has no single-register non-temporal store, and `stnp` is not used: a
+            // streaming store is the plain store, so it needs no fence
+            Op::Store | Op::StoreStream => {
                 let pt = self.value_tid(arg(0)?)?;
                 let inner =
                     ty::pointee(&self.cg.m.types, pt).ok_or_else(|| bad("store through a non-pointer"))?;
@@ -415,6 +417,8 @@ impl<'a, 'm> Gen<'a, 'm> {
                 }
             }
             Op::BoundsCheck => self.bounds(arg(0)?, arg(1)?, site),
+            Op::Prefetch(h) => self.prefetch(h, arg(0)?, arg(1)?),
+            Op::FenceStream => Ok(()),
             Op::Call => {
                 let Operand::Func(g) = arg(0)? else { return Err(bad("call callee")) };
                 let m = self.cg.m;
@@ -1455,6 +1459,40 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.a.b_cond(Cond::Hs, l)?;
             }
         }
+        Ok(())
+    }
+
+    /// `prfm` at `p + i * size` (the size of `p`'s pointee): `pld`/`pst` by intent, `l1keep l2keep
+    /// l3keep l1strm` by level.
+    fn prefetch(&mut self, h: stave_ir::Prefetch, p: Operand, i: Operand) -> R<()> {
+        use stave_ir::PrefetchLoc as L;
+        let (level, stream) = match h.loc {
+            L::L1 => (PrefLevel::L1, false),
+            L::L2 => (PrefLevel::L2, false),
+            L::L3 => (PrefLevel::L3, false),
+            L::Nta => (PrefLevel::L1, true),
+        };
+        let kind = if h.write { PrefKind::Pst } else { PrefKind::Pld };
+        let pt = self.value_tid(p)?;
+        let inner = ty::pointee(&self.cg.m.types, pt).ok_or_else(|| bad("prefetch of a non-pointer"))?;
+        let stride = self.layout(inner)?.size;
+        let rb = self.use_g(p)?;
+        let t = self.tmp_g()?;
+        if let Some(k) = self.b.int_const(i) {
+            self.add_imm(t, rb, (k as i64).wrapping_mul(stride as i64))?;
+        } else {
+            let ri = self.use_g(i)?;
+            if stride == 0 {
+                self.a.mov(X, t, rb)?;
+            } else if stride.is_power_of_two() {
+                self.a.addsub_reg(AddSub::Add, X, t, rb, ri, Shift::Lsl, stride.trailing_zeros())?;
+            } else {
+                let s = self.tmp_g()?;
+                self.a.mov_imm(X, s, stride)?;
+                self.a.madd(X, t, ri, s, rb)?;
+            }
+        }
+        self.a.prfm(Prefetch { kind, level, stream }, Addr::Off(t, 0))?;
         Ok(())
     }
 

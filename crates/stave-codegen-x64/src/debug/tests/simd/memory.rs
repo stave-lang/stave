@@ -237,11 +237,12 @@ fn flush(s: Shape) -> Case {
     )
 }
 
-/// `load_aligned` / `store_aligned` on a slice declared aligned to the vector size.
+/// `load_aligned` / `store_aligned` / `store_stream` on a slice declared aligned to the vector size.
 fn aligned(s: Shape) -> Case {
     let n = s.n as u64;
     let a = s.bytes();
-    Case::new(&[VecOp::LoadAligned, VecOp::StoreAligned], s.bits(), 200, move |sp, b| {
+    let ops = [VecOp::LoadAligned, VecOp::StoreAligned, VecOp::StoreStream];
+    Case::new(&ops, s.bits(), 200, move |sp, b| {
         let base = sp.region(b, 1);
         let all = b.int(4096);
         sp.fill(b, base.into(), all, 11);
@@ -254,13 +255,15 @@ fn aligned(s: Shape) -> Case {
             let x = sp.vload(b, VecOp::LoadAligned, &sl, io, None);
             sp.out(b, x, s);
         }
-        for (k, i) in [2 * n, 3 * n].into_iter().enumerate() {
-            sp.label(b, &format!("vec.store_aligned {} i {i}", s.name()), None);
-            let y = sp.vec(b, s, &lanes(s, k as u64));
-            let io = sp.usize(b, i, k == 0);
-            sp.guard(b, &sl, io);
-            sp.vstore(b, VecOp::StoreAligned, &sl, io, y, None);
-            sp.dump_elems(b, &sl, 0, len);
+        for op in [VecOp::StoreAligned, VecOp::StoreStream] {
+            for (k, i) in [2 * n, 3 * n].into_iter().enumerate() {
+                sp.label(b, &format!("{} {} i {i}", op.name(), s.name()), None);
+                let y = sp.vec(b, s, &lanes(s, k as u64 + 2 * u64::from(op == VecOp::StoreStream)));
+                let io = sp.usize(b, i, k == 0);
+                sp.guard(b, &sl, io);
+                sp.vstore(b, op, &sl, io, y, None);
+                sp.dump_elems(b, &sl, 0, len);
+            }
         }
         sp.unmap(b, base, 2);
     })
@@ -505,7 +508,7 @@ pub fn traps() -> Vec<Case> {
         for s in ss {
             let n = s.n as u64;
             let w = s.lane.bytes() as u64;
-            for op in [VecOp::LoadAligned, VecOp::StoreAligned] {
+            for op in [VecOp::LoadAligned, VecOp::StoreAligned, VecOp::StoreStream] {
                 for i in [1, n + 1] {
                     out.push(trap(&[op], s.bits(), PanicKind::Bounds, move |sp, b| {
                         let base = sp.region(b, 1);

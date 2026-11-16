@@ -1,0 +1,42 @@
+//~ CHECK-ONLY
+// ir golden: a streaming loop gets one `mem.fence_stream` at each exit (its head test and the `return` inside it) and one before the call inside it, none per store; straight-line streaming stores get one before the return; an explicit `fence_stream()` is not repeated; prefetches are ops of their own.
+fn observe(x: f32) -> f32 {
+    return x;
+}
+
+fn fill(s: &mut [f32 align 16], v: f32x4, x: f32) -> f32 {
+    let mut i: usize = 0;
+    let mut acc: f32 = 0.0;
+    while i + 4 <= s.len() {
+        v.store_stream(s, i);
+        if i == 8 {
+            acc = observe(x);
+        }
+        if acc > 100.0 {
+            return acc;
+        }
+        i = i + 4;
+    }
+    return acc;
+}
+
+fn two(s: &mut [f32], x: f32) {
+    x.store_stream(s, 0);
+    x.store_stream(s, 1);
+}
+
+fn explicit(p: *mut u64, x: u64) {
+    unsafe("p is valid for writes and aligned to 8 bytes") {
+        p.write_stream(x);
+        fence_stream();
+    }
+}
+
+fn hints(s: &[u8], p: *const u32) {
+    s.prefetch_read_l1(64);
+    p.prefetch_write_nta();
+}
+
+fn main() -> i32 {
+    return 0;
+}

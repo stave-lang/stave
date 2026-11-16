@@ -3,8 +3,8 @@
 //! Only ops that cannot trap and have no effect besides their result go (wrapping and saturating
 //! integer arithmetic, bit ops, compares, `select`, casts, float arithmetic, aggregate and enum
 //! construction and field reads, address arithmetic, slice parts, vector and mask ops that neither
-//! trap nor touch memory). Trapping arithmetic, checks, loads, stores, calls, intrinsics, and slots
-//! stay.
+//! trap nor touch memory). Trapping arithmetic, checks, loads, stores, memory hints (prefetches,
+//! streaming stores, stream fences), calls, intrinsics, and slots stay.
 
 use stave_ir::{Body, Op, Operand, TypeKey, TypeTable};
 
@@ -62,6 +62,9 @@ fn removable(types: &TypeTable, b: &Body, i: usize) -> bool {
         | Op::Load
         | Op::Store
         | Op::BoundsCheck
+        | Op::Prefetch(_)
+        | Op::StoreStream
+        | Op::FenceStream
         | Op::Call
         | Op::CallInd
         | Op::Intrinsic(_)

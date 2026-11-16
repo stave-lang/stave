@@ -430,9 +430,9 @@ mem.prefetch_write_l2   any                         N    1  prefetcht1  | note: 
 mem.prefetch_write_l3   any                         N    1  prefetcht2  | note: prefetchw needs PRFCHW, not implied by v2: the read hint
 mem.prefetch_write_nta  any                         N    1  prefetchnta  | note: prefetchw needs PRFCHW, not implied by v2: the read hint
 vec.store_stream        float                       N    1  movntp%
-vec.store_stream        int                         N    1  movntdq
+vec.store_stream        int/f16/bf16                N    1  movntdq
 mem.store_stream        int32/int64                 N    1  movnti
-mem.store_stream        f32                         N    2  movd; movnti
+mem.store_stream        f32                         N    2  movq; movnti
 mem.store_stream        f64                         N    2  movq; movnti
 mem.store_stream        any8/any16                  N    1  mov  | note: no 8/16-bit non-temporal store: a plain store
 mem.fence_stream        any                         N    1  sfence

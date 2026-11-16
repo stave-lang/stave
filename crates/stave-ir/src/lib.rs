@@ -4,6 +4,7 @@
 //!   text; canonical renumbering.
 //! - [`ir`]: SSA with block params, struct-of-arrays bodies, `u32` ids; the op set ([`Op`]).
 //! - [`build`]: [`FuncBuilder`] for the front end's lowering.
+//! - [`fence`]: the placement of `mem.fence_stream` after streaming stores.
 //! - [`verify`]: structure, dominance, block params, terminators, op typing.
 //! - [`interp`]: the scalar reference interpreter (oracle) over [`mem`] with a pluggable [`host`].
 //! - [`print_checked`]: the canonical checked-IR text of contracts/checked-ir.md.
@@ -14,6 +15,7 @@
 pub mod arith;
 pub mod bounds;
 pub mod build;
+pub mod fence;
 pub mod host;
 pub mod interp;
 pub mod ir;
@@ -30,7 +32,7 @@ pub use host::{BufferHost, Host, SysResult, SyscallAbi};
 pub use interp::{Config, Interp, InterpError, Outcome, Trap, Val};
 pub use ir::{
     Block, Body, CastKind, Const, Func, FuncId, InstanceId, IntrinsicId, Module, Op, Operand, PanicKind,
-    Site, SiteInfo, Static, StrId, Term, Value,
+    Prefetch, PrefetchLoc, Site, SiteInfo, Static, StrId, Term, Value,
 };
 pub use print_checked::print_checked;
 pub use simd::VecOp;

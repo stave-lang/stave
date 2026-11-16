@@ -1486,8 +1486,12 @@ impl<'a> Ck<'a> {
                 _ => St::Err,
             },
             Res::Builtin(b) => {
+                if b == Builtin::FenceStream {
+                    self.unsafe_op(icx.tok_span(tok));
+                }
                 let ga = targs.and_then(|g| {
-                    let k = icx.kids_vec(g).len();
+                    // `fence_stream` has no generic params: any turbofish is E0201
+                    let k = if b == Builtin::FenceStream { 0 } else { icx.kids_vec(g).len() };
                     self.turbofish(g, &vec![false; k], g)
                 });
                 St::Builtin(b, ga)
@@ -2453,6 +2457,14 @@ impl<'a> Ck<'a> {
                 self.check_bounds(cspan, adt, &gens, &gargs);
                 self.target(paren, Target::Variant { decl, index });
                 Ty::T(self.tys.mk_adt(adt, gargs))
+            }
+            St::Builtin(Builtin::FenceStream, _) => {
+                if !args.is_empty() {
+                    self.arity(n, paren, 0, args.len(), false);
+                    return self.args_only(args);
+                }
+                self.target(paren, Target::FenceStream);
+                Ty::T(ids::UNIT)
             }
             St::Builtin(b, targs) => {
                 if !args.is_empty() {

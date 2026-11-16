@@ -1,0 +1,76 @@
+//~ STDOUT pos_hints_stream.stdout
+// Streaming stores are plain stores for the program: `v.store_stream(s, i)` on a
+// `&mut [f32 align 16]` in a chunk loop (also inside `strict { }`: class N), scalar
+// `x.store_stream(s, i)` on lane types, `p.write_stream(v)` of a scalar and of a vector in
+// `unsafe`, and an explicit `fence_stream()` there. The compiler fences before each return.
+import std.io;
+
+// The 16 floats of `buf`, as a slice aligned to 16 bytes.
+fn aligned(buf: &mut [f32x4; 4]) -> &mut [f32 align 16] from buf {
+    let a = &mut buf[0] as *mut f32x4 as usize;
+    let parts: [usize; 2] = [a, 16];
+    let q = &parts as *const [usize; 2] as *const &mut [f32 align 16];
+    return unsafe("buf holds 16 f32 at a 16-byte aligned address, lent while the view lives") q.read();
+}
+
+fn fill(s: &mut [f32 align 16], x: f32) {
+    let step = f32x4.splat(1.0);
+    let mut v = f32x4.splat(x);
+    let mut i: usize = 0;
+    while i + 4 <= s.len() {
+        v.store_stream(s, i);
+        v = v + step;
+        i = i + 4;
+    }
+}
+
+fn strict_fill(s: &mut [f32 align 16]) {
+    strict {
+        let v = f32x4.splat(0.5);
+        v.store_stream(s, 4);
+    }
+}
+
+fn scalars(w: &mut [u32], d: &mut [f64], b: &mut [i8]) {
+    for i in 0..w.len() {
+        let k = i as% u32 * 10;
+        k.store_stream(w, i);
+    }
+    let x: f64 = 2.5;
+    x.store_stream(d, 1);
+    let y: i8 = -4;
+    y.store_stream(b, 0);
+}
+
+fn raw(p: *mut u64, q: *mut i32x4) {
+    unsafe("p and q are valid for writes and aligned to their sizes") {
+        p.write_stream(77);
+        q.write_stream(i32x4.splat(-9));
+        fence_stream();
+    }
+}
+
+fn main() -> i32 {
+    let mut buf: [f32x4; 4] = [f32x4.splat(0.0), f32x4.splat(0.0), f32x4.splat(0.0), f32x4.splat(0.0)];
+    let s = aligned(&mut buf);
+    fill(s, 1.0);
+    strict_fill(s);
+    let mut t: f32 = 0.0;
+    for i in 0..s.len() {
+        t = t + s[i];
+    }
+    let (a, b, c) = (s[0], s[5], s[15]);
+    io.print(f"floats {t} {a} {b} {c}\n");
+    let mut w: [u32; 5] = [0; 5];
+    let mut d: [f64; 2] = [0.0, 0.0];
+    let mut b: [i8; 3] = [1, 2, 3];
+    scalars(&mut w, &mut d, &mut b);
+    let (w4, d1, b0, b1) = (w[4], d[1], b[0], b[1]);
+    io.print(f"scalars {w4} {d1} {b0} {b1}\n");
+    let mut u: u64 = 0;
+    let mut r = i32x4.splat(0);
+    raw(&mut u as *mut u64, &mut r as *mut i32x4);
+    let rs = r.reduce_add_wrap();
+    io.print(f"raw {u} {rs}\n");
+    return 0;
+}

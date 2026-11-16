@@ -973,6 +973,34 @@ impl<'a> FnVerifier<'a> {
                 }
                 Ok(())
             }
+            Op::Prefetch(_) => {
+                arity(2)?;
+                no_res()?;
+                let pt = self.operand_ty(b, args[0]).ok_or("prefetch of a non-value")?;
+                if pointee(types, pt).is_none() || self.cls(pt) != Cls::Ptr {
+                    return Err("prefetch address must be a thin pointer".into());
+                }
+                match (b.int_const(args[1]), self.operand_cls(b, args[1])) {
+                    (Some(_), _) | (None, Some(Cls::Int(_))) => Ok(()),
+                    _ => Err("prefetch index must be an int".into()),
+                }
+            }
+            Op::StoreStream => {
+                arity(2)?;
+                no_res()?;
+                let pt = self.operand_ty(b, args[0]).ok_or("mem.store_stream to a non-value")?;
+                let p = pointee(types, pt).ok_or("mem.store_stream through a non-pointer")?;
+                match self.key(p) {
+                    Some(TypeKey::Int { bits, .. }) if *bits != IntBits::Size => {}
+                    Some(TypeKey::Float(_) | TypeKey::Vec { .. }) => {}
+                    _ => return Err(format!("mem.store_stream of {}", tn(p))),
+                }
+                self.check_operand(b, args[1], p)
+            }
+            Op::FenceStream => {
+                arity(0)?;
+                no_res()
+            }
             Op::Call => {
                 if n == 0 {
                     return Err("call needs a callee".into());

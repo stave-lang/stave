@@ -455,7 +455,7 @@ fn mem_fn(cx: &mut Cx, op: VecOp, vt: VT, index: Option<VT>, form: Mem) -> stave
     let arr = cx.p.m.types.array(lane, u64::from(3 * vt.n));
     let (parr, pl, pv) = (cx.refm(arr), cx.ptr(lane), cx.ptr(v));
     let slice = match op {
-        LoadAligned | StoreAligned => {
+        LoadAligned | StoreAligned | StoreStream => {
             cx.p.m.types.intern(TypeKey::Slice { elem: lane, align: Some(vt.bytes()) })
         }
         _ => cx.p.m.types.slice(lane),
@@ -468,7 +468,7 @@ fn mem_fn(cx: &mut Cx, op: VecOp, vt: VT, index: Option<VT>, form: Mem) -> stave
     match op {
         Load | LoadAligned => params.extend(idx),
         LoadMasked => params.extend([us, m]),
-        Store | StoreAligned => params.extend(idx.into_iter().chain([v])),
+        Store | StoreAligned | StoreStream => params.extend(idx.into_iter().chain([v])),
         StoreMasked => params.extend([us, v, m]),
         Gather => params.extend(iv),
         _ => params.extend([iv.unwrap(), v]),
@@ -547,9 +547,9 @@ fn memory_ops() {
     for vt in mem_types() {
         let n = u64::from(vt.n);
         let w = vt.l.bits();
-        for op in [Load, Store, LoadAligned, StoreAligned] {
+        for op in [Load, Store, LoadAligned, StoreAligned, StoreStream] {
             let f = mem_fn(&mut cx, op, vt, None, Mem::default());
-            let aligned = matches!(op, LoadAligned | StoreAligned);
+            let aligned = matches!(op, LoadAligned | StoreAligned | StoreStream);
             for round in 0..9usize {
                 let off = if aligned { 0 } else { [0, 1, 3][round % 3] };
                 let len = n + cx.rng.below(2 * n - off + 1);
@@ -561,7 +561,7 @@ fn memory_ops() {
                 };
                 let mut args = backing(&mut cx, vt, off, len);
                 args.push(A::I(i128::from(i)));
-                if matches!(op, Store | StoreAligned) {
+                if matches!(op, Store | StoreAligned | StoreStream) {
                     args.push(A::V(vt, cx.rng.lanes(vt)));
                 }
                 cx.case(&format!("{} {}", op.name(), vt.name()), f, None, args, O::Unit);
@@ -618,8 +618,8 @@ fn memory_ops() {
             }
         }
         // constant indices, through the slice and through the array
-        for op in [Load, Store, LoadAligned, StoreAligned] {
-            let aligned = matches!(op, LoadAligned | StoreAligned);
+        for op in [Load, Store, LoadAligned, StoreAligned, StoreStream] {
+            let aligned = matches!(op, LoadAligned | StoreAligned | StoreStream);
             let mut forms =
                 vec![(false, if aligned { 0 } else { 1 }), (false, if aligned { 2 * n } else { n + 1 })];
             if !aligned {
@@ -631,7 +631,7 @@ fn memory_ops() {
                     let off = if aligned || array { 0 } else { cx.rng.below(2 * n - at + 1) };
                     let len = at + n + cx.rng.below(2 * n - off - at + 1);
                     let mut args = backing(&mut cx, vt, off, len);
-                    if matches!(op, Store | StoreAligned) {
+                    if matches!(op, Store | StoreAligned | StoreStream) {
                         args.push(A::V(vt, cx.rng.lanes(vt)));
                     }
                     cx.case(&format!("{} {} at {at}", op.name(), vt.name()), f, None, args, O::Unit);
@@ -765,7 +765,7 @@ fn traps() {
         let n = u64::from(vt.n);
         let w = vt.l.bits();
         let ones = if w == 64 { u64::MAX } else { (1 << w) - 1 };
-        for op in [LoadAligned, StoreAligned] {
+        for op in [LoadAligned, StoreAligned, StoreStream] {
             // (index, constant)
             for (i, konst) in [(1, false), (n + 1, false), (n + 1, true)] {
                 trap(Bounds, &|cx| {
@@ -775,7 +775,7 @@ fn traps() {
                     if !konst {
                         args.push(A::I(i128::from(i)));
                     }
-                    if op == StoreAligned {
+                    if op != LoadAligned {
                         args.push(A::V(vt, cx.rng.lanes(vt)));
                     }
                     cx.case("aligned access", f, None, args, O::Unit);
@@ -900,7 +900,9 @@ fn tested_by(op: VecOp) -> &'static str {
         Splat | Bitcast | Split | Join | WidenLo | WidenHi | NarrowWrap | NarrowSat | Permute | Lookup
         | Compress | Expand => "shape_ops",
         Load | Store => "memory_ops",
-        LoadAligned | StoreAligned | LoadMasked | StoreMasked | Gather | Scatter => "memory_ops, traps",
+        LoadAligned | StoreAligned | StoreStream | LoadMasked | StoreMasked | Gather | Scatter => {
+            "memory_ops, traps"
+        }
         MaskAnd | MaskOr | MaskXor | MaskNot | Select | ToBits | ToVec | FirstN | Rewiden | MaskAll
         | MaskNone => "mask_ops",
     }
@@ -914,7 +916,7 @@ fn every_op_is_tested_or_listed_unsupported() {
     let tested =
         VecOp::ALL.iter().filter(|op| !UNSUPPORTED.contains(op) && !tested_by(**op).is_empty()).count();
     assert_eq!(tested + UNSUPPORTED.len(), VecOp::ALL.len());
-    assert_eq!(VecOp::ALL.len(), 92);
+    assert_eq!(VecOp::ALL.len(), 93);
 }
 
 /// Vector values outside the vector ops: arguments in registers and on the stack (ten vectors,

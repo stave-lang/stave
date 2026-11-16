@@ -87,6 +87,8 @@ instructions; the trap kind is the matching panic kind (`Overflow`, `Bounds`, `D
 | `addr.field` / `addr.enum_field` / `addr.elem` | `p i` / `p v f` / `p i` | address arithmetic, unchecked (wrapping: `p + i * size` mod 2^64) |
 | `slice.make` / `slice.len` / `slice.ptr` | `p n` / `s` / `s` | fat pointer (`&[T]`, `&str`) parts |
 | `check.bounds` † | `i n` | `i ≥ n` (unsigned) traps `Bounds` |
+| `mem.prefetch_read_l1` … `mem.prefetch_write_nta` | `p i` | the eight prefetch hints (simd-ops.md "Memory hints") of the address `p + i * size_of(pointee)` (wrapping); `p` a thin pointer (`slice.ptr` of a slice, or the raw pointer with `i = 0`); no access, never traps |
+| `mem.store_stream` / `mem.fence_stream` | `p v` / — | `store` with a non-temporal hint (`v` a lane type or a vector) / orders the streaming stores before it |
 | `fn.make` | `@f env` | fn value `(code, environment)` of closure body `@f` (see Closures) |
 | `call` / `call.ind` | `@f args..` / `f args..` | direct / fn-value call (`call.ind` also passes the value's environment, see Closures) |
 | `intrinsic.<name>` | args.. | contracts/intrinsics.md |
@@ -113,6 +115,7 @@ ops take the lane semantics of the scalar op; V = the vector result type, M = `m
 | `vec.bitcast split join widen_lo widen_hi narrow_wrap narrow_sat permute lookup compress expand` | | shape ops (`permute v k0 ..`: constant lane indices) |
 | `vec.load` / `vec.store` | `s i` / `s i v` | lanes `s[i..i+N]`, after `check.bounds i (sub.sat (slice.len s) N-1)` or under a chunk loop's head test; release passes after bounds-check elision may replace a slice `s` by its `slice.ptr` (unchecked `*T`) |
 | `vec.load_aligned` † / `vec.store_aligned` † | `s i` / `s i v` | as `load` / `store`; `i % N != 0` traps `Bounds` |
+| `vec.store_stream` † | `s i v` | `vec.store_aligned` with a non-temporal hint, after the same `check.bounds` |
 | `vec.load_masked` † / `vec.store_masked` † | `s i m` / `s i v m` | active lanes only (inactive read 0); an active lane past the end traps `Bounds` before any lane is written |
 | `vec.gather` † / `vec.scatter` † | `s idx` / `s idx v` | `idx`: unsigned lanes of any width, N of them, zero-extended; any index ≥ len traps `Bounds` before any write; duplicate indices: highest lane wins |
 | `mask.and or xor not select to_bits to_vec first_n rewiden all none` | | mask ops (`mask.select m a b`); a mask lane is all zeros or all ones, a load of any other pattern is undefined behaviour (the interpreter faults) |
@@ -237,6 +240,11 @@ b2():
   against `sub.sat n c` reads as `i + c < n`).
   Compiler-made accesses (`for` over an array or slice, drop loops, array → slice coercion
   `addr.elem p 0` + `slice.make`) index below a length the generated code compares against.
+- **Memory hints**: `s.prefetch_<rw>_<loc>(i)` is `slice.ptr s` and the prefetch of it with `i`;
+  `x.store_stream(s, i)` is `check.bounds i (slice.len s)`, `addr.elem s i`, `mem.store_stream`.
+  After the SSA post-pass, `mem.fence_stream` instructions are placed by the rule of simd-ops.md
+  "Ordering" (stave-ir `fence`): at the start of a block a streaming loop exits to, right before a
+  call, or right after the last streaming store of straight-line code before a call or return.
 - **Sub-slices** (`xs[a..b]`, a slice place; `n` as for `xs[i]`): `cbr (gt b n)` to a block
   `panic.bounds ()` + `unreachable`, then `cbr (gt a b)` the same way, then
   `slice.make (addr.elem p a) (sub.wrap b a)`. `xs[a..=b]` tests `ge b n` first and uses

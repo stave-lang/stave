@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// Streaming stores take lane types (fixed-width ints and floats) and vectors: `store_stream` on
+// a `usize` or `bool`, `write_stream` through a pointer to one or through a `*const`, are E0208;
+// the slice must hold the value's type (E0201). `fence_stream` takes no generic or value
+// arguments (E0201, E0201).
+fn f(n: usize, b: bool, us: &mut [usize], bs: &mut [bool], pu: *mut usize, pb: *mut bool, pc: *const u32, s: &mut [u32]) {
+    n.store_stream(us, 0); //~ ERROR E0208
+    b.store_stream(bs, 0); //~ ERROR E0208
+    let x: u8 = 1;
+    x.store_stream(s, 0); //~ ERROR E0201
+    unsafe("the pointers are valid for writes and aligned") {
+        pu.write_stream(n); //~ ERROR E0208
+        pb.write_stream(b); //~ ERROR E0208
+        pc.write_stream(1); //~ ERROR E0208
+        fence_stream::<u8>(); //~ ERROR E0201
+        fence_stream(1); //~ ERROR E0201
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -295,8 +295,8 @@ mem.prefetch_write_l1   any                         N    1  prfm pstl1keep
 mem.prefetch_write_l2   any                         N    1  prfm pstl2keep
 mem.prefetch_write_l3   any                         N    1  prfm pstl3keep
 mem.prefetch_write_nta  any                         N    1  prfm pstl1strm
-vec.store_stream        any                         N    1  stnt1*
-mem.store_stream        any32/any64                 N    1  str  | note: no single-register non-temporal store: a plain store
-mem.store_stream        any16                       N    1  strh  | note: no single-register non-temporal store: a plain store
-mem.store_stream        any8                        N    1  strb  | note: no single-register non-temporal store: a plain store
-mem.fence_stream        any                         N    0  none  | note: stnp and stnt1 follow normal store ordering  | unverified
+vec.store_stream        any                         N    1  st1*  | note: a plain store: AArch64 code uses no non-temporal store
+mem.store_stream        any32/any64                 N    1  str  | note: a plain store: AArch64 code uses no non-temporal store
+mem.store_stream        any16                       N    1  strh  | note: a plain store: AArch64 code uses no non-temporal store
+mem.store_stream        any8                        N    1  strb  | note: a plain store: AArch64 code uses no non-temporal store
+mem.fence_stream        any                         N    0  none  | note: streaming stores are plain stores

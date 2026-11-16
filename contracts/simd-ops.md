@@ -203,8 +203,9 @@ more; `tools/gen-tables` rejects a table cell whose class disagrees with its rec
 ## Memory hints
 
 Prefetch and streaming (non-temporal) stores. Both are hints: the program's results never depend
-on them. Class N everywhere (one or two instructions, or none), so `strict { }` accepts them and
-no `emulate` is needed. "plain" = an ordinary store, hint dropped (same semantics).
+on them, and a target may compile one to nothing (a prefetch) or to the plain store. Class N
+everywhere (one or two instructions, or none), so `strict { }` accepts them and no `emulate` is
+needed. "plain" = an ordinary store, hint dropped (same semantics).
 
 - **Prefetch** `s.prefetch_<rw>_<loc>(i)` (`s: &[T]` / `&mut [T]`) and `p.prefetch_<rw>_<loc>()`
   (`p: *const T` / `*mut T`), `<rw>` ∈ `read write`, `<loc>` ∈ `l1 l2 l3 nta`. Safe in both forms:
@@ -213,12 +214,17 @@ no `emulate` is needed. "plain" = an ordinary store, hint dropped (same semantic
   `i < len` (one predicate; PTX gives no fault guarantee for a prefetch of an unmapped address,
   unverified), the raw-pointer form emits nothing.
 - **Streaming store** `v.store_stream(s, i)` (`v: TxN`, `s: &mut [T align A]`, A ≥ vector bytes,
-  else E0606; traps `Bounds` if `i + N > len` or `i % N != 0`), `x.store_stream(s, i)` (scalar lane
-  type, `s: &mut [T]`, traps if `i ≥ len`), and unsafe `p.write_stream(v)` (`p: *mut T`, aligned to
+  else E0606; traps `Bounds` if `i + N > len`, then if `i % N != 0`), `x.store_stream(s, i)` (`x`
+  of a lane type T, `s: &mut [T]`, traps `Bounds` if `i ≥ len`), and unsafe `p.write_stream(v)`
+  (`p: *mut T`, T a lane type or a vector; obligation: `p` valid for writes and aligned to
   `size_of::<T>()`; no drop of the old pointee).
 - **Ordering**: a streaming store is a plain store for the program. The compiler places
-  `fence_stream()` after the last streaming store on each path to a return or a call (checked IR,
-  before inlining; one per loop exit). `fence_stream()` is also a built-in fn for unsafe code.
+  `fence_stream()` after the last streaming store on each path to a return or a call (`call`,
+  `call.ind`, any intrinsic), where no further streaming store can come before it: one at each exit
+  of a streaming loop, one before a call inside it, never one per store. It works on the checked
+  IR (before inlining), and a fence already on the path (an explicit `fence_stream()`) is not
+  repeated. A path that ends in a trap gets none. `fence_stream()` is also a built-in fn, an unsafe
+  operation (E0803 outside `unsafe(..)`).
 
 | Op | v2 | v3 | v4 | neon | sve | gpu-sm86 |
 |---|---|---|---|---|---|---|
@@ -230,20 +236,21 @@ no `emulate` is needed. "plain" = an ordinary store, hint dropped (same semantic
 | `prefetch_write_l2` | `prefetcht1` (a) | `prefetcht1` (a) | `prefetchw` | `prfm pstl2keep` | `prfm pstl2keep` | `prefetch.L2` |
 | `prefetch_write_l3` | `prefetcht2` (a) | `prefetcht2` (a) | `prefetchw` | `prfm pstl3keep` | `prfm pstl3keep` | `prefetch.L2` |
 | `prefetch_write_nta` | `prefetchnta` (a) | `prefetchnta` (a) | `prefetchw` | `prfm pstl1strm` | `prfm pstl1strm` | none |
-| `v.store_stream(s, i)` float lanes | `movntps/pd` | `vmovntps/pd` | `vmovntps/pd` (EVEX) | `stnp` of the two d halves (2) | `stnt1w/d` (all-true pred) | `st.global.cs` (`.v2/.v4` per 128 bits) |
-| `v.store_stream(s, i)` int lanes | `movntdq` | `vmovntdq` | `vmovntdq` (EVEX) | `stnp` of the two d halves (2) | `stnt1b/h/w/d` | `st.global.cs` |
+| `v.store_stream(s, i)` float lanes | `movntps/pd` | `vmovntps/pd` | `vmovntps/pd` (EVEX) | plain `str q` (b) | plain `st1w/d` (b) | `st.global.cs` (`.v2/.v4` per 128 bits) |
+| `v.store_stream(s, i)` int lanes | `movntdq` | `vmovntdq` | `vmovntdq` (EVEX) | plain `str q` (b) | plain `st1b/h/w/d` (b) | `st.global.cs` |
 | `x.store_stream(s, i)` 32/64-bit int | `movnti` | `movnti` | `movnti` | plain `str` (b) | plain `str` (b) | `st.global.cs` |
-| `x.store_stream(s, i)` f32/f64 | `movd/movq` + `movnti` (2) | same | same | plain `str` (b) | plain `str` (b) | `st.global.cs` |
+| `x.store_stream(s, i)` f32/f64 | `movq` + `movnti` (2) | same | `vmovd/vmovq` + `movnti` (2) | plain `str` (b) | plain `str` (b) | `st.global.cs` |
 | `x.store_stream(s, i)` 8/16-bit | plain `mov` (c) | plain | plain | plain `strb/strh` | plain | `st.global.cs` |
-| `fence_stream()` | `sfence` | `sfence` | `sfence` | none (d) | none (d) | none (e) |
+| `fence_stream()` | `sfence` | `sfence` | `sfence` | none (b) | none (b) | none (d) |
 
 - (a) `prefetchw` needs PRFCHW (Intel Broadwell+, every AVX-512 CPU), which v2/v3 do not imply
   (Haswell lacks it), so v2/v3 use the read hint of the same level.
-- (b) AArch64 has no single-register non-temporal store (`stnp` needs a pair).
-- (c) x86 has no 8/16-bit non-temporal store.
-- (d) `stnp`/`stnt1` follow normal store ordering; the non-temporal relaxation concerns `ldnp`
-  address dependencies only (unverified: recheck against the Arm ARM before this lowering lands).
-- (e) `.cs` is a cache operator on a weak store; PTX ordering is unchanged. The `.global` space
+- (b) AArch64 code uses no non-temporal store (`stnp` needs a register pair, and its ordering
+  against later stores is not relied on): every streaming store is the plain store with the same
+  checks, so no fence is needed.
+- (c) x86 has no 8/16-bit non-temporal store, and none for a vector under 16 bytes (stored
+  plainly too). The float rows are f32/f64 lanes; f16/bf16 lanes take the int row.
+- (d) `.cs` is a cache operator on a weak store; PTX ordering is unchanged. The `.global` space
   is used when the slice is known global; otherwise the generic `st.cs` / `prefetch.L1` forms.
 
 Lowering notes the backend MUST respect:

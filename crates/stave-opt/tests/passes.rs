@@ -268,3 +268,60 @@ fn loop_blocks_follow_the_header_and_cold_blocks_come_last() {
     let cold = layout::cold_blocks(&body_ir, &order);
     assert_eq!(cold, [false, false, false, false, true, false]);
 }
+
+/// `t.hints(s: &mut [u64], x: u64) -> u64`: prefetches `s` at `len + 64` (an address nothing
+/// else reads), streams `x` to `s[0]`, fences, and returns `s[0]`. The passes keep the prefetch,
+/// the arithmetic only it uses, the streaming store, and the fence.
+#[test]
+fn memory_hints_survive_the_passes() {
+    let mut m = Module::new();
+    let (u64_, usize_) = (m.types.u64(), m.types.usize());
+    let arr = m.types.array(u64_, 4);
+    let parr = m.types.ref_(true, arr);
+    let pel = m.types.ref_(true, u64_);
+    let pconst = m.types.ptr(false, u64_);
+    let sl = m.types.slice(u64_);
+    let psl = m.types.ref_(true, sl);
+    let hint = stave_ir::Prefetch::from_method("prefetch_read_l1").unwrap();
+
+    let hints = m.declare(InstanceId(vec![1]), "t.hints", vec![psl, u64_], Some(u64_));
+    let mut b = FuncBuilder::new(&[psl, u64_]);
+    let (s, x) = (b.param(0).unwrap(), b.param(1).unwrap());
+    let n = b.op(Op::SliceLen, usize_, &[s.into()]);
+    let k = b.int(64);
+    let far = b.binary(Op::AddWrap, usize_, n, k);
+    let p = b.op(Op::SlicePtr, pconst, &[s.into()]);
+    b.inst(Op::Prefetch(hint), None, &[p.into(), far.into()]);
+    let z = b.int(0);
+    b.bounds_check(z, n);
+    let e = b.op(Op::ElemAddr, pel, &[s.into(), z]);
+    b.inst(Op::StoreStream, None, &[e.into(), x.into()]);
+    b.inst(Op::FenceStream, None, &[]);
+    let y = b.load(u64_, e);
+    b.ret(Some(y.into()));
+    assert!(m.define(hints, b.finish().unwrap()));
+
+    let main = m.declare(InstanceId(vec![2]), "t.main", vec![u64_], Some(u64_));
+    let mut b = FuncBuilder::new(&[u64_]);
+    let x = b.param(0).unwrap();
+    let a = b.slot(parr);
+    let zero = b.int(0);
+    let base = b.op(Op::ElemAddr, pel, &[a.into(), zero]);
+    let len = b.int(4);
+    let s = b.op(Op::SliceMake, psl, &[base.into(), len]);
+    let r = b.call(hints, Some(u64_), &[s.into(), x.into()]).unwrap();
+    b.ret(Some(r.into()));
+    assert!(m.define(main, b.finish().unwrap()));
+    verify_module(&m).unwrap();
+
+    let o = optimized(&m);
+    let body = o.func(hints).unwrap().body.as_ref().unwrap();
+    assert_eq!(count(body, Op::Prefetch(hint)), 1);
+    assert_eq!(count(body, Op::AddWrap), 1);
+    assert_eq!(count(body, Op::StoreStream), 1);
+    assert_eq!(count(body, Op::FenceStream), 1);
+    for v in [0u64, 41, u64::MAX] {
+        assert_eq!(run(&m, main, v), Outcome::Return(Some(Val::S(v))));
+        assert_eq!(run(&o, main, v), Outcome::Return(Some(Val::S(v))));
+    }
+}

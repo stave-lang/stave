@@ -1420,6 +1420,10 @@ impl<'a> FnCx<'a> {
                 self.f.b.set_site(stave_ir::Site::NONE);
                 self.call_result(r, ret)
             }
+            Some(Target::FenceStream) => {
+                self.f.b.inst(Op::FenceStream, None, &[]);
+                E::Unit
+            }
             Some(Target::SizeOf { ty, align }) => {
                 let t = self.sub(ty);
                 let Some((s, a)) = self.layout(t) else { return self.fail_at(Some(ctok), "layout") };
@@ -1702,7 +1706,30 @@ impl<'a> FnCx<'a> {
                 let Some(x) = self.val(args.first().copied().unwrap_or(n), Some(inner)) else {
                     return E::Never;
                 };
-                self.f.b.store(v, x);
+                if name == "write" {
+                    self.f.b.store(v, x);
+                } else {
+                    self.f.b.inst(Op::StoreStream, None, &[v, x]);
+                }
+                E::Unit
+            }
+            "store_stream" => {
+                // `x.store_stream(s, i)`: `s[i] = x` with a non-temporal hint
+                let t = p.ty;
+                let Some(x) = self.read(&p) else { return E::Never };
+                let st = self.tys.intern(TypeKind::Slice { elem: t, align: 0 });
+                let rs = self.t_ref(true, st);
+                let us = self.t_usize();
+                let (Some(&sn), Some(&inn)) = (args.first(), args.get(1)) else {
+                    return self.fail_at(Some(seg), "store_stream operands");
+                };
+                let Some(s) = self.val(sn, Some(rs)) else { return E::Never };
+                let Some(i) = self.val(inn, Some(us)) else { return E::Never };
+                let len = self.op1(Op::SliceLen, us, s);
+                self.trapping(seg, Op::BoundsCheck, None, &[i, len]);
+                let ep = self.t_ref(true, t);
+                let a = self.op2(Op::ElemAddr, ep, s, i);
+                self.f.b.inst(Op::StoreStream, None, &[a, x]);
                 E::Unit
             }
             "select" => {
@@ -1730,12 +1757,38 @@ impl<'a> FnCx<'a> {
                 E::V(r, rt)
             }
             s if s.starts_with("prefetch_") => {
-                // a hint: no effect on results, no IR op yet
-                for &a in args {
-                    if self.val(a, None).is_none() {
-                        return E::Never;
+                let Some(h) = stave_ir::Prefetch::from_method(s) else { return self.fail_at(Some(seg), s) };
+                let us = self.t_usize();
+                // a pointer and an element index: `s.prefetch_*(i)` on a slice, `p.prefetch_*()`
+                // on a raw pointer (index 0)
+                let (ptr, pointee, i) = match (self.kind(p.ty), &p.base) {
+                    (TypeKind::Ptr { inner, .. }, _) => {
+                        let Some(v) = self.read(&p) else { return E::Never };
+                        (v, inner, self.int(0))
                     }
-                }
+                    (TypeKind::Slice { .. }, Base::Mem(v, _)) if p.proj.is_empty() => {
+                        let (v, t) = (*v, p.ty);
+                        let Some(i) = self.val(args.first().copied().unwrap_or(n), Some(us)) else {
+                            return E::Never;
+                        };
+                        (v, t, i)
+                    }
+                    _ => return self.fail_at(Some(seg), "prefetch receiver"),
+                };
+                // a fat pointer prefetches from its data pointer
+                let a = match self.kind(pointee) {
+                    TypeKind::Slice { elem, .. } => {
+                        let ep = self.t_ptr(false, elem);
+                        self.op1(Op::SlicePtr, ep, ptr)
+                    }
+                    TypeKind::Str => {
+                        let u8t = self.t_int(false, crate::types::IntBits::B8);
+                        let ep = self.t_ptr(false, u8t);
+                        self.op1(Op::SlicePtr, ep, ptr)
+                    }
+                    _ => ptr,
+                };
+                self.f.b.inst(Op::Prefetch(h), None, &[a, i]);
                 E::Unit
             }
             _ => self.unsupported_at(Some(seg), format!("built-in method `{name}` is not supported yet")),
