@@ -6,8 +6,8 @@ designed. Goal: whole programs, and the compiler itself, run on the GPU.
 
 **Status: pre-alpha, an experiment.** Not for production use. The stage0 compiler (Rust) builds and
 runs programs on x86-64 and AArch64: front end, borrow checker, views, closures, threads, debug code
-generation. SIMD code is only partly type-checked; vector code is generated for x86-64 only
-(SSE4.2 and AVX2 levels), not yet for AArch64. The optimizer is not started. GPU support is design
+generation. SIMD code is only partly type-checked; vector code is generated for x86-64
+(SSE4.2 and AVX2 levels) and AArch64 (Advanced SIMD). The optimizer is not started. GPU support is design
 only. Parts of `contracts/` and `LANG.md` describe designed but unbuilt things (the GPU runtime,
 optimizer rules, planned diagnostics); they say so where they do.
 
@@ -18,7 +18,7 @@ optimizer rules, planned diagnostics); they say so where they do.
   parallel. There is no libc and no external linker: the compiler writes the static ELF itself.
 - **SIMD first.** Vector types, chunk loops with a mandatory tail, and CPU dispatch are language
   constructs checked by the type system, not intrinsics and not a hope that a loop
-  auto-vectorizes. *Status: partly type-checked; vector code generation on x86-64 only;
+  auto-vectorizes. *Status: partly type-checked; vector code generation on x86-64 and AArch64;
   `dispatch` functions do not build yet.*
 - **The GPU as a runtime target.** Whole programs run on the GPU, not only kernels: heap,
   recursion, function values, and I/O through a thin host shim. First target: PTX for NVIDIA.
@@ -42,7 +42,7 @@ optimizer rules, planned diagnostics); they say so where they do.
 ## Roadmap
 
 In order: checker soundness (adversarial testing, fuzzing) → the rest of vector code generation
-(AArch64, CPU dispatch) and a release back end → GPU kernels → whole programs on the GPU → the
+(CPU dispatch) and a release back end → GPU kernels → whole programs on the GPU → the
 compiler on the GPU.
 
 ## Benchmark
@@ -93,7 +93,7 @@ fn main() -> i32 {
 }
 ```
 
-SIMD (design: this type-checks in part; stage0 builds vector types and chunk loops on x86-64, a
+SIMD (design: this type-checks in part; stage0 builds vector types and chunk loops, a
 `dispatch fn` not yet): vector types, chunk loops with a mandatory tail, and runtime CPU dispatch:
 
 ```stave

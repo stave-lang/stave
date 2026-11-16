@@ -8,9 +8,11 @@ use stave_obj::{FuncCode, SymbolId};
 use super::abi::{self, Loc, Ret};
 use super::analysis::{Analysis, NONE, Vk};
 use super::support::Codegen;
-use super::ty::{Sc, Ty};
+use super::ty::{LaneKind, Sc, Ty, VTy};
 use super::{R, bad, unsupported};
-use crate::enc::{AddSub, Addr, Asm, Cond, Fp, Label, MemSize, Reg, Shift, VReg, VecSize, Width, encode_fp8};
+use crate::enc::{
+    AddSub, Addr, Asm, Cond, Fp, Label, MemSize, Reg, Shift, VBin, VReg, VecSize, Width, encode_fp8,
+};
 
 /// Allocatable GPRs: `x0–x7`, `x9–x14`.
 const GPOOL: u32 = 0x0000_7eff;
@@ -670,6 +672,17 @@ impl<'a, 'm> Gen<'a, 'm> {
         self.vreg[v.index()] = NOREG;
     }
 
+    /// The temporaries and pins of the current instruction, for [`Self::tmp_reset`].
+    pub fn tmp_mark(&self) -> [u32; 4] {
+        [self.gtmp, self.ftmp, self.gpin, self.fpin]
+    }
+
+    /// Frees the temporaries taken since `mark`. Only between straight-line code: a register
+    /// taken after the reset may be one of them.
+    pub fn tmp_reset(&mut self, mark: [u32; 4]) {
+        [self.gtmp, self.ftmp, self.gpin, self.fpin] = mark;
+    }
+
     /// Ends an instruction: unpins, frees temporaries, drops values at their last use.
     pub fn end_inst(&mut self, i: u32, result: Option<Value>) {
         self.gpin = 0;
@@ -831,7 +844,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 }
                 self.st(sz, S15, base, off)
             }
-            Ty::Fat | Ty::Mem { .. } => match o {
+            Ty::Fat | Ty::Vec(_) | Ty::Mem { .. } => match o {
                 Operand::Value(v) => {
                     let h = self.home(v);
                     self.memcpy(base, off, SP, h, t.size())
@@ -888,8 +901,26 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let h = self.home(v);
                 self.memcpy(SP, h, base, off, t.size())
             }
+            Ty::Vec(vt) => {
+                let h = self.home(v);
+                self.memcpy(SP, h, base, off, t.size())?;
+                if vt.kind == LaneKind::Mask {
+                    // a mask lane in memory is set iff any of its bits is
+                    self.ldf(vt.home_size(), V31, SP, h)?;
+                    self.a.vbin(VBin::Cmtst, vt.arr(), V31, V31, V31)?;
+                    self.stf(vt.home_size(), V31, SP, h)?;
+                }
+                Ok(())
+            }
             Ty::Bad(why) => Err(unsupported(why)),
         }
+    }
+
+    /// Loads vector operand `o` from its home into `vd`.
+    pub fn load_vec(&mut self, vd: VReg, o: Operand, vt: VTy) -> R<()> {
+        let Operand::Value(v) = o else { return Err(bad("vector operand must be a value")) };
+        let h = self.home(v);
+        self.ldf(vt.home_size(), vd, SP, h)
     }
 
     // ---------------------------------------------------------------- function
@@ -1005,6 +1036,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 (Loc::X(n), Ty::Mem { size, .. }) => self.memcpy(SP, h, xr(n), 0, size)?,
                 (Loc::X(n), _) => self.st(MemSize::X, xr(n), SP, h)?,
                 (Loc::V(n), Ty::Sc(s)) => self.stf(s.vsize(), VReg::vn(n), SP, h)?,
+                (Loc::V(n), Ty::Vec(vt)) => self.stf(vt.home_size(), VReg::vn(n), SP, h)?,
                 (Loc::XPair(n), _) => {
                     self.st(MemSize::X, xr(n), SP, h)?;
                     self.st(MemSize::X, xr(n + 1), SP, h + 8)?;
@@ -1034,6 +1066,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                         self.memcpy(SP, h, x9, 0, size)?;
                     }
                     Ty::Fat => self.memcpy(SP, h, Reg::FP, src, 16)?,
+                    Ty::Vec(vt) => self.memcpy(SP, h, Reg::FP, src, u32::from(vt.size))?,
                     _ => {
                         self.ld(MemSize::X, false, S15, Reg::FP, src)?;
                         self.st(MemSize::X, S15, SP, h)?;
@@ -1261,6 +1294,10 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.load_to_v(VReg::vn(0), o, s)
             }
             Ret::X0X1 => self.load_fat(xr(0), xr(1), o),
+            Ret::Q0 => match rt {
+                Some(Ty::Vec(vt)) => self.load_vec(VReg::vn(0), o, vt),
+                _ => Err(bad("vector return type")),
+            },
             Ret::Indirect => {
                 let Operand::Value(v) = o else { return Err(bad("aggregate return of a non-value")) };
                 let size = rt.map_or(0, |t| t.size());
@@ -1298,7 +1335,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let ty = self.vty(v);
                 let size = ty.size().max(8).div_ceil(8) * 8;
                 match ty {
-                    Ty::Fat | Ty::Mem { .. } => {
+                    Ty::Fat | Ty::Vec(_) | Ty::Mem { .. } => {
                         let h = self.home(v);
                         self.memcpy(SP, soff, SP, h, ty.size())?;
                     }
@@ -1330,7 +1367,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             }
             if let Some(&(_, so)) = saved.iter().find(|s| s.0 == i) {
                 match ty {
-                    Ty::Fat | Ty::Mem { .. } => self.memcpy(SP, h, SP, so, ty.size())?,
+                    Ty::Fat | Ty::Vec(_) | Ty::Mem { .. } => self.memcpy(SP, h, SP, so, ty.size())?,
                     _ => {
                         self.ld(MemSize::X, false, S15, SP, so)?;
                         self.st(MemSize::X, S15, SP, h)?;
@@ -1535,6 +1572,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             let so = i64::from(so);
             match self.cg.ty(pt) {
                 Ty::Fat => self.put(o, Ty::Fat, SP, so)?,
+                t @ Ty::Vec(_) => self.put(o, t, SP, so)?,
                 Ty::Mem { .. } => {
                     self.load_to_x(S15, o)?;
                     self.st(MemSize::X, S15, SP, so)?;
@@ -1549,13 +1587,11 @@ impl<'a, 'm> Gen<'a, 'm> {
         for (k, (&pt, &o)) in params.iter().zip(args).enumerate() {
             match locs[k].loc {
                 Loc::X(n) => self.load_to_x(xr(n), o)?,
-                Loc::V(n) => {
-                    let s = match self.cg.ty(pt) {
-                        Ty::Sc(s) => s,
-                        _ => Sc::F64,
-                    };
-                    self.load_to_v(VReg::vn(n), o, s)?
-                }
+                Loc::V(n) => match self.cg.ty(pt) {
+                    Ty::Vec(vt) => self.load_vec(VReg::vn(n), o, vt)?,
+                    Ty::Sc(s) => self.load_to_v(VReg::vn(n), o, s)?,
+                    _ => return Err(bad("argument in an FP register")),
+                },
                 Loc::XPair(n) => self.load_fat(xr(n), xr(n + 1), o)?,
                 Loc::Stack(_) => {}
             }
@@ -1613,6 +1649,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             let so = i64::from(so);
             match self.cg.ty(pt) {
                 Ty::Fat => self.put(o, Ty::Fat, SP, so)?,
+                t @ Ty::Vec(_) => self.put(o, t, SP, so)?,
                 Ty::Mem { .. } => {
                     self.load_to_x(S15, o)?;
                     self.st(MemSize::X, S15, SP, so)?;
@@ -1627,13 +1664,11 @@ impl<'a, 'm> Gen<'a, 'm> {
         for (k, (&pt, &o)) in params.iter().zip(args).enumerate() {
             match locs[k].loc {
                 Loc::X(n) => self.load_to_x(xr(n), o)?,
-                Loc::V(n) => {
-                    let s = match self.cg.ty(pt) {
-                        Ty::Sc(s) => s,
-                        _ => Sc::F64,
-                    };
-                    self.load_to_v(VReg::vn(n), o, s)?
-                }
+                Loc::V(n) => match self.cg.ty(pt) {
+                    Ty::Vec(vt) => self.load_vec(VReg::vn(n), o, vt)?,
+                    Ty::Sc(s) => self.load_to_v(VReg::vn(n), o, s)?,
+                    _ => return Err(bad("argument in an FP register")),
+                },
                 Loc::XPair(n) => self.load_fat(xr(n), xr(n + 1), o)?,
                 Loc::Stack(_) => {}
             }
@@ -1687,6 +1722,11 @@ impl<'a, 'm> Gen<'a, 'm> {
                 let h = self.home(r);
                 self.st(MemSize::X, xr(0), SP, h)?;
                 self.st(MemSize::X, xr(1), SP, h + 8)?;
+            }
+            Ret::Q0 => {
+                let Ty::Vec(vt) = self.vty(r) else { return Err(bad("vector call result")) };
+                let h = self.home(r);
+                self.stf(vt.home_size(), VReg::vn(0), SP, h)?;
             }
             Ret::Indirect | Ret::None => {}
         }

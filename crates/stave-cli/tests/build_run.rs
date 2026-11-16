@@ -523,28 +523,22 @@ fn single_file_stem_is_checked() {
     assert!(is_static_exec(&work.join("plain")));
 }
 
-/// A valid program with vector values builds for x86-64; for a target whose backend has no vector
-/// code generation it is "not implemented yet" (exit 2, naming vector code generation), never an
-/// internal error (exit 3). `stave check` accepts it.
+/// A valid program with vector values builds for every native target, and `stave check` accepts
+/// it.
 #[test]
-fn vector_program_is_not_implemented() {
+fn vector_program_builds() {
     let d = tmp("simd");
     let f = d.join("simd.stv");
     std::fs::write(&f, "fn main() -> i32 {\n    let a = f32x4.splat(0.0);\n    return 0;\n}\n").unwrap();
     let p = f.display().to_string();
     let (c, _, err) = stave_in(&d, &["check", &p]);
     assert_eq!(c, 0, "{err}");
-    for target in ["x86_64-linux", "x86_64-linux-v3"] {
+    for target in ["x86_64-linux", "x86_64-linux-v3", "aarch64-linux"] {
         let (c, _, err) = stave_in(&d, &["build", &p, "--target", target]);
         assert_eq!(c, 0, "{target}: {err}");
         assert!(is_static_exec(&d.join("simd")), "{target}");
         std::fs::remove_file(d.join("simd")).unwrap();
     }
-    let (c, _, err) = stave_in(&d, &["build", &p, "--target", "aarch64-linux"]);
-    assert_eq!(c, 2, "{err}");
-    assert!(err.contains("is not implemented yet"), "{err}");
-    assert!(err.contains("vector code generation"), "{err}");
-    assert!(!d.join("simd").exists());
 }
 
 /// Syntax that parses but has no semantics yet (parameter `from`, contracts) is

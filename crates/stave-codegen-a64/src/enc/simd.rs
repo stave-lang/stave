@@ -592,6 +592,13 @@ impl Asm {
         self.emit(0x0e20_0800 | arr.q() | (u << 29) | (arr.size() << 22) | (opcode << 12) | rr(vd, vn))
     }
 
+    /// `saddlp/uaddlp vd.Tw, vn.T`: adds adjacent pairs of lanes into lanes twice as wide (`8b` to
+    /// `4h`, ..., `4s` to `2d`); `src` is the narrow arrangement.
+    pub fn vaddlp(&mut self, sign: Sign, src: Arr, vd: VReg, vn: VReg) -> Result<(), EncError> {
+        src.require(BHS, "pairwise long add needs 8-, 16- or 32-bit source lanes")?;
+        self.emit(0x0e20_2800 | src.q() | (sign.u() << 29) | (src.size() << 22) | rr(vd, vn))
+    }
+
     /// `rev16/rev32/rev64 vd.T, vn.T`.
     pub fn vrev(&mut self, op: Rev, arr: Arr, vd: VReg, vn: VReg) -> Result<(), EncError> {
         let (u, opcode, mask) = match op {

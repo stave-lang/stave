@@ -18,9 +18,9 @@ use crate::enc::{
 /// Words of an aggregate `select` emitted straight-line; longer values use a counted loop.
 const SELECT_UNROLL: i64 = 64;
 
-/// A cast-try payload in a register.
+/// A scalar in a register: the source or the result of a cast.
 #[derive(Clone, Copy)]
-enum Payload {
+pub(super) enum Payload {
     G(Reg),
     F(VReg, Fp),
 }
@@ -75,12 +75,12 @@ impl<'a, 'm> Gen<'a, 'm> {
         }
     }
 
-    fn layout(&self, t: TypeId) -> R<&'a Layout> {
+    pub(super) fn layout(&self, t: TypeId) -> R<&'a Layout> {
         let cg: &'a super::support::Codegen<'m> = self.cg;
         cg.layouts.get_layout(t).map_err(|e| unsupported(format!("layout: {e}")))
     }
 
-    fn value_tid(&self, o: Operand) -> R<TypeId> {
+    pub(super) fn value_tid(&self, o: Operand) -> R<TypeId> {
         match o {
             Operand::Value(v) => self.b.value_ty(v).ok_or_else(|| bad("value out of range")),
             _ => Err(bad("value operand expected")),
@@ -102,7 +102,7 @@ impl<'a, 'm> Gen<'a, 'm> {
         }
     }
 
-    fn norm(&mut self, r: Reg, s: Sc) -> R<()> {
+    pub(super) fn norm(&mut self, r: Reg, s: Sc) -> R<()> {
         match (s.bits(), s.signed()) {
             (32, true) => self.a.sxt(X, r, r, Ext::W)?,
             (32, false) => self.a.mov(W, r, r)?,
@@ -137,7 +137,7 @@ impl<'a, 'm> Gen<'a, 'm> {
     }
 
     /// Clamps the exact 64-bit value in `r` to the range of `s` (signedness of the value: `vs`).
-    fn clamp(&mut self, r: Reg, from: (i128, i128), vs: bool, to: Sc) -> R<()> {
+    pub(super) fn clamp(&mut self, r: Reg, from: (i128, i128), vs: bool, to: Sc) -> R<()> {
         let (tmin, tmax) = to.range();
         if from.1 > tmax {
             let t = self.tmp_g()?;
@@ -154,7 +154,7 @@ impl<'a, 'm> Gen<'a, 'm> {
         Ok(())
     }
 
-    fn res(&self, i: u32) -> R<Value> {
+    pub(super) fn res(&self, i: u32) -> R<Value> {
         self.b.insts.result.get(i as usize).copied().flatten().ok_or_else(|| bad("missing result"))
     }
 
@@ -443,7 +443,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.put(arg(1)?, Ty::Sc(Sc::USIZE), SP, h + 8)
             }
             Op::Intrinsic(id) => self.intrinsic(id, i),
-            Op::Vec(v) => Err(unsupported(v.name())),
+            Op::Vec(v) => self.vec_op(v, i),
             Op::Panic(kind) => {
                 let l = self.trap(kind, site)?;
                 self.a.b(l)?;
@@ -918,7 +918,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.a.csel(X, rd, ra, rb, Cond::Ne)?;
                 Ok(())
             }
-            Ty::Fat | Ty::Mem { .. } => {
+            Ty::Fat | Ty::Vec(_) | Ty::Mem { .. } => {
                 let rc = self.use_g(c)?;
                 let h = self.home(v);
                 self.select_mem(rc, h, a, bo, t.size())
@@ -1038,7 +1038,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.a.mov(X, rd, ra)?;
                 Ok(())
             }
-            Ty::Fat | Ty::Mem { .. } => {
+            Ty::Fat | Ty::Vec(_) | Ty::Mem { .. } => {
                 let h = self.home(v);
                 self.put(o, t, SP, h)
             }
@@ -1088,172 +1088,169 @@ impl<'a, 'm> Gen<'a, 'm> {
             Operand::Func(_) => Sc::Ptr,
             _ => return Err(bad("cast operand")),
         };
-        match (from.is_fp(), to.is_fp()) {
-            (false, false) => {
-                let ra = self.use_g(x)?;
-                match kind {
-                    CastKind::Exact | CastKind::Wrap | CastKind::Round => {
-                        let rd = self.def_g(v)?;
-                        self.a.mov(X, rd, ra)?;
-                        if to != Sc::Ptr && to != Sc::Char {
-                            self.norm(rd, to)?;
-                        }
-                        Ok(())
+        let src = if from.is_fp() {
+            Payload::F(self.use_f(x, from)?, from.fp())
+        } else {
+            Payload::G(self.use_g(x)?)
+        };
+        let Some((_, some, _)) = opt else {
+            let dst =
+                if to.is_fp() { Payload::F(self.def_f(v)?, to.fp()) } else { Payload::G(self.def_g(v)?) };
+            self.cast_core(kind, from, to, src, dst)?;
+            return Ok(());
+        };
+        let dst = if to.is_fp() { Payload::F(self.tmp_f()?, to.fp()) } else { Payload::G(self.tmp_g()?) };
+        let ok = self.cast_core(kind, from, to, src, dst)?.ok_or_else(|| bad("cast.try"))?;
+        self.option_write(v, t, some, ok, dst, to)
+    }
+
+    /// The scalar cast of `src` (of class `from`) to class `to`, into `dst`: a register of the
+    /// result's class that is not `src`. For `Try`, returns a register holding 1 if the value
+    /// converts and 0 if not (`dst` is then unspecified). Straight-line code.
+    pub(super) fn cast_core(
+        &mut self,
+        kind: CastKind,
+        from: Sc,
+        to: Sc,
+        src: Payload,
+        dst: Payload,
+    ) -> R<Option<Reg>> {
+        match (src, dst) {
+            (Payload::G(ra), Payload::G(rd)) => match kind {
+                CastKind::Exact | CastKind::Wrap | CastKind::Round => {
+                    self.a.mov(X, rd, ra)?;
+                    if to != Sc::Ptr && to != Sc::Char {
+                        self.norm(rd, to)?;
                     }
-                    CastKind::Sat => {
-                        let rd = self.def_g(v)?;
-                        self.a.mov(X, rd, ra)?;
-                        self.clamp(rd, from.range(), from.signed(), to)
-                    }
-                    CastKind::Try => {
-                        let (_, some, _) = opt.ok_or_else(|| bad("cast.try"))?;
-                        let ok = self.tmp_g()?;
-                        if to == Sc::Char {
-                            let t1 = self.tmp_g()?;
-                            self.a.mov_imm(X, t1, 0x10_ffff)?;
-                            self.a.cmp(X, ra, t1)?;
-                            self.a.cset(W, ok, Cond::Ls)?;
-                            self.a.mov_imm(X, t1, 0xd800)?;
-                            self.a.sub(X, t1, ra, t1)?;
-                            self.a.cmp_imm(X, t1, 0x7ff)?;
-                            self.a.cset(W, t1, Cond::Hi)?;
-                            self.a.logic_reg(Logic::And, W, ok, ok, t1, Shift::Lsl, 0)?;
-                        } else {
-                            self.fits_check(ok, ra, from, to)?;
-                        }
-                        self.option_write(v, t, some, ok, Payload::G(ra), to)
-                    }
+                    Ok(None)
                 }
-            }
-            (false, true) => {
-                let ra = self.use_g(x)?;
-                let fp = to.fp();
-                let cvt = |g: &mut Self, d: VReg| -> R<()> {
-                    if from.signed() {
-                        g.a.scvtf(fp, d, X, ra)?;
+                CastKind::Sat => {
+                    self.a.mov(X, rd, ra)?;
+                    self.clamp(rd, from.range(), from.signed(), to)?;
+                    Ok(None)
+                }
+                CastKind::Try => {
+                    let ok = self.tmp_g()?;
+                    if to == Sc::Char {
+                        let t1 = self.tmp_g()?;
+                        self.a.mov_imm(X, t1, 0x10_ffff)?;
+                        self.a.cmp(X, ra, t1)?;
+                        self.a.cset(W, ok, Cond::Ls)?;
+                        self.a.mov_imm(X, t1, 0xd800)?;
+                        self.a.sub(X, t1, ra, t1)?;
+                        self.a.cmp_imm(X, t1, 0x7ff)?;
+                        self.a.cset(W, t1, Cond::Hi)?;
+                        self.a.logic_reg(Logic::And, W, ok, ok, t1, Shift::Lsl, 0)?;
                     } else {
-                        g.a.ucvtf(fp, d, X, ra)?;
+                        self.fits_check(ok, ra, from, to)?;
                     }
-                    Ok(())
-                };
-                if kind != CastKind::Try {
-                    let rd = self.def_f(v)?;
-                    return cvt(self, rd);
+                    self.a.mov(X, rd, ra)?;
+                    Ok(Some(ok))
                 }
-                let (_, some, _) = opt.ok_or_else(|| bad("cast.try"))?;
-                let r = self.tmp_f()?;
-                cvt(self, r)?;
+            },
+            (Payload::G(ra), Payload::F(rd, fp)) => {
+                if from.signed() {
+                    self.a.scvtf(fp, rd, X, ra)?;
+                } else {
+                    self.a.ucvtf(fp, rd, X, ra)?;
+                }
+                if kind != CastKind::Try {
+                    return Ok(None);
+                }
                 let lim = self.tmp_f()?;
                 let l =
                     if from.signed() { 9_223_372_036_854_775_808.0 } else { 18_446_744_073_709_551_616.0 };
                 self.mat_f(lim, fp, fbits(l, fp))?;
-                self.a.fcmp(fp, r, lim);
+                self.a.fcmp(fp, rd, lim);
                 let ok = self.tmp_g()?;
                 self.a.cset(W, ok, Cond::Mi)?;
                 let back = self.tmp_g()?;
                 if from.signed() {
-                    self.a.fcvtzs(X, back, fp, r)?;
+                    self.a.fcvtzs(X, back, fp, rd)?;
                 } else {
-                    self.a.fcvtzu(X, back, fp, r)?;
+                    self.a.fcvtzu(X, back, fp, rd)?;
                 }
                 self.a.cmp(X, back, ra)?;
                 self.a.cset(W, back, Cond::Eq)?;
                 self.a.logic_reg(Logic::And, W, ok, ok, back, Shift::Lsl, 0)?;
-                self.option_write(v, t, some, ok, Payload::F(r, fp), to)
+                Ok(Some(ok))
             }
-            (true, false) => {
-                let fx = self.use_f(x, from)?;
-                let fp = from.fp();
-                match kind {
-                    CastKind::Try => {
-                        let (_, some, _) = opt.ok_or_else(|| bad("cast.try"))?;
-                        let t1 = self.tmp_f()?;
-                        self.a.fp_un(FpUn::RintZ, fp, t1, fx);
-                        self.a.fcmp(fp, t1, fx);
-                        let ok = self.tmp_g()?;
-                        self.a.cset(W, ok, Cond::Eq)?;
-                        let (tmin, tmax) = to.range();
-                        let c2 = self.tmp_g()?;
-                        self.mat_f(t1, fp, fbits(tmin as f64, fp))?;
-                        self.a.fcmp(fp, fx, t1);
-                        self.a.cset(W, c2, Cond::Ge)?;
-                        self.a.logic_reg(Logic::And, W, ok, ok, c2, Shift::Lsl, 0)?;
-                        self.mat_f(t1, fp, fbits((tmax + 1) as f64, fp))?;
-                        self.a.fcmp(fp, fx, t1);
-                        self.a.cset(W, c2, Cond::Mi)?;
-                        self.a.logic_reg(Logic::And, W, ok, ok, c2, Shift::Lsl, 0)?;
-                        let val = self.tmp_g()?;
-                        if to.signed() {
-                            self.a.fcvtzs(X, val, fp, fx)?;
-                        } else {
-                            self.a.fcvtzu(X, val, fp, fx)?;
-                        }
-                        self.option_write(v, t, some, ok, Payload::G(val), to)
-                    }
-                    _ => {
-                        let rd = self.def_g(v)?;
-                        match (to.bits(), to.signed()) {
-                            (64, true) => self.a.fcvtzs(X, rd, fp, fx)?,
-                            (64, false) => self.a.fcvtzu(X, rd, fp, fx)?,
-                            (32, true) => {
-                                self.a.fcvtzs(W, rd, fp, fx)?;
-                                self.a.sxt(X, rd, rd, Ext::W)?;
-                            }
-                            (32, false) => self.a.fcvtzu(W, rd, fp, fx)?,
-                            (_, true) => {
-                                self.a.fcvtzs(W, rd, fp, fx)?;
-                                self.a.sxt(X, rd, rd, Ext::W)?;
-                                self.clamp(rd, Sc::Int { bits: 32, signed: true }.range(), true, to)?;
-                            }
-                            (_, false) => {
-                                self.a.fcvtzu(W, rd, fp, fx)?;
-                                self.clamp(rd, Sc::U32.range(), false, to)?;
-                            }
-                        }
-                        Ok(())
-                    }
-                }
-            }
-            (true, true) => {
-                let fx = self.use_f(x, from)?;
-                let (ff, tf) = (from.fp(), to.fp());
-                if kind == CastKind::Try {
-                    let (_, some, _) = opt.ok_or_else(|| bad("cast.try"))?;
+            (Payload::F(fx, fp), Payload::G(rd)) => match kind {
+                CastKind::Try => {
+                    let t1 = self.tmp_f()?;
+                    self.a.fp_un(FpUn::RintZ, fp, t1, fx);
+                    self.a.fcmp(fp, t1, fx);
                     let ok = self.tmp_g()?;
-                    if ff == Fp::D && tf == Fp::S {
-                        let r = self.tmp_f()?;
-                        self.a.fcvt(Fp::S, r, Fp::D, fx)?;
-                        let back = self.tmp_f()?;
-                        self.a.fcvt(Fp::D, back, Fp::S, r)?;
-                        self.a.fcmp(Fp::D, back, fx);
-                        self.a.cset(W, ok, Cond::Eq)?;
-                        let c2 = self.tmp_g()?;
-                        self.a.cset(W, c2, Cond::Vs)?;
-                        self.a.logic_reg(Logic::Orr, W, ok, ok, c2, Shift::Lsl, 0)?;
-                        return self.option_write(v, t, some, ok, Payload::F(r, Fp::S), to);
-                    }
-                    let r = self.tmp_f()?;
-                    if ff == tf {
-                        self.a.fmov(tf, r, fx);
+                    self.a.cset(W, ok, Cond::Eq)?;
+                    let (tmin, tmax) = to.range();
+                    let c2 = self.tmp_g()?;
+                    self.mat_f(t1, fp, fbits(tmin as f64, fp))?;
+                    self.a.fcmp(fp, fx, t1);
+                    self.a.cset(W, c2, Cond::Ge)?;
+                    self.a.logic_reg(Logic::And, W, ok, ok, c2, Shift::Lsl, 0)?;
+                    self.mat_f(t1, fp, fbits((tmax + 1) as f64, fp))?;
+                    self.a.fcmp(fp, fx, t1);
+                    self.a.cset(W, c2, Cond::Mi)?;
+                    self.a.logic_reg(Logic::And, W, ok, ok, c2, Shift::Lsl, 0)?;
+                    if to.signed() {
+                        self.a.fcvtzs(X, rd, fp, fx)?;
                     } else {
-                        self.a.fcvt(tf, r, ff, fx)?;
+                        self.a.fcvtzu(X, rd, fp, fx)?;
                     }
-                    self.a.mov_imm(W, ok, 1)?;
-                    return self.option_write(v, t, some, ok, Payload::F(r, tf), to);
+                    Ok(Some(ok))
                 }
-                let rd = self.def_f(v)?;
+                _ => {
+                    match (to.bits(), to.signed()) {
+                        (64, true) => self.a.fcvtzs(X, rd, fp, fx)?,
+                        (64, false) => self.a.fcvtzu(X, rd, fp, fx)?,
+                        (32, true) => {
+                            self.a.fcvtzs(W, rd, fp, fx)?;
+                            self.a.sxt(X, rd, rd, Ext::W)?;
+                        }
+                        (32, false) => self.a.fcvtzu(W, rd, fp, fx)?,
+                        (_, true) => {
+                            self.a.fcvtzs(W, rd, fp, fx)?;
+                            self.a.sxt(X, rd, rd, Ext::W)?;
+                            self.clamp(rd, Sc::Int { bits: 32, signed: true }.range(), true, to)?;
+                        }
+                        (_, false) => {
+                            self.a.fcvtzu(W, rd, fp, fx)?;
+                            self.clamp(rd, Sc::U32.range(), false, to)?;
+                        }
+                    }
+                    Ok(None)
+                }
+            },
+            (Payload::F(fx, ff), Payload::F(rd, tf)) => {
+                if kind == CastKind::Try && ff == Fp::D && tf == Fp::S {
+                    let ok = self.tmp_g()?;
+                    self.a.fcvt(Fp::S, rd, Fp::D, fx)?;
+                    let back = self.tmp_f()?;
+                    self.a.fcvt(Fp::D, back, Fp::S, rd)?;
+                    self.a.fcmp(Fp::D, back, fx);
+                    self.a.cset(W, ok, Cond::Eq)?;
+                    let c2 = self.tmp_g()?;
+                    self.a.cset(W, c2, Cond::Vs)?;
+                    self.a.logic_reg(Logic::Orr, W, ok, ok, c2, Shift::Lsl, 0)?;
+                    return Ok(Some(ok));
+                }
                 if ff == tf {
                     self.a.fmov(tf, rd, fx);
                 } else {
                     self.a.fcvt(tf, rd, ff, fx)?;
                 }
-                Ok(())
+                if kind != CastKind::Try {
+                    return Ok(None);
+                }
+                let ok = self.tmp_g()?;
+                self.a.mov_imm(W, ok, 1)?;
+                Ok(Some(ok))
             }
         }
     }
 
     /// `ok = value in ra (of type from) fits to`.
-    fn fits_check(&mut self, ok: Reg, ra: Reg, from: Sc, to: Sc) -> R<()> {
+    pub(super) fn fits_check(&mut self, ok: Reg, ra: Reg, from: Sc, to: Sc) -> R<()> {
         let (fmin, fmax) = from.range();
         let (tmin, tmax) = to.range();
         self.a.mov_imm(W, ok, 1)?;
@@ -1283,7 +1280,7 @@ impl<'a, 'm> Gen<'a, 'm> {
         }
     }
 
-    fn option_layout(&self, t: TypeId, some: u32) -> R<(u32, i64)> {
+    pub(super) fn option_layout(&self, t: TypeId, some: u32) -> R<(u32, i64)> {
         let l = self.layout(t)?;
         let off = ty::variant_field(l, i128::from(some), 0).ok_or_else(|| bad("option payload"))?.0;
         Ok((l.size as u32, off as i64))
