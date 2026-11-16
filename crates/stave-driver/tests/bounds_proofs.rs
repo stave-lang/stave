@@ -53,6 +53,7 @@ fn proofs_and_kept_checks() {
         ("main.rises", 0),
         ("main.tail_sum", 0),
         ("main.pair_sum", 0),
+        ("main.window_sum", 0),
         ("main.le_only", 1),
         ("main.eq_on_one_path", 1),
         ("main.next_under_len", 1),
@@ -70,4 +71,10 @@ fn proofs_and_kept_checks() {
     assert!(matches!(of("main.rises")[..], [Proof::LoopBound { .. }, Proof::Offset { k: -1, .. }]));
     assert!(matches!(of("main.tail_sum")[..], [Proof::Offset { k: 1, .. }]));
     assert!(matches!(of("main.pair_sum")[..], [Proof::Offset { k: 0, .. }, Proof::Offset { k: 1, .. }]));
+    // `&xs[0..n]` has length `n` and tests `n <= xs.len()`
+    assert!(
+        matches!(of("main.window_sum")[..], [Proof::Offset { k: 0, .. }, Proof::Offset { k: 0, .. }]),
+        "{:?}",
+        of("main.window_sum")
+    );
 }

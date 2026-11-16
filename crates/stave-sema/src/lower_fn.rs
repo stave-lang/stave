@@ -840,6 +840,11 @@ impl<'a> FnCx<'a> {
 
     /// The address of a place, as pointer type `want` when given.
     pub fn addr(&mut self, p: &Place, want: Option<Ty>) -> Option<Operand> {
+        self.addr_t(p, want).map(|a| a.0)
+    }
+
+    /// [`FnCx::addr`] with the pointer's type.
+    pub fn addr_t(&mut self, p: &Place, want: Option<Ty>) -> Option<(Operand, Ty)> {
         let (mut cur, mut cur_t) = match &p.base {
             Base::Mem(v, t) => (*v, *t),
             Base::Val(v, t) => {
@@ -899,8 +904,9 @@ impl<'a> FnCx<'a> {
             && n == 0
         {
             cur = self.convert_ptr(cur, cur_t, w);
+            cur_t = w;
         }
-        Some(cur)
+        Some((cur, cur_t))
     }
 
     /// Reads a place by value (a move of its droppable root).

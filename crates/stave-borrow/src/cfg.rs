@@ -2268,9 +2268,10 @@ impl<'a, 'b> Builder<'a, 'b> {
     }
 
     fn index_step(&mut self, base: V, ie: Option<u32>, tok: u32, n: u32) -> V {
-        let derefs = match self.tb.target(tok) {
-            Some(Target::Index { derefs }) => *derefs,
-            _ => 0,
+        let (derefs, slice) = match self.tb.target(tok) {
+            Some(Target::Index { derefs }) => (*derefs, false),
+            Some(Target::Slice { derefs }) => (*derefs, true),
+            _ => (0, false),
         };
         let Some(p) = self.place_of(base, n) else { return V::Never };
         if let Some(ie) = ie {
@@ -2286,7 +2287,9 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
         let p = self.apply_derefs(p, derefs);
         let et = self.tys.elem(p.ty);
-        V::P(p.with(Proj::Index, et))
+        // a sub-slice is any element (no range reasoning), typed as the slice: never Copy
+        let t = if slice { self.tys.ov.intern(TypeKind::Slice { elem: et, align: 0 }) } else { et };
+        V::P(p.with(Proj::Index, t))
     }
 
     fn try_step(&mut self, n: u32, base: V, tok: u32, last: bool) -> V {

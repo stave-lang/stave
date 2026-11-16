@@ -1214,6 +1214,10 @@ impl<'a> FnCx<'a> {
     fn index_step(&mut self, base: E, ie: Option<u32>, tok: u32) -> E {
         let derefs = match self.target(tok) {
             Some(Target::Index { derefs }) => *derefs,
+            Some(Target::Slice { derefs }) => {
+                let d = *derefs;
+                return self.slice_step(base, ie, tok, d);
+            }
             _ => return self.fail_at(Some(tok), "index without a target"),
         };
         let Some(ie) = ie else { return self.fail_at(Some(tok), "index") };
@@ -1237,6 +1241,101 @@ impl<'a> FnCx<'a> {
         p.proj.push(Proj::Elem(i, et, tok));
         p.ty = et;
         E::P(p)
+    }
+
+    /// `xs[a..b]` (`xs[a..=b]`: end `b + 1`): the slice place of elements `a..end` of an array
+    /// or slice of length `n`, after the tests `end <= n` (inclusive: `b < n`, so `b + 1` cannot
+    /// overflow) and `a <= end`, each a branch to `panic.bounds`. Constant operands are tested
+    /// here: a range out of a constant length is an unconditional `panic.bounds`.
+    fn slice_step(&mut self, base: E, ie: Option<u32>, tok: u32, derefs: u32) -> E {
+        let Some(ie) = ie else { return self.fail_at(Some(tok), "slice") };
+        let Some(p) = self.place_of(base) else { return E::Never };
+        let p = self.own_temp(p);
+        let Some(p) = self.derefs(p, derefs) else { return E::Never };
+        let rt = self.nty(ie);
+        let inclusive = matches!(self.kind(rt), TypeKind::Range { inclusive: true, .. });
+        let core = self.core(ie);
+        if self.icx.kind(core) != Some(NodeKind::RangeExpr) {
+            return self.fail_at(Some(tok), "slice without a range");
+        }
+        let rk = self.kids(core);
+        let (Some(&l), Some(&r)) = (rk.first(), rk.get(1)) else {
+            return self.fail_at(Some(tok), "slice range");
+        };
+        let us = self.t_usize();
+        let Some(a) = self.val(l, Some(us)) else { return E::Never };
+        let Some(b) = self.val(r, Some(us)) else { return E::Never };
+        let (elem, len) = match self.kind(p.ty) {
+            TypeKind::Array { elem, len } => (elem, len.value()),
+            TypeKind::Slice { elem, .. } => (elem, None),
+            _ => return self.fail_at(Some(tok), "slicing a non-array"),
+        };
+        let (ka, kb, kn) = (self.kval(a), self.kval(b), len.map(i128::from));
+        let ke = kb.map(|k| k + i128::from(inclusive));
+        // `xs[a..=usize::MAX]` never fits: its end is not a `usize`
+        let out = matches!((ke, kn), (Some(e), Some(n)) if e > n)
+            || matches!((ka, ke), (Some(a), Some(e)) if a > e)
+            || ke.is_some_and(|e| e > i128::from(u64::MAX));
+        if out {
+            self.trapping(tok, Op::Panic(PanicKind::Bounds), None, &[]);
+            self.f.b.unreachable();
+            return E::Never;
+        }
+        let Some((bp, bt)) = self.addr_t(&p, None) else { return E::Never };
+        let n = match kn {
+            Some(k) => self.int(k),
+            None => self.op1(Op::SliceLen, us, bp),
+        };
+        let end = if inclusive {
+            if kb.is_none() || kn.is_none() {
+                self.trap_if(Op::Ge, b, n, tok);
+            }
+            match ke {
+                Some(k) => self.int(k),
+                None => {
+                    let one = self.int(1);
+                    let Some(e) = self.trapping(tok, Op::Add, Some(us), &[b, one]) else { return E::Never };
+                    e
+                }
+            }
+        } else {
+            if kb.is_none() || kn.is_none() {
+                self.trap_if(Op::Gt, b, n, tok);
+            }
+            b
+        };
+        if ka.is_none() || ke.is_none() {
+            self.trap_if(Op::Gt, a, end, tok);
+        }
+        // a constant start keeps the length `end - a` a term of the bounds facts
+        let n = match (ka, ke) {
+            (Some(0), _) => end,
+            (Some(x), Some(e)) => self.int(e - x),
+            (Some(_), None) => match self.trapping(tok, Op::Sub, Some(us), &[end, a]) {
+                Some(v) => v,
+                None => return E::Never,
+            },
+            (None, _) => self.op2(Op::SubWrap, us, end, a),
+        };
+        let mutable = self.pointee(bt).is_some_and(|x| x.1);
+        let st = self.tys.intern(TypeKind::Slice { elem, align: 0 });
+        let ept = self.ptr_like(bt, elem);
+        let ep = self.op2(Op::ElemAddr, ept, bp, a);
+        let srt = self.t_ref(mutable, st);
+        let s = self.op2(Op::SliceMake, srt, ep, n);
+        E::P(Place { base: Base::Mem(s, srt), proj: Vec::new(), ty: st, root: None })
+    }
+
+    /// Branches to `panic.bounds` (site `tok`) when `op x y` (an unsigned compare) holds.
+    fn trap_if(&mut self, op: Op, x: Operand, y: Operand, tok: u32) {
+        let bt = self.t_bool();
+        let c = self.op2(op, bt, x, y);
+        let (trap, ok) = (self.f.b.create_block(), self.f.b.create_block());
+        self.f.b.cbr(c, trap, &[], ok, &[]);
+        self.f.b.switch_to(trap);
+        self.trapping(tok, Op::Panic(PanicKind::Bounds), None, &[]);
+        self.f.b.unreachable();
+        self.f.b.switch_to(ok);
     }
 
     fn try_step(&mut self, n: u32, base: E, tok: u32) -> E {

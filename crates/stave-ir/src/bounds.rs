@@ -12,6 +12,8 @@
 //!   access is never emitted).
 //! - compiler-made element accesses (`for` over an array or slice, drop loops over arrays, the
 //!   array → slice coercion) index below a length the generated code itself compares against.
+//! - a sub-slice `xs[a..b]`: branches to `panic.bounds` unless `b <= n` and `a <= b`, then
+//!   `slice.make (addr.elem p a) (b - a)`; its start may be `n` (an empty slice at the end).
 //! - `vec.load` / `vec.store` (and their aligned forms) of N lanes at `i`: `check.bounds i lim`
 //!   with `lim = sub.sat n N-1` (so `i < lim` iff `i + N <= n`), or the `ChunkLoop` proof: a chunk
 //!   loop's own head test `cbr (lt i lim)` with the same `lim`. Masked loads and stores, gathers and
@@ -75,6 +77,10 @@ pub enum Proof {
     /// `addr.elem p 0` whose result only feeds `slice.make` (the array → slice coercion: the
     /// base address, never dereferenced by itself).
     SliceBase,
+    /// `addr.elem p i` whose result only feeds `slice.make` (a sub-slice's start, never
+    /// dereferenced by itself), with `i <= len` proven by the facts (`i == len` starts an empty
+    /// slice).
+    SliceStart,
     /// The index was compared `lt i n` by the dominating branch ending block `branch` (stage0
     /// block index), and only its true edge leads here.
     LoopBound { branch: u32 },
@@ -87,7 +93,7 @@ pub enum Proof {
     LenEq { cmp: u32 },
     /// The index is `base + k` (`base` an SSA value number, `None` for a constant index) and the
     /// facts prove it below the length without an equality.
-    Offset { base: Option<u32>, k: i64 },
+    Offset { base: Option<u32>, k: i128 },
 }
 
 /// How an access is guarded.
@@ -392,10 +398,15 @@ impl<'a> Cx<'a> {
                     return Some(Guard::Proof(Proof::LoopBound { branch: br }));
                 }
                 let n = match len {
-                    Some(l) => facts::Term::constant(l)?,
+                    Some(l) => facts::Term::constant(l),
                     None => self.slice_len_term(p)?,
                 };
-                self.prove_lt(i, self.term(idx)?, n).map(Guard::Proof)
+                let t = self.term(idx)?;
+                if let Some(proof) = self.prove_lt(i, t, n) {
+                    return Some(Guard::Proof(proof));
+                }
+                (self.only_slice_base(i) && self.prove_le(i, t, n).is_some())
+                    .then_some(Guard::Proof(Proof::SliceStart))
             }
             AccessKind::Get | AccessKind::Set => {
                 let (a, idx) = (args[0], *args.get(1)?);
@@ -650,6 +661,78 @@ mod tests {
                 assert!(bad[0].to_string().contains("app.f"), "{}", bad[0]);
             }
         }
+    }
+
+    /// `&(*a)[i..j]`: the start `addr.elem a i` may be one past the end; `j <= 4` and `i <= j`
+    /// guard it (`SliceStart`), `j <= 4` alone does not.
+    #[test]
+    fn sub_slice_start() {
+        for tested in [true, false] {
+            let (mut m, us, u32t, pa) = module();
+            let pe = m.types.ref_(false, u32t);
+            let sl = m.types.slice(u32t);
+            let ps = m.types.ref_(false, sl);
+            let bt = m.types.bool();
+            let f = m.declare(InstanceId(vec![0]), "app.s", vec![pa, us, us], Some(ps));
+            let mut b = FuncBuilder::new(&[pa, us, us]);
+            let (a, i, j) = (b.param(0).unwrap(), b.param(1).unwrap(), b.param(2).unwrap());
+            let trap_if_gt = |b: &mut FuncBuilder, x: Operand, y: Operand| {
+                let c = b.inst(Op::Gt, Some(bt), &[x, y]).unwrap();
+                let (trap, ok) = (b.create_block(), b.create_block());
+                b.cbr(c, trap, &[], ok, &[]);
+                b.switch_to(trap);
+                b.inst(Op::Panic(crate::PanicKind::Bounds), None, &[]);
+                b.unreachable();
+                b.switch_to(ok);
+            };
+            let four = b.int(4);
+            trap_if_gt(&mut b, j.into(), four);
+            if tested {
+                trap_if_gt(&mut b, i.into(), j.into());
+            }
+            let n = b.inst(Op::SubWrap, Some(us), &[j.into(), i.into()]).unwrap();
+            let p = b.inst(Op::ElemAddr, Some(pe), &[a.into(), i.into()]).unwrap();
+            let s = b.inst(Op::SliceMake, Some(ps), &[p.into(), n.into()]).unwrap();
+            b.ret(Some(s.into()));
+            m.define(f, b.finish().unwrap());
+            crate::verify_module(&m).unwrap();
+            let r = audit(&m);
+            if tested {
+                assert_eq!(r.unwrap()[0].guard, Guard::Proof(Proof::SliceStart));
+            } else {
+                assert_eq!(r.unwrap_err().len(), 1);
+            }
+        }
+    }
+
+    /// `&s[c..c + 1]` with `c` far above any length: `c + 1 <= len` from the branch guards the
+    /// start (constants of every `u64` value are terms of the facts).
+    #[test]
+    fn sub_slice_huge_constant_start() {
+        let (mut m, us, u32t, _) = module();
+        let pe = m.types.ref_(false, u32t);
+        let sl = m.types.slice(u32t);
+        let ps = m.types.ref_(false, sl);
+        let bt = m.types.bool();
+        let f = m.declare(InstanceId(vec![0]), "app.h", vec![ps], Some(ps));
+        let mut b = FuncBuilder::new(&[ps]);
+        let s = b.param(0).unwrap();
+        let n = b.inst(Op::SliceLen, Some(us), &[s.into()]).unwrap();
+        let (c, end, one) = (b.int(1 << 62), b.int((1 << 62) + 1), b.int(1));
+        let bad = b.inst(Op::Gt, Some(bt), &[end, n.into()]).unwrap();
+        let (trap, ok) = (b.create_block(), b.create_block());
+        b.cbr(bad, trap, &[], ok, &[]);
+        b.switch_to(trap);
+        b.inst(Op::Panic(crate::PanicKind::Bounds), None, &[]);
+        b.unreachable();
+        b.switch_to(ok);
+        let p = b.inst(Op::ElemAddr, Some(pe), &[s.into(), c]).unwrap();
+        let r = b.inst(Op::SliceMake, Some(ps), &[p.into(), one]).unwrap();
+        b.ret(Some(r.into()));
+        m.define(f, b.finish().unwrap());
+        crate::verify_module(&m).unwrap();
+        let acc = audit(&m).unwrap();
+        assert!(matches!(acc[0].guard, Guard::Proof(Proof::Offset { base: None, k: 4611686018427387904 })));
     }
 
     #[test]

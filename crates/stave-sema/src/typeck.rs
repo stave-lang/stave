@@ -88,6 +88,8 @@ pub enum Target {
     FnValue,
     /// Element access (after `derefs` auto-derefs).
     Index { derefs: u32 },
+    /// Sub-slice `xs[a..b]` / `xs[a..=b]` of an array or slice (after `derefs` auto-derefs).
+    Slice { derefs: u32 },
 }
 
 /// An implicit conversion made explicit.

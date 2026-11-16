@@ -2046,15 +2046,38 @@ impl<'a> Ck<'a> {
         ids::ERROR
     }
 
+    /// `Some(inclusive)` when index expression `e` is a range written in the brackets.
+    fn range_index(&self, e: u32) -> Option<bool> {
+        let icx = self.icx;
+        let mut cur = e;
+        while let Some(c) = self.passthrough(cur) {
+            cur = c;
+        }
+        if icx.kind(cur) != Some(NodeKind::RangeExpr) {
+            return None;
+        }
+        let r = icx.kids_vec(cur).get(1).copied()?;
+        Some(icx.is(icx.a(r).saturating_sub(1), Term::DotDotEq))
+    }
+
     fn index(&mut self, base: TypeId, ie: Option<u32>, tok: u32) -> TypeId {
+        let range = ie.and_then(|e| self.range_index(e));
         if let Some(e) = ie {
-            self.check_expr(e, ids::USIZE, None);
+            let want = match range {
+                Some(inclusive) => self.tys.intern(TypeKind::Range { elem: ids::USIZE, inclusive }),
+                None => ids::USIZE,
+            };
+            self.check_expr(e, want, None);
         }
         if base == ids::ERROR || self.tys.has_error(base) {
             return ids::ERROR;
         }
         let (inner, derefs) = self.tys.peel_refs(base);
         match self.tys.kind(inner).clone() {
+            TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } if range.is_some() => {
+                self.target(tok, Target::Slice { derefs });
+                self.tys.intern(TypeKind::Slice { elem, align: 0 })
+            }
             TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => {
                 self.target(tok, Target::Index { derefs });
                 elem

@@ -228,13 +228,21 @@ b2():
   slice, or an array behind a reference or in a `slot`) is `check.bounds i n` immediately before
   `addr.elem p i` (`n` = `slice.len p`, or the array length as a constant); `a[i]` on an array SSA
   value is `get`/`set`, which check a dynamic index themselves. A constant index ≥ a constant array
-  length is `panic.bounds ()` + `unreachable` (the only index folding; the trap is kept). No check is
-  ever removed in the checked IR; release code generation may drop a check only with a recorded
-  proof (constant index < length, a dominating identical check, a dominating `lt i n` branch,
+  length is `panic.bounds ()` + `unreachable` (the trap is kept; sub-slices fold the same way).
+  No check is ever removed in the checked IR; release code generation may drop a check only with a
+  recorded proof (constant index < length, a dominating identical check, a dominating `lt i n` branch,
   and `LenEq`/`Offset`: `i + k < n` derived from dominating unsigned compares, asserting calls
   such as `std.debug.assert`, and trapping `add`/`sub` of constants).
   Compiler-made accesses (`for` over an array or slice, drop loops, array → slice coercion
   `addr.elem p 0` + `slice.make`) index below a length the generated code compares against.
+- **Sub-slices** (`xs[a..b]`, a slice place; `n` as for `xs[i]`): `cbr (gt b n)` to a block
+  `panic.bounds ()` + `unreachable`, then `cbr (gt a b)` the same way, then
+  `slice.make (addr.elem p a) (sub.wrap b a)`. `xs[a..=b]` tests `ge b n` first and uses
+  `e = add b 1` for `b`. A constant `a` makes the length `e - a` a constant, `e` itself (`a = 0`),
+  or a trapping `sub`, so bounds facts see it. No test between two constants is emitted; a range
+  out of a constant length is `panic.bounds ()` + `unreachable`. That `addr.elem` feeds only the
+  `slice.make` and may be one past the end (`a = n`); the audit accepts it with `a <= n` proven
+  from the two tests (`SliceStart`).
 - **Chunk loops** (`for v: TxN in s`): `s` becomes a slice (an array: `addr.elem p 0` +
   `slice.make`), then `lim = sub.sat (slice.len s) N-1` before the head. The head tests
   `lt i lim` (`i + N <= len`: the proof of the body's `vec.load s i`), the body steps `i` by N
