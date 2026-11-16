@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// std.slice `copy_from` between slices of different lengths panics `Assert` before writing.
+// crates/stave-driver/tests/interp_vs_native.rs: exit 101, combinators_copy_from_len.stderr.
+import std.io;
+
+fn main() -> i32 {
+    let src: [u16; 5] = [1, 2, 3, 4, 5];
+    let mut dst: [u16; 5] = [0; 5];
+    (&mut dst[0..4]).copy_from(&src[0..4]);
+    let d = dst[3];
+    io.print(f"{d}\n");
+    (&mut dst[0..5]).copy_from(&src[0..4]);
+    io.print("not reached\n");
+    return 0;
+}

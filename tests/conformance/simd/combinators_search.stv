@@ -1,0 +1,187 @@
+//~ CHECK-ONLY
+// std.slice searches: `find` on every element type (the key in the first vector, a later
+// vector, the tail, absent, an empty slice; floats: NaN never found, -0.0 == +0.0), `find_byte`,
+// `find_any_byte`, `eq` (lengths, a difference in a full vector or in the tail, float bits),
+// and `count` / `any` / `all` with fn predicates (empty: 0, false, true).
+// crates/stave-driver/tests/interp_vs_native.rs runs it in the IR interpreter and natively
+// against combinators_search.stdout.
+import std.io;
+import std.mem;
+
+fn show(o: Option<usize>) {
+    match o {
+        Option.Some(i) => { io.print(f"{i} "); }
+        Option.None => { io.print("- "); }
+    }
+}
+
+fn finds() {
+    let mut a8: [u8; 40] = [0; 40];
+    let mut b8: [i8; 40] = [0; 40];
+    let mut a16: [u16; 40] = [0; 40];
+    let mut b16: [i16; 40] = [0; 40];
+    let mut a32: [u32; 40] = [0; 40];
+    let mut b32: [i32; 40] = [0; 40];
+    let mut a64: [u64; 40] = [0; 40];
+    let mut b64: [i64; 40] = [0; 40];
+    let mut az: [usize; 40] = [0; 40];
+    let mut bz: [isize; 40] = [0; 40];
+    let mut bl: [bool; 40] = [false; 40];
+    for i in 0usize..40 {
+        a8[i] = i as% u8;
+        b8[i] = -(i as% i8);
+        a16[i] = (i as% u16) * 1000;
+        b16[i] = -(i as% i16);
+        a32[i] = (i as% u32) * 100000;
+        b32[i] = -(i as% i32);
+        a64[i] = (i as u64) << 40;
+        b64[i] = -(i as% i64);
+        az[i] = i;
+        bz[i] = -(i as% isize);
+        bl[i] = i % 13 == 12;
+    }
+    // Keys at 0, 3, 15, 17, 39; the key 39 in a 39-element prefix; a missing key; empty.
+    let s8 = &a8[0..40];
+    show(s8.find(0)); show(s8.find(3)); show(s8.find(15)); show(s8.find(17)); show(s8.find(39));
+    show((&a8[0..39]).find(39)); show(s8.find(200)); show((&a8[0..0]).find(0));
+    io.print("\n");
+    let t8 = &b8[0..40];
+    show(t8.find(0)); show(t8.find(-3)); show(t8.find(-17)); show(t8.find(-39)); show(t8.find(1));
+    io.print("\n");
+    let s16 = &a16[0..40];
+    show(s16.find(0)); show(s16.find(7000)); show(s16.find(9000)); show(s16.find(39000)); show(s16.find(1));
+    let t16 = &b16[0..40];
+    show(t16.find(-9)); show(t16.find(-39)); show(t16.find(5));
+    io.print("\n");
+    let s32 = &a32[0..40];
+    show(s32.find(300000)); show(s32.find(3900000)); show((&a32[0..37]).find(3700000)); show(s32.find(5));
+    let t32 = &b32[0..40];
+    show(t32.find(-4)); show(t32.find(-38)); show(t32.find(2));
+    io.print("\n");
+    let s64 = &a64[0..40];
+    let k1: u64 = 1 << 40;
+    let k39: u64 = 39 << 40;
+    show(s64.find(k1)); show(s64.find(k39)); show(s64.find(5));
+    let t64 = &b64[0..40];
+    show(t64.find(-1)); show(t64.find(-39)); show(t64.find(1));
+    show((&az[0..40]).find(33)); show((&az[0..40]).find(40));
+    show((&bz[0..40]).find(-33)); show((&bz[0..40]).find(33));
+    io.print("\n");
+    let sb = &bl[0..40];
+    show(sb.find(true)); show(sb.find(false)); show((&bl[0..12]).find(true));
+    io.print("\n");
+    let z: f32 = 0.0;
+    let nan = z / z;
+    let f: [f32; 9] = [1.0, nan, -0.0, 2.5, 3.0, 4.0, 5.0, 6.0, 7.5];
+    let sf = &f[0..9];
+    show(sf.find(2.5)); show(sf.find(0.0)); show(sf.find(-0.0)); show(sf.find(nan)); show(sf.find(7.5)); show(sf.find(8.0));
+    let d: [f64; 5] = [1.0, 2.0, 0.0, 4.0, 5.5];
+    let sd = &d[0..5];
+    show(sd.find(-0.0)); show(sd.find(5.5)); show(sd.find(4.5));
+    io.print("\n");
+}
+
+fn bytes() {
+    let mut t: [u8; 70] = [97; 70];
+    t[20] = 44;
+    t[50] = 59;
+    t[69] = 10;
+    let s = &t[0..70];
+    let comma: [u8; 1] = [44];
+    let punct: [u8; 3] = [10, 59, 44];
+    let late: [u8; 2] = [10, 59];
+    show(s.find_byte(44)); show(s.find_byte(10)); show(s.find_byte(98)); show((&t[0..69]).find_byte(10));
+    show(s.find_any_byte(&comma[0..1])); show(s.find_any_byte(&punct[0..3])); show(s.find_any_byte(&late[0..2]));
+    show((&t[51..70]).find_any_byte(&late[0..2])); show(s.find_any_byte(&t[0..0])); show((&t[0..0]).find_any_byte(&punct[0..3]));
+    io.print("\n");
+}
+
+fn eqs() {
+    let mut a: [i32; 21] = [0; 21];
+    let mut b: [i32; 21] = [0; 21];
+    for i in 0usize..21 {
+        a[i] = (i as% i32) * 7 - 50;
+        b[i] = (i as% i32) * 7 - 50;
+    }
+    let e1 = (&a[0..21]).eq(&b[0..21]);
+    let e2 = (&a[0..20]).eq(&b[0..21]);
+    let e3 = (&a[0..0]).eq(&b[0..0]);
+    b[20] = 0;
+    let e4 = (&a[0..21]).eq(&b[0..21]);
+    let e5 = (&a[0..20]).eq(&b[0..20]);
+    b[2] = 0;
+    let e6 = (&a[0..16]).eq(&b[0..16]);
+    io.print(f"{e1} {e2} {e3} {e4} {e5} {e6}\n");
+    let mut c: [u8; 40] = [5; 40];
+    let mut d: [u8; 40] = [5; 40];
+    c[37] = 6;
+    let e7 = (&c[0..37]).eq(&d[0..37]);
+    let e8 = (&c[0..40]).eq(&d[0..40]);
+    d[37] = 6;
+    let e9 = (&c[0..40]).eq(&d[0..40]);
+    let w: [u64; 3] = [1, 2, 3];
+    let x: [u64; 3] = [1, 2, 4];
+    let e10 = (&w[0..3]).eq(&x[0..3]);
+    let e11 = (&w[0..2]).eq(&x[0..2]);
+    io.print(f"{e7} {e8} {e9} {e10} {e11}\n");
+    let z: f32 = 0.0;
+    let nan = z / z;
+    let f: [f32; 3] = [nan, 1.0, 0.0];
+    let g: [f32; 3] = [nan, 1.0, -0.0];
+    let e12 = (&f[0..3]).eq(&f[0..3]);
+    let e13 = (&f[0..2]).eq(&g[0..2]);
+    let e14 = (&f[0..3]).eq(&g[0..3]);
+    let other = mem.f32_from_bits(mem.f32_bits(nan) ^ 1);
+    let h: [f32; 1] = [other];
+    let e15 = (&f[0..1]).eq(&h[0..1]);
+    let p: [bool; 3] = [true, false, true];
+    let q: [bool; 3] = [true, false, false];
+    let e16 = (&p[0..3]).eq(&q[0..3]);
+    let e17 = (&p[0..2]).eq(&q[0..2]);
+    let u: [i16; 2] = [1, -1];
+    let v: [i16; 2] = [1, -1];
+    let e18 = (&u[0..2]).eq(&v[0..2]);
+    io.print(f"{e12} {e13} {e14} {e15} {e16} {e17} {e18}\n");
+}
+
+fn preds() {
+    let mut a: [i32; 37] = [0; 37];
+    for i in 0usize..37 { a[i] = (i as% i32) - 18; }
+    let s = &a[0..37];
+    let e = &a[0..0];
+    let limit: i32 = 10;
+    let c1 = s.count(fn(x: i32) -> bool { return x > limit; });
+    let c2 = s.count(fn(x: i32) -> bool { return x % 2 == 0; });
+    let c3 = e.count(fn(x: i32) -> bool { return true; });
+    let a1 = s.any(fn(x: i32) -> bool { return x == 18; });
+    let a2 = s.any(fn(x: i32) -> bool { return x > 18; });
+    let a3 = e.any(fn(x: i32) -> bool { return true; });
+    let l1 = s.all(fn(x: i32) -> bool { return x >= -18; });
+    let l2 = s.all(fn(x: i32) -> bool { return x < 18; });
+    let l3 = e.all(fn(x: i32) -> bool { return false; });
+    io.print(f"{c1} {c2} {c3} {a1} {a2} {a3} {l1} {l2} {l3}\n");
+    let mut calls: usize = 0;
+    let c4 = s.count(fn(x: i32) -> bool { calls = calls + 1; return x < 0; });
+    let z: f32 = 0.0;
+    let nan = z / z;
+    let f: [f32; 4] = [1.0, nan, -2.0, 0.5];
+    let sf = &f[0..4];
+    let c5 = sf.count(fn(x: f32) -> bool { return x != x; });
+    let a4 = sf.any(fn(x: f32) -> bool { return x < -1.0; });
+    let flags: [bool; 5] = [false, false, true, false, false];
+    let sb = &flags[0..5];
+    let c6 = sb.count(fn(b: bool) -> bool { return b; });
+    let l4 = sb.all(fn(b: bool) -> bool { return !b; });
+    let bytes: [u8; 20] = [3; 20];
+    let a5 = (&bytes[0..20]).any(fn(b: u8) -> bool { return b != 3; });
+    let l5 = (&bytes[0..20]).all(fn(b: u8) -> bool { return b == 3; });
+    io.print(f"{c4} {calls} {c5} {a4} {c6} {l4} {a5} {l5}\n");
+}
+
+fn main() -> i32 {
+    finds();
+    bytes();
+    eqs();
+    preds();
+    return 0;
+}

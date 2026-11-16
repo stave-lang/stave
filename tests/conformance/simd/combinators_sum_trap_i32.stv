@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// std.slice `sum` on i32 traps `Overflow` where the sequential loop does: MAX + 1 at element 9
+// overflows although the whole sum (MAX) fits. crates/stave-driver/tests/interp_vs_native.rs:
+// exit 101, combinators_sum_trap_i32.stderr.
+import std.io;
+
+fn main() -> i32 {
+    let mut a: [i32; 11] = [0; 11];
+    a[8] = 2147483647;
+    a[9] = 1;
+    a[10] = -1;
+    let ok = (&a[0..9]).sum();
+    io.print(f"{ok}\n");
+    let s = (&a[0..11]).sum();
+    io.print(f"not reached: {s}\n");
+    return 0;
+}

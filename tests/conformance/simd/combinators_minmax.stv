@@ -1,0 +1,127 @@
+//~ CHECK-ONLY
+// std.slice `min` / `max` on every int and float element type over prefixes of length 0 (None,
+// printed `-`), below one vector, exact multiples, and with tails. Floats: a NaN anywhere gives
+// NaN; -0.0 is below +0.0 in either order. crates/stave-driver/tests/interp_vs_native.rs runs it
+// in the IR interpreter and natively against combinators_minmax.stdout.
+import std.io;
+
+const LENS: [usize; 12] = [0, 1, 3, 4, 7, 8, 15, 16, 17, 31, 33, 40];
+
+fn show<T: Display + Copy>(lo: Option<T>, hi: Option<T>) {
+    match lo {
+        Option.Some(a) => {
+            match hi {
+                Option.Some(b) => { io.print(f"{a}:{b} "); }
+                Option.None => { io.print("?"); }
+            }
+        }
+        Option.None => { io.print("- "); }
+    }
+}
+
+// Index i holds a pseudo-random value; the extremes are not at index 0.
+fn mix(i: usize) -> usize {
+    return (i * 37 + 11) % 101;
+}
+
+fn ints() {
+    let mut a8: [u8; 40] = [0; 40];
+    let mut b8: [i8; 40] = [0; 40];
+    let mut a16: [u16; 40] = [0; 40];
+    let mut b16: [i16; 40] = [0; 40];
+    let mut a32: [u32; 40] = [0; 40];
+    let mut b32: [i32; 40] = [0; 40];
+    let mut a64: [u64; 40] = [0; 40];
+    let mut b64: [i64; 40] = [0; 40];
+    let mut az: [usize; 40] = [0; 40];
+    let mut bz: [isize; 40] = [0; 40];
+    for i in 0usize..40 {
+        let m = mix(i);
+        a8[i] = (m * 2) as% u8;
+        b8[i] = (m as% i8) - 50;
+        a16[i] = (m * 600) as% u16;
+        b16[i] = (m as% i16) * 300 - 15000;
+        a32[i] = (m as% u32) * 40000000;
+        b32[i] = (m as% i32) * 20000000 - 1000000000;
+        a64[i] = (m as u64) * 180000000000000000;
+        b64[i] = (m as% i64) * 90000000000000000 - 4500000000000000000;
+        az[i] = m;
+        bz[i] = (m as% isize) - 50;
+    }
+    for k in 0usize..12 { let s = &a8[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    for k in 0usize..12 { let s = &b8[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    for k in 0usize..12 { let s = &a16[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    for k in 0usize..12 { let s = &b16[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    for k in 0usize..12 { let s = &a32[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    for k in 0usize..12 { let s = &b32[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    for k in 0usize..12 { let s = &a64[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    for k in 0usize..12 { let s = &b64[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    for k in 0usize..12 { let s = &az[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    for k in 0usize..12 { let s = &bz[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    let e8: [i8; 17] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -128];
+    let e64: [u64; 3] = [5, 18446744073709551615, 0];
+    let f64s: [i64; 3] = [0, -9223372036854775808, 9223372036854775807];
+    show((&e8[0..17]).min(), (&e8[0..17]).max());
+    show((&e64[0..3]).min(), (&e64[0..3]).max());
+    show((&f64s[0..3]).min(), (&f64s[0..3]).max());
+    io.print("\n");
+}
+
+fn floats() {
+    let mut a: [f32; 40] = [0.0; 40];
+    let mut b: [f64; 40] = [0.0; 40];
+    for i in 0usize..40 {
+        let m = mix(i);
+        a[i] = ((m as% u32) as~ f32) * 0.25 - 12.0;
+        b[i] = ((m as% u32) as f64) * 0.125 - 6.0;
+    }
+    for k in 0usize..12 { let s = &a[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    for k in 0usize..12 { let s = &b[0..LENS[k]]; show(s.min(), s.max()); }
+    io.print("\n");
+    let z: f32 = 0.0;
+    let nan = z / z;
+    let inf = 1.0 / z;
+    // NaN in the body, in the tail, first; signed zeros both ways; infinities.
+    let mut n1: [f32; 9] = [1.0; 9];
+    n1[2] = nan;
+    let mut n2: [f32; 9] = [1.0; 9];
+    n2[8] = nan;
+    let n3: [f32; 3] = [nan, -inf, inf];
+    let z1: [f32; 2] = [-0.0, 0.0];
+    let z2: [f32; 6] = [0.0, 0.0, 0.0, 0.0, 0.0, -0.0];
+    let i1: [f32; 5] = [inf, -inf, 3.0, 2.0, 1.0];
+    show((&n1[0..9]).min(), (&n1[0..9]).max());
+    show((&n2[0..9]).min(), (&n2[0..9]).max());
+    show((&n3[0..3]).min(), (&n3[0..3]).max());
+    show((&z1[0..2]).min(), (&z1[0..2]).max());
+    show((&z2[0..6]).min(), (&z2[0..6]).max());
+    show((&i1[0..5]).min(), (&i1[0..5]).max());
+    io.print("\n");
+    let y: f64 = 0.0;
+    let dnan = y / y;
+    let mut d1: [f64; 5] = [2.0; 5];
+    d1[4] = dnan;
+    let d2: [f64; 3] = [0.0, -0.0, 0.0];
+    let d3: [f64; 2] = [-0.0, -0.0];
+    show((&d1[0..5]).min(), (&d1[0..5]).max());
+    show((&d2[0..3]).min(), (&d2[0..3]).max());
+    show((&d3[0..2]).min(), (&d3[0..2]).max());
+    io.print("\n");
+}
+
+fn main() -> i32 {
+    ints();
+    floats();
+    return 0;
+}

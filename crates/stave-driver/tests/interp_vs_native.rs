@@ -282,9 +282,11 @@ fn native_binaries_use_only_listed_syscalls() {
 /// op.
 const SIMD_NATIVE: &[&str] = &["x86_64-linux-v2", "x86_64-linux-v3", "aarch64-linux"];
 
-/// `tests/conformance/simd/run_*.stv`, sorted.
+/// `tests/conformance/simd/run_*.stv`, then the std slice method programs `combinators_*.stv`.
 fn simd_programs() -> Vec<PathBuf> {
-    simd_files("run_")
+    let mut v = simd_files("run_");
+    v.extend(simd_files("combinators_"));
+    v
 }
 
 /// `tests/conformance/simd/<prefix>*.stv`, sorted.

@@ -1,0 +1,782 @@
+// std.slice: SIMD-backed methods on the built-in slice types. Methods of `impl [T]` blocks need no
+// import: `xs.sum()` on any `&[f32]`.
+//
+//   sum()            ints: the sequential sum, trapping `Overflow` exactly where `for` + `+` would;
+//                    floats: the fixed lane tree below (not the left-to-right sum)
+//   min() max()      Option (None when empty); floats as the vector `min`/`max`: NaN propagates,
+//                    -0.0 < +0.0
+//   find(x)          first index i with xs[i] == x (floats: NaN is never found, -0.0 == +0.0)
+//   eq(ys)           same length and the same element bits (memcmp: for floats NaN equals a NaN
+//                    of the same bits, -0.0 differs from +0.0)
+//   fill(x)          every element = x
+//   [u8] find_byte(b), find_any_byte(set): first index of b / of any byte of set
+//   any T: Copy      count(pred), any(pred), all(pred) (pred: fn(T) -> bool), copy_from(src)
+//                    (lengths must match: `Assert` panic otherwise)
+//
+// One implementation per method, written in 128-bit vectors (the portable baseline of every CPU
+// target). No signature names a vector width: wider per-target versions can replace a body
+// without changing callers, and give the same results:
+// - Int sums wrap lane-wise and keep the running prefix sum in every lane (`scan_add_wrap`); a
+//   lane whose prefix overflowed sets a flag. A set flag only sends the sum to the sequential
+//   loop, which traps at the overflowing element. Widths therefore never change a result.
+// - A float sum adds element i into lane i % L of L zeroed accumulator lanes, L = 16 for f32
+//   and 8 for f64 (512 bits, held as four 128-bit vectors), then reduces the L lanes by the
+//   `reduce_add` tree: lane j with lane j + L/2, halving until one lane is left. Empty: +0.0.
+// - min, max and the searches do not depend on the order.
+// Branchless per element: sum, min, max, count, fill, copy_from (their loops branch only on the
+// loop test, never on element data; `count` calls pred once per element, in order). The
+// searches (find, find_byte, find_any_byte, eq, any, all) test once per vector or per 16
+// elements and return early: any/all may call pred on up to 15 elements past the deciding one.
+
+import std.debug;
+import std.mem;
+
+// xs as a slice of U: same address, xs.len() * size_of::<T>() / size_of::<U>() elements. Callers
+// pass T and U of one size, or U = u8; every bit pattern of T is then a valid U (bool is 0 or 1).
+fn cast<T, U>(xs: &[T]) -> &[U] from xs {
+    let n = xs.len() * size_of::<T>() / size_of::<U>();
+    let p = mem.slice_ptr(xs) as usize as *const U;
+    return unsafe("xs covers n elements of U, and every bit pattern of T is a valid U") mem.slice(xs, p, n);
+}
+
+// The mutable view; callers write only values valid as T (bytes 0 and 1 into a bool slice).
+fn cast_mut<T, U>(xs: &mut [T]) -> &mut [U] from xs {
+    let n = xs.len() * size_of::<T>() / size_of::<U>();
+    let p = mem.slice_ptr(xs) as usize as *mut U;
+    return unsafe("xs covers n elements of U, borrowed exclusively; only values valid as T are written") mem.slice_mut(xs, p, n);
+}
+
+// Active lanes of the k-th n-lane vector of an r-element tail: clamp(r - k * n, 0, n).
+fn tail_lanes(r: usize, k: usize, n: usize) -> usize {
+    let left = r -| k * n;
+    return (left < n).select(left, n);
+}
+
+fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() { return false; }
+    let n = a.len();
+    let mut i: usize = 0;
+    while i + 16 <= n {
+        if (u8x16.load(a, i) != u8x16.load(b, i)).to_bits() != 0 { return false; }
+        i = i + 16;
+    }
+    let m = mask8x16.first_n(n - i);
+    return ((u8x16.load_masked(a, i, m) != u8x16.load_masked(b, i, m)) & m).to_bits() == 0;
+}
+
+fn some_at(i: usize, bits: u64) -> Option<usize> {
+    return Option.Some(i + (bits.ctz() as usize));
+}
+
+impl [u8] {
+    pub fn sum(&self) -> u8 {
+        let mut s = u8x16.splat(0);
+        let mut bad = mask8x16.none();
+        for v: u8x16 in self {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | (p < (p -% v));
+            s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+        } tail masked (v, m) {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | (p < (p -% v));
+            s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+        }
+        if bad.to_bits() != 0 {
+            let mut t: u8 = 0;
+            for i in 0..self.len() { t = t + self[i]; }
+            return t;
+        }
+        return s.reduce_max();
+    }
+
+    pub fn min(&self) -> Option<u8> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = u8x16.splat(self[0]);
+        for v: u8x16 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+        return Option.Some(a.reduce_min());
+    }
+
+    pub fn max(&self) -> Option<u8> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = u8x16.splat(self[0]);
+        for v: u8x16 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+        return Option.Some(a.reduce_max());
+    }
+
+    pub fn find(&self, x: u8) -> Option<usize> {
+        let k = u8x16.splat(x);
+        let mut i: usize = 0;
+        for v: u8x16 in self {
+            let b = (v == k).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+            i = i + 16;
+        } tail masked (v, m) {
+            let b = ((v == k) & m).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+        }
+        return Option.None;
+    }
+
+    pub fn find_byte(&self, b: u8) -> Option<usize> {
+        return self.find(b);
+    }
+
+    pub fn find_any_byte(&self, set: &[u8]) -> Option<usize> {
+        let mut i: usize = 0;
+        for v: u8x16 in self {
+            let mut hit = mask8x16.none();
+            for j in 0..set.len() { hit = hit | (v == u8x16.splat(set[j])); }
+            let b = hit.to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+            i = i + 16;
+        } tail masked (v, m) {
+            let mut hit = mask8x16.none();
+            for j in 0..set.len() { hit = hit | (v == u8x16.splat(set[j])); }
+            let b = (hit & m).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+        }
+        return Option.None;
+    }
+
+    pub fn eq(&self, other: &[u8]) -> bool {
+        return bytes_eq(self, other);
+    }
+
+    pub fn fill(&mut self, x: u8) {
+        let k = u8x16.splat(x);
+        for v: &mut u8x16 in self { *v = k; } tail masked (v, m) { *v = k; }
+    }
+}
+
+impl [u16] {
+    pub fn sum(&self) -> u16 {
+        let mut s = u16x8.splat(0);
+        let mut bad = mask16x8.none();
+        for v: u16x8 in self {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | (p < (p -% v));
+            s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+        } tail masked (v, m) {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | (p < (p -% v));
+            s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+        }
+        if bad.to_bits() != 0 {
+            let mut t: u16 = 0;
+            for i in 0..self.len() { t = t + self[i]; }
+            return t;
+        }
+        return s.reduce_max();
+    }
+
+    pub fn min(&self) -> Option<u16> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = u16x8.splat(self[0]);
+        for v: u16x8 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+        return Option.Some(a.reduce_min());
+    }
+
+    pub fn max(&self) -> Option<u16> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = u16x8.splat(self[0]);
+        for v: u16x8 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+        return Option.Some(a.reduce_max());
+    }
+
+    pub fn find(&self, x: u16) -> Option<usize> {
+        let k = u16x8.splat(x);
+        let mut i: usize = 0;
+        for v: u16x8 in self {
+            let b = (v == k).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+            i = i + 8;
+        } tail masked (v, m) {
+            let b = ((v == k) & m).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+        }
+        return Option.None;
+    }
+
+    pub fn eq(&self, other: &[u16]) -> bool {
+        return bytes_eq(cast::<u16, u8>(self), cast::<u16, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: u16) {
+        let k = u16x8.splat(x);
+        for v: &mut u16x8 in self { *v = k; } tail masked (v, m) { *v = k; }
+    }
+}
+
+impl [u32] {
+    pub fn sum(&self) -> u32 {
+        let mut s = u32x4.splat(0);
+        let mut bad = mask32x4.none();
+        for v: u32x4 in self {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | (p < (p -% v));
+            s = p.permute::<[3, 3, 3, 3]>();
+        } tail masked (v, m) {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | (p < (p -% v));
+            s = p.permute::<[3, 3, 3, 3]>();
+        }
+        if bad.to_bits() != 0 {
+            let mut t: u32 = 0;
+            for i in 0..self.len() { t = t + self[i]; }
+            return t;
+        }
+        return s.reduce_max();
+    }
+
+    pub fn min(&self) -> Option<u32> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = u32x4.splat(self[0]);
+        for v: u32x4 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+        return Option.Some(a.reduce_min());
+    }
+
+    pub fn max(&self) -> Option<u32> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = u32x4.splat(self[0]);
+        for v: u32x4 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+        return Option.Some(a.reduce_max());
+    }
+
+    pub fn find(&self, x: u32) -> Option<usize> {
+        let k = u32x4.splat(x);
+        let mut i: usize = 0;
+        for v: u32x4 in self {
+            let b = (v == k).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+            i = i + 4;
+        } tail masked (v, m) {
+            let b = ((v == k) & m).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+        }
+        return Option.None;
+    }
+
+    pub fn eq(&self, other: &[u32]) -> bool {
+        return bytes_eq(cast::<u32, u8>(self), cast::<u32, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: u32) {
+        let k = u32x4.splat(x);
+        for v: &mut u32x4 in self { *v = k; } tail masked (v, m) { *v = k; }
+    }
+}
+
+impl [u64] {
+    pub fn sum(&self) -> u64 {
+        let mut s = u64x2.splat(0);
+        let mut bad = mask64x2.none();
+        for v: u64x2 in self {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | (p < (p -% v));
+            s = p.permute::<[1, 1]>();
+        } tail masked (v, m) {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | (p < (p -% v));
+            s = p.permute::<[1, 1]>();
+        }
+        if bad.to_bits() != 0 {
+            let mut t: u64 = 0;
+            for i in 0..self.len() { t = t + self[i]; }
+            return t;
+        }
+        return s.reduce_max();
+    }
+
+    pub fn min(&self) -> Option<u64> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = u64x2.splat(self[0]);
+        for v: u64x2 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+        return Option.Some(a.reduce_min());
+    }
+
+    pub fn max(&self) -> Option<u64> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = u64x2.splat(self[0]);
+        for v: u64x2 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+        return Option.Some(a.reduce_max());
+    }
+
+    pub fn find(&self, x: u64) -> Option<usize> {
+        let k = u64x2.splat(x);
+        let mut i: usize = 0;
+        for v: u64x2 in self {
+            let b = (v == k).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+            i = i + 2;
+        } tail masked (v, m) {
+            let b = ((v == k) & m).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+        }
+        return Option.None;
+    }
+
+    pub fn eq(&self, other: &[u64]) -> bool {
+        return bytes_eq(cast::<u64, u8>(self), cast::<u64, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: u64) {
+        let k = u64x2.splat(x);
+        for v: &mut u64x2 in self { *v = k; } tail masked (v, m) { *v = k; }
+    }
+}
+
+// Signed sums: p = prev + v overflowed iff prev and v have one sign and p the other.
+impl [i8] {
+    pub fn sum(&self) -> i8 {
+        let mut s = i8x16.splat(0);
+        let mut bad = mask8x16.none();
+        let z = i8x16.splat(0);
+        for v: i8x16 in self {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+            s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+        } tail masked (v, m) {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+            s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+        }
+        if bad.to_bits() != 0 {
+            let mut t: i8 = 0;
+            for i in 0..self.len() { t = t + self[i]; }
+            return t;
+        }
+        return s.reduce_max();
+    }
+
+    pub fn min(&self) -> Option<i8> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = i8x16.splat(self[0]);
+        for v: i8x16 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+        return Option.Some(a.reduce_min());
+    }
+
+    pub fn max(&self) -> Option<i8> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = i8x16.splat(self[0]);
+        for v: i8x16 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+        return Option.Some(a.reduce_max());
+    }
+
+    pub fn find(&self, x: i8) -> Option<usize> {
+        return cast::<i8, u8>(self).find(x as% u8);
+    }
+
+    pub fn eq(&self, other: &[i8]) -> bool {
+        return bytes_eq(cast::<i8, u8>(self), cast::<i8, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: i8) {
+        cast_mut::<i8, u8>(self).fill(x as% u8);
+    }
+}
+
+impl [i16] {
+    pub fn sum(&self) -> i16 {
+        let mut s = i16x8.splat(0);
+        let mut bad = mask16x8.none();
+        let z = i16x8.splat(0);
+        for v: i16x8 in self {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+            s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+        } tail masked (v, m) {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+            s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+        }
+        if bad.to_bits() != 0 {
+            let mut t: i16 = 0;
+            for i in 0..self.len() { t = t + self[i]; }
+            return t;
+        }
+        return s.reduce_max();
+    }
+
+    pub fn min(&self) -> Option<i16> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = i16x8.splat(self[0]);
+        for v: i16x8 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+        return Option.Some(a.reduce_min());
+    }
+
+    pub fn max(&self) -> Option<i16> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = i16x8.splat(self[0]);
+        for v: i16x8 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+        return Option.Some(a.reduce_max());
+    }
+
+    pub fn find(&self, x: i16) -> Option<usize> {
+        return cast::<i16, u16>(self).find(x as% u16);
+    }
+
+    pub fn eq(&self, other: &[i16]) -> bool {
+        return bytes_eq(cast::<i16, u8>(self), cast::<i16, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: i16) {
+        cast_mut::<i16, u16>(self).fill(x as% u16);
+    }
+}
+
+impl [i32] {
+    pub fn sum(&self) -> i32 {
+        let mut s = i32x4.splat(0);
+        let mut bad = mask32x4.none();
+        let z = i32x4.splat(0);
+        for v: i32x4 in self {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+            s = p.permute::<[3, 3, 3, 3]>();
+        } tail masked (v, m) {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+            s = p.permute::<[3, 3, 3, 3]>();
+        }
+        if bad.to_bits() != 0 {
+            let mut t: i32 = 0;
+            for i in 0..self.len() { t = t + self[i]; }
+            return t;
+        }
+        return s.reduce_max();
+    }
+
+    pub fn min(&self) -> Option<i32> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = i32x4.splat(self[0]);
+        for v: i32x4 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+        return Option.Some(a.reduce_min());
+    }
+
+    pub fn max(&self) -> Option<i32> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = i32x4.splat(self[0]);
+        for v: i32x4 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+        return Option.Some(a.reduce_max());
+    }
+
+    pub fn find(&self, x: i32) -> Option<usize> {
+        return cast::<i32, u32>(self).find(x as% u32);
+    }
+
+    pub fn eq(&self, other: &[i32]) -> bool {
+        return bytes_eq(cast::<i32, u8>(self), cast::<i32, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: i32) {
+        cast_mut::<i32, u32>(self).fill(x as% u32);
+    }
+}
+
+impl [i64] {
+    pub fn sum(&self) -> i64 {
+        let mut s = i64x2.splat(0);
+        let mut bad = mask64x2.none();
+        let z = i64x2.splat(0);
+        for v: i64x2 in self {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+            s = p.permute::<[1, 1]>();
+        } tail masked (v, m) {
+            let p = s +% v.scan_add_wrap();
+            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+            s = p.permute::<[1, 1]>();
+        }
+        if bad.to_bits() != 0 {
+            let mut t: i64 = 0;
+            for i in 0..self.len() { t = t + self[i]; }
+            return t;
+        }
+        return s.reduce_max();
+    }
+
+    pub fn min(&self) -> Option<i64> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = i64x2.splat(self[0]);
+        for v: i64x2 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+        return Option.Some(a.reduce_min());
+    }
+
+    pub fn max(&self) -> Option<i64> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = i64x2.splat(self[0]);
+        for v: i64x2 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+        return Option.Some(a.reduce_max());
+    }
+
+    pub fn find(&self, x: i64) -> Option<usize> {
+        return cast::<i64, u64>(self).find(x as% u64);
+    }
+
+    pub fn eq(&self, other: &[i64]) -> bool {
+        return bytes_eq(cast::<i64, u8>(self), cast::<i64, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: i64) {
+        cast_mut::<i64, u64>(self).fill(x as% u64);
+    }
+}
+
+// usize and isize are 64-bit on every target: the u64 / i64 code.
+impl [usize] {
+    pub fn sum(&self) -> usize {
+        return cast::<usize, u64>(self).sum() as usize;
+    }
+
+    pub fn min(&self) -> Option<usize> {
+        return match cast::<usize, u64>(self).min() {
+            Option.Some(x) => Option.Some(x as usize),
+            Option.None => Option.None,
+        };
+    }
+
+    pub fn max(&self) -> Option<usize> {
+        return match cast::<usize, u64>(self).max() {
+            Option.Some(x) => Option.Some(x as usize),
+            Option.None => Option.None,
+        };
+    }
+
+    pub fn find(&self, x: usize) -> Option<usize> {
+        return cast::<usize, u64>(self).find(x as u64);
+    }
+
+    pub fn eq(&self, other: &[usize]) -> bool {
+        return bytes_eq(cast::<usize, u8>(self), cast::<usize, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: usize) {
+        cast_mut::<usize, u64>(self).fill(x as u64);
+    }
+}
+
+impl [isize] {
+    pub fn sum(&self) -> isize {
+        return cast::<isize, i64>(self).sum() as isize;
+    }
+
+    pub fn min(&self) -> Option<isize> {
+        return match cast::<isize, i64>(self).min() {
+            Option.Some(x) => Option.Some(x as isize),
+            Option.None => Option.None,
+        };
+    }
+
+    pub fn max(&self) -> Option<isize> {
+        return match cast::<isize, i64>(self).max() {
+            Option.Some(x) => Option.Some(x as isize),
+            Option.None => Option.None,
+        };
+    }
+
+    pub fn find(&self, x: isize) -> Option<usize> {
+        return cast::<isize, u64>(self).find(x as% u64);
+    }
+
+    pub fn eq(&self, other: &[isize]) -> bool {
+        return bytes_eq(cast::<isize, u8>(self), cast::<isize, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: isize) {
+        cast_mut::<isize, u64>(self).fill(x as% u64);
+    }
+}
+
+impl [f32] {
+    pub fn sum(&self) -> f32 {
+        let n = self.len();
+        let mut a0 = f32x4.splat(0.0);
+        let mut a1 = a0;
+        let mut a2 = a0;
+        let mut a3 = a0;
+        let mut i: usize = 0;
+        while i + 16 <= n {
+            a0 = a0 + f32x4.load(self, i);
+            a1 = a1 + f32x4.load(self, i + 4);
+            a2 = a2 + f32x4.load(self, i + 8);
+            a3 = a3 + f32x4.load(self, i + 12);
+            i = i + 16;
+        }
+        if i < n {
+            let r = n - i;
+            a0 = a0 + f32x4.load_masked(self, i, mask32x4.first_n(tail_lanes(r, 0, 4)));
+            a1 = a1 + f32x4.load_masked(self, i + 4, mask32x4.first_n(tail_lanes(r, 1, 4)));
+            a2 = a2 + f32x4.load_masked(self, i + 8, mask32x4.first_n(tail_lanes(r, 2, 4)));
+            a3 = a3 + f32x4.load_masked(self, i + 12, mask32x4.first_n(tail_lanes(r, 3, 4)));
+        }
+        return ((a0 + a2) + (a1 + a3)).reduce_add();
+    }
+
+    pub fn min(&self) -> Option<f32> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = f32x4.splat(self[0]);
+        for v: f32x4 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+        return Option.Some(a.reduce_min());
+    }
+
+    pub fn max(&self) -> Option<f32> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = f32x4.splat(self[0]);
+        for v: f32x4 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+        return Option.Some(a.reduce_max());
+    }
+
+    pub fn find(&self, x: f32) -> Option<usize> {
+        let k = f32x4.splat(x);
+        let mut i: usize = 0;
+        for v: f32x4 in self {
+            let b = (v == k).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+            i = i + 4;
+        } tail masked (v, m) {
+            let b = ((v == k) & m).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+        }
+        return Option.None;
+    }
+
+    pub fn eq(&self, other: &[f32]) -> bool {
+        return bytes_eq(cast::<f32, u8>(self), cast::<f32, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: f32) {
+        cast_mut::<f32, u32>(self).fill(mem.f32_bits(x));
+    }
+}
+
+impl [f64] {
+    pub fn sum(&self) -> f64 {
+        let n = self.len();
+        let mut a0 = f64x2.splat(0.0);
+        let mut a1 = a0;
+        let mut a2 = a0;
+        let mut a3 = a0;
+        let mut i: usize = 0;
+        while i + 8 <= n {
+            a0 = a0 + f64x2.load(self, i);
+            a1 = a1 + f64x2.load(self, i + 2);
+            a2 = a2 + f64x2.load(self, i + 4);
+            a3 = a3 + f64x2.load(self, i + 6);
+            i = i + 8;
+        }
+        if i < n {
+            let r = n - i;
+            a0 = a0 + f64x2.load_masked(self, i, mask64x2.first_n(tail_lanes(r, 0, 2)));
+            a1 = a1 + f64x2.load_masked(self, i + 2, mask64x2.first_n(tail_lanes(r, 1, 2)));
+            a2 = a2 + f64x2.load_masked(self, i + 4, mask64x2.first_n(tail_lanes(r, 2, 2)));
+            a3 = a3 + f64x2.load_masked(self, i + 6, mask64x2.first_n(tail_lanes(r, 3, 2)));
+        }
+        return ((a0 + a2) + (a1 + a3)).reduce_add();
+    }
+
+    pub fn min(&self) -> Option<f64> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = f64x2.splat(self[0]);
+        for v: f64x2 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+        return Option.Some(a.reduce_min());
+    }
+
+    pub fn max(&self) -> Option<f64> {
+        if self.len() == 0 { return Option.None; }
+        let mut a = f64x2.splat(self[0]);
+        for v: f64x2 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+        return Option.Some(a.reduce_max());
+    }
+
+    pub fn find(&self, x: f64) -> Option<usize> {
+        let k = f64x2.splat(x);
+        let mut i: usize = 0;
+        for v: f64x2 in self {
+            let b = (v == k).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+            i = i + 2;
+        } tail masked (v, m) {
+            let b = ((v == k) & m).to_bits();
+            if b != 0 { return some_at(i, b as u64); }
+        }
+        return Option.None;
+    }
+
+    pub fn eq(&self, other: &[f64]) -> bool {
+        return bytes_eq(cast::<f64, u8>(self), cast::<f64, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: f64) {
+        cast_mut::<f64, u64>(self).fill(mem.f64_bits(x));
+    }
+}
+
+// A bool is one byte, 0 or 1.
+impl [bool] {
+    pub fn find(&self, x: bool) -> Option<usize> {
+        return cast::<bool, u8>(self).find(x as u8);
+    }
+
+    pub fn eq(&self, other: &[bool]) -> bool {
+        return bytes_eq(cast::<bool, u8>(self), cast::<bool, u8>(other));
+    }
+
+    pub fn fill(&mut self, x: bool) {
+        cast_mut::<bool, u8>(self).fill(x as u8);
+    }
+}
+
+impl<T: Copy> [T] {
+    pub fn count(&self, pred: fn(T) -> bool) -> usize {
+        let mut n: usize = 0;
+        for i in 0..self.len() { n = n + (pred(self[i]) as usize); }
+        return n;
+    }
+
+    pub fn any(&self, pred: fn(T) -> bool) -> bool {
+        let n = self.len();
+        let mut i: usize = 0;
+        while i < n {
+            let end = (n - i < 16).select(n, i + 16);
+            let mut hit = false;
+            for j in i..end { hit = hit | pred(self[j]); }
+            if hit { return true; }
+            i = end;
+        }
+        return false;
+    }
+
+    pub fn all(&self, pred: fn(T) -> bool) -> bool {
+        let n = self.len();
+        let mut i: usize = 0;
+        while i < n {
+            let end = (n - i < 16).select(n, i + 16);
+            let mut ok = true;
+            for j in i..end { ok = ok & pred(self[j]); }
+            if !ok { return false; }
+            i = end;
+        }
+        return true;
+    }
+
+    pub fn copy_from(&mut self, src: &[T]) {
+        debug.assert(self.len() == src.len(), "copy_from: the slices differ in length");
+        let s = cast::<T, u8>(src);
+        let d = cast_mut::<T, u8>(self);
+        let n = d.len();
+        let mut i: usize = 0;
+        while i + 64 <= n {
+            u8x16.load(s, i).store(d, i);
+            u8x16.load(s, i + 16).store(d, i + 16);
+            u8x16.load(s, i + 32).store(d, i + 32);
+            u8x16.load(s, i + 48).store(d, i + 48);
+            i = i + 64;
+        }
+        while i + 16 <= n {
+            u8x16.load(s, i).store(d, i);
+            i = i + 16;
+        }
+        let m = mask8x16.first_n(n - i);
+        u8x16.load_masked(s, i, m).store_masked(d, i, m);
+    }
+}

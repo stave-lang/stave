@@ -87,6 +87,15 @@ const KERNELS: &[Kernel] = &[
     Kernel { name: "matmul4", kinds: &[kind(&[Elem::F32], 4, Param::F32)] },
     Kernel { name: "utf8", kinds: &[kind(&[Elem::Utf8], 16, Param::None)] },
     Kernel {
+        name: "combinators",
+        kinds: &[
+            kind(&[Elem::F32], 16, Param::F32),
+            kind(&[Elem::F64], 8, Param::None),
+            kind(&[Elem::I32], 4, Param::I32),
+            kind(&[Elem::U8], 16, Param::Byte),
+        ],
+    },
+    Kernel {
         name: "sum_v3",
         kinds: &[
             kind(&[Elem::F32], 8, Param::None),
