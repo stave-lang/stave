@@ -254,8 +254,8 @@ fn tables_and_sites() {
 #[test]
 fn clean_errors() {
     let mut p = Prog::new();
-    let t = p.t;
-    let v4 = p.m.types.intern(TypeKey::Vec { lane: t.f32, n: Lanes::Fixed(4) });
+    let f16 = p.m.types.intern(TypeKey::Float(stave_ir::FloatBits::F16));
+    let v4 = p.m.types.intern(TypeKey::Vec { lane: f16, n: Lanes::Fixed(4) });
     let pv = p.m.types.ref_(true, v4);
     let f = p.decl("t.vec", &[pv], None);
     let mut b = FuncBuilder::new(&[pv]);

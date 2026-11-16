@@ -179,8 +179,8 @@ impl Cg<'_, '_> {
                 let pt = self.pointee(rt?)?;
                 let l = self.layout(pt)?;
                 let size = u32::try_from(l.size).map_err(|_| unsup("slot larger than 4 GiB"))?;
-                if l.align > 16 {
-                    return Err(unsup("slot alignment above 16"));
+                if l.align > u64::from(self.cx.level.vector_bytes()) {
+                    return Err(unsup("slot alignment above the widest vector register"));
                 }
                 let off = self.alloc_frame(size.max(1), l.align as u32)?;
                 self.def_slot(v, off)
@@ -273,7 +273,7 @@ impl Cg<'_, '_> {
                 let name = self.cx.m.intrinsic_name(id).ok_or_else(|| bad("intrinsic id out of range"))?;
                 self.intrinsic(name, args, ty, res)
             }
-            Op::Vec(v) => Err(unsup(format!("{} on x86-64", v.name()))),
+            Op::Vec(v) => self.vec_op(v, args, ty, res),
             Op::Panic(k) => self.trap_now(k),
         }
     }
@@ -365,7 +365,7 @@ impl Cg<'_, '_> {
             };
             let Some(class) = class else { return Ok(false) };
             // an aggregate is copied through `[base + disp]` only
-            if matches!(class?, VCls::M { .. }) && form.is_ok() {
+            if matches!(class?, VCls::M { .. } | VCls::V { .. }) && form.is_ok() {
                 return Ok(false);
             }
             let at = self.pos + (k - i);
@@ -1113,7 +1113,7 @@ impl Cg<'_, '_> {
                     let r = self.new_x(o, p)?;
                     self.bind(v, R::X(r))
                 }
-                VCls::M { size, .. } => {
+                VCls::M { size, .. } | VCls::V { size } => {
                     let s = self.msrc(o)?;
                     let d = self.def_mem(v)?;
                     self.copy_mem(d, s, size)
@@ -1142,7 +1142,7 @@ impl Cg<'_, '_> {
                 self.a.mov_xg(s, r, S0)?;
                 self.bind(v, R::X(r))
             }
-            VCls::M { size, .. } => {
+            VCls::M { size, .. } | VCls::V { size } => {
                 let cr = self.read_g(c)?;
                 let (sa, sb) = (self.msrc(a)?, self.msrc(b)?);
                 let t = self.alloc_g()?;

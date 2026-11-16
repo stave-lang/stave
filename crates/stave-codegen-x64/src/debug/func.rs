@@ -216,6 +216,16 @@ pub(crate) struct Cg<'a, 'm> {
     /// Release: the compare of the current block that its `cbr` emits (`cmp` + `jcc`, no bool
     /// value); `NONE` otherwise.
     fused: u32,
+    /// The frame holds a 32-byte-aligned value: the prologue realigns the stack so that `rbp` is
+    /// 16 above a multiple of 32, keeps the entry frame address at `[rbp - 8]`, and the
+    /// epilogue restores `rsp` from there.
+    pub(crate) realign: bool,
+    /// A `ymm` register was written since the last `vzeroupper`.
+    pub(crate) ydirty: bool,
+    /// The function has 256-bit code (its trap stubs clear the upper halves before the call).
+    pub(crate) yused: bool,
+    /// Vector constants, emitted after the code and read `rip`-relative.
+    pub(crate) vpool: Vec<(Label, Vec<u8>)>,
 }
 
 pub(crate) fn compile(cx: &Ctx<'_>, fid: FuncId) -> Res<FuncCode> {
@@ -369,6 +379,19 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
             }
         }
     }
+    let wide = |t: TypeId| match cx.cls.get(t.index()).copied().flatten() {
+        Some(VCls::V { size }) => size > 16,
+        Some(VCls::M { align, .. }) => align > 16,
+        _ => false,
+    };
+    let wide_slot = |i: usize| {
+        b.insts.op[i] == Op::Slot
+            && matches!(b.insts.ty.get(i).copied().flatten().and_then(|t| cx.m.types.key(t)),
+                Some(TypeKey::Ref { inner, .. } | TypeKey::RawPtr { inner, .. })
+                    if cx.layouts.get_layout(*inner).is_ok_and(|l| l.align > 16))
+    };
+    let realign = b.values.iter().any(|v| wide(v.ty)) || (0..b.insts.len()).any(wide_slot);
+    let saved_bytes = 8 * (gown & callee_saved).count_ones();
     let mut a = Asm::with_capacity(32 * b.insts.len() + 64, b.blocks.len() * 2 + 8);
     let epilogue = a.new_label();
     let labels = (0..b.blocks.len()).map(|_| a.new_label()).collect();
@@ -391,8 +414,9 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
         glock: 0,
         xlock: 0,
         used_callee: gown & callee_saved,
-        // release: the save slots of the owned callee-saved registers come first
-        frame: 8 * (gown & callee_saved).count_ones(),
+        // the entry frame address of a realigned frame, then (release) the save slots of the
+        // owned callee-saved registers
+        frame: saved_bytes + if realign { 8 } else { 0 },
         labels,
         traps: Vec::new(),
         trap_index: rustc_hash::FxHashMap::default(),
@@ -416,6 +440,10 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
         uses,
         folded: if release { vec![NONE; nv] } else { Vec::new() },
         fused: NONE,
+        realign,
+        ydirty: false,
+        yused: false,
+        vpool: Vec::new(),
     };
     let fs = cx.fn_sites.get(fid.index()).copied().unwrap_or(Site::NONE);
     cg.run(fs)
@@ -464,7 +492,16 @@ impl<'a, 'm> Cg<'a, 'm> {
             .get(t.index())
             .copied()
             .flatten()
-            .ok_or_else(|| unsup(format!("values of type t{} ({})", t.0, self.cx.m.types.key_text(t))))
+            .ok_or_else(|| {
+                let text = self.cx.m.types.key_text(t);
+                match self.key(t) {
+                    Some(TypeKey::Vec { .. } | TypeKey::Mask { .. }) => unsup(format!(
+                        "vector type {text}: sizeless, f16 / bf16 lanes, or wider than the target's {}-bit vector registers",
+                        8 * self.cx.level.vector_bytes()
+                    )),
+                    _ => unsup(format!("values of type t{} ({text})", t.0)),
+                }
+            })
     }
 
     pub fn vty(&self, v: Value) -> Res<TypeId> {
@@ -573,10 +610,19 @@ impl<'a, 'm> Cg<'a, 'm> {
 
     // ---------------------------------------------------------------- frame
 
+    /// Frame bytes at the returned `rbp` offset. Alignment above 16 needs a realigned frame.
     pub fn alloc_frame(&mut self, size: u32, align: u32) -> Res<i32> {
-        let al = align.clamp(1, 16);
+        let al = align.clamp(1, 32);
         let end = u64::from(self.frame) + u64::from(size);
-        let end = end.div_ceil(u64::from(al)) * u64::from(al);
+        let end = if al == 32 {
+            if !self.realign {
+                return Err(bad("internal: a 32-byte-aligned value in a frame that is not realigned"));
+            }
+            // `rbp` is 16 above a multiple of 32
+            (end + 16).div_ceil(32) * 32 - 16
+        } else {
+            end.div_ceil(u64::from(al)) * u64::from(al)
+        };
         if end > (1 << 30) {
             return Err(unsup("stack frame larger than 1 GiB"));
         }
@@ -591,10 +637,8 @@ impl<'a, 'm> Cg<'a, 'm> {
             return Err(bad(format!("value %{} out of range", v.0)));
         }
         if !self.has_home[i] {
-            let h = match self.vcls(self.vty(v)?)? {
-                VCls::G { .. } | VCls::X(_) => self.alloc_frame(8, 8)?,
-                VCls::M { size, align } => self.alloc_frame(size.div_ceil(8) * 8, align.max(8))?,
-            };
+            let (size, align) = self.vcls(self.vty(v)?)?.home();
+            let h = self.alloc_frame(size, align)?;
             self.home[i] = h;
             self.has_home[i] = true;
         }
@@ -1441,7 +1485,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                     Ok(())
                 }
             },
-            VCls::M { size, .. } => {
+            VCls::M { size, .. } | VCls::V { size } => {
                 let s = self.msrc(o)?;
                 self.copy_mem(dst, s, size)
             }
@@ -1483,7 +1527,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                 self.a.movs(p, x, src)?;
                 self.bind(res, R::X(x))
             }
-            VCls::M { size, .. } => {
+            VCls::M { size, .. } | VCls::V { size } => {
                 let d = self.def_mem(res)?;
                 self.copy_mem(d, MSrc::Mem(src), size)
             }
@@ -1601,7 +1645,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                         self.copy_to_x(o, p, XS0)?;
                         self.a.movs_store(p, dst, XS0)?;
                     }
-                    VCls::M { size, .. } => {
+                    VCls::M { size, .. } | VCls::V { size } => {
                         let s = self.msrc(o)?;
                         self.copy_mem(dst, s, size)?;
                     }
@@ -1649,6 +1693,13 @@ impl<'a, 'm> Cg<'a, 'm> {
                     let s = self.msrc(o)?;
                     self.load_pieces(s, ps)?;
                 }
+                Loc::Vec(x) => {
+                    let VCls::V { size } = self.ocls(o, None)? else {
+                        return Err(bad("internal: a non-vector argument in a vector register"));
+                    };
+                    let MSrc::Mem(m) = self.msrc(o)? else { return Err(bad("vector argument")) };
+                    self.vload(*x, m, size)?;
+                }
                 Loc::Ignore | Loc::Stack(_) => {}
             }
         }
@@ -1682,6 +1733,8 @@ impl<'a, 'm> Cg<'a, 'm> {
         if abi.stack > 0 {
             self.a.alu_ri(AluOp::Add, Size::Q, RSP, i64::from(abi.stack))?;
         }
+        // The callee returns with clean upper halves unless `ymm0` carries its result.
+        self.ydirty = false;
         let Some(v) = res else { return Ok(()) };
         match &abi.ret {
             RetLoc::None => {
@@ -1699,6 +1752,14 @@ impl<'a, 'm> Cg<'a, 'm> {
             RetLoc::Regs(ps) => {
                 let d = self.def_mem(v)?;
                 self.store_pieces(d, ps)?;
+            }
+            RetLoc::Vec => {
+                let VCls::V { size } = self.vcls(self.vty(v)?)? else {
+                    return Err(bad("internal: a non-vector result in a vector register"));
+                };
+                let d = self.def_mem(v)?;
+                self.vstore(d, abi::xmm(0), size)?;
+                self.vclean();
             }
             RetLoc::Sret => {
                 self.in_home[v.index()] = true;
@@ -1936,6 +1997,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             self.a.mov_mr(Size::Q, Mem::base(RBP, h), RDI)?;
             self.sret_home = Some(h);
         }
+        let mut entry_base = false;
         for (&p, loc) in params.iter().zip(&abi.args) {
             let pi = p.index();
             if pi >= self.vreg.len() {
@@ -1951,6 +2013,27 @@ impl<'a, 'm> Cg<'a, 'm> {
                     let d = self.def_mem(p)?;
                     self.store_pieces(d, ps)?;
                 }
+                Loc::Vec(x) => {
+                    let VCls::V { size } = self.vcls(self.vty(p)?)? else {
+                        return Err(bad("internal: a non-vector param in a vector register"));
+                    };
+                    let d = self.def_mem(p)?;
+                    self.vstore(d, *x, size)?;
+                }
+                // A realigned frame is at no fixed distance from the stack arguments: they are
+                // copied into homes (`rax` carries nothing at entry).
+                Loc::Stack(off) if self.realign => {
+                    let size = match self.vcls(self.vty(p)?)? {
+                        VCls::M { size, .. } | VCls::V { size } => size,
+                        _ => 8,
+                    };
+                    if !entry_base {
+                        self.a.mov_rm(Size::Q, RAX, Mem::base(RBP, -8))?;
+                        entry_base = true;
+                    }
+                    let d = self.def_mem(p)?;
+                    self.copy_mem(d, MSrc::Mem(Mem::base(RAX, 16 + *off as i32)), size)?;
+                }
                 Loc::Stack(off) => {
                     self.home[pi] = 16 + *off as i32;
                     self.has_home[pi] = true;
@@ -1958,6 +2041,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                 }
             }
         }
+        self.vclean();
         self.glock = 0;
         self.xlock = 0;
         if self.rel {
@@ -2055,11 +2139,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                 && params[j] != v
             {
                 let c = self.vcls(self.vty(v)?)?;
-                let size = match c {
-                    VCls::M { size, .. } => size.div_ceil(8) * 8,
-                    _ => 8,
-                };
-                let tmp = self.alloc_frame(size, 16)?;
+                let tmp = self.alloc_frame(c.home().0, 16)?;
                 self.copy_value_to(o, c, Mem::base(RBP, tmp))?;
                 saved[j] = Some(tmp);
             }
@@ -2074,7 +2154,9 @@ impl<'a, 'm> Cg<'a, 'm> {
                 Some(tmp) => {
                     let src = Mem::base(RBP, tmp);
                     match c {
-                        VCls::M { size, .. } => self.copy_mem(dst, MSrc::Mem(src), size)?,
+                        VCls::M { size, .. } | VCls::V { size } => {
+                            self.copy_mem(dst, MSrc::Mem(src), size)?
+                        }
                         _ => {
                             self.a.mov_rm(Size::Q, S0, src)?;
                             self.a.mov_mr(Size::Q, dst, S0)?;
@@ -2095,7 +2177,7 @@ impl<'a, 'm> Cg<'a, 'm> {
         for (j, &o) in args.iter().enumerate() {
             if let Operand::Value(v) = o
                 && params[j] != v
-                && let VCls::M { size, .. } = self.vcls(self.vty(v)?)?
+                && let VCls::M { size, .. } | VCls::V { size } = self.vcls(self.vty(v)?)?
                 && params.contains(&v)
             {
                 let tmp = self.alloc_frame(size.div_ceil(8) * 8, 16)?;
@@ -2110,7 +2192,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                 continue;
             }
             match self.vcls(self.vty(p)?)? {
-                VCls::M { size, .. } => {
+                VCls::M { size, .. } | VCls::V { size } => {
                     let dst = self.hmem(p)?;
                     let src = match saved[j] {
                         Some(tmp) => MSrc::Mem(Mem::base(RBP, tmp)),
@@ -2302,7 +2384,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                 }
                 Err(bad("internal: float value has no location"))
             }
-            VCls::M { size, .. } => {
+            VCls::M { size, .. } | VCls::V { size } => {
                 let s = self.msrc(o)?;
                 self.copy_mem(dst, s, size)
             }
@@ -2484,11 +2566,22 @@ impl<'a, 'm> Cg<'a, 'm> {
                 let s = self.msrc(o)?;
                 self.load_pieces(s, &ps)
             }
+            // a 32-byte result leaves in `ymm0`: its upper half stays as loaded
+            RetLoc::Vec => {
+                let VCls::V { size } = self.ocls(o, self.f.ret)? else {
+                    return Err(bad("internal: a non-vector result in a vector register"));
+                };
+                let MSrc::Mem(m) = self.msrc(o)? else { return Err(bad("vector result")) };
+                self.vload(abi::xmm(0), m, size)?;
+                // control leaves here: the code emitted next starts clean
+                self.ydirty = false;
+                Ok(())
+            }
             RetLoc::Sret => {
                 let h = self.sret_home.ok_or_else(|| bad("internal: no sret home"))?;
                 let size = match self.ocls(o, self.f.ret)? {
                     VCls::M { size, .. } => size,
-                    _ => return Err(bad("sret of a scalar")),
+                    _ => return Err(bad("sret of a non-aggregate")),
                 };
                 let s = self.msrc(o)?;
                 self.a.mov_rm(Size::Q, RAX, Mem::base(RBP, h))?;
@@ -2507,10 +2600,21 @@ impl<'a, 'm> Cg<'a, 'm> {
             self.epilogue_bound = true;
         }
         let saved = CALLEE_SAVED.iter().copied().filter(|g| self.used_callee & bit(*g) != 0);
+        let first = if self.realign { 8 } else { 0 };
         for (k, g) in saved.enumerate() {
-            self.a.mov_rm(Size::Q, g, Mem::base(RBP, -8 * (k as i32 + 1)))?;
+            self.a.mov_rm(Size::Q, g, Mem::base(RBP, -(first + 8 * (k as i32 + 1))))?;
         }
-        self.a.leave();
+        self.leave_ret()
+    }
+
+    /// Drops the frame and returns. A realigned frame is left through the entry frame address.
+    fn leave_ret(&mut self) -> Res<()> {
+        if self.realign {
+            self.a.mov_rm(Size::Q, RSP, Mem::base(RBP, -8))?;
+            self.a.pop(RBP);
+        } else {
+            self.a.leave();
+        }
         self.a.ret();
         Ok(())
     }
@@ -2521,7 +2625,7 @@ impl<'a, 'm> Cg<'a, 'm> {
         // Debug: the registers the cache happened to use are saved below the locals. Release:
         // the owned ones, at the top of the frame.
         let (total, first_save) = if self.rel {
-            (self.frame.div_ceil(16) * 16, 0)
+            (self.frame.div_ceil(16) * 16, if self.realign { 8 } else { 0 })
         } else {
             let locals = self.frame.div_ceil(16) * 16;
             ((locals + 8 * saved.len() as u32).div_ceil(16) * 16, locals)
@@ -2533,8 +2637,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             for (k, g) in saved.iter().enumerate() {
                 self.a.mov_rm(Size::Q, *g, Mem::base(RBP, save_off(k)))?;
             }
-            self.a.leave();
-            self.a.ret();
+            self.leave_ret()?;
         } else if !self.epilogue_bound {
             // no `ret` in the function
             self.a.bind(ep)?;
@@ -2547,10 +2650,17 @@ impl<'a, 'm> Cg<'a, 'm> {
                 self.a.line(*file, *line, *col);
             }
             let kind = PanicKind::ALL.iter().position(|x| *x == k).unwrap_or(0) as i64;
+            if self.yused {
+                self.a.vzeroupper();
+            }
             self.a.mov_ri(Size::D, RDI, kind)?;
             self.a.mov_ri(Size::D, RSI, i64::from(site))?;
             self.a.call_sym(trap_sym);
             self.a.ud2();
+        }
+        for (l, bytes) in std::mem::take(&mut self.vpool) {
+            self.a.bind(l)?;
+            self.a.raw(&bytes);
         }
         let body = self.a.finish()?;
 
@@ -2559,6 +2669,17 @@ impl<'a, 'm> Cg<'a, 'm> {
             p.line(*file, *line, *col);
         }
         p.push(RBP);
+        if self.realign {
+            // The return address and the caller's `rbp` are copied below the aligned boundary,
+            // so the frame chain reads as in any other function.
+            p.mov_rr(Size::Q, S1, RSP);
+            p.alu_ri(AluOp::And, Size::Q, RSP, -32)?;
+            p.alu_ri(AluOp::Sub, Size::Q, RSP, 16)?;
+            for off in [8, 0] {
+                p.mov_rm(Size::Q, S0, Mem::base(S1, off))?;
+                p.mov_mr(Size::Q, Mem::base(RSP, off), S0)?;
+            }
+        }
         p.mov_rr(Size::Q, RBP, RSP);
         if total > 0 {
             let pages = total / 4096;
@@ -2585,6 +2706,9 @@ impl<'a, 'm> Cg<'a, 'm> {
                     p.alu_ri(AluOp::Sub, Size::Q, RSP, i64::from(rest))?;
                 }
             }
+        }
+        if self.realign {
+            p.mov_mr(Size::Q, Mem::base(RBP, -8), S1)?;
         }
         for (k, g) in saved.iter().enumerate() {
             p.mov_mr(Size::Q, Mem::base(RBP, save_off(k)), *g)?;

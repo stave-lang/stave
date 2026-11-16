@@ -523,8 +523,9 @@ fn single_file_stem_is_checked() {
     assert!(is_static_exec(&work.join("plain")));
 }
 
-/// A valid program with vector values is "not implemented yet" (exit 2, naming vector code
-/// generation), never an internal error (exit 3); `stave check` accepts it.
+/// A valid program with vector values builds for x86-64; for a target whose backend has no vector
+/// code generation it is "not implemented yet" (exit 2, naming vector code generation), never an
+/// internal error (exit 3). `stave check` accepts it.
 #[test]
 fn vector_program_is_not_implemented() {
     let d = tmp("simd");
@@ -533,13 +534,17 @@ fn vector_program_is_not_implemented() {
     let p = f.display().to_string();
     let (c, _, err) = stave_in(&d, &["check", &p]);
     assert_eq!(c, 0, "{err}");
-    for target in ["x86_64-linux", "aarch64-linux"] {
+    for target in ["x86_64-linux", "x86_64-linux-v3"] {
         let (c, _, err) = stave_in(&d, &["build", &p, "--target", target]);
-        assert_eq!(c, 2, "{target}: {err}");
-        assert!(err.contains("is not implemented yet"), "{target}: {err}");
-        assert!(err.contains("vector code generation"), "{target}: {err}");
-        assert!(!d.join("simd").exists());
+        assert_eq!(c, 0, "{target}: {err}");
+        assert!(is_static_exec(&d.join("simd")), "{target}");
+        std::fs::remove_file(d.join("simd")).unwrap();
     }
+    let (c, _, err) = stave_in(&d, &["build", &p, "--target", "aarch64-linux"]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.contains("is not implemented yet"), "{err}");
+    assert!(err.contains("vector code generation"), "{err}");
+    assert!(!d.join("simd").exists());
 }
 
 /// Syntax that parses but has no semantics yet (parameter `from`, contracts) is

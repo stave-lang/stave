@@ -41,9 +41,16 @@
 //! (stave-obj `stub::start`), `__stave_main`, `__stave_signal`, `__stave_thread_start`, and the tables
 //! `__stave_site_table` and `__stave_pc_table` (layouts in contracts/intrinsics.md).
 //!
-//! Not implemented (clean [`Error::Unsupported`]): vector / mask types, conversions *to*
-//! f16 / bf16, alignment above 16, intrinsics outside the x86-64 table, references to functions
-//! without a body (C imports need an external linker). Stack overflow is detected by the
+//! Vector and mask values (`simd`): every `vec.*` / `mask.*` op at the target's [`Level`], 128-bit
+//! and narrower vectors with SSE4.2 instructions, 256-bit ones with AVX2. A vector value lives in
+//! its frame home; an op loads its operands into scratch `xmm` / `ymm` registers and stores the
+//! result. A function with a 32-byte-aligned value realigns its frame (`func`), and `ymm` upper
+//! halves are clean between instructions.
+//!
+//! Not implemented (clean [`Error::Unsupported`]): sizeless vectors, vectors with f16 / bf16
+//! lanes, vectors wider than the level's registers, conversions *to* f16 / bf16, alignment above
+//! the widest vector, intrinsics outside the x86-64 table, references to functions without a
+//! body (C imports need an external linker). Stack overflow is detected by the
 //! runtime's guard page, not by an inline check. When `ObjectImage::patch_func` moves a function,
 //! its PC-table row follows it (`Abs64Body`) but keeps its position, so the table is no longer
 //! sorted by address until the next full link.
@@ -54,6 +61,8 @@ mod cast;
 mod func;
 mod intrin;
 mod ops;
+mod simd;
+mod softfma;
 mod stubs;
 #[cfg(test)]
 mod tests;
@@ -81,6 +90,26 @@ pub struct SiteRow {
     pub func: FuncId,
 }
 
+/// The x86-64 feature level vector code is generated for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Level {
+    /// SSE4.2: 128-bit vectors.
+    #[default]
+    V2,
+    /// AVX2, FMA, BMI2: 128- and 256-bit vectors.
+    V3,
+}
+
+impl Level {
+    /// The widest vector register in bytes.
+    pub(crate) fn vector_bytes(self) -> u32 {
+        match self {
+            Level::V2 => 16,
+            Level::V3 => 32,
+        }
+    }
+}
+
 /// Backend options.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -104,6 +133,8 @@ pub struct Options {
     /// Release code generation: values used across blocks get registers for their whole life
     /// (`func`, stave-opt `regalloc`). Off: every such value lives in its frame home.
     pub release: bool,
+    /// The instruction set of vector code.
+    pub level: Level,
 }
 
 impl Default for Options {
@@ -117,6 +148,7 @@ impl Default for Options {
             verify: true,
             threads: 0,
             release: false,
+            level: Level::V2,
         }
     }
 }
@@ -125,7 +157,7 @@ impl Default for Options {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
     Verify(Vec<VerifyError>),
-    /// Valid IR this backend does not implement yet (vector types, f16 rounding casts, ...).
+    /// Valid IR this backend does not implement yet (sizeless vectors, f16 rounding casts, ...).
     Unsupported {
         func: Option<FuncId>,
         what: String,
@@ -221,6 +253,11 @@ pub struct Ctx<'m> {
     pub(crate) static_sym: Vec<SymbolId>,
     /// [`Options::release`].
     pub(crate) release: bool,
+    /// [`Options::level`].
+    pub(crate) level: Level,
+    /// `__stave_fma32`, `__stave_fma64`: the software `fma` of one lane, where the level has no
+    /// FMA instruction and the module has a `vec.fma`.
+    pub(crate) fma_sym: Option<[SymbolId; 2]>,
 }
 
 /// What [`emit_module`] defined: the symbols of the functions, and the PC table rows still to
@@ -324,7 +361,13 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
     };
     let layouts = Layouts::compute(&m.types);
     let static_sym = stubs::statics(m, &layouts, b)?;
-    let cls = abi::classify_all(&m.types, &layouts);
+    let cls = abi::classify_all(&m.types, &layouts, o.level.vector_bytes());
+    let soft_fma = o.level == Level::V2
+        && order
+            .iter()
+            .filter_map(|f| m.funcs[f.index()].body.as_ref())
+            .any(|b| b.insts.op.iter().any(|op| matches!(op, stave_ir::Op::Vec(stave_ir::simd::VecOp::Fma))));
+    let fma_sym = if soft_fma { Some(softfma::define(b)?) } else { None };
     let cx = Ctx {
         m,
         layouts,
@@ -341,6 +384,8 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
         fn_sites: fn_sites.clone(),
         static_sym,
         release: o.release,
+        level: o.level,
+        fma_sym,
     };
     let (codes, nanos) = compile_all(&cx, &order, o.threads);
     for (f, code) in order.iter().zip(codes) {
@@ -438,7 +483,7 @@ pub fn link(mut b: ImageBuilder, e: &Emitted) -> Result<ObjectImage, Error> {
 /// placeholder symbol id.
 pub fn bench_ctx(m: &Module) -> Ctx<'_> {
     let layouts = Layouts::compute(&m.types);
-    let cls = abi::classify_all(&m.types, &layouts);
+    let cls = abi::classify_all(&m.types, &layouts, Level::V2.vector_bytes());
     let n = m.funcs.len() as u32;
     Ctx {
         m,
@@ -454,8 +499,10 @@ pub fn bench_ctx(m: &Module) -> Ctx<'_> {
         pc_table_sym: SymbolId(u32::MAX - 6),
         lines: Vec::new(),
         fn_sites: Vec::new(),
-        static_sym: (0..m.statics.len() as u32).map(|i| SymbolId(u32::MAX - 7 - i)).collect(),
+        static_sym: (0..m.statics.len() as u32).map(|i| SymbolId(u32::MAX - 9 - i)).collect(),
         release: false,
+        level: Level::V2,
+        fma_sym: Some([SymbolId(u32::MAX - 7), SymbolId(u32::MAX - 8)]),
     }
 }
 

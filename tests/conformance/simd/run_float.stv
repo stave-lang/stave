@@ -1,7 +1,7 @@
 //~ CHECK-ONLY
 // Vector float semantics: no contraction outside `fma`, NaN-ness, the fixed reduction tree.
-// Vector programs do not build yet; crates/stave-driver/tests/interp_vs_native.rs runs this one
-// in the IR interpreter against run_float.stdout.
+// Not every target builds vector programs; crates/stave-driver/tests/interp_vs_native.rs runs
+// this one in the IR interpreter (and natively where the target does) against run_float.stdout.
 import std.io;
 
 fn bits(m: mask32x4) -> u8 {

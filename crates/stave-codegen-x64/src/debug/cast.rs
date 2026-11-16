@@ -105,7 +105,7 @@ impl Cg<'_, '_> {
                         self.a.mov_xg(Size::Q, x, S0)?;
                         self.bind(v, R::X(x))
                     }
-                    VCls::M { .. } => Err(bad("cast to an aggregate")),
+                    VCls::M { .. } | VCls::V { .. } => Err(bad("cast to an aggregate")),
                 }
             }
             Some((none, some, pty)) => {
@@ -117,7 +117,9 @@ impl Cg<'_, '_> {
                             VCls::G { bytes, .. } => bytes,
                             VCls::X(Prec::F32) => 4,
                             VCls::X(Prec::F64) => 8,
-                            VCls::M { .. } => return Err(bad("cast.try to an aggregate")),
+                            VCls::M { .. } | VCls::V { .. } => {
+                                return Err(bad("cast.try to an aggregate"));
+                            }
                         };
                         self.store_imm(disp(d, off)?, bytes, bits as i64)
                     }
@@ -128,7 +130,7 @@ impl Cg<'_, '_> {
     }
 
     /// Allocates and zeroes the `Option` result; returns its home, the payload offset, and size.
-    fn option_home(&mut self, rt: TypeId, some: u32, v: Value) -> Res<(Mem, i64, u32)> {
+    pub(crate) fn option_home(&mut self, rt: TypeId, some: u32, v: Value) -> Res<(Mem, i64, u32)> {
         let l = self.layout(rt)?;
         let Shape::Enum(vs) = &l.shape else { return Err(bad("cast.try result is not an enum")) };
         let off =
@@ -175,7 +177,7 @@ impl Cg<'_, '_> {
     }
 
     /// Clamps the normalized value `r` of source type `s` to target `t`.
-    fn sat_clamp(&mut self, r: Gpr, s: IntTy, t: IntTy) -> Res<()> {
+    pub(crate) fn sat_clamp(&mut self, r: Gpr, s: IntTy, t: IntTy) -> Res<()> {
         if s.signed {
             let hi = t.max() < s.max();
             let lo = t.min() > s.min();
@@ -186,7 +188,7 @@ impl Cg<'_, '_> {
     }
 
     /// Jumps to `fail` unless the normalized value `r` of type `s` is in `t`'s range.
-    fn range_jump(&mut self, r: Gpr, s: IntTy, t: IntTy, fail: Label) -> Res<()> {
+    pub(crate) fn range_jump(&mut self, r: Gpr, s: IntTy, t: IntTy, fail: Label) -> Res<()> {
         let cmp = |cg: &mut Self, x: i128| -> Res<()> {
             let x = x as u64 as i64;
             if let Ok(i) = i32::try_from(x) {
@@ -214,7 +216,7 @@ impl Cg<'_, '_> {
     }
 
     /// `x = (float) r` for a normalized integer of type `s` (u64 via halving with the sticky bit).
-    fn cvt_int(&mut self, p: Prec, x: Xmm, r: Gpr, s: IntTy) -> Res<()> {
+    pub(crate) fn cvt_int(&mut self, p: Prec, x: Xmm, r: Gpr, s: IntTy) -> Res<()> {
         if s.signed || s.bits < 64 {
             self.a.cvtsi2s(p, x, Size::Q, r)?;
             return Ok(());
@@ -252,13 +254,13 @@ impl Cg<'_, '_> {
         }
     }
 
-    fn f64_const(&mut self, x: Xmm, bits: i64) -> Res<()> {
+    pub(crate) fn f64_const(&mut self, x: Xmm, bits: i64) -> Res<()> {
         self.a.mov_ri(Size::Q, S0, bits)?;
         Ok(self.a.mov_xg(Size::Q, x, S0)?)
     }
 
     /// `r = t as| XS0` (saturating, NaN → 0, truncating). Clobbers `XS0`, `XS1`.
-    fn f64_to_int_sat(&mut self, r: Gpr, t: IntTy) -> Res<()> {
+    pub(crate) fn f64_to_int_sat(&mut self, r: Gpr, t: IntTy) -> Res<()> {
         let (lmax, lzero, done) = (self.a.new_label(), self.a.new_label(), self.a.new_label());
         if !t.signed && t.bits == 64 {
             let lhigh = self.a.new_label();
@@ -456,7 +458,7 @@ impl Cg<'_, '_> {
 
     /// `r = XS0 as i64` when integral and in `t`'s range, else jump to `lnone`; may jump to
     /// `lsome` (u64 values ≥ 2^63).
-    fn float_try_int(&mut self, r: Gpr, t: IntTy, lnone: Label, lsome: Label) -> Res<()> {
+    pub(crate) fn float_try_int(&mut self, r: Gpr, t: IntTy, lnone: Label, lsome: Label) -> Res<()> {
         let lhigh = self.a.new_label();
         self.f64_const(XS1, F64_M2P63)?;
         self.a.ucomis(Prec::F64, XS0, XS1)?;
