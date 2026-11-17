@@ -2,7 +2,10 @@
 //! - E0708: an arm feature name no target owns;
 //! - E0705: an arm target whose type is not the dispatch's signature with needs = the
 //!   dispatch's needs plus the arm's features (the `_` arm: plus nothing);
-//! - E0706 case `extra-needs`: a `_` target needing a feature the dispatch does not have.
+//! - E0706 case `extra-needs`: a `_` target needing a feature neither the dispatch nor the target baseline has;
+//! - E0718: an arm never picked, because its features (implied ones counted) include those of
+//!   an earlier arm, which every CPU that has them picks first. Checked on every target, dropped
+//!   arms included, so the program is valid or not independent of the arch.
 //!
 //! A dispatch missing its final `_` arm does not parse. Arms whose features (with the
 //! dispatch's) the target's arch does not own are dropped from the build unchecked, and so is a
@@ -25,10 +28,13 @@ use crate::sigs::{FnSig, NameCx, Sigs};
 use crate::typeck::Typeck;
 use crate::types::{self, Interner, TypeKind, TypeTable};
 
-/// One arm of a dispatch: its features (closed; `None` for `_`) and its target's `Name` node.
+/// One arm of a dispatch: its features (closed; `None` for `_`), its target's `Name` node, its
+/// node, and whether a feature name is unknown (E0708).
 struct Arm {
     features: Option<FeatureSet>,
     name: u32,
+    node: u32,
+    unknown: bool,
 }
 
 pub(crate) fn check_dispatches(
@@ -49,6 +55,7 @@ pub(crate) fn check_dispatches(
         };
         let arms = arms_of(&icx, d.node, &mut out);
         let own = FeatureSet::from_bits(sig.features).unwrap_or_default();
+        shadowed(&icx, own, &arms, &mut out);
         if !own.is_owned_by(arch) {
             continue;
         }
@@ -74,6 +81,7 @@ fn arms_of(icx: &ItemCx<'_>, n: u32, out: &mut Vec<Diagnostic>) -> Vec<Arm> {
             Some(NodeKind::DispArm) => {
                 let mut fs = FeatureSet::EMPTY;
                 let mut name = None;
+                let mut unknown = false;
                 for x in icx.kids_vec(c) {
                     match icx.kind(x) {
                         Some(NodeKind::Feature) => {
@@ -81,7 +89,10 @@ fn arms_of(icx: &ItemCx<'_>, n: u32, out: &mut Vec<Diagnostic>) -> Vec<Arm> {
                             let s = icx.tok_str(t);
                             match Feature::from_name(s) {
                                 Some(f) => fs.insert(f),
-                                None => out.extend(mk("E0708", None, &[("name", s)], icx.tok_span(t), &[])),
+                                None => {
+                                    unknown = true;
+                                    out.extend(mk("E0708", None, &[("name", s)], icx.tok_span(t), &[]));
+                                }
                             }
                         }
                         Some(NodeKind::Name) => name = Some(x),
@@ -89,14 +100,29 @@ fn arms_of(icx: &ItemCx<'_>, n: u32, out: &mut Vec<Diagnostic>) -> Vec<Arm> {
                     }
                 }
                 if let Some(name) = name {
-                    arms.push(Arm { features: Some(fs), name });
+                    arms.push(Arm { features: Some(fs), name, node: c, unknown });
                 }
             }
-            Some(NodeKind::Name) => arms.push(Arm { features: None, name: c }),
+            Some(NodeKind::Name) => arms.push(Arm { features: None, name: c, node: c, unknown: false }),
             _ => {}
         }
     }
     arms
+}
+
+/// E0718 for each feature arm whose features (with the dispatch's `own`) include an earlier
+/// arm's.
+fn shadowed(icx: &ItemCx<'_>, own: FeatureSet, arms: &[Arm], out: &mut Vec<Diagnostic>) {
+    let sets: Vec<Option<FeatureSet>> =
+        arms.iter().map(|a| if a.unknown { None } else { a.features.map(|f| own.union(f)) }).collect();
+    for (j, s) in sets.iter().enumerate() {
+        let Some(s) = s else { continue };
+        let earlier = sets[..j].iter().position(|e| e.is_some_and(|e| e.is_subset(*s)));
+        if let Some(i) = earlier {
+            let roles = [("earlier", icx.node_span(arms[i].node))];
+            out.extend(mk("E0718", None, &[], icx.node_span(arms[j].node), &roles));
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -132,8 +158,9 @@ fn check_arm(
     match arm.features {
         Some(_) if same_shape && have == want => {}
         None if same_shape => {
-            if !have.is_subset(want) {
-                let extra = types::feature_names(have.bits() & !want.bits());
+            let allowed = want.union(prog.target.baseline());
+            if !have.is_subset(allowed) {
+                let extra = types::feature_names(have.bits() & !allowed.bits());
                 let f = extra.first().copied().unwrap_or("?");
                 out.extend(mk("E0706", Some("extra-needs"), &[("feature", f)], at, &roles[..0]));
             }

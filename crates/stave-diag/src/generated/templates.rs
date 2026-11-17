@@ -2452,7 +2452,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0704",
         severity: Severity::Error,
         area: "features",
-        rule: "callee needs features the caller lacks",
+        rule: "callee needs features neither the caller nor the target baseline has",
         retired: false,
         located: true,
         holes: &[
@@ -2506,7 +2506,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0706",
         severity: Severity::Error,
         area: "features",
-        rule: "dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing extra features",
+        rule: "dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing features beyond the dispatch's and the target baseline",
         retired: false,
         located: true,
         holes: &[
@@ -2812,6 +2812,30 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `acc = v.reduce_add_ordered(acc);`, whose result does not depend on the vector length",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0718",
+        severity: Severity::Error,
+        area: "features",
+        rule: "dispatch arm never picked: its features (implied ones counted, with the dispatch's) include those of an earlier arm",
+        retired: false,
+        located: true,
+        holes: &[],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "this `dispatch` arm is never picked: a CPU with its features also has an earlier arm's",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "never picked" },
+                    LabelTemplate { at: "earlier", text: "picked first" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "move the arm above the earlier one it includes, or remove it",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

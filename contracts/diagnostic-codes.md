@@ -117,7 +117,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0701 | class M or U operation inside `strict { }` |
 | E0702 | vector type wider than the target's register |
 | E0703 | vector in the signature of a fn, fn type, or closure whose `needs` (plus the target baseline) do not cover its width (`extern "C"` signatures: E0804) |
-| E0704 | callee needs features the caller lacks |
+| E0704 | callee needs features neither the caller nor the target baseline has |
 | E0705 | dispatch arm signature differs from the dispatch signature |
 | E0706 | dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing extra features |
 | E0707 | fn value coercion would drop features not proven where it happens (by the `needs` of the enclosing fn or the target baseline) |
@@ -131,6 +131,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0715 | sizeless vector captured by a closure. Planned |
 | E0716 | sizeless vector as a generic argument that needs a size. Planned |
 | E0717 | VL-dependent float reduction on a sizeless vector (use `reduce_add_ordered`). Planned |
+| E0718 | dispatch arm never picked: its features (implied ones counted, with the dispatch's) include those of an earlier arm |
 | E0801 | `spawn` outside a `scope` block |
 | E0802 | captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body (shared by many threads): a capture that is not `Sync`, or a `&mut` capture |
 | E0803 | unsafe operation outside `unsafe(..)`: raw-pointer `*p`, `p.read()`, `p.write(v)`, `p.write_stream(v)`, `fence_stream()`; a call of an `unsafe` fn or `extern` import; any use (read, write, borrow) of a `static mut` |

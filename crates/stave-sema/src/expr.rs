@@ -2536,7 +2536,7 @@ impl<'a> Ck<'a> {
                         if !self.arity(n, paren, params.len(), args.len(), false) {
                             return self.args_only(args);
                         }
-                        if features & !self.features != 0 {
+                        if features & !self.proven_features() != 0 {
                             self.features_ok(cspan, DeclId::NONE, features);
                         }
                         for (i, &a) in args.iter().enumerate() {

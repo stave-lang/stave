@@ -1,0 +1,29 @@
+//~ STDOUT call_baseline_v3.stdout
+//~ TARGET x86_64-linux-v3
+// The target baseline counts as the caller's needs: on `x86_64-linux-v3` any fn may call an
+// `avx2` fn directly, as a method, or through a fn value.
+import std.io;
+
+fn twice(x: u32) -> u32 needs(avx2) {
+    return x * 2;
+}
+
+struct Acc {
+    n: u32,
+}
+
+impl Acc {
+    pub fn bump(&self, d: u32) -> u32 needs(avx2) {
+        return self.n + d;
+    }
+}
+
+fn main() -> i32 {
+    let a = Acc.{ n: 5 };
+    let f: fn(u32) -> u32 needs(avx2) = twice;
+    let x = twice(4);
+    let y = a.bump(1);
+    let z = f(6);
+    io.print(f"{x} {y} {z}\n");
+    return 0;
+}
