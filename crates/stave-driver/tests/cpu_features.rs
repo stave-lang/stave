@@ -80,12 +80,32 @@ fn host_x86_features() -> BTreeSet<Feature> {
     cpu_features().filter(|f| f.is_owned_by(Arch::X86_64) && flags.contains(cpuinfo_flag(*f))).collect()
 }
 
-/// `qemu-aarch64 -cpu` models and the features they have.
-const QEMU_MODELS: [(&str, &[Feature]); 3] = [
-    ("cortex-a76", &[Feature::Neon, Feature::Fp16, Feature::Dotprod]),
-    ("neoverse-v1", &[Feature::Neon, Feature::Fp16, Feature::Dotprod, Feature::Bf16, Feature::Sve]),
-    ("max", &[Feature::Neon, Feature::Fp16, Feature::Dotprod, Feature::Bf16, Feature::Sve, Feature::Sve2]),
+/// `qemu-aarch64 -cpu` models, the features they have, and the output lines not compared: qemu
+/// versions disagree on whether neoverse-v1 reports bf16.
+const QEMU_MODELS: [(&str, &[Feature], &[&str]); 3] = [
+    ("cortex-a76", &[Feature::Neon, Feature::Fp16, Feature::Dotprod], &[]),
+    (
+        "neoverse-v1",
+        &[Feature::Neon, Feature::Fp16, Feature::Dotprod, Feature::Bf16, Feature::Sve],
+        &["bf16"],
+    ),
+    (
+        "max",
+        &[Feature::Neon, Feature::Fp16, Feature::Dotprod, Feature::Bf16, Feature::Sve, Feature::Sve2],
+        &[],
+    ),
 ];
+
+/// One run: (target, runner, expected stdout, label, lines not compared).
+type Case = (Triple, Option<String>, String, String, &'static [&'static str]);
+
+/// `out` without the lines of the features named in `skip`.
+fn without(out: &str, skip: &[&str]) -> String {
+    out.lines()
+        .filter(|l| !skip.iter().any(|s| l.split(' ').next() == Some(*s)))
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
 
 fn have(tool: &str) -> bool {
     Command::new(tool).arg("--version").output().is_ok_and(|o| o.status.success())
@@ -113,17 +133,16 @@ fn detected_features_match_ground_truth() {
     let native_x86 = legs::gate(x86.name(), exec::can_run(x86) && Path::new("/proc/cpuinfo").is_file());
     let qemu = legs::gate(a64.name(), cfg!(target_os = "linux") && have("qemu-aarch64"));
 
-    // (target, runner, expected stdout, label)
-    let mut cases: Vec<(Triple, Option<String>, String, String)> = Vec::new();
+    let mut cases: Vec<Case> = Vec::new();
     if native_x86 {
-        cases.push((x86, None, expected(&host_x86_features()), "native".into()));
+        cases.push((x86, None, expected(&host_x86_features()), "native".into(), &[]));
     } else {
         eprintln!("note: x86_64-linux binaries cannot run here: build only");
     }
     if qemu {
-        for (model, feats) in QEMU_MODELS {
+        for (model, feats, skip) in QEMU_MODELS {
             let want = expected(&feats.iter().copied().collect());
-            cases.push((a64, Some(format!("qemu-aarch64 -cpu {model}")), want, model.into()));
+            cases.push((a64, Some(format!("qemu-aarch64 -cpu {model}")), want, model.into(), skip));
         }
     } else {
         eprintln!("note: aarch64-linux binaries cannot run under qemu-aarch64 here: build only");
@@ -137,14 +156,16 @@ fn detected_features_match_ground_truth() {
             let out = build(&src, target, release);
             let bin = tmp.path().join(format!("cpu-{target}-{mode}"));
             out.image.as_ref().unwrap().write_file(&bin).unwrap();
-            for (t, runner, want, label) in &cases {
+            for (t, runner, want, label, skip) in &cases {
                 if *t != target {
                     continue;
                 }
                 let spec = RunSpec { args: &[], runner: runner.as_deref(), cwd: None, inherit: false };
                 let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
                 runs += 1;
-                if got.exit != 0 || got.stdout != want.as_bytes() {
+                if got.exit != 0
+                    || without(&String::from_utf8_lossy(&got.stdout), skip) != without(want, skip)
+                {
                     failures.push(format!(
                         "[{target}, {mode}, {label}]: exit {}\n--- stdout\n{}--- want\n{want}--- stderr\n{}",
                         got.exit,
