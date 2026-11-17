@@ -92,7 +92,7 @@ instructions; the trap kind is the matching panic kind (`Overflow`, `Bounds`, `D
 | `fn.make` | `@f env` | fn value `(code, environment)` of closure body `@f` (see Closures) |
 | `call` / `call.ind` | `@f args..` / `f args..` | direct / fn-value call (`call.ind` also passes the value's environment, see Closures) |
 | `intrinsic.<name>` | args.. | contracts/intrinsics.md |
-| `panic.<kind>` | — | unconditional trap: `panic.bounds panic.overflow panic.div_by_zero panic.assert panic.out_of_memory panic.stack_overflow panic.unwrap panic.unsupported_cpu` |
+| `panic.<kind>` | — | unconditional trap: `panic.bounds panic.overflow panic.div_by_zero panic.assert panic.out_of_memory panic.stack_overflow panic.unwrap panic.unsupported_cpu panic.deadlock` |
 
 GPU ops (`gpu.<name>`, gpu-ops.md) extend this list when their lowering lands.
 
