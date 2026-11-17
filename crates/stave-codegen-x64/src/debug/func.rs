@@ -1557,6 +1557,23 @@ impl<'a, 'm> Cg<'a, 'm> {
         self.load_val(v, R::K(dst))
     }
 
+    /// The bits of a mask operand of `n` lanes (8, 16, 32 or 64: a mask that crosses a call
+    /// as its bits) into `dst`, zero above the lanes (no cache change).
+    fn copy_mask_bits(&mut self, o: Operand, n: u32, dst: Gpr) -> Res<()> {
+        let v = self.vec_value(o)?;
+        let vi = v.index();
+        match self.vreg[vi] {
+            Some(R::K(k)) => {
+                self.a.kmov_gk(KSize::of_lanes(n), dst, k);
+                Ok(())
+            }
+            _ if self.in_home[vi] => {
+                self.sized_load(dst, Mem::base(RBP, self.home[vi]), (n / 8) as u8, false)
+            }
+            _ => Err(bad("internal: mask value has no location")),
+        }
+    }
+
     /// A fresh temporary holding a copy of `o`.
     pub fn new_g(&mut self, o: Operand) -> Res<Gpr> {
         let g = self.alloc_g()?;
@@ -2108,7 +2125,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                             self.kmask_store(dst, KS0, n, w)?;
                         }
                         _ => {
-                            self.copy_to_g(o, S0)?;
+                            self.copy_mask_bits(o, n, S0)?;
                             self.a.mov_mr(Size::Q, dst, S0)?;
                         }
                     },
@@ -2157,7 +2174,10 @@ impl<'a, 'm> Cg<'a, 'm> {
         for (&o, loc) in args.iter().zip(&abi.args) {
             match loc {
                 Loc::Reg(_) | Loc::Vec(_) if direct => {}
-                Loc::Reg(Piece::G(g)) => self.copy_to_g(o, *g)?,
+                Loc::Reg(Piece::G(g)) => match self.ocls(o, None)? {
+                    VCls::K { n, .. } => self.copy_mask_bits(o, n, *g)?,
+                    _ => self.copy_to_g(o, *g)?,
+                },
                 Loc::Reg(Piece::X(x)) => {
                     let p = match self.ocls(o, None)? {
                         VCls::X(p) => p,
@@ -2896,12 +2916,13 @@ impl<'a, 'm> Cg<'a, 'm> {
                     self.a.mov_rm(Size::Q, S0, at(o2))?;
                     Ok(self.a.mov_mr(Size::Q, at(o), S0)?)
                 }
-                // call arguments: the bits in a general register, the lanes in a vector one
+                // call arguments: the bits (zero above the lanes) in a general register, the
+                // lanes in a vector one
                 (PLoc::G(d), PSrc::Loc(PLoc::K(s))) => {
-                    self.a.kmov_gk(KSize::Q, d, s);
+                    self.a.kmov_gk(KSize::of_lanes(n), d, s);
                     Ok(())
                 }
-                (PLoc::G(d), PSrc::Loc(PLoc::M(o))) => Ok(self.a.mov_rm(Size::Q, d, at(o))?),
+                (PLoc::G(d), PSrc::Loc(PLoc::M(o))) => self.sized_load(d, at(o), (n / 8) as u8, false),
                 (PLoc::X(d), PSrc::Loc(PLoc::K(s))) => self.kmask_to_vec(d, s, n, w),
                 (PLoc::X(d), PSrc::Loc(PLoc::M(o))) => {
                     self.a.kmov_km(KSize::Q, KS0, at(o))?;
@@ -3236,7 +3257,10 @@ impl<'a, 'm> Cg<'a, 'm> {
     fn ret_value(&mut self, o: Operand) -> Res<()> {
         match self.ret_abi.clone() {
             RetLoc::None => Ok(()),
-            RetLoc::Reg(Piece::G(g)) => self.copy_to_g(o, g),
+            RetLoc::Reg(Piece::G(g)) => match self.ocls(o, self.f.ret)? {
+                VCls::K { n, .. } => self.copy_mask_bits(o, n, g),
+                _ => self.copy_to_g(o, g),
+            },
             RetLoc::Reg(Piece::X(x)) => {
                 let p = match self.ocls(o, self.f.ret)? {
                     VCls::X(p) => p,
