@@ -3,7 +3,9 @@
 // `helper`, both dispatch arms, the export, `main`; no std fn is a root) plus the instances they request
 // (`ident<u8>`, `ident<u32>`); never a `test fn` outside `stave test`, never a generic decl.
 // Release (ir.release.txt): what `main` and the `extern "C"` export reach (plus the runtime entry
-// points, none in the pinned library); the reachable dispatch `pick` makes both arms reachable.
+// points, none in the pinned library). A reachable dispatch reaches only the arms its body calls:
+// the pinned library has no feature word (`runtime.cpu.features`), so `pick` calls `_` alone and
+// `pick_v3` is not reachable.
 fn ident<T>(x: T) -> T {
     return x;
 }

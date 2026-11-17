@@ -178,6 +178,7 @@ dispatch fn sum(xs: &[f32]) -> f32 { avx512f => sum_v4, avx2 => sum_v3, sve => s
 ```
 - An arm may name several features: `avx2 + fma => sum_fma,`. The dispatch fn may have its own `needs(..)`.
 - Each arm target has the dispatch's signature, with needs = dispatch needs + the arm's features (else E0705). The `_` target needs ⊆ dispatch needs (E0706).
+- The CPU's features are read once at start; each call tests the arms top-down, but an arm the `--target` baseline (plus the dispatch's needs) covers ends the chain at compile time. The IR interpreter sees no features: it takes `_` unless pruned.
 - Arms of another arch are dropped. A `cuda` arm picks a GPU path when a usable NVIDIA device exists (planned, §7).
 
 **Lowering gates.** Some ops are unavailable (class U) on some targets: `fma` on v2, gather on v2/neon, scatter below v4, `div_lanes` outside sve, `load_first_fault` outside sve, f16↔f32 without `f16c`, gather/scatter with 8- or 16-bit data or index lanes everywhere. Using one is E0700, unless it is inside `emulate { }` (scalar loop, the only opt-in; each one is listed as an `emulated:` line of the build summary). `strict { }` also rejects multi-instruction ops and ops the table does not list (E0701). Both blocks are lexical (a closure inside counts) and check the `--target` baseline; fns with `needs(..)` are not gated, nor is `gpu-sm86` (E0702 only, at 128 bits). `stave lowering --target T [--op OP]` prints the per-target table.

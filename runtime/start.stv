@@ -4,10 +4,10 @@
 // at argc). entry never returns: it ends with exit_group(main's exit code).
 //
 // Steps: read argc, argv, envp, and auxv (AT_PAGESZ, AT_HWCAP, AT_HWCAP2, AT_RANDOM) into the
-// state block (runtime.state, a `static mut`); install the alternate signal stack and the
-// SIGSEGV handler (runtime.panic); map main's stack of `[run] stack` bytes
-// (runtime.config.RUN_STACK) with a PROT_NONE guard region below it (mmap + mprotect); run main
-// on that stack; exit_group.
+// state block (runtime.state, a `static mut`); fill the CPU feature word (intrinsic `cpu_init`);
+// install the alternate signal stack and the SIGSEGV handler (runtime.panic); map main's stack of
+// `[run] stack` bytes (runtime.config.RUN_STACK) with a PROT_NONE guard region below it (mmap +
+// mprotect); run main on that stack; exit_group.
 //
 // Main runs on the calling thread, switched onto the new stack by the intrinsic
 // `call_on_stack` (contracts/intrinsics.md), with thread id 0; it is not in the thread
@@ -26,8 +26,11 @@ extern "stave-intrinsic" {
     //   unit main).
     // call_on_stack(f, arg, top): calls the C-ABI function at f with arg on a stack whose top is
     //   `top` (16-byte aligned), then restores the caller's stack pointer and returns f's result.
+    // cpu_init(): calls runtime.cpu.init if the program has it (it does exactly when it can read
+    //   the feature word: a dispatch or std.cpu), else no code.
     fn main_addr() -> usize;
     fn call_on_stack(f: usize, arg: usize, top: usize) -> usize;
+    fn cpu_init();
 }
 
 pub unsafe("sp is the initial stack pointer the kernel passed to _start; called once, by _start")
@@ -70,6 +73,10 @@ fn entry(sp: *const usize) -> never {
         (*st).hwcap2 = hwcap2;
         (*st).at_random = random;
         (*st).thread_id = 0;
+    }
+    // the feature word, from the CPU and the auxv values just stored
+    unsafe("once, before main and before any other thread exists") {
+        cpu_init();
     }
 
     // 2. alternate signal stack and SIGSEGV/SIGBUS handler

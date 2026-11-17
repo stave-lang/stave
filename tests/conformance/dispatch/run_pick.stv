@@ -1,0 +1,48 @@
+//~ STDOUT run_pick.stdout
+// A dispatch call runs the first arm, top-down, whose features the running CPU has: the feature
+// word start code stores once, which `std.cpu.features()` returns too; `_` when none matches.
+// Arms of another arch are dropped. The same pick through a fn value and from a fn with its own
+// needs. The output does not depend on the CPU.
+import std.cpu;
+import std.io;
+
+fn sum_v4(a: u32, b: u32) -> u32 needs(avx512f) {
+    return a + b + 400;
+}
+
+fn sum_v3(a: u32, b: u32) -> u32 needs(avx2, fma) {
+    return a + b + 300;
+}
+
+fn sum_sve(a: u32, b: u32) -> u32 needs(sve) {
+    return a + b + 200;
+}
+
+fn sum_base(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+dispatch fn sum(a: u32, b: u32) -> u32 {
+    avx512f => sum_v4,
+    avx2 + fma => sum_v3,
+    sve => sum_sve,
+    _ => sum_base,
+}
+
+// The offset of the arm `sum` must take on this CPU.
+fn expected() -> u32 {
+    let w = cpu.features();
+    if w & cpu.AVX512F != 0 { return 400; }
+    if w & cpu.AVX2 != 0 && w & cpu.FMA != 0 { return 300; }
+    return 0;
+}
+
+fn main() -> i32 {
+    let want = 3 + expected();
+    let direct = sum(1, 2);
+    let f: fn(u32, u32) -> u32 = sum;
+    let through = f(1, 2);
+    if direct == want { io.print("call ok\n"); } else { io.print(f"call {direct}, want {want}\n"); }
+    if through == want { io.print("value ok\n"); } else { io.print(f"value {through}, want {want}\n"); }
+    return 0;
+}

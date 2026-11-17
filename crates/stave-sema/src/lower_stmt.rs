@@ -429,6 +429,64 @@ impl<'a> FnCx<'a> {
         Ok(())
     }
 
+    // ---------- dispatch ----------
+
+    /// The body of a `dispatch fn`: `%w = call @runtime.cpu.features`, then per tested arm
+    /// top-down `(%w & mask) == mask` → return the arm target's result; at the end the plan's
+    /// last arm. Without tested arms the body is the one call, with no feature-word load; so is
+    /// it with a runtime library that has no `runtime.cpu.features` (no word: as if it were 0).
+    pub fn lower_dispatch(&mut self, plan: &crate::dispatch::Plan, params: &[Ty], ret: Ty) -> FnOut {
+        self.fresh_env(params, ret);
+        let args: Vec<Operand> =
+            (0..params.len()).filter_map(|i| self.f.b.param(i).map(Operand::Value)).collect();
+        if let Some(fd) = self.g.lang.cpu_features
+            && !plan.tests.is_empty()
+        {
+            let u64t = self.t_int(false, crate::types::IntBits::B64);
+            let bt = self.t_bool();
+            let f = self.req(Req::Inst(InstKey { decl: fd, args: Vec::new() }));
+            let Some(w) = self.f.b.call(f, Some(FnCx::ir(u64t)), &[]).map(Operand::Value) else {
+                self.fail_at(None, "runtime.cpu.features without a result");
+                return self.dispatch_out(params, ret);
+            };
+            for (mask, k) in &plan.tests {
+                let (hit, next) = (self.f.b.create_block(), self.f.b.create_block());
+                let m = self.int(i128::from(*mask));
+                let x = self.op2(Op::And, u64t, w, m);
+                let c = self.op2(Op::Eq, bt, x, m);
+                self.f.b.cbr(c, hit, &[], next, &[]);
+                self.f.b.switch_to(hit);
+                self.tail_call(k, &args, ret);
+                self.f.b.switch_to(next);
+            }
+        }
+        self.tail_call(&plan.last, &args, ret);
+        self.dispatch_out(params, ret)
+    }
+
+    fn tail_call(&mut self, k: &InstKey, args: &[Operand], ret: Ty) {
+        let f = self.req(Req::Inst(k.clone()));
+        let rt = self.ret_of(ret);
+        let r = self.f.b.call(f, rt.map(FnCx::ir), args);
+        if self.is_never(ret) {
+            self.f.b.unreachable();
+        } else {
+            self.f.b.ret(r.map(Operand::Value));
+        }
+    }
+
+    fn dispatch_out(&mut self, params: &[Ty], ret: Ty) -> FnOut {
+        let body = if self.err.is_none() { self.finish_fn() } else { None };
+        FnOut {
+            closure: None,
+            params: params.to_vec(),
+            ret: self.ret_of(ret),
+            body,
+            site_consts: Vec::new(),
+            name_off: None,
+        }
+    }
+
     // ---------- drop glue ----------
 
     /// The drop glue of `t`: `fn(p: &mut T)`.

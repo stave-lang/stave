@@ -346,17 +346,33 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                     msg: "body flagged with a type error but no error diagnostic".into(),
                 }));
             }
+            let needs = FeatureSet::from_bits(sig.features).unwrap_or(FeatureSet::EMPTY);
+            if decl.flags.has(DeclFlags::DISPATCH) {
+                let mut cx = FnCx::new(g, icx, path);
+                cx.needs = needs;
+                let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));
+                let out = match crate::dispatch::plan(prog, g.tc, &icx, k.decl) {
+                    Some(plan) => cx.lower_dispatch(&plan, &ps, ret),
+                    None => {
+                        cx.fail_at(None, "dispatch without a resolved arm chain");
+                        FnOut {
+                            closure: None,
+                            params: ps,
+                            ret: cx.ret_of(ret),
+                            body: None,
+                            site_consts: Vec::new(),
+                            name_off: None,
+                        }
+                    }
+                };
+                return finish_job(cx, out, name);
+            }
             let body = g.tc.body(k.decl).filter(|b| !b.has_error);
             let declared_only = body.is_none()
                 || decl.flags.has(DeclFlags::EXTERN_IMPORT)
-                || decl.flags.has(DeclFlags::DISPATCH)
                 || sig.abi == crate::sigs::Abi::Intrinsic;
             if declared_only {
                 let mut cx = FnCx::new(g, icx, path);
-                // A reachable dispatch makes its arm targets reachable.
-                for arm in crate::mono::dispatch_arms(prog, g.tc, k.decl) {
-                    cx.req(Req::Inst(arm));
-                }
                 let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));
                 let ret = cx.ret_of(ret);
                 let out = FnOut {
@@ -383,6 +399,7 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                     None
                 };
                 cx.user = !g.builtin_decl(k.decl);
+                cx.needs = needs;
                 cx.flagged = flagged.clone();
                 cx.setup(decl.node);
                 let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));

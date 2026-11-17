@@ -1,0 +1,43 @@
+//~ CHECK-ONLY
+// ir golden (checked-ir.md "Types and fntype", "Instance root set"): a fn header prints the fn's
+// own needs, never the target baseline; a closure has its fn's needs. Dispatch bodies: `sve` is
+// another arch's arm, dropped; `sse42` is in the x86_64-linux baseline, so `half` always takes
+// that arm: its body is that one call, and a call of `half` calls `half_v2` directly (`half`
+// itself is built for its fn value). `twice` tests its `avx2` arm on the feature word, which the
+// pinned library has none of (no `runtime.cpu.features`): its body calls `_` alone. A fn needing
+// avx2 covers `twice`'s first arm and calls `twice_v3` directly.
+fn twice_v3(x: u32) -> u32 needs(avx2) {
+    let f = fn(y: u32) -> u32 { return y * 2; };
+    return f(x);
+}
+
+fn twice_base(x: u32) -> u32 {
+    return x + x;
+}
+
+dispatch fn twice(x: u32) -> u32 { avx2 => twice_v3, _ => twice_base, }
+
+fn wide_user(x: u32) -> u32 needs(avx2, fma) {
+    return twice(x);
+}
+
+fn half_sve(x: u32) -> u32 needs(sve) {
+    return x >> 1;
+}
+
+fn half_v2(x: u32) -> u32 needs(sse42) {
+    return x / 2;
+}
+
+fn half_base(x: u32) -> u32 {
+    return x - x / 2;
+}
+
+dispatch fn half(x: u32) -> u32 { sve => half_sve, sse42 => half_v2, _ => half_base, }
+
+fn main() -> i32 {
+    let a = twice(3);
+    let h: fn(u32) -> u32 = half;
+    let b = h(a) + half(a);
+    return (b - 6) as% i32;
+}

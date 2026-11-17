@@ -19,9 +19,12 @@
 //! (`runtime.start.entry`, `runtime.panic.trap`, `runtime.panic.trap_msg`,
 //! `runtime.panic.on_signal`; contracts/intrinsics.md "Paths fixed by the compiler"). Both modes
 //! then add every instance a lowered body requests (calls, fn-value uses, drop glue), round by
-//! round; a lowered `dispatch fn` requests its arm targets ([`dispatch_arms`]), so a reachable
-//! dispatch makes them reachable, and a lowered `thread_clone` or `thread_start_addr` intrinsic
-//! requests `runtime.thread.entry`, which only the backend's thread start stub calls.
+//! round. A lowered `dispatch fn` body calls only its live arm targets (arms of another arch are
+//! dropped; arms below the first one the target baseline covers are pruned:
+//! [`crate::dispatch::Plan`]). A lowered `thread_clone` or `thread_start_addr` intrinsic requests
+//! `runtime.thread.entry`, which only the backend's thread start stub calls; a request of
+//! `runtime.cpu.features` also requests `runtime.cpu.init`, which only start code's `cpu_init`
+//! intrinsic calls.
 //!
 //! **Instantiation depth** (E0902, [`depth_check`], run by the type checker): from every
 //! non-generic body, the generic instances its call sites request, depth first, substituting
@@ -71,6 +74,11 @@ pub(crate) struct LangFns {
     /// `runtime.thread.entry`: no IR calls it (the backend's thread start stub does), so a lowered
     /// `thread_clone` / `thread_start_addr` intrinsic requests it.
     pub thread_entry: Option<DeclId>,
+    /// `runtime.cpu.features`: reads the feature word (a dispatch body calls it).
+    pub cpu_features: Option<DeclId>,
+    /// `runtime.cpu.init`: fills the feature word; only start code's `cpu_init` intrinsic calls
+    /// it, so a request of `cpu_features` requests it too.
+    pub cpu_init: Option<DeclId>,
 }
 
 fn sym(prog: &Program, s: &str) -> Option<Sym> {
@@ -114,6 +122,8 @@ impl LangFns {
             string_as_str: m("as_str"),
             set_user_site: item_at(prog, "runtime.panic", "set_user_site"),
             thread_entry: item_at(prog, "runtime.thread", "entry"),
+            cpu_features: item_at(prog, "runtime.cpu", "features"),
+            cpu_init: item_at(prog, "runtime.cpu", "init"),
         }
     }
 }
@@ -194,34 +204,6 @@ pub(crate) fn roots(prog: &Program, tc: &Typeck, mode: RootMode, test: bool) -> 
     out[own..].sort();
     if mode == RootMode::Release {
         out.sort();
-    }
-    out
-}
-
-/// The arm targets of `dispatch fn` `d` in arm order (the `_` arm last), as root instances: only
-/// targets with a checked body (an arm naming a fn of another arch is dropped with it).
-pub(crate) fn dispatch_arms(prog: &Program, tc: &Typeck, d: DeclId) -> Vec<InstKey> {
-    let mut out: Vec<InstKey> = Vec::new();
-    let Some(decl) = prog.decl(d) else { return out };
-    if !decl.flags.has(DeclFlags::DISPATCH) || decl.node == u32::MAX {
-        return out;
-    }
-    let ast = prog.item_ast(decl.item);
-    for n in ast.descendants(decl.node) {
-        if ast.kind(n) != Some(stave_syntax::NodeKind::Name) {
-            continue;
-        }
-        if let Some(u) = prog.uses(decl.item, n).last()
-            && let crate::resolve::Res::Decl(t) = u.res
-            && prog.decl(t).is_some_and(|x| matches!(x.kind, DeclKind::Fn | DeclKind::Method))
-            && tc.body(t).is_some_and(|b| !b.has_error)
-            && tc.sigs.fn_sig(t).is_some_and(|s| s.generics.is_empty())
-        {
-            let k = InstKey { decl: t, args: Vec::new() };
-            if !out.contains(&k) {
-                out.push(k);
-            }
-        }
     }
     out
 }

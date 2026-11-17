@@ -17,7 +17,7 @@ Option, Result, or std traits (only the built-in type names and `size_of`/`align
 | `runtime.atomic` | `atomic.stv` | CPU atomic intrinsics (load/xchg/add/cas u32/u64) and a three-state futex lock |
 | `runtime.thread` | `thread.stv` | threads: mapping = guard + stack + altstack + record, clone3 (clone if ENOSYS), futex join on CLEARTID, ids, registry; `scope_spawn`/`scope_join` for `scope { spawn { } }`; `start`/`join`/`cpu_count` for std.thread |
 | `runtime.config` | `config.stv` | per-binary settings (`[run] stack`) |
-| `runtime.cpu` | `cpu.stv` | feature word (contracts/intrinsics.md "CPU feature detection"): `detect()` probes (through `arch.cpu`) and closes under implication; `init()` stores it in the state block once, `features()` reads it |
+| `runtime.cpu` | `cpu.stv` | feature word (contracts/intrinsics.md "CPU feature detection"): `detect()` probes (through `arch.cpu`) and closes under implication; `init()` stores it in the state block once (start code, through the `cpu_init` intrinsic, only in programs that call `features()`), `features()` reads it |
 | `runtime_x86_64.cpu`, `runtime_aarch64.cpu` | `{x86_64,aarch64}/cpu.stv` | `probe(hwcap, hwcap2)`: raw feature bits from CPUID + XCR0 (x86-64) or AT_HWCAP/AT_HWCAP2 (AArch64); imported only by `runtime.cpu` |
 
 `syscalls.list`: the syscall set, one per line. Line i + 1 is call id i in `os.stv` (`SYS_*`) and the

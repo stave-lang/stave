@@ -1,0 +1,53 @@
+type t0 int u 32
+type t1 int s 32
+fn @0 main.wide_user needs(avx2, fma) {
+b0(%0: t0):
+  %1 = call t0 @4 %0
+  ret %1
+}
+fn @1 main.half {
+b0(%0: t0):
+  %1 = call t0 @2 %0
+  ret %1
+}
+fn @2 main.half_v2 needs(sse42) {
+b0(%0: t0):
+  %1 = div t0 %0 2
+  ret %1
+}
+fn @3 main.twice {
+b0(%0: t0):
+  %1 = call t0 @5 %0
+  ret %1
+}
+fn @4 main.twice_v3 needs(avx2) {
+b0(%0: t0):
+  %1 = call.ind t0 @4.0 %0
+  ret %1
+}
+fn @4.0 main.twice_v3 needs(avx2) {
+b0(%0: t0):
+  %1 = mul t0 %0 2
+  ret %1
+}
+fn @5 main.twice_base {
+b0(%0: t0):
+  %1 = add t0 %0 %0
+  ret %1
+}
+fn @6 main.half_base {
+b0(%0: t0):
+  %1 = div t0 %0 2
+  %2 = sub t0 %0 %1
+  ret %2
+}
+fn @7 main.main {
+b0():
+  %0 = call t0 @3 3
+  %1 = call.ind t0 @1 %0
+  %2 = call t0 @2 %0
+  %3 = add t0 %1 %2
+  %4 = sub t0 %3 6
+  %5 = cast.wrap t1 %4
+  ret %5
+}

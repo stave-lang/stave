@@ -32,7 +32,8 @@ pub const BF16: u64 = rt.BF16;
 pub const SVE: u64 = rt.SVE;
 pub const SVE2: u64 = rt.SVE2;
 
-// Probes on every call (a few CPUID instructions, or two loads on AArch64).
+// The word start code stored once, before main (one load). The IR interpreter stores none:
+// there it is 0.
 pub fn features() -> u64 {
-    return rt.detect();
+    return rt.features();
 }

@@ -298,6 +298,8 @@ pub(crate) struct FnCx<'a> {
     pub cur_n_parent: u32,
     /// The unsubstituted impl self type of a method body.
     pub raw_self_ty: Option<Ty>,
+    /// The needs of the fn being lowered (its closures have the same).
+    pub needs: stave_target::FeatureSet,
 }
 
 impl<'a> FnCx<'a> {
@@ -335,6 +337,7 @@ impl<'a> FnCx<'a> {
             cur_tok: 0,
             cur_n_parent: 0,
             raw_self_ty: None,
+            needs: stave_target::FeatureSet::EMPTY,
         }
     }
 
@@ -509,6 +512,14 @@ impl<'a> FnCx<'a> {
         }
         let i = self.reqs.len() as u32;
         self.reqs.push(r.clone());
+        // Only start code's `cpu_init` intrinsic calls `runtime.cpu.init`: a program gets it
+        // exactly when it can read the feature word.
+        if let Req::Inst(k) = &r
+            && Some(k.decl) == self.g.lang.cpu_features
+            && let Some(init) = self.g.lang.cpu_init
+        {
+            self.req(Req::Inst(InstKey { decl: init, args: Vec::new() }));
+        }
         self.req_map.insert(r, i);
         FuncId(i)
     }

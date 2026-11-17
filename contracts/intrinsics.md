@@ -41,6 +41,11 @@ compiler. The probe (`arch.cpu.probe`, per arch) sets a feature when its row bel
 **closure**: a feature stays set only if every feature it implies (transitively, per
 features.rs) is set too, so testing one mask is sound. `runtime.cpu.init()` stores the word once
 in the runtime state (before main, before other threads); `runtime.cpu.features()` reads it.
+`runtime.start.entry` calls `init` through `cpu_init()` (below) right after it stores the auxv
+values, and the program has `init` exactly when it calls `features` (a `dispatch fn` body,
+`std.cpu.features`; checked-ir.md "Instance root set"). The IR interpreter's `cpu_init` does
+nothing, so there the word is 0 and every dispatch takes its `_` arm (unless the baseline prunes
+it).
 
 x86-64 (Intel SDM Vol. 2A, CPUID: Table 3-10 for leaf 01H ECX, Table 3-8 for leaf 07H; the same
 positions as Linux `arch/x86/include/asm/cpufeatures.h` words 4, 9, 12, 16, 18). Leaf 07H is
@@ -125,12 +130,13 @@ has no `runtime.thread.entry` and no `__stave_thread_start`.
 
 **Runtime start and traps** (CPU). The compiler emits two
 C-ABI stubs and two read-only tables per binary, and these intrinsics give their addresses or
-switch stacks. Each lowers inline (no call except the one inside `call_on_stack`).
+switch stacks. Each lowers inline (no call except the ones of `call_on_stack` and `cpu_init`).
 
 | Intrinsic | Arch | Lowering |
 |---|---|---|
 | `main_addr() -> usize` | x86-64 | `lea rax, [rip + __stave_main]`: address of the stub `__stave_main(arg: usize) -> usize` (C ABI; `arg` ignored), which calls the program's `main` and returns its exit status: `main`'s `i32` sign-extended to 64 bits, 0 for a unit `main` |
 | same | AArch64 | `adrp x0, __stave_main; add x0, x0, :lo12:__stave_main` |
+| `cpu_init()` | x86-64 / AArch64 | `call` / `bl runtime.cpu.init` (Stave convention, no arguments) if the program has that fn, else no code |
 | `call_on_stack(f: usize, arg: usize, top: usize) -> usize` | x86-64 | `push rbx; mov rbx, rsp; mov rsp, top` (`top` 16-byte aligned, the caller's obligation); `mov rdi, arg; call f` (System V); `mov rsp, rbx; pop rbx`; result `rax`. Clobbers the caller-saved registers, like `ccall1` |
 | same | AArch64 | `stp x19, x30, [sp, #-16]!; mov x19, sp; mov sp, top; mov x0, arg; blr f` (AAPCS64, `f` in a scratch register, `x16`); `mov sp, x19; ldp x19, x30, [sp], #16`; result `x0` |
 | `signal_handler_addr() -> usize` | x86-64 / AArch64 | address (`lea` / `adrp`+`add`) of the stub `__stave_signal(sig: int, info: *siginfo_t, uctx: *ucontext_t)` (C ABI, SA_SIGINFO handler), which zero-extends `sig` and calls `runtime.panic.on_signal(sig: usize, info: usize, uctx: usize) -> never` |
@@ -158,7 +164,8 @@ list):
   `runtime.thread.scope_spawn(list: &mut usize, f: fn())` and `runtime.thread.scope_join(list:
   &mut usize)` (the `scope { spawn { } }` lowering, checked-ir.md "Closures"),
   `runtime.panic.trap`, `runtime.panic.trap_msg`, `runtime.panic.on_signal`,
-  `runtime.panic.set_user_site`, and the allocator `runtime.alloc.{alloc, free, realloc}`
+  `runtime.panic.set_user_site`, `runtime.cpu.features` (dispatch bodies), `runtime.cpu.init`
+  (`cpu_init`), and the allocator `runtime.alloc.{alloc, free, realloc}`
   (replaced by an `allocator` declaration);
 - compiler-emitted symbols: `_start`, `__stave_main`, `__stave_signal`, `__stave_thread_start`,
   `__stave_site_table`, `__stave_pc_table` (and `__stave_rt` on PTX);

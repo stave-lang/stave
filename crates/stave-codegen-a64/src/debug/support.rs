@@ -20,6 +20,7 @@ pub const RT_ENTRY: &str = "runtime.start.entry";
 pub const RT_TRAP: &str = "runtime.panic.trap";
 pub const RT_ON_SIGNAL: &str = "runtime.panic.on_signal";
 pub const RT_THREAD_ENTRY: &str = "runtime.thread.entry";
+pub const RT_CPU_INIT: &str = "runtime.cpu.init";
 
 pub const SYM_MAIN: &str = "__stave_main";
 pub const SYM_SIGNAL: &str = "__stave_signal";
@@ -46,6 +47,8 @@ pub struct Symbols {
     pub main_stub: Option<SymbolId>,
     pub signal_stub: Option<SymbolId>,
     pub thread_stub: Option<SymbolId>,
+    /// `runtime.cpu.init`, if the module defines it (the `cpu_init` intrinsic calls it).
+    pub cpu_init: Option<SymbolId>,
     pub site_table: SymbolId,
     pub pc_table: SymbolId,
     /// Per site: the line-table position.
@@ -65,6 +68,7 @@ pub(crate) enum Intr {
     PcTable,
     StaticAddr,
     ThreadClone,
+    CpuInit,
     /// `atomic_<op>_u32/u64`: op 0 load, 1 xchg, 2 add, 3 cas; wide = u64.
     Atomic {
         op: u8,
@@ -92,6 +96,7 @@ fn intr_kind(name: &str) -> Intr {
         "pc_table" => Intr::PcTable,
         "static_addr" => Intr::StaticAddr,
         "thread_clone" => Intr::ThreadClone,
+        "cpu_init" => Intr::CpuInit,
         "cpuid" | "xgetbv" => Intr::X86Only,
         _ if name.starts_with("atomic_") => {
             let rest = &name["atomic_".len()..];
@@ -348,6 +353,7 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
         }
         None => None,
     };
+    let cpu_init = sym_of(find(RT_CPU_INIT));
     let fmod = b.func(SYM_FMOD, fmod_code()?)?;
     if let Some(e) = sym_of(find(RT_ENTRY)) {
         b.add_start_stub(e)?;
@@ -362,6 +368,7 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
         main_stub,
         signal_stub,
         thread_stub,
+        cpu_init,
         site_table,
         pc_table,
         lines,

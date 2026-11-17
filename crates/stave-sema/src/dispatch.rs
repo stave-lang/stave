@@ -7,6 +7,8 @@
 //! A dispatch missing its final `_` arm does not parse. Arms whose features (with the
 //! dispatch's) the target's arch does not own are dropped from the build unchecked, and so is a
 //! dispatch that needs such features itself.
+//!
+//! [`plan`] gives the arm chain lowering builds a dispatch body from (crate::lower_stmt).
 
 use stave_diag::{Diagnostic, Span};
 use stave_syntax::NodeKind;
@@ -17,8 +19,10 @@ use crate::decls::{DeclFlags, DeclKind};
 use crate::diag::mk;
 use crate::ids::DeclId;
 use crate::itemcx::{Brackets, ItemCx};
+use crate::mono::InstKey;
 use crate::resolve::Res;
 use crate::sigs::{FnSig, NameCx, Sigs};
+use crate::typeck::Typeck;
 use crate::types::{self, Interner, TypeKind, TypeTable};
 
 /// One arm of a dispatch: its features (closed; `None` for `_`) and its target's `Name` node.
@@ -139,6 +143,62 @@ fn check_arm(
             out.extend(mk("E0705", None, &[("expected", &expected), ("found", &found)], at, &roles));
         }
     }
+}
+
+/// How a reachable `dispatch fn` is lowered on the build target.
+///
+/// The live arms are those whose features (with the dispatch's own) the target's arch owns. With
+/// K = target baseline ∪ the dispatch's needs, the first live arm whose features are ⊆ K always
+/// matches when reached: it ends the chain (`last`), and the arms below it are not lowered. The
+/// `_` arm has no features, so a chain always ends.
+#[derive(Clone, Debug)]
+pub(crate) struct Plan {
+    /// Arms tested at run time, top-down: (feature mask, target). The mask is the arm's closed
+    /// feature set, so `(word & mask) == mask` is a complete test of the closed feature word.
+    pub tests: Vec<(u64, InstKey)>,
+    pub last: InstKey,
+}
+
+impl Plan {
+    /// The first live arm: its features and target.
+    pub fn first(&self) -> (u64, &InstKey) {
+        match self.tests.first() {
+            Some((m, k)) => (*m, k),
+            None => (0, &self.last),
+        }
+    }
+}
+
+/// The [`Plan`] of dispatch `d` (`None`: `d` is not a dispatch with a resolved `_` arm and live arm
+/// targets with checked, non-generic bodies; the type checker rules that out).
+pub(crate) fn plan(prog: &Program, tc: &Typeck, icx: &ItemCx<'_>, d: DeclId) -> Option<Plan> {
+    let decl = prog.decl(d)?;
+    if decl.kind != DeclKind::Fn || !decl.flags.has(DeclFlags::DISPATCH) || decl.node == u32::MAX {
+        return None;
+    }
+    let own = FeatureSet::from_bits(tc.sigs.fn_sig(d)?.features)?;
+    let arch = prog.target.arch();
+    let known = prog.target.baseline().union(own);
+    let mut tests = Vec::new();
+    for arm in arms_of(icx, decl.node, &mut Vec::new()) {
+        let fs = arm.features.unwrap_or(FeatureSet::EMPTY);
+        if !own.union(fs).is_owned_by(arch) {
+            continue;
+        }
+        let Res::Decl(t) = icx.uses(arm.name).last()?.res else { return None };
+        let ok = prog.decl(t).is_some_and(|x| matches!(x.kind, DeclKind::Fn | DeclKind::Method))
+            && tc.body(t).is_some_and(|b| !b.has_error)
+            && tc.sigs.fn_sig(t).is_some_and(|s| s.generics.is_empty());
+        if !ok {
+            return None;
+        }
+        let k = InstKey { decl: t, args: Vec::new() };
+        if fs.is_subset(known) {
+            return Some(Plan { tests, last: k });
+        }
+        tests.push((fs.bits(), k));
+    }
+    None
 }
 
 /// The text of the fn type of `sig` with features `features`.
