@@ -119,10 +119,12 @@ pub enum PanicKind {
     Unwrap,
     /// The CPU lacks a feature of the build target's baseline (runtime start code only).
     UnsupportedCpu,
+    /// A wait that can never end, e.g. a `Once` init reached again from its own initializer.
+    Deadlock,
 }
 
 impl PanicKind {
-    pub const ALL: [PanicKind; 8] = [
+    pub const ALL: [PanicKind; 9] = [
         PanicKind::Bounds,
         PanicKind::Overflow,
         PanicKind::DivByZero,
@@ -131,6 +133,7 @@ impl PanicKind {
         PanicKind::StackOverflow,
         PanicKind::Unwrap,
         PanicKind::UnsupportedCpu,
+        PanicKind::Deadlock,
     ];
 
     /// The report name (`panic: <Kind> at ...`).
@@ -144,6 +147,7 @@ impl PanicKind {
             PanicKind::StackOverflow => "StackOverflow",
             PanicKind::Unwrap => "Unwrap",
             PanicKind::UnsupportedCpu => "UnsupportedCpu",
+            PanicKind::Deadlock => "Deadlock",
         }
     }
 
@@ -158,6 +162,7 @@ impl PanicKind {
             PanicKind::StackOverflow => "panic.stack_overflow",
             PanicKind::Unwrap => "panic.unwrap",
             PanicKind::UnsupportedCpu => "panic.unsupported_cpu",
+            PanicKind::Deadlock => "panic.deadlock",
         }
     }
 }
@@ -379,6 +384,7 @@ impl Op {
             Op::Panic(P::StackOverflow) => &[P::StackOverflow],
             Op::Panic(P::Unwrap) => &[P::Unwrap],
             Op::Panic(P::UnsupportedCpu) => &[P::UnsupportedCpu],
+            Op::Panic(P::Deadlock) => &[P::Deadlock],
             Op::Vec(v) => v.trap_kinds(),
             _ => &[],
         }

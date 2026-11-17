@@ -49,6 +49,7 @@ pub(crate) fn kind_code(k: PanicKind) -> u32 {
         PanicKind::StackOverflow => 5,
         PanicKind::Unwrap => 6,
         PanicKind::UnsupportedCpu => 7,
+        PanicKind::Deadlock => 8,
     }
 }
 

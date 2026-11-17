@@ -544,6 +544,10 @@ fn traps() {
             let r = b.binary(Op::Mul, p.t.u64, x, y);
             p.out(b, r, p.t.u64);
         }),
+        (PanicKind::Deadlock, |b, _| {
+            b.set_site(Site(10));
+            b.panic(PanicKind::Deadlock);
+        }),
     ];
     for (k, (kind, mk)) in cases.into_iter().enumerate() {
         let mut p = Prog::new();

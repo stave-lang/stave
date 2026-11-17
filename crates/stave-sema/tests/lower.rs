@@ -62,7 +62,7 @@ struct Run {
     steps: u64,
 }
 
-const KINDS: [PanicKind; 8] = PanicKind::ALL;
+const KINDS: [PanicKind; 9] = PanicKind::ALL;
 
 /// Runs a lowered program from `runtime.start.entry` in the interpreter.
 fn run(m: &mut Module, abi: SyscallAbi, files: &[(String, Vec<u8>)]) -> Run {

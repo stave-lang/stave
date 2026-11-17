@@ -60,7 +60,7 @@ runtime.panic.trap_msg(kind: u32, site: u32, msg: &[u8]) -> never  // + one line
 ```
 
 `kind`: `KIND_BOUNDS 0, KIND_OVERFLOW 1, KIND_DIV_BY_ZERO 2, KIND_ASSERT 3, KIND_OUT_OF_MEMORY 4,
-KIND_STACK_OVERFLOW 5, KIND_UNWRAP 6, KIND_UNSUPPORTED_CPU 7` (panic kind names; shift amount >= width
+KIND_STACK_OVERFLOW 5, KIND_UNWRAP 6, KIND_UNSUPPORTED_CPU 7, KIND_DEADLOCK 8` (panic kind names; shift amount >= width
 is `Overflow`; `UnsupportedCpu` only from `runtime.cpu.init`, at `SITE_NONE`).
 `site`: index into the compiler-emitted **site table**, `SITE_NONE = 0xFFFF_FFFF` for unknown.
 Output: `panic: <Kind> at <file>:<line>:<col> in <fn> (thread <n>)` on fd 2, then `exit_group(101)`.
