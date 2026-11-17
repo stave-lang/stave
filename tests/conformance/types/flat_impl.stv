@@ -1,0 +1,38 @@
+//~ CHECK-ONLY
+// E1408: `Flat` is derived, never implemented: every impl of it is rejected, safe or
+// `unsafe(..)`, generic or not, for a Flat type or not, and it changes nothing (`Raw` stays
+// not Flat, E1407).
+struct Plain {
+    pub v: u32,
+}
+
+struct Raw {
+    pub p: *const u8,
+}
+
+struct Wrap<T> {
+    pub v: T,
+}
+
+struct Other {
+    pub p: *mut u8,
+}
+
+impl Flat for Plain {} //~ ERROR E1408
+
+impl Flat for Raw {} //~ ERROR E1408
+
+impl<T> Flat for Wrap<T> {} //~ ERROR E1408
+
+unsafe("Other never dereferences p") impl Flat for Other {} //~ ERROR E1408
+
+fn need<T: Flat>() {}
+
+fn main() -> i32 {
+    need::<Plain>();
+    need::<Wrap<u32>>();
+    need::<Raw>(); //~ ERROR E1407
+    need::<Wrap<*const u8>>(); //~ ERROR E1407
+    need::<Other>(); //~ ERROR E1407
+    return 0;
+}

@@ -2,7 +2,7 @@
 
 This is the human-readable table of codes for `crates/stave-diag`, `stave explain`, and
 every `//~ ERROR` / `//~ WARNING` expectation in the conformance suite
-([conformance-annotations.md](conformance-annotations.md)). It holds E00xx–E10xx and E13xx; the
+([conformance-annotations.md](conformance-annotations.md)). It holds E00xx–E10xx, E13xx, and E14xx; the
 E11xx rows (GPU kernels) live in [gpu-diagnostics.md](gpu-diagnostics.md) and the E12xx rows
 (the `gpu-sm86` target) in [gpu-program-diagnostics.md](gpu-program-diagnostics.md). The registry is the union of
 these three tables. Codes are stable: a code is never reused and never changes meaning. A retired
@@ -33,6 +33,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E11xx | GPU kernels ([gpu-diagnostics.md](gpu-diagnostics.md)) |
 | E12xx | GPU programs, target `gpu-sm86` ([gpu-program-diagnostics.md](gpu-program-diagnostics.md)) |
 | E13xx | GPU compiler, stage1 ([cli-stage1.md](cli-stage1.md)); listed below |
+| E14xx | effects, recursion, stack, ranks, flat; listed below |
 
 | Code | Rule |
 |---|---|
@@ -158,3 +159,5 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E1302 | `--compiler gpu` but no usable GPU (reason as in the summary line). No location. Fix: use `--compiler auto` or `--compiler cpu`; or make the GPU usable: install the NVIDIA driver, check the device, or reinstall Stave with the GPU compiler image (compute capability below 8.6: stage1 needs 8.6 or higher) |
 | E1303 | `--compiler gpu` with a code-generating command (`build`, `run`, `test`) for a target stage1 does not support (AArch64 in v1); `stave check` is not affected. Reported instead of E1302 when both apply (probe step 1, cli.md). No location. Fix: use `--compiler auto` or `--compiler cpu`: stage0 builds this target |
 | E1304 | `--compiler gpu` and the package links C objects (through mold/lld), which stage1 v1 does not support. Located at the package's first C-link input in stave.toml (or the first `extern "C"` import block if none is declared). `stave check` is not affected. Under `auto` such packages go to stage0 (reported in the summary line). Fix: use `--compiler auto` or `--compiler cpu`: stage0 links C objects |
+| E1407 | a `Flat` bound (`<T: Flat>`) given a type that is not `Flat`. Names the first non-flat component (reference, view, raw pointer, fn value, `UnsafeCell`, type with `Drop`, generic param without a `Flat` bound, unsized type) and its path: field names, `Variant.field` for an enum payload, `0` for a tuple element, `[_]` for an array element, `<T>` for a type argument. Case `self`: the type itself is that component. Case `depth`: the check passed its depth cutoff (1024 levels) and fails closed |
+| E1408 | an `impl Flat`, safe or `unsafe(..)`: `Flat` is derived by the compiler from the type's structure and never implemented. At the `impl`; no other impl check runs on it |

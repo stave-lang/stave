@@ -20,7 +20,7 @@
 #   severity  "error" | "warning"                   required
 #   area      range name of diagnostic-codes.md: "lex-parse" "resolve" "types" "patterns" "kinds"
 #             "borrow" "simd" "features" "threads-unsafe-ffi" "generics" "driver" "gpu-kernel"
-#             "gpu-program" "gpu-compiler"
+#             "gpu-program" "gpu-compiler" "effects"
 #   rule      one line, same meaning as the diagnostic-codes.md row
 #   retired   true for a retired code (then only code, rule, retired)
 #   located   false for codes with no primary span (they sort first); default true. Exactly
@@ -1740,3 +1740,31 @@ rule = "`--compiler gpu` and the package links C objects, which stage1 v1 does n
 message = "`--compiler gpu`: C linking not supported by stage1"
 labels = [{ at = "primary", text = "the package links C objects here" }]
 fix = { description = "use `--compiler auto` or `--compiler cpu`: stage0 links C objects" }
+
+[[diag]]
+code = "E1407"
+severity = "error"
+area = "effects"
+rule = "`Flat` demanded by a bound, type not `Flat`: names the first non-flat component and its path (field chain); case `self` when the type itself is the component; case `depth` past the check's depth cutoff"
+holes = { type = "type", path = "place", part = "type", reason = "text-literal", limit = "int" }
+choices = { reason = ["a reference", "a raw pointer", "a fn value", "a view type", "`UnsafeCell` (interior mutability)", "a type with `Drop`", "a generic parameter without a `Flat` bound", "unsized"] }
+message = "`{type}` is not `Flat`: component `{path}` has type `{part}`, {reason}"
+labels = [{ at = "primary", text = "`Flat` required here" }, { at = "param", text = "the `Flat` bound is on this parameter" }]
+fix = { description = "pass a type without references, views, raw pointers, fn values, `UnsafeCell`, or `Drop` types; store indices or offsets instead of pointers" }
+
+[diag.cases.self]
+message = "`{type}` is not `Flat`: it is {reason}"
+
+[diag.cases.depth]
+message = "`{type}` is not `Flat`: it nests deeper than {limit} levels, the limit of the `Flat` check"
+fix = { description = "nest the type less deeply" }
+
+[[diag]]
+code = "E1408"
+severity = "error"
+area = "effects"
+rule = "an `impl Flat` (safe or `unsafe(..)`): `Flat` is derived by the compiler from the type's structure and never implemented"
+holes = { type = "type" }
+message = "`impl Flat for {type}`: `Flat` is derived by the compiler, never implemented"
+labels = [{ at = "primary", text = "remove this impl" }]
+fix = { description = "remove the impl: a type is `Flat` exactly when it holds no reference, view, raw pointer, fn value, `UnsafeCell`, or `Drop` type" }

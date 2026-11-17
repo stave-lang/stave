@@ -11,6 +11,10 @@
 // Marker traits: `Copy` is safe and built in for ints, floats, bool, char, &T, raw pointers, and
 // arrays/tuples of Copy; an ADT opts in with an empty `impl Copy for S {}`. `Send` and
 // `Sync` are unsafe traits: an impl states why the type may cross / be shared between threads.
+// `Flat` (no pointer inside: a value may be copied byte for byte to a thread, the GPU, or a file)
+// is derived by the compiler and never implemented (E1408): a type is Flat iff no field, enum
+// payload, array / tuple element, or type argument, at any depth, is a reference, view, raw
+// pointer, fn value, `UnsafeCell`, or type with `Drop`. `<T: Flat>` demands it (E1407).
 //
 // Operator traits: one trait per operator and overflow mode, every one of the shape
 // `fn op(self, rhs: Self) -> Self` (unary: `fn op(self) -> Self`): operands and result have one
@@ -108,6 +112,9 @@ pub trait Copy {}
 pub unsafe("an implementer guarantees that a value of the type may be moved to another thread") trait Send {}
 
 pub unsafe("an implementer guarantees that &Self may be used from several threads at once") trait Sync {}
+
+// Derived from the type's structure only (see the header): every `impl Flat` is rejected.
+pub trait Flat {}
 
 // The destructor of a type (Vec): run by the compiler only (see the header).
 pub trait Drop {

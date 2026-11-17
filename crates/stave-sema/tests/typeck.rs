@@ -396,3 +396,80 @@ fn check_runs_on_the_callers_thread_count() {
     let (p1, tc1) = one.install(|| mem(&deep));
     assert_eq!(stave_sema::dump_types(&p1, &tc1), base);
 }
+
+/// E1407 names the first non-flat component and the path to it; E1408 rejects any impl.
+#[test]
+fn flat_diagnostics_name_the_first_non_flat_component() {
+    let src = "import std.cell;\n\
+         struct Raw { pub p: *const u8 }\n\
+         struct Outer { pub n: u32, pub inner: Raw }\n\
+         enum Msg { Quit, Data(u32, Raw), Named { len: u32, at: Outer } }\n\
+         struct Tag<T> { pub raw: u32 }\n\
+         struct Handle { pub id: u32 }\n\
+         impl Drop for Handle { fn drop(&mut self) {} }\n\
+         view struct Cursor { pub at: &u32 }\n\
+         impl Flat for Raw {}\n\
+         fn need<T: Flat>() {}\n\
+         fn fwd<T>() { need::<T>(); }\n\
+         fn main() -> i32 {\n\
+         \x20   need::<&u32>();\n\
+         \x20   need::<fn(u32) -> u32>();\n\
+         \x20   need::<Cursor>();\n\
+         \x20   need::<Handle>();\n\
+         \x20   need::<[[Outer; 2]; 3]>();\n\
+         \x20   need::<(u32, Raw)>();\n\
+         \x20   need::<Msg>();\n\
+         \x20   need::<Option<&u32>>();\n\
+         \x20   need::<Tag<*const u8>>();\n\
+         \x20   need::<cell.Cell<u32>>();\n\
+         \x20   need::<str>();\n\
+         \x20   return 0;\n\
+         }\n";
+    let (p, tc) = mem(src);
+    let got: Vec<String> = tc
+        .all_diagnostics(&p)
+        .iter()
+        .map(|d| {
+            let line = d.primary().map_or(0, |s| p.source_map.locate(s).map_or(0, |l| l.line));
+            format!("{line}: {} {}", d.code(), d.message())
+        })
+        .collect();
+    let want = [
+        "9: E1408 `impl Flat for Raw`: `Flat` is derived by the compiler, never implemented",
+        "11: E1407 `T` is not `Flat`: it is a generic parameter without a `Flat` bound",
+        "13: E1407 `&u32` is not `Flat`: it is a reference",
+        "14: E1407 `fn(u32) -> u32` is not `Flat`: it is a fn value",
+        "15: E1407 `Cursor` is not `Flat`: it is a view type",
+        "16: E1407 `Handle` is not `Flat`: it is a type with `Drop`",
+        "17: E1407 `[[Outer; 2]; 3]` is not `Flat`: component `[_][_].inner.p` has type `*const u8`, a raw pointer",
+        "18: E1407 `(u32, Raw)` is not `Flat`: component `1.p` has type `*const u8`, a raw pointer",
+        "19: E1407 `Msg` is not `Flat`: component `Data.1.p` has type `*const u8`, a raw pointer",
+        "20: E1407 `Option<&u32>` is not `Flat`: component `Some.0` has type `&u32`, a reference",
+        "21: E1407 `Tag<*const u8>` is not `Flat`: component `<T>` has type `*const u8`, a raw pointer",
+        "22: E1407 `Cell<u32>` is not `Flat`: component `v` has type `UnsafeCell<u32>`, `UnsafeCell` (interior mutability)",
+        "23: E1407 `str` is not `Flat`: it is unsized",
+    ];
+    assert_eq!(got, want);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
+}
+
+/// Past its depth cutoff the Flat check fails closed (E1407 case `depth`).
+#[test]
+fn flat_depth_cutoff_fails_closed() {
+    let nest = |n: usize| format!("{}u32{}", "W<".repeat(n), ">".repeat(n));
+    let src = format!(
+        "struct W<T> {{ pub v: T }}\nfn need<T: Flat>() {{}}\n\
+         fn main() -> i32 {{ need::<{}>(); need::<{}>(); return 0; }}\n",
+        nest(1000),
+        nest(1100)
+    );
+    let (p, tc) = mem(&src);
+    let got: Vec<String> =
+        tc.all_diagnostics(&p).iter().map(|d| format!("{} {}", d.code(), d.message())).collect();
+    // the type text is elided in the middle (`W<W<..>>`)
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].starts_with("E1407 `W<W<"), "{}", got[0]);
+    let tail = ">>` is not `Flat`: it nests deeper than 1024 levels, the limit of the `Flat` check";
+    assert!(got[0].ends_with(tail), "{}", got[0]);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
+}
