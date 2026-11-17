@@ -3,7 +3,8 @@
 // lengths 1 KiB + 0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33 elements and 1 KiB - 1) and on short ones
 // (0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33), each at start offsets 0..3 (unaligned), against
 // element-by-element references: int sums (with lanes that overflow while the running sum does
-// not), min, max, find, eq, fill, find_any_byte, copy_from; floats with -0.0 / +0.0 and NaN.
+// not), min, max, find, eq, fill, find_any_byte, copy_from; floats with -0.0 / +0.0 and quiet
+// and signaling NaNs with payloads (min / max of a slice with a NaN: the canonical quiet NaN).
 // crates/stave-driver/tests/interp_vs_native.rs runs it in the IR interpreter (the 128-bit
 // loops), natively (the 256-bit loops where the CPU has AVX2) and under qemu `-cpu Nehalem`,
 // against combinators_wide.stdout.
@@ -494,6 +495,7 @@ fn neg_f32(x: f32) -> bool {
 
 fn test_f32() {
     let z: f32 = 0.0;
+    let nans: [u32; 4] = [0x7fc00001, 0xffc00002, 0x7f800001, 0xff800005];
     let mut a: [f32; 293] = [0.0; 293];
     for i in 0usize..293 {
         let m = mix(i) % 50;
@@ -525,14 +527,34 @@ fn test_f32() {
                     while xs[j] != x { j = j + 1; }
                     if xs.find(x).unwrap() != j { bad = " find"; }
                 }
-                let mut q = a;
-                q[o + n / 2] = z / z;
-                let qs = &q[o..o + n];
-                let qlo = qs.min().unwrap();
-                let qhi = qs.max().unwrap();
-                if qlo == qlo || qhi == qhi { bad = " NaN min/max"; }
-                if qs.find(z / z).is_some() { bad = " find NaN"; }
-                if qs.eq(xs) || qs.eq(qs) { bad = " eq NaN"; }
+                // quiet and signaling NaNs of either sign with payloads, one or several, and a
+                // slice of NaNs only: min and max give the canonical quiet NaN
+                for w in 0usize..5 {
+                    let mut q = a;
+                    if w < 4 {
+                        q[o + n / 2] = mem.f32_from_bits(nans[w]);
+                    } else {
+                        for i in 0..n { q[o + i] = mem.f32_from_bits(nans[i % 4]); }
+                    }
+                    if w == 3 {
+                        q[o] = mem.f32_from_bits(nans[1]);
+                        q[o + n - 1] = mem.f32_from_bits(nans[2]);
+                    }
+                    let qs = &q[o..o + n];
+                    let qlo = mem.f32_bits(qs.min().unwrap());
+                    let qhi = mem.f32_bits(qs.max().unwrap());
+                    if qlo != 0x7fc00000 || qhi != 0x7fc00000 { bad = " NaN min/max bits"; }
+                    if qs.find(mem.f32_from_bits(nans[w % 4])).is_some() { bad = " find NaN"; }
+                    if qs.eq(qs) { bad = " eq NaN"; }
+                }
+                // zeros of both signs only: -0.0 < +0.0
+                let mut zs = a;
+                for i in 0..n { zs[o + i] = if (i + o) % 3 == 1 then -z else z; }
+                let zlo = mem.f32_bits((&zs[o..o + n]).min().unwrap());
+                let zhi = mem.f32_bits((&zs[o..o + n]).max().unwrap());
+                let has_neg = n > 1 || o % 3 == 1;
+                let has_pos = n > 1 || o % 3 != 1;
+                if (zlo == mem.f32_bits(-z)) != has_neg || (zhi == mem.f32_bits(z)) != has_pos { bad = " min/max of zeros"; }
             }
             if xs.find(1000.5).is_some() { bad = " find absent"; }
             let mut b = a;
@@ -558,6 +580,7 @@ fn neg_f64(x: f64) -> bool {
 
 fn test_f64() {
     let z: f64 = 0.0;
+    let nans: [u64; 4] = [0x7ff8000000000001, 0xfff8000000000002, 0x7ff0000000000001, 0xfff0000000000005];
     let mut a: [f64; 165] = [0.0; 165];
     for i in 0usize..165 {
         let m = mix(i) % 50;
@@ -589,14 +612,34 @@ fn test_f64() {
                     while xs[j] != x { j = j + 1; }
                     if xs.find(x).unwrap() != j { bad = " find"; }
                 }
-                let mut q = a;
-                q[o + n / 2] = z / z;
-                let qs = &q[o..o + n];
-                let qlo = qs.min().unwrap();
-                let qhi = qs.max().unwrap();
-                if qlo == qlo || qhi == qhi { bad = " NaN min/max"; }
-                if qs.find(z / z).is_some() { bad = " find NaN"; }
-                if qs.eq(xs) || qs.eq(qs) { bad = " eq NaN"; }
+                // quiet and signaling NaNs of either sign with payloads, one or several, and a
+                // slice of NaNs only: min and max give the canonical quiet NaN
+                for w in 0usize..5 {
+                    let mut q = a;
+                    if w < 4 {
+                        q[o + n / 2] = mem.f64_from_bits(nans[w]);
+                    } else {
+                        for i in 0..n { q[o + i] = mem.f64_from_bits(nans[i % 4]); }
+                    }
+                    if w == 3 {
+                        q[o] = mem.f64_from_bits(nans[1]);
+                        q[o + n - 1] = mem.f64_from_bits(nans[2]);
+                    }
+                    let qs = &q[o..o + n];
+                    let qlo = mem.f64_bits(qs.min().unwrap());
+                    let qhi = mem.f64_bits(qs.max().unwrap());
+                    if qlo != 0x7ff8000000000000 || qhi != 0x7ff8000000000000 { bad = " NaN min/max bits"; }
+                    if qs.find(mem.f64_from_bits(nans[w % 4])).is_some() { bad = " find NaN"; }
+                    if qs.eq(qs) { bad = " eq NaN"; }
+                }
+                // zeros of both signs only: -0.0 < +0.0
+                let mut zs = a;
+                for i in 0..n { zs[o + i] = if (i + o) % 3 == 1 then -z else z; }
+                let zlo = mem.f64_bits((&zs[o..o + n]).min().unwrap());
+                let zhi = mem.f64_bits((&zs[o..o + n]).max().unwrap());
+                let has_neg = n > 1 || o % 3 == 1;
+                let has_pos = n > 1 || o % 3 != 1;
+                if (zlo == mem.f64_bits(-z)) != has_neg || (zhi == mem.f64_bits(z)) != has_pos { bad = " min/max of zeros"; }
             }
             if xs.find(1000.5).is_some() { bad = " find absent"; }
             let mut b = a;

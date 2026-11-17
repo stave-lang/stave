@@ -4,7 +4,9 @@
 //   sum()            ints: the sequential sum, trapping `Overflow` exactly where `for` + `+` would;
 //                    floats: the fixed lane tree below (not the left-to-right sum)
 //   min() max()      Option (None when empty); floats as the vector `min`/`max`: NaN propagates,
-//                    -0.0 < +0.0
+//                    -0.0 < +0.0; a NaN result is always the positive quiet NaN with an empty
+//                    payload (0x7fc00000 / 0x7ff8000000000000), whatever NaNs the slice holds:
+//                    which NaN a lane op passes on differs between CPUs and lane groupings
 //   find(x)          first index i with xs[i] == x (floats: NaN is never found, -0.0 == +0.0)
 //   eq(ys)           same length and xs[i] == ys[i] for every i (ints, bool: the same bits;
 //                    floats: `==`, so a NaN element makes it false and -0.0 equals +0.0)
@@ -1560,18 +1562,28 @@ impl [f32] {
 
     pub fn min(&self) -> Option<f32> {
         if self.len() == 0 { return Option.None; }
-        if self.len() >= LONG_B32 { return Option.Some(min_f32_cpu(self)); }
-        let mut a = f32x4.splat(self[0]);
-        for v: f32x4 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
-        return Option.Some(a.reduce_min());
+        let mut r: f32 = 0.0;
+        if self.len() >= LONG_B32 {
+            r = min_f32_cpu(self);
+        } else {
+            let mut a = f32x4.splat(self[0]);
+            for v: f32x4 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+            r = a.reduce_min();
+        }
+        return Option.Some(if r != r then mem.f32_from_bits(0x7fc00000) else r);
     }
 
     pub fn max(&self) -> Option<f32> {
         if self.len() == 0 { return Option.None; }
-        if self.len() >= LONG_B32 { return Option.Some(max_f32_cpu(self)); }
-        let mut a = f32x4.splat(self[0]);
-        for v: f32x4 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
-        return Option.Some(a.reduce_max());
+        let mut r: f32 = 0.0;
+        if self.len() >= LONG_B32 {
+            r = max_f32_cpu(self);
+        } else {
+            let mut a = f32x4.splat(self[0]);
+            for v: f32x4 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+            r = a.reduce_max();
+        }
+        return Option.Some(if r != r then mem.f32_from_bits(0x7fc00000) else r);
     }
 
     pub fn find(&self, x: f32) -> Option<usize> {
@@ -1716,18 +1728,28 @@ impl [f64] {
 
     pub fn min(&self) -> Option<f64> {
         if self.len() == 0 { return Option.None; }
-        if self.len() >= LONG_B64 { return Option.Some(min_f64_cpu(self)); }
-        let mut a = f64x2.splat(self[0]);
-        for v: f64x2 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
-        return Option.Some(a.reduce_min());
+        let mut r: f64 = 0.0;
+        if self.len() >= LONG_B64 {
+            r = min_f64_cpu(self);
+        } else {
+            let mut a = f64x2.splat(self[0]);
+            for v: f64x2 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+            r = a.reduce_min();
+        }
+        return Option.Some(if r != r then mem.f64_from_bits(0x7ff8000000000000) else r);
     }
 
     pub fn max(&self) -> Option<f64> {
         if self.len() == 0 { return Option.None; }
-        if self.len() >= LONG_B64 { return Option.Some(max_f64_cpu(self)); }
-        let mut a = f64x2.splat(self[0]);
-        for v: f64x2 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
-        return Option.Some(a.reduce_max());
+        let mut r: f64 = 0.0;
+        if self.len() >= LONG_B64 {
+            r = max_f64_cpu(self);
+        } else {
+            let mut a = f64x2.splat(self[0]);
+            for v: f64x2 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+            r = a.reduce_max();
+        }
+        return Option.Some(if r != r then mem.f64_from_bits(0x7ff8000000000000) else r);
     }
 
     pub fn find(&self, x: f64) -> Option<usize> {
