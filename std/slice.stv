@@ -18,10 +18,10 @@
 //
 // Every method loops in 128-bit vectors (the portable baseline of every CPU target). On x86-64,
 // sum (ints), min, max, find, find_any_byte, eq, fill and copy_from have a second loop in
-// 256-bit vectors under `needs(avx2)`, which a slice of 1 KiB or more (`LONG_B*`) reaches
-// through a `dispatch fn` when the CPU has AVX2 (always on x86_64-linux-v3; AArch64 builds only
-// the 128-bit loop). Shorter slices stay in the method: the CPU test and the calls cost more
-// than the wider vectors save there. The `_` arm of each dispatch repeats the method's 128-bit
+// 256-bit vectors under `needs(avx2)`, which a slice of `LONG_B*` or more elements (1 KiB, or
+// 512 B for 4- and 8-byte elements) reaches through a `dispatch fn` when the CPU has AVX2
+// (always on x86_64-linux-v3; AArch64 builds only the 128-bit loop). Shorter slices stay in the
+// method: the CPU test and the calls cost more than the wider vectors save there. The `_` arm of each dispatch repeats the method's 128-bit
 // loop (a call from the method would cost the short slices). No signature names a vector width,
 // and every loop gives the same results:
 // - Int sums wrap lane-wise and keep the running prefix sum in every lane (`scan_add_wrap`); a
@@ -40,11 +40,14 @@
 import std.debug;
 import std.mem;
 
-// 1 KiB in elements of 1, 2, 4 and 8 bytes.
+// The slice length in elements of 1, 2, 4 and 8 bytes from which the 256-bit loop is never slower
+// than the 128-bit one, with a margin: 1 KiB for 1- and 2-byte elements (and for `eq` and
+// `copy_from` of every type, which work on bytes), 512 B for 4- and 8-byte elements, whose
+// 128-bit loops cost more per element.
 const LONG_B8: usize = 1024;
 const LONG_B16: usize = 512;
-const LONG_B32: usize = 256;
-const LONG_B64: usize = 128;
+const LONG_B32: usize = 128;
+const LONG_B64: usize = 64;
 
 // xs as a slice of U: same address, xs.len() * size_of::<T>() / size_of::<U>() elements. Callers
 // pass T and U of one size, or U = u8; every bit pattern of T is then a valid U (bool is 0 or 1).

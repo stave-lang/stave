@@ -36,7 +36,7 @@ differential` (part of `cargo test --workspace`); Linux, x86-64 host for the nat
 | histogram | 256-bin byte histogram | `gather`, `scatter` (inside `emulate`), lane-private bins |
 | matmul4 | 4x4 matrix times 4-element points | `permute` broadcasts, `join` (v3), `select` |
 | utf8 | UTF-8 validation (Keiser–Lemire), code points | `lookup`, `>>`, `-|`, `reduce_or` |
-| combinators | the `std.slice` methods on f32 / f64 / i32 / u8 (no `_v3` file: std picks its loops; these slices stay below the 1 KiB where its 256-bit loops start, which `tests/conformance/simd/combinators_wide.stv` covers) | `sum min max find find_byte find_any_byte count any all eq fill copy_from` |
+| combinators | the `std.slice` methods on f32 / f64 / i32 / u8 (no `_v3` file: std picks its loops; these slices are mostly shorter than the 512 B to 1 KiB where its 256-bit loops start, which `tests/conformance/simd/combinators_wide.stv` covers) | `sum min max find find_byte find_any_byte count any all eq fill copy_from` |
 | stream_copy | copies f32 / f64 / i32 / u8 into a misaligned destination | `store_stream` (vector and scalar), `write_stream`, `fence_stream`, prefetches past the end |
 
 ## Cases
