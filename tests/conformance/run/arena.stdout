@@ -1,0 +1,6 @@
+cap 64, used 1 24 28
+[u64; 4]: ok, last 4
+u8 in a full arena: out of memory
+used 64 64; a 8, b 1 1002
+after reset: 5, used 2
+try_new(2^62): out of memory

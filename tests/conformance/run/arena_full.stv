@@ -1,0 +1,13 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: OutOfMemory at arena_full.stv:11:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// `alloc` on an arena without room for the value panics `OutOfMemory` at the caller: the
+// capacity is fixed, the arena never grows.
+import std.arena;
+
+fn main() -> i32 {
+    let ar = arena.Arena.new(4);
+    let a = ar.alloc(1u32);
+    let b = ar.alloc(2u8);
+    return 0;
+}
