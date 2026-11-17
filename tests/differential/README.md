@@ -35,8 +35,8 @@ differential` (part of `cargo test --workspace`); Linux, x86-64 host for the nat
 | bytesearch | first and last index of a byte, count | `to_bits`, scalar `ctz` / `clz`, backward loads |
 | bytesearch_disp | bytesearch through `dispatch fn`s: 512-bit `needs(v4)`, 256-bit `needs(avx2)`, `needs(sve)` and 128-bit `_` arms | dispatch, per-function feature sets, `mask8x64` bits |
 | sum_disp | wrapping i32 and widened u8 sums through `dispatch fn`s with the arms of bytesearch_disp | dispatch, 512-bit `widen_lo/hi`, `reduce_add_wrap` |
-| reduce | std's f32 / f64 `sum` and `dot` and 128-bit kernels against the logical-lane rule (32 / 16 lanes from -0.0), written out one element at a time; lengths to 6L + 1, past where std dispatches | `load_masked`, `select` of `-0.0` into a tail, the 8-vector fold, `reduce_add` |
-| reduce_disp | reduce through `dispatch fn`s with the arms of bytesearch_disp (the L lanes in 2 x 512-bit and 4 x 256-bit vectors), and std's own `sum` / `dot` arms | dispatch, 512-bit masked loads and `reduce_add`, std's `v4` / `avx2` / `_` arms |
+| reduce | std's f32 / f64 `sum` and `dot` against the two-level rule (blocks of 4096 by the logical-lane rule, 32 / 16 lanes from -0.0, then the block tree), written out one term at a time; the same sums from 128-bit kernels per block (last block first, combined by the tree's recursive split), from std on the root's two children under `thread.join`, and from std on two-block pieces under `thread.par_for_mut`; lengths to 6L + 1 and around and past several blocks | `load_masked`, `select` of `-0.0` into a tail, the 8-vector fold, `reduce_add`, threads |
+| reduce_disp | reduce's blocks through `dispatch fn`s with the arms of bytesearch_disp (the L lanes in 2 x 512-bit and 4 x 256-bit vectors), combined by the tree's passes and by its split, and std's own one- and two-level `sum` / `dot` arms | dispatch, 512-bit masked loads and `reduce_add`, std's `v4` / `avx2` / `_` arms |
 | prefix | in-place inclusive prefix sums, f32 / f64 / i32 | `scan_add`, `scan_add_wrap`, `permute`, `&mut` chunk binding |
 | histogram | 256-bin byte histogram | `gather`, `scatter` (inside `emulate`), lane-private bins |
 | matmul4 | 4x4 matrix times 4-element points | `permute` broadcasts, `join` (v3), `select` |
@@ -53,8 +53,12 @@ misalignment. Each case draws its values from one palette: a few distinct values
 (±0, ±inf, NaNs with payloads, subnormals, extremes), moderate random values, or raw bits. The
 `reduce` kernels add four: all `-0.0` (dot: times 1.0), cancelling values of either sign from
 2^-20 to 2^21, ±MAX at every eighth element among ±1 (overflow and inf + -inf depend on the lane
-count), and moderate values with NaNs; `harness.rs` checks that their cases tell L from L/2 and
-2L, from the sequential sum, and from `+0.0` lane starts, and NaN-ness between lane counts.
+count), and moderate values with NaNs; their kinds also list lengths at and past one block of
+4096, each from the cancelling palette and from a step palette (2^12 in the first block, 2^-12
+after it) whose block sums round differently in any other block order. `harness.rs` checks
+that their cases tell the rule from L/2 and 2L lanes, the sequential sum, `+0.0` lane starts,
+the one-level rule, half and twice the block, and block sums added left to right, and NaN-ness
+between lane counts.
 `STAVE_DIFF_SEED` (default `0x5eed`) seeds the generator; `STAVE_DIFF_KERNELS=sum,dot` runs
 only those programs.
 
@@ -80,8 +84,9 @@ here is reported and skipped. A build that stops with "not implemented yet" fail
 that are known to fail go in `KNOWN` in `harness.rs`, with the reason; they are reported, not
 failed, and an entry that starts passing fails the test until it is removed.
 
-Default run: about 8,100 cases over the 24 programs, 186 legs, about 86,000 checked lines, about
-45 s on an 8-core x86-64 host with Intel SDE. `STAVE_DIFF_FULL=1 STAVE_DIFF_RANDOM=256` checks
+Default run: about 8,200 cases over the 24 programs, 186 legs, about 87,000 checked lines, about
+3 min on an 8-core x86-64 host with Intel SDE (most of it the `reduce` cases past one block,
+element by element in the interpreter and under SDE). `STAVE_DIFF_FULL=1 STAVE_DIFF_RANDOM=256` checks
 several hundred thousand lines in several minutes.
 
 ## Dispatch runs

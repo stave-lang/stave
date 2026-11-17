@@ -36,7 +36,10 @@
 //   element, or for dot the product) adds into lane i % L of L lanes that start at -0.0, L = 32
 //   for f32 and 16 for f64 (1024 bits: eight 128-bit, four 256-bit or two 512-bit vectors), then
 //   the L lanes reduce by the `reduce_add` tree: lane j with lane j + L/2, halving until one lane
-//   is left. Empty: -0.0. The bits depend on L only, so every loop and target agrees.
+//   is left. Past SUM_BLOCK elements they go two-level: blocks of SUM_BLOCK elements (the last
+//   may be shorter), each by that rule, then the block sums by the block tree: passes adding
+//   neighbour 2i + 1 into 2i, a last odd one carried. Empty: -0.0. The bits depend on n only,
+//   so every loop, target and split along the tree agrees.
 // - min, max and the searches do not depend on the order.
 // Branchless per element: sum, min, max, count, fill, copy_from (their loops branch only on the
 // loop test, never on element data). The searches (find, find_byte, find_any_byte, eq, any,
@@ -53,6 +56,10 @@ const LONG_B8: usize = 1024;
 const LONG_B16: usize = 512;
 const LONG_B32: usize = 128;
 const LONG_B64: usize = 64;
+
+// The block of the two-level float sum and dot (file head), in elements: slices of at most this
+// many elements are one block, summed by the one-level rule alone.
+const SUM_BLOCK: usize = 4096;
 
 // xs as a slice of U: same address, xs.len() * size_of::<T>() / size_of::<U>() elements. Callers
 // pass T and U of one size, or U = u8; every bit pattern of T is then a valid U (bool is 0 or 1).
@@ -1848,16 +1855,137 @@ dispatch fn sum_f32_cpu(xs: &[f32]) -> f32 { v4 => sum_f32_v4, avx2 => sum_f32_v
 
 dispatch fn dot_f32_cpu(xs: &[f32], ys: &[f32]) -> f32 { v4 => dot_f32_v4, avx2 => dot_f32_v3, _ => dot_f32, }
 
+// The block tree (file head) over the block sums of a f32 sum or dot, in one pass: the stack
+// holds the sums of complete tree nodes, the earliest and largest at the bottom. Pushing block
+// c adds the top entry before it (top + new) once per trailing 1 bit of c; `finish` adds the
+// entries from the top down (entry + sum so far), which is the tree's right edge.
+struct BlockTree32 {
+    s: [f32; 64],
+    top: usize,
+    count: u64,
+}
+
+impl BlockTree32 {
+    fn new() -> BlockTree32 {
+        return BlockTree32.{ s: [-0.0; 64], top: 0, count: 0 };
+    }
+
+    fn push(&mut self, x: f32) {
+        let mut v = x;
+        let mut c = self.count;
+        while (c & 1) == 1 {
+            self.top = self.top - 1;
+            v = self.s[self.top] + v;
+            c = c >> 1;
+        }
+        self.s[self.top] = v;
+        self.top = self.top + 1;
+        self.count = self.count + 1;
+    }
+
+    fn finish(&self) -> f32 {
+        if self.top == 0 { return -0.0; }
+        let mut k = self.top - 1;
+        let mut v = self.s[k];
+        while k > 0 {
+            k = k - 1;
+            v = self.s[k] + v;
+        }
+        return v;
+    }
+}
+
+fn sum2_f32(xs: &[f32]) -> f32 {
+    let n = xs.len();
+    let mut t = BlockTree32.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(sum_f32(&xs[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+fn dot2_f32(xs: &[f32], ys: &[f32]) -> f32 {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let mut t = BlockTree32.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(dot_f32(&xs[i..e], &y[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+fn sum2_f32_v3(xs: &[f32]) -> f32 needs(avx2) {
+    let n = xs.len();
+    let mut t = BlockTree32.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(sum_f32_v3(&xs[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+fn dot2_f32_v3(xs: &[f32], ys: &[f32]) -> f32 needs(avx2) {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let mut t = BlockTree32.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(dot_f32_v3(&xs[i..e], &y[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+fn sum2_f32_v4(xs: &[f32]) -> f32 needs(v4) {
+    let n = xs.len();
+    let mut t = BlockTree32.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(sum_f32_v4(&xs[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+fn dot2_f32_v4(xs: &[f32], ys: &[f32]) -> f32 needs(v4) {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let mut t = BlockTree32.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(dot_f32_v4(&xs[i..e], &y[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+dispatch fn sum2_f32_cpu(xs: &[f32]) -> f32 { v4 => sum2_f32_v4, avx2 => sum2_f32_v3, _ => sum2_f32, }
+
+dispatch fn dot2_f32_cpu(xs: &[f32], ys: &[f32]) -> f32 { v4 => dot2_f32_v4, avx2 => dot2_f32_v3, _ => dot2_f32, }
+
 impl [f32] {
     pub fn sum(&self) -> f32 {
-        if self.len() >= LONG_B32 { return sum_f32_cpu(self); }
-        return sum_f32(self);
+        if self.len() < LONG_B32 { return sum_f32(self); }
+        if self.len() <= SUM_BLOCK { return sum_f32_cpu(self); }
+        return sum2_f32_cpu(self);
     }
 
     pub fn dot(&self, other: &[f32]) -> f32 {
         debug.assert(self.len() == other.len(), "dot: the slices differ in length");
-        if self.len() >= LONG_B32 { return dot_f32_cpu(self, other); }
-        return dot_f32(self, other);
+        if self.len() < LONG_B32 { return dot_f32(self, other); }
+        if self.len() <= SUM_BLOCK { return dot_f32_cpu(self, other); }
+        return dot2_f32_cpu(self, other);
     }
 
     pub fn min(&self) -> Option<f32> {
@@ -2306,16 +2434,137 @@ dispatch fn sum_f64_cpu(xs: &[f64]) -> f64 { v4 => sum_f64_v4, avx2 => sum_f64_v
 
 dispatch fn dot_f64_cpu(xs: &[f64], ys: &[f64]) -> f64 { v4 => dot_f64_v4, avx2 => dot_f64_v3, _ => dot_f64, }
 
+// The block tree (file head) over the block sums of a f64 sum or dot, in one pass: the stack
+// holds the sums of complete tree nodes, the earliest and largest at the bottom. Pushing block
+// c adds the top entry before it (top + new) once per trailing 1 bit of c; `finish` adds the
+// entries from the top down (entry + sum so far), which is the tree's right edge.
+struct BlockTree64 {
+    s: [f64; 64],
+    top: usize,
+    count: u64,
+}
+
+impl BlockTree64 {
+    fn new() -> BlockTree64 {
+        return BlockTree64.{ s: [-0.0; 64], top: 0, count: 0 };
+    }
+
+    fn push(&mut self, x: f64) {
+        let mut v = x;
+        let mut c = self.count;
+        while (c & 1) == 1 {
+            self.top = self.top - 1;
+            v = self.s[self.top] + v;
+            c = c >> 1;
+        }
+        self.s[self.top] = v;
+        self.top = self.top + 1;
+        self.count = self.count + 1;
+    }
+
+    fn finish(&self) -> f64 {
+        if self.top == 0 { return -0.0; }
+        let mut k = self.top - 1;
+        let mut v = self.s[k];
+        while k > 0 {
+            k = k - 1;
+            v = self.s[k] + v;
+        }
+        return v;
+    }
+}
+
+fn sum2_f64(xs: &[f64]) -> f64 {
+    let n = xs.len();
+    let mut t = BlockTree64.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(sum_f64(&xs[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+fn dot2_f64(xs: &[f64], ys: &[f64]) -> f64 {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let mut t = BlockTree64.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(dot_f64(&xs[i..e], &y[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+fn sum2_f64_v3(xs: &[f64]) -> f64 needs(avx2) {
+    let n = xs.len();
+    let mut t = BlockTree64.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(sum_f64_v3(&xs[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+fn dot2_f64_v3(xs: &[f64], ys: &[f64]) -> f64 needs(avx2) {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let mut t = BlockTree64.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(dot_f64_v3(&xs[i..e], &y[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+fn sum2_f64_v4(xs: &[f64]) -> f64 needs(v4) {
+    let n = xs.len();
+    let mut t = BlockTree64.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(sum_f64_v4(&xs[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+fn dot2_f64_v4(xs: &[f64], ys: &[f64]) -> f64 needs(v4) {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let mut t = BlockTree64.new();
+    let mut i: usize = 0;
+    while i < n {
+        let e = (n - i < SUM_BLOCK).select(n, i + SUM_BLOCK);
+        t.push(dot_f64_v4(&xs[i..e], &y[i..e]));
+        i = e;
+    }
+    return t.finish();
+}
+
+dispatch fn sum2_f64_cpu(xs: &[f64]) -> f64 { v4 => sum2_f64_v4, avx2 => sum2_f64_v3, _ => sum2_f64, }
+
+dispatch fn dot2_f64_cpu(xs: &[f64], ys: &[f64]) -> f64 { v4 => dot2_f64_v4, avx2 => dot2_f64_v3, _ => dot2_f64, }
+
 impl [f64] {
     pub fn sum(&self) -> f64 {
-        if self.len() >= LONG_B64 { return sum_f64_cpu(self); }
-        return sum_f64(self);
+        if self.len() < LONG_B64 { return sum_f64(self); }
+        if self.len() <= SUM_BLOCK { return sum_f64_cpu(self); }
+        return sum2_f64_cpu(self);
     }
 
     pub fn dot(&self, other: &[f64]) -> f64 {
         debug.assert(self.len() == other.len(), "dot: the slices differ in length");
-        if self.len() >= LONG_B64 { return dot_f64_cpu(self, other); }
-        return dot_f64(self, other);
+        if self.len() < LONG_B64 { return dot_f64(self, other); }
+        if self.len() <= SUM_BLOCK { return dot_f64_cpu(self, other); }
+        return dot2_f64_cpu(self, other);
     }
 
     pub fn min(&self) -> Option<f64> {

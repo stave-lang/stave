@@ -164,9 +164,29 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
   by L); its sign and payload are unspecified.
   std: `xs.sum()` on `[f32]` / `[f64]` has terms t_i = x_i, and `xs.dot(ys)` has t_i = the
   rounded product x_i * y_i (never fused); both use L = 32 for f32 and L = 16 for f64 (1024 bits)
-  on every target, dispatch arm (128-bit `_` and NEON, `avx2`, `v4`) and the GPU. A program
-  that sums one slice with loops of different L gets different bits; one L per sum is the
-  portable form.
+  on every target, dispatch arm (128-bit `_` and NEON, `avx2`, `v4`) and the GPU, in two levels
+  (below). A program that sums one slice with loops of different L gets different bits; one L
+  per sum is the portable form.
+- **Two-level rule** (std `sum` and `dot`). With block size B (4096 elements, f32 and f64):
+  1. block k holds terms kB .. min((k + 1)B, n) - 1; there are m = ceil(n / B) blocks, the last
+     possibly short. S_k = the block's sum by the logical-lane rule above (its own lanes from
+     `-0.0`, its own tail, its own tree).
+  2. The block tree combines S_0 .. S_(m-1): level 0 is S; level j + 1 entry i = level j entry
+     2i + level j entry 2i + 1, or level j entry 2i alone when 2i + 1 is past the end; the
+     result is the single entry of the first level that has one. m = 0: `-0.0`; m = 1: S_0, so
+     a sum of at most B terms is the one-level sum, bit for bit. Equivalently: tree(S_0 ..
+     S_(m-1)) = tree(first p) + tree(rest), p the largest power of two below m.
+  3. Streaming form (one pass, at most 64 entries of state): a stack of node sums; after block
+     c (counting from 0) is summed, pop and add (popped + new) once per trailing 1 bit of c,
+     then push; at the end add the entries from the top down (lower + sum so far).
+
+  The bits depend only on n and the terms. Legal splits: a tree node is the aligned run of
+  blocks i·2^j .. (i + 1)·2^j - 1 (clipped to m); any thread, warp or pass may compute any node
+  alone (its sum is the two-level rule on that run of terms), and any cover of the blocks by
+  nodes, combined by the levels above them, gives the same bits. Splitting the slice at multiples
+  of 2^j·B elements (one j for all pieces) and combining the pieces' sums by the block tree is
+  legal; any other cut (inside a block, or between nodes the tree does not have, e.g. 8 blocks
+  as 0..2 and 3..7) is not.
 - Integer vector arithmetic needs a mode (`+%`, `+|`, `checked_add`). Plain `+ - *` is E0604.
 - Shifts: per-lane amounts ≥ bits trap (`<<`, `>>`) or are masked (`<<%`), as for scalars.
   A constant out-of-range amount is E0205.
