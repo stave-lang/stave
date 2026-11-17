@@ -1,0 +1,22 @@
+//~ STDOUT slice_of_arrays.stdout
+// A slice of arrays steps by whole arrays: `m[i]` is the i-th pair, read and written, in a debug
+// and in a release build.
+import std.io;
+
+fn get(m: &[[u32; 2]], i: usize, j: usize) -> u32 {
+    return m[i][j];
+}
+
+fn bump(m: &mut [[u32; 2]], i: usize) {
+    m[i][1] = m[i][1] + 10;
+}
+
+fn main() -> i32 {
+    let mut m: [[u32; 2]; 3] = [[1, 2], [3, 4], [5, 6]];
+    bump(&mut m, 2);
+    let a = get(&m, 1, 1);
+    let b = get(&m, 2, 0);
+    let c = get(&m, 2, 1);
+    io.print(f"{a} {b} {c}\n");
+    return 0;
+}

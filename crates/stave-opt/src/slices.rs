@@ -139,6 +139,10 @@ fn unify(b: &mut Body, mut parts: Vec<(u32, u32, i128, u32)>) -> bool {
 /// Rewrites every `addr.elem s i`, `vec.load s i`, and `vec.store s i v` whose `s` is a reference
 /// to a slice into `slice.ptr s` plus the same op on the element pointer. Returns whether the body
 /// changed.
+///
+/// A slice whose elements are arrays is left alone: `addr.elem` on a pointer to an array steps
+/// by the array's element, so on the element pointer `*mut [T; N]` it would address `T`s, not
+/// the slice's elements.
 pub fn split_elem_addrs(types: &TypeTable, b: &mut Body) -> bool {
     let mut edit = Edit::new(b);
     let mut rewire: Vec<(u32, Value)> = Vec::new();
@@ -159,6 +163,9 @@ pub fn split_elem_addrs(types: &TypeTable, b: &mut Body) -> bool {
             continue;
         };
         let Some(TypeKey::Slice { elem, .. }) = types.key(*inner) else { continue };
+        if matches!(types.key(*elem), Some(TypeKey::Array { .. } | TypeKey::Slice { .. })) {
+            continue;
+        }
         let Some(pt) = types.find(&TypeKey::RawPtr { mutable: true, inner: *elem }) else { continue };
         let p = edit.value(pt);
         edit.insert(
