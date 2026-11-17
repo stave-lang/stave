@@ -4332,7 +4332,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
         ],
         shapes: &[
             Shape {
@@ -4342,6 +4342,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "`{fn}` must not have `{effect}`" },
                     LabelTemplate { at: "deny", text: "`{effect}` denied here" },
                     LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
                     LabelTemplate { at: "op", text: "`{at}` {op} here" },
                 ],
                 fix: Some(FixTemplate {
@@ -4357,6 +4358,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "`{fn}` must not have `{effect}`" },
                     LabelTemplate { at: "deny", text: "`{effect}` denied here" },
                     LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
                     LabelTemplate { at: "op", text: "`{at}` {op} here" },
                 ],
                 fix: Some(FixTemplate {
@@ -4379,7 +4381,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "from", kind: HoleKind::Type, choices: &[] },
-            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
             Hole { name: "to", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[
@@ -4401,6 +4403,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                 labels: &[
                     LabelTemplate { at: "primary", text: "coerced here" },
                     LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
                     LabelTemplate { at: "op", text: "`{at}` {op} here" },
                 ],
                 fix: Some(FixTemplate {

@@ -18,7 +18,8 @@
 //! | a `scope { }` (it waits for its threads at the end) | `block` |
 //! | a `spawn { }` (it maps a stack and starts a thread) | `alloc io trap` |
 //!
-//! A node's set ([`EffectSets::set`]) is its own effects and the sets of everything it calls,
+//! A node's set ([`EffectSets::set`]) is its own effects and the sets of everything it calls or
+//! drops (a drop edge to a glue node, which has no effects of its own, then to the `Drop` impls),
 //! except through a boundary fn. An edge carries the deny clause of a fn-value call's type
 //! ([`crate::callgraph::Edge::deny`]): those effects do not flow through it, because every value of
 //! that type is checked to lack them (the coercion rule of typeck plus E1403 here).
@@ -110,6 +111,7 @@ impl std::ops::BitOrAssign for Effects {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpKind {
     Alloc,
+    Free,
     OutOfMemory,
     Trap,
     Cycle,
@@ -127,6 +129,7 @@ impl OpKind {
     pub fn text(self) -> &'static str {
         match self {
             OpKind::Alloc => "allocates",
+            OpKind::Free => "frees memory",
             OpKind::OutOfMemory => "may run out of memory",
             OpKind::Trap => "may trap",
             OpKind::Cycle => "is recursive",
@@ -155,7 +158,7 @@ pub struct Op {
 pub const BOUNDARY: &[(&str, &str, Effects, OpKind)] = &[
     ("runtime.alloc", "alloc", Effects(Effects::ALLOC.0 | Effects::TRAP.0), OpKind::Alloc),
     ("runtime.alloc", "try_alloc", Effects::ALLOC, OpKind::Alloc),
-    ("runtime.alloc", "free", Effects::ALLOC, OpKind::Alloc),
+    ("runtime.alloc", "free", Effects::ALLOC, OpKind::Free),
     ("runtime.alloc", "realloc", Effects(Effects::ALLOC.0 | Effects::TRAP.0), OpKind::Alloc),
     ("runtime.alloc", "try_realloc", Effects::ALLOC, OpKind::Alloc),
     ("runtime.panic", "trap", Effects::TRAP, OpKind::Trap),
@@ -237,7 +240,10 @@ impl Plan {
             }
         }
         (0..n as u32)
-            .filter(|&i| seen[i as usize] && !matches!(g.nodes[i as usize].kind, NodeKind::Table { .. } | NodeKind::Glue { .. }))
+            .filter(|&i| {
+                seen[i as usize]
+                    && !matches!(g.nodes[i as usize].kind, NodeKind::Table { .. } | NodeKind::Glue { .. })
+            })
             .collect()
     }
 }
@@ -686,7 +692,9 @@ pub fn check(prog: &Program, tc: &Typeck, plan: &Plan, sets: &EffectSets) -> Vec
                 Why::Made { site } => primary = *site,
             }
             for &ei in &edges {
-                roles.push(("call", g.out[ei as usize].site));
+                let edge = &g.out[ei as usize];
+                let role = if edge.kind == crate::callgraph::EdgeKind::Drop { "drop" } else { "call" };
+                roles.push((role, edge.site));
             }
             let whole_fn = op.is_none_or(|o| o.span == g.nodes[end as usize].span);
             if let Some(o) = op

@@ -90,7 +90,9 @@ pub fn node_ir(prog: &Program, tc: &Typeck, nodes: &[u32]) -> Result<NodeIrs, Fa
         let has_body = match &g.nodes[n as usize].kind {
             stave_sema::callgraph::NodeKind::Fn { body, .. } => *body,
             stave_sema::callgraph::NodeKind::Closure { .. } => true,
-            stave_sema::callgraph::NodeKind::Table { .. } | stave_sema::callgraph::NodeKind::Glue { .. } => false,
+            stave_sema::callgraph::NodeKind::Table { .. } | stave_sema::callgraph::NodeKind::Glue { .. } => {
+                false
+            }
         };
         if has_body && !covered[n as usize] {
             out[n as usize].trap = Some(g.nodes[n as usize].span);

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use stave_sema::callgraph::NodeKind;
+use stave_sema::callgraph::{EdgeKind, NodeKind};
 use stave_sema::effects::{self, BOUNDARY, Effects, Why};
 use stave_sema::{Config, Fs, Program, Typeck};
 
@@ -179,37 +179,57 @@ fn main() {
     assert!(m["std.thread.join<u32, u32>"].contains(Effects::IO | Effects::BLOCK));
 }
 
-/// A fn-value call's edge carries the deny clause of the value's type (two calls into one
-/// table: what both deny); those effects do not flow through it.
+/// A fn-value call's edges carry the deny clause of the value's type, both the flow-refined
+/// edges to the values that reach the call and the edge to the whole table where an untracked
+/// value does (a fn value returned by a call); the denied effects do not flow through them.
 #[test]
 fn indirect_edges_carry_the_deny_clause() {
     let (p, tc) = load(
         "import std.debug;
 fn trapping(x: u32) -> u32 { debug.assert(x != 0u32, \"x\"); return x; }
+fn safe(x: u32) -> u32 without(trap) { return x +% 1u32; }
+fn safe_both(x: u32) -> u32 without(trap, alloc) { return x +% 2u32; }
 fn one(f: fn(u32) -> u32 without(trap), x: u32) -> u32 { return f(x); }
 fn two(f: fn(u32) -> u32 without(trap, alloc), g: fn(u32) -> u32 without(trap), x: u32) -> u32 {
     return f(g(x));
 }
+fn pick() -> fn(u32) -> u32 without(trap) { return safe; }
+fn returned(x: u32) -> u32 {
+    let f = pick();
+    return f(x);
+}
 fn open(f: fn(u32) -> u32, x: u32) -> u32 { return f(x); }
 fn main() {
     let a = open(trapping, 1u32);
+    let b = one(safe, 1u32);
+    let c = two(safe_both, safe, 1u32);
+    let d = returned(1u32);
 }
 ",
     );
     let d = tc.call_graph.dump(&p, &tc);
-    let edge = |from: &str| -> String {
+    let edge = |from: &str, to: &str| -> String {
         d.lines()
-            .find(|l| l.starts_with(&format!("edge {from} -> table fn(u32) -> u32 ")))
-            .unwrap_or_else(|| panic!("no edge from {from}:\n{d}"))
+            .find(|l| l.starts_with(&format!("edge {from} -> {to} ")))
+            .unwrap_or_else(|| panic!("no edge {from} -> {to}:\n{d}"))
             .to_string()
     };
-    assert!(edge("main.one").contains(" indirect without(trap) @"), "{}", edge("main.one"));
-    assert!(edge("main.two").contains(" indirect without(trap) @"), "{}", edge("main.two"));
-    assert!(edge("main.open").contains(" indirect @"), "{}", edge("main.open"));
+    let e = edge("main.one", "main.safe");
+    assert!(e.contains(" indirect without(trap) @"), "{e}");
+    let e = edge("main.two", "main.safe");
+    assert!(e.contains(" indirect without(trap) @"), "{e}");
+    let e = edge("main.two", "main.safe_both");
+    assert!(e.contains(" indirect without(alloc, trap) @"), "{e}");
+    let e = edge("main.returned", "table fn(u32) -> u32");
+    assert!(e.contains(" indirect without(trap) @"), "{e}");
+    let e = edge("main.open", "main.trapping");
+    assert!(e.contains(" indirect @"), "{e}");
     let m = sets(&p, &tc);
     is(&m, "main.open", &["trap"]);
     is(&m, "main.one", &[]);
     is(&m, "main.two", &[]);
+    // the table holds `trapping`; the edge's deny clause keeps `trap` out
+    is(&m, "main.returned", &[]);
 }
 
 /// The fn type text names the deny clause; widening it is E1403, narrowing it is a coercion.
@@ -266,6 +286,40 @@ fn main() {
     assert_eq!(made, ["main.inc", "main.via<u16>.0", "main.via<u8>.0"]);
     assert!(plan.needs_ir());
     assert!(plan.checks.iter().all(|c| c.deny == Effects::TRAP || c.deny == Effects::IO));
+}
+
+/// Implicit drops count: a fn that only lets a `Vec` go out of scope frees its buffer (`alloc`),
+/// through a drop edge to the glue and `Vec.drop`; the glue itself has no effect of its own, and
+/// the chain of `without(alloc)` on it starts with that drop edge. A `MutexGuard` going out of
+/// scope unlocks, which is no effect.
+#[test]
+fn implicit_drops_count() {
+    let (p, tc) = load(
+        "import std.vec;
+import std.sync;
+fn sink(v: vec.Vec<u32>) {}
+fn sink_denied(v: vec.Vec<u32>) without(alloc) {}
+fn guard(m: &sync.Mutex<u32>) -> u32 { let g = m.lock(); return *g.get(); }
+fn main() {}
+",
+    );
+    let m = sets(&p, &tc);
+    is(&m, "main.sink", &["alloc"]);
+    is(&m, "main.guard", &["lock"]);
+    let s = effects::solve(&p, &tc, None);
+    let g = &tc.call_graph;
+    let names = g.node_names(&p, &tc, &(0..g.nodes.len() as u32).collect::<Vec<_>>());
+    let at = |name: &str| names.iter().position(|n| n == name).unwrap() as u32;
+    let glue = g.nodes.iter().position(|n| matches!(n.kind, NodeKind::Glue { .. })).unwrap();
+    assert_eq!(s.local[glue], Effects::NONE);
+    let (edges, end) = s.chain(g, at("main.sink_denied"), Effects::ALLOC).unwrap();
+    assert_eq!(g.out[edges[0] as usize].kind, EdgeKind::Drop);
+    assert_eq!(names[end as usize], "runtime.alloc.free");
+    let plan = effects::plan(&p, &tc);
+    let d = effects::check(&p, &tc, &plan, &s);
+    assert_eq!(d.len(), 1);
+    assert_eq!(d[0].code(), "E1401");
+    assert!(d[0].message().contains("`runtime.alloc.free`, which frees memory"), "{}", d[0].message());
 }
 
 /// The sets do not depend on the worker count (per-level steps collect in SCC order).
