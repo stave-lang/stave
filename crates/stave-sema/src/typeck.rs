@@ -192,7 +192,7 @@ pub struct TypeckTimings {
     pub sigs: Duration,
     pub bodies: Duration,
     pub canon: Duration,
-    /// [`crate::callgraph`].
+    /// [`crate::callgraph`] and the recursion check on it.
     pub graph: Duration,
 }
 
@@ -450,6 +450,9 @@ fn check_in_pool(prog: &Program) -> Typeck {
     } else {
         crate::callgraph::build(prog, &sigs_table, &tys, &bodies, &brackets)
     };
+    if !call_graph.truncated {
+        diags.extend(crate::recursion::check(prog, &sigs_table, &tys, &call_graph));
+    }
     let t_graph = t3.elapsed();
     let diagnostics = stave_diag::canonical_order(diags, &prog.source_map);
     Typeck {

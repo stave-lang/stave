@@ -1742,6 +1742,16 @@ labels = [{ at = "primary", text = "the package links C objects here" }]
 fix = { description = "use `--compiler auto` or `--compiler cpu`: stage0 links C objects" }
 
 [[diag]]
+code = "E1402"
+severity = "error"
+area = "effects"
+rule = "unmarked recursion: a call cycle (a strongly connected component of the whole-program call graph over instances: calls, implied calls, `dispatch` arms, fn-value calls resolved to the values that reach them, drops) with a fn not declared `rec fn`; one per cycle, at the call leaving its first unmarked fn (smallest path); the cycle is listed from there along a shortest path, and every other unmarked fn of the component gets a label at its name; a cycle made only by dropping a recursive value (drop glue, `Drop` impls, built-in fns) needs no marker; a cycle through a closure literal is E1409"
+holes = { name = "path", cycle = "path" }
+message = "recursive call cycle `{cycle}`: `{name}` is not a `rec fn`"
+labels = [{ at = "primary", text = "`{name}` calls the next fn of the cycle here" }, { at = "call", text = "next call of the cycle" }, { at = "unmarked", text = "also in this recursion, not a `rec fn`" }]
+fix = { description = "mark every fn of the recursion `rec fn` (its depth then has no static bound), or rewrite it as a loop" }
+
+[[diag]]
 code = "E1407"
 severity = "error"
 area = "effects"
@@ -1768,3 +1778,13 @@ holes = { type = "type" }
 message = "`impl Flat for {type}`: `Flat` is derived by the compiler, never implemented"
 labels = [{ at = "primary", text = "remove this impl" }]
 fix = { description = "remove the impl: a type is `Flat` exactly when it holds no reference, view, raw pointer, fn value, `UnsafeCell`, or `Drop` type" }
+
+[[diag]]
+code = "E1409"
+severity = "error"
+area = "effects"
+rule = "a call cycle through a closure literal (also when the closure is reached through a fn value); one per cycle, at its first closure literal; the cycle is listed from there along a shortest path"
+holes = { name = "path", cycle = "path" }
+message = "recursive call cycle `{cycle}` goes through a closure literal in `{name}`"
+labels = [{ at = "primary", text = "this closure literal is part of the cycle" }, { at = "call", text = "next call of the cycle" }]
+fix = { description = "write the recursive part as a `rec fn` item and call it from the closure" }
