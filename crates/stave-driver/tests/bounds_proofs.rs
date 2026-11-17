@@ -1,35 +1,53 @@
-//! Release bounds-check elision on real front-end IR: `tests/conformance/run/bounds_proofs.stv`
-//! lowered, put through the release passes before code generation (stave-opt, then
-//! `stave_ir::bounds::elide`), keeps exactly the checks its look-alike functions need.
+//! The check-removal pass on real front-end IR. `tests/conformance/run/bounds_proofs.stv`,
+//! lowered by the driver, keeps exactly the checks its look-alike functions need, and the same
+//! ones in a debug and in a release build. Over the whole run suite, every function a release
+//! build lowers has the checked IR the debug build gives it, so both keep the same checks. The
+//! two programs that pin this in the `ir` dump goldens are the run tests of the same name.
+//! Removal changes no program: every run-suite program gives the same output, exit status, and
+//! trap in the reference interpreter with all its checks and with the proven ones removed. And
+//! on front-end IR too, the witness checker refuses every corrupted witness and every made-up
+//! witness for a check a look-alike function keeps.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use stave_driver::pipeline::{self, Goal, Options};
+#[path = "../../../tests/support/checked_ir.rs"]
+mod checked_ir;
+#[allow(dead_code)]
+#[path = "../../stave-ir/tests/common/forge.rs"]
+mod forge;
+
+use stave_driver::interp::{self, Limits};
+use stave_driver::pipeline::{self, Goal, Options, Output};
 use stave_driver::shipped::Library;
-use stave_ir::bounds::{self, Proof};
+use stave_ir::bounds::Proof;
 use stave_ir::{Module, Op};
 
 fn repo() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
 }
 
-/// The checked IR of the program after the release passes that run before code generation, and
-/// the proofs recorded per function path.
-fn released(file: &str) -> (Module, Vec<(String, Proof)>) {
+/// The pipeline through lowering (no code generation) in debug or release mode.
+fn lowered(root: &Path, release: bool) -> Output {
     let mut opts = Options::new(Goal::Check).threads(Some(2));
     opts.lower = true;
-    opts.release = true;
+    opts.release = release;
     opts.target = Some(stave_target::Triple::parse("x86_64-linux").unwrap());
-    let out = pipeline::run(&repo().join(file), &Library::in_dir(repo()), &opts).unwrap();
+    pipeline::run(root, &Library::in_dir(repo()), &opts).unwrap()
+}
+
+/// The checked IR of the program, and the rule that removed each check, per function path.
+fn checked(file: &str, release: bool) -> (Module, Vec<(String, Proof)>) {
+    let out = lowered(&repo().join(file), release);
     assert!(!out.has_errors(), "{file}: {:?}", out.diagnostics);
-    let mut m = out.module.expect("checked IR");
-    for b in m.funcs.iter_mut().filter_map(|f| f.body.as_mut()) {
-        stave_opt::before_elision(b);
-    }
-    let e = bounds::elide(&mut m).unwrap_or_else(|r| panic!("witness refused: {r:?}"));
+    let m = out.module.expect("checked IR");
     stave_ir::verify_module(&m).unwrap_or_else(|e| panic!("{e:?}"));
-    bounds::audit(&m).unwrap_or_else(|u| panic!("unguarded after elision: {u:?}"));
-    let proofs = e.into_iter().map(|x| (m.funcs[x.func.index()].path.clone(), x.proof)).collect();
+    stave_ir::bounds::audit(&m).unwrap_or_else(|u| panic!("unguarded after removal: {u:?}"));
+    let mut proofs = Vec::new();
+    for p in &out.removed_checks {
+        assert_eq!(p.proofs.len(), p.witness.removed.len());
+        let path = &m.funcs[p.witness.func.index()].path;
+        proofs.extend(p.proofs.iter().map(|&proof| (path.clone(), proof)));
+    }
     (m, proofs)
 }
 
@@ -45,7 +63,13 @@ fn kept(m: &Module, path: &str) -> usize {
 
 #[test]
 fn proofs_and_kept_checks() {
-    let (m, proofs) = released("tests/conformance/run/bounds_proofs.stv");
+    for release in [false, true] {
+        proofs_and_kept_checks_in(release);
+    }
+}
+
+fn proofs_and_kept_checks_in(release: bool) {
+    let (m, proofs) = checked("tests/conformance/run/bounds_proofs.stv", release);
     let of = |path: &str| -> Vec<Proof> { proofs.iter().filter(|p| p.0 == path).map(|p| p.1).collect() };
     for (path, n) in [
         ("main.dot", 0),
@@ -88,4 +112,165 @@ fn proofs_and_kept_checks() {
         "{:?}",
         of("main.window_sum")
     );
+}
+
+/// Package dirs and single `.stv` files directly under `run/`, sorted.
+fn run_programs() -> Vec<PathBuf> {
+    let dir = repo().join("tests/conformance/run");
+    let mut v: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy();
+            !name.starts_with('.')
+                && !name.starts_with('_')
+                && (p.join("stave.toml").is_file() || p.extension().is_some_and(|x| x == "stv"))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// The lowered IR of a checked program before the removal pass: every check in place.
+fn unremoved(out: &Output) -> Option<Module> {
+    stave_sema::lower(&out.program, out.typeck.as_ref()?, stave_sema::Mode::Debug).ok()
+}
+
+fn count_checks(m: &Module) -> usize {
+    m.funcs
+        .iter()
+        .filter_map(|f| f.body.as_ref())
+        .map(|b| b.insts.op.iter().filter(|op| **op == Op::BoundsCheck).count())
+        .sum()
+}
+
+fn data_files(p: &Path) -> Vec<(String, Vec<u8>)> {
+    if !p.is_dir() {
+        return Vec::new();
+    }
+    std::fs::read_dir(p)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()))
+        .collect()
+}
+
+/// Over the run suite, per program:
+///
+/// - Debug = release in which checks remain: each function the release build lowers (what
+///   `main` reaches, the shipped std and runtime included) has the ops of the debug build's
+///   function of that path, and so the same `check.bounds`.
+/// - Removing the proven checks changes nothing the program does: the lowered IR with every
+///   check and the checked IR without the proven ones print the same, exit the same, and trap
+///   the same in the reference interpreter (which bounds-checks every access of its own memory,
+///   so an access that lost a check it needed would fault).
+#[test]
+fn modes_agree_and_removal_changes_no_program() {
+    use rayon::prelude::*;
+    let target = stave_target::Triple::parse("x86_64-linux").unwrap();
+    // Per program that lowers: release fns, checks kept, checks removed, whether it traps.
+    let per_program: Vec<Option<[usize; 4]>> = run_programs()
+        .par_iter()
+        .map(|p| {
+            let (dbg, rel) = (lowered(p, false), lowered(p, true));
+            let (Some(d), Some(r)) = (&dbg.module, &rel.module) else {
+                assert_eq!(dbg.module.is_some(), rel.module.is_some(), "{}", p.display());
+                return None;
+            };
+            let differ = checked_ir::not_in(r, d);
+            assert!(differ.is_empty(), "{}: release differs from debug in {differ:?}", p.display());
+            let (kd, kr) = (checked_ir::kept_checks(d), checked_ir::kept_checks(r));
+            for (path, n) in &kr {
+                assert!(kd.get(path).is_some_and(|m| m >= n), "{}: {path} keeps {n} checks", p.display());
+            }
+            let removed = |o: &Output| o.removed_checks.iter().map(|x| x.proofs.len()).sum::<usize>();
+            assert_eq!(removed(&dbg), removed(&rel), "{}", p.display());
+
+            let before = unremoved(&dbg).unwrap_or_else(|| panic!("{}: does not lower", p.display()));
+            assert_eq!(count_checks(&before) - count_checks(d), removed(&dbg), "{}", p.display());
+            let main = stave_driver::build::main_path(&dbg.program)?;
+            let files = data_files(p);
+            let run =
+                |m: &Module| interp::run(m, &main, target, &[], &files, Limits::default()).map(|r| r.ran);
+            let (want, got) = (run(&before), run(d));
+            assert_eq!(got, want, "{}: removal changed the run", p.display());
+            let fns = r.funcs.iter().filter(|f| f.body.is_some()).count();
+            Some([fns, kr.values().sum(), removed(&rel), usize::from(want.is_ok_and(|r| r.exit == 101))])
+        })
+        .collect();
+    let ran: Vec<[usize; 4]> = per_program.into_iter().flatten().collect();
+    let total = |k: usize| ran.iter().map(|x| x[k]).sum::<usize>();
+    let (fns, kept, removed, trapped) = (total(0), total(1), total(2), total(3));
+    assert!(ran.len() >= 50, "only {} programs lowered", ran.len());
+    assert!(fns > 0 && removed > 0 && kept > 0, "{fns} fns, {removed} removed, {kept} kept");
+    assert!(trapped >= 5, "only {trapped} programs trap");
+}
+
+/// On front-end IR (the program, the shipped std, and the runtime): the checker accepts every
+/// witness the pass writes and refuses every corruption of one; no made-up witness removes a
+/// check a look-alike function keeps.
+#[test]
+fn no_forged_witness_passes() {
+    for (file, look_alikes) in [
+        ("tests/conformance/run/bounds_removed.stv", &[][..]),
+        ("tests/conformance/run/bounds_kept.stv", &["main.first_n", "main.pairs"][..]),
+        (
+            "tests/conformance/run/bounds_proofs.stv",
+            &[
+                "main.le_only",
+                "main.eq_on_one_path",
+                "main.next_under_len",
+                "main.prev_wrapping",
+                "main.at_offset",
+                "main.chunk_le_sat",
+                "main.chunk_short_test",
+                "main.chunk_wrapping",
+                "main.chunk_other",
+                "main.chunk_shrunk",
+                "main.chunk_moved",
+            ][..],
+        ),
+    ] {
+        let checked = lowered(&repo().join(file), false);
+        let m = unremoved(&checked).unwrap_or_else(|| panic!("{file} does not lower"));
+        let corrupted = forge::mutants_are_refused(&m);
+        assert!(corrupted >= 20, "{file}: only {corrupted} corrupted witnesses");
+        let mut forged = 0;
+        for path in look_alikes {
+            let f = m.find_func(path).unwrap_or_else(|| panic!("{file}: no fn {path}"));
+            assert_eq!(forge::kept_checks(&m, f).len(), 1, "{file}: {path}");
+            forged += forge::forgeries_are_refused(&m, f);
+        }
+        assert_eq!(forged == 0, look_alikes.is_empty(), "{file}");
+    }
+}
+
+/// The two programs whose remaining checks the `ir` dump goldens pin per mode
+/// (`tests/conformance/dumps/ir_bounds_*`: `ir.txt` debug, `ir.release.txt` release) are the
+/// run tests of the same name, which run natively in both modes: the dump case differs only in
+/// its `//~` annotation lines. In both modes `bounds_removed` keeps no check and `bounds_kept`
+/// keeps the two that can fail.
+#[test]
+fn dump_cases_are_the_run_programs() {
+    let code = |p: PathBuf| -> String {
+        let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        text.lines().filter(|l| !l.starts_with("//~")).map(|l| format!("{l}\n")).collect()
+    };
+    for (name, want) in
+        [("bounds_removed", &[][..]), ("bounds_kept", &[("main.first_n", 1), ("main.pairs", 1)][..])]
+    {
+        let run = repo().join(format!("tests/conformance/run/{name}.stv"));
+        let dump = repo().join(format!("tests/conformance/dumps/ir_{name}/input/src/main.stv"));
+        assert_eq!(code(run.clone()), code(dump), "{name}: the dump case is not the run program");
+        for release in [false, true] {
+            let (m, _) = checked(&format!("tests/conformance/run/{name}.stv"), release);
+            let kept: Vec<(String, usize)> = checked_ir::kept_checks(&m)
+                .into_iter()
+                .filter(|(path, _)| path.starts_with("main."))
+                .collect();
+            let want: Vec<(String, usize)> = want.iter().map(|(p, n)| (p.to_string(), *n)).collect();
+            assert_eq!(kept, want, "{name}, release: {release}");
+        }
+    }
 }

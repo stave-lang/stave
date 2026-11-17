@@ -3,8 +3,8 @@
 //~ STDOUT bounds_offset_trap.stdout
 //~ STDERR-CONTAINS "panic: Bounds at bounds_offset_trap.stv:13:27 in main.pairs (thread 0)"
 // `xs[i + 1]` under `i < xs.len()` looks like a constant-offset access but is out of range in the
-// last iteration: release builds keep its check and trap there, after printing the in-range
-// pairs (`xs[i]` itself is proven and loses its check).
+// last iteration: a release build keeps its check, as a debug build does, and traps there after
+// printing the in-range pairs (`xs[i]` itself is proven and loses its check).
 import std.io;
 
 fn pairs(xs: &[u32]) -> u32 {

@@ -108,9 +108,10 @@ flags above.
 - The corpus is synthetic: dense integer expressions, small fns, shallow loops. Real programs
   have other mixes; gcc and clang at `-O2` spend unusually long on it. Lines are about 42 bytes
   long on average.
-- A debug build keeps every value that crosses a block in its stack slot and optimizes nothing.
+- A debug build keeps every value that crosses a block in its stack slot and optimizes nothing;
+  like every build, it removes the bounds checks it has a proof for.
   `--release` lowers only what `main` reaches, reads each slice's address and length once,
-  removes the bounds checks it has a proof for, keeps values that cross blocks in registers,
+  keeps values that cross blocks in registers,
   folds addresses into loads and stores, puts cold code last, and packs the image. It does not
   inline, hoist loop-invariant code, or build vector code, so it is expected to lose to `-O2`,
   and it does.

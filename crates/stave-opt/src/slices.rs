@@ -2,14 +2,12 @@
 //! is defined, instead of at every element access.
 //!
 //! - [`unify_parts`]: all `slice.len s` (or `slice.ptr s`) of one slice value `s` become a single
-//!   instruction right after the definition of `s`. A bounds check against the length and a loop
-//!   bound against the length then name the same operand (what stave-ir's `bounds::elide`
-//!   compares), and inside a loop the part is a value defined outside it, which the backends
-//!   keep in a register.
+//!   instruction right after the definition of `s`: inside a loop the part is a value defined
+//!   outside it, which the backends keep in a register.
 //! - [`split_elem_addrs`]: `addr.elem s i`, `vec.load s i`, and `vec.store s i v` on a slice
 //!   reference become `p = slice.ptr s` and the same op on the element pointer `p`, so the
-//!   address is such a part too. Run it after bounds-check elision: a check guards the access by
-//!   its slice operand.
+//!   address is such a part too. It runs after the removal of bounds checks, which reads an
+//!   access by its slice operand; the bounds audit no longer sees these accesses afterwards.
 //!
 //! - [`unify_chunk_bounds`]: all `n -| k` of one value `n` and one constant `k` (the bound of a
 //!   vector access of `k + 1` lanes, checked against the length `n`) become a single instruction

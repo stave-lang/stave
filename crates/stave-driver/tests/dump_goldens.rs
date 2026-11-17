@@ -7,18 +7,24 @@
 //!
 //! Checked-IR goldens (contracts/checked-ir.md): every `ir_<construct>/` case is a
 //! package `input` plus the expected `ir.txt` of a debug lowering (`stave check --dump=ir`) and, when
-//! present, `ir.release.txt` of a `--release` lowering (instance root sets). A case whose input has
-//! an error diagnostic has no `ir.txt`, and none may be written for it.
+//! present, `ir.release.txt` of a `--release` lowering (instance root sets; the `ir_bounds_*`
+//! cases: the bounds checks left in each mode, which must be the same ones). A case whose input
+//! has an error diagnostic has no `ir.txt`, and none may be written for it.
 //!
 //! `STAVE_BLESS=1` rewrites the expected files from the current output (review the diff!).
 
 use std::path::{Path, PathBuf};
+
+#[path = "../../../tests/support/checked_ir.rs"]
+mod checked_ir;
 
 use stave_driver::dump::{DumpStage, write_dumps};
 use stave_driver::pipeline::{self, Goal, Options, Output};
 use stave_driver::shipped::Library;
 
 const CASES: [&str; 4] = ["valid_small", "dropped_item", "unbalanced", "multi_file"];
+/// The `ir_` cases that also have a golden of the release lowering.
+const RELEASE_CASES: [&str; 3] = ["ir_bounds_kept", "ir_bounds_removed", "ir_roots"];
 const COMPARED: [DumpStage; 7] = [
     DumpStage::Tokens,
     DumpStage::Items,
@@ -299,7 +305,9 @@ fn ir_goldens() {
     for case in &cases {
         for (release, file) in [(false, "ir.txt"), (true, "ir.release.txt")] {
             let want_path = dumps_dir(case).join(file);
-            if release && !want_path.exists() && !(bless && case == "ir_roots") {
+            let has_release = RELEASE_CASES.contains(&case.as_str());
+            if release && !want_path.exists() && !(bless && has_release) {
+                assert!(!has_release, "{case}: no {file}");
                 continue;
             }
             let (dir, out) = run_ir_case(case, release, 2);
@@ -334,7 +342,8 @@ fn ir_goldens() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The `ir` dump does not depend on the thread count; release prints a subset of debug's fns.
+/// The `ir` dump does not depend on the thread count; release prints a subset of debug's fns,
+/// each with the debug build's ops.
 #[test]
 fn ir_dump_properties() {
     for case in ir_cases() {
@@ -363,7 +372,14 @@ fn ir_dump_properties() {
                 last_inst = Some(inst);
             }
         }
-        let (dr, _) = run_ir_case(&case, true, 1);
+        let (dr, or) = run_ir_case(&case, true, 1);
+        // Every fn the release build lowers has the ops of the debug build's, and so its checks.
+        if let (Some(d), Some(r)) = (&o1.module, &or.module) {
+            let differ = checked_ir::not_in(r, d);
+            assert!(differ.is_empty(), "{case}: release differs from debug in {differ:?}");
+            let (kd, kr) = (checked_ir::kept_checks(d), checked_ir::kept_checks(r));
+            assert!(kr.iter().all(|(path, n)| kd.get(path) == Some(n)), "{case}: {kr:?} vs {kd:?}");
+        }
         let rel = read(&dr.join("ir.txt"));
         let paths = |t: &str| -> std::collections::BTreeSet<String> {
             t.lines()

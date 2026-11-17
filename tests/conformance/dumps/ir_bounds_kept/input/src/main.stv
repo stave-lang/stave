@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// Every build, debug or release, keeps a bounds check it has no proof for, so both trap at the
+// same place. `n` is not known to be the length of `xs` (`first_n`: its check passes here), and
+// `i + 1` is one past what `i < xs.len()` covers (`pairs`: `xs[i]` is proven and loses its
+// check, `xs[i + 1]` traps in the last iteration).
+fn first_n(xs: &[u32], n: usize) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..n {
+        s += xs[i];
+    }
+    return s;
+}
+
+fn pairs(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..xs.len() {
+        s += xs[i] + xs[i + 1];
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let a: [u32; 3] = [7, 8, 9];
+    if first_n(&a, 3) != 24 {
+        return 1;
+    }
+    let s = pairs(&a);
+    return if s == 0 then 2 else 3;
+}

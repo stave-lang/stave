@@ -1,0 +1,77 @@
+type t0 int u 32
+type t1 int u size
+type t2 int s 32
+type t3 bool
+type t4 ref t0
+type t5 ref t8
+type t6 ref t9
+type t7 ref mut t8
+type t8 array t0 3
+type t9 slice t0
+fn @0 main.pairs {
+b0(%0: t6):
+  %1 = slice.len t1 %0
+  br b1(0, 0)
+b1(%2: t1, %3: t0):
+  %4 = lt t3 %2 %1
+  cbr %4 b2() b3(%3)
+b2():
+  %5 = slice.len t1 %0
+  %6 = addr.elem t4 %0 %2
+  %7 = load t0 %6
+  %8 = add t1 %2 1
+  %9 = slice.len t1 %0
+  check.bounds () %8 %9
+  %10 = addr.elem t4 %0 %8
+  %11 = load t0 %10
+  %12 = add t0 %7 %11
+  %13 = add t0 %3 %12
+  %14 = add.wrap t1 %2 1
+  br b1(%14, %13)
+b3(%15: t0):
+  ret %15
+}
+fn @1 main.first_n {
+b0(%0: t6, %1: t1):
+  br b1(0, 0)
+b1(%2: t1, %3: t0):
+  %4 = lt t3 %2 %1
+  cbr %4 b2() b3(%3)
+b2():
+  %5 = slice.len t1 %0
+  check.bounds () %2 %5
+  %6 = addr.elem t4 %0 %2
+  %7 = load t0 %6
+  %8 = add t0 %3 %7
+  %9 = add.wrap t1 %2 1
+  br b1(%9, %8)
+b3(%10: t0):
+  ret %10
+}
+fn @2 main.main {
+b0():
+  %0 = slot t7
+  %1 = make t8 7 8 9
+  store () %0 %1
+  %2 = cast t5 %0
+  %3 = addr.elem t4 %2 0
+  %4 = slice.make t6 %3 3
+  %5 = call t0 @1 %4 3
+  %6 = ne t3 %5 24
+  cbr %6 b1() b2()
+b1():
+  ret 1
+b2():
+  %7 = cast t5 %0
+  %8 = addr.elem t4 %7 0
+  %9 = slice.make t6 %8 3
+  %10 = call t0 @0 %9
+  %11 = eq t3 %10 0
+  cbr %11 b3() b4()
+b3():
+  br b5(2)
+b4():
+  br b5(3)
+b5(%12: t2):
+  ret %12
+}
