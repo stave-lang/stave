@@ -1,0 +1,105 @@
+// runtime.cpu: the CPU features of the running process (contracts/intrinsics.md "CPU feature
+// detection").
+//
+// A feature word is a u64 with bit i set for feature i of the compiler's closed feature list
+// (crates/stave-target/src/features.rs; a test checks every constant below against it). The
+// word is closed downward: a feature is set only if everything it implies is set, so testing one
+// mask is sound. The probe itself is per arch (`arch.cpu`: cpuid/xgetbv on x86-64, AT_HWCAP and
+// AT_HWCAP2 on AArch64); this module applies the implication closure.
+//
+// The process word (`runtime.state` field `cpu_features`) is written once by `init`, from start
+// code before main and before any other thread exists, and only read afterwards: no atomics.
+
+import arch.cpu;
+import runtime.state;
+
+pub const SSE42: u64 = 1 << 0;
+pub const AVX: u64 = 1 << 1;
+pub const AVX2: u64 = 1 << 2;
+pub const FMA: u64 = 1 << 3;
+pub const BMI2: u64 = 1 << 4;
+pub const F16C: u64 = 1 << 5;
+pub const AVX512F: u64 = 1 << 6;
+pub const AVX512BW: u64 = 1 << 7;
+pub const AVX512VL: u64 = 1 << 8;
+pub const AVX512DQ: u64 = 1 << 9;
+pub const AVX512CD: u64 = 1 << 10;
+pub const AVX512VBMI: u64 = 1 << 11;
+pub const AVX512VBMI2: u64 = 1 << 12;
+pub const AVX512VPOPCNTDQ: u64 = 1 << 13;
+pub const AVX512BITALG: u64 = 1 << 14;
+pub const AVX512FP16: u64 = 1 << 15;
+pub const AVX512BF16: u64 = 1 << 16;
+pub const NEON: u64 = 1 << 17;
+pub const FP16: u64 = 1 << 18;
+pub const DOTPROD: u64 = 1 << 19;
+pub const BF16: u64 = 1 << 20;
+pub const SVE: u64 = 1 << 21;
+pub const SVE2: u64 = 1 << 22;
+pub const CUDA: u64 = 1 << 23;
+
+pub const NFEATURES: usize = 24;
+
+// CLOSURE[i]: feature i and everything it implies, transitively.
+const CLOSURE: [u64; 24] = [
+    SSE42,
+    SSE42 | AVX,
+    SSE42 | AVX | AVX2,
+    SSE42 | AVX | FMA,
+    BMI2,
+    SSE42 | AVX | F16C,
+    SSE42 | AVX | AVX2 | FMA | F16C | AVX512F,
+    SSE42 | AVX | AVX2 | FMA | F16C | AVX512F | AVX512BW,
+    SSE42 | AVX | AVX2 | FMA | F16C | AVX512F | AVX512VL,
+    SSE42 | AVX | AVX2 | FMA | F16C | AVX512F | AVX512DQ,
+    SSE42 | AVX | AVX2 | FMA | F16C | AVX512F | AVX512CD,
+    SSE42 | AVX | AVX2 | FMA | F16C | AVX512F | AVX512BW | AVX512VBMI,
+    SSE42 | AVX | AVX2 | FMA | F16C | AVX512F | AVX512BW | AVX512VBMI2,
+    SSE42 | AVX | AVX2 | FMA | F16C | AVX512F | AVX512VPOPCNTDQ,
+    SSE42 | AVX | AVX2 | FMA | F16C | AVX512F | AVX512BW | AVX512BITALG,
+    SSE42 | AVX | AVX2 | FMA | F16C | AVX512F | AVX512BW | AVX512VL | AVX512DQ | AVX512FP16,
+    SSE42 | AVX | AVX2 | FMA | F16C | AVX512F | AVX512BW | AVX512BF16,
+    NEON,
+    NEON | FP16,
+    NEON | DOTPROD,
+    NEON | BF16,
+    NEON | FP16 | SVE,
+    NEON | FP16 | SVE | SVE2,
+    CUDA,
+];
+
+// The largest subset of `raw` closed under implication: feature i stays iff CLOSURE[i] ⊆ raw.
+// One pass suffices: CLOSURE[i] ⊆ raw implies CLOSURE[j] ⊆ raw for every j in CLOSURE[i].
+pub fn close(raw: u64) -> u64 {
+    let mut w: u64 = 0;
+    for i in 0..NFEATURES {
+        let c = CLOSURE[i];
+        if raw & c == c { w = w | (1u64 << (i as u64)); }
+    }
+    return w;
+}
+
+// The features of the running CPU and OS. Pure: reads the CPU (x86-64) or the auxiliary vector
+// values runtime.start saved (AArch64), writes nothing.
+pub fn detect() -> u64 {
+    let st = state.get();
+    let hwcap = unsafe("st is runtime.state.STATE; hwcap is written only by runtime.start before main") (*st).hwcap;
+    let hwcap2 = unsafe("st is runtime.state.STATE; hwcap2 is written only by runtime.start before main") (*st).hwcap2;
+    return close(cpu.probe(hwcap, hwcap2));
+}
+
+// Fills the process word. Start code calls it once, before main and before any other thread.
+pub unsafe("called once, before main and before any thread other than the start thread exists")
+fn init() {
+    let w = detect();
+    let st = state.get();
+    unsafe("st is runtime.state.STATE; no other thread exists yet (caller)") {
+        (*st).cpu_features = w;
+    }
+}
+
+// The process word `init` stored (0 before `init`).
+pub fn features() -> u64 {
+    let st = state.get();
+    return unsafe("st is runtime.state.STATE; cpu_features is written only by init, before any other thread") (*st).cpu_features;
+}

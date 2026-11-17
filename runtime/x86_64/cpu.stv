@@ -1,0 +1,75 @@
+// runtime_x86_64.cpu: the x86-64 feature probe, imported only by runtime.cpu (`import arch.cpu;`).
+// Rules and their CPUID sources: contracts/intrinsics.md "CPU feature detection". The bit
+// constants are runtime.cpu's (a test checks both files against the compiler's feature list);
+// runtime.cpu closes the raw word under implication.
+
+extern "stave-intrinsic" {
+    fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32);
+    fn xgetbv(xcr: u32) -> u64;
+}
+
+const SSE42: u64 = 1 << 0;
+const AVX: u64 = 1 << 1;
+const AVX2: u64 = 1 << 2;
+const FMA: u64 = 1 << 3;
+const BMI2: u64 = 1 << 4;
+const F16C: u64 = 1 << 5;
+const AVX512F: u64 = 1 << 6;
+const AVX512BW: u64 = 1 << 7;
+const AVX512VL: u64 = 1 << 8;
+const AVX512DQ: u64 = 1 << 9;
+const AVX512CD: u64 = 1 << 10;
+const AVX512VBMI: u64 = 1 << 11;
+const AVX512VBMI2: u64 = 1 << 12;
+const AVX512VPOPCNTDQ: u64 = 1 << 13;
+const AVX512BITALG: u64 = 1 << 14;
+const AVX512FP16: u64 = 1 << 15;
+const AVX512BF16: u64 = 1 << 16;
+
+// XCR0 state components the OS must enable: SSE and YMM (bits 1, 2) for VEX-encoded code, plus
+// opmask, ZMM_Hi256, Hi16_ZMM (bits 5, 6, 7) for EVEX-encoded code.
+const XCR0_AVX: u64 = 0x6;
+const XCR0_AVX512: u64 = 0xe6;
+
+const AVX_CLASS: u64 = AVX | AVX2 | FMA | F16C;
+const AVX512_CLASS: u64 = AVX512F | AVX512BW | AVX512VL | AVX512DQ | AVX512CD | AVX512VBMI | AVX512VBMI2 | AVX512VPOPCNTDQ | AVX512BITALG | AVX512FP16 | AVX512BF16;
+
+fn bit(reg: u32, n: u32, f: u64) -> u64 {
+    return if (reg >> n) & 1 == 1 then f else 0;
+}
+
+fn query(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    return unsafe("cpuid only reads processor identification; every x86-64 CPU has it") cpuid(leaf, subleaf);
+}
+
+// Features the CPU reports and the OS has enabled, not yet closed under implication. The
+// AArch64 auxiliary vector words are unused here.
+pub fn probe(hwcap: u64, hwcap2: u64) -> u64 {
+    let (max_leaf, _, _, _) = query(0, 0);
+    if max_leaf < 1 { return 0; }
+    let (_, _, ecx1, _) = query(1, 0);
+    let mut w: u64 = 0;
+    w = w | bit(ecx1, 20, SSE42) | bit(ecx1, 28, AVX) | bit(ecx1, 12, FMA) | bit(ecx1, 29, F16C);
+    if max_leaf >= 7 {
+        let (max_sub7, ebx7, ecx7, edx7) = query(7, 0);
+        w = w | bit(ebx7, 5, AVX2) | bit(ebx7, 8, BMI2);
+        w = w | bit(ebx7, 16, AVX512F) | bit(ebx7, 17, AVX512DQ) | bit(ebx7, 28, AVX512CD);
+        w = w | bit(ebx7, 30, AVX512BW) | bit(ebx7, 31, AVX512VL);
+        w = w | bit(ecx7, 1, AVX512VBMI) | bit(ecx7, 6, AVX512VBMI2);
+        w = w | bit(ecx7, 12, AVX512BITALG) | bit(ecx7, 14, AVX512VPOPCNTDQ);
+        w = w | bit(edx7, 23, AVX512FP16);
+        if max_sub7 >= 1 {
+            let (eax71, _, _, _) = query(7, 1);
+            w = w | bit(eax71, 5, AVX512BF16);
+        }
+    }
+    // xgetbv faults unless the CPU has XSAVE (leaf 1 ECX bit 26) and the OS set CR4.OSXSAVE
+    // (bit 27).
+    let mut xcr0: u64 = 0;
+    if (ecx1 >> 26) & 3 == 3 {
+        xcr0 = unsafe("OSXSAVE is set, so xgetbv is enabled; XCR0 is readable at every privilege level") xgetbv(0);
+    }
+    if xcr0 & XCR0_AVX != XCR0_AVX { w = w & ~(AVX_CLASS | AVX512_CLASS); }
+    if xcr0 & XCR0_AVX512 != XCR0_AVX512 { w = w & ~AVX512_CLASS; }
+    return w;
+}
