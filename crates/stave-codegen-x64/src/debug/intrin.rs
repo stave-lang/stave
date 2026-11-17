@@ -3,7 +3,8 @@
 //! `main_addr`, `signal_handler_addr`, `site_table`, `pc_table`, the CPU atomics
 //! `atomic_{load,xchg,add,cas}_{u32,u64}` (sequentially consistent: `mov` / `xchg` / `lock xadd` /
 //! `lock cmpxchg` on `[rcx]`), and `thread_clone` (a thread-creating system call whose child runs
-//! `__stave_thread_start(arg)` on its new stack, then the `exit` system call).
+//! `__stave_thread_start(arg)` on its new stack, then the `exit` system call), and `cpu_init` (a
+//! call of `runtime.cpu.init` when the module has it, else nothing).
 
 use stave_ir::layout::Shape;
 use stave_ir::{Operand, TypeId, Value};
@@ -148,6 +149,15 @@ impl Cg<'_, '_> {
                     Some(v) => self.bind_g(v, RAX),
                     None => Ok(()),
                 }
+            }
+            "cpu_init" => {
+                // a call of `runtime.cpu.init` if the program has it, else no code
+                arity(0)?;
+                let Some(g) = super::find_body(self.cx.m, "runtime.cpu.init") else { return Ok(()) };
+                let gf = self.cx.m.func(g).ok_or_else(|| bad("callee out of range"))?;
+                let abi = self.abi_of(&gf.params, gf.ret)?;
+                let sym = self.func_sym(g)?;
+                self.call(Callee::Sym(sym), &[], &abi, None, false)
             }
             "thread_start_addr" => addr(self, self.cx.thread_sym, "`runtime.thread.entry`"),
             "main_addr" => addr(self, self.cx.main_sym, "`main`"),

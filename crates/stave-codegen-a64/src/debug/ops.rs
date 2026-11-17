@@ -1642,6 +1642,10 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.a.bind(parent)?;
                 self.result_regs(Ret::X0, res)
             }
+            Intr::CpuInit => match syms.cpu_init {
+                Some(sym) => self.call(Ok(sym), &[], None, &[], None),
+                None => Ok(()),
+            },
             Intr::Atomic { op, wide } => {
                 // x1 = p, x2 = value / new, x3 = expected; result x0 (sequentially consistent:
                 // ldar, or an ldaxr/stlxr loop)

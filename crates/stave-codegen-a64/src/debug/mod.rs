@@ -93,7 +93,8 @@
 //! `syscallN`: `x8 = nr`, `x0..x5`, `svc #0`, result `x0`. `ccallN`: `x0..x7`, `a9..a12` at
 //! `[sp]`, `blr x16`. `call_on_stack`: `stp x19, x30, [sp, #-16]!; mov x19, sp; mov sp, top;
 //! blr x16; mov sp, x19; ldp x19, x30, [sp], #16`. `main_addr`, `signal_handler_addr`,
-//! `thread_start_addr`, `site_table`, `pc_table`, `static_addr k`: `adrp` + `add`. `cpuid`,
+//! `thread_start_addr`, `site_table`, `pc_table`, `static_addr k`: `adrp` + `add`. `cpu_init`:
+//! `bl runtime.cpu.init` when the module defines it, else nothing. `cpuid`,
 //! `xgetbv` (x86-64 only) and unknown intrinsics are [`ErrorKind::Unsupported`].
 //!
 //! # Emitted symbols ([`prepare`])

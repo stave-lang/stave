@@ -1,11 +1,16 @@
 type t0 int u 8
 type t1 int u 32
 type t2 int s 32
+fn @0 main.pick {
+b0(%0: t1):
+  %1 = call t1 @6 %0
+  ret %1
+}
 fn @1 main.for_export {
 b0(%0: t2):
   ret %0
 }
-fn @2 main.pick_v3 {
+fn @2 main.pick_v3 needs(avx2) {
 b0(%0: t1):
   %1 = add t1 %0 1
   ret %1

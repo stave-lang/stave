@@ -1350,7 +1350,7 @@ impl<'a> FnCx<'a> {
         match tgt {
             Some(Target::Fn { decl, args: ga }) => {
                 let ga: Vec<GArg> = ga.iter().map(|a| self.sub_garg(*a)).collect();
-                let k = InstKey { decl, args: ga };
+                let k = self.direct_dispatch(decl).unwrap_or(InstKey { decl, args: ga });
                 let Some((ps, _)) = self.inst_sig(&k) else { return self.fail_at(Some(ctok), "callee") };
                 let Some(vs) = self.args(args, &ps) else { return E::Never };
                 self.call_inst(k, &vs, ctok)
@@ -1448,6 +1448,23 @@ impl<'a> FnCx<'a> {
                 _ => self.fail_at(Some(ctok), "call without a target"),
             },
         }
+    }
+
+    /// A call of `dispatch fn` `decl` from a fn whose needs and the target baseline cover the
+    /// first live arm's features calls that arm's target directly: the dispatch would always pick
+    /// it there. Only the first arm: an earlier arm may still match at run time otherwise.
+    fn direct_dispatch(&self, decl: crate::ids::DeclId) -> Option<InstKey> {
+        let prog = self.g.prog;
+        let d = prog.decl(decl)?;
+        if !d.flags.has(crate::decls::DeclFlags::DISPATCH) {
+            return None;
+        }
+        let b = self.g.brackets.get(d.item.idx())?;
+        let icx = crate::itemcx::ItemCx::new(prog, d.item, b)?;
+        let plan = crate::dispatch::plan(prog, self.g.tc, &icx, decl)?;
+        let (mask, k) = plan.first();
+        let have = prog.target.baseline().union(self.needs);
+        (mask & !have.bits() == 0).then(|| k.clone())
     }
 
     /// The ADT type of a literal or constructor: the node type when it is the last step, else

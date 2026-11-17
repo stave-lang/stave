@@ -179,6 +179,10 @@ fn print_func(m: &Module, f: &Func, lay: &FnLayout, out: &mut String) {
             .collect();
         let _ = write!(out, "<{}>", ts.join(","));
     }
+    if !f.features.is_empty() {
+        let fs: Vec<&str> = crate::types::feature_generators(f.features).iter().map(|x| x.name()).collect();
+        let _ = write!(out, " needs({})", fs.join(", "));
+    }
     out.push_str(" {\n");
     for &bi in &lay.block_order {
         let Some(bd) = b.blocks.get(bi) else { continue };

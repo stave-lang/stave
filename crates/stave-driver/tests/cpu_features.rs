@@ -180,14 +180,25 @@ fn detected_features_match_ground_truth() {
     assert!(failures.is_empty(), "{} failure(s):\n{}", failures.len(), failures.join("\n"));
 }
 
-/// A program that does not use `std.cpu` has no `runtime.cpu` code: detection is not linked in
-/// unconditionally.
+/// A dispatch that reads no feature word: its first live arm is in the baseline of both arches
+/// (`neon` is dropped on x86-64, `sse42` on AArch64).
+const BASELINE_DISPATCH: &str = "fn on_neon() -> u32 needs(neon) {\n    return 2;\n}\n\n\
+     fn on_v2() -> u32 needs(sse42) {\n    return 1;\n}\n\n\
+     fn on_base() -> u32 {\n    return 0;\n}\n\n\
+     dispatch fn pick() -> u32 { neon => on_neon, sse42 => on_v2, _ => on_base, }\n\n\
+     fn main() -> i32 {\n    return (pick() as% i32) - 1;\n}\n";
+
+/// A program that does not use `std.cpu` and has no dispatch that tests the feature word has no
+/// `runtime.cpu` code: detection is not linked in unconditionally, and start code fills no word.
 #[test]
 fn hello_has_no_cpu_detection() {
-    let p = repo().join("tests/conformance/run/hello");
+    let tmp = TempDir::new("cpuf-none").unwrap();
+    let disp = tmp.path().join("baseline_dispatch.stv");
+    std::fs::write(&disp, BASELINE_DISPATCH).unwrap();
+    let hello = repo().join("tests/conformance/run/hello");
     for target in ["x86_64-linux", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
-        for release in [false, true] {
-            let out = build(&p, target, release);
+        for (p, release) in [(&hello, false), (&hello, true), (&disp, false), (&disp, true)] {
+            let out = build(p, target, release);
             let m = out.module.as_ref().unwrap();
             let cpu: Vec<&str> = m
                 .funcs
@@ -195,7 +206,7 @@ fn hello_has_no_cpu_detection() {
                 .filter(|f| f.body.is_some() && f.path.starts_with("runtime.cpu."))
                 .map(|f| f.path.as_str())
                 .collect();
-            assert!(cpu.is_empty(), "hello [{target}, release {release}]: has {cpu:?}");
+            assert!(cpu.is_empty(), "{} [{target}, release {release}]: has {cpu:?}", p.display());
         }
     }
 }

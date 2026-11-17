@@ -14,7 +14,8 @@ IrFile  = TypeLine* Func* ;
 TypeLine= "type " TId " " TypeKey "\n" ;          (* every type a printed instance uses, by T *)
 TypeKey = variant (" " field)* ;                  (* canonical type key, fields in key order:
                                                      `int s 32`, `ref mut t4`, `adt d17 t4`, `fntype t4 -> t2 avx2` *)
-Func    = "fn @" Inst " " Path ("<" GArg ("," GArg)* ">")? " {" "\n" Block+ "}" "\n" ;
+Func    = "fn @" Inst " " Path ("<" GArg ("," GArg)* ">")? Needs? " {" "\n" Block+ "}" "\n" ;
+Needs   = " needs(" Feature (", " Feature)* ")" ;  (* the fn's own needs, as `fntype` prints them *)
 GArg    = TId | IntC ;                            (* type arg, or const generic arg in decimal (as in `adt` keys) *)
 Block   = Blk "(" (Val ": " TId ("," " " Val ": " TId)*)? "):" "\n" InstL* Term ;
 InstL   = "  " (Val " = ")? Op " " (TId | "()") (" " Operand)* "\n" ;   (* result type; `()` if none *)
@@ -48,8 +49,7 @@ stages' numbering, except `d<D>`):
   `Pair<u16>` exist only here. `d<D>` in `adt` keys is the canonical decl id D.
 - `@<inst>`: the rank of the instance among the build's instances (the root set's closure,
   below), ordered by (decl D, generic args by `t<T>`), drop glue after every decl instance, ordered
-  by its type; closures `@<enclosing>.<k>`. Bodiless instances (`extern "C"` imports; `dispatch
-  fn`s until their lowering lands) take ids but are not printed, so printed ids may have gaps;
+  by its type; closures `@<enclosing>.<k>`. Bodiless instances (`extern "C"` imports) take ids but are not printed, so printed ids may have gaps;
   calls still name them (`call t2 @0 %1`). Ids differ between debug and `--release` (different
   root sets).
 - `s<S>`: the rank of the string constant among the module's distinct string constants by
@@ -285,6 +285,9 @@ b2():
   under implication: `needs(avx2)` prints `avx2`, not `sse42 avx avx2`), in contracts/simd-ops.md
   §Features order. In the canonical type order a feature set compares as its `u64` bitset (bit i
   = the i-th feature of §Features) read as a number.
+- A fn header prints the fn's `needs(..)` (the same feature list, comma-separated) when they are
+  not empty: `fn @3 main.sum_v3 needs(avx2) {`. A closure has the needs of its fn and prints them
+  too; the target baseline is never printed.
 
 ## Closures
 
@@ -321,10 +324,23 @@ reference (`Ref` / `RefMut`); `copy` captures are reserved (no syntax yet, LANG.
   `extern "C"` exports, the `allocator` impl, and, under `stave test` (also `stave test --release`),
   `test fn`s, plus the runtime entry points the compiler's own startup, trap, and signal code calls
   (contracts/intrinsics.md "Paths fixed by the compiler": `runtime.start.entry`,
-  `runtime.panic.trap`, `runtime.panic.trap_msg`, `runtime.panic.on_signal`). A reachable
-  `dispatch` makes its arm targets reachable (an arm of another arch is not).
+  `runtime.panic.trap`, `runtime.panic.trap_msg`, `runtime.panic.on_signal`).
+- **`dispatch fn`** (both modes): a reachable dispatch has a body that calls only its live arms,
+  so only those are reachable through it. An arm of another arch is dropped. With K = the target
+  baseline ∪ the dispatch's needs, the first remaining arm whose features are ⊆ K always matches:
+  the body ends with a direct call of it and the arms below it (and `_`) are not called; if it is
+  the first arm, the body is that one call. Otherwise the body is `%w = call @runtime.cpu.features`
+  then, per arm top-down, `%m = and t<u64> %w M`, `%c = eq t<bool> %m M`, `cbr` to a block
+  returning the arm target's call result (M = the arm's closed feature set as a `u64`, bit i =
+  feature i). A runtime library without `runtime.cpu.features` (the dump goldens' stand-in) has
+  no word: the body is the call of that last arm alone. A call of a dispatch from a fn whose
+  needs ∪ the baseline cover the first remaining arm's features calls that arm target instead
+  (a fn value of the dispatch is the dispatch).
 - In both modes a lowered `intrinsic.thread_clone` or `intrinsic.thread_start_addr` requests
   `runtime.thread.entry`, which only the compiler's `__stave_thread_start` stub calls
-  (intrinsics.md "Thread start").
+  (intrinsics.md "Thread start"), and a request of `runtime.cpu.features` (a dispatch body,
+  `std.cpu.features`) also requests `runtime.cpu.init`, which only `intrinsic.cpu_init` in
+  `runtime.start.entry` calls. Without that request (no reachable dispatch with a tested arm, no
+  `std.cpu.features`) a program has no `runtime.cpu` code.
 - Generic decls are never printed, only their instances. `kernel fn`s are printed like fns; GPU ops print as
   `gpu.<name>` (gpu-ops.md "Checked-IR spelling"). Intrinsic calls print as `intrinsic.<name>`.

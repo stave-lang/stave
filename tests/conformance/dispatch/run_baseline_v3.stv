@@ -1,0 +1,41 @@
+//~ STDOUT run_baseline_v3.stdout
+//~ TARGET x86_64-linux-v3
+// The target baseline decides statically: on `x86_64-linux-v3` the `avx2` arm always matches,
+// so `pick` tests only `avx512f` at run time and never takes the `_` arm below. A dispatch
+// with its own needs counts them too: `fma` with `avx` is covered here (`main` reaches `own`
+// through a fn value, which the baseline makes `fn() -> u32`).
+import std.io;
+
+fn pick_v4() -> u32 needs(avx512f) {
+    return 4;
+}
+
+fn pick_v3() -> u32 needs(avx2) {
+    return 3;
+}
+
+fn pick_base() -> u32 {
+    return 1;
+}
+
+dispatch fn pick() -> u32 { avx512f => pick_v4, avx2 => pick_v3, _ => pick_base, }
+
+fn own_fma() -> u32 needs(avx, fma) {
+    return 5;
+}
+
+fn own_avx() -> u32 needs(avx) {
+    return 6;
+}
+
+dispatch fn own() -> u32 needs(avx) { fma => own_fma, _ => own_avx, }
+
+fn main() -> i32 {
+    let a = pick();
+    // avx512f is not in the baseline: whether it matches depends on the CPU
+    if a == 3 || a == 4 { io.print("pick ok\n"); } else { io.print(f"pick {a}\n"); }
+    let g: fn() -> u32 = own;
+    let b = g();
+    io.print(f"own {b}\n");
+    return 0;
+}

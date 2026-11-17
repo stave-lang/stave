@@ -9,6 +9,8 @@
 //
 // The process word (`runtime.state` field `cpu_features`) is written once by `init`, from start
 // code before main and before any other thread exists, and only read afterwards: no atomics.
+// Start code reaches `init` through the `cpu_init` intrinsic, which calls it only in programs
+// that read the word (`features`: a dispatch fn or std.cpu); others carry no code of this module.
 
 import arch.cpu;
 import runtime.state;
@@ -88,7 +90,8 @@ pub fn detect() -> u64 {
     return close(cpu.probe(hwcap, hwcap2));
 }
 
-// Fills the process word. Start code calls it once, before main and before any other thread.
+// Fills the process word. Start code calls it once (intrinsic `cpu_init`), before main and before
+// any other thread.
 pub unsafe("called once, before main and before any thread other than the start thread exists")
 fn init() {
     let w = detect();

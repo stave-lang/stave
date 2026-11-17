@@ -181,8 +181,8 @@ fn types_suite_passes() {
     assert!(r.negative >= 10, "suite too small");
 }
 
-/// Feature-typed fns and `dispatch` (E07xx signature, coercion, and arm rules): every test
-/// passes.
+/// Feature-typed fns and `dispatch` (E07xx signature, coercion, and arm rules; dispatch runs,
+/// natively on the x86-64 host): every test passes.
 #[test]
 fn dispatch_suite_passes() {
     let r = suite("dispatch");
