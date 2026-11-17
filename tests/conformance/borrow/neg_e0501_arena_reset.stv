@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+// E0501 `bad`: a value from `alloc` borrows the arena (`&self`, result `from self`), so `reset`
+// (`&mut self`) conflicts with it while the value is still used.
+import std.arena;
+import std.io;
+
+fn bad(ar: &mut arena.Arena) {
+    let x = ar.alloc(1u32);
+    ar.reset(); //~ ERROR E0501
+    let v = *x;
+    io.print(f"{v}\n");
+}
+
+fn main() -> i32 {
+    return 0;
+}
