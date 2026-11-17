@@ -201,8 +201,14 @@ fn main() {
     );
     let g = &tc.call_graph;
     let t = "table fn(u32) -> u32";
-    has(&d, &format!("edge main.twice -> {t} indirect @1:53"));
-    has(&d, &format!("edge main.walk -> {t} indirect @6:12"));
+    // each call through a param reaches what its callers pass there
+    has(&d, "edge main.twice -> main.inc indirect @1:53");
+    has(&d, "edge main.twice -> main.main.0 indirect @1:53");
+    lacks(&d, "edge main.twice -> main.step");
+    has(&d, "edge main.walk -> main.step indirect @6:12");
+    lacks(&d, "edge main.walk -> main.inc");
+    lacks(&d, &format!("edge main.twice -> {t}"));
+    // the table keeps every value of its type (the upper bound)
     has(&d, &format!("edge {t} -> main.inc member @11:19"));
     has(&d, &format!("edge {t} -> main.step member @8:38"));
     has(&d, &format!("edge {t} -> main.main.0 member @13:19"));
@@ -210,12 +216,12 @@ fn main() {
     lacks(&d, &format!("edge {t} -> main.dec"));
     // another fn type, another table
     has(&d, "edge table fn(u32, u32) -> u32 -> main.other member @16:13");
-    has(&d, "edge main.main -> table fn(u32, u32) -> u32 indirect");
+    // through a local
+    has(&d, "edge main.main -> main.other indirect @17:13");
     lacks(&d, "edge table fn(u32, u32) -> u32 -> main.inc");
-    // step -> walk -> table -> step; twice calls the table but nothing in it calls twice
-    let cyc = d.lines().find(|l| l.starts_with("cycle") && l.contains("main.step")).expect("cycle");
-    assert!(cyc.contains("main.walk") && cyc.contains(t), "{cyc}");
-    assert!(!cyc.contains("main.twice") && !cyc.contains("main.main"), "{cyc}");
+    // step -> walk -> step through walk's param
+    has(&d, "cycle level 0 {main.step, main.walk}");
+    assert!(!d.lines().any(|l| l.starts_with("cycle") && l.contains("main.twice")), "{}", own(&d));
     let tn = node(g, &d, t);
     let ti = match g.nodes[tn as usize].kind {
         NodeKind::Table { table } => table as usize,
@@ -241,15 +247,16 @@ fn main() {
 }
 ",
     );
-    has(&d, "edge main.via<u32> -> table fn(u32) -> u32 indirect @3:12");
-    has(&d, "edge main.via<u32>.0 -> table fn(u32) -> u32 indirect @2:36");
-    has(&d, "edge main.via<bool>.0 -> table fn(bool) -> bool indirect @2:36");
+    has(&d, "edge main.via<u32> -> main.via<u32>.0 indirect @3:12");
+    has(&d, "edge main.via<u32>.0 -> main.inc indirect @2:36");
+    has(&d, "edge main.via<bool>.0 -> main.not indirect @2:36");
+    lacks(&d, "edge main.via<u32>.0 -> main.not");
     has(&d, "edge table fn(u32) -> u32 -> main.via<u32>.0 member @2:13");
     has(&d, "edge table fn(u32) -> u32 -> main.inc member @8:23");
     has(&d, "edge table fn(bool) -> bool -> main.via<bool>.0 member @2:13");
     lacks(&d, "edge table fn(bool) -> bool -> main.inc");
-    // g calls f through the table g is in: a cycle through a closure literal
-    has(&d, "cycle level 1 {main.via<u32>.0, table fn(u32) -> u32}");
+    // g calls f, which holds only what main passes
+    assert!(!d.lines().any(|l| l.starts_with("cycle") && l.contains("main.")), "{}", own(&d));
     check_invariants(&tc.call_graph);
 }
 
@@ -408,22 +415,151 @@ fn main() {
 }
 
 #[test]
-fn a_unit_join_is_a_cycle_through_the_fn_table() {
-    // Every `fn()` value is in one table, so join's own `fn()` closure (which calls `b()`, a
-    // `fn() -> ()` value) is a member of the table it calls.
+fn thread_bodies_reach_only_what_flows_to_them() {
+    // join's own `fn()` closure calls `b()`, which holds only the closure main passes
     let (_p, tc, d) = dump(
         "import std.thread;
+fn tick() { }
 fn main() {
     let (x, y) = thread.join(fn() { }, fn() { });
+    thread.par_for(0usize, 4usize, fn(i: usize) {
+        let g = tick;
+        g();
+    });
 }
 ",
     );
-    let cyc = d.lines().find(|l| l.starts_with("cycle") && l.contains("std.thread.join<(), ()>.0"));
-    assert!(
-        cyc.is_some_and(|c| c.contains("table fn()")),
-        "{}",
-        d.lines().filter(|l| l.starts_with("cycle")).collect::<Vec<_>>().join("\n")
+    let cycles: Vec<&str> = d.lines().filter(|l| l.starts_with("cycle") && !l.ends_with(" drop")).collect();
+    assert!(cycles.is_empty(), "{}", cycles.join("\n"));
+    has(&d, "edge std.thread.join<(), ()>.0 -> main.main.1 indirect");
+    has(&d, "edge std.thread.join<(), ()> -> main.main.0 indirect");
+    has(&d, "edge std.thread.run.0 -> main.main.2 indirect");
+    has(&d, "edge main.main.2 -> main.tick indirect @7:9");
+    check_invariants(&tc.call_graph);
+}
+
+#[test]
+fn a_closure_that_reaches_itself_through_a_param_is_a_cycle() {
+    let (_p, tc, d) = dump(
+        "import std.thread;
+fn call(f: fn(u32) -> u32, n: u32) -> u32 { return f(n); }
+fn again(n: u32) -> u32 { return call(fn(x: u32) -> u32 { return again(x); }, n); }
+fn twice() {
+    let (x, y) = thread.join(fn() { twice(); }, fn() { });
+}
+fn main() {
+    let a = again(1u32);
+    twice();
+}
+",
     );
+    has(&d, "cycle level 0 {main.again, main.call, main.again.0}");
+    let cyc = d.lines().find(|l| l.starts_with("cycle") && l.contains("main.twice")).expect("join cycle");
+    assert!(cyc.contains("main.twice.0") && cyc.contains("std.thread.join<(), ()>"), "{cyc}");
+    assert!(!cyc.contains("main.twice.1") && !cyc.ends_with(" drop"), "{cyc}");
+    check_invariants(&tc.call_graph);
+}
+
+#[test]
+fn fn_values_through_two_calls_and_a_view_field() {
+    let (_p, tc, d) = dump(
+        "fn leaf() { }
+fn other() { }
+fn inner(f: fn()) { f(); }
+fn outer(f: fn()) { inner(f); }
+view struct Cb { f: fn() }
+fn fire(c: &Cb) {
+    let f = c.f;
+    f();
+}
+fn main() {
+    outer(leaf);
+    let c = Cb.{ f: other };
+    fire(&c);
+}
+",
+    );
+    has(&d, "edge main.inner -> main.leaf indirect @3:21");
+    lacks(&d, "edge main.inner -> main.other");
+    has(&d, "edge main.fire -> main.other indirect @8:5");
+    lacks(&d, "edge main.fire -> main.leaf");
+    lacks(&d, "edge main.inner -> table");
+    lacks(&d, "edge main.fire -> table");
+    check_invariants(&tc.call_graph);
+}
+
+#[test]
+fn drop_cycles_of_recursive_types_are_marked() {
+    let (_p, tc, d) = dump(
+        "import std.vec;
+import std.mem;
+struct N { kids: vec.Vec<N> }
+struct M { kids: vec.Vec<M> }
+impl Drop for M {
+    fn drop(&mut self) {
+        let k = mem.replace(&mut self.kids, vec.Vec::<M>.new());
+        release(k);
+    }
+}
+fn release(k: vec.Vec<M>) { }
+fn main() {
+    let n = N.{ kids: vec.Vec::<N>.new() };
+    let m = M.{ kids: vec.Vec::<M>.new() };
+}
+",
+    );
+    let g = &tc.call_graph;
+    has(&d, "edge main.main -> drop_glue N drop @13:9");
+    has(&d, "edge drop_glue N -> drop_glue Vec<N> drop");
+    has(&d, "edge drop_glue Vec<N> -> std.vec.Vec.drop<N> drop");
+    // dropping an N drops its kids: a drop cycle through std only
+    let n = d.lines().find(|l| l.starts_with("cycle") && l.contains("drop_glue N")).expect("N cycle");
+    assert!(n.ends_with(" drop") && n.contains("std.vec.Vec.clear<N>"), "{n}");
+    // M's drop reaches a user fn that drops the kids: not a drop cycle
+    let m = d.lines().find(|l| l.starts_with("cycle") && l.contains("drop_glue M")).expect("M cycle");
+    assert!(m.contains("main.release") && m.contains("main.M.drop") && !m.ends_with(" drop"), "{m}");
+    let s = g.scc_of[node(g, &d, "drop_glue N") as usize];
+    assert!(g.is_cycle(s) && g.is_drop_cycle(s));
+    assert!(!g.is_drop_cycle(g.scc_of[node(g, &d, "main.release") as usize]));
+    check_invariants(g);
+}
+
+#[test]
+fn drops_of_temporaries_moved_values_and_fields() {
+    let (_p, tc, d) = dump(
+        "struct G { v: u32 }
+impl Drop for G {
+    fn drop(&mut self) { }
+}
+struct H { g: G }
+fn make() -> G { return G.{ v: 1u32 }; }
+fn consume(g: G) { }
+fn temp() -> u32 { return make().v; }
+fn moved() {
+    let g = make();
+    consume(g);
+}
+fn field() {
+    let h = H.{ g: G.{ v: 2u32 } };
+}
+fn plain(x: u32, r: &G) -> u32 { return x + r.v; }
+fn main() {
+    let a = temp();
+    moved();
+    field();
+    let b = plain(1u32, &make());
+}
+",
+    );
+    has(&d, "edge main.temp -> drop_glue G drop @8:27");
+    has(&d, "edge main.consume -> drop_glue G drop @7:12");
+    has(&d, "edge main.moved -> drop_glue G drop @10:9");
+    has(&d, "edge main.field -> drop_glue H drop @14:9");
+    has(&d, "edge drop_glue H -> drop_glue G drop");
+    has(&d, "edge drop_glue G -> main.G.drop drop");
+    // a borrowed value is not dropped here
+    lacks(&d, "edge main.plain -> drop_glue");
+    has(&d, "edge main.main -> drop_glue G drop");
     check_invariants(&tc.call_graph);
 }
 
@@ -437,8 +573,10 @@ fn shipped_std_graph_is_consistent_and_independent_of_load_order() {
         let tc = stave_sema::check(&p);
         check_invariants(&tc.call_graph);
         let d = tc.call_graph.dump(&p, &tc);
-        // std and runtime have no call cycle
-        assert!(!d.lines().any(|l| l.starts_with("cycle")), "{t}");
+        // std and runtime have no call cycle but drop cycles
+        let cycles: Vec<&str> =
+            d.lines().filter(|l| l.starts_with("cycle") && !l.ends_with(" drop")).collect();
+        assert!(cycles.is_empty(), "{t}: {}", cycles.join("\n"));
         c.shuffle_seed = Some(7);
         let p2 = Program::load(&c);
         let tc2 = stave_sema::check(&p2);

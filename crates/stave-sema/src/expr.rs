@@ -1648,7 +1648,11 @@ impl<'a> Ck<'a> {
                 let tok = self.icx.end_tok(n);
                 self.target(tok, Target::Variant { decl, index });
                 match args {
-                    Some(a) => Ty::T(self.tys.mk_adt(adt, a)),
+                    Some(a) => {
+                        let t = self.tys.mk_adt(adt, a);
+                        self.owned(tok, t);
+                        Ty::T(t)
+                    }
                     None => {
                         self.e0202_infer(n);
                         Ty::ERR
@@ -2526,7 +2530,9 @@ impl<'a> Ck<'a> {
                 let gens = adef.generics.clone();
                 self.check_bounds(cspan, adt, &gens, &gargs);
                 self.target(paren, Target::Variant { decl, index });
-                Ty::T(self.tys.mk_adt(adt, gargs))
+                let t = self.tys.mk_adt(adt, gargs);
+                self.owned(paren, t);
+                Ty::T(t)
             }
             St::Builtin(Builtin::FenceStream, _) => {
                 if !args.is_empty() {
@@ -3411,6 +3417,7 @@ impl<'a> Ck<'a> {
             Some(i) => self.target(tok, Target::Variant { decl: v.decl, index: i }),
             None => self.target(tok, Target::Struct { decl: adt }),
         }
+        self.owned(tok, t);
         Ty::T(t)
     }
 

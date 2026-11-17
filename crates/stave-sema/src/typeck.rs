@@ -155,6 +155,12 @@ pub struct TypedBody {
     /// `Display.fmt` (a [`Target::TraitMethod`] with the writer type as its own arg, at the
     /// f-string token; one per hole).
     pub implicit: Vec<(u32, Target)>,
+    /// The value types this body may drop, each with the token where such a value appears, sorted
+    /// and without duplicates: its locals (params and pattern bindings, at their binding's first
+    /// token) and the values it makes (call results, struct and variant literals). A value the
+    /// body drops is one of these or a part of one; types that cannot own a `Drop` value (scalars,
+    /// references, pointers, fn values) are left out.
+    pub drops: Vec<(u32, TypeId)>,
     pub has_error: bool,
     /// Class U ops inside `emulate { }`, in source order ([`crate::gates`]).
     pub emulated: Vec<crate::gates::Emulated>,
@@ -470,6 +476,7 @@ fn empty_body(j: Job) -> TypedBody {
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),
+        drops: Vec::new(),
         has_error: true,
         emulated: Vec::new(),
     }
@@ -526,6 +533,9 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
     }
     for s in &mut b.sites {
         map_gargs(&mut s.inst.args, f);
+    }
+    for (_, t) in &mut b.drops {
+        *t = f(*t);
     }
 }
 
@@ -655,6 +665,7 @@ pub(crate) struct Ck<'a> {
     pub coercions: Vec<(u32, Coercion)>,
     pub sites: Vec<CallSite>,
     pub implicit: Vec<(u32, Target)>,
+    pub drops: Vec<(u32, TypeId)>,
     pub depth: u32,
     /// E0005 case `expr` was reported for this body.
     pub depth_reported: bool,
@@ -716,6 +727,7 @@ fn check_body(
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),
+        drops: Vec::new(),
         depth: 0,
         depth_reported: false,
         diverges: false,
@@ -1308,6 +1320,75 @@ impl<'a> Ck<'a> {
         }
     }
 
+    /// Records that the body may own (and drop) a value of type `t`, at token `tok`.
+    pub fn owned(&mut self, tok: u32, t: TypeId) {
+        if !t.is_none()
+            && matches!(
+                self.tys.kind(t),
+                TypeKind::Adt { .. } | TypeKind::Tuple(_) | TypeKind::Array { .. } | TypeKind::Param(_)
+            )
+            && !self.tys.has_error(t)
+        {
+            self.drops.push((tok, t));
+        }
+    }
+
+    /// [`TypedBody::drops`]: the locals and the call results (literals are recorded where they
+    /// are checked).
+    fn record_drops(&mut self) {
+        let icx = self.icx;
+        let locals: Vec<(u32, TypeId)> = self.locals.iter().map(|(&b, &t)| (icx.a(b), t)).collect();
+        for (tok, t) in locals {
+            self.owned(tok, t);
+        }
+        let targets = std::mem::take(&mut self.targets);
+        let implicit = std::mem::take(&mut self.implicit);
+        for (tok, t) in targets.iter().chain(implicit.iter()) {
+            if let Some(r) = self.call_result(*tok, t) {
+                self.owned(*tok, r);
+            }
+        }
+        self.targets = targets;
+        self.implicit = implicit;
+        self.drops.sort_unstable();
+        self.drops.dedup();
+    }
+
+    /// The result type of the call recorded as `t` at `tok`, if it is a call.
+    fn call_result(&mut self, tok: u32, t: &Target) -> Option<TypeId> {
+        let sigs = self.sigs;
+        match t {
+            Target::Fn { decl, args } if self.icx.is(tok, Term::LParen) => {
+                let r = sigs.fn_sig(*decl)?.ret;
+                Some(self.tys.subst(r, args, None))
+            }
+            Target::Method { method, args, .. } | Target::Op { method, args } => {
+                let (m, self_ty) = match method {
+                    MethodRef::Impl { method, .. } => (*method, None),
+                    MethodRef::Bound { method, self_ty, .. } => (*method, Some(*self_ty)),
+                    MethodRef::Builtin(_) => return None,
+                };
+                let r = sigs.fn_sig(m)?.ret;
+                Some(self.tys.subst(r, args, self_ty))
+            }
+            Target::TraitMethod { method, self_ty, args } => {
+                let r = sigs.fn_sig(*method)?.ret;
+                Some(self.tys.subst(r, args, Some(*self_ty)))
+            }
+            Target::FnValue { ty } => match self.tys.kind(*ty) {
+                TypeKind::Fn { ret, .. } => Some(*ret),
+                _ => None,
+            },
+            Target::Builtin { ret, .. } => Some(*ret),
+            // an intrinsic's own generic params are not the body's: such a result is left out
+            // (std's wrappers return it, so their callers own it)
+            Target::Intrinsic { decl } => {
+                sigs.fn_sig(*decl).map(|s| s.ret).filter(|&r| !self.tys.has_params(r))
+            }
+            _ => None,
+        }
+    }
+
     fn finish(mut self, j: Job) -> (TypedBody, Vec<TypeKind>, Vec<Diagnostic>) {
         // Pending literal groups left: no context anywhere (E0202).
         for g in 0..self.lits.len() as u32 {
@@ -1329,6 +1410,7 @@ impl<'a> Ck<'a> {
         locals.sort_by_key(|x| x.0);
         self.targets.sort_by_key(|x| x.0);
         self.implicit.sort_by_key(|x| x.0);
+        self.record_drops();
         self.coercions.sort_by_key(|x| x.0);
         self.coercions.dedup();
         let has_error =
@@ -1344,6 +1426,7 @@ impl<'a> Ck<'a> {
             coercions: std::mem::take(&mut self.coercions),
             sites: std::mem::take(&mut self.sites),
             implicit: std::mem::take(&mut self.implicit),
+            drops: std::mem::take(&mut self.drops),
             has_error,
             emulated: std::mem::take(&mut self.gates.emulated),
         };
