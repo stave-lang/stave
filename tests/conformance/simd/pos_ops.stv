@@ -35,7 +35,7 @@ fn ints(a: u8x16, b: u8x16, k: u32x4, s: &[u32], d: &mut [u32]) -> u32 {
     let p = z.popcount().clz().lookup(a);
     let q: u16x8 = p.widen_hi();
     let r: u8x16 = q.narrow_wrap(q);
-    let mut dv = k.div_const::<7>();
+    let mut dv = k.div_const(7);
     emulate {
         dv = dv.div_lanes(k);
     }

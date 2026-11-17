@@ -236,19 +236,13 @@ impl FnCx<'_> {
                 self.vval(seg, op, rt, &[recv, m])
             }
             "div_const" => {
+                // the checker evaluated the divisor (its argument has no code to lower)
                 let Some(&k) = consts.first() else { return self.fail_at(Some(seg), "div_const divisor") };
-                let fits = match self.kind(lane) {
-                    TypeKind::Int { signed, bits } => {
-                        let w = bits.bits();
-                        let max = if signed { (1u128 << (w - 1)) - 1 } else { (1u128 << w) - 1 };
-                        (k as u128) <= max
-                    }
-                    _ => false,
+                let k = match self.kind(lane) {
+                    TypeKind::Int { signed: true, .. } => k as i64 as i128,
+                    _ => k as i128,
                 };
-                if !fits {
-                    return self.unsupported_at(Some(seg), "a `div_const` divisor outside the lane type");
-                }
-                let k = self.int(k as i128);
+                let k = self.int(k);
                 self.vval(seg, VecOp::DivConst, rt, &[recv, k])
             }
             "permute" => {

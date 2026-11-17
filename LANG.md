@@ -145,10 +145,10 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 - Int vectors: plain `+ - *` = E0604. Use `+%`, `+|`, or `a.checked_add(b) -> Option`.
 - Floats: plain `+ - * /`. `+%` on float = E0206.
 - Wrong mask width or count = E0605: use `m.rewiden::<64>()`.
-- Int vector division: `a.div_const::<K>()` or `a.div_lanes(b)` (E0607).
+- Int vector division: `a.div_const(k)` or `a.div_lanes(b)`. `k` is a nonzero const-expr of the lane type, as the literal of `v << 3` (`a.div_const(-3)`; run-time or 0: E0607); both truncate like `/`, and `MIN / -1` traps `Overflow`.
 
 **Ops** (method form unless shown):
-- arithmetic: `sqrt abs copysign(s) floor ceil round trunc fma(b, c) min max min_num max_num min_x86 max_x86` (floats; `round` ties to even), `div_lanes(b) div_const::<K>()` (ints), `mul_hi(b)` (ints: high half of the double-width product, signed iff the lanes are), `abs_wrap` (signed ints), `min max` (both)
+- arithmetic: `sqrt abs copysign(s) floor ceil round trunc fma(b, c) min max min_num max_num min_x86 max_x86` (floats; `round` ties to even), `div_lanes(b) div_const(k)` (ints), `mul_hi(b)` (ints: high half of the double-width product, signed iff the lanes are), `abs_wrap` (signed ints), `min max` (both)
   - `min`/`max` propagate NaN. `min_num`/`max_num` treat any NaN (quiet or signaling) as missing; two NaNs give a quiet NaN. `min_x86`/`max_x86` use x86 semantics (`a < b ? a : b`, `a > b ? a : b`); a NaN result has unspecified quiet bit and payload.
 - bitwise: `& | ^ ~ andnot(b)` (`a & ~b`), shifts `<< >> <<%` by a vector or a literal (`v << 3`: a lane value)
 - lane counting: `popcount clz`

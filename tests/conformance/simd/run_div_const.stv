@@ -1,0 +1,140 @@
+//~ CHECK-ONLY
+// `a.div_const(k)`: `k` is a nonzero const-expr of the lane type (a literal takes the lane type,
+// as the amount of `v << 3`), negative divisors included; the quotient truncates like the scalar
+// `/`. Each line: the quotients, then `ok` iff every lane equals the scalar quotient. Run by
+// crates/stave-driver/tests/interp_vs_native.rs against run_div_const.stdout.
+import std.io;
+
+const K: i16 = -7;
+const MINUS_ONE: i32 = 0 - 1;
+const BIG: u64 = 1 << 63;
+
+// The first n of q.
+fn show(name: &str, q: [i64; 4], n: usize, ok: bool) {
+    io.print(name);
+    for i in 0..n {
+        let x = q[i];
+        io.print(f" {x}");
+    }
+    if ok {
+        io.print(" ok\n");
+    } else {
+        io.print(" BAD\n");
+    }
+}
+
+fn i8s(name: &str, xs: [i8; 4], v: i8x4, d: i8) {
+    let mut o: [i8; 4] = [0; 4];
+    v.store(&mut o, 0);
+    let mut q: [i64; 4] = [0; 4];
+    let mut ok = true;
+    for i in 0..4usize {
+        q[i] = o[i] as i64;
+        ok = ok && o[i] == xs[i] / d;
+    }
+    show(name, q, 4, ok);
+}
+
+fn u8s(name: &str, xs: [u8; 4], v: u8x4, d: u8) {
+    let mut o: [u8; 4] = [0; 4];
+    v.store(&mut o, 0);
+    let mut q: [i64; 4] = [0; 4];
+    let mut ok = true;
+    for i in 0..4usize {
+        q[i] = o[i] as i64;
+        ok = ok && o[i] == xs[i] / d;
+    }
+    show(name, q, 4, ok);
+}
+
+fn i16s(name: &str, xs: [i16; 4], v: i16x4, d: i16) {
+    let mut o: [i16; 4] = [0; 4];
+    v.store(&mut o, 0);
+    let mut q: [i64; 4] = [0; 4];
+    let mut ok = true;
+    for i in 0..4usize {
+        q[i] = o[i] as i64;
+        ok = ok && o[i] == xs[i] / d;
+    }
+    show(name, q, 4, ok);
+}
+
+fn u16s(name: &str, xs: [u16; 4], v: u16x4, d: u16) {
+    let mut o: [u16; 4] = [0; 4];
+    v.store(&mut o, 0);
+    let mut q: [i64; 4] = [0; 4];
+    let mut ok = true;
+    for i in 0..4usize {
+        q[i] = o[i] as i64;
+        ok = ok && o[i] == xs[i] / d;
+    }
+    show(name, q, 4, ok);
+}
+
+fn i32s(name: &str, xs: [i32; 4], v: i32x4, d: i32) {
+    let mut o: [i32; 4] = [0; 4];
+    v.store(&mut o, 0);
+    let mut q: [i64; 4] = [0; 4];
+    let mut ok = true;
+    for i in 0..4usize {
+        q[i] = o[i] as i64;
+        ok = ok && o[i] == xs[i] / d;
+    }
+    show(name, q, 4, ok);
+}
+
+fn u32s(name: &str, xs: [u32; 4], v: u32x4, d: u32) {
+    let mut o: [u32; 4] = [0; 4];
+    v.store(&mut o, 0);
+    let mut q: [i64; 4] = [0; 4];
+    let mut ok = true;
+    for i in 0..4usize {
+        q[i] = o[i] as i64;
+        ok = ok && o[i] == xs[i] / d;
+    }
+    show(name, q, 4, ok);
+}
+
+fn i64s(name: &str, xs: [i64; 2], v: i64x2, d: i64) {
+    let mut o: [i64; 2] = [0; 2];
+    v.store(&mut o, 0);
+    show(name, [o[0], o[1], 0, 0], 2, o[0] == xs[0] / d && o[1] == xs[1] / d);
+}
+
+fn u64s(name: &str, xs: [u64; 2], v: u64x2, d: u64) {
+    let mut o: [u64; 2] = [0; 2];
+    v.store(&mut o, 0);
+    show(name, [o[0] as% i64, o[1] as% i64, 0, 0], 2, o[0] == xs[0] / d && o[1] == xs[1] / d);
+}
+
+fn main() -> i32 {
+    let b: [i8; 4] = [127, -128, -7, 6];
+    i8s("i8 / -7", b, i8x4.load(&b, 0).div_const(-7), -7);
+    i8s("i8 / -128", b, i8x4.load(&b, 0).div_const(-128), -128);
+    i8s("i8 / 4", b, i8x4.load(&b, 0).div_const(4), 4);
+    let ub: [u8; 4] = [255, 254, 7, 0];
+    u8s("u8 / 255", ub, u8x4.load(&ub, 0).div_const(255), 255);
+    u8s("u8 / 7", ub, u8x4.load(&ub, 0).div_const(7), 7);
+    let h: [i16; 4] = [32767, -32768, -15, 14];
+    i16s("i16 / K", h, i16x4.load(&h, 0).div_const(K), K);
+    i16s("i16 / K * 2", h, i16x4.load(&h, 0).div_const(K * 2), K * 2);
+    i16s("i16 / -32768", h, i16x4.load(&h, 0).div_const(-32768), -32768);
+    let uh: [u16; 4] = [65535, 32768, 641, 1];
+    u16s("u16 / 641", uh, u16x4.load(&uh, 0).div_const(641), 641);
+    u16s("u16 / 32768", uh, u16x4.load(&uh, 0).div_const(32768), 32768);
+    let w: [i32; 4] = [2147483647, -2147483648, -100, 99];
+    i32s("i32 / -3", w, i32x4.load(&w, 0).div_const(-3), -3);
+    i32s("i32 / MIN", w, i32x4.load(&w, 0).div_const(-2147483648), -2147483648);
+    i32s("i32 / 1", w, i32x4.load(&w, 0).div_const(1), 1);
+    let w1: [i32; 4] = [2147483647, -2147483647, -100, 0];
+    i32s("i32 / MINUS_ONE", w1, i32x4.load(&w1, 0).div_const(MINUS_ONE), MINUS_ONE);
+    let uw: [u32; 4] = [4294967295, 4000000000, 7, 6];
+    u32s("u32 / 7", uw, u32x4.load(&uw, 0).div_const(7), 7);
+    u32s("u32 / MAX", uw, u32x4.load(&uw, 0).div_const(4294967295), 4294967295);
+    let d: [i64; 2] = [-9223372036854775808, 9223372036854775807];
+    i64s("i64 / -641", d, i64x2.load(&d, 0).div_const(-641), -641);
+    let ud: [u64; 2] = [18446744073709551615, 12345];
+    u64s("u64 / BIG", ud, u64x2.load(&ud, 0).div_const(BIG), BIG);
+    u64s("u64 / 10", ud, u64x2.load(&ud, 0).div_const(10), 10);
+    return 0;
+}

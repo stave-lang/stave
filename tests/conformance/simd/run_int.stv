@@ -24,7 +24,7 @@ fn main() -> i32 {
     show(a -| u32x4.splat(13));
     show(a << 2);
     show(a <<% u32x4.splat(33));
-    show(a.div_const::<4>());
+    show(a.div_const(4));
     show(a.mul_hi(big));
     show(i32x4.splat(-7).mul_hi(i32x4.splat(3)).bitcast::<u32x4>());
     show(a.permute::<[3, 2, 1, 0]>());

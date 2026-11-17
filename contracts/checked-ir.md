@@ -106,7 +106,7 @@ ops take the lane semantics of the scalar op; V = the vector result type, M = `m
 | `vec.min max min_num max_num min_x86 max_x86` | `a b` | IEEE minimum / maximum, minimumNumber / maximumNumber (a quiet or signaling NaN is missing: the other operand; two NaNs: a quiet NaN), `a < b ? a : b` (a NaN result is some NaN: quiet bit and payload unspecified); int `min max` by value |
 | `vec.add.wrap sub.wrap mul.wrap add.sat sub.sat mul.sat checked_add checked_sub checked_mul` | `a b` | int lanes; `checked_*` yield `Option<V>` |
 | `vec.mul_hi` | `a b` | int lanes: the high half of the exact double-width product, signed iff the lanes are; never traps |
-| `vec.div_lanes` † `vec.div_const` † | `a b` / `a K` | int division per lane (traps as scalar `div`) |
+| `vec.div_lanes` † `vec.div_const` † | `a b` / `a K` | int division per lane (traps as scalar `div`); `K` a constant of the lane type |
 | `vec.and or xor andnot not abs_wrap popcount clz` | lanes | int lanes (`abs_wrap`: signed); `andnot` = `a & ~b` |
 | `vec.shl shr` † `vec.shl.wrap` | `a amount` | amount: V or an int; as scalar shifts |
 | `vec.eq ne lt le gt ge` | `a b` | result M |

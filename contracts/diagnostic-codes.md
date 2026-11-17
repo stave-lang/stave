@@ -111,7 +111,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0604 | plain `+ - *` on an integer vector (choose `+%`, `+|`, or `checked_add`) |
 | E0605 | mask width or count does not match the vector (use `m.rewiden::<W>()`) |
 | E0606 | aligned load or store on a slice whose type lacks that alignment (use `align_to`) |
-| E0607 | vector integer division by a non-constant (use `div_lanes`) |
+| E0607 | vector integer division by a non-constant: `a / b`, or `a.div_const(k)` with `k` not a const-expr (use `div_lanes`). Case `zero`: `a.div_const(k)` with `k` = 0 |
 | E0608 | permute or table index out of range at compile time |
 | E0609 | generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument. Write `f32x8` / `mask32x8` |
 | E0700 | operation unavailable (class U) on the target, outside `emulate { }` |

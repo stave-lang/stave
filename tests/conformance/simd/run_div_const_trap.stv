@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// `a.div_const(-1)` traps `Overflow` where a lane is MIN, as the scalar `MIN / -1`. Run by
+// crates/stave-driver/tests/interp_vs_native.rs: exit 101, run_div_const_trap.stderr.
+import std.io;
+
+fn main() -> i32 {
+    let xs: [i16; 8] = [5, -5, 32767, -32767, 0, 1, -32768, 2];
+    let ok = i16x8.load(&xs, 0).div_const(-2).reduce_add_wrap();
+    io.print(f"by -2: {ok}\n");
+    let q = i16x8.load(&xs, 0).div_const(-1).reduce_add_wrap();
+    io.print(f"by -1: {q}\n");
+    return 0;
+}

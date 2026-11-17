@@ -346,10 +346,8 @@ fn vector_method<I: Interner + ?Sized>(
             };
             (vec![ArgTy::Is(t)], o)
         }
-        "div_const" if !float => match gargs {
-            [GArg::Const(ConstArg::Value(_))] => (vec![], t),
-            _ => return None,
-        },
+        // the divisor is a const-expr of the lane type (`Ck::div_const_divisor`)
+        "div_const" if !float => (vec![ArgTy::Is(lane)], t),
         "store" => (vec![ArgTy::Is(rms), ArgTy::Is(us)], unit),
         "store_aligned" | "store_stream" => {
             let bytes = vec_bytes(cx, lane, n);
@@ -483,6 +481,36 @@ pub fn builtin_assoc<I: Interner + ?Sized>(
             _ => return None,
         }),
         _ => None,
+    }
+}
+
+impl crate::typeck::Ck<'_> {
+    /// The divisor of `v.div_const(k)` (`k` typed as the lane type `lane` by the call) as the
+    /// bits of a `u64`, two's complement for a signed lane. `k` must be a const-expr (E0607)
+    /// other than 0 (E0607 case `zero`); `vec` names the vector in the message.
+    pub(crate) fn div_const_divisor(&mut self, k: u32, lane: TypeId, vec: TypeId) -> Option<u64> {
+        let (n, had_error) = (self.diags.len(), self.has_error);
+        let env = self.env();
+        let v = crate::consteval::eval_item_const(self, &env, k, lane);
+        // "not a const-expr" gives way to E0607; an error inside a const-expr (E0203) stays
+        let kept: Vec<Diagnostic> = self.diags.drain(n..).filter(|d| d.code() != "E0904").collect();
+        let failed = !kept.is_empty();
+        self.diags.extend(kept);
+        self.has_error = had_error || failed;
+        let tn = self.show(vec);
+        let span = self.icx.node_span(k);
+        match v {
+            Some(crate::consteval::Val::Int(0)) => {
+                self.report(mk("E0607", Some("zero"), &[("type", &tn)], span, &[]));
+                None
+            }
+            Some(crate::consteval::Val::Int(d)) => Some(d as u64),
+            _ if failed => None,
+            _ => {
+                self.report(mk("E0607", None, &[("type", &tn)], span, &[]));
+                None
+            }
+        }
     }
 }
 

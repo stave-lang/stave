@@ -2265,7 +2265,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0607",
         severity: Severity::Error,
         area: "simd",
-        rule: "vector integer division by a non-constant (use `div_lanes`)",
+        rule: "vector integer division by a non-constant (use `div_lanes`); case `zero`: by the constant 0",
         retired: false,
         located: true,
         holes: &[
@@ -2279,7 +2279,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "run-time divisor" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "use `a.div_lanes(b)` for a run-time divisor, or `a.div_const::<K>()` for a constant one",
+                    description: "use `a.div_lanes(b)` for a run-time divisor, or `a.div_const(k)` with a const-expr `k`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "zero",
+                message: "integer vector division of `{type}` by the constant 0",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "divides by zero" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "divide by a nonzero constant",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

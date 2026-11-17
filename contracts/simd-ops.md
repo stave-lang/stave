@@ -232,7 +232,7 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 | shift left by vector amount (16/32/64) | `v << s`, `v <<% s` | M | N 32/64, M 16 | N | N | N |
 | shift right by vector amount (16/32/64) | `v >> s` | M | N i32/u32/u64, M | N | N | N |
 | shift by vector amount (8) | `v << s`, `v >> s`, `v <<% s` | M | M | M | N | N |
-| int div by const splat | `a.div_const::<K>()` | M | M | M | M | M |
+| int div by const splat | `a.div_const(k)` | M | M | M | M | M |
 | int div by vector | `a.div_lanes(b)` | U | U | U | U | N (i32/i64), M (i8/i16) |
 | fma | `a.fma(b, c)` | U | N | N | N | N |
 | min/max (IEEE minimum, NaN propagates) | `a.min(b)`, `a.max(b)` | M | M | M | N | N |

@@ -115,6 +115,7 @@ const KERNELS: &[Kernel] = &[
     Kernel { name: "matmul4", kinds: &[kind(&[Elem::F32], 4, Param::F32)] },
     Kernel { name: "utf8", kinds: &[kind(&[Elem::Utf8], 16, Param::None)] },
     Kernel { name: "mulhi", kinds: &[kind(&[Elem::I32, Elem::I32], 4, Param::None)] },
+    Kernel { name: "divconst", kinds: &[kind(&[Elem::I32], 4, Param::None)] },
     Kernel {
         name: "combinators",
         kinds: &[
@@ -188,6 +189,7 @@ const KERNELS: &[Kernel] = &[
     Kernel { name: "matmul4_v3", kinds: &[kind(&[Elem::F32], 8, Param::F32)] },
     Kernel { name: "utf8_v3", kinds: &[kind(&[Elem::Utf8], 32, Param::None)] },
     Kernel { name: "mulhi_v3", kinds: &[kind(&[Elem::I32, Elem::I32], 8, Param::None)] },
+    Kernel { name: "divconst_v3", kinds: &[kind(&[Elem::I32], 8, Param::None)] },
 ];
 
 /// Legs that are known to fail: (kernel, leg, why). They are reported, not failed; one that

@@ -935,11 +935,16 @@ fix = { description = "get an aligned slice with `s.align_to::<{align}>()`, or u
 code = "E0607"
 severity = "error"
 area = "simd"
-rule = "vector integer division by a non-constant (use `div_lanes`)"
+rule = "vector integer division by a non-constant (use `div_lanes`); case `zero`: by the constant 0"
 holes = { type = "type" }
 message = "integer vector division of `{type}` by a non-constant"
 labels = [{ at = "primary", text = "run-time divisor" }]
-fix = { description = "use `a.div_lanes(b)` for a run-time divisor, or `a.div_const::<K>()` for a constant one" }
+fix = { description = "use `a.div_lanes(b)` for a run-time divisor, or `a.div_const(k)` with a const-expr `k`" }
+
+[diag.cases.zero]
+message = "integer vector division of `{type}` by the constant 0"
+labels = [{ at = "primary", text = "divides by zero" }]
+fix = { description = "divide by a nonzero constant" }
 
 [[diag]]
 code = "E0608"
