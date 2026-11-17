@@ -1,0 +1,78 @@
+// The kernels of bytesearch_v3.stv as `needs(avx2)` arms of dispatch fns whose `_` arms are the
+// 128-bit kernels of bytesearch.stv: built for every target, the 256-bit arms run where the CPU
+// has AVX2. Results do not depend on the lane count, so every arm prints the same.
+import base;
+import diff;
+
+fn find_first_v3(xs: &[u8], b: u8) -> usize needs(avx2) {
+    let key = u8x32.splat(b);
+    let n = xs.len();
+    let mut i: usize = 0;
+    while i + 32 <= n {
+        let bits = (u8x32.load(xs, i) == key).to_bits();
+        if bits != 0 { return i + (bits.ctz() as usize); }
+        i = i + 32;
+    }
+    if i < n {
+        let m = mask8x32.first_n(n - i);
+        let bits = ((u8x32.load_masked(xs, i, m) == key) & m).to_bits();
+        if bits != 0 { return i + (bits.ctz() as usize); }
+    }
+    return n;
+}
+
+fn find_last_v3(xs: &[u8], b: u8) -> usize needs(avx2) {
+    let key = u8x32.splat(b);
+    let n = xs.len();
+    let mut j = n;
+    while j >= 32 {
+        let bits = (u8x32.load(xs, j - 32) == key).to_bits();
+        if bits != 0 { return j - 1 - (bits.clz() as usize); }
+        j = j - 32;
+    }
+    if j > 0 {
+        let m = mask8x32.first_n(j);
+        let bits = ((u8x32.load_masked(xs, 0, m) == key) & m).to_bits();
+        if bits != 0 { return 31 - (bits.clz() as usize); }
+    }
+    return n;
+}
+
+fn count_v3(xs: &[u8], b: u8) -> usize needs(avx2) {
+    let key = u8x32.splat(b);
+    let mut c: usize = 0;
+    for v: u8x32 in xs {
+        c = c + ((v == key).to_bits().popcount() as usize);
+    } tail scalar (x) {
+        if x == b { c = c + 1; }
+    }
+    return c;
+}
+
+dispatch fn find_first(xs: &[u8], b: u8) -> usize { avx2 => find_first_v3, _ => base.find_first, }
+
+dispatch fn find_last(xs: &[u8], b: u8) -> usize { avx2 => find_last_v3, _ => base.find_last, }
+
+dispatch fn count(xs: &[u8], b: u8) -> usize { avx2 => count_v3, _ => base.count, }
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        let b = c.u8s(h);
+        let xs = b.get();
+        let key = h.param as% u8;
+        o.u(find_first(xs, key) as u64);
+        o.u(find_last(xs, key) as u64);
+        o.u(count(xs, key) as u64);
+        o.sep();
+        o.u(base.find_first_ref(xs, key) as u64);
+        o.u(base.find_last_ref(xs, key) as u64);
+        o.u(base.count_ref(xs, key) as u64);
+        o.end();
+    }
+    o.flush();
+    return 0;
+}
