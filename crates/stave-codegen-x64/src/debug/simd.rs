@@ -37,6 +37,7 @@
 
 mod arith;
 pub(super) mod compress;
+mod k;
 mod memory;
 mod shape;
 
@@ -164,7 +165,11 @@ impl Cg<'_, '_> {
     // ---------------------------------------------------------------- shapes
 
     pub(super) fn vshape(&self, t: TypeId) -> Res<Sh> {
-        let VCls::V { size } = self.vcls(t)? else { return Err(bad("vector op on a non-vector type")) };
+        let size = match self.vcls(t)? {
+            VCls::V { size } => size,
+            VCls::K { n, w } => n * w,
+            _ => return Err(bad("vector op on a non-vector type")),
+        };
         let types = &self.cx.m.types;
         if let Some((_, lane, n)) = vs::vec_shape(types, t) {
             return Ok(Sh { lane, n, w: lane.bits() / 8, size });
@@ -329,6 +334,17 @@ impl Cg<'_, '_> {
         if d == s { Ok(()) } else { self.vu(VUn::Movdqa, wide, d, s) }
     }
 
+    /// `d = s` for the register of a vector of `size` bytes.
+    pub(crate) fn vmov_sized(&mut self, size: u32, d: Xmm, s: Xmm) -> Res<()> {
+        if size <= 32 {
+            return self.vmov(size > 16, d, s);
+        }
+        if d == s {
+            return Ok(());
+        }
+        self.ev(Ev::new(EOp::Movdqa64, EVL::L512, d.num(), 0, s))
+    }
+
     /// `g = sign bits of s`.
     pub(super) fn vmsk(&mut self, op: VMovMsk, wide: bool, g: Gpr, s: Xmm) -> Res<()> {
         match self.vform(wide)? {
@@ -397,6 +413,9 @@ impl Cg<'_, '_> {
     /// Loads the `size` bytes of a vector at `m` into `x`; the bytes above are zero. Uses `S0`
     /// for a 2-byte value.
     pub(crate) fn vload(&mut self, x: Xmm, m: Mem, size: u32) -> Res<()> {
+        if size == 64 {
+            return self.ev(Ev::new(EOp::Movdqu64, EVL::L512, x.num(), 0, m));
+        }
         let f = self.vform(size > 16)?;
         let sse = f == Form::Sse;
         match size {
@@ -418,6 +437,9 @@ impl Cg<'_, '_> {
 
     /// Stores the low `size` bytes of `x` at `m`.
     pub(crate) fn vstore(&mut self, m: Mem, x: Xmm, size: u32) -> Res<()> {
+        if size == 64 {
+            return self.ev(Ev::new(EOp::Movdqu64St, EVL::L512, x.num(), 0, m));
+        }
         let f = self.vform(size > 16)?;
         let sse = f == Form::Sse;
         match size {
@@ -519,7 +541,7 @@ impl Cg<'_, '_> {
     // ---------------------------------------------------------------- constants
 
     /// The address of a constant in the function's pool.
-    fn vpool_mem(&mut self, bytes: Vec<u8>) -> Mem {
+    pub(super) fn vpool_mem(&mut self, bytes: Vec<u8>) -> Mem {
         if let Some((l, _)) = self.vpool.iter().find(|(_, b)| *b == bytes) {
             return Mem::rip_label(*l, 0);
         }
@@ -609,7 +631,7 @@ impl Cg<'_, '_> {
         {
             return Ok(());
         }
-        let r = self.vec_emit(op, args, ty, res);
+        let r = if self.fx.v4 { self.kvec_emit(op, args, ty, res) } else { self.vec_emit(op, args, ty, res) };
         if !(self.rel && self.ywide) {
             self.vclean();
         }

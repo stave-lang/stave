@@ -10,7 +10,7 @@ use crate::enc::*;
 
 /// The length of a vector memory operand: a slice's, in a register, or an array's.
 #[derive(Clone, Copy)]
-enum VLen {
+pub(super) enum VLen {
     R(Gpr),
     K(u64),
 }
@@ -44,7 +44,7 @@ impl Cg<'_, '_> {
     }
 
     /// Traps `Bounds` unless `i` is a multiple of the lane count `n`.
-    fn valigned(&mut self, i: Operand, n: u32) -> Res<()> {
+    pub(super) fn valigned(&mut self, i: Operand, n: u32) -> Res<()> {
         if let Some(k) = self.int_const(i) {
             return if k % i128::from(n) != 0 { self.trap_now(PanicKind::Bounds) } else { Ok(()) };
         }
@@ -133,7 +133,7 @@ impl Cg<'_, '_> {
     }
 
     /// The address and the length of the slice or array behind `s`.
-    fn vbase(&mut self, s: Operand) -> Res<(Gpr, VLen)> {
+    pub(super) fn vbase(&mut self, s: Operand) -> Res<(Gpr, VLen)> {
         let st = self.oty(s).ok_or_else(|| bad("vector memory operand must be a value"))?;
         let mo = vs::mem_operand(&self.cx.m.types, st).ok_or_else(|| bad("vector memory operand type"))?;
         match mo.len {
@@ -156,6 +156,24 @@ impl Cg<'_, '_> {
         self.a.test_rr(Size::D, bits, bits);
         self.a.jcc(Cond::E, ok)?;
         self.a.bsr(Size::D, S1, bits)?;
+        match len {
+            VLen::R(l) => self.a.mov_rr(Size::Q, S0, l),
+            VLen::K(n) => self.a.mov_ri(Size::Q, S0, n as i64)?,
+        }
+        // S0 = lanes left from `i` to the end
+        self.a.alu_rr(AluOp::Sub, Size::Q, S0, i);
+        self.jtrap(Cond::Be, PanicKind::Bounds)?;
+        self.a.alu_rr(AluOp::Cmp, Size::Q, S1, S0);
+        self.jtrap(Cond::Ae, PanicKind::Bounds)?;
+        Ok(self.a.bind(ok)?)
+    }
+
+    /// [`Self::vmasked_check`] for masks of up to 64 lanes.
+    pub(super) fn kmasked_check(&mut self, bits: Gpr, i: Gpr, len: VLen) -> Res<()> {
+        let ok = self.a.new_label();
+        self.a.test_rr(Size::Q, bits, bits);
+        self.a.jcc(Cond::E, ok)?;
+        self.a.bsr(Size::Q, S1, bits)?;
         match len {
             VLen::R(l) => self.a.mov_rr(Size::Q, S0, l),
             VLen::K(n) => self.a.mov_ri(Size::Q, S0, n as i64)?,

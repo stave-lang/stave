@@ -124,7 +124,14 @@ pub(crate) struct Feats {
     pub avx2: bool,
     pub fma: bool,
     pub bmi2: bool,
+    /// K mode: the set has `avx512f`, `avx512bw`, `avx512vl`, `avx512dq` and `avx512cd`. Masks
+    /// live in `k` registers, vector ops are EVEX-encoded, and 512-bit vectors exist.
+    pub v4: bool,
 }
+
+/// The features of K mode.
+pub(crate) const V4_SET: [Feature; 5] =
+    [Feature::Avx512f, Feature::Avx512bw, Feature::Avx512vl, Feature::Avx512dq, Feature::Avx512cd];
 
 impl Feats {
     pub(crate) fn of(set: FeatureSet) -> Feats {
@@ -134,12 +141,19 @@ impl Feats {
             avx2: set.contains(Feature::Avx2),
             fma: set.contains(Feature::Fma),
             bmi2: set.contains(Feature::Bmi2),
+            v4: V4_SET.iter().all(|f| set.contains(*f)),
         }
     }
 
     /// The widest vector register in bytes.
     pub(crate) fn vector_bytes(self) -> u32 {
-        if self.avx { 32 } else { 16 }
+        if self.v4 {
+            64
+        } else if self.avx {
+            32
+        } else {
+            16
+        }
     }
 }
 
@@ -271,9 +285,11 @@ pub struct Ctx<'m> {
     pub(crate) m: &'m Module,
     pub(crate) layouts: Layouts,
     /// The class of every type, for a function without (`[0]`) and with (`[1]`) 256-bit
-    /// vector registers. The two differ only in which types have a class, so the ABI of a
-    /// signature is the same for every function that can hold its types.
-    pub(crate) cls: [Vec<Option<VCls>>; 2],
+    /// vector registers, and for one in K mode (`[2]`). They differ in which types have a
+    /// class and in how a function holds a mask, not in how a value crosses a call
+    /// (`VCls::boundary`), so the ABI of a signature is the same for every function that can
+    /// hold its types.
+    pub(crate) cls: [Vec<Option<VCls>>; 3],
     pub(crate) func_sym: Vec<Option<SymbolId>>,
     pub(crate) str_sym: Vec<SymbolId>,
     pub(crate) trap_sym: SymbolId,
@@ -320,12 +336,16 @@ impl Ctx<'_> {
 
     /// The type classes of a function with features `fx`.
     pub(crate) fn cls_of(&self, fx: Feats) -> &[Option<VCls>] {
-        &self.cls[usize::from(fx.avx)]
+        &self.cls[if fx.v4 { 2 } else { usize::from(fx.avx) }]
     }
 }
 
-fn classify(m: &Module, layouts: &Layouts) -> [Vec<Option<VCls>>; 2] {
-    [abi::classify_all(&m.types, layouts, 16), abi::classify_all(&m.types, layouts, 32)]
+fn classify(m: &Module, layouts: &Layouts) -> [Vec<Option<VCls>>; 3] {
+    [
+        abi::classify_all(&m.types, layouts, 16, false),
+        abi::classify_all(&m.types, layouts, 32, false),
+        abi::classify_all(&m.types, layouts, 64, true),
+    ]
 }
 
 const RUNTIME_TRAP: &str = "runtime.panic.trap";

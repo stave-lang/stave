@@ -377,7 +377,7 @@ impl Cg<'_, '_> {
             };
             let Some(class) = class else { return Ok(false) };
             // an aggregate is copied through `[base + disp]` only
-            if matches!(class?, VCls::M { .. } | VCls::V { .. }) && form.is_ok() {
+            if matches!(class?, VCls::M { .. } | VCls::V { .. } | VCls::K { .. }) && form.is_ok() {
                 return Ok(false);
             }
             let at = self.pos + (k - i);
@@ -1106,6 +1106,12 @@ impl Cg<'_, '_> {
                     let r = self.new_x(o, p)?;
                     self.bind(v, R::X(r))
                 }
+                VCls::K { .. } => {
+                    let s = self.read_k(o)?;
+                    let r = self.alloc_k()?;
+                    self.a.kmov_kk(KSize::Q, r, s);
+                    self.bind(v, R::K(r))
+                }
                 VCls::M { size, .. } | VCls::V { size } => {
                     let s = self.msrc(o)?;
                     let d = self.def_mem(v)?;
@@ -1134,6 +1140,17 @@ impl Cg<'_, '_> {
                 self.a.cmov(Cond::Ne, s, S0, S1)?;
                 self.a.mov_xg(s, r, S0)?;
                 self.bind(v, R::X(r))
+            }
+            VCls::K { .. } => {
+                let cr = self.read_g(c)?;
+                let (ka, kb) = (self.read_k(a)?, self.read_k(b)?);
+                let r = self.alloc_k()?;
+                self.a.kmov_gk(KSize::Q, S0, kb);
+                self.a.kmov_gk(KSize::Q, S1, ka);
+                self.a.test_rr(Size::D, cr, cr);
+                self.a.cmov(Cond::Ne, Size::Q, S0, S1)?;
+                self.a.kmov_kg(KSize::Q, r, S0);
+                self.bind(v, R::K(r))
             }
             VCls::M { size, .. } | VCls::V { size } => {
                 let cr = self.read_g(c)?;

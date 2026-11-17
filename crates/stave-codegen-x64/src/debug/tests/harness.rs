@@ -28,6 +28,64 @@ pub fn v3() -> FeatureSet {
     FeatureSet::from_features([Feature::Sse42, Feature::Avx2, Feature::Fma, Feature::Bmi2, Feature::F16c])
 }
 
+/// The features of K mode: what `x86_64-linux-v4` adds to v3.
+pub const V4_NEEDS: [Feature; 5] =
+    [Feature::Avx512f, Feature::Avx512bw, Feature::Avx512vl, Feature::Avx512dq, Feature::Avx512cd];
+
+/// The baseline of `x86_64-linux-v4`.
+pub fn v4() -> FeatureSet {
+    v3().union(FeatureSet::from_features(V4_NEEDS))
+}
+
+/// How a program with AVX-512 code runs here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum V4Leg {
+    /// The CPU has the set.
+    Native,
+    /// Under Intel SDE: `$STAVE_SDE -icx -- <program>`.
+    Sde(PathBuf),
+}
+
+/// The `v4` leg: natively on a CPU with the AVX-512 set, else under the emulator the
+/// environment variable `STAVE_SDE` names (the path of `sde64`), else not at all (`None`).
+/// Without it a test skips its AVX-512 runs, or fails when `STAVE_REQUIRE_LEGS` lists `v4`.
+pub fn v4_leg() -> Option<V4Leg> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("avx512vl")
+            && std::arch::is_x86_feature_detected!("avx512dq")
+            && std::arch::is_x86_feature_detected!("avx512cd")
+        {
+            return Some(V4Leg::Native);
+        }
+        if let Some(sde) = std::env::var_os("STAVE_SDE").map(PathBuf::from)
+            && sde.is_file()
+        {
+            return Some(V4Leg::Sde(sde));
+        }
+    }
+    let required = std::env::var("STAVE_REQUIRE_LEGS").unwrap_or_default();
+    assert!(
+        !required.split(',').any(|l| l.trim() == "v4"),
+        "STAVE_REQUIRE_LEGS requires leg `v4` but it cannot run here: needs a CPU with avx512f, avx512bw, avx512vl, avx512dq and avx512cd, or STAVE_SDE naming Intel SDE's `sde64`"
+    );
+    None
+}
+
+/// The command that runs the program at `p` on the `v4` leg.
+pub fn v4_command(leg: &V4Leg, p: &Path) -> Command {
+    match leg {
+        V4Leg::Native => Command::new(p),
+        V4Leg::Sde(sde) => {
+            let mut c = Command::new(sde);
+            c.args(["-icx", "--"]).arg(p);
+            c
+        }
+    }
+}
+
 /// Commonly used types.
 #[derive(Clone, Copy, Debug)]
 pub struct Tys {
