@@ -2,7 +2,9 @@
 // import: `xs.sum()` on any `&[f32]`.
 //
 //   sum()            ints: the sequential sum, trapping `Overflow` exactly where `for` + `+` would;
-//                    floats: the fixed lane tree below (not the left-to-right sum)
+//                    floats: the logical-lane rule below (not the left-to-right sum)
+//   [f32] [f64] dot(ys)  the sum of the rounded products xs[i] * ys[i] (never fused), by the same
+//                    rule (lengths must match: `Assert` panic otherwise)
 //   min() max()      Option (None when empty); floats as the vector `min`/`max`: NaN propagates,
 //                    -0.0 < +0.0; a NaN result is always the positive quiet NaN with an empty
 //                    payload (0x7fc00000 / 0x7ff8000000000000), whatever NaNs the slice holds:
@@ -17,21 +19,24 @@
 //                    (lengths must match: `Assert` panic otherwise)
 //
 // Every method loops in 128-bit vectors (the portable baseline of every CPU target). On x86-64,
-// sum (ints), min, max, find, find_any_byte, eq, fill and copy_from have a second loop in
-// 256-bit vectors under `needs(avx2)`, which a slice of `LONG_B*` or more elements (1 KiB, or
-// 512 B for 4- and 8-byte elements) reaches through a `dispatch fn` when the CPU has AVX2
-// (always on x86_64-linux-v3; AArch64 builds only the 128-bit loop). Shorter slices stay in the
-// method: the CPU test and the calls cost more than the wider vectors save there. The `_` arm of each dispatch repeats the method's 128-bit
-// loop (a call from the method would cost the short slices). No signature names a vector width,
-// and every loop gives the same results:
+// sum, dot, min, max, find, find_any_byte, eq, fill and copy_from have a second loop in
+// 256-bit vectors under `needs(avx2)` (float sum and dot also a third in 512-bit vectors under
+// `needs(v4)`), which a slice of `LONG_B*` or more elements (1 KiB, or 512 B for 4- and 8-byte
+// elements) reaches through a `dispatch fn` when the CPU has the features (AArch64 builds only
+// the 128-bit loop). Shorter slices stay in the 128-bit loop: the CPU test and the calls cost
+// more than the wider vectors save there. The `_` arm of each dispatch repeats the method's
+// 128-bit loop (a call from the method would cost the short slices; float sum and dot call
+// their `_` arm, whose call costs little next to its 32-lane fold). No signature names a vector
+// width, and every loop gives the same results:
 // - Int sums wrap lane-wise and keep the running prefix sum in every lane (`scan_add_wrap`); a
 //   lane whose prefix overflowed sets a flag (the loops outside the method return None then). A
 //   set flag only sends the sum to the method's sequential loop, which traps at the overflowing
 //   element. Widths therefore never change a result.
-// - A float sum adds element i into lane i % L of L zeroed accumulator lanes, L = 16 for f32
-//   and 8 for f64 (512 bits, held as four 128-bit vectors), then reduces the L lanes by the
-//   `reduce_add` tree: lane j with lane j + L/2, halving until one lane is left. Empty: +0.0.
-//   Its four independent accumulators already hide the add latency, so it has no 256-bit loop.
+// - Float sum and dot follow the logical-lane rule (LANG.md §4 Float semantics): term i (the
+//   element, or for dot the product) adds into lane i % L of L lanes that start at -0.0, L = 32
+//   for f32 and 16 for f64 (1024 bits: eight 128-bit, four 256-bit or two 512-bit vectors), then
+//   the L lanes reduce by the `reduce_add` tree: lane j with lane j + L/2, halving until one lane
+//   is left. Empty: -0.0. The bits depend on L only, so every loop and target agrees.
 // - min, max and the searches do not depend on the order.
 // Branchless per element: sum, min, max, count, fill, copy_from (their loops branch only on the
 // loop test, never on element data). The searches (find, find_byte, find_any_byte, eq, any,
@@ -62,12 +67,6 @@ fn cast_mut<T, U>(xs: &mut [T]) -> &mut [U] from xs {
     let n = xs.len() * size_of::<T>() / size_of::<U>();
     let p = mem.slice_ptr(xs) as usize as *mut U;
     return unsafe("xs covers n elements of U, borrowed exclusively; only values valid as T are written") mem.slice_mut(xs, p, n);
-}
-
-// Active lanes of the k-th n-lane vector of an r-element tail: clamp(r - k * n, 0, n).
-fn tail_lanes(r: usize, k: usize, n: usize) -> usize {
-    let left = r -| k * n;
-    return (left < n).select(left, n);
 }
 
 fn some_at(i: usize, bits: u64) -> Option<usize> {
@@ -1538,29 +1537,327 @@ fn eq_f32_v3(a: &[f32], b: &[f32]) -> bool needs(avx2) {
 
 dispatch fn eq_f32_cpu(a: &[f32], b: &[f32]) -> bool { avx2 => eq_f32_v3, _ => eq_f32, }
 
+// The 32 logical lanes of an f32 sum or dot (file head) as eight f32x4, four f32x8 or two
+// f32x16: lane j of register k is logical lane k * N + j, so adding register k + K/2 to
+// register k is one step of the lane tree, and every arm gives the same bits. The last
+// n % 32 elements go in N-element chunks, chunk c into register c; lanes past the end add
+// -0.0, the additive identity (a masked load's +0.0 would turn a -0.0 lane into +0.0). The
+// 128-bit loop, which short slices take, writes the chunks out; the wider ones, whose tail
+// runs once per long slice, add each chunk into a0 and rotate the registers down (a0 = a1,
+// .., the last = the sum), so after all K chunks every register is back in its place.
+fn sum_f32(xs: &[f32]) -> f32 {
+    let n = xs.len();
+    let z = f32x4.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut a4 = z;
+    let mut a5 = z;
+    let mut a6 = z;
+    let mut a7 = z;
+    let mut i: usize = 0;
+    while i + 32 <= n {
+        a0 = a0 + f32x4.load(xs, i);
+        a1 = a1 + f32x4.load(xs, i + 4);
+        a2 = a2 + f32x4.load(xs, i + 8);
+        a3 = a3 + f32x4.load(xs, i + 12);
+        a4 = a4 + f32x4.load(xs, i + 16);
+        a5 = a5 + f32x4.load(xs, i + 20);
+        a6 = a6 + f32x4.load(xs, i + 24);
+        a7 = a7 + f32x4.load(xs, i + 28);
+        i = i + 32;
+    }
+    if i < n {
+        let j0 = i;
+        if j0 + 4 <= n {
+            a0 = a0 + f32x4.load(xs, j0);
+        } else if j0 < n {
+            let m = mask32x4.first_n(n - j0);
+            a0 = a0 + m.select(f32x4.load_masked(xs, j0, m), z);
+        }
+        let j1 = i + 4;
+        if j1 + 4 <= n {
+            a1 = a1 + f32x4.load(xs, j1);
+        } else if j1 < n {
+            let m = mask32x4.first_n(n - j1);
+            a1 = a1 + m.select(f32x4.load_masked(xs, j1, m), z);
+        }
+        let j2 = i + 8;
+        if j2 + 4 <= n {
+            a2 = a2 + f32x4.load(xs, j2);
+        } else if j2 < n {
+            let m = mask32x4.first_n(n - j2);
+            a2 = a2 + m.select(f32x4.load_masked(xs, j2, m), z);
+        }
+        let j3 = i + 12;
+        if j3 + 4 <= n {
+            a3 = a3 + f32x4.load(xs, j3);
+        } else if j3 < n {
+            let m = mask32x4.first_n(n - j3);
+            a3 = a3 + m.select(f32x4.load_masked(xs, j3, m), z);
+        }
+        let j4 = i + 16;
+        if j4 + 4 <= n {
+            a4 = a4 + f32x4.load(xs, j4);
+        } else if j4 < n {
+            let m = mask32x4.first_n(n - j4);
+            a4 = a4 + m.select(f32x4.load_masked(xs, j4, m), z);
+        }
+        let j5 = i + 20;
+        if j5 + 4 <= n {
+            a5 = a5 + f32x4.load(xs, j5);
+        } else if j5 < n {
+            let m = mask32x4.first_n(n - j5);
+            a5 = a5 + m.select(f32x4.load_masked(xs, j5, m), z);
+        }
+        let j6 = i + 24;
+        if j6 + 4 <= n {
+            a6 = a6 + f32x4.load(xs, j6);
+        } else if j6 < n {
+            let m = mask32x4.first_n(n - j6);
+            a6 = a6 + m.select(f32x4.load_masked(xs, j6, m), z);
+        }
+        let j7 = i + 28;
+        if j7 + 4 <= n {
+            a7 = a7 + f32x4.load(xs, j7);
+        } else if j7 < n {
+            let m = mask32x4.first_n(n - j7);
+            a7 = a7 + m.select(f32x4.load_masked(xs, j7, m), z);
+        }
+    }
+    return (((a0 + a4) + (a2 + a6)) + ((a1 + a5) + (a3 + a7))).reduce_add();
+}
+
+fn dot_f32(xs: &[f32], ys: &[f32]) -> f32 {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let z = f32x4.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut a4 = z;
+    let mut a5 = z;
+    let mut a6 = z;
+    let mut a7 = z;
+    let mut i: usize = 0;
+    while i + 32 <= n {
+        a0 = a0 + f32x4.load(xs, i) * f32x4.load(y, i);
+        a1 = a1 + f32x4.load(xs, i + 4) * f32x4.load(y, i + 4);
+        a2 = a2 + f32x4.load(xs, i + 8) * f32x4.load(y, i + 8);
+        a3 = a3 + f32x4.load(xs, i + 12) * f32x4.load(y, i + 12);
+        a4 = a4 + f32x4.load(xs, i + 16) * f32x4.load(y, i + 16);
+        a5 = a5 + f32x4.load(xs, i + 20) * f32x4.load(y, i + 20);
+        a6 = a6 + f32x4.load(xs, i + 24) * f32x4.load(y, i + 24);
+        a7 = a7 + f32x4.load(xs, i + 28) * f32x4.load(y, i + 28);
+        i = i + 32;
+    }
+    if i < n {
+        let j0 = i;
+        if j0 + 4 <= n {
+            a0 = a0 + f32x4.load(xs, j0) * f32x4.load(y, j0);
+        } else if j0 < n {
+            let m = mask32x4.first_n(n - j0);
+            a0 = a0 + m.select(f32x4.load_masked(xs, j0, m) * f32x4.load_masked(y, j0, m), z);
+        }
+        let j1 = i + 4;
+        if j1 + 4 <= n {
+            a1 = a1 + f32x4.load(xs, j1) * f32x4.load(y, j1);
+        } else if j1 < n {
+            let m = mask32x4.first_n(n - j1);
+            a1 = a1 + m.select(f32x4.load_masked(xs, j1, m) * f32x4.load_masked(y, j1, m), z);
+        }
+        let j2 = i + 8;
+        if j2 + 4 <= n {
+            a2 = a2 + f32x4.load(xs, j2) * f32x4.load(y, j2);
+        } else if j2 < n {
+            let m = mask32x4.first_n(n - j2);
+            a2 = a2 + m.select(f32x4.load_masked(xs, j2, m) * f32x4.load_masked(y, j2, m), z);
+        }
+        let j3 = i + 12;
+        if j3 + 4 <= n {
+            a3 = a3 + f32x4.load(xs, j3) * f32x4.load(y, j3);
+        } else if j3 < n {
+            let m = mask32x4.first_n(n - j3);
+            a3 = a3 + m.select(f32x4.load_masked(xs, j3, m) * f32x4.load_masked(y, j3, m), z);
+        }
+        let j4 = i + 16;
+        if j4 + 4 <= n {
+            a4 = a4 + f32x4.load(xs, j4) * f32x4.load(y, j4);
+        } else if j4 < n {
+            let m = mask32x4.first_n(n - j4);
+            a4 = a4 + m.select(f32x4.load_masked(xs, j4, m) * f32x4.load_masked(y, j4, m), z);
+        }
+        let j5 = i + 20;
+        if j5 + 4 <= n {
+            a5 = a5 + f32x4.load(xs, j5) * f32x4.load(y, j5);
+        } else if j5 < n {
+            let m = mask32x4.first_n(n - j5);
+            a5 = a5 + m.select(f32x4.load_masked(xs, j5, m) * f32x4.load_masked(y, j5, m), z);
+        }
+        let j6 = i + 24;
+        if j6 + 4 <= n {
+            a6 = a6 + f32x4.load(xs, j6) * f32x4.load(y, j6);
+        } else if j6 < n {
+            let m = mask32x4.first_n(n - j6);
+            a6 = a6 + m.select(f32x4.load_masked(xs, j6, m) * f32x4.load_masked(y, j6, m), z);
+        }
+        let j7 = i + 28;
+        if j7 + 4 <= n {
+            a7 = a7 + f32x4.load(xs, j7) * f32x4.load(y, j7);
+        } else if j7 < n {
+            let m = mask32x4.first_n(n - j7);
+            a7 = a7 + m.select(f32x4.load_masked(xs, j7, m) * f32x4.load_masked(y, j7, m), z);
+        }
+    }
+    return (((a0 + a4) + (a2 + a6)) + ((a1 + a5) + (a3 + a7))).reduce_add();
+}
+
+fn sum_f32_v3(xs: &[f32]) -> f32 needs(avx2) {
+    let n = xs.len();
+    let z = f32x8.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut i: usize = 0;
+    while i + 32 <= n {
+        a0 = a0 + f32x8.load(xs, i);
+        a1 = a1 + f32x8.load(xs, i + 8);
+        a2 = a2 + f32x8.load(xs, i + 16);
+        a3 = a3 + f32x8.load(xs, i + 24);
+        i = i + 32;
+    }
+    if i < n {
+        for c in 0usize..4 {
+            let j = i + c * 8;
+            let mut v = z;
+            if j + 8 <= n {
+                v = f32x8.load(xs, j);
+            } else if j < n {
+                let m = mask32x8.first_n(n - j);
+                v = m.select(f32x8.load_masked(xs, j, m), z);
+            }
+            let t = a0 + v;
+            a0 = a1;
+            a1 = a2;
+            a2 = a3;
+            a3 = t;
+        }
+    }
+    return ((a0 + a2) + (a1 + a3)).reduce_add();
+}
+
+fn dot_f32_v3(xs: &[f32], ys: &[f32]) -> f32 needs(avx2) {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let z = f32x8.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut i: usize = 0;
+    while i + 32 <= n {
+        a0 = a0 + f32x8.load(xs, i) * f32x8.load(y, i);
+        a1 = a1 + f32x8.load(xs, i + 8) * f32x8.load(y, i + 8);
+        a2 = a2 + f32x8.load(xs, i + 16) * f32x8.load(y, i + 16);
+        a3 = a3 + f32x8.load(xs, i + 24) * f32x8.load(y, i + 24);
+        i = i + 32;
+    }
+    if i < n {
+        for c in 0usize..4 {
+            let j = i + c * 8;
+            let mut v = z;
+            if j + 8 <= n {
+                v = f32x8.load(xs, j) * f32x8.load(y, j);
+            } else if j < n {
+                let m = mask32x8.first_n(n - j);
+                v = m.select(f32x8.load_masked(xs, j, m) * f32x8.load_masked(y, j, m), z);
+            }
+            let t = a0 + v;
+            a0 = a1;
+            a1 = a2;
+            a2 = a3;
+            a3 = t;
+        }
+    }
+    return ((a0 + a2) + (a1 + a3)).reduce_add();
+}
+
+fn sum_f32_v4(xs: &[f32]) -> f32 needs(v4) {
+    let n = xs.len();
+    let z = f32x16.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut i: usize = 0;
+    while i + 32 <= n {
+        a0 = a0 + f32x16.load(xs, i);
+        a1 = a1 + f32x16.load(xs, i + 16);
+        i = i + 32;
+    }
+    if i < n {
+        for c in 0usize..2 {
+            let j = i + c * 16;
+            let mut v = z;
+            if j + 16 <= n {
+                v = f32x16.load(xs, j);
+            } else if j < n {
+                let m = mask32x16.first_n(n - j);
+                v = m.select(f32x16.load_masked(xs, j, m), z);
+            }
+            let t = a0 + v;
+            a0 = a1;
+            a1 = t;
+        }
+    }
+    return (a0 + a1).reduce_add();
+}
+
+fn dot_f32_v4(xs: &[f32], ys: &[f32]) -> f32 needs(v4) {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let z = f32x16.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut i: usize = 0;
+    while i + 32 <= n {
+        a0 = a0 + f32x16.load(xs, i) * f32x16.load(y, i);
+        a1 = a1 + f32x16.load(xs, i + 16) * f32x16.load(y, i + 16);
+        i = i + 32;
+    }
+    if i < n {
+        for c in 0usize..2 {
+            let j = i + c * 16;
+            let mut v = z;
+            if j + 16 <= n {
+                v = f32x16.load(xs, j) * f32x16.load(y, j);
+            } else if j < n {
+                let m = mask32x16.first_n(n - j);
+                v = m.select(f32x16.load_masked(xs, j, m) * f32x16.load_masked(y, j, m), z);
+            }
+            let t = a0 + v;
+            a0 = a1;
+            a1 = t;
+        }
+    }
+    return (a0 + a1).reduce_add();
+}
+
+dispatch fn sum_f32_cpu(xs: &[f32]) -> f32 { v4 => sum_f32_v4, avx2 => sum_f32_v3, _ => sum_f32, }
+
+dispatch fn dot_f32_cpu(xs: &[f32], ys: &[f32]) -> f32 { v4 => dot_f32_v4, avx2 => dot_f32_v3, _ => dot_f32, }
+
 impl [f32] {
     pub fn sum(&self) -> f32 {
-        let n = self.len();
-        let mut a0 = f32x4.splat(0.0);
-        let mut a1 = a0;
-        let mut a2 = a0;
-        let mut a3 = a0;
-        let mut i: usize = 0;
-        while i + 16 <= n {
-            a0 = a0 + f32x4.load(self, i);
-            a1 = a1 + f32x4.load(self, i + 4);
-            a2 = a2 + f32x4.load(self, i + 8);
-            a3 = a3 + f32x4.load(self, i + 12);
-            i = i + 16;
-        }
-        if i < n {
-            let r = n - i;
-            a0 = a0 + f32x4.load_masked(self, i, mask32x4.first_n(tail_lanes(r, 0, 4)));
-            a1 = a1 + f32x4.load_masked(self, i + 4, mask32x4.first_n(tail_lanes(r, 1, 4)));
-            a2 = a2 + f32x4.load_masked(self, i + 8, mask32x4.first_n(tail_lanes(r, 2, 4)));
-            a3 = a3 + f32x4.load_masked(self, i + 12, mask32x4.first_n(tail_lanes(r, 3, 4)));
-        }
-        return ((a0 + a2) + (a1 + a3)).reduce_add();
+        if self.len() >= LONG_B32 { return sum_f32_cpu(self); }
+        return sum_f32(self);
+    }
+
+    pub fn dot(&self, other: &[f32]) -> f32 {
+        debug.assert(self.len() == other.len(), "dot: the slices differ in length");
+        if self.len() >= LONG_B32 { return dot_f32_cpu(self, other); }
+        return dot_f32(self, other);
     }
 
     pub fn min(&self) -> Option<f32> {
@@ -1704,29 +2001,321 @@ fn eq_f64_v3(a: &[f64], b: &[f64]) -> bool needs(avx2) {
 
 dispatch fn eq_f64_cpu(a: &[f64], b: &[f64]) -> bool { avx2 => eq_f64_v3, _ => eq_f64, }
 
+// The 16 logical lanes of an f64 sum or dot (file head) as eight f64x2, four f64x4 or two
+// f64x8, laid out as for f32.
+fn sum_f64(xs: &[f64]) -> f64 {
+    let n = xs.len();
+    let z = f64x2.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut a4 = z;
+    let mut a5 = z;
+    let mut a6 = z;
+    let mut a7 = z;
+    let mut i: usize = 0;
+    while i + 16 <= n {
+        a0 = a0 + f64x2.load(xs, i);
+        a1 = a1 + f64x2.load(xs, i + 2);
+        a2 = a2 + f64x2.load(xs, i + 4);
+        a3 = a3 + f64x2.load(xs, i + 6);
+        a4 = a4 + f64x2.load(xs, i + 8);
+        a5 = a5 + f64x2.load(xs, i + 10);
+        a6 = a6 + f64x2.load(xs, i + 12);
+        a7 = a7 + f64x2.load(xs, i + 14);
+        i = i + 16;
+    }
+    if i < n {
+        let j0 = i;
+        if j0 + 2 <= n {
+            a0 = a0 + f64x2.load(xs, j0);
+        } else if j0 < n {
+            let m = mask64x2.first_n(n - j0);
+            a0 = a0 + m.select(f64x2.load_masked(xs, j0, m), z);
+        }
+        let j1 = i + 2;
+        if j1 + 2 <= n {
+            a1 = a1 + f64x2.load(xs, j1);
+        } else if j1 < n {
+            let m = mask64x2.first_n(n - j1);
+            a1 = a1 + m.select(f64x2.load_masked(xs, j1, m), z);
+        }
+        let j2 = i + 4;
+        if j2 + 2 <= n {
+            a2 = a2 + f64x2.load(xs, j2);
+        } else if j2 < n {
+            let m = mask64x2.first_n(n - j2);
+            a2 = a2 + m.select(f64x2.load_masked(xs, j2, m), z);
+        }
+        let j3 = i + 6;
+        if j3 + 2 <= n {
+            a3 = a3 + f64x2.load(xs, j3);
+        } else if j3 < n {
+            let m = mask64x2.first_n(n - j3);
+            a3 = a3 + m.select(f64x2.load_masked(xs, j3, m), z);
+        }
+        let j4 = i + 8;
+        if j4 + 2 <= n {
+            a4 = a4 + f64x2.load(xs, j4);
+        } else if j4 < n {
+            let m = mask64x2.first_n(n - j4);
+            a4 = a4 + m.select(f64x2.load_masked(xs, j4, m), z);
+        }
+        let j5 = i + 10;
+        if j5 + 2 <= n {
+            a5 = a5 + f64x2.load(xs, j5);
+        } else if j5 < n {
+            let m = mask64x2.first_n(n - j5);
+            a5 = a5 + m.select(f64x2.load_masked(xs, j5, m), z);
+        }
+        let j6 = i + 12;
+        if j6 + 2 <= n {
+            a6 = a6 + f64x2.load(xs, j6);
+        } else if j6 < n {
+            let m = mask64x2.first_n(n - j6);
+            a6 = a6 + m.select(f64x2.load_masked(xs, j6, m), z);
+        }
+        let j7 = i + 14;
+        if j7 + 2 <= n {
+            a7 = a7 + f64x2.load(xs, j7);
+        } else if j7 < n {
+            let m = mask64x2.first_n(n - j7);
+            a7 = a7 + m.select(f64x2.load_masked(xs, j7, m), z);
+        }
+    }
+    return (((a0 + a4) + (a2 + a6)) + ((a1 + a5) + (a3 + a7))).reduce_add();
+}
+
+fn dot_f64(xs: &[f64], ys: &[f64]) -> f64 {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let z = f64x2.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut a4 = z;
+    let mut a5 = z;
+    let mut a6 = z;
+    let mut a7 = z;
+    let mut i: usize = 0;
+    while i + 16 <= n {
+        a0 = a0 + f64x2.load(xs, i) * f64x2.load(y, i);
+        a1 = a1 + f64x2.load(xs, i + 2) * f64x2.load(y, i + 2);
+        a2 = a2 + f64x2.load(xs, i + 4) * f64x2.load(y, i + 4);
+        a3 = a3 + f64x2.load(xs, i + 6) * f64x2.load(y, i + 6);
+        a4 = a4 + f64x2.load(xs, i + 8) * f64x2.load(y, i + 8);
+        a5 = a5 + f64x2.load(xs, i + 10) * f64x2.load(y, i + 10);
+        a6 = a6 + f64x2.load(xs, i + 12) * f64x2.load(y, i + 12);
+        a7 = a7 + f64x2.load(xs, i + 14) * f64x2.load(y, i + 14);
+        i = i + 16;
+    }
+    if i < n {
+        let j0 = i;
+        if j0 + 2 <= n {
+            a0 = a0 + f64x2.load(xs, j0) * f64x2.load(y, j0);
+        } else if j0 < n {
+            let m = mask64x2.first_n(n - j0);
+            a0 = a0 + m.select(f64x2.load_masked(xs, j0, m) * f64x2.load_masked(y, j0, m), z);
+        }
+        let j1 = i + 2;
+        if j1 + 2 <= n {
+            a1 = a1 + f64x2.load(xs, j1) * f64x2.load(y, j1);
+        } else if j1 < n {
+            let m = mask64x2.first_n(n - j1);
+            a1 = a1 + m.select(f64x2.load_masked(xs, j1, m) * f64x2.load_masked(y, j1, m), z);
+        }
+        let j2 = i + 4;
+        if j2 + 2 <= n {
+            a2 = a2 + f64x2.load(xs, j2) * f64x2.load(y, j2);
+        } else if j2 < n {
+            let m = mask64x2.first_n(n - j2);
+            a2 = a2 + m.select(f64x2.load_masked(xs, j2, m) * f64x2.load_masked(y, j2, m), z);
+        }
+        let j3 = i + 6;
+        if j3 + 2 <= n {
+            a3 = a3 + f64x2.load(xs, j3) * f64x2.load(y, j3);
+        } else if j3 < n {
+            let m = mask64x2.first_n(n - j3);
+            a3 = a3 + m.select(f64x2.load_masked(xs, j3, m) * f64x2.load_masked(y, j3, m), z);
+        }
+        let j4 = i + 8;
+        if j4 + 2 <= n {
+            a4 = a4 + f64x2.load(xs, j4) * f64x2.load(y, j4);
+        } else if j4 < n {
+            let m = mask64x2.first_n(n - j4);
+            a4 = a4 + m.select(f64x2.load_masked(xs, j4, m) * f64x2.load_masked(y, j4, m), z);
+        }
+        let j5 = i + 10;
+        if j5 + 2 <= n {
+            a5 = a5 + f64x2.load(xs, j5) * f64x2.load(y, j5);
+        } else if j5 < n {
+            let m = mask64x2.first_n(n - j5);
+            a5 = a5 + m.select(f64x2.load_masked(xs, j5, m) * f64x2.load_masked(y, j5, m), z);
+        }
+        let j6 = i + 12;
+        if j6 + 2 <= n {
+            a6 = a6 + f64x2.load(xs, j6) * f64x2.load(y, j6);
+        } else if j6 < n {
+            let m = mask64x2.first_n(n - j6);
+            a6 = a6 + m.select(f64x2.load_masked(xs, j6, m) * f64x2.load_masked(y, j6, m), z);
+        }
+        let j7 = i + 14;
+        if j7 + 2 <= n {
+            a7 = a7 + f64x2.load(xs, j7) * f64x2.load(y, j7);
+        } else if j7 < n {
+            let m = mask64x2.first_n(n - j7);
+            a7 = a7 + m.select(f64x2.load_masked(xs, j7, m) * f64x2.load_masked(y, j7, m), z);
+        }
+    }
+    return (((a0 + a4) + (a2 + a6)) + ((a1 + a5) + (a3 + a7))).reduce_add();
+}
+
+fn sum_f64_v3(xs: &[f64]) -> f64 needs(avx2) {
+    let n = xs.len();
+    let z = f64x4.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut i: usize = 0;
+    while i + 16 <= n {
+        a0 = a0 + f64x4.load(xs, i);
+        a1 = a1 + f64x4.load(xs, i + 4);
+        a2 = a2 + f64x4.load(xs, i + 8);
+        a3 = a3 + f64x4.load(xs, i + 12);
+        i = i + 16;
+    }
+    if i < n {
+        for c in 0usize..4 {
+            let j = i + c * 4;
+            let mut v = z;
+            if j + 4 <= n {
+                v = f64x4.load(xs, j);
+            } else if j < n {
+                let m = mask64x4.first_n(n - j);
+                v = m.select(f64x4.load_masked(xs, j, m), z);
+            }
+            let t = a0 + v;
+            a0 = a1;
+            a1 = a2;
+            a2 = a3;
+            a3 = t;
+        }
+    }
+    return ((a0 + a2) + (a1 + a3)).reduce_add();
+}
+
+fn dot_f64_v3(xs: &[f64], ys: &[f64]) -> f64 needs(avx2) {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let z = f64x4.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut i: usize = 0;
+    while i + 16 <= n {
+        a0 = a0 + f64x4.load(xs, i) * f64x4.load(y, i);
+        a1 = a1 + f64x4.load(xs, i + 4) * f64x4.load(y, i + 4);
+        a2 = a2 + f64x4.load(xs, i + 8) * f64x4.load(y, i + 8);
+        a3 = a3 + f64x4.load(xs, i + 12) * f64x4.load(y, i + 12);
+        i = i + 16;
+    }
+    if i < n {
+        for c in 0usize..4 {
+            let j = i + c * 4;
+            let mut v = z;
+            if j + 4 <= n {
+                v = f64x4.load(xs, j) * f64x4.load(y, j);
+            } else if j < n {
+                let m = mask64x4.first_n(n - j);
+                v = m.select(f64x4.load_masked(xs, j, m) * f64x4.load_masked(y, j, m), z);
+            }
+            let t = a0 + v;
+            a0 = a1;
+            a1 = a2;
+            a2 = a3;
+            a3 = t;
+        }
+    }
+    return ((a0 + a2) + (a1 + a3)).reduce_add();
+}
+
+fn sum_f64_v4(xs: &[f64]) -> f64 needs(v4) {
+    let n = xs.len();
+    let z = f64x8.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut i: usize = 0;
+    while i + 16 <= n {
+        a0 = a0 + f64x8.load(xs, i);
+        a1 = a1 + f64x8.load(xs, i + 8);
+        i = i + 16;
+    }
+    if i < n {
+        for c in 0usize..2 {
+            let j = i + c * 8;
+            let mut v = z;
+            if j + 8 <= n {
+                v = f64x8.load(xs, j);
+            } else if j < n {
+                let m = mask64x8.first_n(n - j);
+                v = m.select(f64x8.load_masked(xs, j, m), z);
+            }
+            let t = a0 + v;
+            a0 = a1;
+            a1 = t;
+        }
+    }
+    return (a0 + a1).reduce_add();
+}
+
+fn dot_f64_v4(xs: &[f64], ys: &[f64]) -> f64 needs(v4) {
+    let n = xs.len();
+    let y = &ys[0..n];
+    let z = f64x8.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut i: usize = 0;
+    while i + 16 <= n {
+        a0 = a0 + f64x8.load(xs, i) * f64x8.load(y, i);
+        a1 = a1 + f64x8.load(xs, i + 8) * f64x8.load(y, i + 8);
+        i = i + 16;
+    }
+    if i < n {
+        for c in 0usize..2 {
+            let j = i + c * 8;
+            let mut v = z;
+            if j + 8 <= n {
+                v = f64x8.load(xs, j) * f64x8.load(y, j);
+            } else if j < n {
+                let m = mask64x8.first_n(n - j);
+                v = m.select(f64x8.load_masked(xs, j, m) * f64x8.load_masked(y, j, m), z);
+            }
+            let t = a0 + v;
+            a0 = a1;
+            a1 = t;
+        }
+    }
+    return (a0 + a1).reduce_add();
+}
+
+dispatch fn sum_f64_cpu(xs: &[f64]) -> f64 { v4 => sum_f64_v4, avx2 => sum_f64_v3, _ => sum_f64, }
+
+dispatch fn dot_f64_cpu(xs: &[f64], ys: &[f64]) -> f64 { v4 => dot_f64_v4, avx2 => dot_f64_v3, _ => dot_f64, }
+
 impl [f64] {
     pub fn sum(&self) -> f64 {
-        let n = self.len();
-        let mut a0 = f64x2.splat(0.0);
-        let mut a1 = a0;
-        let mut a2 = a0;
-        let mut a3 = a0;
-        let mut i: usize = 0;
-        while i + 8 <= n {
-            a0 = a0 + f64x2.load(self, i);
-            a1 = a1 + f64x2.load(self, i + 2);
-            a2 = a2 + f64x2.load(self, i + 4);
-            a3 = a3 + f64x2.load(self, i + 6);
-            i = i + 8;
-        }
-        if i < n {
-            let r = n - i;
-            a0 = a0 + f64x2.load_masked(self, i, mask64x2.first_n(tail_lanes(r, 0, 2)));
-            a1 = a1 + f64x2.load_masked(self, i + 2, mask64x2.first_n(tail_lanes(r, 1, 2)));
-            a2 = a2 + f64x2.load_masked(self, i + 4, mask64x2.first_n(tail_lanes(r, 2, 2)));
-            a3 = a3 + f64x2.load_masked(self, i + 6, mask64x2.first_n(tail_lanes(r, 3, 2)));
-        }
-        return ((a0 + a2) + (a1 + a3)).reduce_add();
+        if self.len() >= LONG_B64 { return sum_f64_cpu(self); }
+        return sum_f64(self);
+    }
+
+    pub fn dot(&self, other: &[f64]) -> f64 {
+        debug.assert(self.len() == other.len(), "dot: the slices differ in length");
+        if self.len() >= LONG_B64 { return dot_f64_cpu(self, other); }
+        return dot_f64(self, other);
     }
 
     pub fn min(&self) -> Option<f64> {

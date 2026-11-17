@@ -16,9 +16,9 @@ differential` (part of `cargo test --workspace`); Linux, x86-64 host for the nat
   `needs(avx2)` (256-bit kernels), `needs(sve)` (the 128-bit kernels again: the AArch64 backend
   emits the same code under `needs(sve)`, so these arms only give an AArch64 binary a pick at run
   time) and `_` (the 128-bit kernels of `base`); built for every target. Only kernels whose
-  results do not depend on the lane count qualify (`bytesearch_disp`, the integer sums of
-  `sum_disp`; float sums do: lane tree, +0.0 added per inactive tail lane), so every arm must
-  print the same. See "Dispatch runs".
+  results do not depend on the vector width qualify (`bytesearch_disp`, the integer sums of
+  `sum_disp`, and `reduce_disp`, whose float sums fix the logical lane count; the float sums
+  of `sum` use the vector's lane count), so every arm must print the same. See "Dispatch runs".
 - `diff.stv`: module `diff` of every kernel package: reads `cases.bin`, places each input array
   a given number of elements past a 64-byte boundary with guard elements around it, and prints
   result tokens (`u` / `i` integers, `f` / `d` float bits, `h` array hashes; with any
@@ -35,6 +35,8 @@ differential` (part of `cargo test --workspace`); Linux, x86-64 host for the nat
 | bytesearch | first and last index of a byte, count | `to_bits`, scalar `ctz` / `clz`, backward loads |
 | bytesearch_disp | bytesearch through `dispatch fn`s: 512-bit `needs(v4)`, 256-bit `needs(avx2)`, `needs(sve)` and 128-bit `_` arms | dispatch, per-function feature sets, `mask8x64` bits |
 | sum_disp | wrapping i32 and widened u8 sums through `dispatch fn`s with the arms of bytesearch_disp | dispatch, 512-bit `widen_lo/hi`, `reduce_add_wrap` |
+| reduce | std's f32 / f64 `sum` and `dot` and 128-bit kernels against the logical-lane rule (32 / 16 lanes from -0.0), written out one element at a time; lengths to 6L + 1, past where std dispatches | `load_masked`, `select` of `-0.0` into a tail, the 8-vector fold, `reduce_add` |
+| reduce_disp | reduce through `dispatch fn`s with the arms of bytesearch_disp (the L lanes in 2 x 512-bit and 4 x 256-bit vectors), and std's own `sum` / `dot` arms | dispatch, 512-bit masked loads and `reduce_add`, std's `v4` / `avx2` / `_` arms |
 | prefix | in-place inclusive prefix sums, f32 / f64 / i32 | `scan_add`, `scan_add_wrap`, `permute`, `&mut` chunk binding |
 | histogram | 256-bin byte histogram | `gather`, `scatter` (inside `emulate`), lane-private bins |
 | matmul4 | 4x4 matrix times 4-element points | `permute` broadcasts, `join` (v3), `select` |
@@ -48,7 +50,11 @@ For each case kind of a kernel (element type and lane count N): every length fro
 each at two misalignments from a 64-byte boundary (`STAVE_DIFF_FULL=1`: every misalignment),
 then `STAVE_DIFF_RANDOM` (default 24) cases of random length up to 3N + 257 and random
 misalignment. Each case draws its values from one palette: a few distinct values, edge values
-(±0, ±inf, NaNs with payloads, subnormals, extremes), moderate random values, or raw bits.
+(±0, ±inf, NaNs with payloads, subnormals, extremes), moderate random values, or raw bits. The
+`reduce` kernels add four: all `-0.0` (dot: times 1.0), cancelling values of either sign from
+2^-20 to 2^21, ±MAX at every eighth element among ±1 (overflow and inf + -inf depend on the lane
+count), and moderate values with NaNs; `harness.rs` checks that their cases tell L from L/2 and
+2L, from the sequential sum, and from `+0.0` lane starts, and NaN-ness between lane counts.
 `STAVE_DIFF_SEED` (default `0x5eed`) seeds the generator; `STAVE_DIFF_KERNELS=sum,dot` runs
 only those programs.
 
@@ -62,8 +68,10 @@ x86_64-linux-v3 and aarch64-linux; the `_v3` programs for x86_64-linux-v3 only):
   equal whatever their sign and payload (unspecified, LANG.md §3), every other token compares
   bit for bit (`-0.0` is not `0.0`), and an `h` hash replaces each NaN by one canonical NaN first;
 - every native line equals the interpreter's;
-- for `utf8`, `bytesearch` and `sum_disp`, the reference tokens equal what the harness computes
-  in Rust;
+- for `utf8`, `bytesearch`, `sum_disp` and the `reduce` kernels, the reference tokens equal
+  what the harness computes in Rust;
+- in `reduce_disp` runs on x86-64, std's `sum` / `dot` dispatch fns pick the run's arm too
+  (`std.slice.<f>_v4`, `_v3`, or `_`);
 - outputs keep their guard elements (a flag token).
 
 A failing line is shown with the case's head and inputs, and with the program rerun on that case
@@ -72,8 +80,8 @@ here is reported and skipped. A build that stops with "not implemented yet" fail
 that are known to fail go in `KNOWN` in `harness.rs`, with the reason; they are reported, not
 failed, and an entry that starts passing fails the test until it is removed.
 
-Default run: about 5,700 cases over the 22 programs, 154 legs, about 46,000 checked lines, about
-25 s on an 8-core x86-64 host with Intel SDE. `STAVE_DIFF_FULL=1 STAVE_DIFF_RANDOM=256` checks
+Default run: about 8,100 cases over the 24 programs, 186 legs, about 86,000 checked lines, about
+45 s on an 8-core x86-64 host with Intel SDE. `STAVE_DIFF_FULL=1 STAVE_DIFF_RANDOM=256` checks
 several hundred thousand lines in several minutes.
 
 ## Dispatch runs

@@ -2,8 +2,8 @@
 // `needs(avx2)` arms with 256-bit vectors, `needs(sve)` arms that run the 128-bit kernels (the
 // AArch64 backend emits the same code for them), and the 128-bit kernels of sum.stv as `_` arms.
 // Wrapping integer addition does not depend on the order, so every arm prints the same; the float
-// sums of sum.stv do (lane tree, and +0.0 added for each inactive lane of a masked tail), so they
-// are not here.
+// sums of sum.stv do (their lane count is the vector's, and a masked tail adds +0.0 per inactive
+// lane), so they are not here: reduce_disp.stv has float sums whose arms agree by construction.
 import base;
 import diff;
 

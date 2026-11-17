@@ -38,8 +38,32 @@ struct Kernel {
 }
 
 const fn kind(arrays: &'static [Elem], lanes: usize, param: Param) -> Kind {
-    Kind { arrays, lanes, param }
+    Kind { arrays, lanes, param, palettes: &generate::PALETTES }
 }
+
+/// The logical lane counts of std's float `sum` and `dot`.
+const L_F32: usize = 32;
+const L_F64: usize = 16;
+
+/// The cases of the float reduction kernels: f32 and f64 sums, then dot products. Lengths run
+/// to 6L + 1, past the lengths (128 f32, 64 f64) where std's `sum` and `dot` go through
+/// `dispatch`, so each std arm sees every tail length too.
+const REDUCE_KINDS: &[Kind] = &[
+    Kind { arrays: &[Elem::F32], lanes: 2 * L_F32, param: Param::None, palettes: &generate::REDUCE_PALETTES },
+    Kind { arrays: &[Elem::F64], lanes: 2 * L_F64, param: Param::None, palettes: &generate::REDUCE_PALETTES },
+    Kind {
+        arrays: &[Elem::F32, Elem::F32],
+        lanes: 2 * L_F32,
+        param: Param::None,
+        palettes: &generate::REDUCE_PALETTES,
+    },
+    Kind {
+        arrays: &[Elem::F64, Elem::F64],
+        lanes: 2 * L_F64,
+        param: Param::None,
+        palettes: &generate::REDUCE_PALETTES,
+    },
+];
 
 /// Every kernel program, with the case kinds its `main` dispatches on (in order).
 const KERNELS: &[Kernel] = &[
@@ -99,6 +123,7 @@ const KERNELS: &[Kernel] = &[
             kind(&[Elem::U8], 16, Param::Byte),
         ],
     },
+    Kernel { name: "reduce", kinds: REDUCE_KINDS },
     Kernel {
         name: "stream_copy",
         kinds: &[
@@ -149,6 +174,7 @@ const KERNELS: &[Kernel] = &[
         name: "sum_disp",
         kinds: &[kind(&[Elem::I32], 16, Param::None), kind(&[Elem::U8], 64, Param::None)],
     },
+    Kernel { name: "reduce_disp", kinds: REDUCE_KINDS },
     Kernel {
         name: "prefix_v3",
         kinds: &[
@@ -238,6 +264,7 @@ fn dispatch_fns(kernel: &str) -> &'static [&'static str] {
     match kernel {
         "bytesearch_disp" => &["find_first", "find_last", "count"],
         "sum_disp" => &["sum_i32", "sum_u8"],
+        "reduce_disp" => &["sum_f32", "dot_f32", "sum_f64", "dot_f64"],
         _ => panic!("{kernel}: no dispatch fns listed"),
     }
 }
@@ -387,13 +414,36 @@ fn run_bin(bin: &Path, run: &Run, args: &[String], cwd: &Path) -> Ran {
     }
 }
 
+/// The std dispatch fns (`std.slice.<f>`) a `_disp` kernel reaches whose arms it checks too.
+fn std_dispatch_fns(kernel: &str) -> &'static [&'static str] {
+    match kernel {
+        "reduce_disp" => &["sum_f32_cpu", "dot_f32_cpu", "sum_f64_cpu", "dot_f64_cpu"],
+        _ => &[],
+    }
+}
+
+/// The arm of std dispatch fn `f` (`<g>_cpu`) for `want`: `<g>_v4`, `<g>_v3`, else `<g>` (std
+/// has no `sve` arms).
+fn std_arm(f: &str, want: Arm) -> String {
+    let g = f.strip_suffix("_cpu").unwrap_or(f);
+    match want {
+        Arm::V4 => format!("std.slice.{g}_v4"),
+        Arm::V3 => format!("std.slice.{g}_v3"),
+        Arm::Sve | Arm::Base => format!("std.slice.{g}"),
+    }
+}
+
 /// Checks the trace of a traced run: every `dispatch: main.<f> -> <arm>` line names `want`'s
-/// arm of `f`, and each dispatch fn of the kernel has a line. Returns the run with its stderr
-/// less the trace (std's own dispatch fns too; under SDE every line).
-fn picked(kernel: &str, mut r: Ran, want: Arm, sde: bool) -> Result<Ran, String> {
+/// arm of `f`, and each dispatch fn of the kernel has a line; so do the std fns of
+/// [`std_dispatch_fns`] when `std_traced` (x86-64: an AArch64 build resolves them at compile
+/// time and prints no line). Returns the run with its stderr less the trace (other std dispatch
+/// fns too; under SDE every line).
+fn picked(kernel: &str, mut r: Ran, want: Arm, sde: bool, std_traced: bool) -> Result<Ran, String> {
     let err = String::from_utf8_lossy(&r.stderr).into_owned();
     let fns = dispatch_fns(kernel);
     let mut seen = vec![false; fns.len()];
+    let sfns = std_dispatch_fns(kernel);
+    let mut sseen = vec![!std_traced; sfns.len()];
     let mut rest = String::new();
     for line in err.lines() {
         let Some(t) = line.strip_prefix("dispatch: ") else {
@@ -404,6 +454,13 @@ fn picked(kernel: &str, mut r: Ran, want: Arm, sde: bool) -> Result<Ran, String>
             continue;
         };
         let Some((f, arm)) = t.split_once(" -> ") else { return Err(format!("trace line `{line}`")) };
+        if let Some(i) = f.strip_prefix("std.slice.").and_then(|g| sfns.iter().position(|h| *h == g)) {
+            if arm != std_arm(sfns[i], want) {
+                return Err(format!("trace line `{line}`: want the {want:?} arm, {}", show(&r)));
+            }
+            sseen[i] = true;
+            continue;
+        }
         let Some(f) = f.strip_prefix("main.") else { continue };
         let Some(i) = fns.iter().position(|g| *g == f) else {
             return Err(format!("trace line `{line}`: not a dispatch fn of {kernel}"));
@@ -415,6 +472,13 @@ fn picked(kernel: &str, mut r: Ran, want: Arm, sde: bool) -> Result<Ran, String>
     }
     if let Some(i) = seen.iter().position(|s| !s) {
         return Err(format!("no trace line for `main.{}` (want the {want:?} arm), {}", fns[i], show(&r)));
+    }
+    if let Some(i) = sseen.iter().position(|s| !s) {
+        return Err(format!(
+            "no trace line for `std.slice.{}` (want the {want:?} arm), {}",
+            sfns[i],
+            show(&r)
+        ));
     }
     r.stderr = rest.into_bytes();
     Ok(r)
@@ -562,7 +626,71 @@ fn oracle(kernel: &str, case: &generate::Case) -> Option<String> {
             Some(format!("i{s}"))
         }
         "sum_disp" => Some(format!("u{}", xs.iter().fold(0u32, |s, &b| s.wrapping_add(u32::from(b))))),
+        "reduce" | "reduce_disp" => {
+            let t = reduce_token(case, L_F32, L_F64, -0.0);
+            Some(format!("{t} {t}"))
+        }
         _ => None,
+    }
+}
+
+fn le_f32(b: &[u8]) -> Vec<f32> {
+    b.chunks(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+}
+
+fn le_f64(b: &[u8]) -> Vec<f64> {
+    b.chunks(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect()
+}
+
+/// The logical-lane rule over L lanes: lane l starts at `start` and adds terms l, l + L, .. in
+/// order, then lane j adds lane j + w for w = L/2, .., 1. std uses `start` = -0.0.
+fn lanes_f32(terms: impl Iterator<Item = f32>, l: usize, start: f32) -> f32 {
+    let mut lane = vec![start; l];
+    for (i, t) in terms.enumerate() {
+        lane[i % l] += t;
+    }
+    let mut w = l / 2;
+    while w > 0 {
+        for j in 0..w {
+            lane[j] += lane[j + w];
+        }
+        w /= 2;
+    }
+    lane[0]
+}
+
+fn lanes_f64(terms: impl Iterator<Item = f64>, l: usize, start: f64) -> f64 {
+    let mut lane = vec![start; l];
+    for (i, t) in terms.enumerate() {
+        lane[i % l] += t;
+    }
+    let mut w = l / 2;
+    while w > 0 {
+        for j in 0..w {
+            lane[j] += lane[j + w];
+        }
+        w /= 2;
+    }
+    lane[0]
+}
+
+/// The token of a reduction case (kinds of [`REDUCE_KINDS`]) with `l32` / `l64` lanes for f32 /
+/// f64 and the given start value; std's is `reduce_token(case, L_F32, L_F64, -0.0)`.
+fn reduce_token(case: &generate::Case, l32: usize, l64: usize, start: f64) -> String {
+    let a = &case.arrays[0];
+    match case.kind {
+        0 => ftok(lanes_f32(le_f32(a).into_iter(), l32, start as f32).to_bits()),
+        1 => dtok(lanes_f64(le_f64(a).into_iter(), l64, start).to_bits()),
+        2 => {
+            let ys = le_f32(&case.arrays[1]);
+            let ps = le_f32(a).into_iter().zip(ys).map(|(x, y)| x * y);
+            ftok(lanes_f32(ps, l32, start as f32).to_bits())
+        }
+        _ => {
+            let ys = le_f64(&case.arrays[1]);
+            let ps = le_f64(a).into_iter().zip(ys).map(|(x, y)| x * y);
+            dtok(lanes_f64(ps, l64, start).to_bits())
+        }
     }
 }
 
@@ -691,7 +819,7 @@ fn run_kernel(k: &'static Kernel, root: &Path, plan: Plan) -> Vec<Report> {
                 let got = run_bin(&bin, run, &[], &dir);
                 let got = match run.arm {
                     None => Leg::Ran(got),
-                    Some(arm) => match picked(k.name, got, arm, run.sde) {
+                    Some(arm) => match picked(k.name, got, arm, run.sde, t.starts_with("x86_64")) {
                         Ok(r) => Leg::Ran(r),
                         Err(e) => Leg::Failed(e),
                     },
@@ -794,4 +922,28 @@ fn other_tokens_compare_bit_exact() {
     assert!(!same(&u1, &u2), "an int token is never a NaN");
     assert!(!line_ok(&format!(" {pz} = {nz}")));
     assert!(!same_tokens(&pz, &format!("{pz} {pz}")));
+}
+
+/// The reduction cases catch the likely mistakes: for every kind, some default case gives other
+/// bits with half or twice the lane count, with the sequential sum, and with +0.0 lane starts,
+/// and some case is a NaN under one lane count but not under another.
+#[test]
+fn reduce_cases_tell_lane_counts_orders_and_zero_signs_apart() {
+    let plan = Plan { seed: 0x5eed, full: false, random: 24 };
+    let cases = generate::cases("reduce", REDUCE_KINDS, plan);
+    for kind in 0..REDUCE_KINDS.len() as u32 {
+        let (mut half, mut double, mut seq, mut plus_zero, mut nan) = (0, 0, 0, 0, 0);
+        for c in cases.iter().filter(|c| c.kind == kind) {
+            let want = reduce_token(c, L_F32, L_F64, -0.0);
+            let h = reduce_token(c, L_F32 / 2, L_F64 / 2, -0.0);
+            let d = reduce_token(c, 2 * L_F32, 2 * L_F64, -0.0);
+            half += usize::from(!same(&want, &h));
+            double += usize::from(!same(&want, &d));
+            seq += usize::from(!same(&want, &reduce_token(c, 1, 1, -0.0)));
+            plus_zero += usize::from(!same(&want, &reduce_token(c, L_F32, L_F64, 0.0)));
+            nan += usize::from(is_nan(&want) != is_nan(&h) || is_nan(&want) != is_nan(&d));
+        }
+        let n = [half, double, seq, plus_zero, nan];
+        assert!(n.iter().all(|&k| k > 0), "kind {kind}: half, double, sequential, +0.0, NaN-ness: {n:?}");
+    }
 }

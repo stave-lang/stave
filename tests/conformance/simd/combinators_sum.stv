@@ -2,7 +2,8 @@
 // std.slice `sum` on every int and float element type, over prefixes of length 0, below one
 // vector, exact multiples, and with tails (LENS). Int sums are the sequential sums: slices whose
 // lanes would overflow but whose running sum never does (MAX, -MAX, ...) do not trap. Float sums
-// use the 16-lane (f32) / 8-lane (f64) tree; NaN, infinities, and -0.0 follow IEEE addition.
+// follow the logical-lane rule with 32 (f32) / 16 (f64) lanes from -0.0, so an empty or all -0.0
+// sum is -0.0; NaN and infinities follow IEEE addition.
 // crates/stave-driver/tests/interp_vs_native.rs runs it in the IR interpreter and natively
 // against combinators_sum.stdout.
 import std.io;
@@ -99,7 +100,7 @@ fn sums_f32() {
     }
     for k in 0usize..12 { let s = (&a[0..LENS[k]]).sum(); io.print(f"{s} "); }
     io.print("\n");
-    // 2^24 + 1 + 1 + ... : sequentially every 1 rounds away; in 16 lanes they are added first.
+    // 2^24 + 1 + 1 + ... : sequentially every 1 rounds away; across 32 lanes most add up first.
     let mut b: [f32; 33] = [1.0; 33];
     b[0] = 16777216.0;
     let t = (&b[0..33]).sum();

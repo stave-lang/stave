@@ -1,0 +1,69 @@
+//~ CHECK-ONLY
+// std.slice `dot` on f32 and f64 over prefixes of length 0, below one vector, around the 32-lane
+// (f32) / 16-lane (f64) block, and long enough for the loops behind `dispatch`: each product is
+// rounded, then summed by the logical-lane rule from -0.0 (an empty dot, or one of -0.0
+// products, is -0.0). crates/stave-driver/tests/interp_vs_native.rs runs it in the IR
+// interpreter and natively against combinators_dot.stdout.
+import std.io;
+
+const LENS: [usize; 12] = [0, 1, 3, 4, 15, 16, 17, 31, 32, 33, 64, 200];
+
+fn dots_f32() {
+    let mut a: [f32; 200] = [0.0; 200];
+    let mut b: [f32; 200] = [0.0; 200];
+    let mut x: f32 = 1.0;
+    for i in 0usize..200 {
+        a[i] = x;
+        b[i] = 0.5 - x;
+        x = x * 1.7 - 2.3;
+        if x > 1000.0 || x < -1000.0 { x = x * 0.001; }
+    }
+    for k in 0usize..12 {
+        let s = (&a[0..LENS[k]]).dot(&b[0..LENS[k]]);
+        io.print(f"{s} ");
+    }
+    io.print("\n");
+    // 2^12 * 2^12 + 1 * 1 + ...: sequentially every 1 rounds away; across 32 lanes most add up
+    // first.
+    let mut c: [f32; 40] = [1.0; 40];
+    c[0] = 4096.0;
+    let t = (&c[0..40]).dot(&c[0..40]);
+    let z: f32 = 0.0;
+    let inf = 1.0 / z;
+    let d: [f32; 3] = [-0.0, -0.0, -0.0];
+    let e: [f32; 3] = [1.0, 2.0, 3.0];
+    let f: [f32; 2] = [inf, 1.0];
+    let g: [f32; 2] = [0.0, 1.0];
+    let s1 = (&d[0..3]).dot(&e[0..3]);
+    let s2 = (&d[0..3]).dot(&d[0..3]);
+    let s3 = (&f[0..2]).dot(&g[0..2]);
+    io.print(f"{t} {s1} {s2} {s3}\n");
+}
+
+fn dots_f64() {
+    let mut a: [f64; 200] = [0.0; 200];
+    let mut b: [f64; 200] = [0.0; 200];
+    let mut x: f64 = 1.0;
+    for i in 0usize..200 {
+        a[i] = x;
+        b[i] = 0.5 - x;
+        x = x * 1.7 - 2.3;
+        if x > 1000.0 || x < -1000.0 { x = x * 0.001; }
+    }
+    for k in 0usize..12 {
+        let s = (&a[0..LENS[k]]).dot(&b[0..LENS[k]]);
+        io.print(f"{s} ");
+    }
+    io.print("\n");
+    let d: [f64; 2] = [-0.0, -0.0];
+    let e: [f64; 2] = [1.0, 2.0];
+    let s1 = (&d[0..2]).dot(&e[0..2]);
+    let s2 = (&d[0..0]).dot(&e[0..0]);
+    io.print(f"{s1} {s2}\n");
+}
+
+fn main() -> i32 {
+    dots_f32();
+    dots_f64();
+    return 0;
+}
