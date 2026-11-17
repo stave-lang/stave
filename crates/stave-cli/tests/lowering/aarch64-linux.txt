@@ -18,6 +18,8 @@ vec.sub.wrap            int                         N    1  sub
 vec.abs_wrap            sint                        N    1  abs
 vec.mul.wrap            int8/int16/int32            N    1  mul
 vec.mul.wrap            int64                       M    8  umov x4; mul x2; ins x2  | note: no 64-bit lane mul: per lane through general registers
+vec.mul_hi              int8/int16/int32            M    3  ?mull; ?mull2; uzp2
+vec.mul_hi              int64                       M    8  umov x4; ?mulh x2; ins x2  | note: no 64-bit lane high multiply: per lane through general registers
 vec.mul.sat             i8/i16/i32                  M    4  ?mull; ?qxtn; ?mull2; ?qxtn2
 vec.mul.sat             u8/u16/u32                  M    4  ?mull; ?qxtn; ?mull2; ?qxtn2
 vec.mul.sat             i64                         M   20  umov x4; eor x4; asr x2; mul x2; smulh x2; cmp x2; csel x2; ins x2

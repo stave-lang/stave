@@ -173,6 +173,67 @@ v2 = { class = "M", recipe = "psrlq; pmuludq; psrlq; pmuludq; paddq; psllq; pmul
 v3 = { class = "M", recipe = "vpsrlq; vpmuludq; vpsrlq; vpmuludq; vpaddq; vpsllq; vpmuludq; vpaddq" }
 v4 = { class = "N", recipe = "vpmullq" }
 
+# int mul high half: bytes as the high bytes of the even and of the odd bytes' word products;
+# doublewords as the high halves of the even and of the odd lanes' quadword products; quadwords
+# lane by lane (v2, v3: `mul` / `imul` leave the high half in rdx) or from four doubleword
+# products (v4)
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["i16"]
+v2 = { class = "N", recipe = "pmulhw" }
+v3 = { class = "N", recipe = "vpmulhw" }
+v4 = { class = "N", recipe = "vpmulhw" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["u16"]
+v2 = { class = "N", recipe = "pmulhuw" }
+v3 = { class = "N", recipe = "vpmulhuw" }
+v4 = { class = "N", recipe = "vpmulhuw" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["i32"]
+v2 = { class = "M", recipe = "pshufd x2; pmuldq x2; psrlq; pblendw" }
+v3 = { class = "M", recipe = "vpshufd x2; vpmuldq x2; vpsrlq; vpblendw" }
+v4 = { class = "M", recipe = "vpmuldq x2; vpsrlq x2; vpermt2d" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["u32"]
+v2 = { class = "M", recipe = "pshufd x2; pmuludq x2; psrlq; pblendw" }
+v3 = { class = "M", recipe = "vpshufd x2; vpmuludq x2; vpsrlq; vpblendw" }
+v4 = { class = "M", recipe = "vpmuludq x2; vpsrlq x2; vpermt2d" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["i8"]
+v2 = { class = "M", recipe = "psllw x2; pmulhw x2; psrlw; pand x3; por" }
+v3 = { class = "M", recipe = "vpsllw x2; vpmulhw x2; vpsrlw; vpand x3; vpor" }
+v4 = { class = "M", recipe = "vpsllw x2; vpmulhw x2; vpandq x2; vpsrlw; vpternlogq" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["u8"]
+v2 = { class = "M", recipe = "psllw; pand x4; pmulhuw x2; por" }
+v3 = { class = "M", recipe = "vpsllw; vpand x4; vpmulhuw x2; vpor" }
+v4 = { class = "M", recipe = "vpsllw x2; vpmulhuw x2; vpandq x2; vpsrlw; vpternlogq" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["i64"]
+v2 = { class = "M", recipe = "mov x4; imul x2" }
+v3 = { class = "M", recipe = "mov x8; imul x4" }
+v4 = { class = "M", recipe = "vpsrlq x5; vpmuludq x4; vpaddq x4; vpandq x3; vpsraq x2; vpsubq x2" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["u64"]
+v2 = { class = "M", recipe = "mov x4; mul x2" }
+v3 = { class = "M", recipe = "mov x8; mul x4" }
+v4 = { class = "M", recipe = "vpsrlq x5; vpmuludq x4; vpaddq x4; vpandq" }
+
 # saturating add/sub
 
 [[op]]

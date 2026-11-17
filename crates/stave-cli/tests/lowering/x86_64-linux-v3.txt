@@ -20,6 +20,14 @@ vec.abs_wrap            i64                         M    3  vpcmpgtq; vpxor; vps
 vec.mul.wrap            int16/int32                 N    1  vpmull*
 vec.mul.wrap            int8                        M    7  vpsrlw x2; vpmullw; vpsllw; vpmullw; vpand; vpor
 vec.mul.wrap            int64                       M    8  vpsrlq; vpmuludq; vpsrlq; vpmuludq; vpaddq; vpsllq; vpmuludq; vpaddq
+vec.mul_hi              i16                         N    1  vpmulhw
+vec.mul_hi              u16                         N    1  vpmulhuw
+vec.mul_hi              i32                         M    6  vpshufd x2; vpmuldq x2; vpsrlq; vpblendw
+vec.mul_hi              u32                         M    6  vpshufd x2; vpmuludq x2; vpsrlq; vpblendw
+vec.mul_hi              i8                          M    9  vpsllw x2; vpmulhw x2; vpsrlw; vpand x3; vpor
+vec.mul_hi              u8                          M    8  vpsllw; vpand x4; vpmulhuw x2; vpor
+vec.mul_hi              i64                         M   12  mov x8; imul x4
+vec.mul_hi              u64                         M   12  mov x8; mul x4
 vec.add.sat             i8/i16                      N    1  vpadds*
 vec.add.sat             u8/u16                      N    1  vpaddus*
 vec.sub.sat             i8/i16                      N    1  vpsubs*

@@ -449,6 +449,31 @@ fn int_wrap_saturate_trap() {
 }
 
 #[test]
+fn mul_hi_is_the_high_half() {
+    let min = i32::MIN as i64;
+    let max = i32::MAX as i64;
+    let h = same(
+        int(true, 32),
+        4,
+        2,
+        VecOp::MulHi,
+        vec![ilanes(&[min, min, -1, max]), ilanes(&[min, max, 1, max])],
+    )
+    .unwrap();
+    assert_eq!(ival(&h), vec![1 << 30, (min * max) >> 32, -1, (max * max) >> 32]);
+    let u = same(int(false, 8), 4, 2, VecOp::MulHi, vec![lanes(&[255, 255, 16, 0]), lanes(&[255, 2, 16, 9])])
+        .unwrap();
+    assert_eq!(out_lanes(&u), vec![254, 1, 1, 0]);
+    let u =
+        same(int(false, 64), 2, 2, VecOp::MulHi, vec![lanes(&[u64::MAX, 1 << 63]), lanes(&[u64::MAX, 4])])
+            .unwrap();
+    assert_eq!(out_lanes(&u), vec![u64::MAX - 1, 2]);
+    let s = same(int(true, 64), 2, 2, VecOp::MulHi, vec![ilanes(&[i64::MIN, -1]), ilanes(&[i64::MIN, 1])])
+        .unwrap();
+    assert_eq!(ival(&s), vec![1 << 62, -1]);
+}
+
+#[test]
 fn checked_ops_yield_option() {
     let res = |op: VecOp, a: Vec<i64>, b: Vec<i64>| {
         one(

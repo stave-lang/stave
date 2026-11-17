@@ -28,7 +28,7 @@ fn floats(a: f32x4, b: f32x4, s: &[f32], d: &mut [f32]) -> f32 {
 }
 
 fn ints(a: u8x16, b: u8x16, k: u32x4, s: &[u32], d: &mut [u32]) -> u32 {
-    let w = (a +% b) -| (a *% b) +| a;
+    let w = (a +% b) -| (a *% b) +| a.mul_hi(b);
     let x = (w & b) | (w ^ a) | ~w | w.andnot(b);
     let y = (x << 2) >> 1;
     let z = y <<% b;
@@ -39,7 +39,7 @@ fn ints(a: u8x16, b: u8x16, k: u32x4, s: &[u32], d: &mut [u32]) -> u32 {
     emulate {
         dv = dv.div_lanes(k);
     }
-    let t = dv.min(k).max(k);
+    let t = dv.min(k).max(k).mul_hi(k);
     let c: Option<u32x4> = t.checked_add(k);
     emulate {
         let g = u32x4.gather(s, k);

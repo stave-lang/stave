@@ -213,6 +213,7 @@ impl FnCx<'_> {
             "checked_add" => Some(VecOp::CheckedAdd),
             "checked_sub" => Some(VecOp::CheckedSub),
             "checked_mul" => Some(VecOp::CheckedMul),
+            "mul_hi" => Some(VecOp::MulHi),
             _ => None,
         };
         if let Some(op) = binary {

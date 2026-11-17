@@ -136,7 +136,9 @@ pub fn int_arith() -> Vec<Case> {
         let ed = int_edges(l);
         for s in shapes(l) {
             use VecOp::*;
-            for op in [AddWrap, SubWrap, MulWrap, AddSat, SubSat, MulSat, Min, Max, And, Or, Xor, Andnot] {
+            for op in
+                [AddWrap, SubWrap, MulWrap, AddSat, SubSat, MulSat, MulHi, Min, Max, And, Or, Xor, Andnot]
+            {
                 out.extend(batch(op, Res::V(s), false, pairs(s, &ps, &ps)));
             }
             for op in [AbsWrap, Popcount, Clz, Not] {

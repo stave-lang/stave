@@ -49,7 +49,7 @@ use super::ty::{self, Ty, VTy, half_arr, lane_of};
 use super::{R, bad, unsupported};
 use crate::enc::{
     Across, AddSub, Addr, Arr, CmpZ, Cond, FcvtRound, Fp, FpBin, IdxExt, ImmShift, Label, Lane, Logic,
-    MemSize, Narrow, Reg, Shift, Sign, Tbl, VBin, VFpBin, VFpUn, VIntUn, VLogic, VReg, VShift, VecSize,
+    MemSize, Narrow, Perm, Reg, Shift, Sign, Tbl, VBin, VFpBin, VFpUn, VIntUn, VLogic, VReg, VShift, VecSize,
 };
 
 const B16: Arr = Arr::B16;
@@ -327,8 +327,8 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.set_v(v, rd)
             }
             Add | Sub | Mul | Div | Copysign | Min | Max | MinNum | MaxNum | MinX86 | MaxX86 | AddWrap
-            | SubWrap | MulWrap | AddSat | SubSat | MulSat | And | Or | Xor | Andnot | MaskAnd | MaskOr
-            | MaskXor => {
+            | SubWrap | MulWrap | AddSat | SubSat | MulSat | MulHi | And | Or | Xor | Andnot | MaskAnd
+            | MaskOr | MaskXor => {
                 let v = self.res(i)?;
                 let (a, vt) = self.use_v(arg(0)?)?;
                 let (c, _) = self.use_v(arg(1)?)?;
@@ -684,11 +684,44 @@ impl<'a, 'm> Gen<'a, 'm> {
                     self.a.ins_gpr(Lane::D, rd, k, lo)?;
                 }
             }
+            MulHi if vt.lane != Lane::D => self.mul_hi(vt, rd, a, c)?,
+            MulHi => {
+                for k in 0..2 {
+                    self.a.umov(Lane::D, S15, a, k)?;
+                    self.a.umov(Lane::D, S16, c, k)?;
+                    if signed {
+                        self.a.smulh(S15, S15, S16)?;
+                    } else {
+                        self.a.umulh(S15, S15, S16)?;
+                    }
+                    self.a.ins_gpr(Lane::D, rd, k, S15)?;
+                }
+            }
             And | MaskAnd => self.a.vlogic(VLogic::And, B16, rd, a, c)?,
             Or | MaskOr => self.a.vlogic(VLogic::Orr, B16, rd, a, c)?,
             Xor | MaskXor => self.a.vlogic(VLogic::Eor, B16, rd, a, c)?,
             Andnot => self.a.vlogic(VLogic::Bic, B16, rd, a, c)?,
             _ => return Err(bad("vector binary op")),
+        }
+        Ok(())
+    }
+
+    /// `rd` = the high halves of the double-width products of the 8-, 16- or 32-bit lanes of `a`
+    /// and `c` (`rd` is neither): the widening multiplies' products, their high halves picked.
+    fn mul_hi(&mut self, vt: VTy, rd: VReg, a: VReg, c: VReg) -> R<()> {
+        let sign = if vt.signed() { Sign::Signed } else { Sign::Unsigned };
+        let half = half_arr(vt.lane);
+        if vt.size < 16 {
+            let wide = self.tmp_f()?;
+            self.a.vmull(sign, half, wide, a, c)?;
+            self.a.vshrn(false, half, rd, wide, vt.lane.bits())?;
+        } else {
+            let arr = vt.arr();
+            let upper = self.tmp_f()?;
+            self.a.vmull(sign, half, rd, a, c)?;
+            self.a.vmull(sign, arr, upper, a, c)?;
+            // a product's high half is the odd narrow lane of its pair
+            self.a.vperm(Perm::Uzp2, arr, rd, rd, upper)?;
         }
         Ok(())
     }

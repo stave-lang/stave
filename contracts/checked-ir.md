@@ -75,7 +75,7 @@ instructions; the trap kind is the matching panic kind (`Overflow`, `Bounds`, `D
 | `shl shr` † | `a amount` | amount ≥ bits traps `Overflow`; `shr` arithmetic iff signed. The front end gives the amount the left operand's type |
 | `and or xor`, `not` | `a b`, `a` | bitwise on ints, logical on `bool` |
 | `popcount clz ctz` | `a` | bit counts within the type's width; result type = operand type |
-| `mul.wide` | `a b` | `u32`/`u64` → `tuple (hi, lo)` |
+| `mul.wide` | `a b` | `i32`/`i64`/`u32`/`u64` → `tuple (hi, lo)`: the exact double-width product, `hi` signed iff the type is, `lo` its low bits |
 | `eq ne lt le gt ge` | `a b` | result `bool`; ints by signedness, floats IEEE (unordered: only `ne` true); pointers and fn values `eq`/`ne` only |
 | `select` | `c a b` | `c ? a : b`: `c` is `bool`, `a` and `b` have the result type (any type, aggregates included). Both operands are already computed; a backend emits no branch on `c` and no memory access whose address depends on `c` (a conditional move per scalar or per 8-byte word). A mask `c` with vector operands of its shape is the lane-wise form, verified when vector lowering lands |
 | `cast cast.wrap cast.sat cast.round cast.try` | `x` | `as as% as\| as~ as?` (allowed pairs: below); `cast.try` yields the `Option` instance |
@@ -105,6 +105,7 @@ ops take the lane semantics of the scalar op; V = the vector result type, M = `m
 | `vec.add sub mul div neg abs copysign sqrt floor ceil round trunc fma` | lanes | float lanes, IEEE (`round` ties to even, `fma` one rounding) |
 | `vec.min max min_num max_num min_x86 max_x86` | `a b` | IEEE minimum / maximum, minimumNumber / maximumNumber (a quiet or signaling NaN is missing: the other operand; two NaNs: a quiet NaN), `a < b ? a : b` (a NaN result is some NaN: quiet bit and payload unspecified); int `min max` by value |
 | `vec.add.wrap sub.wrap mul.wrap add.sat sub.sat mul.sat checked_add checked_sub checked_mul` | `a b` | int lanes; `checked_*` yield `Option<V>` |
+| `vec.mul_hi` | `a b` | int lanes: the high half of the exact double-width product, signed iff the lanes are; never traps |
 | `vec.div_lanes` † `vec.div_const` † | `a b` / `a K` | int division per lane (traps as scalar `div`) |
 | `vec.and or xor andnot not abs_wrap popcount clz` | lanes | int lanes (`abs_wrap`: signed); `andnot` = `a & ~b` |
 | `vec.shl shr` † `vec.shl.wrap` | `a amount` | amount: V or an int; as scalar shifts |

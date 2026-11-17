@@ -15,7 +15,9 @@ fn lane_op(op: VecOp) -> Option<(bool, bool, usize)> {
         Min | Max => (true, true, 2),
         Fma => (true, false, 3),
         AbsWrap | Popcount | Clz | Not => (false, true, 1),
-        AddWrap | SubWrap | MulWrap | AddSat | SubSat | MulSat | And | Or | Xor | Andnot => (false, true, 2),
+        AddWrap | SubWrap | MulWrap | AddSat | SubSat | MulSat | MulHi | And | Or | Xor | Andnot => {
+            (false, true, 2)
+        }
         _ => return None,
     })
 }
@@ -890,8 +892,8 @@ fn tested_by(op: VecOp) -> &'static str {
         Neg | Abs | Sqrt | Floor | Ceil | Round | Trunc | Add | Sub | Mul | Div | Copysign | MinNum
         | MaxNum | MinX86 | MaxX86 | Fma => "float_lane_ops",
         Min | Max => "float_lane_ops, int_lane_ops",
-        AbsWrap | Popcount | Clz | Not | AddWrap | SubWrap | MulWrap | AddSat | SubSat | MulSat | And
-        | Or | Xor | Andnot => "int_lane_ops",
+        AbsWrap | Popcount | Clz | Not | AddWrap | SubWrap | MulWrap | AddSat | SubSat | MulSat | MulHi
+        | And | Or | Xor | Andnot => "int_lane_ops",
         Eq | Ne | Lt | Le | Gt | Ge | ReduceAdd | ReduceAddWrap | ReduceMin | ReduceMax | ReduceAnd
         | ReduceOr | ReduceAddOrdered | ScanAdd | ScanAddWrap => "compares_reductions_scans",
         Shl | Shr | ShlWrap | DivLanes | DivConst => "shifts_and_divisions, traps",
@@ -916,7 +918,7 @@ fn every_op_is_tested_or_listed_unsupported() {
     let tested =
         VecOp::ALL.iter().filter(|op| !UNSUPPORTED.contains(op) && !tested_by(**op).is_empty()).count();
     assert_eq!(tested + UNSUPPORTED.len(), VecOp::ALL.len());
-    assert_eq!(VecOp::ALL.len(), 93);
+    assert_eq!(VecOp::ALL.len(), 94);
 }
 
 /// Vector values outside the vector ops: arguments in registers and on the stack (ten vectors,

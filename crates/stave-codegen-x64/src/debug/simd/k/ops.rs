@@ -183,6 +183,7 @@ impl Cg<'_, '_> {
             Scatter => self.k_scatter(arg(0)?, arg(1)?, arg(2)?),
             DivConst => self.k_div_const(arg(0)?, arg(1)?, rt?, rv?),
             MulSat => self.k_mul_sat(arg(0)?, arg(1)?, rt?, rv?),
+            MulHi => self.k_mul_hi(arg(0)?, arg(1)?, rt?, rv?),
             CheckedMul => self.k_checked_mul(arg(0)?, arg(1)?, rt?, rv?),
             Popcount | Clz => self.k_count(op, arg(0)?, rt?, rv?),
             Permute => self.k_permute(args, rt?, rv?),
@@ -516,6 +517,60 @@ impl Cg<'_, '_> {
         self.kshv(EShiftI::Psrlq, sz, XS0, xa, 32)?;
         self.kshv(EShiftI::Psrlq, sz, XS1, xb, 32)?;
         self.kb(mul, sz, o, XS0, XS1)
+    }
+
+    /// High halves of the double-width products. 64-bit lanes from four 32-bit partial
+    /// products: with `a = ah 2^32 + al` and `t = ah bl + (al bl >> 32)`, the unsigned high half
+    /// is `ah bh + (t >> 32) + ((al bh + (t mod 2^32)) >> 32)`; no sum overflows. Signed lanes
+    /// subtract `b` where `a` is negative and `a` where `b` is.
+    fn k_mul_hi(&mut self, a: Operand, b: Operand, rt: TypeId, rv: Value) -> Res<()> {
+        let sh = self.vshape(rt)?;
+        let t = self.vint(sh)?;
+        let sz = sh.size;
+        let (xa, xb) = (self.vread(a, sz)?, self.vread(b, sz)?);
+        let r = self.alloc_x()?;
+        match sh.w {
+            1 => {
+                // the even products' high bytes to the low byte, the odd ones' in place
+                let o = self.alloc_x()?;
+                self.kbyte_products(sz, t.signed, xa, xb, r, o)?;
+                self.ksh(EShiftI::Psrlw, sz, r, 8)?;
+                let lo = self.ksplat_mem(sz, 2, 0x00ff);
+                self.kbi(EOp::Pternlogq, sz, r, o, lo, 0xe4)?;
+            }
+            2 => self.kb(if t.signed { EOp::Pmulhw } else { EOp::Pmulhuw }, sz, r, xa, xb)?,
+            4 => {
+                self.kdword_products(sz, t.signed, xa, xb, r, XS1)?;
+                self.kinterleave_idx(XS0, sz, true)?;
+                self.ev(Ev::new(EOp::Permt2d, EVL::of_size(sz), r.num(), XS0.num(), XS1))?;
+            }
+            _ => {
+                let (tt, u) = (self.alloc_x()?, self.alloc_x()?);
+                self.kshv(EShiftI::Psrlq, sz, XS0, xa, 32)?;
+                self.kshv(EShiftI::Psrlq, sz, XS1, xb, 32)?;
+                self.kb(EOp::Pmuludq, sz, r, XS0, XS1)?;
+                self.kb(EOp::Pmuludq, sz, tt, XS0, xb)?;
+                self.kb(EOp::Pmuludq, sz, u, xa, XS1)?;
+                self.kb(EOp::Pmuludq, sz, XS0, xa, xb)?;
+                self.ksh(EShiftI::Psrlq, sz, XS0, 32)?;
+                self.kb(EOp::Paddq, sz, tt, tt, XS0)?;
+                let lo = self.ksplat_mem(sz, 8, 0xffff_ffff);
+                self.kb(EOp::Pandq, sz, XS1, tt, lo)?;
+                self.kb(EOp::Paddq, sz, u, u, XS1)?;
+                self.ksh(EShiftI::Psrlq, sz, tt, 32)?;
+                self.ksh(EShiftI::Psrlq, sz, u, 32)?;
+                self.kb(EOp::Paddq, sz, r, r, tt)?;
+                self.kb(EOp::Paddq, sz, r, r, u)?;
+                if t.signed {
+                    for (x, y) in [(xa, xb), (xb, xa)] {
+                        self.kshv(EShiftI::Psraq, sz, XS0, x, 63)?;
+                        self.kb(EOp::Pandq, sz, XS0, XS0, y)?;
+                        self.kb(EOp::Psubq, sz, r, r, XS0)?;
+                    }
+                }
+            }
+        }
+        self.vput(rv, r, sz)
     }
 
     /// Products clamped to the lane type's range.

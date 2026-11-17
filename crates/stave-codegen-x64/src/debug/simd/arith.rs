@@ -249,6 +249,77 @@ impl Cg<'_, '_> {
         }
     }
 
+    /// `a` = the high halves of the double-width products `a * b` of 8-, 16- or 32-bit lanes.
+    /// Clobbers `XS0`, `XS1`.
+    pub(super) fn vmulhi(&mut self, sh: Sh, signed: bool, a: Xmm, b: Xmm) -> Res<()> {
+        let wide = sh.wide();
+        match sh.w {
+            1 => {
+                // even bytes: the high bytes of their products moved to the low byte of the
+                // word; odd bytes: the whole product of the bytes held high in their words
+                let e = self.alloc_x()?;
+                self.vmov(wide, e, a)?;
+                self.vsh(VShiftI::Psllw, wide, e, 8)?;
+                if signed {
+                    self.vmov(wide, XS1, b)?;
+                    self.vsh(VShiftI::Psllw, wide, XS1, 8)?;
+                    self.vb(VBin::Pmulhw, wide, e, XS1)?;
+                    self.vsh(VShiftI::Psrlw, wide, e, 8)?;
+                } else {
+                    // (a * 2^8) * b over 2^16 is the product's high byte
+                    self.vsplat(XS0, wide, 2, 0x00ff)?;
+                    self.vmov(wide, XS1, b)?;
+                    self.vb(VBin::Pand, wide, XS1, XS0)?;
+                    self.vb(VBin::Pmulhuw, wide, e, XS1)?;
+                }
+                self.vsplat(XS0, wide, 2, 0xff00)?;
+                self.vb(VBin::Pand, wide, a, XS0)?;
+                self.vmov(wide, XS1, b)?;
+                self.vb(VBin::Pand, wide, XS1, XS0)?;
+                self.vb(if signed { VBin::Pmulhw } else { VBin::Pmulhuw }, wide, a, XS1)?;
+                self.vb(VBin::Pand, wide, a, XS0)?;
+                self.vb(VBin::Por, wide, a, e)
+            }
+            2 => self.vb(if signed { VBin::Pmulhw } else { VBin::Pmulhuw }, wide, a, b),
+            _ => {
+                // the 64-bit products of the even lanes and of the odd ones (moved to the even
+                // positions): their high doublewords are the odd ones
+                let o = self.alloc_x()?;
+                let mul = if signed { VBin::Pmuldq } else { VBin::Pmuludq };
+                self.vui(VUnI::Pshufd, wide, XS0, a, 0xf5)?;
+                self.vui(VUnI::Pshufd, wide, o, b, 0xf5)?;
+                self.vb(mul, wide, XS0, o)?;
+                self.vb(mul, wide, a, b)?;
+                self.vsh(VShiftI::Psrlq, wide, a, 32)?;
+                self.vbi(VBinI::Pblendw, wide, a, XS0, 0xcc)
+            }
+        }
+    }
+
+    /// High halves of the double-width products. 64-bit lanes lane by lane: the one-operand
+    /// `mul` / `imul` leaves the high half in `rdx`.
+    pub(super) fn v_mul_hi(&mut self, a: Operand, b: Operand, rt: TypeId, rv: Value) -> Res<()> {
+        let sh = self.vshape(rt)?;
+        let t = self.vint(sh)?;
+        if sh.w == 8 {
+            let (ma, mb) = (self.vmem(a)?, self.vmem(b)?);
+            self.reserve_g(RAX)?;
+            self.reserve_g(RDX)?;
+            let d = self.def_mem(rv)?;
+            let op = if t.signed { UnaryOp::Imul } else { UnaryOp::Mul };
+            for k in 0..sh.n {
+                self.a.mov_rm(Size::Q, RAX, lane(ma, k, 8)?)?;
+                self.a.unary(op, Size::Q, lane(mb, k, 8)?)?;
+                self.a.mov_mr(Size::Q, lane(d, k, 8)?, RDX)?;
+            }
+            return Ok(());
+        }
+        let s = self.vread(b, sh.size)?;
+        let x = self.vget(a, sh.size)?;
+        self.vmulhi(sh, t.signed, x, s)?;
+        self.vput(rv, x, sh.size)
+    }
+
     pub(super) fn v_int_bin(&mut self, op: VecOp, a: Operand, b: Operand, rt: TypeId, rv: Value) -> Res<()> {
         let sh = self.vshape(rt)?;
         let wide = sh.wide();

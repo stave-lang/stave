@@ -162,14 +162,22 @@ pub fn int_cmp(op: Op, t: IntTy, a: u64, b: u64) -> bool {
     }
 }
 
-/// `mul.wide` on u32 / u64: `(hi, lo)`.
-pub fn mul_wide(bits: u8, a: u64, b: u64) -> (u64, u64) {
-    if bits == 32 {
-        let p = (a & 0xffff_ffff) * (b & 0xffff_ffff);
-        (p >> 32, p & 0xffff_ffff)
+/// `mul.wide` on i32 / i64 / u32 / u64: `(hi, lo)` of the exact double-width product, both
+/// normalized to `t` (`lo` is the low half's bits, as `mul.wrap` gives them).
+pub fn mul_wide(t: IntTy, a: u64, b: u64) -> (u64, u64) {
+    (mul_hi(t, a, b), t.norm(a.wrapping_mul(b)))
+}
+
+/// The high half of the exact double-width product of two values of `t`, normalized: the
+/// product shifted right by the width, arithmetically iff `t` is signed.
+pub fn mul_hi(t: IntTy, a: u64, b: u64) -> u64 {
+    let n = u32::from(t.bits);
+    if t.signed {
+        // |MIN * MIN| = 2^126 at 64 bits: the i128 product is exact
+        t.wrap((t.value(a) * t.value(b)) >> n)
     } else {
-        let p = (a as u128) * (b as u128);
-        ((p >> 64) as u64, p as u64)
+        let p = (t.norm(a) as u128) * (t.norm(b) as u128);
+        t.wrap((p >> n) as i128)
     }
 }
 

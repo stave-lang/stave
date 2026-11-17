@@ -25,6 +25,8 @@ fn main() -> i32 {
     show(a << 2);
     show(a <<% u32x4.splat(33));
     show(a.div_const::<4>());
+    show(a.mul_hi(big));
+    show(i32x4.splat(-7).mul_hi(i32x4.splat(3)).bitcast::<u32x4>());
     show(a.permute::<[3, 2, 1, 0]>());
     let ix: [u32; 4] = [5, 0, 5, 1];
     emulate {
@@ -65,5 +67,12 @@ fn main() -> i32 {
     let wl = w.reduce_add_wrap();
     let n = i32x4.splat(70000).narrow_sat(i32x4.splat(-5)).reduce_min();
     io.print(f"widen {wl} narrow {n}\n");
+    let s8: i8 = -128;
+    let h8 = s8.mul_hi(s8);
+    let u64v: u64 = 18446744073709551615;
+    let h64 = u64v.mul_hi(u64v);
+    let s64: i64 = -3;
+    let (wh, wlo) = s64.mul_wide(7);
+    io.print(f"mul_hi {h8} {h64} mul_wide {wh} {wlo}\n");
     return 0;
 }
