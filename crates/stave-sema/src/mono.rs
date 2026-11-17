@@ -23,9 +23,10 @@
 //! dropped; arms below the first one the target baseline covers are pruned:
 //! [`crate::dispatch::Plan`]). A lowered `thread_clone` or `thread_start_addr` intrinsic requests
 //! `runtime.thread.entry`, which only the backend's thread start stub calls; a request of
-//! `runtime.cpu.features` also requests `runtime.cpu.init`, which only start code's `cpu_init`
-//! intrinsic calls; so does that intrinsic itself when the target baseline is above its arch's
-//! lowest one (start code then checks the CPU against it).
+//! `runtime.cpu.features`, and a dispatch body that loads the feature word `runtime.cpu.WORD`,
+//! also request `runtime.cpu.init`, which only start code's `cpu_init` intrinsic calls; so does
+//! that intrinsic itself when the target baseline is above its arch's lowest one (start code then
+//! checks the CPU against it).
 //!
 //! **Instantiation depth** (E0902, [`depth_check`], run by the type checker): from every
 //! non-generic body, the generic instances its call sites request, depth first, substituting
@@ -75,10 +76,13 @@ pub(crate) struct LangFns {
     /// `runtime.thread.entry`: no IR calls it (the backend's thread start stub does), so a lowered
     /// `thread_clone` / `thread_start_addr` intrinsic requests it.
     pub thread_entry: Option<DeclId>,
-    /// `runtime.cpu.features`: reads the feature word (a dispatch body calls it).
+    /// `runtime.cpu.features`: reads the feature word (std.cpu calls it).
     pub cpu_features: Option<DeclId>,
+    /// `runtime.cpu.WORD`: the feature word, a `u64` static that a dispatch body loads.
+    pub cpu_word: Option<DeclId>,
     /// `runtime.cpu.init`: fills the feature word; only start code's `cpu_init` intrinsic calls
-    /// it, so a request of `cpu_features` requests it too.
+    /// it, so a request of `cpu_features` requests it too, and so does a dispatch body that loads
+    /// `cpu_word`.
     pub cpu_init: Option<DeclId>,
     /// `runtime.cpu.trace(line: &str)`: writes a dispatch trace line (a dispatch body calls it
     /// when the word's trace bit is set).
@@ -127,6 +131,7 @@ impl LangFns {
             set_user_site: item_at(prog, "runtime.panic", "set_user_site"),
             thread_entry: item_at(prog, "runtime.thread", "entry"),
             cpu_features: item_at(prog, "runtime.cpu", "features"),
+            cpu_word: item_at(prog, "runtime.cpu", "WORD"),
             cpu_init: item_at(prog, "runtime.cpu", "init"),
             cpu_trace: item_at(prog, "runtime.cpu", "trace"),
         }

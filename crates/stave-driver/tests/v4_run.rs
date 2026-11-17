@@ -306,7 +306,7 @@ fn dispatch_v4_arm() {
         let out = build(&src, triple("x86_64-linux"), release);
         let m = out.module.as_ref().unwrap();
         let calls = callees(m, "main.scale").expect("no `main.scale` with a body");
-        assert_eq!(calls, ["runtime.cpu.features", "main.scale_v4", "main.scale_base"], "{mode}");
+        assert_eq!(calls, ["main.scale_v4", "main.scale_base"], "{mode}");
         let bin = tmp.path().join(format!("kernel-{mode}"));
         out.image.as_ref().unwrap().write_file(&bin).unwrap();
         for (runner, v4, label) in &cases {

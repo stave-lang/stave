@@ -40,10 +40,11 @@ feature i of the compiler's closed feature list (`crates/stave-target/src/featur
 compiler. The probe (`arch.cpu.probe`, per arch) sets a feature when its row below holds; then
 **closure**: a feature stays set only if every feature it implies (transitively, per
 features.rs) is set too, so testing one mask is sound. `runtime.cpu.init()` stores the word once
-in the runtime state (before main, before other threads); `runtime.cpu.features()` reads it.
+in the `static mut` `runtime.cpu.WORD` (before main, before other threads); a dispatch body
+loads it directly (one load, no call), `runtime.cpu.features()` returns it.
 `runtime.start.entry` calls `init` through `cpu_init()` (below) right after it stores the auxv
-values, and the program has `init` exactly when it calls `features` (a `dispatch fn` body,
-`std.cpu.features`) or its target baseline is above its arch's lowest (`x86_64-linux-v3`,
+values, and the program has `init` exactly when it reads the word (a `dispatch fn` body that tests
+an arm, `std.cpu.features`) or its target baseline is above its arch's lowest (`x86_64-linux-v3`,
 `-v4`, `aarch64-linux+sve`, `+sve2`; checked-ir.md "Instance root set"). The IR interpreter's
 `cpu_init` does nothing, so there the word is 0 and every dispatch takes its `_` arm (unless the
 baseline prunes it).
@@ -189,8 +190,9 @@ list):
   `runtime.thread.scope_spawn(list: &mut usize, f: fn())` and `runtime.thread.scope_join(list:
   &mut usize)` (the `scope { spawn { } }` lowering, checked-ir.md "Closures"),
   `runtime.panic.trap`, `runtime.panic.trap_msg`, `runtime.panic.on_signal`,
-  `runtime.panic.set_user_site`, `runtime.cpu.features` (dispatch bodies), `runtime.cpu.init`
-  (`cpu_init`), `runtime.cpu.trace` (dispatch bodies, trace bit), and the allocator
+  `runtime.panic.set_user_site`, `runtime.cpu.WORD` (a `u64` static; dispatch bodies load it),
+  `runtime.cpu.features` (a request of it requests `init`), `runtime.cpu.init` (`cpu_init`),
+  `runtime.cpu.trace` (dispatch bodies, trace bit), and the allocator
   `runtime.alloc.{alloc, free, realloc}`
   (replaced by an `allocator` declaration);
 - compiler-emitted symbols: `_start`, `__stave_main`, `__stave_signal`, `__stave_thread_start`,

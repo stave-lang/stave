@@ -4,7 +4,7 @@
 // another arch's arm, dropped; `sse42` is in the x86_64-linux baseline, so `half` always takes
 // that arm: its body is that one call, and a call of `half` calls `half_v2` directly (`half`
 // itself is built for its fn value). `twice` tests its `avx2` arm on the feature word, which the
-// pinned library has none of (no `runtime.cpu.features`): its body calls `_` alone. A fn needing
+// pinned library has none of (no `runtime.cpu.WORD`): its body calls `_` alone. A fn needing
 // avx2 covers `twice`'s first arm and calls `twice_v3` directly.
 fn twice_v3(x: u32) -> u32 needs(avx2) {
     let f = fn(y: u32) -> u32 { return y * 2; };
