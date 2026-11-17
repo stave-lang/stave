@@ -234,6 +234,41 @@ eops! {
         Pmovzxbw = (P66, M38, 0, 0x30, Half, Bw), Pmovzxbd = (P66, M38, 0, 0x31, Quarter, F),
         Pmovzxbq = (P66, M38, 0, 0x32, Eighth, F), Pmovzxwd = (P66, M38, 0, 0x33, Half, F),
         Pmovzxwq = (P66, M38, 0, 0x34, Quarter, F), Pmovzxdq = (P66, M38, 0, 0x35, Half, F),
+        // down-conversions, truncating, signed- and unsigned-saturating: `reg` is the wide
+        // source, `rm` the narrow destination or memory
+        Pmovwb = (F3, M38, 0, 0x30, Half, Bw), Pmovswb = (F3, M38, 0, 0x20, Half, Bw),
+        Pmovuswb = (F3, M38, 0, 0x10, Half, Bw),
+        Pmovdb = (F3, M38, 0, 0x31, Quarter, F), Pmovsdb = (F3, M38, 0, 0x21, Quarter, F),
+        Pmovusdb = (F3, M38, 0, 0x11, Quarter, F),
+        Pmovdw = (F3, M38, 0, 0x33, Half, F), Pmovsdw = (F3, M38, 0, 0x23, Half, F),
+        Pmovusdw = (F3, M38, 0, 0x13, Half, F),
+        Pmovqb = (F3, M38, 0, 0x32, Eighth, F), Pmovsqb = (F3, M38, 0, 0x22, Eighth, F),
+        Pmovusqb = (F3, M38, 0, 0x12, Eighth, F),
+        Pmovqw = (F3, M38, 0, 0x34, Quarter, F), Pmovsqw = (F3, M38, 0, 0x24, Quarter, F),
+        Pmovusqw = (F3, M38, 0, 0x14, Quarter, F),
+        Pmovqd = (F3, M38, 0, 0x35, Half, F), Pmovsqd = (F3, M38, 0, 0x25, Half, F),
+        Pmovusqd = (F3, M38, 0, 0x15, Half, F),
+        // int <-> float conversions (`cvtt*`: truncating); the source of a `Half` one is half
+        // the destination, the destination of `cvtpd2ps`, `cvt?qq2ps`, `cvttpd2?dq` half the
+        // source
+        Cvtdq2ps = (N, M0F, 0, 0x5b, Full, F), Cvtqq2ps = (N, M0F, 1, 0x5b, Full, Dq),
+        Cvtudq2ps = (F2, M0F, 0, 0x7a, Full, F), Cvtuqq2ps = (F2, M0F, 1, 0x7a, Full, Dq),
+        Cvtdq2pd = (F3, M0F, 0, 0xe6, Half, F), Cvtqq2pd = (F3, M0F, 1, 0xe6, Full, Dq),
+        Cvtudq2pd = (F3, M0F, 0, 0x7a, Half, F), Cvtuqq2pd = (F3, M0F, 1, 0x7a, Full, Dq),
+        Cvtps2pd = (N, M0F, 0, 0x5a, Half, F), Cvtpd2ps = (P66, M0F, 1, 0x5a, Full, F),
+        Cvttps2dq = (F3, M0F, 0, 0x5b, Full, F), Cvttpd2dq = (P66, M0F, 1, 0xe6, Full, F),
+        Cvttps2udq = (N, M0F, 0, 0x78, Full, F), Cvttpd2udq = (N, M0F, 1, 0x78, Full, F),
+        Cvttps2qq = (P66, M0F, 0, 0x7a, Half, Dq), Cvttpd2qq = (P66, M0F, 1, 0x7a, Full, Dq),
+        Cvttps2uqq = (P66, M0F, 0, 0x78, Half, Dq), Cvttpd2uqq = (P66, M0F, 1, 0x78, Full, Dq),
+        // packs, two-source permutes (`vvvv` the indices, `reg` the first table and the
+        // result), `vpermq` by an index vector (`vvvv`; 256 and 512 bits only), unpacks,
+        // `vpshufd`
+        Packsswb = (P66, M0F, 0, 0x63, Full, Bw), Packssdw = (P66, M0F, 0, 0x6b, Full, Bw),
+        Permt2w = (P66, M38, 1, 0x7d, Full, Bw), Permt2d = (P66, M38, 0, 0x7e, Full, F),
+        Permq = (P66, M38, 1, 0x36, Full, F),
+        Punpcklwd = (P66, M0F, 0, 0x61, Full, Bw), Punpckldq = (P66, M0F, 0, 0x62, Full, F),
+        Punpcklqdq = (P66, M0F, 1, 0x6c, Full, F),
+        Pshufd = (P66, M0F, 0, 0x70, Full, F),
         // halves and quarters: `reg` is the wide register, `rm` the narrow one or memory
         Extracti64x4 = (P66, M3A, 1, 0x3b, Fixed(32), F), Extractf64x4 = (P66, M3A, 1, 0x1b, Fixed(32), F),
         Extracti32x4 = (P66, M3A, 0, 0x39, Fixed(16), F), Extractf32x4 = (P66, M3A, 0, 0x19, Fixed(16), F),

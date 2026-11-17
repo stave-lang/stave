@@ -122,9 +122,10 @@ const KOPS: [&str; 10] =
     ["kortest", "kshiftl", "kshiftr", "kandn", "kxnor", "kmov", "kand", "kxor", "knot", "kor"];
 
 /// The AVX-512 features of an EVEX instruction, from its text: the instructions on byte and
-/// word lanes are `avx512bw`, the float logic, the quadword multiply and the doubleword and
-/// quadword mask conversions `avx512dq`, the rest `avx512f`; without a `zmm` operand it is an
-/// `avx512vl` form.
+/// word lanes are `avx512bw` (not the down-conversions from doublewords and quadwords), the float
+/// logic, the quadword multiply, the conversions between floats and quadwords and the doubleword
+/// and quadword mask conversions `avx512dq`, the rest `avx512f`; without a `zmm` operand it is
+/// an `avx512vl` form.
 fn evex_need(i: &Inst) -> FeatureSet {
     let m = i.mnem.strip_suffix(".s").unwrap_or(&i.mnem);
     let dq = matches!(
@@ -142,9 +143,12 @@ fn evex_need(i: &Inst) -> FeatureSet {
             | "vorpd"
             | "vxorps"
             | "vxorpd"
-    );
-    let bw = matches!(m, "vpmovb2m" | "vpmovw2m" | "vmovdqu8" | "vmovdqu16" | "vpmaddwd")
-        || (m.starts_with("vp") && (m.ends_with('b') || m.ends_with('w')));
+    ) || (m.starts_with("vcvt") && m.contains("qq"));
+    let down = ["vpmov", "vpmovs", "vpmovus"]
+        .iter()
+        .any(|p| m.strip_prefix(p).is_some_and(|r| matches!(r, "db" | "dw" | "qb" | "qw" | "qd")));
+    let bw = matches!(m, "vpmovb2m" | "vpmovw2m" | "vmovdqu8" | "vmovdqu16" | "vpmaddwd" | "vpunpcklwd")
+        || (m.starts_with("vp") && (m.ends_with('b') || m.ends_with('w')) && !down);
     let mut s = FeatureSet::of(if dq {
         Feature::Avx512dq
     } else if bw {
@@ -563,12 +567,12 @@ fn recorded_features_match_the_disassembly() {
     for &op in EOp::ALL {
         let n = format!("{op:?}");
         let has = |ps: &[&str]| ps.iter().any(|p| n.starts_with(p));
-        let imm = has(&["Rndscale", "Pternlog", "Cmpp", "Extract", "Insert"])
+        let imm = has(&["Rndscale", "Pternlog", "Cmpp", "Extract", "Insert", "Pshufd"])
             || (has(&["Pcmp"]) && !has(&["Pcmpeq", "Pcmpgt"]));
         for vl in [EVL::L128, EVL::L256, EVL::L512] {
             let halves = n.ends_with("64x4");
             let quarters = n.ends_with("32x4");
-            if (vl == EVL::L128 && (halves || quarters || op == EOp::Broadcastsd))
+            if (vl == EVL::L128 && (halves || quarters || matches!(op, EOp::Broadcastsd | EOp::Permq)))
                 || (vl == EVL::L256 && halves)
             {
                 continue;

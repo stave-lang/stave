@@ -23,6 +23,8 @@ use crate::debug::func::*;
 use crate::debug::{Res, bad, unsup};
 use crate::enc::*;
 
+mod cast;
+
 fn fp(p: Prec, ps: EOp, pd: EOp) -> EOp {
     if p == Prec::F32 { ps } else { pd }
 }
@@ -1034,11 +1036,13 @@ impl Cg<'_, '_> {
             FirstN => self.k_first_n(arg(0)?, rt?, rv?),
             Rewiden => self.k_rewiden(arg(0)?, rv?),
             MaskAll | MaskNone => self.k_mask_const(op == MaskAll, rv?),
+            Cast(kind) => self.k_cast(kind, arg(0)?, rt?, rv?),
+            WidenLo | WidenHi => self.k_widen(op == WidenHi, arg(0)?, rt?, rv?),
+            NarrowWrap | NarrowSat => self.k_narrow(op == NarrowSat, arg(0)?, arg(1)?, rt?, rv?),
             // no vector form at any tier: lane by lane on the home bytes
             DivLanes => self.v_div(op, arg(0)?, arg(1)?, rt?, rv?),
-            MulSat | CheckedMul | DivConst | Popcount | Clz | ScanAdd | ScanAddWrap | Cast(_) | WidenLo
-            | WidenHi | NarrowWrap | NarrowSat | Permute | Lookup | Compress | Expand | StoreStream
-            | Gather | Scatter => Err(unsup(format!(
+            MulSat | CheckedMul | DivConst | Popcount | Clz | ScanAdd | ScanAddWrap | Permute | Lookup
+            | Compress | Expand | StoreStream | Gather | Scatter => Err(unsup(format!(
                 "{} in a fn compiled for the AVX-512 set (`avx512f`, `avx512bw`, `avx512vl`, `avx512dq`, `avx512cd`)",
                 op.name()
             ))),
