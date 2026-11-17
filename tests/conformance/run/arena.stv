@@ -1,0 +1,61 @@
+//~ STDOUT arena.stdout
+//~ EXIT 0
+// std.arena: values of several Copy types live in one arena at once, each aligned for its type
+// (padding counts toward the fixed capacity); `try_alloc` returns `Result.Err` when a value does
+// not fit and takes nothing; `reset` frees everything for reuse; `try_new` reports a buffer
+// that cannot be had (2^62 bytes).
+import std.arena;
+import std.io;
+
+struct P {
+    pub x: u32,
+    pub y: u64,
+}
+
+impl Copy for P {}
+
+fn main() -> i32 {
+    let mut ar = arena.Arena.new(64);
+    let cap = ar.capacity();
+    let a = ar.alloc(7u8);
+    let u1 = ar.used();
+    let b = ar.alloc(P.{ x: 1, y: 2 });
+    let u2 = ar.used();
+    let d = ar.alloc(1000u32);
+    let u3 = ar.used();
+    io.print(f"cap {cap}, used {u1} {u2} {u3}\n");
+    *a = *a + 1;
+    let dv = *d;
+    b.y = b.y + (dv as u64);
+    let xs: [u64; 4] = [1, 2, 3, 4];
+    match ar.try_alloc(xs) {
+        Result.Ok(r) => {
+            let arr = *r;
+            let last = arr[3];
+            io.print(f"[u64; 4]: ok, last {last}\n");
+        }
+        Result.Err(e) => { io.print(f"[u64; 4]: {e}\n"); }
+    }
+    let u4 = ar.used();
+    match ar.try_alloc(1u8) {
+        Result.Ok(_) => { io.print("u8 in a full arena: ok\n"); }
+        Result.Err(e) => { io.print(f"u8 in a full arena: {e}\n"); }
+    }
+    let u5 = ar.used();
+    let av = *a;
+    let bx = b.x;
+    let by = b.y;
+    io.print(f"used {u4} {u5}; a {av}, b {bx} {by}\n");
+
+    ar.reset();
+    let e = ar.alloc(5u16);
+    let ev = *e;
+    let u6 = ar.used();
+    io.print(f"after reset: {ev}, used {u6}\n");
+
+    match arena.Arena.try_new(0x4000_0000_0000_0000) {
+        Result.Ok(_) => { io.print("try_new(2^62): ok\n"); }
+        Result.Err(err) => { io.print(f"try_new(2^62): {err}\n"); }
+    }
+    return 0;
+}

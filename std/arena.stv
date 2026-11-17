@@ -1,0 +1,96 @@
+// std.arena: Arena, a bump allocator of fixed capacity for Copy values.
+//
+// The capacity (bytes) is fixed when the arena is made: one buffer from the global allocator,
+// never grown or moved. `alloc` and `try_alloc` take `&self`, so many allocations are live at
+// once, each a borrow of the arena. `reset` takes `&mut self`, so the borrow checker rejects it
+// while any allocation is still used (E0501); afterwards the whole buffer is free again.
+// Values must be Copy: nothing in an arena needs dropping, and dropping the arena only frees its
+// buffer. A value that does not fit (alignment padding counts) makes `alloc` panic
+// `OutOfMemory` at the caller; `try_alloc` returns `Result.Err(vec.AllocError)` instead and
+// takes nothing.
+// Send: an Arena owns its buffer, and moving it ends every borrow of its values. Not Sync: the
+// bump offset is a Cell.
+
+import runtime.alloc;
+import runtime.panic;
+import std.cell;
+import std.core;
+import std.mem;
+import std.vec;
+
+// Alignment of the buffer; a value aligned more strictly is padded inside it.
+const BUF_ALIGN: usize = 16;
+
+pub struct Arena {
+    base: *mut u8,
+    cap: usize,
+    used: cell.Cell<usize>,
+}
+
+unsafe("an Arena uniquely owns its buffer; a move needs every borrow of its values to have ended") impl core.Send for Arena {}
+
+fn oom() -> never {
+    panic.trap(panic.KIND_OUT_OF_MEMORY, panic.user_site());
+}
+
+impl Arena {
+    // An arena of `capacity` bytes.
+    pub fn new(capacity: usize) -> Arena {
+        let p = alloc.alloc(capacity, BUF_ALIGN);
+        return Arena.{ base: p, cap: capacity, used: cell.Cell::<usize>.new(0) };
+    }
+
+    pub fn try_new(capacity: usize) -> Result<Arena, vec.AllocError> {
+        let p = alloc.try_alloc(capacity, BUF_ALIGN);
+        if (p as usize) == 0 { return Result.Err(vec.AllocError.{}); }
+        return Result.Ok(Arena.{ base: p, cap: capacity, used: cell.Cell::<usize>.new(0) });
+    }
+
+    pub fn capacity(&self) -> usize {
+        return self.cap;
+    }
+
+    // Bytes taken since the arena was made or last reset, alignment padding included.
+    pub fn used(&self) -> usize {
+        return self.used.get();
+    }
+
+    pub fn alloc<T: Copy>(&self, v: T) -> &mut T from self {
+        let p = self.take::<T>();
+        if (p as usize) == 0 { oom(); }
+        unsafe("p is a fresh, aligned slot for one T inside the buffer") { p.write(v); }
+        return unsafe("p was just written; until reset, which needs &mut self, only this reference reaches it") &mut *p;
+    }
+
+    pub fn try_alloc<T: Copy>(&self, v: T) -> Result<&mut T, vec.AllocError> from self {
+        let p = self.take::<T>();
+        if (p as usize) == 0 { return Result.Err(vec.AllocError.{}); }
+        unsafe("p is a fresh, aligned slot for one T inside the buffer") { p.write(v); }
+        return Result.Ok(unsafe("p was just written; until reset, which needs &mut self, only this reference reaches it") &mut *p);
+    }
+
+    // Frees every allocation at once.
+    pub fn reset(&mut self) {
+        self.used.set(0);
+    }
+
+    // Takes the next slot for one T, or returns null (taking nothing) if it does not fit.
+    fn take<T>(&self) -> *mut T {
+        let used = self.used.get();
+        let al = mem.type_align::<T>();
+        let start = (self.base as usize) + used;
+        let pad = (al - start % al) % al;
+        let size = mem.type_size::<T>();
+        if pad > self.cap - used || size > self.cap - used - pad { return 0usize as *mut T; }
+        self.used.set(used + pad + size);
+        return (start + pad) as *mut T;
+    }
+}
+
+impl core.Drop for Arena {
+    fn drop(&mut self) {
+        unsafe("base holds cap bytes from alloc with BUF_ALIGN; its values are Copy and no longer borrowed") {
+            alloc.free(self.base, self.cap, BUF_ALIGN);
+        }
+    }
+}
