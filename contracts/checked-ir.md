@@ -92,7 +92,7 @@ instructions; the trap kind is the matching panic kind (`Overflow`, `Bounds`, `D
 | `fn.make` | `@f env` | fn value `(code, environment)` of closure body `@f` (see Closures) |
 | `call` / `call.ind` | `@f args..` / `f args..` | direct / fn-value call (`call.ind` also passes the value's environment, see Closures) |
 | `intrinsic.<name>` | args.. | contracts/intrinsics.md |
-| `panic.<kind>` | — | unconditional trap: `panic.bounds panic.overflow panic.div_by_zero panic.assert panic.out_of_memory panic.stack_overflow panic.unwrap` |
+| `panic.<kind>` | — | unconditional trap: `panic.bounds panic.overflow panic.div_by_zero panic.assert panic.out_of_memory panic.stack_overflow panic.unwrap panic.unsupported_cpu` |
 
 GPU ops (`gpu.<name>`, gpu-ops.md) extend this list when their lowering lands.
 
@@ -332,15 +332,22 @@ reference (`Ref` / `RefMut`); `copy` captures are reserved (no syntax yet, LANG.
   the first arm, the body is that one call. Otherwise the body is `%w = call @runtime.cpu.features`
   then, per arm top-down, `%m = and t<u64> %w M`, `%c = eq t<bool> %m M`, `cbr` to a block
   returning the arm target's call result (M = the arm's closed feature set as a `u64`, bit i =
-  feature i). A runtime library without `runtime.cpu.features` (the dump goldens' stand-in) has
-  no word: the body is the call of that last arm alone. A call of a dispatch from a fn whose
+  feature i). Each such block, and the final one, begins with the trace test: `%t = and t<u64> %w
+  T`, `%c = ne t<bool> %t 0`, `cbr` to a block that calls `@runtime.cpu.trace` with the string
+  `dispatch: <dispatch path> -> <arm target path>\n` and branches on (T = bit 63, intrinsics.md
+  "CPU feature detection"; no test without a `runtime.cpu.trace`). A runtime library without
+  `runtime.cpu.features` (the dump goldens' stand-in) has no word: the body is the call of that
+  last arm alone. A call of a dispatch from a fn whose
   needs ∪ the baseline cover the first remaining arm's features calls that arm target instead
   (a fn value of the dispatch is the dispatch).
 - In both modes a lowered `intrinsic.thread_clone` or `intrinsic.thread_start_addr` requests
   `runtime.thread.entry`, which only the compiler's `__stave_thread_start` stub calls
   (intrinsics.md "Thread start"), and a request of `runtime.cpu.features` (a dispatch body,
   `std.cpu.features`) also requests `runtime.cpu.init`, which only `intrinsic.cpu_init` in
-  `runtime.start.entry` calls. Without that request (no reachable dispatch with a tested arm, no
-  `std.cpu.features`) a program has no `runtime.cpu` code.
+  `runtime.start.entry` calls. A lowered `intrinsic.cpu_init` requests `runtime.cpu.init` itself
+  when the target baseline is above its arch's lowest (`x86_64-linux-v2`, `aarch64-linux`): start
+  code then checks the CPU against it. Without either request (no reachable dispatch with a
+  tested arm, no `std.cpu.features`, a lowest-baseline target) a program has no `runtime.cpu`
+  code. `intrinsic.cpu_baseline` is never in the IR: lowering replaces it by its constant.
 - Generic decls are never printed, only their instances. `kernel fn`s are printed like fns; GPU ops print as
   `gpu.<name>` (gpu-ops.md "Checked-IR spelling"). Intrinsic calls print as `intrinsic.<name>`.

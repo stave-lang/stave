@@ -1362,6 +1362,20 @@ impl<'a> FnCx<'a> {
                 };
                 let (ps, ret) = (sig.params.clone(), sig.ret);
                 let Some(vs) = self.args(args, &ps) else { return E::Never };
+                let target = self.g.prog.target;
+                // A compile-time constant: the target baseline as a feature word (closed under
+                // implication, like the runtime's word).
+                if name == "cpu_baseline" {
+                    return E::V(self.int(i128::from(target.baseline().bits())), ret);
+                }
+                // Start code must check the CPU against a baseline above the arch's lowest one,
+                // even in a program that never reads the feature word.
+                if name == "cpu_init"
+                    && target.baseline() != target.arch_base().baseline()
+                    && let Some(init) = self.g.lang.cpu_init
+                {
+                    self.req(Req::Inst(InstKey { decl: init, args: Vec::new() }));
+                }
                 let id = self.intrinsic(&name);
                 let rt = self.ret_of(ret);
                 let r = self.f.b.intrinsic(id, rt.map(FnCx::ir), &vs);

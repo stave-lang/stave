@@ -10,10 +10,23 @@
 // The process word (`runtime.state` field `cpu_features`) is written once by `init`, from start
 // code before main and before any other thread exists, and only read afterwards: no atomics.
 // Start code reaches `init` through the `cpu_init` intrinsic, which calls it only in programs
-// that read the word (`features`: a dispatch fn or std.cpu); others carry no code of this module.
+// that read the word (`features`: a dispatch fn or std.cpu) or whose target baseline is above
+// the arch's lowest one; others carry no code of this module.
+//
+// `init` stops the program (panic UnsupportedCpu) when the CPU lacks a baseline feature, then
+// applies the environment: `STAVE_CPU=-name,-name` clears features (never baseline ones), and
+// `STAVE_DISPATCH_TRACE` sets TRACE, which makes every dispatch body report its pick (`trace`).
 
 import arch.cpu;
+import runtime.os;
+import runtime.panic;
 import runtime.state;
+
+extern "stave-intrinsic" {
+    // contracts/intrinsics.md "CPU feature detection": the build target's baseline as a feature
+    // word, a constant.
+    fn cpu_baseline() -> u64;
+}
 
 pub const SSE42: u64 = 1 << 0;
 pub const AVX: u64 = 1 << 1;
@@ -41,6 +54,15 @@ pub const SVE2: u64 = 1 << 22;
 pub const CUDA: u64 = 1 << 23;
 
 pub const NFEATURES: usize = 24;
+
+// The bit no feature uses: dispatch tracing is on. Dispatch bodies test it; std.cpu clears it.
+pub const TRACE: u64 = 1 << 63;
+
+// The feature names in bit order, one space apart (a test checks them against the compiler).
+const NAMES: &str = "sse42 avx avx2 fma bmi2 f16c avx512f avx512bw avx512vl avx512dq avx512cd avx512vbmi avx512vbmi2 avx512vpopcntdq avx512bitalg avx512fp16 avx512bf16 neon fp16 dotprod bf16 sve sve2 cuda";
+
+const MSG_CAP: usize = 512;
+const NAME_CAP: usize = 64;
 
 // CLOSURE[i]: feature i and everything it implies, transitively.
 const CLOSURE: [u64; 24] = [
@@ -91,18 +113,198 @@ pub fn detect() -> u64 {
 }
 
 // Fills the process word. Start code calls it once (intrinsic `cpu_init`), before main and before
-// any other thread.
+// any other thread. A CPU without a baseline feature cannot run the program's code, which may
+// use that feature anywhere: UnsupportedCpu before main.
 pub unsafe("called once, before main and before any thread other than the start thread exists")
 fn init() {
-    let w = detect();
+    let detected = detect();
+    let base = unsafe("cpu_baseline only yields a constant") cpu_baseline();
+    if detected & base != base { unsupported(base & ~detected); }
+    // The removed set is closed upward, so the masked word stays closed downward; it holds no
+    // baseline feature, since the baseline is closed downward.
+    let mut w = detected & ~env_removed(base);
+    if env_trace() { w = w | TRACE; }
     let st = state.get();
     unsafe("st is runtime.state.STATE; no other thread exists yet (caller)") {
         (*st).cpu_features = w;
     }
 }
 
-// The process word `init` stored (0 before `init`).
+// The process word `init` stored (0 before `init`), TRACE included.
 pub fn features() -> u64 {
     let st = state.get();
     return unsafe("st is runtime.state.STATE; cpu_features is written only by init, before any other thread") (*st).cpu_features;
+}
+
+// One dispatch trace line (`dispatch: <fn> -> <arm>\n`, a string literal) in one write, so lines
+// of concurrent threads never interleave.
+pub fn trace(line: &str) {
+    let parts = unsafe("a &str is (data pointer, byte length)") *(&line as *const &str as *const [usize; 2]);
+    loop {
+        let r = unsafe("parts is a string literal in read-only program data") os.write(os.STDERR, parts[0] as *const u8, parts[1]);
+        if r != -os.EINTR { return; }
+    }
+}
+
+fn unsupported(missing: u64) -> never {
+    let mut m = Msg.new();
+    m.lit("the CPU lacks features of the build target:");
+    for i in 0..NFEATURES {
+        if missing & (1u64 << (i as u64)) != 0 {
+            m.byte(32u8);
+            m.name(i);
+        }
+    }
+    panic.trap_msg(panic.KIND_UNSUPPORTED_CPU, panic.SITE_NONE, &m.b[0..m.n]);
+}
+
+// ---- environment ----
+
+// Features STAVE_CPU removes: for each `-name` item whose feature is not in `base`, that feature
+// and every feature implying it (an item naming a baseline feature removes nothing: the
+// program's code assumes it). An empty or unset value removes none. Any other value stops the
+// program (exit 101) with one line: a typo silently ignored would make a test pass for the
+// wrong reason.
+fn env_removed(base: u64) -> u64 {
+    let v = env("STAVE_CPU");
+    if v == 0 || at(v) == 0 { return 0; }
+    let mut out: u64 = 0;
+    let mut a = v;
+    loop {
+        if at(a) != 45u8 { bad_syntax(); }
+        a = a + 1;
+        let s = a;
+        while at(a) != 0 && at(a) != 44u8 { a = a + 1; }
+        if a == s { bad_syntax(); }
+        let i = lookup(s, a - s);
+        if i == NFEATURES { unknown(s, a - s); }
+        if base & (1u64 << (i as u64)) == 0 { out = out | implying(i); }
+        if at(a) == 0 { return out; }
+        a = a + 1;
+    }
+}
+
+// Whether STAVE_DISPATCH_TRACE is set to a value other than empty or `0`.
+fn env_trace() -> bool {
+    let v = env("STAVE_DISPATCH_TRACE");
+    if v == 0 || at(v) == 0 { return false; }
+    return !(at(v) == 48u8 && at(v + 1) == 0);
+}
+
+// Feature i and every feature that implies it.
+fn implying(i: usize) -> u64 {
+    let b = 1u64 << (i as u64);
+    let mut m: u64 = 0;
+    for j in 0..NFEATURES {
+        if CLOSURE[j] & b != 0 { m = m | (1u64 << (j as u64)); }
+    }
+    return m;
+}
+
+// The feature named by the n bytes at address s; NFEATURES if none.
+fn lookup(s: usize, n: usize) -> usize {
+    let x = str_bytes(NAMES);
+    for i in 0..NFEATURES {
+        let (a, e) = word(i);
+        if e - a == n {
+            let mut k: usize = 0;
+            while k < n && at(s + k) == x[a + k] { k = k + 1; }
+            if k == n { return i; }
+        }
+    }
+    return NFEATURES;
+}
+
+// [start, end) of feature i's name in NAMES.
+fn word(i: usize) -> (usize, usize) {
+    let x = str_bytes(NAMES);
+    let mut a: usize = 0;
+    let mut k: usize = 0;
+    while a < x.len() {
+        let mut e = a;
+        while e < x.len() && x[e] != 32u8 { e = e + 1; }
+        if k == i { return (a, e); }
+        k = k + 1;
+        a = e + 1;
+    }
+    return (x.len(), x.len());
+}
+
+fn bad_syntax() -> never {
+    let mut m = Msg.new();
+    m.lit("stave: STAVE_CPU: bad syntax\n");
+    m.fail();
+}
+
+fn unknown(s: usize, n: usize) -> never {
+    let mut m = Msg.new();
+    m.lit("stave: STAVE_CPU: unknown feature '");
+    let shown = if n < NAME_CAP then n else NAME_CAP;
+    for k in 0..shown { m.byte(at(s + k)); }
+    m.lit("'\n");
+    m.fail();
+}
+
+// Address of the value of environment variable `name` (the byte after `name=`), 0 if unset.
+fn env(name: &str) -> usize {
+    let x = str_bytes(name);
+    let st = state.get();
+    let mut p = unsafe("st is runtime.state.STATE; envp is written only by runtime.start before main") (*st).envp;
+    if p == 0 { return 0; }
+    loop {
+        let e = unsafe("envp is a NULL-terminated array on the initial stack, which stays mapped") *(p as *const usize);
+        if e == 0 { return 0; }
+        // the entry's NUL differs from every byte of `name`, so the scan stops inside the entry
+        let mut k: usize = 0;
+        while k < x.len() && at(e + k) == x[k] { k = k + 1; }
+        if k == x.len() && at(e + k) == 61u8 { return e + k + 1; }
+        p = p + 8;
+    }
+}
+
+// The byte at address a of an environment string; callers never read past its NUL.
+fn at(a: usize) -> u8 {
+    return unsafe("a lies inside a NUL-terminated environment string on the initial stack, which stays mapped") *(a as *const u8);
+}
+
+// &str -> its UTF-8 bytes (`&str` and `&[u8]` share the (data, len) representation).
+fn str_bytes(s: &str) -> &[u8] from s {
+    return unsafe("&str and &[u8] are both (data pointer, byte length); str holds UTF-8 bytes") *(&s as *const &str as *const &[u8]);
+}
+
+// A message line built without allocation (start code, before main).
+struct Msg {
+    b: [u8; MSG_CAP],
+    n: usize,
+}
+
+impl Msg {
+    fn new() -> Msg {
+        return Msg.{ b: [0u8; MSG_CAP], n: 0 };
+    }
+
+    fn byte(&mut self, c: u8) {
+        if self.n < MSG_CAP {
+            self.b[self.n] = c;
+            self.n = self.n + 1;
+        }
+    }
+
+    fn lit(&mut self, s: &str) {
+        let x = str_bytes(s);
+        for i in 0..x.len() { self.byte(x[i]); }
+    }
+
+    fn name(&mut self, i: usize) {
+        let x = str_bytes(NAMES);
+        let (a, e) = word(i);
+        for k in a..e { self.byte(x[k]); }
+    }
+
+    // Writes the line to the diagnostic channel and exits 101.
+    fn fail(&self) -> never {
+        let p = &self.b as *const [u8; MSG_CAP] as *const u8;
+        let r = unsafe("p..p+n lies inside self.b") os.write(os.STDERR, p, self.n);
+        os.exit_group(panic.EXIT_PANIC);
+    }
 }

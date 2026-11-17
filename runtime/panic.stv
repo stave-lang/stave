@@ -43,7 +43,8 @@ pub const KIND_ASSERT: u32 = 3;
 pub const KIND_OUT_OF_MEMORY: u32 = 4;
 pub const KIND_STACK_OVERFLOW: u32 = 5;
 pub const KIND_UNWRAP: u32 = 6;
-pub const NKIND: u32 = 7;
+pub const KIND_UNSUPPORTED_CPU: u32 = 7;
+pub const NKIND: u32 = 8;
 
 // A site the table does not hold (runtime start-up failures): printed as `<unknown>:0:0`.
 pub const SITE_NONE: u32 = 0xFFFF_FFFF;
@@ -178,6 +179,7 @@ fn put_kind(l: &mut Line, kind: u32) {
     else if kind == KIND_OUT_OF_MEMORY { l.lit("OutOfMemory"); }
     else if kind == KIND_STACK_OVERFLOW { l.lit("StackOverflow"); }
     else if kind == KIND_UNWRAP { l.lit("Unwrap"); }
+    else if kind == KIND_UNSUPPORTED_CPU { l.lit("UnsupportedCpu"); }
     else { l.lit("Unknown"); }
 }
 

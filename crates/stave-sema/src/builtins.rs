@@ -508,6 +508,7 @@ pub fn intrinsic(name: &str) -> Option<(IArch, Vec<TypeId>, IRet)> {
         }
         "call_on_stack" => (IArch::Both, vec![us, us, us], IRet::T(us)),
         "cpu_init" => (IArch::Both, vec![], IRet::T(ids::UNIT)),
+        "cpu_baseline" => (IArch::Both, vec![], IRet::T(ids::U64)),
         "thread_clone" => (IArch::Both, vec![us; 7], IRet::T(ids::ISIZE)),
         "atomic_load_u32" => (IArch::Both, vec![us], IRet::T(ids::U32)),
         "atomic_load_u64" => (IArch::Both, vec![us], IRet::T(ids::U64)),

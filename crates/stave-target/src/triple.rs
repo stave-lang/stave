@@ -105,6 +105,15 @@ impl Triple {
         }
     }
 
+    /// The lowest target of this triple's arch: `x86_64-linux-v2`, `aarch64-linux`, `gpu-sm86`.
+    pub fn arch_base(self) -> Triple {
+        match self {
+            Triple::X86_64(_) => Triple::X86_64(X86Level::V2),
+            Triple::Aarch64(_) => Triple::Aarch64(A64Ext::Base),
+            Triple::GpuSm86 => Triple::GpuSm86,
+        }
+    }
+
     /// The host's baseline target: `x86_64-linux-v2` or `aarch64-linux`, from the architecture
     /// this compiler was built for. CPU features of the host are never probed for this (cli.md).
     /// `None` on any other architecture.

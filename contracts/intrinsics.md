@@ -43,9 +43,33 @@ features.rs) is set too, so testing one mask is sound. `runtime.cpu.init()` stor
 in the runtime state (before main, before other threads); `runtime.cpu.features()` reads it.
 `runtime.start.entry` calls `init` through `cpu_init()` (below) right after it stores the auxv
 values, and the program has `init` exactly when it calls `features` (a `dispatch fn` body,
-`std.cpu.features`; checked-ir.md "Instance root set"). The IR interpreter's `cpu_init` does
-nothing, so there the word is 0 and every dispatch takes its `_` arm (unless the baseline prunes
-it).
+`std.cpu.features`) or its target baseline is above its arch's lowest (`x86_64-linux-v3`,
+`-v4`, `aarch64-linux+sve`, `+sve2`; checked-ir.md "Instance root set"). The IR interpreter's
+`cpu_init` does nothing, so there the word is 0 and every dispatch takes its `_` arm (unless the
+baseline prunes it).
+
+`init`, in order:
+1. **Baseline**: B = `cpu_baseline()`, the `--target` baseline as a closed feature word (a
+   constant: lowering replaces the call by it; it never reaches the IR). If the detected word
+   lacks a feature of B, the program stops before main: `panic: UnsupportedCpu at
+   <unknown>:0:0 in <unknown> (thread 0)`, then one line `the CPU lacks features of the build
+   target: <names>`, exit 101 (runtime.panic `trap_msg`, kind 7, `SITE_NONE`).
+2. **Mask**: `STAVE_CPU` in the environment, read once: empty or unset changes nothing;
+   otherwise comma-separated items `-<name>`, no spaces. An item naming a feature of B does
+   nothing (the program's code assumes it); any other removes feature `<name>` and every feature
+   implying it (CLOSURE rows containing it). The removed set R is closed upward and disjoint
+   from B, so `detected & ~R` stays closed downward. A name of another arch's feature is
+   accepted and changes nothing. An unknown name prints the one line `stave: STAVE_CPU: unknown feature
+   '<name>'` (name cut at 64 bytes), any other malformed value `stave: STAVE_CPU: bad syntax`,
+   to the diagnostic channel; exit 101 before main. Features can only be removed.
+3. **Trace bit**: bit 63, never a feature, is set when `STAVE_DISPATCH_TRACE` is set to a value
+   other than empty or `0`. Each block of a dispatch body (checked-ir.md "Instance root set")
+   that calls an arm target first tests it on the word already loaded (one branch, no extra
+   load) and, when set, calls `runtime.cpu.trace(line: &str)` with the literal
+   `dispatch: <dispatch fn path> -> <arm target path>\n`, written with one `write` (lines of
+   threads do not interleave). A call resolved at compile time (pruned to one arm, or the
+   call-site redirect) runs no dispatch body and prints nothing. `runtime.cpu.features()`
+   returns the word with the bit; `std.cpu.features()` clears it.
 
 x86-64 (Intel SDM Vol. 2A, CPUID: Table 3-10 for leaf 01H ECX, Table 3-8 for leaf 07H; the same
 positions as Linux `arch/x86/include/asm/cpufeatures.h` words 4, 9, 12, 16, 18). Leaf 07H is
@@ -137,6 +161,7 @@ switch stacks. Each lowers inline (no call except the ones of `call_on_stack` an
 | `main_addr() -> usize` | x86-64 | `lea rax, [rip + __stave_main]`: address of the stub `__stave_main(arg: usize) -> usize` (C ABI; `arg` ignored), which calls the program's `main` and returns its exit status: `main`'s `i32` sign-extended to 64 bits, 0 for a unit `main` |
 | same | AArch64 | `adrp x0, __stave_main; add x0, x0, :lo12:__stave_main` |
 | `cpu_init()` | x86-64 / AArch64 | `call` / `bl runtime.cpu.init` (Stave convention, no arguments) if the program has that fn, else no code |
+| `cpu_baseline() -> u64` | x86-64 / AArch64 | none: lowering replaces the call by the constant `--target` baseline feature word ("CPU feature detection") |
 | `call_on_stack(f: usize, arg: usize, top: usize) -> usize` | x86-64 | `push rbx; mov rbx, rsp; mov rsp, top` (`top` 16-byte aligned, the caller's obligation); `mov rdi, arg; call f` (System V); `mov rsp, rbx; pop rbx`; result `rax`. Clobbers the caller-saved registers, like `ccall1` |
 | same | AArch64 | `stp x19, x30, [sp, #-16]!; mov x19, sp; mov sp, top; mov x0, arg; blr f` (AAPCS64, `f` in a scratch register, `x16`); `mov sp, x19; ldp x19, x30, [sp], #16`; result `x0` |
 | `signal_handler_addr() -> usize` | x86-64 / AArch64 | address (`lea` / `adrp`+`add`) of the stub `__stave_signal(sig: int, info: *siginfo_t, uctx: *ucontext_t)` (C ABI, SA_SIGINFO handler), which zero-extends `sig` and calls `runtime.panic.on_signal(sig: usize, info: usize, uctx: usize) -> never` |
@@ -165,7 +190,8 @@ list):
   &mut usize)` (the `scope { spawn { } }` lowering, checked-ir.md "Closures"),
   `runtime.panic.trap`, `runtime.panic.trap_msg`, `runtime.panic.on_signal`,
   `runtime.panic.set_user_site`, `runtime.cpu.features` (dispatch bodies), `runtime.cpu.init`
-  (`cpu_init`), and the allocator `runtime.alloc.{alloc, free, realloc}`
+  (`cpu_init`), `runtime.cpu.trace` (dispatch bodies, trace bit), and the allocator
+  `runtime.alloc.{alloc, free, realloc}`
   (replaced by an `allocator` declaration);
 - compiler-emitted symbols: `_start`, `__stave_main`, `__stave_signal`, `__stave_thread_start`,
   `__stave_site_table`, `__stave_pc_table` (and `__stave_rt` on PTX);

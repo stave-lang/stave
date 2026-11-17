@@ -136,8 +136,8 @@ fn build(p: &Path, target: Triple, release: bool) -> Output {
     out
 }
 
-/// The paths of the fns `path`'s body calls directly, in instruction order (`None`: no such fn
-/// with a body).
+/// The paths of the fns `path`'s body calls directly, in instruction order, without the
+/// dispatch trace calls (`runtime.cpu.trace`; `None`: no such fn with a body).
 fn callees(m: &Module, path: &str) -> Option<Vec<String>> {
     let f = m.funcs.iter().find(|f| f.path == path)?;
     let b = f.body.as_ref()?;
@@ -146,6 +146,7 @@ fn callees(m: &Module, path: &str) -> Option<Vec<String>> {
         if *op == Op::Call
             && let Some(Operand::Func(g)) = b.args(i as u32).first()
             && let Some(g) = m.func(*g)
+            && g.path != "runtime.cpu.trace"
         {
             out.push(g.path.clone());
         }
@@ -374,7 +375,8 @@ fn check_ir(m: &Module, target: Triple) -> Result<(), String> {
 }
 
 /// A dispatch whose first arm the target baseline covers is one direct call: no feature-word
-/// load, no `runtime.cpu` code, and (release) the arms below it are not built.
+/// load (no `runtime.cpu.features`; start code still has `init`, which checks the v3 baseline),
+/// and (release) the arms below it are not built.
 #[test]
 fn baseline_pruned_dispatch_has_no_cpu_code() {
     let tmp = TempDir::new("disp-pruned").unwrap();
@@ -388,7 +390,7 @@ fn baseline_pruned_dispatch_has_no_cpu_code() {
         assert_eq!(callees(m, "main.pick").unwrap(), ["main.on_avx2"], "release {release}");
         let main_calls = callees(m, "main.main").unwrap();
         assert!(main_calls.iter().any(|c| c == "main.on_avx2"), "release {release}: {main_calls:?}");
-        assert!(cpu_fns(m).is_empty(), "release {release}: has {:?}", cpu_fns(m));
+        assert!(!has_body(m, "runtime.cpu.features"), "release {release}: has {:?}", cpu_fns(m));
         if release {
             assert!(!has_body(m, "main.on_base"), "the pruned `_` arm is built");
         }
