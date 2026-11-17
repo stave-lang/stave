@@ -3,7 +3,8 @@
 // `features()` has the bit of every feature the CPU has and the OS enables (x86-64: CPUID and
 // XCR0; AArch64: AT_HWCAP/AT_HWCAP2), closed downward under implication: a set bit means that
 // feature and everything it implies are usable, so `features() & cpu.AVX2 != 0` is a complete
-// test. Only features of the build target's arch can be set. Rules: contracts/intrinsics.md
+// test. Only features of the build target's arch can be set; `STAVE_CPU=-name,..` in the
+// environment clears features above the build target's baseline. Rules: contracts/intrinsics.md
 // "CPU feature detection".
 
 import runtime.cpu as rt;
@@ -32,8 +33,8 @@ pub const BF16: u64 = rt.BF16;
 pub const SVE: u64 = rt.SVE;
 pub const SVE2: u64 = rt.SVE2;
 
-// The word start code stored once, before main (one load). The IR interpreter stores none:
-// there it is 0.
+// The word start code stored once, before main (one load), without the runtime's trace bit. The
+// IR interpreter stores none: there it is 0.
 pub fn features() -> u64 {
-    return rt.features();
+    return rt.features() & ~rt.TRACE;
 }

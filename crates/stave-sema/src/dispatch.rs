@@ -172,6 +172,10 @@ fn check_arm(
     }
 }
 
+/// The bit of the runtime feature word that no feature uses: set by `runtime.cpu.init` when
+/// dispatch tracing is on (contracts/intrinsics.md "CPU feature detection").
+pub(crate) const TRACE_BIT: u64 = 1 << 63;
+
 /// How a reachable `dispatch fn` is lowered on the build target.
 ///
 /// The live arms are those whose features (with the dispatch's own) the target's arch owns. With

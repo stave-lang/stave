@@ -24,7 +24,8 @@
 //! [`crate::dispatch::Plan`]). A lowered `thread_clone` or `thread_start_addr` intrinsic requests
 //! `runtime.thread.entry`, which only the backend's thread start stub calls; a request of
 //! `runtime.cpu.features` also requests `runtime.cpu.init`, which only start code's `cpu_init`
-//! intrinsic calls.
+//! intrinsic calls; so does that intrinsic itself when the target baseline is above its arch's
+//! lowest one (start code then checks the CPU against it).
 //!
 //! **Instantiation depth** (E0902, [`depth_check`], run by the type checker): from every
 //! non-generic body, the generic instances its call sites request, depth first, substituting
@@ -79,6 +80,9 @@ pub(crate) struct LangFns {
     /// `runtime.cpu.init`: fills the feature word; only start code's `cpu_init` intrinsic calls
     /// it, so a request of `cpu_features` requests it too.
     pub cpu_init: Option<DeclId>,
+    /// `runtime.cpu.trace(line: &str)`: writes a dispatch trace line (a dispatch body calls it
+    /// when the word's trace bit is set).
+    pub cpu_trace: Option<DeclId>,
 }
 
 fn sym(prog: &Program, s: &str) -> Option<Sym> {
@@ -124,6 +128,7 @@ impl LangFns {
             thread_entry: item_at(prog, "runtime.thread", "entry"),
             cpu_features: item_at(prog, "runtime.cpu", "features"),
             cpu_init: item_at(prog, "runtime.cpu", "init"),
+            cpu_trace: item_at(prog, "runtime.cpu", "trace"),
         }
     }
 }

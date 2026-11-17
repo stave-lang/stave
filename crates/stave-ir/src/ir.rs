@@ -117,10 +117,12 @@ pub enum PanicKind {
     OutOfMemory,
     StackOverflow,
     Unwrap,
+    /// The CPU lacks a feature of the build target's baseline (runtime start code only).
+    UnsupportedCpu,
 }
 
 impl PanicKind {
-    pub const ALL: [PanicKind; 7] = [
+    pub const ALL: [PanicKind; 8] = [
         PanicKind::Bounds,
         PanicKind::Overflow,
         PanicKind::DivByZero,
@@ -128,6 +130,7 @@ impl PanicKind {
         PanicKind::OutOfMemory,
         PanicKind::StackOverflow,
         PanicKind::Unwrap,
+        PanicKind::UnsupportedCpu,
     ];
 
     /// The report name (`panic: <Kind> at ...`).
@@ -140,6 +143,7 @@ impl PanicKind {
             PanicKind::OutOfMemory => "OutOfMemory",
             PanicKind::StackOverflow => "StackOverflow",
             PanicKind::Unwrap => "Unwrap",
+            PanicKind::UnsupportedCpu => "UnsupportedCpu",
         }
     }
 
@@ -153,6 +157,7 @@ impl PanicKind {
             PanicKind::OutOfMemory => "panic.out_of_memory",
             PanicKind::StackOverflow => "panic.stack_overflow",
             PanicKind::Unwrap => "panic.unwrap",
+            PanicKind::UnsupportedCpu => "panic.unsupported_cpu",
         }
     }
 }
@@ -373,6 +378,7 @@ impl Op {
             Op::Panic(P::OutOfMemory) => &[P::OutOfMemory],
             Op::Panic(P::StackOverflow) => &[P::StackOverflow],
             Op::Panic(P::Unwrap) => &[P::Unwrap],
+            Op::Panic(P::UnsupportedCpu) => &[P::UnsupportedCpu],
             Op::Vec(v) => v.trap_kinds(),
             _ => &[],
         }

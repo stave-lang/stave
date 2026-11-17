@@ -2,7 +2,8 @@
 //! `pub const <NAME>: u64 = 1 << <bit>;` for every feature (NAME = the feature name in upper
 //! case, bit = `Feature as u8`), and its `CLOSURE` table row i is exactly `FeatureSet::of(i)`;
 //! `runtime/{x86_64,aarch64}/cpu.stv` declare the same constants for the features their arch
-//! owns and none of another arch's; `std/cpu.stv` names every CPU feature through runtime.cpu.
+//! owns and none of another arch's; `std/cpu.stv` names every CPU feature through runtime.cpu;
+//! `runtime/cpu.stv` `NAMES` lists the feature names in bit order (`STAVE_CPU` parsing).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -85,6 +86,14 @@ fn arch_probe_constants_equal_feature_bits() {
             }
         }
     }
+}
+
+#[test]
+fn runtime_cpu_names_equal_feature_names() {
+    let text = repo_file("runtime/cpu.stv");
+    let names: Vec<&str> = Feature::ALL.iter().map(|f| f.name()).collect();
+    let decl = format!("const NAMES: &str = \"{}\";", names.join(" "));
+    assert!(text.contains(&decl), "runtime/cpu.stv lacks `{decl}`");
 }
 
 #[test]

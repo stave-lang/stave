@@ -435,6 +435,9 @@ impl<'a> FnCx<'a> {
     /// top-down `(%w & mask) == mask` → return the arm target's result; at the end the plan's
     /// last arm. Without tested arms the body is the one call, with no feature-word load; so is
     /// it with a runtime library that has no `runtime.cpu.features` (no word: as if it were 0).
+    /// With a word, each arm's block first tests the word's trace bit
+    /// ([`crate::dispatch::TRACE_BIT`]) and, when set, calls `runtime.cpu.trace` with the line
+    /// `dispatch: <dispatch> -> <arm>\n`.
     pub fn lower_dispatch(&mut self, plan: &crate::dispatch::Plan, params: &[Ty], ret: Ty) -> FnOut {
         self.fresh_env(params, ret);
         let args: Vec<Operand> =
@@ -456,12 +459,39 @@ impl<'a> FnCx<'a> {
                 let c = self.op2(Op::Eq, bt, x, m);
                 self.f.b.cbr(c, hit, &[], next, &[]);
                 self.f.b.switch_to(hit);
+                self.trace_arm(w, k);
                 self.tail_call(k, &args, ret);
                 self.f.b.switch_to(next);
             }
+            self.trace_arm(w, &plan.last);
         }
         self.tail_call(&plan.last, &args, ret);
         self.dispatch_out(params, ret)
+    }
+
+    /// `if (%w & TRACE_BIT) != 0 { runtime.cpu.trace("dispatch: <this fn> -> <arm>\n") }`: one
+    /// branch on the word already in a register, so tracing costs no load when off.
+    fn trace_arm(&mut self, w: Operand, arm: &InstKey) {
+        let Some(t) = self.g.lang.cpu_trace else { return };
+        let u64t = self.t_int(false, crate::types::IntBits::B64);
+        let bt = self.t_bool();
+        let (on, go) = (self.f.b.create_block(), self.f.b.create_block());
+        let bit = self.int(i128::from(crate::dispatch::TRACE_BIT));
+        let zero = self.int(0);
+        let x = self.op2(Op::And, u64t, w, bit);
+        let c = self.op2(Op::Ne, bt, x, zero);
+        self.f.b.cbr(c, on, &[], go, &[]);
+        self.f.b.switch_to(on);
+        let line = format!(
+            "dispatch: {} -> {}\n",
+            self.path,
+            crate::lower::fn_path(self.g.prog, self.g.sigs, arm.decl)
+        );
+        let s = self.string(line.as_bytes());
+        let f = self.req(Req::Inst(InstKey { decl: t, args: Vec::new() }));
+        self.f.b.call(f, None, &[Operand::Str(s)]);
+        self.f.b.br(go, &[]);
+        self.f.b.switch_to(go);
     }
 
     fn tail_call(&mut self, k: &InstKey, args: &[Operand], ret: Ty) {

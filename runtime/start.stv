@@ -27,7 +27,8 @@ extern "stave-intrinsic" {
     // call_on_stack(f, arg, top): calls the C-ABI function at f with arg on a stack whose top is
     //   `top` (16-byte aligned), then restores the caller's stack pointer and returns f's result.
     // cpu_init(): calls runtime.cpu.init if the program has it (it does exactly when it can read
-    //   the feature word: a dispatch or std.cpu), else no code.
+    //   the feature word, a dispatch or std.cpu, or its target baseline is above the arch's
+    //   lowest), else no code.
     fn main_addr() -> usize;
     fn call_on_stack(f: usize, arg: usize, top: usize) -> usize;
     fn cpu_init();

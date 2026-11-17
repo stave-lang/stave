@@ -17,7 +17,7 @@ Option, Result, or std traits (only the built-in type names and `size_of`/`align
 | `runtime.atomic` | `atomic.stv` | CPU atomic intrinsics (load/xchg/add/cas u32/u64) and a three-state futex lock |
 | `runtime.thread` | `thread.stv` | threads: mapping = guard + stack + altstack + record, clone3 (clone if ENOSYS), futex join on CLEARTID, ids, registry; `scope_spawn`/`scope_join` for `scope { spawn { } }`; `start`/`join`/`cpu_count` for std.thread |
 | `runtime.config` | `config.stv` | per-binary settings (`[run] stack`) |
-| `runtime.cpu` | `cpu.stv` | feature word (contracts/intrinsics.md "CPU feature detection"): `detect()` probes (through `arch.cpu`) and closes under implication; `init()` stores it in the state block once (start code, through the `cpu_init` intrinsic, only in programs that call `features()`), `features()` reads it |
+| `runtime.cpu` | `cpu.stv` | feature word (contracts/intrinsics.md "CPU feature detection"): `detect()` probes (through `arch.cpu`) and closes under implication; `init()` checks it against the target baseline (`cpu_baseline()`; UnsupportedCpu), applies `STAVE_CPU` and `STAVE_DISPATCH_TRACE`, and stores it in the state block once (start code, through the `cpu_init` intrinsic, only in programs that call `features()` or whose baseline is above the arch's lowest), `features()` reads it, `trace(line)` writes a dispatch trace line |
 | `runtime_x86_64.cpu`, `runtime_aarch64.cpu` | `{x86_64,aarch64}/cpu.stv` | `probe(hwcap, hwcap2)`: raw feature bits from CPUID + XCR0 (x86-64) or AT_HWCAP/AT_HWCAP2 (AArch64); imported only by `runtime.cpu` |
 
 `syscalls.list`: the syscall set, one per line. Line i + 1 is call id i in `os.stv` (`SYS_*`) and the
@@ -60,7 +60,8 @@ runtime.panic.trap_msg(kind: u32, site: u32, msg: &[u8]) -> never  // + one line
 ```
 
 `kind`: `KIND_BOUNDS 0, KIND_OVERFLOW 1, KIND_DIV_BY_ZERO 2, KIND_ASSERT 3, KIND_OUT_OF_MEMORY 4,
-KIND_STACK_OVERFLOW 5, KIND_UNWRAP 6` (panic kind names; shift amount >= width is `Overflow`).
+KIND_STACK_OVERFLOW 5, KIND_UNWRAP 6, KIND_UNSUPPORTED_CPU 7` (panic kind names; shift amount >= width
+is `Overflow`; `UnsupportedCpu` only from `runtime.cpu.init`, at `SITE_NONE`).
 `site`: index into the compiler-emitted **site table**, `SITE_NONE = 0xFFFF_FFFF` for unknown.
 Output: `panic: <Kind> at <file>:<line>:<col> in <fn> (thread <n>)` on fd 2, then `exit_group(101)`.
 A panic during a panic exits 101 at once.
