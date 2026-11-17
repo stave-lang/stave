@@ -43,6 +43,10 @@ enum Shape {
     Insert(u32),
     /// `v, v, xmm/m`
     ShiftX,
+    /// `narrow/m, wide` (the wide register is this many times the narrow one)
+    Down(u32),
+    /// `narrow, wide/m` (the wide operand is this many times the narrow register)
+    Narrow(u32),
 }
 
 fn shape(op: EOp) -> Shape {
@@ -74,6 +78,22 @@ fn shape(op: EOp) -> Shape {
             "bd" | "wq" => Shape::Extend(4),
             _ => Shape::Extend(8),
         }
+    } else if matches!(op, EOp::Cvtdq2pd | EOp::Cvtudq2pd | EOp::Cvtps2pd | EOp::Cvttps2qq | EOp::Cvttps2uqq)
+    {
+        Shape::Extend(2)
+    } else if matches!(op, EOp::Cvtqq2ps | EOp::Cvtuqq2ps | EOp::Cvtpd2ps | EOp::Cvttpd2dq | EOp::Cvttpd2udq)
+    {
+        Shape::Narrow(2)
+    } else if has("Cvt") {
+        Shape::Un
+    } else if has("Pmov") {
+        Shape::Down(match &n[n.len() - 2..] {
+            "wb" | "dw" | "qd" => 2,
+            "db" | "qw" => 4,
+            _ => 8,
+        })
+    } else if has("Pshufd") {
+        Shape::UnI
     } else if has("Extract") {
         Shape::Extract(if n.ends_with("64x4") { 2 } else { 4 })
     } else if has("Insert") {
@@ -105,7 +125,7 @@ fn mnemonic(op: EOp) -> String {
 
 fn lens(op: EOp) -> Vec<EVL> {
     match (op, shape(op)) {
-        (EOp::Broadcastsd, _) => vec![EVL::L256, EVL::L512],
+        (EOp::Broadcastsd | EOp::Permq, _) => vec![EVL::L256, EVL::L512],
         (_, Shape::Extract(2) | Shape::Insert(2)) => vec![EVL::L512],
         (_, Shape::Extract(_) | Shape::Insert(_)) => vec![EVL::L256, EVL::L512],
         _ => vec![EVL::L128, EVL::L256, EVL::L512],
@@ -272,6 +292,14 @@ fn add(bt: &mut Batch, op: EOp, vl: EVL, (d, a, b): (u8, u8, u8), m: Option<&(Me
         Shape::ShiftX => {
             let (rm, t) = rm(16);
             (Ev::new(op, vl, d, a, rm), format!("{name} {}{kk},{},{t}", v(d), v(a)))
+        }
+        Shape::Down(r) => {
+            let (rm, t) = rm(n / r);
+            (Ev::new(op, vl, d, 0, rm), format!("{name} {t}{kk},{}", v(d)))
+        }
+        Shape::Narrow(r) => {
+            let (rm, t) = rm(n);
+            (Ev::new(op, vl, d, 0, rm), format!("{name} {}{kk},{t}", vreg(n / r, d)))
         }
     };
     bt.add(text, |asm| asm.evex(ev.mask(kr, z)));
