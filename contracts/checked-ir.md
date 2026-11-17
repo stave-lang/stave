@@ -113,7 +113,7 @@ ops take the lane semantics of the scalar op; V = the vector result type, M = `m
 | `vec.reduce_add_ordered` / `vec.scan_add scan_add_wrap` | `v init` / `v` | sequential from lane 0; `reduce_add_ordered` and `scan_add`: float lanes; `scan_add_wrap`: int lanes, wrapping |
 | `vec.cast cast.wrap cast.sat cast.round cast.try` | `v` | `as as% as\| as~ as?` per lane (`try`: `Option<V>`, `Some` iff every lane converts) |
 | `vec.bitcast split join widen_lo widen_hi narrow_wrap narrow_sat permute lookup compress expand` | | shape ops (`permute v k0 ..`: constant lane indices) |
-| `vec.load` / `vec.store` | `s i` / `s i v` | lanes `s[i..i+N]`, after `check.bounds i (sub.sat (slice.len s) N-1)` or under a chunk loop's head test; release passes after bounds-check elision may replace a slice `s` by its `slice.ptr` (unchecked `*T`) |
+| `vec.load` / `vec.store` | `s i` / `s i v` | lanes `s[i..i+N]`, after `check.bounds i (sub.sat (slice.len s) N-1)` or under a chunk loop's head test; release passes (which run after the removal of proven bounds checks) may replace a slice `s` by its `slice.ptr` (unchecked `*T`) |
 | `vec.load_aligned` † / `vec.store_aligned` † | `s i` / `s i v` | as `load` / `store`; `i % N != 0` traps `Bounds` |
 | `vec.store_stream` † | `s i v` | `vec.store_aligned` with a non-temporal hint, after the same `check.bounds` |
 | `vec.load_masked` † / `vec.store_masked` † | `s i m` / `s i v m` | active lanes only (inactive read 0); an active lane past the end traps `Bounds` before any lane is written |
@@ -233,11 +233,17 @@ b2():
   `addr.elem p i` (`n` = `slice.len p`, or the array length as a constant); `a[i]` on an array SSA
   value is `get`/`set`, which check a dynamic index themselves. A constant index ≥ a constant array
   length is `panic.bounds ()` + `unreachable` (the trap is kept; sub-slices fold the same way).
-  No check is ever removed in the checked IR; release code generation may drop a check only with a
-  recorded proof (constant index < length, a dominating identical check, a dominating `lt i n` branch,
+  One pass after lowering removes the checks that have a proof (constant index < length, a
+  dominating check on the same index and length, a dominating `lt i n` branch,
   and `LenEq`/`Offset`: `i + k < n` derived from dominating unsigned compares, asserting calls
   such as `std.debug.assert`, and trapping `add`/`sub` of constants; a check or a strict compare
-  against `sub.sat n c` reads as `i + c < n`).
+  against `sub.sat n c` reads as `i + c < n`). The pass runs in every build and never looks at
+  the build mode: a function keeps the same checks in debug and release, and the checked IR (the
+  `ir` dump, the interpreter's input) is its result. Each removed check has a witness, the proof
+  as a chain of inequalities that each name their place in the IR (stave-ir `witness`); an
+  independent checker validates every witness before the check is deleted, and a witness it
+  refuses is a compiler bug (exit 3). Release passes remove no check; the IR verifier and the
+  bounds audit run again on their output.
   Compiler-made accesses (`for` over an array or slice, drop loops, array → slice coercion
   `addr.elem p 0` + `slice.make`) index below a length the generated code compares against.
 - **Memory hints**: `s.prefetch_<rw>_<loc>(i)` is `slice.ptr s` and the prefetch of it with `i`;

@@ -1,8 +1,8 @@
 //! Bounds checks of element accesses (panic `Bounds`; no silent check removal): the audit that
-//! every access keeps its check, and the elision of a check only with a recorded proof.
+//! every access keeps its check, and the removal of a check only with a witness.
 //!
-//! **Insertion** happens in the front end's lowering (stave-sema), so the checked IR
-//! (contracts/checked-ir.md) already carries every check:
+//! **Insertion** happens in the front end's lowering (stave-sema), which gives every access its
+//! check:
 //!
 //! - `xs[i]` on a place in memory (a slice, or an array behind a reference or in a `slot`):
 //!   `check.bounds i n` right before `addr.elem p i`, with `n = slice.len p` or the array length.
@@ -26,16 +26,23 @@
 //! through raw pointers (`addr.elem` on `*T`) are pointer arithmetic, the `unsafe` code's own
 //! obligation, and are not element accesses.
 //!
-//! **Elision** ([`elide`]): a `check.bounds` is removed only when one of these proofs holds, and
-//! each removal is returned as an [`Elided`] record (never silent):
+//! **Removal** ([`prove_func`], [`elide`]): the one pass that decides which checks a build
+//! keeps. It runs on the lowered IR of every build, debug and release alike, and depends on
+//! nothing but the function's body and its callees' bodies, so a function keeps the same checks
+//! in every build mode. A `check.bounds` goes only when one of these proofs holds:
 //!
 //! | Proof | Holds when |
 //! |---|---|
 //! | `ConstInRange` | index and length are constants and index < length |
-//! | `Dominated` | an identical `check.bounds` (same index and length operands) dominates it |
-//! | `LoopBound` | a dominating `cbr (lt i n') T F` reaches the check only through `T` (T's only predecessor), `i` unsigned, and `n'` is the same length operand (or a constant ≤ a constant length) |
+//! | `Dominated` | a `check.bounds` on the same index and length dominates it |
+//! | `LoopBound` | a dominating `cbr (lt i n') T F` reaches the check only through `T` (T's only predecessor), `i` unsigned, and `n'` is the same length (or a constant ≤ a constant length) |
 //! | `LenEq` | the facts below prove `i < n` through an equality of two lengths, e.g. `i < len(a)` and `len(a) == len(b)` for `check.bounds i len(b)` |
 //! | `Offset` | the facts below prove `i + k < n` for the index `i + k` (`k` a constant, possibly negative or 0) without an equality; for a check against `n -| c` (a vector access), `k` includes `c`: the last lane |
+//!
+//! "The same" index or length is the same operand, or two `slice.len` of one slice value (the
+//! lowering reads the length again at every use). `Dominated` and `LoopBound` are found for all
+//! checks of a function at once, by sorting them with the candidate sources and one scan in
+//! dominator-tree order ([`Cx::twins`], [`Cx::loop_heads`]).
 //!
 //! `LenEq` and `Offset` come from one difference-constraint graph per function (`bounds/facts.rs`):
 //! facts `x <= y + c` over SSA values from dominating branches (unsigned compares, a loop's
@@ -43,15 +50,20 @@
 //! trapping `add`/`sub` by a constant folded into offsets. Each check is a query on it, explored
 //! from the index for at most [`BOUNDS_STEP_LIMIT`] edges.
 //!
-//! The checked IR is printed before elision (it is pre-optimization IR); stage0 runs [`elide`] for
-//! `--release` code generation only.
+//! The pass deletes nothing. Its result is a witness per check ([`crate::witness`]): the proof
+//! written out as a chain of inequalities, each naming the place of the IR it is read from. The
+//! separate checker [`crate::witness::check`] validates every chain and then deletes the checks
+//! it accepted; a chain it refuses is a compiler bug. The [`Proof`] is the label of the rule
+//! that found the chain, for reports and tests.
 
 mod facts;
 
-use crate::ir::{Block, Body, Func, FuncId, Module, Op, Operand, Term, Value, ValueDef};
+use crate::ir::{Block, Body, Func, FuncId, Module, Op, Operand, Span, Term, Value, ValueDef};
 use crate::simd::VecOp;
 use crate::types::{TypeId, TypeKey, TypeTable};
 use crate::verify::Dominators;
+use crate::witness::check::{Rejected, check_module, remove};
+use crate::witness::{Edge, FnWitness, NO_BLOCK, Node, Removed, Source};
 
 /// The most graph edges one bounds query follows before it gives up and keeps the check: compile
 /// time stays linear in the number of checks.
@@ -133,7 +145,7 @@ impl std::fmt::Display for Unguarded {
     }
 }
 
-/// A removed `check.bounds` and the proof that allowed it.
+/// A removed `check.bounds` and the rule that proved it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Elided {
     pub func: FuncId,
@@ -141,6 +153,23 @@ pub struct Elided {
     /// Instruction index before the removal.
     pub inst: u32,
     pub proof: Proof,
+}
+
+/// The checks of one function the pass proved: their witness, and per row of
+/// [`FnWitness::removed`] the rule that found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Proved {
+    pub witness: FnWitness,
+    pub proofs: Vec<Proof>,
+}
+
+/// What [`analyze_func`] finds in one function.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Analysis {
+    /// The checks to remove (`None`: none).
+    pub proved: Option<Proved>,
+    /// The element accesses without a check or proof.
+    pub unguarded: Vec<Unguarded>,
 }
 
 /// Every element access of the module with its guard, or the unguarded ones.
@@ -159,63 +188,70 @@ pub fn audit(m: &Module) -> Result<Vec<Access>, Vec<Unguarded>> {
 /// order (none for an unknown id or a function without a body). Functions are independent, so a
 /// caller may audit them in parallel; [`audit`]'s lists are every function's in id order.
 pub fn audit_func(m: &Module, fid: FuncId) -> (Vec<Access>, Vec<Unguarded>) {
-    let mut ok = Vec::new();
-    let mut bad = Vec::new();
-    let Some(f) = m.func(fid) else { return (ok, bad) };
-    let Some(b) = &f.body else { return (ok, bad) };
-    // Only these ops can be element accesses: without one there is nothing to analyse.
-    let is_vec_access = |op: &Op| matches!(op, Op::Vec(v) if v.is_memory());
-    if !b.insts.op.iter().any(|op| matches!(op, Op::ElemAddr | Op::Get | Op::Set) || is_vec_access(op)) {
-        return (ok, bad);
+    let Some(f) = m.func(fid) else { return (Vec::new(), Vec::new()) };
+    let Some(b) = &f.body else { return (Vec::new(), Vec::new()) };
+    if !has_access(b) {
+        return (Vec::new(), Vec::new());
     }
-    let cx = Cx::new(m, b);
-    for i in 0..b.insts.len() as u32 {
-        let Some(kind) = cx.access_kind(i) else { continue };
-        if !cx.reachable_inst(i) {
-            continue;
-        }
-        match cx.guard(i, kind) {
-            Some(guard) => ok.push(Access { func: fid, inst: i, kind, guard }),
-            None => bad.push(Unguarded { func: fid, path: label(f), inst: i, kind }),
-        }
-    }
-    (ok, bad)
+    Cx::new(m, b).audit(f, fid)
 }
 
-/// Removes every `check.bounds` that has a proof; returns the records, in (function, instruction)
-/// order. Accesses stay guarded ([`audit`] holds before and after).
-pub fn elide(m: &mut Module) -> Vec<Elided> {
+/// Only these ops can be element accesses: without one there is nothing to audit.
+fn has_access(b: &Body) -> bool {
+    b.insts.op.iter().any(|op| match op {
+        Op::ElemAddr | Op::Get | Op::Set => true,
+        Op::Vec(v) => v.is_memory(),
+        _ => false,
+    })
+}
+
+/// The witnesses of the `check.bounds` of function `fid` that have a proof (`None`: no check
+/// has one). Nothing is removed. Functions are independent: a caller may run them in parallel.
+pub fn prove_func(m: &Module, fid: FuncId) -> Option<Proved> {
+    let b = m.func(fid)?.body.as_ref()?;
+    if !b.insts.op.contains(&Op::BoundsCheck) {
+        return None;
+    }
+    Cx::new(m, b).prove(fid)
+}
+
+/// [`prove_func`] and the unguarded accesses of [`audit_func`] from one analysis of the
+/// function. The audit sees the body with every check in place: an access behind a check that
+/// has a witness stays guarded by that check, whose removal the witness checker answers for.
+pub fn analyze_func(m: &Module, fid: FuncId) -> Analysis {
+    let Some(f) = m.func(fid) else { return Analysis::default() };
+    let Some(b) = &f.body else { return Analysis::default() };
+    let (checks, accesses) = (b.insts.op.contains(&Op::BoundsCheck), has_access(b));
+    if !checks && !accesses {
+        return Analysis::default();
+    }
+    let cx = Cx::new(m, b);
+    Analysis {
+        proved: if checks { cx.prove(fid) } else { None },
+        unguarded: if accesses { cx.audit(f, fid).1 } else { Vec::new() },
+    }
+}
+
+/// The whole removal step on a module, function by function: proves, has the witness checker
+/// validate every chain, and lets it delete the checks. Returns the records in (function,
+/// instruction) order, or the witnesses the checker refused (then nothing is removed).
+/// Accesses stay guarded ([`audit`] holds before and after).
+pub fn elide(m: &mut Module) -> Result<Vec<Elided>, Vec<Rejected>> {
+    let proved: Vec<Proved> = (0..m.funcs.len() as u32).filter_map(|f| prove_func(m, FuncId(f))).collect();
+    let witnesses: Vec<FnWitness> = proved.iter().map(|p| p.witness.clone()).collect();
+    let checked = check_module(m, &witnesses)?;
     let mut out = Vec::new();
-    for fi in 0..m.funcs.len() {
-        let removed: Vec<(u32, Proof)> = {
-            let f = &m.funcs[fi];
-            let Some(b) = &f.body else { continue };
-            if !b.insts.op.contains(&Op::BoundsCheck) {
-                continue;
-            }
-            let cx = Cx::new(m, b);
-            (0..b.insts.len() as u32)
-                .filter(|&i| b.insts.op[i as usize] == Op::BoundsCheck && cx.reachable_inst(i))
-                .filter_map(|i| cx.check_proof(i).map(|p| (i, p)))
-                .collect()
-        };
-        if removed.is_empty() {
-            continue;
-        }
-        let path = label(&m.funcs[fi]);
-        // A check proven only by another removed check stays proven: `Dominated` points at a
-        // check that dominates it, and that one is either kept or itself proven.
-        if let Some(b) = &mut m.funcs[fi].body {
-            remove_insts(b, &removed.iter().map(|r| r.0).collect::<Vec<_>>());
-        }
-        out.extend(removed.into_iter().map(|(inst, proof)| Elided {
-            func: FuncId(fi as u32),
+    for p in &proved {
+        let path = m.func(p.witness.func).map_or(String::new(), label);
+        out.extend(p.witness.removed.iter().zip(&p.proofs).map(|(r, &proof)| Elided {
+            func: p.witness.func,
             path: path.clone(),
-            inst,
+            inst: r.inst,
             proof,
         }));
     }
-    out
+    remove(m, &checked);
+    Ok(out)
 }
 
 fn label(f: &Func) -> String {
@@ -403,7 +439,7 @@ impl<'a> Cx<'a> {
                     None => self.slice_len_term(p)?,
                 };
                 let t = self.term(idx)?;
-                if let Some(proof) = self.prove_lt(i, t, n) {
+                if let Some(proof) = self.prove_lt(i, t, n, None) {
                     return Some(Guard::Proof(proof));
                 }
                 (self.only_slice_base(i) && self.prove_le(i, t, n).is_some())
@@ -446,7 +482,7 @@ impl<'a> Cx<'a> {
                     None => self.slice_len_term(p)?,
                 };
                 let last = self.term(idx)?.plus(i128::from(lanes) - 1)?;
-                self.prove_lt(i, last, n).map(Guard::Proof)
+                self.prove_lt(i, last, n, None).map(Guard::Proof)
             }
         }
     }
@@ -526,8 +562,202 @@ impl<'a> Cx<'a> {
         None
     }
 
-    /// The proof that `check.bounds` instruction `i` is redundant, if any.
-    fn check_proof(&self, i: u32) -> Option<Proof> {
+    /// The audit of the function: its guarded and its unguarded element accesses.
+    fn audit(&self, f: &Func, fid: FuncId) -> (Vec<Access>, Vec<Unguarded>) {
+        let mut ok = Vec::new();
+        let mut bad = Vec::new();
+        for i in 0..self.b.insts.len() as u32 {
+            let Some(kind) = self.access_kind(i) else { continue };
+            if !self.reachable_inst(i) {
+                continue;
+            }
+            match self.guard(i, kind) {
+                Some(guard) => ok.push(Access { func: fid, inst: i, kind, guard }),
+                None => bad.push(Unguarded { func: fid, path: label(f), inst: i, kind }),
+            }
+        }
+        (ok, bad)
+    }
+
+    /// The witnesses of every check that has a proof.
+    fn prove(&self, func: FuncId) -> Option<Proved> {
+        let twins = self.twins();
+        let heads = self.loop_heads();
+        let mut w = FnWitness { func, dom: Vec::new(), removed: Vec::new(), edges: Vec::new() };
+        let mut proofs = Vec::new();
+        for (k, &i) in self.checks.iter().enumerate() {
+            let start = w.edges.len();
+            match self.check_proof(i, twins[k], heads[k], &mut w.edges) {
+                Some(proof) => {
+                    let edges = Span { start: start as u32, len: (w.edges.len() - start) as u32 };
+                    w.removed.push(Removed { inst: i, site: self.b.insts.site[i as usize], edges });
+                    proofs.push(proof);
+                }
+                None => w.edges.truncate(start),
+            }
+        }
+        if proofs.is_empty() {
+            return None;
+        }
+        w.dom = (0..self.b.blocks.len()).map(|bk| self.dom.idom(bk).map_or(NO_BLOCK, |d| d as u32)).collect();
+        Some(Proved { witness: w, proofs })
+    }
+
+    /// The key two operands share exactly when they are "the same": the operand itself, or the
+    /// slice value whose length it reads.
+    fn same_key(&self, o: Operand) -> u64 {
+        let (tag, id) = match o {
+            Operand::Value(v) => match self.len_read(v) {
+                Some((_, s)) => (5u64, s.0),
+                None => (0, v.0),
+            },
+            Operand::Const(c) => (1, c.0),
+            Operand::Str(x) => (2, x.0),
+            Operand::Func(f) => (3, f.0),
+            Operand::Type(t) => (4, t.0),
+        };
+        tag << 32 | u64::from(id)
+    }
+
+    /// `(d, s)` when `v` is defined by instruction `d` as `slice.len s`, `s` a value.
+    fn len_read(&self, v: Value) -> Option<(u32, Value)> {
+        let d = self.def(v)?;
+        match (self.b.insts.op[d as usize], self.b.args(d)) {
+            (Op::SliceLen, &[Operand::Value(s)]) => Some((d, s)),
+            _ => None,
+        }
+    }
+
+    /// The edges from operand `a` to "the same" operand `b`: none, or the two `slice.len`
+    /// readings of their slice.
+    fn bridge(&self, a: Operand, b: Operand, out: &mut Vec<Edge>) -> Option<()> {
+        if a == b {
+            return Some(());
+        }
+        let (Operand::Value(va), Operand::Value(vb)) = (a, b) else { return None };
+        let ((da, sa), (db, sb)) = (self.len_read(va)?, self.len_read(vb)?);
+        if sa != sb {
+            return None;
+        }
+        let len = Node::Len(sa);
+        out.push(Edge { from: Node::Val(va), to: len, w: 0, src: Source::SliceLen { inst: da } });
+        out.push(Edge { from: len, to: Node::Val(vb), w: 0, src: Source::SliceLen { inst: db } });
+        Some(())
+    }
+
+    /// Per check (position in `checks`), the nearest `check.bounds` on the same index and length
+    /// that dominates it. Checks are sorted by operands, then by the dominator-tree preorder of
+    /// their place; one scan per group keeps the group's checks that dominate the current one
+    /// on a stack.
+    fn twins(&self) -> Vec<Option<u32>> {
+        let mut rows: Vec<(u64, u64, u32, u32, u32)> = self
+            .checks
+            .iter()
+            .enumerate()
+            .filter_map(|(k, &i)| {
+                let &[idx, n] = self.b.args(i) else { return None };
+                let order = self.dom.preorder(self.block_of[i as usize] as usize);
+                Some((self.same_key(idx), self.same_key(n), order, i, k as u32))
+            })
+            .collect();
+        rows.sort_unstable();
+        let mut twin = vec![None; self.checks.len()];
+        let mut above: Vec<u32> = Vec::new();
+        let mut group = None;
+        for &(idx, n, _, i, k) in &rows {
+            if group != Some((idx, n)) {
+                group = Some((idx, n));
+                above.clear();
+            }
+            while above.last().is_some_and(|&c| !self.inst_dominates(c, i)) {
+                above.pop();
+            }
+            twin[k as usize] = above.last().copied();
+            above.push(i);
+        }
+        twin
+    }
+
+    /// Per check (position in `checks`), a loop bound that proves it: `(branch, head)` where
+    /// block `branch` ends in `cbr (lt i n') head F`, that true edge is the only way into
+    /// `head`, `head` dominates the check, `i` is the check's (unsigned) index, and `n'` is the
+    /// check's length or a constant ≤ its constant length. Found like [`Cx::twins`]: the heads
+    /// and the checks of one index and length sorted by dominator-tree preorder, one scan with
+    /// the stack of heads that dominate the current row.
+    fn loop_heads(&self) -> Vec<Option<(u32, u32)>> {
+        // A constant length is its own class: any head testing a constant at most it will do.
+        const CONSTANT: u64 = u64::MAX;
+        let len_key = |n: Operand| if self.konst(n).is_some() { CONSTANT } else { self.same_key(n) };
+        // (index key, length key, preorder, 0 = head / 1 = check, block or position in `checks`,
+        // branch block, constant bound)
+        let mut rows: Vec<(u64, u64, u32, u8, u32, u32, u64)> = Vec::new();
+        for t in 0..self.b.blocks.len() {
+            if let [(d, true)] = self.preds[t][..]
+                && let Term::Cbr { cond: Operand::Value(c), then, .. } = self.b.blocks[d as usize].term
+                && then.block.index() == t
+                && let Some(ci) = self.def(c)
+                && self.b.insts.op[ci as usize] == Op::Lt
+                && let &[idx, n] = self.b.args(ci)
+                && self
+                    .ty(idx)
+                    .and_then(|ty| self.key(ty))
+                    .is_some_and(|k| matches!(k, TypeKey::Int { signed: false, .. }))
+            {
+                let bound = self.konst(n).unwrap_or(0);
+                rows.push((self.same_key(idx), len_key(n), self.dom.preorder(t), 0, t as u32, d, bound));
+            }
+        }
+        let mut found = vec![None; self.checks.len()];
+        if rows.is_empty() {
+            return found;
+        }
+        for (k, &i) in self.checks.iter().enumerate() {
+            let &[idx, n] = self.b.args(i) else { continue };
+            let order = self.dom.preorder(self.block_of[i as usize] as usize);
+            rows.push((self.same_key(idx), len_key(n), order, 1, k as u32, 0, self.konst(n).unwrap_or(0)));
+        }
+        rows.sort_unstable();
+        // The heads above the current row, each with the head of the smallest constant bound at
+        // or below it on the stack: (head block, branch block, bound, best head, best branch,
+        // best bound).
+        let mut above: Vec<(u32, u32, u64, u32, u32, u64)> = Vec::new();
+        let mut group = None;
+        for &(idx, n, _, kind, at, branch, bound) in &rows {
+            if group != Some((idx, n)) {
+                group = Some((idx, n));
+                above.clear();
+            }
+            let block = if kind == 0 { at } else { self.block_of[self.checks[at as usize] as usize] };
+            while above.last().is_some_and(|h| !self.dom.dominates(h.0 as usize, block as usize)) {
+                above.pop();
+            }
+            if kind == 0 {
+                let best = match above.last() {
+                    Some(&(_, _, _, t, d, b)) if b <= bound => (t, d, b),
+                    _ => (at, branch, bound),
+                };
+                above.push((at, branch, bound, best.0, best.1, best.2));
+            } else if let Some(&(t, d, _, best_t, best_d, best_bound)) = above.last() {
+                if n != CONSTANT {
+                    found[at as usize] = Some((d, t));
+                } else if best_bound <= bound {
+                    found[at as usize] = Some((best_d, best_t));
+                }
+            }
+        }
+        found
+    }
+
+    /// The proof that `check.bounds` instruction `i` is redundant, if any, with its chain of
+    /// witness edges appended to `out`. `twin` and `head`: the check's rows of [`Cx::twins`] and
+    /// [`Cx::loop_heads`].
+    fn check_proof(
+        &self,
+        i: u32,
+        twin: Option<u32>,
+        head: Option<(u32, u32)>,
+        out: &mut Vec<Edge>,
+    ) -> Option<Proof> {
         let args = self.b.args(i);
         let (idx, n) = (*args.first()?, *args.get(1)?);
         if let (Some(k), Some(l)) = (self.konst(idx), self.konst(n))
@@ -535,26 +765,69 @@ impl<'a> Cx<'a> {
         {
             return Some(Proof::ConstInRange { index: k, len: l });
         }
-        if let Some(first) = self
-            .checks
-            .iter()
-            .copied()
-            .find(|&c| c != i && self.b.args(c) == args && self.inst_dominates(c, i))
+        let start = out.len();
+        if let Some(first) = twin
+            && let &[x, y] = self.b.args(first)
         {
-            return Some(Proof::Dominated { first });
+            if self.less_edge((idx, n), (x, y), Source::Check { inst: first }, out).is_some() {
+                return Some(Proof::Dominated { first });
+            }
+            out.truncate(start);
         }
-        let same_len =
-            |m: Operand| m == n || matches!((self.konst(m), self.konst(n)), (Some(a), Some(b)) if a <= b);
-        if let Some(branch) = self.loop_bound(i, idx, same_len) {
-            return Some(Proof::LoopBound { branch });
+        if let Some((branch, head)) = head
+            && let Term::Cbr { cond: Operand::Value(c), .. } = self.b.blocks[branch as usize].term
+            && let Some(ci) = self.def(c)
+            && let &[x, y] = self.b.args(ci)
+        {
+            if self.less_edge((idx, n), (x, y), Source::Branch { block: head }, out).is_some() {
+                return Some(Proof::LoopBound { branch });
+            }
+            out.truncate(start);
         }
         let t = self.term(idx)?;
-        if let Some(p) = self.term(n).and_then(|tn| self.prove_lt(i, t, tn)) {
-            return Some(p);
+        let mut path = Vec::new();
+        if let Some(tn) = self.term(n)
+            && let Some(p) = self.prove_lt(i, t, tn, Some(&mut path))
+        {
+            return self.chain(idx, &path, n, out).map(|()| p);
         }
         // `idx < n -| c` iff `idx + c < n` (the limit of a vector access of `c + 1` lanes)
-        let (n, c) = self.sat_bound(n)?;
-        self.prove_lt(i, t.plus(c)?, self.term(n)?)
+        let (len, c) = self.sat_bound(n)?;
+        let p = self.prove_lt(i, t.plus(c)?, self.term(len)?, Some(&mut path))?;
+        self.chain(idx, &path, len, out)?;
+        let (Operand::Value(lim), Some((from, k))) = (n, self.written(len)) else { return None };
+        out.push(Edge { from, to: Node::Val(lim), w: c - k, src: Source::SubSat { inst: self.def(lim)? } });
+        Some(p)
+    }
+
+    /// The chain from `idx` to `n` through `x < y` read at `src`, for a check `(idx, n)` whose
+    /// index is the same as `x` and whose length is the same as `y`, or a constant like `y`.
+    fn less_edge(
+        &self,
+        check: (Operand, Operand),
+        less: (Operand, Operand),
+        src: Source,
+        out: &mut Vec<Edge>,
+    ) -> Option<()> {
+        let ((idx, n), (x, y)) = (check, less);
+        self.bridge(idx, x, out)?;
+        let ((from, kx), (to, ky)) = (self.written(x)?, self.written(y)?);
+        out.push(Edge { from, to, w: ky - kx - 1, src });
+        if self.konst(y).is_none() || self.konst(n).is_none() {
+            self.bridge(y, n, out)?;
+        }
+        Some(())
+    }
+
+    /// The chain from `idx` to `n` along the facts `path`: the index folded down to its term,
+    /// each fact between its terms, and the length's term unfolded up to the length.
+    fn chain(&self, idx: Operand, path: &[u32], n: Operand, out: &mut Vec<Edge>) -> Option<()> {
+        self.down(idx, out);
+        for &f in path {
+            self.fact_edges(f, out)?;
+        }
+        self.up(n, out);
+        Some(())
     }
 }
 
@@ -586,47 +859,6 @@ fn preds_of(b: &Body, dom: &Dominators) -> Vec<Vec<(u32, bool)>> {
         }
     }
     preds
-}
-
-/// Removes instructions `dead` (sorted, none with a result) from `b`, keeping block order.
-fn remove_insts(b: &mut Body, dead: &[u32]) {
-    let n = b.insts.len();
-    let mut keep = vec![true; n];
-    for &d in dead {
-        if let Some(k) = keep.get_mut(d as usize) {
-            *k = false;
-        }
-    }
-    let mut new_idx = vec![u32::MAX; n];
-    let mut next = 0u32;
-    for (i, k) in keep.iter().enumerate() {
-        if *k {
-            new_idx[i] = next;
-            next += 1;
-        }
-    }
-    let ins = std::mem::take(&mut b.insts);
-    let pick = |i: usize| keep[i];
-    b.insts.op = ins.op.into_iter().enumerate().filter(|(i, _)| pick(*i)).map(|x| x.1).collect();
-    b.insts.ty = ins.ty.into_iter().enumerate().filter(|(i, _)| pick(*i)).map(|x| x.1).collect();
-    b.insts.result = ins.result.into_iter().enumerate().filter(|(i, _)| pick(*i)).map(|x| x.1).collect();
-    b.insts.args = ins.args.into_iter().enumerate().filter(|(i, _)| pick(*i)).map(|x| x.1).collect();
-    b.insts.site = ins.site.into_iter().enumerate().filter(|(i, _)| pick(*i)).map(|x| x.1).collect();
-    for bd in &mut b.blocks {
-        let lo = bd.insts.start as usize;
-        let hi = lo + bd.insts.len as usize;
-        let kept = (lo..hi.min(n)).filter(|&i| keep[i]).count() as u32;
-        let start = (lo..n).map(|i| new_idx[i]).find(|&x| x != u32::MAX).unwrap_or(next);
-        bd.insts.start = start;
-        bd.insts.len = kept;
-    }
-    for v in &mut b.values {
-        if let ValueDef::Inst(i) = &mut v.def
-            && let Some(&ni) = new_idx.get(*i as usize)
-        {
-            *i = ni;
-        }
-    }
 }
 
 #[cfg(test)]
@@ -763,7 +995,7 @@ mod tests {
         b.ret(Some(x.into()));
         let _ = us;
         m.define(f, b.finish().unwrap());
-        let e = elide(&mut m);
+        let e = elide(&mut m).unwrap();
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].proof, Proof::ConstInRange { index: 1, len: 4 });
         let body = m.funcs[0].body.as_ref().unwrap();

@@ -1258,4 +1258,10 @@ impl Dominators {
     pub fn idom(&self, b: usize) -> Option<usize> {
         self.idom.get(b).copied().flatten()
     }
+
+    /// The position of reachable block `b` in a preorder walk of the dominator tree: a block
+    /// comes after every block that dominates it.
+    pub fn preorder(&self, b: usize) -> u32 {
+        self.tin.get(b).copied().unwrap_or(0)
+    }
 }

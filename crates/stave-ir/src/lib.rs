@@ -10,6 +10,9 @@
 //! - [`print_checked`]: the canonical checked-IR text of contracts/checked-ir.md.
 //! - [`simd`]: vector and mask ops ([`VecOp`]) and their lane semantics.
 //! - [`arith`]: scalar op and cast semantics; [`layout`]: memory layout of IR types.
+//! - [`bounds`]: the audit of element accesses and the pass that proves bounds checks removable.
+//! - [`witness`]: the proofs of that pass as data, and their independent checker, which alone
+//!   deletes a check.
 //! - [`link`]: text order and symbol names of a module's functions and statics (both backends).
 
 pub mod arith;
@@ -26,6 +29,7 @@ pub mod print_checked;
 pub mod simd;
 pub mod types;
 pub mod verify;
+pub mod witness;
 
 pub use build::{BuildError, FuncBuilder};
 pub use host::{BufferHost, Host, SysResult, SyscallAbi};

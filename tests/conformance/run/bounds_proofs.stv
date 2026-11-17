@@ -1,7 +1,7 @@
 //~ ARGS --release
 //~ STDOUT bounds_proofs.stdout
-// Release builds drop the bounds checks a proof covers (equal lengths, constant offsets from the
-// loop bound) and keep the others; every result is the same as in a debug build.
+// A build drops the bounds checks a proof covers (equal lengths, constant offsets from the loop
+// bound) and keeps the others, in release as in debug; every result is the same in both.
 import std.debug;
 import std.io;
 

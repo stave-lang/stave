@@ -82,21 +82,17 @@ fn run(m: &Module, f: FuncId, k: u64) -> Outcome {
 
 fn optimized(m: &Module) -> Module {
     let mut c = m.clone();
-    for f in &mut c.funcs {
-        if let Some(b) = &mut f.body {
-            stave_opt::before_elision(b);
-        }
-    }
+    bounds::elide(&mut c).unwrap_or_else(|r| panic!("witness refused: {r:?}"));
     verify_module(&c).unwrap();
-    bounds::elide(&mut c);
     stave_opt::slices::declare_elem_pointers(&mut c.types);
     let types = c.types.clone();
     for f in &mut c.funcs {
         if let Some(b) = &mut f.body {
-            stave_opt::after_elision(&types, b);
+            stave_opt::optimize(&types, b);
         }
     }
     verify_module(&c).unwrap_or_else(|e| panic!("optimized IR does not verify: {e:?}"));
+    bounds::audit(&c).unwrap_or_else(|u| panic!("unguarded after the release passes: {u:?}"));
     c
 }
 

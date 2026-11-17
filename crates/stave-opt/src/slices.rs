@@ -2,14 +2,12 @@
 //! is defined, instead of at every element access.
 //!
 //! - [`unify_parts`]: all `slice.len s` (or `slice.ptr s`) of one slice value `s` become a single
-//!   instruction right after the definition of `s`. A bounds check against the length and a loop
-//!   bound against the length then name the same operand (what stave-ir's `bounds::elide`
-//!   compares), and inside a loop the part is a value defined outside it, which the backends
-//!   keep in a register.
+//!   instruction right after the definition of `s`: inside a loop the part is a value defined
+//!   outside it, which the backends keep in a register.
 //! - [`split_elem_addrs`]: `addr.elem s i`, `vec.load s i`, and `vec.store s i v` on a slice
 //!   reference become `p = slice.ptr s` and the same op on the element pointer `p`, so the
-//!   address is such a part too. Run it after bounds-check elision: a check guards the access by
-//!   its slice operand.
+//!   address is such a part too. It runs after the removal of bounds checks, which reads an
+//!   access by its slice operand; the bounds audit no longer sees these accesses afterwards.
 //!
 //! - [`unify_chunk_bounds`]: all `n -| k` of one value `n` and one constant `k` (the bound of a
 //!   vector access of `k + 1` lanes, checked against the length `n`) become a single instruction
@@ -139,6 +137,10 @@ fn unify(b: &mut Body, mut parts: Vec<(u32, u32, i128, u32)>) -> bool {
 /// Rewrites every `addr.elem s i`, `vec.load s i`, and `vec.store s i v` whose `s` is a reference
 /// to a slice into `slice.ptr s` plus the same op on the element pointer. Returns whether the body
 /// changed.
+///
+/// A slice whose elements are arrays is left alone: `addr.elem` on a pointer to an array steps
+/// by the array's element, so on the element pointer `*mut [T; N]` it would address `T`s, not
+/// the slice's elements.
 pub fn split_elem_addrs(types: &TypeTable, b: &mut Body) -> bool {
     let mut edit = Edit::new(b);
     let mut rewire: Vec<(u32, Value)> = Vec::new();
@@ -159,6 +161,9 @@ pub fn split_elem_addrs(types: &TypeTable, b: &mut Body) -> bool {
             continue;
         };
         let Some(TypeKey::Slice { elem, .. }) = types.key(*inner) else { continue };
+        if matches!(types.key(*elem), Some(TypeKey::Array { .. } | TypeKey::Slice { .. })) {
+            continue;
+        }
         let Some(pt) = types.find(&TypeKey::RawPtr { mutable: true, inner: *elem }) else { continue };
         let p = edit.value(pt);
         edit.insert(

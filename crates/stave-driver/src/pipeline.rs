@@ -13,7 +13,8 @@
 //! `--timings` stages (schema names, `contracts/diagnostics.schema.json`), in execution order:
 //! `read` (manifests, file discovery, file reads), `lex`, `items`, `parse` (stave-sema's
 //! [`stave_sema::Timings::stages`]), `intern`, `resolve`, `typeck`, `borrowck` (items = bodies
-//! checked), then for builds `lower` (mono + lowering + IR verification, fused; no separate `mono` line),
+//! checked), then for builds `lower` (mono + lowering + IR verification + the removal of proven
+//! bounds checks with its witness check, fused; no separate `mono` line),
 //! `codegen` (per function, parallel), `link` (layout, relocations, DWARF line tables, ELF; no
 //! separate `dwarf` line).
 //!
@@ -281,8 +282,12 @@ pub struct Output {
     /// The stages that ran, in execution order.
     pub timings: Vec<StageTiming>,
     /// The checked IR (builds, and checks with [`Options::lower`]; only without error
-    /// diagnostics).
+    /// diagnostics): the lowered program after the removal of the bounds checks that have a
+    /// checked witness, the same in every build mode.
     pub module: Option<Module>,
+    /// The bounds checks [`Output::module`] no longer has, per function: the witness the
+    /// checker accepted and the rule behind each row.
+    pub removed_checks: Vec<stave_ir::bounds::Proved>,
     /// The checked-IR function of the root package's `main`, if any.
     pub main: Option<FuncId>,
     /// The executable ([`Goal::Build`] without errors).
@@ -412,6 +417,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             diagnostics,
             timings,
             module: None,
+            removed_checks: Vec::new(),
             main: None,
             image: None,
             failure: None,
@@ -431,6 +437,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             diagnostics,
             timings,
             module: None,
+            removed_checks: Vec::new(),
             main: None,
             image: None,
             failure: Some(Failure::Unsupported { stage: Stage::Typeck, message: what }),
@@ -483,6 +490,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
         diagnostics,
         timings,
         module: None,
+        removed_checks: Vec::new(),
         main: None,
         image: None,
         failure,
@@ -495,14 +503,17 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
         return out;
     }
 
-    // ---- mono + lower + verify.
+    // ---- mono + lower + verify + removal of the bounds checks with a checked witness.
     let t0 = Instant::now();
     let lowered = build::lower(&out.program, &tc, opts.mode());
-    let funcs = lowered.as_ref().map_or(0, |m| m.funcs.iter().filter(|f| f.body.is_some()).count());
+    let funcs = lowered.as_ref().map_or(0, |l| l.module.funcs.iter().filter(|f| f.body.is_some()).count());
     out.timings.push(timing(Stage::Lower, ms(t0.elapsed()), funcs as u64));
     out.typeck = Some(tc);
     let module = match lowered {
-        Ok(m) => m,
+        Ok(l) => {
+            out.removed_checks = l.removed;
+            l.module
+        }
         Err(f) => {
             out.failure = Some(f);
             return out;

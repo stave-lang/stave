@@ -6,20 +6,26 @@
 //!   [`LowerErrorKind::Unsupported`] (a construct stage0 does not lower yet) are
 //!   [`Failure::Unsupported`]; any other lowering or verifier error is a compiler bug
 //!   ([`Failure::Internal`]).
-//! - [`lower`] also runs the bounds audit ([`stave_ir::bounds::audit`]): an element access without a
-//!   check or proof is a compiler bug.
-//! - [`codegen_link`]: release builds first run the IR passes of stave-opt around the elision of
-//!   the bounds checks that have a recorded proof ([`stave_ir::bounds::elide`], records in
-//!   [`Built::elided`]); then per-function code generation in parallel (rayon on the caller's pool for
-//!   AArch64; stave-codegen-x64 uses its own scoped threads), then the link. Debug builds use
-//!   stave-obj's debug layout (padded slots, jump table), release builds the packed one. Backend
-//!   errors on valid IR (vectors, f16) are [`Failure::Unsupported`].
+//! - [`lower`] then decides which bounds checks the program keeps, the same way in every build
+//!   mode: per function, the bounds audit (an element access without a check or proof is a
+//!   compiler bug) and the proofs of removable checks ([`stave_ir::bounds::analyze_func`]); the
+//!   witness checker on every proof ([`stave_ir::witness::check`]; a refused witness is a
+//!   compiler bug); then the removal of the accepted checks. The module it returns is the
+//!   checked IR: what the `ir` dump prints, the interpreter runs, and both code generators get.
+//! - [`codegen_link`]: release builds first run the IR passes of stave-opt, then the IR verifier
+//!   and the bounds audit again on their result (a failure is a compiler bug); then per-function
+//!   code generation in parallel (rayon on the caller's pool for AArch64; stave-codegen-x64 uses
+//!   its own scoped threads), then the link. Debug builds use stave-obj's debug layout (padded
+//!   slots, jump table), release builds the packed one. Backend errors on valid IR (vectors,
+//!   f16) are [`Failure::Unsupported`].
 //! - [`main_path`]: the checked-IR path of the root package's `main`.
 
 use std::fmt;
 use std::time::Instant;
 
 use rayon::prelude::*;
+use stave_ir::bounds::{Analysis, Proved, Unguarded, analyze_func};
+use stave_ir::witness::check::{Checked, Rejected, check_func};
 use stave_ir::{FuncId, Module};
 use stave_obj::{FuncCode, ImageBuilder, Machine, ObjectImage};
 use stave_sema::{DeclKind, LowerErrorKind, Mode, Program, Typeck};
@@ -106,13 +112,22 @@ pub fn no_main(prog: &Program) -> Option<stave_diag::Diagnostic> {
     stave_diag::Diagnostic::new("E0108", None, &[], Some(stave_diag::Span::new(file, 0, 0)), &[]).ok()
 }
 
-/// Lowers (mono + lower) and verifies. The program must have no error diagnostics.
-pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Module, Failure> {
+/// The checked IR of a program and the proofs of the bounds checks it no longer has.
+pub struct Lowered {
+    pub module: Module,
+    /// Per function that lost a check: the witness the checker accepted and the rule behind
+    /// each row (function order; instruction indices are those before the removal).
+    pub removed: Vec<Proved>,
+}
+
+/// Lowers (mono + lower), verifies, and removes the bounds checks that have a checked witness.
+/// The program must have no error diagnostics.
+pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Lowered, Failure> {
     let (lowered, tm) = stave_sema::lower_timed(prog, tc, mode);
     prof::part(".rounds", tm.rounds);
     prof::part(".assemble", tm.assemble);
     prof::mark("lower");
-    let m = lowered.map_err(|es| {
+    let mut m = lowered.map_err(|es| {
         let message = listed(&es);
         if es.iter().all(|e| e.kind == LowerErrorKind::Unsupported) {
             Failure::Unsupported { stage: Stage::Lower, message }
@@ -120,7 +135,15 @@ pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Module, Failure>
             Failure::Internal { stage: Stage::Lower, message }
         }
     })?;
-    verify(&m).map_err(|es| {
+    verified(&m, Stage::Lower)?;
+    prof::mark("verify");
+    let removed = remove_proven_checks(&mut m)?;
+    Ok(Lowered { module: m, removed })
+}
+
+/// The IR verifier on `m`; an error is a compiler bug of `stage`.
+fn verified(m: &Module, stage: Stage) -> Result<(), Failure> {
+    verify(m).map_err(|es| {
         let named: Vec<String> = es
             .iter()
             .map(|e| {
@@ -128,19 +151,68 @@ pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Module, Failure>
                 format!("{f}{e}")
             })
             .collect();
-        Failure::Internal { stage: Stage::Lower, message: format!("IR verifier: {}", listed(&named)) }
-    })?;
-    prof::mark("verify");
-    // Every element access keeps its bounds check or a proof.
-    let bad = unguarded(&m);
-    if !bad.is_empty() {
-        return Err(Failure::Internal {
-            stage: Stage::Lower,
-            message: format!("bounds audit: {}", listed(&bad)),
-        });
+        Failure::Internal { stage, message: format!("IR verifier: {}", listed(&named)) }
+    })
+}
+
+/// The bounds audit on `m`; an unguarded element access is a compiler bug of `stage`.
+fn audited(m: &Module, stage: Stage) -> Result<(), Failure> {
+    let per_fn: Vec<Vec<Unguarded>> = (0..m.funcs.len() as u32)
+        .into_par_iter()
+        .map(|f| stave_ir::bounds::audit_func(m, FuncId(f)).1)
+        .collect();
+    let bad: Vec<Unguarded> = per_fn.into_iter().flatten().collect();
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(Failure::Internal { stage, message: format!("bounds audit: {}", listed(&bad)) })
     }
-    prof::mark("bounds-audit");
-    Ok(m)
+}
+
+/// The one step that decides which bounds checks a build keeps; it does not look at the build
+/// mode. Per function, in parallel: the audit that every element access has its check or a
+/// proof, and the witnesses of the checks that are provably redundant. Then the witness checker,
+/// which shares no code with the proof search, validates every witness, and only the checks it
+/// accepted are deleted. Returns the accepted proofs.
+fn remove_proven_checks(m: &mut Module) -> Result<Vec<Proved>, Failure> {
+    let internal = |message: String| Failure::Internal { stage: Stage::Lower, message };
+    let found: Vec<Analysis> =
+        (0..m.funcs.len() as u32).into_par_iter().map(|f| analyze_func(m, FuncId(f))).collect();
+    let mut proved = Vec::new();
+    let mut bad = Vec::new();
+    for a in found {
+        bad.extend(a.unguarded);
+        proved.extend(a.proved);
+    }
+    if !bad.is_empty() {
+        return Err(internal(format!("bounds audit: {}", listed(&bad))));
+    }
+    prof::mark("bounds-analyze");
+    remove_checked(m, &proved)?;
+    Ok(proved)
+}
+
+/// Has the witness checker validate every proof (functions in parallel), then deletes the
+/// checks it accepted. A witness it refuses is a compiler bug, and then nothing is removed.
+fn remove_checked(m: &mut Module, proved: &[Proved]) -> Result<(), Failure> {
+    let results: Vec<Result<Checked, Rejected>> =
+        proved.par_iter().map(|p| check_func(m, &p.witness)).collect();
+    let mut checked = Vec::with_capacity(results.len());
+    let mut refused = Vec::new();
+    for r in results {
+        match r {
+            Ok(c) => checked.push(c),
+            Err(e) => refused.push(e),
+        }
+    }
+    if !refused.is_empty() {
+        let message = format!("bounds witness: {}", listed(&refused));
+        return Err(Failure::Internal { stage: Stage::Lower, message });
+    }
+    prof::mark("witness-check");
+    stave_ir::witness::check::remove(m, &checked);
+    prof::mark("bounds-remove");
+    Ok(())
 }
 
 /// [`stave_ir::verify_module`] with the functions verified in parallel (same errors, same order).
@@ -154,16 +226,6 @@ fn verify(m: &Module) -> Result<(), Vec<stave_ir::VerifyError>> {
     if errs.is_empty() { Ok(()) } else { Err(errs) }
 }
 
-/// The unguarded element accesses of [`stave_ir::bounds::audit`], the functions audited in
-/// parallel (same list, same order).
-fn unguarded(m: &Module) -> Vec<stave_ir::bounds::Unguarded> {
-    let per_fn: Vec<Vec<stave_ir::bounds::Unguarded>> = (0..m.funcs.len() as u32)
-        .into_par_iter()
-        .map(|f| stave_ir::bounds::audit_func(m, FuncId(f)).1)
-        .collect();
-    per_fn.into_iter().flatten().collect()
-}
-
 /// A linked executable and the back-end timings.
 pub struct Built {
     pub image: ObjectImage,
@@ -171,8 +233,6 @@ pub struct Built {
     pub link_ms: f64,
     /// Functions with a body (compiled).
     pub funcs: u64,
-    /// Bounds checks removed with their proofs (release builds only; stave_ir::bounds).
-    pub elided: Vec<stave_ir::bounds::Elided>,
 }
 
 fn ms(t: Instant) -> f64 {
@@ -204,31 +264,29 @@ pub fn codegen_link(
         });
     }
     let funcs = m.funcs.iter().filter(|f| f.body.is_some()).count() as u64;
-    // Release: drop the bounds checks that have a recorded proof (the checked IR keeps them).
-    let mut elided = Vec::new();
     let owned;
     let m = if release {
         let mut c = m.clone();
-        c.funcs.par_iter_mut().filter_map(|f| f.body.as_mut()).for_each(stave_opt::before_elision);
-        elided = stave_ir::bounds::elide(&mut c);
         stave_opt::slices::declare_elem_pointers(&mut c.types);
         let types = &c.types;
-        c.funcs
-            .par_iter_mut()
-            .filter_map(|f| f.body.as_mut())
-            .for_each(|b| stave_opt::after_elision(types, b));
+        c.funcs.par_iter_mut().filter_map(|f| f.body.as_mut()).for_each(|b| stave_opt::optimize(types, b));
+        prof::mark("opt");
+        // The optimizer's output is checked like the lowering's: it must be valid IR in which
+        // every element access still has its check or a proof.
+        verified(&c, Stage::Opt)?;
+        prof::mark("opt-verify");
+        audited(&c, Stage::Opt)?;
+        prof::mark("opt-audit");
         owned = c;
         &owned
     } else {
         m
     };
-    let mut built = match triple.arch() {
+    match triple.arch() {
         Arch::X86_64 => x64(m, main, triple.baseline(), release, threads, funcs),
         Arch::Aarch64 => a64(m, main, release, funcs),
         Arch::Gpu => Err(Failure::Target(triple)),
-    }?;
-    built.elided = elided;
-    Ok(built)
+    }
 }
 
 /// Whether the backend of `triple` generates code for vector values and ops.
@@ -256,7 +314,7 @@ fn x64(
     let o = stave_codegen_x64::Options {
         image: image.clone(),
         main: Some(main),
-        // The driver verified the module after lowering.
+        // The driver verified the module after lowering and after the release passes.
         verify: false,
         threads: threads.unwrap_or(0),
         release,
@@ -271,7 +329,7 @@ fn x64(
     let t1 = Instant::now();
     let img = stave_codegen_x64::link(b, &e).map_err(|e| classify(Stage::Link, e))?;
     prof::mark("link");
-    Ok(Built { image: img, codegen_ms, link_ms: ms(t1), funcs, elided: Vec::new() })
+    Ok(Built { image: img, codegen_ms, link_ms: ms(t1), funcs })
 }
 
 fn a64(m: &Module, main: FuncId, release: bool, funcs: u64) -> Result<Built, Failure> {
@@ -302,12 +360,63 @@ fn a64(m: &Module, main: FuncId, release: bool, funcs: u64) -> Result<Built, Fai
     let t1 = Instant::now();
     let img = b.link().map_err(|e| Failure::Internal { stage: Stage::Link, message: e.to_string() })?;
     prof::mark("link");
-    Ok(Built { image: img, codegen_ms, link_ms: ms(t1), funcs, elided: Vec::new() })
+    Ok(Built { image: img, codegen_ms, link_ms: ms(t1), funcs })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `app.at(a: &[u32; 4], i: usize)`: `check.bounds 2 4` (provable), then `check.bounds i 4`
+    /// (not provable), each before its `addr.elem`.
+    fn two_checks() -> (Module, FuncId) {
+        use stave_ir::{FuncBuilder, InstanceId, Op};
+        let mut m = Module::new();
+        let (us, u32t) = (m.types.usize(), m.types.u32());
+        let arr = m.types.array(u32t, 4);
+        let (pa, pe) = (m.types.ref_(false, arr), m.types.ref_(false, u32t));
+        let f = m.declare(InstanceId(vec![0]), "app.at", vec![pa, us], Some(u32t));
+        let mut b = FuncBuilder::new(&[pa, us]);
+        let (a, i) = (b.param(0).unwrap(), b.param(1).unwrap());
+        let (two, four) = (b.int(2), b.int(4));
+        b.bounds_check(two, four);
+        let p = b.op(Op::ElemAddr, pe, &[a.into(), two]);
+        let x = b.load(u32t, p);
+        b.bounds_check(i, four);
+        let q = b.op(Op::ElemAddr, pe, &[a.into(), i.into()]);
+        let y = b.load(u32t, q);
+        let s = b.binary(Op::AddWrap, u32t, x, y);
+        b.ret(Some(s.into()));
+        m.define(f, b.finish().unwrap());
+        (m, f)
+    }
+
+    fn checks(m: &Module, f: FuncId) -> usize {
+        let b = m.func(f).unwrap().body.as_ref().unwrap();
+        b.insts.op.iter().filter(|op| **op == stave_ir::Op::BoundsCheck).count()
+    }
+
+    /// The step removes the check that has a proof and keeps the other. A proof the witness
+    /// checker refuses stops the build as a compiler bug, and no check is removed.
+    #[test]
+    fn a_refused_witness_is_an_internal_error() {
+        let (mut m, f) = two_checks();
+        let proved = remove_proven_checks(&mut m).unwrap();
+        assert_eq!((proved.len(), proved[0].proofs.len(), checks(&m, f)), (1, 1, 1));
+
+        let (mut m, f) = two_checks();
+        let mut forged = stave_ir::bounds::prove_func(&m, f).unwrap();
+        // the row of the provable check, pointed at the other one
+        let ops = &m.func(f).unwrap().body.as_ref().unwrap().insts.op;
+        let second = ops.iter().rposition(|op| *op == stave_ir::Op::BoundsCheck).unwrap();
+        forged.witness.removed[0].inst = second as u32;
+        let e = remove_checked(&mut m, &[forged]).unwrap_err();
+        assert_eq!(e.stage(), Stage::Lower);
+        assert!(matches!(e, Failure::Internal { .. }), "{e:?}");
+        let text = e.to_string();
+        assert!(text.starts_with("lower failed: bounds witness: @0 app.at: inst "), "{text}");
+        assert_eq!(checks(&m, f), 2);
+    }
 
     #[test]
     fn listed_messages() {
