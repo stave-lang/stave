@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use stave_ir::{FuncBuilder, Op, Operand, TypeId, TypeKey, VecOp};
+use stave_ir::{CastKind, FuncBuilder, Op, Operand, TypeId, TypeKey, VecOp};
 use stave_target::lowering::{Class, Tier};
 
 use super::super::features::{Inst, disasm};
@@ -76,6 +76,19 @@ fn probe(sp: &mut Sp, op: VecOp, key: &str, form: &str) -> Option<Probe> {
         }
         return Some(p);
     }
+    if let Some((f, t)) = key.split_once('>') {
+        // a cast: the wider side fills 512 bits
+        let (from, to) = (lane_of(f)?, lane_of(t)?);
+        let n = 512 / from.bits().max(to.bits());
+        let src = sp.vt(sh(from, n));
+        let ret = match op {
+            Cast(CastKind::Try) => sp.res_t(Res::Opt(sh(to, n))),
+            Cast(_) => sp.vt(sh(to, n)),
+            _ => return None,
+        };
+        (p.params, p.ret) = (vec![src], Some(ret));
+        return Some(p);
+    }
     let lane = lane_of(key)?;
     let s = sh(lane, 512 / lane.bits());
     let v = sp.vt(s);
@@ -128,6 +141,11 @@ fn probe(sp: &mut Sp, op: VecOp, key: &str, form: &str) -> Option<Probe> {
             p.checks = &["kmov", "test", "bsr", "sub", "cmp"];
         }
         Select => (p.params, p.ret, p.mask_params) = (vec![m, v, v], Some(v), 1),
+        WidenLo | WidenHi => (p.params, p.ret) = (vec![v], Some(sp.vt(sh(lane.wide()?, s.n / 2)))),
+        NarrowWrap | NarrowSat => {
+            let half = if lane.signed() { Lane::sint(lane.bits() / 2) } else { Lane::uint(lane.bits() / 2) };
+            (p.params, p.ret) = (vec![v, v], Some(sp.vt(sh(half, s.n * 2))));
+        }
         _ => return None,
     }
     Some(p)
@@ -291,7 +309,7 @@ const LACKING: [(&str, &str, &str); 4] = [
 ];
 
 /// Rows of the v4 column backed by K mode.
-const BACKED: usize = 166;
+const BACKED: usize = 347;
 
 #[test]
 fn v4_recipes_are_the_emitted_code() {
@@ -310,11 +328,14 @@ fn v4_recipes_are_the_emitted_code() {
         }
         let lacking = LACKING.contains(&(e.op, e.ty, e.form));
         let mut ok = true;
+        // a row of f16 / bf16 lanes alone is backed by no code
+        let mut checked = false;
         for (key, recipe) in e.keys.iter().zip(cell.recipes) {
             // no backend holds vectors of these lanes
-            if matches!(*key, "f16" | "bf16") {
+            if key.split('>').any(|l| matches!(l, "f16" | "bf16")) {
                 continue;
             }
+            checked = true;
             let mut sp = Sp::new();
             let code = probe(&mut sp, op, key, e.form).and_then(|p| code_of(sp, &p).map(|c| (p, c)));
             let Some((p, code)) = code else {
@@ -338,7 +359,7 @@ fn v4_recipes_are_the_emitted_code() {
             }
         }
         assert!(!(ok && lacking), "{} {} {}: listed as lacking, but backed", e.op, e.ty, e.form);
-        if ok {
+        if ok && checked {
             backed.push(format!("{} {} {}", e.op, e.ty, e.form));
         }
     }

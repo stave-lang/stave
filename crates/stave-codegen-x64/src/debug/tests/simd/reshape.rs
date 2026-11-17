@@ -93,10 +93,11 @@ fn cast_inputs(from: Lane, to: Lane) -> Vec<u64> {
     vals
 }
 
-/// The lane counts a cast between `a` and `b` runs at: 2, the widest 128-bit one, the 256-bit one.
+/// The lane counts a cast between `a` and `b` runs at: 2, the widest 128-bit one, the 256-bit
+/// one, the 512-bit one.
 fn cast_lanes(a: Lane, b: Lane) -> Vec<u32> {
     let w = a.bits().max(b.bits());
-    let mut v = vec![2, 128 / w, 256 / w];
+    let mut v = vec![2, 128 / w, 256 / w, 512 / w];
     v.dedup();
     v
 }

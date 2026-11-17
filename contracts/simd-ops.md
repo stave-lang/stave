@@ -83,10 +83,10 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
   value in a register.
 - Backed by code on v4: float and integer arithmetic (not `mul.sat`, `checked_mul`,
   `div_const`, `popcount`, `clz`), logic, shifts (not 8-bit lanes by a vector), min / max,
-  compares, `fma`, reductions, `splat`, `bitcast`, `split`, `join`, loads and stores (plain,
-  aligned, masked), and every mask op. The other ops (scans, casts, widen / narrow, permute,
-  lookup, compress / expand, gather / scatter, stream stores) are a code generation error in
-  a K-mode function.
+  compares, `fma`, reductions, `splat`, `bitcast`, `split`, `join`, casts, widen / narrow,
+  loads and stores (plain, aligned, masked), and every mask op. The other ops (scans,
+  permute, lookup, compress / expand, gather / scatter, stream stores) are a code generation
+  error in a K-mode function.
 - Test leg `v4`: binaries with AVX-512 code run natively on a CPU with the v4 set, else under
   Intel SDE when the environment variable `STAVE_SDE` names its `sde64` (`$STAVE_SDE -icx --
   program`), else the leg is skipped (a failure when `STAVE_REQUIRE_LEGS` lists `v4`).

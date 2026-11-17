@@ -950,7 +950,7 @@ fn modes(bits: u32, fma: bool, mask_bits: bool, kok: bool) -> Vec<Mode> {
 /// Ops without a K-mode lowering: every case of them is unsupported in a function compiled for
 /// the AVX-512 set. (`vec.shl`, `vec.shl.wrap` and `vec.shr` lack only the form on 8-bit lanes
 /// with a vector amount.)
-pub const K_UNSUPPORTED: [VecOp; 23] = [
+pub const K_UNSUPPORTED: [VecOp; 14] = [
     VecOp::MulSat,
     VecOp::CheckedMul,
     VecOp::DivConst,
@@ -958,15 +958,6 @@ pub const K_UNSUPPORTED: [VecOp; 23] = [
     VecOp::Clz,
     VecOp::ScanAdd,
     VecOp::ScanAddWrap,
-    VecOp::Cast(CastKind::Exact),
-    VecOp::Cast(CastKind::Wrap),
-    VecOp::Cast(CastKind::Sat),
-    VecOp::Cast(CastKind::Round),
-    VecOp::Cast(CastKind::Try),
-    VecOp::WidenLo,
-    VecOp::WidenHi,
-    VecOp::NarrowWrap,
-    VecOp::NarrowSat,
     VecOp::Permute,
     VecOp::Lookup,
     VecOp::Compress,
