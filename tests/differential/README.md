@@ -12,11 +12,13 @@ differential` (part of `cargo test --workspace`); Linux, x86-64 host for the nat
   results, ` =`, then the reference results.
 - `kernels/<k>_v3.stv`: the same kernels with 256-bit vectors, x86_64-linux-v3 only. They call
   the references of `<k>.stv`, which the harness adds to the package as module `base`.
-- `kernels/<k>_disp.stv`: `dispatch fn`s whose `needs(avx2)` arms are the 256-bit kernels and
-  whose `_` arms are the 128-bit kernels of `base`, built for every target; the x86_64-linux
-  builds run natively (the 256-bit arms on an AVX2 host) and under `qemu-x86_64 -cpu Nehalem`
-  (the `_` arms). Only kernels whose results do not depend on the lane count qualify
-  (`bytesearch_disp`).
+- `kernels/<k>_disp.stv`: `dispatch fn`s with four arms: `needs(v4)` (512-bit kernels),
+  `needs(avx2)` (256-bit kernels), `needs(sve)` (the 128-bit kernels again: the AArch64 backend
+  emits the same code under `needs(sve)`, so these arms only give an AArch64 binary a pick at run
+  time) and `_` (the 128-bit kernels of `base`); built for every target. Only kernels whose
+  results do not depend on the lane count qualify (`bytesearch_disp`, the integer sums of
+  `sum_disp`; float sums do: lane tree, +0.0 added per inactive tail lane), so every arm must
+  print the same. See "Dispatch runs".
 - `diff.stv`: module `diff` of every kernel package: reads `cases.bin`, places each input array
   a given number of elements past a 64-byte boundary with guard elements around it, and prints
   result tokens (`u` / `i` integers, `f` / `d` float bits, `h` array hashes; with any
@@ -31,7 +33,8 @@ differential` (part of `cargo test --workspace`); Linux, x86-64 host for the nat
 | minmax | f32 `min max min_num max_x86`, f64, i32, u8 | float NaN and signed-zero rules, `reduce_min/max`, `select` |
 | filter | elements above a threshold, f32 / i32 / u8 | `compress`, `store_masked`, `to_bits`, `popcount` |
 | bytesearch | first and last index of a byte, count | `to_bits`, scalar `ctz` / `clz`, backward loads |
-| bytesearch_disp | bytesearch through `dispatch fn`s: 256-bit `needs(avx2)` arms, 128-bit `_` arms | dispatch, per-function feature sets |
+| bytesearch_disp | bytesearch through `dispatch fn`s: 512-bit `needs(v4)`, 256-bit `needs(avx2)`, `needs(sve)` and 128-bit `_` arms | dispatch, per-function feature sets, `mask8x64` bits |
+| sum_disp | wrapping i32 and widened u8 sums through `dispatch fn`s with the arms of bytesearch_disp | dispatch, 512-bit `widen_lo/hi`, `reduce_add_wrap` |
 | prefix | in-place inclusive prefix sums, f32 / f64 / i32 | `scan_add`, `scan_add_wrap`, `permute`, `&mut` chunk binding |
 | histogram | 256-bin byte histogram | `gather`, `scatter` (inside `emulate`), lane-private bins |
 | matmul4 | 4x4 matrix times 4-element points | `permute` broadcasts, `join` (v3), `select` |
@@ -58,7 +61,8 @@ x86_64-linux-v3 and aarch64-linux; the `_v3` programs for x86_64-linux-v3 only):
 - on every line the vector tokens equal the reference tokens (two NaNs are equal whatever their
   bits; NaN payloads are unspecified);
 - every native line equals the interpreter's;
-- for `utf8` and `bytesearch`, the reference tokens equal what the harness computes in Rust;
+- for `utf8`, `bytesearch` and `sum_disp`, the reference tokens equal what the harness computes
+  in Rust;
 - outputs keep their guard elements (a flag token).
 
 A failing line is shown with the case's head and inputs, and with the program rerun on that case
@@ -67,6 +71,18 @@ here is reported and skipped. A build that stops with "not implemented yet" fail
 that are known to fail go in `KNOWN` in `harness.rs`, with the reason; they are reported, not
 failed, and an entry that starts passing fails the test until it is removed.
 
-Default run: about 4,300 cases over the 19 programs, 99 legs, about 18,000 checked lines, about
-15 s on an 8-core x86-64 host. `STAVE_DIFF_FULL=1 STAVE_DIFF_RANDOM=256`: about 377,000 checked
-lines, about 5 minutes.
+Default run: about 5,700 cases over the 22 programs, 154 legs, about 46,000 checked lines, about
+25 s on an 8-core x86-64 host with Intel SDE. `STAVE_DIFF_FULL=1 STAVE_DIFF_RANDOM=256` checks
+several hundred thousand lines in several minutes.
+
+## Dispatch runs
+
+A `_disp` kernel's binary for a target runs several times, with `STAVE_DISPATCH_TRACE=1`: every
+trace line of its dispatch fns must name the arm the run's CPU allows, and the output must equal
+the interpreter's (the `_` arms) and the references. The same x86_64-linux binary runs natively
+(the widest arm of the host CPU), natively with `STAVE_CPU=-avx2` (`_`), on the v4 leg (natively
+on an AVX-512 CPU or under Intel SDE: `v4`), there with `STAVE_CPU` removing the five AVX-512
+names or only `avx512cd` (`avx2`), and under `qemu-x86_64 -cpu Nehalem` (`_`; skipped without
+qemu-x86_64). The x86_64-linux-v3 binary picks `avx2` natively and `v4` on the v4 leg. The
+aarch64-linux binary (the x86-64 arms are left out of it) picks `sve` under
+`qemu-aarch64 -cpu max` and `_` there with `STAVE_CPU=-sve` and under `-cpu cortex-a76`.

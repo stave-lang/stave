@@ -33,7 +33,7 @@ fn sum_tree_f64x2(xs: &[f64]) -> f64 {
     return acc.reduce_add();
 }
 
-fn sum_wrap_i32x4(xs: &[i32]) -> i32 {
+pub fn sum_wrap_i32x4(xs: &[i32]) -> i32 {
     let mut acc = i32x4.splat(0);
     let mut rest: i32 = 0;
     for v: i32x4 in xs {
@@ -45,7 +45,7 @@ fn sum_wrap_i32x4(xs: &[i32]) -> i32 {
 }
 
 // Bytes widened to u32 lanes before they are added.
-fn sum_u8x16(xs: &[u8]) -> u32 {
+pub fn sum_u8x16(xs: &[u8]) -> u32 {
     let mut acc = u32x4.splat(0);
     for v: u8x16 in xs {
         acc = acc +% widen_sum(v);

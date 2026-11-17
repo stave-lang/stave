@@ -1,0 +1,118 @@
+// The integer sums of sum.stv through dispatch fns: `needs(v4)` arms with 512-bit vectors,
+// `needs(avx2)` arms with 256-bit vectors, `needs(sve)` arms that run the 128-bit kernels (the
+// AArch64 backend emits the same code for them), and the 128-bit kernels of sum.stv as `_` arms.
+// Wrapping integer addition does not depend on the order, so every arm prints the same; the float
+// sums of sum.stv do (lane tree, and +0.0 added for each inactive lane of a masked tail), so they
+// are not here.
+import base;
+import diff;
+
+fn sum_i32_v4(xs: &[i32]) -> i32 needs(v4) {
+    let mut acc = i32x16.splat(0);
+    let mut rest: i32 = 0;
+    for v: i32x16 in xs {
+        acc = acc +% v;
+    } tail scalar (x) {
+        rest = rest +% x;
+    }
+    return acc.reduce_add_wrap() +% rest;
+}
+
+fn sum_i32_v3(xs: &[i32]) -> i32 needs(avx2) {
+    let mut acc = i32x8.splat(0);
+    let mut rest: i32 = 0;
+    for v: i32x8 in xs {
+        acc = acc +% v;
+    } tail scalar (x) {
+        rest = rest +% x;
+    }
+    return acc.reduce_add_wrap() +% rest;
+}
+
+fn sum_i32_sve(xs: &[i32]) -> i32 needs(sve) {
+    return base.sum_wrap_i32x4(xs);
+}
+
+// Bytes widened to u32 lanes before they are added.
+fn sum_u8_v4(xs: &[u8]) -> u32 needs(v4) {
+    let mut acc = u32x16.splat(0);
+    for v: u8x64 in xs {
+        acc = acc +% widen_sum_v4(v);
+    } tail masked (v, m) {
+        acc = acc +% widen_sum_v4(v);
+    }
+    return acc.reduce_add_wrap();
+}
+
+fn widen_sum_v4(v: u8x64) -> u32x16 needs(v4) {
+    let lo: u16x32 = v.widen_lo();
+    let hi: u16x32 = v.widen_hi();
+    let a: u32x16 = lo.widen_lo();
+    let b: u32x16 = lo.widen_hi();
+    let c: u32x16 = hi.widen_lo();
+    let d: u32x16 = hi.widen_hi();
+    return (a +% b) +% (c +% d);
+}
+
+fn sum_u8_v3(xs: &[u8]) -> u32 needs(avx2) {
+    let mut acc = u32x8.splat(0);
+    for v: u8x32 in xs {
+        acc = acc +% widen_sum_v3(v);
+    } tail masked (v, m) {
+        acc = acc +% widen_sum_v3(v);
+    }
+    return acc.reduce_add_wrap();
+}
+
+fn widen_sum_v3(v: u8x32) -> u32x8 needs(avx2) {
+    let lo: u16x16 = v.widen_lo();
+    let hi: u16x16 = v.widen_hi();
+    let a: u32x8 = lo.widen_lo();
+    let b: u32x8 = lo.widen_hi();
+    let c: u32x8 = hi.widen_lo();
+    let d: u32x8 = hi.widen_hi();
+    return (a +% b) +% (c +% d);
+}
+
+fn sum_u8_sve(xs: &[u8]) -> u32 needs(sve) {
+    return base.sum_u8x16(xs);
+}
+
+dispatch fn sum_i32(xs: &[i32]) -> i32 {
+    v4 => sum_i32_v4,
+    avx2 => sum_i32_v3,
+    sve => sum_i32_sve,
+    _ => base.sum_wrap_i32x4,
+}
+
+dispatch fn sum_u8(xs: &[u8]) -> u32 {
+    v4 => sum_u8_v4,
+    avx2 => sum_u8_v3,
+    sve => sum_u8_sve,
+    _ => base.sum_u8x16,
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        if h.kind == 0 {
+            let b = c.i32s(h);
+            let xs = b.get();
+            o.i(sum_i32(xs) as i64);
+            o.sep();
+            o.i(base.sum_wrap_i32_ref(xs) as i64);
+        } else {
+            let b = c.u8s(h);
+            let xs = b.get();
+            o.u(sum_u8(xs) as u64);
+            o.sep();
+            o.u(base.sum_u8_ref(xs) as u64);
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}
