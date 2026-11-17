@@ -1130,3 +1130,43 @@ fn v4_binary_on_plain_cpu() {
         assert!(ok, "release {release}: {}", got.show());
     }
 }
+
+/// The ops whose 512-bit forms take multi-instruction AVX-512 sequences (scans, streaming
+/// stores, gathers and scatters, division by a constant, saturating and checked multiplies,
+/// bit counts, permutes, lookups, compress / expand, 8-bit shifts by a vector), in a program
+/// built for `x86_64-linux-v4`, debug and release: each family's vector results against the
+/// program's own scalar references on edge values (every line `bad 0`), and the whole output
+/// against the IR interpreter's.
+#[test]
+fn k_ops_match_scalar() {
+    let tmp = TempDir::new("v4-ops").unwrap();
+    let src = tmp.path().join("ops.stv");
+    std::fs::write(&src, include_str!("v4_run/ops.stv")).unwrap();
+    let v4 = triple("x86_64-linux-v4");
+    let mut o = Options::new(Goal::Check).threads(Some(4));
+    o.lower = true;
+    o.target = Some(v4);
+    let checked = pipeline::run(&src, &Library::in_dir(&repo()), &o).unwrap();
+    assert!(!checked.has_errors(), "{:?}", checked.diagnostics);
+    let m = checked.module.as_ref().unwrap();
+    let r = interp::run(m, "main.main", v4, &[], &[], Limits::default()).unwrap().ran;
+    let want = String::from_utf8_lossy(&r.stdout).into_owned();
+    assert_eq!(r.exit, 0, "interpreter: {want}");
+    let families: Vec<&str> = want.lines().filter(|l| l.contains(" bad ")).collect();
+    assert_eq!(families.len(), 12, "interpreter:\n{want}");
+    assert!(families.iter().all(|l| l.contains(" bad 0 ")), "interpreter:\n{want}");
+    let how = v4_leg("the x86_64-linux-v4 runs of the K-mode ops");
+    let mut failures = Vec::new();
+    for release in [false, true] {
+        let mode = if release { "release" } else { "debug" };
+        let out = build(&src, v4, release);
+        let Some(how) = &how else { continue };
+        let bin = tmp.path().join(format!("ops-{mode}"));
+        out.image.as_ref().unwrap().write_file(&bin).unwrap();
+        let got = run(&bin, runner_of(how), false);
+        if got.exit != 0 || got.stdout != want {
+            failures.push(format!("[{mode}, {how:?}]\n{}--- want stdout\n{want}", got.show()));
+        }
+    }
+    assert!(failures.is_empty(), "{} failure(s):\n{}", failures.len(), failures.join("\n"));
+}
