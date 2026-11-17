@@ -1,0 +1,448 @@
+//~ STDOUT run_vector_arms.stdout
+// Dispatch arms with 256-bit bodies in a default-target program: `needs(avx2)` and
+// `needs(avx2, fma)` arms over f32x8 / i32x8 (loads and stores with masked tails, masks,
+// reductions, FMA), a 128-bit `_` arm, closures with 256-bit ops passed to a baseline fn and to
+// `thread.par_for_mut`, and 256-bit values live across calls into baseline code. Every result is
+// compared with a scalar reference over lengths 0..40 at four start offsets. The output does not
+// depend on the CPU; with a command-line argument each line also names the arm that ran
+// (crates/stave-driver/tests/dispatch_vector.rs runs it natively, under qemu `-cpu Nehalem`,
+// for x86_64-linux-v3, and for aarch64-linux).
+import std.env;
+import std.io;
+import std.thread;
+
+const BASE: u32 = 0;
+const AVX2: u32 = 1;
+const FMA: u32 = 2;
+
+struct Out {
+    f: f32,
+    i: i32,
+    j: i32,
+    n: usize,
+    arm: u32,
+}
+
+fn out_f(f: f32, arm: u32) -> Out {
+    return Out.{ f: f, i: 0, j: 0, n: 0, arm: arm };
+}
+
+// f32 sum: values are multiples of 0.25 below 10 in magnitude, so every order is exact.
+fn fsum_v3(xs: &[f32]) -> Out needs(avx2) {
+    let n = xs.len();
+    let mut acc = f32x8.splat(0.0);
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        acc = acc + f32x8.load(xs, i);
+        i = i + 8;
+    }
+    acc = acc + f32x8.load_masked(xs, i, mask32x8.first_n(n - i));
+    return out_f(acc.reduce_add(), AVX2);
+}
+
+fn fsum_base(xs: &[f32]) -> Out {
+    let mut acc = f32x4.splat(0.0);
+    for v: f32x4 in xs { acc = acc + v; } tail masked (v, m) { acc = acc + m.select(v, f32x4.splat(0.0)); }
+    return out_f(acc.reduce_add(), BASE);
+}
+
+dispatch fn fsum(xs: &[f32]) -> Out { avx2 => fsum_v3, _ => fsum_base, }
+
+// i32: wrapping sum, max, and the number of elements above k.
+fn istats_v3(xs: &[i32], k: i32) -> Out needs(avx2) {
+    let kk = i32x8.splat(k);
+    let lo = i32x8.splat(-2147483648);
+    let mut s = i32x8.splat(0);
+    let mut mx = lo;
+    let mut n: usize = 0;
+    for v: i32x8 in xs {
+        s = s +% v;
+        mx = mx.max(v);
+        n = n + ((v > kk).to_bits().popcount() as usize);
+    } tail masked (v, m) {
+        s = s +% v;
+        mx = mx.max(m.select(v, lo));
+        n = n + (((v > kk) & m).to_bits().popcount() as usize);
+    }
+    return Out.{ f: 0.0, i: s.reduce_add_wrap(), j: mx.reduce_max(), n: n, arm: AVX2 };
+}
+
+fn istats_base(xs: &[i32], k: i32) -> Out {
+    let kk = i32x4.splat(k);
+    let lo = i32x4.splat(-2147483648);
+    let mut s = i32x4.splat(0);
+    let mut mx = lo;
+    let mut n: usize = 0;
+    for v: i32x4 in xs {
+        s = s +% v;
+        mx = mx.max(v);
+        n = n + ((v > kk).to_bits().popcount() as usize);
+    } tail masked (v, m) {
+        s = s +% v;
+        mx = mx.max(m.select(v, lo));
+        n = n + (((v > kk) & m).to_bits().popcount() as usize);
+    }
+    return Out.{ f: 0.0, i: s.reduce_add_wrap(), j: mx.reduce_max(), n: n, arm: BASE };
+}
+
+dispatch fn istats(xs: &[i32], k: i32) -> Out { avx2 => istats_v3, _ => istats_base, }
+
+// f32 dot product; FMA rounds once, but every product and partial sum here is exact.
+fn dot_fma(a: &[f32], b: &[f32]) -> Out needs(avx2, fma) {
+    let n = a.len();
+    let mut acc = f32x8.splat(0.0);
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        acc = f32x8.load(a, i).fma(f32x8.load(b, i), acc);
+        i = i + 8;
+    }
+    let m = mask32x8.first_n(n - i);
+    acc = f32x8.load_masked(a, i, m).fma(f32x8.load_masked(b, i, m), acc);
+    return out_f(acc.reduce_add(), FMA);
+}
+
+fn dot_v3(a: &[f32], b: &[f32]) -> Out needs(avx2) {
+    let n = a.len();
+    let mut acc = f32x8.splat(0.0);
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        acc = acc + f32x8.load(a, i) * f32x8.load(b, i);
+        i = i + 8;
+    }
+    let m = mask32x8.first_n(n - i);
+    acc = acc + f32x8.load_masked(a, i, m) * f32x8.load_masked(b, i, m);
+    return out_f(acc.reduce_add(), AVX2);
+}
+
+fn dot_base(a: &[f32], b: &[f32]) -> Out {
+    let n = a.len();
+    let mut acc = f32x4.splat(0.0);
+    let mut i: usize = 0;
+    while i + 4 <= n {
+        acc = acc + f32x4.load(a, i) * f32x4.load(b, i);
+        i = i + 4;
+    }
+    let m = mask32x4.first_n(n - i);
+    acc = acc + f32x4.load_masked(a, i, m) * f32x4.load_masked(b, i, m);
+    return out_f(acc.reduce_add(), BASE);
+}
+
+dispatch fn dot(a: &[f32], b: &[f32]) -> Out { avx2 + fma => dot_fma, avx2 => dot_v3, _ => dot_base, }
+
+// The 256-bit multiply and add without FMA, on CPUs that have FMA too.
+dispatch fn dot_nofma(a: &[f32], b: &[f32]) -> Out { avx2 => dot_v3, _ => dot_base, }
+
+// y = k * x + y in place (a `&mut` chunk binding), then dst = clamp(y, lo, hi) (stores).
+fn axpy_clamp_v3(y: &mut [f32], x: &[f32], k: f32, dst: &mut [f32]) -> u32 needs(avx2) {
+    let kk = f32x8.splat(k);
+    let mut i: usize = 0;
+    for v: &mut f32x8 in y {
+        *v = kk * f32x8.load(x, i) + *v;
+        i = i + 8;
+    } tail masked (v, m) {
+        *v = kk * f32x8.load_masked(x, i, m) + *v;
+    }
+    let lo = f32x8.splat(-4.0);
+    let hi = f32x8.splat(6.5);
+    let n = y.len();
+    let mut j: usize = 0;
+    while j + 8 <= n {
+        f32x8.load(y, j).max(lo).min(hi).store(dst, j);
+        j = j + 8;
+    }
+    let m = mask32x8.first_n(n - j);
+    f32x8.load_masked(y, j, m).max(lo).min(hi).store_masked(dst, j, m);
+    return AVX2;
+}
+
+fn axpy_clamp_base(y: &mut [f32], x: &[f32], k: f32, dst: &mut [f32]) -> u32 {
+    let kk = f32x4.splat(k);
+    let mut i: usize = 0;
+    for v: &mut f32x4 in y {
+        *v = kk * f32x4.load(x, i) + *v;
+        i = i + 4;
+    } tail masked (v, m) {
+        *v = kk * f32x4.load_masked(x, i, m) + *v;
+    }
+    let lo = f32x4.splat(-4.0);
+    let hi = f32x4.splat(6.5);
+    let n = y.len();
+    let mut j: usize = 0;
+    while j + 4 <= n {
+        f32x4.load(y, j).max(lo).min(hi).store(dst, j);
+        j = j + 4;
+    }
+    let m = mask32x4.first_n(n - j);
+    f32x4.load_masked(y, j, m).max(lo).min(hi).store_masked(dst, j, m);
+    return BASE;
+}
+
+dispatch fn axpy_clamp(y: &mut [f32], x: &[f32], k: f32, dst: &mut [f32]) -> u32 {
+    avx2 => axpy_clamp_v3,
+    _ => axpy_clamp_base,
+}
+
+// A baseline higher-order fn: the closures below run their own (256-bit) code under it.
+fn fold_rows(n: usize, row: fn(usize) -> f32) -> f32 {
+    let mut t: f32 = 0.0;
+    for r in 0..n { t = t + row(r); }
+    return t;
+}
+
+// Row sums of an n x w matrix into out (n = out.len()), on many threads; returns their total.
+fn rows_v3(mat: &[f32], w: usize, out: &mut [f32]) -> Out needs(avx2) {
+    let row = fn(r: usize) -> f32 {
+        let mut acc = f32x8.splat(0.0);
+        for v: f32x8 in &mat[r * w..r * w + w] {
+            acc = acc + v;
+        } tail masked (v, m) {
+            acc = acc + m.select(v, f32x8.splat(0.0));
+        }
+        return acc.reduce_add();
+    };
+    let total = fold_rows(out.len(), row);
+    thread.par_for_mut(out, fn(r: usize, x: &mut f32) {
+        let mut acc = f32x8.splat(0.0);
+        for v: f32x8 in &mat[r * w..r * w + w] {
+            acc = acc + v;
+        } tail masked (v, m) {
+            acc = acc + m.select(v, f32x8.splat(0.0));
+        }
+        *x = acc.reduce_add();
+    });
+    return out_f(total, AVX2);
+}
+
+fn rows_base(mat: &[f32], w: usize, out: &mut [f32]) -> Out {
+    let row = fn(r: usize) -> f32 {
+        let mut acc = f32x4.splat(0.0);
+        for v: f32x4 in &mat[r * w..r * w + w] {
+            acc = acc + v;
+        } tail masked (v, m) {
+            acc = acc + m.select(v, f32x4.splat(0.0));
+        }
+        return acc.reduce_add();
+    };
+    let total = fold_rows(out.len(), row);
+    thread.par_for_mut(out, fn(r: usize, x: &mut f32) {
+        let mut acc = f32x4.splat(0.0);
+        for v: f32x4 in &mat[r * w..r * w + w] {
+            acc = acc + v;
+        } tail masked (v, m) {
+            acc = acc + m.select(v, f32x4.splat(0.0));
+        }
+        *x = acc.reduce_add();
+    });
+    return out_f(total, BASE);
+}
+
+dispatch fn rows(mat: &[f32], w: usize, out: &mut [f32]) -> Out { avx2 => rows_v3, _ => rows_base, }
+
+// A baseline callee with 128-bit code of its own.
+fn sum4(xs: &[f32]) -> f32 {
+    let mut acc = f32x4.splat(0.0);
+    for v: f32x4 in xs { acc = acc * f32x4.splat(0.5) + v; } tail scalar (x) { acc = acc + f32x4.splat(x); }
+    return acc.reduce_add();
+}
+
+// 256-bit values live across a call to baseline code and across a baseline fn calling back into
+// 256-bit code (xs.len() >= 16).
+fn live_v3(xs: &[f32]) -> Out needs(avx2) {
+    let a = f32x8.load(xs, 0);
+    let b = i32x8.splat(3) +% i32x8.splat(4);
+    let c = f32x8.load(xs, 8) * f32x8.splat(2.0);
+    let s = sum4(xs);
+    let t = fold_rows(2, fn(r: usize) -> f32 { return (f32x8.load(xs, r * 8) - f32x8.splat(1.0)).reduce_add(); });
+    let d = a + c;
+    let u = sum4(&xs[3..xs.len()]);
+    let e = (d * f32x8.splat(0.5)).reduce_add() + s + t + u;
+    return Out.{ f: e, i: (b +% i32x8.splat(1)).reduce_add_wrap(), j: 0, n: 0, arm: AVX2 };
+}
+
+fn live_base(xs: &[f32]) -> Out {
+    let a0 = f32x4.load(xs, 0);
+    let a1 = f32x4.load(xs, 4);
+    let b = i32x4.splat(3) +% i32x4.splat(4);
+    let c0 = f32x4.load(xs, 8) * f32x4.splat(2.0);
+    let c1 = f32x4.load(xs, 12) * f32x4.splat(2.0);
+    let s = sum4(xs);
+    let t = fold_rows(2, fn(r: usize) -> f32 {
+        let one = f32x4.splat(1.0);
+        return ((f32x4.load(xs, r * 8) - one) + (f32x4.load(xs, r * 8 + 4) - one)).reduce_add();
+    });
+    let d0 = a0 + c0;
+    let d1 = a1 + c1;
+    let u = sum4(&xs[3..xs.len()]);
+    let h = f32x4.splat(0.5);
+    let e = (d0 * h + d1 * h).reduce_add() + s + t + u;
+    return Out.{ f: e, i: (b +% i32x4.splat(1)).reduce_add_wrap() * 2, j: 0, n: 0, arm: BASE };
+}
+
+dispatch fn live(xs: &[f32]) -> Out { avx2 => live_v3, _ => live_base, }
+
+fn fval(i: usize) -> f32 {
+    return (((i * 7) % 19) as~ f32) * 0.25 - 2.0;
+}
+
+fn ival(i: usize) -> i32 {
+    return ((i * 2654435761) % 4001) as% i32 - 2000;
+}
+
+fn arm_name(arm: u32) -> &str {
+    return if arm == FMA then "avx2+fma" else if arm == AVX2 then "avx2" else if arm == BASE then "base" else "mixed";
+}
+
+fn report(name: &str, arm: u32, ok: bool) {
+    io.print(name);
+    if env.count() > 1 {
+        io.print(" ");
+        io.print(arm_name(arm));
+    }
+    if ok { io.print(" ok\n"); } else { io.print(" MISMATCH\n"); }
+}
+
+// The arm of every call so far: one arm, or 99 when calls differ.
+fn same_arm(first: bool, seen: u32, arm: u32) -> u32 {
+    return if first || seen == arm then arm else 99;
+}
+
+fn test_fsum(data: &[f32]) {
+    let mut ok = true;
+    let mut arm: u32 = 0;
+    let mut first = true;
+    for off in 0usize..4 {
+        for n in 0usize..41 {
+            let xs = &data[off..off + n];
+            let mut want: f32 = 0.0;
+            for i in 0..n { want = want + xs[i]; }
+            let got = fsum(xs);
+            ok = ok & (got.f == want);
+            arm = same_arm(first, arm, got.arm);
+            first = false;
+        }
+    }
+    report("fsum", arm, ok);
+}
+
+fn test_istats(data: &[i32]) {
+    let mut ok = true;
+    let mut arm: u32 = 0;
+    let mut first = true;
+    for off in 0usize..4 {
+        for n in 0usize..41 {
+            let xs = &data[off..off + n];
+            let mut s: i32 = 0;
+            let mut mx: i32 = -2147483648;
+            let mut c: usize = 0;
+            for i in 0..n {
+                s = s +% xs[i];
+                if xs[i] > mx { mx = xs[i]; }
+                if xs[i] > 100 { c = c + 1; }
+            }
+            let got = istats(xs, 100);
+            ok = ok & (got.i == s) & (got.j == mx) & (got.n == c);
+            arm = same_arm(first, arm, got.arm);
+            first = false;
+        }
+    }
+    report("istats", arm, ok);
+}
+
+fn test_dot(data: &[f32]) {
+    let mut ok = true;
+    let mut arm: u32 = 0;
+    let mut first = true;
+    for off in 0usize..4 {
+        for n in 0usize..41 {
+            let a = &data[off..off + n];
+            let b = &data[off + 5..off + 5 + n];
+            let mut want: f32 = 0.0;
+            for i in 0..n { want = want + a[i] * b[i]; }
+            let got = dot(a, b);
+            let g2 = dot_nofma(a, b);
+            ok = ok & (got.f == want) & (g2.f == want) & (g2.arm != FMA);
+            arm = same_arm(first, arm, got.arm);
+            first = false;
+        }
+    }
+    report("dot", arm, ok);
+}
+
+fn test_axpy_clamp(data: &[f32]) {
+    let mut ok = true;
+    let mut arm: u32 = 0;
+    let mut first = true;
+    for off in 0usize..4 {
+        for n in 0usize..41 {
+            let mut y: [f32; 48] = [0.0; 48];
+            let mut d: [f32; 48] = [9.0; 48];
+            for i in 0usize..48 { y[i] = data[i + 7]; }
+            let x = &data[off..off + n];
+            let got = axpy_clamp(&mut y[off..off + n], x, 1.5, &mut d[off..off + n]);
+            arm = same_arm(first, arm, got);
+            first = false;
+            for i in 0usize..48 {
+                let inside = i >= off && i < off + n;
+                let wy = if inside then 1.5 * data[i] + data[i + 7] else data[i + 7];
+                let c = if wy < -4.0 then -4.0 else if wy > 6.5 then 6.5 else wy;
+                let wd = if inside then c else 9.0;
+                ok = ok & (y[i] == wy) & (d[i] == wd);
+            }
+        }
+    }
+    report("axpy_clamp", arm, ok);
+}
+
+fn test_rows(data: &[f32]) {
+    let mut ok = true;
+    let mut arm: u32 = 0;
+    let mut first = true;
+    for w in 0usize..20 {
+        let mut out: [f32; 6] = [0.0; 6];
+        let got = rows(&data[1..1 + 6 * w], w, &mut out);
+        let mut total: f32 = 0.0;
+        for r in 0usize..6 {
+            let mut s: f32 = 0.0;
+            for i in 0..w { s = s + data[1 + r * w + i]; }
+            ok = ok & (out[r] == s);
+            total = total + s;
+        }
+        ok = ok & (got.f == total);
+        arm = same_arm(first, arm, got.arm);
+        first = false;
+    }
+    report("rows", arm, ok);
+}
+
+fn test_live(data: &[f32]) {
+    let mut ok = true;
+    let mut arm: u32 = 0;
+    let mut first = true;
+    for off in 0usize..4 {
+        let xs = &data[off..off + 21];
+        let mut s: f32 = 0.0;
+        for i in 0usize..16 {
+            let c = if i < 8 then xs[i] + xs[i + 8] * 2.0 else 0.0;
+            s = s + c * 0.5 + (xs[i] - 1.0);
+        }
+        let got = live(xs);
+        ok = ok & (got.i == 64) & (got.f == s + sum4(xs) + sum4(&xs[3..21]));
+        arm = same_arm(first, arm, got.arm);
+        first = false;
+    }
+    report("live", arm, ok);
+}
+
+fn main() -> i32 {
+    let mut fd: [f32; 128] = [0.0; 128];
+    let mut id: [i32; 48] = [0; 48];
+    for i in 0usize..128 { fd[i] = fval(i); }
+    for i in 0usize..48 { id[i] = ival(i); }
+    test_fsum(&fd);
+    test_istats(&id);
+    test_dot(&fd);
+    test_axpy_clamp(&fd);
+    test_rows(&fd);
+    test_live(&fd);
+    return 0;
+}
