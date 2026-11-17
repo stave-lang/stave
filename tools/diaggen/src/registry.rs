@@ -11,7 +11,7 @@ pub const HOLE_KINDS: [&str; 8] =
     ["name", "path", "type", "token-kinds", "int", "place", "source", "text-literal"];
 
 /// Code range prefix (first three characters) → area name.
-pub const AREAS: [(&str, &str); 14] = [
+pub const AREAS: [(&str, &str); 15] = [
     ("E00", "lex-parse"),
     ("E01", "resolve"),
     ("E02", "types"),
@@ -26,6 +26,7 @@ pub const AREAS: [(&str, &str); 14] = [
     ("E11", "gpu-kernel"),
     ("E12", "gpu-program"),
     ("E13", "gpu-compiler"),
+    ("E14", "effects"),
 ];
 
 #[derive(Deserialize)]

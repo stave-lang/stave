@@ -1,0 +1,91 @@
+//~ CHECK-ONLY
+// `Flat` is derived for every type built from ints, floats, bool, char, vectors, masks, and
+// arrays / tuples / structs / enums of Flat types, per instance for generics; a generic param is
+// Flat through a `Flat` bound, and the bound is checked at each call and struct literal.
+struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+struct Particle {
+    pub pos: Point,
+    pub vel: [f32; 3],
+    pub id: u64,
+    pub alive: bool,
+    pub tag: char,
+}
+
+enum Shape {
+    Empty,
+    Circle(f64),
+    Rect { w: f64, h: f64 },
+    Poly([Point; 4]),
+}
+
+struct Pair<A, B> {
+    pub a: A,
+    pub b: B,
+}
+
+// The type argument is not stored: still checked, and Flat here.
+struct Tag<T> {
+    pub raw: u32,
+}
+
+// Recursive through a type argument only: Flat (coinductive).
+struct Node {
+    pub next: Tag<Node>,
+}
+
+struct Empty {}
+
+struct Buf<T: Flat> {
+    pub v: T,
+}
+
+fn need<T: Flat>() {}
+
+fn forward<T: Flat>() {
+    need::<T>();
+    need::<[T; 2]>();
+    need::<Pair<T, u8>>();
+    need::<Option<T>>();
+}
+
+fn store<T: Flat>(v: T) -> Buf<T> {
+    return Buf.{ v: v };
+}
+
+fn main() -> i32 {
+    need::<u8>();
+    need::<i64>();
+    need::<f32>();
+    need::<f64>();
+    need::<bool>();
+    need::<char>();
+    need::<usize>();
+    need::<u32x4>();
+    need::<f32x4>();
+    need::<mask32x4>();
+    need::<[u32; 0]>();
+    need::<[[[u8; 2]; 3]; 4]>();
+    need::<[Point; 8]>();
+    need::<()>();
+    need::<(u32, (bool, [char; 2]), f64)>();
+    need::<Point>();
+    need::<Particle>();
+    need::<Shape>();
+    need::<Empty>();
+    need::<Pair<u32, Pair<Point, [i8; 3]>>>();
+    need::<Tag<u32>>();
+    need::<Node>();
+    need::<Option<u32>>();
+    need::<Option<Option<Point>>>();
+    need::<Result<u32, Shape>>();
+    need::<Buf<[Point; 2]>>();
+    forward::<Particle>();
+    forward::<Pair<u32, u32>>();
+    let b = store(Point.{ x: 1.0, y: 2.0 });
+    let c = Buf.{ v: [1u32, 2u32] };
+    return 0;
+}

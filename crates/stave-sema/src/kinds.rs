@@ -1,4 +1,4 @@
-//! Kinds ([`Kind`]): `copy view send sync sized` per
+//! Kinds ([`Kind`]): `copy view send sync flat sized` per
 //! type, and the view placement rules E0410–E0414. Every view test of the checker goes through
 //! [`is_view`]; the diagnostics are built here only ([`e0410`], [`view_arg`], [`e0413`]).
 //!
@@ -27,6 +27,10 @@
 //! (`std.sync.Mutex`). A fn type is Copy (its captures are by reference or `copy`), never
 //! Send or Sync (its captures are not in its type: [`crate::threads`] checks them where a closure crosses
 //! threads, E0802/E0806). `str` and slices are the only unsized types.
+//!
+//! **Flat** (no pointer inside: a value may be copied byte for byte to another thread, the GPU,
+//! or a file) is derived from the type's structure only ([`World::flat_witness`] names the
+//! first non-flat component for E1407); no impl adds or removes it (E1408).
 
 use stave_diag::{Diagnostic, Span};
 
@@ -46,6 +50,7 @@ pub struct Kind {
     pub view: bool,
     pub send: bool,
     pub sync: bool,
+    pub flat: bool,
     pub sized: bool,
 }
 
@@ -126,7 +131,8 @@ pub fn kind_of<I: Interner + ?Sized>(w: World<'_>, cx: &mut I, t: TypeId, env: &
     };
     let send = marker(lang.send);
     let sync = marker(lang.sync);
-    Kind { copy, view, send, sync, sized }
+    let flat = marker(lang.flat);
+    Kind { copy, view, send, sync, flat, sized }
 }
 
 /// Whether `d` is `std.mem.forget` (E0412).

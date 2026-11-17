@@ -4321,4 +4321,85 @@ pub(super) static ENTRIES: &[Entry] = &[
             },
         ],
     },
+    Entry {
+        code: "E1407",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "`Flat` demanded by a bound, type not `Flat`: names the first non-flat component and its path (field chain); case `self` when the type itself is the component; case `depth` past the check's depth cutoff",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "limit", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "part", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "path", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "reason", kind: HoleKind::TextLiteral, choices: &["a reference", "a raw pointer", "a fn value", "a view type", "`UnsafeCell` (interior mutability)", "a type with `Drop`", "a generic parameter without a `Flat` bound", "unsized"] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{type}` is not `Flat`: component `{path}` has type `{part}`, {reason}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`Flat` required here" },
+                    LabelTemplate { at: "param", text: "the `Flat` bound is on this parameter" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass a type without references, views, raw pointers, fn values, `UnsafeCell`, or `Drop` types; store indices or offsets instead of pointers",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "depth",
+                message: "`{type}` is not `Flat`: it nests deeper than {limit} levels, the limit of the `Flat` check",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`Flat` required here" },
+                    LabelTemplate { at: "param", text: "the `Flat` bound is on this parameter" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "nest the type less deeply",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "self",
+                message: "`{type}` is not `Flat`: it is {reason}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`Flat` required here" },
+                    LabelTemplate { at: "param", text: "the `Flat` bound is on this parameter" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass a type without references, views, raw pointers, fn values, `UnsafeCell`, or `Drop` types; store indices or offsets instead of pointers",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1408",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "an `impl Flat` (safe or `unsafe(..)`): `Flat` is derived by the compiler from the type's structure and never implemented",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`impl Flat for {type}`: `Flat` is derived by the compiler, never implemented",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "remove this impl" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove the impl: a type is `Flat` exactly when it holds no reference, view, raw pointer, fn value, `UnsafeCell`, or `Drop` type",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
 ];

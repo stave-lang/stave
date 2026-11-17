@@ -2288,8 +2288,8 @@ impl<'a> Ck<'a> {
         }
     }
 
-    /// Bound (E0901 `unsatisfied`) and view (E0411/E0412/E0414, [`crate::kinds::view_arg`]) checks
-    /// of a call's generic args.
+    /// Bound (E0901 `unsatisfied`, E1407 for `Flat`) and view (E0411/E0412/E0414,
+    /// [`crate::kinds::view_arg`]) checks of a call's generic args.
     fn check_bounds(&mut self, at: Span, generic: DeclId, gens: &[GenericParam], args: &[GArg]) {
         let genv = self.genv();
         for (i, g) in gens.iter().enumerate() {
@@ -2297,7 +2297,11 @@ impl<'a> Ck<'a> {
             if a == ids::ERROR || self.tys.has_error(a) {
                 continue;
             }
-            if !g.view && self.w.is_view(&self.tys, a, genv) {
+            // A view is never Flat: under a `Flat` bound, E1407 (naming the reference) replaces
+            // the view diagnostics, whose fix (`T: view`) would not help.
+            let flat = self.sigs.lang.flat;
+            let flat_bound = flat.is_some() && g.bounds.iter().any(|b| b.trait_decl == flat);
+            if !g.view && !flat_bound && self.w.is_view(&self.tys, a, genv) {
                 let tn = self.show(a);
                 let d = crate::kinds::view_arg(self.prog, generic, g, &tn, at);
                 self.report(d);
@@ -2313,6 +2317,12 @@ impl<'a> Ck<'a> {
                     })
                     .collect();
                 let tr = TraitRef { trait_decl: b.trait_decl, args: bargs };
+                if b.trait_decl == self.sigs.lang.flat && b.trait_decl.is_some() {
+                    if let Some(wit) = self.w.flat_witness(&mut self.tys, a, genv) {
+                        self.e1407(at, a, &wit, g.name_span);
+                    }
+                    continue;
+                }
                 if !self.w.implements(&mut self.tys, a, &tr, genv) {
                     let tn = self.show(a);
                     let trn = self
@@ -2330,6 +2340,30 @@ impl<'a> Ck<'a> {
                 }
             }
         }
+    }
+
+    /// E1407: `ty` (given for a `Flat`-bound param declared at `param`) is not Flat; `wit` names
+    /// its first non-flat component.
+    fn e1407(&mut self, at: Span, ty: TypeId, wit: &crate::traits::FlatWitness, param: Span) {
+        use crate::traits::NotFlat;
+        let tn = self.show(ty);
+        let d = match wit.why {
+            NotFlat::Unknown => return,
+            NotFlat::Depth => {
+                let limit = crate::traits::QUERY_DEPTH.to_string();
+                mk("E1407", Some("depth"), &[("type", &tn), ("limit", &limit)], at, &[("param", param)])
+            }
+            why if wit.path.is_empty() => {
+                mk("E1407", Some("self"), &[("type", &tn), ("reason", why.text())], at, &[("param", param)])
+            }
+            why => {
+                let pn = self.show(wit.part);
+                let holes =
+                    [("type", tn.as_str()), ("path", &wit.path), ("part", &pn), ("reason", why.text())];
+                mk("E1407", None, &holes, at, &[("param", param)])
+            }
+        };
+        self.report(d);
     }
 
     fn call_text_span(&self, n: u32, paren: u32) -> Span {
