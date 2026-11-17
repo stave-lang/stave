@@ -96,11 +96,17 @@ unit main). `call_on_stack(f, arg, top)` runs it on main's own stack.
 pub fn alloc(size: usize, alignment: usize) -> *mut u8                 // never null; OOM panics
 pub unsafe(..) fn free(p: *mut u8, size: usize, alignment: usize)
 pub unsafe(..) fn realloc(p: *mut u8, old_size: usize, alignment: usize, new_size: usize) -> *mut u8
+pub fn try_alloc(size: usize, alignment: usize) -> *mut u8             // null instead of OOM
+pub unsafe(..) fn try_realloc(p: *mut u8, old_size: usize, alignment: usize, new_size: usize) -> *mut u8
 ```
 
 Sized deallocation (no headers); `alignment` a power of two; size 0 → a dangling aligned pointer.
-Planned: `allocator my.alloc;` provides these three signatures and the compiler binds std's
-calls of `runtime.alloc.{alloc,free,realloc}` to them. Today the declaration is only parsed and
+`try_alloc` / `try_realloc` (std's `try_` methods) return null where `alloc` / `realloc` panic
+`OutOfMemory`; a failed `try_realloc` leaves its block unchanged.
+`alloc` and `realloc` are derived: `try_alloc` / `try_realloc` plus the `OutOfMemory` trap.
+Planned: `allocator my.alloc;` provides only the fallible forms and `free` (`try_alloc`,
+`try_realloc`, `free`, the signatures above) and the compiler binds `runtime.alloc`'s calls of
+them to its module; `alloc` and `realloc` stay derived. Today the declaration is only parsed and
 checked (at most one per binary, E0104), and release builds keep its module's `alloc`, `free`,
 and `realloc` as roots; std's calls still go to `runtime.alloc`.
 

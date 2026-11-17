@@ -1,9 +1,10 @@
 // runtime.alloc: the global allocator, over mmap/munmap/mremap.
 //
-// API (the one std uses; an `allocator my.alloc;` module provides the same three fns):
-//   alloc(size, alignment) -> *mut u8                  never null; OutOfMemory panic on failure
+// API (the one std uses). The replaceable part, which an `allocator my.alloc;` module provides:
+//   try_alloc(size, alignment) -> *mut u8              null on failure
+//   try_realloc(p, old_size, alignment, new_size)      null on failure, p then left as it was
 //   free(p, size, alignment)                           size and alignment as passed to alloc/realloc
-//   realloc(p, old_size, alignment, new_size) -> *mut u8
+// Derived, never replaced: alloc and realloc, the same calls with an `OutOfMemory` panic on null.
 // `alignment` is a power of two. size 0 returns `alignment` itself as a dangling, aligned, non-null
 // pointer that is never dereferenced; freeing it is a no-op. The caller passes the size back
 // (sized deallocation), so blocks carry no header.
@@ -43,6 +44,13 @@ const CHUNK: usize = 4194304;
 const SMALL_ALIGN_MAX: usize = 4096;
 
 pub fn alloc(size: usize, alignment: usize) -> *mut u8 {
+    let p = try_alloc(size, alignment);
+    if (p as usize) == 0 { oom(); }
+    return p;
+}
+
+// Null when the memory is not available.
+pub fn try_alloc(size: usize, alignment: usize) -> *mut u8 {
     check_align(alignment);
     if size == 0 { return alignment as *mut u8; }
     let c = class_of(size, alignment);
@@ -65,8 +73,16 @@ fn free(p: *mut u8, size: usize, alignment: usize) {
 
 pub unsafe("p came from alloc/realloc with old_size and alignment; on return only the result is used")
 fn realloc(p: *mut u8, old_size: usize, alignment: usize, new_size: usize) -> *mut u8 {
+    let q = unsafe("caller obligation") try_realloc(p, old_size, alignment, new_size);
+    if (q as usize) == 0 { oom(); }
+    return q;
+}
+
+// Null when the memory is not available; p is then still the caller's, unchanged.
+pub unsafe("p came from alloc/realloc with old_size and alignment; on a non-null return only the result is used")
+fn try_realloc(p: *mut u8, old_size: usize, alignment: usize, new_size: usize) -> *mut u8 {
     check_align(alignment);
-    if old_size == 0 { return alloc(new_size, alignment); }
+    if old_size == 0 { return try_alloc(new_size, alignment); }
     if new_size == 0 {
         unsafe("caller obligation") { free(p, old_size, alignment); }
         return alignment as *mut u8;
@@ -76,16 +92,18 @@ fn realloc(p: *mut u8, old_size: usize, alignment: usize, new_size: usize) -> *m
     if co < NCLASS && co == cn { return p; }
     let page = state.page_size();
     if co >= NCLASS && cn >= NCLASS && alignment <= page {
+        if !rounds_up(new_size, page) { return null(); }
         let lo = round_up(old_size, page);
         let ln = round_up(new_size, page);
         if lo == ln { return p; }
         let r = unsafe("p..p+lo is a large mapping owned by the caller") os.mremap(p as usize, lo, ln, os.MREMAP_MAYMOVE);
-        if r < 0 { oom(); }
+        if r < 0 { return null(); }
         add_large(ln);
         sub_large(lo);
         return (r as% usize) as *mut u8;
     }
-    let q = alloc(new_size, alignment);
+    let q = try_alloc(new_size, alignment);
+    if (q as usize) == 0 { return q; }
     let n = if old_size < new_size then old_size else new_size;
     unsafe("p and q are distinct live blocks of at least n bytes") {
         copy_bytes(q, p as *const u8, n);
@@ -119,9 +137,18 @@ fn oom() -> never {
 
 const USIZE_MAX: usize = 0xFFFF_FFFF_FFFF_FFFF;
 
+fn null() -> *mut u8 {
+    return 0usize as *mut u8;
+}
+
+// Whether x rounded up to a multiple of a (a >= 1) fits in usize.
+fn rounds_up(x: usize, a: usize) -> bool {
+    return x <= USIZE_MAX - (a - 1);
+}
+
 // x rounded up to a multiple of a (a >= 1); OutOfMemory if that exceeds usize.
 fn round_up(x: usize, a: usize) -> usize {
-    if x > USIZE_MAX - (a - 1) { oom(); }
+    if !rounds_up(x, a) { oom(); }
     return (x + a - 1) / a * a;
 }
 
@@ -198,8 +225,10 @@ unsafe("p is a block of class c that nothing else uses") fn small_free_locked(p:
 }
 
 // Cuts one slab into class-c blocks: returns the first, pushes the rest (lowest address on top).
+// Null when no slab can be mapped.
 fn refill(c: usize) -> *mut u8 {
     let slab = take_slab();
+    if slab == 0 { return null(); }
     let size = CLASS[c];
     let n = SLAB / size;
     let mut i = n;
@@ -211,6 +240,7 @@ fn refill(c: usize) -> *mut u8 {
     return slab as *mut u8;
 }
 
+// 0 when the next chunk cannot be mapped.
 fn take_slab() -> usize {
     let st = state.get();
     let cur = unsafe("st is runtime.state.STATE; the allocator lock is held or the field is only read for diagnostics") (*st).arena_cur;
@@ -222,7 +252,7 @@ fn take_slab() -> usize {
     let prot = os.PROT_READ | os.PROT_WRITE;
     let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS | os.MAP_NORESERVE;
     let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, CHUNK, prot, flags, -1, 0);
-    if r < 0 { oom(); }
+    if r < 0 { return 0; }
     let base = r as% usize;
     unsafe("st is runtime.state.STATE; the allocator lock is held or the field is only read for diagnostics") {
         (*st).arena_cur = base + SLAB;
@@ -232,22 +262,24 @@ fn take_slab() -> usize {
     return base;
 }
 
+// Null when the mapping fails.
 fn large_alloc(size: usize, alignment: usize) -> *mut u8 {
     let page = state.page_size();
+    if !rounds_up(size, page) { return null(); }
     let len = round_up(size, page);
     let prot = os.PROT_READ | os.PROT_WRITE;
     let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS | os.MAP_NORESERVE;
     if alignment <= page {
         let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, len, prot, flags, -1, 0);
-        if r < 0 { oom(); }
+        if r < 0 { return null(); }
         add_large(len);
         return (r as% usize) as *mut u8;
     }
     // Over-map by alignment, then return the unaligned head and the tail_len to the kernel, so the
     // mapping is exactly [p, p + len) as free() expects.
-    if len > USIZE_MAX - alignment { oom(); }
+    if len > USIZE_MAX - alignment { return null(); }
     let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, len + alignment, prot, flags, -1, 0);
-    if r < 0 { oom(); }
+    if r < 0 { return null(); }
     let base = r as% usize;
     let p = round_up(base, alignment);
     let head = p - base;

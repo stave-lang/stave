@@ -1,0 +1,14 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: OutOfMemory at vec_oom_grow.stv:12:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// Growing a live buffer to 2^62 bytes, which no address space holds, panics `OutOfMemory` at the
+// caller: the plain methods keep the trap that their `try_` forms turn into `Result.Err`.
+import std.vec;
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u8>.new();
+    v.push(1);
+    let n: usize = 0x4000_0000_0000_0000;
+    v.reserve(n);
+    return 0;
+}
