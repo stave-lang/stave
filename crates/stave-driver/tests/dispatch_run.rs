@@ -120,6 +120,29 @@ fn main() -> i32 {
 }
 "#;
 
+/// A dispatch with arms of both arches and nothing else that reads the feature word.
+const WORD_ONLY: &str = r#"import std.io;
+
+fn on_avx2() -> u32 needs(avx2) {
+    return 3;
+}
+
+fn on_sve() -> u32 needs(sve) {
+    return 2;
+}
+
+fn on_base() -> u32 {
+    return 0;
+}
+
+dispatch fn pick() -> u32 { avx2 => on_avx2, sve => on_sve, _ => on_base, }
+
+fn main() -> i32 {
+    if pick() == 3 { io.print("avx2\n"); } else { io.print("base\n"); }
+    return 0;
+}
+"#;
+
 fn have(tool: &str) -> bool {
     Command::new(tool).arg("--version").output().is_ok_and(|o| o.status.success())
 }
@@ -164,6 +187,64 @@ fn cpu_fns(m: &Module) -> Vec<&str> {
         .filter(|f| f.body.is_some() && f.path.starts_with("runtime.cpu."))
         .map(|f| f.path.as_str())
         .collect()
+}
+
+/// What a fn body reads and calls: loads of the feature word (`intrinsic.static_addr` of the
+/// static `runtime.cpu.WORD`, then `load`), other loads, intrinsics other than the word's
+/// address, and every callee, trace calls included.
+#[derive(Debug, Default)]
+struct Shape {
+    word_loads: usize,
+    other_loads: usize,
+    intrinsics: Vec<String>,
+    calls: Vec<String>,
+}
+
+fn shape(m: &Module, path: &str) -> Option<Shape> {
+    let f = m.funcs.iter().find(|f| f.path == path)?;
+    let b = f.body.as_ref()?;
+    let word = m.statics.iter().position(|s| s.path == "runtime.cpu.WORD").map(|w| w as i128);
+    let word_addr = |i: usize| -> bool {
+        matches!(&b.insts.op[i], Op::Intrinsic(id) if m.intrinsic_name(*id) == Some("static_addr"))
+            && word.is_some()
+            && b.args(i as u32).first().and_then(|a| b.int_const(*a)) == word
+    };
+    let def = |o: &Operand| -> Option<usize> {
+        let Operand::Value(v) = o else { return None };
+        b.insts.result.iter().position(|r| *r == Some(*v))
+    };
+    let mut s = Shape::default();
+    for (i, op) in b.insts.op.iter().enumerate() {
+        let args = b.args(i as u32);
+        match op {
+            Op::Load if args.first().and_then(def).is_some_and(word_addr) => s.word_loads += 1,
+            Op::Load => s.other_loads += 1,
+            Op::Intrinsic(id) if !word_addr(i) => {
+                s.intrinsics.push(m.intrinsic_name(*id).unwrap_or("?").to_string());
+            }
+            Op::Call => {
+                let callee = match args.first() {
+                    Some(Operand::Func(g)) => m.func(*g).map(|g| g.path.clone()),
+                    _ => None,
+                };
+                s.calls.push(callee.unwrap_or_else(|| "<indirect>".into()));
+            }
+            _ => {}
+        }
+    }
+    Some(s)
+}
+
+/// A dispatch body that tests the word: one load of `runtime.cpu.WORD`, no other load or
+/// intrinsic, and no call but `arms` (in order) and trace calls.
+fn check_word_body(m: &Module, path: &str, arms: &[&str]) -> Result<(), String> {
+    let s = shape(m, path).ok_or_else(|| format!("no `{path}` with a body"))?;
+    let arm_calls: Vec<&str> =
+        s.calls.iter().map(String::as_str).filter(|c| *c != "runtime.cpu.trace").collect();
+    if s.word_loads != 1 || s.other_loads != 0 || !s.intrinsics.is_empty() || arm_calls != arms {
+        return Err(format!("`{path}`: {s:?}, want one word load and calls of {arms:?}"));
+    }
+    Ok(())
 }
 
 /// `<label> <arm>` lines as a map.
@@ -350,16 +431,15 @@ fn check_ir(m: &Module, target: Triple) -> Result<(), String> {
         }
         Arch::X86_64 => {
             // sve and dotprod are AArch64 arms, dropped; `_` ends the chain
-            expect("main.pick", &["runtime.cpu.features", "main.on_avx2", "main.on_base"])?;
-            expect("main.own", &["runtime.cpu.features", "main.own_v3", "main.own_avx"])?;
-            expect("main.outer", &["runtime.cpu.features", "main.via_avx", "main.on_base"])?;
+            check_word_body(m, "main.pick", &["main.on_avx2", "main.on_base"])?;
+            check_word_body(m, "main.own", &["main.own_v3", "main.own_avx"])?;
+            check_word_body(m, "main.outer", &["main.via_avx", "main.on_base"])?;
             main_expect(&["main.pick", "main.outer", "main.direct"], &[])?;
             // a fn needing only avx does not cover own's first arm (avx2) on v2
             expect("main.via_avx", &["main.own"])?;
         }
         _ => {
-            let all = ["runtime.cpu.features", "main.on_sve", "main.on_dotprod", "main.on_base"];
-            expect("main.pick", &all)?;
+            check_word_body(m, "main.pick", &["main.on_sve", "main.on_dotprod", "main.on_base"])?;
             // every arm of `outer` and `direct` but `_` is dropped: their calls are `_`'s
             main_expect(&["main.pick", "main.on_base"], &["main.outer", "main.direct"])?;
             if has_body(m, "main.own") || has_body(m, "main.direct_user") {
@@ -375,8 +455,8 @@ fn check_ir(m: &Module, target: Triple) -> Result<(), String> {
 }
 
 /// A dispatch whose first arm the target baseline covers is one direct call: no feature-word
-/// load (no `runtime.cpu.features`; start code still has `init`, which checks the v3 baseline),
-/// and (release) the arms below it are not built.
+/// load (start code still has `init`, which checks the v3 baseline), and (release) the arms below
+/// it are not built.
 #[test]
 fn baseline_pruned_dispatch_has_no_cpu_code() {
     let tmp = TempDir::new("disp-pruned").unwrap();
@@ -388,6 +468,8 @@ fn baseline_pruned_dispatch_has_no_cpu_code() {
         let out = build(&src, v3, release);
         let m = out.module.as_ref().unwrap();
         assert_eq!(callees(m, "main.pick").unwrap(), ["main.on_avx2"], "release {release}");
+        let s = shape(m, "main.pick").unwrap();
+        assert_eq!((s.word_loads, s.other_loads), (0, 0), "release {release}: {s:?}");
         let main_calls = callees(m, "main.main").unwrap();
         assert!(main_calls.iter().any(|c| c == "main.on_avx2"), "release {release}: {main_calls:?}");
         assert!(!has_body(m, "runtime.cpu.features"), "release {release}: has {:?}", cpu_fns(m));
@@ -401,6 +483,38 @@ fn baseline_pruned_dispatch_has_no_cpu_code() {
             let got = exec::run(&bin, &spec).unwrap();
             let stdout = String::from_utf8_lossy(&got.stdout).into_owned();
             assert_eq!((got.exit, stdout.as_str()), (0, "avx2\n"));
+        }
+    }
+}
+
+/// A dispatch whose arms are tested at run time loads the feature word itself: its body is one
+/// load of `runtime.cpu.WORD`, mask tests, and calls of the arms (plus trace calls), with no call
+/// of `runtime.cpu.features`, which a program without `std.cpu` does not have; start code still
+/// fills the word (`init`).
+#[test]
+fn dispatch_body_loads_the_word() {
+    let tmp = TempDir::new("disp-word").unwrap();
+    let src = tmp.path().join("word.stv");
+    std::fs::write(&src, WORD_ONLY).unwrap();
+    let v2 = Triple::parse("x86_64-linux").unwrap();
+    let a64 = Triple::parse("aarch64-linux").unwrap();
+    let native = legs::gate(v2.name(), exec::can_run(v2) && Path::new("/proc/cpuinfo").is_file());
+    for (target, arms) in [(v2, ["main.on_avx2", "main.on_base"]), (a64, ["main.on_sve", "main.on_base"])] {
+        for release in [false, true] {
+            let out = build(&src, target, release);
+            let m = out.module.as_ref().unwrap();
+            let at = format!("{target}, release {release}");
+            check_word_body(m, "main.pick", &arms).unwrap_or_else(|e| panic!("[{at}] {e}"));
+            assert!(has_body(m, "runtime.cpu.init"), "[{at}] {:?}", cpu_fns(m));
+            assert!(!has_body(m, "runtime.cpu.features"), "[{at}] {:?}", cpu_fns(m));
+            if native && target == v2 {
+                let bin = tmp.path().join(format!("word-{release}"));
+                out.image.as_ref().unwrap().write_file(&bin).unwrap();
+                let spec = RunSpec { args: &[], runner: None, cwd: None, inherit: false };
+                let got = exec::run(&bin, &spec).unwrap();
+                let want = if host_avx().1 { "avx2\n" } else { "base\n" };
+                assert_eq!((got.exit, String::from_utf8_lossy(&got.stdout).as_ref()), (0, want), "[{at}]");
+            }
         }
     }
 }

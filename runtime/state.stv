@@ -31,8 +31,6 @@ pub struct State {
     pub hwcap: u64,
     pub hwcap2: u64,
     pub at_random: usize,
-    // feature word (runtime.cpu): written once by runtime.cpu.init before any other thread
-    pub cpu_features: u64,
     // main stack: [stack_lo, stack_hi) usable, [guard_lo, guard_hi) PROT_NONE below it
     pub stack_lo: usize,
     pub stack_hi: usize,
@@ -67,7 +65,6 @@ static mut STATE: State = State.{
     hwcap: 0,
     hwcap2: 0,
     at_random: 0,
-    cpu_features: 0,
     stack_lo: 0,
     stack_hi: 0,
     guard_lo: 0,

@@ -106,8 +106,7 @@ fn check_ir(m: &Module, target: Triple) -> Result<(), String> {
         let (direct, not) = match target.arch() {
             Arch::X86_64 if target.baseline().contains(stave_target::Feature::Avx2) => (arms[0], disp),
             Arch::X86_64 => {
-                let mut want = vec!["runtime.cpu.features".to_string()];
-                want.extend(arms.iter().map(|a| a.to_string()));
+                let want: Vec<String> = arms.iter().map(|a| a.to_string()).collect();
                 let got = calls(disp)?;
                 if got != want {
                     return Err(format!("`{disp}` calls {got:?}, want {want:?}"));
@@ -290,7 +289,7 @@ fn slice_methods_dispatch_to_256_bit_loops() {
                 let at = format!("{t} release {release}");
                 match (target.arch(), target.baseline().contains(stave_target::Feature::Avx2)) {
                     (Arch::X86_64, false) => {
-                        let want = vec!["runtime.cpu.features".to_string(), wide.clone(), base.clone()];
+                        let want = vec![wide.clone(), base.clone()];
                         assert_eq!(callees(m, &disp), Some(want), "{at}: `{disp}`");
                         assert!(!callers_of(&disp).is_empty(), "{at}: nothing calls `{disp}`");
                     }

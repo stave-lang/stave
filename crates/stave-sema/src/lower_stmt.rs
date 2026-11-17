@@ -431,27 +431,40 @@ impl<'a> FnCx<'a> {
 
     // ---------- dispatch ----------
 
-    /// The body of a `dispatch fn`: `%w = call @runtime.cpu.features`, then per tested arm
-    /// top-down `(%w & mask) == mask` → return the arm target's result; at the end the plan's
-    /// last arm. Without tested arms the body is the one call, with no feature-word load; so is
-    /// it with a runtime library that has no `runtime.cpu.features` (no word: as if it were 0).
-    /// With a word, each arm's block first tests the word's trace bit
+    /// The body of a `dispatch fn`: `%p = intrinsic.static_addr <runtime.cpu.WORD>`,
+    /// `%w = load t<u64> %p` (no call: start code wrote the word before main and before any other
+    /// thread, and nothing writes it later), then per tested arm top-down `(%w & mask) == mask` →
+    /// return the arm target's result; at the end the plan's last arm. Loading the word requests
+    /// `runtime.cpu.init`, which fills it. Without tested arms the body is the one call, with no
+    /// feature-word load; so is it with a runtime library that has no `runtime.cpu.WORD` (no
+    /// word: as if it were 0). With a word, each arm's block first tests the word's trace bit
     /// ([`crate::dispatch::TRACE_BIT`]) and, when set, calls `runtime.cpu.trace` with the line
     /// `dispatch: <dispatch> -> <arm>\n`.
     pub fn lower_dispatch(&mut self, plan: &crate::dispatch::Plan, params: &[Ty], ret: Ty) -> FnOut {
         self.fresh_env(params, ret);
         let args: Vec<Operand> =
             (0..params.len()).filter_map(|i| self.f.b.param(i).map(Operand::Value)).collect();
-        if let Some(fd) = self.g.lang.cpu_features
+        if let Some(wd) = self.g.lang.cpu_word
             && !plan.tests.is_empty()
         {
             let u64t = self.t_int(false, crate::types::IntBits::B64);
             let bt = self.t_bool();
-            let f = self.req(Req::Inst(InstKey { decl: fd, args: Vec::new() }));
-            let Some(w) = self.f.b.call(f, Some(FnCx::ir(u64t)), &[]).map(Operand::Value) else {
-                self.fail_at(None, "runtime.cpu.features without a result");
+            let Some(&idx) = self.g.statics.get(&wd) else {
+                self.fail_at(None, "runtime.cpu.WORD without a value");
                 return self.dispatch_out(params, ret);
             };
+            if self.g.sigs.konst(wd).map(|c| c.ty) != Some(u64t) {
+                self.fail_at(None, "runtime.cpu.WORD is not a u64");
+                return self.dispatch_out(params, ret);
+            }
+            if let Some(init) = self.g.lang.cpu_init {
+                self.req(Req::Inst(InstKey { decl: init, args: Vec::new() }));
+            }
+            let pt = self.t_ptr(false, u64t);
+            let sa = self.intrinsic("static_addr");
+            let i = self.int(i128::from(idx));
+            let p = self.f.b.op(Op::Intrinsic(sa), FnCx::ir(pt), &[i]);
+            let w = Operand::Value(self.f.b.load(FnCx::ir(u64t), p));
             for (mask, k) in &plan.tests {
                 let (hit, next) = (self.f.b.create_block(), self.f.b.create_block());
                 let m = self.int(i128::from(*mask));

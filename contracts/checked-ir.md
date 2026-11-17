@@ -329,21 +329,22 @@ reference (`Ref` / `RefMut`); `copy` captures are reserved (no syntax yet, LANG.
   so only those are reachable through it. An arm of another arch is dropped. With K = the target
   baseline ∪ the dispatch's needs, the first remaining arm whose features are ⊆ K always matches:
   the body ends with a direct call of it and the arms below it (and `_`) are not called; if it is
-  the first arm, the body is that one call. Otherwise the body is `%w = call @runtime.cpu.features`
-  then, per arm top-down, `%m = and t<u64> %w M`, `%c = eq t<bool> %m M`, `cbr` to a block
+  the first arm, the body is that one call. Otherwise the body is `%p = intrinsic.static_addr S`,
+  `%w = load t<u64> %p` (S = the index of the static `runtime.cpu.WORD`; no call), then, per arm
+  top-down, `%m = and t<u64> %w M`, `%c = eq t<bool> %m M`, `cbr` to a block
   returning the arm target's call result (M = the arm's closed feature set as a `u64`, bit i =
   feature i). Each such block, and the final one, begins with the trace test: `%t = and t<u64> %w
   T`, `%c = ne t<bool> %t 0`, `cbr` to a block that calls `@runtime.cpu.trace` with the string
   `dispatch: <dispatch path> -> <arm target path>\n` and branches on (T = bit 63, intrinsics.md
   "CPU feature detection"; no test without a `runtime.cpu.trace`). A runtime library without
-  `runtime.cpu.features` (the dump goldens' stand-in) has no word: the body is the call of that
+  `runtime.cpu.WORD` (the dump goldens' stand-in) has no word: the body is the call of that
   last arm alone. A call of a dispatch from a fn whose
   needs ∪ the baseline cover the first remaining arm's features calls that arm target instead
   (a fn value of the dispatch is the dispatch).
 - In both modes a lowered `intrinsic.thread_clone` or `intrinsic.thread_start_addr` requests
   `runtime.thread.entry`, which only the compiler's `__stave_thread_start` stub calls
-  (intrinsics.md "Thread start"), and a request of `runtime.cpu.features` (a dispatch body,
-  `std.cpu.features`) also requests `runtime.cpu.init`, which only `intrinsic.cpu_init` in
+  (intrinsics.md "Thread start"), and a request of `runtime.cpu.features` (`std.cpu.features`) or
+  a dispatch body that loads `runtime.cpu.WORD` also requests `runtime.cpu.init`, which only `intrinsic.cpu_init` in
   `runtime.start.entry` calls. A lowered `intrinsic.cpu_init` requests `runtime.cpu.init` itself
   when the target baseline is above its arch's lowest (`x86_64-linux-v2`, `aarch64-linux`): start
   code then checks the CPU against it. Without either request (no reachable dispatch with a
