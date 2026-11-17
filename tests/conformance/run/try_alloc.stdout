@@ -1,3 +1,6 @@
+Vec<Tok> full: gave back the Tok
+  drop Tok
+  len unchanged true
 try_with_capacity(10): cap 10
 try_push: ok
 try_extend_from_slice: ok

@@ -4,8 +4,10 @@
 // methods panic `OutOfMemory`, and leave the container as it was. Failures are forced by sizes
 // past usize (capacity arithmetic) and by 2^62-byte requests, which no address space holds (the
 // kernel's mmap and the interpreter's heap both refuse them): through a fresh allocation and
-// through growing an existing buffer.
+// through growing an existing buffer. A failed `Vec.try_push` gives its value back: a Vec of a
+// zero-sized type claims usize max elements, so the push has no room and its length cannot grow.
 import std.io;
+import std.mem;
 import std.string;
 import std.vec;
 
@@ -27,11 +29,43 @@ fn show_vec(v: &vec.Vec<u32>) {
     io.print(f"  len {n}, cap >= 104 {room}, first {a}, last {b}\n");
 }
 
+struct Tok {}
+
+impl Drop for Tok {
+    fn drop(&mut self) {
+        io.print("  drop Tok\n");
+    }
+}
+
+fn push_into_full() {
+    let mut full = vec.Vec::<Tok>.new();
+    let n = full.capacity();
+    unsafe("Tok is zero-sized, so every slot holds a valid Tok; set_len(0) below runs before any is used") {
+        full.set_len(n);
+    }
+    match full.try_push(Tok.{}) {
+        Result.Ok(_) => { io.print("Vec<Tok> full: ok\n"); }
+        Result.Err(t) => {
+            io.print("Vec<Tok> full: gave back the Tok\n");
+            mem.drop(t);
+        }
+    }
+    let same = full.len() == n;
+    io.print(f"  len unchanged {same}\n");
+    unsafe("the claimed elements were never made: no drop may run for them") {
+        full.set_len(0);
+    }
+}
+
 fn main() -> i32 {
+    push_into_full();
     let mut v = vec.Vec::<u32>.try_with_capacity(10).unwrap();
     let c = v.capacity();
     io.print(f"try_with_capacity(10): cap {c}\n");
-    show("try_push", v.try_push(7));
+    match v.try_push(7) {
+        Result.Ok(_) => { io.print("try_push: ok\n"); }
+        Result.Err(x) => { io.print(f"try_push: gave back {x}\n"); }
+    }
     let xs: [u32; 3] = [1, 2, 3];
     show("try_extend_from_slice", v.try_extend_from_slice(&xs[0..3]));
     show("try_reserve(100)", v.try_reserve(100));

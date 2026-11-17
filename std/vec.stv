@@ -10,8 +10,8 @@
 // impls below state them: a Vec owns its elements, so it is Send when T is and Sync when T is.
 // Types built on Vec (String, std.soa) get both structurally from their Vec fields.
 // Capacity arithmetic that overflows usize is an allocation failure (`OutOfMemory`), never an
-// `Overflow` panic. The `try_` methods return `Result.Err(AllocError)` instead of panicking and
-// leave the Vec as it was; every other method that allocates panics `OutOfMemory`.
+// `Overflow` panic. The `try_` methods return `Result.Err` instead of panicking (`AllocError`;
+// `try_push` gives its value back) and leave the Vec as it was; every other method that allocates panics `OutOfMemory`.
 
 import runtime.alloc;
 import runtime.panic;
@@ -108,9 +108,9 @@ impl<T> Vec<T> {
         self.len = self.len + 1;
     }
 
-    // On failure x is dropped; `try_reserve(1)` then `push(x)` keeps it.
-    pub fn try_push(&mut self, x: T) -> Result<(), AllocError> {
-        if self.len == self.cap { self.try_reserve(1)?; }
+    // On failure x comes back in the `Err`, so nothing is dropped behind the caller's back.
+    pub fn try_push(&mut self, x: T) -> Result<(), T> {
+        if self.len == self.cap && self.try_reserve(1).is_err() { return Result.Err(x); }
         let slot = mem.add_mut(self.ptr, self.len);
         unsafe("len < cap: slot is inside the buffer and uninitialized") { slot.write(x); }
         self.len = self.len + 1;

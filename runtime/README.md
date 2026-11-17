@@ -103,8 +103,10 @@ pub unsafe(..) fn try_realloc(p: *mut u8, old_size: usize, alignment: usize, new
 Sized deallocation (no headers); `alignment` a power of two; size 0 → a dangling aligned pointer.
 `try_alloc` / `try_realloc` (std's `try_` methods) return null where `alloc` / `realloc` panic
 `OutOfMemory`; a failed `try_realloc` leaves its block unchanged.
-Planned: `allocator my.alloc;` provides the `alloc`, `free`, `realloc` signatures and the compiler binds std's
-calls of `runtime.alloc.{alloc,free,realloc}` to them. Today the declaration is only parsed and
+`alloc` and `realloc` are derived: `try_alloc` / `try_realloc` plus the `OutOfMemory` trap.
+Planned: `allocator my.alloc;` provides only the fallible forms and `free` (`try_alloc`,
+`try_realloc`, `free`, the signatures above) and the compiler binds `runtime.alloc`'s calls of
+them to its module; `alloc` and `realloc` stay derived. Today the declaration is only parsed and
 checked (at most one per binary, E0104), and release builds keep its module's `alloc`, `free`,
 and `realloc` as roots; std's calls still go to `runtime.alloc`.
 

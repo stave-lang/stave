@@ -1,11 +1,10 @@
 // runtime.alloc: the global allocator, over mmap/munmap/mremap.
 //
-// API (the one std uses; an `allocator my.alloc;` module provides the same three fns):
-//   alloc(size, alignment) -> *mut u8                  never null; OutOfMemory panic on failure
+// API (the one std uses). The replaceable part, which an `allocator my.alloc;` module provides:
+//   try_alloc(size, alignment) -> *mut u8              null on failure
+//   try_realloc(p, old_size, alignment, new_size)      null on failure, p then left as it was
 //   free(p, size, alignment)                           size and alignment as passed to alloc/realloc
-//   realloc(p, old_size, alignment, new_size) -> *mut u8
-// Fallible forms for std's `try_` methods: try_alloc and try_realloc return null where alloc and
-// realloc panic `OutOfMemory`; a failed try_realloc leaves p as it was.
+// Derived, never replaced: alloc and realloc, the same calls with an `OutOfMemory` panic on null.
 // `alignment` is a power of two. size 0 returns `alignment` itself as a dangling, aligned, non-null
 // pointer that is never dereferenced; freeing it is a no-op. The caller passes the size back
 // (sized deallocation), so blocks carry no header.
