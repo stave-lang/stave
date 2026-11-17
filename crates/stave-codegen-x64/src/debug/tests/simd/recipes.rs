@@ -103,14 +103,35 @@ fn probe(sp: &mut Sp, op: VecOp, key: &str, form: &str) -> Option<Probe> {
     match op {
         Splat => (p.params, p.ret) = (vec![scalar], Some(v)),
         Add | Sub | Mul | Div | MinX86 | MaxX86 | Min | Max | MinNum | MaxNum | Copysign | AddWrap
-        | SubWrap | MulWrap | AddSat | SubSat | And | Or | Xor | Andnot => {
+        | SubWrap | MulWrap | AddSat | SubSat | MulSat | And | Or | Xor | Andnot => {
             (p.params, p.ret) = (vec![v, v], Some(v))
         }
-        Neg | Abs | Sqrt | Floor | Ceil | Round | Trunc | AbsWrap | Not => {
-            (p.params, p.ret) = (vec![v], Some(v))
-        }
+        Neg | Abs | Sqrt | Floor | Ceil | Round | Trunc | AbsWrap | Not | Popcount | Clz | ScanAdd
+        | ScanAddWrap => (p.params, p.ret) = (vec![v], Some(v)),
         Fma => (p.params, p.ret) = (vec![v, v, v], Some(v)),
-        CheckedAdd | CheckedSub => (p.params, p.ret) = (vec![v, v], Some(sp.res_t(Res::Opt(s)))),
+        CheckedAdd | CheckedSub | CheckedMul => (p.params, p.ret) = (vec![v, v], Some(sp.res_t(Res::Opt(s)))),
+        DivConst => (p.params, p.ret, p.consts) = (vec![v], Some(v), vec![worst_divisor(lane)]),
+        // reversed lanes: bytes cross their 128-bit blocks
+        Permute => (p.params, p.ret, p.consts) = (vec![v], Some(v), (0..s.n).rev().map(i128::from).collect()),
+        Lookup => (p.params, p.ret) = (vec![v, v], Some(v)),
+        Compress | Expand => (p.params, p.ret, p.mask_params) = (vec![v, m], Some(v), 1),
+        Gather | Scatter => {
+            // an array of a constant length, which 32-bit indices reach
+            let at = sp.p.m.types.intern(TypeKey::Array { elem: scalar, len: 1000 });
+            let arr = sp.p.m.types.ref_(op == Scatter, at);
+            let iv = sp.vt(sh(Lane::uint(lane.bits()), s.n));
+            p.checks = &["vpcmp", "kortest"];
+            if op == Gather {
+                (p.params, p.ret) = (vec![arr, iv], Some(v));
+            } else {
+                p.params = vec![arr, iv, v];
+            }
+        }
+        StoreStream => {
+            let st = sp.p.m.types.intern(TypeKey::Slice { elem: scalar, align: Some(64) });
+            let sl = sp.p.m.types.ref_(true, st);
+            (p.params, p.checks) = (vec![sl, t.usize, v], &["test"]);
+        }
         Shl | Shr | ShlWrap if form == "const" => (p.params, p.ret, p.consts) = (vec![v], Some(v), vec![3]),
         Shl | Shr => (p.params, p.ret, p.checks) = (vec![v, v], Some(v), &["vpcmpu", "kortest", "vpcmpnleu"]),
         ShlWrap => (p.params, p.ret) = (vec![v, v], Some(v)),
@@ -149,6 +170,20 @@ fn probe(sp: &mut Sp, op: VecOp, key: &str, form: &str) -> Option<Probe> {
         _ => return None,
     }
     Some(p)
+}
+
+/// A divisor whose sequence is the longest of the lane type's: a multiplier one bit too wide
+/// (unsigned), or added to the dividend and negated (signed).
+fn worst_divisor(l: Lane) -> i128 {
+    match (l.bits(), l.signed()) {
+        (8, false) => 7,
+        (8, true) => -7,
+        (16, false) => 7,
+        (16, true) => -15,
+        (32, false) => 7,
+        (32, true) => -7,
+        _ => 7,
+    }
 }
 
 /// The instructions of the probe's function, compiled for the v4 baseline as a release build
@@ -300,16 +335,12 @@ fn code_counts(code: &[Inst], p: &Probe, want: &BTreeMap<String, usize>) -> BTre
     out
 }
 
-/// Rows of ops K mode lowers that it still lacks: 8-bit lanes shifted by a vector.
-const LACKING: [(&str, &str, &str); 4] = [
-    ("vec.shl", "int8", "vector"),
-    ("vec.shl.wrap", "int8", "vector"),
-    ("vec.shr", "u8", "vector"),
-    ("vec.shr", "i8", "vector"),
-];
-
 /// Rows of the v4 column backed by K mode.
-const BACKED: usize = 347;
+const BACKED: usize = 411;
+
+/// The v4 rows no K-mode code backs: unavailable cells, and rows of f16 / bf16 lanes alone,
+/// which no backend holds in vectors.
+const NOT_BACKED: [&str; 0] = [];
 
 #[test]
 fn v4_recipes_are_the_emitted_code() {
@@ -317,16 +348,18 @@ fn v4_recipes_are_the_emitted_code() {
         return;
     }
     let mut backed = Vec::new();
+    let mut unbacked = Vec::new();
     let mut failures = Vec::new();
     let mut total = 0;
     for e in Tier::V4.entries() {
         let Some(cell) = e.baseline(Tier::V4) else { continue };
         total += 1;
         let Some(&op) = VecOp::ALL.iter().find(|o| o.name() == e.op) else { continue };
-        if cell.class == Class::U || K_UNSUPPORTED.contains(&op) {
+        let row = format!("{} {} {}", e.op, e.ty, e.form);
+        if cell.class == Class::U {
+            unbacked.push(row);
             continue;
         }
-        let lacking = LACKING.contains(&(e.op, e.ty, e.form));
         let mut ok = true;
         // a row of f16 / bf16 lanes alone is backed by no code
         let mut checked = false;
@@ -340,9 +373,7 @@ fn v4_recipes_are_the_emitted_code() {
             let code = probe(&mut sp, op, key, e.form).and_then(|p| code_of(sp, &p).map(|c| (p, c)));
             let Some((p, code)) = code else {
                 ok = false;
-                if !lacking {
-                    failures.push(format!("{} {key} {}: no K-mode code", e.op, e.form));
-                }
+                failures.push(format!("{} {key} {}: no K-mode code", e.op, e.form));
                 continue;
             };
             let want = recipe_counts(recipe);
@@ -358,9 +389,10 @@ fn v4_recipes_are_the_emitted_code() {
                 ));
             }
         }
-        assert!(!(ok && lacking), "{} {} {}: listed as lacking, but backed", e.op, e.ty, e.form);
         if ok && checked {
-            backed.push(format!("{} {} {}", e.op, e.ty, e.form));
+            backed.push(row);
+        } else if ok {
+            unbacked.push(row);
         }
     }
     assert!(failures.is_empty(), "{} rows differ:\n{}", failures.len(), failures.join("\n"));
@@ -368,4 +400,5 @@ fn v4_recipes_are_the_emitted_code() {
         eprintln!("v4 rows backed by K mode: {} of {total}", backed.len());
     }
     assert_eq!(backed.len(), BACKED, "v4 rows backed by K mode (of {total})");
+    assert_eq!(unbacked, NOT_BACKED, "v4 rows no K-mode code backs");
 }

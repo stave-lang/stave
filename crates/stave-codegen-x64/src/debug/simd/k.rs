@@ -20,10 +20,11 @@ use stave_ir::{Operand, PanicKind, TypeId, Value};
 use super::{Sh, VSrc, by_w, y};
 use crate::debug::abi::VCls;
 use crate::debug::func::*;
-use crate::debug::{Res, bad, unsup};
+use crate::debug::{Res, bad};
 use crate::enc::*;
 
 mod cast;
+mod ops;
 
 fn fp(p: Prec, ps: EOp, pd: EOp) -> EOp {
     if p == Prec::F32 { ps } else { pd }
@@ -683,10 +684,7 @@ impl Cg<'_, '_> {
             return self.vput(rv, x, sz);
         }
         if sh.w == 1 {
-            return Err(unsup(format!(
-                "{} of 8-bit lanes by a vector in a fn compiled for the AVX-512 set",
-                op.name()
-            )));
+            return self.k_shift_bytes(op, a, amt, rt, rv);
         }
         let s = self.vread(amt, sz)?;
         let x = self.vget(a, sz)?;
@@ -1042,10 +1040,7 @@ impl Cg<'_, '_> {
             // no vector form at any tier: lane by lane on the home bytes
             DivLanes => self.v_div(op, arg(0)?, arg(1)?, rt?, rv?),
             MulSat | CheckedMul | DivConst | Popcount | Clz | ScanAdd | ScanAddWrap | Permute | Lookup
-            | Compress | Expand | StoreStream | Gather | Scatter => Err(unsup(format!(
-                "{} in a fn compiled for the AVX-512 set (`avx512f`, `avx512bw`, `avx512vl`, `avx512dq`, `avx512cd`)",
-                op.name()
-            ))),
+            | Compress | Expand | StoreStream | Gather | Scatter => self.kops_emit(op, args, ty, res),
         }
     }
 }
