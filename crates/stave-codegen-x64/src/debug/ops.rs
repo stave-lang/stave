@@ -764,17 +764,18 @@ impl Cg<'_, '_> {
             Shape::Fields(fs) if fs.len() == 2 => (fs[0].0 as i64, fs[1].0 as i64, fs[0].1),
             _ => return Err(bad("mul.wide result must be a pair")),
         };
-        let bits = match self.sk(t) {
-            Some(Sk::Int(it)) if !it.signed && (it.bits == 32 || it.bits == 64) => it.bits,
-            _ => return Err(bad("mul.wide needs u32 or u64")),
+        let (bits, signed) = match self.sk(t) {
+            Some(Sk::Int(it)) if it.bits == 32 || it.bits == 64 => (it.bits, it.signed),
+            _ => return Err(bad("mul.wide needs a 32- or 64-bit int")),
         };
         if bits == 32 {
+            // the operands are normalized to 64 bits: their product is exact
             let bo = self.read_gi(b)?;
             let r = self.new_g(a)?;
             self.imul_gi(Size::Q, r, bo)?;
             let d = self.def_mem(v)?;
             self.a.mov_rr(Size::Q, S0, r);
-            self.a.shift_ri(ShiftOp::Shr, Size::Q, S0, 32)?;
+            self.a.shift_ri(if signed { ShiftOp::Sar } else { ShiftOp::Shr }, Size::Q, S0, 32)?;
             self.a.mov_mr(Size::D, disp(d, o0)?, S0)?;
             self.a.mov_mr(Size::D, disp(d, o1)?, r)?;
             return Ok(());
@@ -783,7 +784,7 @@ impl Cg<'_, '_> {
         self.reserve_g(RDX)?;
         let br = self.read_g(b)?;
         self.copy_to_g(a, RAX)?;
-        self.a.unary(UnaryOp::Mul, Size::Q, br)?;
+        self.a.unary(if signed { UnaryOp::Imul } else { UnaryOp::Mul }, Size::Q, br)?;
         let d = self.def_mem(v)?;
         self.a.mov_mr(Size::Q, disp(d, o0)?, RDX)?;
         self.a.mov_mr(Size::Q, disp(d, o1)?, RAX)?;

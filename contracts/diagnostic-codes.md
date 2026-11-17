@@ -77,7 +77,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0205 | constant shift amount ≥ bit width |
 | E0206 | operator not defined for type (e.g. `+%` on a float) |
 | E0207 | non-unit function can reach its end without `return` (a `()` function falling off its end is an implicit `return;`). Case `never`: a `-> never` function with a reachable `return` or a reachable end of body |
-| E0208 | no method or field `<name>` on type `<T>` (e.g. `mul_wide` on `u16`: it exists on `u32` and `u64` only) |
+| E0208 | no method or field `<name>` on type `<T>` (e.g. `mul_wide` on `u16`: it exists on `i32`, `i64`, `u32` and `u64` only) |
 | E0209 | `never` used outside a return type: it is legal only after `->` of a fn signature or a fn type |
 | E0210 | expression statement whose type is not `()` or `never` (discarded value, e.g. an ignored `Result`). Discard explicitly with `let _ = e;` (drops at once). Exact fix |
 | E0211 | contract operand not allowed: `requires`/`ensures` take a `bool` expression over params, fields, `.len()`, literals, arithmetic, comparison, `&&` `||` `!`, and calls of safe fns whose args are `&` or Copy; no `unsafe`, `&mut`, `static`/`static mut`. Case `trait-impl`: a contract on a trait impl method. Planned |
@@ -111,7 +111,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0604 | plain `+ - *` on an integer vector (choose `+%`, `+|`, or `checked_add`) |
 | E0605 | mask width or count does not match the vector (use `m.rewiden::<W>()`) |
 | E0606 | aligned load or store on a slice whose type lacks that alignment (use `align_to`) |
-| E0607 | vector integer division by a non-constant (use `div_lanes`) |
+| E0607 | vector integer division by a non-constant: `a / b`, or `a.div_const(k)` with `k` not a const-expr (use `div_lanes`). Case `zero`: `a.div_const(k)` with `k` = 0 |
 | E0608 | permute or table index out of range at compile time |
 | E0609 | generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument. Write `f32x8` / `mask32x8` |
 | E0700 | operation unavailable (class U) on the target, outside `emulate { }` |

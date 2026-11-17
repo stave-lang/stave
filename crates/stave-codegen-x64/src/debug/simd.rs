@@ -657,6 +657,7 @@ impl Cg<'_, '_> {
             }
             AddSat | SubSat => self.v_sat(op, arg(0)?, arg(1)?, rt?, rv?),
             MulSat => self.v_mul_sat(arg(0)?, arg(1)?, rt?, rv?),
+            MulHi => self.v_mul_hi(arg(0)?, arg(1)?, rt?, rv?),
             CheckedAdd | CheckedSub | CheckedMul => self.v_checked(op, arg(0)?, arg(1)?, rt?, rv?),
             DivLanes | DivConst => self.v_div(op, arg(0)?, arg(1)?, rt?, rv?),
             AbsWrap | Popcount | Clz | Not | MaskNot => self.v_int_un(op, arg(0)?, rt?, rv?),

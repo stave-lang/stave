@@ -174,6 +174,26 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        op: "vec.mul_hi",
+        ty: "int8/int16/int32",
+        form: "",
+        keys: &["i8", "u8", "i16", "u16", "i32", "u32"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 3, recipe: "?mull; ?mull2; uzp2", recipes: &["smull; smull2; uzp2", "umull; umull2; uzp2", "smull; smull2; uzp2", "umull; umull2; uzp2", "smull; smull2; uzp2", "umull; umull2; uzp2"], note: "", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "?mulh", recipes: &["smulh", "umulh", "smulh", "umulh", "smulh", "umulh"], note: "", unverified: false },
+        ],
+    },
+    Entry {
+        op: "vec.mul_hi",
+        ty: "int64",
+        form: "",
+        keys: &["i64", "u64"],
+        cells: &[
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 8, recipe: "umov x4; ?mulh x2; ins x2", recipes: &["umov x4; smulh x2; ins x2", "umov x4; umulh x2; ins x2"], note: "no 64-bit lane high multiply: per lane through general registers", unverified: false },
+            Cell { tier: Tier::Sve, feature: None, class: Class::N, cost: 1, recipe: "?mulh", recipes: &["smulh", "umulh"], note: "", unverified: false },
+        ],
+    },
+    Entry {
         op: "vec.mul.sat",
         ty: "i8/i16/i32",
         form: "",
@@ -429,7 +449,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["u8"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 48, recipe: "umov x16; udiv x16; ins x16", recipes: &["umov x16; udiv x16; ins x16"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "umull; umull2; uzp2; uhadd; ushr", recipes: &["umull; umull2; uzp2; uhadd; ushr"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "umulh; sub; lsr; add; lsr", recipes: &["umulh; sub; lsr; add; lsr"], note: "", unverified: false },
         ],
     },
@@ -439,7 +459,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["u16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 24, recipe: "umov x8; udiv x8; ins x8", recipes: &["umov x8; udiv x8; ins x8"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "umull; umull2; uzp2; uhadd; ushr", recipes: &["umull; umull2; uzp2; uhadd; ushr"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "umulh; sub; lsr; add; lsr", recipes: &["umulh; sub; lsr; add; lsr"], note: "", unverified: false },
         ],
     },
@@ -449,7 +469,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["u32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 12, recipe: "umov x4; udiv x4; ins x4", recipes: &["umov x4; udiv x4; ins x4"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 5, recipe: "umull; umull2; uzp2; uhadd; ushr", recipes: &["umull; umull2; uzp2; uhadd; ushr"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "umulh; sub; lsr; add; lsr", recipes: &["umulh; sub; lsr; add; lsr"], note: "", unverified: false },
         ],
     },
@@ -469,7 +489,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i8"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 48, recipe: "smov x16; sdiv x16; ins x16", recipes: &["smov x16; sdiv x16; ins x16"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "smull; smull2; uzp2; add; sshr x2; sub", recipes: &["smull; smull2; uzp2; add; sshr x2; sub"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "smulh; add; asr; lsr; add", recipes: &["smulh; add; asr; lsr; add"], note: "", unverified: false },
         ],
     },
@@ -479,7 +499,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i16"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 24, recipe: "smov x8; sdiv x8; ins x8", recipes: &["smov x8; sdiv x8; ins x8"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "smull; smull2; uzp2; add; sshr x2; sub", recipes: &["smull; smull2; uzp2; add; sshr x2; sub"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "smulh; add; asr; lsr; add", recipes: &["smulh; add; asr; lsr; add"], note: "", unverified: false },
         ],
     },
@@ -489,7 +509,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         form: "",
         keys: &["i32"],
         cells: &[
-            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 12, recipe: "smov x4; sdiv x4; ins x4", recipes: &["smov x4; sdiv x4; ins x4"], note: "per lane through general registers", unverified: false },
+            Cell { tier: Tier::Neon, feature: None, class: Class::M, cost: 7, recipe: "smull; smull2; uzp2; add; sshr x2; sub", recipes: &["smull; smull2; uzp2; add; sshr x2; sub"], note: "", unverified: false },
             Cell { tier: Tier::Sve, feature: None, class: Class::M, cost: 5, recipe: "smulh; add; asr; lsr; add", recipes: &["smulh; add; asr; lsr; add"], note: "", unverified: false },
         ],
     },

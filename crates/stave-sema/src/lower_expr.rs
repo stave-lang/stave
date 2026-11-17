@@ -1718,6 +1718,29 @@ impl<'a> FnCx<'a> {
                 let tt = self.tys.mk_tuple(vec![t, t]);
                 E::V(self.op2(Op::MulWide, tt, a, b), tt)
             }
+            "mul_hi" => {
+                let t = p.ty;
+                let Some(a) = self.read(&p) else { return E::Never };
+                let Some(b) = self.val(args.first().copied().unwrap_or(n), Some(t)) else { return E::Never };
+                let (signed, bits) = match self.kind(t) {
+                    TypeKind::Int { signed, bits } => (signed, bits),
+                    _ => return self.fail_at(Some(seg), "mul_hi"),
+                };
+                if bits.bits() >= 32 {
+                    let tt = self.tys.mk_tuple(vec![t, t]);
+                    let w = self.op2(Op::MulWide, tt, a, b);
+                    let z = self.int(0);
+                    return E::V(self.op2(Op::Get, t, w, z), t);
+                }
+                // the exact product in 32 bits, its bits above the operand width
+                let wt = self.t_int(signed, crate::types::IntBits::B32);
+                let (wa, wb) =
+                    (self.op1(Op::Cast(CastKind::Exact), wt, a), self.op1(Op::Cast(CastKind::Exact), wt, b));
+                let prod = self.op2(Op::MulWrap, wt, wa, wb);
+                let k = self.int(i128::from(bits.bits()));
+                let Some(hi) = self.trapping(seg, Op::Shr, Some(wt), &[prod, k]) else { return E::Never };
+                E::V(self.op1(Op::Cast(CastKind::Wrap), t, hi), t)
+            }
             "popcount" | "clz" | "ctz" => {
                 let t = p.ty;
                 let Some(a) = self.read(&p) else { return E::Never };

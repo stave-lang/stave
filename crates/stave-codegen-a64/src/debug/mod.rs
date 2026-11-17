@@ -79,7 +79,7 @@
 //!
 //! Integers are kept normalized in 64-bit registers (sign- or zero-extended from their width, as
 //! the interpreter carries them), so compares and divisions use 64-bit forms and narrow results
-//! are re-normalized (`sxt*`/`uxt*`). `mul.wide`: `umulh` + `mul` (u64), `umull` (u32).
+//! are re-normalized (`sxt*`/`uxt*`). `mul.wide`: `umulh`/`smulh` + `mul` (64-bit), `umull`/`smull` (32-bit).
 //! `popcount`: `cnt`/`addv` on `v31`; `ctz`: `rbit` + `clz`. Floats are IEEE (FPCR default: round
 //! to nearest even, no flush to zero); `rem` calls `__stave_fmod` (exact, integer algorithm; f32
 //! via exact f64 widening). `as|` float → int is `fcvtzs`/`fcvtzu` (saturating, NaN → 0) plus a

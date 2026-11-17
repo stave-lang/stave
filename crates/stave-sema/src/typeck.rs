@@ -66,8 +66,8 @@ pub enum Target {
     /// A trait method called through a bound or a qualified `Trait.m(x)` with `Self` = `self_ty`.
     TraitMethod { method: DeclId, self_ty: TypeId, args: Vec<GArg> },
     /// A built-in method of a built-in type, or a type-relative built-in (`f32x4.splat`);
-    /// `ret`: the call's result type; `consts`: its constant generic arguments (`div_const::<K>`,
-    /// the `permute` lane indices).
+    /// `ret`: the call's result type; `consts`: its constants (the `div_const` divisor's bits,
+    /// two's complement for signed lanes; the `permute` lane indices).
     Builtin { name: &'static str, recv: TypeId, adjust: Adjust, ret: TypeId, consts: Vec<u64> },
     /// A user-type operator: the trait method (`Add.add`) through the impl or a bound.
     Op { method: MethodRef, args: Vec<GArg> },

@@ -69,6 +69,7 @@ const OPS: &[Row] = &[
     row("int mul wrapping i8", &[(&["vec.mul.wrap"], "", &["i8", "u8"])]),
     row("int mul wrapping i64", &[(&["vec.mul.wrap"], "", &["i64", "u64"])]),
     row("int mul saturating", &[(&["vec.mul.sat"], "", INT)]),
+    row("int mul high half", &[(&["vec.mul_hi"], "", INT)]),
     row("sat add/sub i8/i16", &[(&["vec.add.sat", "vec.sub.sat"], "", &["i8", "u8", "i16", "u16"])]),
     row("sat add i32/i64", &[(&["vec.add.sat"], "", &["i32", "u32", "i64", "u64"])]),
     signed_row("sat sub i32/i64", &[(&["vec.sub.sat"], "", &["i32", "u32", "i64", "u64"])]),
