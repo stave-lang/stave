@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// `rec fn` items, methods, and test fns declare their names like plain fns.
+rec fn fact(n: u64) -> u64 {
+    return if n == 0 then 1 else n * fact(n - 1);
+}
+
+struct Tree { depth: u32 }
+
+impl Tree {
+    pub rec fn count(&self, k: u32) -> u32 {
+        return if k == 0 then self.depth else self.count(k - 1);
+    }
+}
+
+test rec fn fact_small() {
+    let t = Tree.{ depth: 2 };
+    let n = fact(5) + t.count(3) as u64;
+}
+
+fn main() -> i32 {
+    return fact(3) as% i32;
+}

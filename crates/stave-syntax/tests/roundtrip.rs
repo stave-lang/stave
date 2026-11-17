@@ -134,6 +134,9 @@ impl Gen {
                 if self.chance(30) {
                     self.w("needs(avx2)");
                 }
+                if self.chance(20) {
+                    self.w("without(alloc, unsafe)");
+                }
             }
             9 => {
                 self.w("Vec <");
@@ -617,6 +620,17 @@ impl Gen {
         }
     }
 
+    /// A fn item or method signature: `fn_sig` plus the optional `rec` and `without(..)`.
+    fn decl_sig(&mut self, with_self: bool) {
+        if self.chance(15) {
+            self.w("rec");
+        }
+        self.fn_sig(with_self);
+        if self.chance(15) {
+            self.w("without(trap, lock)");
+        }
+    }
+
     fn item(&mut self, d: u32) {
         match self.pick(15) {
             0..=3 => {
@@ -626,7 +640,7 @@ impl Gen {
                 if self.chance(10) {
                     self.w("unsafe(\"why\")");
                 }
-                self.fn_sig(false);
+                self.decl_sig(false);
                 self.contracts(d.min(1));
                 self.block(d);
             }
@@ -698,7 +712,7 @@ impl Gen {
                     if self.chance(20) {
                         self.w("unsafe(\"x\")");
                     }
-                    self.fn_sig(true);
+                    self.decl_sig(true);
                     self.contracts(d.min(1));
                     self.block(d.saturating_sub(1));
                     self.nl();

@@ -162,9 +162,9 @@ pub(crate) fn dropped_names(toks: &[Token], start: usize, end: usize) -> Dropped
     let mut out = DroppedNames { names: Vec::new(), impl_header_idents: Vec::new() };
     let end = end.min(toks.len());
     let mut i = start;
-    // Prefixes: pub, test, unsafe("..").
+    // Prefixes: pub, test, unsafe(".."), rec.
     loop {
-        if is(toks, i, Term::KwPub) || is(toks, i, Term::KwTest) {
+        if is(toks, i, Term::KwPub) || is(toks, i, Term::KwTest) || is(toks, i, Term::KwRec) {
             i += 1;
         } else if is(toks, i, Term::KwUnsafe) {
             i += 1;

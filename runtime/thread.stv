@@ -82,13 +82,13 @@ fn start(f: fn()) -> usize {
         cannot_create();
     }
     let w = fn_words(f);
-    let rec = (base + guard + size + alt) as *mut Thread;
+    let th = (base + guard + size + alt) as *mut Thread;
     let st = state.get();
     let idp = unsafe("st is runtime.state.STATE; only the field address is taken") &mut (*st).next_thread as *mut u64;
     let id = unsafe("idp is the thread counter of the state block") atomic.fetch_add_u64(idp, 1) + 1;
     let e = register(base, base + len, base + guard, id);
-    unsafe("rec is the record page of the fresh mapping; no thread uses it yet") {
-        rec.write(Thread.{
+    unsafe("th is the record page of the fresh mapping; no thread uses it yet") {
+        th.write(Thread.{
             tid: 0,
             pad: 0,
             code: w[0],
@@ -101,10 +101,10 @@ fn start(f: fn()) -> usize {
             next: 0,
         });
     }
-    let tidp = unsafe("rec is the record (above)") &mut (*rec).tid as *mut u32;
-    let r = unsafe("[base + guard, + size) is the fresh stack; tid lives in the record until join unmaps it; entry reads rec") os.spawn_thread(base + guard, size, tidp, rec as usize);
+    let tidp = unsafe("th is the record (above)") &mut (*th).tid as *mut u32;
+    let r = unsafe("[base + guard, + size) is the fresh stack; tid lives in the record until join unmaps it; entry reads th") os.spawn_thread(base + guard, size, tidp, th as usize);
     if r < 0 {
-        unsafe("the thread was not created: nothing else uses the mapping") { release(rec); }
+        unsafe("the thread was not created: nothing else uses the mapping") { release(th); }
         if r != -os.ENOSYS {
             cannot_create();
         }
@@ -112,7 +112,7 @@ fn start(f: fn()) -> usize {
         f();
         return 0;
     }
-    return rec as usize;
+    return th as usize;
 }
 
 // The panic of a failed thread creation (kind Assert at the user site, message on the next line).
@@ -125,21 +125,21 @@ fn cannot_create() -> never {
 pub unsafe("h came from start and is joined once")
 fn join(h: usize) {
     if h == 0 { return; }
-    let rec = h as *mut Thread;
-    let tidp = unsafe("rec is a live record (caller)") &mut (*rec).tid as *mut u32;
+    let th = h as *mut Thread;
+    let tidp = unsafe("th is a live record (caller)") &mut (*th).tid as *mut u32;
     loop {
         let t = unsafe("tidp is the record's futex word") atomic.load_u32(tidp as *const u32);
         if t == 0 { break; }
         // not FUTEX_PRIVATE: the kernel's exit-time wake of CLONE_CHILD_CLEARTID is a shared one
         let r = unsafe("tidp is a valid futex word") os.futex(tidp, os.FUTEX_WAIT, t, 0, 0, 0);
     }
-    unsafe("the thread has exited: nothing else uses the record or its mapping") { release(rec); }
+    unsafe("the thread has exited: nothing else uses the record or its mapping") { release(th); }
 }
 
-unsafe("rec is the record of a mapping no thread uses any more") fn release(rec: *mut Thread) {
-    let e = unsafe("caller obligation") (*rec).entry;
-    let base = unsafe("caller obligation") (*rec).map;
-    let len = unsafe("caller obligation") (*rec).map_len;
+unsafe("th is the record of a mapping no thread uses any more") fn release(th: *mut Thread) {
+    let e = unsafe("caller obligation") (*th).entry;
+    let base = unsafe("caller obligation") (*th).map;
+    let len = unsafe("caller obligation") (*th).map_len;
     unregister(e);
     let r = unsafe("the mapping holds no live object (caller)") os.munmap(base, len);
 }
@@ -151,8 +151,8 @@ pub unsafe("f's captures stay valid until scope_join(list) returns (the lowering
 fn scope_spawn(list: &mut usize, f: fn()) {
     let h = unsafe("caller obligation") start(f);
     if h == 0 { return; }
-    let rec = h as *mut Thread;
-    unsafe("rec is the live record start returned; only the spawning thread links it") { (*rec).next = *list; }
+    let th = h as *mut Thread;
+    unsafe("th is the live record start returned; only the spawning thread links it") { (*th).next = *list; }
     *list = h;
 }
 
@@ -160,8 +160,8 @@ fn scope_spawn(list: &mut usize, f: fn()) {
 pub fn scope_join(list: &mut usize) {
     let mut h = *list;
     while h != 0 {
-        let rec = h as *mut Thread;
-        let next = unsafe("h is a live record of this list") (*rec).next;
+        let th = h as *mut Thread;
+        let next = unsafe("h is a live record of this list") (*th).next;
         unsafe("h came from spawn and is in this list once") { join(h); }
         h = next;
     }
@@ -171,12 +171,12 @@ pub fn scope_join(list: &mut usize) {
 // ---- thread start (called by `__stave_thread_start`) ----
 
 pub fn entry(arg: usize) -> usize {
-    let rec = arg as *const Thread;
-    let alt = unsafe("arg is the record start passed to spawn_thread") (*rec).alt;
-    let alt_len = unsafe("arg is the record start passed to spawn_thread") (*rec).alt_len;
+    let th = arg as *const Thread;
+    let alt = unsafe("arg is the record start passed to spawn_thread") (*th).alt;
+    let alt_len = unsafe("arg is the record start passed to spawn_thread") (*th).alt_len;
     let ok = panic.set_altstack(alt, alt_len);
-    let code = unsafe("arg is the record start passed to spawn_thread") (*rec).code;
-    let env = unsafe("arg is the record start passed to spawn_thread") (*rec).env;
+    let code = unsafe("arg is the record start passed to spawn_thread") (*th).code;
+    let env = unsafe("arg is the record start passed to spawn_thread") (*th).env;
     let w: [usize; 2] = [code, env];
     let f = unsafe("w holds the two words of the fn value start was given") *(&w as *const [usize; 2] as *const fn());
     f();

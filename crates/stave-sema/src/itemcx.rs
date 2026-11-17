@@ -384,6 +384,9 @@ impl<'p> ItemCx<'p> {
                         return self.close(a);
                     } else if t == Term::KwFn as u8 {
                         let close = self.close(a + 1);
+                        if let Some(nd) = self.child(n, NodeKind::Without) {
+                            return self.close(self.a(nd) + 1);
+                        }
                         if let Some(nd) = self.child(n, NodeKind::Needs) {
                             return self.close(self.a(nd) + 1);
                         }

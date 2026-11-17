@@ -1,5 +1,5 @@
-(* Fixture for tools/ll1gen/tests/conflicts.rs: a small grammar with only two of the three listed
-   conflicts (Stmt,"unsafe"), (TypeBase,"<"), (TypeBase,"needs") and the rules that
+(* Fixture for tools/ll1gen/tests/conflicts.rs: a small grammar with only three of the four listed
+   conflicts (Stmt,"unsafe"), (TypeBase,"<"), (TypeBase,"needs"), (TypeBase,"without") and the rules that
    contracts/parse-errors.md names. *)
 
 (* ---------- items ---------- *)
@@ -14,9 +14,10 @@ CmpOp       = "<" | ">" ;
 Cast        = Unary ("as" Type)* ;
 Unary       = Unsafe Unary | Ident | IntLit ;
 Type        = TypeBase ;
-TypeBase    = Ident GenericArgs? | "fn" "(" ")" ("->" Type)? ;
+TypeBase    = Ident GenericArgs? | "fn" "(" ")" ("->" Type)? Without? ;
 GenericArgs = "<" Type ("," Type)* ">" ;
 Needs       = "needs" "(" Ident ")" ;
+Without     = "without" "(" Ident ")" ;
 
 (* The origin rules that rules 5-13 of contracts/parse-errors.md name (not reachable from File). *)
 FnDecl       = "fn" Ident "(" Params ")" RetClause Block ;

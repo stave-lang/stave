@@ -1,13 +1,13 @@
 //~ EXIT 101
-//~ STDERR-CONTAINS "panic: StackOverflow at panic_stack.stv:5:4 in main.rec (thread 0)"
+//~ STDERR-CONTAINS "panic: StackOverflow at panic_stack.stv:5:8 in main.down (thread 0)"
 //~ RESOURCE-LIMIT
 // Unbounded recursion overflows main's stack: StackOverflow at the recursing fn's name token.
-fn rec(n: u64) -> u64 {
+rec fn down(n: u64) -> u64 {
     let pad: [u64; 32] = [n; 32];
-    return rec(n + 1) + pad[(n % 32) as usize];
+    return down(n + 1) + pad[(n % 32) as usize];
 }
 
 fn main() -> i32 {
-    let r = rec(0);
+    let r = down(0);
     return 0;
 }

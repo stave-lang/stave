@@ -1,0 +1,22 @@
+//~ PARSE-ONLY
+// D5: `without(..)` directly after a fn type binds to that (innermost) fn type, after its
+// `needs(..)` if any.
+
+// the returned fn type is `without(alloc)`; `pick` itself denies nothing
+fn pick() -> fn() without(alloc) {
+    return plain;
+}
+
+// parenthesized: `pick_without` itself is `without(alloc)`
+fn pick_without() -> (fn()) without(alloc) {
+    return plain;
+}
+
+// both clauses belong to the returned fn type
+fn pick_both() -> fn() needs(avx2) without(trap) {
+    return fast;
+}
+
+fn plain() {}
+
+fn fast() needs(avx2) {}

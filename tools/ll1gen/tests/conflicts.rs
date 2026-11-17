@@ -39,10 +39,10 @@ fn joined(errs: &[Error]) -> String {
     errs.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
 }
 
-/// The three overrides, each resolved to the first listed alternative.
+/// The four overrides, each resolved to the first listed alternative.
 fn check_overrides(t: &Tables) {
     let keys: Vec<(&str, &str)> = t.overrides.iter().map(|o| (o.rule.as_str(), o.token.as_str())).collect();
-    assert_eq!(keys, [("Stmt", "unsafe"), ("TypeBase", "<"), ("TypeBase", "needs")]);
+    assert_eq!(keys, [("Stmt", "unsafe"), ("TypeBase", "<"), ("TypeBase", "needs"), ("TypeBase", "without")]);
     for o in &t.overrides {
         assert!(o.alternatives.len() >= 2, "{o:?}");
         assert_eq!(o.prod, o.alternatives[0], "first listed alternative wins");
@@ -58,7 +58,8 @@ fn check_overrides(t: &Tables) {
         match o.token.as_str() {
             "unsafe" => assert_eq!(first, "Unsafe", "Stmt -> Unsafe Block"),
             "<" => assert_eq!((first, rhs.len()), ("GenericArgs", 1)),
-            _ => assert_eq!((first, rhs.len()), ("Needs", 1)),
+            "needs" => assert_eq!((first, rhs.len()), ("Needs", 1)),
+            _ => assert_eq!((first, rhs.len()), ("Without", 1)),
         }
         // The losing alternative of the two TypeBase helpers is ε.
         if o.rule == "TypeBase" {
@@ -68,10 +69,10 @@ fn check_overrides(t: &Tables) {
 }
 
 #[test]
-fn contract_grammar_has_exactly_the_three_overrides() {
+fn contract_grammar_has_exactly_the_four_overrides() {
     let t = contract();
     check_overrides(&t);
-    assert_eq!(OVERRIDES.len(), 3);
+    assert_eq!(OVERRIDES.len(), 4);
 }
 
 #[test]
@@ -123,7 +124,7 @@ fn split_map() {
 }
 
 #[test]
-fn fixture_with_the_three_overrides_passes() {
+fn fixture_with_the_four_overrides_passes() {
     let t = build_tables(&fixture_src("base.ebnf"), &Config::contract()).expect("base fixture");
     check_overrides(&t);
 }
