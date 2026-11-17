@@ -41,6 +41,7 @@ differential` (part of `cargo test --workspace`); Linux, x86-64 host for the nat
 | histogram | 256-bin byte histogram | `gather`, `scatter` (inside `emulate`), lane-private bins |
 | matmul4 | 4x4 matrix times 4-element points | `permute` broadcasts, `join` (v3), `select` |
 | utf8 | UTF-8 validation (Keiser–Lemire), code points | `lookup`, `>>`, `-|`, `reduce_or` |
+| mulhi | high halves of products on every int lane type (the i32 inputs bitcast), every pair of 8-bit values | `mul_hi`, scalar `mul_hi` and `mul_wide` as references |
 | combinators | the `std.slice` methods on f32 / f64 / i32 / u8 (no `_v3` file: std picks its loops; these slices are mostly shorter than the 512 B to 1 KiB where its 256-bit loops start, which `tests/conformance/simd/combinators_wide.stv` covers) | `sum min max find find_byte find_any_byte count any all eq fill copy_from` |
 | stream_copy | copies f32 / f64 / i32 / u8 into a misaligned destination | `store_stream` (vector and scalar), `write_stream`, `fence_stream`, prefetches past the end |
 
@@ -80,8 +81,8 @@ here is reported and skipped. A build that stops with "not implemented yet" fail
 that are known to fail go in `KNOWN` in `harness.rs`, with the reason; they are reported, not
 failed, and an entry that starts passing fails the test until it is removed.
 
-Default run: about 8,100 cases over the 24 programs, 186 legs, about 86,000 checked lines, about
-45 s on an 8-core x86-64 host with Intel SDE. `STAVE_DIFF_FULL=1 STAVE_DIFF_RANDOM=256` checks
+Default run: about 8,400 cases over the 28 programs, 206 legs, about 87,000 checked lines, about
+55 s on an 8-core x86-64 host with Intel SDE. `STAVE_DIFF_FULL=1 STAVE_DIFF_RANDOM=256` checks
 several hundred thousand lines in several minutes.
 
 ## Dispatch runs

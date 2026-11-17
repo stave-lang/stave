@@ -128,6 +128,7 @@ ops! {
         Psubusb = (P66, M0F, 0xd8), Psubusw = (P66, M0F, 0xd9),
         Pmullw = (P66, M0F, 0xd5), Pmulld = (P66, M38, 0x40),
         Pmuludq = (P66, M0F, 0xf4), Pmuldq = (P66, M38, 0x28),
+        Pmulhw = (P66, M0F, 0xe5), Pmulhuw = (P66, M0F, 0xe4),
         Pminsb = (P66, M38, 0x38), Pminsw = (P66, M0F, 0xea), Pminsd = (P66, M38, 0x39),
         Pminub = (P66, M0F, 0xda), Pminuw = (P66, M38, 0x3a), Pminud = (P66, M38, 0x3b),
         Pmaxsb = (P66, M38, 0x3c), Pmaxsw = (P66, M0F, 0xee), Pmaxsd = (P66, M38, 0x3d),

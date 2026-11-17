@@ -173,6 +173,67 @@ v2 = { class = "M", recipe = "psrlq; pmuludq; psrlq; pmuludq; paddq; psllq; pmul
 v3 = { class = "M", recipe = "vpsrlq; vpmuludq; vpsrlq; vpmuludq; vpaddq; vpsllq; vpmuludq; vpaddq" }
 v4 = { class = "N", recipe = "vpmullq" }
 
+# int mul high half: bytes as the high bytes of the even and of the odd bytes' word products;
+# doublewords as the high halves of the even and of the odd lanes' quadword products; quadwords
+# lane by lane (v2, v3: `mul` / `imul` leave the high half in rdx) or from four doubleword
+# products (v4)
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["i16"]
+v2 = { class = "N", recipe = "pmulhw" }
+v3 = { class = "N", recipe = "vpmulhw" }
+v4 = { class = "N", recipe = "vpmulhw" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["u16"]
+v2 = { class = "N", recipe = "pmulhuw" }
+v3 = { class = "N", recipe = "vpmulhuw" }
+v4 = { class = "N", recipe = "vpmulhuw" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["i32"]
+v2 = { class = "M", recipe = "pshufd x2; pmuldq x2; psrlq; pblendw" }
+v3 = { class = "M", recipe = "vpshufd x2; vpmuldq x2; vpsrlq; vpblendw" }
+v4 = { class = "M", recipe = "vpmuldq x2; vpsrlq x2; vpermt2d" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["u32"]
+v2 = { class = "M", recipe = "pshufd x2; pmuludq x2; psrlq; pblendw" }
+v3 = { class = "M", recipe = "vpshufd x2; vpmuludq x2; vpsrlq; vpblendw" }
+v4 = { class = "M", recipe = "vpmuludq x2; vpsrlq x2; vpermt2d" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["i8"]
+v2 = { class = "M", recipe = "psllw x2; pmulhw x2; psrlw; pand x3; por" }
+v3 = { class = "M", recipe = "vpsllw x2; vpmulhw x2; vpsrlw; vpand x3; vpor" }
+v4 = { class = "M", recipe = "vpsllw x2; vpmulhw x2; vpandq x2; vpsrlw; vpternlogq" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["u8"]
+v2 = { class = "M", recipe = "psllw; pand x4; pmulhuw x2; por" }
+v3 = { class = "M", recipe = "vpsllw; vpand x4; vpmulhuw x2; vpor" }
+v4 = { class = "M", recipe = "vpsllw x2; vpmulhuw x2; vpandq x2; vpsrlw; vpternlogq" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["i64"]
+v2 = { class = "M", recipe = "mov x4; imul x2" }
+v3 = { class = "M", recipe = "mov x8; imul x4" }
+v4 = { class = "M", recipe = "vpsrlq x5; vpmuludq x4; vpaddq x4; vpandq x3; vpsraq x2; vpsubq x2" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["u64"]
+v2 = { class = "M", recipe = "mov x4; mul x2" }
+v3 = { class = "M", recipe = "mov x8; mul x4" }
+v4 = { class = "M", recipe = "vpsrlq x5; vpmuludq x4; vpaddq x4; vpandq" }
+
 # saturating add/sub
 
 [[op]]
@@ -306,14 +367,14 @@ op = "vec.mul.sat"
 ty = ["i64"]
 v2 = { class = "M", recipe = "mov x8; imul x2; jno x2; xor x4; sar x2" }
 v3 = { class = "M", recipe = "mov x16; imul x4; jno x4; xor x8; sar x4" }
-v4 = { class = "M", recipe = "imul x8; sar x8; xor x16", note = "lane by lane in general registers: no 64-bit high product" }
+v4 = { class = "M", recipe = "imul x8; sar x8; xor x16", note = "lane by lane in general registers: no 64-bit high-product instruction" }
 
 [[op]]
 op = "vec.mul.sat"
 ty = ["u64"]
 v2 = { class = "M", recipe = "mov x8; mul x2; jnc x2" }
 v3 = { class = "M", recipe = "mov x16; mul x4; jnc x4" }
-v4 = { class = "M", recipe = "mul x8", note = "lane by lane in general registers: no 64-bit high product" }
+v4 = { class = "M", recipe = "mul x8", note = "lane by lane in general registers: no 64-bit high-product instruction" }
 
 # checked add/sub: the result, an any-lane overflow test, the Option tag; checked mul runs lane by lane
 
@@ -406,14 +467,14 @@ op = "vec.checked_mul"
 ty = ["i64"]
 v2 = { class = "M", recipe = "mov x8; imul x2; jo x2; jmp" }
 v3 = { class = "M", recipe = "mov x14; imul x4; jo x4; jmp" }
-v4 = { class = "M", recipe = "imul x8", note = "lane by lane in general registers: no 64-bit high product" }
+v4 = { class = "M", recipe = "imul x8", note = "lane by lane in general registers: no 64-bit high-product instruction" }
 
 [[op]]
 op = "vec.checked_mul"
 ty = ["u64"]
 v2 = { class = "M", recipe = "mov x8; mul x2; jc x2; jmp" }
 v3 = { class = "M", recipe = "mov x14; mul x4; jc x4; jmp" }
-v4 = { class = "M", recipe = "mul x8", note = "lane by lane in general registers: no 64-bit high product" }
+v4 = { class = "M", recipe = "mul x8", note = "lane by lane in general registers: no 64-bit high-product instruction" }
 
 # bitwise
 
@@ -658,63 +719,66 @@ v2 = { class = "M", recipe = "movx x32; sar x16; mov x16" }
 v3 = { class = "M", recipe = "movx x64; sar x32; mov x32" }
 v4 = { class = "M", recipe = "vpandq; vpsrlw; vpsllw; vpsraw; vpsravw x2; vpternlogq" }
 
-# int div by const splat
+# int div by const splat: the multiply-high plans of stave_ir::divmagic (worst case listed); bytes
+# as their even and odd bytes widened to words (an unsigned power of two: a word shift, masked);
+# 64-bit lanes lane by lane in general registers (the one-operand mul / imul leave the high half
+# in rdx)
 
 [[op]]
 op = "vec.div_const"
 ty = ["u16"]
-v2 = { class = "M", recipe = "movx x8; xor x8; div x8; mov x8", note = "a hardware divide per lane" }
-v3 = { class = "M", recipe = "movx x16; xor x16; div x16; mov x16", note = "a hardware divide per lane" }
+v2 = { class = "M", recipe = "pmulhuw; psubw; psrlw x2; paddw" }
+v3 = { class = "M", recipe = "vpmulhuw; vpsubw; vpsrlw x2; vpaddw" }
 v4 = { class = "M", recipe = "vpmulhuw; vpsubw; vpsrlw; vpaddw; vpsrlw" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["i16"]
-v2 = { class = "M", recipe = "movx x8; cqo x8; idiv x8; mov x8", note = "a hardware divide per lane" }
-v3 = { class = "M", recipe = "movx x16; cqo x16; idiv x16; mov x16", note = "a hardware divide per lane" }
+v2 = { class = "M", recipe = "pmulhw; paddw x2; psraw; psrlw" }
+v3 = { class = "M", recipe = "vpmulhw; vpaddw x2; vpsraw; vpsrlw" }
 v4 = { class = "M", recipe = "vpmulhw; vpaddw; vpsraw; vpsrlw; vpaddw; vpsubw" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["u32"]
-v2 = { class = "M", recipe = "movx x4; xor x4; div x4; mov x4", note = "a hardware divide per lane" }
-v3 = { class = "M", recipe = "movx x8; xor x8; div x8; mov x8", note = "a hardware divide per lane" }
+v2 = { class = "M", recipe = "pshufd; pmuludq x2; psrlq; pblendw; psubd; psrld x2; paddd" }
+v3 = { class = "M", recipe = "vpshufd; vpmuludq x2; vpsrlq; vpblendw; vpsubd; vpsrld x2; vpaddd" }
 v4 = { class = "M", recipe = "vpsrlq; vpmuludq x2; vpermt2d; vpsubd; vpsrld; vpaddd; vpsrld" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["i32"]
-v2 = { class = "M", recipe = "movx x4; cqo x4; idiv x4; mov x4", note = "a hardware divide per lane" }
-v3 = { class = "M", recipe = "movx x8; cqo x8; idiv x8; mov x8", note = "a hardware divide per lane" }
+v2 = { class = "M", recipe = "pshufd; pmuldq x2; psrlq; pblendw; paddd x2; psrad; psrld" }
+v3 = { class = "M", recipe = "vpshufd; vpmuldq x2; vpsrlq; vpblendw; vpaddd x2; vpsrad; vpsrld" }
 v4 = { class = "M", recipe = "vpsrlq; vpmuldq x2; vpermt2d; vpaddd; vpsrad; vpsrld; vpaddd; vpsubd" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["u8"]
-v2 = { class = "M", recipe = "movx x16; xor x16; div x16; mov x16", note = "a hardware divide per lane" }
-v3 = { class = "M", recipe = "movx x32; xor x32; div x32; mov x32", note = "a hardware divide per lane" }
+v2 = { class = "M", recipe = "psrlw x3; pand; pmulhuw x2; psllw; por" }
+v3 = { class = "M", recipe = "vpsrlw x3; vpand; vpmulhuw x2; vpsllw; vpor" }
 v4 = { class = "M", recipe = "vpsrlw; vpandq; vpmulhuw x2; vpsllw; vpternlogq" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["i8"]
-v2 = { class = "M", recipe = "movx x16; cqo x16; idiv x16; mov x16", note = "a hardware divide per lane" }
-v3 = { class = "M", recipe = "movx x32; cqo x32; idiv x32; mov x32", note = "a hardware divide per lane" }
+v2 = { class = "M", recipe = "psraw x6; psllw x2; psrlw x2; paddw x2; psubw x2; pand; por" }
+v3 = { class = "M", recipe = "vpsraw x6; vpsllw x2; vpsrlw x2; vpaddw x2; vpsubw x2; vpand; vpor" }
 v4 = { class = "M", recipe = "vpsraw x2; vpsllw x2; vpmulhw x2; vpsrlw x2; vpaddw x2; vpsubw x2; vpternlogq" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["u64"]
-v2 = { class = "M", recipe = "mov x4; xor x2; div x2", note = "a hardware divide per lane" }
-v3 = { class = "M", recipe = "mov x8; xor x4; div x4", note = "a hardware divide per lane" }
-v4 = { class = "M", recipe = "xor x8; div x8", note = "lane by lane in general registers: no 64-bit high product" }
+v2 = { class = "M", recipe = "mov x6; mul x2; sub x2; shr x4; add x2" }
+v3 = { class = "M", recipe = "mov x12; mul x4; sub x4; shr x8; add x4" }
+v4 = { class = "M", recipe = "mul x8; sub x8; shr x16; add x8", note = "lane by lane in general registers: no 64-bit high-product instruction" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["i64"]
-v2 = { class = "M", recipe = "mov x4; cqo x2; idiv x2", note = "a hardware divide per lane" }
-v3 = { class = "M", recipe = "mov x8; cqo x4; idiv x4", note = "a hardware divide per lane" }
-v4 = { class = "M", recipe = "cqo x8; idiv x8", note = "lane by lane in general registers: no 64-bit high product" }
+v2 = { class = "M", recipe = "mov x6; imul x2; add x2; sar x4; sub x2" }
+v3 = { class = "M", recipe = "mov x12; imul x4; add x4; sar x8; sub x4" }
+v4 = { class = "M", recipe = "imul x8; add x8; sar x16; sub x8", note = "lane by lane in general registers: no 64-bit high-product instruction" }
 
 # int div by vector
 

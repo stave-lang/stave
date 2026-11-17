@@ -135,7 +135,8 @@ impl FnVerifier<'_> {
                 self.vshape(t)?;
                 self.check_args(b, args, &[t, t])
             }
-            AddWrap | SubWrap | MulWrap | AddSat | SubSat | MulSat | DivLanes | And | Or | Xor | Andnot => {
+            AddWrap | SubWrap | MulWrap | AddSat | SubSat | MulSat | MulHi | DivLanes | And | Or | Xor
+            | Andnot => {
                 arity(2)?;
                 let t = res()?;
                 self.int_lanes(t)?;

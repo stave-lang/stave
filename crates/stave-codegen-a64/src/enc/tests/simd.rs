@@ -133,7 +133,7 @@ impl Batch {
 
 #[test]
 fn int_three_same() {
-    let ops: [(VBin, &str, u8); 24] = [
+    let ops: [(VBin, &str, u8); 25] = [
         (VBin::Add, "add", BHSD),
         (VBin::Sub, "sub", BHSD),
         (VBin::Mul, "mul", BHS),
@@ -158,6 +158,7 @@ fn int_three_same() {
         (VBin::Cmtst, "cmtst", BHSD),
         (VBin::Sshl, "sshl", BHSD),
         (VBin::Ushl, "ushl", BHSD),
+        (VBin::Uhadd, "uhadd", BHS),
     ];
     let mut b = Batch::new();
     for (op, name, mask) in ops {
@@ -521,6 +522,7 @@ fn shifts_by_immediate() {
         (VShift::Ushr, "ushr", false),
         (VShift::Sli, "sli", true),
         (VShift::Sri, "sri", false),
+        (VShift::Usra, "usra", false),
     ];
     let mut b = Batch::new();
     for (op, name, left) in ops {

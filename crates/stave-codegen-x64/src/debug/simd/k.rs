@@ -1039,8 +1039,10 @@ impl Cg<'_, '_> {
             NarrowWrap | NarrowSat => self.k_narrow(op == NarrowSat, arg(0)?, arg(1)?, rt?, rv?),
             // no vector form at any tier: lane by lane on the home bytes
             DivLanes => self.v_div(op, arg(0)?, arg(1)?, rt?, rv?),
-            MulSat | CheckedMul | DivConst | Popcount | Clz | ScanAdd | ScanAddWrap | Permute | Lookup
-            | Compress | Expand | StoreStream | Gather | Scatter => self.kops_emit(op, args, ty, res),
+            MulSat | MulHi | CheckedMul | DivConst | Popcount | Clz | ScanAdd | ScanAddWrap | Permute
+            | Lookup | Compress | Expand | StoreStream | Gather | Scatter => {
+                self.kops_emit(op, args, ty, res)
+            }
         }
     }
 }

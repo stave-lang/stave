@@ -15,7 +15,9 @@ fn lane_op(op: VecOp) -> Option<(bool, bool, usize)> {
         Min | Max => (true, true, 2),
         Fma => (true, false, 3),
         AbsWrap | Popcount | Clz | Not => (false, true, 1),
-        AddWrap | SubWrap | MulWrap | AddSat | SubSat | MulSat | And | Or | Xor | Andnot => (false, true, 2),
+        AddWrap | SubWrap | MulWrap | AddSat | SubSat | MulSat | MulHi | And | Or | Xor | Andnot => {
+            (false, true, 2)
+        }
         _ => return None,
     })
 }
@@ -189,10 +191,13 @@ fn shifts_and_divisions() {
             }
             cx.case(&format!("div_lanes {}", vt.name()), f, Some(v), vargs(vt, a), O::V(vt, Canon::Exact));
         }
-        let mut divisors = vec![1, 3, 7, it.max(), it.max() - 1];
+        // one of each form of the multiply-high plans
+        let b = i128::from(it.bits);
+        let mut divisors = vec![1, 2, 3, 5, 6, 7, 10, 25, 641, 1 << (b - 2), it.max(), it.max() - 1];
         if it.signed {
-            divisors.extend([-1, -3, it.min()]);
+            divisors.extend([-1, -2, -3, -7, -10, -641, -(1 << (b - 2)), it.min()]);
         }
+        divisors.retain(|&d| it.fits(d));
         for d in divisors {
             let f = cx.wrap(DivConst, &[v], Some(v), &[P::Arg(0), P::K(d)]);
             for a in inputs(&mut cx, vt, 1, 3) {
@@ -890,8 +895,8 @@ fn tested_by(op: VecOp) -> &'static str {
         Neg | Abs | Sqrt | Floor | Ceil | Round | Trunc | Add | Sub | Mul | Div | Copysign | MinNum
         | MaxNum | MinX86 | MaxX86 | Fma => "float_lane_ops",
         Min | Max => "float_lane_ops, int_lane_ops",
-        AbsWrap | Popcount | Clz | Not | AddWrap | SubWrap | MulWrap | AddSat | SubSat | MulSat | And
-        | Or | Xor | Andnot => "int_lane_ops",
+        AbsWrap | Popcount | Clz | Not | AddWrap | SubWrap | MulWrap | AddSat | SubSat | MulSat | MulHi
+        | And | Or | Xor | Andnot => "int_lane_ops",
         Eq | Ne | Lt | Le | Gt | Ge | ReduceAdd | ReduceAddWrap | ReduceMin | ReduceMax | ReduceAnd
         | ReduceOr | ReduceAddOrdered | ScanAdd | ScanAddWrap => "compares_reductions_scans",
         Shl | Shr | ShlWrap | DivLanes | DivConst => "shifts_and_divisions, traps",
@@ -916,7 +921,7 @@ fn every_op_is_tested_or_listed_unsupported() {
     let tested =
         VecOp::ALL.iter().filter(|op| !UNSUPPORTED.contains(op) && !tested_by(**op).is_empty()).count();
     assert_eq!(tested + UNSUPPORTED.len(), VecOp::ALL.len());
-    assert_eq!(VecOp::ALL.len(), 93);
+    assert_eq!(VecOp::ALL.len(), 94);
 }
 
 /// Vector values outside the vector ops: arguments in registers and on the stack (ten vectors,
