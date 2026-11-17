@@ -116,13 +116,13 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0700 | operation unavailable (class U) on the target, outside `emulate { }` |
 | E0701 | class M or U operation inside `strict { }` |
 | E0702 | vector type wider than the target's register |
-| E0703 | vector in a signature whose `needs` does not cover its width (`extern "C"` signatures: E0804). Planned |
+| E0703 | vector in the signature of a fn, fn type, or closure whose `needs` (plus the target baseline) do not cover its width (`extern "C"` signatures: E0804) |
 | E0704 | callee needs features the caller lacks |
-| E0705 | dispatch arm signature differs from the dispatch signature. Planned |
-| E0706 | dispatch without a final `_` arm, or a `_` target needing extra features. Planned |
-| E0707 | fn value coercion would drop required features |
+| E0705 | dispatch arm signature differs from the dispatch signature |
+| E0706 | dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing extra features |
+| E0707 | fn value coercion would drop features not proven where it happens (by the `needs` of the enclosing fn or the target baseline) |
 | E0708 | unknown feature name, or a feature not owned by any arch (`cuda` is owned by x86-64, AArch64, and `gpu-sm86`) |
-| E0709 | `main`, a trait method, or an `extern` export declares `needs`. Planned |
+| E0709 | `main`, a trait method, or an `extern` export declares `needs` |
 | E0710 | sizeless vector used without `needs(sve)`. Planned |
 | E0711 | sizeless vector as an ADT field. Planned |
 | E0712 | sizeless vector as an array element. Planned |

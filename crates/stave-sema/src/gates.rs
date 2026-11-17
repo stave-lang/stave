@@ -17,7 +17,7 @@
 use stave_diag::Span;
 use stave_syntax::Term;
 use stave_target::lowering::{self, Class, Tier};
-use stave_target::{Triple, X86Level};
+use stave_target::{Arch, Feature, FeatureSet, Triple};
 
 use crate::diag::mk;
 use crate::prim::Lanes;
@@ -65,10 +65,83 @@ impl Gates {
 
 /// The widest vector or mask, in bits, that target `t` has without `needs(...)`.
 pub fn max_vector_bits(t: Triple) -> u32 {
-    match t {
-        Triple::X86_64(X86Level::V3) => 256,
-        Triple::X86_64(X86Level::V4) => 512,
-        _ => 128,
+    feature_vector_bits(t.baseline())
+}
+
+/// The widest vector or mask, in bits, that code with features `fs` may use.
+pub fn feature_vector_bits(fs: FeatureSet) -> u32 {
+    if fs.contains(Feature::Avx512f) {
+        512
+    } else if fs.contains(Feature::Avx2) {
+        256
+    } else {
+        128
+    }
+}
+
+/// The first fixed vector or mask in `t` wider than `max` bits, with its width. Looks through
+/// refs, pointers, arrays, slices, tuples, and generic arguments, not into fn types (each fn type
+/// is checked where it is written).
+pub(crate) fn wide_part<I: Interner + ?Sized>(cx: &I, t: TypeId, max: u32) -> Option<(TypeId, u32)> {
+    let mut stack = vec![t];
+    while let Some(t) = stack.pop() {
+        if stack.len() > 4096 {
+            return None;
+        }
+        match cx.kind(t) {
+            TypeKind::Vector { lane, n: Lanes::Fixed(k) } => {
+                let bits = types::lane_bits(cx.kind(*lane)) * *k as u32;
+                if bits > max {
+                    return Some((t, bits));
+                }
+            }
+            TypeKind::Mask { width, n: Lanes::Fixed(k) } => {
+                let bits = *width as u32 * *k as u32;
+                if bits > max {
+                    return Some((t, bits));
+                }
+            }
+            TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => stack.push(*inner),
+            TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => stack.push(*elem),
+            TypeKind::Tuple(ts) => stack.extend(ts.iter().rev()),
+            TypeKind::Adt { args, .. } => stack.extend(args.iter().rev().filter_map(|a| match a {
+                types::GArg::Type(x) => Some(*x),
+                types::GArg::Const(_) => None,
+            })),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The first vector in signature type `t` that a signature with features `features` cannot hold
+/// on `target` (the baseline counts), with its width.
+pub(crate) fn sig_wide_part<I: Interner + ?Sized>(
+    cx: &I,
+    target: Triple,
+    t: TypeId,
+    features: u64,
+) -> Option<(TypeId, u32)> {
+    let fs = FeatureSet::from_bits(features).unwrap_or_default();
+    wide_part(cx, t, feature_vector_bits(target.baseline().union(fs)))
+}
+
+/// E0703 for vector type `ty` (`bits` wide) in a signature at `span` whose features (with the
+/// target baseline) do not cover it; E0702 where no feature of the target's arch is that wide.
+pub(crate) fn sig_too_wide(
+    target: Triple,
+    ty: &str,
+    bits: u32,
+    span: Span,
+) -> Option<stave_diag::Diagnostic> {
+    let need = match target.arch() {
+        Arch::X86_64 if bits <= 256 => Some(Feature::Avx2),
+        Arch::X86_64 if bits <= 512 => Some(Feature::Avx512f),
+        _ => None,
+    };
+    match need {
+        Some(f) => mk("E0703", None, &[("type", ty), ("feature", f.name())], span, &[]),
+        None => too_wide(ty, bits, max_vector_bits(target), span),
     }
 }
 
@@ -317,6 +390,20 @@ impl Ck<'_> {
             TypeKind::Mask { width, n: Lanes::Fixed(k) } => *width as u32 * *k as u32,
             _ => 0,
         }
+    }
+
+    /// E0703 for signature type `t` at `span` of a closure or fn type with features `features`,
+    /// in a body with `needs(...)` (elsewhere E0702 has gated every written vector).
+    pub(crate) fn sig_width_at(&mut self, span: Span, t: TypeId, features: u64) {
+        if self.features == 0 || self.gates.wide.contains(&span) {
+            return;
+        }
+        let target = self.prog.target;
+        let Some((v, bits)) = sig_wide_part(&self.tys, target, t, features) else { return };
+        let name = self.show(v);
+        self.gates.wide.push(span);
+        let d = sig_too_wide(target, &name, bits, span);
+        self.report(d);
     }
 
     pub(crate) fn gate_width_of(&mut self, span: Span, ty: &str, bits: u32) {

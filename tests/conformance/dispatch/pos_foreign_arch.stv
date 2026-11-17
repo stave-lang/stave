@@ -1,0 +1,27 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+//~ TARGET aarch64-linux
+// Fns and dispatch arms needing another arch's features are left out of the build: on that arch
+// their bodies are not checked.
+fn sum_v3(xs: &[f32]) -> f32 needs(avx2) {
+    let v: f32x8 = f32x8.splat(0.0);
+    return 0.0;
+}
+
+fn sum_sve(xs: &[f32]) -> f32 needs(sve) {
+    return 0.0;
+}
+
+fn sum_base(xs: &[f32]) -> f32 {
+    return 0.0;
+}
+
+dispatch fn sum(xs: &[f32]) -> f32 {
+    avx2 => sum_v3,
+    sve => sum_sve,
+    _ => sum_base,
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,34 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// A `fn(..) needs(F)` value is usable as `fn(..) needs(G)` when F ⊆ G (implied features count:
+// `avx2` implies `avx`), in any fn.
+fn base(x: u32) -> u32 {
+    return x;
+}
+
+fn v3(x: u32) -> u32 needs(avx2) {
+    return x;
+}
+
+fn vex(x: u32) -> u32 needs(avx) {
+    return x;
+}
+
+fn take(f: fn(u32) -> u32 needs(avx2)) -> u32 needs(avx2) {
+    return f(1);
+}
+
+fn hold() {
+    let a: fn(u32) -> u32 needs(avx2) = base;
+    let b: fn(u32) -> u32 needs(avx2, fma) = v3;
+    let c: fn(u32) -> u32 needs(avx2) = vex;
+    let d: fn(u32) -> u32 needs(fma) = vex;
+}
+
+fn k() -> u32 needs(avx2) {
+    return take(base) + take(vex) + take(v3);
+}
+
+fn main() -> i32 {
+    return 0;
+}

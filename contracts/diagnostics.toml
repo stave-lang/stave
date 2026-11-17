@@ -997,7 +997,7 @@ fix = { description = "use a vector of at most {max} bits, or add `needs(...)` w
 code = "E0703"
 severity = "error"
 area = "features"
-rule = "vector in a signature whose `needs` does not cover its width (`extern \"C\"` signatures: E0804) (planned)"
+rule = "vector in the signature of a fn, fn type, or closure whose `needs` (plus the target baseline) do not cover its width (`extern \"C\"` signatures: E0804)"
 holes = { type = "type", feature = "name" }
 message = "`{type}` in this signature needs `{feature}`, which the function's `needs` does not list"
 labels = [{ at = "primary", text = "`{type}` needs `{feature}`" }]
@@ -1017,7 +1017,7 @@ fix = { description = "add `needs({feature})` to the caller, or call `{callee}` 
 code = "E0705"
 severity = "error"
 area = "features"
-rule = "dispatch arm signature differs from the dispatch signature (planned)"
+rule = "dispatch arm signature differs from the dispatch signature"
 holes = { expected = "type", found = "type" }
 message = "dispatch arm has type `{found}`, expected `{expected}`"
 labels = [{ at = "primary", text = "this arm's function" }, { at = "dispatch", text = "dispatch signature" }]
@@ -1027,7 +1027,7 @@ fix = { description = "give the arm's function the type `{expected}` (the dispat
 code = "E0706"
 severity = "error"
 area = "features"
-rule = "dispatch without a final `_` arm, or a `_` target needing extra features (planned)"
+rule = "dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing extra features"
 holes = { feature = "name" }
 message = "`dispatch` has no final `_` arm"
 labels = [{ at = "primary", text = "last arm is not `_`" }]
@@ -1042,11 +1042,11 @@ fix = { description = "point the `_` arm at a function without `needs({feature})
 code = "E0707"
 severity = "error"
 area = "features"
-rule = "fn value coercion would drop required features"
+rule = "fn value coercion would drop features not proven where it happens (by the `needs` of the enclosing fn or the target baseline)"
 holes = { from = "type", to = "type" }
 message = "`{from}` cannot be used as `{to}`: its required features would be dropped"
 labels = [{ at = "primary", text = "coerced here" }]
-fix = { description = "add the features to the target type (`{to}` with `needs(...)`), or use a function that needs no extra features" }
+fix = { description = "add the features to the target type (`{to}` with `needs(...)`), make the coercion inside a function with those `needs`, or use a function that needs no extra features" }
 
 [[diag]]
 code = "E0708"
@@ -1062,7 +1062,7 @@ fix = { description = "correct the feature name (`stave lowering --target T` lis
 code = "E0709"
 severity = "error"
 area = "features"
-rule = "`main`, a trait method, or an `extern` export declares `needs` (planned)"
+rule = "`main`, a trait method, or an `extern` export declares `needs`"
 holes = { what = "text-literal" }
 choices = { what = ["`main`", "a trait method", "an `extern` export"] }
 message = "{what} cannot declare `needs`"

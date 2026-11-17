@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0709: `main` and trait methods (in the trait and in its impls) cannot have `needs`. An
+// `extern "C"` export takes no `needs` in the grammar.
+trait Sum {
+    fn sum(&self) -> u32 needs(avx2); //~ ERROR E0709
+}
+
+struct S {
+    x: u32,
+}
+
+impl Sum for S {
+    fn sum(&self) -> u32 needs(avx2) { //~ ERROR E0709
+        return self.x;
+    }
+}
+
+// An inherent method may have `needs`.
+impl S {
+    fn wide(&self) -> u32 needs(avx2) {
+        return self.x;
+    }
+}
+
+fn main() -> i32 needs(avx2) { //~ ERROR E0709
+    return 0;
+}

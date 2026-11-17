@@ -1,0 +1,23 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+//~ TARGET aarch64-linux
+// E0708: a feature name no target owns, in the `needs(..)` of a fn or a fn type, or in a
+// dispatch arm.
+fn f() needs(avx3) { //~ ERROR E0708
+}
+
+fn base() {
+}
+
+fn g() {
+    let h: fn() needs(AVX2) = base; //~ ERROR E0708
+}
+
+dispatch fn d() {
+    sse5 => base, //~ ERROR E0708
+    _ => base,
+}
+
+fn main() -> i32 {
+    return 0;
+}

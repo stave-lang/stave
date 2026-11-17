@@ -1,0 +1,37 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// Inside a fn with `needs(F)`, a fn value needing features of F is usable as a fn type without
+// them: CPU features never change while a program runs, so it stays callable. Every coercion
+// site: call argument, `let` with a type, struct field, return, `par_for` body.
+import std.thread;
+
+fn sum_v3(i: usize) needs(avx2) {
+}
+
+fn apply(f: fn(usize)) {
+    f(0);
+}
+
+view struct Holder {
+    f: fn(usize),
+}
+
+fn k() needs(avx2) {
+    apply(sum_v3);
+    let a: fn(usize) = sum_v3;
+    let h = Holder.{ f: sum_v3 };
+    thread.par_for(0, 4, sum_v3);
+}
+
+fn r() -> (fn(usize)) needs(avx2) {
+    return sum_v3;
+}
+
+// Implied features count: `avx512f` implies `avx2`.
+fn k4() needs(avx512f) {
+    apply(sum_v3);
+}
+
+fn main() -> i32 {
+    return 0;
+}

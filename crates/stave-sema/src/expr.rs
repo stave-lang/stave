@@ -1319,10 +1319,16 @@ impl<'a> Ck<'a> {
     fn closure(&mut self, n: u32) -> Ty {
         let icx = self.icx;
         let mut params = Vec::new();
+        // A closure has the `needs` of its fn: its body is checked and compiled under them.
+        let features = self.features;
         if let Some(ps) = icx.child(n, NodeKind::Params) {
             for p in icx.kids_vec(ps) {
                 let t = match icx.child(p, NodeKind::Type) {
-                    Some(tn) => self.lower_ty(tn, false),
+                    Some(tn) => {
+                        let t = self.lower_ty(tn, false);
+                        self.sig_width_at(icx.node_span(tn), t, features);
+                        t
+                    }
                     None => ids::ERROR,
                 };
                 self.locals.insert(p, t);
@@ -1331,7 +1337,11 @@ impl<'a> Ck<'a> {
         }
         let ret_node = icx.child(n, NodeKind::Type);
         let ret = match ret_node {
-            Some(r) => self.lower_ty(r, true),
+            Some(r) => {
+                let t = self.lower_ty(r, true);
+                self.sig_width_at(icx.node_span(r), t, features);
+                t
+            }
             None => ids::UNIT,
         };
         let Some(block) = icx.child(n, NodeKind::Block) else { return Ty::ERR };
@@ -1358,7 +1368,7 @@ impl<'a> Ck<'a> {
         if params.contains(&ids::ERROR) || ret == ids::ERROR {
             return Ty::ERR;
         }
-        Ty::T(self.tys.intern(TypeKind::Fn { params: params.into_boxed_slice(), ret, features: 0 }))
+        Ty::T(self.tys.intern(TypeKind::Fn { params: params.into_boxed_slice(), ret, features }))
     }
 
     fn fstring(&mut self, n: u32, tok: u32) -> Ty {
@@ -2160,6 +2170,18 @@ impl<'a> Ck<'a> {
         let mut b2 = binds.to_vec();
         if self.w.match_ty(&self.tys, p, t, &mut b2) {
             binds.copy_from_slice(&b2);
+            return;
+        }
+        // a fn value with other features: the coercion of the argument decides (E0707)
+        if let (TypeKind::Fn { features: pf, .. }, TypeKind::Fn { params, ret, features }) =
+            (self.tys.kind(p).clone(), self.tys.kind(t).clone())
+            && pf != features
+        {
+            let t2 = self.tys.intern(TypeKind::Fn { params, ret, features: pf });
+            let mut b5 = binds.to_vec();
+            if self.w.match_ty(&self.tys, p, t2, &mut b5) {
+                binds.copy_from_slice(&b5);
+            }
             return;
         }
         // `&mut T` for `&T`, `&[T; N]` for `&[T]`
