@@ -81,8 +81,8 @@ here is reported and skipped. A build that stops with "not implemented yet" fail
 that are known to fail go in `KNOWN` in `harness.rs`, with the reason; they are reported, not
 failed, and an entry that starts passing fails the test until it is removed.
 
-Default run: about 8,100 cases over the 24 programs, 186 legs, about 86,000 checked lines, about
-45 s on an 8-core x86-64 host with Intel SDE. `STAVE_DIFF_FULL=1 STAVE_DIFF_RANDOM=256` checks
+Default run: about 8,400 cases over the 28 programs, 206 legs, about 87,000 checked lines, about
+55 s on an 8-core x86-64 host with Intel SDE. `STAVE_DIFF_FULL=1 STAVE_DIFF_RANDOM=256` checks
 several hundred thousand lines in several minutes.
 
 ## Dispatch runs
