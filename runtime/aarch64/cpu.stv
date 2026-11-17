@@ -1,0 +1,35 @@
+// runtime_aarch64.cpu: the AArch64 feature probe, imported only by runtime.cpu (`import arch.cpu;`).
+// Rules and their HWCAP sources: contracts/intrinsics.md "CPU feature detection". The bit
+// constants are runtime.cpu's (a test checks both files against the compiler's feature list);
+// runtime.cpu closes the raw word under implication.
+
+const NEON: u64 = 1 << 17;
+const FP16: u64 = 1 << 18;
+const DOTPROD: u64 = 1 << 19;
+const BF16: u64 = 1 << 20;
+const SVE: u64 = 1 << 21;
+const SVE2: u64 = 1 << 22;
+
+// Linux arch/arm64/include/uapi/asm/hwcap.h.
+const HWCAP_ASIMD: u64 = 1 << 1;
+const HWCAP_FPHP: u64 = 1 << 9;
+const HWCAP_ASIMDHP: u64 = 1 << 10;
+const HWCAP_ASIMDDP: u64 = 1 << 20;
+const HWCAP_SVE: u64 = 1 << 22;
+const HWCAP2_SVE2: u64 = 1 << 1;
+const HWCAP2_BF16: u64 = 1 << 14;
+
+fn has(word: u64, mask: u64, f: u64) -> u64 {
+    return if word & mask == mask then f else 0;
+}
+
+// Features the kernel reports in AT_HWCAP / AT_HWCAP2, not yet closed under implication.
+pub fn probe(hwcap: u64, hwcap2: u64) -> u64 {
+    let mut w: u64 = has(hwcap, HWCAP_ASIMD, NEON);
+    w = w | has(hwcap, HWCAP_FPHP | HWCAP_ASIMDHP, FP16);
+    w = w | has(hwcap, HWCAP_ASIMDDP, DOTPROD);
+    w = w | has(hwcap2, HWCAP2_BF16, BF16);
+    w = w | has(hwcap, HWCAP_SVE, SVE);
+    w = w | has(hwcap2, HWCAP2_SVE2, SVE2);
+    return w;
+}

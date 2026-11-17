@@ -33,6 +33,47 @@ Rules:
 AArch64 feature detection needs no intrinsic: the runtime reads `AT_HWCAP`/`AT_HWCAP2` from the
 auxiliary vector on the initial stack.
 
+**CPU feature detection**: `runtime.cpu.detect() -> u64` returns the **feature word**: bit i is
+feature i of the compiler's closed feature list (`crates/stave-target/src/features.rs`, the order of LANG.md §4 Features:
+`sse42` = bit 0 … `sve2` = bit 22, `cuda` = bit 23, never set by the CPU probe). The constants
+`runtime.cpu.SSE42 …` and the `std.cpu` names are these masks; a test checks them against the
+compiler. The probe (`arch.cpu.probe`, per arch) sets a feature when its row below holds; then
+**closure**: a feature stays set only if every feature it implies (transitively, per
+features.rs) is set too, so testing one mask is sound. `runtime.cpu.init()` stores the word once
+in the runtime state (before main, before other threads); `runtime.cpu.features()` reads it.
+
+x86-64 (Intel SDM Vol. 2A, CPUID: Table 3-10 for leaf 01H ECX, Table 3-8 for leaf 07H; the same
+positions as Linux `arch/x86/include/asm/cpufeatures.h` words 4, 9, 12, 16, 18). Leaf 07H is
+read only if leaf 0 EAX ≥ 7; sub-leaf 1 only if leaf 07H.0 EAX ≥ 1.
+
+| Feature | CPUID bit | | Feature | CPUID bit |
+|---|---|---|---|---|
+| `sse42` | 01H ECX[20] | | `avx512dq` | 07H.0 EBX[17] |
+| `avx` | 01H ECX[28] | | `avx512cd` | 07H.0 EBX[28] |
+| `fma` | 01H ECX[12] | | `avx512bw` | 07H.0 EBX[30] |
+| `f16c` | 01H ECX[29] | | `avx512vl` | 07H.0 EBX[31] |
+| `avx2` | 07H.0 EBX[5] | | `avx512vbmi` | 07H.0 ECX[1] |
+| `bmi2` | 07H.0 EBX[8] | | `avx512vbmi2` | 07H.0 ECX[6] |
+| `avx512f` | 07H.0 EBX[16] | | `avx512bitalg` | 07H.0 ECX[12] |
+| `avx512fp16` | 07H.0 EDX[23] | | `avx512vpopcntdq` | 07H.0 ECX[14] |
+| `avx512bf16` | 07H.1 EAX[5] | | | |
+
+OS state: `xgetbv(0)` (XCR0) is read only if 01H ECX[26] (XSAVE) and ECX[27] (OSXSAVE) are set,
+else XCR0 counts as 0. AVX-class features (`avx avx2 fma f16c` and every `avx512*`) need
+`XCR0 & 0x6 == 0x6` (SSE, YMM state); AVX-512-class features (`avx512*`) also need
+`XCR0 & 0xe6 == 0xe6` (opmask, ZMM_Hi256, Hi16_ZMM). `sse42` and `bmi2` need no OS state.
+
+AArch64 (Linux `arch/arm64/include/uapi/asm/hwcap.h`):
+
+| Feature | Condition |
+|---|---|
+| `neon` | `AT_HWCAP` bit 1 (`HWCAP_ASIMD`) |
+| `fp16` | `AT_HWCAP` bits 9 and 10 (`HWCAP_FPHP`, `HWCAP_ASIMDHP`) |
+| `dotprod` | `AT_HWCAP` bit 20 (`HWCAP_ASIMDDP`) |
+| `bf16` | `AT_HWCAP2` bit 14 (`HWCAP2_BF16`) |
+| `sve` | `AT_HWCAP` bit 22 (`HWCAP_SVE`) |
+| `sve2` | `AT_HWCAP2` bit 1 (`HWCAP2_SVE2`) |
+
 **`ccallN`** calls C functions whose address comes from `dlsym` (e.g. the
 CUDA driver table of `std.gpu`). Only integer-class arguments and results: pointers and integers,
 passed as `usize`. No floats, vectors, or structs by value; a C function that needs them cannot be

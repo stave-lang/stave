@@ -59,7 +59,8 @@ impl ArchSet {
     }
 }
 
-/// A target feature. The discriminant is its bit in [`FeatureSet`]; the order is the contract's
+/// A target feature. The discriminant is its bit in [`FeatureSet`] and in the runtime's feature
+/// word (`runtime/cpu.stv`, checked by `tests/runtime_cpu.rs`); the order is the contract's
 /// listing order, which is also the printing order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]

@@ -1,0 +1,38 @@
+// std.cpu: CPU features of the running machine, as a feature word.
+//
+// `features()` has the bit of every feature the CPU has and the OS enables (x86-64: CPUID and
+// XCR0; AArch64: AT_HWCAP/AT_HWCAP2), closed downward under implication: a set bit means that
+// feature and everything it implies are usable, so `features() & cpu.AVX2 != 0` is a complete
+// test. Only features of the build target's arch can be set. Rules: contracts/intrinsics.md
+// "CPU feature detection".
+
+import runtime.cpu as rt;
+
+pub const SSE42: u64 = rt.SSE42;
+pub const AVX: u64 = rt.AVX;
+pub const AVX2: u64 = rt.AVX2;
+pub const FMA: u64 = rt.FMA;
+pub const BMI2: u64 = rt.BMI2;
+pub const F16C: u64 = rt.F16C;
+pub const AVX512F: u64 = rt.AVX512F;
+pub const AVX512BW: u64 = rt.AVX512BW;
+pub const AVX512VL: u64 = rt.AVX512VL;
+pub const AVX512DQ: u64 = rt.AVX512DQ;
+pub const AVX512CD: u64 = rt.AVX512CD;
+pub const AVX512VBMI: u64 = rt.AVX512VBMI;
+pub const AVX512VBMI2: u64 = rt.AVX512VBMI2;
+pub const AVX512VPOPCNTDQ: u64 = rt.AVX512VPOPCNTDQ;
+pub const AVX512BITALG: u64 = rt.AVX512BITALG;
+pub const AVX512FP16: u64 = rt.AVX512FP16;
+pub const AVX512BF16: u64 = rt.AVX512BF16;
+pub const NEON: u64 = rt.NEON;
+pub const FP16: u64 = rt.FP16;
+pub const DOTPROD: u64 = rt.DOTPROD;
+pub const BF16: u64 = rt.BF16;
+pub const SVE: u64 = rt.SVE;
+pub const SVE2: u64 = rt.SVE2;
+
+// Probes on every call (a few CPUID instructions, or two loads on AArch64).
+pub fn features() -> u64 {
+    return rt.detect();
+}
