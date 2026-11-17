@@ -1,0 +1,55 @@
+//~ STDOUT run_default_arm_baseline.stdout
+//~ TARGET x86_64-linux-v2
+// The `_` target may need a feature of the target baseline (`sse42` on x86-64) that the
+// dispatch does not: it runs where the `avx2` arm does not match (qemu `-cpu Nehalem`), with the
+// same results. With a command-line argument the line also names the arm that ran
+// (crates/stave-driver/tests/dispatch_vector.rs).
+import std.env;
+import std.io;
+
+fn count_v3(xs: &[u32], k: u32) -> (usize, u32) needs(avx2) {
+    let kk = u32x8.splat(k);
+    let mut n: usize = 0;
+    for v: u32x8 in xs {
+        n = n + ((v == kk).to_bits().popcount() as usize);
+    } tail masked (v, m) {
+        n = n + (((v == kk) & m).to_bits().popcount() as usize);
+    }
+    return (n, 1);
+}
+
+fn count_v2(xs: &[u32], k: u32) -> (usize, u32) needs(sse42) {
+    let kk = u32x4.splat(k);
+    let mut n: usize = 0;
+    for v: u32x4 in xs {
+        n = n + ((v == kk).to_bits().popcount() as usize);
+    } tail masked (v, m) {
+        n = n + (((v == kk) & m).to_bits().popcount() as usize);
+    }
+    return (n, 0);
+}
+
+dispatch fn count(xs: &[u32], k: u32) -> (usize, u32) { avx2 => count_v3, _ => count_v2, }
+
+fn main() -> i32 {
+    let mut a: [u32; 41] = [0; 41];
+    for i in 0usize..41 { a[i] = ((i * 7) % 5) as% u32; }
+    let mut ok = true;
+    let mut arm: u32 = 0;
+    for n in 0usize..41 {
+        let mut want: usize = 0;
+        for i in 0..n {
+            if a[i] == 3 { want = want + 1; }
+        }
+        let (got, which) = count(&a[0..n], 3);
+        ok = ok & (got == want);
+        arm = which;
+    }
+    let (total, _) = count(&a, 3);
+    io.print(f"count {total}");
+    if env.count() > 1 {
+        if arm == 1 { io.print(" avx2"); } else { io.print(" sse42"); }
+    }
+    if ok { io.print(" ok\n"); } else { io.print(" MISMATCH\n"); }
+    return 0;
+}

@@ -4,7 +4,9 @@
 //   sum()            ints: the sequential sum, trapping `Overflow` exactly where `for` + `+` would;
 //                    floats: the fixed lane tree below (not the left-to-right sum)
 //   min() max()      Option (None when empty); floats as the vector `min`/`max`: NaN propagates,
-//                    -0.0 < +0.0
+//                    -0.0 < +0.0; a NaN result is always the positive quiet NaN with an empty
+//                    payload (0x7fc00000 / 0x7ff8000000000000), whatever NaNs the slice holds:
+//                    which NaN a lane op passes on differs between CPUs and lane groupings
 //   find(x)          first index i with xs[i] == x (floats: NaN is never found, -0.0 == +0.0)
 //   eq(ys)           same length and xs[i] == ys[i] for every i (ints, bool: the same bits;
 //                    floats: `==`, so a NaN element makes it false and -0.0 equals +0.0)
@@ -14,15 +16,22 @@
 //                    on any elements, in any order, any number of times), copy_from(src)
 //                    (lengths must match: `Assert` panic otherwise)
 //
-// One implementation per method, written in 128-bit vectors (the portable baseline of every CPU
-// target). No signature names a vector width: wider per-target versions can replace a body
-// without changing callers, and give the same results:
+// Every method loops in 128-bit vectors (the portable baseline of every CPU target). On x86-64,
+// sum (ints), min, max, find, find_any_byte, eq, fill and copy_from have a second loop in
+// 256-bit vectors under `needs(avx2)`, which a slice of 1 KiB or more (`LONG_B*`) reaches
+// through a `dispatch fn` when the CPU has AVX2 (always on x86_64-linux-v3; AArch64 builds only
+// the 128-bit loop). Shorter slices stay in the method: the CPU test and the calls cost more
+// than the wider vectors save there. The `_` arm of each dispatch repeats the method's 128-bit
+// loop (a call from the method would cost the short slices). No signature names a vector width,
+// and every loop gives the same results:
 // - Int sums wrap lane-wise and keep the running prefix sum in every lane (`scan_add_wrap`); a
-//   lane whose prefix overflowed sets a flag. A set flag only sends the sum to the sequential
-//   loop, which traps at the overflowing element. Widths therefore never change a result.
+//   lane whose prefix overflowed sets a flag (the loops outside the method return None then). A
+//   set flag only sends the sum to the method's sequential loop, which traps at the overflowing
+//   element. Widths therefore never change a result.
 // - A float sum adds element i into lane i % L of L zeroed accumulator lanes, L = 16 for f32
 //   and 8 for f64 (512 bits, held as four 128-bit vectors), then reduces the L lanes by the
 //   `reduce_add` tree: lane j with lane j + L/2, halving until one lane is left. Empty: +0.0.
+//   Its four independent accumulators already hide the add latency, so it has no 256-bit loop.
 // - min, max and the searches do not depend on the order.
 // Branchless per element: sum, min, max, count, fill, copy_from (their loops branch only on the
 // loop test, never on element data). The searches (find, find_byte, find_any_byte, eq, any,
@@ -30,6 +39,12 @@
 
 import std.debug;
 import std.mem;
+
+// 1 KiB in elements of 1, 2, 4 and 8 bytes.
+const LONG_B8: usize = 1024;
+const LONG_B16: usize = 512;
+const LONG_B32: usize = 256;
+const LONG_B64: usize = 128;
 
 // xs as a slice of U: same address, xs.len() * size_of::<T>() / size_of::<U>() elements. Callers
 // pass T and U of one size, or U = u8; every bit pattern of T is then a valid U (bool is 0 or 1).
@@ -52,8 +67,11 @@ fn tail_lanes(r: usize, k: usize, n: usize) -> usize {
     return (left < n).select(left, n);
 }
 
+fn some_at(i: usize, bits: u64) -> Option<usize> {
+    return Option.Some(i + (bits.ctz() as usize));
+}
+
 fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() { return false; }
     let n = a.len();
     let mut i: usize = 0;
     while i + 16 <= n {
@@ -64,33 +82,241 @@ fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     return ((u8x16.load_masked(a, i, m) != u8x16.load_masked(b, i, m)) & m).to_bits() == 0;
 }
 
-fn some_at(i: usize, bits: u64) -> Option<usize> {
-    return Option.Some(i + (bits.ctz() as usize));
+fn bytes_eq_v3(a: &[u8], b: &[u8]) -> bool needs(avx2) {
+    let n = a.len();
+    let mut i: usize = 0;
+    while i + 32 <= n {
+        if (u8x32.load(a, i) != u8x32.load(b, i)).to_bits() != 0 { return false; }
+        i = i + 32;
+    }
+    let m = mask8x32.first_n(n - i);
+    return ((u8x32.load_masked(a, i, m) != u8x32.load_masked(b, i, m)) & m).to_bits() == 0;
 }
+
+// bytes_eq, bytes_eq_v3: a.len() == b.len().
+dispatch fn bytes_eq_cpu(a: &[u8], b: &[u8]) -> bool { avx2 => bytes_eq_v3, _ => bytes_eq, }
+
+// a == b as bytes, for every int and bool slice.
+fn bytes_eq_any(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() { return false; }
+    if a.len() >= LONG_B8 { return bytes_eq_cpu(a, b); }
+    let n = a.len();
+    let mut i: usize = 0;
+    while i + 16 <= n {
+        if (u8x16.load(a, i) != u8x16.load(b, i)).to_bits() != 0 { return false; }
+        i = i + 16;
+    }
+    let m = mask8x16.first_n(n - i);
+    return ((u8x16.load_masked(a, i, m) != u8x16.load_masked(b, i, m)) & m).to_bits() == 0;
+}
+
+fn copy_bytes(s: &[u8], d: &mut [u8]) {
+    let n = d.len();
+    let mut i: usize = 0;
+    while i + 64 <= n {
+        u8x16.load(s, i).store(d, i);
+        u8x16.load(s, i + 16).store(d, i + 16);
+        u8x16.load(s, i + 32).store(d, i + 32);
+        u8x16.load(s, i + 48).store(d, i + 48);
+        i = i + 64;
+    }
+    while i + 16 <= n {
+        u8x16.load(s, i).store(d, i);
+        i = i + 16;
+    }
+    let m = mask8x16.first_n(n - i);
+    u8x16.load_masked(s, i, m).store_masked(d, i, m);
+}
+
+fn copy_bytes_v3(s: &[u8], d: &mut [u8]) needs(avx2) {
+    let n = d.len();
+    let mut i: usize = 0;
+    while i + 128 <= n {
+        u8x32.load(s, i).store(d, i);
+        u8x32.load(s, i + 32).store(d, i + 32);
+        u8x32.load(s, i + 64).store(d, i + 64);
+        u8x32.load(s, i + 96).store(d, i + 96);
+        i = i + 128;
+    }
+    while i + 32 <= n {
+        u8x32.load(s, i).store(d, i);
+        i = i + 32;
+    }
+    let m = mask8x32.first_n(n - i);
+    u8x32.load_masked(s, i, m).store_masked(d, i, m);
+}
+
+dispatch fn copy_bytes_cpu(s: &[u8], d: &mut [u8]) { avx2 => copy_bytes_v3, _ => copy_bytes, }
+
+fn find_any_byte(xs: &[u8], set: &[u8]) -> Option<usize> {
+    let mut i: usize = 0;
+    for v: u8x16 in xs {
+        let mut hit = mask8x16.none();
+        for j in 0..set.len() { hit = hit | (v == u8x16.splat(set[j])); }
+        let b = hit.to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 16;
+    } tail masked (v, m) {
+        let mut hit = mask8x16.none();
+        for j in 0..set.len() { hit = hit | (v == u8x16.splat(set[j])); }
+        let b = (hit & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+fn find_any_byte_v3(xs: &[u8], set: &[u8]) -> Option<usize> needs(avx2) {
+    let mut i: usize = 0;
+    for v: u8x32 in xs {
+        let mut hit = mask8x32.none();
+        for j in 0..set.len() { hit = hit | (v == u8x32.splat(set[j])); }
+        let b = hit.to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 32;
+    } tail masked (v, m) {
+        let mut hit = mask8x32.none();
+        for j in 0..set.len() { hit = hit | (v == u8x32.splat(set[j])); }
+        let b = (hit & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+dispatch fn find_any_byte_cpu(xs: &[u8], set: &[u8]) -> Option<usize> { avx2 => find_any_byte_v3, _ => find_any_byte, }
+
+fn sum_u8(xs: &[u8]) -> Option<u8> {
+    let mut s = u8x16.splat(0);
+    let mut bad = mask8x16.none();
+    for v: u8x16 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+fn sum_u8_v3(xs: &[u8]) -> Option<u8> needs(avx2) {
+    let mut s = u8x32.splat(0);
+    let mut bad = mask8x32.none();
+    for v: u8x32 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+dispatch fn sum_u8_cpu(xs: &[u8]) -> Option<u8> { avx2 => sum_u8_v3, _ => sum_u8, }
+
+fn min_u8(xs: &[u8]) -> u8 {
+    let mut a = u8x16.splat(xs[0]);
+    for v: u8x16 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+fn min_u8_v3(xs: &[u8]) -> u8 needs(avx2) {
+    let mut a = u8x32.splat(xs[0]);
+    for v: u8x32 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+dispatch fn min_u8_cpu(xs: &[u8]) -> u8 { avx2 => min_u8_v3, _ => min_u8, }
+
+fn max_u8(xs: &[u8]) -> u8 {
+    let mut a = u8x16.splat(xs[0]);
+    for v: u8x16 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+fn max_u8_v3(xs: &[u8]) -> u8 needs(avx2) {
+    let mut a = u8x32.splat(xs[0]);
+    for v: u8x32 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+dispatch fn max_u8_cpu(xs: &[u8]) -> u8 { avx2 => max_u8_v3, _ => max_u8, }
+
+fn find_u8(xs: &[u8], x: u8) -> Option<usize> {
+    let k = u8x16.splat(x);
+    let mut i: usize = 0;
+    for v: u8x16 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 16;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+fn find_u8_v3(xs: &[u8], x: u8) -> Option<usize> needs(avx2) {
+    let k = u8x32.splat(x);
+    let mut i: usize = 0;
+    for v: u8x32 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 32;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+dispatch fn find_u8_cpu(xs: &[u8], x: u8) -> Option<usize> { avx2 => find_u8_v3, _ => find_u8, }
+
+fn fill_u8(xs: &mut [u8], x: u8) {
+    let k = u8x16.splat(x);
+    for v: &mut u8x16 in xs { *v = k; } tail masked (v, m) { *v = k; }
+}
+
+fn fill_u8_v3(xs: &mut [u8], x: u8) needs(avx2) {
+    let k = u8x32.splat(x);
+    for v: &mut u8x32 in xs { *v = k; } tail masked (v, m) { *v = k; }
+}
+
+dispatch fn fill_u8_cpu(xs: &mut [u8], x: u8) { avx2 => fill_u8_v3, _ => fill_u8, }
 
 impl [u8] {
     pub fn sum(&self) -> u8 {
-        let mut s = u8x16.splat(0);
-        let mut bad = mask8x16.none();
-        for v: u8x16 in self {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | (p < (p -% v));
-            s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
-        } tail masked (v, m) {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | (p < (p -% v));
-            s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+        if self.len() >= LONG_B8 {
+            match sum_u8_cpu(self) {
+                Option.Some(s) => { return s; }
+                Option.None => {}
+            }
+        } else {
+            let mut s = u8x16.splat(0);
+            let mut bad = mask8x16.none();
+            for v: u8x16 in self {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | (p < (p -% v));
+                s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+            } tail masked (v, m) {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | (p < (p -% v));
+                s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+            }
+            if bad.to_bits() == 0 { return s.reduce_max(); }
         }
-        if bad.to_bits() != 0 {
-            let mut t: u8 = 0;
-            for i in 0..self.len() { t = t + self[i]; }
-            return t;
-        }
-        return s.reduce_max();
+        let mut t: u8 = 0;
+        for i in 0..self.len() { t = t + self[i]; }
+        return t;
     }
 
     pub fn min(&self) -> Option<u8> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B8 { return Option.Some(min_u8_cpu(self)); }
         let mut a = u8x16.splat(self[0]);
         for v: u8x16 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
         return Option.Some(a.reduce_min());
@@ -98,12 +324,14 @@ impl [u8] {
 
     pub fn max(&self) -> Option<u8> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B8 { return Option.Some(max_u8_cpu(self)); }
         let mut a = u8x16.splat(self[0]);
         for v: u8x16 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
         return Option.Some(a.reduce_max());
     }
 
     pub fn find(&self, x: u8) -> Option<usize> {
+        if self.len() >= LONG_B8 { return find_u8_cpu(self, x); }
         let k = u8x16.splat(x);
         let mut i: usize = 0;
         for v: u8x16 in self {
@@ -122,6 +350,7 @@ impl [u8] {
     }
 
     pub fn find_any_byte(&self, set: &[u8]) -> Option<usize> {
+        if self.len() >= LONG_B8 { return find_any_byte_cpu(self, set); }
         let mut i: usize = 0;
         for v: u8x16 in self {
             let mut hit = mask8x16.none();
@@ -139,38 +368,152 @@ impl [u8] {
     }
 
     pub fn eq(&self, other: &[u8]) -> bool {
-        return bytes_eq(self, other);
+        return bytes_eq_any(self, other);
     }
 
     pub fn fill(&mut self, x: u8) {
+        if self.len() >= LONG_B8 {
+            fill_u8_cpu(self, x);
+            return;
+        }
         let k = u8x16.splat(x);
         for v: &mut u8x16 in self { *v = k; } tail masked (v, m) { *v = k; }
     }
 }
 
+fn sum_u16(xs: &[u16]) -> Option<u16> {
+    let mut s = u16x8.splat(0);
+    let mut bad = mask16x8.none();
+    for v: u16x8 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+fn sum_u16_v3(xs: &[u16]) -> Option<u16> needs(avx2) {
+    let mut s = u16x16.splat(0);
+    let mut bad = mask16x16.none();
+    for v: u16x16 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+dispatch fn sum_u16_cpu(xs: &[u16]) -> Option<u16> { avx2 => sum_u16_v3, _ => sum_u16, }
+
+fn min_u16(xs: &[u16]) -> u16 {
+    let mut a = u16x8.splat(xs[0]);
+    for v: u16x8 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+fn min_u16_v3(xs: &[u16]) -> u16 needs(avx2) {
+    let mut a = u16x16.splat(xs[0]);
+    for v: u16x16 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+dispatch fn min_u16_cpu(xs: &[u16]) -> u16 { avx2 => min_u16_v3, _ => min_u16, }
+
+fn max_u16(xs: &[u16]) -> u16 {
+    let mut a = u16x8.splat(xs[0]);
+    for v: u16x8 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+fn max_u16_v3(xs: &[u16]) -> u16 needs(avx2) {
+    let mut a = u16x16.splat(xs[0]);
+    for v: u16x16 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+dispatch fn max_u16_cpu(xs: &[u16]) -> u16 { avx2 => max_u16_v3, _ => max_u16, }
+
+fn find_u16(xs: &[u16], x: u16) -> Option<usize> {
+    let k = u16x8.splat(x);
+    let mut i: usize = 0;
+    for v: u16x8 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 8;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+fn find_u16_v3(xs: &[u16], x: u16) -> Option<usize> needs(avx2) {
+    let k = u16x16.splat(x);
+    let mut i: usize = 0;
+    for v: u16x16 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 16;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+dispatch fn find_u16_cpu(xs: &[u16], x: u16) -> Option<usize> { avx2 => find_u16_v3, _ => find_u16, }
+
+fn fill_u16(xs: &mut [u16], x: u16) {
+    let k = u16x8.splat(x);
+    for v: &mut u16x8 in xs { *v = k; } tail masked (v, m) { *v = k; }
+}
+
+fn fill_u16_v3(xs: &mut [u16], x: u16) needs(avx2) {
+    let k = u16x16.splat(x);
+    for v: &mut u16x16 in xs { *v = k; } tail masked (v, m) { *v = k; }
+}
+
+dispatch fn fill_u16_cpu(xs: &mut [u16], x: u16) { avx2 => fill_u16_v3, _ => fill_u16, }
+
 impl [u16] {
     pub fn sum(&self) -> u16 {
-        let mut s = u16x8.splat(0);
-        let mut bad = mask16x8.none();
-        for v: u16x8 in self {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | (p < (p -% v));
-            s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
-        } tail masked (v, m) {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | (p < (p -% v));
-            s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+        if self.len() >= LONG_B16 {
+            match sum_u16_cpu(self) {
+                Option.Some(s) => { return s; }
+                Option.None => {}
+            }
+        } else {
+            let mut s = u16x8.splat(0);
+            let mut bad = mask16x8.none();
+            for v: u16x8 in self {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | (p < (p -% v));
+                s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+            } tail masked (v, m) {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | (p < (p -% v));
+                s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+            }
+            if bad.to_bits() == 0 { return s.reduce_max(); }
         }
-        if bad.to_bits() != 0 {
-            let mut t: u16 = 0;
-            for i in 0..self.len() { t = t + self[i]; }
-            return t;
-        }
-        return s.reduce_max();
+        let mut t: u16 = 0;
+        for i in 0..self.len() { t = t + self[i]; }
+        return t;
     }
 
     pub fn min(&self) -> Option<u16> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B16 { return Option.Some(min_u16_cpu(self)); }
         let mut a = u16x8.splat(self[0]);
         for v: u16x8 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
         return Option.Some(a.reduce_min());
@@ -178,12 +521,14 @@ impl [u16] {
 
     pub fn max(&self) -> Option<u16> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B16 { return Option.Some(max_u16_cpu(self)); }
         let mut a = u16x8.splat(self[0]);
         for v: u16x8 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
         return Option.Some(a.reduce_max());
     }
 
     pub fn find(&self, x: u16) -> Option<usize> {
+        if self.len() >= LONG_B16 { return find_u16_cpu(self, x); }
         let k = u16x8.splat(x);
         let mut i: usize = 0;
         for v: u16x8 in self {
@@ -198,38 +543,152 @@ impl [u16] {
     }
 
     pub fn eq(&self, other: &[u16]) -> bool {
-        return bytes_eq(cast::<u16, u8>(self), cast::<u16, u8>(other));
+        return bytes_eq_any(cast::<u16, u8>(self), cast::<u16, u8>(other));
     }
 
     pub fn fill(&mut self, x: u16) {
+        if self.len() >= LONG_B16 {
+            fill_u16_cpu(self, x);
+            return;
+        }
         let k = u16x8.splat(x);
         for v: &mut u16x8 in self { *v = k; } tail masked (v, m) { *v = k; }
     }
 }
 
+fn sum_u32(xs: &[u32]) -> Option<u32> {
+    let mut s = u32x4.splat(0);
+    let mut bad = mask32x4.none();
+    for v: u32x4 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[3, 3, 3, 3]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[3, 3, 3, 3]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+fn sum_u32_v3(xs: &[u32]) -> Option<u32> needs(avx2) {
+    let mut s = u32x8.splat(0);
+    let mut bad = mask32x8.none();
+    for v: u32x8 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+dispatch fn sum_u32_cpu(xs: &[u32]) -> Option<u32> { avx2 => sum_u32_v3, _ => sum_u32, }
+
+fn min_u32(xs: &[u32]) -> u32 {
+    let mut a = u32x4.splat(xs[0]);
+    for v: u32x4 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+fn min_u32_v3(xs: &[u32]) -> u32 needs(avx2) {
+    let mut a = u32x8.splat(xs[0]);
+    for v: u32x8 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+dispatch fn min_u32_cpu(xs: &[u32]) -> u32 { avx2 => min_u32_v3, _ => min_u32, }
+
+fn max_u32(xs: &[u32]) -> u32 {
+    let mut a = u32x4.splat(xs[0]);
+    for v: u32x4 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+fn max_u32_v3(xs: &[u32]) -> u32 needs(avx2) {
+    let mut a = u32x8.splat(xs[0]);
+    for v: u32x8 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+dispatch fn max_u32_cpu(xs: &[u32]) -> u32 { avx2 => max_u32_v3, _ => max_u32, }
+
+fn find_u32(xs: &[u32], x: u32) -> Option<usize> {
+    let k = u32x4.splat(x);
+    let mut i: usize = 0;
+    for v: u32x4 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 4;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+fn find_u32_v3(xs: &[u32], x: u32) -> Option<usize> needs(avx2) {
+    let k = u32x8.splat(x);
+    let mut i: usize = 0;
+    for v: u32x8 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 8;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+dispatch fn find_u32_cpu(xs: &[u32], x: u32) -> Option<usize> { avx2 => find_u32_v3, _ => find_u32, }
+
+fn fill_u32(xs: &mut [u32], x: u32) {
+    let k = u32x4.splat(x);
+    for v: &mut u32x4 in xs { *v = k; } tail masked (v, m) { *v = k; }
+}
+
+fn fill_u32_v3(xs: &mut [u32], x: u32) needs(avx2) {
+    let k = u32x8.splat(x);
+    for v: &mut u32x8 in xs { *v = k; } tail masked (v, m) { *v = k; }
+}
+
+dispatch fn fill_u32_cpu(xs: &mut [u32], x: u32) { avx2 => fill_u32_v3, _ => fill_u32, }
+
 impl [u32] {
     pub fn sum(&self) -> u32 {
-        let mut s = u32x4.splat(0);
-        let mut bad = mask32x4.none();
-        for v: u32x4 in self {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | (p < (p -% v));
-            s = p.permute::<[3, 3, 3, 3]>();
-        } tail masked (v, m) {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | (p < (p -% v));
-            s = p.permute::<[3, 3, 3, 3]>();
+        if self.len() >= LONG_B32 {
+            match sum_u32_cpu(self) {
+                Option.Some(s) => { return s; }
+                Option.None => {}
+            }
+        } else {
+            let mut s = u32x4.splat(0);
+            let mut bad = mask32x4.none();
+            for v: u32x4 in self {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | (p < (p -% v));
+                s = p.permute::<[3, 3, 3, 3]>();
+            } tail masked (v, m) {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | (p < (p -% v));
+                s = p.permute::<[3, 3, 3, 3]>();
+            }
+            if bad.to_bits() == 0 { return s.reduce_max(); }
         }
-        if bad.to_bits() != 0 {
-            let mut t: u32 = 0;
-            for i in 0..self.len() { t = t + self[i]; }
-            return t;
-        }
-        return s.reduce_max();
+        let mut t: u32 = 0;
+        for i in 0..self.len() { t = t + self[i]; }
+        return t;
     }
 
     pub fn min(&self) -> Option<u32> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B32 { return Option.Some(min_u32_cpu(self)); }
         let mut a = u32x4.splat(self[0]);
         for v: u32x4 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
         return Option.Some(a.reduce_min());
@@ -237,12 +696,14 @@ impl [u32] {
 
     pub fn max(&self) -> Option<u32> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B32 { return Option.Some(max_u32_cpu(self)); }
         let mut a = u32x4.splat(self[0]);
         for v: u32x4 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
         return Option.Some(a.reduce_max());
     }
 
     pub fn find(&self, x: u32) -> Option<usize> {
+        if self.len() >= LONG_B32 { return find_u32_cpu(self, x); }
         let k = u32x4.splat(x);
         let mut i: usize = 0;
         for v: u32x4 in self {
@@ -257,38 +718,152 @@ impl [u32] {
     }
 
     pub fn eq(&self, other: &[u32]) -> bool {
-        return bytes_eq(cast::<u32, u8>(self), cast::<u32, u8>(other));
+        return bytes_eq_any(cast::<u32, u8>(self), cast::<u32, u8>(other));
     }
 
     pub fn fill(&mut self, x: u32) {
+        if self.len() >= LONG_B32 {
+            fill_u32_cpu(self, x);
+            return;
+        }
         let k = u32x4.splat(x);
         for v: &mut u32x4 in self { *v = k; } tail masked (v, m) { *v = k; }
     }
 }
 
+fn sum_u64(xs: &[u64]) -> Option<u64> {
+    let mut s = u64x2.splat(0);
+    let mut bad = mask64x2.none();
+    for v: u64x2 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[1, 1]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[1, 1]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+fn sum_u64_v3(xs: &[u64]) -> Option<u64> needs(avx2) {
+    let mut s = u64x4.splat(0);
+    let mut bad = mask64x4.none();
+    for v: u64x4 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[3, 3, 3, 3]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | (p < (p -% v));
+        s = p.permute::<[3, 3, 3, 3]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+dispatch fn sum_u64_cpu(xs: &[u64]) -> Option<u64> { avx2 => sum_u64_v3, _ => sum_u64, }
+
+fn min_u64(xs: &[u64]) -> u64 {
+    let mut a = u64x2.splat(xs[0]);
+    for v: u64x2 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+fn min_u64_v3(xs: &[u64]) -> u64 needs(avx2) {
+    let mut a = u64x4.splat(xs[0]);
+    for v: u64x4 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+dispatch fn min_u64_cpu(xs: &[u64]) -> u64 { avx2 => min_u64_v3, _ => min_u64, }
+
+fn max_u64(xs: &[u64]) -> u64 {
+    let mut a = u64x2.splat(xs[0]);
+    for v: u64x2 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+fn max_u64_v3(xs: &[u64]) -> u64 needs(avx2) {
+    let mut a = u64x4.splat(xs[0]);
+    for v: u64x4 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+dispatch fn max_u64_cpu(xs: &[u64]) -> u64 { avx2 => max_u64_v3, _ => max_u64, }
+
+fn find_u64(xs: &[u64], x: u64) -> Option<usize> {
+    let k = u64x2.splat(x);
+    let mut i: usize = 0;
+    for v: u64x2 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 2;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+fn find_u64_v3(xs: &[u64], x: u64) -> Option<usize> needs(avx2) {
+    let k = u64x4.splat(x);
+    let mut i: usize = 0;
+    for v: u64x4 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 4;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+dispatch fn find_u64_cpu(xs: &[u64], x: u64) -> Option<usize> { avx2 => find_u64_v3, _ => find_u64, }
+
+fn fill_u64(xs: &mut [u64], x: u64) {
+    let k = u64x2.splat(x);
+    for v: &mut u64x2 in xs { *v = k; } tail masked (v, m) { *v = k; }
+}
+
+fn fill_u64_v3(xs: &mut [u64], x: u64) needs(avx2) {
+    let k = u64x4.splat(x);
+    for v: &mut u64x4 in xs { *v = k; } tail masked (v, m) { *v = k; }
+}
+
+dispatch fn fill_u64_cpu(xs: &mut [u64], x: u64) { avx2 => fill_u64_v3, _ => fill_u64, }
+
 impl [u64] {
     pub fn sum(&self) -> u64 {
-        let mut s = u64x2.splat(0);
-        let mut bad = mask64x2.none();
-        for v: u64x2 in self {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | (p < (p -% v));
-            s = p.permute::<[1, 1]>();
-        } tail masked (v, m) {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | (p < (p -% v));
-            s = p.permute::<[1, 1]>();
+        if self.len() >= LONG_B64 {
+            match sum_u64_cpu(self) {
+                Option.Some(s) => { return s; }
+                Option.None => {}
+            }
+        } else {
+            let mut s = u64x2.splat(0);
+            let mut bad = mask64x2.none();
+            for v: u64x2 in self {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | (p < (p -% v));
+                s = p.permute::<[1, 1]>();
+            } tail masked (v, m) {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | (p < (p -% v));
+                s = p.permute::<[1, 1]>();
+            }
+            if bad.to_bits() == 0 { return s.reduce_max(); }
         }
-        if bad.to_bits() != 0 {
-            let mut t: u64 = 0;
-            for i in 0..self.len() { t = t + self[i]; }
-            return t;
-        }
-        return s.reduce_max();
+        let mut t: u64 = 0;
+        for i in 0..self.len() { t = t + self[i]; }
+        return t;
     }
 
     pub fn min(&self) -> Option<u64> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B64 { return Option.Some(min_u64_cpu(self)); }
         let mut a = u64x2.splat(self[0]);
         for v: u64x2 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
         return Option.Some(a.reduce_min());
@@ -296,12 +871,14 @@ impl [u64] {
 
     pub fn max(&self) -> Option<u64> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B64 { return Option.Some(max_u64_cpu(self)); }
         let mut a = u64x2.splat(self[0]);
         for v: u64x2 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
         return Option.Some(a.reduce_max());
     }
 
     pub fn find(&self, x: u64) -> Option<usize> {
+        if self.len() >= LONG_B64 { return find_u64_cpu(self, x); }
         let k = u64x2.splat(x);
         let mut i: usize = 0;
         for v: u64x2 in self {
@@ -316,40 +893,115 @@ impl [u64] {
     }
 
     pub fn eq(&self, other: &[u64]) -> bool {
-        return bytes_eq(cast::<u64, u8>(self), cast::<u64, u8>(other));
+        return bytes_eq_any(cast::<u64, u8>(self), cast::<u64, u8>(other));
     }
 
     pub fn fill(&mut self, x: u64) {
+        if self.len() >= LONG_B64 {
+            fill_u64_cpu(self, x);
+            return;
+        }
         let k = u64x2.splat(x);
         for v: &mut u64x2 in self { *v = k; } tail masked (v, m) { *v = k; }
     }
 }
 
 // Signed sums: p = prev + v overflowed iff prev and v have one sign and p the other.
+
+fn sum_i8(xs: &[i8]) -> Option<i8> {
+    let mut s = i8x16.splat(0);
+    let mut bad = mask8x16.none();
+    let z = i8x16.splat(0);
+    for v: i8x16 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+fn sum_i8_v3(xs: &[i8]) -> Option<i8> needs(avx2) {
+    let mut s = i8x32.splat(0);
+    let mut bad = mask8x32.none();
+    let z = i8x32.splat(0);
+    for v: i8x32 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+dispatch fn sum_i8_cpu(xs: &[i8]) -> Option<i8> { avx2 => sum_i8_v3, _ => sum_i8, }
+
+fn min_i8(xs: &[i8]) -> i8 {
+    let mut a = i8x16.splat(xs[0]);
+    for v: i8x16 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+fn min_i8_v3(xs: &[i8]) -> i8 needs(avx2) {
+    let mut a = i8x32.splat(xs[0]);
+    for v: i8x32 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+dispatch fn min_i8_cpu(xs: &[i8]) -> i8 { avx2 => min_i8_v3, _ => min_i8, }
+
+fn max_i8(xs: &[i8]) -> i8 {
+    let mut a = i8x16.splat(xs[0]);
+    for v: i8x16 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+fn max_i8_v3(xs: &[i8]) -> i8 needs(avx2) {
+    let mut a = i8x32.splat(xs[0]);
+    for v: i8x32 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+dispatch fn max_i8_cpu(xs: &[i8]) -> i8 { avx2 => max_i8_v3, _ => max_i8, }
+
 impl [i8] {
     pub fn sum(&self) -> i8 {
-        let mut s = i8x16.splat(0);
-        let mut bad = mask8x16.none();
-        let z = i8x16.splat(0);
-        for v: i8x16 in self {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
-            s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
-        } tail masked (v, m) {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
-            s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+        if self.len() >= LONG_B8 {
+            match sum_i8_cpu(self) {
+                Option.Some(s) => { return s; }
+                Option.None => {}
+            }
+        } else {
+            let mut s = i8x16.splat(0);
+            let mut bad = mask8x16.none();
+            let z = i8x16.splat(0);
+            for v: i8x16 in self {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+                s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+            } tail masked (v, m) {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+                s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+            }
+            if bad.to_bits() == 0 { return s.reduce_max(); }
         }
-        if bad.to_bits() != 0 {
-            let mut t: i8 = 0;
-            for i in 0..self.len() { t = t + self[i]; }
-            return t;
-        }
-        return s.reduce_max();
+        let mut t: i8 = 0;
+        for i in 0..self.len() { t = t + self[i]; }
+        return t;
     }
 
     pub fn min(&self) -> Option<i8> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B8 { return Option.Some(min_i8_cpu(self)); }
         let mut a = i8x16.splat(self[0]);
         for v: i8x16 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
         return Option.Some(a.reduce_min());
@@ -357,6 +1009,7 @@ impl [i8] {
 
     pub fn max(&self) -> Option<i8> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B8 { return Option.Some(max_i8_cpu(self)); }
         let mut a = i8x16.splat(self[0]);
         for v: i8x16 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
         return Option.Some(a.reduce_max());
@@ -367,7 +1020,7 @@ impl [i8] {
     }
 
     pub fn eq(&self, other: &[i8]) -> bool {
-        return bytes_eq(cast::<i8, u8>(self), cast::<i8, u8>(other));
+        return bytes_eq_any(cast::<i8, u8>(self), cast::<i8, u8>(other));
     }
 
     pub fn fill(&mut self, x: i8) {
@@ -375,30 +1028,100 @@ impl [i8] {
     }
 }
 
+fn sum_i16(xs: &[i16]) -> Option<i16> {
+    let mut s = i16x8.splat(0);
+    let mut bad = mask16x8.none();
+    let z = i16x8.splat(0);
+    for v: i16x8 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+fn sum_i16_v3(xs: &[i16]) -> Option<i16> needs(avx2) {
+    let mut s = i16x16.splat(0);
+    let mut bad = mask16x16.none();
+    let z = i16x16.splat(0);
+    for v: i16x16 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+dispatch fn sum_i16_cpu(xs: &[i16]) -> Option<i16> { avx2 => sum_i16_v3, _ => sum_i16, }
+
+fn min_i16(xs: &[i16]) -> i16 {
+    let mut a = i16x8.splat(xs[0]);
+    for v: i16x8 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+fn min_i16_v3(xs: &[i16]) -> i16 needs(avx2) {
+    let mut a = i16x16.splat(xs[0]);
+    for v: i16x16 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+dispatch fn min_i16_cpu(xs: &[i16]) -> i16 { avx2 => min_i16_v3, _ => min_i16, }
+
+fn max_i16(xs: &[i16]) -> i16 {
+    let mut a = i16x8.splat(xs[0]);
+    for v: i16x8 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+fn max_i16_v3(xs: &[i16]) -> i16 needs(avx2) {
+    let mut a = i16x16.splat(xs[0]);
+    for v: i16x16 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+dispatch fn max_i16_cpu(xs: &[i16]) -> i16 { avx2 => max_i16_v3, _ => max_i16, }
+
 impl [i16] {
     pub fn sum(&self) -> i16 {
-        let mut s = i16x8.splat(0);
-        let mut bad = mask16x8.none();
-        let z = i16x8.splat(0);
-        for v: i16x8 in self {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
-            s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
-        } tail masked (v, m) {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
-            s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+        if self.len() >= LONG_B16 {
+            match sum_i16_cpu(self) {
+                Option.Some(s) => { return s; }
+                Option.None => {}
+            }
+        } else {
+            let mut s = i16x8.splat(0);
+            let mut bad = mask16x8.none();
+            let z = i16x8.splat(0);
+            for v: i16x8 in self {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+                s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+            } tail masked (v, m) {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+                s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+            }
+            if bad.to_bits() == 0 { return s.reduce_max(); }
         }
-        if bad.to_bits() != 0 {
-            let mut t: i16 = 0;
-            for i in 0..self.len() { t = t + self[i]; }
-            return t;
-        }
-        return s.reduce_max();
+        let mut t: i16 = 0;
+        for i in 0..self.len() { t = t + self[i]; }
+        return t;
     }
 
     pub fn min(&self) -> Option<i16> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B16 { return Option.Some(min_i16_cpu(self)); }
         let mut a = i16x8.splat(self[0]);
         for v: i16x8 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
         return Option.Some(a.reduce_min());
@@ -406,6 +1129,7 @@ impl [i16] {
 
     pub fn max(&self) -> Option<i16> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B16 { return Option.Some(max_i16_cpu(self)); }
         let mut a = i16x8.splat(self[0]);
         for v: i16x8 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
         return Option.Some(a.reduce_max());
@@ -416,7 +1140,7 @@ impl [i16] {
     }
 
     pub fn eq(&self, other: &[i16]) -> bool {
-        return bytes_eq(cast::<i16, u8>(self), cast::<i16, u8>(other));
+        return bytes_eq_any(cast::<i16, u8>(self), cast::<i16, u8>(other));
     }
 
     pub fn fill(&mut self, x: i16) {
@@ -424,30 +1148,100 @@ impl [i16] {
     }
 }
 
+fn sum_i32(xs: &[i32]) -> Option<i32> {
+    let mut s = i32x4.splat(0);
+    let mut bad = mask32x4.none();
+    let z = i32x4.splat(0);
+    for v: i32x4 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[3, 3, 3, 3]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[3, 3, 3, 3]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+fn sum_i32_v3(xs: &[i32]) -> Option<i32> needs(avx2) {
+    let mut s = i32x8.splat(0);
+    let mut bad = mask32x8.none();
+    let z = i32x8.splat(0);
+    for v: i32x8 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[7, 7, 7, 7, 7, 7, 7, 7]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+dispatch fn sum_i32_cpu(xs: &[i32]) -> Option<i32> { avx2 => sum_i32_v3, _ => sum_i32, }
+
+fn min_i32(xs: &[i32]) -> i32 {
+    let mut a = i32x4.splat(xs[0]);
+    for v: i32x4 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+fn min_i32_v3(xs: &[i32]) -> i32 needs(avx2) {
+    let mut a = i32x8.splat(xs[0]);
+    for v: i32x8 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+dispatch fn min_i32_cpu(xs: &[i32]) -> i32 { avx2 => min_i32_v3, _ => min_i32, }
+
+fn max_i32(xs: &[i32]) -> i32 {
+    let mut a = i32x4.splat(xs[0]);
+    for v: i32x4 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+fn max_i32_v3(xs: &[i32]) -> i32 needs(avx2) {
+    let mut a = i32x8.splat(xs[0]);
+    for v: i32x8 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+dispatch fn max_i32_cpu(xs: &[i32]) -> i32 { avx2 => max_i32_v3, _ => max_i32, }
+
 impl [i32] {
     pub fn sum(&self) -> i32 {
-        let mut s = i32x4.splat(0);
-        let mut bad = mask32x4.none();
-        let z = i32x4.splat(0);
-        for v: i32x4 in self {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
-            s = p.permute::<[3, 3, 3, 3]>();
-        } tail masked (v, m) {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
-            s = p.permute::<[3, 3, 3, 3]>();
+        if self.len() >= LONG_B32 {
+            match sum_i32_cpu(self) {
+                Option.Some(s) => { return s; }
+                Option.None => {}
+            }
+        } else {
+            let mut s = i32x4.splat(0);
+            let mut bad = mask32x4.none();
+            let z = i32x4.splat(0);
+            for v: i32x4 in self {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+                s = p.permute::<[3, 3, 3, 3]>();
+            } tail masked (v, m) {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+                s = p.permute::<[3, 3, 3, 3]>();
+            }
+            if bad.to_bits() == 0 { return s.reduce_max(); }
         }
-        if bad.to_bits() != 0 {
-            let mut t: i32 = 0;
-            for i in 0..self.len() { t = t + self[i]; }
-            return t;
-        }
-        return s.reduce_max();
+        let mut t: i32 = 0;
+        for i in 0..self.len() { t = t + self[i]; }
+        return t;
     }
 
     pub fn min(&self) -> Option<i32> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B32 { return Option.Some(min_i32_cpu(self)); }
         let mut a = i32x4.splat(self[0]);
         for v: i32x4 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
         return Option.Some(a.reduce_min());
@@ -455,6 +1249,7 @@ impl [i32] {
 
     pub fn max(&self) -> Option<i32> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B32 { return Option.Some(max_i32_cpu(self)); }
         let mut a = i32x4.splat(self[0]);
         for v: i32x4 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
         return Option.Some(a.reduce_max());
@@ -465,7 +1260,7 @@ impl [i32] {
     }
 
     pub fn eq(&self, other: &[i32]) -> bool {
-        return bytes_eq(cast::<i32, u8>(self), cast::<i32, u8>(other));
+        return bytes_eq_any(cast::<i32, u8>(self), cast::<i32, u8>(other));
     }
 
     pub fn fill(&mut self, x: i32) {
@@ -473,30 +1268,100 @@ impl [i32] {
     }
 }
 
+fn sum_i64(xs: &[i64]) -> Option<i64> {
+    let mut s = i64x2.splat(0);
+    let mut bad = mask64x2.none();
+    let z = i64x2.splat(0);
+    for v: i64x2 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[1, 1]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[1, 1]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+fn sum_i64_v3(xs: &[i64]) -> Option<i64> needs(avx2) {
+    let mut s = i64x4.splat(0);
+    let mut bad = mask64x4.none();
+    let z = i64x4.splat(0);
+    for v: i64x4 in xs {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[3, 3, 3, 3]>();
+    } tail masked (v, m) {
+        let p = s +% v.scan_add_wrap();
+        bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+        s = p.permute::<[3, 3, 3, 3]>();
+    }
+    if bad.to_bits() != 0 { return Option.None; }
+    return Option.Some(s.reduce_max());
+}
+
+dispatch fn sum_i64_cpu(xs: &[i64]) -> Option<i64> { avx2 => sum_i64_v3, _ => sum_i64, }
+
+fn min_i64(xs: &[i64]) -> i64 {
+    let mut a = i64x2.splat(xs[0]);
+    for v: i64x2 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+fn min_i64_v3(xs: &[i64]) -> i64 needs(avx2) {
+    let mut a = i64x4.splat(xs[0]);
+    for v: i64x4 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+dispatch fn min_i64_cpu(xs: &[i64]) -> i64 { avx2 => min_i64_v3, _ => min_i64, }
+
+fn max_i64(xs: &[i64]) -> i64 {
+    let mut a = i64x2.splat(xs[0]);
+    for v: i64x2 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+fn max_i64_v3(xs: &[i64]) -> i64 needs(avx2) {
+    let mut a = i64x4.splat(xs[0]);
+    for v: i64x4 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+dispatch fn max_i64_cpu(xs: &[i64]) -> i64 { avx2 => max_i64_v3, _ => max_i64, }
+
 impl [i64] {
     pub fn sum(&self) -> i64 {
-        let mut s = i64x2.splat(0);
-        let mut bad = mask64x2.none();
-        let z = i64x2.splat(0);
-        for v: i64x2 in self {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
-            s = p.permute::<[1, 1]>();
-        } tail masked (v, m) {
-            let p = s +% v.scan_add_wrap();
-            bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
-            s = p.permute::<[1, 1]>();
+        if self.len() >= LONG_B64 {
+            match sum_i64_cpu(self) {
+                Option.Some(s) => { return s; }
+                Option.None => {}
+            }
+        } else {
+            let mut s = i64x2.splat(0);
+            let mut bad = mask64x2.none();
+            let z = i64x2.splat(0);
+            for v: i64x2 in self {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+                s = p.permute::<[1, 1]>();
+            } tail masked (v, m) {
+                let p = s +% v.scan_add_wrap();
+                bad = bad | ((((p -% v) ^ p) & (v ^ p)) < z);
+                s = p.permute::<[1, 1]>();
+            }
+            if bad.to_bits() == 0 { return s.reduce_max(); }
         }
-        if bad.to_bits() != 0 {
-            let mut t: i64 = 0;
-            for i in 0..self.len() { t = t + self[i]; }
-            return t;
-        }
-        return s.reduce_max();
+        let mut t: i64 = 0;
+        for i in 0..self.len() { t = t + self[i]; }
+        return t;
     }
 
     pub fn min(&self) -> Option<i64> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B64 { return Option.Some(min_i64_cpu(self)); }
         let mut a = i64x2.splat(self[0]);
         for v: i64x2 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
         return Option.Some(a.reduce_min());
@@ -504,6 +1369,7 @@ impl [i64] {
 
     pub fn max(&self) -> Option<i64> {
         if self.len() == 0 { return Option.None; }
+        if self.len() >= LONG_B64 { return Option.Some(max_i64_cpu(self)); }
         let mut a = i64x2.splat(self[0]);
         for v: i64x2 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
         return Option.Some(a.reduce_max());
@@ -514,7 +1380,7 @@ impl [i64] {
     }
 
     pub fn eq(&self, other: &[i64]) -> bool {
-        return bytes_eq(cast::<i64, u8>(self), cast::<i64, u8>(other));
+        return bytes_eq_any(cast::<i64, u8>(self), cast::<i64, u8>(other));
     }
 
     pub fn fill(&mut self, x: i64) {
@@ -547,7 +1413,7 @@ impl [usize] {
     }
 
     pub fn eq(&self, other: &[usize]) -> bool {
-        return bytes_eq(cast::<usize, u8>(self), cast::<usize, u8>(other));
+        return bytes_eq_any(cast::<usize, u8>(self), cast::<usize, u8>(other));
     }
 
     pub fn fill(&mut self, x: usize) {
@@ -579,13 +1445,95 @@ impl [isize] {
     }
 
     pub fn eq(&self, other: &[isize]) -> bool {
-        return bytes_eq(cast::<isize, u8>(self), cast::<isize, u8>(other));
+        return bytes_eq_any(cast::<isize, u8>(self), cast::<isize, u8>(other));
     }
 
     pub fn fill(&mut self, x: isize) {
         cast_mut::<isize, u64>(self).fill(x as% u64);
     }
 }
+
+fn min_f32(xs: &[f32]) -> f32 {
+    let mut a = f32x4.splat(xs[0]);
+    for v: f32x4 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+fn min_f32_v3(xs: &[f32]) -> f32 needs(avx2) {
+    let mut a = f32x8.splat(xs[0]);
+    for v: f32x8 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+dispatch fn min_f32_cpu(xs: &[f32]) -> f32 { avx2 => min_f32_v3, _ => min_f32, }
+
+fn max_f32(xs: &[f32]) -> f32 {
+    let mut a = f32x4.splat(xs[0]);
+    for v: f32x4 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+fn max_f32_v3(xs: &[f32]) -> f32 needs(avx2) {
+    let mut a = f32x8.splat(xs[0]);
+    for v: f32x8 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+dispatch fn max_f32_cpu(xs: &[f32]) -> f32 { avx2 => max_f32_v3, _ => max_f32, }
+
+fn find_f32(xs: &[f32], x: f32) -> Option<usize> {
+    let k = f32x4.splat(x);
+    let mut i: usize = 0;
+    for v: f32x4 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 4;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+fn find_f32_v3(xs: &[f32], x: f32) -> Option<usize> needs(avx2) {
+    let k = f32x8.splat(x);
+    let mut i: usize = 0;
+    for v: f32x8 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 8;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+dispatch fn find_f32_cpu(xs: &[f32], x: f32) -> Option<usize> { avx2 => find_f32_v3, _ => find_f32, }
+
+fn eq_f32(a: &[f32], b: &[f32]) -> bool {
+    let n = a.len();
+    let mut i: usize = 0;
+    while i + 4 <= n {
+        if (f32x4.load(a, i) != f32x4.load(b, i)).to_bits() != 0 { return false; }
+        i = i + 4;
+    }
+    let m = mask32x4.first_n(n - i);
+    return ((f32x4.load_masked(a, i, m) != f32x4.load_masked(b, i, m)) & m).to_bits() == 0;
+}
+
+fn eq_f32_v3(a: &[f32], b: &[f32]) -> bool needs(avx2) {
+    let n = a.len();
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        if (f32x8.load(a, i) != f32x8.load(b, i)).to_bits() != 0 { return false; }
+        i = i + 8;
+    }
+    let m = mask32x8.first_n(n - i);
+    return ((f32x8.load_masked(a, i, m) != f32x8.load_masked(b, i, m)) & m).to_bits() == 0;
+}
+
+dispatch fn eq_f32_cpu(a: &[f32], b: &[f32]) -> bool { avx2 => eq_f32_v3, _ => eq_f32, }
 
 impl [f32] {
     pub fn sum(&self) -> f32 {
@@ -614,19 +1562,32 @@ impl [f32] {
 
     pub fn min(&self) -> Option<f32> {
         if self.len() == 0 { return Option.None; }
-        let mut a = f32x4.splat(self[0]);
-        for v: f32x4 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
-        return Option.Some(a.reduce_min());
+        let mut r: f32 = 0.0;
+        if self.len() >= LONG_B32 {
+            r = min_f32_cpu(self);
+        } else {
+            let mut a = f32x4.splat(self[0]);
+            for v: f32x4 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+            r = a.reduce_min();
+        }
+        return Option.Some(if r != r then mem.f32_from_bits(0x7fc00000) else r);
     }
 
     pub fn max(&self) -> Option<f32> {
         if self.len() == 0 { return Option.None; }
-        let mut a = f32x4.splat(self[0]);
-        for v: f32x4 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
-        return Option.Some(a.reduce_max());
+        let mut r: f32 = 0.0;
+        if self.len() >= LONG_B32 {
+            r = max_f32_cpu(self);
+        } else {
+            let mut a = f32x4.splat(self[0]);
+            for v: f32x4 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+            r = a.reduce_max();
+        }
+        return Option.Some(if r != r then mem.f32_from_bits(0x7fc00000) else r);
     }
 
     pub fn find(&self, x: f32) -> Option<usize> {
+        if self.len() >= LONG_B32 { return find_f32_cpu(self, x); }
         let k = f32x4.splat(x);
         let mut i: usize = 0;
         for v: f32x4 in self {
@@ -642,6 +1603,7 @@ impl [f32] {
 
     pub fn eq(&self, other: &[f32]) -> bool {
         if self.len() != other.len() { return false; }
+        if self.len() >= LONG_B32 { return eq_f32_cpu(self, other); }
         let n = self.len();
         let mut i: usize = 0;
         while i + 4 <= n {
@@ -656,6 +1618,88 @@ impl [f32] {
         cast_mut::<f32, u32>(self).fill(mem.f32_bits(x));
     }
 }
+
+fn min_f64(xs: &[f64]) -> f64 {
+    let mut a = f64x2.splat(xs[0]);
+    for v: f64x2 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+fn min_f64_v3(xs: &[f64]) -> f64 needs(avx2) {
+    let mut a = f64x4.splat(xs[0]);
+    for v: f64x4 in xs { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+    return a.reduce_min();
+}
+
+dispatch fn min_f64_cpu(xs: &[f64]) -> f64 { avx2 => min_f64_v3, _ => min_f64, }
+
+fn max_f64(xs: &[f64]) -> f64 {
+    let mut a = f64x2.splat(xs[0]);
+    for v: f64x2 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+fn max_f64_v3(xs: &[f64]) -> f64 needs(avx2) {
+    let mut a = f64x4.splat(xs[0]);
+    for v: f64x4 in xs { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+    return a.reduce_max();
+}
+
+dispatch fn max_f64_cpu(xs: &[f64]) -> f64 { avx2 => max_f64_v3, _ => max_f64, }
+
+fn find_f64(xs: &[f64], x: f64) -> Option<usize> {
+    let k = f64x2.splat(x);
+    let mut i: usize = 0;
+    for v: f64x2 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 2;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+fn find_f64_v3(xs: &[f64], x: f64) -> Option<usize> needs(avx2) {
+    let k = f64x4.splat(x);
+    let mut i: usize = 0;
+    for v: f64x4 in xs {
+        let b = (v == k).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+        i = i + 4;
+    } tail masked (v, m) {
+        let b = ((v == k) & m).to_bits();
+        if b != 0 { return some_at(i, b as u64); }
+    }
+    return Option.None;
+}
+
+dispatch fn find_f64_cpu(xs: &[f64], x: f64) -> Option<usize> { avx2 => find_f64_v3, _ => find_f64, }
+
+fn eq_f64(a: &[f64], b: &[f64]) -> bool {
+    let n = a.len();
+    let mut i: usize = 0;
+    while i + 2 <= n {
+        if (f64x2.load(a, i) != f64x2.load(b, i)).to_bits() != 0 { return false; }
+        i = i + 2;
+    }
+    let m = mask64x2.first_n(n - i);
+    return ((f64x2.load_masked(a, i, m) != f64x2.load_masked(b, i, m)) & m).to_bits() == 0;
+}
+
+fn eq_f64_v3(a: &[f64], b: &[f64]) -> bool needs(avx2) {
+    let n = a.len();
+    let mut i: usize = 0;
+    while i + 4 <= n {
+        if (f64x4.load(a, i) != f64x4.load(b, i)).to_bits() != 0 { return false; }
+        i = i + 4;
+    }
+    let m = mask64x4.first_n(n - i);
+    return ((f64x4.load_masked(a, i, m) != f64x4.load_masked(b, i, m)) & m).to_bits() == 0;
+}
+
+dispatch fn eq_f64_cpu(a: &[f64], b: &[f64]) -> bool { avx2 => eq_f64_v3, _ => eq_f64, }
 
 impl [f64] {
     pub fn sum(&self) -> f64 {
@@ -684,19 +1728,32 @@ impl [f64] {
 
     pub fn min(&self) -> Option<f64> {
         if self.len() == 0 { return Option.None; }
-        let mut a = f64x2.splat(self[0]);
-        for v: f64x2 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
-        return Option.Some(a.reduce_min());
+        let mut r: f64 = 0.0;
+        if self.len() >= LONG_B64 {
+            r = min_f64_cpu(self);
+        } else {
+            let mut a = f64x2.splat(self[0]);
+            for v: f64x2 in self { a = a.min(v); } tail masked (v, m) { a = a.min(m.select(v, a)); }
+            r = a.reduce_min();
+        }
+        return Option.Some(if r != r then mem.f64_from_bits(0x7ff8000000000000) else r);
     }
 
     pub fn max(&self) -> Option<f64> {
         if self.len() == 0 { return Option.None; }
-        let mut a = f64x2.splat(self[0]);
-        for v: f64x2 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
-        return Option.Some(a.reduce_max());
+        let mut r: f64 = 0.0;
+        if self.len() >= LONG_B64 {
+            r = max_f64_cpu(self);
+        } else {
+            let mut a = f64x2.splat(self[0]);
+            for v: f64x2 in self { a = a.max(v); } tail masked (v, m) { a = a.max(m.select(v, a)); }
+            r = a.reduce_max();
+        }
+        return Option.Some(if r != r then mem.f64_from_bits(0x7ff8000000000000) else r);
     }
 
     pub fn find(&self, x: f64) -> Option<usize> {
+        if self.len() >= LONG_B64 { return find_f64_cpu(self, x); }
         let k = f64x2.splat(x);
         let mut i: usize = 0;
         for v: f64x2 in self {
@@ -712,6 +1769,7 @@ impl [f64] {
 
     pub fn eq(&self, other: &[f64]) -> bool {
         if self.len() != other.len() { return false; }
+        if self.len() >= LONG_B64 { return eq_f64_cpu(self, other); }
         let n = self.len();
         let mut i: usize = 0;
         while i + 2 <= n {
@@ -734,7 +1792,7 @@ impl [bool] {
     }
 
     pub fn eq(&self, other: &[bool]) -> bool {
-        return bytes_eq(cast::<bool, u8>(self), cast::<bool, u8>(other));
+        return bytes_eq_any(cast::<bool, u8>(self), cast::<bool, u8>(other));
     }
 
     pub fn fill(&mut self, x: bool) {
@@ -782,6 +1840,10 @@ impl<T: Copy> [T] {
         debug.assert(self.len() == src.len(), "copy_from: the slices differ in length");
         let s = cast::<T, u8>(src);
         let d = cast_mut::<T, u8>(self);
+        if d.len() >= LONG_B8 {
+            copy_bytes_cpu(s, d);
+            return;
+        }
         let n = d.len();
         let mut i: usize = 0;
         while i + 64 <= n {

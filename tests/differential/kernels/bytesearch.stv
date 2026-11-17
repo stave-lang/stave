@@ -4,7 +4,7 @@
 // masked load for the head.
 import diff;
 
-fn find_first(xs: &[u8], b: u8) -> usize {
+pub fn find_first(xs: &[u8], b: u8) -> usize {
     let key = u8x16.splat(b);
     let n = xs.len();
     let mut i: usize = 0;
@@ -21,7 +21,7 @@ fn find_first(xs: &[u8], b: u8) -> usize {
     return n;
 }
 
-fn find_last(xs: &[u8], b: u8) -> usize {
+pub fn find_last(xs: &[u8], b: u8) -> usize {
     let key = u8x16.splat(b);
     let n = xs.len();
     let mut j = n;
@@ -38,7 +38,7 @@ fn find_last(xs: &[u8], b: u8) -> usize {
     return n;
 }
 
-fn count(xs: &[u8], b: u8) -> usize {
+pub fn count(xs: &[u8], b: u8) -> usize {
     let key = u8x16.splat(b);
     let mut c: usize = 0;
     for v: u8x16 in xs {

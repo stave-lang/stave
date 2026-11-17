@@ -4,7 +4,10 @@
 //! the references' tokens; every line must match itself, and every leg must print what the
 //! interpreter prints. Legs: the stave-ir interpreter, then native debug and release builds for
 //! x86_64-linux, x86_64-linux-v3 and aarch64-linux (under qemu-aarch64 on an x86-64 host);
-//! a `_v3` kernel builds for x86_64-linux-v3 only. A leg that cannot run here is skipped with a
+//! a `_v3` kernel builds for x86_64-linux-v3 only; a `_disp` kernel (dispatch fns over
+//! `needs(avx2)` arms and the kernels of `<k>.stv`) builds for every target and its
+//! x86_64-linux builds also run under `qemu-x86_64 -cpu Nehalem` (the `_` arms; skipped without
+//! qemu-x86_64). A leg that cannot run here is skipped with a
 //! note, or fails when `STAVE_REQUIRE_LEGS` lists it.
 //!
 //! Env: `STAVE_DIFF_SEED` (u64), `STAVE_DIFF_FULL=1` (every misalignment), `STAVE_DIFF_RANDOM`
@@ -140,6 +143,7 @@ const KERNELS: &[Kernel] = &[
         ],
     },
     Kernel { name: "bytesearch_v3", kinds: &[kind(&[Elem::U8], 32, Param::Byte)] },
+    Kernel { name: "bytesearch_disp", kinds: &[kind(&[Elem::U8], 32, Param::Byte)] },
     Kernel {
         name: "prefix_v3",
         kinds: &[
@@ -203,7 +207,7 @@ fn runner(target: Triple) -> Option<Option<&'static str>> {
 }
 
 /// The package of one kernel: `stave.toml`, `src/main.stv` (the kernel file), `src/diff.stv`,
-/// and for `<k>_v3` the references of `<k>.stv` as `src/base.stv`.
+/// and for `<k>_v3` and `<k>_disp` the kernels and references of `<k>.stv` as `src/base.stv`.
 fn package(dir: &Path, name: &str) {
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -211,7 +215,7 @@ fn package(dir: &Path, name: &str) {
     std::fs::write(dir.join("stave.toml"), "name = \"kernel\"\nkind = \"bin\"\n").unwrap();
     std::fs::copy(here.join(format!("kernels/{name}.stv")), src.join("main.stv")).unwrap();
     std::fs::copy(here.join("diff.stv"), src.join("diff.stv")).unwrap();
-    if let Some(base) = name.strip_suffix("_v3") {
+    if let Some(base) = name.strip_suffix("_v3").or_else(|| name.strip_suffix("_disp")) {
         std::fs::copy(here.join(format!("kernels/{base}.stv")), src.join("base.stv")).unwrap();
     }
 }
@@ -329,7 +333,7 @@ fn oracle(kernel: &str, case: &generate::Case) -> Option<String> {
             let points = xs.iter().filter(|&&b| b & 0xc0 != 0x80).count();
             Some(format!("u{} u{points}", u8::from(valid)))
         }
-        "bytesearch" | "bytesearch_v3" => {
+        "bytesearch" | "bytesearch_v3" | "bytesearch_disp" => {
             let b = case.param as u8;
             let first = xs.iter().position(|&x| x == b).unwrap_or(xs.len());
             let last = xs.iter().rposition(|&x| x == b).unwrap_or(xs.len());
@@ -422,22 +426,32 @@ fn run_kernel(k: &'static Kernel, root: &Path, plan: Plan) -> Vec<Report> {
     reports.push(check(k.name, ileg, Leg::Ran(want.clone()), None, &cases, &dir, &rerun_i));
     let want_text = String::from_utf8_lossy(&want.stdout).into_owned();
 
-    for t in targets {
+    // (target, how to run its builds, leg label suffix)
+    let mut legs: Vec<(&str, Option<Option<&str>>, &str)> =
+        targets.iter().map(|t| (*t, runner(Triple::parse(t).unwrap()), "")).collect();
+    // a dispatch kernel also runs on an x86-64 CPU without AVX2: its `_` arms
+    if k.name.ends_with("_disp") {
+        if cfg!(target_os = "linux") && have("qemu-x86_64") {
+            legs.push(("x86_64-linux", Some(Some("qemu-x86_64 -cpu Nehalem")), " Nehalem"));
+        } else {
+            eprintln!("note: no qemu-x86_64: the Nehalem leg of {} is skipped", k.name);
+        }
+    }
+    for (t, how, label) in legs {
         let target = Triple::parse(t).unwrap();
-        let how = runner(target);
         for release in [false, true] {
-            let leg = format!("{t} {}", if release { "release" } else { "debug" });
+            let leg = format!("{t} {}{label}", if release { "release" } else { "debug" });
             let got = match build(&dir, target, release) {
                 Err(m) => Leg::NotBuilt(m),
                 Ok(_) if how.is_none() => Leg::Skipped("cannot run here".into()),
                 Ok(out) => {
-                    let bin = dir.join(format!("bin-{t}-{release}"));
+                    let bin = dir.join(format!("bin-{t}-{release}{label}"));
                     out.image.as_ref().unwrap().write_file(&bin).unwrap();
                     let spec = RunSpec { args: &[], runner: how.unwrap(), cwd: Some(&dir), inherit: false };
                     Leg::Ran(exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display())))
                 }
             };
-            let bin = dir.join(format!("bin-{t}-{release}"));
+            let bin = dir.join(format!("bin-{t}-{release}{label}"));
             let rerun = |cwd: &Path, _: &[u8]| {
                 let args = ["full".to_string()];
                 let spec = RunSpec { args: &args, runner: how.flatten(), cwd: Some(cwd), inherit: false };

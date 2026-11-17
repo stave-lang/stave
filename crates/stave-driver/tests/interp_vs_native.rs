@@ -337,7 +337,8 @@ fn lower_only(p: &Path, target: Triple) -> Output {
 /// Every SIMD program runs in the interpreter on both arches: stdout equals `<name>.stdout`, the
 /// exit status `<name>.exit` (default 0), and stderr contains `<name>.stderr` when present
 /// (`STAVE_BLESS=1` rewrites the stdout files). On the targets of [`SIMD_NATIVE`] the native
-/// debug and release builds must also match.
+/// debug and release builds must also match, and the x86_64-linux builds again under
+/// `qemu-x86_64 -cpu Nehalem` (no AVX2) when it is installed.
 #[test]
 fn simd_programs_run_in_the_interpreter() {
     let progs = simd_programs();
@@ -345,6 +346,11 @@ fn simd_programs_run_in_the_interpreter() {
     let bless = std::env::var_os("STAVE_BLESS").is_some();
     let tmp = TempDir::new("ivn-simd").unwrap();
     let mut failures = Vec::new();
+    let v2 = Triple::parse("x86_64-linux").unwrap();
+    let nehalem = cfg!(target_os = "linux") && have("qemu-x86_64");
+    if !nehalem {
+        eprintln!("note: no qemu-x86_64: the Nehalem runs are skipped");
+    }
     for target in ["x86_64-linux", "x86_64-linux-v3", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
         for p in &progs {
             let name = p.file_stem().unwrap().to_string_lossy().into_owned();
@@ -376,18 +382,26 @@ fn simd_programs_run_in_the_interpreter() {
                 continue;
             }
             let Some(runner) = runner(target) else { continue };
+            // x86-64 without AVX2 as well: the std.slice loops a 256-bit CPU skips
+            let mut runners = vec![(runner, "")];
+            if target == v2 && nehalem {
+                runners.push((Some("qemu-x86_64 -cpu Nehalem"), " Nehalem"));
+            }
             let want = Ran { exit: r.exit & 0xff, ..r.clone() };
             for (release, mode) in [(false, "debug"), (true, "release")] {
                 let built = build(p, target, release);
                 let bin = tmp.path().join(format!("{name}-{target}-{mode}"));
                 built.image.as_ref().unwrap().write_file(&bin).unwrap();
-                let spec = RunSpec { args: &[], runner, cwd: Some(&base_dir(p)), inherit: false };
-                let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
-                if got != want {
-                    failures.push(format!(
-                        "{name} [{target} {mode}]: native differs from the interpreter\n{}",
-                        show(&got)
-                    ));
+                for (runner, how) in &runners {
+                    let spec =
+                        RunSpec { args: &[], runner: *runner, cwd: Some(&base_dir(p)), inherit: false };
+                    let got = exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display()));
+                    if got != want {
+                        failures.push(format!(
+                            "{name} [{target} {mode}{how}]: native differs from the interpreter\n{}",
+                            show(&got)
+                        ));
+                    }
                 }
             }
         }
