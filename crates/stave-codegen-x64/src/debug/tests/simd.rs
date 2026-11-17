@@ -22,6 +22,7 @@
 mod lanewise;
 mod memory;
 mod plumbing;
+mod recipes;
 mod regs;
 mod reshape;
 mod values;
@@ -1005,7 +1006,7 @@ fn k_ok(c: &Case) -> bool {
 }
 
 /// Functions that stay at the module baseline under every mode.
-fn baseline_fn(path: &str) -> bool {
+pub fn baseline_fn(path: &str) -> bool {
     path.starts_with("runtime.") || matches!(path, "t.main" | "t.write" | "t.print_u64" | "t.dump" | "t.fill")
 }
 

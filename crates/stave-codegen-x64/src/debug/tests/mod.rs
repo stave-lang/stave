@@ -9,6 +9,7 @@ mod cases;
 mod cold;
 mod features;
 mod harness;
+mod kmode;
 mod native;
 mod props;
 mod randgen;

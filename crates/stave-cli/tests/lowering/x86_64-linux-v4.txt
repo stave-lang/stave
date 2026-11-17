@@ -128,9 +128,9 @@ mask.and                mask                        N    1  kandq
 mask.or                 mask                        N    1  korq
 mask.xor                mask                        N    1  kxorq
 mask.not                mask                        N    1  knotq
-mask.all                mask                        N    1  kxnor*  | unverified
-mask.none               mask                        N    1  kxor*  | unverified
-mask.to_vec             mask                        N    1  vpmovm2*  | unverified
+mask.all                mask                        N    1  kxnorq
+mask.none               mask                        N    1  kxorq
+mask.to_vec             mask                        N    1  vpmovm2*
 mask.rewiden            mask                        N    0  none
 mask.to_bits            m8                          N    1  kmovq
 mask.to_bits            m16                         N    1  kmovd

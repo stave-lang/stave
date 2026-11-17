@@ -497,13 +497,13 @@ impl Cg<'_, '_> {
     }
 
     /// The wrapped sum or difference of signed lanes in `r` and, in `XS0`, a vector whose lane
-    /// sign bits are set where it overflowed.
-    fn ksigned_ovf(&mut self, sh: Sh, add: bool, r: Xmm, a: Xmm, b: Xmm) -> Res<()> {
+    /// sign bits are set where it overflowed (`tern`: the bitwise `vpternlog` form).
+    fn ksigned_ovf(&mut self, sh: Sh, add: bool, tern: EOp, r: Xmm, a: Xmm, b: Xmm) -> Res<()> {
         let sz = sh.size;
         self.kb(by_w(sh.w, if add { KPADD } else { KPSUB }), sz, r, a, b)?;
         self.ku(EOp::Movdqa64, sz, XS0, a)?;
         // per bit, of (a, b, r): add: (a ^ r) & (b ^ r); sub: (a ^ b) & (a ^ r)
-        self.kbi(EOp::Pternlogd, sz, XS0, b, r, if add { 0x42 } else { 0x18 })
+        self.kbi(tern, sz, XS0, b, r, if add { 0x42 } else { 0x18 })
     }
 
     fn k_sat(&mut self, op: VecOp, a: Operand, b: Operand, rt: TypeId, rv: Value) -> Res<()> {
@@ -543,7 +543,7 @@ impl Cg<'_, '_> {
         let (xa, xb) = (self.vread(a, sz)?, self.vread(b, sz)?);
         let r = self.alloc_x()?;
         let k = self.alloc_k()?;
-        self.ksigned_ovf(sh, add, r, xa, xb)?;
+        self.ksigned_ovf(sh, add, if q { EOp::Pternlogq } else { EOp::Pternlogd }, r, xa, xb)?;
         self.kmask_from_vec(k, XS0, sh.n, sh.w)?;
         // the bound on `a`'s side: MAX, or MIN = !MAX for a negative `a`
         self.ku(EOp::Movdqa64, sz, XS0, xa)?;
@@ -573,7 +573,7 @@ impl Cg<'_, '_> {
         let (d, off, _) = self.option_home(rt, some, rv)?;
         // ZF = no lane overflowed
         if t.signed {
-            self.ksigned_ovf(sh, add, r, xa, xb)?;
+            self.ksigned_ovf(sh, add, EOp::Pternlogd, r, xa, xb)?;
             self.ksplat(XS1, sz, sh.w, sh.sign())?;
             self.kcmp(EOp::Ptestmq, sz, k, XS0, XS1, None)?;
             self.a.kortest(KSize::B, k, k);
@@ -934,7 +934,8 @@ impl Cg<'_, '_> {
         if sh.size < 16 {
             self.vload(x, m, sh.size)?;
         } else {
-            self.ku(EOp::Movdqu64, sh.size, x, m)?;
+            // an aligned access: the slice is aligned to the vector and the index to its lanes
+            self.ku(if aligned { EOp::Movdqa64 } else { EOp::Movdqu64 }, sh.size, x, m)?;
         }
         self.vput(rv, x, sh.size)
     }
@@ -949,7 +950,7 @@ impl Cg<'_, '_> {
         if sh.size < 16 {
             return self.vstore(m, x, sh.size);
         }
-        self.ku(EOp::Movdqu64St, sh.size, x, m)
+        self.ku(if aligned { EOp::Movdqa64St } else { EOp::Movdqu64St }, sh.size, x, m)
     }
 
     /// Active lanes only: inactive lanes read as zero and their memory is not touched.

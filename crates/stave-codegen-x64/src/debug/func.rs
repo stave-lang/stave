@@ -701,7 +701,12 @@ impl<'a, 'm> Cg<'a, 'm> {
                             .map(|f| f.name())
                             .collect();
                         let all: Vec<&str> = super::V4_SET.iter().map(|f| f.name()).collect();
-                        let more = if lacks.is_empty() {
+                        let types = &self.cx.m.types;
+                        let bytes = match stave_ir::simd::vec_shape(types, t) {
+                            Some((_, lane, n)) => lane.bits() / 8 * n,
+                            None => stave_ir::simd::mask_shape(types, t).map_or(0, |(w, n)| w / 8 * n),
+                        };
+                        let more = if lacks.is_empty() || bytes <= 32 {
                             String::new()
                         } else {
                             format!(
@@ -2006,13 +2011,22 @@ impl<'a, 'm> Cg<'a, 'm> {
 
     pub fn abi_of(&self, params: &[TypeId], ret: Option<TypeId>) -> Res<CallAbi> {
         abi::call_abi(&self.cx.m.types, &self.cx.layouts, self.cls, params, ret, false)
-            .ok_or_else(|| unsup("a parameter or return type has no value class"))
+            .ok_or_else(|| self.no_class(params, ret))
     }
 
     /// [`Self::abi_of`] plus the trailing environment argument of a fn-value call.
     pub fn abi_of_env(&self, params: &[TypeId], ret: Option<TypeId>) -> Res<CallAbi> {
         abi::call_abi(&self.cx.m.types, &self.cx.layouts, self.cls, params, ret, true)
-            .ok_or_else(|| unsup("a parameter or return type has no value class"))
+            .ok_or_else(|| self.no_class(params, ret))
+    }
+
+    /// The error of a signature with a type this function cannot hold: the type's own.
+    fn no_class(&self, params: &[TypeId], ret: Option<TypeId>) -> Error {
+        params
+            .iter()
+            .chain(&ret)
+            .find_map(|&t| self.vcls(t).err())
+            .unwrap_or_else(|| unsup("a parameter or return type has no value class"))
     }
 
     /// `sub rsp, n`, touching every page on the way down (as the prologue does), so a large

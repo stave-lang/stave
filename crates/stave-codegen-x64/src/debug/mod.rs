@@ -67,9 +67,19 @@
 //! build, and in a debug build when the module baseline has no `avx`. A function with a
 //! 32-byte-aligned value realigns its frame (`func`).
 //!
+//! K mode. A function whose set has `avx512f`, `avx512bw`, `avx512vl`, `avx512dq` and `avx512cd`
+//! ([`Feats::v4`]) holds 512-bit vectors (in `zmm0`–`zmm13`) and its masks as one bit per lane
+//! in mask registers: a register class of its own next to the general and vector ones (`k1`–`k7`
+//! in the cache, `k4`–`k7` ownable across blocks in a release build, `k0` scratch; 8-byte
+//! homes). Its vector ops are the v4 recipes of the lowering table, EVEX-encoded (`simd::k`).
+//! Masks keep their format outside the function, the vector of all-ones lanes: in memory and
+//! across calls (`abi`), where the function converts. Every EVEX and mask-register instruction
+//! records its AVX-512 features like the others.
+//!
 //! Not implemented (clean [`Error::Unsupported`]): sizeless vectors, vectors with f16 / bf16
 //! lanes, 256-bit vectors in a function without `avx`, 256-bit ops whose instructions need a
-//! feature the function lacks, vectors wider than 256 bits, conversions *to* f16 / bf16,
+//! feature the function lacks, vectors wider than 256 bits outside K mode, the ops K mode does
+//! not lower (`simd::k`), conversions *to* f16 / bf16,
 //! alignment above the widest vector, intrinsics outside the x86-64 table, references to
 //! functions without a body (C imports need an external linker). Stack overflow is detected by the
 //! runtime's guard page, not by an inline check. When `ObjectImage::patch_func` moves a function,

@@ -28,7 +28,7 @@ fn have(tool: &str) -> bool {
 }
 
 /// GNU objdump is installed (the checks parse its Intel-syntax output).
-fn have_objdump() -> bool {
+pub fn have_objdump() -> bool {
     static HAVE: OnceLock<bool> = OnceLock::new();
     *HAVE.get_or_init(|| {
         let h = Command::new("objdump")
@@ -1134,7 +1134,7 @@ fn op_outside_the_feature_set_is_unsupported() {
         (sh(Lane::I32, 8), VecOp::AddWrap, &[Feature::Avx], "avx2"),
         (sh(Lane::U8, 32), VecOp::AddSat, &[Feature::Avx], "avx2"),
         // a 256-bit value needs `avx` in the function that holds it
-        (sh(Lane::F32, 8), VecOp::Add, &[], "value class"),
+        (sh(Lane::F32, 8), VecOp::Add, &[], "wider than the fn's 128-bit vector registers"),
     ];
     for (s, op, needs, missing) in cases {
         let mut sp = Sp::new();
