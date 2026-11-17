@@ -835,7 +835,7 @@ pub fn display<I: Interner + ?Sized>(cx: &I, names: &dyn Names, t: TypeId) -> St
     s
 }
 
-fn feature_names(bits: u64) -> Vec<&'static str> {
+pub(crate) fn feature_names(bits: u64) -> Vec<&'static str> {
     let Some(fs) = stave_target::FeatureSet::from_bits(bits) else { return Vec::new() };
     let all: Vec<stave_target::Feature> = fs.iter().collect();
     // Only features not implied by another member of the set.

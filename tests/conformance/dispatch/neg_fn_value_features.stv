@@ -1,0 +1,34 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0707: a `fn(..) needs(F)` value used as `fn(..) needs(G)` where F is not covered by G, the
+// needs of the fn where it happens, and the target baseline.
+fn sum_v3(i: usize) needs(avx2) {
+}
+
+fn sum_v4(i: usize) needs(avx512f) {
+}
+
+fn apply(f: fn(usize)) {
+    f(0);
+}
+
+view struct Holder {
+    f: fn(usize),
+}
+
+fn base() -> fn(usize) {
+    apply(sum_v3); //~ ERROR E0707
+    let a: fn(usize) = sum_v3; //~ ERROR E0707
+    let h = Holder.{ f: sum_v3 }; //~ ERROR E0707
+    let b: fn(usize) needs(fma) = sum_v3; //~ ERROR E0707
+    return sum_v3; //~ ERROR E0707
+}
+
+fn k() needs(avx2) {
+    apply(sum_v4); //~ ERROR E0707
+    let c: fn(usize) needs(avx2) = sum_v4; //~ ERROR E0707
+}
+
+fn main() -> i32 {
+    return 0;
+}

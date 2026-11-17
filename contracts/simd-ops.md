@@ -48,8 +48,8 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 - Generic spelling: `vec<T, N>` / `mask<W, N>`, legal only with generic arguments (E0609).
 - `Txn` / `maskWxn` (sizeless) need `needs(sve)` in v1 (E0710). Restrictions are
   E0711–E0716 (see diagnostic-codes.md).
-- **ABI rule:** a vector type in a signature requires `needs` covering its width
-  (E0703). Every function and `dispatch` arm of one signature has one ABI. `extern "C"`
+- **ABI rule:** a vector type in a signature (fn, fn type, closure) requires `needs` covering
+  its width, the target baseline counting (E0703). Every function and `dispatch` arm of one signature has one ABI. `extern "C"`
   signatures may not contain vectors (E0804).
 
 ## Semantics

@@ -1,0 +1,49 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0705: each arm target has the dispatch's signature, with needs = the dispatch's needs plus
+// the arm's features (exactly: implied features count, extra or missing ones do not match).
+fn a_v4(xs: &[u32]) -> f32 needs(avx512f) {
+    return 0.0;
+}
+
+fn a_fma(xs: &[f32]) -> f32 needs(avx2) {
+    return 0.0;
+}
+
+fn a_more(xs: &[f32]) -> f32 needs(avx2, bmi2) {
+    return 0.0;
+}
+
+fn a_base(xs: &[f32]) -> f32 {
+    return 0.0;
+}
+
+dispatch fn a(xs: &[f32]) -> f32 {
+    avx512f => a_v4, //~ ERROR E0705
+    avx2 + fma => a_fma, //~ ERROR E0705
+    avx2 => a_more, //~ ERROR E0705
+    _ => a_base,
+}
+
+fn b_v3(x: u32) -> u32 needs(fma, avx2) {
+    return x;
+}
+
+fn b_v4(x: u32) -> u32 needs(avx512f) {
+    return x;
+}
+
+fn b_base(x: u64) -> u32 needs(fma) {
+    return 0;
+}
+
+// The dispatch's own needs join every arm's.
+dispatch fn b(x: u32) -> u32 needs(fma) {
+    avx512f => b_v4,
+    avx2 => b_v3,
+    _ => b_base, //~ ERROR E0705
+}
+
+fn main() -> i32 {
+    return 0;
+}

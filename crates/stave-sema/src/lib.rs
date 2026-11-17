@@ -37,6 +37,7 @@ pub mod builtins;
 pub mod closures;
 pub mod consteval;
 pub mod decls;
+mod dispatch;
 pub mod gates;
 pub mod itemcx;
 pub mod kinds;

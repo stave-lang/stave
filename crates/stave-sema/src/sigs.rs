@@ -367,6 +367,10 @@ pub(crate) trait LowerHost: Interner {
     }
     /// A written fixed vector or mask type `ty` of `bits` bits at `span` (E0702, crate::gates).
     fn vector_width(&mut self, _span: Span, _ty: &str, _bits: u32) {}
+    /// Signature type `t` written at `span`, of a fn or fn type with features `features` (E0703,
+    /// crate::gates). Only where E0702 does not gate written vectors (inside `needs(...)`), so a
+    /// too wide vector gets one of the two codes.
+    fn sig_width(&mut self, _span: Span, _t: TypeId, _features: u64) {}
 }
 
 /// Lowers a `Type` or `TypeBase` node. `ret_pos`: directly after `->` (where `never` is legal).
@@ -491,13 +495,11 @@ fn lower_base<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -
         let kids = icx.kids_vec(n);
         let mut tys: Vec<u32> =
             kids.iter().copied().filter(|&c| icx.kind(c) == Some(NodeKind::Type)).collect();
-        let ret = if has_ret {
-            match tys.pop() {
-                Some(r) => lower_type(h, env, r, true),
-                None => h.error_ty(),
-            }
-        } else {
-            h.fixed_ty(ids::UNIT)
+        let ret_node = if has_ret { tys.pop() } else { None };
+        let ret = match ret_node {
+            Some(r) => lower_type(h, env, r, true),
+            None if has_ret => h.error_ty(),
+            None => h.fixed_ty(ids::UNIT),
         };
         let params: Vec<TypeId> = tys.iter().map(|&c| lower_type(h, env, c, false)).collect();
         let features = match icx.child(n, NodeKind::Needs) {
@@ -506,6 +508,9 @@ fn lower_base<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -
         };
         if params.contains(&h.error_ty()) || h.is_error_ty(ret) {
             return h.error_ty();
+        }
+        for (&t, &c) in params.iter().zip(&tys).chain(ret_node.iter().map(|c| (&ret, c))) {
+            h.sig_width(icx.node_span(c), t, features);
         }
         return h.intern(TypeKind::Fn { params: params.into_boxed_slice(), ret, features });
     }
@@ -905,6 +910,19 @@ impl<'p> LowerHost for SigBuilder<'p> {
         }
         self.diags.extend(d);
     }
+
+    fn sig_width(&mut self, span: Span, t: TypeId, features: u64) {
+        if !self.ungated || self.wide.contains(&span) {
+            return;
+        }
+        let Some((v, bits)) = crate::gates::sig_wide_part(self, self.prog.target, t, features) else {
+            return;
+        };
+        let name = types::display(self, &NameCx { prog: self.prog, generics: &[] }, v);
+        self.wide.push(span);
+        let d = crate::gates::sig_too_wide(self.prog.target, &name, bits, span);
+        self.diags.extend(d);
+    }
 }
 
 impl<'p> SigBuilder<'p> {
@@ -1202,6 +1220,33 @@ impl<'p> SigBuilder<'p> {
         }
     }
 
+    /// What fn `d` is when it may not declare `needs` (E0709): `main` of the root package, a
+    /// method of a trait or of a trait impl, or an `extern` export.
+    fn needs_forbidden(&mut self, d: DeclId, decl: &crate::decls::Decl) -> Option<&'static str> {
+        if decl.flags.has(DeclFlags::EXTERN_EXPORT) {
+            return Some("an `extern` export");
+        }
+        match decl.kind {
+            DeclKind::TraitMethod => Some("a trait method"),
+            DeclKind::Method => {
+                self.ensure(decl.parent);
+                match &self.sigs[decl.parent.idx()] {
+                    DeclSig::Impl(i) if i.trait_ref.is_some() => Some("a trait method"),
+                    _ => None,
+                }
+            }
+            DeclKind::Fn => {
+                let main = self.prog.strings.lookup("main")?;
+                let is_main = self.prog.packages.iter().any(|p| {
+                    p.is_root
+                        && p.root_module.get().is_some_and(|m| self.prog.module_item(m, main) == Some(d))
+                });
+                is_main.then_some("`main`")
+            }
+            _ => None,
+        }
+    }
+
     fn build_fn(&mut self, d: DeclId) -> DeclSig {
         let Some(decl) = self.prog.decl(d).copied() else { return DeclSig::None };
         let Some(icx) = self.icx(decl.item) else { return DeclSig::None };
@@ -1319,10 +1364,30 @@ impl<'p> SigBuilder<'p> {
                 }
             }
         }
-        let features = match icx.child(n, NodeKind::Needs) {
+        let needs_node = icx.child(n, NodeKind::Needs);
+        let mut features = match needs_node {
             Some(nd) => needs_bits(self, &icx, nd),
             None => 0,
         };
+        if let Some(nd) = needs_node
+            && let Some(what) = self.needs_forbidden(d, &decl)
+        {
+            // E0709; the fn is checked as if it had no `needs` (no second error from the trait
+            // impl signature compare).
+            let dg = mk("E0709", None, &[("what", what)], icx.node_span(nd), &[]);
+            self.diags.extend(dg);
+            features = 0;
+        } else if needs_node.is_some()
+            && stave_target::FeatureSet::from_bits(features)
+                .is_some_and(|fs| fs.is_owned_by(self.prog.target.arch()))
+        {
+            // E0703 (a fn needing another arch's features is left out of the build)
+            let ungated = std::mem::replace(&mut self.ungated, true);
+            for (&t, &sp) in params.iter().zip(&param_spans).chain(ret_span.iter().map(|s| (&ret, s))) {
+                self.sig_width(sp, t, features);
+            }
+            self.ungated = ungated;
+        }
         let mut is_unsafe = decl.flags.has(DeclFlags::UNSAFE);
         let mut abi = Abi::Stave;
         if decl.flags.has(DeclFlags::EXTERN_IMPORT) {

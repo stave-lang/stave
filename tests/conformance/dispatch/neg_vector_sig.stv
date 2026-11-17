@@ -1,0 +1,35 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0703: a vector in a signature (of a fn item, a fn type, or a closure) needs features that
+// cover its width: 256 bits `avx2`, 512 bits `avx512f`. The target baseline counts. Outside
+// `needs(..)` a too wide vector is E0702 instead.
+fn narrow(v: f32x8) -> f32 needs(sse42) { //~ ERROR E0703
+    return 0.0;
+}
+
+fn wide_ret() -> u8x64 needs(avx2) { //~ ERROR E0703
+    return u8x64.splat(0);
+}
+
+fn behind_ref(xs: &[f32x8]) needs(fma) { //~ ERROR E0703
+}
+
+fn fits(v: f32x8) -> f32x8 needs(avx2) {
+    return v;
+}
+
+fn fits512(v: u8x64) -> u8x64 needs(avx512bw) {
+    return v;
+}
+
+fn in_body() needs(avx2) {
+    let f: fn(f32x8) -> f32x8 needs(avx2) = fits;
+    // the fn type needs nothing (128 bits); the closure has the fn's `avx2` (256 bits)
+    let g: fn(f32x16) -> f32 = fn(v: f32x16) -> f32 { return 0.0; }; //~ ERROR E0703
+    //~^ ERROR E0703
+    let h: fn(f32x8) = fn(v: f32x8) { }; //~ ERROR E0703
+}
+
+fn main() -> i32 {
+    return 0;
+}

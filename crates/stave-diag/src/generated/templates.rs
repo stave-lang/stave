@@ -2426,7 +2426,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0703",
         severity: Severity::Error,
         area: "features",
-        rule: "vector in a signature whose `needs` does not cover its width (`extern \"C\"` signatures: E0804) (planned)",
+        rule: "vector in the signature of a fn, fn type, or closure whose `needs` (plus the target baseline) do not cover its width (`extern \"C\"` signatures: E0804)",
         retired: false,
         located: true,
         holes: &[
@@ -2479,7 +2479,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0705",
         severity: Severity::Error,
         area: "features",
-        rule: "dispatch arm signature differs from the dispatch signature (planned)",
+        rule: "dispatch arm signature differs from the dispatch signature",
         retired: false,
         located: true,
         holes: &[
@@ -2506,7 +2506,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0706",
         severity: Severity::Error,
         area: "features",
-        rule: "dispatch without a final `_` arm, or a `_` target needing extra features (planned)",
+        rule: "dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing extra features",
         retired: false,
         located: true,
         holes: &[
@@ -2543,7 +2543,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0707",
         severity: Severity::Error,
         area: "features",
-        rule: "fn value coercion would drop required features",
+        rule: "fn value coercion would drop features not proven where it happens (by the `needs` of the enclosing fn or the target baseline)",
         retired: false,
         located: true,
         holes: &[
@@ -2558,7 +2558,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "coerced here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "add the features to the target type (`{to}` with `needs(...)`), or use a function that needs no extra features",
+                    description: "add the features to the target type (`{to}` with `needs(...)`), make the coercion inside a function with those `needs`, or use a function that needs no extra features",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2594,7 +2594,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0709",
         severity: Severity::Error,
         area: "features",
-        rule: "`main`, a trait method, or an `extern` export declares `needs` (planned)",
+        rule: "`main`, a trait method, or an `extern` export declares `needs`",
         retired: false,
         located: true,
         holes: &[

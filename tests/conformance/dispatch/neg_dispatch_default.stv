@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0706 case `extra-needs`: the `_` target needs no feature beyond the dispatch's. (A dispatch
+// without a final `_` arm does not parse.)
+fn c_v4(x: u32) -> u32 needs(avx512f) {
+    return x;
+}
+
+fn c_base(x: u32) -> u32 needs(avx2) {
+    return x;
+}
+
+fn c_fma(x: u32) -> u32 needs(fma) {
+    return x;
+}
+
+dispatch fn c(x: u32) -> u32 {
+    avx512f => c_v4,
+    _ => c_base, //~ ERROR E0706
+}
+
+dispatch fn d(x: u32) -> u32 needs(fma) {
+    avx512f => c_v4,
+    _ => c_fma,
+}
+
+fn main() -> i32 {
+    return 0;
+}

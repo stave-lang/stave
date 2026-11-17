@@ -1,0 +1,39 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// A closure has the needs of the fn it is written in: its body may call that fn's feature
+// callees (E0704 checks it against those needs), and its type is `fn(..) needs(..)`, usable as
+// a fn type without them inside that fn. `spawn` bodies alike.
+import std.thread;
+
+fn sum_v3(i: usize) needs(avx2) {
+}
+
+fn sum_v4(i: usize) needs(avx512f) {
+}
+
+fn apply(f: fn(usize)) {
+    f(0);
+}
+
+fn k() needs(avx2) {
+    apply(fn(i: usize) { sum_v3(i); });
+    let c = fn(i: usize) { sum_v3(i); };
+    let t: fn(usize) needs(avx2) = c;
+    let d: fn(usize) = c;
+    c(1);
+    thread.par_for(0, 4, fn(i: usize) { sum_v3(i); });
+    scope {
+        spawn {
+            sum_v3(0);
+        }
+    }
+    apply(fn(i: usize) { sum_v4(i); }); //~ ERROR E0704
+}
+
+fn base() {
+    apply(fn(i: usize) { sum_v3(i); }); //~ ERROR E0704
+}
+
+fn main() -> i32 {
+    return 0;
+}

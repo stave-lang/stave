@@ -346,6 +346,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
     let (mut tys, sigs_table, mut diags) = sb.finish();
     diags.extend(crate::traits::check_impls(prog, &sigs_table, &mut tys, &brackets));
     diags.extend(crate::builtins::check_intrinsics(prog, &sigs_table, &tys, &brackets));
+    diags.extend(crate::dispatch::check_dispatches(prog, &sigs_table, &mut tys, &brackets));
     let t_sigs = t0.elapsed();
 
     // Bodies.
@@ -1060,10 +1061,27 @@ impl<'a> Ck<'a> {
                 if self.tys.has_error(want) {
                     return want;
                 }
+                let drops_features = matches!(
+                    (self.tys.kind(t), self.tys.kind(want)),
+                    (TypeKind::Fn { params: p1, ret: r1, .. }, TypeKind::Fn { params: p2, ret: r2, .. })
+                        if p1 == p2 && r1 == r2
+                );
+                if drops_features {
+                    let (from, to) = (self.show(t), self.show(want));
+                    let d = mk("E0707", None, &[("from", &from), ("to", &to)], self.icx.node_span(n), &[]);
+                    self.report(d);
+                    return ids::ERROR;
+                }
                 self.mismatch(n, got, want, why);
                 ids::ERROR
             }
         }
+    }
+
+    /// The features every value made in this body may assume: its `needs` and the target
+    /// baseline.
+    pub fn proven_features(&self) -> u64 {
+        self.features | self.prog.target.baseline().bits()
     }
 
     /// Re-types a node chain whose value was a pending literal (the group is resolved at the
@@ -1132,8 +1150,9 @@ impl<'a> Ck<'a> {
                 TypeKind::Fn { params: p1, ret: r1, features: f1 },
                 TypeKind::Fn { params: p2, ret: r2, features: f2 },
             ) => {
-                // features may only grow (E0707 is the features check)
-                if p1 == p2 && r1 == r2 && (f1 & !f2) == 0 {
+                // Features may drop to those proven where the coercion happens: CPU features
+                // never change while a program runs, so the value stays callable (else E0707).
+                if p1 == p2 && r1 == r2 && (f1 & !(f2 | self.proven_features())) == 0 {
                     return Some(Coercion::FnItem);
                 }
                 None
@@ -1718,6 +1737,10 @@ impl sigs::LowerHost for Ck<'_> {
 
     fn vector_width(&mut self, span: Span, ty: &str, bits: u32) {
         self.gate_width_of(span, ty, bits);
+    }
+
+    fn sig_width(&mut self, span: Span, t: TypeId, features: u64) {
+        self.sig_width_at(span, t, features);
     }
 }
 
