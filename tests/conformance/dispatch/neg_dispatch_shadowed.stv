@@ -19,6 +19,14 @@ fn s_base(x: u32) -> u32 {
     return x;
 }
 
+fn s_g3(x: u32) -> u32 needs(v3) {
+    return x;
+}
+
+fn s_g4(x: u32) -> u32 needs(v4) {
+    return x;
+}
+
 // `avx512f` implies `avx2`.
 dispatch fn implied(x: u32) -> u32 {
     avx2 => s_v3,
@@ -32,10 +40,31 @@ dispatch fn more(x: u32) -> u32 {
     _ => s_base,
 }
 
+// A group arm counts as its features: `v3` includes `avx2`, `v4` includes `v3`.
+dispatch fn group(x: u32) -> u32 {
+    avx2 => s_v3,
+    v3 => s_g3, //~ ERROR E0718
+    _ => s_base,
+}
+
+dispatch fn group_up(x: u32) -> u32 {
+    v3 => s_g3,
+    v4 => s_g4, //~ ERROR E0718
+    _ => s_base,
+}
+
 // Most specific first: every arm can be picked.
 dispatch fn ordered(x: u32) -> u32 {
     avx512f => s_v4,
     avx2 + fma => s_fma,
+    avx2 => s_v3,
+    _ => s_base,
+}
+
+dispatch fn ordered_groups(x: u32) -> u32 {
+    v4 => s_g4,
+    avx512f => s_v4,
+    v3 => s_g3,
     avx2 => s_v3,
     _ => s_base,
 }

@@ -225,6 +225,76 @@ impl fmt::Display for Feature {
     }
 }
 
+/// A group name: shorthand for a fixed list of features, accepted wherever source code names a
+/// feature (`needs(..)`, fn types, `dispatch` arms). It resolves to its members' closure, so a
+/// [`FeatureSet`] never records a group. Groups are also the x86-64 target levels
+/// (`x86_64-linux-v3` / `-v4` have the group as their baseline). `--features` and `STAVE_CPU`
+/// take individual features only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum FeatureGroup {
+    V3,
+    V4,
+}
+
+struct GroupInfo {
+    name: &'static str,
+    /// A group whose members this one includes.
+    base: Option<FeatureGroup>,
+    members: &'static [Feature],
+}
+
+/// Indexed by `FeatureGroup as usize`.
+const GROUPS: [GroupInfo; 2] = [
+    GroupInfo { name: "v3", base: None, members: &[F::Avx2, F::Fma, F::Bmi2, F::F16c] },
+    GroupInfo {
+        name: "v4",
+        base: Some(FeatureGroup::V3),
+        members: &[F::Avx512f, F::Avx512bw, F::Avx512vl, F::Avx512dq, F::Avx512cd],
+    },
+];
+
+impl FeatureGroup {
+    pub const ALL: [FeatureGroup; 2] = [FeatureGroup::V3, FeatureGroup::V4];
+
+    fn info(self) -> &'static GroupInfo {
+        &GROUPS[self as usize]
+    }
+
+    pub fn name(self) -> &'static str {
+        self.info().name
+    }
+
+    /// The features the group lists, its base's included, in feature order.
+    pub fn members(self) -> Vec<Feature> {
+        let info = self.info();
+        let mut out = info.base.map(FeatureGroup::members).unwrap_or_default();
+        out.extend_from_slice(info.members);
+        out.sort();
+        out
+    }
+
+    /// The features the group adds to its base (`v4`: the five AVX-512 ones), in feature order.
+    pub fn own_members(self) -> &'static [Feature] {
+        self.info().members
+    }
+
+    /// The closure of the members.
+    pub fn features(self) -> FeatureSet {
+        FeatureSet::from_features(self.members())
+    }
+
+    pub fn from_name(s: &str) -> Option<FeatureGroup> {
+        FeatureGroup::ALL.into_iter().find(|g| g.name() == s)
+    }
+}
+
+impl fmt::Display for FeatureGroup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeatureError {
     /// A name that is no feature.
@@ -296,6 +366,14 @@ impl FeatureSet {
 
     pub fn bits(self) -> u64 {
         self.0
+    }
+
+    /// What a feature name in source code (`needs(..)`, fn types, `dispatch` arms) stands for:
+    /// a feature's closure, or a [`FeatureGroup`]'s. `None` for an unknown name.
+    pub fn of_name(s: &str) -> Option<FeatureSet> {
+        Feature::from_name(s)
+            .map(FeatureSet::of)
+            .or_else(|| FeatureGroup::from_name(s).map(FeatureGroup::features))
     }
 
     pub fn with(self, f: Feature) -> FeatureSet {
@@ -431,6 +509,29 @@ mod tests {
         assert!(!set("neon").is_owned_by(Arch::Gpu));
         assert_eq!(set("avx2,cuda").owners(), ArchSet::X86_64);
         assert_eq!(FeatureSet::EMPTY.owners(), ArchSet::ALL);
+    }
+
+    #[test]
+    fn groups() {
+        for g in FeatureGroup::ALL {
+            assert_eq!(FeatureGroup::from_name(g.name()), Some(g));
+            assert_eq!(Feature::from_name(g.name()), None, "{g} is also a feature name");
+            assert!(g.features().is_owned_by(Arch::X86_64), "{g}");
+            assert_eq!(FeatureSet::of_name(g.name()), Some(g.features()));
+        }
+        let names = |g: FeatureGroup| g.members().iter().map(|f| f.name()).collect::<Vec<_>>().join(",");
+        assert_eq!(names(FeatureGroup::V3), "avx2,fma,bmi2,f16c");
+        assert_eq!(names(FeatureGroup::V4), "avx2,fma,bmi2,f16c,avx512f,avx512bw,avx512vl,avx512dq,avx512cd");
+        assert_eq!(FeatureGroup::V3.features(), set("avx2,fma,bmi2,f16c"));
+        assert_eq!(FeatureGroup::V3.own_members(), FeatureGroup::V3.members());
+        let avx512 = FeatureSet::from_features(FeatureGroup::V4.own_members().iter().copied());
+        assert_eq!(avx512, set("avx512f,avx512bw,avx512vl,avx512dq,avx512cd"));
+        assert_eq!(avx512.union(set("bmi2")), FeatureGroup::V4.features());
+        assert!(FeatureGroup::V3.features().is_subset(FeatureGroup::V4.features()));
+        assert!(!set("avx512f").union(set("bmi2")).contains(Feature::Avx512cd));
+        assert_eq!(FeatureSet::of_name("avx2"), Some(set("avx2")));
+        assert_eq!(FeatureSet::of_name("v5"), None);
+        assert_eq!(FeatureSet::parse_list("v3"), Err(FeatureError::Unknown("v3".into())));
     }
 
     #[test]

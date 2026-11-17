@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use stave_target::{Arch, Feature, FeatureSet};
+use stave_target::{Arch, Feature, FeatureGroup, FeatureSet};
 
 fn repo_file(rel: &str) -> String {
     let p: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel);
@@ -94,6 +94,10 @@ fn runtime_cpu_names_equal_feature_names() {
     let names: Vec<&str> = Feature::ALL.iter().map(|f| f.name()).collect();
     let decl = format!("const NAMES: &str = \"{}\";", names.join(" "));
     assert!(text.contains(&decl), "runtime/cpu.stv lacks `{decl}`");
+    // `STAVE_CPU` takes individual features only: a group name there is an unknown feature.
+    for g in FeatureGroup::ALL {
+        assert!(!names.contains(&g.name()), "group `{g}` is in the STAVE_CPU names");
+    }
 }
 
 #[test]
