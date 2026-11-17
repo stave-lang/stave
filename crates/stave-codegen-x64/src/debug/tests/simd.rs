@@ -1416,7 +1416,8 @@ fn k_coverage() {
             }
         }
     }
-    let missing: Vec<&str> = VecOp::ALL.iter().filter(|op| !wide.contains(op.name())).map(|op| op.name()).collect();
+    let missing: Vec<&str> =
+        VecOp::ALL.iter().filter(|op| !wide.contains(op.name())).map(|op| op.name()).collect();
     assert!(missing.is_empty(), "ops without a 512-bit K-mode case: {missing:?}");
     assert!(lacking.is_empty(), "cases that do not compile in K mode: {lacking:?}");
 }

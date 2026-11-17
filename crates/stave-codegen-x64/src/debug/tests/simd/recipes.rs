@@ -338,9 +338,10 @@ fn code_counts(code: &[Inst], p: &Probe, want: &BTreeMap<String, usize>) -> BTre
 /// Rows of the v4 column backed by K mode.
 const BACKED: usize = 411;
 
-/// The v4 rows no K-mode code backs: unavailable cells, and rows of f16 / bf16 lanes alone,
-/// which no backend holds in vectors.
-const NOT_BACKED: [&str; 0] = [];
+/// The v4 rows of vector ops no K-mode code backs: an unavailable cell (`div_lanes`, which has
+/// no vector form at any x86 tier), and the casts on f16 lanes alone, which no backend holds in
+/// vectors.
+const NOT_BACKED: [&str; 3] = ["vec.div_lanes int", "vec.cast f16>f32", "vec.cast.round f32>f16"];
 
 #[test]
 fn v4_recipes_are_the_emitted_code() {
@@ -355,7 +356,7 @@ fn v4_recipes_are_the_emitted_code() {
         let Some(cell) = e.baseline(Tier::V4) else { continue };
         total += 1;
         let Some(&op) = VecOp::ALL.iter().find(|o| o.name() == e.op) else { continue };
-        let row = format!("{} {} {}", e.op, e.ty, e.form);
+        let row = format!("{} {} {}", e.op, e.ty, e.form).trim_end().to_owned();
         if cell.class == Class::U {
             unbacked.push(row);
             continue;

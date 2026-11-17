@@ -150,7 +150,14 @@ fn evex_need(i: &Inst) -> FeatureSet {
         .any(|p| m.strip_prefix(p).is_some_and(|r| matches!(r, "db" | "dw" | "qb" | "qw" | "qd")));
     let bw = matches!(
         m,
-        "vpmovb2m" | "vpmovw2m" | "vmovdqu8" | "vmovdqu16" | "vpmaddwd" | "vpunpcklwd" | "vpslldq" | "vpsrldq"
+        "vpmovb2m"
+            | "vpmovw2m"
+            | "vmovdqu8"
+            | "vmovdqu16"
+            | "vpmaddwd"
+            | "vpunpcklwd"
+            | "vpslldq"
+            | "vpsrldq"
     ) || (m.starts_with("vp") && (m.ends_with('b') || m.ends_with('w')) && !down);
     let mut s = FeatureSet::of(if dq {
         Feature::Avx512dq
@@ -577,7 +584,8 @@ fn recorded_features_match_the_disassembly() {
         for vl in [EVL::L128, EVL::L256, EVL::L512] {
             let halves = n.ends_with("64x4");
             let quarters = n.ends_with("32x4");
-            if (vl == EVL::L128 && (halves || quarters || matches!(op, EOp::Broadcastsd | EOp::Permq | EOp::Shufi64x2)))
+            if (vl == EVL::L128
+                && (halves || quarters || matches!(op, EOp::Broadcastsd | EOp::Permq | EOp::Shufi64x2)))
                 || (vl == EVL::L256 && halves)
             {
                 continue;
