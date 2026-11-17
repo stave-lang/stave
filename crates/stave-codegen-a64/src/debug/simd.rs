@@ -24,8 +24,12 @@
 //! - `mul.sat` and `checked_mul`: a widening multiply narrowed back (64-bit lanes: `smulh`/
 //!   `umulh` per lane). `checked_add`/`checked_sub` overflow where the saturating result
 //!   differs from the wrapping one.
-//! - `div_lanes`, `div_const`: `sdiv`/`udiv` per lane in lane order, each lane with the scalar
-//!   checks, so the lowest trapping lane decides the trap kind.
+//! - `mul_hi`: `?mull`, `?mull2`, `uzp2` (a vector below 128 bits: `?mull`, `shrn`); 64-bit
+//!   lanes `smulh`/`umulh` per lane.
+//! - `div_const` on 8-, 16- and 32-bit lanes: the multiply-high plan of `stave_ir::divmagic`
+//!   (`?mull`, `?mull2`, `uzp2`, then shifts; `uhadd` for a multiplier one bit too wide).
+//!   `div_lanes`, and `div_const` on 64-bit lanes: `sdiv`/`udiv` per lane in lane order, each
+//!   lane with the scalar checks, so the lowest trapping lane decides the trap kind.
 //! - Reductions: `addv`/`smaxv`/... where the register holds exactly the vector and the order
 //!   does not matter; otherwise the fixed tree (upper half folded onto the lower half).
 //!   `reduce_add_ordered` and the float `scan_add` add lane by lane; the int scan is
@@ -39,6 +43,8 @@
 //!   Stores check every lane before writing any.
 //! - `to_bits`: lanes narrowed to bytes, bit 0 of each byte gathered by one multiply.
 
+use stave_ir::arith::IntTy;
+use stave_ir::divmagic::{DivPlan, div_plan};
 use stave_ir::layout::Shape;
 use stave_ir::simd::{self, VecOp};
 use stave_ir::{CastKind, Operand, PanicKind, Site, TypeId, Value};
@@ -795,9 +801,93 @@ impl<'a, 'm> Gen<'a, 'm> {
         self.option_vec(v, t, fail, rd, vt)
     }
 
-    /// `div_lanes` / `div_const`: lane by lane with the scalar checks, so the lowest trapping
-    /// lane decides the trap.
+    /// `rd` = the high halves of `a * m` per 8-, 16- or 32-bit lane, `m` in every lane.
+    fn mul_hi_k(&mut self, vt: VTy, rd: VReg, a: VReg, m: u64) -> R<()> {
+        let k = self.tmp_f()?;
+        self.splat_imm(k, vt.arr(), m & ((1 << vt.lane.bits()) - 1))?;
+        self.mul_hi(vt, rd, a, k)
+    }
+
+    /// `div_const` on 8-, 16- or 32-bit lanes by `d` (not 0): the multiply-high plan of
+    /// `stave_ir::divmagic` on the lanes. A divisor of -1 traps `Overflow` where a lane is MIN.
+    fn div_const(&mut self, i: u32, a: Operand, d: i64, site: Site) -> R<()> {
+        let v = self.res(i)?;
+        let (a, vt) = self.use_v(a)?;
+        let (arr, n, signed) = (vt.arr(), vt.lane.bits(), vt.signed());
+        if signed && d == -1 {
+            let over = self.trap(PanicKind::Overflow, site)?;
+            let (m, any) = (self.tmp_f()?, self.tmp_g()?);
+            self.splat_imm(m, arr, 1 << (n - 1))?;
+            self.a.vbin(VBin::Cmeq, arr, m, a, m)?;
+            self.any_bits(any, m, u32::from(vt.size))?;
+            self.a.cbnz(X, any, over)?;
+        }
+        let rd = self.tmp_f()?;
+        match div_plan(d, n, if signed { n - 1 } else { n }, signed) {
+            DivPlan::Ge(_) => return Err(bad("a 64-bit division plan on narrower lanes")),
+            DivPlan::Copy { neg: false } => self.a.vmov(B16, rd, a)?,
+            DivPlan::Copy { neg: true } => self.a.vint_un(VIntUn::Neg, arr, rd, a)?,
+            DivPlan::Shr(s) => self.a.vshift(VShift::Ushr, arr, rd, a, s)?,
+            DivPlan::Mul { m, s } => {
+                self.mul_hi_k(vt, rd, a, m)?;
+                if s > 0 {
+                    self.a.vshift(VShift::Ushr, arr, rd, rd, s)?;
+                }
+            }
+            DivPlan::MulAdd { m, s } => {
+                // t + ((x - t) >> 1) is the halving add of x and t (t <= x)
+                self.mul_hi_k(vt, rd, a, m)?;
+                self.a.vbin(VBin::Uhadd, arr, rd, a, rd)?;
+                if s > 0 {
+                    self.a.vshift(VShift::Ushr, arr, rd, rd, s)?;
+                }
+            }
+            DivPlan::Pow { l, neg } => {
+                // a negative x gains 2^l - 1, so the shift rounds toward zero
+                if l > 1 {
+                    self.a.vshift(VShift::Sshr, arr, rd, a, l - 1)?;
+                    self.a.vshift(VShift::Ushr, arr, rd, rd, n - l)?;
+                } else {
+                    self.a.vshift(VShift::Ushr, arr, rd, a, n - 1)?;
+                }
+                self.a.vbin(VBin::Add, arr, rd, a, rd)?;
+                self.a.vshift(VShift::Sshr, arr, rd, rd, l)?;
+                if neg {
+                    self.a.vint_un(VIntUn::Neg, arr, rd, rd)?;
+                }
+            }
+            DivPlan::SMul { m, s, add, neg } => {
+                self.mul_hi_k(vt, rd, a, m as u64)?;
+                if add {
+                    self.a.vbin(VBin::Add, arr, rd, rd, a)?;
+                }
+                if s > 0 {
+                    self.a.vshift(VShift::Sshr, arr, rd, rd, s)?;
+                }
+                // a negative x gains 1; a negative divisor subtracts the other way round
+                if neg {
+                    let sx = self.tmp_f()?;
+                    self.a.vshift(VShift::Sshr, arr, sx, a, n - 1)?;
+                    self.a.vbin(VBin::Sub, arr, rd, sx, rd)?;
+                } else {
+                    self.a.vshift(VShift::Usra, arr, rd, a, n - 1)?;
+                }
+            }
+        }
+        self.set_v(v, rd)
+    }
+
+    /// `div_lanes`, and `div_const` on 64-bit lanes or by 0: lane by lane with the scalar
+    /// checks, so the lowest trapping lane decides the trap.
     fn div(&mut self, op: VecOp, i: u32, a: Operand, c: Operand, site: Site) -> R<()> {
+        if op == VecOp::DivConst {
+            let vt = self.vt(a)?;
+            let k = self.b.int_const(c).ok_or_else(|| bad("vec.div_const divisor"))?;
+            let d = IntTy::new(vt.lane.bits() as u8, vt.signed()).wrap(k) as i64;
+            if d != 0 && vt.lane != Lane::D {
+                return self.div_const(i, a, d, site);
+            }
+        }
         let v = self.res(i)?;
         let (a, vt) = self.use_v(a)?;
         let divisors = if op == VecOp::DivConst { None } else { Some(self.use_v(c)?.0) };

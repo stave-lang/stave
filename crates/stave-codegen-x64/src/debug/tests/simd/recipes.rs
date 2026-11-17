@@ -182,6 +182,7 @@ fn worst_divisor(l: Lane) -> i128 {
         (16, true) => -15,
         (32, false) => 7,
         (32, true) => -7,
+        (64, true) => -15,
         _ => 7,
     }
 }

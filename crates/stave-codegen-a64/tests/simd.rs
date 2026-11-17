@@ -191,10 +191,13 @@ fn shifts_and_divisions() {
             }
             cx.case(&format!("div_lanes {}", vt.name()), f, Some(v), vargs(vt, a), O::V(vt, Canon::Exact));
         }
-        let mut divisors = vec![1, 3, 7, it.max(), it.max() - 1];
+        // one of each form of the multiply-high plans
+        let b = i128::from(it.bits);
+        let mut divisors = vec![1, 2, 3, 5, 6, 7, 10, 25, 641, 1 << (b - 2), it.max(), it.max() - 1];
         if it.signed {
-            divisors.extend([-1, -3, it.min()]);
+            divisors.extend([-1, -2, -3, -7, -10, -641, -(1 << (b - 2)), it.min()]);
         }
+        divisors.retain(|&d| it.fits(d));
         for d in divisors {
             let f = cx.wrap(DivConst, &[v], Some(v), &[P::Arg(0), P::K(d)]);
             for a in inputs(&mut cx, vt, 1, 3) {

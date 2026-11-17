@@ -45,13 +45,13 @@ vec.shl                 int by vector               N    1  ushl
 vec.shl.wrap            int by vector               N    2  and; ushl
 vec.shr                 uint by vector              N    2  neg; ushl
 vec.shr                 sint by vector              N    2  neg; sshl
-vec.div_const           u8                          M   48  umov x16; udiv x16; ins x16  | note: per lane through general registers
-vec.div_const           u16                         M   24  umov x8; udiv x8; ins x8  | note: per lane through general registers
-vec.div_const           u32                         M   12  umov x4; udiv x4; ins x4  | note: per lane through general registers
+vec.div_const           u8                          M    5  umull; umull2; uzp2; uhadd; ushr
+vec.div_const           u16                         M    5  umull; umull2; uzp2; uhadd; ushr
+vec.div_const           u32                         M    5  umull; umull2; uzp2; uhadd; ushr
 vec.div_const           u64                         M    6  umov x2; udiv x2; ins x2  | note: per lane through general registers
-vec.div_const           i8                          M   48  smov x16; sdiv x16; ins x16  | note: per lane through general registers
-vec.div_const           i16                         M   24  smov x8; sdiv x8; ins x8  | note: per lane through general registers
-vec.div_const           i32                         M   12  smov x4; sdiv x4; ins x4  | note: per lane through general registers
+vec.div_const           i8                          M    7  smull; smull2; uzp2; add; sshr x2; sub
+vec.div_const           i16                         M    7  smull; smull2; uzp2; add; sshr x2; sub
+vec.div_const           i32                         M    7  smull; smull2; uzp2; add; sshr x2; sub
 vec.div_const           i64                         M    6  umov x2; sdiv x2; ins x2  | note: per lane through general registers
 vec.div_lanes           i32/i64                     U    -  -
 vec.div_lanes           u32/u64                     U    -  -

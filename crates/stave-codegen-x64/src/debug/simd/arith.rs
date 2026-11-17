@@ -1,6 +1,7 @@
 //! Lane arithmetic: float and int ops, shifts, compares, reductions, scans.
 
 use stave_ir::arith::IntTy;
+use stave_ir::divmagic::{DivPlan, div_plan};
 use stave_ir::simd::{LaneTy, VecOp};
 use stave_ir::{Operand, PanicKind, TypeId, Value};
 
@@ -537,19 +538,267 @@ impl Cg<'_, '_> {
         Ok(self.a.bind(lend)?)
     }
 
+    /// `x` = the high halves of `x * m` per lane of `w` (2 or 4) bytes, `m` in every lane.
+    /// Clobbers `XS0`, `XS1`.
+    fn vmulhi_k(&mut self, wide: bool, w: u32, signed: bool, x: Xmm, m: u64) -> Res<()> {
+        self.vsplat(XS1, wide, w, m)?;
+        if w == 2 {
+            return self.vb(if signed { VBin::Pmulhw } else { VBin::Pmulhuw }, wide, x, XS1);
+        }
+        // the multiplier is in every doubleword: the odd lanes move to the even positions alone
+        let mul = if signed { VBin::Pmuldq } else { VBin::Pmuludq };
+        self.vui(VUnI::Pshufd, wide, XS0, x, 0xf5)?;
+        self.vb(mul, wide, XS0, XS1)?;
+        self.vb(mul, wide, x, XS1)?;
+        self.vsh(VShiftI::Psrlq, wide, x, 32)?;
+        self.vbi(VBinI::Pblendw, wide, x, XS0, 0xcc)
+    }
+
+    /// `x = 0 - x` per lane of `w` bytes. Clobbers `XS0`.
+    fn vneg_lanes(&mut self, wide: bool, w: u32, x: Xmm) -> Res<()> {
+        self.vzero(XS0)?;
+        self.vb(by_w(w, PSUB), wide, XS0, x)?;
+        self.vmov(wide, x, XS0)
+    }
+
+    /// `x = x / d` per lane of `w` (2 or 4) bytes by `plan`, made for those lanes. Clobbers
+    /// `XS0`, `XS1`.
+    fn vdiv_lanes(&mut self, wide: bool, w: u32, plan: DivPlan, x: Xmm) -> Res<()> {
+        let bits = (w * 8) as u8;
+        let (srl, sra) =
+            if w == 2 { (VShiftI::Psrlw, VShiftI::Psraw) } else { (VShiftI::Psrld, VShiftI::Psrad) };
+        let (add, sub) = (by_w(w, PADD), by_w(w, PSUB));
+        match plan {
+            DivPlan::Ge(_) => return Err(bad("internal: a 64-bit division plan on narrower lanes")),
+            DivPlan::Copy { neg } => {
+                if neg {
+                    self.vneg_lanes(wide, w, x)?;
+                }
+            }
+            DivPlan::Shr(s) => self.vsh(srl, wide, x, s as u8)?,
+            DivPlan::Mul { m, s } => {
+                self.vmulhi_k(wide, w, false, x, m)?;
+                if s > 0 {
+                    self.vsh(srl, wide, x, s as u8)?;
+                }
+            }
+            DivPlan::MulAdd { m, s } => {
+                let t = self.alloc_x()?;
+                self.vmov(wide, t, x)?;
+                self.vmulhi_k(wide, w, false, t, m)?;
+                self.vb(sub, wide, x, t)?;
+                self.vsh(srl, wide, x, 1)?;
+                self.vb(add, wide, x, t)?;
+                if s > 0 {
+                    self.vsh(srl, wide, x, s as u8)?;
+                }
+            }
+            DivPlan::Pow { l, neg } => {
+                let t = self.alloc_x()?;
+                self.vmov(wide, t, x)?;
+                if l > 1 {
+                    self.vsh(sra, wide, t, (l - 1) as u8)?;
+                    self.vsh(srl, wide, t, bits - l as u8)?;
+                } else {
+                    self.vsh(srl, wide, t, bits - 1)?;
+                }
+                self.vb(add, wide, x, t)?;
+                self.vsh(sra, wide, x, l as u8)?;
+                if neg {
+                    self.vneg_lanes(wide, w, x)?;
+                }
+            }
+            DivPlan::SMul { m, s, add: plus_x, neg } => {
+                let t = self.alloc_x()?;
+                self.vmov(wide, t, x)?;
+                self.vmulhi_k(wide, w, true, t, m as u64)?;
+                if plus_x {
+                    self.vb(add, wide, t, x)?;
+                }
+                if s > 0 {
+                    self.vsh(sra, wide, t, s as u8)?;
+                }
+                // a negative x gains 1: `t - (x >> (bits - 1))`; a negative divisor subtracts the
+                // other way round
+                if neg {
+                    self.vsh(sra, wide, x, bits - 1)?;
+                    self.vb(sub, wide, x, t)?;
+                } else {
+                    self.vsh(srl, wide, x, bits - 1)?;
+                    self.vb(add, wide, x, t)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Truncating division by a constant `d` (not 0) through high products
+    /// (`stave_ir::divmagic`): word and doubleword lanes directly, byte lanes as their even and
+    /// odd bytes widened to words (an unsigned power of two: a word shift, masked). A divisor
+    /// of -1 traps `Overflow` where a lane is MIN.
+    fn vdiv_const(&mut self, sh: Sh, t: IntTy, d: i64, a: Operand, rv: Value) -> Res<()> {
+        let wide = sh.wide();
+        let x = self.vget(a, sh.size)?;
+        if t.signed && d == -1 {
+            self.vsplat(XS0, wide, sh.w, sh.sign())?;
+            self.vb(by_w(sh.w, PCMPEQ), wide, XS0, x)?;
+            self.vptest(wide, XS0, XS0)?;
+            self.jtrap(Cond::Ne, PanicKind::Overflow)?;
+        }
+        let n = sh.bits();
+        let plan = div_plan(d, n, if t.signed { n - 1 } else { n }, t.signed);
+        if sh.w > 1 || matches!(plan, DivPlan::Copy { .. }) {
+            self.vdiv_lanes(wide, sh.w, plan, x)?;
+            return self.vput(rv, x, sh.size);
+        }
+        if let DivPlan::Shr(s) = plan {
+            self.vsh(VShiftI::Psrlw, wide, x, s as u8)?;
+            self.vsplat(XS0, wide, 1, 0xff >> s)?;
+            self.vb(VBin::Pand, wide, x, XS0)?;
+            return self.vput(rv, x, sh.size);
+        }
+        // the even bytes in x, the odd ones in o, as words of 8-bit values
+        let o = self.alloc_x()?;
+        self.vmov(wide, o, x)?;
+        if t.signed {
+            self.vsh(VShiftI::Psraw, wide, o, 8)?;
+            self.vsh(VShiftI::Psllw, wide, x, 8)?;
+            self.vsh(VShiftI::Psraw, wide, x, 8)?;
+        } else {
+            self.vsh(VShiftI::Psrlw, wide, o, 8)?;
+            self.vsplat(XS0, wide, 2, 0x00ff)?;
+            self.vb(VBin::Pand, wide, x, XS0)?;
+        }
+        let plan = div_plan(d, 16, if t.signed { 7 } else { 8 }, t.signed);
+        self.vdiv_lanes(wide, 2, plan, x)?;
+        self.vdiv_lanes(wide, 2, plan, o)?;
+        self.vsh(VShiftI::Psllw, wide, o, 8)?;
+        if t.signed {
+            self.vsplat(XS0, wide, 2, 0x00ff)?;
+            self.vb(VBin::Pand, wide, x, XS0)?;
+        }
+        self.vb(VBin::Por, wide, x, o)?;
+        self.vput(rv, x, sh.size)
+    }
+
+    /// Truncating division of 64-bit lanes by a constant `d` (not 0), lane by lane in general
+    /// registers by the plan of `stave_ir::divmagic`: the one-operand `mul` / `imul` leaves the
+    /// high half in `rdx`. A divisor of -1 traps `Overflow` at the first MIN lane.
+    fn vdiv_const64(&mut self, sh: Sh, t: IntTy, d: i64, a: Operand, rv: Value) -> Res<()> {
+        let ma = self.vmem(a)?;
+        self.reserve_g(RAX)?;
+        self.reserve_g(RDX)?;
+        let c = self.alloc_g()?;
+        let dm = self.def_mem(rv)?;
+        let plan = div_plan(d, 64, if t.signed { 63 } else { 64 }, t.signed);
+        match plan {
+            DivPlan::Mul { m, .. } | DivPlan::MulAdd { m, .. } => self.a.mov_ri(Size::Q, c, m as i64)?,
+            DivPlan::SMul { m, .. } => self.a.mov_ri(Size::Q, c, m)?,
+            DivPlan::Ge(d) => self.a.mov_ri(Size::Q, c, d as i64)?,
+            _ => {}
+        }
+        for k in 0..sh.n {
+            let (x, q) = (lane(ma, k, 8)?, lane(dm, k, 8)?);
+            self.a.mov_rm(Size::Q, RAX, x)?;
+            // the quotient in `r`
+            let r = match plan {
+                DivPlan::Copy { neg } => {
+                    if neg {
+                        self.a.mov_ri(Size::Q, S0, i64::MIN)?;
+                        self.a.alu_rr(AluOp::Cmp, Size::Q, RAX, S0);
+                        self.jtrap(Cond::E, PanicKind::Overflow)?;
+                        self.a.unary(UnaryOp::Neg, Size::Q, RAX)?;
+                    }
+                    RAX
+                }
+                DivPlan::Shr(s) => {
+                    self.a.shift_ri(ShiftOp::Shr, Size::Q, RAX, s as u8)?;
+                    RAX
+                }
+                DivPlan::Ge(_) => {
+                    self.a.alu_rr(AluOp::Xor, Size::D, RDX, RDX);
+                    self.a.alu_rr(AluOp::Cmp, Size::Q, RAX, c);
+                    self.a.setcc(Cond::NC, RDX);
+                    RDX
+                }
+                DivPlan::Mul { s, .. } => {
+                    self.a.unary(UnaryOp::Mul, Size::Q, c)?;
+                    if s > 0 {
+                        self.a.shift_ri(ShiftOp::Shr, Size::Q, RDX, s as u8)?;
+                    }
+                    RDX
+                }
+                DivPlan::MulAdd { s, .. } => {
+                    self.a.unary(UnaryOp::Mul, Size::Q, c)?;
+                    self.a.mov_rm(Size::Q, RAX, x)?;
+                    self.a.alu_rr(AluOp::Sub, Size::Q, RAX, RDX);
+                    self.a.shift_ri(ShiftOp::Shr, Size::Q, RAX, 1)?;
+                    self.a.alu_rr(AluOp::Add, Size::Q, RAX, RDX);
+                    if s > 0 {
+                        self.a.shift_ri(ShiftOp::Shr, Size::Q, RAX, s as u8)?;
+                    }
+                    RAX
+                }
+                DivPlan::Pow { l, neg } => {
+                    // a negative x gains 2^l - 1, so the shift rounds toward zero
+                    self.a.mov_rr(Size::Q, RDX, RAX);
+                    if l > 1 {
+                        self.a.shift_ri(ShiftOp::Sar, Size::Q, RDX, (l - 1) as u8)?;
+                        self.a.shift_ri(ShiftOp::Shr, Size::Q, RDX, (64 - l) as u8)?;
+                    } else {
+                        self.a.shift_ri(ShiftOp::Shr, Size::Q, RDX, 63)?;
+                    }
+                    self.a.alu_rr(AluOp::Add, Size::Q, RAX, RDX);
+                    self.a.shift_ri(ShiftOp::Sar, Size::Q, RAX, l as u8)?;
+                    if neg {
+                        self.a.unary(UnaryOp::Neg, Size::Q, RAX)?;
+                    }
+                    RAX
+                }
+                DivPlan::SMul { s, add, neg, .. } => {
+                    self.a.unary(UnaryOp::Imul, Size::Q, c)?;
+                    if add {
+                        self.a.alu_rm(AluOp::Add, Size::Q, RDX, x)?;
+                    }
+                    if s > 0 {
+                        self.a.shift_ri(ShiftOp::Sar, Size::Q, RDX, s as u8)?;
+                    }
+                    // a negative x gains 1; a negative divisor subtracts the other way round
+                    self.a.mov_rm(Size::Q, RAX, x)?;
+                    if neg {
+                        self.a.shift_ri(ShiftOp::Sar, Size::Q, RAX, 63)?;
+                        self.a.alu_rr(AluOp::Sub, Size::Q, RAX, RDX);
+                        RAX
+                    } else {
+                        self.a.shift_ri(ShiftOp::Shr, Size::Q, RAX, 63)?;
+                        self.a.alu_rr(AluOp::Add, Size::Q, RDX, RAX);
+                        RDX
+                    }
+                }
+            };
+            self.a.mov_mr(Size::Q, q, r)?;
+        }
+        Ok(())
+    }
+
     /// Truncating division lane by lane, traps in lane order: a zero divisor `DivByZero`, then
     /// `MIN / -1` `Overflow`.
     pub(super) fn v_div(&mut self, op: VecOp, a: Operand, b: Operand, rt: TypeId, rv: Value) -> Res<()> {
         let sh = self.vshape(rt)?;
         let t = self.vint(sh)?;
         let wb = sh.w as u8;
-        let ma = self.vmem(a)?;
         let konst = if op == VecOp::DivConst {
             let k = self.int_const(b).ok_or_else(|| bad("div_const divisor must be a constant"))?;
             Some(t.wrap(k) as i64)
         } else {
             None
         };
+        match konst {
+            Some(d) if d != 0 && sh.w < 8 => return self.vdiv_const(sh, t, d, a, rv),
+            Some(d) if d != 0 => return self.vdiv_const64(sh, t, d, a, rv),
+            _ => {}
+        }
+        let ma = self.vmem(a)?;
         if konst == Some(0) {
             self.def_mem(rv)?;
             return self.trap_now(PanicKind::DivByZero);
