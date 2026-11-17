@@ -133,7 +133,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 
 **Status.** Stage0 checks vector code and lowers it to checked IR (fixed lane counts; the IR interpreter runs it). Vector machine code: x86-64 (`x86_64-linux`: vectors up to 128 bits, SSE4.2; `x86_64-linux-v3`: up to 256 bits, AVX2) and `aarch64-linux` (Advanced SIMD, up to 128 bits); no f16/bf16 lanes. Planned (not enforced yet): E0710-E0717, E0700/E0701 on `gpu-sm86`, sizeless vectors past type checking. E0601-E0604, E0607, E0704 are checked in part.
 
-**Types.** `TxN`: T ∈ `i8..i64 u8..u64 f32 f64 f16 bf16`, N a power of two from 2 to 64. Total width ≤ target register: 128 bits everywhere (portable), 256 needs `avx2`, 512 needs `avx512f`. Too wide = E0702. Masks `maskWxN` are typed by lane **width** and count: `i32x8`, `u32x8` and `f32x8` compares all give `mask32x8`. Generic spelling `vec<T, N>` / `mask<W, N>` only when an argument is generic.
+**Types.** `TxN`: T ∈ `i8..i64 u8..u64 f32 f64 f16 bf16`, N a power of two from 2 to 64. Total width ≤ target register: 128 bits everywhere (portable), 256 needs `avx2`, 512 needs `v4` (its `avx512f/bw/vl/dq/cd`; `avx512f` alone is not enough). Too wide = E0702. Masks `maskWxN` are typed by lane **width** and count: `i32x8`, `u32x8` and `f32x8` compares all give `mask32x8`. Generic spelling `vec<T, N>` / `mask<W, N>` only when an argument is generic.
 
 **Strictness.**
 - Only identical vector types combine (E0603). Scalar with vector = E0602: write `f32x4.splat(1.0)`.
@@ -168,13 +168,13 @@ The tail runs after the full chunks and only when elements remain (`masked`: onc
 **Hot loops over one field**: store records as columns, `import std.soa;` → `soa.Soa3::<f32, f32, u32>.new()`, `push(a, b, c)`, `len()`, `get(i)`, `set(i, ..)`, `col0()`/`col0_mut()` (`&[A]`/`&mut [A]`), `cols_mut()` (all columns at once, to read one and write another). Loop: `for v: f32x8 in ps.col0() { .. } tail ..`. Types `Soa2`..`Soa4` (no variadic generics); name fields with a wrapper struct whose methods return `self.s.col0()`. Why: SIMD over a field of `Vec<Struct>` needs gathers; a column is one contiguous slice.
 
 **Features.** Signature form: `fn f(..) -> R needs(avx2, fma) { }`. Features are part of the fn type. Each target owns a closed set of feature names; a fn that needs another target's feature is left out of the build. A callee's needs must be ⊆ the caller's needs ∪ the target baseline (E0704). A closure has the needs of its fn. A vector in a signature (fn, fn type, closure) needs features that cover its width, the target baseline counting (E0703). `main`, trait methods, and extern exports cannot have `needs` (E0709).
-- x86-64: `sse42 ⊂ avx ⊂ avx2`, `fma bmi2 f16c` (v3 = avx2+fma+bmi2+f16c), `avx512f ⊂ avx512bw/vl/dq/cd` (v4), extras `avx512vbmi avx512vbmi2 avx512vpopcntdq avx512bitalg avx512fp16 avx512bf16`.
+- x86-64: `sse42 ⊂ avx ⊂ avx2`, `fma bmi2 f16c`, `avx512f ⊂ avx512bw/vl/dq/cd`, extras `avx512vbmi avx512vbmi2 avx512vpopcntdq avx512bitalg avx512fp16 avx512bf16`; the names `v3` = avx2+fma+bmi2+f16c and `v4` = v3+avx512f/bw/vl/dq/cd (the `-v3` / `-v4` target baselines) stand for their features in `needs` and arms, not in `--features` or `STAVE_CPU`.
 - AArch64: `neon` (baseline), `fp16 dotprod bf16`, `sve ⊂ sve2`.
 - Fns needing another arch's features are skipped on that arch. 128-bit code with no `needs` is portable.
 
 **Dispatch** (runtime CPU pick, arms tried top-down, `_` required last; full example in §5):
 ```text
-dispatch fn sum(xs: &[f32]) -> f32 { avx512f => sum_v4, avx2 => sum_v3, sve => sum_sve, _ => sum_base, }
+dispatch fn sum(xs: &[f32]) -> f32 { v4 => sum_v4, avx2 => sum_v3, sve => sum_sve, _ => sum_base, }
 ```
 - An arm may name several features: `avx2 + fma => sum_fma,`. The dispatch fn may have its own `needs(..)`. An arm whose features (implied ones counted) include an earlier arm's is never picked (E0718): `avx2 => a, avx512f => b`.
 - Each arm target has the dispatch's signature, with needs = dispatch needs + the arm's features (else E0705). The `_` target needs ⊆ dispatch needs ∪ the target baseline (E0706).

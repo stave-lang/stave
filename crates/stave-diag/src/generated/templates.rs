@@ -2415,7 +2415,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "too wide for this target" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "use a vector of at most {max} bits, or add `needs(...)` with a feature that has wider registers (`avx2`: 256, `avx512f`: 512)",
+                    description: "use a vector of at most {max} bits, or add `needs(...)` with features that have wider registers (`avx2`: 256, `v4`: 512)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

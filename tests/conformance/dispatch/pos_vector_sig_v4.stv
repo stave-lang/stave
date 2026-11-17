@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v4
+// The target baseline counts for E0703: `x86_64-linux-v4` has all of `v4`, so a 512-bit vector
+// fits a signature with no `needs` or with any features there.
+fn f(v: f32x16) -> f32x16 {
+    return v;
+}
+
+fn g(v: u8x64) -> u8x64 needs(avx512f) {
+    return v;
+}
+
+fn h() needs(bmi2) {
+    let k: fn(mask32x16) -> f64x8 = fn(m: mask32x16) -> f64x8 { return f64x8.splat(0.0); };
+}
+
+fn main() -> i32 {
+    return 0;
+}

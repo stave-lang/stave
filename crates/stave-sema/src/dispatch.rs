@@ -15,7 +15,7 @@
 
 use stave_diag::{Diagnostic, Span};
 use stave_syntax::NodeKind;
-use stave_target::{Feature, FeatureSet};
+use stave_target::FeatureSet;
 
 use crate::Program;
 use crate::decls::{DeclFlags, DeclKind};
@@ -87,8 +87,8 @@ fn arms_of(icx: &ItemCx<'_>, n: u32, out: &mut Vec<Diagnostic>) -> Vec<Arm> {
                         Some(NodeKind::Feature) => {
                             let t = icx.a(x);
                             let s = icx.tok_str(t);
-                            match Feature::from_name(s) {
-                                Some(f) => fs.insert(f),
+                            match FeatureSet::of_name(s) {
+                                Some(f) => fs = fs.union(f),
                                 None => {
                                     unknown = true;
                                     out.extend(mk("E0708", None, &[("name", s)], icx.tok_span(t), &[]));

@@ -6,6 +6,10 @@
 fn f() needs(avx3) { //~ ERROR E0708
 }
 
+// `v3` and `v4` are the only group names.
+fn f5() needs(v5) { //~ ERROR E0708
+}
+
 fn base() {
 }
 

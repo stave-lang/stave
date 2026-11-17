@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use crate::features::{Arch, Feature, FeatureError, FeatureSet};
+use crate::features::{Arch, Feature, FeatureError, FeatureGroup, FeatureSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum X86Level {
@@ -87,17 +87,15 @@ impl Triple {
     }
 
     /// Features every program for this target may assume (simd-ops.md §Features tiers):
-    /// v2 = sse42, v3 = v2 + avx2 fma bmi2 f16c, v4 = v3 + avx512f/bw/vl/dq/cd, AArch64 = neon,
-    /// `+sve`, `+sve2`. On `gpu-sm86`, `cuda` is always true. On CPU targets `cuda` is
-    /// a runtime feature (a `dispatch` arm), never in the baseline.
+    /// v2 = sse42; v3 and v4 = the feature groups of the same names; AArch64 = neon, `+sve`,
+    /// `+sve2`. On `gpu-sm86`, `cuda` is always true. On CPU targets `cuda` is a runtime feature
+    /// (a `dispatch` arm), never in the baseline.
     pub fn baseline(self) -> FeatureSet {
         use Feature as F;
-        let v3 = [F::Sse42, F::Avx2, F::Fma, F::Bmi2, F::F16c];
-        let v4 = [F::Avx512f, F::Avx512bw, F::Avx512vl, F::Avx512dq, F::Avx512cd];
         match self {
             Triple::X86_64(X86Level::V2) => FeatureSet::of(F::Sse42),
-            Triple::X86_64(X86Level::V3) => FeatureSet::from_features(v3),
-            Triple::X86_64(X86Level::V4) => FeatureSet::from_features(v3.into_iter().chain(v4)),
+            Triple::X86_64(X86Level::V3) => FeatureGroup::V3.features(),
+            Triple::X86_64(X86Level::V4) => FeatureGroup::V4.features(),
             Triple::Aarch64(A64Ext::Base) => FeatureSet::of(F::Neon),
             Triple::Aarch64(A64Ext::Sve) => FeatureSet::of(F::Sve),
             Triple::Aarch64(A64Ext::Sve2) => FeatureSet::of(F::Sve2),

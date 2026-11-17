@@ -1,0 +1,68 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+//~ TARGET aarch64-linux
+// The group names `v3` (avx2 + fma + bmi2 + f16c) and `v4` (v3 + avx512f/bw/vl/dq/cd) stand for
+// their features wherever a feature name is: `needs(..)`, fn types, dispatch arms. Both are
+// x86-64 names: on AArch64 a fn or an arm naming one is left out of the build.
+fn sum_v3(xs: &[f32]) -> f32 needs(v3) {
+    let v: f32x8 = f32x8.splat(0.0);
+    return 0.0;
+}
+
+fn sum_four(xs: &[f32]) -> f32 needs(avx2, fma, bmi2, f16c) {
+    return 0.0;
+}
+
+fn sum_v3f(xs: &[f32]) -> f32 needs(v3, avx512f) {
+    return 0.0;
+}
+
+fn sum_f(xs: &[f32]) -> f32 needs(avx512f) {
+    return 0.0;
+}
+
+fn sum_v4(xs: &[f32]) -> f32 needs(v4) {
+    let v: f32x16 = f32x16.splat(0.0);
+    return 0.0;
+}
+
+fn sum_base(xs: &[f32]) -> f32 {
+    return 0.0;
+}
+
+// 512 bits in a signature: `v4`, or its five AVX-512 features.
+fn wide_v4(v: f32x16) -> f32x16 needs(v4) {
+    return v;
+}
+
+fn wide_named(v: u8x64) -> u8x64 needs(avx512f, avx512bw, avx512vl, avx512dq, avx512cd) {
+    return v;
+}
+
+// `needs(v3)` and the four names are one fn type; `v3` ⊆ `v4`.
+fn values(xs: &[f32]) -> f32 needs(v4) {
+    let a: fn(&[f32]) -> f32 needs(avx2, fma, bmi2, f16c) = sum_v3;
+    let b: fn(&[f32]) -> f32 needs(v3) = sum_four;
+    let c: fn(&[f32]) -> f32 needs(v4) = b;
+    let w: fn(f32x16) -> f32x16 needs(v4) = wide_v4;
+    let k: fn(u8x64) -> u8x64 needs(avx512f, avx512bw, avx512vl, avx512dq, avx512cd) = wide_named;
+    return sum_v3(xs) + sum_four(xs) + c(xs);
+}
+
+// A `v3` arm takes a target needing exactly v3's features, however they are written (E0705).
+dispatch fn sum(xs: &[f32]) -> f32 {
+    v4 => sum_v4,
+    v3 + avx512f => sum_v3f,
+    avx512f => sum_f,
+    v3 => sum_four,
+    _ => sum_base,
+}
+
+dispatch fn sum_named(xs: &[f32]) -> f32 {
+    avx2 + fma + bmi2 + f16c => sum_v3,
+    _ => sum_base,
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -17,7 +17,7 @@
 use stave_diag::Span;
 use stave_syntax::Term;
 use stave_target::lowering::{self, Class, Tier};
-use stave_target::{Arch, Feature, FeatureSet, Triple};
+use stave_target::{Arch, Feature, FeatureGroup, FeatureSet, Triple};
 
 use crate::diag::mk;
 use crate::prim::Lanes;
@@ -68,9 +68,14 @@ pub fn max_vector_bits(t: Triple) -> u32 {
     feature_vector_bits(t.baseline())
 }
 
+/// The features 512-bit vectors and masks take: the AVX-512 part of `v4`, not `avx512f` alone.
+fn wide512() -> &'static [Feature] {
+    FeatureGroup::V4.own_members()
+}
+
 /// The widest vector or mask, in bits, that code with features `fs` may use.
 pub fn feature_vector_bits(fs: FeatureSet) -> u32 {
-    if fs.contains(Feature::Avx512f) {
+    if wide512().iter().all(|f| fs.contains(*f)) {
         512
     } else if fs.contains(Feature::Avx2) {
         256
@@ -126,23 +131,28 @@ pub(crate) fn sig_wide_part<I: Interner + ?Sized>(
     wide_part(cx, t, feature_vector_bits(target.baseline().union(fs)))
 }
 
-/// E0703 for vector type `ty` (`bits` wide) in a signature at `span` whose features (with the
-/// target baseline) do not cover it; E0702 where no feature of the target's arch is that wide.
+/// E0703 for vector type `ty` (`bits` wide) in a signature at `span` whose features `features`
+/// (with the target baseline) do not cover it, naming the missing features (those not implied by
+/// another, in feature order); E0702 where no feature of the target's arch is that wide.
 pub(crate) fn sig_too_wide(
     target: Triple,
+    features: u64,
     ty: &str,
     bits: u32,
     span: Span,
 ) -> Option<stave_diag::Diagnostic> {
     let need = match target.arch() {
-        Arch::X86_64 if bits <= 256 => Some(Feature::Avx2),
-        Arch::X86_64 if bits <= 512 => Some(Feature::Avx512f),
-        _ => None,
+        Arch::X86_64 if bits <= 256 => vec![Feature::Avx2],
+        Arch::X86_64 if bits <= 512 => wide512().to_vec(),
+        _ => Vec::new(),
     };
-    match need {
-        Some(f) => mk("E0703", None, &[("type", ty), ("feature", f.name())], span, &[]),
-        None => too_wide(ty, bits, max_vector_bits(target), span),
+    let have = target.baseline().union(FeatureSet::from_bits(features).unwrap_or_default());
+    let missing = FeatureSet::from_features(need.into_iter().filter(|f| !have.contains(*f)));
+    let names = types::feature_names(missing.bits());
+    if names.is_empty() {
+        return too_wide(ty, bits, max_vector_bits(target), span);
     }
+    mk("E0703", None, &[("type", ty), ("feature", &names.join(", "))], span, &[])
 }
 
 /// E0702 for a `bits`-wide vector or mask type `ty` at `span`, if it is wider than `max`.
@@ -402,7 +412,7 @@ impl Ck<'_> {
         let Some((v, bits)) = sig_wide_part(&self.tys, target, t, features) else { return };
         let name = self.show(v);
         self.gates.wide.push(span);
-        let d = sig_too_wide(target, &name, bits, span);
+        let d = sig_too_wide(target, features, &name, bits, span);
         self.report(d);
     }
 

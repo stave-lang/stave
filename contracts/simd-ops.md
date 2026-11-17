@@ -27,6 +27,12 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
   (`avx512vbmi`, `avx512vbmi2`, `avx512bitalg`, `avx512bf16` ⇒ `avx512bw`; `avx512fp16` ⇒
   `avx512bw` + `avx512vl` + `avx512dq`; `avx512vpopcntdq` ⇒ `avx512f`); every AArch64 extra
   (`fp16`, `dotprod`, `bf16`, `sve`, `sve2`) ⇒ `neon`; `sve` ⇒ `fp16`.
+- **Groups** (x86-64): `v3` = `avx2` + `fma` + `bmi2` + `f16c`; `v4` = `v3` + `avx512f` +
+  `avx512bw` + `avx512vl` + `avx512dq` + `avx512cd`. A group name is accepted wherever source
+  code names a feature (`needs(..)`, fn types, `dispatch` arms, `a + b` arms) and stands for the
+  closure of its members: feature sets, types, diagnostics, and dumps only hold features (printed
+  as the features not implied by another, in the order above). The `x86_64-linux-v3` / `-v4`
+  baselines are these groups. `--features` and `STAVE_CPU` take feature names only.
 - **Target tiers below**: `v2` = sse42 baseline, `v3`, `v4`, `neon` = baseline AArch64, `sve`.
 
 ### Per-function feature sets (x86-64 code generation)
@@ -60,6 +66,8 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
   - A type exists on a target iff N·bits(T) ≤ the register width (v2/neon 128, v3 256, v4 512).
     Otherwise it is E0702: there are no silent multi-register types. 128-bit types exist on every
     tier, so they are the portable baseline.
+  - Features covering a width: 256 bits `avx2`; 512 bits the AVX-512 part of `v4`: `avx512f`,
+    `avx512bw`, `avx512vl`, `avx512dq`, `avx512cd` (`avx512f` alone does not).
   - f16/bf16 lanes support load/store/convert everywhere (`f16c` on x86 for conversions). For
     arithmetic they are **U** unless `avx512fp16`/`fp16` (f16) or `avx512bf16`/`bf16` (bf16 dot
     products only).

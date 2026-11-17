@@ -621,10 +621,8 @@ pub(crate) fn needs_bits<H: LowerHost + ?Sized>(h: &mut H, icx: &ItemCx<'_>, nd:
     for f in icx.kids_vec(nd) {
         let t = icx.a(f);
         let name = icx.tok_str(t);
-        match stave_target::Feature::from_name(name) {
-            Some(feat) => {
-                fs = fs.union(stave_target::FeatureSet::of(feat));
-            }
+        match stave_target::FeatureSet::of_name(name) {
+            Some(named) => fs = fs.union(named),
             None => {
                 let d = mk("E0708", None, &[("name", name)], icx.tok_span(t), &[]);
                 h.report(d);
@@ -920,7 +918,7 @@ impl<'p> LowerHost for SigBuilder<'p> {
         };
         let name = types::display(self, &NameCx { prog: self.prog, generics: &[] }, v);
         self.wide.push(span);
-        let d = crate::gates::sig_too_wide(self.prog.target, &name, bits, span);
+        let d = crate::gates::sig_too_wide(self.prog.target, features, &name, bits, span);
         self.diags.extend(d);
     }
 }

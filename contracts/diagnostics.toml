@@ -991,7 +991,7 @@ rule = "vector type wider than the target's register"
 holes = { type = "type", bits = "int", max = "int" }
 message = "`{type}` is {bits} bits wide, the target's vector registers have {max}"
 labels = [{ at = "primary", text = "too wide for this target" }]
-fix = { description = "use a vector of at most {max} bits, or add `needs(...)` with a feature that has wider registers (`avx2`: 256, `avx512f`: 512)" }
+fix = { description = "use a vector of at most {max} bits, or add `needs(...)` with features that have wider registers (`avx2`: 256, `v4`: 512)" }
 
 [[diag]]
 code = "E0703"

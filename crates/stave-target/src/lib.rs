@@ -4,5 +4,5 @@ pub mod features;
 pub mod lowering;
 pub mod triple;
 
-pub use features::{Arch, ArchSet, Feature, FeatureError, FeatureSet};
+pub use features::{Arch, ArchSet, Feature, FeatureError, FeatureGroup, FeatureSet};
 pub use triple::{A64Ext, Target, TargetError, Triple, TripleError, X86Level};
