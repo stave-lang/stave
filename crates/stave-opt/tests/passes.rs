@@ -88,7 +88,7 @@ fn optimized(m: &Module) -> Module {
         }
     }
     verify_module(&c).unwrap();
-    bounds::elide(&mut c);
+    bounds::elide(&mut c).unwrap_or_else(|r| panic!("witness refused: {r:?}"));
     stave_opt::slices::declare_elem_pointers(&mut c.types);
     let types = c.types.clone();
     for f in &mut c.funcs {

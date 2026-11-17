@@ -1,4 +1,5 @@
-//! Robustness: random (mostly malformed) IR never panics the verifier, printer, or interpreter;
+//! Robustness: random (mostly malformed) IR never panics the verifier, printer, or interpreter,
+//! and with a random witness never panics the witness checker;
 //! random well-typed straight-line integer programs agree with a direct evaluation.
 
 mod common;
@@ -7,6 +8,8 @@ use common::*;
 use proptest::prelude::*;
 use stave_ir::interp::{self, Config, Outcome, Val};
 use stave_ir::ir::{BlockData, Insts, Span, Term, ValueData, ValueDef};
+use stave_ir::witness::check::{check_func, remove};
+use stave_ir::witness::{Edge, FnWitness, Node, Removed, Source};
 use stave_ir::{Body, Const, FuncBuilder, Module, Op, Operand, PanicKind, TypeKey, Value};
 
 const OPS: [Op; 24] = [
@@ -46,15 +49,74 @@ fn arb_operand(nv: u32, nc: u32) -> impl Strategy<Value = Operand> {
     ]
 }
 
+/// The ops a witness can name, for bodies the witness checker reads.
+const WITNESS_OPS: [Op; 12] = [
+    Op::BoundsCheck,
+    Op::BoundsCheck,
+    Op::SliceLen,
+    Op::SliceMake,
+    Op::Add,
+    Op::Sub,
+    Op::SubSat,
+    Op::AddWrap,
+    Op::Lt,
+    Op::Eq,
+    Op::Not,
+    Op::Call,
+];
+
 /// A raw body with arbitrary ids and spans.
 fn arb_body() -> impl Strategy<Value = Body> {
-    (1..5usize, 0..12usize, 0..10u32).prop_flat_map(|(nb, ni, nv)| {
+    arb_body_of(&OPS)
+}
+
+/// A witness with arbitrary rows, edges, and dominance table.
+fn arb_witness() -> impl Strategy<Value = FnWitness> {
+    let node = || {
+        prop_oneof![
+            Just(Node::Zero),
+            (0..12u32).prop_map(|v| Node::Val(Value(v))),
+            (0..12u32).prop_map(|v| Node::Len(Value(v))),
+        ]
+    };
+    let src = (0..7u8, 0..14u32, 0..3u32).prop_map(|(kind, at, arg)| match kind {
+        0 => Source::Branch { block: at },
+        1 => Source::Assert { call: at, arg },
+        2 => Source::Check { inst: at },
+        3 => Source::Arith { inst: at },
+        4 => Source::SliceLen { inst: at },
+        5 => Source::SliceMake { inst: at },
+        _ => Source::SubSat { inst: at },
+    });
+    let edge = (node(), node(), -3i128..4, src).prop_map(|(from, to, w, src)| Edge { from, to, w, src });
+    let rows = prop::collection::vec((0..14u32, 0..6u32, 0..4u32), 0..4);
+    (prop::collection::vec(0..7u32, 0..6), rows, prop::collection::vec(edge, 0..8)).prop_map(
+        |(dom, rows, edges)| FnWitness {
+            func: stave_ir::FuncId(0),
+            dom,
+            removed: rows
+                .into_iter()
+                .map(|(inst, start, len)| Removed {
+                    inst,
+                    site: stave_ir::Site::NONE,
+                    edges: Span { start, len },
+                })
+                .collect(),
+            edges,
+        },
+    )
+}
+
+fn arb_body_of(op_set: &'static [Op]) -> impl Strategy<Value = Body> {
+    (1..5usize, 0..12usize, 0..10u32).prop_flat_map(move |(nb, ni, nv)| {
         let blocks = prop::collection::vec(
             (0..4u32, 0..3u32, 0..ni as u32 + 1, 0..3u32, 0..nb as u32 + 1, 0..5u32, any::<bool>()),
             nb,
         );
-        let insts =
-            prop::collection::vec((0..OPS.len(), 0..12u32, any::<bool>(), 0..nv + 1, 0..20u32, 0..4u32), ni);
+        let insts = prop::collection::vec(
+            (0..op_set.len(), 0..12u32, any::<bool>(), 0..nv + 1, 0..20u32, 0..4u32),
+            ni,
+        );
         let ops = prop::collection::vec(arb_operand(nv, 6), 0..24);
         let consts = prop::collection::vec(any::<i64>(), 0..6);
         let values = prop::collection::vec((0..12u32, any::<bool>(), 0..12u32), nv as usize);
@@ -76,7 +138,7 @@ fn arb_body() -> impl Strategy<Value = Body> {
                 .collect(),
             block_params: (0..nv).map(Value).collect(),
             insts: Insts {
-                op: insts.iter().map(|x| OPS[x.0]).collect(),
+                op: insts.iter().map(|x| op_set[x.0]).collect(),
                 ty: insts.iter().map(|x| if x.2 { Some(stave_ir::TypeId(x.1)) } else { None }).collect(),
                 result: insts.iter().map(|x| Some(Value(x.3))).collect(),
                 args: insts.iter().map(|x| Span { start: x.4, len: x.5 }).collect(),
@@ -127,6 +189,14 @@ proptest! {
         let _ = stave_ir::print_checked(&m);
         let cfg = Config { max_steps: 10_000, ..Config::default() };
         let _ = interp::run(&m, stave_ir::FuncId(0), vec![], host(), cfg);
+    }
+
+    #[test]
+    fn random_witnesses_never_panic(body in arb_body_of(&WITNESS_OPS), w in arb_witness()) {
+        let mut m = module_with(body);
+        if let Ok(checked) = check_func(&m, &w) {
+            remove(&mut m, &[checked]);
+        }
     }
 }
 

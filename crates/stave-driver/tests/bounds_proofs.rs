@@ -26,7 +26,7 @@ fn released(file: &str) -> (Module, Vec<(String, Proof)>) {
     for b in m.funcs.iter_mut().filter_map(|f| f.body.as_mut()) {
         stave_opt::before_elision(b);
     }
-    let e = bounds::elide(&mut m);
+    let e = bounds::elide(&mut m).unwrap_or_else(|r| panic!("witness refused: {r:?}"));
     stave_ir::verify_module(&m).unwrap_or_else(|e| panic!("{e:?}"));
     bounds::audit(&m).unwrap_or_else(|u| panic!("unguarded after elision: {u:?}"));
     let proofs = e.into_iter().map(|x| (m.funcs[x.func.index()].path.clone(), x.proof)).collect();

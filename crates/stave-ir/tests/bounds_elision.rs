@@ -1,6 +1,9 @@
-//! Bounds-check audit and elision (`stave_ir::bounds`): every element access
-//! keeps its check unless a proof is recorded; elision removes only proven checks, records each,
+//! Bounds-check audit and removal (`stave_ir::bounds`): every element access
+//! keeps its check unless a proof is recorded; removal takes only proven checks, records each,
 //! keeps the audit passing, and never changes a result or a trap (checked in the interpreter).
+//! Every proof is written out as a witness the independent checker accepts (`elide` runs it),
+//! and the checker refuses every corruption of those witnesses and every made-up witness for a
+//! check the look-alike functions must keep (`common::forge`).
 
 mod common;
 
@@ -90,7 +93,7 @@ fn loop_and_const_checks_are_elided_with_proofs() {
     let before = run(&m, f, vec![Val::S(4)]);
     assert_eq!(before, Outcome::Return(Some(Val::S(13))));
     assert_eq!(checks(&m, f), 3);
-    let e = elide(&mut m);
+    let e = elide(&mut m).unwrap();
     let proofs: Vec<Proof> = e.iter().map(|x| x.proof).collect();
     assert_eq!(proofs.len(), 3, "{e:?}");
     assert!(matches!(proofs[0], Proof::LoopBound { .. }), "{proofs:?}");
@@ -112,7 +115,7 @@ fn loop_and_const_checks_are_elided_with_proofs() {
 fn unproven_check_is_kept_and_traps() {
     let (mut m, f) = sum_module(false);
     audit(&m).unwrap();
-    let e = elide(&mut m);
+    let e = elide(&mut m).unwrap();
     assert!(
         e.iter().all(|x| matches!(x.proof, Proof::ConstInRange { .. } | Proof::Dominated { .. })),
         "{e:?}"
@@ -151,7 +154,7 @@ fn slice_index_keeps_its_check() {
     assert_eq!(acc.len(), 2);
     assert_eq!(acc[0].guard, Guard::Proof(Proof::ConstInRange { index: 0, len: 4 }));
     assert!(matches!(acc[1].guard, Guard::Check(_)));
-    assert!(elide(&mut m).is_empty());
+    assert!(elide(&mut m).unwrap().is_empty());
     assert_eq!(checks(&m, f), 1);
     assert_eq!(run(&m, f, vec![Val::S(3)]), Outcome::Return(Some(Val::S(9))));
     assert!(matches!(run(&m, f, vec![Val::S(4)]), Outcome::Trap(t) if t.kind == PanicKind::Bounds));
@@ -194,7 +197,7 @@ fn unguarded_accesses_are_reported() {
         assert!(bad[0].to_string().starts_with("@7 app.bad: inst "), "{}", bad[0]);
         // Elision never invents a proof for it.
         let before = checks(&m, FuncId(0));
-        elide(&mut m);
+        elide(&mut m).unwrap();
         assert_eq!(checks(&m, FuncId(0)), before);
     }
 }
@@ -357,10 +360,13 @@ fn two_slices(f: BodyFn) -> (Module, FuncId, FuncId) {
 }
 
 /// Elides; the result verifies, audits, and `main` returns or traps the same on every `(na, nb)`
-/// up to 8. Returns the elided module and the proofs recorded for `f`.
+/// up to 8; no corrupted witness passes the checker. Returns the elided module and the proofs
+/// recorded for `f`.
 fn elide_same(m: &Module, f: FuncId, main: FuncId) -> (Module, Vec<Proof>) {
+    let corrupted = forge::mutants_are_refused(m);
     let mut o = m.clone();
-    let e = elide(&mut o);
+    let e = elide(&mut o).unwrap();
+    assert!(e.is_empty() || corrupted > 0);
     verify_module(&o).unwrap_or_else(|e| panic!("{e:?}"));
     audit(&o).unwrap_or_else(|u| panic!("unguarded after elision: {u:?}"));
     for na in 0..=8u64 {
@@ -628,6 +634,7 @@ fn look_alikes_keep_their_checks() {
         let (o, _) = elide_same(&m, f, main);
         assert_eq!(checks(&o, f), kept, "{name}");
         assert_eq!(trap(&o, main, na, nb), Some(PanicKind::Bounds), "{name}");
+        assert!(forge::forgeries_are_refused(&m, f) > 0, "{name}");
     }
 }
 
@@ -662,7 +669,7 @@ fn search_stops_at_the_step_limit() {
             b.ret(Some(ov[0].into()));
         });
         verify_module(&m).unwrap();
-        let e = elide(&mut m);
+        let e = elide(&mut m).unwrap();
         assert_eq!(checks(&m, f), kept, "chain of {len}");
         if kept == 0 {
             assert!(matches!(e[..], [Elided { proof: Proof::Offset { k: 0, .. }, .. }]), "{e:?}");
@@ -933,5 +940,6 @@ fn while_le_look_alikes_keep_their_checks() {
         let (o, proofs) = elide_same(&m, f, main);
         assert_eq!(checks(&o, f), 1, "{name}: {proofs:?}");
         assert_eq!(trap(&o, main, na, nb), Some(PanicKind::Bounds), "{name}");
+        assert!(forge::forgeries_are_refused(&m, f) > 0, "{name}");
     }
 }

@@ -210,7 +210,10 @@ pub fn codegen_link(
     let m = if release {
         let mut c = m.clone();
         c.funcs.par_iter_mut().filter_map(|f| f.body.as_mut()).for_each(stave_opt::before_elision);
-        elided = stave_ir::bounds::elide(&mut c);
+        elided = stave_ir::bounds::elide(&mut c).map_err(|refused| Failure::Internal {
+            stage: Stage::Opt,
+            message: format!("bounds witness: {}", listed(&refused)),
+        })?;
         stave_opt::slices::declare_elem_pointers(&mut c.types);
         let types = &c.types;
         c.funcs

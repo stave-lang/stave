@@ -22,6 +22,11 @@
 //! demand, over facts whose region dominates the check, and gives up after [`BOUNDS_STEP_LIMIT`]
 //! edges. Any path found is a chain of true inequalities, so the proof is sound however the search
 //! ends; giving up only keeps a check.
+//!
+//! The facts are one table sorted by their start node. Every fact keeps the place it was read
+//! from and its two operands as written, so a path found can be written out as a witness
+//! ([`crate::witness`]): the folding steps from an operand to its term ([`Cx::fold`]) become
+//! edges of their own.
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::VecDeque;
@@ -32,14 +37,13 @@ use super::{BOUNDS_STEP_LIMIT, Cx, Proof, preds_of};
 use crate::ir::{Block, Body, FuncId, Op, Operand, Term as IrTerm, Value, ValueDef};
 use crate::types::TypeKey;
 use crate::verify::Dominators;
+use crate::witness::{ASSERT_BLOCKS, Edge, MAX_CONST, NOT_DEPTH, Node, Source};
 
-/// Folding depth of `add`/`sub` chains and `not` chains.
+/// Folding depth of `add`/`sub` chains, and of `slice.len (slice.make ..)` nesting.
 const DEPTH: u32 = 8;
 /// Constants and offsets beyond this are opaque (keeps every weight sum far from `i128` overflow).
 /// Every `u64` constant is below it, so a constant index or length is never opaque.
-const MAX_K: i128 = 1 << 64;
-/// An asserting callee is recognized only in bodies of at most this many blocks.
-const ASSERT_BLOCKS: usize = 16;
+const MAX_K: i128 = MAX_CONST;
 
 const ZERO: u32 = 0;
 
@@ -79,19 +83,44 @@ struct Region {
     after: Option<u32>,
 }
 
-/// `from <= to + w` (stored at `from`).
+/// `from <= to + w` between two term nodes.
 #[derive(Clone, Copy)]
 struct Fact {
+    from: u32,
     to: u32,
     w: i128,
     at: Region,
     /// The `eq`/`ne` instruction when the fact is one half of a proved equality.
     eq: Option<u32>,
+    /// Where the fact was read, and what it says there: `a <= b + wop` between the two operands
+    /// as written, before folding.
+    src: Source,
+    a: Operand,
+    b: Operand,
+    wop: i128,
 }
 
+/// The facts of a function, sorted by `from` (facts of one node in the order they were found).
 #[derive(Default)]
 pub(super) struct Graph {
-    adj: FxHashMap<u32, Vec<Fact>>,
+    facts: Vec<Fact>,
+}
+
+impl Graph {
+    /// The facts starting at `node`, as a range of the table.
+    fn from(&self, node: u32) -> std::ops::Range<usize> {
+        let lo = self.facts.partition_point(|f| f.from < node);
+        let hi = lo + self.facts[lo..].partition_point(|f| f.from == node);
+        lo..hi
+    }
+}
+
+/// One improvement of a node's distance during a query: reached over `fact` from the step
+/// `parent` (`u32::MAX`: the start).
+#[derive(Clone, Copy)]
+struct Step {
+    parent: u32,
+    fact: u32,
 }
 
 /// The lazily built per-function graph and the callee summaries it needed.
@@ -115,55 +144,82 @@ impl Cx<'_> {
 
     /// The term of an unsigned integer operand.
     pub(super) fn term(&self, o: Operand) -> Option<Term> {
-        let mut o = o;
-        let mut k: i128 = 0;
-        for _ in 0..DEPTH {
-            if let Some(c) = self.small_const(o) {
-                return Some(Term { node: ZERO, k: k.checked_add(c)?, root: None });
-            }
-            let Operand::Value(v) = o else { return None };
-            if !self.unsigned(v) {
-                return None;
-            }
-            let opaque = Term { node: val_node(v), k, root: Some(v) };
-            let Some(d) = self.def(v) else { return Some(opaque) };
-            let args = self.b.args(d);
-            match (self.b.insts.op[d as usize], args) {
-                (Op::Add, &[x, y]) => {
-                    let (x, c) = match (self.small_const(x), self.small_const(y)) {
-                        (_, Some(c)) => (x, c),
-                        (Some(c), _) => (y, c),
-                        _ => return Some(opaque),
-                    };
-                    k = k.checked_add(c)?;
-                    o = x;
-                }
-                (Op::Sub, &[x, y]) => {
-                    let Some(c) = self.small_const(y) else { return Some(opaque) };
-                    k = k.checked_sub(c)?;
-                    o = x;
-                }
-                (Op::SliceLen, &[s]) => return self.slice_len(s, k, v),
-                _ => return Some(opaque),
-            }
-            if k.abs() > MAX_K {
-                return None;
-            }
-        }
-        None
+        self.fold(o, &mut |_| {})
     }
 
-    /// `slice.len s + k` (the value `root` reads it).
-    fn slice_len(&self, s: Operand, k: i128, root: Value) -> Option<Term> {
-        let Operand::Value(sv) = s else { return None };
-        if let Some(d) = self.def(sv)
-            && self.b.insts.op[d as usize] == Op::SliceMake
-            && let Some(&n) = self.b.args(d).get(1)
-        {
-            let t = self.term(n)?;
-            return Some(Term { k: t.k.checked_add(k)?, ..t });
+    /// The node and offset of an operand as written: a constant is `zero + c`, a value itself.
+    pub(super) fn written(&self, o: Operand) -> Option<(Node, i128)> {
+        match o {
+            Operand::Value(v) if self.unsigned(v) => Some((Node::Val(v), 0)),
+            _ => self.small_const(o).map(|c| (Node::Zero, c)),
         }
-        Some(Term { node: len_node(sv), k, root: Some(root) })
+    }
+
+    /// [`Cx::term`], handing `sink` every folding step as the equality it uses, from the operand
+    /// as written down to the term's node.
+    pub(super) fn fold(&self, o: Operand, sink: &mut impl FnMut(Edge)) -> Option<Term> {
+        let mut o = o;
+        let mut k: i128 = 0;
+        let mut nested = 0;
+        'term: loop {
+            for _ in 0..DEPTH {
+                if let Some(c) = self.small_const(o) {
+                    return Some(Term { node: ZERO, k: k.checked_add(c)?, root: None });
+                }
+                let Operand::Value(v) = o else { return None };
+                if !self.unsigned(v) {
+                    return None;
+                }
+                let opaque = Term { node: val_node(v), k, root: Some(v) };
+                let Some(d) = self.def(v) else { return Some(opaque) };
+                let args = self.b.args(d);
+                match (self.b.insts.op[d as usize], args) {
+                    (Op::Add, &[x, y]) => {
+                        let (x, c) = match (self.small_const(x), self.small_const(y)) {
+                            (_, Some(c)) => (x, c),
+                            (Some(c), _) => (y, c),
+                            _ => return Some(opaque),
+                        };
+                        let (to, kx) = self.written(x)?;
+                        sink(Edge { from: Node::Val(v), to, w: kx + c, src: Source::Arith { inst: d } });
+                        k = k.checked_add(c)?;
+                        o = x;
+                    }
+                    (Op::Sub, &[x, y]) => {
+                        let Some(c) = self.small_const(y) else { return Some(opaque) };
+                        let (to, kx) = self.written(x)?;
+                        sink(Edge { from: Node::Val(v), to, w: kx - c, src: Source::Arith { inst: d } });
+                        k = k.checked_sub(c)?;
+                        o = x;
+                    }
+                    (Op::SliceLen, &[s]) => {
+                        let Operand::Value(sv) = s else { return None };
+                        let len = Node::Len(sv);
+                        sink(Edge { from: Node::Val(v), to: len, w: 0, src: Source::SliceLen { inst: d } });
+                        // `slice.len (slice.make p n)` is `n`.
+                        if let Some(ds) = self.def(sv)
+                            && self.b.insts.op[ds as usize] == Op::SliceMake
+                            && let Some(&n) = self.b.args(ds).get(1)
+                        {
+                            let (to, kn) = self.written(n)?;
+                            sink(Edge { from: len, to, w: kn, src: Source::SliceMake { inst: ds } });
+                            nested += 1;
+                            if nested > DEPTH {
+                                return None;
+                            }
+                            o = n;
+                            continue 'term;
+                        }
+                        return Some(Term { node: len_node(sv), k, root: Some(v) });
+                    }
+                    _ => return Some(opaque),
+                }
+                if k.abs() > MAX_K {
+                    return None;
+                }
+            }
+            return None;
+        }
     }
 
     /// The length term of the slice `p` points to (`p` itself a slice reference).
@@ -186,7 +242,8 @@ impl Cx<'_> {
         let mut g = Graph::default();
         for t in 1..self.b.blocks.len() {
             if let Some((cond, pol)) = edge_cond(self.b, &self.preds, t) {
-                self.cond_facts(&mut g, cond, pol, Region { block: t as u32, after: None }, DEPTH);
+                let at = Region { block: t as u32, after: None };
+                self.cond_facts(&mut g, cond, pol, at, Source::Branch { block: t as u32 }, NOT_DEPTH);
             }
         }
         for i in 0..self.b.insts.len() as u32 {
@@ -203,10 +260,14 @@ impl Cx<'_> {
             for (k, &a) in args[1..].iter().enumerate().take(64) {
                 if mask & (1u64 << k) != 0 {
                     let at = Region { block: self.block_of[i as usize], after: Some(i) };
-                    self.cond_facts(&mut g, a, true, at, DEPTH);
+                    let src = Source::Assert { call: i, arg: k as u32 };
+                    self.cond_facts(&mut g, a, true, at, src, NOT_DEPTH);
                 }
             }
         }
+        // Stable: the facts of one node stay in the order they were found, which is the order a
+        // query tries them in.
+        g.facts.sort_by_key(|f| f.from);
         g
     }
 
@@ -220,14 +281,14 @@ impl Cx<'_> {
         })
     }
 
-    /// The facts of condition `c` being `pol`.
-    fn cond_facts(&self, g: &mut Graph, c: Operand, pol: bool, at: Region, depth: u32) {
+    /// The facts of condition `c` being `pol`, read at `src`.
+    fn cond_facts(&self, g: &mut Graph, c: Operand, pol: bool, at: Region, src: Source, depth: u32) {
         let Operand::Value(v) = c else { return };
         let Some(d) = self.def(v) else { return };
         let (op, args) = (self.b.insts.op[d as usize], self.b.args(d));
         if op == Op::Not {
             if let (&[x], 1..) = (args, depth) {
-                self.cond_facts(g, x, !pol, at, depth - 1);
+                self.cond_facts(g, x, !pol, at, src, depth - 1);
             }
             return;
         }
@@ -241,17 +302,19 @@ impl Cx<'_> {
             (Op::Gt, false) | (Op::Le, true) => Some((y, x, false)),
             _ => None,
         };
+        let mut le =
+            |a: Operand, b: Operand, w: i128, eq: Option<u32>| self.add_le(g, at, src, (a, b, w), eq);
         if let Some((lo, hi, lt)) = strict
             && let Some((n, c)) = self.sat_bound(hi)
-            && let (Some(tlo), Some(tn)) = (self.term(lo).and_then(|t| t.plus(c)), self.term(n))
         {
             if lt {
-                self.add_term_le(g, tlo, tn, -1, at, None);
+                // lo + c < n
+                le(lo, n, -c - 1, None);
             } else {
-                self.add_term_le(g, tn, tlo, 0, at, None);
+                // n <= lo + c
+                le(n, lo, c, None);
             }
         }
-        let mut le = |a: Operand, b: Operand, w: i128, eq: Option<u32>| self.add_le(g, a, b, w, at, eq);
         match (op, pol) {
             // x < y
             (Op::Lt, true) | (Op::Ge, false) => le(x, y, -1, None),
@@ -282,20 +345,19 @@ impl Cx<'_> {
         }
     }
 
-    /// Records `a <= b + w`.
-    fn add_le(&self, g: &mut Graph, a: Operand, b: Operand, w: i128, at: Region, eq: Option<u32>) {
+    /// Records `a <= b + w` (the triple `le`), read at `src` and valid in `at`.
+    fn add_le(&self, g: &mut Graph, at: Region, src: Source, le: (Operand, Operand, i128), eq: Option<u32>) {
+        let (a, b, w) = le;
         let (Some(ta), Some(tb)) = (self.term(a), self.term(b)) else { return };
-        self.add_term_le(g, ta, tb, w, at, eq);
-    }
-
-    /// Records `ta <= tb + w`.
-    fn add_term_le(&self, g: &mut Graph, ta: Term, tb: Term, w: i128, at: Region, eq: Option<u32>) {
         if ta.node == tb.node {
             return;
         }
+        let (Some((_, ka)), Some((_, kb))) = (self.written(a), self.written(b)) else { return };
         // ta.node + ta.k <= tb.node + tb.k + w
-        let Some(w) = tb.k.checked_add(w).and_then(|s| s.checked_sub(ta.k)) else { return };
-        g.adj.entry(ta.node).or_default().push(Fact { to: tb.node, w, at, eq });
+        let Some(folded) = tb.k.checked_add(w).and_then(|s| s.checked_sub(ta.k)) else { return };
+        // as written: a's node + ka <= b's node + kb + w
+        let wop = kb + w - ka;
+        g.facts.push(Fact { from: ta.node, to: tb.node, w: folded, at, eq, src, a, b, wop });
     }
 
     /// The bit set of `f`'s parameters that are true whenever `f` returns.
@@ -316,8 +378,9 @@ impl Cx<'_> {
         }
     }
 
-    /// The `LenEq` or `Offset` proof that `idx < n` holds right before instruction `at`.
-    pub(super) fn prove_lt(&self, at: u32, idx: Term, n: Term) -> Option<Proof> {
+    /// The `LenEq` or `Offset` proof that `idx < n` holds right before instruction `at`. With
+    /// `path`, the facts used are appended to it in order (indices for [`Cx::fact_edges`]).
+    pub(super) fn prove_lt(&self, at: u32, idx: Term, n: Term, path: Option<&mut Vec<u32>>) -> Option<Proof> {
         let bound = n.k.checked_sub(idx.k)?.checked_sub(1)?;
         let offset = Proof::Offset { base: idx.root.map(|v| v.0), k: idx.k };
         if idx.node == n.node {
@@ -325,13 +388,19 @@ impl Cx<'_> {
         }
         let g = self.graph();
         let block = self.block_of[at as usize];
-        let mut dist: FxHashMap<u32, (i128, Option<u32>)> = FxHashMap::default();
-        dist.insert(idx.node, (0, None));
+        const START: u32 = u32::MAX;
+        // Per node: its best distance so far, whether an equality was used, and the step that
+        // reached it. A step is never rewritten, so its parents spell out one walk of exactly
+        // the distance it was entered with, whatever improves later.
+        let mut taken: Vec<Step> = Vec::new();
+        let mut dist: FxHashMap<u32, (i128, Option<u32>, u32)> = FxHashMap::default();
+        dist.insert(idx.node, (0, None, START));
         let mut work = VecDeque::from([idx.node]);
         let mut steps = 0u32;
         while let Some(u) = work.pop_front() {
-            let Some(&(du, eq_u)) = dist.get(&u) else { continue };
-            for f in g.adj.get(&u).map_or(&[][..], |v| &v[..]) {
+            let Some(&(du, eq_u, step_u)) = dist.get(&u) else { continue };
+            for fi in g.from(u) {
+                let f = &g.facts[fi];
                 steps += 1;
                 if steps > BOUNDS_STEP_LIMIT {
                     return None;
@@ -342,13 +411,24 @@ impl Cx<'_> {
                 let Some(d) = du.checked_add(f.w) else { continue };
                 let eq = eq_u.or(f.eq);
                 if f.to == n.node && d <= bound {
+                    if let Some(path) = path {
+                        let from = path.len();
+                        path.push(fi as u32);
+                        let mut s = step_u;
+                        while let Some(step) = taken.get(s as usize) {
+                            path.push(step.fact);
+                            s = step.parent;
+                        }
+                        path[from..].reverse();
+                    }
                     return Some(match eq {
                         Some(cmp) => Proof::LenEq { cmp },
                         None => offset,
                     });
                 }
-                if dist.get(&f.to).is_none_or(|&(old, _)| d < old) {
-                    dist.insert(f.to, (d, eq));
+                if dist.get(&f.to).is_none_or(|&(old, _, _)| d < old) {
+                    dist.insert(f.to, (d, eq, taken.len() as u32));
+                    taken.push(Step { parent: step_u, fact: fi as u32 });
                     work.push_back(f.to);
                 }
             }
@@ -358,7 +438,34 @@ impl Cx<'_> {
 
     /// [`Cx::prove_lt`] for `idx <= n`.
     pub(super) fn prove_le(&self, at: u32, idx: Term, n: Term) -> Option<Proof> {
-        self.prove_lt(at, idx, Term { k: n.k.checked_add(1)?, ..n })
+        self.prove_lt(at, idx, Term { k: n.k.checked_add(1)?, ..n }, None)
+    }
+
+    /// The folding steps of operand `o`, from the operand as written down to its term's node.
+    pub(super) fn down(&self, o: Operand, out: &mut Vec<Edge>) {
+        let _ = self.fold(o, &mut |e| out.push(e));
+    }
+
+    /// The folding steps of operand `o` backwards, from its term's node up to the operand as
+    /// written. Every step is an equality, so it holds in this direction too.
+    pub(super) fn up(&self, o: Operand, out: &mut Vec<Edge>) {
+        let from = out.len();
+        self.down(o, out);
+        out[from..].reverse();
+        for e in &mut out[from..] {
+            *e = Edge { from: e.to, to: e.from, w: -e.w, src: e.src };
+        }
+    }
+
+    /// The edges of fact `fi` between its two term nodes: up to its left operand, the fact as
+    /// read at its source, down from its right operand.
+    pub(super) fn fact_edges(&self, fi: u32, out: &mut Vec<Edge>) -> Option<()> {
+        let f = self.graph().facts.get(fi as usize)?;
+        self.up(f.a, out);
+        let ((from, _), (to, _)) = (self.written(f.a)?, self.written(f.b)?);
+        out.push(Edge { from, to, w: f.wop, src: f.src });
+        self.down(f.b, out);
+        Some(())
     }
 }
 
