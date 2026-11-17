@@ -1,6 +1,9 @@
-// The kernels of bytesearch_v3.stv as `needs(avx2)` arms of dispatch fns whose `_` arms are the
-// 128-bit kernels of bytesearch.stv: built for every target, the 256-bit arms run where the CPU
-// has AVX2. Results do not depend on the lane count, so every arm prints the same.
+// The kernels of bytesearch_v3.stv, and the same with 512-bit vectors, as the `needs(avx2)` and
+// `needs(v4)` arms of dispatch fns whose `_` arms are the 128-bit kernels of bytesearch.stv: one
+// x86-64 binary carries all three and runs the widest the CPU (less `STAVE_CPU`) allows. The
+// `needs(sve)` arms run the 128-bit kernels too (the AArch64 backend emits the same code for
+// them): they give an AArch64 binary an arm to pick at run time. Results do not depend on the
+// lane count, so every arm prints the same.
 import base;
 import diff;
 
@@ -49,11 +52,83 @@ fn count_v3(xs: &[u8], b: u8) -> usize needs(avx2) {
     return c;
 }
 
-dispatch fn find_first(xs: &[u8], b: u8) -> usize { avx2 => find_first_v3, _ => base.find_first, }
+fn find_first_v4(xs: &[u8], b: u8) -> usize needs(v4) {
+    let key = u8x64.splat(b);
+    let n = xs.len();
+    let mut i: usize = 0;
+    while i + 64 <= n {
+        let bits = (u8x64.load(xs, i) == key).to_bits();
+        if bits != 0 { return i + (bits.ctz() as usize); }
+        i = i + 64;
+    }
+    if i < n {
+        let m = mask8x64.first_n(n - i);
+        let bits = ((u8x64.load_masked(xs, i, m) == key) & m).to_bits();
+        if bits != 0 { return i + (bits.ctz() as usize); }
+    }
+    return n;
+}
 
-dispatch fn find_last(xs: &[u8], b: u8) -> usize { avx2 => find_last_v3, _ => base.find_last, }
+fn find_last_v4(xs: &[u8], b: u8) -> usize needs(v4) {
+    let key = u8x64.splat(b);
+    let n = xs.len();
+    let mut j = n;
+    while j >= 64 {
+        let bits = (u8x64.load(xs, j - 64) == key).to_bits();
+        if bits != 0 { return j - 1 - (bits.clz() as usize); }
+        j = j - 64;
+    }
+    if j > 0 {
+        let m = mask8x64.first_n(j);
+        let bits = ((u8x64.load_masked(xs, 0, m) == key) & m).to_bits();
+        if bits != 0 { return 63 - (bits.clz() as usize); }
+    }
+    return n;
+}
 
-dispatch fn count(xs: &[u8], b: u8) -> usize { avx2 => count_v3, _ => base.count, }
+fn count_v4(xs: &[u8], b: u8) -> usize needs(v4) {
+    let key = u8x64.splat(b);
+    let mut c: usize = 0;
+    for v: u8x64 in xs {
+        c = c + ((v == key).to_bits().popcount() as usize);
+    } tail scalar (x) {
+        if x == b { c = c + 1; }
+    }
+    return c;
+}
+
+fn find_first_sve(xs: &[u8], b: u8) -> usize needs(sve) {
+    return base.find_first(xs, b);
+}
+
+fn find_last_sve(xs: &[u8], b: u8) -> usize needs(sve) {
+    return base.find_last(xs, b);
+}
+
+fn count_sve(xs: &[u8], b: u8) -> usize needs(sve) {
+    return base.count(xs, b);
+}
+
+dispatch fn find_first(xs: &[u8], b: u8) -> usize {
+    v4 => find_first_v4,
+    avx2 => find_first_v3,
+    sve => find_first_sve,
+    _ => base.find_first,
+}
+
+dispatch fn find_last(xs: &[u8], b: u8) -> usize {
+    v4 => find_last_v4,
+    avx2 => find_last_v3,
+    sve => find_last_sve,
+    _ => base.find_last,
+}
+
+dispatch fn count(xs: &[u8], b: u8) -> usize {
+    v4 => count_v4,
+    avx2 => count_v3,
+    sve => count_sve,
+    _ => base.count,
+}
 
 fn main() -> i32 {
     let mut c = diff.open();
