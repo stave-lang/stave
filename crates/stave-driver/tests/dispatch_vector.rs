@@ -56,7 +56,8 @@ fn callees(m: &Module, path: &str) -> Option<Vec<String>> {
     calls_of(m, m.funcs.iter().find(|f| f.path == path)?)
 }
 
-/// The paths of the fns `f`'s body calls directly (`None`: no body).
+/// The paths of the fns `f`'s body calls directly, the dispatch trace calls left out (`None`:
+/// no body).
 fn calls_of(m: &Module, f: &Func) -> Option<Vec<String>> {
     let b = f.body.as_ref()?;
     let mut out = Vec::new();
@@ -64,6 +65,7 @@ fn calls_of(m: &Module, f: &Func) -> Option<Vec<String>> {
         if *op == Op::Call
             && let Some(Operand::Func(g)) = b.args(i as u32).first()
             && let Some(g) = m.func(*g)
+            && g.path != "runtime.cpu.trace"
         {
             out.push(g.path.clone());
         }
