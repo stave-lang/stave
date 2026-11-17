@@ -55,7 +55,7 @@ pub struct Override {
 }
 
 /// The only conflicts `contracts/grammar.ebnf` may have (listed in the grammar header).
-pub const OVERRIDES: [Override; 3] = [
+pub const OVERRIDES: [Override; 4] = [
     Override {
         rule: "Stmt",
         token: "unsafe",
@@ -66,6 +66,11 @@ pub const OVERRIDES: [Override; 3] = [
         rule: "TypeBase",
         token: "needs",
         why: "D5: `needs` directly after a fn type binds to that (innermost) fn type",
+    },
+    Override {
+        rule: "TypeBase",
+        token: "without",
+        why: "D5: `without` directly after a fn type binds to that (innermost) fn type",
     },
 ];
 

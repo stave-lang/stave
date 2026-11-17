@@ -6,7 +6,7 @@
 //!    file whose depth exceeds [`MAX_DEPTH`] gets one E0005 at the first opener reaching depth
 //!    `MAX_DEPTH + 1`. Either way the file has no items.
 //! 2. Item cut: a token starts an item iff it is at bracket depth 0, is an item keyword
-//!    (`import pub test unsafe fn struct enum view trait impl const static dispatch extern type
+//!    (`import pub test unsafe rec fn struct enum view trait impl const static dispatch extern type
 //!    allocator kernel`), and follows `;`, `}`, or the start of the file. The tokens before the first item
 //!    start are a [`ItemKind::PreItem`] (always dropped, E0004). An `import` item after a
 //!    non-import item is a [`ItemKind::LateImport`] (dropped, E0004 at `import`).
@@ -49,11 +49,12 @@ pub struct ItemTable {
 }
 
 fn is_item_keyword(kind: u8) -> bool {
-    const KW: [Term; 17] = [
+    const KW: [Term; 18] = [
         Term::KwImport,
         Term::KwPub,
         Term::KwTest,
         Term::KwUnsafe,
+        Term::KwRec,
         Term::KwFn,
         Term::KwStruct,
         Term::KwEnum,

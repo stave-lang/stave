@@ -1,0 +1,28 @@
+//~ PARSE-ONLY
+// Misplaced `rec` and `without(..)`. Each broken item reports its first syntax error.
+
+// `rec` only directly before the `fn` of a fn item or method
+rec rec fn twice() {} //~ ERROR E0004
+pub rec unsafe("x") fn order() {} //~ ERROR E0004
+rec test fn order_test() {} //~ ERROR E0004
+rec dispatch fn d(x: u32) -> u32 { _ => f, } //~ ERROR E0004
+rec kernel fn k(xs: &mut [f32]) {} //~ ERROR E0004
+extern "C" rec fn ext(a: i32) -> i32 { return a; } //~ ERROR E0004
+trait T { rec fn m(&self); } //~ ERROR E0004
+trait U { fn m(&self) without(alloc); } //~ ERROR E0004
+
+// a closure literal takes no `rec`: write the recursive part as a `rec fn` item
+fn closure() {
+    let f = rec fn(x: u32) -> u32 { return x; }; //~ ERROR E0004
+}
+
+// `without(..)`: after `needs(..)`, before `requires`, at least one name in parentheses
+fn empty() without() {} //~ ERROR E0004
+fn bare() without alloc {} //~ ERROR E0004
+fn late() without(alloc) needs(avx2) {} //~ ERROR E0004
+fn after_requires(n: u32) requires(n > 0) without(alloc) {} //~ ERROR E0004
+fn twice_without() without(alloc) without(trap) {} //~ ERROR E0004
+fn dotted() without(std.alloc) {} //~ ERROR E0004
+fn closure_without() {
+    let f = fn(x: u32) -> u32 without(trap) { return x; }; //~ ERROR E0004
+}

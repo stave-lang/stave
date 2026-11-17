@@ -1,0 +1,58 @@
+//~ PARSE-ONLY
+// `rec fn` marks a fn that may be part of a call cycle: on fn items, methods, test fns, and after
+// `pub` and `unsafe("..")`. `without(..)` follows `needs(..)` and precedes `requires`/`ensures`;
+// fn types carry it after their `needs(..)`. The effect names: alloc trap recursive lock unsafe
+// io block.
+rec fn walk(n: u32) -> u32 {
+    return if n == 0 then 0 else walk(n - 1) + 1;
+}
+
+pub rec fn even(n: u32) -> bool {
+    return if n == 0 then true else odd(n - 1);
+}
+
+pub unsafe("p is valid for reads") rec fn odd_at(p: *const u32) -> bool {
+    return odd(unsafe("caller obligation") *p);
+}
+
+rec fn odd(n: u32) -> bool {
+    return if n == 0 then false else even(n - 1);
+}
+
+test rec fn walks() {
+    let n = walk(3);
+}
+
+fn hot(xs: &[u32]) -> u32 without(alloc, trap, lock) {
+    return 0;
+}
+
+fn all(xs: &[u32]) -> u32 needs(avx2) without(alloc, trap, recursive, lock, unsafe, io, block) requires(xs.len() > 0) {
+    return xs[0];
+}
+
+rec fn sum(xs: &[u32], i: usize) -> u32
+    without(alloc)
+    requires(i <= xs.len())
+    ensures(result >= 0) {
+    return if i == xs.len() then 0 else xs[i] + sum(xs, i + 1);
+}
+
+fn no_ret() without(io) {}
+
+// a fn type carries the deny clause: here the parameter's type, not `apply`
+fn apply(f: fn(u32) -> u32 without(trap), x: u32) -> u32 {
+    return f(x);
+}
+
+fn both(f: fn(u32) needs(avx2) without(alloc, lock)) {}
+
+struct S { n: u32 }
+
+impl S {
+    pub rec fn depth(&self, k: u32) -> u32 without(alloc) {
+        return if k == 0 then self.n else self.depth(k - 1);
+    }
+
+    unsafe("never called") rec fn raw(&self) {}
+}

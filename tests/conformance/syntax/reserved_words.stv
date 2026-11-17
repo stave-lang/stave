@@ -1,0 +1,12 @@
+//~ PARSE-ONLY
+// `rec`, `without`, and the reserved words `invariant decreases ghost pure spec forall exists`
+// are keywords: never a name.
+fn rec() {} //~ ERROR E0004
+fn f1() { let without = 1; } //~ ERROR E0004
+fn f2() { let invariant = 1; } //~ ERROR E0004
+fn f3(decreases: u32) {} //~ ERROR E0004
+struct S { ghost: u32 } //~ ERROR E0004
+fn f4() { let x = pure(1); } //~ ERROR E0004
+fn f5() -> spec {} //~ ERROR E0004
+fn f6() { for forall in 0..4 {} } //~ ERROR E0004
+enum E { A, exists } //~ ERROR E0004

@@ -4,7 +4,7 @@ mod common;
 
 use common::{F, codes, one, one_at, repo};
 use stave_diag::{SourceFiles, emit_json};
-use stave_syntax::{ItemKind, NodeKind, Term, items, lex, parse_file};
+use stave_syntax::{ItemKind, NodeKind, Term, items, lex, parse_file, token_text};
 
 fn ok(src: &str) {
     let pf = parse_file(src.as_bytes(), F);
@@ -197,6 +197,56 @@ fn e0004_expected_sets_in_terminal_order() {
     assert_eq!(one_at("fn f() { let x = @; }"), ("E0018", "@".into()));
     // fn types have no `from`
     assert_eq!(one_at("struct S { g: fn(&T) -> &T from x }").0, "E0004");
+}
+
+/// The parent kind of every `Without` node of item 0, and the effect names it lists.
+fn withouts(src: &str) -> Vec<(NodeKind, Vec<String>)> {
+    let pf = parse_file(src.as_bytes(), F);
+    assert!(pf.diagnostics.is_empty(), "{src}\n{:#?}", pf.diagnostics);
+    let ast = pf.item_ast(0);
+    let parents = ast.parents();
+    let text = |n: u32| {
+        let a = ast.get(n).unwrap().a as usize;
+        String::from_utf8_lossy(token_text(src.as_bytes(), &pf.tokens, a)).into_owned()
+    };
+    (0..ast.len() as u32)
+        .filter(|&n| ast.kind(n) == Some(NodeKind::Without))
+        .map(|n| {
+            let effects =
+                ast.children(n).into_iter().filter(|&c| ast.kind(c) == Some(NodeKind::Effect)).map(text);
+            (ast.kind(parents[n as usize]).unwrap(), effects.collect())
+        })
+        .collect()
+}
+
+#[test]
+fn rec_and_without_in_the_tree() {
+    let src = "rec fn f(n: u32) -> u32 without(alloc, unsafe) { return n; }";
+    let pf = parse_file(src.as_bytes(), F);
+    let ast = pf.item_ast(0);
+    let f = (0..ast.len() as u32).find(|&n| ast.kind(n) == Some(NodeKind::FnDecl)).unwrap();
+    assert_eq!(pf.tokens[ast.get(f).unwrap().a as usize].kind, Term::KwRec as u8, "FnDecl starts at `rec`");
+    assert_eq!(withouts(src), vec![(NodeKind::FnDecl, vec!["alloc".to_string(), "unsafe".to_string()])]);
+    // D5: `without` directly after a fn type belongs to that fn type
+    let w = |e: &str| vec![e.to_string()];
+    assert_eq!(withouts("fn f() -> fn() without(io) { }"), vec![(NodeKind::TypeBase, w("io"))]);
+    assert_eq!(withouts("fn f() -> (fn()) without(io) { }"), vec![(NodeKind::FnDecl, w("io"))]);
+    assert_eq!(
+        withouts("fn f(g: fn(u8) -> u8 needs(avx2) without(trap)) -> u8 needs(avx2) without(lock) { }"),
+        vec![(NodeKind::TypeBase, w("trap")), (NodeKind::FnDecl, w("lock"))]
+    );
+    // the parser takes any name; the closed effect set is checked after parsing
+    assert_eq!(withouts("fn f() without(frobnicate) { }"), vec![(NodeKind::FnDecl, w("frobnicate"))]);
+    // `rec` starts an item
+    let l = lex(b"fn a() { } rec fn b() { }", F);
+    assert_eq!(items(&l.tokens, F).unwrap().items.len(), 2);
+    ok(
+        "test rec fn t() { }\nimpl S { pub unsafe(\"x\") rec fn m(&self) { } }\npub unsafe(\"x\") rec fn u() { }",
+    );
+    // the reserved words are keywords, never names
+    for w in ["rec", "without", "invariant", "decreases", "ghost", "pure", "spec", "forall", "exists"] {
+        assert_eq!(one_at(&format!("fn f() {{ let {w} = 1; }}")), ("E0004", w.into()), "{w}");
+    }
 }
 
 #[test]

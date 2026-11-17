@@ -183,6 +183,11 @@ impl Collector<'_> {
         &self.file.parsed.tokens
     }
 
+    /// The name token of the `FnDecl` whose first token is `a`: `rec`? `fn` Ident.
+    fn fn_decl_name(&self, a: u32) -> u32 {
+        if is(self.toks(), a as usize, Term::KwRec) { a + 2 } else { a + 1 }
+    }
+
     /// The first identifier at or after token `from` within the next few tokens (decl names
     /// follow their keyword, possibly after `view`/`unsafe(..)` prefixes).
     fn name_after(&self, from: u32, kw: Term) -> u32 {
@@ -324,7 +329,14 @@ impl Collector<'_> {
                 Some(NodeKind::Unsafe) => unsafe_flag = DeclFlags::UNSAFE,
                 Some(NodeKind::FnDecl) => {
                     let t = if test { DeclFlags::TEST } else { 0 };
-                    let d = self.push(DeclKind::Fn, a + 1, c, u32::MAX, pub_flag | unsafe_flag | t, 0);
+                    let d = self.push(
+                        DeclKind::Fn,
+                        self.fn_decl_name(a),
+                        c,
+                        u32::MAX,
+                        pub_flag | unsafe_flag | t,
+                        0,
+                    );
                     self.main(d);
                 }
                 Some(NodeKind::KernelDecl) => {
@@ -436,7 +448,7 @@ impl Collector<'_> {
                         fl |= DeclFlags::PUB;
                     }
                     let a = self.a(c);
-                    methods.push(self.push(DeclKind::Method, a + 1, c, d, fl, k));
+                    methods.push(self.push(DeclKind::Method, self.fn_decl_name(a), c, d, fl, k));
                     k += 1;
                 }
                 _ => prev_unsafe = None,
@@ -511,7 +523,8 @@ pub(crate) fn collect_file(file: &File, module: ModuleId, module_path: &str, str
                         Some(NodeKind::ItemBody) => c.item_body(ch, pub_flag, false),
                         Some(NodeKind::FnDecl) if test => {
                             let fa = c.a(ch);
-                            let d = c.push(DeclKind::Fn, fa + 1, ch, u32::MAX, DeclFlags::TEST, 0);
+                            let d =
+                                c.push(DeclKind::Fn, c.fn_decl_name(fa), ch, u32::MAX, DeclFlags::TEST, 0);
                             c.main(d);
                         }
                         _ => {}

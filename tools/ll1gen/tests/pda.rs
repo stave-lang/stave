@@ -186,13 +186,14 @@ fn generated_tables_equal_a_fresh_build() {
         assert_eq!(Term::from_id(i as u16), Some(*x));
     }
     assert_eq!(Term::from_id(NTERM as u16), None);
-    assert_eq!(lt::NOVERRIDE, 3);
+    assert_eq!(lt::NOVERRIDE, 4);
     let d2 = lt::OVERRIDE_TYPE_BASE_LT;
     assert_eq!(lt::NT_ORIGIN[lt::OVERRIDE_NT[d2] as usize], NodeKind::TypeBase.nt());
     assert_eq!(lt::OVERRIDE_ORIGIN[d2], NodeKind::TypeBase.nt());
     assert_eq!(lt::OVERRIDE_TERM[d2], Term::Lt.id());
     assert_eq!(lt::OVERRIDE_ORIGIN[lt::OVERRIDE_STMT_KW_UNSAFE], NodeKind::Stmt.nt());
     assert_eq!(lt::OVERRIDE_TERM[lt::OVERRIDE_TYPE_BASE_KW_NEEDS], Term::KwNeeds.id());
+    assert_eq!(lt::OVERRIDE_TERM[lt::OVERRIDE_TYPE_BASE_KW_WITHOUT], Term::KwWithout.id());
     for ((&nt, &tm), &p) in lt::OVERRIDE_NT.iter().zip(&lt::OVERRIDE_TERM).zip(&lt::OVERRIDE_PROD) {
         assert_eq!(lt::action(nt, tm), p as i16);
     }

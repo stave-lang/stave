@@ -4,10 +4,11 @@
    Notation: X? optional, X* zero or more, X+ one or more, "t" terminal, A | B alternatives.
 
    LL(1) claim: every alternative is chosen by the next token, never by backtracking or a
-   symbol-table lookup. The generated table has exactly three conflicts, each resolved by a fixed
-   greedy choice (the first listed alternative): D2, D5, and statement-start `unsafe`. D3 and unary
-   `&&` are not table conflicts but PDA split actions (below). D4 is a name-resolution rule, not a
-   parser rule. Each rule has a conformance test (tests/conformance/syntax/ll1_D*.stv):
+   symbol-table lookup. The generated table has exactly four conflicts, each resolved by a fixed
+   greedy choice (the first listed alternative): D2, D5 (`needs` and `without`), and
+   statement-start `unsafe`. D3 and unary `&&` are not table conflicts but PDA split actions
+   (below). D4 is a name-resolution rule, not a parser rule. Each rule has a conformance test
+   (tests/conformance/syntax/ll1_D*.stv):
 
    D2 (cast type): after `as`/`as%`/`as|`/`as?`/`as~`, a `<` following the type name is always
       TypeArgs. `x as usize < y` is a parse error (E0011). Write `(x as usize) < y`.
@@ -15,8 +16,9 @@
       and its first `>` closes the list (a parser action: expected ">" consumes one ">" of the token).
    D4 (dotted chains): `a.b.c` is parsed as Primary(Ident) plus postfix `.Ident` steps. Name
       resolution, not the parser, decides whether a step is a module, type, variant, or field.
-   D5 (fn-type needs): `needs(..)` directly after a fn type binds to that (innermost) fn type:
-      `fn f() -> fn() needs(avx2) { }` gives the RETURNED fn type the feature. For f itself write
+   D5 (fn-type needs, without): `needs(..)` and `without(..)` directly after a fn type bind to that
+      (innermost) fn type: `fn f() -> fn() needs(avx2) { }` gives the RETURNED fn type the
+      feature, `fn f() -> fn() without(alloc) { }` the deny clause. For f itself write
       `fn f() -> (fn()) needs(avx2) { }`.
    Statement `unsafe`: at statement start `unsafe` always opens `Unsafe Block` (see ExprStmt).
 
@@ -66,7 +68,9 @@ Keywords     = "fn" "let" "mut" "const" "struct" "enum" "trait" "impl" "for" "in
                "if" "then" "else" "match" "return" "break" "continue" "pub" "import" "as" "from"
                "needs" "dispatch" "unsafe" "extern" "self" "Self" "true" "false" "tail" "masked"
                "scalar" "exact" "align" "copy" "type" "view" "scope" "spawn" "strict" "emulate"
-               "test" "allocator" "kernel" "static" "requires" "ensures" ;
+               "test" "allocator" "kernel" "static" "requires" "ensures" "rec" "without"
+               "invariant" "decreases" "ghost" "pure" "spec" "forall" "exists" ;
+               (* invariant .. exists: reserved only, see rule Reserved *)
 
 (* Operator tokens (maximal munch, then D3 splitting):
    +  -  *  /  %       trapping on scalar ints, IEEE on floats, E0604 on int vectors
@@ -86,7 +90,9 @@ KernelDecl   = "kernel" "fn" Ident "(" Params? ")" Block ;   (* GPU kernel, rule
 Unsafe       = "unsafe" "(" StrLit ")" ;              (* the stated obligation, mandatory:
                                                          unsafe fn = caller obligation; unsafe trait/impl = implementer obligation *)
 
-FnDecl       = "fn" Ident Generics? "(" Params? ")" RetClause? Needs? Requires* Ensures* Block ;
+FnDecl       = "rec"? "fn" Ident Generics? "(" Params? ")" RetClause? Needs? Without? Requires* Ensures* Block ;
+               (* `rec`: the fn may be part of a call cycle; trait signatures, closures, dispatch,
+                  kernel and extern fns take none *)
 Requires     = "requires" "(" Expr ")" ;               (* checked at entry, panic Contract at the caller *)
 Ensures      = "ensures" "(" Expr ")" ;                (* checked at each return; inside it the identifier `result` names the returned value (contextual, not a keyword) *)
 Params       = Param ("," Param)* ","? ;
@@ -99,6 +105,9 @@ From         = "from" Origin ("+" Origin)* ;          (* `+` joins origins. Miss
 Origin       = "copy"? (Ident | "self") ;             (* meaning: the origin table of LANG.md §3 *)
 Needs        = "needs" "(" Feature ("," Feature)* ")" ;
 Feature      = Ident ;                                (* closed set per arch: contracts/simd-ops.md §Features *)
+Without      = "without" "(" Effect ("," Effect)* ")" ;   (* deny clause: effects the fn and all it calls must not have *)
+Effect       = Ident | "unsafe" ;                     (* closed set: alloc trap recursive lock unsafe io block; the
+                                                         parser takes any Ident, name checking is semantic *)
 Generics     = "<" GenericParam ("," GenericParam)* ">" ;   (* bounds only inline: no `where` *)
 GenericParam = Ident (":" Bound)? | "const" Ident ":" Type ;
 Bound        = BoundItem ("+" BoundItem)* ;
@@ -139,7 +148,7 @@ Type         = "[" Type ( ";" Expr | "align" IntLit )? "]"   (* [T; N] / [T] / [
 TypeBase     = "&" "mut"? Type                         (* placement rules: LANG.md §3 *)
              | "*" ("const" | "mut") Type              (* raw pointer; deref is unsafe *)
              | "(" ( Type ( "," (Type ("," Type)* ","?)? )? )? ")"   (* () unit, (T) = T, (T,) 1-tuple *)
-             | "fn" "(" (Type ("," Type)*)? ")" ("->" Type)? Needs?   (* fn value; features are part of the type (D5). No `from`: a call borrows from all ref/view args *)
+             | "fn" "(" (Type ("," Type)*)? ")" ("->" Type)? Needs? Without?   (* fn value; features and deny clause are part of the type (D5). No `from`: a call borrows from all ref/view args *)
              | Ident ("." Ident)* GenericArgs?         (* f32x8, mask32x8, f32xn, vec<T, N> (generic only) *)
              | "Self" ;
 GenericArgs  = "<" GenericArg ("," GenericArg)* ">" ;   (* D3 *)
@@ -230,3 +239,8 @@ Pattern      = "_"
              | "(" (Pattern ("," (Pattern ("," Pattern)* ","?)?)?)? ")" ;
 FieldPat     = Ident (":" Pattern)? ;
 Literal      = "-"? (IntLit | FloatLit) | StrLit | CharLit | "true" | "false" ;
+
+(* ---------- reserved ---------- *)
+(* Keywords without a meaning: no rule reaches Reserved, so each is a syntax error wherever it
+   appears (a keyword is never an Ident). The rule only makes them terminals. *)
+Reserved     = "invariant" | "decreases" | "ghost" | "pure" | "spec" | "forall" | "exists" ;

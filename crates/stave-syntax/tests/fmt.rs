@@ -67,6 +67,20 @@ fn spacing_and_one_statement_per_line() {
 }
 
 #[test]
+fn rec_and_without() {
+    golden(
+        "rec  fn walk ( n : u32 ) -> u32 without ( alloc , unsafe ) { return n ; }",
+        "rec fn walk(n: u32) -> u32 without(alloc, unsafe) { return n; }\n",
+    );
+    golden(
+        "pub unsafe(\"x\")rec fn f(g:fn(u32)->u32 needs(avx2)without(trap))->fn()without(io,block){return h;}",
+        "pub unsafe(\"x\") rec fn f(g: fn(u32) -> u32 needs(avx2) without(trap)) -> fn() without(io, block) { return h; }\n",
+    );
+    fixed("test rec fn t() {}\n");
+    fixed("impl S {\n    pub rec fn f(&self) -> u32 without(recursive) requires(true) { return 0; }\n}\n");
+}
+
+#[test]
 fn blocks_on_one_line() {
     // kept: on one line in the source, at most one statement
     fixed("fn f(c: bool) -> i32 {\n    if c { return 1; }\n    return 0;\n}\n");

@@ -233,6 +233,7 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
         },
         b'd' => match s {
             b"dispatch" => KwDispatch,
+            b"decreases" => KwDecreases,
             _ => return None,
         },
         b'e' => match s {
@@ -242,6 +243,7 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
             b"exact" => KwExact,
             b"emulate" => KwEmulate,
             b"ensures" => KwEnsures,
+            b"exists" => KwExists,
             _ => return None,
         },
         b'f' => match s {
@@ -249,6 +251,11 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
             b"for" => KwFor,
             b"from" => KwFrom,
             b"false" => KwFalse,
+            b"forall" => KwForall,
+            _ => return None,
+        },
+        b'g' => match s {
+            b"ghost" => KwGhost,
             _ => return None,
         },
         b'i' => match s {
@@ -256,6 +263,7 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
             b"in" => KwIn,
             b"impl" => KwImpl,
             b"import" => KwImport,
+            b"invariant" => KwInvariant,
             _ => return None,
         },
         b'k' => match s {
@@ -279,11 +287,13 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
         },
         b'p' => match s {
             b"pub" => KwPub,
+            b"pure" => KwPure,
             _ => return None,
         },
         b'r' => match s {
             b"return" => KwReturn,
             b"requires" => KwRequires,
+            b"rec" => KwRec,
             _ => return None,
         },
         b's' => match s {
@@ -294,6 +304,7 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
             b"spawn" => KwSpawn,
             b"static" => KwStatic,
             b"strict" => KwStrict,
+            b"spec" => KwSpec,
             _ => return None,
         },
         b'S' => match s {
@@ -319,6 +330,7 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
         },
         b'w' => match s {
             b"while" => KwWhile,
+            b"without" => KwWithout,
             _ => return None,
         },
         _ => return None,
