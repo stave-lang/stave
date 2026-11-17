@@ -1425,7 +1425,7 @@ impl<'a> FnCx<'a> {
                     None => self.fail_at(Some(ctok), "no impl for a trait method call"),
                 }
             }
-            Some(Target::FnValue) => {
+            Some(Target::FnValue { .. }) => {
                 let fe = self.cur_value(cur, prim);
                 let ft = self.e_ty(&fe);
                 let Some(fv) = self.operand_of(fe) else { return E::Never };

@@ -2272,7 +2272,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             Some(Target::TraitMethod { method, self_ty, args: ga }) => {
                 self.direct_call(method, &ga, Some(self_ty), args, last, n, span)
             }
-            Some(Target::FnValue) => {
+            Some(Target::FnValue { .. }) => {
                 let fv = self.cur_value(cur);
                 let Some(fp) = self.place_of(fv, n) else { return V::Never };
                 let ft = fp.ty;

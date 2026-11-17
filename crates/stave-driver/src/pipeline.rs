@@ -452,6 +452,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     prof::part(".sigs", tc.timings.sigs);
     prof::part(".bodies", tc.timings.bodies);
     prof::part(".canon", tc.timings.canon);
+    prof::part(".call-graph", tc.timings.graph);
     prof::mark("typeck");
     let mut diagnostics = tc.all_diagnostics(&program);
     prof::mark("diag-order");

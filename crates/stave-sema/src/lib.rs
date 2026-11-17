@@ -24,7 +24,8 @@
 //!
 //! Dumps (stage-gates): [`dump_strings`], [`dump_names`], [`dump_types`].
 //!
-//! Type checking: [`check`] ([`typeck`]). Monomorphization and lowering to the checked IR:
+//! Type checking: [`check`] ([`typeck`]), which also builds the whole-program call graph
+//! ([`callgraph`]). Monomorphization and lowering to the checked IR:
 //! [`lower()`] ([`lower`], [`mono`]).
 //!
 //! For the type checker: [`Program::decl`] (kind, name, node, flags), [`Program::members`]
@@ -34,6 +35,7 @@
 //! method steps that need types).
 
 pub mod builtins;
+pub mod callgraph;
 pub mod closures;
 pub mod consteval;
 pub mod decls;

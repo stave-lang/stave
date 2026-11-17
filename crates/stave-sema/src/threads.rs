@@ -146,7 +146,7 @@ impl Ck<'_> {
 /// node is the argument's core. A fn item argument has its `FnItem` coercion on one of these
 /// nodes; a coercion deeper inside (an operand of `if`, `match`, or a call) does not make the
 /// argument a fn item.
-fn wrapper_chain(icx: &crate::itemcx::ItemCx<'_>, n: u32) -> Vec<u32> {
+pub(crate) fn wrapper_chain(icx: &crate::itemcx::ItemCx<'_>, n: u32) -> Vec<u32> {
     let mut cur = n;
     let mut out = vec![n];
     for _ in 0..1_000_000 {

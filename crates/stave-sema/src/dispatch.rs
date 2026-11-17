@@ -232,6 +232,33 @@ pub(crate) fn plan(prog: &Program, tc: &Typeck, icx: &ItemCx<'_>, d: DeclId) -> 
     None
 }
 
+/// The arm targets of dispatch `d` that the build target's arch owns (with the dispatch's own
+/// features), top-down, `_` last. Arms below one the target baseline covers are kept: which of
+/// them lowering prunes depends on the baseline, the arms that exist do not.
+pub(crate) fn arm_targets(prog: &Program, sigs: &Sigs, icx: &ItemCx<'_>, d: DeclId) -> Vec<DeclId> {
+    let Some(decl) = prog.decl(d) else { return Vec::new() };
+    if !decl.flags.has(DeclFlags::DISPATCH) || decl.node == u32::MAX {
+        return Vec::new();
+    }
+    let Some(own) = sigs.fn_sig(d).and_then(|s| FeatureSet::from_bits(s.features)) else {
+        return Vec::new();
+    };
+    let arch = prog.target.arch();
+    let mut out = Vec::new();
+    for arm in arms_of(icx, decl.node, &mut Vec::new()) {
+        if !own.union(arm.features.unwrap_or(FeatureSet::EMPTY)).is_owned_by(arch) {
+            continue;
+        }
+        if let Some(u) = icx.uses(arm.name).last()
+            && let Res::Decl(t) = u.res
+            && !out.contains(&t)
+        {
+            out.push(t);
+        }
+    }
+    out
+}
+
 /// The text of the fn type of `sig` with features `features`.
 fn fn_type_text(prog: &Program, tys: &mut TypeTable, sig: &FnSig, features: u64) -> String {
     let t =
