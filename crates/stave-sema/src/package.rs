@@ -549,10 +549,11 @@ fn display(root: &Path, p: &Path) -> String {
     let rel = p.strip_prefix(root).unwrap_or(p);
     let parts: Vec<String> = rel
         .components()
-        .filter(|c| !matches!(c, Component::CurDir))
+        .filter(|c| !matches!(c, Component::CurDir | Component::RootDir))
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
-    parts.join("/")
+    let lead = if rel.has_root() { "/" } else { "" };
+    format!("{lead}{}", parts.join("/"))
 }
 
 fn module_rel(rel_in_dir: &str) -> Vec<String> {
@@ -769,6 +770,15 @@ mod tests {
     fn issues(text: &str) -> Vec<(Option<&'static str>, String)> {
         let (_, is) = read_manifest(text.as_bytes());
         is.into_iter().filter(|i| i.case != Some("missing-name")).map(|i| (i.case, i.key())).collect()
+    }
+
+    #[test]
+    fn display_paths() {
+        let root = Path::new("/w/pkg");
+        assert_eq!(display(root, Path::new("/w/pkg/src/a.stv")), "src/a.stv");
+        assert_eq!(display(root, Path::new("/home/u/lib/b.stv")), "/home/u/lib/b.stv");
+        assert_eq!(display(Path::new("pkg"), Path::new("./x.stv")), "x.stv");
+        assert_eq!(display(Path::new("pkg"), Path::new("other/x.stv")), "other/x.stv");
     }
 
     #[test]

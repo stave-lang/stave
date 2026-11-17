@@ -763,6 +763,17 @@ fn assemble(
     module.intrinsics = all_intrs.clone();
     let mut funcs: Vec<stave_ir::Func> = Vec::with_capacity(nf as usize);
     let mut sites: Vec<SiteInfo> = Vec::new();
+    // Files of built-in packages are named `<package>/<path in package>` (`std/vec.stv`) in the
+    // site table, so a binary does not depend on where the library is installed.
+    let site_names: FxHashMap<u32, String> = prog
+        .files
+        .iter()
+        .filter_map(|f| {
+            let p = prog.packages.get(f.package.0 as usize)?;
+            (p.kind == crate::package::PackageKind::Builtin)
+                .then(|| (f.id.0, format!("{}/{}", p.name, f.rel_path)))
+        })
+        .collect();
     let mut outs = outs;
     for (rank, &j) in order.iter().enumerate() {
         let job = &jobs[j];
@@ -825,7 +836,11 @@ fn assemble(
                 let row = sites.len() as u32;
                 let (fp, line, col) =
                     match prog.source_map.locate(stave_diag::Span::new(stave_diag::FileId(file), off, 0)) {
-                        Ok(l) => (l.path.to_string(), l.line, l.col),
+                        Ok(l) => (
+                            site_names.get(&file).cloned().unwrap_or_else(|| l.path.to_string()),
+                            l.line,
+                            l.col,
+                        ),
                         Err(_) => (String::from("<unknown>"), 0, 0),
                     };
                 sites.push(SiteInfo { file: fp, line, col, func: path.clone() });
