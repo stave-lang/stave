@@ -1654,16 +1654,46 @@ fn bounds_cases() -> Vec<Case> {
     out
 }
 
+/// Twelve masks of `s` live at once (more than there are mask registers), folded, then each
+/// printed: a call, so every live mask goes through its home.
+fn mask_pressure(s: Shape) -> Case {
+    let ops = [VecOp::Lt, VecOp::MaskXor, VecOp::MaskAnd, VecOp::MaskOr, VecOp::MaskNot];
+    Case::new(&ops, s.bits(), inputs_cost(13, s.bits()) + 200, move |sp, b| {
+        let tag = format!("mask pressure {}", s.name());
+        let mt = sp.mt(s.lane.bits(), s.n);
+        let items: Vec<(Shape, Vec<u64>)> = (0..13).map(|k| (s, rnd(s, 200 + k))).collect();
+        let vs = inputs(sp, b, &items);
+        let ms: Vec<Value> = (0..12).map(|k| vcmp(sp, b, VecOp::Lt, s, vs[k], vs[k + 1])).collect();
+        let mut acc = ms[11];
+        for k in (0..11).rev() {
+            let op = [VecOp::MaskXor, VecOp::MaskAnd, VecOp::MaskOr][k % 3];
+            acc = b.op(Op::Vec(op), mt, &[acc.into(), ms[k].into()]);
+        }
+        show_mask(sp, b, &format!("{tag} fold"), acc, s);
+        for (k, m) in ms.iter().enumerate() {
+            show_mask(sp, b, &format!("{tag} {k}"), *m, s);
+        }
+        let n = b.op(Op::Vec(VecOp::MaskNot), mt, &[acc.into()]);
+        show_mask(sp, b, &format!("{tag} not"), n, s);
+    })
+}
+
 pub fn registers() -> Vec<Case> {
     let f = |l: Lane, n: u32| sh(l, n);
     let narrow = [f(Lane::F32, 4), f(Lane::F64, 2), f(Lane::I32, 4), f(Lane::U8, 16)];
     let wide = [f(Lane::F32, 8), f(Lane::F64, 4), f(Lane::I64, 4), f(Lane::I16, 16)];
+    let widest = [f(Lane::F32, 16), f(Lane::F64, 8), f(Lane::I64, 8), f(Lane::I16, 32), f(Lane::U8, 64)];
     let mut out = Vec::new();
-    for s in narrow.into_iter().chain(wide) {
+    for s in narrow.into_iter().chain(wide).chain(widest) {
         out.push(pressure(s));
         out.push(loop_pressure(s));
         out.push(param_reuse(s));
     }
+    for s in [f(Lane::I32, 4), f(Lane::F64, 4), f(Lane::F32, 16), f(Lane::U8, 64), f(Lane::I64, 8)] {
+        out.push(mask_pressure(s));
+    }
+    out.push(mixed_loop(f(Lane::F32, 16), f(Lane::I32, 16)));
+    out.push(mixed_loop(f(Lane::F32, 16), f(Lane::I16, 8)));
     out.push(pressure_mixed());
     for s in [f(Lane::F32, 4), f(Lane::I32, 4), f(Lane::F64, 4), f(Lane::I16, 16)] {
         for perm in [[1, 2, 0, 3], [1, 0, 3, 2], [3, 0, 1, 2], [0, 1, 2, 3]] {

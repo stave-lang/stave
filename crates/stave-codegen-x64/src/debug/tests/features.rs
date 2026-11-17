@@ -28,7 +28,7 @@ fn have(tool: &str) -> bool {
 }
 
 /// GNU objdump is installed (the checks parse its Intel-syntax output).
-fn have_objdump() -> bool {
+pub fn have_objdump() -> bool {
     static HAVE: OnceLock<bool> = OnceLock::new();
     *HAVE.get_or_init(|| {
         let h = Command::new("objdump")
@@ -52,6 +52,8 @@ pub struct Inst {
     pub target: Option<usize>,
     /// The symbol the linker resolves inside this instruction (a call target, a data address).
     pub sym: Option<String>,
+    /// EVEX-encoded: its first byte is `62`, which is no other instruction in 64-bit code.
+    pub evex: bool,
 }
 
 impl Inst {
@@ -59,8 +61,9 @@ impl Inst {
         format!("{:#x}: {} {}", self.off, self.mnem, self.ops)
     }
 
+    /// Writes or reads a register above its low 128 bits.
     pub fn ymm(&self) -> bool {
-        self.ops.contains("ymm")
+        self.ops.contains("ymm") || self.ops.contains("zmm")
     }
 }
 
@@ -87,7 +90,8 @@ pub fn disasm(code: &[u8]) -> Vec<Inst> {
         };
         let mut toks = body.split_whitespace();
         let mut mnem = toks.next().unwrap_or("");
-        while PREFIXES.contains(&mnem) {
+        // `{evex}` marks an EVEX instruction that also has a VEX encoding
+        while PREFIXES.contains(&mnem) || mnem == "{evex}" {
             mnem = toks.next().unwrap_or("");
         }
         let ops = toks.collect::<Vec<_>>().join(" ");
@@ -95,7 +99,8 @@ pub fn disasm(code: &[u8]) -> Vec<Inst> {
             .and_then(|c| c.split_whitespace().next())
             .and_then(|h| h.strip_prefix("0x"))
             .and_then(|h| usize::from_str_radix(h, 16).ok());
-        v.push(Inst { off, mnem: mnem.to_owned(), ops, target, sym: None });
+        let evex = code.get(off) == Some(&0x62);
+        v.push(Inst { off, mnem: mnem.to_owned(), ops, target, sym: None, evex });
     }
     v
 }
@@ -105,14 +110,72 @@ pub fn disasm(code: &[u8]) -> Vec<Inst> {
 enum Need {
     Baseline,
     Feat(Feature),
+    /// An EVEX or mask-register instruction: only in a function compiled for the whole AVX-512
+    /// set (K mode), and these features of it.
+    K(FeatureSet),
     /// Outside every feature set the backend compiles for.
     Never,
 }
 
-/// The feature of an instruction, from its text alone.
+/// The mask-register instructions (VEX-encoded).
+const KOPS: [&str; 10] =
+    ["kortest", "kshiftl", "kshiftr", "kandn", "kxnor", "kmov", "kand", "kxor", "knot", "kor"];
+
+/// The AVX-512 features of an EVEX instruction, from its text: the instructions on byte and
+/// word lanes are `avx512bw`, the float logic, the quadword multiply and the doubleword and
+/// quadword mask conversions `avx512dq`, the rest `avx512f`; without a `zmm` operand it is an
+/// `avx512vl` form.
+fn evex_need(i: &Inst) -> FeatureSet {
+    let m = i.mnem.strip_suffix(".s").unwrap_or(&i.mnem);
+    let dq = matches!(
+        m,
+        "vpmullq"
+            | "vpmovm2d"
+            | "vpmovm2q"
+            | "vpmovd2m"
+            | "vpmovq2m"
+            | "vandps"
+            | "vandpd"
+            | "vandnps"
+            | "vandnpd"
+            | "vorps"
+            | "vorpd"
+            | "vxorps"
+            | "vxorpd"
+    );
+    let bw = matches!(m, "vpmovb2m" | "vpmovw2m" | "vmovdqu8" | "vmovdqu16" | "vpmaddwd")
+        || (m.starts_with("vp") && (m.ends_with('b') || m.ends_with('w')));
+    let mut s = FeatureSet::of(if dq {
+        Feature::Avx512dq
+    } else if bw {
+        Feature::Avx512bw
+    } else {
+        Feature::Avx512f
+    });
+    if !i.ops.contains("zmm") {
+        s.insert(Feature::Avx512vl);
+    }
+    s
+}
+
+/// The feature of an instruction, from its text (and, for the encoding, its first byte).
 fn need(i: &Inst) -> Need {
     let m = i.mnem.as_str();
-    if i.ops.contains("zmm") || i.ops.contains("{k") || m == "(bad)" {
+    if m == "(bad)" {
+        return Need::Never;
+    }
+    if let Some(op) = KOPS.iter().find(|p| m.starts_with(**p)) {
+        return match &m[op.len()..] {
+            "w" => Need::K(FeatureSet::of(Feature::Avx512f)),
+            "b" => Need::K(FeatureSet::of(Feature::Avx512dq)),
+            "d" | "q" => Need::K(FeatureSet::of(Feature::Avx512bw)),
+            _ => Need::Never,
+        };
+    }
+    if i.evex {
+        return Need::K(evex_need(i));
+    }
+    if i.ops.contains("zmm") || i.ops.contains("{k") {
         return Need::Never;
     }
     if matches!(m, "pext" | "pdep" | "bzhi" | "mulx" | "rorx" | "sarx" | "shlx" | "shrx") {
@@ -247,9 +310,14 @@ pub fn functions(
     out
 }
 
+/// The features of K mode.
+const V4: [Feature; 5] =
+    [Feature::Avx512f, Feature::Avx512bw, Feature::Avx512vl, Feature::Avx512dq, Feature::Avx512cd];
+
 /// Fails when a function of `img` has an instruction outside its feature set (the module
 /// baseline `baseline` plus the function's own `needs`), or, in a function that adds `avx` to
-/// the baseline, a vector or scalar float instruction that is not VEX-encoded.
+/// the baseline, a vector or scalar float instruction that is not VEX-encoded. An EVEX or
+/// mask-register instruction is outside the set of every function but one in K mode.
 pub fn check_image(m: &Module, img: &ObjectImage, baseline: FeatureSet, what: &str) {
     if !have_objdump() {
         return;
@@ -265,6 +333,7 @@ pub fn check_image(m: &Module, img: &ObjectImage, baseline: FeatureSet, what: &s
             let ok = match need(i) {
                 Need::Baseline => true,
                 Need::Feat(f) => features.contains(f),
+                Need::K(s) => V4.iter().all(|f| features.contains(*f)) && s.is_subset(features),
                 Need::Never => false,
             };
             if !ok {
@@ -283,8 +352,15 @@ pub fn check_image(m: &Module, img: &ObjectImage, baseline: FeatureSet, what: &s
 /// The classifier on known instructions.
 #[test]
 fn classifier() {
-    let i =
-        |mnem: &str, ops: &str| Inst { off: 0, mnem: mnem.into(), ops: ops.into(), target: None, sym: None };
+    let inst = |mnem: &str, ops: &str, evex: bool| Inst {
+        off: 0,
+        mnem: mnem.into(),
+        ops: ops.into(),
+        target: None,
+        sym: None,
+        evex,
+    };
+    let i = |mnem: &str, ops: &str| inst(mnem, ops, false);
     use Feature::*;
     let cases = [
         ("addps", "xmm0,xmm1", Need::Baseline),
@@ -320,6 +396,34 @@ fn classifier() {
         ("tzcnt", "eax,ecx", Need::Never),
     ];
     for (m, o, want) in cases {
+        assert_eq!(need(&i(m, o)), want, "{m} {o}");
+    }
+    let k = |fs: &[Feature]| Need::K(FeatureSet::from_features(fs.iter().copied()));
+    let evex = [
+        ("vpaddd", "zmm0,zmm0,zmm1", k(&[Avx512f])),
+        ("vpaddd", "ymm0,ymm0,ymm1", k(&[Avx512f, Avx512vl])),
+        ("vpaddb", "zmm0,zmm0,zmm1", k(&[Avx512bw])),
+        ("vpcmpltub", "k1,xmm0,xmm1", k(&[Avx512bw, Avx512vl])),
+        ("vpmovm2d", "zmm0,k1", k(&[Avx512dq])),
+        ("vpmovb2m", "k1,ymm0", k(&[Avx512bw, Avx512vl])),
+        ("vxorps", "zmm0,zmm0,zmm1", k(&[Avx512dq])),
+        ("vmovdqu64", "ZMMWORD PTR [rax],zmm1", k(&[Avx512f])),
+        ("vmovdqu8", "zmm1{k1}{z},ZMMWORD PTR [rax]", k(&[Avx512bw])),
+        ("vpmullq", "xmm0,xmm0,xmm1", k(&[Avx512dq, Avx512vl])),
+        ("vextracti64x4", "ymm0,zmm1,0x1", k(&[Avx512f])),
+    ];
+    for (m, o, want) in evex {
+        assert_eq!(need(&inst(m, o, true)), want, "{m} {o}");
+    }
+    let masks = [
+        ("kmovw", "k1,eax", k(&[Avx512f])),
+        ("kmovb", "eax,k1", k(&[Avx512dq])),
+        ("kmovq", "k1,QWORD PTR [rbp-0x8]", k(&[Avx512bw])),
+        ("kandnq", "k1,k2,k3", k(&[Avx512bw])),
+        ("kortestb", "k1,k1", k(&[Avx512dq])),
+        ("kshiftrd", "k1,k2,0x3", k(&[Avx512bw])),
+    ];
+    for (m, o, want) in masks {
         assert_eq!(need(&i(m, o)), want, "{m} {o}");
     }
 }
@@ -454,13 +558,65 @@ fn recorded_features_match_the_disassembly() {
     add("paddd".into(), &|a| a.sse_bin(VBin::Paddd, x1, x2));
     add("pshufb".into(), &|a| a.sse_bin(VBin::Pshufb, x1, x2));
     add("popcnt".into(), &|a| a.popcnt(Size::Q, g, g));
-    assert!(want.len() > 600, "{} encodings", want.len());
+    // EVEX: every entry at every length it has
+    let kr = KReg::masked(1);
+    for &op in EOp::ALL {
+        let n = format!("{op:?}");
+        let has = |ps: &[&str]| ps.iter().any(|p| n.starts_with(p));
+        let imm = has(&["Rndscale", "Pternlog", "Cmpp", "Extract", "Insert"])
+            || (has(&["Pcmp"]) && !has(&["Pcmpeq", "Pcmpgt"]));
+        for vl in [EVL::L128, EVL::L256, EVL::L512] {
+            let halves = n.ends_with("64x4");
+            let quarters = n.ends_with("32x4");
+            if (vl == EVL::L128 && (halves || quarters || op == EOp::Broadcastsd))
+                || (vl == EVL::L256 && halves)
+            {
+                continue;
+            }
+            let e = Ev::new(op, vl, 1, 0, ERm::R(3));
+            let e = if imm { e.imm(1) } else { e };
+            add(format!("{op:?} {vl:?}"), &|a| a.evex(e));
+        }
+    }
+    for &op in EShiftI::ALL {
+        for vl in [EVL::L128, EVL::L256, EVL::L512] {
+            add(format!("{op:?} {vl:?}"), &|a| a.evex_shift_i(op, vl, 1, ERm::R(2), 3, kr, false));
+        }
+    }
+    for s in KSize::ALL {
+        type Emit<'a> = (&'a str, &'a dyn Fn(&mut Asm));
+        let fns: [Emit; 7] = [
+            ("kmov k,k", &|a| a.kmov_kk(s, kr, kr)),
+            ("kmov k,g", &|a| a.kmov_kg(s, kr, g)),
+            ("kmov g,k", &|a| a.kmov_gk(s, g, kr)),
+            ("knot", &|a| a.knot(s, kr, kr)),
+            ("kortest", &|a| a.kortest(s, kr, kr)),
+            ("kshiftl", &|a| a.kshift(true, s, kr, kr, 1)),
+            ("kshiftr", &|a| a.kshift(false, s, kr, kr, 1)),
+        ];
+        for (name, f) in fns {
+            add(format!("{name} {s:?}"), &|a| {
+                f(a);
+                Ok(())
+            });
+        }
+        for op in KBin::ALL {
+            add(format!("{op:?} {s:?}"), &|a| {
+                a.kbin(op, s, kr, kr, kr);
+                Ok(())
+            });
+        }
+        add(format!("kmov k,m {s:?}"), &|a| a.kmov_km(s, kr, m));
+        add(format!("kmov m,k {s:?}"), &|a| a.kmov_mk(s, m, kr));
+    }
+    assert!(want.len() > 1100, "{} encodings", want.len());
     let insts = disasm(&buf);
     for (off, recorded, name) in want {
         let i = insts.iter().find(|i| i.off == off).unwrap_or_else(|| panic!("{name}: not disassembled"));
         let shown = match need(i) {
             Need::Baseline => FeatureSet::EMPTY,
             Need::Feat(f) => FeatureSet::of(f),
+            Need::K(s) => s,
             Need::Never => panic!("{name}: `{}`", i.text()),
         };
         assert_eq!(recorded, shown, "{name}: `{}`", i.text());
@@ -474,13 +630,13 @@ fn by_symbol(m: &Module) -> HashMap<String, FuncId> {
     order.iter().filter_map(|f| names[f.index()].clone().map(|n| (n, *f))).collect()
 }
 
-/// A 256-bit vector or mask type: a value of it travels in a `ymm` register.
-fn is_ymm(m: &Module, t: TypeId) -> bool {
-    let bytes = match stave_ir::simd::vec_shape(&m.types, t) {
-        Some((_, lane, n)) => lane.bits() / 8 * n,
-        None => stave_ir::simd::mask_shape(&m.types, t).map_or(0, |(w, n)| w / 8 * n),
-    };
-    bytes == 32
+/// A 256- or 512-bit vector or a 256-bit mask type: a value of it travels in a `ymm` or `zmm`
+/// register (a mask of 512 bits of lanes travels as its bits in a general register).
+pub fn is_ymm(m: &Module, t: TypeId) -> bool {
+    match stave_ir::simd::vec_shape(&m.types, t) {
+        Some((_, lane, n)) => lane.bits() / 8 * n >= 32,
+        None => stave_ir::simd::mask_shape(&m.types, t).is_some_and(|(w, n)| w / 8 * n == 32),
+    }
 }
 
 /// The `ymm` upper halves are clean at every call and return of the straight-line function `f`
@@ -488,7 +644,7 @@ fn is_ymm(m: &Module, t: TypeId) -> bool {
 /// the last `vzeroupper` (or the last call that returned none) and it. `ind`: whether the
 /// function's indirect calls carry a 256-bit argument and a 256-bit result. Returns the number
 /// of `vzeroupper`s.
-fn check_upper_halves(m: &Module, f: &Func, code: &[Inst], ind: (bool, bool), what: &str) -> usize {
+pub fn check_upper_halves(m: &Module, f: &Func, code: &[Inst], ind: (bool, bool), what: &str) -> usize {
     let syms = by_symbol(m);
     let carries = |g: &Func| (g.params.iter().any(|&t| is_ymm(m, t)), g.ret.is_some_and(|t| is_ymm(m, t)));
     let (mut dirty, ret_ymm) = carries(f);
@@ -978,7 +1134,7 @@ fn op_outside_the_feature_set_is_unsupported() {
         (sh(Lane::I32, 8), VecOp::AddWrap, &[Feature::Avx], "avx2"),
         (sh(Lane::U8, 32), VecOp::AddSat, &[Feature::Avx], "avx2"),
         // a 256-bit value needs `avx` in the function that holds it
-        (sh(Lane::F32, 8), VecOp::Add, &[], "value class"),
+        (sh(Lane::F32, 8), VecOp::Add, &[], "wider than the fn's 128-bit vector registers"),
     ];
     for (s, op, needs, missing) in cases {
         let mut sp = Sp::new();

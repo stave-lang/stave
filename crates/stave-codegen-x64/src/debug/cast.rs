@@ -105,7 +105,7 @@ impl Cg<'_, '_> {
                         self.a.mov_xg(Size::Q, x, S0)?;
                         self.bind(v, R::X(x))
                     }
-                    VCls::M { .. } | VCls::V { .. } => Err(bad("cast to an aggregate")),
+                    VCls::M { .. } | VCls::V { .. } | VCls::K { .. } => Err(bad("cast to an aggregate")),
                 }
             }
             Some((none, some, pty)) => {
@@ -117,7 +117,7 @@ impl Cg<'_, '_> {
                             VCls::G { bytes, .. } => bytes,
                             VCls::X(Prec::F32) => 4,
                             VCls::X(Prec::F64) => 8,
-                            VCls::M { .. } | VCls::V { .. } => {
+                            VCls::M { .. } | VCls::V { .. } | VCls::K { .. } => {
                                 return Err(bad("cast.try to an aggregate"));
                             }
                         };

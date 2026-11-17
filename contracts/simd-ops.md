@@ -59,6 +59,38 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
   baseline callee or caller, the trap path) never runs with dirty upper halves.
 - Compiler-emitted stubs, routines, and tables use target-baseline instructions only.
 
+### K mode (x86-64 functions with the AVX-512 set)
+
+- A function is in **K mode** iff F ⊇ {`avx512f`, `avx512bw`, `avx512vl`, `avx512dq`,
+  `avx512cd`} (the v4 set). Any other function is compiled as above, and a 512-bit vector or
+  an EVEX instruction in it is a code generation error that names the features F lacks.
+- In K mode every mask value is one bit per lane in a mask register `k1`–`k7` (`k0` is never a
+  write mask; all are caller-saved; a spilled mask is its bits in 8 bytes). Bit j is lane j;
+  the bits from the lane count up are unspecified, and what reads a mask as an integer
+  (`to_bits`, a bounds check) narrows first. Every vector op is the v4 recipe of the generated
+  table, EVEX-encoded at the length of the value (`xmm`, `ymm`, `zmm`; VEX on `xmm` where the
+  recipe names it). Vectors use `zmm0`–`zmm13`, numbered as the `xmm` / `ymm` registers of the
+  other functions; `zmm16`–`zmm31` are not used.
+- The mask ABI follows the type, so K-mode and other functions share signatures. A mask whose
+  lanes fill at most 256 bits crosses a call as the vector of its lanes (all ones or all
+  zeros, in the vector argument sequence) for every function: a K-mode function converts at
+  its params, call arguments and returns (`vpmov*2m` in, `vpmovm2*` out). A mask of a 512-bit
+  type crosses as its bits, an integer argument (zero above the lane count), returned in
+  `rax`. A 512-bit vector travels in a `zmm` register as a 256-bit one in a `ymm`. A mask in
+  memory (behind a pointer, in an aggregate) is the vector of its lanes on every target.
+- `vzeroupper`: the rule above with `zmm` state counted as dirty upper parts: the bits above
+  127 of `zmm0`–`zmm15` are clean at every call and return that carries no 256- or 512-bit
+  value in a register.
+- Backed by code on v4: float and integer arithmetic (not `mul.sat`, `checked_mul`,
+  `div_const`, `popcount`, `clz`), logic, shifts (not 8-bit lanes by a vector), min / max,
+  compares, `fma`, reductions, `splat`, `bitcast`, `split`, `join`, loads and stores (plain,
+  aligned, masked), and every mask op. The other ops (scans, casts, widen / narrow, permute,
+  lookup, compress / expand, gather / scatter, stream stores) are a code generation error in
+  a K-mode function.
+- Test leg `v4`: binaries with AVX-512 code run natively on a CPU with the v4 set, else under
+  Intel SDE when the environment variable `STAVE_SDE` names its `sde64` (`$STAVE_SDE -icx --
+  program`), else the leg is skipped (a failure when `STAVE_REQUIRE_LEGS` lists `v4`).
+
 ## Types
 
 - `TxN`, where T ∈ {i8..i64, u8..u64, f32, f64, f16, bf16} and N ∈ {2,4,…,64}. `isize`/`usize`
@@ -72,7 +104,8 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
     arithmetic they are **U** unless `avx512fp16`/`fp16` (f16) or `avx512bf16`/`bf16` (bf16 dot
     products only).
 - `maskWxN`, where W is the lane width in bits and N the lane count, e.g. `mask32x8`. Its layout is
-  unspecified and it is not addressable.
+  unspecified and it is not addressable (in a register: a vector of all-ones lanes, or one bit
+  per lane in a `k` register in K mode).
   - Leaving registers: `m.to_bits() -> u8|u16|u32|u64` (the smallest that holds N bits, high bits
     zero) and `m.to_vec::<iW>()`.
   - `m.rewiden::<W2>()` is N on v4/sve and M elsewhere. Constructors: `maskWxN.first_n(k)`,

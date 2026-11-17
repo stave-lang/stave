@@ -2,7 +2,8 @@
 # tools/gen-tables turns it into src/generated/x86.rs.
 #
 # Tiers: v2 = SSE4.2, 128-bit; v3 = AVX2 FMA BMI2 F16C, 256-bit VEX; v4 = v3 + AVX-512 F BW VL DQ
-# CD, 512-bit EVEX with masks in k registers. On v2 and v3 a mask is a vector of all-ones lanes.
+# CD, 512-bit EVEX with masks in k registers. On v2 and v3 a mask is a vector of all-ones lanes;
+# on v4 it is one bit per lane in a k register, the bits above the lane count unspecified.
 #
 # One [[op]] per (op, type class, form):
 #   op    the IR name (`vec.*`, `mask.*`); chunk-loop constructs are `loop.*`, memory hints and
@@ -23,7 +24,13 @@
 # (div_const, permute) lists the worst case. The cost is the number of instructions in the recipe,
 # a loop body counted once. The class follows from it: N at most 2, M more (gen-tables checks).
 # Recipes of tiers with a backend (v2, v3) are what it emits; moves between frame homes are
-# memory traffic, not counted.
+# memory traffic, not counted. On v4 the backend emits the recipes of: float and integer
+# arithmetic except `mul.sat`, `checked_mul`, `div_const`, `popcount` and `clz`; logic; shifts
+# except 8-bit lanes by a vector; min / max; compares; `fma`; the reductions; `splat`, `bitcast`,
+# `split`, `join`; loads and stores, plain, aligned and masked; every `mask.*` op. A v4 cell of
+# another op is `unverified` or not yet emitted: the op is a code generation error in a function
+# compiled for the v4 features. Not listed on v4 either: the conversion of a mask at a call
+# boundary (`vpmov*2m`, `vpmovm2*`, `kmov`).
 #
 # Ops without a vector instruction run lane by lane on the home bytes in general registers: the
 # recipe counts every lane's loads, work and stores (one instruction repeated as `xK`), and `movx`
@@ -978,21 +985,21 @@ op = "mask.all"
 ty = ["mask"]
 v2 = { class = "N", recipe = "pcmpeqd" }
 v3 = { class = "N", recipe = "vpcmpeqd" }
-v4 = { class = "N", recipe = "kxnor*", unverified = true }
+v4 = { class = "N", recipe = "kxnorq" }
 
 [[op]]
 op = "mask.none"
 ty = ["mask"]
 v2 = { class = "N", recipe = "pxor" }
 v3 = { class = "N", recipe = "vpxor" }
-v4 = { class = "N", recipe = "kxor*", unverified = true }
+v4 = { class = "N", recipe = "kxorq" }
 
 [[op]]
 op = "mask.to_vec"
 ty = ["mask"]
 v2 = { class = "N", recipe = "none" }
 v3 = { class = "N", recipe = "none" }
-v4 = { class = "N", recipe = "vpmovm2*", unverified = true }
+v4 = { class = "N", recipe = "vpmovm2*" }
 
 [[op]]
 op = "mask.rewiden"

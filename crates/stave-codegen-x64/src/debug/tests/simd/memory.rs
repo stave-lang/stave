@@ -94,7 +94,7 @@ fn all_mask(n: u32) -> u64 {
 
 /// A vector of distinct recognizable lanes (NaN payloads for floats).
 fn lanes(s: Shape, seed: u64) -> Vec<u64> {
-    let mut r = Rng::new(seed + 991);
+    let mut r = Rng::new(seed.wrapping_add(991));
     let nn = if s.lane.is_float() { nans(s.lane) } else { vec![] };
     (0..s.n as usize)
         .map(|j| if j < nn.len() && seed.is_multiple_of(2) { nn[j] } else { r.next() & s.lane.ones() })

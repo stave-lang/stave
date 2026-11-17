@@ -336,11 +336,11 @@ pub fn sweep_masks(n: u32) -> Vec<u64> {
 
 /// Lane bits that tell every lane apart and are never zero: the lane number in the low byte.
 pub fn lane_ids(s: Shape, salt: u64) -> Vec<u64> {
-    let mut r = Rng::new(salt + 5);
+    let mut r = Rng::new(salt.wrapping_add(5));
     (0..u64::from(s.n))
         .map(|j| {
             if s.lane.bits() == 8 {
-                (salt % 4) * 0x40 + j + 1
+                (salt % 3) * 0x40 + j + 1
             } else {
                 (r.next() << 8 | (j + 1)) & s.lane.ones()
             }
@@ -365,12 +365,12 @@ pub fn compress() -> Vec<Case> {
     out
 }
 
-/// Every mask shape: lane width 8 to 64, 2 to 32 lanes, at most 256 bits.
+/// Every mask shape: lane width 8 to 64, 2 to 64 lanes, at most 512 bits.
 fn mask_shapes() -> Vec<(u32, u32)> {
     let mut v = Vec::new();
     for w in [8, 16, 32, 64] {
-        for n in [2, 4, 8, 16, 32] {
-            if w * n <= 256 && w * n >= 16 {
+        for n in [2, 4, 8, 16, 32, 64] {
+            if w * n <= 512 && w * n >= 16 {
                 v.push((w, n));
             }
         }
@@ -409,7 +409,7 @@ pub fn masks() -> Vec<Case> {
         let tuples = ks.iter().flat_map(|&k| [vec![Arg::U(k, false)], vec![Arg::U(k, true)]]).collect();
         out.extend(batch(VecOp::FirstN, Res::M(w, n), false, tuples));
         for w2 in [8, 16, 32, 64] {
-            if w2 * n > 256 {
+            if w2 * n > 512 {
                 continue;
             }
             let tuples = pats.iter().map(|&a| vec![m(a)]).collect();

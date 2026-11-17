@@ -58,13 +58,33 @@ const OWN_G_SCRATCH: [Gpr; 2] = [Gpr::R9, Gpr::R8];
 /// vector registers are call-clobbered.
 const OWN_X_FIRST: u8 = 6;
 const OWN_X_COUNT: u8 = 8;
+/// `k1`..`k7` hold mask values (K mode); `k0` cannot be a write mask and is scratch.
+const NK: u8 = 8;
+pub(crate) const KS0: KReg = KReg::masked(0);
+/// Release: `k4`..`k7` may be owned by a mask for its whole life; `k1`..`k3` stay with the
+/// block-local cache. No mask register survives a call.
+const OWN_K_FIRST: u8 = 4;
+const OWN_K_COUNT: u8 = 4;
 const OUT_OF_G: &str = "internal: out of general registers";
 const OUT_OF_X: &str = "internal: out of vector registers";
+const OUT_OF_K: &str = "internal: out of mask registers";
+/// The register class of mask values in K mode, next to the classes of `regalloc`: they are
+/// assigned in a pass of their own, since `k` registers are a file of their own.
+const CLASS_PRED: u8 = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum R {
     G(Gpr),
     X(Xmm),
+    K(KReg),
+}
+
+/// The register file of a temporary.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RFile {
+    G,
+    X,
+    K,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -79,6 +99,7 @@ enum Occ {
 enum PLoc {
     G(Gpr),
     X(Xmm),
+    K(KReg),
     M(i32),
 }
 
@@ -99,6 +120,12 @@ enum MK {
     Float(Prec),
     /// A vector or mask of this many bytes.
     Vec(u32),
+    /// A mask register value of `n` lanes of `w` bytes: its bits between mask registers,
+    /// homes and general registers, its lanes into a vector register.
+    Mask {
+        n: u32,
+        w: u32,
+    },
 }
 
 impl MK {
@@ -106,6 +133,7 @@ impl MK {
         match c {
             VCls::X(p) => MK::Float(p),
             VCls::V { size } => MK::Vec(size),
+            VCls::K { n, w } => MK::Mask { n, w },
             _ => MK::G,
         }
     }
@@ -121,6 +149,7 @@ fn ploc(r: R) -> PLoc {
     match r {
         R::G(g) => PLoc::G(g),
         R::X(x) => PLoc::X(x),
+        R::K(k) => PLoc::K(k),
     }
 }
 
@@ -193,8 +222,10 @@ pub(crate) struct Cg<'a, 'm> {
     touched: Vec<u32>,
     gocc: [Occ; 16],
     xocc: [Occ; 16],
+    kocc: [Occ; 8],
     glock: u16,
     xlock: u16,
+    klock: u8,
     used_callee: u16,
     frame: u32,
     labels: Vec<Label>,
@@ -221,6 +252,7 @@ pub(crate) struct Cg<'a, 'm> {
     /// Registers owned by some value of this function; the cache never allocates them.
     gown: u16,
     xown: u16,
+    kown: u8,
     /// General registers the cache does not allocate: the owned ones and, in a release build,
     /// every callee-saved one.
     gskip: u16,
@@ -245,15 +277,17 @@ pub(crate) struct Cg<'a, 'm> {
     /// Release: the compare of the current block that its `cbr` emits (`cmp` + `jcc`, no bool
     /// value); `NONE` otherwise.
     fused: u32,
-    /// The frame holds a 32-byte-aligned value: the prologue realigns the stack so that `rbp` is
-    /// 16 above a multiple of 32, keeps the entry frame address at `[rbp - 8]`, and the
-    /// epilogue restores `rsp` from there.
+    /// The frame holds a 32- or 64-byte-aligned value: the prologue realigns the stack so that
+    /// `rbp` is 16 above a multiple of [`Self::frame_align`], keeps the entry frame address at
+    /// `[rbp - 8]`, and the epilogue restores `rsp` from there.
     pub(crate) realign: bool,
-    /// The `ymm` upper halves may be dirty here. A debug build cleans them after every vector
-    /// op; a release build keeps 256-bit values in registers and cleans before a call or a
-    /// return that carries none.
+    /// The alignment of a realigned frame: 32, or 64 with a 64-byte-aligned value.
+    frame_align: u32,
+    /// The `ymm` / `zmm` upper parts may be dirty here. A debug build cleans them after every
+    /// vector op; a release build keeps 256- and 512-bit values in registers and cleans before
+    /// a call or a return that carries none.
     pub(crate) ydirty: bool,
-    /// The function has 32-byte vector values.
+    /// The function has vector values of 32 bytes or more (or masks that cross a call as such).
     pub(crate) ywide: bool,
     /// The instruction being compiled.
     cur_inst: u32,
@@ -276,7 +310,8 @@ pub(crate) fn compile(cx: &Ctx<'_>, fid: FuncId) -> Res<FuncCode> {
         match compile_with(cx, fid, true) {
             // An instruction that needs more temporaries than the cache keeps next to the owned
             // registers: this function is compiled without them.
-            Err(Error::Malformed { what, .. }) if what == OUT_OF_G || what == OUT_OF_X => {}
+            Err(Error::Malformed { what, .. })
+                if what == OUT_OF_G || what == OUT_OF_X || what == OUT_OF_K => {}
             r => return r,
         }
     }
@@ -289,12 +324,14 @@ struct Owned {
     reg: Vec<Option<R>>,
     gown: u16,
     xown: u16,
+    kown: u8,
     first: Vec<u32>,
     last: Vec<u32>,
 }
 
 /// Per value its register class ([`regalloc::CLASS_NONE`] for values that live in memory and for
-/// frame addresses), and per instruction whether it clobbers the scratch registers.
+/// frame addresses, [`CLASS_PRED`] for masks in K mode), and per instruction whether it clobbers
+/// the scratch registers.
 fn reg_classes(cls: &[Option<VCls>], fx: Feats, b: &Body) -> (Vec<u8>, Vec<bool>) {
     let nv = b.values.len();
     let mut class = vec![regalloc::CLASS_NONE; nv];
@@ -303,6 +340,7 @@ fn reg_classes(cls: &[Option<VCls>], fx: Feats, b: &Body) -> (Vec<u8>, Vec<bool>
             Some(VCls::G { .. }) => regalloc::CLASS_INT,
             Some(VCls::X(_)) => regalloc::CLASS_FLOAT,
             Some(VCls::V { .. }) => regalloc::CLASS_VEC,
+            Some(VCls::K { .. }) => CLASS_PRED,
             _ => regalloc::CLASS_NONE,
         };
     }
@@ -344,6 +382,7 @@ fn reg_classes(cls: &[Option<VCls>], fx: Feats, b: &Body) -> (Vec<u8>, Vec<bool>
 }
 
 fn ownership(b: &Body, an: &Analysis, class: &[u8], clobbers: &[bool]) -> Owned {
+    let all = class;
     let saved = CALLEE_SAVED.len() as u8;
     let pools = regalloc::Pools {
         int_saved: saved,
@@ -352,9 +391,19 @@ fn ownership(b: &Body, an: &Analysis, class: &[u8], clobbers: &[bool]) -> Owned 
         float_scratch: OWN_X_COUNT,
         vec_saved: 0,
     };
+    let pred = class.contains(&CLASS_PRED);
+    // Masks are no class of `regalloc`: here they have none, and a second pass below assigns
+    // them alone, as the integer class of a pool of the ownable mask registers.
+    let plain: Vec<u8>;
+    let class = if pred {
+        plain = class.iter().map(|&c| if c == CLASS_PRED { regalloc::CLASS_NONE } else { c }).collect();
+        &plain[..]
+    } else {
+        class
+    };
     let asg = regalloc::assign(b, &an.rpo, class, clobbers, pools);
     let (mut gown, mut xown) = (0u16, 0u16);
-    let reg = asg
+    let mut reg: Vec<Option<R>> = asg
         .reg
         .iter()
         .zip(class)
@@ -377,7 +426,35 @@ fn ownership(b: &Body, an: &Analysis, class: &[u8], clobbers: &[bool]) -> Owned 
             }
         })
         .collect();
-    Owned { reg, gown, xown, first: asg.first, last: asg.last }
+    let (mut first, mut last) = (asg.first, asg.last);
+    let mut kown = 0u8;
+    if pred {
+        let masks: Vec<u8> = all
+            .iter()
+            .map(|&c| if c == CLASS_PRED { regalloc::CLASS_INT } else { regalloc::CLASS_NONE })
+            .collect();
+        let pools = regalloc::Pools {
+            int_saved: 0,
+            int_scratch: OWN_K_COUNT,
+            float_saved: 0,
+            float_scratch: 0,
+            vec_saved: 0,
+        };
+        let asg = regalloc::assign(b, &an.rpo, &masks, clobbers, pools);
+        for (v, &r) in asg.reg.iter().enumerate() {
+            if r == regalloc::NO_REG {
+                continue;
+            }
+            let k = KReg::masked(OWN_K_FIRST + r % OWN_K_COUNT);
+            kown |= 1 << k.num();
+            reg[v] = Some(R::K(k));
+            if let (Some(f), Some(l)) = (first.get_mut(v), last.get_mut(v)) {
+                *f = asg.first.get(v).copied().unwrap_or(*f);
+                *l = asg.last.get(v).copied().unwrap_or(*l);
+            }
+        }
+    }
+    Owned { reg, gown, xown, kown, first, last }
 }
 
 /// Per value: read in a block emitted before the block that defines it.
@@ -435,7 +512,7 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
     let fx = cx.feats(f);
     let cls = cx.cls_of(fx);
     let mut early = Vec::new();
-    let Owned { reg: own, gown, xown, first, last } = if release {
+    let Owned { reg: own, gown, xown, kown, first, last } = if release {
         // A rotated loop's test is emitted after the blocks that use its values: only values
         // with a register for their whole life can be read there before their definition.
         let (class, clobbers) = reg_classes(cls, fx, b);
@@ -450,7 +527,7 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
             ownership(b, &an, &class, &clobbers)
         }
     } else {
-        Owned { reg: Vec::new(), gown: 0, xown: 0, first: Vec::new(), last: Vec::new() }
+        Owned { reg: Vec::new(), gown: 0, xown: 0, kown: 0, first: Vec::new(), last: Vec::new() }
     };
     let uses = if release { use_counts(b) } else { Vec::new() };
     let callee_saved = CALLEE_SAVED.iter().fold(0, |m, g| m | bit(*g));
@@ -476,7 +553,26 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
                     if cx.layouts.get_layout(*inner).is_ok_and(|l| l.align > 16))
     };
     let realign = b.values.iter().any(|v| wide(v.ty)) || (0..b.insts.len()).any(wide_slot);
-    let ywide = b.values.iter().any(|v| matches!(cls.get(v.ty.index()), Some(Some(VCls::V { size: 32 }))));
+    let align64 = |t: TypeId| match cls.get(t.index()).copied().flatten() {
+        Some(VCls::V { size }) => size > 32,
+        Some(VCls::M { align, .. }) => align > 32,
+        _ => false,
+    };
+    let slot64 = |i: usize| {
+        b.insts.op[i] == Op::Slot
+            && matches!(b.insts.ty.get(i).copied().flatten().and_then(|t| cx.m.types.key(t)),
+                Some(TypeKey::Ref { inner, .. } | TypeKey::RawPtr { inner, .. })
+                    if cx.layouts.get_layout(*inner).is_ok_and(|l| l.align > 32))
+    };
+    let frame_align = if fx.v4 && (b.values.iter().any(|v| align64(v.ty)) || (0..b.insts.len()).any(slot64)) {
+        64
+    } else {
+        32
+    };
+    let ywide = b.values.iter().any(|v| match cls.get(v.ty.index()).copied().flatten() {
+        Some(c @ (VCls::V { .. } | VCls::K { .. })) => c.wide_at_boundary(),
+        _ => false,
+    });
     let saved_bytes = 8 * (gown & callee_saved).count_ones();
     let mut a = Asm::with_capacity(32 * b.insts.len() + 64, b.blocks.len() * 2 + 8);
     // Scalar float code next to live `ymm` values must not depend on their upper halves. A
@@ -504,8 +600,10 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
         touched: Vec::new(),
         gocc: [Occ::Free; 16],
         xocc: [Occ::Free; 16],
+        kocc: [Occ::Free; 8],
         glock: 0,
         xlock: 0,
+        klock: 0,
         used_callee: gown & callee_saved,
         // the entry frame address of a realigned frame, then (release) the save slots of the
         // owned callee-saved registers
@@ -525,6 +623,7 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
         early,
         gown,
         xown,
+        kown,
         gskip: if release { gown | callee_saved } else { 0 },
         epilogue_bound: false,
         first,
@@ -535,6 +634,7 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
         folded: if release { vec![NONE; nv] } else { Vec::new() },
         fused: NONE,
         realign,
+        frame_align,
         ydirty: release && ywide,
         ywide,
         cur_inst: NONE,
@@ -551,6 +651,10 @@ fn bit(r: Gpr) -> u16 {
 
 fn xbit(x: Xmm) -> u16 {
     1 << x.num()
+}
+
+fn kbit(k: KReg) -> u8 {
+    1 << k.num()
 }
 
 pub(crate) fn disp(m: Mem, d: i64) -> Res<Mem> {
@@ -590,10 +694,32 @@ impl<'a, 'm> Cg<'a, 'm> {
             .ok_or_else(|| {
                 let text = self.cx.m.types.key_text(t);
                 match self.key(t) {
-                    Some(TypeKey::Vec { .. } | TypeKey::Mask { .. }) => unsup(format!(
-                        "vector type {text}: sizeless, f16 / bf16 lanes, or wider than the fn's {}-bit vector registers",
-                        8 * self.fx.vector_bytes()
-                    )),
+                    Some(TypeKey::Vec { .. } | TypeKey::Mask { .. }) => {
+                        let lacks: Vec<&str> = super::V4_SET
+                            .iter()
+                            .filter(|f| !self.fx.set.contains(**f))
+                            .map(|f| f.name())
+                            .collect();
+                        let all: Vec<&str> = super::V4_SET.iter().map(|f| f.name()).collect();
+                        let types = &self.cx.m.types;
+                        let bytes = match stave_ir::simd::vec_shape(types, t) {
+                            Some((_, lane, n)) => lane.bits() / 8 * n,
+                            None => stave_ir::simd::mask_shape(types, t).map_or(0, |(w, n)| w / 8 * n),
+                        };
+                        let more = if lacks.is_empty() || bytes <= 32 {
+                            String::new()
+                        } else {
+                            format!(
+                                " (512-bit vectors need `{}`: the fn lacks `{}`)",
+                                all.join("`, `"),
+                                lacks.join("`, `")
+                            )
+                        };
+                        unsup(format!(
+                            "vector type {text}: sizeless, f16 / bf16 lanes, or wider than the fn's {}-bit vector registers{more}",
+                            8 * self.fx.vector_bytes()
+                        ))
+                    }
                     _ => unsup(format!("values of type t{} ({text})", t.0)),
                 }
             })
@@ -719,14 +845,15 @@ impl<'a, 'm> Cg<'a, 'm> {
 
     /// Frame bytes at the returned `rbp` offset. Alignment above 16 needs a realigned frame.
     pub fn alloc_frame(&mut self, size: u32, align: u32) -> Res<i32> {
-        let al = align.clamp(1, 32);
+        let al = align.clamp(1, 64);
         let end = u64::from(self.frame) + u64::from(size);
-        let end = if al == 32 {
-            if !self.realign {
-                return Err(bad("internal: a 32-byte-aligned value in a frame that is not realigned"));
+        let end = if al >= 32 {
+            if !self.realign || al > self.frame_align {
+                return Err(bad("internal: an over-aligned value in a frame that is not realigned"));
             }
-            // `rbp` is 16 above a multiple of 32
-            (end + 16).div_ceil(32) * 32 - 16
+            // `rbp` is 16 above a multiple of the frame alignment
+            let al = u64::from(al);
+            (end + 16).div_ceil(al) * al - 16
         } else {
             end.div_ceil(u64::from(al)) * u64::from(al)
         };
@@ -819,6 +946,7 @@ impl<'a, 'm> Cg<'a, 'm> {
         match r {
             R::G(g) => self.gocc[g.num() as usize],
             R::X(x) => self.xocc[x.num() as usize],
+            R::K(k) => self.kocc[k.num() as usize],
         }
     }
 
@@ -826,6 +954,7 @@ impl<'a, 'm> Cg<'a, 'm> {
         match r {
             R::G(g) => self.gocc[g.num() as usize] = o,
             R::X(x) => self.xocc[x.num() as usize] = o,
+            R::K(k) => self.kocc[k.num() as usize] = o,
         }
     }
 
@@ -833,6 +962,7 @@ impl<'a, 'm> Cg<'a, 'm> {
         match r {
             R::G(g) => self.glock & bit(g) != 0,
             R::X(x) => self.xlock & xbit(x) != 0,
+            R::K(k) => self.klock & kbit(k) != 0,
         }
     }
 
@@ -845,6 +975,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                 }
             }
             R::X(x) => self.xlock |= xbit(x),
+            R::K(k) => self.klock |= kbit(k),
         }
     }
 
@@ -875,6 +1006,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                 VCls::V { size } => self.vstore(m, x, size)?,
                 _ => self.a.movs_store(Prec::F64, m, x)?,
             },
+            R::K(k) => self.a.kmov_mk(KSize::Q, m, k)?,
         }
         self.in_home[v.index()] = true;
         Ok(())
@@ -886,7 +1018,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             return Ok(());
         }
         match self.vcls(self.vty(v)?)? {
-            VCls::V { size } => self.vmov(size > 16, d, s),
+            VCls::V { size } => self.vmov_sized(size, d, s),
             _ => {
                 self.a.movaps(d, s);
                 Ok(())
@@ -945,10 +1077,15 @@ impl<'a, 'm> Cg<'a, 'm> {
         self.own.get(v.index()).copied().flatten()
     }
 
-    /// The hinted register as a temporary, when it is idle.
-    fn take_hint(&mut self, want_x: bool) -> Option<R> {
+    /// The hinted register as a temporary, when it is idle and of the wanted file.
+    fn take_hint(&mut self, want: RFile) -> Option<R> {
         let h = self.hint?;
-        if matches!(h, R::X(_)) != want_x || self.locked(h) || self.occ(h) != Occ::Free {
+        let file = match h {
+            R::G(_) => RFile::G,
+            R::X(_) => RFile::X,
+            R::K(_) => RFile::K,
+        };
+        if file != want || self.locked(h) || self.occ(h) != Occ::Free {
             return None;
         }
         self.set_occ(h, Occ::Temp);
@@ -957,7 +1094,7 @@ impl<'a, 'm> Cg<'a, 'm> {
     }
 
     pub fn alloc_g(&mut self) -> Res<Gpr> {
-        if let Some(R::G(g)) = self.take_hint(false) {
+        if let Some(R::G(g)) = self.take_hint(RFile::G) {
             return Ok(g);
         }
         let mut best: Option<(u32, Gpr)> = None;
@@ -983,7 +1120,7 @@ impl<'a, 'm> Cg<'a, 'm> {
     }
 
     pub fn alloc_x(&mut self) -> Res<Xmm> {
-        if let Some(R::X(x)) = self.take_hint(true) {
+        if let Some(R::X(x)) = self.take_hint(RFile::X) {
             return Ok(x);
         }
         let mut best: Option<(u32, Xmm)> = None;
@@ -1007,6 +1144,41 @@ impl<'a, 'm> Cg<'a, 'm> {
         self.set_occ(R::X(x), Occ::Temp);
         self.lock(R::X(x));
         Ok(x)
+    }
+
+    /// A mask register `k1`..`k7` as a temporary.
+    pub fn alloc_k(&mut self) -> Res<KReg> {
+        if let Some(R::K(k)) = self.take_hint(RFile::K) {
+            return Ok(k);
+        }
+        let mut best: Option<(u32, KReg)> = None;
+        for n in 1..NK {
+            let k = KReg::masked(n);
+            if self.kown & kbit(k) != 0 {
+                continue;
+            }
+            if let Some(s) = self.victim_score(R::K(k)) {
+                if s == 0 {
+                    best = Some((0, k));
+                    break;
+                }
+                if best.is_none_or(|(bs, _)| s < bs) {
+                    best = Some((s, k));
+                }
+            }
+        }
+        let (_, k) = best.ok_or_else(|| bad(OUT_OF_K))?;
+        self.evict(R::K(k))?;
+        self.set_occ(R::K(k), Occ::Temp);
+        self.lock(R::K(k));
+        Ok(k)
+    }
+
+    fn alloc_k_cache(&mut self) -> Res<KReg> {
+        let h = self.hint.take();
+        let r = self.alloc_k();
+        self.hint = h;
+        r
     }
 
     /// A cache register for an operand: never the hinted one, which the result is about to
@@ -1077,6 +1249,7 @@ impl<'a, 'm> Cg<'a, 'm> {
                 match (rv, r) {
                     (R::G(d), R::G(s)) => self.a.mov_rr(Size::Q, d, s),
                     (R::X(d), R::X(s)) => self.xmove(v, d, s)?,
+                    (R::K(d), R::K(s)) => self.a.kmov_kk(KSize::Q, d, s),
                     _ => return Err(bad("internal: result in a register of the wrong class")),
                 }
                 self.free_reg(r);
@@ -1113,13 +1286,20 @@ impl<'a, 'm> Cg<'a, 'm> {
         for n in 0..NXMM {
             self.evict(R::X(Xmm::masked(n)))?;
         }
+        for n in 1..NK {
+            self.evict(R::K(KReg::masked(n)))?;
+        }
         Ok(())
     }
 
     /// Release, before a call: stores the cached values that are read after the call. The
     /// bindings stay, so the arguments can move straight out of their registers.
     fn save_for_call(&mut self) -> Res<()> {
-        let regs = CALLER_SAVED.into_iter().map(R::G).chain((0..NXMM).map(|n| R::X(Xmm::masked(n))));
+        let regs = CALLER_SAVED
+            .into_iter()
+            .map(R::G)
+            .chain((0..NXMM).map(|n| R::X(Xmm::masked(n))))
+            .chain((1..NK).map(|n| R::K(KReg::masked(n))));
         for r in regs {
             match self.occ(r) {
                 Occ::Free => {}
@@ -1142,6 +1322,9 @@ impl<'a, 'm> Cg<'a, 'm> {
         for n in 0..NXMM {
             self.free_reg(R::X(Xmm::masked(n)));
         }
+        for n in 1..NK {
+            self.free_reg(R::K(KReg::masked(n)));
+        }
     }
 
     fn reset_regs(&mut self) {
@@ -1151,8 +1334,12 @@ impl<'a, 'm> Cg<'a, 'm> {
             }
             self.free_reg(R::X(Xmm::masked(n)));
         }
+        for n in 0..NK {
+            self.free_reg(R::K(KReg::masked(n)));
+        }
         self.glock = 0;
         self.xlock = 0;
+        self.klock = 0;
     }
 
     fn end_inst(&mut self, i: u32) -> Res<()> {
@@ -1191,8 +1378,14 @@ impl<'a, 'm> Cg<'a, 'm> {
                 self.xocc[n] = Occ::Free;
             }
         }
+        for o in self.kocc.iter_mut() {
+            if *o == Occ::Temp {
+                *o = Occ::Free;
+            }
+        }
         self.glock = 0;
         self.xlock = 0;
+        self.klock = 0;
         Ok(())
     }
 
@@ -1217,6 +1410,16 @@ impl<'a, 'm> Cg<'a, 'm> {
                 (R::X(s), R::X(d)) => self.xmove(v, d, s)?,
                 (R::X(s), R::G(d)) => self.a.mov_gx(Size::Q, d, s)?,
                 (R::G(s), R::X(d)) => self.a.mov_xg(Size::Q, d, s)?,
+                (R::K(s), R::K(d)) => {
+                    if s != d {
+                        self.a.kmov_kk(KSize::Q, d, s);
+                    }
+                }
+                (R::K(s), R::G(d)) => self.a.kmov_gk(KSize::Q, d, s),
+                (R::G(s), R::K(d)) => self.a.kmov_kg(KSize::Q, d, s),
+                (R::K(_), R::X(_)) | (R::X(_), R::K(_)) => {
+                    return Err(bad("internal: a mask moved to or from a vector register"));
+                }
             }
             return Ok(());
         }
@@ -1228,11 +1431,12 @@ impl<'a, 'm> Cg<'a, 'm> {
         if self.is_slot[vi] {
             return match dst {
                 R::G(d) => Ok(self.a.lea(Size::Q, d, m)?),
-                R::X(_) => Err(bad("slot address in a vector register")),
+                R::X(_) | R::K(_) => Err(bad("slot address in a vector register")),
             };
         }
         match dst {
             R::G(d) => self.a.mov_rm(Size::Q, d, m)?,
+            R::K(d) => self.a.kmov_km(KSize::Q, d, m)?,
             R::X(d) => match self.vcls(self.vty(v)?)? {
                 VCls::X(p) => self.a.movs(p, d, m)?,
                 VCls::V { size } => self.vload(d, m, size)?,
@@ -1329,6 +1533,45 @@ impl<'a, 'm> Cg<'a, 'm> {
         let x = self.alloc_x_cache()?;
         self.copy_to_x(o, p, x)?;
         Ok(x)
+    }
+
+    /// A mask operand in its mask register (cached for later uses in the block); locked until
+    /// the end of the instruction.
+    pub fn read_k(&mut self, o: Operand) -> Res<KReg> {
+        let v = self.vec_value(o)?;
+        let vi = v.index();
+        if let Some(R::K(k)) = self.vreg[vi] {
+            self.lock(R::K(k));
+            return Ok(k);
+        }
+        let k = self.alloc_k_cache()?;
+        self.load_val(v, R::K(k))?;
+        self.set_occ(R::K(k), Occ::Val(v));
+        self.vreg[vi] = Some(R::K(k));
+        Ok(k)
+    }
+
+    /// Copies a mask operand into `dst` (no cache change).
+    pub(crate) fn copy_to_k(&mut self, o: Operand, dst: KReg) -> Res<()> {
+        let v = self.vec_value(o)?;
+        self.load_val(v, R::K(dst))
+    }
+
+    /// The bits of a mask operand of `n` lanes (8, 16, 32 or 64: a mask that crosses a call
+    /// as its bits) into `dst`, zero above the lanes (no cache change).
+    fn copy_mask_bits(&mut self, o: Operand, n: u32, dst: Gpr) -> Res<()> {
+        let v = self.vec_value(o)?;
+        let vi = v.index();
+        match self.vreg[vi] {
+            Some(R::K(k)) => {
+                self.a.kmov_gk(KSize::of_lanes(n), dst, k);
+                Ok(())
+            }
+            _ if self.in_home[vi] => {
+                self.sized_load(dst, Mem::base(RBP, self.home[vi]), (n / 8) as u8, false)
+            }
+            _ => Err(bad("internal: mask value has no location")),
+        }
     }
 
     /// A fresh temporary holding a copy of `o`.
@@ -1434,7 +1677,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             x
         } else {
             let r = self.alloc_x()?;
-            self.vmov(size > 16, r, x)?;
+            self.vmov_sized(size, r, x)?;
             r
         };
         self.vnorm(x, size)?;
@@ -1691,6 +1934,10 @@ impl<'a, 'm> Cg<'a, 'm> {
                 }
             },
             VCls::V { size } => self.vec_store(o, dst, size),
+            VCls::K { n, w } => {
+                let k = self.read_k(o)?;
+                self.kmask_store(dst, k, n, w)
+            }
             VCls::M { size, .. } => {
                 let s = self.msrc(o)?;
                 self.copy_mem(dst, s, size)
@@ -1710,6 +1957,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             match r {
                 R::G(g) => self.glock &= !bit(g),
                 R::X(x) => self.xlock &= !xbit(x),
+                R::K(k) => self.klock &= !kbit(k),
             }
         }
     }
@@ -1737,6 +1985,11 @@ impl<'a, 'm> Cg<'a, 'm> {
                 let x = self.alloc_x()?;
                 self.vload(x, src, size)?;
                 self.bind(res, R::X(x))
+            }
+            VCls::K { n, w } => {
+                let k = self.alloc_k()?;
+                self.kmask_load(k, src, n, w)?;
+                self.bind(res, R::K(k))
             }
             VCls::M { size, .. } | VCls::V { size } => {
                 let d = self.def_mem(res)?;
@@ -1775,13 +2028,22 @@ impl<'a, 'm> Cg<'a, 'm> {
 
     pub fn abi_of(&self, params: &[TypeId], ret: Option<TypeId>) -> Res<CallAbi> {
         abi::call_abi(&self.cx.m.types, &self.cx.layouts, self.cls, params, ret, false)
-            .ok_or_else(|| unsup("a parameter or return type has no value class"))
+            .ok_or_else(|| self.no_class(params, ret))
     }
 
     /// [`Self::abi_of`] plus the trailing environment argument of a fn-value call.
     pub fn abi_of_env(&self, params: &[TypeId], ret: Option<TypeId>) -> Res<CallAbi> {
         abi::call_abi(&self.cx.m.types, &self.cx.layouts, self.cls, params, ret, true)
-            .ok_or_else(|| unsup("a parameter or return type has no value class"))
+            .ok_or_else(|| self.no_class(params, ret))
+    }
+
+    /// The error of a signature with a type this function cannot hold: the type's own.
+    fn no_class(&self, params: &[TypeId], ret: Option<TypeId>) -> Error {
+        params
+            .iter()
+            .chain(&ret)
+            .find_map(|&t| self.vcls(t).err())
+            .unwrap_or_else(|| unsup("a parameter or return type has no value class"))
     }
 
     /// `sub rsp, n`, touching every page on the way down (as the prologue does), so a large
@@ -1857,6 +2119,16 @@ impl<'a, 'm> Cg<'a, 'm> {
                         self.a.movs_store(p, dst, XS0)?;
                     }
                     VCls::V { size } => self.vec_store(o, dst, size)?,
+                    c @ VCls::K { n, w } => match c.boundary() {
+                        VCls::V { .. } => {
+                            self.copy_to_k(o, KS0)?;
+                            self.kmask_store(dst, KS0, n, w)?;
+                        }
+                        _ => {
+                            self.copy_mask_bits(o, n, S0)?;
+                            self.a.mov_mr(Size::Q, dst, S0)?;
+                        }
+                    },
                     VCls::M { size, .. } => {
                         let s = self.msrc(o)?;
                         self.copy_mem(dst, s, size)?;
@@ -1875,7 +2147,12 @@ impl<'a, 'm> Cg<'a, 'm> {
             for (&o, loc) in args.iter().zip(&abi.args) {
                 match loc {
                     Loc::Reg(Piece::G(g)) => {
-                        moves.push(PMove { dst: PLoc::G(*g), src: self.psrc(o)?, kind: MK::G })
+                        // a mask that travels as its bits
+                        let kind = match self.ocls(o, None)? {
+                            c @ VCls::K { .. } => MK::of(c),
+                            _ => MK::G,
+                        };
+                        moves.push(PMove { dst: PLoc::G(*g), src: self.psrc(o)?, kind })
                     }
                     Loc::Reg(Piece::X(x)) => {
                         let p = match self.ocls(o, None)? {
@@ -1897,7 +2174,10 @@ impl<'a, 'm> Cg<'a, 'm> {
         for (&o, loc) in args.iter().zip(&abi.args) {
             match loc {
                 Loc::Reg(_) | Loc::Vec(_) if direct => {}
-                Loc::Reg(Piece::G(g)) => self.copy_to_g(o, *g)?,
+                Loc::Reg(Piece::G(g)) => match self.ocls(o, None)? {
+                    VCls::K { n, .. } => self.copy_mask_bits(o, n, *g)?,
+                    _ => self.copy_to_g(o, *g)?,
+                },
                 Loc::Reg(Piece::X(x)) => {
                     let p = match self.ocls(o, None)? {
                         VCls::X(p) => p,
@@ -1909,13 +2189,17 @@ impl<'a, 'm> Cg<'a, 'm> {
                     let s = self.msrc(o)?;
                     self.load_pieces(s, ps)?;
                 }
-                Loc::Vec(x) => {
-                    let VCls::V { size } = self.ocls(o, None)? else {
-                        return Err(bad("internal: a non-vector argument in a vector register"));
-                    };
-                    let MSrc::Mem(m) = self.msrc(o)? else { return Err(bad("vector argument")) };
-                    self.vload(*x, m, size)?;
-                }
+                Loc::Vec(x) => match self.ocls(o, None)? {
+                    VCls::V { size } => {
+                        let MSrc::Mem(m) = self.msrc(o)? else { return Err(bad("vector argument")) };
+                        self.vload(*x, m, size)?;
+                    }
+                    VCls::K { n, w } => {
+                        self.copy_to_k(o, KS0)?;
+                        self.kmask_to_vec(*x, KS0, n, w)?;
+                    }
+                    _ => return Err(bad("internal: a non-vector argument in a vector register")),
+                },
                 Loc::Ignore | Loc::Stack(_) => {}
             }
         }
@@ -1932,7 +2216,7 @@ impl<'a, 'm> Cg<'a, 'm> {
         // unless an argument is in one.
         let mut ymm_arg = false;
         for (&o, loc) in args.iter().zip(&abi.args) {
-            ymm_arg |= matches!(loc, Loc::Vec(_)) && matches!(self.ocls(o, None)?, VCls::V { size: 32 });
+            ymm_arg |= matches!(loc, Loc::Vec(_)) && self.ocls(o, None)?.wide_at_boundary();
         }
         if self.rel && !ymm_arg {
             self.vclean();
@@ -1966,6 +2250,12 @@ impl<'a, 'm> Cg<'a, 'm> {
                 // zero-sized result
                 self.def_mem(v)?;
             }
+            RetLoc::Reg(Piece::G(g)) if matches!(self.vcls(self.vty(v)?)?, VCls::K { .. }) => {
+                // a mask returned as its bits
+                let k = self.alloc_k()?;
+                self.a.kmov_kg(KSize::Q, k, *g);
+                self.bind(v, R::K(k))?;
+            }
             RetLoc::Reg(Piece::G(g)) => {
                 self.set_occ(R::G(*g), Occ::Temp);
                 self.bind_g(v, *g)?;
@@ -1979,8 +2269,17 @@ impl<'a, 'm> Cg<'a, 'm> {
                 self.store_pieces(d, ps)?;
             }
             RetLoc::Vec => {
-                let VCls::V { size } = self.vcls(self.vty(v)?)? else {
-                    return Err(bad("internal: a non-vector result in a vector register"));
+                let size = match self.vcls(self.vty(v)?)? {
+                    VCls::V { size } => size,
+                    VCls::K { n, w } => {
+                        let k = self.alloc_k()?;
+                        self.kmask_from_vec(k, abi::xmm(0), n, w)?;
+                        if !self.rel {
+                            self.vclean();
+                        }
+                        return self.bind(v, R::K(k));
+                    }
+                    _ => return Err(bad("internal: a non-vector result in a vector register")),
                 };
                 if self.rel {
                     self.ydirty = size > 16;
@@ -2283,6 +2582,12 @@ impl<'a, 'm> Cg<'a, 'm> {
                 Loc::Ignore => {
                     self.def_mem(p)?;
                 }
+                Loc::Reg(Piece::G(g)) if matches!(self.vcls(self.vty(p)?)?, VCls::K { .. }) => {
+                    // a mask passed as its bits
+                    let k = self.alloc_k()?;
+                    self.a.kmov_kg(KSize::Q, k, *g);
+                    self.bind(p, R::K(k))?;
+                }
                 Loc::Reg(Piece::G(g)) => self.bind(p, R::G(*g))?,
                 Loc::Reg(Piece::X(x)) => self.bind(p, R::X(*x))?,
                 Loc::Regs(ps) => {
@@ -2290,8 +2595,15 @@ impl<'a, 'm> Cg<'a, 'm> {
                     self.store_pieces(d, ps)?;
                 }
                 Loc::Vec(x) => {
-                    let VCls::V { size } = self.vcls(self.vty(p)?)? else {
-                        return Err(bad("internal: a non-vector param in a vector register"));
+                    let size = match self.vcls(self.vty(p)?)? {
+                        VCls::V { size } => size,
+                        VCls::K { n, w } => {
+                            let k = self.alloc_k()?;
+                            self.kmask_from_vec(k, *x, n, w)?;
+                            self.bind(p, R::K(k))?;
+                            continue;
+                        }
+                        _ => return Err(bad("internal: a non-vector param in a vector register")),
                     };
                     if self.rel {
                         // the caller leaves the bytes above the value unspecified
@@ -2302,12 +2614,33 @@ impl<'a, 'm> Cg<'a, 'm> {
                         self.vstore(d, *x, size)?;
                     }
                 }
+                // A mask on the stack as the vector of its lanes: into a mask register.
+                Loc::Stack(off)
+                    if matches!(self.vcls(self.vty(p)?)?,
+                        c @ VCls::K { .. } if matches!(c.boundary(), VCls::V { .. })) =>
+                {
+                    let VCls::K { n, w } = self.vcls(self.vty(p)?)? else {
+                        return Err(bad("internal: mask param"));
+                    };
+                    let src = if self.realign {
+                        if !entry_base {
+                            self.a.mov_rm(Size::Q, RAX, Mem::base(RBP, -8))?;
+                            entry_base = true;
+                        }
+                        Mem::base(RAX, 16 + *off as i32)
+                    } else {
+                        Mem::base(RBP, 16 + *off as i32)
+                    };
+                    let k = self.alloc_k()?;
+                    self.kmask_load(k, src, n, w)?;
+                    self.bind(p, R::K(k))?;
+                }
                 // A realigned frame is at no fixed distance from the stack arguments: they are
                 // copied into homes (`rax` carries nothing at entry).
                 Loc::Stack(off) if self.realign => {
                     let size = match self.vcls(self.vty(p)?)? {
                         VCls::M { size, .. } | VCls::V { size } => size,
-                        _ => 8,
+                        VCls::G { .. } | VCls::X(_) | VCls::K { .. } => 8,
                     };
                     if !entry_base {
                         self.a.mov_rm(Size::Q, RAX, Mem::base(RBP, -8))?;
@@ -2328,6 +2661,7 @@ impl<'a, 'm> Cg<'a, 'm> {
         }
         self.glock = 0;
         self.xlock = 0;
+        self.klock = 0;
         if self.rel {
             self.settle_params(params)?;
         }
@@ -2553,7 +2887,11 @@ impl<'a, 'm> Cg<'a, 'm> {
             // its reader moves.
             let l = ms[0].dst;
             let kind = ms.iter().find(|o| o.src == PSrc::Loc(l)).map_or(ms[0].kind, |o| o.kind);
-            let tmp = if kind == MK::G { PLoc::G(S1) } else { PLoc::X(XS1) };
+            let tmp = match kind {
+                MK::G => PLoc::G(S1),
+                MK::Mask { .. } => PLoc::K(KS0),
+                _ => PLoc::X(XS1),
+            };
             self.emit_move(tmp, PSrc::Loc(l), kind)?;
             for o in ms.iter_mut() {
                 if o.src == PSrc::Loc(l) {
@@ -2566,9 +2904,36 @@ impl<'a, 'm> Cg<'a, 'm> {
 
     fn emit_move(&mut self, dst: PLoc, src: PSrc, kind: MK) -> Res<()> {
         let at = |off: i32| Mem::base(RBP, off);
+        if let MK::Mask { n, w } = kind {
+            return match (dst, src) {
+                (PLoc::K(d), PSrc::Loc(PLoc::K(s))) => {
+                    self.a.kmov_kk(KSize::Q, d, s);
+                    Ok(())
+                }
+                (PLoc::K(d), PSrc::Loc(PLoc::M(o))) => Ok(self.a.kmov_km(KSize::Q, d, at(o))?),
+                (PLoc::M(o), PSrc::Loc(PLoc::K(s))) => Ok(self.a.kmov_mk(KSize::Q, at(o), s)?),
+                (PLoc::M(o), PSrc::Loc(PLoc::M(o2))) => {
+                    self.a.mov_rm(Size::Q, S0, at(o2))?;
+                    Ok(self.a.mov_mr(Size::Q, at(o), S0)?)
+                }
+                // call arguments: the bits (zero above the lanes) in a general register, the
+                // lanes in a vector one
+                (PLoc::G(d), PSrc::Loc(PLoc::K(s))) => {
+                    self.a.kmov_gk(KSize::of_lanes(n), d, s);
+                    Ok(())
+                }
+                (PLoc::G(d), PSrc::Loc(PLoc::M(o))) => self.sized_load(d, at(o), (n / 8) as u8, false),
+                (PLoc::X(d), PSrc::Loc(PLoc::K(s))) => self.kmask_to_vec(d, s, n, w),
+                (PLoc::X(d), PSrc::Loc(PLoc::M(o))) => {
+                    self.a.kmov_km(KSize::Q, KS0, at(o))?;
+                    self.kmask_to_vec(d, KS0, n, w)
+                }
+                _ => Err(bad("internal: a mask move between these places")),
+            };
+        }
         if let MK::Vec(size) = kind {
             return match (dst, src) {
-                (PLoc::X(d), PSrc::Loc(PLoc::X(s))) => self.vmov(size > 16, d, s),
+                (PLoc::X(d), PSrc::Loc(PLoc::X(s))) => self.vmov_sized(size, d, s),
                 (PLoc::X(d), PSrc::Loc(PLoc::M(o))) => self.vload(d, at(o), size),
                 (PLoc::M(o), PSrc::Loc(PLoc::X(s))) => self.vstore(at(o), s, size),
                 (PLoc::M(o), PSrc::Loc(PLoc::M(o2))) => {
@@ -2616,6 +2981,9 @@ impl<'a, 'm> Cg<'a, 'm> {
             (PLoc::X(_), PSrc::Sym(_) | PSrc::Addr(_)) => {
                 return Err(bad("internal: an address moved into a vector register"));
             }
+            (PLoc::K(_), _) | (_, PSrc::Loc(PLoc::K(_))) => {
+                return Err(bad("internal: a mask register in a scalar move"));
+            }
         }
         Ok(())
     }
@@ -2624,10 +2992,12 @@ impl<'a, 'm> Cg<'a, 'm> {
     /// other params out of registers owned by some value.
     fn settle_params(&mut self, params: &[Value]) -> Res<()> {
         for n in 0..16u8 {
-            for r in [Gpr::new(n).map(R::G), Some(R::X(Xmm::masked(n)))].into_iter().flatten() {
+            let k = (n < NK).then(|| R::K(KReg::masked(n)));
+            for r in [Gpr::new(n).map(R::G), Some(R::X(Xmm::masked(n))), k].into_iter().flatten() {
                 let is_owned = match r {
                     R::G(g) => self.gown & bit(g) != 0,
                     R::X(x) => self.xown & xbit(x) != 0,
+                    R::K(k) => self.kown & kbit(k) != 0,
                 };
                 if is_owned
                     && let Occ::Val(q) = self.occ(r)
@@ -2691,6 +3061,17 @@ impl<'a, 'm> Cg<'a, 'm> {
                     return Ok(self.a.mov_mr(Size::Q, dst, S0)?);
                 }
                 Err(bad("internal: float value has no location"))
+            }
+            VCls::K { .. } => {
+                let v = self.vec_value(o)?;
+                if let Some(R::K(k)) = self.vreg[v.index()] {
+                    return Ok(self.a.kmov_mk(KSize::Q, dst, k)?);
+                }
+                if self.in_home[v.index()] {
+                    self.a.mov_rm(Size::Q, S0, Mem::base(RBP, self.home[v.index()]))?;
+                    return Ok(self.a.mov_mr(Size::Q, dst, S0)?);
+                }
+                Err(bad("internal: mask value has no location"))
             }
             VCls::M { size, .. } | VCls::V { size } => {
                 let s = self.msrc(o)?;
@@ -2865,8 +3246,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             }
             return Ok(());
         };
-        let ymm =
-            matches!(self.ret_abi, RetLoc::Vec) && matches!(self.ocls(o, self.f.ret)?, VCls::V { size: 32 });
+        let ymm = matches!(self.ret_abi, RetLoc::Vec) && self.ocls(o, self.f.ret)?.wide_at_boundary();
         self.ret_value(o)?;
         if self.rel && !ymm {
             self.vclean();
@@ -2877,7 +3257,10 @@ impl<'a, 'm> Cg<'a, 'm> {
     fn ret_value(&mut self, o: Operand) -> Res<()> {
         match self.ret_abi.clone() {
             RetLoc::None => Ok(()),
-            RetLoc::Reg(Piece::G(g)) => self.copy_to_g(o, g),
+            RetLoc::Reg(Piece::G(g)) => match self.ocls(o, self.f.ret)? {
+                VCls::K { n, .. } => self.copy_mask_bits(o, n, g),
+                _ => self.copy_to_g(o, g),
+            },
             RetLoc::Reg(Piece::X(x)) => {
                 let p = match self.ocls(o, self.f.ret)? {
                     VCls::X(p) => p,
@@ -2891,8 +3274,18 @@ impl<'a, 'm> Cg<'a, 'm> {
             }
             // a 32-byte result leaves in `ymm0`: its upper half stays as loaded
             RetLoc::Vec => {
-                let VCls::V { size } = self.ocls(o, self.f.ret)? else {
-                    return Err(bad("internal: a non-vector result in a vector register"));
+                let size = match self.ocls(o, self.f.ret)? {
+                    VCls::V { size } => size,
+                    VCls::K { n, w } => {
+                        self.copy_to_k(o, KS0)?;
+                        self.kmask_to_vec(abi::xmm(0), KS0, n, w)?;
+                        if !self.rel {
+                            // control leaves here: the code emitted next starts clean
+                            self.ydirty = false;
+                        }
+                        return Ok(());
+                    }
+                    _ => return Err(bad("internal: a non-vector result in a vector register")),
                 };
                 if self.rel {
                     return self.vec_copy(o, abi::xmm(0));
@@ -3000,7 +3393,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             // The return address and the caller's `rbp` are copied below the aligned boundary,
             // so the frame chain reads as in any other function.
             p.mov_rr(Size::Q, S1, RSP);
-            p.alu_ri(AluOp::And, Size::Q, RSP, -32)?;
+            p.alu_ri(AluOp::And, Size::Q, RSP, -i64::from(self.frame_align))?;
             p.alu_ri(AluOp::Sub, Size::Q, RSP, 16)?;
             for off in [8, 0] {
                 p.mov_rm(Size::Q, S0, Mem::base(S1, off))?;

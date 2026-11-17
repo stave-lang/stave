@@ -1,8 +1,14 @@
 //! Vector and mask ops, differential per op: small IR functions run in the interpreter and
 //! natively under each feature [`Mode`] (a v2 baseline: vectors up to 128 bits; a v3 baseline,
-//! and a v2 baseline whose test functions carry `needs`: up to 256 bits), each as a debug and as
-//! a release build. Every function of every build is disassembled and its instructions are
-//! checked against the function's feature set ([`super::features::check_image`]).
+//! and a v2 baseline whose test functions carry `needs`: up to 256 bits; a v4 baseline, and a v2
+//! baseline whose test functions carry the AVX-512 set: up to 512 bits, masks in `k`
+//! registers), each as a debug and as a release build. Every function of every build is
+//! disassembled and its instructions are checked against the function's feature set
+//! ([`super::features::check_image`]).
+//!
+//! The AVX-512 modes run on the `v4` leg ([`v4_leg`]: natively, or under Intel SDE), and only
+//! the cases whose function compiles in K mode ([`k_ok`]): the ops K mode lacks are listed in
+//! [`K_UNSUPPORTED`], and a 512-bit case of one of them runs nowhere.
 //!
 //! A program is a list of cases, one function each, called in order from `main`. Every input tuple
 //! prints a label line (`# <op> <operands> -> <result>`), then the raw bits of its result as
@@ -16,6 +22,7 @@
 mod lanewise;
 mod memory;
 mod plumbing;
+mod recipes;
 mod regs;
 mod reshape;
 mod values;
@@ -208,14 +215,18 @@ impl Shape {
     }
 }
 
-/// Every shape of `lane` from 16 to 256 bits with at least 2 lanes.
+/// Every shape of `lane` from 16 to 512 bits with at least 2 lanes.
 pub fn shapes(lane: Lane) -> Vec<Shape> {
-    [2, 4, 8, 16, 32].into_iter().map(|n| sh(lane, n)).filter(|s| s.bits() >= 16 && s.bits() <= 256).collect()
+    [2, 4, 8, 16, 32, 64]
+        .into_iter()
+        .map(|n| sh(lane, n))
+        .filter(|s| s.bits() >= 16 && s.bits() <= 512)
+        .collect()
 }
 
-/// The 128- and 256-bit shapes of `lane`.
+/// The 128-, 256- and 512-bit shapes of `lane`.
 pub fn full_shapes(lane: Lane) -> Vec<Shape> {
-    vec![sh(lane, 128 / lane.bits()), sh(lane, 256 / lane.bits())]
+    vec![sh(lane, 128 / lane.bits()), sh(lane, 256 / lane.bits()), sh(lane, 512 / lane.bits())]
 }
 
 /// An operand of a case.
@@ -889,38 +900,113 @@ struct Mode {
     name: &'static str,
     /// The module baseline is v3 (else v2).
     v3: bool,
+    /// The module baseline is v4.
+    v4: bool,
     /// The features every function but the runtime's and `main` gets on top of the baseline:
     /// those functions are called from baseline code and call it back (`t.print_u64`).
     needs: &'static [Feature],
 }
 
-const MODES: [Mode; 7] = [
-    Mode { name: "V2", v3: false, needs: &[] },
-    Mode { name: "v2+bmi2", v3: false, needs: &[Feature::Bmi2] },
-    Mode { name: "V3", v3: true, needs: &[] },
-    Mode { name: "v2+v3", v3: false, needs: &[Feature::Avx2, Feature::Fma, Feature::Bmi2, Feature::F16c] },
-    Mode { name: "v2+avx2", v3: false, needs: &[Feature::Avx2] },
-    Mode { name: "v2+avx2+fma", v3: false, needs: &[Feature::Avx2, Feature::Fma] },
-    Mode { name: "v2+avx", v3: false, needs: &[Feature::Avx] },
+const MODES: [Mode; 9] = [
+    Mode { name: "V2", v3: false, v4: false, needs: &[] },
+    Mode { name: "v2+bmi2", v3: false, v4: false, needs: &[Feature::Bmi2] },
+    Mode { name: "V3", v3: true, v4: false, needs: &[] },
+    Mode {
+        name: "v2+v3",
+        v3: false,
+        v4: false,
+        needs: &[Feature::Avx2, Feature::Fma, Feature::Bmi2, Feature::F16c],
+    },
+    Mode { name: "v2+avx2", v3: false, v4: false, needs: &[Feature::Avx2] },
+    Mode { name: "v2+avx2+fma", v3: false, v4: false, needs: &[Feature::Avx2, Feature::Fma] },
+    Mode { name: "v2+avx", v3: false, v4: false, needs: &[Feature::Avx] },
+    Mode { name: "V4", v3: false, v4: true, needs: &[] },
+    Mode { name: "v2+v4", v3: false, v4: false, needs: &V4_NEEDS },
 ];
+
+impl Mode {
+    /// The test functions are compiled in K mode.
+    fn k(self) -> bool {
+        self.v4 || self.needs == V4_NEEDS
+    }
+}
 
 /// The modes a program whose widest vector has `bits` bits runs under. `fma`: it has a
 /// `vec.fma`, the one op `fma` on top of `avx2` changes; `mask_bits`: it has an op that takes
-/// the bits of a mask, which `bmi2` changes.
-fn modes(bits: u32, fma: bool, mask_bits: bool) -> Vec<Mode> {
+/// the bits of a mask, which `bmi2` changes; `kok`: its cases compile in K mode.
+fn modes(bits: u32, fma: bool, mask_bits: bool, kok: bool) -> Vec<Mode> {
     MODES
         .into_iter()
         .filter(|m| match m.name {
             "V2" => bits <= 128,
             "v2+bmi2" => bits <= 128 && mask_bits,
-            "v2+avx2+fma" => fma,
-            _ => true,
+            "v2+avx2+fma" => fma && bits <= 256,
+            "V4" | "v2+v4" => kok,
+            _ => bits <= 256,
         })
         .collect()
 }
 
+/// Ops without a K-mode lowering: every case of them is unsupported in a function compiled for
+/// the AVX-512 set. (`vec.shl`, `vec.shl.wrap` and `vec.shr` lack only the form on 8-bit lanes
+/// with a vector amount.)
+pub const K_UNSUPPORTED: [VecOp; 23] = [
+    VecOp::MulSat,
+    VecOp::CheckedMul,
+    VecOp::DivConst,
+    VecOp::Popcount,
+    VecOp::Clz,
+    VecOp::ScanAdd,
+    VecOp::ScanAddWrap,
+    VecOp::Cast(CastKind::Exact),
+    VecOp::Cast(CastKind::Wrap),
+    VecOp::Cast(CastKind::Sat),
+    VecOp::Cast(CastKind::Round),
+    VecOp::Cast(CastKind::Try),
+    VecOp::WidenLo,
+    VecOp::WidenHi,
+    VecOp::NarrowWrap,
+    VecOp::NarrowSat,
+    VecOp::Permute,
+    VecOp::Lookup,
+    VecOp::Compress,
+    VecOp::Expand,
+    VecOp::StoreStream,
+    VecOp::Gather,
+    VecOp::Scatter,
+];
+
+/// Whether the functions of `c` (its own and the helpers it calls) compile in K mode (debug
+/// and release agree).
+fn k_ok(c: &Case) -> bool {
+    let b = build("probe".into(), &[c]);
+    let mut m = b.sp.p.m;
+    for f in &mut m.funcs {
+        if !baseline_fn(&f.path) {
+            f.features = FeatureSet::from_features(V4_NEEDS);
+        }
+    }
+    let mut ok = [true; 2];
+    for (release, slot) in [false, true].into_iter().zip(&mut ok) {
+        let mut cx = bench_ctx(&m);
+        cx.release = release;
+        for (i, f) in m.funcs.iter().enumerate() {
+            if f.body.is_none() || baseline_fn(&f.path) {
+                continue;
+            }
+            match compile_func(&cx, FuncId(i as u32)) {
+                Ok(_) => {}
+                Err(Error::Unsupported { .. }) => *slot = false,
+                Err(e) => panic!("K mode: {:?}: {}: {e}", c.ops, f.path),
+            }
+        }
+    }
+    assert_eq!(ok[0], ok[1], "K mode: {:?}: debug and release disagree", c.ops);
+    ok[0]
+}
+
 /// Functions that stay at the module baseline under every mode.
-fn baseline_fn(path: &str) -> bool {
+pub fn baseline_fn(path: &str) -> bool {
     path.starts_with("runtime.") || matches!(path, "t.main" | "t.write" | "t.print_u64" | "t.dump" | "t.fill")
 }
 
@@ -975,6 +1061,8 @@ struct Built {
     fma: bool,
     /// A case has an op that reads the bits of a mask.
     mask_bits: bool,
+    /// Every case compiles in K mode.
+    kok: bool,
     checks: Vec<fn(&str)>,
 }
 
@@ -1005,39 +1093,67 @@ fn build(name: String, cases: &[&Case]) -> Built {
     let fma = cases.iter().any(|c| c.ops.contains(&VecOp::Fma));
     let mask_ops = [VecOp::ToBits, VecOp::Compress, VecOp::Expand, VecOp::LoadMasked, VecOp::StoreMasked];
     let mask_bits = cases.iter().any(|c| c.ops.iter().any(|op| mask_ops.contains(op)));
-    Built { sp, name, trap, trap_dump, fma, mask_bits, checks }
+    Built { sp, name, trap, trap_dump, fma, mask_bits, kok: false, checks }
 }
 
-/// Groups cases into programs: trap-free cases by level set, at most [`PROGRAM_COST`] each; every
-/// trapping case alone.
+/// Groups cases into programs: trap-free cases by level set (128, 256, 512 bits) and by whether
+/// they compile in K mode, at most [`PROGRAM_COST`] each; every trapping case alone. A 512-bit
+/// case that K mode lacks is in no program.
 fn programs(test: &str, cases: &[Case]) -> Vec<Built> {
+    let kok: Vec<bool> = cases.iter().map(k_ok).collect();
+    let level = |c: &Case| match c.bits {
+        0..=128 => 0,
+        129..=256 => 1,
+        _ => 2,
+    };
     let mut out = Vec::new();
-    for wide in [false, true] {
-        let sel: Vec<&Case> = cases.iter().filter(|c| c.trap.is_none() && (c.bits > 128) == wide).collect();
-        let mut cur: Vec<&Case> = Vec::new();
-        let mut cost = 0;
-        for c in sel {
-            if !cur.is_empty() && cost + c.cost > PROGRAM_COST {
-                out.push(build(format!("{test}-{}", out.len()), &cur));
-                cur.clear();
-                cost = 0;
+    let push = |cur: &[&Case], k: bool, out: &mut Vec<Built>| {
+        let mut b = build(format!("{test}-{}", out.len()), cur);
+        b.kok = k;
+        out.push(b);
+    };
+    for wide in [0, 1, 2] {
+        for k in [false, true] {
+            if wide == 2 && !k {
+                continue;
             }
-            cost += c.cost;
-            cur.push(c);
-        }
-        if !cur.is_empty() {
-            out.push(build(format!("{test}-{}", out.len()), &cur));
+            let sel: Vec<&Case> = cases
+                .iter()
+                .zip(&kok)
+                .filter(|(c, ok)| c.trap.is_none() && level(c) == wide && **ok == k)
+                .map(|(c, _)| c)
+                .collect();
+            let mut cur: Vec<&Case> = Vec::new();
+            let mut cost = 0;
+            for c in sel {
+                if !cur.is_empty() && cost + c.cost > PROGRAM_COST {
+                    push(&cur, k, &mut out);
+                    cur.clear();
+                    cost = 0;
+                }
+                cost += c.cost;
+                cur.push(c);
+            }
+            if !cur.is_empty() {
+                push(&cur, k, &mut out);
+            }
         }
     }
-    for c in cases.iter().filter(|c| c.trap.is_some()) {
-        out.push(build(format!("{test}-{}", out.len()), &[c]));
+    for (c, &k) in cases.iter().zip(&kok).filter(|(c, k)| c.trap.is_some() && (c.bits <= 256 || **k)) {
+        push(&[c], k, &mut out);
     }
     out
 }
 
-/// Compiles, checks the instructions of every function against its features, and runs natively;
-/// a signal is reported as exit status `-signal`.
-fn native_run(m: &stave_ir::Module, main: Option<FuncId>, name: &str, opts: &Options) -> Option<RunOut> {
+/// Compiles, checks the instructions of every function against its features, and runs natively
+/// (`leg`: on the `v4` leg); a signal is reported as exit status `-signal`.
+fn native_run(
+    m: &stave_ir::Module,
+    main: Option<FuncId>,
+    name: &str,
+    opts: &Options,
+    leg: Option<&V4Leg>,
+) -> Option<RunOut> {
     let opts = Options { main, ..opts.clone() };
     let img = compile_module(m, &opts).unwrap_or_else(|e| panic!("{name}: codegen: {e}"));
     super::features::check_image(m, &img, opts.features, name);
@@ -1047,7 +1163,11 @@ fn native_run(m: &stave_ir::Module, main: Option<FuncId>, name: &str, opts: &Opt
     let path = tmp(name);
     img.write_file(&path).unwrap();
     let out = loop {
-        match std::process::Command::new(&*path).output() {
+        let mut cmd = match leg {
+            Some(l) => v4_command(l, &path),
+            None => std::process::Command::new(&*path),
+        };
+        match cmd.output() {
             Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(5)),
             r => break r.unwrap(),
         }
@@ -1160,14 +1280,34 @@ fn run_built(b: &Built, stats: &Stats) {
     stats.add(&stats.labels, labels);
     stats.add(if bits <= 128 { &stats.both } else { &stats.v3 }, 1);
     let expect = if b.trap_dump { with_trap_dump(&want.stdout) } else { want.stdout.clone() };
-    for mode in modes(bits, b.fma, b.mask_bits) {
+    for mode in modes(bits, b.fma, b.mask_bits, b.kok) {
+        // the AVX-512 modes run where the `v4` leg does
+        let leg = if mode.k() {
+            match v4_leg() {
+                Some(l) => Some(l),
+                None => {
+                    stats.add(&stats.no_v4, 1);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         for (build, base) in [("debug", Options::default()), ("release", release_options())] {
             let what = format!("{} [{} {build}]", b.name, mode.name);
             let (m, tried, raised) = module_for(p, mode, base.release);
             stats.add(&stats.avx_fns, tried);
             stats.add(&stats.raised, raised);
-            let opts = Options { features: if mode.v3 { v3() } else { v2() }, ..base };
-            match native_run(&m, p.main, &format!("{}-{}-{build}", b.name, mode.name), &opts) {
+            let features = if mode.v4 {
+                v4()
+            } else if mode.v3 {
+                v3()
+            } else {
+                v2()
+            };
+            let opts = Options { features, ..base };
+            let name = format!("{}-{}-{build}", b.name, mode.name);
+            match native_run(&m, p.main, &name, &opts, leg.as_ref()) {
                 Some(got) => {
                     compare(&what, &expect, want_code, &got);
                     stats.add(&stats.runs, 1);
@@ -1191,6 +1331,8 @@ struct Stats {
     /// Label lines (input tuples) printed by the interpreter.
     labels: AtomicUsize,
     runs: AtomicUsize,
+    /// AVX-512 mode runs skipped: the `v4` leg does not run here.
+    no_v4: AtomicUsize,
 }
 
 impl Stats {
@@ -1220,6 +1362,10 @@ pub fn run(test: &str, cases: Vec<Case>) {
             });
         }
     });
+    let no_v4 = stats.no_v4.load(Ordering::Relaxed);
+    if no_v4 > 0 {
+        eprintln!("SKIP {test}: {no_v4} AVX-512 runs: no CPU with the AVX-512 set and no STAVE_SDE");
+    }
     if std::env::var_os("STAVE_TEST_VERBOSE").is_some() {
         eprintln!(
             "{test}: {ncases} case fns, programs {} of 128 bits and {} of 256, with avx alone {} of {} fns of 256-bit programs need avx2, {} labels, {} native runs, {:.1?}",
@@ -1280,6 +1426,46 @@ fn coverage() {
         }
     }
     assert!(missing.is_empty(), "ops without (256-bit) cases: {missing:?}");
+}
+
+/// K mode covers what it claims: every op outside [`K_UNSUPPORTED`] has a 512-bit case that
+/// compiles in K mode, and every op in the list has a case that does not (a case whose op has
+/// no reader emits nothing and compiles anyway).
+#[test]
+fn k_coverage() {
+    let mut wide = BTreeSet::new();
+    let mut refused = BTreeSet::new();
+    let mut lacking = BTreeSet::new();
+    for (_, cases) in all_cases() {
+        for c in &cases {
+            let ok = k_ok(c);
+            let listed = c.ops.iter().any(|o| K_UNSUPPORTED.contains(o));
+            for &op in &c.ops {
+                if ok && c.bits > 256 {
+                    wide.insert(op.name());
+                }
+                if !ok && c.ops.len() == 1 {
+                    refused.insert(op.name());
+                }
+            }
+            if !ok && !listed {
+                lacking.insert(format!("{:?}", c.ops.iter().map(|o| o.name()).collect::<Vec<_>>()));
+            }
+        }
+    }
+    let missing: Vec<&str> = VecOp::ALL
+        .iter()
+        .filter(|op| !K_UNSUPPORTED.contains(op) && !wide.contains(op.name()))
+        .map(|op| op.name())
+        .collect();
+    assert!(missing.is_empty(), "ops without a 512-bit K-mode case: {missing:?}");
+    let stale: Vec<&str> =
+        K_UNSUPPORTED.iter().filter(|op| !refused.contains(op.name())).map(|op| op.name()).collect();
+    assert!(stale.is_empty(), "ops listed as unsupported in K mode that compile: {stale:?}");
+    // the one form of a supported op that K mode lacks: 8-bit lanes shifted by a vector
+    for l in &lacking {
+        assert!(l.contains("vec.sh"), "cases of supported ops that do not compile in K mode: {lacking:?}");
+    }
 }
 
 #[test]

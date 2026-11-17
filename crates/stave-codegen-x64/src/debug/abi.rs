@@ -37,13 +37,22 @@
 //!   `ymm0`. A mask is passed as the vector it is held as: one lane of the mask's width per
 //!   lane, all ones where set, zero where clear. An aggregate with a vector or mask inside is
 //!   MEMORY whatever its size (stack argument, sret return).
-//! - The upper halves of `ymm0`–`ymm15` are clean at every call and return that carries no
-//!   32-byte value in a register. One that does leaves every upper half unspecified: the
-//!   receiver cleans them before its own calls and returns.
+//! - **512-bit vectors and their masks.** A 64-byte vector takes the `zmm` view of the same
+//!   registers (`zmm0`–`zmm7`, return `zmm0`; on the stack as the 32-byte ones). A mask whose
+//!   lanes would fill 64 bytes (`mask8x64`, `mask16x32`, `mask32x16`, `mask64x8`) is not passed
+//!   as that vector but as its bits: one INTEGER argument, bit `j` = lane `j`, zero above the
+//!   lane count, returned in `rax`. A mask of up to 32 bytes is the vector above for every
+//!   function, also for one that holds its masks in `k` registers: it converts at its params,
+//!   call arguments and returns.
+//! - The upper parts of `zmm0`–`zmm15` above bit 127 are clean at every call and return that
+//!   carries no 32- or 64-byte value in a register. One that does leaves every upper part
+//!   unspecified: the receiver cleans them before its own calls and returns. `k0`–`k7` are
+//!   caller-saved and carry nothing across a call.
 //! - The convention follows the types of a signature only, never the features a function is
 //!   compiled for: functions of different feature sets call each other. A function holds a
-//!   32-byte value only with `avx`, so both sides of a signature with one have it, and a
-//!   function without `avx` is never entered or returned to with dirty upper halves.
+//!   32-byte value only with `avx` and a 64-byte one only with the AVX-512 set, so both sides
+//!   of a signature with one have it, and a function without `avx` is never entered or
+//!   returned to with dirty upper parts.
 
 use stave_ir::layout::{Layouts, Shape};
 use stave_ir::simd::{self, LaneTy};
@@ -66,16 +75,41 @@ pub(crate) enum VCls {
     /// bytes), where the bytes above `size` up to 16 are zero. A debug build loads it for every
     /// op; a release build keeps it in the register.
     V { size: u32 },
+    /// A mask in a function compiled for the AVX-512 set (K mode): `n` lanes of `w` bytes held
+    /// as one bit per lane in a mask register, bit `j` = lane `j`, the bits from `n` up zero.
+    /// Its home is 8 bytes holding those bits. Everywhere else (memory behind a pointer, an
+    /// aggregate, the call boundary) the mask keeps the format of [`VCls::V`]: `n * w` bytes of
+    /// all-ones or zero lanes, except that at a call one of more than 32 bytes travels as its
+    /// bits in a general register ([`VCls::boundary`]).
+    K { n: u32, w: u32 },
 }
 
 impl VCls {
     /// Size and alignment of the frame home of a value of this class.
     pub(crate) fn home(self) -> (u32, u32) {
         match self {
-            VCls::G { .. } | VCls::X(_) => (8, 8),
+            VCls::G { .. } | VCls::X(_) | VCls::K { .. } => (8, 8),
             VCls::M { size, align } => (size.div_ceil(8) * 8, align.max(8)),
             VCls::V { size } => (size.max(8), size.max(8)),
         }
+    }
+}
+
+impl VCls {
+    /// The class a value of this class has at a call boundary: a mask register value travels
+    /// as the vector of its lanes, or as its bits (an integer) when that vector has more than
+    /// 32 bytes. So a signature has one convention whatever the features of the two sides.
+    pub(crate) fn boundary(self) -> VCls {
+        match self {
+            VCls::K { n, w } if n * w <= 32 => VCls::V { size: n * w },
+            VCls::K { .. } => VCls::G { bytes: 8, signed: false },
+            c => c,
+        }
+    }
+
+    /// The value occupies a `ymm` or `zmm` register at a call boundary.
+    pub(crate) fn wide_at_boundary(self) -> bool {
+        matches!(self.boundary(), VCls::V { size } if size > 16)
     }
 }
 
@@ -84,12 +118,18 @@ const MAX_VALUE_SIZE: u64 = 1 << 28;
 
 /// The class of every type of the table (`None`: no value of the type can be held: unsized,
 /// generic, too large, a vector wider than `vmax` bytes or with f16 / bf16 lanes, a sizeless
-/// vector). `vmax`: the widest vector register of the target in bytes (16 or 32).
-pub(crate) fn classify_all(types: &TypeTable, layouts: &Layouts, vmax: u32) -> Vec<Option<VCls>> {
-    (0..types.len()).map(|i| classify(types, layouts, TypeId(i as u32), vmax)).collect()
+/// vector). `vmax`: the widest vector register of the function in bytes (16, 32, or 64); `kmask`:
+/// masks live in mask registers ([`VCls::K`]).
+pub(crate) fn classify_all(
+    types: &TypeTable,
+    layouts: &Layouts,
+    vmax: u32,
+    kmask: bool,
+) -> Vec<Option<VCls>> {
+    (0..types.len()).map(|i| classify(types, layouts, TypeId(i as u32), vmax, kmask)).collect()
 }
 
-fn classify(types: &TypeTable, layouts: &Layouts, t: TypeId, vmax: u32) -> Option<VCls> {
+fn classify(types: &TypeTable, layouts: &Layouts, t: TypeId, vmax: u32, kmask: bool) -> Option<VCls> {
     let key = types.key(t)?;
     let vec = |size: u64| (size <= u64::from(vmax)).then_some(VCls::V { size: size as u32 });
     let g = |bytes: u8, signed: bool| Some(VCls::G { bytes, signed });
@@ -124,7 +164,10 @@ fn classify(types: &TypeTable, layouts: &Layouts, t: TypeId, vmax: u32) -> Optio
         },
         TypeKey::Mask { .. } => {
             let (w, n) = simd::mask_shape(types, t)?;
-            vec(u64::from(w / 8 * n))
+            match vec(u64::from(w / 8 * n))? {
+                VCls::V { .. } if kmask => Some(VCls::K { n, w: w / 8 }),
+                c => Some(c),
+            }
         }
         _ => None,
     }
@@ -264,7 +307,7 @@ pub(crate) fn call_abi(
     ret: Option<TypeId>,
     env: bool,
 ) -> Option<CallAbi> {
-    let get = |t: TypeId| cls.get(t.index()).copied().flatten();
+    let get = |t: TypeId| cls.get(t.index()).copied().flatten().map(VCls::boundary);
     let mut ng = 0usize;
     let mut nx = 0u8;
     let ret = match ret {
@@ -273,6 +316,7 @@ pub(crate) fn call_abi(
             VCls::G { .. } => RetLoc::Reg(Piece::G(Gpr::RAX)),
             VCls::X(_) => RetLoc::Reg(Piece::X(xmm(0))),
             VCls::V { .. } => RetLoc::Vec,
+            VCls::K { .. } => return None,
             VCls::M { size: 0, .. } => RetLoc::None,
             VCls::M { size, .. } => match eightbytes(types, layouts, t, size) {
                 Some(ebs) => {
@@ -335,6 +379,7 @@ pub(crate) fn call_abi(
                     Loc::Stack(on_stack(size, size))
                 }
             }
+            VCls::K { .. } => return None,
             VCls::M { size: 0, .. } => Loc::Ignore,
             VCls::M { size, align } => match eightbytes(types, layouts, p, size) {
                 Some(ebs) => {
