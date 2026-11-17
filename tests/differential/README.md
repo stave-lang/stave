@@ -58,8 +58,9 @@ For every leg (the interpreter, then native debug and release builds for x86_64-
 x86_64-linux-v3 and aarch64-linux; the `_v3` programs for x86_64-linux-v3 only):
 
 - the program exits 0 with one line per case and nothing on stderr;
-- on every line the vector tokens equal the reference tokens (two NaNs are equal whatever their
-  bits; NaN payloads are unspecified);
+- on every line the vector tokens equal the reference tokens: two NaNs of one float type are
+  equal whatever their sign and payload (unspecified, LANG.md §3), every other token compares
+  bit for bit (`-0.0` is not `0.0`), and an `h` hash replaces each NaN by one canonical NaN first;
 - every native line equals the interpreter's;
 - for `utf8`, `bytesearch` and `sum_disp`, the reference tokens equal what the harness computes
   in Rust;
