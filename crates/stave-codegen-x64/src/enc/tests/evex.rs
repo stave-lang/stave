@@ -47,6 +47,8 @@ enum Shape {
     Down(u32),
     /// `narrow, wide/m` (the wide operand is this many times the narrow register)
     Narrow(u32),
+    /// `v/m, v` with a zeroing form
+    Compress,
 }
 
 fn shape(op: EOp) -> Shape {
@@ -54,11 +56,20 @@ fn shape(op: EOp) -> Shape {
     let has = |p: &str| n.starts_with(p);
     if n.ends_with("St") {
         Shape::Store
-    } else if has("Movdq") || has("Mova") || has("Movshdup") || has("Sqrt") || has("Pabs") {
+    } else if has("Pcompress") {
+        Shape::Compress
+    } else if has("Movdq")
+        || has("Mova")
+        || has("Movshdup")
+        || has("Sqrt")
+        || has("Pabs")
+        || has("Plzcnt")
+        || has("Pexpand")
+    {
         Shape::Un
-    } else if has("Rndscale") {
+    } else if has("Rndscale") || has("Pshufd") {
         Shape::UnI
-    } else if has("Pternlog") {
+    } else if has("Pternlog") || has("Shufi") || has("Align") {
         Shape::BinI
     } else if has("Pcmpeq") || has("Pcmpgt") || has("Ptestm") {
         Shape::Cmp
@@ -128,6 +139,7 @@ fn lens(op: EOp) -> Vec<EVL> {
         (EOp::Broadcastsd | EOp::Permq, _) => vec![EVL::L256, EVL::L512],
         (_, Shape::Extract(2) | Shape::Insert(2)) => vec![EVL::L512],
         (_, Shape::Extract(_) | Shape::Insert(_)) => vec![EVL::L256, EVL::L512],
+        (EOp::Shufi64x2, _) => vec![EVL::L256, EVL::L512],
         _ => vec![EVL::L128, EVL::L256, EVL::L512],
     }
 }
@@ -301,13 +313,18 @@ fn add(bt: &mut Batch, op: EOp, vl: EVL, (d, a, b): (u8, u8, u8), m: Option<&(Me
             let (rm, t) = rm(n);
             (Ev::new(op, vl, d, 0, rm), format!("{name} {}{kk},{t}", vreg(n / r, d)))
         }
+        Shape::Compress => {
+            let (rm, t) = rm(n);
+            (Ev::new(op, vl, d, 0, rm), format!("{name} {t}{kk},{}", v(d)))
+        }
     };
     bt.add(text, |asm| asm.evex(ev.mask(kr, z)));
 }
 
 /// Whether `op` takes a write mask.
 fn masked(op: EOp) -> bool {
-    op != EOp::Psadbw && !matches!(shape(op), Shape::MaskToVec | Shape::VecToMask)
+    !matches!(op, EOp::Psadbw | EOp::MovntpsSt | EOp::MovntpdSt | EOp::MovntdqSt)
+        && !matches!(shape(op), Shape::MaskToVec | Shape::VecToMask)
 }
 
 #[test]
@@ -367,9 +384,12 @@ fn evex_shift_imm() {
                 bt.add(format!("{name} {},{},0x7", vreg(n, d), vreg(n, s)), |a| {
                     a.evex_shift_i(op, vl, d, ERm::R(s), 7, KReg::masked(0), false)
                 });
-                bt.add(format!("{name} {}{{k2}}{{z}},{},0x1", vreg(n, d), vreg(n, s)), |a| {
-                    a.evex_shift_i(op, vl, d, ERm::R(s), 1, KReg::masked(2), true)
-                });
+                // the byte shifts take no write mask
+                if !matches!(op, EShiftI::Pslldq | EShiftI::Psrldq) {
+                    bt.add(format!("{name} {}{{k2}}{{z}},{},0x1", vreg(n, d), vreg(n, s)), |a| {
+                        a.evex_shift_i(op, vl, d, ERm::R(s), 1, KReg::masked(2), true)
+                    });
+                }
             }
             for (m, text) in &ms {
                 bt.add(format!("{name} {},{text},0x3", vreg(n, 5)), |a| {
@@ -459,4 +479,47 @@ fn mask_registers() {
         }
     }
     bt.run();
+}
+
+/// Gathers and scatters: every form at each length, with both register banks and displacements
+/// that are and are not a multiple of the element size.
+#[test]
+fn evex_gather_scatter() {
+    let mut bt = Batch::new();
+    let x = Xmm::masked;
+    for op in EVsib::ALL {
+        let name = format!("v{op:?}").to_lowercase();
+        let (data_q, index_q) = match op {
+            EVsib::Pgatherdd | EVsib::Pscatterdd => (false, false),
+            EVsib::Pgatherdq | EVsib::Pscatterdq => (true, false),
+            EVsib::Pgatherqd | EVsib::Pscatterqd => (false, true),
+            EVsib::Pgatherqq | EVsib::Pscatterqq => (true, true),
+        };
+        let (scale, sc) = if data_q { (8, Scale::S8) } else { (4, Scale::S4) };
+        for vl in [EVL::L128, EVL::L256, EVL::L512] {
+            let n = vl.bytes();
+            // where the lane sizes differ, the register of the narrower lanes is half as long
+            let dn = if !data_q && index_q { n / 2 } else { n };
+            let inn = if data_q && !index_q { n / 2 } else { n };
+            for (d, i, k, base, disp) in
+                [(1u8, 2u8, 1u8, Gpr::RAX, 0x40), (9, 3, 7, Gpr::R9, 0x7), (4, 12, 2, Gpr::RSP, -0x100)]
+            {
+                let off = if disp < 0 { format!("-0x{:x}", -disp) } else { format!("+0x{disp:x}") };
+                let mem = format!("[{}+{}*{scale}{off}]", base.name(Size::Q), vreg(inn, i));
+                let want = if op.scatter() {
+                    format!("{name} {mem}{{k{k}}},{}", vreg(dn, d))
+                } else {
+                    format!("{name} {}{{k{k}}},{mem}", vreg(dn, d))
+                };
+                bt.add(want, |a| a.evex_vsib(op, vl, x(d), base, x(i), sc, disp, KReg::masked(k)));
+            }
+        }
+    }
+    bt.run();
+    let mut a = Asm::new();
+    let (g, s) = (EVsib::Pgatherdd, EVsib::Pscatterdd);
+    assert!(a.evex_vsib(g, EVL::L512, x(1), Gpr::RAX, x(2), Scale::S4, 0, KReg::masked(0)).is_err());
+    assert!(a.evex_vsib(g, EVL::L512, x(1), Gpr::RAX, x(1), Scale::S4, 0, KReg::masked(1)).is_err());
+    assert_eq!(a.offset(), 0);
+    assert!(a.evex_vsib(s, EVL::L512, x(1), Gpr::RAX, x(1), Scale::S4, 0, KReg::masked(1)).is_ok());
 }

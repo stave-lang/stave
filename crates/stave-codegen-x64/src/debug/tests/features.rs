@@ -122,10 +122,10 @@ const KOPS: [&str; 10] =
     ["kortest", "kshiftl", "kshiftr", "kandn", "kxnor", "kmov", "kand", "kxor", "knot", "kor"];
 
 /// The AVX-512 features of an EVEX instruction, from its text: the instructions on byte and
-/// word lanes are `avx512bw` (not the down-conversions from doublewords and quadwords), the float
-/// logic, the quadword multiply, the conversions between floats and quadwords and the doubleword
-/// and quadword mask conversions `avx512dq`, the rest `avx512f`; without a `zmm` operand it is
-/// an `avx512vl` form.
+/// word lanes and the byte shifts are `avx512bw` (not the down-conversions from doublewords and
+/// quadwords), the float logic, the quadword multiply, the conversions between floats and
+/// quadwords and the doubleword and quadword mask conversions `avx512dq`, the leading-zero counts
+/// `avx512cd`, the rest `avx512f`; without a `zmm` operand it is an `avx512vl` form.
 fn evex_need(i: &Inst) -> FeatureSet {
     let m = i.mnem.strip_suffix(".s").unwrap_or(&i.mnem);
     let dq = matches!(
@@ -144,13 +144,18 @@ fn evex_need(i: &Inst) -> FeatureSet {
             | "vxorps"
             | "vxorpd"
     ) || (m.starts_with("vcvt") && m.contains("qq"));
+    let cd = matches!(m, "vplzcntd" | "vplzcntq");
     let down = ["vpmov", "vpmovs", "vpmovus"]
         .iter()
         .any(|p| m.strip_prefix(p).is_some_and(|r| matches!(r, "db" | "dw" | "qb" | "qw" | "qd")));
-    let bw = matches!(m, "vpmovb2m" | "vpmovw2m" | "vmovdqu8" | "vmovdqu16" | "vpmaddwd" | "vpunpcklwd")
-        || (m.starts_with("vp") && (m.ends_with('b') || m.ends_with('w')) && !down);
+    let bw = matches!(
+        m,
+        "vpmovb2m" | "vpmovw2m" | "vmovdqu8" | "vmovdqu16" | "vpmaddwd" | "vpunpcklwd" | "vpslldq" | "vpsrldq"
+    ) || (m.starts_with("vp") && (m.ends_with('b') || m.ends_with('w')) && !down);
     let mut s = FeatureSet::of(if dq {
         Feature::Avx512dq
+    } else if cd {
+        Feature::Avx512cd
     } else if bw {
         Feature::Avx512bw
     } else {
@@ -567,17 +572,19 @@ fn recorded_features_match_the_disassembly() {
     for &op in EOp::ALL {
         let n = format!("{op:?}");
         let has = |ps: &[&str]| ps.iter().any(|p| n.starts_with(p));
-        let imm = has(&["Rndscale", "Pternlog", "Cmpp", "Extract", "Insert", "Pshufd"])
+        let imm = has(&["Rndscale", "Pternlog", "Cmpp", "Extract", "Insert", "Pshufd", "Shufi", "Align"])
             || (has(&["Pcmp"]) && !has(&["Pcmpeq", "Pcmpgt"]));
         for vl in [EVL::L128, EVL::L256, EVL::L512] {
             let halves = n.ends_with("64x4");
             let quarters = n.ends_with("32x4");
-            if (vl == EVL::L128 && (halves || quarters || matches!(op, EOp::Broadcastsd | EOp::Permq)))
+            if (vl == EVL::L128 && (halves || quarters || matches!(op, EOp::Broadcastsd | EOp::Permq | EOp::Shufi64x2)))
                 || (vl == EVL::L256 && halves)
             {
                 continue;
             }
-            let e = Ev::new(op, vl, 1, 0, ERm::R(3));
+            // a non-temporal store has only the memory form
+            let rm = if has(&["Movnt"]) { ERm::M(m) } else { ERm::R(3) };
+            let e = Ev::new(op, vl, 1, 0, rm);
             let e = if imm { e.imm(1) } else { e };
             add(format!("{op:?} {vl:?}"), &|a| a.evex(e));
         }

@@ -79,6 +79,7 @@ pub(super) enum Ef {
     F,
     Bw,
     Dq,
+    Cd,
 }
 
 impl Ef {
@@ -87,6 +88,7 @@ impl Ef {
             Ef::F => Feature::Avx512f,
             Ef::Bw => Feature::Avx512bw,
             Ef::Dq => Feature::Avx512dq,
+            Ef::Cd => Feature::Avx512cd,
         }
     }
 }
@@ -216,6 +218,22 @@ eops! {
         // blends by a mask register
         Pblendmb = (P66, M38, 0, 0x66, Full, Bw), Pblendmw = (P66, M38, 1, 0x66, Full, Bw),
         Pblendmd = (P66, M38, 0, 0x64, Full, F), Pblendmq = (P66, M38, 1, 0x64, Full, F),
+        // shuffles and permutes (`Shufi64x2` has no 128-bit form)
+        Pshufb = (P66, M38, 0, 0x00, Full, Bw),
+        Shufi64x2 = (P66, M3A, 1, 0x43, Full, F), Alignq = (P66, M3A, 1, 0x03, Full, F),
+        Permi2w = (P66, M38, 1, 0x75, Full, Bw), Permi2d = (P66, M38, 0, 0x76, Full, F),
+        Permi2q = (P66, M38, 1, 0x76, Full, F),
+        // high halves and widening products, packs
+        Pmulhw = (P66, M0F, 0, 0xe5, Full, Bw), Pmulhuw = (P66, M0F, 0, 0xe4, Full, Bw),
+        Pmuldq = (P66, M38, 1, 0x28, Full, F), Pmuludq = (P66, M0F, 1, 0xf4, Full, F),
+        Pmaddubsw = (P66, M38, 0, 0x04, Full, Bw), Packuswb = (P66, M0F, 0, 0x67, Full, Bw),
+        Plzcntd = (P66, M38, 0, 0x44, Full, Cd), Plzcntq = (P66, M38, 1, 0x44, Full, Cd),
+        // compress (`reg` the source, `rm` the destination) and expand, one element per lane
+        Pcompressd = (P66, M38, 0, 0x8b, Fixed(4), F), Pcompressq = (P66, M38, 1, 0x8b, Fixed(8), F),
+        Pexpandd = (P66, M38, 0, 0x89, Fixed(4), F), Pexpandq = (P66, M38, 1, 0x89, Fixed(8), F),
+        // non-temporal stores
+        MovntpsSt = (N, M0F, 0, 0x2b, Full, F), MovntpdSt = (P66, M0F, 1, 0x2b, Full, F),
+        MovntdqSt = (P66, M0F, 0, 0xe7, Full, F),
         // mask register to and from a vector of all-ones lanes
         Pmovm2b = (F3, M38, 0, 0x28, Full, Bw), Pmovm2w = (F3, M38, 1, 0x28, Full, Bw),
         Pmovm2d = (F3, M38, 0, 0x38, Full, Dq), Pmovm2q = (F3, M38, 1, 0x38, Full, Dq),
@@ -289,6 +307,9 @@ pub enum EShiftI {
     Psraw,
     Psrad,
     Psraq,
+    /// Byte shifts within each 128-bit lane.
+    Pslldq,
+    Psrldq,
 }
 
 impl EShiftI {
@@ -302,6 +323,8 @@ impl EShiftI {
         EShiftI::Psraw,
         EShiftI::Psrad,
         EShiftI::Psraq,
+        EShiftI::Pslldq,
+        EShiftI::Psrldq,
     ];
 
     /// `(opcode, /digit, W, feature)`.
@@ -316,6 +339,8 @@ impl EShiftI {
             EShiftI::Psraw => (0x71, 4, false, Ef::Bw),
             EShiftI::Psrad => (0x72, 4, false, Ef::F),
             EShiftI::Psraq => (0x72, 4, true, Ef::F),
+            EShiftI::Pslldq => (0x73, 7, false, Ef::Bw),
+            EShiftI::Psrldq => (0x73, 3, false, Ef::Bw),
         }
     }
 }
@@ -633,5 +658,88 @@ impl Asm {
         };
         self.note(s.feature());
         let _ = self.kvex(Pp::P66, Map::M3A, w, false, opc, dst.0, 0, RmEnc::Reg(src.0), Some(imm));
+    }
+}
+
+/// Gathers and scatters: EVEX with a vector-indexed memory operand (VSIB), under a write mask
+/// that the instruction clears lane by lane as it completes. Named as the mnemonic: data then
+/// index lane size, `Pgatherqd` has quadword indices and doubleword data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EVsib {
+    Pgatherdd,
+    Pgatherdq,
+    Pgatherqd,
+    Pgatherqq,
+    Pscatterdd,
+    Pscatterdq,
+    Pscatterqd,
+    Pscatterqq,
+}
+
+impl EVsib {
+    pub const ALL: [EVsib; 8] = [
+        EVsib::Pgatherdd,
+        EVsib::Pgatherdq,
+        EVsib::Pgatherqd,
+        EVsib::Pgatherqq,
+        EVsib::Pscatterdd,
+        EVsib::Pscatterdq,
+        EVsib::Pscatterqd,
+        EVsib::Pscatterqq,
+    ];
+
+    /// `(opcode, W)`.
+    fn desc(self) -> (u8, bool) {
+        match self {
+            EVsib::Pgatherdd => (0x90, false),
+            EVsib::Pgatherdq => (0x90, true),
+            EVsib::Pgatherqd => (0x91, false),
+            EVsib::Pgatherqq => (0x91, true),
+            EVsib::Pscatterdd => (0xa0, false),
+            EVsib::Pscatterdq => (0xa0, true),
+            EVsib::Pscatterqd => (0xa1, false),
+            EVsib::Pscatterqq => (0xa1, true),
+        }
+    }
+
+    pub fn scatter(self) -> bool {
+        matches!(self, EVsib::Pscatterdd | EVsib::Pscatterdq | EVsib::Pscatterqd | EVsib::Pscatterqq)
+    }
+}
+
+impl Asm {
+    /// `vpgather* data {k}, [base + index * scale + disp]` / `vpscatter* [..] {k}, data`. `vl`
+    /// is the length of the wider of the data and the index register; `k` is not `k0`, and a
+    /// gather's data register is not its index register.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evex_vsib(
+        &mut self,
+        op: EVsib,
+        vl: EVL,
+        data: Xmm,
+        base: Gpr,
+        index: Xmm,
+        scale: super::Scale,
+        disp: i32,
+        k: KReg,
+    ) -> Result<(), EncError> {
+        let (opc, w) = op.desc();
+        if data.num() > 15 || index.num() > 15 {
+            return Err(EncError::Invalid("EVEX register above 15"));
+        }
+        if k.0 == 0 {
+            return Err(EncError::Invalid("a gather or scatter needs a mask register other than k0"));
+        }
+        if !op.scatter() && data.num() == index.num() {
+            return Err(EncError::Invalid("a gather's data and index registers must differ"));
+        }
+        let rm = RmEnc::Vsib { base: Some(base), index: index.num(), scale, disp };
+        let n = if w { 8 } else { 4 };
+        self.evex_raw(Pp::P66, Map::M38, w, opc, vl, data.num(), 0, rm, k, false, Tt::Fixed(n), None)?;
+        self.note(Feature::Avx512f);
+        if vl != EVL::L512 {
+            self.note(Feature::Avx512vl);
+        }
+        Ok(())
     }
 }
