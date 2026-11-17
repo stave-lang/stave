@@ -59,15 +59,40 @@ fn load(src: &str) -> (Program, Typeck) {
     (p, tc)
 }
 
-/// Every fn and closure node's effect set (without the checked IR), by node name.
+/// Every fn and closure's effect set (without the checked IR) by source name, as `stave effects`
+/// reports it: the union over the call-graph nodes the program uses.
 fn sets(p: &Program, tc: &Typeck) -> BTreeMap<String, Effects> {
     let s = effects::solve(p, tc, None);
     let g = &tc.call_graph;
-    let ns: Vec<u32> = (0..g.nodes.len() as u32)
-        .filter(|&n| !matches!(g.nodes[n as usize].kind, NodeKind::Table { .. }))
-        .collect();
-    let names = g.node_names(p, tc, &ns);
-    names.into_iter().zip(ns).map(|(name, n)| (name, s.set[n as usize])).collect()
+    let groups = effects::by_source(g, &s);
+    let firsts: Vec<u32> = groups.iter().map(|x| x.0[0]).collect();
+    let names = g.source_names(p, tc, &firsts);
+    names.into_iter().zip(groups).map(|(name, (_, e))| (name, e)).collect()
+}
+
+/// `name` without the fn values a call-graph node is specialized on (`a{0=b}.0` -> `a.0`).
+fn unspec(name: &str) -> String {
+    let (mut out, mut depth) = (String::new(), 0);
+    for c in name.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The dump line of the edge `from -> to` (source names; any specialization), if there is one.
+fn edge_line(d: &str, from: &str, to: &str) -> Option<String> {
+    d.lines()
+        .filter_map(|l| l.strip_prefix("edge "))
+        .find(|l| {
+            let Some((f, rest)) = l.split_once(" -> ") else { return false };
+            unspec(f) == from && unspec(rest).starts_with(&format!("{to} "))
+        })
+        .map(str::to_string)
 }
 
 #[track_caller]
@@ -170,11 +195,8 @@ fn main() {
 ",
     );
     let d = tc.call_graph.dump(&p, &tc);
-    assert!(
-        d.lines()
-            .any(|l| l.starts_with("edge std.thread.join<u32, u32> -> std.thread.join<u32, u32>.0 spawn")),
-        "{d}"
-    );
+    let e = edge_line(&d, "std.thread.join<u32, u32>", "std.thread.join<u32, u32>.0").unwrap_or_default();
+    assert!(e.contains(" spawn @"), "{d}");
     let m = sets(&p, &tc);
     assert!(m["std.thread.join<u32, u32>"].contains(Effects::IO | Effects::BLOCK));
 }
@@ -209,10 +231,7 @@ fn main() {
     );
     let d = tc.call_graph.dump(&p, &tc);
     let edge = |from: &str, to: &str| -> String {
-        d.lines()
-            .find(|l| l.starts_with(&format!("edge {from} -> {to} ")))
-            .unwrap_or_else(|| panic!("no edge {from} -> {to}:\n{d}"))
-            .to_string()
+        edge_line(&d, from, to).unwrap_or_else(|| panic!("no edge {from} -> {to}:\n{d}"))
     };
     let e = edge("main.one", "main.safe");
     assert!(e.contains(" indirect without(trap) @"), "{e}");
@@ -308,7 +327,7 @@ fn main() {}
     is(&m, "main.guard", &["lock"]);
     let s = effects::solve(&p, &tc, None);
     let g = &tc.call_graph;
-    let names = g.node_names(&p, &tc, &(0..g.nodes.len() as u32).collect::<Vec<_>>());
+    let names = g.source_names(&p, &tc, &(0..g.nodes.len() as u32).collect::<Vec<_>>());
     let at = |name: &str| names.iter().position(|n| n == name).unwrap() as u32;
     let glue = g.nodes.iter().position(|n| matches!(n.kind, NodeKind::Glue { .. })).unwrap();
     assert_eq!(s.local[glue], Effects::NONE);
@@ -320,6 +339,133 @@ fn main() {}
     assert_eq!(d.len(), 1);
     assert_eq!(d[0].code(), "E1401");
     assert!(d[0].message().contains("`runtime.alloc.free`, which frees memory"), "{}", d[0].message());
+}
+
+/// The nodes of fn `name` (every specialization and the plain node) and which are used.
+fn nodes_of(p: &Program, tc: &Typeck, s: &effects::EffectSets, name: &str) -> Vec<(String, bool)> {
+    let g = &tc.call_graph;
+    let all: Vec<u32> = (0..g.nodes.len() as u32).collect();
+    let src = g.source_names(p, tc, &all);
+    let full = g.node_names(p, tc, &all);
+    all.iter()
+        .filter(|&&n| src[n as usize] == name && matches!(g.nodes[n as usize].kind, NodeKind::Fn { .. }))
+        .map(|&n| (full[n as usize].clone(), s.used[n as usize]))
+        .collect()
+}
+
+/// E1401 / E1403 diagnostics of the program (code, message).
+fn effect_errors(p: &Program, tc: &Typeck) -> Vec<(String, String)> {
+    let s = effects::solve(p, tc, None);
+    let plan = effects::plan(p, tc);
+    effects::check(p, tc, &plan, &s).iter().map(|d| (d.code().to_string(), d.message().to_string())).collect()
+}
+
+/// A helper called with two closures, one trapping and one not, has a node for each: its line
+/// is the union, and `without(trap)` on it is E1401, once, in source names.
+#[test]
+fn a_helper_called_with_two_closures_has_their_union() {
+    let src = |deny: &str| {
+        format!(
+            "import std.debug;
+fn apply(f: fn(u32) -> u32, x: u32) -> u32 {deny} {{ return f(x); }}
+fn main() {{
+    let a = apply(fn(x: u32) -> u32 {{ debug.assert(x != 0u32, \"x\"); return x; }}, 1u32);
+    let b = apply(fn(x: u32) -> u32 {{ return x +% 1u32; }}, 2u32);
+}}
+"
+        )
+    };
+    let (p, tc) = load(&src(""));
+    let s = effects::solve(&p, &tc, None);
+    let nodes = nodes_of(&p, &tc, &s, "main.apply");
+    assert_eq!(nodes.iter().filter(|x| x.1).count(), 2, "{nodes:?}");
+    is(&sets(&p, &tc), "main.apply", &["trap"]);
+    let (p, tc) = load(&src("without(trap)"));
+    let errs = effect_errors(&p, &tc);
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert_eq!(errs[0].0, "E1401");
+    assert_eq!(
+        errs[0].1,
+        "`main.apply` denies `trap`, but it reaches `runtime.panic.trap_msg`, which may trap"
+    );
+}
+
+/// A helper only ever called with one closure: its plain node runs nowhere and counts for
+/// nothing, while a helper no call reaches keeps its plain node.
+#[test]
+fn an_unused_plain_node_does_not_count() {
+    let (p, tc) = load(
+        "fn apply(f: fn(u32) -> u32, x: u32) -> u32 without(trap) { return f(x); }
+fn lonely(f: fn(u32) -> u32, x: u32) -> u32 { return f(x); }
+fn main() {
+    let a = apply(fn(x: u32) -> u32 { return x +% 1u32; }, 1u32);
+}
+",
+    );
+    let s = effects::solve(&p, &tc, None);
+    let apply = nodes_of(&p, &tc, &s, "main.apply");
+    assert_eq!(apply.len(), 2, "{apply:?}");
+    assert!(apply.iter().any(|(n, used)| n == "main.apply" && !used), "{apply:?}");
+    assert!(apply.iter().any(|(n, used)| n != "main.apply" && *used), "{apply:?}");
+    assert_eq!(nodes_of(&p, &tc, &s, "main.lonely"), [("main.lonely".to_string(), true)]);
+    is(&sets(&p, &tc), "main.apply", &[]);
+    assert!(effect_errors(&p, &tc).is_empty());
+}
+
+/// Past 16 known values the calls share the plain node, which then holds the rest: the effects
+/// stay sound (the trapping value is the 17th).
+#[test]
+fn past_the_specialization_limit_the_plain_node_holds_the_rest() {
+    let mut src =
+        String::from("import std.debug;\nfn apply(f: fn(u32) -> u32, x: u32) -> u32 DENY { return f(x); }\n");
+    for i in 0..16 {
+        src.push_str(&format!("fn v{i}(x: u32) -> u32 {{ return x +% {i}u32; }}\n"));
+    }
+    src.push_str("fn v16(x: u32) -> u32 { debug.assert(x != 0u32, \"x\"); return x; }\nfn main() {\n");
+    for i in 0..17 {
+        src.push_str(&format!("    let a{i} = apply(v{i}, 1u32);\n"));
+    }
+    src.push_str("}\n");
+    let (p, tc) = load(&src.replace("DENY", ""));
+    let s = effects::solve(&p, &tc, None);
+    let apply = nodes_of(&p, &tc, &s, "main.apply");
+    assert_eq!(apply.len(), 17, "{apply:?}");
+    assert!(apply.iter().all(|x| x.1), "{apply:?}");
+    assert!(apply.iter().any(|(n, _)| n == "main.apply"));
+    is(&sets(&p, &tc), "main.apply", &["trap"]);
+    let (p, tc) = load(&src.replace("DENY", "without(trap)"));
+    let errs = effect_errors(&p, &tc);
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert_eq!(
+        errs[0].1,
+        "`main.apply` denies `trap`, but it reaches `runtime.panic.trap_msg`, which may trap"
+    );
+}
+
+/// The recursion check and the effect pass name a cycle through a specialized helper the same
+/// way: source names, no specialization.
+#[test]
+fn recursion_and_effect_diagnostics_use_source_names() {
+    let (p, tc, errs) = load_any(
+        "fn apply(f: fn(u32) -> u32, x: u32) -> u32 { return f(x); }
+fn spin(n: u32) -> u32 { return apply(spin, n -% 1u32); }
+fn g(n: u32) -> u32 without(recursive) { return spin(n); }
+fn main() {
+    let a = g(3u32);
+}
+",
+        "x86_64-linux",
+    );
+    let rec: Vec<&String> = errs.iter().filter(|e| e.starts_with("E1402")).collect();
+    assert_eq!(rec.len(), 1, "{errs:?}");
+    let eff = effect_errors(&p, &tc);
+    assert_eq!(eff.len(), 1, "{eff:?}");
+    assert_eq!(eff[0].0, "E1401");
+    for m in rec.iter().map(|s| s.as_str()).chain([eff[0].1.as_str()]) {
+        assert!(!m.contains('{'), "{m}");
+        assert!(m.contains("main.spin") || m.contains("main.apply"), "{m}");
+    }
+    assert!(eff[0].1.contains("`main.g` denies `recursive`, but it reaches `main."), "{eff:?}");
 }
 
 /// The sets do not depend on the worker count (per-level steps collect in SCC order).

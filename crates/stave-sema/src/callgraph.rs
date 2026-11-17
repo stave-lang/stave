@@ -310,7 +310,15 @@ impl CallGraph {
     pub fn node_names(&self, prog: &Program, tc: &Typeck, ns: &[u32]) -> Vec<String> {
         let cx = self.types(&tc.types);
         let names = crate::sigs::NameCx { prog, generics: &[] };
-        ns.iter().map(|&n| node_name(self, prog, &tc.sigs, &cx, &names, n)).collect()
+        ns.iter().map(|&n| node_name(self, prog, &tc.sigs, &cx, &names, n, true)).collect()
+    }
+
+    /// The names of nodes `ns` in source terms: as [`CallGraph::node_names`], without the fn
+    /// values a node is specialized on (`main.apply`, not `main.apply{0=main.twice}`).
+    pub fn source_names(&self, prog: &Program, tc: &Typeck, ns: &[u32]) -> Vec<String> {
+        let cx = self.types(&tc.types);
+        let names = crate::sigs::NameCx { prog, generics: &[] };
+        ns.iter().map(|&n| node_name(self, prog, &tc.sigs, &cx, &names, n, false)).collect()
     }
 
     /// A text form for tests: one line per node, edge, table, root, and SCC (cycles only), in id
@@ -319,7 +327,7 @@ impl CallGraph {
     pub fn dump(&self, prog: &Program, tc: &Typeck) -> String {
         let cx = self.types(&tc.types);
         let names = crate::sigs::NameCx { prog, generics: &[] };
-        let name = |n: u32| -> String { node_name(self, prog, &tc.sigs, &cx, &names, n) };
+        let name = |n: u32| -> String { node_name(self, prog, &tc.sigs, &cx, &names, n, true) };
         let at = |s: Span| -> String {
             prog.source_map.locate(s).map_or_else(|_| "?".to_string(), |l| format!("{}:{}", l.line, l.col))
         };
@@ -380,6 +388,7 @@ fn node_name(
     cx: &Overlay<'_>,
     names: &crate::sigs::NameCx<'_>,
     n: u32,
+    spec_too: bool,
 ) -> String {
     match g.nodes.get(n as usize).map(|x| &x.kind) {
         Some(NodeKind::Fn { inst, spec, .. }) => {
@@ -398,10 +407,10 @@ fn node_name(
             let known: Vec<String> = spec
                 .iter()
                 .enumerate()
-                .filter(|(_, ns)| !ns.is_empty())
+                .filter(|(_, ns)| spec_too && !ns.is_empty())
                 .map(|(p, ns)| {
                     let vs: Vec<String> =
-                        ns.iter().map(|&n| node_name(g, prog, sigs, cx, names, n)).collect();
+                        ns.iter().map(|&n| node_name(g, prog, sigs, cx, names, n, true)).collect();
                     format!("{p}={}", vs.join("|"))
                 })
                 .collect();
@@ -411,7 +420,7 @@ fn node_name(
             s
         }
         Some(NodeKind::Closure { parent, index, .. }) => {
-            format!("{}.{index}", node_name(g, prog, sigs, cx, names, *parent))
+            format!("{}.{index}", node_name(g, prog, sigs, cx, names, *parent, spec_too))
         }
         Some(NodeKind::Table { table }) => {
             let t = g.tables.get(*table as usize).map_or(TypeId::NONE, |t| t.ty);

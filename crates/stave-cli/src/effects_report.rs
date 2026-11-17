@@ -1,6 +1,8 @@
 //! `stave effects [PKG_DIR] [--json]` (contracts/cli.md): the effect set of every fn and closure
 //! of the program's own packages (the root package and its path dependencies; generic fns per
-//! instance), one per line in canonical (file, offset) order, then by name. Always stage0.
+//! instance; a fn the call graph specializes on the fn values it is called with is one line, the
+//! union over the nodes the program uses), one per line in canonical (file, offset) order, then
+//! by name. Always stage0.
 //!
 //! - human: `<file>:<line>:<col>: <fn>: <effects>` (effects space-separated in the order
 //!   `alloc trap recursive lock unsafe io block`, or `none`)
@@ -105,10 +107,16 @@ fn render(
             .and_then(|m| prog.packages.get(m.package.idx()))
             .is_some_and(|p| p.kind != stave_sema::PackageKind::Builtin)
     };
-    let nodes: Vec<u32> = (0..g.nodes.len() as u32).filter(|&n| own(n)).collect();
-    let names = g.node_names(prog, tc, &nodes);
+    // one row per source fn or closure: the union over the call-graph nodes the program uses
+    let groups: Vec<(u32, Effects)> = stave_sema::effects::by_source(g, sets)
+        .into_iter()
+        .filter(|(ns, _)| own(ns[0]))
+        .map(|(ns, e)| (ns[0], e))
+        .collect();
+    let nodes: Vec<u32> = groups.iter().map(|x| x.0).collect();
+    let names = g.source_names(prog, tc, &nodes);
     let mut rows = Vec::with_capacity(nodes.len());
-    for (k, &n) in nodes.iter().enumerate() {
+    for (k, &(n, effects)) in groups.iter().enumerate() {
         let span = g.nodes[n as usize].span;
         let loc = output.files().locate(span)?;
         let file = prog.file(span.file).map_or(String::new(), |f| {
@@ -119,14 +127,7 @@ fn render(
                 f.display_path.clone()
             }
         });
-        rows.push((
-            (span.file, span.offset),
-            names[k].clone(),
-            file,
-            loc.line,
-            loc.col,
-            sets.set[n as usize],
-        ));
+        rows.push(((span.file, span.offset), names[k].clone(), file, loc.line, loc.col, effects));
     }
     rows.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
     let mut s = String::new();

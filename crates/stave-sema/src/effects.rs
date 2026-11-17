@@ -255,6 +255,9 @@ pub struct EffectSets {
     pub set: Vec<Effects>,
     /// Boundary nodes: their set is their own effects.
     pub boundary: Vec<bool>,
+    /// The nodes the program uses ([`used_nodes`]); a fn's effects are the union over its used
+    /// nodes.
+    pub used: Vec<bool>,
     /// The first op of each own effect: (node, effect bit index, op), sorted.
     ops: Vec<(u32, u8, Op)>,
     /// Whether `trap` includes the checked IR's trapping instructions (else only call cycles
@@ -550,7 +553,95 @@ pub fn solve(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>) -> EffectSets {
     }
     let set: Vec<Effects> =
         (0..n).map(|i| if boundary_node[i] { local[i] } else { scc_set[g.scc_of[i] as usize] }).collect();
-    EffectSets { local, set, boundary: boundary_node, ops, trap_from_ir: ir.is_some() }
+    EffectSets { local, set, boundary: boundary_node, used: used_nodes(g), ops, trap_from_ir: ir.is_some() }
+}
+
+/// Is `n` a fn node specialized on no fn value (the node calls without known values share)?
+fn plain(g: &CallGraph, n: u32) -> bool {
+    matches!(&g.nodes[n as usize].kind, NodeKind::Fn { spec, .. } if spec.iter().all(|s| s.is_empty()))
+}
+
+/// The nodes the program uses. The call graph gives a fn one node per set of known fn values
+/// it is called with, plus a plain node every fn starts with; a plain node that no call reaches
+/// stands for nothing that runs. Used: what an edge reaches from a used node, the closures of a
+/// used node, the roots, and, for a fn none of whose nodes is otherwise used, its plain node
+/// (first for fns no call reaches at all, then for those reached only from unused nodes, in node
+/// order). Every fn and closure therefore has a used node unless its enclosing fn's are all
+/// unused.
+pub fn used_nodes(g: &CallGraph) -> Vec<bool> {
+    let n = g.nodes.len();
+    let mut used = vec![false; n];
+    let mut closures: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut group_of: FxHashMap<&InstKey, usize> = FxHashMap::default();
+    let mut groups: Vec<Vec<u32>> = Vec::new();
+    for (i, nd) in g.nodes.iter().enumerate() {
+        match &nd.kind {
+            NodeKind::Closure { parent, .. } => closures[*parent as usize].push(i as u32),
+            NodeKind::Fn { inst, .. } => {
+                let k = *group_of.entry(inst).or_insert_with(|| {
+                    groups.push(Vec::new());
+                    groups.len() - 1
+                });
+                groups[k].push(i as u32);
+            }
+            _ => {}
+        }
+    }
+    let mut stack: Vec<u32> = g.roots.iter().map(|r| r.node).collect();
+    let visit = |stack: &mut Vec<u32>, used: &mut Vec<bool>| {
+        while let Some(m) = stack.pop() {
+            if std::mem::replace(&mut used[m as usize], true) {
+                continue;
+            }
+            stack.extend(g.succ(m).iter().map(|e| e.to).filter(|&t| !used[t as usize]));
+            stack.extend(closures[m as usize].iter().copied().filter(|&c| !used[c as usize]));
+        }
+    };
+    visit(&mut stack, &mut used);
+    let entry = |nodes: &[u32]| -> u32 { nodes.iter().copied().find(|&m| plain(g, m)).unwrap_or(nodes[0]) };
+    for nodes in &groups {
+        let called =
+            nodes.iter().any(|&m| g.pred(m).any(|(c, _)| !g.fn_of(c).is_some_and(|f| nodes.contains(&f))));
+        if !called && !nodes.iter().any(|&m| used[m as usize]) {
+            stack.push(entry(nodes));
+        }
+    }
+    visit(&mut stack, &mut used);
+    for nodes in &groups {
+        if !nodes.iter().any(|&m| used[m as usize]) {
+            stack.push(entry(nodes));
+            visit(&mut stack, &mut used);
+        }
+    }
+    used
+}
+
+/// The program's fns and closures in source terms: per group of nodes of one instance (or of one
+/// closure of it), the used nodes and the union of their effect sets, in first-node order.
+/// Groups with no used node (closures of fns that never run) are left out.
+pub fn by_source(g: &CallGraph, sets: &EffectSets) -> Vec<(Vec<u32>, Effects)> {
+    let mut group_of: FxHashMap<(&InstKey, u32), usize> = FxHashMap::default();
+    let mut out: Vec<(Vec<u32>, Effects)> = Vec::new();
+    for (i, nd) in g.nodes.iter().enumerate() {
+        let key = match &nd.kind {
+            NodeKind::Fn { inst, .. } => (inst, u32::MAX),
+            NodeKind::Closure { parent, index, .. } => match &g.nodes[*parent as usize].kind {
+                NodeKind::Fn { inst, .. } => (inst, *index),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if !sets.used[i] {
+            continue;
+        }
+        let k = *group_of.entry(key).or_insert_with(|| {
+            out.push((Vec::new(), Effects::NONE));
+            out.len() - 1
+        });
+        out[k].0.push(i as u32);
+        out[k].1 |= sets.set[i];
+    }
+    out
 }
 
 /// The checks of the program: every fn instance whose decl has a deny clause, and every fn value
@@ -566,7 +657,7 @@ pub fn plan(prog: &Program, tc: &Typeck) -> Plan {
         }
     }
     let mut inst_of: FxHashMap<DeclId, Vec<u32>> = FxHashMap::default();
-    let mut key_of: FxHashMap<&InstKey, u32> = FxHashMap::default();
+    let mut key_of: FxHashMap<&InstKey, Vec<u32>> = FxHashMap::default();
     for (i, nd) in g.nodes.iter().enumerate() {
         if let NodeKind::Fn { inst, .. } = &nd.kind {
             if let Some(s) = tc.sigs.fn_sig(inst.decl)
@@ -576,7 +667,7 @@ pub fn plan(prog: &Program, tc: &Typeck) -> Plan {
             }
             if !made.is_empty() {
                 inst_of.entry(inst.decl).or_default().push(i as u32);
-                key_of.insert(inst, i as u32);
+                key_of.entry(inst).or_default().push(i as u32);
             }
         }
     }
@@ -627,7 +718,7 @@ pub fn plan(prog: &Program, tc: &Typeck) -> Plan {
                     } else {
                         vec![InstKey { decl: *decl, args }]
                     };
-                    nodes.extend(decls.iter().filter_map(|k| key_of.get(k).copied()));
+                    nodes.extend(decls.iter().filter_map(|k| key_of.get(k)).flatten().copied());
                 }
                 for m in nodes {
                     checks.push(Check { node: m, deny, why: Why::Made { site } });
@@ -643,29 +734,29 @@ pub fn plan(prog: &Program, tc: &Typeck) -> Plan {
 pub fn check(prog: &Program, tc: &Typeck, plan: &Plan, sets: &EffectSets) -> Vec<Diagnostic> {
     let g = &tc.call_graph;
     let mut out = Vec::new();
-    // (node, effect, where a made value is coerced): one diagnostic each
-    type Key = (u32, u8, Option<(u32, u32)>);
+    // (source fn, effect, where a made value is coerced): one diagnostic each, whichever of the
+    // fn's specialized nodes has the effect
+    type Key = (String, u8, Option<(u32, u32)>);
     let mut seen: FxHashSet<Key> = FxHashSet::default();
     for c in &plan.checks {
+        if !sets.used[c.node as usize] {
+            continue;
+        }
         let have = Effects(sets.set[c.node as usize].0 & c.deny.0);
         for e in have.each() {
-            let key = (
-                c.node,
-                e.0,
-                match &c.why {
-                    Why::Clause => None,
-                    Why::Made { site } => Some((site.file.0, site.offset)),
-                },
-            );
-            if !seen.insert(key) {
+            let Some((edges, end)) = sets.chain(g, c.node, e) else { continue };
+            // the names `stave effects` prints: checked-IR paths, type args of an instance,
+            // `<fn>.<k>` for a closure, never the fn values a node is specialized on
+            let names = g.source_names(prog, tc, &[c.node, end]);
+            let (fn_path, at) = (&names[0], &names[1]);
+            let site = match &c.why {
+                Why::Clause => None,
+                Why::Made { site } => Some((site.file.0, site.offset)),
+            };
+            if !seen.insert((fn_path.clone(), e.0, site)) {
                 continue;
             }
-            let Some((edges, end)) = sets.chain(g, c.node, e) else { continue };
             let op = sets.op(end, e);
-            // the names `stave effects` prints: checked-IR paths, type args of an instance,
-            // `<fn>.<k>` for a closure
-            let names = g.node_names(prog, tc, &[c.node, end]);
-            let (fn_path, at) = (&names[0], &names[1]);
             let effect = e.names()[0];
             let op_text = op.map_or(OpKind::Trap.text(), |o| o.kind.text());
             let mut roles: Vec<(&str, Span)> = Vec::new();

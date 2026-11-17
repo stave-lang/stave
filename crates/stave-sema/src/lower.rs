@@ -92,9 +92,9 @@ pub type SitePos = (stave_diag::FileId, u32);
 /// The checked IR of a set of call-graph nodes ([`lower_graph_nodes`]).
 pub struct GraphLowering {
     pub module: Module,
-    /// The call-graph node of each function (`u32::MAX`: drop glue, or an instance the graph
-    /// does not have).
-    pub node_of_func: Vec<u32>,
+    /// The call-graph nodes of each function (none: drop glue, or an instance the graph does not
+    /// have).
+    pub nodes_of_func: Vec<Vec<u32>>,
     /// Where each site row is: (file, byte offset of its token).
     pub site_pos: Vec<SitePos>,
 }
@@ -110,8 +110,8 @@ pub fn lower_graph_nodes(
     crate::pool::on_big_stacks(|| {
         let (r, tm) = lower_in_pool(prog, tc, Roots::Graph(nodes));
         let r = r.map(|a| {
-            let node_of_func = graph_nodes_of(tc, &a);
-            GraphLowering { module: a.module, node_of_func, site_pos: a.site_pos }
+            let nodes_of_func = graph_nodes_of(tc, &a);
+            GraphLowering { module: a.module, nodes_of_func, site_pos: a.site_pos }
         });
         (r, tm)
     })
@@ -167,27 +167,26 @@ fn table_to_graph(
     x
 }
 
-/// The graph node of each function of `a`.
-fn graph_nodes_of(tc: &Typeck, a: &Assembled) -> Vec<u32> {
+/// The graph nodes of each function of `a`: every node of its instance (the plain node and one
+/// per fn-value specialization share one body), or of the closure in each of them.
+fn graph_nodes_of(tc: &Typeck, a: &Assembled) -> Vec<Vec<u32>> {
     use crate::callgraph::NodeKind;
     let g = &tc.call_graph;
     let mut cx = g.types(&tc.types);
     let mut memo = FxHashMap::default();
-    let mut key_of: FxHashMap<&InstKey, u32> = FxHashMap::default();
+    let mut key_of: FxHashMap<&InstKey, Vec<u32>> = FxHashMap::default();
     let mut first_closure = vec![u32::MAX; g.nodes.len()];
     for (i, nd) in g.nodes.iter().enumerate() {
         match &nd.kind {
-            NodeKind::Fn { inst, .. } => {
-                key_of.insert(inst, i as u32);
-            }
+            NodeKind::Fn { inst, .. } => key_of.entry(inst).or_default().push(i as u32),
             NodeKind::Closure { parent, index: 0, .. } => first_closure[*parent as usize] = i as u32,
             _ => {}
         }
     }
     let n_global = tc.types.len();
-    let mut node_of_rank: Vec<u32> = Vec::with_capacity(a.order.len());
+    let mut nodes_of_rank: Vec<Vec<u32>> = Vec::with_capacity(a.order.len());
     for &j in &a.order {
-        let node = match &a.jobs[j] {
+        let nodes = match &a.jobs[j] {
             Job::Inst(k) => {
                 let args: Vec<GArg> = k
                     .args
@@ -199,24 +198,31 @@ fn graph_nodes_of(tc: &Typeck, a: &Assembled) -> Vec<u32> {
                         c => *c,
                     })
                     .collect();
-                key_of.get(&InstKey { decl: k.decl, args }).copied().unwrap_or(u32::MAX)
+                key_of.get(&InstKey { decl: k.decl, args }).cloned().unwrap_or_default()
             }
-            Job::Glue(_) => u32::MAX,
+            Job::Glue(_) => Vec::new(),
         };
-        node_of_rank.push(node);
+        nodes_of_rank.push(nodes);
     }
     a.module
         .funcs
         .iter()
         .map(|f| {
-            let node =
-                f.instance.0.first().and_then(|&r| node_of_rank.get(r as usize)).copied().unwrap_or(u32::MAX);
-            let Some(&c) = f.instance.0.get(1) else { return node };
-            let cn = first_closure.get(node as usize).copied().unwrap_or(u32::MAX).saturating_add(c);
-            match g.nodes.get(cn as usize).map(|x| &x.kind) {
-                Some(NodeKind::Closure { parent, index, .. }) if *parent == node && *index == c => cn,
-                _ => u32::MAX,
-            }
+            let nodes: &[u32] =
+                f.instance.0.first().and_then(|&r| nodes_of_rank.get(r as usize)).map_or(&[], |v| v);
+            let Some(&c) = f.instance.0.get(1) else { return nodes.to_vec() };
+            nodes
+                .iter()
+                .filter_map(|&node| {
+                    let cn = first_closure.get(node as usize).copied().unwrap_or(u32::MAX).saturating_add(c);
+                    match g.nodes.get(cn as usize).map(|x| &x.kind) {
+                        Some(NodeKind::Closure { parent, index, .. }) if *parent == node && *index == c => {
+                            Some(cn)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect()
         })
         .collect()
 }

@@ -78,12 +78,13 @@ pub fn node_ir(prog: &Program, tc: &Typeck, nodes: &[u32]) -> Result<NodeIrs, Fa
     let mut out = vec![NodeIr::default(); g.nodes.len()];
     let mut covered = vec![false; g.nodes.len()];
     for (f, t) in scans.iter().enumerate() {
-        let node = gl.node_of_func.get(f).copied().unwrap_or(u32::MAX);
-        let Some(slot) = out.get_mut(node as usize) else { continue };
-        covered[node as usize] = true;
-        let at = g.nodes[node as usize].span;
-        slot.trap = t.trap.map(|(s, _)| span_of(s, at));
-        slot.out_of_memory = t.out_of_memory.map(|s| span_of(s, at));
+        for &node in gl.nodes_of_func.get(f).map_or(&[][..], |v| v) {
+            let Some(slot) = out.get_mut(node as usize) else { continue };
+            covered[node as usize] = true;
+            let at = g.nodes[node as usize].span;
+            slot.trap = t.trap.map(|(s, _)| span_of(s, at));
+            slot.out_of_memory = t.out_of_memory.map(|s| span_of(s, at));
+        }
     }
     let mut unmapped = Vec::new();
     for &n in nodes {
