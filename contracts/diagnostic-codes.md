@@ -131,6 +131,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0715 | sizeless vector captured by a closure. Planned |
 | E0716 | sizeless vector as a generic argument that needs a size. Planned |
 | E0717 | VL-dependent float reduction on a sizeless vector (use `reduce_add_ordered`). Planned |
+| E0718 | dispatch arm never picked: its features (implied ones counted, with the dispatch's) include those of an earlier arm |
 | E0801 | `spawn` outside a `scope` block |
 | E0802 | captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body (shared by many threads): a capture that is not `Sync`, or a `&mut` capture |
 | E0803 | unsafe operation outside `unsafe(..)`: raw-pointer `*p`, `p.read()`, `p.write(v)`, `p.write_stream(v)`, `fence_stream()`; a call of an `unsafe` fn or `extern` import; any use (read, write, borrow) of a `static mut` |

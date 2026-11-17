@@ -1150,6 +1150,15 @@ labels = [{ at = "primary", text = "vector-length-dependent reduction" }]
 fix = { description = "use `acc = v.reduce_add_ordered(acc);`, whose result does not depend on the vector length" }
 
 [[diag]]
+code = "E0718"
+severity = "error"
+area = "features"
+rule = "dispatch arm never picked: its features (implied ones counted, with the dispatch's) include those of an earlier arm"
+message = "this `dispatch` arm is never picked: a CPU with its features also has an earlier arm's"
+labels = [{ at = "primary", text = "never picked" }, { at = "earlier", text = "picked first" }]
+fix = { description = "move the arm above the earlier one it includes, or remove it" }
+
+[[diag]]
 code = "E0801"
 severity = "error"
 area = "threads-unsafe-ffi"

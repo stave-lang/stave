@@ -2819,6 +2819,30 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0718",
+        severity: Severity::Error,
+        area: "features",
+        rule: "dispatch arm never picked: its features (implied ones counted, with the dispatch's) include those of an earlier arm",
+        retired: false,
+        located: true,
+        holes: &[],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "this `dispatch` arm is never picked: a CPU with its features also has an earlier arm's",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "never picked" },
+                    LabelTemplate { at: "earlier", text: "picked first" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "move the arm above the earlier one it includes, or remove it",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0801",
         severity: Severity::Error,
         area: "threads-unsafe-ffi",

@@ -176,7 +176,7 @@ The tail runs after the full chunks and only when elements remain (`masked`: onc
 ```text
 dispatch fn sum(xs: &[f32]) -> f32 { avx512f => sum_v4, avx2 => sum_v3, sve => sum_sve, _ => sum_base, }
 ```
-- An arm may name several features: `avx2 + fma => sum_fma,`. The dispatch fn may have its own `needs(..)`.
+- An arm may name several features: `avx2 + fma => sum_fma,`. The dispatch fn may have its own `needs(..)`. An arm whose features (implied ones counted) include an earlier arm's is never picked (E0718): `avx2 => a, avx512f => b`.
 - Each arm target has the dispatch's signature, with needs = dispatch needs + the arm's features (else E0705). The `_` target needs ⊆ dispatch needs (E0706).
 - The CPU's features are read once at start; each call tests the arms top-down, but an arm the `--target` baseline (plus the dispatch's needs) covers ends the chain at compile time. The IR interpreter sees no features: it takes `_` unless pruned.
 - Arms of another arch are dropped. A `cuda` arm picks a GPU path when a usable NVIDIA device exists (planned, §7).

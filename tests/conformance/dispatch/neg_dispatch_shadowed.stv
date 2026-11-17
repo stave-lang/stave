@@ -1,0 +1,45 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+//~ TARGET aarch64-linux
+// E0718: an arm whose features (implied ones counted, with the dispatch's) include an earlier
+// arm's is never picked. Checked on every target, also for arms the target drops.
+fn s_v3(x: u32) -> u32 needs(avx2) {
+    return x;
+}
+
+fn s_v4(x: u32) -> u32 needs(avx512f) {
+    return x;
+}
+
+fn s_fma(x: u32) -> u32 needs(avx2, fma) {
+    return x;
+}
+
+fn s_base(x: u32) -> u32 {
+    return x;
+}
+
+// `avx512f` implies `avx2`.
+dispatch fn implied(x: u32) -> u32 {
+    avx2 => s_v3,
+    avx512f => s_v4, //~ ERROR E0718
+    _ => s_base,
+}
+
+dispatch fn more(x: u32) -> u32 {
+    avx2 => s_v3,
+    avx2 + fma => s_fma, //~ ERROR E0718
+    _ => s_base,
+}
+
+// Most specific first: every arm can be picked.
+dispatch fn ordered(x: u32) -> u32 {
+    avx512f => s_v4,
+    avx2 + fma => s_fma,
+    avx2 => s_v3,
+    _ => s_base,
+}
+
+fn main() -> i32 {
+    return 0;
+}
