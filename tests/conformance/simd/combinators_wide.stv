@@ -1,6 +1,8 @@
 //~ CHECK-ONLY
-// std.slice methods on slices long enough for the 256-bit loops of x86-64 (1 KiB and more: the
-// lengths 1 KiB + 0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33 elements and 1 KiB - 1) and on short ones
+// std.slice methods on slices long enough for the 256-bit loops of x86-64 (from 1 KiB of data for
+// 1- and 2-byte elements, and for eq and copy_from of every type; from 512 B for the other
+// methods on 4- and 8-byte elements: at each threshold the lengths 0, 1, 7, 8, 9, 15, 16, 17, 31,
+// 32, 33 elements beyond it and 1 below it) and on short ones
 // (0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33), each at start offsets 0..3 (unaligned), against
 // element-by-element references: int sums (with lanes that overflow while the running sum does
 // not), min, max, find, eq, fill, find_any_byte, copy_from; floats with -0.0 / +0.0 and quiet
@@ -20,6 +22,20 @@ fn lens(long: usize) -> [usize; 23] {
         l[i + 11] = long + s[i];
     }
     l[22] = long - 1;
+    return l;
+}
+
+// The tested lengths for a type with two thresholds: `long` (most methods) and `long2` (eq).
+fn lens2(long: usize, long2: usize) -> [usize; 35] {
+    let s: [usize; 11] = [0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33];
+    let mut l: [usize; 35] = [0; 35];
+    for i in 0usize..11 {
+        l[i] = s[i];
+        l[i + 11] = long + s[i];
+        l[i + 22] = long2 + s[i];
+    }
+    l[33] = long - 1;
+    l[34] = long2 - 1;
     return l;
 }
 
@@ -154,11 +170,11 @@ fn test_u32() {
         a[i] = (mix(i) % 4000000000) as% u32;
         s[i] = if i % 61 == 7 then 3 else 0;
     }
-    let ls = lens(256);
+    let ls = lens2(128, 256);
     let mut bad = "";
     let mut cases: usize = 0;
     for o in 0usize..4 {
-        for k in 0usize..23 {
+        for k in 0usize..35 {
             let n = ls[k];
             cases = cases + 1;
             let xs = &a[o..o + n];
@@ -211,11 +227,11 @@ fn test_u64() {
         a[i] = (mix(i) % 18000000000000000000) as% u64;
         s[i] = if i % 61 == 7 then 3 else 0;
     }
-    let ls = lens(128);
+    let ls = lens2(64, 128);
     let mut bad = "";
     let mut cases: usize = 0;
     for o in 0usize..4 {
-        for k in 0usize..23 {
+        for k in 0usize..35 {
             let n = ls[k];
             cases = cases + 1;
             let xs = &a[o..o + n];
@@ -382,11 +398,11 @@ fn test_i32() {
         a[i] = ((mix(i) % 100) as% i32) - 50;
         s[i] = if i % 2 == 0 then 2147483647 else -2147483647;
     }
-    let ls = lens(256);
+    let ls = lens2(128, 256);
     let mut bad = "";
     let mut cases: usize = 0;
     for o in 0usize..4 {
-        for k in 0usize..23 {
+        for k in 0usize..35 {
             let n = ls[k];
             cases = cases + 1;
             let xs = &a[o..o + n];
@@ -439,11 +455,11 @@ fn test_i64() {
         a[i] = ((mix(i) % 100) as% i64) - 50;
         s[i] = if i % 2 == 0 then 9223372036854775807 else -9223372036854775807;
     }
-    let ls = lens(128);
+    let ls = lens2(64, 128);
     let mut bad = "";
     let mut cases: usize = 0;
     for o in 0usize..4 {
-        for k in 0usize..23 {
+        for k in 0usize..35 {
             let n = ls[k];
             cases = cases + 1;
             let xs = &a[o..o + n];
@@ -501,7 +517,7 @@ fn test_f32() {
         let m = mix(i) % 50;
         a[i] = if m == 0 then -z else if m == 1 then z else ((m as% u32) as~ f32) * 0.25 - 6.0;
     }
-    let ls = lens(256);
+    let ls = lens(128);
     let mut bad = "";
     let mut cases: usize = 0;
     for o in 0usize..4 {
@@ -586,7 +602,7 @@ fn test_f64() {
         let m = mix(i) % 50;
         a[i] = if m == 0 then -z else if m == 1 then z else ((m as% u64) as~ f64) * 0.25 - 6.0;
     }
-    let ls = lens(128);
+    let ls = lens(64);
     let mut bad = "";
     let mut cases: usize = 0;
     for o in 0usize..4 {
