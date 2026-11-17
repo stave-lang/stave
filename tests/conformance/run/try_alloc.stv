@@ -1,0 +1,67 @@
+//~ STDOUT try_alloc.stdout
+//~ EXIT 0
+// The `try_` methods of Vec and String return `Result.Err(vec.AllocError)` where the plain
+// methods panic `OutOfMemory`, and leave the container as it was. Failures are forced by sizes
+// past usize (capacity arithmetic) and by 2^62-byte requests, which no address space holds (the
+// kernel's mmap and the interpreter's heap both refuse them): through a fresh allocation and
+// through growing an existing buffer.
+import std.io;
+import std.string;
+import std.vec;
+
+const HUGE: usize = 0x4000_0000_0000_0000;
+
+fn show(what: &str, r: Result<(), vec.AllocError>) {
+    match r {
+        Result.Ok(_) => { io.print(f"{what}: ok\n"); }
+        Result.Err(e) => { io.print(f"{what}: {e}\n"); }
+    }
+}
+
+fn show_vec(v: &vec.Vec<u32>) {
+    let n = v.len();
+    let room = v.capacity() >= 104;
+    let s = v.as_slice();
+    let a = s[0];
+    let b = s[n - 1];
+    io.print(f"  len {n}, cap >= 104 {room}, first {a}, last {b}\n");
+}
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.try_with_capacity(10).unwrap();
+    let c = v.capacity();
+    io.print(f"try_with_capacity(10): cap {c}\n");
+    show("try_push", v.try_push(7));
+    let xs: [u32; 3] = [1, 2, 3];
+    show("try_extend_from_slice", v.try_extend_from_slice(&xs[0..3]));
+    show("try_reserve(100)", v.try_reserve(100));
+    show_vec(&v);
+
+    show("try_reserve(usize max)", v.try_reserve(0xFFFF_FFFF_FFFF_FFFF));
+    show("try_reserve(2^60 u32)", v.try_reserve(HUGE / 4));
+    show_vec(&v);
+    v.push(9);
+    show_vec(&v);
+
+    match vec.Vec::<u64>.try_with_capacity(HUGE / 2) {
+        Result.Ok(_) => { io.print("Vec<u64> 2^61: ok\n"); }
+        Result.Err(e) => { io.print(f"Vec<u64> 2^61: {e}\n"); }
+    }
+    match vec.Vec::<u8>.try_with_capacity(HUGE) {
+        Result.Ok(_) => { io.print("Vec<u8> 2^62: ok\n"); }
+        Result.Err(e) => { io.print(f"Vec<u8> 2^62: {e}\n"); }
+    }
+
+    let mut s = string.String.try_with_capacity(4).unwrap();
+    show("String try_push_str", s.try_push_str("héllo"));
+    show("String try_push", s.try_push('→'));
+    show("String try_reserve(2^62)", s.try_reserve(HUGE));
+    let t = s.as_str();
+    let n = s.len();
+    io.print(f"  {t} ({n} bytes)\n");
+    match string.String.try_with_capacity(HUGE) {
+        Result.Ok(_) => { io.print("String 2^62: ok\n"); }
+        Result.Err(e) => { io.print(f"String 2^62: {e}\n"); }
+    }
+    return 0;
+}

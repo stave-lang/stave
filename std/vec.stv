@@ -10,12 +10,24 @@
 // impls below state them: a Vec owns its elements, so it is Send when T is and Sync when T is.
 // Types built on Vec (String, std.soa) get both structurally from their Vec fields.
 // Capacity arithmetic that overflows usize is an allocation failure (`OutOfMemory`), never an
-// `Overflow` panic.
+// `Overflow` panic. The `try_` methods return `Result.Err(AllocError)` instead of panicking and
+// leave the Vec as it was; every other method that allocates panics `OutOfMemory`.
 
 import runtime.alloc;
 import runtime.panic;
 import std.core;
 import std.mem;
+
+// The memory a `try_` method asked for is not available (std.vec, std.string, std.arena).
+pub struct AllocError {}
+
+impl core.Copy for AllocError {}
+
+impl core.Display for AllocError {
+    fn fmt<W: core.Write>(&self, w: &mut W) {
+        w.write_str("out of memory");
+    }
+}
 
 pub struct Vec<T> {
     ptr: *mut T,
@@ -45,6 +57,12 @@ impl<T> Vec<T> {
         return v;
     }
 
+    pub fn try_with_capacity(n: usize) -> Result<Vec<T>, AllocError> {
+        let mut v: Vec<T> = Self.new();
+        v.try_reserve(n)?;
+        return Result.Ok(v);
+    }
+
     pub fn len(&self) -> usize {
         return self.len;
     }
@@ -59,22 +77,28 @@ impl<T> Vec<T> {
 
     // Ensures room for `extra` more elements.
     pub fn reserve(&mut self, extra: usize) {
-        if extra > USIZE_MAX - self.len { oom(); }
-        let need = self.len + extra;
-        if need <= self.cap { return; }
-        let mut c = if self.cap < 4 then 4 else self.cap *| 2;
-        if c < need { c = need; }
-        self.grow_to(c);
+        if self.try_reserve(extra).is_err() { oom(); }
     }
 
-    fn grow_to(&mut self, new_cap: usize) {
+    pub fn try_reserve(&mut self, extra: usize) -> Result<(), AllocError> {
+        if extra > USIZE_MAX - self.len { return Result.Err(AllocError.{}); }
+        let need = self.len + extra;
+        if need <= self.cap { return Result.Ok(()); }
+        let mut c = if self.cap < 4 then 4 else self.cap *| 2;
+        if c < need { c = need; }
+        return self.try_grow_to(c);
+    }
+
+    fn try_grow_to(&mut self, new_cap: usize) -> Result<(), AllocError> {
         let size = mem.type_size::<T>();
         let al = mem.type_align::<T>();
-        if size != 0 && new_cap > USIZE_MAX / size { oom(); }
+        if size != 0 && new_cap > USIZE_MAX / size { return Result.Err(AllocError.{}); }
         let bytes = new_cap * size;
-        let p = if self.cap == 0 then alloc.alloc(bytes, al) else unsafe("ptr holds cap * size bytes from alloc with this alignment") alloc.realloc(self.ptr as *mut u8, self.cap * size, al, bytes);
+        let p = if self.cap == 0 then alloc.try_alloc(bytes, al) else unsafe("ptr holds cap * size bytes from alloc with this alignment") alloc.try_realloc(self.ptr as *mut u8, self.cap * size, al, bytes);
+        if (p as usize) == 0 { return Result.Err(AllocError.{}); }
         self.ptr = p as *mut T;
         self.cap = new_cap;
+        return Result.Ok(());
     }
 
     pub fn push(&mut self, x: T) {
@@ -82,6 +106,15 @@ impl<T> Vec<T> {
         let slot = mem.add_mut(self.ptr, self.len);
         unsafe("len < cap: slot is inside the buffer and uninitialized") { slot.write(x); }
         self.len = self.len + 1;
+    }
+
+    // On failure x is dropped; `try_reserve(1)` then `push(x)` keeps it.
+    pub fn try_push(&mut self, x: T) -> Result<(), AllocError> {
+        if self.len == self.cap { self.try_reserve(1)?; }
+        let slot = mem.add_mut(self.ptr, self.len);
+        unsafe("len < cap: slot is inside the buffer and uninitialized") { slot.write(x); }
+        self.len = self.len + 1;
+        return Result.Ok(());
     }
 
     pub fn pop(&mut self) -> Option<T> {
@@ -147,9 +180,19 @@ impl<T> Vec<T> {
 impl<T: Copy> Vec<T> {
     pub fn extend_from_slice(&mut self, xs: &[T]) {
         self.reserve(xs.len());
+        self.extend_reserved(xs);
+    }
+
+    pub fn try_extend_from_slice(&mut self, xs: &[T]) -> Result<(), AllocError> {
+        self.try_reserve(xs.len())?;
+        self.extend_reserved(xs);
+        return Result.Ok(());
+    }
+
+    fn extend_reserved(&mut self, xs: &[T]) {
         for i in 0..xs.len() {
             let slot = mem.add_mut(self.ptr, self.len);
-            unsafe("reserve made room: slot is inside the buffer and uninitialized") { slot.write(xs[i]); }
+            unsafe("the caller reserved room for xs: slot is inside the buffer and uninitialized") { slot.write(xs[i]); }
             self.len = self.len + 1;
         }
     }
