@@ -452,7 +452,7 @@ impl<'a> FnVerifier<'a> {
         match o {
             Operand::Value(v) => {
                 let t = b.value_ty(v).ok_or("value out of range")?;
-                if t == want {
+                if t == want || self.same_fn_shape(t, key) {
                     Ok(())
                 } else {
                     Err(format!("%{} has type {}, expected {}", v.0, self.tname(t), self.tname(want)))
@@ -495,6 +495,19 @@ impl<'a> FnVerifier<'a> {
                 }
             }
             Operand::Type(_) => Err("a type operand is not a value".into()),
+        }
+    }
+
+    /// Whether `t` is a fn type with the params and return of `want`: fn types that differ only
+    /// in their features share one representation, and the type checker has already decided
+    /// that the value may drop or gain them (E0707), as for a fn item operand.
+    fn same_fn_shape(&self, t: TypeId, want: &TypeKey) -> bool {
+        match (self.key(t), want) {
+            (
+                Some(TypeKey::FnType { params: p1, ret: r1, .. }),
+                TypeKey::FnType { params: p2, ret: r2, .. },
+            ) => p1 == p2 && r1 == r2,
+            _ => false,
         }
     }
 

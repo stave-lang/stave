@@ -1,0 +1,35 @@
+//~ STDOUT run_fn_value_needs.stdout
+// A fn value made in a fn with needs (a closure has them) is used as a fn type without them
+// inside that fn: passed to a baseline fn, kept in a local of that type, and given to
+// `thread.par_for`. The features are dropped, the value is unchanged.
+import std.atomic;
+import std.io;
+import std.thread;
+
+fn apply(f: fn(u32) -> u32, x: u32) -> u32 {
+    return f(x);
+}
+
+fn twice(x: u32) -> u32 needs(avx2) {
+    return x * 2;
+}
+
+fn run_v3(k: u32) -> u32 needs(avx2) {
+    let c = fn(x: u32) -> u32 { return twice(x) + k; };
+    let d: fn(u32) -> u32 = c;
+    let total = atomic.U64.new(0);
+    thread.par_for(0, 4, fn(i: usize) { let _ = total.fetch_add(twice(i as% u32) as u64); });
+    return apply(c, 1) + d(2) + (total.load() as% u32);
+}
+
+fn run_base(k: u32) -> u32 {
+    return (2 + k) + (4 + k) + 12;
+}
+
+dispatch fn run(k: u32) -> u32 { avx2 => run_v3, _ => run_base, }
+
+fn main() -> i32 {
+    let r = run(10);
+    io.print(f"{r}\n");
+    return 0;
+}
