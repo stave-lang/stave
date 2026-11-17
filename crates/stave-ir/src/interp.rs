@@ -201,6 +201,15 @@ pub struct Interp<'m, H: Host> {
     scratch: Vec<Val>,
 }
 
+/// An aggregate being loaded: its parts (type, address), the next part, the values so far.
+type Open = (Vec<(TypeId, u64)>, usize, Vec<Val>);
+
+/// One level of a load: a value, or an aggregate's parts and the values before them.
+enum Loaded {
+    Val(Val),
+    Parts(Vec<(TypeId, u64)>, Vec<Val>),
+}
+
 fn malformed(s: &'static str) -> InterpError {
     InterpError::Malformed(s)
 }
@@ -475,98 +484,127 @@ impl<'m, H: Host> Interp<'m, H> {
         move |fault| InterpError::Fault { fault, func, site }
     }
 
+    /// The value of type `t` at `addr`. Aggregates are read part by part with an explicit stack
+    /// (a value nested [`MAX_TYPE_DEPTH`] levels deep needs no deeper native stack).
     fn load_val(&self, t: TypeId, addr: u64, depth: usize, func: FuncId, site: Site) -> R<Val> {
-        if depth > MAX_TYPE_DEPTH {
-            return Err(InterpError::Unsupported("load nesting too deep".into()));
+        let mut stack: Vec<Open> = Vec::new();
+        let mut todo = Some((t, addr));
+        let mut done: Option<Val> = None;
+        loop {
+            if let Some((t, addr)) = todo.take() {
+                if depth + stack.len() > MAX_TYPE_DEPTH {
+                    return Err(InterpError::Unsupported("load nesting too deep".into()));
+                }
+                match self.load_one(t, addr, func, site)? {
+                    Loaded::Val(v) => done = Some(v),
+                    Loaded::Parts(parts, out) => stack.push((parts, 0, out)),
+                }
+            }
+            if let Some(v) = done.take() {
+                match stack.last_mut() {
+                    Some(top) => top.2.push(v),
+                    None => return Ok(v),
+                }
+            }
+            let Some(top) = stack.last_mut() else { return Err(malformed("load")) };
+            if let Some(&part) = top.0.get(top.1) {
+                top.1 += 1;
+                todo = Some(part);
+            } else if let Some((_, _, out)) = stack.pop() {
+                done = Some(Val::agg(out));
+            }
         }
+    }
+
+    /// One level of [`Interp::load_val`]: a scalar's value, or an aggregate's parts and the
+    /// values that precede them (an enum's tag).
+    fn load_one(&self, t: TypeId, addr: u64, func: FuncId, site: Site) -> R<Loaded> {
         let fault = Self::fault(func, site);
         let l = self.layout(t)?;
         Ok(match &l.shape {
             Shape::Scalar => {
                 let raw = self.mem.read_uint(addr, l.size).map_err(fault)?;
-                Val::S(match self.cls(t) {
+                Loaded::Val(Val::S(match self.cls(t) {
                     Cls::Int(it) => it.norm(raw),
                     Cls::Bool => (raw != 0) as u64,
                     _ => raw,
-                })
+                }))
             }
             Shape::Fat => {
                 let a = self.mem.read_uint(addr, 8).map_err(&fault)?;
                 let n = self.mem.read_uint(addr.wrapping_add(8), 8).map_err(&fault)?;
-                Val::Pair(a, n)
+                Loaded::Val(Val::Pair(a, n))
             }
             Shape::Fields(fs) => {
-                let mut v = Vec::with_capacity(fs.len());
-                for &(off, ft) in fs {
-                    v.push(self.load_val(ft, addr.wrapping_add(off), depth + 1, func, site)?);
-                }
-                Val::agg(v)
+                let parts = fs.iter().map(|&(off, ft)| (ft, addr.wrapping_add(off))).collect();
+                Loaded::Parts(parts, Vec::with_capacity(fs.len()))
             }
             Shape::Array { elem, stride, len } => {
                 if *len > MAX_AGG_LEN {
                     return Err(InterpError::Unsupported("array value too large".into()));
                 }
-                let mut v = Vec::with_capacity(*len as usize);
-                for k in 0..*len {
-                    v.push(self.load_val(*elem, addr.wrapping_add(k * stride), depth + 1, func, site)?);
-                }
-                Val::agg(v)
+                let parts = (0..*len).map(|k| (*elem, addr.wrapping_add(k * stride))).collect();
+                Loaded::Parts(parts, Vec::with_capacity(*len as usize))
             }
             Shape::Enum(vs) => {
                 let tag = self.mem.read_uint(addr, 4).map_err(&fault)?;
                 let fs = vs.get(tag as usize).ok_or(InterpError::WrongVariant { func, site })?;
-                let mut v = Vec::with_capacity(fs.len() + 1);
-                v.push(Val::S(tag));
-                for &(off, ft) in fs {
-                    v.push(self.load_val(ft, addr.wrapping_add(off), depth + 1, func, site)?);
-                }
-                Val::agg(v)
+                let mut out = Vec::with_capacity(fs.len() + 1);
+                out.push(Val::S(tag));
+                let parts = fs.iter().map(|&(off, ft)| (ft, addr.wrapping_add(off))).collect();
+                Loaded::Parts(parts, out)
             }
-            Shape::Bytes => self.load_bytes(t, addr, func, site)?,
+            Shape::Bytes => Loaded::Val(self.load_bytes(t, addr, func, site)?),
         })
     }
 
+    /// Stores `v` of type `t` at `addr`: each aggregate's own bytes (an enum's zeroing and tag)
+    /// before its parts, parts in order, with an explicit stack (no deep native stack).
     fn store_val(&mut self, t: TypeId, addr: u64, v: &Val, depth: usize, func: FuncId, site: Site) -> R<()> {
-        if depth > MAX_TYPE_DEPTH {
-            return Err(InterpError::Unsupported("store nesting too deep".into()));
+        let mut stack: Vec<(TypeId, u64, &Val, usize)> = vec![(t, addr, v, depth)];
+        while let Some((t, addr, v, depth)) = stack.pop() {
+            if depth > MAX_TYPE_DEPTH {
+                return Err(InterpError::Unsupported("store nesting too deep".into()));
+            }
+            let fault = Self::fault(func, site);
+            let l = self.layout(t)?.clone();
+            let first = stack.len();
+            match (&l.shape, v) {
+                (Shape::Scalar, Val::S(x)) => self.mem.write_uint(addr, l.size, *x).map_err(fault)?,
+                (Shape::Fat, Val::Pair(a, n)) => {
+                    self.mem.write_uint(addr, 8, *a).map_err(&fault)?;
+                    self.mem.write_uint(addr.wrapping_add(8), 8, *n).map_err(&fault)?;
+                }
+                (Shape::Fields(fs), Val::Agg(vs)) if fs.len() == vs.len() => {
+                    for (&(off, ft), fv) in fs.iter().zip(vs.iter()) {
+                        stack.push((ft, addr.wrapping_add(off), fv, depth + 1));
+                    }
+                }
+                (Shape::Array { elem, stride, len }, Val::Agg(vs)) if *len == vs.len() as u64 => {
+                    for (k, fv) in vs.iter().enumerate() {
+                        stack.push((*elem, addr.wrapping_add(k as u64 * stride), fv, depth + 1));
+                    }
+                }
+                (Shape::Enum(vars), Val::Agg(vs)) => {
+                    let tag = vs.first().and_then(|t| t.bits()).ok_or(malformed("enum value"))?;
+                    let fs = vars.get(tag as usize).ok_or(InterpError::WrongVariant { func, site })?;
+                    if fs.len() + 1 != vs.len() {
+                        return Err(malformed("enum value arity"));
+                    }
+                    // Zero the whole enum first, so the bytes beyond this variant are deterministic.
+                    self.mem.write(addr, &vec![0u8; l.size as usize]).map_err(&fault)?;
+                    self.mem.write_uint(addr, 4, tag).map_err(&fault)?;
+                    for (&(off, ft), fv) in fs.iter().zip(vs[1..].iter()) {
+                        stack.push((ft, addr.wrapping_add(off), fv, depth + 1));
+                    }
+                }
+                (Shape::Bytes, _) => self.store_bytes(t, addr, v, func, site)?,
+                _ => return Err(malformed("stored value does not match its type")),
+            }
+            // the first part is stored first
+            stack[first..].reverse();
         }
-        let fault = Self::fault(func, site);
-        let l = self.layout(t)?.clone();
-        match (&l.shape, v) {
-            (Shape::Scalar, Val::S(x)) => self.mem.write_uint(addr, l.size, *x).map_err(fault),
-            (Shape::Fat, Val::Pair(a, n)) => {
-                self.mem.write_uint(addr, 8, *a).map_err(&fault)?;
-                self.mem.write_uint(addr.wrapping_add(8), 8, *n).map_err(&fault)
-            }
-            (Shape::Fields(fs), Val::Agg(vs)) if fs.len() == vs.len() => {
-                for (&(off, ft), fv) in fs.iter().zip(vs.iter()) {
-                    self.store_val(ft, addr.wrapping_add(off), fv, depth + 1, func, site)?;
-                }
-                Ok(())
-            }
-            (Shape::Array { elem, stride, len }, Val::Agg(vs)) if *len == vs.len() as u64 => {
-                for (k, fv) in vs.iter().enumerate() {
-                    self.store_val(*elem, addr.wrapping_add(k as u64 * stride), fv, depth + 1, func, site)?;
-                }
-                Ok(())
-            }
-            (Shape::Enum(vars), Val::Agg(vs)) => {
-                let tag = vs.first().and_then(|t| t.bits()).ok_or(malformed("enum value"))?;
-                let fs = vars.get(tag as usize).ok_or(InterpError::WrongVariant { func, site })?;
-                if fs.len() + 1 != vs.len() {
-                    return Err(malformed("enum value arity"));
-                }
-                // Zero the whole enum first, so the bytes beyond this variant are deterministic.
-                self.mem.write(addr, &vec![0u8; l.size as usize]).map_err(&fault)?;
-                self.mem.write_uint(addr, 4, tag).map_err(&fault)?;
-                for (&(off, ft), fv) in fs.iter().zip(vs[1..].iter()) {
-                    self.store_val(ft, addr.wrapping_add(off), fv, depth + 1, func, site)?;
-                }
-                Ok(())
-            }
-            (Shape::Bytes, _) => self.store_bytes(t, addr, v, func, site),
-            _ => Err(malformed("stored value does not match its type")),
-        }
+        Ok(())
     }
 
     fn set(regs: &mut [Val], body: &Body, i: u32, v: Val) {

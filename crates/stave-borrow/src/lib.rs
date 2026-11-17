@@ -214,13 +214,23 @@ fn on_big_stacks<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     if BIG.with(Cell::get) {
         return f();
     }
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(rayon::current_num_threads().max(1))
-        .stack_size(STACK)
-        .start_handler(|_| BIG.with(|b| b.set(true)))
-        .build();
-    match pool {
-        Ok(p) => p.install(f),
-        Err(_) => f(),
+    let n = rayon::current_num_threads().max(1);
+    let run = move || {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .stack_size(STACK)
+            .start_handler(|_| BIG.with(|b| b.set(true)))
+            .build();
+        match pool {
+            Ok(p) => p.install(f),
+            Err(_) => f(),
+        }
+    };
+    // a worker of another pool waiting in `install` would run that pool's other jobs on its own
+    // stack meanwhile; a plain thread waits without running anything
+    if rayon::current_thread_index().is_some() {
+        std::thread::scope(|s| s.spawn(run).join()).unwrap_or_else(|e| std::panic::resume_unwind(e))
+    } else {
+        run()
     }
 }
