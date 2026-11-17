@@ -1,0 +1,16 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0704: the `x86_64-linux-v2` baseline does not prove `avx2`, so calling an `avx2` fn needs
+// `avx2` in the caller.
+fn twice(x: u32) -> u32 needs(avx2) {
+    return x * 2;
+}
+
+fn ok(x: u32) -> u32 needs(avx2) {
+    return twice(x);
+}
+
+fn main() -> i32 {
+    let a = twice(4); //~ ERROR E0704
+    return 0;
+}

@@ -2452,7 +2452,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0704",
         severity: Severity::Error,
         area: "features",
-        rule: "callee needs features the caller lacks",
+        rule: "callee needs features neither the caller nor the target baseline has",
         retired: false,
         located: true,
         holes: &[
@@ -2506,7 +2506,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0706",
         severity: Severity::Error,
         area: "features",
-        rule: "dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing extra features",
+        rule: "dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing features beyond the dispatch's and the target baseline",
         retired: false,
         located: true,
         holes: &[

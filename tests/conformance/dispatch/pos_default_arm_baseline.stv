@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// The target baseline counts for the `_` target: it may need `sse42`, which every x86-64
+// target has, though the dispatch does not.
+fn c_v3(x: u32) -> u32 needs(avx2) {
+    return x;
+}
+
+fn c_base(x: u32) -> u32 needs(sse42) {
+    return x;
+}
+
+dispatch fn c(x: u32) -> u32 {
+    avx2 => c_v3,
+    _ => c_base,
+}
+
+fn main() -> i32 {
+    return 0;
+}

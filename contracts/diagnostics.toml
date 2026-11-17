@@ -1007,7 +1007,7 @@ fix = { description = "add `needs({feature})` to the signature, or use a vector 
 code = "E0704"
 severity = "error"
 area = "features"
-rule = "callee needs features the caller lacks"
+rule = "callee needs features neither the caller nor the target baseline has"
 holes = { callee = "path", feature = "name" }
 message = "`{callee}` needs `{feature}`, which the caller does not have"
 labels = [{ at = "primary", text = "call needs `{feature}`" }, { at = "callee", text = "`{callee}` declares `needs({feature})` here" }]
@@ -1027,7 +1027,7 @@ fix = { description = "give the arm's function the type `{expected}` (the dispat
 code = "E0706"
 severity = "error"
 area = "features"
-rule = "dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing extra features"
+rule = "dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing features beyond the dispatch's and the target baseline"
 holes = { feature = "name" }
 message = "`dispatch` has no final `_` arm"
 labels = [{ at = "primary", text = "last arm is not `_`" }]

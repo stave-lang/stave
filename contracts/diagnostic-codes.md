@@ -117,7 +117,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0701 | class M or U operation inside `strict { }` |
 | E0702 | vector type wider than the target's register |
 | E0703 | vector in the signature of a fn, fn type, or closure whose `needs` (plus the target baseline) do not cover its width (`extern "C"` signatures: E0804) |
-| E0704 | callee needs features the caller lacks |
+| E0704 | callee needs features neither the caller nor the target baseline has |
 | E0705 | dispatch arm signature differs from the dispatch signature |
 | E0706 | dispatch without a final `_` arm (the grammar requires it: a syntax error comes first), or a `_` target needing extra features |
 | E0707 | fn value coercion would drop features not proven where it happens (by the `needs` of the enclosing fn or the target baseline) |

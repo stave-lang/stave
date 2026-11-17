@@ -2,7 +2,7 @@
 //! - E0708: an arm feature name no target owns;
 //! - E0705: an arm target whose type is not the dispatch's signature with needs = the
 //!   dispatch's needs plus the arm's features (the `_` arm: plus nothing);
-//! - E0706 case `extra-needs`: a `_` target needing a feature the dispatch does not have;
+//! - E0706 case `extra-needs`: a `_` target needing a feature neither the dispatch nor the target baseline has;
 //! - E0718: an arm never picked, because its features (implied ones counted) include those of
 //!   an earlier arm, which every CPU that has them picks first. Checked on every target, dropped
 //!   arms included, so the program is valid or not independent of the arch.
@@ -158,8 +158,9 @@ fn check_arm(
     match arm.features {
         Some(_) if same_shape && have == want => {}
         None if same_shape => {
-            if !have.is_subset(want) {
-                let extra = types::feature_names(have.bits() & !want.bits());
+            let allowed = want.union(prog.target.baseline());
+            if !have.is_subset(allowed) {
+                let extra = types::feature_names(have.bits() & !allowed.bits());
                 let f = extra.first().copied().unwrap_or("?");
                 out.extend(mk("E0706", Some("extra-needs"), &[("feature", f)], at, &roles[..0]));
             }

@@ -1687,9 +1687,9 @@ impl<'a> Ck<'a> {
         self.sites.push(CallSite { caller: self.decl, node, inst: Instance { decl, args: args.to_vec() } });
     }
 
-    /// E0704: callee features must be a subset of the caller's.
+    /// E0704: callee features must be a subset of the caller's and the target baseline.
     pub fn features_ok(&mut self, at: Span, callee: DeclId, callee_features: u64) {
-        let missing = callee_features & !self.features;
+        let missing = callee_features & !self.proven_features();
         if missing == 0 {
             return;
         }
