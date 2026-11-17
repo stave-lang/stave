@@ -78,6 +78,9 @@ atomics are sequentially consistent; `p` is the address (naturally aligned) as `
 (runtime `sys.stv` passes the arch's argument order); the `exit` system call of the child path is
 in runtime/syscalls.list. `__stave_thread_start` (above) is emitted for static binaries too. The IR
 interpreter returns `-ENOSYS` for `thread_clone` (runtime.thread then runs the body inline).
+No IR calls `runtime.thread.entry`, so a lowered `thread_clone` or `thread_start_addr` requests
+it, in debug and release alike (checked-ir.md "Instance root set"); a program that lowers neither
+has no `runtime.thread.entry` and no `__stave_thread_start`.
 
 **Runtime start and traps** (CPU). The compiler emits two
 C-ABI stubs and two read-only tables per binary, and these intrinsics give their addresses or
