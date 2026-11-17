@@ -155,12 +155,14 @@ fn check_run(bin: &Path, runner: Option<&str>, want: &[(&str, &str)], golden: &s
     Ok(())
 }
 
-/// Every run of one program: `runs(target)` gives the (runner, expected arms, label) of the runs
-/// of `target`'s binaries.
+/// One run of a binary: (runner, the arm each line must name, label).
+type Run = (Option<String>, Vec<(&'static str, &'static str)>, String);
+
+/// Every run of one program: `runs(target)` gives the runs of `target`'s binaries.
 fn run_program(
     name: &str,
     targets: &[Triple],
-    runs: &dyn Fn(Triple) -> Vec<(Option<String>, Vec<(&'static str, &'static str)>, String)>,
+    runs: &dyn Fn(Triple) -> Vec<Run>,
     ir: &dyn Fn(&Module, Triple) -> Result<(), String>,
 ) -> (usize, Vec<String>) {
     let src = program(&format!("{name}.stv"));
