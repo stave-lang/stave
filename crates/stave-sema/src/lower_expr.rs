@@ -1365,6 +1365,13 @@ impl<'a> FnCx<'a> {
                 let id = self.intrinsic(&name);
                 let rt = self.ret_of(ret);
                 let r = self.f.b.intrinsic(id, rt.map(FnCx::ir), &vs);
+                // A started thread runs `runtime.thread.entry` from the backend's start stub, which
+                // no IR call reaches.
+                if matches!(name.as_str(), "thread_clone" | "thread_start_addr")
+                    && let Some(e) = self.g.lang.thread_entry
+                {
+                    self.req(Req::Inst(InstKey { decl: e, args: Vec::new() }));
+                }
                 self.call_result(r, ret)
             }
             Some(Target::Variant { decl, index }) => {

@@ -315,7 +315,7 @@ reference (`Ref` / `RefMut`); `copy` captures are reserved (no syntax yet, LANG.
 
 - **debug**: every non-generic fn of the package and its dependencies (not fns dropped for
   needing another arch's features; `test fn`s only under `stave test`), plus the release roots
-  below and `runtime.thread.entry`, plus every instance they request, transitively. Fns of the built-in packages (`std`,
+  below, plus every instance they request, transitively. Fns of the built-in packages (`std`,
   `runtime`) are not roots: they are lowered only when reachable, as in release.
 - **release**: only instances reachable through calls and fn-value uses from the roots `main`,
   `extern "C"` exports, the `allocator` impl, and, under `stave test` (also `stave test --release`),
@@ -323,5 +323,8 @@ reference (`Ref` / `RefMut`); `copy` captures are reserved (no syntax yet, LANG.
   (contracts/intrinsics.md "Paths fixed by the compiler": `runtime.start.entry`,
   `runtime.panic.trap`, `runtime.panic.trap_msg`, `runtime.panic.on_signal`). A reachable
   `dispatch` makes its arm targets reachable (an arm of another arch is not).
+- In both modes a lowered `intrinsic.thread_clone` or `intrinsic.thread_start_addr` requests
+  `runtime.thread.entry`, which only the compiler's `__stave_thread_start` stub calls
+  (intrinsics.md "Thread start").
 - Generic decls are never printed, only their instances. `kernel fn`s are printed like fns; GPU ops print as
   `gpu.<name>` (gpu-ops.md "Checked-IR spelling"). Intrinsic calls print as `intrinsic.<name>`.

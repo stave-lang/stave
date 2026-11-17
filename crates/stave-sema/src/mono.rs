@@ -17,11 +17,11 @@
 //! of the root package, the `extern "C"` exports, the `allocator` module's `alloc`/`free`/`realloc`,
 //! `test fn`s under `stave test`, and the runtime entry points the compiler's own stubs call
 //! (`runtime.start.entry`, `runtime.panic.trap`, `runtime.panic.trap_msg`,
-//! `runtime.panic.on_signal`; contracts/intrinsics.md "Paths fixed by the compiler"; a debug build
-//! also roots `runtime.thread.entry`, which the thread start stub calls). Both modes
+//! `runtime.panic.on_signal`; contracts/intrinsics.md "Paths fixed by the compiler"). Both modes
 //! then add every instance a lowered body requests (calls, fn-value uses, drop glue), round by
 //! round; a lowered `dispatch fn` requests its arm targets ([`dispatch_arms`]), so a reachable
-//! dispatch makes them reachable.
+//! dispatch makes them reachable, and a lowered `thread_clone` or `thread_start_addr` intrinsic
+//! requests `runtime.thread.entry`, which only the backend's thread start stub calls.
 //!
 //! **Instantiation depth** (E0902, [`depth_check`], run by the type checker): from every
 //! non-generic body, the generic instances its call sites request, depth first, substituting
@@ -68,6 +68,9 @@ pub(crate) struct LangFns {
     pub string_push_str: Option<DeclId>,
     pub string_as_str: Option<DeclId>,
     pub set_user_site: Option<DeclId>,
+    /// `runtime.thread.entry`: no IR calls it (the backend's thread start stub does), so a lowered
+    /// `thread_clone` / `thread_start_addr` intrinsic requests it.
+    pub thread_entry: Option<DeclId>,
 }
 
 fn sym(prog: &Program, s: &str) -> Option<Sym> {
@@ -110,6 +113,7 @@ impl LangFns {
             string_push_str: m("push_str"),
             string_as_str: m("as_str"),
             set_user_site: item_at(prog, "runtime.panic", "set_user_site"),
+            thread_entry: item_at(prog, "runtime.thread", "entry"),
         }
     }
 }
@@ -186,9 +190,6 @@ pub(crate) fn roots(prog: &Program, tc: &Typeck, mode: RootMode, test: bool) -> 
         ("runtime.panic", "on_signal"),
     ] {
         add(&mut out, item_at(prog, m, n));
-    }
-    if mode != RootMode::Release {
-        add(&mut out, item_at(prog, "runtime.thread", "entry"));
     }
     out[own..].sort();
     if mode == RootMode::Release {
