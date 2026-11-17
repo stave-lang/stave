@@ -448,9 +448,10 @@ fn build(dir: &Path, target: Triple, release: bool) -> Result<Output, String> {
     }
 }
 
-/// Equal tokens; two NaNs (`f`/`d` tokens) are equal whatever their bits.
+/// Equal tokens. NaN sign and payload are unspecified, so two NaN tokens of one float type
+/// (`f`/`d`) are equal whatever their bits; every other token, `-0.0` included, compares exactly.
 fn same(a: &str, b: &str) -> bool {
-    a == b || (is_nan(a) && is_nan(b))
+    a == b || (a.as_bytes().first() == b.as_bytes().first() && is_nan(a) && is_nan(b))
 }
 
 fn is_nan(t: &str) -> bool {
@@ -754,4 +755,43 @@ fn kernels_match_their_references() {
     eprintln!("{} legs in {:.1} s", reports.len(), t.elapsed().as_secs_f64());
     assert!(failures.is_empty(), "{} failing leg(s):\n{}", failures.len(), failures.join("\n"));
     assert!(passed_known.is_empty(), "known failures that pass now (remove from KNOWN): {passed_known:?}");
+}
+
+fn ftok(bits: u32) -> String {
+    format!("f{bits}")
+}
+
+fn dtok(bits: u64) -> String {
+    format!("d{bits}")
+}
+
+#[test]
+fn nan_tokens_compare_as_a_class() {
+    let q = f32::NAN.to_bits();
+    for other in [q | 0x8000_0000, 0x7f80_0001, 0x7fc0_1234, 0xffff_ffff] {
+        assert!(f32::from_bits(other).is_nan());
+        assert!(same(&ftok(q), &ftok(other)), "f32 NaN {q:#x} vs {other:#x}");
+    }
+    let dq = f64::NAN.to_bits();
+    for other in [dq | (1 << 63), 0x7ff0_0000_0000_0001, 0x7ff8_dead_beef_0000] {
+        assert!(f64::from_bits(other).is_nan());
+        assert!(same(&dtok(dq), &dtok(other)), "f64 NaN {dq:#x} vs {other:#x}");
+    }
+    let (a, b) = (ftok(0x7f80_0001), ftok(0xffc0_0000));
+    assert!(same_tokens(&format!("u3 {a} h7"), &format!("u3 {b} h7")));
+    assert!(line_ok(&format!(" {} {} = {} {}", ftok(q), dtok(dq), ftok(0xff80_0002), dtok(dq ^ 1))));
+}
+
+#[test]
+fn other_tokens_compare_bit_exact() {
+    let (pz, nz) = (ftok(0f32.to_bits()), ftok((-0f32).to_bits()));
+    assert!(!same(&pz, &nz), "f32 -0.0 vs 0.0");
+    assert!(!same(&dtok(0f64.to_bits()), &dtok((-0f64).to_bits())), "f64 -0.0 vs 0.0");
+    assert!(!same(&ftok(f32::INFINITY.to_bits()), &ftok(f32::NAN.to_bits())), "inf vs NaN");
+    assert!(!same(&ftok(1f32.to_bits()), &ftok(1f32.to_bits() + 1)), "one ulp apart");
+    assert!(!same(&ftok(f32::NAN.to_bits()), &dtok(f64::NAN.to_bits())), "NaNs of two float types");
+    let (u1, u2) = (format!("u{}", f32::NAN.to_bits()), format!("u{}", 0x7fc0_0001u32));
+    assert!(!same(&u1, &u2), "an int token is never a NaN");
+    assert!(!line_ok(&format!(" {pz} = {nz}")));
+    assert!(!same_tokens(&pz, &format!("{pz} {pz}")));
 }

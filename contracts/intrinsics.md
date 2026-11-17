@@ -193,8 +193,11 @@ list):
   `runtime.panic.set_user_site`, `runtime.cpu.WORD` (a `u64` static; dispatch bodies load it),
   `runtime.cpu.features` (a request of it requests `init`), `runtime.cpu.init` (`cpu_init`),
   `runtime.cpu.trace` (dispatch bodies, trace bit), and the allocator
-  `runtime.alloc.{alloc, free, realloc}`
-  (replaced by an `allocator` declaration);
+  `runtime.alloc.{try_alloc, try_realloc, free}` (`try_alloc(size, alignment) -> *mut u8`,
+  `unsafe try_realloc(p, old_size, alignment, new_size) -> *mut u8`, both null on failure, a
+  failed `try_realloc` leaving `p` unchanged; `unsafe free(p, size, alignment)`), replaced by the
+  same three fns of an `allocator` declaration's module; the trapping `runtime.alloc.{alloc,
+  realloc}` are derived from them (`OutOfMemory` on null) and are never replaced;
 - compiler-emitted symbols: `_start`, `__stave_main`, `__stave_signal`, `__stave_thread_start`,
   `__stave_site_table`, `__stave_pc_table` (and `__stave_rt` on PTX);
 - `std.cell.UnsafeCell`, the only interior-mutability type: `&T` is readonly for the optimizer

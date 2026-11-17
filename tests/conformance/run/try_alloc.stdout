@@ -1,0 +1,19 @@
+Vec<Tok> full: gave back the Tok
+  drop Tok
+  len unchanged true
+try_with_capacity(10): cap 10
+try_push: ok
+try_extend_from_slice: ok
+try_reserve(100): ok
+  len 4, cap >= 104 true, first 7, last 3
+try_reserve(usize max): out of memory
+try_reserve(2^60 u32): out of memory
+  len 4, cap >= 104 true, first 7, last 3
+  len 5, cap >= 104 true, first 7, last 9
+Vec<u64> 2^61: out of memory
+Vec<u8> 2^62: out of memory
+String try_push_str: ok
+String try_push: ok
+String try_reserve(2^62): out of memory
+  héllo→ (9 bytes)
+String 2^62: out of memory

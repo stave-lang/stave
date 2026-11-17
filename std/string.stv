@@ -26,6 +26,18 @@ impl String {
         return String.{ buf: vec.Vec::<u8>.with_capacity(n) };
     }
 
+    // The `try_` methods return `Result.Err` instead of panicking `OutOfMemory`, with the String
+    // unchanged.
+    pub fn try_with_capacity(n: usize) -> Result<String, vec.AllocError> {
+        let buf = vec.Vec::<u8>.try_with_capacity(n)?;
+        return Result.Ok(String.{ buf: buf });
+    }
+
+    // Room for `extra` more bytes.
+    pub fn try_reserve(&mut self, extra: usize) -> Result<(), vec.AllocError> {
+        return self.buf.try_reserve(extra);
+    }
+
     pub fn from_str(s: &str) -> String {
         let mut r = String.new();
         r.push_str(s);
@@ -52,6 +64,18 @@ impl String {
 
     pub fn push_str(&mut self, s: &str) {
         self.buf.extend_from_slice(mem.str_bytes(s));
+    }
+
+    pub fn try_push_str(&mut self, s: &str) -> Result<(), vec.AllocError> {
+        return self.buf.try_extend_from_slice(mem.str_bytes(s));
+    }
+
+    pub fn try_push(&mut self, c: char) -> Result<(), vec.AllocError> {
+        let u = c as u32;
+        let n: usize = if u < 0x80 then 1 else if u < 0x800 then 2 else if u < 0x10000 then 3 else 4;
+        self.buf.try_reserve(n)?;
+        self.push(c);
+        return Result.Ok(());
     }
 
     pub fn push(&mut self, c: char) {

@@ -1,0 +1,34 @@
+//~ STDOUT float_text_nan_class.stdout
+//~ EXIT 0
+// Float text shows a NaN as `NaN` whatever its sign, quiet bit, and payload (all unspecified for
+// NaN results), and keeps the sign of zero. So byte-equal stdout compares printed floats with
+// every NaN as one class and everything else exactly. Bits come from parameters: nothing folds.
+import std.io;
+import std.mem;
+
+fn show32(bits: u32) {
+    let x = mem.f32_from_bits(bits);
+    io.print(f"{x}\n");
+}
+
+fn show64(bits: u64) {
+    let x = mem.f64_from_bits(bits);
+    io.print(f"{x}\n");
+}
+
+fn main() -> i32 {
+    // quiet, negative quiet, signaling, negative with a payload, then -0.0, 0.0
+    show32(0x7fc00000);
+    show32(0xffc00000);
+    show32(0x7f800001);
+    show32(0xffc01234);
+    show32(0x80000000);
+    show32(0);
+    show64(0x7ff8000000000000);
+    show64(0xfff8000000000000);
+    show64(0x7ff0000000000001);
+    show64(0xfff8deadbeef0000);
+    show64(0x8000000000000000);
+    show64(0);
+    return 0;
+}
