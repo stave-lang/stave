@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// E1404: a deny clause names only `alloc trap recursive lock unsafe io block`, on fn items and
+// in fn types.
+fn f() without(alloc, gc) { //~ ERROR E1404
+}
+
+fn g(h: fn() without(panic)) { //~ ERROR E1404
+}
+
+fn main() {
+    f();
+}

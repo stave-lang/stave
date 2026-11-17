@@ -1,8 +1,9 @@
 //! The stage0 driver pipeline.
 //!
 //! read → lex → items → parse → intern → resolve (+ canonical renumbering) → typeck (+ canonical
-//! type renumbering) → borrowck (stave-borrow, per body) → mono + lower (checked IR) → codegen →
-//! link (static ELF with DWARF line tables).
+//! type renumbering) → borrowck (stave-borrow, per body) → effects (deny clauses; [`crate::effects`],
+//! no `--timings` line) → mono + lower (checked IR) → codegen → link (static ELF with DWARF line
+//! tables).
 //!
 //! The front end through name resolution is [`stave_sema::Program::load`] (packages and manifests,
 //! the built-in `std`/`runtime` of a [`Library`], per-file parallel read + lex + items + parse,
@@ -18,7 +19,7 @@
 //! `codegen` (per function, parallel), `link` (layout, relocations, DWARF line tables, ELF; no
 //! separate `dwarf` line).
 //!
-//! Goals: [`Goal::Check`] stops after `borrowck` ([`Output::borrowck`]); a body the borrow
+//! Goals: [`Goal::Check`] stops after the effect pass ([`Output::borrowck`], [`Output::effects`]); a body the borrow
 //! checker could not check ([`stave_borrow::Borrowck::unchecked`]) is [`Output::failure`] for every
 //! goal but [`Goal::Parse`]. [`Goal::Build`] goes on
 //! through `link` when there is no error diagnostic; the back end's result is [`Output::module`] (the checked IR, also
@@ -135,9 +136,9 @@ impl Stage {
     /// | items | E0016 |
     /// | parse | E0004 E0011–E0014 E0019–E0023 E0025–E0028 |
     /// | resolve | E0101–E0107 |
-    /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0700–E0718 (the lowering-class gates E0700 E0701 included), E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck); the signature's `from` clause E0520 E0521; E0503 case `static` (writes to a `static`) |
+    /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0700–E0718 (the lowering-class gates E0700 E0701 included), E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck), E1404 (deny clause names); the signature's `from` clause E0520 E0521; E0503 case `static` (writes to a `static`) |
     /// | borrowck | E05xx except E0520 E0521 (accesses, loans, returned origins) |
-    /// | lower | E0108 (no `fn main`, builds only, reported before lowering) |
+    /// | lower | E0108 (no `fn main`, builds only, reported before lowering); E1401 E1403 (the effect pass, after borrowck on programs without errors, in checks and builds) |
     /// | (none) | retired codes: E0511 |
     pub fn of_code(code: &str) -> Option<Stage> {
         match code {
@@ -156,6 +157,9 @@ impl Stage {
             "E1002" | "E1003" => return Some(Stage::Read),
             // a build without `main` (stave build/run/test only; reported before lowering)
             "E0108" => return Some(Stage::Lower),
+            // the effect pass runs after borrowck on programs without errors, before lowering
+            "E1401" | "E1403" => return Some(Stage::Lower),
+            "E1404" => return Some(Stage::Typeck),
             // Origin table: checked with the signature (stave-sema origins), never from a body.
             "E0520" | "E0521" => return Some(Stage::Typeck),
             // retired: a missing `from` declares the empty origin set
@@ -216,6 +220,9 @@ pub struct Options {
     pub lower: bool,
     /// Collect the borrow checker's per-access lines (the `borrow` dump).
     pub borrow_dump: bool,
+    /// `stave effects`: compute `trap` from the checked IR of every fn, not only of what the deny
+    /// clauses reach ([`crate::effects::run`]).
+    pub effects_all: bool,
     /// Contents that stand in for source files on disk ([`stave_sema::Config::sources`]): a
     /// check of edits that are not written yet.
     pub sources: std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
@@ -232,6 +239,7 @@ impl Options {
             tests: false,
             lower: false,
             borrow_dump: false,
+            effects_all: false,
             sources: std::collections::BTreeMap::new(),
         }
     }
@@ -277,6 +285,9 @@ pub struct Output {
     pub typeck: Option<Typeck>,
     /// The borrow checker's result (`None` when the goal is [`Goal::Parse`]).
     pub borrowck: Option<stave_borrow::Borrowck>,
+    /// The effect sets of the call graph's nodes ([`crate::effects`]; `None` with error
+    /// diagnostics before the effect pass).
+    pub effects: Option<stave_sema::effects::EffectSets>,
     /// All diagnostics in canonical order, deduplicated.
     pub diagnostics: Vec<Diagnostic>,
     /// The stages that ran, in execution order.
@@ -422,6 +433,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             program,
             typeck: None,
             borrowck: None,
+            effects: None,
             diagnostics,
             timings,
             module: None,
@@ -442,6 +454,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             program,
             typeck: None,
             borrowck: None,
+            effects: None,
             diagnostics,
             timings,
             module: None,
@@ -491,11 +504,31 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     }
     // A body the borrow checker could not model is not known to be sound: the run fails (check
     // and build alike) instead of accepting it without its E05xx diagnostics.
-    let failure = if has_errors { None } else { unchecked_failure(&bc, |d| program.decl_path(d)) };
+    let mut failure = if has_errors { None } else { unchecked_failure(&bc, |d| program.decl_path(d)) };
+
+    // ---- effects: deny clauses against the effect sets of the call graph.
+    let mut effect_sets = None;
+    if !has_errors && failure.is_none() {
+        let t0 = Instant::now();
+        match crate::effects::run(&program, &tc, opts.effects_all) {
+            Ok(r) => {
+                if !r.diagnostics.is_empty() {
+                    diagnostics.extend(r.diagnostics);
+                    diagnostics = stave_diag::canonical_order(diagnostics, &program.source_map);
+                    has_errors = true;
+                }
+                effect_sets = Some(r.sets);
+            }
+            Err(f) => failure = Some(f),
+        }
+        prof::part(".effects", t0.elapsed());
+        prof::mark("effects");
+    }
     let mut out = Output {
         program,
         typeck: None,
         borrowck: Some(bc),
+        effects: effect_sets,
         diagnostics,
         timings,
         module: None,
@@ -631,6 +664,9 @@ mod tests {
         assert_eq!(of("E0101"), Some(Stage::Resolve));
         assert_eq!(of("E0107"), Some(Stage::Resolve));
         assert_eq!(of("E0108"), Some(Stage::Lower));
+        assert_eq!(of("E1401"), Some(Stage::Lower));
+        assert_eq!(of("E1403"), Some(Stage::Lower));
+        assert_eq!(of("E1404"), Some(Stage::Typeck));
         assert_eq!(of("E0201"), Some(Stage::Typeck));
         assert_eq!(of("E0909"), Some(Stage::Typeck));
         assert_eq!(of("E0803"), Some(Stage::Typeck));

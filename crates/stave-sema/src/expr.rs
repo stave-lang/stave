@@ -1368,7 +1368,9 @@ impl<'a> Ck<'a> {
         if params.contains(&ids::ERROR) || ret == ids::ERROR {
             return Ty::ERR;
         }
-        Ty::T(self.tys.intern(TypeKind::Fn { params: params.into_boxed_slice(), ret, features }))
+        // A closure has no deny clause of its own: coercing it to a fn type with one is checked on
+        // its effects (`crate::effects`).
+        Ty::T(self.tys.intern(TypeKind::Fn { params: params.into_boxed_slice(), ret, features, deny: 0 }))
     }
 
     fn fstring(&mut self, n: u32, tok: u32) -> Ty {
@@ -1716,6 +1718,7 @@ impl<'a> Ck<'a> {
             params: sig.params.clone().into_boxed_slice(),
             ret: sig.ret,
             features: sig.features,
+            deny: sig.deny,
         };
         if sig.params.contains(&ids::ERROR) || sig.ret == ids::ERROR {
             return ids::ERROR;
@@ -2190,12 +2193,13 @@ impl<'a> Ck<'a> {
             binds.copy_from_slice(&b2);
             return;
         }
-        // a fn value with other features: the coercion of the argument decides (E0707)
-        if let (TypeKind::Fn { features: pf, .. }, TypeKind::Fn { params, ret, features }) =
+        // a fn value with other features or another deny clause: the coercion of the argument
+        // decides (E0707, E1403)
+        if let (TypeKind::Fn { features: pf, deny: pd, .. }, TypeKind::Fn { params, ret, features, deny }) =
             (self.tys.kind(p).clone(), self.tys.kind(t).clone())
-            && pf != features
+            && (pf != features || pd != deny)
         {
-            let t2 = self.tys.intern(TypeKind::Fn { params, ret, features: pf });
+            let t2 = self.tys.intern(TypeKind::Fn { params, ret, features: pf, deny: pd });
             let mut b5 = binds.to_vec();
             if self.w.match_ty(&self.tys, p, t2, &mut b5) {
                 binds.copy_from_slice(&b5);
@@ -2586,7 +2590,7 @@ impl<'a> Ck<'a> {
                     return self.args_only(args);
                 }
                 match self.tys.kind(t).clone() {
-                    TypeKind::Fn { params, ret, features } => {
+                    TypeKind::Fn { params, ret, features, .. } => {
                         if !self.arity(n, paren, params.len(), args.len(), false) {
                             return self.args_only(args);
                         }

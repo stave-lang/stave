@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// `without(io)`: the allocator's system calls are its allocation, not `io`, so `g` may fill a
+// `Vec` through `h`.
+import std.vec;
+
+fn h(v: &mut vec.Vec<u32>) {
+    v.push(1u32);
+}
+
+fn g(v: &mut vec.Vec<u32>) without(io) {
+    h(v);
+}
+
+fn main() {
+    let mut v = vec.Vec::<u32>.new();
+    g(&mut v);
+}

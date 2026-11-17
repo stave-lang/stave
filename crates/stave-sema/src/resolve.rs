@@ -1070,9 +1070,7 @@ impl<'t, 'a> W<'t, 'a> {
             NodeKind::Requires | NodeKind::Ensures => {
                 self.unimplemented(n, "a `requires` / `ensures` contract");
             }
-            // An unchecked deny clause would promise what nothing verifies.
-            NodeKind::Without => self.unimplemented(n, "a `without(..)` deny clause"),
-            NodeKind::Effect => {}
+            NodeKind::Without | NodeKind::Effect => {}
             NodeKind::Primary => {
                 self.chain_head(n);
                 let a = self.a(n) as usize;

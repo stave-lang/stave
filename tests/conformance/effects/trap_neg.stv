@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// `without(trap)`: `g` reaches the trapping `+` in `h`; the `+%` in `g` itself cannot trap.
+fn h(x: u32) -> u32 {
+    return x + 1u32;
+}
+
+fn g(x: u32) -> u32 without(trap) { //~ ERROR E1401
+    return h(x) +% 1u32;
+}
+
+fn main() {
+    let r = g(1u32);
+}

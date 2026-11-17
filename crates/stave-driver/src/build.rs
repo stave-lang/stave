@@ -127,22 +127,26 @@ pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Lowered, Failure
     prof::part(".rounds", tm.rounds);
     prof::part(".assemble", tm.assemble);
     prof::mark("lower");
-    let mut m = lowered.map_err(|es| {
-        let message = listed(&es);
-        if es.iter().all(|e| e.kind == LowerErrorKind::Unsupported) {
-            Failure::Unsupported { stage: Stage::Lower, message }
-        } else {
-            Failure::Internal { stage: Stage::Lower, message }
-        }
-    })?;
+    let mut m = lowered.map_err(|es| lower_failure(&es))?;
     verified(&m, Stage::Lower)?;
     prof::mark("verify");
     let removed = remove_proven_checks(&mut m)?;
     Ok(Lowered { module: m, removed })
 }
 
+/// The failure for lowering errors: all [`LowerErrorKind::Unsupported`] is
+/// [`Failure::Unsupported`], anything else a compiler bug.
+pub(crate) fn lower_failure(es: &[stave_sema::LowerError]) -> Failure {
+    let message = listed(es);
+    if es.iter().all(|e| e.kind == LowerErrorKind::Unsupported) {
+        Failure::Unsupported { stage: Stage::Lower, message }
+    } else {
+        Failure::Internal { stage: Stage::Lower, message }
+    }
+}
+
 /// The IR verifier on `m`; an error is a compiler bug of `stage`.
-fn verified(m: &Module, stage: Stage) -> Result<(), Failure> {
+pub(crate) fn verified(m: &Module, stage: Stage) -> Result<(), Failure> {
     verify(m).map_err(|es| {
         let named: Vec<String> = es
             .iter()
@@ -174,7 +178,7 @@ fn audited(m: &Module, stage: Stage) -> Result<(), Failure> {
 /// proof, and the witnesses of the checks that are provably redundant. Then the witness checker,
 /// which shares no code with the proof search, validates every witness, and only the checks it
 /// accepted are deleted. Returns the accepted proofs.
-fn remove_proven_checks(m: &mut Module) -> Result<Vec<Proved>, Failure> {
+pub(crate) fn remove_proven_checks(m: &mut Module) -> Result<Vec<Proved>, Failure> {
     let internal = |message: String| Failure::Internal { stage: Stage::Lower, message };
     let found: Vec<Analysis> =
         (0..m.funcs.len() as u32).into_par_iter().map(|f| analyze_func(m, FuncId(f))).collect();

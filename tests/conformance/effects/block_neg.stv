@@ -1,0 +1,24 @@
+//~ CHECK-ONLY
+// `without(block)`: `g` waits in `thread.join` through `h`; `s` waits at the end of its own
+// `scope` (the op is in the fn itself).
+import std.thread;
+
+fn h() -> u32 {
+    let (a, b) = thread.join(fn() -> u32 { return 1u32; }, fn() -> u32 { return 2u32; });
+    return a +% b;
+}
+
+fn g() -> u32 without(block) { //~ ERROR E1401
+    return h();
+}
+
+fn s() without(block) { //~ ERROR E1401
+    scope {
+        spawn { }
+    }
+}
+
+fn main() {
+    let a = g();
+    s();
+}

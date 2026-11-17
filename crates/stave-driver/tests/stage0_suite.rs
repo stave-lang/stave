@@ -190,6 +190,15 @@ fn dispatch_suite_passes() {
     assert!(r.negative >= 6, "suite too small");
 }
 
+/// Effects and deny clauses (E1401, E1403, E1404): one positive and one negative test per
+/// effect; the `trap` run test passes in debug and release alike, natively on the x86-64 host.
+#[test]
+fn effects_suite_passes() {
+    let r = suite("effects");
+    all_decided(&r);
+    assert!(r.negative >= 10 && r.positive >= 8, "suite too small");
+}
+
 #[test]
 fn dump_inputs_as_conformance_tests() {
     let mut c = stage0(2);

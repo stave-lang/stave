@@ -1,0 +1,62 @@
+//~ CHECK-ONLY
+// The `stave effects` golden (expected.json, crates/stave-cli/tests/effects_report.rs), built
+// against the pinned stand-in library so it does not move with the shipped std: own fns only,
+// generic fns per instance, closures as `<fn>.<k>`.
+extern "C" {
+    fn abs(x: i32) -> i32;
+}
+
+fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+fn add_wrap(a: u32, b: u32) -> u32 without(trap) {
+    return a +% b;
+}
+
+fn first(xs: &[u32]) -> u32 {
+    return xs[0];
+}
+
+// the bounds check has a proof and is removed: no trap
+fn total(xs: &[u32]) -> u32 without(trap) {
+    let mut s = 0u32;
+    for i in 0..xs.len() {
+        s = s +% xs[i];
+    }
+    return s;
+}
+
+rec fn depth(n: u32) -> u32 {
+    return if n == 0u32 then 0u32 else depth(n -% 1u32) +% 1u32;
+}
+
+fn read(p: *const u32) -> u32 {
+    return unsafe("p points to a live u32") *p;
+}
+
+fn c_abs(x: i32) -> i32 {
+    return unsafe("abs has no precondition") abs(x);
+}
+
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+fn apply(f: fn(u32) -> u32 without(trap), x: u32) -> u32 {
+    return f(x);
+}
+
+fn main() {
+    let xs: [u32; 2] = [1u32, 2u32];
+    let a = add(1u32, 2u32);
+    let b = add_wrap(1u32, 2u32);
+    let c = first(&xs);
+    let d = total(&xs);
+    let e = depth(3u32);
+    let f = read(&a as *const u32);
+    let g = c_abs(-1i32);
+    let h = id(1u32);
+    let i = id(true);
+    let j = apply(fn(x: u32) -> u32 { return x +% 1u32; }, 3u32);
+}

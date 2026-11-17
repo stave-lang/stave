@@ -21,7 +21,9 @@
 //!   untracked value can (below);
 //! - [`EdgeKind::Member`]: a table, to each fn and closure of its type made into a fn value
 //!   anywhere (site: the first place the walk finds it made);
-//! - [`EdgeKind::Spawn`]: the fn or closure holding a `spawn` statement, to the spawn body;
+//! - [`EdgeKind::Spawn`]: the fn or closure holding a `spawn` statement, to the spawn body, and
+//!   the one passing a closure literal to `runtime.thread.start` (which runs it on a new
+//!   thread), to that closure;
 //! - [`EdgeKind::Drop`]: a fn or closure to the glue of each value type it may drop
 //!   ([`crate::typeck::TypedBody::drops`]: its locals and the values it makes; a value it drops is
 //!   one of them or a part of one), and a glue to its type's `Drop` impl and to the glue of each
@@ -34,9 +36,11 @@
 //!
 //! **Tables.** A fn value is made by a fn item used as a value (coercion `FnItem`), a closure
 //! literal, or a `spawn` body (which `runtime.thread` runs as a `fn()` value). The only coercion
-//! between fn types keeps the params and the return type and changes the features (typeck), so a
-//! table is keyed by the params and the return type, features cleared, and holds every value of
-//! any fn type with that key: the upper bound of what a call through such a value reaches.
+//! between fn types keeps the params and the return type and changes the features or the deny
+//! clause (typeck), so a table is keyed by the params and the return type, features and deny
+//! clause cleared, and holds every value of any fn type with that key: the upper bound of what a
+//! call through such a value reaches. Every `Indirect` edge of a call carries the deny clause of
+//! the called value's type ([`Edge::deny`]).
 //!
 //! **Fn-value flow.** A fn value lives only in a local, a param, or a view field, so the values a
 //! call through one reaches are tracked by slots: each local and param of an instance (a closure's
@@ -135,6 +139,10 @@ pub struct Edge {
     /// the f-string, the coerced expression's first token; for [`EdgeKind::Member`] where the
     /// fn value is made.
     pub site: Span,
+    /// Effects ([`crate::effects::Effects`] bits) no target reached through this edge has: for
+    /// an [`EdgeKind::Indirect`] edge, the deny clause of the fn type of its calls (of several
+    /// calls to one table, what all of them deny); 0 for every other edge.
+    pub deny: u8,
 }
 
 /// A fn-value target table.
@@ -285,6 +293,13 @@ impl CallGraph {
         o
     }
 
+    /// The names of nodes `ns`, as [`CallGraph::dump`] prints them.
+    pub fn node_names(&self, prog: &Program, tc: &Typeck, ns: &[u32]) -> Vec<String> {
+        let cx = self.types(&tc.types);
+        let names = crate::sigs::NameCx { prog, generics: &[] };
+        ns.iter().map(|&n| node_name(self, prog, &tc.sigs, &cx, &names, n)).collect()
+    }
+
     /// A text form for tests: one line per node, edge, table, root, and SCC (cycles only), in id
     /// order. Fn instances print as checked-IR paths with their type args, closures as
     /// `<fn>.<k>`, tables as `table <fn type>`, sites as `line:col`.
@@ -311,6 +326,9 @@ impl CallGraph {
                 let kind = match e.kind {
                     EdgeKind::Call => "call".to_string(),
                     EdgeKind::Dispatch { decl } => format!("dispatch {}", prog.decl_path(decl)),
+                    EdgeKind::Indirect if e.deny != 0 => {
+                        format!("indirect without({})", crate::effects::Effects(e.deny).names().join(", "))
+                    }
                     EdgeKind::Indirect => "indirect".to_string(),
                     EdgeKind::Member => "member".to_string(),
                     EdgeKind::Spawn => "spawn".to_string(),
@@ -422,8 +440,9 @@ enum What<'b> {
     Store { decl: DeclId, index: u32, src: Src<'b> },
     /// A fn item made into a fn value; `root`: it is a thread fn's argument.
     FnItem { decl: DeclId, args: &'b [GArg], root: Option<RootKind> },
-    /// Closure `k` made into a fn value (a `spawn` body: also spawned).
-    Closure { k: u32, root: Option<RootKind> },
+    /// Closure `k` made into a fn value (a `spawn` body, or `started` by `runtime.thread.start`:
+    /// also spawned).
+    Closure { k: u32, root: Option<RootKind>, started: bool },
     /// `String.as_str` of a coercion.
     AsStr,
     /// `String.new` and `String.push_str` of an f-string.
@@ -509,15 +528,21 @@ fn params_of(icx: &ItemCx<'_>, n: u32) -> Vec<u32> {
     icx.child(n, Syn::Params).map_or_else(Vec::new, |p| icx.kids_vec(p).iter().copied().collect())
 }
 
-/// The fn items and closure literals passed to the thread fns in `body`: (core token, root). A
-/// closure literal's core token is its `fn` token; a fn item's, the token typeck keys its value
-/// target by.
-fn thread_args(icx: &ItemCx<'_>, body: &TypedBody, fns: &[Option<DeclId>; 3]) -> Vec<(u32, RootKind)> {
+/// The fn items and closure literals passed to the thread fns `fns[..3]` in `body`: (core token,
+/// root). A closure literal's core token is its `fn` token; a fn item's, the token typeck keys its
+/// value target by. Also the `fn` tokens of the closure literals passed to `fns[3]`
+/// (`runtime.thread.start`), which runs them on a new thread.
+fn thread_args(
+    icx: &ItemCx<'_>,
+    body: &TypedBody,
+    fns: &[Option<DeclId>; 4],
+) -> (Vec<(u32, RootKind)>, Vec<u32>) {
     let mut out = Vec::new();
+    let mut started = Vec::new();
     let calls_one =
         body.targets.iter().any(|(_, t)| matches!(t, Target::Fn { decl, .. } if fns.contains(&Some(*decl))));
     if !calls_one {
-        return out;
+        return (out, started);
     }
     let lo = icx.ast.descendants(body.node).start;
     for n in lo..=body.node {
@@ -534,7 +559,15 @@ fn thread_args(icx: &ItemCx<'_>, body: &TypedBody, fns: &[Option<DeclId>; 3]) ->
             let args: &[u32] = match which {
                 0 => &[0, 1],
                 1 => &[2],
-                _ => &[1],
+                2 => &[1],
+                _ => {
+                    if let Some(&arg) = icx.kids_vec(k).first()
+                        && crate::closures::closure_kind(icx, arg) == Some(ClosureKind::Literal)
+                    {
+                        started.push(icx.a(arg));
+                    }
+                    continue;
+                }
             };
             let kids = icx.kids_vec(k);
             for &i in args {
@@ -551,7 +584,7 @@ fn thread_args(icx: &ItemCx<'_>, body: &TypedBody, fns: &[Option<DeclId>; 3]) ->
             }
         }
     }
-    out
+    (out, started)
 }
 
 /// What the fn-valued expression `e` of `body` is (module docs, "Fn-value flow").
@@ -723,7 +756,7 @@ fn extract<'b>(
     icx: &ItemCx<'_>,
     body: &'b TypedBody,
     sigs: &Sigs,
-    fns: &[Option<DeclId>; 3],
+    fns: &[Option<DeclId>; 4],
     fnish: &dyn Fn(TypeId) -> bool,
     is_fn: &dyn Fn(TypeId) -> bool,
 ) -> BodyEvents<'b> {
@@ -755,7 +788,7 @@ fn extract<'b>(
         closures.push(Closure { kind, lo, hi, owner, ty, span: icx.tok_span(lo), params });
     }
     let params = params_of(icx, body.node);
-    let roots = thread_args(icx, body, fns);
+    let (roots, started) = thread_args(icx, body, fns);
     let root_at = |t: u32| roots.iter().find(|r| r.0 == t).map(|r| r.1);
     let mut evs: Vec<Ev> = Vec::new();
     let file = icx.fid();
@@ -801,11 +834,12 @@ fn extract<'b>(
     drop(push);
     for (k, c) in closures.iter().enumerate() {
         let root = if c.kind == ClosureKind::Spawn { Some(RootKind::Spawn) } else { root_at(c.lo) };
+        let started = started.contains(&c.lo);
         evs.push(Ev {
             owner: c.owner,
             tok: c.lo,
             site: Site::At(c.span),
-            what: What::Closure { k: k as u32, root },
+            what: What::Closure { k: k as u32, root, started },
         });
     }
     evs.sort_by_key(|e| e.order());
@@ -858,6 +892,9 @@ struct ValueSite {
     /// (param index, argument)
     args: Vec<(u32, Val)>,
     site: Site,
+    /// The deny clause of the called value's fn type: every value that reaches the call was
+    /// coerced to that type, so none has those effects.
+    deny: u8,
 }
 
 /// The fn-value flow constraints the walk collects.
@@ -900,8 +937,8 @@ struct Walk<'a> {
     drop_memo: FxHashMap<TypeId, bool>,
     /// [`Walk::needs_drop`] of typeck's types by id: 0 unknown, 1 no, 2 yes.
     drop_known: Vec<u8>,
-    /// (from, to or `TABLE_BIT | table`, kind, site)
-    edges: Vec<(u32, u32, EdgeKind, Site)>,
+    /// (from, to or `TABLE_BIT | table`, kind, site, deny)
+    edges: Vec<(u32, u32, EdgeKind, Site, u8)>,
     tables: Vec<TypeId>,
     table_of: FxHashMap<TypeId, u32>,
     /// (table, node, site)
@@ -1000,7 +1037,7 @@ impl<'a> Walk<'a> {
         if let Some(k) = crate::mono::drop_method(&w, &mut self.cx, t)
             && let Some(n) = self.node_for(k, i)
         {
-            self.edges.push((i, n, EdgeKind::Drop, site));
+            self.edges.push((i, n, EdgeKind::Drop, site, 0));
         }
         let parts: Vec<TypeId> = match self.cx.kind(t).clone() {
             TypeKind::Adt { .. } => crate::mono::adt_fields(self.sigs, &mut self.cx, t)
@@ -1013,7 +1050,7 @@ impl<'a> Walk<'a> {
             if self.needs_drop(p)
                 && let Some(g) = self.glue_node(p, i, site)
             {
-                self.edges.push((i, g, EdgeKind::Drop, site));
+                self.edges.push((i, g, EdgeKind::Drop, site, 0));
             }
         }
     }
@@ -1048,10 +1085,18 @@ impl<'a> Walk<'a> {
         if args.is_empty() { t } else { self.cx.subst(t, args, None) }
     }
 
+    /// The deny clause of fn type `t` (0 for any other type).
+    fn deny_of(&self, t: TypeId) -> u8 {
+        match self.cx.kind(t) {
+            TypeKind::Fn { deny, .. } => *deny,
+            _ => 0,
+        }
+    }
+
     /// The table of fn type `t` (`None` if `t` is not a fn type).
     fn table(&mut self, t: TypeId) -> Option<u32> {
         let TypeKind::Fn { params, ret, .. } = self.cx.kind(t).clone() else { return None };
-        let key = self.cx.intern(TypeKind::Fn { params, ret, features: 0 });
+        let key = self.cx.intern(TypeKind::Fn { params, ret, features: 0, deny: 0 });
         if let Some(&i) = self.table_of.get(&key) {
             return Some(i);
         }
@@ -1067,7 +1112,7 @@ impl<'a> Walk<'a> {
         let (ps, r) = (sig.params.clone(), sig.ret);
         let params: Vec<TypeId> = ps.iter().map(|&p| self.subst(p, args)).collect();
         let ret = self.subst(r, args);
-        let t = self.cx.intern(TypeKind::Fn { params: params.into_boxed_slice(), ret, features: 0 });
+        let t = self.cx.intern(TypeKind::Fn { params: params.into_boxed_slice(), ret, features: 0, deny: 0 });
         self.table(t)
     }
 
@@ -1079,7 +1124,7 @@ impl<'a> Walk<'a> {
         };
         let to = self.fn_targets(decl, args, inst);
         for &t in &to {
-            self.edges.push((from, t, kind, site));
+            self.edges.push((from, t, kind, site, 0));
         }
         to
     }
@@ -1204,15 +1249,19 @@ impl<'a> Walk<'a> {
                 What::ValueCall { ty, callee } => {
                     let t = self.subst(*ty, &args);
                     let table = self.table(t);
+                    let deny = self.deny_of(t);
                     let callee = self.val(callee, i, base, &args);
-                    self.flow.sites.push(ValueSite { from, table, callee, args: Vec::new(), site: ev.site });
+                    let site = ev.site;
+                    self.flow.sites.push(ValueSite { from, table, callee, args: Vec::new(), site, deny });
                     last = (ev.tok, Vec::new(), Some(self.flow.sites.len() - 1));
                 }
                 What::ValueUse { ty, src } => {
                     let t = self.subst(*ty, &args);
                     let table = self.table(t);
+                    let deny = self.deny_of(t);
                     let callee = self.val(src, i, base, &args);
-                    self.flow.sites.push(ValueSite { from, table, callee, args: Vec::new(), site: ev.site });
+                    let site = ev.site;
+                    self.flow.sites.push(ValueSite { from, table, callee, args: Vec::new(), site, deny });
                 }
                 What::Arg { idx, src } => {
                     if last.0 != ev.tok {
@@ -1252,11 +1301,14 @@ impl<'a> Walk<'a> {
                         }
                     }
                 }
-                What::Closure { k, root } => {
+                What::Closure { k, root, started } => {
                     let n = base + k;
                     let c = &be.closures[*k as usize];
+                    if *started {
+                        self.edges.push((from, n, EdgeKind::Spawn, ev.site, 0));
+                    }
                     let tb = if c.kind == ClosureKind::Spawn {
-                        self.edges.push((from, n, EdgeKind::Spawn, ev.site));
+                        self.edges.push((from, n, EdgeKind::Spawn, ev.site, 0));
                         if let Some(d) = self.scope_spawn
                             && let Some(ss) = self.node_for(InstKey { decl: d, args: Vec::new() }, i)
                             && let Some(p) = self.param_slot(ss, 1)
@@ -1264,7 +1316,12 @@ impl<'a> Walk<'a> {
                             self.flow.add(&Val::Nodes(vec![n]), p);
                         }
                         let unit = self.cx.mk_tuple(Vec::new());
-                        let t = self.cx.intern(TypeKind::Fn { params: Box::new([]), ret: unit, features: 0 });
+                        let t = self.cx.intern(TypeKind::Fn {
+                            params: Box::new([]),
+                            ret: unit,
+                            features: 0,
+                            deny: 0,
+                        });
                         self.table(t)
                     } else {
                         let t = self.subst(c.ty, &args);
@@ -1296,7 +1353,7 @@ impl<'a> Walk<'a> {
             }
             let site = Site::Tok { file: be.file, tok };
             if let Some(g) = self.glue_node(t, i, site) {
-                self.edges.push((node_of(o), g, EdgeKind::Drop, site));
+                self.edges.push((node_of(o), g, EdgeKind::Drop, site, 0));
             }
         }
     }
@@ -1452,12 +1509,12 @@ impl<'a> Walk<'a> {
             };
             if untracked {
                 if let Some(tb) = s.table {
-                    self.edges.push((s.from, TABLE_BIT | tb, EdgeKind::Indirect, s.site));
+                    self.edges.push((s.from, TABLE_BIT | tb, EdgeKind::Indirect, s.site, s.deny));
                 }
                 continue;
             }
             for t in site_targets(s, &sets, &top, &members) {
-                self.edges.push((s.from, t, EdgeKind::Indirect, s.site));
+                self.edges.push((s.from, t, EdgeKind::Indirect, s.site, s.deny));
             }
         }
     }
@@ -1515,7 +1572,9 @@ pub(crate) fn build(
     bodies: &[TypedBody],
     brackets: &[Brackets],
 ) -> CallGraph {
-    let fns = ["join", "par_for", "par_for_mut"].map(|n| crate::mono::item_at(prog, "std.thread", n));
+    let [join, par_for, par_for_mut] =
+        ["join", "par_for", "par_for_mut"].map(|n| crate::mono::item_at(prog, "std.thread", n));
+    let fns = [join, par_for, par_for_mut, crate::mono::item_at(prog, "runtime.thread", "start")];
     // 2: a fn type, 1: a generic param
     let fn_like: Vec<u8> = table
         .iter()
@@ -1613,7 +1672,7 @@ fn finish(w: Walk<'_>) -> CallGraph {
     for &(t, _, s) in &w.members {
         table_site[t as usize].get_or_insert(s);
     }
-    for &(_, t, _, s) in &w.edges {
+    for &(_, t, _, s, _) in &w.edges {
         if t & TABLE_BIT != 0 {
             table_site[(t & !TABLE_BIT) as usize].get_or_insert(s);
         }
@@ -1626,11 +1685,11 @@ fn finish(w: Walk<'_>) -> CallGraph {
     }
     let n = nodes.len();
     let fix = |t: u32| if t & TABLE_BIT != 0 { n_fn + (t & !TABLE_BIT) } else { t };
-    let raw: Vec<(u32, u32, EdgeKind, Site)> = w
+    let raw: Vec<(u32, u32, EdgeKind, Site, u8)> = w
         .edges
         .into_iter()
-        .map(|(f, t, k, s)| (f, fix(t), k, s))
-        .chain(w.members.iter().map(|&(t, m, s)| (n_fn + t, m, EdgeKind::Member, s)))
+        .map(|(f, t, k, s, d)| (f, fix(t), k, s, d))
+        .chain(w.members.iter().map(|&(t, m, s)| (n_fn + t, m, EdgeKind::Member, s, 0)))
         .collect();
     // counting sort by caller keeps each caller's edges in recording order (source order per
     // body); per caller, a stable sort by callee keeps the first edge of each pair
@@ -1648,15 +1707,20 @@ fn finish(w: Walk<'_>) -> CallGraph {
         fill[e.0 as usize] += 1;
     }
     let mut kept: Vec<u32> = Vec::with_capacity(raw.len());
+    let mut kept_deny: Vec<u8> = Vec::with_capacity(raw.len());
     let mut new_start = vec![0u32; n + 1];
     for v in 0..n {
         let list = &mut slots[out_start[v] as usize..out_start[v + 1] as usize];
         list.sort_by_key(|&i| raw[i as usize].1);
         let mut last = u32::MAX;
         for &i in list.iter() {
-            if raw[i as usize].1 != last {
-                last = raw[i as usize].1;
+            let (_, to, _, _, deny) = raw[i as usize];
+            if to != last {
+                last = to;
                 kept.push(i);
+                kept_deny.push(deny);
+            } else if let Some(d) = kept_deny.last_mut() {
+                *d &= deny;
             }
         }
         new_start[v + 1] = kept.len() as u32;
@@ -1664,9 +1728,10 @@ fn finish(w: Walk<'_>) -> CallGraph {
     let out_start = new_start;
     let out: Vec<Edge> = kept
         .par_iter()
-        .map(|&i| {
-            let (_, to, kind, site) = raw[i as usize];
-            Edge { to, kind, site: site.span(prog) }
+        .zip(kept_deny.par_iter())
+        .map(|(&i, &deny)| {
+            let (_, to, kind, site, _) = raw[i as usize];
+            Edge { to, kind, site: site.span(prog), deny }
         })
         .collect();
     let callers: Vec<u32> = kept.iter().map(|&i| raw[i as usize].0).collect();
@@ -1940,7 +2005,8 @@ mod tests {
             out_start[i + 1] += out_start[i];
         }
         let site = Span::new(stave_diag::FileId(0), 0, 0);
-        let out: Vec<Edge> = es.iter().map(|&(_, t)| Edge { to: t, kind: EdgeKind::Call, site }).collect();
+        let out: Vec<Edge> =
+            es.iter().map(|&(_, t)| Edge { to: t, kind: EdgeKind::Call, site, deny: 0 }).collect();
         let callers: Vec<u32> = es.iter().map(|e| e.0).collect();
         let (in_start, in_edges) = transpose(n, &out_start, &out);
         let to: Vec<u32> = out.iter().map(|e| e.to).collect();

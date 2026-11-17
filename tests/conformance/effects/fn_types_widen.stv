@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// E1403: a value of `fn(..) without(D1)` is usable as `fn(..) without(D2)` only if D2 ⊆ D1; a
+// fn-typed param is not a closure literal or fn item, so its effects are only what its type
+// denies.
+fn widen(f: fn(u32) -> u32) -> u32 {
+    let g: fn(u32) -> u32 without(trap) = f; //~ ERROR E1403
+    return 0u32;
+}
+
+fn partly(f: fn(u32) -> u32 without(alloc)) -> u32 {
+    let g: fn(u32) -> u32 without(alloc, io) = f; //~ ERROR E1403
+    return 0u32;
+}
+
+fn id(x: u32) -> u32 {
+    return x;
+}
+
+fn main() {
+    let w = widen(id);
+}

@@ -161,6 +161,11 @@ pub struct TypedBody {
     /// body drops is one of these or a part of one; types that cannot own a `Drop` value (scalars,
     /// references, pointers, fn values) are left out.
     pub drops: Vec<(u32, TypeId)>,
+    /// Fn values made (a closure literal, a fn item used as a value) where a fn type with a deny
+    /// clause their own type lacks is wanted, so the effect pass checks them on their effects
+    /// ([`crate::effects`], E1403): (the closure's `fn` token or the token of the fn item's value
+    /// target, the effects that must be absent, the coerced node), sorted by token.
+    pub denied: Vec<(u32, u8, u32)>,
     pub has_error: bool,
     /// Class U ops inside `emulate { }`, in source order ([`crate::gates`]).
     pub emulated: Vec<crate::gates::Emulated>,
@@ -477,6 +482,7 @@ fn empty_body(j: Job) -> TypedBody {
         sites: Vec::new(),
         implicit: Vec::new(),
         drops: Vec::new(),
+        denied: Vec::new(),
         has_error: true,
         emulated: Vec::new(),
     }
@@ -666,6 +672,7 @@ pub(crate) struct Ck<'a> {
     pub sites: Vec<CallSite>,
     pub implicit: Vec<(u32, Target)>,
     pub drops: Vec<(u32, TypeId)>,
+    pub denied: Vec<(u32, u8, u32)>,
     pub depth: u32,
     /// E0005 case `expr` was reported for this body.
     pub depth_reported: bool,
@@ -728,6 +735,7 @@ fn check_body(
         sites: Vec::new(),
         implicit: Vec::new(),
         drops: Vec::new(),
+        denied: Vec::new(),
         depth: 0,
         depth_reported: false,
         diverges: false,
@@ -1097,6 +1105,19 @@ impl<'a> Ck<'a> {
                 if self.tys.has_error(want) {
                     return want;
                 }
+                if let Some(widened) = self.deny_widened(t, want) {
+                    if let Some(tok) = self.made_fn_value(n) {
+                        self.denied.push((tok, widened, n));
+                        self.coerce_note(n, Coercion::FnItem);
+                        return want;
+                    }
+                    let (from, to) = (self.show(t), self.show(want));
+                    let effect = crate::effects::Effects(widened).names()[0];
+                    let holes = [("from", from.as_str()), ("to", to.as_str()), ("effect", effect)];
+                    let d = mk("E1403", None, &holes, self.icx.node_span(n), &[]);
+                    self.report(d);
+                    return ids::ERROR;
+                }
                 let drops_features = matches!(
                     (self.tys.kind(t), self.tys.kind(want)),
                     (TypeKind::Fn { params: p1, ret: r1, .. }, TypeKind::Fn { params: p2, ret: r2, .. })
@@ -1112,6 +1133,31 @@ impl<'a> Ck<'a> {
                 ids::ERROR
             }
         }
+    }
+
+    /// The effects fn type `want` denies beyond those fn type `t` denies, when that is the only
+    /// reason `t` is not coercible to `want` (equal params and return type, features allowed).
+    fn deny_widened(&self, t: TypeId, want: TypeId) -> Option<u8> {
+        let (
+            TypeKind::Fn { params: p1, ret: r1, features: f1, deny: d1 },
+            TypeKind::Fn { params: p2, ret: r2, features: f2, deny: d2 },
+        ) = (self.tys.kind(t), self.tys.kind(want))
+        else {
+            return None;
+        };
+        let widened = d2 & !d1;
+        (p1 == p2 && r1 == r2 && (f1 & !(f2 | self.proven_features())) == 0 && widened != 0)
+            .then_some(widened)
+    }
+
+    /// The token a fn value made by node `n` is known by: a closure literal's `fn` token, or the
+    /// token of a fn item's value target (`None` for any other expression).
+    fn made_fn_value(&self, n: u32) -> Option<u32> {
+        if crate::closures::closure_kind(&self.icx, n) == Some(crate::closures::ClosureKind::Literal) {
+            return Some(self.icx.a(n));
+        }
+        let end = self.icx.end_tok(n);
+        self.targets.iter().rev().any(|(tok, t)| *tok == end && matches!(t, Target::Fn { .. })).then_some(end)
     }
 
     /// The features every value made in this body may assume: its `needs` and the target
@@ -1183,12 +1229,14 @@ impl<'a> Ck<'a> {
                 None
             }
             (
-                TypeKind::Fn { params: p1, ret: r1, features: f1 },
-                TypeKind::Fn { params: p2, ret: r2, features: f2 },
+                TypeKind::Fn { params: p1, ret: r1, features: f1, deny: d1 },
+                TypeKind::Fn { params: p2, ret: r2, features: f2, deny: d2 },
             ) => {
                 // Features may drop to those proven where the coercion happens: CPU features
                 // never change while a program runs, so the value stays callable (else E0707).
-                if p1 == p2 && r1 == r2 && (f1 & !(f2 | self.proven_features())) == 0 {
+                // The deny clause may only shrink: the value keeps every guarantee the target
+                // type states (else E1403).
+                if p1 == p2 && r1 == r2 && (f1 & !(f2 | self.proven_features())) == 0 && (d2 & !d1) == 0 {
                     return Some(Coercion::FnItem);
                 }
                 None
@@ -1413,6 +1461,8 @@ impl<'a> Ck<'a> {
         self.record_drops();
         self.coercions.sort_by_key(|x| x.0);
         self.coercions.dedup();
+        self.denied.sort();
+        self.denied.dedup();
         let has_error =
             self.has_error || self.diags.iter().any(|d| d.severity() == stave_diag::Severity::Error);
         let body = TypedBody {
@@ -1427,6 +1477,7 @@ impl<'a> Ck<'a> {
             sites: std::mem::take(&mut self.sites),
             implicit: std::mem::take(&mut self.implicit),
             drops: std::mem::take(&mut self.drops),
+            denied: std::mem::take(&mut self.denied),
             has_error,
             emulated: std::mem::take(&mut self.gates.emulated),
         };

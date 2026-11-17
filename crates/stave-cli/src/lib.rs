@@ -35,6 +35,7 @@
 //! change); `STAVE_PROFILE` prints the step profile of a compile on stderr (`stave_driver::prof`).
 
 pub mod args;
+pub mod effects_report;
 pub mod fix;
 pub mod fmt;
 pub mod lowering;
@@ -145,6 +146,7 @@ fn dispatch(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         }
         (Cmd::Daemon, _) => not_implemented("daemon evict", "needs the stage1 daemon", err),
         (Cmd::UnsafeReport, _) => unsafe_report::run(a, out, err),
+        (Cmd::Effects, _) => effects_report::run(a, out, err),
         (Cmd::Fix, _) => fix::run(a, out, err),
         (Cmd::Fmt, _) => fmt::run(a, out, err),
         (Cmd::Lowering, _) => lowering::run(a, out, err),

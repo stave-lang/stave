@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// `without(alloc)`: `g` calls `h`, which only reads a slice and does wrapping arithmetic.
+fn h(xs: &[u32]) -> u32 {
+    let mut s = 0u32;
+    for i in 0..xs.len() {
+        s = s +% xs[i];
+    }
+    return s;
+}
+
+fn g(xs: &[u32]) -> u32 without(alloc) {
+    return h(xs);
+}
+
+fn main() {
+    let a: [u32; 3] = [1u32, 2u32, 3u32];
+    let r = g(&a);
+}

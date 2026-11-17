@@ -107,7 +107,7 @@ Needs        = "needs" "(" Feature ("," Feature)* ")" ;
 Feature      = Ident ;                                (* closed set per arch: contracts/simd-ops.md §Features *)
 Without      = "without" "(" Effect ("," Effect)* ")" ;   (* deny clause: effects the fn and all it calls must not have *)
 Effect       = Ident | "unsafe" ;                     (* closed set: alloc trap recursive lock unsafe io block; the
-                                                         parser takes any Ident, name checking is semantic *)
+                                                         parser takes any Ident, name checking is semantic (E1404) *)
 Generics     = "<" GenericParam ("," GenericParam)* ">" ;   (* bounds only inline: no `where` *)
 GenericParam = Ident (":" Bound)? | "const" Ident ":" Type ;
 Bound        = BoundItem ("+" BoundItem)* ;
