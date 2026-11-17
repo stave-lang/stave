@@ -16,7 +16,7 @@ use stave_ir::{Module, Op, Operand, TypeId, Value};
 use stave_obj::{DataObj, ImageBuilder, SymbolId};
 
 use super::super::func::*;
-use super::super::{Level, Res, bad};
+use super::super::{Feats, Res, bad};
 use super::{Sh, y};
 use crate::enc::*;
 
@@ -116,9 +116,10 @@ fn entries(n: u32, unit: u32, expand: bool) -> Vec<u8> {
 }
 
 /// The tables `compress` (`expand`) of `n` lanes of `w` bytes uses, or `None`: lane by lane.
-fn tabs(level: Level, w: u32, n: u32, expand: bool) -> Option<Vec<Tab>> {
+/// The 256-bit forms shuffle with AVX2 instructions.
+fn tabs(avx2: bool, w: u32, n: u32, expand: bool) -> Option<Vec<Tab>> {
     let size = w * n;
-    if size > 32 || (size > 16 && level != Level::V3) {
+    if size > 32 || (size > 16 && !avx2) {
         return None;
     }
     Some(match (w, size > 16) {
@@ -132,15 +133,21 @@ fn tabs(level: Level, w: u32, n: u32, expand: bool) -> Option<Vec<Tab>> {
     })
 }
 
-/// Defines the tables of the module's `vec.compress` / `vec.expand` shapes.
-pub(crate) fn define(m: &Module, level: Level, b: &mut ImageBuilder) -> Res<[Option<SymbolId>; NTAB]> {
+/// Defines the tables of the module's `vec.compress` / `vec.expand` shapes, each as the
+/// function it is in lowers it (`baseline`: the module's features).
+pub(crate) fn define(
+    m: &Module,
+    baseline: stave_target::FeatureSet,
+    b: &mut ImageBuilder,
+) -> Res<[Option<SymbolId>; NTAB]> {
     let mut used = [false; NTAB];
     for f in &m.funcs {
         let Some(body) = &f.body else { continue };
+        let avx2 = Feats::of(baseline.union(f.features)).avx2;
         for (op, ty) in body.insts.op.iter().zip(&body.insts.ty) {
             let Op::Vec(op @ (VecOp::Compress | VecOp::Expand)) = op else { continue };
             let Some((_, lane, n)) = ty.and_then(|t| vs::vec_shape(&m.types, t)) else { continue };
-            for t in tabs(level, lane.bits() / 8, n, *op == VecOp::Expand).unwrap_or_default() {
+            for t in tabs(avx2, lane.bits() / 8, n, *op == VecOp::Expand).unwrap_or_default() {
                 used[t.index()] = true;
             }
         }
@@ -208,7 +215,7 @@ impl Cg<'_, '_> {
         rv: Value,
     ) -> Res<bool> {
         let sh = self.vshape(rt)?;
-        if tabs(self.cx.level, sh.w, sh.n, expand).is_none() {
+        if tabs(self.fx.avx2, sh.w, sh.n, expand).is_none() {
             return Ok(false);
         }
         let mx = self.vread(m, sh.size)?;

@@ -100,7 +100,7 @@ impl Cg<'_, '_> {
     pub(super) fn v_fma(&mut self, a: Operand, b: Operand, c: Operand, rt: TypeId, rv: Value) -> Res<()> {
         let sh = self.vshape(rt)?;
         let p = self.vprec(sh)?;
-        if self.vex() {
+        if self.fx.fma {
             let (bx, cx) = (self.vread(b, sh.size)?, self.vread(c, sh.size)?);
             let x = self.vget(a, sh.size)?;
             // x = bx * x + cx
@@ -112,6 +112,8 @@ impl Cg<'_, '_> {
         let sym = if p == Prec::F32 { syms[0] } else { syms[1] };
         let (ma, mb, mc) = (self.vmem(a)?, self.vmem(b)?, self.vmem(c)?);
         self.spill_caller_saved()?;
+        // the routine is baseline code
+        self.vclean();
         let d = self.def_mem(rv)?;
         for k in 0..sh.n {
             for (n, m) in [(0, ma), (1, mb), (2, mc)] {
@@ -684,7 +686,7 @@ impl Cg<'_, '_> {
             self.vshift_by(op, sh, t.signed, x, XS1)?;
             return self.vput(rv, x, sh.size);
         }
-        if self.vex() && sh.w >= 4 {
+        if self.fx.avx2 && sh.w >= 4 {
             let x = self.vget(a, sh.size)?;
             let s = self.vget(amt, sh.size)?;
             self.vsplat(XS0, wide, sh.w, (bits - 1) as u64)?;

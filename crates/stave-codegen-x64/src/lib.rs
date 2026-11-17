@@ -3,4 +3,4 @@
 pub mod debug;
 pub mod enc;
 
-pub use debug::{Emitted, Error, Level, Options, SiteRow, compile_func, compile_module, emit_module, link};
+pub use debug::{Emitted, Error, Options, SiteRow, compile_func, compile_module, emit_module, link};

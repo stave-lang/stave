@@ -9,6 +9,8 @@
 //! `vmaskmov` source, a VEX-only op through `sse_*`) are [`EncError`]s.
 
 use super::inst::{Enc, RmEnc};
+use stave_target::Feature;
+
 use super::simd_ops::{Desc, Map, Pp, flag};
 use super::{
     Asm, EncError, Gpr, Mem, PExtr, PInsr, Prefetch, Rm, Scale, Size, VBin, VBinI, VBlendV, VCvtN, VExtract,
@@ -103,6 +105,10 @@ impl VecReg for Xmm {
 
 impl VecReg for Ymm {
     const LEN: VLen = VLen::X256;
+}
+
+fn wide<R: VecReg>() -> bool {
+    R::LEN == VLen::X256
 }
 
 /// One VEX encoding: `[C5 | C4] opcode ModRM [SIB] [disp]` (an immediate is written by the
@@ -423,6 +429,7 @@ impl Asm {
     pub fn vex_bin<R: VecReg>(&mut self, op: VBin, dst: R, a: R, b: impl Into<VRm>) -> Result<(), EncError> {
         let d = op.desc();
         let rm = vrm(d, R::LEN, b.into())?;
+        self.note(op.feature(wide::<R>()));
         self.vex_d(d, R::LEN, dst.num(), a.num(), rm, None)
     }
 
@@ -432,6 +439,7 @@ impl Asm {
     pub fn vex_un<R: VecReg>(&mut self, op: VUn, dst: R, src: impl Into<VRm>) -> Result<(), EncError> {
         let d = op.desc();
         let rm = vrm(d, R::LEN, src.into())?;
+        self.note(op.feature(wide::<R>(), matches!(rm, RmEnc::Mem(_))));
         self.vex_d(d, R::LEN, dst.num(), 0, rm, None)
     }
 
@@ -447,6 +455,7 @@ impl Asm {
         let d = op.desc();
         check_imm(d, imm, 32)?;
         let rm = vrm(d, R::LEN, b.into())?;
+        self.note(op.feature(wide::<R>()));
         self.vex_d(d, R::LEN, dst.num(), a.num(), rm, Some(imm))
     }
 
@@ -460,6 +469,7 @@ impl Asm {
     ) -> Result<(), EncError> {
         let d = op.desc();
         let rm = vrm(d, R::LEN, src.into())?;
+        self.note(op.feature(wide::<R>()));
         self.vex_d(d, R::LEN, dst.num(), 0, rm, Some(imm))
     }
 
@@ -467,6 +477,7 @@ impl Asm {
     pub fn vex_store<R: VecReg>(&mut self, op: VStore, m: Mem, src: R) -> Result<(), EncError> {
         let d = op.desc();
         check_len(d, R::LEN)?;
+        self.note(Feature::Avx);
         self.vex_d(d, R::LEN, src.num(), 0, RmEnc::Mem(m), None)
     }
 
@@ -475,11 +486,13 @@ impl Asm {
     pub fn vex_cvt_n(&mut self, op: VCvtN, dst: Xmm, src: impl Into<VRm>, len: VLen) -> Result<(), EncError> {
         let d = op.desc();
         let rm = vrm(d, len, src.into())?;
+        self.note(Feature::Avx);
         self.vex_d(d, len, dst.0, 0, rm, None)
     }
 
     /// `vmovmskps/vmovmskpd/vpmovmskb dst32, src`.
     pub fn vex_movmsk<R: VecReg>(&mut self, op: VMovMsk, dst: Gpr, src: R) {
+        self.note(op.feature(wide::<R>()));
         let _ = self.vex_d(op.desc(), R::LEN, dst.0, 0, RmEnc::Reg(src.num()), None);
     }
 
@@ -502,6 +515,7 @@ impl Asm {
             VRm::R(r) if r.len() == R::LEN => RmEnc::Reg(r.num()),
             VRm::R(_) => return Err(EncError::Invalid("register width does not match the instruction")),
         };
+        self.note(op.feature(wide::<R>()));
         self.vex(Vex {
             pp: Pp::P66,
             map: Map::M3A,
@@ -520,6 +534,7 @@ impl Asm {
     /// `vpsllw/.../vpsrldq dst, src, imm8` (the source is a register: the group has no memory form).
     pub fn vex_shift_i<R: VecReg>(&mut self, op: VShiftI, dst: R, src: R, imm: u8) -> Result<(), EncError> {
         let (opc, digit) = op.group();
+        self.note(op.feature(wide::<R>()));
         self.vex(Vex {
             pp: Pp::P66,
             map: Map::M0F,
@@ -538,6 +553,7 @@ impl Asm {
     /// `vmovd/vmovq xmm, r/m32|r/m64`.
     pub fn vex_movd_x(&mut self, s: Size, dst: Xmm, src: impl Into<Rm>) -> Result<(), EncError> {
         Self::check_dq(s)?;
+        self.note(Feature::Avx);
         self.vex(Vex {
             pp: Pp::P66,
             map: Map::M0F,
@@ -554,6 +570,7 @@ impl Asm {
     /// `vmovd/vmovq r/m32|r/m64, xmm`.
     pub fn vex_movd_r(&mut self, s: Size, dst: impl Into<Rm>, src: Xmm) -> Result<(), EncError> {
         Self::check_dq(s)?;
+        self.note(Feature::Avx);
         self.vex(Vex {
             pp: Pp::P66,
             map: Map::M0F,
@@ -578,6 +595,7 @@ impl Asm {
     ) -> Result<(), EncError> {
         let d = op.desc();
         check_len(d, R::LEN)?;
+        self.note(op.feature());
         self.vex_d(d, R::LEN, src.num(), 0, dst.into().into(), Some(imm))
     }
 
@@ -589,12 +607,14 @@ impl Asm {
         mask: R,
         src: R,
     ) -> Result<(), EncError> {
+        self.note(op.feature());
         self.vex_d(op.desc(), R::LEN, src.num(), mask.num(), RmEnc::Mem(m), None)
     }
 
     /// `vpextrb/vpextrw/vpextrd/vpextrq/vextractps dst, src, imm8`.
     pub fn vex_pextr(&mut self, op: PExtr, dst: impl Into<Rm>, src: Xmm, imm: u8) -> Result<(), EncError> {
         let (opc, w) = op.code();
+        self.note(Feature::Avx);
         self.vex(Vex {
             pp: Pp::P66,
             map: Map::M3A,
@@ -620,6 +640,7 @@ impl Asm {
         imm: u8,
     ) -> Result<(), EncError> {
         let (map, opc, w) = op.code();
+        self.note(Feature::Avx);
         self.vex(Vex {
             pp: Pp::P66,
             map,
@@ -678,16 +699,19 @@ impl Asm {
         };
         let d = op.desc();
         let rm = RmEnc::Vsib { base, index: index.num(), scale, disp };
+        self.note(Feature::Avx2);
         self.vex_d(d, l, dst.num(), mask.num(), rm, None)
     }
 
     /// `vzeroupper`: clears the upper halves of all `ymm` registers.
     pub fn vzeroupper(&mut self) {
+        self.note(Feature::Avx);
         self.buf.extend_from_slice(&[0xc5, 0xf8, 0x77]);
     }
 
     /// `vzeroall`.
     pub fn vzeroall(&mut self) {
+        self.note(Feature::Avx);
         self.buf.extend_from_slice(&[0xc5, 0xfc, 0x77]);
     }
 
@@ -697,6 +721,7 @@ impl Asm {
         if s < Size::D {
             return Err(EncError::Invalid("BMI2 instructions need a 32- or 64-bit operand"));
         }
+        self.note(Feature::Bmi2);
         self.vex(Vex {
             pp,
             map: Map::M38,

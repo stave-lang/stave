@@ -23,7 +23,7 @@ use rayon::prelude::*;
 use stave_ir::{FuncId, Module};
 use stave_obj::{FuncCode, ImageBuilder, Machine, ObjectImage};
 use stave_sema::{DeclKind, LowerErrorKind, Mode, Program, Typeck};
-use stave_target::{Arch, Triple, X86Level};
+use stave_target::{Arch, Triple};
 
 use crate::pipeline::Stage;
 use crate::prof;
@@ -223,7 +223,7 @@ pub fn codegen_link(
         m
     };
     let mut built = match triple.arch() {
-        Arch::X86_64 => x64(m, main, x64_level(triple), release, threads, funcs),
+        Arch::X86_64 => x64(m, main, triple.baseline(), release, threads, funcs),
         Arch::Aarch64 => a64(m, main, release, funcs),
         Arch::Gpu => Err(Failure::Target(triple)),
     }?;
@@ -239,18 +239,10 @@ fn generates_vector_code(triple: Triple) -> bool {
     }
 }
 
-/// The level the x86-64 backend generates vector code for: `v4` code is `v3` code.
-fn x64_level(triple: Triple) -> stave_codegen_x64::Level {
-    match triple {
-        Triple::X86_64(X86Level::V2) => stave_codegen_x64::Level::V2,
-        _ => stave_codegen_x64::Level::V3,
-    }
-}
-
 fn x64(
     m: &Module,
     main: FuncId,
-    level: stave_codegen_x64::Level,
+    baseline: stave_target::FeatureSet,
     release: bool,
     threads: Option<usize>,
     funcs: u64,
@@ -268,7 +260,7 @@ fn x64(
         verify: false,
         threads: threads.unwrap_or(0),
         release,
-        level,
+        features: baseline,
         ..stave_codegen_x64::Options::default()
     };
     let t0 = Instant::now();

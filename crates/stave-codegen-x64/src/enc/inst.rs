@@ -1,6 +1,7 @@
 //! Instruction forms. Layout of each encoding: `[66|F2|F3] [REX] opcode ModRM [SIB] [disp] [imm]`.
 
 use stave_obj::{Reloc, RelocKind, SymbolId};
+use stave_target::Feature;
 
 use super::simd::Vex;
 use super::simd_ops::{Map, Pp};
@@ -726,6 +727,7 @@ impl Asm {
             _ => false,
         };
         let vvvv = if two_operand { 0 } else { reg };
+        self.note(Feature::Avx);
         self.vex(Vex { pp, map: Map::M0F, w, l: VLen::X128, opc, reg, vvvv, rm, trailing: 0 })
     }
 

@@ -14,7 +14,19 @@ use stave_ir::{
     Outcome, PanicKind, SyscallAbi, TypeId, TypeKey, Val,
 };
 
+use stave_target::{Feature, FeatureSet};
+
 use crate::debug::{Options, compile_module};
+
+/// The baseline of `x86_64-linux` (v2).
+pub fn v2() -> FeatureSet {
+    FeatureSet::of(Feature::Sse42)
+}
+
+/// The baseline of `x86_64-linux-v3`.
+pub fn v3() -> FeatureSet {
+    FeatureSet::from_features([Feature::Sse42, Feature::Avx2, Feature::Fma, Feature::Bmi2, Feature::F16c])
+}
 
 /// Commonly used types.
 #[derive(Clone, Copy, Debug)]
@@ -320,10 +332,15 @@ pub fn kind_index(k: PanicKind) -> i32 {
 }
 
 pub fn interp(p: &Prog) -> RunOut {
+    interp_args(p, &[b"t"])
+}
+
+/// The interpreter's run with the command line `args` (the program name first).
+pub fn interp_args(p: &Prog, args: &[&[u8]]) -> RunOut {
     let cfg = Config { max_steps: 2_000_000_000, max_depth: 100_000, ..Config::default() };
     let mut it = Interp::new(&p.m, BufferHost::new(SyscallAbi::X86_64), cfg)
         .unwrap_or_else(|e| panic!("interp setup: {e:?}"));
-    let sp = it.process_stack(&[b"t"], &[]).unwrap();
+    let sp = it.process_stack(args, &[]).unwrap();
     let out = it.run(p.entry, vec![Val::S(sp)]).unwrap_or_else(|e| panic!("interp: {e:?}"));
     let code = match out {
         Outcome::Exit(c) => c,
@@ -395,8 +412,17 @@ pub fn run_file(p: &std::path::Path) -> RunOut {
 
 /// Compiles `p` and runs it natively (`None` on a non-x86-64-Linux host).
 pub fn native(p: &Prog, name: &str, opts: &Options) -> Option<RunOut> {
-    let opts = Options { main: opts.main.or(p.main), ..opts.clone() };
-    let img = compile_module(&p.m, &opts).unwrap_or_else(|e| panic!("{name}: codegen: {e}"));
+    native_module(&p.m, p.main, name, opts)
+}
+
+/// [`native`] of the module `m`. A module with `needs` has the instructions of every function
+/// checked against the function's features.
+pub fn native_module(m: &Module, main: Option<FuncId>, name: &str, opts: &Options) -> Option<RunOut> {
+    let opts = Options { main: opts.main.or(main), ..opts.clone() };
+    let img = compile_module(m, &opts).unwrap_or_else(|e| panic!("{name}: codegen: {e}"));
+    if m.funcs.iter().any(|f| !f.features.is_empty()) {
+        super::features::check_image(m, &img, opts.features, name);
+    }
     if !native_host() {
         return None;
     }
@@ -420,12 +446,31 @@ pub fn release_options() -> Options {
     }
 }
 
-/// Runs in the interpreter and natively, as a debug and as a release build, and compares;
-/// returns the interpreter's result.
+/// `m` with `avx` in the `needs` of every function but the runtime's: baseline code calls
+/// functions with the feature, and they call it back.
+pub fn with_avx(m: &Module) -> Module {
+    let mut m = m.clone();
+    for f in &mut m.funcs {
+        if !f.path.starts_with("runtime.") {
+            f.features = FeatureSet::of(Feature::Avx);
+        }
+    }
+    m
+}
+
+/// Runs in the interpreter and natively, as a debug and as a release build, and as a debug
+/// build whose functions have `avx` on top of the v2 baseline (their scalar float code is
+/// VEX-encoded), and compares; returns the interpreter's result.
 pub fn check(p: &Prog, name: &str) -> RunOut {
     let want = interp(p);
-    for (oname, opts) in [("debug", Options::default()), ("release", release_options())] {
-        if let Some(got) = native(p, &format!("{name}-{oname}"), &opts) {
+    let avx = with_avx(&p.m);
+    let builds = [
+        ("debug", Options::default(), &p.m),
+        ("release", release_options(), &p.m),
+        ("debug-avx", Options::default(), &avx),
+    ];
+    for (oname, opts, m) in builds {
+        if let Some(got) = native_module(m, p.main, &format!("{name}-{oname}"), &opts) {
             if std::env::var_os("STAVE_TEST_VERBOSE").is_some() {
                 eprintln!("{name} ({oname}): native exit {} stdout {} bytes", got.code, got.stdout.len());
             }

@@ -179,7 +179,7 @@ impl Cg<'_, '_> {
                 let pt = self.pointee(rt?)?;
                 let l = self.layout(pt)?;
                 let size = u32::try_from(l.size).map_err(|_| unsup("slot larger than 4 GiB"))?;
-                if l.align > u64::from(self.cx.level.vector_bytes()) {
+                if l.align > u64::from(self.fx.vector_bytes()) {
                     return Err(unsup("slot alignment above the widest vector register"));
                 }
                 let off = self.alloc_frame(size.max(1), l.align as u32)?;

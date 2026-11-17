@@ -29,6 +29,30 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
   (`fp16`, `dotprod`, `bf16`, `sve`, `sve2`) ⇒ `neon`; `sve` ⇒ `fp16`.
 - **Target tiers below**: `v2` = sse42 baseline, `v3`, `v4`, `neon` = baseline AArch64, `sve`.
 
+### Per-function feature sets (x86-64 code generation)
+
+- A function is compiled for F = the closure of the target baseline ∪ its `needs`. Each feature
+  of F enables its own instructions and nothing else:
+  - `avx`: the VEX encoding of the function's vector and scalar float instructions, and 256-bit
+    float instructions. (Where the baseline has `avx`, a debug build keeps the legacy encoding of
+    scalar float instructions: it holds no 256-bit value in a register between two IR
+    instructions.)
+  - `avx2`: 256-bit integer instructions, and the AVX2-only instructions at 128 bits (broadcast
+    from a register, per-lane shift counts, gathers, integer masked moves).
+  - `fma`, `bmi2`, `f16c`: their instructions; without them the baseline sequence (software
+    `fma`).
+- A function never contains an instruction outside F. An op with no lowering under F (a 256-bit
+  integer op with `avx` alone) is a code generation error, never another instruction. The tier
+  columns of the generated table describe functions whose F is a tier baseline.
+- The calling convention follows the types of the signature only, never F: a caller and a callee
+  with different feature sets agree. A 256-bit vector travels in a `ymm` register, so a signature
+  with one needs `avx` on both sides (E0703).
+- `ymm` upper halves are clean at every call and every return that carries no 256-bit value in a
+  register. A function with `avx` in F that may have dirtied them executes `vzeroupper` before
+  such a return and before such a call, direct or through a fn value; so code without `avx` (a
+  baseline callee or caller, the trap path) never runs with dirty upper halves.
+- Compiler-emitted stubs, routines, and tables use target-baseline instructions only.
+
 ## Types
 
 - `TxN`, where T ∈ {i8..i64, u8..u64, f32, f64, f16, bf16} and N ∈ {2,4,…,64}. `isize`/`usize`

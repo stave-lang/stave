@@ -46,19 +46,32 @@
 //! (stave-obj `stub::start`), `__stave_main`, `__stave_signal`, `__stave_thread_start`, and the tables
 //! `__stave_site_table` and `__stave_pc_table` (layouts in contracts/intrinsics.md).
 //!
-//! Vector and mask values (`simd`): every `vec.*` / `mask.*` op at the target's [`Level`], 128-bit
-//! and narrower vectors with SSE4.2 instructions, 256-bit ones with AVX2. In a debug build a
-//! vector value lives in its frame home: an op loads its operands into scratch `xmm` / `ymm`
-//! registers and stores the result, and `ymm` upper halves are clean between instructions. A
-//! release build keeps vectors in registers (above); a function with 32-byte values then cleans
-//! the upper halves before a call and before a return that carries no such value, and its
-//! scalar float instructions are VEX-encoded. A function with a 32-byte-aligned value realigns
-//! its frame (`func`).
+//! Features. Every function is compiled for its own feature set: the module baseline
+//! ([`Options::features`]) and the function's `needs` (`Func::features`), closed under
+//! implication ([`Feats`]). Each CPUID feature decides on its own: `avx` the VEX encoding of
+//! the function's vector code and 256-bit float vectors, `avx2` 256-bit integer vectors and the
+//! AVX2-only instructions at 128 bits (broadcasts from a register, per-lane shift counts,
+//! gathers, integer masked moves), `fma` the fused multiply-add (else `__stave_fma32/64`),
+//! `bmi2` `pext`. The assembler records the feature of every instruction it encodes
+//! ([`crate::enc::Asm::features`]); a function whose code would need a feature outside its set
+//! is [`Error::Unsupported`]. The stubs, the software routines and the tables are the same for
+//! every function and use baseline instructions only.
+//!
+//! Vector and mask values (`simd`): every `vec.*` / `mask.*` op, 128-bit and narrower vectors
+//! with SSE4.2 instructions (VEX-encoded with `avx`), 256-bit ones with AVX and AVX2. In a
+//! debug build a vector value lives in its frame home: an op loads its operands into scratch
+//! `xmm` / `ymm` registers and stores the result, and `ymm` upper halves are clean between
+//! instructions. A release build keeps vectors in registers (above); a function with 32-byte
+//! values then cleans the upper halves before a call and before a return that carries no such
+//! value. The scalar float instructions of a function with `avx` are VEX-encoded in a release
+//! build, and in a debug build when the module baseline has no `avx`. A function with a
+//! 32-byte-aligned value realigns its frame (`func`).
 //!
 //! Not implemented (clean [`Error::Unsupported`]): sizeless vectors, vectors with f16 / bf16
-//! lanes, vectors wider than the level's registers, conversions *to* f16 / bf16, alignment above
-//! the widest vector, intrinsics outside the x86-64 table, references to functions without a
-//! body (C imports need an external linker). Stack overflow is detected by the
+//! lanes, 256-bit vectors in a function without `avx`, 256-bit ops whose instructions need a
+//! feature the function lacks, vectors wider than 256 bits, conversions *to* f16 / bf16,
+//! alignment above the widest vector, intrinsics outside the x86-64 table, references to
+//! functions without a body (C imports need an external linker). Stack overflow is detected by the
 //! runtime's guard page, not by an inline check. When `ObjectImage::patch_func` moves a function,
 //! its PC-table row follows it (`Abs64Body`) but keeps its position, so the table is no longer
 //! sorted by address until the next full link.
@@ -79,8 +92,9 @@ use std::fmt;
 
 use rustc_hash::FxHashMap;
 use stave_ir::layout::Layouts;
-use stave_ir::{FuncId, Module, Operand, Site, VerifyError};
+use stave_ir::{Func, FuncId, Module, Operand, Site, VerifyError};
 use stave_obj::{FileId, FuncCode, ImageBuilder, Machine, ObjError, ObjectImage, SourceFile, SymbolId};
+use stave_target::{Feature, FeatureSet};
 
 use crate::enc::EncError;
 use abi::VCls;
@@ -98,23 +112,34 @@ pub struct SiteRow {
     pub func: FuncId,
 }
 
-/// The x86-64 feature level vector code is generated for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Level {
-    /// SSE4.2: 128-bit vectors.
-    #[default]
-    V2,
-    /// AVX2, FMA, BMI2: 128- and 256-bit vectors.
-    V3,
+/// The CPU features one function is compiled for, one predicate per CPUID feature. SSE4.2 is
+/// assumed everywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Feats {
+    /// The closed set the predicates come from.
+    pub set: FeatureSet,
+    /// VEX encoding; 256-bit vectors with float instructions.
+    pub avx: bool,
+    /// 256-bit integer instructions, and the AVX2-only ones at 128 bits.
+    pub avx2: bool,
+    pub fma: bool,
+    pub bmi2: bool,
 }
 
-impl Level {
+impl Feats {
+    pub(crate) fn of(set: FeatureSet) -> Feats {
+        Feats {
+            set,
+            avx: set.contains(Feature::Avx),
+            avx2: set.contains(Feature::Avx2),
+            fma: set.contains(Feature::Fma),
+            bmi2: set.contains(Feature::Bmi2),
+        }
+    }
+
     /// The widest vector register in bytes.
     pub(crate) fn vector_bytes(self) -> u32 {
-        match self {
-            Level::V2 => 16,
-            Level::V3 => 32,
-        }
+        if self.avx { 32 } else { 16 }
     }
 }
 
@@ -141,8 +166,9 @@ pub struct Options {
     /// Release code generation: values used across blocks get registers for their whole life
     /// (`func`, stave-opt `regalloc`). Off: every such value lives in its frame home.
     pub release: bool,
-    /// The instruction set of vector code.
-    pub level: Level,
+    /// The module baseline: the features every function may use (a target's
+    /// `Triple::baseline`). A function adds its own `Func::features`.
+    pub features: FeatureSet,
 }
 
 impl Default for Options {
@@ -156,7 +182,7 @@ impl Default for Options {
             verify: true,
             threads: 0,
             release: false,
-            level: Level::V2,
+            features: FeatureSet::of(Feature::Sse42),
         }
     }
 }
@@ -244,7 +270,10 @@ pub(crate) type Res<T> = Result<T, Error>;
 pub struct Ctx<'m> {
     pub(crate) m: &'m Module,
     pub(crate) layouts: Layouts,
-    pub(crate) cls: Vec<Option<VCls>>,
+    /// The class of every type, for a function without (`[0]`) and with (`[1]`) 256-bit
+    /// vector registers. The two differ only in which types have a class, so the ABI of a
+    /// signature is the same for every function that can hold its types.
+    pub(crate) cls: [Vec<Option<VCls>>; 2],
     pub(crate) func_sym: Vec<Option<SymbolId>>,
     pub(crate) str_sym: Vec<SymbolId>,
     pub(crate) trap_sym: SymbolId,
@@ -261,10 +290,10 @@ pub struct Ctx<'m> {
     pub(crate) static_sym: Vec<SymbolId>,
     /// [`Options::release`].
     pub(crate) release: bool,
-    /// [`Options::level`].
-    pub(crate) level: Level,
-    /// `__stave_fma32`, `__stave_fma64`: the software `fma` of one lane, where the level has no
-    /// FMA instruction and the module has a `vec.fma`.
+    /// [`Options::features`].
+    pub(crate) baseline: FeatureSet,
+    /// `__stave_fma32`, `__stave_fma64`: the software `fma` of one lane, where a function
+    /// without the `fma` feature has a `vec.fma`.
     pub(crate) fma_sym: Option<[SymbolId; 2]>,
     /// The `compress` / `expand` tables the module's shapes use (`simd::compress::Tab`).
     pub(crate) ctab: [Option<SymbolId>; simd::compress::NTAB],
@@ -281,6 +310,22 @@ pub struct Emitted {
     pub pc_rows: Vec<(SymbolId, u32)>,
     /// Per-function codegen time in nanoseconds (by `FuncId`, 0 for no body).
     pub nanos: Vec<u64>,
+}
+
+impl Ctx<'_> {
+    /// The features `f` is compiled for.
+    pub(crate) fn feats(&self, f: &Func) -> Feats {
+        Feats::of(self.baseline.union(f.features))
+    }
+
+    /// The type classes of a function with features `fx`.
+    pub(crate) fn cls_of(&self, fx: Feats) -> &[Option<VCls>] {
+        &self.cls[usize::from(fx.avx)]
+    }
+}
+
+fn classify(m: &Module, layouts: &Layouts) -> [Vec<Option<VCls>>; 2] {
+    [abi::classify_all(&m.types, layouts, 16), abi::classify_all(&m.types, layouts, 32)]
 }
 
 const RUNTIME_TRAP: &str = "runtime.panic.trap";
@@ -371,14 +416,15 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
     };
     let layouts = Layouts::compute(&m.types);
     let static_sym = stubs::statics(m, &layouts, b)?;
-    let cls = abi::classify_all(&m.types, &layouts, o.level.vector_bytes());
-    let soft_fma = o.level == Level::V2
-        && order
-            .iter()
-            .filter_map(|f| m.funcs[f.index()].body.as_ref())
-            .any(|b| b.insts.op.iter().any(|op| matches!(op, stave_ir::Op::Vec(stave_ir::simd::VecOp::Fma))));
+    let cls = classify(m, &layouts);
+    let soft_fma = order.iter().map(|f| &m.funcs[f.index()]).any(|f| {
+        !Feats::of(o.features.union(f.features)).fma
+            && f.body.as_ref().is_some_and(|b| {
+                b.insts.op.iter().any(|op| matches!(op, stave_ir::Op::Vec(stave_ir::simd::VecOp::Fma)))
+            })
+    });
     let fma_sym = if soft_fma { Some(softfma::define(b)?) } else { None };
-    let ctab = simd::compress::define(m, o.level, b)?;
+    let ctab = simd::compress::define(m, o.features, b)?;
     let cx = Ctx {
         m,
         layouts,
@@ -395,7 +441,7 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
         fn_sites: fn_sites.clone(),
         static_sym,
         release: o.release,
-        level: o.level,
+        baseline: o.features,
         fma_sym,
         ctab,
     };
@@ -495,7 +541,7 @@ pub fn link(mut b: ImageBuilder, e: &Emitted) -> Result<ObjectImage, Error> {
 /// placeholder symbol id.
 pub fn bench_ctx(m: &Module) -> Ctx<'_> {
     let layouts = Layouts::compute(&m.types);
-    let cls = abi::classify_all(&m.types, &layouts, Level::V2.vector_bytes());
+    let cls = classify(m, &layouts);
     let n = m.funcs.len() as u32;
     Ctx {
         m,
@@ -513,7 +559,7 @@ pub fn bench_ctx(m: &Module) -> Ctx<'_> {
         fn_sites: Vec::new(),
         static_sym: (0..m.statics.len() as u32).map(|i| SymbolId(u32::MAX - 9 - i)).collect(),
         release: false,
-        level: Level::V2,
+        baseline: FeatureSet::of(Feature::Sse42),
         fma_sym: Some([SymbolId(u32::MAX - 7), SymbolId(u32::MAX - 8)]),
         ctab: simd::compress::placeholders(n + m.strings.len() as u32),
     }
