@@ -4,11 +4,12 @@
 //! the references' tokens; every line must match itself, and every leg must print what the
 //! interpreter prints. Legs: the stave-ir interpreter, then native debug and release builds for
 //! x86_64-linux, x86_64-linux-v3 and aarch64-linux (under qemu-aarch64 on an x86-64 host);
-//! a `_v3` kernel builds for x86_64-linux-v3 only; a `_disp` kernel (dispatch fns over
-//! `needs(avx2)` arms and the kernels of `<k>.stv`) builds for every target and its
-//! x86_64-linux builds also run under `qemu-x86_64 -cpu Nehalem` (the `_` arms; skipped without
-//! qemu-x86_64). A leg that cannot run here is skipped with a
-//! note, or fails when `STAVE_REQUIRE_LEGS` lists it.
+//! a `_v3` kernel builds for x86_64-linux-v3 only. A `_disp` kernel (dispatch fns over
+//! `needs(v4)`, `needs(avx2)` and `needs(sve)` arms and the kernels of `<k>.stv`) builds for every
+//! target, and each binary runs several times with `STAVE_DISPATCH_TRACE=1`, under `STAVE_CPU`
+//! masks, Intel SDE (the v4 leg) and qemu CPU models: each run must pick the arm that CPU allows
+//! ([`gate_runs`]) and print what the interpreter prints. A leg that cannot run here is skipped
+//! with a note, or fails when `STAVE_REQUIRE_LEGS` lists it.
 //!
 //! Env: `STAVE_DIFF_SEED` (u64), `STAVE_DIFF_FULL=1` (every misalignment), `STAVE_DIFF_RANDOM`
 //! (random cases per kind, default 24), `STAVE_DIFF_KERNELS` (comma-separated names).
@@ -143,7 +144,11 @@ const KERNELS: &[Kernel] = &[
         ],
     },
     Kernel { name: "bytesearch_v3", kinds: &[kind(&[Elem::U8], 32, Param::Byte)] },
-    Kernel { name: "bytesearch_disp", kinds: &[kind(&[Elem::U8], 32, Param::Byte)] },
+    Kernel { name: "bytesearch_disp", kinds: &[kind(&[Elem::U8], 64, Param::Byte)] },
+    Kernel {
+        name: "sum_disp",
+        kinds: &[kind(&[Elem::I32], 16, Param::None), kind(&[Elem::U8], 64, Param::None)],
+    },
     Kernel {
         name: "prefix_v3",
         kinds: &[
@@ -206,6 +211,215 @@ fn runner(target: Triple) -> Option<Option<&'static str>> {
     how
 }
 
+/// A dispatch arm of a `_disp` kernel: the dispatch fn `main.<f>` calls `main.<f>_v4`,
+/// `main.<f>_v3`, `main.<f>_sve`, or for `_` a kernel of module `base`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arm {
+    V4,
+    V3,
+    Sve,
+    Base,
+}
+
+impl Arm {
+    /// Whether `target` is this arm of the dispatch fn `main.<f>`.
+    fn is(self, f: &str, target: &str) -> bool {
+        match self {
+            Arm::V4 => target == format!("main.{f}_v4"),
+            Arm::V3 => target == format!("main.{f}_v3"),
+            Arm::Sve => target == format!("main.{f}_sve"),
+            Arm::Base => target.starts_with("base."),
+        }
+    }
+}
+
+/// The dispatch fns of a `_disp` kernel; its `main` calls each of them.
+fn dispatch_fns(kernel: &str) -> &'static [&'static str] {
+    match kernel {
+        "bytesearch_disp" => &["find_first", "find_last", "count"],
+        "sum_disp" => &["sum_i32", "sum_u8"],
+        _ => panic!("{kernel}: no dispatch fns listed"),
+    }
+}
+
+/// One run of a leg's binary.
+#[derive(Clone, Debug)]
+struct Run {
+    /// None: native.
+    runner: Option<String>,
+    /// `STAVE_CPU` (None: unset).
+    cpu: Option<&'static str>,
+    /// Some: with `STAVE_DISPATCH_TRACE=1`, and every call of the kernel's dispatch fns picks
+    /// this arm.
+    arm: Option<Arm>,
+    /// Under Intel SDE, which may write lines of its own to stderr.
+    sde: bool,
+    /// Leg label suffix.
+    label: String,
+}
+
+impl Run {
+    fn plain(runner: Option<&str>) -> Run {
+        Run { runner: runner.map(String::from), cpu: None, arm: None, sde: false, label: String::new() }
+    }
+
+    fn picks(runner: Option<&str>, cpu: Option<&'static str>, arm: Arm, label: &str) -> Run {
+        let label = match cpu {
+            Some(c) => format!(" {label} STAVE_CPU={c}"),
+            None => format!(" {label}"),
+        };
+        Run { runner: runner.map(String::from), cpu, arm: Some(arm), sde: false, label }
+    }
+}
+
+/// Every AVX-512 name of the `v4` group.
+const NO_AVX512: &str = "-avx512f,-avx512bw,-avx512vl,-avx512dq,-avx512cd";
+
+fn host_avx2() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// The runs of a `_disp` kernel's binary for `target` (`how`: its leg, as [`runner`] gives it),
+/// each with the arm it must pick:
+///
+/// - x86_64-linux: natively the widest arm the CPU has, and with `-avx2` the `_` arms; on the
+///   v4 leg (natively or under SDE) the 512-bit arms, and without the five AVX-512 names, or
+///   without just one of them, the 256-bit arms; under `qemu-x86_64 -cpu Nehalem` the `_` arms
+///   (not a leg: skipped without qemu-x86_64).
+/// - x86_64-linux-v3: the baseline covers the 256-bit arms but not the `v4` test: natively the
+///   256-bit arms (512-bit on an AVX-512 CPU), on the v4 leg the 512-bit ones.
+/// - aarch64-linux: the x86-64 arms are left out of the build, the `sve` test stays: under
+///   `qemu-aarch64 -cpu max` the `sve` arms, with `-sve` and under `-cpu cortex-a76` the `_` arms.
+fn gate_runs(kernel: &str, target: Triple, how: Option<Option<&'static str>>) -> Vec<Run> {
+    let mut r = Vec::new();
+    let v3 = Triple::parse("x86_64-linux-v3").unwrap();
+    let v4 = Triple::parse("x86_64-linux-v4").unwrap();
+    match target.name() {
+        "x86_64-linux-v2" | "x86_64-linux-v3" => {
+            let wide = target == v3;
+            let host = if exec::can_run(v4) && exec::can_run(v3) {
+                Arm::V4
+            } else if host_avx2() {
+                Arm::V3
+            } else {
+                Arm::Base
+            };
+            if how.is_some() {
+                r.push(Run::picks(None, None, host, "native"));
+                if !wide {
+                    r.push(Run::picks(None, Some("-avx2"), Arm::Base, "native"));
+                }
+            }
+            match legs::v4(exec::can_run(v4)) {
+                Some(leg) => {
+                    let (runner, label, sde) = match &leg {
+                        legs::V4Run::Runner(c) => (Some(c.as_str()), "sde", true),
+                        legs::V4Run::Native => (None, "v4", false),
+                    };
+                    if sde {
+                        r.push(Run { sde, ..Run::picks(runner, None, Arm::V4, label) });
+                    }
+                    r.push(Run { sde, ..Run::picks(runner, Some(NO_AVX512), Arm::V3, label) });
+                    if !wide {
+                        r.push(Run { sde, ..Run::picks(runner, Some("-avx512cd"), Arm::V3, label) });
+                    }
+                }
+                None => eprintln!(
+                    "note: no AVX-512 CPU and no STAVE_SDE: the v4 runs of {kernel} ({target}) are skipped"
+                ),
+            }
+            if !wide {
+                if cfg!(target_os = "linux") && have("qemu-x86_64") {
+                    r.push(Run::picks(Some("qemu-x86_64 -cpu Nehalem"), None, Arm::Base, "Nehalem"));
+                } else {
+                    eprintln!("note: no qemu-x86_64: the Nehalem runs of {kernel} are skipped");
+                }
+            }
+        }
+        "aarch64-linux" => match how {
+            Some(None) => {
+                let sve = exec::can_run(Triple::parse("aarch64-linux+sve").unwrap());
+                r.push(Run::picks(None, None, if sve { Arm::Sve } else { Arm::Base }, "native"));
+                r.push(Run::picks(None, Some("-sve"), Arm::Base, "native"));
+            }
+            Some(Some(q)) => {
+                let (max, a76) = (format!("{q} -cpu max"), format!("{q} -cpu cortex-a76"));
+                r.push(Run::picks(Some(&max), None, Arm::Sve, "qemu max"));
+                r.push(Run::picks(Some(&max), Some("-sve"), Arm::Base, "qemu max"));
+                r.push(Run::picks(Some(&a76), None, Arm::Base, "qemu cortex-a76"));
+            }
+            None => {}
+        },
+        t => panic!("{kernel}: no runs for {t}"),
+    }
+    r
+}
+
+/// Runs `bin` with exactly the `STAVE_CPU` and `STAVE_DISPATCH_TRACE` of `run`. ETXTBSY (another
+/// thread's fork still holds a just-written binary open) is retried.
+fn run_bin(bin: &Path, run: &Run, args: &[String], cwd: &Path) -> Ran {
+    let spec = RunSpec { args, runner: run.runner.as_deref(), cwd: Some(cwd), inherit: false };
+    let mut tries = 0;
+    loop {
+        let mut cmd = exec::command(bin, &spec).unwrap();
+        cmd.env_remove("STAVE_CPU").env_remove("STAVE_DISPATCH_TRACE");
+        if let Some(c) = run.cpu {
+            cmd.env("STAVE_CPU", c);
+        }
+        if run.arm.is_some() {
+            cmd.env("STAVE_DISPATCH_TRACE", "1");
+        }
+        match cmd.stdin(std::process::Stdio::null()).output() {
+            Err(e) if e.raw_os_error() == Some(26) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => panic!("{}: {e}", bin.display()),
+            Ok(o) => return Ran { exit: exec::status_code(o.status), stdout: o.stdout, stderr: o.stderr },
+        }
+    }
+}
+
+/// Checks the trace of a traced run: every `dispatch: main.<f> -> <arm>` line names `want`'s
+/// arm of `f`, and each dispatch fn of the kernel has a line. Returns the run with its stderr
+/// less the trace (std's own dispatch fns too; under SDE every line).
+fn picked(kernel: &str, mut r: Ran, want: Arm, sde: bool) -> Result<Ran, String> {
+    let err = String::from_utf8_lossy(&r.stderr).into_owned();
+    let fns = dispatch_fns(kernel);
+    let mut seen = vec![false; fns.len()];
+    let mut rest = String::new();
+    for line in err.lines() {
+        let Some(t) = line.strip_prefix("dispatch: ") else {
+            if !sde {
+                rest.push_str(line);
+                rest.push('\n');
+            }
+            continue;
+        };
+        let Some((f, arm)) = t.split_once(" -> ") else { return Err(format!("trace line `{line}`")) };
+        let Some(f) = f.strip_prefix("main.") else { continue };
+        let Some(i) = fns.iter().position(|g| *g == f) else {
+            return Err(format!("trace line `{line}`: not a dispatch fn of {kernel}"));
+        };
+        if !want.is(f, arm) {
+            return Err(format!("trace line `{line}`: want the {want:?} arm, {}", show(&r)));
+        }
+        seen[i] = true;
+    }
+    if let Some(i) = seen.iter().position(|s| !s) {
+        return Err(format!("no trace line for `main.{}` (want the {want:?} arm), {}", fns[i], show(&r)));
+    }
+    r.stderr = rest.into_bytes();
+    Ok(r)
+}
+
 /// The package of one kernel: `stave.toml`, `src/main.stv` (the kernel file), `src/diff.stv`,
 /// and for `<k>_v3` and `<k>_disp` the kernels and references of `<k>.stv` as `src/base.stv`.
 fn package(dir: &Path, name: &str) {
@@ -262,6 +476,8 @@ enum Leg {
     Ran(Ran),
     NotBuilt(String),
     Skipped(String),
+    /// Ran, but not as the leg must (the dispatch trace).
+    Failed(String),
 }
 
 struct Report {
@@ -340,6 +556,11 @@ fn oracle(kernel: &str, case: &generate::Case) -> Option<String> {
             let count = xs.iter().filter(|&&x| x == b).count();
             Some(format!("u{first} u{last} u{count}"))
         }
+        "sum_disp" if case.kind == 0 => {
+            let s = xs.chunks(4).fold(0i32, |s, b| s.wrapping_add(i32::from_le_bytes(b.try_into().unwrap())));
+            Some(format!("i{s}"))
+        }
+        "sum_disp" => Some(format!("u{}", xs.iter().fold(0u32, |s, &b| s.wrapping_add(u32::from(b))))),
         _ => None,
     }
 }
@@ -359,6 +580,10 @@ fn check(
         Leg::Ran(r) => r,
         Leg::NotBuilt(m) | Leg::Skipped(m) => {
             rep.note = Some(m);
+            return rep;
+        }
+        Leg::Failed(m) => {
+            rep.note = Some(format!("failed: {m}"));
             return rep;
         }
     };
@@ -426,38 +651,56 @@ fn run_kernel(k: &'static Kernel, root: &Path, plan: Plan) -> Vec<Report> {
     reports.push(check(k.name, ileg, Leg::Ran(want.clone()), None, &cases, &dir, &rerun_i));
     let want_text = String::from_utf8_lossy(&want.stdout).into_owned();
 
-    // (target, how to run its builds, leg label suffix)
-    let mut legs: Vec<(&str, Option<Option<&str>>, &str)> =
-        targets.iter().map(|t| (*t, runner(Triple::parse(t).unwrap()), "")).collect();
-    // a dispatch kernel also runs on an x86-64 CPU without AVX2: its `_` arms
-    if k.name.ends_with("_disp") {
-        if cfg!(target_os = "linux") && have("qemu-x86_64") {
-            legs.push(("x86_64-linux", Some(Some("qemu-x86_64 -cpu Nehalem")), " Nehalem"));
-        } else {
-            eprintln!("note: no qemu-x86_64: the Nehalem leg of {} is skipped", k.name);
-        }
-    }
-    for (t, how, label) in legs {
+    for t in targets {
         let target = Triple::parse(t).unwrap();
+        let how = runner(target);
+        let runs = if k.name.ends_with("_disp") {
+            gate_runs(k.name, target, how)
+        } else {
+            how.map(|r| vec![Run::plain(r)]).unwrap_or_default()
+        };
+        let no_rerun = |_: &Path, _: &[u8]| -> Option<Ran> { None };
         for release in [false, true] {
-            let leg = format!("{t} {}{label}", if release { "release" } else { "debug" });
-            let got = match build(&dir, target, release) {
-                Err(m) => Leg::NotBuilt(m),
-                Ok(_) if how.is_none() => Leg::Skipped("cannot run here".into()),
-                Ok(out) => {
-                    let bin = dir.join(format!("bin-{t}-{release}{label}"));
-                    out.image.as_ref().unwrap().write_file(&bin).unwrap();
-                    let spec = RunSpec { args: &[], runner: how.unwrap(), cwd: Some(&dir), inherit: false };
-                    Leg::Ran(exec::run(&bin, &spec).unwrap_or_else(|e| panic!("{}: {e}", bin.display())))
+            let mode = if release { "release" } else { "debug" };
+            let out = match build(&dir, target, release) {
+                Ok(out) => out,
+                Err(m) => {
+                    reports.push(check(
+                        k.name,
+                        format!("{t} {mode}"),
+                        Leg::NotBuilt(m),
+                        None,
+                        &[],
+                        &dir,
+                        &no_rerun,
+                    ));
+                    continue;
                 }
             };
-            let bin = dir.join(format!("bin-{t}-{release}{label}"));
-            let rerun = |cwd: &Path, _: &[u8]| {
-                let args = ["full".to_string()];
-                let spec = RunSpec { args: &args, runner: how.flatten(), cwd: Some(cwd), inherit: false };
-                exec::run(&bin, &spec).ok()
-            };
-            reports.push(check(k.name, leg, got, Some(&want_text), &cases, &dir, &rerun));
+            if runs.is_empty() {
+                let got = Leg::Skipped("cannot run here".into());
+                reports.push(check(k.name, format!("{t} {mode}"), got, None, &[], &dir, &no_rerun));
+                continue;
+            }
+            // one binary for every run of the leg
+            let bin = dir.join(format!("bin-{t}-{mode}"));
+            out.image.as_ref().unwrap().write_file(&bin).unwrap();
+            for run in &runs {
+                let leg = format!("{t} {mode}{}", run.label);
+                let got = run_bin(&bin, run, &[], &dir);
+                let got = match run.arm {
+                    None => Leg::Ran(got),
+                    Some(arm) => match picked(k.name, got, arm, run.sde) {
+                        Ok(r) => Leg::Ran(r),
+                        Err(e) => Leg::Failed(e),
+                    },
+                };
+                let rerun = |cwd: &Path, _: &[u8]| {
+                    let plain = Run { arm: None, ..run.clone() };
+                    Some(run_bin(&bin, &plain, &["full".to_string()], cwd))
+                };
+                reports.push(check(k.name, leg, got, Some(&want_text), &cases, &dir, &rerun));
+            }
         }
     }
     reports
