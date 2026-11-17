@@ -20,7 +20,7 @@ use std::fmt;
 use stave_obj::{FileId, FuncCode, LineRow, Reloc, RelocKind, SymbolId};
 use stave_target::{Feature, FeatureSet};
 
-pub use evex::{EOp, ERm, EShiftI, EVL, Ev, KBin, KReg, KSize};
+pub use evex::{EOp, ERm, EShiftI, EVL, EVsib, Ev, KBin, KReg, KSize};
 pub use inst::{AluOp, PLogic, Prec, ShiftOp, SseOp, UnaryOp, XRm};
 pub use simd::{VLen, VReg, VRm, VecReg};
 pub use simd_ops::{

@@ -1,0 +1,748 @@
+import std.io;
+
+// The K-mode sequences of the 512-bit ops against scalar references, on edge values and a
+// pseudo-random spread. Prints one line per op family: the lanes that differ, and a checksum
+// of the vector results.
+
+fn rnd(s: u64) -> u64 {
+    return s *% 6364136223846793005 +% 1442695040888963407;
+}
+
+// Lane values: zero, the extremes and their neighbours of an 8-bit lane, then random bits.
+fn fill8(xs: &mut [u8], seed: u64) {
+    let mut s = seed;
+    for i in 0..xs.len() {
+        s = rnd(s);
+        let r = (s >> 33) as% u8;
+        let k = i % 9;
+        xs[i] = if k == 0 then 0 else if k == 1 then 255 else if k == 2 then 128 else if k == 3 then 127 else if k == 4 then 1 else r;
+    }
+}
+
+fn fill16(xs: &mut [u16], seed: u64) {
+    let mut s = seed;
+    for i in 0..xs.len() {
+        s = rnd(s);
+        let r = (s >> 30) as% u16;
+        let k = i % 9;
+        xs[i] = if k == 0 then 0 else if k == 1 then 65535 else if k == 2 then 32768 else if k == 3 then 32767 else if k == 4 then 1 else if k == 5 then (r & 255) else r;
+    }
+}
+
+fn fill32(xs: &mut [u32], seed: u64) {
+    let mut s = seed;
+    for i in 0..xs.len() {
+        s = rnd(s);
+        let r = (s >> 20) as% u32;
+        let k = i % 7;
+        xs[i] = if k == 0 then 0 else if k == 1 then 4294967295 else if k == 2 then 2147483648 else if k == 3 then 2147483647 else if k == 4 then (r & 65535) else r;
+    }
+}
+
+fn fill64(xs: &mut [u64], seed: u64) {
+    let mut s = seed;
+    for i in 0..xs.len() {
+        s = rnd(s);
+        let k = i % 5;
+        xs[i] = if k == 0 then 0 else if k == 1 then 18446744073709551615 else if k == 2 then 9223372036854775808 else if k == 3 then (s >> 34) else s;
+    }
+}
+
+fn cs(acc: u64, x: u64) -> u64 {
+    return (acc ^ x) *% 1099511628211;
+}
+
+fn report(name: &str, bad: u32, sum: u64) {
+    io.print(name);
+    io.print(f" bad {bad} sum {sum}\n");
+}
+
+fn pop(x: u64, bits: u32) -> u64 {
+    let mut n: u64 = 0;
+    for b in 0u32..bits {
+        n = n + ((x >> (b as u64)) & 1);
+    }
+    return n;
+}
+
+fn lz(x: u64, bits: u32) -> u64 {
+    let mut n: u64 = 0;
+    let mut b = bits;
+    while b > 0 {
+        b = b - 1;
+        if (x >> (b as u64)) & 1 == 1 {
+            return n;
+        }
+        n = n + 1;
+    }
+    return n;
+}
+
+fn scans() {
+    let mut a: [u8; 64] = [0; 64];
+    let mut b: [u32; 16] = [0; 16];
+    let mut c: [u64; 8] = [0; 8];
+    let mut d: [u16; 32] = [0; 32];
+    fill8(&mut a, 1);
+    fill32(&mut b, 2);
+    fill64(&mut c, 3);
+    fill16(&mut d, 4);
+    let mut ra: [u8; 64] = [0; 64];
+    let mut rb: [i32; 16] = [0; 16];
+    let mut rc: [u64; 8] = [0; 8];
+    let mut rd: [u16; 32] = [0; 32];
+    u8x64.load(&a, 0).scan_add_wrap().store(&mut ra, 0);
+    u32x16.load(&b, 0).bitcast::<i32x16>().scan_add_wrap().store(&mut rb, 0);
+    u64x8.load(&c, 0).scan_add_wrap().store(&mut rc, 0);
+    u16x32.load(&d, 0).scan_add_wrap().store(&mut rd, 0);
+    let mut bad: u32 = 0;
+    let mut sum: u64 = 0;
+    let mut p8: u8 = 0;
+    for i in 0usize..64 {
+        p8 = p8 +% a[i];
+        if ra[i] != p8 { bad = bad + 1; }
+        sum = cs(sum, ra[i] as u64);
+    }
+    let mut p32: i32 = 0;
+    for i in 0usize..16 {
+        p32 = p32 +% (b[i] as% i32);
+        if rb[i] != p32 { bad = bad + 1; }
+        sum = cs(sum, rb[i] as% u64);
+    }
+    let mut p64: u64 = 0;
+    for i in 0usize..8 {
+        p64 = p64 +% c[i];
+        if rc[i] != p64 { bad = bad + 1; }
+        sum = cs(sum, rc[i]);
+    }
+    let mut p16: u16 = 0;
+    for i in 0usize..32 {
+        p16 = p16 +% d[i];
+        if rd[i] != p16 { bad = bad + 1; }
+        sum = cs(sum, rd[i] as u64);
+    }
+    report("scan_add_wrap", bad, sum);
+    // std.slice sums keep the running prefix sum in every lane
+    let small: [u32; 37] = [3; 37];
+    let sl: &[u32] = &small;
+    let total = sl.sum();
+    io.print(f"slice sum {total}\n");
+}
+
+// The 64 bytes of `buf`, as a slice aligned to 64 bytes.
+fn aligned(buf: &mut [u8x64; 2]) -> &mut [u8 align 64] from buf {
+    let a = &mut buf[0] as *mut u8x64 as usize;
+    let parts: [usize; 2] = [a, 128];
+    let q = &parts as *const [usize; 2] as *const &mut [u8 align 64];
+    return unsafe("buf holds 128 bytes at a 64-byte aligned address, lent while the view lives") q.read();
+}
+
+fn streams() {
+    let mut buf: [u8x64; 2] = [u8x64.splat(0); 2];
+    let mut a: [u8; 64] = [0; 64];
+    fill8(&mut a, 5);
+    let v = u8x64.load(&a, 0);
+    let s = aligned(&mut buf);
+    v.store_stream(s, 64);
+    let mut bad: u32 = 0;
+    let mut sum: u64 = 0;
+    for i in 0usize..128 {
+        let want = if i < 64 then 0 else a[i - 64];
+        if s[i] != want { bad = bad + 1; }
+        sum = cs(sum, s[i] as u64);
+    }
+    report("store_stream", bad, sum);
+}
+
+fn gathers() {
+    let mut t: [u32; 1000] = [0; 1000];
+    fill32(&mut t, 6);
+    let mut t64: [u64; 300] = [0; 300];
+    fill64(&mut t64, 7);
+    let mut ix: [u32; 16] = [0; 16];
+    let mut ix64: [u64; 8] = [0; 8];
+    for i in 0usize..16 {
+        ix[i] = ((i * 397 + 11) % 1000) as% u32;
+    }
+    ix[3] = 999;
+    ix[4] = 0;
+    for i in 0usize..8 {
+        ix64[i] = ((i * 71 + 5) % 300) as u64;
+    }
+    ix64[7] = 299;
+    let tl: &[u32] = &t;
+    let tl64: &[u64] = &t64;
+    let mut g: [u32; 16] = [0; 16];
+    let mut g64: [u64; 8] = [0; 8];
+    let mut gf: [f32; 16] = [0.0; 16];
+    u32x16.gather(tl, u32x16.load(&ix, 0)).store(&mut g, 0);
+    u64x8.gather(tl64, u64x8.load(&ix64, 0)).store(&mut g64, 0);
+    let mut fs: [f32; 1000] = [0.0; 1000];
+    for i in 0usize..1000 {
+        fs[i] = (i as% u32) as~ f32;
+    }
+    let fl: &[f32] = &fs;
+    f32x16.gather(fl, u32x16.load(&ix, 0)).store(&mut gf, 0);
+    let mut bad: u32 = 0;
+    let mut sum: u64 = 0;
+    for i in 0usize..16 {
+        if g[i] != t[ix[i] as usize] { bad = bad + 1; }
+        if gf[i] != fs[ix[i] as usize] { bad = bad + 1; }
+        sum = cs(sum, g[i] as u64);
+    }
+    for i in 0usize..8 {
+        if g64[i] != t64[ix64[i] as usize] { bad = bad + 1; }
+        sum = cs(sum, g64[i]);
+    }
+    report("gather", bad, sum);
+    // scatter: repeated indices, the highest lane wins
+    let mut d: [u32; 40] = [0; 40];
+    let mut d64: [u64; 40] = [0; 40];
+    let mut sx: [u32; 16] = [0; 16];
+    let mut sv: [u32; 16] = [0; 16];
+    let mut sx64: [u64; 8] = [0; 8];
+    for i in 0usize..16 {
+        sx[i] = ((i * 7) % 13) as% u32;
+        sv[i] = (i as% u32) +% 100;
+    }
+    for i in 0usize..8 {
+        sx64[i] = ((i * 5) % 6) as u64 + 30;
+    }
+    let dl: &mut [u32] = &mut d;
+    u32x16.load(&sv, 0).scatter(dl, u32x16.load(&sx, 0));
+    let dl64: &mut [u64] = &mut d64;
+    u64x8.load(&g64, 0).scatter(dl64, u64x8.load(&sx64, 0));
+    let mut e: [u32; 40] = [0; 40];
+    let mut e64: [u64; 40] = [0; 40];
+    for i in 0usize..16 {
+        e[sx[i] as usize] = sv[i];
+    }
+    for i in 0usize..8 {
+        e64[sx64[i] as usize] = g64[i];
+    }
+    bad = 0;
+    sum = 0;
+    for i in 0usize..40 {
+        if d[i] != e[i] { bad = bad + 1; }
+        if d64[i] != e64[i] { bad = bad + 1; }
+        sum = cs(cs(sum, d[i] as u64), d64[i]);
+    }
+    report("scatter", bad, sum);
+}
+
+fn divs() {
+    let mut a: [u8; 64] = [0; 64];
+    let mut b: [u16; 32] = [0; 32];
+    let mut c: [u32; 16] = [0; 16];
+    let mut d: [u64; 8] = [0; 8];
+    fill8(&mut a, 8);
+    fill16(&mut b, 9);
+    fill32(&mut c, 10);
+    fill64(&mut d, 11);
+    let mut r8: [u8; 64] = [0; 64];
+    let mut s8: [i8; 64] = [0; 64];
+    let mut r16: [u16; 32] = [0; 32];
+    let mut s16: [i16; 32] = [0; 32];
+    let mut p16: [i16; 32] = [0; 32];
+    let mut r32: [u32; 16] = [0; 16];
+    let mut s32: [i32; 16] = [0; 16];
+    let mut r64: [u64; 8] = [0; 8];
+    let mut s64: [i64; 8] = [0; 8];
+    let va = u8x64.load(&a, 0);
+    let vb = u16x32.load(&b, 0);
+    let vc = u32x16.load(&c, 0);
+    let vd = u64x8.load(&d, 0);
+    va.div_const::<7>().store(&mut r8, 0);
+    va.bitcast::<i8x64>().div_const::<7>().store(&mut s8, 0);
+    vb.div_const::<7>().store(&mut r16, 0);
+    vb.bitcast::<i16x32>().div_const::<15>().store(&mut s16, 0);
+    vb.bitcast::<i16x32>().div_const::<8>().store(&mut p16, 0);
+    vc.div_const::<7>().store(&mut r32, 0);
+    vc.bitcast::<i32x16>().div_const::<7>().store(&mut s32, 0);
+    vd.div_const::<10>().store(&mut r64, 0);
+    vd.bitcast::<i64x8>().div_const::<3>().store(&mut s64, 0);
+    let mut bad: u32 = 0;
+    let mut sum: u64 = 0;
+    for i in 0usize..64 {
+        let x = a[i];
+        let y = x as% i8;
+        if r8[i] != x / 7 { bad = bad + 1; }
+        if s8[i] != y / 7 { bad = bad + 1; }
+        sum = cs(cs(sum, r8[i] as u64), s8[i] as% u64);
+    }
+    for i in 0usize..32 {
+        let x = b[i];
+        let y = x as% i16;
+        if r16[i] != x / 7 { bad = bad + 1; }
+        if s16[i] != y / 15 { bad = bad + 1; }
+        if p16[i] != y / 8 { bad = bad + 1; }
+        sum = cs(cs(cs(sum, r16[i] as u64), s16[i] as% u64), p16[i] as% u64);
+    }
+    for i in 0usize..16 {
+        let x = c[i];
+        let y = x as% i32;
+        if r32[i] != x / 7 { bad = bad + 1; }
+        if s32[i] != y / 7 { bad = bad + 1; }
+        sum = cs(cs(sum, r32[i] as u64), s32[i] as% u64);
+    }
+    for i in 0usize..8 {
+        let x = d[i];
+        let y = x as% i64;
+        if r64[i] != x / 10 { bad = bad + 1; }
+        if s64[i] != y / 3 { bad = bad + 1; }
+        sum = cs(cs(sum, r64[i]), s64[i] as% u64);
+    }
+    report("div_const", bad, sum);
+}
+
+fn muls() {
+    let mut a: [u8; 64] = [0; 64];
+    let mut b: [u8; 64] = [0; 64];
+    let mut c: [u16; 32] = [0; 32];
+    let mut d: [u16; 32] = [0; 32];
+    let mut e: [u32; 16] = [0; 16];
+    let mut f: [u32; 16] = [0; 16];
+    let mut g: [u64; 8] = [0; 8];
+    let mut h: [u64; 8] = [0; 8];
+    fill8(&mut a, 12);
+    fill8(&mut b, 13);
+    fill16(&mut c, 14);
+    fill16(&mut d, 15);
+    fill32(&mut e, 16);
+    fill32(&mut f, 17);
+    fill64(&mut g, 18);
+    fill64(&mut h, 19);
+    // small factors too, so not every product saturates
+    for i in 0usize..16 {
+        b[4 * i] = (i as% u8) & 7;
+        d[2 * i] = (i as% u16) & 15;
+        f[i / 2 * 2] = (i as% u32) & 255;
+    }
+    let mut ru8: [u8; 64] = [0; 64];
+    let mut ri8: [i8; 64] = [0; 64];
+    let mut ru16: [u16; 32] = [0; 32];
+    let mut ri16: [i16; 32] = [0; 32];
+    let mut ru32: [u32; 16] = [0; 16];
+    let mut ri32: [i32; 16] = [0; 16];
+    let mut ru64: [u64; 8] = [0; 8];
+    let mut ri64: [i64; 8] = [0; 8];
+    let (va, vb) = (u8x64.load(&a, 0), u8x64.load(&b, 0));
+    let (vc, vd) = (u16x32.load(&c, 0), u16x32.load(&d, 0));
+    let (ve, vf) = (u32x16.load(&e, 0), u32x16.load(&f, 0));
+    let (vg, vh) = (u64x8.load(&g, 0), u64x8.load(&h, 0));
+    (va *| vb).store(&mut ru8, 0);
+    (va.bitcast::<i8x64>() *| vb.bitcast::<i8x64>()).store(&mut ri8, 0);
+    (vc *| vd).store(&mut ru16, 0);
+    (vc.bitcast::<i16x32>() *| vd.bitcast::<i16x32>()).store(&mut ri16, 0);
+    (ve *| vf).store(&mut ru32, 0);
+    (ve.bitcast::<i32x16>() *| vf.bitcast::<i32x16>()).store(&mut ri32, 0);
+    (vg *| vh).store(&mut ru64, 0);
+    (vg.bitcast::<i64x8>() *| vh.bitcast::<i64x8>()).store(&mut ri64, 0);
+    let mut bad: u32 = 0;
+    let mut sum: u64 = 0;
+    for i in 0usize..64 {
+        if ru8[i] != a[i] *| b[i] { bad = bad + 1; }
+        if ri8[i] != (a[i] as% i8) *| (b[i] as% i8) { bad = bad + 1; }
+        sum = cs(cs(sum, ru8[i] as u64), ri8[i] as% u64);
+    }
+    for i in 0usize..32 {
+        if ru16[i] != c[i] *| d[i] { bad = bad + 1; }
+        if ri16[i] != (c[i] as% i16) *| (d[i] as% i16) { bad = bad + 1; }
+        sum = cs(cs(sum, ru16[i] as u64), ri16[i] as% u64);
+    }
+    for i in 0usize..16 {
+        if ru32[i] != e[i] *| f[i] { bad = bad + 1; }
+        if ri32[i] != (e[i] as% i32) *| (f[i] as% i32) { bad = bad + 1; }
+        sum = cs(cs(sum, ru32[i] as u64), ri32[i] as% u64);
+    }
+    for i in 0usize..8 {
+        if ru64[i] != g[i] *| h[i] { bad = bad + 1; }
+        if ri64[i] != (g[i] as% i64) *| (h[i] as% i64) { bad = bad + 1; }
+        sum = cs(cs(sum, ru64[i]), ri64[i] as% u64);
+    }
+    report("mul.sat", bad, sum);
+    // checked: None iff some lane's exact product leaves the lane type
+    let mut seen: u32 = 0;
+    bad = 0;
+    for k in 0usize..4 {
+        // k: the pairs of lanes the vectors take (all, then with the overflowing lanes zeroed)
+        let mut x8: [u8; 64] = [0; 64];
+        let mut x16: [u16; 32] = [0; 32];
+        let mut x32: [u32; 16] = [0; 16];
+        for i in 0usize..64 {
+            x8[i] = if k == 0 then a[i] else if ((a[i] as u32) * (b[i] as u32) > 255) == (k == 1) then 0 else a[i];
+        }
+        for i in 0usize..32 {
+            let p = (c[i] as% i16 as i32) * (d[i] as% i16 as i32);
+            let out = p > 32767 || p < -32768;
+            x16[i] = if k == 0 then c[i] else if out == (k == 1) then 0 else c[i];
+        }
+        for i in 0usize..16 {
+            let p = (e[i] as u64) * (f[i] as u64);
+            x32[i] = if k == 0 then e[i] else if (p > 4294967295) == (k == 1) then 0 else e[i];
+        }
+        let mut o8 = false;
+        for i in 0usize..64 {
+            if (x8[i] as u32) * (b[i] as u32) > 255 { o8 = true; }
+        }
+        let mut o16 = false;
+        for i in 0usize..32 {
+            let p = (x16[i] as% i16 as i32) * (d[i] as% i16 as i32);
+            if p > 32767 || p < -32768 { o16 = true; }
+        }
+        let mut o32 = false;
+        for i in 0usize..16 {
+            if (x32[i] as u64) * (f[i] as u64) > 4294967295 { o32 = true; }
+        }
+        match u8x64.load(&x8, 0).checked_mul(vb) {
+            Option.Some(v) => {
+                if o8 { bad = bad + 1; }
+                let mut r: [u8; 64] = [0; 64];
+                v.store(&mut r, 0);
+                for i in 0usize..64 {
+                    if r[i] != x8[i] *% b[i] { bad = bad + 1; }
+                }
+                seen = seen + 1;
+            }
+            Option.None => { if !o8 { bad = bad + 1; } }
+        }
+        match u16x32.load(&x16, 0).bitcast::<i16x32>().checked_mul(vd.bitcast::<i16x32>()) {
+            Option.Some(v) => {
+                if o16 { bad = bad + 1; }
+                let mut r: [i16; 32] = [0; 32];
+                v.store(&mut r, 0);
+                for i in 0usize..32 {
+                    if r[i] != (x16[i] as% i16) *% (d[i] as% i16) { bad = bad + 1; }
+                }
+                seen = seen + 1;
+            }
+            Option.None => { if !o16 { bad = bad + 1; } }
+        }
+        match u32x16.load(&x32, 0).checked_mul(vf) {
+            Option.Some(v) => {
+                if o32 { bad = bad + 1; }
+                let mut r: [u32; 16] = [0; 16];
+                v.store(&mut r, 0);
+                for i in 0usize..16 {
+                    if r[i] != x32[i] *% f[i] { bad = bad + 1; }
+                }
+                seen = seen + 1;
+            }
+            Option.None => { if !o32 { bad = bad + 1; } }
+        }
+    }
+    report("checked_mul", bad, seen as u64);
+}
+
+fn counts() {
+    let mut a: [u8; 64] = [0; 64];
+    let mut b: [u16; 32] = [0; 32];
+    let mut c: [u32; 16] = [0; 16];
+    let mut d: [u64; 8] = [0; 8];
+    fill8(&mut a, 20);
+    fill16(&mut b, 21);
+    fill32(&mut c, 22);
+    fill64(&mut d, 23);
+    let mut pa: [u8; 64] = [0; 64];
+    let mut la: [u8; 64] = [0; 64];
+    let mut pb: [u16; 32] = [0; 32];
+    let mut lb: [u16; 32] = [0; 32];
+    let mut pc: [u32; 16] = [0; 16];
+    let mut lc: [u32; 16] = [0; 16];
+    let mut pd: [u64; 8] = [0; 8];
+    let mut ld: [u64; 8] = [0; 8];
+    u8x64.load(&a, 0).popcount().store(&mut pa, 0);
+    u8x64.load(&a, 0).clz().store(&mut la, 0);
+    u16x32.load(&b, 0).popcount().store(&mut pb, 0);
+    u16x32.load(&b, 0).clz().store(&mut lb, 0);
+    u32x16.load(&c, 0).popcount().store(&mut pc, 0);
+    u32x16.load(&c, 0).clz().store(&mut lc, 0);
+    u64x8.load(&d, 0).popcount().store(&mut pd, 0);
+    u64x8.load(&d, 0).clz().store(&mut ld, 0);
+    let mut bad: u32 = 0;
+    let mut sum: u64 = 0;
+    for i in 0usize..64 {
+        if pa[i] as u64 != pop(a[i] as u64, 8) { bad = bad + 1; }
+        if la[i] as u64 != lz(a[i] as u64, 8) { bad = bad + 1; }
+        sum = cs(cs(sum, pa[i] as u64), la[i] as u64);
+    }
+    for i in 0usize..32 {
+        if pb[i] as u64 != pop(b[i] as u64, 16) { bad = bad + 1; }
+        if lb[i] as u64 != lz(b[i] as u64, 16) { bad = bad + 1; }
+        sum = cs(cs(sum, pb[i] as u64), lb[i] as u64);
+    }
+    for i in 0usize..16 {
+        if pc[i] as u64 != pop(c[i] as u64, 32) { bad = bad + 1; }
+        if lc[i] as u64 != lz(c[i] as u64, 32) { bad = bad + 1; }
+        sum = cs(cs(sum, pc[i] as u64), lc[i] as u64);
+    }
+    for i in 0usize..8 {
+        if pd[i] != pop(d[i], 64) { bad = bad + 1; }
+        if ld[i] != lz(d[i], 64) { bad = bad + 1; }
+        sum = cs(cs(sum, pd[i]), ld[i]);
+    }
+    report("popcount/clz", bad, sum);
+}
+
+fn shuffles() {
+    let mut a: [u8; 64] = [0; 64];
+    let mut b: [u16; 32] = [0; 32];
+    let mut c: [u32; 16] = [0; 16];
+    let mut d: [u64; 8] = [0; 8];
+    fill8(&mut a, 24);
+    fill16(&mut b, 25);
+    fill32(&mut c, 26);
+    fill64(&mut d, 27);
+    let mut ra: [u8; 64] = [0; 64];
+    let mut rq: [u8; 64] = [0; 64];
+    let mut rp: [u8; 64] = [0; 64];
+    let mut rb: [u16; 32] = [0; 32];
+    let mut rc: [u32; 16] = [0; 16];
+    let mut rd: [u64; 8] = [0; 8];
+    let va = u8x64.load(&a, 0);
+    va.permute::<[63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]>().store(&mut ra, 0);
+    // whole words across the blocks; bytes within their block
+    va.permute::<[62, 63, 60, 61, 58, 59, 56, 57, 54, 55, 52, 53, 50, 51, 48, 49, 46, 47, 44, 45, 42, 43, 40, 41, 38, 39, 36, 37, 34, 35, 32, 33, 30, 31, 28, 29, 26, 27, 24, 25, 22, 23, 20, 21, 18, 19, 16, 17, 14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1]>().store(&mut rq, 0);
+    va.permute::<[1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14, 17, 16, 19, 18, 21, 20, 23, 22, 25, 24, 27, 26, 29, 28, 31, 30, 33, 32, 35, 34, 37, 36, 39, 38, 41, 40, 43, 42, 45, 44, 47, 46, 49, 48, 51, 50, 53, 52, 55, 54, 57, 56, 59, 58, 61, 60, 63, 62]>().store(&mut rp, 0);
+    u16x32.load(&b, 0).permute::<[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 0, 1, 2, 3, 4]>().store(&mut rb, 0);
+    u32x16.load(&c, 0).permute::<[15, 0, 14, 1, 13, 2, 12, 3, 11, 4, 10, 5, 9, 6, 8, 7]>().store(&mut rc, 0);
+    u64x8.load(&d, 0).permute::<[7, 7, 0, 0, 3, 4, 1, 6]>().store(&mut rd, 0);
+    let ci: [usize; 16] = [15, 0, 14, 1, 13, 2, 12, 3, 11, 4, 10, 5, 9, 6, 8, 7];
+    let di: [usize; 8] = [7, 7, 0, 0, 3, 4, 1, 6];
+    let mut bad: u32 = 0;
+    let mut sum: u64 = 0;
+    for i in 0usize..64 {
+        if ra[i] != a[63 - i] { bad = bad + 1; }
+        if rq[i] != a[(62 - (i & 62)) + (i & 1)] { bad = bad + 1; }
+        if rp[i] != a[i ^ 1] { bad = bad + 1; }
+        sum = cs(cs(cs(sum, ra[i] as u64), rq[i] as u64), rp[i] as u64);
+    }
+    for i in 0usize..16 {
+        if rc[i] != c[ci[i]] { bad = bad + 1; }
+        sum = cs(sum, rc[i] as u64);
+    }
+    for i in 0usize..32 {
+        if rb[i] != b[(i + 5) % 32] { bad = bad + 1; }
+        sum = cs(sum, rb[i] as u64);
+    }
+    for i in 0usize..8 {
+        if rd[i] != d[di[i]] { bad = bad + 1; }
+        sum = cs(sum, rd[i]);
+    }
+    report("permute", bad, sum);
+    // lookups: indices past the table and negative ones give 0
+    let mut ia: [u8; 64] = [0; 64];
+    let mut ib: [u16; 32] = [0; 32];
+    let mut ic: [u32; 16] = [0; 16];
+    let mut id: [u64; 8] = [0; 8];
+    fill8(&mut ia, 28);
+    fill16(&mut ib, 29);
+    fill32(&mut ic, 30);
+    fill64(&mut id, 31);
+    for i in 0usize..64 {
+        if i % 3 == 0 { ia[i] = ia[i] & 63; }
+    }
+    for i in 0usize..32 {
+        if i % 3 != 2 { ib[i] = ib[i] & 31; }
+    }
+    for i in 0usize..16 {
+        if i % 4 != 3 { ic[i] = ic[i] & 15; }
+    }
+    for i in 0usize..8 {
+        if i % 2 == 0 { id[i] = id[i] & 7; }
+    }
+    let mut la: [u8; 64] = [0; 64];
+    let mut sa: [i8; 64] = [0; 64];
+    let mut lb: [u16; 32] = [0; 32];
+    let mut lc: [i32; 16] = [0; 16];
+    let mut ld: [u64; 8] = [0; 8];
+    va.lookup(u8x64.load(&ia, 0)).store(&mut la, 0);
+    va.bitcast::<i8x64>().lookup(u8x64.load(&ia, 0).bitcast::<i8x64>()).store(&mut sa, 0);
+    u16x32.load(&b, 0).lookup(u16x32.load(&ib, 0)).store(&mut lb, 0);
+    u32x16.load(&c, 0).bitcast::<i32x16>().lookup(u32x16.load(&ic, 0).bitcast::<i32x16>()).store(&mut lc, 0);
+    u64x8.load(&d, 0).lookup(u64x8.load(&id, 0)).store(&mut ld, 0);
+    bad = 0;
+    sum = 0;
+    for i in 0usize..64 {
+        let k = ia[i] as usize;
+        let want = if k < 64 then a[k] else 0;
+        let sk = ia[i] as% i8;
+        let swant = if sk >= 0 && sk < 64 then a[sk as% usize] as% i8 else 0;
+        if la[i] != want { bad = bad + 1; }
+        if sa[i] != swant { bad = bad + 1; }
+        sum = cs(cs(sum, la[i] as u64), sa[i] as% u64);
+    }
+    for i in 0usize..32 {
+        let k = ib[i] as usize;
+        let want = if k < 32 then b[k] else 0;
+        if lb[i] != want { bad = bad + 1; }
+        sum = cs(sum, lb[i] as u64);
+    }
+    for i in 0usize..16 {
+        let sk = ic[i] as% i32;
+        let want = if sk >= 0 && sk < 16 then c[sk as% usize] as% i32 else 0;
+        if lc[i] != want { bad = bad + 1; }
+        sum = cs(sum, lc[i] as% u64);
+    }
+    for i in 0usize..8 {
+        let want = if id[i] < 8 then d[id[i] as usize] else 0;
+        if ld[i] != want { bad = bad + 1; }
+        sum = cs(sum, ld[i]);
+    }
+    report("lookup", bad, sum);
+}
+
+fn compresses() {
+    let mut a: [u8; 64] = [0; 64];
+    let mut b: [u16; 32] = [0; 32];
+    let mut c: [u32; 16] = [0; 16];
+    let mut d: [u64; 8] = [0; 8];
+    fill8(&mut a, 32);
+    fill16(&mut b, 33);
+    fill32(&mut c, 34);
+    fill64(&mut d, 35);
+    let mut bad: u32 = 0;
+    let mut sum: u64 = 0;
+    // masks: some lanes, none, all
+    for k in 0u8..3 {
+        let mut m8: [u8; 64] = [0; 64];
+        let mut m16: [u16; 32] = [0; 32];
+        let mut m32: [u32; 16] = [0; 16];
+        let mut m64: [u64; 8] = [0; 8];
+        for i in 0usize..64 {
+            m8[i] = if k == 0 then a[i] % 3 else k - 1;
+        }
+        for i in 0usize..32 {
+            m16[i] = if k == 0 then b[i] % 2 else (k - 1) as u16;
+        }
+        for i in 0usize..16 {
+            m32[i] = if k == 0 then c[i] % 2 else (k - 1) as u32;
+        }
+        for i in 0usize..8 {
+            m64[i] = if k == 0 then d[i] % 2 else (k - 1) as u64;
+        }
+        let ma = u8x64.load(&m8, 0) == u8x64.splat(1);
+        let mb = u16x32.load(&m16, 0) == u16x32.splat(1);
+        let mc = u32x16.load(&m32, 0) == u32x16.splat(1);
+        let md = u64x8.load(&m64, 0) == u64x8.splat(1);
+        let mut ca: [u8; 64] = [0; 64];
+        let mut ea: [u8; 64] = [0; 64];
+        let mut cb: [u16; 32] = [0; 32];
+        let mut eb: [u16; 32] = [0; 32];
+        let mut cc: [u32; 16] = [0; 16];
+        let mut ec: [u32; 16] = [0; 16];
+        let mut cd: [u64; 8] = [0; 8];
+        let mut ed: [u64; 8] = [0; 8];
+        u8x64.load(&a, 0).compress(ma).store(&mut ca, 0);
+        u8x64.load(&a, 0).expand(ma).store(&mut ea, 0);
+        u16x32.load(&b, 0).compress(mb).store(&mut cb, 0);
+        u16x32.load(&b, 0).expand(mb).store(&mut eb, 0);
+        u32x16.load(&c, 0).compress(mc).store(&mut cc, 0);
+        u32x16.load(&c, 0).expand(mc).store(&mut ec, 0);
+        u64x8.load(&d, 0).compress(md).store(&mut cd, 0);
+        u64x8.load(&d, 0).expand(md).store(&mut ed, 0);
+        let mut n: usize = 0;
+        let mut wc: [u8; 64] = [0; 64];
+        let mut we: [u8; 64] = [0; 64];
+        for i in 0usize..64 {
+            if m8[i] == 1 {
+                wc[n] = a[i];
+                we[i] = a[n];
+                n = n + 1;
+            }
+        }
+        for i in 0usize..64 {
+            if ca[i] != wc[i] || ea[i] != we[i] { bad = bad + 1; }
+            sum = cs(cs(sum, ca[i] as u64), ea[i] as u64);
+        }
+        n = 0;
+        let mut wc16: [u16; 32] = [0; 32];
+        let mut we16: [u16; 32] = [0; 32];
+        for i in 0usize..32 {
+            if m16[i] == 1 {
+                wc16[n] = b[i];
+                we16[i] = b[n];
+                n = n + 1;
+            }
+        }
+        for i in 0usize..32 {
+            if cb[i] != wc16[i] || eb[i] != we16[i] { bad = bad + 1; }
+            sum = cs(cs(sum, cb[i] as u64), eb[i] as u64);
+        }
+        n = 0;
+        let mut wc32: [u32; 16] = [0; 16];
+        let mut we32: [u32; 16] = [0; 16];
+        for i in 0usize..16 {
+            if m32[i] == 1 {
+                wc32[n] = c[i];
+                we32[i] = c[n];
+                n = n + 1;
+            }
+        }
+        for i in 0usize..16 {
+            if cc[i] != wc32[i] || ec[i] != we32[i] { bad = bad + 1; }
+            sum = cs(cs(sum, cc[i] as u64), ec[i] as u64);
+        }
+        n = 0;
+        let mut wc64: [u64; 8] = [0; 8];
+        let mut we64: [u64; 8] = [0; 8];
+        for i in 0usize..8 {
+            if m64[i] == 1 {
+                wc64[n] = d[i];
+                we64[i] = d[n];
+                n = n + 1;
+            }
+        }
+        for i in 0usize..8 {
+            if cd[i] != wc64[i] || ed[i] != we64[i] { bad = bad + 1; }
+            sum = cs(cs(sum, cd[i]), ed[i]);
+        }
+    }
+    report("compress/expand", bad, sum);
+}
+
+fn shifts() {
+    let mut a: [u8; 64] = [0; 64];
+    let mut s: [u8; 64] = [0; 64];
+    fill8(&mut a, 36);
+    fill8(&mut s, 37);
+    let mut w: [u8; 64] = [0; 64];
+    for i in 0usize..64 {
+        w[i] = s[i];
+        s[i] = s[i] & 7;
+    }
+    let va = u8x64.load(&a, 0);
+    let vs = u8x64.load(&s, 0);
+    let mut rl: [u8; 64] = [0; 64];
+    let mut rr: [u8; 64] = [0; 64];
+    let mut rs: [i8; 64] = [0; 64];
+    let mut rw: [u8; 64] = [0; 64];
+    (va << vs).store(&mut rl, 0);
+    (va >> vs).store(&mut rr, 0);
+    (va.bitcast::<i8x64>() >> vs.bitcast::<i8x64>()).store(&mut rs, 0);
+    (va <<% u8x64.load(&w, 0)).store(&mut rw, 0);
+    let mut bad: u32 = 0;
+    let mut sum: u64 = 0;
+    for i in 0usize..64 {
+        let k = s[i];
+        if rl[i] != a[i] << k { bad = bad + 1; }
+        if rr[i] != a[i] >> k { bad = bad + 1; }
+        if rs[i] != (a[i] as% i8) >> (k as% i8) { bad = bad + 1; }
+        if rw[i] != a[i] <<% w[i] { bad = bad + 1; }
+        sum = cs(cs(cs(cs(sum, rl[i] as u64), rr[i] as u64), rs[i] as% u64), rw[i] as u64);
+    }
+    report("shift u8/i8 by vector", bad, sum);
+}
+
+fn main() -> i32 {
+    scans();
+    streams();
+    gathers();
+    divs();
+    muls();
+    counts();
+    shuffles();
+    compresses();
+    shifts();
+    return 0;
+}

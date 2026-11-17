@@ -6,9 +6,8 @@
 //! disassembled and its instructions are checked against the function's feature set
 //! ([`super::features::check_image`]).
 //!
-//! The AVX-512 modes run on the `v4` leg ([`v4_leg`]: natively, or under Intel SDE), and only
-//! the cases whose function compiles in K mode ([`k_ok`]): the ops K mode lacks are listed in
-//! [`K_UNSUPPORTED`], and a 512-bit case of one of them runs nowhere.
+//! The AVX-512 modes run on the `v4` leg ([`v4_leg`]: natively, or under Intel SDE); every case
+//! compiles in K mode ([`k_coverage`]).
 //!
 //! A program is a list of cases, one function each, called in order from `main`. Every input tuple
 //! prints a label line (`# <op> <operands> -> <result>`), then the raw bits of its result as
@@ -947,26 +946,6 @@ fn modes(bits: u32, fma: bool, mask_bits: bool, kok: bool) -> Vec<Mode> {
         .collect()
 }
 
-/// Ops without a K-mode lowering: every case of them is unsupported in a function compiled for
-/// the AVX-512 set. (`vec.shl`, `vec.shl.wrap` and `vec.shr` lack only the form on 8-bit lanes
-/// with a vector amount.)
-pub const K_UNSUPPORTED: [VecOp; 14] = [
-    VecOp::MulSat,
-    VecOp::CheckedMul,
-    VecOp::DivConst,
-    VecOp::Popcount,
-    VecOp::Clz,
-    VecOp::ScanAdd,
-    VecOp::ScanAddWrap,
-    VecOp::Permute,
-    VecOp::Lookup,
-    VecOp::Compress,
-    VecOp::Expand,
-    VecOp::StoreStream,
-    VecOp::Gather,
-    VecOp::Scatter,
-];
-
 /// Whether the functions of `c` (its own and the helpers it calls) compile in K mode (debug
 /// and release agree).
 fn k_ok(c: &Case) -> bool {
@@ -1419,44 +1398,28 @@ fn coverage() {
     assert!(missing.is_empty(), "ops without (256-bit) cases: {missing:?}");
 }
 
-/// K mode covers what it claims: every op outside [`K_UNSUPPORTED`] has a 512-bit case that
-/// compiles in K mode, and every op in the list has a case that does not (a case whose op has
-/// no reader emits nothing and compiles anyway).
+/// K mode lowers every op: each has a 512-bit case, and every case compiles in K mode.
 #[test]
 fn k_coverage() {
     let mut wide = BTreeSet::new();
-    let mut refused = BTreeSet::new();
     let mut lacking = BTreeSet::new();
     for (_, cases) in all_cases() {
         for c in &cases {
             let ok = k_ok(c);
-            let listed = c.ops.iter().any(|o| K_UNSUPPORTED.contains(o));
             for &op in &c.ops {
                 if ok && c.bits > 256 {
                     wide.insert(op.name());
                 }
-                if !ok && c.ops.len() == 1 {
-                    refused.insert(op.name());
-                }
             }
-            if !ok && !listed {
+            if !ok {
                 lacking.insert(format!("{:?}", c.ops.iter().map(|o| o.name()).collect::<Vec<_>>()));
             }
         }
     }
-    let missing: Vec<&str> = VecOp::ALL
-        .iter()
-        .filter(|op| !K_UNSUPPORTED.contains(op) && !wide.contains(op.name()))
-        .map(|op| op.name())
-        .collect();
+    let missing: Vec<&str> =
+        VecOp::ALL.iter().filter(|op| !wide.contains(op.name())).map(|op| op.name()).collect();
     assert!(missing.is_empty(), "ops without a 512-bit K-mode case: {missing:?}");
-    let stale: Vec<&str> =
-        K_UNSUPPORTED.iter().filter(|op| !refused.contains(op.name())).map(|op| op.name()).collect();
-    assert!(stale.is_empty(), "ops listed as unsupported in K mode that compile: {stale:?}");
-    // the one form of a supported op that K mode lacks: 8-bit lanes shifted by a vector
-    for l in &lacking {
-        assert!(l.contains("vec.sh"), "cases of supported ops that do not compile in K mode: {lacking:?}");
-    }
+    assert!(lacking.is_empty(), "cases that do not compile in K mode: {lacking:?}");
 }
 
 #[test]

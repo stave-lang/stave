@@ -32,28 +32,28 @@ vec.sub.sat             i32                         M    6  vpsubd; vpternlogd; 
 vec.sub.sat             i64                         M    6  vpsubq; vpternlogq; vpmovq2m; vpsraq; vpxorq; vmovdqa64 {k}
 vec.sub.sat             u32                         N    2  vpmaxud; vpsubd
 vec.sub.sat             u64                         N    2  vpmaxuq; vpsubq
-vec.mul.sat             i8                          M   11  vextracti64x4 x2; vpmovsxbw x4; vpmullw x2; vpmovswb x2; vinserti64x4  | unverified
-vec.mul.sat             u8                          M   11  vextracti64x4 x2; vpmovzxbw x4; vpmullw x2; vpmovuswb x2; vinserti64x4  | unverified
-vec.mul.sat             i16                         M   11  vextracti64x4 x2; vpmovsxwd x4; vpmulld x2; vpmovsdw x2; vinserti64x4  | unverified
-vec.mul.sat             u16                         M   11  vextracti64x4 x2; vpmovzxwd x4; vpmulld x2; vpmovusdw x2; vinserti64x4  | unverified
-vec.mul.sat             i32                         M   11  vextracti64x4 x2; vpmovsxdq x4; vpmullq x2; vpmovsqd x2; vinserti64x4  | unverified
-vec.mul.sat             u32                         M   11  vextracti64x4 x2; vpmovzxdq x4; vpmullq x2; vpmovusqd x2; vinserti64x4  | unverified
-vec.mul.sat             i64                         M   73  vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; imul x8; sar x8; xor x16; cmovo x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4  | unverified
-vec.mul.sat             u64                         M   57  vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; mul x8; sbb x8; or x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4  | unverified
+vec.mul.sat             i8                          M    8  vpsllw x2; vpmulhw; vpandq x2; vpmulhw; vpacksswb; vpshufb
+vec.mul.sat             u8                          M   10  vpsllw x2; vpmulhuw; vpandq x2; vpmulhuw; vpminuw x2; vpackuswb; vpshufb
+vec.mul.sat             i16                         M    7  vpmullw; vpmulhw; vpsraw; vpcmpw; vpsraw; vpxorq; vmovdqu16 {k}
+vec.mul.sat             u16                         M    4  vpmullw; vpmulhuw; vptestmw; vmovdqu16 {k}
+vec.mul.sat             i32                         M    9  vpmuldq; vpsrlq x2; vpmuldq; vpminsq x2; vpmaxsq x2; vpermt2d
+vec.mul.sat             u32                         M    7  vpmuludq; vpsrlq x2; vpmuludq; vpminuq x2; vpermt2d
+vec.mul.sat             i64                         M   32  imul x8; sar x8; xor x16  | note: lane by lane in general registers: no 64-bit high product
+vec.mul.sat             u64                         M    8  mul x8  | note: lane by lane in general registers: no 64-bit high product
 vec.checked_add         sint                        M    5  vpadd*; vpternlogd; vptestmq; kortestb; setz
 vec.checked_add         u8/u16/u32                  M    4  vpadd*; vpcmpu*; kortestq; setz
 vec.checked_add         u64                         M    4  vpaddq; vpcmpuq; kortestq; setz
 vec.checked_sub         sint                        M    5  vpsub*; vpternlogd; vptestmq; kortestb; setz
 vec.checked_sub         u8/u16/u32                  M    4  vpsub*; vpcmpu*; kortestq; setz
 vec.checked_sub         u64                         M    4  vpsubq; vpcmpuq; kortestq; setz
-vec.checked_mul         i8                          M   17  vextracti64x4 x2; vpmovsxbw x4; vpmullw x2; vpmovswb x2; vinserti64x4; vpaddw x2; vpor; vptestmw; kortestd; setz
-vec.checked_mul         u8                          M   15  vextracti64x4 x2; vpmovzxbw x4; vpmullw x2; vpmovwb x2; vinserti64x4; vpor; vptestmw; kortestd; setz
-vec.checked_mul         i16                         M    6  vpmullw; vpmulhw; vpsraw; vpcmpw; kortestd; setz
-vec.checked_mul         u16                         M    5  vpmullw; vpmulhuw; vptestmw; kortestd; setz
-vec.checked_mul         i32                         M   11  vpmulld; vpmuldq; vpsrlq x3; vpmuldq; vpblendmd; vpsrad; vpcmpd; kortestw; setz
-vec.checked_mul         u32                         M   10  vpmulld; vpmuludq; vpsrlq x3; vpmuludq; vpblendmd; vptestmd; kortestw; setz
-vec.checked_mul         i64                         M   47  vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; imul x8; seto x8; or x7; xor; vpmullq
-vec.checked_mul         u64                         M   47  vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; mul x8; seto x8; or x7; xor; vpmullq
+vec.checked_mul         i8                          M   14  vpsllw x2; vpmulhw; vpandq x2; vpmulhw; vpaddw x2; vporq; vptestmw; vpsllw; vpternlogq; kortestq; setz
+vec.checked_mul         u8                          M   12  vpsllw x2; vpmulhuw; vpandq x2; vpmulhuw; vporq; vptestmw; vpsllw; vpternlogq; kortestq; setz
+vec.checked_mul         i16                         M    6  vpmullw; vpmulhw; vpsraw; vpcmpw; kortestq; setz
+vec.checked_mul         u16                         M    5  vpmullw; vpmulhuw; vptestmw; kortestq; setz
+vec.checked_mul         i32                         M   10  vpmulld; vpmuldq; vpsrlq x2; vpmuldq; vpermt2d; vpsrad; vpcmpd; kortestq; setz
+vec.checked_mul         u32                         M    9  vpmulld; vpmuludq; vpsrlq x2; vpmuludq; vpermt2d; vptestmd; kortestq; setz
+vec.checked_mul         i64                         M    8  imul x8  | note: lane by lane in general registers: no 64-bit high product
+vec.checked_mul         u64                         M    8  mul x8  | note: lane by lane in general registers: no 64-bit high product
 vec.and                 int                         N    1  vpandq
 vec.or                  int                         N    1  vporq
 vec.xor                 int                         N    1  vpxorq
@@ -80,18 +80,18 @@ vec.shr                 u32 by vector               N    1  vpsrlvd
 vec.shr                 i32 by vector               N    1  vpsravd
 vec.shr                 u64 by vector               N    1  vpsrlvq
 vec.shr                 i64 by vector               N    1  vpsravq
-vec.shl                 int8 by vector              M    6  vpshufb; vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq
-vec.shl.wrap            int8 by vector              M    7  vpandq; vpshufb; vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq
-vec.shr                 u8 by vector                M   11  vextracti64x4 x2; vpmovzxbw x4; vpsrlvw x2; vpmovwb x2; vinserti64x4
-vec.shr                 i8 by vector                M   11  vextracti64x4 x2; vpmovsxbw x2; vpmovzxbw x2; vpsravw x2; vpmovwb x2; vinserti64x4
+vec.shl                 int8 by vector              M    6  vpandq; vpsrlw; vpsllvw; vpandnq; vpsllvw; vpternlogq
+vec.shl.wrap            int8 by vector              M    7  vpandq x2; vpsrlw; vpsllvw; vpandnq; vpsllvw; vpternlogq
+vec.shr                 u8 by vector                M    6  vpandq x2; vpsrlw; vpsrlvw x2; vpternlogq
+vec.shr                 i8 by vector                M    7  vpandq; vpsrlw; vpsllw; vpsraw; vpsravw x2; vpternlogq
 vec.div_const           u16                         M    5  vpmulhuw; vpsubw; vpsrlw; vpaddw; vpsrlw
-vec.div_const           i16                         M    5  vpmulhw; vpaddw; vpsraw; vpsrlw; vpaddw
-vec.div_const           u32                         M    9  vpsrlq; vpmuludq x2; vpsrlq; vpblendmd; vpsubd; vpsrld; vpaddd; vpsrld
-vec.div_const           i32                         M    9  vpsrlq; vpmuldq x2; vpsrlq; vpblendmd; vpaddd; vpsrad; vpsrld; vpaddd
-vec.div_const           u8                          M    5  vpunpcklbw; vpunpckhbw; vpmulhuw x2; vpackuswb
-vec.div_const           i8                          M   11  vpunpcklbw; vpunpckhbw; vpsraw x2; vpmulhw x2; vpsrlw x2; vpaddw x2; vpacksswb
-vec.div_const           u64                         M   62  vextracti64x4; vextracti128 x2; vmovq x4; vpextrq x4; mul x8; sub x8; shr x16; add x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4
-vec.div_const           i64                         M   62  vextracti64x4; vextracti128 x2; vmovq x4; vpextrq x4; imul x8; add x8; sar x8; shr x8; add x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4
+vec.div_const           i16                         M    6  vpmulhw; vpaddw; vpsraw; vpsrlw; vpaddw; vpsubw
+vec.div_const           u32                         M    8  vpsrlq; vpmuludq x2; vpermt2d; vpsubd; vpsrld; vpaddd; vpsrld
+vec.div_const           i32                         M    9  vpsrlq; vpmuldq x2; vpermt2d; vpaddd; vpsrad; vpsrld; vpaddd; vpsubd
+vec.div_const           u8                          M    6  vpsrlw; vpandq; vpmulhuw x2; vpsllw; vpternlogq
+vec.div_const           i8                          M   13  vpsraw x2; vpsllw x2; vpmulhw x2; vpsrlw x2; vpaddw x2; vpsubw x2; vpternlogq
+vec.div_const           u64                         M   16  xor x8; div x8  | note: lane by lane in general registers: no 64-bit high product
+vec.div_const           i64                         M   16  cqo x8; idiv x8  | note: lane by lane in general registers: no 64-bit high product
 vec.div_lanes           int                         U    -  -
 vec.fma                 float                       N    1  vfmadd213p%
 vec.min                 float                       M    5  vminp%; vminp%; vorp%; vcmpunordp%; vaddp% {k}
@@ -160,12 +160,12 @@ vec.scatter             any32                       N    2  kxnorw; vpscatterdd 
 vec.scatter             any64                       N    2  kxnorb; vpscatterqq
 vec.compress            any32                       N    1  vpcompressd {z}
 vec.compress            any64                       N    1  vpcompressq {z}
-vec.compress            any16                       M   14  vextracti64x4; vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; vpmovdw x2; kmovw; popcnt; vmovdqu64; vmovdqu16 x3  | +avx512vbmi2: N 1 vpcompress* {z}  | unverified
-vec.compress            any8                        M   35  vextracti32x4 x3; vpmovzxbd x4; kshiftrq x3; vpcompressd {z} x4; vpmovdb x4; kmovq; movzx x3; shr x2; popcnt x3; add x2; vmovdqu64; vmovdqu8 x5  | +avx512vbmi2: N 1 vpcompress* {z}  | unverified
+vec.compress            any16                       M   10  vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; kmovd; shl; popcnt; vpmovdw x2  | +avx512vbmi2: N 1 vpcompress* {z}
+vec.compress            any8                        M   22  vpmovzxbd x4; kshiftrq x3; vpcompressd {z} x4; kmovq; shl x3; popcnt x3; vpmovdb x4  | +avx512vbmi2: N 1 vpcompress* {z}
 vec.expand              any32                       N    1  vpexpandd {z}
 vec.expand              any64                       N    1  vpexpandq {z}
-vec.expand              any16                       M   12  vpmovzxwd x2; kshiftrd; kmovw; popcnt; vmovdqu16 x2; vpexpandd {z} x2; vpmovdw x2; vinserti64x4  | +avx512vbmi2: N 1 vpexpand* {z}  | note: vpexpandw needs avx512vbmi2: dword expands  | unverified
-vec.expand              any8                        M   33  vmovdqu8 x4; vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; vpmovdb x4; vinserti32x4 x3; kmovq; movzx x3; shr x2; popcnt x3; add x2  | +avx512vbmi2: N 1 vpexpand* {z}  | note: vpexpandb needs avx512vbmi2: dword expands  | unverified
+vec.expand              any16                       M   10  vpmovzxwd x2; kshiftrd; vpexpandd {z} x2; kmovd; shl; popcnt; vpmovdw x2  | +avx512vbmi2: N 1 vpexpand* {z}  | note: vpexpandw needs avx512vbmi2: dword expands
+vec.expand              any8                        M   22  vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; kmovq; shl x3; popcnt x3; vpmovdb x4  | +avx512vbmi2: N 1 vpexpand* {z}  | note: vpexpandb needs avx512vbmi2: dword expands
 vec.reduce_add          f32                         M    8  vextractf64x4; vaddps; vextractf128; vaddps; vmovhlps; vaddps; vmovshdup; vaddss
 vec.reduce_add          f64                         M    6  vextractf64x4; vaddpd; vextractf128; vaddpd; vunpckhpd; vaddsd
 vec.reduce_add_wrap     int8                        M    8  vextracti64x4; vpaddb; vextracti128; vpaddb; vpsadbw; vpshufd; vpaddq; vmovd
@@ -196,26 +196,26 @@ vec.reduce_or           int32                       M    9  vextracti64x4; vporq
 vec.reduce_or           int64                       M    7  vextracti64x4; vporq; vextracti128; vpor; vpshufd; vpor; vmovq
 vec.reduce_add_ordered  f32                         M   31  vextractf32x4 x3; vmovshdup x4; vmovhlps x4; vshufps x4; vaddss x16
 vec.reduce_add_ordered  f64                         M   15  vextractf32x4 x3; vunpckhpd x4; vaddsd x8
-vec.scan_add            f32                         M   48  vextractf32x4 x3; vmovshdup x4; vmovhlps x4; vpermilps x4; vaddss x15; vinsertps x15; vinsertf32x4 x3
-vec.scan_add            f64                         M   21  vextractf32x4 x3; vunpckhpd x4; vaddsd x7; vunpcklpd x4; vinsertf32x4 x3
-vec.scan_add_wrap       int8                        M   15  vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpshufb; vshufi64x2 x3; vpaddb x3
-vec.scan_add_wrap       int16                       M   13  vpslldq; vpaddw; vpslldq; vpaddw; vpslldq; vpaddw; vpshufb; vshufi64x2 x3; vpaddw x3
-vec.scan_add_wrap       int32                       M   11  vpslldq; vpaddd; vpslldq; vpaddd; vpshufd; vshufi64x2 x3; vpaddd x3
-vec.scan_add_wrap       int64                       M    9  vpslldq; vpaddq; vpshufd; vshufi64x2 x3; vpaddq x3
-vec.permute             any8                        M   11  vshufi64x2 x4; vpshufb x4; vpblendmb x3  | +avx512vbmi: N 1 vpermb  | note: vpermb needs avx512vbmi: per-128-bit-lane shuffles and blends
-vec.permute             any16                       N    1  vpermw
-vec.permute             any32                       N    1  vpermd
-vec.permute             any64                       N    1  vpermq
-vec.lookup              int8                        M   16  vpaddusb; vshufi64x2 x4; vpshufb x4; vpsllw x2; vpmovb2m x2; vpblendmb x3  | +avx512vbmi: N 2 vpcmpub; vpermb {z}  | unverified
-vec.lookup              int16                       N    2  vpcmpu*; vperm* {k}{z}  | unverified
-vec.lookup              int32                       N    2  vpcmpu*; vperm* {k}{z}  | unverified
-vec.lookup              int64                       N    2  vpcmpu*; vperm* {k}{z}  | unverified
+vec.scan_add            f32                         M   32  vmovss x17; vaddss x15  | note: lane by lane: each sum adds one lane to the one before
+vec.scan_add            f64                         M   16  vmovsd x9; vaddsd x7  | note: lane by lane: each sum adds one lane to the one before
+vec.scan_add_wrap       int8                        M   15  vpslldq x4; vpaddb x7; vpshufb; valignq x3
+vec.scan_add_wrap       int16                       M   13  vpslldq x3; vpaddw x6; vpshufb; valignq x3
+vec.scan_add_wrap       int32                       M   11  vpslldq x2; vpaddd x5; vpshufd; valignq x3
+vec.scan_add_wrap       int64                       M    9  vpslldq; vpaddq x4; vpshufd; valignq x3
+vec.permute             any8                        M    5  vpermi2w x2; vpshufb x2; vporq  | +avx512vbmi: N 1 vpermb  | note: vpermb needs avx512vbmi: the word of each byte, then the byte in it
+vec.permute             any16                       N    1  vpermi2w
+vec.permute             any32                       N    1  vpermi2d
+vec.permute             any64                       N    1  vpermi2q
+vec.lookup              int8                        M   16  vpaddusb; vshufi64x2 x4; vpshufb x4; vpsllw x2; vpmovb2m x2; vpblendmb x3  | +avx512vbmi: N 2 vpcmpub; vpermb {z}
+vec.lookup              int16                       N    2  vpcmpu*; vpermi2* {k}{z}
+vec.lookup              int32                       N    2  vpcmpu*; vpermi2* {k}{z}
+vec.lookup              int64                       N    2  vpcmpu*; vpermi2* {k}{z}
 vec.popcount            int8                        M    6  vpsrlw; vpandq x2; vpshufb x2; vpaddb  | +avx512bitalg: N 1 vpopcntb
 vec.popcount            int16                       M    7  vpsrlw; vpandq x2; vpshufb x2; vpaddb; vpmaddubsw  | +avx512bitalg: N 1 vpopcntw
 vec.popcount            int32                       M    8  vpsrlw; vpandq x2; vpshufb x2; vpaddb; vpmaddubsw; vpmaddwd  | +avx512vpopcntdq: N 1 vpopcntd
 vec.popcount            int64                       M    7  vpsrlw; vpandq x2; vpshufb x2; vpaddb; vpsadbw  | +avx512vpopcntdq: N 1 vpopcntq
-vec.clz                 int8                        M    8  vpsrlw; vpandq x2; vpshufb x2; vpcmpeqb; vpandq; vpaddb
-vec.clz                 int16                       M    9  vextracti64x4; vpmovzxwd x2; vplzcntd x2; vpmovdw x2; vinserti64x4; vpsubw
+vec.clz                 int8                        M    7  vpsrlw; vpandq x2; vpcmpeqb; vpshufb x2; vpaddb {k}
+vec.clz                 int16                       M    7  vpslld x2; vpord x3; vplzcntd x2
 vec.clz                 int32                       N    1  vplzcntd
 vec.clz                 int64                       N    1  vplzcntq
 vec.widen_lo            i8                          N    1  vpmovsxbw

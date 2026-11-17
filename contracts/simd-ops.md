@@ -81,12 +81,11 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 - `vzeroupper`: the rule above with `zmm` state counted as dirty upper parts: the bits above
   127 of `zmm0`–`zmm15` are clean at every call and return that carries no 256- or 512-bit
   value in a register.
-- Backed by code on v4: float and integer arithmetic (not `mul.sat`, `checked_mul`,
-  `div_const`, `popcount`, `clz`), logic, shifts (not 8-bit lanes by a vector), min / max,
-  compares, `fma`, reductions, `splat`, `bitcast`, `split`, `join`, casts, widen / narrow,
-  loads and stores (plain, aligned, masked), and every mask op. The other ops (scans,
-  permute, lookup, compress / expand, gather / scatter, stream stores) are a code generation
-  error in a K-mode function.
+- Backed by code on v4: every op (f16 / bf16 lanes aside). Without VBMI / VBMI2 / BITALG /
+  VPOPCNTDQ, byte and word permutes, lookups, compress / expand and bit counts take sequences of
+  word, doubleword and byte-shuffle instructions. Lane by lane on the home bytes, as on v3:
+  float scans, 64-bit `mul.sat`, `checked_mul` and `div_const`, gathers and scatters of 8- and
+  16-bit lanes, and lookups whose index lanes differ in width from the table's.
 - Test leg `v4`: binaries with AVX-512 code run natively on a CPU with the v4 set, else under
   Intel SDE when the environment variable `STAVE_SDE` names its `sde64` (`$STAVE_SDE -icx --
   program`), else the leg is skipped (a failure when `STAVE_REQUIRE_LEGS` lists `v4`).

@@ -352,7 +352,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 128, recipe: "movx x32; imul x16; cmp x32; cmov x32; mov x16", recipes: &["movx x32; imul x16; cmp x32; cmov x32; mov x16"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 256, recipe: "movx x64; imul x32; cmp x64; cmov x64; mov x32", recipes: &["movx x64; imul x32; cmp x64; cmov x64; mov x32"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vextracti64x4 x2; vpmovsxbw x4; vpmullw x2; vpmovswb x2; vinserti64x4", recipes: &["vextracti64x4 x2; vpmovsxbw x4; vpmullw x2; vpmovswb x2; vinserti64x4"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 8, recipe: "vpsllw x2; vpmulhw; vpandq x2; vpmulhw; vpacksswb; vpshufb", recipes: &["vpsllw x2; vpmulhw; vpandq x2; vpmulhw; vpacksswb; vpshufb"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -363,7 +363,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 96, recipe: "movx x32; imul x16; cmp x16; cmov x16; mov x16", recipes: &["movx x32; imul x16; cmp x16; cmov x16; mov x16"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 192, recipe: "movx x64; imul x32; cmp x32; cmov x32; mov x32", recipes: &["movx x64; imul x32; cmp x32; cmov x32; mov x32"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vextracti64x4 x2; vpmovzxbw x4; vpmullw x2; vpmovuswb x2; vinserti64x4", recipes: &["vextracti64x4 x2; vpmovzxbw x4; vpmullw x2; vpmovuswb x2; vinserti64x4"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 10, recipe: "vpsllw x2; vpmulhuw; vpandq x2; vpmulhuw; vpminuw x2; vpackuswb; vpshufb", recipes: &["vpsllw x2; vpmulhuw; vpandq x2; vpmulhuw; vpminuw x2; vpackuswb; vpshufb"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -374,7 +374,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 64, recipe: "movx x16; imul x8; cmp x16; cmov x16; mov x8", recipes: &["movx x16; imul x8; cmp x16; cmov x16; mov x8"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 128, recipe: "movx x32; imul x16; cmp x32; cmov x32; mov x16", recipes: &["movx x32; imul x16; cmp x32; cmov x32; mov x16"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vextracti64x4 x2; vpmovsxwd x4; vpmulld x2; vpmovsdw x2; vinserti64x4", recipes: &["vextracti64x4 x2; vpmovsxwd x4; vpmulld x2; vpmovsdw x2; vinserti64x4"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 7, recipe: "vpmullw; vpmulhw; vpsraw; vpcmpw; vpsraw; vpxorq; vmovdqu16 {k}", recipes: &["vpmullw; vpmulhw; vpsraw; vpcmpw; vpsraw; vpxorq; vmovdqu16 {k}"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -385,7 +385,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 48, recipe: "movx x16; imul x8; cmp x8; cmov x8; mov x8", recipes: &["movx x16; imul x8; cmp x8; cmov x8; mov x8"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 96, recipe: "movx x32; imul x16; cmp x16; cmov x16; mov x16", recipes: &["movx x32; imul x16; cmp x16; cmov x16; mov x16"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vextracti64x4 x2; vpmovzxwd x4; vpmulld x2; vpmovusdw x2; vinserti64x4", recipes: &["vextracti64x4 x2; vpmovzxwd x4; vpmulld x2; vpmovusdw x2; vinserti64x4"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 4, recipe: "vpmullw; vpmulhuw; vptestmw; vmovdqu16 {k}", recipes: &["vpmullw; vpmulhuw; vptestmw; vmovdqu16 {k}"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -396,7 +396,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 32, recipe: "movx x8; imul x4; cmp x8; cmov x8; mov x4", recipes: &["movx x8; imul x4; cmp x8; cmov x8; mov x4"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 64, recipe: "movx x16; imul x8; cmp x16; cmov x16; mov x8", recipes: &["movx x16; imul x8; cmp x16; cmov x16; mov x8"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vextracti64x4 x2; vpmovsxdq x4; vpmullq x2; vpmovsqd x2; vinserti64x4", recipes: &["vextracti64x4 x2; vpmovsxdq x4; vpmullq x2; vpmovsqd x2; vinserti64x4"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 9, recipe: "vpmuldq; vpsrlq x2; vpmuldq; vpminsq x2; vpmaxsq x2; vpermt2d", recipes: &["vpmuldq; vpsrlq x2; vpmuldq; vpminsq x2; vpmaxsq x2; vpermt2d"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -407,7 +407,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 24, recipe: "movx x8; imul x4; cmp x4; cmov x4; mov x4", recipes: &["movx x8; imul x4; cmp x4; cmov x4; mov x4"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 48, recipe: "movx x16; imul x8; cmp x8; cmov x8; mov x8", recipes: &["movx x16; imul x8; cmp x8; cmov x8; mov x8"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vextracti64x4 x2; vpmovzxdq x4; vpmullq x2; vpmovusqd x2; vinserti64x4", recipes: &["vextracti64x4 x2; vpmovzxdq x4; vpmullq x2; vpmovusqd x2; vinserti64x4"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 7, recipe: "vpmuludq; vpsrlq x2; vpmuludq; vpminuq x2; vpermt2d", recipes: &["vpmuludq; vpsrlq x2; vpmuludq; vpminuq x2; vpermt2d"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -418,7 +418,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 18, recipe: "mov x8; imul x2; jno x2; xor x4; sar x2", recipes: &["mov x8; imul x2; jno x2; xor x4; sar x2"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 36, recipe: "mov x16; imul x4; jno x4; xor x8; sar x4", recipes: &["mov x16; imul x4; jno x4; xor x8; sar x4"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 73, recipe: "vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; imul x8; sar x8; xor x16; cmovo x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4", recipes: &["vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; imul x8; sar x8; xor x16; cmovo x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 32, recipe: "imul x8; sar x8; xor x16", recipes: &["imul x8; sar x8; xor x16"], note: "lane by lane in general registers: no 64-bit high product", unverified: false },
         ],
     },
     Entry {
@@ -429,7 +429,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 12, recipe: "mov x8; mul x2; jnc x2", recipes: &["mov x8; mul x2; jnc x2"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 24, recipe: "mov x16; mul x4; jnc x4", recipes: &["mov x16; mul x4; jnc x4"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 57, recipe: "vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; mul x8; sbb x8; or x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4", recipes: &["vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; mul x8; sbb x8; or x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 8, recipe: "mul x8", recipes: &["mul x8"], note: "lane by lane in general registers: no 64-bit high product", unverified: false },
         ],
     },
     Entry {
@@ -506,7 +506,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 115, recipe: "movx x48; imul x16; cmp x16; jne x16; mov x18; jmp", recipes: &["movx x48; imul x16; cmp x16; jne x16; mov x18; jmp"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 227, recipe: "movx x96; imul x32; cmp x32; jne x32; mov x34; jmp", recipes: &["movx x96; imul x32; cmp x32; jne x32; mov x34; jmp"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 17, recipe: "vextracti64x4 x2; vpmovsxbw x4; vpmullw x2; vpmovswb x2; vinserti64x4; vpaddw x2; vpor; vptestmw; kortestd; setz", recipes: &["vextracti64x4 x2; vpmovsxbw x4; vpmullw x2; vpmovswb x2; vinserti64x4; vpaddw x2; vpor; vptestmw; kortestd; setz"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 14, recipe: "vpsllw x2; vpmulhw; vpandq x2; vpmulhw; vpaddw x2; vporq; vptestmw; vpsllw; vpternlogq; kortestq; setz", recipes: &["vpsllw x2; vpmulhw; vpandq x2; vpmulhw; vpaddw x2; vporq; vptestmw; vpsllw; vpternlogq; kortestq; setz"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -517,7 +517,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 115, recipe: "movx x48; imul x16; cmp x16; jne x16; mov x18; jmp", recipes: &["movx x48; imul x16; cmp x16; jne x16; mov x18; jmp"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 227, recipe: "movx x96; imul x32; cmp x32; jne x32; mov x34; jmp", recipes: &["movx x96; imul x32; cmp x32; jne x32; mov x34; jmp"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 15, recipe: "vextracti64x4 x2; vpmovzxbw x4; vpmullw x2; vpmovwb x2; vinserti64x4; vpor; vptestmw; kortestd; setz", recipes: &["vextracti64x4 x2; vpmovzxbw x4; vpmullw x2; vpmovwb x2; vinserti64x4; vpor; vptestmw; kortestd; setz"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 12, recipe: "vpsllw x2; vpmulhuw; vpandq x2; vpmulhuw; vporq; vptestmw; vpsllw; vpternlogq; kortestq; setz", recipes: &["vpsllw x2; vpmulhuw; vpandq x2; vpmulhuw; vporq; vptestmw; vpsllw; vpternlogq; kortestq; setz"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -528,7 +528,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 59, recipe: "movx x24; imul x8; cmp x8; jne x8; mov x10; jmp", recipes: &["movx x24; imul x8; cmp x8; jne x8; mov x10; jmp"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 115, recipe: "movx x48; imul x16; cmp x16; jne x16; mov x18; jmp", recipes: &["movx x48; imul x16; cmp x16; jne x16; mov x18; jmp"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 6, recipe: "vpmullw; vpmulhw; vpsraw; vpcmpw; kortestd; setz", recipes: &["vpmullw; vpmulhw; vpsraw; vpcmpw; kortestd; setz"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 6, recipe: "vpmullw; vpmulhw; vpsraw; vpcmpw; kortestq; setz", recipes: &["vpmullw; vpmulhw; vpsraw; vpcmpw; kortestq; setz"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -539,7 +539,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 59, recipe: "movx x24; imul x8; cmp x8; jne x8; mov x10; jmp", recipes: &["movx x24; imul x8; cmp x8; jne x8; mov x10; jmp"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 115, recipe: "movx x48; imul x16; cmp x16; jne x16; mov x18; jmp", recipes: &["movx x48; imul x16; cmp x16; jne x16; mov x18; jmp"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 5, recipe: "vpmullw; vpmulhuw; vptestmw; kortestd; setz", recipes: &["vpmullw; vpmulhuw; vptestmw; kortestd; setz"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 5, recipe: "vpmullw; vpmulhuw; vptestmw; kortestq; setz", recipes: &["vpmullw; vpmulhuw; vptestmw; kortestq; setz"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -550,7 +550,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 31, recipe: "movx x12; imul x4; cmp x4; jne x4; mov x6; jmp", recipes: &["movx x12; imul x4; cmp x4; jne x4; mov x6; jmp"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 59, recipe: "movx x24; imul x8; cmp x8; jne x8; mov x10; jmp", recipes: &["movx x24; imul x8; cmp x8; jne x8; mov x10; jmp"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vpmulld; vpmuldq; vpsrlq x3; vpmuldq; vpblendmd; vpsrad; vpcmpd; kortestw; setz", recipes: &["vpmulld; vpmuldq; vpsrlq x3; vpmuldq; vpblendmd; vpsrad; vpcmpd; kortestw; setz"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 10, recipe: "vpmulld; vpmuldq; vpsrlq x2; vpmuldq; vpermt2d; vpsrad; vpcmpd; kortestq; setz", recipes: &["vpmulld; vpmuldq; vpsrlq x2; vpmuldq; vpermt2d; vpsrad; vpcmpd; kortestq; setz"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -561,7 +561,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 31, recipe: "movx x12; imul x4; cmp x4; jne x4; mov x6; jmp", recipes: &["movx x12; imul x4; cmp x4; jne x4; mov x6; jmp"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 59, recipe: "movx x24; imul x8; cmp x8; jne x8; mov x10; jmp", recipes: &["movx x24; imul x8; cmp x8; jne x8; mov x10; jmp"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 10, recipe: "vpmulld; vpmuludq; vpsrlq x3; vpmuludq; vpblendmd; vptestmd; kortestw; setz", recipes: &["vpmulld; vpmuludq; vpsrlq x3; vpmuludq; vpblendmd; vptestmd; kortestw; setz"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 9, recipe: "vpmulld; vpmuludq; vpsrlq x2; vpmuludq; vpermt2d; vptestmd; kortestq; setz", recipes: &["vpmulld; vpmuludq; vpsrlq x2; vpmuludq; vpermt2d; vptestmd; kortestq; setz"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -572,7 +572,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 13, recipe: "mov x8; imul x2; jo x2; jmp", recipes: &["mov x8; imul x2; jo x2; jmp"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 23, recipe: "mov x14; imul x4; jo x4; jmp", recipes: &["mov x14; imul x4; jo x4; jmp"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 47, recipe: "vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; imul x8; seto x8; or x7; xor; vpmullq", recipes: &["vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; imul x8; seto x8; or x7; xor; vpmullq"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 8, recipe: "imul x8", recipes: &["imul x8"], note: "lane by lane in general registers: no 64-bit high product", unverified: false },
         ],
     },
     Entry {
@@ -583,7 +583,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 13, recipe: "mov x8; mul x2; jc x2; jmp", recipes: &["mov x8; mul x2; jc x2; jmp"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 23, recipe: "mov x14; mul x4; jc x4; jmp", recipes: &["mov x14; mul x4; jc x4; jmp"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 47, recipe: "vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; mul x8; seto x8; or x7; xor; vpmullq", recipes: &["vextracti64x4 x2; vextracti128 x4; vmovq x8; vpextrq x8; mul x8; seto x8; or x7; xor; vpmullq"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 8, recipe: "mul x8", recipes: &["mul x8"], note: "lane by lane in general registers: no 64-bit high product", unverified: false },
         ],
     },
     Entry {
@@ -880,7 +880,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 64, recipe: "movx x32; shl x16; mov x16", recipes: &["movx x32; shl x16; mov x16", "movx x32; shl x16; mov x16"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 128, recipe: "movx x64; shl x32; mov x32", recipes: &["movx x64; shl x32; mov x32", "movx x64; shl x32; mov x32"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 6, recipe: "vpshufb; vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq", recipes: &["vpshufb; vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq", "vpshufb; vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 6, recipe: "vpandq; vpsrlw; vpsllvw; vpandnq; vpsllvw; vpternlogq", recipes: &["vpandq; vpsrlw; vpsllvw; vpandnq; vpsllvw; vpternlogq", "vpandq; vpsrlw; vpsllvw; vpandnq; vpsllvw; vpternlogq"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -891,7 +891,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 80, recipe: "movx x32; and x16; shl x16; mov x16", recipes: &["movx x32; and x16; shl x16; mov x16", "movx x32; and x16; shl x16; mov x16"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 160, recipe: "movx x64; and x32; shl x32; mov x32", recipes: &["movx x64; and x32; shl x32; mov x32", "movx x64; and x32; shl x32; mov x32"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 7, recipe: "vpandq; vpshufb; vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq", recipes: &["vpandq; vpshufb; vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq", "vpandq; vpshufb; vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 7, recipe: "vpandq x2; vpsrlw; vpsllvw; vpandnq; vpsllvw; vpternlogq", recipes: &["vpandq x2; vpsrlw; vpsllvw; vpandnq; vpsllvw; vpternlogq", "vpandq x2; vpsrlw; vpsllvw; vpandnq; vpsllvw; vpternlogq"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -902,7 +902,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 64, recipe: "movx x32; shr x16; mov x16", recipes: &["movx x32; shr x16; mov x16"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 128, recipe: "movx x64; shr x32; mov x32", recipes: &["movx x64; shr x32; mov x32"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vextracti64x4 x2; vpmovzxbw x4; vpsrlvw x2; vpmovwb x2; vinserti64x4", recipes: &["vextracti64x4 x2; vpmovzxbw x4; vpsrlvw x2; vpmovwb x2; vinserti64x4"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 6, recipe: "vpandq x2; vpsrlw; vpsrlvw x2; vpternlogq", recipes: &["vpandq x2; vpsrlw; vpsrlvw x2; vpternlogq"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -913,7 +913,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 64, recipe: "movx x32; sar x16; mov x16", recipes: &["movx x32; sar x16; mov x16"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 128, recipe: "movx x64; sar x32; mov x32", recipes: &["movx x64; sar x32; mov x32"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vextracti64x4 x2; vpmovsxbw x2; vpmovzxbw x2; vpsravw x2; vpmovwb x2; vinserti64x4", recipes: &["vextracti64x4 x2; vpmovsxbw x2; vpmovzxbw x2; vpsravw x2; vpmovwb x2; vinserti64x4"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 7, recipe: "vpandq; vpsrlw; vpsllw; vpsraw; vpsravw x2; vpternlogq", recipes: &["vpandq; vpsrlw; vpsllw; vpsraw; vpsravw x2; vpternlogq"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -935,7 +935,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 32, recipe: "movx x8; cqo x8; idiv x8; mov x8", recipes: &["movx x8; cqo x8; idiv x8; mov x8"], note: "a hardware divide per lane", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 64, recipe: "movx x16; cqo x16; idiv x16; mov x16", recipes: &["movx x16; cqo x16; idiv x16; mov x16"], note: "a hardware divide per lane", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 5, recipe: "vpmulhw; vpaddw; vpsraw; vpsrlw; vpaddw", recipes: &["vpmulhw; vpaddw; vpsraw; vpsrlw; vpaddw"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 6, recipe: "vpmulhw; vpaddw; vpsraw; vpsrlw; vpaddw; vpsubw", recipes: &["vpmulhw; vpaddw; vpsraw; vpsrlw; vpaddw; vpsubw"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -946,7 +946,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 16, recipe: "movx x4; xor x4; div x4; mov x4", recipes: &["movx x4; xor x4; div x4; mov x4"], note: "a hardware divide per lane", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 32, recipe: "movx x8; xor x8; div x8; mov x8", recipes: &["movx x8; xor x8; div x8; mov x8"], note: "a hardware divide per lane", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 9, recipe: "vpsrlq; vpmuludq x2; vpsrlq; vpblendmd; vpsubd; vpsrld; vpaddd; vpsrld", recipes: &["vpsrlq; vpmuludq x2; vpsrlq; vpblendmd; vpsubd; vpsrld; vpaddd; vpsrld"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 8, recipe: "vpsrlq; vpmuludq x2; vpermt2d; vpsubd; vpsrld; vpaddd; vpsrld", recipes: &["vpsrlq; vpmuludq x2; vpermt2d; vpsubd; vpsrld; vpaddd; vpsrld"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -957,7 +957,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 16, recipe: "movx x4; cqo x4; idiv x4; mov x4", recipes: &["movx x4; cqo x4; idiv x4; mov x4"], note: "a hardware divide per lane", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 32, recipe: "movx x8; cqo x8; idiv x8; mov x8", recipes: &["movx x8; cqo x8; idiv x8; mov x8"], note: "a hardware divide per lane", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 9, recipe: "vpsrlq; vpmuldq x2; vpsrlq; vpblendmd; vpaddd; vpsrad; vpsrld; vpaddd", recipes: &["vpsrlq; vpmuldq x2; vpsrlq; vpblendmd; vpaddd; vpsrad; vpsrld; vpaddd"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 9, recipe: "vpsrlq; vpmuldq x2; vpermt2d; vpaddd; vpsrad; vpsrld; vpaddd; vpsubd", recipes: &["vpsrlq; vpmuldq x2; vpermt2d; vpaddd; vpsrad; vpsrld; vpaddd; vpsubd"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -968,7 +968,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 64, recipe: "movx x16; xor x16; div x16; mov x16", recipes: &["movx x16; xor x16; div x16; mov x16"], note: "a hardware divide per lane", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 128, recipe: "movx x32; xor x32; div x32; mov x32", recipes: &["movx x32; xor x32; div x32; mov x32"], note: "a hardware divide per lane", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 5, recipe: "vpunpcklbw; vpunpckhbw; vpmulhuw x2; vpackuswb", recipes: &["vpunpcklbw; vpunpckhbw; vpmulhuw x2; vpackuswb"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 6, recipe: "vpsrlw; vpandq; vpmulhuw x2; vpsllw; vpternlogq", recipes: &["vpsrlw; vpandq; vpmulhuw x2; vpsllw; vpternlogq"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -979,7 +979,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 64, recipe: "movx x16; cqo x16; idiv x16; mov x16", recipes: &["movx x16; cqo x16; idiv x16; mov x16"], note: "a hardware divide per lane", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 128, recipe: "movx x32; cqo x32; idiv x32; mov x32", recipes: &["movx x32; cqo x32; idiv x32; mov x32"], note: "a hardware divide per lane", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vpunpcklbw; vpunpckhbw; vpsraw x2; vpmulhw x2; vpsrlw x2; vpaddw x2; vpacksswb", recipes: &["vpunpcklbw; vpunpckhbw; vpsraw x2; vpmulhw x2; vpsrlw x2; vpaddw x2; vpacksswb"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 13, recipe: "vpsraw x2; vpsllw x2; vpmulhw x2; vpsrlw x2; vpaddw x2; vpsubw x2; vpternlogq", recipes: &["vpsraw x2; vpsllw x2; vpmulhw x2; vpsrlw x2; vpaddw x2; vpsubw x2; vpternlogq"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -990,7 +990,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 8, recipe: "mov x4; xor x2; div x2", recipes: &["mov x4; xor x2; div x2"], note: "a hardware divide per lane", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 16, recipe: "mov x8; xor x4; div x4", recipes: &["mov x8; xor x4; div x4"], note: "a hardware divide per lane", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 62, recipe: "vextracti64x4; vextracti128 x2; vmovq x4; vpextrq x4; mul x8; sub x8; shr x16; add x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4", recipes: &["vextracti64x4; vextracti128 x2; vmovq x4; vpextrq x4; mul x8; sub x8; shr x16; add x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 16, recipe: "xor x8; div x8", recipes: &["xor x8; div x8"], note: "lane by lane in general registers: no 64-bit high product", unverified: false },
         ],
     },
     Entry {
@@ -1001,7 +1001,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 8, recipe: "mov x4; cqo x2; idiv x2", recipes: &["mov x4; cqo x2; idiv x2"], note: "a hardware divide per lane", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 16, recipe: "mov x8; cqo x4; idiv x4", recipes: &["mov x8; cqo x4; idiv x4"], note: "a hardware divide per lane", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 62, recipe: "vextracti64x4; vextracti128 x2; vmovq x4; vpextrq x4; imul x8; add x8; sar x8; shr x8; add x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4", recipes: &["vextracti64x4; vextracti128 x2; vmovq x4; vpextrq x4; imul x8; add x8; sar x8; shr x8; add x8; vmovq x4; vpinsrq x4; vinserti128 x2; vinserti64x4"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 16, recipe: "cqo x8; idiv x8", recipes: &["cqo x8; idiv x8"], note: "lane by lane in general registers: no 64-bit high product", unverified: false },
         ],
     },
     Entry {
@@ -1760,7 +1760,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 5, recipe: "packsswb; pmovmskb; and; shl; pshufb", recipes: &["packsswb; pmovmskb; and; shl; pshufb", "packsswb; pmovmskb; and; shl; pshufb", "packsswb; pmovmskb; and; shl; pshufb", "packsswb; pmovmskb; and; shl; pshufb"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 17, recipe: "vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; shl; vpshufb; neg; vmovdqu; vpshufb; vpor; vmovdqu; vpshufb; vinserti128", recipes: &["vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; shl; vpshufb; neg; vmovdqu; vpshufb; vpor; vmovdqu; vpshufb; vinserti128", "vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; shl; vpshufb; neg; vmovdqu; vpshufb; vpor; vmovdqu; vpshufb; vinserti128", "vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; shl; vpshufb; neg; vmovdqu; vpshufb; vpor; vmovdqu; vpshufb; vinserti128", "vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; shl; vpshufb; neg; vmovdqu; vpshufb; vpor; vmovdqu; vpshufb; vinserti128"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 14, recipe: "vextracti64x4; vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; vpmovdw x2; kmovw; popcnt; vmovdqu64; vmovdqu16 x3", recipes: &["vextracti64x4; vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; vpmovdw x2; kmovw; popcnt; vmovdqu64; vmovdqu16 x3", "vextracti64x4; vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; vpmovdw x2; kmovw; popcnt; vmovdqu64; vmovdqu16 x3", "vextracti64x4; vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; vpmovdw x2; kmovw; popcnt; vmovdqu64; vmovdqu16 x3", "vextracti64x4; vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; vpmovdw x2; kmovw; popcnt; vmovdqu64; vmovdqu16 x3"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 10, recipe: "vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; kmovd; shl; popcnt; vpmovdw x2", recipes: &["vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; kmovd; shl; popcnt; vpmovdw x2", "vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; kmovd; shl; popcnt; vpmovdw x2", "vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; kmovd; shl; popcnt; vpmovdw x2", "vpmovzxwd x2; kshiftrd; vpcompressd {z} x2; kmovd; shl; popcnt; vpmovdw x2"], note: "", unverified: false },
             Cell { tier: Tier::V4, feature: Some("avx512vbmi2"), class: Class::N, cost: 1, recipe: "vpcompress* {z}", recipes: &["vpcompressw {z}", "vpcompressw {z}", "vpcompressw {z}", "vpcompressw {z}"], note: "", unverified: false },
         ],
     },
@@ -1772,7 +1772,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 15, recipe: "pmovmskb; shr; movzx; movq x2; pshufb; movq; psrldq; pshufb; movq; popcnt; neg; movdqu; pshufb; por", recipes: &["pmovmskb; shr; movzx; movq x2; pshufb; movq; psrldq; pshufb; movq; popcnt; neg; movdqu; pshufb; por", "pmovmskb; shr; movzx; movq x2; pshufb; movq; psrldq; pshufb; movq; popcnt; neg; movdqu; pshufb; por"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 40, recipe: "vpmovmskb; shr x3; and; popcnt x3; vextracti128; movzx x2; vmovq x8; vpshufb x8; vpsrldq x2; neg x3; vmovdqu x4; vpor x3; vinserti128", recipes: &["vpmovmskb; shr x3; and; popcnt x3; vextracti128; movzx x2; vmovq x8; vpshufb x8; vpsrldq x2; neg x3; vmovdqu x4; vpor x3; vinserti128", "vpmovmskb; shr x3; and; popcnt x3; vextracti128; movzx x2; vmovq x8; vpshufb x8; vpsrldq x2; neg x3; vmovdqu x4; vpor x3; vinserti128"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 35, recipe: "vextracti32x4 x3; vpmovzxbd x4; kshiftrq x3; vpcompressd {z} x4; vpmovdb x4; kmovq; movzx x3; shr x2; popcnt x3; add x2; vmovdqu64; vmovdqu8 x5", recipes: &["vextracti32x4 x3; vpmovzxbd x4; kshiftrq x3; vpcompressd {z} x4; vpmovdb x4; kmovq; movzx x3; shr x2; popcnt x3; add x2; vmovdqu64; vmovdqu8 x5", "vextracti32x4 x3; vpmovzxbd x4; kshiftrq x3; vpcompressd {z} x4; vpmovdb x4; kmovq; movzx x3; shr x2; popcnt x3; add x2; vmovdqu64; vmovdqu8 x5"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 22, recipe: "vpmovzxbd x4; kshiftrq x3; vpcompressd {z} x4; kmovq; shl x3; popcnt x3; vpmovdb x4", recipes: &["vpmovzxbd x4; kshiftrq x3; vpcompressd {z} x4; kmovq; shl x3; popcnt x3; vpmovdb x4", "vpmovzxbd x4; kshiftrq x3; vpcompressd {z} x4; kmovq; shl x3; popcnt x3; vpmovdb x4"], note: "", unverified: false },
             Cell { tier: Tier::V4, feature: Some("avx512vbmi2"), class: Class::N, cost: 1, recipe: "vpcompress* {z}", recipes: &["vpcompressb {z}", "vpcompressb {z}"], note: "", unverified: false },
         ],
     },
@@ -1806,7 +1806,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 5, recipe: "packsswb; pmovmskb; and; shl; pshufb", recipes: &["packsswb; pmovmskb; and; shl; pshufb", "packsswb; pmovmskb; and; shl; pshufb", "packsswb; pmovmskb; and; shl; pshufb", "packsswb; pmovmskb; and; shl; pshufb"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 16, recipe: "vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; vmovdqu; vpshufb; vmovdqu; vpshufb; vpor; shl; vpshufb; vinserti128", recipes: &["vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; vmovdqu; vpshufb; vmovdqu; vpshufb; vpor; shl; vpshufb; vinserti128", "vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; vmovdqu; vpshufb; vmovdqu; vpshufb; vpor; shl; vpshufb; vinserti128", "vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; vmovdqu; vpshufb; vmovdqu; vpshufb; vpor; shl; vpshufb; vinserti128", "vpmovmskb; pext; shr; and; popcnt; vextracti128; shl; vpshufb; vmovdqu; vpshufb; vmovdqu; vpshufb; vpor; shl; vpshufb; vinserti128"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 12, recipe: "vpmovzxwd x2; kshiftrd; kmovw; popcnt; vmovdqu16 x2; vpexpandd {z} x2; vpmovdw x2; vinserti64x4", recipes: &["vpmovzxwd x2; kshiftrd; kmovw; popcnt; vmovdqu16 x2; vpexpandd {z} x2; vpmovdw x2; vinserti64x4", "vpmovzxwd x2; kshiftrd; kmovw; popcnt; vmovdqu16 x2; vpexpandd {z} x2; vpmovdw x2; vinserti64x4", "vpmovzxwd x2; kshiftrd; kmovw; popcnt; vmovdqu16 x2; vpexpandd {z} x2; vpmovdw x2; vinserti64x4", "vpmovzxwd x2; kshiftrd; kmovw; popcnt; vmovdqu16 x2; vpexpandd {z} x2; vpmovdw x2; vinserti64x4"], note: "vpexpandw needs avx512vbmi2: dword expands", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 10, recipe: "vpmovzxwd x2; kshiftrd; vpexpandd {z} x2; kmovd; shl; popcnt; vpmovdw x2", recipes: &["vpmovzxwd x2; kshiftrd; vpexpandd {z} x2; kmovd; shl; popcnt; vpmovdw x2", "vpmovzxwd x2; kshiftrd; vpexpandd {z} x2; kmovd; shl; popcnt; vpmovdw x2", "vpmovzxwd x2; kshiftrd; vpexpandd {z} x2; kmovd; shl; popcnt; vpmovdw x2", "vpmovzxwd x2; kshiftrd; vpexpandd {z} x2; kmovd; shl; popcnt; vpmovdw x2"], note: "vpexpandw needs avx512vbmi2: dword expands", unverified: false },
             Cell { tier: Tier::V4, feature: Some("avx512vbmi2"), class: Class::N, cost: 1, recipe: "vpexpand* {z}", recipes: &["vpexpandw {z}", "vpexpandw {z}", "vpexpandw {z}", "vpexpandw {z}"], note: "", unverified: false },
         ],
     },
@@ -1818,7 +1818,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 10, recipe: "pmovmskb; shr; movzx; popcnt; imul; add; movq x2; punpcklqdq; pshufb", recipes: &["pmovmskb; shr; movzx; popcnt; imul; add; movq x2; punpcklqdq; pshufb", "pmovmskb; shr; movzx; popcnt; imul; add; movq x2; punpcklqdq; pshufb"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 29, recipe: "vpmovmskb; shr x3; and; popcnt x3; vextracti128; movzx x2; imul x2; add x2; vmovq x4; vpunpcklqdq x2; vpshufb x4; vmovdqu x2; vpor; vinserti128", recipes: &["vpmovmskb; shr x3; and; popcnt x3; vextracti128; movzx x2; imul x2; add x2; vmovq x4; vpunpcklqdq x2; vpshufb x4; vmovdqu x2; vpor; vinserti128", "vpmovmskb; shr x3; and; popcnt x3; vextracti128; movzx x2; imul x2; add x2; vmovq x4; vpunpcklqdq x2; vpshufb x4; vmovdqu x2; vpor; vinserti128"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 33, recipe: "vmovdqu8 x4; vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; vpmovdb x4; vinserti32x4 x3; kmovq; movzx x3; shr x2; popcnt x3; add x2", recipes: &["vmovdqu8 x4; vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; vpmovdb x4; vinserti32x4 x3; kmovq; movzx x3; shr x2; popcnt x3; add x2", "vmovdqu8 x4; vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; vpmovdb x4; vinserti32x4 x3; kmovq; movzx x3; shr x2; popcnt x3; add x2"], note: "vpexpandb needs avx512vbmi2: dword expands", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 22, recipe: "vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; kmovq; shl x3; popcnt x3; vpmovdb x4", recipes: &["vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; kmovq; shl x3; popcnt x3; vpmovdb x4", "vpmovzxbd x4; kshiftrq x3; vpexpandd {z} x4; kmovq; shl x3; popcnt x3; vpmovdb x4"], note: "vpexpandb needs avx512vbmi2: dword expands", unverified: false },
             Cell { tier: Tier::V4, feature: Some("avx512vbmi2"), class: Class::N, cost: 1, recipe: "vpexpand* {z}", recipes: &["vpexpandb {z}", "vpexpandb {z}"], note: "", unverified: false },
         ],
     },
@@ -2160,7 +2160,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 8, recipe: "movss x5; addss x3", recipes: &["movss x5; addss x3"], note: "lane by lane in order, the running sum in a register", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 16, recipe: "vmovss x9; vaddss x7", recipes: &["vmovss x9; vaddss x7"], note: "lane by lane in order, the running sum in a register", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 48, recipe: "vextractf32x4 x3; vmovshdup x4; vmovhlps x4; vpermilps x4; vaddss x15; vinsertps x15; vinsertf32x4 x3", recipes: &["vextractf32x4 x3; vmovshdup x4; vmovhlps x4; vpermilps x4; vaddss x15; vinsertps x15; vinsertf32x4 x3"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 32, recipe: "vmovss x17; vaddss x15", recipes: &["vmovss x17; vaddss x15"], note: "lane by lane: each sum adds one lane to the one before", unverified: false },
         ],
     },
     Entry {
@@ -2171,7 +2171,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 4, recipe: "movsd x3; addsd", recipes: &["movsd x3; addsd"], note: "lane by lane in order, the running sum in a register", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 8, recipe: "vmovsd x5; vaddsd x3", recipes: &["vmovsd x5; vaddsd x3"], note: "lane by lane in order, the running sum in a register", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 21, recipe: "vextractf32x4 x3; vunpckhpd x4; vaddsd x7; vunpcklpd x4; vinsertf32x4 x3", recipes: &["vextractf32x4 x3; vunpckhpd x4; vaddsd x7; vunpcklpd x4; vinsertf32x4 x3"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 16, recipe: "vmovsd x9; vaddsd x7", recipes: &["vmovsd x9; vaddsd x7"], note: "lane by lane: each sum adds one lane to the one before", unverified: false },
         ],
     },
     Entry {
@@ -2182,7 +2182,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 8, recipe: "pslldq; padd*; pslldq; padd*; pslldq; padd*; pslldq; padd*", recipes: &["pslldq; paddb; pslldq; paddb; pslldq; paddb; pslldq; paddb", "pslldq; paddb; pslldq; paddb; pslldq; paddb; pslldq; paddb"], note: "log steps of a byte shift and an add", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 12, recipe: "vpslldq; vpadd*; vpslldq; vpadd*; vpslldq; vpadd*; vpslldq; vpadd*; vpsrldq; vpbroadcast*; vinserti128; vpadd*", recipes: &["vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpsrldq; vpbroadcastb; vinserti128; vpaddb", "vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpsrldq; vpbroadcastb; vinserti128; vpaddb"], note: "log steps within each 128-bit half, then the total of the lower half added to the upper", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 15, recipe: "vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpshufb; vshufi64x2 x3; vpaddb x3", recipes: &["vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpshufb; vshufi64x2 x3; vpaddb x3", "vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpslldq; vpaddb; vpshufb; vshufi64x2 x3; vpaddb x3"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 15, recipe: "vpslldq x4; vpaddb x7; vpshufb; valignq x3", recipes: &["vpslldq x4; vpaddb x7; vpshufb; valignq x3", "vpslldq x4; vpaddb x7; vpshufb; valignq x3"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -2193,7 +2193,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 6, recipe: "pslldq; padd*; pslldq; padd*; pslldq; padd*", recipes: &["pslldq; paddw; pslldq; paddw; pslldq; paddw", "pslldq; paddw; pslldq; paddw; pslldq; paddw"], note: "log steps of a byte shift and an add", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 10, recipe: "vpslldq; vpadd*; vpslldq; vpadd*; vpslldq; vpadd*; vpsrldq; vpbroadcast*; vinserti128; vpadd*", recipes: &["vpslldq; vpaddw; vpslldq; vpaddw; vpslldq; vpaddw; vpsrldq; vpbroadcastw; vinserti128; vpaddw", "vpslldq; vpaddw; vpslldq; vpaddw; vpslldq; vpaddw; vpsrldq; vpbroadcastw; vinserti128; vpaddw"], note: "log steps within each 128-bit half, then the total of the lower half added to the upper", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 13, recipe: "vpslldq; vpaddw; vpslldq; vpaddw; vpslldq; vpaddw; vpshufb; vshufi64x2 x3; vpaddw x3", recipes: &["vpslldq; vpaddw; vpslldq; vpaddw; vpslldq; vpaddw; vpshufb; vshufi64x2 x3; vpaddw x3", "vpslldq; vpaddw; vpslldq; vpaddw; vpslldq; vpaddw; vpshufb; vshufi64x2 x3; vpaddw x3"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 13, recipe: "vpslldq x3; vpaddw x6; vpshufb; valignq x3", recipes: &["vpslldq x3; vpaddw x6; vpshufb; valignq x3", "vpslldq x3; vpaddw x6; vpshufb; valignq x3"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -2204,7 +2204,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 4, recipe: "pslldq; padd*; pslldq; padd*", recipes: &["pslldq; paddd; pslldq; paddd", "pslldq; paddd; pslldq; paddd"], note: "log steps of a byte shift and an add", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 8, recipe: "vpslldq; vpadd*; vpslldq; vpadd*; vpsrldq; vpbroadcast*; vinserti128; vpadd*", recipes: &["vpslldq; vpaddd; vpslldq; vpaddd; vpsrldq; vpbroadcastd; vinserti128; vpaddd", "vpslldq; vpaddd; vpslldq; vpaddd; vpsrldq; vpbroadcastd; vinserti128; vpaddd"], note: "log steps within each 128-bit half, then the total of the lower half added to the upper", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vpslldq; vpaddd; vpslldq; vpaddd; vpshufd; vshufi64x2 x3; vpaddd x3", recipes: &["vpslldq; vpaddd; vpslldq; vpaddd; vpshufd; vshufi64x2 x3; vpaddd x3", "vpslldq; vpaddd; vpslldq; vpaddd; vpshufd; vshufi64x2 x3; vpaddd x3"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vpslldq x2; vpaddd x5; vpshufd; valignq x3", recipes: &["vpslldq x2; vpaddd x5; vpshufd; valignq x3", "vpslldq x2; vpaddd x5; vpshufd; valignq x3"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -2215,7 +2215,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::N, cost: 2, recipe: "pslldq; padd*", recipes: &["pslldq; paddq", "pslldq; paddq"], note: "log steps of a byte shift and an add", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 6, recipe: "vpslldq; vpadd*; vpsrldq; vpbroadcast*; vinserti128; vpadd*", recipes: &["vpslldq; vpaddq; vpsrldq; vpbroadcastq; vinserti128; vpaddq", "vpslldq; vpaddq; vpsrldq; vpbroadcastq; vinserti128; vpaddq"], note: "log steps within each 128-bit half, then the total of the lower half added to the upper", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 9, recipe: "vpslldq; vpaddq; vpshufd; vshufi64x2 x3; vpaddq x3", recipes: &["vpslldq; vpaddq; vpshufd; vshufi64x2 x3; vpaddq x3", "vpslldq; vpaddq; vpshufd; vshufi64x2 x3; vpaddq x3"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 9, recipe: "vpslldq; vpaddq x4; vpshufd; valignq x3", recipes: &["vpslldq; vpaddq x4; vpshufd; valignq x3", "vpslldq; vpaddq x4; vpshufd; valignq x3"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -2226,7 +2226,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::N, cost: 1, recipe: "pshufb", recipes: &["pshufb", "pshufb"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 4, recipe: "vpermq; vpshufb x2; vpor", recipes: &["vpermq; vpshufb x2; vpor", "vpermq; vpshufb x2; vpor"], note: "worst case, a lane crosses the 128-bit halves: the operand and its halves swapped are shuffled and or-ed; otherwise one or two instructions", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 11, recipe: "vshufi64x2 x4; vpshufb x4; vpblendmb x3", recipes: &["vshufi64x2 x4; vpshufb x4; vpblendmb x3", "vshufi64x2 x4; vpshufb x4; vpblendmb x3"], note: "vpermb needs avx512vbmi: per-128-bit-lane shuffles and blends", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 5, recipe: "vpermi2w x2; vpshufb x2; vporq", recipes: &["vpermi2w x2; vpshufb x2; vporq", "vpermi2w x2; vpshufb x2; vporq"], note: "vpermb needs avx512vbmi: the word of each byte, then the byte in it", unverified: false },
             Cell { tier: Tier::V4, feature: Some("avx512vbmi"), class: Class::N, cost: 1, recipe: "vpermb", recipes: &["vpermb", "vpermb"], note: "", unverified: false },
         ],
     },
@@ -2238,7 +2238,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::N, cost: 1, recipe: "pshufb", recipes: &["pshufb", "pshufb", "pshufb", "pshufb"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 4, recipe: "vpermq; vpshufb x2; vpor", recipes: &["vpermq; vpshufb x2; vpor", "vpermq; vpshufb x2; vpor", "vpermq; vpshufb x2; vpor", "vpermq; vpshufb x2; vpor"], note: "worst case, a lane crosses the 128-bit halves: the operand and its halves swapped are shuffled and or-ed; otherwise one or two instructions", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 1, recipe: "vpermw", recipes: &["vpermw", "vpermw", "vpermw", "vpermw"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 1, recipe: "vpermi2w", recipes: &["vpermi2w", "vpermi2w", "vpermi2w", "vpermi2w"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -2249,7 +2249,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::N, cost: 1, recipe: "pshufb", recipes: &["pshufb", "pshufb", "pshufb"], note: "a byte shuffle with a constant control", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::N, cost: 1, recipe: "vpermd", recipes: &["vpermd", "vpermd", "vpermd"], note: "one cross-lane instruction", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 1, recipe: "vpermd", recipes: &["vpermd", "vpermd", "vpermd"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 1, recipe: "vpermi2d", recipes: &["vpermi2d", "vpermi2d", "vpermi2d"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -2260,7 +2260,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::N, cost: 1, recipe: "pshufb", recipes: &["pshufb", "pshufb", "pshufb"], note: "a byte shuffle with a constant control", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::N, cost: 1, recipe: "vpermd", recipes: &["vpermd", "vpermd", "vpermd"], note: "one cross-lane instruction, on pairs of dword indices", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 1, recipe: "vpermq", recipes: &["vpermq", "vpermq", "vpermq"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 1, recipe: "vpermi2q", recipes: &["vpermi2q", "vpermi2q", "vpermi2q"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -2271,7 +2271,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::N, cost: 2, recipe: "paddusb; pshufb", recipes: &["paddusb; pshufb", "paddusb; pshufb"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 8, recipe: "vpermq x2; vpxor; vpaddusb x2; vpshufb x2; vpor", recipes: &["vpermq x2; vpxor; vpaddusb x2; vpshufb x2; vpor", "vpermq x2; vpxor; vpaddusb x2; vpshufb x2; vpor"], note: "the table is looked up half by half, the upper half with bit 4 of the indices flipped", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 16, recipe: "vpaddusb; vshufi64x2 x4; vpshufb x4; vpsllw x2; vpmovb2m x2; vpblendmb x3", recipes: &["vpaddusb; vshufi64x2 x4; vpshufb x4; vpsllw x2; vpmovb2m x2; vpblendmb x3", "vpaddusb; vshufi64x2 x4; vpshufb x4; vpsllw x2; vpmovb2m x2; vpblendmb x3"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 16, recipe: "vpaddusb; vshufi64x2 x4; vpshufb x4; vpsllw x2; vpmovb2m x2; vpblendmb x3", recipes: &["vpaddusb; vshufi64x2 x4; vpshufb x4; vpsllw x2; vpmovb2m x2; vpblendmb x3", "vpaddusb; vshufi64x2 x4; vpshufb x4; vpsllw x2; vpmovb2m x2; vpblendmb x3"], note: "", unverified: false },
             Cell { tier: Tier::V4, feature: Some("avx512vbmi"), class: Class::N, cost: 2, recipe: "vpcmpub; vpermb {z}", recipes: &["vpcmpub; vpermb {z}", "vpcmpub; vpermb {z}"], note: "", unverified: false },
         ],
     },
@@ -2283,7 +2283,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 48, recipe: "movx x16; xor x8; cmp x8; jae x8; mov x8", recipes: &["movx x16; xor x8; cmp x8; jae x8; mov x8", "movx x16; xor x8; cmp x8; jae x8; mov x8"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 96, recipe: "movx x32; xor x16; cmp x16; jae x16; mov x16", recipes: &["movx x32; xor x16; cmp x16; jae x16; mov x16", "movx x32; xor x16; cmp x16; jae x16; mov x16"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 2, recipe: "vpcmpu*; vperm* {k}{z}", recipes: &["vpcmpuw; vpermw {k}{z}", "vpcmpuw; vpermw {k}{z}"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 2, recipe: "vpcmpu*; vpermi2* {k}{z}", recipes: &["vpcmpuw; vpermi2w {k}{z}", "vpcmpuw; vpermi2w {k}{z}"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -2294,7 +2294,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 24, recipe: "movx x8; xor x4; cmp x4; jae x4; mov x4", recipes: &["movx x8; xor x4; cmp x4; jae x4; mov x4", "movx x8; xor x4; cmp x4; jae x4; mov x4"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 48, recipe: "movx x16; xor x8; cmp x8; jae x8; mov x8", recipes: &["movx x16; xor x8; cmp x8; jae x8; mov x8", "movx x16; xor x8; cmp x8; jae x8; mov x8"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 2, recipe: "vpcmpu*; vperm* {k}{z}", recipes: &["vpcmpud; vpermd {k}{z}", "vpcmpud; vpermd {k}{z}"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 2, recipe: "vpcmpu*; vpermi2* {k}{z}", recipes: &["vpcmpud; vpermi2d {k}{z}", "vpcmpud; vpermi2d {k}{z}"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -2305,7 +2305,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 12, recipe: "mov x6; xor x2; cmp x2; jae x2", recipes: &["mov x6; xor x2; cmp x2; jae x2", "mov x6; xor x2; cmp x2; jae x2"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 24, recipe: "mov x12; xor x4; cmp x4; jae x4", recipes: &["mov x12; xor x4; cmp x4; jae x4", "mov x12; xor x4; cmp x4; jae x4"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 2, recipe: "vpcmpu*; vperm* {k}{z}", recipes: &["vpcmpuq; vpermq {k}{z}", "vpcmpuq; vpermq {k}{z}"], note: "", unverified: true },
+            Cell { tier: Tier::V4, feature: None, class: Class::N, cost: 2, recipe: "vpcmpu*; vpermi2* {k}{z}", recipes: &["vpcmpuq; vpermi2q {k}{z}", "vpcmpuq; vpermi2q {k}{z}"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -2364,7 +2364,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 8, recipe: "psrlw; pand x2; pshufb x2; pcmpeqb; pand; paddb", recipes: &["psrlw; pand x2; pshufb x2; pcmpeqb; pand; paddb", "psrlw; pand x2; pshufb x2; pcmpeqb; pand; paddb"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 8, recipe: "vpsrlw; vpand x2; vpshufb x2; vpcmpeqb; vpand; vpaddb", recipes: &["vpsrlw; vpand x2; vpshufb x2; vpcmpeqb; vpand; vpaddb", "vpsrlw; vpand x2; vpshufb x2; vpcmpeqb; vpand; vpaddb"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 8, recipe: "vpsrlw; vpandq x2; vpshufb x2; vpcmpeqb; vpandq; vpaddb", recipes: &["vpsrlw; vpandq x2; vpshufb x2; vpcmpeqb; vpandq; vpaddb", "vpsrlw; vpandq x2; vpshufb x2; vpcmpeqb; vpandq; vpaddb"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 7, recipe: "vpsrlw; vpandq x2; vpcmpeqb; vpshufb x2; vpaddb {k}", recipes: &["vpsrlw; vpandq x2; vpcmpeqb; vpshufb x2; vpaddb {k}", "vpsrlw; vpandq x2; vpcmpeqb; vpshufb x2; vpaddb {k}"], note: "", unverified: false },
         ],
     },
     Entry {
@@ -2375,7 +2375,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         cells: &[
             Cell { tier: Tier::V2, feature: None, class: Class::M, cost: 13, recipe: "psrlw; pand x2; pshufb x2; pcmpeqb; pand; paddb; psrlw; pand; pcmpeqw; pand; paddw", recipes: &["psrlw; pand x2; pshufb x2; pcmpeqb; pand; paddb; psrlw; pand; pcmpeqw; pand; paddw", "psrlw; pand x2; pshufb x2; pcmpeqb; pand; paddb; psrlw; pand; pcmpeqw; pand; paddw"], note: "", unverified: false },
             Cell { tier: Tier::V3, feature: None, class: Class::M, cost: 13, recipe: "vpsrlw; vpand x2; vpshufb x2; vpcmpeqb; vpand; vpaddb; vpsrlw; vpand; vpcmpeqw; vpand; vpaddw", recipes: &["vpsrlw; vpand x2; vpshufb x2; vpcmpeqb; vpand; vpaddb; vpsrlw; vpand; vpcmpeqw; vpand; vpaddw", "vpsrlw; vpand x2; vpshufb x2; vpcmpeqb; vpand; vpaddb; vpsrlw; vpand; vpcmpeqw; vpand; vpaddw"], note: "", unverified: false },
-            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 9, recipe: "vextracti64x4; vpmovzxwd x2; vplzcntd x2; vpmovdw x2; vinserti64x4; vpsubw", recipes: &["vextracti64x4; vpmovzxwd x2; vplzcntd x2; vpmovdw x2; vinserti64x4; vpsubw", "vextracti64x4; vpmovzxwd x2; vplzcntd x2; vpmovdw x2; vinserti64x4; vpsubw"], note: "", unverified: false },
+            Cell { tier: Tier::V4, feature: None, class: Class::M, cost: 7, recipe: "vpslld x2; vpord x3; vplzcntd x2", recipes: &["vpslld x2; vpord x3; vplzcntd x2", "vpslld x2; vpord x3; vplzcntd x2"], note: "", unverified: false },
         ],
     },
     Entry {
