@@ -3,6 +3,7 @@
 
 mod cases;
 mod elf;
+mod evex;
 mod props;
 mod random;
 mod simd;

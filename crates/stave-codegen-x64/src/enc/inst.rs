@@ -226,14 +226,20 @@ impl Asm {
     /// ModRM, SIB, and displacement for `reg` and `rm`; `trailing` is the number of immediate
     /// bytes that follow (a RIP-relative displacement counts from the end of the instruction).
     pub(super) fn emit_modrm(&mut self, reg: u8, rm: RmEnc, trailing: u8) {
+        self.emit_modrm_scaled(reg, rm, trailing, 1)
+    }
+
+    /// [`Self::emit_modrm`] where a one-byte displacement counts units of `n` bytes (EVEX
+    /// `disp8 * N`).
+    pub(super) fn emit_modrm_scaled(&mut self, reg: u8, rm: RmEnc, trailing: u8, n: i32) {
         let reg3 = (reg & 7) << 3;
         match rm {
             RmEnc::Reg(r) => self.buf.push(0xc0 | reg3 | (r & 7)),
             RmEnc::Mem(Mem::Sib { base, index, disp }) => {
-                self.emit_sib(reg3, base.map(|r| r.0), index.map(|(i, s)| (i.0, s as u8)), disp)
+                self.emit_sib(reg3, base.map(|r| r.0), index.map(|(i, s)| (i.0, s as u8)), disp, n)
             }
             RmEnc::Vsib { base, index, scale, disp } => {
-                self.emit_sib(reg3, base.map(|r| r.0), Some((index, scale as u8)), disp)
+                self.emit_sib(reg3, base.map(|r| r.0), Some((index, scale as u8)), disp, n)
             }
             RmEnc::Mem(Mem::Rip { target, disp }) => {
                 self.buf.push(reg3 | 5);
@@ -246,8 +252,9 @@ impl Asm {
         }
     }
 
-    fn emit_sib(&mut self, reg3: u8, base: Option<u8>, index: Option<(u8, u8)>, disp: i32) {
+    fn emit_sib(&mut self, reg3: u8, base: Option<u8>, index: Option<(u8, u8)>, disp: i32, n: i32) {
         let d = i64::from(disp);
+        let n = i64::from(n.max(1));
         match base {
             None => {
                 let sib = index.map_or(0x25, |(i, s)| (s << 6) | ((i & 7) << 3) | 5);
@@ -258,7 +265,7 @@ impl Asm {
                 let b3 = bs & 7;
                 let md = if d == 0 && b3 != 5 {
                     0
-                } else if fits_i8(d) {
+                } else if d % n == 0 && fits_i8(d / n) {
                     1
                 } else {
                     2
@@ -273,7 +280,7 @@ impl Asm {
                     self.buf.push((md << 6) | reg3 | b3);
                 }
                 match md {
-                    1 => self.buf.push(disp as i8 as u8),
+                    1 => self.buf.push((d / n) as i8 as u8),
                     2 => self.buf.extend_from_slice(&disp.to_le_bytes()),
                     _ => {}
                 }

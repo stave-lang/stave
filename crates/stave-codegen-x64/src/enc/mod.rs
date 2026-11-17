@@ -1,6 +1,6 @@
 //! x86-64 instruction encoder: general-purpose integer instructions, the SSE2 scalar float subset
-//! a template/greedy debug backend needs, and packed-vector instructions in legacy SSE and VEX
-//! encodings (see [`Asm::sse_bin`], [`Asm::vex_bin`]).
+//! a template/greedy debug backend needs, and packed-vector instructions in legacy SSE, VEX and
+//! EVEX encodings (see [`Asm::sse_bin`], [`Asm::vex_bin`], [`Asm::evex`]).
 //!
 //! [`Asm`] is a byte buffer with labels and fixups. Branches to labels are always `rel32` (so code
 //! size does not depend on label distance and patching is predictable). References to other
@@ -10,6 +10,7 @@
 //! Operand order is Intel: destination first. Method suffixes name the operand kinds:
 //! `r` register, `m` memory, `i` immediate (e.g. [`Asm::alu_mi`]: memory ← memory op imm).
 
+mod evex;
 mod inst;
 mod simd;
 mod simd_ops;
@@ -19,6 +20,7 @@ use std::fmt;
 use stave_obj::{FileId, FuncCode, LineRow, Reloc, RelocKind, SymbolId};
 use stave_target::{Feature, FeatureSet};
 
+pub use evex::{EOp, ERm, EShiftI, EVL, Ev, KBin, KReg, KSize};
 pub use inst::{AluOp, PLogic, Prec, ShiftOp, SseOp, UnaryOp, XRm};
 pub use simd::{VLen, VReg, VRm, VecReg};
 pub use simd_ops::{
