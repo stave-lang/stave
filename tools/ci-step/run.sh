@@ -4,6 +4,8 @@
 #   tools/ci-step/run.sh <step> [args...]
 # Env: STAVE_REQUIRE_LEGS=v2,v3,aarch64 makes a native test leg that cannot run here (CPU feature,
 # qemu-aarch64) fail instead of being skipped; CI sets it, unset skips (tests/support/legs.rs).
+# Leg v4 (AVX-512) runs natively or under the Intel SDE `sde64` that STAVE_SDE names; CI does
+# not list it.
 set -eu
 if [ "$(uname -s)" != Linux ]; then
   echo "run.sh: refusing to run on $(uname -s): steps run on Linux" >&2
