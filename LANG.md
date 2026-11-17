@@ -125,7 +125,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
   - `spawn` and `join` args: captured `&T` needs `T: Sync`, captured `&mut T` or copied `T` needs `Send` (E0802). A `par_for`/`par_for_mut` body runs on many threads at once: captures need `Sync`, no `&mut` captures (E0802). The argument itself must be a closure literal or fn item: not a fn-typed param, a local, or an `if`/`match` choosing one (E0806). `thread.join`, `par_for`, `par_for_mut` are never fn values (E0807).
   - Send/Sync are structural (an ADT is Send/Sync if its fields are) unless the ADT has an `unsafe("..") impl` of that trait: then only its impls count, e.g. `unsafe("..") impl<T: Sync> Sync for G<T> {}` makes `G<Cell<u32>>` not Sync. An impl of `Send`, `Sync`, or any `unsafe("..") trait` must be an `unsafe("..") impl` (E0810).
 - `Flat` (prelude) = no pointer inside, so a value may be copied byte for byte to a thread, the GPU, or a file. Derived per type (per instance for generics), never implemented: any `impl Flat` is E1408. A type is Flat iff no field, enum payload, array / tuple element, or type argument, at any depth, is a reference, view, raw pointer, fn value, `UnsafeCell` (so no `Cell`, atomics, `Mutex`), or type with `Drop` (`vec.Vec`); `str` and slices are not Flat, a generic param only through `T: Flat`. Demand it with a bound `<T: Flat>`: E1407 names the first non-flat component and its path (`a.p`, `[_]`, `Some.0`). Copy does not imply Flat (`&T`, raw pointers).
-- Slice methods of `std.slice` (no import) are SIMD inside: `xs.sum()` (ints trap `Overflow` where a sequential loop would; floats: a fixed 16-lane (f32) / 8-lane (f64) tree, not left-to-right), `min max` (→ `Option`), `find(x)`, `eq(ys)` (floats: `==`), `fill(x)`, `copy_from(src)`, on `[u8]` `find_byte find_any_byte(set)`, on any Copy T `count any all` (pred `fn(T) -> bool`, called on any elements, in any order, any number of times). Planned: `map_into(dst, f)` with `f: fn(f32xn) -> f32xn`, `sort`, `par_sum par_map_into par_sort`. Why: regular code, explicit SIMD stays in std, no auto-vectorization cliffs.
+- Slice methods of `std.slice` (no import) are SIMD inside: `xs.sum()` (ints trap `Overflow` where a sequential loop would; floats: 32 (f32) / 16 (f64) logical lanes, §4 Float semantics), on floats `xs.dot(ys)` (same rule; lengths differ: `Assert`), `min max` (→ `Option`), `find(x)`, `eq(ys)` (floats: `==`), `fill(x)`, `copy_from(src)`, on `[u8]` `find_byte find_any_byte(set)`, on any Copy T `count any all` (pred `fn(T) -> bool`, called on any elements, in any order, any number of times). Planned: `map_into(dst, f)` with `f: fn(f32xn) -> f32xn`, `sort`, `par_sum par_map_into par_sort`. Why: regular code, explicit SIMD stays in std, no auto-vectorization cliffs.
 - Planned (no optimizer yet): release builds treat `&mut T` as noalias and `&T` as read-only unless T contains `std.cell.UnsafeCell` (the only way to mutate through `&`; Cell/Mutex wrap it; no run-time-checked borrow type exists: share mutable structure by index, `Mutex`, or `unsafe` + UnsafeCell). In `unsafe`, never make a `&mut` overlap another live ref, never write behind a live `&` except through UnsafeCell: UB. Why: borrow rules become free optimizer facts.
 - Every build, debug or release, drops a bounds check only with a proof, and both drop the same ones, so a program traps at the same places in both (the compiler re-checks each proof with a separate checker before it removes the check): `for i in 0..xs.len()`, chunk loops, lengths proven equal earlier on every path (`debug.assert(a.len() == b.len(), "..")`, or `if a.len() != b.len() { return ..; }`, then `b[i]` in `for i in 0..a.len()`), and constant offsets from the bound (`xs[i - 1]` in `for i in 1..xs.len()`, `xs[i + 1]` in `for i in 0..xs.len() - 1` or `while i + 1 < xs.len()`, `f32x8.load(xs, i)` and `xs[i + 7]` in `while i + 8 <= xs.len()`). Facts come from `<`/`<=`/`==`/`!=` tests on unsigned values, sub-slices (`&xs[0..n]` has length `n` and proves `n <= xs.len()`), and `+`/`-` of constants (they trap on overflow, so `xs.len() - 1` on an empty slice traps `Overflow`); `+%`, casts, and signed values prove nothing, and a slice assigned after the test is a new slice. Planned: `stave bounds-report` lists the checks kept.
 - Sub-slice: `&xs[a..b]`, `&mut xs[a..=b]` (a range written in the brackets, `usize` ends) on an array or slice is `&[T]` / `&mut [T]` of elements `a` up to `b` (exclusive / inclusive); `xs[a..b]` itself is a `[T]` place (`xs[1..4][0]`, `.len()`), never a value (E0504). Traps `Bounds` unless `a <= b <= len` (`a..=b`: `b < len` and `a <= b + 1`). It borrows the whole operand, like `&xs[i]`: two sub-slices of one array conflict even when disjoint. `Vec`, `String`, `str` take no index: `&v.as_slice()[a..b]`.
@@ -191,6 +191,7 @@ dispatch fn sum(xs: &[f32]) -> f32 { v4 => sum_v4, avx2 => sum_v3, sve => sum_sv
 **Sizeless (SVE).** `f32xn`, `mask32xn`: lane count fixed per run, legal only under `needs(sve)` (E0710). Allowed only in locals, params, and returns: not fields, array elements, globals, closure captures, or sized generic args (E0711–E0716). Loops need no tail clause. Float `reduce_add` on them = E0717: use `acc = v.reduce_add_ordered(acc);`.
 
 **Float semantics.** IEEE, round-nearest-even, no FTZ, no auto-FMA. NaN results are quiet NaN with unspecified sign and payload. A float cast to its own type is a bit copy (a signaling NaN stays signaling). Lane op = scalar op per lane.
+- Float sums follow the logical-lane rule: with L logical lanes (a power of two), element i adds into lane i % L, each lane in index order from `-0.0` (the additive identity), then the L lanes reduce by the `reduce_add` tree. The bits depend only on L and the input, never on the vector width: K vectors of N lanes (KN = L) hold lane kN + j in lane j of vector k, and adding vector k + K/2 into vector k (k < K/2), halving to one vector, then its `reduce_add`, is the L-lane tree. Elements past the end add nothing: pad a tail with `-0.0`, never `0.0` (inactive lanes of a masked load read `0.0`: select `-0.0` into them). Std `sum` and `dot` (each product rounded, never fused) fix L = 32 (f32) / 16 (f64) on every target, dispatch arm, and the GPU: an empty sum is `-0.0`, and every one gives the same bits (a NaN result: the same class, §3).
 
 ## 5. Examples
 
@@ -307,14 +308,22 @@ fn guards() {
 
 ```stave
 // portable 128-bit kernels: no needs, run on every target
-fn sum_base(xs: &[f32]) -> f32 {
-    let mut acc = f32x4.splat(0.0);
-    for v: f32x4 in xs {
-        acc = acc + v;
-    } tail masked (v, m) {
-        acc = acc + m.select(v, f32x4.splat(0.0));
+fn sum_base(xs: &[f32]) -> f32 {            // L = 8 in two f32x4: the bits of sum_v3
+    let z = f32x4.splat(-0.0);
+    let mut a = z;
+    let mut b = z;
+    let mut i: usize = 0;
+    while i + 8 <= xs.len() {
+        a = a + f32x4.load(xs, i);
+        b = b + f32x4.load(xs, i + 4);
+        i = i + 8;
     }
-    return acc.reduce_add();
+    let r = xs.len() - i;                   // 0..7 elements left
+    let ma = mask32x4.first_n((r < 4).select(r, 4));
+    let mb = mask32x4.first_n(r -| 4);
+    a = a + ma.select(f32x4.load_masked(xs, i, ma), z);
+    b = b + mb.select(f32x4.load_masked(xs, i + 4, mb), z);
+    return (a + b).reduce_add();
 }
 
 fn count_eq(xs: &[u8], b: u8) -> usize {
@@ -339,18 +348,19 @@ fn add_wrap(a: &mut [i32], k: i32) {
 
 // x86 256-bit variant + dispatch
 fn sum_v3(xs: &[f32]) -> f32 needs(avx2) {
-    let mut acc = f32x8.splat(0.0);
-    for v: f32x8 in xs { acc = acc + v; } tail masked (v, m) { acc = acc + m.select(v, f32x8.splat(0.0)); }
+    let z = f32x8.splat(-0.0);
+    let mut acc = z;
+    for v: f32x8 in xs { acc = acc + v; } tail masked (v, m) { acc = acc + m.select(v, z); }
     return acc.reduce_add();
 }
 
-fn sum_sve(xs: &[f32]) -> f32 needs(sve) {
-    let mut acc: f32 = 0.0;
+fn sum_sve(xs: &[f32]) -> f32 needs(sve) {  // sequential (L = 1): other bits than sum
+    let mut acc: f32 = -0.0;
     for v: f32xn in xs { acc = v.reduce_add_ordered(acc); }
     return acc;
 }
 
-dispatch fn sum(xs: &[f32]) -> f32 { avx2 => sum_v3, sve => sum_sve, _ => sum_base, }
+dispatch fn sum(xs: &[f32]) -> f32 { avx2 => sum_v3, _ => sum_base, }
 ```
 
 ```stave

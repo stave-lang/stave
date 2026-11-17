@@ -1,5 +1,6 @@
-// The std.slice methods against element-by-element definitions. Float `sum` is the 16-lane
-// (f32) / 8-lane (f64) tree: element i into lane i % L, then the reduction tree. Float `min` /
+// The std.slice methods against element-by-element definitions. Float `sum` is the 32-lane
+// (f32) / 16-lane (f64) rule: element i into lane i % L, lanes from -0.0, then the reduction
+// tree (reduce.stv covers it and `dot` in depth). Float `min` /
 // `max` propagate NaN and order -0.0 below +0.0. Int sums run on values small enough never to
 // overflow (the trapping cases are conformance tests). `eq` is element-wise `==`: on ints the
 // same bits, on floats a NaN is never equal and -0.0 equals +0.0.
@@ -116,7 +117,7 @@ fn case_f32(c: &mut diff.Cases, o: &mut diff.Out, h: diff.Head) {
     o.flag(diff.guards_f32(&cp) && diff.guards_f32(&fl));
     o.sep();
     let n = xs.len();
-    o.f32(diff.tree_f32(diff.lanes_f32(xs, 16, 0.0, 0.0, diff.add_f32), 16, diff.add_f32));
+    o.f32(diff.tree_f32(diff.lanes_f32(xs, 32, -0.0, -0.0, diff.add_f32), 32, diff.add_f32));
     if n == 0 {
         o.flag(false);
         o.flag(false);
@@ -171,7 +172,7 @@ fn case_f64(c: &mut diff.Cases, o: &mut diff.Out, h: diff.Head) {
     o.f64s(fl.get());
     o.flag(diff.guards_f64(&cp) && diff.guards_f64(&fl));
     o.sep();
-    o.f64(diff.tree_f64(diff.lanes_f64(xs, 8, 0.0, 0.0, diff.add_f64), 8, diff.add_f64));
+    o.f64(diff.tree_f64(diff.lanes_f64(xs, 16, -0.0, -0.0, diff.add_f64), 16, diff.add_f64));
     if n == 0 {
         o.flag(false);
         o.flag(false);

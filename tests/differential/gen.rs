@@ -1,7 +1,8 @@
 //! Cases for the differential kernels: every length from 0 to three vectors and one element past
 //! them, at several misalignments from a 64-byte boundary (every one with `STAVE_DIFF_FULL=1`),
 //! then random lengths. Values are edge-biased: each case draws its elements from one palette
-//! (few distinct values, edge values, moderate random values, or raw bits).
+//! (few distinct values, edge values, moderate random values, or raw bits; the float reduction
+//! kernels also all -0.0, cancelling sums, overflowing sums and NaNs).
 //!
 //! The encoding is the one `diff.stv` reads: little endian, u32 case count, then per case u32
 //! kind, len, mis, param and the case's arrays, `len` elements each.
@@ -70,13 +71,14 @@ pub enum Param {
     I32,
 }
 
-/// One case shape a kernel program understands: its arrays and the widest lane count its
-/// kernels use for them.
+/// One case shape a kernel program understands: its arrays, the widest lane count its kernels
+/// use for them, and the palettes its cases draw from.
 #[derive(Clone, Copy, Debug)]
 pub struct Kind {
     pub arrays: &'static [Elem],
     pub lanes: usize,
     pub param: Param,
+    pub palettes: &'static [Palette],
 }
 
 #[derive(Clone, Debug)]
@@ -155,14 +157,36 @@ const U8_EDGES: [u8; 9] = [0, 1, 0x7f, 0x80, 0xff, b'a', b'\n', 0xc0, 0x0f];
 
 /// The value distribution of one case.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Palette {
+pub enum Palette {
     Few,
     Edge,
     Moderate,
     Bits,
+    /// Floats: the first array all -0.0, the others all 1.0 (sums and products of -0.0).
+    NegZero,
+    /// Floats: either sign, magnitudes 2^-20 to 2^21: sums cancel and round, and their bits
+    /// depend on the order of the additions.
+    Cancel,
+    /// Floats: ±MAX or ±MAX/2 at every eighth element of the first array, ±1 elsewhere: whether
+    /// a lane overflows, and whether +inf then meets -inf (NaN), depends on the lane count.
+    Huge,
+    /// Floats: moderate values and one NaN in eight (quiet, signalling, payloads, either sign).
+    Nan,
 }
 
-const PALETTES: [Palette; 4] = [Palette::Few, Palette::Edge, Palette::Moderate, Palette::Bits];
+pub const PALETTES: [Palette; 4] = [Palette::Few, Palette::Edge, Palette::Moderate, Palette::Bits];
+
+/// The palettes of the float reduction kernels.
+pub const REDUCE_PALETTES: [Palette; 8] = [
+    Palette::Few,
+    Palette::Edge,
+    Palette::Moderate,
+    Palette::Bits,
+    Palette::NegZero,
+    Palette::Cancel,
+    Palette::Huge,
+    Palette::Nan,
+];
 
 /// A finite f32 of moderate size, so sums round but rarely overflow.
 fn moderate_f32(r: &mut Rng) -> f32 {
@@ -179,8 +203,22 @@ fn moderate_f64(r: &mut Rng) -> f64 {
     s * m * 2f64.powi(e)
 }
 
-fn f32_bits(r: &mut Rng, p: Palette, param: u32) -> u32 {
+/// `at`: (array, element) index.
+fn f32_bits(r: &mut Rng, p: Palette, param: u32, at: (usize, usize)) -> u32 {
     match p {
+        Palette::NegZero if at.0 == 0 => 0x8000_0000,
+        Palette::NegZero => 0x3f80_0000,
+        Palette::Cancel => {
+            let m = (r.below(1 << 24) as f32) / (1u32 << 23) as f32;
+            let s = if r.below(2) == 0 { 1.0 } else { -1.0 };
+            (s * m * 2f32.powi(r.pick(&[-20, -1, 0, 1, 20]))).to_bits()
+        }
+        Palette::Huge if at.0 == 0 && at.1.is_multiple_of(8) => {
+            r.pick(&[0x7f7f_ffff, 0xff7f_ffff, 0x7eff_ffff, 0xfeff_ffff])
+        }
+        Palette::Huge => r.pick(&[0x3f80_0000, 0xbf80_0000]),
+        Palette::Nan if r.below(8) == 0 => r.pick(&[0x7fc0_0000, 0xffc0_0001, 0x7f80_0001, 0x7fc1_2345]),
+        Palette::Nan => moderate_f32(r).to_bits(),
         Palette::Few => r.pick(&[0x3f80_0000, 0xbf80_0000, 0x3f00_0000, 0, 0x8000_0000, param]),
         Palette::Edge if r.below(2) == 0 => r.pick(&F32_EDGES),
         Palette::Edge | Palette::Moderate => {
@@ -194,8 +232,29 @@ fn f32_bits(r: &mut Rng, p: Palette, param: u32) -> u32 {
     }
 }
 
-fn f64_bits(r: &mut Rng, p: Palette, param: u64) -> u64 {
+fn f64_bits(r: &mut Rng, p: Palette, param: u64, at: (usize, usize)) -> u64 {
     match p {
+        Palette::NegZero if at.0 == 0 => 0x8000_0000_0000_0000,
+        Palette::NegZero => 0x3ff0_0000_0000_0000,
+        Palette::Cancel => {
+            let m = (r.below(1 << 53) as f64) / (1u64 << 52) as f64;
+            let s = if r.below(2) == 0 { 1.0 } else { -1.0 };
+            (s * m * 2f64.powi(r.pick(&[-20, -1, 0, 1, 20]))).to_bits()
+        }
+        Palette::Huge if at.0 == 0 && at.1.is_multiple_of(8) => r.pick(&[
+            0x7fef_ffff_ffff_ffff,
+            0xffef_ffff_ffff_ffff,
+            0x7fdf_ffff_ffff_ffff,
+            0xffdf_ffff_ffff_ffff,
+        ]),
+        Palette::Huge => r.pick(&[0x3ff0_0000_0000_0000, 0xbff0_0000_0000_0000]),
+        Palette::Nan if r.below(8) == 0 => r.pick(&[
+            0x7ff8_0000_0000_0000,
+            0xfff8_0000_0000_0001,
+            0x7ff0_0000_0000_0001,
+            0x7ff8_0012_3450_0000,
+        ]),
+        Palette::Nan => moderate_f64(r).to_bits(),
         Palette::Few => {
             r.pick(&[0x3ff0_0000_0000_0000, 0xbff0_0000_0000_0000, 0, 0x8000_0000_0000_0000, param])
         }
@@ -215,8 +274,8 @@ fn i32_value(r: &mut Rng, p: Palette, param: u32) -> i32 {
     match p {
         Palette::Few => r.pick(&[-2, -1, 0, 1, 2, param as i32]),
         Palette::Edge if r.below(2) == 0 => r.pick(&I32_EDGES),
-        Palette::Edge | Palette::Moderate => r.below(2001) as i32 - 1000,
         Palette::Bits => r.next() as i32,
+        _ => r.below(2001) as i32 - 1000,
     }
 }
 
@@ -224,14 +283,14 @@ fn u8_value(r: &mut Rng, p: Palette, param: u32) -> u8 {
     match p {
         Palette::Few => r.pick(&[param as u8, param as u8 ^ 1, 0]),
         Palette::Edge if r.below(2) == 0 => r.pick(&U8_EDGES),
-        Palette::Edge | Palette::Moderate => {
+        Palette::Bits => r.next() as u8,
+        _ => {
             if r.below(16) == 0 {
                 param as u8
             } else {
                 b'a' + r.below(26) as u8
             }
         }
-        Palette::Bits => r.next() as u8,
     }
 }
 
@@ -298,13 +357,15 @@ fn param(r: &mut Rng, p: Param) -> u32 {
     }
 }
 
-fn array(r: &mut Rng, e: Elem, p: Palette, len: usize, prm: u32) -> Vec<u8> {
+fn array(r: &mut Rng, e: Elem, p: Palette, len: usize, prm: u32, idx: usize) -> Vec<u8> {
     let mut v = Vec::with_capacity(len * e.size());
     let prm64 = f64::from(f32::from_bits(prm)).to_bits();
     match e {
         Elem::Utf8 => return utf8(r, len),
-        Elem::F32 => (0..len).for_each(|_| v.extend_from_slice(&f32_bits(r, p, prm).to_le_bytes())),
-        Elem::F64 => (0..len).for_each(|_| v.extend_from_slice(&f64_bits(r, p, prm64).to_le_bytes())),
+        Elem::F32 => (0..len).for_each(|i| v.extend_from_slice(&f32_bits(r, p, prm, (idx, i)).to_le_bytes())),
+        Elem::F64 => {
+            (0..len).for_each(|i| v.extend_from_slice(&f64_bits(r, p, prm64, (idx, i)).to_le_bytes()))
+        }
         Elem::I32 => (0..len).for_each(|_| v.extend_from_slice(&i32_value(r, p, prm).to_le_bytes())),
         Elem::U8 => (0..len).for_each(|_| v.push(u8_value(r, p, prm))),
     }
@@ -313,8 +374,8 @@ fn array(r: &mut Rng, e: Elem, p: Palette, len: usize, prm: u32) -> Vec<u8> {
 
 fn case(r: &mut Rng, kind: u32, k: &'static Kind, len: usize, mis: usize) -> Case {
     let prm = param(r, k.param);
-    let pal = r.pick(&PALETTES);
-    let arrays = k.arrays.iter().map(|&e| array(r, e, pal, len, prm)).collect();
+    let pal = r.pick(k.palettes);
+    let arrays = k.arrays.iter().enumerate().map(|(i, &e)| array(r, e, pal, len, prm, i)).collect();
     Case { kind, len, mis, param: prm, elems: k.arrays, arrays }
 }
 

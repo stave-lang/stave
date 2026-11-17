@@ -142,8 +142,31 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
   `scan_add_wrap` (wrapping, as `+%`). `reduce_add_ordered` is float-only: a wrapping integer sum
   does not depend on the order (`init +% v.reduce_add_wrap()`).
   `v.reduce_add_ordered(init)` is strictly sequential (`init + v[0] + v[1] + …`). Threading the
-  accumulator through a loop makes a whole-slice sum independent of chunk boundaries, and so of VL. On sizeless vectors, float
-  `reduce_add`/`reduce_mul` are E0717.
+  accumulator through a loop makes a whole-slice sum independent of chunk boundaries, and so of
+  VL. On sizeless vectors, float `reduce_add` is E0717.
+- **Logical-lane rule** (whole-slice float sums; normative for std and every backend). A sum of
+  terms t_0 .. t_(n-1) over L logical lanes (L a power of two) is:
+  1. lane l = `((-0.0 + t_l) + t_(l+L)) + …`, every i < n with i % L == l, in increasing i;
+  2. while more than one lane is left: lane j = lane j + lane (j + L/2) for j < L/2, L halves
+     (the `reduce_add` tree on L lanes).
+
+  The bits depend only on L and the terms. Composition: K vectors of N lanes (KN = L) hold
+  logical lane kN + j in lane j of vector k; step 2 on them is vector k + vector (k + K/2),
+  halving K, then `reduce_add` of the last vector, so 128-, 256- and 512-bit loops, a scalar
+  loop with L accumulators, and a GPU warp (L = 32: lane l of the warp is logical lane l, and
+  the warp reduce of gpu-ops.md is the 32-lane tree; L < 32: lanes l ≥ L hold `-0.0`) give the
+  same bits. `-0.0` is the additive identity (`x + -0.0` is x bit for bit for every non-NaN x,
+  `+0.0` included), so a lane with no term stays `-0.0`, an empty sum is `-0.0`, and a tail
+  pads its missing terms with `-0.0`: never `+0.0`, which turns a `-0.0` lane into `+0.0`
+  (inactive lanes of a masked load read `+0.0`: select `-0.0` into them, or add only active
+  lanes). No backend may reassociate or contract; it may skip only additions of `-0.0`. A NaN
+  result is NaN on every target (which inputs give one is fixed
+  by L); its sign and payload are unspecified.
+  std: `xs.sum()` on `[f32]` / `[f64]` has terms t_i = x_i, and `xs.dot(ys)` has t_i = the
+  rounded product x_i * y_i (never fused); both use L = 32 for f32 and L = 16 for f64 (1024 bits)
+  on every target, dispatch arm (128-bit `_` and NEON, `avx2`, `v4`) and the GPU. A program
+  that sums one slice with loops of different L gets different bits; one L per sum is the
+  portable form.
 - Integer vector arithmetic needs a mode (`+%`, `+|`, `checked_add`). Plain `+ - *` is E0604.
 - Shifts: per-lane amounts ≥ bits trap (`<<`, `>>`) or are masked (`<<%`), as for scalars.
   A constant out-of-range amount is E0205.

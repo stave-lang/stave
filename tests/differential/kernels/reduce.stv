@@ -1,0 +1,236 @@
+// Float sums and dot products under the logical-lane rule (LANG.md §4 "Float reductions"):
+// L lanes (32 for f32, 16 for f64, as std's `sum` and `dot`), lane l starts at -0.0 and adds
+// element i (dot: the rounded product a[i] * b[i]) for every i with i % L == l, in order; then
+// lane j adds lane j + w for w = L/2, L/4, .., 1. The references below do exactly that, one
+// element at a time. Each case prints std's `sum` / `dot`, then the 128-bit kernels (the L lanes
+// as eight f32x4 or f64x2; a partial last block is a masked load with -0.0 selected into the
+// lanes past the end), ` =`, then the reference twice. Std picks its loop by length (and through
+// `dispatch` by CPU), so lengths go up to past six times L; reduce_disp.stv runs the same with
+// 256- and 512-bit kernels and every std arm.
+import diff;
+
+pub fn sum_f32_ref(xs: &[f32]) -> f32 {
+    let mut lane: [f32; 32] = [-0.0; 32];
+    for i in 0..xs.len() { lane[i % 32] = lane[i % 32] + xs[i]; }
+    let mut w: usize = 16;
+    while w > 0 {
+        for j in 0..w { lane[j] = lane[j] + lane[j + w]; }
+        w = w / 2;
+    }
+    return lane[0];
+}
+
+pub fn dot_f32_ref(a: &[f32], b: &[f32]) -> f32 {
+    let mut lane: [f32; 32] = [-0.0; 32];
+    for i in 0..a.len() {
+        let p = a[i] * b[i];
+        lane[i % 32] = lane[i % 32] + p;
+    }
+    let mut w: usize = 16;
+    while w > 0 {
+        for j in 0..w { lane[j] = lane[j] + lane[j + w]; }
+        w = w / 2;
+    }
+    return lane[0];
+}
+
+pub fn sum_f64_ref(xs: &[f64]) -> f64 {
+    let mut lane: [f64; 16] = [-0.0; 16];
+    for i in 0..xs.len() { lane[i % 16] = lane[i % 16] + xs[i]; }
+    let mut w: usize = 8;
+    while w > 0 {
+        for j in 0..w { lane[j] = lane[j] + lane[j + w]; }
+        w = w / 2;
+    }
+    return lane[0];
+}
+
+pub fn dot_f64_ref(a: &[f64], b: &[f64]) -> f64 {
+    let mut lane: [f64; 16] = [-0.0; 16];
+    for i in 0..a.len() {
+        let p = a[i] * b[i];
+        lane[i % 16] = lane[i % 16] + p;
+    }
+    let mut w: usize = 8;
+    while w > 0 {
+        for j in 0..w { lane[j] = lane[j] + lane[j + w]; }
+        w = w / 2;
+    }
+    return lane[0];
+}
+
+// Lanes 4k .. 4k + 3 of the block at xs[i..]: the elements before n, -0.0 past it.
+fn part_f32x4(xs: &[f32], i: usize, k: usize) -> f32x4 {
+    let left = xs.len() -| (i + 4 * k);
+    let m = mask32x4.first_n((left < 4).select(left, 4));
+    return m.select(f32x4.load_masked(xs, i + 4 * k, m), f32x4.splat(-0.0));
+}
+
+fn part_dot_f32x4(a: &[f32], b: &[f32], i: usize, k: usize) -> f32x4 {
+    let left = a.len() -| (i + 4 * k);
+    let m = mask32x4.first_n((left < 4).select(left, 4));
+    let j = i + 4 * k;
+    return m.select(f32x4.load_masked(a, j, m) * f32x4.load_masked(b, j, m), f32x4.splat(-0.0));
+}
+
+fn part_f64x2(xs: &[f64], i: usize, k: usize) -> f64x2 {
+    let left = xs.len() -| (i + 2 * k);
+    let m = mask64x2.first_n((left < 2).select(left, 2));
+    return m.select(f64x2.load_masked(xs, i + 2 * k, m), f64x2.splat(-0.0));
+}
+
+fn part_dot_f64x2(a: &[f64], b: &[f64], i: usize, k: usize) -> f64x2 {
+    let left = a.len() -| (i + 2 * k);
+    let m = mask64x2.first_n((left < 2).select(left, 2));
+    let j = i + 2 * k;
+    return m.select(f64x2.load_masked(a, j, m) * f64x2.load_masked(b, j, m), f64x2.splat(-0.0));
+}
+
+pub fn sum_f32x4(xs: &[f32]) -> f32 {
+    let z = f32x4.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut a4 = z;
+    let mut a5 = z;
+    let mut a6 = z;
+    let mut a7 = z;
+    let mut i: usize = 0;
+    while i < xs.len() {
+        a0 = a0 + part_f32x4(xs, i, 0);
+        a1 = a1 + part_f32x4(xs, i, 1);
+        a2 = a2 + part_f32x4(xs, i, 2);
+        a3 = a3 + part_f32x4(xs, i, 3);
+        a4 = a4 + part_f32x4(xs, i, 4);
+        a5 = a5 + part_f32x4(xs, i, 5);
+        a6 = a6 + part_f32x4(xs, i, 6);
+        a7 = a7 + part_f32x4(xs, i, 7);
+        i = i + 32;
+    }
+    return (((a0 + a4) + (a2 + a6)) + ((a1 + a5) + (a3 + a7))).reduce_add();
+}
+
+pub fn dot_f32x4(a: &[f32], b: &[f32]) -> f32 {
+    let z = f32x4.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut a4 = z;
+    let mut a5 = z;
+    let mut a6 = z;
+    let mut a7 = z;
+    let mut i: usize = 0;
+    while i < a.len() {
+        a0 = a0 + part_dot_f32x4(a, b, i, 0);
+        a1 = a1 + part_dot_f32x4(a, b, i, 1);
+        a2 = a2 + part_dot_f32x4(a, b, i, 2);
+        a3 = a3 + part_dot_f32x4(a, b, i, 3);
+        a4 = a4 + part_dot_f32x4(a, b, i, 4);
+        a5 = a5 + part_dot_f32x4(a, b, i, 5);
+        a6 = a6 + part_dot_f32x4(a, b, i, 6);
+        a7 = a7 + part_dot_f32x4(a, b, i, 7);
+        i = i + 32;
+    }
+    return (((a0 + a4) + (a2 + a6)) + ((a1 + a5) + (a3 + a7))).reduce_add();
+}
+
+pub fn sum_f64x2(xs: &[f64]) -> f64 {
+    let z = f64x2.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut a4 = z;
+    let mut a5 = z;
+    let mut a6 = z;
+    let mut a7 = z;
+    let mut i: usize = 0;
+    while i < xs.len() {
+        a0 = a0 + part_f64x2(xs, i, 0);
+        a1 = a1 + part_f64x2(xs, i, 1);
+        a2 = a2 + part_f64x2(xs, i, 2);
+        a3 = a3 + part_f64x2(xs, i, 3);
+        a4 = a4 + part_f64x2(xs, i, 4);
+        a5 = a5 + part_f64x2(xs, i, 5);
+        a6 = a6 + part_f64x2(xs, i, 6);
+        a7 = a7 + part_f64x2(xs, i, 7);
+        i = i + 16;
+    }
+    return (((a0 + a4) + (a2 + a6)) + ((a1 + a5) + (a3 + a7))).reduce_add();
+}
+
+pub fn dot_f64x2(a: &[f64], b: &[f64]) -> f64 {
+    let z = f64x2.splat(-0.0);
+    let mut a0 = z;
+    let mut a1 = z;
+    let mut a2 = z;
+    let mut a3 = z;
+    let mut a4 = z;
+    let mut a5 = z;
+    let mut a6 = z;
+    let mut a7 = z;
+    let mut i: usize = 0;
+    while i < a.len() {
+        a0 = a0 + part_dot_f64x2(a, b, i, 0);
+        a1 = a1 + part_dot_f64x2(a, b, i, 1);
+        a2 = a2 + part_dot_f64x2(a, b, i, 2);
+        a3 = a3 + part_dot_f64x2(a, b, i, 3);
+        a4 = a4 + part_dot_f64x2(a, b, i, 4);
+        a5 = a5 + part_dot_f64x2(a, b, i, 5);
+        a6 = a6 + part_dot_f64x2(a, b, i, 6);
+        a7 = a7 + part_dot_f64x2(a, b, i, 7);
+        i = i + 16;
+    }
+    return (((a0 + a4) + (a2 + a6)) + ((a1 + a5) + (a3 + a7))).reduce_add();
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        if h.kind == 0 {
+            let b = c.f32s(h);
+            let xs = b.get();
+            o.f32(xs.sum());
+            o.f32(sum_f32x4(xs));
+            o.sep();
+            let r = sum_f32_ref(xs);
+            o.f32(r);
+            o.f32(r);
+        } else if h.kind == 1 {
+            let b = c.f64s(h);
+            let xs = b.get();
+            o.f64(xs.sum());
+            o.f64(sum_f64x2(xs));
+            o.sep();
+            let r = sum_f64_ref(xs);
+            o.f64(r);
+            o.f64(r);
+        } else if h.kind == 2 {
+            let ba = c.f32s(h);
+            let bb = c.f32s(h);
+            o.f32(ba.get().dot(bb.get()));
+            o.f32(dot_f32x4(ba.get(), bb.get()));
+            o.sep();
+            let r = dot_f32_ref(ba.get(), bb.get());
+            o.f32(r);
+            o.f32(r);
+        } else {
+            let ba = c.f64s(h);
+            let bb = c.f64s(h);
+            o.f64(ba.get().dot(bb.get()));
+            o.f64(dot_f64x2(ba.get(), bb.get()));
+            o.sep();
+            let r = dot_f64_ref(ba.get(), bb.get());
+            o.f64(r);
+            o.f64(r);
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

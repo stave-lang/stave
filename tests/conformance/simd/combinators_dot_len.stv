@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// std.slice `dot` of slices of different lengths panics `Assert`.
+// crates/stave-driver/tests/interp_vs_native.rs: exit 101, combinators_dot_len.stderr.
+import std.io;
+
+fn main() -> i32 {
+    let a: [f32; 5] = [1.0, 2.0, 3.0, 4.0, 5.0];
+    let s = (&a[0..4]).dot(&a[1..5]);
+    io.print(f"{s}\n");
+    let t = (&a[0..5]).dot(&a[0..4]);
+    io.print(f"{t}\n");
+    return 0;
+}
