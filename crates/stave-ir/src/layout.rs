@@ -107,10 +107,44 @@ fn record(
 }
 
 impl Layouts {
+    /// Every type's layout. Components are laid out before the types holding them, in a
+    /// post-order walk with an explicit stack: a type nested [`MAX_TYPE_DEPTH`] levels deep
+    /// needs no deeper native stack than a flat one.
     pub fn compute(types: &TypeTable) -> Layouts {
         let mut st = vec![St::New; types.len()];
+        // (type, depth, components pushed)
+        let mut stack: Vec<(TypeId, usize, bool)> = Vec::new();
+        let mut parts: Vec<TypeId> = Vec::new();
         for i in 0..types.len() {
-            let _ = Self::get(types, &mut st, TypeId(i as u32), 0);
+            stack.push((TypeId(i as u32), 0, false));
+            while let Some(&(t, depth, expanded)) = stack.last() {
+                if !expanded {
+                    if !matches!(st.get(t.index()), Some(St::New)) {
+                        stack.pop();
+                        continue;
+                    }
+                    if depth > MAX_TYPE_DEPTH {
+                        // left `New`: the type is laid out on its own; the holder is too deep
+                        stack.pop();
+                        continue;
+                    }
+                    // on the stack: a component that is still `Busy` is a type containing itself
+                    st[t.index()] = St::Busy;
+                    if let Some(top) = stack.last_mut() {
+                        top.2 = true;
+                    }
+                    components(types, t, &mut parts);
+                    for &c in parts.iter().rev() {
+                        if matches!(st.get(c.index()), Some(St::New)) {
+                            stack.push((c, depth + 1, false));
+                        }
+                    }
+                    continue;
+                }
+                stack.pop();
+                let r = Self::calc(types, &mut st, t, depth + 1);
+                st[t.index()] = St::Done(r);
+            }
         }
         Layouts {
             v: st
@@ -229,7 +263,71 @@ impl Layouts {
     }
 }
 
+/// The types whose layouts the layout of `t` is made of, into `out` (cleared first).
+fn components(types: &TypeTable, t: TypeId, out: &mut Vec<TypeId>) {
+    out.clear();
+    match types.key(t) {
+        Some(TypeKey::Array { elem, .. }) => out.push(*elem),
+        Some(TypeKey::Tuple(ts)) => out.extend(ts.iter().copied()),
+        Some(TypeKey::Adt { .. }) => {
+            if let Some(shape) = types.shape(t) {
+                out.extend(shape.variants.iter().flatten().copied());
+            }
+        }
+        Some(TypeKey::Vec { lane, .. }) => out.push(*lane),
+        _ => {}
+    }
+}
+
 /// True if a pointer to `t` is fat (`t` is a slice or `str`).
 pub fn is_unsized_pointee(types: &TypeTable, t: TypeId) -> bool {
     matches!(types.key(t), Some(TypeKey::Str | TypeKey::Slice { .. }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tuple chain `n` deep whose outermost type has the smallest id, so no order of the table
+    /// lays the components out first.
+    fn chain(n: u32) -> TypeTable {
+        let mut types = TypeTable::new();
+        for k in 0..n {
+            types.intern(TypeKey::Tuple(vec![TypeId(k + 1)]));
+        }
+        types.intern(TypeKey::Int { signed: true, bits: IntBits::B32 });
+        types
+    }
+
+    /// Nesting at the depth limit is laid out on a small native stack.
+    #[test]
+    fn deep_nesting_needs_no_deep_stack() {
+        let n = MAX_TYPE_DEPTH as u32;
+        let types = chain(n);
+        let l = std::thread::Builder::new()
+            .stack_size(128 << 10)
+            .spawn(move || Layouts::compute(&types))
+            .unwrap()
+            .join()
+            .unwrap();
+        for k in 0..=n {
+            assert_eq!(l.size_of(TypeId(k)), Some(4), "type {k}");
+        }
+        // one level more: every holder is too deep, the innermost type is laid out
+        let l = Layouts::compute(&chain(n + 1));
+        assert_eq!(l.get_layout(TypeId(0)), Err(LayoutError::TooDeep));
+        assert_eq!(l.get_layout(TypeId(n)), Err(LayoutError::TooDeep));
+        assert_eq!(l.size_of(TypeId(n + 1)), Some(4));
+    }
+
+    /// A type that contains itself has no layout.
+    #[test]
+    fn self_containing_type_is_infinite() {
+        let mut types = TypeTable::new();
+        types.intern(TypeKey::Tuple(vec![TypeId(1)]));
+        types.intern(TypeKey::Tuple(vec![TypeId(0)]));
+        let l = Layouts::compute(&types);
+        assert_eq!(l.get_layout(TypeId(0)), Err(LayoutError::Infinite));
+        assert_eq!(l.get_layout(TypeId(1)), Err(LayoutError::Infinite));
+    }
 }

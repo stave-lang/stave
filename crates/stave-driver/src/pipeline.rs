@@ -347,7 +347,15 @@ pub fn run(root: &Path, lib: &Library, opts: &Options) -> Result<Output, Pipelin
 }
 
 /// Runs the pipeline on `pool` (reused across runs by `stave test`).
+///
+/// Called from a worker of another pool, it waits on a plain thread: a worker waiting in
+/// `install` runs its own pool's other jobs on its stack meanwhile (rayon's cross-pool wait), so
+/// runs started from the items of a `par_iter` would nest on one stack without bound.
 pub fn run_on(pool: &rayon::ThreadPool, root: &Path, lib: &Library, opts: &Options) -> Output {
+    if rayon::current_thread_index().is_some() && pool.current_thread_index().is_none() {
+        return std::thread::scope(|s| s.spawn(|| pool.install(|| run_inner(root, lib, opts))).join())
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
     pool.install(|| run_inner(root, lib, opts))
 }
 
@@ -559,6 +567,37 @@ fn unchecked_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs started from the items of a `par_iter` run one at a time on each caller's stack: a
+    /// caller waiting for its run does not take up the next item.
+    #[test]
+    fn parallel_runs_do_not_nest() {
+        use std::cell::Cell;
+        thread_local! {
+            static DEPTH: Cell<u32> = const { Cell::new(0) };
+        }
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/conformance/syntax/rec_fn_check.stv");
+        let lib = Library::in_dir(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+        let opts = Options::new(Goal::Parse).threads(Some(1));
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let most = pool.install(|| {
+            (0..16u32)
+                .into_par_iter()
+                .map(|_| {
+                    let d = DEPTH.with(|c| {
+                        c.set(c.get() + 1);
+                        c.get()
+                    });
+                    let out = run(&root, &lib, &opts).unwrap();
+                    assert!(!out.has_errors());
+                    DEPTH.with(|c| c.set(c.get() - 1));
+                    d
+                })
+                .max()
+        });
+        assert_eq!(most, Some(1));
+    }
 
     /// An unchecked body fails the run as unsupported in `borrowck`; a fully checked program
     /// does not.

@@ -156,6 +156,26 @@ fn data_files(p: &Path) -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
+/// The interpreter lays out, loads, and stores a value nested hundreds of levels deep (the
+/// `W256<Loud>` of `drop_deep_type`) on a small native stack.
+#[test]
+fn deep_values_need_no_deep_stack() {
+    let p = repo().join("tests/conformance/run/drop_deep_type.stv");
+    let out = lowered(&p, false);
+    let m = out.module.expect("checked IR");
+    let main = stave_driver::build::main_path(&out.program).unwrap();
+    let want = std::fs::read(repo().join("tests/conformance/run/drop_deep_type.stdout")).unwrap();
+    let target = stave_target::Triple::parse("x86_64-linux").unwrap();
+    let ran = std::thread::Builder::new()
+        .stack_size(256 << 10)
+        .spawn(move || interp::run(&m, &main, target, &[], &[], Limits::default()).map(|r| r.ran))
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap();
+    assert_eq!((ran.exit, ran.stdout), (0, want));
+}
+
 /// Over the run suite, per program:
 ///
 /// - Debug = release in which checks remain: each function the release build lowers (what
