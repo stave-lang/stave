@@ -17,6 +17,7 @@ mod simd_ops;
 use std::fmt;
 
 use stave_obj::{FileId, FuncCode, LineRow, Reloc, RelocKind, SymbolId};
+use stave_target::{Feature, FeatureSet};
 
 pub use inst::{AluOp, PLogic, Prec, ShiftOp, SseOp, UnaryOp, XRm};
 pub use simd::{VLen, VReg, VRm, VecReg};
@@ -326,6 +327,8 @@ pub struct Asm {
     lines: Vec<LineRow>,
     /// The scalar SSE functions (`sse`, `movs`, `movaps`, ...) emit their VEX forms.
     vex_scalars: bool,
+    /// The CPUID features of the instructions encoded so far beyond SSE4.2.
+    used: FeatureSet,
 }
 
 const MAX_CODE: usize = i32::MAX as usize;
@@ -345,6 +348,16 @@ impl Asm {
     /// them, and no dependence on the `ymm` upper halves.
     pub fn set_vex_scalars(&mut self, on: bool) {
         self.vex_scalars = on;
+    }
+
+    /// The CPUID features beyond SSE4.2 that the instructions encoded so far need (closed under
+    /// implication): every VEX, FMA, F16C, and BMI2 instruction records its own.
+    pub fn features(&self) -> FeatureSet {
+        self.used
+    }
+
+    pub(super) fn note(&mut self, f: Feature) {
+        self.used.insert(f);
     }
 
     /// Current offset.

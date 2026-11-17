@@ -448,6 +448,16 @@ impl Cg<'_, '_> {
                 src[j * w + b] = Some((k * w + b) as u8);
             }
         }
+        if (from.wide() || to.wide()) && !self.fx.avx2 {
+            // no shuffle moves lanes between the halves of a `ymm` without AVX2: lane by lane
+            let m = self.vmem(a)?;
+            let d = self.def_mem(rv)?;
+            for (j, &k) in ks.iter().enumerate() {
+                self.sized_load(S0, lane(m, k as u32, to.w)?, to.w as u8, false)?;
+                self.a.mov_mr(size_of(to.w), lane(d, j as u32, to.w)?, S0)?;
+            }
+            return Ok(());
+        }
         let x = self.vget(a, from.size)?;
         if !from.wide() && !to.wide() {
             let ctl: Vec<u8> = src[..16].iter().map(|s| s.unwrap_or(0x80)).collect();
@@ -622,7 +632,16 @@ impl Cg<'_, '_> {
         let x = self.vread(a, sh.size)?;
         let s = self.vget(b, sh.size)?;
         match self.vform(sh.wide())? {
-            Form::Y => self.a.vex_blendv(VBlendV::Pblendvb, y(s), y(s), y(x), y(mx))?,
+            Form::Y => {
+                // the 256-bit byte blend is AVX2; AVX blends by the sign of a 32- or 64-bit
+                // lane, which is the mask lane's value
+                let op = match (self.fx.avx2, sh.w) {
+                    (false, 4) => VBlendV::Blendvps,
+                    (false, 8) => VBlendV::Blendvpd,
+                    _ => VBlendV::Pblendvb,
+                };
+                self.a.vex_blendv(op, y(s), y(s), y(x), y(mx))?
+            }
             _ => self.a.vex_blendv(VBlendV::Pblendvb, s, s, x, mx)?,
         }
         self.vput(rv, s, sh.size)
@@ -631,15 +650,30 @@ impl Cg<'_, '_> {
     /// `g` = bit j set iff lane j of the mask in `x` is set. Clobbers `XS0`, `S0`.
     pub(super) fn vmask_bits(&mut self, g: Gpr, x: Xmm, sh: Sh) -> Res<()> {
         let wide = sh.wide();
+        // the sign bits of the bytes of a `ymm` are an AVX2 instruction
+        let ybytes = wide && self.fx.avx2;
         match sh.w {
+            1 if wide && !ybytes => {
+                self.vmsk(VMovMsk::Pmovmskb, false, g, x)?;
+                self.vhigh(XS0, x)?;
+                self.vmsk(VMovMsk::Pmovmskb, false, S0, XS0)?;
+                self.a.shift_ri(ShiftOp::Shl, Size::D, S0, 16)?;
+                self.a.alu_rr(AluOp::Or, Size::D, g, S0);
+            }
             1 => self.vmsk(VMovMsk::Pmovmskb, wide, g, x)?,
             4 => self.vmsk(VMovMsk::Movmskps, wide, g, x)?,
             8 => self.vmsk(VMovMsk::Movmskpd, wide, g, x)?,
-            _ if self.vex() => {
+            _ if self.fx.bmi2 && (ybytes || !wide) => {
                 // two equal bits per lane: keep one
                 self.vmsk(VMovMsk::Pmovmskb, wide, g, x)?;
                 self.a.mov_ri(Size::D, S0, 0xaaaa_aaaa)?;
                 self.a.pext(Size::D, g, g, S0)?;
+            }
+            _ if wide => {
+                // the lanes of both halves as the bytes of one `xmm`
+                self.vhigh(XS0, x)?;
+                self.vb3(VBin::Packsswb, false, XS0, x, XS0)?;
+                self.vmsk(VMovMsk::Pmovmskb, false, g, XS0)?;
             }
             _ => {
                 self.vmov(false, XS0, x)?;
@@ -647,8 +681,9 @@ impl Cg<'_, '_> {
                 self.vmsk(VMovMsk::Pmovmskb, false, g, XS0)?;
             }
         }
-        // a full register gives one bit per lane, except two per lane from `packsswb`
-        let exact = (sh.size == 16 || sh.size == 32) && (sh.w != 2 || self.vex());
+        // a full register gives one bit per lane, except two per lane from `packsswb` of one
+        // `xmm` with itself
+        let exact = (sh.size == 16 || sh.size == 32) && (sh.w != 2 || self.fx.bmi2 || wide);
         if sh.n < 32 && !exact {
             self.a.alu_ri(AluOp::And, Size::D, g, (1i64 << sh.n) - 1)?;
         }
@@ -673,12 +708,24 @@ impl Cg<'_, '_> {
         self.a.alu_rr(AluOp::Cmp, Size::Q, g, S0);
         self.a.cmov(Cond::B, Size::Q, S0, g)?;
         self.vmovd_xg(Size::D, x, S0)?;
-        self.vbroadcast(sh.w, wide, x)?;
         let lanes = if wide { 32 } else { 16 } / sh.w;
         let mut bytes = Vec::with_capacity(32);
         for j in 0..u64::from(lanes) {
             bytes.extend_from_slice(&j.to_le_bytes()[..sh.w as usize]);
         }
+        if wide && !self.fx.avx2 {
+            // no 256-bit integer compare without AVX2: each half against its lane numbers
+            let gt = by_w(sh.w, PCMPGT);
+            self.vbroadcast(sh.w, false, x)?;
+            self.vmov(false, XS1, x)?;
+            self.vconst(iota, false, &bytes[..16])?;
+            self.vb(gt, false, x, iota)?;
+            self.vconst(iota, false, &bytes[16..])?;
+            self.vb(gt, false, XS1, iota)?;
+            self.vset_high(x, XS1)?;
+            return self.vput(rv, x, sh.size);
+        }
+        self.vbroadcast(sh.w, wide, x)?;
         self.vconst(iota, wide, &bytes)?;
         self.vb(by_w(sh.w, PCMPGT), wide, x, iota)?;
         self.vput(rv, x, sh.size)

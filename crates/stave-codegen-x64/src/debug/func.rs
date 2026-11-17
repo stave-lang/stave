@@ -14,7 +14,7 @@ use stave_opt::regalloc;
 
 use super::abi::{self, CallAbi, Loc, Piece, RetLoc, VCls};
 use super::analysis::{self, Analysis, NONE};
-use super::{Ctx, Error, Level, Res, bad, unsup};
+use super::{Ctx, Error, Feats, Res, bad, unsup};
 use crate::enc::*;
 
 /// Scratch GPRs, never allocated to values.
@@ -174,6 +174,10 @@ pub(crate) enum Callee {
 pub(crate) struct Cg<'a, 'm> {
     pub cx: &'a Ctx<'m>,
     pub f: &'a Func,
+    /// The features this function is compiled for.
+    pub fx: Feats,
+    /// The type classes for those features ([`Ctx::cls_of`]).
+    cls: &'a [Option<VCls>],
     pub b: &'a Body,
     pub an: Analysis,
     pub a: Asm,
@@ -291,11 +295,11 @@ struct Owned {
 
 /// Per value its register class ([`regalloc::CLASS_NONE`] for values that live in memory and for
 /// frame addresses), and per instruction whether it clobbers the scratch registers.
-fn reg_classes(cx: &Ctx<'_>, b: &Body) -> (Vec<u8>, Vec<bool>) {
+fn reg_classes(cls: &[Option<VCls>], fx: Feats, b: &Body) -> (Vec<u8>, Vec<bool>) {
     let nv = b.values.len();
     let mut class = vec![regalloc::CLASS_NONE; nv];
     for (c, vd) in class.iter_mut().zip(&b.values) {
-        *c = match cx.cls.get(vd.ty.index()).copied().flatten() {
+        *c = match cls.get(vd.ty.index()).copied().flatten() {
             Some(VCls::G { .. }) => regalloc::CLASS_INT,
             Some(VCls::X(_)) => regalloc::CLASS_FLOAT,
             Some(VCls::V { .. }) => regalloc::CLASS_VEC,
@@ -310,7 +314,7 @@ fn reg_classes(cx: &Ctx<'_>, b: &Body) -> (Vec<u8>, Vec<bool>) {
         match op {
             Op::Call | Op::CallInd | Op::Intrinsic(_) => clobbers[i] = true,
             // one call of the software routine per lane
-            Op::Vec(VecOp::Fma) if cx.level == Level::V2 => clobbers[i] = true,
+            Op::Vec(VecOp::Fma) if !fx.fma => clobbers[i] = true,
             Op::Slot => {
                 if let Some(v) = res {
                     frame_addr[v.index()] = true;
@@ -428,11 +432,13 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
     let b = f.body.as_ref().ok_or_else(|| bad("function has no body"))?;
     let mut an = analysis::analyze(b);
     let nv = b.values.len();
+    let fx = cx.feats(f);
+    let cls = cx.cls_of(fx);
     let mut early = Vec::new();
     let Owned { reg: own, gown, xown, first, last } = if release {
         // A rotated loop's test is emitted after the blocks that use its values: only values
         // with a register for their whole life can be read there before their definition.
-        let (class, clobbers) = reg_classes(cx, b);
+        let (class, clobbers) = reg_classes(cls, fx, b);
         an.rpo = stave_opt::layout::rotated_order(b, |v| class[v.index()] != regalloc::CLASS_NONE);
         let o = ownership(b, &an, &class, &clobbers);
         early = early_uses(b, &an.rpo, &an.def_block);
@@ -458,7 +464,7 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
             }
         }
     }
-    let wide = |t: TypeId| match cx.cls.get(t.index()).copied().flatten() {
+    let wide = |t: TypeId| match cls.get(t.index()).copied().flatten() {
         Some(VCls::V { size }) => size > 16,
         Some(VCls::M { align, .. }) => align > 16,
         _ => false,
@@ -470,16 +476,21 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
                     if cx.layouts.get_layout(*inner).is_ok_and(|l| l.align > 16))
     };
     let realign = b.values.iter().any(|v| wide(v.ty)) || (0..b.insts.len()).any(wide_slot);
-    let ywide = b.values.iter().any(|v| matches!(cx.cls.get(v.ty.index()), Some(Some(VCls::V { size: 32 }))));
+    let ywide = b.values.iter().any(|v| matches!(cls.get(v.ty.index()), Some(Some(VCls::V { size: 32 }))));
     let saved_bytes = 8 * (gown & callee_saved).count_ones();
     let mut a = Asm::with_capacity(32 * b.insts.len() + 64, b.blocks.len() * 2 + 8);
-    // Scalar float code next to live `ymm` values must not depend on their upper halves.
-    a.set_vex_scalars(release && cx.level == Level::V3);
+    // Scalar float code next to live `ymm` values must not depend on their upper halves. A
+    // debug build has none live between instructions; where the baseline has `avx` its scalar
+    // code is legacy SSE, and in a function that adds `avx` to the baseline it is VEX like the
+    // rest of the function's float code.
+    a.set_vex_scalars(fx.avx && (release || !cx.baseline.contains(stave_target::Feature::Avx)));
     let epilogue = a.new_label();
     let labels = (0..b.blocks.len()).map(|_| a.new_label()).collect();
     let cg = Cg {
         cx,
         f,
+        fx,
+        cls,
         b,
         an,
         a,
@@ -572,8 +583,7 @@ impl<'a, 'm> Cg<'a, 'm> {
     }
 
     pub fn vcls(&self, t: TypeId) -> Res<VCls> {
-        self.cx
-            .cls
+        self.cls
             .get(t.index())
             .copied()
             .flatten()
@@ -581,12 +591,24 @@ impl<'a, 'm> Cg<'a, 'm> {
                 let text = self.cx.m.types.key_text(t);
                 match self.key(t) {
                     Some(TypeKey::Vec { .. } | TypeKey::Mask { .. }) => unsup(format!(
-                        "vector type {text}: sizeless, f16 / bf16 lanes, or wider than the target's {}-bit vector registers",
-                        8 * self.cx.level.vector_bytes()
+                        "vector type {text}: sizeless, f16 / bf16 lanes, or wider than the fn's {}-bit vector registers",
+                        8 * self.fx.vector_bytes()
                     )),
                     _ => unsup(format!("values of type t{} ({text})", t.0)),
                 }
             })
+    }
+
+    /// Fails when the code emitted so far has an instruction of a CPUID feature outside the
+    /// function's set (`what`: the op being compiled).
+    pub(crate) fn check_features(&self, what: &str) -> Res<()> {
+        let used = self.a.features();
+        if used.is_subset(self.fx.set) {
+            return Ok(());
+        }
+        let missing: Vec<&str> =
+            used.iter().filter(|f| !self.fx.set.contains(*f)).map(|f| f.name()).collect();
+        Err(unsup(format!("{what} needs `{}`, which the fn's features lack", missing.join("`, `"))))
     }
 
     pub fn vty(&self, v: Value) -> Res<TypeId> {
@@ -1752,13 +1774,13 @@ impl<'a, 'm> Cg<'a, 'm> {
     // ---------------------------------------------------------------- calls
 
     pub fn abi_of(&self, params: &[TypeId], ret: Option<TypeId>) -> Res<CallAbi> {
-        abi::call_abi(&self.cx.m.types, &self.cx.layouts, &self.cx.cls, params, ret, false)
+        abi::call_abi(&self.cx.m.types, &self.cx.layouts, self.cls, params, ret, false)
             .ok_or_else(|| unsup("a parameter or return type has no value class"))
     }
 
     /// [`Self::abi_of`] plus the trailing environment argument of a fn-value call.
     pub fn abi_of_env(&self, params: &[TypeId], ret: Option<TypeId>) -> Res<CallAbi> {
-        abi::call_abi(&self.cx.m.types, &self.cx.layouts, &self.cx.cls, params, ret, true)
+        abi::call_abi(&self.cx.m.types, &self.cx.layouts, self.cls, params, ret, true)
             .ok_or_else(|| unsup("a parameter or return type has no value class"))
     }
 
@@ -2966,6 +2988,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             self.a.bind(l)?;
             self.a.raw(&bytes);
         }
+        self.check_features("the fn's code")?;
         let body = self.a.finish()?;
 
         let mut p = Asm::new();

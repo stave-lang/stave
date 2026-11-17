@@ -2,6 +2,8 @@
 //! named after the legacy mnemonic (`Addps` is `addps` and, VEX-encoded, `vaddps`), and VEX-only
 //! instructions are named without the `v` (`Psllvd` is `vpsllvd`).
 
+use stave_target::Feature;
+
 /// Mandatory prefix (VEX `pp`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Pp {
@@ -284,6 +286,114 @@ ops! {
     }
 }
 
+/// The CPUID feature of the VEX form of an integer instruction that has a legacy SSE form: AVX
+/// encodes it at 128 bits, AVX2 added the 256-bit form.
+fn int_feature(wide: bool) -> Feature {
+    if wide { Feature::Avx2 } else { Feature::Avx }
+}
+
+impl VBin {
+    /// The CPUID feature of the VEX form (`wide`: at 256 bits).
+    pub(super) fn feature(self, wide: bool) -> Feature {
+        use VBin::*;
+        match self {
+            Addps | Addpd | Subps | Subpd | Mulps | Mulpd | Divps | Divpd | Minps | Minpd | Maxps | Maxpd
+            | Andps | Andpd | Andnps | Andnpd | Orps | Orpd | Xorps | Xorpd | Unpcklps | Unpcklpd
+            | Unpckhps | Unpckhpd | Haddps | Haddpd | Movhlps | Movlhps | Permilps | Permilpd | Maskmovps
+            | Maskmovpd => Feature::Avx,
+            Psllvd | Psllvq | Psrlvd | Psrlvq | Psravd | Permd | Permps | Pmaskmovd | Pmaskmovq => {
+                Feature::Avx2
+            }
+            // the other VEX-only entries are the fused multiply-adds
+            _ if self.desc().has(flag::V) => Feature::Fma,
+            _ => int_feature(wide),
+        }
+    }
+}
+
+impl VUn {
+    /// The CPUID feature of the VEX form (`wide`: at 256 bits; `mem`: with a memory source).
+    pub(super) fn feature(self, wide: bool, mem: bool) -> Feature {
+        use VUn::*;
+        match self {
+            Sqrtps | Sqrtpd | Movups | Movaps | Movdqu | Movdqa | Movq | Ptest | Cvtdq2ps | Cvtps2dq
+            | Cvttps2dq | Cvtdq2pd | Cvtps2pd => Feature::Avx,
+            // AVX broadcasts from memory only
+            Broadcastss | Broadcastsd if mem => Feature::Avx,
+            Broadcastss | Broadcastsd | Pbroadcastb | Pbroadcastw | Pbroadcastd | Pbroadcastq => {
+                Feature::Avx2
+            }
+            Cvtph2ps => Feature::F16c,
+            Pabsb | Pabsw | Pabsd | Pmovsxbw | Pmovsxbd | Pmovsxbq | Pmovsxwd | Pmovsxwq | Pmovsxdq
+            | Pmovzxbw | Pmovzxbd | Pmovzxbq | Pmovzxwd | Pmovzxwq | Pmovzxdq => int_feature(wide),
+        }
+    }
+}
+
+impl VBinI {
+    /// The CPUID feature of the VEX form (`wide`: at 256 bits).
+    pub(super) fn feature(self, wide: bool) -> Feature {
+        use VBinI::*;
+        match self {
+            Cmpps | Cmppd | Shufps | Shufpd | Blendps | Blendpd | Insertps | Roundss | Roundsd
+            | Perm2f128 | Insertf128 => Feature::Avx,
+            Pblendd | Perm2i128 | Inserti128 => Feature::Avx2,
+            Pblendw | Palignr => int_feature(wide),
+        }
+    }
+}
+
+impl VUnI {
+    /// The CPUID feature of the VEX form (`wide`: at 256 bits).
+    pub(super) fn feature(self, wide: bool) -> Feature {
+        use VUnI::*;
+        match self {
+            Roundps | Roundpd | Permilps | Permilpd => Feature::Avx,
+            Permq | Permpd => Feature::Avx2,
+            Pshufd | Pshuflw | Pshufhw => int_feature(wide),
+        }
+    }
+}
+
+impl VMovMsk {
+    /// The CPUID feature of the VEX form (`wide`: of a `ymm` source).
+    pub(super) fn feature(self, wide: bool) -> Feature {
+        match self {
+            VMovMsk::Movmskps | VMovMsk::Movmskpd => Feature::Avx,
+            VMovMsk::Pmovmskb => int_feature(wide),
+        }
+    }
+}
+
+impl VBlendV {
+    /// The CPUID feature of the VEX form (`wide`: at 256 bits).
+    pub(super) fn feature(self, wide: bool) -> Feature {
+        match self {
+            VBlendV::Blendvps | VBlendV::Blendvpd => Feature::Avx,
+            VBlendV::Pblendvb => int_feature(wide),
+        }
+    }
+}
+
+impl VExtract {
+    pub(super) fn feature(self) -> Feature {
+        match self {
+            VExtract::Extractf128 => Feature::Avx,
+            VExtract::Extracti128 => Feature::Avx2,
+            VExtract::Cvtps2ph => Feature::F16c,
+        }
+    }
+}
+
+impl VMaskStore {
+    pub(super) fn feature(self) -> Feature {
+        match self {
+            VMaskStore::Maskmovps | VMaskStore::Maskmovpd => Feature::Avx,
+            VMaskStore::Pmaskmovd | VMaskStore::Pmaskmovq => Feature::Avx2,
+        }
+    }
+}
+
 /// Packed shifts by an immediate: the opcode group and the `/digit` of the ModRM `reg` field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VShiftI {
@@ -313,6 +423,11 @@ impl VShiftI {
         VShiftI::Pslldq,
         VShiftI::Psrldq,
     ];
+
+    /// The CPUID feature of the VEX form (`wide`: at 256 bits).
+    pub(super) fn feature(self, wide: bool) -> Feature {
+        int_feature(wide)
+    }
 
     /// `(opcode, /digit)`.
     pub(super) fn group(self) -> (u8, u8) {

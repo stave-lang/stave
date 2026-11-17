@@ -1,6 +1,8 @@
 //! Vector and mask ops, differential per op: small IR functions run in the interpreter and
-//! natively at each feature level (`Level::V2`: vectors up to 128 bits, `Level::V3`: up to 256
-//! bits; the 128-bit programs run at both), each as a debug and as a release build.
+//! natively under each feature [`Mode`] (a v2 baseline: vectors up to 128 bits; a v3 baseline,
+//! and a v2 baseline whose test functions carry `needs`: up to 256 bits), each as a debug and as
+//! a release build. Every function of every build is disassembled and its instructions are
+//! checked against the function's feature set ([`super::features::check_image`]).
 //!
 //! A program is a list of cases, one function each, called in order from `main`. Every input tuple
 //! prints a label line (`# <op> <operands> -> <result>`), then the raw bits of its result as
@@ -29,8 +31,10 @@ use stave_ir::{
     Value, VecOp,
 };
 
+use stave_target::{Feature, FeatureSet};
+
 use super::harness::*;
-use crate::debug::{Level, Options, compile_module};
+use crate::debug::{Error, Options, bench_ctx, compile_func, compile_module};
 
 /// A lane type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -879,9 +883,83 @@ fn max_bits(m: &stave_ir::Module) -> u32 {
     out
 }
 
-/// The levels a program whose widest vector has `bits` bits runs at.
-fn levels(bits: u32) -> &'static [Level] {
-    if bits <= 128 { &[Level::V2, Level::V3] } else { &[Level::V3] }
+/// One way to compile a program: the module baseline, and the `needs` of its test functions.
+#[derive(Clone, Copy, Debug)]
+struct Mode {
+    name: &'static str,
+    /// The module baseline is v3 (else v2).
+    v3: bool,
+    /// The features every function but the runtime's and `main` gets on top of the baseline:
+    /// those functions are called from baseline code and call it back (`t.print_u64`).
+    needs: &'static [Feature],
+}
+
+const MODES: [Mode; 7] = [
+    Mode { name: "V2", v3: false, needs: &[] },
+    Mode { name: "v2+bmi2", v3: false, needs: &[Feature::Bmi2] },
+    Mode { name: "V3", v3: true, needs: &[] },
+    Mode { name: "v2+v3", v3: false, needs: &[Feature::Avx2, Feature::Fma, Feature::Bmi2, Feature::F16c] },
+    Mode { name: "v2+avx2", v3: false, needs: &[Feature::Avx2] },
+    Mode { name: "v2+avx2+fma", v3: false, needs: &[Feature::Avx2, Feature::Fma] },
+    Mode { name: "v2+avx", v3: false, needs: &[Feature::Avx] },
+];
+
+/// The modes a program whose widest vector has `bits` bits runs under. `fma`: it has a
+/// `vec.fma`, the one op `fma` on top of `avx2` changes; `mask_bits`: it has an op that takes
+/// the bits of a mask, which `bmi2` changes.
+fn modes(bits: u32, fma: bool, mask_bits: bool) -> Vec<Mode> {
+    MODES
+        .into_iter()
+        .filter(|m| match m.name {
+            "V2" => bits <= 128,
+            "v2+bmi2" => bits <= 128 && mask_bits,
+            "v2+avx2+fma" => fma,
+            _ => true,
+        })
+        .collect()
+}
+
+/// Functions that stay at the module baseline under every mode.
+fn baseline_fn(path: &str) -> bool {
+    path.starts_with("runtime.") || matches!(path, "t.main" | "t.write" | "t.print_u64" | "t.dump" | "t.fill")
+}
+
+/// The module of `p` under `mode`. With `avx` alone a 256-bit integer op is unsupported: in
+/// that mode each function of a 256-bit program that does not compile is given `avx2`, the
+/// others run with `avx` alone. Also returns how many functions were tried and how many needed
+/// `avx2`.
+fn module_for(p: &Prog, mode: Mode, release: bool) -> (stave_ir::Module, usize, usize) {
+    let mut m = p.m.clone();
+    let needs = FeatureSet::from_features(mode.needs.iter().copied());
+    for f in &mut m.funcs {
+        if !baseline_fn(&f.path) {
+            f.features = needs;
+        }
+    }
+    let (mut tried, mut raised) = (0, 0);
+    if mode.needs == [Feature::Avx] && max_bits(&m) > 128 {
+        let mut raise = Vec::new();
+        {
+            let mut cx = bench_ctx(&m);
+            cx.release = release;
+            for (i, f) in m.funcs.iter().enumerate() {
+                if f.body.is_none() || baseline_fn(&f.path) {
+                    continue;
+                }
+                tried += 1;
+                match compile_func(&cx, FuncId(i as u32)) {
+                    Ok(_) => {}
+                    Err(Error::Unsupported { .. }) => raise.push(i),
+                    Err(e) => panic!("{}: {e}", f.path),
+                }
+            }
+        }
+        raised = raise.len();
+        for i in raise {
+            m.funcs[i].features = FeatureSet::of(Feature::Avx2);
+        }
+    }
+    (m, tried, raised)
 }
 
 /// Program size limit (sum of case costs).
@@ -893,6 +971,10 @@ struct Built {
     name: String,
     trap: Option<PanicKind>,
     trap_dump: bool,
+    /// A case has a `vec.fma`.
+    fma: bool,
+    /// A case has an op that reads the bits of a mask.
+    mask_bits: bool,
     checks: Vec<fn(&str)>,
 }
 
@@ -920,7 +1002,10 @@ fn build(name: String, cases: &[&Case]) -> Built {
     let trap = cases.iter().find_map(|c| c.trap);
     let trap_dump = cases.iter().any(|c| c.trap_dump);
     let checks = cases.iter().filter_map(|c| c.check).collect();
-    Built { sp, name, trap, trap_dump, checks }
+    let fma = cases.iter().any(|c| c.ops.contains(&VecOp::Fma));
+    let mask_ops = [VecOp::ToBits, VecOp::Compress, VecOp::Expand, VecOp::LoadMasked, VecOp::StoreMasked];
+    let mask_bits = cases.iter().any(|c| c.ops.iter().any(|op| mask_ops.contains(op)));
+    Built { sp, name, trap, trap_dump, fma, mask_bits, checks }
 }
 
 /// Groups cases into programs: trap-free cases by level set, at most [`PROGRAM_COST`] each; every
@@ -950,10 +1035,12 @@ fn programs(test: &str, cases: &[Case]) -> Vec<Built> {
     out
 }
 
-/// Compiles and runs natively; a signal is reported as exit status `-signal`.
-fn native_run(p: &Prog, name: &str, opts: &Options) -> Option<RunOut> {
-    let opts = Options { main: p.main, ..opts.clone() };
-    let img = compile_module(&p.m, &opts).unwrap_or_else(|e| panic!("{name}: codegen: {e}"));
+/// Compiles, checks the instructions of every function against its features, and runs natively;
+/// a signal is reported as exit status `-signal`.
+fn native_run(m: &stave_ir::Module, main: Option<FuncId>, name: &str, opts: &Options) -> Option<RunOut> {
+    let opts = Options { main, ..opts.clone() };
+    let img = compile_module(m, &opts).unwrap_or_else(|e| panic!("{name}: codegen: {e}"));
+    super::features::check_image(m, &img, opts.features, name);
     if !native_host() {
         return None;
     }
@@ -1069,15 +1156,18 @@ fn run_built(b: &Built, stats: &Stats) {
         c(&String::from_utf8_lossy(&want.stdout));
     }
     let labels = want.stdout.split(|&c| c == b'\n').filter(|l| l.starts_with(b"# ")).count();
-    let lvls = levels(max_bits(&p.m));
+    let bits = max_bits(&p.m);
     stats.add(&stats.labels, labels);
-    stats.add(if lvls.len() == 2 { &stats.both } else { &stats.v3 }, 1);
+    stats.add(if bits <= 128 { &stats.both } else { &stats.v3 }, 1);
     let expect = if b.trap_dump { with_trap_dump(&want.stdout) } else { want.stdout.clone() };
-    for &level in lvls {
-        for (mode, base) in [("debug", Options::default()), ("release", release_options())] {
-            let what = format!("{} [{level:?} {mode}]", b.name);
-            let opts = Options { level, ..base };
-            match native_run(p, &format!("{}-{level:?}-{mode}", b.name), &opts) {
+    for mode in modes(bits, b.fma, b.mask_bits) {
+        for (build, base) in [("debug", Options::default()), ("release", release_options())] {
+            let what = format!("{} [{} {build}]", b.name, mode.name);
+            let (m, tried, raised) = module_for(p, mode, base.release);
+            stats.add(&stats.avx_fns, tried);
+            stats.add(&stats.raised, raised);
+            let opts = Options { features: if mode.v3 { v3() } else { v2() }, ..base };
+            match native_run(&m, p.main, &format!("{}-{}-{build}", b.name, mode.name), &opts) {
                 Some(got) => {
                     compare(&what, &expect, want_code, &got);
                     stats.add(&stats.runs, 1);
@@ -1091,10 +1181,13 @@ fn run_built(b: &Built, stats: &Stats) {
 /// Counts for `STAVE_TEST_VERBOSE`.
 #[derive(Default)]
 struct Stats {
-    /// Programs run at both levels.
+    /// Programs of 128-bit vectors (every mode).
     both: AtomicUsize,
-    /// Programs with 256-bit vectors (V3 only).
+    /// Programs with 256-bit vectors (no v2 baseline without `needs`).
     v3: AtomicUsize,
+    /// Functions of 256-bit programs compiled with `avx` alone, and those that needed `avx2`.
+    avx_fns: AtomicUsize,
+    raised: AtomicUsize,
     /// Label lines (input tuples) printed by the interpreter.
     labels: AtomicUsize,
     runs: AtomicUsize,
@@ -1129,9 +1222,11 @@ pub fn run(test: &str, cases: Vec<Case>) {
     });
     if std::env::var_os("STAVE_TEST_VERBOSE").is_some() {
         eprintln!(
-            "{test}: {ncases} case fns, programs {} at V2+V3 and {} at V3 only, {} labels, {} native runs, {:.1?}",
+            "{test}: {ncases} case fns, programs {} of 128 bits and {} of 256, with avx alone {} of {} fns of 256-bit programs need avx2, {} labels, {} native runs, {:.1?}",
             stats.both.into_inner(),
             stats.v3.into_inner(),
+            stats.raised.into_inner(),
+            stats.avx_fns.into_inner(),
             stats.labels.into_inner(),
             stats.runs.into_inner(),
             t0.elapsed()
@@ -1277,7 +1372,7 @@ fn comparator() {
 }
 
 /// Vector types the backend does not generate code for yield `Error::Unsupported`: f16 lanes,
-/// sizeless vectors, vectors and masks wider than the level.
+/// sizeless vectors, vectors and masks wider than the registers of the function's features.
 #[test]
 fn unsupported_shapes() {
     use stave_ir::types::TypeTable;
@@ -1299,16 +1394,18 @@ fn unsupported_shapes() {
         t.intern(TypeKey::Vec { lane: l, n: Lanes::Fixed(4) })
     };
     let mask32x8: Mk = |t| t.intern(TypeKey::Mask { width: 32, n: Lanes::Fixed(8) });
-    let cases: [(&str, Mk, Level); 7] = [
-        ("f16x8", f16x8, Level::V2),
-        ("f16x8", f16x8, Level::V3),
-        ("f32xN", sizeless, Level::V3),
-        ("f32x16", f32x16, Level::V3),
-        ("f32x16", f32x16, Level::V2),
-        ("i64x4", i64x4, Level::V2),
-        ("mask32x8", mask32x8, Level::V2),
+    // (type, baseline: v3 or v2)
+    let cases: [(&str, Mk, bool); 7] = [
+        ("f16x8", f16x8, false),
+        ("f16x8", f16x8, true),
+        ("f32xN", sizeless, true),
+        ("f32x16", f32x16, true),
+        ("f32x16", f32x16, false),
+        ("i64x4", i64x4, false),
+        ("mask32x8", mask32x8, false),
     ];
-    for (what, mk, level) in cases {
+    for (what, mk, wide) in cases {
+        let level = if wide { v3() } else { v2() };
         let mut p = Prog::new();
         let vt = mk(&mut p.m.types);
         let f = p.decl("t.vec", &[vt], Some(vt));
@@ -1319,7 +1416,7 @@ fn unsupported_shapes() {
         p.main(|_, _| {});
         stave_ir::verify_module(&p.m).unwrap_or_else(|e| panic!("{what}: IR does not verify: {e:?}"));
         for (mode, base) in [("debug", Options::default()), ("release", release_options())] {
-            let o = Options { level, main: p.main, ..base };
+            let o = Options { features: level, main: p.main, ..base };
             match compile_module(&p.m, &o) {
                 Err(crate::debug::Error::Unsupported { .. }) => {}
                 r => panic!("{what} [{level:?} {mode}]: expected Unsupported, got {:?}", r.map(|_| ())),

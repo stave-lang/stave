@@ -40,6 +40,10 @@
 //! - The upper halves of `ymm0`–`ymm15` are clean at every call and return that carries no
 //!   32-byte value in a register. One that does leaves every upper half unspecified: the
 //!   receiver cleans them before its own calls and returns.
+//! - The convention follows the types of a signature only, never the features a function is
+//!   compiled for: functions of different feature sets call each other. A function holds a
+//!   32-byte value only with `avx`, so both sides of a signature with one have it, and a
+//!   function without `avx` is never entered or returned to with dirty upper halves.
 
 use stave_ir::layout::{Layouts, Shape};
 use stave_ir::simd::{self, LaneTy};

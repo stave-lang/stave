@@ -169,13 +169,14 @@ impl Cg<'_, '_> {
     }
 
     /// The masked load and store of a shape's lanes (`vmaskmov*`, `vpmaskmov*`): 32- and 64-bit
-    /// lanes at the VEX level. A lane is active by its sign bit, and an inactive lane neither
-    /// faults nor is written.
+    /// lanes with `avx`. A lane is active by its sign bit, and an inactive lane neither faults
+    /// nor is written. The integer forms are AVX2: without it int lanes move through the float
+    /// forms, bit for bit.
     fn vmaskmov(&self, sh: Sh) -> Option<(VBin, VMaskStore)> {
         if !self.vex() || sh.w < 4 {
             return None;
         }
-        Some(match (sh.float().is_some(), sh.w) {
+        Some(match (sh.float().is_some() || !self.fx.avx2, sh.w) {
             (true, 4) => (VBin::Maskmovps, VMaskStore::Maskmovps),
             (true, _) => (VBin::Maskmovpd, VMaskStore::Maskmovpd),
             (false, 4) => (VBin::Pmaskmovd, VMaskStore::Pmaskmovd),
@@ -367,7 +368,7 @@ impl Cg<'_, '_> {
         let ish = self.voshape(idx)?;
         let mi = self.vmem(idx)?;
         let (base, len) = self.vbase(s)?;
-        if self.vex() && sh.w >= 4 {
+        if self.fx.avx2 && sh.w >= 4 {
             return self.vgather_packed(sh, ish, mi, base, len, rv);
         }
         let d = self.def_mem(rv)?;

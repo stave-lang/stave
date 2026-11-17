@@ -3,7 +3,7 @@
 //! An op takes its operands in registers ([`Cg::vget`]: one it may overwrite, [`Cg::vread`]: one
 //! it only reads), computes register to register, and defines the result ([`Cg::vput`]); these
 //! three and [`Cg::vmem`] are the only places that know where a vector value is. Ops without an
-//! instruction at the level run lane by lane on the home bytes.
+//! instruction in the function's features run lane by lane on the home bytes.
 //!
 //! In a debug build a vector value lives in its frame home (`VCls::V`): every operand is loaded
 //! and every result stored. In a release build it lives in a register like a float: in the
@@ -11,10 +11,15 @@
 //! when a register is needed for something else, before a call, or for an op that works on
 //! the home bytes ([`Cg::vmem`]).
 //!
-//! Encoding follows the level: legacy SSE (128-bit, destructive) at `V2`, VEX at `V3` (the same
-//! destructive shape, `ymm` for 32-byte values). `xmm14` / `xmm15` are scratch here as in the
-//! scalar code. A legacy SSE instruction never takes a vector memory operand (it would have to
-//! be 16-byte aligned): constants and homes are loaded with unaligned moves.
+//! Encoding follows the function's features (`Cg::fx`): legacy SSE (128-bit, destructive)
+//! without `avx`, VEX with it (the same destructive shape, `ymm` for 32-byte values). A 256-bit
+//! instruction on integer lanes is AVX2. With `avx` alone a 32-byte value still moves, blends
+//! and takes float instructions and the bitwise ones (as their float twins); every other
+//! integer instruction on it makes the function unsupported (`Cg::check_features`), and an op
+//! with an AVX2-only instruction in its 128-bit form takes its SSE sequence, VEX-encoded.
+//! `xmm14` / `xmm15` are scratch here as in the scalar code. A legacy SSE instruction never
+//! takes a vector memory operand (it would have to be 16-byte aligned): constants and homes
+//! are loaded with unaligned moves.
 //!
 //! A mask is a vector of its lane width with all-ones (set) or all-zero lanes. A value of fewer
 //! than 16 bytes is loaded and stored at its exact size, so nothing outside it is read or
@@ -22,11 +27,13 @@
 //! [`Cg::vput`] too, since the next op reads that register.
 //!
 //! `ymm` upper halves. Debug: every op ends with them clean ([`Cg::vclean`]); no 256-bit value
-//! stays in a register between instructions, and the scalar code is legacy SSE. Release: a
-//! function with 32-byte values keeps them in `ymm` registers and cleans before a call and
-//! before a return that carries no 32-byte value; its scalar float code is VEX-encoded
-//! (`Asm::set_vex_scalars`), so it never waits for an upper half. A function without 32-byte
-//! values cleans after an op that used a `ymm` register inside.
+//! stays in a register between instructions, so the scalar code may be legacy SSE (it is where
+//! the module baseline has `avx`). Release: a function with 32-byte values keeps them in `ymm`
+//! registers and cleans before a call and before a return that carries no 32-byte value; its
+//! scalar float code is VEX-encoded (`Asm::set_vex_scalars`), so it never waits for an upper
+//! half. A function without 32-byte values cleans after an op that used a `ymm` register
+//! inside. Either way the upper halves are clean wherever control leaves for code that may lack
+//! `avx`: a callee, the caller, the trap path, a software routine.
 
 mod arith;
 pub(super) mod compress;
@@ -39,7 +46,7 @@ use stave_ir::{FloatBits, Operand, TypeId, Value};
 
 use super::abi::VCls;
 use super::func::*;
-use super::{Level, Res, bad, unsup};
+use super::{Res, bad, unsup};
 use crate::enc::*;
 
 /// The shape of a vector or mask value.
@@ -173,11 +180,11 @@ impl Cg<'_, '_> {
     // ---------------------------------------------------------------- encodings
 
     pub(super) fn vform(&mut self, wide: bool) -> Res<Form> {
-        match (self.cx.level, wide) {
-            (Level::V2, false) => Ok(Form::Sse),
-            (Level::V2, true) => Err(bad("internal: a 256-bit vector instruction at the SSE level")),
-            (Level::V3, false) => Ok(Form::X),
-            (Level::V3, true) => {
+        match (self.fx.avx, wide) {
+            (false, false) => Ok(Form::Sse),
+            (false, true) => Err(bad("internal: a 256-bit vector instruction without avx")),
+            (true, false) => Ok(Form::X),
+            (true, true) => {
                 self.ydirty = true;
                 self.yused = true;
                 Ok(Form::Y)
@@ -185,8 +192,24 @@ impl Cg<'_, '_> {
         }
     }
 
+    /// Vector instructions are VEX-encoded.
     pub(super) fn vex(&self) -> bool {
-        self.cx.level == Level::V3
+        self.fx.avx
+    }
+
+    /// `op` on 256 bits: without AVX2 a bitwise integer op is its float twin, which AVX has
+    /// at that width and which gives the same bits.
+    fn yop(&self, op: VBin) -> VBin {
+        if self.fx.avx2 {
+            return op;
+        }
+        match op {
+            VBin::Pand => VBin::Andps,
+            VBin::Pandn => VBin::Andnps,
+            VBin::Por => VBin::Orps,
+            VBin::Pxor => VBin::Xorps,
+            o => o,
+        }
     }
 
     /// Clears the `ymm` upper halves if a 256-bit instruction dirtied them.
@@ -202,7 +225,7 @@ impl Cg<'_, '_> {
         match self.vform(wide)? {
             Form::Sse => self.a.sse_bin(op, d, s)?,
             Form::X => self.a.vex_bin(op, d, d, s)?,
-            Form::Y => self.a.vex_bin(op, y(d), y(d), y(s))?,
+            Form::Y => self.a.vex_bin(self.yop(op), y(d), y(d), y(s))?,
         }
         Ok(())
     }
@@ -214,9 +237,9 @@ impl Cg<'_, '_> {
             VSrc::M(m) => m,
         };
         match self.vform(wide)? {
-            Form::Sse => return Err(bad("internal: an unaligned memory operand at the SSE level")),
+            Form::Sse => return Err(bad("internal: an unaligned memory operand without avx")),
             Form::X => self.a.vex_bin(op, d, d, m)?,
-            Form::Y => self.a.vex_bin(op, y(d), y(d), m)?,
+            Form::Y => self.a.vex_bin(self.yop(op), y(d), y(d), m)?,
         }
         Ok(())
     }
@@ -234,9 +257,9 @@ impl Cg<'_, '_> {
     /// `d = a op s` (VEX only).
     pub(super) fn vb3(&mut self, op: VBin, wide: bool, d: Xmm, a: Xmm, s: Xmm) -> Res<()> {
         match self.vform(wide)? {
-            Form::Sse => return Err(bad("internal: a VEX-only instruction at the SSE level")),
+            Form::Sse => return Err(bad("internal: a VEX-only instruction without avx")),
             Form::X => self.a.vex_bin(op, d, a, s)?,
-            Form::Y => self.a.vex_bin(op, y(d), y(a), y(s))?,
+            Form::Y => self.a.vex_bin(self.yop(op), y(d), y(a), y(s))?,
         }
         Ok(())
     }
@@ -323,6 +346,10 @@ impl Cg<'_, '_> {
 
     /// `d = all ones`.
     pub(super) fn vones(&mut self, wide: bool, d: Xmm) -> Res<()> {
+        if wide && !self.fx.avx2 {
+            // the always-true predicate: no 256-bit integer compare without AVX2
+            return self.vbi(VBinI::Cmpps, true, d, d, 0x0f);
+        }
         self.vb(VBin::Pcmpeqd, wide, d, d)
     }
 
@@ -354,7 +381,15 @@ impl Cg<'_, '_> {
     /// The upper 128 bits of `ymm s` into `xmm d` (the upper half of `ymm d` becomes zero).
     pub(super) fn vhigh(&mut self, d: Xmm, s: Xmm) -> Res<()> {
         self.vform(true)?;
-        Ok(self.a.vex_extract(VExtract::Extracti128, d, y(s), 1)?)
+        let op = if self.fx.avx2 { VExtract::Extracti128 } else { VExtract::Extractf128 };
+        Ok(self.a.vex_extract(op, d, y(s), 1)?)
+    }
+
+    /// `xmm s` into the upper 128 bits of `ymm d`.
+    pub(super) fn vset_high(&mut self, d: Xmm, s: Xmm) -> Res<()> {
+        self.vform(true)?;
+        let op = if self.fx.avx2 { VBinI::Inserti128 } else { VBinI::Insertf128 };
+        Ok(self.a.vex_bin_i(op, y(d), y(d), s, 1)?)
     }
 
     // ---------------------------------------------------------------- values
@@ -519,22 +554,23 @@ impl Cg<'_, '_> {
 
     /// Copies lane 0 (`w` bytes) of `x` into every lane.
     pub(super) fn vbroadcast(&mut self, w: u32, wide: bool, x: Xmm) -> Res<()> {
-        if self.vex() {
+        if self.fx.avx2 {
             let op = by_w(w, [VUn::Pbroadcastb, VUn::Pbroadcastw, VUn::Pbroadcastd, VUn::Pbroadcastq]);
             return self.vu_x(op, wide, x, x);
         }
         match w {
             1 => {
                 self.vzero(XS0)?;
-                self.vb(VBin::Pshufb, false, x, XS0)
+                self.vb(VBin::Pshufb, false, x, XS0)?;
             }
             2 => {
                 self.vui(VUnI::Pshuflw, false, x, x, 0)?;
-                self.vb(VBin::Punpcklqdq, false, x, x)
+                self.vb(VBin::Punpcklqdq, false, x, x)?;
             }
-            4 => self.vui(VUnI::Pshufd, false, x, x, 0),
-            _ => self.vb(VBin::Punpcklqdq, false, x, x),
+            4 => self.vui(VUnI::Pshufd, false, x, x, 0)?,
+            _ => self.vb(VBin::Punpcklqdq, false, x, x)?,
         }
+        if wide { self.vset_high(x, x) } else { Ok(()) }
     }
 
     /// `d = m ? s : d` for a full-lane mask `m`; `t` is clobbered.
@@ -577,7 +613,8 @@ impl Cg<'_, '_> {
         if !(self.rel && self.ywide) {
             self.vclean();
         }
-        r
+        r?;
+        self.check_features(op.name())
     }
 
     fn vec_emit(&mut self, op: VecOp, args: &[Operand], ty: Option<TypeId>, res: Option<Value>) -> Res<()> {

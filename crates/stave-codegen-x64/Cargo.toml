@@ -16,8 +16,8 @@ workspace = true
 stave-ir = { workspace = true }
 stave-obj = { workspace = true }
 stave-opt = { workspace = true }
+stave-target = { workspace = true }
 rustc-hash = { workspace = true }
 
 [dev-dependencies]
-stave-target = { workspace = true }
 proptest = { workspace = true }
