@@ -42,6 +42,7 @@ use stave_diag::{Diagnostic, Span};
 use stave_syntax::{NodeKind, Term};
 
 use crate::Program;
+use crate::callgraph::CallGraph;
 use crate::decls::{DeclFlags, DeclKind};
 use crate::diag::mk;
 use crate::ids::{BindingRef, DeclId, ItemId};
@@ -86,8 +87,8 @@ pub enum Target {
     FenceStream,
     /// An `extern "stave-intrinsic"` call (checked IR `intrinsic.<name>`).
     Intrinsic { decl: DeclId },
-    /// A call through a fn value.
-    FnValue,
+    /// A call through a fn value of fn type `ty`.
+    FnValue { ty: TypeId },
     /// Element access (after `derefs` auto-derefs).
     Index { derefs: u32 },
     /// Sub-slice `xs[a..b]` / `xs[a..=b]` of an array or slice (after `derefs` auto-derefs).
@@ -149,6 +150,11 @@ pub struct TypedBody {
     /// Implicit coercions keyed by the node of the coerced expression, sorted.
     pub coercions: Vec<(u32, Coercion)>,
     pub sites: Vec<CallSite>,
+    /// Calls the source does not spell, keyed by the token of their construct, sorted: a `for`
+    /// loop's `next` (a [`Target::Method`] at the `for` token) and an f-string hole's
+    /// `Display.fmt` (a [`Target::TraitMethod`] with the writer type as its own arg, at the
+    /// f-string token; one per hole).
+    pub implicit: Vec<(u32, Target)>,
     pub has_error: bool,
     /// Class U ops inside `emulate { }`, in source order ([`crate::gates`]).
     pub emulated: Vec<crate::gates::Emulated>,
@@ -180,6 +186,8 @@ pub struct TypeckTimings {
     pub sigs: Duration,
     pub bodies: Duration,
     pub canon: Duration,
+    /// [`crate::callgraph`].
+    pub graph: Duration,
 }
 
 /// The type-checked program.
@@ -192,6 +200,8 @@ pub struct Typeck {
     pub bodies: Vec<TypedBody>,
     /// Unique instances, sorted (canonical).
     pub instances: Vec<Instance>,
+    /// The whole-program call graph ([`crate::callgraph`]).
+    pub call_graph: CallGraph,
     /// Type-checking diagnostics (canonical order). [`Typeck::all_diagnostics`] merges resolution's.
     pub diagnostics: Vec<Diagnostic>,
     pub timings: TypeckTimings,
@@ -423,16 +433,27 @@ fn check_in_pool(prog: &Program) -> Typeck {
         bodies.iter().flat_map(|b| b.sites.iter().map(|s| s.inst.clone())).collect();
     instances.sort();
     instances.dedup();
-    diags.extend(crate::mono::depth_check(prog, &sigs_table, &tys, &bodies, &brackets));
+    let deep = crate::mono::depth_check(prog, &sigs_table, &tys, &bodies, &brackets);
+    // polymorphic recursion (E0902) has no finite instance graph
+    let too_deep = !deep.is_empty();
+    diags.extend(deep);
     let t_canon = t2.elapsed();
+    let t3 = Instant::now();
+    let call_graph = if too_deep {
+        CallGraph { truncated: true, ..CallGraph::default() }
+    } else {
+        crate::callgraph::build(prog, &sigs_table, &tys, &bodies, &brackets)
+    };
+    let t_graph = t3.elapsed();
     let diagnostics = stave_diag::canonical_order(diags, &prog.source_map);
     Typeck {
         types: tys,
         sigs: sigs_table,
         bodies,
         instances,
+        call_graph,
         diagnostics,
-        timings: TypeckTimings { sigs: t_sigs, bodies: t_bodies, canon: t_canon },
+        timings: TypeckTimings { sigs: t_sigs, bodies: t_bodies, canon: t_canon, graph: t_graph },
         error_type: err,
     }
 }
@@ -448,6 +469,7 @@ fn empty_body(j: Job) -> TypedBody {
         targets: Vec::new(),
         coercions: Vec::new(),
         sites: Vec::new(),
+        implicit: Vec::new(),
         has_error: true,
         emulated: Vec::new(),
     }
@@ -483,7 +505,7 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
     for (_, t) in &mut b.locals {
         *t = f(*t);
     }
-    for (_, t) in &mut b.targets {
+    for (_, t) in b.targets.iter_mut().chain(b.implicit.iter_mut()) {
         match t {
             Target::Fn { args, .. } => map_gargs(args, f),
             Target::Method { method, args, .. } | Target::Op { method, args } => {
@@ -498,7 +520,7 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
                 *recv = f(*recv);
                 *ret = f(*ret);
             }
-            Target::SizeOf { ty, .. } => *ty = f(*ty),
+            Target::SizeOf { ty, .. } | Target::FnValue { ty } => *ty = f(*ty),
             _ => {}
         }
     }
@@ -632,6 +654,7 @@ pub(crate) struct Ck<'a> {
     pub targets: Vec<(u32, Target)>,
     pub coercions: Vec<(u32, Coercion)>,
     pub sites: Vec<CallSite>,
+    pub implicit: Vec<(u32, Target)>,
     pub depth: u32,
     /// E0005 case `expr` was reported for this body.
     pub depth_reported: bool,
@@ -692,6 +715,7 @@ fn check_body(
         targets: Vec::new(),
         coercions: Vec::new(),
         sites: Vec::new(),
+        implicit: Vec::new(),
         depth: 0,
         depth_reported: false,
         diverges: false,
@@ -1304,6 +1328,7 @@ impl<'a> Ck<'a> {
         let mut locals: Vec<(u32, TypeId)> = self.locals.iter().map(|(&k, &v)| (k, v)).collect();
         locals.sort_by_key(|x| x.0);
         self.targets.sort_by_key(|x| x.0);
+        self.implicit.sort_by_key(|x| x.0);
         self.coercions.sort_by_key(|x| x.0);
         self.coercions.dedup();
         let has_error =
@@ -1318,6 +1343,7 @@ impl<'a> Ck<'a> {
             targets: std::mem::take(&mut self.targets),
             coercions: std::mem::take(&mut self.coercions),
             sites: std::mem::take(&mut self.sites),
+            implicit: std::mem::take(&mut self.implicit),
             has_error,
             emulated: std::mem::take(&mut self.gates.emulated),
         };

@@ -1365,6 +1365,7 @@ fn empty_body() -> &'static TypedBody {
         targets: Vec::new(),
         coercions: Vec::new(),
         sites: Vec::new(),
+        implicit: Vec::new(),
         has_error: true,
         emulated: Vec::new(),
     })

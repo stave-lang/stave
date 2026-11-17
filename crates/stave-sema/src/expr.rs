@@ -1444,6 +1444,20 @@ impl<'a> Ck<'a> {
                     let d = mk("E0208", None, &[("name", "fmt"), ("type", &tn)], sp, &[]);
                     self.report(d);
                 }
+                continue;
+            }
+            // lowering calls `Display.fmt::<String>` on the hole (references peeled)
+            let fmt = self.prog.strings.lookup("fmt");
+            let string = self.sigs.lang.string;
+            if let Some(m) = self.sigs.trait_def(disp).and_then(|t| {
+                t.methods.iter().copied().find(|&m| self.prog.decl(m).is_some_and(|x| Some(x.name) == fmt))
+            }) && string.is_some()
+            {
+                let w = self.tys.mk_adt(string, Vec::new());
+                self.implicit.push((
+                    tok,
+                    Target::TraitMethod { method: m, self_ty: inner, args: vec![GArg::Type(w)] },
+                ));
             }
         }
         let s = self.sigs.lang.string;
@@ -2578,7 +2592,7 @@ impl<'a> Ck<'a> {
                             let t2 = self.check_expr(a, want, None);
                             self.note_reborrow(a, t2, want);
                         }
-                        self.target(paren, Target::FnValue);
+                        self.target(paren, Target::FnValue { ty: t });
                         Ty::T(ret)
                     }
                     _ => {
@@ -3547,7 +3561,7 @@ impl<'a> Ck<'a> {
                 }
             } else if b != ids::ERROR {
                 // a plain annotated element binding: it must be the element type
-                let et = self.element_type(iter, it);
+                let et = self.element_type(icx.a(f), iter, it);
                 if et != b && et != ids::ERROR && !self.tys.has_error(et) {
                     let want = self.tys_range_of(b);
                     self.mismatch(iter, Ty::T(it), want, None);
@@ -3561,7 +3575,7 @@ impl<'a> Ck<'a> {
             if let Some(tc) = tail {
                 self.tail_clause(tc, ids::ERROR, ids::ERROR, Lanes::Fixed(1));
             }
-            self.element_type(iter, it)
+            self.element_type(icx.a(f), iter, it)
         };
         let pp = self.pattern(pat, elem_t, crate::patterns::Mode::Move);
         crate::patterns::irrefutable(self, pat, &pp, elem_t);
@@ -3582,7 +3596,9 @@ impl<'a> Ck<'a> {
         self.tys.intern(TypeKind::Range { elem: b, inclusive: false })
     }
 
-    fn element_type(&mut self, iter: u32, it: TypeId) -> TypeId {
+    /// The element type of `for .. in iter` (`it`: the type of `iter`); an iterator's `next` is
+    /// recorded as an implicit call at `for_tok`.
+    fn element_type(&mut self, for_tok: u32, iter: u32, it: TypeId) -> TypeId {
         if it == ids::ERROR || self.tys.has_error(it) {
             return ids::ERROR;
         }
@@ -3604,6 +3620,15 @@ impl<'a> Ck<'a> {
                 && let Some((sig, args, self_ty)) = self.w.method_sig(&m)
             {
                 let ret = self.tys.subst(sig.ret, &args, self_ty);
+                // lowering resolves `next` with the impl's args (none of its own)
+                let call_args = match &m {
+                    MethodRef::Impl { impl_args, .. } => impl_args.clone(),
+                    _ => Vec::new(),
+                };
+                self.implicit.push((
+                    for_tok,
+                    Target::Method { method: m, args: call_args, adjust: Adjust::default() },
+                ));
                 if let TypeKind::Adt { def, args } = self.tys.kind(ret).clone()
                     && def == self.sigs.lang.option
                     && let Some(GArg::Type(x)) = args.first()

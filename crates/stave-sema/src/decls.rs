@@ -76,6 +76,8 @@ impl DeclFlags {
     pub const HAS_SELF: u16 = 1 << 11;
     /// `static mut` (a `static` without it is immutable).
     pub const MUT: u16 = 1 << 12;
+    /// `rec fn`: the fn may be part of a call cycle.
+    pub const REC: u16 = 1 << 13;
 
     pub fn has(self, f: u16) -> bool {
         self.0 & f != 0
@@ -186,6 +188,11 @@ impl Collector<'_> {
     /// The name token of the `FnDecl` whose first token is `a`: `rec`? `fn` Ident.
     fn fn_decl_name(&self, a: u32) -> u32 {
         if is(self.toks(), a as usize, Term::KwRec) { a + 2 } else { a + 1 }
+    }
+
+    /// [`DeclFlags::REC`] for the `FnDecl` whose first token is `a`.
+    fn rec_flag(&self, a: u32) -> u16 {
+        if is(self.toks(), a as usize, Term::KwRec) { DeclFlags::REC } else { 0 }
     }
 
     /// The first identifier at or after token `from` within the next few tokens (decl names
@@ -334,7 +341,7 @@ impl Collector<'_> {
                         self.fn_decl_name(a),
                         c,
                         u32::MAX,
-                        pub_flag | unsafe_flag | t,
+                        pub_flag | unsafe_flag | t | self.rec_flag(a),
                         0,
                     );
                     self.main(d);
@@ -448,6 +455,7 @@ impl Collector<'_> {
                         fl |= DeclFlags::PUB;
                     }
                     let a = self.a(c);
+                    fl |= self.rec_flag(a);
                     methods.push(self.push(DeclKind::Method, self.fn_decl_name(a), c, d, fl, k));
                     k += 1;
                 }
@@ -523,8 +531,8 @@ pub(crate) fn collect_file(file: &File, module: ModuleId, module_path: &str, str
                         Some(NodeKind::ItemBody) => c.item_body(ch, pub_flag, false),
                         Some(NodeKind::FnDecl) if test => {
                             let fa = c.a(ch);
-                            let d =
-                                c.push(DeclKind::Fn, c.fn_decl_name(fa), ch, u32::MAX, DeclFlags::TEST, 0);
+                            let fl = DeclFlags::TEST | c.rec_flag(fa);
+                            let d = c.push(DeclKind::Fn, c.fn_decl_name(fa), ch, u32::MAX, fl, 0);
                             c.main(d);
                         }
                         _ => {}

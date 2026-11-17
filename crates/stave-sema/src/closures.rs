@@ -107,36 +107,20 @@ pub fn closures(
     root: u32,
 ) -> Vec<ClosureInfo> {
     let lo = icx.ast.descendants(root).start;
-    let mut out: Vec<ClosureInfo> = Vec::new();
-    // A closure body starts at a `fn` or `spawn` token. The tokens of the fn's block are far fewer
-    // than its nodes: a block without such a token has no closure body, and its nodes are skipped.
-    let skip = icx.child(root, NodeKind::Block).and_then(|b| {
-        let open = icx.a(b);
-        let close = icx.close(open);
-        let toks = icx.toks.get(open as usize..=close as usize)?;
-        let none =
-            close > open && !toks.iter().any(|t| t.kind == Term::KwFn as u8 || t.kind == Term::KwSpawn as u8);
-        none.then(|| icx.ast.descendants(b).start..b + 1)
-    });
-    let skip = skip.unwrap_or(lo..lo);
-    for m in (lo..skip.start).chain(skip.end..root + 1) {
-        if let Some(kind) = closure_kind(icx, m) {
-            out.push(ClosureInfo {
-                node: m,
-                kind,
-                index: 0,
-                token: icx.a(m),
-                parent: None,
-                captures: Vec::new(),
-            });
-        }
-    }
+    let mut out: Vec<ClosureInfo> = closure_nodes(icx, root)
+        .into_iter()
+        .enumerate()
+        .map(|(k, (node, kind))| ClosureInfo {
+            node,
+            kind,
+            index: k as u32,
+            token: icx.a(node),
+            parent: None,
+            captures: Vec::new(),
+        })
+        .collect();
     if out.is_empty() {
         return out;
-    }
-    out.sort_by_key(|c| c.token);
-    for (k, c) in out.iter_mut().enumerate() {
-        c.index = k as u32;
     }
     // parents: the smallest enclosing body
     let ranges: Vec<(u32, u32)> = out.iter().map(|c| (icx.ast.descendants(c.node).start, c.node)).collect();
@@ -188,6 +172,31 @@ pub fn closures(
         caps.sort_by_key(|x| x.binding);
         c.captures = caps;
     }
+    out
+}
+
+/// The closure-body nodes inside the body at `root` (a fn decl node) in `@<enclosing>.<k>` order
+/// (by their `fn` / `spawn` token), with their kinds.
+pub fn closure_nodes(icx: &ItemCx<'_>, root: u32) -> Vec<(u32, ClosureKind)> {
+    let lo = icx.ast.descendants(root).start;
+    let mut out: Vec<(u32, ClosureKind)> = Vec::new();
+    // A closure body starts at a `fn` or `spawn` token. The tokens of the fn's block are far fewer
+    // than its nodes: a block without such a token has no closure body, and its nodes are skipped.
+    let skip = icx.child(root, NodeKind::Block).and_then(|b| {
+        let open = icx.a(b);
+        let close = icx.close(open);
+        let toks = icx.toks.get(open as usize..=close as usize)?;
+        let none =
+            close > open && !toks.iter().any(|t| t.kind == Term::KwFn as u8 || t.kind == Term::KwSpawn as u8);
+        none.then(|| icx.ast.descendants(b).start..b + 1)
+    });
+    let skip = skip.unwrap_or(lo..lo);
+    for m in (lo..skip.start).chain(skip.end..root + 1) {
+        if let Some(kind) = closure_kind(icx, m) {
+            out.push((m, kind));
+        }
+    }
+    out.sort_by_key(|&(m, _)| icx.a(m));
     out
 }
 
