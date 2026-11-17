@@ -20,6 +20,14 @@ vec.abs_wrap            i64                         N    1  vpabsq
 vec.mul.wrap            int16/int32                 N    1  vpmull*
 vec.mul.wrap            int8                        M    5  vpmullw; vpsrlw; vpandq; vpmullw; vpternlogq
 vec.mul.wrap            int64                       N    1  vpmullq
+vec.mul_hi              i16                         N    1  vpmulhw
+vec.mul_hi              u16                         N    1  vpmulhuw
+vec.mul_hi              i32                         M    5  vpmuldq x2; vpsrlq x2; vpermt2d
+vec.mul_hi              u32                         M    5  vpmuludq x2; vpsrlq x2; vpermt2d
+vec.mul_hi              i8                          M    8  vpsllw x2; vpmulhw x2; vpandq x2; vpsrlw; vpternlogq
+vec.mul_hi              u8                          M    8  vpsllw x2; vpmulhuw x2; vpandq x2; vpsrlw; vpternlogq
+vec.mul_hi              i64                         M   20  vpsrlq x5; vpmuludq x4; vpaddq x4; vpandq x3; vpsraq x2; vpsubq x2
+vec.mul_hi              u64                         M   14  vpsrlq x5; vpmuludq x4; vpaddq x4; vpandq
 vec.add.sat             i8/i16                      N    1  vpadds*
 vec.add.sat             u8/u16                      N    1  vpaddus*
 vec.sub.sat             i8/i16                      N    1  vpsubs*
@@ -38,8 +46,8 @@ vec.mul.sat             i16                         M    7  vpmullw; vpmulhw; vp
 vec.mul.sat             u16                         M    4  vpmullw; vpmulhuw; vptestmw; vmovdqu16 {k}
 vec.mul.sat             i32                         M    9  vpmuldq; vpsrlq x2; vpmuldq; vpminsq x2; vpmaxsq x2; vpermt2d
 vec.mul.sat             u32                         M    7  vpmuludq; vpsrlq x2; vpmuludq; vpminuq x2; vpermt2d
-vec.mul.sat             i64                         M   32  imul x8; sar x8; xor x16  | note: lane by lane in general registers: no 64-bit high product
-vec.mul.sat             u64                         M    8  mul x8  | note: lane by lane in general registers: no 64-bit high product
+vec.mul.sat             i64                         M   32  imul x8; sar x8; xor x16  | note: lane by lane in general registers: no 64-bit high-product instruction
+vec.mul.sat             u64                         M    8  mul x8  | note: lane by lane in general registers: no 64-bit high-product instruction
 vec.checked_add         sint                        M    5  vpadd*; vpternlogd; vptestmq; kortestb; setz
 vec.checked_add         u8/u16/u32                  M    4  vpadd*; vpcmpu*; kortestq; setz
 vec.checked_add         u64                         M    4  vpaddq; vpcmpuq; kortestq; setz
@@ -52,8 +60,8 @@ vec.checked_mul         i16                         M    6  vpmullw; vpmulhw; vp
 vec.checked_mul         u16                         M    5  vpmullw; vpmulhuw; vptestmw; kortestq; setz
 vec.checked_mul         i32                         M   10  vpmulld; vpmuldq; vpsrlq x2; vpmuldq; vpermt2d; vpsrad; vpcmpd; kortestq; setz
 vec.checked_mul         u32                         M    9  vpmulld; vpmuludq; vpsrlq x2; vpmuludq; vpermt2d; vptestmd; kortestq; setz
-vec.checked_mul         i64                         M    8  imul x8  | note: lane by lane in general registers: no 64-bit high product
-vec.checked_mul         u64                         M    8  mul x8  | note: lane by lane in general registers: no 64-bit high product
+vec.checked_mul         i64                         M    8  imul x8  | note: lane by lane in general registers: no 64-bit high-product instruction
+vec.checked_mul         u64                         M    8  mul x8  | note: lane by lane in general registers: no 64-bit high-product instruction
 vec.and                 int                         N    1  vpandq
 vec.or                  int                         N    1  vporq
 vec.xor                 int                         N    1  vpxorq
@@ -90,8 +98,8 @@ vec.div_const           u32                         M    8  vpsrlq; vpmuludq x2;
 vec.div_const           i32                         M    9  vpsrlq; vpmuldq x2; vpermt2d; vpaddd; vpsrad; vpsrld; vpaddd; vpsubd
 vec.div_const           u8                          M    6  vpsrlw; vpandq; vpmulhuw x2; vpsllw; vpternlogq
 vec.div_const           i8                          M   13  vpsraw x2; vpsllw x2; vpmulhw x2; vpsrlw x2; vpaddw x2; vpsubw x2; vpternlogq
-vec.div_const           u64                         M   16  xor x8; div x8  | note: lane by lane in general registers: no 64-bit high product
-vec.div_const           i64                         M   16  cqo x8; idiv x8  | note: lane by lane in general registers: no 64-bit high product
+vec.div_const           u64                         M   40  mul x8; sub x8; shr x16; add x8  | note: lane by lane in general registers: no 64-bit high-product instruction
+vec.div_const           i64                         M   40  imul x8; add x8; sar x16; sub x8  | note: lane by lane in general registers: no 64-bit high-product instruction
 vec.div_lanes           int                         U    -  -
 vec.fma                 float                       N    1  vfmadd213p%
 vec.min                 float                       M    5  vminp%; vminp%; vorp%; vcmpunordp%; vaddp% {k}

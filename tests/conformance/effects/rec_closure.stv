@@ -1,0 +1,39 @@
+//~ CHECK-ONLY
+// E1409: a call cycle through a closure literal, at the closure, also when every fn of the cycle
+// is a `rec fn` and when the closure is reached through a fn value, a `thread.join` argument, or
+// a `spawn` body.
+import std.thread;
+
+fn call(f: fn(u32) -> u32, n: u32) -> u32 {
+    return f(n);
+}
+
+fn again(n: u32) -> u32 {
+    return call(fn(x: u32) -> u32 { return again(x); }, n); //~ ERROR E1409
+}
+
+rec fn call_rec(f: fn(u32) -> u32, n: u32) -> u32 {
+    return f(n);
+}
+
+rec fn again_rec(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return call_rec(fn(x: u32) -> u32 { return again_rec(x - 1); }, n); //~ ERROR E1409
+}
+
+fn twice() {
+    let (x, y) = thread.join(fn() { twice(); }, fn() { }); //~ ERROR E1409
+}
+
+fn spin() {
+    scope {
+        spawn { spin(); } //~ ERROR E1409
+    }
+}
+
+fn main() {
+    let a = again(1);
+    let b = again_rec(1);
+    twice();
+    spin();
+}

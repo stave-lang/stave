@@ -5,10 +5,11 @@
 //! Only the five features of the v4 set: no VBMI, VBMI2, BITALG, VPOPCNTDQ, IFMA or GFNI. Byte
 //! and word lanes take sequences of word, doubleword and byte-shuffle instructions; what no
 //! sequence does well runs lane by lane on the home bytes as on v3: float scans (their sums
-//! are sequential), 64-bit `mul.sat`, `checked_mul` and `div_const` (no 64-bit high product),
-//! gathers and scatters of 8- and 16-bit lanes, and lookups whose index lanes are not as wide
-//! as the table's.
+//! are sequential), 64-bit `mul.sat`, `checked_mul` and `div_const` (no 64-bit high-product
+//! instruction), gathers and scatters of 8- and 16-bit lanes, and lookups whose index lanes are
+//! not as wide as the table's.
 
+use stave_ir::divmagic::{DivPlan, div_plan};
 use stave_ir::simd::VecOp;
 use stave_ir::{Operand, PanicKind, TypeId, Value};
 
@@ -19,74 +20,6 @@ use super::*;
 /// Per nibble value: its set bits, and its leading zeros within four bits.
 const POPCOUNT_LUT: [u8; 16] = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
 const CLZ_LUT: [u8; 16] = [4, 3, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0];
-
-/// How lanes divide by a constant: Granlund and Montgomery, "Division by invariant integers
-/// using multiplication", with the high half of a product per lane. `t` below is that
-/// high half of `x * m`, signed or unsigned as the lanes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DivPlan {
-    /// `x`, or `-x` (a signed divisor of -1).
-    Copy { neg: bool },
-    /// Unsigned, a power of two: `x >> s`.
-    Shr(u32),
-    /// Unsigned: `t >> s`.
-    Mul { m: u64, s: u32 },
-    /// Unsigned, a multiplier one bit too wide (`m` its low bits): `(t + ((x - t) >> 1)) >> s`.
-    MulAdd { m: u64, s: u32 },
-    /// Signed, `|d| = 2^l`: `(x + ((x >> (l - 1)) >>> (N - l))) >> l`, negated for `d < 0`.
-    Pow { l: u32, neg: bool },
-    /// Signed: `((t [+ x]) >> s) - (x >> (N - 1))`, negated for `d < 0`; with `add`, `m` is
-    /// the multiplier less 2^N, negative.
-    SMul { m: i64, s: u32, add: bool, neg: bool },
-}
-
-/// `(m, sh_post)` of the multiplier for a divisor `d` (1 <= d < 2^n) of dividends of `prec`
-/// bits, computed with `n`-bit high products (CHOOSE_MULTIPLIER): `m` may have n + 1 bits.
-fn choose_multiplier(d: u64, n: u32, prec: u32) -> (u128, u32) {
-    let l = if d <= 1 { 0 } else { 64 - (d - 1).leading_zeros() };
-    let mut s = l;
-    let mut lo = (1u128 << (n + l)) / u128::from(d);
-    let mut hi = ((1u128 << (n + l)) + (1u128 << (n + l - prec))) / u128::from(d);
-    while lo / 2 < hi / 2 && s > 0 {
-        lo /= 2;
-        hi /= 2;
-        s -= 1;
-    }
-    (hi, s)
-}
-
-/// The plan for the divisor `d` (not 0; lane value, sign-extended when `signed`) of dividends
-/// of `prec` bits (the sign not counted), on lanes of `n` bits.
-fn div_plan(d: i64, n: u32, prec: u32, signed: bool) -> DivPlan {
-    if !signed {
-        let d = d as u64;
-        if d == 1 {
-            return DivPlan::Copy { neg: false };
-        }
-        if d.is_power_of_two() {
-            return DivPlan::Shr(d.trailing_zeros());
-        }
-        let (m, s) = choose_multiplier(d, n, prec);
-        return if m < 1 << n {
-            DivPlan::Mul { m: m as u64, s }
-        } else {
-            DivPlan::MulAdd { m: (m - (1 << n)) as u64, s: s - 1 }
-        };
-    }
-    let (a, neg) = (d.unsigned_abs(), d < 0);
-    if a == 1 {
-        return DivPlan::Copy { neg };
-    }
-    if a.is_power_of_two() {
-        return DivPlan::Pow { l: a.trailing_zeros(), neg };
-    }
-    let (m, s) = choose_multiplier(a, n, prec);
-    if m < 1 << (n - 1) {
-        DivPlan::SMul { m: m as i64, s, add: false, neg }
-    } else {
-        DivPlan::SMul { m: (m as i128 - (1i128 << n)) as i64, s, add: true, neg }
-    }
-}
 
 impl Cg<'_, '_> {
     // ---------------------------------------------------------------- helpers
@@ -183,6 +116,7 @@ impl Cg<'_, '_> {
             Scatter => self.k_scatter(arg(0)?, arg(1)?, arg(2)?),
             DivConst => self.k_div_const(arg(0)?, arg(1)?, rt?, rv?),
             MulSat => self.k_mul_sat(arg(0)?, arg(1)?, rt?, rv?),
+            MulHi => self.k_mul_hi(arg(0)?, arg(1)?, rt?, rv?),
             CheckedMul => self.k_checked_mul(arg(0)?, arg(1)?, rt?, rv?),
             Popcount | Clz => self.k_count(op, arg(0)?, rt?, rv?),
             Permute => self.k_permute(args, rt?, rv?),
@@ -388,6 +322,7 @@ impl Cg<'_, '_> {
             if w == 2 { (EShiftI::Psrlw, EShiftI::Psraw) } else { (EShiftI::Psrld, EShiftI::Psrad) };
         let (add, sub) = (by_w(w, KPADD), by_w(w, KPSUB));
         match plan {
+            DivPlan::Ge(_) => return Err(bad("internal: a 64-bit division plan on narrower lanes")),
             DivPlan::Copy { neg } => {
                 if neg {
                     self.kneg(size, w, x, x)?;
@@ -445,10 +380,10 @@ impl Cg<'_, '_> {
         Ok(())
     }
 
-    /// Truncating division by a constant: high products of word and doubleword lanes; byte
-    /// lanes as their even and odd bytes extended to words. A divisor of 0 traps `DivByZero`
-    /// at once, -1 traps `Overflow` where a lane is MIN. 64-bit lanes have no high product:
-    /// lane by lane.
+    /// Truncating division by a constant: high products of word and doubleword lanes
+    /// (`stave_ir::divmagic`); byte lanes as their even and odd bytes extended to words. A
+    /// divisor of 0 traps `DivByZero` at once, -1 traps `Overflow` where a lane is MIN. 64-bit
+    /// lanes lane by lane in general registers (no 64-bit high-product instruction).
     fn k_div_const(&mut self, a: Operand, b: Operand, rt: TypeId, rv: Value) -> Res<()> {
         let sh = self.vshape(rt)?;
         let t = self.vint(sh)?;
@@ -516,6 +451,60 @@ impl Cg<'_, '_> {
         self.kshv(EShiftI::Psrlq, sz, XS0, xa, 32)?;
         self.kshv(EShiftI::Psrlq, sz, XS1, xb, 32)?;
         self.kb(mul, sz, o, XS0, XS1)
+    }
+
+    /// High halves of the double-width products. 64-bit lanes from four 32-bit partial
+    /// products: with `a = ah 2^32 + al` and `t = ah bl + (al bl >> 32)`, the unsigned high half
+    /// is `ah bh + (t >> 32) + ((al bh + (t mod 2^32)) >> 32)`; no sum overflows. Signed lanes
+    /// subtract `b` where `a` is negative and `a` where `b` is.
+    fn k_mul_hi(&mut self, a: Operand, b: Operand, rt: TypeId, rv: Value) -> Res<()> {
+        let sh = self.vshape(rt)?;
+        let t = self.vint(sh)?;
+        let sz = sh.size;
+        let (xa, xb) = (self.vread(a, sz)?, self.vread(b, sz)?);
+        let r = self.alloc_x()?;
+        match sh.w {
+            1 => {
+                // the even products' high bytes to the low byte, the odd ones' in place
+                let o = self.alloc_x()?;
+                self.kbyte_products(sz, t.signed, xa, xb, r, o)?;
+                self.ksh(EShiftI::Psrlw, sz, r, 8)?;
+                let lo = self.ksplat_mem(sz, 2, 0x00ff);
+                self.kbi(EOp::Pternlogq, sz, r, o, lo, 0xe4)?;
+            }
+            2 => self.kb(if t.signed { EOp::Pmulhw } else { EOp::Pmulhuw }, sz, r, xa, xb)?,
+            4 => {
+                self.kdword_products(sz, t.signed, xa, xb, r, XS1)?;
+                self.kinterleave_idx(XS0, sz, true)?;
+                self.ev(Ev::new(EOp::Permt2d, EVL::of_size(sz), r.num(), XS0.num(), XS1))?;
+            }
+            _ => {
+                let (tt, u) = (self.alloc_x()?, self.alloc_x()?);
+                self.kshv(EShiftI::Psrlq, sz, XS0, xa, 32)?;
+                self.kshv(EShiftI::Psrlq, sz, XS1, xb, 32)?;
+                self.kb(EOp::Pmuludq, sz, r, XS0, XS1)?;
+                self.kb(EOp::Pmuludq, sz, tt, XS0, xb)?;
+                self.kb(EOp::Pmuludq, sz, u, xa, XS1)?;
+                self.kb(EOp::Pmuludq, sz, XS0, xa, xb)?;
+                self.ksh(EShiftI::Psrlq, sz, XS0, 32)?;
+                self.kb(EOp::Paddq, sz, tt, tt, XS0)?;
+                let lo = self.ksplat_mem(sz, 8, 0xffff_ffff);
+                self.kb(EOp::Pandq, sz, XS1, tt, lo)?;
+                self.kb(EOp::Paddq, sz, u, u, XS1)?;
+                self.ksh(EShiftI::Psrlq, sz, tt, 32)?;
+                self.ksh(EShiftI::Psrlq, sz, u, 32)?;
+                self.kb(EOp::Paddq, sz, r, r, tt)?;
+                self.kb(EOp::Paddq, sz, r, r, u)?;
+                if t.signed {
+                    for (x, y) in [(xa, xb), (xb, xa)] {
+                        self.kshv(EShiftI::Psraq, sz, XS0, x, 63)?;
+                        self.kb(EOp::Pandq, sz, XS0, XS0, y)?;
+                        self.kb(EOp::Psubq, sz, r, r, XS0)?;
+                    }
+                }
+            }
+        }
+        self.vput(rv, r, sz)
     }
 
     /// Products clamped to the lane type's range.
@@ -1012,141 +1001,5 @@ impl Cg<'_, '_> {
         // per bit: e's low bytes, x's high bytes
         self.kbi(EOp::Pternlogq, sz, x, e, c, 0xd8)?;
         self.vput(rv, x, sz)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{DivPlan, div_plan};
-
-    /// The plan's lane operations on one `n`-bit lane, `x` normalized (sign-extended when
-    /// `signed`): what [`super::Cg::kdiv_lanes`] emits.
-    fn eval(plan: DivPlan, n: u32, signed: bool, x: i64) -> i64 {
-        let mask = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
-        let u = |v: i64| (v as u64) & mask;
-        let s = |v: i64| ((u(v) << (64 - n)) as i64) >> (64 - n);
-        let norm = |v: i64| if signed { s(v) } else { u(v) as i64 };
-        let srl = |v: i64, k: u32| (u(v) >> k) as i64;
-        let sra = |v: i64, k: u32| s(v) >> k;
-        let mulhu = |v: i64, m: u64| ((u128::from(u(v)) * u128::from(m & mask)) >> n) as i64;
-        let mulhs = |v: i64, m: i64| ((i128::from(s(v)) * i128::from(s(m))) >> n) as i64;
-        let r = match plan {
-            DivPlan::Copy { neg } => {
-                if neg {
-                    -x
-                } else {
-                    x
-                }
-            }
-            DivPlan::Shr(k) => srl(x, k),
-            DivPlan::Mul { m, s } => srl(mulhu(x, m), s),
-            DivPlan::MulAdd { m, s } => {
-                let t = mulhu(x, m);
-                let q = u(t + srl(u(x) as i64 - t, 1)) as i64;
-                srl(q, s)
-            }
-            DivPlan::Pow { l, neg } => {
-                let t = if l > 1 { srl(sra(x, l - 1), n - l) } else { srl(x, n - 1) };
-                let q = sra(x + t, l);
-                if neg { -q } else { q }
-            }
-            DivPlan::SMul { m, s: sh, add, neg } => {
-                let mut t = mulhs(x, m);
-                if add {
-                    t = s(t + x);
-                }
-                let q = s(sra(t, sh) + srl(x, n - 1));
-                if neg { -q } else { q }
-            }
-        };
-        norm(r)
-    }
-
-    fn check(n: u32, prec: u32, signed: bool, d: i64, xs: impl Iterator<Item = i64>) {
-        let plan = div_plan(d, n, prec, signed);
-        for x in xs {
-            let want = if signed { x.wrapping_div(d) } else { ((x as u64) / (d as u64)) as i64 };
-            let want = if signed {
-                ((want as u64) << (64 - n)) as i64 >> (64 - n)
-            } else {
-                want & ((1i64 << n) - 1)
-            };
-            assert_eq!(eval(plan, n, signed, x), want, "{x} / {d} on {n}-bit lanes ({plan:?})");
-        }
-    }
-
-    /// Every byte divisor and dividend, as the 16-bit lanes the byte lanes divide in.
-    #[test]
-    fn div_plans_bytes() {
-        for d in 1..256 {
-            check(16, 8, false, d, 0..256);
-        }
-        for d in -128..128 {
-            if d != 0 {
-                check(16, 7, true, d, (-128..128).filter(|&x| !(x == -128 && d == -1)));
-            }
-        }
-    }
-
-    /// Every 16-bit divisor against edge and spread dividends; every dividend for some.
-    #[test]
-    fn div_plans_words() {
-        let edges = |lo: i64, hi: i64| {
-            let mut v: Vec<i64> = (lo..lo + 300).chain(hi - 300..=hi).collect();
-            v.extend((lo..=hi).step_by(97));
-            v
-        };
-        let (ux, sx) = (edges(0, 0xffff), edges(-0x8000, 0x7fff));
-        for d in 1..=0xffff {
-            check(16, 16, false, d, ux.iter().copied());
-        }
-        for d in -0x8000..=0x7fff {
-            if d != 0 {
-                check(16, 15, true, d, sx.iter().copied().filter(|&x| !(x == -0x8000 && d == -1)));
-            }
-        }
-        for d in [3, 5, 6, 7, 10, 11, 100, 641, 0x7fff, 0xfffe] {
-            check(16, 16, false, d, 0..=0xffff);
-            let d = ((d as u16) as i16) as i64;
-            check(16, 15, true, d, (-0x8000..=0x7fff).filter(|&x| !(x == -0x8000 && d == -1)));
-        }
-    }
-
-    /// 32-bit divisors: small ones, powers of two and their neighbours, extremes, a pseudo
-    /// random spread; dividends likewise.
-    #[test]
-    fn div_plans_dwords() {
-        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-        let mut next = || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed
-        };
-        let mut ds: Vec<u64> = (1..2000).collect();
-        for k in 1..32 {
-            ds.extend([(1u64 << k) - 1, 1 << k, (1 << k) + 1]);
-        }
-        ds.extend([0xffff_fffe, 0xffff_ffff, 0x8000_0001, 0x7fff_ffff]);
-        ds.extend((0..3000).map(|_| next() & 0xffff_ffff));
-        let mut xs: Vec<u64> = (0..500).chain((0..500).map(|i| 0xffff_ffff - i)).collect();
-        xs.extend((0..500).map(|i| 0x8000_0000 - 250 + i));
-        xs.extend((0..2000).map(|_| next() & 0xffff_ffff));
-        for &d in &ds {
-            if d == 0 {
-                continue;
-            }
-            check(32, 32, false, d as i64, xs.iter().map(|&x| x as i64));
-            let sd = (d as u32) as i32 as i64;
-            check(
-                32,
-                31,
-                true,
-                sd,
-                xs.iter()
-                    .map(|&x| (x as u32) as i32 as i64)
-                    .filter(|&x| !(x == i64::from(i32::MIN) && sd == -1)),
-            );
-        }
     }
 }

@@ -18,6 +18,7 @@
 //! | `vec.min_x86 max_x86` | `a b` | V (float) | `a < b ? a : b` / `a > b ? a : b` (else `b`) |
 //! | `vec.add.wrap sub.wrap mul.wrap` | `a b` | V (int) | wrapping |
 //! | `vec.add.sat sub.sat mul.sat` | `a b` | V (int) | saturating |
+//! | `vec.mul_hi` | `a b` | V (int) | the high half of the exact double-width product, signed iff the lanes are |
 //! | `vec.checked_add checked_sub checked_mul` | `a b` | `Option<V>` | `Some` iff no lane overflows |
 //! | `vec.div_lanes` † / `vec.div_const` † | `a b` / `a K` | V (int) | truncating division per lane; a zero divisor traps `DivByZero`, `MIN / -1` traps `Overflow` (lowest lane first) |
 //! | `vec.abs_wrap popcount clz` | `a` | V (int; `abs_wrap` signed) | `|MIN|` = MIN; bit counts within the lane |
@@ -86,6 +87,7 @@ pub enum VecOp {
     AddSat,
     SubSat,
     MulSat,
+    MulHi,
     CheckedAdd,
     CheckedSub,
     CheckedMul,
@@ -153,7 +155,7 @@ pub enum VecOp {
 
 impl VecOp {
     /// Every op, in declaration order (tests and tables iterate it).
-    pub const ALL: [VecOp; 93] = {
+    pub const ALL: [VecOp; 94] = {
         use VecOp::*;
         [
             Splat,
@@ -182,6 +184,7 @@ impl VecOp {
             AddSat,
             SubSat,
             MulSat,
+            MulHi,
             CheckedAdd,
             CheckedSub,
             CheckedMul,
@@ -282,6 +285,7 @@ impl VecOp {
             AddSat => "vec.add.sat",
             SubSat => "vec.sub.sat",
             MulSat => "vec.mul.sat",
+            MulHi => "vec.mul_hi",
             CheckedAdd => "vec.checked_add",
             CheckedSub => "vec.checked_sub",
             CheckedMul => "vec.checked_mul",
@@ -603,6 +607,7 @@ pub fn int_binary(op: VecOp, t: IntTy, a: u64, b: u64) -> Result<u64, PanicKind>
             Ok(if (x <= y) == (op == VecOp::Min) { a } else { b })
         }
         VecOp::Andnot => Ok(t.norm(a & !b)),
+        VecOp::MulHi => Ok(arith::mul_hi(t, a, b)),
         _ => match op.scalar() {
             Some(s) => arith::int_binary(s, t, a, b),
             None => Ok(0),

@@ -54,6 +54,13 @@
 //! a tuple, array, or enum payload, through a reference or raw pointer, or bound by a pattern
 //! other than `let x`; each passes the whole table on.
 //!
+//! **Specialization.** A direct call that passes known fn values (fn items, closure literals, a
+//! local set once to one, or a param that is itself specialized) reaches a node of the callee for
+//! those values ([`NodeKind::Fn`] `spec`), so a helper such as `apply(f, x)` called with `g` from
+//! one place and, inside `g`, with a closure from another is two nodes and no cycle. Calls whose
+//! values are not known share the plain node; at most [`SPEC_LIMIT`] specialized nodes per
+//! instance, then the plain node.
+//!
 //! **Roots** ([`Root`]): `main` of the root package, each `spawn` body, and each fn item or closure
 //! literal passed to `std.thread.join` (both args), `par_for`, or `par_for_mut` (`body`).
 //!
@@ -88,8 +95,10 @@ use crate::types::{GArg, Interner, Overlay, TypeId, TypeKind, TypeTable};
 /// What a node stands for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeKind {
-    /// A fn or method instance. `body`: it has a checked body (else no out-edges).
-    Fn { inst: InstKey, rec: bool, body: bool },
+    /// A fn or method instance. `body`: it has a checked body (else no out-edges). `spec`: per
+    /// param, the fn values every call of this node passes there (empty: any), so a fn that takes
+    /// a fn value has one node per known value it is called with ([`CallGraph`] docs).
+    Fn { inst: InstKey, rec: bool, body: bool, spec: Vec<Vec<u32>> },
     /// Closure body `index` (`@<enclosing>.<index>`) of the instance node `parent`.
     Closure { parent: u32, index: u32, spawn: bool },
     /// Fn-value target table `table` ([`CallGraph::tables`]).
@@ -212,6 +221,10 @@ const CHAIN_LIMIT: u32 = 4 * crate::mono::INST_DEPTH;
 
 /// Most nodes.
 const NODE_BUDGET: usize = 1 << 21;
+
+/// Most specialized nodes of one instance; further calls with other known fn values share its
+/// unspecialized node.
+const SPEC_LIMIT: u32 = 16;
 
 /// Marks a table index in an edge target before the table nodes exist.
 const TABLE_BIT: u32 = 1 << 31;
@@ -369,7 +382,7 @@ fn node_name(
     n: u32,
 ) -> String {
     match g.nodes.get(n as usize).map(|x| &x.kind) {
-        Some(NodeKind::Fn { inst, .. }) => {
+        Some(NodeKind::Fn { inst, spec, .. }) => {
             let mut s = crate::lower::fn_path(prog, sigs, inst.decl);
             if !inst.args.is_empty() {
                 let args: Vec<String> = inst
@@ -381,6 +394,19 @@ fn node_name(
                     })
                     .collect();
                 let _ = write!(s, "<{}>", args.join(", "));
+            }
+            let known: Vec<String> = spec
+                .iter()
+                .enumerate()
+                .filter(|(_, ns)| !ns.is_empty())
+                .map(|(p, ns)| {
+                    let vs: Vec<String> =
+                        ns.iter().map(|&n| node_name(g, prog, sigs, cx, names, n)).collect();
+                    format!("{p}={}", vs.join("|"))
+                })
+                .collect();
+            if !known.is_empty() {
+                let _ = write!(s, "{{{}}}", known.join(", "));
             }
             s
         }
@@ -592,11 +618,11 @@ fn classify<'b>(icx: &ItemCx<'_>, body: &'b TypedBody, closures: &[Closure], e: 
     let chain = crate::threads::wrapper_chain(icx, e);
     let end = icx.end_tok(e);
     for &c in &chain {
-        if body.coercion(c) == Some(&Coercion::FnItem) {
-            return match body.target(icx.end_tok(c)) {
-                Some(Target::Fn { decl, args }) => Src::FnItem(*decl, args),
-                _ => Src::Top,
-            };
+        // `FnItem` also marks a fn value whose features drop: only a fn item has a target here
+        if body.coercion(c) == Some(&Coercion::FnItem)
+            && let Some(Target::Fn { decl, args }) = body.target(icx.end_tok(c))
+        {
+            return Src::FnItem(*decl, args);
         }
         if icx.kind(c) == Some(Syn::Postfix)
             && let Some(Target::Field { decl, index, .. }) = body.target(icx.end_tok(c))
@@ -932,7 +958,13 @@ struct Walk<'a> {
     brackets: &'a [Brackets],
     cx: Overlay<'a>,
     nodes: Vec<NodeB>,
-    keys: FxHashMap<InstKey, u32>,
+    keys: FxHashMap<(InstKey, Vec<Vec<u32>>), u32>,
+    /// Specializations made per instance ([`SPEC_LIMIT`]).
+    specs: FxHashMap<InstKey, u32>,
+    /// The fn values the call being resolved passes per param (empty: none known).
+    spec_hint: Vec<Vec<u32>>,
+    /// The known fn values of the params of the node being expanded: (binding, nodes).
+    consts: Vec<(u32, Vec<u32>)>,
     glue: FxHashMap<TypeId, u32>,
     drop_memo: FxHashMap<TypeId, bool>,
     /// [`Walk::needs_drop`] of typeck's types by id: 0 unknown, 1 no, 2 yes.
@@ -972,9 +1004,19 @@ impl<'a> Walk<'a> {
     }
 
     fn node_for(&mut self, key: InstKey, from: u32) -> Option<u32> {
-        if let Some(&n) = self.keys.get(&key) {
+        let mut spec = self.spec_hint.clone();
+        if !spec.is_empty() {
+            let known = self.keys.contains_key(&(key.clone(), spec.clone()));
+            let made = self.specs.get(&key).copied().unwrap_or(0);
+            if !known && made >= SPEC_LIMIT {
+                spec = Vec::new();
+            }
+        }
+        let k = (key, spec);
+        if let Some(&n) = self.keys.get(&k) {
             return Some(n);
         }
+        let (key, spec) = k;
         let d = *self.prog.decl(key.decl)?;
         if !matches!(d.kind, DeclKind::Fn | DeclKind::Method) {
             return None;
@@ -987,9 +1029,17 @@ impl<'a> Walk<'a> {
         }
         let body = self.body_index(key.decl);
         let id = self.nodes.len() as u32;
-        let kind = NodeKind::Fn { inst: key.clone(), rec: d.flags.has(DeclFlags::REC), body: body.is_some() };
+        if !spec.is_empty() {
+            *self.specs.entry(key.clone()).or_insert(0) += 1;
+        }
+        let kind = NodeKind::Fn {
+            inst: key.clone(),
+            rec: d.flags.has(DeclFlags::REC),
+            body: body.is_some(),
+            spec: spec.clone(),
+        };
         self.nodes.push(NodeB { kind, span: d.name_span, from, body });
-        self.keys.insert(key, id);
+        self.keys.insert((key, spec), id);
         Some(id)
     }
 
@@ -1195,7 +1245,10 @@ impl<'a> Walk<'a> {
     /// A fn value of instance node `inst` (closure nodes from `base`) at walk time.
     fn val(&mut self, src: &Src<'_>, inst: u32, base: u32, args: &[GArg]) -> Val {
         match *src {
-            Src::Local(b) => Val::Slot(self.flow.slot(SlotKey::Local(inst, b))),
+            Src::Local(b) => match self.consts.iter().find(|c| c.0 == b) {
+                Some((_, ns)) => Val::Nodes(ns.clone()),
+                None => Val::Slot(self.flow.slot(SlotKey::Local(inst, b))),
+            },
             Src::Field(d, i) => {
                 // a field declared generic is untracked: generic code stores into it unseen
                 let declared =
@@ -1217,8 +1270,10 @@ impl<'a> Walk<'a> {
     }
 
     fn expand(&mut self, i: u32) {
-        let (args, bi) = match &self.nodes[i as usize] {
-            NodeB { kind: NodeKind::Fn { inst, .. }, body: Some(b), .. } => (inst.args.clone(), *b),
+        let (args, bi, spec) = match &self.nodes[i as usize] {
+            NodeB { kind: NodeKind::Fn { inst, spec, .. }, body: Some(b), .. } => {
+                (inst.args.clone(), *b, spec.clone())
+            }
             NodeB { kind: NodeKind::Glue { ty }, .. } => {
                 let t = *ty;
                 self.expand_glue(i, t);
@@ -1228,10 +1283,34 @@ impl<'a> Walk<'a> {
         };
         let evs = self.evs;
         let Some(be) = evs[bi].as_ref() else { return };
+        self.consts = spec
+            .iter()
+            .enumerate()
+            .filter(|(_, ns)| !ns.is_empty())
+            .filter_map(|(p, ns)| be.params.get(p).map(|&b| (b, ns.clone())))
+            .collect();
         let base = self.nodes.len() as u32;
         for (k, c) in be.closures.iter().enumerate() {
             let kind = NodeKind::Closure { parent: i, index: k as u32, spawn: c.kind == ClosureKind::Spawn };
             self.nodes.push(NodeB { kind, span: c.span, from: i, body: None });
+        }
+        // a local set once, to a fn item or closure literal, holds that value everywhere
+        let mut sets: Vec<(u32, &Src<'_>, usize)> = Vec::new();
+        for ev in &be.evs {
+            if let What::Init { b, src } = &ev.what {
+                match sets.iter_mut().find(|s| s.0 == *b) {
+                    Some(s) => s.2 += 1,
+                    None => sets.push((*b, src, 1)),
+                }
+            }
+        }
+        for (b, src, n) in sets {
+            if n == 1
+                && matches!(src, Src::FnItem(..) | Src::Closure(_))
+                && let Val::Nodes(ns) = self.val(src, i, base, &args)
+            {
+                self.consts.push((b, ns));
+            }
         }
         let node_of = |o: u32| if o == 0 { i } else { base + o - 1 };
         if !args.is_empty() {
@@ -1239,11 +1318,29 @@ impl<'a> Walk<'a> {
         }
         // the callees of the call at the last call token: direct nodes, or a value-call site
         let mut last: (u32, Vec<u32>, Option<usize>) = (u32::MAX, Vec::new(), None);
-        for ev in &be.evs {
+        for (ei, ev) in be.evs.iter().enumerate() {
             let from = node_of(ev.owner);
             match &ev.what {
                 What::Call(t) => {
+                    // the fn values the call passes: the callee is specialized on them
+                    let mut hint: Vec<Vec<u32>> = Vec::new();
+                    for a in be.evs[ei + 1..].iter().take_while(|a| a.tok == ev.tok) {
+                        if let What::Arg { idx, src } = &a.what
+                            && let Val::Nodes(ns) = self.val(src, i, base, &args)
+                        {
+                            let idx = *idx as usize;
+                            if hint.len() <= idx {
+                                hint.resize(idx + 1, Vec::new());
+                            }
+                            let mut ns = ns;
+                            ns.sort_unstable();
+                            ns.dedup();
+                            hint[idx] = ns;
+                        }
+                    }
+                    self.spec_hint = hint;
                     let to = self.call(from, i, t, &args, ev.site);
+                    self.spec_hint = Vec::new();
                     last = (ev.tok, to, None);
                 }
                 What::ValueCall { ty, callee } => {
@@ -1356,6 +1453,7 @@ impl<'a> Walk<'a> {
                 self.edges.push((node_of(o), g, EdgeKind::Drop, site, 0));
             }
         }
+        self.consts.clear();
     }
 
     /// A param declared with a generic type that this instance makes a fn type is untracked:
@@ -1613,6 +1711,9 @@ pub(crate) fn build(
         cx: Overlay::new(table),
         nodes: Vec::new(),
         keys: FxHashMap::default(),
+        specs: FxHashMap::default(),
+        spec_hint: Vec::new(),
+        consts: Vec::new(),
         glue: FxHashMap::default(),
         drop_memo: FxHashMap::default(),
         drop_known: vec![0; table.len()],
@@ -1633,7 +1734,7 @@ pub(crate) fn build(
         }
     }
     if let Some(m) = main_decl(prog)
-        && let Some(&n) = w.keys.get(&InstKey { decl: m, args: Vec::new() })
+        && let Some(&n) = w.keys.get(&(InstKey { decl: m, args: Vec::new() }, Vec::new()))
     {
         let site = Site::At(w.nodes[n as usize].span);
         w.root(n, RootKind::Main, site);

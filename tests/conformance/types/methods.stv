@@ -1,5 +1,6 @@
 //~ CHECK-ONLY
-// E0208: no method or field. `mul_wide` exists on `u32` and `u64` only.
+// E0208: no method or field. `mul_wide` exists on `i32`, `i64`, `u32` and `u64` only, `mul_hi` on
+// the fixed-width ints.
 struct Pt { pub x: u32, pub y: u32 }
 
 impl Pt {
@@ -12,6 +13,15 @@ fn wide(a: u32, b: u64, c: u16) -> u64 {
     let (h2, l2) = b.mul_wide(b);
     let bad = c.mul_wide(c); //~ ERROR E0208
     return h2 + l2 + (hi as u64) + (lo as u64);
+}
+
+fn signed_wide(a: i32, b: i64, c: i8, n: usize) -> i64 {
+    let (hi, lo) = a.mul_wide(a);
+    let (h2, l2) = b.mul_wide(b);
+    let h3: i8 = c.mul_hi(c);
+    let h4: i64 = b.mul_hi(b);
+    let bad = n.mul_hi(n); //~ ERROR E0208
+    return (h2 +% l2) +% (hi as i64) +% (lo as i64) +% (h3 as i64) +% h4;
 }
 
 fn fields(p: Pt, r: &Pt, m: &mut Pt) -> u32 {

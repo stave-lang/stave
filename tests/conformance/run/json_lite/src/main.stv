@@ -127,7 +127,7 @@ fn parse_string(b: &[u8], p: &mut usize) -> Result<string.String, usize> {
     return Result.Ok(s);
 }
 
-fn parse_array(b: &[u8], p: &mut usize) -> Result<Json, usize> {
+rec fn parse_array(b: &[u8], p: &mut usize) -> Result<Json, usize> {
     expect_byte(b, p, 91)?;
     let mut items = vec.Vec::<Json>.new();
     skip_ws(b, p);
@@ -149,7 +149,7 @@ fn parse_array(b: &[u8], p: &mut usize) -> Result<Json, usize> {
     return Result.Ok(Json.Arr(items));
 }
 
-fn parse_object(b: &[u8], p: &mut usize) -> Result<Json, usize> {
+rec fn parse_object(b: &[u8], p: &mut usize) -> Result<Json, usize> {
     expect_byte(b, p, 123)?;
     let mut members = vec.Vec::<Member>.new();
     skip_ws(b, p);
@@ -173,7 +173,7 @@ fn parse_object(b: &[u8], p: &mut usize) -> Result<Json, usize> {
     return Result.Ok(Json.Obj(members));
 }
 
-fn parse_value(b: &[u8], p: &mut usize) -> Result<Json, usize> {
+rec fn parse_value(b: &[u8], p: &mut usize) -> Result<Json, usize> {
     skip_ws(b, p);
     if *p >= b.len() {
         return Result.Err(*p);
@@ -218,7 +218,7 @@ fn parse(b: &[u8]) -> Result<Json, usize> {
     return Result.Ok(v);
 }
 
-fn write(v: &Json, out: &mut string.String) {
+rec fn write(v: &Json, out: &mut string.String) {
     match v {
         Json.Null => {
             out.push_str("null");
@@ -278,7 +278,7 @@ struct Stats {
     pub float_sum: f64,
 }
 
-fn walk(v: &Json, st: &mut Stats) {
+rec fn walk(v: &Json, st: &mut Stats) {
     match v {
         Json.Null => {
             st.nulls = st.nulls + 1;

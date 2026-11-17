@@ -43,7 +43,7 @@ fn load(src: &str, target: &str) -> (Program, Typeck) {
     let errs: Vec<String> = tc
         .all_diagnostics(&p)
         .iter()
-        .filter(|d| d.severity() == stave_diag::Severity::Error)
+        .filter(|d| d.severity() == stave_diag::Severity::Error && !["E1402", "E1409"].contains(&d.code()))
         .map(|d| format!("{} {}", d.code(), d.message()))
         .collect();
     assert!(errs.is_empty(), "{}", errs.join("\n"));
@@ -53,8 +53,27 @@ fn load(src: &str, target: &str) -> (Program, Typeck) {
 /// The dump lines of the program's own package (`main.` paths), plus cycles and roots.
 fn dump(src: &str) -> (Program, Typeck, String) {
     let (p, tc) = load(src, "x86_64-linux");
-    let d = tc.call_graph.dump(&p, &tc);
+    let d = plain(&tc.call_graph.dump(&p, &tc));
     (p, tc, d)
+}
+
+/// The dump with the specializations (`{0=main.f}` after a fn name) left out, for tests that are
+/// not about them.
+fn plain(d: &str) -> String {
+    let mut out = String::with_capacity(d.len());
+    let mut depth = 0u32;
+    let mut prev = ' ';
+    for c in d.chars() {
+        if c == '{' && (depth > 0 || (prev != ' ' && prev != '\n')) {
+            depth += 1;
+        } else if c == '}' && depth > 0 {
+            depth -= 1;
+        } else if depth == 0 {
+            out.push(c);
+        }
+        prev = c;
+    }
+    out
 }
 
 #[track_caller]
@@ -453,7 +472,7 @@ fn main() {
 }
 ",
     );
-    has(&d, "cycle level 0 {main.again, main.call, main.again.0}");
+    has(&d, "cycle level 0 {main.again, main.again.0, main.call}");
     let cyc = d.lines().find(|l| l.starts_with("cycle") && l.contains("main.twice")).expect("join cycle");
     assert!(cyc.contains("main.twice.0") && cyc.contains("std.thread.join<(), ()>"), "{cyc}");
     assert!(!cyc.contains("main.twice.1") && !cyc.ends_with(" drop"), "{cyc}");
@@ -614,4 +633,130 @@ fn corpus_graph_is_independent_of_load_order_and_threads() {
         assert!(pool.install(|| load(None).1) == base, "threads {threads}");
     }
     let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The E1402 / E1409 diagnostics of a program: (code, message, line of the primary span, the
+/// related labels as `line:label`).
+fn recursion_errors(src: &str) -> Vec<(String, String, u32, Vec<String>)> {
+    let (p, tc) = load(src, "x86_64-linux");
+    let line = |s: stave_diag::Span| p.source_map.locate(s).map_or(0, |l| l.line);
+    tc.all_diagnostics(&p)
+        .iter()
+        .filter(|d| ["E1402", "E1409"].contains(&d.code()))
+        .map(|d| {
+            let related = d.related().iter().map(|r| format!("{}:{}", line(r.span), r.label)).collect();
+            (d.code().to_string(), d.message().to_string(), d.primary().map_or(0, line), related)
+        })
+        .collect()
+}
+
+#[test]
+fn unmarked_recursion_names_the_cycle() {
+    let errs = recursion_errors(
+        "fn a(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return b(n - 1);
+}
+fn b(n: u32) -> u32 { return c(n); }
+fn c(n: u32) -> u32 { return a(n) + b(n); }
+rec fn d(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return e(n - 1);
+}
+fn e(n: u32) -> u32 { return d(n); }
+fn main() {
+    let x = a(3) + d(3);
+}
+",
+    );
+    assert_eq!(errs.len(), 2, "{errs:?}");
+    let (code, msg, at, rel) = &errs[0];
+    assert_eq!((code.as_str(), *at), ("E1402", 3));
+    assert_eq!(
+        msg,
+        "recursive call cycle `main.a -> main.b -> main.c -> main.a`: `main.a` is not a `rec fn`"
+    );
+    assert_eq!(
+        rel,
+        &[
+            "3:`main.a` calls the next fn of the cycle here".to_string(),
+            "5:next call of the cycle".to_string(),
+            "6:next call of the cycle".to_string(),
+            "5:also in this recursion, not a `rec fn`".to_string(),
+            "6:also in this recursion, not a `rec fn`".to_string(),
+        ]
+    );
+    let (code, msg, at, _) = &errs[1];
+    assert_eq!((code.as_str(), *at), ("E1402", 11));
+    assert_eq!(msg, "recursive call cycle `main.e -> main.d -> main.e`: `main.e` is not a `rec fn`");
+}
+
+#[test]
+fn a_cycle_through_a_closure_is_its_own_error() {
+    let errs = recursion_errors(
+        "fn call(f: fn(u32) -> u32, n: u32) -> u32 { return f(n); }
+fn again(n: u32) -> u32 {
+    return call(fn(x: u32) -> u32 { return again(x); }, n);
+}
+fn main() {
+    let x = again(1);
+}
+",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    let (code, msg, at, _) = &errs[0];
+    assert_eq!((code.as_str(), *at), ("E1409", 3));
+    assert_eq!(
+        msg,
+        "recursive call cycle `closure in main.again -> main.again -> main.call -> closure in main.again` goes through a closure literal in `main.again`"
+    );
+}
+
+#[test]
+fn generic_recursion_is_reported_once_with_the_instance() {
+    let errs = recursion_errors(
+        "fn deep<X>(x: X, n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return deep(x, n - 1);
+}
+fn main() {
+    let a = deep(7u8, 2) + deep(true, 2);
+}
+",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].1.starts_with("recursive call cycle `main.deep<"), "{errs:?}");
+    assert!(errs[0].1.ends_with("`main.deep` is not a `rec fn`"), "{errs:?}");
+}
+
+/// A fn taking a fn value gets a node per known value it is called with, so a helper called with
+/// `twice` and, inside `twice`, with a closure is no cycle; values that are not known at the call
+/// share the plain node.
+#[test]
+fn fn_params_are_specialized_per_known_value() {
+    let src = "fn twice(x: u32) -> u32 {
+    let f = fn(y: u32) -> u32 { return y * 2; };
+    return apply(f, x);
+}
+fn apply(f: fn(u32) -> u32, x: u32) -> u32 { return f(x); }
+fn pick(k: bool) -> u32 {
+    let g = if k then twice else twice;
+    return apply(g, 1);
+}
+fn main() {
+    let a = apply(twice, 5) + pick(true);
+}
+";
+    let (p, tc) = load(src, "x86_64-linux");
+    let d = tc.call_graph.dump(&p, &tc);
+    let has_raw = |l: &str| assert!(d.lines().any(|x| x.starts_with(l)), "no `{l}` in:\n{}", own(&d));
+    has_raw("edge main.main -> main.apply{0=main.twice} call");
+    has_raw("edge main.apply{0=main.twice} -> main.twice indirect");
+    has_raw("edge main.twice -> main.apply{0=main.twice.0} call");
+    has_raw("edge main.apply{0=main.twice.0} -> main.twice.0 indirect");
+    // an untracked value goes to the plain node, which calls through its fn-type table
+    has_raw("edge main.pick -> main.apply call");
+    has_raw("edge main.apply -> table fn(u32) -> u32 indirect");
+    assert!(!d.lines().any(|l| l.starts_with("cycle") && !l.ends_with(" drop")), "{}", own(&d));
+    check_invariants(&tc.call_graph);
 }

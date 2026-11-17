@@ -77,7 +77,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0205 | constant shift amount ≥ bit width |
 | E0206 | operator not defined for type (e.g. `+%` on a float) |
 | E0207 | non-unit function can reach its end without `return` (a `()` function falling off its end is an implicit `return;`). Case `never`: a `-> never` function with a reachable `return` or a reachable end of body |
-| E0208 | no method or field `<name>` on type `<T>` (e.g. `mul_wide` on `u16`: it exists on `u32` and `u64` only) |
+| E0208 | no method or field `<name>` on type `<T>` (e.g. `mul_wide` on `u16`: it exists on `i32`, `i64`, `u32` and `u64` only) |
 | E0209 | `never` used outside a return type: it is legal only after `->` of a fn signature or a fn type |
 | E0210 | expression statement whose type is not `()` or `never` (discarded value, e.g. an ignored `Result`). Discard explicitly with `let _ = e;` (drops at once). Exact fix |
 | E0211 | contract operand not allowed: `requires`/`ensures` take a `bool` expression over params, fields, `.len()`, literals, arithmetic, comparison, `&&` `||` `!`, and calls of safe fns whose args are `&` or Copy; no `unsafe`, `&mut`, `static`/`static mut`. Case `trait-impl`: a contract on a trait impl method. Planned |
@@ -111,7 +111,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0604 | plain `+ - *` on an integer vector (choose `+%`, `+|`, or `checked_add`) |
 | E0605 | mask width or count does not match the vector (use `m.rewiden::<W>()`) |
 | E0606 | aligned load or store on a slice whose type lacks that alignment (use `align_to`) |
-| E0607 | vector integer division by a non-constant (use `div_lanes`) |
+| E0607 | vector integer division by a non-constant: `a / b`, or `a.div_const(k)` with `k` not a const-expr (use `div_lanes`). Case `zero`: `a.div_const(k)` with `k` = 0 |
 | E0608 | permute or table index out of range at compile time |
 | E0609 | generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument. Write `f32x8` / `mask32x8` |
 | E0700 | operation unavailable (class U) on the target, outside `emulate { }` |
@@ -160,7 +160,9 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E1303 | `--compiler gpu` with a code-generating command (`build`, `run`, `test`) for a target stage1 does not support (AArch64 in v1); `stave check` is not affected. Reported instead of E1302 when both apply (probe step 1, cli.md). No location. Fix: use `--compiler auto` or `--compiler cpu`: stage0 builds this target |
 | E1304 | `--compiler gpu` and the package links C objects (through mold/lld), which stage1 v1 does not support. Located at the package's first C-link input in stave.toml (or the first `extern "C"` import block if none is declared). `stave check` is not affected. Under `auto` such packages go to stage0 (reported in the summary line). Fix: use `--compiler auto` or `--compiler cpu`: stage0 links C objects |
 | E1401 | a fn with a deny clause `without(..)` has a denied effect: something it can call has it. Checked on each instance of a generic fn (an uninstantiated one is not checked), after the type and borrow checks pass. Names the call chain (one `call` label per call, from the fn to the op) and the op (`op` label). At the denied effect in the clause; for an instance of a generic fn at the call that instantiates it. Case `self`: the op is in the fn itself |
+| E1402 | unmarked recursion: a call cycle with a fn not declared `rec fn`. The graph is over instances (generic fns per instantiation, closures per instance); its edges are calls, implied calls (`for` `next`, f-string `Display.fmt`), `dispatch` calls to their arms, fn-value calls to the values that can reach them, and drops (drop glue, `Drop` impls). One per cycle, at the call leaving the cycle's unmarked fn with the smallest path; the message lists the cycle from there along a shortest path, with a related label at each further call and at the name of every other unmarked fn of the component. Exempt: a cycle made only by dropping a recursive value (glue, `Drop` impls, built-in fns). A cycle through a closure literal is E1409 |
 | E1403 | a fn value coerced to a fn type whose deny clause names an effect the value may have: a value of `fn(..) without(D1)` is usable as `fn(..) without(D2)` only if D2 ⊆ D1. A closure literal or fn item made into such a value is checked on its effects instead (case `made`: names the chain and the op as E1401) |
 | E1404 | unknown effect name in a deny clause (the effects: `alloc trap recursive lock unsafe io block`) |
 | E1407 | a `Flat` bound (`<T: Flat>`) given a type that is not `Flat`. Names the first non-flat component (reference, view, raw pointer, fn value, `UnsafeCell`, type with `Drop`, generic param without a `Flat` bound, unsized type) and its path: field names, `Variant.field` for an enum payload, `0` for a tuple element, `[_]` for an array element, `<T>` for a type argument. Case `self`: the type itself is that component. Case `depth`: the check passed its depth cutoff (1024 levels) and fails closed |
 | E1408 | an `impl Flat`, safe or `unsafe(..)`: `Flat` is derived by the compiler from the type's structure and never implemented. At the `impl`; no other impl check runs on it |
+| E1409 | a call cycle through a closure literal (directly or through a fn value): closures cannot be `rec`. One per cycle, at its first closure literal; the cycle is listed as for E1402 |

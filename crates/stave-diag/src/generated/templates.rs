@@ -2265,7 +2265,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0607",
         severity: Severity::Error,
         area: "simd",
-        rule: "vector integer division by a non-constant (use `div_lanes`)",
+        rule: "vector integer division by a non-constant (use `div_lanes`); case `zero`: by the constant 0",
         retired: false,
         located: true,
         holes: &[
@@ -2279,7 +2279,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "run-time divisor" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "use `a.div_lanes(b)` for a run-time divisor, or `a.div_const::<K>()` for a constant one",
+                    description: "use `a.div_lanes(b)` for a run-time divisor, or `a.div_const(k)` with a const-expr `k`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "zero",
+                message: "integer vector division of `{type}` by the constant 0",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "divides by zero" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "divide by a nonzero constant",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4370,6 +4382,34 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E1402",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "unmarked recursion: a call cycle (a strongly connected component of the whole-program call graph over instances: calls, implied calls, `dispatch` arms, fn-value calls resolved to the values that reach them, drops) with a fn not declared `rec fn`; one per cycle, at the call leaving its first unmarked fn (smallest path); the cycle is listed from there along a shortest path, and every other unmarked fn of the component gets a label at its name; a cycle made only by dropping a recursive value (drop glue, `Drop` impls, built-in fns) needs no marker; a cycle through a closure literal is E1409",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "cycle", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "name", kind: HoleKind::Path, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "recursive call cycle `{cycle}`: `{name}` is not a `rec fn`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{name}` calls the next fn of the cycle here" },
+                    LabelTemplate { at: "call", text: "next call of the cycle" },
+                    LabelTemplate { at: "unmarked", text: "also in this recursion, not a `rec fn`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "mark every fn of the recursion `rec fn` (its depth then has no static bound), or rewrite it as a loop",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E1403",
         severity: Severity::Error,
         area: "effects",
@@ -4514,6 +4554,33 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the impl: a type is `Flat` exactly when it holds no reference, view, raw pointer, fn value, `UnsafeCell`, or `Drop` type",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1409",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "a call cycle through a closure literal (also when the closure is reached through a fn value); one per cycle, at its first closure literal; the cycle is listed from there along a shortest path",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "cycle", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "name", kind: HoleKind::Path, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "recursive call cycle `{cycle}` goes through a closure literal in `{name}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this closure literal is part of the cycle" },
+                    LabelTemplate { at: "call", text: "next call of the cycle" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write the recursive part as a `rec fn` item and call it from the closure",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

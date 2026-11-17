@@ -73,6 +73,7 @@ mod dump;
 mod ids;
 mod intern;
 mod pool;
+mod recursion;
 mod scan;
 mod toml;
 

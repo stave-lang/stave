@@ -1,12 +1,12 @@
-//! Built-ins: methods of the built-in types (`u32`/`u64` `mul_wide`, int bit counts,
+//! Built-ins: methods of the built-in types (`mul_wide`, `mul_hi`, int bit counts,
 //! raw-pointer `read`/`write`, memory hints (prefetches, `write_stream`, scalar `store_stream`),
 //! `len`, `bool` and mask `select`, SIMD vector and mask operations), the type-relative fns of
 //! vector and mask types (`f32x4.splat`, `u8x16.load`), and the `extern "stave-intrinsic"` table
 //! of contracts/intrinsics.md (E0805; E0704 when called on another arch). `size_of` / `align_of`
 //! / `fence_stream` are typed by the body checker.
 //!
-//! `mul_wide` exists on `u32` and `u64` only: on any other type the lookup fails and the
-//! checker reports E0208.
+//! `mul_wide` exists on `i32`, `i64`, `u32` and `u64` only, `mul_hi` on the fixed-width ints:
+//! on any other type the lookup fails and the checker reports E0208.
 
 use stave_diag::Diagnostic;
 use stave_syntax::NodeKind;
@@ -31,7 +31,7 @@ pub struct BuiltinMethod {
     pub is_unsafe: bool,
 }
 
-const INT_METHODS: &[&str] = &["mul_wide", "popcount", "clz", "ctz"];
+const INT_METHODS: &[&str] = &["mul_wide", "mul_hi", "popcount", "clz", "ctz"];
 const PTR_HINTS: &[&str] = &[
     "prefetch_read_l1",
     "prefetch_read_l2",
@@ -87,6 +87,7 @@ const VEC_METHODS: &[&str] = &[
     "checked_add",
     "checked_sub",
     "checked_mul",
+    "mul_hi",
     "div_const",
     "div_lanes",
     "store_stream",
@@ -115,9 +116,12 @@ pub fn builtin_method<I: Interner + ?Sized>(cx: &I, t: TypeId, name: &str) -> Op
         TypeKind::Int { .. } | TypeKind::Float(_) if name == "store_stream" => {
             is_lane(cx, t).then_some(BuiltinMethod { name: "store_stream", by_ref: false, is_unsafe: false })
         }
-        TypeKind::Int { signed, bits } => {
+        TypeKind::Int { bits, .. } => {
             let n = intern_name(INT_METHODS, name)?;
-            if n == "mul_wide" && (*signed || !matches!(bits, types::IntBits::B32 | types::IntBits::B64)) {
+            if n == "mul_wide" && !matches!(bits, types::IntBits::B32 | types::IntBits::B64) {
+                return None;
+            }
+            if n == "mul_hi" && *bits == types::IntBits::Size {
                 return None;
             }
             Some(BuiltinMethod { name: n, by_ref: false, is_unsafe: false })
@@ -211,6 +215,7 @@ pub fn builtin_method_sig<I: Interner + ?Sized>(
             let tup = cx.mk_tuple(vec![t, t]);
             (vec![ArgTy::Is(t)], tup)
         }
+        (TypeKind::Int { .. }, "mul_hi") => (vec![ArgTy::Is(t)], t),
         (TypeKind::Int { .. } | TypeKind::Float(_), "store_stream") => {
             let s = cx.intern(TypeKind::Slice { elem: t, align: 0 });
             let rs = cx.mk_ref(true, s);
@@ -325,7 +330,7 @@ fn vector_method<I: Interner + ?Sized>(
         "scan_add" if float => (vec![], t),
         "scan_add_wrap" if !float => (vec![], t),
         "copysign" | "min_num" | "max_num" | "min_x86" | "max_x86" if float => (vec![ArgTy::Is(t)], t),
-        "andnot" | "div_lanes" if !float => (vec![ArgTy::Is(t)], t),
+        "andnot" | "div_lanes" | "mul_hi" if !float => (vec![ArgTy::Is(t)], t),
         "min" | "max" => (vec![ArgTy::Is(t)], t),
         "fma" if float => (vec![ArgTy::Is(t), ArgTy::Is(t)], t),
         "reduce_add" if float => (vec![], lane),
@@ -341,10 +346,8 @@ fn vector_method<I: Interner + ?Sized>(
             };
             (vec![ArgTy::Is(t)], o)
         }
-        "div_const" if !float => match gargs {
-            [GArg::Const(ConstArg::Value(_))] => (vec![], t),
-            _ => return None,
-        },
+        // the divisor is a const-expr of the lane type (`Ck::div_const_divisor`)
+        "div_const" if !float => (vec![ArgTy::Is(lane)], t),
         "store" => (vec![ArgTy::Is(rms), ArgTy::Is(us)], unit),
         "store_aligned" | "store_stream" => {
             let bytes = vec_bytes(cx, lane, n);
@@ -478,6 +481,36 @@ pub fn builtin_assoc<I: Interner + ?Sized>(
             _ => return None,
         }),
         _ => None,
+    }
+}
+
+impl crate::typeck::Ck<'_> {
+    /// The divisor of `v.div_const(k)` (`k` typed as the lane type `lane` by the call) as the
+    /// bits of a `u64`, two's complement for a signed lane. `k` must be a const-expr (E0607)
+    /// other than 0 (E0607 case `zero`); `vec` names the vector in the message.
+    pub(crate) fn div_const_divisor(&mut self, k: u32, lane: TypeId, vec: TypeId) -> Option<u64> {
+        let (n, had_error) = (self.diags.len(), self.has_error);
+        let env = self.env();
+        let v = crate::consteval::eval_item_const(self, &env, k, lane);
+        // "not a const-expr" gives way to E0607; an error inside a const-expr (E0203) stays
+        let kept: Vec<Diagnostic> = self.diags.drain(n..).filter(|d| d.code() != "E0904").collect();
+        let failed = !kept.is_empty();
+        self.diags.extend(kept);
+        self.has_error = had_error || failed;
+        let tn = self.show(vec);
+        let span = self.icx.node_span(k);
+        match v {
+            Some(crate::consteval::Val::Int(0)) => {
+                self.report(mk("E0607", Some("zero"), &[("type", &tn)], span, &[]));
+                None
+            }
+            Some(crate::consteval::Val::Int(d)) => Some(d as u64),
+            _ if failed => None,
+            _ => {
+                self.report(mk("E0607", None, &[("type", &tn)], span, &[]));
+                None
+            }
+        }
     }
 }
 

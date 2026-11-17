@@ -165,6 +165,8 @@ pub enum VBin {
     /// Shift left by the signed per-lane amount in `vm` (right when negative).
     Sshl,
     Ushl,
+    /// Unsigned halving add: `(a + b) >> 1` without losing the carry.
+    Uhadd,
 }
 
 impl VBin {
@@ -194,6 +196,7 @@ impl VBin {
             VBin::Cmtst => (0, 0x11, BHSD),
             VBin::Sshl => (0, 0x08, BHSD),
             VBin::Ushl => (1, 0x08, BHSD),
+            VBin::Uhadd => (1, 0x00, BHS),
         }
     }
 }
@@ -387,6 +390,8 @@ pub enum VShift {
     Sli,
     /// Shift right and insert, `1..=lane bits`.
     Sri,
+    /// Unsigned shift right and accumulate (`vd += vn >> imm`), `1..=lane bits`.
+    Usra,
 }
 
 /// Narrowing moves (`xtn`, `xtn2` by the arrangement).
@@ -798,6 +803,7 @@ impl Asm {
             VShift::Ushr => (1, 0x00, false),
             VShift::Sli => (1, 0x0a, true),
             VShift::Sri => (1, 0x08, false),
+            VShift::Usra => (1, 0x02, false),
         };
         let field = if left {
             range(i64::from(imm), 0, i64::from(esize - 1), 6)?;

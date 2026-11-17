@@ -690,17 +690,17 @@ impl<'m, H: Host> Interp<'m, H> {
                 Val::S(arith::int_count(op, t, s!(0)))
             }
             Op::MulWide => {
-                let bits = match self.ocls(body, arg(0)?).or(self.ocls(body, arg(1)?)) {
-                    Some(Cls::Int(t)) => t.bits,
+                let it = match self.ocls(body, arg(0)?).or(self.ocls(body, arg(1)?)) {
+                    Some(Cls::Int(t)) => t,
                     _ => match ty.and_then(|t| self.m.types.key(t)) {
                         Some(crate::types::TypeKey::Tuple(ts)) => match ts.first().map(|t| self.cls(*t)) {
-                            Some(Cls::Int(t)) => t.bits,
-                            _ => 64,
+                            Some(Cls::Int(t)) => t,
+                            _ => IntTy::new(64, false),
                         },
-                        _ => 64,
+                        _ => IntTy::new(64, false),
                     },
                 };
-                let (hi, lo) = arith::mul_wide(bits, s!(0), s!(1));
+                let (hi, lo) = arith::mul_wide(it, s!(0), s!(1));
                 Val::agg(vec![Val::S(hi), Val::S(lo)])
             }
             Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {

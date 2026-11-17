@@ -3100,10 +3100,13 @@ impl<'a> Ck<'a> {
                     } else {
                         ats = self.builtin_args(&ps, args);
                         let ret = if b.name == "select" { self.select_ty(c, &ats, args) } else { ret };
-                        if let [GArg::Const(ConstArg::Value(k))] = gargs[..]
-                            && b.name == "div_const"
+                        if b.name == "div_const"
+                            && let (Some(&k), Some(&kt)) = (args.first(), ats.first())
+                            && kt != ids::ERROR
+                            && let TypeKind::Vector { lane, .. } = *self.tys.kind(c)
+                            && let Some(d) = self.div_const_divisor(k, lane, c)
                         {
-                            consts.push(k);
+                            consts.push(d);
                         }
                         (ret, Ty::T(ret))
                     };

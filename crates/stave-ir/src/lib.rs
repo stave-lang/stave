@@ -19,6 +19,7 @@
 pub mod arith;
 pub mod bounds;
 pub mod build;
+pub mod divmagic;
 pub mod fence;
 pub mod host;
 pub mod interp;
