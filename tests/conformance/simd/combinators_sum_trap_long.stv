@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// std.slice `sum` on slices long enough for the 256-bit loop of x86-64: the running sum of 2000
+// i16 elements reaches MAX at element 1500 and overflows at element 1700 although the whole sum
+// fits, so the first sum stops short of 1700 and returns, the second traps `Overflow`.
+// crates/stave-driver/tests/interp_vs_native.rs: exit 101, combinators_sum_trap_long.stderr.
+import std.io;
+
+fn main() -> i32 {
+    let mut a: [i16; 2000] = [0; 2000];
+    for i in 0usize..1500 { a[i] = if i % 3 == 2 then 32767 else -16383; }
+    a[1500] = 32267;
+    a[1700] = 1;
+    a[1999] = -1;
+    let ok = (&a[0..1700]).sum();
+    io.print(f"{ok}\n");
+    let s = (&a[0..2000]).sum();
+    io.print(f"not reached: {s}\n");
+    return 0;
+}

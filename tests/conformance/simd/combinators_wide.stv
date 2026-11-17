@@ -1,0 +1,673 @@
+//~ CHECK-ONLY
+// std.slice methods on slices long enough for the 256-bit loops of x86-64 (1 KiB and more: the
+// lengths 1 KiB + 0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33 elements and 1 KiB - 1) and on short ones
+// (0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33), each at start offsets 0..3 (unaligned), against
+// element-by-element references: int sums (with lanes that overflow while the running sum does
+// not), min, max, find, eq, fill, find_any_byte, copy_from; floats with -0.0 / +0.0 and NaN.
+// crates/stave-driver/tests/interp_vs_native.rs runs it in the IR interpreter (the 128-bit
+// loops), natively (the 256-bit loops where the CPU has AVX2) and under qemu `-cpu Nehalem`,
+// against combinators_wide.stdout.
+import std.io;
+import std.mem;
+
+// The tested lengths for a type whose long slices start at `long` elements.
+fn lens(long: usize) -> [usize; 23] {
+    let s: [usize; 11] = [0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33];
+    let mut l: [usize; 23] = [0; 23];
+    for i in 0usize..11 {
+        l[i] = s[i];
+        l[i + 11] = long + s[i];
+    }
+    l[22] = long - 1;
+    return l;
+}
+
+fn mix(i: usize) -> usize {
+    return (i *% 2654435761) % 1000003;
+}
+
+fn report(name: &str, cases: usize, bad: &str) {
+    io.print(name);
+    io.print(f" {cases} cases");
+    if bad.len() == 0 { io.print(" ok\n"); } else { io.print(" BAD"); io.print(bad); io.print("\n"); }
+}
+
+fn test_u8() {
+    let mut a: [u8; 1061] = [0; 1061];
+    let mut s: [u8; 1061] = [0; 1061];
+    for i in 0usize..1061 {
+        a[i] = (mix(i) % 200) as% u8;
+        s[i] = if i % 61 == 7 then 3 else 0;
+    }
+    let ls = lens(1024);
+    let mut bad = "";
+    let mut cases: usize = 0;
+    for o in 0usize..4 {
+        for k in 0usize..23 {
+            let n = ls[k];
+            cases = cases + 1;
+            let xs = &a[o..o + n];
+            let ss = &s[o..o + n];
+            let mut sum: u8 = 0;
+            for i in 0..n { sum = sum + ss[i]; }
+            if ss.sum() != sum { bad = " sum"; }
+            if n == 0 {
+                if xs.min().is_some() || xs.max().is_some() { bad = " min/max of empty"; }
+                if xs.find(0).is_some() { bad = " find in empty"; }
+            } else {
+                let mut lo = xs[0];
+                let mut hi = xs[0];
+                for i in 0..n {
+                    if xs[i] < lo { lo = xs[i]; }
+                    if xs[i] > hi { hi = xs[i]; }
+                }
+                if xs.min().unwrap() != lo { bad = " min"; }
+                if xs.max().unwrap() != hi { bad = " max"; }
+                for p in 0usize..2 {
+                    let x = xs[if p == 0 then n / 2 else n - 1];
+                    let mut j: usize = 0;
+                    while xs[j] != x { j = j + 1; }
+                    if xs.find(x).unwrap() != j { bad = " find"; }
+                }
+            }
+            if xs.find(201).is_some() { bad = " find absent"; }
+            let mut b = a;
+            if !xs.eq(&b[o..o + n]) { bad = " eq"; }
+            if n > 0 {
+                b[o + n - 1] = b[o + n - 1] +% 1;
+                if xs.eq(&b[o..o + n]) { bad = " eq differs"; }
+                if xs.eq(&a[o..o + n - 1]) { bad = " eq length"; }
+            }
+            let mut c = a;
+            (&mut c[o..o + n]).fill(5);
+            for i in 0usize..1061 {
+                let want = if i >= o && i < o + n then 5 else a[i];
+                if c[i] != want { bad = " fill"; }
+            }
+        }
+    }
+    report("u8", cases, bad);
+}
+
+fn test_u16() {
+    let mut a: [u16; 549] = [0; 549];
+    let mut s: [u16; 549] = [0; 549];
+    for i in 0usize..549 {
+        a[i] = (mix(i) % 60000) as% u16;
+        s[i] = if i % 61 == 7 then 3 else 0;
+    }
+    let ls = lens(512);
+    let mut bad = "";
+    let mut cases: usize = 0;
+    for o in 0usize..4 {
+        for k in 0usize..23 {
+            let n = ls[k];
+            cases = cases + 1;
+            let xs = &a[o..o + n];
+            let ss = &s[o..o + n];
+            let mut sum: u16 = 0;
+            for i in 0..n { sum = sum + ss[i]; }
+            if ss.sum() != sum { bad = " sum"; }
+            if n == 0 {
+                if xs.min().is_some() || xs.max().is_some() { bad = " min/max of empty"; }
+                if xs.find(0).is_some() { bad = " find in empty"; }
+            } else {
+                let mut lo = xs[0];
+                let mut hi = xs[0];
+                for i in 0..n {
+                    if xs[i] < lo { lo = xs[i]; }
+                    if xs[i] > hi { hi = xs[i]; }
+                }
+                if xs.min().unwrap() != lo { bad = " min"; }
+                if xs.max().unwrap() != hi { bad = " max"; }
+                for p in 0usize..2 {
+                    let x = xs[if p == 0 then n / 2 else n - 1];
+                    let mut j: usize = 0;
+                    while xs[j] != x { j = j + 1; }
+                    if xs.find(x).unwrap() != j { bad = " find"; }
+                }
+            }
+            if xs.find(60001).is_some() { bad = " find absent"; }
+            let mut b = a;
+            if !xs.eq(&b[o..o + n]) { bad = " eq"; }
+            if n > 0 {
+                b[o + n - 1] = b[o + n - 1] +% 1;
+                if xs.eq(&b[o..o + n]) { bad = " eq differs"; }
+                if xs.eq(&a[o..o + n - 1]) { bad = " eq length"; }
+            }
+            let mut c = a;
+            (&mut c[o..o + n]).fill(5);
+            for i in 0usize..549 {
+                let want = if i >= o && i < o + n then 5 else a[i];
+                if c[i] != want { bad = " fill"; }
+            }
+        }
+    }
+    report("u16", cases, bad);
+}
+
+fn test_u32() {
+    let mut a: [u32; 293] = [0; 293];
+    let mut s: [u32; 293] = [0; 293];
+    for i in 0usize..293 {
+        a[i] = (mix(i) % 4000000000) as% u32;
+        s[i] = if i % 61 == 7 then 3 else 0;
+    }
+    let ls = lens(256);
+    let mut bad = "";
+    let mut cases: usize = 0;
+    for o in 0usize..4 {
+        for k in 0usize..23 {
+            let n = ls[k];
+            cases = cases + 1;
+            let xs = &a[o..o + n];
+            let ss = &s[o..o + n];
+            let mut sum: u32 = 0;
+            for i in 0..n { sum = sum + ss[i]; }
+            if ss.sum() != sum { bad = " sum"; }
+            if n == 0 {
+                if xs.min().is_some() || xs.max().is_some() { bad = " min/max of empty"; }
+                if xs.find(0).is_some() { bad = " find in empty"; }
+            } else {
+                let mut lo = xs[0];
+                let mut hi = xs[0];
+                for i in 0..n {
+                    if xs[i] < lo { lo = xs[i]; }
+                    if xs[i] > hi { hi = xs[i]; }
+                }
+                if xs.min().unwrap() != lo { bad = " min"; }
+                if xs.max().unwrap() != hi { bad = " max"; }
+                for p in 0usize..2 {
+                    let x = xs[if p == 0 then n / 2 else n - 1];
+                    let mut j: usize = 0;
+                    while xs[j] != x { j = j + 1; }
+                    if xs.find(x).unwrap() != j { bad = " find"; }
+                }
+            }
+            if xs.find(4000000001).is_some() { bad = " find absent"; }
+            let mut b = a;
+            if !xs.eq(&b[o..o + n]) { bad = " eq"; }
+            if n > 0 {
+                b[o + n - 1] = b[o + n - 1] +% 1;
+                if xs.eq(&b[o..o + n]) { bad = " eq differs"; }
+                if xs.eq(&a[o..o + n - 1]) { bad = " eq length"; }
+            }
+            let mut c = a;
+            (&mut c[o..o + n]).fill(5);
+            for i in 0usize..293 {
+                let want = if i >= o && i < o + n then 5 else a[i];
+                if c[i] != want { bad = " fill"; }
+            }
+        }
+    }
+    report("u32", cases, bad);
+}
+
+fn test_u64() {
+    let mut a: [u64; 165] = [0; 165];
+    let mut s: [u64; 165] = [0; 165];
+    for i in 0usize..165 {
+        a[i] = (mix(i) % 18000000000000000000) as% u64;
+        s[i] = if i % 61 == 7 then 3 else 0;
+    }
+    let ls = lens(128);
+    let mut bad = "";
+    let mut cases: usize = 0;
+    for o in 0usize..4 {
+        for k in 0usize..23 {
+            let n = ls[k];
+            cases = cases + 1;
+            let xs = &a[o..o + n];
+            let ss = &s[o..o + n];
+            let mut sum: u64 = 0;
+            for i in 0..n { sum = sum + ss[i]; }
+            if ss.sum() != sum { bad = " sum"; }
+            if n == 0 {
+                if xs.min().is_some() || xs.max().is_some() { bad = " min/max of empty"; }
+                if xs.find(0).is_some() { bad = " find in empty"; }
+            } else {
+                let mut lo = xs[0];
+                let mut hi = xs[0];
+                for i in 0..n {
+                    if xs[i] < lo { lo = xs[i]; }
+                    if xs[i] > hi { hi = xs[i]; }
+                }
+                if xs.min().unwrap() != lo { bad = " min"; }
+                if xs.max().unwrap() != hi { bad = " max"; }
+                for p in 0usize..2 {
+                    let x = xs[if p == 0 then n / 2 else n - 1];
+                    let mut j: usize = 0;
+                    while xs[j] != x { j = j + 1; }
+                    if xs.find(x).unwrap() != j { bad = " find"; }
+                }
+            }
+            if xs.find(18000000000000000001).is_some() { bad = " find absent"; }
+            let mut b = a;
+            if !xs.eq(&b[o..o + n]) { bad = " eq"; }
+            if n > 0 {
+                b[o + n - 1] = b[o + n - 1] +% 1;
+                if xs.eq(&b[o..o + n]) { bad = " eq differs"; }
+                if xs.eq(&a[o..o + n - 1]) { bad = " eq length"; }
+            }
+            let mut c = a;
+            (&mut c[o..o + n]).fill(5);
+            for i in 0usize..165 {
+                let want = if i >= o && i < o + n then 5 else a[i];
+                if c[i] != want { bad = " fill"; }
+            }
+        }
+    }
+    report("u64", cases, bad);
+}
+
+fn test_i8() {
+    let mut a: [i8; 1061] = [0; 1061];
+    let mut s: [i8; 1061] = [0; 1061];
+    for i in 0usize..1061 {
+        a[i] = ((mix(i) % 100) as% i8) - 50;
+        s[i] = if i % 2 == 0 then 127 else -127;
+    }
+    let ls = lens(1024);
+    let mut bad = "";
+    let mut cases: usize = 0;
+    for o in 0usize..4 {
+        for k in 0usize..23 {
+            let n = ls[k];
+            cases = cases + 1;
+            let xs = &a[o..o + n];
+            let ss = &s[o..o + n];
+            let mut sum: i8 = 0;
+            for i in 0..n { sum = sum + ss[i]; }
+            if ss.sum() != sum { bad = " sum"; }
+            if n == 0 {
+                if xs.min().is_some() || xs.max().is_some() { bad = " min/max of empty"; }
+                if xs.find(0).is_some() { bad = " find in empty"; }
+            } else {
+                let mut lo = xs[0];
+                let mut hi = xs[0];
+                for i in 0..n {
+                    if xs[i] < lo { lo = xs[i]; }
+                    if xs[i] > hi { hi = xs[i]; }
+                }
+                if xs.min().unwrap() != lo { bad = " min"; }
+                if xs.max().unwrap() != hi { bad = " max"; }
+                for p in 0usize..2 {
+                    let x = xs[if p == 0 then n / 2 else n - 1];
+                    let mut j: usize = 0;
+                    while xs[j] != x { j = j + 1; }
+                    if xs.find(x).unwrap() != j { bad = " find"; }
+                }
+            }
+            if xs.find(100).is_some() { bad = " find absent"; }
+            let mut b = a;
+            if !xs.eq(&b[o..o + n]) { bad = " eq"; }
+            if n > 0 {
+                b[o + n - 1] = b[o + n - 1] +% 1;
+                if xs.eq(&b[o..o + n]) { bad = " eq differs"; }
+                if xs.eq(&a[o..o + n - 1]) { bad = " eq length"; }
+            }
+            let mut c = a;
+            (&mut c[o..o + n]).fill(5);
+            for i in 0usize..1061 {
+                let want = if i >= o && i < o + n then 5 else a[i];
+                if c[i] != want { bad = " fill"; }
+            }
+        }
+    }
+    report("i8", cases, bad);
+}
+
+fn test_i16() {
+    let mut a: [i16; 549] = [0; 549];
+    let mut s: [i16; 549] = [0; 549];
+    for i in 0usize..549 {
+        a[i] = ((mix(i) % 100) as% i16) - 50;
+        s[i] = if i % 2 == 0 then 32767 else -32767;
+    }
+    let ls = lens(512);
+    let mut bad = "";
+    let mut cases: usize = 0;
+    for o in 0usize..4 {
+        for k in 0usize..23 {
+            let n = ls[k];
+            cases = cases + 1;
+            let xs = &a[o..o + n];
+            let ss = &s[o..o + n];
+            let mut sum: i16 = 0;
+            for i in 0..n { sum = sum + ss[i]; }
+            if ss.sum() != sum { bad = " sum"; }
+            if n == 0 {
+                if xs.min().is_some() || xs.max().is_some() { bad = " min/max of empty"; }
+                if xs.find(0).is_some() { bad = " find in empty"; }
+            } else {
+                let mut lo = xs[0];
+                let mut hi = xs[0];
+                for i in 0..n {
+                    if xs[i] < lo { lo = xs[i]; }
+                    if xs[i] > hi { hi = xs[i]; }
+                }
+                if xs.min().unwrap() != lo { bad = " min"; }
+                if xs.max().unwrap() != hi { bad = " max"; }
+                for p in 0usize..2 {
+                    let x = xs[if p == 0 then n / 2 else n - 1];
+                    let mut j: usize = 0;
+                    while xs[j] != x { j = j + 1; }
+                    if xs.find(x).unwrap() != j { bad = " find"; }
+                }
+            }
+            if xs.find(100).is_some() { bad = " find absent"; }
+            let mut b = a;
+            if !xs.eq(&b[o..o + n]) { bad = " eq"; }
+            if n > 0 {
+                b[o + n - 1] = b[o + n - 1] +% 1;
+                if xs.eq(&b[o..o + n]) { bad = " eq differs"; }
+                if xs.eq(&a[o..o + n - 1]) { bad = " eq length"; }
+            }
+            let mut c = a;
+            (&mut c[o..o + n]).fill(5);
+            for i in 0usize..549 {
+                let want = if i >= o && i < o + n then 5 else a[i];
+                if c[i] != want { bad = " fill"; }
+            }
+        }
+    }
+    report("i16", cases, bad);
+}
+
+fn test_i32() {
+    let mut a: [i32; 293] = [0; 293];
+    let mut s: [i32; 293] = [0; 293];
+    for i in 0usize..293 {
+        a[i] = ((mix(i) % 100) as% i32) - 50;
+        s[i] = if i % 2 == 0 then 2147483647 else -2147483647;
+    }
+    let ls = lens(256);
+    let mut bad = "";
+    let mut cases: usize = 0;
+    for o in 0usize..4 {
+        for k in 0usize..23 {
+            let n = ls[k];
+            cases = cases + 1;
+            let xs = &a[o..o + n];
+            let ss = &s[o..o + n];
+            let mut sum: i32 = 0;
+            for i in 0..n { sum = sum + ss[i]; }
+            if ss.sum() != sum { bad = " sum"; }
+            if n == 0 {
+                if xs.min().is_some() || xs.max().is_some() { bad = " min/max of empty"; }
+                if xs.find(0).is_some() { bad = " find in empty"; }
+            } else {
+                let mut lo = xs[0];
+                let mut hi = xs[0];
+                for i in 0..n {
+                    if xs[i] < lo { lo = xs[i]; }
+                    if xs[i] > hi { hi = xs[i]; }
+                }
+                if xs.min().unwrap() != lo { bad = " min"; }
+                if xs.max().unwrap() != hi { bad = " max"; }
+                for p in 0usize..2 {
+                    let x = xs[if p == 0 then n / 2 else n - 1];
+                    let mut j: usize = 0;
+                    while xs[j] != x { j = j + 1; }
+                    if xs.find(x).unwrap() != j { bad = " find"; }
+                }
+            }
+            if xs.find(100).is_some() { bad = " find absent"; }
+            let mut b = a;
+            if !xs.eq(&b[o..o + n]) { bad = " eq"; }
+            if n > 0 {
+                b[o + n - 1] = b[o + n - 1] +% 1;
+                if xs.eq(&b[o..o + n]) { bad = " eq differs"; }
+                if xs.eq(&a[o..o + n - 1]) { bad = " eq length"; }
+            }
+            let mut c = a;
+            (&mut c[o..o + n]).fill(5);
+            for i in 0usize..293 {
+                let want = if i >= o && i < o + n then 5 else a[i];
+                if c[i] != want { bad = " fill"; }
+            }
+        }
+    }
+    report("i32", cases, bad);
+}
+
+fn test_i64() {
+    let mut a: [i64; 165] = [0; 165];
+    let mut s: [i64; 165] = [0; 165];
+    for i in 0usize..165 {
+        a[i] = ((mix(i) % 100) as% i64) - 50;
+        s[i] = if i % 2 == 0 then 9223372036854775807 else -9223372036854775807;
+    }
+    let ls = lens(128);
+    let mut bad = "";
+    let mut cases: usize = 0;
+    for o in 0usize..4 {
+        for k in 0usize..23 {
+            let n = ls[k];
+            cases = cases + 1;
+            let xs = &a[o..o + n];
+            let ss = &s[o..o + n];
+            let mut sum: i64 = 0;
+            for i in 0..n { sum = sum + ss[i]; }
+            if ss.sum() != sum { bad = " sum"; }
+            if n == 0 {
+                if xs.min().is_some() || xs.max().is_some() { bad = " min/max of empty"; }
+                if xs.find(0).is_some() { bad = " find in empty"; }
+            } else {
+                let mut lo = xs[0];
+                let mut hi = xs[0];
+                for i in 0..n {
+                    if xs[i] < lo { lo = xs[i]; }
+                    if xs[i] > hi { hi = xs[i]; }
+                }
+                if xs.min().unwrap() != lo { bad = " min"; }
+                if xs.max().unwrap() != hi { bad = " max"; }
+                for p in 0usize..2 {
+                    let x = xs[if p == 0 then n / 2 else n - 1];
+                    let mut j: usize = 0;
+                    while xs[j] != x { j = j + 1; }
+                    if xs.find(x).unwrap() != j { bad = " find"; }
+                }
+            }
+            if xs.find(100).is_some() { bad = " find absent"; }
+            let mut b = a;
+            if !xs.eq(&b[o..o + n]) { bad = " eq"; }
+            if n > 0 {
+                b[o + n - 1] = b[o + n - 1] +% 1;
+                if xs.eq(&b[o..o + n]) { bad = " eq differs"; }
+                if xs.eq(&a[o..o + n - 1]) { bad = " eq length"; }
+            }
+            let mut c = a;
+            (&mut c[o..o + n]).fill(5);
+            for i in 0usize..165 {
+                let want = if i >= o && i < o + n then 5 else a[i];
+                if c[i] != want { bad = " fill"; }
+            }
+        }
+    }
+    report("i64", cases, bad);
+}
+
+fn neg_f32(x: f32) -> bool {
+    return mem.f32_bits(x) >> 31 == 1;
+}
+
+fn test_f32() {
+    let z: f32 = 0.0;
+    let mut a: [f32; 293] = [0.0; 293];
+    for i in 0usize..293 {
+        let m = mix(i) % 50;
+        a[i] = if m == 0 then -z else if m == 1 then z else ((m as% u32) as~ f32) * 0.25 - 6.0;
+    }
+    let ls = lens(256);
+    let mut bad = "";
+    let mut cases: usize = 0;
+    for o in 0usize..4 {
+        for k in 0usize..23 {
+            let n = ls[k];
+            cases = cases + 1;
+            let xs = &a[o..o + n];
+            if n == 0 {
+                if xs.min().is_some() || xs.max().is_some() { bad = " min/max of empty"; }
+            } else {
+                let mut lo = xs[0];
+                let mut hi = xs[0];
+                for i in 0..n {
+                    let x = xs[i];
+                    if x < lo || (x == lo && neg_f32(x)) { lo = x; }
+                    if x > hi || (x == hi && !neg_f32(x)) { hi = x; }
+                }
+                if mem.f32_bits(xs.min().unwrap()) != mem.f32_bits(lo) { bad = " min"; }
+                if mem.f32_bits(xs.max().unwrap()) != mem.f32_bits(hi) { bad = " max"; }
+                for p in 0usize..2 {
+                    let x = xs[if p == 0 then n / 2 else n - 1];
+                    let mut j: usize = 0;
+                    while xs[j] != x { j = j + 1; }
+                    if xs.find(x).unwrap() != j { bad = " find"; }
+                }
+                let mut q = a;
+                q[o + n / 2] = z / z;
+                let qs = &q[o..o + n];
+                let qlo = qs.min().unwrap();
+                let qhi = qs.max().unwrap();
+                if qlo == qlo || qhi == qhi { bad = " NaN min/max"; }
+                if qs.find(z / z).is_some() { bad = " find NaN"; }
+                if qs.eq(xs) || qs.eq(qs) { bad = " eq NaN"; }
+            }
+            if xs.find(1000.5).is_some() { bad = " find absent"; }
+            let mut b = a;
+            if !xs.eq(&b[o..o + n]) { bad = " eq"; }
+            if n > 0 {
+                b[o + n - 1] = b[o + n - 1] + 1.0;
+                if xs.eq(&b[o..o + n]) { bad = " eq differs"; }
+            }
+            let mut c = a;
+            (&mut c[o..o + n]).fill(-z);
+            for i in 0usize..293 {
+                let want = if i >= o && i < o + n then -z else a[i];
+                if mem.f32_bits(c[i]) != mem.f32_bits(want) { bad = " fill"; }
+            }
+        }
+    }
+    report("f32", cases, bad);
+}
+
+fn neg_f64(x: f64) -> bool {
+    return mem.f64_bits(x) >> 63 == 1;
+}
+
+fn test_f64() {
+    let z: f64 = 0.0;
+    let mut a: [f64; 165] = [0.0; 165];
+    for i in 0usize..165 {
+        let m = mix(i) % 50;
+        a[i] = if m == 0 then -z else if m == 1 then z else ((m as% u64) as~ f64) * 0.25 - 6.0;
+    }
+    let ls = lens(128);
+    let mut bad = "";
+    let mut cases: usize = 0;
+    for o in 0usize..4 {
+        for k in 0usize..23 {
+            let n = ls[k];
+            cases = cases + 1;
+            let xs = &a[o..o + n];
+            if n == 0 {
+                if xs.min().is_some() || xs.max().is_some() { bad = " min/max of empty"; }
+            } else {
+                let mut lo = xs[0];
+                let mut hi = xs[0];
+                for i in 0..n {
+                    let x = xs[i];
+                    if x < lo || (x == lo && neg_f64(x)) { lo = x; }
+                    if x > hi || (x == hi && !neg_f64(x)) { hi = x; }
+                }
+                if mem.f64_bits(xs.min().unwrap()) != mem.f64_bits(lo) { bad = " min"; }
+                if mem.f64_bits(xs.max().unwrap()) != mem.f64_bits(hi) { bad = " max"; }
+                for p in 0usize..2 {
+                    let x = xs[if p == 0 then n / 2 else n - 1];
+                    let mut j: usize = 0;
+                    while xs[j] != x { j = j + 1; }
+                    if xs.find(x).unwrap() != j { bad = " find"; }
+                }
+                let mut q = a;
+                q[o + n / 2] = z / z;
+                let qs = &q[o..o + n];
+                let qlo = qs.min().unwrap();
+                let qhi = qs.max().unwrap();
+                if qlo == qlo || qhi == qhi { bad = " NaN min/max"; }
+                if qs.find(z / z).is_some() { bad = " find NaN"; }
+                if qs.eq(xs) || qs.eq(qs) { bad = " eq NaN"; }
+            }
+            if xs.find(1000.5).is_some() { bad = " find absent"; }
+            let mut b = a;
+            if !xs.eq(&b[o..o + n]) { bad = " eq"; }
+            if n > 0 {
+                b[o + n - 1] = b[o + n - 1] + 1.0;
+                if xs.eq(&b[o..o + n]) { bad = " eq differs"; }
+            }
+            let mut c = a;
+            (&mut c[o..o + n]).fill(-z);
+            for i in 0usize..165 {
+                let want = if i >= o && i < o + n then -z else a[i];
+                if mem.f64_bits(c[i]) != mem.f64_bits(want) { bad = " fill"; }
+            }
+        }
+    }
+    report("f64", cases, bad);
+}
+
+// find_any_byte and copy_from (u8, and u64: 8-byte elements copied as bytes).
+fn test_bytes() {
+    let mut a: [u8; 1064] = [0; 1064];
+    let mut a64: [u64; 168] = [0; 168];
+    for i in 0usize..1064 { a[i] = (mix(i) % 200) as% u8; }
+    for i in 0usize..168 { a64[i] = mix(i) as u64 *% 1000003; }
+    let ls = lens(1024);
+    let ls64 = lens(128);
+    let mut bad = "";
+    let mut cases: usize = 0;
+    for o in 0usize..4 {
+        for k in 0usize..23 {
+            let n = ls[k];
+            cases = cases + 1;
+            let xs = &a[o..o + n];
+            let absent: [u8; 2] = [250, 251];
+            if xs.find_any_byte(&absent).is_some() { bad = " find_any_byte absent"; }
+            if n > 0 {
+                let set: [u8; 3] = [251, xs[n - 1], xs[n / 2]];
+                let mut j: usize = 0;
+                while xs[j] != set[1] && xs[j] != set[2] { j = j + 1; }
+                if xs.find_any_byte(&set).unwrap() != j { bad = " find_any_byte"; }
+            }
+            let mut c: [u8; 1064] = [7; 1064];
+            (&mut c[o..o + n]).copy_from(&a[3 - o..3 - o + n]);
+            for i in 0usize..1064 {
+                let want = if i >= o && i < o + n then a[i + 3 - o - o] else 7;
+                if c[i] != want { bad = " copy_from u8"; }
+            }
+            let m = ls64[k];
+            let mut d: [u64; 168] = [9; 168];
+            (&mut d[o..o + m]).copy_from(&a64[3 - o..3 - o + m]);
+            for i in 0usize..168 {
+                let want = if i >= o && i < o + m then a64[i + 3 - o - o] else 9;
+                if d[i] != want { bad = " copy_from u64"; }
+            }
+        }
+    }
+    report("bytes", cases, bad);
+}
+
+fn main() -> i32 {
+    test_u8();
+    test_u16();
+    test_u32();
+    test_u64();
+    test_i8();
+    test_i16();
+    test_i32();
+    test_i64();
+    test_f32();
+    test_f64();
+    test_bytes();
+    return 0;
+}

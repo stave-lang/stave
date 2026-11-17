@@ -21,7 +21,7 @@ mod legs;
 use stave_driver::exec::{self, RunSpec, TempDir};
 use stave_driver::pipeline::{self, Goal, Options, Output};
 use stave_driver::shipped::Library;
-use stave_ir::{Module, Op, Operand};
+use stave_ir::{Func, Module, Op, Operand};
 use stave_target::{Arch, Triple};
 
 fn repo() -> PathBuf {
@@ -53,7 +53,11 @@ fn build(p: &Path, target: Triple, release: bool) -> Output {
 
 /// The paths of the fns `path`'s body calls directly (`None`: no such fn with a body).
 fn callees(m: &Module, path: &str) -> Option<Vec<String>> {
-    let f = m.funcs.iter().find(|f| f.path == path)?;
+    calls_of(m, m.funcs.iter().find(|f| f.path == path)?)
+}
+
+/// The paths of the fns `f`'s body calls directly (`None`: no body).
+fn calls_of(m: &Module, f: &Func) -> Option<Vec<String>> {
     let b = f.body.as_ref()?;
     let mut out = Vec::new();
     for (i, op) in b.insts.op.iter().enumerate() {
@@ -243,4 +247,56 @@ fn vector_arms_match_scalar_references() {
     failures.extend(more);
     eprintln!("{} runs", n + m);
     assert!(failures.is_empty(), "{} failure(s):\n{}", failures.len(), failures.join("\n"));
+}
+
+/// The `std.slice` methods reach their 256-bit loops through dispatch fns: on x86_64-linux the
+/// dispatch tests the feature word and picks the `needs(avx2)` loop or the 128-bit one; on
+/// x86_64-linux-v3 the method calls the 256-bit loop directly; AArch64 builds no 256-bit loop.
+/// (`interp_vs_native` runs `tests/conformance/simd/combinators_*.stv` natively, under
+/// `-cpu Nehalem`, and in the interpreter.)
+#[test]
+fn slice_methods_dispatch_to_256_bit_loops() {
+    let src = repo().join("tests/conformance/simd/combinators_wide.stv");
+    let fns = [
+        "sum_u8",
+        "min_i32",
+        "max_f32",
+        "find_u64",
+        "fill_u16",
+        "eq_f64",
+        "bytes_eq",
+        "copy_bytes",
+        "find_any_byte",
+    ];
+    for t in ["x86_64-linux", "x86_64-linux-v3", "aarch64-linux"] {
+        let target = Triple::parse(t).unwrap();
+        for release in [false, true] {
+            let out = build(&src, target, release);
+            let m = out.module.as_ref().unwrap();
+            let callers_of = |g: &str| -> Vec<String> {
+                m.funcs
+                    .iter()
+                    .filter(|h| calls_of(m, h).is_some_and(|c| c.iter().any(|x| x == g)))
+                    .map(|h| h.path.clone())
+                    .collect()
+            };
+            for f in fns {
+                let (base, wide, disp) =
+                    (format!("std.slice.{f}"), format!("std.slice.{f}_v3"), format!("std.slice.{f}_cpu"));
+                let at = format!("{t} release {release}");
+                match (target.arch(), target.baseline().contains(stave_target::Feature::Avx2)) {
+                    (Arch::X86_64, false) => {
+                        let want = vec!["runtime.cpu.features".to_string(), wide.clone(), base.clone()];
+                        assert_eq!(callees(m, &disp), Some(want), "{at}: `{disp}`");
+                        assert!(!callers_of(&disp).is_empty(), "{at}: nothing calls `{disp}`");
+                    }
+                    (Arch::X86_64, true) => {
+                        assert!(callees(m, &disp).is_none(), "{at}: `{disp}` is built");
+                        assert!(!callers_of(&wide).is_empty(), "{at}: nothing calls `{wide}`");
+                    }
+                    _ => assert!(callees(m, &wide).is_none(), "{at}: `{wide}` is built"),
+                }
+            }
+        }
+    }
 }
