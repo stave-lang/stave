@@ -1,0 +1,39 @@
+//~ CHECK-ONLY
+// `soa.Soa<P>` is `Frozen` (its rows are Flat, its buffer a raw pointer to bytes) and not `Flat`
+// (the buffer pointer, E1407). A contract reads its columns: the touched values (`ps`, the
+// column's built-in `len` receiver `[f32]`, `ps.x[i]`) are all Frozen.
+import std.soa;
+
+struct P {
+    pub x: f32,
+    pub id: u32,
+}
+
+impl Copy for P {}
+
+fn frozen<T: Frozen + view>() {}
+
+fn flat<T: Flat>() {}
+
+fn first_x(ps: &soa.Soa<P>, i: usize) -> f32 requires(ps.x.len() > 0 && i < ps.len()) ensures(result == ps.x[i]) {
+    return ps.x[i];
+}
+
+fn grow(ps: &mut soa.Soa<P>, p: P) requires(ps.id.len() < 1000) ensures(ps.len() == old(ps.len()) + 1) {
+    ps.push(p);
+}
+
+fn count<T: Flat>(ps: &soa.Soa<T>) -> usize ensures(result == ps.len()) {
+    return ps.len();
+}
+
+fn main() -> i32 {
+    frozen::<soa.Soa<P>>();
+    frozen::<&mut soa.Soa<P>>();
+    flat::<soa.Soa<P>>(); //~ ERROR E1407
+    let mut ps = soa.Soa::<P>.new();
+    grow(&mut ps, P.{ x: 1.0, id: 7 });
+    let x = first_x(&ps, 0);
+    let n = count(&ps);
+    return 0;
+}
