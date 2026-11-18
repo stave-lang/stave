@@ -1,0 +1,98 @@
+//~ CHECK-ONLY
+// Drops that run inside generic std code and through containers are checked too (E1405): a
+// `Vec<Flush>` dropped at scope end (its `Drop` runs `clear`, which drops each element through a
+// local of the element type), `clear` and a discarded `pop` result, an array element and an
+// `Option` overwritten, and a tuple and an array of `Flush` dropped at scope end, each while a
+// rank-2 guard is held and `Flush` takes rank 1 when dropped. A closure only borrows what it
+// captures, so dropping it drops nothing.
+import std.sync;
+import std.vec;
+
+static LOW: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0);
+
+struct Flush { pub n: u32 }
+
+impl Drop for Flush {
+    fn drop(&mut self) {
+        let k = self.n;
+        let v = LOW.with_lock(fn(c: &mut u32) -> u32 { *c = *c + k; return *c; });
+    }
+}
+
+fn make(n: u32) -> Flush {
+    return Flush.{ n: n };
+}
+
+fn filled() -> vec.Vec<Flush> {
+    let mut v = vec.Vec::<Flush>.new();
+    v.push(make(1));
+    return v;
+}
+
+fn vec_at_scope_end(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let g = hi.lock();
+    let v = filled();
+    return *g.get(); //~ ERROR E1405
+}
+
+fn vec_clear(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let mut v = filled();
+    let g = hi.lock();
+    v.clear(); //~ ERROR E1405
+    return *g.get();
+}
+
+fn vec_pop_discarded(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let mut v = filled();
+    let g = hi.lock();
+    let _ = v.pop(); //~ ERROR E1405
+    return *g.get();
+}
+
+fn array_element(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let mut a: [Flush; 2] = [make(1), make(2)];
+    let g = hi.lock();
+    a[0] = make(3); //~ ERROR E1405
+    return *g.get();
+}
+
+fn option_cleared(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let mut o: Option<Flush> = Option.Some(make(1));
+    let g = hi.lock();
+    o = Option.None; //~ ERROR E1405
+    return *g.get();
+}
+
+fn tuple_at_scope_end(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let g = hi.lock();
+    let t = (make(1), 2u32);
+    return *g.get(); //~ ERROR E1405
+}
+
+fn array_at_scope_end(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let g = hi.lock();
+    let a: [Flush; 2] = [make(1), make(2)];
+    return *g.get(); //~ ERROR E1405
+}
+
+fn closure_dropped(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let x = make(1);
+    let g = hi.lock();
+    {
+        let f = fn() -> u32 { return x.n; };
+        let n = f();
+    }
+    return *g.get();
+}
+
+fn main() {
+    let hi = sync.Mutex::<u32, 2>.new(0);
+    let r1 = vec_at_scope_end(&hi);
+    let r2 = vec_clear(&hi);
+    let r3 = vec_pop_discarded(&hi);
+    let r4 = array_element(&hi);
+    let r5 = option_cleared(&hi);
+    let r6 = tuple_at_scope_end(&hi);
+    let r7 = array_at_scope_end(&hi);
+    let r8 = closure_dropped(&hi);
+}

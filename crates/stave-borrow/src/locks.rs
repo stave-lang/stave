@@ -104,9 +104,14 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
             parts.push(Vec::new());
         }
     }
-    let local_of: Vec<LocalId> =
-        (0..body.locals.len() as u32).filter(|&l| idx[l as usize] != u32::MAX).collect();
+    // tracked index -> local (candidates were numbered first, the locals with drop glue after)
     let n = parts.len();
+    let mut local_of: Vec<LocalId> = vec![0; n];
+    for (l, &i) in idx.iter().enumerate() {
+        if i != u32::MAX {
+            local_of[i as usize] = l as LocalId;
+        }
+    }
     let mut entry: Vec<Option<Bits>> = vec![None; body.blocks.len()];
     let mut init = Bits::new(n);
     for (i, l) in body.locals.iter().enumerate() {
@@ -183,8 +188,8 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
             if let Some((t, _)) = drop {
                 dropped.push(t);
             }
-            match (&s.kind, drop) {
-                (StmtKind::Assign { rv: Rvalue::Call { tok, args, .. }, .. }, _) if holding(&st) => {
+            match &s.kind {
+                StmtKind::Assign { rv: Rvalue::Call { tok, args, .. }, .. } if holding(&st) => {
                     let mut at = st.clone();
                     for a in args {
                         if a.kind == OpKind::Move
@@ -199,26 +204,29 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
                         out.sites.push(HeldAt { at: At::Call(*tok), span: s.span, held: held(&at) });
                     }
                 }
-                (StmtKind::Read(o), _) if holding(&st) => {
+                StmtKind::Read(o) if holding(&st) => {
                     if let Some(&(_, scope)) = body.joins.iter().find(|j| j.0 == o.place.local) {
                         out.sites.push(HeldAt { at: At::Join(scope), span: s.span, held: held(&st) });
                     }
                 }
-                // a drop runs the type's drop glue: a call, holding all but what it drops
-                (_, Some((t, whole))) if holding(&st) => {
-                    let mut at = st.clone();
-                    if let Some(p) = whole
-                        && p.proj.is_empty()
-                        && let Some(&i) = idx.get(p.local as usize)
-                        && i != u32::MAX
-                    {
-                        at.remove(i as usize);
-                    }
-                    if holding(&at) {
-                        out.sites.push(HeldAt { at: At::Drop(t), span: s.span, held: held(&at) });
-                    }
-                }
                 _ => {}
+            }
+            // a drop runs the type's drop glue: a call, holding all but what it drops; an
+            // overwriting assignment whose value is a call (a user compound operator) is both
+            if let Some((t, whole)) = drop
+                && holding(&st)
+            {
+                let mut at = st.clone();
+                if let Some(p) = whole
+                    && p.proj.is_empty()
+                    && let Some(&i) = idx.get(p.local as usize)
+                    && i != u32::MAX
+                {
+                    at.remove(i as usize);
+                }
+                if holding(&at) {
+                    out.sites.push(HeldAt { at: At::Drop(t), span: s.span, held: held(&at) });
+                }
             }
             step(&s.kind, &mut st);
         }

@@ -424,7 +424,10 @@ pub struct BodyDrops {
 }
 
 /// Marks the drop edges of fn and closure nodes to the glue of types their body never drops
-/// (the graph's drop edges cover every type a body makes or owns, a returned one too).
+/// (the graph's drop edges cover every type a body makes or owns, a returned one too). A body's
+/// edges are narrowed only when every type it drops is the glue target of one of its own drop
+/// edges; a dropped type without glue, or one reached only inside another glue (a part dropped
+/// after a partial move), keeps them all.
 fn unused_drops(
     g: &CallGraph,
     cx: &mut crate::types::Overlay<'_>,
@@ -433,25 +436,35 @@ fn unused_drops(
 ) -> Vec<bool> {
     let mut skip = vec![false; g.out.len()];
     let by_decl: FxHashMap<DeclId, &Option<Vec<TypeId>>> = drops.iter().map(|d| (d.decl, &d.types)).collect();
-    let mut kept: FxHashMap<u32, Option<FxHashSet<u32>>> = FxHashMap::default();
+    // per fn node: the drop edges of it and its closures, (edge index, target)
+    let mut edges: FxHashMap<u32, Vec<(usize, u32)>> = FxHashMap::default();
     for v in 0..g.nodes.len() as u32 {
         let Some(p) = g.fn_of(v) else { continue };
         let base = g.out_start[v as usize] as usize;
         for (k, e) in g.succ(v).iter().enumerate() {
-            if e.kind != EdgeKind::Drop {
-                continue;
+            if e.kind == EdgeKind::Drop {
+                edges.entry(p).or_default().push((base + k, e.to));
             }
-            let set = kept.entry(p).or_insert_with(|| {
-                let NodeKind::Fn { inst, .. } = &g.nodes[p as usize].kind else { return None };
-                let types = by_decl.get(&inst.decl)?.as_ref()?;
-                Some(
-                    types.iter().filter_map(|&t| glue.get(&cx.subst(t, &inst.args, None)).copied()).collect(),
-                )
-            });
-            if let Some(set) = set
-                && !set.contains(&e.to)
-            {
-                skip[base + k] = true;
+        }
+    }
+    for (p, list) in edges {
+        let NodeKind::Fn { inst, .. } = &g.nodes[p as usize].kind else { continue };
+        let Some(Some(types)) = by_decl.get(&inst.decl) else { continue };
+        let targets: FxHashSet<u32> = list.iter().map(|x| x.1).collect();
+        let mut used: FxHashSet<u32> = FxHashSet::default();
+        let all_mapped = types.iter().all(|&t| match glue.get(&cx.subst(t, &inst.args, None)) {
+            Some(&n) if targets.contains(&n) => {
+                used.insert(n);
+                true
+            }
+            _ => false,
+        });
+        if !all_mapped {
+            continue;
+        }
+        for (ei, to) in list {
+            if !used.contains(&to) {
+                skip[ei] = true;
             }
         }
     }
