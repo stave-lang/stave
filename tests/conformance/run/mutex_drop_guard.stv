@@ -1,0 +1,15 @@
+//~ STDOUT mutex_drop_guard.stdout
+// `mem.drop(guard)` unlocks the mutex at once: the same thread locks it again in the same scope.
+import std.io;
+import std.mem;
+import std.sync;
+
+fn main() {
+    let m = sync.Mutex::<u32, 1>.new(5u32);
+    let mut g = m.lock();
+    *g.get_mut() = 6;
+    mem.drop(g);
+    let h = m.lock();
+    let v = *h.get();
+    io.print(f"{v}\n");
+}
