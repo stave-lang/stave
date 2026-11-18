@@ -638,6 +638,31 @@ labels = [{ at = "primary", text = "parameter `old`" }]
 fix = { description = "rename the parameter" }
 
 [[diag]]
+code = "E0214"
+severity = "error"
+area = "types"
+rule = "a `test fn` with parameters the runner cannot generate inputs for: a parameter type other than an int, `bool`, `char`, `f32`, `f64`, an array or tuple of those, or (as the parameter's own type) `&[T]` of those; case `unbounded`: a `&[T]` parameter without a `requires` comparing its `.len()` with a constant upper bound; case `size`: a parameter value of more than 4096 scalars (a slice counts its length bound); case `ret`: a return type other than `()`"
+holes = { type = "type", name = "name" }
+message = "the test runner cannot generate values of type `{type}`"
+labels = [{ at = "primary", text = "parameter of a `test fn`" }]
+fix = { description = "take ints, `bool`, `char`, `f32`, `f64`, arrays and tuples of them, or `&[T]` of those, and build other values in the body" }
+
+[diag.cases.unbounded]
+message = "slice parameter `{name}` of a `test fn` has no length bound"
+labels = [{ at = "primary", text = "no `requires({name}.len() <= N)`" }]
+fix = { description = "bound the length with a constant: `requires({name}.len() <= 16)`" }
+
+[diag.cases.size]
+message = "values of `{type}` are too large to generate (more than 4096 scalars)"
+labels = [{ at = "primary", text = "parameter of a `test fn`" }]
+fix = { description = "use a smaller array, or a lower length bound in `requires`" }
+
+[diag.cases.ret]
+message = "a `test fn` with parameters must return `()`"
+labels = [{ at = "primary", text = "return type of a `test fn`" }]
+fix = { description = "remove the return type: a test fails by panicking (`std.debug.assert`)" }
+
+[[diag]]
 code = "E0300"
 severity = "error"
 area = "patterns"

@@ -1500,6 +1500,68 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0214",
+        severity: Severity::Error,
+        area: "types",
+        rule: "a `test fn` with parameters the runner cannot generate inputs for: a parameter type other than an int, `bool`, `char`, `f32`, `f64`, an array or tuple of those, or (as the parameter's own type) `&[T]` of those; case `unbounded`: a `&[T]` parameter without a `requires` comparing its `.len()` with a constant upper bound; case `size`: a parameter value of more than 4096 scalars (a slice counts its length bound); case `ret`: a return type other than `()`",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "name", kind: HoleKind::Name, choices: &[] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "the test runner cannot generate values of type `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "parameter of a `test fn`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take ints, `bool`, `char`, `f32`, `f64`, arrays and tuples of them, or `&[T]` of those, and build other values in the body",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "ret",
+                message: "a `test fn` with parameters must return `()`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "return type of a `test fn`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove the return type: a test fails by panicking (`std.debug.assert`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "size",
+                message: "values of `{type}` are too large to generate (more than 4096 scalars)",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "parameter of a `test fn`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use a smaller array, or a lower length bound in `requires`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "unbounded",
+                message: "slice parameter `{name}` of a `test fn` has no length bound",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no `requires({name}.len() <= N)`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bound the length with a constant: `requires({name}.len() <= 16)`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0300",
         severity: Severity::Error,
         area: "patterns",

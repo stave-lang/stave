@@ -174,6 +174,8 @@ pub struct TypedBody {
     pub emulated: Vec<crate::gates::Emulated>,
     /// The fn's `requires` / `ensures` clauses, if it has any.
     pub contracts: Option<Box<crate::contracts::Contracts>>,
+    /// A `test fn` with parameters: the domain its inputs come from.
+    pub test_domain: Option<Box<crate::testgen::Domain>>,
 }
 
 impl TypedBody {
@@ -494,6 +496,7 @@ fn empty_body(j: Job) -> TypedBody {
         has_error: true,
         emulated: Vec::new(),
         contracts: None,
+        test_domain: None,
     }
 }
 
@@ -699,6 +702,8 @@ pub(crate) struct Ck<'a> {
     /// The `old(e)` calls typed so far: (`(` token, `e`'s node).
     pub olds: Vec<(u32, u32)>,
     pub contracts: Option<Box<crate::contracts::Contracts>>,
+    /// The input domain of a `test fn` with parameters ([`crate::testgen`]).
+    pub domain: Option<Box<crate::testgen::Domain>>,
 }
 
 fn check_body(
@@ -760,6 +765,7 @@ fn check_body(
         contract: None,
         olds: Vec::new(),
         contracts: None,
+        domain: None,
     };
     match j.kind {
         JobKind::Fn => {
@@ -1317,6 +1323,7 @@ impl<'a> Ck<'a> {
         self.rets.pop();
         self.end_of_body(block, div, ret);
         self.contract_rules(n);
+        self.test_domain(sig, n);
     }
 
     /// E0207 at the end of a body that can reach it.
@@ -1500,6 +1507,7 @@ impl<'a> Ck<'a> {
             has_error,
             emulated: std::mem::take(&mut self.gates.emulated),
             contracts: self.contracts.take(),
+            test_domain: self.domain.take(),
         };
         // thread-crossing capture checks (E0802, E0806; crate::threads)
         let td = self.thread_checks(&body);

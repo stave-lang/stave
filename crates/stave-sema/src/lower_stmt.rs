@@ -393,6 +393,9 @@ impl<'a> FnCx<'a> {
     /// At entry, after the params are bound: the `requires` checks in order, then the `old(e)`
     /// snapshots. `end`: the body's closing `}` (where a unit body ends).
     fn contract_entry(&mut self, end: Option<u32>) {
+        if self.tb().test_domain.is_some() {
+            self.test_entry();
+        }
         let Some(c) = self.contracts() else { return };
         for cl in c.checked_requires() {
             self.contract_check(cl, None);
@@ -411,6 +414,45 @@ impl<'a> FnCx<'a> {
             if end.is_none() {
                 self.fail_at(None, "`ensures` on a fn without a body");
             }
+        }
+    }
+
+    /// The entry of a `test fn` with parameters: the input marker, then its `requires` clauses
+    /// in order as filters. The runner is the caller: an input a clause rejects writes the skip
+    /// marker and returns at once (every parameter type the runner generates is Copy, so there
+    /// is nothing to drop); it never panics `Contract`.
+    fn test_entry(&mut self) {
+        let (Some(input), Some(skip)) = (self.g.lang.test_input, self.g.lang.test_skip) else {
+            self.fail_at(None, "`runtime.panic` has no `test fn` input markers");
+            return;
+        };
+        let fi = self.req(Req::Inst(InstKey { decl: input, args: Vec::new() }));
+        self.f.last_site = None;
+        self.f.b.call(fi, None, &[]);
+        let Some(c) = self.contracts() else { return };
+        for cl in &c.requires {
+            if !self.open() {
+                return;
+            }
+            let saved = std::mem::take(&mut self.f.temps);
+            let bt = self.t_bool();
+            self.hold_site = true;
+            let v = self.val(cl.expr, Some(bt));
+            self.drop_temps();
+            self.hold_site = false;
+            self.f.temps = saved;
+            let Some(v) = v else { return };
+            if !self.open() {
+                return;
+            }
+            let (no, ok) = (self.f.b.create_block(), self.f.b.create_block());
+            self.f.b.cbr(v, ok, &[], no, &[]);
+            self.f.b.switch_to(no);
+            let fs = self.req(Req::Inst(InstKey { decl: skip, args: Vec::new() }));
+            self.f.last_site = None;
+            self.f.b.call(fs, None, &[]);
+            self.f.b.ret(None);
+            self.f.b.switch_to(ok);
         }
     }
 

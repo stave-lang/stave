@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// `test fn` parameters: the runner generates ints, `bool`, `char`, `f32`, `f64`, arrays and
+// tuples of those, and (as a parameter's own type) `&[T]` of those with a constant length bound
+// from `requires`. Anything else is E0214; so is a value of more than 4096 scalars, and a
+// return type other than `()` on a `test fn` with parameters.
+struct P {
+    x: u32,
+}
+
+const MAX: usize = 8;
+
+test fn struct_param(p: P) {}                                    //~ ERROR E0214
+test fn str_param(s: &str) {}                                    //~ ERROR E0214
+test fn mut_slice(xs: &mut [u8]) {}                              //~ ERROR E0214
+test fn nested_slice(xs: &[&[u8]]) requires(xs.len() <= 4) {}    //~ ERROR E0214
+test fn slice_in_tuple(t: (&[u8], u32)) {}                       //~ ERROR E0214
+test fn ref_param(r: &u32) {}                                    //~ ERROR E0214
+test fn unbounded(xs: &[u8]) {}                                  //~ ERROR E0214
+test fn lower_bound_only(xs: &[u8]) requires(xs.len() >= 2) {}   //~ ERROR E0214
+test fn filter_is_no_bound(xs: &[u8]) requires(xs.len() != 3) {} //~ ERROR E0214
+test fn too_long(xs: &[u32]) requires(xs.len() <= 5000) {}       //~ ERROR E0214
+test fn too_large(a: [u64; 5000]) {}                             //~ ERROR E0214
+test fn returns(x: u32) -> u32 { return x; }                     //~ ERROR E0214
+
+// Accepted: a bound from a literal, a `const`, or the other side of the comparison.
+test fn bounded(xs: &[u8], k: u32) requires(xs.len() <= 4 && k < 9) {}
+test fn const_bound(xs: &[(u8, bool)]) requires(xs.len() < MAX) {}
+test fn flipped(xs: &[[i16; 2]]) requires(16 >= xs.len()) {}
+test fn at_the_limit(xs: &[u32]) requires(xs.len() <= 4096) {}
+test fn no_params_unchanged() {}
+
+fn main() {}

@@ -112,11 +112,15 @@ impl Line {
     }
 
     fn flush(&mut self) {
+        self.flush_to(os.STDERR);
+    }
+
+    fn flush_to(&mut self, fd: i32) {
         let p = &self.b as *const [u8; LINE_CAP] as *const u8;
         let mut done: usize = 0;
         while done < self.n {
             let q = ((p as usize) + done) as *const u8;
-            let r = unsafe("q..q+(n-done) lies inside self.b") os.write(os.STDERR, q, self.n - done);
+            let r = unsafe("q..q+(n-done) lies inside self.b") os.write(fd, q, self.n - done);
             if r == -os.EINTR { continue; }
             if r <= 0 { break; }
             done = done + (r as% usize);
@@ -271,6 +275,23 @@ pub fn requires_failed(clause: &str) -> never {
 // A false `ensures` clause: kind Contract at `site` (the return), then the clause's source text.
 pub fn ensures_failed(site: u32, clause: &str) -> never {
     trap_msg(KIND_CONTRACT, site, str_bytes(clause));
+}
+
+// The stdout markers of a `test fn` with parameters: one line as each input starts, one more
+// when a `requires` clause skips it. `stave test` counts them to name a failing input and the
+// skipped ones, and never shows them.
+pub fn test_input() {
+    marker("\u{1}stave-test input\n");
+}
+
+pub fn test_skip() {
+    marker("\u{1}stave-test skip\n");
+}
+
+fn marker(s: &str) {
+    let mut l = Line.new();
+    l.lit(s);
+    l.flush_to(os.STDOUT);
 }
 
 // An explicit std abort: kind Assert at the user site.

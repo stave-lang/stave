@@ -434,9 +434,9 @@ impl Drop for TempDir {
     }
 }
 
-/// The `test fn`s of the root package: (checked-IR path, function), in canonical decl order.
-/// The module must be lowered with `stave_sema::Mode::Test`.
-pub fn test_fns(prog: &Program, m: &Module) -> Vec<(String, FuncId)> {
+/// The `test fn`s of the root package: (checked-IR path, function, decl), in canonical decl
+/// order. The module must be lowered with `stave_sema::Mode::Test`.
+pub fn test_fns(prog: &Program, m: &Module) -> Vec<(String, FuncId, stave_sema::DeclId)> {
     let mut v = Vec::new();
     for (i, d) in prog.decls.iter().enumerate() {
         if d.kind != DeclKind::Fn || !d.flags.has(DeclFlags::TEST) {
@@ -446,9 +446,10 @@ pub fn test_fns(prog: &Program, m: &Module) -> Vec<(String, FuncId)> {
         if !root {
             continue;
         }
-        let path = prog.decl_path(stave_sema::DeclId(i as u32));
+        let d = stave_sema::DeclId(i as u32);
+        let path = prog.decl_path(d);
         if let Some(f) = m.find_func(&path).filter(|f| m.func(*f).is_some_and(|x| x.body.is_some())) {
-            v.push((path, f));
+            v.push((path, f, d));
         }
     }
     v
