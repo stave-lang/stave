@@ -1,0 +1,18 @@
+//~ ARGS --release
+//~ STDOUT trap_ok.stdout
+// trap_ok.stv in a release build: the same fns are trap-free.
+import std.io;
+
+fn g(xs: &[u32]) -> u32 without(trap) {
+    let mut s = 0u32;
+    for i in 0..xs.len() {
+        s = s +% xs[i];
+    }
+    return s;
+}
+
+fn main() {
+    let a: [u32; 4] = [1u32, 2u32, 3u32, 4294967295u32];
+    let s = g(&a);
+    io.print(f"{s}\n");
+}

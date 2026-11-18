@@ -381,10 +381,10 @@ impl<'a> World<'a> {
                     }
                 }
                 (
-                    TypeKind::Fn { params: p1, ret: r1, features: f1 },
-                    TypeKind::Fn { params: p2, ret: r2, features: f2 },
+                    TypeKind::Fn { params: p1, ret: r1, features: f1, deny: d1 },
+                    TypeKind::Fn { params: p2, ret: r2, features: f2, deny: d2 },
                 ) => {
-                    if f1 != f2 || p1.len() != p2.len() {
+                    if f1 != f2 || d1 != d2 || p1.len() != p2.len() {
                         return false;
                     }
                     for (p, x) in p1.iter().zip(p2.iter()) {

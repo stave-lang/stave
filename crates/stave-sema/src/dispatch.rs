@@ -261,7 +261,11 @@ pub(crate) fn arm_targets(prog: &Program, sigs: &Sigs, icx: &ItemCx<'_>, d: Decl
 
 /// The text of the fn type of `sig` with features `features`.
 fn fn_type_text(prog: &Program, tys: &mut TypeTable, sig: &FnSig, features: u64) -> String {
-    let t =
-        tys.intern(TypeKind::Fn { params: sig.params.clone().into_boxed_slice(), ret: sig.ret, features });
+    let t = tys.intern(TypeKind::Fn {
+        params: sig.params.clone().into_boxed_slice(),
+        ret: sig.ret,
+        features,
+        deny: sig.deny,
+    });
     types::display(&*tys, &NameCx { prog, generics: &sig.generics }, t)
 }

@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// `without(block)`: `g` calls `h`, which waits for no thread.
+fn h() -> u32 {
+    return 1u32;
+}
+
+fn g() -> u32 without(block) {
+    return h();
+}
+
+fn main() {
+    let b = g();
+}

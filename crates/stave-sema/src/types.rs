@@ -133,11 +133,13 @@ pub enum TypeKind {
         def: DeclId,
         args: Box<[GArg]>,
     },
-    /// `features`: the stave-target `FeatureSet` bits (closed under implication).
+    /// `features`: the stave-target `FeatureSet` bits (closed under implication). `deny`: the
+    /// effects of the deny clause ([`crate::effects::Effects`] bits).
     Fn {
         params: Box<[TypeId]>,
         ret: TypeId,
         features: u64,
+        deny: u8,
     },
     Vector {
         lane: TypeId,
@@ -233,10 +235,11 @@ impl TypeKind {
                     })
                     .collect(),
             },
-            TypeKind::Fn { params, ret, features } => TypeKind::Fn {
+            TypeKind::Fn { params, ret, features, deny } => TypeKind::Fn {
                 params: params.iter().map(|&t| f(t)).collect(),
                 ret: f(*ret),
                 features: *features,
+                deny: *deny,
             },
             TypeKind::Vector { lane, n } => TypeKind::Vector { lane: f(*lane), n: *n },
             other => other.clone(),
@@ -706,9 +709,9 @@ fn cmp_types(kinds: &[TypeKind], a: TypeId, b: TypeId) -> Ordering {
             })
         }
         (
-            TypeKind::Fn { params: p1, ret: r1, features: f1 },
-            TypeKind::Fn { params: p2, ret: r2, features: f2 },
-        ) => cl(p1, p2).then_with(|| ct(*r1, *r2)).then_with(|| f1.cmp(f2)),
+            TypeKind::Fn { params: p1, ret: r1, features: f1, deny: d1 },
+            TypeKind::Fn { params: p2, ret: r2, features: f2, deny: d2 },
+        ) => cl(p1, p2).then_with(|| ct(*r1, *r2)).then_with(|| f1.cmp(f2)).then_with(|| d1.cmp(d2)),
         (TypeKind::Vector { lane: l1, n: n1 }, TypeKind::Vector { lane: l2, n: n2 }) => {
             ct(*l1, *l2).then_with(|| n1.cmp(n2))
         }
@@ -914,7 +917,7 @@ fn display_into<I: Interner + ?Sized>(cx: &I, names: &dyn Names, t: TypeId, s: &
                 s.push('>');
             }
         }
-        TypeKind::Fn { params, ret, features } => {
+        TypeKind::Fn { params, ret, features, deny } => {
             s.push_str("fn(");
             for (i, x) in params.iter().enumerate() {
                 if i > 0 {
@@ -930,6 +933,9 @@ fn display_into<I: Interner + ?Sized>(cx: &I, names: &dyn Names, t: TypeId, s: &
             let f = feature_names(*features);
             if !f.is_empty() {
                 s.push_str(&format!(" needs({})", f.join(", ")));
+            }
+            if *deny != 0 {
+                s.push_str(&format!(" without({})", crate::effects::Effects(*deny).names().join(", ")));
             }
         }
         TypeKind::Vector { lane, n } => {
@@ -1017,7 +1023,8 @@ pub fn type_key_text(table: &TypeTable, t: TypeId) -> String {
             }
             s
         }
-        TypeKind::Fn { params, ret, features } => {
+        // The deny clause is not part of the checked IR's fn type.
+        TypeKind::Fn { params, ret, features, .. } => {
             let mut s = "fntype".to_string();
             for x in params.iter() {
                 s.push(' ');
@@ -1141,7 +1148,12 @@ mod tests {
         assert_eq!(t.mk_adt(DeclId(7), vec![GArg::Type(err)]), err);
         assert_eq!(t.subst(vec_t, &[GArg::Type(err)], None), err);
         // printing: `fn()` has no `-> ()` (the unit id moved too)
-        let f = t.intern(TypeKind::Fn { params: Box::new([u8t]), ret: t.fixed_ty(ids::UNIT), features: 0 });
+        let f = t.intern(TypeKind::Fn {
+            params: Box::new([u8t]),
+            ret: t.fixed_ty(ids::UNIT),
+            features: 0,
+            deny: 0,
+        });
         assert_eq!(display(&t, &N, f), "fn(u8)");
         assert_eq!(display(&t, &N, s), "[u8; 4]");
         // overlays and merges over the canonical table

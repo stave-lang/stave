@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// `without(alloc)`: `g` reaches the allocator through `h` and `Vec.push`; the error names the
+// call chain, one label per call.
+import std.vec;
+
+fn h(v: &mut vec.Vec<u32>) {
+    v.push(1u32);
+}
+
+fn g(v: &mut vec.Vec<u32>) without(alloc) { //~ ERROR E1401
+    h(v);
+}
+
+fn main() {
+    let mut v = vec.Vec::<u32>.new();
+    g(&mut v);
+}

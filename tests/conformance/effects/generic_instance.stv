@@ -1,0 +1,41 @@
+//~ CHECK-ONLY
+// A generic fn is checked on each instance: `total::<Grow>` reaches the allocator through
+// `Grow.size`, and the error is at the call that instantiates it; `total::<Fixed>` is accepted.
+import std.vec;
+
+trait Size {
+    fn size(&self) -> usize;
+}
+
+struct Fixed {
+    n: usize,
+}
+
+impl Size for Fixed {
+    fn size(&self) -> usize {
+        return self.n;
+    }
+}
+
+struct Grow {
+    n: usize,
+}
+
+impl Size for Grow {
+    fn size(&self) -> usize {
+        let mut v = vec.Vec::<u32>.new();
+        v.push(1u32);
+        return v.len();
+    }
+}
+
+fn total<T: Size>(x: &T) -> usize without(alloc) {
+    return x.size();
+}
+
+fn main() {
+    let a = Fixed.{ n: 1 };
+    let b = Grow.{ n: 2 };
+    let s = total(&a);
+    let t = total(&b); //~ ERROR E1401
+}

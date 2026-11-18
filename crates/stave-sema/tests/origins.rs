@@ -147,7 +147,12 @@ fn kinds_of_types() {
     let r = k(&mut tys, by_ref.params[0]);
     assert!(r.view && r.copy && r.send && r.sync && !r.flat);
     // fn(&u32) -> &u32: a Copy view, neither Send nor Sync
-    let ft = tys.intern(TypeKind::Fn { params: vec![by_ref.params[0]].into(), ret: by_ref.ret, features: 0 });
+    let ft = tys.intern(TypeKind::Fn {
+        params: vec![by_ref.params[0]].into(),
+        ret: by_ref.ret,
+        features: 0,
+        deny: 0,
+    });
     let f = k(&mut tys, ft);
     assert!(f.view && f.copy && !f.send && !f.sync && !f.flat);
     // str: unsized

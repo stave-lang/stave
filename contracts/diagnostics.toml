@@ -1747,6 +1747,21 @@ labels = [{ at = "primary", text = "the package links C objects here" }]
 fix = { description = "use `--compiler auto` or `--compiler cpu`: stage0 links C objects" }
 
 [[diag]]
+code = "E1401"
+severity = "error"
+area = "effects"
+rule = "a fn with a deny clause has a denied effect through what it can call; checked per instance of a generic fn; names the call chain and the op; at the denied effect, or for an instance at the call that instantiates it; case `self` when the op is in the fn itself"
+holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal" }
+choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] }
+message = "`{fn}` denies `{effect}`, but it reaches `{at}`, which {op}"
+labels = [{ at = "primary", text = "`{fn}` must not have `{effect}`" }, { at = "deny", text = "`{effect}` denied here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "op", text = "`{at}` {op} here" }]
+fix = { description = "remove `{effect}` from the deny clause, or change the calls so that `{at}` is not reached" }
+
+[diag.cases.self]
+message = "`{fn}` denies `{effect}`, but it {op}"
+fix = { description = "remove `{effect}` from the deny clause, or remove what has it" }
+
+[[diag]]
 code = "E1402"
 severity = "error"
 area = "effects"
@@ -1755,6 +1770,32 @@ holes = { name = "path", cycle = "path" }
 message = "recursive call cycle `{cycle}`: `{name}` is not a `rec fn`"
 labels = [{ at = "primary", text = "`{name}` calls the next fn of the cycle here" }, { at = "call", text = "next call of the cycle" }, { at = "unmarked", text = "also in this recursion, not a `rec fn`" }]
 fix = { description = "mark every fn of the recursion `rec fn` (its depth then has no static bound), or rewrite it as a loop" }
+
+[[diag]]
+code = "E1403"
+severity = "error"
+area = "effects"
+rule = "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1; case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)"
+holes = { from = "type", to = "type", effect = "text-literal", fn = "path", at = "path", op = "text-literal" }
+choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] }
+message = "`{from}` cannot be used as `{to}`: it does not deny `{effect}`"
+labels = [{ at = "primary", text = "coerced here" }]
+fix = { description = "add `{effect}` to the deny clause of `{from}`, or remove it from `{to}`" }
+
+[diag.cases.made]
+message = "`{fn}` cannot be used as a fn value that denies `{effect}`: it reaches `{at}`, which {op}"
+labels = [{ at = "primary", text = "coerced here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "op", text = "`{at}` {op} here" }]
+fix = { description = "remove `{effect}` from the fn type, or change the calls so that `{at}` is not reached" }
+
+[[diag]]
+code = "E1404"
+severity = "error"
+area = "effects"
+rule = "unknown effect name in a deny clause"
+holes = { name = "name" }
+message = "unknown effect `{name}`"
+labels = [{ at = "primary", text = "not an effect" }]
+fix = { description = "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`" }
 
 [[diag]]
 code = "E1407"

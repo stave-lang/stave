@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// `without(recursive)`: `g` calls `h` twice, and nothing it reaches is part of a call cycle.
+fn h(n: u32) -> u32 {
+    return n +% 1u32;
+}
+
+fn g(n: u32) -> u32 without(recursive) {
+    return h(h(n));
+}
+
+fn main() {
+    let a = g(3u32);
+}

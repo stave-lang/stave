@@ -1,0 +1,19 @@
+//~ STDOUT trap_ok.stdout
+// `without(trap)` in a debug build: `xs[i]` with `i` from `0..xs.len()` has a proof, so its
+// bounds check is removed in every build mode, and `+%` cannot trap. trap_ok_release.stv builds
+// the same program with `--release`.
+import std.io;
+
+fn g(xs: &[u32]) -> u32 without(trap) {
+    let mut s = 0u32;
+    for i in 0..xs.len() {
+        s = s +% xs[i];
+    }
+    return s;
+}
+
+fn main() {
+    let a: [u32; 4] = [1u32, 2u32, 3u32, 4294967295u32];
+    let s = g(&a);
+    io.print(f"{s}\n");
+}

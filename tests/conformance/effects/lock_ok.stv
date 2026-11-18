@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// `without(lock)`: `g` reads through `h` and takes no lock.
+fn h(x: &u32) -> u32 {
+    return *x;
+}
+
+fn g(x: &u32) -> u32 without(lock) {
+    return h(x);
+}
+
+fn main() {
+    let x = 2u32;
+    let b = g(&x);
+}

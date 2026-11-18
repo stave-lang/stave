@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// An `extern "C"` import has every effect: `g` reaches `puts` through `h`.
+extern "C" {
+    fn puts(s: *const u8) -> i32;
+}
+
+fn h(p: *const u8) -> i32 {
+    return unsafe("p is a NUL-terminated string") puts(p);
+}
+
+fn g(p: *const u8) -> i32 without(io) { //~ ERROR E1401
+    return h(p);
+}
+
+fn main() {
+    let nul = 0u8;
+    let r = g(&nul as *const u8);
+}

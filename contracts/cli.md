@@ -10,9 +10,10 @@ built program's exit codes are in LANG.md §3 (101 on a panic).
 |---|---|
 | `stave build [PKG_DIR] [--release] [--target T] [--features F,...] [-o OUT]` | Build an executable or static library |
 | `stave run [PKG_DIR [ARGS...]] [--release] [--target T] [-- ARGS...]` | Build, then exec. `--target` only the host's targets (the triples of the host's arch, at any level the host CPU supports) or `gpu-sm86`; otherwise E1001 |
-| `stave check [PKG_DIR]` | Parse, resolve, type check, and borrow check. No codegen |
+| `stave check [PKG_DIR]` | Parse, resolve, type check, borrow check, and check deny clauses (`without(..)`). No codegen |
 | `stave test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD]` | Build and run `test fn`s and the conformance files. `--runner` wraps execution (e.g. `sde64 -icx --`, `qemu-aarch64 -cpu max,...`). A target the host cannot run without a runner is E1001: reported as not run, never as passed |
 | `stave unsafe-report [PKG_DIR] [--json]` | List the unsafe inventory |
+| `stave effects [PKG_DIR] [--json]` | List the effect set of each fn of the program's own packages |
 | `stave caps-report [PKG_DIR] [--json]` | Planned: per package, the OS capability classes its code can reach |
 | `stave bounds-report [PKG_DIR] [--target T] [--json]` | Planned: every bounds check kept in release code, with the reason |
 | `stave branch-report [PKG_DIR] [--target T] [--json]` | Planned: branches in loops whose condition depends on loaded data, with a suggested fix |
@@ -72,6 +73,19 @@ Outputs and statuses of the code-generating commands:
   checked-IR path of the enclosing fn (`trait`/`impl`: the trait's path / the impl's self-type
   head); strings are JSON-escaped in both forms. The package set follows `--target` selection of
   dependencies (the host baseline: no `--target` flag).
+
+- `stave effects [PKG_DIR] [--json]`: checks the program as `stave check` does (always stage0,
+  host baseline), computing `trap` from the checked IR of every fn (LANG.md §2, deny clause).
+  With error diagnostics before the effect pass they go to stderr (`--json`: as JSON lines),
+  nothing to stdout, exit 1. Otherwise stdout has one line per fn and closure of the root package
+  and its dependencies outside `std` and `runtime` (a generic fn once per instance the program
+  makes), in canonical (file F, offset) order, then by name. Human: `<file>:<line>:<col>: <fn>:
+  <effects>`, the effects space-separated in the order `alloc trap recursive lock unsafe io
+  block`, or `none`; `--json`: one object per line,
+  `{"file":"src/main.stv","line":9,"col":4,"fn":"main.add","effects":["trap"]}`. `file`, `line`,
+  `col` as in `unsafe-report`, at the fn's name (a closure: its `fn` token); `fn` is the
+  checked-IR path, with the type args of an instance (`main.id<u32>`), a closure `<fn>.<k>`.
+  Deny-clause violations (E1401, E1403) are printed on stderr after the report, exit 1.
 
 - `stave fix [PKG_DIR] [--dry-run]`: runs `stave check` (always stage0), applies every fix whose
   `applicability` is `exact` to the source files of the root package (never `std`, `runtime`, or

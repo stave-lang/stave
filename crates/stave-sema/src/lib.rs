@@ -40,6 +40,7 @@ pub mod closures;
 pub mod consteval;
 pub mod decls;
 mod dispatch;
+pub mod effects;
 pub mod gates;
 pub mod itemcx;
 pub mod kinds;
@@ -90,7 +91,9 @@ pub use diag::failures as diagnostic_build_failures;
 pub use dump::{dump_names, dump_strings, names_file_into, strings_into};
 pub use ids::{BindingRef, DeclId, GenericRef, ItemId, ModuleId, PackageId, Sym};
 pub use intern::Strings;
-pub use lower::{LowerError, LowerErrorKind, LowerTimings, Mode, lower, lower_timed};
+pub use lower::{
+    GraphLowering, LowerError, LowerErrorKind, LowerTimings, Mode, lower, lower_graph_nodes, lower_timed,
+};
 pub use modules::{Import, Module};
 pub use package::{BuiltinPackage, FileBytes, Fs, Package, PackageKind};
 pub use prim::{Builtin, Lanes, Prim, Scalar};

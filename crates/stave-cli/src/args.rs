@@ -18,6 +18,7 @@ pub enum Cmd {
     Test,
     Fix,
     UnsafeReport,
+    Effects,
     Fmt,
     Lowering,
     Explain,
@@ -33,6 +34,7 @@ impl Cmd {
             Cmd::Test => "test",
             Cmd::Fix => "fix",
             Cmd::UnsafeReport => "unsafe-report",
+            Cmd::Effects => "effects",
             Cmd::Fmt => "fmt",
             Cmd::Lowering => "lowering",
             Cmd::Explain => "explain",
@@ -48,6 +50,7 @@ impl Cmd {
             Cmd::Test,
             Cmd::Fix,
             Cmd::UnsafeReport,
+            Cmd::Effects,
             Cmd::Fmt,
             Cmd::Lowering,
             Cmd::Explain,
@@ -110,7 +113,7 @@ pub struct Args {
     pub filter: Option<String>,
     pub watch: bool,
     pub alloc_check: bool,
-    /// `unsafe-report --json`.
+    /// `unsafe-report --json`, `effects --json`.
     pub json: bool,
     /// `fix --dry-run`.
     pub dry_run: bool,
@@ -161,6 +164,8 @@ commands:
   fix [PKG_DIR] [--dry-run] [--target T] [--diagnostics human|json]
                         (apply the exact fixes, re-check, repeat; --dry-run prints a diff)
   unsafe-report [PKG_DIR] [--json]
+  effects [PKG_DIR] [--json]
+                        (the effects of each fn of the program's own packages)
   fmt [PKG_DIR | FILE...] [--check]
                         rewrite sources in the canonical layout (a directory: every
                         .stv file below it; --check: list the files that would change)
@@ -205,7 +210,7 @@ fn allowed(cmd: Cmd, flag: &str) -> bool {
         // Always stage0: the check of a round reads edits that are not written yet.
         Cmd::Fix => matches!(flag, "--dry-run" | "--target" | "--diagnostics"),
         // These always run in stage0 whatever --compiler says (cli-stage1.md).
-        Cmd::UnsafeReport => matches!(flag, "--json" | "--compiler"),
+        Cmd::UnsafeReport | Cmd::Effects => matches!(flag, "--json" | "--compiler"),
         Cmd::Fmt => flag == "--check",
         Cmd::Lowering => matches!(flag, "--target" | "--op" | "--compiler"),
         Cmd::Explain => flag == "--compiler",
@@ -519,7 +524,7 @@ mod tests {
         assert_eq!(a.diagnostics, DiagFormat::Human);
         assert_eq!(a.target, Target::host().unwrap());
         assert!(!a.explicit_target);
-        for c in ["build", "run", "check", "test", "unsafe-report"] {
+        for c in ["build", "run", "check", "test", "unsafe-report", "effects"] {
             assert_eq!(args(c).cmd.name(), c);
         }
         assert_eq!(args("check pkg").pkg_dir, Some(PathBuf::from("pkg")));
@@ -563,6 +568,7 @@ mod tests {
         assert!(a.release);
         assert!(args("run s.stv").run_args.is_empty());
         assert!(args("unsafe-report --json").json);
+        assert!(args("effects pkg --json").json);
         let a = args("fix pkg --dry-run --diagnostics json");
         assert_eq!((a.cmd, a.dry_run, a.diagnostics), (Cmd::Fix, true, DiagFormat::Json));
         assert_eq!(a.pkg_dir, Some(PathBuf::from("pkg")));

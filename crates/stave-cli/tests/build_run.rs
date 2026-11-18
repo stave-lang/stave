@@ -698,7 +698,7 @@ fn emulated_ops_are_listed() {
     assert!(err.contains("E0700"), "{err}");
 }
 
-/// Syntax that parses but has no semantics yet (parameter `from`, contracts, `without(..)`) is
+/// Syntax that parses but has no semantics yet (parameter `from`, contracts) is
 /// "not implemented yet" for `stave check` and `stave build` (exit 2, naming the construct and
 /// its place); an error in the same program is reported instead (exit 1).
 #[test]
@@ -718,13 +718,6 @@ fn parsed_only_syntax_is_not_implemented() {
              fn main() -> i32 {\n    return 0;\n}\n",
             "a `from` clause on a parameter at ",
             ":2:18",
-        ),
-        (
-            "without.stv",
-            "fn apply(f: fn(u32) -> u32 without(trap), x: u32) -> u32 {\n    return f(x);\n}\n\
-             fn main() -> i32 {\n    return 0;\n}\n",
-            "a `without(..)` deny clause at ",
-            ":1:28",
         ),
     ];
     for (name, src, what, at) in cases {

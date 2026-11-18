@@ -4334,6 +4334,54 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E1401",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "a fn with a deny clause has a denied effect through what it can call; checked per instance of a generic fn; names the call chain and the op; at the denied effect, or for an instance at the call that instantiates it; case `self` when the op is in the fn itself",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "at", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{fn}` denies `{effect}`, but it reaches `{at}`, which {op}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{fn}` must not have `{effect}`" },
+                    LabelTemplate { at: "deny", text: "`{effect}` denied here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                    LabelTemplate { at: "op", text: "`{at}` {op} here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `{effect}` from the deny clause, or change the calls so that `{at}` is not reached",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "self",
+                message: "`{fn}` denies `{effect}`, but it {op}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{fn}` must not have `{effect}`" },
+                    LabelTemplate { at: "deny", text: "`{effect}` denied here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                    LabelTemplate { at: "op", text: "`{at}` {op} here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `{effect}` from the deny clause, or remove what has it",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E1402",
         severity: Severity::Error,
         area: "effects",
@@ -4355,6 +4403,76 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "mark every fn of the recursion `rec fn` (its depth then has no static bound), or rewrite it as a loop",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1403",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1; case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "at", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "from", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+            Hole { name: "to", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{from}` cannot be used as `{to}`: it does not deny `{effect}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "coerced here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "add `{effect}` to the deny clause of `{from}`, or remove it from `{to}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "made",
+                message: "`{fn}` cannot be used as a fn value that denies `{effect}`: it reaches `{at}`, which {op}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "coerced here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                    LabelTemplate { at: "op", text: "`{at}` {op} here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `{effect}` from the fn type, or change the calls so that `{at}` is not reached",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1404",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "unknown effect name in a deny clause",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "name", kind: HoleKind::Name, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "unknown effect `{name}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not an effect" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

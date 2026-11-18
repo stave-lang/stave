@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// `without(unsafe)`: `g` reaches the `unsafe` expression in `h`.
+fn h(p: *const u32) -> u32 {
+    return unsafe("p points to a live u32") *p;
+}
+
+fn g(p: *const u32) -> u32 without(unsafe) { //~ ERROR E1401
+    return h(p);
+}
+
+fn main() {
+    let x = 1u32;
+    let r = g(&x as *const u32);
+}

@@ -1,0 +1,36 @@
+//~ CHECK-ONLY
+// The deny clause is part of the fn type. A closure literal or fn item made into a value of a fn
+// type with a deny clause is checked on its effects (E1403 when it has a denied one). A value of
+// `fn(..) without(D1)` is usable as `fn(..) without(D2)` when D2 ⊆ D1. A call through a
+// `without(trap)` value does not trap, although other `fn(u32) -> u32` values may.
+fn inc(x: u32) -> u32 {
+    return x + 1u32;
+}
+
+fn wrap_inc(x: u32) -> u32 {
+    return x +% 1u32;
+}
+
+fn safe_inc(x: u32) -> u32 without(trap, alloc) {
+    return x +% 1u32;
+}
+
+fn apply(f: fn(u32) -> u32 without(trap), x: u32) -> u32 without(trap) {
+    return f(x);
+}
+
+// D2 = {trap} ⊆ D1 = {trap, alloc}
+fn narrow(f: fn(u32) -> u32 without(trap, alloc)) -> u32 {
+    let g: fn(u32) -> u32 without(trap) = f;
+    return apply(g, 1u32);
+}
+
+fn main() {
+    let a = apply(fn(x: u32) -> u32 { return x +% 2u32; }, 1u32);
+    let b = apply(fn(x: u32) -> u32 { return x + 2u32; }, 1u32); //~ ERROR E1403
+    let c = apply(wrap_inc, 1u32);
+    let d = apply(inc, 1u32); //~ ERROR E1403
+    let e = narrow(safe_inc);
+    let plain: fn(u32) -> u32 = inc;
+    let f = plain(1u32);
+}

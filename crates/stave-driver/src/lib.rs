@@ -8,6 +8,8 @@
 //!   parse, intern, resolve), type checker, lowering, and [`build`] (code generation and the
 //!   static ELF link); `--timings` stage names.
 //! - [`build`]: the back end (lower + verify, x86-64 / AArch64 debug codegen, link).
+//! - [`effects`]: the effect pass and its deny-clause checks (E1401, E1403), between borrowck and
+//!   lowering.
 //! - [`exec`]: running built executables (natively or through a `--runner`); `test fn` discovery.
 //! - [`harness`]: the `test fn` harness of `stave test PKG_DIR`.
 //! - [`interp`]: runs a lowered program in the stave-ir reference interpreter (the oracle).
@@ -19,6 +21,7 @@
 pub mod build;
 pub mod conformance;
 pub mod dump;
+pub mod effects;
 pub mod exec;
 pub mod harness;
 pub mod interp;

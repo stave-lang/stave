@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// `without(io)`: `g` prints through `h`, which makes a system call.
+import std.io;
+
+fn h() {
+    io.print("hi\n");
+}
+
+fn g() without(io) { //~ ERROR E1401
+    h();
+}
+
+fn main() {
+    g();
+}
