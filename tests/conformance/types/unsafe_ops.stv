@@ -1,7 +1,7 @@
 //~ CHECK-ONLY
 // Unsafe operations (E0803): raw-pointer deref, unsafe fn and extern import calls. An
 // `unsafe fn` body is not an unsafe context.
-extern "C" {
+unsafe("puts as declared in stdio.h") extern "C" {
     fn puts(s: *const u8) -> i32;
 }
 

@@ -1,10 +1,14 @@
 //~ CHECK-ONLY
-// E1404: a deny clause names only `alloc trap recursive lock unsafe io block`, on fn items and
-// in fn types.
+// E1404: a deny clause names only `alloc trap recursive lock unsafe io block`, on fn items,
+// in fn types, and on `extern "C"` imports.
 fn f() without(alloc, gc) { //~ ERROR E1404
 }
 
 fn g(h: fn() without(panic)) { //~ ERROR E1404
+}
+
+unsafe("test declarations") extern "C" {
+    fn fast() without(speed); //~ ERROR E1404
 }
 
 fn main() {

@@ -25,9 +25,10 @@ pub fn text_order(m: &Module) -> Vec<FuncId> {
     order
 }
 
-/// Per `FuncId`: the symbol name of each function in `fns` (`None` for the others). A function
-/// is named by its path, or `path@instance` when another function of `fns` has the same path or
-/// the path is reserved ([`is_reserved`]).
+/// Per `FuncId`: the symbol name of each function in `fns` (`None` for the others). An
+/// `extern "C"` function is named by its [`crate::Func::symbol`] (a C name has no `.`, so it never
+/// meets a path); any other function by its path, or `path@instance` when another function of
+/// `fns` has the same path or the path is reserved ([`is_reserved`]).
 pub fn func_symbols(m: &Module, fns: &[FuncId]) -> Vec<Option<String>> {
     let mut count: FxHashMap<&str, u32> = FxHashMap::default();
     for f in fns {
@@ -38,6 +39,10 @@ pub fn func_symbols(m: &Module, fns: &[FuncId]) -> Vec<Option<String>> {
     let mut out = vec![None; m.funcs.len()];
     for f in fns {
         let Some(func) = m.funcs.get(f.index()) else { continue };
+        if let Some(sym) = &func.symbol {
+            out[f.index()] = Some(sym.clone());
+            continue;
+        }
         let shared = count.get(func.path.as_str()).copied().unwrap_or(0) > 1;
         out[f.index()] = Some(if shared || is_reserved(&func.path) {
             format!("{}@{}", func.path, func.instance)

@@ -1,0 +1,2 @@
+name = "ffi_symbols_pkg"
+kind = "bin"

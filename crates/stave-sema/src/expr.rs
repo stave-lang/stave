@@ -1741,7 +1741,12 @@ impl<'a> Ck<'a> {
         self.target(tok, Target::Fn { decl, args: args.clone() });
         self.site(tok, decl, &args);
         self.coerce_note(n, Coercion::FnItem);
-        if sig.is_unsafe {
+        if self.prog.decl(decl).is_some_and(|d| d.flags.has(DeclFlags::EXTERN_EXPORT)) {
+            // an export has the C convention, a fn value the Stave one
+            let path = self.prog.decl_path(decl);
+            let d = mk("E0807", Some("extern"), &[("name", &path)], self.icx.node_span(n), &[]);
+            self.report(d);
+        } else if sig.is_unsafe {
             // E0807: fn types carry no `unsafe` marker, so a call through the value
             // would skip E0803 (also for `extern` imports, whose calls are unsafe).
             let path = self.prog.decl_path(decl);
@@ -2357,8 +2362,14 @@ impl<'a> Ck<'a> {
         let mut pending: Vec<(usize, Ty)> = Vec::new();
         for (i, &a) in args.iter().enumerate() {
             let Some(&p) = params.get(i) else {
+                // past the params only through `...` (the arity check rejects the rest)
                 let t = self.expr(a, None);
-                self.force(t);
+                let t = self.force(t);
+                if !crate::ffi::c_variadic_ok(&self.tys, t) {
+                    let tn = self.show(t);
+                    let d = mk("E0813", None, &[("type", &tn)], self.icx.node_span(a), &[]);
+                    self.report(d);
+                }
                 continue;
             };
             let why = spans.get(i).copied();

@@ -83,12 +83,13 @@ Keywords     = "fn" "let" "mut" "const" "struct" "enum" "trait" "impl" "for" "in
 File         = Import* Item* EOF ;                     (* imports precede items: a later `import` is E0004 *)
 Import       = "import" Ident ("." Ident)* ("as" Ident)? ";" ;
 Item         = "pub"? ItemBody | "test" FnDecl ;      (* FIRST sets: pub/unsafe/fn/... vs "test" *)      (* test fns: run by `stave test` *)
-ItemBody     = Unsafe? (FnDecl | TraitDecl | ImplDecl)      (* left-factored: one `unsafe` prefix *)
-             | AdtDecl | ConstDecl | StaticDecl | DispatchDecl | ExternItem | TypeAlias
+ItemBody     = Unsafe? (FnDecl | TraitDecl | ImplDecl | ExternItem)   (* left-factored: one `unsafe` prefix *)
+             | AdtDecl | ConstDecl | StaticDecl | DispatchDecl | TypeAlias
              | AllocatorDecl | KernelDecl ;
 KernelDecl   = "kernel" "fn" Ident "(" Params? ")" Block ;   (* GPU kernel, rules in contracts/gpu-lang.md *)
 Unsafe       = "unsafe" "(" StrLit ")" ;              (* the stated obligation, mandatory:
-                                                         unsafe fn = caller obligation; unsafe trait/impl = implementer obligation *)
+                                                         unsafe fn = caller obligation; unsafe trait/impl = implementer obligation;
+                                                         unsafe extern "C" { } = declarer obligation: each import matches its C definition *)
 
 FnDecl       = "rec"? "fn" Ident Generics? "(" Params? ")" RetClause? Needs? Without? Requires* Ensures* Block ;
                (* `rec`: the fn may be part of a call cycle; trait signatures, closures, dispatch,
@@ -131,9 +132,13 @@ TypeAlias    = "type" Ident Generics? "=" Type ";" ;
 AllocatorDecl = "allocator" Ident ("." Ident)* ";" ;  (* replaces the global allocator; at most one per binary *)
 
 (* C ABI. After `extern "C"`: "{" means imports and "fn" means a C-ABI export
-   definition. Calls to imports are unsafe. Vectors are not allowed in C signatures. *)
-ExternItem   = "extern" StrLit ( "{" ExternFn* "}" | "fn" Ident "(" Params? ")" ("->" Type)? Block ) ;
-ExternFn     = "fn" Ident "(" XParams? ")" ("->" Type)? ";" ;
+   definition. ABI strings: "C", and "stave-intrinsic" for import blocks of the shipped packages
+   (else E0811). A "C" import block needs `unsafe("..")` (E0811); calls to imports are unsafe.
+   An import has every effect except those its `without` lists (a claim of the block's obligation).
+   C signatures hold ints, `f32`, `f64`, `bool`, and thin raw pointers (E0804). *)
+ExternItem   = "extern" StrLit ( "{" ExternFn* "}"
+                               | "fn" Ident "(" Params? ")" ("->" Type)? Without? Requires* Ensures* Block ) ;
+ExternFn     = "fn" Ident "(" XParams? ")" ("->" Type)? Without? ";" ;
 XParams      = "..." | Param ("," XParams?)? ;   (* "..." only last; LL(1) form of Params ("," "...")? *)
 
 (* Runtime CPU dispatch. Arms are tried top to bottom. `_` is required and last.

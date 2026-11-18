@@ -720,9 +720,17 @@ impl Gen {
                 self.w("}");
             }
             10 => {
-                self.w("extern \"C\" { fn puts(s: *const u8) -> i32; fn printf(f: *const u8, ...) -> i32; }");
+                self.w("unsafe(\"stdio.h\") extern \"C\" { fn puts(s: *const u8) -> i32 without(alloc, io);");
+                self.w("fn printf(f: *const u8, ...) -> i32; }");
                 self.nl();
+                if self.chance(30) {
+                    self.w("unsafe(\"x\")");
+                }
                 self.w("extern \"C\" fn add(a: i32, b: i32) -> i32");
+                if self.chance(30) {
+                    self.w("without(alloc)");
+                }
+                self.contracts(d.min(1));
                 self.block(d.saturating_sub(1));
             }
             11 => self.w("dispatch fn sum(xs: &[f32]) -> f32 needs(sse42) { avx2 + fma => m.a, _ => b, }"),

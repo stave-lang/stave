@@ -271,8 +271,8 @@ unsafe("Send is sound here") impl Send for Wrap<i32> { }
 const N: usize = 4 * 2;
 type Bytes = [u8; 16];
 type Aligned = [f32 align 64];
-extern "C" { fn puts(s: *const u8) -> i32; fn printf(f: *const u8, ...) -> i32; }
-extern "C" fn add(a: i32, b: i32) -> i32 { return a + b; }
+unsafe("stdio.h") extern "C" { fn puts(s: *const u8) -> i32 without(alloc, io); fn printf(f: *const u8, ...) -> i32; }
+extern "C" fn add(a: i32, b: i32) -> i32 without(alloc) requires(a > 0) ensures(result > b) { return a + b; }
 dispatch fn sum(xs: &[f32]) -> f32 needs(sse42) { avx2 + fma => sum_avx2, _ => sum_scalar, }
 fn sum_avx2(xs: &[f32]) -> f32 needs(avx2, fma) {
     let mut acc: f32x8 = f32x8.splat(0.0);

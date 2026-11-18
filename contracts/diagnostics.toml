@@ -603,7 +603,7 @@ severity = "error"
 area = "types"
 rule = "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy; no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is read, never written or passed as `&mut`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op); cases `frozen` / `frozen-self` (when the other operand rules hold): the first value the clause touches (an expression, a call result, a built-in receiver, a called fn value) whose type is not `Frozen`, with the path to its `UnsafeCell` or fn value; case `static`: a callee in a clause reaches a `static` whose type is not `Frozen`; case `mut-result`: an `ensures` reads a param that a `&mut` in the return type borrows from (`from v`), outside `old(..)`"
 holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal", value = "source", type = "type", path = "place", part = "type", reason = "text-literal", name = "path" }
-choices = { reason = ["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound", "nested deeper than the limit of the `Frozen` check"], effect = ["lock", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] }
+choices = { reason = ["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound", "nested deeper than the limit of the `Frozen` check"], effect = ["lock", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] }
 message = "this expression is not allowed in a contract"
 labels = [{ at = "primary", text = "not allowed in `requires`/`ensures`" }]
 fix = { description = "keep contracts side-effect free: compare params, fields, and `.len()`; move other checks into the body with `std.debug.assert`" }
@@ -1314,11 +1314,19 @@ fix = { description = "wrap it in `unsafe(\"<obligation>\") {{ ... }}`, or `unsa
 code = "E0804"
 severity = "error"
 area = "threads-unsafe-ffi"
-rule = "vector or view type in an `extern \"C\"` signature"
+rule = "type not C-safe in an `extern \"C\"` signature (import or export): C-safe are `i8`..`i64`, `u8`..`u64`, `isize`, `usize`, `f32`, `f64`, `bool`, raw pointers whose pointee is not `[T]` or `str`, and the returns `()` and `never`. Cases `vector-view` (vector, mask, reference, fn value) and `struct` (a struct by value)"
 holes = { type = "type" }
 message = "`{type}` cannot appear in an `extern \"C\"` signature"
+labels = [{ at = "primary", text = "not a C type" }]
+fix = { description = "use an int type, `f32`, `f64`, `bool`, or a raw pointer to a sized type instead of `{type}`" }
+
+[diag.cases.vector-view]
 labels = [{ at = "primary", text = "vector or view type" }]
 fix = { description = "pass a raw pointer and a length (`*const T`, `usize`) instead of `{type}`" }
+
+[diag.cases.struct]
+labels = [{ at = "primary", text = "struct passed by value" }]
+fix = { description = "pass `*const {type}` (or `*mut {type}`) instead" }
 
 [[diag]]
 code = "E0805"
@@ -1350,7 +1358,7 @@ fix = { description = "pass a closure literal or a fn item directly to {callee}"
 code = "E0807"
 severity = "error"
 area = "threads-unsafe-ffi"
-rule = "an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker, so a call through the value would skip E0803). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through the value would skip E0802 and E0806)"
+rule = "an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker, so a call through the value would skip E0803). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through the value would skip E0802 and E0806). Case `extern`: an `extern \"C\"` export used as a fn value (its convention is C, not Stave's)"
 holes = { name = "path" }
 message = "unsafe fn `{name}` cannot become a fn value"
 labels = [{ at = "primary", text = "unsafe fn used as a fn value" }]
@@ -1360,6 +1368,11 @@ fix = { description = "wrap the call in a safe fn or closure with its own `unsaf
 message = "`{name}` cannot become a fn value: its calls check the captures of their closure arguments"
 labels = [{ at = "primary", text = "thread fn used as a fn value" }]
 fix = { description = "call `{name}` directly with a closure literal or fn item" }
+
+[diag.cases.extern]
+message = "`extern \"C\"` export `{name}` cannot become a fn value"
+labels = [{ at = "primary", text = "C-ABI fn used as a fn value" }]
+fix = { description = "call `{name}` directly, or wrap the call in a closure" }
 
 [[diag]]
 code = "E0808"
@@ -1389,6 +1402,56 @@ holes = { trait = "path" }
 message = "impl of unsafe trait `{trait}` needs `unsafe(\"..\")`"
 labels = [{ at = "primary", text = "impl without an obligation" }, { at = "trait", text = "`{trait}` declared unsafe here" }]
 fix = { description = "state why the type meets the obligation of `{trait}`: write `unsafe(\"<obligation>\") impl`" }
+
+[[diag]]
+code = "E0811"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "`extern` item form: an ABI string other than `\"C\"` (and `\"stave-intrinsic\"` on an import block); case `obligation`: an `extern \"C\"` import block without `unsafe(\"..\")`; case `intrinsic`: `unsafe(\"..\")` on an `extern \"stave-intrinsic\"` block"
+holes = { abi = "source" }
+message = "unknown ABI `{abi}`"
+labels = [{ at = "primary", text = "not `\"C\"`" }]
+fix = { description = "write `extern \"C\"`" }
+
+[diag.cases.obligation]
+message = "`extern \"C\"` import block needs `unsafe(\"..\")`"
+labels = [{ at = "primary", text = "imports without an obligation" }]
+fix = { description = "state why every declaration matches its C definition (types, `...`, the effects `without` claims): write `unsafe(\"<obligation>\") extern {abi} {{ ... }}`" }
+
+[diag.cases.intrinsic]
+message = "`unsafe(\"..\")` on an `extern {abi}` block"
+labels = [{ at = "primary", text = "intrinsics are checked against their table: nothing to trust" }]
+fix = { description = "remove the `unsafe(\"..\")`" }
+
+[[diag]]
+code = "E0812"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "C symbol (the unmangled fn name of an `extern \"C\"` import or export, one namespace per program): two exports of one name (`duplicate`), two declarations of one symbol with different signatures (`signature`), or a name the compiler defines (`reserved`: `_start`, `__stave*`)"
+holes = { name = "name" }
+message = "C symbol `{name}` is exported twice"
+labels = [{ at = "primary", text = "second export" }, { at = "first", text = "first export" }]
+fix = { description = "rename one of the `extern \"C\"` fns: C symbols are the fn names, global across the program" }
+
+[diag.cases.signature]
+message = "C symbol `{name}` is declared with two different signatures"
+labels = [{ at = "primary", text = "this signature" }, { at = "first", text = "differs from this one" }]
+fix = { description = "declare `{name}` with one signature everywhere (the one of its C definition)" }
+
+[diag.cases.reserved]
+message = "C symbol `{name}` is reserved for the compiler"
+labels = [{ at = "primary", text = "reserved symbol" }]
+fix = { description = "rename the fn: `_start` and names starting `__stave` are defined by the compiler" }
+
+[[diag]]
+code = "E0813"
+severity = "error"
+area = "threads-unsafe-ffi"
+rule = "variadic argument (after the fixed params of an `extern \"C\"` import with `...`) whose type C cannot pass: allowed are `i32`, `u32`, `i64`, `u64`, `isize`, `usize`, `f64`, and raw pointers whose pointee is not `[T]` or `str` (C's promotions are written with `as`)"
+holes = { type = "type" }
+message = "`{type}` cannot be passed as a variadic C argument"
+labels = [{ at = "primary", text = "variadic argument of type `{type}`" }]
+fix = { description = "convert it to `i32`, `u32`, `i64`, `u64`, `isize`, `usize`, `f64`, or a thin raw pointer (`x as f64`, `b as i32`)" }
 
 [[diag]]
 code = "E0901"
@@ -1872,7 +1935,7 @@ severity = "error"
 area = "effects"
 rule = "a fn with a deny clause has a denied effect through what it can call; checked per instance of a generic fn; names the call chain and the op; at the denied effect, or for an instance at the call that instantiates it; case `self` when the op is in the fn itself"
 holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal" }
-choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] }
+choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] }
 message = "`{fn}` denies `{effect}`, but it reaches `{at}`, which {op}"
 labels = [{ at = "primary", text = "`{fn}` must not have `{effect}`" }, { at = "deny", text = "`{effect}` denied here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "op", text = "`{at}` {op} here" }]
 fix = { description = "remove `{effect}` from the deny clause, or change the calls so that `{at}` is not reached" }
@@ -1897,7 +1960,7 @@ severity = "error"
 area = "effects"
 rule = "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1; case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)"
 holes = { from = "type", to = "type", effect = "text-literal", fn = "path", at = "path", op = "text-literal" }
-choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] }
+choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] }
 message = "`{from}` cannot be used as `{to}`: it does not deny `{effect}`"
 labels = [{ at = "primary", text = "coerced here" }]
 fix = { description = "add `{effect}` to the deny clause of `{from}`, or remove it from `{to}`" }

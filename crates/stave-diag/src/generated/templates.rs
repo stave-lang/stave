@@ -1410,7 +1410,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["lock", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "name", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] },
             Hole { name: "part", kind: HoleKind::Type, choices: &[] },
             Hole { name: "path", kind: HoleKind::Place, choices: &[] },
             Hole { name: "reason", kind: HoleKind::TextLiteral, choices: &["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound", "nested deeper than the limit of the `Frozen` check"] },
@@ -3244,7 +3244,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0804",
         severity: Severity::Error,
         area: "threads-unsafe-ffi",
-        rule: "vector or view type in an `extern \"C\"` signature",
+        rule: "type not C-safe in an `extern \"C\"` signature (import or export): C-safe are `i8`..`i64`, `u8`..`u64`, `isize`, `usize`, `f32`, `f64`, `bool`, raw pointers whose pointee is not `[T]` or `str`, and the returns `()` and `never`. Cases `vector-view` (vector, mask, reference, fn value) and `struct` (a struct by value)",
         retired: false,
         located: true,
         holes: &[
@@ -3253,6 +3253,30 @@ pub(super) static ENTRIES: &[Entry] = &[
         shapes: &[
             Shape {
                 case: "",
+                message: "`{type}` cannot appear in an `extern \"C\"` signature",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not a C type" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use an int type, `f32`, `f64`, `bool`, or a raw pointer to a sized type instead of `{type}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "struct",
+                message: "`{type}` cannot appear in an `extern \"C\"` signature",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "struct passed by value" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass `*const {type}` (or `*mut {type}`) instead",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "vector-view",
                 message: "`{type}` cannot appear in an `extern \"C\"` signature",
                 labels: &[
                     LabelTemplate { at: "primary", text: "vector or view type" },
@@ -3331,7 +3355,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0807",
         severity: Severity::Error,
         area: "threads-unsafe-ffi",
-        rule: "an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker, so a call through the value would skip E0803). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through the value would skip E0802 and E0806)",
+        rule: "an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker, so a call through the value would skip E0803). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through the value would skip E0802 and E0806). Case `extern`: an `extern \"C\"` export used as a fn value (its convention is C, not Stave's)",
         retired: false,
         located: true,
         holes: &[
@@ -3346,6 +3370,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "wrap the call in a safe fn or closure with its own `unsafe(\"..\")`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "extern",
+                message: "`extern \"C\"` export `{name}` cannot become a fn value",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "C-ABI fn used as a fn value" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "call `{name}` directly, or wrap the call in a closure",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3433,6 +3469,131 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "state why the type meets the obligation of `{trait}`: write `unsafe(\"<obligation>\") impl`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0811",
+        severity: Severity::Error,
+        area: "threads-unsafe-ffi",
+        rule: "`extern` item form: an ABI string other than `\"C\"` (and `\"stave-intrinsic\"` on an import block); case `obligation`: an `extern \"C\"` import block without `unsafe(\"..\")`; case `intrinsic`: `unsafe(\"..\")` on an `extern \"stave-intrinsic\"` block",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "abi", kind: HoleKind::Source, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "unknown ABI `{abi}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not `\"C\"`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write `extern \"C\"`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "intrinsic",
+                message: "`unsafe(\"..\")` on an `extern {abi}` block",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "intrinsics are checked against their table: nothing to trust" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove the `unsafe(\"..\")`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "obligation",
+                message: "`extern \"C\"` import block needs `unsafe(\"..\")`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "imports without an obligation" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "state why every declaration matches its C definition (types, `...`, the effects `without` claims): write `unsafe(\"<obligation>\") extern {abi} {{ ... }}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0812",
+        severity: Severity::Error,
+        area: "threads-unsafe-ffi",
+        rule: "C symbol (the unmangled fn name of an `extern \"C\"` import or export, one namespace per program): two exports of one name (`duplicate`), two declarations of one symbol with different signatures (`signature`), or a name the compiler defines (`reserved`: `_start`, `__stave*`)",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "name", kind: HoleKind::Name, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "C symbol `{name}` is exported twice",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "second export" },
+                    LabelTemplate { at: "first", text: "first export" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "rename one of the `extern \"C\"` fns: C symbols are the fn names, global across the program",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "reserved",
+                message: "C symbol `{name}` is reserved for the compiler",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "reserved symbol" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "rename the fn: `_start` and names starting `__stave` are defined by the compiler",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "signature",
+                message: "C symbol `{name}` is declared with two different signatures",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this signature" },
+                    LabelTemplate { at: "first", text: "differs from this one" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "declare `{name}` with one signature everywhere (the one of its C definition)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0813",
+        severity: Severity::Error,
+        area: "threads-unsafe-ffi",
+        rule: "variadic argument (after the fixed params of an `extern \"C\"` import with `...`) whose type C cannot pass: allowed are `i32`, `u32`, `i64`, `u64`, `isize`, `usize`, `f64`, and raw pointers whose pointee is not `[T]` or `str` (C's promotions are written with `as`)",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{type}` cannot be passed as a variadic C argument",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "variadic argument of type `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "convert it to `i32`, `u32`, `i64`, `u64`, `isize`, `usize`, `f64`, or a thin raw pointer (`x as f64`, `b as i32`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4659,7 +4820,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] },
         ],
         shapes: &[
             Shape {
@@ -4736,7 +4897,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "from", kind: HoleKind::Type, choices: &[] },
-            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] },
             Hole { name: "to", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[

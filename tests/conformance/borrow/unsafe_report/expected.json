@@ -1,3 +1,4 @@
+{"file":"src/main.stv","line":5,"col":1,"fn":"main","kind":"extern","obligation":"puts as declared in stdio.h"}
 {"file":"src/main.stv","line":11,"col":1,"fn":"main.Addr","kind":"trait","obligation":"implementers return a valid address"}
 {"file":"src/main.stv","line":13,"col":5,"fn":"main.Addr.raw","kind":"fn","obligation":"the caller keeps the Slot alive while using the result"}
 {"file":"src/main.stv","line":18,"col":1,"fn":"main.Slot","kind":"impl","obligation":"bits is the address of a live Slot"}

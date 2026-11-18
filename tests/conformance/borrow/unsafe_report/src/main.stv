@@ -2,7 +2,7 @@
 // `stave unsafe-report --json` golden: expected.json lists every site in
 // (file, offset) order: the `read_raw` expression of LANG.md §5, plus sites of every other kind (unsafe trait
 // method signature, trait impl method, and inherent method included).
-extern "C" {
+unsafe("puts as declared in stdio.h") extern "C" {
     fn puts(s: *const u8) -> i32;
 }
 

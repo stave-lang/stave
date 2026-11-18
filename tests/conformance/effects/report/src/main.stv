@@ -1,9 +1,9 @@
 //~ CHECK-ONLY
 // The `stave effects` golden (expected.json, crates/stave-cli/tests/effects_report.rs), built
 // against the pinned stand-in library so it does not move with the shipped std: own fns only,
-// generic fns per instance, closures as `<fn>.<k>`.
-extern "C" {
-    fn abs(x: i32) -> i32;
+// generic fns per instance, closures as `<fn>.<k>`; an import has the effects its `without` leaves.
+unsafe("abs as declared in stdlib.h; it calls nothing and never traps") extern "C" {
+    fn abs(x: i32) -> i32 without(alloc, trap, recursive, lock, io, block);
 }
 
 fn add(a: u32, b: u32) -> u32 {

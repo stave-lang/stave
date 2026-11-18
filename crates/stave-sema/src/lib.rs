@@ -42,6 +42,7 @@ pub mod contracts;
 pub mod decls;
 mod dispatch;
 pub mod effects;
+mod ffi;
 pub mod gates;
 pub mod itemcx;
 pub mod kinds;

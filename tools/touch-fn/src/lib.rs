@@ -322,7 +322,7 @@ mod tests {
 // fn commented(x: i32) { }
 pub struct S { pub a: i32 }
 trait T { fn sig(&self) -> i32; }
-extern "C" { fn puts(s: *const u8) -> i32; }
+unsafe("stdio.h") extern "C" { fn puts(s: *const u8) -> i32; }
 extern "C" fn add(a: i32, b: i32) -> i32 { return a + b; }
 dispatch fn sum(xs: &[f32]) -> f32 { avx2 => sum_v3, _ => sum_base, }
 impl S {

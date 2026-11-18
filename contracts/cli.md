@@ -120,15 +120,16 @@ Outputs and statuses of the code-generating commands:
   nothing to stdout, exit 1. Otherwise stdout lists every site of every package of the program
   (root, dependencies, `std`, `runtime`), one per line, in canonical (file F, offset) order, then
   kind order: `block` (`unsafe("..") { }`), `expr` (`unsafe("..") e`), `fn` (unsafe fn, method, or
-  trait method signature), `trait`, `impl`, `extern-call` (each use of an `extern "C"` import, with
-  the innermost enclosing block/expr obligation). Human: `<file>:<line>:<col>: <kind> in <fn>:
+  trait method signature; also an `unsafe("..")` export), `trait`, `impl`, `extern` (an
+  `unsafe("..") extern "C" { }` import block), `extern-call` (each use of an `extern "C"` import,
+  with the innermost enclosing block/expr obligation). Human: `<file>:<line>:<col>: <kind> in <fn>:
   "<obligation>"`; `--json`: one object per line,
   `{"file":"src/main.stv","line":21,"col":17,"fn":"main.read_raw","kind":"expr","obligation":"..."}`.
   `file` is the diagnostics path inside the root package's directory, else
   `<package>/<path in package>` (`runtime/alloc.stv`, never an install path); `line`/`col` (1-based,
   col in bytes) locate the `unsafe` keyword (an `extern-call`: the callee name); `fn` is the
   checked-IR path of the enclosing fn (`trait`/`impl`: the trait's path / the impl's self-type
-  head); strings are JSON-escaped in both forms. The package set follows `--target` selection of
+  head; `extern`: the module's path); strings are JSON-escaped in both forms. The package set follows `--target` selection of
   dependencies (the host baseline: no `--target` flag).
 
 - `stave effects [PKG_DIR] [--json]`: checks the program as `stave check` does (always stage0,

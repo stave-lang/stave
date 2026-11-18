@@ -320,7 +320,7 @@ fn never_panics_on_odd_inputs() {
         "allocator a.b;",
         "allocator main;\nallocator main;",
         "dispatch fn d(x: u8) -> u8 { avx2 => nope, _ => d, }",
-        "extern \"C\" { fn puts(s: *const u8) -> i32; fn printf(f: *const u8, ...) -> i32; }",
+        "unsafe(\"x\") extern \"C\" { fn puts(s: *const u8) -> i32 without(io); fn printf(f: *const u8, ...) -> i32; }",
         "fn f() { let x = fn(a: i32) -> i32 { return a + y; }; }",
         "fn f() { match 1u8 { m.X(a, b) => { } Y.{ a, b: c } => { } } }",
         "trait T { fn f(&self) -> Self; }",

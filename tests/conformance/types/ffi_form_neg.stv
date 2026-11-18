@@ -1,0 +1,25 @@
+//~ CHECK-ONLY
+// E0811: the ABI string is `"C"` (`"stave-intrinsic"` only on import blocks), a `"C"` import
+// block states its obligation, and an intrinsic block states none (its table is checked).
+extern "C" { //~ ERROR E0811
+    fn puts(s: *const u8) -> i32;
+}
+
+unsafe("abs as declared in stdlib.h") extern "Rust" { //~ ERROR E0811
+    fn abs(x: i32) -> i32;
+}
+
+extern "C-unwind" fn add(a: i32, b: i32) -> i32 { //~ ERROR E0811
+    return a + b;
+}
+
+extern "stave-intrinsic" fn sub(a: i32, b: i32) -> i32 { //~ ERROR E0811
+    return a - b;
+}
+
+unsafe("nothing to trust") //~ ERROR E0811
+extern "stave-intrinsic" { }
+
+fn main() -> i32 {
+    return 0;
+}

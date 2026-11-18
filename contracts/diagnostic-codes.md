@@ -138,13 +138,16 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0801 | `spawn` outside a `scope` block |
 | E0802 | captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body (shared by many threads): a capture that is not `Sync`, or a `&mut` capture |
 | E0803 | unsafe operation outside `unsafe(..)`: raw-pointer `*p`, `p.read()`, `p.write(v)`, `p.write_stream(v)`, `fence_stream()`; a call of an `unsafe` fn or `extern` import; any use (read, write, borrow) of a `static mut` |
-| E0804 | vector or view type in an `extern "C"` signature |
+| E0804 | type not C-safe in an `extern "C"` signature (import or export): C-safe are `i8`..`i64`, `u8`..`u64`, `isize`, `usize`, `f32`, `f64`, `bool`, raw pointers whose pointee is not `[T]` or `str`, and the returns `()` and `never`. Cases `vector-view` (vector, mask, reference, fn value), `struct` (a struct by value). At the type |
 | E0805 | `extern "stave-intrinsic"` outside the shipped `std`, `runtime`, and `runtime-gpu` packages, or a name or signature not in `contracts/intrinsics.md` |
 | E0806 | argument of `thread.join`, `thread.par_for`, or `thread.par_for_mut` is a fn value whose captures are unknown (not a closure literal or fn item) |
-| E0807 | an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through it would skip E0802/E0806) |
+| E0807 | an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through it would skip E0802/E0806). Case `extern`: an `extern "C"` export used as a fn value |
 | E0808 | `spawn` inside a closure body: a closure is not part of the `scope` block around it, so its `spawn` has no scope to join |
 | E0809 | `static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` packages (user code: `static` with a `Sync` type) |
 | E0810 | impl of an unsafe trait (`Send`, `Sync`, or any trait declared `unsafe("..") trait`) without `unsafe("..")`. At the `impl` |
+| E0811 | `extern` item form: an ABI string other than `"C"` (and `"stave-intrinsic"` on an import block), at the string; case `obligation`: an `extern "C"` import block without `unsafe("..")`, at `extern`; case `intrinsic`: `unsafe("..")` on an `extern "stave-intrinsic"` block, at `unsafe` |
+| E0812 | C symbol (the unmangled fn name of an `extern "C"` import or export, one namespace per program): two exports of one name (`duplicate`), two declarations of one symbol with different signatures (`signature`), a name the compiler defines (`reserved`: `_start`, `__stave*`). At the later fn name |
+| E0813 | variadic argument whose type C cannot pass: allowed are `i32`, `u32`, `i64`, `u64`, `isize`, `usize`, `f64`, and raw pointers whose pointee is not `[T]` or `str` (promotions written with `as`). At the argument |
 | E0901 | method or operator not provided by the generic's bounds (reported at the definition) |
 | E0902 | instantiation depth limit (64) exceeded: an instance of a generic fn or method, reached from a non-generic fn through calls, would be the 65th instance of that generic on its own instantiation chain (polymorphic recursion such as `f::<[T; 1]>(..)` inside `f<T>`). At the call that requests it, once per generic |
 | E0903 | overlapping impls |

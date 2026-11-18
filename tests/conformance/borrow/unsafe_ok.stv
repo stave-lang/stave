@@ -1,7 +1,7 @@
 //~ CHECK-ONLY
 // Every unsafe form with its obligation string: accepted, and listed by
 // `stave unsafe-report`.
-extern "C" {
+unsafe("puts as declared in stdio.h") extern "C" {
     fn puts(s: *const u8) -> i32;
 }
 

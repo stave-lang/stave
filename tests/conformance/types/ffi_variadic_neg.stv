@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// E0813: a variadic argument C cannot take as written: C's promotions (to `i32`, to `f64`) are
+// explicit, and views, structs, and `bool` never pass through `...`.
+struct Pair { pub a: u32, pub b: u32 }
+
+unsafe("printf as declared in stdio.h") extern "C" {
+    fn printf(f: *const u8, ...) -> i32;
+}
+
+fn main() -> i32 {
+    let fmt: [u8; 1] = [0u8];
+    let f = &fmt[0] as *const u8;
+    let x: f32 = 1.5;
+    let b: u8 = 7;
+    let c: i16 = -3;
+    let ok = true;
+    let s: &str = "hi";
+    let p = Pair.{ a: 1, b: 2 };
+    unsafe("fmt is an empty NUL-terminated format, so printf reads no argument") {
+        let n1 = printf(f, x); //~ ERROR E0813
+        let n2 = printf(f, b); //~ ERROR E0813
+        let n3 = printf(f, c); //~ ERROR E0813
+        let n4 = printf(f, ok); //~ ERROR E0813
+        let n5 = printf(f, s); //~ ERROR E0813
+        let n6 = printf(f, p); //~ ERROR E0813
+    }
+    return 0;
+}

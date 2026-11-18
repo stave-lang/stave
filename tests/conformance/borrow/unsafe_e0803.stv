@@ -2,7 +2,7 @@
 // E0803: unsafe operations outside `unsafe(..)`: raw-pointer `*p`, `p.read()`,
 // `p.write(v)`, a call of an `unsafe` fn or method or of an `extern` import. An `unsafe fn`
 // body is not an unsafe context: each operation inside still needs its own `unsafe(..)`.
-extern "C" {
+unsafe("puts as declared in stdio.h") extern "C" {
     fn puts(s: *const u8) -> i32;
 }
 

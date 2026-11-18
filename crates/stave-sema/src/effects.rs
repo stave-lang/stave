@@ -8,7 +8,7 @@
 //! | Source | Effects |
 //! |---|---|
 //! | the runtime fns of [`BOUNDARY`] (allocator, panic, lock word, futex, thread start and join) | their row; nothing they call counts |
-//! | an `extern "C"` import | all |
+//! | an `extern "C"` import | all except those its `without` lists (a claim of the block's obligation) |
 //! | intrinsic `syscall0`..`syscall6`, `thread_clone` | `io` |
 //! | intrinsic `call_on_stack`, `cpu_init` (they run code no edge shows) | all |
 //! | a trapping instruction of the checked IR after the removal of proven bounds checks ([`NodeIr`]) | `trap` |
@@ -139,7 +139,7 @@ impl OpKind {
             OpKind::Syscall => "makes a system call",
             OpKind::Join => "waits for other threads",
             OpKind::Spawn => "starts a thread",
-            OpKind::Extern => "is an `extern` fn, which has every effect",
+            OpKind::Extern => "is an `extern` fn, which has every effect its `without` does not list",
             OpKind::Unseen => "runs code the call graph does not show",
         }
     }
@@ -437,7 +437,8 @@ fn fixed(
     }
     let sig = tc.sigs.fn_sig(d)?;
     if sig.abi != Abi::Intrinsic {
-        return Some((Effects::ALL, OpKind::Extern));
+        // the `without` list is a claim covered by the block's obligation, never checked
+        return Some((Effects(Effects::ALL.0 & !sig.deny), OpKind::Extern));
     }
     intrinsic(prog, d)
 }

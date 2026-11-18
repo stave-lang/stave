@@ -482,6 +482,14 @@ fn remap_job(r: &mut JobOut, map: &dyn Fn(TypeId) -> TypeId) {
     }
 }
 
+/// The link symbol of an `extern "C"` import or export `d`: its name, unmangled.
+fn c_symbol(prog: &Program, sigs: &crate::sigs::Sigs, d: DeclId) -> Option<String> {
+    let decl = prog.decl(d)?;
+    let c = decl.flags.has(DeclFlags::EXTERN_IMPORT | DeclFlags::EXTERN_EXPORT)
+        && sigs.fn_sig(d).is_some_and(|s| s.abi == crate::sigs::Abi::C);
+    c.then(|| prog.strings.get(decl.name).to_string())
+}
+
 /// The checked-IR path of fn or method decl `d`.
 pub(crate) fn fn_path(prog: &Program, sigs: &crate::sigs::Sigs, d: DeclId) -> String {
     let Some(decl) = prog.decl(d) else { return String::new() };
@@ -1017,6 +1025,10 @@ fn assemble(
                 .unwrap_or(FeatureSet::EMPTY),
             Job::Glue(_) => FeatureSet::EMPTY,
         };
+        let symbol = match job {
+            Job::Inst(k) => c_symbol(prog, sigs, k.decl),
+            Job::Glue(_) => None,
+        };
         let type_args = fin_args(j);
         let reqs = o.reqs.clone();
         let job_sites = o.sites.clone();
@@ -1138,6 +1150,7 @@ fn assemble(
                 features,
                 body,
                 name_site,
+                symbol: if f.closure.is_some() { None } else { symbol.clone() },
             });
         }
     }
