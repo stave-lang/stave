@@ -211,12 +211,16 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                 let lspan = body.locals[l.place.local as usize].span;
                 out.extend(mk("E0512", None, &[("place", &text)], span, &[("local", lspan)]));
             }
-            Finding::Uncovered { span, param, from, clause } => {
+            Finding::Uncovered { span, param, from, clause, copy } => {
                 let name = match body.locals.iter().position(|x| x.param == Some(param)) {
                     Some(i) => local_name(body, tys, i as u32),
                     None => "_".to_string(),
                 };
-                let case = if clause { None } else { Some("no-from") };
+                let case = match (clause, copy) {
+                    (false, _) => Some("no-from"),
+                    (true, true) => Some("copy"),
+                    (true, false) => None,
+                };
                 out.extend(mk("E0510", case, &[("origin", &name)], span, &[("from", from)]));
             }
             Finding::MoveOut { place, span, capture } => {
@@ -228,9 +232,9 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                     None => out.extend(mk("E0504", None, &[("place", &text)], span, &[])),
                 }
             }
-            Finding::ViewWrite { place, span } => {
+            Finding::ViewWrite { place, span, several } => {
                 let text = place_text(body, tys, &place);
-                out.extend(mk("E0513", None, &[("place", &text)], span, &[]));
+                out.extend(mk("E0513", several.then_some("several"), &[("place", &text)], span, &[]));
             }
         }
     }

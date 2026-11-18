@@ -1,0 +1,45 @@
+//~ CHECK-ONLY
+// A captured tuple or view may hold pointers to several view objects of the enclosing fn: the
+// closure stores nothing that borrows through them.
+fn dangling() -> u32 {
+    let mut oa: Option<&u32> = Option.None;
+    {
+        let x: u32 = 7;
+        let ob: Option<&u32> = Option.Some(&x);
+        let t = (&mut oa, &ob);
+        let f = fn() {
+            *t.0 = *t.1; //~ ERROR E0513
+        };
+        f();
+    }
+    return match oa { Option.Some(r) => *r, Option.None => 0 };
+}
+
+// A captured `&mut` points to one object.
+fn one_object() -> u32 {
+    let x: u32 = 7;
+    let mut oa: Option<&u32> = Option.Some(&x);
+    let p = &mut oa;
+    let f = fn() {
+        let v: Option<&u32> = *p;
+        *p = v;
+    };
+    f();
+    return match oa { Option.Some(v) => *v, Option.None => 0 };
+}
+
+fn clear() -> u32 {
+    let x: u32 = 7;
+    let mut oa: Option<&u32> = Option.Some(&x);
+    let ob: Option<&u32> = Option.None;
+    let t = (&mut oa, &ob);
+    let f = fn() {
+        *t.0 = Option.None;
+    };
+    f();
+    return match oa { Option.Some(v) => *v, Option.None => 0 };
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -11,9 +11,39 @@
 //! **Contents.** Reading a ref-like value through `k` dereferences of a local `x` yields
 //! `contents^k(O(x))`, where `contents(L)` is the origin set of the borrowed place's value (taken
 //! when L is created: the place cannot be written while L lives), `contents(Pb(i)) = {Pc(i)}`,
-//! and `contents(Pc(i)) = {Pc(i)}`. A borrow `&P` carries its loan, the origins of the pointer it
-//! reborrows through (a reborrow keeps the outer loan live), and the origins of the borrowed
-//! value (a view object borrowed keeps its own origins live).
+//! and `contents(Pc(i)) = {Pc(i)}`. A borrow `&P` carries its loan, the origins of the pointers
+//! it reborrows through (a reborrow keeps the outer loans live), and the origins of the borrowed
+//! value (a view object borrowed keeps its own origins live). The pointers are those of every
+//! dereference of `P` after its last `&` one, and that one: what a `&mut` points to is reached
+//! only through the place holding the `&mut`, so the borrow must keep that place borrowed too
+//! (else a second borrow made through it would alias the first); a `&` can be copied out of its
+//! place, so nothing before it is needed.
+//!
+//! **Stores.** A ref-like value written through a dereference lands in one view object that no
+//! origin set is updated for, so every reader of that object must already expect the value's
+//! origins `S`. The pointer's origin set `P` names the objects it may point to
+//! ([`Flow::store_fits`]); the store is accepted iff `S` is empty or all of:
+//! - `S ⊆ contents(P)`;
+//! - for every `&mut` loan `L` in `P` of a ref-like place without a dereference: `S ⊆
+//!   contents(L)`. The borrowed local is read later with at least the set it had when `L` was
+//!   created (a whole assignment in between conflicts with `L`, a part assignment only adds),
+//!   and through `L` with `contents(L)`. A loan of a place behind a dereference needs no test:
+//!   the loans its pointer held are in `P` with it;
+//! - for `Pb(i)` in `P`: param `i` is a reference and `S ⊆ {Pc(i)}`. A reference points to one
+//!   object, and a value with origin `Pc(i)` was read from that object or from what it reaches,
+//!   which the caller's set for the object covers (a borrow carries the borrowed value's
+//!   origins). A by-value view or a capture may hold pointers to several objects of the caller
+//!   under the one atom, so nothing with origins is stored through them;
+//! - if the type of param `i` holds a `&mut` to a ref-like type below a reference
+//!   ([`Tys::holds_inner_mut`]): `Pc(i)` is not in `P`, and with `Pb(i)` in `P` the place written
+//!   is `*i` itself, with no other dereference. A pointer found inside what a param reaches
+//!   points to a caller object whose own set the caller keeps: it may be smaller than the set of
+//!   the object it was read from. Such a pointer has `Pc(i)`, or `Pb(i)` alone when a call
+//!   returned it `from` an argument that was the param moved. Without such a `&mut` in the
+//!   type, `Pc(i)` is in `P` only as the origins of the value pointed to.
+//!
+//! The caller of a fn therefore updates nothing at a call: a callee stores into the object a
+//! `&mut` param points to only what that object already reaches.
 //!
 //! **Fixpoint.** Forward dataflow in reverse postorder to a fixpoint (union at joins). The
 //! usual bound (loop depth + 1 rounds) holds for gen/kill problems; copies between locals
@@ -86,6 +116,11 @@ pub struct Flow<'b> {
     pub contents: Vec<Bits>,
     /// Ref-likeness of every type the body's places use.
     pub ref_like: FxHashMap<TypeId, bool>,
+    /// Ref-like params whose type is a reference: `Pb` names one object.
+    pub ref_param: Bits,
+    /// Ref-like params that reach a `&mut` to a ref-like type through a reference: `Pc` may be
+    /// a pointer a store goes through.
+    pub deep_param: Bits,
     /// Block entry states (`None`: unreachable).
     pub entry: Vec<Option<State>>,
     pub preds: Vec<Vec<u32>>,
@@ -119,6 +154,20 @@ impl<'b> Flow<'b> {
                 ntracked += 1;
             }
         }
+        let mut ref_param = Bits::new(nparams);
+        let mut deep_param = Bits::new(nparams);
+        for (i, l) in body.locals.iter().enumerate() {
+            let Some(p) = l.param else { continue };
+            if tracked[i] == u32::MAX || p as usize >= nparams {
+                continue;
+            }
+            if !tys.is_unknown(l.ty) && tys.deref(l.ty).is_some_and(|(_, k)| k != DerefKind::Raw) {
+                ref_param.insert(p as usize);
+            }
+            if tys.holds_inner_mut(l.ty) {
+                deep_param.insert(p as usize);
+            }
+        }
         for b in &body.blocks {
             for s in &b.stmts {
                 for_each_place(&s.kind, |p| {
@@ -146,6 +195,8 @@ impl<'b> Flow<'b> {
             ntracked,
             contents: vec![Bits::new(atoms.len()); body.loans.len()],
             ref_like,
+            ref_param,
+            deep_param,
             entry: vec![None; n],
             preds,
             rpo,
@@ -260,6 +311,60 @@ impl<'b> Flow<'b> {
         (cur, ptr)
     }
 
+    /// Whether every view object a pointer with origins `ptr` may point to already has the
+    /// origins `val` (module doc, **Stores**; `val ⊆ contents(ptr)` is the caller's test).
+    /// `direct`: the param whose own dereference is the only one of the place written.
+    pub fn store_fits(&self, ptr: &Bits, val: &Bits, direct: Option<u32>) -> bool {
+        if val.is_empty() {
+            return true;
+        }
+        for a in ptr.iter() {
+            if let Some(l) = self.body.loans.get(a) {
+                if l.mutable
+                    && !l.place.has_deref()
+                    && self.is_ref_like(l.place.ty)
+                    && !val.is_subset(&self.contents[a])
+                {
+                    return false;
+                }
+            } else if let Some((i, copy)) = self.atoms.param(a) {
+                let deep = self.deep_param.contains(i as usize);
+                let fits = if copy {
+                    !deep
+                } else {
+                    let pc = self.atoms.pc(i);
+                    self.ref_param.contains(i as usize)
+                        && val.iter().all(|x| x == pc)
+                        && (!deep || direct == Some(i))
+                };
+                if !fits {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// The origins of the pointers a borrow of `p` goes through (module doc, **Contents**): of
+    /// every dereference after the last `&` one, and of that one.
+    fn through(&self, st: &State, p: &Place) -> Bits {
+        let mut cur = self.local_o(st, p.local);
+        let mut out = self.empty();
+        for pr in &p.proj {
+            if let Proj::Deref(k) = pr {
+                match k {
+                    DerefKind::Raw => return self.empty(),
+                    DerefKind::Shared => out = cur.clone(),
+                    DerefKind::Mut => {
+                        out.union_with(&cur);
+                    }
+                }
+                cur = self.contents_of(&cur);
+            }
+        }
+        out
+    }
+
     pub fn op_origins(&self, st: &State, op: &Operand) -> Bits {
         if op.kind == OpKind::Const || !self.is_ref_like(op.place.ty) {
             return self.empty();
@@ -276,7 +381,9 @@ impl<'b> Flow<'b> {
                 let mut s = self.empty();
                 s.insert(*loan as usize);
                 let (val, ptr) = self.place_origins(st, place);
-                if let Some(p) = ptr {
+                if place.derefs() > 1 {
+                    s.union_with(&self.through(st, place));
+                } else if let Some(p) = ptr {
                     s.union_with(&p);
                 }
                 if self.is_ref_like(place.ty) {

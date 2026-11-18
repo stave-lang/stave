@@ -1,0 +1,38 @@
+//~ CHECK-ONLY
+// A by-value view param may hold pointers to several view objects of the caller, and the caller
+// learns nothing from the call: nothing that borrows is stored through them.
+view struct W { a: &mut Option<&u32>, b: &Option<&u32> }
+
+fn mix(w: W) {
+    *w.a = *w.b; //~ ERROR E0513
+}
+
+fn moved_out(w: W) {
+    let a = w.a;
+    *a = *w.b; //~ ERROR E0513
+}
+
+fn clear(w: W) {
+    *w.a = Option.None;
+}
+
+// A `&mut` param points to one object: a value read from it goes back into it, also through a
+// reborrow.
+fn keep(a: &mut Option<&u32>) {
+    let v: Option<&u32> = *a;
+    *a = v;
+    let q = &mut *a;
+    let u: Option<&u32> = *q;
+    *q = u;
+}
+
+fn main() -> i32 {
+    let mut oa: Option<&u32> = Option.None;
+    {
+        let x: u32 = 7;
+        let ob: Option<&u32> = Option.Some(&x);
+        mix(W.{ a: &mut oa, b: &ob });
+    }
+    keep(&mut oa);
+    return match oa { Option.Some(r) => (*r) as% i32, Option.None => 0 };
+}

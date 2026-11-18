@@ -1,0 +1,38 @@
+//~ CHECK-ONLY
+// A pointer taken out of a tuple may point to any view object the tuple borrows: a store through
+// it needs the value's origins in each of them, not in their union.
+fn dangling() -> u32 {
+    let mut oa: Option<&u32> = Option.None;
+    {
+        let x: u32 = 7;
+        let ob: Option<&u32> = Option.Some(&x);
+        let t = (&mut oa, &ob);
+        *t.0 = *t.1; //~ ERROR E0513
+    }
+    return match oa { Option.Some(r) => *r, Option.None => 0 };
+}
+
+// Both objects already borrow from `x` through `r`.
+fn same_origins() -> u32 {
+    let x: u32 = 7;
+    let r: &u32 = &x;
+    let mut oa: Option<&u32> = Option.Some(r);
+    let ob: Option<&u32> = Option.Some(r);
+    let t = (&mut oa, &ob);
+    *t.0 = *t.1;
+    return match oa { Option.Some(v) => *v, Option.None => 0 };
+}
+
+// A value that borrows nothing fits every object.
+fn clear() -> u32 {
+    let x: u32 = 7;
+    let mut oa: Option<&u32> = Option.None;
+    let ob: Option<&u32> = Option.Some(&x);
+    let t = (&mut oa, &ob);
+    *t.0 = Option.None;
+    return match *t.1 { Option.Some(v) => *v, Option.None => 0 };
+}
+
+fn main() -> i32 {
+    return 0;
+}

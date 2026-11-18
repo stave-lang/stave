@@ -2168,7 +2168,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0510",
         severity: Severity::Error,
         area: "borrow",
-        rule: "returned reference or view not covered by the `from` clause",
+        rule: "returned reference or view not covered by the `from` clause; case `copy`: the value borrows the parameter itself (a field of the view it points to, or what a `&mut` in that view points to) and the clause names it `from copy`",
         retired: false,
         located: true,
         holes: &[
@@ -2184,6 +2184,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `{origin}` to the `from` clause, or return a value borrowed from a listed parameter",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "copy",
+                message: "returned value borrows `{origin}` itself, which `from copy {origin}` does not cover",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "returned here" },
+                    LabelTemplate { at: "from", text: "`from` clause" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write `from {origin}` (the result then keeps `{origin}` borrowed), or return only what is copied out of the view: a borrow through a `&mut` held in it is not a copy",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2243,7 +2256,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0513",
         severity: Severity::Error,
         area: "borrow",
-        rule: "write through `&mut View` with origins not contained in the target's",
+        rule: "write through `&mut View` with origins not contained in the target's; case `several`: the pointer may point to more than one view object and one of them may lack the origins (a pointer picked from several, or one held in a by-value view parameter, in a closure capture, or below the view a `&mut` parameter points to)",
         retired: false,
         located: true,
         holes: &[
@@ -2258,6 +2271,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write a value that borrows only from the origins of `{place}`, or add the origin to the `from` clause that created `{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "several",
+                message: "cannot write into `{place}`: it may be one of several view objects, and not every one of them has the origins the value borrows from",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "write here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write through a pointer to one view object: a `&mut` borrow of one local, or a `&mut` parameter itself",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

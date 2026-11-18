@@ -1,0 +1,37 @@
+//~ CHECK-ONLY
+// A pointer picked by a condition may point to either view object.
+fn dangling(c: bool) -> u32 {
+    let mut oa: Option<&u32> = Option.None;
+    {
+        let x: u32 = 7;
+        let r: &u32 = &x;
+        let mut ob: Option<&u32> = Option.Some(r);
+        let q = if c then &mut oa else &mut ob;
+        *q = Option.Some(r); //~ ERROR E0513
+    }
+    return match oa { Option.Some(r) => *r, Option.None => 0 };
+}
+
+fn same_origins(c: bool) -> u32 {
+    let x: u32 = 7;
+    let r: &u32 = &x;
+    let mut oa: Option<&u32> = Option.Some(r);
+    let mut ob: Option<&u32> = Option.Some(r);
+    let q = if c then &mut oa else &mut ob;
+    *q = Option.Some(r);
+    return match oa { Option.Some(v) => *v, Option.None => 0 };
+}
+
+// One object: the value was read from it.
+fn one_object() -> u32 {
+    let x: u32 = 7;
+    let mut oa: Option<&u32> = Option.Some(&x);
+    let q = &mut oa;
+    let v: Option<&u32> = *q;
+    *q = v;
+    return match oa { Option.Some(v) => *v, Option.None => 0 };
+}
+
+fn main() -> i32 {
+    return 0;
+}

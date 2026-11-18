@@ -1,0 +1,40 @@
+//~ CHECK-ONLY
+// A `&mut` item taken from a `&mut` field of a view under `from copy self` keeps the loan of the
+// field's own referent, which the clause does not cover: it would let two items alias.
+// `from self` covers it.
+view struct Cur { buf: &mut [u32], i: usize }
+
+impl Cur {
+    fn next(&mut self) -> Option<&mut u32> from copy self {
+        if self.i >= self.buf.len() { return Option.None; }
+        let k = self.i;
+        self.i = k + 1;
+        return Option.Some(&mut self.buf[k]); //~ ERROR E0510
+    }
+
+    fn next_slice(&mut self) -> Option<&mut [u32]> from copy self {
+        if self.i >= self.buf.len() { return Option.None; }
+        let k = self.i;
+        self.i = k + 1;
+        return Option.Some(&mut self.buf[k..k + 1]); //~ ERROR E0510
+    }
+
+    fn whole(&mut self) -> &mut [u32] from copy self {
+        return &mut *self.buf; //~ ERROR E0510
+    }
+
+    fn next_tied(&mut self) -> Option<&mut u32> from self {
+        if self.i >= self.buf.len() { return Option.None; }
+        let k = self.i;
+        self.i = k + 1;
+        return Option.Some(&mut self.buf[k]);
+    }
+}
+
+fn cur(xs: &mut [u32]) -> Cur from xs {
+    return Cur.{ buf: xs, i: 0 };
+}
+
+fn main() -> i32 {
+    return 0;
+}

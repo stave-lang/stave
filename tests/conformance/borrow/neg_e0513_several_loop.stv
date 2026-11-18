@@ -1,0 +1,38 @@
+//~ CHECK-ONLY
+// A pointer reassigned in a loop may point to every view object it was given.
+fn dangling() -> u32 {
+    let mut oa: Option<&u32> = Option.None;
+    {
+        let x: u32 = 7;
+        let mut ob: Option<&u32> = Option.Some(&x);
+        let mut q: &mut Option<&u32> = &mut ob;
+        let v: Option<&u32> = *q;
+        let mut i: u32 = 0;
+        while i < 2 {
+            *q = v; //~ ERROR E0513
+            q = &mut oa;
+            i = i + 1;
+        }
+    }
+    return match oa { Option.Some(r) => *r, Option.None => 0 };
+}
+
+fn same_origins() -> u32 {
+    let x: u32 = 7;
+    let r: &u32 = &x;
+    let mut oa: Option<&u32> = Option.Some(r);
+    let mut ob: Option<&u32> = Option.Some(r);
+    let mut q: &mut Option<&u32> = &mut ob;
+    let v: Option<&u32> = *q;
+    let mut i: u32 = 0;
+    while i < 2 {
+        *q = v;
+        q = &mut oa;
+        i = i + 1;
+    }
+    return match oa { Option.Some(v) => *v, Option.None => 0 };
+}
+
+fn main() -> i32 {
+    return 0;
+}

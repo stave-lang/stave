@@ -83,13 +83,15 @@ pub enum Finding {
     /// E0512: a returned value borrows local storage (the loan).
     Escape { span: Span, loan: LoanId },
     /// E0510: a returned value has an origin of param `param` not in the `from` clause (`from`:
-    /// the clause, or the return type when `clause` is false).
-    Uncovered { span: Span, param: u32, from: Span, clause: bool },
+    /// the clause, or the return type when `clause` is false); `copy`: the clause names the param
+    /// as `from copy`, which covers only the origins of the view it points to.
+    Uncovered { span: Span, param: u32, from: Span, clause: bool, copy: bool },
     /// E0504: a by-value use of a non-Copy place behind a dereference or an index, or of a
     /// capture (`capture`: the closure's span).
     MoveOut { place: Place, span: Span, capture: Option<Span> },
-    /// E0513: a ref-like value written through a dereference has origins the target lacks.
-    ViewWrite { place: Place, span: Span },
+    /// E0513: a ref-like value written through a dereference has origins the target lacks;
+    /// `several`: the objects the pointer may point to have them together, one of them may not.
+    ViewWrite { place: Place, span: Span, several: bool },
 }
 
 /// One borrow-dump line of an access: node, kind, verdict code, reported loan's node.
@@ -414,24 +416,28 @@ impl Cx<'_, '_> {
                 }
                 // a write through a dereference, or into a closure's capture (a reference to an
                 // outer local whose origins the outer body fixed when it created the closure),
-                // may store only origins the target already has
+                // may store only origins the target already has, whichever view object the
+                // pointer points to
                 let capture = body.locals[dest.local as usize].capture.is_some();
                 if (dest.has_deref() || capture)
                     && self.flow.is_ref_like(dest.ty)
                     && !matches!(rv, Rvalue::Pure(_))
                 {
                     let (val, _) = self.flow.rv_origins(st, rv, dest.ty);
-                    let target = if dest.has_deref() {
-                        self.flow.place_origins(st, dest).0
+                    let (target, ptr) = if dest.has_deref() {
+                        self.flow.place_origins(st, dest)
                     } else {
                         let mut t = self.flow.empty();
                         if let Some(p) = body.locals[dest.local as usize].param {
                             t.insert(self.flow.atoms.pb(p));
                         }
-                        t
+                        (t, None)
                     };
-                    if !val.is_subset(&target) {
-                        self.findings.push(Finding::ViewWrite { place: dest.clone(), span: s.span });
+                    let several = val.is_subset(&target);
+                    let direct =
+                        if dest.derefs() == 1 { body.locals[dest.local as usize].param } else { None };
+                    if !several || ptr.is_some_and(|p| !self.flow.store_fits(&p, &val, direct)) {
+                        self.findings.push(Finding::ViewWrite { place: dest.clone(), span: s.span, several });
                     }
                 }
             }
@@ -484,7 +490,8 @@ impl Cx<'_, '_> {
         if let Some(l) = escape {
             self.findings.push(Finding::Escape { span: o.span, loan: l });
         } else if let (Some(p), Some(fs)) = (uncovered, from_span) {
-            self.findings.push(Finding::Uncovered { span: o.span, param: p, from: fs.0, clause: fs.1 });
+            let copy = from.is_some_and(|f| f.iter().any(|&(i, _)| i == p));
+            self.findings.push(Finding::Uncovered { span: o.span, param: p, from: fs.0, clause: fs.1, copy });
         }
     }
 }

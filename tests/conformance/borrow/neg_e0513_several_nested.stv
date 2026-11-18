@@ -1,0 +1,58 @@
+//~ CHECK-ONLY
+// A pointer found inside the view a `&mut` param points to names a caller object with its own
+// origins: nothing that borrows is stored through it.
+view struct Holder { slot: &mut Option<&u32>, extra: Option<&u32> }
+view struct In { a: &mut Option<&u32> }
+view struct Out { i: In, b: &Option<&u32> }
+
+fn leak(h: &mut Holder) {
+    *h.slot = h.extra; //~ ERROR E0513
+}
+
+fn mix(o: &mut Out) {
+    *o.i.a = *o.b; //~ ERROR E0513
+}
+
+fn slot_of(h: &mut Holder) -> &mut Option<&u32> from h {
+    return &mut *h.slot;
+}
+
+fn through_call(h: &mut Holder) {
+    let v: Option<&u32> = h.extra;
+    let s = slot_of(h);
+    *s = v; //~ ERROR E0513
+}
+
+fn slot_in(t: (&mut Holder, u32)) -> &mut Option<&u32> from t {
+    return &mut *t.0.slot;
+}
+
+// The param moved into a call: the result may still be a pointer found inside `*h`.
+fn through_move(h: &mut Holder) {
+    let v: Option<&u32> = h.extra;
+    let s = slot_in((h, 1u32));
+    *s = v; //~ ERROR E0513
+}
+
+// The param's own object takes what it reaches; the inner object takes a value without borrows,
+// or its own value inside a callee that gets it as a `&mut` param.
+fn pull(h: &mut Holder) {
+    h.extra = *h.slot;
+    *h.slot = Option.None;
+    keep(h.slot);
+}
+
+fn keep(a: &mut Option<&u32>) {
+    let v: Option<&u32> = *a;
+    *a = v;
+}
+
+fn main() -> i32 {
+    let mut oa: Option<&u32> = Option.None;
+    {
+        let x: u32 = 7;
+        let mut h = Holder.{ slot: &mut oa, extra: Option.Some(&x) };
+        leak(&mut h);
+    }
+    return match oa { Option.Some(r) => (*r) as% i32, Option.None => 0 };
+}
