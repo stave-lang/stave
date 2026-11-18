@@ -92,7 +92,7 @@ instructions; the trap kind is the matching panic kind (`Overflow`, `Bounds`, `D
 | `fn.make` | `@f env` | fn value `(code, environment)` of closure body `@f` (see Closures) |
 | `call` / `call.ind` | `@f args..` / `f args..` | direct / fn-value call (`call.ind` also passes the value's environment, see Closures) |
 | `intrinsic.<name>` | args.. | contracts/intrinsics.md |
-| `panic.<kind>` | — | unconditional trap: `panic.bounds panic.overflow panic.div_by_zero panic.assert panic.out_of_memory panic.stack_overflow panic.unwrap panic.unsupported_cpu panic.deadlock` |
+| `panic.<kind>` | — | unconditional trap: `panic.bounds panic.overflow panic.div_by_zero panic.assert panic.out_of_memory panic.stack_overflow panic.unwrap panic.unsupported_cpu panic.deadlock panic.contract` (lowering emits no `panic.contract`: a false clause calls the runtime, see Contracts) |
 
 GPU ops (`gpu.<name>`, gpu-ops.md) extend this list when their lowering lands.
 
@@ -229,6 +229,16 @@ b2():
   `panic.<kind> ()` followed by the terminator `unreachable`; code after it in source is
   unreachable and deleted with its blocks. A call of a `-> never` fn is followed by `unreachable`
   the same way.
+- **Contracts**: after the params are bound, each `requires` clause in order is its expression,
+  then `cbr c ok fail`; `fail` is `call runtime.panic.requires_failed (s)` + `unreachable`, with
+  `s` the `str` constant of the clause's source text (one line: white space holding a line break
+  becomes one space). Then each `old(e)` of the `ensures` clauses, in source order, is `e`
+  evaluated once; the `old(e)` uses read that value. At each `return`, `?` error return, and the
+  end of a unit body, after the scope drops, the returned value is stored to the slot of `result`
+  (the last slot; none for a unit return) and each `ensures` clause is checked the same way,
+  `fail` calling `runtime.panic.ensures_failed (site, s)` with the site of the `return` token
+  (the `?`, the body's `}`). No `panic.<kind>` op: the report holds the clause text. A
+  `requires` clause of a `test fn` is not checked.
 - **Bounds checks** (stave-ir `bounds`): `xs[i]` on a place in memory (a
   slice, or an array behind a reference or in a `slot`) is `check.bounds i n` immediately before
   `addr.elem p i` (`n` = `slice.len p`, or the array length as a constant); `a[i]` on an array SSA

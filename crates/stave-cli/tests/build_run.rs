@@ -698,28 +698,19 @@ fn emulated_ops_are_listed() {
     assert!(err.contains("E0700"), "{err}");
 }
 
-/// Syntax that parses but has no semantics yet (parameter `from`, contracts) is
-/// "not implemented yet" for `stave check` and `stave build` (exit 2, naming the construct and
-/// its place); an error in the same program is reported instead (exit 1).
+/// Syntax that parses but has no semantics yet (parameter `from`) is "not implemented yet" for
+/// `stave check` and `stave build` (exit 2, naming the construct and its place); an error in the
+/// same program is reported instead (exit 1).
 #[test]
 fn parsed_only_syntax_is_not_implemented() {
     let d = tmp("v07");
-    let cases = [
-        (
-            "contract.stv",
-            "fn at(xs: &[u32], i: usize) -> u32 requires(i < xs.len()) {\n    return xs[i];\n}\n\
-             fn main() -> i32 {\n    return 0;\n}\n",
-            "a `requires` / `ensures` contract at ",
-            ":1:36",
-        ),
-        (
-            "param_from.stv",
-            "view struct S { r: &u32 }\nfn put(s: &mut S from x, x: &u32) {\n    s.r = x;\n}\n\
-             fn main() -> i32 {\n    return 0;\n}\n",
-            "a `from` clause on a parameter at ",
-            ":2:18",
-        ),
-    ];
+    let cases = [(
+        "param_from.stv",
+        "view struct S { r: &u32 }\nfn put(s: &mut S from x, x: &u32) {\n    s.r = x;\n}\n\
+         fn main() -> i32 {\n    return 0;\n}\n",
+        "a `from` clause on a parameter at ",
+        ":2:18",
+    )];
     for (name, src, what, at) in cases {
         let f = d.join(name);
         std::fs::write(&f, src).unwrap();
@@ -732,7 +723,7 @@ fn parsed_only_syntax_is_not_implemented() {
         }
     }
     let f = d.join("error.stv");
-    let src = "fn f(n: u32) -> u32 requires(n > 0) {\n    return n;\n}\n\
+    let src = "view struct S { r: &u32 }\nfn put(s: &mut S from x, x: &u32) {\n    s.r = x;\n}\n\
                fn main() -> i32 {\n    return nope;\n}\n";
     std::fs::write(&f, src).unwrap();
     let (c, _, err) = stave_in(&d, &["check", &f.display().to_string()]);

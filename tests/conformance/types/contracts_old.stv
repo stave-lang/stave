@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// `result` and `old(..)` are contextual names inside contract clauses: a param named `result`
+// (E0212) or `old` (E0213 case `param`) in a fn with `ensures`; `old(..)` in a `requires`
+// (case `outside`), around `old(..)` or `result` (case `entry`), of a non-Copy value (E0213).
+import std.vec;
+
+fn b1(result: u32) -> u32 ensures(result > 0) { return 1; } //~ ERROR E0212
+fn b2(old: u32) -> u32 ensures(result > old) { return old + 1; } //~ ERROR E0213
+fn b3(x: u32) requires(old(x) > 0) { } //~ ERROR E0213
+fn b4(x: u32) -> u32 ensures(old(result) > 0) { return x; } //~ ERROR E0213
+fn b5(x: u32) -> u32 ensures(old(old(x)) == x) { return x; } //~ ERROR E0213
+fn b6(v: &mut vec.Vec<u32>) ensures(old(v).len() == 0) { } //~ ERROR E0213
+
+// Without `ensures`, `result` and `old` name params; outside clauses they are plain names.
+fn c1(result: u32, old: u32) -> u32 requires(result > old) {
+    return result - old;
+}
+
+fn main() { }

@@ -94,7 +94,8 @@ FnDecl       = "rec"? "fn" Ident Generics? "(" Params? ")" RetClause? Needs? Wit
                (* `rec`: the fn may be part of a call cycle; trait signatures, closures, dispatch,
                   kernel and extern fns take none *)
 Requires     = "requires" "(" Expr ")" ;               (* checked at entry, panic Contract at the caller *)
-Ensures      = "ensures" "(" Expr ")" ;                (* checked at each return; inside it the identifier `result` names the returned value (contextual, not a keyword) *)
+Ensures      = "ensures" "(" Expr ")" ;                (* checked at each return; inside it the identifier `result` names the returned value
+                                                         and a call `old(e)` the value of `e` at entry (both contextual, not keywords) *)
 Params       = Param ("," Param)* ","? ;
 Param        = (SelfParam | Ident ":" Type) ParamFrom? ;
 ParamFrom    = From ;                                 (* only on a `&mut V` param of a fn item or method (E0514): what the

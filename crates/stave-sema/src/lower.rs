@@ -292,6 +292,8 @@ fn lower_in_pool(
     let (opt_none, opt_some) = (vidx(opt, "None"), vidx(opt, "Some"));
     let (res_ok, res_err) = (vidx(res, "Ok"), vidx(res, "Err"));
     let any_item = prog.items.iter().position(|it| it.ok).map(|i| ItemId(i as u32));
+    let any_requires =
+        tc.bodies.iter().any(|b| b.contracts.as_deref().is_some_and(|c| !c.checked_requires().is_empty()));
 
     let mut jobs: Vec<Job> = match roots {
         Roots::Mode(mode) => {
@@ -355,6 +357,7 @@ fn lower_in_pool(
                 opt_some,
                 res_ok,
                 res_err,
+                any_requires,
             };
             pending.par_iter().map(|j| lower_job(&g, any_item, j)).collect()
         };

@@ -1,0 +1,23 @@
+//~ EXIT 101
+//~ STDOUT contract_requires.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_requires.stv:20:13 in main.main (thread 0)\nrequires(i < v.len())\n"
+// A false `requires` panics `Contract` located at the call (the caller's obligation); the next
+// line is the clause's source text. The clauses run in order at entry; the std call inside a
+// clause does not move the reported site.
+import std.io;
+import std.vec;
+
+fn at(v: &vec.Vec<u32>, i: usize) -> u32 requires(v.len() > 0) requires(i < v.len()) {
+    return *v.get_ref(i);
+}
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(10);
+    v.push(20);
+    let x = at(&v, 1);
+    io.print(f"at 1: {x}\n");
+    let y = at(&v, 2);
+    io.print(f"not reached {y}\n");
+    return 0;
+}

@@ -38,6 +38,7 @@ pub mod builtins;
 pub mod callgraph;
 pub mod closures;
 pub mod consteval;
+pub mod contracts;
 pub mod decls;
 mod dispatch;
 pub mod effects;

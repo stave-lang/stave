@@ -14,6 +14,7 @@
 //! | a trapping instruction of the checked IR after the removal of proven bounds checks ([`NodeIr`]) | `trap` |
 //! | `panic.out_of_memory` in that IR | `alloc` |
 //! | membership in a call cycle (an SCC that is a cycle) | `recursive`, `trap` (stack overflow) |
+//! | a `requires` / `ensures` check ([`crate::contracts`]) | `trap` |
 //! | `unsafe("..")` block or expression, outside the built-in packages | `unsafe` |
 //! | a `scope { }` (it waits for its threads at the end) | `block` |
 //! | a `spawn { }` (it maps a stack and starts a thread) | `alloc io trap` |
@@ -164,6 +165,8 @@ pub const BOUNDARY: &[(&str, &str, Effects, OpKind)] = &[
     ("runtime.panic", "trap", Effects::TRAP, OpKind::Trap),
     ("runtime.panic", "trap_msg", Effects::TRAP, OpKind::Trap),
     ("runtime.panic", "abort", Effects::TRAP, OpKind::Trap),
+    ("runtime.panic", "requires_failed", Effects::TRAP, OpKind::Trap),
+    ("runtime.panic", "ensures_failed", Effects::TRAP, OpKind::Trap),
     ("runtime.atomic", "lock", Effects::LOCK, OpKind::Lock),
     ("runtime.atomic", "try_lock", Effects::NONE, OpKind::Lock),
     ("runtime.atomic", "unlock", Effects::NONE, OpKind::Lock),
@@ -488,6 +491,12 @@ pub fn solve(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>) -> EffectSets {
                     if o == owner {
                         add(e, op, &mut eff);
                     }
+                }
+                // a contract check is a trap op of the fn (no proof removes one)
+                if owner == 0
+                    && let Some(s) = tc.bodies[bi].contracts.as_deref().and_then(|c| c.trap_span())
+                {
+                    add(Effects::TRAP, Op { kind: OpKind::Trap, span: s }, &mut eff);
                 }
             }
             if let Some(x) = ir.and_then(|r| r.get(i as usize)) {

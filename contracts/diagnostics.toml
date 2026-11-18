@@ -586,7 +586,9 @@ fix = { description = "use the value, or discard it explicitly with `let _ = ..;
 code = "E0211"
 severity = "error"
 area = "types"
-rule = "contract operand not allowed: a `requires`/`ensures` expression may use params, fields, `.len()`, literals, arithmetic, comparison, `&&`/`||`/`!`, and calls of safe fns whose args are `&` or Copy; not `unsafe`, `&mut`, a `static`/`static mut`, or a non-bool result (planned)"
+rule = "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy (a fn value only if its type denies `io`, `lock`, `block`); no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op)"
+holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal" }
+choices = { effect = ["lock", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] }
 message = "this expression is not allowed in a contract"
 labels = [{ at = "primary", text = "not allowed in `requires`/`ensures`" }]
 fix = { description = "keep contracts side-effect free: compare params, fields, and `.len()`; move other checks into the body with `std.debug.assert`" }
@@ -596,13 +598,43 @@ message = "a trait impl method cannot have contracts"
 labels = [{ at = "primary", text = "contract on a trait impl method" }]
 fix = { description = "move the check into the method body with `std.debug.assert`, or into an inherent method" }
 
+[diag.cases.impure-call]
+message = "`{fn}` cannot be called in a contract: it has `{effect}`, as it reaches `{at}`, which {op}"
+labels = [{ at = "primary", text = "called in a contract here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "op", text = "`{at}` {op} here" }]
+fix = { description = "call only fns without `io`, `lock`, or `block` in `requires`/`ensures`; move this check into the body" }
+
 [[diag]]
 code = "E0212"
 severity = "error"
 area = "types"
-rule = "a parameter named `result` in a fn with an `ensures` clause: inside `ensures(..)` the name `result` means the returned value (contextual name, not a keyword; planned)"
+rule = "a parameter named `result` in a fn with an `ensures` clause: inside `ensures(..)` the name `result` means the returned value (contextual name, not a keyword)"
 message = "parameter `result` conflicts with the returned value named `result` in `ensures(..)`"
 labels = [{ at = "primary", text = "parameter `result`" }]
+fix = { description = "rename the parameter" }
+
+[[diag]]
+code = "E0213"
+severity = "error"
+area = "types"
+rule = "`old(e)` misuse: `e` is not Copy; case `outside`: `old(..)` in a `requires`; case `entry`: `old(..)` or `result` inside `old(..)`; case `param`: a parameter named `old` in a fn with an `ensures` clause (contextual name inside contract clauses)"
+holes = { type = "type" }
+message = "`old(..)` needs a Copy value, found `{type}`"
+labels = [{ at = "primary", text = "evaluated at entry and kept to the return" }]
+fix = { description = "take `old(..)` of a Copy part, e.g. `old(v.len())`" }
+
+[diag.cases.outside]
+message = "`old(..)` is only allowed in `ensures`"
+labels = [{ at = "primary", text = "`old` in a `requires`" }]
+fix = { description = "use the value itself: a `requires` runs at entry" }
+
+[diag.cases.entry]
+message = "`old(..)` is evaluated at entry: it cannot hold `old(..)` or `result`"
+labels = [{ at = "primary", text = "not known at entry" }]
+fix = { description = "move this part out of `old(..)`" }
+
+[diag.cases.param]
+message = "parameter `old` conflicts with `old(..)` in `ensures(..)`"
+labels = [{ at = "primary", text = "parameter `old`" }]
 fix = { description = "rename the parameter" }
 
 [[diag]]

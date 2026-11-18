@@ -1,0 +1,40 @@
+//~ EXIT 101
+//~ STDOUT contract_fn_value.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_fn_value.stv:21:12 in main.apply (thread 0)\nrequires(x != 0)\n"
+// A fn called through a fn value checks its `requires` too (the check is in the callee), and the
+// panic names the call through the value. A `?` error return and a generic instance check their
+// `ensures` as well.
+import std.io;
+
+fn inv(x: u32) -> u32 requires(x != 0) ensures(result <= 100) {
+    return 100 / x;
+}
+
+fn first<T: Copy>(xs: &[T]) -> Option<T> ensures(result.is_some() == (xs.len() > 0)) {
+    if xs.len() == 0 {
+        return Option.None;
+    }
+    return Option.Some(xs[0]);
+}
+
+fn apply(f: fn(u32) -> u32, x: u32) -> u32 {
+    return f(x);
+}
+
+fn second(xs: &[u32]) -> Option<u32> ensures(xs.len() > 0 || result.is_none()) {
+    let a = first(xs)?;
+    return Option.Some(a + 1);
+}
+
+fn main() -> i32 {
+    let a = apply(inv, 4);
+    let xs: [u32; 2] = [7, 8];
+    let s = second(&xs);
+    let e = second(&xs[0..0]);
+    let k = if s.is_some() then 1u32 else 0u32;
+    let m = if e.is_none() then 1u32 else 0u32;
+    io.print(f"{a} {k} {m}\n");
+    let z = apply(inv, 0);
+    io.print(f"not reached {z}\n");
+    return 0;
+}
