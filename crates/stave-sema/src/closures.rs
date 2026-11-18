@@ -313,7 +313,7 @@ fn chain_binding(icx: &ItemCx<'_>, tb: &TypedBody, n: u32, recv_mut: bool) -> Op
                 continue;
             }
             match tb.target(seg) {
-                Some(Target::Field { derefs, .. }) if *derefs == 0 => {}
+                Some(Target::Field { derefs, .. } | Target::Column { derefs, .. }) if *derefs == 0 => {}
                 _ => root = None,
             }
             p = q;

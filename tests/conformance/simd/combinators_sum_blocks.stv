@@ -1,0 +1,82 @@
+//~ CHECK-ONLY
+// std.slice float `sum` and `dot` past one block (4096 elements): blocks summed by the
+// logical-lane rule, block sums by the block tree. Up to 4096 elements the result is the
+// one-level sum; 4097 elements are a block and one element; 3 blocks and 5 elements combine as
+// (S0 + S1) + (S2 + S3); 40000 elements are 10 blocks. Sums of nodes of the tree, added as the
+// tree does, give the same bits: the line ends `ok`. 4097 elements of -0.0 sum to -0.0.
+// crates/stave-driver/tests/interp_vs_native.rs runs it in the IR interpreter and natively
+// against combinators_sum_blocks.stdout.
+import std.io;
+import std.vec;
+
+const LENS: [usize; 6] = [4095, 4096, 4097, 8192, 12293, 40000];
+
+fn data32(n: usize, seed: u64) -> vec.Vec<f32> {
+    let mut s = seed;
+    let mut v = vec.Vec::<f32>.with_capacity(n);
+    for _i in 0..n {
+        s = s *% 6364136223846793005 +% 1442695040888963407;
+        let x = (s >> 40) as% u32;
+        v.push((x as~ f32) * (1.0 / 16777216.0) - 0.25);
+    }
+    return v;
+}
+
+fn data64(n: usize, seed: u64) -> vec.Vec<f64> {
+    let mut s = seed;
+    let mut v = vec.Vec::<f64>.with_capacity(n);
+    for _i in 0..n {
+        s = s *% 6364136223846793005 +% 1442695040888963407;
+        let x = s >> 11;
+        v.push((x as~ f64) * (1.0 / 9007199254740992.0) - 0.25);
+    }
+    return v;
+}
+
+fn sums_f32() {
+    let a = data32(40000, 1);
+    let b = data32(40000, 2);
+    let xs = a.as_slice();
+    let ys = b.as_slice();
+    for k in 0usize..6 {
+        let n = LENS[k];
+        let s = (&xs[0..n]).sum();
+        let d = (&xs[0..n]).dot(&ys[0..n]);
+        io.print(f"{s}/{d} ");
+    }
+    // 10 blocks: nodes 0..7 and 8..9.
+    let whole = xs.sum();
+    let split = (&xs[0..32768]).sum() + (&xs[32768..40000]).sum();
+    let dw = xs.dot(ys);
+    let ds = (&xs[0..32768]).dot(&ys[0..32768]) + (&xs[32768..40000]).dot(&ys[32768..40000]);
+    let ok = whole == split && dw == ds;
+    // Two blocks of -0.0: each block sum is -0.0, and so is their sum.
+    let mut zs = vec.Vec::<f32>.with_capacity(4097);
+    for _i in 0usize..4097 { zs.push(-0.0); }
+    let z = zs.as_slice().sum();
+    io.print(f"{z} ");
+    io.print(if ok then "ok\n" else "differ\n");
+}
+
+fn sums_f64() {
+    let a = data64(40000, 3);
+    let b = data64(40000, 4);
+    let xs = a.as_slice();
+    let ys = b.as_slice();
+    for k in 0usize..6 {
+        let n = LENS[k];
+        let s = (&xs[0..n]).sum();
+        let d = (&xs[0..n]).dot(&ys[0..n]);
+        io.print(f"{s}/{d} ");
+    }
+    // 3 blocks and 5 elements: nodes 0..1, 2 and 3.
+    let whole = (&xs[0..12293]).sum();
+    let split = (&xs[0..8192]).sum() + ((&xs[8192..12288]).sum() + (&xs[12288..12293]).sum());
+    io.print(if whole == split then "ok\n" else "differ\n");
+}
+
+fn main() -> i32 {
+    sums_f32();
+    sums_f64();
+    return 0;
+}

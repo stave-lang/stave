@@ -1,7 +1,7 @@
 //~ STDOUT threads_std_send_sync.stdout
 // Owning std containers cross threads: `vec.Vec<T>` is Send / Sync when T is (explicit impls),
-// `string.String` and `std.soa` types through their Vec fields (a Soa3 is shared by two join
-// closures). A Vec and a String move out of
+// `string.String` through its Vec field, `soa.Soa<T>` when T is (one is shared by two join
+// closures, one reading a column). A Vec and a String move out of
 // `thread.join`, a `&mut Vec` is captured by a join closure, `&Vec` and `Mutex<Vec<u64>>` are
 // shared by a par_for body. A MutexGuard over a Sync value may be shared by par_for_mut workers.
 import std.io;
@@ -10,6 +10,12 @@ import std.string;
 import std.sync;
 import std.thread;
 import std.vec;
+
+struct P3 {
+    pub a: f32,
+    pub b: f32,
+    pub id: u32,
+}
 
 fn fill(n: u64) -> vec.Vec<u64> {
     let mut v = vec.Vec::<u64>.new();
@@ -48,9 +54,9 @@ fn main() -> i32 {
     for i in 0..out.len() { sum = sum + *out.get_ref(i); }
     io.print(f"{sum}\n");
 
-    let mut ps = soa.Soa3::<f32, f32, u32>.new();
-    for i in 0u32..10 { ps.push(1.0, 2.0, i); }
-    let (t1, t2) = thread.join(fn() -> u32 { let (ra, rb, rc) = ps.get_ref(1); return *rc; }, fn() -> usize { return ps.len(); });
+    let mut ps = soa.Soa::<P3>.new();
+    for i in 0u32..10 { ps.push(P3.{ a: 1.0, b: 2.0, id: i }); }
+    let (t1, t2) = thread.join(fn() -> u32 { return ps.id[1]; }, fn() -> usize { return ps.len(); });
     io.print(f"{t1} {t2}\n");
     return 0;
 }
