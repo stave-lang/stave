@@ -1,0 +1,63 @@
+//~ EXIT 12
+// Parts split off a by-value view (`split_rows`, `from self`): a recursive tiling holds both
+// halves across the recursive call.
+import std.debug;
+import std.mem;
+
+unsafe("p..p+len are valid u32 slots that owner keeps alive and lends exclusively while the result lives")
+fn items_mut(owner: &[u32], p: *mut u32, len: usize) -> &mut [u32] from owner {
+    let parts: [usize; 2] = [p as usize, len];
+    let q = &parts as *const [usize; 2] as *const &mut [u32];
+    return unsafe("a slice reference is (data pointer, length)") q.read();
+}
+
+view struct GridMut { anchor: &[u32], p: *mut u32, rows: usize, cols: usize }
+
+impl GridMut {
+    fn new(xs: &mut [u32], cols: usize) -> GridMut from xs {
+        debug.assert(cols != 0 && xs.len() % cols == 0, "shape");
+        let rows = xs.len() / cols;
+        let p = mem.slice_ptr(xs) as *mut u32;
+        return GridMut.{ anchor: &xs[0..0], p: p, rows: rows, cols: cols };
+    }
+
+    fn row_mut(&mut self, r: usize) -> &mut [u32] from self {
+        debug.assert(r < self.rows, "row");
+        return unsafe("the row is inside the buffer the anchor lends exclusively") items_mut(self.anchor, mem.add_mut(self.p, r * self.cols), self.cols);
+    }
+
+    fn split_rows(self, r: usize) -> (GridMut, GridMut) from self {
+        debug.assert(r <= self.rows, "split");
+        let top = GridMut.{ anchor: self.anchor, p: self.p, rows: r, cols: self.cols };
+        let bottom = GridMut.{ anchor: self.anchor, p: mem.add_mut(self.p, r * self.cols), rows: self.rows - r, cols: self.cols };
+        return (top, bottom);
+    }
+}
+
+rec fn tile(g: GridMut, depth: u32) {
+    if g.rows == 0 { return; }
+    if g.rows == 1 {
+        let mut h = g;
+        let r = h.row_mut(0);
+        r[0] = depth;
+        r[1] = 1;
+        return;
+    }
+    let (top, bottom) = g.split_rows(g.rows / 2);
+    tile(top, depth + 1);
+    tile(bottom, depth + 1);
+}
+
+fn total(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..xs.len() {
+        s = s + xs[i];
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let mut xs: [u32; 8] = [0; 8];
+    tile(GridMut.new(&mut xs, 2), 0);
+    return total(&xs) as% i32;
+}

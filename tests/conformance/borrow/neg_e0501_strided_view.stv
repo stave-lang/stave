@@ -1,0 +1,65 @@
+//~ CHECK-ONLY
+// While a view built `from xs` is used later, `xs` cannot be read or written, a second view of
+// `xs` cannot be built, and two `&mut` items of one view cannot be held at once.
+import std.debug;
+import std.mem;
+
+unsafe("p is valid for one u32 that owner keeps alive and lends exclusively while the result lives")
+fn item_mut(owner: &[u32], p: *mut u32) -> &mut u32 from owner {
+    return unsafe("p is valid for one u32 and no other live reference reaches it") &mut *p;
+}
+
+view struct ViewMut { anchor: &[u32], p: *mut u32, len: usize, step: usize }
+
+impl ViewMut {
+    fn new(xs: &mut [u32], start: usize, step: usize) -> ViewMut from xs {
+        debug.assert(step != 0, "step");
+        let n = xs.len();
+        let len = if start >= n then 0 else (n - start - 1) / step + 1;
+        let p = mem.slice_ptr(xs) as *mut u32;
+        return ViewMut.{ anchor: &xs[0..0], p: mem.add_mut(p, start), len: len, step: step };
+    }
+
+    fn get_mut(&mut self, i: usize) -> &mut u32 from self {
+        debug.assert(i < self.len, "index");
+        let slot = mem.add_mut(self.p, i * self.step);
+        return unsafe("i < len, so slot is inside the buffer the anchor lends exclusively") item_mut(self.anchor, slot);
+    }
+
+    fn set(&mut self, i: usize, x: u32) {
+        *self.get_mut(i) = x;
+    }
+}
+
+fn read_while_live(xs: &mut [u32]) -> u32 {
+    let mut v = ViewMut.new(xs, 0, 2);
+    let a = xs[1]; //~ ERROR E0501
+    v.set(0, a);
+    return a;
+}
+
+fn write_while_live(xs: &mut [u32]) {
+    let mut v = ViewMut.new(xs, 0, 2);
+    xs[1] = 5; //~ ERROR E0501
+    v.set(0, 1);
+}
+
+fn two_views(xs: &mut [u32]) {
+    let mut a = ViewMut.new(xs, 0, 2);
+    let mut b = ViewMut.new(xs, 1, 2); //~ ERROR E0501
+    a.set(0, 1);
+    b.set(0, 2);
+}
+
+fn two_items(xs: &mut [u32]) {
+    let mut v = ViewMut.new(xs, 0, 1);
+    let a = v.get_mut(0);
+    let b = v.get_mut(1); //~ ERROR E0501
+//~^ ERROR E0501
+    *a = 1;
+    *b = 2;
+}
+
+fn main() -> i32 {
+    return 0;
+}

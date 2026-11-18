@@ -1,0 +1,66 @@
+//~ EXIT 14
+// `thread.join` runs the two halves of a view split off one `&mut` slice on two threads (the
+// view type is Send by an explicit unsafe impl).
+import std.debug;
+import std.mem;
+import std.thread;
+
+unsafe("p is valid for one u32 that owner keeps alive and lends exclusively while the result lives")
+fn item_mut(owner: &[u32], p: *mut u32) -> &mut u32 from owner {
+    return unsafe("p is valid for one u32 and no other live reference reaches it") &mut *p;
+}
+
+view struct ViewMut { anchor: &[u32], p: *mut u32, len: usize, step: usize }
+
+unsafe("the pointer is only used to reach elements of the buffer the anchor lends; split parts are disjoint") impl Send for ViewMut {}
+
+impl ViewMut {
+    fn new(xs: &mut [u32], start: usize, step: usize) -> ViewMut from xs {
+        debug.assert(step != 0, "step");
+        let n = xs.len();
+        let len = if start >= n then 0 else (n - start - 1) / step + 1;
+        let p = mem.slice_ptr(xs) as *mut u32;
+        return ViewMut.{ anchor: &xs[0..0], p: mem.add_mut(p, start), len: len, step: step };
+    }
+
+    fn len(&self) -> usize {
+        return self.len;
+    }
+
+    fn get_mut(&mut self, i: usize) -> &mut u32 from self {
+        debug.assert(i < self.len, "index");
+        let slot = mem.add_mut(self.p, i * self.step);
+        return unsafe("i < len, so slot is inside the buffer the anchor lends exclusively") item_mut(self.anchor, slot);
+    }
+
+    fn set(&mut self, i: usize, x: u32) {
+        *self.get_mut(i) = x;
+    }
+
+    fn split_at(self, k: usize) -> (ViewMut, ViewMut) from self {
+        let k = if k < self.len then k else self.len;
+        let a = ViewMut.{ anchor: self.anchor, p: self.p, len: k, step: self.step };
+        let b = ViewMut.{ anchor: self.anchor, p: mem.add_mut(self.p, k * self.step), len: self.len - k, step: self.step };
+        return (a, b);
+    }
+}
+
+fn par_fill(xs: &mut [u32]) -> usize {
+    let (mut l, mut r) = ViewMut.new(xs, 0, 1).split_at(4);
+    let (la, lb) = thread.join(fn() -> usize { l.set(0, 1); l.set(3, 3); return l.len(); }, fn() -> usize { r.set(0, 2); return r.len(); });
+    return la + lb;
+}
+
+fn total(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..xs.len() {
+        s = s + xs[i];
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let mut ys: [u32; 8] = [0; 8];
+    let n = par_fill(&mut ys);
+    return (total(&ys) + (n as% u32)) as% i32;
+}
