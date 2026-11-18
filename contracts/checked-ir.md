@@ -229,16 +229,20 @@ b2():
   `panic.<kind> ()` followed by the terminator `unreachable`; code after it in source is
   unreachable and deleted with its blocks. A call of a `-> never` fn is followed by `unreachable`
   the same way.
-- **Contracts**: after the params are bound, each `requires` clause in order is its expression,
-  then `cbr c ok fail`; `fail` is `call runtime.panic.requires_failed (s)` + `unreachable`, with
-  `s` the `str` constant of the clause's source text (one line: white space holding a line break
-  becomes one space). Then each `old(e)` of the `ensures` clauses, in source order, is `e`
-  evaluated once; the `old(e)` uses read that value. At each `return`, `?` error return, and the
-  end of a unit body, after the scope drops, the returned value is stored to the slot of `result`
-  (the last slot; none for a unit return) and each `ensures` clause is checked the same way,
-  `fail` calling `runtime.panic.ensures_failed (site, s)` with the site of the `return` token
-  (the `?`, the body's `}`). No `panic.<kind>` op: the report holds the clause text. A
-  `requires` clause of a `test fn` is not checked.
+- **Contracts**: after the params are bound, each `requires` clause in order is checked: each operand
+  of its top-level `&&` in order is its expression, then `cbr c ok fail`; `fail` is
+  `call runtime.panic.requires_failed (s)` (at the site of the operand's first token) +
+  `unreachable`, with `s` the `str` constant of the whole clause's source text (one line: white
+  space holding a line break becomes one space). Then each `old(e)` of the `ensures` clauses, in
+  source order, is `e` evaluated once; the `old(e)` uses read that value. At each `return`, `?`
+  error return, and the end of a unit body, after the scope drops, `result` is bound to the
+  returned value (an int or `bool` no clause borrows: that SSA value; else stored to its slot, the
+  last slot, none for a unit return) and each `ensures` clause is checked the same way, `fail`
+  calling `runtime.panic.ensures_failed (site, s)` with the site of the `return` token (the `?`,
+  the body's `}`). No `panic.<kind>` op: the report holds the clause text. A `requires` clause of
+  a `test fn` is not checked. The removal pass below treats each such check like a bounds check:
+  a proven one goes (`cbr` becomes `br ok`, the call and its block go); one that fails whenever
+  reached is a compile error (E0215, E0217) and stays.
 - **Bounds checks** (stave-ir `bounds`): `xs[i]` on a place in memory (a
   slice, or an array behind a reference or in a `slot`) is `check.bounds i n` immediately before
   `addr.elem p i` (`n` = `slice.len p`, or the array length as a constant); `a[i]` on an array SSA
@@ -246,18 +250,21 @@ b2():
   length is `panic.bounds ()` + `unreachable` (the trap is kept; sub-slices fold the same way).
   One pass after lowering removes the checks that have a proof (constant index < length, a
   dominating check on the same index and length, a dominating `lt i n` branch,
-  and `LenEq`/`Offset`: `i + k < n` derived from dominating unsigned compares, asserting calls
-  such as `std.debug.assert`, trapping `add`/`sub` of constants, unsigned bit ops (`and x y` is
-  at most `x` and `y`, `rem x y` below `y` and at most `x`, `shr x k` at most `x`), the range
-  `0 ..= 2^bits - 1` of an unsigned type, and `cast`/`cast.wrap`/`cast.sat` from an unsigned
-  type to an unsigned one at least as wide as the same value; a check or a strict compare
-  against `sub.sat n c` reads as `i + c < n`). The pass runs in every build and never looks at
+  and `LenEq`/`Offset`: `i + k < n` derived from dominating int compares (signed values read
+  as their own mathematical value), asserting calls such as `std.debug.assert`, trapping
+  `add`/`sub` of constants, unsigned bit ops (`and x y` is at most `x` and `y`, `rem x y` below
+  `y` and at most `x`, `shr x k` at most `x`), the range of an int type, and
+  `cast`/`cast.wrap`/`cast.sat` to a type holding every value of the source type as the same
+  value; a check or a strict unsigned compare against `sub.sat n c` reads as `i + c < n`). The
+  same facts decide the contract checks (above). The pass runs in every build and never looks at
   the build mode: a function keeps the same checks in debug and release, and the checked IR (the
   `ir` dump, the interpreter's input) is its result. Each removed check has a witness, the proof
-  as a chain of inequalities that each name their place in the IR (stave-ir `witness`); an
-  independent checker validates every witness before the check is deleted, and a witness it
-  refuses is a compiler bug (exit 3). Release passes remove no check; the IR verifier and the
-  bounds audit run again on their output.
+  as inequalities that each name their place in the IR and that, times their multipliers, add
+  up to the goal (stave-ir `witness`; mostly chains, every multiplier 1); an
+  independent checker validates every witness, and every refutation of a contract check, before
+  the check is deleted or the error reported, and a witness it refuses is a compiler bug (exit
+  3). Release passes remove no check; the IR verifier and the bounds audit run again on their
+  output.
   Compiler-made accesses (`for` over an array or slice, drop loops, array → slice coercion
   `addr.elem p 0` + `slice.make`) index below a length the generated code compares against.
 - **Memory hints**: `s.prefetch_<rw>_<loc>(i)` is `slice.ptr s` and the prefetch of it with `i`;

@@ -9,7 +9,7 @@ use proptest::prelude::*;
 use stave_ir::interp::{self, Config, Outcome, Val};
 use stave_ir::ir::{BlockData, Insts, Span, Term, ValueData, ValueDef};
 use stave_ir::witness::check::{check_func, remove};
-use stave_ir::witness::{Edge, FnWitness, Node, Removed, Source};
+use stave_ir::witness::{Edge, FnWitness, Node, Refuted, Removed, Source};
 use stave_ir::{Body, Const, FuncBuilder, Module, Op, Operand, PanicKind, TypeKey, Value};
 
 const OPS: [Op; 24] = [
@@ -95,18 +95,35 @@ fn arb_witness() -> impl Strategy<Value = FnWitness> {
         8 => Source::Cast { inst: at },
         _ => Source::SubSat { inst: at },
     });
-    let edge = (node(), node(), -3i128..4, src).prop_map(|(from, to, w, src)| Edge { from, to, w, src });
-    let rows = prop::collection::vec((0..14u32, 0..6u32, 0..4u32), 0..4);
-    (prop::collection::vec(0..7u32, 0..6), rows, prop::collection::vec(edge, 0..8)).prop_map(
-        |(dom, rows, edges)| FnWitness {
+    let edge = (node(), node(), -3i128..4, src, 0..3u32).prop_map(|(from, to, w, src, mul)| Edge {
+        from,
+        to,
+        w,
+        src,
+        mul,
+    });
+    let rows = prop::collection::vec((0..14u32, 0..6u32, 0..4u32, 0..2u32), 0..4);
+    let refuted = prop::collection::vec((0..14u32, 0..6u32, 0..4u32, 0..3u8), 0..2);
+    (prop::collection::vec(0..7u32, 0..6), rows, refuted, prop::collection::vec(edge, 0..8)).prop_map(
+        |(dom, rows, refuted, edges)| FnWitness {
             func: stave_ir::FuncId(0),
             dom,
             removed: rows
                 .into_iter()
-                .map(|(inst, start, len)| Removed {
+                .map(|(inst, start, len, also)| Removed {
                     inst,
                     site: stave_ir::Site::NONE,
                     edges: Span { start, len },
+                    also: Span { start: start + len, len: also },
+                })
+                .collect(),
+            refuted: refuted
+                .into_iter()
+                .map(|(inst, start, len, half)| Refuted {
+                    inst,
+                    site: stave_ir::Site::NONE,
+                    edges: Span { start, len },
+                    half,
                 })
                 .collect(),
             edges,

@@ -376,18 +376,54 @@ impl<'a> FnCx<'a> {
         self.tb().contracts.as_deref()
     }
 
-    /// The local `result` names in the `ensures` clauses (returned type `ret`): in a slot unless
-    /// it holds no data, never dropped (the returned value owns its contents).
+    /// The local `result` names in the `ensures` clauses (returned type `ret`), never dropped (the
+    /// returned value owns its contents): an SSA value when it is an int or `bool` no clause
+    /// takes the address of (so the checks compare the returned value itself), else in a slot
+    /// unless it holds no data.
     fn result_local(&mut self, ret: Ty) {
         let Some(c) = self.contracts() else { return };
         if c.ensures.is_empty() {
             return;
         }
-        let mem = !self.is_unit(ret) && !self.is_never(ret);
         let idx = self.locals.len();
-        self.locals.push(LocalInfo { node: c.result, ty: ret, mem, drop: false, flag: None });
+        self.locals.push(LocalInfo { node: c.result, ty: ret, mem: false, drop: false, flag: None });
         self.by_node.insert(c.result, idx);
         self.result_local = Some(idx);
+        let scalar = matches!(self.tys.kind(ret), TypeKind::Int { .. } | TypeKind::Bool);
+        let clauses: Vec<u32> = c.ensures.iter().map(|cl| cl.node).collect();
+        let mem = if scalar {
+            self.address_taken(&clauses, idx)
+        } else {
+            !self.is_unit(ret) && !self.is_never(ret)
+        };
+        self.locals[idx].mem = mem;
+    }
+
+    /// Whether an expression under one of the nodes `roots` borrows local `l` (`&l`, or a method
+    /// call or sub-slice that auto-references it), as [`Self::setup`] finds them in a body.
+    fn address_taken(&self, roots: &[u32], l: usize) -> bool {
+        let icx = self.icx;
+        let mut autoref: Vec<usize> = Vec::new();
+        for &root in roots {
+            for m in icx.ast.descendants(root).start..=root {
+                match icx.kind(m) {
+                    Some(NodeKind::Unary) => {
+                        let a = icx.a(m);
+                        if (icx.is(a, Term::Amp) || icx.is(a, Term::AmpAmp))
+                            && let Some(c) = icx.last_child(m)
+                            && let Some(x) = self.place_root(c)
+                        {
+                            autoref.push(x);
+                        }
+                    }
+                    Some(NodeKind::Postfix) => {
+                        let _ = self.chain_root(m, Some(&mut autoref));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        autoref.contains(&l)
     }
 
     /// At entry, after the params are bound: the `requires` checks in order, then the `old(e)`
@@ -476,33 +512,43 @@ impl<'a> FnCx<'a> {
     }
 
     /// Branches to the failure call of clause `cl` when it is false: a `requires` (`at` `None`)
-    /// or an `ensures` reported at token `at`. The clause's temporaries are dropped before the
-    /// branch; those of the enclosing statement are left as they are.
+    /// or an `ensures` reported at token `at`. Each operand of the clause's top-level `&&` is its
+    /// own check, in order (a false one fails before the next is evaluated, as `&&` would); each
+    /// reports the whole clause. A check's temporaries are dropped before its branch; those of the
+    /// enclosing statement are left as they are.
     fn contract_check(&mut self, cl: &crate::contracts::ContractClause, at: Option<u32>) {
-        if !self.open() {
-            return;
+        let conjuncts = if self.nkind(cl.expr) == Some(NodeKind::AndExpr) {
+            self.kids(cl.expr).to_vec()
+        } else {
+            vec![cl.expr]
+        };
+        for e in conjuncts {
+            if !self.open() {
+                return;
+            }
+            let saved = std::mem::take(&mut self.f.temps);
+            let bt = self.t_bool();
+            self.hold_site = at.is_none();
+            let c = self.val(e, Some(bt));
+            self.drop_temps();
+            self.hold_site = false;
+            self.f.temps = saved;
+            let Some(c) = c else { return };
+            if !self.open() {
+                return;
+            }
+            let (fail, ok) = (self.f.b.create_block(), self.f.b.create_block());
+            self.f.b.cbr(c, ok, &[], fail, &[]);
+            self.f.b.switch_to(fail);
+            self.contract_fail(cl, e, at);
+            self.f.b.switch_to(ok);
         }
-        let saved = std::mem::take(&mut self.f.temps);
-        let bt = self.t_bool();
-        self.hold_site = at.is_none();
-        let c = self.val(cl.expr, Some(bt));
-        self.drop_temps();
-        self.hold_site = false;
-        self.f.temps = saved;
-        let Some(c) = c else { return };
-        if !self.open() {
-            return;
-        }
-        let (fail, ok) = (self.f.b.create_block(), self.f.b.create_block());
-        self.f.b.cbr(c, ok, &[], fail, &[]);
-        self.f.b.switch_to(fail);
-        self.contract_fail(cl, at);
-        self.f.b.switch_to(ok);
     }
 
     /// The call of `runtime.panic.requires_failed(clause)` or
-    /// `runtime.panic.ensures_failed(site, clause)` (never returns).
-    fn contract_fail(&mut self, cl: &crate::contracts::ContractClause, at: Option<u32>) {
+    /// `runtime.panic.ensures_failed(site, clause)` (never returns) for conjunct `e` of `cl`, at
+    /// the site of `e`'s first token (where diagnostics about the check point).
+    fn contract_fail(&mut self, cl: &crate::contracts::ContractClause, e: u32, at: Option<u32>) {
         let line = crate::contracts::clause_line(self.icx.span_text(cl.span));
         let s = Operand::Str(self.string(line.as_bytes()));
         let decl = if at.is_some() { self.g.lang.ensures_failed } else { self.g.lang.requires_failed };
@@ -512,6 +558,14 @@ impl<'a> FnCx<'a> {
         };
         let f = self.req(Req::Inst(InstKey { decl: d, args: Vec::new() }));
         self.f.last_site = None;
+        let here = self.site(self.icx.a(e));
+        let saved = self.f.b.site();
+        self.f.b.set_site(here);
+        self.contract_fail_call(f, s, at);
+        self.f.b.set_site(saved);
+    }
+
+    fn contract_fail_call(&mut self, f: stave_ir::FuncId, s: Operand, at: Option<u32>) {
         match at {
             None => {
                 self.f.b.call(f, None, &[s]);

@@ -1,0 +1,44 @@
+//~ STDOUT contract_generic_instance.stdout
+// A contract check the facts refute inside an instance of a generic fn is no error, it stays a
+// runtime check: the instance may be dead for reasons only its caller knows (`first::<0>` is
+// called only under `if N > 0`), or the refuted point may sit behind a test on the instance's
+// constants (`pick::<0>`, `width::<u8>`).
+import std.io;
+
+fn pick<const N: usize>(x: usize) -> usize ensures(result > 0) {
+    if N == 0 {
+        return 1;
+    }
+    return N;
+}
+
+fn first<const N: usize>(xs: &[u32; N]) -> u32 requires(N > 0) {
+    return xs[0];
+}
+
+fn sum_or_zero<const N: usize>(xs: &[u32; N]) -> u32 {
+    if N > 0 {
+        return first::<N>(xs);
+    }
+    return 0;
+}
+
+fn width<T: Copy>(t: T) -> usize ensures(result >= 2) {
+    if size_of::<T>() < 2 {
+        return 2;
+    }
+    return size_of::<T>();
+}
+
+fn main() -> i32 {
+    let a = pick::<0>(3);
+    let b = pick::<4>(3);
+    io.print(f"{a} {b}\n");
+    let e: [u32; 0] = [];
+    let t: [u32; 2] = [4, 5];
+    let r = sum_or_zero::<0>(&e) + sum_or_zero::<2>(&t);
+    io.print(f"{r}\n");
+    let w = width(1u8) + width(1u32);
+    io.print(f"{w}\n");
+    return 0;
+}

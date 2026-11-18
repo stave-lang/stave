@@ -1,0 +1,44 @@
+//~ CHECK-ONLY
+// A contract check that the facts before it refute fails on every execution that reaches it: a
+// `requires` false whenever the clauses before it hold makes the fn uncallable (E0215), an
+// `ensures` false whenever a return is reached is an error at that return (E0217). Each operand
+// of a top-level `&&` is its own check; type ranges, signed compares, and `+` by a constant are
+// facts. An instance of a generic fn gets no error: its check stays (`contract_generic_instance`).
+fn contradict(x: u32) -> u32 requires(x < 10) requires(x > 20) { //~ ERROR E0215
+    return x;
+}
+
+fn split(x: u32) -> u32 requires(x > 5 && x < 3) { //~ ERROR E0215
+    return x;
+}
+
+fn byte(b: u8) -> u8 requires(b > 255) { //~ ERROR E0215
+    return b;
+}
+
+fn signed(x: i32) -> i32 requires(x < -5) requires(x + 10 > 5) { //~ ERROR E0215
+    return x;
+}
+
+fn generic<T: Copy>(t: T, b: u8) -> T requires(b > 255) {
+    return t;
+}
+
+fn sign(x: i32) -> i32 ensures(result >= 0) {
+    if x < 0 {
+        return x; //~ ERROR E0217
+    }
+    return x;
+}
+
+fn four(x: u32) -> u32 requires(x == 4) ensures(result == 5) {
+    return x; //~ ERROR E0217
+}
+
+fn main() {
+    let a = contradict(1) + split(4) + four(4);
+    let b = byte(1);
+    let c = signed(-6) + sign(1);
+    let d = generic(1u32, 2);
+    let e = generic(3u64, 4);
+}

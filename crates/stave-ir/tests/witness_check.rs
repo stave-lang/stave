@@ -79,7 +79,7 @@ fn val(v: Value) -> Node {
 }
 
 fn edge(from: Node, to: Node, w: i128, src: Source) -> Edge {
-    Edge { from, to, w, src }
+    Edge { from, to, w, src, mul: 1 }
 }
 
 /// The only `check.bounds` of `f`.
@@ -266,7 +266,8 @@ fn a_negated_test_holds_on_the_false_side() {
 }
 
 /// A signed compare says nothing about unsigned order: `-1 < n` as signed, far above `n` as an
-/// index.
+/// index. The branch states its compare of the signed values, not of the unsigned ones they
+/// were cast from by wrapping.
 #[test]
 fn a_signed_test_is_refused() {
     let (m, f, (n, then)) = fixture(|b, _, t, p| {
@@ -284,7 +285,7 @@ fn a_signed_test_is_refused() {
     let i = body(&m, f).params(Block(0))[2];
     assert!(proved(&m, f).is_none());
     let forged = vec![edge(val(i), val(n), -1, Source::Branch { block: then.0 })];
-    assert_eq!(verdict(&m, f, forged), Err(Reject::Operand));
+    assert_eq!(verdict(&m, f, forged), Err(Reject::Edge));
 }
 
 /// `if i + 1 < n { a[i] }`: with a trapping `add` the sum is exact and the access is proven;
@@ -730,7 +731,10 @@ fn rem_is_below_its_divisor() {
                     edge(val(k), val(r), 0, Source::Cast { inst: inst_of(bd, k) }),
                     edge(val(r), Node::Zero, 3, Source::Bits { inst: inst_of(bd, r) }),
                 ];
-                assert_eq!(verdict(&m, f, chain), Err(Reject::Operand));
+                assert_eq!(verdict(&m, f, chain), Err(Reject::Source));
+                // a signed `rem` may be negative: it bounds nothing
+                let rem = vec![edge(val(r), Node::Zero, 3, Source::Bits { inst: inst_of(bd, r) })];
+                assert_eq!(verdict(&m, f, rem), Err(Reject::Operand));
             }
         }
     }
@@ -830,7 +834,8 @@ fn type_ranges_and_widening_casts() {
             }
             Test::SignedSource => {
                 assert!(proved(&m, f).is_none());
-                assert_eq!(verdict(&m, f, byte_chain(255)), Err(Reject::Operand));
+                // `i8` to `usize` moves the negative bytes far up: no equality
+                assert_eq!(verdict(&m, f, byte_chain(255)), Err(Reject::Source));
             }
         }
     }
@@ -984,10 +989,50 @@ fn the_checker_shares_no_code_with_the_pass() {
     assert_eq!(uses.len(), 3, "{uses:?}");
     assert!(uses[0].starts_with("use super::{") && uses[1].starts_with("use crate::ir::{"), "{uses:?}");
     assert_eq!(uses[2], "use crate::types::{IntBits, TypeKey};");
-    for banned in ["bounds::", "verify", "facts", "Dominators", "interp", "crate::simd", "reachable()"] {
+    for banned in [
+        "bounds::",
+        "verify",
+        "facts",
+        "Dominators",
+        "interp",
+        "crate::simd",
+        "reachable()",
+        "layout",
+        "arith",
+        ".width()",
+    ] {
         assert!(code.iter().all(|l| !l.contains(banned)), "the checker uses `{banned}`");
     }
     // ... and the data module it reads holds no logic to share.
     let data = include_str!("../src/witness.rs");
     assert!(!data.contains("fn "), "witness.rs is tables and constants only");
+}
+
+/// The checker reads int widths and ranges on its own: they must be the type layer's widths, the
+/// layout's sizes (`usize` / `isize` included, which the layout gives every target alike), and
+/// the interpreter's value ranges, so that neither side can change alone.
+#[test]
+fn the_checkers_int_widths_are_the_types() {
+    use stave_ir::arith::IntTy;
+    use stave_ir::layout::Layouts;
+    use stave_ir::types::IntBits;
+    use stave_ir::witness::check::{int_range, int_width};
+    let mut m = Module::new();
+    let all = [IntBits::B8, IntBits::B16, IntBits::B32, IntBits::B64, IntBits::Size];
+    let mut tys = Vec::new();
+    for bits in all {
+        for signed in [false, true] {
+            tys.push((signed, bits, m.types.int(signed, bits)));
+        }
+    }
+    assert_eq!(m.types.usize(), m.types.int(false, IntBits::Size));
+    assert_eq!(m.types.isize(), m.types.int(true, IntBits::Size));
+    let layouts = Layouts::compute(&m.types);
+    for (signed, bits, t) in tys {
+        let w = int_width(bits);
+        assert_eq!(w, u32::from(bits.width()), "{bits:?}");
+        assert_eq!(layouts.size_of(t), Some(u64::from(w) / 8), "{bits:?}");
+        let it = IntTy::new(w as u8, signed);
+        assert_eq!(int_range((signed, w)), (it.min(), it.max()), "{bits:?}, signed: {signed}");
+    }
 }

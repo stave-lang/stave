@@ -1,0 +1,37 @@
+//~ EXIT 101
+//~ STDOUT contract_removed.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_removed.stv:26:5 in main.within (thread 0)\nensures(result >= lo && result <= hi)\n"
+// The contract checks the facts prove are removed (every `ensures` check of `clamp`), the
+// others stay and panic as before: `within`'s `result <= hi` is not implied by anything, and a
+// false operand of a split clause reports the whole clause.
+import std.io;
+
+fn clamp(x: i32, lo: i32, hi: i32) -> i32 requires(lo <= hi) ensures(result >= lo && result <= hi) {
+    if x < lo {
+        return lo;
+    }
+    if x > hi {
+        return hi;
+    }
+    return x;
+}
+
+fn within(x: u32, lo: u32, hi: u32) -> u32 ensures(result >= lo && result <= hi) {
+    if x < lo {
+        return lo;
+    }
+    if x == hi {
+        return hi;
+    }
+    return x;
+}
+
+fn main() -> i32 {
+    let (a, b, c) = (clamp(-5, 0, 10), clamp(50, 0, 10), clamp(7, 0, 10));
+    io.print(f"{a} {b} {c}\n");
+    let (d, e, f) = (within(1, 2, 9), within(9, 2, 9), within(5, 2, 9));
+    io.print(f"{d} {e} {f}\n");
+    let g = within(50, 2, 9);
+    io.print(f"{g}\n");
+    return 0;
+}

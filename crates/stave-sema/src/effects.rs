@@ -11,10 +11,9 @@
 //! | an `extern "C"` import | all except those its `without` lists (a claim of the block's obligation) |
 //! | intrinsic `syscall0`..`syscall6`, `thread_clone` | `io` |
 //! | intrinsic `call_on_stack`, `cpu_init` (they run code no edge shows) | all |
-//! | a trapping instruction of the checked IR after the removal of proven bounds checks ([`NodeIr`]) | `trap` |
+//! | a trapping instruction of the checked IR after the removal of proven bounds and contract checks ([`NodeIr`]; a kept `requires` / `ensures` check is its failure call) | `trap` |
 //! | `panic.out_of_memory` in that IR | `alloc` |
 //! | membership in a call cycle (an SCC that is a cycle) | `recursive`, `trap` (stack overflow) |
-//! | a `requires` / `ensures` check ([`crate::contracts`]) | `trap` |
 //! | `unsafe("..")` block or expression, outside the built-in packages | `unsafe` |
 //! | a `scope { }` (it waits for its threads at the end) | `block` |
 //! | a `spawn { }` (it maps a stack and starts a thread) | `alloc io trap` |
@@ -249,6 +248,23 @@ impl Plan {
             })
             .collect()
     }
+}
+
+/// The fn nodes whose bodies have a contract check (a checked `requires` or an `ensures`): their
+/// checked IR decides which checks stay, so their `trap` and the contract diagnostics need it.
+pub fn contract_nodes(tc: &Typeck) -> Vec<u32> {
+    let g = &tc.call_graph;
+    let checked = |d: DeclId| {
+        let Ok(bi) = tc.bodies.binary_search_by_key(&d, |b| b.decl) else { return false };
+        let b = &tc.bodies[bi];
+        !b.has_error
+            && b.contracts
+                .as_deref()
+                .is_some_and(|c| !c.checked_requires().is_empty() || !c.ensures.is_empty())
+    };
+    (0..g.nodes.len() as u32)
+        .filter(|&i| matches!(&g.nodes[i as usize].kind, NodeKind::Fn { inst, body: true, .. } if checked(inst.decl)))
+        .collect()
 }
 
 /// Each node's own effects and its effect set ([`solve`]).
@@ -492,12 +508,6 @@ pub fn solve(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>) -> EffectSets {
                     if o == owner {
                         add(e, op, &mut eff);
                     }
-                }
-                // a contract check is a trap op of the fn (no proof removes one)
-                if owner == 0
-                    && let Some(s) = tc.bodies[bi].contracts.as_deref().and_then(|c| c.trap_span())
-                {
-                    add(Effects::TRAP, Op { kind: OpKind::Trap, span: s }, &mut eff);
                 }
             }
             if let Some(x) = ir.and_then(|r| r.get(i as usize)) {

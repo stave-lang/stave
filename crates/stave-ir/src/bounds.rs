@@ -52,20 +52,46 @@
 //! offsets and a widening unsigned cast into its operand. Each check is a query on it, explored
 //! from the index for at most [`BOUNDS_STEP_LIMIT`] edges.
 //!
+//! **Contract checks** go the same way. A `requires` / `ensures` clause is one check per conjunct
+//! of its top-level `&&`: `cbr c ok fail` with `fail` holding only the call of
+//! `runtime.panic.requires_failed` / `ensures_failed`. Its goal is the inequality `c` states at the
+//! end of the block that branches (a compare of ints under `not`s; `==` is two goals, `!=` none),
+//! asked of the same graph; a goal between a constant and a value its type range decides is one
+//! `Range` fact. Three answers: proved (every goal has a chain: the check goes, like a bounds
+//! check, [`Proof::Clause`]); refuted (not proved, and a chain proves the negation of one goal:
+//! the check fails whenever control gets there, [`Proved::refuted`]); unknown (the check stays). A
+//! `requires` check sees the clauses before it and the parameters' type ranges; an `ensures`
+//! check at a return sees everything that dominates that return.
+//!
+//! "Fails whenever reached" is vacuous where nothing reaches: there the goal holds too. So before
+//! a refutation the pass looks for dead code, and finding it, reports none: (a) facts holding at
+//! the point that contradict each other (a walk of negative weight from one of the first 16
+//! nodes of the conditions holding there back to itself); every goal linked to that walk is then
+//! proved with the walk counted as often as it needs (a multiplier), so a proof wins over the
+//! refutation there; (b) a dominating branch on a compare of two constants, entered
+//! on the side the compare never takes; (c) a dominating call that cannot return: its callee has
+//! no `ret`, or asserts a parameter the call passes the constant `false`. Dead code of any other
+//! shape (a loop that never ends, a callee that always panics through a path with a `ret`) is
+//! not recognized, and a check there that the facts refute stays an error. Only the pass decides
+//! this, the checker certifies no dead code: leaving a refutation out keeps a runtime check and
+//! removes nothing.
+//!
 //! The pass deletes nothing. Its result is a witness per check ([`crate::witness`]): the proof
 //! written out as a chain of inequalities, each naming the place of the IR it is read from. The
-//! separate checker [`crate::witness::check`] validates every chain and then deletes the checks
-//! it accepted; a chain it refuses is a compiler bug. The [`Proof`] is the label of the rule
-//! that found the chain, for reports and tests.
+//! separate checker [`crate::witness::check`] validates every chain, refutations included, and
+//! then deletes the checks it accepted; a chain it refuses is a compiler bug. The [`Proof`] is the
+//! label of the rule that found the chain, for reports and tests.
 
 mod facts;
 
-use crate::ir::{Block, Body, Func, FuncId, Module, Op, Operand, Span, Term, Value, ValueDef};
+use crate::ir::{Block, Body, Func, FuncId, Module, Op, Operand, Site, Span, Term, Value, ValueDef};
 use crate::simd::VecOp;
 use crate::types::{TypeId, TypeKey, TypeTable};
 use crate::verify::Dominators;
 use crate::witness::check::{Rejected, check_module, remove};
-use crate::witness::{Edge, FnWitness, NO_BLOCK, Node, Removed, Source};
+use crate::witness::{
+    ENSURES_FAILED, Edge, FnWitness, NO_BLOCK, NOT_DEPTH, Node, REQUIRES_FAILED, Refuted, Removed, Source,
+};
 
 /// The most graph edges one bounds query follows before it gives up and keeps the check: compile
 /// time stays linear in the number of checks.
@@ -109,6 +135,15 @@ pub enum Proof {
     /// The facts prove `base + k` below the length without an equality (`base` an SSA value
     /// number, `None` for a constant index): the index, or a vector access's last lane.
     Offset { base: Option<u32>, k: i128 },
+    /// A contract check whose condition the facts prove.
+    Clause(Clause),
+}
+
+/// The kind of a contract check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Clause {
+    Requires,
+    Ensures,
 }
 
 /// How an access is guarded.
@@ -157,12 +192,185 @@ pub struct Elided {
     pub proof: Proof,
 }
 
-/// The checks of one function the pass proved: their witness, and per row of
-/// [`FnWitness::removed`] the rule that found it.
+/// The checks of one function the pass proved or refuted: their witness, per row of
+/// [`FnWitness::removed`] the rule that found it, and per row of [`FnWitness::refuted`] the kind
+/// of the contract check.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proved {
     pub witness: FnWitness,
     pub proofs: Vec<Proof>,
+    pub refuted: Vec<Clause>,
+}
+
+impl Proved {
+    /// The removed `check.bounds` (not contract checks).
+    pub fn bounds_removed(&self) -> usize {
+        self.proofs.iter().filter(|p| !matches!(p, Proof::Clause(_))).count()
+    }
+}
+
+/// A contract check the pass proved or refuted, for diagnostics: read off a [`Proved`] and the
+/// module it was proved on, before any removal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Finding {
+    pub func: FuncId,
+    pub clause: Clause,
+    /// Proved (removed) or refuted (fails whenever reached).
+    pub refuted: bool,
+    /// The site of the check's failure call: the conjunct.
+    pub site: Site,
+    /// An `ensures` check: the site of the return it checks (its failure call's first argument).
+    pub ret: Option<Site>,
+    /// The sites of the facts of its proof, in order, each once.
+    pub facts: Vec<Site>,
+    /// The evaluation of the conjunct itself can trap or calls a fn: deleting the clause from
+    /// the source would change the program even where its check is proved.
+    pub traps: bool,
+}
+
+/// The contract checks of `p` (proved on `m`, unchanged since), in instruction order: removed,
+/// then refuted.
+pub fn findings(m: &Module, p: &Proved) -> Vec<Finding> {
+    let w = &p.witness;
+    let Some(f) = m.func(w.func) else { return Vec::new() };
+    let Some(b) = &f.body else { return Vec::new() };
+    let site = |i: u32| b.insts.site.get(i as usize).copied().unwrap_or(Site::NONE);
+    let make = |inst: u32, clause: Clause, refuted: bool, spans: &[Span]| {
+        let ret = match (clause, b.args(inst).get(1).and_then(|&o| b.int_const(o))) {
+            (Clause::Ensures, Some(s)) => u32::try_from(s).ok().map(Site),
+            _ => None,
+        };
+        let mut facts: Vec<Site> = Vec::new();
+        for e in spans.iter().flat_map(|s| s.of(&w.edges)) {
+            let s = match (contract_branch(&m.funcs, b, e.src), source_inst(b, e.src)) {
+                // a branch past an earlier contract check: that check's conjunct
+                (Some(call), _) | (None, Some(call)) => site(call),
+                (None, None) => f.name_site,
+            };
+            if s != Site::NONE && !facts.contains(&s) {
+                facts.push(s);
+            }
+        }
+        Finding {
+            func: w.func,
+            clause,
+            refuted,
+            site: site(inst),
+            ret,
+            facts,
+            traps: conjunct_traps(m, b, inst),
+        }
+    };
+    let mut out = Vec::new();
+    for (r, proof) in w.removed.iter().zip(&p.proofs) {
+        if let Proof::Clause(c) = *proof {
+            out.push(make(r.inst, c, false, &[r.edges, r.also]));
+        }
+    }
+    for (r, &c) in w.refuted.iter().zip(&p.refuted) {
+        out.push(make(r.inst, c, true, &[r.edges]));
+    }
+    out
+}
+
+/// Whether the evaluation of the conjunct whose failure call is `call` has a trapping
+/// instruction or a call: the blocks from where the conjunct starts (the true side of the
+/// contract check before it, or the entry) up to the block branching on it.
+fn conjunct_traps(m: &Module, b: &Body, call: u32) -> bool {
+    let is_fail_block = |t: usize| {
+        b.blocks.get(t).is_some_and(|bd| {
+            bd.insts.len == 1
+                && b.insts.op.get(bd.insts.start as usize) == Some(&Op::Call)
+                && fail_clause(&m.funcs, b, bd.insts.start).is_some()
+        })
+    };
+    let Some(fb) = b.blocks.iter().position(|bd| bd.insts.indices().contains(&call)) else { return true };
+    let Some(p) =
+        b.blocks.iter().position(|bd| matches!(bd.term, Term::Cbr { els, .. } if els.block.index() == fb))
+    else {
+        return true;
+    };
+    let dom = Dominators::compute(b);
+    // the start: the nearest dominator entered by the true edge of an earlier contract check
+    let mut start = 0;
+    let mut walk = Some(p);
+    while let Some(t) = walk {
+        let entered = b.blocks.iter().any(|bd| match bd.term {
+            Term::Cbr { then, els, .. } => then.block.index() == t && is_fail_block(els.block.index()),
+            _ => false,
+        });
+        if entered {
+            start = t;
+            break;
+        }
+        walk = dom.idom(t).filter(|&d| d != t);
+    }
+    let mut seen = vec![false; b.blocks.len()];
+    let mut work = vec![start];
+    seen[start] = true;
+    while let Some(t) = work.pop() {
+        for i in b.blocks[t].insts.indices() {
+            if b.insts.op.get(i as usize) == Some(&Op::Call) || crate::traps::trap_of(m, b, i).is_some() {
+                return true;
+            }
+        }
+        if t == p {
+            continue;
+        }
+        for s in b.successors(Block(t as u32)) {
+            let s = s.block.index();
+            if s < seen.len() && !seen[s] && !is_fail_block(s) {
+                seen[s] = true;
+                work.push(s);
+            }
+        }
+    }
+    false
+}
+
+/// The failure call of the contract check whose true edge source `src` (a branch) reads.
+fn contract_branch(funcs: &[Func], b: &Body, src: Source) -> Option<u32> {
+    let Source::Branch { block } = src else { return None };
+    b.blocks.iter().find_map(|bd| match bd.term {
+        Term::Cbr { then, els, .. } if then.block.0 == block => {
+            let fail = b.blocks.get(els.block.index())?;
+            let q = fail.insts.start;
+            (fail.insts.len == 1
+                && b.insts.op.get(q as usize) == Some(&Op::Call)
+                && fail_clause(funcs, b, q).is_some())
+            .then_some(q)
+        }
+        _ => None,
+    })
+}
+
+/// The instruction a witness source is read at, for reports: the compare (or `not`) a branch
+/// tests, the defining instruction of a ranged value, the instruction itself; `None` for the
+/// range of a block parameter.
+pub fn source_inst(b: &Body, src: Source) -> Option<u32> {
+    let def = |v: Value| match b.values.get(v.index())?.def {
+        ValueDef::Inst(i) => Some(i),
+        ValueDef::Param { .. } => None,
+    };
+    match src {
+        Source::Branch { block } => b.blocks.iter().find_map(|bd| match bd.term {
+            Term::Cbr { cond: Operand::Value(c), then, els }
+                if then.block.0 == block || els.block.0 == block =>
+            {
+                def(c)
+            }
+            _ => None,
+        }),
+        Source::Assert { call: i, .. }
+        | Source::Check { inst: i }
+        | Source::Arith { inst: i }
+        | Source::SliceLen { inst: i }
+        | Source::SliceMake { inst: i }
+        | Source::SubSat { inst: i }
+        | Source::Bits { inst: i }
+        | Source::Cast { inst: i } => Some(i),
+        Source::Range { value } => def(value),
+    }
 }
 
 /// What [`analyze_func`] finds in one function.
@@ -211,10 +419,30 @@ fn has_access(b: &Body) -> bool {
 /// has one). Nothing is removed. Functions are independent: a caller may run them in parallel.
 pub fn prove_func(m: &Module, fid: FuncId) -> Option<Proved> {
     let b = m.func(fid)?.body.as_ref()?;
-    if !b.insts.op.contains(&Op::BoundsCheck) {
+    if !has_check(m, b) {
         return None;
     }
     Cx::new(m, b).prove(fid)
+}
+
+/// Whether `b` has a `check.bounds` or a call of a contract failure fn: without one there is
+/// nothing to prove.
+fn has_check(m: &Module, b: &Body) -> bool {
+    (0..b.insts.len() as u32).any(|i| match b.insts.op[i as usize] {
+        Op::BoundsCheck => true,
+        Op::Call => fail_clause(&m.funcs, b, i).is_some(),
+        _ => false,
+    })
+}
+
+/// The kind of contract check whose failure call instruction `i` is, by its callee.
+fn fail_clause(funcs: &[Func], b: &Body, i: u32) -> Option<Clause> {
+    let Some(&Operand::Func(f)) = b.args(i).first() else { return None };
+    match funcs.get(f.index())?.path.as_str() {
+        REQUIRES_FAILED => Some(Clause::Requires),
+        ENSURES_FAILED => Some(Clause::Ensures),
+        _ => None,
+    }
 }
 
 /// [`prove_func`] and the unguarded accesses of [`audit_func`] from one analysis of the
@@ -223,7 +451,7 @@ pub fn prove_func(m: &Module, fid: FuncId) -> Option<Proved> {
 pub fn analyze_func(m: &Module, fid: FuncId) -> Analysis {
     let Some(f) = m.func(fid) else { return Analysis::default() };
     let Some(b) = &f.body else { return Analysis::default() };
-    let (checks, accesses) = (b.insts.op.contains(&Op::BoundsCheck), has_access(b));
+    let (checks, accesses) = (has_check(m, b), has_access(b));
     if !checks && !accesses {
         return Analysis::default();
     }
@@ -273,7 +501,75 @@ struct Cx<'a> {
     preds: Vec<Vec<(u32, bool)>>,
     /// The reachable `check.bounds` instructions, in order.
     checks: Vec<u32>,
+    /// The reachable contract checks, in order.
+    contracts: Vec<ContractCheck>,
     facts: facts::Facts,
+}
+
+/// A contract check as the pass reads it.
+#[derive(Clone, Copy)]
+struct ContractCheck {
+    /// The failure call, alone in its block.
+    call: u32,
+    /// The block ending in `cbr cond ok fail`.
+    branch: u32,
+    cond: Operand,
+    clause: Clause,
+}
+
+/// What a contract check's goals come to.
+enum Verdict {
+    /// Every goal has a chain; the second goal's (of an `==`) starts at this edge.
+    Proved { also: Option<usize> },
+    /// Goal `half` is false whenever the check is reached.
+    Refuted { half: u8 },
+}
+
+/// One goal `lo < hi` (`strict`) or `lo <= hi`, the operands as written.
+#[derive(Clone, Copy)]
+struct Goal {
+    lo: Operand,
+    hi: Operand,
+    strict: bool,
+}
+
+impl Goal {
+    /// The goal that holds exactly when this one does not.
+    fn negated(self) -> Goal {
+        Goal { lo: self.hi, hi: self.lo, strict: !self.strict }
+    }
+}
+
+/// The reachable contract checks of `b`: a block holding only a call of a contract failure fn
+/// and ending in `unreachable`, entered only by the false edge of a `cbr` whose true edge goes
+/// elsewhere.
+fn contract_checks(
+    funcs: &[Func],
+    b: &Body,
+    dom: &Dominators,
+    preds: &[Vec<(u32, bool)>],
+) -> Vec<ContractCheck> {
+    let mut out = Vec::new();
+    for (fb, bd) in b.blocks.iter().enumerate().skip(1) {
+        let q = bd.insts.start;
+        if !dom.reachable(fb)
+            || bd.insts.len != 1
+            || !matches!(bd.term, Term::Unreachable)
+            || b.insts.op.get(q as usize) != Some(&Op::Call)
+        {
+            continue;
+        }
+        let Some(clause) = fail_clause(funcs, b, q) else { continue };
+        let [(p, false)] = preds[fb][..] else { continue };
+        if let Term::Cbr { cond, then, els } = b.blocks[p as usize].term
+            && els.block.index() == fb
+            && then.block.index() != fb
+        {
+            out.push(ContractCheck { call: q, branch: p, cond, clause });
+        }
+    }
+    out.sort_unstable_by_key(|c| c.call);
+    out
 }
 
 impl<'a> Cx<'a> {
@@ -295,7 +591,8 @@ impl<'a> Cx<'a> {
                     && block_of.get(i as usize).is_some_and(|&bk| dom.reachable(bk as usize))
             })
             .collect();
-        Cx { types, funcs, b, dom, block_of, preds, checks, facts: facts::Facts::default() }
+        let contracts = contract_checks(funcs, b, &dom, &preds);
+        Cx { types, funcs, b, dom, block_of, preds, checks, contracts, facts: facts::Facts::default() }
     }
 
     fn reachable_inst(&self, i: u32) -> bool {
@@ -581,28 +878,321 @@ impl<'a> Cx<'a> {
         (ok, bad)
     }
 
-    /// The witnesses of every check that has a proof.
+    /// The witnesses of every check that has a proof, and of every contract check that has a
+    /// refutation.
     fn prove(&self, func: FuncId) -> Option<Proved> {
-        let twins = self.twins();
-        let heads = self.loop_heads();
-        let mut w = FnWitness { func, dom: Vec::new(), removed: Vec::new(), edges: Vec::new() };
-        let mut proofs = Vec::new();
-        for (k, &i) in self.checks.iter().enumerate() {
+        let mut w =
+            FnWitness { func, dom: Vec::new(), removed: Vec::new(), refuted: Vec::new(), edges: Vec::new() };
+        let mut rows: Vec<(Removed, Proof)> = Vec::new();
+        let span = |from: usize, to: usize| Span { start: from as u32, len: (to - from) as u32 };
+        if !self.checks.is_empty() {
+            let twins = self.twins();
+            let heads = self.loop_heads();
+            for (k, &i) in self.checks.iter().enumerate() {
+                let start = w.edges.len();
+                match self.check_proof(i, twins[k], heads[k], &mut w.edges) {
+                    Some(proof) => {
+                        let edges = span(start, w.edges.len());
+                        let site = self.b.insts.site[i as usize];
+                        rows.push((Removed { inst: i, site, edges, also: Span::default() }, proof));
+                    }
+                    None => w.edges.truncate(start),
+                }
+            }
+        }
+        let mut refuted = Vec::new();
+        for c in &self.contracts {
             let start = w.edges.len();
-            match self.check_proof(i, twins[k], heads[k], &mut w.edges) {
-                Some(proof) => {
-                    let edges = Span { start: start as u32, len: (w.edges.len() - start) as u32 };
-                    w.removed.push(Removed { inst: i, site: self.b.insts.site[i as usize], edges });
-                    proofs.push(proof);
+            let site = self.b.insts.site[c.call as usize];
+            match self.contract_proof(c, &mut w.edges) {
+                Some(Verdict::Proved { also }) => {
+                    let (edges, also) = match also {
+                        Some(mid) => (span(start, mid), span(mid, w.edges.len())),
+                        None => (span(start, w.edges.len()), Span::default()),
+                    };
+                    rows.push((Removed { inst: c.call, site, edges, also }, Proof::Clause(c.clause)));
+                }
+                Some(Verdict::Refuted { half }) => {
+                    w.refuted.push(Refuted { inst: c.call, site, edges: span(start, w.edges.len()), half });
+                    refuted.push(c.clause);
                 }
                 None => w.edges.truncate(start),
             }
         }
-        if proofs.is_empty() {
+        if rows.is_empty() && refuted.is_empty() {
             return None;
         }
+        rows.sort_by_key(|r| r.0.inst);
+        let proofs = rows.iter().map(|r| r.1).collect();
+        w.removed = rows.into_iter().map(|r| r.0).collect();
         w.dom = (0..self.b.blocks.len()).map(|bk| self.dom.idom(bk).map_or(NO_BLOCK, |d| d as u32)).collect();
-        Some(Proved { witness: w, proofs })
+        Some(Proved { witness: w, proofs, refuted })
+    }
+
+    /// The verdict on contract check `c`, with the edges of its proof or refutation appended to
+    /// `out` (nothing when unknown).
+    fn contract_proof(&self, c: &ContractCheck, out: &mut Vec<Edge>) -> Option<Verdict> {
+        // the compare under the `not`s, as it reads when the condition is true
+        let (mut o, mut holds) = (c.cond, true);
+        let (op, x, y) = 'cmp: {
+            for _ in 0..=NOT_DEPTH {
+                let Operand::Value(v) = o else { return None };
+                let d = self.def(v)?;
+                match (self.b.insts.op[d as usize], self.b.args(d)) {
+                    (Op::Not, &[a]) => {
+                        o = a;
+                        holds = !holds;
+                    }
+                    (op, &[x, y]) => break 'cmp (op, x, y),
+                    _ => return None,
+                }
+            }
+            return None;
+        };
+        let op = if holds {
+            op
+        } else {
+            match op {
+                Op::Lt => Op::Ge,
+                Op::Le => Op::Gt,
+                Op::Gt => Op::Le,
+                Op::Ge => Op::Lt,
+                Op::Eq => Op::Ne,
+                Op::Ne => Op::Eq,
+                _ => return None,
+            }
+        };
+        let g = |lo, hi, strict| Goal { lo, hi, strict };
+        let goals = match op {
+            Op::Lt => vec![g(x, y, true)],
+            Op::Le => vec![g(x, y, false)],
+            Op::Gt => vec![g(y, x, true)],
+            Op::Ge => vec![g(y, x, false)],
+            Op::Eq => vec![g(x, y, false), g(y, x, false)],
+            _ => return None,
+        };
+        let start = out.len();
+        let prove_all = |cycle: Option<&(u32, Vec<u32>)>, out: &mut Vec<Edge>| {
+            let mut second = None;
+            for (k, &goal) in goals.iter().enumerate() {
+                if k == 1 {
+                    second = Some(out.len());
+                }
+                let mark = out.len();
+                if self.goal_chain(c.branch, goal, out).is_some() {
+                    continue;
+                }
+                out.truncate(mark);
+                cycle.and_then(|cy| self.goal_by_cycle(c.branch, goal, cy, out))?;
+            }
+            Some(Verdict::Proved { also: second })
+        };
+        if let Some(v) = prove_all(None, out) {
+            return Some(v);
+        }
+        out.truncate(start);
+        // A point no execution reaches holds the goal and its negation alike: there a proof may
+        // need the contradiction several times (multipliers), and no refutation is reported.
+        if let Some(cycle) = self.contradiction(c.branch) {
+            let v = prove_all(Some(&cycle), out);
+            if v.is_none() {
+                out.truncate(start);
+            }
+            return v;
+        }
+        if self.dead_end(c.branch) {
+            return None;
+        }
+        for (half, &goal) in goals.iter().enumerate() {
+            if self.goal_chain(c.branch, goal.negated(), out).is_some() {
+                return Some(Verdict::Refuted { half: half as u8 });
+            }
+            out.truncate(start);
+        }
+        None
+    }
+
+    /// The chain of `goal` at the end of block `block`, appended to `out`, if the facts prove it.
+    fn goal_chain(&self, block: u32, goal: Goal, out: &mut Vec<Edge>) -> Option<()> {
+        if self.range_goal(goal, out).is_some() {
+            return Some(());
+        }
+        let (lo, hi) = (self.term(goal.lo)?, self.term(goal.hi)?);
+        let hi_bound = if goal.strict { hi } else { hi.plus(1)? };
+        let mut path = Vec::new();
+        self.prove_at(block, u32::MAX, lo, hi_bound, Some(&mut path))?;
+        let from = out.len();
+        if self.chain(goal.lo, &path, goal.hi, out).is_none() {
+            out.truncate(from);
+            return None;
+        }
+        Some(())
+    }
+
+    /// `goal` between a constant and an int value that the value's type range alone decides
+    /// (`x >= 0` on an unsigned `x`, `b <= 255` on a `u8`): one `Range` edge.
+    fn range_goal(&self, goal: Goal, out: &mut Vec<Edge>) -> Option<()> {
+        let strict = i128::from(goal.strict);
+        let range = |v: Value| -> Option<(i128, i128)> {
+            match self.key(self.b.value_ty(v)?)? {
+                TypeKey::Int { signed: true, bits } => {
+                    let h = 1i128 << (bits.width() - 1);
+                    Some((-h, h - 1))
+                }
+                TypeKey::Int { signed: false, bits } => Some((0, (1i128 << bits.width()) - 1)),
+                _ => None,
+            }
+        };
+        let konst = |o: Operand| self.b.int_const(o).filter(|c| c.abs() <= crate::witness::MAX_CONST);
+        let edge = match (goal.lo, goal.hi) {
+            // c <= v (+ strict): the type's least value is at least c + strict
+            (lo, Operand::Value(v)) if konst(lo).is_some() => {
+                let (min, _) = range(v)?;
+                (konst(lo)? + strict <= min).then_some(Edge {
+                    from: Node::Zero,
+                    to: Node::Val(v),
+                    w: -min,
+                    src: Source::Range { value: v },
+                    mul: 1,
+                })?
+            }
+            // v + strict <= c: the type's greatest value is at most c - strict
+            (Operand::Value(v), hi) if konst(hi).is_some() => {
+                let (_, max) = range(v)?;
+                (max + strict <= konst(hi)?).then_some(Edge {
+                    from: Node::Val(v),
+                    to: Node::Zero,
+                    w: max,
+                    src: Source::Range { value: v },
+                    mul: 1,
+                })?
+            }
+            _ => return None,
+        };
+        out.push(edge);
+        Some(())
+    }
+
+    /// The chain of `goal` at the end of `block` through the contradictory `cycle` (a node and
+    /// facts leading back to it with negative weight), the cycle's edges counted as often as the
+    /// goal needs: valid at a point no execution reaches.
+    fn goal_by_cycle(
+        &self,
+        block: u32,
+        goal: Goal,
+        cycle: &(u32, Vec<u32>),
+        out: &mut Vec<Edge>,
+    ) -> Option<()> {
+        let (lo, hi) = (self.term(goal.lo)?, self.term(goal.hi)?);
+        let to_cycle = self.walk(block, lo, cycle.0)?;
+        let from_cycle = self.walk(block, Self::node_term(cycle.0), Self::node_of(hi))?;
+        let start = out.len();
+        let built = (|| {
+            self.down(goal.lo, out);
+            for &f in &to_cycle {
+                self.fact_edges(f, out)?;
+            }
+            let ring = out.len();
+            for &f in &cycle.1 {
+                self.fact_edges(f, out)?;
+            }
+            let after = out.len();
+            for &f in &from_cycle {
+                self.fact_edges(f, out)?;
+            }
+            self.up(goal.hi, out);
+            let sum = |es: &[Edge]| es.iter().try_fold(0i128, |s, e| s.checked_add(e.w));
+            let (path, around) =
+                (sum(&out[start..ring])?.checked_add(sum(&out[after..])?)?, sum(&out[ring..after])?);
+            let ((_, klo), (_, khi)) = (self.written(goal.lo)?, self.written(goal.hi)?);
+            let want = khi - klo - i128::from(goal.strict);
+            let short = path.checked_sub(want)?;
+            if short <= 0 {
+                out.drain(ring..after);
+                return Some(());
+            }
+            if around >= 0 {
+                return None;
+            }
+            let times = (short + (-around) - 1) / (-around);
+            let times = u32::try_from(times).ok().filter(|&t| t <= crate::witness::MAX_MUL)?;
+            for e in &mut out[ring..after] {
+                e.mul = times;
+            }
+            Some(())
+        })();
+        if built.is_none() {
+            out.truncate(start);
+        }
+        built
+    }
+
+    /// Whether the end of `block` is dead in a way the facts do not show: a dominating branch on a
+    /// compare of two constants entered on the side the compare never takes, or a dominating call
+    /// that cannot return (a callee with no `ret`, or an asserting callee given the constant
+    /// `false` for the parameter it asserts).
+    fn dead_end(&self, block: u32) -> bool {
+        let mut walk = Some(block as usize);
+        while let Some(t) = walk {
+            if let Some((cond, pol)) = facts::edge_cond(self.b, &self.preds, t)
+                && self.constant_cond(cond).is_some_and(|v| v != pol)
+            {
+                return true;
+            }
+            for i in self.b.blocks[t].insts.indices() {
+                if self.b.insts.op.get(i as usize) == Some(&Op::Call) && self.never_returns(i) {
+                    return true;
+                }
+            }
+            walk = self.dom.idom(t).filter(|&p| p != t);
+        }
+        false
+    }
+
+    /// The value of `cond` when it is a compare of two int constants under `not`s.
+    fn constant_cond(&self, cond: Operand) -> Option<bool> {
+        let (mut o, mut flip) = (cond, false);
+        for _ in 0..=NOT_DEPTH {
+            let Operand::Value(v) = o else { return None };
+            let d = self.def(v)?;
+            let (x, y) = match (self.b.insts.op[d as usize], self.b.args(d)) {
+                (Op::Not, &[a]) => {
+                    o = a;
+                    flip = !flip;
+                    continue;
+                }
+                (_, &[x, y]) => (self.b.int_const(x)?, self.b.int_const(y)?),
+                _ => return None,
+            };
+            let r = match self.b.insts.op[d as usize] {
+                Op::Lt => x < y,
+                Op::Le => x <= y,
+                Op::Gt => x > y,
+                Op::Ge => x >= y,
+                Op::Eq => x == y,
+                Op::Ne => x != y,
+                _ => return None,
+            };
+            return Some(r != flip);
+        }
+        None
+    }
+
+    /// Whether call `i` cannot return: its callee's body has no `ret`, or the callee asserts a
+    /// parameter that the call passes the constant `false`.
+    fn never_returns(&self, i: u32) -> bool {
+        let args = self.b.args(i);
+        let Some(&Operand::Func(f)) = args.first() else { return false };
+        let Some(body) = self.funcs.get(f.index()).and_then(|f| f.body.as_ref()) else { return false };
+        if !body.blocks.iter().any(|bd| matches!(bd.term, Term::Ret(_))) {
+            return true;
+        }
+        let mask = self.asserted(f);
+        args[1..]
+            .iter()
+            .enumerate()
+            .take(64)
+            .any(|(k, &a)| mask & (1u64 << k) != 0 && self.b.int_const(a) == Some(0))
     }
 
     /// The key two operands share exactly when they are "the same": the operand itself, or the
@@ -642,8 +1232,8 @@ impl<'a> Cx<'a> {
             return None;
         }
         let len = Node::Len(sa);
-        out.push(Edge { from: Node::Val(va), to: len, w: 0, src: Source::SliceLen { inst: da } });
-        out.push(Edge { from: len, to: Node::Val(vb), w: 0, src: Source::SliceLen { inst: db } });
+        out.push(Edge { from: Node::Val(va), to: len, w: 0, src: Source::SliceLen { inst: da }, mul: 1 });
+        out.push(Edge { from: len, to: Node::Val(vb), w: 0, src: Source::SliceLen { inst: db }, mul: 1 });
         Some(())
     }
 
@@ -798,7 +1388,13 @@ impl<'a> Cx<'a> {
         let p = self.prove_lt(i, t.plus(c)?, self.term(len)?, Some(&mut path))?;
         self.chain(idx, &path, len, out)?;
         let (Operand::Value(lim), Some((from, k))) = (n, self.written(len)) else { return None };
-        out.push(Edge { from, to: Node::Val(lim), w: c - k, src: Source::SubSat { inst: self.def(lim)? } });
+        out.push(Edge {
+            from,
+            to: Node::Val(lim),
+            w: c - k,
+            src: Source::SubSat { inst: self.def(lim)? },
+            mul: 1,
+        });
         Some(p)
     }
 
@@ -814,7 +1410,7 @@ impl<'a> Cx<'a> {
         let ((idx, n), (x, y)) = (check, less);
         self.bridge(idx, x, out)?;
         let ((from, kx), (to, ky)) = (self.written(x)?, self.written(y)?);
-        out.push(Edge { from, to, w: ky - kx - 1, src });
+        out.push(Edge { from, to, w: ky - kx - 1, src, mul: 1 });
         if self.konst(y).is_none() || self.konst(n).is_none() {
             self.bridge(y, n, out)?;
         }

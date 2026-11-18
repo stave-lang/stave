@@ -234,7 +234,7 @@ fn modes_agree_and_removal_changes_no_program() {
             for (path, n) in &kr {
                 assert!(kd.get(path).is_some_and(|m| m >= n), "{}: {path} keeps {n} checks", p.display());
             }
-            let removed = |o: &Output| o.removed_checks.iter().map(|x| x.proofs.len()).sum::<usize>();
+            let removed = |o: &Output| o.removed_checks.iter().map(|x| x.bounds_removed()).sum::<usize>();
             // a debug build also lowers fns `main` does not reach: compare the fns both lower
             let (fd, fr) = (removed_per_fn(&dbg, d), removed_per_fn(&rel, r));
             let both = |path: &String| has_body(d, path) && has_body(r, path);
@@ -347,4 +347,50 @@ fn dump_cases_are_the_run_programs() {
             assert_eq!(kept, want, "{name}, release: {release}");
         }
     }
+}
+
+/// The contract failure calls left in function `path` of `m`: its kept contract checks.
+fn kept_contracts(m: &Module, path: &str) -> usize {
+    let f = m.funcs.iter().find(|f| f.path == path).unwrap_or_else(|| panic!("no fn {path}"));
+    let b = f.body.as_ref().unwrap();
+    let fails = [stave_ir::witness::REQUIRES_FAILED, stave_ir::witness::ENSURES_FAILED];
+    (0..b.insts.len() as u32)
+        .filter(|&i| {
+            b.insts.op[i as usize] == Op::Call
+                && matches!(b.args(i).first(), Some(stave_ir::Operand::Func(g))
+                    if fails.contains(&m.funcs[g.index()].path.as_str()))
+        })
+        .count()
+}
+
+/// `tests/conformance/run/contract_removed.stv` keeps exactly the contract checks the facts do
+/// not decide, the same in a debug and a release build: of `clamp` only the `requires` (its six
+/// `ensures` checks, two per return, are proved), of `within` the `result <= hi` at the first
+/// and the last return.
+#[test]
+fn contract_checks_kept_and_removed() {
+    use stave_ir::bounds::Clause;
+    for release in [false, true] {
+        let (m, proofs) = checked("tests/conformance/run/contract_removed.stv", release);
+        let removed = |path: &str| {
+            proofs.iter().filter(|p| p.0 == path && p.1 == Proof::Clause(Clause::Ensures)).count()
+        };
+        for (path, kept, gone) in [("main.clamp", 1, 6), ("main.within", 2, 4)] {
+            assert_eq!((kept_contracts(&m, path), removed(path)), (kept, gone), "{path}, release: {release}");
+        }
+    }
+}
+
+/// On front-end IR, the checker accepts every contract witness the pass writes (removals and
+/// refutations), refuses every corruption of one, and refuses every made-up removal or
+/// refutation of a contract check the pass leaves alone.
+#[test]
+fn no_forged_contract_witness_passes() {
+    let file = "tests/conformance/run/contract_removed.stv";
+    let checked = lowered(&repo().join(file), false);
+    let m = unremoved(&checked).unwrap_or_else(|| panic!("{file} does not lower"));
+    assert!(forge::mutants_are_refused(&m) >= 20);
+    let f = m.find_func("main.within").expect("main.within");
+    assert_eq!(forge::contract_checks(&m, f).len(), 6);
+    assert!(forge::contract_forgeries_are_refused(&m, f) > 100);
 }

@@ -29,10 +29,12 @@
 //!
 //! **Checks** (lowering): the `requires` clauses at entry in order (on a `test fn` they never
 //! panic: with parameters they filter its inputs, [`crate::testgen`]; without, they are not
-//! evaluated), then the `old(e)` snapshots, then the `ensures` clauses in order at each return; a
-//! false clause calls `runtime.panic.requires_failed` (located at the caller's user site, which
-//! every call that can reach a `requires` stores first) or `runtime.panic.ensures_failed` (at the
-//! return). A fn with a checked clause has `trap` ([`Contracts::trap_span`]).
+//! evaluated), then the `old(e)` snapshots, then the `ensures` clauses in order at each return;
+//! each operand of a clause's top-level `&&` is its own check. A false one calls
+//! `runtime.panic.requires_failed` (located at the caller's user site, which every call that can
+//! reach a `requires` stores first) or `runtime.panic.ensures_failed` (at the return). The removal
+//! of proven checks (stave-ir `bounds`) deletes the checks the facts prove and reports those that
+//! always fail; a kept check is a trapping instruction of the fn's IR (`trap`, [`crate::effects`]).
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::{Diagnostic, Span};
@@ -74,11 +76,6 @@ impl Contracts {
     /// The `requires` clauses lowering checks.
     pub fn checked_requires(&self) -> &[ContractClause] {
         if self.check_requires { &self.requires } else { &[] }
-    }
-
-    /// Whether the fn has a check that can fail (its `trap` op): the first such clause's span.
-    pub fn trap_span(&self) -> Option<Span> {
-        self.checked_requires().first().or(self.ensures.first()).map(|c| c.span)
     }
 
     /// Whether span `s` starts inside a clause.

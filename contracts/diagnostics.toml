@@ -708,6 +708,36 @@ labels = [{ at = "primary", text = "return type of a `test fn`" }]
 fix = { description = "remove the return type: a test fails by panicking (`std.debug.assert`)" }
 
 [[diag]]
+code = "E0215"
+severity = "error"
+area = "types"
+rule = "a `requires` conjunct (an operand of a clause's top-level `&&`) that is false whenever it is reached: the clauses before it and the parameters' type ranges prove its negation by a chain of inequalities, so every call fails it; not in an instance of a generic fn, nor at a point shown dead (contradictory facts, a branch on two constants, a call that cannot return): there the check stays; after the type and borrow checks pass; one `fact` label per fact of the chain"
+holes = { fn = "path" }
+message = "`{fn}` can never be called: this `requires` is false whenever the clauses before it hold"
+labels = [{ at = "primary", text = "always false" }, { at = "fact", text = "a fact of the proof" }]
+fix = { description = "correct the clause, or the clauses before it that contradict it" }
+
+[[diag]]
+code = "E0216"
+severity = "warning"
+area = "types"
+rule = "warning: a `requires` conjunct that the clauses before it and the parameters' type ranges imply (a chain of inequalities proves it); its check is removed; not reported in a generic fn (it may hold for some instances only), nor for a conjunct whose own evaluation can trap or calls a fn; one `fact` label per fact of the chain"
+holes = { fn = "path" }
+message = "unnecessary `requires` of `{fn}`: it holds whenever the clauses before it hold"
+labels = [{ at = "primary", text = "always true" }, { at = "fact", text = "a fact of the proof" }]
+fix = { description = "remove the conjunct" }
+
+[[diag]]
+code = "E0217"
+severity = "error"
+area = "types"
+rule = "an `ensures` conjunct that is false whenever a `return` (or the end of a unit body) is reached: what holds there proves its negation by a chain of inequalities; not in an instance of a generic fn, nor at a return shown dead (as E0215); at the return, with the clause as a related span; after the type and borrow checks pass; one `fact` label per fact of the chain"
+holes = { fn = "path" }
+message = "an `ensures` of `{fn}` always fails at this return"
+labels = [{ at = "primary", text = "returns here" }, { at = "clause", text = "false whenever this return is reached" }, { at = "fact", text = "a fact of the proof" }]
+fix = { description = "correct the returned value or the clause" }
+
+[[diag]]
 code = "E0300"
 severity = "error"
 area = "patterns"

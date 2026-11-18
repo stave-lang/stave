@@ -1,36 +1,44 @@
-//! The difference-constraint graph behind the `LenEq` and `Offset` proofs.
+//! The difference-constraint graph behind the `LenEq` and `Offset` proofs and the contract-check
+//! goals.
 //!
-//! Values are unsigned integers, read as mathematical integers. A term is `node + k`: `k` a
-//! constant, `node` the constant zero, an SSA value, or the length of an SSA slice value. Trapping
-//! `add x c` / `sub x c` (constant `c`) are folded into the term of `x`: a defined result is exactly
-//! `x ± c` (overflow traps), and the index's own trap stays in the code, so no wrap reasoning is
-//! needed. `slice.len (slice.make p n)` is the term of `n`. A `cast`, `cast.wrap`, or `cast.sat` of
-//! an unsigned value to an unsigned type at least as wide is the term of its operand: widening
-//! keeps the value under all three. Wrapping arithmetic, other casts, loads, and everything else
-//! are opaque nodes.
+//! Values are ints, each read as the mathematical integer it is under its own type (unsigned
+//! plain, signed two's complement), so a fact between a signed and an unsigned value is an
+//! ordinary inequality; a source is read only in the signedness its op computes in (a compare's
+//! or an `add`'s operands share one int type; bit ops, `sub.sat`, and lengths are unsigned). A
+//! term is `node + k`: `k` a constant, `node` the constant zero, an SSA value, or the length of an
+//! SSA slice value. Trapping `add x c` / `sub x c` (constant `c`) are folded into the term of `x`:
+//! a defined result is exactly `x ± c` (overflow traps), and the check's own trap stays in the
+//! code, so no wrap reasoning is needed. `slice.len (slice.make p n)` is the term of `n`. A
+//! `cast`, `cast.wrap`, or `cast.sat` of an int value to an int type that holds every value of
+//! the source type (same signedness and at least as wide, or unsigned to a wider signed type) is
+//! the term of its operand: such a cast keeps the value under all three. Wrapping arithmetic,
+//! other casts, loads, and everything else are opaque nodes.
 //!
 //! A fact `x <= y + w` is an edge `x → y` of weight `w`, valid in a region of the function:
 //!
 //! - a branch: `cbr c T F` where `T` (or `F`) is the target's only predecessor edge; `c` (or `!c`)
-//!   holds in every block that target dominates. `c` is an unsigned `lt le gt ge eq ne`, or `not`
-//!   of one. A strict comparison with `n -| c` (`sub.sat`, constant `c`) also gives
+//!   holds in every block that target dominates. `c` is an int `lt le gt ge eq ne`, or `not`
+//!   of one. A strict unsigned comparison with `n -| c` (`sub.sat`, constant `c`) also gives
 //!   `x + c < n` (`x < n -| c`) or `x + c >= n` (its negation): `n -| c` is `max(n - c, 0)`.
+//!   A contract check's branch is such a branch: its true side is the only way past it.
 //! - an asserting call: `call @f .. c ..` where every `ret` of `f` is reached only through a branch
 //!   on that parameter being true (`std.debug.assert`); `c` holds after the call.
 //! - a bit op on unsigned values, after it: `v = and x y` gives `v <= x` and `v <= y`;
 //!   `v = rem x y` gives `v <= x` and `v <= y - 1` (`y = 0` traps, so a result means `y >= 1`);
 //!   `v = shr x k` (logical on unsigned) gives `v <= x`. Only when every constant operand read
 //!   is a value of the op's type (a constant divisor: and not 0).
-//! - the type of an unsigned value `v` of `bits` bits, where `v` is defined: `v <= 2^bits - 1`
-//!   for `bits < 64` (a wider bound is no bound on any length), and `0 <= v` for each value node
-//!   another fact leaves (only such a node can be a step between two other facts).
+//! - the type of an int value `v` of `bits` bits, where `v` is defined: unsigned, `v <= 2^bits - 1`
+//!   for `bits < 64` (a wider bound is no bound on any length) and `0 <= v`; signed,
+//!   `v <= 2^(bits-1) - 1` and `-2^(bits-1) <= v`. A lower bound only for each value node another
+//!   fact leaves (only such a node can be a step between two other facts).
 //!
 //! Every fact is about the current values of its operands wherever its region dominates the query
 //! (an SSA value redefined in a later loop iteration passes the region's head again). A query
-//! `i < n` searches for a path `i → .. → n` of total weight `≤ n.k - i.k - 1`, from the index, on
-//! demand, over facts whose region dominates the check, and gives up after [`BOUNDS_STEP_LIMIT`]
-//! edges. Any path found is a chain of true inequalities, so the proof is sound however the search
-//! ends; giving up only keeps a check.
+//! `i < n` searches for a path `i → .. → n` of total weight `≤ n.k - i.k - 1`, from `i`, on
+//! demand, over facts whose region dominates the point (right before a `check.bounds`, or the end
+//! of the block branching on a contract check's condition), and gives up after
+//! [`BOUNDS_STEP_LIMIT`] edges. Any path found is a chain of true inequalities, so the proof is
+//! sound however the search ends; giving up only keeps a check.
 //!
 //! The facts are one table sorted by their start node. Every fact keeps the place it was read
 //! from and its two operands as written, so a path found can be written out as a witness
@@ -50,6 +58,8 @@ use crate::witness::{ASSERT_BLOCKS, Edge, MAX_CONST, NOT_DEPTH, Node, Source};
 
 /// Folding depth of `add`/`sub` chains, and of `slice.len (slice.make ..)` nesting.
 const DEPTH: u32 = 8;
+/// The most nodes a search for contradictory facts starts from.
+const CYCLE_STARTS: usize = 16;
 /// Constants and offsets beyond this are opaque (keeps every weight sum far from `i128` overflow).
 /// Every `u64` constant is below it, so a constant index or length is never opaque.
 const MAX_K: i128 = MAX_CONST;
@@ -141,14 +151,27 @@ pub(super) struct Facts {
 
 impl Cx<'_> {
     fn unsigned(&self, v: Value) -> bool {
-        self.b
-            .value_ty(v)
-            .and_then(|t| self.key(t))
-            .is_some_and(|k| matches!(k, TypeKey::Int { signed: false, .. }))
+        matches!(self.int_ty(v), Some((false, _)))
+    }
+
+    /// `(signed, bits)` of `v`'s type when it is an int.
+    fn int_ty(&self, v: Value) -> Option<(bool, u8)> {
+        match self.b.value_ty(v).and_then(|t| self.key(t)) {
+            Some(TypeKey::Int { signed, bits }) => Some((*signed, bits.width())),
+            _ => None,
+        }
+    }
+
+    /// A cast from `x`'s type to `v`'s keeps every value: the target holds the source's range.
+    fn widens(&self, x: Value, v: Value) -> bool {
+        match (self.int_ty(x), self.int_ty(v)) {
+            (Some((sx, wx)), Some((sv, wv))) => (sx == sv && wx <= wv) || (!sx && sv && wx < wv),
+            _ => false,
+        }
     }
 
     fn small_const(&self, o: Operand) -> Option<i128> {
-        self.b.int_const(o).filter(|c| (0..=MAX_K).contains(c))
+        self.b.int_const(o).filter(|c| (-MAX_K..=MAX_K).contains(c))
     }
 
     /// The width in bits of `v`'s type when it is an unsigned int.
@@ -172,7 +195,7 @@ impl Cx<'_> {
         }
     }
 
-    /// The term of an unsigned integer operand.
+    /// The term of an int operand.
     pub(super) fn term(&self, o: Operand) -> Option<Term> {
         self.fold(o, &mut |_| {})
     }
@@ -180,7 +203,7 @@ impl Cx<'_> {
     /// The node and offset of an operand as written: a constant is `zero + c`, a value itself.
     pub(super) fn written(&self, o: Operand) -> Option<(Node, i128)> {
         match o {
-            Operand::Value(v) if self.unsigned(v) => Some((Node::Val(v), 0)),
+            Operand::Value(v) if self.int_ty(v).is_some() => Some((Node::Val(v), 0)),
             _ => self.small_const(o).map(|c| (Node::Zero, c)),
         }
     }
@@ -197,9 +220,7 @@ impl Cx<'_> {
                     return Some(Term { node: ZERO, k: k.checked_add(c)?, root: None });
                 }
                 let Operand::Value(v) = o else { return None };
-                if !self.unsigned(v) {
-                    return None;
-                }
+                self.int_ty(v)?;
                 let opaque = Term { node: val_node(v), k, root: Some(v) };
                 let Some(d) = self.def(v) else { return Some(opaque) };
                 let args = self.b.args(d);
@@ -211,40 +232,59 @@ impl Cx<'_> {
                             _ => return Some(opaque),
                         };
                         let (to, kx) = self.written(x)?;
-                        sink(Edge { from: Node::Val(v), to, w: kx + c, src: Source::Arith { inst: d } });
+                        sink(Edge {
+                            from: Node::Val(v),
+                            to,
+                            w: kx + c,
+                            src: Source::Arith { inst: d },
+                            mul: 1,
+                        });
                         k = k.checked_add(c)?;
                         o = x;
                     }
                     (Op::Sub, &[x, y]) => {
                         let Some(c) = self.small_const(y) else { return Some(opaque) };
                         let (to, kx) = self.written(x)?;
-                        sink(Edge { from: Node::Val(v), to, w: kx - c, src: Source::Arith { inst: d } });
+                        sink(Edge {
+                            from: Node::Val(v),
+                            to,
+                            w: kx - c,
+                            src: Source::Arith { inst: d },
+                            mul: 1,
+                        });
                         k = k.checked_sub(c)?;
                         o = x;
                     }
                     (
                         Op::Cast(CastKind::Exact | CastKind::Wrap | CastKind::Sat),
                         &[x @ Operand::Value(xv)],
-                    ) if self.width(xv).is_some_and(|wx| self.width(v).is_some_and(|wv| wx <= wv)) => {
+                    ) if self.widens(xv, v) => {
                         sink(Edge {
                             from: Node::Val(v),
                             to: Node::Val(xv),
                             w: 0,
                             src: Source::Cast { inst: d },
+                            mul: 1,
                         });
                         o = x;
                     }
                     (Op::SliceLen, &[s]) => {
                         let Operand::Value(sv) = s else { return None };
                         let len = Node::Len(sv);
-                        sink(Edge { from: Node::Val(v), to: len, w: 0, src: Source::SliceLen { inst: d } });
+                        sink(Edge {
+                            from: Node::Val(v),
+                            to: len,
+                            w: 0,
+                            src: Source::SliceLen { inst: d },
+                            mul: 1,
+                        });
                         // `slice.len (slice.make p n)` is `n`.
                         if let Some(ds) = self.def(sv)
                             && self.b.insts.op[ds as usize] == Op::SliceMake
                             && let Some(&n) = self.b.args(ds).get(1)
                         {
                             let (to, kn) = self.written(n)?;
-                            sink(Edge { from: len, to, w: kn, src: Source::SliceMake { inst: ds } });
+                            sink(Edge { from: len, to, w: kn, src: Source::SliceMake { inst: ds }, mul: 1 });
                             nested += 1;
                             if nested > DEPTH {
                                 return None;
@@ -312,22 +352,33 @@ impl Cx<'_> {
                 self.bit_facts(&mut g, d);
             }
         }
-        // `0 <= v` for the value nodes a fact leaves toward a node other than zero, collected
-        // before the type ranges, which only lead to zero.
+        // The lower end of the type, `lo <= v`, for the value nodes a fact leaves toward a node
+        // other than zero, collected before the upper ends, which only lead to zero.
         let mut leave: Vec<u32> = g.facts.iter().filter(|f| f.to != ZERO).map(|f| f.from).collect();
         leave.sort_unstable();
         leave.dedup();
         for node in leave.into_iter().filter(|&n| n % 2 == 1) {
             let v = Value((node - 1) / 2);
-            if let Some(at) = self.defined_in(v) {
-                self.add_le(&mut g, at, Source::Range { value: v }, (None, Some(Operand::Value(v)), 0), None);
+            if let Some((signed, bits)) = self.int_ty(v)
+                && let Some(at) = self.defined_in(v)
+            {
+                let lo = if signed { -(1i128 << (bits - 1)) } else { 0 };
+                self.add_le(
+                    &mut g,
+                    at,
+                    Source::Range { value: v },
+                    (None, Some(Operand::Value(v)), -lo),
+                    None,
+                );
             }
         }
         for v in (0..self.b.values.len() as u32).map(Value) {
-            if let Some(w) = self.width(v).filter(|&w| w < 64)
-                && let Some(at) = self.defined_in(v)
-            {
-                let top = (1i128 << w) - 1;
+            let top = match self.int_ty(v) {
+                Some((false, w)) if w < 64 => (1i128 << w) - 1,
+                Some((true, w)) => (1i128 << (w - 1)) - 1,
+                _ => continue,
+            };
+            if let Some(at) = self.defined_in(v) {
                 self.add_le(
                     &mut g,
                     at,
@@ -467,7 +518,7 @@ impl Cx<'_> {
     }
 
     /// The bit set of `f`'s parameters that are true whenever `f` returns.
-    fn asserted(&self, f: FuncId) -> u64 {
+    pub(super) fn asserted(&self, f: FuncId) -> u64 {
         if let Some(&m) = self.facts.asserted.borrow().get(&f) {
             return m;
         }
@@ -487,13 +538,26 @@ impl Cx<'_> {
     /// The `LenEq` or `Offset` proof that `idx < n` holds right before instruction `at`. With
     /// `path`, the facts used are appended to it in order (indices for [`Cx::fact_edges`]).
     pub(super) fn prove_lt(&self, at: u32, idx: Term, n: Term, path: Option<&mut Vec<u32>>) -> Option<Proof> {
+        self.prove_at(self.block_of[at as usize], at, idx, n, path)
+    }
+
+    /// [`Cx::prove_lt`] right before instruction `at` of `block` (`u32::MAX`: at the block's end).
+    pub(super) fn prove_at(
+        &self,
+        block: u32,
+        at: u32,
+        idx: Term,
+        n: Term,
+        path: Option<&mut Vec<u32>>,
+    ) -> Option<Proof> {
         let bound = n.k.checked_sub(idx.k)?.checked_sub(1)?;
         let offset = Proof::Offset { base: idx.root.map(|v| v.0), k: idx.k };
-        if idx.node == n.node {
-            return (bound >= 0).then_some(offset);
+        // One node on both sides: holds by the constants alone, or by a walk back to the node
+        // of negative weight (contradictory facts) found below.
+        if idx.node == n.node && bound >= 0 {
+            return Some(offset);
         }
         let g = self.graph();
-        let block = self.block_of[at as usize];
         const START: u32 = u32::MAX;
         // Per node: its best distance so far, whether an equality was used, and the step that
         // reached it. A step is never rewritten, so its parents spell out one walk of exactly
@@ -547,6 +611,50 @@ impl Cx<'_> {
         self.prove_lt(at, idx, Term { k: n.k.checked_add(1)?, ..n }, None)
     }
 
+    /// Facts that contradict each other at the end of `block`: a node and a walk of facts back
+    /// to it of negative total weight (`u <= u - 1`). Only the start nodes of branch and assert
+    /// facts holding there are tried (a contradiction needs a condition), at most
+    /// [`CYCLE_STARTS`] of them, each a bounded query.
+    pub(super) fn contradiction(&self, block: u32) -> Option<(u32, Vec<u32>)> {
+        let g = self.graph();
+        let mut starts: Vec<u32> = Vec::new();
+        for f in &g.facts {
+            if matches!(f.src, Source::Branch { .. } | Source::Assert { .. })
+                && self.holds(f.at, block, u32::MAX)
+                && !starts.contains(&f.from)
+            {
+                starts.push(f.from);
+                if starts.len() == CYCLE_STARTS {
+                    break;
+                }
+            }
+        }
+        starts.into_iter().find_map(|u| {
+            let t = Term { node: u, k: 0, root: None };
+            let mut path = Vec::new();
+            self.prove_at(block, u32::MAX, t, t, Some(&mut path)).map(|_| (u, path))
+        })
+    }
+
+    /// A walk of facts holding at the end of `block` from the node of `from` to node `to`, of any
+    /// weight (empty when they are the same node).
+    pub(super) fn walk(&self, block: u32, from: Term, to: u32) -> Option<Vec<u32>> {
+        let mut path = Vec::new();
+        let far = Term { node: to, k: MAX_K, root: None };
+        self.prove_at(block, u32::MAX, Term { node: from.node, k: 0, root: None }, far, Some(&mut path))?;
+        Some(path)
+    }
+
+    /// The node of term `t`.
+    pub(super) fn node_of(t: Term) -> u32 {
+        t.node
+    }
+
+    /// The term of node `u` itself.
+    pub(super) fn node_term(u: u32) -> Term {
+        Term { node: u, k: 0, root: None }
+    }
+
     /// The folding steps of operand `o`, from the operand as written down to its term's node.
     pub(super) fn down(&self, o: Operand, out: &mut Vec<Edge>) {
         let _ = self.fold(o, &mut |e| out.push(e));
@@ -559,7 +667,7 @@ impl Cx<'_> {
         self.down(o, out);
         out[from..].reverse();
         for e in &mut out[from..] {
-            *e = Edge { from: e.to, to: e.from, w: -e.w, src: e.src };
+            *e = Edge { from: e.to, to: e.from, w: -e.w, ..*e };
         }
     }
 
@@ -571,7 +679,7 @@ impl Cx<'_> {
             self.up(a, out);
         }
         let ((from, _), (to, _)) = (self.side_written(f.a)?, self.side_written(f.b)?);
-        out.push(Edge { from, to, w: f.wop, src: f.src });
+        out.push(Edge { from, to, w: f.wop, src: f.src, mul: 1 });
         if let Some(b) = f.b {
             self.down(b, out);
         }
@@ -589,7 +697,7 @@ impl Cx<'_> {
 
 /// `(cond, pol)` when block `t` (not the entry) is entered only through the `pol` edge of a
 /// `cbr cond`.
-fn edge_cond(b: &Body, preds: &[Vec<(u32, bool)>], t: usize) -> Option<(Operand, bool)> {
+pub(super) fn edge_cond(b: &Body, preds: &[Vec<(u32, bool)>], t: usize) -> Option<(Operand, bool)> {
     let &[(d, pol)] = preds.get(t)?.as_slice() else { return None };
     if t == 0 {
         return None;

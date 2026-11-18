@@ -1,0 +1,39 @@
+//~ CHECK-ONLY
+// A `requires` operand that the clauses before it and the parameters' type ranges imply is
+// unnecessary: warning E0216, and its check is removed. Not in a generic fn (an instance could
+// make it hold), and never for a clause the facts do not decide. A proved `ensures` check is
+// removed without a word.
+fn twice(x: u32) -> u32 requires(x < 10) requires(x < 20) { //~ WARNING E0216
+    return x;
+}
+
+fn split(x: u32, y: u32) -> u32 requires(x < 10 && y > x && y > 0) { //~ WARNING E0216
+    return y;
+}
+
+fn byte(b: u8) -> u8 requires(b <= 255) { //~ WARNING E0216
+    return b;
+}
+
+fn generic<T: Copy>(t: T, x: u32) -> T requires(x < 10) requires(x < 20) {
+    return t;
+}
+
+fn needed(x: u32, y: u32) -> u32 requires(x < 10) requires(y > 2) {
+    return x + y;
+}
+
+fn clamp(x: i32) -> i32 ensures(result >= 0) ensures(result <= 100) {
+    if x < 0 {
+        return 0;
+    }
+    if x > 100 {
+        return 100;
+    }
+    return x;
+}
+
+fn main() {
+    let a = twice(1) + split(1, 2) + byte(3) as u32 + generic(4u32, 5) + needed(1, 3);
+    let b = clamp(7);
+}
