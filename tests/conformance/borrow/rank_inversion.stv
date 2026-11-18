@@ -1,0 +1,39 @@
+//~ CHECK-ONLY
+// Lock ranks: a thread acquires upward only. Taking a lower or an equal rank while a guard may
+// be held is E1405: directly, the same mutex again, and through a chain of calls.
+import std.sync;
+
+fn inverted(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) -> u32 {
+    let gb = b.lock();
+    let ga = a.lock(); //~ ERROR E1405
+    return *ga.get() + *gb.get();
+}
+
+fn relock(a: &sync.Mutex<u32, 1>) -> u32 {
+    let g = a.lock();
+    let again = a.lock(); //~ ERROR E1405
+    return *g.get() + *again.get();
+}
+
+fn read_a(a: &sync.Mutex<u32, 1>) -> u32 {
+    let g = a.lock();
+    return *g.get();
+}
+
+fn through(a: &sync.Mutex<u32, 1>) -> u32 {
+    return read_a(a);
+}
+
+fn chain(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) -> u32 {
+    let gb = b.lock();
+    let x = through(a); //~ ERROR E1405
+    return x + *gb.get();
+}
+
+fn main() {
+    let a = sync.Mutex::<u32, 1>.new(0);
+    let b = sync.Mutex::<u32, 2>.new(0);
+    let x = inverted(&a, &b);
+    let y = relock(&a);
+    let z = chain(&a, &b);
+}

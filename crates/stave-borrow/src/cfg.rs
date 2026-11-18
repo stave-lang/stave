@@ -119,6 +119,9 @@ pub enum Rvalue {
     Call {
         args: Vec<Operand>,
         flows: Flows,
+        /// The token typeck keys the call by (the call graph's call token): a call's `(`, a
+        /// method's name, a user operator, the `for` token of a `next` call.
+        tok: u32,
     },
     /// Operators, casts, comparisons, built-ins with a non-ref result: no origins.
     Pure(Vec<Operand>),
@@ -235,6 +238,9 @@ pub struct Body {
     pub ret: RetCheck,
     /// Bodies of closures and spawn blocks inside this one.
     pub nested: Vec<Body>,
+    /// The join local of each `scope` statement with the statement's span: a read of it is the
+    /// join of the threads spawned there.
+    pub joins: Vec<(LocalId, Span)>,
     /// Why this body cannot be checked (nothing is reported for it).
     pub unsupported: Option<&'static str>,
 }
@@ -343,6 +349,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             bad_moves: Vec::new(),
             ret: RetCheck::None,
             nested: Vec::new(),
+            joins: Vec::new(),
             unsupported: None,
         };
         Builder {
@@ -872,7 +879,9 @@ impl<'a, 'b> Builder<'a, 'b> {
                 Some(o) => {
                     let user = self.tb.target(icx.a(op)).cloned();
                     match user {
-                        Some(Target::Op { .. }) => Rvalue::Call { args: vec![o, r], flows: Flows::None },
+                        Some(Target::Op { .. }) => {
+                            Rvalue::Call { args: vec![o, r], flows: Flows::None, tok: icx.a(op) }
+                        }
                         _ => Rvalue::Pure(vec![o, r]),
                     }
                 }
@@ -1065,7 +1074,8 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let (rv, _) = self.borrow(p.clone(), true, false, span, iter);
                 let Some(rop) = self.operand(rv, iter) else { return };
                 let opt_ty = self.option_of(*item_ty);
-                let res = self.put_temp(Rvalue::Call { args: vec![rop], flows: flows.clone() }, opt_ty, iter);
+                let call = Rvalue::Call { args: vec![rop], flows: flows.clone(), tok: icx.a(f) };
+                let res = self.put_temp(call, opt_ty, iter);
                 let V::P(rp) = res else { return };
                 let some = self.some_index();
                 Some(rp.with(Proj::EnumField(some, 0), *item_ty))
@@ -1646,6 +1656,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         let sspan = self.span(s);
         let j = self.new_local(TypeId::NONE, false, sspan, String::new(), true);
         self.body.locals[j as usize].node = s;
+        self.body.joins.push((j, sspan));
         let init =
             StmtKind::Assign { dest: Place::local(j, TypeId::NONE), rv: Rvalue::Agg(Vec::new()), init: true };
         self.push(init, sspan, u32::MAX);
@@ -1791,7 +1802,9 @@ impl<'a, 'b> Builder<'a, 'b> {
             let v = self.expr(c);
             let Some(r) = self.operand(v, c) else { return V::Never };
             let rv = match self.tb.target(optok) {
-                Some(Target::Op { .. }) => Rvalue::Call { args: vec![acc, r], flows: Flows::None },
+                Some(Target::Op { .. }) => {
+                    Rvalue::Call { args: vec![acc, r], flows: Flows::None, tok: optok }
+                }
                 _ => Rvalue::Pure(vec![acc, r]),
             };
             let V::P(p) = self.put_temp(rv, ty, n) else { return V::Never };
@@ -1892,7 +1905,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         let Some(op) = self.operand(v, c) else { return V::Never };
         let ty = self.nty(n);
         let rv = match self.tb.target(a) {
-            Some(Target::Op { .. }) => Rvalue::Call { args: vec![op], flows: Flows::None },
+            Some(Target::Op { .. }) => Rvalue::Call { args: vec![op], flows: Flows::None, tok: a },
             _ => Rvalue::Pure(vec![op]),
         };
         self.put_temp(rv, ty, n)
@@ -2263,14 +2276,18 @@ impl<'a, 'b> Builder<'a, 'b> {
         let span = icx.range_span(icx.a(n), icx.close(paren));
         let node_ty = if last { self.nty(n) } else { TypeId::NONE };
         match tgt {
-            Some(Target::Fn { decl, args: ga }) => self.direct_call(decl, &ga, None, args, last, n, span),
-            Some(Target::Intrinsic { decl }) => self.direct_call(decl, &[], None, args, last, n, span),
+            Some(Target::Fn { decl, args: ga }) => {
+                self.direct_call(decl, &ga, None, args, last, n, (span, paren))
+            }
+            Some(Target::Intrinsic { decl }) => {
+                self.direct_call(decl, &[], None, args, last, n, (span, paren))
+            }
             Some(Target::Variant { .. }) => {
                 let Some(ops) = self.args(args) else { return V::Never };
                 self.put_temp(Rvalue::Agg(ops), node_ty, n)
             }
             Some(Target::TraitMethod { method, self_ty, args: ga }) => {
-                self.direct_call(method, &ga, Some(self_ty), args, last, n, span)
+                self.direct_call(method, &ga, Some(self_ty), args, last, n, (span, paren))
             }
             Some(Target::FnValue { .. }) => {
                 let fv = self.cur_value(cur);
@@ -2301,13 +2318,13 @@ impl<'a, 'b> Builder<'a, 'b> {
                     }
                     _ => Flows::None,
                 };
-                self.call_result(Rvalue::Call { args: ops, flows }, ret, n, span)
+                self.call_result(Rvalue::Call { args: ops, flows, tok: paren }, ret, n, span)
             }
             Some(Target::SizeOf { .. }) => V::Const,
             _ => {
                 let Some(ops) = self.args(args) else { return V::Never };
                 let flows = self.flows_if(node_ty, || Flows::AllArgs);
-                self.call_result(Rvalue::Call { args: ops, flows }, node_ty, n, span)
+                self.call_result(Rvalue::Call { args: ops, flows, tok: paren }, node_ty, n, span)
             }
         }
     }
@@ -2321,18 +2338,18 @@ impl<'a, 'b> Builder<'a, 'b> {
         args: &[u32],
         last: bool,
         n: u32,
-        span: Span,
+        (span, tok): (Span, u32),
     ) -> V {
         let sigs = self.tys.sigs;
         let node_ty = if last { self.nty(n) } else { TypeId::NONE };
         let Some(ops) = self.args(args) else { return V::Never };
         let Some(sig) = sigs.fn_sig(decl) else {
             let flows = self.flows_if(node_ty, || Flows::AllArgs);
-            return self.call_result(Rvalue::Call { args: ops, flows }, node_ty, n, span);
+            return self.call_result(Rvalue::Call { args: ops, flows, tok }, node_ty, n, span);
         };
         let ret = if last { node_ty } else { self.tys.subst(sig.ret, ga, self_ty) };
         let flows = self.sig_flows(ret, sig);
-        self.call_result(Rvalue::Call { args: ops, flows }, ret, n, span)
+        self.call_result(Rvalue::Call { args: ops, flows, tok }, ret, n, span)
     }
 
     fn call_result(&mut self, rv: Rvalue, ret: TypeId, n: u32, span: Span) -> V {
@@ -2410,7 +2427,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             Some(s) => self.sig_flows(ret, s),
             None => self.flows_if(ret, || Flows::AllArgs),
         };
-        self.call_result(Rvalue::Call { args: ops, flows }, ret, n, span)
+        self.call_result(Rvalue::Call { args: ops, flows, tok: seg }, ret, n, span)
     }
 }
 

@@ -11,12 +11,12 @@ struct Raw {
     p: *const u8,
 }
 
-fn guard_shared(m: &sync.Mutex<cell.Cell<u32>>, n: usize) {
+fn guard_shared(m: &sync.Mutex<cell.Cell<u32>, 1>, n: usize) {
     let g = m.lock();
     thread.par_for(0, n, fn(i: usize) { g.get().set(1); }); //~ ERROR E0802
 }
 
-fn guard_sent(m: &sync.Mutex<u32>) -> u32 {
+fn guard_sent(m: &sync.Mutex<u32, 1>) -> u32 {
     let mut g = m.lock();
     let (a, b) = thread.join(fn() -> u32 { let r = g.get_mut(); *r = 1; return 1; }, fn() -> u32 { return 2; }); //~ ERROR E0802
     return a + b;

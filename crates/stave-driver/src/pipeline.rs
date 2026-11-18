@@ -2,7 +2,7 @@
 //!
 //! read → lex → items → parse → intern → resolve (+ canonical renumbering) → typeck (+ canonical
 //! type renumbering) → borrowck (stave-borrow, per body) → effects (deny clauses; [`crate::effects`],
-//! no `--timings` line) → mono + lower (checked IR) → codegen → link (static ELF with DWARF line
+//! no `--timings` line) → lock ranks ([`stave_sema::ranks`], no `--timings` line) → mono + lower (checked IR) → codegen → link (static ELF with DWARF line
 //! tables).
 //!
 //! The front end through name resolution is [`stave_sema::Program::load`] (packages and manifests,
@@ -138,7 +138,7 @@ impl Stage {
     /// | resolve | E0101–E0107 |
     /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0700–E0718 (the lowering-class gates E0700 E0701 included), E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck), E1404 (deny clause names); the signature's `from` clause E0520 E0521; E0503 case `static` (writes to a `static`) |
     /// | borrowck | E05xx except E0520 E0521 (accesses, loans, returned origins) |
-    /// | lower | E0108 (no `fn main`, builds only, reported before lowering); E1401 E1403 (the effect pass, after borrowck on programs without errors, in checks and builds) |
+    /// | lower | E0108 (no `fn main`, builds only, reported before lowering); E1401 E1403 (the effect pass), E1405 E1406 (the rank pass), after borrowck on programs without errors, in checks and builds |
     /// | (none) | retired codes: E0511 |
     pub fn of_code(code: &str) -> Option<Stage> {
         match code {
@@ -157,8 +157,9 @@ impl Stage {
             "E1002" | "E1003" => return Some(Stage::Read),
             // a build without `main` (stave build/run/test only; reported before lowering)
             "E0108" => return Some(Stage::Lower),
-            // the effect pass runs after borrowck on programs without errors, before lowering
-            "E1401" | "E1403" => return Some(Stage::Lower),
+            // the effect and rank passes run after borrowck on programs without errors, before
+            // lowering
+            "E1401" | "E1403" | "E1405" | "E1406" => return Some(Stage::Lower),
             "E1404" => return Some(Stage::Typeck),
             // Origin table: checked with the signature (stave-sema origins), never from a body.
             "E0520" | "E0521" => return Some(Stage::Typeck),
@@ -538,6 +539,17 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
         }
         prof::part(".effects", t0.elapsed());
         prof::mark("effects");
+    }
+    // ---- lock ranks: every acquisition above the ranks held, every join too.
+    if !has_errors && failure.is_none() {
+        let t0 = Instant::now();
+        let ds = stave_sema::ranks::check(&program, &tc, &bc.locks, &bc.drops);
+        if !ds.is_empty() {
+            diagnostics.extend(ds);
+            diagnostics = stave_diag::canonical_order(diagnostics, &program.source_map);
+            has_errors = true;
+        }
+        prof::part(".ranks", t0.elapsed());
     }
     let mut out = Output {
         program,

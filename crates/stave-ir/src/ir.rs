@@ -121,10 +121,13 @@ pub enum PanicKind {
     UnsupportedCpu,
     /// A wait that can never end, e.g. a `Once` init reached again from its own initializer.
     Deadlock,
+    /// A false `requires` / `ensures` clause. Lowering reports it through
+    /// `runtime.panic.requires_failed` / `ensures_failed` (which print the clause), not this op.
+    Contract,
 }
 
 impl PanicKind {
-    pub const ALL: [PanicKind; 9] = [
+    pub const ALL: [PanicKind; 10] = [
         PanicKind::Bounds,
         PanicKind::Overflow,
         PanicKind::DivByZero,
@@ -134,6 +137,7 @@ impl PanicKind {
         PanicKind::Unwrap,
         PanicKind::UnsupportedCpu,
         PanicKind::Deadlock,
+        PanicKind::Contract,
     ];
 
     /// The report name (`panic: <Kind> at ...`).
@@ -148,6 +152,7 @@ impl PanicKind {
             PanicKind::Unwrap => "Unwrap",
             PanicKind::UnsupportedCpu => "UnsupportedCpu",
             PanicKind::Deadlock => "Deadlock",
+            PanicKind::Contract => "Contract",
         }
     }
 
@@ -163,6 +168,7 @@ impl PanicKind {
             PanicKind::Unwrap => "panic.unwrap",
             PanicKind::UnsupportedCpu => "panic.unsupported_cpu",
             PanicKind::Deadlock => "panic.deadlock",
+            PanicKind::Contract => "panic.contract",
         }
     }
 }
@@ -385,6 +391,7 @@ impl Op {
             Op::Panic(P::Unwrap) => &[P::Unwrap],
             Op::Panic(P::UnsupportedCpu) => &[P::UnsupportedCpu],
             Op::Panic(P::Deadlock) => &[P::Deadlock],
+            Op::Panic(P::Contract) => &[P::Contract],
             Op::Vec(v) => v.trap_kinds(),
             _ => &[],
         }

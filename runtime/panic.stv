@@ -2,7 +2,8 @@
 //
 // Report: one line on fd 2, then exit_group(101):
 //     panic: <Kind> at <file>:<line>:<col> in <fn> (thread <n>)
-// `trap_msg` adds one more line holding the message (std.debug.assert).
+// `trap_msg` adds one more line holding the message (std.debug.assert); a failed contract
+// clause adds its source text the same way.
 //
 // Compiler interface (runtime/README.md has the full contract):
 // - every trapping operation calls `trap(kind, site) -> never`: `kind` one of the KIND_* consts,
@@ -11,6 +12,9 @@
 //   (the `user_site` rule), the compiler calls `set_user_site(site)` (or stores
 //   the word directly); std passes `user_site()` as the site of OutOfMemory, Assert, Unwrap,
 //   and Bounds panics raised for its caller;
+// - a false `requires` clause calls `requires_failed(clause)`, located at the user site, which
+//   user code stores before every call that can reach one; a false `ensures` clause calls
+//   `ensures_failed(site, clause)`, located at the return;
 // - the compiler's C-ABI stub `__stave_signal(sig, info, uctx)` calls `on_signal`.
 //
 // Site table (read-only data, address from `site_table()`; contracts/intrinsics.md is the source
@@ -45,7 +49,8 @@ pub const KIND_STACK_OVERFLOW: u32 = 5;
 pub const KIND_UNWRAP: u32 = 6;
 pub const KIND_UNSUPPORTED_CPU: u32 = 7;
 pub const KIND_DEADLOCK: u32 = 8;
-pub const NKIND: u32 = 9;
+pub const KIND_CONTRACT: u32 = 9;
+pub const NKIND: u32 = 10;
 
 // A site the table does not hold (runtime start-up failures): printed as `<unknown>:0:0`.
 pub const SITE_NONE: u32 = 0xFFFF_FFFF;
@@ -190,6 +195,7 @@ fn put_kind(l: &mut Line, kind: u32) {
     else if kind == KIND_UNWRAP { l.lit("Unwrap"); }
     else if kind == KIND_UNSUPPORTED_CPU { l.lit("UnsupportedCpu"); }
     else if kind == KIND_DEADLOCK { l.lit("Deadlock"); }
+    else if kind == KIND_CONTRACT { l.lit("Contract"); }
     else { l.lit("Unknown"); }
 }
 
@@ -263,6 +269,17 @@ pub fn trap_msg(kind: u32, site: u32, msg: &[u8]) -> never {
     l.byte(10);
     l.flush();
     os.exit_group(EXIT_PANIC);
+}
+
+// A false `requires` clause: kind Contract at the user site (the caller's call), then the
+// clause's source text.
+pub fn requires_failed(clause: &str) -> never {
+    trap_msg(KIND_CONTRACT, user_site(), str_bytes(clause));
+}
+
+// A false `ensures` clause: kind Contract at `site` (the return), then the clause's source text.
+pub fn ensures_failed(site: u32, clause: &str) -> never {
+    trap_msg(KIND_CONTRACT, site, str_bytes(clause));
 }
 
 // An explicit std abort: kind Assert at the user site.

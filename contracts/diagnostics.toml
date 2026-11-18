@@ -586,7 +586,9 @@ fix = { description = "use the value, or discard it explicitly with `let _ = ..;
 code = "E0211"
 severity = "error"
 area = "types"
-rule = "contract operand not allowed: a `requires`/`ensures` expression may use params, fields, `.len()`, literals, arithmetic, comparison, `&&`/`||`/`!`, and calls of safe fns whose args are `&` or Copy; not `unsafe`, `&mut`, a `static`/`static mut`, or a non-bool result (planned)"
+rule = "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy (a fn value only if its type denies `io`, `lock`, `block`); no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op)"
+holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal" }
+choices = { effect = ["lock", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] }
 message = "this expression is not allowed in a contract"
 labels = [{ at = "primary", text = "not allowed in `requires`/`ensures`" }]
 fix = { description = "keep contracts side-effect free: compare params, fields, and `.len()`; move other checks into the body with `std.debug.assert`" }
@@ -596,13 +598,43 @@ message = "a trait impl method cannot have contracts"
 labels = [{ at = "primary", text = "contract on a trait impl method" }]
 fix = { description = "move the check into the method body with `std.debug.assert`, or into an inherent method" }
 
+[diag.cases.impure-call]
+message = "`{fn}` cannot be called in a contract: it has `{effect}`, as it reaches `{at}`, which {op}"
+labels = [{ at = "primary", text = "called in a contract here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "op", text = "`{at}` {op} here" }]
+fix = { description = "call only fns without `io`, `lock`, or `block` in `requires`/`ensures`; move this check into the body" }
+
 [[diag]]
 code = "E0212"
 severity = "error"
 area = "types"
-rule = "a parameter named `result` in a fn with an `ensures` clause: inside `ensures(..)` the name `result` means the returned value (contextual name, not a keyword; planned)"
+rule = "a parameter named `result` in a fn with an `ensures` clause: inside `ensures(..)` the name `result` means the returned value (contextual name, not a keyword)"
 message = "parameter `result` conflicts with the returned value named `result` in `ensures(..)`"
 labels = [{ at = "primary", text = "parameter `result`" }]
+fix = { description = "rename the parameter" }
+
+[[diag]]
+code = "E0213"
+severity = "error"
+area = "types"
+rule = "`old(e)` misuse: `e` is not Copy; case `outside`: `old(..)` in a `requires`; case `entry`: `old(..)` or `result` inside `old(..)`; case `param`: a parameter named `old` in a fn with an `ensures` clause (contextual name inside contract clauses)"
+holes = { type = "type" }
+message = "`old(..)` needs a Copy value, found `{type}`"
+labels = [{ at = "primary", text = "evaluated at entry and kept to the return" }]
+fix = { description = "take `old(..)` of a Copy part, e.g. `old(v.len())`" }
+
+[diag.cases.outside]
+message = "`old(..)` is only allowed in `ensures`"
+labels = [{ at = "primary", text = "`old` in a `requires`" }]
+fix = { description = "use the value itself: a `requires` runs at entry" }
+
+[diag.cases.entry]
+message = "`old(..)` is evaluated at entry: it cannot hold `old(..)` or `result`"
+labels = [{ at = "primary", text = "not known at entry" }]
+fix = { description = "move this part out of `old(..)`" }
+
+[diag.cases.param]
+message = "parameter `old` conflicts with `old(..)` in `ensures(..)`"
+labels = [{ at = "primary", text = "parameter `old`" }]
 fix = { description = "rename the parameter" }
 
 [[diag]]
@@ -728,11 +760,11 @@ fix = { description = "remove `impl Copy for {type}` (a type with a destructor m
 code = "E0417"
 severity = "error"
 area = "kinds"
-rule = "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T>`, or `sync.Once<T>`"
+rule = "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T, R>`, or `sync.Once<T, R>` (R: the lock rank)"
 holes = { type = "type" }
 message = "`static` of type `{type}`, which is not `Sync`"
 labels = [{ at = "primary", text = "`static` type" }]
-fix = { description = "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}>`, or `sync.Once<{type}>`" }
+fix = { description = "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}, R>`, or `sync.Once<{type}, R>` (R: the lock rank)" }
 
 [[diag]]
 code = "E0501"
@@ -773,7 +805,7 @@ fix = { description = "create a `&mut` reference instead of `&` where this refer
 [diag.cases.static]
 message = "cannot assign to or mutably borrow `{place}`: a `static` is immutable"
 labels = [{ at = "primary", text = "mutation of a `static`" }]
-fix = { description = "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T>`) and change it through its `&self` methods" }
+fix = { description = "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T, R>`) and change it through its `&self` methods" }
 
 [[diag]]
 code = "E0504"
@@ -1268,7 +1300,7 @@ rule = "`static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` pac
 holes = { name = "name" }
 message = "`static mut {name}` is only allowed in the `std` and `runtime` packages"
 labels = [{ at = "primary", text = "`static mut` here" }]
-fix = { description = "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>`)" }
+fix = { description = "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T, R>`, `sync.Once<T, R>`)" }
 
 [[diag]]
 code = "E0810"
@@ -1796,6 +1828,31 @@ holes = { name = "name" }
 message = "unknown effect `{name}`"
 labels = [{ at = "primary", text = "not an effect" }]
 fix = { description = "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`" }
+
+[[diag]]
+code = "E1405"
+severity = "error"
+area = "effects"
+rule = "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there; case `drop`: a value whose drop glue acquires such a lock is dropped (scope end, temporary, overwritten old value) while the guard is held"
+holes = { fn = "path", lock = "type", rank = "int", held = "type", held_rank = "int" }
+message = "`{fn}` acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank}): locks are taken in increasing rank order"
+labels = [{ at = "primary", text = "acquires rank {rank} here" }, { at = "held", text = "`{held}` held from here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }]
+fix = { description = "release the guard before this call, give `{lock}` a rank above {held_rank}, or take two mutexes of one rank together with `sync.lock_pair`" }
+
+[diag.cases.drop]
+message = "`{fn}` drops a value whose drop acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})"
+labels = [{ at = "primary", text = "dropped here" }, { at = "held", text = "`{held}` held from here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }]
+fix = { description = "release the guard before the value is dropped (declare the value before the guard, or end the guard's block first), or give `{lock}` a rank above {held_rank}" }
+
+[[diag]]
+code = "E1406"
+severity = "error"
+area = "effects"
+rule = "a guard held across a join whose children acquire a lock at or below its rank: at a `scope` end, `thread.join`, or `par_for` / `par_for_mut` call, the ranks held must be below every rank the joined threads may acquire; names the held and the acquired type and the chain"
+holes = { fn = "path", lock = "type", rank = "int", held = "type", held_rank = "int" }
+message = "`{fn}` waits for threads that acquire `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})"
+labels = [{ at = "primary", text = "threads joined here" }, { at = "held", text = "`{held}` held from here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }]
+fix = { description = "release the guard before the join, or give `{lock}` a rank above {held_rank}" }
 
 [[diag]]
 code = "E1407"

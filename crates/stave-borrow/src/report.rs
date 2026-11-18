@@ -248,6 +248,7 @@ mod tests {
             bad_moves: Vec::new(),
             ret: RetCheck::None,
             nested: Vec::new(),
+            joins: Vec::new(),
             unsupported: None,
         }
     }

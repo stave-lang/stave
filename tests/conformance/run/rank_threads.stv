@@ -1,0 +1,43 @@
+//~ STDOUT rank_threads.stdout
+// Ranked locks under threads: every worker takes `TOTAL` (rank 1), then `COUNT` (rank 2) under
+// it, then the pair `X`, `Y` (rank 3) through `lock_pair`, half of them naming the pair in the
+// other order; `lock_pair` locks by address, so nothing deadlocks and every count adds up.
+import std.io;
+import std.sync;
+import std.thread;
+
+static TOTAL: sync.Mutex<u64, 1> = sync.Mutex::<u64, 1>.new(0);
+static COUNT: sync.Mutex<u64, 2> = sync.Mutex::<u64, 2>.new(0);
+static X: sync.Mutex<u64, 3> = sync.Mutex::<u64, 3>.new(0);
+static Y: sync.Mutex<u64, 3> = sync.Mutex::<u64, 3>.new(0);
+
+fn add_pair(a: &sync.Mutex<u64, 3>, b: &sync.Mutex<u64, 3>, k: u64) {
+    let (ga, gb) = sync.lock_pair(a, b);
+    let mut x = ga;
+    let mut y = gb;
+    let xv = x.get_mut();
+    *xv = *xv + k;
+    let yv = y.get_mut();
+    *yv = *yv + k;
+}
+
+fn main() -> i32 {
+    thread.par_for(0, 2000, fn(i: usize) {
+        let n = TOTAL.with_lock(fn(t: &mut u64) -> u64 {
+            *t = *t + (i as u64);
+            let c = COUNT.with_lock(fn(k: &mut u64) -> u64 { *k = *k + 1; return *k; });
+            if i % 2 == 0 {
+                add_pair(&X, &Y, 1);
+            } else {
+                add_pair(&Y, &X, 1);
+            }
+            return c;
+        });
+    });
+    let total = TOTAL.with_lock(fn(t: &mut u64) -> u64 { return *t; });
+    let count = COUNT.with_lock(fn(c: &mut u64) -> u64 { return *c; });
+    let x = X.with_lock(fn(v: &mut u64) -> u64 { return *v; });
+    let y = Y.with_lock(fn(v: &mut u64) -> u64 { return *v; });
+    io.print(f"{total} {count} {x} {y}\n");
+    return 0;
+}

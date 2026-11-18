@@ -1,0 +1,10 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Deadlock"
+// `lock_pair` given one mutex twice could never take the second lock: it traps `Deadlock`.
+import std.sync;
+
+fn main() -> i32 {
+    let m = sync.Mutex::<u32, 1>.new(0);
+    let (a, b) = sync.lock_pair(&m, &m);
+    return 0;
+}

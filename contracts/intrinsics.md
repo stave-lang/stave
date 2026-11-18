@@ -205,7 +205,8 @@ list):
   `runtime.thread.start(f: fn()) -> usize` (every fn value it can be given gets a stack-table
   row; it calls `f` itself where no thread can be created),
   `runtime.panic.trap`, `runtime.panic.trap_msg`, `runtime.panic.on_signal`,
-  `runtime.panic.set_user_site`, `runtime.cpu.WORD` (a `u64` static; dispatch bodies load it),
+  `runtime.panic.set_user_site`, `runtime.panic.requires_failed(clause: &str)` and
+  `runtime.panic.ensures_failed(site: u32, clause: &str)` (a false contract clause), `runtime.cpu.WORD` (a `u64` static; dispatch bodies load it),
   `runtime.cpu.features` (a request of it requests `init`), `runtime.cpu.init` (`cpu_init`),
   `runtime.cpu.trace` (dispatch bodies, trace bit), and the allocator
   `runtime.alloc.{try_alloc, try_realloc, free}` (`try_alloc(size, alignment) -> *mut u8`,
@@ -220,7 +221,12 @@ list):
 - constructors a const-expr may call: `new` of `std.cell.UnsafeCell`, `std.atomic.U32`, `U64`,
   `Usize`, `Bool`, `std.sync.Mutex`, and `std.sync.Once`. The call is evaluated as the struct
   literal the constructor returns, with its parameters bound to the (const) arguments, so each
-  body is exactly `return <struct literal>;` over const-exprs and the parameters;
+  body is exactly `return <struct literal>;` over const-exprs and the parameters (`Mutex<T, R>`
+  and `Once<T, R>` take their rank `R` from the expected type, as any type argument);
+- the ranked locks of `std.sync`: `Mutex<T, R>`, `Once<T, R>`, and `MutexGuard<T, R>` (a held lock
+  of rank `R`, the ADT's second argument), and the acquisitions of rank `R`, each fn's one const
+  generic param: `Mutex.lock`, `Once.get_or_init` (which also runs its `f` holding `R`), and
+  `lock_pair`. The rank check (E1405, E1406) knows only these; `try_lock` acquires nothing;
 - `std.thread.join`, `std.thread.par_for`, `std.thread.par_for_mut`, whose fn-value arguments get
   the thread capture checks (E0802, E0806);
 - language items of std: the prelude module `std.core` and its

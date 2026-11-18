@@ -14,7 +14,7 @@ unsafe("test fixture: the cell is never written") impl Sync for Shared {}
 
 static A: Slot = Slot.{ c: cell.UnsafeCell::<u32>.new(0) }; //~ ERROR E0417
 static B: Shared = Shared.{ c: cell.UnsafeCell::<u32>.new(0) };
-static M: sync.Mutex<cell.UnsafeCell<u32>> = sync.Mutex::<cell.UnsafeCell<u32>>.new(cell.UnsafeCell::<u32>.new(1));
+static M: sync.Mutex<cell.UnsafeCell<u32>, 1> = sync.Mutex::<cell.UnsafeCell<u32>, 1>.new(cell.UnsafeCell::<u32>.new(1));
 static N: (u32, atomic.U32) = (1, atomic.U32.new(2));
 
 // `Cell.new` is not a const-expr either (E0904).

@@ -57,10 +57,12 @@ below; this section restates what the runtime expects.
 ```
 runtime.panic.trap(kind: u32, site: u32) -> never
 runtime.panic.trap_msg(kind: u32, site: u32, msg: &[u8]) -> never  // + one line `msg` (std.debug.assert)
+runtime.panic.requires_failed(clause: &str) -> never           // Contract at the user site, + the clause
+runtime.panic.ensures_failed(site: u32, clause: &str) -> never  // Contract at the return, + the clause
 ```
 
 `kind`: `KIND_BOUNDS 0, KIND_OVERFLOW 1, KIND_DIV_BY_ZERO 2, KIND_ASSERT 3, KIND_OUT_OF_MEMORY 4,
-KIND_STACK_OVERFLOW 5, KIND_UNWRAP 6, KIND_UNSUPPORTED_CPU 7, KIND_DEADLOCK 8` (panic kind names; shift amount >= width
+KIND_STACK_OVERFLOW 5, KIND_UNWRAP 6, KIND_UNSUPPORTED_CPU 7, KIND_DEADLOCK 8, KIND_CONTRACT 9` (panic kind names; shift amount >= width
 is `Overflow`; `UnsupportedCpu` only from `runtime.cpu.init`, at `SITE_NONE`).
 `site`: index into the compiler-emitted **site table**, `SITE_NONE = 0xFFFF_FFFF` for unknown.
 Output: `panic: <Kind> at <file>:<line>:<col> in <fn> (thread <n>)` on fd 2, then `exit_group(101)`.
@@ -70,7 +72,9 @@ A panic during a panic exits 101 at once.
 std fn that may allocate (OutOfMemory) or panics for its caller (`std.debug.assert`,
 `Option/Result.unwrap`, `Vec.get_ref/get_mut` Bounds), store the call's site id with
 `runtime.panic.set_user_site(site: u32)` (or the same store inline: the `user_site` field of
-`runtime.state.STATE`). std reports `runtime.panic.user_site()`.
+`runtime.state.STATE`). std reports `runtime.panic.user_site()`. In a program where some fn checks
+a `requires` clause, user code also stores the site before a direct call of such a fn or of a
+`dispatch fn`, and before every call through a fn value: `requires_failed` reports there.
 
 **Signals.** The compiler emits a C-ABI stub `__stave_signal(sig: int, info: *siginfo, uctx: *void)`
 that calls `runtime.panic.on_signal(sig: usize, info: usize, uctx: usize) -> never`; its address is

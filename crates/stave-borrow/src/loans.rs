@@ -294,7 +294,7 @@ impl<'b> Flow<'b> {
                 }
                 s
             }
-            Rvalue::Call { args, flows } => match flows {
+            Rvalue::Call { args, flows, .. } => match flows {
                 Flows::None => self.empty(),
                 Flows::AllArgs => {
                     let mut s = self.empty();

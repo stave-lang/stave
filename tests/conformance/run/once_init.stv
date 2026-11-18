@@ -8,7 +8,7 @@ import std.sync;
 struct Table { pub id: u64, pub cells: [u32; 4] }
 
 static RUNS: atomic.U32 = atomic.U32.new(0);
-static TABLE: sync.Once<Table> = sync.Once::<Table>.new();
+static TABLE: sync.Once<Table, 1> = sync.Once::<Table, 1>.new();
 
 fn build() -> Table {
     let n = RUNS.fetch_add(1);
@@ -30,7 +30,7 @@ fn main() -> i32 {
     let runs = RUNS.load();
     io.print(f"{before} {a} {id1} {id2} {runs}\n");
 
-    let local = sync.Once::<u32>.new();
+    let local = sync.Once::<u32, 1>.new();
     let x = *local.get_or_init(fn() -> u32 { return 7; });
     let y = *local.get_or_init(fn() -> u32 { return 8; });
     io.print(f"{x} {y}\n");

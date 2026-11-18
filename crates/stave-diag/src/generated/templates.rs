@@ -1364,10 +1364,15 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0211",
         severity: Severity::Error,
         area: "types",
-        rule: "contract operand not allowed: a `requires`/`ensures` expression may use params, fields, `.len()`, literals, arithmetic, comparison, `&&`/`||`/`!`, and calls of safe fns whose args are `&` or Copy; not `unsafe`, `&mut`, a `static`/`static mut`, or a non-bool result (planned)",
+        rule: "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy (a fn value only if its type denies `io`, `lock`, `block`); no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op)",
         retired: false,
         located: true,
-        holes: &[],
+        holes: &[
+            Hole { name: "at", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["lock", "io", "block"] },
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+        ],
         shapes: &[
             Shape {
                 case: "",
@@ -1377,6 +1382,21 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "keep contracts side-effect free: compare params, fields, and `.len()`; move other checks into the body with `std.debug.assert`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "impure-call",
+                message: "`{fn}` cannot be called in a contract: it has `{effect}`, as it reaches `{at}`, which {op}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "called in a contract here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                    LabelTemplate { at: "op", text: "`{at}` {op} here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "call only fns without `io`, `lock`, or `block` in `requires`/`ensures`; move this check into the body",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1399,7 +1419,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0212",
         severity: Severity::Error,
         area: "types",
-        rule: "a parameter named `result` in a fn with an `ensures` clause: inside `ensures(..)` the name `result` means the returned value (contextual name, not a keyword; planned)",
+        rule: "a parameter named `result` in a fn with an `ensures` clause: inside `ensures(..)` the name `result` means the returned value (contextual name, not a keyword)",
         retired: false,
         located: true,
         holes: &[],
@@ -1409,6 +1429,67 @@ pub(super) static ENTRIES: &[Entry] = &[
                 message: "parameter `result` conflicts with the returned value named `result` in `ensures(..)`",
                 labels: &[
                     LabelTemplate { at: "primary", text: "parameter `result`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "rename the parameter",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0213",
+        severity: Severity::Error,
+        area: "types",
+        rule: "`old(e)` misuse: `e` is not Copy; case `outside`: `old(..)` in a `requires`; case `entry`: `old(..)` or `result` inside `old(..)`; case `param`: a parameter named `old` in a fn with an `ensures` clause (contextual name inside contract clauses)",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`old(..)` needs a Copy value, found `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "evaluated at entry and kept to the return" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take `old(..)` of a Copy part, e.g. `old(v.len())`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "entry",
+                message: "`old(..)` is evaluated at entry: it cannot hold `old(..)` or `result`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not known at entry" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "move this part out of `old(..)`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "outside",
+                message: "`old(..)` is only allowed in `ensures`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`old` in a `requires`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use the value itself: a `requires` runs at entry",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "param",
+                message: "parameter `old` conflicts with `old(..)` in `ensures(..)`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "parameter `old`" },
                 ],
                 fix: Some(FixTemplate {
                     description: "rename the parameter",
@@ -1733,7 +1814,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0417",
         severity: Severity::Error,
         area: "kinds",
-        rule: "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T>`, or `sync.Once<T>`",
+        rule: "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T, R>`, or `sync.Once<T, R>` (R: the lock rank)",
         retired: false,
         located: true,
         holes: &[
@@ -1747,7 +1828,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "`static` type" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}>`, or `sync.Once<{type}>`",
+                    description: "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}, R>`, or `sync.Once<{type}, R>` (R: the lock rank)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1854,7 +1935,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "mutation of a `static`" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T>`) and change it through its `&self` methods",
+                    description: "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T, R>`) and change it through its `&self` methods",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3116,7 +3197,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "`static mut` here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>`)",
+                    description: "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T, R>`, `sync.Once<T, R>`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4473,6 +4554,85 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1405",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there; case `drop`: a value whose drop glue acquires such a lock is dropped (scope end, temporary, overwritten old value) while the guard is held",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "held", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "held_rank", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "lock", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "rank", kind: HoleKind::Int, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{fn}` acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank}): locks are taken in increasing rank order",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "acquires rank {rank} here" },
+                    LabelTemplate { at: "held", text: "`{held}` held from here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "release the guard before this call, give `{lock}` a rank above {held_rank}, or take two mutexes of one rank together with `sync.lock_pair`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "drop",
+                message: "`{fn}` drops a value whose drop acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "dropped here" },
+                    LabelTemplate { at: "held", text: "`{held}` held from here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "release the guard before the value is dropped (declare the value before the guard, or end the guard's block first), or give `{lock}` a rank above {held_rank}",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1406",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "a guard held across a join whose children acquire a lock at or below its rank: at a `scope` end, `thread.join`, or `par_for` / `par_for_mut` call, the ranks held must be below every rank the joined threads may acquire; names the held and the acquired type and the chain",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "held", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "held_rank", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "lock", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "rank", kind: HoleKind::Int, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{fn}` waits for threads that acquire `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "threads joined here" },
+                    LabelTemplate { at: "held", text: "`{held}` held from here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "release the guard before the join, or give `{lock}` a rank above {held_rank}",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

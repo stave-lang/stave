@@ -140,8 +140,8 @@ extern \"C\" {
 }
 fn push(v: &mut vec.Vec<u32>) { v.push(1u32); }
 fn print() { io.print(\"x\\n\"); }
-fn locked(m: &sync.Mutex<u32>) -> u32 { let g = m.lock(); return *g.get(); }
-fn once(o: &sync.Once<u32>) -> u32 { return *o.get_or_init(fn() -> u32 { return 1u32; }); }
+fn locked(m: &sync.Mutex<u32, 1>) -> u32 { let g = m.lock(); return *g.get(); }
+fn once(o: &sync.Once<u32, 1>) -> u32 { return *o.get_or_init(fn() -> u32 { return 1u32; }); }
 fn par() -> u32 {
     let (a, b) = thread.join(fn() -> u32 { return 1u32; }, fn() -> u32 { return 2u32; });
     return a +% b;
@@ -318,7 +318,7 @@ fn implicit_drops_count() {
 import std.sync;
 fn sink(v: vec.Vec<u32>) {}
 fn sink_denied(v: vec.Vec<u32>) without(alloc) {}
-fn guard(m: &sync.Mutex<u32>) -> u32 { let g = m.lock(); return *g.get(); }
+fn guard(m: &sync.Mutex<u32, 1>) -> u32 { let g = m.lock(); return *g.get(); }
 fn main() {}
 ",
     );

@@ -1,0 +1,35 @@
+//~ CHECK-ONLY
+// `Once` ranks: waiting for the value counts as acquiring the Once's rank, and the init runs
+// holding it. An init that takes a lower rank (reported at the `get_or_init` that runs it) and a
+// `get_or_init` under a guard of a higher rank are E1405; under a lower one it is fine.
+import std.sync;
+
+static LOW: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(7);
+static CFG: sync.Once<u32, 3> = sync.Once::<u32, 3>.new();
+
+fn read_low() -> u32 {
+    return LOW.with_lock(fn(v: &mut u32) -> u32 { return *v; });
+}
+
+fn under_low(low: &sync.Mutex<u32, 1>) -> u32 {
+    let g = low.lock();
+    let v = *CFG.get_or_init(fn() -> u32 { return 1u32; });
+    return v + *g.get();
+}
+
+fn init_takes_low() -> u32 {
+    return *CFG.get_or_init(read_low); //~ ERROR E1405
+}
+
+fn under_high(high: &sync.Mutex<u32, 5>) -> u32 {
+    let g = high.lock();
+    return *CFG.get_or_init(fn() -> u32 { return 2u32; }) + *g.get(); //~ ERROR E1405
+}
+
+fn main() {
+    let low = sync.Mutex::<u32, 1>.new(0);
+    let high = sync.Mutex::<u32, 5>.new(0);
+    let a = under_low(&low);
+    let b = init_takes_low();
+    let c = under_high(&high);
+}

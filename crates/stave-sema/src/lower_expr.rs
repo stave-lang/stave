@@ -1299,7 +1299,10 @@ impl<'a> FnCx<'a> {
         };
         self.drop_temps_keep();
         self.drop_scopes(0);
-        self.f.b.ret(Some(r));
+        self.ensures_checks(Some(r), tok);
+        if self.open() {
+            self.f.b.ret(Some(r));
+        }
         // continue
         self.f.env = snap;
         self.f.b.switch_to(cont);
@@ -1434,17 +1437,22 @@ impl<'a> FnCx<'a> {
                 };
                 let Some(vs) = self.args(args, &params) else { return E::Never };
                 let rt = self.ret_of(ret);
+                // the callee may check a `requires`, reported at the user site
+                if self.user && self.g.any_requires {
+                    self.user_site(ctok);
+                }
                 let s = self.site(ctok);
                 self.f.b.set_site(s);
-                self.f.last_site = None;
                 let r = self.f.b.call_ind(fv, rt.map(FnCx::ir), &vs);
                 self.f.b.set_site(stave_ir::Site::NONE);
+                self.f.last_site = None;
                 self.call_result(r, ret)
             }
             Some(Target::FenceStream) => {
                 self.f.b.inst(Op::FenceStream, None, &[]);
                 E::Unit
             }
+            Some(Target::Old) => self.old_value(paren),
             Some(Target::SizeOf { ty, align }) => {
                 let t = self.sub(ty);
                 let Some((s, a)) = self.layout(t) else { return self.fail_at(Some(ctok), "layout") };
