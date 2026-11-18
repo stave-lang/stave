@@ -1,0 +1,76 @@
+//~ CHECK-ONLY
+// E1402: a call cycle with a fn not declared `rec fn`, once per cycle, at the call that leaves
+// the cycle's unmarked fn with the smallest path. Self-calls, mutual calls, a cycle with one fn
+// marked, methods, generic fns (every instance repeats the cycle at the same call: one error), a
+// cycle through a fn-value param, and a cycle through a `dispatch` fn's arms.
+
+fn alone(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return alone(n - 1); //~ ERROR E1402
+}
+
+fn ping(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return pong(n - 1); //~ ERROR E1402
+}
+
+fn pong(n: u32) -> u32 {
+    return ping(n);
+}
+
+rec fn even(n: u32) -> bool {
+    if n == 0 { return true; }
+    return odd(n - 1);
+}
+
+fn odd(n: u32) -> bool {
+    if n == 0 { return false; }
+    return even(n - 1); //~ ERROR E1402
+}
+
+struct T { v: u32 }
+
+impl T {
+    fn down(&self, n: u32) -> u32 {
+        if n == 0 { return self.v; }
+        return self.down(n - 1); //~ ERROR E1402
+    }
+}
+
+fn deep<X>(x: X, n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return deep(x, n - 1); //~ ERROR E1402
+}
+
+fn walk(f: fn(u32) -> u32, n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return f(n - 1);
+}
+
+fn step(n: u32) -> u32 {
+    return walk(step, n); //~ ERROR E1402
+}
+
+fn sum_wide(n: u32) -> u32 needs(avx2) {
+    if n == 0 { return 0; }
+    return total(n - 1);
+}
+
+fn sum_base(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return total(n - 1); //~ ERROR E1402
+}
+
+dispatch fn total(n: u32) -> u32 { avx2 => sum_wide, _ => sum_base, }
+
+fn main() {
+    let a = alone(3);
+    let b = ping(3);
+    let c = even(3);
+    let t = T.{ v: 1 };
+    let d = t.down(2);
+    let e = deep(7u8, 2);
+    let f = deep(true, 2);
+    let g = step(3);
+    let h = total(3);
+}
