@@ -1,7 +1,9 @@
 //~ CHECK-ONLY
 // `soa.Soa<T>`: T must be a struct (E0910, where the type is written and at calls) and Flat
 // (E1407, the bound of its methods); a column is a field of T (E0208 case `column`, also for a
-// generic T, which has no fields); the row built-ins are visible in `std.soa` only (E0101).
+// generic T, which has no fields); the row built-ins are visible in `std.soa` only (E0101);
+// `get` copies a row, so it exists only for a Copy row type (E0208 otherwise, as for any method
+// of an impl whose bounds fail).
 import std.soa;
 import std.vec;
 
@@ -34,5 +36,6 @@ fn main() -> i32 {
     let len = ps.len; //~ ERROR E0208
     let n = generic(&ps);
     let r = soa_row_size::<P>(); //~ ERROR E0101
+    let p = ps.get(0); //~ ERROR E0208
     return 0;
 }

@@ -1,0 +1,15 @@
+pub struct Soa {
+    pub len: usize,
+}
+
+struct P {
+    pub v: u32,
+}
+
+pub fn row() -> usize {
+    return soa_row_size::<P>(); //~ ERROR E0101
+}
+
+pub fn len(s: &Soa) -> usize {
+    return s.len;
+}

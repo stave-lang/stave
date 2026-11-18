@@ -1,14 +1,31 @@
 //~ CHECK-ONLY
 // A column is a `[F]` place, never a value (E0504, like `xs[a..b]`), and is written only through
-// a mutable path to the Soa (E0503).
+// a mutable path to the Soa (E0503). An element of a column moves out only if F is Copy: a column
+// of a non-Copy struct is E0504, a Copy field's column reads fine.
 import std.soa;
 
 struct P {
     pub x: f32,
 }
 
+struct At {
+    pub a: u32,
+}
+
+struct Tok {
+    pub id: u32,
+    pub inner: At,
+}
+
 fn write(ps: &soa.Soa<P>) {
     ps.x[0] = 1.0; //~ ERROR E0503
+}
+
+fn elems(ts: &soa.Soa<Tok>) -> u32 {
+    let a = ts.inner[0]; //~ ERROR E0504
+    let id = ts.id[0];
+    let x = ts.inner[0].a;
+    return id + x;
 }
 
 fn main() -> i32 {

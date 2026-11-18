@@ -11,22 +11,32 @@ struct V2 {
     pub b: u32,
 }
 
+impl Copy for V2 {}
+
 struct Body {
     pub pos: V2,
     pub mass: u64,
 }
 
+impl Copy for Body {}
+
 struct Empty {}
+
+impl Copy for Empty {}
 
 struct One {
     pub v: u64,
 }
+
+impl Copy for One {}
 
 struct Tagged {
     pub v: u32,
     pub none: Empty,
     pub w: u16,
 }
+
+impl Copy for Tagged {}
 
 struct Holder {
     pub ps: soa.Soa<One>,
@@ -46,6 +56,8 @@ struct Wide {
     pub f: i8,
     pub g: bool,
 }
+
+impl Copy for Wide {}
 
 fn main() -> i32 {
     let mut bs = soa.Soa::<Body>.new();

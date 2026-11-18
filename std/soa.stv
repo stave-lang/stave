@@ -131,14 +131,6 @@ impl<T: core.Flat> Soa<T> {
         return Option.Some(unsafe("row len - 1 was initialized; len no longer covers it") soa_read::<T>(self.ptr as *const u8, self.cap, self.len));
     }
 
-    // Row i by value; panics `Bounds` if i >= len.
-    pub fn get(&self, i: usize) -> T {
-        if i >= self.len {
-            panic.trap(panic.KIND_BOUNDS, panic.user_site());
-        }
-        return unsafe("i < len: an initialized row; T is Flat, so a bitwise copy owns nothing") soa_read::<T>(self.ptr as *const u8, self.cap, i);
-    }
-
     // Overwrites row i; panics `Bounds` if i >= len.
     pub fn set(&mut self, i: usize, x: T) {
         if i >= self.len {
@@ -150,6 +142,17 @@ impl<T: core.Flat> Soa<T> {
     // Removes every row; keeps the buffer.
     pub fn clear(&mut self) {
         self.len = 0;
+    }
+}
+
+impl<T: core.Flat + core.Copy> Soa<T> {
+    // Row i by value; panics `Bounds` if i >= len. Copy rows only: a non-Copy row leaves only by
+    // `pop`, as an element of `Vec` moves out only by `pop`.
+    pub fn get(&self, i: usize) -> T {
+        if i >= self.len {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        return unsafe("i < len: an initialized row; T is Copy, so the copy leaves the row valid") soa_read::<T>(self.ptr as *const u8, self.cap, i);
     }
 }
 

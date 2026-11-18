@@ -12,6 +12,8 @@ struct P {
     pub id: u32,
 }
 
+impl Copy for P {}
+
 fn sum_col(xs: &[f32]) -> f32 {
     let mut s: f32 = 0.0;
     for i in 0..xs.len() { s = s + xs[i]; }

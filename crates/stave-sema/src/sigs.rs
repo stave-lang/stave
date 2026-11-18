@@ -642,6 +642,12 @@ fn view_args<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32, d: DeclId, args:
     }
 }
 
+/// Whether `m` is module `soa` of the built-in `std` package.
+pub(crate) fn is_builtin_soa(p: &Program, m: &crate::modules::Module) -> bool {
+    m.path_text == "std.soa"
+        && p.packages.get(m.package.idx()).is_some_and(|k| k.kind == crate::PackageKind::Builtin)
+}
+
 /// E0910: a written `std.soa.Soa<T>` whose row type T is neither a struct nor a generic param.
 fn soa_row<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32, d: DeclId, args: &[GArg]) {
     let Some(GArg::Type(t)) = args.first().copied() else { return };
@@ -649,7 +655,7 @@ fn soa_row<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32, d: DeclId, args: &
         let prog = h.prog();
         let is_soa = prog.decl(d).is_some_and(|x| {
             prog.strings.get(x.name) == "Soa"
-                && prog.module(x.module).is_some_and(|m| m.path_text == "std.soa")
+                && prog.module(x.module).is_some_and(|m| is_builtin_soa(prog, m))
         });
         if !is_soa || h.has_error(t) {
             return;
@@ -1067,7 +1073,11 @@ impl<'p> SigBuilder<'p> {
         self.lang.write = find(&core, "Write");
         self.lang.string = find(&["std", "string"], "String");
         self.lang.unsafe_cell = find(&["std", "cell"], "UnsafeCell");
-        self.lang.soa = find(&["std", "soa"], "Soa");
+        // a user module may also be spelled `std.soa`: only the built-in package's counts
+        self.lang.soa = match (p.modules.iter().find(|m| is_builtin_soa(p, m)), p.strings.lookup("Soa")) {
+            (Some(m), Some(s)) => p.module_item(m.id, s).unwrap_or(DeclId::NONE),
+            _ => DeclId::NONE,
+        };
         for (t, _) in OP_TRAITS {
             let d = find(&core, t);
             if d.is_some() {

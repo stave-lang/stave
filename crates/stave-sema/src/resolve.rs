@@ -220,6 +220,9 @@ pub(crate) struct Tables<'a> {
     pub builtins: &'a FxHashMap<Sym, Builtin>,
     /// Per module: it sees the prelude (its package is `std` or depends on it).
     pub prelude_ok: &'a [bool],
+    /// Module `soa` of the built-in `std` package: the only one that sees the row built-ins (a
+    /// user module may also be spelled `std.soa`).
+    pub soa_module: Option<ModuleId>,
     /// (parent, name) → member: variants of enums, fields, trait methods.
     pub members: &'a FxHashMap<(DeclId, Sym), DeclId>,
     pub methods: &'a MethodTable,
@@ -246,7 +249,7 @@ impl Tables<'_> {
             return Some(Res::Prim(p));
         }
         let b = *self.builtins.get(&sym)?;
-        if b.soa_only() && self.modules.get(module.idx()).is_none_or(|m| m.path_text != "std.soa") {
+        if b.soa_only() && self.soa_module != Some(module) {
             return None;
         }
         Some(Res::Builtin(b))

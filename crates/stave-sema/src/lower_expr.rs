@@ -1161,6 +1161,8 @@ impl<'a> FnCx<'a> {
         if is_struct {
             (self.adt_fields(row).and_then(|v| v.into_iter().next()).unwrap_or_default(), true)
         } else {
+            // a non-struct row reaches here only through a generic instance (E0910 checks written
+            // and std.soa-call row types, not instances): the whole value is one column
             (vec![row], false)
         }
     }
