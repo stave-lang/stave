@@ -516,6 +516,7 @@ fn contract_diagnostics_name_the_shared_state() {
          fn each(f: fn(u32) -> bool, x: u32) requires(f(x)) { }\n\
          fn any<T>(xs: &[T]) requires(xs.len() > 0) { }\n\
          fn g(x: u32) requires(via(x)) { }\n\
+         fn get(v: &mut [u32]) -> &mut u32 from v ensures(v.len() > 0) { return &mut v[0]; }\n\
          fn main() { }\n";
     let (p, tc) = mem(src);
     let show = |ds: &[stave_diag::Diagnostic]| -> Vec<String> {
@@ -530,6 +531,7 @@ fn contract_diagnostics_name_the_shared_state() {
         "5: E0211 `c` cannot be used in a contract: `&U64` is not `Frozen`: component `*.v` has type `UnsafeCell<u64>`, `UnsafeCell` (interior mutability)",
         "6: E0211 `f` cannot be used in a contract: `fn(u32) -> bool` is not `Frozen`: it is a fn value (its captures are not in its type)",
         "7: E0211 `xs` cannot be used in a contract: `&[T]` is not `Frozen`: component `*[_]` has type `T`, a generic parameter without a `Frozen` bound",
+        "9: E0211 `ensures` cannot read `v`: `result` holds a `&mut` borrowed from it",
     ];
     assert_eq!(show(&tc.all_diagnostics(&p)), want);
     let want = [

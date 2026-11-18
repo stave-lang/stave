@@ -1364,7 +1364,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0211",
         severity: Severity::Error,
         area: "types",
-        rule: "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy; no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op); cases `frozen` / `frozen-self` (when the other operand rules hold): the first value the clause touches (an expression, a call result, a built-in receiver, a called fn value) whose type is not `Frozen`, with the path to its `UnsafeCell` or fn value; case `static`: a callee in a clause reaches a `static` whose type is not `Frozen`",
+        rule: "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy; no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is read, never written or passed as `&mut`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op); cases `frozen` / `frozen-self` (when the other operand rules hold): the first value the clause touches (an expression, a call result, a built-in receiver, a called fn value) whose type is not `Frozen`, with the path to its `UnsafeCell` or fn value; case `static`: a callee in a clause reaches a `static` whose type is not `Frozen`; case `mut-result`: an `ensures` reads a param that a `&mut` in the return type borrows from (`from v`), outside `old(..)`",
         retired: false,
         located: true,
         holes: &[
@@ -1427,6 +1427,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call only fns without `io`, `lock`, or `block` in `requires`/`ensures`; move this check into the body",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-result",
+                message: "`ensures` cannot read `{name}`: `result` holds a `&mut` borrowed from it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "read while `result` borrows it mutably" },
+                    LabelTemplate { at: "param", text: "the result borrows from this parameter" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "read the value at entry with `old(..)`, or state the property through `result`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

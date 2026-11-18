@@ -455,6 +455,11 @@ impl Ck<'_> {
             }
         }
         let in_old = |t: u32| olds.iter().any(|&(a, b)| a <= t && t <= b);
+        // The params a `&mut` inside the result borrows from (`from v`, `from copy v`): an
+        // `ensures` reading one would alias that live `&mut` (planned noalias), except inside
+        // `old(..)`, which reads at entry.
+        let mut_from: Vec<u32> = if ensures { self.mut_result_params() } else { Vec::new() };
+        let mut mut_read: Option<(u32, u32)> = None;
         for u in icx.res.uses.iter() {
             if !(lo..=hi).contains(&u.token) {
                 continue;
@@ -472,6 +477,9 @@ impl Ck<'_> {
             if !ensures || !matches!(icx.kind(b.node), Some(NodeKind::Param | NodeKind::SelfParam)) {
                 continue;
             }
+            if mut_from.contains(&b.node) && !in_old(u.token) && mut_read.is_none_or(|(t, _)| u.token < t) {
+                mut_read = Some((u.token, b.node));
+            }
             let Some(&t) = self.locals.get(&b.node) else { continue };
             if !self.contract_value_ok(t, true) {
                 flag(u.token);
@@ -480,8 +488,74 @@ impl Ck<'_> {
         if let Some(t) = bad {
             let d = mk("E0211", None, &[], icx.tok_span(t), &[]);
             self.report(d);
+            return true;
         }
-        bad.is_some()
+        if let Some((t, p)) = mut_read {
+            let name = icx.tok_str(t).to_string();
+            let d = mk(
+                "E0211",
+                Some("mut-result"),
+                &[("name", &name)],
+                icx.tok_span(t),
+                &[("param", icx.node_span(p))],
+            );
+            self.report(d);
+            return true;
+        }
+        false
+    }
+
+    /// The param nodes of the checked fn that a `&mut` inside its return type may borrow from.
+    fn mut_result_params(&mut self) -> Vec<u32> {
+        let Some(sig) = self.sigs.fn_sig(self.decl) else { return Vec::new() };
+        let (origins, ret, node) = (sig.origins.clone(), sig.ret, sig.node);
+        if origins.is_empty() || !self.has_mut_ref(ret) {
+            return Vec::new();
+        }
+        let icx = self.icx;
+        let Some(ps) = icx.child(node, NodeKind::Params) else { return Vec::new() };
+        let params = icx.kids_vec(ps);
+        // a param binds at its Param node, `self` at the SelfParam node inside it
+        origins
+            .iter()
+            .filter_map(|o| {
+                params.get(o.param as usize).map(|&p| icx.child(p, NodeKind::SelfParam).unwrap_or(p))
+            })
+            .collect()
+    }
+
+    /// Whether a `&mut` is reachable in type `t` (through references, elements, fields, and type
+    /// arguments; a recursive type is visited once).
+    fn has_mut_ref(&mut self, t: TypeId) -> bool {
+        let mut seen: FxHashSet<TypeId> = FxHashSet::default();
+        let mut work = vec![t];
+        while let Some(t) = work.pop() {
+            if !seen.insert(t) || seen.len() > 4096 {
+                continue;
+            }
+            match self.tys.kind(t).clone() {
+                TypeKind::Ref { mutable: true, .. } => return true,
+                TypeKind::Adt { def, args } => {
+                    let fields: Vec<TypeId> = self
+                        .sigs
+                        .adt(def)
+                        .map(|a| a.variants.iter().flat_map(|v| v.fields.iter().map(|f| f.ty)).collect())
+                        .unwrap_or_default();
+                    for f in fields {
+                        work.push(self.tys.subst(f, &args, None));
+                    }
+                    work.extend(
+                        args.iter().filter_map(|a| if let GArg::Type(x) = a { Some(*x) } else { None }),
+                    );
+                }
+                k => {
+                    let mut kids = Vec::new();
+                    k.children(&mut kids);
+                    work.extend(kids);
+                }
+            }
+        }
+        false
     }
 }
 
