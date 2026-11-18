@@ -176,6 +176,11 @@ impl FuncBuilder {
         self.site = s;
     }
 
+    /// The site [`FuncBuilder::set_site`] last set.
+    pub fn site(&self) -> Site {
+        self.site
+    }
+
     pub fn value_type(&self, v: Value) -> Option<TypeId> {
         self.values.get(v.index()).map(|x| x.0)
     }

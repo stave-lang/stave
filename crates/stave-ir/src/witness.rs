@@ -1,47 +1,69 @@
-//! Witnesses of removed bounds checks: what the check-removal pass ([`crate::bounds`]) claims
-//! about each `check.bounds` it wants gone, in a form the independent checker ([`check`])
-//! validates without any search.
+//! Witnesses of removed checks: what the check-removal pass ([`crate::bounds`]) claims about
+//! each `check.bounds` and each contract check it wants gone, and about each contract check it
+//! finds false on every path, in a form the independent checker ([`check`]) validates without any
+//! search.
 //!
-//! A `check.bounds i n` may be removed only if `i < n` holds whenever control reaches it. Its
-//! witness is a chain of inequalities between integers the IR names, each read off one place of
-//! the IR:
+//! **Checks.** A row names one check by an instruction index:
 //!
-//! - A [`Node`] is an integer: zero, an unsigned SSA value, or the length of an SSA slice value
-//!   (what every `slice.len` of that value reads).
-//! - An operand denotes `node + k`: an int constant `c` (`0 <= c <=` [`MAX_CONST`]) is
-//!   `Zero + c`, an unsigned int value `v` is `Val(v) + 0`.
-//! - An [`Edge`] states `from <= to + w` and names its [`Source`].
+//! - `check.bounds i n` (both unsigned): the goal is `i <= n - 1` right before it.
+//! - a contract check: the instruction is a `call @f ..` with `f` = `runtime.panic.requires_failed`
+//!   or `runtime.panic.ensures_failed`, the only instruction of its block `F`, which ends in
+//!   `unreachable` and is entered only by the false edge of a `cbr c T F` (`T` not `F`) ending
+//!   block `P`. The goal is `c` at the end of `P`, `c` a compare of ints under at most
+//!   [`NOT_DEPTH`] `not`s: `x < y` is `x <= y - 1`, `x <= y` itself, `x == y` the two goals
+//!   `x <= y` and `y <= x`; `!=` has none. Removing it turns the `cbr` into a `br T` and deletes
+//!   the call: whenever `P` ends, `c` holds, so control went to `T` anyway.
 //!
-//! The chain of a check starts at the node of `i`, each edge starts where the one before ends,
-//! and the last ends at the node of `n`; the weights must sum to at most `k_n - k_i - 1`. Then
-//! `i <= n - 1`. A chain may be empty (two constants).
+//! **Integers.** A [`Node`] is an integer: zero, an int SSA value, or the length of an SSA slice
+//! value (what every `slice.len` of that value reads). A value's node is its mathematical value
+//! under its own type: unsigned plain, signed two's complement. An operand denotes `node + k`: an
+//! int constant `c` (`|c| <=` [`MAX_CONST`]) is `Zero + c`, an int value `v` is `Val(v) + 0`.
+//! Since every node has one reading, an inequality between a signed and an unsigned node is an
+//! ordinary statement about integers; what keeps the two kinds apart is that a source is read
+//! only with the signedness its op computes in: both operands of a compare, `add`, or `sub` have
+//! one int type and a constant operand must be a value of it; `check.bounds`, `sub.sat`, the bit
+//! ops, and slice lengths are unsigned; a `Cast` relates a signed and an unsigned node only where
+//! every value of the source type is one of the target type.
+//!
+//! **Rows.** An [`Edge`] states `from <= to + w` and names its [`Source`]; its multiplier `mul`
+//! (at least 1) says how often it is added. A goal `a <= b + w` is proved by edges whose sum
+//! `Σ mul·(from - to) <= Σ mul·w` has the left side `a - b` (every other node, zero aside,
+//! cancels) and `Σ mul·w <= w`. A chain `a → .. → b` is the case with every multiplier 1; the
+//! pass writes only chains. The edges of a goal may be empty (`0 <= w`).
 //!
 //! | Source | Reads | States |
 //! |---|---|---|
-//! | `Branch { block }` | the `cbr c` whose one edge is the only way into `block`; `c` is a compare of unsigned ints under at most [`NOT_DEPTH`] `not`s | the compare (or its negation on the false edge), in every block `block` dominates |
+//! | `Branch { block }` | the `cbr c` whose one edge is the only way into `block`; `c` a compare of ints under at most [`NOT_DEPTH`] `not`s | the compare (or its negation on the false edge), in every block `block` dominates |
 //! | `Assert { call, arg }` | a `call @f` whose callee returns only through a branch on parameter `arg` being true (bodies of at most [`ASSERT_BLOCKS`] blocks) | the compare passed as that argument, after the call |
 //! | `Check { inst }` | an earlier `check.bounds x y` (kept, or removed with its own witness) | `x < y`, after it |
-//! | `Arith { inst }` | `v = add x c` or `v = sub x c`, unsigned and trapping, `c` a constant | `v = x + c` / `v = x - c` |
+//! | `Arith { inst }` | `v = add x c` or `v = sub x c`, int and trapping, `c` a constant of `v`'s type | `v = x + c` / `v = x - c` |
 //! | `SliceLen { inst }` | `v = slice.len s` | `v = Len(s)` |
 //! | `SliceMake { inst }` | `s = slice.make p n` | `Len(s) = n` |
 //! | `SubSat { inst }` | `h = sub.sat n c`, unsigned, `c` a constant | `n <= h + c` |
-//! | `Range { value }` | the type of `value`, an unsigned int of `bits` bits | `0 <= value` and `value <= 2^bits - 1` |
+//! | `Range { value }` | the type of `value`, an int of `bits` bits | unsigned: `0 <= value <= 2^bits - 1`; signed: `-2^(bits-1) <= value <= 2^(bits-1) - 1` |
 //! | `Bits { inst }` | `v = and x y`, `v = rem x y`, or `v = shr x k`, unsigned; a constant operand `c` within the type (`rem`: `1 <= c`) | `and`: `v <= x`, `v <= y`; `rem`: `v <= x`, `v <= y - 1`; `shr`: `v <= x` |
-//! | `Cast { inst }` | `v = cast x`, `cast.wrap x`, or `cast.sat x`: `x` an unsigned int value, `v` an unsigned int at least as wide | `v = x` |
+//! | `Cast { inst }` | `v = cast x`, `cast.wrap x`, or `cast.sat x`: `x` an int value whose every value `v`'s int type holds (same signedness and at least as wide, or unsigned to a wider signed type) | `v = x` |
 //!
 //! A compare `x < y`, `x <= y`, `x == y` states `x <= y - 1`, `x <= y`, or both `x <= y` and
-//! `y <= x`. Where the larger side `y` of a strict compare is `sub.sat n c`, it also states
-//! `x + c < n`; where the smaller side `x` of a non-strict one is `sub.sat n c`, also
-//! `n <= y + c`. An equality source (`Arith`, `SliceLen`, `SliceMake`, `Cast`) gives its edge in
-//! both directions. The instruction of every source but `Branch` and `Range` must dominate the
-//! check; for `Range`, the definition of `value` (an instruction, or the block of a parameter).
+//! `y <= x`. Where the larger side `y` of an unsigned strict compare is `sub.sat n c`, it also
+//! states `x + c < n`; where the smaller side `x` of an unsigned non-strict one is `sub.sat n c`,
+//! also `n <= y + c`. An equality source (`Arith`, `SliceLen`, `SliceMake`, `Cast`) gives its
+//! edge in both directions. The instruction of every source but `Branch` and `Range` must run
+//! before the check on every path to it; for `Range`, the definition of `value` (an instruction,
+//! or the block of a parameter). For a contract check "the check" is the end of block `P`, never
+//! `F` (which only the failing edge enters).
 //!
 //! Why each `Bits` and `Cast` row holds of the values as mathematical integers: on unsigned ints
 //! `x & y` is at most either operand; `rem` traps when `y = 0`, so a result that exists is
 //! `x mod y`, below `y` and at most `x`; an unsigned `shr` is logical, `floor(x / 2^k)`, at most
-//! `x` (an amount `>= bits` traps). A cast to an unsigned type at least as wide as the unsigned
-//! source keeps the value under every one of the three kinds. A constant operand is read as
-//! itself, so it must already be a value of the op's type.
+//! `x` (an amount `>= bits` traps). A cast to a type holding every value of the source type keeps
+//! the value under every one of the three kinds. A trapping `add`/`sub` that returns has the exact
+//! sum. A constant operand is read as itself, so it must already be a value of the op's type.
+//!
+//! **Refutations.** A [`Refuted`] row claims that a contract check fails whenever its point is
+//! reached: its edges prove the negation `b <= a - w - 1` of one goal `a <= b + w` (for `==`, of
+//! either half). The checker validates it like a removal and removes nothing; the driver reports
+//! it as an error.
 //!
 //! Dominance is certified, not computed, by the checker: [`FnWitness::dom`] names for every
 //! reachable block one block that dominates it, and the checker accepts the table when every
@@ -62,12 +84,17 @@ pub const NOT_DEPTH: u32 = 8;
 pub const ASSERT_BLOCKS: usize = 16;
 /// [`FnWitness::dom`] of a block that is not reachable.
 pub const NO_BLOCK: u32 = u32::MAX;
+/// The largest multiplier of an edge.
+pub const MAX_MUL: u32 = 1 << 16;
+/// The checked-IR paths of the fns a failed `requires` / `ensures` check calls.
+pub const REQUIRES_FAILED: &str = "runtime.panic.requires_failed";
+pub const ENSURES_FAILED: &str = "runtime.panic.ensures_failed";
 
 /// An integer a witness talks about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Node {
     Zero,
-    /// An unsigned int SSA value.
+    /// An int SSA value, read under its own type.
     Val(Value),
     /// The length of an SSA slice value.
     Len(Value),
@@ -88,32 +115,47 @@ pub enum Source {
     Cast { inst: u32 },
 }
 
-/// `from <= to + w`.
+/// `from <= to + w`, added `mul` times.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Edge {
     pub from: Node,
     pub to: Node,
     pub w: i128,
     pub src: Source,
+    pub mul: u32,
 }
 
-/// One removed `check.bounds`.
+/// One removed check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Removed {
-    /// The instruction index of the check.
+    /// The instruction index of the check (a contract check: its failure call).
     pub inst: u32,
     /// The check's source site (for reports).
     pub site: Site,
-    /// Its chain, a span of [`FnWitness::edges`].
+    /// The proof of its goal, a span of [`FnWitness::edges`].
     pub edges: Span,
+    /// The proof of the second goal of an `==` (empty otherwise).
+    pub also: Span,
 }
 
-/// The removed checks of one function: flat tables, rows in instruction order.
+/// One contract check that fails whenever it is reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Refuted {
+    /// The failure call of the check.
+    pub inst: u32,
+    pub site: Site,
+    /// The proof of the negation of goal `half` (0, or 1 for the second goal of an `==`).
+    pub edges: Span,
+    pub half: u8,
+}
+
+/// The removed and the refuted checks of one function: flat tables, rows in instruction order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnWitness {
     pub func: FuncId,
     /// Per block, a block that dominates it (the entry: itself; unreachable: [`NO_BLOCK`]).
     pub dom: Vec<u32>,
     pub removed: Vec<Removed>,
+    pub refuted: Vec<Refuted>,
     pub edges: Vec<Edge>,
 }

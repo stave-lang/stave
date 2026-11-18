@@ -1,16 +1,19 @@
 //! The trapping instructions of a checked-IR function: what makes it have the `trap` effect, read
-//! from the IR after the removal of proven bounds checks (the same IR in every build mode).
+//! from the IR after the removal of proven bounds and contract checks (the same IR in every build
+//! mode).
 //!
 //! An instruction traps when its op can raise a panic kind other than `StackOverflow` (a call or
 //! stack slot overflows the stack only where call recursion is reachable; the call graph decides
 //! that): `panic.<kind>`, `check.bounds`, `add sub mul neg` on ints, `div rem` on ints unless the
 //! divisor is a constant other than 0 (and other than -1 for a signed type), `shl shr` unless the
 //! amount is a constant below the width, `get`/`set` of an array element unless the index is a
-//! constant below the length, and the vector ops that trap. `panic.out_of_memory` also counts as
-//! an allocation.
+//! constant below the length, the vector ops that trap, and a contract check that the removal kept
+//! (its call of `runtime.panic.requires_failed` / `ensures_failed`, `Contract`). `panic.out_of_memory`
+//! also counts as an allocation.
 
 use crate::ir::{Body, Const, FuncId, Module, Op, Operand, PanicKind, Site};
 use crate::types::TypeKey;
+use crate::witness::{ENSURES_FAILED, REQUIRES_FAILED};
 
 /// The first trapping instruction of a function and its first `panic.out_of_memory`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -89,6 +92,13 @@ fn trap_of(m: &Module, b: &Body, i: u32) -> Option<PanicKind> {
             }
         }
         Op::Vec(v) => v.trap_kinds().iter().copied().find(|&k| k != PanicKind::StackOverflow),
+        Op::Call => match args.first() {
+            Some(Operand::Func(f)) => m
+                .func(*f)
+                .filter(|f| f.path == REQUIRES_FAILED || f.path == ENSURES_FAILED)
+                .map(|_| PanicKind::Contract),
+            _ => None,
+        },
         _ => None,
     }
 }
