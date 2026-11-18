@@ -73,10 +73,7 @@ fn human_form_errors_and_usage() {
         "{out}"
     );
     assert!(out.lines().any(|l| l.ends_with(": main.depth: trap recursive")), "{out}");
-    assert!(
-        out.lines().any(|l| l.ends_with(": main.c_abs: alloc trap recursive lock unsafe io block")),
-        "{out}"
-    );
+    assert!(out.lines().any(|l| l.ends_with(": main.main: trap recursive unsafe")), "{out}");
     // A deny clause violated: the report, then the diagnostics on stderr, exit 1.
     let bad = repo().join("tests/conformance/effects/trap_neg.stv");
     let (c, out, err) = stave(&["effects", bad.to_str().unwrap()], None);

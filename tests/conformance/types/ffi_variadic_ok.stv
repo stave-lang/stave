@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// Variadic C arguments: `i32 u32 i64 u64 isize usize f64` and raw pointers to sized types pass
+// through `...`; narrower ints and `f32` pass after the C promotion is written with `as`.
+unsafe("printf as declared in stdio.h") extern "C" {
+    fn printf(f: *const u8, ...) -> i32;
+}
+
+fn main() -> i32 {
+    let fmt: [u8; 1] = [0u8];
+    let f = &fmt[0] as *const u8;
+    let x: f32 = 1.5;
+    let b: u8 = 7;
+    unsafe("fmt is an empty NUL-terminated format, so printf reads no argument") {
+        let n = printf(f, 1i32, 2u32, 3i64, 4u64, 5isize, 6usize, 7.0f64, f);
+        let m = printf(f, x as f64, b as i32, b as u32);
+    }
+    return 0;
+}

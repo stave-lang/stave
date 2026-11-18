@@ -1,0 +1,11 @@
+unsafe("strlen as declared in string.h") extern "C" {
+    fn strlen(s: *const u8) -> usize;
+}
+
+pub fn len_of(s: *const u8) -> usize {
+    return unsafe("the caller passes a NUL-terminated string") strlen(s);
+}
+
+extern "C" fn twice(n: u32) -> u32 {
+    return n * 2;
+}

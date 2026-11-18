@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// E0812: a C symbol is the fn name, one namespace across every module of the program: an
+// export twice (default case), and one symbol declared with two signatures (`signature`). The
+// diagnostic is at the later declaration in (file path, offset) order: `a.stv` comes first.
+import ffi_symbols_pkg.a;
+
+unsafe("strlen, declared with the wrong return type") extern "C" {
+    fn strlen(s: *const u8) -> u32; //~ ERROR E0812
+}
+
+extern "C" fn tick(n: u32) -> u32 { //~ ERROR E0812
+    return n;
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -135,7 +135,7 @@ fn sources_and_propagation() {
 import std.io;
 import std.sync;
 import std.thread;
-extern \"C\" {
+unsafe(\"puts as declared in stdio.h\") extern \"C\" {
     fn puts(s: *const u8) -> i32;
 }
 fn push(v: &mut vec.Vec<u32>) { v.push(1u32); }

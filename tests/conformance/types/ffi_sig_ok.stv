@@ -1,0 +1,31 @@
+//~ CHECK-ONLY
+// C-safe signature types (E0804): ints, `f32`, `f64`, `bool`, raw pointers to sized types
+// (through aliases too), and the returns `()` and `never`. An opaque C type is an empty struct
+// behind a pointer; a struct goes by pointer.
+struct File {}
+
+struct Pair { pub a: u32, pub b: u32 }
+
+type Handle = *mut File;
+
+unsafe("the declarations match the C definitions of the test library") extern "C" {
+    fn ints(a: i8, b: i16, c: i32, d: i64, e: isize) -> u64;
+    fn uints(a: u8, b: u16, c: u32, d: u64, e: usize) -> i8;
+    fn floats(x: f32, y: f64, z: bool) -> f64;
+    fn ptrs(f: *mut File, p: *const Pair, q: *const *const u8, h: Handle) -> *mut u8;
+    fn fill(p: *mut [u32; 4]);
+    fn quit(code: i32) -> never;
+}
+
+extern "C" fn sum(a: i32, b: i32) -> i64 {
+    return a as i64 + b as i64;
+}
+
+extern "C" fn is_null(p: *const Pair) -> bool {
+    return p as usize == 0;
+}
+
+fn main() -> i32 {
+    let t = sum(1, 2);
+    return 0;
+}

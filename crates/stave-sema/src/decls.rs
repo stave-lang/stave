@@ -330,10 +330,14 @@ impl Collector<'_> {
     fn item_body(&mut self, body: u32, pub_flag: u16, test: bool) {
         let kids = self.ast.children(body);
         let mut unsafe_flag = 0;
+        let mut unsafe_tok = u32::MAX;
         for &c in &kids {
             let a = self.a(c);
             match self.ast.kind(c) {
-                Some(NodeKind::Unsafe) => unsafe_flag = DeclFlags::UNSAFE,
+                Some(NodeKind::Unsafe) => {
+                    unsafe_flag = DeclFlags::UNSAFE;
+                    unsafe_tok = a;
+                }
                 Some(NodeKind::FnDecl) => {
                     let t = if test { DeclFlags::TEST } else { 0 };
                     let d = self.push(
@@ -394,13 +398,15 @@ impl Collector<'_> {
                 }
                 Some(NodeKind::ImplDecl) => self.impl_decl(c, unsafe_flag),
                 Some(NodeKind::ExternItem) => {
-                    if self.ast.child(c, NodeKind::Block).is_some() {
+                    let export = self.ast.child(c, NodeKind::Block).is_some();
+                    self.extern_form(a, unsafe_tok, export);
+                    if export {
                         let d = self.push(
                             DeclKind::Fn,
                             a + 3,
                             c,
                             u32::MAX,
-                            pub_flag | DeclFlags::EXTERN_EXPORT,
+                            pub_flag | unsafe_flag | DeclFlags::EXTERN_EXPORT,
                             0,
                         );
                         self.main(d);
@@ -424,6 +430,32 @@ impl Collector<'_> {
                 _ => {}
             }
         }
+    }
+
+    /// E0811 for the `extern` item whose first token is `a` (`unsafe_tok`: its `unsafe` keyword,
+    /// or `u32::MAX`). An import block's obligation states that every declaration in it matches
+    /// the C definition; an intrinsic block is checked against the intrinsic table instead, so an
+    /// obligation there would trust nothing.
+    fn extern_form(&mut self, a: u32, unsafe_tok: u32, export: bool) {
+        let lit = a + 1;
+        let text = stave_syntax::token_text(&self.file.bytes, self.toks(), lit as usize);
+        let abi = String::from_utf8_lossy(text).into_owned();
+        let has_unsafe = unsafe_tok != u32::MAX;
+        let dg = match abi.as_str() {
+            r#""C""# if !export && !has_unsafe => {
+                mk("E0811", Some("obligation"), &[("abi", &abi)], self.span(a), &[])
+            }
+            r#""C""# => None,
+            r#""stave-intrinsic""# if !export => {
+                if has_unsafe {
+                    mk("E0811", Some("intrinsic"), &[("abi", &abi)], self.span(unsafe_tok), &[])
+                } else {
+                    None
+                }
+            }
+            _ => mk("E0811", None, &[("abi", &abi)], self.span(lit), &[]),
+        };
+        self.out.diags.extend(dg);
     }
 
     fn impl_decl(&mut self, n: u32, unsafe_flag: u16) {

@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// An import has every effect except those its `without` lists, a claim the block's obligation
+// covers: a fn denying those effects may call it.
+unsafe("abs as declared in stdlib.h: no allocation, I/O, lock, or wait") extern "C" {
+    fn abs(x: i32) -> i32 without(alloc, io, lock, block);
+}
+
+fn magnitude(x: i32) -> i32 without(alloc, io, lock, block) {
+    return unsafe("abs has no precondition") abs(x);
+}
+
+fn main() {
+    let m = magnitude(-4);
+}

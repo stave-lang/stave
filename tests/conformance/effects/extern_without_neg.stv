@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// E1401 through an import: it keeps every effect its `without` does not list.
+unsafe("puts as declared in stdio.h; it allocates nothing") extern "C" {
+    fn puts(s: *const u8) -> i32 without(alloc);
+}
+
+fn say(p: *const u8) -> i32 without(alloc) {
+    return unsafe("p is a NUL-terminated string") puts(p);
+}
+
+fn quiet(p: *const u8) -> i32 without(io) { //~ ERROR E1401
+    return unsafe("p is a NUL-terminated string") puts(p);
+}
+
+fn main() {
+    let nul = 0u8;
+    let a = say(&nul as *const u8);
+    let b = quiet(&nul as *const u8);
+}

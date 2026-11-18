@@ -10,6 +10,7 @@
 //! | `Fn` | `unsafe("..") fn` (fn, method, trait method signature) | that fn | the caller's obligation |
 //! | `Trait` | `unsafe("..") trait` | the trait's path | the implementer's obligation |
 //! | `Impl` | `unsafe("..") impl` | the impl's path (`<module>.<self-type head>`, as method paths) | the implementer's |
+//! | `Extern` | `unsafe("..") extern "C" { }` (an import block) | the module's path | the declarer's: every import matches its C definition |
 //! | `ExternCall` | each use of an `extern "C"` import | enclosing fn | the innermost enclosing `Block`/`Expr` site's string |
 //!
 //! `fn` is the checked-IR path (contracts/checked-ir.md `Path`; methods `<module>.<Type>.<name>`).
@@ -48,6 +49,7 @@ pub enum UnsafeKind {
     Fn,
     Trait,
     Impl,
+    Extern,
     ExternCall,
 }
 
@@ -60,6 +62,7 @@ impl UnsafeKind {
             UnsafeKind::Fn => "fn",
             UnsafeKind::Trait => "trait",
             UnsafeKind::Impl => "impl",
+            UnsafeKind::Extern => "extern",
             UnsafeKind::ExternCall => "extern-call",
         }
     }
@@ -142,6 +145,7 @@ fn item_sites(prog: &Program, tc: &Typeck, item: ItemId, decls: &[(u32, DeclId)]
         None
     };
     let path_of = |d: Option<DeclId>| d.map_or(String::new(), |d| decl_path(prog, tc, d));
+    let module_path = prog.module(it.module).map_or(String::new(), |m| m.path_text.clone());
     // Block/Expr regions: (first node, last node, obligation).
     let mut regions: Vec<(u32, u32, String)> = Vec::new();
     for n in 0..ast.len() as u32 {
@@ -173,9 +177,14 @@ fn item_sites(prog: &Program, tc: &Typeck, item: ItemId, decls: &[(u32, DeclId)]
                 let kind = match ast.kind(target) {
                     Some(NodeKind::TraitDecl) => UnsafeKind::Trait,
                     Some(NodeKind::ImplDecl) => UnsafeKind::Impl,
+                    Some(NodeKind::ExternItem) if decl_at(target).is_none() => UnsafeKind::Extern,
                     _ => UnsafeKind::Fn,
                 };
-                (kind, path_of(decl_at(target)), None)
+                let func = match kind {
+                    UnsafeKind::Extern => module_path.clone(),
+                    _ => path_of(decl_at(target)),
+                };
+                (kind, func, None)
             }
             // Statement form `Unsafe Block`: the block is the next sibling.
             _ => (UnsafeKind::Block, path_of(enclosing(n)), next),

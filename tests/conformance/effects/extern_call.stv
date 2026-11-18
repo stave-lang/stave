@@ -1,6 +1,6 @@
 //~ CHECK-ONLY
-// An `extern "C"` import has every effect: `g` reaches `puts` through `h`.
-extern "C" {
+// An `extern "C"` import without a `without` has every effect: `g` reaches `puts` through `h`.
+unsafe("puts as declared in stdio.h") extern "C" {
     fn puts(s: *const u8) -> i32;
 }
 

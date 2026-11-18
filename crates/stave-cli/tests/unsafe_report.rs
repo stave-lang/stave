@@ -61,7 +61,7 @@ fn json_golden() {
         kinds.insert(v["kind"].as_str().unwrap().to_string());
     }
     let kinds: Vec<&str> = kinds.iter().map(String::as_str).collect();
-    assert_eq!(kinds, ["block", "expr", "extern-call", "fn", "impl", "trait"]);
+    assert_eq!(kinds, ["block", "expr", "extern", "extern-call", "fn", "impl", "trait"]);
     assert!(
         out.contains(
             "\"fn\":\"main.read_raw\",\"kind\":\"expr\",\"obligation\":\"p is valid for reads: caller passes &x as *const u8\""

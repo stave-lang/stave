@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// E0812 case `reserved`: the compiler defines `_start` and every `__stave*` symbol.
+unsafe("test declarations") extern "C" {
+    fn _start(); //~ ERROR E0812
+}
+
+extern "C" fn __stave_hook() -> i32 { //~ ERROR E0812
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

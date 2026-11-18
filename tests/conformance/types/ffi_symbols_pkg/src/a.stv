@@ -1,0 +1,7 @@
+unsafe("strlen as declared in string.h") extern "C" {
+    fn strlen(s: *const u8) -> usize;
+}
+
+extern "C" fn tick(n: u32) -> u32 {
+    return n +% 1;
+}

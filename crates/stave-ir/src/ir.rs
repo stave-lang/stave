@@ -656,6 +656,9 @@ pub struct Func {
     /// Site of the fn's name token (the PC-table row of contracts/intrinsics.md); `Site::NONE`
     /// if unknown.
     pub name_site: Site,
+    /// The link symbol of an `extern "C"` import or export: its fn name, unmangled (sema
+    /// rejects clashes and reserved names, E0812). `None` for Stave fns, named by [`crate::link`].
+    pub symbol: Option<String>,
 }
 
 /// A source site row (contracts/intrinsics.md site table): what a [`Site`] indexes in
@@ -721,6 +724,7 @@ impl Module {
             features: FeatureSet::EMPTY,
             body: None,
             name_site: Site::NONE,
+            symbol: None,
         });
         id
     }

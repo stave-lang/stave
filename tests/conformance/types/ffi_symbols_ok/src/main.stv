@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// One C symbol declared in two modules with one signature, and an import of a symbol this
+// program exports: each pair names one C function.
+import ffi_symbols_ok.b;
+
+unsafe("strlen as declared in string.h; twice as exported by module b") extern "C" {
+    fn strlen(s: *const u8) -> usize;
+    fn twice(n: u32) -> u32;
+}
+
+fn main() -> i32 {
+    let z: u8 = 0;
+    let n = unsafe("z is an empty NUL-terminated string") strlen(&z as *const u8);
+    let m = b.len_of(&z as *const u8);
+    let t = unsafe("twice has no precondition") twice(2);
+    return 0;
+}

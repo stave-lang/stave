@@ -10,7 +10,7 @@
 //! root package's directory, else `<package>/<path in the package>` (`std/core.stv`,
 //! `runtime/alloc.stv`: independent of the install location); `line`/`col` are 1-based
 //! (col in bytes) at the `unsafe` keyword (an `extern-call` site: the callee name), `kind` is
-//! `block expr fn trait impl extern-call`, strings are JSON-escaped in both forms. The program is
+//! `block expr fn trait impl extern extern-call`, strings are JSON-escaped in both forms. The program is
 //! checked through type checking first: with error diagnostics they are printed on stderr (`--json`:
 //! as JSON lines), nothing goes to stdout, and the exit status is 1.
 

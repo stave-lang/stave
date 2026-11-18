@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// E0807 case `extern`: an `extern "C"` export has the C convention, so it never becomes a Stave
+// fn value; a direct call is fine.
+extern "C" fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+fn apply(f: fn(i32, i32) -> i32) -> i32 {
+    return f(1, 2);
+}
+
+fn main() -> i32 {
+    let s = add(1, 2);
+    let f = add; //~ ERROR E0807
+    let t = apply(add); //~ ERROR E0807
+    return 0;
+}

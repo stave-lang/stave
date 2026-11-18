@@ -379,6 +379,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
     let (mut tys, sigs_table, mut diags) = sb.finish();
     diags.extend(crate::traits::check_impls(prog, &sigs_table, &mut tys, &brackets));
     diags.extend(crate::builtins::check_intrinsics(prog, &sigs_table, &tys, &brackets));
+    diags.extend(crate::ffi::check(prog, &sigs_table, &tys));
     diags.extend(crate::dispatch::check_dispatches(prog, &sigs_table, &mut tys, &brackets));
     let t_sigs = t0.elapsed();
 

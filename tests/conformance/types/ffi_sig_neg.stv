@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// E0804: a type that is not C-safe in an `extern "C"` signature, import or export: vectors and
+// views (case `vector-view`), structs by value (case `struct`), and every other non-C type.
+struct Pair { pub a: u32, pub b: u32 }
+
+enum Mode { A, B }
+
+unsafe("the declarations match the C definitions of the test library") extern "C" {
+    fn vec4(v: f32x4) -> i32; //~ ERROR E0804
+    fn slice(xs: &[u8]) -> i32; //~ ERROR E0804
+    fn by_ref(p: &u32); //~ ERROR E0804
+    fn callback(f: fn(i32) -> i32); //~ ERROR E0804
+    fn by_value(p: Pair); //~ ERROR E0804
+    fn fat(s: *const str) -> usize; //~ ERROR E0804
+    fn fat_slice(s: *const [u8]); //~ ERROR E0804
+    fn chars(c: char); //~ ERROR E0804
+    fn mode(m: Mode); //~ ERROR E0804
+    fn pair_ret() -> (u32, u32); //~ ERROR E0804
+    fn unit_param(u: ()); //~ ERROR E0804
+}
+
+extern "C" fn export_struct(p: Pair) -> u32 { //~ ERROR E0804
+    return p.a;
+}
+
+extern "C" fn export_ret(x: u32) -> [u32; 2] { //~ ERROR E0804
+    return [x, x];
+}
+
+fn main() -> i32 {
+    return 0;
+}

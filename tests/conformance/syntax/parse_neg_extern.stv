@@ -1,0 +1,9 @@
+//~ PARSE-ONLY
+// An import takes `without` only (no `needs`, `requires`, `ensures`); an export takes no
+// generics, `needs`, or `from`. Each broken item reports its first syntax error.
+unsafe("x") extern "C" { fn f(x: i32) -> i32 requires(x > 0); } //~ ERROR E0004
+unsafe("x") extern "C" { fn g() needs(avx2); } //~ ERROR E0004
+unsafe("x") extern "C" { fn h() without(io) -> i32; } //~ ERROR E0004
+extern "C" fn id<T>(x: T) -> T { return x; } //~ ERROR E0004
+extern "C" fn wide() needs(avx2) { } //~ ERROR E0004
+extern "C" fn back(p: &u32) -> &u32 from p { return p; } //~ ERROR E0004

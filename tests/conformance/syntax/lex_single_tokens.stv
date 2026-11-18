@@ -1,7 +1,7 @@
 //~ PARSE-ONLY
 // Single tokens: `as%` `as|` `as?` `as~` `...` `..` `..=` `.{` and the wrapping and
 // saturating operators with their compound forms.
-extern "C" {
+unsafe("printf as declared in stdio.h") extern "C" {
     fn printf(f: *const u8, ...) -> i32;
 }
 
