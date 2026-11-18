@@ -57,10 +57,12 @@ below; this section restates what the runtime expects.
 ```
 runtime.panic.trap(kind: u32, site: u32) -> never
 runtime.panic.trap_msg(kind: u32, site: u32, msg: &[u8]) -> never  // + one line `msg` (std.debug.assert)
+runtime.panic.requires_failed(clause: &str) -> never           // Contract at the user site, + the clause
+runtime.panic.ensures_failed(site: u32, clause: &str) -> never  // Contract at the return, + the clause
 ```
 
 `kind`: `KIND_BOUNDS 0, KIND_OVERFLOW 1, KIND_DIV_BY_ZERO 2, KIND_ASSERT 3, KIND_OUT_OF_MEMORY 4,
-KIND_STACK_OVERFLOW 5, KIND_UNWRAP 6, KIND_UNSUPPORTED_CPU 7, KIND_DEADLOCK 8` (panic kind names; shift amount >= width
+KIND_STACK_OVERFLOW 5, KIND_UNWRAP 6, KIND_UNSUPPORTED_CPU 7, KIND_DEADLOCK 8, KIND_CONTRACT 9` (panic kind names; shift amount >= width
 is `Overflow`; `UnsupportedCpu` only from `runtime.cpu.init`, at `SITE_NONE`).
 `site`: index into the compiler-emitted **site table**, `SITE_NONE = 0xFFFF_FFFF` for unknown.
 Output: `panic: <Kind> at <file>:<line>:<col> in <fn> (thread <n>)` on fd 2, then `exit_group(101)`.
@@ -70,7 +72,9 @@ A panic during a panic exits 101 at once.
 std fn that may allocate (OutOfMemory) or panics for its caller (`std.debug.assert`,
 `Option/Result.unwrap`, `Vec.get_ref/get_mut` Bounds), store the call's site id with
 `runtime.panic.set_user_site(site: u32)` (or the same store inline: the `user_site` field of
-`runtime.state.STATE`). std reports `runtime.panic.user_site()`.
+`runtime.state.STATE`). std reports `runtime.panic.user_site()`. In a program where some fn checks
+a `requires` clause, user code also stores the site before a direct call of such a fn or of a
+`dispatch fn`, and before every call through a fn value: `requires_failed` reports there.
 
 **Signals.** The compiler emits a C-ABI stub `__stave_signal(sig: int, info: *siginfo, uctx: *void)`
 that calls `runtime.panic.on_signal(sig: usize, info: usize, uctx: usize) -> never`; its address is
@@ -79,12 +83,16 @@ the `signal_handler_addr()` intrinsic. A SIGSEGV with `si_addr` in `[guard_lo, g
 the default action. Frames larger than `runtime.config.GUARD` (64 KiB) must be probed page by page
 by the prologue, or an overflow can jump the guard.
 
-**Tables** (read-only data; little-endian; addresses from `site_table()` and `pc_table()`):
+**Tables** (read-only data; little-endian; addresses from `site_table()`, `pc_table()`, and
+`stack_table()`):
 
 - site table: `u64 count`, then rows of 32 bytes: `+0 file ptr u64, +8 file_len u32, +12 line u32,
   +16 fn ptr u64, +24 fn_len u32, +28 col u32` (line/col 1-based, col in bytes; fn = checked-IR path);
 - PC table: `u64 count`, then rows of 16 bytes sorted by `pc_lo`: `+0 pc_lo u64, +8 site u32, +12 pad`
   (site = the fn's name token).
+- stack table: `+0 default u64` (`[run] stack`; 0: `RUN_STACK`), `+8 main u64` (0: no bound),
+  `+16 count u64`, then rows of 16 bytes: `+0 code u64` (a fn value's code address), `+8 bytes
+  u64` (0: no bound). `runtime.config.main_stack` and `thread_stack(code)` read it.
 
 **Main.** `main_addr()` is the address of the compiler-emitted C-ABI stub
 `__stave_main(arg: usize) -> usize` (calls `main`, returns its status: i32 sign-extended, 0 for a
@@ -116,8 +124,10 @@ and `realloc` as roots; std's calls still go to `runtime.alloc`.
   reaches it through `state.get() -> *mut State`; each dereference is `unsafe` and follows the
   field rules in the `state.stv` header. Its initializer uses a struct literal and `[0; NCLASS]`,
   both const-exprs.
-- **`[run] stack`**: `runtime.config.RUN_STACK` must be generated per binary by the driver from
-  `stave.toml`; the shipped file holds the 8 MiB default.
+- **Stack sizes**: main's and each thread's stack size come from the compiler-emitted stack
+  table (`stack_table()`, contracts/intrinsics.md): the computed bound, else `[run] stack`;
+  `runtime.config.RUN_STACK` (8 MiB) is the default where the manifest sets none or there is no
+  table (the IR interpreter).
 - **Threads**: main runs on the start thread, switched onto its own mmap'd stack by
   `call_on_stack` (id 0, not in the registry). Other threads: runtime/thread.stv header. The
   allocator's shared lists are guarded by one futex lock (`state.alloc_lock`); `user_site` and

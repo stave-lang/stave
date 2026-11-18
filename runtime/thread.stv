@@ -2,7 +2,9 @@
 //
 // A thread runs one fn value `fn()` (a closure: code + environment, contracts/checked-ir.md
 // "Closures") on its own mapping, laid out bottom to top as
-//     [guard: config.GUARD, PROT_NONE][stack: config.RUN_STACK][altstack: config.ALTSTACK][record]
+//     [guard: config.GUARD, PROT_NONE][stack][altstack: config.ALTSTACK][record]
+// where the stack has config.thread_stack(code of the fn value) bytes: the computed bound of
+// threads started with that fn, else `[run] stack`.
 // The record (one page) holds the futex word `tid`, the fn value, and the mapping. The thread
 // is created with clone3 (or `clone` where clone3 is ENOSYS: qemu-user), sharing the address
 // space, files, and signal handlers (runtime.os.spawn_thread); the kernel writes its tid into
@@ -64,8 +66,9 @@ fn fn_words(f: fn()) -> [usize; 2] {
 pub unsafe("f and everything it captures stay valid until join(handle) returns")
 fn start(f: fn()) -> usize {
     let page = state.page_size();
+    let w = fn_words(f);
     let guard = round_up(config.GUARD, page);
-    let size = round_up(config.RUN_STACK, page);
+    let size = round_up(config.thread_stack(w[0]), page);
     let alt = round_up(config.ALTSTACK, page);
     let len = guard + size + alt + page;
     let prot = os.PROT_READ | os.PROT_WRITE;
@@ -81,7 +84,6 @@ fn start(f: fn()) -> usize {
         let u = unsafe("the mapping is fresh: no object and no thread uses it") os.munmap(base, len);
         cannot_create();
     }
-    let w = fn_words(f);
     let th = (base + guard + size + alt) as *mut Thread;
     let st = state.get();
     let idp = unsafe("st is runtime.state.STATE; only the field address is taken") &mut (*st).next_thread as *mut u64;

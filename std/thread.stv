@@ -8,8 +8,9 @@
 //   par_for_mut(xs, body)   body(i, &mut xs[i]) for every index, each element borrowed by one call.
 // CPU backend: one worker per CPU in the sched_getaffinity mask (runtime.thread.cpu_count), no
 // flag or variable. Workers claim index chunks from one atomic counter. Threads are created per
-// call (runtime.thread: clone3 + guard page + altstack) and joined before the call returns, so
-// a body may borrow the caller's stack.
+// call (runtime.thread: clone3 + guard page + altstack; the stack sized from the compiler's
+// bound for the closure it runs) and joined before the call returns, so a body may borrow the
+// caller's stack.
 
 import runtime.thread as rt;
 import runtime.atomic;

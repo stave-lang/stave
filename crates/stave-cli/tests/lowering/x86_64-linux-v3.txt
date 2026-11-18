@@ -20,6 +20,14 @@ vec.abs_wrap            i64                         M    3  vpcmpgtq; vpxor; vps
 vec.mul.wrap            int16/int32                 N    1  vpmull*
 vec.mul.wrap            int8                        M    7  vpsrlw x2; vpmullw; vpsllw; vpmullw; vpand; vpor
 vec.mul.wrap            int64                       M    8  vpsrlq; vpmuludq; vpsrlq; vpmuludq; vpaddq; vpsllq; vpmuludq; vpaddq
+vec.mul_hi              i16                         N    1  vpmulhw
+vec.mul_hi              u16                         N    1  vpmulhuw
+vec.mul_hi              i32                         M    6  vpshufd x2; vpmuldq x2; vpsrlq; vpblendw
+vec.mul_hi              u32                         M    6  vpshufd x2; vpmuludq x2; vpsrlq; vpblendw
+vec.mul_hi              i8                          M    9  vpsllw x2; vpmulhw x2; vpsrlw; vpand x3; vpor
+vec.mul_hi              u8                          M    8  vpsllw; vpand x4; vpmulhuw x2; vpor
+vec.mul_hi              i64                         M   12  mov x8; imul x4
+vec.mul_hi              u64                         M   12  mov x8; mul x4
 vec.add.sat             i8/i16                      N    1  vpadds*
 vec.add.sat             u8/u16                      N    1  vpaddus*
 vec.sub.sat             i8/i16                      N    1  vpsubs*
@@ -84,14 +92,14 @@ vec.shl                 int8 by vector              M  128  movx x64; shl x32; m
 vec.shl.wrap            int8 by vector              M  160  movx x64; and x32; shl x32; mov x32
 vec.shr                 u8 by vector                M  128  movx x64; shr x32; mov x32
 vec.shr                 i8 by vector                M  128  movx x64; sar x32; mov x32
-vec.div_const           u16                         M   64  movx x16; xor x16; div x16; mov x16  | note: a hardware divide per lane
-vec.div_const           i16                         M   64  movx x16; cqo x16; idiv x16; mov x16  | note: a hardware divide per lane
-vec.div_const           u32                         M   32  movx x8; xor x8; div x8; mov x8  | note: a hardware divide per lane
-vec.div_const           i32                         M   32  movx x8; cqo x8; idiv x8; mov x8  | note: a hardware divide per lane
-vec.div_const           u8                          M  128  movx x32; xor x32; div x32; mov x32  | note: a hardware divide per lane
-vec.div_const           i8                          M  128  movx x32; cqo x32; idiv x32; mov x32  | note: a hardware divide per lane
-vec.div_const           u64                         M   16  mov x8; xor x4; div x4  | note: a hardware divide per lane
-vec.div_const           i64                         M   16  mov x8; cqo x4; idiv x4  | note: a hardware divide per lane
+vec.div_const           u16                         M    5  vpmulhuw; vpsubw; vpsrlw x2; vpaddw
+vec.div_const           i16                         M    5  vpmulhw; vpaddw x2; vpsraw; vpsrlw
+vec.div_const           u32                         M    9  vpshufd; vpmuludq x2; vpsrlq; vpblendw; vpsubd; vpsrld x2; vpaddd
+vec.div_const           i32                         M    9  vpshufd; vpmuldq x2; vpsrlq; vpblendw; vpaddd x2; vpsrad; vpsrld
+vec.div_const           u8                          M    8  vpsrlw x3; vpand; vpmulhuw x2; vpsllw; vpor
+vec.div_const           i8                          M   16  vpsraw x6; vpsllw x2; vpsrlw x2; vpaddw x2; vpsubw x2; vpand; vpor
+vec.div_const           u64                         M   32  mov x12; mul x4; sub x4; shr x8; add x4
+vec.div_const           i64                         M   32  mov x12; imul x4; add x4; sar x8; sub x4
 vec.div_lanes           int                         U    -  -
 vec.fma                 float                       N    1  vfmadd213p%
 vec.min                 float                       M    5  vminp%; vcmpunordp%; vminp%; vpor x2

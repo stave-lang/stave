@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// Ranks are checked per instance of a generic fn: `nested` takes its two locks in rank order for
+// the instance `ok` makes and against it for the one `bad` makes; the error is at the call in the
+// generic body.
+import std.sync;
+
+fn nested<const R: u32, const S: u32>(outer: &sync.Mutex<u32, R>, inner: &sync.Mutex<u32, S>) -> u32 {
+    let g = outer.lock();
+    let h = inner.lock(); //~ ERROR E1405
+    return *g.get() + *h.get();
+}
+
+fn ok(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) -> u32 {
+    return nested::<1, 2>(a, b);
+}
+
+fn bad(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) -> u32 {
+    return nested::<2, 1>(b, a);
+}
+
+fn main() {
+    let a = sync.Mutex::<u32, 1>.new(0);
+    let b = sync.Mutex::<u32, 2>.new(0);
+    let x = ok(&a, &b);
+    let y = bad(&a, &b);
+}

@@ -333,6 +333,9 @@ impl<'a> FnCx<'a> {
             let r = self.f.ret;
             if self.open() {
                 if self.ret_of(r).is_none() && !self.is_never(r) {
+                    if let Some(at) = self.f.ensures_end {
+                        self.ensures_checks(None, at);
+                    }
                     self.f.b.ret(None);
                 } else {
                     self.f.b.unreachable();
@@ -343,12 +346,15 @@ impl<'a> FnCx<'a> {
 
     /// Lowers the fn body at `fn_node` (a `FnDecl`, `ExternItem` export, or `KernelDecl`).
     pub fn lower_body(&mut self, fn_node: u32, params: &[Ty], ret: Ty) -> FnOut {
+        self.result_local(ret);
         self.fresh_env(params, ret);
         self.make_slots(None);
         self.push_scope();
         let icx = self.icx;
         self.bind_params(icx.child(fn_node, NodeKind::Params));
-        if let Some(b) = icx.child(fn_node, NodeKind::Block) {
+        let block = icx.child(fn_node, NodeKind::Block);
+        self.contract_entry(block.map(|b| icx.close(icx.a(b))));
+        if let Some(b) = block {
             self.block(b);
         }
         self.end_fn();
@@ -361,6 +367,172 @@ impl<'a> FnCx<'a> {
             body,
             site_consts,
             name_off: None,
+        }
+    }
+
+    // ---------- contracts ----------
+
+    fn contracts(&self) -> Option<&'a crate::contracts::Contracts> {
+        self.tb().contracts.as_deref()
+    }
+
+    /// The local `result` names in the `ensures` clauses (returned type `ret`): in a slot unless
+    /// it holds no data, never dropped (the returned value owns its contents).
+    fn result_local(&mut self, ret: Ty) {
+        let Some(c) = self.contracts() else { return };
+        if c.ensures.is_empty() {
+            return;
+        }
+        let mem = !self.is_unit(ret) && !self.is_never(ret);
+        let idx = self.locals.len();
+        self.locals.push(LocalInfo { node: c.result, ty: ret, mem, drop: false, flag: None });
+        self.by_node.insert(c.result, idx);
+        self.result_local = Some(idx);
+    }
+
+    /// At entry, after the params are bound: the `requires` checks in order, then the `old(e)`
+    /// snapshots. `end`: the body's closing `}` (where a unit body ends).
+    fn contract_entry(&mut self, end: Option<u32>) {
+        if self.tb().test_domain.is_some() {
+            self.test_entry();
+        }
+        let Some(c) = self.contracts() else { return };
+        for cl in c.checked_requires() {
+            self.contract_check(cl, None);
+        }
+        for &(paren, e) in &c.olds {
+            if !self.open() {
+                return;
+            }
+            let t = self.nty(e);
+            let Some(v) = self.val(e, Some(t)) else { return };
+            self.drop_temps();
+            self.old_vals.insert(paren, (v, t));
+        }
+        if !c.ensures.is_empty() {
+            self.f.ensures_end = end;
+            if end.is_none() {
+                self.fail_at(None, "`ensures` on a fn without a body");
+            }
+        }
+    }
+
+    /// The entry of a `test fn` with parameters: the input marker, then its `requires` clauses
+    /// in order as filters. The runner is the caller: an input a clause rejects writes the skip
+    /// marker and returns at once (every parameter type the runner generates is Copy, so there
+    /// is nothing to drop); it never panics `Contract`.
+    fn test_entry(&mut self) {
+        let (Some(input), Some(skip)) = (self.g.lang.test_input, self.g.lang.test_skip) else {
+            self.fail_at(None, "`runtime.panic` has no `test fn` input markers");
+            return;
+        };
+        let fi = self.req(Req::Inst(InstKey { decl: input, args: Vec::new() }));
+        self.f.last_site = None;
+        self.f.b.call(fi, None, &[]);
+        let Some(c) = self.contracts() else { return };
+        for cl in &c.requires {
+            if !self.open() {
+                return;
+            }
+            let saved = std::mem::take(&mut self.f.temps);
+            let bt = self.t_bool();
+            self.hold_site = true;
+            let v = self.val(cl.expr, Some(bt));
+            self.drop_temps();
+            self.hold_site = false;
+            self.f.temps = saved;
+            let Some(v) = v else { return };
+            if !self.open() {
+                return;
+            }
+            let (no, ok) = (self.f.b.create_block(), self.f.b.create_block());
+            self.f.b.cbr(v, ok, &[], no, &[]);
+            self.f.b.switch_to(no);
+            let fs = self.req(Req::Inst(InstKey { decl: skip, args: Vec::new() }));
+            self.f.last_site = None;
+            self.f.b.call(fs, None, &[]);
+            self.f.b.ret(None);
+            self.f.b.switch_to(ok);
+        }
+    }
+
+    /// The `ensures` checks of a return of `v` (`None`: unit) at token `at`, after the drops of
+    /// the scopes it leaves.
+    pub fn ensures_checks(&mut self, v: Option<Operand>, at: u32) {
+        if self.f.ensures_end.is_none() || !self.open() {
+            return;
+        }
+        let Some(c) = self.contracts() else { return };
+        if let Some(l) = self.result_local {
+            let v = match v {
+                Some(v) => v,
+                None => self.unit_val(),
+            };
+            self.bind(l, Some(v));
+        }
+        for cl in &c.ensures {
+            self.contract_check(cl, Some(at));
+        }
+    }
+
+    /// Branches to the failure call of clause `cl` when it is false: a `requires` (`at` `None`)
+    /// or an `ensures` reported at token `at`. The clause's temporaries are dropped before the
+    /// branch; those of the enclosing statement are left as they are.
+    fn contract_check(&mut self, cl: &crate::contracts::ContractClause, at: Option<u32>) {
+        if !self.open() {
+            return;
+        }
+        let saved = std::mem::take(&mut self.f.temps);
+        let bt = self.t_bool();
+        self.hold_site = at.is_none();
+        let c = self.val(cl.expr, Some(bt));
+        self.drop_temps();
+        self.hold_site = false;
+        self.f.temps = saved;
+        let Some(c) = c else { return };
+        if !self.open() {
+            return;
+        }
+        let (fail, ok) = (self.f.b.create_block(), self.f.b.create_block());
+        self.f.b.cbr(c, ok, &[], fail, &[]);
+        self.f.b.switch_to(fail);
+        self.contract_fail(cl, at);
+        self.f.b.switch_to(ok);
+    }
+
+    /// The call of `runtime.panic.requires_failed(clause)` or
+    /// `runtime.panic.ensures_failed(site, clause)` (never returns).
+    fn contract_fail(&mut self, cl: &crate::contracts::ContractClause, at: Option<u32>) {
+        let line = crate::contracts::clause_line(self.icx.span_text(cl.span));
+        let s = Operand::Str(self.string(line.as_bytes()));
+        let decl = if at.is_some() { self.g.lang.ensures_failed } else { self.g.lang.requires_failed };
+        let Some(d) = decl else {
+            self.fail_at(at, "`runtime.panic` has no contract failure fn");
+            return;
+        };
+        let f = self.req(Req::Inst(InstKey { decl: d, args: Vec::new() }));
+        self.f.last_site = None;
+        match at {
+            None => {
+                self.f.b.call(f, None, &[s]);
+            }
+            Some(tok) => {
+                let site = self.site(tok);
+                let k = self.f.b.int(site.0 as i128);
+                if let Operand::Const(ci) = k {
+                    self.f.site_consts.push(ci);
+                }
+                self.f.b.call(f, None, &[k, s]);
+            }
+        }
+        self.f.b.unreachable();
+    }
+
+    /// The `old(e)` snapshot of the call whose `(` is `paren`.
+    pub fn old_value(&mut self, paren: u32) -> E {
+        match self.old_vals.get(&paren) {
+            Some(&(v, t)) => E::V(v, t),
+            None => self.fail_at(Some(paren), "`old(..)` without an entry snapshot"),
         }
     }
 
@@ -675,7 +847,7 @@ impl<'a> FnCx<'a> {
         } else if t == Term::KwMatch as u8 {
             self.lower_match(s, &kids, false);
         } else if t == Term::KwReturn as u8 {
-            self.return_stmt(kids.first().copied());
+            self.return_stmt(a, kids.first().copied());
         } else if t == Term::KwBreak as u8 || t == Term::KwContinue as u8 {
             self.break_continue(a, t == Term::KwBreak as u8);
         } else if t == Term::KwSpawn as u8 {
@@ -731,7 +903,7 @@ impl<'a> FnCx<'a> {
             return;
         };
         let unit = self.t_unit();
-        let ft = self.tys.intern(TypeKind::Fn { params: Box::new([]), ret: unit, features: 0 });
+        let ft = self.tys.intern(TypeKind::Fn { params: Box::new([]), ret: unit, features: 0, deny: 0 });
         let Some(fv) = self.closure_value(s, k, ft) else { return };
         let Some(d) = crate::mono::item_at(self.g.prog, "runtime.thread", "scope_spawn") else {
             self.fail(s, "`runtime.thread.scope_spawn` not found");
@@ -972,7 +1144,8 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    fn return_stmt(&mut self, e: Option<u32>) {
+    /// `return e;` at token `at`.
+    fn return_stmt(&mut self, at: u32, e: Option<u32>) {
         let rt = self.f.ret;
         let v = match e {
             Some(e) => {
@@ -993,6 +1166,7 @@ impl<'a> FnCx<'a> {
         };
         self.drop_temps_keep();
         self.drop_scopes(0);
+        self.ensures_checks(v, at);
         if self.open() {
             self.f.b.ret(v);
         }

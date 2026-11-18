@@ -252,44 +252,44 @@ fn divs() {
     let vb = u16x32.load(&b, 0);
     let vc = u32x16.load(&c, 0);
     let vd = u64x8.load(&d, 0);
-    va.div_const::<7>().store(&mut r8, 0);
-    va.bitcast::<i8x64>().div_const::<7>().store(&mut s8, 0);
-    vb.div_const::<7>().store(&mut r16, 0);
-    vb.bitcast::<i16x32>().div_const::<15>().store(&mut s16, 0);
-    vb.bitcast::<i16x32>().div_const::<8>().store(&mut p16, 0);
-    vc.div_const::<7>().store(&mut r32, 0);
-    vc.bitcast::<i32x16>().div_const::<7>().store(&mut s32, 0);
-    vd.div_const::<10>().store(&mut r64, 0);
-    vd.bitcast::<i64x8>().div_const::<3>().store(&mut s64, 0);
+    va.div_const(7).store(&mut r8, 0);
+    va.bitcast::<i8x64>().div_const(-7).store(&mut s8, 0);
+    vb.div_const(7).store(&mut r16, 0);
+    vb.bitcast::<i16x32>().div_const(-15).store(&mut s16, 0);
+    vb.bitcast::<i16x32>().div_const(-8).store(&mut p16, 0);
+    vc.div_const(7).store(&mut r32, 0);
+    vc.bitcast::<i32x16>().div_const(-7).store(&mut s32, 0);
+    vd.div_const(10).store(&mut r64, 0);
+    vd.bitcast::<i64x8>().div_const(-3).store(&mut s64, 0);
     let mut bad: u32 = 0;
     let mut sum: u64 = 0;
     for i in 0usize..64 {
         let x = a[i];
         let y = x as% i8;
         if r8[i] != x / 7 { bad = bad + 1; }
-        if s8[i] != y / 7 { bad = bad + 1; }
+        if s8[i] != y / -7 { bad = bad + 1; }
         sum = cs(cs(sum, r8[i] as u64), s8[i] as% u64);
     }
     for i in 0usize..32 {
         let x = b[i];
         let y = x as% i16;
         if r16[i] != x / 7 { bad = bad + 1; }
-        if s16[i] != y / 15 { bad = bad + 1; }
-        if p16[i] != y / 8 { bad = bad + 1; }
+        if s16[i] != y / -15 { bad = bad + 1; }
+        if p16[i] != y / -8 { bad = bad + 1; }
         sum = cs(cs(cs(sum, r16[i] as u64), s16[i] as% u64), p16[i] as% u64);
     }
     for i in 0usize..16 {
         let x = c[i];
         let y = x as% i32;
         if r32[i] != x / 7 { bad = bad + 1; }
-        if s32[i] != y / 7 { bad = bad + 1; }
+        if s32[i] != y / -7 { bad = bad + 1; }
         sum = cs(cs(sum, r32[i] as u64), s32[i] as% u64);
     }
     for i in 0usize..8 {
         let x = d[i];
         let y = x as% i64;
         if r64[i] != x / 10 { bad = bad + 1; }
-        if s64[i] != y / 3 { bad = bad + 1; }
+        if s64[i] != y / -3 { bad = bad + 1; }
         sum = cs(cs(sum, r64[i]), s64[i] as% u64);
     }
     report("div_const", bad, sum);

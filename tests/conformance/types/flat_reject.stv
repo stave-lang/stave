@@ -73,7 +73,7 @@ fn main() -> i32 {
     need::<cell.UnsafeCell<u32>>(); //~ ERROR E1407
     need::<cell.Cell<u32>>(); //~ ERROR E1407
     need::<atomic.U32>(); //~ ERROR E1407
-    need::<sync.Mutex<u32>>(); //~ ERROR E1407
+    need::<sync.Mutex<u32, 1>>(); //~ ERROR E1407
     need::<Handle>(); //~ ERROR E1407
     need::<Holds>(); //~ ERROR E1407
     need::<vec.Vec<u32>>(); //~ ERROR E1407

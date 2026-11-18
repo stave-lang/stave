@@ -112,7 +112,10 @@ fn build_links_an_executable() {
     let out = tmp.join("valid_small").display().to_string();
     let (c, _, err) = stave_env(&["build", &input("valid_small"), "-o", &out], &[]);
     assert_eq!(c, 0, "{err}");
-    assert_eq!(err, SUMMARY_AUTO);
+    // the build summary: main's stack bound, then the summary line
+    let (stack, rest) = err.split_once('\n').unwrap_or_default();
+    assert!(stack.starts_with("stack: main: ") && stack.ends_with(" bytes"), "{err}");
+    assert_eq!(rest, SUMMARY_AUTO);
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         let o = Command::new(&out).output().unwrap();
         assert_eq!((o.status.code(), o.stdout.as_slice()), (Some(0), &b"s = 3\n"[..]));

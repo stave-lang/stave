@@ -18,6 +18,8 @@ vec.sub.wrap            int                         N    1  sub
 vec.abs_wrap            sint                        N    1  abs
 vec.mul.wrap            int8/int16/int32            N    1  mul
 vec.mul.wrap            int64                       N    1  mul
+vec.mul_hi              int8/int16/int32            N    1  ?mulh
+vec.mul_hi              int64                       N    1  ?mulh
 vec.mul.sat             i8/i16/i32                  M    8  mul; smulh; asr; eor; asr; eor; cmpne; sel  | unverified
 vec.mul.sat             u8/u16/u32                  M    4  mul; umulh; cmpne; sel  | unverified
 vec.mul.sat             i64                         M    8  mul; smulh; asr; eor; asr; eor; cmpne; sel  | unverified

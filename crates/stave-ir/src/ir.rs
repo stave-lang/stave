@@ -19,7 +19,7 @@
 //! | `shl.wrap` | `a amount` | `<<%`: amount masked by bits-1 |
 //! | `and or xor` / `not` | `a b` / `a` | bitwise on ints, logical on bool |
 //! | `popcount clz ctz` | `a` | bit counts within `a`'s type width; result type = operand type |
-//! | `mul.wide` | `a b` | u32/u64 → `tuple (hi, lo)` |
+//! | `mul.wide` | `a b` | i32/i64/u32/u64 → `tuple (hi, lo)`: the exact double-width product; `hi` signed iff the type is, `lo` its low bits |
 //! | `eq ne lt le gt ge` | `a b` | result bool; ints by signedness, floats IEEE (unordered: only `ne` true) |
 //! | `select` | `c a b` | `c ? a : b` for a `bool` `c` and any one type of `a`, `b`; branch-free in every backend |
 //! | `cast cast.wrap cast.sat cast.round cast.try` | `x` | `as as% as\| as~ as?`; `cast.try` yields the `Option` instance |
@@ -121,10 +121,13 @@ pub enum PanicKind {
     UnsupportedCpu,
     /// A wait that can never end, e.g. a `Once` init reached again from its own initializer.
     Deadlock,
+    /// A false `requires` / `ensures` clause. Lowering reports it through
+    /// `runtime.panic.requires_failed` / `ensures_failed` (which print the clause), not this op.
+    Contract,
 }
 
 impl PanicKind {
-    pub const ALL: [PanicKind; 9] = [
+    pub const ALL: [PanicKind; 10] = [
         PanicKind::Bounds,
         PanicKind::Overflow,
         PanicKind::DivByZero,
@@ -134,6 +137,7 @@ impl PanicKind {
         PanicKind::Unwrap,
         PanicKind::UnsupportedCpu,
         PanicKind::Deadlock,
+        PanicKind::Contract,
     ];
 
     /// The report name (`panic: <Kind> at ...`).
@@ -148,6 +152,7 @@ impl PanicKind {
             PanicKind::Unwrap => "Unwrap",
             PanicKind::UnsupportedCpu => "UnsupportedCpu",
             PanicKind::Deadlock => "Deadlock",
+            PanicKind::Contract => "Contract",
         }
     }
 
@@ -163,6 +168,7 @@ impl PanicKind {
             PanicKind::Unwrap => "panic.unwrap",
             PanicKind::UnsupportedCpu => "panic.unsupported_cpu",
             PanicKind::Deadlock => "panic.deadlock",
+            PanicKind::Contract => "panic.contract",
         }
     }
 }
@@ -385,6 +391,7 @@ impl Op {
             Op::Panic(P::Unwrap) => &[P::Unwrap],
             Op::Panic(P::UnsupportedCpu) => &[P::UnsupportedCpu],
             Op::Panic(P::Deadlock) => &[P::Deadlock],
+            Op::Panic(P::Contract) => &[P::Contract],
             Op::Vec(v) => v.trap_kinds(),
             _ => &[],
         }

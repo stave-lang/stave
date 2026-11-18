@@ -87,6 +87,15 @@ pub(crate) struct LangFns {
     /// `runtime.cpu.trace(line: &str)`: writes a dispatch trace line (a dispatch body calls it
     /// when the word's trace bit is set).
     pub cpu_trace: Option<DeclId>,
+    /// `runtime.panic.requires_failed(clause: &str) -> never`: a false `requires` (reported at
+    /// the user site).
+    pub requires_failed: Option<DeclId>,
+    /// `runtime.panic.ensures_failed(site: u32, clause: &str) -> never`: a false `ensures`.
+    pub ensures_failed: Option<DeclId>,
+    /// `runtime.panic.test_input()` / `test_skip()`: the stdout markers of a `test fn` with
+    /// parameters (an input started; an input a `requires` clause skips).
+    pub test_input: Option<DeclId>,
+    pub test_skip: Option<DeclId>,
 }
 
 fn sym(prog: &Program, s: &str) -> Option<Sym> {
@@ -134,6 +143,10 @@ impl LangFns {
             cpu_word: item_at(prog, "runtime.cpu", "WORD"),
             cpu_init: item_at(prog, "runtime.cpu", "init"),
             cpu_trace: item_at(prog, "runtime.cpu", "trace"),
+            requires_failed: item_at(prog, "runtime.panic", "requires_failed"),
+            ensures_failed: item_at(prog, "runtime.panic", "ensures_failed"),
+            test_input: item_at(prog, "runtime.panic", "test_input"),
+            test_skip: item_at(prog, "runtime.panic", "test_skip"),
         }
     }
 }

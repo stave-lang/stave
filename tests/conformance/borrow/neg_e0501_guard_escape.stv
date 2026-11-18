@@ -3,7 +3,7 @@
 // block conflicts with the reference still used after it.
 import std.sync;
 
-fn escape(m: &sync.Mutex<u32>) -> u32 {
+fn escape(m: &sync.Mutex<u32, 1>) -> u32 {
     let zero: u32 = 0;
     let mut p: &u32 = &zero;
     {

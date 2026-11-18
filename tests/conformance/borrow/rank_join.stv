@@ -1,0 +1,39 @@
+//~ CHECK-ONLY
+// E1406: a guard held where the thread waits for children that take its rank or a lower one:
+// the end of a `scope`, `thread.join`, `par_for`.
+import std.sync;
+import std.thread;
+
+static A: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0);
+
+fn take_a() -> u32 {
+    return A.with_lock(fn(v: &mut u32) -> u32 { return *v; });
+}
+
+fn scoped(b: &sync.Mutex<u32, 2>) {
+    let g = b.lock();
+    scope {
+        spawn {
+            let x = take_a();
+        }
+    } //~ ERROR E1406
+}
+
+fn joined(a: &sync.Mutex<u32, 1>) -> u32 {
+    let g = a.lock();
+    let (x, y) = thread.join(fn() -> u32 { return take_a(); }, fn() -> u32 { return 1u32; }); //~ ERROR E1406
+    return x + y + *g.get();
+}
+
+fn par(b: &sync.Mutex<u32, 2>) {
+    let g = b.lock();
+    thread.par_for(0, 4, fn(i: usize) { let x = take_a(); }); //~ ERROR E1406
+}
+
+fn main() {
+    let a = sync.Mutex::<u32, 1>.new(0);
+    let b = sync.Mutex::<u32, 2>.new(0);
+    scoped(&b);
+    let j = joined(&a);
+    par(&b);
+}

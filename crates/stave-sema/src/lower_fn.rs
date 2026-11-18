@@ -54,6 +54,8 @@ pub(crate) struct G<'a> {
     pub opt_some: u32,
     pub res_ok: u32,
     pub res_err: u32,
+    /// Some fn checks a `requires`: calls that can reach one store the user site first.
+    pub any_requires: bool,
 }
 
 impl<'a> G<'a> {
@@ -67,6 +69,18 @@ impl<'a> G<'a> {
             .decl(d)
             .and_then(|x| self.prog.module(x.module))
             .is_some_and(|m| self.builtin_pkg.get(m.package.idx()).copied().unwrap_or(false))
+    }
+
+    /// Whether a call of decl `d` can run a `requires` check, which reports at the user site:
+    /// `d` checks one, or `d` is a dispatch fn (its arm may).
+    pub fn reaches_requires(&self, d: DeclId) -> bool {
+        if !self.any_requires {
+            return false;
+        }
+        if self.prog.decl(d).is_some_and(|x| x.flags.has(crate::decls::DeclFlags::DISPATCH)) {
+            return true;
+        }
+        self.tc.body(d).and_then(|b| b.contracts.as_deref()).is_some_and(|c| !c.checked_requires().is_empty())
     }
 }
 
@@ -212,6 +226,9 @@ pub(crate) struct FnState {
     /// Open `scope` statements: (scope depth of their block, the `&mut usize` thread-list
     /// handle); their spawns are joined when that scope ends or is left.
     pub scope_handles: Vec<(usize, Operand)>,
+    /// The fn has `ensures` clauses (never set for a closure): each return checks them, and the
+    /// end of a unit body (this token, the body's `}`) does too.
+    pub ensures_end: Option<u32>,
     /// `&mut` chunk bindings: (scope depth of the chunk body, the write-back of the binding's
     /// slot); written back when that scope ends or is left.
     pub write_backs: Vec<(usize, WriteBack)>,
@@ -300,6 +317,13 @@ pub(crate) struct FnCx<'a> {
     pub raw_self_ty: Option<Ty>,
     /// The needs of the fn being lowered (its closures have the same).
     pub needs: stave_target::FeatureSet,
+    /// The `old(e)` snapshots taken at entry, by the call's `(` token: (value, type).
+    pub old_vals: FxHashMap<u32, (Operand, Ty)>,
+    /// The local `result` names in the `ensures` clauses.
+    pub result_local: Option<usize>,
+    /// Lowering a `requires` clause: no user-site stores, so a false clause reports the site
+    /// the caller stored.
+    pub hold_site: bool,
 }
 
 impl<'a> FnCx<'a> {
@@ -338,6 +362,9 @@ impl<'a> FnCx<'a> {
             cur_n_parent: 0,
             raw_self_ty: None,
             needs: stave_target::FeatureSet::EMPTY,
+            old_vals: FxHashMap::default(),
+            result_local: None,
+            hold_site: false,
         }
     }
 
@@ -1241,16 +1268,26 @@ impl<'a> FnCx<'a> {
             Some(s) => s,
             None => return self.fail_at(Some(tok), "call of a fn without a signature"),
         };
-        if self.user && self.g.builtin_decl(k.decl) {
+        let builtin = self.g.builtin_decl(k.decl);
+        let requires = self.g.reaches_requires(k.decl);
+        if self.user && (builtin || requires) {
             self.user_site(tok);
         } else {
             self.f.last_site = None;
         }
         let f = self.req(Req::Inst(k));
-        self.emit_call(f, args, ret, tok)
+        let r = self.emit_call(f, args, ret, tok);
+        if requires && !builtin {
+            // user code ran: it may have stored other sites
+            self.f.last_site = None;
+        }
+        r
     }
 
     pub fn user_site(&mut self, tok: u32) {
+        if self.hold_site {
+            return;
+        }
         let Some(sus) = self.g.lang.set_user_site else { return };
         let s = self.site(tok);
         let here = self.f.b.current().map(|b| (b, s.0));
@@ -1349,6 +1386,7 @@ impl FnState {
             last_site: None,
             scope_handles: Vec::new(),
             write_backs: Vec::new(),
+            ensures_end: None,
         }
     }
 }
@@ -1366,7 +1404,11 @@ fn empty_body() -> &'static TypedBody {
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),
+        drops: Vec::new(),
+        denied: Vec::new(),
         has_error: true,
         emulated: Vec::new(),
+        contracts: None,
+        test_domain: None,
     })
 }

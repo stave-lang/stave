@@ -595,8 +595,11 @@ fn runtime_syscalls_match_the_list() {
         }
         assert_eq!(nr_array(&text), list, "{dir}: NR[id] follows the list order");
         assert!(text.contains(&format!("pub const NCALLS: usize = {};", list.len())), "{dir}: NCALLS");
-        // Every raw syscall takes its number from the NR table: `syscallN(NR[id], ..)`.
+        // Every raw syscall takes its number from the NR table, `syscallN(NR[id], ..)`, or names
+        // one of its NR_* constants (`exit_group`, `sched_yield`: the panic path, which must not
+        // trap, so no table lookup).
         let mut calls = 0;
+        let mut direct = 0;
         for l in
             text.lines().filter(|l| !l.trim_start().starts_with("fn ") && !l.trim_start().starts_with("//"))
         {
@@ -608,11 +611,19 @@ fn runtime_syscalls_match_the_list() {
                     continue;
                 }
                 let arg0 = rest[2..].split([',', ')']).next().unwrap_or("").trim();
-                assert_eq!(arg0, "NR[id]", "{dir}: syscall number not from the table in `{}`", l.trim());
-                calls += 1;
+                if arg0 == "NR[id]" {
+                    calls += 1;
+                    continue;
+                }
+                let named = arg0
+                    .strip_prefix("NR_")
+                    .is_some_and(|n| names.contains(&n.to_ascii_lowercase().as_str()));
+                assert!(named, "{dir}: syscall number not from the table in `{}`", l.trim());
+                direct += 1;
             }
         }
         assert_eq!(calls, 7, "{dir}: one wrapper per syscall0..syscall6");
+        assert_eq!(direct, 2, "{dir}: exit_group and sched_yield");
     }
     // Cross-check x86-64 against the host's kernel headers when installed.
     if let Ok(h) = std::fs::read_to_string("/usr/include/x86_64-linux-gnu/asm/unistd_64.h") {

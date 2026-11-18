@@ -1299,7 +1299,10 @@ impl<'a> FnCx<'a> {
         };
         self.drop_temps_keep();
         self.drop_scopes(0);
-        self.f.b.ret(Some(r));
+        self.ensures_checks(Some(r), tok);
+        if self.open() {
+            self.f.b.ret(Some(r));
+        }
         // continue
         self.f.env = snap;
         self.f.b.switch_to(cont);
@@ -1434,17 +1437,22 @@ impl<'a> FnCx<'a> {
                 };
                 let Some(vs) = self.args(args, &params) else { return E::Never };
                 let rt = self.ret_of(ret);
+                // the callee may check a `requires`, reported at the user site
+                if self.user && self.g.any_requires {
+                    self.user_site(ctok);
+                }
                 let s = self.site(ctok);
                 self.f.b.set_site(s);
-                self.f.last_site = None;
                 let r = self.f.b.call_ind(fv, rt.map(FnCx::ir), &vs);
                 self.f.b.set_site(stave_ir::Site::NONE);
+                self.f.last_site = None;
                 self.call_result(r, ret)
             }
             Some(Target::FenceStream) => {
                 self.f.b.inst(Op::FenceStream, None, &[]);
                 E::Unit
             }
+            Some(Target::Old) => self.old_value(paren),
             Some(Target::SizeOf { ty, align }) => {
                 let t = self.sub(ty);
                 let Some((s, a)) = self.layout(t) else { return self.fail_at(Some(ctok), "layout") };
@@ -1717,6 +1725,29 @@ impl<'a> FnCx<'a> {
                 let Some(b) = self.val(args.first().copied().unwrap_or(n), Some(t)) else { return E::Never };
                 let tt = self.tys.mk_tuple(vec![t, t]);
                 E::V(self.op2(Op::MulWide, tt, a, b), tt)
+            }
+            "mul_hi" => {
+                let t = p.ty;
+                let Some(a) = self.read(&p) else { return E::Never };
+                let Some(b) = self.val(args.first().copied().unwrap_or(n), Some(t)) else { return E::Never };
+                let (signed, bits) = match self.kind(t) {
+                    TypeKind::Int { signed, bits } => (signed, bits),
+                    _ => return self.fail_at(Some(seg), "mul_hi"),
+                };
+                if bits.bits() >= 32 {
+                    let tt = self.tys.mk_tuple(vec![t, t]);
+                    let w = self.op2(Op::MulWide, tt, a, b);
+                    let z = self.int(0);
+                    return E::V(self.op2(Op::Get, t, w, z), t);
+                }
+                // the exact product in 32 bits, its bits above the operand width
+                let wt = self.t_int(signed, crate::types::IntBits::B32);
+                let (wa, wb) =
+                    (self.op1(Op::Cast(CastKind::Exact), wt, a), self.op1(Op::Cast(CastKind::Exact), wt, b));
+                let prod = self.op2(Op::MulWrap, wt, wa, wb);
+                let k = self.int(i128::from(bits.bits()));
+                let Some(hi) = self.trapping(seg, Op::Shr, Some(wt), &[prod, k]) else { return E::Never };
+                E::V(self.op1(Op::Cast(CastKind::Wrap), t, hi), t)
             }
             "popcount" | "clz" | "ctz" => {
                 let t = p.ty;

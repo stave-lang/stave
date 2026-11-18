@@ -17,7 +17,8 @@
 //!   code generation in parallel (rayon on the caller's pool for AArch64; stave-codegen-x64 uses
 //!   its own scoped threads), then the link. Debug builds use stave-obj's debug layout (padded
 //!   slots, jump table), release builds the packed one. Backend errors on valid IR (vectors,
-//!   f16) are [`Failure::Unsupported`].
+//!   f16) are [`Failure::Unsupported`]. Given the call graph, it also computes the stack bound
+//!   from the frame sizes the backend reports ([`crate::stack`]) and writes the stack table.
 //! - [`main_path`]: the checked-IR path of the root package's `main`.
 
 use std::fmt;
@@ -27,12 +28,12 @@ use rayon::prelude::*;
 use stave_ir::bounds::{Analysis, Proved, Unguarded, analyze_func};
 use stave_ir::witness::check::{Checked, Rejected, check_func};
 use stave_ir::{FuncId, Module};
-use stave_obj::{FuncCode, ImageBuilder, Machine, ObjectImage};
+use stave_obj::{FuncCode, ImageBuilder, Machine, ObjectImage, StackUse};
 use stave_sema::{DeclKind, LowerErrorKind, Mode, Program, Typeck};
 use stave_target::{Arch, Triple};
 
 use crate::pipeline::Stage;
-use crate::prof;
+use crate::{prof, stack};
 
 /// Why the back end produced no executable for a program without error diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,31 +119,37 @@ pub struct Lowered {
     /// Per function that lost a check: the witness the checker accepted and the rule behind
     /// each row (function order; instruction indices are those before the removal).
     pub removed: Vec<Proved>,
+    /// Per function: the call-graph nodes it stands for ([`stave_sema::lower_mapped`]).
+    pub nodes_of_func: Vec<Vec<u32>>,
 }
 
 /// Lowers (mono + lower), verifies, and removes the bounds checks that have a checked witness.
 /// The program must have no error diagnostics.
 pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Lowered, Failure> {
-    let (lowered, tm) = stave_sema::lower_timed(prog, tc, mode);
+    let (lowered, tm) = stave_sema::lower_mapped(prog, tc, mode);
     prof::part(".rounds", tm.rounds);
     prof::part(".assemble", tm.assemble);
     prof::mark("lower");
-    let mut m = lowered.map_err(|es| {
-        let message = listed(&es);
-        if es.iter().all(|e| e.kind == LowerErrorKind::Unsupported) {
-            Failure::Unsupported { stage: Stage::Lower, message }
-        } else {
-            Failure::Internal { stage: Stage::Lower, message }
-        }
-    })?;
+    let (mut m, nodes_of_func) = lowered.map_err(|es| lower_failure(&es))?;
     verified(&m, Stage::Lower)?;
     prof::mark("verify");
     let removed = remove_proven_checks(&mut m)?;
-    Ok(Lowered { module: m, removed })
+    Ok(Lowered { module: m, removed, nodes_of_func })
+}
+
+/// The failure for lowering errors: all [`LowerErrorKind::Unsupported`] is
+/// [`Failure::Unsupported`], anything else a compiler bug.
+pub(crate) fn lower_failure(es: &[stave_sema::LowerError]) -> Failure {
+    let message = listed(es);
+    if es.iter().all(|e| e.kind == LowerErrorKind::Unsupported) {
+        Failure::Unsupported { stage: Stage::Lower, message }
+    } else {
+        Failure::Internal { stage: Stage::Lower, message }
+    }
 }
 
 /// The IR verifier on `m`; an error is a compiler bug of `stage`.
-fn verified(m: &Module, stage: Stage) -> Result<(), Failure> {
+pub(crate) fn verified(m: &Module, stage: Stage) -> Result<(), Failure> {
     verify(m).map_err(|es| {
         let named: Vec<String> = es
             .iter()
@@ -174,7 +181,7 @@ fn audited(m: &Module, stage: Stage) -> Result<(), Failure> {
 /// proof, and the witnesses of the checks that are provably redundant. Then the witness checker,
 /// which shares no code with the proof search, validates every witness, and only the checks it
 /// accepted are deleted. Returns the accepted proofs.
-fn remove_proven_checks(m: &mut Module) -> Result<Vec<Proved>, Failure> {
+pub(crate) fn remove_proven_checks(m: &mut Module) -> Result<Vec<Proved>, Failure> {
     let internal = |message: String| Failure::Internal { stage: Stage::Lower, message };
     let found: Vec<Analysis> =
         (0..m.funcs.len() as u32).into_par_iter().map(|f| analyze_func(m, FuncId(f))).collect();
@@ -233,6 +240,8 @@ pub struct Built {
     pub link_ms: f64,
     /// Functions with a body (compiled).
     pub funcs: u64,
+    /// The stack bound (when the caller gave the call graph).
+    pub stack: Option<stack::Report>,
 }
 
 fn ms(t: Instant) -> f64 {
@@ -245,13 +254,15 @@ pub fn image_options(machine: Machine, release: bool) -> stave_obj::Options {
 }
 
 /// Generates code for every function of `m` and links the static executable whose `main` is
-/// `main` (`__stave_main`; contracts/intrinsics.md).
+/// `main` (`__stave_main`; contracts/intrinsics.md). With `stack`, the stack table holds the
+/// computed bound; without, it is empty (every stack gets the `[run] stack` default).
 pub fn codegen_link(
     m: &Module,
     main: FuncId,
     triple: Triple,
     release: bool,
     threads: Option<usize>,
+    stack: Option<&stack::Input<'_>>,
 ) -> Result<Built, Failure> {
     // A backend without vector code generation: a vector value or op stops the build here.
     if !generates_vector_code(triple)
@@ -283,8 +294,8 @@ pub fn codegen_link(
         m
     };
     match triple.arch() {
-        Arch::X86_64 => x64(m, main, triple.baseline(), release, threads, funcs),
-        Arch::Aarch64 => a64(m, main, release, funcs),
+        Arch::X86_64 => x64(m, main, triple.baseline(), release, threads, funcs, stack),
+        Arch::Aarch64 => a64(m, main, release, funcs, stack),
         Arch::Gpu => Err(Failure::Target(triple)),
     }
 }
@@ -304,6 +315,7 @@ fn x64(
     release: bool,
     threads: Option<usize>,
     funcs: u64,
+    stack: Option<&stack::Input<'_>>,
 ) -> Result<Built, Failure> {
     use stave_codegen_x64::Error as E;
     let classify = |stage: Stage, e: E| match e {
@@ -326,13 +338,25 @@ fn x64(
     let e = stave_codegen_x64::emit_module(m, &o, &mut b).map_err(|e| classify(Stage::Codegen, e))?;
     let codegen_ms = ms(t0);
     prof::mark("codegen");
+    let report = stack.map(|s| stack::compute(m, s, &e.stack, main));
+    if let Some(r) = &report {
+        b.define_rodata(e.stack_table, r.table(&e.func_syms))
+            .map_err(|e| Failure::Internal { stage: Stage::Link, message: e.to_string() })?;
+        prof::mark("stack");
+    }
     let t1 = Instant::now();
     let img = stave_codegen_x64::link(b, &e).map_err(|e| classify(Stage::Link, e))?;
     prof::mark("link");
-    Ok(Built { image: img, codegen_ms, link_ms: ms(t1), funcs })
+    Ok(Built { image: img, codegen_ms, link_ms: ms(t1), funcs, stack: report })
 }
 
-fn a64(m: &Module, main: FuncId, release: bool, funcs: u64) -> Result<Built, Failure> {
+fn a64(
+    m: &Module,
+    main: FuncId,
+    release: bool,
+    funcs: u64,
+    stack: Option<&stack::Input<'_>>,
+) -> Result<Built, Failure> {
     use stave_codegen_a64::debug::{Codegen, Error, ErrorKind, FuncScratch, prepare};
     let classify = |stage: Stage, e: Error| match e.kind {
         ErrorKind::Unsupported(_) => Failure::Unsupported { stage, message: e.to_string() },
@@ -344,10 +368,12 @@ fn a64(m: &Module, main: FuncId, release: bool, funcs: u64) -> Result<Built, Fai
     let cg = Codegen::new(m, &syms).release(release);
     let ids: Vec<FuncId> =
         (0..m.funcs.len()).filter(|&i| m.funcs[i].body.is_some()).map(|i| FuncId(i as u32)).collect();
-    let codes: Vec<Result<FuncCode, Error>> =
-        ids.par_iter().map_init(FuncScratch::default, |s, &f| cg.compile(f, s)).collect();
+    let codes: Vec<Result<(FuncCode, StackUse), Error>> =
+        ids.par_iter().map_init(FuncScratch::default, |s, &f| cg.compile_stack(f, s)).collect();
+    let mut uses = vec![StackUse::default(); m.funcs.len()];
     for (&f, code) in ids.iter().zip(codes) {
-        let code = code.map_err(|e| classify(Stage::Codegen, e))?;
+        let (code, used) = code.map_err(|e| classify(Stage::Codegen, e))?;
+        uses[f.index()] = used;
         let sym = syms.funcs.get(f.index()).copied().flatten().ok_or_else(|| Failure::Internal {
             stage: Stage::Codegen,
             message: format!("fn #{} has no symbol", f.0),
@@ -357,10 +383,18 @@ fn a64(m: &Module, main: FuncId, release: bool, funcs: u64) -> Result<Built, Fai
     }
     let codegen_ms = ms(t0);
     prof::mark("codegen");
+    let report = stack.map(|s| stack::compute(m, s, &uses, main));
+    let table = match &report {
+        Some(r) => r.table(&syms.funcs),
+        None => stave_obj::stub::stack_table(0, 0, &[]),
+    };
+    b.define_rodata(syms.stack_table, table)
+        .map_err(|e| Failure::Internal { stage: Stage::Link, message: e.to_string() })?;
+    prof::mark("stack");
     let t1 = Instant::now();
     let img = b.link().map_err(|e| Failure::Internal { stage: Stage::Link, message: e.to_string() })?;
     prof::mark("link");
-    Ok(Built { image: img, codegen_ms, link_ms: ms(t1), funcs })
+    Ok(Built { image: img, codegen_ms, link_ms: ms(t1), funcs, stack: report })
 }
 
 #[cfg(test)]

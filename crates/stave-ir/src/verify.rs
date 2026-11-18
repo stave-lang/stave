@@ -681,8 +681,8 @@ impl<'a> FnVerifier<'a> {
                 match self.key(t) {
                     Some(TypeKey::Tuple(ts)) if ts.len() == 2 && ts[0] == ts[1] => {
                         match self.cls(ts[0]) {
-                            Cls::Int(it) if !it.signed && (it.bits == 32 || it.bits == 64) => {}
-                            _ => return Err("mul.wide needs u32 or u64".into()),
+                            Cls::Int(it) if it.bits == 32 || it.bits == 64 => {}
+                            _ => return Err("mul.wide needs a 32- or 64-bit int".into()),
                         }
                         self.check_args(b, args, &[ts[0], ts[0]])
                     }

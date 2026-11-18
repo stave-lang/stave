@@ -21,7 +21,7 @@ fn main() -> i32 {
     let (a, s) = thread.join(fn() -> vec.Vec<u64> { return fill(100); }, fn() -> string.String { return string.String.from_str("from b"); });
     let mut w = vec.Vec::<u64>.new();
     let (x, y) = thread.join(fn() -> u64 { w.push(7); return 1; }, fn() -> u64 { return 2; });
-    let m = sync.Mutex::<vec.Vec<u64>>.new(vec.Vec::<u64>.new());
+    let m = sync.Mutex::<vec.Vec<u64>, 1>.new(vec.Vec::<u64>.new());
     thread.par_for(0, 100, fn(i: usize) {
         let k = *a.get_ref(i);
         let mut g = m.lock();
@@ -37,7 +37,7 @@ fn main() -> i32 {
     io.print(f"{n} {s} {wl} {xy}\n");
     io.print(f"{total} {gl}\n");
 
-    let lk = sync.Mutex::<u64>.new(5);
+    let lk = sync.Mutex::<u64, 1>.new(5);
     let mut out = vec.Vec::<u64>.new();
     for i in 0u64..8 { out.push(0); }
     {

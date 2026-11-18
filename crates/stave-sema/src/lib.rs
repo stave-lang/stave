@@ -38,8 +38,10 @@ pub mod builtins;
 pub mod callgraph;
 pub mod closures;
 pub mod consteval;
+pub mod contracts;
 pub mod decls;
 mod dispatch;
+pub mod effects;
 pub mod gates;
 pub mod itemcx;
 pub mod kinds;
@@ -56,8 +58,10 @@ pub mod origins;
 pub mod package;
 pub mod patterns;
 pub mod prim;
+pub mod ranks;
 pub mod resolve;
 pub mod sigs;
+pub mod testgen;
 mod threads;
 pub mod traits;
 pub mod typeck;
@@ -72,6 +76,7 @@ mod dump;
 mod ids;
 mod intern;
 mod pool;
+mod recursion;
 mod scan;
 mod toml;
 
@@ -89,7 +94,10 @@ pub use diag::failures as diagnostic_build_failures;
 pub use dump::{dump_names, dump_strings, names_file_into, strings_into};
 pub use ids::{BindingRef, DeclId, GenericRef, ItemId, ModuleId, PackageId, Sym};
 pub use intern::Strings;
-pub use lower::{LowerError, LowerErrorKind, LowerTimings, Mode, lower, lower_timed};
+pub use lower::{
+    GraphLowering, LowerError, LowerErrorKind, LowerTimings, Mode, lower, lower_graph_nodes, lower_mapped,
+    lower_timed,
+};
 pub use modules::{Import, Module};
 pub use package::{BuiltinPackage, FileBytes, Fs, Package, PackageKind};
 pub use prim::{Builtin, Lanes, Prim, Scalar};
@@ -515,7 +523,7 @@ impl Program {
             for is in &mf.issues {
                 let span = Span::new(fid, is.span.lo, is.span.hi.saturating_sub(is.span.lo));
                 let holes: Vec<(&str, &str)> = is.holes.iter().map(|(k, v)| (*k, v.as_str())).collect();
-                diags.extend(mk("E1002", is.case, &holes, span, &[]));
+                diags.extend(mk(is.code, is.case, &holes, span, &[]));
             }
         }
         let mut timings = Timings {
@@ -639,6 +647,7 @@ impl Program {
                 deps,
                 root_module,
                 is_root: rp.is_root,
+                run_stack: rp.run_stack,
             });
         }
 
@@ -1173,6 +1182,7 @@ impl Program {
                     deps,
                     root_module: ModuleId::NONE,
                     is_root: rp.is_root,
+                    run_stack: rp.run_stack,
                 }
             })
             .collect();

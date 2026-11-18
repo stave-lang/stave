@@ -13,11 +13,13 @@
 //! - [`bounds`]: the audit of element accesses and the pass that proves bounds checks removable.
 //! - [`witness`]: the proofs of that pass as data, and their independent checker, which alone
 //!   deletes a check.
+//! - [`traps`]: the instructions that give a function the `trap` effect.
 //! - [`link`]: text order and symbol names of a module's functions and statics (both backends).
 
 pub mod arith;
 pub mod bounds;
 pub mod build;
+pub mod divmagic;
 pub mod fence;
 pub mod host;
 pub mod interp;
@@ -27,6 +29,7 @@ pub mod link;
 pub mod mem;
 pub mod print_checked;
 pub mod simd;
+pub mod traps;
 pub mod types;
 pub mod verify;
 pub mod witness;

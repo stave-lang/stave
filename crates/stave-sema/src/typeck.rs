@@ -66,8 +66,8 @@ pub enum Target {
     /// A trait method called through a bound or a qualified `Trait.m(x)` with `Self` = `self_ty`.
     TraitMethod { method: DeclId, self_ty: TypeId, args: Vec<GArg> },
     /// A built-in method of a built-in type, or a type-relative built-in (`f32x4.splat`);
-    /// `ret`: the call's result type; `consts`: its constant generic arguments (`div_const::<K>`,
-    /// the `permute` lane indices).
+    /// `ret`: the call's result type; `consts`: its constants (the `div_const` divisor's bits,
+    /// two's complement for signed lanes; the `permute` lane indices).
     Builtin { name: &'static str, recv: TypeId, adjust: Adjust, ret: TypeId, consts: Vec<u64> },
     /// A user-type operator: the trait method (`Add.add`) through the impl or a bound.
     Op { method: MethodRef, args: Vec<GArg> },
@@ -93,6 +93,9 @@ pub enum Target {
     Index { derefs: u32 },
     /// Sub-slice `xs[a..b]` / `xs[a..=b]` of an array or slice (after `derefs` auto-derefs).
     Slice { derefs: u32 },
+    /// `old(e)` in an `ensures` clause: the value of `e` at entry
+    /// ([`crate::contracts::Contracts::olds`]).
+    Old,
 }
 
 /// An implicit conversion made explicit.
@@ -155,9 +158,24 @@ pub struct TypedBody {
     /// `Display.fmt` (a [`Target::TraitMethod`] with the writer type as its own arg, at the
     /// f-string token; one per hole).
     pub implicit: Vec<(u32, Target)>,
+    /// The value types this body may drop, each with the token where such a value appears, sorted
+    /// and without duplicates: its locals (params and pattern bindings, at their binding's first
+    /// token) and the values it makes (call results, struct and variant literals). A value the
+    /// body drops is one of these or a part of one; types that cannot own a `Drop` value (scalars,
+    /// references, pointers, fn values) are left out.
+    pub drops: Vec<(u32, TypeId)>,
+    /// Fn values made (a closure literal, a fn item used as a value) where a fn type with a deny
+    /// clause their own type lacks is wanted, so the effect pass checks them on their effects
+    /// ([`crate::effects`], E1403): (the closure's `fn` token or the token of the fn item's value
+    /// target, the effects that must be absent, the coerced node), sorted by token.
+    pub denied: Vec<(u32, u8, u32)>,
     pub has_error: bool,
     /// Class U ops inside `emulate { }`, in source order ([`crate::gates`]).
     pub emulated: Vec<crate::gates::Emulated>,
+    /// The fn's `requires` / `ensures` clauses, if it has any.
+    pub contracts: Option<Box<crate::contracts::Contracts>>,
+    /// A `test fn` with parameters: the domain its inputs come from.
+    pub test_domain: Option<Box<crate::testgen::Domain>>,
 }
 
 impl TypedBody {
@@ -186,7 +204,7 @@ pub struct TypeckTimings {
     pub sigs: Duration,
     pub bodies: Duration,
     pub canon: Duration,
-    /// [`crate::callgraph`].
+    /// [`crate::callgraph`] and the recursion check on it.
     pub graph: Duration,
 }
 
@@ -444,6 +462,9 @@ fn check_in_pool(prog: &Program) -> Typeck {
     } else {
         crate::callgraph::build(prog, &sigs_table, &tys, &bodies, &brackets)
     };
+    if !call_graph.truncated {
+        diags.extend(crate::recursion::check(prog, &sigs_table, &tys, &call_graph));
+    }
     let t_graph = t3.elapsed();
     let diagnostics = stave_diag::canonical_order(diags, &prog.source_map);
     Typeck {
@@ -470,8 +491,12 @@ fn empty_body(j: Job) -> TypedBody {
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),
+        drops: Vec::new(),
+        denied: Vec::new(),
         has_error: true,
         emulated: Vec::new(),
+        contracts: None,
+        test_domain: None,
     }
 }
 
@@ -526,6 +551,9 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
     }
     for s in &mut b.sites {
         map_gargs(&mut s.inst.args, f);
+    }
+    for (_, t) in &mut b.drops {
+        *t = f(*t);
     }
 }
 
@@ -655,6 +683,8 @@ pub(crate) struct Ck<'a> {
     pub coercions: Vec<(u32, Coercion)>,
     pub sites: Vec<CallSite>,
     pub implicit: Vec<(u32, Target)>,
+    pub drops: Vec<(u32, TypeId)>,
+    pub denied: Vec<(u32, u8, u32)>,
     pub depth: u32,
     /// E0005 case `expr` was reported for this body.
     pub depth_reported: bool,
@@ -667,6 +697,13 @@ pub(crate) struct Ck<'a> {
     /// alternative (binding node, type, mode), in source order.
     pub or_binds: Option<Vec<(u32, TypeId, crate::patterns::Mode)>>,
     pub gates: crate::gates::Gates,
+    /// Inside a contract clause: which kind, and the `old(..)` nesting.
+    pub contract: Option<crate::contracts::ClauseCx>,
+    /// The `old(e)` calls typed so far: (`(` token, `e`'s node).
+    pub olds: Vec<(u32, u32)>,
+    pub contracts: Option<Box<crate::contracts::Contracts>>,
+    /// The input domain of a `test fn` with parameters ([`crate::testgen`]).
+    pub domain: Option<Box<crate::testgen::Domain>>,
 }
 
 fn check_body(
@@ -716,6 +753,8 @@ fn check_body(
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),
+        drops: Vec::new(),
+        denied: Vec::new(),
         depth: 0,
         depth_reported: false,
         diverges: false,
@@ -723,6 +762,10 @@ fn check_body(
         kids_buf: Vec::new(),
         or_binds: None,
         gates: crate::gates::Gates::default(),
+        contract: None,
+        olds: Vec::new(),
+        contracts: None,
+        domain: None,
     };
     match j.kind {
         JobKind::Fn => {
@@ -1085,6 +1128,19 @@ impl<'a> Ck<'a> {
                 if self.tys.has_error(want) {
                     return want;
                 }
+                if let Some(widened) = self.deny_widened(t, want) {
+                    if let Some(tok) = self.made_fn_value(n) {
+                        self.denied.push((tok, widened, n));
+                        self.coerce_note(n, Coercion::FnItem);
+                        return want;
+                    }
+                    let (from, to) = (self.show(t), self.show(want));
+                    let effect = crate::effects::Effects(widened).names()[0];
+                    let holes = [("from", from.as_str()), ("to", to.as_str()), ("effect", effect)];
+                    let d = mk("E1403", None, &holes, self.icx.node_span(n), &[]);
+                    self.report(d);
+                    return ids::ERROR;
+                }
                 let drops_features = matches!(
                     (self.tys.kind(t), self.tys.kind(want)),
                     (TypeKind::Fn { params: p1, ret: r1, .. }, TypeKind::Fn { params: p2, ret: r2, .. })
@@ -1100,6 +1156,31 @@ impl<'a> Ck<'a> {
                 ids::ERROR
             }
         }
+    }
+
+    /// The effects fn type `want` denies beyond those fn type `t` denies, when that is the only
+    /// reason `t` is not coercible to `want` (equal params and return type, features allowed).
+    fn deny_widened(&self, t: TypeId, want: TypeId) -> Option<u8> {
+        let (
+            TypeKind::Fn { params: p1, ret: r1, features: f1, deny: d1 },
+            TypeKind::Fn { params: p2, ret: r2, features: f2, deny: d2 },
+        ) = (self.tys.kind(t), self.tys.kind(want))
+        else {
+            return None;
+        };
+        let widened = d2 & !d1;
+        (p1 == p2 && r1 == r2 && (f1 & !(f2 | self.proven_features())) == 0 && widened != 0)
+            .then_some(widened)
+    }
+
+    /// The token a fn value made by node `n` is known by: a closure literal's `fn` token, or the
+    /// token of a fn item's value target (`None` for any other expression).
+    fn made_fn_value(&self, n: u32) -> Option<u32> {
+        if crate::closures::closure_kind(&self.icx, n) == Some(crate::closures::ClosureKind::Literal) {
+            return Some(self.icx.a(n));
+        }
+        let end = self.icx.end_tok(n);
+        self.targets.iter().rev().any(|(tok, t)| *tok == end && matches!(t, Target::Fn { .. })).then_some(end)
     }
 
     /// The features every value made in this body may assume: its `needs` and the target
@@ -1171,12 +1252,14 @@ impl<'a> Ck<'a> {
                 None
             }
             (
-                TypeKind::Fn { params: p1, ret: r1, features: f1 },
-                TypeKind::Fn { params: p2, ret: r2, features: f2 },
+                TypeKind::Fn { params: p1, ret: r1, features: f1, deny: d1 },
+                TypeKind::Fn { params: p2, ret: r2, features: f2, deny: d2 },
             ) => {
                 // Features may drop to those proven where the coercion happens: CPU features
                 // never change while a program runs, so the value stays callable (else E0707).
-                if p1 == p2 && r1 == r2 && (f1 & !(f2 | self.proven_features())) == 0 {
+                // The deny clause may only shrink: the value keeps every guarantee the target
+                // type states (else E1403).
+                if p1 == p2 && r1 == r2 && (f1 & !(f2 | self.proven_features())) == 0 && (d2 & !d1) == 0 {
                     return Some(Coercion::FnItem);
                 }
                 None
@@ -1234,10 +1317,13 @@ impl<'a> Ck<'a> {
         let Some(block) = icx.child(n, NodeKind::Block) else { return };
         let ret = sig.ret;
         self.rets.push(RetCx { ty: ret, span: sig.ret_span, loops: Vec::new(), is_never: ret == ids::NEVER });
+        self.contract_clauses(n, ret);
         self.reachable = true;
         let div = self.block(block);
         self.rets.pop();
         self.end_of_body(block, div, ret);
+        self.contract_rules(n);
+        self.test_domain(sig, n);
     }
 
     /// E0207 at the end of a body that can reach it.
@@ -1308,6 +1394,75 @@ impl<'a> Ck<'a> {
         }
     }
 
+    /// Records that the body may own (and drop) a value of type `t`, at token `tok`.
+    pub fn owned(&mut self, tok: u32, t: TypeId) {
+        if !t.is_none()
+            && matches!(
+                self.tys.kind(t),
+                TypeKind::Adt { .. } | TypeKind::Tuple(_) | TypeKind::Array { .. } | TypeKind::Param(_)
+            )
+            && !self.tys.has_error(t)
+        {
+            self.drops.push((tok, t));
+        }
+    }
+
+    /// [`TypedBody::drops`]: the locals and the call results (literals are recorded where they
+    /// are checked).
+    fn record_drops(&mut self) {
+        let icx = self.icx;
+        let locals: Vec<(u32, TypeId)> = self.locals.iter().map(|(&b, &t)| (icx.a(b), t)).collect();
+        for (tok, t) in locals {
+            self.owned(tok, t);
+        }
+        let targets = std::mem::take(&mut self.targets);
+        let implicit = std::mem::take(&mut self.implicit);
+        for (tok, t) in targets.iter().chain(implicit.iter()) {
+            if let Some(r) = self.call_result(*tok, t) {
+                self.owned(*tok, r);
+            }
+        }
+        self.targets = targets;
+        self.implicit = implicit;
+        self.drops.sort_unstable();
+        self.drops.dedup();
+    }
+
+    /// The result type of the call recorded as `t` at `tok`, if it is a call.
+    fn call_result(&mut self, tok: u32, t: &Target) -> Option<TypeId> {
+        let sigs = self.sigs;
+        match t {
+            Target::Fn { decl, args } if self.icx.is(tok, Term::LParen) => {
+                let r = sigs.fn_sig(*decl)?.ret;
+                Some(self.tys.subst(r, args, None))
+            }
+            Target::Method { method, args, .. } | Target::Op { method, args } => {
+                let (m, self_ty) = match method {
+                    MethodRef::Impl { method, .. } => (*method, None),
+                    MethodRef::Bound { method, self_ty, .. } => (*method, Some(*self_ty)),
+                    MethodRef::Builtin(_) => return None,
+                };
+                let r = sigs.fn_sig(m)?.ret;
+                Some(self.tys.subst(r, args, self_ty))
+            }
+            Target::TraitMethod { method, self_ty, args } => {
+                let r = sigs.fn_sig(*method)?.ret;
+                Some(self.tys.subst(r, args, Some(*self_ty)))
+            }
+            Target::FnValue { ty } => match self.tys.kind(*ty) {
+                TypeKind::Fn { ret, .. } => Some(*ret),
+                _ => None,
+            },
+            Target::Builtin { ret, .. } => Some(*ret),
+            // an intrinsic's own generic params are not the body's: such a result is left out
+            // (std's wrappers return it, so their callers own it)
+            Target::Intrinsic { decl } => {
+                sigs.fn_sig(*decl).map(|s| s.ret).filter(|&r| !self.tys.has_params(r))
+            }
+            _ => None,
+        }
+    }
+
     fn finish(mut self, j: Job) -> (TypedBody, Vec<TypeKind>, Vec<Diagnostic>) {
         // Pending literal groups left: no context anywhere (E0202).
         for g in 0..self.lits.len() as u32 {
@@ -1329,8 +1484,11 @@ impl<'a> Ck<'a> {
         locals.sort_by_key(|x| x.0);
         self.targets.sort_by_key(|x| x.0);
         self.implicit.sort_by_key(|x| x.0);
+        self.record_drops();
         self.coercions.sort_by_key(|x| x.0);
         self.coercions.dedup();
+        self.denied.sort();
+        self.denied.dedup();
         let has_error =
             self.has_error || self.diags.iter().any(|d| d.severity() == stave_diag::Severity::Error);
         let body = TypedBody {
@@ -1344,8 +1502,12 @@ impl<'a> Ck<'a> {
             coercions: std::mem::take(&mut self.coercions),
             sites: std::mem::take(&mut self.sites),
             implicit: std::mem::take(&mut self.implicit),
+            drops: std::mem::take(&mut self.drops),
+            denied: std::mem::take(&mut self.denied),
             has_error,
             emulated: std::mem::take(&mut self.gates.emulated),
+            contracts: self.contracts.take(),
+            test_domain: self.domain.take(),
         };
         // thread-crossing capture checks (E0802, E0806; crate::threads)
         let td = self.thread_checks(&body);

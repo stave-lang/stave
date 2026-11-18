@@ -1,0 +1,76 @@
+//~ CHECK-ONLY
+// Accepted: every fn of each cycle is a `rec fn` (self, mutual, methods, generic, through a
+// fn-value param, through `dispatch` arms); a `rec fn` in no cycle; dropping a recursive value
+// (no marker needed); closures and thread bodies in no cycle (a closure passed to `thread.join`
+// or `par_for` reaches only what flows to it).
+import std.thread;
+import std.vec;
+
+rec fn alone(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return alone(n - 1);
+}
+
+rec fn ping(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return pong(n - 1);
+}
+
+rec fn pong(n: u32) -> u32 {
+    return ping(n);
+}
+
+struct T { v: u32 }
+
+impl T {
+    rec fn down(&self, n: u32) -> u32 {
+        if n == 0 { return self.v; }
+        return self.down(n - 1);
+    }
+}
+
+rec fn deep<X>(x: X, n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return deep(x, n - 1);
+}
+
+rec fn walk(f: fn(u32) -> u32, n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return f(n - 1);
+}
+
+rec fn step(n: u32) -> u32 {
+    return walk(step, n);
+}
+
+rec fn sum_wide(n: u32) -> u32 needs(avx2) {
+    if n == 0 { return 0; }
+    return total(n - 1);
+}
+
+rec fn sum_base(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return total(n - 1);
+}
+
+dispatch fn total(n: u32) -> u32 { avx2 => sum_wide, _ => sum_base, }
+
+rec fn leaf() -> u32 {
+    return 1;
+}
+
+struct Node { kids: vec.Vec<Node> }
+
+fn tick() { }
+
+fn main() {
+    let a = alone(3) + ping(3) + deep(7u8, 2) + step(3) + total(3) + leaf();
+    let t = T.{ v: 1 };
+    let d = t.down(2);
+    let n = Node.{ kids: vec.Vec::<Node>.new() };
+    let (x, y) = thread.join(fn() { tick(); }, fn() { });
+    thread.par_for(0, 4, fn(i: usize) {
+        let g = tick;
+        g();
+    });
+}

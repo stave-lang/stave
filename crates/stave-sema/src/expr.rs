@@ -1368,7 +1368,9 @@ impl<'a> Ck<'a> {
         if params.contains(&ids::ERROR) || ret == ids::ERROR {
             return Ty::ERR;
         }
-        Ty::T(self.tys.intern(TypeKind::Fn { params: params.into_boxed_slice(), ret, features }))
+        // A closure has no deny clause of its own: coercing it to a fn type with one is checked on
+        // its effects (`crate::effects`).
+        Ty::T(self.tys.intern(TypeKind::Fn { params: params.into_boxed_slice(), ret, features, deny: 0 }))
     }
 
     fn fstring(&mut self, n: u32, tok: u32) -> Ty {
@@ -1648,7 +1650,11 @@ impl<'a> Ck<'a> {
                 let tok = self.icx.end_tok(n);
                 self.target(tok, Target::Variant { decl, index });
                 match args {
-                    Some(a) => Ty::T(self.tys.mk_adt(adt, a)),
+                    Some(a) => {
+                        let t = self.tys.mk_adt(adt, a);
+                        self.owned(tok, t);
+                        Ty::T(t)
+                    }
                     None => {
                         self.e0202_infer(n);
                         Ty::ERR
@@ -1712,6 +1718,7 @@ impl<'a> Ck<'a> {
             params: sig.params.clone().into_boxed_slice(),
             ret: sig.ret,
             features: sig.features,
+            deny: sig.deny,
         };
         if sig.params.contains(&ids::ERROR) || sig.ret == ids::ERROR {
             return ids::ERROR;
@@ -2186,12 +2193,13 @@ impl<'a> Ck<'a> {
             binds.copy_from_slice(&b2);
             return;
         }
-        // a fn value with other features: the coercion of the argument decides (E0707)
-        if let (TypeKind::Fn { features: pf, .. }, TypeKind::Fn { params, ret, features }) =
+        // a fn value with other features or another deny clause: the coercion of the argument
+        // decides (E0707, E1403)
+        if let (TypeKind::Fn { features: pf, deny: pd, .. }, TypeKind::Fn { params, ret, features, deny }) =
             (self.tys.kind(p).clone(), self.tys.kind(t).clone())
-            && pf != features
+            && (pf != features || pd != deny)
         {
-            let t2 = self.tys.intern(TypeKind::Fn { params, ret, features: pf });
+            let t2 = self.tys.intern(TypeKind::Fn { params, ret, features: pf, deny: pd });
             let mut b5 = binds.to_vec();
             if self.w.match_ty(&self.tys, p, t2, &mut b5) {
                 binds.copy_from_slice(&b5);
@@ -2526,8 +2534,11 @@ impl<'a> Ck<'a> {
                 let gens = adef.generics.clone();
                 self.check_bounds(cspan, adt, &gens, &gargs);
                 self.target(paren, Target::Variant { decl, index });
-                Ty::T(self.tys.mk_adt(adt, gargs))
+                let t = self.tys.mk_adt(adt, gargs);
+                self.owned(paren, t);
+                Ty::T(t)
             }
+            St::Builtin(Builtin::Old, _) => self.old_call(n, paren, args, hint),
             St::Builtin(Builtin::FenceStream, _) => {
                 if !args.is_empty() {
                     self.arity(n, paren, 0, args.len(), false);
@@ -2580,7 +2591,7 @@ impl<'a> Ck<'a> {
                     return self.args_only(args);
                 }
                 match self.tys.kind(t).clone() {
-                    TypeKind::Fn { params, ret, features } => {
+                    TypeKind::Fn { params, ret, features, .. } => {
                         if !self.arity(n, paren, params.len(), args.len(), false) {
                             return self.args_only(args);
                         }
@@ -2682,6 +2693,29 @@ impl<'a> Ck<'a> {
         );
         self.report(d);
         false
+    }
+
+    /// `old(e)` (resolution gives the name this meaning only inside a contract clause): the type
+    /// of `e`, typed as at entry. Only in an `ensures`, not nested (E0213); E0213 for a non-Copy
+    /// `e` and `result` inside it comes from [`crate::contracts`] once types are final.
+    fn old_call(&mut self, n: u32, paren: u32, args: &[u32], hint: Option<TypeId>) -> Ty {
+        let at = self.icx.tok_span(paren.saturating_sub(1));
+        let Some(cx) = self.contract else { return self.args_only(args) };
+        if !self.arity(n, paren, 1, args.len(), false) {
+            return self.args_only(args);
+        }
+        if !cx.ensures || cx.old_depth > 0 {
+            let case = if cx.ensures { "entry" } else { "outside" };
+            let d = mk("E0213", Some(case), &[], at, &[]);
+            self.report(d);
+            return self.args_only(args);
+        }
+        self.contract = Some(crate::contracts::ClauseCx { old_depth: cx.old_depth + 1, ..cx });
+        let t = self.expr(args[0], hint);
+        self.contract = Some(cx);
+        self.target(paren, Target::Old);
+        self.olds.push((paren, args[0]));
+        t
     }
 
     fn args_only(&mut self, args: &[u32]) -> Ty {
@@ -3090,10 +3124,13 @@ impl<'a> Ck<'a> {
                     } else {
                         ats = self.builtin_args(&ps, args);
                         let ret = if b.name == "select" { self.select_ty(c, &ats, args) } else { ret };
-                        if let [GArg::Const(ConstArg::Value(k))] = gargs[..]
-                            && b.name == "div_const"
+                        if b.name == "div_const"
+                            && let (Some(&k), Some(&kt)) = (args.first(), ats.first())
+                            && kt != ids::ERROR
+                            && let TypeKind::Vector { lane, .. } = *self.tys.kind(c)
+                            && let Some(d) = self.div_const_divisor(k, lane, c)
                         {
-                            consts.push(k);
+                            consts.push(d);
                         }
                         (ret, Ty::T(ret))
                     };
@@ -3411,6 +3448,7 @@ impl<'a> Ck<'a> {
             Some(i) => self.target(tok, Target::Variant { decl: v.decl, index: i }),
             None => self.target(tok, Target::Struct { decl: adt }),
         }
+        self.owned(tok, t);
         Ty::T(t)
     }
 

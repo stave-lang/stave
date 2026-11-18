@@ -154,7 +154,7 @@ it, in debug and release alike (checked-ir.md "Instance root set"); a program th
 has no `runtime.thread.entry` and no `__stave_thread_start`.
 
 **Runtime start and traps** (CPU). The compiler emits two
-C-ABI stubs and two read-only tables per binary, and these intrinsics give their addresses or
+C-ABI stubs and three read-only tables per binary, and these intrinsics give their addresses or
 switch stacks. Each lowers inline (no call except the ones of `call_on_stack` and `cpu_init`).
 
 | Intrinsic | Arch | Lowering |
@@ -168,6 +168,7 @@ switch stacks. Each lowers inline (no call except the ones of `call_on_stack` an
 | `signal_handler_addr() -> usize` | x86-64 / AArch64 | address (`lea` / `adrp`+`add`) of the stub `__stave_signal(sig: int, info: *siginfo_t, uctx: *ucontext_t)` (C ABI, SA_SIGINFO handler), which zero-extends `sig` and calls `runtime.panic.on_signal(sig: usize, info: usize, uctx: usize) -> never` |
 | `site_table() -> usize` | x86-64 / AArch64 | address of `__stave_site_table` (`.rodata`, 8-byte aligned), layout below |
 | `pc_table() -> usize` | x86-64 / AArch64 | address of `__stave_pc_table` (`.rodata`, 8-byte aligned), layout below |
+| `stack_table() -> usize` | x86-64 / AArch64 | address of `__stave_stack_table` (`.rodata`, 8-byte aligned), layout below; the IR interpreter returns 0 (no table) |
 
 Table layouts (little-endian; runtime/README.md restates them, this contract is the source of
 truth):
@@ -183,14 +184,31 @@ truth):
   ascending, one per emitted fn: `+0 pc_lo: u64` (address of the fn's first instruction),
   `+8 site: u32` (site-table row of the fn's name token), `+12 pad: u32 = 0`. A PC belongs to the
   last row with `pc_lo <= pc`.
+- **stack table** `__stave_stack_table`: `+0 default: u64` (`[run] stack` in bytes; 0: not set,
+  the runtime's 8 MiB default), `+8 main: u64` (bytes of main's stack; 0: no bound), `+16 count:
+  u64`, then `count` rows of 16 bytes: `+0 code: u64` (the code address a fn value holds, as
+  `fn.make` and fn items store it: the jump-table stub where the image has one), `+8 bytes: u64`
+  (bytes of the stack of a thread started with a fn value of that code address; 0: no bound).
+  A stack with a bound gets it (rounded up to the page size), whatever `[run] stack` says; a
+  stack without one (no row, or 0) gets `default`. The compiler computes the bound per root from
+  the frame sizes of the generated code over the call graph: main's stack holds `__stave_main`
+  and what `main` can call; a thread's holds `__stave_thread_start`, `runtime.thread.entry`, and
+  what its fn value can call; a stack whose calls can reach a `rec fn` or a call cycle (a drop
+  cycle of a recursive type) has no bound. The bytes include a margin of 4 KiB. Signal handlers
+  run on the alternate signal stack, so no bound counts them.
 
 **Paths fixed by the compiler** (no attributes or lang items exist; these names are the whole
 list):
 - entry points: `runtime.start.entry`, `runtime.gpu.start.entry`, `runtime.thread.entry`,
   `runtime.thread.scope_spawn(list: &mut usize, f: fn())` and `runtime.thread.scope_join(list:
   &mut usize)` (the `scope { spawn { } }` lowering, checked-ir.md "Closures"),
+  `runtime.thread.start(f: fn()) -> usize` (every fn value it can be given gets a stack-table
+  row; it calls `f` itself where no thread can be created),
   `runtime.panic.trap`, `runtime.panic.trap_msg`, `runtime.panic.on_signal`,
-  `runtime.panic.set_user_site`, `runtime.cpu.WORD` (a `u64` static; dispatch bodies load it),
+  `runtime.panic.set_user_site`, `runtime.panic.requires_failed(clause: &str)` and
+  `runtime.panic.ensures_failed(site: u32, clause: &str)` (a false contract clause),
+  `runtime.panic.test_input()` and `runtime.panic.test_skip()` (the stdout markers of a `test fn`
+  with parameters, cli.md "Test fn inputs"), `runtime.cpu.WORD` (a `u64` static; dispatch bodies load it),
   `runtime.cpu.features` (a request of it requests `init`), `runtime.cpu.init` (`cpu_init`),
   `runtime.cpu.trace` (dispatch bodies, trace bit), and the allocator
   `runtime.alloc.{try_alloc, try_realloc, free}` (`try_alloc(size, alignment) -> *mut u8`,
@@ -199,13 +217,18 @@ list):
   same three fns of an `allocator` declaration's module; the trapping `runtime.alloc.{alloc,
   realloc}` are derived from them (`OutOfMemory` on null) and are never replaced;
 - compiler-emitted symbols: `_start`, `__stave_main`, `__stave_signal`, `__stave_thread_start`,
-  `__stave_site_table`, `__stave_pc_table` (and `__stave_rt` on PTX);
+  `__stave_site_table`, `__stave_pc_table`, `__stave_stack_table` (and `__stave_rt` on PTX);
 - `std.cell.UnsafeCell`, the only interior-mutability type: `&T` is readonly for the optimizer
   unless T contains it;
 - constructors a const-expr may call: `new` of `std.cell.UnsafeCell`, `std.atomic.U32`, `U64`,
   `Usize`, `Bool`, `std.sync.Mutex`, and `std.sync.Once`. The call is evaluated as the struct
   literal the constructor returns, with its parameters bound to the (const) arguments, so each
-  body is exactly `return <struct literal>;` over const-exprs and the parameters;
+  body is exactly `return <struct literal>;` over const-exprs and the parameters (`Mutex<T, R>`
+  and `Once<T, R>` take their rank `R` from the expected type, as any type argument);
+- the ranked locks of `std.sync`: `Mutex<T, R>`, `Once<T, R>`, and `MutexGuard<T, R>` (a held lock
+  of rank `R`, the ADT's second argument), and the acquisitions of rank `R`, each fn's one const
+  generic param: `Mutex.lock`, `Once.get_or_init` (which also runs its `f` holding `R`), and
+  `lock_pair`. The rank check (E1405, E1406) knows only these; `try_lock` acquires nothing;
 - `std.thread.join`, `std.thread.par_for`, `std.thread.par_for_mut`, whose fn-value arguments get
   the thread capture checks (E0802, E0806);
 - language items of std: the prelude module `std.core` and its

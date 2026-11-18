@@ -1,0 +1,75 @@
+// `test fn`s with parameters: `stave test` calls each with inputs generated from its parameter
+// types, narrowed by its `requires` clauses; a clause that is no range filters the inputs. As a
+// conformance run test, `main` runs.
+import std.debug;
+import std.io;
+
+const LIMIT: u32 = 1000;
+
+fn clamp(x: u32, hi: u32) -> u32 {
+    return if x > hi then hi else x;
+}
+
+fn sum(xs: &[u32]) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..xs.len() {
+        s = s + (xs[i] as u64);
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let c = clamp(7, 5);
+    let xs: [u32; 3] = [1, 2, 3];
+    let s = sum(&xs);
+    io.print(f"clamp: {c}\nsum: {s}\n");
+    return 0;
+}
+
+// Every scalar type the runner generates.
+test fn scalars(a: i8, b: u16, c: i32, d: u64, e: isize, f: usize, g: bool, h: char, x: f32, y: f64) {
+    debug.assert((a as i64) >= -128 && (b as u64) <= 65535, "i8, u16 in range");
+    debug.assert((c as i64) >= -2147483648 && d <= 18446744073709551615, "i32, u64 in range");
+    debug.assert((e as i64) <= 9223372036854775807 && f >= 0, "isize, usize in range");
+    debug.assert(g || !g, "bool");
+    debug.assert((h as u32) <= 0x10FFFF, "char is a scalar value");
+    debug.assert(x == x || x != x, "f32");
+    debug.assert(y == y || y != y, "f64");
+}
+
+// Comparisons with constants become ranges: the runner never passes a value outside them.
+test fn ranges(k: u32, n: i32, xs: &[u8]) requires(k < 10 && (n >= -5 && n <= 5)) requires(xs.len() <= 4) requires(LIMIT > k) {
+    debug.assert(k < 10, "k < 10");
+    debug.assert(n >= -5 && n <= 5, "n in -5..=5");
+    debug.assert(xs.len() <= 4, "at most 4 bytes");
+    debug.assert(clamp(k, 9) == k, "clamp keeps k");
+}
+
+// Any other clause filters: inputs with a == b are skipped, never passed.
+test fn filtered(a: u8, b: u8) requires(a != b) {
+    debug.assert(a != b, "the filter holds");
+}
+
+// Arrays and tuples, nested.
+test fn aggregates(p: (u8, bool), q: [i16; 3], r: ([u8; 2], char)) {
+    debug.assert(q.len() == 3 && r.0.len() == 2, "array lengths");
+    debug.assert((p.0 as u32) < 256, "u8 field");
+}
+
+// Slices of tuples and of floats; a length range from both sides.
+test fn slices(xs: &[(u32, bool)], ys: &[f64]) requires(xs.len() <= 8 && ys.len() >= 1 && ys.len() <= 3) {
+    debug.assert(xs.len() <= 8, "xs bound");
+    debug.assert(ys.len() >= 1 && ys.len() <= 3, "ys bounds");
+    let mut n: usize = 0;
+    for i in 0..xs.len() {
+        if xs[i].1 {
+            n = n + 1;
+        }
+    }
+    debug.assert(n <= xs.len(), "count");
+}
+
+// `ensures` on a `test fn` is checked as on any fn.
+test fn sums(xs: &[u32]) requires(xs.len() <= 6) ensures(xs.len() <= 6) {
+    debug.assert(sum(xs) <= 6 * 4294967295, "sum of six u32s");
+}

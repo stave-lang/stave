@@ -38,7 +38,7 @@ use crate::lower_fn::{FnCx, FnOut, G, JobOut};
 pub use crate::lower_fn::{LowerError, LowerErrorKind};
 use crate::mono::{InstKey, LangFns, Req, RootMode};
 use crate::typeck::Typeck;
-use crate::types::{ConstArg, FloatBits, GArg, IntBits, Interner, TypeId, TypeKind, TypeTable};
+use crate::types::{ConstArg, FloatBits, GArg, IntBits, Interner, Overlay, TypeId, TypeKind, TypeTable};
 
 /// Which build to lower for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +79,154 @@ pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Module, Vec<Lowe
     lower_timed(prog, tc, mode).0
 }
 
+/// What a lowering starts from.
+enum Roots<'a> {
+    Mode(Mode),
+    /// The fn instances of these call-graph nodes ([`Typeck::call_graph`]; a closure: its fn's).
+    Graph(&'a [u32]),
+}
+
+/// Where a site row is: (file, byte offset of its token).
+pub type SitePos = (stave_diag::FileId, u32);
+
+/// The checked IR of a set of call-graph nodes ([`lower_graph_nodes`]).
+pub struct GraphLowering {
+    pub module: Module,
+    /// The call-graph nodes of each function (none: drop glue, or an instance the graph does not
+    /// have).
+    pub nodes_of_func: Vec<Vec<u32>>,
+    /// Where each site row is: (file, byte offset of its token).
+    pub site_pos: Vec<SitePos>,
+}
+
+/// Lowers the fn instances of call-graph nodes `nodes` and everything they request, as every
+/// build mode lowers each of them (lowering an instance does not depend on the mode), and maps
+/// the functions back to graph nodes.
+pub fn lower_graph_nodes(
+    prog: &Program,
+    tc: &Typeck,
+    nodes: &[u32],
+) -> (Result<GraphLowering, Vec<LowerError>>, LowerTimings) {
+    crate::pool::on_big_stacks(|| {
+        let (r, tm) = lower_in_pool(prog, tc, Roots::Graph(nodes));
+        let r = r.map(|a| {
+            let nodes_of_func = graph_nodes_of(tc, &a);
+            GraphLowering { module: a.module, nodes_of_func, site_pos: a.site_pos }
+        });
+        (r, tm)
+    })
+}
+
+/// A lowered module with what lowering knew about it.
+struct Assembled {
+    module: Module,
+    jobs: Vec<Job>,
+    /// The job of each instance rank (the first number of a [`stave_ir::InstanceId`]).
+    order: Vec<usize>,
+    table: TypeTable,
+    site_pos: Vec<SitePos>,
+}
+
+/// Graph type `t` (typeck's table plus the graph's local types, read through `cx`) in the
+/// lowering's table.
+fn graph_to_table(
+    cx: &Overlay<'_>,
+    table: &mut TypeTable,
+    memo: &mut FxHashMap<TypeId, TypeId>,
+    t: TypeId,
+) -> TypeId {
+    if !t.is_local() {
+        return t;
+    }
+    if let Some(&x) = memo.get(&t) {
+        return x;
+    }
+    let k = cx.kind(t).clone().map(|c| graph_to_table(cx, table, memo, c));
+    let x = table.intern(k);
+    memo.insert(t, x);
+    x
+}
+
+/// Lowering type `t` as a graph type (typeck's ids, below `n_global`, are shared).
+fn table_to_graph(
+    table: &TypeTable,
+    n_global: usize,
+    cx: &mut Overlay<'_>,
+    memo: &mut FxHashMap<TypeId, TypeId>,
+    t: TypeId,
+) -> TypeId {
+    if t.is_local() || t.idx() < n_global {
+        return t;
+    }
+    if let Some(&x) = memo.get(&t) {
+        return x;
+    }
+    let k = table.kind(t).clone().map(|c| table_to_graph(table, n_global, cx, memo, c));
+    let x = cx.intern(k);
+    memo.insert(t, x);
+    x
+}
+
+/// The graph nodes of each function of `a`: every node of its instance (the plain node and one
+/// per fn-value specialization share one body), or of the closure in each of them.
+fn graph_nodes_of(tc: &Typeck, a: &Assembled) -> Vec<Vec<u32>> {
+    use crate::callgraph::NodeKind;
+    let g = &tc.call_graph;
+    let mut cx = g.types(&tc.types);
+    let mut memo = FxHashMap::default();
+    let mut key_of: FxHashMap<&InstKey, Vec<u32>> = FxHashMap::default();
+    let mut first_closure = vec![u32::MAX; g.nodes.len()];
+    for (i, nd) in g.nodes.iter().enumerate() {
+        match &nd.kind {
+            NodeKind::Fn { inst, .. } => key_of.entry(inst).or_default().push(i as u32),
+            NodeKind::Closure { parent, index: 0, .. } => first_closure[*parent as usize] = i as u32,
+            _ => {}
+        }
+    }
+    let n_global = tc.types.len();
+    let mut nodes_of_rank: Vec<Vec<u32>> = Vec::with_capacity(a.order.len());
+    for &j in &a.order {
+        let nodes = match &a.jobs[j] {
+            Job::Inst(k) => {
+                let args: Vec<GArg> = k
+                    .args
+                    .iter()
+                    .map(|x| match x {
+                        GArg::Type(t) => {
+                            GArg::Type(table_to_graph(&a.table, n_global, &mut cx, &mut memo, *t))
+                        }
+                        c => *c,
+                    })
+                    .collect();
+                key_of.get(&InstKey { decl: k.decl, args }).cloned().unwrap_or_default()
+            }
+            Job::Glue(_) => Vec::new(),
+        };
+        nodes_of_rank.push(nodes);
+    }
+    a.module
+        .funcs
+        .iter()
+        .map(|f| {
+            let nodes: &[u32] =
+                f.instance.0.first().and_then(|&r| nodes_of_rank.get(r as usize)).map_or(&[], |v| v);
+            let Some(&c) = f.instance.0.get(1) else { return nodes.to_vec() };
+            nodes
+                .iter()
+                .filter_map(|&node| {
+                    let cn = first_closure.get(node as usize).copied().unwrap_or(u32::MAX).saturating_add(c);
+                    match g.nodes.get(cn as usize).map(|x| &x.kind) {
+                        Some(NodeKind::Closure { parent, index, .. }) if *parent == node && *index == c => {
+                            Some(cn)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// [`lower`] with phase timings.
 /// Runs with the caller's thread count (the current rayon pool's) on big-stack workers
 /// (module `pool`).
@@ -87,10 +235,36 @@ pub fn lower_timed(
     tc: &Typeck,
     mode: Mode,
 ) -> (Result<Module, Vec<LowerError>>, LowerTimings) {
-    crate::pool::on_big_stacks(|| lower_in_pool(prog, tc, mode))
+    crate::pool::on_big_stacks(|| {
+        let (r, tm) = lower_in_pool(prog, tc, Roots::Mode(mode));
+        (r.map(|a| a.module), tm)
+    })
 }
 
-fn lower_in_pool(prog: &Program, tc: &Typeck, mode: Mode) -> (Result<Module, Vec<LowerError>>, LowerTimings) {
+/// A lowered module and the call-graph nodes of each function ([`lower_mapped`]).
+pub type Mapped = (Module, Vec<Vec<u32>>);
+
+/// [`lower_timed`] plus the call-graph nodes of each function, as [`GraphLowering::nodes_of_func`].
+pub fn lower_mapped(
+    prog: &Program,
+    tc: &Typeck,
+    mode: Mode,
+) -> (Result<Mapped, Vec<LowerError>>, LowerTimings) {
+    crate::pool::on_big_stacks(|| {
+        let (r, tm) = lower_in_pool(prog, tc, Roots::Mode(mode));
+        let r = r.map(|a| {
+            let nodes_of_func = graph_nodes_of(tc, &a);
+            (a.module, nodes_of_func)
+        });
+        (r, tm)
+    })
+}
+
+fn lower_in_pool(
+    prog: &Program,
+    tc: &Typeck,
+    roots: Roots<'_>,
+) -> (Result<Assembled, Vec<LowerError>>, LowerTimings) {
     let mut tm = LowerTimings::default();
     let err = |msg: &str| LowerError {
         kind: LowerErrorKind::Internal,
@@ -137,15 +311,48 @@ fn lower_in_pool(prog: &Program, tc: &Typeck, mode: Mode) -> (Result<Module, Vec
     let (opt_none, opt_some) = (vidx(opt, "None"), vidx(opt, "Some"));
     let (res_ok, res_err) = (vidx(res, "Ok"), vidx(res, "Err"));
     let any_item = prog.items.iter().position(|it| it.ok).map(|i| ItemId(i as u32));
+    let any_requires =
+        tc.bodies.iter().any(|b| b.contracts.as_deref().is_some_and(|c| !c.checked_requires().is_empty()));
 
-    let (rmode, test) = match mode {
-        Mode::Debug => (RootMode::Debug, false),
-        Mode::DebugAll => (RootMode::DebugAll, false),
-        Mode::Release => (RootMode::Release, false),
-        Mode::Test => (RootMode::Debug, true),
-        Mode::ReleaseTest => (RootMode::Release, true),
+    let mut jobs: Vec<Job> = match roots {
+        Roots::Mode(mode) => {
+            let (rmode, test) = match mode {
+                Mode::Debug => (RootMode::Debug, false),
+                Mode::DebugAll => (RootMode::DebugAll, false),
+                Mode::Release => (RootMode::Release, false),
+                Mode::Test => (RootMode::Debug, true),
+                Mode::ReleaseTest => (RootMode::Release, true),
+            };
+            crate::mono::roots(prog, tc, rmode, test).into_iter().map(Job::Inst).collect()
+        }
+        Roots::Graph(nodes) => {
+            let g = &tc.call_graph;
+            let cx = g.types(&tc.types);
+            let mut memo = FxHashMap::default();
+            let mut seen: FxHashSet<InstKey> = FxHashSet::default();
+            let mut out = Vec::new();
+            for &n in nodes {
+                let Some(f) = g.fn_of(n) else { continue };
+                let crate::callgraph::NodeKind::Fn { inst, body: true, .. } = &g.nodes[f as usize].kind
+                else {
+                    continue;
+                };
+                let args: Vec<GArg> = inst
+                    .args
+                    .iter()
+                    .map(|x| match x {
+                        GArg::Type(t) => GArg::Type(graph_to_table(&cx, &mut table, &mut memo, *t)),
+                        c => *c,
+                    })
+                    .collect();
+                let k = InstKey { decl: inst.decl, args };
+                if seen.insert(k.clone()) {
+                    out.push(Job::Inst(k));
+                }
+            }
+            out
+        }
     };
-    let mut jobs: Vec<Job> = crate::mono::roots(prog, tc, rmode, test).into_iter().map(Job::Inst).collect();
     let mut cache: FxHashMap<Job, usize> = jobs.iter().cloned().enumerate().map(|(i, j)| (j, i)).collect();
     // the job that first requested each job (roots: none)
     let mut parent: Vec<Option<usize>> = vec![None; jobs.len()];
@@ -169,6 +376,7 @@ fn lower_in_pool(prog: &Program, tc: &Typeck, mode: Mode) -> (Result<Module, Vec
                 opt_some,
                 res_ok,
                 res_err,
+                any_requires,
             };
             pending.par_iter().map(|j| lower_job(&g, any_item, j)).collect()
         };
@@ -218,8 +426,9 @@ fn lower_in_pool(prog: &Program, tc: &Typeck, mode: Mode) -> (Result<Module, Vec
     let outs: Vec<JobOut> = outs.into_iter().flatten().collect();
     let m = assemble(prog, sigs, &mut table, &jobs, &cache, outs, &statics_list);
     tm.assemble = t1.elapsed();
-    tm.n_funcs = m.as_ref().map_or(0, |m| m.funcs.len());
-    (m.map_err(|e| vec![e]), tm)
+    tm.n_funcs = m.as_ref().map_or(0, |m| m.0.funcs.len());
+    let r = m.map(|(module, order, site_pos)| Assembled { module, jobs, order, table, site_pos });
+    (r.map_err(|e| vec![e]), tm)
 }
 
 /// Most instances of one generic on a request chain in lowering. The type checker's E0902
@@ -494,7 +703,7 @@ impl Tr {
                     })
                     .collect(),
             },
-            TypeKind::Fn { params, ret, features } => {
+            TypeKind::Fn { params, ret, features, .. } => {
                 let ps = params.iter().map(|&x| self.tr(table, x, d)).collect();
                 let r = if matches!(table.kind(ret), TypeKind::Never) {
                     self.tmp.unit()
@@ -560,7 +769,7 @@ fn assemble(
     cache: &FxHashMap<Job, usize>,
     outs: Vec<JobOut>,
     statics_list: &[DeclId],
-) -> Result<Module, LowerError> {
+) -> Result<(Module, Vec<usize>, Vec<SitePos>), LowerError> {
     let mut tr = Tr { tmp: IrTypes::new(), memo: FxHashMap::default(), adt_sema: FxHashMap::default() };
     // 1. translate every used type; the printed set P
     let mut used: Vec<stave_ir::TypeId> = Vec::new();
@@ -780,6 +989,7 @@ fn assemble(
     module.intrinsics = all_intrs.clone();
     let mut funcs: Vec<stave_ir::Func> = Vec::with_capacity(nf as usize);
     let mut sites: Vec<SiteInfo> = Vec::new();
+    let mut site_pos: Vec<SitePos> = Vec::new();
     // Files of built-in packages are named `<package>/<path in package>` (`std/vec.stv`) in the
     // site table, so a binary does not depend on where the library is installed.
     let site_names: FxHashMap<u32, String> = prog
@@ -861,6 +1071,7 @@ fn assemble(
                         Err(_) => (String::from("<unknown>"), 0, 0),
                     };
                 sites.push(SiteInfo { file: fp, line, col, func: path.clone() });
+                site_pos.push((stave_diag::FileId(file), off));
                 if let Some(s) = s {
                     site_map.insert(s, row);
                 }
@@ -954,7 +1165,7 @@ fn assemble(
         }
         module.statics.push(Static { path: prog.decl_path(d), ty, init });
     }
-    Ok(module)
+    Ok((module, order, site_pos))
 }
 
 /// Whether sema type `t` is met for the first time (always for an id outside `seen`).

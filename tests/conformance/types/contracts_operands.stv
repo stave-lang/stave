@@ -1,0 +1,52 @@
+//~ CHECK-ONLY
+// Contract operands that are rejected: E0211 once per clause, at its first violation; E0211 case
+// `trait-impl` for contracts on a trait impl method.
+import std.vec;
+
+static LIMIT: u32 = 10;
+
+struct S { n: u32 }
+
+trait Size {
+    fn size(&self) -> u32;
+}
+
+impl Size for S {
+    fn size(&self) -> u32 ensures(result > 0) { //~ ERROR E0211
+        return 1;
+    }
+}
+
+fn grow(v: &mut vec.Vec<u32>) -> bool {
+    v.push(1);
+    return true;
+}
+
+fn take(v: vec.Vec<u32>) -> u32 {
+    return 0;
+}
+
+fn bump(x: &mut u32) -> bool {
+    return true;
+}
+
+fn apply(f: fn(u32) -> bool, x: u32) -> bool {
+    return f(x);
+}
+
+fn a1(v: &mut vec.Vec<u32>) requires(v.len() > 0) { } //~ ERROR E0211
+fn a2(v: &mut vec.Vec<u32>) ensures(grow(v)) { } //~ ERROR E0211
+fn a3(v: &mut vec.Vec<u32>) ensures(v.pop().is_some()) { v.push(1); } //~ ERROR E0211
+fn a4(x: u32) requires(LIMIT > x) { } //~ ERROR E0211
+fn a5(x: u32) requires(take(vec.Vec::<u32>.new()) <= x) { } //~ ERROR E0211
+fn a6(x: u32) requires(bump(&mut x)) { } //~ ERROR E0211
+fn a7(xs: vec.Vec<u32>) -> u32 ensures(xs.len() > 0) { return 0; } //~ ERROR E0211
+fn a8(f: fn(u32) -> bool, x: u32) requires(f(x)) { } //~ ERROR E0211
+fn a9(x: u32) requires(apply(fn(y: u32) -> bool { return y > 0; }, x)) { } //~ ERROR E0211
+fn a10(x: u32) requires(f"{x}".len() > 0) { } //~ ERROR E0211
+fn a11(o: Option<u32>) -> Option<u32> requires(o? > 0) { return o; } //~ ERROR E0211
+fn a12(o: &Option<vec.Vec<u32>>) requires(match *o { Option.Some(v) => v.len() > 0, Option.None => false }) { } //~ ERROR E0211
+fn a13(x: u32) requires(x > 0) requires(LIMIT > 0) ensures(LIMIT > 1) { } //~ ERROR E0211
+//~^ ERROR E0211
+
+fn main() { }

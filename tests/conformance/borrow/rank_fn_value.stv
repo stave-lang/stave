@@ -1,0 +1,24 @@
+//~ CHECK-ONLY
+// E1405 through fn values: a fn that takes a lower rank, called under a guard through a fn-typed
+// param, by `with_lock` (reported at the `with_lock` call), and through a fn-typed local.
+import std.sync;
+
+static LOW: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0);
+
+fn bump_low() -> u32 {
+    return LOW.with_lock(fn(v: &mut u32) -> u32 { *v = *v + 1; return *v; });
+}
+
+fn under_high(high: &sync.Mutex<u32, 5>, f: fn() -> u32) -> u32 {
+    let g = high.lock();
+    return f() + *g.get(); //~ ERROR E1405
+}
+
+fn main() {
+    let high = sync.Mutex::<u32, 5>.new(0);
+    let a = under_high(&high, bump_low);
+    let b = high.with_lock(fn(h: &mut u32) -> u32 { return *h + bump_low(); }); //~ ERROR E1405
+    let g = high.lock();
+    let f: fn() -> u32 = bump_low;
+    let c = f(); //~ ERROR E1405
+}

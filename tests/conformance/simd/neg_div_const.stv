@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// `a.div_const(k)`: `k` is a const-expr of the lane type (E0607 for a run-time value, E0607 case
+// `zero` for 0); a literal out of the lane type's range is E0203, another type E0201. The
+// divisor is an argument: the generic form `div_const::<K>()` lacks it (E0201 case `arity`).
+const K: i32 = -7;
+const WIDE: i64 = 3;
+
+fn f(a: i32x4, u: u8x16, d: i32) -> i32x4 {
+    let ok = a.div_const(K).div_const(-2147483648).div_const(K * 3 + 1);
+    let b = a.div_const(d); //~ ERROR E0607
+    let c = a.div_const(0); //~ ERROR E0607
+    let e = a.div_const(K + 7); //~ ERROR E0607
+    let g = u.div_const(256); //~ ERROR E0203
+    let h = u.div_const(-1); //~ ERROR E0203
+    let i = a.div_const(WIDE); //~ ERROR E0201
+    let j = a.div_const::<7>(); //~ ERROR E0201
+    return ok;
+}
+
+fn main() -> i32 {
+    return 0;
+}

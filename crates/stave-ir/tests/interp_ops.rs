@@ -248,6 +248,24 @@ fn mul_wide() {
         ret_val(run(&m, f, vec![Val::S(0xffff_ffff), Val::S(2)])),
         Val::agg(vec![Val::S(1), Val::S(0xffff_fffe)])
     );
+    // signed: hi carries the sign of the exact product, lo its low bits (normalized)
+    let si = |x: i64| Val::S(x as u64);
+    for (bits, cases) in [
+        (IntBits::B64, [(i64::MIN, i64::MIN, 1i64 << 62, 0), (-1, 1, -1, -1), (i64::MIN, -1, 0, i64::MIN)]),
+        (IntBits::B32, [(i32::MIN as i64, i32::MIN as i64, 1 << 30, 0), (-1, 1, -1, -1), (-3, 7, -1, -21)]),
+    ] {
+        let mut m = Module::new();
+        let t = m.types.int(true, bits);
+        let pair = m.types.tuple(vec![t, t]);
+        let f = define(&mut m, &[0], "t.f", &[t, t], Some(pair), |b, _| {
+            let (x, y) = (b.param(0).unwrap(), b.param(1).unwrap());
+            let r = b.binary(Op::MulWide, pair, x, y);
+            b.ret(Some(r.into()));
+        });
+        for (x, y, hi, lo) in cases {
+            assert_eq!(ret_val(run(&m, f, vec![si(x), si(y)])), Val::agg(vec![si(hi), si(lo)]), "{x} * {y}");
+        }
+    }
 }
 
 fn cmp(op: Op, k: TypeKey, a: Val, b: Val) -> bool {

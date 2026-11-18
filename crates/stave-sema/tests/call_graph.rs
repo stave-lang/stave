@@ -43,7 +43,7 @@ fn load(src: &str, target: &str) -> (Program, Typeck) {
     let errs: Vec<String> = tc
         .all_diagnostics(&p)
         .iter()
-        .filter(|d| d.severity() == stave_diag::Severity::Error)
+        .filter(|d| d.severity() == stave_diag::Severity::Error && !["E1402", "E1409"].contains(&d.code()))
         .map(|d| format!("{} {}", d.code(), d.message()))
         .collect();
     assert!(errs.is_empty(), "{}", errs.join("\n"));
@@ -53,8 +53,27 @@ fn load(src: &str, target: &str) -> (Program, Typeck) {
 /// The dump lines of the program's own package (`main.` paths), plus cycles and roots.
 fn dump(src: &str) -> (Program, Typeck, String) {
     let (p, tc) = load(src, "x86_64-linux");
-    let d = tc.call_graph.dump(&p, &tc);
+    let d = plain(&tc.call_graph.dump(&p, &tc));
     (p, tc, d)
+}
+
+/// The dump with the specializations (`{0=main.f}` after a fn name) left out, for tests that are
+/// not about them.
+fn plain(d: &str) -> String {
+    let mut out = String::with_capacity(d.len());
+    let mut depth = 0u32;
+    let mut prev = ' ';
+    for c in d.chars() {
+        if c == '{' && (depth > 0 || (prev != ' ' && prev != '\n')) {
+            depth += 1;
+        } else if c == '}' && depth > 0 {
+            depth -= 1;
+        } else if depth == 0 {
+            out.push(c);
+        }
+        prev = c;
+    }
+    out
 }
 
 #[track_caller]
@@ -201,8 +220,14 @@ fn main() {
     );
     let g = &tc.call_graph;
     let t = "table fn(u32) -> u32";
-    has(&d, &format!("edge main.twice -> {t} indirect @1:53"));
-    has(&d, &format!("edge main.walk -> {t} indirect @6:12"));
+    // each call through a param reaches what its callers pass there
+    has(&d, "edge main.twice -> main.inc indirect @1:53");
+    has(&d, "edge main.twice -> main.main.0 indirect @1:53");
+    lacks(&d, "edge main.twice -> main.step");
+    has(&d, "edge main.walk -> main.step indirect @6:12");
+    lacks(&d, "edge main.walk -> main.inc");
+    lacks(&d, &format!("edge main.twice -> {t}"));
+    // the table keeps every value of its type (the upper bound)
     has(&d, &format!("edge {t} -> main.inc member @11:19"));
     has(&d, &format!("edge {t} -> main.step member @8:38"));
     has(&d, &format!("edge {t} -> main.main.0 member @13:19"));
@@ -210,12 +235,12 @@ fn main() {
     lacks(&d, &format!("edge {t} -> main.dec"));
     // another fn type, another table
     has(&d, "edge table fn(u32, u32) -> u32 -> main.other member @16:13");
-    has(&d, "edge main.main -> table fn(u32, u32) -> u32 indirect");
+    // through a local
+    has(&d, "edge main.main -> main.other indirect @17:13");
     lacks(&d, "edge table fn(u32, u32) -> u32 -> main.inc");
-    // step -> walk -> table -> step; twice calls the table but nothing in it calls twice
-    let cyc = d.lines().find(|l| l.starts_with("cycle") && l.contains("main.step")).expect("cycle");
-    assert!(cyc.contains("main.walk") && cyc.contains(t), "{cyc}");
-    assert!(!cyc.contains("main.twice") && !cyc.contains("main.main"), "{cyc}");
+    // step -> walk -> step through walk's param
+    has(&d, "cycle level 0 {main.step, main.walk}");
+    assert!(!d.lines().any(|l| l.starts_with("cycle") && l.contains("main.twice")), "{}", own(&d));
     let tn = node(g, &d, t);
     let ti = match g.nodes[tn as usize].kind {
         NodeKind::Table { table } => table as usize,
@@ -241,15 +266,16 @@ fn main() {
 }
 ",
     );
-    has(&d, "edge main.via<u32> -> table fn(u32) -> u32 indirect @3:12");
-    has(&d, "edge main.via<u32>.0 -> table fn(u32) -> u32 indirect @2:36");
-    has(&d, "edge main.via<bool>.0 -> table fn(bool) -> bool indirect @2:36");
+    has(&d, "edge main.via<u32> -> main.via<u32>.0 indirect @3:12");
+    has(&d, "edge main.via<u32>.0 -> main.inc indirect @2:36");
+    has(&d, "edge main.via<bool>.0 -> main.not indirect @2:36");
+    lacks(&d, "edge main.via<u32>.0 -> main.not");
     has(&d, "edge table fn(u32) -> u32 -> main.via<u32>.0 member @2:13");
     has(&d, "edge table fn(u32) -> u32 -> main.inc member @8:23");
     has(&d, "edge table fn(bool) -> bool -> main.via<bool>.0 member @2:13");
     lacks(&d, "edge table fn(bool) -> bool -> main.inc");
-    // g calls f through the table g is in: a cycle through a closure literal
-    has(&d, "cycle level 1 {main.via<u32>.0, table fn(u32) -> u32}");
+    // g calls f, which holds only what main passes
+    assert!(!d.lines().any(|l| l.starts_with("cycle") && l.contains("main.")), "{}", own(&d));
     check_invariants(&tc.call_graph);
 }
 
@@ -408,22 +434,151 @@ fn main() {
 }
 
 #[test]
-fn a_unit_join_is_a_cycle_through_the_fn_table() {
-    // Every `fn()` value is in one table, so join's own `fn()` closure (which calls `b()`, a
-    // `fn() -> ()` value) is a member of the table it calls.
+fn thread_bodies_reach_only_what_flows_to_them() {
+    // join's own `fn()` closure calls `b()`, which holds only the closure main passes
     let (_p, tc, d) = dump(
         "import std.thread;
+fn tick() { }
 fn main() {
     let (x, y) = thread.join(fn() { }, fn() { });
+    thread.par_for(0usize, 4usize, fn(i: usize) {
+        let g = tick;
+        g();
+    });
 }
 ",
     );
-    let cyc = d.lines().find(|l| l.starts_with("cycle") && l.contains("std.thread.join<(), ()>.0"));
-    assert!(
-        cyc.is_some_and(|c| c.contains("table fn()")),
-        "{}",
-        d.lines().filter(|l| l.starts_with("cycle")).collect::<Vec<_>>().join("\n")
+    let cycles: Vec<&str> = d.lines().filter(|l| l.starts_with("cycle") && !l.ends_with(" drop")).collect();
+    assert!(cycles.is_empty(), "{}", cycles.join("\n"));
+    has(&d, "edge std.thread.join<(), ()>.0 -> main.main.1 indirect");
+    has(&d, "edge std.thread.join<(), ()> -> main.main.0 indirect");
+    has(&d, "edge std.thread.run.0 -> main.main.2 indirect");
+    has(&d, "edge main.main.2 -> main.tick indirect @7:9");
+    check_invariants(&tc.call_graph);
+}
+
+#[test]
+fn a_closure_that_reaches_itself_through_a_param_is_a_cycle() {
+    let (_p, tc, d) = dump(
+        "import std.thread;
+fn call(f: fn(u32) -> u32, n: u32) -> u32 { return f(n); }
+fn again(n: u32) -> u32 { return call(fn(x: u32) -> u32 { return again(x); }, n); }
+fn twice() {
+    let (x, y) = thread.join(fn() { twice(); }, fn() { });
+}
+fn main() {
+    let a = again(1u32);
+    twice();
+}
+",
     );
+    has(&d, "cycle level 0 {main.again, main.again.0, main.call}");
+    let cyc = d.lines().find(|l| l.starts_with("cycle") && l.contains("main.twice")).expect("join cycle");
+    assert!(cyc.contains("main.twice.0") && cyc.contains("std.thread.join<(), ()>"), "{cyc}");
+    assert!(!cyc.contains("main.twice.1") && !cyc.ends_with(" drop"), "{cyc}");
+    check_invariants(&tc.call_graph);
+}
+
+#[test]
+fn fn_values_through_two_calls_and_a_view_field() {
+    let (_p, tc, d) = dump(
+        "fn leaf() { }
+fn other() { }
+fn inner(f: fn()) { f(); }
+fn outer(f: fn()) { inner(f); }
+view struct Cb { f: fn() }
+fn fire(c: &Cb) {
+    let f = c.f;
+    f();
+}
+fn main() {
+    outer(leaf);
+    let c = Cb.{ f: other };
+    fire(&c);
+}
+",
+    );
+    has(&d, "edge main.inner -> main.leaf indirect @3:21");
+    lacks(&d, "edge main.inner -> main.other");
+    has(&d, "edge main.fire -> main.other indirect @8:5");
+    lacks(&d, "edge main.fire -> main.leaf");
+    lacks(&d, "edge main.inner -> table");
+    lacks(&d, "edge main.fire -> table");
+    check_invariants(&tc.call_graph);
+}
+
+#[test]
+fn drop_cycles_of_recursive_types_are_marked() {
+    let (_p, tc, d) = dump(
+        "import std.vec;
+import std.mem;
+struct N { kids: vec.Vec<N> }
+struct M { kids: vec.Vec<M> }
+impl Drop for M {
+    fn drop(&mut self) {
+        let k = mem.replace(&mut self.kids, vec.Vec::<M>.new());
+        release(k);
+    }
+}
+fn release(k: vec.Vec<M>) { }
+fn main() {
+    let n = N.{ kids: vec.Vec::<N>.new() };
+    let m = M.{ kids: vec.Vec::<M>.new() };
+}
+",
+    );
+    let g = &tc.call_graph;
+    has(&d, "edge main.main -> drop_glue N drop @13:9");
+    has(&d, "edge drop_glue N -> drop_glue Vec<N> drop");
+    has(&d, "edge drop_glue Vec<N> -> std.vec.Vec.drop<N> drop");
+    // dropping an N drops its kids: a drop cycle through std only
+    let n = d.lines().find(|l| l.starts_with("cycle") && l.contains("drop_glue N")).expect("N cycle");
+    assert!(n.ends_with(" drop") && n.contains("std.vec.Vec.clear<N>"), "{n}");
+    // M's drop reaches a user fn that drops the kids: not a drop cycle
+    let m = d.lines().find(|l| l.starts_with("cycle") && l.contains("drop_glue M")).expect("M cycle");
+    assert!(m.contains("main.release") && m.contains("main.M.drop") && !m.ends_with(" drop"), "{m}");
+    let s = g.scc_of[node(g, &d, "drop_glue N") as usize];
+    assert!(g.is_cycle(s) && g.is_drop_cycle(s));
+    assert!(!g.is_drop_cycle(g.scc_of[node(g, &d, "main.release") as usize]));
+    check_invariants(g);
+}
+
+#[test]
+fn drops_of_temporaries_moved_values_and_fields() {
+    let (_p, tc, d) = dump(
+        "struct G { v: u32 }
+impl Drop for G {
+    fn drop(&mut self) { }
+}
+struct H { g: G }
+fn make() -> G { return G.{ v: 1u32 }; }
+fn consume(g: G) { }
+fn temp() -> u32 { return make().v; }
+fn moved() {
+    let g = make();
+    consume(g);
+}
+fn field() {
+    let h = H.{ g: G.{ v: 2u32 } };
+}
+fn plain(x: u32, r: &G) -> u32 { return x + r.v; }
+fn main() {
+    let a = temp();
+    moved();
+    field();
+    let b = plain(1u32, &make());
+}
+",
+    );
+    has(&d, "edge main.temp -> drop_glue G drop @8:27");
+    has(&d, "edge main.consume -> drop_glue G drop @7:12");
+    has(&d, "edge main.moved -> drop_glue G drop @10:9");
+    has(&d, "edge main.field -> drop_glue H drop @14:9");
+    has(&d, "edge drop_glue H -> drop_glue G drop");
+    has(&d, "edge drop_glue G -> main.G.drop drop");
+    // a borrowed value is not dropped here
+    lacks(&d, "edge main.plain -> drop_glue");
+    has(&d, "edge main.main -> drop_glue G drop");
     check_invariants(&tc.call_graph);
 }
 
@@ -437,8 +592,10 @@ fn shipped_std_graph_is_consistent_and_independent_of_load_order() {
         let tc = stave_sema::check(&p);
         check_invariants(&tc.call_graph);
         let d = tc.call_graph.dump(&p, &tc);
-        // std and runtime have no call cycle
-        assert!(!d.lines().any(|l| l.starts_with("cycle")), "{t}");
+        // std and runtime have no call cycle but drop cycles
+        let cycles: Vec<&str> =
+            d.lines().filter(|l| l.starts_with("cycle") && !l.ends_with(" drop")).collect();
+        assert!(cycles.is_empty(), "{t}: {}", cycles.join("\n"));
         c.shuffle_seed = Some(7);
         let p2 = Program::load(&c);
         let tc2 = stave_sema::check(&p2);
@@ -476,4 +633,130 @@ fn corpus_graph_is_independent_of_load_order_and_threads() {
         assert!(pool.install(|| load(None).1) == base, "threads {threads}");
     }
     let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The E1402 / E1409 diagnostics of a program: (code, message, line of the primary span, the
+/// related labels as `line:label`).
+fn recursion_errors(src: &str) -> Vec<(String, String, u32, Vec<String>)> {
+    let (p, tc) = load(src, "x86_64-linux");
+    let line = |s: stave_diag::Span| p.source_map.locate(s).map_or(0, |l| l.line);
+    tc.all_diagnostics(&p)
+        .iter()
+        .filter(|d| ["E1402", "E1409"].contains(&d.code()))
+        .map(|d| {
+            let related = d.related().iter().map(|r| format!("{}:{}", line(r.span), r.label)).collect();
+            (d.code().to_string(), d.message().to_string(), d.primary().map_or(0, line), related)
+        })
+        .collect()
+}
+
+#[test]
+fn unmarked_recursion_names_the_cycle() {
+    let errs = recursion_errors(
+        "fn a(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return b(n - 1);
+}
+fn b(n: u32) -> u32 { return c(n); }
+fn c(n: u32) -> u32 { return a(n) + b(n); }
+rec fn d(n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return e(n - 1);
+}
+fn e(n: u32) -> u32 { return d(n); }
+fn main() {
+    let x = a(3) + d(3);
+}
+",
+    );
+    assert_eq!(errs.len(), 2, "{errs:?}");
+    let (code, msg, at, rel) = &errs[0];
+    assert_eq!((code.as_str(), *at), ("E1402", 3));
+    assert_eq!(
+        msg,
+        "recursive call cycle `main.a -> main.b -> main.c -> main.a`: `main.a` is not a `rec fn`"
+    );
+    assert_eq!(
+        rel,
+        &[
+            "3:`main.a` calls the next fn of the cycle here".to_string(),
+            "5:next call of the cycle".to_string(),
+            "6:next call of the cycle".to_string(),
+            "5:also in this recursion, not a `rec fn`".to_string(),
+            "6:also in this recursion, not a `rec fn`".to_string(),
+        ]
+    );
+    let (code, msg, at, _) = &errs[1];
+    assert_eq!((code.as_str(), *at), ("E1402", 11));
+    assert_eq!(msg, "recursive call cycle `main.e -> main.d -> main.e`: `main.e` is not a `rec fn`");
+}
+
+#[test]
+fn a_cycle_through_a_closure_is_its_own_error() {
+    let errs = recursion_errors(
+        "fn call(f: fn(u32) -> u32, n: u32) -> u32 { return f(n); }
+fn again(n: u32) -> u32 {
+    return call(fn(x: u32) -> u32 { return again(x); }, n);
+}
+fn main() {
+    let x = again(1);
+}
+",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    let (code, msg, at, _) = &errs[0];
+    assert_eq!((code.as_str(), *at), ("E1409", 3));
+    assert_eq!(
+        msg,
+        "recursive call cycle `closure in main.again -> main.again -> main.call -> closure in main.again` goes through a closure literal in `main.again`"
+    );
+}
+
+#[test]
+fn generic_recursion_is_reported_once_with_the_instance() {
+    let errs = recursion_errors(
+        "fn deep<X>(x: X, n: u32) -> u32 {
+    if n == 0 { return 0; }
+    return deep(x, n - 1);
+}
+fn main() {
+    let a = deep(7u8, 2) + deep(true, 2);
+}
+",
+    );
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].1.starts_with("recursive call cycle `main.deep<"), "{errs:?}");
+    assert!(errs[0].1.ends_with("`main.deep` is not a `rec fn`"), "{errs:?}");
+}
+
+/// A fn taking a fn value gets a node per known value it is called with, so a helper called with
+/// `twice` and, inside `twice`, with a closure is no cycle; values that are not known at the call
+/// share the plain node.
+#[test]
+fn fn_params_are_specialized_per_known_value() {
+    let src = "fn twice(x: u32) -> u32 {
+    let f = fn(y: u32) -> u32 { return y * 2; };
+    return apply(f, x);
+}
+fn apply(f: fn(u32) -> u32, x: u32) -> u32 { return f(x); }
+fn pick(k: bool) -> u32 {
+    let g = if k then twice else twice;
+    return apply(g, 1);
+}
+fn main() {
+    let a = apply(twice, 5) + pick(true);
+}
+";
+    let (p, tc) = load(src, "x86_64-linux");
+    let d = tc.call_graph.dump(&p, &tc);
+    let has_raw = |l: &str| assert!(d.lines().any(|x| x.starts_with(l)), "no `{l}` in:\n{}", own(&d));
+    has_raw("edge main.main -> main.apply{0=main.twice} call");
+    has_raw("edge main.apply{0=main.twice} -> main.twice indirect");
+    has_raw("edge main.twice -> main.apply{0=main.twice.0} call");
+    has_raw("edge main.apply{0=main.twice.0} -> main.twice.0 indirect");
+    // an untracked value goes to the plain node, which calls through its fn-type table
+    has_raw("edge main.pick -> main.apply call");
+    has_raw("edge main.apply -> table fn(u32) -> u32 indirect");
+    assert!(!d.lines().any(|l| l.starts_with("cycle") && !l.ends_with(" drop")), "{}", own(&d));
+    check_invariants(&tc.call_graph);
 }

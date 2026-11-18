@@ -90,6 +90,9 @@ pub struct FnSig {
     pub origins: Vec<Origin>,
     /// stave-target `FeatureSet` bits.
     pub features: u64,
+    /// The deny clause ([`crate::effects::Effects`] bits) and the span of each effect it names.
+    pub deny: u8,
+    pub deny_spans: Vec<(u8, Span)>,
     pub is_unsafe: bool,
     pub abi: Abi,
     pub variadic: bool,
@@ -208,6 +211,34 @@ pub struct LangItems {
     /// The constructors a const-expr may call (fixed paths): `new` of `std.cell.UnsafeCell`,
     /// `std.atomic.{U32, U64, Usize, Bool}`, `std.sync.{Mutex, Once}`.
     pub const_ctors: Vec<DeclId>,
+    /// The ranked locks of `std.sync` (fixed paths, [`crate::ranks`]).
+    pub locks: LockItems,
+}
+
+/// The `std.sync` items the rank check knows (`NONE` without std).
+#[derive(Clone, Copy, Debug)]
+pub struct LockItems {
+    pub mutex: DeclId,
+    pub guard: DeclId,
+    pub once: DeclId,
+    /// `Mutex.lock`, `Once.get_or_init`, `lock_pair`: the acquisitions of the rank that is their
+    /// one const generic param.
+    pub lock: DeclId,
+    pub get_or_init: DeclId,
+    pub lock_pair: DeclId,
+}
+
+impl Default for LockItems {
+    fn default() -> Self {
+        LockItems {
+            mutex: DeclId::NONE,
+            guard: DeclId::NONE,
+            once: DeclId::NONE,
+            lock: DeclId::NONE,
+            get_or_init: DeclId::NONE,
+            lock_pair: DeclId::NONE,
+        }
+    }
 }
 
 impl Default for LangItems {
@@ -226,6 +257,7 @@ impl Default for LangItems {
             unsafe_cell: DeclId::NONE,
             ops: FxHashMap::default(),
             const_ctors: Vec::new(),
+            locks: LockItems::default(),
         }
     }
 }
@@ -509,13 +541,17 @@ fn lower_base<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -
             Some(nd) => needs_bits(h, &icx, nd),
             None => 0,
         };
+        let deny = match icx.child(n, NodeKind::Without) {
+            Some(nd) => deny_bits(h, &icx, nd).0,
+            None => 0,
+        };
         if params.contains(&h.error_ty()) || h.is_error_ty(ret) {
             return h.error_ty();
         }
         for (&t, &c) in params.iter().zip(&tys).chain(ret_node.iter().map(|c| (&ret, c))) {
             h.sig_width(icx.node_span(c), t, features);
         }
-        return h.intern(TypeKind::Fn { params: params.into_boxed_slice(), ret, features });
+        return h.intern(TypeKind::Fn { params: params.into_boxed_slice(), ret, features, deny });
     }
     if t == Term::KwSelfType as u8 {
         return env.self_ty.unwrap_or(h.error_ty());
@@ -633,6 +669,31 @@ pub(crate) fn needs_bits<H: LowerHost + ?Sized>(h: &mut H, icx: &ItemCx<'_>, nd:
         }
     }
     fs.bits()
+}
+
+/// The effects a `without(..)` clause names, with the span of each; E1404 for an unknown name.
+pub(crate) fn deny_bits<H: LowerHost + ?Sized>(
+    h: &mut H,
+    icx: &ItemCx<'_>,
+    nd: u32,
+) -> (u8, Vec<(u8, Span)>) {
+    let mut bits = 0u8;
+    let mut spans = Vec::new();
+    for e in icx.kids_vec(nd) {
+        let t = icx.a(e);
+        let name = icx.tok_str(t);
+        match crate::effects::Effects::of_name(name) {
+            Some(b) => {
+                bits |= b.0;
+                spans.push((b.0, icx.tok_span(t)));
+            }
+            None => {
+                let d = mk("E1404", None, &[("name", name)], icx.tok_span(t), &[]);
+                h.report(d);
+            }
+        }
+    }
+    (bits, spans)
 }
 
 /// Lowers generic args for a decl whose params are `shape` (true = const param). `None` on a
@@ -998,6 +1059,21 @@ impl<'p> SigBuilder<'p> {
                 }
             }
         }
+        let sync = ["std", "sync"];
+        let method = |adt: DeclId, name: &str| -> DeclId {
+            let m = p.strings.lookup(name).and_then(|s| p.methods.inherent.get(&(TypeHead::Adt(adt), s)));
+            match m.and_then(|v| v.first()) {
+                Some(&m) if adt.is_some() => m,
+                _ => DeclId::NONE,
+            }
+        };
+        let l = &mut self.lang.locks;
+        l.mutex = find(&sync, "Mutex");
+        l.guard = find(&sync, "MutexGuard");
+        l.once = find(&sync, "Once");
+        l.lock = method(l.mutex, "lock");
+        l.get_or_init = method(l.once, "get_or_init");
+        l.lock_pair = find(&sync, "lock_pair");
     }
 
     pub fn icx(&self, item: ItemId) -> Option<ItemCx<'p>> {
@@ -1390,6 +1466,10 @@ impl<'p> SigBuilder<'p> {
             }
             self.ungated = ungated;
         }
+        let (deny, deny_spans) = match icx.child(n, NodeKind::Without) {
+            Some(nd) => deny_bits(self, &icx, nd),
+            None => (0, Vec::new()),
+        };
         let mut is_unsafe = decl.flags.has(DeclFlags::UNSAFE);
         let mut abi = Abi::Stave;
         if decl.flags.has(DeclFlags::EXTERN_IMPORT) {
@@ -1420,6 +1500,8 @@ impl<'p> SigBuilder<'p> {
             ret_span,
             origins,
             features,
+            deny,
+            deny_spans,
             is_unsafe,
             abi,
             variadic,

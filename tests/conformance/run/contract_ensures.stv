@@ -1,0 +1,26 @@
+//~ EXIT 101
+//~ STDOUT contract_ensures.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_ensures.stv:14:9 in main.clamp (thread 0)\nensures(result <= hi)\n"
+// A false `ensures` panics `Contract` at the `return` that ends the call, with `result` bound to
+// the returned value; the clauses run in order at each return.
+import std.io;
+
+fn clamp(x: u32, lo: u32, hi: u32) -> u32 ensures(result >= lo) ensures(result <= hi) {
+    if x < lo {
+        return lo;
+    }
+    if x > hi {
+        // the bug: above `hi` it returns `x`
+        return x;
+    }
+    return x;
+}
+
+fn main() -> i32 {
+    let a = clamp(5, 10, 20);
+    let b = clamp(15, 10, 20);
+    io.print(f"{a} {b}\n");
+    let c = clamp(25, 10, 20);
+    io.print(f"not reached {c}\n");
+    return 0;
+}

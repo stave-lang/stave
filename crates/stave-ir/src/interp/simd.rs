@@ -163,7 +163,7 @@ impl<H: Host> Interp<'_, H> {
                 lanes_val(vec![x; n as usize])
             }
             Add | Sub | Mul | Div | Copysign | Min | Max | MinNum | MaxNum | MinX86 | MaxX86 | AddWrap
-            | SubWrap | MulWrap | AddSat | SubSat | MulSat | And | Or | Xor | Andnot | DivLanes => {
+            | SubWrap | MulWrap | AddSat | SubSat | MulSat | MulHi | And | Or | Xor | Andnot | DivLanes => {
                 let (_, lane, _) = self.vshape(rt()?)?;
                 let (a, b) = (self.lanes(body, regs, arg(0)?)?, self.lanes(body, regs, arg(1)?)?);
                 let mut out = Vec::with_capacity(a.len());

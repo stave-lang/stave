@@ -2,7 +2,7 @@
 // the last value whose successor the loop computes without overflow). Both must agree.
 import std.io;
 
-fn fib_rec(n: u32) -> u64 {
+rec fn fib_rec(n: u32) -> u64 {
     if n < 2 {
         return n as u64;
     }

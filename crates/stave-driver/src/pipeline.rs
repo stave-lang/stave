@@ -1,8 +1,9 @@
 //! The stage0 driver pipeline.
 //!
 //! read → lex → items → parse → intern → resolve (+ canonical renumbering) → typeck (+ canonical
-//! type renumbering) → borrowck (stave-borrow, per body) → mono + lower (checked IR) → codegen →
-//! link (static ELF with DWARF line tables).
+//! type renumbering) → borrowck (stave-borrow, per body) → effects (deny clauses; [`crate::effects`],
+//! no `--timings` line) → lock ranks ([`stave_sema::ranks`], no `--timings` line) → mono + lower (checked IR) → codegen → link (static ELF with DWARF line
+//! tables).
 //!
 //! The front end through name resolution is [`stave_sema::Program::load`] (packages and manifests,
 //! the built-in `std`/`runtime` of a [`Library`], per-file parallel read + lex + items + parse,
@@ -18,7 +19,7 @@
 //! `codegen` (per function, parallel), `link` (layout, relocations, DWARF line tables, ELF; no
 //! separate `dwarf` line).
 //!
-//! Goals: [`Goal::Check`] stops after `borrowck` ([`Output::borrowck`]); a body the borrow
+//! Goals: [`Goal::Check`] stops after the effect pass ([`Output::borrowck`], [`Output::effects`]); a body the borrow
 //! checker could not check ([`stave_borrow::Borrowck::unchecked`]) is [`Output::failure`] for every
 //! goal but [`Goal::Parse`]. [`Goal::Build`] goes on
 //! through `link` when there is no error diagnostic; the back end's result is [`Output::module`] (the checked IR, also
@@ -135,9 +136,9 @@ impl Stage {
     /// | items | E0016 |
     /// | parse | E0004 E0011–E0014 E0019–E0023 E0025–E0028 |
     /// | resolve | E0101–E0107 |
-    /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0700–E0718 (the lowering-class gates E0700 E0701 included), E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck); the signature's `from` clause E0520 E0521; E0503 case `static` (writes to a `static`) |
+    /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0700–E0718 (the lowering-class gates E0700 E0701 included), E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck), E1404 (deny clause names); the signature's `from` clause E0520 E0521; E0503 case `static` (writes to a `static`) |
     /// | borrowck | E05xx except E0520 E0521 (accesses, loans, returned origins) |
-    /// | lower | E0108 (no `fn main`, builds only, reported before lowering) |
+    /// | lower | E0108 (no `fn main`, builds only, reported before lowering); E1401 E1403 (the effect pass), E1405 E1406 (the rank pass), after borrowck on programs without errors, in checks and builds |
     /// | (none) | retired codes: E0511 |
     pub fn of_code(code: &str) -> Option<Stage> {
         match code {
@@ -156,6 +157,10 @@ impl Stage {
             "E1002" | "E1003" => return Some(Stage::Read),
             // a build without `main` (stave build/run/test only; reported before lowering)
             "E0108" => return Some(Stage::Lower),
+            // the effect and rank passes run after borrowck on programs without errors, before
+            // lowering
+            "E1401" | "E1403" | "E1405" | "E1406" => return Some(Stage::Lower),
+            "E1404" => return Some(Stage::Typeck),
             // Origin table: checked with the signature (stave-sema origins), never from a body.
             "E0520" | "E0521" => return Some(Stage::Typeck),
             // retired: a missing `from` declares the empty origin set
@@ -216,6 +221,9 @@ pub struct Options {
     pub lower: bool,
     /// Collect the borrow checker's per-access lines (the `borrow` dump).
     pub borrow_dump: bool,
+    /// `stave effects`: compute `trap` from the checked IR of every fn, not only of what the deny
+    /// clauses reach ([`crate::effects::run`]).
+    pub effects_all: bool,
     /// Contents that stand in for source files on disk ([`stave_sema::Config::sources`]): a
     /// check of edits that are not written yet.
     pub sources: std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
@@ -232,6 +240,7 @@ impl Options {
             tests: false,
             lower: false,
             borrow_dump: false,
+            effects_all: false,
             sources: std::collections::BTreeMap::new(),
         }
     }
@@ -277,6 +286,9 @@ pub struct Output {
     pub typeck: Option<Typeck>,
     /// The borrow checker's result (`None` when the goal is [`Goal::Parse`]).
     pub borrowck: Option<stave_borrow::Borrowck>,
+    /// The effect sets of the call graph's nodes ([`crate::effects`]; `None` with error
+    /// diagnostics before the effect pass).
+    pub effects: Option<stave_sema::effects::EffectSets>,
     /// All diagnostics in canonical order, deduplicated.
     pub diagnostics: Vec<Diagnostic>,
     /// The stages that ran, in execution order.
@@ -292,6 +304,8 @@ pub struct Output {
     pub main: Option<FuncId>,
     /// The executable ([`Goal::Build`] without errors).
     pub image: Option<ObjectImage>,
+    /// The stack bound of the executable ([`crate::stack`]).
+    pub stack: Option<crate::stack::Report>,
     /// Why a run without error diagnostics failed: a body borrowck could not check (check and
     /// build), or no image (build).
     pub failure: Option<Failure>,
@@ -311,6 +325,17 @@ impl Output {
 
     pub fn has_errors(&self) -> bool {
         self.error_count() > 0
+    }
+
+    /// The build summary's stack lines (empty without a computed bound).
+    pub fn stack_lines(&self) -> Vec<String> {
+        let (Some(r), Some(tc), Some(m)) = (&self.stack, &self.typeck, &self.module) else {
+            return Vec::new();
+        };
+        crate::stack::summary(r, &self.program, tc, m, |sp| match self.files().locate(sp) {
+            Ok(l) => format!("{}:{}:{}", l.path, l.line, l.col),
+            Err(_) => "?".to_string(),
+        })
     }
 }
 
@@ -347,7 +372,15 @@ pub fn run(root: &Path, lib: &Library, opts: &Options) -> Result<Output, Pipelin
 }
 
 /// Runs the pipeline on `pool` (reused across runs by `stave test`).
+///
+/// Called from a worker of another pool, it waits on a plain thread: a worker waiting in
+/// `install` runs its own pool's other jobs on its stack meanwhile (rayon's cross-pool wait), so
+/// runs started from the items of a `par_iter` would nest on one stack without bound.
 pub fn run_on(pool: &rayon::ThreadPool, root: &Path, lib: &Library, opts: &Options) -> Output {
+    if rayon::current_thread_index().is_some() && pool.current_thread_index().is_none() {
+        return std::thread::scope(|s| s.spawn(|| pool.install(|| run_inner(root, lib, opts))).join())
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
     pool.install(|| run_inner(root, lib, opts))
 }
 
@@ -414,12 +447,14 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             program,
             typeck: None,
             borrowck: None,
+            effects: None,
             diagnostics,
             timings,
             module: None,
             removed_checks: Vec::new(),
             main: None,
             image: None,
+            stack: None,
             failure: None,
             lines,
         };
@@ -434,12 +469,14 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             program,
             typeck: None,
             borrowck: None,
+            effects: None,
             diagnostics,
             timings,
             module: None,
             removed_checks: Vec::new(),
             main: None,
             image: None,
+            stack: None,
             failure: Some(Failure::Unsupported { stage: Stage::Typeck, message: what }),
             lines,
         };
@@ -483,17 +520,49 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     }
     // A body the borrow checker could not model is not known to be sound: the run fails (check
     // and build alike) instead of accepting it without its E05xx diagnostics.
-    let failure = if has_errors { None } else { unchecked_failure(&bc, |d| program.decl_path(d)) };
+    let mut failure = if has_errors { None } else { unchecked_failure(&bc, |d| program.decl_path(d)) };
+
+    // ---- effects: deny clauses against the effect sets of the call graph.
+    let mut effect_sets = None;
+    if !has_errors && failure.is_none() {
+        let t0 = Instant::now();
+        match crate::effects::run(&program, &tc, opts.effects_all) {
+            Ok(r) => {
+                if !r.diagnostics.is_empty() {
+                    diagnostics.extend(r.diagnostics);
+                    diagnostics = stave_diag::canonical_order(diagnostics, &program.source_map);
+                    has_errors = true;
+                }
+                effect_sets = Some(r.sets);
+            }
+            Err(f) => failure = Some(f),
+        }
+        prof::part(".effects", t0.elapsed());
+        prof::mark("effects");
+    }
+    // ---- lock ranks: every acquisition above the ranks held, every join too.
+    if !has_errors && failure.is_none() {
+        let t0 = Instant::now();
+        let ds = stave_sema::ranks::check(&program, &tc, &bc.locks, &bc.drops);
+        if !ds.is_empty() {
+            diagnostics.extend(ds);
+            diagnostics = stave_diag::canonical_order(diagnostics, &program.source_map);
+            has_errors = true;
+        }
+        prof::part(".ranks", t0.elapsed());
+    }
     let mut out = Output {
         program,
         typeck: None,
         borrowck: Some(bc),
+        effects: effect_sets,
         diagnostics,
         timings,
         module: None,
         removed_checks: Vec::new(),
         main: None,
         image: None,
+        stack: None,
         failure,
         lines,
     };
@@ -510,10 +579,10 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     let funcs = lowered.as_ref().map_or(0, |l| l.module.funcs.iter().filter(|f| f.body.is_some()).count());
     out.timings.push(timing(Stage::Lower, ms(t0.elapsed()), funcs as u64));
     out.typeck = Some(tc);
-    let module = match lowered {
+    let (module, nodes_of_func) = match lowered {
         Ok(l) => {
             out.removed_checks = l.removed;
-            l.module
+            (l.module, l.nodes_of_func)
         }
         Err(f) => {
             out.failure = Some(f);
@@ -529,11 +598,24 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             (None, _) => out.failure = Some(Failure::NoHostTarget),
             (Some(_), None) => out.failure = Some(Failure::NoMain),
             (Some(t), Some(main)) => {
-                match build::codegen_link(&module, main, t, opts.release, opts.threads) {
+                let run_stack = out.program.packages.iter().find(|p| p.is_root).and_then(|p| p.run_stack);
+                let built = match &out.typeck {
+                    Some(tc) => {
+                        let input = crate::stack::Input {
+                            graph: &tc.call_graph,
+                            nodes_of_func: &nodes_of_func,
+                            run_stack,
+                        };
+                        build::codegen_link(&module, main, t, opts.release, opts.threads, Some(&input))
+                    }
+                    None => build::codegen_link(&module, main, t, opts.release, opts.threads, None),
+                };
+                match built {
                     Ok(b) => {
                         out.timings.push(timing(Stage::Codegen, b.codegen_ms, b.funcs));
                         out.timings.push(timing(Stage::Link, b.link_ms, b.funcs));
                         out.image = Some(b.image);
+                        out.stack = b.stack;
                     }
                     Err(f) => out.failure = Some(f),
                 }
@@ -559,6 +641,37 @@ fn unchecked_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs started from the items of a `par_iter` run one at a time on each caller's stack: a
+    /// caller waiting for its run does not take up the next item.
+    #[test]
+    fn parallel_runs_do_not_nest() {
+        use std::cell::Cell;
+        thread_local! {
+            static DEPTH: Cell<u32> = const { Cell::new(0) };
+        }
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/conformance/syntax/rec_fn_check.stv");
+        let lib = Library::in_dir(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+        let opts = Options::new(Goal::Parse).threads(Some(1));
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let most = pool.install(|| {
+            (0..16u32)
+                .into_par_iter()
+                .map(|_| {
+                    let d = DEPTH.with(|c| {
+                        c.set(c.get() + 1);
+                        c.get()
+                    });
+                    let out = run(&root, &lib, &opts).unwrap();
+                    assert!(!out.has_errors());
+                    DEPTH.with(|c| c.set(c.get() - 1));
+                    d
+                })
+                .max()
+        });
+        assert_eq!(most, Some(1));
+    }
 
     /// An unchecked body fails the run as unsupported in `borrowck`; a fully checked program
     /// does not.
@@ -592,6 +705,9 @@ mod tests {
         assert_eq!(of("E0101"), Some(Stage::Resolve));
         assert_eq!(of("E0107"), Some(Stage::Resolve));
         assert_eq!(of("E0108"), Some(Stage::Lower));
+        assert_eq!(of("E1401"), Some(Stage::Lower));
+        assert_eq!(of("E1403"), Some(Stage::Lower));
+        assert_eq!(of("E1404"), Some(Stage::Typeck));
         assert_eq!(of("E0201"), Some(Stage::Typeck));
         assert_eq!(of("E0909"), Some(Stage::Typeck));
         assert_eq!(of("E0803"), Some(Stage::Typeck));

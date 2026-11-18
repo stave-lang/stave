@@ -1,21 +1,29 @@
-// std.sync: Mutex, Once.
+// std.sync: Mutex, Once, ranks.
 //
-// `Mutex<T>` guards a T with a futex lock (runtime.atomic: three-state futex mutex, waiters
+// `Mutex<T, R>` guards a T with a futex lock (runtime.atomic: three-state futex mutex, waiters
 // sleep in FUTEX_WAIT). `lock()` returns a `MutexGuard` view; its destructor unlocks, so the
 // lock is held exactly while the guard lives (a guard cannot be forgotten: E0412).
-// `with_lock(f)` runs `f(&mut value)` under the lock and returns its result. Mutex<T> is Send
-// and Sync when T is Send. A MutexGuard<T> is never Send (it stays on the locking thread) and is
-// Sync only when T is Sync (a shared guard hands out `&T` to every thread holding it). Not
+// `with_lock(f)` runs `f(&mut value)` under the lock and returns its result. Mutex<T, R> is Send
+// and Sync when T is Send. A MutexGuard<T, R> is never Send (it stays on the locking thread) and
+// is Sync only when T is Sync (a shared guard hands out `&T` to every thread holding it). Not
 // poisoned: a panic ends the process.
 //
-// `Once<T>` holds a value computed at most once: `get_or_init(f)` runs `f` in the first caller,
-// callers arriving meanwhile sleep on a futex, and every call returns a reference to the one
-// value. Sync when T is Send and Sync. Calling `get_or_init` of the same Once from inside `f`
-// never returns.
+// `R` (a `u32`) is the lock's rank. The compiler checks that a thread acquires upward only:
+// while a guard of rank r lives, every lock taken (directly, through any call, and by the threads
+// a `scope` end, `thread.join` or `par_*` waits for) has a rank above r (E1405, E1406). Two
+// mutexes of one rank are taken together only through `lock_pair`, which locks them in address
+// order. `try_lock` never waits, so it is not checked, but its guard counts as held.
+//
+// `Once<T, R>` holds a value computed at most once: `get_or_init(f)` runs `f` in the first
+// caller, callers arriving meanwhile sleep on a futex, and every call returns a reference to the
+// one value. Waiting for the value counts as acquiring rank R, and `f` runs holding rank R. Sync
+// when T is Send and Sync. Calling `get_or_init` of the same Once from inside its `f` (possible
+// only past the rank check, through unsafe code) traps `Deadlock`.
 //
 // `Mutex.new` and `Once.new` are paths fixed by the compiler (contracts/intrinsics.md): a
 // `static` initializer may call them, so each body must stay one `return` of a struct literal
-// whose operands are const-exprs over the parameters.
+// whose operands are const-exprs over the parameters. `Mutex.lock`, `Once.get_or_init`, and
+// `lock_pair` are fixed paths too: the rank check knows them as the acquisitions of rank R.
 
 import runtime.atomic;
 import runtime.os;
@@ -23,32 +31,32 @@ import runtime.panic;
 import std.core;
 import std.cell;
 
-pub struct Mutex<T> {
+pub struct Mutex<T, const R: u32> {
     word: cell.UnsafeCell<u32>,
     v: cell.UnsafeCell<T>,
 }
 
-unsafe("the value is reached only under the lock; moving the mutex moves the value") impl<T: core.Send> core.Send for Mutex<T> {}
-unsafe("the lock serializes every access to the value") impl<T: core.Send> core.Sync for Mutex<T> {}
+unsafe("the value is reached only under the lock; moving the mutex moves the value") impl<T: core.Send, const R: u32> core.Send for Mutex<T, R> {}
+unsafe("the lock serializes every access to the value") impl<T: core.Send, const R: u32> core.Sync for Mutex<T, R> {}
 
-impl<T> Mutex<T> {
-    pub fn new(v: T) -> Mutex<T> {
-        return Mutex::<T>.{ word: cell.UnsafeCell::<u32>.new(0), v: cell.UnsafeCell::<T>.new(v) };
+impl<T, const R: u32> Mutex<T, R> {
+    pub fn new(v: T) -> Mutex<T, R> {
+        return Mutex::<T, R>.{ word: cell.UnsafeCell::<u32>.new(0), v: cell.UnsafeCell::<T>.new(v) };
     }
 
     // Blocks until the lock is free, then holds it while the guard lives.
-    pub fn lock(&self) -> MutexGuard<T> from self {
+    pub fn lock(&self) -> MutexGuard<T, R> from self {
         unsafe("word is this mutex's lock word; it lives as long as self") { atomic.lock(self.word.get()); }
-        return MutexGuard::<T>.{ m: self, marker: 0usize as *const u8 };
+        return MutexGuard::<T, R>.{ m: self, marker: 0usize as *const u8 };
     }
 
-    pub fn try_lock(&self) -> Option<MutexGuard<T>> from self {
+    pub fn try_lock(&self) -> Option<MutexGuard<T, R>> from self {
         let ok = unsafe("word is this mutex's lock word") atomic.try_lock(self.word.get());
-        return if ok then Option.Some(MutexGuard::<T>.{ m: self, marker: 0usize as *const u8 }) else Option.None;
+        return if ok then Option.Some(MutexGuard::<T, R>.{ m: self, marker: 0usize as *const u8 }) else Option.None;
     }
 
     // f(&mut value) under the lock.
-    pub fn with_lock<R>(&self, f: fn(&mut T) -> R) -> R {
+    pub fn with_lock<U>(&self, f: fn(&mut T) -> U) -> U {
         let mut g = self.lock();
         let r = f(g.get_mut());
         return r;
@@ -63,18 +71,43 @@ impl<T> Mutex<T> {
     }
 }
 
+// Locks two mutexes of one rank, lower address first, so that threads naming one pair in either
+// order cannot deadlock. The same mutex twice can never be granted: it traps `Deadlock`.
+pub fn lock_pair<A, B, const R: u32>(a: &Mutex<A, R>, b: &Mutex<B, R>) -> (MutexGuard<A, R>, MutexGuard<B, R>) from a + b {
+    let wa = a.word.get();
+    let wb = b.word.get();
+    let (pa, pb) = (wa as usize, wb as usize);
+    if pa == pb {
+        panic.trap(panic.KIND_DEADLOCK, panic.user_site());
+    }
+    if pa < pb {
+        unsafe("wa and wb are the lock words of a and b, which outlive the guards") {
+            atomic.lock(wa);
+            atomic.lock(wb);
+        }
+    } else {
+        unsafe("wa and wb are the lock words of a and b, which outlive the guards") {
+            atomic.lock(wb);
+            atomic.lock(wa);
+        }
+    }
+    let ga = MutexGuard::<A, R>.{ m: a, marker: 0usize as *const u8 };
+    let gb = MutexGuard::<B, R>.{ m: b, marker: 0usize as *const u8 };
+    return (ga, gb);
+}
+
 // The lock of a Mutex, held while this view lives.
-pub view struct MutexGuard<T> {
-    m: &Mutex<T>,
+pub view struct MutexGuard<T, const R: u32> {
+    m: &Mutex<T, R>,
     // A raw pointer is neither Send nor Sync, so the structural rule gives the guard neither;
-    // Sync comes back only through the impl below. Without it, `&Mutex<T>` would make the guard
-    // Sync for every T: Send (Mutex<T> is Sync then), sharing `&T` of a non-Sync T.
+    // Sync comes back only through the impl below. Without it, `&Mutex<T, R>` would make the
+    // guard Sync for every T: Send (Mutex<T, R> is Sync then), sharing `&T` of a non-Sync T.
     marker: *const u8,
 }
 
-unsafe("a shared guard only gives out &T, which is safe to share when T is Sync") impl<T: core.Sync> core.Sync for MutexGuard<T> {}
+unsafe("a shared guard only gives out &T, which is safe to share when T is Sync") impl<T: core.Sync, const R: u32> core.Sync for MutexGuard<T, R> {}
 
-impl<T> MutexGuard<T> {
+impl<T, const R: u32> MutexGuard<T, R> {
     pub fn get(&self) -> &T from self {
         let p = self.m.v.get();
         return unsafe("this guard holds the lock: no other access to the value") &*p;
@@ -86,29 +119,32 @@ impl<T> MutexGuard<T> {
     }
 }
 
-impl<T> core.Drop for MutexGuard<T> {
+impl<T, const R: u32> core.Drop for MutexGuard<T, R> {
     fn drop(&mut self) {
         unsafe("this guard holds the lock") { atomic.unlock(self.m.word.get()); }
     }
 }
 
 // A value computed once, by the first caller of `get_or_init`.
-pub struct Once<T> {
+pub struct Once<T, const R: u32> {
     // 0 empty, 1 the first caller is running `f`, 2 the same with callers asleep, 3 ready
     state: cell.UnsafeCell<u32>,
+    // the thread id + 1 of the caller running `f`, 0 before; written once, before `f` runs
+    owner: cell.UnsafeCell<u64>,
     v: cell.UnsafeCell<Option<T>>,
 }
 
-unsafe("the slot is written once, by the thread that moved the state from 0 to 1, before the state becomes 3; every other thread reads it only after that") impl<T: core.Send + core.Sync> core.Sync for Once<T> {}
+unsafe("the slot is written once, by the thread that moved the state from 0 to 1, before the state becomes 3; every other thread reads it only after that") impl<T: core.Send + core.Sync, const R: u32> core.Sync for Once<T, R> {}
 
-impl<T> Once<T> {
-    pub fn new() -> Once<T> {
-        return Once::<T>.{ state: cell.UnsafeCell::<u32>.new(0), v: cell.UnsafeCell::<Option<T>>.new(Option.None) };
+impl<T, const R: u32> Once<T, R> {
+    pub fn new() -> Once<T, R> {
+        return Once::<T, R>.{ state: cell.UnsafeCell::<u32>.new(0), owner: cell.UnsafeCell::<u64>.new(0), v: cell.UnsafeCell::<Option<T>>.new(Option.None) };
     }
 
     // The value; the first caller computes it with `f`, callers arriving meanwhile wait for it.
     pub fn get_or_init(&self, f: fn() -> T) -> &T from self {
         let w = self.state.get();
+        let o = self.owner.get();
         let p = self.v.get();
         loop {
             let s = unsafe("w is this Once's state word") atomic.load_u32(w as *const u32);
@@ -116,15 +152,23 @@ impl<T> Once<T> {
             if s == 0 {
                 let was = unsafe("w is this Once's state word") atomic.cas_u32(w, 0, 1);
                 if was == 0 {
+                    let me = panic.thread_id() + 1;
+                    let prev = unsafe("o is this Once's owner word") atomic.swap_u64(o, me);
                     let val = f();
                     unsafe("state 1 or 2: only this thread touches the slot") { *p = Option.Some(val); }
-                    let prev = unsafe("w is this Once's state word") atomic.swap_u32(w, 3);
-                    if prev == 2 {
+                    let before = unsafe("w is this Once's state word") atomic.swap_u32(w, 3);
+                    if before == 2 {
                         let r = unsafe("w is a valid futex word") os.futex(w, os.FUTEX_WAKE | os.FUTEX_PRIVATE, 2147483647, 0, 0, 0);
                     }
                     break;
                 }
             } else {
+                // the owner word is written before `f` runs, so the thread running `f` always
+                // finds itself there; any other thread finds 0 or another id
+                let who = unsafe("o is this Once's owner word") atomic.load_u64(o as *const u64);
+                if who == panic.thread_id() + 1 {
+                    panic.trap(panic.KIND_DEADLOCK, panic.user_site());
+                }
                 // the first caller is running `f`: mark the word and sleep until it changes
                 let c = if s == 1 then unsafe("w is this Once's state word") atomic.cas_u32(w, 1, 2) else s;
                 if c == 1 || c == 2 {

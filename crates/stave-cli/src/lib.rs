@@ -35,6 +35,7 @@
 //! change); `STAVE_PROFILE` prints the step profile of a compile on stderr (`stave_driver::prof`).
 
 pub mod args;
+pub mod effects_report;
 pub mod fix;
 pub mod fmt;
 pub mod lowering;
@@ -145,6 +146,7 @@ fn dispatch(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
         }
         (Cmd::Daemon, _) => not_implemented("daemon evict", "needs the stage1 daemon", err),
         (Cmd::UnsafeReport, _) => unsafe_report::run(a, out, err),
+        (Cmd::Effects, _) => effects_report::run(a, out, err),
         (Cmd::Fix, _) => fix::run(a, out, err),
         (Cmd::Fmt, _) => fmt::run(a, out, err),
         (Cmd::Lowering, _) => lowering::run(a, out, err),
@@ -387,6 +389,9 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
             };
             let _ = writeln!(err, "emulated: {at}: {} on {} ({triple})", e.op, e.ty);
         }
+        for l in output.stack_lines() {
+            let _ = writeln!(err, "{l}");
+        }
         let _ = writeln!(err, "{}", select::summary_line(selection, total_ms as u64));
     }
     release(output);
@@ -514,7 +519,9 @@ fn test(
         let mut opts = Options::new(Goal::Check).threads(threads);
         opts.target = Some(a.target.triple);
         opts.release = a.release;
-        match harness::run(&pool, &root, &lib, &opts, a.filter.as_deref(), a.runner.as_deref()) {
+        let sel =
+            harness::Selection { filter: a.filter.as_deref(), runner: a.runner.as_deref(), input: a.input };
+        match harness::run(&pool, &root, &lib, &opts, sel) {
             Ok(r) => {
                 let _ = out.write_all(r.render().as_bytes());
                 ok &= r.failed() == 0;

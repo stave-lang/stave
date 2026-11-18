@@ -103,7 +103,7 @@ fn probe(sp: &mut Sp, op: VecOp, key: &str, form: &str) -> Option<Probe> {
     match op {
         Splat => (p.params, p.ret) = (vec![scalar], Some(v)),
         Add | Sub | Mul | Div | MinX86 | MaxX86 | Min | Max | MinNum | MaxNum | Copysign | AddWrap
-        | SubWrap | MulWrap | AddSat | SubSat | MulSat | And | Or | Xor | Andnot => {
+        | SubWrap | MulWrap | AddSat | SubSat | MulSat | MulHi | And | Or | Xor | Andnot => {
             (p.params, p.ret) = (vec![v, v], Some(v))
         }
         Neg | Abs | Sqrt | Floor | Ceil | Round | Trunc | AbsWrap | Not | Popcount | Clz | ScanAdd
@@ -182,6 +182,7 @@ fn worst_divisor(l: Lane) -> i128 {
         (16, true) => -15,
         (32, false) => 7,
         (32, true) => -7,
+        (64, true) => -15,
         _ => 7,
     }
 }
@@ -336,7 +337,7 @@ fn code_counts(code: &[Inst], p: &Probe, want: &BTreeMap<String, usize>) -> BTre
 }
 
 /// Rows of the v4 column backed by K mode.
-const BACKED: usize = 411;
+const BACKED: usize = 419;
 
 /// The v4 rows of vector ops no K-mode code backs: an unavailable cell (`div_lanes`, which has
 /// no vector form at any x86 tier), and the casts on f16 lanes alone, which no backend holds in

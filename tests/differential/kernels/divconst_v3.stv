@@ -1,0 +1,702 @@
+// The kernels of divconst.stv with 256-bit vectors (x86_64-linux-v3), against the same
+// references with twice the lanes.
+import base;
+import diff;
+
+fn run(a: &[i32], r: &mut [i32], f: fn(i32x8) -> i32x8) {
+    let n = a.len();
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        f(i32x8.load(a, i)).store(r, i);
+        i = i + 8;
+    }
+    if i < n {
+        let m = mask32x8.first_n(n - i);
+        f(i32x8.load_masked(a, i, m)).store_masked(r, i, m);
+    }
+}
+
+// Every i8 lane value through f, 32 at a time, folded per lane.
+fn all_i8(f: fn(i8x32) -> i8x32) -> u64 {
+    let mut idx: [i8; 32] = [0; 32];
+    for j in 0usize..32 {
+        idx[j] = ((j as% u8) as% i8);
+    }
+    let iota = i8x32.load(&idx, 0);
+    let mut acc = i8x32.splat(0);
+    let p = i8x32.splat((157u8 as% i8));
+    let mut c: usize = 0;
+    while c < 256 {
+        let x = iota +% i8x32.splat(((c as% u8) as% i8));
+        acc = (acc ^ f(x)) *% p;
+        c = c + 32;
+    }
+    let mut out: [i8; 32] = [0; 32];
+    acc.store(&mut out, 0);
+    let mut h: u64 = 14695981039346656037;
+    for j in 0usize..32 {
+        h = (h ^ ((out[j] as% u8) as u64)) *% 1099511628211;
+    }
+    return h;
+}
+
+// Every u8 lane value through f, 32 at a time, folded per lane.
+fn all_u8(f: fn(u8x32) -> u8x32) -> u64 {
+    let mut idx: [u8; 32] = [0; 32];
+    for j in 0usize..32 {
+        idx[j] = (j as% u8);
+    }
+    let iota = u8x32.load(&idx, 0);
+    let mut acc = u8x32.splat(0);
+    let p = u8x32.splat(157u8);
+    let mut c: usize = 0;
+    while c < 256 {
+        let x = iota +% u8x32.splat((c as% u8));
+        acc = (acc ^ f(x)) *% p;
+        c = c + 32;
+    }
+    let mut out: [u8; 32] = [0; 32];
+    acc.store(&mut out, 0);
+    let mut h: u64 = 14695981039346656037;
+    for j in 0usize..32 {
+        h = (h ^ ((out[j] as% u8) as u64)) *% 1099511628211;
+    }
+    return h;
+}
+
+// Every i16 lane value through f, 16 at a time, folded per lane.
+fn all_i16(f: fn(i16x16) -> i16x16) -> u64 {
+    let mut idx: [i16; 16] = [0; 16];
+    for j in 0usize..16 {
+        idx[j] = ((j as% u16) as% i16);
+    }
+    let iota = i16x16.load(&idx, 0);
+    let mut acc = i16x16.splat(0);
+    let p = i16x16.splat((40503u16 as% i16));
+    let mut c: usize = 0;
+    while c < 65536 {
+        let x = iota +% i16x16.splat(((c as% u16) as% i16));
+        acc = (acc ^ f(x)) *% p;
+        c = c + 16;
+    }
+    let mut out: [i16; 16] = [0; 16];
+    acc.store(&mut out, 0);
+    let mut h: u64 = 14695981039346656037;
+    for j in 0usize..16 {
+        h = (h ^ ((out[j] as% u16) as u64)) *% 1099511628211;
+    }
+    return h;
+}
+
+// Every u16 lane value through f, 16 at a time, folded per lane.
+fn all_u16(f: fn(u16x16) -> u16x16) -> u64 {
+    let mut idx: [u16; 16] = [0; 16];
+    for j in 0usize..16 {
+        idx[j] = (j as% u16);
+    }
+    let iota = u16x16.load(&idx, 0);
+    let mut acc = u16x16.splat(0);
+    let p = u16x16.splat(40503u16);
+    let mut c: usize = 0;
+    while c < 65536 {
+        let x = iota +% u16x16.splat((c as% u16));
+        acc = (acc ^ f(x)) *% p;
+        c = c + 16;
+    }
+    let mut out: [u16; 16] = [0; 16];
+    acc.store(&mut out, 0);
+    let mut h: u64 = 14695981039346656037;
+    for j in 0usize..16 {
+        h = (h ^ ((out[j] as% u16) as u64)) *% 1099511628211;
+    }
+    return h;
+}
+
+fn q_u8_1(x: u8x32) -> u8x32 {
+    return x.div_const(1);
+}
+
+fn q_u8_2(x: u8x32) -> u8x32 {
+    return x.div_const(2);
+}
+
+fn q_u8_3(x: u8x32) -> u8x32 {
+    return x.div_const(3);
+}
+
+fn q_u8_5(x: u8x32) -> u8x32 {
+    return x.div_const(5);
+}
+
+fn q_u8_6(x: u8x32) -> u8x32 {
+    return x.div_const(6);
+}
+
+fn q_u8_7(x: u8x32) -> u8x32 {
+    return x.div_const(7);
+}
+
+fn q_u8_10(x: u8x32) -> u8x32 {
+    return x.div_const(10);
+}
+
+fn q_u8_11(x: u8x32) -> u8x32 {
+    return x.div_const(11);
+}
+
+fn q_u8_13(x: u8x32) -> u8x32 {
+    return x.div_const(13);
+}
+
+fn q_u8_25(x: u8x32) -> u8x32 {
+    return x.div_const(25);
+}
+
+fn q_u8_37(x: u8x32) -> u8x32 {
+    return x.div_const(37);
+}
+
+fn q_u8_64(x: u8x32) -> u8x32 {
+    return x.div_const(64);
+}
+
+fn q_u8_100(x: u8x32) -> u8x32 {
+    return x.div_const(100);
+}
+
+fn q_u8_127(x: u8x32) -> u8x32 {
+    return x.div_const(127);
+}
+
+fn q_u8_128(x: u8x32) -> u8x32 {
+    return x.div_const(128);
+}
+
+fn q_u8_129(x: u8x32) -> u8x32 {
+    return x.div_const(129);
+}
+
+fn q_u8_200(x: u8x32) -> u8x32 {
+    return x.div_const(200);
+}
+
+fn q_u8_254(x: u8x32) -> u8x32 {
+    return x.div_const(254);
+}
+
+fn q_u8_255(x: u8x32) -> u8x32 {
+    return x.div_const(255);
+}
+
+fn q_i8_1(x: i8x32) -> i8x32 {
+    return x.div_const(1);
+}
+
+fn q_i8_m1(x: i8x32) -> i8x32 {
+    let y = x;
+    let z = (y == i8x32.splat(-128)).select(i8x32.splat(0), y);
+    return z.div_const(-1);
+}
+
+fn q_i8_2(x: i8x32) -> i8x32 {
+    return x.div_const(2);
+}
+
+fn q_i8_m2(x: i8x32) -> i8x32 {
+    return x.div_const(-2);
+}
+
+fn q_i8_3(x: i8x32) -> i8x32 {
+    return x.div_const(3);
+}
+
+fn q_i8_m3(x: i8x32) -> i8x32 {
+    return x.div_const(-3);
+}
+
+fn q_i8_5(x: i8x32) -> i8x32 {
+    return x.div_const(5);
+}
+
+fn q_i8_m5(x: i8x32) -> i8x32 {
+    return x.div_const(-5);
+}
+
+fn q_i8_6(x: i8x32) -> i8x32 {
+    return x.div_const(6);
+}
+
+fn q_i8_7(x: i8x32) -> i8x32 {
+    return x.div_const(7);
+}
+
+fn q_i8_m7(x: i8x32) -> i8x32 {
+    return x.div_const(-7);
+}
+
+fn q_i8_10(x: i8x32) -> i8x32 {
+    return x.div_const(10);
+}
+
+fn q_i8_m10(x: i8x32) -> i8x32 {
+    return x.div_const(-10);
+}
+
+fn q_i8_11(x: i8x32) -> i8x32 {
+    return x.div_const(11);
+}
+
+fn q_i8_25(x: i8x32) -> i8x32 {
+    return x.div_const(25);
+}
+
+fn q_i8_m25(x: i8x32) -> i8x32 {
+    return x.div_const(-25);
+}
+
+fn q_i8_37(x: i8x32) -> i8x32 {
+    return x.div_const(37);
+}
+
+fn q_i8_64(x: i8x32) -> i8x32 {
+    return x.div_const(64);
+}
+
+fn q_i8_m64(x: i8x32) -> i8x32 {
+    return x.div_const(-64);
+}
+
+fn q_i8_100(x: i8x32) -> i8x32 {
+    return x.div_const(100);
+}
+
+fn q_i8_m100(x: i8x32) -> i8x32 {
+    return x.div_const(-100);
+}
+
+fn q_i8_126(x: i8x32) -> i8x32 {
+    return x.div_const(126);
+}
+
+fn q_i8_127(x: i8x32) -> i8x32 {
+    return x.div_const(127);
+}
+
+fn q_i8_m127(x: i8x32) -> i8x32 {
+    return x.div_const(-127);
+}
+
+fn q_i8_m128(x: i8x32) -> i8x32 {
+    return x.div_const(-128);
+}
+
+fn q_u16_1(x: u16x16) -> u16x16 {
+    return x.div_const(1);
+}
+
+fn q_u16_3(x: u16x16) -> u16x16 {
+    return x.div_const(3);
+}
+
+fn q_u16_7(x: u16x16) -> u16x16 {
+    return x.div_const(7);
+}
+
+fn q_u16_16(x: u16x16) -> u16x16 {
+    return x.div_const(16);
+}
+
+fn q_u16_65535(x: u16x16) -> u16x16 {
+    return x.div_const(65535);
+}
+
+fn q_i16_m1(x: i16x16) -> i16x16 {
+    let y = x;
+    let z = (y == i16x16.splat(-32768)).select(i16x16.splat(0), y);
+    return z.div_const(-1);
+}
+
+fn q_i16_m2(x: i16x16) -> i16x16 {
+    return x.div_const(-2);
+}
+
+fn q_i16_7(x: i16x16) -> i16x16 {
+    return x.div_const(7);
+}
+
+fn q_i16_m7(x: i16x16) -> i16x16 {
+    return x.div_const(-7);
+}
+
+fn q_i16_15(x: i16x16) -> i16x16 {
+    return x.div_const(15);
+}
+
+fn q_i16_m15(x: i16x16) -> i16x16 {
+    return x.div_const(-15);
+}
+
+fn q_i16_32767(x: i16x16) -> i16x16 {
+    return x.div_const(32767);
+}
+
+fn q_i16_m32768(x: i16x16) -> i16x16 {
+    return x.div_const(-32768);
+}
+
+fn q_u32_1(x: i32x8) -> i32x8 {
+    return x.bitcast::<u32x8>().div_const(1).bitcast::<i32x8>();
+}
+
+fn q_u32_3(x: i32x8) -> i32x8 {
+    return x.bitcast::<u32x8>().div_const(3).bitcast::<i32x8>();
+}
+
+fn q_u32_7(x: i32x8) -> i32x8 {
+    return x.bitcast::<u32x8>().div_const(7).bitcast::<i32x8>();
+}
+
+fn q_u32_65536(x: i32x8) -> i32x8 {
+    return x.bitcast::<u32x8>().div_const(65536).bitcast::<i32x8>();
+}
+
+fn q_u32_2147483649(x: i32x8) -> i32x8 {
+    return x.bitcast::<u32x8>().div_const(2147483649).bitcast::<i32x8>();
+}
+
+fn q_u32_4294967295(x: i32x8) -> i32x8 {
+    return x.bitcast::<u32x8>().div_const(4294967295).bitcast::<i32x8>();
+}
+
+fn q_i32_m1(x: i32x8) -> i32x8 {
+    let y = x;
+    let z = (y == i32x8.splat(-2147483648)).select(i32x8.splat(0), y);
+    return z.div_const(-1);
+}
+
+fn q_i32_2(x: i32x8) -> i32x8 {
+    return x.div_const(2);
+}
+
+fn q_i32_m3(x: i32x8) -> i32x8 {
+    return x.div_const(-3);
+}
+
+fn q_i32_7(x: i32x8) -> i32x8 {
+    return x.div_const(7);
+}
+
+fn q_i32_m7(x: i32x8) -> i32x8 {
+    return x.div_const(-7);
+}
+
+fn q_i32_1048576(x: i32x8) -> i32x8 {
+    return x.div_const(1048576);
+}
+
+fn q_i32_2147483647(x: i32x8) -> i32x8 {
+    return x.div_const(2147483647);
+}
+
+fn q_i32_m2147483648(x: i32x8) -> i32x8 {
+    return x.div_const(-2147483648);
+}
+
+fn q_u64_1(x: i32x8) -> i32x8 {
+    return x.bitcast::<u64x4>().div_const(1).bitcast::<i32x8>();
+}
+
+fn q_u64_7(x: i32x8) -> i32x8 {
+    return x.bitcast::<u64x4>().div_const(7).bitcast::<i32x8>();
+}
+
+fn q_u64_641(x: i32x8) -> i32x8 {
+    return x.bitcast::<u64x4>().div_const(641).bitcast::<i32x8>();
+}
+
+fn q_u64_18446744073709551615(x: i32x8) -> i32x8 {
+    return x.bitcast::<u64x4>().div_const(18446744073709551615).bitcast::<i32x8>();
+}
+
+fn q_i64_m1(x: i32x8) -> i32x8 {
+    let y = x.bitcast::<i64x4>();
+    let z = (y == i64x4.splat(-9223372036854775808)).select(i64x4.splat(0), y);
+    return z.div_const(-1).bitcast::<i32x8>();
+}
+
+fn q_i64_7(x: i32x8) -> i32x8 {
+    return x.bitcast::<i64x4>().div_const(7).bitcast::<i32x8>();
+}
+
+fn q_i64_m641(x: i32x8) -> i32x8 {
+    return x.bitcast::<i64x4>().div_const(-641).bitcast::<i32x8>();
+}
+
+fn q_i64_m9223372036854775808(x: i32x8) -> i32x8 {
+    return x.bitcast::<i64x4>().div_const(-9223372036854775808).bitcast::<i32x8>();
+}
+
+fn main() -> i32 {
+    let mut c = diff.open();
+    let mut o = diff.out();
+    let n = c.count();
+    for k in 0..n {
+        let h = c.head();
+        let ba = c.i32s(h);
+        let a = ba.get();
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i32_m1);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i32_2);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i32_m3);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i32_7);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i32_m7);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i32_1048576);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i32_2147483647);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i32_m2147483648);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_u32_1);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_u32_3);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_u32_7);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_u32_65536);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_u32_2147483649);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_u32_4294967295);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i64_m1);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i64_7);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i64_m641);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_i64_m9223372036854775808);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_u64_1);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_u64_7);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_u64_641);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        run(a, r.get_mut(), q_u64_18446744073709551615);
+        o.i32s(r.get());
+        if k == 0 {
+            o.u(all_i8(q_i8_1));
+            o.u(all_i8(q_i8_m1));
+            o.u(all_i8(q_i8_2));
+            o.u(all_i8(q_i8_m2));
+            o.u(all_i8(q_i8_3));
+            o.u(all_i8(q_i8_m3));
+            o.u(all_i8(q_i8_5));
+            o.u(all_i8(q_i8_m5));
+            o.u(all_i8(q_i8_6));
+            o.u(all_i8(q_i8_7));
+            o.u(all_i8(q_i8_m7));
+            o.u(all_i8(q_i8_10));
+            o.u(all_i8(q_i8_m10));
+            o.u(all_i8(q_i8_11));
+            o.u(all_i8(q_i8_25));
+            o.u(all_i8(q_i8_m25));
+            o.u(all_i8(q_i8_37));
+            o.u(all_i8(q_i8_64));
+            o.u(all_i8(q_i8_m64));
+            o.u(all_i8(q_i8_100));
+            o.u(all_i8(q_i8_m100));
+            o.u(all_i8(q_i8_126));
+            o.u(all_i8(q_i8_127));
+            o.u(all_i8(q_i8_m127));
+            o.u(all_i8(q_i8_m128));
+            o.u(all_u8(q_u8_1));
+            o.u(all_u8(q_u8_2));
+            o.u(all_u8(q_u8_3));
+            o.u(all_u8(q_u8_5));
+            o.u(all_u8(q_u8_6));
+            o.u(all_u8(q_u8_7));
+            o.u(all_u8(q_u8_10));
+            o.u(all_u8(q_u8_11));
+            o.u(all_u8(q_u8_13));
+            o.u(all_u8(q_u8_25));
+            o.u(all_u8(q_u8_37));
+            o.u(all_u8(q_u8_64));
+            o.u(all_u8(q_u8_100));
+            o.u(all_u8(q_u8_127));
+            o.u(all_u8(q_u8_128));
+            o.u(all_u8(q_u8_129));
+            o.u(all_u8(q_u8_200));
+            o.u(all_u8(q_u8_254));
+            o.u(all_u8(q_u8_255));
+            o.u(all_i16(q_i16_m1));
+            o.u(all_i16(q_i16_m2));
+            o.u(all_i16(q_i16_7));
+            o.u(all_i16(q_i16_m7));
+            o.u(all_i16(q_i16_15));
+            o.u(all_i16(q_i16_m15));
+            o.u(all_i16(q_i16_32767));
+            o.u(all_i16(q_i16_m32768));
+            o.u(all_u16(q_u16_1));
+            o.u(all_u16(q_u16_3));
+            o.u(all_u16(q_u16_7));
+            o.u(all_u16(q_u16_16));
+            o.u(all_u16(q_u16_65535));
+        }
+        o.sep();
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i32(a, r.get_mut(), -1);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i32(a, r.get_mut(), 2);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i32(a, r.get_mut(), -3);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i32(a, r.get_mut(), 7);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i32(a, r.get_mut(), -7);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i32(a, r.get_mut(), 1048576);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i32(a, r.get_mut(), 2147483647);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i32(a, r.get_mut(), -2147483648);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_u32(a, r.get_mut(), 1);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_u32(a, r.get_mut(), 3);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_u32(a, r.get_mut(), 7);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_u32(a, r.get_mut(), 65536);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_u32(a, r.get_mut(), 2147483649);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_u32(a, r.get_mut(), 4294967295);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i64(a, r.get_mut(), -1);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i64(a, r.get_mut(), 7);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i64(a, r.get_mut(), -641);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_i64(a, r.get_mut(), -9223372036854775808);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_u64(a, r.get_mut(), 1);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_u64(a, r.get_mut(), 7);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_u64(a, r.get_mut(), 641);
+        o.i32s(r.get());
+        let mut r = diff.Buf::<i32>.new(h.len, h.mis, 0);
+        base.ref_u64(a, r.get_mut(), 18446744073709551615);
+        o.i32s(r.get());
+        if k == 0 {
+            o.u(base.all_i8_ref(1, 32));
+            o.u(base.all_i8_ref(-1, 32));
+            o.u(base.all_i8_ref(2, 32));
+            o.u(base.all_i8_ref(-2, 32));
+            o.u(base.all_i8_ref(3, 32));
+            o.u(base.all_i8_ref(-3, 32));
+            o.u(base.all_i8_ref(5, 32));
+            o.u(base.all_i8_ref(-5, 32));
+            o.u(base.all_i8_ref(6, 32));
+            o.u(base.all_i8_ref(7, 32));
+            o.u(base.all_i8_ref(-7, 32));
+            o.u(base.all_i8_ref(10, 32));
+            o.u(base.all_i8_ref(-10, 32));
+            o.u(base.all_i8_ref(11, 32));
+            o.u(base.all_i8_ref(25, 32));
+            o.u(base.all_i8_ref(-25, 32));
+            o.u(base.all_i8_ref(37, 32));
+            o.u(base.all_i8_ref(64, 32));
+            o.u(base.all_i8_ref(-64, 32));
+            o.u(base.all_i8_ref(100, 32));
+            o.u(base.all_i8_ref(-100, 32));
+            o.u(base.all_i8_ref(126, 32));
+            o.u(base.all_i8_ref(127, 32));
+            o.u(base.all_i8_ref(-127, 32));
+            o.u(base.all_i8_ref(-128, 32));
+            o.u(base.all_u8_ref(1, 32));
+            o.u(base.all_u8_ref(2, 32));
+            o.u(base.all_u8_ref(3, 32));
+            o.u(base.all_u8_ref(5, 32));
+            o.u(base.all_u8_ref(6, 32));
+            o.u(base.all_u8_ref(7, 32));
+            o.u(base.all_u8_ref(10, 32));
+            o.u(base.all_u8_ref(11, 32));
+            o.u(base.all_u8_ref(13, 32));
+            o.u(base.all_u8_ref(25, 32));
+            o.u(base.all_u8_ref(37, 32));
+            o.u(base.all_u8_ref(64, 32));
+            o.u(base.all_u8_ref(100, 32));
+            o.u(base.all_u8_ref(127, 32));
+            o.u(base.all_u8_ref(128, 32));
+            o.u(base.all_u8_ref(129, 32));
+            o.u(base.all_u8_ref(200, 32));
+            o.u(base.all_u8_ref(254, 32));
+            o.u(base.all_u8_ref(255, 32));
+            o.u(base.all_i16_ref(-1, 16));
+            o.u(base.all_i16_ref(-2, 16));
+            o.u(base.all_i16_ref(7, 16));
+            o.u(base.all_i16_ref(-7, 16));
+            o.u(base.all_i16_ref(15, 16));
+            o.u(base.all_i16_ref(-15, 16));
+            o.u(base.all_i16_ref(32767, 16));
+            o.u(base.all_i16_ref(-32768, 16));
+            o.u(base.all_u16_ref(1, 16));
+            o.u(base.all_u16_ref(3, 16));
+            o.u(base.all_u16_ref(7, 16));
+            o.u(base.all_u16_ref(16, 16));
+            o.u(base.all_u16_ref(65535, 16));
+        }
+        o.end();
+    }
+    o.flush();
+    return 0;
+}

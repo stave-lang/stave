@@ -136,7 +136,9 @@ pub fn int_arith() -> Vec<Case> {
         let ed = int_edges(l);
         for s in shapes(l) {
             use VecOp::*;
-            for op in [AddWrap, SubWrap, MulWrap, AddSat, SubSat, MulSat, Min, Max, And, Or, Xor, Andnot] {
+            for op in
+                [AddWrap, SubWrap, MulWrap, AddSat, SubSat, MulSat, MulHi, Min, Max, And, Or, Xor, Andnot]
+            {
                 out.extend(batch(op, Res::V(s), false, pairs(s, &ps, &ps)));
             }
             for op in [AbsWrap, Popcount, Clz, Not] {
@@ -157,7 +159,8 @@ fn traps_div(t: stave_ir::arith::IntTy, a: u64, b: u64) -> bool {
     stave_ir::simd::int_binary(VecOp::DivLanes, t, t.norm(a), t.norm(b)).is_err()
 }
 
-/// `div_const` divisors: ±1, ±2, ±3, 7, 10, powers of two, MIN, MAX.
+/// `div_const` divisors: one of each form of the multiply-high plans (±1, ±2, ±3, 5, 6, ±7,
+/// ±10, ±15, 25, 641, powers of two, MIN, MAX).
 fn divisors(l: Lane) -> Vec<i128> {
     let t = l.int().unwrap();
     let b = l.bits();
@@ -168,9 +171,15 @@ fn divisors(l: Lane) -> Vec<i128> {
         -2,
         3,
         -3,
+        5,
+        6,
         7,
+        -7,
         10,
         -10,
+        15,
+        -15,
+        25,
         641,
         1 << (b - 2),
         -(1 << (b - 2)),

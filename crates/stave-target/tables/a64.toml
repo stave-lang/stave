@@ -118,6 +118,21 @@ ty = ["int64"]
 neon = { class = "M", recipe = "umov x4; mul x2; ins x2", note = "no 64-bit lane mul: per lane through general registers" }
 sve = { class = "N", recipe = "mul" }
 
+# int mul high half: the widening multiplies' products, their high halves picked (a 64-bit vector:
+# one `?mull`, `shrn`); 64-bit lanes per lane through general registers
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["int8", "int16", "int32"]
+neon = { class = "M", recipe = "?mull; ?mull2; uzp2" }
+sve = { class = "N", recipe = "?mulh" }
+
+[[op]]
+op = "vec.mul_hi"
+ty = ["int64"]
+neon = { class = "M", recipe = "umov x4; ?mulh x2; ins x2", note = "no 64-bit lane high multiply: per lane through general registers" }
+sve = { class = "N", recipe = "?mulh" }
+
 # the exact double-width products narrowed with saturation; 64-bit lanes per lane through general
 # registers
 
@@ -288,24 +303,25 @@ form = "vector"
 neon = { class = "N", recipe = "neg; sshl" }
 sve = { class = "N", recipe = "asr" }
 
-# int division
+# int division; div_const on 8- to 32-bit lanes: the multiply-high plans of stave_ir::divmagic
+# (worst case listed), on 64-bit lanes per lane through general registers
 
 [[op]]
 op = "vec.div_const"
 ty = ["u8"]
-neon = { class = "M", recipe = "umov x16; udiv x16; ins x16", note = "per lane through general registers" }
+neon = { class = "M", recipe = "umull; umull2; uzp2; uhadd; ushr" }
 sve = { class = "M", recipe = "umulh; sub; lsr; add; lsr" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["u16"]
-neon = { class = "M", recipe = "umov x8; udiv x8; ins x8", note = "per lane through general registers" }
+neon = { class = "M", recipe = "umull; umull2; uzp2; uhadd; ushr" }
 sve = { class = "M", recipe = "umulh; sub; lsr; add; lsr" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["u32"]
-neon = { class = "M", recipe = "umov x4; udiv x4; ins x4", note = "per lane through general registers" }
+neon = { class = "M", recipe = "umull; umull2; uzp2; uhadd; ushr" }
 sve = { class = "M", recipe = "umulh; sub; lsr; add; lsr" }
 
 [[op]]
@@ -317,19 +333,19 @@ sve = { class = "M", recipe = "umulh; sub; lsr; add; lsr" }
 [[op]]
 op = "vec.div_const"
 ty = ["i8"]
-neon = { class = "M", recipe = "smov x16; sdiv x16; ins x16", note = "per lane through general registers" }
+neon = { class = "M", recipe = "smull; smull2; uzp2; add; sshr x2; sub" }
 sve = { class = "M", recipe = "smulh; add; asr; lsr; add" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["i16"]
-neon = { class = "M", recipe = "smov x8; sdiv x8; ins x8", note = "per lane through general registers" }
+neon = { class = "M", recipe = "smull; smull2; uzp2; add; sshr x2; sub" }
 sve = { class = "M", recipe = "smulh; add; asr; lsr; add" }
 
 [[op]]
 op = "vec.div_const"
 ty = ["i32"]
-neon = { class = "M", recipe = "smov x4; sdiv x4; ins x4", note = "per lane through general registers" }
+neon = { class = "M", recipe = "smull; smull2; uzp2; add; sshr x2; sub" }
 sve = { class = "M", recipe = "smulh; add; asr; lsr; add" }
 
 [[op]]

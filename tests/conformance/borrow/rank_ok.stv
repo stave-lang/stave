@@ -1,0 +1,75 @@
+//~ CHECK-ONLY
+// Accepted by the rank check: locks taken upward (directly, through a call, under `with_lock`),
+// a guard released (its block ended) before a lower rank is taken, two mutexes of one rank
+// through `lock_pair`, `try_lock` under a higher guard (it never waits), and joins whose
+// children take higher ranks only.
+import std.sync;
+import std.thread;
+
+static B: sync.Mutex<u32, 2> = sync.Mutex::<u32, 2>.new(0);
+
+fn take_b() -> u32 {
+    return B.with_lock(fn(v: &mut u32) -> u32 { return *v; });
+}
+
+fn upward(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) -> u32 {
+    let ga = a.lock();
+    let gb = b.lock();
+    return *ga.get() + *gb.get();
+}
+
+fn upward_call(a: &sync.Mutex<u32, 1>) -> u32 {
+    let ga = a.lock();
+    let x = take_b();
+    return x + *ga.get();
+}
+
+fn block_ended(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) -> u32 {
+    let mut x: u32 = 0;
+    {
+        let gb = b.lock();
+        x = *gb.get();
+    }
+    let ga = a.lock();
+    return x + *ga.get();
+}
+
+fn same_rank(b: &sync.Mutex<u32, 2>, c: &sync.Mutex<u32, 2>) -> u32 {
+    let (gb, gc) = sync.lock_pair(b, c);
+    return *gb.get() + *gc.get();
+}
+
+fn try_under(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) -> u32 {
+    let gb = b.lock();
+    let got = a.try_lock();
+    let mut n: u32 = 0;
+    match got {
+        Option.Some(g) => { n = *g.get(); }
+        Option.None => {}
+    }
+    return n + *gb.get();
+}
+
+fn joins_higher(a: &sync.Mutex<u32, 1>) -> u32 {
+    let ga = a.lock();
+    let (x, y) = thread.join(fn() -> u32 { return take_b(); }, fn() -> u32 { return 1u32; });
+    scope {
+        spawn {
+            let z = take_b();
+        }
+    }
+    return x + y + *ga.get();
+}
+
+fn main() {
+    let a = sync.Mutex::<u32, 1>.new(0);
+    let b = sync.Mutex::<u32, 2>.new(0);
+    let c = sync.Mutex::<u32, 2>.new(0);
+    let r1 = upward(&a, &b);
+    let r0 = upward_call(&a);
+    let r2 = block_ended(&a, &b);
+    let r3 = same_rank(&b, &c);
+    let r4 = try_under(&a, &b);
+    let r5 = joins_higher(&a);
+    let r6 = a.with_lock(fn(v: &mut u32) -> u32 { return *v + take_b(); });
+}

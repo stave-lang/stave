@@ -737,20 +737,31 @@ impl<'a, 'm> Gen<'a, 'm> {
             Shape::Fields(fs) if fs.len() == 2 => (fs[0].0 as i64, fs[1].0 as i64, fs[0].1),
             _ => return Err(bad("mul.wide result")),
         };
-        let wide = self.cg.ty(et) == Ty::Sc(Sc::Int { bits: 64, signed: false });
+        let (wide, signed) = match self.cg.ty(et) {
+            Ty::Sc(Sc::Int { bits, signed }) => (bits == 64, signed),
+            _ => return Err(bad("mul.wide operand")),
+        };
         let ra = self.use_g(a)?;
         let rb = self.use_g(bo)?;
         let lo = self.tmp_g()?;
         let hi = self.tmp_g()?;
         let h = self.home(v);
         if wide {
-            self.a.umulh(hi, ra, rb)?;
+            if signed {
+                self.a.smulh(hi, ra, rb)?;
+            } else {
+                self.a.umulh(hi, ra, rb)?;
+            }
             self.a.mul(X, lo, ra, rb)?;
             self.st(MemSize::X, hi, SP, h + o0)?;
             self.st(MemSize::X, lo, SP, h + o1)
         } else {
-            self.a.umull(lo, ra, rb)?;
-            self.a.shift_imm(Shift::Lsr, X, hi, lo, 32)?;
+            if signed {
+                self.a.smull(lo, ra, rb)?;
+            } else {
+                self.a.umull(lo, ra, rb)?;
+            }
+            self.a.shift_imm(if signed { Shift::Asr } else { Shift::Lsr }, X, hi, lo, 32)?;
             self.st(MemSize::W, hi, SP, h + o0)?;
             self.st(MemSize::W, lo, SP, h + o1)
         }
@@ -1602,6 +1613,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             Intr::ThreadAddr => addr_of(self, syms.thread_stub, "__stave_thread_start"),
             Intr::SiteTable => addr_of(self, Some(syms.site_table), "__stave_site_table"),
             Intr::PcTable => addr_of(self, Some(syms.pc_table), "__stave_pc_table"),
+            Intr::StackTable => addr_of(self, Some(syms.stack_table), "__stave_stack_table"),
             Intr::StaticAddr => {
                 let k = args
                     .first()

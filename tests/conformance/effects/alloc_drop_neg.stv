@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// `without(alloc)`: `g` only lets its `Vec` go out of scope, and dropping it frees the buffer;
+// the chain goes through the drop glue and `Vec.drop`.
+import std.vec;
+
+fn g(v: vec.Vec<u32>) without(alloc) { //~ ERROR E1401
+}
+
+fn main() {
+    let v = vec.Vec::<u32>.new();
+    g(v);
+}

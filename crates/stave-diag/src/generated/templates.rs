@@ -1364,10 +1364,15 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0211",
         severity: Severity::Error,
         area: "types",
-        rule: "contract operand not allowed: a `requires`/`ensures` expression may use params, fields, `.len()`, literals, arithmetic, comparison, `&&`/`||`/`!`, and calls of safe fns whose args are `&` or Copy; not `unsafe`, `&mut`, a `static`/`static mut`, or a non-bool result (planned)",
+        rule: "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy (a fn value only if its type denies `io`, `lock`, `block`); no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op)",
         retired: false,
         located: true,
-        holes: &[],
+        holes: &[
+            Hole { name: "at", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["lock", "io", "block"] },
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+        ],
         shapes: &[
             Shape {
                 case: "",
@@ -1377,6 +1382,21 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "keep contracts side-effect free: compare params, fields, and `.len()`; move other checks into the body with `std.debug.assert`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "impure-call",
+                message: "`{fn}` cannot be called in a contract: it has `{effect}`, as it reaches `{at}`, which {op}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "called in a contract here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                    LabelTemplate { at: "op", text: "`{at}` {op} here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "call only fns without `io`, `lock`, or `block` in `requires`/`ensures`; move this check into the body",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1399,7 +1419,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0212",
         severity: Severity::Error,
         area: "types",
-        rule: "a parameter named `result` in a fn with an `ensures` clause: inside `ensures(..)` the name `result` means the returned value (contextual name, not a keyword; planned)",
+        rule: "a parameter named `result` in a fn with an `ensures` clause: inside `ensures(..)` the name `result` means the returned value (contextual name, not a keyword)",
         retired: false,
         located: true,
         holes: &[],
@@ -1412,6 +1432,129 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "rename the parameter",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0213",
+        severity: Severity::Error,
+        area: "types",
+        rule: "`old(e)` misuse: `e` is not Copy; case `outside`: `old(..)` in a `requires`; case `entry`: `old(..)` or `result` inside `old(..)`; case `param`: a parameter named `old` in a fn with an `ensures` clause (contextual name inside contract clauses)",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`old(..)` needs a Copy value, found `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "evaluated at entry and kept to the return" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take `old(..)` of a Copy part, e.g. `old(v.len())`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "entry",
+                message: "`old(..)` is evaluated at entry: it cannot hold `old(..)` or `result`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not known at entry" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "move this part out of `old(..)`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "outside",
+                message: "`old(..)` is only allowed in `ensures`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`old` in a `requires`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use the value itself: a `requires` runs at entry",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "param",
+                message: "parameter `old` conflicts with `old(..)` in `ensures(..)`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "parameter `old`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "rename the parameter",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0214",
+        severity: Severity::Error,
+        area: "types",
+        rule: "a `test fn` with parameters the runner cannot generate inputs for: a parameter type other than an int, `bool`, `char`, `f32`, `f64`, an array or tuple of those, or (as the parameter's own type) `&[T]` of those; case `unbounded`: a `&[T]` parameter without a `requires` comparing its `.len()` with a constant upper bound; case `size`: a parameter value of more than 4096 scalars (a slice counts its length bound); case `ret`: a return type other than `()`",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "name", kind: HoleKind::Name, choices: &[] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "the test runner cannot generate values of type `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "parameter of a `test fn`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take ints, `bool`, `char`, `f32`, `f64`, arrays and tuples of them, or `&[T]` of those, and build other values in the body",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "ret",
+                message: "a `test fn` with parameters must return `()`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "return type of a `test fn`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove the return type: a test fails by panicking (`std.debug.assert`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "size",
+                message: "values of `{type}` are too large to generate (more than 4096 scalars)",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "parameter of a `test fn`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use a smaller array, or a lower length bound in `requires`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "unbounded",
+                message: "slice parameter `{name}` of a `test fn` has no length bound",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no `requires({name}.len() <= N)`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bound the length with a constant: `requires({name}.len() <= 16)`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1733,7 +1876,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0417",
         severity: Severity::Error,
         area: "kinds",
-        rule: "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T>`, or `sync.Once<T>`",
+        rule: "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T, R>`, or `sync.Once<T, R>` (R: the lock rank)",
         retired: false,
         located: true,
         holes: &[
@@ -1747,7 +1890,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "`static` type" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}>`, or `sync.Once<{type}>`",
+                    description: "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}, R>`, or `sync.Once<{type}, R>` (R: the lock rank)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1854,7 +1997,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "mutation of a `static`" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T>`) and change it through its `&self` methods",
+                    description: "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T, R>`) and change it through its `&self` methods",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2265,7 +2408,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0607",
         severity: Severity::Error,
         area: "simd",
-        rule: "vector integer division by a non-constant (use `div_lanes`)",
+        rule: "vector integer division by a non-constant (use `div_lanes`); case `zero`: by the constant 0",
         retired: false,
         located: true,
         holes: &[
@@ -2279,7 +2422,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "run-time divisor" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "use `a.div_lanes(b)` for a run-time divisor, or `a.div_const::<K>()` for a constant one",
+                    description: "use `a.div_lanes(b)` for a run-time divisor, or `a.div_const(k)` with a const-expr `k`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "zero",
+                message: "integer vector division of `{type}` by the constant 0",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "divides by zero" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "divide by a nonzero constant",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3104,7 +3259,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "`static mut` here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>`)",
+                    description: "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T, R>`, `sync.Once<T, R>`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4322,6 +4477,231 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E1401",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "a fn with a deny clause has a denied effect through what it can call; checked per instance of a generic fn; names the call chain and the op; at the denied effect, or for an instance at the call that instantiates it; case `self` when the op is in the fn itself",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "at", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{fn}` denies `{effect}`, but it reaches `{at}`, which {op}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{fn}` must not have `{effect}`" },
+                    LabelTemplate { at: "deny", text: "`{effect}` denied here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                    LabelTemplate { at: "op", text: "`{at}` {op} here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `{effect}` from the deny clause, or change the calls so that `{at}` is not reached",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "self",
+                message: "`{fn}` denies `{effect}`, but it {op}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{fn}` must not have `{effect}`" },
+                    LabelTemplate { at: "deny", text: "`{effect}` denied here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                    LabelTemplate { at: "op", text: "`{at}` {op} here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `{effect}` from the deny clause, or remove what has it",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1402",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "unmarked recursion: a call cycle (a strongly connected component of the whole-program call graph over instances: calls, implied calls, `dispatch` arms, fn-value calls resolved to the values that reach them, drops) with a fn not declared `rec fn`; one per cycle, at the call leaving its first unmarked fn (smallest path); the cycle is listed from there along a shortest path, and every other unmarked fn of the component gets a label at its name; a cycle made only by dropping a recursive value (drop glue, `Drop` impls, built-in fns) needs no marker; a cycle through a closure literal is E1409",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "cycle", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "name", kind: HoleKind::Path, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "recursive call cycle `{cycle}`: `{name}` is not a `rec fn`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{name}` calls the next fn of the cycle here" },
+                    LabelTemplate { at: "call", text: "next call of the cycle" },
+                    LabelTemplate { at: "unmarked", text: "also in this recursion, not a `rec fn`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "mark every fn of the recursion `rec fn` (its depth then has no static bound), or rewrite it as a loop",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1403",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1; case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "at", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "from", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+            Hole { name: "to", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{from}` cannot be used as `{to}`: it does not deny `{effect}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "coerced here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "add `{effect}` to the deny clause of `{from}`, or remove it from `{to}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "made",
+                message: "`{fn}` cannot be used as a fn value that denies `{effect}`: it reaches `{at}`, which {op}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "coerced here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                    LabelTemplate { at: "op", text: "`{at}` {op} here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `{effect}` from the fn type, or change the calls so that `{at}` is not reached",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1404",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "unknown effect name in a deny clause",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "name", kind: HoleKind::Name, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "unknown effect `{name}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not an effect" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1405",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there; case `drop`: a value whose drop glue acquires such a lock is dropped (scope end, temporary, overwritten old value) while the guard is held",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "held", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "held_rank", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "lock", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "rank", kind: HoleKind::Int, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{fn}` acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank}): locks are taken in increasing rank order",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "acquires rank {rank} here" },
+                    LabelTemplate { at: "held", text: "`{held}` held from here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "release the guard before this call, give `{lock}` a rank above {held_rank}, or take two mutexes of one rank together with `sync.lock_pair`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "drop",
+                message: "`{fn}` drops a value whose drop acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "dropped here" },
+                    LabelTemplate { at: "held", text: "`{held}` held from here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "release the guard before the value is dropped (declare the value before the guard, or end the guard's block first), or give `{lock}` a rank above {held_rank}",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1406",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "a guard held across a join whose children acquire a lock at or below its rank: at a `scope` end, `thread.join`, or `par_for` / `par_for_mut` call, the ranks held must be below every rank the joined threads may acquire; names the held and the acquired type and the chain",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "held", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "held_rank", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "lock", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "rank", kind: HoleKind::Int, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{fn}` waits for threads that acquire `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "threads joined here" },
+                    LabelTemplate { at: "held", text: "`{held}` held from here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "release the guard before the join, or give `{lock}` a rank above {held_rank}",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E1407",
         severity: Severity::Error,
         area: "effects",
@@ -4396,6 +4776,33 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the impl: a type is `Flat` exactly when it holds no reference, view, raw pointer, fn value, `UnsafeCell`, or `Drop` type",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1409",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "a call cycle through a closure literal (also when the closure is reached through a fn value); one per cycle, at its first closure literal; the cycle is listed from there along a shortest path",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "cycle", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "name", kind: HoleKind::Path, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "recursive call cycle `{cycle}` goes through a closure literal in `{name}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this closure literal is part of the cycle" },
+                    LabelTemplate { at: "call", text: "next call of the cycle" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write the recursive part as a `rec fn` item and call it from the closure",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

@@ -121,6 +121,9 @@ pub enum Builtin {
     AlignOf,
     /// `fence_stream()`: orders earlier streaming stores (an unsafe operation).
     FenceStream,
+    /// `old(e)`: `e` evaluated at fn entry. A contextual name inside a contract clause only
+    /// (resolution), never in the global table, so not in [`Builtin::ALL`].
+    Old,
 }
 
 impl Builtin {
@@ -131,6 +134,7 @@ impl Builtin {
             Builtin::SizeOf => "size_of",
             Builtin::AlignOf => "align_of",
             Builtin::FenceStream => "fence_stream",
+            Builtin::Old => "old",
         }
     }
 

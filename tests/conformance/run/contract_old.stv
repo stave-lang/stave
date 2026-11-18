@@ -1,0 +1,26 @@
+//~ EXIT 101
+//~ STDOUT contract_old.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_old.stv:16:1 in main.push_two (thread 0)\nensures(v.len() == old(v.len()) + 2)\n"
+// `old(e)` is `e` at entry (after the `requires`); an `ensures` reads through a `&mut` param and
+// runs at the end of a unit body too, reported at its `}`. A clause written over several lines
+// prints as one.
+import std.io;
+import std.vec;
+
+fn push_two(v: &mut vec.Vec<u32>, x: u32)
+    ensures(v.len() ==
+        old(v.len()) + 2)
+{
+    v.push(x);
+    if x < 100 { v.push(x + 1); }
+}
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.new();
+    push_two(&mut v, 1);
+    let n = v.len();
+    io.print(f"len {n}\n");
+    push_two(&mut v, 500);
+    io.print("not reached\n");
+    return 0;
+}
