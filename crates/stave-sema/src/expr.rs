@@ -1919,6 +1919,20 @@ impl<'a> Ck<'a> {
     }
 
     /// A type-relative step `T.m` (deferred by the resolver).
+    /// E0201 case `type-args`: a turbofish `g` on built-in `name`, which takes none.
+    fn no_generic_args(&mut self, name: &str, g: u32) {
+        let icx = self.icx;
+        let given = icx.kids_vec(g).len().to_string();
+        let d = mk(
+            "E0201",
+            Some("type-args"),
+            &[("operand", name), ("count", "0"), ("given", &given)],
+            icx.node_span(g),
+            &[],
+        );
+        self.report(d);
+    }
+
     fn type_rel(&mut self, st: St, seg: u32, targs: Option<u32>) -> St {
         let icx = self.icx;
         let base = match st {
@@ -1938,6 +1952,11 @@ impl<'a> Ck<'a> {
         if matches!(self.tys.kind(base), TypeKind::Vector { .. } | TypeKind::Mask { .. })
             && builtins::builtin_assoc(&mut self.tys, base, text).is_some()
         {
+            if let Some(g) = targs {
+                let nm = text.to_string();
+                self.no_generic_args(&nm, g);
+                return St::Err;
+            }
             return St::TypeAssoc { ty: base, name, tok: seg };
         }
         let genv = self.genv();
@@ -3118,6 +3137,13 @@ impl<'a> Ck<'a> {
         match lk {
             Lookup::Found { m, level, recv: c } => match m {
                 MethodRef::Builtin(b) => {
+                    if let Some(g) = targs_node
+                        && !builtins::TAKES_GENERIC_ARGS.contains(&b.name)
+                    {
+                        let nm = self.prog.strings.get(name).to_string();
+                        self.no_generic_args(&nm, g);
+                        return self.args_only(args);
+                    }
                     let mut consts: Vec<u64> = Vec::new();
                     let gargs: Vec<GArg> = match targs_node {
                         Some(g) if b.name == "permute" => {

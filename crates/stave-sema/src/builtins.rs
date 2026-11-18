@@ -195,6 +195,10 @@ pub enum ArgTy {
     },
 }
 
+/// The built-in methods that take a turbofish; on any other built-in method or type-relative
+/// built-in (`f32x4.splat`) one is E0201 case `type-args`.
+pub const TAKES_GENERIC_ARGS: [&str; 5] = ["bitcast", "to_vec", "rewiden", "permute", "align_to"];
+
 /// The signature of built-in method `m` on receiver type `t` with turbofish args `gargs`:
 /// (argument types after the receiver, return type). `None`: wrong turbofish shape.
 pub fn builtin_method_sig<I: Interner + ?Sized>(
