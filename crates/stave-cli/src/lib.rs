@@ -494,6 +494,7 @@ fn test(
     let target = a.explicit_target.then_some(a.target.triple);
     let cfg = Config {
         filter: a.filter.clone(),
+        exact: a.exact,
         runner: a.runner.clone(),
         known_codes: Some(stage0::registry_codes()),
         target,
@@ -507,6 +508,7 @@ fn test(
     };
     let _ = out.write_all(report.render().as_bytes());
     let mut ok = report.is_success();
+    let mut usage = false;
     // A package: its `test fn`s too.
     if root.join("stave.toml").is_file() {
         let pool = match pipeline::thread_pool(threads) {
@@ -519,8 +521,12 @@ fn test(
         let mut opts = Options::new(Goal::Check).threads(threads);
         opts.target = Some(a.target.triple);
         opts.release = a.release;
-        let sel =
-            harness::Selection { filter: a.filter.as_deref(), runner: a.runner.as_deref(), input: a.input };
+        let sel = harness::Selection {
+            filter: a.filter.as_deref(),
+            exact: a.exact,
+            runner: a.runner.as_deref(),
+            input: a.input,
+        };
         match harness::run(&pool, &root, &lib, &opts, sel) {
             Ok(r) => {
                 let _ = out.write_all(r.render().as_bytes());
@@ -536,12 +542,26 @@ fn test(
                 let _ = writeln!(err, "stave: test fns: {e}");
                 ok = false;
             }
+            Err(HarnessError::Selection(e)) => {
+                let _ = writeln!(err, "stave: {e}");
+                usage = true;
+            }
         }
+    } else if let Some(i) = a.input {
+        let _ =
+            writeln!(err, "stave: --input {i}: {} is not a package, so it has no test fn", display(&root));
+        usage = true;
     }
     note_fallback(&mut false, err);
     let ms = start.elapsed().as_millis() as u64;
     let _ = writeln!(err, "{}", select::summary_line(selection, ms));
-    if ok { EXIT_OK } else { EXIT_USER }
+    if usage {
+        EXIT_USAGE
+    } else if ok {
+        EXIT_OK
+    } else {
+        EXIT_USER
+    }
 }
 
 fn display(p: &Path) -> String {

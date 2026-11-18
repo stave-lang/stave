@@ -1,0 +1,5 @@
+// A struct `main` takes as a `test fn` parameter: its fields are `pub`, so `main` can name them.
+pub struct Cell {
+    pub row: u32,
+    pub col: u32,
+}

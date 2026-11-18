@@ -2,16 +2,20 @@
 //!
 //! **Domain** ([`Ck::test_domain`]): the product of the parameter types, each a [`Gen`]. A
 //! parameter type the runner can generate is an int (`i8`..`i64`, `u8`..`u64`, `isize`, `usize`),
-//! `bool`, `char`, `f32`, `f64`, an array or tuple of those (nested freely), or, at the top level
-//! only, `&[T]` of those. Anything else is E0214; so is a non-`()` return type (case `ret`), a slice
+//! `bool`, `char`, `f32`, `f64`, an array, tuple, or non-view struct of those (nested freely), or,
+//! at the top level only, `&[T]` of those. A struct also needs every field, and every struct type
+//! of the test's package inside, visible from the test's module (case `private`). Anything else
+//! is E0214 (case `field`: the struct field that is not generatable, and its type; a struct of
+//! another package counts as one such type); so is a non-`()` return type (case `ret`), a slice
 //! parameter without a length bound (case `unbounded`), and a value of more than [`MAX_SCALARS`]
 //! scalars (case `size`).
 //!
 //! **Ranges**: each `requires` clause is split at `&&` (through parentheses); a conjunct that
-//! compares an int parameter, or `p.len()` of a slice parameter, with a constant (an int literal,
-//! its negation, or an int `const`) with `<`, `<=`, `>`, `>=`, or `==` narrows that parameter's
-//! range. Every other conjunct is a filter: the lowered test fn evaluates all its clauses at entry
-//! and skips an input that fails one (lowering, [`crate::contracts`]).
+//! compares an int parameter, an int field (`p.a.b`) of a struct parameter, or `p.len()` of a
+//! slice parameter, with a constant (an int literal, its negation, or an int `const`) with `<`,
+//! `<=`, `>`, `>=`, or `==` narrows that range. Every other conjunct is a filter: the lowered test
+//! fn evaluates all its clauses at entry and skips an input that fails one (lowering,
+//! [`crate::contracts`]).
 //!
 //! **Inputs** ([`inputs`]): the edge phase, then the sampled phase, an input equal to an earlier one
 //! dropped. Everything here is a pure function of the domain, so every target and both compilers
@@ -26,7 +30,7 @@ use crate::diag::mk;
 use crate::resolve::Res;
 use crate::sigs::FnSig;
 use crate::typeck::{Ck, Target};
-use crate::types::{ConstArg, FloatBits, IntBits, Interner, TypeId, TypeKind, ids};
+use crate::types::{ConstArg, FloatBits, GArg, IntBits, Interner, Names, TypeId, TypeKind, ids};
 
 /// The most scalars one generated parameter value may hold (a slice counts its length bound).
 pub const MAX_SCALARS: u64 = 4096;
@@ -52,6 +56,12 @@ pub enum Gen {
     F64,
     Array(Box<Gen>, u64),
     Tuple(Vec<Gen>),
+    /// A struct: the path of its literal from the test's module (`geo.Point`, `Pair::<u32>`) and
+    /// its fields in declaration order.
+    Struct {
+        path: String,
+        fields: Vec<(String, Gen)>,
+    },
     /// `&[T]` with a length in `lo..=hi` (`hi` = `i128::MAX` until a clause bounds it).
     Slice(Box<Gen>, i128, i128),
 }
@@ -71,7 +81,7 @@ pub struct Domain {
     pub filters: u32,
 }
 
-/// A generated value. Arrays, tuples, and slices are lists; floats are their bits.
+/// A generated value. Arrays, tuples, structs, and slices are lists; floats are their bits.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Value {
     Int(i128),
@@ -165,8 +175,32 @@ impl Gen {
                 }
             }
             Gen::Tuple(gs) => gs.iter().map(Gen::period).max().unwrap_or(1),
+            Gen::Struct { fields, .. } => fields.iter().map(|(_, g)| g.period()).max().unwrap_or(1),
             Gen::Slice(e, lo, hi) => int_edges(*lo, *hi).len().max(e.period()),
         }
+    }
+
+    /// The positions of this parameter in the edge phase: a struct one per field (nested structs
+    /// flattened), anything else one.
+    pub fn positions(&self) -> usize {
+        match self {
+            Gen::Struct { fields, .. } => fields.iter().map(|(_, g)| g.positions()).sum(),
+            _ => 1,
+        }
+    }
+
+    /// The edge-phase value from flattened position `*pos` on (advanced past this value): on the
+    /// anti-diagonal (`anti`) an odd position takes edge `period - 1 - k mod period` of its own
+    /// generator, every other position edge `k`. Inside an array, tuple, or slice a struct is one
+    /// value of [`Gen::edge`].
+    fn edge_at(&self, k: usize, anti: bool, pos: &mut usize) -> Value {
+        if let Gen::Struct { fields, .. } = self {
+            return Value::List(fields.iter().map(|(_, g)| g.edge_at(k, anti, pos)).collect());
+        }
+        let j = *pos;
+        *pos += 1;
+        let per = self.period();
+        self.edge(if anti && j % 2 == 1 { per - 1 - k % per } else { k })
     }
 
     /// Whether the generator has no value (an empty int range or length range).
@@ -175,14 +209,15 @@ impl Gen {
             Gen::Int { lo, hi, .. } => lo > hi,
             Gen::Array(e, n) => *n > 0 && e.is_empty(),
             Gen::Tuple(gs) => gs.iter().any(Gen::is_empty),
+            Gen::Struct { fields, .. } => fields.iter().any(|(_, g)| g.is_empty()),
             Gen::Slice(e, lo, hi) => lo > hi || (*lo > 0 && e.is_empty()),
             _ => false,
         }
     }
 
     /// The `k`-th edge value (cyclic): element `j` of an array or slice is the element
-    /// generator's edge `k + j`, every tuple field its own edge `k`, a slice's length the `k`-th
-    /// edge of its length range.
+    /// generator's edge `k + j`, every tuple or struct field its own edge `k`, a slice's length the
+    /// `k`-th edge of its length range.
     pub fn edge(&self, k: usize) -> Value {
         match self {
             Gen::Int { lo, hi, .. } => {
@@ -195,6 +230,7 @@ impl Gen {
             Gen::F64 => Value::F64(F64_EDGES[k % F64_EDGES.len()]),
             Gen::Array(e, n) => Value::List((0..*n as usize).map(|j| e.edge(k + j)).collect()),
             Gen::Tuple(gs) => Value::List(gs.iter().map(|g| g.edge(k)).collect()),
+            Gen::Struct { fields, .. } => Value::List(fields.iter().map(|(_, g)| g.edge(k)).collect()),
             Gen::Slice(e, lo, hi) => {
                 let lens = int_edges(*lo, *hi);
                 let n = lens[k % lens.len()] as usize;
@@ -205,8 +241,8 @@ impl Gen {
 
     /// A sampled value: an int is `lo + next() mod (hi - lo + 1)`, a `bool` the low bit, a
     /// `char` `r = next() mod 0x10F800` (plus 0x800 from 0xD800 on, skipping the surrogates), a
-    /// float the low bits of `next()`; arrays and tuples in order; a slice its length (as an int
-    /// of its length range), then its elements.
+    /// float the low bits of `next()`; arrays, tuples, and struct fields in order; a slice its
+    /// length (as an int of its length range), then its elements.
     pub fn sample(&self, r: &mut SplitMix64) -> Value {
         match self {
             Gen::Int { lo, hi, .. } => Value::Int(sample_int(*lo, *hi, r)),
@@ -219,6 +255,7 @@ impl Gen {
             Gen::F64 => Value::F64(r.next()),
             Gen::Array(e, n) => Value::List((0..*n).map(|_| e.sample(r)).collect()),
             Gen::Tuple(gs) => Value::List(gs.iter().map(|g| g.sample(r)).collect()),
+            Gen::Struct { fields, .. } => Value::List(fields.iter().map(|(_, g)| g.sample(r)).collect()),
             Gen::Slice(e, lo, hi) => {
                 let n = sample_int(*lo, *hi, r);
                 Value::List((0..n).map(|_| e.sample(r)).collect())
@@ -231,6 +268,7 @@ impl Gen {
         match self {
             Gen::Array(e, n) => n.saturating_mul(e.scalars()),
             Gen::Tuple(gs) => gs.iter().fold(0u64, |a, g| a.saturating_add(g.scalars())),
+            Gen::Struct { fields, .. } => fields.iter().fold(0u64, |a, (_, g)| a.saturating_add(g.scalars())),
             Gen::Slice(e, _, hi) => u64::try_from(*hi).unwrap_or(u64::MAX).saturating_mul(e.scalars()),
             _ => 1,
         }
@@ -262,11 +300,11 @@ impl Domain {
 
 /// Every input, in order: the edge phase, then [`SAMPLES`] sampled inputs from one
 /// [`SplitMix64`] at [`SEED`] (parameters in order); an input equal to an earlier one is dropped.
-/// Empty for an empty domain. With `n` the largest parameter period, the edge phase is the
-/// diagonal (input `k` < `n` takes edge `k` of every parameter), then, with two or more
-/// parameters, the anti-diagonal (input `k` < `n` takes edge `k` of the parameters at even
-/// positions and edge `period - 1 - k mod period` of those at odd ones), so low edges meet high
-/// ones.
+/// Empty for an empty domain. The edge phase sees the parameters as positions, a struct's fields
+/// flattened into one position each ([`Gen::positions`]). With `n` the largest period, it is the
+/// diagonal (input `k` < `n` takes edge `k` at every position), then, with two or more
+/// positions, the anti-diagonal (input `k` < `n` takes edge `k` at even positions and edge
+/// `period - 1 - k mod period` at odd ones), so low edges meet high ones.
 pub fn inputs(d: &Domain) -> Vec<Vec<Value>> {
     if d.is_empty() || d.params.is_empty() {
         return Vec::new();
@@ -274,19 +312,12 @@ pub fn inputs(d: &Domain) -> Vec<Vec<Value>> {
     let mut out: Vec<Vec<Value>> = Vec::new();
     let mut seen: HashSet<Vec<Value>> = HashSet::new();
     let n = d.params.iter().map(|p| p.values.period()).max().unwrap_or(1);
-    let phases = if d.params.len() > 1 { 2 } else { 1 };
+    let positions: usize = d.params.iter().map(|p| p.values.positions()).sum();
+    let phases = if positions > 1 { 2 } else { 1 };
     for phase in 0..phases {
         for k in 0..n {
-            let i: Vec<Value> = d
-                .params
-                .iter()
-                .enumerate()
-                .map(|(j, p)| {
-                    let per = p.values.period();
-                    let e = if phase == 1 && j % 2 == 1 { per - 1 - k % per } else { k };
-                    p.values.edge(e)
-                })
-                .collect();
+            let mut pos = 0usize;
+            let i: Vec<Value> = d.params.iter().map(|p| p.values.edge_at(k, phase == 1, &mut pos)).collect();
             if seen.insert(i.clone()) {
                 out.push(i);
             }
@@ -303,7 +334,7 @@ pub fn inputs(d: &Domain) -> Vec<Vec<Value>> {
 }
 
 /// `v` as a Stave expression of `g`'s type: suffixed int and float literals, `'c'` with escapes,
-/// `[..]`, `(..)`, `&[..]`; a float with no literal (inf, NaN) as `mem.f32_from_bits(0x..)`
+/// `[..]`, `(..)`, `&[..]`, `S.{ f: .. }`; a float with no literal (inf, NaN) as `mem.f32_from_bits(0x..)`
 /// (`std.mem`), which also keeps a NaN's payload.
 pub fn literal(g: &Gen, v: &Value) -> String {
     match (g, v) {
@@ -323,6 +354,15 @@ pub fn literal(g: &Gen, v: &Value) -> String {
         (Gen::Tuple(gs), Value::List(vs)) => {
             let parts: Vec<String> = gs.iter().zip(vs).map(|(g, v)| literal(g, v)).collect();
             if parts.len() == 1 { format!("({},)", parts[0]) } else { format!("({})", parts.join(", ")) }
+        }
+        (Gen::Struct { path, fields }, Value::List(vs)) => {
+            let parts: Vec<String> =
+                fields.iter().zip(vs).map(|((f, g), v)| format!("{f}: {}", literal(g, v))).collect();
+            if parts.is_empty() {
+                format!("{path}.{{ }}")
+            } else {
+                format!("{path}.{{ {} }}", parts.join(", "))
+            }
         }
         _ => "?".to_string(),
     }
@@ -363,11 +403,70 @@ fn int_name(signed: bool, bits: IntBits) -> &'static str {
     }
 }
 
-/// What a range conjunct constrains: an int parameter's value or a slice parameter's length.
-#[derive(Clone, Copy)]
+/// What a range conjunct constrains: an int parameter's value, an int field of a struct parameter
+/// (`path`: field indices, outermost first), or a slice parameter's length.
+#[derive(Clone)]
 struct Subject {
     param: usize,
+    path: Vec<usize>,
     len: bool,
+}
+
+/// Why the runner cannot generate a type.
+enum NoGen {
+    /// The type itself (E0214 without a case).
+    Type,
+    /// The struct field at this path (`inner.label`), of this type (as the test's module writes
+    /// it), is not generatable.
+    Field(String, String),
+    /// `name` (a field path, or a struct's name) is private to module `module`.
+    Private { name: String, module: String, field: bool },
+}
+
+impl NoGen {
+    /// This reason seen from the struct field `f` that holds it (`Type` is resolved by the
+    /// caller, which knows the field's type).
+    fn under(self, f: &str) -> NoGen {
+        match self {
+            NoGen::Type => NoGen::Type,
+            NoGen::Field(p, t) => NoGen::Field(format!("{f}.{p}"), t),
+            NoGen::Private { name, module, field: true } => {
+                NoGen::Private { name: format!("{f}.{name}"), module, field: true }
+            }
+            p @ NoGen::Private { .. } => p,
+        }
+    }
+}
+
+/// ADT names as a module writes them: its own items bare, another module's through the import
+/// that binds it (`geo.Point`), else by the module's full path.
+struct ModuleNames<'a> {
+    prog: &'a crate::Program,
+    module: crate::ModuleId,
+    inner: crate::sigs::NameCx<'a>,
+}
+
+impl Names for ModuleNames<'_> {
+    fn adt_name(&self, d: crate::DeclId) -> String {
+        let Some(x) = self.prog.decl(d) else { return "_".to_string() };
+        let name = self.prog.strings.get(x.name);
+        if x.module == self.module {
+            return name.to_string();
+        }
+        let via = self
+            .prog
+            .module(self.module)
+            .and_then(|me| me.imports.iter().find(|i| i.target == x.module))
+            .map(|i| self.prog.strings.get(i.bound).to_string());
+        match via.or_else(|| self.prog.module(x.module).map(|m| m.path_text.clone())) {
+            Some(m) => format!("{m}.{name}"),
+            None => name.to_string(),
+        }
+    }
+
+    fn param_name(&self, i: u32) -> String {
+        self.inner.param_name(i)
+    }
 }
 
 impl Ck<'_> {
@@ -397,11 +496,24 @@ impl Ck<'_> {
                 ok = false;
                 continue;
             }
-            match self.param_gen(t, true) {
-                Some(values) => params.push(Param { name: icx.tok_str(icx.a(p)).to_string(), values }),
-                None => {
+            match self.param_gen(t, true, 0) {
+                Ok(values) => params.push(Param { name: icx.tok_str(icx.a(p)).to_string(), values }),
+                Err(why) => {
                     let tn = self.show(t);
-                    self.report(mk("E0214", None, &[("type", &tn)], at, &[]));
+                    let d = match &why {
+                        NoGen::Type => mk("E0214", None, &[("type", &tn)], at, &[]),
+                        NoGen::Field(f, ft) => {
+                            mk("E0214", Some("field"), &[("type", &tn), ("name", f), ("inner", ft)], at, &[])
+                        }
+                        NoGen::Private { name, module, .. } => mk(
+                            "E0214",
+                            Some("private"),
+                            &[("type", &tn), ("name", name), ("module", module)],
+                            at,
+                            &[],
+                        ),
+                    };
+                    self.report(d);
                     ok = false;
                 }
             }
@@ -442,35 +554,98 @@ impl Ck<'_> {
         }
     }
 
-    /// The generator of type `t` (`top`: a parameter's own type, where `&[T]` is allowed).
-    fn param_gen(&mut self, t: TypeId, top: bool) -> Option<Gen> {
+    /// The generator of type `t` (`top`: a parameter's own type, where `&[T]` is allowed; `depth`:
+    /// the nesting so far, bounded so a pathological type cannot exhaust the stack).
+    fn param_gen(&mut self, t: TypeId, top: bool, depth: u32) -> Result<Gen, NoGen> {
+        if depth > 64 {
+            return Err(NoGen::Type);
+        }
         match self.tys.kind(t).clone() {
             TypeKind::Int { signed, bits } => {
-                let (lo, hi) = crate::literals::int_range_kind(&TypeKind::Int { signed, bits })?;
-                Some(Gen::Int { ty: int_name(signed, bits), lo, hi })
+                let (lo, hi) =
+                    crate::literals::int_range_kind(&TypeKind::Int { signed, bits }).ok_or(NoGen::Type)?;
+                Ok(Gen::Int { ty: int_name(signed, bits), lo, hi })
             }
-            TypeKind::Bool => Some(Gen::Bool),
-            TypeKind::Char => Some(Gen::Char),
-            TypeKind::Float(FloatBits::F32) => Some(Gen::F32),
-            TypeKind::Float(FloatBits::F64) => Some(Gen::F64),
+            TypeKind::Bool => Ok(Gen::Bool),
+            TypeKind::Char => Ok(Gen::Char),
+            TypeKind::Float(FloatBits::F32) => Ok(Gen::F32),
+            TypeKind::Float(FloatBits::F64) => Ok(Gen::F64),
             TypeKind::Array { elem, len: ConstArg::Value(n) } => {
-                Some(Gen::Array(Box::new(self.param_gen(elem, false)?), n))
+                Ok(Gen::Array(Box::new(self.param_gen(elem, false, depth + 1)?), n))
             }
             TypeKind::Tuple(ts) => {
                 let mut gs = Vec::with_capacity(ts.len());
                 for &x in ts.iter() {
-                    gs.push(self.param_gen(x, false)?);
+                    gs.push(self.param_gen(x, false, depth + 1)?);
                 }
-                Some(Gen::Tuple(gs))
+                Ok(Gen::Tuple(gs))
             }
+            TypeKind::Adt { def, args } => self.struct_gen(def, &args, depth),
             TypeKind::Ref { mutable: false, inner } if top => match self.tys.kind(inner).clone() {
                 TypeKind::Slice { elem, align: 0 } => {
-                    Some(Gen::Slice(Box::new(self.param_gen(elem, false)?), 0, i128::MAX))
+                    Ok(Gen::Slice(Box::new(self.param_gen(elem, false, depth + 1)?), 0, i128::MAX))
                 }
-                _ => None,
+                _ => Err(NoGen::Type),
             },
-            _ => None,
+            _ => Err(NoGen::Type),
         }
+    }
+
+    /// The generator of struct `def` with arguments `args`: its fields, each generatable and
+    /// visible from the test's module, as is the struct itself. Enums and views are not. A struct
+    /// of another package that is not generatable is just `Type`: its insides (`vec.Vec`'s
+    /// private pointer) are not the test author's to change, so the report names the field that
+    /// holds it, with its type.
+    fn struct_gen(&mut self, def: crate::DeclId, args: &[GArg], depth: u32) -> Result<Gen, NoGen> {
+        let (prog, sigs) = (self.prog, self.sigs);
+        let adt = sigs.adt(def).ok_or(NoGen::Type)?;
+        let v = adt.variants.first().ok_or(NoGen::Type)?;
+        if adt.is_enum || adt.is_view {
+            return Err(NoGen::Type);
+        }
+        let me = self.icx.res_module();
+        let module_text = |m| prog.module(m).map_or(String::new(), |x| x.path_text.clone());
+        let d = prog.decl(def).ok_or(NoGen::Type)?;
+        let package = |m| prog.module(m).map(|x| x.package);
+        let foreign = package(d.module) != package(me);
+        let fail = |why: NoGen| Err(if foreign { NoGen::Type } else { why });
+        if !d.is_pub() && d.module != me {
+            let name = prog.strings.get(d.name).to_string();
+            return fail(NoGen::Private { name, module: module_text(d.module), field: false });
+        }
+        let names = ModuleNames { prog, module: me, inner: self.names() };
+        let mut fields = Vec::with_capacity(v.fields.len());
+        for f in &v.fields {
+            let fname = prog.strings.get(f.name).to_string();
+            if let Some(fd) = prog.decl(f.decl)
+                && !fd.is_pub()
+                && fd.module != me
+            {
+                return fail(NoGen::Private { name: fname, module: module_text(fd.module), field: true });
+            }
+            let ft = self.tys.subst(f.ty, args, None);
+            match self.param_gen(ft, false, depth + 1) {
+                Ok(g) => fields.push((fname, g)),
+                Err(NoGen::Type) => {
+                    let t = crate::types::display(&self.tys, &names, ft);
+                    return fail(NoGen::Field(fname, t));
+                }
+                Err(why) => return fail(why.under(&fname)),
+            }
+        }
+        let mut path = names.adt_name(def);
+        if !args.is_empty() {
+            let parts: Vec<String> = args
+                .iter()
+                .map(|a| match a {
+                    GArg::Type(x) => crate::types::display(&self.tys, &names, *x),
+                    GArg::Const(ConstArg::Value(n)) => n.to_string(),
+                    GArg::Const(_) => "_".to_string(),
+                })
+                .collect();
+            path = format!("{path}::<{}>", parts.join(", "));
+        }
+        Ok(Gen::Struct { path, fields })
     }
 
     /// The conjuncts of clause expression `e`: split at `&&`, through parentheses.
@@ -541,7 +716,14 @@ impl Ck<'_> {
         } else {
             return false;
         };
-        match &mut params[s.param].values {
+        let mut g = &mut params[s.param].values;
+        for &i in &s.path {
+            match g {
+                Gen::Struct { fields, .. } => g = &mut fields[i].1,
+                _ => return false,
+            }
+        }
+        match g {
             Gen::Int { lo: a, hi: b, .. } if !s.len => {
                 *a = (*a).max(lo);
                 *b = (*b).min(hi);
@@ -555,7 +737,8 @@ impl Ck<'_> {
         true
     }
 
-    /// Node `n` as a range subject: an int parameter, or `p.len()` of a slice parameter.
+    /// Node `n` as a range subject: an int parameter, an int field `p.a.b` of a struct parameter,
+    /// or `p.len()` of a slice parameter.
     fn subject(&self, n: u32, nodes: &[u32], params: &[Param]) -> Option<Subject> {
         let icx = self.icx;
         if let Some(x) = self.paren_inner(n) {
@@ -570,7 +753,30 @@ impl Ck<'_> {
         match icx.kind(n)? {
             NodeKind::Primary if icx.is(a, Term::Ident) && icx.end_tok(n) == a => {
                 let i = param_at(a)?;
-                matches!(params[i].values, Gen::Int { .. }).then_some(Subject { param: i, len: false })
+                matches!(params[i].values, Gen::Int { .. }).then_some(Subject {
+                    param: i,
+                    path: Vec::new(),
+                    len: false,
+                })
+            }
+            // `p.a.b`: with `p` a struct parameter, each step after it is a field of its struct.
+            NodeKind::Primary | NodeKind::Postfix
+                if icx.is(a, Term::Ident)
+                    && icx.end_tok(n) > a
+                    && (a..=icx.end_tok(n)).all(|t| {
+                        if (t - a).is_multiple_of(2) { icx.is(t, Term::Ident) } else { icx.is(t, Term::Dot) }
+                    }) =>
+            {
+                let i = param_at(a)?;
+                let mut g = &params[i].values;
+                let mut path = Vec::new();
+                for t in (a + 2..=icx.end_tok(n)).step_by(2) {
+                    let Gen::Struct { fields, .. } = g else { return None };
+                    let f = fields.iter().position(|(name, _)| name == icx.tok_str(t))?;
+                    path.push(f);
+                    g = &fields[f].1;
+                }
+                matches!(g, Gen::Int { .. }).then_some(Subject { param: i, path, len: false })
             }
             NodeKind::Postfix => {
                 let is_len = icx.is(a, Term::Ident)
@@ -587,7 +793,11 @@ impl Ck<'_> {
                     return None;
                 }
                 let i = param_at(a)?;
-                matches!(params[i].values, Gen::Slice(..)).then_some(Subject { param: i, len: true })
+                matches!(params[i].values, Gen::Slice(..)).then_some(Subject {
+                    param: i,
+                    path: Vec::new(),
+                    len: true,
+                })
             }
             _ => None,
         }
@@ -731,5 +941,49 @@ mod tests {
         assert_eq!(literal(&s, &Value::List(vec![Value::Int(1), Value::Int(2)])), "&[1u8, 2u8]");
         let a = Gen::Array(Box::new(Gen::Bool), 0);
         assert_eq!(literal(&a, &Value::List(Vec::new())), "[]");
+        let p = Gen::Struct {
+            path: "geo.Pair::<u8>".into(),
+            fields: vec![("a".into(), int("u8", 0, 255)), ("b".into(), Gen::Bool)],
+        };
+        assert_eq!(
+            literal(&p, &Value::List(vec![Value::Int(7), Value::Bool(false)])),
+            "geo.Pair::<u8>.{ a: 7u8, b: false }"
+        );
+        let e = Gen::Struct { path: "E".into(), fields: Vec::new() };
+        assert_eq!(literal(&e, &Value::List(Vec::new())), "E.{ }");
+    }
+
+    #[test]
+    fn struct_fields_are_edge_positions() {
+        // One struct parameter of two fields meets low and high edges as two parameters do.
+        let s = Gen::Struct {
+            path: "S".into(),
+            fields: vec![("a".into(), int("u8", 0, 255)), ("b".into(), int("u8", 0, 255))],
+        };
+        let d = Domain { params: vec![Param { name: "s".into(), values: s.clone() }], filters: 0 };
+        let a = inputs(&d);
+        let n = int_edges(0, 255).len();
+        assert_eq!(a[0], [Value::List(vec![Value::Int(0), Value::Int(0)])]);
+        assert_eq!(a[n], [Value::List(vec![Value::Int(0), Value::Int(255)])]);
+        // Nested: a struct field is split into its fields; positions run on into the next parameter.
+        let outer = Gen::Struct { path: "O".into(), fields: vec![("s".into(), s), ("c".into(), Gen::Bool)] };
+        assert_eq!(outer.positions(), 3);
+        let d = Domain {
+            params: vec![
+                Param { name: "o".into(), values: outer },
+                Param { name: "k".into(), values: int("u8", 0, 255) },
+            ],
+            filters: 0,
+        };
+        let a = inputs(&d);
+        // Anti-diagonal, k = 0: positions 1 (`s.b`) and 3 (`k`) take their last edge.
+        let first_anti = [
+            Value::List(vec![Value::List(vec![Value::Int(0), Value::Int(255)]), Value::Bool(false)]),
+            Value::Int(255),
+        ];
+        assert_eq!(a[n], first_anti);
+        // An array of structs is one position: its struct elements are not split.
+        let arr = Gen::Array(Box::new(Gen::Struct { path: "S".into(), fields: Vec::new() }), 2);
+        assert_eq!(arr.positions(), 1);
     }
 }

@@ -130,8 +130,10 @@ pub trait TestCompiler {
 
 #[derive(Clone, Debug, Default)]
 pub struct Config {
-    /// `--filter S`: only tests whose name contains `S`.
+    /// `--filter S`: only tests whose name contains `S` (`exact`: equals `S`).
     pub filter: Option<String>,
+    /// `--exact`.
+    pub exact: bool,
     /// `--runner CMD`.
     pub runner: Option<String>,
     /// Codes annotations may use (contracts/diagnostic-codes.md plus the GPU tables); `None`
@@ -263,7 +265,7 @@ pub fn run_tests(cases: &[TestCase], cfg: &Config, compiler: &mut dyn TestCompil
     let mut report = Report::default();
     for case in cases {
         if let Some(f) = &cfg.filter
-            && !case.name.contains(f.as_str())
+            && !(if cfg.exact { case.name == *f } else { case.name.contains(f.as_str()) })
         {
             continue;
         }

@@ -1,0 +1,5 @@
+// A struct of another module: a failing input names it as `geo.Cell`.
+pub struct Cell {
+    pub row: u32,
+    pub col: u32,
+}
