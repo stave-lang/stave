@@ -304,6 +304,8 @@ pub struct Output {
     pub main: Option<FuncId>,
     /// The executable ([`Goal::Build`] without errors).
     pub image: Option<ObjectImage>,
+    /// The stack bound of the executable ([`crate::stack`]).
+    pub stack: Option<crate::stack::Report>,
     /// Why a run without error diagnostics failed: a body borrowck could not check (check and
     /// build), or no image (build).
     pub failure: Option<Failure>,
@@ -323,6 +325,17 @@ impl Output {
 
     pub fn has_errors(&self) -> bool {
         self.error_count() > 0
+    }
+
+    /// The build summary's stack lines (empty without a computed bound).
+    pub fn stack_lines(&self) -> Vec<String> {
+        let (Some(r), Some(tc), Some(m)) = (&self.stack, &self.typeck, &self.module) else {
+            return Vec::new();
+        };
+        crate::stack::summary(r, &self.program, tc, m, |sp| match self.files().locate(sp) {
+            Ok(l) => format!("{}:{}:{}", l.path, l.line, l.col),
+            Err(_) => "?".to_string(),
+        })
     }
 }
 
@@ -441,6 +454,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             removed_checks: Vec::new(),
             main: None,
             image: None,
+            stack: None,
             failure: None,
             lines,
         };
@@ -462,6 +476,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             removed_checks: Vec::new(),
             main: None,
             image: None,
+            stack: None,
             failure: Some(Failure::Unsupported { stage: Stage::Typeck, message: what }),
             lines,
         };
@@ -547,6 +562,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
         removed_checks: Vec::new(),
         main: None,
         image: None,
+        stack: None,
         failure,
         lines,
     };
@@ -563,10 +579,10 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     let funcs = lowered.as_ref().map_or(0, |l| l.module.funcs.iter().filter(|f| f.body.is_some()).count());
     out.timings.push(timing(Stage::Lower, ms(t0.elapsed()), funcs as u64));
     out.typeck = Some(tc);
-    let module = match lowered {
+    let (module, nodes_of_func) = match lowered {
         Ok(l) => {
             out.removed_checks = l.removed;
-            l.module
+            (l.module, l.nodes_of_func)
         }
         Err(f) => {
             out.failure = Some(f);
@@ -582,11 +598,24 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             (None, _) => out.failure = Some(Failure::NoHostTarget),
             (Some(_), None) => out.failure = Some(Failure::NoMain),
             (Some(t), Some(main)) => {
-                match build::codegen_link(&module, main, t, opts.release, opts.threads) {
+                let run_stack = out.program.packages.iter().find(|p| p.is_root).and_then(|p| p.run_stack);
+                let built = match &out.typeck {
+                    Some(tc) => {
+                        let input = crate::stack::Input {
+                            graph: &tc.call_graph,
+                            nodes_of_func: &nodes_of_func,
+                            run_stack,
+                        };
+                        build::codegen_link(&module, main, t, opts.release, opts.threads, Some(&input))
+                    }
+                    None => build::codegen_link(&module, main, t, opts.release, opts.threads, None),
+                };
+                match built {
                     Ok(b) => {
                         out.timings.push(timing(Stage::Codegen, b.codegen_ms, b.funcs));
                         out.timings.push(timing(Stage::Link, b.link_ms, b.funcs));
                         out.image = Some(b.image);
+                        out.stack = b.stack;
                     }
                     Err(f) => out.failure = Some(f),
                 }

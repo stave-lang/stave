@@ -219,7 +219,7 @@ pub fn run(
         let domain = out.typeck.as_ref().and_then(|tc| tc.body(decl)).and_then(|b| b.test_domain.as_deref());
         let Some(domain) = domain else {
             let built = pool
-                .install(|| build::codegen_link(&module, f, triple, opts.release, opts.threads))
+                .install(|| build::codegen_link(&module, f, triple, opts.release, opts.threads, None))
                 .map_err(HarnessError::Failure)?;
             let outcome = if !runnable {
                 TestFnOutcome::NotRun
@@ -268,7 +268,7 @@ pub fn run(
             HarnessError::Failure(Failure::Internal { stage: pipeline::Stage::Lower, message })
         })?;
         let built = pool
-            .install(|| build::codegen_link(&module, caller, triple, opts.release, opts.threads))
+            .install(|| build::codegen_link(&module, caller, triple, opts.release, opts.threads, None))
             .map_err(HarnessError::Failure)?;
         if !runnable {
             report.results.push(TestFnResult { name, outcome: TestFnOutcome::NotRun, inputs: None });

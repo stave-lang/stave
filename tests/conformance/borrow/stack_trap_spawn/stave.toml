@@ -1,0 +1,5 @@
+name = "stack_trap_spawn"
+kind = "bin"
+
+[run]
+stack = "64KiB"

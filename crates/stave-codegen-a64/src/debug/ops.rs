@@ -1613,6 +1613,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             Intr::ThreadAddr => addr_of(self, syms.thread_stub, "__stave_thread_start"),
             Intr::SiteTable => addr_of(self, Some(syms.site_table), "__stave_site_table"),
             Intr::PcTable => addr_of(self, Some(syms.pc_table), "__stave_pc_table"),
+            Intr::StackTable => addr_of(self, Some(syms.stack_table), "__stave_stack_table"),
             Intr::StaticAddr => {
                 let k = args
                     .first()

@@ -1,0 +1,68 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: StackOverflow"
+//~ RESOURCE-LIMIT
+// stack_bound's call chain with `f4` marked `rec fn`: main reaches a `rec fn`, so its stack has
+// no computed bound and keeps `[run] stack` (64 KiB), which the chain (eight frames of 32 KiB)
+// overflows: the guard page traps.
+import std.io;
+
+fn f0(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return buf[i] + 1;
+}
+
+fn f1(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f0(buf[i]) + 1;
+}
+
+fn f2(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f1(buf[i]) + 1;
+}
+
+fn f3(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f2(buf[i]) + 1;
+}
+
+rec fn f4(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f3(buf[i]) + 1;
+}
+
+fn f5(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f4(buf[i]) + 1;
+}
+
+fn f6(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f5(buf[i]) + 1;
+}
+
+fn f7(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f6(buf[i]) + 1;
+}
+
+fn main() {
+    let a = f7(1u64);
+    io.print(f"main {a}\n");
+}

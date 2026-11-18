@@ -77,24 +77,32 @@ pub fn user_site() -> u32 {
 // CPU thread id: 0 for the thread running main, then creation order. Found from the
 // address of a local: the registry entry (runtime.state `reg`) whose range holds this stack (a
 // thread's stack mapping includes its alternate signal stack); 0 if none does.
+// thread_id, find_entry, and reg_word have no trapping operation (wrapping arithmetic, raw
+// reads): runtime.panic.begin calls them before it marks the process as panicking, where a trap
+// would start the report again without end.
 pub fn thread_id() -> u64 {
     let here: u8 = 0;
     let a = &here as *const u8 as usize;
     let e = find_entry(a);
-    if e == state.MAX_THREADS { return 0; }
+    if e >= state.MAX_THREADS { return 0; }
+    return unsafe("e < MAX_THREADS, so the word is inside the registry") reg_word(e *% state.REG_WORDS +% 3) as u64;
+}
+
+// Word i of the registry.
+unsafe("i < REG_LEN") fn reg_word(i: usize) -> usize {
     let st = state.get();
-    return unsafe("e < MAX_THREADS: an entry of the registry") (*st).reg[e * state.REG_WORDS + 3] as u64;
+    let base = unsafe("st is runtime.state.STATE; only the field address is taken") &(*st).reg as *const [usize; state.REG_LEN] as usize;
+    return unsafe("i < REG_LEN (caller): a word of the registry") *((base +% i *% 8) as *const usize);
 }
 
 // The registry entry whose [lo, hi) holds address a; MAX_THREADS if none. Reads without the
 // registry lock: an entry is complete before it is published (lo is written last) and is
 // removed only after its thread has exited.
 fn find_entry(a: usize) -> usize {
-    let st = state.get();
     for e in 0..state.MAX_THREADS {
-        let k = e * state.REG_WORDS;
-        let lo = unsafe("k < REG_LEN: inside the registry") (*st).reg[k];
-        let hi = unsafe("k + 1 < REG_LEN: inside the registry") (*st).reg[k + 1];
+        let k = e *% state.REG_WORDS;
+        let lo = unsafe("e < MAX_THREADS, so k + 1 < REG_LEN") reg_word(k);
+        let hi = unsafe("e < MAX_THREADS, so k + 1 < REG_LEN") reg_word(k +% 1);
         if lo != 0 && a >= lo && a < hi { return e; }
     }
     return state.MAX_THREADS;
@@ -223,10 +231,11 @@ fn put_site(l: &mut Line, site: u32) {
 
 // Marks the process as panicking. A panic while this thread reports one (or in its signal
 // handler) exits 101 at once, without a second report; a panic in another thread meanwhile
-// waits for the first report's exit_group.
+// waits for the first report's exit_group. Nothing begin calls traps (the compiler's stack bound
+// checks it), so a trap during a report ends here, one frame chain deep.
 fn begin() {
     let st = state.get();
-    let me = (thread_id() + 1) as% u32;
+    let me = (thread_id() +% 1) as% u32;
     let w = unsafe("st is runtime.state.STATE; only the field address is taken") &mut (*st).panicking as *mut u32;
     let prev = unsafe("w is the panicking word of the state block") atomic.cas_u32(w, 0, me);
     if prev == 0 { return; }

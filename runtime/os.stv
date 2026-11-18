@@ -263,13 +263,13 @@ fn spawn_thread(stack: usize, size: usize, tid: *mut u32, arg: usize) -> isize {
 }
 
 pub fn sched_yield() -> isize {
-    return sys.sc0(SYS_SCHED_YIELD);
+    return sys.sched_yield();
 }
 
 // ---- process ----
 // Never returns (the kernel ends the process; the `loop` only gives the body type `never`).
 pub fn exit_group(code: i32) -> never {
-    let r = sys.sc1(SYS_EXIT_GROUP, code as% usize);
+    let r = sys.exit_group(code as% usize);
     loop {}
 }
 

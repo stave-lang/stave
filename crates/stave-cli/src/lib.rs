@@ -389,6 +389,9 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
             };
             let _ = writeln!(err, "emulated: {at}: {} on {} ({triple})", e.op, e.ty);
         }
+        for l in output.stack_lines() {
+            let _ = writeln!(err, "{l}");
+        }
         let _ = writeln!(err, "{}", select::summary_line(selection, total_ms as u64));
     }
     release(output);

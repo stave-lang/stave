@@ -1,0 +1,67 @@
+//~ STDERR-CONTAINS "panic: Bounds at src/main.stv:12:15 in main.f0 (thread 0)\n"
+// A bounds check fails in the deepest frame of a call chain without recursion (eight frames of
+// 32 KiB) on main: the panic report runs on top of that chain, inside the stack the compiler
+// computed (which wins over the 64 KiB `[run] stack`), and prints in full.
+import std.io;
+
+fn f0(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    // out of range: the deepest frame traps Bounds
+    return buf[i + 4096];
+}
+
+fn f1(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f0(buf[i]) + 1;
+}
+
+fn f2(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f1(buf[i]) + 1;
+}
+
+fn f3(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f2(buf[i]) + 1;
+}
+
+fn f4(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f3(buf[i]) + 1;
+}
+
+fn f5(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f4(buf[i]) + 1;
+}
+
+fn f6(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f5(buf[i]) + 1;
+}
+
+fn f7(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f6(buf[i]) + 1;
+}
+
+fn main() {
+    let a = f7(1u64);
+    io.print(f"main {a}\n");
+}

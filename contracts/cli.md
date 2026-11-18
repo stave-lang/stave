@@ -236,6 +236,17 @@ Common flags come after the subcommand (`stave build --release`, not `stave --re
   block in the source, and every class U operation inside one is listed in the build summary:
   one line `emulated: <file>:<line>:<col>: <op> on <type> (<target>)` each, on stderr before the
   summary line, in source order.
+- The stack bound of a CPU executable is listed in the build summary of `build` and `run`, after
+  the `emulated:` lines: `stack: main: <n> bytes`, then one line per function a thread can
+  start with, `stack: spawn at <file>:<line>:<col>: <n> bytes` (a `spawn` body) or
+  ``stack: thread `<fn>`: <n> bytes`` (a closure `std.thread` starts, e.g.
+  `` `std.thread.join<u64, u64>.0` ``). `<n>` is the computed bound; the runtime maps it plus a
+  4 KiB margin, rounded up to the page size. A stack without a bound reads
+  ``unbounded (<why>), [run] stack <n> bytes``, `<why>` one of ``reaches rec fn `<fn>` ``,
+  ``reaches a call cycle through `<fn>` `` (a drop cycle of a recursive type), ``calls a fn
+  value with unknown targets in `<fn>` ``, ``calls C code in `<fn>` ``, `the call graph is
+  incomplete`. The bound depends
+  on the build mode and target (frame sizes); it never fails a build.
 - `--cache DIR`: incremental cache location. Default: `PKG_DIR/.stave-cache`. Planned: stage0 has
   no cache and refuses the flag as not implemented (exit 2).
 
@@ -269,7 +280,7 @@ version = "0.1.0"
 prims = { path = "prims/cpu" }          # path-only in v1
 
 [run]
-stack = "8MiB"                          # main and every thread (gpu-program.md)
+stack = "8MiB"                          # stacks without a computed bound (gpu-program.md)
 
 [target.gpu-sm86.dependencies]          # per target
 prims = { path = "prims/gpu" }
@@ -288,6 +299,8 @@ entry (the specific one over the arch table). Built-in packages (`std`, `runtime
 non-path dependency, unknown target name, TOML syntax error, duplicate key, bad `kind`, missing
 `name`, missing root file, missing dependency directory, unreadable manifest) are E1002, located
 in `stave.toml`; an unreadable source file is E1003. `[run] stack` (default
-`"8MiB"`, at least `"4KiB"`, size grammar of gpu-program.md "Manifest keys") is the stack
-size of `main` and of every runtime thread, on every target; on the CPU each stack has a guard page
+`"8MiB"`, at least `"4KiB"`, size grammar of gpu-program.md "Manifest keys"; another value is
+E1203) is the stack size of `main` and of every runtime thread whose calls can reach a `rec fn`
+(or a drop cycle of a recursive type), on every target; on the CPU every other stack gets the
+computed bound of what it can call (intrinsics.md "stack table"), and each stack has a guard page
 below it.
