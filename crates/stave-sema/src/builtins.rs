@@ -536,9 +536,12 @@ pub fn intrinsic(name: &str) -> Option<(IArch, Vec<TypeId>, IRet)> {
     Some(match name {
         "cpuid" => (IArch::X86, vec![ids::U32, ids::U32], IRet::Cpuid),
         "xgetbv" => (IArch::X86, vec![ids::U32], IRet::T(ids::U64)),
-        "thread_start_addr" | "main_addr" | "signal_handler_addr" | "site_table" | "pc_table" => {
-            (IArch::Both, vec![], IRet::T(us))
-        }
+        "thread_start_addr"
+        | "main_addr"
+        | "signal_handler_addr"
+        | "site_table"
+        | "pc_table"
+        | "stack_table" => (IArch::Both, vec![], IRet::T(us)),
         "call_on_stack" => (IArch::Both, vec![us, us, us], IRet::T(us)),
         "cpu_init" => (IArch::Both, vec![], IRet::T(ids::UNIT)),
         "cpu_baseline" => (IArch::Both, vec![], IRet::T(ids::U64)),

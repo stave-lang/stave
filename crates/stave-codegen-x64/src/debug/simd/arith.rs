@@ -115,6 +115,8 @@ impl Cg<'_, '_> {
         self.spill_caller_saved()?;
         // the routine is baseline code
         self.vclean();
+        // the call's return address; the routine itself takes no stack
+        self.below = self.below.max(8);
         let d = self.def_mem(rv)?;
         for k in 0..sh.n {
             for (n, m) in [(0, ma), (1, mb), (2, mc)] {

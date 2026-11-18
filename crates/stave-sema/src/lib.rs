@@ -94,7 +94,8 @@ pub use dump::{dump_names, dump_strings, names_file_into, strings_into};
 pub use ids::{BindingRef, DeclId, GenericRef, ItemId, ModuleId, PackageId, Sym};
 pub use intern::Strings;
 pub use lower::{
-    GraphLowering, LowerError, LowerErrorKind, LowerTimings, Mode, lower, lower_graph_nodes, lower_timed,
+    GraphLowering, LowerError, LowerErrorKind, LowerTimings, Mode, lower, lower_graph_nodes, lower_mapped,
+    lower_timed,
 };
 pub use modules::{Import, Module};
 pub use package::{BuiltinPackage, FileBytes, Fs, Package, PackageKind};
@@ -521,7 +522,7 @@ impl Program {
             for is in &mf.issues {
                 let span = Span::new(fid, is.span.lo, is.span.hi.saturating_sub(is.span.lo));
                 let holes: Vec<(&str, &str)> = is.holes.iter().map(|(k, v)| (*k, v.as_str())).collect();
-                diags.extend(mk("E1002", is.case, &holes, span, &[]));
+                diags.extend(mk(is.code, is.case, &holes, span, &[]));
             }
         }
         let mut timings = Timings {
@@ -645,6 +646,7 @@ impl Program {
                 deps,
                 root_module,
                 is_root: rp.is_root,
+                run_stack: rp.run_stack,
             });
         }
 
@@ -1179,6 +1181,7 @@ impl Program {
                     deps,
                     root_module: ModuleId::NONE,
                     is_root: rp.is_root,
+                    run_stack: rp.run_stack,
                 }
             })
             .collect();

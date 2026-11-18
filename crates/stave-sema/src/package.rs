@@ -66,6 +66,8 @@ pub struct Package {
     pub root_module: crate::ModuleId,
     /// The package being built.
     pub is_root: bool,
+    /// `[run] stack` of its manifest, in bytes (valid: at least 4 KiB).
+    pub run_stack: Option<u64>,
 }
 
 /// Read access to sources: the disk, or an in-memory tree (tests).
@@ -221,10 +223,13 @@ fn walk(dir: &Path, prefix: String, depth: usize, out: &mut Vec<String>) {
     }
 }
 
-/// An E1002 found while reading a manifest (converted to a diagnostic once file ids exist).
+/// An E1002 (or E1203) found while reading a manifest (converted to a diagnostic once file ids
+/// exist).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ManifestIssue {
-    /// `None` (unknown key) or the E1002 case name.
+    /// `E1002`, or `E1203` for an invalid `[run]` value.
+    pub code: &'static str,
+    /// `None` (unknown key) or the case name.
     pub case: Option<&'static str>,
     /// The case's holes (`key`, `expected`, `root`).
     pub holes: Vec<(&'static str, String)>,
@@ -233,7 +238,12 @@ pub(crate) struct ManifestIssue {
 
 impl ManifestIssue {
     fn new(case: Option<&'static str>, holes: &[(&'static str, &str)], span: TSpan) -> ManifestIssue {
-        ManifestIssue { case, holes: holes.iter().map(|(k, v)| (*k, v.to_string())).collect(), span }
+        ManifestIssue {
+            code: "E1002",
+            case,
+            holes: holes.iter().map(|(k, v)| (*k, v.to_string())).collect(),
+            span,
+        }
     }
 
     /// The key text of the issue (tests).
@@ -278,6 +288,7 @@ pub(crate) struct RawPackage {
     pub is_root: bool,
     /// Root module relative path (`["main"]`, `["lib"]`), if any.
     pub root_rel: Option<Vec<String>>,
+    pub run_stack: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -306,6 +317,8 @@ struct ManifestData {
     deps: Vec<DepSpec>,
     /// `[target.<t>.dependencies]` by target table name.
     target_deps: Vec<(String, Vec<DepSpec>)>,
+    /// `[run] stack` in bytes.
+    run_stack: Option<u64>,
 }
 
 const TARGET_ALIAS_X86: &str = "x86_64-linux";
@@ -354,6 +367,21 @@ impl Check<'_> {
                 None
             }
         }
+    }
+
+    /// `stack` of a `[run]` table: a size of at least 4 KiB (E1203 otherwise, at the value).
+    fn run_stack(&mut self, t: &TTable) -> Option<u64> {
+        let e = t.entries.iter().find(|e| e.key == "stack")?;
+        let v = match &e.value {
+            TValue::Str(s, _) => parse_size(s).filter(|&n| n >= 4096),
+            _ => None,
+        };
+        if v.is_none() {
+            let mut is = ManifestIssue::new(Some("stack"), &[("key", "stack")], e.value.span());
+            is.code = "E1203";
+            self.issues.push(is);
+        }
+        v
     }
 
     fn table<'t>(&mut self, e: &'t TEntry) -> Option<&'t TTable> {
@@ -452,8 +480,14 @@ impl Check<'_> {
                         }
                     }
                 }
-                // GPU program (`[run]`, `[gpu]`) and stage1 compiler (`[compiler]`) keys: checked there.
-                "run" | "gpu" | "compiler" => {
+                "run" => {
+                    if let Some(t) = self.table(e) {
+                        m.run_stack = self.run_stack(t);
+                    }
+                }
+                // GPU program (`[gpu]`, the other `[run]` keys) and stage1 compiler
+                // (`[compiler]`) keys: checked there.
+                "gpu" | "compiler" => {
                     let _ = self.table(e);
                 }
                 _ => self.unknown(e),
@@ -471,6 +505,26 @@ fn valid_name(name: &str) -> bool {
         || name == ".."
         || name.starts_with('-')
         || name.contains(['/', '\\', '\0']))
+}
+
+/// A size of the manifest grammar (gpu-program.md "Manifest keys"): decimal digits without sign,
+/// point, `_`, or leading zero, then directly one of `B KiB MiB GiB TiB`; more than 0, fits `u64`.
+fn parse_size(s: &str) -> Option<u64> {
+    let digits = s.bytes().take_while(u8::is_ascii_digit).count();
+    let (num, unit) = s.split_at(digits);
+    if num.is_empty() || num.starts_with('0') {
+        return None;
+    }
+    let shift = match unit {
+        "B" => 0,
+        "KiB" => 10,
+        "MiB" => 20,
+        "GiB" => 30,
+        "TiB" => 40,
+        _ => return None,
+    };
+    let n: u64 = num.parse().ok()?;
+    n.checked_mul(1u64 << shift)
 }
 
 /// Reads and checks one manifest: (data, issues). `name` is required (E1002 `missing-name`, at
@@ -583,6 +637,7 @@ pub(crate) fn load(fs: &Fs, root: &Path, target: Triple, builtins: &[BuiltinPack
             manifest: None,
             is_root: true,
             root_rel: Some(vec!["main".into()]),
+            run_stack: None,
         });
         specs.push(Vec::new());
         l.files.push(PendingFile {
@@ -704,6 +759,7 @@ fn add_package(
             manifest,
             is_root: false,
             root_rel: None,
+            run_stack: data.run_stack,
         });
         for rel in fs.builtin_files(dir) {
             let abs = dir.join(&rel);
@@ -748,6 +804,7 @@ fn add_package(
         manifest,
         is_root,
         root_rel: Some(vec![root_file.to_string()]),
+        run_stack: data.run_stack,
     });
     for rel in files {
         let abs = dir.join("src").join(&rel);
@@ -770,6 +827,27 @@ mod tests {
     fn issues(text: &str) -> Vec<(Option<&'static str>, String)> {
         let (_, is) = read_manifest(text.as_bytes());
         is.into_iter().filter(|i| i.case != Some("missing-name")).map(|i| (i.case, i.key())).collect()
+    }
+
+    /// `[run] stack`: a size of the manifest grammar, at least 4 KiB; anything else is E1203
+    /// case `stack` at the value.
+    #[test]
+    fn run_stack() {
+        let (m, is) = read_manifest(b"name = \"a\"\n[run]\nstack = \"64KiB\"\n");
+        assert_eq!((m.run_stack, is.len()), (Some(65536), 0));
+        for bad in ["\"1KiB\"", "\"0B\"", "\"08MiB\"", "\"8MB\"", "\"8 MiB\"", "\"1.5GiB\"", "8", "\"\""] {
+            let text = format!("name = \"a\"\n[run]\nstack = {bad}\n");
+            let (m, is) = read_manifest(text.as_bytes());
+            let got: Vec<_> = is.iter().map(|i| (i.code, i.case, i.key())).collect();
+            assert_eq!(got, vec![("E1203", Some("stack"), "stack".to_string())], "{bad}");
+            assert_eq!(m.run_stack, None);
+        }
+        assert_eq!(parse_size("4096B"), Some(4096));
+        assert_eq!(parse_size("8MiB"), Some(8 << 20));
+        assert_eq!(parse_size("1TiB"), Some(1 << 40));
+        assert_eq!(parse_size("16777216TiB"), None);
+        // the other `[run]` keys are not this check's
+        assert_eq!(issues("[run]\nthreads = 4\n"), vec![]);
     }
 
     #[test]

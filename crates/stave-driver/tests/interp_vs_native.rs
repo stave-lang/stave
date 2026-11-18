@@ -40,6 +40,11 @@ fn programs() -> Vec<PathBuf> {
             !name.starts_with('.')
                 && !name.starts_with('_')
                 && (p.join("stave.toml").is_file() || p.extension().is_some_and(|x| x == "stv"))
+                // the interpreter has no stack size: a program that overflows its `[run] stack`
+                // runs to its end there
+                && !(std::fs::read_to_string(p.join("stave.toml")).is_ok_and(|t| t.contains("[run]"))
+                    && std::fs::read_to_string(p.join("src/main.stv"))
+                        .is_ok_and(|t| t.contains("//~ RESOURCE-LIMIT")))
         })
         .collect();
     v.sort();

@@ -1,0 +1,39 @@
+//~ STDOUT stack_spawn.stdout
+// Each `spawn` body is a root of its own: the deep one (three frames of 16 KiB) and the shallow
+// one get separate stack bounds, and both threads run with them.
+import std.io;
+
+fn g0(x: u32) -> u32 {
+    let mut buf: [u32; 4096] = [0u32; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return buf[i] + 1;
+}
+
+fn g1(x: u32) -> u32 {
+    let mut buf: [u32; 4096] = [0u32; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return g0(buf[i]) + 1;
+}
+
+fn g2(x: u32) -> u32 {
+    let mut buf: [u32; 4096] = [0u32; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return g1(buf[i]) + 1;
+}
+
+fn small(x: u32) -> u32 {
+    return x * 2;
+}
+
+fn main() {
+    let mut deep: u32 = 0;
+    let mut shallow: u32 = 0;
+    scope {
+        spawn { deep = g2(5u32); }
+        spawn { shallow = small(21u32); }
+    }
+    io.print(f"deep {deep}\nshallow {shallow}\n");
+}

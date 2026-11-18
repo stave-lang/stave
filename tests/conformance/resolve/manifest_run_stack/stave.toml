@@ -1,0 +1,5 @@
+name = "manifest_run_stack"
+kind = "bin"
+
+[run]
+stack = "1KiB" #~ ERROR E1203

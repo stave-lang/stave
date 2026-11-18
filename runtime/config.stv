@@ -1,10 +1,19 @@
 // runtime.config: per-binary settings fixed at build time.
 //
-// The driver must emit this module for each binary from the package's stave.toml (no mechanism
-// exists yet: ASSUMPTION, see runtime/README.md). The shipped file holds the defaults.
+// The compiler emits the stack table (`stack_table()` intrinsic; contracts/intrinsics.md is the
+// source of truth for the layout), all little-endian:
+//     +0 default: u64 (`[run] stack` bytes; 0: RUN_STACK)   +8 main: u64 (0: no bound)
+//     +16 count: u64; then count rows of 16 bytes:
+//     +0 code: u64 (the code address of a fn value a thread starts with)   +8 bytes: u64 (0: no bound)
+// A stack whose callers reach no `rec fn` gets its computed bound (plus the compiler's margin),
+// whatever `[run] stack` says; any other stack gets `[run] stack`. Without a table (the IR
+// interpreter: address 0) every stack gets RUN_STACK.
 
-// `[run] stack`: stack bytes of `main` and of every runtime thread (contracts/cli.md, default
-// "8MiB", at least "4KiB"). Rounded up to the page size by runtime.start.
+extern "stave-intrinsic" {
+    fn stack_table() -> usize;
+}
+
+// `[run] stack` default (contracts/cli.md: "8MiB", at least "4KiB").
 pub const RUN_STACK: usize = 8388608;
 
 // PROT_NONE guard region below every stack. 64 KiB rather than one page so that a
@@ -13,3 +22,40 @@ pub const GUARD: usize = 65536;
 
 // Alternate signal stack per thread for the SIGSEGV handler (>= MINSIGSTKSZ on both arches).
 pub const ALTSTACK: usize = 65536;
+
+unsafe("a is 8-byte aligned and readable") fn ld64(a: usize) -> u64 {
+    return unsafe("a is 8-byte aligned and readable (caller)") *(a as *const u64);
+}
+
+// `[run] stack` of table t (not 0).
+fn default_stack(t: usize) -> usize {
+    let d = unsafe("t is the compiler-emitted stack table, 8-byte aligned") ld64(t);
+    if d == 0 { return RUN_STACK; }
+    return d as usize;
+}
+
+// Stack bytes of main (before rounding up to the page size).
+pub fn main_stack() -> usize {
+    let t = unsafe("intrinsic: address of the compiler-emitted stack table") stack_table();
+    if t == 0 { return RUN_STACK; }
+    let b = unsafe("t is the stack table: its main word") ld64(t + 8);
+    if b == 0 { return default_stack(t); }
+    return b as usize;
+}
+
+// Stack bytes of a thread started with the fn value whose code address is `code` (before
+// rounding up to the page size).
+pub fn thread_stack(code: usize) -> usize {
+    let t = unsafe("intrinsic: address of the compiler-emitted stack table") stack_table();
+    if t == 0 { return RUN_STACK; }
+    let n = unsafe("t is the stack table: its count word") ld64(t + 16) as usize;
+    for i in 0..n {
+        let row = t + 24 + i * 16;
+        let c = unsafe("i < count: inside the stack table") ld64(row) as usize;
+        if c == code {
+            let b = unsafe("i < count: inside the stack table") ld64(row + 8);
+            if b != 0 { return b as usize; }
+        }
+    }
+    return default_stack(t);
+}

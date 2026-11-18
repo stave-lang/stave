@@ -105,9 +105,9 @@ const MREMAP_MAYMOVE: u64 = 1;
 /// `openat`, relative paths and `AT_FDCWD` only; `close`); `mprotect`, `rt_sigaction`,
 /// `rt_sigprocmask`, and `sigaltstack` succeed without effect; `getpid` returns 1. Other system
 /// calls return `-ENOSYS`. `cpuid` and `xgetbv` return zeros (no optional features);
-/// `thread_start_addr` returns 0; `cpu_init` does nothing (the feature word stays 0, so a
-/// `dispatch` takes its `_` arm); any other intrinsic without arguments returns its entry of
-/// `values` (`main_addr`, `site_table`, `pc_table`, `signal_handler_addr`), if set.
+/// `thread_start_addr` and `stack_table` return 0 (no stack table: the runtime defaults apply);
+/// `cpu_init` does nothing (the feature word stays 0, so a `dispatch` takes its `_` arm); any
+/// other intrinsic without arguments returns its entry of `values` (`main_addr`, `site_table`, `pc_table`, `signal_handler_addr`), if set.
 #[derive(Clone, Debug)]
 pub struct BufferHost {
     pub abi: SyscallAbi,
@@ -252,7 +252,7 @@ impl Host for BufferHost {
         }
         match name {
             "cpuid" => Ok(Some(Val::agg(vec![Val::S(0), Val::S(0), Val::S(0), Val::S(0)]))),
-            "xgetbv" | "thread_start_addr" => Ok(Some(Val::S(0))),
+            "xgetbv" | "thread_start_addr" | "stack_table" => Ok(Some(Val::S(0))),
             "cpu_init" => Ok(None),
             // one thread only: thread creation fails like an unsupported system call
             "thread_clone" => Ok(Some(Val::S(ENOSYS))),

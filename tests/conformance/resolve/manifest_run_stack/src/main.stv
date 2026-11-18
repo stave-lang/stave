@@ -1,0 +1,5 @@
+//~ CHECK-ONLY
+// E1203 case `stack` (at the value): `[run] stack` is a size of at least 4 KiB.
+fn main() -> i32 {
+    return 0;
+}

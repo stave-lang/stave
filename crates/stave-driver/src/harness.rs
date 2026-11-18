@@ -127,7 +127,7 @@ pub fn run(
             continue;
         }
         let built = pool
-            .install(|| build::codegen_link(module, f, triple, opts.release, opts.threads))
+            .install(|| build::codegen_link(module, f, triple, opts.release, opts.threads, None))
             .map_err(HarnessError::Failure)?;
         let outcome = if !runnable {
             TestFnOutcome::NotRun
