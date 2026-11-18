@@ -26,7 +26,12 @@ fn config(root: &Path, target: &str, shuffle: Option<u64>) -> Config {
 fn lowered(root: &Path, target: &str, mode: Mode, shuffle: Option<u64>) -> Module {
     let p = Program::load(&config(root, target, shuffle));
     let tc = stave_sema::check(&p);
-    let d = tc.all_diagnostics(&p);
+    // warnings (a stale `rec fn`, E1411) do not stop a build
+    let d: Vec<_> = tc
+        .all_diagnostics(&p)
+        .into_iter()
+        .filter(|d| d.severity() != stave_diag::Severity::Warning)
+        .collect();
     if !d.is_empty() {
         let text = stave_diag::emit_human(&d, &p.source_map).unwrap_or_default();
         panic!("{}: diagnostics:\n{text}", root.display());

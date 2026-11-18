@@ -5,7 +5,7 @@
 //     +0 default: u64 (`[run] stack` bytes; 0: RUN_STACK)   +8 main: u64 (0: no bound)
 //     +16 count: u64; then count rows of 16 bytes:
 //     +0 code: u64 (the code address of a fn value a thread starts with)   +8 bytes: u64 (0: no bound)
-// A stack whose callers reach no `rec fn` gets its computed bound (plus the compiler's margin),
+// A stack whose calls reach no call cycle gets its computed bound (plus the compiler's margin),
 // whatever `[run] stack` says; any other stack gets `[run] stack`. Without a table (the IR
 // interpreter: address 0) every stack gets RUN_STACK.
 

@@ -15,6 +15,9 @@ impl Tree {
 test rec fn fact_small() {
     let t = Tree.{ depth: 2 };
     let n = fact(5) + t.count(3) as u64;
+    if n == 0 {
+        fact_small();
+    }
 }
 
 fn main() -> i32 {

@@ -1954,3 +1954,13 @@ message = "`{type}` is not `Frozen`: it is {reason}"
 [diag.cases.depth]
 message = "`{type}` is not `Frozen`: it nests deeper than {limit} levels, the limit of the `Frozen` check"
 fix = { description = "nest the type less deeply" }
+
+[[diag]]
+code = "E1411"
+severity = "warning"
+area = "effects"
+rule = "a `rec fn` none of whose instances is on a call cycle (not reported when the call graph is truncated, nor for a generic never instantiated): the marker names nothing, and the stack bound ignores it"
+holes = { name = "path" }
+message = "`rec fn {name}` is on no call cycle"
+labels = [{ at = "primary", text = "no instance of this fn recurses" }]
+fix = { description = "remove `rec`: the fn is not recursive" }

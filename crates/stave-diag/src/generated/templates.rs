@@ -4924,4 +4924,29 @@ pub(super) static ENTRIES: &[Entry] = &[
             },
         ],
     },
+    Entry {
+        code: "E1411",
+        severity: Severity::Warning,
+        area: "effects",
+        rule: "a `rec fn` none of whose instances is on a call cycle (not reported when the call graph is truncated, nor for a generic never instantiated): the marker names nothing, and the stack bound ignores it",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "name", kind: HoleKind::Path, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`rec fn {name}` is on no call cycle",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no instance of this fn recurses" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `rec`: the fn is not recursive",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
 ];

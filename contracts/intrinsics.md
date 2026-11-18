@@ -193,8 +193,8 @@ truth):
   stack without one (no row, or 0) gets `default`. The compiler computes the bound per root from
   the frame sizes of the generated code over the call graph: main's stack holds `__stave_main`
   and what `main` can call; a thread's holds `__stave_thread_start`, `runtime.thread.entry`, and
-  what its fn value can call; a stack whose calls can reach a `rec fn` or a call cycle (a drop
-  cycle of a recursive type) has no bound. The bytes include a margin of 4 KiB. Signal handlers
+  what its fn value can call; a stack whose calls can reach a call cycle (recursion, or a drop
+  cycle of a recursive type) has no bound; a `rec fn` on no cycle is bounded like any fn. The bytes include a margin of 4 KiB. Signal handlers
   run on the alternate signal stack, so no bound counts them.
 
 **Paths fixed by the compiler** (no attributes or lang items exist; these names are the whole

@@ -19,8 +19,9 @@
 //! most one more such path; that needs every function `begin` reaches to be free of trap stubs,
 //! which the pass checks (else every trapping stack is unbounded).
 //! Computed sinks first by out-degree peeling, on flat arrays without recursion. A node that is
-//! `rec fn`, unresolved, or reaches either or a cycle (a drop cycle of a recursive type, or one
-//! the added edges close) has no bound.
+//! unresolved, on a cycle, or reaches either has no bound: a call cycle (named by its `rec fn`),
+//! a drop cycle of a recursive type, or one the added edges close. A `rec fn` on no cycle of
+//! this graph is bounded like any fn.
 //!
 //! **Stacks.** Main's stack holds the `__stave_main` stub and `main`. A thread runs the
 //! `__stave_thread_start` stub, `runtime.thread.entry`, and the fn value it was started with; each
@@ -71,7 +72,7 @@ pub enum At {
 /// Why a stack has no bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Why {
-    /// It reaches this `rec fn`.
+    /// It reaches a call cycle through this `rec fn`.
     Rec(At),
     /// It reaches a call cycle through this node.
     Cycle(At),
@@ -362,12 +363,8 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
             traps[x as usize] |= u.traps;
         }
     }
+    // A `rec fn` is bounded unless it is on a cycle of this graph: the marker only names the cycle.
     let mut poison: Vec<Option<Why>> = vec![None; total];
-    for (x, nd) in g.nodes.iter().enumerate() {
-        if nd.rec() {
-            poison[x] = Some(Why::Rec(At::Graph(x as u32)));
-        }
-    }
 
     // edges: (from, to, through a fn value)
     let mut edges: Vec<(u32, u32, bool)> = Vec::new();
