@@ -50,7 +50,11 @@ fn arb_operand(nv: u32, nc: u32) -> impl Strategy<Value = Operand> {
 }
 
 /// The ops a witness can name, for bodies the witness checker reads.
-const WITNESS_OPS: [Op; 12] = [
+const WITNESS_OPS: [Op; 16] = [
+    Op::And,
+    Op::Rem,
+    Op::Shr,
+    Op::Cast(stave_ir::CastKind::Wrap),
     Op::BoundsCheck,
     Op::BoundsCheck,
     Op::SliceLen,
@@ -79,13 +83,16 @@ fn arb_witness() -> impl Strategy<Value = FnWitness> {
             (0..12u32).prop_map(|v| Node::Len(Value(v))),
         ]
     };
-    let src = (0..7u8, 0..14u32, 0..3u32).prop_map(|(kind, at, arg)| match kind {
+    let src = (0..10u8, 0..14u32, 0..3u32).prop_map(|(kind, at, arg)| match kind {
         0 => Source::Branch { block: at },
         1 => Source::Assert { call: at, arg },
         2 => Source::Check { inst: at },
         3 => Source::Arith { inst: at },
         4 => Source::SliceLen { inst: at },
         5 => Source::SliceMake { inst: at },
+        6 => Source::Range { value: Value(at) },
+        7 => Source::Bits { inst: at },
+        8 => Source::Cast { inst: at },
         _ => Source::SubSat { inst: at },
     });
     let edge = (node(), node(), -3i128..4, src).prop_map(|(from, to, w, src)| Edge { from, to, w, src });

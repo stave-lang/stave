@@ -65,6 +65,9 @@ fn shifted(src: Source) -> Source {
         Source::SliceLen { inst } => Source::SliceLen { inst: inst + 1 },
         Source::SliceMake { inst } => Source::SliceMake { inst: inst + 1 },
         Source::SubSat { inst } => Source::SubSat { inst: inst + 1 },
+        Source::Range { value } => Source::Range { value: Value(value.0 + 1) },
+        Source::Bits { inst } => Source::Bits { inst: inst + 1 },
+        Source::Cast { inst } => Source::Cast { inst: inst + 1 },
     }
 }
 
@@ -172,11 +175,16 @@ pub fn forgeries_are_refused(m: &Module, f: FuncId) -> usize {
                 Source::SliceLen { inst },
                 Source::SliceMake { inst },
                 Source::SubSat { inst },
+                Source::Bits { inst },
+                Source::Cast { inst },
                 Source::Assert { call: inst, arg: 0 },
                 Source::Assert { call: inst, arg: 1 },
             ] {
                 forge(edge(src), "an instruction that proves a kept check");
             }
+        }
+        for v in 0..b.values.len() as u32 {
+            forge(edge(Source::Range { value: Value(v) }), "a type range that proves a kept check");
         }
         for r in proved.iter().flat_map(|p| p.witness.removed.iter().map(move |r| (p, r))) {
             forge(r.1.edges.of(&r.0.witness.edges).to_vec(), "another check's chain");

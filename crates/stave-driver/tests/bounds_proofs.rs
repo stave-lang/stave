@@ -104,6 +104,17 @@ fn proofs_and_kept_checks_in(release: bool) {
         ("main.chunk_other", 1),
         ("main.chunk_shrunk", 1),
         ("main.chunk_moved", 1),
+        ("main.at_required", 0),
+        ("main.mask_n", 0),
+        ("main.mod_n", 0),
+        ("main.mask_len", 0),
+        ("main.mod_len", 0),
+        ("main.half", 0),
+        ("main.by_byte", 0),
+        ("main.mask_wide", 1),
+        ("main.mod_wide", 1),
+        ("main.by_u16", 1),
+        ("main.by_signed", 1),
     ] {
         assert_eq!(kept(&m, path), n, "{path}: {:?}", of(path));
     }
@@ -125,6 +136,12 @@ fn proofs_and_kept_checks_in(release: bool) {
         "{:?}",
         of("main.window_sum")
     );
+    // the clause's `cbr` is the only way into the body: `i < xs.len()` holds there
+    assert!(matches!(of("main.at_required")[..], [Proof::LoopBound { .. }]), "{:?}", of("main.at_required"));
+    // bounded by the bit op or the byte's type alone
+    for path in ["main.mask_n", "main.mod_n", "main.mask_len", "main.mod_len", "main.half", "main.by_byte"] {
+        assert!(matches!(of(path)[..], [Proof::Offset { k: 0, .. }]), "{path}: {:?}", of(path));
+    }
 }
 
 /// Package dirs and single `.stv` files directly under `run/`, sorted.
@@ -282,6 +299,10 @@ fn no_forged_witness_passes() {
                 "main.chunk_other",
                 "main.chunk_shrunk",
                 "main.chunk_moved",
+                "main.mask_wide",
+                "main.mod_wide",
+                "main.by_u16",
+                "main.by_signed",
             ][..],
         ),
     ] {

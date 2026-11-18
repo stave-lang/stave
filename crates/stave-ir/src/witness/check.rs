@@ -4,8 +4,9 @@
 //! at its source, compared with what that source states, and the weights are summed. Nothing is
 //! searched for, and nothing here comes from the pass that wrote the witness: this file reads
 //! the IR tables and the witness tables only, with its own reading of the control-flow graph,
-//! of dominance (the certificate of [`FnWitness::dom`]), and of asserting callees. A rejection
-//! is a compiler bug. [`remove`] then deletes exactly the checks that were accepted.
+//! of dominance (the certificate of [`FnWitness::dom`]), of asserting callees, and of int
+//! widths. A rejection is a compiler bug. [`remove`] then deletes exactly the checks that were
+//! accepted.
 //!
 //! What an accepted witness rests on: the IR verifier (the module must have passed it: an
 //! operand is defined on every path to its use, and ops have their operand types), the op
@@ -18,8 +19,8 @@
 //! that is not well-formed the checker refuses or accepts, but does not panic.
 
 use super::{ASSERT_BLOCKS, Edge, FnWitness, MAX_CONST, NO_BLOCK, NOT_DEPTH, Node, Removed, Source};
-use crate::ir::{Block, Body, FuncId, Module, Op, Operand, Term, Value, ValueDef};
-use crate::types::TypeKey;
+use crate::ir::{Block, Body, CastKind, FuncId, Module, Op, Operand, Term, Value, ValueDef};
+use crate::types::{IntBits, TypeKey};
 
 /// Why a witness does not hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -403,6 +404,46 @@ impl<'a> Cx<'a> {
         matches!(key, Some(TypeKey::Int { signed: false, .. }))
     }
 
+    /// The width in bits of `v`'s type when it is an unsigned int.
+    fn width(&self, v: Value) -> Option<u32> {
+        match self.b.value_ty(v).and_then(|t| self.m.types.key(t)) {
+            Some(TypeKey::Int { signed: false, bits }) => Some(match bits {
+                IntBits::B8 => 8,
+                IntBits::B16 => 16,
+                IntBits::B32 => 32,
+                IntBits::B64 | IntBits::Size => 64,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The largest value of `v`'s type when it is an unsigned int.
+    fn top(&self, v: Value) -> Option<i128> {
+        self.width(v).map(|w| (1i128 << w) - 1)
+    }
+
+    /// The node and offset of operand `o` of an op whose type has the largest value `top`: a
+    /// constant must be a value of that type.
+    fn typed(&self, o: Operand, top: i128) -> Result<(Node, i128), Reject> {
+        match self.operand(o)? {
+            (Node::Zero, c) if c > top => Err(Reject::Operand),
+            nk => Ok(nk),
+        }
+    }
+
+    /// `v` has its value on every path to instruction `q`: its instruction runs before `q`, or
+    /// it is a parameter of a block that dominates `q`'s.
+    fn defined_at(&self, v: Value, q: u32) -> bool {
+        match self.b.values.get(v.index()).map(|d| d.def) {
+            Some(ValueDef::Inst(i)) => self.before(i, q),
+            Some(ValueDef::Param { block, .. }) => {
+                let at = self.block_of.get(q as usize).copied().unwrap_or(NO_BLOCK);
+                at != NO_BLOCK && self.encloses(block.index(), at as usize)
+            }
+            None => false,
+        }
+    }
+
     fn konst(&self, o: Operand) -> Option<i128> {
         self.b.int_const(o).filter(|c| (0..=MAX_CONST).contains(c))
     }
@@ -568,6 +609,58 @@ impl<'a> Cx<'a> {
                 let (node, k) = self.operand(n)?;
                 // h = max(n - c, 0) >= n - c
                 stated.push(node, Node::Val(h), c - k);
+            }
+            Source::Range { value } => {
+                let top = self.top(value).ok_or(Reject::Operand)?;
+                if !self.defined_at(value, q) {
+                    return Err(Reject::Region);
+                }
+                stated.push(Node::Zero, Node::Val(value), 0);
+                stated.push(Node::Val(value), Node::Zero, top);
+            }
+            Source::Bits { inst } => {
+                let (v, args) = self.defined(inst, q)?;
+                let top = self.top(v).ok_or(Reject::Operand)?;
+                match (self.op(inst), args) {
+                    // v = x & y <= min(x, y)
+                    (Some(Op::And), &[x, y]) => {
+                        let ((nx, kx), (ny, ky)) = (self.typed(x, top)?, self.typed(y, top)?);
+                        stated.push(Node::Val(v), nx, kx);
+                        stated.push(Node::Val(v), ny, ky);
+                    }
+                    // v = x mod y, y >= 1 (y = 0 traps): v <= y - 1 and v <= x
+                    (Some(Op::Rem), &[x, y]) => {
+                        let ((nx, kx), (ny, ky)) = (self.typed(x, top)?, self.typed(y, top)?);
+                        if ny == Node::Zero && ky < 1 {
+                            return Err(Reject::Source);
+                        }
+                        stated.push(Node::Val(v), nx, kx);
+                        stated.push(Node::Val(v), ny, ky - 1);
+                    }
+                    // v = floor(x / 2^k) <= x
+                    (Some(Op::Shr), &[x, _]) => {
+                        let (nx, kx) = self.typed(x, top)?;
+                        stated.push(Node::Val(v), nx, kx);
+                    }
+                    _ => return Err(Reject::Source),
+                }
+            }
+            Source::Cast { inst } => {
+                let (v, args) = self.defined(inst, q)?;
+                let (Some(Op::Cast(CastKind::Exact | CastKind::Wrap | CastKind::Sat)), &[Operand::Value(x)]) =
+                    (self.op(inst), args)
+                else {
+                    return Err(Reject::Source);
+                };
+                let (Some(wv), Some(wx)) = (self.width(v), self.width(x)) else {
+                    return Err(Reject::Operand);
+                };
+                // a narrower target truncates or saturates: only a widening cast keeps the value
+                if wv < wx {
+                    return Err(Reject::Source);
+                }
+                stated.push(Node::Val(v), Node::Val(x), 0);
+                stated.push(Node::Val(x), Node::Val(v), 0);
             }
         }
         if stated.has(e) { Ok(()) } else { Err(Reject::Edge) }

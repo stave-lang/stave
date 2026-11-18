@@ -229,6 +229,7 @@ fn aggregate_get_set() {
 // Difference-constraint proofs: `LenEq` and `Offset`.
 
 struct S {
+    u8t: TypeId,
     u32t: TypeId,
     us: TypeId,
     i64t: TypeId,
@@ -241,6 +242,7 @@ struct S {
 }
 
 fn stypes(m: &mut Module) -> S {
+    let u8t = m.types.u8();
     let u32t = m.types.u32();
     let us = m.types.usize();
     let i64t = m.types.i64();
@@ -252,7 +254,7 @@ fn stypes(m: &mut Module) -> S {
     let psl = m.types.ref_(false, sl);
     let pce = m.types.ref_(false, u32t);
     let v4 = m.types.intern(TypeKey::Vec { lane: u32t, n: Lanes::Fixed(4) });
-    S { u32t, us, i64t, bt, parr8, pe, psl, pce, v4 }
+    S { u8t, u32t, us, i64t, bt, parr8, pe, psl, pce, v4 }
 }
 
 /// The front end's slice read `s[idx]` (`n` = `slice.len s`): `check.bounds idx n`,
@@ -615,11 +617,151 @@ fn signed_index(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
     })
 }
 
+/// `for i in 0..8 { acc += a[op(i, y)] }` with the index `op` builds from `i`.
+fn over_eight(
+    b: &mut FuncBuilder,
+    t: &S,
+    x: &Two,
+    index: fn(&mut FuncBuilder, &S, &Two, Value) -> Value,
+) -> Value {
+    let (z, eight) = (b.int(0), b.int(8));
+    for_range(b, t, z, eight, |b, i, acc| {
+        let k = index(b, t, x, i);
+        let q = read(b, t, x.a, x.na, k);
+        b.binary(Op::AddWrap, t.u32t, acc, q)
+    })
+}
+
+/// `a[i & (a.len() - 1)]`: at most `a.len() - 1` (the trapping `- 1` rules out an empty `a`).
+fn masked_by_len(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    over_eight(b, t, x, |b, t, x, i| {
+        let one = b.int(1);
+        let m = b.binary(Op::Sub, t.us, x.na, one);
+        b.binary(Op::And, t.us, i, m)
+    })
+}
+
+/// `a[i % a.len()]`: below the divisor (a zero divisor traps).
+fn rem_by_len(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    over_eight(b, t, x, |b, t, x, i| b.binary(Op::Rem, t.us, i, x.na))
+}
+
+/// `for i in 0..a.len() { a[i >> 1] }`: a logical shift does not grow the value.
+fn shr_under_len(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let z = b.int(0);
+    for_range(b, t, z, x.na.into(), |b, i, acc| {
+        let one = b.int(1);
+        let k = b.binary(Op::Shr, t.us, i, one);
+        let q = read(b, t, x.a, x.na, k);
+        b.binary(Op::AddWrap, t.u32t, acc, q)
+    })
+}
+
+/// `if a.len() == 8 { .. a[i & 7] .. }`: the mask's constant against a length equal to 8.
+fn masked_const(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let eight = b.int(8);
+    let eq = b.cmp(Op::Eq, t.bt, x.na, eight);
+    guarded(b, t, x, eq, |b, t, x| {
+        over_eight(b, t, x, |b, t, _, i| {
+            let seven = b.int(7);
+            b.binary(Op::And, t.us, i, seven)
+        })
+    })
+}
+
+/// `if a.len() >= 5 { .. a[i % 5] .. }`.
+fn rem_const(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let five = b.int(5);
+    let ge = b.cmp(Op::Ge, t.bt, x.na, five);
+    guarded(b, t, x, ge, |b, t, x| {
+        over_eight(b, t, x, |b, t, _, i| {
+            let five = b.int(5);
+            b.binary(Op::Rem, t.us, i, five)
+        })
+    })
+}
+
+/// `if a.len() >= 256 { .. a[(i as% u8) as usize] .. }`: a `u8` is at most 255, and the widening
+/// cast keeps its value.
+fn byte_index(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let k256 = b.int(256);
+    let ge = b.cmp(Op::Ge, t.bt, x.na, k256);
+    guarded(b, t, x, ge, |b, t, x| {
+        over_eight(b, t, x, |b, t, _, i| {
+            let byte = b.cast(CastKind::Wrap, t.u8t, i);
+            b.cast(CastKind::Exact, t.us, byte)
+        })
+    })
+}
+
+/// Unsigned `and`, `rem`, `shr`, and the range of a `u8` bound the index: no check is left, and
+/// every program runs and traps as before.
+#[test]
+fn bit_ops_and_type_ranges_have_no_check() {
+    let cases: [(&str, BodyFn); 6] = [
+        ("i & (len - 1)", masked_by_len),
+        ("i % len", rem_by_len),
+        ("i >> 1", shr_under_len),
+        ("i & 7 under len == 8", masked_const),
+        ("i % 5 under len >= 5", rem_const),
+        ("u8 index under len >= 256", byte_index),
+    ];
+    for (name, body) in cases {
+        let (m, f, main) = two_slices(body);
+        let (o, proofs) = elide_same(&m, f, main);
+        assert_eq!(checks(&o, f), 0, "{name}");
+        assert_eq!(proofs.len(), 1, "{name}: {proofs:?}");
+    }
+}
+
+/// `a[i & a.len()]`: at most the length, not below it.
+fn masked_by_own_len(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    over_eight(b, t, x, |b, t, x, i| b.binary(Op::And, t.us, i, x.na))
+}
+
+/// `a[i & b.len()]`: the other slice's length.
+fn masked_by_other_len(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    over_eight(b, t, x, |b, t, x, i| b.binary(Op::And, t.us, i, x.nb))
+}
+
+/// `a[i % a.len() + 1]`: one past the remainder's bound.
+fn rem_plus_one(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    over_eight(b, t, x, |b, t, x, i| {
+        let r = b.binary(Op::Rem, t.us, i, x.na);
+        let one = b.int(1);
+        b.binary(Op::Add, t.us, r, one)
+    })
+}
+
+/// `for i in 0..a.len() { a[i << 1] }`: a left shift grows the value.
+fn shl_under_len(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    let z = b.int(0);
+    for_range(b, t, z, x.na.into(), |b, i, acc| {
+        let one = b.int(1);
+        let k = b.binary(Op::Shl, t.us, i, one);
+        let q = read(b, t, x.a, x.na, k);
+        b.binary(Op::AddWrap, t.u32t, acc, q)
+    })
+}
+
+/// `a[(i as% u8) as usize]`: a byte is below 256, not below the length.
+fn byte_unguarded(b: &mut FuncBuilder, t: &S, x: &Two) -> Value {
+    over_eight(b, t, x, |b, t, _, i| {
+        let byte = b.cast(CastKind::Wrap, t.u8t, i);
+        b.cast(CastKind::Exact, t.us, byte)
+    })
+}
+
 /// Look-alikes the proofs must not fire on: each keeps the check that can fail, and still traps
 /// `Bounds` where the unoptimized code does.
 #[test]
 fn look_alikes_keep_their_checks() {
-    let cases: [(&str, BodyFn, usize, (u64, u64)); 8] = [
+    let cases: [(&str, BodyFn, usize, (u64, u64)); 13] = [
+        ("i & len", masked_by_own_len, 1, (4, 0)),
+        ("i & other len", masked_by_other_len, 1, (3, 4)),
+        ("i % len + 1", rem_plus_one, 1, (3, 0)),
+        ("i << 1", shl_under_len, 1, (3, 0)),
+        ("u8 index", byte_unguarded, 1, (3, 0)),
         ("le only", le_only, 1, (4, 2)),
         ("eq on one path", eq_on_one_path, 1, (6, 2)),
         ("non-asserting callee", non_asserting_callee, 1, (3, 1)),

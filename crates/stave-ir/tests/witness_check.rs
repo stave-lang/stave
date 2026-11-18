@@ -642,6 +642,224 @@ fn saturating_limits() {
     }
 }
 
+/// `a[i op (a.len() - 1)]`: an unsigned `and` is at most either operand, and the trapping `- 1`
+/// puts that operand below the length. `or` and `xor` state no such bound.
+#[test]
+fn and_is_at_most_either_operand() {
+    for op in [Op::And, Op::Or, Op::Xor] {
+        let (m, f, (n, m1, k)) = fixture(|b, _, t, p| {
+            let n = b.op(Op::SliceLen, t.us, &[p.a.into()]);
+            let one = b.int(1);
+            let m1 = b.binary(Op::Sub, t.us, n, one);
+            let k = b.binary(op, t.us, p.i, m1);
+            let x = read(b, t, p.a, n, k);
+            ret(b, x);
+            (n, m1, k)
+        });
+        let bd = body(&m, f);
+        let (bits, sub) = (Source::Bits { inst: inst_of(bd, k) }, Source::Arith { inst: inst_of(bd, m1) });
+        let chain = |w| vec![edge(val(k), val(m1), w, bits), edge(val(m1), val(n), -1, sub)];
+        if op == Op::And {
+            assert!(matches!(proved(&m, f), Some((Proof::Offset { k: 0, .. }, _))));
+            assert_eq!(verdict(&m, f, chain(0)), Ok(()));
+            assert_eq!(verdict(&m, f, chain(-1)), Err(Reject::Edge));
+            // `k <= i` holds too, but `i` is not known below anything
+            let i = bd.params(Block(0))[2];
+            assert_eq!(verdict(&m, f, vec![edge(val(k), val(i), 0, bits)]), Err(Reject::Chain));
+        } else {
+            assert!(proved(&m, f).is_none(), "{op:?}");
+            assert_eq!(verdict(&m, f, chain(0)), Err(Reject::Source), "{op:?}");
+        }
+    }
+}
+
+/// `rem` traps on a zero divisor, so a result is below its divisor: `i % a.len()` below the
+/// length, `j % 4` below 4. A divisor of 0 and a signed `rem` state nothing.
+#[test]
+fn rem_is_below_its_divisor() {
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Test {
+        ByLen,
+        ByFour,
+        ByZero,
+        Signed,
+    }
+    for test in [Test::ByLen, Test::ByFour, Test::ByZero, Test::Signed] {
+        let (m, f, (n, k, r)) = fixture(|b, _, t, p| {
+            let n = b.op(Op::SliceLen, t.us, &[p.a.into()]);
+            let (four, zero) = (b.int(4), b.int(0));
+            let (k, r) = match test {
+                Test::ByLen => (b.binary(Op::Rem, t.us, p.i, n), None),
+                Test::ByFour => (b.binary(Op::Rem, t.us, p.j, four), None),
+                Test::ByZero => (b.binary(Op::Rem, t.us, p.j, zero), None),
+                Test::Signed => {
+                    let s = b.cast(CastKind::Wrap, t.i64t, p.j);
+                    let r = b.binary(Op::Rem, t.i64t, s, four);
+                    (b.cast(CastKind::Wrap, t.us, r), Some(r))
+                }
+            };
+            if test == Test::ByLen {
+                b.bounds_check(k, n);
+            } else {
+                b.bounds_check(k, four);
+            }
+            ret0(b);
+            (n, k, r)
+        });
+        let bd = body(&m, f);
+        let bits = Source::Bits { inst: inst_of(bd, k) };
+        match test {
+            Test::ByLen => {
+                assert!(proved(&m, f).is_some());
+                assert_eq!(verdict(&m, f, vec![edge(val(k), val(n), -1, bits)]), Ok(()));
+                assert_eq!(verdict(&m, f, vec![edge(val(k), val(n), -2, bits)]), Err(Reject::Edge));
+            }
+            Test::ByFour => {
+                assert!(proved(&m, f).is_some());
+                assert_eq!(verdict(&m, f, vec![edge(val(k), Node::Zero, 3, bits)]), Ok(()));
+                assert_eq!(verdict(&m, f, vec![edge(val(k), Node::Zero, 2, bits)]), Err(Reject::Edge));
+            }
+            Test::ByZero => {
+                assert!(proved(&m, f).is_none());
+                assert_eq!(verdict(&m, f, vec![edge(val(k), Node::Zero, -1, bits)]), Err(Reject::Source));
+            }
+            Test::Signed => {
+                assert!(proved(&m, f).is_none());
+                let r = r.unwrap();
+                let chain = vec![
+                    edge(val(k), val(r), 0, Source::Cast { inst: inst_of(bd, k) }),
+                    edge(val(r), Node::Zero, 3, Source::Bits { inst: inst_of(bd, r) }),
+                ];
+                assert_eq!(verdict(&m, f, chain), Err(Reject::Operand));
+            }
+        }
+    }
+}
+
+/// `if i < a.len() { a[i op j] }`: a logical shift right is at most its operand, a shift left is
+/// not.
+#[test]
+fn shr_is_at_most_its_operand() {
+    for op in [Op::Shr, Op::Shl] {
+        let (m, f, (n, k, then)) = fixture(|b, _, t, p| {
+            let n = b.op(Op::SliceLen, t.us, &[p.a.into()]);
+            let c = b.cmp(Op::Lt, t.bt, p.i, n);
+            let (then, els) = branch(b, c);
+            let k = b.binary(op, t.us, p.i, p.j);
+            let x = read(b, t, p.a, n, k);
+            ret(b, x);
+            b.switch_to(els);
+            ret0(b);
+            (n, k, then)
+        });
+        let bd = body(&m, f);
+        let i = bd.params(Block(0))[2];
+        let chain = |w| {
+            vec![
+                edge(val(k), val(i), w, Source::Bits { inst: inst_of(bd, k) }),
+                edge(val(i), val(n), -1, Source::Branch { block: then.0 }),
+            ]
+        };
+        if op == Op::Shr {
+            assert!(proved(&m, f).is_some());
+            assert_eq!(verdict(&m, f, chain(0)), Ok(()));
+            assert_eq!(verdict(&m, f, chain(-1)), Err(Reject::Edge));
+        } else {
+            assert!(proved(&m, f).is_none());
+            assert_eq!(verdict(&m, f, chain(0)), Err(Reject::Source));
+        }
+    }
+}
+
+/// `(i as% u8) as usize < 256`: a `u8` is at most 255 and the widening cast keeps it. Not below
+/// 255; a narrowing cast does not keep its operand, a signed source has no unsigned range, and a
+/// value defined after the check bounds nothing there.
+#[test]
+fn type_ranges_and_widening_casts() {
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Test {
+        Byte,
+        ByteBelow255,
+        Narrowing,
+        SignedSource,
+    }
+    for test in [Test::Byte, Test::ByteBelow255, Test::Narrowing, Test::SignedSource] {
+        let (m, f, (n, k, byte, late, then)) = fixture(|b, m, t, p| {
+            let (u8t, i8t) = (m.types.u8(), m.types.i8());
+            let n = b.op(Op::SliceLen, t.us, &[p.a.into()]);
+            let c = b.cmp(Op::Lt, t.bt, p.i, n);
+            let (then, els) = branch(b, c);
+            let byte = b.cast(CastKind::Wrap, if test == Test::SignedSource { i8t } else { u8t }, p.i);
+            let k = if test == Test::Narrowing { byte } else { b.cast(CastKind::Wrap, t.us, byte) };
+            let limit = match test {
+                Test::Byte | Test::SignedSource => b.int(256),
+                Test::ByteBelow255 => b.int(255),
+                Test::Narrowing => n.into(),
+            };
+            b.bounds_check(k, limit);
+            let late = b.cast(CastKind::Wrap, u8t, p.j);
+            ret0(b);
+            b.switch_to(els);
+            ret0(b);
+            (n, k, byte, late, then)
+        });
+        let bd = body(&m, f);
+        let cast = Source::Cast { inst: inst_of(bd, k) };
+        let range = Source::Range { value: byte };
+        let byte_chain = |w| vec![edge(val(k), val(byte), 0, cast), edge(val(byte), Node::Zero, w, range)];
+        match test {
+            Test::Byte => {
+                assert!(matches!(proved(&m, f), Some((Proof::Offset { k: 0, .. }, _))));
+                assert_eq!(verdict(&m, f, byte_chain(255)), Ok(()));
+                assert_eq!(verdict(&m, f, byte_chain(254)), Err(Reject::Edge));
+                let late = vec![edge(val(k), Node::Zero, 255, Source::Range { value: late })];
+                assert_eq!(verdict(&m, f, late), Err(Reject::Region));
+            }
+            Test::ByteBelow255 => {
+                assert!(proved(&m, f).is_none());
+                assert_eq!(verdict(&m, f, byte_chain(255)), Err(Reject::Weak));
+            }
+            Test::Narrowing => {
+                assert!(proved(&m, f).is_none());
+                let i = bd.params(Block(0))[2];
+                let forged = vec![
+                    edge(val(k), val(i), 0, cast),
+                    edge(val(i), val(n), -1, Source::Branch { block: then.0 }),
+                ];
+                assert_eq!(verdict(&m, f, forged), Err(Reject::Source));
+            }
+            Test::SignedSource => {
+                assert!(proved(&m, f).is_none());
+                assert_eq!(verdict(&m, f, byte_chain(255)), Err(Reject::Operand));
+            }
+        }
+    }
+}
+
+/// A constant operand is read as itself only when it is a value of the op's type: in a body the
+/// verifier would refuse, `u8 and x 300` does not bound `x & 300` by 300.
+#[test]
+fn a_constant_outside_its_type_bounds_nothing() {
+    let mut m = Module::new();
+    let u8t = m.types.u8();
+    let f = define(&mut m, &[1], "app.f", &[u8t], None, |b, _| {
+        let x = b.param(0).unwrap();
+        let c = b.int(300);
+        let v = b.binary(Op::And, u8t, x, c);
+        let k = b.int(301);
+        b.bounds_check(v, k);
+        b.ret(None);
+    });
+    assert!(verify_module(&m).is_err());
+    let bd = body(&m, f);
+    let and = insts_with(bd, Op::And)[0];
+    let v = bd.insts.result[and as usize].unwrap();
+    assert_eq!(
+        verdict(&m, f, vec![edge(val(v), Node::Zero, 300, Source::Bits { inst: and })]),
+        Err(Reject::Operand)
+    );
+}
+
 /// Rows must name reachable `check.bounds` instructions, in order, each once; chains must lie
 /// inside the edge table.
 #[test]
@@ -765,7 +983,7 @@ fn the_checker_shares_no_code_with_the_pass() {
     let uses: Vec<&str> = code.iter().copied().filter(|l| l.starts_with("use ")).collect();
     assert_eq!(uses.len(), 3, "{uses:?}");
     assert!(uses[0].starts_with("use super::{") && uses[1].starts_with("use crate::ir::{"), "{uses:?}");
-    assert_eq!(uses[2], "use crate::types::TypeKey;");
+    assert_eq!(uses[2], "use crate::types::{IntBits, TypeKey};");
     for banned in ["bounds::", "verify", "facts", "Dominators", "interp", "crate::simd", "reachable()"] {
         assert!(code.iter().all(|l| !l.contains(banned)), "the checker uses `{banned}`");
     }

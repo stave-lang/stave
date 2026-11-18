@@ -4,8 +4,10 @@
 //! constant, `node` the constant zero, an SSA value, or the length of an SSA slice value. Trapping
 //! `add x c` / `sub x c` (constant `c`) are folded into the term of `x`: a defined result is exactly
 //! `x ± c` (overflow traps), and the index's own trap stays in the code, so no wrap reasoning is
-//! needed. `slice.len (slice.make p n)` is the term of `n`. Wrapping arithmetic, casts, loads, and
-//! everything else are opaque nodes.
+//! needed. `slice.len (slice.make p n)` is the term of `n`. A `cast`, `cast.wrap`, or `cast.sat` of
+//! an unsigned value to an unsigned type at least as wide is the term of its operand: widening
+//! keeps the value under all three. Wrapping arithmetic, other casts, loads, and everything else
+//! are opaque nodes.
 //!
 //! A fact `x <= y + w` is an edge `x → y` of weight `w`, valid in a region of the function:
 //!
@@ -15,6 +17,13 @@
 //!   `x + c < n` (`x < n -| c`) or `x + c >= n` (its negation): `n -| c` is `max(n - c, 0)`.
 //! - an asserting call: `call @f .. c ..` where every `ret` of `f` is reached only through a branch
 //!   on that parameter being true (`std.debug.assert`); `c` holds after the call.
+//! - a bit op on unsigned values, after it: `v = and x y` gives `v <= x` and `v <= y`;
+//!   `v = rem x y` gives `v <= x` and `v <= y - 1` (`y = 0` traps, so a result means `y >= 1`);
+//!   `v = shr x k` (logical on unsigned) gives `v <= x`. Only when every constant operand read
+//!   is a value of the op's type (a constant divisor: and not 0).
+//! - the type of an unsigned value `v` of `bits` bits, where `v` is defined: `v <= 2^bits - 1`
+//!   for `bits < 64` (a wider bound is no bound on any length), and `0 <= v` for each value node
+//!   another fact leaves (only such a node can be a step between two other facts).
 //!
 //! Every fact is about the current values of its operands wherever its region dominates the query
 //! (an SSA value redefined in a later loop iteration passes the region's head again). A query
@@ -34,7 +43,7 @@ use std::collections::VecDeque;
 use rustc_hash::FxHashMap;
 
 use super::{BOUNDS_STEP_LIMIT, Cx, Proof, preds_of};
-use crate::ir::{Block, Body, FuncId, Op, Operand, Term as IrTerm, Value, ValueDef};
+use crate::ir::{Block, Body, CastKind, FuncId, Op, Operand, Term as IrTerm, Value, ValueDef};
 use crate::types::TypeKey;
 use crate::verify::Dominators;
 use crate::witness::{ASSERT_BLOCKS, Edge, MAX_CONST, NOT_DEPTH, Node, Source};
@@ -93,10 +102,10 @@ struct Fact {
     /// The `eq`/`ne` instruction when the fact is one half of a proved equality.
     eq: Option<u32>,
     /// Where the fact was read, and what it says there: `a <= b + wop` between the two operands
-    /// as written, before folding.
+    /// as written, before folding (`None`: the constant zero).
     src: Source,
-    a: Operand,
-    b: Operand,
+    a: Option<Operand>,
+    b: Option<Operand>,
     wop: i128,
 }
 
@@ -140,6 +149,27 @@ impl Cx<'_> {
 
     fn small_const(&self, o: Operand) -> Option<i128> {
         self.b.int_const(o).filter(|c| (0..=MAX_K).contains(c))
+    }
+
+    /// The width in bits of `v`'s type when it is an unsigned int.
+    fn width(&self, v: Value) -> Option<u8> {
+        match self.b.value_ty(v).and_then(|t| self.key(t)) {
+            Some(TypeKey::Int { signed: false, bits }) => Some(bits.width()),
+            _ => None,
+        }
+    }
+
+    /// Where `v` has its value: after its instruction, or in the block it is a parameter of
+    /// (`None`: unreachable).
+    fn defined_in(&self, v: Value) -> Option<Region> {
+        match self.b.values.get(v.index())?.def {
+            ValueDef::Inst(i) => {
+                self.reachable_inst(i).then(|| Region { block: self.block_of[i as usize], after: Some(i) })
+            }
+            ValueDef::Param { block, .. } => {
+                self.dom.reachable(block.index()).then_some(Region { block: block.0, after: None })
+            }
+        }
     }
 
     /// The term of an unsigned integer operand.
@@ -190,6 +220,18 @@ impl Cx<'_> {
                         let (to, kx) = self.written(x)?;
                         sink(Edge { from: Node::Val(v), to, w: kx - c, src: Source::Arith { inst: d } });
                         k = k.checked_sub(c)?;
+                        o = x;
+                    }
+                    (
+                        Op::Cast(CastKind::Exact | CastKind::Wrap | CastKind::Sat),
+                        &[x @ Operand::Value(xv)],
+                    ) if self.width(xv).is_some_and(|wx| self.width(v).is_some_and(|wv| wx <= wv)) => {
+                        sink(Edge {
+                            from: Node::Val(v),
+                            to: Node::Val(xv),
+                            w: 0,
+                            src: Source::Cast { inst: d },
+                        });
                         o = x;
                     }
                     (Op::SliceLen, &[s]) => {
@@ -265,10 +307,65 @@ impl Cx<'_> {
                 }
             }
         }
+        for d in 0..self.b.insts.len() as u32 {
+            if matches!(self.b.insts.op[d as usize], Op::And | Op::Rem | Op::Shr) && self.reachable_inst(d) {
+                self.bit_facts(&mut g, d);
+            }
+        }
+        // `0 <= v` for the value nodes a fact leaves toward a node other than zero, collected
+        // before the type ranges, which only lead to zero.
+        let mut leave: Vec<u32> = g.facts.iter().filter(|f| f.to != ZERO).map(|f| f.from).collect();
+        leave.sort_unstable();
+        leave.dedup();
+        for node in leave.into_iter().filter(|&n| n % 2 == 1) {
+            let v = Value((node - 1) / 2);
+            if let Some(at) = self.defined_in(v) {
+                self.add_le(&mut g, at, Source::Range { value: v }, (None, Some(Operand::Value(v)), 0), None);
+            }
+        }
+        for v in (0..self.b.values.len() as u32).map(Value) {
+            if let Some(w) = self.width(v).filter(|&w| w < 64)
+                && let Some(at) = self.defined_in(v)
+            {
+                let top = (1i128 << w) - 1;
+                self.add_le(
+                    &mut g,
+                    at,
+                    Source::Range { value: v },
+                    (Some(Operand::Value(v)), None, top),
+                    None,
+                );
+            }
+        }
         // Stable: the facts of one node stay in the order they were found, which is the order a
         // query tries them in.
         g.facts.sort_by_key(|f| f.from);
         g
+    }
+
+    /// The facts bit op `d` (`and`, `rem`, `shr`) states about its unsigned result.
+    fn bit_facts(&self, g: &mut Graph, d: u32) {
+        let Some(Some(v)) = self.b.insts.result.get(d as usize).copied() else { return };
+        let Some(w) = self.width(v) else { return };
+        let top = (1i128 << w) - 1;
+        // A constant operand is read as itself: only one that is a value of the type.
+        let typed = |o: Operand| self.b.int_const(o).is_none_or(|c| (0..=top).contains(&c));
+        let at = Region { block: self.block_of[d as usize], after: Some(d) };
+        let src = Source::Bits { inst: d };
+        let mut le =
+            |o: Operand, w: i128| self.add_le(g, at, src, (Some(Operand::Value(v)), Some(o), w), None);
+        match (self.b.insts.op[d as usize], self.b.args(d)) {
+            (Op::And, &[x, y]) if typed(x) && typed(y) => {
+                le(x, 0);
+                le(y, 0);
+            }
+            (Op::Rem, &[x, y]) if typed(x) && typed(y) && self.b.int_const(y) != Some(0) => {
+                le(x, 0);
+                le(y, -1);
+            }
+            (Op::Shr, &[x, _]) if typed(x) => le(x, 0),
+            _ => {}
+        }
     }
 
     fn is_cmp(&self, o: Operand) -> bool {
@@ -302,8 +399,9 @@ impl Cx<'_> {
             (Op::Gt, false) | (Op::Le, true) => Some((y, x, false)),
             _ => None,
         };
-        let mut le =
-            |a: Operand, b: Operand, w: i128, eq: Option<u32>| self.add_le(g, at, src, (a, b, w), eq);
+        let mut le = |a: Operand, b: Operand, w: i128, eq: Option<u32>| {
+            self.add_le(g, at, src, (Some(a), Some(b), w), eq)
+        };
         if let Some((lo, hi, lt)) = strict
             && let Some((n, c)) = self.sat_bound(hi)
         {
@@ -345,14 +443,22 @@ impl Cx<'_> {
         }
     }
 
-    /// Records `a <= b + w` (the triple `le`), read at `src` and valid in `at`.
-    fn add_le(&self, g: &mut Graph, at: Region, src: Source, le: (Operand, Operand, i128), eq: Option<u32>) {
+    /// Records `a <= b + w` (the triple `le`; `None` is the constant zero), read at `src` and valid
+    /// in `at`.
+    fn add_le(
+        &self,
+        g: &mut Graph,
+        at: Region,
+        src: Source,
+        le: (Option<Operand>, Option<Operand>, i128),
+        eq: Option<u32>,
+    ) {
         let (a, b, w) = le;
-        let (Some(ta), Some(tb)) = (self.term(a), self.term(b)) else { return };
+        let (Some(ta), Some(tb)) = (self.side_term(a), self.side_term(b)) else { return };
         if ta.node == tb.node {
             return;
         }
-        let (Some((_, ka)), Some((_, kb))) = (self.written(a), self.written(b)) else { return };
+        let (Some((_, ka)), Some((_, kb))) = (self.side_written(a), self.side_written(b)) else { return };
         // ta.node + ta.k <= tb.node + tb.k + w
         let Some(folded) = tb.k.checked_add(w).and_then(|s| s.checked_sub(ta.k)) else { return };
         // as written: a's node + ka <= b's node + kb + w
@@ -461,11 +567,23 @@ impl Cx<'_> {
     /// read at its source, down from its right operand.
     pub(super) fn fact_edges(&self, fi: u32, out: &mut Vec<Edge>) -> Option<()> {
         let f = self.graph().facts.get(fi as usize)?;
-        self.up(f.a, out);
-        let ((from, _), (to, _)) = (self.written(f.a)?, self.written(f.b)?);
+        if let Some(a) = f.a {
+            self.up(a, out);
+        }
+        let ((from, _), (to, _)) = (self.side_written(f.a)?, self.side_written(f.b)?);
         out.push(Edge { from, to, w: f.wop, src: f.src });
-        self.down(f.b, out);
+        if let Some(b) = f.b {
+            self.down(b, out);
+        }
         Some(())
+    }
+
+    fn side_term(&self, o: Option<Operand>) -> Option<Term> {
+        o.map_or(Some(Term::constant(0)), |o| self.term(o))
+    }
+
+    fn side_written(&self, o: Option<Operand>) -> Option<(Node, i128)> {
+        o.map_or(Some((Node::Zero, 0)), |o| self.written(o))
     }
 }
 
