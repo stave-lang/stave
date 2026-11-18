@@ -1,5 +1,5 @@
 //~ STDOUT static_mutex_once.stdout
-// `sync.Mutex<T>` and `sync.Once<T>` are Sync, so they can be statics; `Mutex.new(e)` and
+// `sync.Mutex<T, R>` and `sync.Once<T, R>` are Sync, so they can be statics; `Mutex.new(e)` and
 // `Once.new()` are const-exprs.
 import std.io;
 import std.sync;
@@ -7,9 +7,9 @@ import std.thread;
 
 struct Config { pub width: u32, pub depth: u32 }
 
-static TOTAL: sync.Mutex<u64> = sync.Mutex::<u64>.new(0);
-static PAIR: sync.Mutex<[u32; 2]> = sync.Mutex::<[u32; 2]>.new([3, 4]);
-static CONFIG: sync.Once<Config> = sync.Once::<Config>.new();
+static TOTAL: sync.Mutex<u64, 1> = sync.Mutex::<u64, 1>.new(0);
+static PAIR: sync.Mutex<[u32; 2], 1> = sync.Mutex::<[u32; 2], 1>.new([3, 4]);
+static CONFIG: sync.Once<Config, 1> = sync.Once::<Config, 1>.new();
 
 fn load() -> Config {
     return Config.{ width: 80, depth: 3 };

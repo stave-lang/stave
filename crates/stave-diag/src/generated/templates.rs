@@ -4480,6 +4480,70 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E1405",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "held", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "held_rank", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "lock", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "rank", kind: HoleKind::Int, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{fn}` acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank}): locks are taken in increasing rank order",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "acquires rank {rank} here" },
+                    LabelTemplate { at: "held", text: "`{held}` held from here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "release the guard before this call, give `{lock}` a rank above {held_rank}, or take two mutexes of one rank together with `sync.lock_pair`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1406",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "a guard held across a join whose children acquire a lock at or below its rank: at a `scope` end, `thread.join`, or `par_for` / `par_for_mut` call, the ranks held must be below every rank the joined threads may acquire; names the held and the acquired type and the chain",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "held", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "held_rank", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "lock", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "rank", kind: HoleKind::Int, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{fn}` waits for threads that acquire `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "threads joined here" },
+                    LabelTemplate { at: "held", text: "`{held}` held from here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "release the guard before the join, or give `{lock}` a rank above {held_rank}",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E1407",
         severity: Severity::Error,
         area: "effects",

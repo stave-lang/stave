@@ -211,6 +211,34 @@ pub struct LangItems {
     /// The constructors a const-expr may call (fixed paths): `new` of `std.cell.UnsafeCell`,
     /// `std.atomic.{U32, U64, Usize, Bool}`, `std.sync.{Mutex, Once}`.
     pub const_ctors: Vec<DeclId>,
+    /// The ranked locks of `std.sync` (fixed paths, [`crate::ranks`]).
+    pub locks: LockItems,
+}
+
+/// The `std.sync` items the rank check knows (`NONE` without std).
+#[derive(Clone, Copy, Debug)]
+pub struct LockItems {
+    pub mutex: DeclId,
+    pub guard: DeclId,
+    pub once: DeclId,
+    /// `Mutex.lock`, `Once.get_or_init`, `lock_pair`: the acquisitions of the rank that is their
+    /// one const generic param.
+    pub lock: DeclId,
+    pub get_or_init: DeclId,
+    pub lock_pair: DeclId,
+}
+
+impl Default for LockItems {
+    fn default() -> Self {
+        LockItems {
+            mutex: DeclId::NONE,
+            guard: DeclId::NONE,
+            once: DeclId::NONE,
+            lock: DeclId::NONE,
+            get_or_init: DeclId::NONE,
+            lock_pair: DeclId::NONE,
+        }
+    }
 }
 
 impl Default for LangItems {
@@ -229,6 +257,7 @@ impl Default for LangItems {
             unsafe_cell: DeclId::NONE,
             ops: FxHashMap::default(),
             const_ctors: Vec::new(),
+            locks: LockItems::default(),
         }
     }
 }
@@ -1030,6 +1059,21 @@ impl<'p> SigBuilder<'p> {
                 }
             }
         }
+        let sync = ["std", "sync"];
+        let method = |adt: DeclId, name: &str| -> DeclId {
+            let m = p.strings.lookup(name).and_then(|s| p.methods.inherent.get(&(TypeHead::Adt(adt), s)));
+            match m.and_then(|v| v.first()) {
+                Some(&m) if adt.is_some() => m,
+                _ => DeclId::NONE,
+            }
+        };
+        let l = &mut self.lang.locks;
+        l.mutex = find(&sync, "Mutex");
+        l.guard = find(&sync, "MutexGuard");
+        l.once = find(&sync, "Once");
+        l.lock = method(l.mutex, "lock");
+        l.get_or_init = method(l.once, "get_or_init");
+        l.lock_pair = find(&sync, "lock_pair");
     }
 
     pub fn icx(&self, item: ItemId) -> Option<ItemCx<'p>> {

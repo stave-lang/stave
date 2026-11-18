@@ -14,7 +14,7 @@ impl Pt {
 static N: u32 = 1;
 static P: Pt = Pt.{ x: 1, y: 2 };
 static T: [u8; 2] = [1, 2];
-static M: sync.Mutex<u32> = sync.Mutex::<u32>.new(0);
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0);
 static C: atomic.U32 = atomic.U32.new(0);
 
 fn takes(r: &mut u32) { *r = 0; }

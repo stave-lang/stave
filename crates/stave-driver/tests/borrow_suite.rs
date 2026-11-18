@@ -1,6 +1,7 @@
 //! The borrow checker through the driver:
 //!
-//! - `tests/conformance/borrow/{neg_,e0501_pick_,pos_}*.stv` pass under `stave test` (stage0);
+//! - `tests/conformance/borrow/{neg_,e0501_pick_,pos_}*.stv` pass under `stave test` (stage0),
+//!   and so do the lock-rank tests `rank_*.stv`;
 //! - related-span goldens: `--diagnostics json` of every negative there equals
 //!   `tests/conformance/borrow/_json/<name>.json` (only the diagnostics located in the test file;
 //!   `STAVE_BLESS=1` rewrites them; a missing one is written and fails the run once);
@@ -51,6 +52,23 @@ fn borrow_suite_passes() {
         mine.extend(r.results.into_iter().filter(|t| ours(&t.name)));
     }
     assert!(mine.len() >= 20, "suite too small: {}", mine.len());
+    let bad: Vec<String> = mine
+        .iter()
+        .filter(|t| t.outcome != Outcome::Passed)
+        .map(|t| format!("{}: {:?}", t.name, t.outcome))
+        .collect();
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// The lock-rank tests (`rank_*`: E1405, E1406, and what the rank check accepts) pass.
+#[test]
+fn rank_suite_passes() {
+    let mut c = Stage0::new(Some(4), lib()).unwrap();
+    let cfg = Config { filter: Some("rank_".to_string()), ..config() };
+    let r = run_suite(&repo().join("tests/conformance/borrow"), &cfg, &mut c).unwrap();
+    eprintln!("{}", r.render());
+    let mine: Vec<_> = r.results.iter().filter(|t| t.name.starts_with("rank_")).collect();
+    assert!(mine.len() >= 6, "rank suite too small: {}", mine.len());
     let bad: Vec<String> = mine
         .iter()
         .filter(|t| t.outcome != Outcome::Passed)

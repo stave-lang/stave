@@ -2,16 +2,16 @@
 // `without(lock)`: `g` takes a `Mutex` through `h` and `Mutex.lock`.
 import std.sync;
 
-fn h(m: &sync.Mutex<u32>) -> u32 {
+fn h(m: &sync.Mutex<u32, 1>) -> u32 {
     let guard = m.lock();
     return *guard.get();
 }
 
-fn g(m: &sync.Mutex<u32>) -> u32 without(lock) { //~ ERROR E1401
+fn g(m: &sync.Mutex<u32, 1>) -> u32 without(lock) { //~ ERROR E1401
     return h(m);
 }
 
 fn main() {
-    let m = sync.Mutex::<u32>.new(1u32);
+    let m = sync.Mutex::<u32, 1>.new(1u32);
     let a = g(&m);
 }

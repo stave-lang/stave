@@ -57,6 +57,7 @@ pub mod origins;
 pub mod package;
 pub mod patterns;
 pub mod prim;
+pub mod ranks;
 pub mod resolve;
 pub mod sigs;
 mod threads;

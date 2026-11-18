@@ -1798,6 +1798,26 @@ labels = [{ at = "primary", text = "not an effect" }]
 fix = { description = "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`" }
 
 [[diag]]
+code = "E1405"
+severity = "error"
+area = "effects"
+rule = "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there"
+holes = { fn = "path", lock = "type", rank = "int", held = "type", held_rank = "int" }
+message = "`{fn}` acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank}): locks are taken in increasing rank order"
+labels = [{ at = "primary", text = "acquires rank {rank} here" }, { at = "held", text = "`{held}` held from here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }]
+fix = { description = "release the guard before this call, give `{lock}` a rank above {held_rank}, or take two mutexes of one rank together with `sync.lock_pair`" }
+
+[[diag]]
+code = "E1406"
+severity = "error"
+area = "effects"
+rule = "a guard held across a join whose children acquire a lock at or below its rank: at a `scope` end, `thread.join`, or `par_for` / `par_for_mut` call, the ranks held must be below every rank the joined threads may acquire; names the held and the acquired type and the chain"
+holes = { fn = "path", lock = "type", rank = "int", held = "type", held_rank = "int" }
+message = "`{fn}` waits for threads that acquire `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})"
+labels = [{ at = "primary", text = "threads joined here" }, { at = "held", text = "`{held}` held from here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }]
+fix = { description = "release the guard before the join, or give `{lock}` a rank above {held_rank}" }
+
+[[diag]]
 code = "E1407"
 severity = "error"
 area = "effects"
