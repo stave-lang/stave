@@ -93,6 +93,9 @@ pub enum Target {
     Index { derefs: u32 },
     /// Sub-slice `xs[a..b]` / `xs[a..=b]` of an array or slice (after `derefs` auto-derefs).
     Slice { derefs: u32 },
+    /// `old(e)` in an `ensures` clause: the value of `e` at entry
+    /// ([`crate::contracts::Contracts::olds`]).
+    Old,
 }
 
 /// An implicit conversion made explicit.
@@ -169,6 +172,8 @@ pub struct TypedBody {
     pub has_error: bool,
     /// Class U ops inside `emulate { }`, in source order ([`crate::gates`]).
     pub emulated: Vec<crate::gates::Emulated>,
+    /// The fn's `requires` / `ensures` clauses, if it has any.
+    pub contracts: Option<Box<crate::contracts::Contracts>>,
 }
 
 impl TypedBody {
@@ -488,6 +493,7 @@ fn empty_body(j: Job) -> TypedBody {
         denied: Vec::new(),
         has_error: true,
         emulated: Vec::new(),
+        contracts: None,
     }
 }
 
@@ -688,6 +694,11 @@ pub(crate) struct Ck<'a> {
     /// alternative (binding node, type, mode), in source order.
     pub or_binds: Option<Vec<(u32, TypeId, crate::patterns::Mode)>>,
     pub gates: crate::gates::Gates,
+    /// Inside a contract clause: which kind, and the `old(..)` nesting.
+    pub contract: Option<crate::contracts::ClauseCx>,
+    /// The `old(e)` calls typed so far: (`(` token, `e`'s node).
+    pub olds: Vec<(u32, u32)>,
+    pub contracts: Option<Box<crate::contracts::Contracts>>,
 }
 
 fn check_body(
@@ -746,6 +757,9 @@ fn check_body(
         kids_buf: Vec::new(),
         or_binds: None,
         gates: crate::gates::Gates::default(),
+        contract: None,
+        olds: Vec::new(),
+        contracts: None,
     };
     match j.kind {
         JobKind::Fn => {
@@ -1297,10 +1311,12 @@ impl<'a> Ck<'a> {
         let Some(block) = icx.child(n, NodeKind::Block) else { return };
         let ret = sig.ret;
         self.rets.push(RetCx { ty: ret, span: sig.ret_span, loops: Vec::new(), is_never: ret == ids::NEVER });
+        self.contract_clauses(n, ret);
         self.reachable = true;
         let div = self.block(block);
         self.rets.pop();
         self.end_of_body(block, div, ret);
+        self.contract_rules(n);
     }
 
     /// E0207 at the end of a body that can reach it.
@@ -1483,6 +1499,7 @@ impl<'a> Ck<'a> {
             denied: std::mem::take(&mut self.denied),
             has_error,
             emulated: std::mem::take(&mut self.gates.emulated),
+            contracts: self.contracts.take(),
         };
         // thread-crossing capture checks (E0802, E0806; crate::threads)
         let td = self.thread_checks(&body);

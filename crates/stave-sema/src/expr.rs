@@ -2538,6 +2538,7 @@ impl<'a> Ck<'a> {
                 self.owned(paren, t);
                 Ty::T(t)
             }
+            St::Builtin(Builtin::Old, _) => self.old_call(n, paren, args, hint),
             St::Builtin(Builtin::FenceStream, _) => {
                 if !args.is_empty() {
                     self.arity(n, paren, 0, args.len(), false);
@@ -2692,6 +2693,29 @@ impl<'a> Ck<'a> {
         );
         self.report(d);
         false
+    }
+
+    /// `old(e)` (resolution gives the name this meaning only inside a contract clause): the type
+    /// of `e`, typed as at entry. Only in an `ensures`, not nested (E0213); E0213 for a non-Copy
+    /// `e` and `result` inside it comes from [`crate::contracts`] once types are final.
+    fn old_call(&mut self, n: u32, paren: u32, args: &[u32], hint: Option<TypeId>) -> Ty {
+        let at = self.icx.tok_span(paren.saturating_sub(1));
+        let Some(cx) = self.contract else { return self.args_only(args) };
+        if !self.arity(n, paren, 1, args.len(), false) {
+            return self.args_only(args);
+        }
+        if !cx.ensures || cx.old_depth > 0 {
+            let case = if cx.ensures { "entry" } else { "outside" };
+            let d = mk("E0213", Some(case), &[], at, &[]);
+            self.report(d);
+            return self.args_only(args);
+        }
+        self.contract = Some(crate::contracts::ClauseCx { old_depth: cx.old_depth + 1, ..cx });
+        let t = self.expr(args[0], hint);
+        self.contract = Some(cx);
+        self.target(paren, Target::Old);
+        self.olds.push((paren, args[0]));
+        t
     }
 
     fn args_only(&mut self, args: &[u32]) -> Ty {

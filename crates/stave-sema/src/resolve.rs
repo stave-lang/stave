@@ -330,6 +330,16 @@ enum Task {
     EndClosure { lmark: u32, param_mark: u32 },
     EndContainer { gmark: u32, ctx: SelfCtx, level: u8 },
     PopName,
+    EndContract(Option<Clause>),
+}
+
+/// The contract clause being resolved: inside one, `old(..)` is the entry snapshot and, inside
+/// an `ensures`, `result` is the returned value.
+#[derive(Clone, Copy, Debug)]
+struct Clause {
+    ensures: bool,
+    /// The binding node of `result`: the fn's first `Ensures` node.
+    result: u32,
 }
 
 struct W<'t, 'a> {
@@ -357,6 +367,9 @@ struct W<'t, 'a> {
     stack: Vec<Task>,
     segs: Vec<Seg>,
     chain: Vec<u32>,
+    /// The first `Ensures` node of the fn being resolved.
+    first_ensures: Option<u32>,
+    clause: Option<Clause>,
 }
 
 impl<'t, 'a> W<'t, 'a> {
@@ -427,6 +440,21 @@ impl<'t, 'a> W<'t, 'a> {
         let d =
             mk("E0105", None, &[("name", self.name(name)), ("scope", &scope)], primary, &[("first", first)]);
         self.diag(d);
+    }
+
+    /// The contextual names of a contract clause, which win over every other binding there:
+    /// `old` called directly ([`Builtin::Old`]), and in an `ensures` the returned value `result`
+    /// (a local whose binding node is the fn's first `Ensures` node).
+    fn contextual(&self, h: &Seg, nsegs: usize) -> Option<Res> {
+        let c = self.clause?;
+        let name = self.name(h.sym);
+        if name == "old" && nsegs == 1 && is(self.toks, h.tok as usize + 1, Term::LParen) {
+            return Some(Res::Builtin(Builtin::Old));
+        }
+        if name == "result" && c.ensures {
+            return Some(Res::Local(BindingRef { node: c.result }));
+        }
+        None
     }
 
     fn lookup_local(&self, sym: Sym) -> Option<BindingRef> {
@@ -525,7 +553,8 @@ impl<'t, 'a> W<'t, 'a> {
             self.segs = segs;
             return;
         };
-        let head_res = match head {
+        let contextual = if ns == Ns::Value { self.contextual(&h, segs.len()) } else { None };
+        let head_res = match head.or(contextual) {
             Some(r) => Some(r),
             None => match ns {
                 Ns::Value => self
@@ -940,6 +969,7 @@ impl<'t, 'a> W<'t, 'a> {
         if !matches!(self.self_ctx, SelfCtx::None) {
             self.level = 1;
         }
+        self.first_ensures = self.ast.child(n, NodeKind::Ensures);
         self.push_children(n);
     }
 
@@ -1068,7 +1098,10 @@ impl<'t, 'a> W<'t, 'a> {
                 }
             }
             NodeKind::Requires | NodeKind::Ensures => {
-                self.unimplemented(n, "a `requires` / `ensures` contract");
+                let ensures = kind_n == NodeKind::Ensures;
+                self.stack.push(Task::EndContract(self.clause));
+                self.clause = Some(Clause { ensures, result: self.first_ensures.unwrap_or(n) });
+                self.push_children(n);
             }
             NodeKind::Without | NodeKind::Effect => {}
             NodeKind::Primary => {
@@ -1178,6 +1211,7 @@ impl<'t, 'a> W<'t, 'a> {
                 Task::PopName => {
                     self.names.pop();
                 }
+                Task::EndContract(c) => self.clause = c,
             }
         }
     }
@@ -1213,6 +1247,8 @@ pub(crate) fn resolve_item(t: &Tables<'_>, item: ItemId) -> (ItemRes, Vec<Diagno
         stack: Vec::new(),
         segs: Vec::new(),
         chain: Vec::new(),
+        first_ensures: None,
+        clause: None,
     };
     w.run(root);
     let mut res = w.res;

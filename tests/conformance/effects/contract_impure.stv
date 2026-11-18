@@ -1,0 +1,30 @@
+//~ CHECK-ONLY
+// A fn called in a contract must not have `io`, `lock`, or `block` in its effect set (E0211 case
+// `impure-call`, at the call, naming the chain to the op); `alloc` and `trap` are allowed.
+import std.io;
+import std.vec;
+
+fn log(x: u32) -> bool {
+    io.print("checked\n");
+    return x > 0;
+}
+
+fn logs(x: u32) -> bool {
+    return log(x);
+}
+
+fn fresh(n: u32) -> bool {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(n);
+    return v.len() == 1;
+}
+
+fn f(x: u32) requires(log(x)) { } //~ ERROR E0211
+fn g(x: u32) -> u32 ensures(logs(result)) { return x; } //~ ERROR E0211
+fn h(x: u32) requires(fresh(x)) ensures(x / 1 == x) { }
+
+fn main() {
+    f(1);
+    let y = g(2);
+    h(3);
+}
