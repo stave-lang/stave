@@ -1,0 +1,88 @@
+//~ CHECK-ONLY
+// Contracts that check: clauses over params, fields, `.len()`, and calls of pure fns with `&` or
+// Copy args; `result` and `old(e)` in `ensures`; reads through a `&mut` param in `ensures`; a
+// method's clauses read `self`; `requires` on an `unsafe` fn; a generic fn; a call through a fn
+// value whose type denies `io`, `lock`, `block`; a Copy `match` and aggregate. Outside a clause
+// `result` and `old` are ordinary names.
+import std.vec;
+
+struct Counter { n: u32 }
+
+impl Counter {
+    pub fn get(&self) -> u32 ensures(result == self.n) {
+        return self.n;
+    }
+
+    pub fn bump(&mut self) ensures(self.n == old(self.n) + 1) {
+        self.n = self.n + 1;
+    }
+}
+
+fn double(x: u32) -> u32 {
+    return x * 2;
+}
+
+fn small(xs: &[u32]) -> bool {
+    return xs.len() < 100;
+}
+
+fn at(xs: &[u32], i: usize) -> u32 requires(small(xs)) requires(i < xs.len()) ensures(result == xs[i]) {
+    return xs[i];
+}
+
+fn push_one(v: &mut vec.Vec<u32>, x: u32) requires(x < 1000) ensures(v.len() == old(v.len()) + 1) {
+    v.push(x);
+}
+
+fn twice(x: u32) -> u32 requires(x < 1000) ensures(result == double(x)) ensures(result >= x) {
+    return x + x;
+}
+
+fn pick<T: Copy>(a: T, b: T, first: bool) -> T ensures(first || !first) {
+    return if first then a else b;
+}
+
+fn half(x: u32) -> Option<u32>
+    requires(x < 1000)
+    ensures(match result { Option.Some(h) => h * 2 == x, Option.None => x % 2 == 1 })
+    ensures([x, 1u32][1] == 1)
+{
+    if x % 2 == 1 {
+        return Option.None;
+    }
+    return Option.Some(x / 2);
+}
+
+fn check(f: fn(u32) -> bool without(io, lock, block), x: u32) -> bool requires(f(x)) {
+    return true;
+}
+
+fn positive(x: u32) -> bool {
+    return x > 0;
+}
+
+unsafe("p points to a readable u32") fn load(p: *const u32, ok: bool) -> u32 requires(ok) {
+    return unsafe("p is readable (caller)") *p;
+}
+
+fn ordinary(old: u32) -> u32 requires(old > 0) {
+    let result = old + 1;
+    return result;
+}
+
+fn main() -> i32 {
+    let a: [u32; 3] = [1, 2, 3];
+    let x = at(&a, 1);
+    let mut v = vec.Vec::<u32>.new();
+    push_one(&mut v, x);
+    let mut c = Counter.{ n: 0 };
+    c.bump();
+    let y = twice(c.get());
+    let z = pick(x, y, true);
+    let w = ordinary(z);
+    let h = half(w);
+    let ok = check(positive, w);
+    let p = &w as *const u32;
+    let u = unsafe("p is the address of w") load(p, ok);
+    return 0;
+}

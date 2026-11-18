@@ -1,0 +1,50 @@
+//~ CHECK-ONLY
+// A fn called in a contract must not have `io`, `lock`, or `block` in its effect set (E0211 case
+// `impure-call`, at the call, naming the chain to the op); `alloc` and `trap` are allowed.
+import std.io;
+import std.sync;
+import std.thread;
+import std.vec;
+
+fn log(x: u32) -> bool {
+    io.print("checked\n");
+    return x > 0;
+}
+
+fn logs(x: u32) -> bool {
+    return log(x);
+}
+
+fn fresh(n: u32) -> bool {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(n);
+    return v.len() == 1;
+}
+
+fn locked(m: &sync.Mutex<u32>) -> bool {
+    let guard = m.lock();
+    return *guard.get() > 0;
+}
+
+// `thread.join` waits (`block`) and starts a thread (`io`): one error per effect.
+fn waits(x: u32) -> bool {
+    let (a, b) = thread.join(fn() -> u32 { return 1u32; }, fn() -> u32 { return 2u32; });
+    let s = a +% b;
+    return s > x;
+}
+
+fn f(x: u32) requires(log(x)) { } //~ ERROR E0211
+fn g(x: u32) -> u32 ensures(logs(result)) { return x; } //~ ERROR E0211
+fn h(x: u32) requires(fresh(x)) ensures(x / 1 == x) { }
+fn k(m: &sync.Mutex<u32>) requires(locked(m)) { } //~ ERROR E0211
+fn w(x: u32) requires(waits(x)) { } //~ ERROR E0211
+//~^ ERROR E0211
+
+fn main() {
+    f(1);
+    let y = g(2);
+    h(3);
+    let m = sync.Mutex::<u32>.new(1u32);
+    k(&m);
+    w(4);
+}

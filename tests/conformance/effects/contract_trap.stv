@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// A `requires` / `ensures` check is a trap op of the fn holding it: under `without(trap)` it is
+// E1401 (case `self`), while the same fn without the clause has no trap.
+fn pos(x: u32) -> u32 without(trap) requires(x > 0) { //~ ERROR E1401
+    return x;
+}
+
+fn same(x: u32) -> u32 without(trap) {
+    return x;
+}
+
+fn main() {
+    let a = pos(1);
+    let b = same(a);
+}

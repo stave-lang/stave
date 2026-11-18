@@ -1364,10 +1364,15 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0211",
         severity: Severity::Error,
         area: "types",
-        rule: "contract operand not allowed: a `requires`/`ensures` expression may use params, fields, `.len()`, literals, arithmetic, comparison, `&&`/`||`/`!`, and calls of safe fns whose args are `&` or Copy; not `unsafe`, `&mut`, a `static`/`static mut`, or a non-bool result (planned)",
+        rule: "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy (a fn value only if its type denies `io`, `lock`, `block`); no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op)",
         retired: false,
         located: true,
-        holes: &[],
+        holes: &[
+            Hole { name: "at", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["lock", "io", "block"] },
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+        ],
         shapes: &[
             Shape {
                 case: "",
@@ -1377,6 +1382,21 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "keep contracts side-effect free: compare params, fields, and `.len()`; move other checks into the body with `std.debug.assert`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "impure-call",
+                message: "`{fn}` cannot be called in a contract: it has `{effect}`, as it reaches `{at}`, which {op}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "called in a contract here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                    LabelTemplate { at: "op", text: "`{at}` {op} here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "call only fns without `io`, `lock`, or `block` in `requires`/`ensures`; move this check into the body",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1399,7 +1419,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0212",
         severity: Severity::Error,
         area: "types",
-        rule: "a parameter named `result` in a fn with an `ensures` clause: inside `ensures(..)` the name `result` means the returned value (contextual name, not a keyword; planned)",
+        rule: "a parameter named `result` in a fn with an `ensures` clause: inside `ensures(..)` the name `result` means the returned value (contextual name, not a keyword)",
         retired: false,
         located: true,
         holes: &[],
@@ -1409,6 +1429,67 @@ pub(super) static ENTRIES: &[Entry] = &[
                 message: "parameter `result` conflicts with the returned value named `result` in `ensures(..)`",
                 labels: &[
                     LabelTemplate { at: "primary", text: "parameter `result`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "rename the parameter",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0213",
+        severity: Severity::Error,
+        area: "types",
+        rule: "`old(e)` misuse: `e` is not Copy; case `outside`: `old(..)` in a `requires`; case `entry`: `old(..)` or `result` inside `old(..)`; case `param`: a parameter named `old` in a fn with an `ensures` clause (contextual name inside contract clauses)",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`old(..)` needs a Copy value, found `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "evaluated at entry and kept to the return" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take `old(..)` of a Copy part, e.g. `old(v.len())`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "entry",
+                message: "`old(..)` is evaluated at entry: it cannot hold `old(..)` or `result`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not known at entry" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "move this part out of `old(..)`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "outside",
+                message: "`old(..)` is only allowed in `ensures`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`old` in a `requires`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use the value itself: a `requires` runs at entry",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "param",
+                message: "parameter `old` conflicts with `old(..)` in `ensures(..)`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "parameter `old`" },
                 ],
                 fix: Some(FixTemplate {
                     description: "rename the parameter",
