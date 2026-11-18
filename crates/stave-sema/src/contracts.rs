@@ -9,13 +9,19 @@
 //! **Operand rules** ([`Ck::contract_rules`], E0211, at most one per clause, the first in source
 //! order): no `unsafe`, closure literal, `spawn`, f-string, `?`, `&mut` borrow, `static`, or
 //! intrinsic; a call (fn, method, operator, trait method) only of a safe fn whose every parameter
-//! is a shared reference or a Copy type, so a clause neither writes nor moves; a call through a fn
-//! value only if its type denies `io`, `lock`, and `block`. A parameter of type `&mut T` is not
+//! is a shared reference or a Copy type, so a clause neither writes nor moves. A parameter of
+//! type `&mut T` is not
 //! read in a `requires`; an `ensures` may read through it (never write: the call rule). An
 //! `ensures` runs after the body, which may have moved a by-value parameter, so there a parameter
 //! must be a reference or Copy. E0212 / E0213 (case `param`): a parameter named `result` / `old`
 //! in a fn with an `ensures`. E0213: `old(e)` with a non-Copy `e`, or `result` inside it (case
 //! `entry`). E0211 case `trait-impl`: contracts on a trait impl method.
+//!
+//! **Shared state** (E0211 cases `frozen` / `frozen-self`, [`Ck::clause_frozen`]; once the
+//! operand rules pass): every value a clause touches has a `Frozen` type, so no call in it can
+//! change anything through a shared reference (an atomic, `Cell`, `Mutex`, or a fn value's
+//! captures); this bans `load()` too. Case `static` ([`shared_statics`]): no callee reaches a
+//! `static` whose type is not Frozen.
 //!
 //! **Purity** ([`purity`], E0211 case `impure-call`): a callee (or a drop) in a clause whose effect
 //! set ([`crate::effects`]) has `io`, `lock`, or `block`. Calls in clauses are call-graph edges of
@@ -29,7 +35,7 @@
 //! every call that can reach a `requires` stores first) or `runtime.panic.ensures_failed` (at the
 //! return). A fn with a checked clause has `trap` ([`Contracts::trap_span`]).
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::{Diagnostic, Span};
 use stave_syntax::{NodeKind, Term};
 
@@ -38,8 +44,9 @@ use crate::callgraph::{EdgeKind, NodeKind as GNode};
 use crate::decls::{DeclFlags, DeclKind};
 use crate::diag::mk;
 use crate::effects::{EffectSets, Effects, OpKind};
+use crate::ids::DeclId;
 use crate::resolve::Res;
-use crate::traits::MethodRef;
+use crate::traits::{Derived, MethodRef, NotFlat};
 use crate::typeck::{Ck, Target, Ty, Typeck};
 use crate::types::{GArg, Interner, TypeId, TypeKind, ids};
 
@@ -191,10 +198,14 @@ impl Ck<'_> {
         let olds: Vec<(u32, u32)> =
             c.olds.iter().map(|&(paren, _)| (paren + 1, icx.close(paren).saturating_sub(1))).collect();
         for cl in &c.requires {
-            self.clause_rules(cl, false, c.result, &olds);
+            if !self.clause_rules(cl, false, c.result, &olds) {
+                self.clause_frozen(cl);
+            }
         }
         for cl in &c.ensures {
-            self.clause_rules(cl, true, c.result, &olds);
+            if !self.clause_rules(cl, true, c.result, &olds) {
+                self.clause_frozen(cl);
+            }
         }
         for &(_, e) in &c.olds {
             let Some(&t) = e.checked_sub(self.lo).and_then(|i| self.node_ty.get(i as usize)) else {
@@ -242,9 +253,113 @@ impl Ck<'_> {
         })
     }
 
+    /// E0211 case `frozen` / `frozen-self` for clause `cl`: the first value the clause touches
+    /// whose type is not Frozen, by source position (the innermost expression first). A clause
+    /// touches every expression in it (each param, `self`, `result` it names, each operand,
+    /// receiver, argument, place, and value inside `old(..)`), each call's result and built-in
+    /// method receiver (a step inside a chain such as `a.f().g()` is no expression), and every fn
+    /// value it calls. A field reached from a touched value is part of it.
+    fn clause_frozen(&mut self, cl: &ContractClause) {
+        let icx = self.icx;
+        let open = icx.a(cl.node) + 1;
+        let (lo, hi) = (open + 1, icx.close(open).saturating_sub(1));
+        // (first token, span length, text, type)
+        let mut touched: Vec<(u32, u32, String, TypeId)> = Vec::new();
+        for e in icx.ast.descendants(cl.node) {
+            if !icx.is_expr(e) {
+                continue;
+            }
+            let Some(&t) = e.checked_sub(self.lo).and_then(|i| self.node_ty.get(i as usize)) else {
+                continue;
+            };
+            let Ty::T(t) = self.resolve(t) else { continue };
+            touched.push((icx.a(e), icx.node_span(e).len, clause_line(icx.node_text(e)), t));
+        }
+        let ts: Vec<(u32, Target)> =
+            self.targets.iter().filter(|(t, _)| (lo..=hi).contains(t)).cloned().collect();
+        for (t, tg) in ts {
+            let name = icx.tok_str(if icx.is(t, Term::LParen) { t.saturating_sub(1) } else { t });
+            let call = format!("{name}(..)");
+            let (decl, args, self_ty) = match &tg {
+                Target::FnValue { ty } => {
+                    touched.push((t, 0, call, *ty));
+                    continue;
+                }
+                Target::Builtin { recv, ret, .. } => {
+                    touched.push((t, 0, format!("receiver of {call}"), *recv));
+                    touched.push((t, 0, call, *ret));
+                    continue;
+                }
+                Target::Fn { decl, args } if icx.is(t, Term::LParen) => (*decl, args.clone(), None),
+                Target::Method { method: MethodRef::Impl { method, .. }, args, .. }
+                | Target::Op { method: MethodRef::Impl { method, .. }, args } => {
+                    (*method, args.clone(), None)
+                }
+                Target::Method { method: MethodRef::Bound { method, self_ty, .. }, args, .. }
+                | Target::Op { method: MethodRef::Bound { method, self_ty, .. }, args } => {
+                    (*method, args.clone(), Some(*self_ty))
+                }
+                Target::TraitMethod { method, self_ty, args } => (*method, args.clone(), Some(*self_ty)),
+                _ => continue,
+            };
+            let Some(sig) = self.sigs.fn_sig(decl) else { continue };
+            let ret = sig.ret;
+            let r = self.tys.subst(ret, &args, self_ty);
+            touched.push((t, 0, call, r));
+        }
+        touched.sort_by_key(|x| (x.0, x.1));
+        let env = self.genv();
+        for (tok, _, text, t) in touched {
+            if t.is_none() || t == ids::ERROR || self.tys.has_error(t) {
+                continue;
+            }
+            let d = Derived::Frozen;
+            let Some(wit) = self.w.derived_witness(&mut self.tys, t, env, d) else { continue };
+            let tn = self.show(t);
+            let at = icx.tok_span(tok);
+            let diag = match wit.why {
+                NotFlat::Unknown => return,
+                NotFlat::Depth => {
+                    let r = "nested deeper than the limit of the `Frozen` check";
+                    mk(
+                        "E0211",
+                        Some("frozen-self"),
+                        &[("value", &text), ("type", &tn), ("reason", r)],
+                        at,
+                        &[],
+                    )
+                }
+                why if wit.path.is_empty() => {
+                    let r = why.text_for(d);
+                    mk(
+                        "E0211",
+                        Some("frozen-self"),
+                        &[("value", &text), ("type", &tn), ("reason", r)],
+                        at,
+                        &[],
+                    )
+                }
+                why => {
+                    let pn = self.show(wit.part);
+                    let r = why.text_for(d);
+                    let holes = [
+                        ("value", text.as_str()),
+                        ("type", &tn),
+                        ("path", &wit.path),
+                        ("part", &pn),
+                        ("reason", r),
+                    ];
+                    mk("E0211", Some("frozen"), &holes, at, &[])
+                }
+            };
+            self.report(diag);
+            return;
+        }
+    }
+
     /// E0211 for clause `cl`: the first violation of the operand rules, if any. `result` is the
     /// binding node of `result`; `olds` the token ranges of the `old(..)` arguments.
-    fn clause_rules(&mut self, cl: &ContractClause, ensures: bool, result: u32, olds: &[(u32, u32)]) {
+    fn clause_rules(&mut self, cl: &ContractClause, ensures: bool, result: u32, olds: &[(u32, u32)]) -> bool {
         let icx = self.icx;
         let open = icx.a(cl.node) + 1;
         let (lo, hi) = (open + 1, icx.close(open).saturating_sub(1));
@@ -269,10 +384,6 @@ impl Ck<'_> {
             let ok = match &tg {
                 Target::Global { decl } => !self.prog.decl(*decl).is_some_and(|d| d.kind == DeclKind::Static),
                 Target::Intrinsic { .. } => false,
-                Target::FnValue { ty } => {
-                    let pure = Effects::IO.0 | Effects::LOCK.0 | Effects::BLOCK.0;
-                    matches!(self.tys.kind(*ty), TypeKind::Fn { deny, .. } if deny & pure == pure)
-                }
                 Target::Fn { decl, args } if icx.is(t, Term::LParen) => {
                     self.contract_call_ok(*decl, args, None)
                 }
@@ -374,6 +485,7 @@ impl Ck<'_> {
             let d = mk("E0211", None, &[], icx.tok_span(t), &[]);
             self.report(d);
         }
+        bad.is_some()
     }
 }
 
@@ -418,6 +530,126 @@ pub fn purity(prog: &Program, tc: &Typeck, sets: &EffectSets) -> Vec<Diagnostic>
                     [("fn", callee.as_str()), ("effect", effect), ("at", at.as_str()), ("op", op_text)];
                 out.extend(mk("E0211", Some("impure-call"), &holes, edge.site, &roles));
             }
+        }
+    }
+    out
+}
+
+/// E0211 case `static`: a callee in a clause that reaches, through calls and drops, a body that
+/// names a `static` whose type is not Frozen (an atomic, `Mutex`, `Once`, ...): shared state the
+/// clause could change. A body counts with every static it names, its closures' included.
+/// `static mut` (built-in packages only, reached through `unsafe`) does not count.
+pub fn shared_statics(prog: &Program, tc: &Typeck) -> Vec<Diagnostic> {
+    let g = &tc.call_graph;
+    let frozen = tc.sigs.lang.frozen;
+    if frozen.is_none() {
+        return Vec::new();
+    }
+    let w = crate::traits::World { prog, sigs: &tc.sigs };
+    let mut cx = crate::types::Overlay::new(&tc.types);
+    let tr = crate::sigs::TraitRef { trait_decl: frozen, args: Vec::new() };
+    let mut verdict: FxHashMap<DeclId, bool> = FxHashMap::default();
+    let mut shared = |d: DeclId| -> bool {
+        if let Some(&v) = verdict.get(&d) {
+            return v;
+        }
+        let v = prog.decl(d).is_some_and(|x| x.kind == DeclKind::Static && !x.flags.has(DeclFlags::MUT))
+            && tc.sigs.konst(d).is_some_and(|c| !w.implements(&mut cx, c.ty, &tr, &[]));
+        verdict.insert(d, v);
+        v
+    };
+    // The decl whose body holds node `n`'s code (a closure's: its enclosing fn's).
+    let body_of = |mut n: u32| -> Option<DeclId> {
+        for _ in 0..g.nodes.len() {
+            match &g.nodes[n as usize].kind {
+                GNode::Fn { inst, .. } => return Some(inst.decl),
+                GNode::Closure { parent, .. } => n = *parent,
+                _ => return None,
+            }
+        }
+        None
+    };
+    // Per node: the first shared static its body names.
+    let mut uses: Vec<Option<DeclId>> = vec![None; g.nodes.len()];
+    for (i, u) in uses.iter_mut().enumerate() {
+        let Some(b) = body_of(i as u32).and_then(|d| tc.body(d)) else { continue };
+        *u = b.targets.iter().find_map(|(_, t)| match t {
+            Target::Global { decl } if shared(*decl) => Some(*decl),
+            _ => None,
+        });
+    }
+    // Nodes that reach such a use: backwards from the users.
+    let mut reach = vec![false; g.nodes.len()];
+    let mut work: Vec<u32> = (0..g.nodes.len() as u32).filter(|&n| uses[n as usize].is_some()).collect();
+    for &n in &work {
+        reach[n as usize] = true;
+    }
+    while let Some(n) = work.pop() {
+        for (c, _) in g.pred(n) {
+            if !reach[c as usize] {
+                reach[c as usize] = true;
+                work.push(c);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen: FxHashSet<(u32, u32)> = FxHashSet::default();
+    for (i, nd) in g.nodes.iter().enumerate() {
+        let GNode::Fn { inst, .. } = &nd.kind else { continue };
+        let Some(c) = tc.body(inst.decl).and_then(|b| b.contracts.as_deref()) else { continue };
+        for edge in g.succ(i as u32) {
+            if edge.kind == EdgeKind::Member || !c.holds(edge.site) || !reach[edge.to as usize] {
+                continue;
+            }
+            if !seen.insert((edge.site.file.0, edge.site.offset)) {
+                continue;
+            }
+            // a shortest chain to a user, through reaching nodes only
+            let mut parent: FxHashMap<u32, Option<u32>> = FxHashMap::default();
+            parent.insert(edge.to, None);
+            let mut queue = std::collections::VecDeque::from([edge.to]);
+            let mut end = None;
+            while let Some(m) = queue.pop_front() {
+                if uses[m as usize].is_some() {
+                    end = Some(m);
+                    break;
+                }
+                let base = g.out_start[m as usize];
+                for (k, e) in g.succ(m).iter().enumerate() {
+                    if reach[e.to as usize]
+                        && let std::collections::hash_map::Entry::Vacant(v) = parent.entry(e.to)
+                    {
+                        v.insert(Some(base + k as u32));
+                        queue.push_back(e.to);
+                    }
+                }
+            }
+            let Some(end) = end else { continue };
+            let (Some(st), Some(sd)) = (uses[end as usize], uses[end as usize].and_then(|d| prog.decl(d)))
+            else {
+                continue;
+            };
+            let mut chain = Vec::new();
+            let mut cur = end;
+            while let Some(&Some(ei)) = parent.get(&cur) {
+                chain.push(ei);
+                cur = g.caller(ei);
+            }
+            chain.reverse();
+            let names = g.source_names(prog, tc, &[edge.to, end]);
+            let (Some(callee), Some(at)) = (names.first(), names.get(1)) else { continue };
+            let sname = prog.decl_path(st);
+            let nx = crate::sigs::NameCx { prog, generics: &[] };
+            let tn =
+                tc.sigs.konst(st).map_or_else(String::new, |k| crate::types::display(&tc.types, &nx, k.ty));
+            let mut roles: Vec<(&str, Span)> = Vec::new();
+            for &ei in &chain {
+                let x = &g.out[ei as usize];
+                roles.push((if x.kind == EdgeKind::Drop { "drop" } else { "call" }, x.site));
+            }
+            roles.push(("static", sd.name_span));
+            let holes = [("fn", callee.as_str()), ("at", at.as_str()), ("name", &sname), ("type", &tn)];
+            out.extend(mk("E0211", Some("static"), &holes, edge.site, &roles));
         }
     }
     out

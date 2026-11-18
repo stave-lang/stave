@@ -1,9 +1,9 @@
 //~ CHECK-ONLY
 // Contracts that check: clauses over params, fields, `.len()`, and calls of pure fns with `&` or
 // Copy args; `result` and `old(e)` in `ensures`; reads through a `&mut` param in `ensures`; a
-// method's clauses read `self`; `requires` on an `unsafe` fn; a generic fn; a call through a fn
-// value whose type denies `io`, `lock`, `block`; a Copy `match` and aggregate. Outside a clause
-// `result` and `old` are ordinary names.
+// method's clauses read `self`; `requires` on an `unsafe` fn; a generic fn; a Copy `match` and
+// aggregate; Frozen values only (a `&vec.Vec<u32>`, a struct of plain fields, a `Frozen` or `Flat`
+// generic). Outside a clause `result` and `old` are ordinary names.
 import std.vec;
 
 struct Counter { n: u32 }
@@ -53,8 +53,12 @@ fn half(x: u32) -> Option<u32>
     return Option.Some(x / 2);
 }
 
-fn check(f: fn(u32) -> bool without(io, lock, block), x: u32) -> bool requires(f(x)) {
+fn count<T: Frozen>(xs: &[T], n: usize) -> bool requires(xs.len() >= n) {
     return true;
+}
+
+fn count_flat<T: Flat>(xs: &[T]) -> usize ensures(result == xs.len()) {
+    return xs.len();
 }
 
 fn positive(x: u32) -> bool {
@@ -81,7 +85,7 @@ fn main() -> i32 {
     let z = pick(x, y, true);
     let w = ordinary(z);
     let h = half(w);
-    let ok = check(positive, w);
+    let ok = positive(w) && count(&a, 2) && count_flat(&a) == 3;
     let p = &w as *const u32;
     let u = unsafe("p is the address of w") load(p, ok);
     return 0;

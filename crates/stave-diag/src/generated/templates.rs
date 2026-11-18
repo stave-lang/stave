@@ -1364,14 +1364,20 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0211",
         severity: Severity::Error,
         area: "types",
-        rule: "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy (a fn value only if its type denies `io`, `lock`, `block`); no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op)",
+        rule: "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy; no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op); cases `frozen` / `frozen-self` (when the other operand rules hold): the first value the clause touches (an expression, a call result, a built-in receiver, a called fn value) whose type is not `Frozen`, with the path to its `UnsafeCell` or fn value; case `static`: a callee in a clause reaches a `static` whose type is not `Frozen`",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["lock", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "name", kind: HoleKind::Path, choices: &[] },
             Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+            Hole { name: "part", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "path", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "reason", kind: HoleKind::TextLiteral, choices: &["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound", "nested deeper than the limit of the `Frozen` check"] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "value", kind: HoleKind::Source, choices: &[] },
         ],
         shapes: &[
             Shape {
@@ -1387,6 +1393,30 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "frozen",
+                message: "`{value}` cannot be used in a contract: `{type}` is not `Frozen`: component `{path}` has type `{part}`, {reason}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a contract may change this value through a shared reference" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass the fields the check needs as Copy values or `&` to Frozen data, or move this check into the body with `std.debug.assert`; a generic parameter needs a `Frozen` bound",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "frozen-self",
+                message: "`{value}` cannot be used in a contract: `{type}` is not `Frozen`: it is {reason}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a contract may change state through this value" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass the fields the check needs as Copy values or `&` to Frozen data, or move this check into the body with `std.debug.assert`; a generic parameter needs a `Frozen` bound",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "impure-call",
                 message: "`{fn}` cannot be called in a contract: it has `{effect}`, as it reaches `{at}`, which {op}",
                 labels: &[
@@ -1397,6 +1427,21 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call only fns without `io`, `lock`, or `block` in `requires`/`ensures`; move this check into the body",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "static",
+                message: "`{fn}` cannot be called in a contract: it reaches `{at}`, which uses `{name}` of type `{type}`, not `Frozen`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "called in a contract here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                    LabelTemplate { at: "static", text: "shared state declared here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "keep shared state out of `requires`/`ensures`; move this check into the body",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

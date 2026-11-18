@@ -586,9 +586,9 @@ fix = { description = "use the value, or discard it explicitly with `let _ = ..;
 code = "E0211"
 severity = "error"
 area = "types"
-rule = "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy (a fn value only if its type denies `io`, `lock`, `block`); no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op)"
-holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal" }
-choices = { effect = ["lock", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] }
+rule = "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy; no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op); cases `frozen` / `frozen-self` (when the other operand rules hold): the first value the clause touches (an expression, a call result, a built-in receiver, a called fn value) whose type is not `Frozen`, with the path to its `UnsafeCell` or fn value; case `static`: a callee in a clause reaches a `static` whose type is not `Frozen`"
+holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal", value = "source", type = "type", path = "place", part = "type", reason = "text-literal", name = "path" }
+choices = { reason = ["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound", "nested deeper than the limit of the `Frozen` check"], effect = ["lock", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] }
 message = "this expression is not allowed in a contract"
 labels = [{ at = "primary", text = "not allowed in `requires`/`ensures`" }]
 fix = { description = "keep contracts side-effect free: compare params, fields, and `.len()`; move other checks into the body with `std.debug.assert`" }
@@ -602,6 +602,21 @@ fix = { description = "move the check into the method body with `std.debug.asser
 message = "`{fn}` cannot be called in a contract: it has `{effect}`, as it reaches `{at}`, which {op}"
 labels = [{ at = "primary", text = "called in a contract here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "op", text = "`{at}` {op} here" }]
 fix = { description = "call only fns without `io`, `lock`, or `block` in `requires`/`ensures`; move this check into the body" }
+
+[diag.cases.frozen]
+message = "`{value}` cannot be used in a contract: `{type}` is not `Frozen`: component `{path}` has type `{part}`, {reason}"
+labels = [{ at = "primary", text = "a contract may change this value through a shared reference" }]
+fix = { description = "pass the fields the check needs as Copy values or `&` to Frozen data, or move this check into the body with `std.debug.assert`; a generic parameter needs a `Frozen` bound" }
+
+[diag.cases.frozen-self]
+message = "`{value}` cannot be used in a contract: `{type}` is not `Frozen`: it is {reason}"
+labels = [{ at = "primary", text = "a contract may change state through this value" }]
+fix = { description = "pass the fields the check needs as Copy values or `&` to Frozen data, or move this check into the body with `std.debug.assert`; a generic parameter needs a `Frozen` bound" }
+
+[diag.cases.static]
+message = "`{fn}` cannot be called in a contract: it reaches `{at}`, which uses `{name}` of type `{type}`, not `Frozen`"
+labels = [{ at = "primary", text = "called in a contract here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "static", text = "shared state declared here" }]
+fix = { description = "keep shared state out of `requires`/`ensures`; move this check into the body" }
 
 [[diag]]
 code = "E0212"

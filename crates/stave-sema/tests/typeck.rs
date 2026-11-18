@@ -504,6 +504,41 @@ fn frozen_diagnostics_name_the_first_unfrozen_component() {
     assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }
 
+/// E0211 cases `frozen` / `frozen-self` name the touched value and the path to its `UnsafeCell`
+/// or fn value; case `static` names the chain to a static that is not Frozen.
+#[test]
+fn contract_diagnostics_name_the_shared_state() {
+    let src = "import std.atomic;\n\
+         static HITS: atomic.U64 = atomic.U64.new(0);\n\
+         fn bump() -> bool { return HITS.fetch_add(1) >= 0; }\n\
+         fn via(x: u32) -> bool { return x > 0 && bump(); }\n\
+         fn tick(c: &atomic.U64) requires(c.fetch_add(1u64) >= 0u64) { }\n\
+         fn each(f: fn(u32) -> bool, x: u32) requires(f(x)) { }\n\
+         fn any<T>(xs: &[T]) requires(xs.len() > 0) { }\n\
+         fn g(x: u32) requires(via(x)) { }\n\
+         fn main() { }\n";
+    let (p, tc) = mem(src);
+    let show = |ds: &[stave_diag::Diagnostic]| -> Vec<String> {
+        ds.iter()
+            .map(|d| {
+                let line = d.primary().map_or(0, |s| p.source_map.locate(s).map_or(0, |l| l.line));
+                format!("{line}: {} {}", d.code(), d.message())
+            })
+            .collect()
+    };
+    let want = [
+        "5: E0211 `c` cannot be used in a contract: `&U64` is not `Frozen`: component `*.v` has type `UnsafeCell<u64>`, `UnsafeCell` (interior mutability)",
+        "6: E0211 `f` cannot be used in a contract: `fn(u32) -> bool` is not `Frozen`: it is a fn value (its captures are not in its type)",
+        "7: E0211 `xs` cannot be used in a contract: `&[T]` is not `Frozen`: component `*[_]` has type `T`, a generic parameter without a `Frozen` bound",
+    ];
+    assert_eq!(show(&tc.all_diagnostics(&p)), want);
+    let want = [
+        "8: E0211 `main.via` cannot be called in a contract: it reaches `main.bump`, which uses `main.HITS` of type `U64`, not `Frozen`",
+    ];
+    assert_eq!(show(&stave_sema::contracts::shared_statics(&p, &tc)), want);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
+}
+
 /// Past its depth cutoff the Flat check fails closed (E1407 case `depth`).
 #[test]
 fn flat_depth_cutoff_fails_closed() {

@@ -3,14 +3,14 @@
 //~ STDERR-CONTAINS "panic: Contract at contract_fn_value.stv:21:12 in main.apply (thread 0)\nrequires(x != 0)\n"
 // A fn called through a fn value checks its `requires` too (the check is in the callee), and the
 // panic names the call through the value. A `?` error return and a generic instance check their
-// `ensures` as well.
+// `ensures` as well (its clause touches `T` values: `T: Frozen`).
 import std.io;
 
 fn inv(x: u32) -> u32 requires(x != 0) ensures(result <= 100) {
     return 100 / x;
 }
 
-fn first<T: Copy>(xs: &[T]) -> Option<T> ensures(result.is_some() == (xs.len() > 0)) {
+fn first<T: Copy + Frozen>(xs: &[T]) -> Option<T> ensures(result.is_some() == (xs.len() > 0)) {
     if xs.len() == 0 {
         return Option.None;
     }

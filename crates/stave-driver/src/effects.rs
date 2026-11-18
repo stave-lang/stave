@@ -22,7 +22,7 @@ use crate::pipeline::Stage;
 /// The effect sets of a program and the violations of its deny clauses.
 pub struct EffectRun {
     pub sets: EffectSets,
-    /// E1401, E1403 (case `made`), E0211 (case `impure-call`).
+    /// E1401, E1403 (case `made`), E0211 (cases `impure-call`, `static`).
     pub diagnostics: Vec<Diagnostic>,
     /// Functions lowered for the `trap` effect (0: none were needed).
     pub lowered: usize,
@@ -44,6 +44,7 @@ pub fn run(prog: &Program, tc: &Typeck, all: bool) -> Result<EffectRun, Failure>
     let sets = effects::solve(prog, tc, ir.as_deref());
     let mut diagnostics = effects::check(prog, tc, &plan, &sets);
     diagnostics.extend(stave_sema::contracts::purity(prog, tc, &sets));
+    diagnostics.extend(stave_sema::contracts::shared_statics(prog, tc));
     Ok(EffectRun { sets, diagnostics, lowered })
 }
 
