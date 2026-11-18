@@ -1,11 +1,14 @@
 // The float sums and dot products of reduce.stv through dispatch fns: `needs(v4)` arms hold the
-// L lanes in two 512-bit vectors, `needs(avx2)` arms in four 256-bit vectors, `needs(sve)` arms
-// run the 128-bit kernels (the AArch64 backend emits the same code for them), and the 128-bit
-// kernels of reduce.stv are the `_` arms. Under the logical-lane rule the width never changes the
-// bits, so every arm prints the reference. Each run also calls std's `sum` and `dot`, whose own
-// dispatch fns pick the arm of the same CPU for slices long enough to reach them.
+// L lanes of a block in two 512-bit vectors, `needs(avx2)` arms in four 256-bit vectors,
+// `needs(sve)` arms run the 128-bit kernels (the AArch64 backend emits the same code for them),
+// and the 128-bit kernels of reduce.stv are the `_` arms. The width never changes the bits, so
+// every arm prints the reference. Each case prints std's `sum` / `dot` (whose own dispatch fns
+// pick the arm of the same CPU for slices long enough to reach them); the blocks through the
+// dispatch fns combined by the tree's passes; the same blocks, last first, combined by its
+// recursive split; std on the two children of the tree's root on two threads.
 import base;
 import diff;
+import std.vec;
 
 fn part_f32x16(xs: &[f32], i: usize, k: usize) -> f32x16 needs(v4) {
     let left = xs.len() -| (i + 16 * k);
@@ -223,6 +226,74 @@ dispatch fn dot_f64(a: &[f64], b: &[f64]) -> f64 {
     _ => base.dot_f64x2,
 }
 
+// The two-level sum with blocks through the dispatch fn, first block first (`last`: last block
+// first), combined by the passes (by the recursive split).
+fn sum2_f32(last: bool, xs: &[f32]) -> f32 {
+    let n = xs.len();
+    let m = base.blocks(n);
+    if m == 0 { return -0.0; }
+    let mut v = vec.Vec::<f32>.new();
+    for _k in 0..m { v.push(-0.0); }
+    let s = v.as_mut_slice();
+    for j in 0..m {
+        let k = if last then m - 1 - j else j;
+        s[k] = sum_f32(&xs[k * base.B..base.block_end(k, n)]);
+    }
+    if last { return base.split::<f32>(v.as_slice()); }
+    return base.levels::<f32>(v);
+}
+
+// The two-level dot with blocks through the dispatch fn, first block first (`last`: last block
+// first), combined by the passes (by the recursive split).
+fn dot2_f32(last: bool, a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len();
+    let m = base.blocks(n);
+    if m == 0 { return -0.0; }
+    let mut v = vec.Vec::<f32>.new();
+    for _k in 0..m { v.push(-0.0); }
+    let s = v.as_mut_slice();
+    for j in 0..m {
+        let k = if last then m - 1 - j else j;
+        s[k] = dot_f32(&a[k * base.B..base.block_end(k, n)], &b[k * base.B..base.block_end(k, n)]);
+    }
+    if last { return base.split::<f32>(v.as_slice()); }
+    return base.levels::<f32>(v);
+}
+
+// The two-level sum with blocks through the dispatch fn, first block first (`last`: last block
+// first), combined by the passes (by the recursive split).
+fn sum2_f64(last: bool, xs: &[f64]) -> f64 {
+    let n = xs.len();
+    let m = base.blocks(n);
+    if m == 0 { return -0.0; }
+    let mut v = vec.Vec::<f64>.new();
+    for _k in 0..m { v.push(-0.0); }
+    let s = v.as_mut_slice();
+    for j in 0..m {
+        let k = if last then m - 1 - j else j;
+        s[k] = sum_f64(&xs[k * base.B..base.block_end(k, n)]);
+    }
+    if last { return base.split::<f64>(v.as_slice()); }
+    return base.levels::<f64>(v);
+}
+
+// The two-level dot with blocks through the dispatch fn, first block first (`last`: last block
+// first), combined by the passes (by the recursive split).
+fn dot2_f64(last: bool, a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    let m = base.blocks(n);
+    if m == 0 { return -0.0; }
+    let mut v = vec.Vec::<f64>.new();
+    for _k in 0..m { v.push(-0.0); }
+    let s = v.as_mut_slice();
+    for j in 0..m {
+        let k = if last then m - 1 - j else j;
+        s[k] = dot_f64(&a[k * base.B..base.block_end(k, n)], &b[k * base.B..base.block_end(k, n)]);
+    }
+    if last { return base.split::<f64>(v.as_slice()); }
+    return base.levels::<f64>(v);
+}
+
 fn main() -> i32 {
     let mut c = diff.open();
     let mut o = diff.out();
@@ -233,36 +304,56 @@ fn main() -> i32 {
             let b = c.f32s(h);
             let xs = b.get();
             o.f32(xs.sum());
-            o.f32(sum_f32(xs));
+            o.f32(sum2_f32(false, xs));
+            o.f32(sum2_f32(true, xs));
+            o.f32(base.sum_f32_join(xs));
             o.sep();
-            let r = base.sum_f32_ref(xs);
+            let r = base.sum2_f32_ref(xs);
+            o.f32(r);
+            o.f32(r);
             o.f32(r);
             o.f32(r);
         } else if h.kind == 1 {
             let b = c.f64s(h);
             let xs = b.get();
             o.f64(xs.sum());
-            o.f64(sum_f64(xs));
+            o.f64(sum2_f64(false, xs));
+            o.f64(sum2_f64(true, xs));
+            o.f64(base.sum_f64_join(xs));
             o.sep();
-            let r = base.sum_f64_ref(xs);
+            let r = base.sum2_f64_ref(xs);
+            o.f64(r);
+            o.f64(r);
             o.f64(r);
             o.f64(r);
         } else if h.kind == 2 {
             let ba = c.f32s(h);
             let bb = c.f32s(h);
-            o.f32(ba.get().dot(bb.get()));
-            o.f32(dot_f32(ba.get(), bb.get()));
+            let xs = ba.get();
+            let ys = bb.get();
+            o.f32(xs.dot(ys));
+            o.f32(dot2_f32(false, xs, ys));
+            o.f32(dot2_f32(true, xs, ys));
+            o.f32(base.dot_f32_join(xs, ys));
             o.sep();
-            let r = base.dot_f32_ref(ba.get(), bb.get());
+            let r = base.dot2_f32_ref(xs, ys);
+            o.f32(r);
+            o.f32(r);
             o.f32(r);
             o.f32(r);
         } else {
             let ba = c.f64s(h);
             let bb = c.f64s(h);
-            o.f64(ba.get().dot(bb.get()));
-            o.f64(dot_f64(ba.get(), bb.get()));
+            let xs = ba.get();
+            let ys = bb.get();
+            o.f64(xs.dot(ys));
+            o.f64(dot2_f64(false, xs, ys));
+            o.f64(dot2_f64(true, xs, ys));
+            o.f64(base.dot_f64_join(xs, ys));
             o.sep();
-            let r = base.dot_f64_ref(ba.get(), bb.get());
+            let r = base.dot2_f64_ref(xs, ys);
+            o.f64(r);
+            o.f64(r);
             o.f64(r);
             o.f64(r);
         }
