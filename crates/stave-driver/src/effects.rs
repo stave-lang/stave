@@ -13,8 +13,8 @@
 //! The same removal step decides the contract checks, so their diagnostics come from here, once
 //! per program and the same in every mode: E0215 (a `requires` that is false whenever reached),
 //! E0217 (an `ensures` false whenever a return is reached), and the warning E0216 (a `requires`
-//! that the clauses before it imply; not in a generic fn, where it could hold for some instances
-//! only). Each names the facts of its proof.
+//! that the clauses before it imply). None in an instance of a generic fn, where the answer may
+//! depend on the instance. Each names the facts of its proof.
 
 use rayon::prelude::*;
 use stave_diag::{Diagnostic, Span};
@@ -44,15 +44,46 @@ pub fn run(prog: &Program, tc: &Typeck, all: bool) -> Result<EffectRun, Failure>
     let contracts = effects::contract_nodes(tc);
     let mut lowered = 0;
     let mut diagnostics = Vec::new();
-    let ir = if all || plan.needs_ir() || !contracts.is_empty() {
-        let mut nodes = plan.ir_nodes(&tc.call_graph, all);
-        nodes.extend(contracts);
+    let traps = all || plan.needs_ir();
+    let ir = if traps || !contracts.is_empty() {
+        let planned = plan.ir_nodes(&tc.call_graph, all);
+        let mut nodes = planned.clone();
+        nodes.extend(&contracts);
         nodes.sort_unstable();
         nodes.dedup();
-        let l = node_ir(prog, tc, &nodes)?;
-        lowered = l.funcs;
-        diagnostics = l.contracts;
-        Some(l.ir)
+        match node_ir(prog, tc, &nodes) {
+            Ok(l) => {
+                lowered = l.funcs;
+                diagnostics = l.contracts;
+                Some(l.ir)
+            }
+            // A fn lowered only for its contract checks may use what stage0 cannot lower yet (or
+            // hit a lowering bug): `check` stays as it was without those checks, and a build
+            // reports the failure where it lowers the fn. Each such fn alone still gets its
+            // contract diagnostics when it lowers.
+            Err(_) if !contracts.is_empty() => {
+                let mut seen: Vec<(&'static str, Option<Span>, String)> = Vec::new();
+                for &c in &contracts {
+                    let Ok(l) = node_ir(prog, tc, &[c]) else { continue };
+                    lowered += l.funcs;
+                    for d in l.contracts {
+                        let key = (d.code(), d.primary(), d.message().to_string());
+                        if !seen.contains(&key) {
+                            seen.push(key);
+                            diagnostics.push(d);
+                        }
+                    }
+                }
+                if traps {
+                    let l = node_ir(prog, tc, &planned)?;
+                    lowered += l.funcs;
+                    Some(l.ir)
+                } else {
+                    None
+                }
+            }
+            Err(f) => return Err(f),
+        }
     } else {
         None
     };
@@ -146,15 +177,21 @@ pub fn node_ir(prog: &Program, tc: &Typeck, nodes: &[u32]) -> Result<NodeIrs, Fa
 }
 
 /// The code, primary span, and (E0217) clause span of the diagnostic of contract finding `x`, if
-/// it has one: a proved `ensures` and a proved `requires` of a generic fn have none.
+/// it has one. None in an instance of a generic fn: what holds there may depend on the instance,
+/// and the instance may be called only where its caller knows the check holds. A proved `ensures`
+/// has none, nor a proved `requires` whose own evaluation can trap or calls a fn (removing it
+/// from the source would remove that trap).
 fn contract_diag(
     x: &Finding,
     generic: bool,
     span: impl Fn(stave_ir::Site) -> Span,
 ) -> Option<(&'static str, Span, Option<Span>)> {
+    if generic {
+        return None;
+    }
     match (x.clause, x.refuted) {
         (Clause::Requires, true) => Some(("E0215", span(x.site), None)),
-        (Clause::Requires, false) if !generic => Some(("E0216", span(x.site), None)),
+        (Clause::Requires, false) if !x.traps => Some(("E0216", span(x.site), None)),
         (Clause::Ensures, true) => {
             let ret = x.ret.map_or(span(x.site), &span);
             Some(("E0217", ret, Some(span(x.site))))

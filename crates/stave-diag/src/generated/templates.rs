@@ -1687,7 +1687,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0215",
         severity: Severity::Error,
         area: "types",
-        rule: "a `requires` conjunct (an operand of a clause's top-level `&&`) that is false whenever it is reached: the clauses before it and the parameters' type ranges prove its negation by a chain of inequalities, so every call fails it; checked per instance, after the type and borrow checks pass; one `fact` label per fact of the chain",
+        rule: "a `requires` conjunct (an operand of a clause's top-level `&&`) that is false whenever it is reached: the clauses before it and the parameters' type ranges prove its negation by a chain of inequalities, so every call fails it; not in an instance of a generic fn, nor at a point shown dead (contradictory facts, a branch on two constants, a call that cannot return): there the check stays; after the type and borrow checks pass; one `fact` label per fact of the chain",
         retired: false,
         located: true,
         holes: &[
@@ -1713,7 +1713,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0216",
         severity: Severity::Warning,
         area: "types",
-        rule: "warning: a `requires` conjunct that the clauses before it and the parameters' type ranges imply (a chain of inequalities proves it); its check is removed; not reported in a generic fn (it may hold for some instances only); one `fact` label per fact of the chain",
+        rule: "warning: a `requires` conjunct that the clauses before it and the parameters' type ranges imply (a chain of inequalities proves it); its check is removed; not reported in a generic fn (it may hold for some instances only), nor for a conjunct whose own evaluation can trap or calls a fn; one `fact` label per fact of the chain",
         retired: false,
         located: true,
         holes: &[
@@ -1739,7 +1739,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0217",
         severity: Severity::Error,
         area: "types",
-        rule: "an `ensures` conjunct that is false whenever a `return` (or the end of a unit body) is reached: what holds there proves its negation by a chain of inequalities; at the return, with the clause as a related span; checked per instance, after the type and borrow checks pass; one `fact` label per fact of the chain",
+        rule: "an `ensures` conjunct that is false whenever a `return` (or the end of a unit body) is reached: what holds there proves its negation by a chain of inequalities; not in an instance of a generic fn, nor at a return shown dead (as E0215); at the return, with the clause as a related span; after the type and borrow checks pass; one `fact` label per fact of the chain",
         retired: false,
         located: true,
         holes: &[

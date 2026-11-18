@@ -29,7 +29,8 @@
 //! (at least 1) says how often it is added. A goal `a <= b + w` is proved by edges whose sum
 //! `Σ mul·(from - to) <= Σ mul·w` has the left side `a - b` (every other node, zero aside,
 //! cancels) and `Σ mul·w <= w`. A chain `a → .. → b` is the case with every multiplier 1; the
-//! pass writes only chains. The edges of a goal may be empty (`0 <= w`).
+//! pass writes chains, and around a contradiction (a walk of negative weight) a chain with that
+//! walk counted several times. The edges of a goal may be empty (`0 <= w`).
 //!
 //! | Source | Reads | States |
 //! |---|---|---|

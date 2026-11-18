@@ -283,5 +283,52 @@ fn signed_facts_and_multipliers() {
     let weak = vec![Edge { mul: 2, ..edge(x, y, 0, eq) }, Edge { mul: 2, ..edge(y, x, 0, eq) }];
     assert_eq!(why(&m, &witness(&m, f, &[(q[3], weak, vec![])], &[])), Reject::Chain);
     let overflow = vec![Edge { w: i128::MAX / 2, mul: 4, ..combo[0] }];
-    assert_eq!(why(&m, &witness(&m, f, &[(q[3], overflow, vec![])], &[])), Reject::Edge);
+    assert_eq!(why(&m, &witness(&m, f, &[(q[3], overflow, vec![])], &[])), Reject::Overflow);
+}
+
+/// `requires(x < 10)`, then `if x >= 10 { requires(x > 1000) }`: the second check is at a point
+/// no execution reaches, which the pass proves (never refutes) by the contradiction `x <= 9`,
+/// `10 <= x` counted as often as the goal needs. The checker accepts that multiplier or a larger
+/// one, refuses one less, and refuses one above the limit.
+#[test]
+fn a_dead_point_is_proved_around_its_contradiction() {
+    let (m, f, ()) = contract_fn(
+        |m| m.types.u32(),
+        |b, x, _, bt, fail| {
+            let ten = b.int(10);
+            let lt = b.cmp(Op::Lt, bt, x, ten);
+            require(b, fail, lt);
+            let ge = b.cmp(Op::Ge, bt, x, ten);
+            let (dead, live) = (b.create_block(), b.create_block());
+            b.cbr(ge, dead, &[], live, &[]);
+            b.switch_to(dead);
+            let k = b.int(1000);
+            let gt = b.cmp(Op::Gt, bt, x, k);
+            require(b, fail, gt);
+            b.ret(Some(x.into()));
+            b.switch_to(live);
+        },
+    );
+    let q = calls(&m, f);
+    let p = prove_func(&m, f).expect("a proof");
+    assert!(p.witness.refuted.is_empty());
+    assert_eq!(p.witness.removed.iter().map(|r| r.inst).collect::<Vec<_>>(), [q[1]]);
+    let w = &p.witness;
+    check_func(&m, w).unwrap_or_else(|r| panic!("{r}"));
+    let edges = w.removed[0].edges.of(&w.edges);
+    let k = edges.iter().position(|e| e.mul > 1).expect("an edge counted more than once");
+    // 1000 < x from 10 <= x and x <= 9: around the contradiction (weight -1) 991 times
+    assert_eq!(edges[k].mul, 991);
+    let with = |change: &dyn Fn(&mut Edge)| {
+        let mut x = w.clone();
+        for e in &mut x.edges[w.removed[0].edges.start as usize..][..edges.len()] {
+            if e.mul > 1 {
+                change(e);
+            }
+        }
+        x
+    };
+    assert!(check_func(&m, &with(&|e| e.mul += 1)).is_ok());
+    assert_eq!(why(&m, &with(&|e| e.mul -= 1)), Reject::Weak);
+    assert_eq!(why(&m, &with(&|e| e.mul = stave_ir::witness::MAX_MUL + 1)), Reject::Edge);
 }

@@ -43,7 +43,7 @@ pub fn scan(m: &Module, f: FuncId) -> Traps {
 }
 
 /// The panic kind instruction `i` of `b` can raise, if any (not `StackOverflow`).
-fn trap_of(m: &Module, b: &Body, i: u32) -> Option<PanicKind> {
+pub fn trap_of(m: &Module, b: &Body, i: u32) -> Option<PanicKind> {
     let op = *b.insts.op.get(i as usize)?;
     let args = b.args(i);
     let int_of = |t: Option<crate::types::TypeId>| match t.and_then(|t| m.types.key(t)) {

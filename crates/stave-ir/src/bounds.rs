@@ -56,11 +56,25 @@
 //! of its top-level `&&`: `cbr c ok fail` with `fail` holding only the call of
 //! `runtime.panic.requires_failed` / `ensures_failed`. Its goal is the inequality `c` states at the
 //! end of the block that branches (a compare of ints under `not`s; `==` is two goals, `!=` none),
-//! asked of the same graph. Three answers: proved (every goal has a chain: the check goes, like a
-//! bounds check, [`Proof::Clause`]); refuted (not proved, and a chain proves the negation of one
-//! goal: the check fails whenever control gets there, [`Proved::refuted`]); unknown (the check
-//! stays). A `requires` check sees the clauses before it and the parameters' type ranges; an
-//! `ensures` check at a return sees everything that dominates that return.
+//! asked of the same graph; a goal between a constant and a value its type range decides is one
+//! `Range` fact. Three answers: proved (every goal has a chain: the check goes, like a bounds
+//! check, [`Proof::Clause`]); refuted (not proved, and a chain proves the negation of one goal:
+//! the check fails whenever control gets there, [`Proved::refuted`]); unknown (the check stays). A
+//! `requires` check sees the clauses before it and the parameters' type ranges; an `ensures`
+//! check at a return sees everything that dominates that return.
+//!
+//! "Fails whenever reached" is vacuous where nothing reaches: there the goal holds too. So before
+//! a refutation the pass looks for dead code, and finding it, reports none: (a) facts holding at
+//! the point that contradict each other (a walk of negative weight from one of the first 16
+//! nodes of the conditions holding there back to itself); every goal linked to that walk is then
+//! proved with the walk counted as often as it needs (a multiplier), so a proof wins over the
+//! refutation there; (b) a dominating branch on a compare of two constants, entered
+//! on the side the compare never takes; (c) a dominating call that cannot return: its callee has
+//! no `ret`, or asserts a parameter the call passes the constant `false`. Dead code of any other
+//! shape (a loop that never ends, a callee that always panics through a path with a `ret`) is
+//! not recognized, and a check there that the facts refute stays an error. Only the pass decides
+//! this, the checker certifies no dead code: leaving a refutation out keeps a runtime check and
+//! removes nothing.
 //!
 //! The pass deletes nothing. Its result is a witness per check ([`crate::witness`]): the proof
 //! written out as a chain of inequalities, each naming the place of the IR it is read from. The
@@ -209,6 +223,9 @@ pub struct Finding {
     pub ret: Option<Site>,
     /// The sites of the facts of its proof, in order, each once.
     pub facts: Vec<Site>,
+    /// The evaluation of the conjunct itself can trap or calls a fn: deleting the clause from
+    /// the source would change the program even where its check is proved.
+    pub traps: bool,
 }
 
 /// The contract checks of `p` (proved on `m`, unchanged since), in instruction order: removed,
@@ -234,7 +251,15 @@ pub fn findings(m: &Module, p: &Proved) -> Vec<Finding> {
                 facts.push(s);
             }
         }
-        Finding { func: w.func, clause, refuted, site: site(inst), ret, facts }
+        Finding {
+            func: w.func,
+            clause,
+            refuted,
+            site: site(inst),
+            ret,
+            facts,
+            traps: conjunct_traps(m, b, inst),
+        }
     };
     let mut out = Vec::new();
     for (r, proof) in w.removed.iter().zip(&p.proofs) {
@@ -246,6 +271,61 @@ pub fn findings(m: &Module, p: &Proved) -> Vec<Finding> {
         out.push(make(r.inst, c, true, &[r.edges]));
     }
     out
+}
+
+/// Whether the evaluation of the conjunct whose failure call is `call` has a trapping
+/// instruction or a call: the blocks from where the conjunct starts (the true side of the
+/// contract check before it, or the entry) up to the block branching on it.
+fn conjunct_traps(m: &Module, b: &Body, call: u32) -> bool {
+    let is_fail_block = |t: usize| {
+        b.blocks.get(t).is_some_and(|bd| {
+            bd.insts.len == 1
+                && b.insts.op.get(bd.insts.start as usize) == Some(&Op::Call)
+                && fail_clause(&m.funcs, b, bd.insts.start).is_some()
+        })
+    };
+    let Some(fb) = b.blocks.iter().position(|bd| bd.insts.indices().contains(&call)) else { return true };
+    let Some(p) =
+        b.blocks.iter().position(|bd| matches!(bd.term, Term::Cbr { els, .. } if els.block.index() == fb))
+    else {
+        return true;
+    };
+    let dom = Dominators::compute(b);
+    // the start: the nearest dominator entered by the true edge of an earlier contract check
+    let mut start = 0;
+    let mut walk = Some(p);
+    while let Some(t) = walk {
+        let entered = b.blocks.iter().any(|bd| match bd.term {
+            Term::Cbr { then, els, .. } => then.block.index() == t && is_fail_block(els.block.index()),
+            _ => false,
+        });
+        if entered {
+            start = t;
+            break;
+        }
+        walk = dom.idom(t).filter(|&d| d != t);
+    }
+    let mut seen = vec![false; b.blocks.len()];
+    let mut work = vec![start];
+    seen[start] = true;
+    while let Some(t) = work.pop() {
+        for i in b.blocks[t].insts.indices() {
+            if b.insts.op.get(i as usize) == Some(&Op::Call) || crate::traps::trap_of(m, b, i).is_some() {
+                return true;
+            }
+        }
+        if t == p {
+            continue;
+        }
+        for s in b.successors(Block(t as u32)) {
+            let s = s.block.index();
+            if s < seen.len() && !seen[s] && !is_fail_block(s) {
+                seen[s] = true;
+                work.push(s);
+            }
+        }
+    }
+    false
 }
 
 /// The failure call of the contract check whose true edge source `src` (a branch) reads.
@@ -892,21 +972,37 @@ impl<'a> Cx<'a> {
             _ => return None,
         };
         let start = out.len();
-        let mut second = None;
-        let mut proved = true;
-        for (k, &goal) in goals.iter().enumerate() {
-            if k == 1 {
-                second = Some(out.len());
+        let prove_all = |cycle: Option<&(u32, Vec<u32>)>, out: &mut Vec<Edge>| {
+            let mut second = None;
+            for (k, &goal) in goals.iter().enumerate() {
+                if k == 1 {
+                    second = Some(out.len());
+                }
+                let mark = out.len();
+                if self.goal_chain(c.branch, goal, out).is_some() {
+                    continue;
+                }
+                out.truncate(mark);
+                cycle.and_then(|cy| self.goal_by_cycle(c.branch, goal, cy, out))?;
             }
-            if self.goal_chain(c.branch, goal, out).is_none() {
-                proved = false;
-                break;
-            }
-        }
-        if proved {
-            return Some(Verdict::Proved { also: second });
+            Some(Verdict::Proved { also: second })
+        };
+        if let Some(v) = prove_all(None, out) {
+            return Some(v);
         }
         out.truncate(start);
+        // A point no execution reaches holds the goal and its negation alike: there a proof may
+        // need the contradiction several times (multipliers), and no refutation is reported.
+        if let Some(cycle) = self.contradiction(c.branch) {
+            let v = prove_all(Some(&cycle), out);
+            if v.is_none() {
+                out.truncate(start);
+            }
+            return v;
+        }
+        if self.dead_end(c.branch) {
+            return None;
+        }
         for (half, &goal) in goals.iter().enumerate() {
             if self.goal_chain(c.branch, goal.negated(), out).is_some() {
                 return Some(Verdict::Refuted { half: half as u8 });
@@ -918,6 +1014,9 @@ impl<'a> Cx<'a> {
 
     /// The chain of `goal` at the end of block `block`, appended to `out`, if the facts prove it.
     fn goal_chain(&self, block: u32, goal: Goal, out: &mut Vec<Edge>) -> Option<()> {
+        if self.range_goal(goal, out).is_some() {
+            return Some(());
+        }
         let (lo, hi) = (self.term(goal.lo)?, self.term(goal.hi)?);
         let hi_bound = if goal.strict { hi } else { hi.plus(1)? };
         let mut path = Vec::new();
@@ -928,6 +1027,172 @@ impl<'a> Cx<'a> {
             return None;
         }
         Some(())
+    }
+
+    /// `goal` between a constant and an int value that the value's type range alone decides
+    /// (`x >= 0` on an unsigned `x`, `b <= 255` on a `u8`): one `Range` edge.
+    fn range_goal(&self, goal: Goal, out: &mut Vec<Edge>) -> Option<()> {
+        let strict = i128::from(goal.strict);
+        let range = |v: Value| -> Option<(i128, i128)> {
+            match self.key(self.b.value_ty(v)?)? {
+                TypeKey::Int { signed: true, bits } => {
+                    let h = 1i128 << (bits.width() - 1);
+                    Some((-h, h - 1))
+                }
+                TypeKey::Int { signed: false, bits } => Some((0, (1i128 << bits.width()) - 1)),
+                _ => None,
+            }
+        };
+        let konst = |o: Operand| self.b.int_const(o).filter(|c| c.abs() <= crate::witness::MAX_CONST);
+        let edge = match (goal.lo, goal.hi) {
+            // c <= v (+ strict): the type's least value is at least c + strict
+            (lo, Operand::Value(v)) if konst(lo).is_some() => {
+                let (min, _) = range(v)?;
+                (konst(lo)? + strict <= min).then_some(Edge {
+                    from: Node::Zero,
+                    to: Node::Val(v),
+                    w: -min,
+                    src: Source::Range { value: v },
+                    mul: 1,
+                })?
+            }
+            // v + strict <= c: the type's greatest value is at most c - strict
+            (Operand::Value(v), hi) if konst(hi).is_some() => {
+                let (_, max) = range(v)?;
+                (max + strict <= konst(hi)?).then_some(Edge {
+                    from: Node::Val(v),
+                    to: Node::Zero,
+                    w: max,
+                    src: Source::Range { value: v },
+                    mul: 1,
+                })?
+            }
+            _ => return None,
+        };
+        out.push(edge);
+        Some(())
+    }
+
+    /// The chain of `goal` at the end of `block` through the contradictory `cycle` (a node and
+    /// facts leading back to it with negative weight), the cycle's edges counted as often as the
+    /// goal needs: valid at a point no execution reaches.
+    fn goal_by_cycle(
+        &self,
+        block: u32,
+        goal: Goal,
+        cycle: &(u32, Vec<u32>),
+        out: &mut Vec<Edge>,
+    ) -> Option<()> {
+        let (lo, hi) = (self.term(goal.lo)?, self.term(goal.hi)?);
+        let to_cycle = self.walk(block, lo, cycle.0)?;
+        let from_cycle = self.walk(block, Self::node_term(cycle.0), Self::node_of(hi))?;
+        let start = out.len();
+        let built = (|| {
+            self.down(goal.lo, out);
+            for &f in &to_cycle {
+                self.fact_edges(f, out)?;
+            }
+            let ring = out.len();
+            for &f in &cycle.1 {
+                self.fact_edges(f, out)?;
+            }
+            let after = out.len();
+            for &f in &from_cycle {
+                self.fact_edges(f, out)?;
+            }
+            self.up(goal.hi, out);
+            let sum = |es: &[Edge]| es.iter().try_fold(0i128, |s, e| s.checked_add(e.w));
+            let (path, around) =
+                (sum(&out[start..ring])?.checked_add(sum(&out[after..])?)?, sum(&out[ring..after])?);
+            let ((_, klo), (_, khi)) = (self.written(goal.lo)?, self.written(goal.hi)?);
+            let want = khi - klo - i128::from(goal.strict);
+            let short = path.checked_sub(want)?;
+            if short <= 0 {
+                out.drain(ring..after);
+                return Some(());
+            }
+            if around >= 0 {
+                return None;
+            }
+            let times = (short + (-around) - 1) / (-around);
+            let times = u32::try_from(times).ok().filter(|&t| t <= crate::witness::MAX_MUL)?;
+            for e in &mut out[ring..after] {
+                e.mul = times;
+            }
+            Some(())
+        })();
+        if built.is_none() {
+            out.truncate(start);
+        }
+        built
+    }
+
+    /// Whether the end of `block` is dead in a way the facts do not show: a dominating branch on a
+    /// compare of two constants entered on the side the compare never takes, or a dominating call
+    /// that cannot return (a callee with no `ret`, or an asserting callee given the constant
+    /// `false` for the parameter it asserts).
+    fn dead_end(&self, block: u32) -> bool {
+        let mut walk = Some(block as usize);
+        while let Some(t) = walk {
+            if let Some((cond, pol)) = facts::edge_cond(self.b, &self.preds, t)
+                && self.constant_cond(cond).is_some_and(|v| v != pol)
+            {
+                return true;
+            }
+            for i in self.b.blocks[t].insts.indices() {
+                if self.b.insts.op.get(i as usize) == Some(&Op::Call) && self.never_returns(i) {
+                    return true;
+                }
+            }
+            walk = self.dom.idom(t).filter(|&p| p != t);
+        }
+        false
+    }
+
+    /// The value of `cond` when it is a compare of two int constants under `not`s.
+    fn constant_cond(&self, cond: Operand) -> Option<bool> {
+        let (mut o, mut flip) = (cond, false);
+        for _ in 0..=NOT_DEPTH {
+            let Operand::Value(v) = o else { return None };
+            let d = self.def(v)?;
+            let (x, y) = match (self.b.insts.op[d as usize], self.b.args(d)) {
+                (Op::Not, &[a]) => {
+                    o = a;
+                    flip = !flip;
+                    continue;
+                }
+                (_, &[x, y]) => (self.b.int_const(x)?, self.b.int_const(y)?),
+                _ => return None,
+            };
+            let r = match self.b.insts.op[d as usize] {
+                Op::Lt => x < y,
+                Op::Le => x <= y,
+                Op::Gt => x > y,
+                Op::Ge => x >= y,
+                Op::Eq => x == y,
+                Op::Ne => x != y,
+                _ => return None,
+            };
+            return Some(r != flip);
+        }
+        None
+    }
+
+    /// Whether call `i` cannot return: its callee's body has no `ret`, or the callee asserts a
+    /// parameter that the call passes the constant `false`.
+    fn never_returns(&self, i: u32) -> bool {
+        let args = self.b.args(i);
+        let Some(&Operand::Func(f)) = args.first() else { return false };
+        let Some(body) = self.funcs.get(f.index()).and_then(|f| f.body.as_ref()) else { return false };
+        if !body.blocks.iter().any(|bd| matches!(bd.term, Term::Ret(_))) {
+            return true;
+        }
+        let mask = self.asserted(f);
+        args[1..]
+            .iter()
+            .enumerate()
+            .take(64)
+            .any(|(k, &a)| mask & (1u64 << k) != 0 && self.b.int_const(a) == Some(0))
     }
 
     /// The key two operands share exactly when they are "the same": the operand itself, or the

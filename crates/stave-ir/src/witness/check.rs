@@ -56,6 +56,8 @@ pub enum Reject {
     Chain,
     /// The weights do not prove the goal.
     Weak,
+    /// A weight times its multiplier, or the sum, is beyond `i128`.
+    Overflow,
 }
 
 impl Reject {
@@ -70,6 +72,7 @@ impl Reject {
             Reject::Region => "the source does not dominate the check",
             Reject::Chain => "the edges do not add up to the goal's two sides",
             Reject::Weak => "the weights do not prove the goal",
+            Reject::Overflow => "the weights overflow",
         }
     }
 }
@@ -817,9 +820,9 @@ impl<'a> Cx<'a> {
             if e.mul == 0 || e.mul > MAX_MUL {
                 return Err(at_edge(Reject::Edge));
             }
-            self.edge(e, at).map_err(at_edge)?;
             let m = i128::from(e.mul);
-            sum = m.checked_mul(e.w).and_then(|x| sum.checked_add(x)).ok_or(at_edge(Reject::Edge))?;
+            sum = m.checked_mul(e.w).and_then(|x| sum.checked_add(x)).ok_or(at_edge(Reject::Overflow))?;
+            self.edge(e, at).map_err(at_edge)?;
             coef.push((e.from, m));
             coef.push((e.to, -m));
         }

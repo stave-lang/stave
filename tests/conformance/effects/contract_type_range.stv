@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// The type range alone proves a check against a constant: `result >= 0` on a `u8` holds, so the
+// check goes and `lo` has no `trap`; `requires(x >= 0)` is unnecessary (E0216).
+fn lo(x: u8) -> u8 without(trap) ensures(result >= 0) {
+    return x;
+}
+
+fn top(x: u8) -> u8 without(trap) requires(x >= 0) { //~ WARNING E0216
+    return x;
+}
+
+fn small(x: i8) -> i8 without(trap) ensures(result <= 127 && result >= -128) {
+    return x;
+}
+
+fn main() {
+    let a = lo(1) + top(2);
+    let b = small(3);
+}

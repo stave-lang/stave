@@ -1,0 +1,15 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Overflow at contract_own_trap.stv:7:30"
+// A `requires` whose proof rests on its own trapping arithmetic is no unnecessary clause: its
+// check goes, but `x + 1` still traps at 255, so deleting the clause would change the program.
+// No E0216 here.
+import std.io;
+fn f(x: u8) -> u8 requires(x + 1 > x) {
+    return x;
+}
+
+fn main() -> i32 {
+    let a = f(255);
+    io.print(f"ran past f: {a}\n");
+    return 0;
+}

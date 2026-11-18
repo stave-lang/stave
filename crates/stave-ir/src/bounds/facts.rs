@@ -58,6 +58,8 @@ use crate::witness::{ASSERT_BLOCKS, Edge, MAX_CONST, NOT_DEPTH, Node, Source};
 
 /// Folding depth of `add`/`sub` chains, and of `slice.len (slice.make ..)` nesting.
 const DEPTH: u32 = 8;
+/// The most nodes a search for contradictory facts starts from.
+const CYCLE_STARTS: usize = 16;
 /// Constants and offsets beyond this are opaque (keeps every weight sum far from `i128` overflow).
 /// Every `u64` constant is below it, so a constant index or length is never opaque.
 const MAX_K: i128 = MAX_CONST;
@@ -516,7 +518,7 @@ impl Cx<'_> {
     }
 
     /// The bit set of `f`'s parameters that are true whenever `f` returns.
-    fn asserted(&self, f: FuncId) -> u64 {
+    pub(super) fn asserted(&self, f: FuncId) -> u64 {
         if let Some(&m) = self.facts.asserted.borrow().get(&f) {
             return m;
         }
@@ -550,8 +552,10 @@ impl Cx<'_> {
     ) -> Option<Proof> {
         let bound = n.k.checked_sub(idx.k)?.checked_sub(1)?;
         let offset = Proof::Offset { base: idx.root.map(|v| v.0), k: idx.k };
-        if idx.node == n.node {
-            return (bound >= 0).then_some(offset);
+        // One node on both sides: holds by the constants alone, or by a walk back to the node
+        // of negative weight (contradictory facts) found below.
+        if idx.node == n.node && bound >= 0 {
+            return Some(offset);
         }
         let g = self.graph();
         const START: u32 = u32::MAX;
@@ -607,6 +611,50 @@ impl Cx<'_> {
         self.prove_lt(at, idx, Term { k: n.k.checked_add(1)?, ..n }, None)
     }
 
+    /// Facts that contradict each other at the end of `block`: a node and a walk of facts back
+    /// to it of negative total weight (`u <= u - 1`). Only the start nodes of branch and assert
+    /// facts holding there are tried (a contradiction needs a condition), at most
+    /// [`CYCLE_STARTS`] of them, each a bounded query.
+    pub(super) fn contradiction(&self, block: u32) -> Option<(u32, Vec<u32>)> {
+        let g = self.graph();
+        let mut starts: Vec<u32> = Vec::new();
+        for f in &g.facts {
+            if matches!(f.src, Source::Branch { .. } | Source::Assert { .. })
+                && self.holds(f.at, block, u32::MAX)
+                && !starts.contains(&f.from)
+            {
+                starts.push(f.from);
+                if starts.len() == CYCLE_STARTS {
+                    break;
+                }
+            }
+        }
+        starts.into_iter().find_map(|u| {
+            let t = Term { node: u, k: 0, root: None };
+            let mut path = Vec::new();
+            self.prove_at(block, u32::MAX, t, t, Some(&mut path)).map(|_| (u, path))
+        })
+    }
+
+    /// A walk of facts holding at the end of `block` from the node of `from` to node `to`, of any
+    /// weight (empty when they are the same node).
+    pub(super) fn walk(&self, block: u32, from: Term, to: u32) -> Option<Vec<u32>> {
+        let mut path = Vec::new();
+        let far = Term { node: to, k: MAX_K, root: None };
+        self.prove_at(block, u32::MAX, Term { node: from.node, k: 0, root: None }, far, Some(&mut path))?;
+        Some(path)
+    }
+
+    /// The node of term `t`.
+    pub(super) fn node_of(t: Term) -> u32 {
+        t.node
+    }
+
+    /// The term of node `u` itself.
+    pub(super) fn node_term(u: u32) -> Term {
+        Term { node: u, k: 0, root: None }
+    }
+
     /// The folding steps of operand `o`, from the operand as written down to its term's node.
     pub(super) fn down(&self, o: Operand, out: &mut Vec<Edge>) {
         let _ = self.fold(o, &mut |e| out.push(e));
@@ -649,7 +697,7 @@ impl Cx<'_> {
 
 /// `(cond, pol)` when block `t` (not the entry) is entered only through the `pol` edge of a
 /// `cbr cond`.
-fn edge_cond(b: &Body, preds: &[Vec<(u32, bool)>], t: usize) -> Option<(Operand, bool)> {
+pub(super) fn edge_cond(b: &Body, preds: &[Vec<(u32, bool)>], t: usize) -> Option<(Operand, bool)> {
     let &[(d, pol)] = preds.get(t)?.as_slice() else { return None };
     if t == 0 {
         return None;

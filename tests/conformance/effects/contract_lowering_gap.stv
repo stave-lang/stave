@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// `stave check` lowers a fn with a contract check to decide its checks. A fn stage0 cannot lower
+// yet (a `for` over a `char` range) gets no contract diagnostics from `check`, and `check` passes
+// as it does without the clause; a build reports the gap where it lowers the fn.
+fn count(a: char, b: char) -> u32 ensures(result >= 0) {
+    let mut n: u32 = 0;
+    for c in a..b {
+        n += 1;
+    }
+    return n;
+}
+
+fn main() {
+    let k = count('a', 'd');
+}

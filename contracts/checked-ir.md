@@ -260,7 +260,7 @@ b2():
   the build mode: a function keeps the same checks in debug and release, and the checked IR (the
   `ir` dump, the interpreter's input) is its result. Each removed check has a witness, the proof
   as inequalities that each name their place in the IR and that, times their multipliers, add
-  up to the goal (stave-ir `witness`; the pass writes chains, every multiplier 1); an
+  up to the goal (stave-ir `witness`; mostly chains, every multiplier 1); an
   independent checker validates every witness, and every refutation of a contract check, before
   the check is deleted or the error reported, and a witness it refuses is a compiler bug (exit
   3). Release passes remove no check; the IR verifier and the bounds audit run again on their
