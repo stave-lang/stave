@@ -10,7 +10,7 @@
 //!
 //! A `test fn` with parameters is called by a generated fn instead ([`add_caller`]): one call per
 //! input of [`stave_sema::testgen::inputs`], in order, all in one process. Scalars are constants;
-//! an array or tuple value and the elements of a slice are statics. The test fn writes a
+//! an array, tuple, or struct value and the elements of a slice are statics. The test fn writes a
 //! stdout marker as each input starts and another when its `requires` skips the input
 //! (contracts/cli.md "Test fn inputs"): their counts give the inputs run and skipped, and on a
 //! failure the input that failed, which `--filter T --exact --input N` runs alone.
@@ -110,7 +110,7 @@ impl TestFnReport {
                         if run * 10 < i.total {
                             let _ = writeln!(
                                 s,
-                                "    note: `requires` skipped {} of {} inputs; only comparisons of a parameter or `p.len()` with a constant narrow the inputs",
+                                "    note: `requires` skipped {} of {} inputs; only comparisons of a parameter, its int fields, or `p.len()` with a constant narrow the inputs",
                                 i.skipped, i.total
                             );
                         }
@@ -394,9 +394,9 @@ fn word(s: &str) -> String {
 }
 
 /// Adds `__stave_test_inputs.<tag>`, a fn without parameters that calls `test` once per input of
-/// `inputs` (values of `d`'s parameters), in order, and returns. An array or tuple argument is
-/// loaded from a static holding its bytes; a slice argument is made from a static `[T; n]` of its
-/// elements (equal statics shared).
+/// `inputs` (values of `d`'s parameters), in order, and returns. An array, tuple, or struct
+/// argument is loaded from a static holding its bytes; a slice argument is made from a static
+/// `[T; n]` of its elements (equal statics shared).
 pub fn add_caller(
     m: &mut Module,
     test: FuncId,
@@ -450,7 +450,7 @@ impl Caller<'_> {
             (Gen::Char, Value::Char(c)) => b.int(i128::from(*c)),
             (Gen::F32, Value::F32(x)) => b.konst(Const::F32(*x)),
             (Gen::F64, Value::F64(x)) => b.konst(Const::F64(*x)),
-            (Gen::Array(..) | Gen::Tuple(_), _) => {
+            (Gen::Array(..) | Gen::Tuple(_) | Gen::Struct { .. }, _) => {
                 let size = self.size(t)?;
                 let mut bytes = vec![0u8; size];
                 encode(&self.lay, t, v, &mut bytes, 0)?;

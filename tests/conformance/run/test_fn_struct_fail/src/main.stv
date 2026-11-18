@@ -1,0 +1,36 @@
+// A failing `test fn` with struct parameters, for `stave test`: the failing input prints as
+// struct literals as `main` names the types (`Span::<u32>`, `geo.Cell`), and its replay line
+// selects that one test although another test's name starts with it. As a conformance run test,
+// `main` runs.
+import std.debug;
+import std.io;
+import geo;
+
+struct Span<T> {
+    start: T,
+    end: T,
+}
+
+// Seeded bug: traps `Overflow` when the span is reversed.
+fn len(s: Span<u32>) -> u32 {
+    return s.end - s.start;
+}
+
+fn main() -> i32 {
+    let n = len(Span.{ start: 2, end: 5 });
+    io.print(f"len: {n}\n");
+    return 0;
+}
+
+test fn span_len(s: Span<u32>, c: geo.Cell) requires(s.end < 100) {
+    debug.assert(len(s) < 100, "a span is shorter than 100");
+    debug.assert(c.row == c.row, "a cell");
+}
+
+test fn span_len_ordered(s: Span<u32>) requires(s.start <= s.end && s.end < 100) {
+    debug.assert(len(s) < 100, "an ordered span is shorter than 100");
+}
+
+test fn plain() {
+    debug.assert(len(Span.{ start: 0, end: 0 }) == 0, "an empty span");
+}

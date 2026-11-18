@@ -1,0 +1,19 @@
+// Structs `main` takes as `test fn` parameters: `Open` has only `pub` fields, `Sealed` does not.
+pub struct Open {
+    pub x: u32,
+    pub y: i8,
+}
+
+pub struct Sealed {
+    pub x: u32,
+    y: u32,
+}
+
+pub struct Outer {
+    pub open: Open,
+    pub sealed: Sealed,
+}
+
+pub fn sealed(x: u32) -> Sealed {
+    return Sealed.{ x: x, y: x };
+}

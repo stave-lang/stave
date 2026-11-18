@@ -758,6 +758,100 @@ fn input_selects_one_test() {
     assert_eq!((c, test_lines(&out).len()), (0, 1), "{out}");
 }
 
+/// `test fn` parameters of struct type: the inputs of `run/test_fn_structs` (the same with
+/// `--release` and on AArch64); a failing input of `run/test_fn_struct_fail` prints as struct
+/// literals that compile where the test's module would write them, and its replay reruns it.
+#[test]
+fn test_fn_struct_inputs() {
+    let pkg = run_prog("test_fn_structs");
+    let d = tmp("testfn_structs");
+    let (c, out, err) = stave_in(&d, &["test", &pkg]);
+    if !host_runs() {
+        return;
+    }
+    assert_eq!(c, 0, "{out}{err}");
+    // `field_ranges`: x in -3..=3, y = 7, id in 0..=9, a bool: 140 values, 121 of them inputs.
+    let want = [
+        "ok        test main.containers: 621 inputs run, 0 skipped",
+        "ok        test main.generic_and_imported: 446 inputs run, 0 skipped",
+        "ok        test main.nested: 622 inputs run, 0 skipped",
+        "ok        test main.field_filter: 438 inputs run, 183 skipped",
+        "ok        test main.field_ranges: 121 inputs run, 0 skipped",
+    ];
+    assert_eq!(test_lines(&out), want, "{out}");
+    let (c, rel, _) = stave_in(&d, &["test", &pkg, "--release"]);
+    assert_eq!((c, test_lines(&rel)), (0, test_lines(&out)), "--release: {rel}");
+    if have_qemu_aarch64() {
+        let (c, a64, err) =
+            stave_in(&d, &["test", &pkg, "--target", "aarch64-linux", "--runner", "qemu-aarch64"]);
+        assert_eq!((c, test_lines(&a64)), (0, test_lines(&out)), "aarch64: {a64}{err}");
+    }
+
+    let pkg = run_prog("test_fn_struct_fail");
+    let (c, out, err) = stave_in(&d, &["test", &pkg]);
+    assert_eq!(c, 1, "{out}{err}");
+    // Diagonal input 18: `start` takes edge 18 of u32 (127), `end` edge 18 of 0..=99 (98).
+    assert!(out.contains("FAILED    test main.span_len (exit 101) at input 18 (19 of "), "{out}");
+    assert!(out.contains("    panic: Overflow at src/main.stv:16:18 in main.len"), "{out}");
+    let shown = out.lines().find_map(|l| l.strip_prefix("    input ")).unwrap_or_else(|| panic!("{out}"));
+    let (input, values) = shown.split_once(": ").unwrap();
+    assert_eq!(
+        values, "s = Span::<u32>.{ start: 127u32, end: 98u32 }, c = geo.Cell.{ row: 127u32, col: 127u32 }",
+        "{out}"
+    );
+    assert!(out.contains("ok        test main.span_len_ordered: "), "{out}");
+    let replay =
+        out.lines().find_map(|l| l.strip_prefix("    replay: stave ")).unwrap_or_else(|| panic!("{out}"));
+    let (c, again, _) = stave_in(&d, &replay.split_whitespace().collect::<Vec<_>>());
+    assert_eq!(c, 1, "{again}");
+    assert!(again.contains(&format!("    input {shown}\n")), "{again}");
+    assert_eq!(test_lines(&again).len(), 1, "{again}");
+
+    // The literals compile in the test's module.
+    let paste = tmp("testfn_struct_paste");
+    std::fs::create_dir_all(paste.join("src")).unwrap();
+    std::fs::write(paste.join("stave.toml"), "name = \"paste\"\nkind = \"bin\"\n").unwrap();
+    std::fs::copy(Path::new(&pkg).join("src/geo.stv"), paste.join("src/geo.stv")).unwrap();
+    let (s, c) = values.split_once(", c = ").unwrap();
+    let s = s.strip_prefix("s = ").unwrap();
+    std::fs::write(
+        paste.join("src/main.stv"),
+        format!(
+            "import geo;\n\nstruct Span<T> {{\n    start: T,\n    end: T,\n}}\n\nfn main() -> i32 {{\n    let s: Span<u32> = {s};\n    let c: geo.Cell = {c};\n    return 0;\n}}\n"
+        ),
+    )
+    .unwrap();
+    let (c, out, err) = stave_in(&paste, &["check", "."]);
+    assert_eq!(c, 0, "input {input}: {out}{err}");
+}
+
+/// E0214 says why a struct is not generatable: the field that is not, or what is private.
+#[test]
+fn test_fn_struct_e0214_messages() {
+    let d = tmp("testfn_struct_e0214");
+    let types = repo().join("tests/conformance/types");
+    let (c, _, err) = stave_in(&d, &["check", &types.join("test_fn_params.stv").display().to_string()]);
+    assert_eq!(c, 1, "{err}");
+    for m in [
+        "the test runner cannot generate values of type `V`",
+        "the test runner cannot generate values of type `E`",
+        "the test runner cannot generate values of type `Outer`: it cannot generate field `h.e`",
+        "the test runner cannot generate values of type `WithVec`: `v.ptr` is private to module `std.vec`",
+        "values of `Big` are too large to generate (more than 4096 scalars)",
+    ] {
+        assert!(err.contains(m), "{m}: {err}");
+    }
+    let (c, _, err) = stave_in(&d, &["check", &types.join("test_fn_private").display().to_string()]);
+    assert_eq!(c, 1, "{err}");
+    for m in [
+        "the test runner cannot generate values of type `Sealed`: `y` is private to module `geo`",
+        "the test runner cannot generate values of type `Outer`: `sealed.y` is private to module `geo`",
+        "the test runner cannot generate values of type `[Sealed; 2]`: `y` is private to module `geo`",
+    ] {
+        assert!(err.contains(m), "{m}: {err}");
+    }
+}
+
 /// A package directory `dir` with manifest name `name` (TOML-escaped) and an empty `main`.
 fn named_package(dir: &Path, name: &str) {
     std::fs::create_dir_all(dir.join("src")).unwrap();
