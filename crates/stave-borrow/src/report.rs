@@ -228,9 +228,9 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                     None => out.extend(mk("E0504", None, &[("place", &text)], span, &[])),
                 }
             }
-            Finding::ViewWrite { place, span } => {
+            Finding::ViewWrite { place, span, several } => {
                 let text = place_text(body, tys, &place);
-                out.extend(mk("E0513", None, &[("place", &text)], span, &[]));
+                out.extend(mk("E0513", several.then_some("several"), &[("place", &text)], span, &[]));
             }
         }
     }

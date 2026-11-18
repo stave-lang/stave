@@ -102,7 +102,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0510 | returned reference or view not covered by the `from` clause |
 | E0511 | retired: a missing `from` clause declares the empty origin set; a returned borrow of a parameter not named is E0510 |
 | E0512 | returned value borrows a local |
-| E0513 | write through `&mut View` with origins not contained in the target's. Planned: for a `&mut` rooted at a parameter, the origins must be in that parameter's `from` set plus its own origins; fix "add `from x` to parameter `p`" |
+| E0513 | write through `&mut View` with origins not contained in the target's; case `several`: the pointer may point to more than one view object and one of them may lack the origins (a pointer picked from several, or one held in a by-value view parameter, in a closure capture, or below the view a `&mut` parameter points to). Planned: for a `&mut` rooted at a parameter, the origins must be in that parameter's `from` set plus its own origins; fix "add `from x` to parameter `p`" |
 | E0514 | `from` on a parameter that is not `&mut V` (V a view) of a fn item or method (closure, `extern`, and `kernel` params take none). Planned |
 | E0515 | a parameter's `from` clause names the parameter itself. Planned |
 | E0520 | `from x` names a by-value non-view parameter |

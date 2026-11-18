@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// A pointer read from a field of a view struct local may point to any view object the struct
+// borrows.
+view struct W { a: &mut Option<&u32>, b: &Option<&u32> }
+
+fn dangling() -> u32 {
+    let mut oa: Option<&u32> = Option.None;
+    {
+        let x: u32 = 7;
+        let ob: Option<&u32> = Option.Some(&x);
+        let w = W.{ a: &mut oa, b: &ob };
+        *w.a = *w.b; //~ ERROR E0513
+    }
+    return match oa { Option.Some(r) => *r, Option.None => 0 };
+}
+
+fn same_origins() -> u32 {
+    let x: u32 = 7;
+    let r: &u32 = &x;
+    let mut oa: Option<&u32> = Option.Some(r);
+    let ob: Option<&u32> = Option.Some(r);
+    let w = W.{ a: &mut oa, b: &ob };
+    *w.a = *w.b;
+    return match oa { Option.Some(v) => *v, Option.None => 0 };
+}
+
+fn main() -> i32 {
+    return 0;
+}

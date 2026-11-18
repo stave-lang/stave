@@ -210,6 +210,71 @@ impl<'a> Tys<'a> {
         r
     }
 
+    /// Whether a value of `t` can reach, through at least one reference, a `&mut` to a ref-like
+    /// type: a pointer a store can go through that is not one of the value's own (unknown types
+    /// and view-bounded generic params: yes). A fn value counts as its result, which carries the
+    /// fn value's origins.
+    pub fn holds_inner_mut(&mut self, t: TypeId) -> bool {
+        if self.is_unknown(t) {
+            return true;
+        }
+        if let TypeKind::Ref { inner, .. } = self.ov.kind(t) {
+            let inner = *inner;
+            if !self.ref_like(inner) {
+                return false;
+            }
+        }
+        let sigs = self.sigs;
+        let env = self.env;
+        // (type, below a reference)
+        let mut stack = vec![(t, false)];
+        let mut seen: Vec<(TypeId, bool)> = Vec::new();
+        let mut kids = Vec::new();
+        while let Some((x, below)) = stack.pop() {
+            if self.is_unknown(x) || seen.len() > 4096 {
+                return true;
+            }
+            if !self.ref_like(x) || seen.contains(&(x, below)) {
+                continue;
+            }
+            seen.push((x, below));
+            match self.kind(x) {
+                TypeKind::Ref { mutable, inner } => {
+                    if below && mutable && self.ref_like(inner) {
+                        return true;
+                    }
+                    stack.push((inner, true));
+                }
+                TypeKind::Ptr { .. } => {}
+                TypeKind::Param(i) => {
+                    if env.get(i as usize).is_some_and(|g| g.view) {
+                        return true;
+                    }
+                }
+                TypeKind::Fn { ret, .. } => stack.push((ret, below)),
+                TypeKind::Adt { def, args } => {
+                    for a in args.iter() {
+                        if let GArg::Type(a) = a {
+                            stack.push((*a, below));
+                        }
+                    }
+                    if let Some(a) = sigs.adt(def).filter(|a| a.is_view) {
+                        for f in a.variants.iter().flat_map(|v| v.fields.iter()) {
+                            let ft = self.ov.subst(f.ty, &args, None);
+                            stack.push((ft, below));
+                        }
+                    }
+                }
+                k => {
+                    kids.clear();
+                    k.children(&mut kids);
+                    stack.extend(kids.iter().map(|&c| (c, below)));
+                }
+            }
+        }
+        false
+    }
+
     /// Whether `t` is Copy (unknown types: yes, so nothing is reported for them).
     pub fn is_copy(&mut self, t: TypeId) -> bool {
         if self.is_unknown(t) {
