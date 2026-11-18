@@ -1,0 +1,40 @@
+// `stave test --input N` runs one input of exactly one `test fn`: the replay line of a failure
+// selects the test by its full name with `--exact`, since `--filter` alone matches every test
+// whose name contains it (here `main.sum_agrees` is inside `main.sum_agrees_short`). As a
+// conformance run test, `main` runs.
+import std.debug;
+import std.io;
+
+fn sum_ref(xs: &[u32]) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..xs.len() {
+        s = s + (xs[i] as u64);
+    }
+    return s;
+}
+
+// Seeded bug: one too many when there are exactly three elements.
+fn sum(xs: &[u32]) -> u64 {
+    let s = sum_ref(xs);
+    return if xs.len() == 3 then s +% 1 else s;
+}
+
+fn main() -> i32 {
+    let xs: [u32; 2] = [4, 5];
+    let s = sum(&xs);
+    io.print(f"sum: {s}\n");
+    return 0;
+}
+
+test fn sum_agrees(xs: &[u32]) requires(xs.len() <= 4) {
+    debug.assert(sum(xs) == sum_ref(xs), "sum agrees with the reference");
+}
+
+test fn sum_agrees_short(xs: &[u32]) requires(xs.len() <= 2) {
+    debug.assert(sum(xs) == sum_ref(xs), "sum agrees on short slices");
+}
+
+test fn plain() {
+    let xs: [u32; 1] = [7];
+    debug.assert(sum(&xs) == 7, "one element");
+}

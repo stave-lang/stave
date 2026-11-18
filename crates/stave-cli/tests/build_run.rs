@@ -680,7 +680,7 @@ test fn empty_range(a: u8) requires(a > 3 && a < 2) { }
     assert!(out.contains("    input 3: xs = &[3u32, 4u32, 5u32]\n"), "{out}");
     let replay =
         out.lines().find_map(|l| l.strip_prefix("    replay: stave ")).unwrap_or_else(|| panic!("{out}"));
-    assert!(replay.starts_with("test . --filter main.sums_agree --input 3 --target "), "{replay}");
+    assert!(replay.starts_with("test . --filter main.sums_agree --exact --input 3 --target "), "{replay}");
     let words: Vec<&str> = replay.split_whitespace().collect();
     let (c, again, _) = stave_in(&bad, &words);
     assert_eq!(c, 1, "{again}");
@@ -694,9 +694,68 @@ test fn empty_range(a: u8) requires(a > 3 && a < 2) { }
     assert!(out.contains("FAILED    test main.none_left: `requires` skipped all "), "{out}");
     assert!(out.contains("FAILED    test main.empty_range: its `requires` ranges admit no input\n"), "{out}");
     assert!(out.ends_with("test fns: 1 passed, 3 failed, 0 not run\n"), "{out}");
-    let (c, none, _) = stave_in(&bad, &["test", ".", "--input", "100000"]);
+    let (c, none, _) = stave_in(&bad, &["test", ".", "--filter", "sums_agree", "--input", "100000"]);
     assert_eq!(c, 1);
     assert!(none.contains("FAILED    test main.sums_agree: no input 100000: the test has "), "{none}");
+}
+
+/// `--input N` runs one input of exactly one `test fn`: the replay line names the failing test
+/// with `--filter T --exact`, so a test whose name contains T is not run; a selection of several
+/// tests, of none, or of a test without parameters is a usage error (exit 2).
+#[test]
+fn input_selects_one_test() {
+    let pkg = run_prog("test_fn_replay");
+    let d = tmp("testfn_replay");
+    let (c, out, err) = stave_in(&d, &["test", &pkg]);
+    if !host_runs() {
+        return;
+    }
+    assert_eq!(c, 1, "{out}{err}");
+    assert!(out.contains("FAILED    test main.sum_agrees (exit 101) at input "), "{out}");
+    assert!(out.contains("ok        test main.sum_agrees_short: "), "{out}");
+    assert!(out.ends_with("test fns: 2 passed, 1 failed, 0 not run\n"), "{out}");
+    let replay =
+        out.lines().find_map(|l| l.strip_prefix("    replay: stave ")).unwrap_or_else(|| panic!("{out}"));
+    let words: Vec<&str> = replay.split_whitespace().collect();
+    let at = words.iter().position(|w| *w == "--filter").unwrap_or_else(|| panic!("{replay}"));
+    assert_eq!(words[at + 1..at + 4], ["main.sum_agrees", "--exact", "--input"], "{replay}");
+    let input = words[at + 4];
+    let (c, again, err) = stave_in(&d, &words);
+    assert_eq!(c, 1, "{again}{err}");
+    let lines = test_lines(&again);
+    assert_eq!(lines.len(), 1, "only the failing test runs: {again}");
+    assert!(
+        lines[0].starts_with(&format!("FAILED    test main.sum_agrees (exit 101) at input {input} (1 of 1"))
+    );
+    assert!(again.ends_with("test fns: 0 passed, 1 failed, 0 not run\n"), "{again}");
+
+    // `--filter main.sum_agrees` alone selects both tests.
+    let (c, out, err) = stave_in(&d, &["test", &pkg, "--filter", "main.sum_agrees", "--input", input]);
+    assert_eq!(c, 2, "{out}{err}");
+    assert!(
+        err.contains(&format!("stave: --input {input}: --filter main.sum_agrees selects 2 test fns (")),
+        "{err}"
+    );
+    assert!(err.contains("main.sum_agrees_short") && err.contains("--filter NAME --exact"), "{err}");
+    assert!(test_lines(&out).is_empty(), "{out}");
+    let (c, _, err) = stave_in(&d, &["test", &pkg, "--input", "0"]);
+    assert_eq!(c, 2);
+    assert!(err.contains("stave: --input 0: the package selects 3 test fns ("), "{err}");
+    let (c, _, err) = stave_in(&d, &["test", &pkg, "--filter", "main.sum", "--exact", "--input", "0"]);
+    assert_eq!(c, 2);
+    assert!(err.contains("stave: --input 0: --filter main.sum --exact selects no test fn"), "{err}");
+    let (c, _, err) = stave_in(&d, &["test", &pkg, "--filter", "plain", "--input", "0"]);
+    assert_eq!(c, 2);
+    assert!(
+        err.contains("stave: --input 0: test fn main.plain has no parameters, so it has no input 0"),
+        "{err}"
+    );
+    let (c, _, err) = stave_in(&d, &["test", &d.display().to_string(), "--input", "0"]);
+    assert_eq!(c, 2);
+    assert!(err.contains("is not a package, so it has no test fn"), "{err}");
+    // Without `--input`, `--exact` selects the one test and runs all its inputs.
+    let (c, out, _) = stave_in(&d, &["test", &pkg, "--filter", "main.sum_agrees_short", "--exact"]);
+    assert_eq!((c, test_lines(&out).len()), (0, 1), "{out}");
 }
 
 /// A package directory `dir` with manifest name `name` (TOML-escaped) and an empty `main`.

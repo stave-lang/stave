@@ -111,7 +111,9 @@ pub struct Args {
     pub cache: Option<PathBuf>,
     pub runner: Option<String>,
     pub filter: Option<String>,
-    /// `test --input N`: only input N of each selected `test fn` with parameters.
+    /// `test --exact`: `--filter` is a whole test name, not a substring.
+    pub exact: bool,
+    /// `test --input N`: only input N of the one selected `test fn`, which has parameters.
     pub input: Option<usize>,
     pub watch: bool,
     pub alloc_check: bool,
@@ -162,8 +164,9 @@ commands:
                         (host targets only, else E1001; ARGS go to the program,
                         those starting with `-` only after `--`)
   check [PKG_DIR]
-  test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD] [--input N]
-                        (--input N: only input N of each test fn with parameters)
+  test [PKG_DIR] [--release] [--target T] [--filter S [--exact]] [--runner CMD] [--input N]
+                        (--filter S: tests whose name contains S; --exact: named S;
+                        --input N: only input N of the one selected test fn)
   fix [PKG_DIR] [--dry-run] [--target T] [--diagnostics human|json]
                         (apply the exact fixes, re-check, repeat; --dry-run prints a diff)
   unsafe-report [PKG_DIR] [--json]
@@ -209,7 +212,9 @@ fn allowed(cmd: Cmd, flag: &str) -> bool {
     match cmd {
         Cmd::Build => COMPILE.contains(&flag) || matches!(flag, "-o" | "--watch"),
         Cmd::Run | Cmd::Check => COMPILE.contains(&flag),
-        Cmd::Test => COMPILE.contains(&flag) || matches!(flag, "--filter" | "--runner" | "--input"),
+        Cmd::Test => {
+            COMPILE.contains(&flag) || matches!(flag, "--filter" | "--exact" | "--runner" | "--input")
+        }
         // Always stage0: the check of a round reads edits that are not written yet.
         Cmd::Fix => matches!(flag, "--dry-run" | "--target" | "--diagnostics"),
         // These always run in stage0 whatever --compiler says (cli-stage1.md).
@@ -239,7 +244,7 @@ fn takes_value(flag: &str) -> bool {
     )
 }
 
-const KNOWN_FLAGS: [&str; 20] = [
+const KNOWN_FLAGS: [&str; 21] = [
     "--release",
     "--target",
     "--features",
@@ -252,6 +257,7 @@ const KNOWN_FLAGS: [&str; 20] = [
     "--cache",
     "--runner",
     "--filter",
+    "--exact",
     "--input",
     "--watch",
     "--alloc-check",
@@ -306,6 +312,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
     let mut input: Option<usize> = None;
     let (mut release, mut timings, mut watch, mut alloc_check, mut json, mut dry_run, mut check) =
         (false, false, false, false, false, false, false);
+    let mut exact = false;
 
     let mut i = 1;
     while i < argv.len() {
@@ -364,6 +371,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
             "--json" => set_flag(&mut json, flag)?,
             "--dry-run" => set_flag(&mut dry_run, flag)?,
             "--check" => set_flag(&mut check, flag)?,
+            "--exact" => set_flag(&mut exact, flag)?,
             "--target" => set_once(&mut target, value, flag)?,
             // A list: repeated --features accumulate.
             "--features" => features.push(value),
@@ -475,6 +483,9 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
     if dump.is_empty() && dump_dir.is_some() {
         return err("--dump-dir needs --dump=STAGE,...");
     }
+    if exact && filter.is_none() {
+        return err("--exact needs --filter NAME");
+    }
 
     Ok(Parsed::Args(Box::new(Args {
         cmd,
@@ -491,6 +502,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
         cache,
         runner,
         filter,
+        exact,
         input,
         watch,
         alloc_check,
@@ -570,7 +582,9 @@ mod tests {
     fn test_run_and_others() {
         let a = args("test t --filter lex --runner qemu-aarch64 --target aarch64-linux+sve --input 7");
         assert_eq!((a.filter.as_deref(), a.runner.as_deref()), (Some("lex"), Some("qemu-aarch64")));
-        assert_eq!(a.input, Some(7));
+        assert_eq!((a.input, a.exact), (Some(7), false));
+        let a = args("test t --filter main.lex --exact --input 0");
+        assert_eq!((a.filter.as_deref(), a.exact, a.input), (Some("main.lex"), true, Some(0)));
         let v: Vec<String> = ["run", "--release", "--", "-x", "--target", "y"].map(String::from).to_vec();
         let Ok(Parsed::Args(a)) = parse(&v) else { panic!() };
         assert_eq!(a.run_args, ["-x", "--target", "y"]);
@@ -633,6 +647,9 @@ mod tests {
         assert!(usage("run --filter x").contains("does not take --filter"));
         assert!(usage("test --input x").contains("--input takes an input number"));
         assert!(usage("build --input 1").contains("does not take --input"));
+        assert!(usage("test --exact").contains("--exact needs --filter NAME"));
+        assert!(usage("test --filter a --exact --exact").contains("--exact given twice"));
+        assert!(usage("run --exact").contains("does not take --exact"));
         assert!(usage("check --dry-run").contains("does not take --dry-run"));
         assert!(usage("fix --release").contains("does not take --release"));
         assert!(usage("fix --compiler gpu").contains("does not take --compiler"));

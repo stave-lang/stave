@@ -11,7 +11,7 @@ built program's exit codes are in LANG.md §3 (101 on a panic).
 | `stave build [PKG_DIR] [--release] [--target T] [--features F,...] [-o OUT]` | Build an executable or static library |
 | `stave run [PKG_DIR [ARGS...]] [--release] [--target T] [-- ARGS...]` | Build, then exec. `--target` only the host's targets (the triples of the host's arch, at any level the host CPU supports) or `gpu-sm86`; otherwise E1001 |
 | `stave check [PKG_DIR]` | Parse, resolve, type check, borrow check, and check deny clauses (`without(..)`). No codegen |
-| `stave test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD] [--input N]` | Build and run `test fn`s and the conformance files. `--input N` runs only input N of each selected `test fn` with parameters. `--runner` wraps execution (e.g. `sde64 -icx --`, `qemu-aarch64 -cpu max,...`). A target the host cannot run without a runner is E1001: reported as not run, never as passed |
+| `stave test [PKG_DIR] [--release] [--target T] [--filter S [--exact]] [--runner CMD] [--input N]` | Build and run `test fn`s and the conformance files. `--filter S` selects those whose name contains `S`; with `--exact`, the one named `S` (`main.sums`; `--exact` without `--filter`: exit 2). `--input N` runs only input N of the selected `test fn`: a selection of no `test fn`, of several, or of one without parameters is exit 2, and so is a PKG_DIR without `stave.toml`. `--runner` wraps execution (e.g. `sde64 -icx --`, `qemu-aarch64 -cpu max,...`). A target the host cannot run without a runner is E1001: reported as not run, never as passed |
 | `stave unsafe-report [PKG_DIR] [--json]` | List the unsafe inventory |
 | `stave effects [PKG_DIR] [--json]` | List the effect set of each fn of the program's own packages |
 | `stave caps-report [PKG_DIR] [--json]` | Planned: per package, the OS capability classes its code can reach |
@@ -93,7 +93,7 @@ Outputs and statuses of the code-generating commands:
     started)`, the stderr lines, `    input N: p = <literal>, ...` (Stave literals: suffixed ints
     and floats, a float with no literal as `mem.f32_from_bits(0x..)` / `mem.f64_from_bits(0x..)`,
     `'c'` with `\u{..}` escapes, `[..]`, `(..)`, `&[..]`), and `    replay: stave test DIR
-    --filter T --input N --target TRIPLE` (plus `--release`, `--runner CMD` when given).
+    --filter T --exact --input N --target TRIPLE` (plus `--release`, `--runner CMD` when given).
     `FAILED    test T: ...` with no exit status: no input ran (an empty range; `requires` skipped
     all; `--input N` past the last input), or the process exited with status 0 before its last
     input.
