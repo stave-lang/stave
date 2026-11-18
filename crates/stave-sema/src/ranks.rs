@@ -28,9 +28,12 @@
 //! built-in package (`with_lock` calling `f` under its guard, `get_or_init` running `f`) is
 //! reported at the user call that leads there.
 //!
-//! Not checked: the drop of a value whose `Drop` impl takes a lock, at the point it is dropped
-//! while a guard of an equal or higher rank lives (its callers' calls are checked through the
-//! drop edges).
+//! **Drops.** A drop (scope end, temporary, partial drop, the old value an assignment
+//! overwrites) runs the dropped type's drop glue, a node of the graph: it is checked like a call,
+//! without the local it drops. Locals drop in reverse declaration order, so a value declared
+//! before a guard drops after the guard is released. A value moved into a callee and dropped there
+//! is that callee's drop: its own check covers the guards it holds, and every caller holding a
+//! guard is checked at the call, whose lowest rank includes the callee's drop edges.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::{Diagnostic, Span};
@@ -71,9 +74,12 @@ pub enum At {
     Call(u32),
     /// The join of the threads of the `scope` statement spanning this.
     Join(Span),
+    /// A drop of a value of this type (the old value of an assignment too): its drop glue runs.
+    /// A local type indexes [`BodyLocks::types`].
+    Drop(TypeId),
 }
 
-/// The locals that may hold a lock at one call or join; `span` is the call or the join.
+/// The locals that may hold a lock at one call, join, or drop; `span` is that point.
 #[derive(Clone, Debug)]
 pub struct HeldAt {
     pub at: At,
@@ -81,14 +87,40 @@ pub struct HeldAt {
     pub held: Vec<Held>,
 }
 
-/// The locks a fn body (its closures and `spawn` bodies included) may hold: per call and join
-/// with any; `any`, every one it may hold anywhere; `calls`, the token of every call its CFG has.
+/// The locks a fn body (its closures and `spawn` bodies included) may hold: per call, join, and
+/// drop with any; `any`, every one it may hold anywhere; `calls`, the token of every call its CFG
+/// has; `types`, the local types of the borrow checker's type overlay for the body.
 #[derive(Clone, Debug)]
 pub struct BodyLocks {
     pub decl: DeclId,
     pub sites: Vec<HeldAt>,
     pub any: Vec<Held>,
     pub calls: Vec<u32>,
+    pub types: Vec<TypeKind>,
+}
+
+/// Type `t` of an overlay whose local types are `local`, interned into `cx` (a global id is the
+/// same in both). Post-order with an explicit stack.
+fn import<I: Interner + ?Sized>(cx: &mut I, local: &[TypeKind], t: TypeId) -> Option<TypeId> {
+    let mut done: FxHashMap<TypeId, TypeId> = FxHashMap::default();
+    let mut stack = vec![(t, false)];
+    while let Some((u, ready)) = stack.pop() {
+        if !u.is_local() || done.contains_key(&u) {
+            continue;
+        }
+        let k = local.get(u.idx())?;
+        if ready {
+            let mapped = k.map(|c| if c.is_local() { done.get(&c).copied().unwrap_or(c) } else { c });
+            let id = cx.intern(mapped);
+            done.insert(u, id);
+        } else {
+            stack.push((u, true));
+            let mut kids = Vec::new();
+            k.children(&mut kids);
+            stack.extend(kids.into_iter().filter(|c| c.is_local()).map(|c| (c, false)));
+        }
+    }
+    if t.is_local() { done.get(&t).copied() } else { Some(t) }
 }
 
 /// The parts of a value of type `t` that may hold a lock: each `MutexGuard` reached through
@@ -149,8 +181,9 @@ fn own_rank(sigs: &Sigs, l: &LockItems, inst: &InstKey) -> Option<u64> {
     }
 }
 
-/// The lowest rank each node may acquire ([`NONE`]: none), by levels of the condensed graph.
-fn lowest(g: &CallGraph, own: &[u64]) -> Vec<u64> {
+/// The lowest rank each node may acquire ([`NONE`]: none), by levels of the condensed graph;
+/// edges marked in `skip` are not taken.
+fn lowest(g: &CallGraph, own: &[u64], skip: &[bool]) -> Vec<u64> {
     let mut low = vec![NONE; g.nodes.len()];
     for l in 0..g.level_count() {
         for s in g.level(l) {
@@ -158,8 +191,9 @@ fn lowest(g: &CallGraph, own: &[u64]) -> Vec<u64> {
             let mut m = NONE;
             for &v in members {
                 m = m.min(own[v as usize]);
-                for e in g.succ(v) {
-                    if g.scc_of[e.to as usize] != s {
+                let base = g.out_start[v as usize] as usize;
+                for (k, e) in g.succ(v).iter().enumerate() {
+                    if g.scc_of[e.to as usize] != s && !skip[base + k] {
                         m = m.min(low[e.to as usize]);
                     }
                 }
@@ -185,6 +219,7 @@ struct Cx<'a> {
     g: &'a CallGraph,
     own: Vec<u64>,
     low: Vec<u64>,
+    skip: Vec<bool>,
     threads: [Option<DeclId>; 3],
     out: Vec<Diagnostic>,
     seen: FxHashSet<(u32, u32, u64, u64)>,
@@ -242,7 +277,7 @@ impl Cx<'_> {
             }
             let base = g.out_start[m as usize];
             for (k, e) in g.succ(m).iter().enumerate() {
-                if self.low[e.to as usize] > rank {
+                if self.low[e.to as usize] > rank || self.skip[(base + k as u32) as usize] {
                     continue;
                 }
                 if let std::collections::hash_map::Entry::Vacant(v) = parent.entry(e.to) {
@@ -279,7 +314,7 @@ impl Cx<'_> {
 
     /// Reports the acquisition by `targets` at `span` of node `p` while `held` is held (E1405);
     /// `join`: the targets are threads joined there (E1406).
-    fn report(&mut self, p: u32, span: Span, held: &Lock, targets: &[u32], join: bool) {
+    fn report(&mut self, p: u32, span: Span, held: &Lock, targets: &[u32], join: bool, drop: bool) {
         let Some(&t) = targets.iter().min_by_key(|&&t| self.low[t as usize]) else { return };
         let Some((edges, end)) = self.chain(t, held.rank) else { return };
         let rank = self.own[end as usize];
@@ -310,7 +345,8 @@ impl Cx<'_> {
             roles.push((if e.kind == EdgeKind::Drop { "drop" } else { "call" }, e.site));
         }
         let code = if join { "E1406" } else { "E1405" };
-        self.out.extend(mk(code, None, &holes, primary, &roles));
+        let case = (drop && !join).then_some("drop");
+        self.out.extend(mk(code, case, &holes, primary, &roles));
     }
 
     fn resolve(&self, held: &[Held], args: &[GArg], extra: Option<&Lock>) -> Vec<Lock> {
@@ -379,9 +415,52 @@ impl Cx<'_> {
     }
 }
 
+/// The types a fn body (its closures included) may drop, from the borrow checker: the values
+/// that may be initialized where a drop runs. `None`: not known (keep every drop edge).
+#[derive(Clone, Debug)]
+pub struct BodyDrops {
+    pub decl: DeclId,
+    pub types: Option<Vec<TypeId>>,
+}
+
+/// Marks the drop edges of fn and closure nodes to the glue of types their body never drops
+/// (the graph's drop edges cover every type a body makes or owns, a returned one too).
+fn unused_drops(
+    g: &CallGraph,
+    cx: &mut crate::types::Overlay<'_>,
+    glue: &FxHashMap<TypeId, u32>,
+    drops: &[BodyDrops],
+) -> Vec<bool> {
+    let mut skip = vec![false; g.out.len()];
+    let by_decl: FxHashMap<DeclId, &Option<Vec<TypeId>>> = drops.iter().map(|d| (d.decl, &d.types)).collect();
+    let mut kept: FxHashMap<u32, Option<FxHashSet<u32>>> = FxHashMap::default();
+    for v in 0..g.nodes.len() as u32 {
+        let Some(p) = g.fn_of(v) else { continue };
+        let base = g.out_start[v as usize] as usize;
+        for (k, e) in g.succ(v).iter().enumerate() {
+            if e.kind != EdgeKind::Drop {
+                continue;
+            }
+            let set = kept.entry(p).or_insert_with(|| {
+                let NodeKind::Fn { inst, .. } = &g.nodes[p as usize].kind else { return None };
+                let types = by_decl.get(&inst.decl)?.as_ref()?;
+                Some(
+                    types.iter().filter_map(|&t| glue.get(&cx.subst(t, &inst.args, None)).copied()).collect(),
+                )
+            });
+            if let Some(set) = set
+                && !set.contains(&e.to)
+            {
+                skip[base + k] = true;
+            }
+        }
+    }
+    skip
+}
+
 /// The E1405 / E1406 diagnostics of a program without errors (`bodies`: the borrow checker's
-/// held locks).
-pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks]) -> Vec<Diagnostic> {
+/// held locks; `drops`: what each body may drop).
+pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks], drops: &[BodyDrops]) -> Vec<Diagnostic> {
     let g = &tc.call_graph;
     let sigs = &tc.sigs;
     let l = sigs.lang.locks;
@@ -396,9 +475,21 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks]) -> Vec<Diagnosti
     if own.iter().all(|&r| r == NONE) {
         return Vec::new();
     }
-    let low = lowest(g, &own);
+    // the dropped types of the bodies are interned here, over the graph's own types
+    let mut tycx = g.types(&tc.types);
+    let glue: FxHashMap<TypeId, u32> = g
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| match n.kind {
+            NodeKind::Glue { ty } => Some((ty, i as u32)),
+            _ => None,
+        })
+        .collect();
+    let skip = unused_drops(g, &mut tycx, &glue, drops);
+    let low = lowest(g, &own, &skip);
     let threads = ["join", "par_for", "par_for_mut"].map(|n| crate::mono::item_at(prog, "std.thread", n));
-    let mut cx = Cx { prog, tc, g, own, low, threads, out: Vec::new(), seen: FxHashSet::default() };
+    let mut cx = Cx { prog, tc, g, own, low, skip, threads, out: Vec::new(), seen: FxHashSet::default() };
     let by_decl: FxHashMap<DeclId, &BodyLocks> = bodies.iter().map(|b| (b.decl, b)).collect();
     // the calls of each fn node to check (its closures' calls under it): (token, callees)
     let mut calls: FxHashMap<u32, Vec<(u32, Vec<u32>)>> = FxHashMap::default();
@@ -436,7 +527,7 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks]) -> Vec<Diagnosti
                     .iter()
                     .filter_map(|s| match s.at {
                         At::Call(t) => Some((t, s)),
-                        At::Join(_) => None,
+                        At::Join(_) | At::Drop(_) => None,
                     })
                     .collect()
             })
@@ -471,7 +562,7 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks]) -> Vec<Diagnosti
                 continue;
             }
             let join = cx.is_thread_call(targets);
-            cx.report(p, span, &top, targets, join);
+            cx.report(p, span, &top, targets, join, false);
         }
         // the joins of the node's `scope` statements: the spawn bodies inside each statement
         let Some(b) = body else { continue };
@@ -493,7 +584,26 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks]) -> Vec<Diagnosti
                 .collect();
             let low = kids.iter().map(|&c| cx.low[c as usize]).min().unwrap_or(NONE);
             if low <= top.rank {
-                cx.report(p, s.span, &top, &kids, true);
+                cx.report(p, s.span, &top, &kids, true, false);
+            }
+        }
+        // the drops: the dropped type's glue, else (a type the graph has no glue for) every
+        // drop the node and its closures make
+        for s in &b.sites {
+            let At::Drop(t) = s.at else { continue };
+            let held = cx.resolve(&s.held, &args, None);
+            let Some(top) = held.into_iter().max_by_key(|h| h.rank) else { continue };
+            let ty = import(&mut tycx, &b.types, t).map(|t| tycx.subst(t, &args, None));
+            let targets: Vec<u32> = match ty.and_then(|t| glue.get(&t)) {
+                Some(&n) => vec![n],
+                None => (0..g.nodes.len() as u32)
+                    .filter(|&c| c == p || matches!(g.nodes[c as usize].kind, NodeKind::Closure { parent, .. } if parent == p))
+                    .flat_map(|c| g.succ(c).iter().filter(|e| e.kind == EdgeKind::Drop).map(|e| e.to))
+                    .collect(),
+            };
+            let low = targets.iter().map(|&n| cx.low[n as usize]).min().unwrap_or(NONE);
+            if low <= top.rank {
+                cx.report(p, s.span, &top, &targets, false, true);
             }
         }
     }

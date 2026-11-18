@@ -1,11 +1,17 @@
-//! The locks a body holds at its calls and joins, for the rank check ([`stave_sema::ranks`]).
+//! The locks a body holds at its calls, joins, and drops, for the rank check
+//! ([`stave_sema::ranks`]).
 //!
 //! A local may hold a lock while its value may contain a `MutexGuard` (or a value of a `T: view`
 //! param) and it may be initialized: forward dataflow over the CFG, union at joins. A local
 //! becomes initialized when it or a part of it is assigned (params and captures on entry), and
 //! stops being so when it is moved out as a whole, dropped as a whole, or dies. A partial move
 //! keeps it (conservative). At a call, the locals the call's arguments move out as a whole are
-//! not counted: the callee holds them, and its own calls are checked in its body.
+//! not counted: the callee holds them, and its own calls are checked in its body. A drop (a
+//! `Drop` statement, or the old value an assignment overwrites) runs the type's drop glue: it is
+//! checked like a call, without the local it drops. The types a body really drops (a drop of a
+//! value that may be initialized) are reported for every body: the call graph's drop edges
+//! (every type a body makes or owns) narrowed to them, a constructor that returns its value drops
+//! nothing.
 
 use stave_sema::ranks::{At, Held, HeldAt, Part};
 
@@ -22,6 +28,11 @@ pub struct Scan {
     pub calls: Vec<u32>,
     /// Whether any local of the body may hold a lock.
     pub holds: bool,
+    /// The local types of the body's type overlay (the [`At::Drop`] types index them).
+    pub types: Vec<stave_sema::types::TypeKind>,
+    /// The types of the values the body may drop (typeck's table); `None`: one is a type of the
+    /// body's overlay only.
+    pub drops: Option<Vec<stave_sema::TypeId>>,
 }
 
 /// The locals a statement moves out or ends as a whole.
@@ -49,15 +60,18 @@ fn ended(k: &StmtKind, mut f: impl FnMut(LocalId)) {
 /// Scans `flow`'s body.
 pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
     let body: &Body = flow.body;
-    let mut out = Scan::default();
+    let mut out = Scan { drops: Some(Vec::new()), ..Scan::default() };
+    let mut drops_any = false;
     for b in &body.blocks {
         for s in &b.stmts {
-            if let StmtKind::Assign { rv: Rvalue::Call { tok, .. }, .. } = &s.kind {
-                out.calls.push(*tok);
+            match &s.kind {
+                StmtKind::Assign { rv: Rvalue::Call { tok, .. }, .. } => out.calls.push(*tok),
+                StmtKind::Drop(_) | StmtKind::Assign { init: false, .. } => drops_any = true,
+                _ => {}
             }
         }
     }
-    // the locals that may hold a lock, with their parts (each type walked once)
+    // the locals that may hold a lock, with their parts (each type walked once), first
     let mut parts: Vec<Vec<Part>> = Vec::new();
     let mut idx: Vec<u32> = vec![u32::MAX; body.locals.len()];
     let mut memo: Vec<(stave_sema::TypeId, Vec<Part>)> = Vec::new();
@@ -78,10 +92,18 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
             parts.push(ps);
         }
     }
-    if parts.is_empty() {
+    let ncand = parts.len();
+    out.holds = ncand > 0;
+    if !out.holds && !drops_any {
         return out;
     }
-    out.holds = true;
+    // then the locals with drop glue: a drop runs only on a value that may be initialized
+    for (i, l) in body.locals.iter().enumerate() {
+        if idx[i] == u32::MAX && !l.ty.is_none() && tys.needs_drop(l.ty) {
+            idx[i] = parts.len() as u32;
+            parts.push(Vec::new());
+        }
+    }
     let local_of: Vec<LocalId> =
         (0..body.locals.len() as u32).filter(|&l| idx[l as usize] != u32::MAX).collect();
     let n = parts.len();
@@ -131,18 +153,38 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
             break;
         }
     }
+    let holding = |st: &Bits| st.iter().any(|i| i < ncand);
+    let live = |st: &Bits, l: LocalId| match idx.get(l as usize) {
+        Some(&i) if i != u32::MAX => st.contains(i as usize),
+        _ => true,
+    };
     let held = |st: &Bits| -> Vec<Held> {
         st.iter()
+            .filter(|&i| i < ncand)
             .map(|i| Held { parts: parts[i].clone(), span: body.locals[local_of[i] as usize].span })
             .collect()
     };
+    let mut dropped: Vec<stave_sema::TypeId> = Vec::new();
     let mut any = Bits::new(n);
     for &b in &flow.rpo {
         let Some(mut st) = entry[b as usize].clone() else { continue };
         for s in &body.blocks[b as usize].stmts {
             any.union_with(&st);
-            match &s.kind {
-                StmtKind::Assign { rv: Rvalue::Call { tok, args, .. }, .. } if !st.is_empty() => {
+            // the drops that may run, and what they drop (an overwrite drops the old value)
+            let drop = match &s.kind {
+                StmtKind::Drop(p) if live(&st, p.local) => Some((p.ty, Some(p))),
+                StmtKind::Assign { dest, init: false, .. }
+                    if live(&st, dest.local) && tys.needs_drop(dest.ty) =>
+                {
+                    Some((dest.ty, None))
+                }
+                _ => None,
+            };
+            if let Some((t, _)) = drop {
+                dropped.push(t);
+            }
+            match (&s.kind, drop) {
+                (StmtKind::Assign { rv: Rvalue::Call { tok, args, .. }, .. }, _) if holding(&st) => {
                     let mut at = st.clone();
                     for a in args {
                         if a.kind == OpKind::Move
@@ -153,13 +195,27 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
                             at.remove(i as usize);
                         }
                     }
-                    if !at.is_empty() {
+                    if holding(&at) {
                         out.sites.push(HeldAt { at: At::Call(*tok), span: s.span, held: held(&at) });
                     }
                 }
-                StmtKind::Read(o) if !st.is_empty() => {
+                (StmtKind::Read(o), _) if holding(&st) => {
                     if let Some(&(_, scope)) = body.joins.iter().find(|j| j.0 == o.place.local) {
                         out.sites.push(HeldAt { at: At::Join(scope), span: s.span, held: held(&st) });
+                    }
+                }
+                // a drop runs the type's drop glue: a call, holding all but what it drops
+                (_, Some((t, whole))) if holding(&st) => {
+                    let mut at = st.clone();
+                    if let Some(p) = whole
+                        && p.proj.is_empty()
+                        && let Some(&i) = idx.get(p.local as usize)
+                        && i != u32::MAX
+                    {
+                        at.remove(i as usize);
+                    }
+                    if holding(&at) {
+                        out.sites.push(HeldAt { at: At::Drop(t), span: s.span, held: held(&at) });
                     }
                 }
                 _ => {}
@@ -167,6 +223,9 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
             step(&s.kind, &mut st);
         }
     }
+    dropped.sort_unstable();
+    dropped.dedup();
+    out.drops = if dropped.iter().any(|t| t.is_local()) { None } else { Some(dropped) };
     out.any = held(&any);
     out
 }

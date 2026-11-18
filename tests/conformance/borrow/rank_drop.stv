@@ -1,0 +1,101 @@
+//~ CHECK-ONLY
+// A drop runs the dropped type's drop glue, so it is checked like a call (E1405, at the drop):
+// `Flush` takes `LOW` (rank 1) when dropped. Locals drop in reverse declaration order, so a
+// `Flush` declared after a rank-2 guard drops while it is held (an error) and one declared before
+// drops after it is released (fine). Also: a temporary dropped at the end of its statement, the
+// old value an assignment overwrites, a struct with a `Flush` field, and a `Flush` moved into a
+// callee that drops it (an error at the call). Dropping a guard acquires nothing.
+import std.sync;
+
+static LOW: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0);
+
+struct Flush { pub n: u32 }
+
+impl Drop for Flush {
+    fn drop(&mut self) {
+        let k = self.n;
+        let v = LOW.with_lock(fn(c: &mut u32) -> u32 { *c = *c + k; return *c; });
+    }
+}
+
+struct Holder { pub f: Flush, pub id: u32 }
+
+fn make(n: u32) -> Flush {
+    return Flush.{ n: n };
+}
+
+fn consume(x: Flush) {}
+
+fn declared_first(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let x = Flush.{ n: 1 };
+    let g = hi.lock();
+    return *g.get();
+}
+
+fn declared_after(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let g = hi.lock();
+    let x = Flush.{ n: 1 };
+    return *g.get(); //~ ERROR E1405
+}
+
+fn temporary(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let g = hi.lock();
+    let v = *g.get() + make(3).n; //~ ERROR E1405
+    return v;
+}
+
+fn overwrite(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let mut x = Flush.{ n: 1 };
+    let g = hi.lock();
+    x = Flush.{ n: 2 }; //~ ERROR E1405
+    return *g.get();
+}
+
+fn field(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let g = hi.lock();
+    let h = Holder.{ f: make(1), id: 2 };
+    return *g.get() + h.id; //~ ERROR E1405
+}
+
+fn moved_in(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let g = hi.lock();
+    consume(make(4)); //~ ERROR E1405
+    return *g.get();
+}
+
+fn released_first(hi: &sync.Mutex<u32, 2>) -> u32 {
+    let x = Flush.{ n: 1 };
+    let mut v: u32 = 0;
+    {
+        let g = hi.lock();
+        v = *g.get();
+    }
+    let y = Flush.{ n: 2 };
+    return v;
+}
+
+fn under_lower(zero: &sync.Mutex<u32, 0>) -> u32 {
+    let g = zero.lock();
+    let x = Flush.{ n: 1 };
+    return *g.get();
+}
+
+fn two_guards(lo: &sync.Mutex<u32, 0>, hi: &sync.Mutex<u32, 2>) -> u32 {
+    let a = lo.lock();
+    let b = hi.lock();
+    return *a.get() + *b.get();
+}
+
+fn main() {
+    let zero = sync.Mutex::<u32, 0>.new(0);
+    let hi = sync.Mutex::<u32, 2>.new(0);
+    let r1 = declared_first(&hi);
+    let r2 = declared_after(&hi);
+    let r3 = temporary(&hi);
+    let r4 = overwrite(&hi);
+    let r5 = field(&hi);
+    let r6 = moved_in(&hi);
+    let r7 = released_first(&hi);
+    let r8 = under_lower(&zero);
+    let r9 = two_guards(&zero, &hi);
+}

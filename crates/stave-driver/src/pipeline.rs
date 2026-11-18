@@ -528,7 +528,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     // ---- lock ranks: every acquisition above the ranks held, every join too.
     if !has_errors && failure.is_none() {
         let t0 = Instant::now();
-        let ds = stave_sema::ranks::check(&program, &tc, &bc.locks);
+        let ds = stave_sema::ranks::check(&program, &tc, &bc.locks, &bc.drops);
         if !ds.is_empty() {
             diagnostics.extend(ds);
             diagnostics = stave_diag::canonical_order(diagnostics, &program.source_map);

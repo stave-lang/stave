@@ -64,8 +64,10 @@ pub struct Borrowck {
     pub time: Duration,
     /// Summed per-body time of the phases (CFG build, dataflow, checks + reports), all threads.
     pub phases: [Duration; 3],
-    /// The locks each body that may hold one holds at its calls and joins, in body order.
+    /// The locks each body that may hold one holds at its calls, joins, and drops, in body order.
     pub locks: Vec<stave_sema::ranks::BodyLocks>,
+    /// The types each checked body may drop, in body order.
+    pub drops: Vec<stave_sema::ranks::BodyDrops>,
 }
 
 impl Borrowck {
@@ -138,6 +140,7 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
         }
         out.diagnostics.extend(r.diags);
         out.dump.extend(r.dump);
+        out.drops.push(stave_sema::ranks::BodyDrops { decl: tb.decl, types: r.locks.drops.clone() });
         if r.locks.holds {
             let l = r.locks;
             out.locks.push(stave_sema::ranks::BodyLocks {
@@ -145,6 +148,7 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
                 sites: l.sites,
                 any: l.any,
                 calls: l.calls,
+                types: l.types,
             });
         }
     }
@@ -193,10 +197,13 @@ fn check_body(
         unsupported: body.unsupported,
         rounds: 0,
         phases: [t0.elapsed(), Duration::ZERO, Duration::ZERO],
-        locks: locks::Scan::default(),
+        locks: locks::Scan { drops: Some(Vec::new()), ..locks::Scan::default() },
     };
     if body.unsupported.is_none() {
         check_tree(&body, &mut tys, opts, tb.item.0, &mut one);
+        if one.locks.holds {
+            one.locks.types = tys.ov.local.clone();
+        }
     }
     Some(one)
 }
@@ -217,6 +224,13 @@ fn check_tree(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item: u32,
     one.locks.sites.extend(l.sites);
     one.locks.any.extend(l.any);
     one.locks.calls.extend(l.calls);
+    one.locks.drops = match (one.locks.drops.take(), l.drops) {
+        (Some(mut a), Some(b)) => {
+            a.extend(b);
+            Some(a)
+        }
+        _ => None,
+    };
     for nb in &body.nested {
         check_tree(nb, tys, opts, item, one);
     }

@@ -1733,7 +1733,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0417",
         severity: Severity::Error,
         area: "kinds",
-        rule: "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T>`, or `sync.Once<T>`",
+        rule: "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T, R>`, or `sync.Once<T, R>` (R: the lock rank)",
         retired: false,
         located: true,
         holes: &[
@@ -1747,7 +1747,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "`static` type" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}>`, or `sync.Once<{type}>`",
+                    description: "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}, R>`, or `sync.Once<{type}, R>` (R: the lock rank)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1854,7 +1854,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "mutation of a `static`" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T>`) and change it through its `&self` methods",
+                    description: "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T, R>`) and change it through its `&self` methods",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3116,7 +3116,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "`static mut` here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>`)",
+                    description: "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T, R>`, `sync.Once<T, R>`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4483,7 +4483,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1405",
         severity: Severity::Error,
         area: "effects",
-        rule: "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there",
+        rule: "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there; case `drop`: a value whose drop glue acquires such a lock is dropped (scope end, temporary, overwritten old value) while the guard is held",
         retired: false,
         located: true,
         holes: &[
@@ -4505,6 +4505,21 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "release the guard before this call, give `{lock}` a rank above {held_rank}, or take two mutexes of one rank together with `sync.lock_pair`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "drop",
+                message: "`{fn}` drops a value whose drop acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "dropped here" },
+                    LabelTemplate { at: "held", text: "`{held}` held from here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "release the guard before the value is dropped (declare the value before the guard, or end the guard's block first), or give `{lock}` a rank above {held_rank}",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
