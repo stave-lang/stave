@@ -234,6 +234,7 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
         b'd' => match s {
             b"dispatch" => KwDispatch,
             b"decreases" => KwDecreases,
+            b"derive" => KwDerive,
             _ => return None,
         },
         b'e' => match s {
