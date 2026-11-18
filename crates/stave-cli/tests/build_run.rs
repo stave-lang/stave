@@ -775,6 +775,7 @@ fn test_fn_struct_inputs() {
         "ok        test main.containers: 621 inputs run, 0 skipped",
         "ok        test main.generic_and_imported: 446 inputs run, 0 skipped",
         "ok        test main.nested: 622 inputs run, 0 skipped",
+        "ok        test main.drops: 96 inputs run, 0 skipped",
         "ok        test main.field_filter: 438 inputs run, 183 skipped",
         "ok        test main.field_ranges: 121 inputs run, 0 skipped",
     ];
@@ -835,8 +836,10 @@ fn test_fn_struct_e0214_messages() {
     for m in [
         "the test runner cannot generate values of type `V`",
         "the test runner cannot generate values of type `E`",
-        "the test runner cannot generate values of type `Outer`: it cannot generate field `h.e`",
-        "the test runner cannot generate values of type `WithVec`: `v.ptr` is private to module `std.vec`",
+        "the test runner cannot generate values of type `Outer`: it cannot generate field `h.e` of type `E`",
+        "the test runner cannot generate values of type `WithVec`: it cannot generate field `v` of type `vec.Vec<u8>`",
+        "the test runner cannot generate values of type `WithString`: it cannot generate field `name` of type `string.String`",
+        "the test runner cannot generate values of type `Vec<u32>`\n",
         "values of `Big` are too large to generate (more than 4096 scalars)",
     ] {
         assert!(err.contains(m), "{m}: {err}");

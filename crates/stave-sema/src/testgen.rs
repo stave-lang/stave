@@ -4,8 +4,9 @@
 //! parameter type the runner can generate is an int (`i8`..`i64`, `u8`..`u64`, `isize`, `usize`),
 //! `bool`, `char`, `f32`, `f64`, an array, tuple, or non-view struct of those (nested freely), or,
 //! at the top level only, `&[T]` of those. A struct also needs every field, and every struct type
-//! inside, visible from the test's module (case `private`). Anything else is E0214 (case `field`:
-//! the struct field that is not generatable); so is a non-`()` return type (case `ret`), a slice
+//! of the test's package inside, visible from the test's module (case `private`). Anything else
+//! is E0214 (case `field`: the struct field that is not generatable, and its type; a struct of
+//! another package counts as one such type); so is a non-`()` return type (case `ret`), a slice
 //! parameter without a length bound (case `unbounded`), and a value of more than [`MAX_SCALARS`]
 //! scalars (case `size`).
 //!
@@ -415,18 +416,20 @@ struct Subject {
 enum NoGen {
     /// The type itself (E0214 without a case).
     Type,
-    /// The struct field at this path (`inner.label`) is not generatable.
-    Field(String),
+    /// The struct field at this path (`inner.label`), of this type (as the test's module writes
+    /// it), is not generatable.
+    Field(String, String),
     /// `name` (a field path, or a struct's name) is private to module `module`.
     Private { name: String, module: String, field: bool },
 }
 
 impl NoGen {
-    /// This reason seen from the struct field `f` that holds it.
+    /// This reason seen from the struct field `f` that holds it (`Type` is resolved by the
+    /// caller, which knows the field's type).
     fn under(self, f: &str) -> NoGen {
         match self {
-            NoGen::Type => NoGen::Field(f.to_string()),
-            NoGen::Field(p) => NoGen::Field(format!("{f}.{p}")),
+            NoGen::Type => NoGen::Type,
+            NoGen::Field(p, t) => NoGen::Field(format!("{f}.{p}"), t),
             NoGen::Private { name, module, field: true } => {
                 NoGen::Private { name: format!("{f}.{name}"), module, field: true }
             }
@@ -499,7 +502,9 @@ impl Ck<'_> {
                     let tn = self.show(t);
                     let d = match &why {
                         NoGen::Type => mk("E0214", None, &[("type", &tn)], at, &[]),
-                        NoGen::Field(f) => mk("E0214", Some("field"), &[("type", &tn), ("name", f)], at, &[]),
+                        NoGen::Field(f, ft) => {
+                            mk("E0214", Some("field"), &[("type", &tn), ("name", f), ("inner", ft)], at, &[])
+                        }
                         NoGen::Private { name, module, .. } => mk(
                             "E0214",
                             Some("private"),
@@ -587,7 +592,10 @@ impl Ck<'_> {
     }
 
     /// The generator of struct `def` with arguments `args`: its fields, each generatable and
-    /// visible from the test's module, as is the struct itself. Enums and views are not.
+    /// visible from the test's module, as is the struct itself. Enums and views are not. A struct
+    /// of another package that is not generatable is just `Type`: its insides (`vec.Vec`'s
+    /// private pointer) are not the test author's to change, so the report names the field that
+    /// holds it, with its type.
     fn struct_gen(&mut self, def: crate::DeclId, args: &[GArg], depth: u32) -> Result<Gen, NoGen> {
         let (prog, sigs) = (self.prog, self.sigs);
         let adt = sigs.adt(def).ok_or(NoGen::Type)?;
@@ -598,10 +606,14 @@ impl Ck<'_> {
         let me = self.icx.res_module();
         let module_text = |m| prog.module(m).map_or(String::new(), |x| x.path_text.clone());
         let d = prog.decl(def).ok_or(NoGen::Type)?;
+        let package = |m| prog.module(m).map(|x| x.package);
+        let foreign = package(d.module) != package(me);
+        let fail = |why: NoGen| Err(if foreign { NoGen::Type } else { why });
         if !d.is_pub() && d.module != me {
             let name = prog.strings.get(d.name).to_string();
-            return Err(NoGen::Private { name, module: module_text(d.module), field: false });
+            return fail(NoGen::Private { name, module: module_text(d.module), field: false });
         }
+        let names = ModuleNames { prog, module: me, inner: self.names() };
         let mut fields = Vec::with_capacity(v.fields.len());
         for f in &v.fields {
             let fname = prog.strings.get(f.name).to_string();
@@ -609,15 +621,18 @@ impl Ck<'_> {
                 && !fd.is_pub()
                 && fd.module != me
             {
-                return Err(NoGen::Private { name: fname, module: module_text(fd.module), field: true });
+                return fail(NoGen::Private { name: fname, module: module_text(fd.module), field: true });
             }
             let ft = self.tys.subst(f.ty, args, None);
             match self.param_gen(ft, false, depth + 1) {
                 Ok(g) => fields.push((fname, g)),
-                Err(why) => return Err(why.under(&fname)),
+                Err(NoGen::Type) => {
+                    let t = crate::types::display(&self.tys, &names, ft);
+                    return fail(NoGen::Field(fname, t));
+                }
+                Err(why) => return fail(why.under(&fname)),
             }
         }
-        let names = ModuleNames { prog, module: me, inner: self.names() };
         let mut path = names.adt_name(def);
         if !args.is_empty() {
             let parts: Vec<String> = args

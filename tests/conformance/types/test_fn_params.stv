@@ -3,6 +3,7 @@
 // and structs of those, and (as a parameter's own type) `&[T]` of those with a constant length
 // bound from `requires`. Anything else is E0214; so is a value of more than 4096 scalars, and a
 // return type other than `()` on a `test fn` with parameters.
+import std.string;
 import std.vec;
 
 struct P {
@@ -31,6 +32,10 @@ struct WithVec {
     v: vec.Vec<u8>,
 }
 
+struct WithString {
+    name: string.String,
+}
+
 struct Big {
     a: [u64; 5000],
 }
@@ -52,6 +57,8 @@ test fn view_param(v: V) {}                                      //~ ERROR E0214
 test fn enum_param(e: E) {}                                      //~ ERROR E0214
 test fn enum_field(o: Outer) {}                                  //~ ERROR E0214
 test fn vec_field(w: WithVec) {}                                 //~ ERROR E0214
+test fn string_field(w: WithString) {}                           //~ ERROR E0214
+test fn vec_param(v: vec.Vec<u32>) {}                            //~ ERROR E0214
 test fn struct_too_large(b: Big) {}                              //~ ERROR E0214
 test fn struct_ref(p: &P) {}                                     //~ ERROR E0214
 

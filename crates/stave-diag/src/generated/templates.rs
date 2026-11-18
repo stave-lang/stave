@@ -1503,10 +1503,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0214",
         severity: Severity::Error,
         area: "types",
-        rule: "a `test fn` with parameters the runner cannot generate inputs for: a parameter type other than an int, `bool`, `char`, `f32`, `f64`, an array, tuple, or non-view struct of those, or (as the parameter's own type) `&[T]` of those; case `field`: a struct field of another type; case `private`: a struct, or a struct field, the test's module cannot name; case `unbounded`: a `&[T]` parameter without a `requires` comparing its `.len()` with a constant upper bound; case `size`: a parameter value of more than 4096 scalars (a slice counts its length bound); case `ret`: a return type other than `()`",
+        rule: "a `test fn` with parameters the runner cannot generate inputs for: a parameter type other than an int, `bool`, `char`, `f32`, `f64`, an array, tuple, or non-view struct of those, or (as the parameter's own type) `&[T]` of those; case `field`: a struct field of another type (a struct of another package counts as one), named with its type; case `private`: a struct of the test's package, or a field of one, the test's module cannot name; case `unbounded`: a `&[T]` parameter without a `requires` comparing its `.len()` with a constant upper bound; case `size`: a parameter value of more than 4096 scalars (a slice counts its length bound); case `ret`: a return type other than `()`",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "inner", kind: HoleKind::Type, choices: &[] },
             Hole { name: "module", kind: HoleKind::Path, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
@@ -1526,7 +1527,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             },
             Shape {
                 case: "field",
-                message: "the test runner cannot generate values of type `{type}`: it cannot generate field `{name}`",
+                message: "the test runner cannot generate values of type `{type}`: it cannot generate field `{name}` of type `{inner}`",
                 labels: &[
                     LabelTemplate { at: "primary", text: "parameter of a `test fn`" },
                 ],

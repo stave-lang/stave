@@ -57,8 +57,9 @@ Outputs and statuses of the code-generating commands:
   - Parameter types (else E0214): `i8 i16 i32 i64 isize u8 u16 u32 u64 usize bool char f32 f64`,
     `[T; N]`, tuples, and non-view structs of those (nested), and, as a parameter's own type,
     `&[T]` of those (no `align`). Every struct inside, and each of its fields, must be visible from
-    the test's module (`pub`, or declared there; else E0214 case `private`): so no enums, refs,
-    views, `vec.Vec`, or `string.String`. A slice needs a length upper bound; a value holds at
+    the test's module (`pub`, or declared there; else E0214 case `private`, or, for a struct of
+    another package, case `field` naming the field that holds it and its type): so no enums,
+    refs, views, `vec.Vec`, or `string.String`. A slice needs a length upper bound; a value holds at
     most 4096 scalars (a slice: bound × the element's); the return type is `()`.
   - Domain: one generator per parameter: an int's range starts as its type's, a slice's length
     range as `0..`. Each `requires` clause is split at `&&` (also inside parentheses); a conjunct

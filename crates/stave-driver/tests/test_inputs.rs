@@ -67,7 +67,7 @@ fn inputs_run_in_the_interpreter() {
 
 #[test]
 fn struct_inputs_run_in_the_interpreter() {
-    run_package("test_fn_structs", 5, "main.field_filter", |i| match &i[0] {
+    run_package("test_fn_structs", 6, "main.field_filter", |i| match &i[0] {
         Value::List(xy) => xy[0] == xy[1],
         _ => false,
     });
