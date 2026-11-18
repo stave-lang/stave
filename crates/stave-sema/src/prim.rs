@@ -112,7 +112,8 @@ pub enum Prim {
     Never,
 }
 
-/// A built-in fn: the generic layout queries (const-evaluable) and the stream fence.
+/// A built-in fn: the generic layout queries (const-evaluable), the stream fence, and the row
+/// operations of `std.soa`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Builtin {
     /// `size_of::<T>() -> usize`.
@@ -124,10 +125,25 @@ pub enum Builtin {
     /// `old(e)`: `e` evaluated at fn entry. A contextual name inside a contract clause only
     /// (resolution), never in the global table, so not in [`Builtin::ALL`].
     Old,
+    /// `soa_row_size::<T>() -> usize`: the sum of the sizes of T's fields, one row of a
+    /// `std.soa.Soa<T>`. This one and the two below resolve in module `std.soa` only.
+    SoaRowSize,
+    /// `soa_read::<T>(base: *const u8, cap: usize, i: usize) -> T` (unsafe): row `i` of the
+    /// columns at `base` of capacity `cap` (contracts/intrinsics.md, `std.soa.Soa`).
+    SoaRead,
+    /// `soa_write::<T>(base: *mut u8, cap: usize, i: usize, x: T)` (unsafe): `x` as row `i`.
+    SoaWrite,
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 3] = [Builtin::SizeOf, Builtin::AlignOf, Builtin::FenceStream];
+    pub const ALL: [Builtin; 6] = [
+        Builtin::SizeOf,
+        Builtin::AlignOf,
+        Builtin::FenceStream,
+        Builtin::SoaRowSize,
+        Builtin::SoaRead,
+        Builtin::SoaWrite,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -135,7 +151,15 @@ impl Builtin {
             Builtin::AlignOf => "align_of",
             Builtin::FenceStream => "fence_stream",
             Builtin::Old => "old",
+            Builtin::SoaRowSize => "soa_row_size",
+            Builtin::SoaRead => "soa_read",
+            Builtin::SoaWrite => "soa_write",
         }
+    }
+
+    /// The row built-ins of `std.soa`, resolved in that module only.
+    pub fn soa_only(self) -> bool {
+        matches!(self, Builtin::SoaRowSize | Builtin::SoaRead | Builtin::SoaWrite)
     }
 
     pub fn from_name(s: &str) -> Option<Builtin> {

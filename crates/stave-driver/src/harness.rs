@@ -10,10 +10,10 @@
 //!
 //! A `test fn` with parameters is called by a generated fn instead ([`add_caller`]): one call per
 //! input of [`stave_sema::testgen::inputs`], in order, all in one process. Scalars are constants;
-//! an array or tuple value and the elements of a slice are statics. The test fn writes a stdout
-//! marker as each input starts and another when its `requires` skips the input (contracts/cli.md
-//! "Test fn inputs"): their counts give the inputs run and skipped, and on a failure the input
-//! that failed, which `--input N` runs alone.
+//! an array, tuple, or struct value and the elements of a slice are statics. The test fn writes a
+//! stdout marker as each input starts and another when its `requires` skips the input
+//! (contracts/cli.md "Test fn inputs"): their counts give the inputs run and skipped, and on a
+//! failure the input that failed, which `--filter T --exact --input N` runs alone.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -110,7 +110,7 @@ impl TestFnReport {
                         if run * 10 < i.total {
                             let _ = writeln!(
                                 s,
-                                "    note: `requires` skipped {} of {} inputs; only comparisons of a parameter or `p.len()` with a constant narrow the inputs",
+                                "    note: `requires` skipped {} of {} inputs; only comparisons of a parameter, its int fields, or `p.len()` with a constant narrow the inputs",
                                 i.skipped, i.total
                             );
                         }
@@ -170,17 +170,33 @@ pub enum HarnessError {
     Diagnostics,
     Failure(Failure),
     Io(String),
+    /// `--input N` with a selection of no `test fn`, of several, or of one without parameters
+    /// (the reason): a usage error.
+    Selection(String),
 }
 
 /// Which tests and inputs to run.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Selection<'a> {
-    /// A substring of the test's path.
+    /// A substring of the test's path, or (`exact`) the whole path.
     pub filter: Option<&'a str>,
+    /// `--exact`: `filter` must equal the test's path.
+    pub exact: bool,
     /// `--runner CMD`.
     pub runner: Option<&'a str>,
-    /// `--input N`: only input N of each selected `test fn` with parameters.
+    /// `--input N`: only input N of the one selected `test fn`, which must have parameters.
     pub input: Option<usize>,
+}
+
+impl Selection<'_> {
+    /// Whether the test with checked-IR path `name` is selected.
+    pub fn selects(&self, name: &str) -> bool {
+        match self.filter {
+            None => true,
+            Some(f) if self.exact => name == f,
+            Some(f) => name.contains(f),
+        }
+    }
 }
 
 /// Builds and runs the `test fn`s of the package at `root` selected by `sel`.
@@ -212,11 +228,38 @@ pub fn run(
     let runnable = runner.is_some_and(|r| !r.trim().is_empty()) || exec::can_run(triple);
     let cwd = if root.is_dir() { root.to_path_buf() } else { root.parent().unwrap_or(root).to_path_buf() };
     let mut report = TestFnReport::default();
-    for (k, (name, f, decl)) in exec::test_fns(&out.program, &module).into_iter().enumerate() {
-        if sel.filter.is_some_and(|s| !name.contains(s)) {
-            continue;
+    let domain_of =
+        |decl| out.typeck.as_ref().and_then(|tc| tc.body(decl)).and_then(|b| b.test_domain.as_deref());
+    let tests: Vec<(usize, (String, FuncId, stave_sema::DeclId))> = exec::test_fns(&out.program, &module)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, (name, ..))| sel.selects(name))
+        .collect();
+    if let Some(i) = sel.input {
+        let names: Vec<&str> = tests.iter().map(|(_, (n, ..))| n.as_str()).collect();
+        let what = match (sel.filter, sel.exact) {
+            (None, _) => "the package".to_string(),
+            (Some(f), true) => format!("--filter {f} --exact"),
+            (Some(f), false) => format!("--filter {f}"),
+        };
+        let why = match tests.as_slice() {
+            [] => Some(format!("--input {i}: {what} selects no test fn")),
+            [(_, (name, _, decl))] if domain_of(*decl).is_none() => {
+                Some(format!("--input {i}: test fn {name} has no parameters, so it has no input {i}"))
+            }
+            [_] => None,
+            _ => Some(format!(
+                "--input {i}: {what} selects {} test fns ({}); select one: --filter NAME --exact",
+                names.len(),
+                names.join(", ")
+            )),
+        };
+        if let Some(why) = why {
+            return Err(HarnessError::Selection(why));
         }
-        let domain = out.typeck.as_ref().and_then(|tc| tc.body(decl)).and_then(|b| b.test_domain.as_deref());
+    }
+    for (k, (name, f, decl)) in tests {
+        let domain = domain_of(decl);
         let Some(domain) = domain else {
             let built = pool
                 .install(|| build::codegen_link(&module, f, triple, opts.release, opts.threads, None))
@@ -316,7 +359,8 @@ pub fn count(hay: &[u8], pat: &[u8]) -> usize {
     n
 }
 
-/// The `stave test` command that runs input `i` of test `name` alone, in the same build.
+/// The `stave test` command that runs input `i` of test `name` alone, in the same build (`--exact`:
+/// no other test whose path contains `name` is selected).
 fn replay(
     root: &Path,
     name: &str,
@@ -325,8 +369,11 @@ fn replay(
     triple: stave_target::Triple,
     runner: Option<&str>,
 ) -> String {
-    let mut c =
-        format!("stave test {} --filter {} --input {i}", word(&root.display().to_string()), word(name));
+    let mut c = format!(
+        "stave test {} --filter {} --exact --input {i}",
+        word(&root.display().to_string()),
+        word(name)
+    );
     if opts.release {
         c.push_str(" --release");
     }
@@ -347,9 +394,9 @@ fn word(s: &str) -> String {
 }
 
 /// Adds `__stave_test_inputs.<tag>`, a fn without parameters that calls `test` once per input of
-/// `inputs` (values of `d`'s parameters), in order, and returns. An array or tuple argument is
-/// loaded from a static holding its bytes; a slice argument is made from a static `[T; n]` of its
-/// elements (equal statics shared).
+/// `inputs` (values of `d`'s parameters), in order, and returns. An array, tuple, or struct
+/// argument is loaded from a static holding its bytes; a slice argument is made from a static
+/// `[T; n]` of its elements (equal statics shared).
 pub fn add_caller(
     m: &mut Module,
     test: FuncId,
@@ -403,7 +450,7 @@ impl Caller<'_> {
             (Gen::Char, Value::Char(c)) => b.int(i128::from(*c)),
             (Gen::F32, Value::F32(x)) => b.konst(Const::F32(*x)),
             (Gen::F64, Value::F64(x)) => b.konst(Const::F64(*x)),
-            (Gen::Array(..) | Gen::Tuple(_), _) => {
+            (Gen::Array(..) | Gen::Tuple(_) | Gen::Struct { .. }, _) => {
                 let size = self.size(t)?;
                 let mut bytes = vec![0u8; size];
                 encode(&self.lay, t, v, &mut bytes, 0)?;

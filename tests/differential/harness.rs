@@ -38,31 +38,32 @@ struct Kernel {
 }
 
 const fn kind(arrays: &'static [Elem], lanes: usize, param: Param) -> Kind {
-    Kind { arrays, lanes, param, palettes: &generate::PALETTES }
+    Kind { arrays, lanes, param, palettes: &generate::PALETTES, extra: &[] }
 }
 
-/// The logical lane counts of std's float `sum` and `dot`.
+/// The logical lane counts of std's float `sum` and `dot`, and the block of their two-level rule
+/// (`SUM_BLOCK` in std/slice.stv), in elements.
 const L_F32: usize = 32;
 const L_F64: usize = 16;
+const BLOCK: usize = generate::SUM_BLOCK;
+
+/// Lengths at and past one block: two blocks, the second of one element; four blocks, the
+/// last short; six blocks, a block count that is not a power of two. (The interpreter leg runs
+/// them element by element, so they stay few.)
+const BLOCK_LENS: &[usize] = &[BLOCK, BLOCK + 1, 3 * BLOCK + 5, 5 * BLOCK + L_F32 + 3];
+
+const fn rkind(arrays: &'static [Elem], lanes: usize) -> Kind {
+    Kind { arrays, lanes, param: Param::None, palettes: &generate::REDUCE_PALETTES, extra: BLOCK_LENS }
+}
 
 /// The cases of the float reduction kernels: f32 and f64 sums, then dot products. Lengths run
 /// to 6L + 1, past the lengths (128 f32, 64 f64) where std's `sum` and `dot` go through
-/// `dispatch`, so each std arm sees every tail length too.
+/// `dispatch`, so each std arm sees every tail length too, then [`BLOCK_LENS`].
 const REDUCE_KINDS: &[Kind] = &[
-    Kind { arrays: &[Elem::F32], lanes: 2 * L_F32, param: Param::None, palettes: &generate::REDUCE_PALETTES },
-    Kind { arrays: &[Elem::F64], lanes: 2 * L_F64, param: Param::None, palettes: &generate::REDUCE_PALETTES },
-    Kind {
-        arrays: &[Elem::F32, Elem::F32],
-        lanes: 2 * L_F32,
-        param: Param::None,
-        palettes: &generate::REDUCE_PALETTES,
-    },
-    Kind {
-        arrays: &[Elem::F64, Elem::F64],
-        lanes: 2 * L_F64,
-        param: Param::None,
-        palettes: &generate::REDUCE_PALETTES,
-    },
+    rkind(&[Elem::F32], 2 * L_F32),
+    rkind(&[Elem::F64], 2 * L_F64),
+    rkind(&[Elem::F32, Elem::F32], 2 * L_F32),
+    rkind(&[Elem::F64, Elem::F64], 2 * L_F64),
 ];
 
 /// Every kernel program, with the case kinds its `main` dispatches on (in order).
@@ -421,7 +422,16 @@ fn run_bin(bin: &Path, run: &Run, args: &[String], cwd: &Path) -> Ran {
 /// The std dispatch fns (`std.slice.<f>`) a `_disp` kernel reaches whose arms it checks too.
 fn std_dispatch_fns(kernel: &str) -> &'static [&'static str] {
     match kernel {
-        "reduce_disp" => &["sum_f32_cpu", "dot_f32_cpu", "sum_f64_cpu", "dot_f64_cpu"],
+        "reduce_disp" => &[
+            "sum_f32_cpu",
+            "dot_f32_cpu",
+            "sum_f64_cpu",
+            "dot_f64_cpu",
+            "sum2_f32_cpu",
+            "dot2_f32_cpu",
+            "sum2_f64_cpu",
+            "dot2_f64_cpu",
+        ],
         _ => &[],
     }
 }
@@ -631,8 +641,8 @@ fn oracle(kernel: &str, case: &generate::Case) -> Option<String> {
         }
         "sum_disp" => Some(format!("u{}", xs.iter().fold(0u32, |s, &b| s.wrapping_add(u32::from(b))))),
         "reduce" | "reduce_disp" => {
-            let t = reduce_token(case, L_F32, L_F64, -0.0);
-            Some(format!("{t} {t}"))
+            let t = reduce_token(case, STD_RULE);
+            Some(format!("{t} {t} {t} {t}"))
         }
         _ => None,
     }
@@ -648,9 +658,9 @@ fn le_f64(b: &[u8]) -> Vec<f64> {
 
 /// The logical-lane rule over L lanes: lane l starts at `start` and adds terms l, l + L, .. in
 /// order, then lane j adds lane j + w for w = L/2, .., 1. std uses `start` = -0.0.
-fn lanes_f32(terms: impl Iterator<Item = f32>, l: usize, start: f32) -> f32 {
+fn lanes_f32(terms: &[f32], l: usize, start: f32) -> f32 {
     let mut lane = vec![start; l];
-    for (i, t) in terms.enumerate() {
+    for (i, t) in terms.iter().enumerate() {
         lane[i % l] += t;
     }
     let mut w = l / 2;
@@ -663,9 +673,9 @@ fn lanes_f32(terms: impl Iterator<Item = f32>, l: usize, start: f32) -> f32 {
     lane[0]
 }
 
-fn lanes_f64(terms: impl Iterator<Item = f64>, l: usize, start: f64) -> f64 {
+fn lanes_f64(terms: &[f64], l: usize, start: f64) -> f64 {
     let mut lane = vec![start; l];
-    for (i, t) in terms.enumerate() {
+    for (i, t) in terms.iter().enumerate() {
         lane[i % l] += t;
     }
     let mut w = l / 2;
@@ -678,22 +688,64 @@ fn lanes_f64(terms: impl Iterator<Item = f64>, l: usize, start: f64) -> f64 {
     lane[0]
 }
 
-/// The token of a reduction case (kinds of [`REDUCE_KINDS`]) with `l32` / `l64` lanes for f32 /
-/// f64 and the given start value; std's is `reduce_token(case, L_F32, L_F64, -0.0)`.
-fn reduce_token(case: &generate::Case, l32: usize, l64: usize, start: f64) -> String {
+/// The block tree in level passes: each pass adds neighbours 2i + 1 into 2i and carries a last
+/// odd one up unchanged, until one sum is left.
+fn tree<T: Copy + std::ops::Add<Output = T>>(mut v: Vec<T>) -> T {
+    while v.len() > 1 {
+        v = v.chunks(2).map(|p| if p.len() == 2 { p[0] + p[1] } else { p[0] }).collect();
+    }
+    v[0]
+}
+
+/// A variant of the rule: `l32` / `l64` lanes, lanes from `start`, blocks of `block` terms
+/// (`usize::MAX`: one block, the one-level rule), block sums by the block tree or, without
+/// `tree`, left to right.
+#[derive(Clone, Copy)]
+struct Rule {
+    l32: usize,
+    l64: usize,
+    start: f64,
+    block: usize,
+    tree: bool,
+}
+
+/// std's rule.
+const STD_RULE: Rule = Rule { l32: L_F32, l64: L_F64, start: -0.0, block: BLOCK, tree: true };
+
+fn combine<T: Copy + std::ops::Add<Output = T>>(v: Vec<T>, r: Rule) -> T {
+    if r.tree { tree(v) } else { v[1..].iter().fold(v[0], |a, &b| a + b) }
+}
+
+fn rule_f32(t: &[f32], r: Rule) -> f32 {
+    let s = r.start as f32;
+    if t.is_empty() {
+        return lanes_f32(t, r.l32, s);
+    }
+    combine(t.chunks(r.block.min(t.len())).map(|b| lanes_f32(b, r.l32, s)).collect(), r)
+}
+
+fn rule_f64(t: &[f64], r: Rule) -> f64 {
+    if t.is_empty() {
+        return lanes_f64(t, r.l64, r.start);
+    }
+    combine(t.chunks(r.block.min(t.len())).map(|b| lanes_f64(b, r.l64, r.start)).collect(), r)
+}
+
+/// The token of a reduction case (kinds of [`REDUCE_KINDS`]) under rule `r`.
+fn reduce_token(case: &generate::Case, r: Rule) -> String {
     let a = &case.arrays[0];
     match case.kind {
-        0 => ftok(lanes_f32(le_f32(a).into_iter(), l32, start as f32).to_bits()),
-        1 => dtok(lanes_f64(le_f64(a).into_iter(), l64, start).to_bits()),
+        0 => ftok(rule_f32(&le_f32(a), r).to_bits()),
+        1 => dtok(rule_f64(&le_f64(a), r).to_bits()),
         2 => {
-            let ys = le_f32(&case.arrays[1]);
-            let ps = le_f32(a).into_iter().zip(ys).map(|(x, y)| x * y);
-            ftok(lanes_f32(ps, l32, start as f32).to_bits())
+            let ps: Vec<f32> =
+                le_f32(a).into_iter().zip(le_f32(&case.arrays[1])).map(|(x, y)| x * y).collect();
+            ftok(rule_f32(&ps, r).to_bits())
         }
         _ => {
-            let ys = le_f64(&case.arrays[1]);
-            let ps = le_f64(a).into_iter().zip(ys).map(|(x, y)| x * y);
-            dtok(lanes_f64(ps, l64, start).to_bits())
+            let ps: Vec<f64> =
+                le_f64(a).into_iter().zip(le_f64(&case.arrays[1])).map(|(x, y)| x * y).collect();
+            dtok(rule_f64(&ps, r).to_bits())
         }
     }
 }
@@ -929,25 +981,37 @@ fn other_tokens_compare_bit_exact() {
 }
 
 /// The reduction cases catch the likely mistakes: for every kind, some default case gives other
-/// bits with half or twice the lane count, with the sequential sum, and with +0.0 lane starts,
+/// bits with half or twice the lane count, with the sequential sum, with +0.0 lane starts, with
+/// the one-level rule, with half or twice the block, and with block sums added left to right;
 /// and some case is a NaN under one lane count but not under another.
 #[test]
-fn reduce_cases_tell_lane_counts_orders_and_zero_signs_apart() {
+fn reduce_cases_tell_lane_counts_blocks_orders_and_zero_signs_apart() {
     let plan = Plan { seed: 0x5eed, full: false, random: 24 };
     let cases = generate::cases("reduce", REDUCE_KINDS, plan);
+    let s = STD_RULE;
+    let variants = [
+        Rule { l32: L_F32 / 2, l64: L_F64 / 2, ..s },
+        Rule { l32: 2 * L_F32, l64: 2 * L_F64, ..s },
+        Rule { l32: 1, l64: 1, block: usize::MAX, ..s },
+        Rule { start: 0.0, ..s },
+        Rule { block: usize::MAX, ..s },
+        Rule { block: BLOCK / 2, ..s },
+        Rule { block: 2 * BLOCK, ..s },
+        Rule { tree: false, ..s },
+    ];
     for kind in 0..REDUCE_KINDS.len() as u32 {
-        let (mut half, mut double, mut seq, mut plus_zero, mut nan) = (0, 0, 0, 0, 0);
+        let mut n = [0usize; 9];
         for c in cases.iter().filter(|c| c.kind == kind) {
-            let want = reduce_token(c, L_F32, L_F64, -0.0);
-            let h = reduce_token(c, L_F32 / 2, L_F64 / 2, -0.0);
-            let d = reduce_token(c, 2 * L_F32, 2 * L_F64, -0.0);
-            half += usize::from(!same(&want, &h));
-            double += usize::from(!same(&want, &d));
-            seq += usize::from(!same(&want, &reduce_token(c, 1, 1, -0.0)));
-            plus_zero += usize::from(!same(&want, &reduce_token(c, L_F32, L_F64, 0.0)));
-            nan += usize::from(is_nan(&want) != is_nan(&h) || is_nan(&want) != is_nan(&d));
+            let want = reduce_token(c, s);
+            let got: Vec<String> = variants.iter().map(|&r| reduce_token(c, r)).collect();
+            for (k, g) in got.iter().enumerate() {
+                n[k] += usize::from(!same(&want, g));
+            }
+            n[8] += usize::from(is_nan(&want) != is_nan(&got[0]) || is_nan(&want) != is_nan(&got[1]));
         }
-        let n = [half, double, seq, plus_zero, nan];
-        assert!(n.iter().all(|&k| k > 0), "kind {kind}: half, double, sequential, +0.0, NaN-ness: {n:?}");
+        assert!(
+            n.iter().all(|&k| k > 0),
+            "kind {kind}: L/2, 2L, sequential, +0.0, one-level, B/2, 2B, left fold, NaN-ness: {n:?}"
+        );
     }
 }

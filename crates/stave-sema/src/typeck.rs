@@ -79,6 +79,11 @@ pub enum Target {
     Field { decl: DeclId, index: u32, derefs: u32 },
     /// Tuple element.
     TupleField { index: u32, derefs: u32 },
+    /// Column `index` of a `std.soa.Soa<T>` (field `index` of T): a `[F]` place (after `derefs`
+    /// auto-derefs).
+    Column { index: u32, derefs: u32 },
+    /// A row built-in of `std.soa` (`soa_row_size`, `soa_read`, `soa_write`) on row type `ty`.
+    SoaRow { op: crate::prim::Builtin, ty: TypeId },
     /// A const or `static mut` use.
     Global { decl: DeclId },
     /// `size_of::<T>()` / `align_of::<T>()`.
@@ -545,7 +550,7 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
                 *recv = f(*recv);
                 *ret = f(*ret);
             }
-            Target::SizeOf { ty, .. } | Target::FnValue { ty } => *ty = f(*ty),
+            Target::SizeOf { ty, .. } | Target::FnValue { ty } | Target::SoaRow { ty, .. } => *ty = f(*ty),
             _ => {}
         }
     }

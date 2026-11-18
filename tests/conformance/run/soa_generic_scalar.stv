@@ -1,0 +1,39 @@
+//~ STDOUT soa_generic_scalar.stdout
+// A `Soa<T>` used only through generic fns accepts a non-struct T: E0910 is checked where a
+// concrete row type is written or passed to a `std.soa` call, not per instance. Such an instance
+// stores the whole value as one column (pinned here with T = u32: push, pop, len).
+import std.io;
+import std.soa;
+
+fn make<T: Flat>() -> soa.Soa<T> {
+    return soa.Soa::<T>.new();
+}
+
+fn put<T: Flat>(ps: &mut soa.Soa<T>, x: T) {
+    ps.push(x);
+}
+
+fn take<T: Flat>(ps: &mut soa.Soa<T>) -> Option<T> {
+    return ps.pop();
+}
+
+fn count<T: Flat>(ps: &soa.Soa<T>) -> usize {
+    return ps.len();
+}
+
+fn main() -> i32 {
+    let mut ps = make::<u32>();
+    for i in 0u32..10 { put(&mut ps, i * 3); }
+    let n = count(&ps);
+    let last = take(&mut ps).unwrap();
+    let mut s: u32 = 0;
+    loop {
+        match take(&mut ps) {
+            Option.Some(x) => { s = s + x; }
+            Option.None => { break; }
+        }
+    }
+    let m = count(&ps);
+    io.print(f"{n} {last} {s} {m}\n");
+    return 0;
+}

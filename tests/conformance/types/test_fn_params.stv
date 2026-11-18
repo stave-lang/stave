@@ -1,15 +1,47 @@
 //~ CHECK-ONLY
-// `test fn` parameters: the runner generates ints, `bool`, `char`, `f32`, `f64`, arrays and
-// tuples of those, and (as a parameter's own type) `&[T]` of those with a constant length bound
-// from `requires`. Anything else is E0214; so is a value of more than 4096 scalars, and a
+// `test fn` parameters: the runner generates ints, `bool`, `char`, `f32`, `f64`, arrays, tuples,
+// and structs of those, and (as a parameter's own type) `&[T]` of those with a constant length
+// bound from `requires`. Anything else is E0214; so is a value of more than 4096 scalars, and a
 // return type other than `()` on a `test fn` with parameters.
+import std.string;
+import std.vec;
+
 struct P {
     x: u32,
 }
 
+view struct V {
+    s: &str,
+}
+
+enum E {
+    A,
+    B,
+}
+
+struct Holder {
+    e: E,
+}
+
+struct Outer {
+    p: P,
+    h: Holder,
+}
+
+struct WithVec {
+    v: vec.Vec<u8>,
+}
+
+struct WithString {
+    name: string.String,
+}
+
+struct Big {
+    a: [u64; 5000],
+}
+
 const MAX: usize = 8;
 
-test fn struct_param(p: P) {}                                    //~ ERROR E0214
 test fn str_param(s: &str) {}                                    //~ ERROR E0214
 test fn mut_slice(xs: &mut [u8]) {}                              //~ ERROR E0214
 test fn nested_slice(xs: &[&[u8]]) requires(xs.len() <= 4) {}    //~ ERROR E0214
@@ -21,12 +53,24 @@ test fn filter_is_no_bound(xs: &[u8]) requires(xs.len() != 3) {} //~ ERROR E0214
 test fn too_long(xs: &[u32]) requires(xs.len() <= 5000) {}       //~ ERROR E0214
 test fn too_large(a: [u64; 5000]) {}                             //~ ERROR E0214
 test fn returns(x: u32) -> u32 { return x; }                     //~ ERROR E0214
+test fn view_param(v: V) {}                                      //~ ERROR E0214
+test fn enum_param(e: E) {}                                      //~ ERROR E0214
+test fn enum_field(o: Outer) {}                                  //~ ERROR E0214
+test fn vec_field(w: WithVec) {}                                 //~ ERROR E0214
+test fn string_field(w: WithString) {}                           //~ ERROR E0214
+test fn vec_param(v: vec.Vec<u32>) {}                            //~ ERROR E0214
+test fn struct_too_large(b: Big) {}                              //~ ERROR E0214
+test fn struct_ref(p: &P) {}                                     //~ ERROR E0214
 
-// Accepted: a bound from a literal, a `const`, or the other side of the comparison.
+// Accepted: a bound from a literal, a `const`, or the other side of the comparison; structs
+// whose fields this module can name, with or without a range on a field.
 test fn bounded(xs: &[u8], k: u32) requires(xs.len() <= 4 && k < 9) {}
 test fn const_bound(xs: &[(u8, bool)]) requires(xs.len() < MAX) {}
 test fn flipped(xs: &[[i16; 2]]) requires(16 >= xs.len()) {}
 test fn at_the_limit(xs: &[u32]) requires(xs.len() <= 4096) {}
 test fn no_params_unchanged() {}
+test fn struct_param(p: P) {}
+test fn struct_field_range(p: P, ps: [P; 2]) requires(p.x < 10) {}
+test fn struct_slice(ps: &[P]) requires(ps.len() <= 4) {}
 
 fn main() {}

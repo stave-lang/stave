@@ -74,10 +74,14 @@ checked in the same order.
 - **Multi-block (reference kernels):** per-block partials are written to `gpu.Out` by block
   index, then reduced by a second launch with the same tree, so the order is by lane, then by
   block index.
-- **std `sum` / `dot`:** the logical-lane rule of simd-ops.md with the CPU's L (32 for f32, 16
-  for f64): lane l of one warp adds terms l, l + L, … in order from `-0.0` (f64: lanes 16–31
-  stay `-0.0`), then the warp reduce above, which is the L-lane tree. Same bits as every CPU
-  target; a block or grid order of its own would be another L.
+- **std `sum` / `dot`:** the two-level rule of simd-ops.md with the CPU's L (32 for f32, 16
+  for f64) and B (4096). Pass 0: one warp per block k; lane l adds the block's terms l, l + L,
+  … in order from `-0.0` (f64: lanes 16–31 stay `-0.0`), then the warp reduce above, which is
+  the L-lane tree; lane 0 writes S_k to slot k. Passes 1, 2, …: level j + 1 slot i = slot 2i +
+  slot 2i + 1 of level j (a last odd slot is copied), by index, never by arrival; a CTA may run
+  several levels in shared memory as long as each add is the same pair. Depth: ceil(log2 m)
+  passes after pass 0; n = 16M f32 is 4096 warps in pass 0, then 12 levels. Same bits as every
+  CPU target and any CPU thread split.
 - **Block scan:** inclusive Hillis–Steele per warp (`shfl.sync.up`, offsets 1, 2, 4, 8, 16, lane
   ≥ offset adds `partner + own`); warp totals are scanned the same way by warp 0; lane result =
   `exclusive warp prefix + lane value` (warp 0: the lane value alone). Exclusive scan = the

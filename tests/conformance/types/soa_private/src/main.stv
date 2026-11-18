@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// A private field of the row struct gives a column usable only in the struct's module
+// (E0106 case `column`); its `pub` fields are columns everywhere.
+import std.soa;
+import pts;
+
+fn main() -> i32 {
+    let mut ps = soa.Soa::<pts.Pt>.new();
+    ps.push(pts.make(1.0, 7));
+    let x = ps.x[0];
+    let t = ps.tag[0]; //~ ERROR E0106
+    let s = pts.tags(&ps);
+    return 0;
+}

@@ -887,6 +887,24 @@ impl<'a> World<'a> {
         self.impl_applies_q(cx, imp, t, env, depth, &mut Query::default())
     }
 
+    /// The generic args of impl `imp` when its self type matches `t`, its bounds unchecked (the
+    /// call that uses them reports the unmet ones).
+    pub fn impl_head_args<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        imp: &ImplDef,
+        t: TypeId,
+    ) -> Option<Vec<GArg>> {
+        if cx.is_error_ty(imp.self_ty) {
+            return None;
+        }
+        let mut binds: Vec<Option<GArg>> = vec![None; imp.generics.len()];
+        if !self.match_ty(cx, imp.self_ty, t, &mut binds) {
+            return None;
+        }
+        binds.into_iter().collect()
+    }
+
     fn impl_applies_q<I: Interner + ?Sized>(
         &self,
         cx: &mut I,

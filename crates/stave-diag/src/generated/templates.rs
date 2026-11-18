@@ -899,6 +899,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                     edits: &[],
                 }),
             },
+            Shape {
+                case: "column",
+                message: "column `{name}` is private to module `{module}`: its field of the row struct is not `pub`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "private column `{name}` used here" },
+                    LabelTemplate { at: "decl", text: "field `{name}` declared here without `pub`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "mark field `{name}` `pub` in `{module}`, or use the column only inside `{module}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
         ],
     },
     Entry {
@@ -1297,6 +1310,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "column",
+                message: "`{type}` has no column `{name}`: its columns are the fields of its row struct",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no field `{name}` in the row type" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "name a field of the row struct, or add field `{name}` to it",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "missing-field",
                 message: "missing field `{name}` in a literal of `{type}`",
                 labels: &[
@@ -1561,10 +1586,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0214",
         severity: Severity::Error,
         area: "types",
-        rule: "a `test fn` with parameters the runner cannot generate inputs for: a parameter type other than an int, `bool`, `char`, `f32`, `f64`, an array or tuple of those, or (as the parameter's own type) `&[T]` of those; case `unbounded`: a `&[T]` parameter without a `requires` comparing its `.len()` with a constant upper bound; case `size`: a parameter value of more than 4096 scalars (a slice counts its length bound); case `ret`: a return type other than `()`",
+        rule: "a `test fn` with parameters the runner cannot generate inputs for: a parameter type other than an int, `bool`, `char`, `f32`, `f64`, an array, tuple, or non-view struct of those, or (as the parameter's own type) `&[T]` of those; case `field`: a struct field of another type (a struct of another package counts as one), named with its type; case `private`: a struct of the test's package, or a field of one, the test's module cannot name; case `unbounded`: a `&[T]` parameter without a `requires` comparing its `.len()` with a constant upper bound; case `size`: a parameter value of more than 4096 scalars (a slice counts its length bound); case `ret`: a return type other than `()`",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "inner", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "module", kind: HoleKind::Path, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
@@ -1576,7 +1603,31 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "parameter of a `test fn`" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "take ints, `bool`, `char`, `f32`, `f64`, arrays and tuples of them, or `&[T]` of those, and build other values in the body",
+                    description: "take ints, `bool`, `char`, `f32`, `f64`, arrays, tuples, and structs of them, or `&[T]` of those, and build other values in the body",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "field",
+                message: "the test runner cannot generate values of type `{type}`: it cannot generate field `{name}` of type `{inner}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "parameter of a `test fn`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take the other fields as parameters and build the struct in the body",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "private",
+                message: "the test runner cannot generate values of type `{type}`: `{name}` is private to module `{module}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "parameter of a `test fn`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "mark `{name}` `pub` in `{module}`, or take its parts as parameters and build the value in the body",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3621,6 +3672,31 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the call: the value is dropped when it goes out of scope or is overwritten; to end its life early, move it into `std.mem.drop(x)`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0910",
+        severity: Severity::Error,
+        area: "generics",
+        rule: "the row type of `std.soa.Soa<T>` is not a struct (its fields are the columns); checked where the type is written and at calls of `std.soa` methods; a generic parameter passes",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{type}` cannot be the row type of `soa.Soa`: it is not a struct",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a struct is required here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use a struct with one field per column, e.g. `struct Row {{ pub v: {type} }}` and `soa.Soa<Row>`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

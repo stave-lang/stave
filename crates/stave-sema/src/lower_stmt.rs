@@ -1375,6 +1375,13 @@ impl<'a> FnCx<'a> {
                 let Some(a) = self.addr(&p, None) else { return };
                 (self.array_slice(a, true, lane, n), true)
             }
+            // a `[T]` place (a sub-slice, a `std.soa` column): its address is the slice
+            TypeKind::Slice { .. } => {
+                let Some((a, at)) = self.addr_t(&p, None) else { return };
+                let mutable = self.pointee(at).is_some_and(|x| x.1);
+                let st = self.slice_ref_ty(mutable, lane);
+                (self.convert_ptr(a, at, st), mutable)
+            }
             _ => {
                 self.fail(f, "chunk loop over a non-sequence");
                 return;

@@ -1,13 +1,20 @@
-// Float sums and dot products under the logical-lane rule (LANG.md §4 "Float reductions"):
-// L lanes (32 for f32, 16 for f64, as std's `sum` and `dot`), lane l starts at -0.0 and adds
-// element i (dot: the rounded product a[i] * b[i]) for every i with i % L == l, in order; then
-// lane j adds lane j + w for w = L/2, L/4, .., 1. The references below do exactly that, one
-// element at a time. Each case prints std's `sum` / `dot`, then the 128-bit kernels (the L lanes
-// as eight f32x4 or f64x2; a partial last block is a masked load with -0.0 selected into the
-// lanes past the end), ` =`, then the reference twice. Std picks its loop by length (and through
-// `dispatch` by CPU), so lengths go up to past six times L; reduce_disp.stv runs the same with
-// 256- and 512-bit kernels and every std arm.
+// Float sums and dot products under the two-level rule (LANG.md §4 "Float semantics"). One
+// level: L lanes (32 for f32, 16 for f64), lane l starts at -0.0 and adds term i (the element,
+// or for dot the rounded product a[i] * b[i]) for every i with i % L == l, in order; then lane
+// j adds lane j + w for w = L/2, L/4, .., 1. Two levels: terms in blocks of B, each block by the
+// one-level rule, the block sums by the block tree: passes that add neighbours 2i + 1 into 2i
+// and carry a last odd one, until one sum is left. The references below do exactly that, one
+// term at a time. Each case prints std's `sum` / `dot`; the blocks summed by the 128-bit
+// kernels in reverse order and combined by splitting at the largest power of two below the
+// block count; std on the two children of the tree's root, run by `thread.join`; std on pieces
+// of two blocks, run by `thread.par_for_mut` and combined by the passes; ` =`, then the
+// reference four times. Lengths go past six times L (std's dispatch) and past several blocks.
 import diff;
+import std.thread;
+import std.vec;
+
+// std's block (SUM_BLOCK in std/slice.stv).
+pub const B: usize = 4096;
 
 pub fn sum_f32_ref(xs: &[f32]) -> f32 {
     let mut lane: [f32; 32] = [-0.0; 32];
@@ -186,6 +193,241 @@ pub fn dot_f64x2(a: &[f64], b: &[f64]) -> f64 {
     return (((a0 + a4) + (a2 + a6)) + ((a1 + a5) + (a3 + a7))).reduce_add();
 }
 
+// One pass of the block tree.
+fn pass<T: Add + Copy>(v: &[T]) -> vec.Vec<T> {
+    let mut w = vec.Vec::<T>.new();
+    let mut j: usize = 0;
+    while j + 1 < v.len() {
+        w.push(v[j] + v[j + 1]);
+        j = j + 2;
+    }
+    if j < v.len() { w.push(v[j]); }
+    return w;
+}
+
+// The block tree in passes over at least one block sum.
+pub fn levels<T: Add + Copy>(v0: vec.Vec<T>) -> T {
+    let mut v = v0;
+    while v.len() > 1 {
+        let w = pass::<T>(v.as_slice());
+        v = w;
+    }
+    return *v.get_ref(0);
+}
+
+// The same tree, recursively: split at the largest power of two below the count.
+pub rec fn split<T: Add + Copy>(v: &[T]) -> T {
+    if v.len() == 1 { return v[0]; }
+    let mut p: usize = 1;
+    while p * 2 < v.len() { p = p * 2; }
+    return split::<T>(&v[0..p]) + split::<T>(&v[p..v.len()]);
+}
+
+// The end of block k of an n-term sum.
+pub fn block_end(k: usize, n: usize) -> usize {
+    let e = (k + 1) * B;
+    return if e < n then e else n;
+}
+
+// The number of blocks of an n-term sum.
+pub fn blocks(n: usize) -> usize {
+    return (n + B - 1) / B;
+}
+
+// Where the root's right child starts: the largest power of two below the block count, in
+// elements (n when there is one block or none).
+pub fn root_split(n: usize) -> usize {
+    let m = blocks(n);
+    if m < 2 { return n; }
+    let mut p: usize = 1;
+    while p * 2 < m { p = p * 2; }
+    return p * B;
+}
+
+pub fn sum2_f32_ref(xs: &[f32]) -> f32 {
+    let n = xs.len();
+    if n == 0 { return -0.0; }
+    let mut v = vec.Vec::<f32>.new();
+    for k in 0..blocks(n) { v.push(sum_f32_ref(&xs[k * B..block_end(k, n)])); }
+    return levels::<f32>(v);
+}
+
+// Block sums by the 128-bit kernel, last block first, combined by `split`.
+fn sum2_f32_rev(xs: &[f32]) -> f32 {
+    let n = xs.len();
+    let m = blocks(n);
+    if m == 0 { return sum_f32x4(xs); }
+    let mut v = vec.Vec::<f32>.new();
+    for _k in 0..m { v.push(-0.0); }
+    let s = v.as_mut_slice();
+    for j in 0..m {
+        let k = m - 1 - j;
+        s[k] = sum_f32x4(&xs[k * B..block_end(k, n)]);
+    }
+    return split::<f32>(v.as_slice());
+}
+
+// std on both children of the tree's root, on two threads.
+pub fn sum_f32_join(xs: &[f32]) -> f32 {
+    let n = xs.len();
+    let k = root_split(n);
+    if k == n { return xs.sum(); }
+    let (l, r) = thread.join(fn() -> f32 { return (&xs[0..k]).sum(); }, fn() -> f32 { return (&xs[k..n]).sum(); });
+    return l + r;
+}
+
+// std on pieces of two blocks (the tree's level-1 nodes) on many threads, then the passes.
+fn sum_f32_pieces(xs: &[f32]) -> f32 {
+    let n = xs.len();
+    if n <= B { return xs.sum(); }
+    let mut v = vec.Vec::<f32>.new();
+    for _k in 0..(blocks(n) + 1) / 2 { v.push(-0.0); }
+    thread.par_for_mut(v.as_mut_slice(), fn(i: usize, p: &mut f32) {
+        let lo = 2 * i * B;
+        let hi = if lo + 2 * B < n then lo + 2 * B else n;
+        *p = (&xs[lo..hi]).sum();
+    });
+    return levels::<f32>(v);
+}
+
+pub fn dot2_f32_ref(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len();
+    if n == 0 { return -0.0; }
+    let mut v = vec.Vec::<f32>.new();
+    for k in 0..blocks(n) { v.push(dot_f32_ref(&a[k * B..block_end(k, n)], &b[k * B..block_end(k, n)])); }
+    return levels::<f32>(v);
+}
+
+// Block sums by the 128-bit kernel, last block first, combined by `split`.
+fn dot2_f32_rev(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len();
+    let m = blocks(n);
+    if m == 0 { return dot_f32x4(a, b); }
+    let mut v = vec.Vec::<f32>.new();
+    for _k in 0..m { v.push(-0.0); }
+    let s = v.as_mut_slice();
+    for j in 0..m {
+        let k = m - 1 - j;
+        s[k] = dot_f32x4(&a[k * B..block_end(k, n)], &b[k * B..block_end(k, n)]);
+    }
+    return split::<f32>(v.as_slice());
+}
+
+// std on both children of the tree's root, on two threads.
+pub fn dot_f32_join(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len();
+    let k = root_split(n);
+    if k == n { return a.dot(b); }
+    let (l, r) = thread.join(fn() -> f32 { return (&a[0..k]).dot(&b[0..k]); }, fn() -> f32 { return (&a[k..n]).dot(&b[k..n]); });
+    return l + r;
+}
+
+// std on pieces of two blocks (the tree's level-1 nodes) on many threads, then the passes.
+fn dot_f32_pieces(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len();
+    if n <= B { return a.dot(b); }
+    let mut v = vec.Vec::<f32>.new();
+    for _k in 0..(blocks(n) + 1) / 2 { v.push(-0.0); }
+    thread.par_for_mut(v.as_mut_slice(), fn(i: usize, p: &mut f32) {
+        let lo = 2 * i * B;
+        let hi = if lo + 2 * B < n then lo + 2 * B else n;
+        *p = (&a[lo..hi]).dot(&b[lo..hi]);
+    });
+    return levels::<f32>(v);
+}
+
+pub fn sum2_f64_ref(xs: &[f64]) -> f64 {
+    let n = xs.len();
+    if n == 0 { return -0.0; }
+    let mut v = vec.Vec::<f64>.new();
+    for k in 0..blocks(n) { v.push(sum_f64_ref(&xs[k * B..block_end(k, n)])); }
+    return levels::<f64>(v);
+}
+
+// Block sums by the 128-bit kernel, last block first, combined by `split`.
+fn sum2_f64_rev(xs: &[f64]) -> f64 {
+    let n = xs.len();
+    let m = blocks(n);
+    if m == 0 { return sum_f64x2(xs); }
+    let mut v = vec.Vec::<f64>.new();
+    for _k in 0..m { v.push(-0.0); }
+    let s = v.as_mut_slice();
+    for j in 0..m {
+        let k = m - 1 - j;
+        s[k] = sum_f64x2(&xs[k * B..block_end(k, n)]);
+    }
+    return split::<f64>(v.as_slice());
+}
+
+// std on both children of the tree's root, on two threads.
+pub fn sum_f64_join(xs: &[f64]) -> f64 {
+    let n = xs.len();
+    let k = root_split(n);
+    if k == n { return xs.sum(); }
+    let (l, r) = thread.join(fn() -> f64 { return (&xs[0..k]).sum(); }, fn() -> f64 { return (&xs[k..n]).sum(); });
+    return l + r;
+}
+
+// std on pieces of two blocks (the tree's level-1 nodes) on many threads, then the passes.
+fn sum_f64_pieces(xs: &[f64]) -> f64 {
+    let n = xs.len();
+    if n <= B { return xs.sum(); }
+    let mut v = vec.Vec::<f64>.new();
+    for _k in 0..(blocks(n) + 1) / 2 { v.push(-0.0); }
+    thread.par_for_mut(v.as_mut_slice(), fn(i: usize, p: &mut f64) {
+        let lo = 2 * i * B;
+        let hi = if lo + 2 * B < n then lo + 2 * B else n;
+        *p = (&xs[lo..hi]).sum();
+    });
+    return levels::<f64>(v);
+}
+
+pub fn dot2_f64_ref(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    if n == 0 { return -0.0; }
+    let mut v = vec.Vec::<f64>.new();
+    for k in 0..blocks(n) { v.push(dot_f64_ref(&a[k * B..block_end(k, n)], &b[k * B..block_end(k, n)])); }
+    return levels::<f64>(v);
+}
+
+// Block sums by the 128-bit kernel, last block first, combined by `split`.
+fn dot2_f64_rev(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    let m = blocks(n);
+    if m == 0 { return dot_f64x2(a, b); }
+    let mut v = vec.Vec::<f64>.new();
+    for _k in 0..m { v.push(-0.0); }
+    let s = v.as_mut_slice();
+    for j in 0..m {
+        let k = m - 1 - j;
+        s[k] = dot_f64x2(&a[k * B..block_end(k, n)], &b[k * B..block_end(k, n)]);
+    }
+    return split::<f64>(v.as_slice());
+}
+
+// std on both children of the tree's root, on two threads.
+pub fn dot_f64_join(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    let k = root_split(n);
+    if k == n { return a.dot(b); }
+    let (l, r) = thread.join(fn() -> f64 { return (&a[0..k]).dot(&b[0..k]); }, fn() -> f64 { return (&a[k..n]).dot(&b[k..n]); });
+    return l + r;
+}
+
+// std on pieces of two blocks (the tree's level-1 nodes) on many threads, then the passes.
+fn dot_f64_pieces(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len();
+    if n <= B { return a.dot(b); }
+    let mut v = vec.Vec::<f64>.new();
+    for _k in 0..(blocks(n) + 1) / 2 { v.push(-0.0); }
+    thread.par_for_mut(v.as_mut_slice(), fn(i: usize, p: &mut f64) {
+        let lo = 2 * i * B;
+        let hi = if lo + 2 * B < n then lo + 2 * B else n;
+        *p = (&a[lo..hi]).dot(&b[lo..hi]);
+    });
+    return levels::<f64>(v);
+}
+
 fn main() -> i32 {
     let mut c = diff.open();
     let mut o = diff.out();
@@ -196,36 +438,56 @@ fn main() -> i32 {
             let b = c.f32s(h);
             let xs = b.get();
             o.f32(xs.sum());
-            o.f32(sum_f32x4(xs));
+            o.f32(sum2_f32_rev(xs));
+            o.f32(sum_f32_join(xs));
+            o.f32(sum_f32_pieces(xs));
             o.sep();
-            let r = sum_f32_ref(xs);
+            let r = sum2_f32_ref(xs);
+            o.f32(r);
+            o.f32(r);
             o.f32(r);
             o.f32(r);
         } else if h.kind == 1 {
             let b = c.f64s(h);
             let xs = b.get();
             o.f64(xs.sum());
-            o.f64(sum_f64x2(xs));
+            o.f64(sum2_f64_rev(xs));
+            o.f64(sum_f64_join(xs));
+            o.f64(sum_f64_pieces(xs));
             o.sep();
-            let r = sum_f64_ref(xs);
+            let r = sum2_f64_ref(xs);
+            o.f64(r);
+            o.f64(r);
             o.f64(r);
             o.f64(r);
         } else if h.kind == 2 {
             let ba = c.f32s(h);
             let bb = c.f32s(h);
-            o.f32(ba.get().dot(bb.get()));
-            o.f32(dot_f32x4(ba.get(), bb.get()));
+            let xs = ba.get();
+            let ys = bb.get();
+            o.f32(xs.dot(ys));
+            o.f32(dot2_f32_rev(xs, ys));
+            o.f32(dot_f32_join(xs, ys));
+            o.f32(dot_f32_pieces(xs, ys));
             o.sep();
-            let r = dot_f32_ref(ba.get(), bb.get());
+            let r = dot2_f32_ref(xs, ys);
+            o.f32(r);
+            o.f32(r);
             o.f32(r);
             o.f32(r);
         } else {
             let ba = c.f64s(h);
             let bb = c.f64s(h);
-            o.f64(ba.get().dot(bb.get()));
-            o.f64(dot_f64x2(ba.get(), bb.get()));
+            let xs = ba.get();
+            let ys = bb.get();
+            o.f64(xs.dot(ys));
+            o.f64(dot2_f64_rev(xs, ys));
+            o.f64(dot_f64_join(xs, ys));
+            o.f64(dot_f64_pieces(xs, ys));
             o.sep();
-            let r = dot_f64_ref(ba.get(), bb.get());
+            let r = dot2_f64_ref(xs, ys);
+            o.f64(r);
+            o.f64(r);
             o.f64(r);
             o.f64(r);
         }

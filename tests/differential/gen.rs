@@ -2,7 +2,7 @@
 //! them, at several misalignments from a 64-byte boundary (every one with `STAVE_DIFF_FULL=1`),
 //! then random lengths. Values are edge-biased: each case draws its elements from one palette
 //! (few distinct values, edge values, moderate random values, or raw bits; the float reduction
-//! kernels also all -0.0, cancelling sums, overflowing sums and NaNs).
+//! kernels also all -0.0, cancelling sums, overflowing sums, NaNs and block steps).
 //!
 //! The encoding is the one `diff.stv` reads: little endian, u32 case count, then per case u32
 //! kind, len, mis, param and the case's arrays, `len` elements each.
@@ -72,13 +72,15 @@ pub enum Param {
 }
 
 /// One case shape a kernel program understands: its arrays, the widest lane count its kernels
-/// use for them, and the palettes its cases draw from.
+/// use for them, the palettes its cases draw from, and lengths it also needs (after the random
+/// ones, see [`cases`]).
 #[derive(Clone, Copy, Debug)]
 pub struct Kind {
     pub arrays: &'static [Elem],
     pub lanes: usize,
     pub param: Param,
     pub palettes: &'static [Palette],
+    pub extra: &'static [usize],
 }
 
 #[derive(Clone, Debug)]
@@ -172,7 +174,15 @@ pub enum Palette {
     Huge,
     /// Floats: moderate values and one NaN in eight (quiet, signalling, payloads, either sign).
     Nan,
+    /// Floats, for slices past one block of a two-level sum: the first [`SUM_BLOCK`] elements of
+    /// the first array 2^12 (f32) / 2^41 (f64), the rest 2^-12, other arrays 1.0. Block sums are
+    /// 2^24 / 2^53, then 1.0 each: added one at a time to the first they all round away, while
+    /// the block tree adds them in pairs first and keeps some.
+    Steps,
 }
+
+/// The block of std's two-level float `sum` and `dot` (`SUM_BLOCK` in std/slice.stv).
+pub const SUM_BLOCK: usize = 4096;
 
 pub const PALETTES: [Palette; 4] = [Palette::Few, Palette::Edge, Palette::Moderate, Palette::Bits];
 
@@ -219,6 +229,9 @@ fn f32_bits(r: &mut Rng, p: Palette, param: u32, at: (usize, usize)) -> u32 {
         Palette::Huge => r.pick(&[0x3f80_0000, 0xbf80_0000]),
         Palette::Nan if r.below(8) == 0 => r.pick(&[0x7fc0_0000, 0xffc0_0001, 0x7f80_0001, 0x7fc1_2345]),
         Palette::Nan => moderate_f32(r).to_bits(),
+        Palette::Steps if at.0 > 0 => 0x3f80_0000,
+        Palette::Steps if at.1 < SUM_BLOCK => 0x4580_0000,
+        Palette::Steps => 0x3980_0000,
         Palette::Few => r.pick(&[0x3f80_0000, 0xbf80_0000, 0x3f00_0000, 0, 0x8000_0000, param]),
         Palette::Edge if r.below(2) == 0 => r.pick(&F32_EDGES),
         Palette::Edge | Palette::Moderate => {
@@ -255,6 +268,9 @@ fn f64_bits(r: &mut Rng, p: Palette, param: u64, at: (usize, usize)) -> u64 {
             0x7ff8_0012_3450_0000,
         ]),
         Palette::Nan => moderate_f64(r).to_bits(),
+        Palette::Steps if at.0 > 0 => 0x3ff0_0000_0000_0000,
+        Palette::Steps if at.1 < SUM_BLOCK => 0x4280_0000_0000_0000,
+        Palette::Steps => 0x3f30_0000_0000_0000,
         Palette::Few => {
             r.pick(&[0x3ff0_0000_0000_0000, 0xbff0_0000_0000_0000, 0, 0x8000_0000_0000_0000, param])
         }
@@ -373,8 +389,12 @@ fn array(r: &mut Rng, e: Elem, p: Palette, len: usize, prm: u32, idx: usize) -> 
 }
 
 fn case(r: &mut Rng, kind: u32, k: &'static Kind, len: usize, mis: usize) -> Case {
-    let prm = param(r, k.param);
     let pal = r.pick(k.palettes);
+    case_in(r, kind, k, len, mis, pal)
+}
+
+fn case_in(r: &mut Rng, kind: u32, k: &'static Kind, len: usize, mis: usize, pal: Palette) -> Case {
+    let prm = param(r, k.param);
     let arrays = k.arrays.iter().enumerate().map(|(i, &e)| array(r, e, pal, len, prm, i)).collect();
     Case { kind, len, mis, param: prm, elems: k.arrays, arrays }
 }
@@ -397,6 +417,14 @@ pub fn cases(name: &str, kinds: &'static [Kind], plan: Plan) -> Vec<Case> {
             let len = r.below((3 * k.lanes + 258) as u64) as usize;
             let mis = r.below(slots as u64) as usize;
             out.push(case(&mut r, ki as u32, k, len, mis));
+        }
+        // Each extra length (only the float reduction kinds have them) from Cancel, whose sums
+        // round, and from Steps, whose block sums round differently in any other block order.
+        for &len in k.extra {
+            let mis = r.below(slots as u64) as usize;
+            for pal in [Palette::Cancel, Palette::Steps] {
+                out.push(case_in(&mut r, ki as u32, k, len, mis, pal));
+            }
         }
     }
     out

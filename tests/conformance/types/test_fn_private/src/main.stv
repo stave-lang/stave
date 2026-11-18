@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// A struct is generated only if the test's module can name every field of it, and of every
+// struct inside it: else E0214 (case `private`).
+import geo;
+
+test fn open(o: geo.Open, p: (geo.Open, bool)) requires(o.x < 5) {}
+test fn sealed(s: geo.Sealed) {}                                    //~ ERROR E0214
+test fn sealed_inside(o: geo.Outer) {}                              //~ ERROR E0214
+test fn sealed_in_array(a: [geo.Sealed; 2]) {}                      //~ ERROR E0214
+
+fn main() {
+    let s = geo.sealed(1);
+}

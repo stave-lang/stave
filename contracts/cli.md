@@ -11,7 +11,7 @@ built program's exit codes are in LANG.md §3 (101 on a panic).
 | `stave build [PKG_DIR] [--release] [--target T] [--features F,...] [-o OUT]` | Build an executable or static library |
 | `stave run [PKG_DIR [ARGS...]] [--release] [--target T] [-- ARGS...]` | Build, then exec. `--target` only the host's targets (the triples of the host's arch, at any level the host CPU supports) or `gpu-sm86`; otherwise E1001 |
 | `stave check [PKG_DIR]` | Parse, resolve, type check, borrow check, and check deny clauses (`without(..)`). No codegen |
-| `stave test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD] [--input N]` | Build and run `test fn`s and the conformance files. `--input N` runs only input N of each selected `test fn` with parameters. `--runner` wraps execution (e.g. `sde64 -icx --`, `qemu-aarch64 -cpu max,...`). A target the host cannot run without a runner is E1001: reported as not run, never as passed |
+| `stave test [PKG_DIR] [--release] [--target T] [--filter S [--exact]] [--runner CMD] [--input N]` | Build and run `test fn`s and the conformance files. `--filter S` selects those whose name contains `S`; with `--exact`, the one named `S` (`main.sums`; `--exact` without `--filter`: exit 2). `--input N` runs only input N of the selected `test fn`: a selection of no `test fn`, of several, or of one without parameters is exit 2, and so is a PKG_DIR without `stave.toml`. `--runner` wraps execution (e.g. `sde64 -icx --`, `qemu-aarch64 -cpu max,...`). A target the host cannot run without a runner is E1001: reported as not run, never as passed |
 | `stave unsafe-report [PKG_DIR] [--json]` | List the unsafe inventory |
 | `stave effects [PKG_DIR] [--json]` | List the effect set of each fn of the program's own packages |
 | `stave caps-report [PKG_DIR] [--json]` | Planned: per package, the OS capability classes its code can reach |
@@ -55,12 +55,16 @@ Outputs and statuses of the code-generating commands:
   inputs within the ranges below, and the test fn evaluates all its `requires` clauses at entry,
   in order; a false one skips the input (it never panics `Contract`).
   - Parameter types (else E0214): `i8 i16 i32 i64 isize u8 u16 u32 u64 usize bool char f32 f64`,
-    `[T; N]` and tuples of those (nested), and, as a parameter's own type, `&[T]` of those (no
-    `align`). A slice needs a length upper bound; a value holds at most 4096 scalars (a slice:
-    bound × the element's); the return type is `()`.
+    `[T; N]`, tuples, and non-view structs of those (nested), and, as a parameter's own type,
+    `&[T]` of those (no `align`). Every struct inside, and each of its fields, must be visible from
+    the test's module (`pub`, or declared there; else E0214 case `private`, or, for a struct of
+    another package, case `field` naming the field that holds it and its type): so no enums,
+    refs, views, `vec.Vec`, or `string.String`. A slice needs a length upper bound; a value holds at
+    most 4096 scalars (a slice: bound × the element's); the return type is `()`.
   - Domain: one generator per parameter: an int's range starts as its type's, a slice's length
     range as `0..`. Each `requires` clause is split at `&&` (also inside parentheses); a conjunct
-    `S op K` or `K op S` (`op` one of `< <= > >= ==`; `S` an int parameter or `p.len()` of a slice
+    `S op K` or `K op S` (`op` one of `< <= > >= ==`; `S` an int parameter, an int field `p.f.g`
+    of a struct parameter (fields only, no index or tuple step), or `p.len()` of a slice
     parameter; `K` an int literal, a negated or parenthesized `K`, or an int `const`) intersects
     `S`'s range with the values satisfying it. Every other conjunct only filters. The domain is
     the product of the generators (finite, so it can be enumerated).
@@ -70,18 +74,21 @@ Outputs and statuses of the code-generating commands:
     0x10FFFF`. `f32` bits: `0x00000000 0x80000000 0x3F800000 0xBF800000 0x00000001 0x00800000
     0x7F7FFFFF 0xFF7FFFFF 0x7F800000 0xFF800000 0x7FC00000` (±0, ±1, least subnormal, least
     normal, ±max, ±inf, NaN); `f64` the same eleven values. The period of a generator: an int's
-    edge count, 2, 10, 11, 11; `[T; N]`: T's (1 if N = 0); a tuple: the largest of its fields' (1
-    if none); a slice: the larger of its length range's edge count and T's. Edge `k` (cyclic): a
-    scalar's edge `k mod period`; element `j` of an array or slice is T's edge `k + j`; field `i`
-    of a tuple its edge `k`; a slice's length is `int_edges(length range)[k mod count]`.
-  - Inputs, in order, with `n` the largest period of the parameters: the diagonal (`k` = 0 to
-    n-1: every parameter its edge `k`); with two or more parameters the anti-diagonal (`k` = 0 to
-    n-1: parameter `i` its edge `k` if `i` is even, else edge `period - 1 - (k mod period)`); then
+    edge count, 2, 10, 11, 11; `[T; N]`: T's (1 if N = 0); a tuple or struct: the largest of its
+    fields' (1 if none); a slice: the larger of its length range's edge count and T's. Edge `k`
+    (cyclic): a scalar's edge `k mod period`; element `j` of an array or slice is T's edge `k + j`;
+    field `i` of a tuple or struct its edge `k`; a slice's length is `int_edges(length range)[k
+    mod count]`.
+  - Positions: the parameters in order, a struct parameter replaced by its fields in order (a
+    struct field again by its fields); a struct inside an array, tuple, or slice is not split.
+  - Inputs, in order, with `n` the largest period of the positions: the diagonal (`k` = 0 to n-1:
+    every position its edge `k`); with two or more positions the anti-diagonal (`k` = 0 to n-1:
+    position `i` its edge `k` if `i` is even, else edge `period - 1 - (k mod period)`); then
     256 samples from SplitMix64 with state 0 (`next`: `state += 0x9E3779B97F4A7C15`; `z = state;
     z = (z ^ z >> 30) * 0xBF58476D1CE4E5B9; z = (z ^ z >> 27) * 0x94D049BB133111EB; return
     z ^ z >> 31`, all mod 2^64), parameters in order: an int `lo + next mod (hi - lo + 1)`, `bool`
     `next & 1`, `char` `r = next mod 0x10F800` plus 0x800 if `r >= 0xD800`, `f32` the low 32 bits
-    of `next`, `f64` `next`, arrays and tuples their parts in order, a slice its length (as an int
+    of `next`, `f64` `next`, arrays, tuples, and structs their parts in order, a slice its length (as an int
     of its length range) then its elements. An input equal to an earlier one (floats by bits) is
     dropped. Input `N` is the N-th of this list, from 0; it depends only on the parameter types and
     ranges, never on the target, the build mode, or the run.
@@ -92,8 +99,10 @@ Outputs and statuses of the code-generating commands:
     ...` when fewer than one input in ten ran; `FAILED    test T (exit E) at input N (K of M
     started)`, the stderr lines, `    input N: p = <literal>, ...` (Stave literals: suffixed ints
     and floats, a float with no literal as `mem.f32_from_bits(0x..)` / `mem.f64_from_bits(0x..)`,
-    `'c'` with `\u{..}` escapes, `[..]`, `(..)`, `&[..]`), and `    replay: stave test DIR
-    --filter T --input N --target TRIPLE` (plus `--release`, `--runner CMD` when given).
+    `'c'` with `\u{..}` escapes, `[..]`, `(..)`, `&[..]`, `S.{ f: .. }` with `S` as the test's
+    module names it: `S` if declared there, else through the import binding its module
+    (`geo.Point`), else its full module path, generic arguments as `S::<u32>`), and `    replay: stave test DIR
+    --filter T --exact --input N --target TRIPLE` (plus `--release`, `--runner CMD` when given).
     `FAILED    test T: ...` with no exit status: no input ran (an empty range; `requires` skipped
     all; `--input N` past the last input), or the process exited with status 0 before its last
     input.

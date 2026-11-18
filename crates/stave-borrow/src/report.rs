@@ -13,6 +13,7 @@
 
 use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
+use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
 use crate::cfg::{Body, LoanId, Place, Proj};
 use crate::check::{Finding, later_use};
@@ -40,6 +41,7 @@ fn place_key(p: &Place) -> (u32, Vec<(u8, u32, u32)>) {
             Proj::Field(i) => (1, *i, 0),
             Proj::EnumField(v, f) => (1, *f, *v),
             Proj::Index => (2, 0, 0),
+            Proj::Column(i) => (3, *i, 0),
         })
         .collect();
     (p.local, proj)
@@ -103,6 +105,24 @@ pub fn place_text(body: &Body, tys: &mut Tys<'_>, p: &Place) -> String {
             Proj::Index => {
                 s.push_str("[_]");
                 ty = tys.elem(ty);
+            }
+            Proj::Column(i) => {
+                let row = match tys.kind(ty) {
+                    TypeKind::Adt { args, .. } => match args.first() {
+                        Some(GArg::Type(t)) => *t,
+                        _ => TypeId::NONE,
+                    },
+                    _ => TypeId::NONE,
+                };
+                match tys.field_name(row, 0, i) {
+                    Some(n) => {
+                        s.push('.');
+                        s.push_str(&n);
+                    }
+                    None => s.push_str(&format!(".{i}")),
+                }
+                let et = tys.field_ty(row, 0, i);
+                ty = tys.ov.intern(TypeKind::Slice { elem: et, align: 0 });
             }
         }
     }

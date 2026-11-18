@@ -680,7 +680,7 @@ test fn empty_range(a: u8) requires(a > 3 && a < 2) { }
     assert!(out.contains("    input 3: xs = &[3u32, 4u32, 5u32]\n"), "{out}");
     let replay =
         out.lines().find_map(|l| l.strip_prefix("    replay: stave ")).unwrap_or_else(|| panic!("{out}"));
-    assert!(replay.starts_with("test . --filter main.sums_agree --input 3 --target "), "{replay}");
+    assert!(replay.starts_with("test . --filter main.sums_agree --exact --input 3 --target "), "{replay}");
     let words: Vec<&str> = replay.split_whitespace().collect();
     let (c, again, _) = stave_in(&bad, &words);
     assert_eq!(c, 1, "{again}");
@@ -694,9 +694,165 @@ test fn empty_range(a: u8) requires(a > 3 && a < 2) { }
     assert!(out.contains("FAILED    test main.none_left: `requires` skipped all "), "{out}");
     assert!(out.contains("FAILED    test main.empty_range: its `requires` ranges admit no input\n"), "{out}");
     assert!(out.ends_with("test fns: 1 passed, 3 failed, 0 not run\n"), "{out}");
-    let (c, none, _) = stave_in(&bad, &["test", ".", "--input", "100000"]);
+    let (c, none, _) = stave_in(&bad, &["test", ".", "--filter", "sums_agree", "--input", "100000"]);
     assert_eq!(c, 1);
     assert!(none.contains("FAILED    test main.sums_agree: no input 100000: the test has "), "{none}");
+}
+
+/// `--input N` runs one input of exactly one `test fn`: the replay line names the failing test
+/// with `--filter T --exact`, so a test whose name contains T is not run; a selection of several
+/// tests, of none, or of a test without parameters is a usage error (exit 2).
+#[test]
+fn input_selects_one_test() {
+    let pkg = run_prog("test_fn_replay");
+    let d = tmp("testfn_replay");
+    let (c, out, err) = stave_in(&d, &["test", &pkg]);
+    if !host_runs() {
+        return;
+    }
+    assert_eq!(c, 1, "{out}{err}");
+    assert!(out.contains("FAILED    test main.sum_agrees (exit 101) at input "), "{out}");
+    assert!(out.contains("ok        test main.sum_agrees_short: "), "{out}");
+    assert!(out.ends_with("test fns: 2 passed, 1 failed, 0 not run\n"), "{out}");
+    let replay =
+        out.lines().find_map(|l| l.strip_prefix("    replay: stave ")).unwrap_or_else(|| panic!("{out}"));
+    let words: Vec<&str> = replay.split_whitespace().collect();
+    let at = words.iter().position(|w| *w == "--filter").unwrap_or_else(|| panic!("{replay}"));
+    assert_eq!(words[at + 1..at + 4], ["main.sum_agrees", "--exact", "--input"], "{replay}");
+    let input = words[at + 4];
+    let (c, again, err) = stave_in(&d, &words);
+    assert_eq!(c, 1, "{again}{err}");
+    let lines = test_lines(&again);
+    assert_eq!(lines.len(), 1, "only the failing test runs: {again}");
+    assert!(
+        lines[0].starts_with(&format!("FAILED    test main.sum_agrees (exit 101) at input {input} (1 of 1"))
+    );
+    assert!(again.ends_with("test fns: 0 passed, 1 failed, 0 not run\n"), "{again}");
+
+    // `--filter main.sum_agrees` alone selects both tests.
+    let (c, out, err) = stave_in(&d, &["test", &pkg, "--filter", "main.sum_agrees", "--input", input]);
+    assert_eq!(c, 2, "{out}{err}");
+    assert!(
+        err.contains(&format!("stave: --input {input}: --filter main.sum_agrees selects 2 test fns (")),
+        "{err}"
+    );
+    assert!(err.contains("main.sum_agrees_short") && err.contains("--filter NAME --exact"), "{err}");
+    assert!(test_lines(&out).is_empty(), "{out}");
+    let (c, _, err) = stave_in(&d, &["test", &pkg, "--input", "0"]);
+    assert_eq!(c, 2);
+    assert!(err.contains("stave: --input 0: the package selects 3 test fns ("), "{err}");
+    let (c, _, err) = stave_in(&d, &["test", &pkg, "--filter", "main.sum", "--exact", "--input", "0"]);
+    assert_eq!(c, 2);
+    assert!(err.contains("stave: --input 0: --filter main.sum --exact selects no test fn"), "{err}");
+    let (c, _, err) = stave_in(&d, &["test", &pkg, "--filter", "plain", "--input", "0"]);
+    assert_eq!(c, 2);
+    assert!(
+        err.contains("stave: --input 0: test fn main.plain has no parameters, so it has no input 0"),
+        "{err}"
+    );
+    let (c, _, err) = stave_in(&d, &["test", &d.display().to_string(), "--input", "0"]);
+    assert_eq!(c, 2);
+    assert!(err.contains("is not a package, so it has no test fn"), "{err}");
+    // Without `--input`, `--exact` selects the one test and runs all its inputs.
+    let (c, out, _) = stave_in(&d, &["test", &pkg, "--filter", "main.sum_agrees_short", "--exact"]);
+    assert_eq!((c, test_lines(&out).len()), (0, 1), "{out}");
+}
+
+/// `test fn` parameters of struct type: the inputs of `run/test_fn_structs` (the same with
+/// `--release` and on AArch64); a failing input of `run/test_fn_struct_fail` prints as struct
+/// literals that compile where the test's module would write them, and its replay reruns it.
+#[test]
+fn test_fn_struct_inputs() {
+    let pkg = run_prog("test_fn_structs");
+    let d = tmp("testfn_structs");
+    let (c, out, err) = stave_in(&d, &["test", &pkg]);
+    if !host_runs() {
+        return;
+    }
+    assert_eq!(c, 0, "{out}{err}");
+    // `field_ranges`: x in -3..=3, y = 7, id in 0..=9, a bool: 140 values, 121 of them inputs.
+    let want = [
+        "ok        test main.containers: 621 inputs run, 0 skipped",
+        "ok        test main.generic_and_imported: 446 inputs run, 0 skipped",
+        "ok        test main.nested: 622 inputs run, 0 skipped",
+        "ok        test main.drops: 96 inputs run, 0 skipped",
+        "ok        test main.field_filter: 438 inputs run, 183 skipped",
+        "ok        test main.field_ranges: 121 inputs run, 0 skipped",
+    ];
+    assert_eq!(test_lines(&out), want, "{out}");
+    let (c, rel, _) = stave_in(&d, &["test", &pkg, "--release"]);
+    assert_eq!((c, test_lines(&rel)), (0, test_lines(&out)), "--release: {rel}");
+    if have_qemu_aarch64() {
+        let (c, a64, err) =
+            stave_in(&d, &["test", &pkg, "--target", "aarch64-linux", "--runner", "qemu-aarch64"]);
+        assert_eq!((c, test_lines(&a64)), (0, test_lines(&out)), "aarch64: {a64}{err}");
+    }
+
+    let pkg = run_prog("test_fn_struct_fail");
+    let (c, out, err) = stave_in(&d, &["test", &pkg]);
+    assert_eq!(c, 1, "{out}{err}");
+    // Diagonal input 18: `start` takes edge 18 of u32 (127), `end` edge 18 of 0..=99 (98).
+    assert!(out.contains("FAILED    test main.span_len (exit 101) at input 18 (19 of "), "{out}");
+    assert!(out.contains("    panic: Overflow at src/main.stv:16:18 in main.len"), "{out}");
+    let shown = out.lines().find_map(|l| l.strip_prefix("    input ")).unwrap_or_else(|| panic!("{out}"));
+    let (input, values) = shown.split_once(": ").unwrap();
+    assert_eq!(
+        values, "s = Span::<u32>.{ start: 127u32, end: 98u32 }, c = geo.Cell.{ row: 127u32, col: 127u32 }",
+        "{out}"
+    );
+    assert!(out.contains("ok        test main.span_len_ordered: "), "{out}");
+    let replay =
+        out.lines().find_map(|l| l.strip_prefix("    replay: stave ")).unwrap_or_else(|| panic!("{out}"));
+    let (c, again, _) = stave_in(&d, &replay.split_whitespace().collect::<Vec<_>>());
+    assert_eq!(c, 1, "{again}");
+    assert!(again.contains(&format!("    input {shown}\n")), "{again}");
+    assert_eq!(test_lines(&again).len(), 1, "{again}");
+
+    // The literals compile in the test's module.
+    let paste = tmp("testfn_struct_paste");
+    std::fs::create_dir_all(paste.join("src")).unwrap();
+    std::fs::write(paste.join("stave.toml"), "name = \"paste\"\nkind = \"bin\"\n").unwrap();
+    std::fs::copy(Path::new(&pkg).join("src/geo.stv"), paste.join("src/geo.stv")).unwrap();
+    let (s, c) = values.split_once(", c = ").unwrap();
+    let s = s.strip_prefix("s = ").unwrap();
+    std::fs::write(
+        paste.join("src/main.stv"),
+        format!(
+            "import geo;\n\nstruct Span<T> {{\n    start: T,\n    end: T,\n}}\n\nfn main() -> i32 {{\n    let s: Span<u32> = {s};\n    let c: geo.Cell = {c};\n    return 0;\n}}\n"
+        ),
+    )
+    .unwrap();
+    let (c, out, err) = stave_in(&paste, &["check", "."]);
+    assert_eq!(c, 0, "input {input}: {out}{err}");
+}
+
+/// E0214 says why a struct is not generatable: the field that is not, or what is private.
+#[test]
+fn test_fn_struct_e0214_messages() {
+    let d = tmp("testfn_struct_e0214");
+    let types = repo().join("tests/conformance/types");
+    let (c, _, err) = stave_in(&d, &["check", &types.join("test_fn_params.stv").display().to_string()]);
+    assert_eq!(c, 1, "{err}");
+    for m in [
+        "the test runner cannot generate values of type `V`",
+        "the test runner cannot generate values of type `E`",
+        "the test runner cannot generate values of type `Outer`: it cannot generate field `h.e` of type `E`",
+        "the test runner cannot generate values of type `WithVec`: it cannot generate field `v` of type `vec.Vec<u8>`",
+        "the test runner cannot generate values of type `WithString`: it cannot generate field `name` of type `string.String`",
+        "the test runner cannot generate values of type `Vec<u32>`\n",
+        "values of `Big` are too large to generate (more than 4096 scalars)",
+    ] {
+        assert!(err.contains(m), "{m}: {err}");
+    }
+    let (c, _, err) = stave_in(&d, &["check", &types.join("test_fn_private").display().to_string()]);
+    assert_eq!(c, 1, "{err}");
+    for m in [
+        "the test runner cannot generate values of type `Sealed`: `y` is private to module `geo`",
+        "the test runner cannot generate values of type `Outer`: `sealed.y` is private to module `geo`",
+        "the test runner cannot generate values of type `[Sealed; 2]`: `y` is private to module `geo`",
+    ] {
+        assert!(err.contains(m), "{m}: {err}");
+    }
 }
 
 /// A package directory `dir` with manifest name `name` (TOML-escaped) and an empty `main`.
