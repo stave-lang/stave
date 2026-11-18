@@ -1,6 +1,6 @@
 //~ CHECK-ONLY
 // Contracts that check: clauses over params, fields, `.len()`, and calls of pure fns with `&` or
-// Copy args; `result` and `old(e)` in `ensures`; reads through a `&mut` param in `ensures`; a
+// Copy args; `result` and `old(e)` in `ensures`; reads through a `&mut` param in both; a
 // method's clauses read `self`; `requires` on an `unsafe` fn; a generic fn; a Copy `match` and
 // aggregate; Frozen values only (a `&vec.Vec<u32>`, a struct of plain fields, a `Frozen` or `Flat`
 // generic). Outside a clause `result` and `old` are ordinary names.
@@ -30,7 +30,7 @@ fn at(xs: &[u32], i: usize) -> u32 requires(small(xs)) requires(i < xs.len()) en
     return xs[i];
 }
 
-fn push_one(v: &mut vec.Vec<u32>, x: u32) requires(x < 1000) ensures(v.len() == old(v.len()) + 1) {
+fn push_one(v: &mut vec.Vec<u32>, x: u32) requires(x < 1000 && v.len() < 1000) requires(small(v.as_slice())) ensures(v.len() == old(v.len()) + 1) {
     v.push(x);
 }
 

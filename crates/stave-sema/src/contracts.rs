@@ -9,9 +9,8 @@
 //! **Operand rules** ([`Ck::contract_rules`], E0211, at most one per clause, the first in source
 //! order): no `unsafe`, closure literal, `spawn`, f-string, `?`, `&mut` borrow, `static`, or
 //! intrinsic; a call (fn, method, operator, trait method) only of a safe fn whose every parameter
-//! is a shared reference or a Copy type, so a clause neither writes nor moves. A parameter of
-//! type `&mut T` is not
-//! read in a `requires`; an `ensures` may read through it (never write: the call rule). An
+//! is a shared reference or a Copy type, so a clause neither writes nor moves. A clause may read
+//! through a parameter of type `&mut T` (never write or pass it on as `&mut`: the call rule). An
 //! `ensures` runs after the body, which may have moved a by-value parameter, so there a parameter
 //! must be a reference or Copy. E0212 / E0213 (case `param`): a parameter named `result` / `old`
 //! in a fn with an `ensures`. E0213: `old(e)` with a non-Copy `e`, or `result` inside it (case
@@ -468,16 +467,13 @@ impl Ck<'_> {
                 }
                 continue;
             }
-            if !matches!(icx.kind(b.node), Some(NodeKind::Param | NodeKind::SelfParam)) {
+            // A `requires` runs before the body: every param is still there to be read (a
+            // `&mut` one too: writing or passing it on as `&mut` fails the call rule above).
+            if !ensures || !matches!(icx.kind(b.node), Some(NodeKind::Param | NodeKind::SelfParam)) {
                 continue;
             }
             let Some(&t) = self.locals.get(&b.node) else { continue };
-            let ok = if ensures {
-                self.contract_value_ok(t, true)
-            } else {
-                !matches!(self.tys.kind(t), TypeKind::Ref { mutable: true, .. })
-            };
-            if !ok {
+            if !self.contract_value_ok(t, true) {
                 flag(u.token);
             }
         }
