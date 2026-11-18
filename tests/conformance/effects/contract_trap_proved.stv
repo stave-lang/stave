@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// `trap` comes from the checked IR after the removal of proven checks: a fn whose every contract
+// check is proved has no trap from its clauses, so it may deny `trap`; a check that stays is a
+// trap op (`contract_trap`).
+fn clamp(x: i32) -> i32 without(trap) ensures(result >= 0 && result <= 100) {
+    if x < 0 {
+        return 0;
+    }
+    if x > 100 {
+        return 100;
+    }
+    return x;
+}
+
+fn main() {
+    let a = clamp(5);
+}

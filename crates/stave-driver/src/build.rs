@@ -6,9 +6,9 @@
 //!   [`LowerErrorKind::Unsupported`] (a construct stage0 does not lower yet) are
 //!   [`Failure::Unsupported`]; any other lowering or verifier error is a compiler bug
 //!   ([`Failure::Internal`]).
-//! - [`lower`] then decides which bounds checks the program keeps, the same way in every build
-//!   mode: per function, the bounds audit (an element access without a check or proof is a
-//!   compiler bug) and the proofs of removable checks ([`stave_ir::bounds::analyze_func`]); the
+//! - [`lower`] then decides which bounds and contract checks the program keeps, the same way in
+//!   every build mode: per function, the bounds audit (an element access without a check or proof
+//!   is a compiler bug) and the proofs of removable checks ([`stave_ir::bounds::analyze_func`]); the
 //!   witness checker on every proof ([`stave_ir::witness::check`]; a refused witness is a
 //!   compiler bug); then the removal of the accepted checks. The module it returns is the
 //!   checked IR: what the `ir` dump prints, the interpreter runs, and both code generators get.
@@ -25,7 +25,7 @@ use std::fmt;
 use std::time::Instant;
 
 use rayon::prelude::*;
-use stave_ir::bounds::{Analysis, Proved, Unguarded, analyze_func};
+use stave_ir::bounds::{Analysis, Finding, Proved, Unguarded, analyze_func, findings};
 use stave_ir::witness::check::{Checked, Rejected, check_func};
 use stave_ir::{FuncId, Module};
 use stave_obj::{FuncCode, ImageBuilder, Machine, ObjectImage, StackUse};
@@ -133,7 +133,7 @@ pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Lowered, Failure
     let (mut m, nodes_of_func) = lowered.map_err(|es| lower_failure(&es))?;
     verified(&m, Stage::Lower)?;
     prof::mark("verify");
-    let removed = remove_proven_checks(&mut m)?;
+    let (removed, _) = remove_proven_checks(&mut m)?;
     Ok(Lowered { module: m, removed, nodes_of_func })
 }
 
@@ -176,12 +176,13 @@ fn audited(m: &Module, stage: Stage) -> Result<(), Failure> {
     }
 }
 
-/// The one step that decides which bounds checks a build keeps; it does not look at the build
-/// mode. Per function, in parallel: the audit that every element access has its check or a
-/// proof, and the witnesses of the checks that are provably redundant. Then the witness checker,
-/// which shares no code with the proof search, validates every witness, and only the checks it
-/// accepted are deleted. Returns the accepted proofs.
-pub(crate) fn remove_proven_checks(m: &mut Module) -> Result<Vec<Proved>, Failure> {
+/// The one step that decides which bounds and contract checks a build keeps; it does not look at
+/// the build mode. Per function, in parallel: the audit that every element access has its check
+/// or a proof, and the witnesses of the checks that are provably redundant and of the contract
+/// checks that always fail. Then the witness checker, which shares no code with the proof search,
+/// validates every witness, and only the checks it accepted are deleted. Returns the accepted
+/// proofs and the contract checks they prove or refute (the refuted ones stay).
+pub(crate) fn remove_proven_checks(m: &mut Module) -> Result<(Vec<Proved>, Vec<Finding>), Failure> {
     let internal = |message: String| Failure::Internal { stage: Stage::Lower, message };
     let found: Vec<Analysis> =
         (0..m.funcs.len() as u32).into_par_iter().map(|f| analyze_func(m, FuncId(f))).collect();
@@ -195,13 +196,14 @@ pub(crate) fn remove_proven_checks(m: &mut Module) -> Result<Vec<Proved>, Failur
         return Err(internal(format!("bounds audit: {}", listed(&bad))));
     }
     prof::mark("bounds-analyze");
-    remove_checked(m, &proved)?;
-    Ok(proved)
+    let found = remove_checked(m, &proved)?;
+    Ok((proved, found))
 }
 
 /// Has the witness checker validate every proof (functions in parallel), then deletes the
 /// checks it accepted. A witness it refuses is a compiler bug, and then nothing is removed.
-fn remove_checked(m: &mut Module, proved: &[Proved]) -> Result<(), Failure> {
+/// Returns the contract checks proved or refuted, read before the removal.
+fn remove_checked(m: &mut Module, proved: &[Proved]) -> Result<Vec<Finding>, Failure> {
     let results: Vec<Result<Checked, Rejected>> =
         proved.par_iter().map(|p| check_func(m, &p.witness)).collect();
     let mut checked = Vec::with_capacity(results.len());
@@ -217,9 +219,10 @@ fn remove_checked(m: &mut Module, proved: &[Proved]) -> Result<(), Failure> {
         return Err(Failure::Internal { stage: Stage::Lower, message });
     }
     prof::mark("witness-check");
+    let found: Vec<Finding> = proved.iter().flat_map(|p| findings(m, p)).collect();
     stave_ir::witness::check::remove(m, &checked);
     prof::mark("bounds-remove");
-    Ok(())
+    Ok(found)
 }
 
 /// [`stave_ir::verify_module`] with the functions verified in parallel (same errors, same order).
@@ -435,7 +438,7 @@ mod tests {
     #[test]
     fn a_refused_witness_is_an_internal_error() {
         let (mut m, f) = two_checks();
-        let proved = remove_proven_checks(&mut m).unwrap();
+        let (proved, _) = remove_proven_checks(&mut m).unwrap();
         assert_eq!((proved.len(), proved[0].proofs.len(), checks(&m, f)), (1, 1, 1));
 
         let (mut m, f) = two_checks();

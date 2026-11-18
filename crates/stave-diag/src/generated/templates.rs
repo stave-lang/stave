@@ -1684,6 +1684,85 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0215",
+        severity: Severity::Error,
+        area: "types",
+        rule: "a `requires` conjunct (an operand of a clause's top-level `&&`) that is false whenever it is reached: the clauses before it and the parameters' type ranges prove its negation by a chain of inequalities, so every call fails it; checked per instance, after the type and borrow checks pass; one `fact` label per fact of the chain",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{fn}` can never be called: this `requires` is false whenever the clauses before it hold",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "always false" },
+                    LabelTemplate { at: "fact", text: "a fact of the proof" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "correct the clause, or the clauses before it that contradict it",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0216",
+        severity: Severity::Warning,
+        area: "types",
+        rule: "warning: a `requires` conjunct that the clauses before it and the parameters' type ranges imply (a chain of inequalities proves it); its check is removed; not reported in a generic fn (it may hold for some instances only); one `fact` label per fact of the chain",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "unnecessary `requires` of `{fn}`: it holds whenever the clauses before it hold",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "always true" },
+                    LabelTemplate { at: "fact", text: "a fact of the proof" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove the conjunct",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0217",
+        severity: Severity::Error,
+        area: "types",
+        rule: "an `ensures` conjunct that is false whenever a `return` (or the end of a unit body) is reached: what holds there proves its negation by a chain of inequalities; at the return, with the clause as a related span; checked per instance, after the type and borrow checks pass; one `fact` label per fact of the chain",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "an `ensures` of `{fn}` always fails at this return",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "returns here" },
+                    LabelTemplate { at: "clause", text: "false whenever this return is reached" },
+                    LabelTemplate { at: "fact", text: "a fact of the proof" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "correct the returned value or the clause",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0300",
         severity: Severity::Error,
         area: "patterns",

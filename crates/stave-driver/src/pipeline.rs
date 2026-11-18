@@ -529,9 +529,9 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
         match crate::effects::run(&program, &tc, opts.effects_all) {
             Ok(r) => {
                 if !r.diagnostics.is_empty() {
+                    has_errors |= r.diagnostics.iter().any(|d| d.severity() == Severity::Error);
                     diagnostics.extend(r.diagnostics);
                     diagnostics = stave_diag::canonical_order(diagnostics, &program.source_map);
-                    has_errors = true;
                 }
                 effect_sets = Some(r.sets);
             }

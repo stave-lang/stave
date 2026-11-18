@@ -10,8 +10,8 @@ fn clamp(x: u32, lo: u32, hi: u32) -> u32 ensures(result >= lo) ensures(result <
         return lo;
     }
     if x > hi {
-        // the bug: above `hi` it returns `x`
-        return x;
+        // the bug: above `hi` it returns `x - 1` (`return x` here would be E0217: always false)
+        return x - 1;
     }
     return x;
 }
