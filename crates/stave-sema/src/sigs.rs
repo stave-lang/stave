@@ -391,7 +391,8 @@ pub(crate) struct TyEnv<'a> {
 /// Lowering callbacks a type lowering needs from its context (signature phase or body phase).
 pub(crate) trait LowerHost: Interner {
     fn prog(&self) -> &Program;
-    fn sigs_generics_len(&mut self, d: DeclId) -> Option<Vec<bool>>;
+    /// Per generic param of `d`: `None` for a type param, the declared type of a const one.
+    fn sigs_generics_len(&mut self, d: DeclId) -> Option<Vec<Option<TypeId>>>;
     /// The generic params of an ADT (view checks of type arguments).
     fn adt_generics(&mut self, d: DeclId) -> Vec<GenericParam>;
     fn alias_target(&mut self, d: DeclId) -> Option<(Vec<GenericParam>, TypeId)>;
@@ -595,7 +596,8 @@ fn lower_base<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -
                 }
                 DeclKind::TypeAlias => {
                     let Some((gens, target)) = h.alias_target(d) else { return h.error_ty() };
-                    let shape: Vec<bool> = gens.iter().map(|g| g.is_const).collect();
+                    let shape: Vec<Option<TypeId>> =
+                        gens.iter().map(|g| g.is_const.then_some(g.const_ty)).collect();
                     let Some(args) = lower_gargs(h, env, gargs_node, &shape, n) else { return h.error_ty() };
                     let t = h.subst(target, &args, None);
                     if !ret_pos && t == h.fixed_ty(ids::NEVER) {
@@ -705,7 +707,7 @@ pub(crate) fn lower_gargs<H: LowerHost>(
     h: &mut H,
     env: &TyEnv<'_>,
     gargs: Option<u32>,
-    shape: &[bool],
+    shape: &[Option<TypeId>],
     at: u32,
 ) -> Option<Vec<GArg>> {
     let icx = env.icx;
@@ -732,22 +734,37 @@ pub(crate) fn lower_gargs<H: LowerHost>(
     Some(out)
 }
 
-/// One `GenericArg`: a type (`want_const` false) or a const.
-pub(crate) fn lower_garg<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, ga: u32, want_const: bool) -> GArg {
+/// One `GenericArg`: a type (`want_const` `None`) or a const of the param's declared type
+/// (`usize` when it is unknown).
+pub(crate) fn lower_garg<H: LowerHost>(
+    h: &mut H,
+    env: &TyEnv<'_>,
+    ga: u32,
+    want_const: Option<TypeId>,
+) -> GArg {
     let icx = env.icx;
     let a = icx.a(ga);
     let child = icx.first_child(ga);
-    if want_const {
+    if let Some(cty) = want_const {
+        let cty = if cty.is_none() || h.is_error_ty(cty) { h.fixed_ty(ids::USIZE) } else { cty };
         if icx.is(a, Term::IntLit) {
-            return GArg::Const(match crate::literals::parse_int_text(icx.tok_str(a)) {
-                Some((v, _)) if v <= u64::MAX as u128 => ConstArg::Value(v as u64),
-                _ => ConstArg::Error,
-            });
+            let Some((v, _)) = crate::literals::parse_int_text(icx.tok_str(a)) else {
+                return GArg::Const(ConstArg::Error);
+            };
+            let (lo, hi) = crate::literals::int_range_kind(h.kind(cty)).unwrap_or((0, u64::MAX as i128));
+            if v > hi as u128 {
+                let tn = types::display(&*h, &NameCx { prog: h.prog(), generics: &[] }, cty);
+                let (lo, hi) = (lo.to_string(), hi.to_string());
+                let holes = [("literal", icx.tok_str(a)), ("type", tn.as_str()), ("min", &lo), ("max", &hi)];
+                h.report(mk("E0203", None, &holes, icx.tok_span(a), &[]));
+                return GArg::Const(ConstArg::Error);
+            }
+            return GArg::Const(ConstArg::Value(v as u64));
         }
         if let Some(c) = child {
             match icx.kind(c) {
                 Some(k) if crate::typeck::is_expr_kind(k) => {
-                    return GArg::Const(h.const_u64(env, c, h.fixed_ty(ids::USIZE)));
+                    return GArg::Const(h.const_u64(env, c, cty));
                 }
                 Some(NodeKind::TypeBase) => {
                     // A const generic param or a const named like a type path.
@@ -759,7 +776,7 @@ pub(crate) fn lower_garg<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, ga: u32, want
                                 return GArg::Const(ConstArg::Param(idx));
                             }
                             Res::Decl(d) if h.prog().decl(d).is_some_and(|x| x.kind == DeclKind::Const) => {
-                                return GArg::Const(h.const_u64(env, c, h.fixed_ty(ids::USIZE)));
+                                return GArg::Const(h.const_u64(env, c, cty));
                             }
                             Res::Unresolved => return GArg::Const(ConstArg::Error),
                             _ => {}
@@ -858,15 +875,17 @@ fn lower_prim<H: LowerHost>(
             // `vec<T, N>` / `mask<W, N>` (E0609 when no argument is generic).
             let kids = gargs.map(|g| icx.kids_vec(g)).unwrap_or_default();
             if kids.len() != 2 {
-                let _ = lower_gargs(h, env, gargs, &[false, true], n);
+                let us = h.fixed_ty(ids::USIZE);
+                let _ = lower_gargs(h, env, gargs, &[None, Some(us)], n);
                 return h.error_ty();
             }
+            let us = Some(h.fixed_ty(ids::USIZE));
             let first = if p == Prim::VecGeneric {
-                lower_garg(h, env, kids[0], false)
+                lower_garg(h, env, kids[0], None)
             } else {
-                lower_garg(h, env, kids[0], true)
+                lower_garg(h, env, kids[0], us)
             };
-            let second = lower_garg(h, env, kids[1], true);
+            let second = lower_garg(h, env, kids[1], us);
             let lanes = match second {
                 GArg::Const(ConstArg::Value(v)) if matches!(v, 2 | 4 | 8 | 16 | 32 | 64) => {
                     Lanes::Fixed(v as u8)
@@ -937,8 +956,8 @@ impl<'p> LowerHost for SigBuilder<'p> {
         self.prog
     }
 
-    fn sigs_generics_len(&mut self, d: DeclId) -> Option<Vec<bool>> {
-        Some(self.generics_of(d).iter().map(|g| g.is_const).collect())
+    fn sigs_generics_len(&mut self, d: DeclId) -> Option<Vec<Option<TypeId>>> {
+        Some(self.generics_of(d).iter().map(|g| g.is_const.then_some(g.const_ty)).collect())
     }
 
     fn adt_generics(&mut self, d: DeclId) -> Vec<GenericParam> {
@@ -1228,7 +1247,8 @@ impl<'p> SigBuilder<'p> {
             }
             return None;
         }
-        let shape: Vec<bool> = self.generics_of(d).iter().map(|g| g.is_const).collect();
+        let shape: Vec<Option<TypeId>> =
+            self.generics_of(d).iter().map(|g| g.is_const.then_some(g.const_ty)).collect();
         let gargs = icx.child(n, NodeKind::GenericArgs);
         let args = lower_gargs(self, env, gargs, &shape, n)?;
         Some(TraitRef { trait_decl: d, args })
