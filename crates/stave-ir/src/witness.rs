@@ -25,12 +25,23 @@
 //! | `SliceLen { inst }` | `v = slice.len s` | `v = Len(s)` |
 //! | `SliceMake { inst }` | `s = slice.make p n` | `Len(s) = n` |
 //! | `SubSat { inst }` | `h = sub.sat n c`, unsigned, `c` a constant | `n <= h + c` |
+//! | `Range { value }` | the type of `value`, an unsigned int of `bits` bits | `0 <= value` and `value <= 2^bits - 1` |
+//! | `Bits { inst }` | `v = and x y`, `v = rem x y`, or `v = shr x k`, unsigned; a constant operand `c` within the type (`rem`: `1 <= c`) | `and`: `v <= x`, `v <= y`; `rem`: `v <= x`, `v <= y - 1`; `shr`: `v <= x` |
+//! | `Cast { inst }` | `v = cast x`, `cast.wrap x`, or `cast.sat x`: `x` an unsigned int value, `v` an unsigned int at least as wide | `v = x` |
 //!
 //! A compare `x < y`, `x <= y`, `x == y` states `x <= y - 1`, `x <= y`, or both `x <= y` and
 //! `y <= x`. Where the larger side `y` of a strict compare is `sub.sat n c`, it also states
 //! `x + c < n`; where the smaller side `x` of a non-strict one is `sub.sat n c`, also
-//! `n <= y + c`. An equality source (`Arith`, `SliceLen`, `SliceMake`) gives its edge in both
-//! directions. The instruction of every source but `Branch` must dominate the check.
+//! `n <= y + c`. An equality source (`Arith`, `SliceLen`, `SliceMake`, `Cast`) gives its edge in
+//! both directions. The instruction of every source but `Branch` and `Range` must dominate the
+//! check; for `Range`, the definition of `value` (an instruction, or the block of a parameter).
+//!
+//! Why each `Bits` and `Cast` row holds of the values as mathematical integers: on unsigned ints
+//! `x & y` is at most either operand; `rem` traps when `y = 0`, so a result that exists is
+//! `x mod y`, below `y` and at most `x`; an unsigned `shr` is logical, `floor(x / 2^k)`, at most
+//! `x` (an amount `>= bits` traps). A cast to an unsigned type at least as wide as the unsigned
+//! source keeps the value under every one of the three kinds. A constant operand is read as
+//! itself, so it must already be a value of the op's type.
 //!
 //! Dominance is certified, not computed, by the checker: [`FnWitness::dom`] names for every
 //! reachable block one block that dominates it, and the checker accepts the table when every
@@ -72,6 +83,9 @@ pub enum Source {
     SliceLen { inst: u32 },
     SliceMake { inst: u32 },
     SubSat { inst: u32 },
+    Range { value: Value },
+    Bits { inst: u32 },
+    Cast { inst: u32 },
 }
 
 /// `from <= to + w`.

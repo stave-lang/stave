@@ -247,7 +247,10 @@ b2():
   One pass after lowering removes the checks that have a proof (constant index < length, a
   dominating check on the same index and length, a dominating `lt i n` branch,
   and `LenEq`/`Offset`: `i + k < n` derived from dominating unsigned compares, asserting calls
-  such as `std.debug.assert`, and trapping `add`/`sub` of constants; a check or a strict compare
+  such as `std.debug.assert`, trapping `add`/`sub` of constants, unsigned bit ops (`and x y` is
+  at most `x` and `y`, `rem x y` below `y` and at most `x`, `shr x k` at most `x`), the range
+  `0 ..= 2^bits - 1` of an unsigned type, and `cast`/`cast.wrap`/`cast.sat` from an unsigned
+  type to an unsigned one at least as wide as the same value; a check or a strict compare
   against `sub.sat n c` reads as `i + c < n`). The pass runs in every build and never looks at
   the build mode: a function keeps the same checks in debug and release, and the checked IR (the
   `ir` dump, the interpreter's input) is its result. Each removed check has a witness, the proof

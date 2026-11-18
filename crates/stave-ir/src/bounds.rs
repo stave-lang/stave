@@ -46,8 +46,10 @@
 //!
 //! `LenEq` and `Offset` come from one difference-constraint graph per function (`bounds/facts.rs`):
 //! facts `x <= y + c` over SSA values from dominating branches (unsigned compares, a loop's
-//! `lt i n` among them) and asserting calls (`std.debug.assert(a.len() == b.len(), ..)`), with
-//! trapping `add`/`sub` by a constant folded into offsets. Each check is a query on it, explored
+//! `lt i n` among them), asserting calls (`std.debug.assert(a.len() == b.len(), ..)`), unsigned
+//! bit ops (`h & (n - 1) <= n - 1`, `h % n <= n - 1`, `x >> k <= x`), and the range of an
+//! unsigned type (`b <= 255` for a `u8`), with trapping `add`/`sub` by a constant folded into
+//! offsets and a widening unsigned cast into its operand. Each check is a query on it, explored
 //! from the index for at most [`BOUNDS_STEP_LIMIT`] edges.
 //!
 //! The pass deletes nothing. Its result is a witness per check ([`crate::witness`]): the proof
