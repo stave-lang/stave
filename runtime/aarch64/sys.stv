@@ -107,6 +107,16 @@ pub fn sc0(id: usize) -> isize {
     return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall0(NR[id]);
 }
 
+// exit_group and sched_yield name their number directly, so no trapping operation (the NR
+// lookup) is on runtime.panic.begin's path, where a trap would start the report again.
+pub fn exit_group(code: usize) -> isize {
+    return unsafe("exit_group takes no memory") syscall1(NR_EXIT_GROUP, code);
+}
+
+pub fn sched_yield() -> isize {
+    return unsafe("sched_yield takes no memory") syscall0(NR_SCHED_YIELD);
+}
+
 pub fn sc1(id: usize, a1: usize) -> isize {
     return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall1(NR[id], a1);
 }

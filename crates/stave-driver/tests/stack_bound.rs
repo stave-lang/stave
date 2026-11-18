@@ -7,6 +7,8 @@
 //!   (`stack_rec`): so the chain needs more than `[run] stack`, and the computed stack is what
 //!   lets `stack_bound` run;
 //! - each `spawn` body is a root with its own bound (`stack_spawn.stv`);
+//! - a trap in the deepest frame of a bounded chain, on main and on a spawned thread, still
+//!   prints the whole panic report (`run/stack_trap_main`, `borrow/stack_trap_spawn`);
 //! - a drop cycle of a recursive type has no bound;
 //! - every run-suite program, debug and release, maps every fn value it makes to the call graph
 //!   (no stack is unbounded for an unresolved fn-value call), and gets a bound unless it reaches
@@ -135,6 +137,32 @@ fn a_rec_fn_keeps_run_stack() {
             let err = String::from_utf8_lossy(&got.stderr);
             assert_eq!(got.exit, 101, "{what}: {err}");
             assert!(err.contains("panic: StackOverflow"), "{what}: {err}");
+        }
+    }
+}
+
+/// A bounds check fails in the deepest frame of the chain, on main and on a spawned thread: the
+/// panic report runs on top of the chain inside the computed stack and prints in full.
+#[test]
+fn a_trap_at_the_bottom_of_the_bound_reports_in_full() {
+    // the spawn one is outside run/: the interpreter runs a spawn body on the calling thread
+    let borrow = repo().join("tests/conformance/borrow");
+    for (dir, name, thread) in [(run_dir(), "stack_trap_main", 0), (borrow, "stack_trap_spawn", 1)] {
+        let p = dir.join(name);
+        let want = format!("panic: Bounds at src/main.stv:12:15 in main.f0 (thread {thread})\n");
+        for target in targets() {
+            for release in [false, true] {
+                let out = build(&p, target, release);
+                let r = out.stack.as_ref().unwrap();
+                let what = format!("{name} [{target}, release {release}]");
+                bytes(r.main, &what);
+                for t in &r.threads {
+                    bytes(t.depth, &what);
+                }
+                let Some(got) = run(&out, target, name, &p) else { continue };
+                assert_eq!(got.exit, 101, "{what}");
+                assert_eq!(String::from_utf8_lossy(&got.stderr), want, "{what}");
+            }
         }
     }
 }

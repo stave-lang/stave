@@ -14,8 +14,10 @@
 //! made into a fn value has no node, is unresolved, and so is one that calls C code (`ccall`).
 //!
 //! **Depth** of a node: its weight plus the largest depth among its successors, and, if its code
-//! has a trap stub, the depth `T` of a trap: twice the depth of `runtime.panic.trap` (a trap
-//! raised while one is reported exits at `runtime.panic.begin`, so it adds one more such path).
+//! has a trap stub, the depth `T` of a trap: twice the depth of `runtime.panic.trap`. A trap
+//! raised while one is reported calls `runtime.panic.begin` first, which exits, so it adds at
+//! most one more such path; that needs every function `begin` reaches to be free of trap stubs,
+//! which the pass checks (else every trapping stack is unbounded).
 //! Computed sinks first by out-degree peeling, on flat arrays without recursion. A node that is
 //! `rec fn`, unresolved, or reaches either or a cycle (a drop cycle of a recursive type, or one
 //! the added edges close) has no bound.
@@ -221,6 +223,22 @@ fn on_cycle(start: &[u32], to: &[u32], done: &[Option<Depth>], x: u32) -> Vec<u3
     cycle
 }
 
+/// A node with a trap stub that `from` reaches (themselves included), if any.
+fn trapping_node(start: &[u32], to: &[u32], traps: &[bool], from: &[u32]) -> Option<u32> {
+    let mut seen = vec![false; traps.len()];
+    let mut work: Vec<u32> = from.to_vec();
+    while let Some(x) = work.pop() {
+        if std::mem::replace(&mut seen[x as usize], true) {
+            continue;
+        }
+        if traps[x as usize] {
+            return Some(x);
+        }
+        work.extend_from_slice(&to[start[x as usize] as usize..start[x as usize + 1] as usize]);
+    }
+    None
+}
+
 fn find_body(m: &Module, path: &str) -> Option<FuncId> {
     m.funcs.iter().position(|f| f.path == path && f.body.is_some()).map(|i| FuncId(i as u32))
 }
@@ -418,13 +436,19 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
         xs.iter().try_fold(0, |acc, &x| finish(done, x).map(|d| acc.max(d)))
     };
 
-    // the depth of a trap, from the depths without trap stubs
+    // the depth of a trap, from the depths without trap stubs: the report's own path, plus one
+    // more trap raised anywhere on it, which calls `runtime.panic.begin` first and exits there.
+    // That holds only if nothing `begin` reaches traps (else a trap there starts over).
     let zero = vec![Ok(0); total];
     let first = longest(&start, &to, &weight, &zero, &poison);
-    let trap = match find_body(m, "runtime.panic.trap") {
-        Some(t) => over(&first, &ids[t.index()]).map(|d| d.saturating_mul(2)),
+    let trap = match (find_body(m, "runtime.panic.trap"), find_body(m, "runtime.panic.begin")) {
+        (Some(t), Some(b)) => match trapping_node(&start, &to, &traps, &ids[b.index()]) {
+            Some(x) => Err(Why::Cycle(at(x))),
+            None => over(&first, &ids[t.index()]).map(|d| d.saturating_mul(2)),
+        },
+        (Some(t), None) => Err(Why::Cycle(at(ids[t.index()].first().copied().unwrap_or(0)))),
         // `__stave_panic_fallback`: called, no frame
-        None => Ok(16),
+        (None, _) => Ok(16),
     };
     let leaf: Vec<Depth> = traps.iter().map(|&t| if t { trap } else { Ok(0) }).collect();
     let done = longest(&start, &to, &weight, &leaf, &poison);
@@ -628,6 +652,14 @@ mod tests {
         let mut c = on_cycle(&start, &to, &d, 0);
         c.sort_unstable();
         assert_eq!(c, vec![1, 2]);
+    }
+
+    /// The trap stubs `runtime.panic.begin`'s callees may not have: found anywhere below it.
+    #[test]
+    fn trapping_node_below() {
+        let (start, to) = csr(4, &[(0, 1), (1, 2), (3, 0)]);
+        assert_eq!(trapping_node(&start, &to, &[false, false, true, false], &[0]), Some(2));
+        assert_eq!(trapping_node(&start, &to, &[false, false, false, true], &[0]), None);
     }
 
     /// Duplicate edges are counted consistently.
