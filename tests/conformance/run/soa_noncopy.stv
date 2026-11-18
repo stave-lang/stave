@@ -1,0 +1,29 @@
+//~ STDOUT soa_noncopy.stdout
+// A Flat row type that is not Copy: no `get`, but `push`, `set`, `pop`, and the columns work.
+// A column of a non-Copy struct is read through its Copy fields (`ps.at[i].a`).
+import std.io;
+import std.soa;
+
+struct At {
+    pub a: u32,
+    pub b: u32,
+}
+
+struct Tok {
+    pub id: u32,
+    pub at: At,
+}
+
+fn main() -> i32 {
+    let mut ps = soa.Soa::<Tok>.new();
+    for i in 0u32..5 { ps.push(Tok.{ id: i, at: At.{ a: i * 10, b: i * 100 } }); }
+    ps.set(1, Tok.{ id: 11, at: At.{ a: 7, b: 8 } });
+    ps.id[2] = 22;
+    let a1 = ps.at[1].a;
+    let t = ps.pop().unwrap();
+    let mut ids: u32 = 0;
+    for i in 0..ps.id.len() { ids = ids + ps.id[i]; }
+    let n = ps.len();
+    io.print(f"{a1} {t.id} {t.at.a} {t.at.b} {ids} {n}\n");
+    return 0;
+}

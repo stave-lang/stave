@@ -899,6 +899,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                     edits: &[],
                 }),
             },
+            Shape {
+                case: "column",
+                message: "column `{name}` is private to module `{module}`: its field of the row struct is not `pub`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "private column `{name}` used here" },
+                    LabelTemplate { at: "decl", text: "field `{name}` declared here without `pub`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "mark field `{name}` `pub` in `{module}`, or use the column only inside `{module}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
         ],
     },
     Entry {
@@ -1292,6 +1305,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "correct the spelling, or convert the value to a type that has `{name}` (`stave explain E0208`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "column",
+                message: "`{type}` has no column `{name}`: its columns are the fields of its row struct",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no field `{name}` in the row type" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "name a field of the row struct, or add field `{name}` to it",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3563,6 +3588,31 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove the call: the value is dropped when it goes out of scope or is overwritten; to end its life early, move it into `std.mem.drop(x)`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0910",
+        severity: Severity::Error,
+        area: "generics",
+        rule: "the row type of `std.soa.Soa<T>` is not a struct (its fields are the columns); checked where the type is written and at calls of `std.soa` methods; a generic parameter passes",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{type}` cannot be the row type of `soa.Soa`: it is not a struct",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a struct is required here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use a struct with one field per column, e.g. `struct Row {{ pub v: {type} }}` and `soa.Soa<Row>`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

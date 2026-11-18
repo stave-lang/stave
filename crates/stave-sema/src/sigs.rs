@@ -206,6 +206,9 @@ pub struct LangItems {
     /// `std.cell.UnsafeCell` (fixed path): never Sync, so no type containing it is Sync without
     /// an explicit `unsafe(..) impl Sync` (crate::kinds).
     pub unsafe_cell: DeclId,
+    /// `std.soa.Soa<T>` (fixed path): its fields, outside `std.soa`, are the columns of T, one per
+    /// field of the struct T (crate::expr `field_of`).
+    pub soa: DeclId,
     /// Operator traits by name (`Add`, `WrapAdd`, ...).
     pub ops: FxHashMap<&'static str, DeclId>,
     /// The constructors a const-expr may call (fixed paths): `new` of `std.cell.UnsafeCell`,
@@ -255,6 +258,7 @@ impl Default for LangItems {
             display: DeclId::NONE,
             write: DeclId::NONE,
             unsafe_cell: DeclId::NONE,
+            soa: DeclId::NONE,
             ops: FxHashMap::default(),
             const_ctors: Vec::new(),
             locks: LockItems::default(),
@@ -585,6 +589,7 @@ fn lower_base<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -
                     match args {
                         Some(args) => {
                             view_args(h, &icx, n, d, &args);
+                            soa_row(h, &icx, n, d, &args);
                             h.mk_adt(d, args)
                         }
                         None => h.error_ty(),
@@ -635,6 +640,39 @@ fn view_args<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32, d: DeclId, args:
     for d in out {
         h.report(Some(d));
     }
+}
+
+/// Whether `m` is module `soa` of the built-in `std` package.
+pub(crate) fn is_builtin_soa(p: &Program, m: &crate::modules::Module) -> bool {
+    m.path_text == "std.soa"
+        && p.packages.get(m.package.idx()).is_some_and(|k| k.kind == crate::PackageKind::Builtin)
+}
+
+/// E0910: a written `std.soa.Soa<T>` whose row type T is neither a struct nor a generic param.
+fn soa_row<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32, d: DeclId, args: &[GArg]) {
+    let Some(GArg::Type(t)) = args.first().copied() else { return };
+    let diag = {
+        let prog = h.prog();
+        let is_soa = prog.decl(d).is_some_and(|x| {
+            prog.strings.get(x.name) == "Soa"
+                && prog.module(x.module).is_some_and(|m| is_builtin_soa(prog, m))
+        });
+        if !is_soa || h.has_error(t) {
+            return;
+        }
+        let ok = match h.kind(t) {
+            TypeKind::Adt { def, .. } => prog.decl(*def).is_some_and(|x| x.kind == DeclKind::Struct),
+            TypeKind::Param(_) => true,
+            _ => false,
+        };
+        if ok {
+            return;
+        }
+        let names = NameCx { prog, generics: h.view_env() };
+        let tn = types::display(h, &names, t);
+        mk("E0910", None, &[("type", &tn)], icx.node_span(n), &[])
+    };
+    h.report(diag);
 }
 
 fn e0209<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32) {
@@ -1035,6 +1073,11 @@ impl<'p> SigBuilder<'p> {
         self.lang.write = find(&core, "Write");
         self.lang.string = find(&["std", "string"], "String");
         self.lang.unsafe_cell = find(&["std", "cell"], "UnsafeCell");
+        // a user module may also be spelled `std.soa`: only the built-in package's counts
+        self.lang.soa = match (p.modules.iter().find(|m| is_builtin_soa(p, m)), p.strings.lookup("Soa")) {
+            (Some(m), Some(s)) => p.module_item(m.id, s).unwrap_or(DeclId::NONE),
+            _ => DeclId::NONE,
+        };
         for (t, _) in OP_TRAITS {
             let d = find(&core, t);
             if d.is_some() {

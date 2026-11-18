@@ -1,0 +1,143 @@
+//~ STDOUT soa_rows.stdout
+// std.soa row types: a nested struct field is one column of that struct, a struct without
+// fields never allocates, a single-field struct, a struct of seven fields of mixed sizes
+// (each column aligned for its type), the `try_` forms, a zero-sized field, and a Soa inside
+// a struct reached through a `&mut` parameter.
+import std.io;
+import std.soa;
+
+struct V2 {
+    pub a: u32,
+    pub b: u32,
+}
+
+impl Copy for V2 {}
+
+struct Body {
+    pub pos: V2,
+    pub mass: u64,
+}
+
+impl Copy for Body {}
+
+struct Empty {}
+
+impl Copy for Empty {}
+
+struct One {
+    pub v: u64,
+}
+
+impl Copy for One {}
+
+struct Tagged {
+    pub v: u32,
+    pub none: Empty,
+    pub w: u16,
+}
+
+impl Copy for Tagged {}
+
+struct Holder {
+    pub ps: soa.Soa<One>,
+    pub k: u64,
+}
+
+fn double(h: &mut Holder) {
+    for i in 0..h.ps.v.len() { h.ps.v[i] = h.ps.v[i] * h.k; }
+}
+
+struct Wide {
+    pub a: u8,
+    pub b: u16,
+    pub c: u32,
+    pub d: u64,
+    pub e: f64,
+    pub f: i8,
+    pub g: bool,
+}
+
+impl Copy for Wide {}
+
+fn main() -> i32 {
+    let mut bs = soa.Soa::<Body>.new();
+    bs.push(Body.{ pos: V2.{ a: 1, b: 2 }, mass: 10 });
+    bs.push(Body.{ pos: V2.{ a: 3, b: 4 }, mass: 20 });
+    bs.pos[1].b = 40;
+    let pa = bs.pos[0].a;
+    let m = bs.mass[1];
+    let b1 = bs.get(1);
+    let pl = bs.pos.len();
+    io.print(f"{pa} {m} {b1.pos.a} {b1.pos.b} {b1.mass} {pl}\n");
+
+    let mut es = soa.Soa::<Empty>.new();
+    for i in 0u32..5 { es.push(Empty.{}); }
+    let el = es.len();
+    let popped = es.pop().is_some();
+    let el2 = es.len();
+    io.print(f"{el} {popped} {el2}\n");
+
+    let mut os = soa.Soa::<One>.new();
+    for i in 0u64..100 { os.push(One.{ v: i }); }
+    let total = os.v.sum();
+    let o99 = os.get(99);
+    io.print(f"{total} {o99.v}\n");
+
+    let mut ws = soa.Soa::<Wide>.with_capacity(1);
+    for i in 0u32..20 {
+        ws.push(Wide.{
+            a: i as% u8,
+            b: (i * 3) as% u16,
+            c: i * 5,
+            d: (i as u64) * 1000,
+            e: (i as~ f64) * 0.5,
+            f: -(i as% i8),
+            g: i % 2 == 0,
+        });
+    }
+    let mut sa: u64 = 0;
+    let mut sb: u64 = 0;
+    let mut sc: u64 = 0;
+    let mut sd: u64 = 0;
+    let mut se: f64 = 0.0;
+    let mut sf: i64 = 0;
+    let mut sg: u32 = 0;
+    for i in 0..ws.len() {
+        sa = sa + (ws.a[i] as u64);
+        sb = sb + (ws.b[i] as u64);
+        sc = sc + (ws.c[i] as u64);
+        sd = sd + ws.d[i];
+        se = se + ws.e[i];
+        sf = sf + (ws.f[i] as i64);
+        if ws.g[i] { sg = sg + 1; }
+    }
+    let w7 = ws.get(7);
+    io.print(f"{sa} {sb} {sc} {sd} {se} {sf} {sg}\n");
+    io.print(f"{w7.a} {w7.b} {w7.c} {w7.d} {w7.e} {w7.f} {w7.g}\n");
+
+    let mut ts = soa.Soa::<One>.try_with_capacity(4).unwrap();
+    let r1 = ts.try_reserve(10).is_ok();
+    let r2 = ts.try_push(One.{ v: 5 }).is_ok();
+    let big = ts.try_reserve(0x4000_0000_0000_0000).is_err();
+    let tl = ts.len();
+    let t0 = ts.v[0];
+    let huge = soa.Soa::<One>.try_with_capacity(0x2000_0000_0000_0000).is_err();
+    io.print(f"{r1} {r2} {big} {tl} {t0} {huge}\n");
+
+    let mut gs = soa.Soa::<Tagged>.new();
+    for i in 0u32..6 { gs.push(Tagged.{ v: i, none: Empty.{}, w: (i * 7) as% u16 }); }
+    let g4 = gs.get(4);
+    let nl = gs.none.len();
+    let w5 = gs.w[5];
+    io.print(f"{g4.v} {g4.w} {nl} {w5}\n");
+
+    let mut h = Holder.{ ps: soa.Soa::<One>.new(), k: 3 };
+    h.ps.push(One.{ v: 4 });
+    h.ps.push(One.{ v: 5 });
+    double(&mut h);
+    h.ps.v[0] = h.ps.v[0] + 1;
+    let h0 = h.ps.v[0];
+    let h1 = h.ps.get(1);
+    io.print(f"{h0} {h1.v}\n");
+    return 0;
+}

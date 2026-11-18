@@ -145,7 +145,7 @@ pub fn places_conflict(p: &Place, q: &Place, kind: Access) -> bool {
     let n = p.proj.len().min(q.proj.len());
     for i in 0..n {
         match (p.proj[i], q.proj[i]) {
-            (Proj::Field(a), Proj::Field(b)) if a != b => return false,
+            (Proj::Field(a), Proj::Field(b)) | (Proj::Column(a), Proj::Column(b)) if a != b => return false,
             (Proj::EnumField(v, a), Proj::EnumField(w, b)) if v == w && a != b => return false,
             _ => {}
         }

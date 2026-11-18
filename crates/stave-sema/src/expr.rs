@@ -1625,7 +1625,14 @@ impl<'a> Ck<'a> {
     fn impl_args_for(&mut self, imp: DeclId, t: TypeId) -> Option<Vec<GArg>> {
         let idef = self.sigs.impl_def(imp)?;
         let genv = self.genv();
-        self.w.impl_applies(&mut self.tys, idef, t, genv, 0)
+        let args = self.w.impl_applies(&mut self.tys, idef, t, genv, 0);
+        // `soa.Soa::<X>.new()` with a non-struct or non-Flat X reaches the call, whose bound check
+        // names the problem (E0910, E1407), instead of failing inference
+        let soa_mod = self.prog.decl(self.sigs.lang.soa).map(|d| d.module);
+        if args.is_none() && soa_mod.is_some() && self.prog.decl(imp).map(|d| d.module) == soa_mod {
+            return self.w.impl_head_args(&mut self.tys, idef, t);
+        }
+        args
     }
 
     /// The value of a finished path state.
@@ -2012,6 +2019,14 @@ impl<'a> Ck<'a> {
             return ids::ERROR;
         }
         let (inner, derefs) = self.tys.peel_refs(t);
+        let soa = self.sigs.lang.soa;
+        if let TypeKind::Adt { def, args } = self.tys.kind(inner).clone()
+            && soa.is_some()
+            && def == soa
+            && self.prog.decl(soa).is_some_and(|d| d.module != self.icx.res_module())
+        {
+            return self.column_of(inner, &args, name, at, key, derefs);
+        }
         if let TypeKind::Adt { def, args } = self.tys.kind(inner).clone()
             && let Some(adt) = self.sigs.adt(def)
             && !adt.is_enum
@@ -2040,6 +2055,77 @@ impl<'a> Ck<'a> {
         let d = mk("E0208", None, &[("name", nm), ("type", &tn)], at, &[]);
         self.report(d);
         ids::ERROR
+    }
+
+    /// Column `name` of `soa` (a `std.soa.Soa<T>` outside `std.soa`): field `name` of the struct T
+    /// as a `[F]` place. Private fields of T give columns private to T's module (E0106 case
+    /// `column`); a name T has no field of is E0208 case `column`.
+    fn column_of(
+        &mut self,
+        soa: TypeId,
+        args: &[GArg],
+        name: Sym,
+        at: Span,
+        key: Option<u32>,
+        derefs: u32,
+    ) -> TypeId {
+        let Some(GArg::Type(row)) = args.first().copied() else { return ids::ERROR };
+        if row == ids::ERROR || self.tys.has_error(row) {
+            return ids::ERROR;
+        }
+        if let TypeKind::Adt { def, args: rargs } = self.tys.kind(row).clone()
+            && let Some(adt) = self.sigs.adt(def)
+            && !adt.is_enum
+            && let Some(v) = adt.variants.first()
+            && let Some((i, f)) = v.fields.iter().enumerate().find(|(_, f)| f.name == name)
+        {
+            let ft = self.tys.subst(f.ty, &rargs, None);
+            if let Some(fd) = self.prog.decl(f.decl)
+                && !fd.is_pub()
+                && fd.module != self.icx.res_module()
+            {
+                let module = self.prog.module(fd.module).map_or(String::new(), |m| m.path_text.clone());
+                let nm = self.prog.strings.get(name).to_string();
+                let d = mk(
+                    "E0106",
+                    Some("column"),
+                    &[("name", &nm), ("module", &module)],
+                    at,
+                    &[("decl", fd.name_span)],
+                );
+                self.report(d);
+            }
+            if let Some(k) = key {
+                self.target(k, Target::Column { index: i as u32, derefs });
+            }
+            return self.tys.intern(TypeKind::Slice { elem: ft, align: 0 });
+        }
+        let tn = self.show(soa);
+        let nm = self.prog.strings.get(name);
+        let nm = if nm.is_empty() { "_" } else { nm };
+        let d = mk("E0208", Some("column"), &[("name", nm), ("type", &tn)], at, &[]);
+        self.report(d);
+        ids::ERROR
+    }
+
+    /// E0910: `row`, the type argument of a `std.soa.Soa` (or of a generic of module `std.soa`
+    /// whose first param is the row type), is not a struct. A generic param passes: its instances
+    /// are not checked. Returns whether it reported.
+    pub fn soa_row_check(&mut self, at: Span, row: TypeId) -> bool {
+        if row == ids::ERROR || self.tys.has_error(row) {
+            return false;
+        }
+        let ok = match self.tys.kind(row) {
+            TypeKind::Adt { def, .. } => self.sigs.adt(*def).is_some_and(|a| !a.is_enum),
+            TypeKind::Param(_) => true,
+            _ => false,
+        };
+        if !ok {
+            let tn = self.show(row);
+            let d = mk("E0910", None, &[("type", &tn)], at, &[]);
+            self.report(d);
+        }
+        !ok
     }
 
     /// `Some(inclusive)` when index expression `e` is a range written in the brackets.
@@ -2314,6 +2400,9 @@ impl<'a> Ck<'a> {
     /// [`crate::kinds::view_arg`]) checks of a call's generic args.
     fn check_bounds(&mut self, at: Span, generic: DeclId, gens: &[GenericParam], args: &[GArg]) {
         let genv = self.genv();
+        // the generics of `std.soa` take the row type first (E0910 before the `Flat` bound)
+        let soa_mod = self.prog.decl(self.sigs.lang.soa).map(|d| d.module);
+        let in_soa = soa_mod.is_some() && self.prog.decl(generic).map(|d| d.module) == soa_mod;
         for (i, g) in gens.iter().enumerate() {
             let Some(GArg::Type(a)) = args.get(i).copied() else { continue };
             if a == ids::ERROR || self.tys.has_error(a) {
@@ -2323,6 +2412,9 @@ impl<'a> Ck<'a> {
             // the view diagnostics, whose fix (`T: view`) would not help.
             let flat = self.sigs.lang.flat;
             let flat_bound = flat.is_some() && g.bounds.iter().any(|b| b.trait_decl == flat);
+            if i == 0 && in_soa && flat_bound && self.soa_row_check(at, a) {
+                continue;
+            }
             if !g.view && !flat_bound && self.w.is_view(&self.tys, a, genv) {
                 let tn = self.show(a);
                 let d = crate::kinds::view_arg(self.prog, generic, g, &tn, at);
@@ -2546,6 +2638,36 @@ impl<'a> Ck<'a> {
                 }
                 self.target(paren, Target::FenceStream);
                 Ty::T(ids::UNIT)
+            }
+            St::Builtin(b, targs) if b.soa_only() => {
+                let t = match targs.as_deref() {
+                    Some([GArg::Type(t)]) => *t,
+                    _ => {
+                        self.e0202_infer(n);
+                        return self.args_only(args);
+                    }
+                };
+                let us = ids::USIZE;
+                let params: Vec<TypeId> = match b {
+                    Builtin::SoaRead => vec![self.tys.mk_ptr(false, ids::U8), us, us],
+                    Builtin::SoaWrite => vec![self.tys.mk_ptr(true, ids::U8), us, us, t],
+                    _ => Vec::new(),
+                };
+                if !self.arity(n, paren, params.len(), args.len(), false) {
+                    return self.args_only(args);
+                }
+                if b != Builtin::SoaRowSize {
+                    self.unsafe_op(cspan);
+                }
+                for (&a, &p) in args.iter().zip(&params) {
+                    self.check_expr(a, p, None);
+                }
+                self.target(paren, Target::SoaRow { op: b, ty: t });
+                Ty::T(match b {
+                    Builtin::SoaRead => t,
+                    Builtin::SoaWrite => ids::UNIT,
+                    _ => ids::USIZE,
+                })
             }
             St::Builtin(b, targs) => {
                 if !args.is_empty() {

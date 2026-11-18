@@ -887,6 +887,10 @@ impl Program {
                 })
             })
             .collect();
+        let soa_module = modules
+            .iter()
+            .position(|m| m.path_text == "std.soa" && packages[m.package.idx()].kind == PackageKind::Builtin)
+            .map(|i| ModuleId(i as u32));
         let prims: FxHashMap<Sym, Prim> =
             strings.iter().filter_map(|(s, text)| Prim::from_name(text).map(|p| (s, p))).collect();
         let builtins: FxHashMap<Sym, Builtin> =
@@ -925,6 +929,7 @@ impl Program {
                 prims: &prims,
                 builtins: &builtins,
                 prelude_ok: &prelude_ok,
+                soa_module,
                 members: &members,
                 methods: &empty_methods,
                 impls: &[],
@@ -959,6 +964,7 @@ impl Program {
                 prims: &prims,
                 builtins: &builtins,
                 prelude_ok: &prelude_ok,
+                soa_module,
                 members: &members,
                 methods: &methods,
                 impls: &raw_impls,
