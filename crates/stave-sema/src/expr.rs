@@ -2345,6 +2345,13 @@ impl<'a> Ck<'a> {
                     }
                     continue;
                 }
+                if b.trait_decl == self.sigs.lang.frozen && b.trait_decl.is_some() {
+                    let d = crate::traits::Derived::Frozen;
+                    if let Some(wit) = self.w.derived_witness(&mut self.tys, a, genv, d) {
+                        self.e1410(at, a, &wit, g.name_span);
+                    }
+                    continue;
+                }
                 if !self.w.implements(&mut self.tys, a, &tr, genv) {
                     let tn = self.show(a);
                     let trn = self
@@ -2383,6 +2390,31 @@ impl<'a> Ck<'a> {
                 let holes =
                     [("type", tn.as_str()), ("path", &wit.path), ("part", &pn), ("reason", why.text())];
                 mk("E1407", None, &holes, at, &[("param", param)])
+            }
+        };
+        self.report(d);
+    }
+
+    /// E1410: `ty` (given for a `Frozen`-bound param declared at `param`) is not Frozen; `wit`
+    /// names its first component that is not.
+    fn e1410(&mut self, at: Span, ty: TypeId, wit: &crate::traits::FlatWitness, param: Span) {
+        use crate::traits::{Derived, NotFlat};
+        let tn = self.show(ty);
+        let d = match wit.why {
+            NotFlat::Unknown => return,
+            NotFlat::Depth => {
+                let limit = crate::traits::QUERY_DEPTH.to_string();
+                mk("E1410", Some("depth"), &[("type", &tn), ("limit", &limit)], at, &[("param", param)])
+            }
+            why if wit.path.is_empty() => {
+                let r = why.text_for(Derived::Frozen);
+                mk("E1410", Some("self"), &[("type", &tn), ("reason", r)], at, &[("param", param)])
+            }
+            why => {
+                let pn = self.show(wit.part);
+                let r = why.text_for(Derived::Frozen);
+                let holes = [("type", tn.as_str()), ("path", &wit.path), ("part", &pn), ("reason", r)];
+                mk("E1410", None, &holes, at, &[("param", param)])
             }
         };
         self.report(d);

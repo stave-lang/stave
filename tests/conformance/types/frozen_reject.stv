@@ -1,0 +1,58 @@
+//~ CHECK-ONLY
+// E1410: a `Frozen` bound given a type that reaches an `UnsafeCell` (`Cell`, atomics, `Mutex`,
+// `Once`) or a fn value, directly, behind a field, a reference, a raw pointer, a slice, an enum
+// payload, or a type argument. E1408: `Frozen` is never implemented, and an impl changes
+// nothing.
+import std.atomic;
+import std.cell;
+import std.sync;
+import std.vec;
+
+struct Stats {
+    pub n: u32,
+    pub hits: atomic.U64,
+}
+
+struct Plain {
+    pub v: u32,
+}
+
+struct Shared {
+    pub p: *const Stats,
+}
+
+view enum Job {
+    Idle,
+    Run(fn() -> u32),
+}
+
+impl Frozen for Plain {} //~ ERROR E1408
+
+unsafe("Shared never reads through p") impl Frozen for Shared {} //~ ERROR E1408
+
+fn need<T: Frozen + view>() {}
+
+fn fwd<T>() {
+    need::<T>(); //~ ERROR E1410
+}
+
+fn fwd_copy<T: Copy>() {
+    need::<&T>(); //~ ERROR E1410
+}
+
+fn main() -> i32 {
+    need::<Plain>();
+    need::<cell.Cell<u32>>(); //~ ERROR E1410
+    need::<atomic.U64>(); //~ ERROR E1410
+    need::<&atomic.U64>(); //~ ERROR E1410
+    need::<sync.Mutex<u32, 1>>(); //~ ERROR E1410
+    need::<sync.Once<u32, 1>>(); //~ ERROR E1410
+    need::<Stats>(); //~ ERROR E1410
+    need::<Shared>(); //~ ERROR E1410
+    need::<&[cell.Cell<u8>]>(); //~ ERROR E1410
+    need::<vec.Vec<atomic.Bool>>(); //~ ERROR E1410
+    need::<Job>(); //~ ERROR E1410
+    need::<fn(u32) -> bool>(); //~ ERROR E1410
+    need::<Option<&Stats>>(); //~ ERROR E1410
+    return 0;
+}

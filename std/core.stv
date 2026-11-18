@@ -15,6 +15,11 @@
 // is derived by the compiler and never implemented (E1408): a type is Flat iff no field, enum
 // payload, array / tuple element, or type argument, at any depth, is a reference, view, raw
 // pointer, fn value, `UnsafeCell`, or type with `Drop`. `<T: Flat>` demands it (E1407).
+// `Frozen` (nothing reachable from a value changes while the value is only shared) is derived
+// and never implemented too: a type is Frozen iff no `UnsafeCell` and no fn value is reachable
+// through its fields, payloads, elements, type arguments, or the pointees of its references and
+// raw pointers. Flat implies Frozen. `<T: Frozen>` demands it (E1410); contract clauses touch
+// only Frozen values (E0211).
 //
 // Operator traits: one trait per operator and overflow mode, every one of the shape
 // `fn op(self, rhs: Self) -> Self` (unary: `fn op(self) -> Self`): operands and result have one
@@ -115,6 +120,9 @@ pub unsafe("an implementer guarantees that &Self may be used from several thread
 
 // Derived from the type's structure only (see the header): every `impl Flat` is rejected.
 pub trait Flat {}
+
+// Derived from the type's structure only (see the header): every `impl Frozen` is rejected.
+pub trait Frozen {}
 
 // The destructor of a type (Vec): run by the compiler only (see the header).
 pub trait Drop {

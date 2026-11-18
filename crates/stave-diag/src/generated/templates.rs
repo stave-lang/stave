@@ -4761,21 +4761,22 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1408",
         severity: Severity::Error,
         area: "effects",
-        rule: "an `impl Flat` (safe or `unsafe(..)`): `Flat` is derived by the compiler from the type's structure and never implemented",
+        rule: "an `impl Flat` or `impl Frozen` (safe or `unsafe(..)`): both are derived by the compiler from the type's structure and never implemented",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "trait", kind: HoleKind::Path, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[
             Shape {
                 case: "",
-                message: "`impl Flat for {type}`: `Flat` is derived by the compiler, never implemented",
+                message: "`impl {trait} for {type}`: `{trait}` is derived by the compiler, never implemented",
                 labels: &[
                     LabelTemplate { at: "primary", text: "remove this impl" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "remove the impl: a type is `Flat` exactly when it holds no reference, view, raw pointer, fn value, `UnsafeCell`, or `Drop` type",
+                    description: "remove the impl: the compiler decides `{trait}` from the type's fields",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4803,6 +4804,62 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write the recursive part as a `rec fn` item and call it from the closure",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1410",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "`Frozen` demanded by a bound, type not `Frozen`: names the first component that is `UnsafeCell`, a fn value, or a generic param without a `Frozen` (or `Flat`) bound, and its path (field chain, `*` for a pointee); case `self` when the type itself is the component; case `depth` past the check's depth cutoff",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "limit", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "part", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "path", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "reason", kind: HoleKind::TextLiteral, choices: &["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound"] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{type}` is not `Frozen`: component `{path}` has type `{part}`, {reason}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`Frozen` required here" },
+                    LabelTemplate { at: "param", text: "the `Frozen` bound is on this parameter" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass a type that reaches no `UnsafeCell` (`Cell`, atomics, `Mutex`, `Once`) and no fn value",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "depth",
+                message: "`{type}` is not `Frozen`: it nests deeper than {limit} levels, the limit of the `Frozen` check",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`Frozen` required here" },
+                    LabelTemplate { at: "param", text: "the `Frozen` bound is on this parameter" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "nest the type less deeply",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "self",
+                message: "`{type}` is not `Frozen`: it is {reason}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`Frozen` required here" },
+                    LabelTemplate { at: "param", text: "the `Frozen` bound is on this parameter" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass a type that reaches no `UnsafeCell` (`Cell`, atomics, `Mutex`, `Once`) and no fn value",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

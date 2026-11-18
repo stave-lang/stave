@@ -453,6 +453,57 @@ fn flat_diagnostics_name_the_first_non_flat_component() {
     assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }
 
+/// E1410 names the first component that is not Frozen (`*` for a pointee); views, `Drop` types,
+/// and raw pointers to Frozen data are Frozen; a `Flat` bound implies `Frozen`; E1408 rejects an
+/// impl of Frozen.
+#[test]
+fn frozen_diagnostics_name_the_first_unfrozen_component() {
+    let src = "import std.atomic;\n\
+         import std.cell;\n\
+         import std.sync;\n\
+         import std.vec;\n\
+         struct Plain { pub n: u32 }\n\
+         struct Counter { pub n: u32, pub hits: atomic.U64 }\n\
+         view struct Cursor { pub at: &Counter }\n\
+         impl Frozen for Plain {}\n\
+         fn need<T: Frozen + view>() {}\n\
+         fn fwd<T>() { need::<T>(); }\n\
+         fn via_flat<T: Flat>() { need::<T>(); }\n\
+         fn main() -> i32 {\n\
+         \x20   need::<&u32>();\n\
+         \x20   need::<*const vec.Vec<u32>>();\n\
+         \x20   need::<&[u32]>();\n\
+         \x20   need::<cell.Cell<u32>>();\n\
+         \x20   need::<&atomic.U64>();\n\
+         \x20   need::<Cursor>();\n\
+         \x20   need::<fn(u32) -> u32>();\n\
+         \x20   need::<(u32, sync.Mutex<u32, 1>)>();\n\
+         \x20   need::<Option<&[cell.Cell<u32>]>>();\n\
+         \x20   return 0;\n\
+         }\n";
+    let (p, tc) = mem(src);
+    let got: Vec<String> = tc
+        .all_diagnostics(&p)
+        .iter()
+        .map(|d| {
+            let line = d.primary().map_or(0, |s| p.source_map.locate(s).map_or(0, |l| l.line));
+            format!("{line}: {} {}", d.code(), d.message())
+        })
+        .collect();
+    let want = [
+        "8: E1408 `impl Frozen for Plain`: `Frozen` is derived by the compiler, never implemented",
+        "10: E1410 `T` is not `Frozen`: it is a generic parameter without a `Frozen` bound",
+        "16: E1410 `Cell<u32>` is not `Frozen`: component `v` has type `UnsafeCell<u32>`, `UnsafeCell` (interior mutability)",
+        "17: E1410 `&U64` is not `Frozen`: component `*.v` has type `UnsafeCell<u64>`, `UnsafeCell` (interior mutability)",
+        "18: E1410 `Cursor` is not `Frozen`: component `at.*.hits.v` has type `UnsafeCell<u64>`, `UnsafeCell` (interior mutability)",
+        "19: E1410 `fn(u32) -> u32` is not `Frozen`: it is a fn value (its captures are not in its type)",
+        "20: E1410 `(u32, Mutex<u32, 1>)` is not `Frozen`: component `1.word` has type `UnsafeCell<u32>`, `UnsafeCell` (interior mutability)",
+        "21: E1410 `Option<&[Cell<u32>]>` is not `Frozen`: component `Some.0.*[_].v` has type `UnsafeCell<u32>`, `UnsafeCell` (interior mutability)",
+    ];
+    assert_eq!(got, want);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
+}
+
 /// Past its depth cutoff the Flat check fails closed (E1407 case `depth`).
 #[test]
 fn flat_depth_cutoff_fails_closed() {

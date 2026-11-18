@@ -1,0 +1,67 @@
+//~ CHECK-ONLY
+// `Frozen` is derived for every type that reaches no `UnsafeCell` and no fn value: scalars,
+// `str`, slices, references and raw pointers to Frozen data, views, `Drop` types, and the
+// aggregates and instances of those. A generic param is Frozen through a `Frozen` or a `Flat`
+// bound.
+import std.string;
+import std.vec;
+
+struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+view struct Cursor {
+    pub text: &str,
+    pub at: usize,
+}
+
+struct Handle {
+    pub id: u32,
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {}
+}
+
+struct Node {
+    pub v: u32,
+    pub kids: vec.Vec<Node>,
+}
+
+enum Tree {
+    Leaf(u32),
+    Branch(vec.Vec<Tree>),
+}
+
+fn need<T: Frozen + view>() {}
+
+fn by_flat<T: Flat>() {
+    need::<T>();
+}
+
+fn by_frozen<T: Frozen>() {
+    need::<&[T]>();
+    need::<Option<T>>();
+}
+
+fn main() -> i32 {
+    need::<u32>();
+    need::<str>();
+    need::<&str>();
+    need::<&[u32]>();
+    need::<&mut [Point]>();
+    need::<*const Point>();
+    need::<*mut u8>();
+    need::<Cursor>();
+    need::<Handle>();
+    need::<vec.Vec<u32>>();
+    need::<string.String>();
+    need::<Node>();
+    need::<Tree>();
+    need::<(u32, &Point, [f64; 2])>();
+    need::<Option<&vec.Vec<Point>>>();
+    by_flat::<Point>();
+    by_frozen::<Handle>();
+    return 0;
+}

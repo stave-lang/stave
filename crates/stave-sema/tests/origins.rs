@@ -137,16 +137,16 @@ fn kinds_of_types() {
     let sig = tc.sigs.fn_sig(root_fn(&p, "by_ref_view")).unwrap();
     let by_ref = tc.sigs.fn_sig(root_fn(&p, "by_ref")).unwrap();
     let k = |tys: &mut stave_sema::TypeTable, t| stave_sema::kinds::kind_of(w, tys, t, &[]);
-    // &mut Lexer: a view, not Copy, not Flat
+    // &mut Lexer: a view, not Copy, not Flat, Frozen (it reaches only a `&str`)
     let m = k(&mut tys, sig.params[0]);
-    assert!(m.view && !m.copy && !m.flat && m.sized);
+    assert!(m.view && !m.copy && !m.flat && m.frozen && m.sized);
     // u32: Copy, Send, Sync, Flat, not a view
     let n = k(&mut tys, sig.params[1]);
-    assert!(!n.view && n.copy && n.send && n.sync && n.flat);
-    // &u32: a Copy view, Send and Sync, not Flat
+    assert!(!n.view && n.copy && n.send && n.sync && n.flat && n.frozen);
+    // &u32: a Copy view, Send and Sync, Frozen, not Flat
     let r = k(&mut tys, by_ref.params[0]);
-    assert!(r.view && r.copy && r.send && r.sync && !r.flat);
-    // fn(&u32) -> &u32: a Copy view, neither Send nor Sync
+    assert!(r.view && r.copy && r.send && r.sync && !r.flat && r.frozen);
+    // fn(&u32) -> &u32: a Copy view, neither Send nor Sync nor Frozen
     let ft = tys.intern(TypeKind::Fn {
         params: vec![by_ref.params[0]].into(),
         ret: by_ref.ret,
@@ -154,7 +154,7 @@ fn kinds_of_types() {
         deny: 0,
     });
     let f = k(&mut tys, ft);
-    assert!(f.view && f.copy && !f.send && !f.sync && !f.flat);
+    assert!(f.view && f.copy && !f.send && !f.sync && !f.flat && !f.frozen);
     // str: unsized
     let TypeKind::Ref { inner, .. } = *tys.kind(sig.ret) else { panic!("&str") };
     assert!(!k(&mut tys, inner).sized);

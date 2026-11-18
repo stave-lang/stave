@@ -1901,11 +1901,11 @@ fix = { description = "nest the type less deeply" }
 code = "E1408"
 severity = "error"
 area = "effects"
-rule = "an `impl Flat` (safe or `unsafe(..)`): `Flat` is derived by the compiler from the type's structure and never implemented"
-holes = { type = "type" }
-message = "`impl Flat for {type}`: `Flat` is derived by the compiler, never implemented"
+rule = "an `impl Flat` or `impl Frozen` (safe or `unsafe(..)`): both are derived by the compiler from the type's structure and never implemented"
+holes = { trait = "path", type = "type" }
+message = "`impl {trait} for {type}`: `{trait}` is derived by the compiler, never implemented"
 labels = [{ at = "primary", text = "remove this impl" }]
-fix = { description = "remove the impl: a type is `Flat` exactly when it holds no reference, view, raw pointer, fn value, `UnsafeCell`, or `Drop` type" }
+fix = { description = "remove the impl: the compiler decides `{trait}` from the type's fields" }
 
 [[diag]]
 code = "E1409"
@@ -1916,3 +1916,21 @@ holes = { name = "path", cycle = "path" }
 message = "recursive call cycle `{cycle}` goes through a closure literal in `{name}`"
 labels = [{ at = "primary", text = "this closure literal is part of the cycle" }, { at = "call", text = "next call of the cycle" }]
 fix = { description = "write the recursive part as a `rec fn` item and call it from the closure" }
+
+[[diag]]
+code = "E1410"
+severity = "error"
+area = "effects"
+rule = "`Frozen` demanded by a bound, type not `Frozen`: names the first component that is `UnsafeCell`, a fn value, or a generic param without a `Frozen` (or `Flat`) bound, and its path (field chain, `*` for a pointee); case `self` when the type itself is the component; case `depth` past the check's depth cutoff"
+holes = { type = "type", path = "place", part = "type", reason = "text-literal", limit = "int" }
+choices = { reason = ["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound"] }
+message = "`{type}` is not `Frozen`: component `{path}` has type `{part}`, {reason}"
+labels = [{ at = "primary", text = "`Frozen` required here" }, { at = "param", text = "the `Frozen` bound is on this parameter" }]
+fix = { description = "pass a type that reaches no `UnsafeCell` (`Cell`, atomics, `Mutex`, `Once`) and no fn value" }
+
+[diag.cases.self]
+message = "`{type}` is not `Frozen`: it is {reason}"
+
+[diag.cases.depth]
+message = "`{type}` is not `Frozen`: it nests deeper than {limit} levels, the limit of the `Frozen` check"
+fix = { description = "nest the type less deeply" }

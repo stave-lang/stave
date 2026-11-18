@@ -200,6 +200,8 @@ pub struct LangItems {
     pub sync: DeclId,
     /// `Flat`: derived from the type's structure only; no impl counts (crate::traits).
     pub flat: DeclId,
+    /// `Frozen`: derived like `Flat`; no `UnsafeCell` or fn value reachable (crate::traits).
+    pub frozen: DeclId,
     pub drop: DeclId,
     pub display: DeclId,
     pub write: DeclId,
@@ -251,6 +253,7 @@ impl Default for LangItems {
             send: DeclId::NONE,
             sync: DeclId::NONE,
             flat: DeclId::NONE,
+            frozen: DeclId::NONE,
             drop: DeclId::NONE,
             display: DeclId::NONE,
             write: DeclId::NONE,
@@ -1030,6 +1033,7 @@ impl<'p> SigBuilder<'p> {
         self.lang.send = find(&core, "Send");
         self.lang.sync = find(&core, "Sync");
         self.lang.flat = find(&core, "Flat");
+        self.lang.frozen = find(&core, "Frozen");
         self.lang.drop = find(&core, "Drop");
         self.lang.display = find(&core, "Display");
         self.lang.write = find(&core, "Write");
