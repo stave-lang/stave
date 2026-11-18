@@ -3,7 +3,7 @@
 //! `Term as u16` is the terminal id of `ll1_table`.
 
 /// Number of terminals.
-pub const NTERM: usize = 133;
+pub const NTERM: usize = 134;
 
 /// A terminal of the grammar.
 #[repr(u8)]
@@ -165,116 +165,118 @@ pub enum Term {
     KwCopy = 76,
     /// `decreases`
     KwDecreases = 77,
+    /// `derive`
+    KwDerive = 78,
     /// `dispatch`
-    KwDispatch = 78,
+    KwDispatch = 79,
     /// `else`
-    KwElse = 79,
+    KwElse = 80,
     /// `emulate`
-    KwEmulate = 80,
+    KwEmulate = 81,
     /// `ensures`
-    KwEnsures = 81,
+    KwEnsures = 82,
     /// `enum`
-    KwEnum = 82,
+    KwEnum = 83,
     /// `exact`
-    KwExact = 83,
+    KwExact = 84,
     /// `exists`
-    KwExists = 84,
+    KwExists = 85,
     /// `extern`
-    KwExtern = 85,
+    KwExtern = 86,
     /// `false`
-    KwFalse = 86,
+    KwFalse = 87,
     /// `fn`
-    KwFn = 87,
+    KwFn = 88,
     /// `for`
-    KwFor = 88,
+    KwFor = 89,
     /// `forall`
-    KwForall = 89,
+    KwForall = 90,
     /// `from`
-    KwFrom = 90,
+    KwFrom = 91,
     /// `ghost`
-    KwGhost = 91,
+    KwGhost = 92,
     /// `if`
-    KwIf = 92,
+    KwIf = 93,
     /// `impl`
-    KwImpl = 93,
+    KwImpl = 94,
     /// `import`
-    KwImport = 94,
+    KwImport = 95,
     /// `in`
-    KwIn = 95,
+    KwIn = 96,
     /// `invariant`
-    KwInvariant = 96,
+    KwInvariant = 97,
     /// `kernel`
-    KwKernel = 97,
+    KwKernel = 98,
     /// `let`
-    KwLet = 98,
+    KwLet = 99,
     /// `loop`
-    KwLoop = 99,
+    KwLoop = 100,
     /// `masked`
-    KwMasked = 100,
+    KwMasked = 101,
     /// `match`
-    KwMatch = 101,
+    KwMatch = 102,
     /// `mut`
-    KwMut = 102,
+    KwMut = 103,
     /// `needs`
-    KwNeeds = 103,
+    KwNeeds = 104,
     /// `pub`
-    KwPub = 104,
+    KwPub = 105,
     /// `pure`
-    KwPure = 105,
+    KwPure = 106,
     /// `rec`
-    KwRec = 106,
+    KwRec = 107,
     /// `requires`
-    KwRequires = 107,
+    KwRequires = 108,
     /// `return`
-    KwReturn = 108,
+    KwReturn = 109,
     /// `scalar`
-    KwScalar = 109,
+    KwScalar = 110,
     /// `scope`
-    KwScope = 110,
+    KwScope = 111,
     /// `self`
-    KwSelf = 111,
+    KwSelf = 112,
     /// `spawn`
-    KwSpawn = 112,
+    KwSpawn = 113,
     /// `spec`
-    KwSpec = 113,
+    KwSpec = 114,
     /// `static`
-    KwStatic = 114,
+    KwStatic = 115,
     /// `strict`
-    KwStrict = 115,
+    KwStrict = 116,
     /// `struct`
-    KwStruct = 116,
+    KwStruct = 117,
     /// `tail`
-    KwTail = 117,
+    KwTail = 118,
     /// `test`
-    KwTest = 118,
+    KwTest = 119,
     /// `then`
-    KwThen = 119,
+    KwThen = 120,
     /// `trait`
-    KwTrait = 120,
+    KwTrait = 121,
     /// `true`
-    KwTrue = 121,
+    KwTrue = 122,
     /// `type`
-    KwType = 122,
+    KwType = 123,
     /// `unsafe`
-    KwUnsafe = 123,
+    KwUnsafe = 124,
     /// `view`
-    KwView = 124,
+    KwView = 125,
     /// `while`
-    KwWhile = 125,
+    KwWhile = 126,
     /// `without`
-    KwWithout = 126,
+    KwWithout = 127,
     /// `{`
-    LBrace = 127,
+    LBrace = 128,
     /// `|`
-    Pipe = 128,
+    Pipe = 129,
     /// `|=`
-    PipeEq = 129,
+    PipeEq = 130,
     /// `||`
-    PipePipe = 130,
+    PipePipe = 131,
     /// `}`
-    RBrace = 131,
+    RBrace = 132,
     /// `~`
-    Tilde = 132,
+    Tilde = 133,
 }
 
 impl Term {
@@ -294,16 +296,16 @@ impl Term {
         Term::RBracket, Term::Caret, Term::CaretEq, Term::Underscore, Term::KwAlign,
         Term::KwAllocator, Term::KwAs, Term::AsPercent, Term::AsQuestion, Term::AsPipe,
         Term::AsTilde, Term::KwBreak, Term::KwConst, Term::KwContinue, Term::KwCopy,
-        Term::KwDecreases, Term::KwDispatch, Term::KwElse, Term::KwEmulate, Term::KwEnsures,
-        Term::KwEnum, Term::KwExact, Term::KwExists, Term::KwExtern, Term::KwFalse, Term::KwFn,
-        Term::KwFor, Term::KwForall, Term::KwFrom, Term::KwGhost, Term::KwIf, Term::KwImpl,
-        Term::KwImport, Term::KwIn, Term::KwInvariant, Term::KwKernel, Term::KwLet, Term::KwLoop,
-        Term::KwMasked, Term::KwMatch, Term::KwMut, Term::KwNeeds, Term::KwPub, Term::KwPure,
-        Term::KwRec, Term::KwRequires, Term::KwReturn, Term::KwScalar, Term::KwScope, Term::KwSelf,
-        Term::KwSpawn, Term::KwSpec, Term::KwStatic, Term::KwStrict, Term::KwStruct, Term::KwTail,
-        Term::KwTest, Term::KwThen, Term::KwTrait, Term::KwTrue, Term::KwType, Term::KwUnsafe,
-        Term::KwView, Term::KwWhile, Term::KwWithout, Term::LBrace, Term::Pipe, Term::PipeEq,
-        Term::PipePipe, Term::RBrace, Term::Tilde,
+        Term::KwDecreases, Term::KwDerive, Term::KwDispatch, Term::KwElse, Term::KwEmulate,
+        Term::KwEnsures, Term::KwEnum, Term::KwExact, Term::KwExists, Term::KwExtern,
+        Term::KwFalse, Term::KwFn, Term::KwFor, Term::KwForall, Term::KwFrom, Term::KwGhost,
+        Term::KwIf, Term::KwImpl, Term::KwImport, Term::KwIn, Term::KwInvariant, Term::KwKernel,
+        Term::KwLet, Term::KwLoop, Term::KwMasked, Term::KwMatch, Term::KwMut, Term::KwNeeds,
+        Term::KwPub, Term::KwPure, Term::KwRec, Term::KwRequires, Term::KwReturn, Term::KwScalar,
+        Term::KwScope, Term::KwSelf, Term::KwSpawn, Term::KwSpec, Term::KwStatic, Term::KwStrict,
+        Term::KwStruct, Term::KwTail, Term::KwTest, Term::KwThen, Term::KwTrait, Term::KwTrue,
+        Term::KwType, Term::KwUnsafe, Term::KwView, Term::KwWhile, Term::KwWithout, Term::LBrace,
+        Term::Pipe, Term::PipeEq, Term::PipePipe, Term::RBrace, Term::Tilde,
     ];
 
     /// The terminal id.
@@ -334,11 +336,11 @@ pub const TERM_TEXT: [&str; NTERM] = [
     "...", "..=", ".{", "/", "/=", ":", "::", ";", "<", "<<", "<<%", "<<%=", "<<=", "<=", "=",
     "==", "=>", ">", ">=", ">>", ">>=", "?", "CharLit", "EOF", "FloatLit", "FmtLit", "Ident",
     "IntLit", "Self", "StrLit", "[", "]", "^", "^=", "_", "align", "allocator", "as", "as%", "as?",
-    "as|", "as~", "break", "const", "continue", "copy", "decreases", "dispatch", "else", "emulate",
-    "ensures", "enum", "exact", "exists", "extern", "false", "fn", "for", "forall", "from",
-    "ghost", "if", "impl", "import", "in", "invariant", "kernel", "let", "loop", "masked", "match",
-    "mut", "needs", "pub", "pure", "rec", "requires", "return", "scalar", "scope", "self", "spawn",
-    "spec", "static", "strict", "struct", "tail", "test", "then", "trait", "true", "type",
+    "as|", "as~", "break", "const", "continue", "copy", "decreases", "derive", "dispatch", "else",
+    "emulate", "ensures", "enum", "exact", "exists", "extern", "false", "fn", "for", "forall",
+    "from", "ghost", "if", "impl", "import", "in", "invariant", "kernel", "let", "loop", "masked",
+    "match", "mut", "needs", "pub", "pure", "rec", "requires", "return", "scalar", "scope", "self",
+    "spawn", "spec", "static", "strict", "struct", "tail", "test", "then", "trait", "true", "type",
     "unsafe", "view", "while", "without", "{", "|", "|=", "||", "}", "~",
 ];
 
@@ -354,7 +356,7 @@ pub const TERM_IS_CLASS: [bool; NTERM] = [
     false, false, false, false, false, false, false, false, false, false, false, false, false,
     false, false, false, false, false, false, false, false, false, false, false, false, false,
     false, false, false, false, false, false, false, false, false, false, false, false, false,
-    false, false,
+    false, false, false,
 ];
 
 // Split actions (grammar header): D3 `>>` `>=` `>>=` start with the `>` that closes type
@@ -369,7 +371,7 @@ pub const SPLIT_FIRST: [i16; NTERM] = [
     -1, 48, 48, 48, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 ];
 
 /// Split: the terminal left after the first one (`>>` → `>`, `>=` → `=`, `>>=` → `>=`, `&&` → `&`); -1 otherwise.
@@ -379,5 +381,5 @@ pub const SPLIT_REST: [i16; NTERM] = [
     -1, 45, 48, 49, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 ];

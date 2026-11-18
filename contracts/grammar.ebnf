@@ -69,8 +69,8 @@ Keywords     = "fn" "let" "mut" "const" "struct" "enum" "trait" "impl" "for" "in
                "needs" "dispatch" "unsafe" "extern" "self" "Self" "true" "false" "tail" "masked"
                "scalar" "exact" "align" "copy" "type" "view" "scope" "spawn" "strict" "emulate"
                "test" "allocator" "kernel" "static" "requires" "ensures" "rec" "without"
-               "invariant" "decreases" "ghost" "pure" "spec" "forall" "exists" ;
-               (* invariant .. exists: reserved only, see rule Reserved *)
+               "invariant" "decreases" "ghost" "pure" "spec" "forall" "exists" "derive" ;
+               (* invariant .. derive: reserved only, see rule Reserved *)
 
 (* Operator tokens (maximal munch, then D3 splitting):
    +  -  *  /  %       trapping on scalar ints, IEEE on floats, E0604 on int vectors
@@ -244,4 +244,5 @@ Literal      = "-"? (IntLit | FloatLit) | StrLit | CharLit | "true" | "false" ;
 (* ---------- reserved ---------- *)
 (* Keywords without a meaning: no rule reaches Reserved, so each is a syntax error wherever it
    appears (a keyword is never an Ident). The rule only makes them terminals. *)
-Reserved     = "invariant" | "decreases" | "ghost" | "pure" | "spec" | "forall" | "exists" ;
+Reserved     = "invariant" | "decreases" | "ghost" | "pure" | "spec" | "forall" | "exists"
+             | "derive" ;
