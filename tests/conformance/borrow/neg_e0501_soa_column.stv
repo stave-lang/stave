@@ -1,0 +1,25 @@
+//~ CHECK-ONLY
+// A column borrow conflicts with every `&mut self` method of the Soa (`push`, `clear`) while it
+// is used later, and two `&mut` of one column conflict.
+import std.soa;
+
+struct P {
+    pub x: f32,
+    pub id: u32,
+}
+
+fn main() -> i32 {
+    let mut ps = soa.Soa::<P>.new();
+    ps.push(P.{ x: 1.0, id: 1 });
+    let xs = &ps.x;
+    ps.push(P.{ x: 2.0, id: 2 }); //~ ERROR E0501
+    let a = xs[0];
+    let ids = &ps.id;
+    ps.clear(); //~ ERROR E0501
+    let b = ids[0];
+    let m1 = &mut ps.x;
+    let m2 = &mut ps.x; //~ ERROR E0501
+    m1[0] = 1.0;
+    m2[0] = 2.0;
+    return 0;
+}

@@ -54,6 +54,9 @@ pub enum Proj {
     EnumField(u32, u32),
     /// Any element of an array or slice.
     Index,
+    /// Column `.0` of a `std.soa.Soa<T>` (field `.0` of T): disjoint from the other columns,
+    /// inside the whole value (so a `&mut self` method call conflicts with it).
+    Column(u32),
 }
 
 /// `local.(field|deref|index)*` with the type of the whole place.
@@ -612,7 +615,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             // a `for` binding takes a fresh element of the owned array on every iteration
             return Operand { kind: OpKind::Copy, place: p, span, node: n, site: u32::MAX };
         }
-        let behind = p.proj.iter().any(|x| matches!(x, Proj::Deref(_) | Proj::Index));
+        let behind = p.proj.iter().any(|x| matches!(x, Proj::Deref(_) | Proj::Index | Proj::Column(_)));
         let (capture, guard) =
             self.body.locals.get(p.local as usize).map_or((None, false), |l| (l.capture, l.guard));
         if by_value && (behind || capture.is_some() || guard) {
@@ -1023,6 +1026,19 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let Some(op) = self.operand(iv, iter) else { return };
                 let V::P(p) = self.put_temp(Rvalue::Use(op), it_ty, iter) else { return };
                 Src::Elems(p, None)
+            }
+            // a `[T]` place (a sub-slice, a `std.soa` column) is borrowed for the loop, `&mut`
+            // under a `&mut` chunk binding
+            TypeKind::Slice { .. } => {
+                let Some(p) = self.place_of(iv, iter) else { return };
+                let m = bind_ty.is_some_and(|_| {
+                    let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
+                    matches!(self.tys.kind(bt), TypeKind::Ref { mutable: true, .. })
+                });
+                let span = self.span(iter);
+                let (rv, _) = self.borrow(p, m, false, span, iter);
+                let V::P(rp) = rv else { return };
+                Src::Elems(rp, Some(if m { DerefKind::Mut } else { DerefKind::Shared }))
             }
             _ => {
                 let Some(op) = self.operand(iv, iter) else { return };
@@ -2201,6 +2217,21 @@ impl<'a, 'b> Builder<'a, 'b> {
         let (index, derefs) = match self.tb.target(tok) {
             Some(Target::Field { index, derefs, .. }) => (*index, *derefs),
             Some(Target::TupleField { index, derefs }) => (*index, *derefs),
+            Some(Target::Column { index, derefs }) => {
+                let (index, derefs) = (*index, *derefs);
+                let Some(p) = self.place_of(recv, n) else { return V::Never };
+                let p = self.apply_derefs(p, derefs);
+                let row = match self.tys.kind(p.ty) {
+                    TypeKind::Adt { args, .. } => match args.first() {
+                        Some(GArg::Type(t)) => *t,
+                        _ => TypeId::NONE,
+                    },
+                    _ => TypeId::NONE,
+                };
+                let et = self.tys.field_ty(row, 0, index);
+                let st = self.tys.ov.intern(TypeKind::Slice { elem: et, align: 0 });
+                return V::P(p.with(Proj::Column(index), st));
+            }
             _ => return V::Const,
         };
         let Some(p) = self.place_of(recv, n) else { return V::Never };

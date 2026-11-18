@@ -245,7 +245,11 @@ impl Tables<'_> {
         if let Some(&p) = self.prims.get(&sym) {
             return Some(Res::Prim(p));
         }
-        self.builtins.get(&sym).map(|&b| Res::Builtin(b))
+        let b = *self.builtins.get(&sym)?;
+        if b.soa_only() && self.modules.get(module.idx()).is_none_or(|m| m.path_text != "std.soa") {
+            return None;
+        }
+        Some(Res::Builtin(b))
     }
 
     /// An item of `module` visible through a path (imports excluded).

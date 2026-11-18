@@ -231,6 +231,13 @@ list):
   `lock_pair`. The rank check (E1405, E1406) knows only these; `try_lock` acquires nothing;
 - `std.thread.join`, `std.thread.par_for`, `std.thread.par_for_mut`, whose fn-value arguments get
   the thread capture checks (E0802, E0806);
+- `std.soa.Soa<T>` with fields `ptr: *mut u8`, `len: usize`, `cap: usize`: outside `std.soa`
+  its fields are the columns, one per field of the struct T (E0910 for another T): column k
+  is the `[F]` place of `len` values of field k's type F at byte `cap * (sizes of fields 0..k)`
+  of `ptr`. In `std.soa` only, the built-ins `soa_row_size::<T>() -> usize` (that sum over all
+  fields), unsafe `soa_read::<T>(base: *const u8, cap: usize, i: usize) -> T` and
+  `soa_write::<T>(base: *mut u8, cap: usize, i: usize, x: T)` move row `i` between a T and
+  columns of that layout (one load or store per field; a non-struct T is one column);
 - language items of std: the prelude module `std.core` and its
   traits `Copy`, `Send`, `Sync`, `Drop`, `Display`, `Write`, and the operator traits (`Add` …
   `Not`); `std.string.String` (f-string values, the `String` → `str` deref through

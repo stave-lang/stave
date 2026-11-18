@@ -1,0 +1,19 @@
+//~ CHECK-ONLY
+// A column is a `[F]` place, never a value (E0504, like `xs[a..b]`), and is written only through
+// a mutable path to the Soa (E0503).
+import std.soa;
+
+struct P {
+    pub x: f32,
+}
+
+fn write(ps: &soa.Soa<P>) {
+    ps.x[0] = 1.0; //~ ERROR E0503
+}
+
+fn main() -> i32 {
+    let ps = soa.Soa::<P>.new();
+    let c = ps.x; //~ ERROR E0504
+    ps.x[0] = 2.0; //~ ERROR E0503
+    return 0;
+}

@@ -1,0 +1,17 @@
+import std.soa;
+
+pub struct Pt {
+    pub x: f32,
+    tag: u32,
+}
+
+pub fn make(x: f32, tag: u32) -> Pt {
+    return Pt.{ x: x, tag: tag };
+}
+
+// The private column is usable here, in Pt's module.
+pub fn tags(ps: &soa.Soa<Pt>) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..ps.tag.len() { s = s + ps.tag[i]; }
+    return s;
+}

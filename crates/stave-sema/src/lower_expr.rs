@@ -1107,6 +1107,10 @@ impl<'a> FnCx<'a> {
         let (index, derefs) = match self.target(tok) {
             Some(Target::Field { index, derefs, .. }) => (*index, *derefs),
             Some(Target::TupleField { index, derefs }) => (*index, *derefs),
+            Some(Target::Column { index, derefs }) => {
+                let (i, d) = (*index, *derefs);
+                return self.column_step(recv, tok, i, d);
+            }
             _ => return self.fail_at(Some(tok), "field without a target"),
         };
         let Some(p) = self.place_of(recv) else { return E::Never };
@@ -1127,6 +1131,146 @@ impl<'a> FnCx<'a> {
         p.proj.push(Proj::Field(index, ft));
         p.ty = ft;
         E::P(p)
+    }
+
+    /// The row type of a `std.soa.Soa<T>` instance and its `ptr`, `len`, `cap` fields (index,
+    /// type).
+    fn soa_parts(&mut self, t: Ty) -> Option<(Ty, [(u32, Ty); 3])> {
+        let TypeKind::Adt { def, args } = self.kind(t) else { return None };
+        if def.is_none() || def != self.g.sigs.lang.soa {
+            return None;
+        }
+        let Some(GArg::Type(row)) = args.first().copied() else { return None };
+        let names: Vec<crate::ids::Sym> =
+            self.g.sigs.adt(def)?.variants.first()?.fields.iter().map(|f| f.name).collect();
+        let tys = self.adt_fields(t)?.into_iter().next()?;
+        let mut out = [(0u32, TypeId::NONE); 3];
+        for (k, want) in ["ptr", "len", "cap"].into_iter().enumerate() {
+            let s = self.g.prog.strings.lookup(want)?;
+            let i = names.iter().position(|&n| n == s)?;
+            out[k] = (i as u32, *tys.get(i)?);
+        }
+        Some((row, out))
+    }
+
+    /// The column types of row type `row`: its fields in declaration order (a non-struct row,
+    /// possible only through a generic instance, is one column of the whole value).
+    fn soa_columns(&mut self, row: Ty) -> (Vec<Ty>, bool) {
+        let is_struct = matches!(self.kind(row), TypeKind::Adt { def, .. }
+            if self.g.sigs.adt(def).is_some_and(|a| !a.is_enum));
+        if is_struct {
+            (self.adt_fields(row).and_then(|v| v.into_iter().next()).unwrap_or_default(), true)
+        } else {
+            (vec![row], false)
+        }
+    }
+
+    /// The byte offset of column `k` per row of capacity: the sizes of columns `0..k`.
+    fn soa_prefix(&mut self, cols: &[Ty], k: usize) -> Option<u64> {
+        let mut off = 0u64;
+        for &c in &cols[..k] {
+            off = off.wrapping_add(self.layout(c)?.0);
+        }
+        Some(off)
+    }
+
+    /// Column `index` of a `std.soa.Soa<T>` place: the `len` rows of field `index` of T, a `[F]`
+    /// place. Layout (std/soa.stv): one buffer `ptr` of `cap` rows, column k at byte
+    /// `cap * (sizes of fields 0..k)`; the products cannot overflow (the buffer holds
+    /// `cap * row size` bytes), so they wrap.
+    fn column_step(&mut self, recv: E, tok: u32, index: u32, derefs: u32) -> E {
+        let Some(p) = self.place_of(recv) else { return E::Never };
+        let p = self.own_temp(p);
+        let Some(p) = self.derefs(p, derefs) else { return E::Never };
+        let Some((row, [ptr, len, cap])) = self.soa_parts(p.ty) else {
+            return self.fail_at(Some(tok), "column of a non-Soa value");
+        };
+        let (cols, _) = self.soa_columns(row);
+        let Some(&ft) = cols.get(index as usize) else { return self.fail_at(Some(tok), "column index") };
+        let Some(off) = self.soa_prefix(&cols, index as usize) else {
+            return self.fail_at(Some(tok), "layout");
+        };
+        let mut vals = Vec::with_capacity(3);
+        for (i, t) in [ptr, len, cap] {
+            let mut q = p.clone();
+            q.proj.push(Proj::Field(i, t));
+            q.ty = t;
+            let Some(v) = self.peek(&q) else { return E::Never };
+            vals.push(v);
+        }
+        let (base, n, c) = (vals[0], vals[1], vals[2]);
+        let us = self.t_usize();
+        let k = self.int(off as i128);
+        let boff = self.op2(Op::MulWrap, us, c, k);
+        let at = self.op2(Op::ElemAddr, ptr.1, base, boff);
+        let mutable = match &p.base {
+            Base::Mem(_, t) => self.pointee(*t).is_none_or(|x| x.1),
+            _ => true,
+        };
+        let ept = self.t_ptr(mutable, ft);
+        let ep = self.op1(Op::Cast(CastKind::Exact), ept, at);
+        let st = self.tys.intern(TypeKind::Slice { elem: ft, align: 0 });
+        let srt = self.t_ref(mutable, st);
+        let s = self.op2(Op::SliceMake, srt, ep, n);
+        E::P(Place { base: Base::Mem(s, srt), proj: Vec::new(), ty: st, root: None })
+    }
+
+    /// `soa_read` / `soa_write` / `soa_row_size` of `std.soa` on row type `row`: row `i` is
+    /// element `i` of every column (layout at [`Self::column_step`]); one load or store per
+    /// column.
+    fn soa_row(&mut self, op: crate::prim::Builtin, row: Ty, args: &[u32], ctok: u32) -> E {
+        use crate::prim::Builtin;
+        let (cols, is_struct) = self.soa_columns(row);
+        let us = self.t_usize();
+        let Some(total) = self.soa_prefix(&cols, cols.len()) else {
+            return self.fail_at(Some(ctok), "layout");
+        };
+        if op == Builtin::SoaRowSize {
+            return E::V(self.int(total as i128), us);
+        }
+        let write = op == Builtin::SoaWrite;
+        let u8t = self.t_int(false, crate::types::IntBits::B8);
+        let bpt = self.t_ptr(write, u8t);
+        let mut ps = vec![bpt, us, us];
+        if write {
+            ps.push(row);
+        }
+        let Some(vs) = self.args(args, &ps) else { return E::Never };
+        let (base, cap, i) = (vs[0], vs[1], vs[2]);
+        let mut loaded = Vec::with_capacity(cols.len());
+        for k in 0..cols.len() {
+            let ft = cols[k];
+            let Some(pre) = self.soa_prefix(&cols, k) else { return self.fail_at(Some(ctok), "layout") };
+            let Some((size, _)) = self.layout(ft) else { return self.fail_at(Some(ctok), "layout") };
+            let (kp, ks) = (self.int(pre as i128), self.int(size as i128));
+            let col = self.op2(Op::MulWrap, us, cap, kp);
+            let el = self.op2(Op::MulWrap, us, i, ks);
+            let off = self.op2(Op::AddWrap, us, col, el);
+            let at = self.op2(Op::ElemAddr, bpt, base, off);
+            let fpt = self.t_ptr(write, ft);
+            let fp = self.op1(Op::Cast(CastKind::Exact), fpt, at);
+            if write {
+                let v = if is_struct {
+                    let ki = self.int(k as i128);
+                    self.op2(Op::Get, ft, vs[3], ki)
+                } else {
+                    vs[3]
+                };
+                self.f.b.store(fp, v);
+            } else {
+                loaded.push(Operand::Value(self.f.b.load(FnCx::ir(ft), fp)));
+            }
+        }
+        if write {
+            return E::Unit;
+        }
+        if is_struct {
+            return E::V(self.opn(Op::Make, row, &loaded), row);
+        }
+        match loaded.first() {
+            Some(&v) => E::V(v, row),
+            None => self.fail_at(Some(ctok), "soa_read"),
+        }
     }
 
     fn index_step(&mut self, base: E, ie: Option<u32>, tok: u32) -> E {
@@ -1453,6 +1597,10 @@ impl<'a> FnCx<'a> {
                 E::Unit
             }
             Some(Target::Old) => self.old_value(paren),
+            Some(Target::SoaRow { op, ty }) => {
+                let row = self.sub(ty);
+                self.soa_row(op, row, args, ctok)
+            }
             Some(Target::SizeOf { ty, align }) => {
                 let t = self.sub(ty);
                 let Some((s, a)) = self.layout(t) else { return self.fail_at(Some(ctok), "layout") };

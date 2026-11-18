@@ -1,34 +1,77 @@
 //~ STDOUT soa_cols.stdout
-// std.soa: records stored as columns. push / set / get / pop / len, a loop over one column
-// slice, and cols_mut to read one column while writing another.
+// std.soa: `soa.Soa<T>` stores one column per field of the struct T, reached as a field of the
+// Soa (`ps.x` is a `[f32]` place). push / get / set / pop / clear, growth past the capacity,
+// column reads and writes, two columns borrowed at once, chunk loops over a column (by value
+// and `&mut`), a std.slice method on a column, and a column written from a closure.
 import std.io;
 import std.soa;
 
+struct P {
+    pub x: f32,
+    pub y: f32,
+    pub id: u32,
+}
+
+fn sum_col(xs: &[f32]) -> f32 {
+    let mut s: f32 = 0.0;
+    for i in 0..xs.len() { s = s + xs[i]; }
+    return s;
+}
+
 fn main() -> i32 {
-    let mut ps = soa.Soa3::<f32, f32, u32>.new();
+    let mut ps = soa.Soa::<P>.with_capacity(3);
+    let cap0 = ps.capacity();
     for i in 0u32..10 {
         let x = i as~ f32;
-        ps.push(x, x * 2.0, i);
+        ps.push(P.{ x: x, y: x * 2.0, id: i });
     }
-    let mut s0: f32 = 0.0;
-    {
-        let xs0 = ps.col0();
-        for i in 0..xs0.len() { s0 = s0 + xs0[i]; }
-    }
-    {
-        let (xs, ys, ids) = ps.cols_mut();
-        for i in 0..ids.len() { ys[i] = xs[i] + 1.0; }
-    }
-    let (x1, y1, i1) = ps.get(1);
-    ps.set(0, 100.0, 200.0, 7);
-    let (a, b, c) = ps.get(0);
-    let (pa, pb, pc) = ps.pop().unwrap();
     let n = ps.len();
-    let (ra, rb, rc) = ps.get_ref(1);
-    let r1 = *rc;
-    io.print(f"{s0} {x1} {y1} {i1}\n");
-    io.print(f"{a} {b} {c}\n");
-    io.print(f"{pa} {pb} {pc} {n}\n");
-    io.print(f"{r1}\n");
+    let grown = ps.capacity() >= 10 && cap0 >= 3;
+    let mut sx: f32 = 0.0;
+    for i in 0..ps.x.len() { sx = sx + ps.x[i]; }
+    let sy = sum_col(&ps.y);
+    io.print(f"{n} {grown} {sx} {sy}\n");
+
+    {
+        let ys = &mut ps.y;
+        let xs = &ps.x;
+        for i in 0..xs.len() { ys[i] = xs[i] + 1.0; }
+    }
+    ps.id[3] = 33;
+    let p1 = ps.get(1);
+    ps.set(0, P.{ x: 100.0, y: 200.0, id: 7 });
+    let p0 = ps.get(0);
+    let last = ps.pop().unwrap();
+    let n2 = ps.len();
+    let id3 = ps.id[3];
+    let yl = ps.y.len();
+    io.print(f"{p1.x} {p1.y} {p1.id} / {p0.x} {p0.y} {p0.id} / {last.x} {last.y} {last.id}\n");
+    io.print(f"{n2} {id3} {yl}\n");
+
+    let mut acc = f32x4.splat(0.0);
+    for v: f32x4 in ps.y {
+        acc = acc + v;
+    } tail masked (v, m) {
+        acc = acc + v;
+    }
+    let vy = acc.reduce_add();
+    let two = f32x4.splat(2.0);
+    for v: &mut f32x4 in ps.x {
+        *v = *v * two;
+    } tail masked (v, m) {
+        *v = *v * two;
+    }
+    let vx = ps.x.sum();
+    let bump = fn(k: u32) { ps.id[0] = ps.id[0] + k; };
+    bump(3);
+    let id0 = ps.id[0];
+    io.print(f"{vy} {vx} {id0}\n");
+
+    ps.clear();
+    let n3 = ps.len();
+    let none = ps.pop().is_none();
+    ps.push(P.{ x: 5.0, y: 6.0, id: 8 });
+    let q = ps.get(0);
+    io.print(f"{n3} {none} {q.x} {q.y} {q.id}\n");
     return 0;
 }

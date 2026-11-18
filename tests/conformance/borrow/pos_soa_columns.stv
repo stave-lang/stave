@@ -1,0 +1,47 @@
+//~ CHECK-ONLY
+// Columns of a `soa.Soa` borrow like fields of a struct: `&mut` of one column and `&` of
+// another at once, through a local, a `&mut` parameter, a chunk loop, and a closure; the Soa
+// can be pushed to again once the column loans end.
+import std.soa;
+
+struct P {
+    pub x: f32,
+    pub y: f32,
+    pub id: u32,
+}
+
+fn shift(ps: &mut soa.Soa<P>) {
+    let xs = &mut ps.x;
+    let ys = &ps.y;
+    for i in 0..xs.len() { xs[i] = xs[i] + ys[i]; }
+}
+
+fn ids(ps: &soa.Soa<P>) -> &[u32] from ps {
+    return &ps.id;
+}
+
+fn main() -> i32 {
+    let mut ps = soa.Soa::<P>.new();
+    ps.push(P.{ x: 1.0, y: 2.0, id: 3 });
+    {
+        let xs = &mut ps.x;
+        let ys = &ps.y;
+        let n = ps.id.len();
+        xs[0] = ys[0] + 1.0;
+    }
+    shift(&mut ps);
+    let k = f32x4.splat(2.0);
+    let ys = &ps.y;
+    for v: &mut f32x4 in ps.x {
+        *v = *v * k;
+    } tail masked (v, m) {
+        *v = *v * k;
+    }
+    let y0 = ys[0];
+    let first = ids(&ps)[0];
+    let bump = fn() { ps.id[0] = ps.id[0] + 1; };
+    bump();
+    ps.x[0] = ps.y[0];
+    ps.push(P.{ x: y0, y: 0.0, id: first });
+    return 0;
+}
