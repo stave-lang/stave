@@ -1,0 +1,19 @@
+//~ EXIT 101
+//~ STDOUT contract_requires_mut.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_requires_mut.stv:17:9 in main.main (thread 0)\nrequires(v.len() < 3)\n"
+// A `requires` reads through a `&mut` param at entry, before the body writes through it.
+import std.io;
+import std.vec;
+
+fn push_small(v: &mut vec.Vec<u32>, x: u32) requires(v.len() < 3) ensures(v.len() == old(v.len()) + 1) {
+    v.push(x);
+}
+
+fn main() {
+    let mut v = vec.Vec::<u32>.new();
+    for i in 0u32..4u32 {
+        let n = v.len();
+        io.print(f"{n}\n");
+        push_small(&mut v, 7);
+    }
+}

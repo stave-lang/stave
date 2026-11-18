@@ -33,7 +33,12 @@ fn diagnostics(root: &Path, target: &str) -> Option<String> {
     c.target = stave_target::Triple::parse(target).ok();
     let p = Program::load(&c);
     let tc = stave_sema::check(&p);
-    let d = tc.all_diagnostics(&p);
+    // warnings (a stale `rec fn`, E1411) leave a program clean
+    let d: Vec<_> = tc
+        .all_diagnostics(&p)
+        .into_iter()
+        .filter(|d| d.severity() != stave_diag::Severity::Warning)
+        .collect();
     if d.is_empty() {
         // the program's own fns were checked, none flagged
         let own: Vec<bool> = tc

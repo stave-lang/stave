@@ -1,0 +1,22 @@
+//~ STDOUT bounds_test_only.stdout
+// `total` is reached only from a `test fn`: a debug build lowers it (every non-generic fn is a
+// root there) and removes its proven check, a release build does not lower it at all. Debug and
+// release still agree on every fn both lower.
+import std.io;
+
+fn total(xs: &[u32]) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..xs.len() {
+        s += xs[i];
+    }
+    return s;
+}
+
+test fn total_of_three() {
+    let xs: [u32; 3] = [1, 2, 3];
+    let t = total(&xs);
+}
+
+fn main() {
+    io.print("ok\n");
+}

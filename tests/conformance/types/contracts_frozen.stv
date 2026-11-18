@@ -1,0 +1,52 @@
+//~ CHECK-ONLY
+// A clause touches only values of a `Frozen` type (E0211 case `frozen` / `frozen-self`, at the
+// first such value): no atomic (not even `load()`), `Cell`, `Mutex`, or fn value, directly,
+// through a reference, a field, a call result, or an argument; a generic `T` there needs
+// `T: Frozen` (or `T: Flat`). Plain data behind `&` is fine.
+import std.atomic;
+import std.cell;
+import std.sync;
+import std.vec;
+
+struct Plain {
+    pub n: u32,
+    pub xs: vec.Vec<u32>,
+}
+
+struct Mixed {
+    pub n: u32,
+    pub hits: cell.Cell<u32>,
+}
+
+fn free(m: &sync.Mutex<u32, 1>) -> bool {
+    return match m.try_lock() {
+        Option.Some(g) => true,
+        Option.None => false,
+    };
+}
+
+fn small(n: u32) -> bool {
+    return n < 100;
+}
+
+// rejected: the two programs that mutated shared state in a clause
+fn tick(c: &atomic.U64) requires(c.fetch_add(1u64) >= 0u64) { } //~ ERROR E0211
+fn idle(m: &sync.Mutex<u32, 1>) requires(free(m)) { } //~ ERROR E0211
+
+// rejected: reads count too
+fn seen(c: &atomic.U64) requires(c.load() > 0u64) { } //~ ERROR E0211
+fn hit(c: &cell.Cell<u32>) ensures(c.get() > 0) { } //~ ERROR E0211
+fn mixed(m: &Mixed) requires(m.n > 0) { } //~ ERROR E0211
+fn many(cs: &[atomic.Bool]) requires(cs.len() > 0) { } //~ ERROR E0211
+fn each(f: fn(u32) -> bool without(io, lock, block), x: u32) requires(f(x)) { } //~ ERROR E0211
+fn first<T: Copy>(xs: &[T]) -> Option<T> requires(xs.len() > 0) { return Option.Some(xs[0]); } //~ ERROR E0211
+fn grown(v: &vec.Vec<cell.Cell<u32>>) -> u32 ensures(result > 0) ensures(v.len() > 0) { return 1; } //~ ERROR E0211
+fn back(n: u32) -> cell.Cell<u32> ensures(n > 0 || result.get() == 0) { return cell.Cell::<u32>.new(n); } //~ ERROR E0211
+
+// accepted
+fn plain(p: &Plain, k: u32) requires(p.n > k && p.xs.len() > 0) ensures(small(p.n)) { }
+fn frozen_t<T: Copy + Frozen>(xs: &[T]) -> Option<T> requires(xs.len() > 0) { return Option.Some(xs[0]); }
+fn flat_t<T: Flat>(xs: &[T]) -> usize ensures(result == xs.len()) { return xs.len(); }
+fn strs(s: &str, v: &mut vec.Vec<u32>) requires(s.len() > 0) ensures(v.len() > 0) { v.push(1); }
+
+fn main() { }

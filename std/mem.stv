@@ -24,8 +24,8 @@ pub fn type_align<T>() -> usize {
 }
 
 // Ends the life of x now: x moves in and is dropped at the end of this body (the fix of E0909;
-// `x.drop()` cannot be called).
-pub fn drop<T>(x: T) {}
+// `x.drop()` cannot be called). A view too: dropping a `MutexGuard` releases its lock here.
+pub fn drop<T: view>(x: T) {}
 
 // Puts v into *dst and returns the old value (the fix of E0504: a value cannot be moved out of a
 // borrow, but it can be exchanged for another).

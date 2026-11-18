@@ -22,7 +22,7 @@ stave test  --target gpu-sm86        # E1001 (not run) on a host without a usabl
 
 | Key | Default | Meaning | Targets |
 |---|---|---|---|
-| `[run] stack` | `"8MiB"` | Per-thread stack limit. GPU: the Stave frame stack. CPU: the stack size of main and of each thread whose calls can reach a `rec fn` (or a drop cycle of a recursive type); every other stack gets the computed bound instead, larger or smaller (intrinsics.md "stack table"; printed in the build summary, cli.md) | all |
+| `[run] stack` | `"8MiB"` | Per-thread stack limit. GPU: the Stave frame stack. CPU: the stack size of main and of each thread whose calls can reach a call cycle (recursion, or a drop cycle of a recursive type); every other stack gets the computed bound instead, larger or smaller (intrinsics.md "stack table"; printed in the build summary, cli.md) | all |
 | `[gpu] heap_max` | `"90%"` | Device heap cap: a size (`"40GiB"`, at least `"64MiB"`) or a percentage of free device memory at start. Growing beyond it is OutOfMemory. Resident programs set it explicitly. `STAVE_GPU_HEAP_MAX` overrides it for one run (below) | gpu-sm86 |
 | `[gpu] block` | `256` | Runtime block size R: a multiple of 32, at most 1024. Kernels used by the program need block size B: a multiple of 32, B ≤ R, R % B == 0, and R/B ≤ 15 when B > 32 (E1202) | gpu-sm86 |
 | `[gpu] poll` | `"adaptive"` | Host poller: `"adaptive"` (busy, then 50 µs sleeps after 10 ms idle, 1 ms sleeps after 1 s) or `"busy"` | gpu-sm86 |

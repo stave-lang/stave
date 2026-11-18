@@ -1855,7 +1855,7 @@ impl<'a> Ck<'a> {
     // ---------- misc ----------
 
     /// The `TyEnv` and checked turbofish args of a `GenericArgs` node for params `shape`.
-    pub fn turbofish(&mut self, ga: u32, shape: &[bool], at: u32) -> Option<Vec<GArg>> {
+    pub fn turbofish(&mut self, ga: u32, shape: &[Option<TypeId>], at: u32) -> Option<Vec<GArg>> {
         let env = self.env();
         sigs::lower_gargs(self, &env, Some(ga), shape, at)
     }
@@ -1901,8 +1901,8 @@ impl sigs::LowerHost for Ck<'_> {
         self.prog
     }
 
-    fn sigs_generics_len(&mut self, d: DeclId) -> Option<Vec<bool>> {
-        Some(self.sigs.generics(d).iter().map(|g| g.is_const).collect())
+    fn sigs_generics_len(&mut self, d: DeclId) -> Option<Vec<Option<TypeId>>> {
+        Some(self.sigs.generics(d).iter().map(|g| g.is_const.then_some(g.const_ty)).collect())
     }
 
     fn adt_generics(&mut self, d: DeclId) -> Vec<GenericParam> {

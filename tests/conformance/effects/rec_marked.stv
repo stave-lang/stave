@@ -1,8 +1,8 @@
 //~ CHECK-ONLY
 // Accepted: every fn of each cycle is a `rec fn` (self, mutual, methods, generic, through a
-// fn-value param, through `dispatch` arms); a `rec fn` in no cycle; dropping a recursive value
-// (no marker needed); closures and thread bodies in no cycle (a closure passed to `thread.join`
-// or `par_for` reaches only what flows to it).
+// fn-value param, through `dispatch` arms); a `rec fn` in no cycle (warning E1411); dropping a
+// recursive value (no marker needed); closures and thread bodies in no cycle (a closure passed to
+// `thread.join` or `par_for` reaches only what flows to it).
 import std.thread;
 import std.vec;
 
@@ -55,7 +55,7 @@ rec fn sum_base(n: u32) -> u32 {
 
 dispatch fn total(n: u32) -> u32 { avx2 => sum_wide, _ => sum_base, }
 
-rec fn leaf() -> u32 {
+rec fn leaf() -> u32 { //~ WARNING E1411
     return 1;
 }
 

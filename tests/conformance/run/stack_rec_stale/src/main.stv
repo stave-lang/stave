@@ -1,0 +1,65 @@
+// stack_rec's call chain with `f4` marked `rec fn` but on no call cycle (warning E1411): the
+// stack bound follows the call graph, not the marker, so main gets its computed stack and the
+// chain runs under a 64 KiB `[run] stack`.
+import std.io;
+
+fn f0(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return buf[i] + 1;
+}
+
+fn f1(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f0(buf[i]) + 1;
+}
+
+fn f2(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f1(buf[i]) + 1;
+}
+
+fn f3(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f2(buf[i]) + 1;
+}
+
+rec fn f4(x: u64) -> u64 { //~ WARNING E1411
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f3(buf[i]) + 1;
+}
+
+fn f5(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f4(buf[i]) + 1;
+}
+
+fn f6(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f5(buf[i]) + 1;
+}
+
+fn f7(x: u64) -> u64 {
+    let mut buf: [u64; 4096] = [0u64; 4096];
+    let i = (x % 4096) as usize;
+    buf[i] = x;
+    return f6(buf[i]) + 1;
+}
+
+fn main() {
+    let a = f7(1u64);
+    io.print(f"main {a}\n");
+}

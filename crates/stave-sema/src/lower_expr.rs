@@ -2240,8 +2240,8 @@ impl crate::sigs::LowerHost for TyHost<'_, '_> {
     fn prog(&self) -> &crate::Program {
         self.prog
     }
-    fn sigs_generics_len(&mut self, d: crate::ids::DeclId) -> Option<Vec<bool>> {
-        Some(self.sigs.generics(d).iter().map(|g| g.is_const).collect())
+    fn sigs_generics_len(&mut self, d: crate::ids::DeclId) -> Option<Vec<Option<TypeId>>> {
+        Some(self.sigs.generics(d).iter().map(|g| g.is_const.then_some(g.const_ty)).collect())
     }
     fn adt_generics(&mut self, d: crate::ids::DeclId) -> Vec<crate::sigs::GenericParam> {
         self.sigs.generics(d).to_vec()

@@ -1,7 +1,7 @@
 //~ CHECK-ONLY
 // `a.div_const(k)`: `k` is a const-expr of the lane type (E0607 for a run-time value, E0607 case
 // `zero` for 0); a literal out of the lane type's range is E0203, another type E0201. The
-// divisor is an argument: the generic form `div_const::<K>()` lacks it (E0201 case `arity`).
+// divisor is an argument: a turbofish on it is E0201 case `type-args` (`div_const::<K>()`).
 const K: i32 = -7;
 const WIDE: i64 = 3;
 

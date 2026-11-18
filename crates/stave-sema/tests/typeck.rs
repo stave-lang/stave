@@ -453,6 +453,94 @@ fn flat_diagnostics_name_the_first_non_flat_component() {
     assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }
 
+/// E1410 names the first component that is not Frozen (`*` for a pointee); views, `Drop` types,
+/// and raw pointers to Frozen data are Frozen; a `Flat` bound implies `Frozen`; E1408 rejects an
+/// impl of Frozen.
+#[test]
+fn frozen_diagnostics_name_the_first_unfrozen_component() {
+    let src = "import std.atomic;\n\
+         import std.cell;\n\
+         import std.sync;\n\
+         import std.vec;\n\
+         struct Plain { pub n: u32 }\n\
+         struct Counter { pub n: u32, pub hits: atomic.U64 }\n\
+         view struct Cursor { pub at: &Counter }\n\
+         impl Frozen for Plain {}\n\
+         fn need<T: Frozen + view>() {}\n\
+         fn fwd<T>() { need::<T>(); }\n\
+         fn via_flat<T: Flat>() { need::<T>(); }\n\
+         fn main() -> i32 {\n\
+         \x20   need::<&u32>();\n\
+         \x20   need::<*const vec.Vec<u32>>();\n\
+         \x20   need::<&[u32]>();\n\
+         \x20   need::<cell.Cell<u32>>();\n\
+         \x20   need::<&atomic.U64>();\n\
+         \x20   need::<Cursor>();\n\
+         \x20   need::<fn(u32) -> u32>();\n\
+         \x20   need::<(u32, sync.Mutex<u32, 1>)>();\n\
+         \x20   need::<Option<&[cell.Cell<u32>]>>();\n\
+         \x20   return 0;\n\
+         }\n";
+    let (p, tc) = mem(src);
+    let got: Vec<String> = tc
+        .all_diagnostics(&p)
+        .iter()
+        .map(|d| {
+            let line = d.primary().map_or(0, |s| p.source_map.locate(s).map_or(0, |l| l.line));
+            format!("{line}: {} {}", d.code(), d.message())
+        })
+        .collect();
+    let want = [
+        "8: E1408 `impl Frozen for Plain`: `Frozen` is derived by the compiler, never implemented",
+        "10: E1410 `T` is not `Frozen`: it is a generic parameter without a `Frozen` bound",
+        "16: E1410 `Cell<u32>` is not `Frozen`: component `v` has type `UnsafeCell<u32>`, `UnsafeCell` (interior mutability)",
+        "17: E1410 `&U64` is not `Frozen`: component `*.v` has type `UnsafeCell<u64>`, `UnsafeCell` (interior mutability)",
+        "18: E1410 `Cursor` is not `Frozen`: component `at.*.hits.v` has type `UnsafeCell<u64>`, `UnsafeCell` (interior mutability)",
+        "19: E1410 `fn(u32) -> u32` is not `Frozen`: it is a fn value (its captures are not in its type)",
+        "20: E1410 `(u32, Mutex<u32, 1>)` is not `Frozen`: component `1.word` has type `UnsafeCell<u32>`, `UnsafeCell` (interior mutability)",
+        "21: E1410 `Option<&[Cell<u32>]>` is not `Frozen`: component `Some.0.*[_].v` has type `UnsafeCell<u32>`, `UnsafeCell` (interior mutability)",
+    ];
+    assert_eq!(got, want);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
+}
+
+/// E0211 cases `frozen` / `frozen-self` name the touched value and the path to its `UnsafeCell`
+/// or fn value; case `static` names the chain to a static that is not Frozen.
+#[test]
+fn contract_diagnostics_name_the_shared_state() {
+    let src = "import std.atomic;\n\
+         static HITS: atomic.U64 = atomic.U64.new(0);\n\
+         fn bump() -> bool { return HITS.fetch_add(1) >= 0; }\n\
+         fn via(x: u32) -> bool { return x > 0 && bump(); }\n\
+         fn tick(c: &atomic.U64) requires(c.fetch_add(1u64) >= 0u64) { }\n\
+         fn each(f: fn(u32) -> bool, x: u32) requires(f(x)) { }\n\
+         fn any<T>(xs: &[T]) requires(xs.len() > 0) { }\n\
+         fn g(x: u32) requires(via(x)) { }\n\
+         fn get(v: &mut [u32]) -> &mut u32 from v ensures(v.len() > 0) { return &mut v[0]; }\n\
+         fn main() { }\n";
+    let (p, tc) = mem(src);
+    let show = |ds: &[stave_diag::Diagnostic]| -> Vec<String> {
+        ds.iter()
+            .map(|d| {
+                let line = d.primary().map_or(0, |s| p.source_map.locate(s).map_or(0, |l| l.line));
+                format!("{line}: {} {}", d.code(), d.message())
+            })
+            .collect()
+    };
+    let want = [
+        "5: E0211 `c` cannot be used in a contract: `&U64` is not `Frozen`: component `*.v` has type `UnsafeCell<u64>`, `UnsafeCell` (interior mutability)",
+        "6: E0211 `f` cannot be used in a contract: `fn(u32) -> bool` is not `Frozen`: it is a fn value (its captures are not in its type)",
+        "7: E0211 `xs` cannot be used in a contract: `&[T]` is not `Frozen`: component `*[_]` has type `T`, a generic parameter without a `Frozen` bound",
+        "9: E0211 `ensures` cannot read `v`: `result` holds a `&mut` borrowed from it",
+    ];
+    assert_eq!(show(&tc.all_diagnostics(&p)), want);
+    let want = [
+        "8: E0211 `main.via` cannot be called in a contract: it reaches `main.bump`, which uses `main.HITS` of type `U64`, not `Frozen`",
+    ];
+    assert_eq!(show(&stave_sema::contracts::shared_statics(&p, &tc)), want);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
+}
+
 /// Past its depth cutoff the Flat check fails closed (E1407 case `depth`).
 #[test]
 fn flat_depth_cutoff_fails_closed() {

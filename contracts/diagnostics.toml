@@ -417,11 +417,16 @@ fix = { description = "mark field `{name}` `pub` in `{module}`, or use the colum
 code = "E0107"
 severity = "error"
 area = "resolve"
-rule = "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package"
-holes = { name = "name", package = "name" }
+rule = "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`), at the module's first token"
+holes = { name = "name", package = "name", module = "path" }
 message = "import path is ambiguous between dependency `{name}` and module `{name}`"
 labels = [{ at = "primary", text = "`{name}` names a dependency and a module of `{package}`" }]
 fix = { description = "for the module, start the path with the package's own name: `import {package}.{name}` (add `as` to pick the bound name); for the dependency, rename the module `{name}` or rename the dependency in `stave.toml`" }
+
+[diag.cases.builtin]
+message = "module `{module}` of package `{package}` is spelled like the built-in package `{name}`"
+labels = [{ at = "primary", text = "this module is never `{name}`'s" }]
+fix = { description = "rename the directory or file so the module path does not start with `{name}`: compiler-known items come from the built-in packages only" }
 
 [[diag]]
 code = "E0108"
@@ -596,9 +601,9 @@ fix = { description = "use the value, or discard it explicitly with `let _ = ..;
 code = "E0211"
 severity = "error"
 area = "types"
-rule = "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy (a fn value only if its type denies `io`, `lock`, `block`); no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op)"
-holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal" }
-choices = { effect = ["lock", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] }
+rule = "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy; no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is read, never written or passed as `&mut`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op); cases `frozen` / `frozen-self` (when the other operand rules hold): the first value the clause touches (an expression, a call result, a built-in receiver, a called fn value) whose type is not `Frozen`, with the path to its `UnsafeCell` or fn value; case `static`: a callee in a clause reaches a `static` whose type is not `Frozen`; case `mut-result`: an `ensures` reads a param that a `&mut` in the return type borrows from (`from v`), outside `old(..)`"
+holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal", value = "source", type = "type", path = "place", part = "type", reason = "text-literal", name = "path" }
+choices = { reason = ["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound", "nested deeper than the limit of the `Frozen` check"], effect = ["lock", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] }
 message = "this expression is not allowed in a contract"
 labels = [{ at = "primary", text = "not allowed in `requires`/`ensures`" }]
 fix = { description = "keep contracts side-effect free: compare params, fields, and `.len()`; move other checks into the body with `std.debug.assert`" }
@@ -612,6 +617,26 @@ fix = { description = "move the check into the method body with `std.debug.asser
 message = "`{fn}` cannot be called in a contract: it has `{effect}`, as it reaches `{at}`, which {op}"
 labels = [{ at = "primary", text = "called in a contract here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "op", text = "`{at}` {op} here" }]
 fix = { description = "call only fns without `io`, `lock`, or `block` in `requires`/`ensures`; move this check into the body" }
+
+[diag.cases.frozen]
+message = "`{value}` cannot be used in a contract: `{type}` is not `Frozen`: component `{path}` has type `{part}`, {reason}"
+labels = [{ at = "primary", text = "a contract may change this value through a shared reference" }]
+fix = { description = "pass the fields the check needs as Copy values or `&` to Frozen data, or move this check into the body with `std.debug.assert`; a generic parameter needs a `Frozen` bound" }
+
+[diag.cases.frozen-self]
+message = "`{value}` cannot be used in a contract: `{type}` is not `Frozen`: it is {reason}"
+labels = [{ at = "primary", text = "a contract may change state through this value" }]
+fix = { description = "pass the fields the check needs as Copy values or `&` to Frozen data, or move this check into the body with `std.debug.assert`; a generic parameter needs a `Frozen` bound" }
+
+[diag.cases.mut-result]
+message = "`ensures` cannot read `{name}`: `result` holds a `&mut` borrowed from it"
+labels = [{ at = "primary", text = "read while `result` borrows it mutably" }, { at = "param", text = "the result borrows from this parameter" }]
+fix = { description = "read the value at entry with `old(..)`, or state the property through `result`" }
+
+[diag.cases.static]
+message = "`{fn}` cannot be called in a contract: it reaches `{at}`, which uses `{name}` of type `{type}`, not `Frozen`"
+labels = [{ at = "primary", text = "called in a contract here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "static", text = "shared state declared here" }]
+fix = { description = "keep shared state out of `requires`/`ensures`; move this check into the body" }
 
 [[diag]]
 code = "E0212"
@@ -1931,11 +1956,11 @@ fix = { description = "nest the type less deeply" }
 code = "E1408"
 severity = "error"
 area = "effects"
-rule = "an `impl Flat` (safe or `unsafe(..)`): `Flat` is derived by the compiler from the type's structure and never implemented"
-holes = { type = "type" }
-message = "`impl Flat for {type}`: `Flat` is derived by the compiler, never implemented"
+rule = "an `impl Flat` or `impl Frozen` (safe or `unsafe(..)`): both are derived by the compiler from the type's structure and never implemented"
+holes = { trait = "path", type = "type" }
+message = "`impl {trait} for {type}`: `{trait}` is derived by the compiler, never implemented"
 labels = [{ at = "primary", text = "remove this impl" }]
-fix = { description = "remove the impl: a type is `Flat` exactly when it holds no reference, view, raw pointer, fn value, `UnsafeCell`, or `Drop` type" }
+fix = { description = "remove the impl: the compiler decides `{trait}` from the type's fields" }
 
 [[diag]]
 code = "E1409"
@@ -1946,3 +1971,31 @@ holes = { name = "path", cycle = "path" }
 message = "recursive call cycle `{cycle}` goes through a closure literal in `{name}`"
 labels = [{ at = "primary", text = "this closure literal is part of the cycle" }, { at = "call", text = "next call of the cycle" }]
 fix = { description = "write the recursive part as a `rec fn` item and call it from the closure" }
+
+[[diag]]
+code = "E1410"
+severity = "error"
+area = "effects"
+rule = "`Frozen` demanded by a bound, type not `Frozen`: names the first component that is `UnsafeCell`, a fn value, or a generic param without a `Frozen` (or `Flat`) bound, and its path (field chain, `*` for a pointee); case `self` when the type itself is the component; case `depth` past the check's depth cutoff"
+holes = { type = "type", path = "place", part = "type", reason = "text-literal", limit = "int" }
+choices = { reason = ["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound"] }
+message = "`{type}` is not `Frozen`: component `{path}` has type `{part}`, {reason}"
+labels = [{ at = "primary", text = "`Frozen` required here" }, { at = "param", text = "the `Frozen` bound is on this parameter" }]
+fix = { description = "pass a type that reaches no `UnsafeCell` (`Cell`, atomics, `Mutex`, `Once`) and no fn value" }
+
+[diag.cases.self]
+message = "`{type}` is not `Frozen`: it is {reason}"
+
+[diag.cases.depth]
+message = "`{type}` is not `Frozen`: it nests deeper than {limit} levels, the limit of the `Frozen` check"
+fix = { description = "nest the type less deeply" }
+
+[[diag]]
+code = "E1411"
+severity = "warning"
+area = "effects"
+rule = "a `rec fn` none of whose instances is on a call cycle (not reported when the call graph is truncated, nor for a generic never instantiated): the marker names nothing, and the stack bound ignores it"
+holes = { name = "path" }
+message = "`rec fn {name}` is on no call cycle"
+labels = [{ at = "primary", text = "no instance of this fn recurses" }]
+fix = { description = "remove `rec`: the fn is not recursive" }

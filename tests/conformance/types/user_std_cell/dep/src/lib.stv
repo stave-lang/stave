@@ -1,0 +1,9 @@
+import std.atomic;
+
+pub struct Counter {
+    pub hits: atomic.U64,
+}
+
+pub fn bump(c: &Counter) -> bool {
+    return c.hits.fetch_add(1) >= 0;
+}

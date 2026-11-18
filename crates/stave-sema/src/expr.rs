@@ -1518,15 +1518,15 @@ impl<'a> Ck<'a> {
                 let ga = targs.and_then(|g| {
                     // `fence_stream` has no generic params: any turbofish is E0201
                     let k = if b == Builtin::FenceStream { 0 } else { icx.kids_vec(g).len() };
-                    self.turbofish(g, &vec![false; k], g)
+                    self.turbofish(g, &vec![None; k], g)
                 });
                 St::Builtin(b, ga)
             }
             Res::Unresolved => St::Err,
             Res::Decl(d) => {
                 let Some(decl) = self.prog.decl(d).copied() else { return St::Err };
-                let shape = |s: &Self, x: DeclId| -> Vec<bool> {
-                    s.sigs.generics(x).iter().map(|g| g.is_const).collect()
+                let shape = |s: &Self, x: DeclId| -> Vec<Option<TypeId>> {
+                    s.sigs.generics(x).iter().map(|g| g.is_const.then_some(g.const_ty)).collect()
                 };
                 match decl.kind {
                     DeclKind::Module => St::NoVal,
@@ -1580,7 +1580,7 @@ impl<'a> Ck<'a> {
                         let ga = targs.and_then(|g| {
                             let all = shape(self, d);
                             let np = self.sigs.fn_sig(d).map_or(0, |s| s.n_parent as usize);
-                            let own: Vec<bool> = all.get(np..).unwrap_or(&[]).to_vec();
+                            let own: Vec<Option<TypeId>> = all.get(np..).unwrap_or(&[]).to_vec();
                             self.turbofish(g, &own, g)
                         });
                         St::Assoc { method: d, impl_args, targs: ga }
@@ -1589,7 +1589,7 @@ impl<'a> Ck<'a> {
                         let ga = targs.and_then(|g| {
                             let all = shape(self, d);
                             let np = self.sigs.fn_sig(d).map_or(0, |s| s.n_parent as usize);
-                            let own: Vec<bool> = all.get(np..).unwrap_or(&[]).to_vec();
+                            let own: Vec<Option<TypeId>> = all.get(np..).unwrap_or(&[]).to_vec();
                             self.turbofish(g, &own, g)
                         });
                         St::TraitMethod { method: d, trait_decl: decl.parent, targs: ga }
@@ -1598,7 +1598,8 @@ impl<'a> Ck<'a> {
                     DeclKind::TypeAlias => match self.sigs.get(d) {
                         crate::sigs::DeclSig::Alias(al) => {
                             let target = al.target;
-                            let sh: Vec<bool> = al.generics.iter().map(|g| g.is_const).collect();
+                            let sh: Vec<Option<TypeId>> =
+                                al.generics.iter().map(|g| g.is_const.then_some(g.const_ty)).collect();
                             if sh.is_empty() {
                                 St::TypeVal(target)
                             } else {
@@ -1925,6 +1926,20 @@ impl<'a> Ck<'a> {
     }
 
     /// A type-relative step `T.m` (deferred by the resolver).
+    /// E0201 case `type-args`: a turbofish `g` on built-in `name`, which takes none.
+    fn no_generic_args(&mut self, name: &str, g: u32) {
+        let icx = self.icx;
+        let given = icx.kids_vec(g).len().to_string();
+        let d = mk(
+            "E0201",
+            Some("type-args"),
+            &[("operand", name), ("count", "0"), ("given", &given)],
+            icx.node_span(g),
+            &[],
+        );
+        self.report(d);
+    }
+
     fn type_rel(&mut self, st: St, seg: u32, targs: Option<u32>) -> St {
         let icx = self.icx;
         let base = match st {
@@ -1944,6 +1959,11 @@ impl<'a> Ck<'a> {
         if matches!(self.tys.kind(base), TypeKind::Vector { .. } | TypeKind::Mask { .. })
             && builtins::builtin_assoc(&mut self.tys, base, text).is_some()
         {
+            if let Some(g) = targs {
+                let nm = text.to_string();
+                self.no_generic_args(&nm, g);
+                return St::Err;
+            }
             return St::TypeAssoc { ty: base, name, tok: seg };
         }
         let genv = self.genv();
@@ -1952,8 +1972,11 @@ impl<'a> Ck<'a> {
             Lookup::Found { m: MethodRef::Impl { method, impl_args, .. }, level: 0, .. } => {
                 let ga = targs.and_then(|g| {
                     let sig = self.sigs.fn_sig(method);
-                    let own: Vec<bool> = sig.map_or(Vec::new(), |s| {
-                        s.generics[s.n_parent as usize..].iter().map(|g| g.is_const).collect()
+                    let own: Vec<Option<TypeId>> = sig.map_or(Vec::new(), |s| {
+                        s.generics[s.n_parent as usize..]
+                            .iter()
+                            .map(|g| g.is_const.then_some(g.const_ty))
+                            .collect()
                     });
                     self.turbofish(g, &own, g)
                 });
@@ -1962,8 +1985,11 @@ impl<'a> Ck<'a> {
             Lookup::Found { m: MethodRef::Bound { method, trait_args, self_ty }, level: 0, .. } => {
                 let ga = targs.and_then(|g| {
                     let sig = self.sigs.fn_sig(method);
-                    let own: Vec<bool> = sig.map_or(Vec::new(), |s| {
-                        s.generics[s.n_parent as usize..].iter().map(|g| g.is_const).collect()
+                    let own: Vec<Option<TypeId>> = sig.map_or(Vec::new(), |s| {
+                        s.generics[s.n_parent as usize..]
+                            .iter()
+                            .map(|g| g.is_const.then_some(g.const_ty))
+                            .collect()
                     });
                     self.turbofish(g, &own, g)
                 });
@@ -2437,6 +2463,13 @@ impl<'a> Ck<'a> {
                     }
                     continue;
                 }
+                if b.trait_decl == self.sigs.lang.frozen && b.trait_decl.is_some() {
+                    let d = crate::traits::Derived::Frozen;
+                    if let Some(wit) = self.w.derived_witness(&mut self.tys, a, genv, d) {
+                        self.e1410(at, a, &wit, g.name_span);
+                    }
+                    continue;
+                }
                 if !self.w.implements(&mut self.tys, a, &tr, genv) {
                     let tn = self.show(a);
                     let trn = self
@@ -2475,6 +2508,31 @@ impl<'a> Ck<'a> {
                 let holes =
                     [("type", tn.as_str()), ("path", &wit.path), ("part", &pn), ("reason", why.text())];
                 mk("E1407", None, &holes, at, &[("param", param)])
+            }
+        };
+        self.report(d);
+    }
+
+    /// E1410: `ty` (given for a `Frozen`-bound param declared at `param`) is not Frozen; `wit`
+    /// names its first component that is not.
+    fn e1410(&mut self, at: Span, ty: TypeId, wit: &crate::traits::FlatWitness, param: Span) {
+        use crate::traits::{Derived, NotFlat};
+        let tn = self.show(ty);
+        let d = match wit.why {
+            NotFlat::Unknown => return,
+            NotFlat::Depth => {
+                let limit = crate::traits::QUERY_DEPTH.to_string();
+                mk("E1410", Some("depth"), &[("type", &tn), ("limit", &limit)], at, &[("param", param)])
+            }
+            why if wit.path.is_empty() => {
+                let r = why.text_for(Derived::Frozen);
+                mk("E1410", Some("self"), &[("type", &tn), ("reason", r)], at, &[("param", param)])
+            }
+            why => {
+                let pn = self.show(wit.part);
+                let r = why.text_for(Derived::Frozen);
+                let holes = [("type", tn.as_str()), ("path", &wit.path), ("part", &pn), ("reason", r)];
+                mk("E1410", None, &holes, at, &[("param", param)])
             }
         };
         self.report(d);
@@ -3201,6 +3259,13 @@ impl<'a> Ck<'a> {
         match lk {
             Lookup::Found { m, level, recv: c } => match m {
                 MethodRef::Builtin(b) => {
+                    if let Some(g) = targs_node
+                        && !builtins::TAKES_GENERIC_ARGS.contains(&b.name)
+                    {
+                        let nm = self.prog.strings.get(name).to_string();
+                        self.no_generic_args(&nm, g);
+                        return self.args_only(args);
+                    }
                     let mut consts: Vec<u64> = Vec::new();
                     let gargs: Vec<GArg> = match targs_node {
                         Some(g) if b.name == "permute" => {
@@ -3212,11 +3277,12 @@ impl<'a> Ck<'a> {
                         }
                         Some(g) => {
                             let k = icx.kids_vec(g);
-                            let shape: Vec<bool> = k
+                            let shape: Vec<Option<TypeId>> = k
                                 .iter()
                                 .map(|&x| {
-                                    !icx.child(x, NodeKind::TypeBase).is_some()
-                                        && !icx.child(x, NodeKind::ArrOrIdx).is_some()
+                                    let c = icx.child(x, NodeKind::TypeBase).is_none()
+                                        && icx.child(x, NodeKind::ArrOrIdx).is_none();
+                                    c.then_some(TypeId::NONE)
                                 })
                                 .collect();
                             self.turbofish(g, &shape, g).unwrap_or_default()
@@ -3284,7 +3350,8 @@ impl<'a> Ck<'a> {
                         binds[i] = Some(*a);
                     }
                     if let Some(g) = targs_node {
-                        let own: Vec<bool> = sig.generics[np..].iter().map(|g| g.is_const).collect();
+                        let own: Vec<Option<TypeId>> =
+                            sig.generics[np..].iter().map(|g| g.is_const.then_some(g.const_ty)).collect();
                         if let Some(t) = self.turbofish(g, &own, g) {
                             for (i, a) in t.into_iter().enumerate() {
                                 binds[np + i] = Some(a);
@@ -3324,7 +3391,8 @@ impl<'a> Ck<'a> {
                         binds[i] = Some(*a);
                     }
                     if let Some(g) = targs_node {
-                        let own: Vec<bool> = sig.generics[np..].iter().map(|g| g.is_const).collect();
+                        let own: Vec<Option<TypeId>> =
+                            sig.generics[np..].iter().map(|g| g.is_const.then_some(g.const_ty)).collect();
                         if let Some(t) = self.turbofish(g, &own, g) {
                             for (i, a) in t.into_iter().enumerate() {
                                 binds[np + i] = Some(a);

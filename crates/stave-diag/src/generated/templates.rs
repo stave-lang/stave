@@ -918,10 +918,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0107",
         severity: Severity::Error,
         area: "resolve",
-        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package",
+        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`), at the module's first token",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "module", kind: HoleKind::Path, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
             Hole { name: "package", kind: HoleKind::Name, choices: &[] },
         ],
@@ -934,6 +935,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "for the module, start the path with the package's own name: `import {package}.{name}` (add `as` to pick the bound name); for the dependency, rename the module `{name}` or rename the dependency in `stave.toml`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "builtin",
+                message: "module `{module}` of package `{package}` is spelled like the built-in package `{name}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this module is never `{name}`'s" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "rename the directory or file so the module path does not start with `{name}`: compiler-known items come from the built-in packages only",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1389,14 +1402,20 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0211",
         severity: Severity::Error,
         area: "types",
-        rule: "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy (a fn value only if its type denies `io`, `lock`, `block`); no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is not read in a `requires`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op)",
+        rule: "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy; no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is read, never written or passed as `&mut`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op); cases `frozen` / `frozen-self` (when the other operand rules hold): the first value the clause touches (an expression, a call result, a built-in receiver, a called fn value) whose type is not `Frozen`, with the path to its `UnsafeCell` or fn value; case `static`: a callee in a clause reaches a `static` whose type is not `Frozen`; case `mut-result`: an `ensures` reads a param that a `&mut` in the return type borrows from (`from v`), outside `old(..)`",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["lock", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "name", kind: HoleKind::Path, choices: &[] },
             Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect", "runs code the call graph does not show"] },
+            Hole { name: "part", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "path", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "reason", kind: HoleKind::TextLiteral, choices: &["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound", "nested deeper than the limit of the `Frozen` check"] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "value", kind: HoleKind::Source, choices: &[] },
         ],
         shapes: &[
             Shape {
@@ -1412,6 +1431,30 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "frozen",
+                message: "`{value}` cannot be used in a contract: `{type}` is not `Frozen`: component `{path}` has type `{part}`, {reason}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a contract may change this value through a shared reference" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass the fields the check needs as Copy values or `&` to Frozen data, or move this check into the body with `std.debug.assert`; a generic parameter needs a `Frozen` bound",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "frozen-self",
+                message: "`{value}` cannot be used in a contract: `{type}` is not `Frozen`: it is {reason}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a contract may change state through this value" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass the fields the check needs as Copy values or `&` to Frozen data, or move this check into the body with `std.debug.assert`; a generic parameter needs a `Frozen` bound",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "impure-call",
                 message: "`{fn}` cannot be called in a contract: it has `{effect}`, as it reaches `{at}`, which {op}",
                 labels: &[
@@ -1422,6 +1465,34 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call only fns without `io`, `lock`, or `block` in `requires`/`ensures`; move this check into the body",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-result",
+                message: "`ensures` cannot read `{name}`: `result` holds a `&mut` borrowed from it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "read while `result` borrows it mutably" },
+                    LabelTemplate { at: "param", text: "the result borrows from this parameter" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "read the value at entry with `old(..)`, or state the property through `result`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "static",
+                message: "`{fn}` cannot be called in a contract: it reaches `{at}`, which uses `{name}` of type `{type}`, not `Frozen`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "called in a contract here" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                    LabelTemplate { at: "static", text: "shared state declared here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "keep shared state out of `requires`/`ensures`; move this check into the body",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4837,21 +4908,22 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1408",
         severity: Severity::Error,
         area: "effects",
-        rule: "an `impl Flat` (safe or `unsafe(..)`): `Flat` is derived by the compiler from the type's structure and never implemented",
+        rule: "an `impl Flat` or `impl Frozen` (safe or `unsafe(..)`): both are derived by the compiler from the type's structure and never implemented",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "trait", kind: HoleKind::Path, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[
             Shape {
                 case: "",
-                message: "`impl Flat for {type}`: `Flat` is derived by the compiler, never implemented",
+                message: "`impl {trait} for {type}`: `{trait}` is derived by the compiler, never implemented",
                 labels: &[
                     LabelTemplate { at: "primary", text: "remove this impl" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "remove the impl: a type is `Flat` exactly when it holds no reference, view, raw pointer, fn value, `UnsafeCell`, or `Drop` type",
+                    description: "remove the impl: the compiler decides `{trait}` from the type's fields",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4879,6 +4951,87 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write the recursive part as a `rec fn` item and call it from the closure",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1410",
+        severity: Severity::Error,
+        area: "effects",
+        rule: "`Frozen` demanded by a bound, type not `Frozen`: names the first component that is `UnsafeCell`, a fn value, or a generic param without a `Frozen` (or `Flat`) bound, and its path (field chain, `*` for a pointee); case `self` when the type itself is the component; case `depth` past the check's depth cutoff",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "limit", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "part", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "path", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "reason", kind: HoleKind::TextLiteral, choices: &["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound"] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{type}` is not `Frozen`: component `{path}` has type `{part}`, {reason}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`Frozen` required here" },
+                    LabelTemplate { at: "param", text: "the `Frozen` bound is on this parameter" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass a type that reaches no `UnsafeCell` (`Cell`, atomics, `Mutex`, `Once`) and no fn value",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "depth",
+                message: "`{type}` is not `Frozen`: it nests deeper than {limit} levels, the limit of the `Frozen` check",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`Frozen` required here" },
+                    LabelTemplate { at: "param", text: "the `Frozen` bound is on this parameter" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "nest the type less deeply",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "self",
+                message: "`{type}` is not `Frozen`: it is {reason}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`Frozen` required here" },
+                    LabelTemplate { at: "param", text: "the `Frozen` bound is on this parameter" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass a type that reaches no `UnsafeCell` (`Cell`, atomics, `Mutex`, `Once`) and no fn value",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E1411",
+        severity: Severity::Warning,
+        area: "effects",
+        rule: "a `rec fn` none of whose instances is on a call cycle (not reported when the call graph is truncated, nor for a generic never instantiated): the marker names nothing, and the stack bound ignores it",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "name", kind: HoleKind::Path, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`rec fn {name}` is on no call cycle",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no instance of this fn recurses" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove `rec`: the fn is not recursive",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

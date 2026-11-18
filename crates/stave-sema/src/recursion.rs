@@ -114,6 +114,43 @@ pub(crate) fn check(prog: &Program, sigs: &Sigs, table: &TypeTable, g: &CallGrap
         }
         out.extend(mk(code, None, &[("name", &who), ("cycle", &cycle)], primary, &roles));
     }
+    out.extend(stale_rec(prog, sigs, g));
+    out
+}
+
+/// E1411 (warning): a `rec fn` with instances, none of them on a call cycle. Not when the graph
+/// is truncated (a missing edge could hide a cycle) nor for a generic never instantiated.
+fn stale_rec(prog: &Program, sigs: &Sigs, g: &CallGraph) -> Vec<Diagnostic> {
+    if g.truncated {
+        return Vec::new();
+    }
+    let mut cyclic: FxHashSet<crate::ids::DeclId> = FxHashSet::default();
+    for s in 0..g.scc_count() as u32 {
+        if !g.is_cycle(s) {
+            continue;
+        }
+        for &n in g.scc(s) {
+            if let NodeKind::Fn { inst, .. } = &g.nodes[n as usize].kind {
+                cyclic.insert(inst.decl);
+            }
+        }
+    }
+    let mut stale: Vec<crate::ids::DeclId> = g
+        .nodes
+        .iter()
+        .filter_map(|nd| match &nd.kind {
+            NodeKind::Fn { inst, rec: true, .. } if !cyclic.contains(&inst.decl) => Some(inst.decl),
+            _ => None,
+        })
+        .collect();
+    stale.sort();
+    stale.dedup();
+    let mut out = Vec::new();
+    for d in stale {
+        let Some(decl) = prog.decl(d) else { continue };
+        let name = crate::lower::fn_path(prog, sigs, d);
+        out.extend(mk("E1411", None, &[("name", &name)], decl.name_span, &[]));
+    }
     out
 }
 

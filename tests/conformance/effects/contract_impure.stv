@@ -21,7 +21,9 @@ fn fresh(n: u32) -> bool {
     return v.len() == 1;
 }
 
-fn locked(m: &sync.Mutex<u32, 1>) -> bool {
+// A lock of its own: `lock` is the effect (shared state is E0211 case `frozen` / `static`).
+fn locked(x: u32) -> bool {
+    let m = sync.Mutex::<u32, 1>.new(x);
     let guard = m.lock();
     return *guard.get() > 0;
 }
@@ -36,7 +38,7 @@ fn waits(x: u32) -> bool {
 fn f(x: u32) requires(log(x)) { } //~ ERROR E0211
 fn g(x: u32) -> u32 ensures(logs(result)) { return x; } //~ ERROR E0211
 fn h(x: u32) requires(fresh(x)) ensures(x / 1 == x) { }
-fn k(m: &sync.Mutex<u32, 1>) requires(locked(m)) { } //~ ERROR E0211
+fn k(x: u32) requires(locked(x)) { } //~ ERROR E0211
 fn w(x: u32) requires(waits(x)) { } //~ ERROR E0211
 //~^ ERROR E0211
 
@@ -44,7 +46,6 @@ fn main() {
     f(1);
     let y = g(2);
     h(3);
-    let m = sync.Mutex::<u32, 1>.new(1u32);
-    k(&m);
+    k(1);
     w(4);
 }

@@ -3,16 +3,17 @@
 //! - a call chain without recursion and with large frames gets its bound on main and on a
 //!   spawned thread, the bound wins over a much smaller `[run] stack`, and the program runs
 //!   (`tests/conformance/run/stack_bound`);
-//! - the same chain with a `rec fn` has no bound, keeps that `[run] stack`, and overflows
-//!   (`stack_rec`): so the chain needs more than `[run] stack`, and the computed stack is what
-//!   lets `stack_bound` run;
+//! - the same chain through a call cycle of a `rec fn` has no bound, keeps that `[run] stack`,
+//!   and overflows (`stack_rec`): so the chain needs more than `[run] stack`, and the computed
+//!   stack is what lets `stack_bound` run; with the `rec fn` on no cycle it is bounded and runs
+//!   (`stack_rec_stale`);
 //! - each `spawn` body is a root with its own bound (`stack_spawn.stv`);
 //! - a trap in the deepest frame of a bounded chain, on main and on a spawned thread, still
 //!   prints the whole panic report (`run/stack_trap_main`, `borrow/stack_trap_spawn`);
 //! - a drop cycle of a recursive type has no bound;
 //! - every run-suite program, debug and release, maps every fn value it makes to the call graph
 //!   (no stack is unbounded for an unresolved fn-value call), and gets a bound unless it reaches
-//!   a `rec fn` or a drop cycle.
+//!   a call cycle or a drop cycle.
 //!
 //! A leg that cannot run here (no qemu-aarch64, not Linux) builds only, or fails when
 //! `STAVE_REQUIRE_LEGS` lists it.
@@ -115,8 +116,8 @@ fn the_bound_wins_over_run_stack() {
     }
 }
 
-/// The same chain through a `rec fn`: no bound, `[run] stack` (64 KiB) applies, and the chain
-/// overflows it at the guard page.
+/// The same chain through a call cycle of a `rec fn`: no bound, `[run] stack` (64 KiB) applies,
+/// and the chain overflows it at the guard page.
 #[test]
 fn a_rec_fn_keeps_run_stack() {
     let p = run_dir().join("stack_rec");

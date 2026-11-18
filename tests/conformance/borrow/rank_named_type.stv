@@ -1,0 +1,12 @@
+//~ CHECK-ONLY
+// A rank has the type of the param, `u32`: a literal out of its range is E0203, a const of
+// another type E0201.
+import std.sync;
+
+const WIDE: u64 = 5;
+
+fn huge(a: &sync.Mutex<u32, 5000000000>) { } //~ ERROR E0203
+
+fn typed(a: &sync.Mutex<u32, WIDE>) { } //~ ERROR E0201
+
+fn main() { }

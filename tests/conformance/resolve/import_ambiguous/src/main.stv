@@ -1,7 +1,8 @@
 //~ CHECK-ONLY
 // E0107: `util` names both the dependency `util` and the module `src/util.stv`, and
 // `std` both the implicit dependency and the directory `src/std/`. The package's own name first
-// selects the module; there is no way to reach a dependency past a module of the same name.
+// selects the module; there is no way to reach a dependency past a module of the same name. A
+// module spelled like a built-in package (`std.extra`) is E0107 case `builtin` as well.
 import util; //~ ERROR E0107
 import import_ambiguous.util as mine;
 import std.io; //~ ERROR E0107

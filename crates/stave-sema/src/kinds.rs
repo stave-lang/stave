@@ -1,4 +1,4 @@
-//! Kinds ([`Kind`]): `copy view send sync flat sized` per
+//! Kinds ([`Kind`]): `copy view send sync flat frozen sized` per
 //! type, and the view placement rules E0410–E0414. Every view test of the checker goes through
 //! [`is_view`]; the diagnostics are built here only ([`e0410`], [`view_arg`], [`e0413`]).
 //!
@@ -30,7 +30,9 @@
 //!
 //! **Flat** (no pointer inside: a value may be copied byte for byte to another thread, the GPU,
 //! or a file) is derived from the type's structure only ([`World::flat_witness`] names the
-//! first non-flat component for E1407); no impl adds or removes it (E1408).
+//! first non-flat component for E1407); no impl adds or removes it (E1408). **Frozen** (no
+//! `UnsafeCell` or fn value reachable, so nothing changes behind a shared reference) likewise
+//! ([`World::derived_witness`], E1410).
 
 use stave_diag::{Diagnostic, Span};
 
@@ -51,6 +53,7 @@ pub struct Kind {
     pub send: bool,
     pub sync: bool,
     pub flat: bool,
+    pub frozen: bool,
     pub sized: bool,
 }
 
@@ -132,7 +135,8 @@ pub fn kind_of<I: Interner + ?Sized>(w: World<'_>, cx: &mut I, t: TypeId, env: &
     let send = marker(lang.send);
     let sync = marker(lang.sync);
     let flat = marker(lang.flat);
-    Kind { copy, view, send, sync, flat, sized }
+    let frozen = marker(lang.frozen);
+    Kind { copy, view, send, sync, flat, frozen, sized }
 }
 
 /// Whether `d` is `std.mem.forget` (E0412).
@@ -142,15 +146,20 @@ pub fn is_forget(prog: &Program, d: DeclId) -> bool {
         return false;
     }
     prog.module(x.module).is_some_and(|m| {
-        m.path.len() == 2 && prog.strings.get(m.path[0]) == "std" && prog.strings.get(m.path[1]) == "mem"
+        m.path.len() == 2
+            && prog.strings.get(m.path[0]) == "std"
+            && prog.strings.get(m.path[1]) == "mem"
+            && prog.packages.get(m.package.idx()).is_some_and(|p| p.kind == crate::PackageKind::Builtin)
     })
 }
 
 /// Whether decl `d` belongs to the built-in std package.
 fn in_std(prog: &Program, d: DeclId) -> bool {
-    prog.decl(d)
-        .and_then(|x| prog.module(x.module))
-        .is_some_and(|m| prog.packages.get(m.package.idx()).is_some_and(|p| p.name == "std"))
+    prog.decl(d).and_then(|x| prog.module(x.module)).is_some_and(|m| {
+        prog.packages
+            .get(m.package.idx())
+            .is_some_and(|p| p.name == "std" && p.kind == crate::PackageKind::Builtin)
+    })
 }
 
 /// E0410: field `field` of non-view ADT `adt` has view type `ty` (display text).

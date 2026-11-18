@@ -34,7 +34,8 @@ fn apply(f: fn(u32) -> bool, x: u32) -> bool {
     return f(x);
 }
 
-fn a1(v: &mut vec.Vec<u32>) requires(v.len() > 0) { } //~ ERROR E0211
+fn a1(v: &mut vec.Vec<u32>) requires(grow(v)) { } //~ ERROR E0211
+fn a1b(v: &mut vec.Vec<u32>) requires(v.pop().is_some()) { } //~ ERROR E0211
 fn a2(v: &mut vec.Vec<u32>) ensures(grow(v)) { } //~ ERROR E0211
 fn a3(v: &mut vec.Vec<u32>) ensures(v.pop().is_some()) { v.push(1); } //~ ERROR E0211
 fn a4(x: u32) requires(LIMIT > x) { } //~ ERROR E0211

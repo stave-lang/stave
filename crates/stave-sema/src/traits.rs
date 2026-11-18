@@ -25,6 +25,14 @@
 //! an ADT instance, and array, tuple, and range elements. `str` and slices are not Flat
 //! (unsized); a generic param is Flat only through a `Flat` bound. Recursive types are Flat
 //! coinductively, like Send/Sync; past the depth cutoff the answer is "no" (E1407 case `depth`).
+//!
+//! **Frozen** is derived the same way (an impl is E1408): a type is Frozen iff nothing reachable
+//! from a value of it can change while the value is only shared: no `std.cell.UnsafeCell` and no
+//! fn value (its captures are not in its type) is reachable through its fields, enum payloads,
+//! type arguments, array, slice, tuple, and range elements, or the pointees of its references
+//! and raw pointers. Views, `Drop` types, `str`, and slices may be Frozen. A generic param is
+//! Frozen through a `Frozen` or a `Flat` bound (Flat implies Frozen). A rule that relies on "`&T`
+//! is read-only" asks for it: the contract operand rule ([`crate::contracts`]).
 
 use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
@@ -166,7 +174,14 @@ impl Default for Query {
     }
 }
 
-/// Why a type is not `Flat` (E1407 `reason`).
+/// The traits the compiler derives from a type's structure, never from impls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Derived {
+    Flat,
+    Frozen,
+}
+
+/// Why a type is not `Flat` / `Frozen` (E1407 / E1410 `reason`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotFlat {
     Ref,
@@ -188,6 +203,18 @@ pub enum NotFlat {
 impl NotFlat {
     /// The E1407 `reason` text (a `choices` entry of the registry).
     pub fn text(self) -> &'static str {
+        self.text_for(Derived::Flat)
+    }
+
+    /// The `reason` text for trait `d` (E1407, E1410, E0211 case `frozen`).
+    pub fn text_for(self, d: Derived) -> &'static str {
+        if d == Derived::Frozen {
+            match self {
+                NotFlat::FnValue => return "a fn value (its captures are not in its type)",
+                NotFlat::Param => return "a generic parameter without a `Frozen` bound",
+                _ => {}
+            }
+        }
         match self {
             NotFlat::Ref => "a reference",
             NotFlat::Ptr => "a raw pointer",
@@ -214,6 +241,8 @@ enum FlatSeg {
     Index(u32),
     Elem,
     Start,
+    /// The pointee of a reference or raw pointer (Frozen only).
+    Deref,
 }
 
 /// The first non-flat component of a type: its path (`a.p`, `[_]`, `0`, `Some.0`, `<T>`; empty
@@ -440,6 +469,14 @@ impl<'a> World<'a> {
             if g.bounds.iter().any(|b| b.trait_decl == tr.trait_decl && b.args == tr.args) {
                 return true;
             }
+            // Flat implies Frozen: no pointer and no `UnsafeCell` leaves nothing to reach.
+            if tr.trait_decl == lang.frozen
+                && lang.frozen.is_some()
+                && lang.flat.is_some()
+                && g.bounds.iter().any(|b| b.trait_decl == lang.flat)
+            {
+                return true;
+            }
             // Copy bound implied by nothing else; Send/Sync are not implied either.
             return false;
         }
@@ -452,9 +489,17 @@ impl<'a> World<'a> {
         {
             return r;
         }
-        let flat = tr.trait_decl == lang.flat && tr.trait_decl.is_some();
-        let auto =
-            (tr.trait_decl == lang.send || tr.trait_decl == lang.sync || flat) && tr.trait_decl.is_some();
+        let derived = if tr.trait_decl.is_none() {
+            None
+        } else if tr.trait_decl == lang.flat {
+            Some(Derived::Flat)
+        } else if tr.trait_decl == lang.frozen {
+            Some(Derived::Frozen)
+        } else {
+            None
+        };
+        let auto = (tr.trait_decl == lang.send || tr.trait_decl == lang.sync || derived.is_some())
+            && tr.trait_decl.is_some();
         if auto {
             // Send/Sync/Flat are coinductive: a type reached again while its own query is in
             // progress (a recursive type) is assumed to implement them.
@@ -468,8 +513,8 @@ impl<'a> World<'a> {
         if auto {
             q.active.push(key);
         }
-        let r = if flat {
-            self.auto_flat(cx, t, tr, env, depth + 1, q)
+        let r = if let Some(d) = derived {
+            self.auto_derived(cx, t, tr, d, env, depth + 1, q)
         } else if auto {
             self.send_sync(cx, t, tr, env, depth + 1, q)
         } else if let Some(name) = lang.ops.iter().find(|(_, d)| **d == tr.trait_decl).map(|(n, _)| *n)
@@ -566,17 +611,19 @@ impl<'a> World<'a> {
         }
     }
 
-    /// Flat: structural only (impls of `Flat` are rejected, E1408, and never consulted).
-    fn auto_flat<I: Interner + ?Sized>(
+    /// Flat / Frozen: structural only (impls of them are rejected, E1408, and never consulted).
+    #[allow(clippy::too_many_arguments)]
+    fn auto_derived<I: Interner + ?Sized>(
         &self,
         cx: &mut I,
         t: TypeId,
         tr: &TraitRef,
+        d: Derived,
         env: &[GenericParam],
         depth: u32,
         q: &mut Query,
     ) -> bool {
-        match self.flat_parts(cx, t) {
+        match self.derived_parts(cx, t, d) {
             Ok(parts) => parts.into_iter().all(|(_, c)| self.implements_q(cx, c, tr, env, depth, q)),
             Err(_) => false,
         }
@@ -586,11 +633,15 @@ impl<'a> World<'a> {
     /// arguments of an ADT instance; array, tuple, and range elements), or why `t` itself is not
     /// flat. A generic param is the caller's to decide (its bounds); `Self` and a const param
     /// used as a type are not flat.
-    fn flat_parts<I: Interner + ?Sized>(
+    fn derived_parts<I: Interner + ?Sized>(
         &self,
         cx: &mut I,
         t: TypeId,
+        d: Derived,
     ) -> Result<Vec<(FlatSeg, TypeId)>, NotFlat> {
+        if d == Derived::Frozen {
+            return self.frozen_parts(cx, t);
+        }
         let lang = &self.sigs.lang;
         match cx.kind(t).clone() {
             TypeKind::Int { .. }
@@ -644,6 +695,59 @@ impl<'a> World<'a> {
         }
     }
 
+    /// One step of the Frozen rule: the components of `t` (as for Flat, plus the pointee of a
+    /// reference or raw pointer and the element of a slice), or why `t` itself is not Frozen.
+    fn frozen_parts<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        t: TypeId,
+    ) -> Result<Vec<(FlatSeg, TypeId)>, NotFlat> {
+        let lang = &self.sigs.lang;
+        match cx.kind(t).clone() {
+            TypeKind::Int { .. }
+            | TypeKind::Float(_)
+            | TypeKind::Bool
+            | TypeKind::Char
+            | TypeKind::Str
+            | TypeKind::Vector { .. }
+            | TypeKind::Mask { .. }
+            | TypeKind::Never
+            | TypeKind::Error => Ok(Vec::new()),
+            TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => Ok(vec![(FlatSeg::Deref, inner)]),
+            TypeKind::Fn { .. } => Err(NotFlat::FnValue),
+            TypeKind::Param(_) | TypeKind::ConstParam(_) | TypeKind::SelfTy => Err(NotFlat::Param),
+            TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => Ok(vec![(FlatSeg::Elem, elem)]),
+            TypeKind::Range { elem, .. } => Ok(vec![(FlatSeg::Start, elem)]),
+            TypeKind::Tuple(ts) => {
+                Ok(ts.iter().enumerate().map(|(i, &x)| (FlatSeg::Index(i as u32), x)).collect())
+            }
+            TypeKind::Adt { def, args } => {
+                if def == lang.unsafe_cell && def.is_some() {
+                    return Err(NotFlat::UnsafeCell);
+                }
+                let Some(adt) = self.sigs.adt(def) else { return Err(NotFlat::Unknown) };
+                let mut out = Vec::new();
+                for (vi, v) in adt.variants.iter().enumerate() {
+                    for (fi, f) in v.fields.iter().enumerate() {
+                        let ft = cx.subst(f.ty, &args, None);
+                        let seg = if adt.is_enum {
+                            FlatSeg::VariantField(def, vi as u32, fi as u32)
+                        } else {
+                            FlatSeg::Field(def, fi as u32)
+                        };
+                        out.push((seg, ft));
+                    }
+                }
+                for (i, a) in args.iter().enumerate() {
+                    if let GArg::Type(x) = a {
+                        out.push((FlatSeg::Arg(def, i as u32), *x));
+                    }
+                }
+                Ok(out)
+            }
+        }
+    }
+
     /// Why `t` is not `Flat` in the scope of `env` (`None`: it is): the first non-flat component
     /// in [`World::flat_parts`] order, reached by descending into the first failing component at
     /// each level. [`NotFlat::Depth`] when the query failed at its depth cutoff only.
@@ -653,18 +757,32 @@ impl<'a> World<'a> {
         t: TypeId,
         env: &[GenericParam],
     ) -> Option<FlatWitness> {
-        let flat = self.sigs.lang.flat;
-        if flat.is_none() {
+        self.derived_witness(cx, t, env, Derived::Flat)
+    }
+
+    /// [`World::flat_witness`] for either derived trait.
+    pub fn derived_witness<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        t: TypeId,
+        env: &[GenericParam],
+        d: Derived,
+    ) -> Option<FlatWitness> {
+        let decl = match d {
+            Derived::Flat => self.sigs.lang.flat,
+            Derived::Frozen => self.sigs.lang.frozen,
+        };
+        if decl.is_none() {
             return None;
         }
-        let tr = TraitRef { trait_decl: flat, args: Vec::new() };
+        let tr = TraitRef { trait_decl: decl, args: Vec::new() };
         if self.implements(cx, t, &tr, env) {
             return None;
         }
         let mut path = String::new();
         let mut cur = t;
         for _ in 0..=QUERY_DEPTH {
-            let parts = match self.flat_parts(cx, cur) {
+            let parts = match self.derived_parts(cx, cur, d) {
                 Ok(p) => p,
                 Err(why) => return Some(FlatWitness { path, part: cur, why }),
             };
@@ -687,6 +805,7 @@ impl<'a> World<'a> {
                 return;
             }
             FlatSeg::Start => "start".to_string(),
+            FlatSeg::Deref => "*".to_string(),
             FlatSeg::Index(i) => i.to_string(),
             FlatSeg::Field(d, fi) => self
                 .sigs
@@ -1110,10 +1229,12 @@ pub(crate) fn check_impls(
         let names = NameCx { prog, generics: &imp.generics };
         let self_text = types::display(tys, &names, imp.self_ty);
         let Some(tr) = &imp.trait_ref else { continue };
-        // E1408: Flat comes from the type's structure only, so the impl is rejected whole and no
-        // other impl check applies to it.
-        if tr.trait_decl == sigs.lang.flat && tr.trait_decl.is_some() {
-            out.extend(mk("E1408", None, &[("type", &self_text)], impl_span, &[]));
+        // E1408: Flat and Frozen come from the type's structure only, so the impl is rejected
+        // whole and no other impl check applies to it.
+        let lang = &sigs.lang;
+        if tr.trait_decl.is_some() && (tr.trait_decl == lang.flat || tr.trait_decl == lang.frozen) {
+            let name = if tr.trait_decl == lang.flat { "Flat" } else { "Frozen" };
+            out.extend(mk("E1408", None, &[("trait", name), ("type", &self_text)], impl_span, &[]));
             continue;
         }
         let Some(trait_def) = sigs.trait_def(tr.trait_decl) else { continue };

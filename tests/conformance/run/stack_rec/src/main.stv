@@ -1,9 +1,9 @@
 //~ EXIT 101
 //~ STDERR-CONTAINS "panic: StackOverflow"
 //~ RESOURCE-LIMIT
-// stack_bound's call chain with `f4` marked `rec fn`: main reaches a `rec fn`, so its stack has
-// no computed bound and keeps `[run] stack` (64 KiB), which the chain (eight frames of 32 KiB)
-// overflows: the guard page traps.
+// stack_bound's call chain with `f4` a `rec fn` that calls itself (never at run time): main
+// reaches a call cycle, so its stack has no computed bound and keeps `[run] stack` (64 KiB),
+// which the chain (eight frames of 32 KiB) overflows: the guard page traps.
 import std.io;
 
 fn f0(x: u64) -> u64 {
@@ -38,6 +38,9 @@ rec fn f4(x: u64) -> u64 {
     let mut buf: [u64; 4096] = [0u64; 4096];
     let i = (x % 4096) as usize;
     buf[i] = x;
+    if x > 1000000000 {
+        return f4(x - 1);
+    }
     return f3(buf[i]) + 1;
 }
 

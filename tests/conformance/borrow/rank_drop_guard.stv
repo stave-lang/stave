@@ -1,0 +1,46 @@
+//~ CHECK-ONLY
+// `mem.drop(guard)` releases a lock before the scope ends: afterwards a lower or equal rank may be
+// taken. A guard still held (dropped later, or only maybe dropped) keeps its rank.
+import std.mem;
+import std.sync;
+
+fn released(lo: &sync.Mutex<u32, 1>, hi: &sync.Mutex<u32, 2>) -> u32 {
+    let gh = hi.lock();
+    let x = *gh.get();
+    mem.drop(gh);
+    let gl = lo.lock();
+    return x + *gl.get();
+}
+
+fn again(m: &sync.Mutex<u32, 1>) -> u32 {
+    let g = m.lock();
+    let x = *g.get();
+    mem.drop(g);
+    let h = m.lock();
+    return x + *h.get();
+}
+
+fn too_late(lo: &sync.Mutex<u32, 1>, hi: &sync.Mutex<u32, 2>) -> u32 {
+    let gh = hi.lock();
+    let gl = lo.lock(); //~ ERROR E1405
+    mem.drop(gh);
+    return *gl.get();
+}
+
+fn maybe(lo: &sync.Mutex<u32, 1>, hi: &sync.Mutex<u32, 2>, c: bool) -> u32 {
+    let gh = hi.lock();
+    if c {
+        mem.drop(gh);
+    }
+    let gl = lo.lock(); //~ ERROR E1405
+    return *gl.get();
+}
+
+fn main() {
+    let lo = sync.Mutex::<u32, 1>.new(1u32);
+    let hi = sync.Mutex::<u32, 2>.new(2u32);
+    let a = released(&lo, &hi);
+    let b = again(&lo);
+    let c = too_late(&lo, &hi);
+    let d = maybe(&lo, &hi, true);
+}

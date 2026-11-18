@@ -103,8 +103,24 @@ pub(crate) fn eval_u64<E: CEnv>(env: &mut E, te: &TyEnv<'_>, n: u32, ty: TypeId)
     }
     let mut ev = Ev { env, te, depth: 0, params: Vec::new() };
     let Some((t, v)) = ev.eval(n, Some(ty)) else { return ConstArg::Error };
+    let typed = !t.is_none() && t != ty && t != ev.fx(ids::NEVER) && !ev.env.is_error_ty(t);
     match ev.fix(n, t, v, ty) {
         Some(Val::Int(i)) if i >= 0 && i <= u64::MAX as i128 => ConstArg::Value(i as u64),
+        _ if typed => {
+            let names = NameCx { prog: ev.env.prog(), generics: &[] };
+            let (e, f) = (types::display(ev.env, &names, ty), types::display(ev.env, &names, t));
+            let icx = te.icx;
+            let text = icx.node_text(n).to_string();
+            let d = mk(
+                "E0201",
+                None,
+                &[("expected", &e), ("found", &f), ("operand", &text)],
+                icx.node_span(n),
+                &[],
+            );
+            ev.env.report(d);
+            ConstArg::Error
+        }
         _ => ConstArg::Error,
     }
 }
@@ -370,6 +386,11 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
             // a bare name is a path with no steps
             NodeKind::Primary if icx.is_path_head(n) => self.postfix(n, &[n], want),
             NodeKind::Primary => self.primary(n, &kids, want),
+            // a const named in a generic argument (`sync.Mutex<u32, RANK>`): its last path step
+            NodeKind::TypeBase => {
+                let res = icx.uses(n).last()?.res;
+                self.path_value(n, res, want)
+            }
             _ => None,
         }
     }
@@ -890,7 +911,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
             if args.len() != 1 {
                 return None;
             }
-            let GArg::Type(t) = lower_garg(self.env, self.te, args[0], false) else { return None };
+            let GArg::Type(t) = lower_garg(self.env, self.te, args[0], None) else { return None };
             if t == self.env.error_ty() || self.env.has_params(t) {
                 return None;
             }

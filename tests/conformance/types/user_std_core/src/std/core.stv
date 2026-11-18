@@ -1,0 +1,3 @@
+pub trait Flat {} //~ ERROR E0107
+
+pub trait Frozen {}

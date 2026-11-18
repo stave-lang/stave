@@ -1,0 +1,37 @@
+//~ CHECK-ONLY
+// A rank is a `u32` const-expr: a literal, a named `u32` const, or `{..}` over them. Named
+// ranks order like literal ones (E1405 against the order).
+import std.sync;
+
+const DB: u32 = 10;
+const CACHE: u32 = DB + 10;
+
+static TABLE: sync.Mutex<u32, DB> = sync.Mutex::<u32, DB>.new(0u32);
+
+fn ordered(a: &sync.Mutex<u32, DB>, b: &sync.Mutex<u32, CACHE>) -> u32 {
+    let ga = a.lock();
+    let gb = b.lock();
+    return *ga.get() + *gb.get();
+}
+
+fn inverted(a: &sync.Mutex<u32, DB>, b: &sync.Mutex<u32, { CACHE + 1 }>) -> u32 {
+    let gb = b.lock();
+    let ga = a.lock(); //~ ERROR E1405
+    return *ga.get() + *gb.get();
+}
+
+fn same(a: &sync.Mutex<u32, DB>, b: &sync.Mutex<u32, 10>) -> u32 {
+    let g = a.lock();
+    let h = b.lock(); //~ ERROR E1405
+    return *g.get() + *h.get();
+}
+
+fn main() {
+    let a = sync.Mutex::<u32, DB>.new(1u32);
+    let b = sync.Mutex::<u32, CACHE>.new(2u32);
+    let c = sync.Mutex::<u32, 21>.new(3u32);
+    let x = ordered(&a, &b);
+    let y = inverted(&a, &c);
+    let d = sync.Mutex::<u32, 10>.new(4u32);
+    let z = same(&a, &d);
+}

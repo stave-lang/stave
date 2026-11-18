@@ -1,0 +1,47 @@
+//~ CHECK-ONLY
+// A fn called in a clause must not reach, through calls or drops, a `static` whose type is not
+// `Frozen` (E0211 case `static`, at the call, naming the chain and the static): the clause could
+// change that shared state. A static of a Frozen type is fine.
+import std.atomic;
+import std.sync;
+
+static HITS: atomic.U64 = atomic.U64.new(0);
+static GATE: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0u32);
+static LIMIT: u32 = 100;
+
+fn bump() -> bool {
+    return HITS.fetch_add(1) >= 0;
+}
+
+fn via(x: u32) -> bool {
+    return x > 0 && bump();
+}
+
+fn open() -> bool {
+    return match GATE.try_lock() {
+        Option.Some(g) => true,
+        Option.None => false,
+    };
+}
+
+fn peek() -> bool {
+    return HITS.load() > 0;
+}
+
+fn under(x: u32) -> bool {
+    return x < LIMIT;
+}
+
+fn f(x: u32) requires(bump()) { } //~ ERROR E0211
+fn g(x: u32) -> u32 ensures(via(result)) { return x; } //~ ERROR E0211
+fn h(x: u32) requires(open()) { } //~ ERROR E0211
+fn k(x: u32) requires(peek()) { } //~ ERROR E0211
+fn ok(x: u32) requires(under(x)) { }
+
+fn main() {
+    f(1);
+    let y = g(2);
+    h(3);
+    k(4);
+    ok(5);
+}

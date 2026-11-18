@@ -1,0 +1,40 @@
+//~ CHECK-ONLY
+// E0211 case `mut-result`: while `result` holds a `&mut` borrowed from a param (`from v`), an
+// `ensures` must not read that param outside `old(..)`: the two would alias. Reading `result`,
+// other params, `old(v..)`, or a param a shared result borrows from is fine.
+struct Buf {
+    pub n: u32,
+    pub xs: [u32; 4],
+}
+
+impl Buf {
+    pub fn slot(&mut self, i: usize) -> &mut u32 from self ensures(self.n > 0) { //~ ERROR E0211
+        return &mut self.xs[i];
+    }
+
+    pub fn slot_ok(&mut self, i: usize) -> &mut u32 from self requires(i < 4 && self.n > 0) ensures(old(self.n) > 0) {
+        return &mut self.xs[i];
+    }
+}
+
+fn pick(a: &mut u32, b: &mut u32, first: bool) -> &mut u32 from a + b ensures(first || *b > 0) { //~ ERROR E0211
+    return if first then a else b;
+}
+
+fn get(v: &mut [u32], k: u32) -> &mut u32 from v ensures(*result >= k || k > 0) ensures(v.len() > 0) { //~ ERROR E0211
+    return &mut v[0];
+}
+
+fn opt(v: &mut [u32]) -> Option<&mut u32> from v ensures(result.is_some() || v.len() == 0) { //~ ERROR E0211
+    return Option.Some(&mut v[0]);
+}
+
+fn shared(v: &mut [u32]) -> &u32 from v ensures(v.len() > 0 && *result >= 0) {
+    return &v[0];
+}
+
+fn other(v: &mut [u32], w: &[u32]) -> &mut u32 from v ensures(w.len() > 0 && old(v.len()) > 0) {
+    return &mut v[0];
+}
+
+fn main() { }
