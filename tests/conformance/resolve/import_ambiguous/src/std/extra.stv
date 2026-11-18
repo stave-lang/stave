@@ -1,3 +1,3 @@
-pub fn e() -> i32 {
+pub fn e() -> i32 { //~ ERROR E0107
     return 2;
 }

@@ -102,9 +102,16 @@ fn sym(prog: &Program, s: &str) -> Option<Sym> {
     prog.strings.lookup(s)
 }
 
-/// The module whose path text is `path`.
+/// The module of a built-in package whose path text is `path` (compiler-known items never come
+/// from another package, whatever its module paths).
 pub(crate) fn module_decl(prog: &Program, path: &str) -> Option<crate::ids::ModuleId> {
-    prog.modules.iter().find(|m| m.path_text == path).map(|m| m.id)
+    prog.modules
+        .iter()
+        .find(|m| {
+            m.path_text == path
+                && prog.packages.get(m.package.idx()).is_some_and(|p| p.kind == crate::PackageKind::Builtin)
+        })
+        .map(|m| m.id)
 }
 
 /// Item `name` of module `path`.

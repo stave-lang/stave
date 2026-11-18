@@ -1072,9 +1072,11 @@ impl<'p> SigBuilder<'p> {
     fn find_lang_items(&mut self) {
         let p = self.prog;
         let find = |module: &[&str], name: &str| -> DeclId {
+            // compiler-known items live in the built-in packages only
             let Some(m) = p.modules.iter().find(|m| {
                 m.path.len() == module.len()
                     && m.path.iter().zip(module).all(|(s, t)| p.strings.get(*s) == *t)
+                    && p.packages.get(m.package.idx()).is_some_and(|k| k.kind == crate::PackageKind::Builtin)
             }) else {
                 return DeclId::NONE;
             };

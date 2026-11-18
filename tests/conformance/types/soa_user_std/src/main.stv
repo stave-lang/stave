@@ -1,6 +1,7 @@
 //~ CHECK-ONLY
 // A module of this package spelled `std.soa` (`src/std/soa.stv`) is not the built-in one: the
-// row built-ins stay out of reach (E0101), and its `Soa` is an ordinary struct.
+// row built-ins stay out of reach (E0101), its `Soa` is an ordinary struct, and the module itself
+// is E0107 case `builtin`.
 fn main() -> i32 {
     return 0;
 }

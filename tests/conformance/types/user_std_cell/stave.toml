@@ -1,0 +1,5 @@
+name = "user_std_cell"
+kind = "bin"
+
+[dependencies]
+dep = { path = "dep" }

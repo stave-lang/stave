@@ -1,4 +1,4 @@
-pub struct Soa {
+pub struct Soa { //~ ERROR E0107
     pub len: usize,
 }
 

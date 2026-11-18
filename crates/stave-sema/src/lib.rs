@@ -607,6 +607,31 @@ impl Program {
                 imports: Vec::new(),
             });
         }
+        // E0107 case `builtin`: a module of another package spelled like a built-in package
+        // (`src/std/cell.stv` of a root package is `std.cell`). Compiler-known items are looked up
+        // in the built-in packages only, so such a module would never be the one the name says.
+        let builtin_roots: Vec<&str> = loaded
+            .packages
+            .iter()
+            .filter(|p| p.kind == PackageKind::Builtin)
+            .map(|p| p.name.as_str())
+            .collect();
+        for (i, m) in mods.iter().enumerate() {
+            let rp = &loaded.packages[pending[i].pf.package];
+            let Some(&first) = m.path.first() else { continue };
+            let head = strings.get(first);
+            if rp.kind == PackageKind::Builtin || !builtin_roots.contains(&head) {
+                continue;
+            }
+            let f = &files[i];
+            let at = if f.parsed.tokens.is_empty() {
+                Span::new(f.id, 0, 0)
+            } else {
+                scan::tok_span(f.id, &f.bytes, &f.parsed.tokens, 0)
+            };
+            let holes = [("module", m.path_text.as_str()), ("package", rp.name.as_str()), ("name", head)];
+            diags.extend(mk("E0107", Some("builtin"), &holes, at, &[]));
+        }
         let mut morder: Vec<usize> = (0..mods.len()).collect();
         morder.sort_by(|&a, &b| {
             (&mods[a].path_text, mods[a].package).cmp(&(&mods[b].path_text, mods[b].package))
@@ -864,10 +889,13 @@ impl Program {
 
         prof(&mut tp, "scopes");
         // Prelude, built-in type names, members.
-        let prelude_module = packages.iter().position(|p| p.name == cfg.prelude.0).and_then(|p| {
-            let rel: Option<Vec<Sym>> = cfg.prelude.1.iter().map(|s| strings.lookup(s)).collect();
-            midx.get(PackageId(p as u32), &rel?)
-        });
+        let prelude_module = packages
+            .iter()
+            .position(|p| p.name == cfg.prelude.0 && p.kind == PackageKind::Builtin)
+            .and_then(|p| {
+                let rel: Option<Vec<Sym>> = cfg.prelude.1.iter().map(|s| strings.lookup(s)).collect();
+                midx.get(PackageId(p as u32), &rel?)
+            });
         let mut prelude: FxHashMap<Sym, DeclId> = FxHashMap::default();
         if let Some(pm) = prelude_module {
             for (&s, e) in &scopes[pm.idx()] {

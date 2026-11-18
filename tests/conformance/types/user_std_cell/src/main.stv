@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// A root package module spelled `std.cell` (`src/std/cell.stv`) is E0107 case `builtin`, and it is
+// never the compiler's `UnsafeCell`: its `UnsafeCell` is an ordinary, Frozen struct, while the
+// built-in one still makes an atomic (here inside `dep.Counter`) not Frozen and keeps it out of
+// contracts.
+import user_std_cell.std.cell;
+import dep;
+
+fn need<T: Frozen + view>() {}
+
+fn tick(c: &dep.Counter) requires(dep.bump(c)) { } //~ ERROR E0211
+
+fn main() {
+    let u = cell.UnsafeCell::<u32>.{ value: 1u32 };
+    need::<cell.UnsafeCell<u32>>();
+    need::<&dep.Counter>(); //~ ERROR E1410
+}

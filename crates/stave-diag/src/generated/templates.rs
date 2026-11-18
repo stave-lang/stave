@@ -918,10 +918,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0107",
         severity: Severity::Error,
         area: "resolve",
-        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package",
+        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`), at the module's first token",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "module", kind: HoleKind::Path, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
             Hole { name: "package", kind: HoleKind::Name, choices: &[] },
         ],
@@ -934,6 +935,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "for the module, start the path with the package's own name: `import {package}.{name}` (add `as` to pick the bound name); for the dependency, rename the module `{name}` or rename the dependency in `stave.toml`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "builtin",
+                message: "module `{module}` of package `{package}` is spelled like the built-in package `{name}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this module is never `{name}`'s" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "rename the directory or file so the module path does not start with `{name}`: compiler-known items come from the built-in packages only",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

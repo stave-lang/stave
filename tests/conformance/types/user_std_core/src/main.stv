@@ -1,0 +1,27 @@
+//~ CHECK-ONLY
+// A root package module spelled `std.core` (`src/std/core.stv`) is E0107 case `builtin`, and its
+// `Flat` / `Frozen` are ordinary traits: the prelude and the derived-trait rules keep the
+// built-in ones (E1407, E1410, E1408), and an impl of the user's trait is an ordinary impl.
+import user_std_core.std.core;
+
+struct X {
+    pub n: u32,
+}
+
+impl core.Frozen for X {}
+
+impl core.Flat for X {}
+
+impl Frozen for X {} //~ ERROR E1408
+
+fn need<T: Frozen + view>() {}
+
+fn flat<T: Flat>() {}
+
+fn mine<T: core.Frozen>() {}
+
+fn main() {
+    need::<fn()>(); //~ ERROR E1410
+    flat::<&u32>(); //~ ERROR E1407
+    mine::<X>();
+}
