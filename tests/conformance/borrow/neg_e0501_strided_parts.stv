@@ -1,0 +1,126 @@
+//~ CHECK-ONLY
+// Views split off one loan hold it together: while any of them is used later, the grid, the
+// buffer, and a new view of either cannot be touched. This holds for a pair from one call, for
+// iterator items, and for the halves of a by-value view.
+import std.debug;
+import std.mem;
+
+unsafe("p is valid for one u32 that owner keeps alive and lends exclusively while the result lives")
+fn item_mut(owner: &[u32], p: *mut u32) -> &mut u32 from owner {
+    return unsafe("p is valid for one u32 and no other live reference reaches it") &mut *p;
+}
+
+view struct ViewMut { anchor: &[u32], p: *mut u32, len: usize, step: usize }
+
+impl ViewMut {
+    fn new(xs: &mut [u32], start: usize, step: usize) -> ViewMut from xs {
+        debug.assert(step != 0, "step");
+        let n = xs.len();
+        let len = if start >= n then 0 else (n - start - 1) / step + 1;
+        let p = mem.slice_ptr(xs) as *mut u32;
+        return ViewMut.{ anchor: &xs[0..0], p: mem.add_mut(p, start), len: len, step: step };
+    }
+
+    fn get_mut(&mut self, i: usize) -> &mut u32 from self {
+        debug.assert(i < self.len, "index");
+        let slot = mem.add_mut(self.p, i * self.step);
+        return unsafe("i < len, so slot is inside the buffer the anchor lends exclusively") item_mut(self.anchor, slot);
+    }
+
+    fn set(&mut self, i: usize, x: u32) {
+        *self.get_mut(i) = x;
+    }
+
+    fn split_at(self, k: usize) -> (ViewMut, ViewMut) from self {
+        let k = if k < self.len then k else self.len;
+        let a = ViewMut.{ anchor: self.anchor, p: self.p, len: k, step: self.step };
+        let b = ViewMut.{ anchor: self.anchor, p: mem.add_mut(self.p, k * self.step), len: self.len - k, step: self.step };
+        return (a, b);
+    }
+}
+
+view struct GridMut { anchor: &[u32], p: *mut u32, rows: usize, cols: usize }
+
+impl GridMut {
+    fn new(xs: &mut [u32], cols: usize) -> GridMut from xs {
+        debug.assert(cols != 0 && xs.len() % cols == 0, "shape");
+        let rows = xs.len() / cols;
+        let p = mem.slice_ptr(xs) as *mut u32;
+        return GridMut.{ anchor: &xs[0..0], p: p, rows: rows, cols: cols };
+    }
+
+    fn col_mut(&mut self, c: usize) -> ViewMut from self {
+        debug.assert(c < self.cols, "column");
+        return ViewMut.{ anchor: self.anchor, p: mem.add_mut(self.p, c), len: self.rows, step: self.cols };
+    }
+
+    fn col_pair_mut(&mut self, a: usize, b: usize) -> (ViewMut, ViewMut) from self {
+        debug.assert(a != b && a < self.cols && b < self.cols, "columns");
+        let va = ViewMut.{ anchor: self.anchor, p: mem.add_mut(self.p, a), len: self.rows, step: self.cols };
+        let vb = ViewMut.{ anchor: self.anchor, p: mem.add_mut(self.p, b), len: self.rows, step: self.cols };
+        return (va, vb);
+    }
+
+    fn cols_mut(self) -> ColsMut from self {
+        return ColsMut.{ g: self, c: 0 };
+    }
+}
+
+view struct ColsMut { g: GridMut, c: usize }
+
+impl ColsMut {
+    fn next(&mut self) -> Option<ViewMut> from copy self {
+        if self.c >= self.g.cols { return Option.None; }
+        let c = self.c;
+        self.c = c + 1;
+        return Option.Some(ViewMut.{ anchor: self.g.anchor, p: mem.add_mut(self.g.p, c), len: self.g.rows, step: self.g.cols });
+    }
+}
+
+fn pair_then_grid(xs: &mut [u32]) {
+    let mut g = GridMut.new(xs, 3);
+    let (mut a, mut b) = g.col_pair_mut(0, 1);
+    let mut c = g.col_mut(2); //~ ERROR E0501
+//~^ ERROR E0501
+    a.set(0, 1);
+    b.set(0, 2);
+    c.set(0, 3);
+}
+
+fn pair_then_buffer(xs: &mut [u32]) -> u32 {
+    let mut g = GridMut.new(xs, 3);
+    let (mut a, mut b) = g.col_pair_mut(0, 1);
+    let z = xs[0]; //~ ERROR E0501
+    a.set(0, z);
+    b.set(0, z);
+    return z;
+}
+
+fn items_then_buffer(xs: &mut [u32]) {
+    let g = GridMut.new(xs, 3);
+    let mut cs = g.cols_mut();
+    let mut a = cs.next().unwrap();
+    xs[0] = 1; //~ ERROR E0501
+    a.set(0, 1);
+}
+
+fn items_then_new_view(xs: &mut [u32]) {
+    let g = GridMut.new(xs, 3);
+    let mut cs = g.cols_mut();
+    let mut a = cs.next().unwrap();
+    let mut v = ViewMut.new(xs, 0, 1); //~ ERROR E0501
+    a.set(0, 1);
+    v.set(0, 2);
+}
+
+fn halves_then_buffer(xs: &mut [u32]) -> u32 {
+    let (mut l, mut r) = ViewMut.new(xs, 0, 1).split_at(2);
+    let z = xs[0]; //~ ERROR E0501
+    l.set(0, z);
+    r.set(0, z);
+    return z;
+}
+
+fn main() -> i32 {
+    return 0;
+}
