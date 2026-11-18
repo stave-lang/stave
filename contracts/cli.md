@@ -11,7 +11,7 @@ built program's exit codes are in LANG.md §3 (101 on a panic).
 | `stave build [PKG_DIR] [--release] [--target T] [--features F,...] [-o OUT]` | Build an executable or static library |
 | `stave run [PKG_DIR [ARGS...]] [--release] [--target T] [-- ARGS...]` | Build, then exec. `--target` only the host's targets (the triples of the host's arch, at any level the host CPU supports) or `gpu-sm86`; otherwise E1001 |
 | `stave check [PKG_DIR]` | Parse, resolve, type check, borrow check, and check deny clauses (`without(..)`). No codegen |
-| `stave test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD]` | Build and run `test fn`s and the conformance files. `--runner` wraps execution (e.g. `sde64 -icx --`, `qemu-aarch64 -cpu max,...`). A target the host cannot run without a runner is E1001: reported as not run, never as passed |
+| `stave test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD] [--input N]` | Build and run `test fn`s and the conformance files. `--input N` runs only input N of each selected `test fn` with parameters. `--runner` wraps execution (e.g. `sde64 -icx --`, `qemu-aarch64 -cpu max,...`). A target the host cannot run without a runner is E1001: reported as not run, never as passed |
 | `stave unsafe-report [PKG_DIR] [--json]` | List the unsafe inventory |
 | `stave effects [PKG_DIR] [--json]` | List the effect set of each fn of the program's own packages |
 | `stave caps-report [PKG_DIR] [--json]` | Planned: per package, the OS capability classes its code can reach |
@@ -48,7 +48,55 @@ Outputs and statuses of the code-generating commands:
   `--target T` applies to tests without a `TARGET` annotation, `--runner CMD` (split at
   whitespace, the binary and its arguments appended) runs every binary. When DIR is a package,
   its `test fn`s run too, each as its own executable from the package directory, passing iff it
-  exits 0; their summary line is `test fns: P passed, F failed, N not run`.
+  exits 0; their summary line is `test fns: P passed, F failed, N not run`. A `test fn` with
+  parameters runs over its inputs (below).
+- **Test fn inputs.** A `test fn` with parameters is a harness: one process calls it once per
+  input, in input order, and passes iff it exits 0. The runner is the caller: it passes only
+  inputs within the ranges below, and the test fn evaluates all its `requires` clauses at entry,
+  in order; a false one skips the input (it never panics `Contract`).
+  - Parameter types (else E0214): `i8 i16 i32 i64 isize u8 u16 u32 u64 usize bool char f32 f64`,
+    `[T; N]` and tuples of those (nested), and, as a parameter's own type, `&[T]` of those (no
+    `align`). A slice needs a length upper bound; a value holds at most 4096 scalars (a slice:
+    bound × the element's); the return type is `()`.
+  - Domain: one generator per parameter: an int's range starts as its type's, a slice's length
+    range as `0..`. Each `requires` clause is split at `&&` (also inside parentheses); a conjunct
+    `S op K` or `K op S` (`op` one of `< <= > >= ==`; `S` an int parameter or `p.len()` of a slice
+    parameter; `K` an int literal, a negated or parenthesized `K`, or an int `const`) intersects
+    `S`'s range with the values satisfying it. Every other conjunct only filters. The domain is
+    the product of the generators (finite, so it can be enumerated).
+  - Edges. `int_edges(lo, hi)`: of `lo`, `lo+1`, `hi-1`, `hi`, `0`, `1`, `-1`, and for `k` in
+    1..=64 `2^k-1`, `2^k`, `2^k+1`, `-2^k-1`, `-2^k`, `-2^k+1`, those in `lo..=hi`, ascending and
+    distinct. `bool`: `false true`. `char`: `0 0x7F 0x80 0x7FF 0x800 0xD7FF 0xE000 0xFFFF 0x10000
+    0x10FFFF`. `f32` bits: `0x00000000 0x80000000 0x3F800000 0xBF800000 0x00000001 0x00800000
+    0x7F7FFFFF 0xFF7FFFFF 0x7F800000 0xFF800000 0x7FC00000` (±0, ±1, least subnormal, least
+    normal, ±max, ±inf, NaN); `f64` the same eleven values. The period of a generator: an int's
+    edge count, 2, 10, 11, 11; `[T; N]`: T's (1 if N = 0); a tuple: the largest of its fields' (1
+    if none); a slice: the larger of its length range's edge count and T's. Edge `k` (cyclic): a
+    scalar's edge `k mod period`; element `j` of an array or slice is T's edge `k + j`; field `i`
+    of a tuple its edge `k`; a slice's length is `int_edges(length range)[k mod count]`.
+  - Inputs, in order, with `n` the largest period of the parameters: the diagonal (`k` = 0 to
+    n-1: every parameter its edge `k`); with two or more parameters the anti-diagonal (`k` = 0 to
+    n-1: parameter `i` its edge `k` if `i` is even, else edge `period - 1 - (k mod period)`); then
+    256 samples from SplitMix64 with state 0 (`next`: `state += 0x9E3779B97F4A7C15`; `z = state;
+    z = (z ^ z >> 30) * 0xBF58476D1CE4E5B9; z = (z ^ z >> 27) * 0x94D049BB133111EB; return
+    z ^ z >> 31`, all mod 2^64), parameters in order: an int `lo + next mod (hi - lo + 1)`, `bool`
+    `next & 1`, `char` `r = next mod 0x10F800` plus 0x800 if `r >= 0xD800`, `f32` the low 32 bits
+    of `next`, `f64` `next`, arrays and tuples their parts in order, a slice its length (as an int
+    of its length range) then its elements. An input equal to an earlier one (floats by bits) is
+    dropped. Input `N` is the N-th of this list, from 0; it depends only on the parameter types and
+    ranges, never on the target, the build mode, or the run.
+  - Markers: the test fn writes `\x01stave-test input\n` to stdout as each input starts and
+    `\x01stave-test skip\n` when a clause skips it (`runtime.panic.test_input` / `test_skip`);
+    the harness counts them and never shows them.
+  - Report lines: `ok        test T: R inputs run, S skipped` (`1 input run`), then `    note:
+    ...` when fewer than one input in ten ran; `FAILED    test T (exit E) at input N (K of M
+    started)`, the stderr lines, `    input N: p = <literal>, ...` (Stave literals: suffixed ints
+    and floats, a float with no literal as `mem.f32_from_bits(0x..)` / `mem.f64_from_bits(0x..)`,
+    `'c'` with `\u{..}` escapes, `[..]`, `(..)`, `&[..]`), and `    replay: stave test DIR
+    --filter T --input N --target TRIPLE` (plus `--release`, `--runner CMD` when given).
+    `FAILED    test T: ...` with no exit status: no input ran (an empty range; `requires` skipped
+    all; `--input N` past the last input), or the process exited with status 0 before its last
+    input.
 - In-memory execution (`stave run`, `stave test`, on x86-64 and AArch64 Linux): the ELF image is
   held in an anonymous memory file (`memfd_create`, close-on-exec) and a child process starts it
   as `/proc/self/fd/N`; `argv[0]` is the program's name. With `--runner CMD` the child runs

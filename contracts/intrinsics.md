@@ -206,7 +206,9 @@ list):
   row; it calls `f` itself where no thread can be created),
   `runtime.panic.trap`, `runtime.panic.trap_msg`, `runtime.panic.on_signal`,
   `runtime.panic.set_user_site`, `runtime.panic.requires_failed(clause: &str)` and
-  `runtime.panic.ensures_failed(site: u32, clause: &str)` (a false contract clause), `runtime.cpu.WORD` (a `u64` static; dispatch bodies load it),
+  `runtime.panic.ensures_failed(site: u32, clause: &str)` (a false contract clause),
+  `runtime.panic.test_input()` and `runtime.panic.test_skip()` (the stdout markers of a `test fn`
+  with parameters, cli.md "Test fn inputs"), `runtime.cpu.WORD` (a `u64` static; dispatch bodies load it),
   `runtime.cpu.features` (a request of it requests `init`), `runtime.cpu.init` (`cpu_init`),
   `runtime.cpu.trace` (dispatch bodies, trace bit), and the allocator
   `runtime.alloc.{try_alloc, try_realloc, free}` (`try_alloc(size, alignment) -> *mut u8`,

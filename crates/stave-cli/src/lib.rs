@@ -519,7 +519,9 @@ fn test(
         let mut opts = Options::new(Goal::Check).threads(threads);
         opts.target = Some(a.target.triple);
         opts.release = a.release;
-        match harness::run(&pool, &root, &lib, &opts, a.filter.as_deref(), a.runner.as_deref()) {
+        let sel =
+            harness::Selection { filter: a.filter.as_deref(), runner: a.runner.as_deref(), input: a.input };
+        match harness::run(&pool, &root, &lib, &opts, sel) {
             Ok(r) => {
                 let _ = out.write_all(r.render().as_bytes());
                 ok &= r.failed() == 0;

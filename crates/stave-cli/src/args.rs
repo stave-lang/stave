@@ -111,6 +111,8 @@ pub struct Args {
     pub cache: Option<PathBuf>,
     pub runner: Option<String>,
     pub filter: Option<String>,
+    /// `test --input N`: only input N of each selected `test fn` with parameters.
+    pub input: Option<usize>,
     pub watch: bool,
     pub alloc_check: bool,
     /// `unsafe-report --json`, `effects --json`.
@@ -160,7 +162,8 @@ commands:
                         (host targets only, else E1001; ARGS go to the program,
                         those starting with `-` only after `--`)
   check [PKG_DIR]
-  test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD]
+  test [PKG_DIR] [--release] [--target T] [--filter S] [--runner CMD] [--input N]
+                        (--input N: only input N of each test fn with parameters)
   fix [PKG_DIR] [--dry-run] [--target T] [--diagnostics human|json]
                         (apply the exact fixes, re-check, repeat; --dry-run prints a diff)
   unsafe-report [PKG_DIR] [--json]
@@ -206,7 +209,7 @@ fn allowed(cmd: Cmd, flag: &str) -> bool {
     match cmd {
         Cmd::Build => COMPILE.contains(&flag) || matches!(flag, "-o" | "--watch"),
         Cmd::Run | Cmd::Check => COMPILE.contains(&flag),
-        Cmd::Test => COMPILE.contains(&flag) || matches!(flag, "--filter" | "--runner"),
+        Cmd::Test => COMPILE.contains(&flag) || matches!(flag, "--filter" | "--runner" | "--input"),
         // Always stage0: the check of a round reads edits that are not written yet.
         Cmd::Fix => matches!(flag, "--dry-run" | "--target" | "--diagnostics"),
         // These always run in stage0 whatever --compiler says (cli-stage1.md).
@@ -231,11 +234,12 @@ fn takes_value(flag: &str) -> bool {
             | "--cache"
             | "--runner"
             | "--filter"
+            | "--input"
             | "--op"
     )
 }
 
-const KNOWN_FLAGS: [&str; 19] = [
+const KNOWN_FLAGS: [&str; 20] = [
     "--release",
     "--target",
     "--features",
@@ -248,6 +252,7 @@ const KNOWN_FLAGS: [&str; 19] = [
     "--cache",
     "--runner",
     "--filter",
+    "--input",
     "--watch",
     "--alloc-check",
     "--json",
@@ -298,6 +303,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
     let (mut out, mut compiler, mut dump, mut dump_dir, mut diagnostics, mut cache) =
         (None, None, None, None, None, None);
     let (mut runner, mut filter, mut op) = (None, None, None);
+    let mut input: Option<usize> = None;
     let (mut release, mut timings, mut watch, mut alloc_check, mut json, mut dry_run, mut check) =
         (false, false, false, false, false, false, false);
 
@@ -381,6 +387,12 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
             "--cache" => set_once(&mut cache, PathBuf::from(value), flag)?,
             "--runner" => set_once(&mut runner, value, flag)?,
             "--filter" => set_once(&mut filter, value, flag)?,
+            "--input" => {
+                let Ok(n) = value.parse::<usize>() else {
+                    return err(format!("--input takes an input number, not `{value}`"));
+                };
+                set_once(&mut input, n, flag)?;
+            }
             "--op" => set_once(&mut op, value, flag)?,
             _ => return err(format!("unknown flag `{flag}`")),
         }
@@ -479,6 +491,7 @@ pub fn parse(argv: &[String]) -> Result<Parsed, UsageError> {
         cache,
         runner,
         filter,
+        input,
         watch,
         alloc_check,
         json,
@@ -555,8 +568,9 @@ mod tests {
 
     #[test]
     fn test_run_and_others() {
-        let a = args("test t --filter lex --runner qemu-aarch64 --target aarch64-linux+sve");
+        let a = args("test t --filter lex --runner qemu-aarch64 --target aarch64-linux+sve --input 7");
         assert_eq!((a.filter.as_deref(), a.runner.as_deref()), (Some("lex"), Some("qemu-aarch64")));
+        assert_eq!(a.input, Some(7));
         let v: Vec<String> = ["run", "--release", "--", "-x", "--target", "y"].map(String::from).to_vec();
         let Ok(Parsed::Args(a)) = parse(&v) else { panic!() };
         assert_eq!(a.run_args, ["-x", "--target", "y"]);
@@ -617,6 +631,8 @@ mod tests {
         assert!(usage("check --watch").contains("does not take --watch"));
         assert!(usage("check -o x").contains("does not take -o"));
         assert!(usage("run --filter x").contains("does not take --filter"));
+        assert!(usage("test --input x").contains("--input takes an input number"));
+        assert!(usage("build --input 1").contains("does not take --input"));
         assert!(usage("check --dry-run").contains("does not take --dry-run"));
         assert!(usage("fix --release").contains("does not take --release"));
         assert!(usage("fix --compiler gpu").contains("does not take --compiler"));

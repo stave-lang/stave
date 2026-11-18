@@ -1409,5 +1409,6 @@ fn empty_body() -> &'static TypedBody {
         has_error: true,
         emulated: Vec::new(),
         contracts: None,
+        test_domain: None,
     })
 }

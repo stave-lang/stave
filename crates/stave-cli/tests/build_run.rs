@@ -589,6 +589,116 @@ fn test_fns_of_a_package() {
     assert!(out.ends_with("test fns: 1 passed, 1 failed, 0 not run\n"), "{out}");
 }
 
+/// The `test fn` lines of a `stave test` output.
+fn test_lines(out: &str) -> Vec<String> {
+    out.lines().filter(|l| l.contains(" test main.")).map(String::from).collect()
+}
+
+/// `test fn`s with parameters: inputs from the parameter types narrowed by `requires`, the same
+/// on every run, build mode, and target; a failing input is named with its literals and a
+/// command that runs it alone.
+#[test]
+fn test_fn_inputs() {
+    let pkg = run_prog("test_fn_params");
+    let d = tmp("testfn_params");
+    let (c, out, err) = stave_in(&d, &["test", &pkg]);
+    if !host_runs() {
+        return;
+    }
+    assert_eq!(c, 0, "{out}{err}");
+    let want = [
+        "ok        test main.scalars: 1006 inputs run, 0 skipped",
+        "ok        test main.slices: 438 inputs run, 0 skipped",
+        "ok        test main.aggregates: 429 inputs run, 0 skipped",
+        "ok        test main.ranges: 285 inputs run, 0 skipped",
+        "ok        test main.filtered: 276 inputs run, 23 skipped",
+        "ok        test main.sums: 302 inputs run, 0 skipped",
+    ];
+    assert_eq!(test_lines(&out), want, "{out}");
+    assert!(out.ends_with("test fns: 6 passed, 0 failed, 0 not run\n"), "{out}");
+    let (c, again, _) = stave_in(&d, &["test", &pkg]);
+    assert_eq!((c, test_lines(&again)), (0, test_lines(&out)), "a second run: {again}");
+    let (c, rel, _) = stave_in(&d, &["test", &pkg, "--release"]);
+    assert_eq!((c, test_lines(&rel)), (0, test_lines(&out)), "--release: {rel}");
+    if have_qemu_aarch64() {
+        let (c, a64, err) =
+            stave_in(&d, &["test", &pkg, "--target", "aarch64-linux", "--runner", "qemu-aarch64"]);
+        assert_eq!((c, test_lines(&a64)), (0, test_lines(&out)), "aarch64: {a64}{err}");
+    }
+
+    // A seeded bug: the tail loop drops the last element when three remain.
+    let bad = tmp("testfn_seeded");
+    std::fs::create_dir_all(bad.join("src")).unwrap();
+    std::fs::write(bad.join("stave.toml"), "name = \"seeded\"\nkind = \"bin\"\n").unwrap();
+    std::fs::write(
+        bad.join("src/main.stv"),
+        "import std.debug;
+
+fn main() -> i32 {
+    return 0;
+}
+
+fn sum4(xs: &[u32]) -> u64 {
+    let mut s: u64 = 0;
+    let mut i: usize = 0;
+    while i + 4 <= xs.len() {
+        s = s + (xs[i] as u64) + (xs[i + 1] as u64) + (xs[i + 2] as u64) + (xs[i + 3] as u64);
+        i = i + 4;
+    }
+    let stop = if xs.len() - i == 3 then xs.len() - 1 else xs.len();
+    while i < stop {
+        s = s + (xs[i] as u64);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn sum_ref(xs: &[u32]) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..xs.len() {
+        s = s + (xs[i] as u64);
+    }
+    return s;
+}
+
+test fn sums_agree(xs: &[u32]) requires(xs.len() <= 9) {
+    debug.assert(sum4(xs) == sum_ref(xs), \"sum4 agrees with the reference\");
+}
+
+test fn rare(a: u32) requires(a % 1000 == 7) { }
+
+test fn none_left(a: u8) requires(a != a) { }
+
+test fn empty_range(a: u8) requires(a > 3 && a < 2) { }
+",
+    )
+    .unwrap();
+    let (c, out, err) = stave_in(&bad, &["test", "."]);
+    assert_eq!(c, 1, "{out}{err}");
+    assert!(out.contains("FAILED    test main.sums_agree (exit 101) at input 3 (4 of "), "{out}");
+    assert!(out.contains("    panic: Assert at src/main.stv:31:"), "{out}");
+    assert!(out.contains("    input 3: xs = &[3u32, 4u32, 5u32]\n"), "{out}");
+    let replay =
+        out.lines().find_map(|l| l.strip_prefix("    replay: stave ")).unwrap_or_else(|| panic!("{out}"));
+    assert!(replay.starts_with("test . --filter main.sums_agree --input 3 --target "), "{replay}");
+    let words: Vec<&str> = replay.split_whitespace().collect();
+    let (c, again, _) = stave_in(&bad, &words);
+    assert_eq!(c, 1, "{again}");
+    assert!(
+        again.contains("FAILED    test main.sums_agree (exit 101) at input 3 (1 of 1 started)\n"),
+        "{again}"
+    );
+    assert!(again.contains("    input 3: xs = &[3u32, 4u32, 5u32]\n"), "{again}");
+    assert!(out.contains("ok        test main.rare: 1 input run, "), "{out}");
+    assert!(out.contains("    note: `requires` skipped "), "{out}");
+    assert!(out.contains("FAILED    test main.none_left: `requires` skipped all "), "{out}");
+    assert!(out.contains("FAILED    test main.empty_range: its `requires` ranges admit no input\n"), "{out}");
+    assert!(out.ends_with("test fns: 1 passed, 3 failed, 0 not run\n"), "{out}");
+    let (c, none, _) = stave_in(&bad, &["test", ".", "--input", "100000"]);
+    assert_eq!(c, 1);
+    assert!(none.contains("FAILED    test main.sums_agree: no input 100000: the test has "), "{none}");
+}
+
 /// A package directory `dir` with manifest name `name` (TOML-escaped) and an empty `main`.
 fn named_package(dir: &Path, name: &str) {
     std::fs::create_dir_all(dir.join("src")).unwrap();

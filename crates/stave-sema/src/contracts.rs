@@ -22,11 +22,12 @@
 //! the fn (the check runs in the callee), and a clause precedes the body, so the edge of a callee
 //! called there is at the clause's site.
 //!
-//! **Checks** (lowering): the `requires` clauses at entry in order (not on a `test fn`), then the
-//! `old(e)` snapshots, then the `ensures` clauses in order at each return; a false clause calls
-//! `runtime.panic.requires_failed` (located at the caller's user site, which every call that can
-//! reach a `requires` stores first) or `runtime.panic.ensures_failed` (at the return). A fn with a
-//! checked clause has `trap` ([`Contracts::trap_span`]).
+//! **Checks** (lowering): the `requires` clauses at entry in order (on a `test fn` they never
+//! panic: with parameters they filter its inputs, [`crate::testgen`]; without, they are not
+//! evaluated), then the `old(e)` snapshots, then the `ensures` clauses in order at each return; a
+//! false clause calls `runtime.panic.requires_failed` (located at the caller's user site, which
+//! every call that can reach a `requires` stores first) or `runtime.panic.ensures_failed` (at the
+//! return). A fn with a checked clause has `trap` ([`Contracts::trap_span`]).
 
 use rustc_hash::FxHashSet;
 use stave_diag::{Diagnostic, Span};
