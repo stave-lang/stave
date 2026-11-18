@@ -35,6 +35,19 @@ fn lowered(root: &Path, release: bool) -> Output {
     pipeline::run(root, &Library::in_dir(repo()), &opts).unwrap()
 }
 
+/// Checks removed per function path of `m` (the module `o` lowered).
+fn removed_per_fn(o: &Output, m: &Module) -> std::collections::BTreeMap<String, usize> {
+    let mut out = std::collections::BTreeMap::new();
+    for p in &o.removed_checks {
+        *out.entry(m.funcs[p.witness.func.index()].path.clone()).or_default() += p.proofs.len();
+    }
+    out
+}
+
+fn has_body(m: &Module, path: &str) -> bool {
+    m.funcs.iter().any(|f| f.path == path && f.body.is_some())
+}
+
 /// The checked IR of the program, and the rule that removed each check, per function path.
 fn checked(file: &str, release: bool) -> (Module, Vec<(String, Proof)>) {
     let out = lowered(&repo().join(file), release);
@@ -205,7 +218,13 @@ fn modes_agree_and_removal_changes_no_program() {
                 assert!(kd.get(path).is_some_and(|m| m >= n), "{}: {path} keeps {n} checks", p.display());
             }
             let removed = |o: &Output| o.removed_checks.iter().map(|x| x.proofs.len()).sum::<usize>();
-            assert_eq!(removed(&dbg), removed(&rel), "{}", p.display());
+            // a debug build also lowers fns `main` does not reach: compare the fns both lower
+            let (fd, fr) = (removed_per_fn(&dbg, d), removed_per_fn(&rel, r));
+            let both = |path: &String| has_body(d, path) && has_body(r, path);
+            for path in fd.keys().chain(fr.keys()).filter(|x| both(x)) {
+                let (a, b) = (fd.get(path).copied().unwrap_or(0), fr.get(path).copied().unwrap_or(0));
+                assert_eq!(a, b, "{}: {path} removes {a} checks in debug, {b} in release", p.display());
+            }
 
             let before = unremoved(&dbg).unwrap_or_else(|| panic!("{}: does not lower", p.display()));
             assert_eq!(count_checks(&before) - count_checks(d), removed(&dbg), "{}", p.display());
@@ -225,6 +244,20 @@ fn modes_agree_and_removal_changes_no_program() {
     assert!(ran.len() >= 50, "only {} programs lowered", ran.len());
     assert!(fns > 0 && removed > 0 && kept > 0, "{fns} fns, {removed} removed, {kept} kept");
     assert!(trapped >= 5, "only {trapped} programs trap");
+}
+
+/// A fn reached only from a `test fn` is lowered by a debug build (every non-generic fn is a root)
+/// and not by a release build: its removed check counts in debug only, and the modes still agree
+/// on every fn both lower.
+#[test]
+fn a_debug_only_fn_keeps_its_proof() {
+    let p = repo().join("tests/conformance/run/bounds_test_only.stv");
+    let (dbg, rel) = (lowered(&p, false), lowered(&p, true));
+    let (Some(d), Some(r)) = (&dbg.module, &rel.module) else { panic!("does not lower") };
+    let (fd, fr) = (removed_per_fn(&dbg, d), removed_per_fn(&rel, r));
+    assert_eq!(fd.get("main.total").copied(), Some(1), "{fd:?}");
+    assert!(has_body(d, "main.total") && !has_body(r, "main.total"));
+    assert!(!fr.contains_key("main.total"), "{fr:?}");
 }
 
 /// On front-end IR (the program, the shipped std, and the runtime): the checker accepts every
