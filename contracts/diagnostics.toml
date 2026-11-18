@@ -760,11 +760,11 @@ fix = { description = "remove `impl Copy for {type}` (a type with a destructor m
 code = "E0417"
 severity = "error"
 area = "kinds"
-rule = "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T>`, or `sync.Once<T>`"
+rule = "`static` of a type that is not `Sync` (a `static` is shared by every thread): use an atomic, `sync.Mutex<T, R>`, or `sync.Once<T, R>` (R: the lock rank)"
 holes = { type = "type" }
 message = "`static` of type `{type}`, which is not `Sync`"
 labels = [{ at = "primary", text = "`static` type" }]
-fix = { description = "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}>`, or `sync.Once<{type}>`" }
+fix = { description = "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}, R>`, or `sync.Once<{type}, R>` (R: the lock rank)" }
 
 [[diag]]
 code = "E0501"
@@ -805,7 +805,7 @@ fix = { description = "create a `&mut` reference instead of `&` where this refer
 [diag.cases.static]
 message = "cannot assign to or mutably borrow `{place}`: a `static` is immutable"
 labels = [{ at = "primary", text = "mutation of a `static`" }]
-fix = { description = "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T>`) and change it through its `&self` methods" }
+fix = { description = "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T, R>`) and change it through its `&self` methods" }
 
 [[diag]]
 code = "E0504"
@@ -1300,7 +1300,7 @@ rule = "`static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` pac
 holes = { name = "name" }
 message = "`static mut {name}` is only allowed in the `std` and `runtime` packages"
 labels = [{ at = "primary", text = "`static mut` here" }]
-fix = { description = "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T>`, `sync.Once<T>`)" }
+fix = { description = "declare `static {name}: T = ..;` with a `Sync` type (`atomic.U64`, `sync.Mutex<T, R>`, `sync.Once<T, R>`)" }
 
 [[diag]]
 code = "E0810"
@@ -1828,6 +1828,31 @@ holes = { name = "name" }
 message = "unknown effect `{name}`"
 labels = [{ at = "primary", text = "not an effect" }]
 fix = { description = "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`" }
+
+[[diag]]
+code = "E1405"
+severity = "error"
+area = "effects"
+rule = "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there; case `drop`: a value whose drop glue acquires such a lock is dropped (scope end, temporary, overwritten old value) while the guard is held"
+holes = { fn = "path", lock = "type", rank = "int", held = "type", held_rank = "int" }
+message = "`{fn}` acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank}): locks are taken in increasing rank order"
+labels = [{ at = "primary", text = "acquires rank {rank} here" }, { at = "held", text = "`{held}` held from here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }]
+fix = { description = "release the guard before this call, give `{lock}` a rank above {held_rank}, or take two mutexes of one rank together with `sync.lock_pair`" }
+
+[diag.cases.drop]
+message = "`{fn}` drops a value whose drop acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})"
+labels = [{ at = "primary", text = "dropped here" }, { at = "held", text = "`{held}` held from here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }]
+fix = { description = "release the guard before the value is dropped (declare the value before the guard, or end the guard's block first), or give `{lock}` a rank above {held_rank}" }
+
+[[diag]]
+code = "E1406"
+severity = "error"
+area = "effects"
+rule = "a guard held across a join whose children acquire a lock at or below its rank: at a `scope` end, `thread.join`, or `par_for` / `par_for_mut` call, the ranks held must be below every rank the joined threads may acquire; names the held and the acquired type and the chain"
+holes = { fn = "path", lock = "type", rank = "int", held = "type", held_rank = "int" }
+message = "`{fn}` waits for threads that acquire `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})"
+labels = [{ at = "primary", text = "threads joined here" }, { at = "held", text = "`{held}` held from here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }]
+fix = { description = "release the guard before the join, or give `{lock}` a rank above {held_rank}" }
 
 [[diag]]
 code = "E1407"

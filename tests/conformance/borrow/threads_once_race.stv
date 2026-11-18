@@ -9,7 +9,7 @@ struct Table { pub id: u64, pub cells: [u32; 4] }
 
 static RUNS: atomic.U32 = atomic.U32.new(0);
 static SUM: atomic.U64 = atomic.U64.new(0);
-static TABLE: sync.Once<Table> = sync.Once::<Table>.new();
+static TABLE: sync.Once<Table, 1> = sync.Once::<Table, 1>.new();
 
 fn build() -> Table {
     let n = RUNS.fetch_add(1);
@@ -37,7 +37,7 @@ fn main() -> i32 {
     let runs2 = RUNS.load();
     io.print(f"{runs} {sum} {id} {runs2}\n");
 
-    let local = sync.Once::<u32>.new();
+    let local = sync.Once::<u32, 1>.new();
     let a = *local.get_or_init(fn() -> u32 { return 7; });
     let b = *local.get_or_init(fn() -> u32 { return 8; });
     io.print(f"{a} {b}\n");

@@ -9,7 +9,9 @@
 //! 3. [`check`]: loan liveness by path exploration, then every access against the live
 //!    overlapping loans (E0501), moved places (E0502), mutability (E0503), view writes (E0513),
 //!    and returns against the `from` clause (E0510, E0512);
-//! 4. [`report`]: diagnostics from the registry templates (E0501 loan choice).
+//! 4. [`report`]: diagnostics from the registry templates (E0501 loan choice);
+//! 5. [`locks`]: the locks held at each call and join, for the rank check
+//!    ([`stave_sema::ranks`]).
 //!
 //! Bodies with any type error are skipped (no cascades). Bodies the builder cannot model
 //! ([`Borrowck::unsupported`]) get no diagnostics and are not checked: a program with one is not
@@ -28,6 +30,7 @@ pub mod bits;
 pub mod cfg;
 pub mod check;
 pub mod loans;
+pub mod locks;
 pub mod report;
 pub mod ty;
 
@@ -61,6 +64,10 @@ pub struct Borrowck {
     pub time: Duration,
     /// Summed per-body time of the phases (CFG build, dataflow, checks + reports), all threads.
     pub phases: [Duration; 3],
+    /// The locks each body that may hold one holds at its calls, joins, and drops, in body order.
+    pub locks: Vec<stave_sema::ranks::BodyLocks>,
+    /// The types each checked body may drop, in body order.
+    pub drops: Vec<stave_sema::ranks::BodyDrops>,
 }
 
 impl Borrowck {
@@ -84,6 +91,7 @@ struct One {
     unsupported: Option<&'static str>,
     rounds: u32,
     phases: [Duration; 3],
+    locks: locks::Scan,
 }
 
 /// Borrow-checks every fn body of the program without a type error.
@@ -132,6 +140,17 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
         }
         out.diagnostics.extend(r.diags);
         out.dump.extend(r.dump);
+        out.drops.push(stave_sema::ranks::BodyDrops { decl: tb.decl, types: r.locks.drops.clone() });
+        if r.locks.holds {
+            let l = r.locks;
+            out.locks.push(stave_sema::ranks::BodyLocks {
+                decl: tb.decl,
+                sites: l.sites,
+                any: l.any,
+                calls: l.calls,
+                types: l.types,
+            });
+        }
     }
     out.dump.sort();
     out.dump.dedup();
@@ -178,9 +197,13 @@ fn check_body(
         unsupported: body.unsupported,
         rounds: 0,
         phases: [t0.elapsed(), Duration::ZERO, Duration::ZERO],
+        locks: locks::Scan { drops: Some(Vec::new()), ..locks::Scan::default() },
     };
     if body.unsupported.is_none() {
         check_tree(&body, &mut tys, opts, tb.item.0, &mut one);
+        if one.locks.holds {
+            one.locks.types = tys.ov.local.clone();
+        }
     }
     Some(one)
 }
@@ -196,6 +219,18 @@ fn check_tree(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item: u32,
     one.phases[1] += t1 - t0;
     one.phases[2] += t1.elapsed();
     one.dump.extend(c.dump.into_iter().map(|d| (item, d)));
+    let l = locks::scan(&flow, tys);
+    one.locks.holds |= l.holds;
+    one.locks.sites.extend(l.sites);
+    one.locks.any.extend(l.any);
+    one.locks.calls.extend(l.calls);
+    one.locks.drops = match (one.locks.drops.take(), l.drops) {
+        (Some(mut a), Some(b)) => {
+            a.extend(b);
+            Some(a)
+        }
+        _ => None,
+    };
     for nb in &body.nested {
         check_tree(nb, tys, opts, item, one);
     }

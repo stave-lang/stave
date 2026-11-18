@@ -214,6 +214,11 @@ pub struct CallGraph {
     /// Instances were left out: an instantiation chain too deep (E0902 reported, or a chain only
     /// fn values or implied calls make), or too many instances. The graph is then incomplete.
     pub truncated: bool,
+    /// Every call site with each node it reaches: (calling fn or closure node, call token, callee
+    /// node), sorted. The token is the one typeck keys the call by (a call's `(`, a method's
+    /// name, an operator, the `for` token, an f-string); a fn-value call reaches the values that
+    /// flow there or its table. [`CallGraph::out`] keeps one edge per (caller, callee) only.
+    pub calls: Vec<(u32, u32, u32)>,
 }
 
 /// Most instances of one generic on one discovery chain (lowering's limit).
@@ -927,6 +932,8 @@ struct ValueSite {
     /// (param index, argument)
     args: Vec<(u32, Val)>,
     site: Site,
+    /// The call token ([`CallGraph::calls`]).
+    tok: u32,
     /// The deny clause of the called value's fn type: every value that reaches the call was
     /// coerced to that type, so none has those effects.
     deny: u8,
@@ -980,6 +987,8 @@ struct Walk<'a> {
     drop_known: Vec<u8>,
     /// (from, to or `TABLE_BIT | table`, kind, site, deny)
     edges: Vec<(u32, u32, EdgeKind, Site, u8)>,
+    /// (from, call token, to or `TABLE_BIT | table`)
+    calls: Vec<(u32, u32, u32)>,
     tables: Vec<TypeId>,
     table_of: FxHashMap<TypeId, u32>,
     /// (table, node, site)
@@ -1350,6 +1359,7 @@ impl<'a> Walk<'a> {
                     self.spec_hint = hint;
                     let to = self.call(from, i, t, &args, ev.site);
                     self.spec_hint = Vec::new();
+                    self.calls.extend(to.iter().map(|&c| (from, ev.tok, c)));
                     last = (ev.tok, to, None);
                 }
                 What::ValueCall { ty, callee } => {
@@ -1357,8 +1367,16 @@ impl<'a> Walk<'a> {
                     let table = self.table(t);
                     let deny = self.deny_of(t);
                     let callee = self.val(callee, i, base, &args);
-                    let site = ev.site;
-                    self.flow.sites.push(ValueSite { from, table, callee, args: Vec::new(), site, deny });
+                    let (site, tok) = (ev.site, ev.tok);
+                    self.flow.sites.push(ValueSite {
+                        from,
+                        table,
+                        callee,
+                        args: Vec::new(),
+                        site,
+                        tok,
+                        deny,
+                    });
                     last = (ev.tok, Vec::new(), Some(self.flow.sites.len() - 1));
                 }
                 What::ValueUse { ty, src } => {
@@ -1366,8 +1384,16 @@ impl<'a> Walk<'a> {
                     let table = self.table(t);
                     let deny = self.deny_of(t);
                     let callee = self.val(src, i, base, &args);
-                    let site = ev.site;
-                    self.flow.sites.push(ValueSite { from, table, callee, args: Vec::new(), site, deny });
+                    let (site, tok) = (ev.site, ev.tok);
+                    self.flow.sites.push(ValueSite {
+                        from,
+                        table,
+                        callee,
+                        args: Vec::new(),
+                        site,
+                        tok,
+                        deny,
+                    });
                 }
                 What::Arg { idx, src } => {
                     if last.0 != ev.tok {
@@ -1442,12 +1468,14 @@ impl<'a> Walk<'a> {
                 }
                 What::AsStr => {
                     if let Some(d) = self.string[0] {
-                        self.call_fn(from, i, d, Vec::new(), ev.site);
+                        let to = self.call_fn(from, i, d, Vec::new(), ev.site);
+                        self.calls.extend(to.iter().map(|&c| (from, ev.tok, c)));
                     }
                 }
                 What::Fstring => {
                     for d in [self.string[1], self.string[2]].into_iter().flatten() {
-                        self.call_fn(from, i, d, Vec::new(), ev.site);
+                        let to = self.call_fn(from, i, d, Vec::new(), ev.site);
+                        self.calls.extend(to.iter().map(|&c| (from, ev.tok, c)));
                     }
                 }
             }
@@ -1617,11 +1645,13 @@ impl<'a> Walk<'a> {
             if untracked {
                 if let Some(tb) = s.table {
                     self.edges.push((s.from, TABLE_BIT | tb, EdgeKind::Indirect, s.site, s.deny));
+                    self.calls.push((s.from, s.tok, TABLE_BIT | tb));
                 }
                 continue;
             }
             for t in site_targets(s, &sets, &top, &members) {
                 self.edges.push((s.from, t, EdgeKind::Indirect, s.site, s.deny));
+                self.calls.push((s.from, s.tok, t));
             }
         }
     }
@@ -1727,6 +1757,7 @@ pub(crate) fn build(
         drop_memo: FxHashMap::default(),
         drop_known: vec![0; table.len()],
         edges: Vec::new(),
+        calls: Vec::new(),
         tables: Vec::new(),
         table_of: FxHashMap::default(),
         members: Vec::new(),
@@ -1795,6 +1826,9 @@ fn finish(w: Walk<'_>) -> CallGraph {
     }
     let n = nodes.len();
     let fix = |t: u32| if t & TABLE_BIT != 0 { n_fn + (t & !TABLE_BIT) } else { t };
+    let mut calls: Vec<(u32, u32, u32)> = w.calls.iter().map(|&(f, k, t)| (f, k, fix(t))).collect();
+    calls.par_sort_unstable();
+    calls.dedup();
     let raw: Vec<(u32, u32, EdgeKind, Site, u8)> = w
         .edges
         .into_iter()
@@ -1877,6 +1911,7 @@ fn finish(w: Walk<'_>) -> CallGraph {
         scc_drop: Vec::new(),
         local_types: w.cx.local,
         truncated: w.truncated,
+        calls,
     };
     g.scc_drop = (0..g.scc_count() as u32)
         .map(|s| {

@@ -1,0 +1,22 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Deadlock"
+// A `get_or_init` re-entered from its own init could never return: it traps `Deadlock`. The rank
+// check rejects this in safe code (the init runs holding the Once's rank); here unsafe code
+// reaches the same Once through a type with a higher rank, past the check.
+import std.io;
+import std.sync;
+
+static CFG: sync.Once<u32, 1> = sync.Once::<u32, 1>.new();
+
+fn init() -> u32 {
+    let p = &CFG as *const sync.Once<u32, 1> as usize as *const sync.Once<u32, 2>;
+    let again: &sync.Once<u32, 2> = unsafe("the same object; only the rank, a type argument, differs") &*p;
+    io.print("init\n");
+    return *again.get_or_init(fn() -> u32 { return 2u32; }) + 1;
+}
+
+fn main() -> i32 {
+    let v = *CFG.get_or_init(init);
+    io.print(f"{v}\n");
+    return 0;
+}

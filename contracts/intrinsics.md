@@ -206,7 +206,12 @@ list):
 - constructors a const-expr may call: `new` of `std.cell.UnsafeCell`, `std.atomic.U32`, `U64`,
   `Usize`, `Bool`, `std.sync.Mutex`, and `std.sync.Once`. The call is evaluated as the struct
   literal the constructor returns, with its parameters bound to the (const) arguments, so each
-  body is exactly `return <struct literal>;` over const-exprs and the parameters;
+  body is exactly `return <struct literal>;` over const-exprs and the parameters (`Mutex<T, R>`
+  and `Once<T, R>` take their rank `R` from the expected type, as any type argument);
+- the ranked locks of `std.sync`: `Mutex<T, R>`, `Once<T, R>`, and `MutexGuard<T, R>` (a held lock
+  of rank `R`, the ADT's second argument), and the acquisitions of rank `R`, each fn's one const
+  generic param: `Mutex.lock`, `Once.get_or_init` (which also runs its `f` holding `R`), and
+  `lock_pair`. The rank check (E1405, E1406) knows only these; `try_lock` acquires nothing;
 - `std.thread.join`, `std.thread.par_for`, `std.thread.par_for_mut`, whose fn-value arguments get
   the thread capture checks (E0802, E0806);
 - language items of std: the prelude module `std.core` and its

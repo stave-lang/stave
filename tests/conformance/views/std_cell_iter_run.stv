@@ -14,7 +14,7 @@ fn main() -> i32 {
     let c = cell.Cell::<u32>.new(1);
     c.set(c.get() + 41);
     let cv = c.get();
-    let m = sync.Mutex::<u32>.new(3);
+    let m = sync.Mutex::<u32, 1>.new(3);
     {
         let mut g = m.lock();
         let v = g.get_mut();
