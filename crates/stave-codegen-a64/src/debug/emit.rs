@@ -1030,7 +1030,8 @@ impl<'a, 'm> Gen<'a, 'm> {
 
     // ---------------------------------------------------------------- function
 
-    pub fn run(mut self) -> R<FuncCode> {
+    /// The function's code, and whether it has a trap stub that calls `runtime.panic.trap`.
+    pub fn run(mut self) -> R<(FuncCode, bool)> {
         let nb = self.b.blocks.len();
         self.labels.clear();
         for _ in 0..nb {
@@ -1063,6 +1064,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             self.term(blk)?;
         }
         let traps = std::mem::take(&mut self.traps);
+        let calls_trap = !traps.is_empty() && self.cg.syms.trap.is_some();
         for (k, site, l) in traps {
             self.a.bind(l)?;
             match self.cg.syms.trap {
@@ -1075,7 +1077,7 @@ impl<'a, 'm> Gen<'a, 'm> {
                 None => self.a.brk(0x100 + k as u16),
             }
         }
-        Ok(self.a.finish()?)
+        Ok((self.a.finish()?, calls_trap))
     }
 
     fn prologue(&mut self) -> R<()> {

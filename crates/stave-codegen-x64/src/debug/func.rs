@@ -9,7 +9,7 @@ use stave_ir::simd::VecOp;
 use stave_ir::{
     Body, Const, FloatBits, Func, FuncId, Op, Operand, PanicKind, Site, StrId, Term, TypeId, TypeKey, Value,
 };
-use stave_obj::{FuncCode, SymbolId};
+use stave_obj::{FuncCode, StackUse, SymbolId};
 use stave_opt::regalloc;
 
 use super::abi::{self, CallAbi, Loc, Piece, RetLoc, VCls};
@@ -295,9 +295,12 @@ pub(crate) struct Cg<'a, 'm> {
     pub(crate) yused: bool,
     /// Vector constants, emitted after the code and read `rip`-relative.
     pub(crate) vpool: Vec<(Label, Vec<u8>)>,
+    /// Most bytes the code puts below the frame at once: a call's stack arguments, the return
+    /// address of a call into a compiler helper, the `push` of `call_on_stack`.
+    pub(crate) below: u32,
 }
 
-pub(crate) fn compile(cx: &Ctx<'_>, fid: FuncId) -> Res<FuncCode> {
+pub(crate) fn compile(cx: &Ctx<'_>, fid: FuncId) -> Res<(FuncCode, StackUse)> {
     let f = cx.m.func(fid).ok_or_else(|| bad("unknown function"))?;
     let b = f.body.as_ref().ok_or_else(|| bad("function has no body"))?;
     // `cpuid` writes `rbx`, which a release build may have given to a value.
@@ -504,7 +507,7 @@ fn use_counts(b: &Body) -> Vec<u8> {
     n
 }
 
-fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
+fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<(FuncCode, StackUse)> {
     let f = cx.m.func(fid).ok_or_else(|| bad("unknown function"))?;
     let b = f.body.as_ref().ok_or_else(|| bad("function has no body"))?;
     let mut an = analysis::analyze(b);
@@ -640,6 +643,7 @@ fn compile_with(cx: &Ctx<'_>, fid: FuncId, release: bool) -> Res<FuncCode> {
         cur_inst: NONE,
         yused: release && ywide,
         vpool: Vec::new(),
+        below: 0,
     };
     let fs = cx.fn_sites.get(fid.index()).copied().unwrap_or(Site::NONE);
     cg.run(fs)
@@ -2104,6 +2108,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             _ => None,
         };
         if abi.stack > 0 {
+            self.below = self.below.max(abi.stack);
             self.sub_rsp_probed(abi.stack)?;
         }
         for (&o, loc) in args.iter().zip(&abi.args) {
@@ -2553,7 +2558,7 @@ impl<'a, 'm> Cg<'a, 'm> {
         }
     }
 
-    fn run(mut self, fn_site: Site) -> Res<FuncCode> {
+    fn run(mut self, fn_site: Site) -> Res<(FuncCode, StackUse)> {
         let b = self.b;
         let f = self.f;
         if self.an.rpo.first() != Some(&0) {
@@ -3338,7 +3343,7 @@ impl<'a, 'm> Cg<'a, 'm> {
         Ok(())
     }
 
-    fn finish(mut self, fn_site: Site) -> Res<FuncCode> {
+    fn finish(mut self, fn_site: Site) -> Res<(FuncCode, StackUse)> {
         let saved: Vec<Gpr> =
             CALLEE_SAVED.iter().copied().filter(|g| self.used_callee & bit(*g) != 0).collect();
         // Debug: the registers the cache happened to use are saved below the locals. Release:
@@ -3362,6 +3367,7 @@ impl<'a, 'm> Cg<'a, 'm> {
             self.a.bind(ep)?;
         }
         let traps = std::mem::take(&mut self.traps);
+        let traps_none = traps.is_empty();
         let trap_sym = self.cx.trap_sym;
         for (k, site, l) in traps {
             self.a.bind(l)?;
@@ -3434,6 +3440,13 @@ impl<'a, 'm> Cg<'a, 'm> {
             p.mov_mr(Size::Q, Mem::base(RBP, save_off(k)), *g)?;
         }
         let pro = p.finish()?;
+        // Return address and saved `rbp`, the frame, the realignment gap (at most the alignment:
+        // `rsp` is 16-aligned after the push), and what goes below the frame.
+        let realigned = if self.realign { self.frame_align } else { 0 };
+        let stack = StackUse {
+            frame: 16u32.saturating_add(total).saturating_add(realigned).saturating_add(self.below),
+            traps: !traps_none,
+        };
         let shift = pro.code.len() as u32;
         let mut code = pro.code;
         code.extend_from_slice(&body.code);
@@ -3447,6 +3460,6 @@ impl<'a, 'm> Cg<'a, 'm> {
             r.offset += shift;
             r
         }));
-        Ok(FuncCode { code, relocs, lines })
+        Ok((FuncCode { code, relocs, lines }, stack))
     }
 }

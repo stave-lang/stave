@@ -1,6 +1,6 @@
 //! Compiler intrinsics, inline (contracts/intrinsics.md): `syscall0`–`syscall6`, `ccall0`–`ccall12`,
 //! `cpuid`, `xgetbv`, `call_on_stack`, and the address intrinsics `thread_start_addr`, `static_addr`,
-//! `main_addr`, `signal_handler_addr`, `site_table`, `pc_table`, the CPU atomics
+//! `main_addr`, `signal_handler_addr`, `site_table`, `pc_table`, `stack_table`, the CPU atomics
 //! `atomic_{load,xchg,add,cas}_{u32,u64}` (sequentially consistent: `mov` / `xchg` / `lock xadd` /
 //! `lock cmpxchg` on `[rcx]`), and `thread_clone` (a thread-creating system call whose child runs
 //! `__stave_thread_start(arg)` on its new stack, then the `exit` system call), and `cpu_init` (a
@@ -164,6 +164,7 @@ impl Cg<'_, '_> {
             "signal_handler_addr" => addr(self, self.cx.signal_sym, "`runtime.panic.on_signal`"),
             "site_table" => addr(self, Some(self.cx.site_table_sym), "site table"),
             "pc_table" => addr(self, Some(self.cx.pc_table_sym), "PC table"),
+            "stack_table" => addr(self, Some(self.cx.stack_table_sym), "stack table"),
             "static_addr" => {
                 arity(1)?;
                 let k = self
@@ -218,6 +219,7 @@ impl Cg<'_, '_> {
                 self.copy_to_g(args[0], S0)?;
                 self.copy_to_g(args[1], RDI)?;
                 self.copy_to_g(args[2], RAX)?;
+                self.below = self.below.max(8);
                 self.a.push(RBX);
                 self.a.mov_rr(Size::Q, RBX, RSP);
                 self.a.mov_rr(Size::Q, RSP, RAX);

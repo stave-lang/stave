@@ -105,6 +105,8 @@
 //! returns its status), `__stave_signal` (`mov w0, w0; b runtime.panic.on_signal`),
 //! `__stave_thread_start` (`b runtime.thread.entry`), `__stave_site_table` and `__stave_pc_table`
 //! (contracts/intrinsics.md row layouts, from `Module::sites` and `Func::name_site`),
+//! `__stave_stack_table` (declared; the caller defines it from [`Codegen::compile_stack`]'s
+//! frame sizes),
 //! `__stave_strings` (all string literals), `__stave_fmod`, and one `.data`/`.bss` object per
 //! `static mut` (`stave_ir::link::static_symbol`).
 //!

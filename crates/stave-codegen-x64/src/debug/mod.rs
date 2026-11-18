@@ -44,7 +44,8 @@
 //! Module level ([`emit_module`], [`link`], [`compile_module`]): one symbol per function with a
 //! body in canonical instance order, string literals, the compiler-emitted stubs `_start`
 //! (stave-obj `stub::start`), `__stave_main`, `__stave_signal`, `__stave_thread_start`, and the tables
-//! `__stave_site_table` and `__stave_pc_table` (layouts in contracts/intrinsics.md).
+//! `__stave_site_table`, `__stave_pc_table`, and `__stave_stack_table` (layouts in
+//! contracts/intrinsics.md).
 //!
 //! Features. Every function is compiled for its own feature set: the module baseline
 //! ([`Options::features`]) and the function's `needs` (`Func::features`), closed under
@@ -103,7 +104,9 @@ use std::fmt;
 use rustc_hash::FxHashMap;
 use stave_ir::layout::Layouts;
 use stave_ir::{Func, FuncId, Module, Operand, Site, VerifyError};
-use stave_obj::{FileId, FuncCode, ImageBuilder, Machine, ObjError, ObjectImage, SourceFile, SymbolId};
+use stave_obj::{
+    FileId, FuncCode, ImageBuilder, Machine, ObjError, ObjectImage, SourceFile, StackUse, SymbolId,
+};
 use stave_target::{Feature, FeatureSet};
 
 use crate::enc::EncError;
@@ -308,6 +311,7 @@ pub struct Ctx<'m> {
     pub(crate) thread_sym: Option<SymbolId>,
     pub(crate) site_table_sym: SymbolId,
     pub(crate) pc_table_sym: SymbolId,
+    pub(crate) stack_table_sym: SymbolId,
     /// Line-table position per site row.
     pub(crate) lines: Vec<Option<(FileId, u32, u32)>>,
     /// Per `FuncId`: site of the name token.
@@ -336,6 +340,10 @@ pub struct Emitted {
     pub pc_rows: Vec<(SymbolId, u32)>,
     /// Per-function codegen time in nanoseconds (by `FuncId`, 0 for no body).
     pub nanos: Vec<u64>,
+    /// Per `FuncId`: what the function's code takes of the stack (default for no body).
+    pub stack: Vec<StackUse>,
+    /// Declared, defined by the caller ([`stave_obj::stub::stack_table`]) or else by [`link`].
+    pub stack_table: SymbolId,
 }
 
 impl Ctx<'_> {
@@ -438,6 +446,7 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
     }
     let site_table_sym = stubs::site_table(&files, &rows, b)?;
     let pc_table_sym = b.declare(stubs::PC_TABLE);
+    let stack_table_sym = b.declare(stave_obj::stub::STACK_TABLE);
     let lines = rows.iter().map(|r| file_ids.get(r.file as usize).map(|&fi| (fi, r.line, r.col))).collect();
     let fn_sites: Vec<Site> = if o.fn_sites.is_empty() {
         m.funcs.iter().map(|f| f.name_site).collect()
@@ -467,6 +476,7 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
         thread_sym,
         site_table_sym,
         pc_table_sym,
+        stack_table_sym,
         lines,
         fn_sites: fn_sites.clone(),
         static_sym,
@@ -476,8 +486,10 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
         ctab,
     };
     let (codes, nanos) = compile_all(&cx, &order, o.threads);
+    let mut stack = vec![StackUse::default(); m.funcs.len()];
     for (f, code) in order.iter().zip(codes) {
-        let code = code.map_err(|e| e.in_func(*f))?;
+        let (code, used) = code.map_err(|e| e.in_func(*f))?;
+        stack[f.index()] = used;
         if let Some(s) = func_sym[f.index()] {
             b.define_func(s, code)?;
         }
@@ -496,21 +508,35 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
     for (f, n) in order.iter().zip(nanos) {
         all_nanos[f.index()] = n;
     }
-    Ok(Emitted { func_syms: func_sym, pc_table: pc_table_sym, pc_rows, nanos: all_nanos })
+    Ok(Emitted {
+        func_syms: func_sym,
+        pc_table: pc_table_sym,
+        pc_rows,
+        nanos: all_nanos,
+        stack,
+        stack_table: stack_table_sym,
+    })
 }
 
 /// Compiles one function (exposed for incremental patching and benchmarks).
 pub fn compile_func(cx: &Ctx<'_>, f: FuncId) -> Result<FuncCode, Error> {
+    compile_func_stack(cx, f).map(|(c, _)| c)
+}
+
+/// [`compile_func`] with what the function's code takes of the stack.
+pub fn compile_func_stack(cx: &Ctx<'_>, f: FuncId) -> Result<(FuncCode, StackUse), Error> {
     func::compile(cx, f).map_err(|e| e.in_func(f))
 }
 
-fn compile_all(cx: &Ctx<'_>, order: &[FuncId], threads: usize) -> (Vec<Res<FuncCode>>, Vec<u64>) {
+type Compiled = Res<(FuncCode, StackUse)>;
+
+fn compile_all(cx: &Ctx<'_>, order: &[FuncId], threads: usize) -> (Vec<Compiled>, Vec<u64>) {
     let n = order.len();
     let threads =
         if threads == 0 { std::thread::available_parallelism().map_or(1, |x| x.get()) } else { threads };
     let one = |f: FuncId| {
         let t = std::time::Instant::now();
-        let r = compile_func(cx, f);
+        let r = compile_func_stack(cx, f);
         (r, t.elapsed().as_nanos() as u64)
     };
     if threads <= 1 || n < 64 {
@@ -518,7 +544,7 @@ fn compile_all(cx: &Ctx<'_>, order: &[FuncId], threads: usize) -> (Vec<Res<FuncC
         return (codes, nanos);
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
-    type Done = (Res<FuncCode>, u64);
+    type Done = (Compiled, u64);
     let mut slots: Vec<Option<Done>> = (0..n).map(|_| None).collect();
     let results: Vec<Vec<(usize, Done)>> = std::thread::scope(|s| {
         let hs: Vec<_> = (0..threads.min(n))
@@ -561,9 +587,13 @@ pub fn compile_module(m: &Module, o: &Options) -> Result<ObjectImage, Error> {
 
 /// Defines the PC table and links. The table's `pc_lo` words are [`stave_obj::RelocKind::Abs64Body`]
 /// relocations: they resolve to each function's first instruction even when the jump table is
-/// enabled (and follow a function that `ObjectImage::patch_func` moves).
+/// enabled (and follow a function that `ObjectImage::patch_func` moves). A stack table the caller
+/// did not define is the empty one: every stack gets the runtime's default.
 pub fn link(mut b: ImageBuilder, e: &Emitted) -> Result<ObjectImage, Error> {
     b.define_rodata(e.pc_table, stubs::pc_table(&e.pc_rows))?;
+    if !b.is_defined(e.stack_table) {
+        b.define_rodata(e.stack_table, stave_obj::stub::stack_table(0, 0, &[]))?;
+    }
     Ok(b.link()?)
 }
 
@@ -585,9 +615,10 @@ pub fn bench_ctx(m: &Module) -> Ctx<'_> {
         thread_sym: Some(SymbolId(u32::MAX - 4)),
         site_table_sym: SymbolId(u32::MAX - 5),
         pc_table_sym: SymbolId(u32::MAX - 6),
+        stack_table_sym: SymbolId(u32::MAX - 9),
         lines: Vec::new(),
         fn_sites: Vec::new(),
-        static_sym: (0..m.statics.len() as u32).map(|i| SymbolId(u32::MAX - 9 - i)).collect(),
+        static_sym: (0..m.statics.len() as u32).map(|i| SymbolId(u32::MAX - 10 - i)).collect(),
         release: false,
         baseline: FeatureSet::of(Feature::Sse42),
         fma_sym: Some([SymbolId(u32::MAX - 7), SymbolId(u32::MAX - 8)]),

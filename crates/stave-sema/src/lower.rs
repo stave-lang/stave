@@ -241,6 +241,25 @@ pub fn lower_timed(
     })
 }
 
+/// A lowered module and the call-graph nodes of each function ([`lower_mapped`]).
+pub type Mapped = (Module, Vec<Vec<u32>>);
+
+/// [`lower_timed`] plus the call-graph nodes of each function, as [`GraphLowering::nodes_of_func`].
+pub fn lower_mapped(
+    prog: &Program,
+    tc: &Typeck,
+    mode: Mode,
+) -> (Result<Mapped, Vec<LowerError>>, LowerTimings) {
+    crate::pool::on_big_stacks(|| {
+        let (r, tm) = lower_in_pool(prog, tc, Roots::Mode(mode));
+        let r = r.map(|a| {
+            let nodes_of_func = graph_nodes_of(tc, &a);
+            (a.module, nodes_of_func)
+        });
+        (r, tm)
+    })
+}
+
 fn lower_in_pool(
     prog: &Program,
     tc: &Typeck,

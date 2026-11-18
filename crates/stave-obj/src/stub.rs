@@ -1,12 +1,34 @@
 //! Fixed per-arch code the writer emits itself (contracts/intrinsics.md "Program entry").
 
-use crate::{FuncCode, Machine, Reloc, RelocKind, SymbolId};
+use crate::{DataObj, FuncCode, Machine, Reloc, RelocKind, SymbolId};
 
 /// Name of the entry stub.
 pub const START: &str = "_start";
 
 /// Name of the runtime entry the stub calls (`runtime.start.entry(sp: *const usize)`).
 pub const RUNTIME_ENTRY: &str = "runtime.start.entry";
+
+/// Name of the stack table (contracts/intrinsics.md "Runtime start and traps").
+pub const STACK_TABLE: &str = "__stave_stack_table";
+
+/// `__stave_stack_table`: `u64 default` (the `[run] stack` bytes; 0: the runtime's own default),
+/// `u64 main` (bytes of main's stack; 0: no bound, the default applies), `u64 count`, then
+/// `count` rows of 16 bytes `{code: u64, bytes: u64}`: the code address a fn value holds (an
+/// [`RelocKind::Abs64`] to the function, the jump-table stub where there is one) and the bytes of
+/// the stack of a thread started with it (0: no bound).
+pub fn stack_table(default: u64, main: u64, rows: &[(SymbolId, u64)]) -> DataObj {
+    let mut bytes = Vec::with_capacity(24 + 16 * rows.len());
+    let mut relocs = Vec::with_capacity(rows.len());
+    bytes.extend_from_slice(&default.to_le_bytes());
+    bytes.extend_from_slice(&main.to_le_bytes());
+    bytes.extend_from_slice(&(rows.len() as u64).to_le_bytes());
+    for &(sym, n) in rows {
+        relocs.push(Reloc { offset: bytes.len() as u32, kind: RelocKind::Abs64, sym, addend: 0 });
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&n.to_le_bytes());
+    }
+    DataObj { bytes, align: 8, relocs }
+}
 
 /// `_start`: pass the initial stack pointer (pointing at `argc`) to `entry` in the first argument
 /// register, with the frame pointer and link register cleared; trap if `entry` returns.

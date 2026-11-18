@@ -138,6 +138,20 @@ pub struct FuncCode {
     pub lines: Vec<LineRow>,
 }
 
+/// What a function's code takes of the stack (reported by the backends; the driver's stack bound
+/// adds these up along call paths).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StackUse {
+    /// Upper bound of the bytes the function takes below the stack pointer its caller had just
+    /// before the call instruction: the return address (x86-64), the saved frame pointer (and
+    /// link register), locals and spill slots, callee-saved register saves, realignment padding,
+    /// the outgoing stack arguments of its calls, and what an intrinsic or a compiler helper it
+    /// calls pushes. The frames of the Stave functions it calls are not included.
+    pub frame: u32,
+    /// The code calls `runtime.panic.trap` (a failing check).
+    pub traps: bool,
+}
+
 /// A read-only or writable data object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DataObj {
@@ -354,6 +368,11 @@ impl ImageBuilder {
 
     pub fn lookup(&self, name: &str) -> Option<SymbolId> {
         self.by_name.get(name).copied()
+    }
+
+    /// Whether symbol `id` has a definition.
+    pub fn is_defined(&self, id: SymbolId) -> bool {
+        self.defs.get(id.0 as usize).is_some_and(|d| !matches!(d, SymDef::Undef))
     }
 
     pub fn name(&self, id: SymbolId) -> Option<&str> {

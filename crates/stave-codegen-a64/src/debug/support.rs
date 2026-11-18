@@ -4,9 +4,10 @@
 use std::collections::HashMap;
 
 use stave_ir::layout::Layouts;
-use stave_ir::{FuncId, Module, Operand, TypeId};
+use stave_ir::{FuncId, Module, Op, Operand, TypeId};
 use stave_obj::{
-    DataObj, FileId, FuncCode, ImageBuilder, Machine, ObjectImage, Options, Reloc, RelocKind, SymbolId,
+    DataObj, FileId, FuncCode, ImageBuilder, Machine, ObjectImage, Options, Reloc, RelocKind, StackUse,
+    SymbolId,
 };
 
 use super::analysis::Analysis;
@@ -27,6 +28,7 @@ pub const SYM_SIGNAL: &str = "__stave_signal";
 pub const SYM_THREAD: &str = "__stave_thread_start";
 pub const SYM_SITE_TABLE: &str = "__stave_site_table";
 pub const SYM_PC_TABLE: &str = "__stave_pc_table";
+pub const SYM_STACK_TABLE: &str = stave_obj::stub::STACK_TABLE;
 pub const SYM_FMOD: &str = "__stave_fmod";
 pub const SYM_STRINGS: &str = "__stave_strings";
 const SYM_SITE_STRINGS: &str = "__stave_site_strings";
@@ -51,6 +53,9 @@ pub struct Symbols {
     pub cpu_init: Option<SymbolId>,
     pub site_table: SymbolId,
     pub pc_table: SymbolId,
+    /// Declared by [`prepare`]; the caller defines it ([`stave_obj::stub::stack_table`]) before
+    /// linking.
+    pub stack_table: SymbolId,
     /// Per site: the line-table position.
     pub lines: Vec<Option<(FileId, u32, u32)>>,
 }
@@ -66,6 +71,7 @@ pub(crate) enum Intr {
     ThreadAddr,
     SiteTable,
     PcTable,
+    StackTable,
     StaticAddr,
     ThreadClone,
     CpuInit,
@@ -94,6 +100,7 @@ fn intr_kind(name: &str) -> Intr {
         "thread_start_addr" => Intr::ThreadAddr,
         "site_table" => Intr::SiteTable,
         "pc_table" => Intr::PcTable,
+        "stack_table" => Intr::StackTable,
         "static_addr" => Intr::StaticAddr,
         "thread_clone" => Intr::ThreadClone,
         "cpu_init" => Intr::CpuInit,
@@ -165,13 +172,27 @@ impl<'a> Codegen<'a> {
 
     /// Compiles one function (it must have a body).
     pub fn compile(&self, f: FuncId, s: &mut FuncScratch) -> Result<FuncCode, Error> {
-        self.compile_inner(f, s).map_err(|mut e| {
-            e.func.get_or_insert(f);
-            e
-        })
+        self.compile_stack(f, s).map(|(c, _)| c)
     }
 
-    fn compile_inner(&self, fid: FuncId, s: &mut FuncScratch) -> R<FuncCode> {
+    /// [`Codegen::compile`] with what the function's code takes of the stack: `x29, x30` (16
+    /// bytes), the frame (locals, spill slots, callee-saved saves, outgoing stack arguments), and
+    /// the 16 bytes `call_on_stack` pushes.
+    pub fn compile_stack(&self, f: FuncId, s: &mut FuncScratch) -> Result<(FuncCode, StackUse), Error> {
+        let (code, traps) = self.compile_inner(f, s).map_err(|mut e| {
+            e.func.get_or_insert(f);
+            e
+        })?;
+        let on_stack = self.m.func(f).and_then(|x| x.body.as_ref()).is_some_and(|b| {
+            b.insts.op.iter().any(
+                |op| matches!(op, Op::Intrinsic(id) if self.intr.get(id.index()) == Some(&Intr::CallOnStack)),
+            )
+        });
+        let frame = 16u32.saturating_add(s.an.frame).saturating_add(if on_stack { 16 } else { 0 });
+        Ok((code, StackUse { frame, traps }))
+    }
+
+    fn compile_inner(&self, fid: FuncId, s: &mut FuncScratch) -> R<(FuncCode, bool)> {
         let func = self.m.func(fid).ok_or_else(|| bad("unknown function"))?;
         let body = func.body.as_ref().ok_or_else(|| bad("function has no body"))?;
         s.an.run(self, func, body)?;
@@ -322,6 +343,7 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
     }
     rows[..8].copy_from_slice(&cnt.to_le_bytes());
     let pc_table = b.rodata(SYM_PC_TABLE, DataObj { bytes: rows, align: 8, relocs })?;
+    let stack_table = b.declare(SYM_STACK_TABLE);
     // Stubs.
     let main_stub = match main {
         Some(mf) => {
@@ -371,6 +393,7 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
         cpu_init,
         site_table,
         pc_table,
+        stack_table,
         lines,
     })
 }
@@ -521,5 +544,6 @@ pub fn build_image(m: &Module, cfg: &BuildConfig) -> Result<ObjectImage, Error> 
         let sym = cg.func_sym(fid)?;
         b.define_func(sym, code)?;
     }
+    b.define_rodata(syms.stack_table, stave_obj::stub::stack_table(0, 0, &[]))?;
     Ok(b.link()?)
 }

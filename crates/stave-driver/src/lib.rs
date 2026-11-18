@@ -17,6 +17,7 @@
 //! - [`conformance`]: the `stave test` runner and its stage0 compiler.
 //! - [`select`]: `--compiler auto|cpu|gpu` and the stage1 probe (contracts/cli.md).
 //! - [`prof`]: the `STAVE_PROFILE` step profile (wall time and allocations per pipeline step).
+//! - [`stack`]: the computed stack bound of a build (`__stave_stack_table`).
 
 pub mod build;
 pub mod conformance;
@@ -30,3 +31,4 @@ pub mod pipeline;
 pub mod prof;
 pub mod select;
 pub mod shipped;
+pub mod stack;
