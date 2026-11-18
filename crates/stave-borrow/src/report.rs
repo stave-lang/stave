@@ -211,12 +211,16 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                 let lspan = body.locals[l.place.local as usize].span;
                 out.extend(mk("E0512", None, &[("place", &text)], span, &[("local", lspan)]));
             }
-            Finding::Uncovered { span, param, from, clause } => {
+            Finding::Uncovered { span, param, from, clause, copy } => {
                 let name = match body.locals.iter().position(|x| x.param == Some(param)) {
                     Some(i) => local_name(body, tys, i as u32),
                     None => "_".to_string(),
                 };
-                let case = if clause { None } else { Some("no-from") };
+                let case = match (clause, copy) {
+                    (false, _) => Some("no-from"),
+                    (true, true) => Some("copy"),
+                    (true, false) => None,
+                };
                 out.extend(mk("E0510", case, &[("origin", &name)], span, &[("from", from)]));
             }
             Finding::MoveOut { place, span, capture } => {

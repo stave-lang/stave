@@ -115,7 +115,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 | `&V` / `&mut V` (V view) | reborrows the view object | inherits V's origins and may outlive the borrow (iterator `next`) |
 | owned non-view by value | E0520 | E0521 |
 
-  Multiple origins: `from a + b`. Returning an uncovered origin = E0510. Borrowing a local = E0512.
+  Multiple origins: `from a + b`. Returning an uncovered origin = E0510. A borrow through a `&mut` field of the view (`&mut *x.buf`, `&x.buf[k]`) is not a copy: `from x`. Borrowing a local = E0512.
 - Planned: `vec.Vec`, `Box`, `Option`, `Result` may hold views, and then are views themselves (`vec.Vec<&u32>` in a local is fine; `Rc` never: E0414). A `&mut` view param names what the callee may store into it: `fn push(&mut self from x, x: T)` (E0513 if missing; only on `&mut` view params, E0514). Pushing a borrow into a local container keeps that borrow alive as long as the container; dropping the container is a use, so declare the data first.
 - Generic params reject views unless bound `T: view` (E0414).
 - Threads borrow stack data only through structured forms: `scope { spawn { .. } spawn { .. } }` (spawns join at `}` and wherever the scope is left: `return`, `break`, `continue`, `?`; a spawn in a loop runs alongside the earlier iterations' threads; `spawn` outside `scope` = E0801, in a closure inside `scope` = E0808; a target may run spawned work on one thread) and `import std.thread;`:

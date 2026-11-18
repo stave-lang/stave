@@ -83,8 +83,9 @@ pub enum Finding {
     /// E0512: a returned value borrows local storage (the loan).
     Escape { span: Span, loan: LoanId },
     /// E0510: a returned value has an origin of param `param` not in the `from` clause (`from`:
-    /// the clause, or the return type when `clause` is false).
-    Uncovered { span: Span, param: u32, from: Span, clause: bool },
+    /// the clause, or the return type when `clause` is false); `copy`: the clause names the param
+    /// as `from copy`, which covers only the origins of the view it points to.
+    Uncovered { span: Span, param: u32, from: Span, clause: bool, copy: bool },
     /// E0504: a by-value use of a non-Copy place behind a dereference or an index, or of a
     /// capture (`capture`: the closure's span).
     MoveOut { place: Place, span: Span, capture: Option<Span> },
@@ -489,7 +490,8 @@ impl Cx<'_, '_> {
         if let Some(l) = escape {
             self.findings.push(Finding::Escape { span: o.span, loan: l });
         } else if let (Some(p), Some(fs)) = (uncovered, from_span) {
-            self.findings.push(Finding::Uncovered { span: o.span, param: p, from: fs.0, clause: fs.1 });
+            let copy = from.is_some_and(|f| f.iter().any(|&(i, _)| i == p));
+            self.findings.push(Finding::Uncovered { span: o.span, param: p, from: fs.0, clause: fs.1, copy });
         }
     }
 }

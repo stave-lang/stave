@@ -2168,7 +2168,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0510",
         severity: Severity::Error,
         area: "borrow",
-        rule: "returned reference or view not covered by the `from` clause",
+        rule: "returned reference or view not covered by the `from` clause; case `copy`: the value borrows the parameter itself (a field of the view it points to, or what a `&mut` in that view points to) and the clause names it `from copy`",
         retired: false,
         located: true,
         holes: &[
@@ -2184,6 +2184,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `{origin}` to the `from` clause, or return a value borrowed from a listed parameter",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "copy",
+                message: "returned value borrows `{origin}` itself, which `from copy {origin}` does not cover",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "returned here" },
+                    LabelTemplate { at: "from", text: "`from` clause" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write `from {origin}` (the result then keeps `{origin}` borrowed), or return only what is copied out of the view: a borrow through a `&mut` held in it is not a copy",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

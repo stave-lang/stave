@@ -1,0 +1,83 @@
+//~ CHECK-ONLY
+// A borrow made through a `&mut` field of a view is not a copy of the view's origins: only the
+// place holding the `&mut` reaches its target, so the result keeps that place borrowed
+// (`from self`). Under `from copy self` a second result, or a write through the view, could
+// alias the first. What a `&` field points to can be copied out.
+view struct Cur { buf: &mut [u32], i: usize }
+view struct Ro { xs: &[u32], i: usize }
+
+impl Cur {
+    fn whole(&mut self) -> &mut [u32] from copy self {
+        return &mut *self.buf; //~ ERROR E0510
+    }
+
+    fn peek(&mut self) -> &[u32] from copy self {
+        return &*self.buf; //~ ERROR E0510
+    }
+
+    fn at(&self, k: usize) -> &u32 from copy self {
+        return &self.buf[k]; //~ ERROR E0510
+    }
+
+    fn whole_tied(&mut self) -> &mut [u32] from self {
+        return &mut *self.buf;
+    }
+
+    fn at_tied(&self, k: usize) -> &u32 from self {
+        return &self.buf[k];
+    }
+}
+
+impl Ro {
+    fn at(&mut self, k: usize) -> &u32 from copy self {
+        return &self.xs[k];
+    }
+
+    fn head(&self, n: usize) -> &[u32] from copy self {
+        return &self.xs[0..n];
+    }
+}
+
+fn cur(xs: &mut [u32]) -> Cur from xs {
+    return Cur.{ buf: xs, i: 0 };
+}
+
+fn whole_of(c: &mut Cur) -> &mut [u32] from c {
+    return &mut *c.buf;
+}
+
+// Two results that keep the view borrowed cannot live together.
+fn alias() -> u32 {
+    let mut a: [u32; 2] = [1, 2];
+    let mut c = cur(&mut a);
+    let p = whole_of(&mut c);
+    let q = whole_of(&mut c); //~ ERROR E0501
+    p[0] = 5;
+    q[0] = 7;
+    return p[0];
+}
+
+// In one body: a borrow through `pc` keeps `c` borrowed.
+fn local_chain() -> u32 {
+    let mut a: [u32; 2] = [1, 2];
+    let mut c = cur(&mut a);
+    let pc = &mut c;
+    let p = &mut *pc.buf;
+    let q = &mut *c.buf; //~ ERROR E0501
+    p[0] = 5;
+    q[0] = 7;
+    return p[0];
+}
+
+// Items copied out of a `&` field outlive the borrow of the view.
+fn copies(xs: &[u32]) -> u32 {
+    let mut r = Ro.{ xs: xs, i: 0 };
+    let x = r.at(0);
+    let y = r.at(1);
+    r.i = 2;
+    return *x + *y + r.head(1)[0];
+}
+
+fn main() -> i32 {
+    return 0;
+}

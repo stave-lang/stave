@@ -11,9 +11,13 @@
 //! **Contents.** Reading a ref-like value through `k` dereferences of a local `x` yields
 //! `contents^k(O(x))`, where `contents(L)` is the origin set of the borrowed place's value (taken
 //! when L is created: the place cannot be written while L lives), `contents(Pb(i)) = {Pc(i)}`,
-//! and `contents(Pc(i)) = {Pc(i)}`. A borrow `&P` carries its loan, the origins of the pointer it
-//! reborrows through (a reborrow keeps the outer loan live), and the origins of the borrowed
-//! value (a view object borrowed keeps its own origins live).
+//! and `contents(Pc(i)) = {Pc(i)}`. A borrow `&P` carries its loan, the origins of the pointers
+//! it reborrows through (a reborrow keeps the outer loans live), and the origins of the borrowed
+//! value (a view object borrowed keeps its own origins live). The pointers are those of every
+//! dereference of `P` after its last `&` one, and that one: what a `&mut` points to is reached
+//! only through the place holding the `&mut`, so the borrow must keep that place borrowed too
+//! (else a second borrow made through it would alias the first); a `&` can be copied out of its
+//! place, so nothing before it is needed.
 //!
 //! **Stores.** A ref-like value written through a dereference lands in one view object that no
 //! origin set is updated for, so every reader of that object must already expect the value's
@@ -341,6 +345,26 @@ impl<'b> Flow<'b> {
         true
     }
 
+    /// The origins of the pointers a borrow of `p` goes through (module doc, **Contents**): of
+    /// every dereference after the last `&` one, and of that one.
+    fn through(&self, st: &State, p: &Place) -> Bits {
+        let mut cur = self.local_o(st, p.local);
+        let mut out = self.empty();
+        for pr in &p.proj {
+            if let Proj::Deref(k) = pr {
+                match k {
+                    DerefKind::Raw => return self.empty(),
+                    DerefKind::Shared => out = cur.clone(),
+                    DerefKind::Mut => {
+                        out.union_with(&cur);
+                    }
+                }
+                cur = self.contents_of(&cur);
+            }
+        }
+        out
+    }
+
     pub fn op_origins(&self, st: &State, op: &Operand) -> Bits {
         if op.kind == OpKind::Const || !self.is_ref_like(op.place.ty) {
             return self.empty();
@@ -357,7 +381,9 @@ impl<'b> Flow<'b> {
                 let mut s = self.empty();
                 s.insert(*loan as usize);
                 let (val, ptr) = self.place_origins(st, place);
-                if let Some(p) = ptr {
+                if place.derefs() > 1 {
+                    s.union_with(&self.through(st, place));
+                } else if let Some(p) = ptr {
                     s.union_with(&p);
                 }
                 if self.is_ref_like(place.ty) {
