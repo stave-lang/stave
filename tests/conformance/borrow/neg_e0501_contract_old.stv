@@ -1,0 +1,89 @@
+//~ CHECK-ONLY
+// A contract clause is code of the fn at the point where it runs. What an `old(e)` value borrows
+// at entry stays borrowed to the `ensures` clauses, so the body may not write it, lend it
+// mutably, move it, or drop it; `result` is live across the clauses too.
+import std.vec;
+
+fn grow(v: &mut vec.Vec<u32>) ensures(old(v.as_slice())[0] == 7) {
+    v.push(1); //~ ERROR E0501
+}
+
+fn regrow(v: &mut vec.Vec<u32>) ensures(*old(v.get_ref(0)) == 7) {
+    v.clear(); //~ ERROR E0501
+}
+
+fn bump(p: &mut u32) ensures(*old(&*p) + 1 == *p) {
+    *p += 1; //~ ERROR E0501
+}
+
+struct Pair {
+    a: u32,
+    b: u32,
+}
+
+impl Pair {
+    fn swap(&mut self) ensures(*old(&self.a) == self.b) {
+        let t = self.a;
+        self.a = self.b; //~ ERROR E0501
+        self.b = t;
+    }
+}
+
+fn same<T: Frozen>(a: &T, b: &T) -> bool {
+    return true;
+}
+
+fn put<T: Copy + Frozen>(p: &mut T, x: T) ensures(same::<T>(old(&*p), p)) {
+    *p = x; //~ ERROR E0501
+}
+
+// Each return runs the clauses: the write on the path past the early `return` is the conflict.
+fn clamp(p: &mut u32, hi: u32) ensures(*old(&*p) >= *p) {
+    if *p <= hi {
+        return;
+    }
+    *p = hi; //~ ERROR E0501
+}
+
+view struct Hold { to: &mut u32 }
+
+fn inc(h: &mut Hold) ensures(*old(&*h.to) + 1 == *h.to) {
+    *h.to += 1; //~ ERROR E0501
+}
+
+// A check the compiler proves and removes is still code of the fn.
+fn keep(p: &mut u32, n: u32) -> u32 requires(n < 10) ensures(result < 10 || *old(&*p) == 0) {
+    *p = n; //~ ERROR E0501
+    return n;
+}
+
+fn dup(v: &vec.Vec<u32>) -> vec.Vec<u32> {
+    let mut w = vec.Vec::<u32>.new();
+    w.extend_from_slice(v.as_slice());
+    return w;
+}
+
+// A temporary made for an `old(e)` value is dropped once the value is taken.
+fn snap(v: &mut vec.Vec<u32>) ensures(old(dup(v).as_slice())[0] == 7) { //~ ERROR E0501
+    v.push(2);
+}
+
+// A `?` error return runs the clauses as well.
+fn try_first(v: &mut vec.Vec<u32>, o: Option<u32>) -> Option<u32> ensures(*old(v.get_ref(0)) == 0) {
+    let x = o?;
+    v.push(x); //~ ERROR E0501
+    return Option.Some(x);
+}
+
+fn slot(v: &mut [u32]) -> &mut u32 from v ensures(*old(&v[0]) == *result) {
+    return &mut v[0]; //~ ERROR E0501
+}
+
+// A fn used as a fn value is the same fn.
+fn use_value() {
+    let f: fn(&mut u32) = bump;
+    let mut x: u32 = 1;
+    f(&mut x);
+}
+
+fn main() { }

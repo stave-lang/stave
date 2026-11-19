@@ -1,0 +1,49 @@
+//~ CHECK-ONLY
+// An `ensures` clause runs at each return, over the params as the body left them: a `&mut`
+// param the body moved (into a local, or into a view its `from` clause names) is gone there.
+import std.vec;
+
+view struct Hold { to: &mut u32 }
+
+fn fill(v: &mut vec.Vec<u32>) ensures(v.len() > 0) { //~ ERROR E0502
+    let q = v;
+    q.push(1);
+}
+
+fn stash(h: &mut Hold from p, p: &mut u32) ensures(*p == 5) { //~ ERROR E0502
+    *p = 5;
+    h.to = p;
+}
+
+// Moved on one path: the clause is checked at each return.
+fn maybe(h: &mut Hold from p, p: &mut u32, keep: bool) -> u32 ensures(*p == result) { //~ ERROR E0502
+    if keep {
+        h.to = p;
+        return 0;
+    }
+    return *p;
+}
+
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+
+fn keep(x: &mut u32) -> u32 ensures(*x == 5) { //~ ERROR E0502
+    let y: &mut u32 = x;
+    *y = 5;
+    return *y;
+}
+
+fn set_link(l: &mut Link from q, q: &mut Pick) ensures(q.count == 7) { //~ ERROR E0502
+    l.to = q;
+    l.to.count = 7;
+}
+
+impl Hold {
+    fn set(&mut self from p, p: &mut u32) -> u32 ensures(old(*p) == result) ensures(*p == result) { //~ ERROR E0502
+        let x = *p;
+        self.to = p;
+        return x;
+    }
+}
+
+fn main() { }
