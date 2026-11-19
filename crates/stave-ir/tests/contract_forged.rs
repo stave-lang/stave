@@ -226,10 +226,13 @@ fn a_safe_row_needs_both_bounds_of_a_trapping_sum() {
     assert!(whys(&m, &good).is_empty());
     let s = &good[0].summary;
     let max = i128::from(u32::MAX);
-    assert_eq!(s.pre.iter().map(|p| p.row).collect::<Vec<_>>(), [
-        Row { a: Term::Zero, b: Term::Param(0), w: -5 },
-        Row { a: Term::Param(0), b: Term::Zero, w: max - 1 }
-    ]);
+    assert_eq!(
+        s.pre.iter().map(|p| p.row).collect::<Vec<_>>(),
+        [
+            Row { a: Term::Zero, b: Term::Param(0), w: -5 },
+            Row { a: Term::Param(0), b: Term::Zero, w: max - 1 }
+        ]
+    );
     assert_eq!(s.pre[1], Pre { row: s.pre[1].row, entry: NO_BLOCK, half: 0 });
     assert_eq!(s.safe.iter().map(|x| x.inst).collect::<Vec<_>>(), insts_with(body(&m, f), Op::Add));
 
