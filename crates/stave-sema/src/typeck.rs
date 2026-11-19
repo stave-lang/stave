@@ -1907,11 +1907,14 @@ impl<'a> Ck<'a> {
         }
     }
 
-    /// Records an instantiation when the callee is generic.
-    pub fn site(&mut self, node: u32, decl: DeclId, args: &[GArg]) {
+    /// Records an instantiation when the callee is generic. Every instantiation of a fn is
+    /// recorded here, so this is where the bounds and the view-kind rule of all its generics (the
+    /// parent impl's or trait's included) are checked against `args`, reported at `at`.
+    pub fn site(&mut self, node: u32, at: Span, decl: DeclId, args: &[GArg]) {
         if args.is_empty() {
             return;
         }
+        self.check_instance(at, decl, args);
         self.sites.push(CallSite { caller: self.decl, node, inst: Instance { decl, args: args.to_vec() } });
     }
 

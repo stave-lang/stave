@@ -2009,7 +2009,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0414",
         severity: Severity::Error,
         area: "kinds",
-        rule: "generic parameter instantiated with a view without the `T: view` bound",
+        rule: "generic parameter instantiated with a view without the `T: view` bound: at every use of a generic fn, method, impl, or type (a call, a fn item used as a value, an operator, a trait method's own params); an impl whose param has no `view` bound does not apply to a view; case `drop`: an `impl Drop` whose param has no `view` bound at a place where its type takes one (a destructor runs for every instance of its type)",
         retired: false,
         located: true,
         holes: &[
@@ -2040,6 +2040,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "keep `{type}` in a local or in a container whose parameter is `view`-bounded (`vec.Vec`, `Box`, `Option`), or store an owned value",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "drop",
+                message: "`impl Drop for {type}` does not cover views: `{generic}` takes a view there, but parameter `{param}` of the impl has no `view` bound",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`impl Drop` here" },
+                    LabelTemplate { at: "param", text: "`{param}` declared here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "add the bound `{param}: view` to the impl",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

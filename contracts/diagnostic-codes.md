@@ -95,7 +95,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0411 | view in a heap or container type (Box, Vec, Map, ...). To be retired: `vec.Vec`, `Box`, `Option`, `Result` take `T: view` and become conditional views; a container without the bound is E0414 case `container` |
 | E0412 | view passed to `forget` |
 | E0413 | view or reference in a `const`, `static`, or `static mut` (except `&str` initialized by a string literal or another such const: static strings) |
-| E0414 | generic parameter instantiated with a view without the `T: view` bound. Case `container` (planned): a heap type that does not accept views, e.g. `Rc`/`Arc` |
+| E0414 | generic parameter instantiated with a view without the `T: view` bound (at every use: call, fn item as a value, operator, trait method's own params; an impl whose param lacks `view` does not apply to a view). Case `drop`: an `impl Drop` param without `view` where its type takes one. Case `container` (planned): a heap type that does not accept views, e.g. `Rc`/`Arc` |
 | E0415 | `impl Copy for T {}` where a field or variant payload of T is not Copy (Copy: scalars, `&T`, raw pointers, arrays and tuples of Copy types, ADTs with `impl Copy`; `&mut T` never). Related span: the field |
 | E0416 | `impl Drop` for a Copy type (built-in Copy, or an ADT with `impl Copy`; related span: the `impl Copy`) |
 | E0417 | `static X: T` where T is not `Sync` (a `static` is shared by every thread): use an atomic (`atomic.U64`), `sync.Mutex<T, R>`, or `sync.Once<T, R>` (R: the lock rank) |

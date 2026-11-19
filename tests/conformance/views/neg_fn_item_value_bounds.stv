@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// A generic fn item used as a value is an instantiation: its bounds and the view-kind rule
+// hold there as at a call (inferred from the expected fn type, or given).
+import std.cell;
+import std.mem;
+import std.sync;
+
+fn put<T>(v: &mut Option<T>, x: T) { *v = Option.Some(x); }
+fn dup<T: Copy>(x: T) -> (T, T) { return (x, x); }
+fn share<T: Sync>(x: &T) { }
+fn apply(f: fn(&mut Option<&u32>, &u32)) { }
+
+struct D { id: u32 }
+
+fn main() -> i32 {
+    let ok: fn(u32) -> (u32, u32) = dup;
+    let ok2: fn(&mut Option<u32>, u32) = put;
+    let f: fn(&mut Option<&u32>, &u32) = put; //~ ERROR E0414
+    let f2 = put::<&u32>; //~ ERROR E0414
+    apply(put); //~ ERROR E0414
+    let h: fn(D) -> (D, D) = dup; //~ ERROR E0901
+    let h2: fn(&mut u32) -> (&mut u32, &mut u32) = dup; //~ ERROR E0414
+    let leak: fn(sync.MutexGuard<u32, 2>) = mem.forget; //~ ERROR E0412
+    let sw: fn(&mut &u32, &mut &u32) = mem.swap; //~ ERROR E0414
+    let s: fn(&cell.Cell<u64>) = share; //~ ERROR E0901
+    let mk = cell.Cell::<Option<&u32>>.new; //~ ERROR E0411
+    return 0;
+}

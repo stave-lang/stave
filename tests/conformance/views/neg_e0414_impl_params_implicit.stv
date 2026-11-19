@@ -1,0 +1,42 @@
+//~ CHECK-ONLY
+// The impls an implied call selects follow the same rule: `next` of a `for` loop, `Display.fmt`
+// of an f-string hole, and an impl method named by path as a fn value.
+import std.io;
+import std.string;
+
+view struct It<T: view> { cur: Option<T>, sink: &mut Option<T> }
+
+impl<T: Copy> It<T> {
+    fn next(&mut self) -> Option<T> {
+        *self.sink = self.cur;
+        let c = self.cur;
+        self.cur = Option.None;
+        return c;
+    }
+}
+
+struct Slot<T: view> { v: Option<T> }
+
+impl<T> Slot<T> {
+    fn set(&mut self, x: T) { self.v = Option.Some(x); }
+}
+
+impl<T: Copy> Display for Slot<T> {
+    fn fmt<W: Write>(&self, w: &mut W) { }
+}
+
+fn main() -> i32 {
+    let a: u32 = 1;
+    let mut owned: Option<u32> = Option.None;
+    let ok = It::<u32>.{ cur: Option.Some(1), sink: &mut owned };
+    for x in ok { }
+    let own = Slot::<u32>.{ v: Option.Some(1) };
+    io.print(f"{own}\n");
+    let mut sink: Option<&u32> = Option.None;
+    let it = It::<&u32>.{ cur: Option.Some(&a), sink: &mut sink };
+    for x in it { } //~ ERROR E0208
+    let slot = Slot::<&u32>.{ v: Option.Some(&a) };
+    io.print(f"{slot}\n"); //~ ERROR E0208
+    let f = Slot::<&u32>.set; //~ ERROR E0414
+    return 0;
+}
