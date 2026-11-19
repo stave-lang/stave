@@ -1,0 +1,20 @@
+[package]
+name = "fuzz-classes"
+description = "Seeded fuzzer of borrow-checker constructs: verdicts known by construction, interpreter vs native runs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gen-corpus = { path = "../gen-corpus" }
+stave-diag = { workspace = true }
+stave-driver = { workspace = true }
+stave-ir = { workspace = true }
+stave-target = { workspace = true }

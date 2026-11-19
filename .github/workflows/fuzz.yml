@@ -1,0 +1,46 @@
+name: fuzz
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: first seed (default: the run number times 100000)
+        required: false
+      budget:
+        description: seconds of fuzzing
+        required: false
+        default: "600"
+permissions:
+  contents: read
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  fuzz-classes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CI: "1"
+      # The release profile's fat LTO costs minutes of build time and nothing a fuzz run needs.
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --locked --release -p fuzz-classes
+      # A new first seed per run: the runs together cover new programs, and a finding names its
+      # seed, so `fuzz-classes --print --class C --seed N` reproduces it.
+      - run: >
+          target/release/fuzz-classes
+          --seed "${{ github.event.inputs.seed || format('{0}00000', github.run_number) }}"
+          --time-budget "${{ github.event.inputs.budget || '600' }}"
+          --jobs "$(nproc)" --release --out fuzz-out
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-classes-${{ github.run_number }}
+          path: |
+            fuzz-out/findings/
+            fuzz-out/summary.txt
+            fuzz-out/programs.tsv
+          if-no-files-found: ignore

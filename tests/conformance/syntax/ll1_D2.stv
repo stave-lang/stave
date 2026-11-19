@@ -10,6 +10,6 @@ fn good(x: u32, y: usize) -> bool {
     return (x as usize) < y;
 }
 
-fn generic_cast(v: vec.Vec<u8>) -> vec.Vec<u8> {
-    return v as vec.Vec<u8>;
+fn generic_cast(v: &vec.Vec<u8>) -> &vec.Vec<u8> from v {
+    return v as &vec.Vec<u8>;
 }
