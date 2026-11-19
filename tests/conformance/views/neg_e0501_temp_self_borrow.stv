@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// The new value of a temporary borrows the value its expression made the time before: a call
+// result `from` the earlier borrow, a literal with a borrow made through it.
+view struct Chain { v: u32, prev: &u32 }
+
+fn wrap(x: &Chain, v: u32) -> Chain from x {
+    return Chain.{ v: v, prev: &x.v };
+}
+
+fn by_call(base: &Chain) -> u32 {
+    let mut r: &Chain = base;
+    let mut i: u32 = 0;
+    while i < 3 {
+        r = &wrap(r, i + 1); //~ ERROR E0501
+        i = i + 1;
+    }
+    return *r.prev;
+}
+
+fn by_literal(base: &Chain) -> u32 {
+    let mut r: &Chain = base;
+    let mut i: u32 = 0;
+    while i < 3 {
+        r = &Chain.{ v: i + 1, prev: &r.v }; //~ ERROR E0501
+        i = i + 1;
+    }
+    return *r.prev;
+}
+
+fn main() -> i32 {
+    return 0;
+}

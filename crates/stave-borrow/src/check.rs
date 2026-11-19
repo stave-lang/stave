@@ -545,16 +545,14 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         for (i, s) in body.blocks[b].stmts.iter().enumerate() {
             let li = live_in(cx.flow, s, &la[i]);
             let live = cx.flow.live_loans(&st, &li);
-            let mut la_i = la[i].clone();
-            if let Some(d) = stmt_def(s) {
-                let t = cx.flow.tracked[d as usize];
-                if t != u32::MAX {
-                    la_i.remove(t as usize);
-                }
-            }
-            let after = cx.flow.live_loans(&st, &la_i);
+            // The loans live after the statement are read from the state after it: the value
+            // the statement gives its destination may hold a loan that no other live local
+            // holds (`x = V.{ r: &x.f }`: the write of `x` ends the value the new one borrows).
+            let mut post = st.clone();
+            cx.flow.apply(&s.kind, &mut post);
+            let after = cx.flow.live_loans(&post, &la[i]);
             cx.stmt(&st, &live, &after, (b as u32, i as u32), s);
-            cx.flow.apply(&s.kind, &mut st);
+            st = post;
         }
     }
     let mut findings = cx.findings;
