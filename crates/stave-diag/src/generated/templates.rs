@@ -2335,10 +2335,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0513",
         severity: Severity::Error,
         area: "borrow",
-        rule: "write through `&mut View` with origins not contained in the target's; case `several`: the pointer may point to more than one view object and one of them may lack the origins (a pointer picked from several, or one held in a by-value view parameter, in a closure capture, or below the view a `&mut` parameter points to)",
+        rule: "store of a value into a view (an assignment through `&mut View`, or a call whose callee declares the store with a parameter `from` clause) with origins the view cannot take: through an assignment the target must have them already, and a view captured by a closure takes nothing new; case `param`: the view is the one a `&mut` parameter points to (or one reached from it) and the parameter's `from` clause does not name the origins; case `several`: the pointer may point to more than one view object and one of them may lack the origins (a pointer picked from several, or one held in a by-value view parameter, in a closure capture, or below the view a `&mut` parameter points to)",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "clause", kind: HoleKind::Source, choices: &[] },
+            Hole { name: "param", kind: HoleKind::Name, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
         ],
         shapes: &[
@@ -2350,6 +2352,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write a value that borrows only from the origins of `{place}`, or add the origin to the `from` clause that created `{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "param",
+                message: "cannot write into `{place}`: parameter `{param}` does not declare that it keeps a borrow of `{clause}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "write here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "add `from {clause}` to parameter `{param}` (`+ {clause}` after a `from` it already has)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2372,7 +2386,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0514",
         severity: Severity::Error,
         area: "borrow",
-        rule: "`from` on a parameter that is not `&mut V` (V a view) of a fn item or method (closures, extern and kernel fns take no parameter `from`) (planned)",
+        rule: "`from` on a parameter that is not `&mut V` (V a view) of a fn item or method (closures, extern and kernel fns take no parameter `from`; a method of a trait impl repeats the trait method's clause on any `&mut` parameter)",
         retired: false,
         located: true,
         holes: &[
@@ -2397,7 +2411,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0515",
         severity: Severity::Error,
         area: "borrow",
-        rule: "a parameter's `from` clause names the parameter itself (planned)",
+        rule: "a parameter's `from` clause names the parameter itself",
         retired: false,
         located: true,
         holes: &[
@@ -3434,7 +3448,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0807",
         severity: Severity::Error,
         area: "threads-unsafe-ffi",
-        rule: "an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker, so a call through the value would skip E0803). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through the value would skip E0802 and E0806). Case `extern`: an `extern \"C\"` export used as a fn value (its convention is C, not Stave's)",
+        rule: "an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker, so a call through the value would skip E0803). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through the value would skip E0802 and E0806). Case `extern`: an `extern \"C\"` export used as a fn value (its convention is C, not Stave's). Case `param-from`: a fn with a parameter `from` clause used as a fn value (fn types carry no clause, and a call through a fn value stores nothing)",
         retired: false,
         located: true,
         holes: &[
@@ -3461,6 +3475,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call `{name}` directly, or wrap the call in a closure",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "param-from",
+                message: "`{name}` cannot become a fn value: a parameter of it has a `from` clause, and a call through a fn value stores nothing",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "fn with a parameter `from` used as a fn value" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "call `{name}` directly, or pass a fn that returns the value and store it at the call site",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
