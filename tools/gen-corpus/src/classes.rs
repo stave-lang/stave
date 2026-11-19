@@ -581,8 +581,14 @@ fn holder(class: Class, r: &mut Rng) -> Holder {
                 pick(r, &["*p.best", "*q.best", "*best(&q)"]),
                 x,
                 Some((
-                    vec![s("let mut p = Pick.{ best: &zero, count: 0 };")],
-                    vec![s("let pp: &mut Pick = &mut p;"), s("*pp = Pick.{ best: &w, count: 3 };")],
+                    vec![
+                        s("let mut p = Pick.{ best: &zero, count: 0 };"),
+                        s("let mut q = Pick.{ best: &zero, count: 0 };"),
+                    ],
+                    vec![
+                        format!("let pp: &mut Pick = if {c} then &mut q else &mut p;"),
+                        s("*pp = Pick.{ best: &w, count: 3 };"),
+                    ],
                 )),
             ),
             0 => h("mk", vec![format!("let p = mk(&x, &y, {c});")], "*p.best", x, None),
@@ -862,10 +868,19 @@ fn frame(r: &mut Rng, b: &mut Body, h: &Holder, want_bad: bool) -> (String, bool
 fn framed(class: Class, r: &mut Rng, idx: usize, want_bad: bool) -> Case {
     let mut b = Body::new();
     head(&mut b, r.range(1, 50));
-    let h = holder(class, r);
+    let mut h = holder(class, r);
+    let mut name = h.name.to_string();
+    // A closure calling a fn value made by a cast is a call cycle to the recursion rule (E1409).
+    if r.chance(200) && h.name != "fn-cast" {
+        // a closure over the holder: it keeps every borrow the holder keeps
+        h.setup.push(format!("let fw: fn() -> u32 = fn() -> u32 {{ return {}; }};", h.use_));
+        h.use_ = s(if r.chance(500) { "fw()" } else { "apply(fw)" });
+        h.scoped = None;
+        name.push_str("+closure");
+    }
     let (f, bad) = frame(r, &mut b, &h, want_bad);
     let codes: &'static [&'static str] = if bad { &["E0501", "E0502"] } else { &[] };
-    finish(idx, b, String::new(), format!("{}/{f}", h.name), bad, codes)
+    finish(idx, b, String::new(), format!("{name}/{f}"), bad, codes)
 }
 
 fn finish(
@@ -881,22 +896,33 @@ fn finish(
     Case { items, body, label: format!("{label}/{}", if bad { "bad" } else { "good" }), bad, codes }
 }
 
-/// Straight-line sequences of setups, uses, and writes over several shared holders; bad iff a
-/// write to an origin of a holder lies between its setup and a later use.
+/// Straight-line sequences of setups, uses, and writes over several holders; bad iff, between
+/// the setup of a holder and its last use, an origin of it is written, or, for a `&mut` holder,
+/// another holder of a common origin is set up or used, or a `&mut` holder of a common origin
+/// is set up while a shared one lives.
 fn sequence(r: &mut Rng, idx: usize, want_bad: bool) -> Case {
     for _ in 0..64 {
         let mut r2 = Rng::derive(r.next_u64(), 1, 1);
         let r = &mut r2;
-        let holders: Vec<(String, Vec<&str>, String)> = (0..r.range(2, 3))
-            .map(|j| match r.below(4) {
-                0 => (format!("let r{j}: &u32 = &x;"), vec!["x"], format!("*r{j}")),
-                1 => (format!("let p{j} = mk(&x, &y, seed > 9);"), vec!["x", "y"], format!("*p{j}.best")),
+        // (setup, origins, use, exclusive)
+        let holders: Vec<(String, Vec<&str>, String, bool)> = (0..r.range(2, 4))
+            .map(|j| match r.below(6) {
+                0 => (format!("let r{j}: &u32 = &x;"), vec!["x"], format!("*r{j}"), false),
+                1 => (
+                    format!("let p{j} = mk(&x, &y, seed > 9);"),
+                    vec!["x", "y"],
+                    format!("*p{j}.best"),
+                    false,
+                ),
                 2 => (
                     format!("let f{j}: fn() -> u32 = fn() -> u32 {{ return z +% 1; }};"),
                     vec!["z"],
                     format!("f{j}()"),
+                    false,
                 ),
-                _ => (format!("let a{j}: [&u32; 2] = [&z; 2];"), vec!["z"], format!("*a{j}[1]")),
+                3 => (format!("let a{j}: [&u32; 2] = [&z; 2];"), vec!["z"], format!("*a{j}[1]"), false),
+                4 => (format!("let m{j}: &mut u32 = &mut z;"), vec!["z"], format!("*m{j}"), true),
+                _ => (format!("let n{j}: &mut u32 = &mut x;"), vec!["x"], format!("*n{j}"), true),
             })
             .collect();
         let mut events: Vec<(u8, usize)> = (0..holders.len()).map(|j| (0, j)).collect();
@@ -922,16 +948,16 @@ fn sequence(r: &mut Rng, idx: usize, want_bad: bool) -> Case {
         }
         let wnames = ["x", "z"];
         let mut bad = false;
-        for (wi, &(e, t)) in ordered.iter().enumerate() {
-            if e != 2 {
-                continue;
-            }
-            for (hj, hd) in holders.iter().enumerate() {
-                let set_before = ordered[..wi].contains(&(0, hj));
-                let used_after = ordered[wi + 1..].contains(&(1, hj));
-                if set_before && used_after && hd.1.contains(&wnames[t]) {
-                    bad = true;
-                }
+        for (h, hd) in holders.iter().enumerate() {
+            let set = ordered.iter().position(|&ev| ev == (0, h));
+            let last = ordered.iter().rposition(|&ev| ev == (1, h));
+            let (Some(set), Some(last)) = (set, last) else { continue };
+            for &(e, t) in &ordered[set + 1..last] {
+                let common = |o: &Vec<&str>| o.iter().any(|n| hd.1.contains(n));
+                bad |= match e {
+                    2 => hd.1.contains(&wnames[t]),
+                    _ => t != h && common(&holders[t].1) && (hd.3 || (e == 0 && holders[t].3)),
+                };
             }
         }
         if bad != want_bad {
