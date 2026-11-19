@@ -144,7 +144,6 @@ atomics are sequentially consistent; `p` is the address (naturally aligned) as `
 | `atomic_xchg_u32/u64(p, v) -> old` | x86-64 / AArch64 | `xchg` / `ldaxr`+`stlxr` loop |
 | `atomic_add_u32/u64(p, v) -> old` (wrapping) | x86-64 / AArch64 | `lock xadd` / `ldaxr`+`add`+`stlxr` loop |
 | `atomic_cas_u32/u64(p, expected, new) -> old` | x86-64 / AArch64 | `lock cmpxchg` / `ldaxr`+`cmp`+`b.ne`+`stlxr` loop (`clrex` on failure) |
-
 | `thread_block() -> usize` | x86-64 | `mov rax, fs:[0]` (`64 48 8B 04 25 00 00 00 00`): the first word of the FS segment, which is the address of the calling thread's block |
 | same | AArch64 | `mrs x0, tpidr_el0` (`D53BD040`) |
 | `set_thread_block(p: usize)` | AArch64 | `msr tpidr_el0, x0` (`D51BD040`), x0 = p |

@@ -110,7 +110,8 @@ const ARCH_SET_FS: u64 = 0x1002;
 /// `openat`, relative paths and `AT_FDCWD` only; `close`); `mprotect`, `rt_sigaction`,
 /// `rt_sigprocmask`, and `sigaltstack` succeed without effect; `getpid` returns 1; x86-64
 /// `arch_prctl(ARCH_SET_FS, p)` and the `set_thread_block(p)` intrinsic store the thread pointer,
-/// which `thread_block` returns (one thread: one word). Other system calls return `-ENOSYS`. `cpuid` and `xgetbv` return zeros (no optional features);
+/// which `thread_block` returns (one thread: one word). Other system calls return `-ENOSYS`.
+/// `cpuid` and `xgetbv` return zeros (no optional features);
 /// `thread_start_addr` and `stack_table` return 0 (no stack table: the runtime defaults apply);
 /// `cpu_init` does nothing (the feature word stays 0, so a `dispatch` takes its `_` arm); any
 /// other intrinsic without arguments returns its entry of `values` (`main_addr`, `site_table`, `pc_table`, `signal_handler_addr`), if set.
