@@ -7,9 +7,10 @@ text ("Relation to the static rules"). The borrow-tracking mode of the IR interp
 it and reports each violation.
 
 A *violation* is an event a rule below forbids. Safe code never reaches one. In `unsafe` code
-it is undefined behaviour (`LANG.md` §3: a `&mut` overlapping another live reference, a write
-behind a live `&`, a dangling pointer). An event no rule forbids is allowed. Only uses count: a
-reference that is never used again conflicts with nothing.
+it is undefined behaviour (the reference cases of the closed list of `LANG.md` §3 are these
+rules). An event no rule forbids is allowed. Only uses count: a
+reference that is never used again conflicts with nothing, except a param while its fn runs
+(M23).
 
 ## State
 
@@ -96,8 +97,8 @@ fn frozen() -> u32 {
 
 ## Events
 
-References M4 to M7, values M8 to M12, scope M13 and M14, calls M15 to M17, closures M18 and
-M19, unsafe code M20 and M21, threads M22.
+References M4 to M7, values M8 to M12, scope M13 and M14, calls M15 to M17 and M23, closures
+M18 and M19, unsafe code M20 and M21, threads M22. M24 is the oracle's check of signatures.
 
 - **M4 (borrow).** `&p` and `&mut p` make a tag. Its parent is the tag `p` is reached through:
   the root when the path of `p` has no dereference, else the tag of the last reference the path
@@ -247,27 +248,17 @@ fn temp_loop() -> u32 {
 ```
 - **M15 (call).** Arguments are evaluated left to right and passed by copy or move with their
   tags; `&mut` places are reborrowed (M6). A param is a local of the callee that holds the
-  argument. A call makes no other tag and protects none: a param's tag may become `Dead` during
-  the call, and only a later use of it is a violation. A call through a fn value is the same.
-```stave
-fn bump(m: &mut u32, r: &u32) -> u32 {
-    *m = *m + 1;            // when `r` covers the same bytes: `r` is Dead
-    return *r;              // M1: read through a Dead `&`
-}
-fn caller() -> u32 {
-    let mut x: u32 = 1;
-    return bump(&mut x, &x);
-}
-```
+  argument. A call makes no other tag. The references it passes are protected until it returns
+  (M23, with the example). A call through a fn value is the same.
 - **M16 (store into a view).** Writing a reference into a view reached through `&mut V` is a
   write (M2) of the view's bytes; the stored word keeps its tag and stays under every rule. A
   parameter `from` clause has no run-time effect: the callee may store any reference it holds,
-  and a store the clause lacks is no violation by itself. The violation is the later use of the
-  stored reference after a conflicting access or after the end of its referent. After the call,
-  each reference in a view the callee could write holds its word from before the call or a word
-  the callee held. A signature does not say which, so a static rule must keep both (a weak
-  update); the model follows the one word that is there. A pointer that may point to several
-  views writes the one it points to.
+  and a store the clause lacks is no violation by itself (M24 reports it). The violation is the
+  later use of the stored reference after a conflicting access or after the end of its
+  referent. After the call, each reference in a view the callee could write holds its word from
+  before the call or a word the callee held. A signature does not say which, so a static rule
+  must keep both (a weak update); the model follows the one word that is there. A pointer that
+  may point to several views writes the one it points to.
 ```stave
 view struct Pick { best: &u32, count: usize }
 fn put(dst: &mut Pick from x, x: &u32) { dst.best = x; }
@@ -292,6 +283,30 @@ fn local(z: &u32) -> &u32 from z {
 }
 fn caller(zero: &u32) -> u32 {
     return *local(zero);    // M1: read after the end of the referent
+}
+```
+- **M23 (protection).** From the entry of a call to the callee's return, the references passed
+  are *protected*: the tag of each `&T` / `&mut T` param (of a reborrowed `&mut` argument: the
+  reborrow's tag, M6) and of each reference word inside a by-value view param (found by its
+  type; of an enum the live variant). Not protected: raw pointers; references reached only
+  through a pointer (what the view behind a `&mut V` param holds); the captures of a fn value,
+  when it is passed and when its body runs (a fn type does not show them; the params of the
+  body are protected like any). While a tag is protected, an access or end that would make it
+  `Dead` on a byte, and a foreign read of a `&mut` that is `Reserved` or `Active`, are violations
+  at that access, whether or not the param is used again. Arguments are evaluated before the
+  entry: in `v.push(v.len())` the read of `v` meets no protection. What this gives an optimizer:
+  from entry to return, not only up to the last use, the bytes of a `&` param outside
+  `UnsafeCell` are not written and stay allocated, and the bytes of a `&mut` param are read and
+  written through it alone.
+```stave
+fn quiet(m: &mut u32, r: &u32) -> u32 {
+    let a: u32 = *r;
+    *m = a + 1;             // M23 when `r` covers the same bytes: it is protected
+    return a;               // `r` is not used again: M1 would report nothing
+}
+fn caller() -> u32 {
+    let mut x: u32 = 1;
+    return quiet(&mut x, &x);
 }
 ```
 - **M18 (closure literal).** Evaluating a closure literal borrows (M4) each captured local once:
@@ -382,12 +397,55 @@ fn interleaved() -> u32 {
 }
 ```
 
+## Signature check
+
+`from` clauses have no run-time rule (M16, M17). The oracle checks them all the same, as a
+fifth report. It is a check of a signature against what one call did, not one of the four
+aliasing classes and not a violation: the execution stays defined, and the reported program may
+have no caller that misuses the reference.
+
+- **M24 (signature).** At the return of a fn item or method. *Reachable from a value*: its
+  reference words (of a fn value: its captures) and those in the views they point to, by type.
+  *Writable through a param*: the reference words reachable from it behind `&mut` words only
+  (`*p` of a `&mut V` param and on; what a `&mut` word of a by-value view or a `&mut` capture
+  points to). A word *derives from* another when its tag is that word's tag or a descendant.
+  - Result: each reference word in the returned value derives from a source of the result's
+    clause; without a clause there is no source.
+  - Stores: each word writable through a param `p` at return, whose tag was not writable
+    through `p` at entry, derives from a word that was, from a source of the clause of `p`, or
+    from a source of a clause that names `p` without `copy`.
+  - Sources: of `from x`, the words reachable from the argument `x`, at entry or at return; of
+    `from copy x`, the same without the word of `x` itself.
+  - Not judged: a tag of a `static` or of string literal data; a tag made through a raw pointer
+    (M20) or below such a tag (its origin is the claim of the unsafe code).
+  - A closure body: every reference param and capture is a source of its result; no param has a
+    clause; a capture is a param for the stores.
+
+  The report is "signature": the return site, the param or result with its clause, the site that
+  made the tag, and the site of the store when the word was written during the call. The check
+  is weaker than E0510 / E0513: it does not tell a borrow through a `&mut` field of `*x` from a
+  copy out of it, and it sees one execution.
+```stave
+view struct Pick { best: &u32, count: usize }
+fn put(dst: &mut Pick, x: &u32) {
+    dst.best = x;           // the word of `x` goes into `*dst`
+}                           // M24: `dst` has no clause that names `x`
+fn harmless(zero: &u32) -> usize {
+    let y: u32 = 7;
+    let mut p = Pick.{ best: zero, count: 0 };
+    put(&mut p, &y);        // `y` outlives `p`: no rule of the model is broken
+    return p.count;
+}
+```
+
 ## Reports
 
 A report gives the class, the rule, the place (allocation and bytes, as a source place), the
 site of the violating event, the site of its cause, and the site where the failing tag was made.
 The failing tag is the first tag from the accessing tag towards the root whose permission
-forbids the access.
+forbids the access. A protection violation (M23) has the class its tag and the access give
+(a `&` written: (a); a `&mut` read or written: (b); an end: (c)); its two sites are the call
+that protects the tag and the access.
 
 | Class | Violation | Cause | Rules |
 |---|---|---|---|
@@ -398,7 +456,8 @@ forbids the access.
 
 In (d) the copy is the report: the later double drop, or the two `&mut` to one place, is its
 symptom. Two holders of one `&mut` tag made by a copy cannot be told apart by M1 to M3, so
-(b) never reports them; M9 does, at the first use of the place the value left.
+(b) never reports them; M9 does, at the first use of the place the value left. The fifth form,
+"signature" (M24), is reported beside these and never instead of them.
 
 ## Relation to the static rules
 
@@ -412,16 +471,17 @@ hole. The model never reads a static rule to decide.
 | E0501: an access, borrow, move, drop, or assignment under a live loan | M1, M2, M3, M4, M9, M12 |
 | E0501: a local dies, or a temporary is evaluated again or dropped, under a live loan | M13, M14 |
 | E0501 after a storing call, after a write through `&mut V`, for a view that borrows itself | M16 with M2, M13 |
-| two-phase receiver borrows | M4 (a borrow is not an access) |
+| E0501 at a call: an argument's referent reachable by the callee another way (a second argument, a capture of a fn-value argument, a thread) | M23 |
+| two-phase receiver borrows | M4 (a borrow is not an access), M23 (protection starts at the entry) |
 | E0502: use after move; assignment into a part of a moved value | M9 |
 | E0503: assignment through `&`; `&mut` of a place behind `&`; writes of a `static` | M2 on `Frozen` |
 | E0503: assignment to, or `&mut` of, an immutable binding | none (the root of a local is `Active`) |
 | E0504: move out of `*r`, `r.f`, `v[i]`, a capture | M9, M12 (the owner later reads or drops the moved-out place) |
-| E0510: a returned borrow the `from` clause lacks | M13, M2 in the caller, which reads the clause |
-| E0512: a returned borrow of a local | M13 |
+| E0510: a returned borrow the `from` clause lacks | M24 (result); M13, M2 in the caller, which reads the clause |
+| E0512: a returned borrow of a local | M13; M24 (result) |
 | E0512 `mut-capture` | M18 |
-| E0513: a store the view or the clause cannot take | M16 with M13, M2 in the caller |
-| E0514, E0515, E0520, E0521, E0905, E0807: form of clauses, fn values of fns with clauses | none (they keep the callers' reading of a signature true) |
+| E0513: a store the view or the clause cannot take | M24 (stores); M16 with M13, M2 in the caller |
+| E0514, E0515, E0520, E0521, E0905, E0807: form of clauses, fn values of fns with clauses | none (they keep M24 and the callers' reading of a signature well-defined) |
 | E0410 to E0414: where references and views may be held | M13, heap `free` (a reference where no rule sees its holder) |
 | E0415, E0416: Copy only for types without `&mut` and drop glue | M8, M9 |
 | E0418: array repeat | M10 |
@@ -429,7 +489,7 @@ hole. The model never reads a static rule to decide.
 | temporaries: lifetime, one place per expression | M14 |
 | E0801, E0808, `scope` / `join` structure | M13, M22 (threads end before the captured locals) |
 | E0802, E0806, E0417, E1405, E1406 | none (data races and deadlocks, not tags) |
-| E0803: unsafe operations | marks where M1 to M21 are the author's obligation |
+| E0803: unsafe operations | marks where M1 to M23 are the author's obligation |
 | `Frozen` (E1410) | M21, M2 (which `&` are read-only) |
 
 Precision notes that follow from the model, each accepted by it: borrows of disjoint elements
@@ -464,7 +524,8 @@ The oracle's regression set holds one program per shape. The rule that rejects t
 
 A program that only shows a callee body the static rules must reject (a store its clause lacks,
 a clause a trait impl drops) has no violating execution until a caller uses the stored
-reference: the model then rejects that execution by the rows above.
+reference: the model then rejects that execution by the rows above. Before that, M24 reports
+the call of the body.
 
 ## What an implementation over the checked IR needs
 
@@ -474,7 +535,8 @@ the next evaluation of a temporary are nothing; one environment `slot` serves ev
 of a closure literal. The tracking mode therefore takes from lowering, per function and outside
 the canonical dump: each borrow with its kind, range, and the implicit forms of M6 and M18; each
 by-value use that is a move (M9), also of an SSA local; the begin and end of each local and
-temporary (M13, M14); the capture references of each `fn.make` as a value of their own (M18).
+temporary (M13, M14); the capture references of each `fn.make` as a value of their own (M18);
+the `from` clauses of each fn (M24).
 `runtime.alloc.{try_alloc, try_realloc, free}` are primitive events. Everything else is read off
 the IR: `load`, `store`, `vec.*` memory ops, and intrinsics that take a pointer are M1 and M2;
 `addr.*` and casts keep the tag (M20).
@@ -483,12 +545,10 @@ the IR: `load`, `store`, `vec.*` memory ops, and intrinsics that take a pointer 
 
 - **Data races.** Two threads that use one tag, or two `Cell` permissions, at once are outside
   the model: it orders accesses and judges tags only.
-- **Signatures.** The model judges executions. A callee that breaks its clause (E0513, E0510)
-  with no caller that then misuses the reference is not reported, and a verdict says nothing
-  about other inputs or interleavings.
-- **No protection during a call.** A param reference that becomes `Dead` while its callee runs
-  and is not used again is no violation. An optimizer may rely only on what the rules give: a
-  fact about a param holds up to its last use, not to the end of the call.
+- **Executions, not programs.** A verdict says nothing about other inputs or interleavings.
+  M24 reports a broken clause only for a call that breaks it, and not through raw pointers.
+- **Captures.** The captures of a fn value are not protected (M23): a fact about one holds up
+  to its last use.
 - **Untagged pointers.** A word that lost its tag (arithmetic other than `+` / `-` with an
   integer, bytes of a reference copied one by one, a pointer from `extern "C"` or a system call)
   acts as the root of its allocation: its accesses kill references a finer rule would keep,
