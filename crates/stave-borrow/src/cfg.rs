@@ -358,16 +358,22 @@ pub struct Builder<'a, 'b> {
     /// The temporary holding the array a `for` loop iterates by value: its elements are moved
     /// into the loop binding one per iteration (not an E0504 move out of an index).
     owned_elems: Option<LocalId>,
+    /// The local each `old(e)` of the `ensures` clauses names (by the call's `(` token): `e`
+    /// evaluated at entry.
+    olds: FxHashMap<u32, LocalId>,
+    /// The local `result` names in the `ensures` clauses: the returned value, from the return
+    /// to the end of the clauses.
+    result: Option<LocalId>,
 }
 
-/// Builds the body of fn decl node `fn_node` (params in `params`, signature `from` list, the
-/// params' `from` clauses).
+/// Builds the body of fn decl node `fn_node` (params in `params`, return type `ret_ty`, signature
+/// `from` list, the params' `from` clauses).
 pub fn build_fn<'a>(
     icx: ItemCx<'a>,
     tb: &'a TypedBody,
     tys: &mut Tys<'a>,
     fn_node: u32,
-    params: &[TypeId],
+    (params, ret_ty): (&[TypeId], TypeId),
     ret: RetCheck,
     declared: Vec<Store>,
 ) -> Body {
@@ -379,7 +385,7 @@ pub fn build_fn<'a>(
     b.infos = std::rc::Rc::new(infos);
     b.body.ret = ret;
     b.body.declared = declared;
-    b.fn_body(fn_node, params);
+    b.fn_body(fn_node, params, ret_ty);
     b.finish()
 }
 
@@ -417,6 +423,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             joins: Vec::new(),
             guard_binds: Vec::new(),
             owned_elems: None,
+            olds: FxHashMap::default(),
+            result: None,
         }
     }
 
@@ -769,7 +777,7 @@ impl<'a, 'b> Builder<'a, 'b> {
 
     // ---------- fn body ----------
 
-    fn fn_body(&mut self, fn_node: u32, params: &[TypeId]) {
+    fn fn_body(&mut self, fn_node: u32, params: &[TypeId], ret: TypeId) {
         let icx = self.icx;
         self.push_scope();
         if let Some(ps) = icx.child(fn_node, NodeKind::Params) {
@@ -791,6 +799,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 }
             }
         }
+        self.contract_entry(ret);
         if let Some(b) = icx.child(fn_node, NodeKind::Block) {
             self.block(b);
         }
@@ -800,12 +809,102 @@ impl<'a, 'b> Builder<'a, 'b> {
     fn end_of_body(&mut self, n: u32) {
         if self.open() {
             let at = self.body_end(n);
+            if self.result.is_some() {
+                let op = self.const_op(n);
+                self.leave(op, at);
+                return;
+            }
             self.exit_path(0, 0, false, at);
             let op = self.const_op(n);
             let span = self.span(n);
             self.push(StmtKind::Return(op), span, n);
             self.terminate(Terminator::Return);
         }
+    }
+
+    // ---------- contract clauses ----------
+
+    /// The fn's clauses at entry, as the code they are there: each `requires` in order, then the
+    /// `old(e)` values of the `ensures` clauses, each held in a local that lives to the clauses
+    /// that read it (so what it borrows stays borrowed across the body).
+    fn contract_entry(&mut self, ret: TypeId) {
+        let tb = self.tb;
+        let Some(c) = tb.contracts.as_deref() else { return };
+        for cl in &c.requires {
+            self.clause(cl.expr);
+        }
+        for &(paren, e) in &c.olds {
+            if !self.open() {
+                return;
+            }
+            let mark = self.temps.len();
+            let v = self.expr(e);
+            let Some(op) = self.operand(v, e) else { return };
+            let (ty, span) = (self.nty(e), self.span(e));
+            let l = self.new_local(ty, false, span, String::new(), true);
+            self.body.locals[l as usize].node = e;
+            self.push(
+                StmtKind::Assign { dest: Place::local(l, ty), rv: Rvalue::Use(op), init: true },
+                span,
+                e,
+            );
+            self.flush_temps(mark);
+            self.olds.insert(paren, l);
+        }
+        if let Some(first) = c.ensures.first() {
+            let span = self.icx.tok_span(self.icx.a(first.node));
+            let l = self.new_local(ret, false, span, "result".to_string(), false);
+            self.body.locals[l as usize].node = c.result;
+            self.by_node.insert(c.result, l);
+            self.result = Some(l);
+        }
+    }
+
+    /// A clause where it runs: its expression evaluated and read.
+    fn clause(&mut self, e: u32) {
+        if !self.open() {
+            return;
+        }
+        let mark = self.temps.len();
+        let v = self.expr(e);
+        if let Some(op) = self.read(v, e)
+            && op.kind != OpKind::Const
+        {
+            let span = op.span;
+            self.push(StmtKind::Read(op), span, e);
+        }
+        self.flush_temps(mark);
+    }
+
+    /// Returns `op` from the fn at `at`. With `ensures` clauses the value goes to `result`, the
+    /// scopes are left, the clauses run in order over the params as the body left them, and
+    /// `result` is returned: it is live across the clauses, as is every `old(e)` a clause reads.
+    fn leave(&mut self, op: Operand, at: Span) {
+        let (span, node) = (op.span, op.node);
+        let Some(res) = self.result else {
+            self.push(StmtKind::Return(op), span, node);
+            self.exit_path(0, 0, false, at);
+            self.terminate(Terminator::Return);
+            return;
+        };
+        let dest = Place::local(res, self.body.locals[res as usize].ty);
+        self.push(StmtKind::Assign { dest: dest.clone(), rv: Rvalue::Use(op), init: true }, span, node);
+        self.exit_path(0, 0, false, at);
+        let tb = self.tb;
+        let clauses = tb.contracts.as_deref().map_or(&[][..], |c| &c.ensures);
+        // a clause is built once per return: the bindings of a `match` in it are fresh locals
+        // each time
+        let first = self.body.locals.len() as LocalId;
+        for cl in clauses {
+            self.clause(cl.expr);
+            self.by_node.retain(|_, l| *l < first);
+        }
+        if !self.open() {
+            return;
+        }
+        let rop = self.op_of_place(dest, span, node, true);
+        self.push(StmtKind::Return(rop), span, node);
+        self.terminate(Terminator::Return);
     }
 
     // ---------- statements ----------
@@ -1032,11 +1131,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
             None => self.const_op(s),
         };
-        let (span, node) = (op.span, op.node);
-        self.push(StmtKind::Return(op), span, node);
         let at = self.span(s);
-        self.exit_path(0, 0, false, at);
-        self.terminate(Terminator::Return);
+        self.leave(op, at);
     }
 
     // ---------- for ----------
@@ -2365,9 +2461,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.terminate(Terminator::Branch(vec![cont, err]));
         self.switch_to(err);
         let rop = self.op_of_place(hold.clone(), span, n, true);
-        self.push(StmtKind::Return(rop), span, n);
-        self.exit_path(0, 0, false, span);
-        self.terminate(Terminator::Return);
+        self.leave(rop, span);
         self.switch_to(cont);
         let pt = if last { self.nty(n) } else { self.tys.payload(bt) };
         let op = self.op_of_place(hold, span, n, true);
@@ -2465,6 +2559,13 @@ impl<'a, 'b> Builder<'a, 'b> {
                 self.call_result(Rvalue::call(ops, flows, paren), ret, n, span)
             }
             Some(Target::SizeOf { .. }) => V::Const,
+            Some(Target::Old) => match self.olds.get(&paren) {
+                Some(&l) => V::P(Place::local(l, self.body.locals[l as usize].ty)),
+                None => {
+                    self.unsupported("`old` outside an `ensures` clause");
+                    V::Never
+                }
+            },
             _ => {
                 let Some(ops) = self.args(args) else { return V::Never };
                 let flows = self.flows_if(node_ty, || Flows::AllArgs);

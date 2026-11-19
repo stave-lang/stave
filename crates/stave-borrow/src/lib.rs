@@ -18,6 +18,12 @@
 //! known to be sound, so the caller must not accept it ([`Borrowck::unchecked`]). Const and `static mut`
 //! initializers hold no borrows that outlive them and are not checked.
 //!
+//! **Contract clauses** are code of the body at the points where they run, whether or not a
+//! check for them stays in the program: the `requires` clauses and then the `old(e)` values at
+//! entry, the `ensures` clauses at each return after the scopes are left, over the params as the
+//! body left them and the returned value (`result`). An `old(e)` value and `result` are live to
+//! the clauses, so what they borrow stays borrowed until then.
+//!
 //! **Rules LANG.md leaves open**: a `&mut` borrow (explicit,
 //! auto-referenced receiver, or capture) of a non-`mut` binding is E0503 (base case), and of a
 //! place behind `&` is E0503 `shared-ref`; a move out of a dereference, an index, or a closure
@@ -200,7 +206,7 @@ fn check_body(
         })
         .collect();
     let t0 = Instant::now();
-    let body = cfg::build_fn(icx, tb, &mut tys, tb.node, &sig.params, ret, declared);
+    let body = cfg::build_fn(icx, tb, &mut tys, tb.node, (&sig.params, sig.ret), ret, declared);
     let mut one = One {
         diags: Vec::new(),
         dump: Vec::new(),
