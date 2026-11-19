@@ -1,0 +1,78 @@
+//~ CHECK-ONLY
+// An assignment whose new value borrows something other than the value it ends: another local,
+// what the old value itself borrowed, the old value moved into a call, another field of the
+// destination; a temporary whose new value is made from a copy read through the earlier borrow,
+// or holds only what the earlier value borrowed.
+import std.io;
+import std.string;
+
+view struct Chain { v: u32, prev: &u32 }
+view struct H { name: string.String, s: &str }
+view struct Two { a: u32, b: &u32 }
+
+fn next(x: u32) -> u32 {
+    return x + 1;
+}
+
+fn by_value(c: Chain) -> Chain from c {
+    return Chain.{ v: c.v + 1, prev: c.prev };
+}
+
+fn relink(x: &Chain, v: u32) -> Chain from copy x {
+    return Chain.{ v: v, prev: x.prev };
+}
+
+fn other_owner() {
+    let other = f"other";
+    let mut x = H.{ name: f"first", s: "" };
+    x = H.{ name: f"second", s: other.as_str() };
+    io.print(x.s);
+}
+
+fn old_borrow(zero: &u32) -> u32 {
+    let mut x = Chain.{ v: 1, prev: zero };
+    x = Chain.{ v: 2, prev: x.prev };
+    return *x.prev;
+}
+
+fn moved_in(zero: &u32) -> u32 {
+    let mut x = Chain.{ v: 1, prev: zero };
+    x = by_value(x);
+    return *x.prev;
+}
+
+fn copied_out(zero: &u32) -> u32 {
+    let mut x = Chain.{ v: 1, prev: zero };
+    x = relink(&x, 2);
+    return *x.prev;
+}
+
+fn other_field(zero: &u32) -> u32 {
+    let mut x = Two.{ a: 1, b: zero };
+    x.b = &x.a;
+    return *x.b;
+}
+
+fn temp_from_copy() -> u32 {
+    let mut r: &u32 = &0u32;
+    let mut i: u32 = 0;
+    while i < 3 {
+        r = &next(*r);
+        i = i + 1;
+    }
+    return *r;
+}
+
+fn temp_keeps_old_borrow(base: &Chain) -> u32 {
+    let mut r: &Chain = base;
+    let mut i: u32 = 0;
+    while i < 3 {
+        r = &relink(r, i + 1);
+        i = i + 1;
+    }
+    return *r.prev;
+}
+
+fn main() -> i32 {
+    return 0;
+}
