@@ -1,0 +1,18 @@
+//~ MEMCHECK invalid-free 16
+// A Vec whose buffer pointer is replaced by a pointer to a local: its drop frees stack memory.
+import std.mem;
+import std.vec;
+
+struct RawVec { ptr: *mut u32, len: usize, cap: usize }
+
+fn main() -> i32 {
+    let mut local: [u32; 4] = [0u32; 4];
+    let mut v = vec.Vec::<u32>.with_capacity(4);
+    let r = (&mut v as *mut vec.Vec<u32>) as usize as *mut RawVec;
+    let s = (&mut local as *mut [u32; 4]) as usize as *mut u32;
+    unsafe("deliberate: the Vec's buffer becomes a local array") {
+        (*r).ptr = s;
+    }
+    mem.drop(v);
+    return 0;
+}

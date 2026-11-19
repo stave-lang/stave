@@ -1,0 +1,17 @@
+//~ MEMCHECK invalid-free 15
+// A Vec whose buffer pointer is moved one element into its buffer: its drop frees an interior
+// pointer.
+import std.mem;
+import std.vec;
+
+struct RawVec { ptr: *mut u32, len: usize, cap: usize }
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.with_capacity(4);
+    let r = (&mut v as *mut vec.Vec<u32>) as usize as *mut RawVec;
+    unsafe("deliberate: the buffer pointer moves past the block start") {
+        (*r).ptr = mem.add_mut((*r).ptr, 1);
+    }
+    mem.drop(v);
+    return 0;
+}

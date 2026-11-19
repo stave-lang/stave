@@ -1,0 +1,14 @@
+//~ MEMCHECK double-free 12
+// A second owner of one Vec made by reading it through a raw pointer: both drops free the
+// buffer (no elements, so the second drop reads nothing before its free).
+import std.mem;
+import std.vec;
+
+fn main() -> i32 {
+    let v = vec.Vec::<u32>.with_capacity(4);
+    let p = &v as *const vec.Vec<u32>;
+    let w: vec.Vec<u32> = unsafe("deliberate: a second owner of the buffer") p.read();
+    mem.drop(w);
+    mem.drop(v);
+    return 0;
+}

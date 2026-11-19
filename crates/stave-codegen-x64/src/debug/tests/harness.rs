@@ -404,6 +404,7 @@ pub fn interp_args(p: &Prog, args: &[&[u8]]) -> RunOut {
         Outcome::Exit(c) => c,
         Outcome::Trap(t) => 100 + kind_index(t.kind),
         Outcome::Return(_) => panic!("entry returned"),
+        Outcome::MemError(r) => panic!("{}", r.render(&p.m)),
     };
     RunOut { stdout: it.host.stdout.clone(), stderr: it.host.stderr.clone(), code }
 }

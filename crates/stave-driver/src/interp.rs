@@ -6,6 +6,10 @@
 //! `runtime.panic.trap(kind, site)` (for `StackOverflow`, the site of the overflowing fn's name
 //! token, which is what the native signal path reports through the PC table).
 //!
+//! Checking mode ([`Limits::check`], default from `STAVE_INTERP_CHECK=1`): a memory error ends
+//! the run with an error whose text starts `interp: memory error [<class>]`
+//! ([`stave_ir::memcheck::MemReport::render`]).
+//!
 //! Files: the in-memory file system of [`stave_ir::BufferHost`] (`files`, relative paths), so a
 //! program reading `input.txt` from its working directory gets the same bytes.
 
@@ -21,11 +25,18 @@ pub struct Limits {
     pub max_steps: u64,
     /// Call depth at which a call traps `StackOverflow`.
     pub max_depth: usize,
+    /// The interpreter's checking mode.
+    pub check: bool,
+}
+
+/// Whether `STAVE_INTERP_CHECK=1` is set: the default of [`Limits::check`].
+pub fn check_from_env() -> bool {
+    std::env::var_os("STAVE_INTERP_CHECK").is_some_and(|v| v == "1")
 }
 
 impl Default for Limits {
     fn default() -> Limits {
-        Limits { max_steps: 20_000_000_000, max_depth: 20_000 }
+        Limits { max_steps: 20_000_000_000, max_depth: 20_000, check: check_from_env() }
     }
 }
 
@@ -64,7 +75,12 @@ pub fn run(
     for (k, v) in files {
         host.files.insert(k.as_bytes().to_vec(), v.clone());
     }
-    let cfg = Config { max_steps: limits.max_steps, max_depth: limits.max_depth, ..Config::default() };
+    let cfg = Config {
+        max_steps: limits.max_steps,
+        max_depth: limits.max_depth,
+        check: limits.check,
+        ..Config::default()
+    };
     let mut it = Interp::new(&m, host, cfg).map_err(|e| format!("interp: {e:?}"))?;
     let n = stave_sema::lower::site_table_bytes(&m, 0).len() as u64;
     let st = it.mem.alloc(n.max(8), 8).ok_or("interp: no memory for the site table")?;
@@ -90,6 +106,7 @@ pub fn run(
     }
     let exit = match out {
         Outcome::Exit(c) => c,
+        Outcome::MemError(r) => return Err(format!("interp: {}", r.render(&m))),
         o => return Err(format!("interp: the program did not exit: {o:?}")),
     };
     let steps = it.steps();

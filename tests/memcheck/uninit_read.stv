@@ -1,0 +1,12 @@
+//~ MEMCHECK uninit-read 9
+// A read of spare capacity no element was written to.
+import std.vec;
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.with_capacity(4);
+    v.push(3u32);
+    let p: *mut u32 = v.spare_ptr();
+    let x: u32 = unsafe("deliberate: element 1 was never written") *p;
+    if x == 0u32 { return 1; }
+    return 0;
+}

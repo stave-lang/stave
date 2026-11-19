@@ -26,6 +26,7 @@ use crate::ir::{
 };
 use crate::layout::{LayoutError, Layouts, Shape};
 use crate::mem::{Fault, Memory};
+use crate::memcheck::{At, MemReport, TRACE_DEPTH, Trace};
 use crate::types::{FloatBits, MAX_TYPE_DEPTH, TypeId};
 use crate::verify::{self, Cls, VerifyError};
 
@@ -88,11 +89,15 @@ pub struct Config {
     pub stack_size: usize,
     /// Heap bytes (`mmap`) the host may allocate.
     pub heap_limit: usize,
+    /// Checking mode ([`crate::memcheck`]): a memory error ends the run with
+    /// [`Outcome::MemError`]. The runtime allocator's `try_alloc`, `free`, and `try_realloc` are
+    /// replaced by checked allocations that are never reused.
+    pub check: bool,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { max_steps: u64::MAX, max_depth: 10_000, stack_size: 8 << 20, heap_limit: 1 << 30 }
+        Config { max_steps: u64::MAX, max_depth: 10_000, stack_size: 8 << 20, heap_limit: 1 << 30, check: false }
     }
 }
 
@@ -112,6 +117,8 @@ pub enum Outcome {
     /// `exit` / `exit_group` with this status.
     Exit(i32),
     Trap(Trap),
+    /// Checking mode: a memory error.
+    MemError(Box<MemReport>),
 }
 
 /// A run that could not complete (not a Stave-level outcome).
@@ -199,6 +206,15 @@ pub struct Interp<'m, H: Host> {
     cfg: Config,
     steps: u64,
     scratch: Vec<Val>,
+    /// Checking mode: the runtime allocator fns whose calls are replaced.
+    alloc_fns: Option<Box<AllocFns>>,
+}
+
+/// The runtime allocator entry points (`runtime/alloc.stv`); `alloc` and `realloc` reach them.
+struct AllocFns {
+    try_alloc: Option<FuncId>,
+    free: Option<FuncId>,
+    try_realloc: Option<FuncId>,
 }
 
 /// An aggregate being loaded: its parts (type, address), the next part, the values so far.
@@ -221,7 +237,18 @@ impl<'m, H: Host> Interp<'m, H> {
         let n = m.types.len();
         let cls = (0..n).map(|i| verify::classify(&m.types, TypeId(i as u32))).collect();
         let pointee = (0..n).map(|i| verify::pointee(&m.types, TypeId(i as u32))).collect();
-        let mut mem = Memory::new(cfg.stack_size, cfg.heap_limit);
+        let mut mem = if cfg.check {
+            Memory::new_checked(cfg.stack_size, cfg.heap_limit)
+        } else {
+            Memory::new(cfg.stack_size, cfg.heap_limit)
+        };
+        let alloc_fns = cfg.check.then(|| {
+            Box::new(AllocFns {
+                try_alloc: m.find_func("runtime.alloc.try_alloc"),
+                free: m.find_func("runtime.alloc.free"),
+                try_realloc: m.find_func("runtime.alloc.try_realloc"),
+            })
+        });
         let strs = m.strings.iter().map(|s| mem.add_data(s)).collect();
         let layouts = Layouts::compute(&m.types);
         let mut statics = Vec::with_capacity(m.statics.len());
@@ -233,7 +260,117 @@ impl<'m, H: Host> Interp<'m, H> {
             mem.write(a, &st.init[..n]).map_err(|_| oom())?;
             statics.push(a);
         }
-        Ok(Interp { m, cls, pointee, layouts, strs, statics, host, mem, cfg, steps: 0, scratch: Vec::new() })
+        Ok(Interp {
+            m,
+            cls,
+            pointee,
+            layouts,
+            strs,
+            statics,
+            host,
+            mem,
+            cfg,
+            steps: 0,
+            scratch: Vec::new(),
+            alloc_fns,
+        })
+    }
+
+    /// The instruction executing in each frame, innermost first, at most [`TRACE_DEPTH`].
+    fn trace(&self, frames: &[Frame]) -> Trace {
+        frames
+            .iter()
+            .rev()
+            .take(TRACE_DEPTH)
+            .filter_map(|fr| {
+                let b = self.m.func(fr.func)?.body.as_ref()?;
+                let blk = b.blocks.get(fr.block as usize)?;
+                Some(At::of(fr.func, b, blk.insts.start + fr.pc.saturating_sub(1)))
+            })
+            .collect()
+    }
+
+    /// An error of [`Interp::run`]: the memory error it is in checking mode, else `e`.
+    fn failed(&mut self, e: InterpError, frames: &[Frame]) -> R<Outcome> {
+        match self.mem.take_report() {
+            Some(mut r) => {
+                r.at = self.trace(frames);
+                Ok(Outcome::MemError(r))
+            }
+            None => Err(e),
+        }
+    }
+
+    fn alloc_block(&mut self, size: u64, align: u64, frames: &[Frame]) -> u64 {
+        if size == 0 {
+            return align;
+        }
+        let at = self.trace(frames);
+        self.mem.heap_alloc(size, align, at).unwrap_or(0)
+    }
+
+    /// Checking mode: a call of a runtime allocator entry point, done on checked allocations
+    /// with the entry point's contract. `None`: not such a call (or one whose alignment the
+    /// runtime itself rejects), run it.
+    fn alloc_call(&mut self, f: FuncId, args: &[Val], frames: &[Frame]) -> Option<Result<Val, Box<MemReport>>> {
+        let af = self.alloc_fns.as_deref()?;
+        let (try_alloc, free, try_realloc) = (af.try_alloc, af.free, af.try_realloc);
+        let u = |k: usize| args.get(k).and_then(Val::bits);
+        let pow2 = |a: u64| a.is_power_of_two();
+        let check_free = |it: &mut Self, p: u64, size: u64, align: u64| match it.mem.heap_check_free(p, size, align) {
+            Ok(()) => Ok(()),
+            Err(mut r) => {
+                r.at = it.trace(frames);
+                Err(r)
+            }
+        };
+        if Some(f) == try_alloc {
+            let (size, align) = (u(0)?, u(1)?);
+            if !pow2(align) {
+                return None;
+            }
+            return Some(Ok(Val::S(self.alloc_block(size, align, frames))));
+        }
+        if Some(f) == free {
+            let (p, size, align) = (u(0)?, u(1)?, u(2)?);
+            if size != 0 {
+                if let Err(r) = check_free(self, p, size, align) {
+                    return Some(Err(r));
+                }
+                let at = self.trace(frames);
+                self.mem.heap_free(p, at);
+            }
+            return Some(Ok(Val::unit()));
+        }
+        if Some(f) == try_realloc {
+            let (p, old, align, new) = (u(0)?, u(1)?, u(2)?, u(3)?);
+            if !pow2(align) {
+                return None;
+            }
+            if old == 0 {
+                return Some(Ok(Val::S(self.alloc_block(new, align, frames))));
+            }
+            if let Err(r) = check_free(self, p, old, align) {
+                return Some(Err(r));
+            }
+            let q = if new == 0 { align } else { self.alloc_block(new, align, frames) };
+            if q == 0 {
+                return Some(Ok(Val::S(0)));
+            }
+            if new != 0 && self.mem.copy_raw(q, p, old.min(new)).is_err() {
+                return self.mem.take_report().map(Err);
+            }
+            let at = self.trace(frames);
+            self.mem.heap_free(p, at);
+            return Some(Ok(Val::S(q)));
+        }
+        None
+    }
+
+    /// Checking mode: the runtime-allocator blocks live now (at exit: the leaks), as
+    /// (address, size, allocation site).
+    pub fn live_heap_blocks(&self) -> Vec<(u64, u64, Trace)> {
+        self.mem.live_heap_blocks()
     }
 
     /// Instructions + terminators executed so far.
@@ -315,9 +452,10 @@ impl<'m, H: Host> Interp<'m, H> {
                 if fr.pc < blk.insts.len {
                     let i = blk.insts.start + fr.pc;
                     fr.pc += 1;
-                    match self.exec(body, fid, &mut fr.regs, i)? {
-                        Step::Next => continue,
-                        s => break (Some(s), i),
+                    match self.exec(body, fid, &mut fr.regs, i) {
+                        Ok(Step::Next) => continue,
+                        Ok(s) => break (Some(s), i),
+                        Err(e) => return self.failed(e, &frames),
                     }
                 }
                 match blk.term {
@@ -363,6 +501,20 @@ impl<'m, H: Host> Interp<'m, H> {
             match step {
                 None => {}
                 Some(Step::Call(f, args, dest)) => {
+                    if self.alloc_fns.is_some()
+                        && let Some(res) = self.alloc_call(f, &args, &frames)
+                    {
+                        let v = match res {
+                            Ok(v) => v,
+                            Err(r) => return Ok(Outcome::MemError(r)),
+                        };
+                        if let (Some(caller), Some(d)) = (frames.last_mut(), dest)
+                            && let Some(r) = caller.regs.get_mut(d.index())
+                        {
+                            *r = v;
+                        }
+                        continue;
+                    }
                     if let Some(fr) = frames.last_mut() {
                         fr.dest = dest;
                     }
@@ -809,7 +961,12 @@ impl<'m, H: Host> Interp<'m, H> {
                 let p = self.pointee.get(t.index()).copied().flatten().ok_or(malformed("slot pointee"))?;
                 let l = self.layout(p)?;
                 match self.mem.stack_alloc(l.size, l.align) {
-                    Some(a) => Val::S(a),
+                    Some(a) => {
+                        if self.cfg.check {
+                            self.mem.note_alloc_site(a, vec![At::of(fid, body, i)]);
+                        }
+                        Val::S(a)
+                    }
                     None => return Ok(Step::Trap(PanicKind::StackOverflow)),
                 }
             }
@@ -973,6 +1130,10 @@ impl<'m, H: Host> Interp<'m, H> {
                 } else {
                     self.host.intrinsic(name, &vals, &mut self.mem).map_err(InterpError::Host)?
                 };
+                // a host access that failed a check (the host may have answered `EFAULT`)
+                if self.mem.has_report() {
+                    return Err(malformed("memory error in a host call"));
+                }
                 match res {
                     Some(v) => v,
                     None => return Ok(Step::Next),
