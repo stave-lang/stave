@@ -29,9 +29,11 @@ fn programs() -> Vec<PathBuf> {
 /// (class, line) of the `//~ MEMCHECK` header.
 fn expected(p: &Path) -> (String, u32) {
     let src = std::fs::read_to_string(p).unwrap();
-    let head = src.lines().next().and_then(|l| l.strip_prefix("//~ MEMCHECK ")).unwrap_or_else(|| {
-        panic!("{}: no `//~ MEMCHECK <class> <line>` first line", p.display())
-    });
+    let head = src
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("//~ MEMCHECK "))
+        .unwrap_or_else(|| panic!("{}: no `//~ MEMCHECK <class> <line>` first line", p.display()));
     let (class, line) = head.split_once(' ').unwrap();
     (class.to_string(), line.trim().parse().unwrap())
 }

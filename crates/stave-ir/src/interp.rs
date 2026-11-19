@@ -97,7 +97,13 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
-        Config { max_steps: u64::MAX, max_depth: 10_000, stack_size: 8 << 20, heap_limit: 1 << 30, check: false }
+        Config {
+            max_steps: u64::MAX,
+            max_depth: 10_000,
+            stack_size: 8 << 20,
+            heap_limit: 1 << 30,
+            check: false,
+        }
     }
 }
 
@@ -312,18 +318,24 @@ impl<'m, H: Host> Interp<'m, H> {
     /// Checking mode: a call of a runtime allocator entry point, done on checked allocations
     /// with the entry point's contract. `None`: not such a call (or one whose alignment the
     /// runtime itself rejects), run it.
-    fn alloc_call(&mut self, f: FuncId, args: &[Val], frames: &[Frame]) -> Option<Result<Val, Box<MemReport>>> {
+    fn alloc_call(
+        &mut self,
+        f: FuncId,
+        args: &[Val],
+        frames: &[Frame],
+    ) -> Option<Result<Val, Box<MemReport>>> {
         let af = self.alloc_fns.as_deref()?;
         let (try_alloc, free, try_realloc) = (af.try_alloc, af.free, af.try_realloc);
         let u = |k: usize| args.get(k).and_then(Val::bits);
         let pow2 = |a: u64| a.is_power_of_two();
-        let check_free = |it: &mut Self, p: u64, size: u64, align: u64| match it.mem.heap_check_free(p, size, align) {
-            Ok(()) => Ok(()),
-            Err(mut r) => {
-                r.at = it.trace(frames);
-                Err(r)
-            }
-        };
+        let check_free =
+            |it: &mut Self, p: u64, size: u64, align: u64| match it.mem.heap_check_free(p, size, align) {
+                Ok(()) => Ok(()),
+                Err(mut r) => {
+                    r.at = it.trace(frames);
+                    Err(r)
+                }
+            };
         if Some(f) == try_alloc {
             let (size, align) = (u(0)?, u(1)?);
             if !pow2(align) {
