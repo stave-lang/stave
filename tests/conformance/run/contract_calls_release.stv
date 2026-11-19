@@ -1,0 +1,82 @@
+//~ ARGS --release
+//~ STDOUT contract_calls_release.stdout
+// The release build of `contract_calls`, with an instance of a generic fn whose every call is
+// proved (it keeps no checked entry). The bounds audit after the optimizer reads the calls with
+// what their callees state.
+// Calls that prove their callee's `requires` enter it past the checks; the others keep the
+// checked entry, and both give the same results. `pos` and `in_range` are called both ways, and
+// through a fn value, which always checks. What a call ensures is known after it: `pick` indexes
+// with no bounds check left, `count` uses its own `ensures` after the recursive call.
+import std.io;
+
+fn pos(x: u32) -> u32 requires(x > 0) {
+    return x;
+}
+
+fn in_range(xs: &[u32], i: usize) -> u32 requires(i < xs.len()) {
+    return xs[i];
+}
+
+fn next_below(i: u32, n: u32) -> u32 requires(i + 1 < n) {
+    return i + 1;
+}
+
+fn small(x: u32) -> u32 ensures(result < 4) {
+    if x < 4 {
+        return x;
+    }
+    return 3;
+}
+
+fn pick(xs: &[u32; 4], x: u32) -> u32 {
+    let i = small(x);
+    return xs[i as usize];
+}
+
+rec fn count(n: u32) -> u32 ensures(result <= n) {
+    if n == 0 {
+        return 0;
+    }
+    let r = count(n - 1);
+    return r + 1;
+}
+
+fn item<T: Copy + Frozen>(xs: &[T], i: usize) -> T requires(i < xs.len()) {
+    return xs[i];
+}
+
+fn pass(x: u32) -> u32 {
+    return pos(x);
+}
+
+fn at_or(xs: &[u32], i: usize, d: u32) -> u32 {
+    if i < xs.len() {
+        return in_range(xs, i);
+    }
+    return d;
+}
+
+fn apply(f: fn(u32) -> u32, x: u32) -> u32 {
+    return f(x);
+}
+
+fn main() -> i32 {
+    let xs: [u32; 4] = [10, 20, 30, 40];
+    let a = pos(3);
+    let b = pass(5);
+    let c = apply(pos, 7);
+    io.print(f"{a} {b} {c}\n");
+    let d = in_range(&xs, 2);
+    let e = at_or(&xs, 1, 0);
+    let g = at_or(&xs, 9, 99);
+    io.print(f"{d} {e} {g}\n");
+    let h = next_below(6, 8);
+    let k = pick(&xs, 2);
+    let m = pick(&xs, 77);
+    let n = count(5);
+    io.print(f"{h} {k} {m} {n}\n");
+    let p = item(&xs, 3);
+    let q = item(&xs, 0);
+    io.print(f"{p} {q}\n");
+    return 0;
+}

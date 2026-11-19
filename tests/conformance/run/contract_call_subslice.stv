@@ -1,0 +1,27 @@
+//~ EXIT 101
+//~ STDOUT contract_call_subslice.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_call_subslice.stv:15:16 in main.tail_at (thread 0)\nrequires(i < xs.len())\n"
+// The length a clause reads is the length of the argument, not of the slice it was cut from:
+// `k < v.len()` does not prove `k < v[1..].len()`, so the call keeps the checked entry and the
+// last index panics `Contract`.
+import std.io;
+
+fn pick(xs: &[u32], i: usize) -> u32 requires(i < xs.len()) {
+    return xs[i];
+}
+
+fn tail_at(v: &[u32], k: usize) -> u32 {
+    if k < v.len() {
+        return pick(&v[1..v.len()], k);
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    let v: [u32; 4] = [1, 2, 3, 4];
+    let a = tail_at(&v, 2);
+    io.print(f"{a}\n");
+    let b = tail_at(&v, 3);
+    io.print(f"not reached {b}\n");
+    return 0;
+}

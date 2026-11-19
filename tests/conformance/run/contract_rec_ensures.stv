@@ -1,0 +1,46 @@
+//~ EXIT 101
+//~ STDOUT contract_rec_ensures.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_rec_ensures.stv:21:9 in main.down (thread 0)\nensures(result < 10)\n"
+// A recursive fn may use its own `ensures` after the recursive call: the check at that return is
+// proved from it and removed. The check at the base case stays, and there a wrong value panics:
+// what is proved says nothing of a result the base case does not deliver. The same across two
+// fns that call each other.
+import std.io;
+
+fn fifty() -> u32 {
+    return 50;
+}
+
+fn seven() -> u32 {
+    return 7;
+}
+
+rec fn down(n: u32) -> u32 ensures(result < 10) {
+    if n == 0 {
+        let r = fifty();
+        return r;
+    }
+    return down(n - 1);
+}
+
+rec fn even(n: u32) -> u32 ensures(result < 10) {
+    if n == 0 {
+        return seven();
+    }
+    return odd(n - 1);
+}
+
+rec fn odd(n: u32) -> u32 ensures(result < 10) {
+    if n == 0 {
+        return seven();
+    }
+    return even(n - 1);
+}
+
+fn main() -> i32 {
+    let a = even(5);
+    io.print(f"{a}\n");
+    let b = down(3);
+    io.print(f"not reached {b}\n");
+    return 0;
+}

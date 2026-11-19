@@ -1741,6 +1741,7 @@ impl<'a> Ck<'a> {
         self.target(tok, Target::Fn { decl, args: args.clone() });
         self.site(tok, decl, &args);
         self.coerce_note(n, Coercion::FnItem);
+        self.valued.push((tok, sig.deny, n));
         if self.prog.decl(decl).is_some_and(|d| d.flags.has(DeclFlags::EXTERN_EXPORT)) {
             // an export has the C convention, a fn value the Stave one
             let path = self.prog.decl_path(decl);

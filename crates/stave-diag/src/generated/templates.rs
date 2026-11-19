@@ -1687,7 +1687,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0215",
         severity: Severity::Error,
         area: "types",
-        rule: "a `requires` conjunct (an operand of a clause's top-level `&&`) that is false whenever it is reached: the clauses before it and the parameters' type ranges prove its negation by a chain of inequalities, so every call fails it; not in an instance of a generic fn, nor at a point shown dead (contradictory facts, a branch on two constants, a call that cannot return): there the check stays; after the type and borrow checks pass; one `fact` label per fact of the chain",
+        rule: "a `requires` conjunct (an operand of a clause's top-level `&&`) that is false whenever it is reached: the clauses before it and the parameters' type ranges prove its negation by a chain of inequalities, so every call fails it; not in an instance of a generic fn, nor at a point shown dead (contradictory facts, a branch on a constant or on two constants, a call that cannot return): there the check stays; after the type and borrow checks pass; one `fact` label per fact of the chain",
         retired: false,
         located: true,
         holes: &[
@@ -1756,6 +1756,33 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "correct the returned value or the clause",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0218",
+        severity: Severity::Error,
+        area: "types",
+        rule: "a call whose arguments make a `requires` conjunct of the callee false whenever the call is reached: what holds before the call proves the conjunct's negation by a chain of inequalities, so the call panics `Contract` or stops before the conjunct; only for a conjunct that compares parameters, slice parameter lengths, and constants; not in an instance of a generic fn or a closure of one, nor at a call shown dead (as E0215); at the call, with the conjunct as a related span; after the type and borrow checks pass; one `fact` label per fact of the chain",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "this call of `{fn}` always fails a `requires`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "called here" },
+                    LabelTemplate { at: "clause", text: "false whenever this call is reached" },
+                    LabelTemplate { at: "fact", text: "a fact of the proof" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "correct the arguments, or call only where the clause holds",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4899,7 +4926,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
         ],
         shapes: &[
             Shape {
@@ -4976,7 +5003,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "from", kind: HoleKind::Type, choices: &[] },
-            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
             Hole { name: "to", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[

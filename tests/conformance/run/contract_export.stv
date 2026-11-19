@@ -1,0 +1,15 @@
+//~ STDOUT contract_export.stdout
+// An exported fn with a `requires` keeps its symbol and its checks for foreign callers. A Stave
+// caller that proves the clause enters past them, through an entry of its own that is no second
+// definition of the symbol.
+import std.io;
+
+extern "C" fn add1(a: u32) -> u32 requires(a < 100) {
+    return a +% 1;
+}
+
+fn main() -> i32 {
+    let r = add1(5);
+    io.print(f"{r}\n");
+    return 0;
+}

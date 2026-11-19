@@ -1,0 +1,122 @@
+//~ CHECK-ONLY
+// A call whose arguments make a `requires` of its callee false whenever it is reached is an
+// error at the call (E0218): what holds before the call (constants, branches, the caller's own
+// clauses) proves the clause's negation. No error where the facts leave the clause open, at a
+// call no execution reaches (contradictory branches, a branch on a constant or on two
+// constants), or in an instance of a generic fn or a closure of one: there the runtime check
+// stays.
+const TRACE: bool = false;
+const K: u32 = 0;
+
+fn pos(x: u32) -> u32 requires(x > 0) {
+    return x;
+}
+
+fn big(x: usize) -> usize requires(x > 0) {
+    return x;
+}
+
+fn in_range(xs: &[u32], i: usize) -> u32 requires(i < xs.len()) {
+    return xs[i];
+}
+
+fn zero() -> u32 {
+    return pos(0); //~ ERROR E0218
+}
+
+fn guarded(x: u32) -> u32 {
+    if x == 0 {
+        return pos(x); //~ ERROR E0218
+    }
+    return x;
+}
+
+fn past(xs: &[u32], i: usize) -> u32 {
+    if i >= xs.len() {
+        return in_range(xs, i); //~ ERROR E0218
+    }
+    return 0;
+}
+
+fn by_clause(x: u32) -> u32 requires(x < 1) {
+    return pos(x); //~ ERROR E0218
+}
+
+fn signed(x: i32) -> i32 requires(x > -5 && x < 5) {
+    return x;
+}
+
+fn at_the_ends() -> i32 {
+    let a = signed(-5); //~ ERROR E0218
+    let b = signed(5); //~ ERROR E0218
+    return a + b + signed(-4) + signed(4);
+}
+
+fn lt(i: usize, n: usize) -> usize requires(i < n) {
+    return i;
+}
+
+fn swapped(i: usize, n: usize) -> usize {
+    if n < i {
+        let a = lt(n, i);
+        return a + lt(i, n); //~ ERROR E0218
+    }
+    return 0;
+}
+
+fn twice() -> u32 {
+    let a = pos(0); //~ ERROR E0218
+    return a + pos(0); //~ ERROR E0218
+}
+
+fn open(x: u32) -> u32 {
+    return pos(x);
+}
+
+fn dead(x: u32) -> u32 {
+    if x > 5 {
+        if x < 3 {
+            return pos(0);
+        }
+    }
+    return x;
+}
+
+fn traced() -> u32 {
+    if TRACE {
+        return pos(0);
+    }
+    return 1;
+}
+
+fn configured() -> u32 {
+    if K > 0 {
+        return pos(K);
+    }
+    return 1;
+}
+
+fn generic<T: Copy>(t: T) -> T {
+    let a = pos(0);
+    return t;
+}
+
+fn in_closure<const N: usize>() -> usize {
+    let g = fn() -> usize { return big(N); };
+    if N > 0 {
+        return g();
+    }
+    return 1;
+}
+
+fn main() {
+    let xs: [u32; 2] = [1, 2];
+    let a = zero() + guarded(1) + past(&xs, 0);
+    let b = open(1) + dead(4) + by_clause(0);
+    let c = generic(1u8);
+    let d = generic(2u64);
+    let e = traced() + configured() + twice();
+    let g = at_the_ends();
+    let h = swapped(2, 1);
+    let f = in_closure::<0>() + in_closure::<4>();
+}

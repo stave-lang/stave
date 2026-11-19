@@ -34,7 +34,10 @@
 //! `runtime.panic.requires_failed` (located at the caller's user site, which every call that can
 //! reach a `requires` stores first) or `runtime.panic.ensures_failed` (at the return). The removal
 //! of proven checks (stave-ir `bounds`) deletes the checks the facts prove and reports those that
-//! always fail; a kept check is a trapping instruction of the fn's IR (`trap`, [`crate::effects`]).
+//! always fail, and sends a call that proves every `requires` of its callee past the callee's
+//! checks. A kept `ensures` check is a trapping instruction of the fn's IR (`trap`); a kept
+//! `requires` check is the fn's entry effect, which only the calls that do not prove it carry
+//! ([`crate::effects`]).
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::{Diagnostic, Span};
