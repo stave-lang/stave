@@ -11,11 +11,11 @@ impl Lexer {
     }
 }
 
-view struct Parts { head: &str, tail: &str, n: usize }
+view struct Parts { head: &str, rest: &str, n: usize }
 
 fn split_into(out: &mut Parts from line, line: &str) {
     out.head = line;
-    out.tail = line;
+    out.rest = line;
     out.n = 2;
 }
 
