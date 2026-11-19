@@ -255,7 +255,11 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                             ("param", pname.as_str()),
                             ("clause", clause.as_str()),
                         ];
-                        out.extend(mk("E0513", Some("param"), &holes, span, &[]));
+                        // a finding is never lost to a case the templates lack: the base shape
+                        // of the code, which needs the place only, reports it then
+                        let d = mk("E0513", Some("param"), &holes, span, &[])
+                            .or_else(|| mk("E0513", None, &holes[..1], span, &[]));
+                        out.extend(d);
                     }
                 }
             }

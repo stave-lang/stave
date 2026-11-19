@@ -1765,9 +1765,11 @@ impl<'a> Ck<'a> {
             self.report(d);
         } else if !sig.param_origins.is_empty() {
             // fn types carry no parameter clause: the caller of the value would not learn
-            // what the fn stores into its `&mut` view arguments
-            let path = self.prog.decl_path(decl);
-            let d = mk("E0807", Some("param-from"), &[("name", &path)], self.icx.node_span(n), &[]);
+            // what the fn stores into its `&mut` view arguments. The coercion is never
+            // accepted for a case the templates lack: the code's base shape reports it then
+            let (path, at) = (self.prog.decl_path(decl), self.icx.node_span(n));
+            let d = mk("E0807", Some("param-from"), &[("name", &path)], at, &[])
+                .or_else(|| mk("E0807", None, &[("name", &path)], at, &[]));
             self.report(d);
         }
         Ty::T(t)
