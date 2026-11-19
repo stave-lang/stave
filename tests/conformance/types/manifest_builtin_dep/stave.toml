@@ -1,0 +1,7 @@
+# A path dependency on the shipped runtime's directory would hand this package the runtime's
+# pub fns, which trust their callers (`runtime.thread.entry` calls through any address).
+name = "builtin_dep"
+kind = "bin"
+
+[dependencies]
+rt = { path = "../../../../runtime" } #~ ERROR E1002

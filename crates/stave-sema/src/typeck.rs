@@ -476,6 +476,11 @@ fn check_in_pool(prog: &Program) -> Typeck {
     };
     if !call_graph.truncated {
         diags.extend(crate::recursion::check(prog, &sigs_table, &tys, &call_graph));
+    } else if !too_deep && let Some((span, what)) = call_graph.truncated_at {
+        // Every check over the graph (recursion, effects, ranks, contract purity, stack) would
+        // miss the left-out instances: the program is rejected.
+        let generic = what.map_or_else(|| "drop glue".to_string(), |d| prog.decl_path(d));
+        diags.extend(mk("E0902", Some("graph"), &[("generic", &generic)], span, &[]));
     }
     let t_graph = t3.elapsed();
     let diagnostics = stave_diag::canonical_order(diags, &prog.source_map);
