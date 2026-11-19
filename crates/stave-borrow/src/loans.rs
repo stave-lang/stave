@@ -31,11 +31,11 @@
 //! - a `&mut` loan `L` of a ref-like place without a dereference: the set of the borrowed
 //!   local gains `S` from the store on, and so does `contents(L)` ([`Flow::apply`]). Left out
 //!   are only loans of that local that no reference in the value can have: another live loan
-//!   of a place overlapping `L`'s would be a conflict, and the pointer of a borrow expression
-//!   passed as a source is not stored into what it points to. A loan of another part of the
-//!   local stays (the local then borrows from itself), and so does `L` when the value holds a
-//!   borrow made through a pointer with `L` in its set (`q.cur = &q.n`), or when the value's
-//!   pointer may be one of several made from `L`. The local is read later with that set, and through a
+//!   of a place overlapping `L`'s would be a conflict. A loan of another part of the local
+//!   stays (the local then borrows from itself), and so does `L` itself: a value made from
+//!   the pointer written through may point into the local (`q.cur = &q.n`; a callee given
+//!   `&mut b` as a source can split it and store one part through the other), and the local
+//!   is then borrowed for as long as it is used. The local is read later with that set, and through a
 //!   pointer with what the local's set says where it is read. A pointer that may point to
 //!   several locals grows each of them. A place behind a dereference is read with the sets of
 //!   the pointers it was borrowed through, which are in the pointer's set with it: nothing is
@@ -170,9 +170,6 @@ pub struct CallStore {
     /// The value's origins: the union over the clause's entries. One set per target, because
     /// the callee may store what any source borrows through any other source it keeps.
     pub val: Bits,
-    /// The loans whose only pointer is a source of this call: the argument is the borrow
-    /// expression itself (`&mut b`, the reborrow of that temporary included).
-    pub whole: Bits,
 }
 
 /// The solved dataflow of one body.
@@ -188,9 +185,6 @@ pub struct Flow<'b> {
     /// without a dereference). While a value holds the loan, those keep the borrowed place from
     /// being reached another way.
     pub made: Vec<Bits>,
-    /// Per local: the loan of the borrow expression a temporary holds (it is assigned by that
-    /// one statement only).
-    pub ref_of: Vec<Option<LoanId>>,
     /// Ref-likeness of every type the body's places use.
     pub ref_like: FxHashMap<TypeId, bool>,
     /// Ref-like params whose type is a reference: `Pb` names one object.
@@ -278,18 +272,11 @@ impl<'b> Flow<'b> {
             }
             d.insert(atoms.pc(s.source));
         }
-        let mut ref_of: Vec<Option<LoanId>> = vec![None; body.locals.len()];
         for b in &body.blocks {
             for s in &b.stmts {
                 for_each_place(&s.kind, |p| {
                     note(p.ty, tys);
                 });
-                if let StmtKind::Assign { dest, rv: Rvalue::Ref { loan, .. }, .. } = &s.kind
-                    && dest.proj.is_empty()
-                    && body.locals[dest.local as usize].temp
-                {
-                    ref_of[dest.local as usize] = Some(*loan);
-                }
             }
         }
         for l in &body.loans {
@@ -312,7 +299,6 @@ impl<'b> Flow<'b> {
             ntracked,
             contents: vec![Bits::new(atoms.len()); body.loans.len()],
             made: vec![Bits::new(atoms.len()); body.loans.len()],
-            ref_of,
             ref_like,
             ref_param,
             deep_param,
@@ -494,26 +480,10 @@ impl<'b> Flow<'b> {
             }
             if out.last().is_none_or(|last| last.target != s.target) {
                 let ptr = if s.into_view { self.op_origins(st, t) } else { self.empty() };
-                let (val, whole) = (self.empty(), self.empty());
-                out.push(CallStore { target: s.target, into_view: s.into_view, ptr, val, whole });
+                out.push(CallStore { target: s.target, into_view: s.into_view, ptr, val: self.empty() });
             }
-            let Some(last) = out.last_mut() else { continue };
-            last.val.union_with(&val);
-            // the source is the temporary of a borrow expression, or its reborrow
-            if !s.copy
-                && q.place.proj.is_empty()
-                && let Some(d) = self.ref_of.get(q.place.local as usize).copied().flatten()
-            {
-                let l = &self.body.loans[d as usize];
-                match l.whole {
-                    Some(m) => {
-                        last.whole.insert(m as usize);
-                    }
-                    None if !l.place.has_deref() => {
-                        last.whole.insert(d as usize);
-                    }
-                    None => {}
-                }
+            if let Some(last) = out.last_mut() {
+                last.val.union_with(&val);
             }
         }
         out
@@ -670,7 +640,7 @@ impl<'b> Flow<'b> {
             let groups = self.call_stores(st, args, stores);
             let mut again = false;
             for g in &groups {
-                let (contents, state) = self.grow(st, &g.ptr, &g.val, Some(&g.whole));
+                let (contents, state) = self.grow(st, &g.ptr, &g.val, true);
                 changed |= contents;
                 again |= contents | state;
             }
@@ -682,13 +652,12 @@ impl<'b> Flow<'b> {
 
     /// A store of a value with origins `val` through a pointer with origins `ptr`: every local
     /// view object the pointer may point to or reach gains `val` (module doc, **Stores**).
-    /// `call`: the store of a call, which also reaches what its sources reach, with the loans
-    /// whose only pointer is one of its sources ([`CallStore::whole`]). Whether a loan's
+    /// `call`: the store of a call, which also reaches what its sources reach. Whether a loan's
     /// contents changed, and whether a local's set did.
-    fn grow(&mut self, st: &mut State, ptr: &Bits, val: &Bits, call: Option<&Bits>) -> (bool, bool) {
+    fn grow(&mut self, st: &mut State, ptr: &Bits, val: &Bits, call: bool) -> (bool, bool) {
         let body = self.body;
         let mut targets = self.reach(st, ptr);
-        if call.is_some() {
+        if call {
             // the callee may keep a pointer it is given as a source and store through it too
             targets.union_with(&self.reach(st, val));
         }
@@ -706,7 +675,7 @@ impl<'b> Flow<'b> {
             }
             let mut add = val.clone();
             for m in val.iter() {
-                if self.cannot_hold(a, m, val, call) {
+                if self.cannot_hold(a, m, val) {
                     add.remove(m);
                 }
             }
@@ -724,34 +693,29 @@ impl<'b> Flow<'b> {
     }
 
     /// Whether the local written through loan `target` cannot come to hold loan `m` of a value
-    /// with origins `val`. `m` must be a loan of the same local, without a dereference, of a
-    /// place that overlaps the target's (a loan of a disjoint part is kept: the local then
-    /// borrows from itself, as after `o.a = &o.b`), and:
-    /// - another loan than the target: both are used by the store, so both are live there, and
-    ///   two live loans of overlapping places, one of them `&mut`, are a conflict where the
-    ///   later one is made. In a body without that error the value holds no reference made by
-    ///   `m`: it is in the set because sets are unions;
-    /// - the target loan itself: only when a source of the call is the borrow expression of
-    ///   that loan (`whole`, [`CallStore::whole`]: the argument `&mut b`). The one pointer made
-    ///   from the loan is then the callee's pointer to the whole place, and a callee stores no
-    ///   borrow of a param's view into that view (such a value holds a loan, which no clause
-    ///   covers). Otherwise two pointers into disjoint parts of the local can share the loan
-    ///   (a callee returned both `from` one `&mut`), and one may be stored through the other.
+    /// with origins `val`. `m` must be another loan of the same local, without a dereference,
+    /// of a place that overlaps the target's (a loan of a disjoint part is kept: the local then
+    /// borrows from itself, as after `o.a = &o.b`): both are used by the store, so both are
+    /// live there, and two live loans of overlapping places, one of them `&mut`, are a conflict
+    /// where the later one is made. In a body without that error the value holds no reference
+    /// made by `m`: it is in the set because sets are unions.
+    ///
+    /// The target loan itself is always kept. Pointers into disjoint parts of the local can
+    /// share it (a callee returned both `from` one `&mut`; a callee given the borrow as a
+    /// source moved it into a helper that split it), and one may be stored through the other.
     ///
     /// And never when `val` holds a loan made through a pointer with `m` in its set
     /// ([`Flow::made`]), other than the reborrow of the temporary that holds exactly `m`: such
-    /// a reference may point into the local, beside the place written (`q.cur = &q.n` with
-    /// `q = &mut p`), and only `m` keeps the local from being used directly while it is held.
-    fn cannot_hold(&self, target: usize, m: usize, val: &Bits, whole: Option<&Bits>) -> bool {
+    /// a reference may point into the local, beside the place written, and only `m` keeps the
+    /// local from being used directly while it is held.
+    fn cannot_hold(&self, target: usize, m: usize, val: &Bits) -> bool {
         let loans = &self.body.loans;
         let (Some(l), Some(x)) = (loans.get(target), loans.get(m)) else { return false };
-        if x.place.local != l.place.local
+        if m == target
+            || x.place.local != l.place.local
             || x.place.has_deref()
             || !places_conflict(&x.place, &l.place, Access::MutBorrow)
         {
-            return false;
-        }
-        if m == target && !whole.is_some_and(|w| w.contains(m)) {
             return false;
         }
         !val.iter().any(|d| {
@@ -874,7 +838,7 @@ impl<'b> Flow<'b> {
                     if !s.is_empty()
                         && let (_, Some(ptr)) = self.place_origins(st, dest)
                     {
-                        changed |= self.grow(st, &ptr, &s, None).0;
+                        changed |= self.grow(st, &ptr, &s, false).0;
                     }
                 } else if let Some(&t) = self.tracked.get(dest.local as usize)
                     && t != u32::MAX

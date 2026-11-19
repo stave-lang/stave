@@ -446,7 +446,7 @@ impl Cx<'_, '_> {
                 {
                     let mut made = st.clone();
                     let (groups, _) = self.flow.settle_call(&mut made, args, stores);
-                    for CallStore { target, into_view, ptr, val, .. } in groups {
+                    for CallStore { target, into_view, ptr, val } in groups {
                         let Some(arg) = args.get(target as usize) else { continue };
                         if let Err(m) = self.flow.store_fits(&made, &ptr, &val, None, Some(into_view)) {
                             // a pointer held in a named local is written through; a temporary is

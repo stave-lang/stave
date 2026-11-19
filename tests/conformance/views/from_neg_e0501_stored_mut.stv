@@ -1,7 +1,8 @@
 //~ CHECK-ONLY
 // A `&mut` borrow stored into a view by a call: the borrowed view stays exclusively borrowed
-// while the holder is used and is free again afterwards; a fn that is given a `&mut` source may
-// store through it, so every view the source reaches gains what the call stores.
+// while the holder is used. A fn that is given a `&mut` source may store through it, so every
+// view the source reaches gains what the call stores, the borrow it is reached by included:
+// the source view stays borrowed after the holder's last use too.
 view struct Pick { best: &u32, count: usize }
 view struct Link { to: &mut Pick }
 
@@ -19,15 +20,15 @@ fn held() -> usize {
     return l.to.count;
 }
 
-fn released() -> usize {
+fn after_the_holder() -> usize {
     let zero: u32 = 0;
     let mut a = Pick.{ best: &zero, count: 0 };
     let mut b = Pick.{ best: &zero, count: 0 };
     let mut l = Link.{ to: &mut a };
     set_link(&mut l, &mut b);
     let n: usize = l.to.count;
-    b.count = 1;
-    return n + b.count;
+    b.count = 1; //~ ERROR E0501
+    return n + b.count; //~ ERROR E0501
 }
 
 // The second store finds the borrow of the first still held by the link.
@@ -85,7 +86,7 @@ fn first_source() -> u32 {
         let x: u32 = 7;
         put_both(&mut l, &x, &mut b);
     } //~ ERROR E0501
-    return *b.best;
+    return *b.best; //~ ERROR E0501
 }
 
 // The target holds no borrow at this instance, yet its clause lets the fn store through `b`.
@@ -104,7 +105,7 @@ fn owned_instance() -> u32 {
         let x: u32 = 7;
         side(&mut nums, &mut p, &x);
     } //~ ERROR E0501
-    return *p.best + nums.v;
+    return *p.best + nums.v; //~ ERROR E0501
 }
 
 fn main() -> i32 {

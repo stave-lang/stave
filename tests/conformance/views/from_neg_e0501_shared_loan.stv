@@ -2,8 +2,8 @@
 // Two pointers into parts of one view can come from one borrow of it. When one is stored
 // through the other the view points into itself: it stays borrowed, by an assignment, by a call,
 // and with both pointers in one by-value source. A part of a view stored into another part
-// keeps that part borrowed. Only the borrow expression itself, as the argument, leaves the
-// borrowed view free after the holder's last use.
+// keeps that part borrowed. The borrow expression itself as the argument is no exception: the
+// callee can split the pointer too.
 view struct Pick { best: &u32, count: usize }
 view struct Link { to: &mut Pick }
 view struct Both { a: Pick, l: Link }
@@ -83,6 +83,6 @@ fn borrow_expression(zero: &u32) -> usize {
     let mut l = Link.{ to: &mut a };
     set_link(&mut l, &mut b);
     let n: usize = l.to.count;
-    b.count = 1;
-    return n + b.count;
+    b.count = 1; //~ ERROR E0501
+    return n + b.count; //~ ERROR E0501
 }
