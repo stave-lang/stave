@@ -711,7 +711,7 @@ fix = { description = "remove the return type: a test fails by panicking (`std.d
 code = "E0215"
 severity = "error"
 area = "types"
-rule = "a `requires` conjunct (an operand of a clause's top-level `&&`) that is false whenever it is reached: the clauses before it and the parameters' type ranges prove its negation by a chain of inequalities, so every call fails it; not in an instance of a generic fn, nor at a point shown dead (contradictory facts, a branch on two constants, a call that cannot return): there the check stays; after the type and borrow checks pass; one `fact` label per fact of the chain"
+rule = "a `requires` conjunct (an operand of a clause's top-level `&&`) that is false whenever it is reached: the clauses before it and the parameters' type ranges prove its negation by a chain of inequalities, so every call fails it; not in an instance of a generic fn, nor at a point shown dead (contradictory facts, a branch on a constant or on two constants, a call that cannot return): there the check stays; after the type and borrow checks pass; one `fact` label per fact of the chain"
 holes = { fn = "path" }
 message = "`{fn}` can never be called: this `requires` is false whenever the clauses before it hold"
 labels = [{ at = "primary", text = "always false" }, { at = "fact", text = "a fact of the proof" }]
@@ -741,7 +741,7 @@ fix = { description = "correct the returned value or the clause" }
 code = "E0218"
 severity = "error"
 area = "types"
-rule = "a call whose arguments make a `requires` conjunct of the callee false whenever the call is reached: what holds before the call proves the conjunct's negation by a chain of inequalities, so the call panics `Contract` or stops before the conjunct; only for a conjunct that compares parameters, slice parameter lengths, and constants; not in an instance of a generic fn, nor at a call shown dead (as E0215); at the call, with the conjunct as a related span; after the type and borrow checks pass; one `fact` label per fact of the chain"
+rule = "a call whose arguments make a `requires` conjunct of the callee false whenever the call is reached: what holds before the call proves the conjunct's negation by a chain of inequalities, so the call panics `Contract` or stops before the conjunct; only for a conjunct that compares parameters, slice parameter lengths, and constants; not in an instance of a generic fn or a closure of one, nor at a call shown dead (as E0215); at the call, with the conjunct as a related span; after the type and borrow checks pass; one `fact` label per fact of the chain"
 holes = { fn = "path" }
 message = "this call of `{fn}` always fails a `requires`"
 labels = [{ at = "primary", text = "called here" }, { at = "clause", text = "false whenever this call is reached" }, { at = "fact", text = "a fact of the proof" }]

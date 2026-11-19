@@ -213,10 +213,17 @@ pub fn node_ir(prog: &Program, tc: &Typeck, nodes: &[u32]) -> Result<NodeIrs, Fa
         contracts.push(d);
     }
     // E0218: a call that always fails a `requires` of its callee, at the call, with the
-    // conjunct. None in an instance of a generic fn (as E0215).
+    // conjunct. None in an instance of a generic fn (as E0215), nor in a closure or `spawn` body
+    // of one: such a body has no generic arguments of its own, its instance id starts with the
+    // enclosing fn's.
     for x in &removed.calls {
         let Some(func) = m.func(x.func) else { continue };
-        if !func.type_args.is_empty() {
+        let root = func.instance.0.first();
+        let encloser_generic = m
+            .funcs
+            .iter()
+            .any(|g| g.instance.0.len() == 1 && g.instance.0.first() == root && !g.type_args.is_empty());
+        if !func.type_args.is_empty() || encloser_generic {
             continue;
         }
         let fallback = nodes_of(x.func)

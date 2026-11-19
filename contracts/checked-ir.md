@@ -257,9 +257,9 @@ b2():
   return). A `call @f ..` whose facts prove every pre row of `@f` about its arguments goes to the
   unchecked entry of `@f`: the body of `@f` after its own removals, without the failure calls
   of its `requires` checks (each `cbr c ok fail` stays, `fail` being an empty `unreachable`
-  block, so `c` is still a fact of the body). It is the fn `@<n>.u`; when `@f` is an instance of
-  a generic fn and every operand naming it is the callee of such a call, `@f` itself becomes it
-  and no `@<n>.u` exists. `call.ind`, `fn.make`, and every other use of `@f` keep `@f`. A call
+  block, so `c` is still a fact of the body). It is the fn `@<n>.u`, which never has the link
+  symbol of an exported `@f`; when `@f` is an instance of a generic fn and every operand naming
+  it in the program is the callee of such a call, `@f` itself becomes it and no `@<n>.u` exists. `call.ind`, `fn.make`, and every other use of `@f` keep `@f`. A call
   whose facts prove the negation of a pre row that reads a check is a compile error (E0218).
   Only the witness checker makes an unchecked entry or a call of one.
 - **Bounds checks** (stave-ir `bounds`): `xs[i]` on a place in memory (a

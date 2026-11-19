@@ -2,9 +2,17 @@
 // A call whose arguments make a `requires` of its callee false whenever it is reached is an
 // error at the call (E0218): what holds before the call (constants, branches, the caller's own
 // clauses) proves the clause's negation. No error where the facts leave the clause open, at a
-// call no execution reaches (contradictory branches, a branch on two constants), or in an
-// instance of a generic fn: there the runtime check stays.
+// call no execution reaches (contradictory branches, a branch on a constant or on two
+// constants), or in an instance of a generic fn or a closure of one: there the runtime check
+// stays.
+const TRACE: bool = false;
+const K: u32 = 0;
+
 fn pos(x: u32) -> u32 requires(x > 0) {
+    return x;
+}
+
+fn big(x: usize) -> usize requires(x > 0) {
     return x;
 }
 
@@ -47,9 +55,31 @@ fn dead(x: u32) -> u32 {
     return x;
 }
 
+fn traced() -> u32 {
+    if TRACE {
+        return pos(0);
+    }
+    return 1;
+}
+
+fn configured() -> u32 {
+    if K > 0 {
+        return pos(K);
+    }
+    return 1;
+}
+
 fn generic<T: Copy>(t: T) -> T {
     let a = pos(0);
     return t;
+}
+
+fn in_closure<const N: usize>() -> usize {
+    let g = fn() -> usize { return big(N); };
+    if N > 0 {
+        return g();
+    }
+    return 1;
 }
 
 fn main() {
@@ -58,4 +88,6 @@ fn main() {
     let b = open(1) + dead(4) + by_clause(0);
     let c = generic(1u8);
     let d = generic(2u64);
+    let e = traced() + configured();
+    let f = in_closure::<0>() + in_closure::<4>();
 }
