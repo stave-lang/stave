@@ -94,7 +94,16 @@ fn check_and_builds_report_the_same() {
             .map(|d| (d.code().to_string(), d.primary().map_or(0, |s| s.offset), d.related().len() as u32))
             .collect()
     };
-    for file in ["tests/conformance/effects/trap_neg.stv", "tests/conformance/effects/fn_types.stv"] {
+    for file in [
+        "tests/conformance/effects/trap_neg.stv",
+        "tests/conformance/effects/fn_types.stv",
+        "tests/conformance/effects/contract_always_fails.stv",
+        "tests/conformance/effects/contract_call_fails.stv",
+        "tests/conformance/effects/contract_call_unproved.stv",
+        "tests/conformance/effects/contract_call_other_ways.stv",
+        "tests/conformance/effects/contract_call_instance_value.stv",
+        "tests/conformance/effects/contract_call_overflow.stv",
+    ] {
         let check = run(file, Goal::Check, |_| {});
         let debug = run(file, Goal::Build, |_| {});
         let release = run(file, Goal::Build, |o| o.release = true);

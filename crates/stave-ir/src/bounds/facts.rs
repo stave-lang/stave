@@ -47,6 +47,7 @@
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
@@ -54,7 +55,9 @@ use super::{BOUNDS_STEP_LIMIT, Cx, Proof, preds_of};
 use crate::ir::{Block, Body, CastKind, FuncId, Op, Operand, Term as IrTerm, Value, ValueDef};
 use crate::types::TypeKey;
 use crate::verify::Dominators;
-use crate::witness::{ASSERT_BLOCKS, Edge, MAX_CONST, NOT_DEPTH, Node, Source};
+use crate::witness::{
+    ASSERT_BLOCKS, Edge, MAX_CONST, NO_BLOCK, NOT_DEPTH, Node, Row, Source, Summary, Term as RowTerm,
+};
 
 /// Folding depth of `add`/`sub` chains, and of `slice.len (slice.make ..)` nesting.
 const DEPTH: u32 = 8;
@@ -64,14 +67,32 @@ const CYCLE_STARTS: usize = 16;
 /// Every `u64` constant is below it, so a constant index or length is never opaque.
 const MAX_K: i128 = MAX_CONST;
 
-const ZERO: u32 = 0;
+pub(super) const ZERO: u32 = 0;
 
-fn val_node(v: Value) -> u32 {
+pub(super) fn val_node(v: Value) -> u32 {
     1 + 2 * v.0
 }
 
-fn len_node(s: Value) -> u32 {
+pub(super) fn len_node(s: Value) -> u32 {
     2 + 2 * s.0
+}
+
+/// The witness node of a term node.
+pub(super) fn node_of(node: u32) -> Node {
+    match node {
+        ZERO => Node::Zero,
+        n if n % 2 == 1 => Node::Val(Value((n - 1) / 2)),
+        n => Node::Len(Value((n - 2) / 2)),
+    }
+}
+
+/// One side of an inequality as written: the constant zero, an int operand, or the length of a
+/// slice value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Side {
+    Zero,
+    Val(Operand),
+    Len(Value),
 }
 
 /// `node + k`; `root` is the value the term was read from after folding (`None`: a constant).
@@ -85,6 +106,11 @@ pub(super) struct Term {
 impl Term {
     pub(super) fn constant(c: u64) -> Term {
         Term { node: ZERO, k: i128::from(c), root: None }
+    }
+
+    /// The term's node and offset.
+    pub(super) fn parts(self) -> (u32, i128) {
+        (self.node, self.k)
     }
 
     /// `self + c`.
@@ -111,11 +137,11 @@ struct Fact {
     at: Region,
     /// The `eq`/`ne` instruction when the fact is one half of a proved equality.
     eq: Option<u32>,
-    /// Where the fact was read, and what it says there: `a <= b + wop` between the two operands
-    /// as written, before folding (`None`: the constant zero).
+    /// Where the fact was read, and what it says there: `a <= b + wop` between the two sides as
+    /// written, before folding.
     src: Source,
-    a: Option<Operand>,
-    b: Option<Operand>,
+    a: Side,
+    b: Side,
     wop: i128,
 }
 
@@ -142,11 +168,13 @@ struct Step {
     fact: u32,
 }
 
-/// The lazily built per-function graph and the callee summaries it needed.
+/// The lazily built per-function graph and what it needed of the callees.
 #[derive(Default)]
 pub(super) struct Facts {
     graph: OnceCell<Graph>,
     asserted: RefCell<FxHashMap<FuncId, u64>>,
+    /// The summaries of callees computed here (no table of them was given).
+    pub(super) claims: RefCell<FxHashMap<FuncId, Option<Arc<Summary>>>>,
 }
 
 impl Cx<'_> {
@@ -155,7 +183,7 @@ impl Cx<'_> {
     }
 
     /// `(signed, bits)` of `v`'s type when it is an int.
-    fn int_ty(&self, v: Value) -> Option<(bool, u8)> {
+    pub(super) fn int_ty(&self, v: Value) -> Option<(bool, u8)> {
         match self.b.value_ty(v).and_then(|t| self.key(t)) {
             Some(TypeKey::Int { signed, bits }) => Some((*signed, bits.width())),
             _ => None,
@@ -170,7 +198,7 @@ impl Cx<'_> {
         }
     }
 
-    fn small_const(&self, o: Operand) -> Option<i128> {
+    pub(super) fn small_const(&self, o: Operand) -> Option<i128> {
         self.b.int_const(o).filter(|c| (-MAX_K..=MAX_K).contains(c))
     }
 
@@ -211,6 +239,17 @@ impl Cx<'_> {
     /// [`Cx::term`], handing `sink` every folding step as the equality it uses, from the operand
     /// as written down to the term's node.
     pub(super) fn fold(&self, o: Operand, sink: &mut impl FnMut(Edge)) -> Option<Term> {
+        self.fold_to(o, None, sink)
+    }
+
+    /// [`Cx::fold`] that reads value `stop` as a node of its own: nothing is folded through its
+    /// definition, nor through a `slice.make` that defines it.
+    pub(super) fn fold_to(
+        &self,
+        o: Operand,
+        stop: Option<Value>,
+        sink: &mut impl FnMut(Edge),
+    ) -> Option<Term> {
         let mut o = o;
         let mut k: i128 = 0;
         let mut nested = 0;
@@ -222,6 +261,9 @@ impl Cx<'_> {
                 let Operand::Value(v) = o else { return None };
                 self.int_ty(v)?;
                 let opaque = Term { node: val_node(v), k, root: Some(v) };
+                if stop == Some(v) {
+                    return Some(opaque);
+                }
                 let Some(d) = self.def(v) else { return Some(opaque) };
                 let args = self.b.args(d);
                 match (self.b.insts.op[d as usize], args) {
@@ -279,7 +321,8 @@ impl Cx<'_> {
                             mul: 1,
                         });
                         // `slice.len (slice.make p n)` is `n`.
-                        if let Some(ds) = self.def(sv)
+                        if stop != Some(sv)
+                            && let Some(ds) = self.def(sv)
                             && self.b.insts.op[ds as usize] == Op::SliceMake
                             && let Some(&n) = self.b.args(ds).get(1)
                         {
@@ -352,6 +395,11 @@ impl Cx<'_> {
                 self.bit_facts(&mut g, d);
             }
         }
+        for i in 0..self.b.insts.len() as u32 {
+            if self.b.insts.op[i as usize] == Op::Call && self.reachable_inst(i) {
+                self.call_facts(&mut g, i);
+            }
+        }
         // The lower end of the type, `lo <= v`, for the value nodes a fact leaves toward a node
         // other than zero, collected before the upper ends, which only lead to zero.
         let mut leave: Vec<u32> = g.facts.iter().filter(|f| f.to != ZERO).map(|f| f.from).collect();
@@ -392,6 +440,48 @@ impl Cx<'_> {
         // query tries them in.
         g.facts.sort_by_key(|f| f.from);
         g
+    }
+
+    /// The facts a returned `call @f ..` states by `f`'s summary: its `post` rows about the
+    /// arguments and the result, and its `pre` rows that read a `requires` check (checked at
+    /// entry, or proved by this call) about the arguments.
+    fn call_facts(&self, g: &mut Graph, i: u32) {
+        let Some(&Operand::Func(f)) = self.b.args(i).first() else { return };
+        let Some(s) = self.claim(f) else { return };
+        let at = Region { block: self.block_of[i as usize], after: Some(i) };
+        for (k, row) in s.post.iter().enumerate() {
+            if let Some((a, b)) = self.call_sides(i, row) {
+                self.add_sides(g, at, Source::Ensures { call: i, clause: k as u32 }, (a, b, row.w), None);
+            }
+        }
+        for (k, p) in s.pre.iter().enumerate() {
+            if p.entry != NO_BLOCK
+                && let Some((a, b)) = self.call_sides(i, &p.row)
+            {
+                self.add_sides(g, at, Source::Arg { call: i, clause: k as u32 }, (a, b, p.row.w), None);
+            }
+        }
+    }
+
+    /// The two sides of summary row `row` of the callee of call `i`, about its operands and
+    /// result.
+    pub(super) fn call_sides(&self, i: u32, row: &Row) -> Option<(Side, Side)> {
+        let args = self.b.args(i);
+        let result = self.b.insts.result.get(i as usize).copied().flatten();
+        let side = |t: RowTerm| -> Option<Side> {
+            let arg = |k: u32| args.get(k as usize + 1).copied();
+            match t {
+                RowTerm::Zero => Some(Side::Zero),
+                RowTerm::Param(k) => arg(k).map(Side::Val),
+                RowTerm::LenParam(k) => match arg(k)? {
+                    Operand::Value(v) => Some(Side::Len(v)),
+                    _ => None,
+                },
+                RowTerm::Result => result.map(|v| Side::Val(Operand::Value(v))),
+                RowTerm::LenResult => result.map(Side::Len),
+            }
+        };
+        Some((side(row.a)?, side(row.b)?))
     }
 
     /// The facts bit op `d` (`and`, `rem`, `shr`) states about its unsigned result.
@@ -504,6 +594,12 @@ impl Cx<'_> {
         le: (Option<Operand>, Option<Operand>, i128),
         eq: Option<u32>,
     ) {
+        let side = |o: Option<Operand>| o.map_or(Side::Zero, Side::Val);
+        self.add_sides(g, at, src, (side(le.0), side(le.1), le.2), eq);
+    }
+
+    /// [`Cx::add_le`] between two [`Side`]s.
+    fn add_sides(&self, g: &mut Graph, at: Region, src: Source, le: (Side, Side, i128), eq: Option<u32>) {
         let (a, b, w) = le;
         let (Some(ta), Some(tb)) = (self.side_term(a), self.side_term(b)) else { return };
         if ta.node == tb.node {
@@ -611,16 +707,18 @@ impl Cx<'_> {
         self.prove_lt(at, idx, Term { k: n.k.checked_add(1)?, ..n }, None)
     }
 
-    /// Facts that contradict each other at the end of `block`: a node and a walk of facts back
-    /// to it of negative total weight (`u <= u - 1`). Only the start nodes of branch and assert
-    /// facts holding there are tried (a contradiction needs a condition), at most
-    /// [`CYCLE_STARTS`] of them, each a bounded query.
-    pub(super) fn contradiction(&self, block: u32) -> Option<(u32, Vec<u32>)> {
+    /// Facts that contradict each other right before instruction `at` of `block` (`u32::MAX`: at
+    /// the block's end): a node and a walk of facts back to it of negative total weight
+    /// (`u <= u - 1`). Only the start nodes of branch and assert facts holding there are tried
+    /// (a contradiction needs a condition), at most [`CYCLE_STARTS`] of them, each a bounded
+    /// query. For a call the point is before it: what the call itself states on return (its
+    /// callee's `requires`) contradicts the very facts that refute it.
+    pub(super) fn contradiction(&self, block: u32, at: u32) -> Option<(u32, Vec<u32>)> {
         let g = self.graph();
         let mut starts: Vec<u32> = Vec::new();
         for f in &g.facts {
             if matches!(f.src, Source::Branch { .. } | Source::Assert { .. })
-                && self.holds(f.at, block, u32::MAX)
+                && self.holds(f.at, block, at)
                 && !starts.contains(&f.from)
             {
                 starts.push(f.from);
@@ -632,7 +730,7 @@ impl Cx<'_> {
         starts.into_iter().find_map(|u| {
             let t = Term { node: u, k: 0, root: None };
             let mut path = Vec::new();
-            self.prove_at(block, u32::MAX, t, t, Some(&mut path)).map(|_| (u, path))
+            self.prove_at(block, at, t, t, Some(&mut path)).map(|_| (u, path))
         })
     }
 
@@ -675,23 +773,128 @@ impl Cx<'_> {
     /// read at its source, down from its right operand.
     pub(super) fn fact_edges(&self, fi: u32, out: &mut Vec<Edge>) -> Option<()> {
         let f = self.graph().facts.get(fi as usize)?;
-        if let Some(a) = f.a {
-            self.up(a, out);
-        }
+        self.side_up(f.a, None, out);
         let ((from, _), (to, _)) = (self.side_written(f.a)?, self.side_written(f.b)?);
         out.push(Edge { from, to, w: f.wop, src: f.src, mul: 1 });
-        if let Some(b) = f.b {
-            self.down(b, out);
-        }
+        self.side_down(f.b, None, out);
         Some(())
     }
 
-    fn side_term(&self, o: Option<Operand>) -> Option<Term> {
-        o.map_or(Some(Term::constant(0)), |o| self.term(o))
+    /// The term of a side, with value `stop` read as a node of its own ([`Cx::fold_to`]).
+    pub(super) fn side_term_to(&self, s: Side, stop: Option<Value>) -> Option<Term> {
+        match s {
+            Side::Zero => Some(Term::constant(0)),
+            Side::Val(o) => self.fold_to(o, stop, &mut |_| {}),
+            Side::Len(v) => {
+                let mut t = None;
+                self.len_down(v, stop, &mut |_| {}, &mut t);
+                t
+            }
+        }
     }
 
-    fn side_written(&self, o: Option<Operand>) -> Option<(Node, i128)> {
-        o.map_or(Some((Node::Zero, 0)), |o| self.written(o))
+    fn side_term(&self, s: Side) -> Option<Term> {
+        self.side_term_to(s, None)
+    }
+
+    /// The node and offset of a side as written.
+    pub(super) fn side_written(&self, s: Side) -> Option<(Node, i128)> {
+        match s {
+            Side::Zero => Some((Node::Zero, 0)),
+            Side::Val(o) => self.written(o),
+            Side::Len(v) => Some((Node::Len(v), 0)),
+        }
+    }
+
+    /// The folding steps of the length of slice value `s`, from `Len(s)` down to its term's
+    /// node (`term`): none, or through the `slice.make` that defines `s` to its length operand.
+    fn len_down(&self, s: Value, stop: Option<Value>, sink: &mut impl FnMut(Edge), term: &mut Option<Term>) {
+        if stop != Some(s)
+            && let Some(d) = self.def(s)
+            && self.b.insts.op[d as usize] == Op::SliceMake
+            && let Some(&n) = self.b.args(d).get(1)
+        {
+            let Some((to, kn)) = self.written(n) else { return };
+            sink(Edge { from: Node::Len(s), to, w: kn, src: Source::SliceMake { inst: d }, mul: 1 });
+            *term = self.fold_to(n, stop, sink);
+            return;
+        }
+        *term = Some(Term { node: len_node(s), k: 0, root: None });
+    }
+
+    /// The folding steps of side `s`, from the side as written down to its term's node.
+    pub(super) fn side_down(&self, s: Side, stop: Option<Value>, out: &mut Vec<Edge>) {
+        match s {
+            Side::Zero => {}
+            Side::Val(o) => {
+                let _ = self.fold_to(o, stop, &mut |e| out.push(e));
+            }
+            Side::Len(v) => self.len_down(v, stop, &mut |e| out.push(e), &mut None),
+        }
+    }
+
+    /// [`Cx::side_down`] backwards, from the term's node up to the side as written.
+    pub(super) fn side_up(&self, s: Side, stop: Option<Value>, out: &mut Vec<Edge>) {
+        let from = out.len();
+        self.side_down(s, stop, out);
+        out[from..].reverse();
+        for e in &mut out[from..] {
+            *e = Edge { from: e.to, to: e.from, w: -e.w, ..*e };
+        }
+    }
+
+    /// The proof of `a <= b + w` right before instruction `at` of `block` (`u32::MAX`: at the
+    /// block's end), appended to `out`: both sides folded, then a path of facts or the type
+    /// range of the one value node against a constant.
+    pub(super) fn side_goal(
+        &self,
+        block: u32,
+        at: u32,
+        (a, b, w): (Side, Side, i128),
+        out: &mut Vec<Edge>,
+    ) -> Option<()> {
+        let (ta, tb) = (self.side_term(a)?, self.side_term(b)?);
+        let bound = tb.k.checked_add(w)?.checked_sub(ta.k)?;
+        let from = out.len();
+        self.side_down(a, None, out);
+        let mut path = Vec::new();
+        let limit = Term { k: tb.k.checked_add(w)?.checked_add(1)?, ..tb };
+        let mid = if self.prove_at(block, at, ta, limit, Some(&mut path)).is_some() {
+            path.iter().try_for_each(|&f| self.fact_edges(f, out))
+        } else {
+            self.range_edge(ta.node, tb.node, bound, out)
+        };
+        if mid.is_none() {
+            out.truncate(from);
+            return None;
+        }
+        self.side_up(b, None, out);
+        Some(())
+    }
+
+    /// `from <= to + bound` between a value node and zero when the value's type range alone
+    /// gives it: one `Range` edge.
+    fn range_edge(&self, from: u32, to: u32, bound: i128, out: &mut Vec<Edge>) -> Option<()> {
+        let range = |node: u32| -> Option<(Value, i128, i128)> {
+            let Node::Val(v) = node_of(node) else { return None };
+            let (signed, bits) = self.int_ty(v)?;
+            Some(if signed {
+                (v, -(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+            } else {
+                (v, 0, (1i128 << bits) - 1)
+            })
+        };
+        let (value, edge) = if to == ZERO {
+            let (v, _, hi) = range(from)?;
+            (v, (Node::Val(v), Node::Zero, hi))
+        } else if from == ZERO {
+            let (v, lo, _) = range(to)?;
+            (v, (Node::Zero, Node::Val(v), -lo))
+        } else {
+            return None;
+        };
+        let (from, to, w) = edge;
+        (w <= bound).then(|| out.push(Edge { from, to, w, src: Source::Range { value }, mul: 1 }))
     }
 }
 

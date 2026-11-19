@@ -5,7 +5,8 @@
 //     [guard: config.GUARD, PROT_NONE][stack][altstack: config.ALTSTACK][record]
 // where the stack has config.thread_stack(code of the fn value) bytes: the computed bound of
 // threads started with that fn, else `[run] stack`.
-// The record (one page) holds the futex word `tid`, the fn value, and the mapping. The thread
+// The record (one page) holds the futex word `tid`, the fn value, the mapping, and the thread's
+// block (runtime.state Block: its thread pointer, set by the clone). The thread
 // is created with clone3 (or `clone` where clone3 is ENOSYS: qemu-user), sharing the address
 // space, files, and signal handlers (runtime.os.spawn_thread); the kernel writes its tid into
 // `tid` and, when it exits, clears `tid` and wakes the futex: that is the join. The child starts
@@ -14,8 +15,8 @@
 // then makes the `exit` system call.
 //
 // Thread ids: main is 0; each created thread takes the next number, process-wide
-// (`state.next_thread`, atomic). The mapping is entered in the registry (`state.reg`), so the
-// panic report finds a thread's id from a stack address and the signal handler finds its guard.
+// (`state.next_thread`, atomic), kept in the thread's block for the panic report. The mapping is
+// entered in the registry (`state.reg`), so the signal handler finds its guard from an address.
 //
 // Entry points fixed by the compiler (contracts/intrinsics.md "Paths fixed by the compiler"):
 // `entry` (thread start), `scope_spawn` and `scope_join` (the lowering of `scope { spawn { } }`:
@@ -28,13 +29,15 @@
 // the IR interpreter has one thread and makes clone fail with ENOSYS (native kernels have
 // clone); there the fn value runs on the calling thread before `start` returns, which gives the
 // same result for `join`, `par_for`, and `scope` (their bodies only communicate through results
-// the caller reads after the join).
+// the caller reads after the join). It runs as a task of its own there too: its error trace
+// starts empty and the caller's is restored after it (runtime.errtrace).
 
 import runtime.os;
 import runtime.state;
 import runtime.atomic;
 import runtime.panic;
 import runtime.config;
+import runtime.errtrace;
 
 struct Thread {
     // kernel tid while the thread runs; 0 once it has exited (futex word, CLONE_CHILD_CLEARTID)
@@ -51,6 +54,7 @@ struct Thread {
     entry: usize,
     // next record of a scope's list (0: end)
     next: usize,
+    blk: state.Block,
 }
 
 fn round_up(x: usize, a: usize) -> usize {
@@ -101,17 +105,31 @@ fn start(f: fn()) -> usize {
             alt_len: alt,
             entry: e,
             next: 0,
+            blk: state.Block.{
+                this: 0,
+                thread_id: id,
+                user_site: 0,
+                requires_site: 0,
+                origin: state.NO_SITE,
+                count: 0,
+                ring: [0u32; state.NRING],
+            },
         });
     }
+    let bp = unsafe("th is the record (above)") &mut (*th).blk as *mut state.Block;
+    unsafe("bp is the block of the record above; no thread uses it yet") { (*bp).this = bp as usize; }
     let tidp = unsafe("th is the record (above)") &mut (*th).tid as *mut u32;
-    let r = unsafe("[base + guard, + size) is the fresh stack; tid lives in the record until join unmaps it; entry reads th") os.spawn_thread(base + guard, size, tidp, th as usize);
+    let r = unsafe("[base + guard, + size) is the fresh stack; tid and the block live in the record until join unmaps it; entry reads th") os.spawn_thread(base + guard, size, tidp, bp as usize, th as usize);
     if r < 0 {
         unsafe("the thread was not created: nothing else uses the mapping") { release(th); }
         if r != -os.ENOSYS {
             cannot_create();
         }
         // the IR interpreter (one thread): run f here
+        let saved = errtrace.save();
+        errtrace.clear();
         f();
+        errtrace.restore(&saved);
         return 0;
     }
     return th as usize;

@@ -21,15 +21,25 @@
 //! may be another removed check: in any execution, the first removed check that would fail has
 //! only true facts before it, so its proof holds, a contradiction.
 //!
+//! Calls and summaries (the module text of [`super`]): a row of another function's summary is
+//! read as that function's witness states it, and is certified by the check of that function; a
+//! module is accepted only when every witness is, so no proof rests on a row that was refused.
+//! `Requires` edges are read only inside the proofs of the function's own entry. [`remove`] is
+//! the only code that makes an unchecked entry or retargets a call to one, and only for the
+//! calls and entries accepted here.
+//!
 //! Cost: linear in the function (blocks, CFG edges, instructions) plus the witness rows, each
 //! goal's nodes sorted once. On IR that is not well-formed the checker refuses or accepts, but
 //! does not panic.
 
 use super::{
-    ASSERT_BLOCKS, ENSURES_FAILED, Edge, FnWitness, MAX_CONST, MAX_MUL, NO_BLOCK, NOT_DEPTH, Node,
-    REQUIRES_FAILED, Refuted, Removed, Source,
+    ASSERT_BLOCKS, CallProved, CallRefuted, ENSURES_FAILED, Edge, FnWitness, MAX_CONST, MAX_MUL, NO_BLOCK,
+    NOT_DEPTH, Node, Pre, REQUIRES_FAILED, Refuted, Removed, Row, SUMMARY_RETURNS, Safe, Source, Summary,
+    Term as RowTerm,
 };
-use crate::ir::{Block, Body, CastKind, FuncId, Module, Op, Operand, Span, Target, Term, Value, ValueDef};
+use crate::ir::{
+    Block, Body, CastKind, FuncId, InstanceId, Module, Op, Operand, Span, Target, Term, Value, ValueDef,
+};
 use crate::types::{IntBits, TypeKey};
 
 /// Why a witness does not hold.
@@ -58,6 +68,15 @@ pub enum Reject {
     Weak,
     /// A weight times its multiplier, or the sum, is beyond `i128`.
     Overflow,
+    /// The summary's tables do not fit the function: a `requires` check without an entry proof,
+    /// a row that is not about its parameters or result, `post` proofs that are not one per row
+    /// and reachable `ret` block, or more such blocks than [`SUMMARY_RETURNS`].
+    Summary,
+    /// A call row does not name a reachable direct call of a function whose summary has an
+    /// entry, its proofs are not one per `pre` row, or a refuted row reads no check.
+    Call,
+    /// The witnesses are not one per function, or the results are not those of their checks.
+    Repeated,
 }
 
 impl Reject {
@@ -73,6 +92,9 @@ impl Reject {
             Reject::Chain => "the edges do not add up to the goal's two sides",
             Reject::Weak => "the weights do not prove the goal",
             Reject::Overflow => "the weights overflow",
+            Reject::Summary => "the summary does not fit the function",
+            Reject::Call => "not a call of a function with an unchecked entry",
+            Reject::Repeated => "not one witness per function",
         }
     }
 }
@@ -111,6 +133,17 @@ pub struct Checked {
     /// The blocks whose `cbr` into an accepted contract check's failure block becomes a `br`.
     jumps: Vec<u32>,
     refuted: Vec<u32>,
+    /// The failure calls of the `requires` checks, when the summary's entry is accepted.
+    entry: Vec<u32>,
+    /// The instructions of the accepted [`Summary::safe`] rows.
+    safe: Vec<u32>,
+    calls: Vec<u32>,
+    call_refuted: Vec<u32>,
+    /// The accepted summary, if it states anything.
+    summary: Option<std::sync::Arc<Summary>>,
+    /// The check that accepted it ([`check_func`], or one [`check_module`] for all its rows):
+    /// rows of one check read the same summaries and were accepted together.
+    set: u64,
 }
 
 impl Checked {
@@ -127,11 +160,70 @@ impl Checked {
     pub fn refuted(&self) -> &[u32] {
         &self.refuted
     }
+
+    /// Whether the function's summary has an accepted entry.
+    pub fn has_entry(&self) -> bool {
+        !self.entry.is_empty()
+    }
+
+    /// The calls accepted as proving their callee's `pre` rows, by instruction index.
+    pub fn calls(&self) -> &[u32] {
+        &self.calls
+    }
+
+    /// The calls accepted as always failing a `pre` row, by instruction index.
+    pub fn call_refuted(&self) -> &[u32] {
+        &self.call_refuted
+    }
 }
 
-/// Validates every row of `w` against its function in `m`. Functions are independent: a caller
-/// may check them in parallel.
+/// The summaries the witnesses of a module state, by function. A proof may read any of them:
+/// each is certified by the check of its own function, and the rows of a set are handed out
+/// only when every witness of the set is accepted ([`check_module_by`]).
+struct Summaries<'a> {
+    by_func: Vec<Option<&'a Summary>>,
+}
+
+impl<'a> Summaries<'a> {
+    fn of(m: &Module, ws: impl IntoIterator<Item = &'a FnWitness>) -> Summaries<'a> {
+        let mut by_func = vec![None; m.funcs.len()];
+        for w in ws {
+            if let Some(slot) = by_func.get_mut(w.func.index()) {
+                *slot = Some(&w.summary);
+            }
+        }
+        Summaries { by_func }
+    }
+
+    fn get(&self, f: FuncId) -> Option<&'a Summary> {
+        self.by_func.get(f.index()).copied().flatten()
+    }
+}
+
+/// Whether summary `s` states anything.
+fn states(s: &Summary) -> bool {
+    !(s.pre.is_empty() && s.entry.is_empty() && s.safe.is_empty() && s.post.is_empty())
+}
+
+/// The result of checking one witness.
+pub type Verdict = Result<Checked, Rejected>;
+
+/// A fresh mark for the rows one check accepts ([`Checked::set`]).
+fn next_set() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Validates every row of `w` and its summary against its function in `m`, with no summary but
+/// the function's own: a call of another function proves nothing and states nothing.
 pub fn check_func(m: &Module, w: &FnWitness) -> Result<Checked, Rejected> {
+    check_in(m, w, &Summaries::of(m, std::iter::once(w)), next_set())
+}
+
+/// Validates every row of `w` and its summary against its function in `m`, reading the
+/// summaries `sums` of the functions it calls. An `Ok` holds only if every witness behind `sums`
+/// is accepted too: the callers below see to that.
+fn check_in(m: &Module, w: &FnWitness, sums: &Summaries<'_>, set: u64) -> Result<Checked, Rejected> {
     let path = m.func(w.func).map_or(String::new(), |f| format!("@{} {}", f.instance, f.path));
     let fail = |inst: Option<u32>, edge: Option<u32>, why: Reject| Rejected {
         func: w.func,
@@ -143,7 +235,8 @@ pub fn check_func(m: &Module, w: &FnWitness) -> Result<Checked, Rejected> {
     let Some(b) = m.func(w.func).and_then(|f| f.body.as_ref()) else {
         return Err(fail(None, None, Reject::Cfg));
     };
-    let mut cx = Cx::new(m, b, &w.dom).map_err(|why| fail(None, None, why))?;
+    let ret = m.func(w.func).and_then(|f| f.ret).and_then(|t| int_of(m, t));
+    let mut cx = Cx::new(m, b, &w.dom, sums, &w.summary, ret).map_err(|why| fail(None, None, why))?;
     let mut prev = None;
     let mut jumps = Vec::new();
     for r in &w.removed {
@@ -156,42 +249,293 @@ pub fn check_func(m: &Module, w: &FnWitness) -> Result<Checked, Rejected> {
         cx.refuted(w, r, prev).map_err(|(edge, why)| fail(Some(r.inst), edge, why))?;
         prev = Some(r.inst);
     }
+    cx.summary(w).map_err(|(inst, edge, why)| fail(inst, edge, why))?;
+    let mut prev = None;
+    for c in &w.calls.proved {
+        cx.call(w, c, prev).map_err(|(edge, why)| fail(Some(c.inst), edge, why))?;
+        prev = Some(c.inst);
+    }
+    let mut prev = None;
+    for c in &w.calls.refuted {
+        cx.call_refuted(w, c, prev).map_err(|(edge, why)| fail(Some(c.inst), edge, why))?;
+        prev = Some(c.inst);
+    }
     Ok(Checked {
         func: w.func,
         insts: w.removed.iter().map(|r| r.inst).collect(),
         jumps,
         refuted: w.refuted.iter().map(|r| r.inst).collect(),
+        entry: w.summary.entry.iter().map(|r| r.inst).collect(),
+        safe: w.summary.safe.iter().map(|s| s.inst).collect(),
+        calls: w.calls.proved.iter().map(|c| c.inst).collect(),
+        call_refuted: w.calls.refuted.iter().map(|c| c.inst).collect(),
+        summary: states(&w.summary).then(|| std::sync::Arc::new(w.summary.clone())),
+        set,
     })
 }
 
-/// [`check_func`] for every function of `ws`: all accepted, or every rejection.
+/// Validates the witnesses `ws`, one per function, each reading the summaries of all of them:
+/// all accepted, or every rejection.
 pub fn check_module(m: &Module, ws: &[FnWitness]) -> Result<Vec<Checked>, Vec<Rejected>> {
+    let ws: Vec<&FnWitness> = ws.iter().collect();
+    check_module_by(m, &ws, |one| (0..ws.len()).map(one).collect())
+}
+
+/// [`check_module`] with the caller running the checks: `run` gets the check of witness `k` and
+/// returns its result for every `k` of `ws`, in order (functions are independent, so it may run
+/// them in parallel). Nothing is accepted unless everything is: a proof may rest on a row of
+/// another function's summary, which only that function's check certifies. A second witness for
+/// one function is refused.
+pub fn check_module_by(
+    m: &Module,
+    ws: &[&FnWitness],
+    run: impl FnOnce(&(dyn Fn(usize) -> Verdict + Sync)) -> Vec<Verdict>,
+) -> Result<Vec<Checked>, Vec<Rejected>> {
+    let refuse = |f: FuncId, why: Reject| Rejected {
+        func: f,
+        path: m.func(f).map_or(String::new(), |x| format!("@{} {}", x.instance, x.path)),
+        inst: None,
+        edge: None,
+        why,
+    };
+    let mut funcs: Vec<FuncId> = ws.iter().map(|w| w.func).collect();
+    funcs.sort_unstable();
+    if let Some(pair) = funcs.windows(2).find(|p| p[0] == p[1]) {
+        return Err(vec![refuse(pair[0], Reject::Repeated)]);
+    }
+    let sums = Summaries::of(m, ws.iter().copied());
+    let set = next_set();
+    let one = |k: usize| check_in(m, ws[k], &sums, set);
+    let results = run(&one);
+    if results.len() != ws.len() {
+        return Err(ws.first().map(|w| refuse(w.func, Reject::Repeated)).into_iter().collect());
+    }
     let mut ok = Vec::with_capacity(ws.len());
     let mut bad = Vec::new();
-    for w in ws {
-        match check_func(m, w) {
-            Ok(c) => ok.push(c),
+    for (w, r) in ws.iter().zip(results) {
+        match r {
+            Ok(c) if c.func == w.func && c.set == set => ok.push(c),
+            // not the result of this witness's check
+            Ok(_) => bad.push(refuse(w.func, Reject::Repeated)),
             Err(r) => bad.push(r),
         }
     }
     if bad.is_empty() { Ok(ok) } else { Err(bad) }
 }
 
-/// Deletes the accepted checks: a `check.bounds` goes; a contract check's `cbr` becomes a `br` to
-/// its true side, its failure call goes, and so does the failure block once nothing branches to
-/// it. `m` must be the module they were checked against, unchanged; an index that is not a
-/// `check.bounds` or a call is left alone.
-pub fn remove(m: &mut Module, checked: &[Checked]) {
-    for c in checked {
-        if let Some(b) = m.func_mut(c.func).and_then(|f| f.body.as_mut()) {
-            remove_checks(b, &c.insts, &c.jumps);
+/// What [`remove`] did besides deleting checks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Removal {
+    /// The rows were not one accepted set: two of them are for this function, or its row comes
+    /// from another check than the first row. Then nothing was changed.
+    pub refused: Option<FuncId>,
+    /// (function, its unchecked entry) for every function some accepted call was retargeted to:
+    /// a new function at the end of the module, or the function itself when every reference to
+    /// it was such a call.
+    pub unchecked: Vec<(FuncId, FuncId)>,
+    /// (caller, callee): every reference of `caller` to `callee` was an accepted call, so
+    /// `caller` only enters `callee` past its `requires` checks. Sorted.
+    pub proved: Vec<(FuncId, FuncId)>,
+    /// Per function with an accepted entry: its instructions, by their index after the removal,
+    /// that cannot trap when it is entered with its `pre` rows true (the failure calls of its
+    /// `requires` checks that stay, and the accepted [`Summary::safe`] instructions).
+    pub entry: Vec<(FuncId, Vec<u32>)>,
+}
+
+/// Calls `f` with every function an operand of `b` names.
+fn func_refs(b: &Body, mut f: impl FnMut(FuncId)) {
+    let mut operand = |o: Operand| {
+        if let Operand::Func(g) = o {
+            f(g);
         }
+    };
+    for i in 0..b.insts.len() as u32 {
+        b.args(i).iter().for_each(|&o| operand(o));
+    }
+    for (bi, bd) in b.blocks.iter().enumerate() {
+        match bd.term {
+            Term::Cbr { cond: o, .. } | Term::Switch { scrut: o, .. } | Term::Ret(Some(o)) => operand(o),
+            Term::Br(_) | Term::Ret(None) | Term::Unreachable => {}
+        }
+        b.for_each_successor(Block(bi as u32), |t| b.target_args(&t).iter().for_each(|&o| operand(o)));
     }
 }
 
+/// Deletes the accepted checks and gives the accepted calls their unchecked entries. `m` must be
+/// the module the rows were checked against, unchanged, and `checked` the rows of one check
+/// ([`check_func`], [`check_module`], [`check_module_by`]), at most one per function: anything
+/// else is refused and changes nothing ([`Removal::refused`]).
+///
+/// - A `check.bounds` goes; a contract check's `cbr` becomes a `br` to its true side, its failure
+///   call goes, and so does the failure block once nothing branches to it. An index that is not
+///   a `check.bounds` or a call is left alone.
+/// - An accepted call whose callee has an accepted entry is retargeted to the callee's unchecked
+///   entry: the callee's body after its own removals, without the failure calls of its `requires`
+///   checks. That body is a new function, with [`InstanceId::UNCHECKED_ENTRY`] appended to the
+///   instance id and no link symbol. The callee keeps its checks: `m` may be a part of the
+///   program, and what else enters the callee is not known.
+pub fn remove(m: &mut Module, checked: &[Checked]) -> Removal {
+    remove_in(m, checked, false)
+}
+
+/// [`remove`] for a module that is the whole program: every use of a function is an operand of
+/// one of its bodies. Then a callee that is an instance of a generic function without a link
+/// symbol, and that every operand naming it calls with an accepted call, becomes its own
+/// unchecked entry and no new function is made (nothing else can enter such an instance).
+pub fn remove_whole(m: &mut Module, checked: &[Checked]) -> Removal {
+    remove_in(m, checked, true)
+}
+
+fn remove_in(m: &mut Module, checked: &[Checked], whole: bool) -> Removal {
+    let n = m.funcs.len();
+    let mut out = Removal::default();
+    let mut with_row = vec![false; n];
+    let mut with_entry: Vec<Option<usize>> = vec![None; n];
+    for (k, c) in checked.iter().enumerate() {
+        let Some(seen) = with_row.get_mut(c.func.index()) else { continue };
+        if std::mem::replace(seen, true) || c.set != checked[0].set {
+            out.refused = Some(c.func);
+            return out;
+        }
+        if c.has_entry() {
+            with_entry[c.func.index()] = Some(k);
+        }
+    }
+    // Per function with an entry: the operands naming it, and how many of them are the callee
+    // of an accepted call.
+    let mut refs = vec![0u32; n];
+    for f in &m.funcs {
+        if let Some(b) = &f.body {
+            func_refs(b, |g| {
+                if let Some(r) = refs.get_mut(g.index()) {
+                    *r += 1;
+                }
+            });
+        }
+    }
+    let mut proved_refs = vec![0u32; n];
+    // Per accepted call with such a callee: (checked row, instruction, callee).
+    let mut retargets: Vec<(usize, u32, FuncId)> = Vec::new();
+    for (k, c) in checked.iter().enumerate() {
+        let Some(b) = m.func(c.func).and_then(|f| f.body.as_ref()) else { continue };
+        let mut to: Vec<FuncId> = Vec::new();
+        for &i in &c.calls {
+            if b.insts.op.get(i as usize) == Some(&Op::Call)
+                && let Some(&Operand::Func(g)) = b.args(i).first()
+                && with_entry.get(g.index()).is_some_and(|e| e.is_some())
+            {
+                proved_refs[g.index()] += 1;
+                retargets.push((k, i, g));
+                to.push(g);
+            }
+        }
+        if to.is_empty() {
+            continue;
+        }
+        to.sort_unstable();
+        let mut named: Vec<FuncId> = Vec::new();
+        func_refs(b, |g| {
+            if to.binary_search(&g).is_ok() {
+                named.push(g);
+            }
+        });
+        named.sort_unstable();
+        // `to` is a sub-multiset of `named`: a callee is fully proved when both hold it equally
+        // often.
+        let count = |v: &[FuncId], g: FuncId| v.partition_point(|x| *x <= g) - v.partition_point(|x| *x < g);
+        let mut last = None;
+        for &g in &to {
+            if last != Some(g) && count(&to, g) == count(&named, g) {
+                out.proved.push((c.func, g));
+            }
+            last = Some(g);
+        }
+    }
+    out.proved.sort_unstable();
+    // Where the accepted calls of each function go.
+    let mut target: Vec<Option<FuncId>> = vec![None; n];
+    let mut clones: Vec<usize> = Vec::new();
+    for g in 0..n {
+        if with_entry[g].is_none() || proved_refs[g] == 0 {
+            continue;
+        }
+        let f = &m.funcs[g];
+        let itself = whole && refs[g] == proved_refs[g] && !f.type_args.is_empty() && f.symbol.is_none();
+        let to = if itself {
+            FuncId(g as u32)
+        } else {
+            clones.push(g);
+            FuncId((n + clones.len() - 1) as u32)
+        };
+        target[g] = Some(to);
+        out.unchecked.push((FuncId(g as u32), to));
+    }
+    for &(k, i, g) in &retargets {
+        let Some(to) = target[g.index()] else { continue };
+        let Some(b) = m.func_mut(checked[k].func).and_then(|f| f.body.as_mut()) else { continue };
+        // A copy of the operands with the new callee: no other instruction reads it.
+        let mut args = b.args(i).to_vec();
+        if let (Some(callee), Some(span)) = (args.first_mut(), b.insts.args.get_mut(i as usize)) {
+            *callee = Operand::Func(to);
+            *span = Span { start: b.operands.len() as u32, len: args.len() as u32 };
+            b.operands.extend(args);
+        }
+    }
+    // The new functions, from the bodies with their calls retargeted and no check removed yet.
+    for &g in &clones {
+        let Some(c) = with_entry[g].map(|k| &checked[k]) else { continue };
+        let mut f = m.funcs[g].clone();
+        if let Some(b) = f.body.as_mut() {
+            let dead: Vec<u32> = c.insts.iter().chain(&c.entry).copied().collect();
+            remove_checks(b, &dead, &c.jumps, &mut []);
+        }
+        let InstanceId(mut id) = f.instance;
+        id.push(InstanceId::UNCHECKED_ENTRY);
+        f.instance = InstanceId(id);
+        // The symbol of an exported function names its checked entry, which foreign callers
+        // enter; this one is named by its path and instance.
+        f.symbol = None;
+        m.funcs.push(f);
+    }
+    for c in checked {
+        let itself = target.get(c.func.index()).copied().flatten() == Some(c.func);
+        let Some(b) = m.func_mut(c.func).and_then(|f| f.body.as_mut()) else { continue };
+        if !c.has_entry() {
+            remove_checks(b, &c.insts, &c.jumps, &mut []);
+            continue;
+        }
+        // The entry's failure calls stay unless the function is its own unchecked entry or the
+        // call is removed with its own witness.
+        let mut dead = c.insts.clone();
+        let mut quiet: Vec<u32> = c.safe.clone();
+        if itself {
+            dead.extend(&c.entry);
+        } else {
+            quiet.extend(c.entry.iter().filter(|q| !c.insts.contains(q)));
+        }
+        quiet.sort_unstable();
+        remove_checks(b, &dead, &c.jumps, &mut quiet);
+        out.entry.push((c.func, quiet));
+    }
+    // What each function states, as certified on the bodies with every check in place: a later
+    // reading of a body that lost its checks would find fewer rows.
+    m.stated.resize(m.funcs.len(), None);
+    for c in checked {
+        if let Some(slot) = m.stated.get_mut(c.func.index())
+            && slot.is_none()
+        {
+            *slot = c.summary.clone();
+        }
+    }
+    for (k, &g) in clones.iter().enumerate() {
+        m.stated[n + k] = m.stated[g].clone();
+    }
+    out
+}
+
 /// Removes the checks `dead` (instructions) and the branches `jumps` (blocks) from `b`, keeping
-/// the order of the rest.
-fn remove_checks(b: &mut Body, dead: &[u32], jumps: &[u32]) {
+/// the order of the rest. `moved`: instructions that stay, rewritten to their new indices.
+fn remove_checks(b: &mut Body, dead: &[u32], jumps: &[u32], moved: &mut [u32]) {
     let mut failed = Vec::with_capacity(jumps.len());
     for &p in jumps {
         if let Some(bd) = b.blocks.get_mut(p as usize)
@@ -239,6 +583,11 @@ fn remove_checks(b: &mut Body, dead: &[u32], jumps: &[u32]) {
         if let ValueDef::Inst(i) = &mut v.def
             && let Some(&to) = before.get(*i as usize)
         {
+            *i = to;
+        }
+    }
+    for i in moved {
+        if let Some(&to) = before.get(*i as usize) {
             *i = to;
         }
     }
@@ -466,10 +815,34 @@ struct Cx<'a> {
     post: Vec<u32>,
     /// Callees already examined, with the parameters they assert.
     asserted: Vec<(FuncId, u64)>,
+    /// The summaries a `call` may be read with.
+    sums: &'a Summaries<'a>,
+    /// The function's own summary.
+    own: &'a Summary,
+    /// The function's return type when it is an int.
+    ret: Option<IntTy>,
+    /// Whether `Requires` edges are read: only inside the proofs of the summary's entry, which
+    /// hold where the `pre` rows do.
+    assume: bool,
+}
+
+/// The int type `t` is, if it is one.
+fn int_of(m: &Module, t: crate::types::TypeId) -> Option<IntTy> {
+    match m.types.key(t) {
+        Some(TypeKey::Int { signed, bits }) => Some((*signed, int_width(*bits))),
+        _ => None,
+    }
 }
 
 impl<'a> Cx<'a> {
-    fn new(m: &'a Module, b: &'a Body, dom: &[u32]) -> Result<Cx<'a>, Reject> {
+    fn new(
+        m: &'a Module,
+        b: &'a Body,
+        dom: &[u32],
+        sums: &'a Summaries<'a>,
+        own: &'a Summary,
+        ret: Option<IntTy>,
+    ) -> Result<Cx<'a>, Reject> {
         let n = b.blocks.len();
         if n == 0 || dom.len() != n {
             return Err(Reject::Cfg);
@@ -551,7 +924,22 @@ impl<'a> Cx<'a> {
         if numbered != reach.iter().filter(|r| **r).count() {
             return Err(Reject::Cfg);
         }
-        let cx = Cx { m, b, block_of, reach, in_count, in_from, in_then, pre, post, asserted: Vec::new() };
+        let cx = Cx {
+            m,
+            b,
+            block_of,
+            reach,
+            in_count,
+            in_from,
+            in_then,
+            pre,
+            post,
+            asserted: Vec::new(),
+            sums,
+            own,
+            ret,
+            assume: false,
+        };
         // Every edge `u → v` enters `v` from below `dom[v]`: by induction along any path from the
         // entry, each tree ancestor of a block is on the path.
         let mut certified = true;
@@ -1003,8 +1391,334 @@ impl<'a> Cx<'a> {
                 stated.push(Node::Val(v), Node::Val(x), 0);
                 stated.push(Node::Val(x), Node::Val(v), 0);
             }
+            Source::Requires { clause } => {
+                if !self.assume {
+                    return Err(Reject::Source);
+                }
+                let row = self.own.pre.get(clause as usize).ok_or(Reject::Source)?.row;
+                let g = self.own_goal(row, None)?;
+                stated.push(g.a, g.b, g.w);
+            }
+            Source::Ensures { call, clause } => {
+                let (f, args, result) = self.direct_call(call).ok_or(Reject::Source)?;
+                if !self.before(call, at) {
+                    return Err(Reject::Region);
+                }
+                let row = self.sums.get(f).and_then(|s| s.post.get(clause as usize)).ok_or(Reject::Source)?;
+                let g = self.call_goal(f, args, result, *row)?;
+                stated.push(g.a, g.b, g.w);
+            }
+            Source::Arg { call, clause } => {
+                let (f, args, _) = self.direct_call(call).ok_or(Reject::Source)?;
+                if !self.before(call, at) {
+                    return Err(Reject::Region);
+                }
+                let pre = self
+                    .sums
+                    .get(f)
+                    .and_then(|s| s.pre.get(clause as usize))
+                    .filter(|p| p.entry != NO_BLOCK)
+                    .ok_or(Reject::Source)?;
+                let g = self.call_goal(f, args, None, pre.row)?;
+                stated.push(g.a, g.b, g.w);
+            }
         }
         if stated.has(e) { Ok(()) } else { Err(Reject::Edge) }
+    }
+
+    /// The callee, the operands, and the result of instruction `i` when it is a `call @f ..`.
+    fn direct_call(&self, i: u32) -> Option<(FuncId, &'a [Operand], Option<Value>)> {
+        let args = self.b.args(i);
+        match (self.op(i)?, args.first()) {
+            (Op::Call, Some(&Operand::Func(f))) => {
+                Some((f, args, self.b.insts.result.get(i as usize).copied().flatten()))
+            }
+            _ => None,
+        }
+    }
+
+    /// `a + ka <= b + kb + w` as a goal on the two nodes.
+    fn row_goal(a: (Node, i128), b: (Node, i128), w: i128) -> Result<Goal, Reject> {
+        let w = w.checked_add(b.1).and_then(|x| x.checked_sub(a.1)).ok_or(Reject::Overflow)?;
+        Ok(Goal { a: a.0, b: b.0, w })
+    }
+
+    /// Summary row `row` of this function about its own parameters and, with `ret` (the operand
+    /// of a `ret`), about the value returned there.
+    fn own_goal(&self, row: Row, ret: Option<Option<Operand>>) -> Result<Goal, Reject> {
+        let params = self.b.params(Block(0));
+        let term = |t: RowTerm| -> Result<(Node, i128), Reject> {
+            let param = |i: u32| params.get(i as usize).copied().ok_or(Reject::Summary);
+            match (t, ret) {
+                (RowTerm::Zero, _) => Ok((Node::Zero, 0)),
+                (RowTerm::Param(i), _) => {
+                    let p = param(i)?;
+                    self.int_ty(p).map(|_| (Node::Val(p), 0)).ok_or(Reject::Summary)
+                }
+                (RowTerm::LenParam(i), _) => Ok((Node::Len(param(i)?), 0)),
+                (RowTerm::Result, Some(Some(o))) => {
+                    let t = self.ret.ok_or(Reject::Summary)?;
+                    self.of_type(o, t)
+                }
+                (RowTerm::LenResult, Some(Some(Operand::Value(v)))) => Ok((Node::Len(v), 0)),
+                (RowTerm::Result | RowTerm::LenResult, _) => Err(Reject::Summary),
+            }
+        };
+        Self::row_goal(term(row.a)?, term(row.b)?, row.w)
+    }
+
+    /// Summary row `row` of `f` about the operands `args` (callee first) and the result of a
+    /// call of it. A constant argument is read as a value of the parameter's type.
+    fn call_goal(
+        &self,
+        f: FuncId,
+        args: &[Operand],
+        result: Option<Value>,
+        row: Row,
+    ) -> Result<Goal, Reject> {
+        let callee = self.m.func(f).and_then(|f| f.body.as_ref()).ok_or(Reject::Call)?;
+        let term = |t: RowTerm| -> Result<(Node, i128), Reject> {
+            let arg = |i: u32| args.get(i as usize + 1).copied().ok_or(Reject::Call);
+            match t {
+                RowTerm::Zero => Ok((Node::Zero, 0)),
+                RowTerm::Param(i) => {
+                    let ty = callee
+                        .params(Block(0))
+                        .get(i as usize)
+                        .and_then(|&p| callee.value_ty(p))
+                        .and_then(|t| int_of(self.m, t))
+                        .ok_or(Reject::Call)?;
+                    self.of_type(arg(i)?, ty)
+                }
+                RowTerm::LenParam(i) => match arg(i)? {
+                    Operand::Value(v) => Ok((Node::Len(v), 0)),
+                    _ => Err(Reject::Operand),
+                },
+                RowTerm::Result => {
+                    let v = result.ok_or(Reject::Source)?;
+                    self.int_ty(v).map(|_| (Node::Val(v), 0)).ok_or(Reject::Operand)
+                }
+                RowTerm::LenResult => result.map(|v| (Node::Len(v), 0)).ok_or(Reject::Source),
+            }
+        };
+        Self::row_goal(term(row.a)?, term(row.b)?, row.w)
+    }
+
+    /// The summary: its entry (every reachable `requires` check proved from the `pre` rows, the
+    /// rows that read a check, the `safe` instructions) and its `post` rows at every return.
+    fn summary(&mut self, w: &FnWitness) -> Result<(), (Option<u32>, Option<u32>, Reject)> {
+        let s = self.own;
+        let whole = |why| (None, None, why);
+        for p in &s.pre {
+            self.own_goal(p.row, None).map_err(whole)?;
+        }
+        if s.entry.is_empty() && !(s.pre.is_empty() && s.safe.is_empty()) {
+            return Err(whole(Reject::Summary));
+        }
+        if !s.entry.is_empty() {
+            // Every reachable call of the failure fn is one row, in order.
+            let mut rows = s.entry.iter();
+            for q in 0..self.b.insts.len() as u32 {
+                let Some((f, _, _)) = self.direct_call(q) else { continue };
+                let bk = self.block_of.get(q as usize).copied().unwrap_or(NO_BLOCK) as usize;
+                if self.m.func(f).is_some_and(|f| f.path == REQUIRES_FAILED)
+                    && self.encloses(bk, bk)
+                    && rows.next().map(|r| r.inst) != Some(q)
+                {
+                    return Err((Some(q), None, Reject::Summary));
+                }
+            }
+            if rows.next().is_some() {
+                return Err(whole(Reject::Summary));
+            }
+        }
+        self.assume = true;
+        let entry = self.entry(w);
+        self.assume = false;
+        entry?;
+        self.posts(w)
+    }
+
+    /// The proofs that read `Requires` edges: each `requires` check from the `pre` rows, each
+    /// row that reads a check, and each `safe` instruction.
+    fn entry(&mut self, w: &FnWitness) -> Result<(), (Option<u32>, Option<u32>, Reject)> {
+        let s = self.own;
+        let mut prev = None;
+        for r in &s.entry {
+            self.row(w, r, prev).map_err(|(edge, why)| (Some(r.inst), edge, why))?;
+            prev = Some(r.inst);
+        }
+        for (k, p) in s.pre.iter().enumerate() {
+            if p.entry != NO_BLOCK {
+                self.exact(w, k as u32, p).map_err(|why| (None::<u32>, None::<u32>, why))?;
+            }
+        }
+        let mut prev = None;
+        for x in &s.safe {
+            self.safe(w, x, prev).map_err(|(edge, why)| (Some(x.inst), edge, why))?;
+            prev = Some(x.inst);
+        }
+        Ok(())
+    }
+
+    /// `pre` row `clause` is goal `p.half` of entry row `p.entry` read through equalities: the
+    /// proof of that goal is one `Requires` edge of this row and edges of sources that state an
+    /// equality, each once, with the goal's exact weight. Then the row holds iff the goal does.
+    /// The check's true side is also the only way to every reachable `ret`, so a call that
+    /// returned passed the check.
+    fn exact(&self, w: &FnWitness, clause: u32, p: &Pre) -> Result<(), Reject> {
+        let r = self.own.entry.get(p.entry as usize).ok_or(Reject::Summary)?;
+        let (_, goals, _) = self.read_check(r.inst)?;
+        let (branch, _) = self.contract(r.inst).ok_or(Reject::Summary)?;
+        let Term::Cbr { then, .. } = self.b.blocks[branch as usize].term else {
+            return Err(Reject::Summary);
+        };
+        let ok = then.block.index();
+        let only = ok != 0 && self.in_count.get(ok) == Some(&1);
+        let returns = (0..self.b.blocks.len())
+            .filter(|&u| self.reach[u] && matches!(self.b.blocks[u].term, Term::Ret(_)))
+            .all(|u| self.encloses(ok, u));
+        if !only || !returns {
+            return Err(Reject::Summary);
+        }
+        let half = usize::from(p.half);
+        if half >= goals.n {
+            return Err(Reject::Goal);
+        }
+        let rows = if half == 0 { r.edges } else { r.also };
+        let (mut sum, mut cited) = (0i128, 0u32);
+        for e in rows.of(&w.edges) {
+            match e.src {
+                Source::Requires { clause: c } if c == clause => cited += 1,
+                Source::Arith { .. }
+                | Source::SliceLen { .. }
+                | Source::SliceMake { .. }
+                | Source::Cast { .. } => {}
+                _ => return Err(Reject::Summary),
+            }
+            if e.mul != 1 {
+                return Err(Reject::Summary);
+            }
+            sum = sum.checked_add(e.w).ok_or(Reject::Overflow)?;
+        }
+        if cited == 1 && sum == goals.at[half].w { Ok(()) } else { Err(Reject::Summary) }
+    }
+
+    /// One `safe` row: a trapping int `add` or `sub` by a constant whose exact result is within
+    /// its type right before it runs.
+    fn safe(&mut self, w: &FnWitness, x: &Safe, prev: Option<u32>) -> Result<(), (Option<u32>, Reject)> {
+        let at_inst = |why| (None, why);
+        let q = x.inst;
+        let bk = self.block_of.get(q as usize).copied().unwrap_or(NO_BLOCK);
+        if prev.is_some_and(|p| p >= q) || bk == NO_BLOCK || !self.encloses(bk as usize, bk as usize) {
+            return Err(at_inst(Reject::NotACheck));
+        }
+        let v = self.b.insts.result.get(q as usize).copied().flatten().ok_or(at_inst(Reject::Source))?;
+        let t = self.int_ty(v).ok_or(at_inst(Reject::Operand))?;
+        let konst = |o: Operand| self.konst(o).filter(|&c| fits(t, c));
+        let (o, c) = match (self.op(q), self.b.args(q)) {
+            (Some(Op::Add), &[x, y]) => match (konst(x), konst(y)) {
+                (_, Some(c)) => (x, c),
+                (Some(c), None) => (y, c),
+                (None, None) => return Err(at_inst(Reject::Source)),
+            },
+            (Some(Op::Sub), &[x, y]) => (x, -konst(y).ok_or(at_inst(Reject::Source))?),
+            _ => return Err(at_inst(Reject::Source)),
+        };
+        let (node, k) = self.of_type(o, t).map_err(at_inst)?;
+        let (lo, hi) = int_range(t);
+        let at = At { block: bk, inst: q };
+        // node + k + c <= hi
+        self.proves(w, Goal { a: node, b: Node::Zero, w: hi - k - c }, x.hi, at, 0)?;
+        // lo <= node + k + c
+        self.proves(w, Goal { a: Node::Zero, b: node, w: k + c - lo }, x.lo, at, x.hi.len)
+    }
+
+    /// Every `post` row proved at the end of every reachable `ret` block.
+    fn posts(&mut self, w: &FnWitness) -> Result<(), (Option<u32>, Option<u32>, Reject)> {
+        let s = self.own;
+        let whole = |why| (None, None, why);
+        if s.post.is_empty() {
+            return if s.post_at.is_empty() { Ok(()) } else { Err(whole(Reject::Summary)) };
+        }
+        let rets: Vec<u32> = (0..self.b.blocks.len())
+            .filter(|&u| self.reach[u] && matches!(self.b.blocks[u].term, Term::Ret(_)))
+            .map(|u| u as u32)
+            .collect();
+        if rets.is_empty() || rets.len() > SUMMARY_RETURNS || s.post_at.len() != s.post.len() * rets.len() {
+            return Err(whole(Reject::Summary));
+        }
+        let mut proofs = s.post_at.iter();
+        for (k, row) in s.post.iter().enumerate() {
+            for &r in &rets {
+                let Some(p) = proofs.next().filter(|p| p.row == k as u32 && p.block == r) else {
+                    return Err(whole(Reject::Summary));
+                };
+                let Term::Ret(ret) = self.b.blocks[r as usize].term else {
+                    return Err(whole(Reject::Summary));
+                };
+                let goal = self.own_goal(*row, Some(ret)).map_err(whole)?;
+                self.proves(w, goal, p.edges, At { block: r, inst: END }, 0)
+                    .map_err(|(edge, why)| (None::<u32>, edge, why))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The reachable direct call `q` of a function whose summary has an entry: its operands and
+    /// the point right before it.
+    fn entered(&self, q: u32) -> Result<(FuncId, &'a [Operand], &'a Summary, At), Reject> {
+        let (f, args, _) = self.direct_call(q).ok_or(Reject::Call)?;
+        let bk = self.block_of.get(q as usize).copied().unwrap_or(NO_BLOCK);
+        if bk == NO_BLOCK || !self.encloses(bk as usize, bk as usize) {
+            return Err(Reject::Call);
+        }
+        let s = self.sums.get(f).filter(|s| !s.entry.is_empty()).ok_or(Reject::Call)?;
+        Ok((f, args, s, At { block: bk, inst: q }))
+    }
+
+    /// One proved call: every `pre` row of its callee, about its arguments, right before it.
+    fn call(
+        &mut self,
+        w: &FnWitness,
+        c: &CallProved,
+        prev: Option<u32>,
+    ) -> Result<(), (Option<u32>, Reject)> {
+        let at_call = |why| (None, why);
+        if prev.is_some_and(|p| p >= c.inst) {
+            return Err(at_call(Reject::Call));
+        }
+        let (f, args, s, at) = self.entered(c.inst).map_err(at_call)?;
+        if c.rows.len as usize != s.pre.len() || !c.rows.in_range(w.calls.goals.len()) {
+            return Err(at_call(Reject::Call));
+        }
+        let mut first = 0u32;
+        for (p, &proof) in s.pre.iter().zip(c.rows.of(&w.calls.goals)) {
+            let goal = self.call_goal(f, args, None, p.row).map_err(at_call)?;
+            self.proves(w, goal, proof, at, first)?;
+            first = first.saturating_add(proof.len);
+        }
+        Ok(())
+    }
+
+    /// One refuted call: the negation of a `pre` row of its callee that reads a check, about its
+    /// arguments, right before it; the call is not also proved.
+    fn call_refuted(
+        &mut self,
+        w: &FnWitness,
+        c: &CallRefuted,
+        prev: Option<u32>,
+    ) -> Result<(), (Option<u32>, Reject)> {
+        let at_call = |why| (None, why);
+        if prev.is_some_and(|p| p >= c.inst) || w.calls.proved.iter().any(|x| x.inst == c.inst) {
+            return Err(at_call(Reject::Call));
+        }
+        let (f, args, s, at) = self.entered(c.inst).map_err(at_call)?;
+        let p = s.pre.get(c.row as usize).filter(|p| p.entry != NO_BLOCK).ok_or(at_call(Reject::Call))?;
+        let g = self.call_goal(f, args, None, p.row).map_err(at_call)?;
+        // not `a <= b + w`: `b <= a - w - 1`
+        let w_neg = g.w.checked_neg().and_then(|x| x.checked_sub(1)).ok_or(at_call(Reject::Overflow))?;
+        self.proves(w, Goal { a: g.b, b: g.a, w: w_neg }, c.edges, at, 0)
     }
 
     /// `a = o + c` (`o` read as `(node, k)`), as both inequalities.

@@ -1747,6 +1747,7 @@ impl<'a> Ck<'a> {
         self.target(tok, Target::Fn { decl, args: args.clone() });
         self.site(tok, decl, &args);
         self.coerce_note(n, Coercion::FnItem);
+        self.valued.push((tok, sig.deny, n));
         if self.prog.decl(decl).is_some_and(|d| d.flags.has(DeclFlags::EXTERN_EXPORT)) {
             // an export has the C convention, a fn value the Stave one
             let path = self.prog.decl_path(decl);
@@ -3134,12 +3135,14 @@ impl<'a> Ck<'a> {
         let ok = match arch {
             builtins::IArch::Both => true,
             builtins::IArch::X86 => self.prog.target.arch() == stave_target::Arch::X86_64,
+            builtins::IArch::A64 => self.prog.target.arch() == stave_target::Arch::Aarch64,
             builtins::IArch::Ptx => false,
         };
         if !ok {
             let path = self.prog.decl_path(decl);
             let f = match arch {
                 builtins::IArch::X86 => "x86_64",
+                builtins::IArch::A64 => "aarch64",
                 _ => "ptx",
             };
             let roles: Vec<(&str, Span)> =

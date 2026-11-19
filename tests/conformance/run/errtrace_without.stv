@@ -1,0 +1,20 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Unwrap at errtrace_without.stv:18:23 in main.main (thread 0)\n  from errtrace_without.stv:7:23 in main.leaf\n  via errtrace_without.stv:13:20 in main.mid\n"
+// Fns that deny every effect still make and propagate errors, and the trace records them: the
+// trace hooks add no effect.
+fn leaf(n: u32) -> Result<u32, u32> without(alloc, trap, recursive, lock, unsafe, io, block) {
+    if n > 5 {
+        return Result.Err(n);
+    }
+    return Result.Ok(n);
+}
+
+fn mid(n: u32) -> Result<u32, u32> without(alloc, trap, recursive, lock, unsafe, io, block) {
+    let v = leaf(n)?;
+    return Result.Ok(v +% 1);
+}
+
+fn main() -> i32 {
+    let v = mid(9u32).unwrap();
+    return v as% i32;
+}

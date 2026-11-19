@@ -34,6 +34,7 @@
 //
 // Display: f-strings call `Display.fmt` for each hole (std/README.md has the lowering).
 
+import runtime.errtrace;
 import runtime.panic;
 
 // ---- Option / Result ----
@@ -67,8 +68,14 @@ impl<T: view> Option<T> {
         return match self { Option.Some(v) => v, Option.None => d };
     }
 
+    // None gives Err(e), and the error trace restarts at the caller (user site).
     pub fn ok_or<E>(self, e: E) -> Result<T, E> from self {
-        return match self { Option.Some(v) => Result.Ok(v), Option.None => Result.Err(e) };
+        match self {
+            Option.Some(v) => { return Result.Ok(v); }
+            Option.None => {}
+        }
+        errtrace.restart(panic.user_site());
+        return Result.Err(e);
     }
 }
 
@@ -88,13 +95,14 @@ impl<T: view, E: view> Result<T, E> {
         return match self { Result.Ok(_) => false, Result.Err(_) => true };
     }
 
-    // Panics `Unwrap` at the caller (user site) on Err.
+    // Panics `Unwrap` at the caller (user site) on Err; the report shows the thread's error
+    // trace (runtime.panic trap_err).
     pub fn unwrap(self) -> T from self {
         match self {
             Result.Ok(v) => { return v; }
             Result.Err(_) => {}
         }
-        panic.trap(panic.KIND_UNWRAP, panic.user_site());
+        panic.trap_err(panic.KIND_UNWRAP, panic.user_site());
     }
 
     pub fn unwrap_or(self, d: T) -> T from self + d {
@@ -107,6 +115,22 @@ impl<T: view, E: view> Result<T, E> {
 
     pub fn err(self) -> Option<E> from self {
         return match self { Result.Ok(_) => Option.None, Result.Err(e) => Option.Some(e) };
+    }
+
+    // Err(e) becomes Err(f(e)), keeping the error trace: it is the same after f as before (an
+    // error f makes does not restart it), plus one via site at the caller (user site).
+    pub fn map_err<F>(self, f: fn(E) -> F) -> Result<T, F> from self {
+        match self {
+            Result.Ok(v) => { return Result.Ok(v); }
+            Result.Err(e) => {
+                let at = panic.user_site();
+                let saved = errtrace.save();
+                let g = f(e);
+                errtrace.restore(&saved);
+                errtrace.push(at);
+                return Result.Err(g);
+            }
+        }
     }
 }
 

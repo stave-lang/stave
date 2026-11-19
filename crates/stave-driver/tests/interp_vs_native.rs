@@ -229,7 +229,7 @@ fn syscall_list() -> Vec<String> {
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(String::from)
+        .map(|l| String::from(l.split_whitespace().next().unwrap_or(l)))
         .collect()
 }
 

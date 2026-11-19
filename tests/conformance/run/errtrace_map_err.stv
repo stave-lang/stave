@@ -1,0 +1,31 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Unwrap at errtrace_map_err.stv:29:27 in main.main (thread 0)\n  from errtrace_map_err.stv:18:23 in main.check\n  via errtrace_map_err.stv:24:22 in main.convert\n  via errtrace_map_err.stv:24:36 in main.convert\n"
+// `map_err` converts the error and keeps its trace: an error the conversion makes does not
+// restart it, and the `map_err` call adds a via site before the `?`.
+enum Big { Of(u32) }
+
+fn noisy(n: u32) -> Result<u32, u32> {
+    return Result.Err(n +% 1);
+}
+
+fn widen(n: u32) -> Big {
+    let r = noisy(n);
+    return Big.Of(n);
+}
+
+fn check(n: u32) -> Result<u32, u32> {
+    if n > 2 {
+        return Result.Err(n);
+    }
+    return Result.Ok(n);
+}
+
+fn convert(n: u32) -> Result<u32, Big> {
+    let v = check(n).map_err(widen)?;
+    return Result.Ok(v);
+}
+
+fn main() -> i32 {
+    let v = convert(7u32).unwrap();
+    return v as% i32;
+}

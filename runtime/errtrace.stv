@@ -1,0 +1,64 @@
+// runtime.errtrace: the error trace of the task running on the calling thread, kept in the
+// thread's block (runtime.state Block: origin, count, ring).
+//
+// Calls the compiler inserts in user packages (contracts/intrinsics.md "Paths fixed by the
+// compiler"), never call-graph edges:
+// - `restart(site)` at each evaluation of a `Result.Err(..)` constructor (site: the `Err`
+//   token): the trace starts over with that origin and no via sites;
+// - `push(site)` where `?` on a `Result` takes the error path, before the scope drops and
+//   `ensures` checks (site: the `?` token): one more via site.
+// std calls `restart(panic.user_site())` where it makes an error itself, and `save` / `restore`
+// around work that must leave its caller's trace as it was: a task body run on the calling thread
+// (runtime.thread, std.thread) and the fn of `Result.map_err`. `clear` starts a task empty.
+//
+// Nothing here traps, allocates, locks, or makes a system call (no effect, and the panic report
+// reads the trace): the ring index is masked and the count wraps.
+
+import runtime.state;
+
+// A copy of a trace: the restarting site (state.NO_SITE: none), the via sites pushed since
+// (wrapping), and the last state.NRING of them, via k at index k % NRING.
+pub struct Trace {
+    pub origin: u32,
+    pub count: u32,
+    pub ring: [u32; state.NRING],
+}
+
+const RING_MASK: usize = state.NRING - 1;
+
+pub fn restart(site: u32) {
+    let b = state.block();
+    unsafe("b is this thread's block; only this thread uses it") {
+        (*b).origin = site;
+        (*b).count = 0;
+    }
+}
+
+pub fn push(site: u32) {
+    let b = state.block();
+    unsafe("b is this thread's block; only this thread uses it; the masked index stays inside the ring") {
+        let c = (*b).count;
+        let ring = &mut (*b).ring as *mut [u32; state.NRING] as usize;
+        let at = ring +% (((c as usize) & RING_MASK) *% 4);
+        *(at as *mut u32) = site;
+        (*b).count = c +% 1;
+    }
+}
+
+pub fn clear() {
+    restart(state.NO_SITE);
+}
+
+pub fn save() -> Trace {
+    let b = state.block();
+    return unsafe("b is this thread's block; only this thread uses it") Trace.{ origin: (*b).origin, count: (*b).count, ring: (*b).ring };
+}
+
+pub fn restore(t: &Trace) {
+    let b = state.block();
+    unsafe("b is this thread's block; only this thread uses it") {
+        (*b).origin = t.origin;
+        (*b).count = t.count;
+        (*b).ring = t.ring;
+    }
+}

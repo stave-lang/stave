@@ -127,6 +127,8 @@ fn arb_witness() -> impl Strategy<Value = FnWitness> {
                 })
                 .collect(),
             edges,
+            summary: Default::default(),
+            calls: Default::default(),
         },
     )
 }

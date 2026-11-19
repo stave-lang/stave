@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// A `+` or `-` by a constant inside a `requires` can overflow before its clause is tested. A
+// call proves the precondition only when the sum stays in range as well: where the clause
+// itself bounds it (`i + 1 < n`), nothing more is asked; where it does not (`x + 1 > 5`), the
+// caller also has to know `x + 1` does not overflow. Proved, neither the clause nor its sum is a
+// trap of the callee or of the caller.
+fn next_below(i: u32, n: u32) -> u32 without(trap) requires(i + 1 < n) {
+    return i;
+}
+
+fn above(x: u32) -> u32 without(trap) requires(x + 1 > 5) {
+    return x;
+}
+
+fn from_clause(n: u32) -> u32 without(trap) requires(n > 8) {
+    return next_below(3, n);
+}
+
+fn bounded(x: u32) -> u32 without(trap) requires(x > 9 && x < 100) {
+    return above(x);
+}
+
+fn unbounded(x: u32) -> u32 without(trap) requires(x > 9) { //~ ERROR E1401
+    return above(x);
+}
+
+fn main() {
+    let a = from_clause(9) + bounded(10) + unbounded(11);
+}

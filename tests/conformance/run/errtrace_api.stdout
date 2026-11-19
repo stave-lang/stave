@@ -1,0 +1,7 @@
+empty: true 0
+origin errtrace_api.stv:9:23 in main.inner
+len 1, skipped 0
+via 15 in main.outer
+  from errtrace_api.stv:9:23 in main.inner
+  via errtrace_api.stv:15:21 in main.outer
+value 0

@@ -3,7 +3,8 @@
 // The compiler emits `_start`, which calls `entry(sp)` with the initial stack pointer (pointing
 // at argc). entry never returns: it ends with exit_group(main's exit code).
 //
-// Steps: read argc, argv, envp, and auxv (AT_PAGESZ, AT_HWCAP, AT_HWCAP2, AT_RANDOM) into the
+// Steps: point the thread pointer at main's thread block (runtime.state `main_block`: every
+// panic reads it, so it comes first); read argc, argv, envp, and auxv (AT_PAGESZ, AT_HWCAP, AT_HWCAP2, AT_RANDOM) into the
 // state block (runtime.state, a `static mut`); fill the CPU feature word (intrinsic `cpu_init`);
 // install the alternate signal stack and the SIGSEGV handler (runtime.panic); map main's stack
 // (runtime.config.main_stack: the computed bound, else `[run] stack`) with a PROT_NONE guard
@@ -40,6 +41,16 @@ fn entry(sp: *const usize) -> never {
     let anon = os.MAP_PRIVATE | os.MAP_ANONYMOUS;
     let st = state.get();
 
+    // 0. main's thread block
+    let mb = unsafe("st is runtime.state.STATE; only the field address is taken") &mut (*st).main_block as *mut state.Block;
+    unsafe("no other thread exists yet; main_block lives as long as the process") {
+        (*mb).this = mb as usize;
+        (*mb).thread_id = 0;
+        (*mb).origin = state.NO_SITE;
+    }
+    let tp = unsafe("mb is main's block; it lives as long as the process") os.set_thread_pointer(mb as usize);
+    if tp < 0 { early_fail(); }
+
     // 1. argc, argv, envp, auxv
     let argc = unsafe("sp points at argc (caller)") *sp;
     let argv = (sp as usize) + 8;
@@ -73,7 +84,6 @@ fn entry(sp: *const usize) -> never {
         (*st).hwcap = hwcap;
         (*st).hwcap2 = hwcap2;
         (*st).at_random = random;
-        (*st).thread_id = 0;
     }
     // the feature word, from the CPU and the auxv values just stored
     unsafe("once, before main and before any other thread exists") {

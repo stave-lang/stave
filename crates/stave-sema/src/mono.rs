@@ -96,6 +96,10 @@ pub(crate) struct LangFns {
     /// parameters (an input started; an input a `requires` clause skips).
     pub test_input: Option<DeclId>,
     pub test_skip: Option<DeclId>,
+    /// `runtime.errtrace.push(site: u32)`: the error path of `?` on a `Result` in a user package.
+    pub errtrace_push: Option<DeclId>,
+    /// `runtime.errtrace.restart(site: u32)`: a `Result.Err(..)` constructor in a user package.
+    pub errtrace_restart: Option<DeclId>,
 }
 
 fn sym(prog: &Program, s: &str) -> Option<Sym> {
@@ -154,6 +158,8 @@ impl LangFns {
             ensures_failed: item_at(prog, "runtime.panic", "ensures_failed"),
             test_input: item_at(prog, "runtime.panic", "test_input"),
             test_skip: item_at(prog, "runtime.panic", "test_skip"),
+            errtrace_push: item_at(prog, "runtime.errtrace", "push"),
+            errtrace_restart: item_at(prog, "runtime.errtrace", "restart"),
         }
     }
 }

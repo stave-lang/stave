@@ -1,0 +1,46 @@
+//~ STDOUT errtrace_api.stdout
+// `std.debug.err_trace()` copies this task's error trace: none at the start of main, then the
+// origin of the latest error, its via sites oldest first, and the lines a panic report prints.
+import std.debug;
+import std.io;
+
+fn inner(n: u32) -> Result<u32, u32> {
+    if n > 1 {
+        return Result.Err(n);
+    }
+    return Result.Ok(n);
+}
+
+fn outer(n: u32) -> Result<u32, u32> {
+    let v = inner(n)?;
+    return Result.Ok(v);
+}
+
+fn main() {
+    let t0 = debug.err_trace();
+    let none = t0.origin().is_none();
+    let n0 = t0.len();
+    io.print(f"empty: {none} {n0}\n");
+    let r = outer(5u32);
+    let t = debug.err_trace();
+    match t.origin() {
+        Option.Some(s) => {
+            let file = s.file();
+            let line = s.line();
+            let col = s.col();
+            let func = s.func();
+            io.print(f"origin {file}:{line}:{col} in {func}\n");
+        }
+        Option.None => { io.print("no origin\n"); }
+    }
+    let n = t.len();
+    let k = t.skipped();
+    io.print(f"len {n}, skipped {k}\n");
+    let v = t.via(0);
+    let vl = v.line();
+    let vf = v.func();
+    io.print(f"via {vl} in {vf}\n");
+    io.print(f"{t}");
+    let got = r.unwrap_or(0u32);
+    io.print(f"value {got}\n");
+}
