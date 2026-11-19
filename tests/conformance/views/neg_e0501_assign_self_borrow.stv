@@ -1,0 +1,56 @@
+//~ CHECK-ONLY
+// The new value of an assignment borrows the value the assignment ends: a literal with a borrow
+// of a field of the old value, of its heap buffer, the same into a field, a call result `from`
+// a borrow of the destination, a borrow taken by an earlier statement. A destination with drop
+// glue then borrows from itself where it is dropped, too.
+import std.io;
+import std.string;
+
+view struct Chain { v: u32, prev: &u32 }
+view struct H { name: string.String, s: &str }
+view struct Wrap { h: H, k: u32 }
+
+fn wrap(x: &Chain, v: u32) -> Chain from x {
+    return Chain.{ v: v, prev: &x.v };
+}
+
+fn literal(zero: &u32) -> u32 {
+    let mut x = Chain.{ v: 1, prev: zero };
+    x = Chain.{ v: 2, prev: &x.v }; //~ ERROR E0501
+    return *x.prev;
+}
+
+fn dropped_buffer() {
+    let mut x = H.{ name: f"first", s: "" };
+    x = H.{ name: f"second", s: x.name.as_str() }; //~ ERROR E0501
+    io.print(x.s);
+} //~ ERROR E0501
+
+fn field() {
+    let mut w = Wrap.{ h: H.{ name: f"first", s: "" }, k: 0 };
+    w.h = H.{ name: f"second", s: w.h.name.as_str() }; //~ ERROR E0501
+    io.print(w.h.s);
+} //~ ERROR E0501
+
+fn call_result(zero: &u32) -> u32 {
+    let mut x = Chain.{ v: 1, prev: zero };
+    x = wrap(&x, 2); //~ ERROR E0501
+    return *x.prev;
+}
+
+fn tuple_field(zero: &u32) -> u32 {
+    let mut x = (Chain.{ v: 1, prev: zero }, 0u32);
+    x.0 = wrap(&x.0, 2); //~ ERROR E0501
+    return *x.0.prev;
+}
+
+fn earlier_statement(zero: &u32) -> u32 {
+    let mut x = Chain.{ v: 1, prev: zero };
+    let p = &x.v;
+    x = Chain.{ v: 2, prev: p }; //~ ERROR E0501
+    return *x.prev;
+}
+
+fn main() -> i32 {
+    return 0;
+}

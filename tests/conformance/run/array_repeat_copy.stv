@@ -1,0 +1,56 @@
+//~ STDOUT array_repeat_copy.stdout
+// `[e; n]` copies a Copy element into every slot. With the constant length 1 the element need not
+// be Copy: the value moves into the one slot, which is then its only owner and drops it once.
+import std.io;
+import std.vec;
+
+struct P {
+    pub x: u32,
+    pub y: u32,
+}
+
+impl Copy for P {}
+
+struct Loud {
+    pub id: u32,
+}
+
+impl Drop for Loud {
+    fn drop(&mut self) {
+        let id = self.id;
+        io.print(f"drop {id}\n");
+    }
+}
+
+const ONE: usize = 1;
+
+fn fill<T: Copy, const N: usize>(x: T) -> [T; N] {
+    return [x; N];
+}
+
+fn main() -> i32 {
+    let a = [3u32; 4];
+    let s = a[0] + a[3];
+    io.print(f"scalars {s}\n");
+    let k: u64 = 9;
+    let r = [&k; 2];
+    let rv = *r[1];
+    io.print(f"refs {rv}\n");
+    let p = [P.{ x: 1, y: 2 }; 3];
+    let py = p[2].y;
+    io.print(f"struct {py}\n");
+    let f = fill::<u16, 5>(7u16);
+    let fl = f.len();
+    let f4 = f[4];
+    io.print(f"generic {fl} {f4}\n");
+    let one = [Loud.{ id: 1 }; 1];
+    let i = one[0].id;
+    io.print(f"one {i}\n");
+    let mut v = vec.Vec::<Loud>.new();
+    v.push(Loud.{ id: 2 });
+    let mut vs = [v; ONE];
+    vs[0].push(Loud.{ id: 3 });
+    let n = vs[0].len();
+    io.print(f"vec {n}\n");
+    return 0;
+}

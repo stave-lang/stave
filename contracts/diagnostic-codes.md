@@ -99,6 +99,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0415 | `impl Copy for T {}` where a field or variant payload of T is not Copy (Copy: scalars, `&T`, raw pointers, arrays and tuples of Copy types, ADTs with `impl Copy`; `&mut T` never). Related span: the field |
 | E0416 | `impl Drop` for a Copy type (built-in Copy, or an ADT with `impl Copy`; related span: the `impl Copy`) |
 | E0417 | `static X: T` where T is not `Sync` (a `static` is shared by every thread): use an atomic (`atomic.U64`), `sync.Mutex<T, R>`, or `sync.Once<T, R>` (R: the lock rank) |
+| E0418 | array repeat `[e; n]` whose element type is not Copy (Copy as in E0415), unless `n` is the constant 1: the one value of `e` fills every slot, and length 0 would leave it to no owner (a const generic length counts as neither). At `e` |
 | E0501 | borrow conflict (borrow site, conflicting access, later use). When an access conflicts with several live loans, the loan with the smallest creation offset is reported (ties: `&mut` before `&`, then place path); the later use is the first use after the access that keeps that loan live |
 | E0502 | use after move |
 | E0503 | assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`, reported by the type checker) |

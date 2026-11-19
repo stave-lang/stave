@@ -1268,6 +1268,16 @@ impl<'a> Ck<'a> {
             if et == ids::ERROR || len == ConstArg::Error {
                 return Ty::ERR;
             }
+            // The one value of `e` fills every slot, so more than one slot needs Copy. Length 0
+            // needs it too: the lowering evaluates `e` and keeps no slot to drop it from.
+            if len != ConstArg::Value(1) && !self.tys.has_error(et) {
+                let env = self.genv();
+                if !self.w.is_copy(&mut self.tys, et, env) {
+                    let tn = self.show(et);
+                    let d = mk("E0418", None, &[("type", &tn)], icx.node_span(e), &[]);
+                    self.report(d);
+                }
+            }
             return Ty::T(self.tys.intern(TypeKind::Array { elem: et, len }));
         }
         if kids.is_empty() {
