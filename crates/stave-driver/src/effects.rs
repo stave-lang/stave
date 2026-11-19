@@ -12,9 +12,15 @@
 //!
 //! The same removal step decides the contract checks, so their diagnostics come from here, once
 //! per program and the same in every mode: E0215 (a `requires` that is false whenever reached),
-//! E0217 (an `ensures` false whenever a return is reached), and the warning E0216 (a `requires`
-//! that the clauses before it imply). None in an instance of a generic fn, where the answer may
-//! depend on the instance. Each names the facts of its proof.
+//! E0217 (an `ensures` false whenever a return is reached), E0218 (a call that always fails a
+//! `requires` of its callee), and the warning E0216 (a `requires` that the clauses before it
+//! imply). None in an instance of a generic fn, where the answer may depend on the instance. Each
+//! names the facts of its proof. For the calls, the pass also lowers every node that calls a fn
+//! with a checked `requires`.
+//!
+//! A `requires` check that stays is the entry effect of its fn, not a trap of its body: the pass
+//! hands [`stave_sema::effects::solve_with`] the call edges whose every call the witness checker
+//! retargeted to the callee's unchecked entry, and only the other edges carry it.
 
 use rayon::prelude::*;
 use stave_diag::{Diagnostic, Span};
@@ -31,7 +37,7 @@ use crate::pipeline::Stage;
 pub struct EffectRun {
     pub sets: EffectSets,
     /// E1401, E1403 (case `made`), E0211 (cases `impure-call`, `static`), E0215, E0216
-    /// (a warning), E0217.
+    /// (a warning), E0217, E0218.
     pub diagnostics: Vec<Diagnostic>,
     /// Functions lowered for the `trap` effect and the contract checks (0: none were needed).
     pub lowered: usize,
@@ -44,6 +50,7 @@ pub fn run(prog: &Program, tc: &Typeck, all: bool) -> Result<EffectRun, Failure>
     let contracts = effects::contract_nodes(tc);
     let mut lowered = 0;
     let mut diagnostics = Vec::new();
+    let mut proved = Vec::new();
     let traps = all || plan.needs_ir();
     let ir = if traps || !contracts.is_empty() {
         let planned = plan.ir_nodes(&tc.call_graph, all);
@@ -55,6 +62,7 @@ pub fn run(prog: &Program, tc: &Typeck, all: bool) -> Result<EffectRun, Failure>
             Ok(l) => {
                 lowered = l.funcs;
                 diagnostics = l.contracts;
+                proved = l.proved;
                 Some(l.ir)
             }
             // A fn lowered only for its contract checks may use what stage0 cannot lower yet (or
@@ -77,6 +85,7 @@ pub fn run(prog: &Program, tc: &Typeck, all: bool) -> Result<EffectRun, Failure>
                 if traps {
                     let l = node_ir(prog, tc, &planned)?;
                     lowered += l.funcs;
+                    proved = l.proved;
                     Some(l.ir)
                 } else {
                     None
@@ -87,7 +96,7 @@ pub fn run(prog: &Program, tc: &Typeck, all: bool) -> Result<EffectRun, Failure>
     } else {
         None
     };
-    let sets = effects::solve(prog, tc, ir.as_deref());
+    let sets = effects::solve_with(prog, tc, ir.as_deref(), &proved);
     diagnostics.extend(effects::check(prog, tc, &plan, &sets));
     diagnostics.extend(stave_sema::contracts::purity(prog, tc, &sets));
     diagnostics.extend(stave_sema::contracts::shared_statics(prog, tc));
@@ -103,8 +112,12 @@ pub struct NodeIrs {
     /// Nodes of the set with a body that no lowered function maps back to (none is expected);
     /// each traps at its name, so the answer stays sound.
     pub unmapped: Vec<u32>,
-    /// The diagnostics of the contract checks the removal step proved or refuted.
+    /// The diagnostics of the contract checks the removal step proved or refuted, and of the
+    /// calls it refuted.
     pub contracts: Vec<Diagnostic>,
+    /// (caller, callee) graph-node pairs whose every call proves the callee's `requires`
+    /// ([`effects::solve_with`]). Sorted.
+    pub proved: Vec<(u32, u32)>,
 }
 
 /// What the checked IR says about each graph node, from lowering `nodes`.
@@ -113,10 +126,24 @@ pub fn node_ir(prog: &Program, tc: &Typeck, nodes: &[u32]) -> Result<NodeIrs, Fa
     let (r, _) = stave_sema::lower_graph_nodes(prog, tc, nodes);
     let mut gl = r.map_err(|es| build::lower_failure(&es))?;
     build::verified(&gl.module, Stage::Lower)?;
-    let (_, found) = build::remove_proven_checks(&mut gl.module)?;
+    let removed = build::remove_proven_checks(&mut gl.module)?;
+    let (found, removal) = (&removed.found, &removed.removal);
     let m = &gl.module;
-    let scans: Vec<traps::Traps> =
-        (0..m.funcs.len() as u32).into_par_iter().map(|f| traps::scan(m, FuncId(f))).collect();
+    // Per function: its entry instructions, which a call that proves its `requires` cannot trap
+    // at: the `requires` checks that stay, and what the witness checker listed.
+    let mut quiet: Vec<Vec<u32>> =
+        (0..m.funcs.len() as u32).into_par_iter().map(|f| traps::requires_checks(m, FuncId(f))).collect();
+    for (f, insts) in &removal.entry {
+        if let Some(q) = quiet.get_mut(f.index()) {
+            q.extend(insts);
+            q.sort_unstable();
+            q.dedup();
+        }
+    }
+    let scans: Vec<traps::Traps> = (0..m.funcs.len() as u32)
+        .into_par_iter()
+        .map(|f| traps::scan_without(m, FuncId(f), &quiet[f as usize]))
+        .collect();
     let span_of = |s: stave_ir::Site, fallback: Span| -> Span {
         let Some(&(fid, off)) = gl.site_pos.get(s.0 as usize) else { return fallback };
         let Some(f) = prog.file(fid) else { return fallback };
@@ -134,8 +161,18 @@ pub fn node_ir(prog: &Program, tc: &Typeck, nodes: &[u32]) -> Result<NodeIrs, Fa
             let at = g.nodes[node as usize].span;
             slot.trap = t.trap.map(|(s, _)| span_of(s, at));
             slot.out_of_memory = t.out_of_memory.map(|s| span_of(s, at));
+            slot.entry = traps::first_trap(m, FuncId(f as u32), &quiet[f]).map(|s| span_of(s, at));
         }
     }
+    let nodes_of = |f: FuncId| gl.nodes_of_func.get(f.index()).map_or(&[][..], |v| v);
+    let mut proved: Vec<(u32, u32)> = Vec::new();
+    for &(caller, callee) in &removal.proved {
+        for &x in nodes_of(caller) {
+            proved.extend(nodes_of(callee).iter().map(|&y| (x, y)));
+        }
+    }
+    proved.sort_unstable();
+    proved.dedup();
     let mut unmapped = Vec::new();
     for &n in nodes {
         let has_body = match &g.nodes[n as usize].kind {
@@ -152,7 +189,7 @@ pub fn node_ir(prog: &Program, tc: &Typeck, nodes: &[u32]) -> Result<NodeIrs, Fa
     }
     let mut contracts = Vec::new();
     let mut seen: std::collections::HashSet<(&str, u32, u32, u32)> = std::collections::HashSet::new();
-    for x in &found {
+    for x in found {
         let Some(func) = m.func(x.func) else { continue };
         let node = gl.nodes_of_func.get(x.func.index()).and_then(|ns| ns.first().copied());
         let fallback = node.map_or(Span::new(stave_diag::FileId(0), 0, 0), |n| g.nodes[n as usize].span);
@@ -173,7 +210,32 @@ pub fn node_ir(prog: &Program, tc: &Typeck, nodes: &[u32]) -> Result<NodeIrs, Fa
             .map_err(|e| Failure::Internal { stage: Stage::Lower, message: e.to_string() })?;
         contracts.push(d);
     }
-    Ok(NodeIrs { ir: out, funcs: m.funcs.len(), unmapped, contracts })
+    // E0218: a call that always fails a `requires` of its callee, at the call, with the
+    // conjunct. None in an instance of a generic fn (as E0215).
+    for x in &removed.calls {
+        let Some(func) = m.func(x.func) else { continue };
+        if !func.type_args.is_empty() {
+            continue;
+        }
+        let fallback = nodes_of(x.func)
+            .first()
+            .map_or(Span::new(stave_diag::FileId(0), 0, 0), |&n| g.nodes[n as usize].span);
+        let name = match nodes_of(x.callee).first() {
+            Some(&n) => g.source_names(prog, tc, &[n]).swap_remove(0),
+            None => m.func(x.callee).map_or(String::new(), |f| f.path.clone()),
+        };
+        let primary = span_of(x.site, fallback);
+        let clause = (x.clause != stave_ir::Site::NONE).then(|| span_of(x.clause, fallback));
+        if !seen.insert(("E0218", primary.file.0, primary.offset, clause.map_or(u32::MAX, |c| c.offset))) {
+            continue;
+        }
+        let mut roles: Vec<(&str, Span)> = clause.map(|c| ("clause", c)).into_iter().collect();
+        roles.extend(x.facts.iter().map(|&s| ("fact", span_of(s, fallback))));
+        let d = Diagnostic::new("E0218", None, &[("fn", name.as_str())], Some(primary), &roles)
+            .map_err(|e| Failure::Internal { stage: Stage::Lower, message: e.to_string() })?;
+        contracts.push(d);
+    }
+    Ok(NodeIrs { ir: out, funcs: m.funcs.len(), unmapped, contracts, proved })
 }
 
 /// The code, primary span, and (E0217) clause span of the diagnostic of contract finding `x`, if

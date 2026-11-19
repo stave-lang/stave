@@ -11,7 +11,7 @@
 //! | an `extern "C"` import | all except those its `without` lists (a claim of the block's obligation) |
 //! | intrinsic `syscall0`..`syscall6`, `thread_clone` | `io` |
 //! | intrinsic `call_on_stack`, `cpu_init` (they run code no edge shows) | all |
-//! | a trapping instruction of the checked IR after the removal of proven bounds and contract checks ([`NodeIr`]; a kept `requires` / `ensures` check is its failure call) | `trap` |
+//! | a trapping instruction of the checked IR after the removal of proven bounds and contract checks ([`NodeIr`]; a kept `ensures` check is its failure call) | `trap` |
 //! | `panic.out_of_memory` in that IR | `alloc` |
 //! | membership in a call cycle (an SCC that is a cycle) | `recursive`, `trap` (stack overflow) |
 //! | `unsafe("..")` block or expression, outside the built-in packages | `unsafe` |
@@ -23,6 +23,15 @@
 //! except through a boundary fn. An edge carries the deny clause of a fn-value call's type
 //! ([`crate::callgraph::Edge::deny`]): those effects do not flow through it, because every value of
 //! that type is checked to lack them (the coercion rule of typeck plus E1403 here).
+//!
+//! **Entry effect.** A `requires` check the removal kept is no effect of the fn's set: it is the
+//! fn's entry effect ([`EffectSets::entry`], `trap`), with the `add`/`sub` of the clauses that the
+//! proved clauses keep in range ([`NodeIr::entry`]). An edge carries the callee's entry effect
+//! unless the checked IR shows that every call of the callee in the caller proves its `requires`
+//! ([`EffectSets::proved`]); a fn value carries it always. So a deny clause on a fn with a
+//! `requires` is about calls inside the precondition, and a caller that does not prove the
+//! precondition has `trap` through the edge: its diagnostic ends at the callee and names the
+//! clause.
 //!
 //! **Shape.** One parallel map over nodes for the local bits, then one parallel step per level of
 //! the condensed graph (callees first): an SCC's set is the union of its members' own effects and
@@ -39,7 +48,7 @@ use stave_diag::{Diagnostic, Span};
 use stave_syntax::{NodeKind as Syn, Term};
 
 use crate::Program;
-use crate::callgraph::{CallGraph, NodeKind};
+use crate::callgraph::{CallGraph, EdgeKind, NodeKind};
 use crate::closures::ClosureKind;
 use crate::decls::DeclFlags;
 use crate::diag::mk;
@@ -122,12 +131,14 @@ pub enum OpKind {
     Spawn,
     Extern,
     Unseen,
+    Requires,
 }
 
 impl OpKind {
     /// The text of the `op` hole of E1401 / E1403.
     pub fn text(self) -> &'static str {
         match self {
+            OpKind::Requires => "has a `requires` clause that the call does not prove",
             OpKind::Alloc => "allocates",
             OpKind::Free => "frees memory",
             OpKind::OutOfMemory => "may run out of memory",
@@ -184,12 +195,16 @@ pub const BOUNDARY: &[(&str, &str, Effects, OpKind)] = &[
 /// The effects of a `spawn { }` statement for the fn holding it (`runtime.thread.scope_spawn`).
 const SPAWN: Effects = Effects(Effects::ALLOC.0 | Effects::IO.0 | Effects::TRAP.0);
 
-/// What the checked IR says about one node (its function after the removal of proven bounds
-/// checks): the first trapping instruction and the first `panic.out_of_memory`.
+/// What the checked IR says about one node (its function after the removal of proven checks):
+/// the first trapping instruction and the first `panic.out_of_memory`, both outside the entry
+/// instructions, and the first entry instruction that can trap (a kept `requires` check, or an
+/// `add`/`sub` of a clause that the proved clauses keep in range): a call that proves the
+/// `requires` cannot trap there.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NodeIr {
     pub trap: Option<Span>,
     pub out_of_memory: Option<Span>,
+    pub entry: Option<Span>,
 }
 
 /// A node checked against effects it must not have.
@@ -250,20 +265,36 @@ impl Plan {
     }
 }
 
-/// The fn nodes whose bodies have a contract check (a checked `requires` or an `ensures`): their
-/// checked IR decides which checks stay, so their `trap` and the contract diagnostics need it.
+/// The fn nodes whose bodies have a contract check (a checked `requires` or an `ensures`), and
+/// the nodes that call a fn with a checked `requires`: their checked IR decides which checks stay
+/// and which calls prove or always fail a `requires`, so their `trap` and the contract
+/// diagnostics need it.
 pub fn contract_nodes(tc: &Typeck) -> Vec<u32> {
     let g = &tc.call_graph;
-    let checked = |d: DeclId| {
-        let Ok(bi) = tc.bodies.binary_search_by_key(&d, |b| b.decl) else { return false };
+    let clauses = |d: DeclId| -> (bool, bool) {
+        let Ok(bi) = tc.bodies.binary_search_by_key(&d, |b| b.decl) else { return (false, false) };
         let b = &tc.bodies[bi];
-        !b.has_error
-            && b.contracts
-                .as_deref()
-                .is_some_and(|c| !c.checked_requires().is_empty() || !c.ensures.is_empty())
+        match b.contracts.as_deref() {
+            Some(c) if !b.has_error => (!c.checked_requires().is_empty(), !c.ensures.is_empty()),
+            _ => (false, false),
+        }
     };
+    let of_node = |i: u32| match &g.nodes[i as usize].kind {
+        NodeKind::Fn { inst, body: true, .. } => clauses(inst.decl),
+        _ => (false, false),
+    };
+    let per_node: Vec<(bool, bool)> = (0..g.nodes.len() as u32).map(of_node).collect();
     (0..g.nodes.len() as u32)
-        .filter(|&i| matches!(&g.nodes[i as usize].kind, NodeKind::Fn { inst, body: true, .. } if checked(inst.decl)))
+        .filter(|&i| {
+            let (requires, ensures) = per_node[i as usize];
+            let calls = || {
+                !matches!(g.nodes[i as usize].kind, NodeKind::Table { .. } | NodeKind::Glue { .. })
+                    && g.succ(i).iter().any(|e| {
+                        matches!(e.kind, EdgeKind::Call | EdgeKind::Dispatch { .. }) && per_node[e.to as usize].0
+                    })
+            };
+            requires || ensures || calls()
+        })
         .collect()
 }
 
@@ -282,6 +313,14 @@ pub struct EffectSets {
     /// Whether `trap` includes the checked IR's trapping instructions (else only call cycles
     /// and the runtime's panic fns).
     pub trap_from_ir: bool,
+    /// Each node's entry effect: what a call that does not prove its `requires` adds to the
+    /// node's set (`trap`, or nothing).
+    pub entry: Vec<Effects>,
+    /// Where each node's entry effect is: the first `requires` conjunct whose check stays.
+    entry_at: Vec<Option<Span>>,
+    /// (caller, callee) node pairs whose every call proves the callee's `requires`: the edge
+    /// does not carry the entry effect. Sorted.
+    pub proved: Vec<(u32, u32)>,
 }
 
 impl EffectSets {
@@ -291,10 +330,30 @@ impl EffectSets {
         self.ops.binary_search_by_key(&(n, bit), |x| (x.0, x.1)).ok().map(|i| self.ops[i].2)
     }
 
+    /// The op of node `n`'s entry effect: its unproved `requires`.
+    pub fn entry_op(&self, n: u32) -> Option<Op> {
+        let span = self.entry_at.get(n as usize).copied().flatten()?;
+        Some(Op { kind: OpKind::Requires, span })
+    }
+
+    /// The entry effect of `to` that the edge from `m` carries.
+    fn enters(&self, m: u32, to: u32) -> Effects {
+        if self.proved.binary_search(&(m, to)).is_ok() {
+            return Effects::NONE;
+        }
+        self.entry.get(to as usize).copied().unwrap_or(Effects::NONE)
+    }
+
     /// The shortest call chain from `from` to a node that has effect `e` on its own: the edge
     /// indices (into [`CallGraph::out`]) in call order, and that node. Edges whose deny clause
     /// names `e` are not taken unless no other chain exists.
     pub fn chain(&self, g: &CallGraph, from: u32, e: Effects) -> Option<(Vec<u32>, u32)> {
+        self.chain_end(g, from, e).map(|(edges, end, _)| (edges, end))
+    }
+
+    /// [`EffectSets::chain`], and whether the chain ends at a node that has `e` as its entry
+    /// effect only, carried by the chain's last edge.
+    pub fn chain_end(&self, g: &CallGraph, from: u32, e: Effects) -> Option<(Vec<u32>, u32, bool)> {
         if !self.set.get(from as usize)?.meets(e) {
             return None;
         }
@@ -302,21 +361,31 @@ impl EffectSets {
             let mut parent: FxHashMap<u32, Option<u32>> = FxHashMap::default();
             parent.insert(from, None);
             let mut queue = std::collections::VecDeque::from([from]);
+            let path = |parent: &FxHashMap<u32, Option<u32>>, m: u32| {
+                let mut edges = Vec::new();
+                let mut cur = m;
+                while let Some(&Some(ei)) = parent.get(&cur) {
+                    edges.push(ei);
+                    cur = g.caller(ei);
+                }
+                edges.reverse();
+                edges
+            };
             while let Some(m) = queue.pop_front() {
                 if self.local[m as usize].meets(e) {
-                    let mut edges = Vec::new();
-                    let mut cur = m;
-                    while let Some(&Some(ei)) = parent.get(&cur) {
-                        edges.push(ei);
-                        cur = g.caller(ei);
-                    }
-                    edges.reverse();
-                    return Some((edges, m));
+                    return Some((path(&parent, m), m, false));
                 }
                 if self.boundary[m as usize] {
                     continue;
                 }
                 let base = g.out_start[m as usize];
+                for (k, edge) in g.succ(m).iter().enumerate() {
+                    if !(strict && Effects(edge.deny).meets(e)) && self.enters(m, edge.to).meets(e) {
+                        let mut edges = path(&parent, m);
+                        edges.push(base + k as u32);
+                        return Some((edges, edge.to, true));
+                    }
+                }
                 for (k, edge) in g.succ(m).iter().enumerate() {
                     if (strict && Effects(edge.deny).meets(e)) || !self.set[edge.to as usize].meets(e) {
                         continue;
@@ -462,6 +531,12 @@ fn fixed(
 /// Each node's own effects and effect set. `ir`: per node, what its checked IR says (`None`: the
 /// IR was not built; `trap` then comes only from call cycles and the runtime's panic fns).
 pub fn solve(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>) -> EffectSets {
+    solve_with(prog, tc, ir, &[])
+}
+
+/// [`solve`] with the (caller, callee) node pairs whose every call proves the callee's
+/// `requires` (sorted): those edges do not carry the callee's entry effect.
+pub fn solve_with(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>, proved: &[(u32, u32)]) -> EffectSets {
     let g = &tc.call_graph;
     let n = g.nodes.len();
     let boundary: FxHashMap<DeclId, (Effects, OpKind)> = BOUNDARY
@@ -537,6 +612,14 @@ pub fn solve(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>) -> EffectSets {
         ops.extend(o.into_iter().map(|(bit, op)| (i as u32, bit, op)));
     }
     ops.sort_by_key(|x| (x.0, x.1));
+    let entry_at: Vec<Option<Span>> = (0..n)
+        .map(|i| if boundary_node[i] { None } else { ir.and_then(|r| r.get(i)).and_then(|x| x.entry) })
+        .collect();
+    let entry: Vec<Effects> =
+        entry_at.iter().map(|s| if s.is_some() { Effects::TRAP } else { Effects::NONE }).collect();
+    let enters = |m: u32, to: u32| {
+        if proved.binary_search(&(m, to)).is_ok() { Effects::NONE } else { entry[to as usize] }
+    };
     // levels, callees first: an SCC's set from its members and the SCCs below
     let mut scc_set = vec![Effects::NONE; g.scc_count()];
     for l in 0..g.level_count() {
@@ -553,6 +636,8 @@ pub fn solve(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>) -> EffectSets {
                     }
                     for e in g.succ(m) {
                         let ts = g.scc_of[e.to as usize];
+                        // the callee's entry effect belongs to this edge, also inside a cycle
+                        acc |= Effects(enters(m, e.to).0 & !e.deny);
                         if ts == s {
                             continue;
                         }
@@ -573,7 +658,17 @@ pub fn solve(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>) -> EffectSets {
     }
     let set: Vec<Effects> =
         (0..n).map(|i| if boundary_node[i] { local[i] } else { scc_set[g.scc_of[i] as usize] }).collect();
-    EffectSets { local, set, boundary: boundary_node, used: used_nodes(g), ops, trap_from_ir: ir.is_some() }
+    EffectSets {
+        local,
+        set,
+        boundary: boundary_node,
+        used: used_nodes(g),
+        ops,
+        trap_from_ir: ir.is_some(),
+        entry,
+        entry_at,
+        proved: proved.to_vec(),
+    }
 }
 
 /// Is `n` a fn node specialized on no fn value (the node calls without known values share)?
@@ -762,9 +857,19 @@ pub fn check(prog: &Program, tc: &Typeck, plan: &Plan, sets: &EffectSets) -> Vec
         if !sets.used[c.node as usize] {
             continue;
         }
-        let have = Effects(sets.set[c.node as usize].0 & c.deny.0);
+        // a fn value is entered by calls that prove nothing: its entry effect is its own
+        let at_entry = match c.why {
+            Why::Clause => Effects::NONE,
+            Why::Made { .. } => sets.entry.get(c.node as usize).copied().unwrap_or(Effects::NONE),
+        };
+        let have = Effects((sets.set[c.node as usize].0 | at_entry.0) & c.deny.0);
         for e in have.each() {
-            let Some((edges, end)) = sets.chain(g, c.node, e) else { continue };
+            let found = if sets.set[c.node as usize].meets(e) {
+                sets.chain_end(g, c.node, e)
+            } else {
+                Some((Vec::new(), c.node, true))
+            };
+            let Some((edges, end, entered)) = found else { continue };
             // the names `stave effects` prints: checked-IR paths, type args of an instance,
             // `<fn>.<k>` for a closure, never the fn values a node is specialized on
             let names = g.source_names(prog, tc, &[c.node, end]);
@@ -776,7 +881,7 @@ pub fn check(prog: &Program, tc: &Typeck, plan: &Plan, sets: &EffectSets) -> Vec
             if !seen.insert((fn_path.clone(), e.0, site)) {
                 continue;
             }
-            let op = sets.op(end, e);
+            let op = if entered { sets.entry_op(end) } else { sets.op(end, e) };
             let effect = e.names()[0];
             let op_text = op.map_or(OpKind::Trap.text(), |o| o.kind.text());
             let mut roles: Vec<(&str, Span)> = Vec::new();

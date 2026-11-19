@@ -10,6 +10,12 @@
 //! constant below the length, the vector ops that trap, and a contract check that the removal kept
 //! (its call of `runtime.panic.requires_failed` / `ensures_failed`, `Contract`). `panic.out_of_memory`
 //! also counts as an allocation.
+//!
+//! A function whose summary has a certified entry ([`crate::witness::Summary`]) has two sets:
+//! the instructions that cannot trap when it is entered with its `requires` proved (the failure
+//! calls of its `requires` checks, the `add`/`sub` of its clauses shown in range), which only a
+//! call that does not prove them reaches as traps ([`first_trap`]), and the rest
+//! ([`scan_without`]).
 
 use crate::ir::{Body, Const, FuncId, Module, Op, Operand, PanicKind, Site};
 use crate::types::TypeKey;
@@ -24,9 +30,38 @@ pub struct Traps {
 
 /// [`Traps`] of function `f` (none for a function without a body).
 pub fn scan(m: &Module, f: FuncId) -> Traps {
+    scan_without(m, f, &[])
+}
+
+/// The `requires` checks of `f` that the removal kept: the calls of
+/// `runtime.panic.requires_failed`, in order.
+pub fn requires_checks(m: &Module, f: FuncId) -> Vec<u32> {
+    let Some(b) = m.func(f).and_then(|x| x.body.as_ref()) else { return Vec::new() };
+    (0..b.insts.len() as u32)
+        .filter(|&i| {
+            b.insts.op[i as usize] == Op::Call
+                && matches!(b.args(i).first(), Some(Operand::Func(g)) if m.func(*g).is_some_and(|g| g.path == REQUIRES_FAILED))
+        })
+        .collect()
+}
+
+/// The site of the first of the instructions `insts` of `f` that can trap.
+pub fn first_trap(m: &Module, f: FuncId, insts: &[u32]) -> Option<Site> {
+    let b = m.func(f).and_then(|x| x.body.as_ref())?;
+    let i = insts.iter().copied().find(|&i| trap_of(m, b, i).is_some())?;
+    Some(b.insts.site.get(i as usize).copied().unwrap_or(Site::NONE))
+}
+
+/// [`scan`] that leaves out the instructions `quiet` (sorted): those the witness checker showed
+/// cannot trap when the function is entered with its `requires` proved
+/// ([`crate::witness::check::Removal::entry`]).
+pub fn scan_without(m: &Module, f: FuncId, quiet: &[u32]) -> Traps {
     let mut out = Traps::default();
     let Some(b) = m.func(f).and_then(|x| x.body.as_ref()) else { return out };
     for i in 0..b.insts.len() as u32 {
+        if quiet.binary_search(&i).is_ok() {
+            continue;
+        }
         let Some(kind) = trap_of(m, b, i) else { continue };
         let site = b.insts.site.get(i as usize).copied().unwrap_or(Site::NONE);
         if out.trap.is_none() {
