@@ -52,6 +52,18 @@ fn at_the_ends() -> i32 {
     return a + b + signed(-4) + signed(4);
 }
 
+fn lt(i: usize, n: usize) -> usize requires(i < n) {
+    return i;
+}
+
+fn swapped(i: usize, n: usize) -> usize {
+    if n < i {
+        let a = lt(n, i);
+        return a + lt(i, n); //~ ERROR E0218
+    }
+    return 0;
+}
+
 fn twice() -> u32 {
     let a = pos(0); //~ ERROR E0218
     return a + pos(0); //~ ERROR E0218
@@ -105,5 +117,6 @@ fn main() {
     let d = generic(2u64);
     let e = traced() + configured() + twice();
     let g = at_the_ends();
+    let h = swapped(2, 1);
     let f = in_closure::<0>() + in_closure::<4>();
 }
