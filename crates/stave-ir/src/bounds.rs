@@ -606,7 +606,12 @@ pub fn claim_func(m: &Module, fid: FuncId) -> Option<Arc<Summary>> {
         return None;
     }
     let s = Cx::new(m, b, None).summarize(&mut Vec::new());
-    (!s.is_empty()).then(|| Arc::new(s))
+    states(&s).then(|| Arc::new(s))
+}
+
+/// Whether summary `s` states anything.
+fn states(s: &Summary) -> bool {
+    !(s.pre.is_empty() && s.entry.is_empty() && s.safe.is_empty() && s.post.is_empty())
 }
 
 /// Whether `b` calls a contract failure fn.
@@ -1085,7 +1090,12 @@ impl<'a> Cx<'a> {
             w.summary = self.summarize(&mut w.edges);
         }
         self.decide_calls(&mut w);
-        if rows.is_empty() && refuted.is_empty() && w.summary.is_empty() && w.calls.is_empty() {
+        if rows.is_empty()
+            && refuted.is_empty()
+            && !states(&w.summary)
+            && w.calls.proved.is_empty()
+            && w.calls.refuted.is_empty()
+        {
             return None;
         }
         rows.sort_by_key(|r| r.0.inst);
@@ -1106,7 +1116,7 @@ impl<'a> Cx<'a> {
                 continue;
             }
             let Some(&Operand::Func(f)) = self.b.args(i).first() else { continue };
-            let Some(s) = self.claim(f).filter(|s| s.has_entry()) else { continue };
+            let Some(s) = self.claim(f).filter(|s| !s.entry.is_empty()) else { continue };
             let (block, site) = (self.block_of[i as usize], self.b.insts.site[i as usize]);
             let (start, first) = (w.edges.len(), w.calls.goals.len());
             let proved = s.pre.iter().all(|p| {

@@ -41,7 +41,6 @@ use crate::ir::{
     Block, Body, CastKind, FuncId, InstanceId, Module, Op, Operand, Span, Target, Term, Value, ValueDef,
 };
 use crate::types::{IntBits, TypeKey};
-use std::sync::Arc;
 
 /// Why a witness does not hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -141,7 +140,7 @@ pub struct Checked {
     calls: Vec<u32>,
     call_refuted: Vec<u32>,
     /// The accepted summary, if it states anything.
-    summary: Option<Arc<Summary>>,
+    summary: Option<std::sync::Arc<Summary>>,
     /// The check that accepted it ([`check_func`], or one [`check_module`] for all its rows):
     /// rows of one check read the same summaries and were accepted together.
     set: u64,
@@ -199,6 +198,11 @@ impl<'a> Summaries<'a> {
     fn get(&self, f: FuncId) -> Option<&'a Summary> {
         self.by_func.get(f.index()).copied().flatten()
     }
+}
+
+/// Whether summary `s` states anything.
+fn states(s: &Summary) -> bool {
+    !(s.pre.is_empty() && s.entry.is_empty() && s.safe.is_empty() && s.post.is_empty())
 }
 
 /// The result of checking one witness.
@@ -265,7 +269,7 @@ fn check_in(m: &Module, w: &FnWitness, sums: &Summaries<'_>, set: u64) -> Result
         safe: w.summary.safe.iter().map(|s| s.inst).collect(),
         calls: w.calls.proved.iter().map(|c| c.inst).collect(),
         call_refuted: w.calls.refuted.iter().map(|c| c.inst).collect(),
-        summary: (!w.summary.is_empty()).then(|| Arc::new(w.summary.clone())),
+        summary: states(&w.summary).then(|| std::sync::Arc::new(w.summary.clone())),
         set,
     })
 }
@@ -1669,7 +1673,7 @@ impl<'a> Cx<'a> {
         if bk == NO_BLOCK || !self.encloses(bk as usize, bk as usize) {
             return Err(Reject::Call);
         }
-        let s = self.sums.get(f).filter(|s| s.has_entry()).ok_or(Reject::Call)?;
+        let s = self.sums.get(f).filter(|s| !s.entry.is_empty()).ok_or(Reject::Call)?;
         Ok((f, args, s, At { block: bk, inst: q }))
     }
 

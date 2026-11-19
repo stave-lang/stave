@@ -251,17 +251,6 @@ pub struct Summary {
     pub post_at: Vec<PostAt>,
 }
 
-impl Summary {
-    /// Whether the function has an unchecked entry.
-    pub fn has_entry(&self) -> bool {
-        !self.entry.is_empty()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.pre.is_empty() && self.entry.is_empty() && self.safe.is_empty() && self.post.is_empty()
-    }
-}
-
 /// A call that proves every `pre` row of its callee.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CallProved {
@@ -289,12 +278,6 @@ pub struct Calls {
     /// Spans of [`FnWitness::edges`].
     pub goals: Vec<Span>,
     pub refuted: Vec<CallRefuted>,
-}
-
-impl Calls {
-    pub fn is_empty(&self) -> bool {
-        self.proved.is_empty() && self.refuted.is_empty()
-    }
 }
 
 /// The removed and the refuted checks of one function, its summary, and its decided calls: flat
