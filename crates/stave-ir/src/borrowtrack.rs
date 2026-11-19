@@ -17,7 +17,7 @@ pub type Tag = u32;
 pub const ROOT: Tag = 0;
 
 /// The caller's handle of an event's site. [`NO_EV`] is "no site".
-pub type Ev = u32;
+pub type Ev = u64;
 pub const NO_EV: Ev = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -245,6 +245,11 @@ impl Tracker {
             Some(&(a, n)) if a == alloc => n,
             _ => 0,
         }
+    }
+
+    /// Whether allocation `alloc` has begun.
+    pub fn has(&self, alloc: u32) -> bool {
+        self.trees.contains_key(&alloc)
     }
 
     /// M4: a new tag of `kind` for `bytes` of `alloc`, reached through `parent`.

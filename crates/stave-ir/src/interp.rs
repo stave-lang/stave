@@ -15,14 +15,17 @@
 //! The interpreter never recurses on the host stack per Stave call (explicit frame stack), and
 //! malformed input yields an [`InterpError`], never a panic.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 mod simd;
 
 use crate::arith::{self, IntTy};
+use crate::borrowtrack::{Ev, Kind, NO_EV, ROOT, Report, Tag, Tracker};
 use crate::host::{Host, SysResult};
 use crate::ir::{
-    Block, Body, CastKind, Const, FuncId, Module, Op, Operand, PanicKind, Site, Target, Term, Value,
+    Block, Body, BorrowMark, CastKind, Const, FuncId, Module, Op, Operand, PanicKind, Site, Target, Term,
+    Value,
 };
 use crate::layout::{LayoutError, Layouts, Shape};
 use crate::mem::{Fault, Memory};
@@ -31,11 +34,29 @@ use crate::types::{FloatBits, MAX_TYPE_DEPTH, TypeId};
 use crate::verify::{self, Cls, VerifyError};
 
 /// A runtime value.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Val {
     S(u64),
     Pair(u64, u64),
     Agg(Rc<[Val]>),
+    /// Borrow tracking: a 64-bit word with the tag of the reference it was made from.
+    T(u64, Tag),
+    /// Borrow tracking: a fat pointer whose address word has a tag.
+    PairT(u64, u64, Tag),
+}
+
+/// A tag is no part of a value: `==` compares the bits.
+impl PartialEq for Val {
+    fn eq(&self, o: &Val) -> bool {
+        match (self, o) {
+            (Val::Agg(a), Val::Agg(b)) => a == b,
+            (Val::S(a) | Val::T(a, _), Val::S(b) | Val::T(b, _)) => a == b,
+            (Val::Pair(a, n) | Val::PairT(a, n, _), Val::Pair(b, k) | Val::PairT(b, k, _)) => {
+                a == b && n == k
+            }
+            _ => false,
+        }
+    }
 }
 
 impl Val {
@@ -60,8 +81,26 @@ impl Val {
     /// The scalar bits, if this is a scalar.
     pub fn bits(&self) -> Option<u64> {
         match self {
-            Val::S(x) => Some(*x),
+            Val::S(x) | Val::T(x, _) => Some(*x),
             _ => None,
+        }
+    }
+    /// The address word of a thin or fat pointer and its tag ([`ROOT`]: none).
+    pub fn word(&self) -> Option<(u64, Tag)> {
+        match *self {
+            Val::S(x) | Val::Pair(x, _) => Some((x, ROOT)),
+            Val::T(x, t) | Val::PairT(x, _, t) => Some((x, t)),
+            Val::Agg(_) => None,
+        }
+    }
+    fn tagged(x: u64, t: Tag) -> Val {
+        if t == ROOT { Val::S(x) } else { Val::T(x, t) }
+    }
+    fn untagged(self) -> Val {
+        match self {
+            Val::T(x, _) => Val::S(x),
+            Val::PairT(a, n, _) => Val::Pair(a, n),
+            v => v,
         }
     }
     pub fn as_f32(&self) -> Option<f32> {
@@ -93,6 +132,9 @@ pub struct Config {
     /// [`Outcome::MemError`]. The runtime allocator's `try_alloc`, `free`, and `try_realloc` are
     /// replaced by checked allocations that are never reused.
     pub check: bool,
+    /// Borrow tracking ([`crate::borrowtrack`]), on top of `check`: a violation of the dynamic
+    /// borrow model ends the run with [`Outcome::BorrowError`].
+    pub borrow: bool,
 }
 
 impl Default for Config {
@@ -103,6 +145,7 @@ impl Default for Config {
             stack_size: 8 << 20,
             heap_limit: 1 << 30,
             check: false,
+            borrow: false,
         }
     }
 }
@@ -125,6 +168,88 @@ pub enum Outcome {
     Trap(Trap),
     /// Checking mode: a memory error.
     MemError(Box<MemReport>),
+    /// Borrow tracking: a violation of the dynamic borrow model.
+    BorrowError(Box<BorrowReport>),
+}
+
+/// A violation of contracts/borrow-model.md with its sites.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BorrowReport {
+    pub report: Report,
+    /// The violating event, innermost frame first.
+    pub at: Trace,
+    /// The event that made the failing tag `Frozen` or `Dead`.
+    pub cause_at: Option<At>,
+    /// Where the failing tag was made (a root: where its allocation began).
+    pub made_at: Option<At>,
+}
+
+impl BorrowReport {
+    /// Multi-line text: `borrow violation [<class>] <rule>: ...`, then the three sites.
+    pub fn render(&self, m: &Module) -> String {
+        let r = &self.report;
+        let one = |at: &Option<At>| match at {
+            Some(a) => MemReport::trace_text(m, &vec![*a]),
+            None => "?".into(),
+        };
+        format!(
+            "borrow violation [{}] {}: {:?} of bytes {}..{} of allocation {} through a {:?} {:?} tag\n  at {}\n  cause ({:?}) at {}\n  tag made at {}",
+            r.class.name(),
+            r.event.rule(),
+            r.event,
+            r.lo,
+            r.hi,
+            r.alloc,
+            r.perm,
+            r.kind,
+            MemReport::trace_text(m, &self.at),
+            r.cause,
+            one(&self.cause_at),
+            one(&self.made_at),
+        )
+    }
+}
+
+/// The state of borrow tracking.
+struct Borrows {
+    tracker: Tracker,
+    /// The tag of the 64-bit word stored at an address, with the word: the tag holds while
+    /// the word is there.
+    shadow: HashMap<u64, (u64, Tag)>,
+    /// The side table by (function, value).
+    marks: HashMap<(u32, u32), BorrowMark>,
+    report: Option<Box<Report>>,
+}
+
+fn ev(f: FuncId, inst: u32) -> Ev {
+    (u64::from(f.0) + 1) << 32 | u64::from(inst)
+}
+
+impl Borrows {
+    /// The allocation and offset of `addr`; the tracker learns of an allocation at its first
+    /// event.
+    fn locate(&mut self, mem: &Memory, addr: u64) -> Option<(u32, u64)> {
+        let (id, base, size) = mem.alloc_span(addr)?;
+        if !self.tracker.has(id) {
+            self.tracker.begin(id, size, false, NO_EV);
+        }
+        addr.checked_sub(base).map(|off| (id, off))
+    }
+
+    fn stored(&mut self, addr: u64, size: u64, bits: u64, tag: Tag) {
+        if tag != ROOT && size == 8 {
+            self.shadow.insert(addr, (bits, tag));
+        } else if !self.shadow.is_empty() {
+            self.shadow.remove(&addr);
+        }
+    }
+
+    fn loaded(&self, addr: u64, bits: u64) -> Tag {
+        match self.shadow.get(&addr) {
+            Some(&(b, t)) if b == bits => t,
+            _ => ROOT,
+        }
+    }
 }
 
 /// A run that could not complete (not a Stave-level outcome).
@@ -214,6 +339,7 @@ pub struct Interp<'m, H: Host> {
     scratch: Vec<Val>,
     /// Checking mode: the runtime allocator fns whose calls are replaced.
     alloc_fns: Option<Box<AllocFns>>,
+    bt: Option<Box<Borrows>>,
 }
 
 /// The runtime allocator entry points (`runtime/alloc.stv`); `alloc` and `realloc` reach them.
@@ -255,6 +381,19 @@ impl<'m, H: Host> Interp<'m, H> {
                 try_realloc: m.find_func("runtime.alloc.try_realloc"),
             })
         });
+        let bt = (cfg.check && cfg.borrow).then(|| {
+            let marks = m
+                .funcs
+                .iter()
+                .enumerate()
+                .flat_map(|(f, func)| func.borrows.iter().map(move |b| ((f as u32, b.value.0), *b)));
+            Box::new(Borrows {
+                tracker: Tracker::new(),
+                shadow: HashMap::new(),
+                marks: marks.collect(),
+                report: None,
+            })
+        });
         let strs = m.strings.iter().map(|s| mem.add_data(s)).collect();
         let layouts = Layouts::compute(&m.types);
         let mut statics = Vec::with_capacity(m.statics.len());
@@ -279,6 +418,7 @@ impl<'m, H: Host> Interp<'m, H> {
             steps: 0,
             scratch: Vec::new(),
             alloc_fns,
+            bt,
         })
     }
 
@@ -298,6 +438,19 @@ impl<'m, H: Host> Interp<'m, H> {
 
     /// An error of [`Interp::run`]: the memory error it is in checking mode, else `e`.
     fn failed(&mut self, e: InterpError, frames: &[Frame]) -> R<Outcome> {
+        if let Some(r) = self.bt.as_mut().and_then(|bt| bt.report.take()) {
+            let at = |e: Ev| {
+                let f = FuncId(u32::try_from((e >> 32).checked_sub(1)?).ok()?);
+                Some(At::of(f, self.m.func(f)?.body.as_ref()?, e as u32))
+            };
+            let (cause_at, made_at) = (at(r.cause_at), at(r.made_at));
+            return Ok(Outcome::BorrowError(Box::new(BorrowReport {
+                report: *r,
+                at: self.trace(frames),
+                cause_at,
+                made_at,
+            })));
+        }
         match self.mem.take_report() {
             Some(mut r) => {
                 r.at = self.trace(frames);
@@ -597,7 +750,7 @@ impl<'m, H: Host> Interp<'m, H> {
     fn scalar(&self, body: &Body, regs: &[Val], o: Operand) -> R<u64> {
         match o {
             Operand::Value(v) => match regs.get(v.index()) {
-                Some(Val::S(x)) => Ok(*x),
+                Some(Val::S(x) | Val::T(x, _)) => Ok(*x),
                 _ => Err(malformed("scalar expected")),
             },
             _ => self.eval(body, regs, o)?.bits().ok_or(malformed("scalar expected")),
@@ -606,7 +759,7 @@ impl<'m, H: Host> Interp<'m, H> {
 
     fn pair(&self, body: &Body, regs: &[Val], o: Operand) -> R<(u64, u64)> {
         match self.eval(body, regs, o)? {
-            Val::Pair(a, n) => Ok((a, n)),
+            Val::Pair(a, n) | Val::PairT(a, n, _) => Ok((a, n)),
             _ => Err(malformed("fat pointer expected")),
         }
     }
@@ -688,16 +841,24 @@ impl<'m, H: Host> Interp<'m, H> {
         Ok(match &l.shape {
             Shape::Scalar => {
                 let raw = self.mem.read_uint(addr, l.size).map_err(fault)?;
-                Loaded::Val(Val::S(match self.cls(t) {
+                let x = match self.cls(t) {
                     Cls::Int(it) => it.norm(raw),
                     Cls::Bool => (raw != 0) as u64,
                     _ => raw,
-                }))
+                };
+                let tag = match &self.bt {
+                    Some(bt) if l.size == 8 => bt.loaded(addr, x),
+                    _ => ROOT,
+                };
+                Loaded::Val(Val::tagged(x, tag))
             }
             Shape::Fat => {
                 let a = self.mem.read_uint(addr, 8).map_err(&fault)?;
                 let n = self.mem.read_uint(addr.wrapping_add(8), 8).map_err(&fault)?;
-                Loaded::Val(Val::Pair(a, n))
+                match self.bt.as_ref().map_or(ROOT, |bt| bt.loaded(addr, a)) {
+                    ROOT => Loaded::Val(Val::Pair(a, n)),
+                    tag => Loaded::Val(Val::PairT(a, n, tag)),
+                }
             }
             Shape::Fields(fs) => {
                 let parts = fs.iter().map(|&(off, ft)| (ft, addr.wrapping_add(off))).collect();
@@ -734,10 +895,18 @@ impl<'m, H: Host> Interp<'m, H> {
             let l = self.layout(t)?.clone();
             let first = stack.len();
             match (&l.shape, v) {
-                (Shape::Scalar, Val::S(x)) => self.mem.write_uint(addr, l.size, *x).map_err(fault)?,
-                (Shape::Fat, Val::Pair(a, n)) => {
-                    self.mem.write_uint(addr, 8, *a).map_err(&fault)?;
-                    self.mem.write_uint(addr.wrapping_add(8), 8, *n).map_err(&fault)?;
+                (Shape::Scalar, &(Val::S(x) | Val::T(x, _))) => {
+                    self.mem.write_uint(addr, l.size, x).map_err(fault)?;
+                    if let Some(bt) = &mut self.bt {
+                        bt.stored(addr, l.size, x, v.word().map_or(ROOT, |w| w.1));
+                    }
+                }
+                (Shape::Fat, &(Val::Pair(a, n) | Val::PairT(a, n, _))) => {
+                    self.mem.write_uint(addr, 8, a).map_err(&fault)?;
+                    self.mem.write_uint(addr.wrapping_add(8), 8, n).map_err(&fault)?;
+                    if let Some(bt) = &mut self.bt {
+                        bt.stored(addr, 8, a, v.word().map_or(ROOT, |w| w.1));
+                    }
                 }
                 (Shape::Fields(fs), Val::Agg(vs)) if fs.len() == vs.len() => {
                     for (&(off, ft), fv) in fs.iter().zip(vs.iter()) {
@@ -769,6 +938,73 @@ impl<'m, H: Host> Interp<'m, H> {
             stack[first..].reverse();
         }
         Ok(())
+    }
+
+    /// The tag of the word an operand holds.
+    fn tag_of(regs: &[Val], o: Operand) -> Tag {
+        match o {
+            Operand::Value(v) => regs.get(v.index()).and_then(Val::word).map_or(ROOT, |w| w.1),
+            _ => ROOT,
+        }
+    }
+
+    fn violation(&mut self, r: Box<Report>) -> InterpError {
+        if let Some(bt) = &mut self.bt {
+            bt.report.get_or_insert(r);
+        }
+        malformed("borrow violation")
+    }
+
+    /// Borrow tracking: the read or write of `len` bytes at `addr` through `tag`.
+    fn track(&mut self, tag: Tag, addr: u64, len: u64, write: bool, f: FuncId, i: u32) -> R<()> {
+        let Some(bt) = &mut self.bt else { return Ok(()) };
+        if len == 0 {
+            return Ok(());
+        }
+        let Some((id, off)) = bt.locate(&self.mem, addr) else { return Ok(()) };
+        let r = if write {
+            bt.tracker.write(id, tag, off, off + len, ev(f, i))
+        } else {
+            bt.tracker.read(id, tag, off, off + len, ev(f, i))
+        };
+        r.map_err(|r| self.violation(r))
+    }
+
+    /// Borrow tracking: the result of instruction `i` with the tag it carries. A marked result
+    /// is a new borrow (M4); the sum or difference of a tagged word and an untagged one keeps
+    /// the tag (M20).
+    fn retag(&mut self, body: &Body, f: FuncId, regs: &[Val], i: u32, out: Val) -> R<Val> {
+        let Some(bt) = &mut self.bt else { return Ok(out) };
+        let op = body.insts.op.get(i as usize).copied();
+        let carried = match (op, &out, body.args(i)) {
+            (Some(Op::Add | Op::AddWrap), &Val::S(x), &[a, b]) => {
+                match (Self::tag_of(regs, a), Self::tag_of(regs, b)) {
+                    (t, ROOT) | (ROOT, t) => Some(Val::tagged(x, t)),
+                    _ => None,
+                }
+            }
+            (Some(Op::Sub | Op::SubWrap), &Val::S(x), &[a, b]) if Self::tag_of(regs, b) == ROOT => {
+                Some(Val::tagged(x, Self::tag_of(regs, a)))
+            }
+            _ => None,
+        };
+        let out = carried.unwrap_or(out);
+        let Some(Some(res)) = body.insts.result.get(i as usize) else { return Ok(out) };
+        let Some(&mark) = bt.marks.get(&(f.0, res.0)) else { return Ok(out) };
+        let Some((addr, parent)) = out.word() else { return Ok(out) };
+        let len = match out {
+            Val::Pair(_, n) | Val::PairT(_, n, _) => n.saturating_mul(mark.size),
+            _ => mark.size,
+        };
+        let Some((id, off)) = bt.locate(&self.mem, addr) else { return Ok(out) };
+        let kind = if mark.mutable { Kind::Mut } else { Kind::Shared };
+        match bt.tracker.borrow(id, parent, kind, off..off.saturating_add(len), &[], ev(f, i)) {
+            Ok(tag) => Ok(match out {
+                Val::Pair(a, n) | Val::PairT(a, n, _) => Val::PairT(a, n, tag),
+                _ => Val::T(addr, tag),
+            }),
+            Err(r) => Err(self.violation(r)),
+        }
     }
 
     fn set(regs: &mut [Val], body: &Body, i: u32, v: Val) {
@@ -917,7 +1153,10 @@ impl<'m, H: Host> Interp<'m, H> {
                     }
                 } else {
                     let to = verify::cast_ty(self.cls(t)).ok_or(malformed("cast target"))?;
-                    Val::S(arith::convert(kind, from, to, x).ok_or(malformed("cast"))?)
+                    let r = arith::convert(kind, from, to, x).ok_or(malformed("cast"))?;
+                    // the same word keeps its tag
+                    let tag = if r == x { Self::tag_of(regs, src) } else { ROOT };
+                    Val::tagged(r, tag)
                 }
             }
             Op::Make => {
@@ -985,6 +1224,10 @@ impl<'m, H: Host> Interp<'m, H> {
             Op::Load => {
                 let t = ty.ok_or(malformed("load type"))?;
                 let a = s!(0);
+                if self.bt.is_some() {
+                    let n = self.layout(t)?.size;
+                    self.track(Self::tag_of(regs, arg(0)?), a, n, false, fid, i)?;
+                }
                 self.load_val(t, a, 0, fid, site)?
             }
             // hints: no effect on the program's state
@@ -1000,6 +1243,10 @@ impl<'m, H: Host> Interp<'m, H> {
                     .ok_or(malformed("store type"))?;
                 let a = s!(0);
                 let v = self.eval(body, regs, arg(1)?)?;
+                if self.bt.is_some() {
+                    let n = self.layout(t)?.size;
+                    self.track(Self::tag_of(regs, p), a, n, true, fid, i)?;
+                }
                 self.store_val(t, a, &v, 0, fid, site)?;
                 return Ok(Step::Next);
             }
@@ -1048,19 +1295,19 @@ impl<'m, H: Host> Interp<'m, H> {
                         (k as i64 as u64).wrapping_mul(stride)
                     }
                 };
-                let base = match self.eval(body, regs, p)? {
-                    Val::S(a) | Val::Pair(a, _) => a,
-                    _ => return Err(malformed("pointer value")),
-                };
-                Val::S(base.wrapping_add(off))
+                let (base, tag) = self.eval(body, regs, p)?.word().ok_or(malformed("pointer value"))?;
+                Val::tagged(base.wrapping_add(off), tag)
             }
-            Op::SliceMake => Val::Pair(s!(0), s!(1)),
+            Op::SliceMake => match Self::tag_of(regs, arg(0)?) {
+                ROOT => Val::Pair(s!(0), s!(1)),
+                tag => Val::PairT(s!(0), s!(1), tag),
+            },
             Op::FnMake => {
                 let Operand::Func(f) = arg(0)? else { return Err(malformed("fn.make code")) };
                 Val::Pair(f.0 as u64, s!(1))
             }
             Op::SliceLen => Val::S(self.pair(body, regs, arg(0)?)?.1),
-            Op::SlicePtr => Val::S(self.pair(body, regs, arg(0)?)?.0),
+            Op::SlicePtr => Val::tagged(self.pair(body, regs, arg(0)?)?.0, Self::tag_of(regs, arg(0)?)),
             Op::BoundsCheck => {
                 let (k, n) = (self.ival(body, regs, arg(0)?)?, self.ival(body, regs, arg(1)?)?);
                 if k >= n {
@@ -1108,7 +1355,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 let name = m.intrinsic_name(id).ok_or(malformed("intrinsic"))?;
                 let mut vals = Vec::with_capacity(args.len());
                 for &a in args {
-                    vals.push(self.eval(body, regs, a)?);
+                    vals.push(self.eval(body, regs, a)?.untagged());
                 }
                 if name == "call_on_stack" {
                     // `call_on_stack(f, arg, top)`: calls fn value `f` with `arg` (the stack switch
@@ -1153,6 +1400,7 @@ impl<'m, H: Host> Interp<'m, H> {
             }
             Op::Panic(k) => return Ok(Step::Trap(k)),
         };
+        let out = if self.bt.is_some() { self.retag(body, fid, regs, i, out)? } else { out };
         Self::set(regs, body, i, out);
         Ok(Step::Next)
     }

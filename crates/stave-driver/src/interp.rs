@@ -111,6 +111,7 @@ pub fn run(
     let exit = match out {
         Outcome::Exit(c) => c,
         Outcome::MemError(r) => return Err(format!("interp: {}", r.render(&m))),
+        Outcome::BorrowError(r) => return Err(format!("interp: {}", r.render(&m))),
         o => return Err(format!("interp: the program did not exit: {o:?}")),
     };
     let steps = it.steps();

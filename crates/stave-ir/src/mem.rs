@@ -380,6 +380,13 @@ impl Memory {
         }
     }
 
+    /// Checking mode: the allocation `addr` names, as (id, first byte, size).
+    pub fn alloc_span(&self, addr: u64) -> Option<(u32, u64, u64)> {
+        let id = addr >> ID_SHIFT;
+        let a = self.chk.as_ref()?.allocs.get(id as usize)?.as_ref()?;
+        Some((id as u32, a.base, a.size))
+    }
+
     /// Checking mode: the runtime-allocator blocks still live, as (address, size, allocation site).
     pub fn live_heap_blocks(&self) -> Vec<(u64, u64, Trace)> {
         let Some(c) = &self.chk else { return Vec::new() };

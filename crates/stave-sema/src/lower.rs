@@ -1151,6 +1151,7 @@ fn assemble(
                 body,
                 name_site,
                 symbol: if f.closure.is_some() { None } else { symbol.clone() },
+                borrows: Vec::new(),
             });
         }
     }
