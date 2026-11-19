@@ -1,0 +1,17 @@
+//~ CHECK-ONLY
+// The destination of `n = f(&mut p, &n)` is written after the call has stored `&n` into `p`.
+view struct Pick { best: &u32, count: usize }
+
+fn bump(dst: &mut Pick from x, x: &u32) -> u32 {
+    dst.best = x;
+    return *x + 1;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut n: u32 = 1;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    n = bump(&mut p, &n); //~ ERROR E0501
+    let a: u32 = *p.best;
+    return a as% i32;
+}
