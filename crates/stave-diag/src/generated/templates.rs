@@ -918,7 +918,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0107",
         severity: Severity::Error,
         area: "resolve",
-        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`), at the module's first token",
+        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`, and so is `src/std.cell.stv`), at the module's first token",
         retired: false,
         located: true,
         holes: &[
@@ -3814,7 +3814,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0902",
         severity: Severity::Error,
         area: "generics",
-        rule: "instantiation depth limit (64) exceeded: an instance of a generic fn or method, reached from a non-generic fn through calls, would be the 65th instance of that generic on its own instantiation chain (polymorphic recursion such as `f::<[T; 1]>(..)` inside `f<T>`); at the call that requests it, once per generic",
+        rule: "instantiation depth limit (64) exceeded: an instance of a generic fn or method, reached from a non-generic fn through calls, would be the 65th instance of that generic on its own instantiation chain (polymorphic recursion such as `f::<[T; 1]>(..)` inside `f<T>`); at the call that requests it, once per generic. Case `graph`: the program's call graph (calls, fn values, drop glue) exceeds its limit (256 instances of one generic on one chain, such as a `Drop` impl of `W<T>` that drops a `W<Option<T>>`, or 2,097,152 nodes); at the fn whose body requests the first instance left out, once; the program is rejected",
         retired: false,
         located: true,
         holes: &[
@@ -3829,6 +3829,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "stop the recursive instantiation of `{generic}`: its type arguments must not grow on each level",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "graph",
+                message: "call graph limit exceeded at `{generic}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this body requests instances without end" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "stop the recursive instantiation of `{generic}` through calls, fn values, or drops: its type arguments must not grow on each level",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3866,7 +3878,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0904",
         severity: Severity::Error,
         area: "generics",
-        rule: "const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id)",
+        rule: "const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value",
         retired: false,
         located: true,
         holes: &[
@@ -3895,6 +3907,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "break the cycle: define one of these consts without using the others",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "depth",
+                message: "const-expr nested more than 2,000 levels deep",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "nesting limit of const evaluation exceeded here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "split the expression into several consts",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4073,6 +4097,31 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0911",
+        severity: Severity::Error,
+        area: "generics",
+        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested more than 256 levels deep; at the call, in a const-expr too",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{type}` has no layout for `size_of` / `align_of`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no size or alignment for this type" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "ask for the size of a sized type nested at most 256 levels deep",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E1001",
         severity: Severity::Error,
         area: "driver",
@@ -4099,7 +4148,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1002",
         severity: Severity::Error,
         area: "driver",
-        rule: "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, or unreadable manifest; located in `stave.toml`",
+        rule: "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, or unreadable manifest; located in `stave.toml`",
         retired: false,
         located: true,
         holes: &[
@@ -4140,6 +4189,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use a name that is one path component: not empty, `.`, or `..`, without `/`, `\\`, or NUL, and not starting with `-`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "builtin-dependency",
+                message: "dependency `{key}`: its `path` is a built-in package",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "built-in package directory" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove dependency `{key}`: `std` is imported without one, and the other built-in packages are not for user code",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

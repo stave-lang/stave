@@ -219,6 +219,9 @@ pub struct CallGraph {
     /// Instances were left out: an instantiation chain too deep (E0902 reported, or a chain only
     /// fn values or implied calls make), or too many instances. The graph is then incomplete.
     pub truncated: bool,
+    /// Where the first instance was left out: the requesting node's span and the instance's
+    /// generic (`None` for drop glue).
+    pub truncated_at: Option<(Span, Option<DeclId>)>,
     /// Every call site with each node it reaches: (calling fn or closure node, call token, callee
     /// node), sorted. The token is the one typeck keys the call by (a call's `(`, a method's
     /// name, an operator, the `for` token, an f-string); a fn-value call reaches the values that
@@ -1006,6 +1009,7 @@ struct Walk<'a> {
     scope_spawn: Option<DeclId>,
     flow: Flow,
     truncated: bool,
+    truncated_at: Option<(Span, Option<DeclId>)>,
 }
 
 impl<'a> Walk<'a> {
@@ -1024,6 +1028,14 @@ impl<'a> Walk<'a> {
             from = b.from;
         }
         n
+    }
+
+    fn truncate(&mut self, from: u32, fallback: Span, what: Option<DeclId>) {
+        self.truncated = true;
+        if self.truncated_at.is_none() {
+            let span = self.nodes.get(from as usize).map_or(fallback, |n| n.span);
+            self.truncated_at = Some((span, what));
+        }
     }
 
     fn node_for(&mut self, key: InstKey, from: u32) -> Option<u32> {
@@ -1047,7 +1059,7 @@ impl<'a> Walk<'a> {
         if self.nodes.len() >= NODE_BUDGET
             || (!key.args.is_empty() && self.chain_count(from, key.decl) >= CHAIN_LIMIT)
         {
-            self.truncated = true;
+            self.truncate(from, d.name_span, Some(key.decl));
             return None;
         }
         let body = self.body_index(key.decl);
@@ -1089,7 +1101,7 @@ impl<'a> Walk<'a> {
             return Some(g);
         }
         if self.nodes.len() >= NODE_BUDGET {
-            self.truncated = true;
+            self.truncate(from, site.span(self.prog), None);
             return None;
         }
         let id = self.nodes.len() as u32;
@@ -1772,6 +1784,7 @@ pub(crate) fn build(
         scope_spawn: crate::mono::item_at(prog, "runtime.thread", "scope_spawn"),
         flow: Flow::default(),
         truncated: false,
+        truncated_at: None,
     };
     for (i, b) in bodies.iter().enumerate() {
         if evs[i].is_some() && sigs.fn_sig(b.decl).is_some_and(|s| s.generics.is_empty()) {
@@ -1919,6 +1932,7 @@ fn finish(w: Walk<'_>) -> CallGraph {
         scc_drop: Vec::new(),
         local_types: w.cx.local,
         truncated: w.truncated,
+        truncated_at: w.truncated_at,
         calls,
     };
     g.scc_drop = (0..g.scc_count() as u32)

@@ -529,13 +529,17 @@ impl Ck<'_> {
     }
 
     /// Whether a `&mut` is reachable in type `t` (through references, elements, fields, and type
-    /// arguments; a recursive type is visited once).
+    /// arguments; a recursive type is visited once). Past 4096 distinct types the answer is yes:
+    /// a `&mut` not found is not proven absent.
     fn has_mut_ref(&mut self, t: TypeId) -> bool {
         let mut seen: FxHashSet<TypeId> = FxHashSet::default();
         let mut work = vec![t];
         while let Some(t) = work.pop() {
-            if !seen.insert(t) || seen.len() > 4096 {
+            if !seen.insert(t) {
                 continue;
+            }
+            if seen.len() > 4096 {
+                return true;
             }
             match self.tys.kind(t).clone() {
                 TypeKind::Ref { mutable: true, .. } => return true,
