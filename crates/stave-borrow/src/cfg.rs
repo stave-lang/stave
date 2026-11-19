@@ -116,6 +116,10 @@ pub struct Store {
     pub target: u32,
     pub source: u32,
     pub copy: bool,
+    /// At a call: whether the target argument points to a ref-like type at this instance. If
+    /// not, nothing is stored into what it points to, but the callee, checked with the type as
+    /// a view, may still have stored through its other sources.
+    pub into_view: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -133,8 +137,8 @@ pub enum Rvalue {
         args: Vec<Operand>,
         flows: Flows,
         /// What the callee may store through its arguments: the entries of its parameters'
-        /// `from` clauses whose target argument points to a ref-like type and whose source
-        /// argument is ref-like (a call through a fn value, a built-in, an operator: none).
+        /// `from` clauses whose source argument is ref-like (a call through a fn value, a
+        /// built-in, an operator: none).
         stores: Vec<Store>,
         /// The token typeck keys the call by (the call graph's call token): a call's `(`, a
         /// method's name, a user operator, the `for` token of a `next` call.
@@ -2354,8 +2358,8 @@ impl<'a, 'b> Builder<'a, 'b> {
                 Some((inner, _)) => self.tys.ref_like(inner),
                 None => false,
             };
-            if into_view && self.tys.ref_like(s.place.ty) {
-                out.push(Store { target, source, copy: o.copy });
+            if self.tys.ref_like(s.place.ty) {
+                out.push(Store { target, source, copy: o.copy, into_view });
             }
         }
         out

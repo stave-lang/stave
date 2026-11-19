@@ -441,20 +441,9 @@ impl Cx<'_, '_> {
                 }
                 // what the callee may store through its `&mut` arguments, per target argument
                 if let Rvalue::Call { args, stores, .. } = rv {
-                    let mut i = 0;
-                    while i < stores.len() {
-                        let target = stores[i].target;
-                        let mut ptr = None;
-                        let mut val = self.flow.empty();
-                        while i < stores.len() && stores[i].target == target {
-                            if let Some((p, v)) = self.flow.store_sets(st, args, &stores[i]) {
-                                val.union_with(&v);
-                                ptr = Some(p);
-                            }
-                            i += 1;
-                        }
-                        let (Some(ptr), Some(arg)) = (ptr, args.get(target as usize)) else { continue };
-                        if let Err(m) = self.flow.store_fits(st, &ptr, &val, None, true) {
+                    for (target, into_view, ptr, val) in self.flow.call_stores(st, args, stores) {
+                        let Some(arg) = args.get(target as usize) else { continue };
+                        if let Err(m) = self.flow.store_fits(st, &ptr, &val, None, Some(into_view)) {
                             // a pointer held in a named local is written through; a temporary is
                             // named by its expression
                             let mut place = arg.place.clone();
@@ -481,7 +470,7 @@ impl Cx<'_, '_> {
                         let ptr = ptr.unwrap_or_else(|| self.flow.empty());
                         let direct =
                             if dest.derefs() == 1 { body.locals[dest.local as usize].param } else { None };
-                        let fit = self.flow.store_fits(st, &ptr, &val, direct, false);
+                        let fit = self.flow.store_fits(st, &ptr, &val, direct, None);
                         fit.err().map(|m| Unfit::of(m, val.is_subset(&target)))
                     } else {
                         let mut t = self.flow.empty();

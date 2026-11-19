@@ -192,7 +192,12 @@ fn check_body(
     let declared: Vec<cfg::Store> = sig
         .param_origins
         .iter()
-        .map(|o| cfg::Store { target: u32::from(o.target), source: u32::from(o.source), copy: o.copy })
+        .map(|o| cfg::Store {
+            target: u32::from(o.target),
+            source: u32::from(o.source),
+            copy: o.copy,
+            into_view: true,
+        })
         .collect();
     let t0 = Instant::now();
     let body = cfg::build_fn(icx, tb, &mut tys, tb.node, &sig.params, ret, declared);

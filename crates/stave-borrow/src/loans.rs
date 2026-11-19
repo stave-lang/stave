@@ -56,7 +56,9 @@
 //!   `Pc(i)` is in `P` only as the origins of the value pointed to;
 //! - any param `i`, whatever its type, when the clause of some `&mut` param `t` names `i` and
 //!   `S ⊆ decl(t)`: the caller's store through the argument of `t` has the argument of `i`
-//!   among its sources, so it grows every view that argument reaches, with at least `S`.
+//!   among its sources, so it grows every view that argument reaches, with at least `S`. The
+//!   caller does so also where the target of `t` holds no borrow at its instance (a generic
+//!   callee checked with a `T: view`): the store then has no pointer atoms, only its sources.
 //!
 //! In the param rules `S` is taken without its passive loans ([`Flow::store_fits`]): a `&`
 //! loan of a place reached last through a `&` (`&xs[a..b]`, `&other.f` with `xs`, `other` of
@@ -432,35 +434,61 @@ impl<'b> Flow<'b> {
         self.clause_param.iter().any(|t| self.decl[t].contains(pb) && held.is_subset(&self.decl[t]))
     }
 
-    /// The pointer and value origins of store `s` of a call with operands `args` (`None`: the
-    /// value has no origins).
-    pub fn store_sets(&self, st: &State, args: &[Operand], s: &Store) -> Option<(Bits, Bits)> {
-        let (t, q) = (args.get(s.target as usize)?, args.get(s.source as usize)?);
-        let mut val = self.op_origins(st, q);
-        if s.copy {
-            val = self.contents_of(st, &val);
+    /// The stores of a call with operands `args`, one per target argument whose clause carries
+    /// an origin: (target, whether it points to a ref-like type at this instance, the pointer's
+    /// origins, the value's origins: the union over the clause's entries). The value is one set
+    /// per target because the callee may store what any source borrows through any other
+    /// source it keeps. The pointer set is empty when the target points to no ref-like type.
+    pub fn call_stores(
+        &self,
+        st: &State,
+        args: &[Operand],
+        stores: &[Store],
+    ) -> Vec<(u32, bool, Bits, Bits)> {
+        let mut out: Vec<(u32, bool, Bits, Bits)> = Vec::new();
+        for s in stores {
+            let (Some(t), Some(q)) = (args.get(s.target as usize), args.get(s.source as usize)) else {
+                continue;
+            };
+            let mut val = self.op_origins(st, q);
+            if s.copy {
+                val = self.contents_of(st, &val);
+            }
+            if val.is_empty() {
+                continue;
+            }
+            match out.last_mut() {
+                Some(last) if last.0 == s.target => {
+                    last.3.union_with(&val);
+                }
+                _ => {
+                    let ptr = if s.into_view { self.op_origins(st, t) } else { self.empty() };
+                    out.push((s.target, s.into_view, ptr, val));
+                }
+            }
         }
-        if val.is_empty() {
-            return None;
-        }
-        Some((self.op_origins(st, t), val))
+        out
     }
 
     /// Whether a value with origins `val` may be stored through a pointer with origins `ptr`
     /// (module doc, **Stores**). `direct`: the param whose own dereference is the only one of
     /// the place an assignment writes. `call`: the store of a call, which also reaches what
-    /// its sources reach. The local objects are grown by [`Flow::apply`].
+    /// its sources reach; `Some(false)`: its target argument points to a type that holds no
+    /// borrow at this instance, so only what the sources reach can take the store. The local
+    /// objects are grown by [`Flow::apply`].
     pub fn store_fits(
         &self,
         st: &State,
         ptr: &Bits,
         val: &Bits,
         direct: Option<u32>,
-        call: bool,
+        call: Option<bool>,
     ) -> Result<(), Misfit> {
         if val.is_empty() {
             return Ok(());
         }
+        let into_view = call != Some(false);
+        let call = call.is_some();
         let body = self.body;
         let pointed = self.reach(st, ptr);
         // a callee may keep a pointer it is given as a source and store through it too
@@ -538,7 +566,7 @@ impl<'b> Flow<'b> {
         // a pointer none of whose origins names a view object (a raw dereference first, a result
         // `from` a shared anchor): nothing is grown for it, and nothing it points to is known to
         // hold the value's origins
-        let unplaced = !placed && (call || !held.is_subset(&allowed));
+        let unplaced = !placed && into_view && (call || !held.is_subset(&allowed));
         if unplaced {
             return Err(Misfit::Object);
         }
@@ -716,10 +744,8 @@ impl<'b> Flow<'b> {
                 let (s, ch) = self.rv_origins(st, rv, dest.ty);
                 changed |= ch;
                 if let Rvalue::Call { args, stores, .. } = rv {
-                    for x in stores {
-                        if let Some((ptr, val)) = self.store_sets(st, args, x) {
-                            changed |= self.grow(st, &ptr, &val, true);
-                        }
+                    for (_, _, ptr, val) in self.call_stores(st, args, stores) {
+                        changed |= self.grow(st, &ptr, &val, true);
                     }
                 }
                 for_each_op(rv, |o| {

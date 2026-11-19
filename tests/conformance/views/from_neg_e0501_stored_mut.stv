@@ -70,6 +70,43 @@ fn below_the_source() -> u32 {
     return *p.best; //~ ERROR E0501
 }
 
+// The same with the borrowed source named before the `&mut` one.
+fn put_both(l: &mut Link from x + q, x: &u32, q: &mut Pick) {
+    q.best = x;
+    l.to = q;
+}
+
+fn first_source() -> u32 {
+    let zero: u32 = 0;
+    let mut a = Pick.{ best: &zero, count: 0 };
+    let mut b = Pick.{ best: &zero, count: 0 };
+    let mut l = Link.{ to: &mut a };
+    {
+        let x: u32 = 7;
+        put_both(&mut l, &x, &mut b);
+    } //~ ERROR E0501
+    return *b.best;
+}
+
+// The target holds no borrow at this instance, yet its clause lets the fn store through `b`.
+struct Slot<T: view> { v: T, n: usize }
+
+fn side<T: view>(s: &mut Slot<T> from b + x, b: &mut Pick, x: &u32) {
+    b.best = x;
+    s.n = s.n + 1;
+}
+
+fn owned_instance() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let mut nums = Slot.{ v: 1u32, n: 0 };
+    {
+        let x: u32 = 7;
+        side(&mut nums, &mut p, &x);
+    } //~ ERROR E0501
+    return *p.best + nums.v;
+}
+
 fn main() -> i32 {
     return 0;
 }
