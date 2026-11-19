@@ -551,7 +551,8 @@ canonical checked IR: it is not dumped, not compared with a golden, and not give
 - **A borrow is a value of its own.** In the canonical IR `&x` is the `slot` value of `x`, and
   `&*r` is `r`: the same value names the reference and the place, so no table beside the
   instructions can tell a use of one from a use of the other. Here each borrow expression (`&p`,
-  `&mut p`, the implicit reborrows of M6, `&mut T` given as `&T`) ends in one more instruction:
+  `&mut p`, an auto-referenced receiver, the implicit reborrows of M6, `&mut T` given as `&T`)
+  ends in one more instruction:
   an identity cast for a thin reference; for a fat one the pointer and length taken apart and put
   together again.
 - **`Body::borrows`**, one row per such value: the value, and `&` or `&mut`. The interpreter
