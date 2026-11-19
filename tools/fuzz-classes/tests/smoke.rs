@@ -9,11 +9,7 @@ use std::process::Command;
 
 /// Findings of compiler bugs that are not fixed yet: kind, texts the saved program's head
 /// comment holds, the bug. An entry is removed with its fix.
-const KNOWN: &[(&str, &[&str], &str)] = &[(
-    "ice",
-    &["IR verifier", ": cast to t"],
-    "`v as T` with T the non-scalar type of v (struct, tuple, Option, fn type) passes the checker and fails the IR verifier",
-)];
+const KNOWN: &[(&str, &[&str], &str)] = &[];
 
 #[test]
 fn same_seed_same_text() {

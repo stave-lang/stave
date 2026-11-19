@@ -25,7 +25,7 @@
 //! reason in its head comment; `DIR/summary.txt` gets the table printed at the end,
 //! `DIR/programs.tsv` one line per program (class, seed, expected and actual verdict, finding,
 //! case labels). Exit 1 when
-//! a finding other than `precision` was made.
+//! a finding other than `precision` was made; precision notes are counted in the summary line.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -514,11 +514,12 @@ fn run(a: &Args) -> ExitCode {
     }
     let _ = writeln!(
         rep,
-        "{} programs in {secs:.1} s ({:.2}/s, {} jobs), {} accepted",
+        "{} programs in {secs:.1} s ({:.2}/s, {} jobs), {} accepted, {} precision notes",
         all.programs,
         all.programs as f64 / secs.max(1e-9),
         a.jobs,
-        all.accepted
+        all.accepted,
+        all.findings.get("precision").copied().unwrap_or(0)
     );
     print!("{rep}");
     let _ = std::fs::write(a.out.join("summary.txt"), &rep);

@@ -453,34 +453,7 @@ fn holder(class: Class, r: &mut Rng) -> Holder {
                 None,
             ),
         },
-        Class::RefCast => match r.below(8) {
-            5 => h(
-                "fn-cast",
-                vec![
-                    format!("let f0: fn() -> u32 = fn() -> u32 {{ return x +% {k}; }};"),
-                    s("let f: fn() -> u32 = f0 as fn() -> u32;"),
-                ],
-                "f()",
-                x,
-                None,
-            ),
-            6 => h(
-                "option-cast",
-                vec![
-                    s("let o0: Option<&u32> = Option.Some(&x);"),
-                    s("let o: Option<&u32> = o0 as Option<&u32>;"),
-                ],
-                "opt(o)",
-                x,
-                None,
-            ),
-            7 => h(
-                "tuple-cast",
-                vec![format!("let t: (&u32, u32) = (&x, {k}u32) as (&u32, u32);")],
-                "*t.0",
-                x,
-                None,
-            ),
+        Class::RefCast => match r.below(6) {
             0 => h(
                 "ref-cast",
                 vec![s("let r0: &u32 = &x;"), s("let r: &u32 = r0 as &u32;")],
@@ -499,13 +472,13 @@ fn holder(class: Class, r: &mut Rng) -> Holder {
                 Some((vec![s("let mut r: &u32 = &zero as &u32;")], vec![s("r = &w as &u32;")])),
             ),
             2 => h(
-                "view-cast",
-                vec![format!("let p0 = Pick.{{ best: &x, count: {k} }};"), s("let p: Pick = p0 as Pick;")],
+                "ref-cast-into-view",
+                vec![s("let r0: &u32 = &x;"), format!("let p = Pick.{{ best: r0 as &u32, count: {k} }};")],
                 "*p.best",
                 x,
                 Some((
                     vec![s("let mut p = Pick.{ best: &zero, count: 0 };")],
-                    vec![s("let p0 = Pick.{ best: &w, count: 1 };"), s("p = p0 as Pick;")],
+                    vec![s("let a: &u32 = &w;"), s("p.best = a as &u32;")],
                 )),
             ),
             3 => h(
@@ -515,6 +488,7 @@ fn holder(class: Class, r: &mut Rng) -> Holder {
                 x,
                 None,
             ),
+            4 => h("mut-cast-direct", vec![s("let m: &mut u32 = &mut x as &mut u32;")], "*m", x, None),
             _ => h(
                 "ref-cast-g",
                 vec![s("let r0: &u32 = &g.id;"), s("let r: &u32 = r0 as &u32;")],
@@ -870,8 +844,7 @@ fn framed(class: Class, r: &mut Rng, idx: usize, want_bad: bool) -> Case {
     head(&mut b, r.range(1, 50));
     let mut h = holder(class, r);
     let mut name = h.name.to_string();
-    // A closure calling a fn value made by a cast is a call cycle to the recursion rule (E1409).
-    if r.chance(200) && h.name != "fn-cast" {
+    if r.chance(200) {
         // a closure over the holder: it keeps every borrow the holder keeps
         h.setup.push(format!("let fw: fn() -> u32 = fn() -> u32 {{ return {}; }};", h.use_));
         h.use_ = s(if r.chance(500) { "fw()" } else { "apply(fw)" });
@@ -1095,6 +1068,23 @@ fn fixed(class: Class, r: &mut Rng, idx: usize, want_bad: bool) -> Option<Case> 
                 b.add("x");
                 ("closure-mut-then-read", String::new(), &[])
             }
+        }
+        Class::RefCast if r.chance(500) => {
+            // `as` to its own type exists for scalars, vectors, masks, references, raw pointers
+            if want_bad {
+                match r.below(5) {
+                    0 => b.line("let p = Pick.{ best: &x, count: 1 } as Pick;"),
+                    1 => b.line(&format!("let p: (u32, u32) = (seed, {k}u32) as (u32, u32);")),
+                    2 => b.line("let p: Option<&u32> = Option.Some(&x) as Option<&u32>;"),
+                    3 => b.line("let p = G.{ id: seed } as G;"),
+                    _ => b.line("let f0: fn(u32) -> u32 = next; let p = f0 as fn(u32) -> u32;"),
+                }
+            } else {
+                b.line(&format!("let n: u32 = (seed +% {k}) as u32;"));
+                b.line("let r: &u32 = &x as &u32;");
+                b.add("n +% *r");
+            }
+            ("identity-cast-kind", String::new(), &["E0204"])
         }
         Class::RefCast => {
             b.line("let m0: &mut u32 = &mut x;");
