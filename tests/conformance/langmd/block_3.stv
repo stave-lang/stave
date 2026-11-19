@@ -11,7 +11,7 @@ fn sum_base(xs: &[f32]) -> f32 {            // L = 8 in two f32x4: the bits of s
         b = b + f32x4.load(xs, i + 4);
         i = i + 8;
     }
-    let r = xs.len() - i;                   // 0..7 elements left
+    let r = xs.len() - i;
     let ma = mask32x4.first_n((r < 4).select(r, 4));
     let mb = mask32x4.first_n(r -| 4);
     a = a + ma.select(f32x4.load_masked(xs, i, ma), z);
@@ -35,7 +35,7 @@ fn add_wrap(a: &mut [i32], k: i32) {
     for v: &mut i32x4 in a {
         *v = *v +% kk;
     } tail masked (v, m) {
-        *v = *v +% kk;                       // only active lanes are written back
+        *v = *v +% kk;
     }
 }
 
