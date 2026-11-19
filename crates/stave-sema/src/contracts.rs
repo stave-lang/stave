@@ -27,6 +27,10 @@
 //! the fn (the check runs in the callee), and a clause precedes the body, so the edge of a callee
 //! called there is at the clause's site.
 //!
+//! **Borrows**: the borrow checker takes each clause as code of the fn at the points where the
+//! checks below run, so the rules above need not catch what it catches: an `old(e)` value whose
+//! borrow the body breaks, an `ensures` over a `&mut` param the body moved.
+//!
 //! **Checks** (lowering): the `requires` clauses at entry in order (on a `test fn` they never
 //! panic: with parameters they filter its inputs, [`crate::testgen`]; without, they are not
 //! evaluated), then the `old(e)` snapshots, then the `ensures` clauses in order at each return;
@@ -413,7 +417,7 @@ impl Ck<'_> {
         // Where a value is consumed by value other than by a call (whose params are checked
         // above): a `match` scrutinee, an `if` / `match` value, an aggregate element, a variant
         // payload. A non-Copy value there may be a place moved out of a param, `result`, or a
-        // reference (no borrow check runs on a clause), so it must be Copy or a shared reference.
+        // reference, and a clause moves nothing, so it must be Copy or a shared reference.
         for m in icx.ast.descendants(cl.node) {
             let consumed: Vec<u32> = match icx.kind(m) {
                 Some(NodeKind::MatchExpr) => icx.first_child(m).into_iter().chain([m]).collect(),

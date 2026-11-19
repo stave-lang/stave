@@ -1,0 +1,90 @@
+//~ STDOUT contract_borrow.stdout
+// Clauses that pass the borrow check at the points where they run: a `requires` before the body
+// moves or writes, an `old(e)` whose borrow the body leaves alone, an `ensures` over params the
+// body only lent, and `result` beside the param a shared result borrows from.
+import std.io;
+import std.vec;
+
+view struct Cur { at: &u32 }
+
+// The copied `&u32` borrows what the view held at entry, not the view the body writes.
+fn retarget(c: &mut Cur from x, x: &u32) ensures(*old(c.at) == 1 && *c.at == 2) {
+    c.at = x;
+}
+
+fn pass(v: vec.Vec<u32>) -> vec.Vec<u32> requires(v.len() > 0) ensures(result.len() > 0) {
+    return v;
+}
+
+fn head(v: &mut [u32]) -> &u32 from v ensures(*result == v[0]) {
+    return &v[0];
+}
+
+fn peek(p: &mut u32) -> u32 ensures(*old(&*p) == result) {
+    return *p;
+}
+
+struct Pair {
+    a: u32,
+    b: u32,
+}
+
+// The body writes a field the `old(..)` borrow does not cover.
+fn set_b(s: &mut Pair, x: u32) ensures(*old(&s.a) == s.a && s.b == x) {
+    s.b = x;
+}
+
+fn push_one(v: &mut vec.Vec<u32>) {
+    v.push(1);
+}
+
+// A `&mut` param passed on is lent, not moved.
+fn fill(v: &mut vec.Vec<u32>) ensures(v.len() == old(v.len()) + 2) {
+    push_one(v);
+    let q = &mut *v;
+    q.push(2);
+}
+
+// Each return runs its own copy of the clause.
+fn pick(o: &Option<u32>, d: u32) -> u32
+    ensures(match *o { Option.Some(x) => result == x, Option.None => result == d })
+{
+    match *o {
+        Option.Some(x) => { return x; }
+        Option.None => { }
+    }
+    return d;
+}
+
+fn first<T: Copy + Frozen>(xs: &[T]) -> Option<&T> from xs
+    requires(xs.len() < 100)
+    ensures(result.is_some() == (old(xs).len() > 0))
+{
+    if xs.len() == 0 {
+        return Option.None;
+    }
+    return Option.Some(&xs[0]);
+}
+
+fn main() -> i32 {
+    let one: u32 = 1;
+    let two: u32 = 2;
+    let mut c = Cur.{ at: &one };
+    retarget(&mut c, &two);
+    let mut v = vec.Vec::<u32>.new();
+    fill(&mut v);
+    let v = pass(v);
+    let n = v.len();
+    let mut xs: [u32; 3] = [5, 6, 7];
+    let h = *head(&mut xs);
+    let mut y: u32 = 9;
+    let p = peek(&mut y);
+    let mut s = Pair.{ a: 1, b: 2 };
+    set_b(&mut s, 4);
+    let b = s.b;
+    let k = pick(&Option.Some(3u32), 0) + pick(&Option.None, 8);
+    let f = *first::<u32>(&xs).unwrap();
+    let at = *c.at;
+    io.print(f"{at} {n} {h} {p} {b} {k} {f}\n");
+    return 0;
+}
