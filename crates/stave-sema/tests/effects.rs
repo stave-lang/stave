@@ -158,7 +158,8 @@ fn main() {}
     let m = sets(&p, &tc);
     is(&m, "main.push", &["alloc", "trap"]);
     // no checked IR here: `trap` only from call cycles and the runtime's panic fns
-    is(&m, "main.print", &["io"]);
+    // a write may wait on a pipe: `block` besides `io`
+    is(&m, "main.print", &["io", "block"]);
     is(&m, "main.locked", &["lock"]);
     assert!(m["main.once"].contains(Effects::LOCK), "{:?}", m["main.once"].names());
     // join starts a thread (alloc io trap) and waits for it

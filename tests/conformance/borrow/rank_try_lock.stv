@@ -1,0 +1,117 @@
+//~ CHECK-ONLY
+// `try_lock` takes no rank, but its guard is held like any other: a blocking acquisition of a
+// lower or an equal rank while it may be held is E1405 (in an `Option` local, a `match`
+// binding or temporary, a statement's temporary, a callee it is moved into, a guard returned by
+// a helper, inside a `Once` init), and a join of threads that take such a rank is E1406.
+import std.sync;
+import std.thread;
+
+static A: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0);
+
+fn take_a() -> u32 {
+    return A.with_lock(fn(v: &mut u32) -> u32 { return *v; });
+}
+
+fn in_option(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) {
+    let gb = b.try_lock();
+    let ga = a.lock(); //~ ERROR E1405
+}
+
+fn equal_rank(a: &sync.Mutex<u32, 1>, c: &sync.Mutex<u32, 1>) {
+    let gc = c.try_lock();
+    let ga = a.lock(); //~ ERROR E1405
+}
+
+fn match_bound(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) {
+    match b.try_lock() {
+        Option.Some(g) => {
+            let ga = a.lock(); //~ ERROR E1405
+        }
+        Option.None => {}
+    }
+}
+
+fn match_unbound(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) {
+    match b.try_lock() {
+        Option.Some(_) => {
+            let ga = a.lock(); //~ ERROR E1405
+        }
+        Option.None => {}
+    }
+}
+
+fn temporary(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) -> u32 {
+    return *b.try_lock().unwrap().get() + take_a(); //~ ERROR E1405
+}
+
+fn with_lock_under(b: &sync.Mutex<u32, 2>) -> u32 {
+    let gb = b.try_lock();
+    return A.with_lock(fn(v: &mut u32) -> u32 { return *v; }); //~ ERROR E1405
+}
+
+fn once_under(o: &sync.Once<u32, 1>, b: &sync.Mutex<u32, 2>) -> u32 {
+    let gb = b.try_lock();
+    return *o.get_or_init(fn() -> u32 { return 1u32; }); //~ ERROR E1405
+}
+
+fn consume(g: Option<sync.MutexGuard<u32, 2>>, a: &sync.Mutex<u32, 1>) {
+    let ga = a.lock(); //~ ERROR E1405
+}
+
+fn grab(b: &sync.Mutex<u32, 2>) -> Option<sync.MutexGuard<u32, 2>> from b {
+    return b.try_lock();
+}
+
+fn handed_on(a: &sync.Mutex<u32, 1>, b: &sync.Mutex<u32, 2>) {
+    consume(b.try_lock(), a);
+    let g = grab(b);
+    let ga = a.lock(); //~ ERROR E1405
+}
+
+fn in_init(o: &sync.Once<u32, 1>, hi: &sync.Mutex<u32, 5>, mid: &sync.Mutex<u32, 3>) -> u32 {
+    return *o.get_or_init(fn() -> u32 {
+        let g = hi.try_lock();
+        let h = mid.lock(); //~ ERROR E1405
+        return 2u32;
+    });
+}
+
+fn scoped(b: &sync.Mutex<u32, 2>) {
+    let g = b.try_lock();
+    scope {
+        spawn { let x = take_a(); }
+    } //~ ERROR E1406
+}
+
+fn joined(b: &sync.Mutex<u32, 2>) -> u32 {
+    let g = b.try_lock();
+    let (x, y) = thread.join(fn() -> u32 { return take_a(); }, fn() -> u32 { return 1u32; }); //~ ERROR E1406
+    return x + y;
+}
+
+fn par(b: &sync.Mutex<u32, 2>) {
+    let g = b.try_lock();
+    thread.par_for(0, 4, fn(i: usize) { let x = take_a(); }); //~ ERROR E1406
+}
+
+fn main() {
+    let a = sync.Mutex::<u32, 1>.new(0);
+    let b = sync.Mutex::<u32, 2>.new(0);
+    let c = sync.Mutex::<u32, 1>.new(0);
+    let hi = sync.Mutex::<u32, 5>.new(0);
+    let mid = sync.Mutex::<u32, 3>.new(0);
+    let o = sync.Once::<u32, 1>.new();
+    let p = sync.Once::<u32, 1>.new();
+    in_option(&a, &b);
+    equal_rank(&a, &c);
+    match_bound(&a, &b);
+    match_unbound(&a, &b);
+    let t = temporary(&a, &b);
+    let w = with_lock_under(&b);
+    let u = once_under(&o, &b);
+    handed_on(&a, &b);
+    let i = in_init(&p, &hi, &mid);
+    scoped(&b);
+    let j = joined(&b);
+    par(&b);
+}
