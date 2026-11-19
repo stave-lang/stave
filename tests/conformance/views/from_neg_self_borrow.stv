@@ -1,0 +1,92 @@
+//~ CHECK-ONLY
+// A view that comes to hold a borrow of another part of itself keeps that part borrowed while it
+// is used, whether the borrow is stored by a call, through a pointer, or directly; a borrow made
+// through a pointer to the view keeps the whole view borrowed.
+view struct Pick { best: &u32, count: usize }
+view struct Outer { n: u32, inner: Pick }
+view struct Sub { best: &u32, n: u32 }
+view struct Pair { a: Sub, b: Sub }
+view struct Cur { cur: &u32, n: u32 }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) {
+        self.best = x;
+    }
+}
+
+fn point(dst: &mut Sub from other, other: &Sub) {
+    dst.best = &other.n;
+}
+
+fn escapes(seed: &u32, v: u32) -> &u32 from seed {
+    let mut o = Outer.{ n: v, inner: Pick.{ best: seed, count: 0 } };
+    o.inner.take(&o.n);
+    return o.inner.best; //~ ERROR E0512
+}
+
+fn by_call(zero: &u32) -> u32 {
+    let mut o = Outer.{ n: 1, inner: Pick.{ best: zero, count: 0 } };
+    o.inner.take(&o.n);
+    o.n = 2; //~ ERROR E0501
+    return *o.inner.best;
+}
+
+fn by_pointer(zero: &u32) -> u32 {
+    let mut o = Outer.{ n: 1, inner: Pick.{ best: zero, count: 0 } };
+    let q = &mut o.inner;
+    q.best = &o.n;
+    o.n = 2; //~ ERROR E0501
+    return *o.inner.best;
+}
+
+fn direct(zero: &u32) -> u32 {
+    let mut o = Outer.{ n: 1, inner: Pick.{ best: zero, count: 0 } };
+    o.inner.best = &o.n;
+    o.n = 2; //~ ERROR E0501
+    return *o.inner.best;
+}
+
+fn other_field(zero: &u32) -> u32 {
+    let mut o = Pair.{ a: Sub.{ best: zero, n: 1 }, b: Sub.{ best: zero, n: 1 } };
+    point(&mut o.a, &o.b);
+    o.b.n = 2; //~ ERROR E0501
+    return *o.a.best;
+}
+
+fn earlier_borrow(zero: &u32) -> u32 {
+    let mut o = Pair.{ a: Sub.{ best: zero, n: 1 }, b: Sub.{ best: zero, n: 1 } };
+    let r = &o.b.n;
+    let mut p = Pick.{ best: zero, count: 0 };
+    p.take(r);
+    o.b.n = 2; //~ ERROR E0501
+    return *p.best;
+}
+
+fn tuple(zero: &u32) -> u32 {
+    let mut t: (u32, Pick) = (1, Pick.{ best: zero, count: 0 });
+    t.1.take(&t.0);
+    t.0 = 2; //~ ERROR E0501
+    return *t.1.best;
+}
+
+// Through a pointer to the view: the view then holds a `&mut` borrow of itself, and every
+// later use of it is rejected.
+fn through_pointer(zero: &u32) -> u32 {
+    let mut p = Cur.{ cur: zero, n: 1 };
+    {
+        let q = &mut p;
+        q.cur = &q.n;
+    }
+    p.n = 2; //~ ERROR E0501
+    return *p.cur; //~ ERROR E0501
+}
+
+fn through_pointer_call(zero: &u32) -> u32 {
+    let mut o = Outer.{ n: 1, inner: Pick.{ best: zero, count: 0 } };
+    {
+        let q = &mut o;
+        q.inner.take(&q.n);
+    }
+    o.n = 2; //~ ERROR E0501
+    return *o.inner.best; //~ ERROR E0501
+}
