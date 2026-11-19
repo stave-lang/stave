@@ -4,6 +4,10 @@
 // with a panic report is the program order). They take `&str`: an f-string argument is an
 // owned `string.String`, borrowed automatically and passed as `&str` through the String → str
 // deref rule (std/string.stv).
+//
+// Every read, write, and open here has the `block` effect besides `io`: a pipe or FIFO can make
+// it wait for another process, or for a thread of this one holding the other end, and no static
+// rule bounds that wait.
 
 import runtime.errtrace;
 import runtime.os;

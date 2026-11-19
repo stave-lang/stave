@@ -38,6 +38,10 @@ optimizer rules, planned diagnostics); they say so where they do.
   but nothing is inlined, hoisted out of loops, or vectorized.
 - The borrow checker's memory use grows quadratically with the number of borrows in one function.
 - Linux only. No C interop yet (`extern "C"` imports cannot be linked).
+- "Safe code cannot deadlock" covers ranked locks and thread joins only. Not covered: a file wait
+  (`std.io` read, write, open: the `block` effect) on a pipe or FIFO whose other end this process
+  holds, a loop that spins on `try_lock` or an atomic until another thread acts (livelock), and a
+  panic report stuck on a full stderr pipe. The table is in [std/README.md](std/README.md).
 
 ## Roadmap
 

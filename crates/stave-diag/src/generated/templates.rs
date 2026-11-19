@@ -1410,7 +1410,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["lock", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "name", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] },
             Hole { name: "part", kind: HoleKind::Type, choices: &[] },
             Hole { name: "path", kind: HoleKind::Place, choices: &[] },
             Hole { name: "reason", kind: HoleKind::TextLiteral, choices: &["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound", "nested deeper than the limit of the `Frozen` check"] },
@@ -5064,7 +5064,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
         ],
         shapes: &[
             Shape {
@@ -5141,7 +5141,7 @@ pub(super) static ENTRIES: &[Entry] = &[
             Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "from", kind: HoleKind::Type, choices: &[] },
-            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
+            Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
             Hole { name: "to", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[

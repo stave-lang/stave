@@ -21,7 +21,7 @@
 
 const DIAG_COUNT: usize = 163;
 const HOLE_COUNT: usize = 252;
-const CHOICE_COUNT: usize = 148;
+const CHOICE_COUNT: usize = 151;
 const SHAPE_COUNT: usize = 264;
 const LABEL_COUNT: usize = 353;
 const EDIT_COUNT: usize = 14;
@@ -2590,211 +2590,211 @@ const HOLE_CHOICE_FIRST: [u32; 253] = [
     13,  // E0211 fn
     13,  // E0211 name
     13,  // E0211 op
-    25,  // E0211 part
-    25,  // E0211 path
-    25,  // E0211 reason
-    29,  // E0211 type
-    29,  // E0211 value
-    29,  // E0213 type
-    29,  // E0214 inner
-    29,  // E0214 module
-    29,  // E0214 name
-    29,  // E0214 type
-    29,  // E0215 fn
-    29,  // E0216 fn
-    29,  // E0217 fn
-    29,  // E0218 fn
-    29,  // E0300 type
-    29,  // E0302 name
-    29,  // E0410 adt
-    29,  // E0410 field
-    29,  // E0410 type
-    29,  // E0411 container
-    29,  // E0411 type
-    29,  // E0412 type
-    29,  // E0413 name
-    29,  // E0413 type
-    29,  // E0414 generic
-    29,  // E0414 param
-    29,  // E0414 type
-    29,  // E0415 field
-    29,  // E0415 field_type
-    29,  // E0415 type
-    29,  // E0416 type
-    29,  // E0417 type
-    29,  // E0418 type
-    29,  // E0501 access
-    34,  // E0501 loan
-    36,  // E0501 loaned
-    36,  // E0501 place
-    36,  // E0502 place
-    36,  // E0503 place
-    36,  // E0504 place
-    36,  // E0510 origin
-    36,  // E0512 place
-    36,  // E0513 clause
-    36,  // E0513 param
-    36,  // E0513 place
-    36,  // E0514 param
-    36,  // E0515 param
-    36,  // E0520 param
-    36,  // E0520 type
-    36,  // E0521 param
-    36,  // E0521 type
-    36,  // E0601 type
-    36,  // E0602 operand
-    36,  // E0602 scalar
-    36,  // E0602 vector
-    36,  // E0603 left
-    36,  // E0603 right
-    36,  // E0604 op
-    39,  // E0604 type
-    39,  // E0605 mask
-    39,  // E0605 vector
-    39,  // E0605 width
-    39,  // E0606 align
-    39,  // E0606 type
-    39,  // E0607 type
-    39,  // E0608 index
-    39,  // E0608 lanes
-    39,  // E0609 concrete
-    39,  // E0609 spelled
-    39,  // E0700 op
-    39,  // E0700 target
-    47,  // E0700 type
-    47,  // E0701 class
-    49,  // E0701 op
-    49,  // E0701 type
-    49,  // E0702 bits
-    49,  // E0702 max
-    49,  // E0702 type
-    49,  // E0703 feature
-    49,  // E0703 type
-    49,  // E0704 callee
-    49,  // E0704 feature
-    49,  // E0705 expected
-    49,  // E0705 found
-    49,  // E0706 feature
-    49,  // E0707 from
-    49,  // E0707 to
-    49,  // E0708 name
-    49,  // E0709 what
-    52,  // E0710 type
-    52,  // E0711 type
-    52,  // E0712 type
-    52,  // E0713 type
-    52,  // E0714 type
-    52,  // E0715 name
-    52,  // E0715 type
-    52,  // E0716 generic
-    52,  // E0716 type
-    52,  // E0717 op
-    52,  // E0717 type
-    52,  // E0802 name
-    52,  // E0802 type
-    52,  // E0804 type
-    52,  // E0805 name
-    52,  // E0806 callee
-    55,  // E0807 name
-    55,  // E0809 name
-    55,  // E0810 trait
-    55,  // E0811 abi
-    55,  // E0812 name
-    55,  // E0813 type
-    55,  // E0901 name
-    55,  // E0901 param
-    55,  // E0902 generic
-    55,  // E0903 trait
-    55,  // E0903 type
-    55,  // E0904 name
-    55,  // E0904 what
-    58,  // E0905 name
-    58,  // E0905 signature
-    58,  // E0906 name
-    58,  // E0906 trait
-    58,  // E0907 name
-    58,  // E0908 first
-    58,  // E0908 name
-    58,  // E0908 second
-    58,  // E0908 type
-    58,  // E0910 type
-    58,  // E0911 type
-    58,  // E1001 target
-    66,  // E1002 expected
-    71,  // E1002 key
-    71,  // E1002 root
-    73,  // E1003 reason
-    77,  // E1101 feature
-    83,  // E1101 kernel
-    83,  // E1102 name
-    83,  // E1103 memory
-    86,  // E1104 name
-    86,  // E1105 op
-    86,  // E1106 expected
-    86,  // E1106 found
-    86,  // E1107 how
-    90,  // E1108 name
-    90,  // E1108 type
-    90,  // E1109 limit
-    90,  // E1109 value
-    90,  // E1110 type
-    90,  // E1111 name
-    90,  // E1201 name
-    90,  // E1202 block
-    90,  // E1202 resident
-    90,  // E1203 key
-    90,  // E1204 amount
-    90,  // E1204 kernel
-    90,  // E1205 name
-    90,  // E1206 type
-    90,  // E1301 available
-    90,  // E1301 needed
-    90,  // E1302 major
-    90,  // E1302 minor
-    90,  // E1302 reason
-    94,  // E1303 target
-    97,  // E1401 at
-    97,  // E1401 effect
-    104, // E1401 fn
-    104, // E1401 op
-    117, // E1402 cycle
-    117, // E1402 name
-    117, // E1403 at
-    117, // E1403 effect
-    124, // E1403 fn
-    124, // E1403 from
-    124, // E1403 op
-    137, // E1403 to
-    137, // E1404 name
-    137, // E1405 fn
-    137, // E1405 held
-    137, // E1405 held_rank
-    137, // E1405 lock
-    137, // E1405 rank
-    137, // E1406 fn
-    137, // E1406 held
-    137, // E1406 held_rank
-    137, // E1406 lock
-    137, // E1406 rank
-    137, // E1407 limit
-    137, // E1407 part
-    137, // E1407 path
-    137, // E1407 reason
-    145, // E1407 type
-    145, // E1408 trait
-    145, // E1408 type
-    145, // E1409 cycle
-    145, // E1409 name
-    145, // E1410 limit
-    145, // E1410 part
-    145, // E1410 path
-    145, // E1410 reason
-    148, // E1410 type
-    148, // E1411 name
-    148, // end
+    26,  // E0211 part
+    26,  // E0211 path
+    26,  // E0211 reason
+    30,  // E0211 type
+    30,  // E0211 value
+    30,  // E0213 type
+    30,  // E0214 inner
+    30,  // E0214 module
+    30,  // E0214 name
+    30,  // E0214 type
+    30,  // E0215 fn
+    30,  // E0216 fn
+    30,  // E0217 fn
+    30,  // E0218 fn
+    30,  // E0300 type
+    30,  // E0302 name
+    30,  // E0410 adt
+    30,  // E0410 field
+    30,  // E0410 type
+    30,  // E0411 container
+    30,  // E0411 type
+    30,  // E0412 type
+    30,  // E0413 name
+    30,  // E0413 type
+    30,  // E0414 generic
+    30,  // E0414 param
+    30,  // E0414 type
+    30,  // E0415 field
+    30,  // E0415 field_type
+    30,  // E0415 type
+    30,  // E0416 type
+    30,  // E0417 type
+    30,  // E0418 type
+    30,  // E0501 access
+    35,  // E0501 loan
+    37,  // E0501 loaned
+    37,  // E0501 place
+    37,  // E0502 place
+    37,  // E0503 place
+    37,  // E0504 place
+    37,  // E0510 origin
+    37,  // E0512 place
+    37,  // E0513 clause
+    37,  // E0513 param
+    37,  // E0513 place
+    37,  // E0514 param
+    37,  // E0515 param
+    37,  // E0520 param
+    37,  // E0520 type
+    37,  // E0521 param
+    37,  // E0521 type
+    37,  // E0601 type
+    37,  // E0602 operand
+    37,  // E0602 scalar
+    37,  // E0602 vector
+    37,  // E0603 left
+    37,  // E0603 right
+    37,  // E0604 op
+    40,  // E0604 type
+    40,  // E0605 mask
+    40,  // E0605 vector
+    40,  // E0605 width
+    40,  // E0606 align
+    40,  // E0606 type
+    40,  // E0607 type
+    40,  // E0608 index
+    40,  // E0608 lanes
+    40,  // E0609 concrete
+    40,  // E0609 spelled
+    40,  // E0700 op
+    40,  // E0700 target
+    48,  // E0700 type
+    48,  // E0701 class
+    50,  // E0701 op
+    50,  // E0701 type
+    50,  // E0702 bits
+    50,  // E0702 max
+    50,  // E0702 type
+    50,  // E0703 feature
+    50,  // E0703 type
+    50,  // E0704 callee
+    50,  // E0704 feature
+    50,  // E0705 expected
+    50,  // E0705 found
+    50,  // E0706 feature
+    50,  // E0707 from
+    50,  // E0707 to
+    50,  // E0708 name
+    50,  // E0709 what
+    53,  // E0710 type
+    53,  // E0711 type
+    53,  // E0712 type
+    53,  // E0713 type
+    53,  // E0714 type
+    53,  // E0715 name
+    53,  // E0715 type
+    53,  // E0716 generic
+    53,  // E0716 type
+    53,  // E0717 op
+    53,  // E0717 type
+    53,  // E0802 name
+    53,  // E0802 type
+    53,  // E0804 type
+    53,  // E0805 name
+    53,  // E0806 callee
+    56,  // E0807 name
+    56,  // E0809 name
+    56,  // E0810 trait
+    56,  // E0811 abi
+    56,  // E0812 name
+    56,  // E0813 type
+    56,  // E0901 name
+    56,  // E0901 param
+    56,  // E0902 generic
+    56,  // E0903 trait
+    56,  // E0903 type
+    56,  // E0904 name
+    56,  // E0904 what
+    59,  // E0905 name
+    59,  // E0905 signature
+    59,  // E0906 name
+    59,  // E0906 trait
+    59,  // E0907 name
+    59,  // E0908 first
+    59,  // E0908 name
+    59,  // E0908 second
+    59,  // E0908 type
+    59,  // E0910 type
+    59,  // E0911 type
+    59,  // E1001 target
+    67,  // E1002 expected
+    72,  // E1002 key
+    72,  // E1002 root
+    74,  // E1003 reason
+    78,  // E1101 feature
+    84,  // E1101 kernel
+    84,  // E1102 name
+    84,  // E1103 memory
+    87,  // E1104 name
+    87,  // E1105 op
+    87,  // E1106 expected
+    87,  // E1106 found
+    87,  // E1107 how
+    91,  // E1108 name
+    91,  // E1108 type
+    91,  // E1109 limit
+    91,  // E1109 value
+    91,  // E1110 type
+    91,  // E1111 name
+    91,  // E1201 name
+    91,  // E1202 block
+    91,  // E1202 resident
+    91,  // E1203 key
+    91,  // E1204 amount
+    91,  // E1204 kernel
+    91,  // E1205 name
+    91,  // E1206 type
+    91,  // E1301 available
+    91,  // E1301 needed
+    91,  // E1302 major
+    91,  // E1302 minor
+    91,  // E1302 reason
+    95,  // E1303 target
+    98,  // E1401 at
+    98,  // E1401 effect
+    105, // E1401 fn
+    105, // E1401 op
+    119, // E1402 cycle
+    119, // E1402 name
+    119, // E1403 at
+    119, // E1403 effect
+    126, // E1403 fn
+    126, // E1403 from
+    126, // E1403 op
+    140, // E1403 to
+    140, // E1404 name
+    140, // E1405 fn
+    140, // E1405 held
+    140, // E1405 held_rank
+    140, // E1405 lock
+    140, // E1405 rank
+    140, // E1406 fn
+    140, // E1406 held
+    140, // E1406 held_rank
+    140, // E1406 lock
+    140, // E1406 rank
+    140, // E1407 limit
+    140, // E1407 part
+    140, // E1407 path
+    140, // E1407 reason
+    148, // E1407 type
+    148, // E1408 trait
+    148, // E1408 type
+    148, // E1409 cycle
+    148, // E1409 name
+    148, // E1410 limit
+    148, // E1410 part
+    148, // E1410 path
+    148, // E1410 reason
+    151, // E1410 type
+    151, // E1411 name
+    151, // end
 ];
 
-const CHOICE_TEXT: [u8; 2188] = [
+const CHOICE_TEXT: [u8; 2275] = [
     // 0 E0003 what: "string"
     115, 116, 114, 105, 110, 103,
     // 1 E0003 what: "f-string"
@@ -2843,324 +2843,333 @@ const CHOICE_TEXT: [u8; 2188] = [
     // 21 E0211 op: "waits for other threads"
     119, 97, 105, 116, 115, 32, 102, 111, 114, 32, 111, 116, 104, 101, 114, 32,
     116, 104, 114, 101, 97, 100, 115,
-    // 22 E0211 op: "starts a thread"
+    // 22 E0211 op: "may wait on a file descriptor"
+    109, 97, 121, 32, 119, 97, 105, 116, 32, 111, 110, 32, 97, 32, 102, 105,
+    108, 101, 32, 100, 101, 115, 99, 114, 105, 112, 116, 111, 114,
+    // 23 E0211 op: "starts a thread"
     115, 116, 97, 114, 116, 115, 32, 97, 32, 116, 104, 114, 101, 97, 100,
-    // 23 E0211 op: "is an `extern` fn, which has every effect its `without` does not list"
+    // 24 E0211 op: "is an `extern` fn, which has every effect its `without` does not list"
     105, 115, 32, 97, 110, 32, 96, 101, 120, 116, 101, 114, 110, 96, 32, 102,
     110, 44, 32, 119, 104, 105, 99, 104, 32, 104, 97, 115, 32, 101, 118, 101,
     114, 121, 32, 101, 102, 102, 101, 99, 116, 32, 105, 116, 115, 32, 96, 119,
     105, 116, 104, 111, 117, 116, 96, 32, 100, 111, 101, 115, 32, 110, 111, 116,
     32, 108, 105, 115, 116,
-    // 24 E0211 op: "runs code the call graph does not show"
+    // 25 E0211 op: "runs code the call graph does not show"
     114, 117, 110, 115, 32, 99, 111, 100, 101, 32, 116, 104, 101, 32, 99, 97,
     108, 108, 32, 103, 114, 97, 112, 104, 32, 100, 111, 101, 115, 32, 110, 111,
     116, 32, 115, 104, 111, 119,
-    // 25 E0211 reason: "`UnsafeCell` (interior mutability)"
+    // 26 E0211 reason: "`UnsafeCell` (interior mutability)"
     96, 85, 110, 115, 97, 102, 101, 67, 101, 108, 108, 96, 32, 40, 105, 110,
     116, 101, 114, 105, 111, 114, 32, 109, 117, 116, 97, 98, 105, 108, 105, 116,
     121, 41,
-    // 26 E0211 reason: "a fn value (its captures are not in its type)"
+    // 27 E0211 reason: "a fn value (its captures are not in its type)"
     97, 32, 102, 110, 32, 118, 97, 108, 117, 101, 32, 40, 105, 116, 115, 32,
     99, 97, 112, 116, 117, 114, 101, 115, 32, 97, 114, 101, 32, 110, 111, 116,
     32, 105, 110, 32, 105, 116, 115, 32, 116, 121, 112, 101, 41,
-    // 27 E0211 reason: "a generic parameter without a `Frozen` bound"
+    // 28 E0211 reason: "a generic parameter without a `Frozen` bound"
     97, 32, 103, 101, 110, 101, 114, 105, 99, 32, 112, 97, 114, 97, 109, 101,
     116, 101, 114, 32, 119, 105, 116, 104, 111, 117, 116, 32, 97, 32, 96, 70,
     114, 111, 122, 101, 110, 96, 32, 98, 111, 117, 110, 100,
-    // 28 E0211 reason: "nested deeper than the limit of the `Frozen` check"
+    // 29 E0211 reason: "nested deeper than the limit of the `Frozen` check"
     110, 101, 115, 116, 101, 100, 32, 100, 101, 101, 112, 101, 114, 32, 116, 104,
     97, 110, 32, 116, 104, 101, 32, 108, 105, 109, 105, 116, 32, 111, 102, 32,
     116, 104, 101, 32, 96, 70, 114, 111, 122, 101, 110, 96, 32, 99, 104, 101,
     99, 107,
-    // 29 E0501 access: "borrow mutably"
+    // 30 E0501 access: "borrow mutably"
     98, 111, 114, 114, 111, 119, 32, 109, 117, 116, 97, 98, 108, 121,
-    // 30 E0501 access: "borrow"
+    // 31 E0501 access: "borrow"
     98, 111, 114, 114, 111, 119,
-    // 31 E0501 access: "move"
+    // 32 E0501 access: "move"
     109, 111, 118, 101,
-    // 32 E0501 access: "assign to"
+    // 33 E0501 access: "assign to"
     97, 115, 115, 105, 103, 110, 32, 116, 111,
-    // 33 E0501 access: "drop"
+    // 34 E0501 access: "drop"
     100, 114, 111, 112,
-    // 34 E0501 loan: "`&mut`"
+    // 35 E0501 loan: "`&mut`"
     96, 38, 109, 117, 116, 96,
-    // 35 E0501 loan: "`&`"
+    // 36 E0501 loan: "`&`"
     96, 38, 96,
-    // 36 E0604 op: "+"
+    // 37 E0604 op: "+"
     43,
-    // 37 E0604 op: "-"
+    // 38 E0604 op: "-"
     45,
-    // 38 E0604 op: "*"
+    // 39 E0604 op: "*"
     42,
-    // 39 E0700 target: "x86_64-linux"
+    // 40 E0700 target: "x86_64-linux"
     120, 56, 54, 95, 54, 52, 45, 108, 105, 110, 117, 120,
-    // 40 E0700 target: "x86_64-linux-v2"
+    // 41 E0700 target: "x86_64-linux-v2"
     120, 56, 54, 95, 54, 52, 45, 108, 105, 110, 117, 120, 45, 118, 50,
-    // 41 E0700 target: "x86_64-linux-v3"
+    // 42 E0700 target: "x86_64-linux-v3"
     120, 56, 54, 95, 54, 52, 45, 108, 105, 110, 117, 120, 45, 118, 51,
-    // 42 E0700 target: "x86_64-linux-v4"
+    // 43 E0700 target: "x86_64-linux-v4"
     120, 56, 54, 95, 54, 52, 45, 108, 105, 110, 117, 120, 45, 118, 52,
-    // 43 E0700 target: "aarch64-linux"
+    // 44 E0700 target: "aarch64-linux"
     97, 97, 114, 99, 104, 54, 52, 45, 108, 105, 110, 117, 120,
-    // 44 E0700 target: "aarch64-linux+sve"
+    // 45 E0700 target: "aarch64-linux+sve"
     97, 97, 114, 99, 104, 54, 52, 45, 108, 105, 110, 117, 120, 43, 115, 118,
     101,
-    // 45 E0700 target: "aarch64-linux+sve2"
+    // 46 E0700 target: "aarch64-linux+sve2"
     97, 97, 114, 99, 104, 54, 52, 45, 108, 105, 110, 117, 120, 43, 115, 118,
     101, 50,
-    // 46 E0700 target: "gpu-sm86"
+    // 47 E0700 target: "gpu-sm86"
     103, 112, 117, 45, 115, 109, 56, 54,
-    // 47 E0701 class: "M"
+    // 48 E0701 class: "M"
     77,
-    // 48 E0701 class: "U"
+    // 49 E0701 class: "U"
     85,
-    // 49 E0709 what: "`main`"
+    // 50 E0709 what: "`main`"
     96, 109, 97, 105, 110, 96,
-    // 50 E0709 what: "a trait method"
+    // 51 E0709 what: "a trait method"
     97, 32, 116, 114, 97, 105, 116, 32, 109, 101, 116, 104, 111, 100,
-    // 51 E0709 what: "an `extern` export"
+    // 52 E0709 what: "an `extern` export"
     97, 110, 32, 96, 101, 120, 116, 101, 114, 110, 96, 32, 101, 120, 112, 111,
     114, 116,
-    // 52 E0806 callee: "`thread.join`"
+    // 53 E0806 callee: "`thread.join`"
     96, 116, 104, 114, 101, 97, 100, 46, 106, 111, 105, 110, 96,
-    // 53 E0806 callee: "`thread.par_for`"
+    // 54 E0806 callee: "`thread.par_for`"
     96, 116, 104, 114, 101, 97, 100, 46, 112, 97, 114, 95, 102, 111, 114, 96,
-    // 54 E0806 callee: "`thread.par_for_mut`"
+    // 55 E0806 callee: "`thread.par_for_mut`"
     96, 116, 104, 114, 101, 97, 100, 46, 112, 97, 114, 95, 102, 111, 114, 95,
     109, 117, 116, 96,
-    // 55 E0904 what: "a call"
+    // 56 E0904 what: "a call"
     97, 32, 99, 97, 108, 108,
-    // 56 E0904 what: "a loop"
+    // 57 E0904 what: "a loop"
     97, 32, 108, 111, 111, 112,
-    // 57 E0904 what: "a non-const item"
+    // 58 E0904 what: "a non-const item"
     97, 32, 110, 111, 110, 45, 99, 111, 110, 115, 116, 32, 105, 116, 101, 109,
-    // 58 E1001 target: "x86_64-linux"
+    // 59 E1001 target: "x86_64-linux"
     120, 56, 54, 95, 54, 52, 45, 108, 105, 110, 117, 120,
-    // 59 E1001 target: "x86_64-linux-v2"
+    // 60 E1001 target: "x86_64-linux-v2"
     120, 56, 54, 95, 54, 52, 45, 108, 105, 110, 117, 120, 45, 118, 50,
-    // 60 E1001 target: "x86_64-linux-v3"
+    // 61 E1001 target: "x86_64-linux-v3"
     120, 56, 54, 95, 54, 52, 45, 108, 105, 110, 117, 120, 45, 118, 51,
-    // 61 E1001 target: "x86_64-linux-v4"
+    // 62 E1001 target: "x86_64-linux-v4"
     120, 56, 54, 95, 54, 52, 45, 108, 105, 110, 117, 120, 45, 118, 52,
-    // 62 E1001 target: "aarch64-linux"
+    // 63 E1001 target: "aarch64-linux"
     97, 97, 114, 99, 104, 54, 52, 45, 108, 105, 110, 117, 120,
-    // 63 E1001 target: "aarch64-linux+sve"
+    // 64 E1001 target: "aarch64-linux+sve"
     97, 97, 114, 99, 104, 54, 52, 45, 108, 105, 110, 117, 120, 43, 115, 118,
     101,
-    // 64 E1001 target: "aarch64-linux+sve2"
+    // 65 E1001 target: "aarch64-linux+sve2"
     97, 97, 114, 99, 104, 54, 52, 45, 108, 105, 110, 117, 120, 43, 115, 118,
     101, 50,
-    // 65 E1001 target: "gpu-sm86"
+    // 66 E1001 target: "gpu-sm86"
     103, 112, 117, 45, 115, 109, 56, 54,
-    // 66 E1002 expected: "string"
+    // 67 E1002 expected: "string"
     115, 116, 114, 105, 110, 103,
-    // 67 E1002 expected: "integer"
+    // 68 E1002 expected: "integer"
     105, 110, 116, 101, 103, 101, 114,
-    // 68 E1002 expected: "boolean"
+    // 69 E1002 expected: "boolean"
     98, 111, 111, 108, 101, 97, 110,
-    // 69 E1002 expected: "array"
+    // 70 E1002 expected: "array"
     97, 114, 114, 97, 121,
-    // 70 E1002 expected: "table"
+    // 71 E1002 expected: "table"
     116, 97, 98, 108, 101,
-    // 71 E1002 root: "src/main.stv"
+    // 72 E1002 root: "src/main.stv"
     115, 114, 99, 47, 109, 97, 105, 110, 46, 115, 116, 118,
-    // 72 E1002 root: "src/lib.stv"
+    // 73 E1002 root: "src/lib.stv"
     115, 114, 99, 47, 108, 105, 98, 46, 115, 116, 118,
-    // 73 E1003 reason: "not found"
+    // 74 E1003 reason: "not found"
     110, 111, 116, 32, 102, 111, 117, 110, 100,
-    // 74 E1003 reason: "permission denied"
+    // 75 E1003 reason: "permission denied"
     112, 101, 114, 109, 105, 115, 115, 105, 111, 110, 32, 100, 101, 110, 105, 101,
     100,
-    // 75 E1003 reason: "is a directory"
+    // 76 E1003 reason: "is a directory"
     105, 115, 32, 97, 32, 100, 105, 114, 101, 99, 116, 111, 114, 121,
-    // 76 E1003 reason: "read error"
+    // 77 E1003 reason: "read error"
     114, 101, 97, 100, 32, 101, 114, 114, 111, 114,
-    // 77 E1101 feature: "heap allocation"
+    // 78 E1101 feature: "heap allocation"
     104, 101, 97, 112, 32, 97, 108, 108, 111, 99, 97, 116, 105, 111, 110,
-    // 78 E1101 feature: "I/O"
+    // 79 E1101 feature: "I/O"
     73, 47, 79,
-    // 79 E1101 feature: "threads"
+    // 80 E1101 feature: "threads"
     116, 104, 114, 101, 97, 100, 115,
-    // 80 E1101 feature: "an `extern` call"
+    // 81 E1101 feature: "an `extern` call"
     97, 110, 32, 96, 101, 120, 116, 101, 114, 110, 96, 32, 99, 97, 108, 108,
-    // 81 E1101 feature: "`dispatch`"
+    // 82 E1101 feature: "`dispatch`"
     96, 100, 105, 115, 112, 97, 116, 99, 104, 96,
-    // 82 E1101 feature: "an f-string"
+    // 83 E1101 feature: "an f-string"
     97, 110, 32, 102, 45, 115, 116, 114, 105, 110, 103,
-    // 83 E1103 memory: "`gpu.Out`"
+    // 84 E1103 memory: "`gpu.Out`"
     96, 103, 112, 117, 46, 79, 117, 116, 96,
-    // 84 E1103 memory: "`gpu.AtomicOut`"
+    // 85 E1103 memory: "`gpu.AtomicOut`"
     96, 103, 112, 117, 46, 65, 116, 111, 109, 105, 99, 79, 117, 116, 96,
-    // 85 E1103 memory: "`gpu.Shared`"
+    // 86 E1103 memory: "`gpu.Shared`"
     96, 103, 112, 117, 46, 83, 104, 97, 114, 101, 100, 96,
-    // 86 E1107 how: "copied"
+    // 87 E1107 how: "copied"
     99, 111, 112, 105, 101, 100,
-    // 87 E1107 how: "stored"
+    // 88 E1107 how: "stored"
     115, 116, 111, 114, 101, 100,
-    // 88 E1107 how: "returned"
+    // 89 E1107 how: "returned"
     114, 101, 116, 117, 114, 110, 101, 100,
-    // 89 E1107 how: "captured"
+    // 90 E1107 how: "captured"
     99, 97, 112, 116, 117, 114, 101, 100,
-    // 90 E1302 reason: "stage1 image missing"
+    // 91 E1302 reason: "stage1 image missing"
     115, 116, 97, 103, 101, 49, 32, 105, 109, 97, 103, 101, 32, 109, 105, 115,
     115, 105, 110, 103,
-    // 91 E1302 reason: "no NVIDIA driver"
+    // 92 E1302 reason: "no NVIDIA driver"
     110, 111, 32, 78, 86, 73, 68, 73, 65, 32, 100, 114, 105, 118, 101, 114,
-    // 92 E1302 reason: "no device"
+    // 93 E1302 reason: "no device"
     110, 111, 32, 100, 101, 118, 105, 99, 101,
-    // 93 E1302 reason: "daemon not reachable"
+    // 94 E1302 reason: "daemon not reachable"
     100, 97, 101, 109, 111, 110, 32, 110, 111, 116, 32, 114, 101, 97, 99, 104,
     97, 98, 108, 101,
-    // 94 E1303 target: "aarch64-linux"
+    // 95 E1303 target: "aarch64-linux"
     97, 97, 114, 99, 104, 54, 52, 45, 108, 105, 110, 117, 120,
-    // 95 E1303 target: "aarch64-linux+sve"
+    // 96 E1303 target: "aarch64-linux+sve"
     97, 97, 114, 99, 104, 54, 52, 45, 108, 105, 110, 117, 120, 43, 115, 118,
     101,
-    // 96 E1303 target: "aarch64-linux+sve2"
+    // 97 E1303 target: "aarch64-linux+sve2"
     97, 97, 114, 99, 104, 54, 52, 45, 108, 105, 110, 117, 120, 43, 115, 118,
     101, 50,
-    // 97 E1401 effect: "alloc"
+    // 98 E1401 effect: "alloc"
     97, 108, 108, 111, 99,
-    // 98 E1401 effect: "trap"
+    // 99 E1401 effect: "trap"
     116, 114, 97, 112,
-    // 99 E1401 effect: "recursive"
+    // 100 E1401 effect: "recursive"
     114, 101, 99, 117, 114, 115, 105, 118, 101,
-    // 100 E1401 effect: "lock"
+    // 101 E1401 effect: "lock"
     108, 111, 99, 107,
-    // 101 E1401 effect: "unsafe"
+    // 102 E1401 effect: "unsafe"
     117, 110, 115, 97, 102, 101,
-    // 102 E1401 effect: "io"
+    // 103 E1401 effect: "io"
     105, 111,
-    // 103 E1401 effect: "block"
+    // 104 E1401 effect: "block"
     98, 108, 111, 99, 107,
-    // 104 E1401 op: "allocates"
+    // 105 E1401 op: "allocates"
     97, 108, 108, 111, 99, 97, 116, 101, 115,
-    // 105 E1401 op: "frees memory"
+    // 106 E1401 op: "frees memory"
     102, 114, 101, 101, 115, 32, 109, 101, 109, 111, 114, 121,
-    // 106 E1401 op: "may run out of memory"
+    // 107 E1401 op: "may run out of memory"
     109, 97, 121, 32, 114, 117, 110, 32, 111, 117, 116, 32, 111, 102, 32, 109,
     101, 109, 111, 114, 121,
-    // 107 E1401 op: "may trap"
+    // 108 E1401 op: "may trap"
     109, 97, 121, 32, 116, 114, 97, 112,
-    // 108 E1401 op: "is recursive"
+    // 109 E1401 op: "is recursive"
     105, 115, 32, 114, 101, 99, 117, 114, 115, 105, 118, 101,
-    // 109 E1401 op: "takes a lock"
+    // 110 E1401 op: "takes a lock"
     116, 97, 107, 101, 115, 32, 97, 32, 108, 111, 99, 107,
-    // 110 E1401 op: "has an `unsafe` block"
+    // 111 E1401 op: "has an `unsafe` block"
     104, 97, 115, 32, 97, 110, 32, 96, 117, 110, 115, 97, 102, 101, 96, 32,
     98, 108, 111, 99, 107,
-    // 111 E1401 op: "makes a system call"
+    // 112 E1401 op: "makes a system call"
     109, 97, 107, 101, 115, 32, 97, 32, 115, 121, 115, 116, 101, 109, 32, 99,
     97, 108, 108,
-    // 112 E1401 op: "waits for other threads"
+    // 113 E1401 op: "waits for other threads"
     119, 97, 105, 116, 115, 32, 102, 111, 114, 32, 111, 116, 104, 101, 114, 32,
     116, 104, 114, 101, 97, 100, 115,
-    // 113 E1401 op: "starts a thread"
+    // 114 E1401 op: "may wait on a file descriptor"
+    109, 97, 121, 32, 119, 97, 105, 116, 32, 111, 110, 32, 97, 32, 102, 105,
+    108, 101, 32, 100, 101, 115, 99, 114, 105, 112, 116, 111, 114,
+    // 115 E1401 op: "starts a thread"
     115, 116, 97, 114, 116, 115, 32, 97, 32, 116, 104, 114, 101, 97, 100,
-    // 114 E1401 op: "is an `extern` fn, which has every effect its `without` does not list"
+    // 116 E1401 op: "is an `extern` fn, which has every effect its `without` does not list"
     105, 115, 32, 97, 110, 32, 96, 101, 120, 116, 101, 114, 110, 96, 32, 102,
     110, 44, 32, 119, 104, 105, 99, 104, 32, 104, 97, 115, 32, 101, 118, 101,
     114, 121, 32, 101, 102, 102, 101, 99, 116, 32, 105, 116, 115, 32, 96, 119,
     105, 116, 104, 111, 117, 116, 96, 32, 100, 111, 101, 115, 32, 110, 111, 116,
     32, 108, 105, 115, 116,
-    // 115 E1401 op: "runs code the call graph does not show"
+    // 117 E1401 op: "runs code the call graph does not show"
     114, 117, 110, 115, 32, 99, 111, 100, 101, 32, 116, 104, 101, 32, 99, 97,
     108, 108, 32, 103, 114, 97, 112, 104, 32, 100, 111, 101, 115, 32, 110, 111,
     116, 32, 115, 104, 111, 119,
-    // 116 E1401 op: "has a `requires` clause that the call does not prove"
+    // 118 E1401 op: "has a `requires` clause that the call does not prove"
     104, 97, 115, 32, 97, 32, 96, 114, 101, 113, 117, 105, 114, 101, 115, 96,
     32, 99, 108, 97, 117, 115, 101, 32, 116, 104, 97, 116, 32, 116, 104, 101,
     32, 99, 97, 108, 108, 32, 100, 111, 101, 115, 32, 110, 111, 116, 32, 112,
     114, 111, 118, 101,
-    // 117 E1403 effect: "alloc"
+    // 119 E1403 effect: "alloc"
     97, 108, 108, 111, 99,
-    // 118 E1403 effect: "trap"
+    // 120 E1403 effect: "trap"
     116, 114, 97, 112,
-    // 119 E1403 effect: "recursive"
+    // 121 E1403 effect: "recursive"
     114, 101, 99, 117, 114, 115, 105, 118, 101,
-    // 120 E1403 effect: "lock"
+    // 122 E1403 effect: "lock"
     108, 111, 99, 107,
-    // 121 E1403 effect: "unsafe"
+    // 123 E1403 effect: "unsafe"
     117, 110, 115, 97, 102, 101,
-    // 122 E1403 effect: "io"
+    // 124 E1403 effect: "io"
     105, 111,
-    // 123 E1403 effect: "block"
+    // 125 E1403 effect: "block"
     98, 108, 111, 99, 107,
-    // 124 E1403 op: "allocates"
+    // 126 E1403 op: "allocates"
     97, 108, 108, 111, 99, 97, 116, 101, 115,
-    // 125 E1403 op: "frees memory"
+    // 127 E1403 op: "frees memory"
     102, 114, 101, 101, 115, 32, 109, 101, 109, 111, 114, 121,
-    // 126 E1403 op: "may run out of memory"
+    // 128 E1403 op: "may run out of memory"
     109, 97, 121, 32, 114, 117, 110, 32, 111, 117, 116, 32, 111, 102, 32, 109,
     101, 109, 111, 114, 121,
-    // 127 E1403 op: "may trap"
+    // 129 E1403 op: "may trap"
     109, 97, 121, 32, 116, 114, 97, 112,
-    // 128 E1403 op: "is recursive"
+    // 130 E1403 op: "is recursive"
     105, 115, 32, 114, 101, 99, 117, 114, 115, 105, 118, 101,
-    // 129 E1403 op: "takes a lock"
+    // 131 E1403 op: "takes a lock"
     116, 97, 107, 101, 115, 32, 97, 32, 108, 111, 99, 107,
-    // 130 E1403 op: "has an `unsafe` block"
+    // 132 E1403 op: "has an `unsafe` block"
     104, 97, 115, 32, 97, 110, 32, 96, 117, 110, 115, 97, 102, 101, 96, 32,
     98, 108, 111, 99, 107,
-    // 131 E1403 op: "makes a system call"
+    // 133 E1403 op: "makes a system call"
     109, 97, 107, 101, 115, 32, 97, 32, 115, 121, 115, 116, 101, 109, 32, 99,
     97, 108, 108,
-    // 132 E1403 op: "waits for other threads"
+    // 134 E1403 op: "waits for other threads"
     119, 97, 105, 116, 115, 32, 102, 111, 114, 32, 111, 116, 104, 101, 114, 32,
     116, 104, 114, 101, 97, 100, 115,
-    // 133 E1403 op: "starts a thread"
+    // 135 E1403 op: "may wait on a file descriptor"
+    109, 97, 121, 32, 119, 97, 105, 116, 32, 111, 110, 32, 97, 32, 102, 105,
+    108, 101, 32, 100, 101, 115, 99, 114, 105, 112, 116, 111, 114,
+    // 136 E1403 op: "starts a thread"
     115, 116, 97, 114, 116, 115, 32, 97, 32, 116, 104, 114, 101, 97, 100,
-    // 134 E1403 op: "is an `extern` fn, which has every effect its `without` does not list"
+    // 137 E1403 op: "is an `extern` fn, which has every effect its `without` does not list"
     105, 115, 32, 97, 110, 32, 96, 101, 120, 116, 101, 114, 110, 96, 32, 102,
     110, 44, 32, 119, 104, 105, 99, 104, 32, 104, 97, 115, 32, 101, 118, 101,
     114, 121, 32, 101, 102, 102, 101, 99, 116, 32, 105, 116, 115, 32, 96, 119,
     105, 116, 104, 111, 117, 116, 96, 32, 100, 111, 101, 115, 32, 110, 111, 116,
     32, 108, 105, 115, 116,
-    // 135 E1403 op: "runs code the call graph does not show"
+    // 138 E1403 op: "runs code the call graph does not show"
     114, 117, 110, 115, 32, 99, 111, 100, 101, 32, 116, 104, 101, 32, 99, 97,
     108, 108, 32, 103, 114, 97, 112, 104, 32, 100, 111, 101, 115, 32, 110, 111,
     116, 32, 115, 104, 111, 119,
-    // 136 E1403 op: "has a `requires` clause that the call does not prove"
+    // 139 E1403 op: "has a `requires` clause that the call does not prove"
     104, 97, 115, 32, 97, 32, 96, 114, 101, 113, 117, 105, 114, 101, 115, 96,
     32, 99, 108, 97, 117, 115, 101, 32, 116, 104, 97, 116, 32, 116, 104, 101,
     32, 99, 97, 108, 108, 32, 100, 111, 101, 115, 32, 110, 111, 116, 32, 112,
     114, 111, 118, 101,
-    // 137 E1407 reason: "a reference"
+    // 140 E1407 reason: "a reference"
     97, 32, 114, 101, 102, 101, 114, 101, 110, 99, 101,
-    // 138 E1407 reason: "a raw pointer"
+    // 141 E1407 reason: "a raw pointer"
     97, 32, 114, 97, 119, 32, 112, 111, 105, 110, 116, 101, 114,
-    // 139 E1407 reason: "a fn value"
+    // 142 E1407 reason: "a fn value"
     97, 32, 102, 110, 32, 118, 97, 108, 117, 101,
-    // 140 E1407 reason: "a view type"
+    // 143 E1407 reason: "a view type"
     97, 32, 118, 105, 101, 119, 32, 116, 121, 112, 101,
-    // 141 E1407 reason: "`UnsafeCell` (interior mutability)"
+    // 144 E1407 reason: "`UnsafeCell` (interior mutability)"
     96, 85, 110, 115, 97, 102, 101, 67, 101, 108, 108, 96, 32, 40, 105, 110,
     116, 101, 114, 105, 111, 114, 32, 109, 117, 116, 97, 98, 105, 108, 105, 116,
     121, 41,
-    // 142 E1407 reason: "a type with `Drop`"
+    // 145 E1407 reason: "a type with `Drop`"
     97, 32, 116, 121, 112, 101, 32, 119, 105, 116, 104, 32, 96, 68, 114, 111,
     112, 96,
-    // 143 E1407 reason: "a generic parameter without a `Flat` bound"
+    // 146 E1407 reason: "a generic parameter without a `Flat` bound"
     97, 32, 103, 101, 110, 101, 114, 105, 99, 32, 112, 97, 114, 97, 109, 101,
     116, 101, 114, 32, 119, 105, 116, 104, 111, 117, 116, 32, 97, 32, 96, 70,
     108, 97, 116, 96, 32, 98, 111, 117, 110, 100,
-    // 144 E1407 reason: "unsized"
+    // 147 E1407 reason: "unsized"
     117, 110, 115, 105, 122, 101, 100,
-    // 145 E1410 reason: "`UnsafeCell` (interior mutability)"
+    // 148 E1410 reason: "`UnsafeCell` (interior mutability)"
     96, 85, 110, 115, 97, 102, 101, 67, 101, 108, 108, 96, 32, 40, 105, 110,
     116, 101, 114, 105, 111, 114, 32, 109, 117, 116, 97, 98, 105, 108, 105, 116,
     121, 41,
-    // 146 E1410 reason: "a fn value (its captures are not in its type)"
+    // 149 E1410 reason: "a fn value (its captures are not in its type)"
     97, 32, 102, 110, 32, 118, 97, 108, 117, 101, 32, 40, 105, 116, 115, 32,
     99, 97, 112, 116, 117, 114, 101, 115, 32, 97, 114, 101, 32, 110, 111, 116,
     32, 105, 110, 32, 105, 116, 115, 32, 116, 121, 112, 101, 41,
-    // 147 E1410 reason: "a generic parameter without a `Frozen` bound"
+    // 150 E1410 reason: "a generic parameter without a `Frozen` bound"
     97, 32, 103, 101, 110, 101, 114, 105, 99, 32, 112, 97, 114, 97, 109, 101,
     116, 101, 114, 32, 119, 105, 116, 104, 111, 117, 116, 32, 97, 32, 96, 70,
     114, 111, 122, 101, 110, 96, 32, 98, 111, 117, 110, 100,
 ];
 
-const CHOICE_TEXT_OFF: [u32; 149] = [
+const CHOICE_TEXT_OFF: [u32; 152] = [
     0,    // E0003 what
     6,    // E0003 what
     14,   // E0003 what
@@ -3184,132 +3193,135 @@ const CHOICE_TEXT_OFF: [u32; 149] = [
     156,  // E0211 op
     175,  // E0211 op
     198,  // E0211 op
-    213,  // E0211 op
-    282,  // E0211 op
-    320,  // E0211 reason
-    354,  // E0211 reason
-    399,  // E0211 reason
-    443,  // E0211 reason
-    493,  // E0501 access
-    507,  // E0501 access
-    513,  // E0501 access
-    517,  // E0501 access
-    526,  // E0501 access
-    530,  // E0501 loan
-    536,  // E0501 loan
-    539,  // E0604 op
-    540,  // E0604 op
-    541,  // E0604 op
-    542,  // E0700 target
-    554,  // E0700 target
-    569,  // E0700 target
-    584,  // E0700 target
-    599,  // E0700 target
-    612,  // E0700 target
-    629,  // E0700 target
-    647,  // E0700 target
-    655,  // E0701 class
-    656,  // E0701 class
-    657,  // E0709 what
-    663,  // E0709 what
-    677,  // E0709 what
-    695,  // E0806 callee
-    708,  // E0806 callee
+    227,  // E0211 op
+    242,  // E0211 op
+    311,  // E0211 op
+    349,  // E0211 reason
+    383,  // E0211 reason
+    428,  // E0211 reason
+    472,  // E0211 reason
+    522,  // E0501 access
+    536,  // E0501 access
+    542,  // E0501 access
+    546,  // E0501 access
+    555,  // E0501 access
+    559,  // E0501 loan
+    565,  // E0501 loan
+    568,  // E0604 op
+    569,  // E0604 op
+    570,  // E0604 op
+    571,  // E0700 target
+    583,  // E0700 target
+    598,  // E0700 target
+    613,  // E0700 target
+    628,  // E0700 target
+    641,  // E0700 target
+    658,  // E0700 target
+    676,  // E0700 target
+    684,  // E0701 class
+    685,  // E0701 class
+    686,  // E0709 what
+    692,  // E0709 what
+    706,  // E0709 what
     724,  // E0806 callee
-    744,  // E0904 what
-    750,  // E0904 what
-    756,  // E0904 what
-    772,  // E1001 target
-    784,  // E1001 target
-    799,  // E1001 target
-    814,  // E1001 target
-    829,  // E1001 target
-    842,  // E1001 target
-    859,  // E1001 target
-    877,  // E1001 target
-    885,  // E1002 expected
-    891,  // E1002 expected
-    898,  // E1002 expected
-    905,  // E1002 expected
-    910,  // E1002 expected
-    915,  // E1002 root
-    927,  // E1002 root
-    938,  // E1003 reason
-    947,  // E1003 reason
-    964,  // E1003 reason
-    978,  // E1003 reason
-    988,  // E1101 feature
-    1003, // E1101 feature
-    1006, // E1101 feature
-    1013, // E1101 feature
-    1029, // E1101 feature
-    1039, // E1101 feature
-    1050, // E1103 memory
-    1059, // E1103 memory
-    1074, // E1103 memory
-    1086, // E1107 how
-    1092, // E1107 how
-    1098, // E1107 how
-    1106, // E1107 how
-    1114, // E1302 reason
-    1134, // E1302 reason
-    1150, // E1302 reason
-    1159, // E1302 reason
-    1179, // E1303 target
-    1192, // E1303 target
-    1209, // E1303 target
-    1227, // E1401 effect
-    1232, // E1401 effect
-    1236, // E1401 effect
-    1245, // E1401 effect
-    1249, // E1401 effect
-    1255, // E1401 effect
-    1257, // E1401 effect
-    1262, // E1401 op
-    1271, // E1401 op
-    1283, // E1401 op
-    1304, // E1401 op
+    737,  // E0806 callee
+    753,  // E0806 callee
+    773,  // E0904 what
+    779,  // E0904 what
+    785,  // E0904 what
+    801,  // E1001 target
+    813,  // E1001 target
+    828,  // E1001 target
+    843,  // E1001 target
+    858,  // E1001 target
+    871,  // E1001 target
+    888,  // E1001 target
+    906,  // E1001 target
+    914,  // E1002 expected
+    920,  // E1002 expected
+    927,  // E1002 expected
+    934,  // E1002 expected
+    939,  // E1002 expected
+    944,  // E1002 root
+    956,  // E1002 root
+    967,  // E1003 reason
+    976,  // E1003 reason
+    993,  // E1003 reason
+    1007, // E1003 reason
+    1017, // E1101 feature
+    1032, // E1101 feature
+    1035, // E1101 feature
+    1042, // E1101 feature
+    1058, // E1101 feature
+    1068, // E1101 feature
+    1079, // E1103 memory
+    1088, // E1103 memory
+    1103, // E1103 memory
+    1115, // E1107 how
+    1121, // E1107 how
+    1127, // E1107 how
+    1135, // E1107 how
+    1143, // E1302 reason
+    1163, // E1302 reason
+    1179, // E1302 reason
+    1188, // E1302 reason
+    1208, // E1303 target
+    1221, // E1303 target
+    1238, // E1303 target
+    1256, // E1401 effect
+    1261, // E1401 effect
+    1265, // E1401 effect
+    1274, // E1401 effect
+    1278, // E1401 effect
+    1284, // E1401 effect
+    1286, // E1401 effect
+    1291, // E1401 op
+    1300, // E1401 op
     1312, // E1401 op
-    1324, // E1401 op
-    1336, // E1401 op
-    1357, // E1401 op
-    1376, // E1401 op
-    1399, // E1401 op
-    1414, // E1401 op
-    1483, // E1401 op
-    1521, // E1401 op
-    1573, // E1403 effect
-    1578, // E1403 effect
-    1582, // E1403 effect
-    1591, // E1403 effect
-    1595, // E1403 effect
-    1601, // E1403 effect
-    1603, // E1403 effect
-    1608, // E1403 op
-    1617, // E1403 op
-    1629, // E1403 op
-    1650, // E1403 op
-    1658, // E1403 op
-    1670, // E1403 op
-    1682, // E1403 op
-    1703, // E1403 op
-    1722, // E1403 op
-    1745, // E1403 op
-    1760, // E1403 op
-    1829, // E1403 op
-    1867, // E1403 op
-    1919, // E1407 reason
-    1930, // E1407 reason
-    1943, // E1407 reason
-    1953, // E1407 reason
-    1964, // E1407 reason
-    1998, // E1407 reason
-    2016, // E1407 reason
-    2058, // E1407 reason
-    2065, // E1410 reason
-    2099, // E1410 reason
-    2144, // E1410 reason
-    2188, // end
+    1333, // E1401 op
+    1341, // E1401 op
+    1353, // E1401 op
+    1365, // E1401 op
+    1386, // E1401 op
+    1405, // E1401 op
+    1428, // E1401 op
+    1457, // E1401 op
+    1472, // E1401 op
+    1541, // E1401 op
+    1579, // E1401 op
+    1631, // E1403 effect
+    1636, // E1403 effect
+    1640, // E1403 effect
+    1649, // E1403 effect
+    1653, // E1403 effect
+    1659, // E1403 effect
+    1661, // E1403 effect
+    1666, // E1403 op
+    1675, // E1403 op
+    1687, // E1403 op
+    1708, // E1403 op
+    1716, // E1403 op
+    1728, // E1403 op
+    1740, // E1403 op
+    1761, // E1403 op
+    1780, // E1403 op
+    1803, // E1403 op
+    1832, // E1403 op
+    1847, // E1403 op
+    1916, // E1403 op
+    1954, // E1403 op
+    2006, // E1407 reason
+    2017, // E1407 reason
+    2030, // E1407 reason
+    2040, // E1407 reason
+    2051, // E1407 reason
+    2085, // E1407 reason
+    2103, // E1407 reason
+    2145, // E1407 reason
+    2152, // E1410 reason
+    2186, // E1410 reason
+    2231, // E1410 reason
+    2275, // end
 ];
 
 const SHAPE_CASE: [u8; 756] = [
