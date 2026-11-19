@@ -198,7 +198,10 @@ impl Cx<'_> {
         if node == ZERO {
             return;
         }
-        let top = |v: Value, w: i128| Edge { from: Node::Val(v), to: Node::Zero, w, src: Source::Range { value: v }, mul: 1 };
+        let top = |value: Value, w: i128| {
+            let (from, to) = (Node::Val(value), Node::Zero);
+            Edge { from, to, w, src: Source::Range { value }, mul: 1 }
+        };
         if let Some((v, _, max)) = self.range_of(node)
             && max <= bound
         {
@@ -242,7 +245,10 @@ impl Cx<'_> {
         if node == ZERO {
             return;
         }
-        let bottom = |v: Value, w: i128| Edge { from: Node::Zero, to: Node::Val(v), w, src: Source::Range { value: v }, mul: 1 };
+        let bottom = |value: Value, w: i128| {
+            let (from, to) = (Node::Zero, Node::Val(value));
+            Edge { from, to, w, src: Source::Range { value }, mul: 1 }
+        };
         if let Some((v, min, _)) = self.range_of(node)
             && -min <= bound
         {

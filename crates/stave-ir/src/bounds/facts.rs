@@ -882,16 +882,17 @@ impl Cx<'_> {
                 (v, 0, (1i128 << bits) - 1)
             })
         };
-        let src = |value| Source::Range { value };
-        if to == ZERO {
+        let (value, edge) = if to == ZERO {
             let (v, _, hi) = range(from)?;
-            (hi <= bound).then(|| out.push(Edge { from: Node::Val(v), to: Node::Zero, w: hi, src: src(v), mul: 1 }))
+            (v, (Node::Val(v), Node::Zero, hi))
         } else if from == ZERO {
             let (v, lo, _) = range(to)?;
-            (-lo <= bound).then(|| out.push(Edge { from: Node::Zero, to: Node::Val(v), w: -lo, src: src(v), mul: 1 }))
+            (v, (Node::Zero, Node::Val(v), -lo))
         } else {
-            None
-        }
+            return None;
+        };
+        let (from, to, w) = edge;
+        (w <= bound).then(|| out.push(Edge { from, to, w, src: Source::Range { value }, mul: 1 }))
     }
 }
 

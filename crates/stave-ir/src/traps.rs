@@ -37,10 +37,11 @@ pub fn scan(m: &Module, f: FuncId) -> Traps {
 /// `runtime.panic.requires_failed`, in order.
 pub fn requires_checks(m: &Module, f: FuncId) -> Vec<u32> {
     let Some(b) = m.func(f).and_then(|x| x.body.as_ref()) else { return Vec::new() };
+    let fails = |g: FuncId| m.func(g).is_some_and(|g| g.path == REQUIRES_FAILED);
     (0..b.insts.len() as u32)
         .filter(|&i| {
             b.insts.op[i as usize] == Op::Call
-                && matches!(b.args(i).first(), Some(Operand::Func(g)) if m.func(*g).is_some_and(|g| g.path == REQUIRES_FAILED))
+                && matches!(b.args(i).first(), Some(&Operand::Func(g)) if fails(g))
         })
         .collect()
 }

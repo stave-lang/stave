@@ -287,11 +287,10 @@ pub fn contract_nodes(tc: &Typeck) -> Vec<u32> {
     (0..g.nodes.len() as u32)
         .filter(|&i| {
             let (requires, ensures) = per_node[i as usize];
+            let direct = |k: EdgeKind| matches!(k, EdgeKind::Call | EdgeKind::Dispatch { .. });
             let calls = || {
                 !matches!(g.nodes[i as usize].kind, NodeKind::Table { .. } | NodeKind::Glue { .. })
-                    && g.succ(i).iter().any(|e| {
-                        matches!(e.kind, EdgeKind::Call | EdgeKind::Dispatch { .. }) && per_node[e.to as usize].0
-                    })
+                    && g.succ(i).iter().any(|e| direct(e.kind) && per_node[e.to as usize].0)
             };
             requires || ensures || calls()
         })
