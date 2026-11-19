@@ -882,8 +882,22 @@ impl<'a> Ck<'a> {
         let checked = op == Term::AsQuestion as u8;
         let fk = self.tys.kind(from).clone();
         let tk = self.tys.kind(to).clone();
-        // a plain cast to the identical type is a bit copy, for any type
-        if plain && from == to {
+        // A cast to the identical type is a bit copy of a scalar, vector, mask, reference, or raw
+        // pointer. Structs, enums, tuples, arrays, and fn values have no cast to themselves
+        // (E0204): moving one is a plain move.
+        let identity = from == to
+            && matches!(
+                fk,
+                TypeKind::Int { .. }
+                    | TypeKind::Float(_)
+                    | TypeKind::Bool
+                    | TypeKind::Char
+                    | TypeKind::Vector { .. }
+                    | TypeKind::Mask { .. }
+                    | TypeKind::Ref { .. }
+                    | TypeKind::Ptr { .. }
+            );
+        if plain && identity {
             return Some(to);
         }
         // vectors: lane-wise, equal lane counts
@@ -897,7 +911,7 @@ impl<'a> Ck<'a> {
             }
             return Some(if checked { self.option_of(to) } else { to });
         }
-        if from == to {
+        if identity {
             return Some(if checked { self.option_of(to) } else { to });
         }
         // references to raw pointers: plain `as` only

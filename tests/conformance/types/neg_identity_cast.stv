@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// E0204: `as` to the identical type is a bit copy of a scalar, vector, mask, reference, or raw
+// pointer only. A struct, tuple, `Option`, view, or fn value has no cast to itself, with any
+// cast operator: it is moved or copied as it is.
+struct P { a: u32 }
+
+view struct V { r: &u32 }
+
+fn one() -> u32 {
+    return 1;
+}
+
+fn main() -> i32 {
+    let x: u32 = 7;
+    let p = P.{ a: 1 };
+    let q: P = p as P; //~ ERROR E0204
+    let t: (u32, u32) = (1u32, 2u32) as (u32, u32); //~ ERROR E0204
+    let o0: Option<u32> = Option.Some(3u32);
+    let o: Option<u32> = o0 as Option<u32>; //~ ERROR E0204
+    let v0 = V.{ r: &x };
+    let v: V = v0 as V; //~ ERROR E0204
+    let f0: fn() -> u32 = one;
+    let f: fn() -> u32 = f0 as fn() -> u32; //~ ERROR E0204
+    let s: P = P.{ a: 2 } as% P; //~ ERROR E0204
+    let r: &u32 = &x as &u32;
+    let n: u32 = x as u32;
+    let m: u32 = x as% u32;
+    return 0;
+}

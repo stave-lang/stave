@@ -49,7 +49,7 @@ Read whole file before writing Stave. Assume Rust **only** where this file is si
 | `v.pop();` (value ignored) | `let _ = v.pop();` | A non-`()`, non-`never` expression statement is E0210 | an ignored `Result` is always visible |
 
 Casts and overflow operators (kept out of the table because they contain `|`):
-- `as` lossless only. `as%` wraps or truncates. `as|` saturates (float NaN → 0). `as?` returns `Option`. `as~` converts to a float type, rounding to nearest even (int→float, f64→f32, f32→f16 lanes).
+- `as` lossless only. `as%` wraps or truncates. `as|` saturates (float NaN → 0). `as?` returns `Option`. `as~` converts to a float type, rounding to nearest even (int→float, f64→f32, f32→f16 lanes). To its own type (bit copy): scalars, vectors, masks, refs, raw pointers only (else E0204).
 - `+% -% *% <<%` wrap. `+| -| *|` saturate. Compound forms: `+%= -%= *%= <<%= +|= -|= *|=`.
 
 **Not in Stave** (rejected; write the right column instead):
