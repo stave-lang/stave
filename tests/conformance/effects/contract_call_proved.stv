@@ -1,0 +1,71 @@
+//~ CHECK-ONLY
+// A fn with a `requires` may deny `trap`: the clause is the caller's obligation. A caller whose
+// every call proves the callee's clauses has no trap from them and may deny `trap` too. A call is
+// proved from constants, the caller's own clauses, branches, slice lengths, and what an earlier
+// call ensures; a recursive call may use the fn's own `ensures`.
+fn pos(x: u32) -> u32 without(trap) requires(x > 0) {
+    return x;
+}
+
+fn in_range(xs: &[u32], i: usize) -> u32 without(trap) requires(i < xs.len()) {
+    return xs[i];
+}
+
+fn below(x: u32) -> u32 without(trap) requires(x < 10) {
+    return x;
+}
+
+fn small(x: u32) -> u32 without(trap) ensures(result < 10) {
+    if x < 10 {
+        return x;
+    }
+    return 9;
+}
+
+fn by_constant() -> u32 without(trap) {
+    return pos(1);
+}
+
+fn by_clause(x: u32) -> u32 without(trap) requires(x > 2) {
+    return pos(x);
+}
+
+fn by_branch(xs: &[u32], i: usize) -> u32 without(trap) {
+    if i < xs.len() {
+        return in_range(xs, i);
+    }
+    return 0;
+}
+
+fn by_ensures(x: u32) -> u32 without(trap) {
+    let s = small(x);
+    return below(s);
+}
+
+fn after_call(xs: &[u32], i: usize) -> u32 without(alloc) {
+    let a = in_range(xs, i);
+    return a +% in_range(xs, i);
+}
+
+fn keep<T: Copy>(t: T, n: u32) -> T without(trap) requires(n > 0) {
+    return t;
+}
+
+fn instance() -> u32 without(trap) {
+    return keep(7u32, 2);
+}
+
+rec fn count(n: u32) -> u32 ensures(result <= n) {
+    if n == 0 {
+        return 0;
+    }
+    let r = count(n - 1);
+    return r + 1;
+}
+
+fn main() {
+    let xs: [u32; 3] = [4, 5, 6];
+    let a = by_constant() + by_clause(3) + by_branch(&xs, 1);
+    let b = by_ensures(40) + after_call(&xs, 2);
+    let c = instance() + count(3);
+}

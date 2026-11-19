@@ -1,0 +1,43 @@
+//~ CHECK-ONLY
+// A call that does not prove every `requires` of its callee keeps the checked entry and has
+// `trap` from it: under `without(trap)` the caller gets E1401, whose chain ends at the callee
+// with the unproved clause. All or nothing per call: one clause left open is enough. A fn value
+// is entered by calls that prove nothing, so a fn whose `requires` check stays is no value of a
+// `without(trap)` fn type (E1403).
+fn pos(x: u32) -> u32 without(trap) requires(x > 0) {
+    return x;
+}
+
+fn both(x: u32, y: u32) -> u32 without(trap) requires(x > 0 && y > 0) {
+    return x;
+}
+
+fn keep<T: Copy>(t: T, n: u32) -> T without(trap) requires(n > 0) {
+    return t;
+}
+
+fn unknown(x: u32) -> u32 without(trap) { //~ ERROR E1401
+    return pos(x);
+}
+
+fn half(y: u32) -> u32 without(trap) { //~ ERROR E1401
+    return both(1, y);
+}
+
+fn instance(n: u32) -> u64 without(trap) { //~ ERROR E1401
+    return keep(7u64, n);
+}
+
+fn twice(x: u32) -> u32 without(trap) requires(x > 0) { //~ ERROR E1401
+    return pos(x) +% pos(x -% 1);
+}
+
+fn apply(f: fn(u32) -> u32 without(trap), x: u32) -> u32 without(trap) {
+    return f(x);
+}
+
+fn main() {
+    let a = unknown(1) + half(2) + twice(3);
+    let b = instance(4);
+    let c = apply(pos, 5); //~ ERROR E1403
+}

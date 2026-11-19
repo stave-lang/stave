@@ -1,0 +1,28 @@
+//~ EXIT 101
+//~ STDOUT contract_call_checked.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_call_checked.stv:18:12 in main.pass (thread 0)\nrequires(x > 0 && x < 100)\n"
+// A fn with proved and unproved callers keeps both entries: the proved call skips the checks,
+// the call that proves only one conjunct keeps them all, and a false clause still panics
+// `Contract` at that call.
+import std.io;
+
+fn window(x: u32) -> u32 requires(x > 0 && x < 100) {
+    return x;
+}
+
+fn proved() -> u32 {
+    return window(42);
+}
+
+fn pass(x: u32) -> u32 requires(x < 100) {
+    return window(x);
+}
+
+fn main() -> i32 {
+    let a = proved();
+    let b = pass(7);
+    io.print(f"{a} {b}\n");
+    let c = pass(0);
+    io.print(f"not reached {c}\n");
+    return 0;
+}

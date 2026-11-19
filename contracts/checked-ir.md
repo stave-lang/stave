@@ -24,7 +24,7 @@ Term    = "  " ( "br " Target | "cbr " Operand " " Target " " Target
                | "ret" (" " Operand)? | "unreachable" ) "\n" ;
 Target  = Blk "(" (Operand (", " Operand)*)? ")" ;
 Operand = Val | IntC | FloatC | SId | "@" Inst | TId ;
-Val = "%" Nat ; Blk = "b" Nat ; TId = "t" Nat ; SId = "s" Nat ; Inst = Nat ("." Nat)* ;
+Val = "%" Nat ; Blk = "b" Nat ; TId = "t" Nat ; SId = "s" Nat ; Inst = Nat ("." Nat)* (".u")? ;
 IntC = "-"? Nat ; FloatC = "0x" Hex ;             (* floats as their exact IEEE bits *)
 ```
 
@@ -49,7 +49,8 @@ stages' numbering, except `d<D>`):
   `Pair<u16>` exist only here. `d<D>` in `adt` keys is the canonical decl id D.
 - `@<inst>`: the rank of the instance among the build's instances (the root set's closure,
   below), ordered by (decl D, generic args by `t<T>`), drop glue after every decl instance, ordered
-  by its type; closures `@<enclosing>.<k>`. Bodiless instances (`extern "C"` imports) take ids but are not printed, so printed ids may have gaps;
+  by its type; closures `@<enclosing>.<k>`; the unchecked entry of `@<n>` (Contracts, below) is
+  `@<n>.u`, printed after `@<n>` and its closures, with the path of `@<n>`. Bodiless instances (`extern "C"` imports) take ids but are not printed, so printed ids may have gaps;
   calls still name them (`call t2 @0 %1`). Ids differ between debug and `--release` (different
   root sets).
 - `s<S>`: the rank of the string constant among the module's distinct string constants by
@@ -243,6 +244,24 @@ b2():
   a `test fn` is not checked. The removal pass below treats each such check like a bounds check:
   a proven one goes (`cbr` becomes `br ok`, the call and its block go); one that fails whenever
   reached is a compile error (E0215, E0217) and stays.
+- **Contracts across calls** (stave-ir `witness`, "Summaries"): a fn states rows `a <= b + w`
+  over zero, its int params, the lengths of its slice params, and its result, each read off its
+  own IR with a proof the witness checker validates. *Pre* rows: every reachable `requires`
+  check tests a compare whose sides fold (trapping `add`/`sub` by a constant, widening casts,
+  `slice.len`) to those terms; one row per goal, plus a row per bound that keeps such an
+  `add`/`sub` in its type's range where the other rows and the params' types do not. *Post*
+  rows: the goals of the `ensures` checks, with the returned value as `result`, that hold at
+  every reachable `ret` (at most 16). After `%v = call @f ..` the post rows of `@f`, and its pre
+  rows that read a check, are facts about the arguments and `%v`; a fn may use its own after a
+  recursive call (what is proved is partial correctness: nothing is said of a call that does not
+  return). A `call @f ..` whose facts prove every pre row of `@f` about its arguments goes to the
+  unchecked entry of `@f`: the body of `@f` after its own removals, without the failure calls
+  of its `requires` checks (each `cbr c ok fail` stays, `fail` being an empty `unreachable`
+  block, so `c` is still a fact of the body). It is the fn `@<n>.u`; when `@f` is an instance of
+  a generic fn and every operand naming it is the callee of such a call, `@f` itself becomes it
+  and no `@<n>.u` exists. `call.ind`, `fn.make`, and every other use of `@f` keep `@f`. A call
+  whose facts prove the negation of a pre row that reads a check is a compile error (E0218).
+  Only the witness checker makes an unchecked entry or a call of one.
 - **Bounds checks** (stave-ir `bounds`): `xs[i]` on a place in memory (a
   slice, or an array behind a reference or in a `slot`) is `check.bounds i n` immediately before
   `addr.elem p i` (`n` = `slice.len p`, or the array length as a constant); `a[i]` on an array SSA

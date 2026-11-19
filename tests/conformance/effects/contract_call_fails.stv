@@ -1,0 +1,61 @@
+//~ CHECK-ONLY
+// A call whose arguments make a `requires` of its callee false whenever it is reached is an
+// error at the call (E0218): what holds before the call (constants, branches, the caller's own
+// clauses) proves the clause's negation. No error where the facts leave the clause open, at a
+// call no execution reaches (contradictory branches, a branch on two constants), or in an
+// instance of a generic fn: there the runtime check stays.
+fn pos(x: u32) -> u32 requires(x > 0) {
+    return x;
+}
+
+fn in_range(xs: &[u32], i: usize) -> u32 requires(i < xs.len()) {
+    return xs[i];
+}
+
+fn zero() -> u32 {
+    return pos(0); //~ ERROR E0218
+}
+
+fn guarded(x: u32) -> u32 {
+    if x == 0 {
+        return pos(x); //~ ERROR E0218
+    }
+    return x;
+}
+
+fn past(xs: &[u32], i: usize) -> u32 {
+    if i >= xs.len() {
+        return in_range(xs, i); //~ ERROR E0218
+    }
+    return 0;
+}
+
+fn by_clause(x: u32) -> u32 requires(x < 1) {
+    return pos(x); //~ ERROR E0218
+}
+
+fn open(x: u32) -> u32 {
+    return pos(x);
+}
+
+fn dead(x: u32) -> u32 {
+    if x > 5 {
+        if x < 3 {
+            return pos(0);
+        }
+    }
+    return x;
+}
+
+fn generic<T: Copy>(t: T) -> T {
+    let a = pos(0);
+    return t;
+}
+
+fn main() {
+    let xs: [u32; 2] = [1, 2];
+    let a = zero() + guarded(1) + past(&xs, 0);
+    let b = open(1) + dead(4) + by_clause(0);
+    let c = generic(1u8);
+    let d = generic(2u64);
+}
