@@ -1,0 +1,57 @@
+//~ CHECK-ONLY
+// The signature rules of a parameter's `from` clause: it stands on a `&mut` view parameter of a
+// fn or method (E0514), does not name its own parameter (E0515), follows the origin table
+// (E0520, E0521), is repeated by a trait impl (E0905), and keeps the fn from being a fn value
+// (E0807).
+view struct Pick { best: &u32, count: usize }
+
+fn shared(p: &Pick from x, x: &u32) { } //~ ERROR E0514
+fn by_value(p: Pick from x, x: &u32) { } //~ ERROR E0514
+fn not_a_view(n: &mut u32 from x, x: &u32) { } //~ ERROR E0514
+fn plain_ref(r: &u32 from x, x: &u32) { } //~ ERROR E0514
+
+fn itself(p: &mut Pick from p, x: &u32) { } //~ ERROR E0515
+fn itself_copy(p: &mut Pick from x + copy p, x: &u32) { } //~ ERROR E0515
+
+fn owned(p: &mut Pick from n, n: u32) { } //~ ERROR E0520
+fn copy_of_ref(p: &mut Pick from copy x, x: &u32) { } //~ ERROR E0521
+fn copy_of_view(p: &mut Pick from copy q, q: Pick) { } //~ ERROR E0521
+
+// fine: a later parameter, a view by value, the origins of a view, a `T: view` pointee
+fn later(p: &mut Pick from x, x: &u32) { }
+fn from_view(p: &mut Pick from q, q: Pick) { }
+fn from_copy(p: &mut Pick from copy q, q: &Pick) { }
+fn generic<T: view>(p: &mut T from x, x: T) { }
+
+trait Sink {
+    fn put(&mut self from x, x: &u32);
+}
+
+trait Plain {
+    fn feed(&mut self, x: &u32);
+}
+
+impl Sink for Pick {
+    fn put(&mut self, x: &u32) { self.count = self.count + 1; } //~ ERROR E0905
+}
+
+impl Plain for Pick {
+    fn feed(&mut self from x, x: &u32) { self.best = x; } //~ ERROR E0905
+}
+
+fn store(dst: &mut Pick from x, x: &u32) {
+    dst.best = x;
+}
+
+fn apply(f: fn(&mut Pick, &u32), p: &mut Pick, x: &u32) {
+    f(p, x);
+}
+
+fn as_values(p: &mut Pick, x: &u32) {
+    let f: fn(&mut Pick, &u32) = store; //~ ERROR E0807
+    apply(store, p, x); //~ ERROR E0807
+}
+
+fn closure_param() {
+    let f = fn(p: &mut Pick from x, x: &u32) { }; //~ ERROR E0514
+}

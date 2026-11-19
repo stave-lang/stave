@@ -1,0 +1,48 @@
+//~ CHECK-ONLY
+// A closure stores nothing new into a view: its parameters take no `from` clause and a call
+// through a fn value tells the caller nothing, and a captured view belongs to the enclosing fn,
+// which fixed its origins when it made the closure.
+view struct Pick { best: &u32, count: usize }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) {
+        self.best = x;
+        self.count = self.count + 1;
+    }
+}
+
+fn captured() -> u32 {
+    let a: u32 = 1;
+    let mut p = Pick.{ best: &a, count: 0 };
+    let f = fn() {
+        let z: u32 = 2;
+        p.take(&z); //~ ERROR E0513
+    };
+    f();
+    return *p.best;
+}
+
+fn through_param(a: &u32) -> u32 {
+    let mut p = Pick.{ best: a, count: 0 };
+    let g = fn(q: &mut Pick, x: &u32) {
+        q.take(x); //~ ERROR E0513
+    };
+    g(&mut p, a);
+    return *p.best;
+}
+
+// What the view already borrows from goes back into it.
+fn keep(a: &u32) -> u32 {
+    let mut p = Pick.{ best: a, count: 0 };
+    let f = fn() {
+        let old: &u32 = p.best;
+        p.take(old);
+    };
+    f();
+    let g = fn(q: &mut Pick) {
+        let old: &u32 = q.best;
+        q.take(old);
+    };
+    g(&mut p);
+    return *p.best;
+}

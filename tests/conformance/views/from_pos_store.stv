@@ -1,0 +1,93 @@
+//~ CHECK-ONLY
+// A `from` clause on a `&mut` view parameter declares what the fn stores into the view: the body
+// may write the named parameters' borrows through it, and a caller keeps them borrowed while the
+// view is used.
+view struct Lexer { src: &str, pos: usize }
+
+impl Lexer {
+    fn reset(&mut self from s, s: &str) {
+        self.src = s;
+        self.pos = 0;
+    }
+}
+
+view struct Parts { head: &str, tail: &str, n: usize }
+
+fn split_into(out: &mut Parts from line, line: &str) {
+    out.head = line;
+    out.tail = line;
+    out.n = 2;
+}
+
+view struct Pick { best: &u32, count: usize }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) {
+        self.best = x;
+        self.count = self.count + 1;
+    }
+
+    fn get(&self) -> &u32 from copy self {
+        return self.best;
+    }
+}
+
+fn store(dst: &mut Pick from x, x: &u32) {
+    dst.best = x;
+}
+
+// The clause may name a later parameter, several parameters, and the origins of a view (`copy`).
+fn relex(dst: &mut Lexer from copy other + extra, other: &Lexer, extra: &str, first: bool) {
+    dst.src = if first then other.src else extra;
+    dst.pos = other.pos;
+}
+
+// A declared store may be passed on to a callee that declares it too, by a call or a method call.
+fn store_two(dst: &mut Pick from a + b, a: &u32, b: &u32) {
+    store(dst, a);
+    dst.take(b);
+}
+
+// What was stored is read back with the view's origins.
+fn swap_in(dst: &mut Pick from x, x: &u32) -> &u32 from copy dst {
+    let old: &u32 = dst.best;
+    dst.best = x;
+    return old;
+}
+
+// A pointer held in the view takes the declared origins too.
+view struct Builder { out: &mut Pick, used: usize }
+
+impl Builder {
+    fn emit(&mut self from x, x: &u32) {
+        self.out.take(x);
+        self.used = self.used + 1;
+    }
+}
+
+// The store goes into a local view of the caller: its borrow lasts as long as the view.
+fn local_views() -> u32 {
+    let zero: u32 = 0;
+    let data: [u32; 4] = [3, 8, 5, 6];
+    let mut p = Pick.{ best: &zero, count: 0 };
+    p.take(&data[1]);
+    store(&mut p, &data[2]);
+    store_two(&mut p, &data[0], &data[3]);
+    let old: u32 = *swap_in(&mut p, &zero);
+    let mut q = Pick.{ best: &zero, count: 0 };
+    let mut b = Builder.{ out: &mut q, used: 0 };
+    b.emit(&data[1]);
+    return *p.get() + *q.best + old;
+}
+
+// A view owned by the fn (a by-value parameter) is a local like any other.
+fn owned_view(p: Pick, x: &u32) -> Pick from p + x {
+    let mut mine = p;
+    mine.take(x);
+    return mine;
+}
+
+fn literals(l: &mut Lexer, parts: &mut Parts) {
+    l.reset("static");
+    split_into(parts, "a b");
+}

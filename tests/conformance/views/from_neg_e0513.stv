@@ -1,0 +1,63 @@
+//~ CHECK-ONLY
+// E0513: a store into the view a `&mut` parameter points to needs the stored borrow in the
+// parameter's `from` clause, in an assignment and in a call that stores. A by-value view and a
+// pointer found below the parameter's view take no clause for their own origins.
+view struct Pick { best: &u32, count: usize }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) {
+        self.best = x;
+        self.count = self.count + 1;
+    }
+}
+
+fn store(dst: &mut Pick from x, x: &u32) {
+    dst.best = x;
+}
+
+fn no_clause(dst: &mut Pick, x: &u32) {
+    dst.best = x; //~ ERROR E0513
+}
+
+fn other_param(dst: &mut Pick from a, a: &u32, b: &u32) {
+    dst.best = b; //~ ERROR E0513
+}
+
+fn call_no_clause(dst: &mut Pick, x: &u32) {
+    store(dst, x); //~ ERROR E0513
+}
+
+fn method_no_clause(dst: &mut Pick, x: &u32) {
+    dst.take(x); //~ ERROR E0513
+}
+
+// `from copy other` names what the view `*other` borrows, not a borrow of the view itself.
+view struct Hold { p: &Pick }
+
+fn keeps_the_view(dst: &mut Hold from copy other, other: &Pick) {
+    dst.p = other; //~ ERROR E0513
+}
+
+fn keeps_the_view_ok(dst: &mut Hold from other, other: &Pick) {
+    dst.p = other;
+}
+
+// A by-value view may hold pointers to several views of the caller and takes no clause.
+view struct Builder { out: &mut Pick, used: usize }
+
+fn by_value(b: Builder, x: &u32) {
+    b.out.take(x); //~ ERROR E0513
+}
+
+// The view below the parameter's view has its own origins in the caller: it takes what the
+// clause names, not what the parameter's view already holds.
+view struct Twin { out: &mut Pick, spare: &u32 }
+
+fn below(t: &mut Twin) {
+    t.out.take(t.spare); //~ ERROR E0513
+}
+
+fn below_ok(t: &mut Twin from x, x: &u32) {
+    t.out.take(x);
+    t.spare = x;
+}

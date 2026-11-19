@@ -1,0 +1,44 @@
+//~ CHECK-ONLY
+// A borrow stored into a view by a call lasts until the view's last use or until the view is
+// assigned as a whole; a view that already borrows from parameters takes further stores.
+view struct Pick { best: &u32, count: usize }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) {
+        self.best = x;
+        self.count = self.count + 1;
+    }
+}
+
+fn two_stores(a: &u32, b: &u32) -> u32 {
+    let mut p = Pick.{ best: a, count: 0 };
+    p.take(b);
+    p.take(a);
+    return *p.best;
+}
+
+fn per_iteration(data: &[u32]) -> usize {
+    let mut n: usize = 0;
+    for i in 0..data.len() {
+        let mut p = Pick.{ best: &data[i], count: 0 };
+        p.take(&data[0]);
+        n = n + p.count;
+    }
+    return n;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut data: [u32; 4] = [3, 8, 5, 6];
+    data[0] = 9;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    p.take(&data[1]);
+    let best: u32 = *p.best;
+    data[1] = best;
+    p = Pick.{ best: &zero, count: 0 };
+    p.take(&data[2]);
+    let last: u32 = *p.best;
+    p = Pick.{ best: &zero, count: 0 };
+    data[2] = 1;
+    return (*p.best + best + last) as% i32;
+}

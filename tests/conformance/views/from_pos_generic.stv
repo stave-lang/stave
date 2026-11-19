@@ -1,0 +1,66 @@
+//~ CHECK-ONLY
+// Parameter `from` clauses on generic containers and trait methods: an instance over a view
+// keeps what is stored into it borrowed; an instance over an owned type stores nothing; a trait
+// impl repeats the trait method's clause, whatever its `Self` is.
+struct Slot<T: view> { v: T, n: usize }
+
+impl<T: view> Slot<T> {
+    fn set(&mut self from x, x: T) {
+        self.v = x;
+        self.n = self.n + 1;
+    }
+}
+
+fn fill<T: view>(s: &mut Slot<T> from x, x: T) {
+    s.set(x);
+}
+
+view struct Pick { best: &u32, count: usize }
+
+trait Sink {
+    fn put(&mut self from x, x: &u32);
+}
+
+impl Sink for Pick {
+    fn put(&mut self from x, x: &u32) {
+        self.best = x;
+        self.count = self.count + 1;
+    }
+}
+
+struct Counter { n: u32 }
+
+impl Sink for Counter {
+    fn put(&mut self from x, x: &u32) {
+        self.n = self.n +% *x;
+    }
+}
+
+fn feed<S: Sink + view>(s: &mut S from x, x: &u32) {
+    s.put(x);
+}
+
+fn feed_owned<S: Sink>(s: &mut S, x: &u32) {
+    s.put(x);
+}
+
+fn instances() -> u32 {
+    let zero: u32 = 0;
+    let mut data: [u32; 2] = [3, 8];
+    let mut refs = Slot.{ v: &zero, n: 0 };
+    refs.set(&data[0]);
+    fill(&mut refs, &data[1]);
+    let seen: u32 = *refs.v;
+    // an owned instance holds no borrow: the argument's loan ends at the call
+    let mut nums = Slot.{ v: 1u32, n: 0 };
+    nums.set(data[0]);
+    data[0] = 4;
+    let mut c = Counter.{ n: 0 };
+    c.put(&data[1]);
+    feed_owned(&mut c, &data[1]);
+    data[1] = 5;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    p.put(&data[0]);
+    feed(&mut p, &data[1]);
+    return seen + nums.v + c.n + *p.best;
+}
