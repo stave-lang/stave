@@ -56,7 +56,7 @@ fn through_call(zero: &u32) -> u32 {
 fn through_call_temp(zero: &u32) -> u32 {
     let mut p = Cur.{ cur: zero, n: 1 };
     let n: &u32 = &id(&mut p).n;
-    p.cur = n;
+    p.cur = n; //~ ERROR E0501
     p.n = 2; //~ ERROR E0501
     return *p.cur; //~ ERROR E0501
 }

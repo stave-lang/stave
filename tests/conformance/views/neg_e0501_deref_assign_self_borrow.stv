@@ -1,0 +1,15 @@
+//~ CHECK-ONLY
+// `*q = v` where `v` borrows the value `*q` held before the assignment.
+import std.io;
+
+view struct Chain { v: u32, prev: &u32 }
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut x = Chain.{ v: 1, prev: &zero };
+    let q = &mut x;
+    *q = Chain.{ v: 2, prev: &q.v }; //~ ERROR E0501
+    let p: u32 = *q.prev;
+    io.print(f"{p}\n");
+    return 0;
+}
