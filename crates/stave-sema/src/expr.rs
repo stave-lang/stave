@@ -579,7 +579,7 @@ impl<'a> Ck<'a> {
                             args: args.clone(),
                         },
                     );
-                    self.site(tok, m, &args);
+                    self.site(tok, self.icx.tok_span(tok), m, &args);
                 }
                 Ty::T(t)
             }
@@ -1472,6 +1472,7 @@ impl<'a> Ck<'a> {
             }) && string.is_some()
             {
                 let w = self.tys.mk_adt(string, Vec::new());
+                self.check_instance(self.icx.tok_span(tok), m, &[GArg::Type(w), GArg::Type(inner)]);
                 self.implicit.push((
                     tok,
                     Target::TraitMethod { method: m, self_ty: inner, args: vec![GArg::Type(w)] },
@@ -1649,7 +1650,8 @@ impl<'a> Ck<'a> {
         if args.is_none() && soa_mod.is_some() && self.prog.decl(imp).map(|d| d.module) == soa_mod {
             return self.w.impl_head_args(&mut self.tys, idef, t);
         }
-        args
+        // a view for a param without `view` likewise: the use of the method names the param
+        args.or_else(|| self.w.impl_applies_but_views(&mut self.tys, idef, t, genv))
     }
 
     /// The value of a finished path state.
@@ -1755,7 +1757,7 @@ impl<'a> Ck<'a> {
         let t = self.tys.subst(ft, &args, None);
         let tok = self.icx.end_tok(n);
         self.target(tok, Target::Fn { decl, args: args.clone() });
-        self.site(tok, decl, &args);
+        self.site(tok, self.icx.node_span(n), decl, &args);
         self.coerce_note(n, Coercion::FnItem);
         self.valued.push((tok, sig.deny, n));
         if self.prog.decl(decl).is_some_and(|d| d.flags.has(DeclFlags::EXTERN_EXPORT)) {
@@ -2460,7 +2462,14 @@ impl<'a> Ck<'a> {
 
     /// Bound (E0901 `unsatisfied`, E1407 for `Flat`) and view (E0411/E0412/E0414,
     /// [`crate::kinds::view_arg`]) checks of a call's generic args.
-    fn check_bounds(&mut self, at: Span, generic: DeclId, gens: &[GenericParam], args: &[GArg]) {
+    fn check_bounds(
+        &mut self,
+        at: Span,
+        generic: DeclId,
+        gens: &[GenericParam],
+        args: &[GArg],
+        self_ty: Option<TypeId>,
+    ) {
         let genv = self.genv();
         // the generics of `std.soa` take the row type first (E0910 before the `Flat` bound)
         let soa_mod = self.prog.decl(self.sigs.lang.soa).map(|d| d.module);
@@ -2488,7 +2497,7 @@ impl<'a> Ck<'a> {
                     .args
                     .iter()
                     .map(|x| match x {
-                        GArg::Type(t) => GArg::Type(self.tys.subst(*t, args, None)),
+                        GArg::Type(t) => GArg::Type(self.tys.subst(*t, args, self_ty)),
                         c => *c,
                     })
                     .collect();
@@ -2624,11 +2633,10 @@ impl<'a> Ck<'a> {
                 let params = sig.params.clone();
                 self.check_args(n, &params, &sig.param_spans, &mut binds, args, sig.ret, hint);
                 let gargs: Vec<GArg> = binds.into_iter().flatten().collect();
-                self.check_bounds(cspan, decl, &sig.generics, &gargs);
                 if sig.abi != crate::sigs::Abi::Intrinsic {
                     self.target(paren, Target::Fn { decl, args: gargs.clone() });
                 }
-                self.site(paren, decl, &gargs);
+                self.site(paren, cspan, decl, &gargs);
                 Ty::T(self.tys.subst(sig.ret, &gargs, None))
             }
             St::Assoc { method, impl_args, targs } => {
@@ -2654,15 +2662,8 @@ impl<'a> Ck<'a> {
                 let params = sig.params.clone();
                 self.check_args(n, &params, &sig.param_spans, &mut binds, args, sig.ret, hint);
                 let gargs: Vec<GArg> = binds.into_iter().flatten().collect();
-                if let Some(imp) = self.prog.decl(method).map(|d| d.parent) {
-                    let ig = self.sigs.impl_def(imp).map(|i| i.generics.clone()).unwrap_or_default();
-                    self.check_bounds(cspan, imp, &ig, &gargs[..np.min(gargs.len())]);
-                }
-                let own: Vec<GenericParam> = sig.generics[np..].to_vec();
-                let own_args: Vec<GArg> = gargs.get(np..).unwrap_or(&[]).to_vec();
-                self.check_bounds_own(cspan, method, &own, &gargs, &own_args);
                 self.target(paren, Target::Fn { decl: method, args: gargs.clone() });
-                self.site(paren, method, &gargs);
+                self.site(paren, cspan, method, &gargs);
                 Ty::T(self.tys.subst(sig.ret, &gargs, None))
             }
             St::TraitMethod { method, trait_decl, targs } => {
@@ -2718,7 +2719,7 @@ impl<'a> Ck<'a> {
                 self.check_args(n, &params, &spans, &mut binds, args, ret, hint);
                 let gargs: Vec<GArg> = binds.into_iter().flatten().collect();
                 let gens = adef.generics.clone();
-                self.check_bounds(cspan, adt, &gens, &gargs);
+                self.check_bounds(cspan, adt, &gens, &gargs, None);
                 self.target(paren, Target::Variant { decl, index });
                 let t = self.tys.mk_adt(adt, gargs);
                 self.owned(paren, t);
@@ -2878,17 +2879,24 @@ impl<'a> Ck<'a> {
         self.tys.mk_adt(adt, args)
     }
 
-    fn check_bounds_own(
-        &mut self,
-        at: Span,
-        method: DeclId,
-        own: &[GenericParam],
-        all: &[GArg],
-        _own_args: &[GArg],
-    ) {
-        // bounds of a method's own generics, args indexed in the flat list
-        let np = all.len().saturating_sub(own.len());
-        let mut padded: Vec<GenericParam> = Vec::with_capacity(all.len());
+    /// The bound and view checks of instance `decl<args>` (`args`: the flat list a site records:
+    /// the parent's generics, the fn's own, then `Self` for a trait method). The parent of an
+    /// impl method is named by its impl.
+    pub(crate) fn check_instance(&mut self, at: Span, decl: DeclId, args: &[GArg]) {
+        let Some(sig) = self.sigs.fn_sig(decl) else { return };
+        let np = (sig.n_parent as usize).min(sig.generics.len());
+        let parent = self.prog.decl(decl).map_or(DeclId::NONE, |d| d.parent);
+        let Some(imp) = self.sigs.impl_def(parent) else {
+            let self_ty = match args.get(sig.generics.len()) {
+                Some(GArg::Type(t)) if self.sigs.trait_def(parent).is_some() => Some(*t),
+                _ => None,
+            };
+            self.check_bounds(at, decl, &sig.generics, args, self_ty);
+            return;
+        };
+        self.check_bounds(at, parent, &imp.generics, &args[..np.min(args.len())], None);
+        // the method's own generics, args indexed in the flat list
+        let mut padded: Vec<GenericParam> = Vec::with_capacity(sig.generics.len());
         for _ in 0..np {
             padded.push(GenericParam {
                 name: Sym::NONE,
@@ -2901,8 +2909,8 @@ impl<'a> Ck<'a> {
                 view: true,
             });
         }
-        padded.extend(own.iter().cloned());
-        self.check_bounds(at, method, &padded, all);
+        padded.extend(sig.generics[np..].iter().cloned());
+        self.check_bounds(at, decl, &padded, args, None);
     }
 
     fn arity(&mut self, n: u32, paren: u32, want: usize, got: usize, variadic: bool) -> bool {
@@ -3279,7 +3287,7 @@ impl<'a> Ck<'a> {
         self.target(paren, Target::TraitMethod { method, self_ty: s, args: targs_all.clone() });
         let mut site_args = targs_all.clone();
         site_args.push(GArg::Type(s));
-        self.site(paren, method, &site_args);
+        self.site(paren, cspan, method, &site_args);
         let r = self.tys.subst(ret, &all, None);
         Ty::T(r)
     }
@@ -3410,14 +3418,12 @@ impl<'a> Ck<'a> {
                     let spans: Vec<Span> = sig.param_spans.get(1..).unwrap_or(&[]).to_vec();
                     self.check_args(n, &params, &spans, &mut binds, args, sig.ret, hint);
                     let gargs: Vec<GArg> = binds.into_iter().flatten().collect();
-                    let own: Vec<GenericParam> = sig.generics[np..].to_vec();
-                    self.check_bounds_own(sspan, method, &own, &gargs, &[]);
                     let adjust = self.adjust_for(level, sk);
                     if adjust.autoref == Some(true) && level == 0 {
                         self.static_mutation_upto(n, Some(seg - 1), sspan);
                     }
                     self.target(seg, Target::Method { method: m.clone(), args: gargs.clone(), adjust });
-                    self.site(seg, method, &gargs);
+                    self.site(seg, sspan, method, &gargs);
                     Ty::T(self.tys.subst(sig.ret, &gargs, None))
                 }
                 MethodRef::Bound { method, ref trait_args, self_ty } => {
@@ -3460,7 +3466,7 @@ impl<'a> Ck<'a> {
                     self.target(seg, Target::Method { method: m.clone(), args: gargs.clone(), adjust });
                     let mut site_args = gargs.clone();
                     site_args.push(GArg::Type(self_ty));
-                    self.site(seg, method, &site_args);
+                    self.site(seg, sspan, method, &site_args);
                     Ty::T(self.tys.subst(ret, &gargs, None))
                 }
             },
@@ -3473,6 +3479,16 @@ impl<'a> Ck<'a> {
                 self.args_only(args)
             }
             Lookup::NotFound => {
+                // an impl that only the view-kind rule refused: name its param
+                if let Some((imp, ia)) = self.w.method_refused_view(&mut self.tys, recv, name, genv)
+                    && let Some(idef) = self.sigs.impl_def(imp)
+                {
+                    let reported = self.diags.len();
+                    self.check_bounds(sspan, imp, &idef.generics, &ia, None);
+                    if self.diags.len() > reported {
+                        return self.args_only(args);
+                    }
+                }
                 let tn = self.show(recv);
                 let nm = self.prog.strings.get(name).to_string();
                 let d = mk("E0208", None, &[("name", &nm), ("type", &tn)], sspan, &[]);
@@ -3681,7 +3697,7 @@ impl<'a> Ck<'a> {
             }
         }
         let gens = adef.generics.clone();
-        self.check_bounds(icx.tok_span(tok), adt, &gens, &gargs);
+        self.check_bounds(icx.tok_span(tok), adt, &gens, &gargs, None);
         match vidx {
             Some(i) => self.target(tok, Target::Variant { decl: v.decl, index: i }),
             None => self.target(tok, Target::Struct { decl: adt }),
@@ -3901,6 +3917,9 @@ impl<'a> Ck<'a> {
                     MethodRef::Impl { impl_args, .. } => impl_args.clone(),
                     _ => Vec::new(),
                 };
+                if let MethodRef::Impl { method, .. } = &m {
+                    self.check_instance(self.icx.node_span(iter), *method, &call_args);
+                }
                 self.implicit.push((
                     for_tok,
                     Target::Method { method: m, args: call_args, adjust: Adjust::default() },

@@ -1,0 +1,34 @@
+//~ CHECK-ONLY
+// The own generic params of a trait method are checked at a call through a bound and at a
+// trait path call, as at a call of the impl's method.
+trait Dup {
+    fn dup<T: Copy>(&self, x: T) -> (T, T);
+    fn put<T>(&self, o: &mut Option<T>, x: T);
+}
+
+struct Unit {}
+
+impl Dup for Unit {
+    fn dup<T: Copy>(&self, x: T) -> (T, T) { return (x, x); }
+    fn put<T>(&self, o: &mut Option<T>, x: T) { *o = Option.Some(x); }
+}
+
+struct D { id: u32 }
+
+fn through_bound<S: Dup>(s: &S, d: D, o: &mut Option<&u32>, x: &u32) {
+    let q = s.dup::<u32>(1);
+    s.put(o, x); //~ ERROR E0414
+    let p = s.dup(d); //~ ERROR E0901
+}
+
+fn main() -> i32 {
+    let u = Unit.{};
+    let a: u32 = 1;
+    let mut o: Option<&u32> = Option.None;
+    let ok = Dup.dup(&u, 1u32);
+    Dup.put(&u, &mut o, &a); //~ ERROR E0414
+    u.put(&mut o, &a); //~ ERROR E0414
+    let p = Dup.dup(&u, D.{ id: 2 }); //~ ERROR E0901
+    let q = u.dup(D.{ id: 3 }); //~ ERROR E0901
+    return 0;
+}
