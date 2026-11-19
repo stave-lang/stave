@@ -62,30 +62,23 @@ const PC_ROW: usize = 16;
 const LINE_CAP: usize = 1024;
 
 // ---- user site word ----
-// Process-wide (runtime.state header): with several threads, a report may name the last user
-// site stored by another thread.
+// Per thread (runtime.state Block): a report names the last user site of its own thread.
 pub fn set_user_site(site: u32) {
-    let st = state.get();
-    unsafe("st is runtime.state.STATE; a racy word store only affects a report's location") { (*st).user_site = site; }
+    let b = state.block();
+    unsafe("b is this thread's block; only this thread uses it") { (*b).user_site = site; }
 }
 
 pub fn user_site() -> u32 {
-    let st = state.get();
-    return unsafe("st is runtime.state.STATE; a racy word load only affects a report's location") (*st).user_site;
+    let b = state.block();
+    return unsafe("b is this thread's block; only this thread uses it") (*b).user_site;
 }
 
-// CPU thread id: 0 for the thread running main, then creation order. Found from the
-// address of a local: the registry entry (runtime.state `reg`) whose range holds this stack (a
-// thread's stack mapping includes its alternate signal stack); 0 if none does.
-// thread_id, find_entry, and reg_word have no trapping operation (wrapping arithmetic, raw
-// reads): runtime.panic.begin calls them before it marks the process as panicking, where a trap
-// would start the report again without end.
+// CPU thread id: 0 for the thread running main, then creation order (the thread's block).
+// No trapping operation: runtime.panic.begin calls it before it marks the process as
+// panicking, where a trap would start the report again without end.
 pub fn thread_id() -> u64 {
-    let here: u8 = 0;
-    let a = &here as *const u8 as usize;
-    let e = find_entry(a);
-    if e >= state.MAX_THREADS { return 0; }
-    return unsafe("e < MAX_THREADS, so the word is inside the registry") reg_word(e *% state.REG_WORDS +% 3) as u64;
+    let b = state.block();
+    return unsafe("b is this thread's block; only this thread uses it") (*b).thread_id;
 }
 
 // Word i of the registry.

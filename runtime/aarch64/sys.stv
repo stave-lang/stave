@@ -18,6 +18,8 @@ extern "stave-intrinsic" {
     // its new stack, calls `__stave_thread_start(arg)` (runtime.thread.entry), then the `exit`
     // system call (NR_EXIT) with its result; the parent gets the call's result.
     fn thread_clone(nr: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, arg: usize) -> isize;
+    // TPIDR_EL0 := p (contracts/intrinsics.md "Thread pointer").
+    fn set_thread_block(p: usize);
 }
 
 pub const NR_READ: usize = 63;
@@ -154,7 +156,14 @@ fn clone3_thread(args: usize, size: usize, arg: usize) -> isize {
 }
 
 // A new thread with the older `clone` (clone(flags, newsp, parent_tid, tls, child_tid) on AArch64), for kernels and emulators without clone3.
-pub unsafe("sp is the 16-byte aligned top of a fresh stack; ptid and ctid are valid u32 words; arg is what runtime.thread.entry expects")
-fn clone_thread(flags: usize, sp: usize, ptid: usize, ctid: usize, arg: usize) -> isize {
-    return unsafe("caller obligation") thread_clone(NR_CLONE, flags, sp, ptid, 0, ctid, arg);
+pub unsafe("sp is the 16-byte aligned top of a fresh stack; ptid and ctid are valid u32 words; tls is the thread's block; arg is what runtime.thread.entry expects")
+fn clone_thread(flags: usize, sp: usize, ptid: usize, ctid: usize, tls: usize, arg: usize) -> isize {
+    return unsafe("caller obligation") thread_clone(NR_CLONE, flags, sp, ptid, tls, ctid, arg);
+}
+
+// The calling thread's thread pointer (TPIDR_EL0) := p; no system call.
+pub unsafe("p is a runtime.state Block of this thread that outlives it")
+fn set_thread_pointer(p: usize) -> isize {
+    unsafe("caller obligation") { set_thread_block(p); }
+    return 0;
 }

@@ -542,6 +542,9 @@ const KERNEL_ABI: [(&str, u32, u32); 36] = [
     ("exit", 60, 93),
 ];
 
+/// The syscalls of one arch only: (name, arch directory, number).
+const ARCH_ONLY: [(&str, &str, u32); 1] = [("arch_prctl", "x86_64", 158)];
+
 fn repo_file(rel: &str) -> String {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel);
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
@@ -573,25 +576,39 @@ fn nr_array(text: &str) -> Vec<String> {
 }
 
 /// Every syscall the runtime can make is in runtime/syscalls.list, with this arch's kernel
-/// number, in list order (call id = line), and nothing else.
+/// number, in list order (call id = line), and nothing else. A row naming an arch directory
+/// (`arch_prctl x86_64`) is that arch's own: an `NR_*` constant after the shared ones, no call id.
 #[test]
 fn runtime_syscalls_match_the_list() {
-    let list: Vec<String> = repo_file("runtime/syscalls.list")
+    let rows: Vec<(String, Option<String>)> = repo_file("runtime/syscalls.list")
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(String::from)
+        .map(|l| match l.split_once(' ') {
+            Some((n, a)) => (n.to_string(), Some(a.trim().to_string())),
+            None => (l.to_string(), None),
+        })
         .collect();
+    let list: Vec<String> = rows.iter().filter(|r| r.1.is_none()).map(|r| r.0.clone()).collect();
     let abi: Vec<&str> = KERNEL_ABI.iter().map(|k| k.0).collect();
     assert_eq!(list, abi, "syscalls.list is the runtime's syscall set");
+    let own: Vec<(&str, &str)> = rows.iter().filter_map(|r| Some((r.0.as_str(), r.1.as_deref()?))).collect();
+    let want_own: Vec<(&str, &str)> = ARCH_ONLY.iter().map(|k| (k.0, k.1)).collect();
+    assert_eq!(own, want_own, "syscalls.list: the arch-only rows, last");
+    assert!(rows.iter().skip(list.len()).all(|r| r.1.is_some()), "arch-only rows come last");
     for (dir, col) in [("x86_64", 0usize), ("aarch64", 1)] {
         let text = repo_file(&format!("runtime/{dir}/sys.stv"));
         let consts = nr_consts(&text);
         let names: Vec<&str> = consts.iter().map(|c| c.0.as_str()).collect();
-        assert_eq!(names, abi, "{dir}: NR_* constants in list order");
+        let mine: Vec<&(&str, &str, u32)> = ARCH_ONLY.iter().filter(|k| k.1 == dir).collect();
+        let want_names: Vec<&str> = abi.iter().copied().chain(mine.iter().map(|k| k.0)).collect();
+        assert_eq!(names, want_names, "{dir}: NR_* constants in list order");
         for ((name, nr), (_, x, a)) in consts.iter().zip(KERNEL_ABI) {
             let want = if col == 0 { x } else { a };
             assert_eq!(*nr, want, "{dir}: NR_{} = {nr}, kernel ABI {want}", name.to_ascii_uppercase());
+        }
+        for ((name, nr), k) in consts.iter().skip(KERNEL_ABI.len()).zip(&mine) {
+            assert_eq!(*nr, k.2, "{dir}: NR_{} = {nr}, kernel ABI {}", name.to_ascii_uppercase(), k.2);
         }
         assert_eq!(nr_array(&text), list, "{dir}: NR[id] follows the list order");
         assert!(text.contains(&format!("pub const NCALLS: usize = {};", list.len())), "{dir}: NCALLS");
@@ -623,11 +640,12 @@ fn runtime_syscalls_match_the_list() {
             }
         }
         assert_eq!(calls, 7, "{dir}: one wrapper per syscall0..syscall6");
-        assert_eq!(direct, 2, "{dir}: exit_group and sched_yield");
+        assert_eq!(direct, 2 + mine.len(), "{dir}: exit_group, sched_yield, and the arch-only calls");
     }
     // Cross-check x86-64 against the host's kernel headers when installed.
     if let Ok(h) = std::fs::read_to_string("/usr/include/x86_64-linux-gnu/asm/unistd_64.h") {
-        for (name, x, _) in KERNEL_ABI {
+        let own = ARCH_ONLY.iter().filter(|k| k.1 == "x86_64").map(|k| (k.0, k.2, 0));
+        for (name, x, _) in KERNEL_ABI.into_iter().chain(own) {
             let def = format!("#define __NR_{name} {x}\n");
             assert!(h.contains(&def), "unistd_64.h lacks `{}`", def.trim());
         }

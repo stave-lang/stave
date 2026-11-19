@@ -89,9 +89,10 @@ pub const SA_SIGINFO: u64 = 4;
 pub const SA_ONSTACK: u64 = 0x0800_0000;
 pub const SA_RESTORER: u64 = 0x0400_0000;
 
-// clone flags of a thread (glibc's set: shared VM, files, signal handlers, thread group),
-// plus the tid word written for the parent and cleared + futex-woken at the thread's exit.
-pub const CLONE_THREAD_FLAGS: u64 = 0x0035_0F00;
+// clone flags of a thread (glibc's set: shared VM, files, signal handlers, thread group, its own
+// thread pointer: CLONE_SETTLS), plus the tid word written for the parent and cleared +
+// futex-woken at the thread's exit.
+pub const CLONE_THREAD_FLAGS: u64 = 0x003D_0F00;
 pub const CLONE_ARGS_SIZE: usize = 64;
 pub const FUTEX_WAIT: i32 = 0;
 pub const FUTEX_WAKE: i32 = 1;
@@ -251,15 +252,23 @@ fn sched_getaffinity(pid: i32, len: usize, mask: *mut u8) -> isize {
 
 // A thread running runtime.thread.entry(arg) on the stack [stack, stack + size): clone3, or
 // `clone` where clone3 is missing (ENOSYS: older kernels, qemu-user). `tid` receives the
-// thread's id and is cleared (with a futex wake) when it exits. Returns the id or -errno.
-pub unsafe("stack..stack+size is a fresh 16-byte aligned stack used by nothing else; tid is a u32 word that outlives the thread; arg is what runtime.thread.entry expects")
-fn spawn_thread(stack: usize, size: usize, tid: *mut u32, arg: usize) -> isize {
+// thread's id and is cleared (with a futex wake) when it exits; `tls` is its thread pointer (a
+// runtime.state Block). Returns the id or -errno.
+pub unsafe("stack..stack+size is a fresh 16-byte aligned stack used by nothing else; tid is a u32 word and tls a runtime.state Block that outlive the thread; arg is what runtime.thread.entry expects")
+fn spawn_thread(stack: usize, size: usize, tid: *mut u32, tls: usize, arg: usize) -> isize {
     let t = tid as usize;
-    let args: [u64; 8] = [CLONE_THREAD_FLAGS, 0, t as u64, t as u64, 0, stack as u64, size as u64, 0];
+    let args: [u64; 8] = [CLONE_THREAD_FLAGS, 0, t as u64, t as u64, 0, stack as u64, size as u64, tls as u64];
     let ap = &args as *const [u64; 8] as usize;
     let r = unsafe("args is a clone_args (VER0, 64 bytes) for a fresh stack (caller)") sys.clone3_thread(ap, CLONE_ARGS_SIZE, arg);
     if r != -ENOSYS { return r; }
-    return unsafe("the same thread with clone (caller)") sys.clone_thread(CLONE_THREAD_FLAGS as usize, stack + size, t, t, arg);
+    return unsafe("the same thread with clone (caller)") sys.clone_thread(CLONE_THREAD_FLAGS as usize, stack + size, t, t, tls, arg);
+}
+
+// Points the calling thread's thread pointer at p (runtime.state Block): x86-64 `arch_prctl`,
+// AArch64 `msr tpidr_el0`. Returns 0 or -errno.
+pub unsafe("p is a runtime.state Block of this thread that outlives it")
+fn set_thread_pointer(p: usize) -> isize {
+    return unsafe("caller obligation") sys.set_thread_pointer(p);
 }
 
 pub fn sched_yield() -> isize {

@@ -34,3 +34,4 @@ kill
 getpid
 clone
 exit
+arch_prctl x86_64

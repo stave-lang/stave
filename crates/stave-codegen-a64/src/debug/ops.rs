@@ -1654,6 +1654,23 @@ impl<'a, 'm> Gen<'a, 'm> {
                 self.a.bind(parent)?;
                 self.result_regs(Ret::X0, res)
             }
+            Intr::ThreadBlock => {
+                self.flush_all()?;
+                if !args.is_empty() {
+                    return Err(bad("thread_block argument count"));
+                }
+                self.a.word(0xD53B_D040); // mrs x0, tpidr_el0
+                self.result_regs(Ret::X0, res)
+            }
+            Intr::SetThreadBlock => {
+                self.flush_all()?;
+                if args.len() != 1 {
+                    return Err(bad("set_thread_block argument count"));
+                }
+                self.load_to_x(xr(0), args[0])?;
+                self.a.word(0xD51B_D040); // msr tpidr_el0, x0
+                Ok(())
+            }
             Intr::CpuInit => match syms.cpu_init {
                 Some(sym) => self.call(Ok(sym), &[], None, &[], None),
                 None => Ok(()),

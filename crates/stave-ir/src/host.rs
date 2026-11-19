@@ -48,6 +48,8 @@ struct Nrs {
     rt_sigprocmask: u64,
     sigaltstack: u64,
     getpid: u64,
+    /// `arch_prctl` (x86-64 only; `u64::MAX` elsewhere).
+    arch_prctl: u64,
 }
 
 impl SyscallAbi {
@@ -68,6 +70,7 @@ impl SyscallAbi {
                 rt_sigprocmask: 14,
                 sigaltstack: 131,
                 getpid: 39,
+                arch_prctl: 158,
             },
             SyscallAbi::Aarch64 => Nrs {
                 read: 63,
@@ -84,6 +87,7 @@ impl SyscallAbi {
                 rt_sigprocmask: 135,
                 sigaltstack: 132,
                 getpid: 172,
+                arch_prctl: u64::MAX,
             },
         }
     }
@@ -98,13 +102,15 @@ const EINVAL: u64 = (-22i64) as u64;
 const ENOMEM: u64 = (-12i64) as u64;
 const MAP_ANONYMOUS: u64 = 0x20;
 const MREMAP_MAYMOVE: u64 = 1;
+const ARCH_SET_FS: u64 = 0x1002;
 
 /// A host that captures fd 1 and fd 2 in buffers and supports `write`, `exit`, `exit_group`,
 /// anonymous `mmap`, `munmap` (whole regions), and `mremap` (moving); `read` from fd 0 (the
 /// `stdin` buffer) and from read-only files of an in-memory file system (`files`, opened with
 /// `openat`, relative paths and `AT_FDCWD` only; `close`); `mprotect`, `rt_sigaction`,
-/// `rt_sigprocmask`, and `sigaltstack` succeed without effect; `getpid` returns 1. Other system
-/// calls return `-ENOSYS`. `cpuid` and `xgetbv` return zeros (no optional features);
+/// `rt_sigprocmask`, and `sigaltstack` succeed without effect; `getpid` returns 1; x86-64
+/// `arch_prctl(ARCH_SET_FS, p)` and the `set_thread_block(p)` intrinsic store the thread pointer,
+/// which `thread_block` returns (one thread: one word). Other system calls return `-ENOSYS`. `cpuid` and `xgetbv` return zeros (no optional features);
 /// `thread_start_addr` and `stack_table` return 0 (no stack table: the runtime defaults apply);
 /// `cpu_init` does nothing (the feature word stays 0, so a `dispatch` takes its `_` arm); any
 /// other intrinsic without arguments returns its entry of `values` (`main_addr`, `site_table`, `pc_table`, `signal_handler_addr`), if set.
@@ -120,6 +126,8 @@ pub struct BufferHost {
     pub values: std::collections::BTreeMap<String, u64>,
     /// Every system call made: (nr, args, result).
     pub log: Vec<(u64, [u64; 6], SysResult)>,
+    /// The thread pointer (`thread_block`); 0 until the program sets it.
+    pub thread_block: u64,
     /// Open files: fd - 3 → (contents, read position).
     open: Vec<Option<(Vec<u8>, usize)>>,
     stdin_pos: usize,
@@ -135,6 +143,7 @@ impl BufferHost {
             files: std::collections::BTreeMap::new(),
             values: std::collections::BTreeMap::new(),
             log: Vec::new(),
+            thread_block: 0,
             open: Vec::new(),
             stdin_pos: 0,
         }
@@ -208,6 +217,12 @@ impl BufferHost {
             SysResult::Ret(0)
         } else if nr == n.getpid {
             SysResult::Ret(1)
+        } else if nr == n.arch_prctl {
+            if a[0] != ARCH_SET_FS {
+                return SysResult::Ret(EINVAL);
+            }
+            self.thread_block = a[1];
+            SysResult::Ret(0)
         } else if nr == n.exit || nr == n.exit_group {
             SysResult::Exit((a[0] & 0xff) as i32)
         } else if nr == n.mmap {
@@ -254,6 +269,14 @@ impl Host for BufferHost {
             "cpuid" => Ok(Some(Val::agg(vec![Val::S(0), Val::S(0), Val::S(0), Val::S(0)]))),
             "xgetbv" | "thread_start_addr" | "stack_table" => Ok(Some(Val::S(0))),
             "cpu_init" => Ok(None),
+            "thread_block" => Ok(Some(Val::S(self.thread_block))),
+            "set_thread_block" => {
+                self.thread_block = args
+                    .first()
+                    .and_then(|v| v.bits())
+                    .ok_or("intrinsic.set_thread_block: operand 0")?;
+                Ok(None)
+            }
             // one thread only: thread creation fails like an unsupported system call
             "thread_clone" => Ok(Some(Val::S(ENOSYS))),
             _ => match self.values.get(name) {
