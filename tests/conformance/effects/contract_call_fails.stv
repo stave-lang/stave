@@ -42,6 +42,21 @@ fn by_clause(x: u32) -> u32 requires(x < 1) {
     return pos(x); //~ ERROR E0218
 }
 
+fn signed(x: i32) -> i32 requires(x > -5 && x < 5) {
+    return x;
+}
+
+fn at_the_ends() -> i32 {
+    let a = signed(-5); //~ ERROR E0218
+    let b = signed(5); //~ ERROR E0218
+    return a + b + signed(-4) + signed(4);
+}
+
+fn twice() -> u32 {
+    let a = pos(0); //~ ERROR E0218
+    return a + pos(0); //~ ERROR E0218
+}
+
 fn open(x: u32) -> u32 {
     return pos(x);
 }
@@ -88,6 +103,7 @@ fn main() {
     let b = open(1) + dead(4) + by_clause(0);
     let c = generic(1u8);
     let d = generic(2u64);
-    let e = traced() + configured();
+    let e = traced() + configured() + twice();
+    let g = at_the_ends();
     let f = in_closure::<0>() + in_closure::<4>();
 }

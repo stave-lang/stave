@@ -36,7 +36,14 @@ fn apply(f: fn(u32) -> u32 without(trap), x: u32) -> u32 without(trap) {
     return f(x);
 }
 
+fn held(y: u32) -> u32 {
+    let f = pos; //~ ERROR E1403
+    let g: fn(u32) -> u32 = pos;
+    return f(y) + g(y);
+}
+
 fn main() {
+    let d = held(6);
     let a = unknown(1) + half(2) + twice(3);
     let b = instance(4);
     let c = apply(pos, 5); //~ ERROR E1403

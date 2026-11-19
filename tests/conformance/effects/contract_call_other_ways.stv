@@ -29,6 +29,28 @@ fn by_dispatch(xs: &[u32]) -> u32 without(trap) { //~ ERROR E1401
     return a +% at_any(xs, 9);
 }
 
+view struct Holder {
+    h: fn(&[u32], usize) -> u32,
+}
+
+fn by_field(xs: &[u32], s: &Holder) -> u32 without(trap) { //~ ERROR E1401
+    let mut a: u32 = 0;
+    if xs.len() > 1 {
+        a = at(xs, 1);
+    }
+    let h = s.h;
+    return a +% h(xs, 9);
+}
+
+fn by_closure(xs: &[u32], i: usize) -> u32 without(trap) { //~ ERROR E1401
+    let mut a: u32 = 0;
+    if xs.len() > 1 {
+        a = at(xs, 1);
+    }
+    let g = fn(ys: &[u32], k: usize) -> u32 { return at(ys, k); };
+    return a +% g(xs, i);
+}
+
 fn only_direct(xs: &[u32]) -> u32 without(trap) {
     if xs.len() > 1 {
         return at(xs, 1);
@@ -38,5 +60,7 @@ fn only_direct(xs: &[u32]) -> u32 without(trap) {
 
 fn main() {
     let v: [u32; 4] = [1, 2, 3, 4];
+    let s = Holder.{ h: at };
     let r = by_value(&v, at) + by_dispatch(&v) + only_direct(&v);
+    let t = by_field(&v, &s) + by_closure(&v, 2);
 }
