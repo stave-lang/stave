@@ -1328,8 +1328,17 @@ impl<'a, 'b> Builder<'a, 'b> {
                     let r = self.op_of_place(h, span, u32::MAX, false);
                     self.push(StmtKind::Read(r), span, u32::MAX);
                 }
+                // a guard binding is a view of the scrutinee, which the arm then takes or the
+                // next arm tests: its value ends with the guard, and no borrow of it (a call in
+                // the guard may store one into a view) is used later
+                let span = self.span(g);
                 for b in self.guard_binds.split_off(gmark) {
-                    self.by_node.remove(&b);
+                    if let Some(l) = self.by_node.remove(&b)
+                        && self.open()
+                    {
+                        let node = self.body.locals[l as usize].node;
+                        self.push(StmtKind::StorageDead(l), span, node);
+                    }
                 }
                 let ok = self.new_block();
                 let mut next: Vec<BlockId> = vec![ok];
@@ -1554,8 +1563,8 @@ impl<'a, 'b> Builder<'a, 'b> {
         Some(Place::local(t, ty))
     }
 
-    /// A guard's view of binding `b`: a read-only local (not in any scope: it is never dropped)
-    /// holding the bound value, or a shared borrow for a binding by reference. Every alternative
+    /// A guard's view of binding `b`: a read-only local (not in any scope: it is never dropped,
+    /// and its storage ends with the guard) holding the bound value, or a shared borrow for a binding by reference. Every alternative
     /// of an or-pattern binds the one guard local of the first alternative's binding.
     fn bind_guard_name(&mut self, b: u32, src: Place) {
         let icx = self.icx;
