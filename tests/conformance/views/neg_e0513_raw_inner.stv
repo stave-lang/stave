@@ -1,0 +1,45 @@
+//~ CHECK-ONLY
+// A view that reaches two views of the caller through raw pointers is held to the rule of
+// `&mut` fields: one of them never takes what the other holds.
+view struct Pick { best: &u32, count: usize }
+
+unsafe("p is valid for one Pick that owner keeps alive and lends exclusively while the result lives")
+fn pick_mut(owner: &Pick, p: *mut Pick) -> &mut Pick from owner {
+    return unsafe("p is valid for one Pick and no other live reference reaches it") &mut *p;
+}
+
+view struct Two { ka: &Pick, kb: &Pick, a: *mut Pick, b: *mut Pick }
+
+impl Two {
+    fn new(a: &mut Pick, b: &mut Pick) -> Two from a + b {
+        let pa = &mut *a as *mut Pick;
+        let pb = &mut *b as *mut Pick;
+        return Two.{ ka: &*a, kb: &*b, a: pa, b: pb };
+    }
+
+    fn first(&mut self) -> &mut Pick from self {
+        return unsafe("a is the Pick ka lends exclusively") pick_mut(self.ka, self.a);
+    }
+
+    fn second(&mut self) -> &mut Pick from self {
+        return unsafe("b is the Pick kb lends exclusively") pick_mut(self.kb, self.b);
+    }
+}
+
+fn cross(t: &mut Two) {
+    let v: &u32 = t.first().best;
+    t.second().best = v; //~ ERROR E0513
+}
+
+fn cross_by_call(t: &mut Two) {
+    let v: &u32 = t.first().best;
+    store(t.second(), v); //~ ERROR E0513
+}
+
+fn store(dst: &mut Pick from x, x: &u32) {
+    dst.best = x;
+}
+
+fn main() -> i32 {
+    return 0;
+}
