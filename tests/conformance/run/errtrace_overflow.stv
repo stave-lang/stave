@@ -1,0 +1,16 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Unwrap at errtrace_overflow.stv:14:25 in main.main (thread 0)\n  from errtrace_overflow.stv:7:23 in main.deep\n  (8 earlier via sites not kept)\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n  via errtrace_overflow.stv:9:24 in main.deep\n"
+// An error passed through 40 `?`: the trace keeps the last 32 via sites and says how many
+// earlier ones it dropped.
+rec fn deep(n: u32) -> Result<u32, u32> {
+    if n == 0 {
+        return Result.Err(7u32);
+    }
+    let v = deep(n - 1)?;
+    return Result.Ok(v);
+}
+
+fn main() -> i32 {
+    let v = deep(40u32).unwrap();
+    return v as% i32;
+}

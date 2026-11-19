@@ -13,7 +13,8 @@ Option, Result, or std traits (only the built-in type names and `size_of`/`align
 | `runtime_x86_64.sys`, `runtime_aarch64.sys` | `{x86_64,aarch64}/sys.stv` | syscall numbers, `syscall0`–`syscall6` intrinsics, ucontext PC offset (one arch package per build, below) |
 | `runtime.alloc` | `alloc.stv` | global allocator over mmap/munmap/mremap |
 | `runtime.panic` | `panic.stv` | panic report, exit 101, SIGSEGV guard-page handler |
-| `runtime.state` | `state.stv` | the process-wide state block, one `static mut`; allocator lock, thread registry |
+| `runtime.state` | `state.stv` | the process-wide state block, one `static mut`; allocator lock, thread registry; the per-thread `Block` behind the thread pointer (`block()`: thread id, user site, error trace) |
+| `runtime.errtrace` | `errtrace.stv` | the calling thread's error trace in its `state.Block`: `restart`, `push` (the compiler's hooks of `Result.Err(..)` and `?`), `clear`, `save` / `restore` (a `Trace` copy), all trap-free |
 | `runtime.atomic` | `atomic.stv` | CPU atomic intrinsics (load/xchg/add/cas u32/u64) and a three-state futex lock |
 | `runtime.thread` | `thread.stv` | threads: mapping = guard + stack + altstack + record, clone3 (clone if ENOSYS), futex join on CLEARTID, ids, registry; `scope_spawn`/`scope_join` for `scope { spawn { } }`; `start`/`join`/`cpu_count` for std.thread |
 | `runtime.config` | `config.stv` | per-binary settings (`[run] stack`) |
@@ -21,7 +22,9 @@ Option, Result, or std traits (only the built-in type names and `size_of`/`align
 | `runtime_x86_64.cpu`, `runtime_aarch64.cpu` | `{x86_64,aarch64}/cpu.stv` | `probe(hwcap, hwcap2)`: raw feature bits from CPUID + XCR0 (x86-64) or AT_HWCAP/AT_HWCAP2 (AArch64); imported only by `runtime.cpu` |
 
 `syscalls.list`: the syscall set, one per line. Line i + 1 is call id i in `os.stv` (`SYS_*`) and the
-index into `NR` in each `sys.stv` (a test compares them).
+index into `NR` in each `sys.stv` (a test compares them). A row with an arch directory after the name
+(`arch_prctl x86_64`, last) is that arch's own: no call id, no `NR` entry; that arch's `sys.stv`
+names its `NR_*` constant in the call.
 
 ## Per-arch selection: per-target dependencies
 
@@ -57,6 +60,7 @@ below; this section restates what the runtime expects.
 ```
 runtime.panic.trap(kind: u32, site: u32) -> never
 runtime.panic.trap_msg(kind: u32, site: u32, msg: &[u8]) -> never  // + one line `msg` (std.debug.assert)
+runtime.panic.trap_err(kind: u32, site: u32) -> never  // + the thread's error trace (std's Result.unwrap)
 runtime.panic.requires_failed(clause: &str) -> never           // Contract at the user site, + the clause
 runtime.panic.ensures_failed(site: u32, clause: &str) -> never  // Contract at the return, + the clause
 ```
@@ -72,9 +76,14 @@ A panic during a panic exits 101 at once.
 std fn that may allocate (OutOfMemory) or panics for its caller (`std.debug.assert`,
 `Option/Result.unwrap`, `Vec.get_ref/get_mut` Bounds), store the call's site id with
 `runtime.panic.set_user_site(site: u32)` (or the same store inline: the `user_site` field of
-`runtime.state.STATE`). std reports `runtime.panic.user_site()`. In a program where some fn checks
+the calling thread's `runtime.state.Block`). std reports `runtime.panic.user_site()`. In a program where some fn checks
 a `requires` clause, user code also stores the site before a direct call of such a fn or of a
 `dispatch fn`, and before every call through a fn value: `requires_failed` reports there.
+
+**Error trace**: in fns of user packages, `runtime.errtrace.push(site)` where `?` on a `Result`
+takes the error path (before the scope drops and `ensures` checks; site: the `?` token) and
+`runtime.errtrace.restart(site)` after each evaluated `Result.Err(..)` constructor (site: the
+`Err` token). Neither is a call-graph edge (no effect).
 
 **Signals.** The compiler emits a C-ABI stub `__stave_signal(sig: int, info: *siginfo, uctx: *void)`
 that calls `runtime.panic.on_signal(sig: usize, info: usize, uctx: usize) -> never`; its address is
@@ -130,10 +139,11 @@ and `realloc` as roots; std's calls still go to `runtime.alloc`.
   table (the IR interpreter).
 - **Threads**: main runs on the start thread, switched onto its own mmap'd stack by
   `call_on_stack` (id 0, not in the registry). Other threads: runtime/thread.stv header. The
-  allocator's shared lists are guarded by one futex lock (`state.alloc_lock`); `user_site` and
-  `panicking` stay process-wide (a report from a thread may name another thread's last user
-  site; a second concurrent panic waits for the first report's exit). A thread's id is found from
-  the address of a local through the registry. If a thread cannot be created (no memory, the
+  allocator's shared lists are guarded by one futex lock (`state.alloc_lock`); `panicking` is
+  process-wide (a second concurrent panic waits for the first report's exit). Each thread's id,
+  user site, and error trace are in its own `state.Block`, found through the thread pointer
+  (contracts/intrinsics.md "Thread pointer"): main's in `STATE`, set first by `start.entry`; a
+  thread's in its record page, set by `CLONE_SETTLS`. If a thread cannot be created (no memory, the
   guard pages cannot be protected, EAGAIN) the program panics with "cannot create thread"; only in the IR interpreter (clone is ENOSYS)
   the body runs inline on the creating thread.
 - **A5** a fn value is two words, (code, environment) (contracts/checked-ir.md "Closures");

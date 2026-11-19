@@ -3,8 +3,8 @@
 //! `main_addr`, `signal_handler_addr`, `site_table`, `pc_table`, `stack_table`, the CPU atomics
 //! `atomic_{load,xchg,add,cas}_{u32,u64}` (sequentially consistent: `mov` / `xchg` / `lock xadd` /
 //! `lock cmpxchg` on `[rcx]`), and `thread_clone` (a thread-creating system call whose child runs
-//! `__stave_thread_start(arg)` on its new stack, then the `exit` system call), and `cpu_init` (a
-//! call of `runtime.cpu.init` when the module has it, else nothing).
+//! `__stave_thread_start(arg)` on its new stack, then the `exit` system call), `cpu_init` (a
+//! call of `runtime.cpu.init` when the module has it, else nothing), and `thread_block` (`fs:[0]`).
 
 use stave_ir::layout::Shape;
 use stave_ir::{Operand, TypeId, Value};
@@ -206,6 +206,16 @@ impl Cg<'_, '_> {
                 self.a.shift_ri(ShiftOp::Shl, Size::Q, RDX, 32)?;
                 self.a.mov_rr(Size::D, RAX, RAX);
                 self.a.alu_rr(AluOp::Or, Size::Q, RAX, RDX);
+                match res {
+                    Some(v) => self.bind_g(v, RAX),
+                    None => Ok(()),
+                }
+            }
+            "thread_block" => {
+                // the block's first word is its own address, so `fs:[0]` is the block
+                arity(0)?;
+                self.reserve_g(RAX)?;
+                self.a.raw(&[0x64, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0]); // mov rax, fs:[0]
                 match res {
                     Some(v) => self.bind_g(v, RAX),
                     None => Ok(()),

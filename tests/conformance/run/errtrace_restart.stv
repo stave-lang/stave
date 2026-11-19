@@ -1,0 +1,37 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Unwrap at errtrace_restart.stv:35:29 in main.main (thread 0)\n  from errtrace_restart.stv:20:23 in main.fresh\n  via errtrace_restart.stv:26:21 in main.wrap\n"
+// Each `Result.Err(..)` restarts the thread's error trace: the handled error of `twice` leaves
+// nothing behind, and the report shows only the new error's origin and its one `?`.
+fn check(n: u32) -> Result<u32, u32> {
+    if n > 10 {
+        return Result.Err(n);
+    }
+    return Result.Ok(n);
+}
+
+fn twice(n: u32) -> Result<u32, u32> {
+    let a = check(n)?;
+    let b = check(a)?;
+    return Result.Ok(a + b);
+}
+
+fn fresh(n: u32) -> Result<u32, u32> {
+    if n == 0 {
+        return Result.Err(n);
+    }
+    return Result.Ok(n);
+}
+
+fn wrap(n: u32) -> Result<u32, u32> {
+    let v = fresh(n)?;
+    return Result.Ok(v);
+}
+
+fn main() -> i32 {
+    let first = match twice(50u32) {
+        Result.Ok(v) => v,
+        Result.Err(e) => e,
+    };
+    let second = wrap(0u32).unwrap();
+    return (first + second) as% i32;
+}

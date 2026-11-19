@@ -144,6 +144,17 @@ atomics are sequentially consistent; `p` is the address (naturally aligned) as `
 | `atomic_xchg_u32/u64(p, v) -> old` | x86-64 / AArch64 | `xchg` / `ldaxr`+`stlxr` loop |
 | `atomic_add_u32/u64(p, v) -> old` (wrapping) | x86-64 / AArch64 | `lock xadd` / `ldaxr`+`add`+`stlxr` loop |
 | `atomic_cas_u32/u64(p, expected, new) -> old` | x86-64 / AArch64 | `lock cmpxchg` / `ldaxr`+`cmp`+`b.ne`+`stlxr` loop (`clrex` on failure) |
+| `thread_block() -> usize` | x86-64 | `mov rax, fs:[0]` (`64 48 8B 04 25 00 00 00 00`): the first word of the FS segment, which is the address of the calling thread's block |
+| same | AArch64 | `mrs x0, tpidr_el0` (`D53BD040`) |
+| `set_thread_block(p: usize)` | AArch64 | `msr tpidr_el0, x0` (`D51BD040`), x0 = p |
+
+**Thread pointer.** Each CPU thread's thread pointer holds the address of its block
+(`runtime.state.Block`, 160 bytes, first word = its own address, so x86-64 reads it as `fs:[0]`).
+`runtime.start.entry` sets main's first, before any other code: x86-64 with the `arch_prctl`
+system call (`ARCH_SET_FS`), AArch64 with `set_thread_block`. A thread gets its own through
+`CLONE_SETTLS` (`clone_args.tls`, or the `tls` argument of `clone`), so its creation needs no other
+call. The IR interpreter's host keeps one word: `set_thread_block(p)` and `arch_prctl(ARCH_SET_FS,
+p)` store `p`, `thread_block()` returns it (0 before).
 
 `nr` is the arch's `clone3` (`a1` = `struct clone_args`, `a2` = its size) or `clone` number
 (runtime `sys.stv` passes the arch's argument order); the `exit` system call of the child path is
@@ -205,7 +216,11 @@ list):
   `runtime.thread.start(f: fn()) -> usize` (every fn value it can be given gets a stack-table
   row; it calls `f` itself where no thread can be created),
   `runtime.panic.trap`, `runtime.panic.trap_msg`, `runtime.panic.on_signal`,
-  `runtime.panic.set_user_site`, `runtime.panic.requires_failed(clause: &str)` and
+  `runtime.panic.set_user_site`, the error-trace hooks `runtime.errtrace.push(site: u32)` (the
+  error path of `?` on a `Result`, before its scope drops and `ensures` checks; site: the `?`
+  token) and `runtime.errtrace.restart(site: u32)` (each evaluated `Result.Err(..)` constructor;
+  site: the `Err` token), both called only in fns of user packages,
+  `runtime.panic.requires_failed(clause: &str)` and
   `runtime.panic.ensures_failed(site: u32, clause: &str)` (a false contract clause),
   `runtime.panic.test_input()` and `runtime.panic.test_skip()` (the stdout markers of a `test fn`
   with parameters, cli.md "Test fn inputs"), `runtime.cpu.WORD` (a `u64` static; dispatch bodies load it),

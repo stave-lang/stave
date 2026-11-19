@@ -75,6 +75,10 @@ pub(crate) enum Intr {
     StaticAddr,
     ThreadClone,
     CpuInit,
+    /// `mrs x0, tpidr_el0`.
+    ThreadBlock,
+    /// `msr tpidr_el0, x0`.
+    SetThreadBlock,
     /// `atomic_<op>_u32/u64`: op 0 load, 1 xchg, 2 add, 3 cas; wide = u64.
     Atomic {
         op: u8,
@@ -104,6 +108,8 @@ fn intr_kind(name: &str) -> Intr {
         "static_addr" => Intr::StaticAddr,
         "thread_clone" => Intr::ThreadClone,
         "cpu_init" => Intr::CpuInit,
+        "thread_block" => Intr::ThreadBlock,
+        "set_thread_block" => Intr::SetThreadBlock,
         "cpuid" | "xgetbv" => Intr::X86Only,
         _ if name.starts_with("atomic_") => {
             let rest = &name["atomic_".len()..];

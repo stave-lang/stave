@@ -1,0 +1,30 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Unwrap at threads_user_site.stv:19:14 in main.second (thread 2)\n"
+// Each thread has its own user site and id (its thread block): thread 1 keeps storing its own
+// user site (every `debug.assert` call) while thread 2 unwraps a None, and the report names
+// thread 2's `unwrap` and thread 2.
+import std.debug;
+
+fn first(n: u32) -> u32 {
+    let mut k: u32 = 0;
+    while k < n {
+        debug.assert(k < n, "in range");
+        k = k + 1;
+    }
+    return k;
+}
+
+fn second(n: u32) -> u32 {
+    let v: Option<u32> = if n > 8 then Option.Some(n) else Option.None;
+    return v.unwrap();
+}
+
+fn main() -> i32 {
+    let mut a: u32 = 0;
+    let mut b: u32 = 0;
+    scope {
+        spawn { a = first(1000000u32); }
+        spawn { b = second(2u32); }
+    }
+    return (a +% b) as% i32;
+}

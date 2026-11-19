@@ -176,6 +176,7 @@ pub const BOUNDARY: &[(&str, &str, Effects, OpKind)] = &[
     ("runtime.alloc", "try_realloc", Effects::ALLOC, OpKind::Alloc),
     ("runtime.panic", "trap", Effects::TRAP, OpKind::Trap),
     ("runtime.panic", "trap_msg", Effects::TRAP, OpKind::Trap),
+    ("runtime.panic", "trap_err", Effects::TRAP, OpKind::Trap),
     ("runtime.panic", "abort", Effects::TRAP, OpKind::Trap),
     ("runtime.panic", "requires_failed", Effects::TRAP, OpKind::Trap),
     ("runtime.panic", "ensures_failed", Effects::TRAP, OpKind::Trap),

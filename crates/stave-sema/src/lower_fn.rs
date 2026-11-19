@@ -1303,6 +1303,23 @@ impl<'a> FnCx<'a> {
         self.f.b.call(f, None, &[c]);
     }
 
+    /// In a user fn, a call of error-trace hook `hook` (`runtime.errtrace.push` / `restart`) with
+    /// the site of token `tok`. Like the user-site store it is no call-graph edge, so it adds no
+    /// effect; the callee neither traps nor stores a user site.
+    pub fn errtrace_hook(&mut self, hook: Option<DeclId>, tok: u32) {
+        let Some(d) = hook else { return };
+        if !self.user || !self.open() {
+            return;
+        }
+        let s = self.site(tok);
+        let c = self.f.b.int(s.0 as i128);
+        if let Operand::Const(ci) = c {
+            self.f.site_consts.push(ci);
+        }
+        let f = self.req(Req::Inst(InstKey { decl: d, args: Vec::new() }));
+        self.f.b.call(f, None, &[c]);
+    }
+
     pub fn emit_call(&mut self, f: FuncId, args: &[Operand], ret: Ty, tok: u32) -> E {
         let rt = self.ret_of(ret);
         let s = self.site(tok);
