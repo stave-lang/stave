@@ -175,6 +175,11 @@ impl At {
 }
 
 impl MemReport {
+    /// A trace on one line: `f (file:l:c) <- g (file:l:c) ..`, innermost first.
+    pub fn trace_text(m: &Module, t: &Trace) -> String {
+        t.iter().map(|at| site_text(m, at)).collect::<Vec<_>>().join(" <- ")
+    }
+
     /// Multi-line text: `memory error [<class>]: ...`, then the access trace, then where the
     /// allocation was made and freed.
     pub fn render(&self, m: &Module) -> String {

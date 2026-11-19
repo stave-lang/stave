@@ -14,6 +14,7 @@
 //! program reading `input.txt` from its working directory gets the same bytes.
 
 use stave_ir::interp::{Config, Interp, Outcome, Val};
+use stave_ir::memcheck::MemReport;
 use stave_ir::{BufferHost, Module, PanicKind, Site, SyscallAbi};
 use stave_target::{Arch, Triple};
 
@@ -46,6 +47,9 @@ pub struct Interpreted {
     pub ran: Ran,
     pub syscalls: Vec<u64>,
     pub steps: u64,
+    /// Checking mode: the runtime-allocator blocks still live at exit, as (size, where
+    /// allocated); not an error (a panic exits without drops, `mem.forget` leaks by design).
+    pub leaks: Vec<(u64, String)>,
 }
 
 /// Runs `m` (a module lowered for `target`) with `main_path` as `main`, argv `[prog, args..]`,
@@ -110,10 +114,16 @@ pub fn run(
         o => return Err(format!("interp: the program did not exit: {o:?}")),
     };
     let steps = it.steps();
+    let leaks = it
+        .live_heap_blocks()
+        .into_iter()
+        .map(|(_, size, at)| (size, MemReport::trace_text(&m, &at)))
+        .collect();
     let h = it.into_host();
     Ok(Interpreted {
         ran: Ran { exit, stdout: h.stdout, stderr: h.stderr },
         syscalls: h.log.iter().map(|l| l.0).collect(),
         steps,
+        leaks,
     })
 }
