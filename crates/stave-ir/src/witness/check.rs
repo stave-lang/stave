@@ -41,6 +41,7 @@ use crate::ir::{
     Block, Body, CastKind, FuncId, InstanceId, Module, Op, Operand, Span, Target, Term, Value, ValueDef,
 };
 use crate::types::{IntBits, TypeKey};
+use std::sync::Arc;
 
 /// Why a witness does not hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -136,6 +137,8 @@ pub struct Checked {
     safe: Vec<u32>,
     calls: Vec<u32>,
     call_refuted: Vec<u32>,
+    /// The accepted summary, if it states anything.
+    summary: Option<Arc<Summary>>,
 }
 
 impl Checked {
@@ -247,6 +250,7 @@ pub fn check_func_in(m: &Module, w: &FnWitness, sums: &Summaries<'_>) -> Result<
         safe: w.summary.safe.iter().map(|s| s.inst).collect(),
         calls: w.calls.proved.iter().map(|c| c.inst).collect(),
         call_refuted: w.calls.refuted.iter().map(|c| c.inst).collect(),
+        summary: (!w.summary.is_empty()).then(|| Arc::new(w.summary.clone())),
     })
 }
 
@@ -437,6 +441,19 @@ pub fn remove(m: &mut Module, checked: &[Checked]) -> Removal {
         quiet.sort_unstable();
         remove_checks(b, &dead, &c.jumps, &mut quiet);
         out.entry.push((c.func, quiet));
+    }
+    // What each function states, as certified on the bodies with every check in place: a later
+    // reading of a body that lost its checks would find fewer rows.
+    m.stated.resize(m.funcs.len(), None);
+    for c in checked {
+        if let Some(slot) = m.stated.get_mut(c.func.index())
+            && slot.is_none()
+        {
+            *slot = c.summary.clone();
+        }
+    }
+    for (k, &g) in clones.iter().enumerate() {
+        m.stated[n + k] = m.stated[g].clone();
     }
     out
 }

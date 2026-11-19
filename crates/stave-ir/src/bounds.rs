@@ -76,6 +76,16 @@
 //! this, the checker certifies no dead code: leaving a refutation out keeps a runtime check and
 //! removes nothing.
 //!
+//! **Calls.** Functions meet only through summaries ([`crate::witness::Summary`], `bounds/summary.rs`):
+//! rows over a function's parameters and result, read off its own body by folding alone
+//! ([`claim_func`]), so the function's witness and all its callers read the same rows. After a
+//! call, the callee's `post` rows and the `pre` rows that read a `requires` check are facts of
+//! the graph. A call of a function whose summary has an entry is one more query, right before
+//! the call: every `pre` row about the arguments proved (the call goes to the unchecked entry),
+//! or the negation of a row that reads a check proved at a point not shown dead (the call always
+//! fails: [`call_findings`]), or neither (the call keeps the checked entry). All or nothing per
+//! call.
+//!
 //! The pass deletes nothing. Its result is a witness per check ([`crate::witness`]): the proof
 //! written out as a chain of inequalities, each naming the place of the IR it is read from. The
 //! separate checker [`crate::witness::check`] validates every chain, refutations included, and
@@ -458,7 +468,13 @@ pub fn audit_func(m: &Module, fid: FuncId) -> (Vec<Access>, Vec<Unguarded>) {
     if !has_access(b) {
         return (Vec::new(), Vec::new());
     }
-    Cx::new(m, b, None).audit(f, fid)
+    let mut cx = Cx::new(m, b, None);
+    // After the removal the callees' own checks may be gone: read calls as the checker certified
+    // them.
+    if !m.stated.is_empty() {
+        cx.claims = Some(&m.stated);
+    }
+    cx.audit(f, fid)
 }
 
 /// Only these ops can be element accesses: without one there is nothing to audit.
@@ -602,8 +618,8 @@ fn has_contract(m: &Module, b: &Body) -> bool {
 /// Per-function analysis context.
 struct Cx<'a> {
     m: &'a Module,
-    /// The summaries of the module's functions, when the caller computed them.
-    claims: Option<&'a Claims>,
+    /// The summaries of the module's functions, by function, when the caller has them.
+    claims: Option<&'a [Option<Arc<Summary>>]>,
     types: &'a TypeTable,
     /// The module's functions (callee bodies for asserting calls).
     funcs: &'a [Func],
@@ -708,7 +724,7 @@ impl<'a> Cx<'a> {
         let contracts = contract_checks(funcs, b, &dom, &preds);
         Cx {
             m,
-            claims,
+            claims: claims.map(|c| &c.0[..]),
             types,
             funcs,
             b,
@@ -724,7 +740,7 @@ impl<'a> Cx<'a> {
     /// The summary function `f` states: from the module's table, or computed here once.
     fn claim(&self, f: FuncId) -> Option<Arc<Summary>> {
         if let Some(c) = self.claims {
-            return c.0.get(f.index()).cloned().flatten();
+            return c.get(f.index()).cloned().flatten();
         }
         if let Some(s) = self.facts.claims.borrow().get(&f) {
             return s.clone();

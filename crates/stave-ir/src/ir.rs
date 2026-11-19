@@ -709,6 +709,11 @@ pub struct Module {
     pub sites: Vec<SiteInfo>,
     /// `static` and `static mut` globals by index (`intrinsic.static_addr <index>`).
     pub statics: Vec<Static>,
+    /// Per function, the summary the witness checker certified when it removed the checks
+    /// ([`crate::witness::check::remove`]; empty before that). A check removed by a fact about a
+    /// call is no longer provable from the bodies alone once the callee's own checks are gone:
+    /// the bounds audit reads calls with these rows.
+    pub stated: Vec<Option<std::sync::Arc<crate::witness::Summary>>>,
 }
 
 impl Module {
