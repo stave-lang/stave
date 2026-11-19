@@ -36,7 +36,8 @@ fn via_fn_caller() -> u32 {
     let mut k = Pick.{ best: &zero, count: 0 };
     {
         let y: u32 = 7;
-        via_fn(&mut k, fn() -> &mut Pick { return &mut a; }, &y);
+        // the closure lends its `&mut` capture again on every call
+        via_fn(&mut k, fn() -> &mut Pick { return &mut a; }, &y); //~ ERROR E0512
     } //~ ERROR E0501
     return *a.best; //~ ERROR E0501
 }

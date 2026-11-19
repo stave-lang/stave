@@ -1,13 +1,14 @@
 //~ CHECK-ONLY
-// A closure that splits the `&mut` param it is given returns a reborrow: not stored. The
-// caller keeps the source view borrowed all the same.
+// A closure that splits the `&mut` param it captures returns borrows of a `&mut` capture
+// (E0512), which hold a loan of the fn and are not stored. The caller keeps the source view
+// borrowed all the same.
 import std.io;
 
 view struct Cur { cur: &u32, n: u32 }
 view struct Two { slot: &mut &u32, n: &u32 }
 
 fn link(dst: &mut Cur from src, src: &mut Cur) {
-    let f = fn() -> Two { return Two.{ slot: &mut src.cur, n: &src.n }; };
+    let f = fn() -> Two { return Two.{ slot: &mut src.cur, n: &src.n }; }; //~ ERROR E0512
     let two = f();
     *two.slot = two.n; //~ ERROR E0513
 }
