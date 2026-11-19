@@ -27,7 +27,9 @@
 //! **Entry effect.** A `requires` check the removal kept is no effect of the fn's set: it is the
 //! fn's entry effect ([`EffectSets::entry`], `trap`), with the `add`/`sub` of the clauses that the
 //! proved clauses keep in range ([`NodeIr::entry`]). An edge carries the callee's entry effect
-//! unless the checked IR shows that every call of the callee in the caller proves its `requires`
+//! unless the caller reaches the callee by calls of it alone ([`crate::callgraph::Edge::calls`]:
+//! not also through a fn value or a `dispatch fn`, whose calls do not name the callee in the
+//! caller's IR) and the checked IR shows that every one of them proves its `requires`
 //! ([`EffectSets::proved`]); a fn value carries it always. So a deny clause on a fn with a
 //! `requires` is about calls inside the precondition, and a caller that does not prove the
 //! precondition has `trap` through the edge: its diagnostic ends at the callee and names the
@@ -265,10 +267,10 @@ impl Plan {
     }
 }
 
-/// Whether an edge of kind `k` is a direct call: the only calls a proof of the callee's
-/// `requires` can send past its checks.
-fn direct(k: EdgeKind) -> bool {
-    matches!(k, EdgeKind::Call | EdgeKind::Dispatch { .. })
+/// Whether an edge of kind `k` may stand for a call the caller's body makes (a pair's edge has
+/// the kind of its first member, so every kind a call can hide behind counts).
+fn may_call(k: EdgeKind) -> bool {
+    matches!(k, EdgeKind::Call | EdgeKind::Dispatch { .. } | EdgeKind::Indirect)
 }
 
 /// The fn nodes whose bodies have a contract check (a checked `requires` or an `ensures`), and
@@ -295,7 +297,7 @@ pub fn contract_nodes(tc: &Typeck) -> Vec<u32> {
             let (requires, ensures) = per_node[i as usize];
             let calls = || {
                 !matches!(g.nodes[i as usize].kind, NodeKind::Table { .. } | NodeKind::Glue { .. })
-                    && g.succ(i).iter().any(|e| direct(e.kind) && per_node[e.to as usize].0)
+                    && g.succ(i).iter().any(|e| may_call(e.kind) && per_node[e.to as usize].0)
             };
             requires || ensures || calls()
         })
@@ -340,10 +342,11 @@ impl EffectSets {
         Some(Op { kind: OpKind::Requires, span })
     }
 
-    /// The entry effect of its target that `edge` from `m` carries: all of it, unless the edge
-    /// is a direct call and every such call in `m` proves the target's `requires`.
+    /// The entry effect of its target that `edge` from `m` carries: all of it, unless `m`
+    /// reaches the target by calls of it alone ([`crate::callgraph::Edge::calls`]) and every
+    /// one of them proves the target's `requires`.
     fn enters(&self, m: u32, edge: &crate::callgraph::Edge) -> Effects {
-        if direct(edge.kind) && self.proved.binary_search(&(m, edge.to)).is_ok() {
+        if edge.calls && self.proved.binary_search(&(m, edge.to)).is_ok() {
             return Effects::NONE;
         }
         self.entry.get(edge.to as usize).copied().unwrap_or(Effects::NONE)
@@ -623,7 +626,7 @@ pub fn solve_with(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>, proved: &[
     let entry: Vec<Effects> =
         entry_at.iter().map(|s| if s.is_some() { Effects::TRAP } else { Effects::NONE }).collect();
     let enters = |m: u32, e: &crate::callgraph::Edge| {
-        let skips = direct(e.kind) && proved.binary_search(&(m, e.to)).is_ok();
+        let skips = e.calls && proved.binary_search(&(m, e.to)).is_ok();
         if skips { Effects::NONE } else { entry[e.to as usize] }
     };
     // levels, callees first: an SCC's set from its members and the SCCs below

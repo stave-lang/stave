@@ -152,6 +152,10 @@ pub struct Edge {
     /// an [`EdgeKind::Indirect`] edge, the deny clause of the fn type of its calls (of several
     /// calls to one table, what all of them deny); 0 for every other edge.
     pub deny: u8,
+    /// Every way the caller reaches this target is an [`EdgeKind::Call`]: no call through a fn
+    /// value or a `dispatch fn` is folded into this edge. Only then does the caller's own IR
+    /// name the target at each call of it.
+    pub calls: bool,
 }
 
 /// A fn-value target table.
@@ -1851,20 +1855,23 @@ fn finish(w: Walk<'_>) -> CallGraph {
         fill[e.0 as usize] += 1;
     }
     let mut kept: Vec<u32> = Vec::with_capacity(raw.len());
-    let mut kept_deny: Vec<u8> = Vec::with_capacity(raw.len());
+    // Per kept edge: the deny bits all edges of its pair share, and whether all of them are calls.
+    let mut kept_deny: Vec<(u8, bool)> = Vec::with_capacity(raw.len());
     let mut new_start = vec![0u32; n + 1];
     for v in 0..n {
         let list = &mut slots[out_start[v] as usize..out_start[v + 1] as usize];
         list.sort_by_key(|&i| raw[i as usize].1);
         let mut last = u32::MAX;
         for &i in list.iter() {
-            let (_, to, _, _, deny) = raw[i as usize];
+            let (_, to, kind, _, deny) = raw[i as usize];
+            let call = kind == EdgeKind::Call;
             if to != last {
                 last = to;
                 kept.push(i);
-                kept_deny.push(deny);
+                kept_deny.push((deny, call));
             } else if let Some(d) = kept_deny.last_mut() {
-                *d &= deny;
+                d.0 &= deny;
+                d.1 &= call;
             }
         }
         new_start[v + 1] = kept.len() as u32;
@@ -1873,9 +1880,9 @@ fn finish(w: Walk<'_>) -> CallGraph {
     let out: Vec<Edge> = kept
         .par_iter()
         .zip(kept_deny.par_iter())
-        .map(|(&i, &deny)| {
+        .map(|(&i, &(deny, calls))| {
             let (_, to, kind, site, _) = raw[i as usize];
-            Edge { to, kind, site: site.span(prog), deny }
+            Edge { to, kind, site: site.span(prog), deny, calls }
         })
         .collect();
     let callers: Vec<u32> = kept.iter().map(|&i| raw[i as usize].0).collect();
@@ -2150,8 +2157,10 @@ mod tests {
             out_start[i + 1] += out_start[i];
         }
         let site = Span::new(stave_diag::FileId(0), 0, 0);
-        let out: Vec<Edge> =
-            es.iter().map(|&(_, t)| Edge { to: t, kind: EdgeKind::Call, site, deny: 0 }).collect();
+        let out: Vec<Edge> = es
+            .iter()
+            .map(|&(_, t)| Edge { to: t, kind: EdgeKind::Call, site, deny: 0, calls: true })
+            .collect();
         let callers: Vec<u32> = es.iter().map(|e| e.0).collect();
         let (in_start, in_edges) = transpose(n, &out_start, &out);
         let to: Vec<u32> = out.iter().map(|e| e.to).collect();

@@ -1,0 +1,42 @@
+//~ CHECK-ONLY
+// A proved call of a fn does not cover the other ways its caller reaches it: a call through a
+// fn value that holds it, or through a `dispatch fn` with it as an arm, proves nothing, so the
+// caller still has `trap` from the `requires` (E1401). A caller that only calls it, and proves
+// each call, has none.
+fn at(xs: &[u32], i: usize) -> u32 without(trap) requires(i < xs.len()) {
+    return xs[i];
+}
+
+fn at_wide(xs: &[u32], i: usize) -> u32 needs(avx2) without(trap) requires(i < xs.len()) {
+    return at(xs, i);
+}
+
+dispatch fn at_any(xs: &[u32], i: usize) -> u32 { avx2 => at_wide, _ => at, }
+
+fn by_value(xs: &[u32], h: fn(&[u32], usize) -> u32) -> u32 without(trap) { //~ ERROR E1401
+    let mut a: u32 = 0;
+    if xs.len() > 1 {
+        a = at(xs, 1);
+    }
+    return a +% h(xs, 9);
+}
+
+fn by_dispatch(xs: &[u32]) -> u32 without(trap) { //~ ERROR E1401
+    let mut a: u32 = 0;
+    if xs.len() > 1 {
+        a = at(xs, 1);
+    }
+    return a +% at_any(xs, 9);
+}
+
+fn only_direct(xs: &[u32]) -> u32 without(trap) {
+    if xs.len() > 1 {
+        return at(xs, 1);
+    }
+    return 0;
+}
+
+fn main() {
+    let v: [u32; 4] = [1, 2, 3, 4];
+    let r = by_value(&v, at) + by_dispatch(&v) + only_direct(&v);
+}
