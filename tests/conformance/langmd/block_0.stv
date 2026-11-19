@@ -32,7 +32,7 @@ fn parse(s: &[u8]) -> Result<u32, ParseErr> {
     if s.len() == 0 { return Result.Err(ParseErr.Empty); }
     let mut acc: u32 = 0;
     for i in 0..s.len() {
-        acc = acc * 10 + digit(s[i])?;      // traps on overflow; use *% / +% to wrap
+        acc = acc * 10 + digit(s[i])?;
     }
     return Result.Ok(acc);
 }

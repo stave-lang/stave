@@ -620,7 +620,9 @@ impl Program {
         for (i, m) in mods.iter().enumerate() {
             let rp = &loaded.packages[pending[i].pf.package];
             let Some(&first) = m.path.first() else { continue };
-            let head = strings.get(first);
+            // A file stem may hold dots (`src/runtime.panic.stv`): its path text then starts
+            // like the built-in module's.
+            let head = strings.get(first).split('.').next().unwrap_or_default();
             if rp.kind == PackageKind::Builtin || !builtin_roots.contains(&head) {
                 continue;
             }

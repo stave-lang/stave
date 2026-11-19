@@ -6,7 +6,8 @@
 //! - [`build`]: [`FuncBuilder`] for the front end's lowering.
 //! - [`fence`]: the placement of `mem.fence_stream` after streaming stores.
 //! - [`verify`]: structure, dominance, block params, terminators, op typing.
-//! - [`interp`]: the scalar reference interpreter (oracle) over [`mem`] with a pluggable [`host`].
+//! - [`interp`]: the scalar reference interpreter (oracle) over [`mem`] with a pluggable [`host`];
+//!   [`memcheck`]: its checking mode (memory errors as an outcome).
 //! - [`print_checked`]: the canonical checked-IR text of contracts/checked-ir.md.
 //! - [`simd`]: vector and mask ops ([`VecOp`]) and their lane semantics.
 //! - [`arith`]: scalar op and cast semantics; [`layout`]: memory layout of IR types.
@@ -27,6 +28,7 @@ pub mod ir;
 pub mod layout;
 pub mod link;
 pub mod mem;
+pub mod memcheck;
 pub mod print_checked;
 pub mod simd;
 pub mod traps;

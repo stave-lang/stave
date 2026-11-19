@@ -16,6 +16,7 @@ GPU) both implement them.
 | `cli.md` | `stave` command line |
 | `simd-ops.md` | portable vector ops and lowering classes (stave-target's tests check `crates/stave-target/tables/` against it) |
 | `checked-ir.md` | canonical checked-IR print format |
+| `lang-details.md` | fine print behind one-sentence rules of `LANG.md`: output formats, case lists, reasons |
 | `soundness.md` | the argument for each static rule whose failure would let an accepted program misbehave |
 | `borrow-model.md` | what a program may do with references at run time (tags, permissions per byte); the static borrow rules must imply it, and the interpreter's borrow tracking reports against it |
 | `intrinsics.md` | `extern "stave-intrinsic"` operations and program entry |

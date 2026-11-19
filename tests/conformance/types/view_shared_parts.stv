@@ -1,0 +1,34 @@
+//~ CHECK-ONLY
+// `P21` has 2^21 leaves but only 22 distinct component types. Whether a type is a view is
+// decided over the distinct types, so the reference next to it is found and `Holder` (not a
+// view) cannot hold it.
+type P0 = [u8; 0];
+type P1 = (P0, P0);
+type P2 = (P1, P1);
+type P3 = (P2, P2);
+type P4 = (P3, P3);
+type P5 = (P4, P4);
+type P6 = (P5, P5);
+type P7 = (P6, P6);
+type P8 = (P7, P7);
+type P9 = (P8, P8);
+type P10 = (P9, P9);
+type P11 = (P10, P10);
+type P12 = (P11, P11);
+type P13 = (P12, P12);
+type P14 = (P13, P13);
+type P15 = (P14, P14);
+type P16 = (P15, P15);
+type P17 = (P16, P16);
+type P18 = (P17, P17);
+type P19 = (P18, P18);
+type P20 = (P19, P19);
+type P21 = (P20, P20);
+
+struct Holder {
+    pub r: (&u32, Option<P21>), //~ ERROR E0410
+}
+
+fn main() -> i32 {
+    return 0;
+}
