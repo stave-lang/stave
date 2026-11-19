@@ -1,0 +1,14 @@
+//~ BORROWCHECK two-exclusive 11 10
+// A raw pointer made from a `&mut` param carries the tag of the reborrow the call made: a
+// write through the caller's reference ends it.
+fn leak(m: &mut u32) -> *mut u32 { return m as *mut u32; }
+
+fn main() -> i32 {
+    let mut x: u32 = 1u32;
+    let r: &mut u32 = &mut x;
+    let p = leak(r);
+    *r = 2u32;
+    unsafe("deliberate: the borrow p was made from ended at the write through r") { *p = 3u32; }
+    if x == 3u32 { return 1; }
+    return 0;
+}

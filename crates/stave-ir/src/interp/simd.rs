@@ -63,14 +63,14 @@ impl<H: Host> Interp<'_, H> {
         if simd::elem_ptr_operand(&self.m.types, t).is_some() {
             // unchecked: its bounds check is a separate instruction
             return match self.eval(body, regs, o)? {
-                Val::S(a) => Ok((a, u64::MAX)),
+                Val::S(a) | Val::T(a, _) => Ok((a, u64::MAX)),
                 _ => Err(malformed("memory operand value")),
             };
         }
         let mo = simd::mem_operand(&self.m.types, t).ok_or(malformed("memory operand type"))?;
         match (self.eval(body, regs, o)?, mo.len) {
-            (Val::Pair(a, n), None) => Ok((a, n)),
-            (Val::S(a), Some(n)) => Ok((a, n)),
+            (Val::Pair(a, n) | Val::PairT(a, n, _), None) => Ok((a, n)),
+            (Val::S(a) | Val::T(a, _), Some(n)) => Ok((a, n)),
             _ => Err(malformed("memory operand value")),
         }
     }

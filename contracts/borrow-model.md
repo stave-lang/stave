@@ -541,6 +541,30 @@ the `from` clauses of each fn (M24).
 the IR: `load`, `store`, `vec.*` memory ops, and intrinsics that take a pointer are M1 and M2;
 `addr.*` and casts keep the tag (M20).
 
+## Side table
+
+The tracking mode runs a module lowered for it (`Options::borrow_marks` of the driver's
+pipeline; no `stave` command and no environment variable asks for it). That lowering differs
+from the canonical one in what this section lists, and in nothing else. Its module is not the
+canonical checked IR: it is not dumped, not compared with a golden, and not given to a backend.
+
+- **A borrow is a value of its own.** In the canonical IR `&x` is the `slot` value of `x`, and
+  `&*r` is `r`: the same value names the reference and the place, so no table beside the
+  instructions can tell a use of one from a use of the other. Here each borrow expression (`&p`,
+  `&mut p`, the implicit reborrows of M6, `&mut T` given as `&T`) ends in one more instruction:
+  an identity cast for a thin reference; for a fat one the pointer and length taken apart and put
+  together again.
+- **`Body::borrows`**, one row per such value: the value, and `&` or `&mut`. The interpreter
+  makes the tag (M4) when the instruction that defines the value runs: the parent is the tag its
+  address word carries; the range starts at the address and has the size of the pointee of the
+  value's type, for a fat reference its length times the element size.
+- **Sites.** An instruction without a site of its own has the site of the statement it belongs
+  to, so both sites of a report are source lines.
+
+The table has no rows for the other events of the section above (moves, scope ends,
+temporaries, captures, call boundaries with their `from` clauses): the tracking mode does not
+see them, and reports none of the violations that need them.
+
 ## Limits
 
 - **Data races.** Two threads that use one tag, or two `Cell` permissions, at once are outside

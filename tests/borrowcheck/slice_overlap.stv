@@ -1,0 +1,13 @@
+//~ BORROWCHECK two-exclusive 11 10
+// Two `&mut` sub-slices of one array that share an element: a write through one, then a read
+// of the shared element through the other.
+fn main() -> i32 {
+    let mut xs: [u32; 3] = [1u32, 2u32, 3u32];
+    let p = &mut xs as *mut [u32; 3];
+    let q = p;
+    let a: &mut [u32] = unsafe("deliberate: overlaps b") &mut (*p)[0..2];
+    let b: &mut [u32] = unsafe("deliberate: overlaps a") &mut (*q)[1..3];
+    b[0] = 7u32;
+    if a[1] == 7u32 { return 1; }
+    return 0;
+}

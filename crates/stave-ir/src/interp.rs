@@ -15,7 +15,7 @@
 //! The interpreter never recurses on the host stack per Stave call (explicit frame stack), and
 //! malformed input yields an [`InterpError`], never a panic.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 mod simd;
@@ -215,7 +215,7 @@ struct Borrows {
     tracker: Tracker,
     /// The tag of the 64-bit word stored at an address, with the word: the tag holds while
     /// the word is there.
-    shadow: HashMap<u64, (u64, Tag)>,
+    shadow: BTreeMap<u64, (u64, Tag)>,
     /// The side table by (function, value).
     marks: HashMap<(u32, u32), BorrowMark>,
     report: Option<Box<Report>>,
@@ -388,7 +388,7 @@ impl<'m, H: Host> Interp<'m, H> {
             });
             Box::new(Borrows {
                 tracker: Tracker::new(),
-                shadow: HashMap::new(),
+                shadow: BTreeMap::new(),
                 marks: marks.collect(),
                 report: None,
             })
@@ -502,6 +502,7 @@ impl<'m, H: Host> Interp<'m, H> {
                     return Some(Err(r));
                 }
                 let at = self.trace(frames);
+                self.end_block(p, &at);
                 self.mem.heap_free(p, at);
             }
             return Some(Ok(Val::unit()));
@@ -525,10 +526,28 @@ impl<'m, H: Host> Interp<'m, H> {
                 return self.mem.take_report().map(Err);
             }
             let at = self.trace(frames);
+            if let Some(bt) = &mut self.bt {
+                // the new block takes the old bytes with their tags
+                let moved: Vec<_> =
+                    bt.shadow.range(p..p.saturating_add(old.min(new))).map(|(&a, &w)| (a, w)).collect();
+                for (a, w) in moved {
+                    bt.shadow.insert(q + (a - p), w);
+                }
+            }
+            self.end_block(p, &at);
             self.mem.heap_free(p, at);
             return Some(Ok(Val::S(q)));
         }
         None
+    }
+
+    /// Borrow tracking: the allocation at `addr` ends (M3): every tag of it is `Dead`.
+    fn end_block(&mut self, addr: u64, at: &Trace) {
+        if let Some(bt) = &mut self.bt
+            && let Some((id, _, _)) = self.mem.alloc_span(addr)
+        {
+            bt.tracker.end_alloc(id, at.first().map_or(NO_EV, |a| ev(a.func, a.inst)));
+        }
     }
 
     /// Checking mode: the runtime-allocator blocks live now (at exit: the leaks), as
@@ -643,6 +662,13 @@ impl<'m, H: Host> Interp<'m, H> {
                             None => None,
                         };
                         let done = frames.pop().ok_or(malformed("frame"))?;
+                        if let Some(bt) = &mut self.bt {
+                            // the frame's locals and temporaries end (M13)
+                            let at = ev(fid, blk.insts.start + done.pc.saturating_sub(1));
+                            for id in self.mem.slots_since(done.mark) {
+                                bt.tracker.end_alloc(id, at);
+                            }
+                        }
                         self.mem.stack_release(done.mark);
                         match frames.last_mut() {
                             None => return Ok(Outcome::Return(v)),
