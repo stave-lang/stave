@@ -323,7 +323,8 @@ impl<'a> World<'a> {
         }
     }
 
-    /// Unifies impl pattern `pat` (generic params = variables in `binds`) with `t`.
+    /// Unifies impl pattern `pat` (generic params = variables in `binds`) with `t`. Past its
+    /// step limit the answer is "no match".
     pub fn match_ty<I: Interner + ?Sized>(
         &self,
         cx: &I,
@@ -331,11 +332,35 @@ impl<'a> World<'a> {
         t: TypeId,
         binds: &mut [Option<GArg>],
     ) -> bool {
+        self.match_ty_in(cx, pat, t, binds, &mut false)
+    }
+
+    /// [`Self::match_ty`], but past the step limit the answer is "may match".
+    pub(crate) fn may_match_ty<I: Interner + ?Sized>(
+        &self,
+        cx: &I,
+        pat: TypeId,
+        t: TypeId,
+        binds: &mut [Option<GArg>],
+    ) -> bool {
+        let mut exceeded = false;
+        self.match_ty_in(cx, pat, t, binds, &mut exceeded) || exceeded
+    }
+
+    fn match_ty_in<I: Interner + ?Sized>(
+        &self,
+        cx: &I,
+        pat: TypeId,
+        t: TypeId,
+        binds: &mut [Option<GArg>],
+        exceeded: &mut bool,
+    ) -> bool {
         let mut stack = vec![(pat, t)];
         let mut steps = 0u32;
         while let Some((p, x)) = stack.pop() {
             steps += 1;
             if steps > 100_000 {
+                *exceeded = true;
                 return false;
             }
             if p == x && !cx.has_params(p) {
@@ -1391,9 +1416,9 @@ fn overlap(w: &World<'_>, tys: &mut TypeTable, a: &ImplDef, b: &ImplDef) -> bool
         (0..b.generics.len() as u32).map(|i| GArg::Type(tys.mk_param(a.generics.len() as u32 + i))).collect();
     let bt = tys.subst(b.self_ty, &shift, None);
     let mut binds = vec![None; a.generics.len() + b.generics.len()];
-    w.match_ty(tys, a.self_ty, bt, &mut binds) || {
+    w.may_match_ty(tys, a.self_ty, bt, &mut binds) || {
         let mut binds = vec![None; a.generics.len() + b.generics.len()];
-        w.match_ty(tys, bt, a.self_ty, &mut binds)
+        w.may_match_ty(tys, bt, a.self_ty, &mut binds)
     }
 }
 

@@ -213,6 +213,9 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             self.depth -= 1;
+            let icx = self.te.icx;
+            let d = mk("E0904", Some("depth"), &[], icx.node_span(n), &[]);
+            self.env.report(d);
             return None;
         }
         let r = self.eval_inner(n, want);
@@ -915,7 +918,13 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
             if t == self.env.error_ty() || self.env.has_params(t) {
                 return None;
             }
-            let (size, align) = self.env.layout(t)?;
+            let Some((size, align)) = self.env.layout(t) else {
+                let names = NameCx { prog: self.env.prog(), generics: &[] };
+                let tn = types::display(self.env, &names, t);
+                let d = mk("E0911", None, &[("type", &tn)], icx.node_span(n), &[]);
+                self.env.report(d);
+                return None;
+            };
             let v = if b == Builtin::SizeOf { size } else { align };
             return Some((self.fx(ids::USIZE), Val::Int(v as i128)));
         }

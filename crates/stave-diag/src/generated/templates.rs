@@ -3814,7 +3814,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0902",
         severity: Severity::Error,
         area: "generics",
-        rule: "instantiation depth limit (64) exceeded: an instance of a generic fn or method, reached from a non-generic fn through calls, would be the 65th instance of that generic on its own instantiation chain (polymorphic recursion such as `f::<[T; 1]>(..)` inside `f<T>`); at the call that requests it, once per generic",
+        rule: "instantiation depth limit (64) exceeded: an instance of a generic fn or method, reached from a non-generic fn through calls, would be the 65th instance of that generic on its own instantiation chain (polymorphic recursion such as `f::<[T; 1]>(..)` inside `f<T>`); at the call that requests it, once per generic. Case `graph`: the program's call graph (calls, fn values, drop glue) exceeds its limit (256 instances of one generic on one chain, such as a `Drop` impl of `W<T>` that drops a `W<Option<T>>`, or 2,097,152 nodes); at the fn whose body requests the first instance left out, once; the program is rejected",
         retired: false,
         located: true,
         holes: &[
@@ -3829,6 +3829,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "stop the recursive instantiation of `{generic}`: its type arguments must not grow on each level",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "graph",
+                message: "call graph limit exceeded at `{generic}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this body requests instances without end" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "stop the recursive instantiation of `{generic}` through calls, fn values, or drops: its type arguments must not grow on each level",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3866,7 +3878,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0904",
         severity: Severity::Error,
         area: "generics",
-        rule: "const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id)",
+        rule: "const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value",
         retired: false,
         located: true,
         holes: &[
@@ -3895,6 +3907,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "break the cycle: define one of these consts without using the others",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "depth",
+                message: "const-expr nested more than 2,000 levels deep",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "nesting limit of const evaluation exceeded here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "split the expression into several consts",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4066,6 +4090,31 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use a struct with one field per column, e.g. `struct Row {{ pub v: {type} }}` and `soa.Soa<Row>`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0911",
+        severity: Severity::Error,
+        area: "generics",
+        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested more than 256 levels deep; at the call, in a const-expr too",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{type}` has no layout for `size_of` / `align_of`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no size or alignment for this type" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "ask for the size of a sized type nested at most 256 levels deep",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
