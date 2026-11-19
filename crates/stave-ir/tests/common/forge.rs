@@ -39,6 +39,8 @@ pub fn witness(m: &Module, f: FuncId, rows: &[(u32, Vec<Edge>)]) -> FnWitness {
         removed: Vec::new(),
         refuted: Vec::new(),
         edges: Vec::new(),
+        summary: Default::default(),
+        calls: Default::default(),
     };
     for (inst, chain) in rows {
         let edges = Span { start: w.edges.len() as u32, len: chain.len() as u32 };
@@ -74,6 +76,9 @@ fn shifted(src: Source) -> Source {
         Source::Range { value } => Source::Range { value: Value(value.0 + 1) },
         Source::Bits { inst } => Source::Bits { inst: inst + 1 },
         Source::Cast { inst } => Source::Cast { inst: inst + 1 },
+        Source::Requires { clause } => Source::Requires { clause: clause + 1 },
+        Source::Ensures { call, clause } => Source::Ensures { call: call + 1, clause },
+        Source::Arg { call, clause } => Source::Arg { call: call + 1, clause },
     }
 }
 

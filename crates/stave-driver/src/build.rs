@@ -25,8 +25,11 @@ use std::fmt;
 use std::time::Instant;
 
 use rayon::prelude::*;
-use stave_ir::bounds::{Analysis, Finding, Proved, Unguarded, analyze_func, findings};
-use stave_ir::witness::check::{Checked, Rejected, check_func};
+use stave_ir::bounds::{
+    Analysis, CallFinding, Claims, Finding, Proved, Unguarded, analyze_func_in, call_findings, claim_func,
+    findings,
+};
+use stave_ir::witness::check::{Checked, Rejected, Removal, Summaries, check_func_in};
 use stave_ir::{FuncId, Module};
 use stave_obj::{FuncCode, ImageBuilder, Machine, ObjectImage, StackUse};
 use stave_sema::{DeclKind, LowerErrorKind, Mode, Program, Typeck};
@@ -130,11 +133,25 @@ pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Lowered, Failure
     prof::part(".rounds", tm.rounds);
     prof::part(".assemble", tm.assemble);
     prof::mark("lower");
-    let (mut m, nodes_of_func) = lowered.map_err(|es| lower_failure(&es))?;
+    let (mut m, mut nodes_of_func) = lowered.map_err(|es| lower_failure(&es))?;
     verified(&m, Stage::Lower)?;
     prof::mark("verify");
-    let (removed, _) = remove_proven_checks(&mut m)?;
+    let r = remove_proven_checks(&mut m)?;
+    extend_nodes(&mut nodes_of_func, &r.removal);
+    let removed = r.proved.into_iter().filter(|p| !p.witness.removed.is_empty()).collect();
     Ok(Lowered { module: m, removed, nodes_of_func })
+}
+
+/// Gives every unchecked entry that is a function of its own the call-graph nodes of the
+/// function it is an entry of. The new functions follow the lowered ones in the order of
+/// [`Removal::unchecked`].
+pub(crate) fn extend_nodes(nodes_of_func: &mut Vec<Vec<u32>>, removal: &Removal) {
+    for &(f, entry) in &removal.unchecked {
+        if entry != f && entry.index() == nodes_of_func.len() {
+            let nodes = nodes_of_func.get(f.index()).cloned().unwrap_or_default();
+            nodes_of_func.push(nodes);
+        }
+    }
 }
 
 /// The failure for lowering errors: all [`LowerErrorKind::Unsupported`] is
@@ -176,16 +193,35 @@ fn audited(m: &Module, stage: Stage) -> Result<(), Failure> {
     }
 }
 
-/// The one step that decides which bounds and contract checks a build keeps; it does not look at
-/// the build mode. Per function, in parallel: the audit that every element access has its check
-/// or a proof, and the witnesses of the checks that are provably redundant and of the contract
-/// checks that always fail. Then the witness checker, which shares no code with the proof search,
-/// validates every witness, and only the checks it accepted are deleted. Returns the accepted
-/// proofs and the contract checks they prove or refute (the refuted ones stay).
-pub(crate) fn remove_proven_checks(m: &mut Module) -> Result<(Vec<Proved>, Vec<Finding>), Failure> {
+/// What [`remove_proven_checks`] decided.
+pub(crate) struct CheckRemoval {
+    /// The accepted witnesses, per function that has one.
+    pub proved: Vec<Proved>,
+    /// The contract checks proved or refuted (the refuted ones stay).
+    pub found: Vec<Finding>,
+    /// The calls that always fail a `requires` of their callee.
+    pub calls: Vec<CallFinding>,
+    /// The unchecked entries made and the calls that go to them.
+    pub removal: Removal,
+}
+
+/// The one step that decides which bounds and contract checks a build keeps and which calls
+/// enter their callee past its `requires` checks; it does not look at the build mode. Per
+/// function, in parallel: the summary it states to its callers, then the audit that every
+/// element access has its check or a proof, and the witnesses of the checks that are provably
+/// redundant, of the contract checks that always fail, and of the calls that prove or refute
+/// their callee's `requires`. Then the witness checker, which shares no code with the proof
+/// search, validates every witness, and only the checks it accepted are deleted and only the
+/// calls it accepted are retargeted.
+pub(crate) fn remove_proven_checks(m: &mut Module) -> Result<CheckRemoval, Failure> {
     let internal = |message: String| Failure::Internal { stage: Stage::Lower, message };
-    let found: Vec<Analysis> =
-        (0..m.funcs.len() as u32).into_par_iter().map(|f| analyze_func(m, FuncId(f))).collect();
+    let stated = Claims::from_rows(
+        (0..m.funcs.len() as u32).into_par_iter().map(|f| claim_func(m, FuncId(f))).collect(),
+    );
+    let found: Vec<Analysis> = (0..m.funcs.len() as u32)
+        .into_par_iter()
+        .map(|f| analyze_func_in(m, FuncId(f), Some(&stated)))
+        .collect();
     let mut proved = Vec::new();
     let mut bad = Vec::new();
     for a in found {
@@ -196,16 +232,21 @@ pub(crate) fn remove_proven_checks(m: &mut Module) -> Result<(Vec<Proved>, Vec<F
         return Err(internal(format!("bounds audit: {}", listed(&bad))));
     }
     prof::mark("bounds-analyze");
-    let found = remove_checked(m, &proved)?;
-    Ok((proved, found))
+    let (found, calls, removal) = remove_checked(m, &proved)?;
+    Ok(CheckRemoval { proved, found, calls, removal })
 }
 
-/// Has the witness checker validate every proof (functions in parallel), then deletes the
-/// checks it accepted. A witness it refuses is a compiler bug, and then nothing is removed.
-/// Returns the contract checks proved or refuted, read before the removal.
-fn remove_checked(m: &mut Module, proved: &[Proved]) -> Result<Vec<Finding>, Failure> {
+/// Has the witness checker validate every proof (functions in parallel, each reading the
+/// summaries of all), then deletes the checks and retargets the calls it accepted. A witness it
+/// refuses is a compiler bug, and then nothing is changed. Returns the contract checks proved or
+/// refuted and the calls refuted, read before the removal, and what the removal made.
+fn remove_checked(
+    m: &mut Module,
+    proved: &[Proved],
+) -> Result<(Vec<Finding>, Vec<CallFinding>, Removal), Failure> {
+    let sums = Summaries::of(m, proved.iter().map(|p| &p.witness));
     let results: Vec<Result<Checked, Rejected>> =
-        proved.par_iter().map(|p| check_func(m, &p.witness)).collect();
+        proved.par_iter().map(|p| check_func_in(m, &p.witness, &sums)).collect();
     let mut checked = Vec::with_capacity(results.len());
     let mut refused = Vec::new();
     for r in results {
@@ -220,9 +261,10 @@ fn remove_checked(m: &mut Module, proved: &[Proved]) -> Result<Vec<Finding>, Fai
     }
     prof::mark("witness-check");
     let found: Vec<Finding> = proved.iter().flat_map(|p| findings(m, p)).collect();
-    stave_ir::witness::check::remove(m, &checked);
+    let calls: Vec<CallFinding> = proved.iter().flat_map(|p| call_findings(m, p)).collect();
+    let removal = stave_ir::witness::check::remove(m, &checked);
     prof::mark("bounds-remove");
-    Ok(found)
+    Ok((found, calls, removal))
 }
 
 /// [`stave_ir::verify_module`] with the functions verified in parallel (same errors, same order).
@@ -438,7 +480,7 @@ mod tests {
     #[test]
     fn a_refused_witness_is_an_internal_error() {
         let (mut m, f) = two_checks();
-        let (proved, _) = remove_proven_checks(&mut m).unwrap();
+        let proved = remove_proven_checks(&mut m).unwrap_or_else(|e| panic!("{e}")).proved;
         assert_eq!((proved.len(), proved[0].proofs.len(), checks(&m, f)), (1, 1, 1));
 
         let (mut m, f) = two_checks();

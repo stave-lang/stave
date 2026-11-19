@@ -90,10 +90,17 @@ impl Site {
     pub const NONE: Site = Site(u32::MAX);
 }
 
-/// The canonical instance id: `41`, or `41.2` for a closure / `spawn` body. Lexicographic order
-/// is the print order (a closure follows its enclosing fn).
+/// The canonical instance id: `41`, or `41.2` for a closure / `spawn` body, or `41.u` for the
+/// unchecked entry of `41` (its body without the `requires` checks, made by the witness
+/// checker). Lexicographic order is the print order (a closure follows its enclosing fn, the
+/// unchecked entry follows the closures).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct InstanceId(pub Vec<u32>);
+
+impl InstanceId {
+    /// The last number of an unchecked entry's id, printed `u`.
+    pub const UNCHECKED_ENTRY: u32 = u32::MAX;
+}
 
 impl std::fmt::Display for InstanceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -101,7 +108,11 @@ impl std::fmt::Display for InstanceId {
             if i > 0 {
                 f.write_str(".")?;
             }
-            write!(f, "{n}")?;
+            if i > 0 && *n == InstanceId::UNCHECKED_ENTRY {
+                f.write_str("u")?;
+            } else {
+                write!(f, "{n}")?;
+            }
         }
         Ok(())
     }

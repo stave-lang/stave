@@ -44,6 +44,9 @@
 //! | `Range { value }` | the type of `value`, an int of `bits` bits | unsigned: `0 <= value <= 2^bits - 1`; signed: `-2^(bits-1) <= value <= 2^(bits-1) - 1` |
 //! | `Bits { inst }` | `v = and x y`, `v = rem x y`, or `v = shr x k`, unsigned; a constant operand `c` within the type (`rem`: `1 <= c`) | `and`: `v <= x`, `v <= y`; `rem`: `v <= x`, `v <= y - 1`; `shr`: `v <= x` |
 //! | `Cast { inst }` | `v = cast x`, `cast.wrap x`, or `cast.sat x`: `x` an int value whose every value `v`'s int type holds (same signedness and at least as wide, or unsigned to a wider signed type) | `v = x` |
+//! | `Requires { clause }` | row `clause` of the function's own [`Summary::pre`] | the row about the function's parameters; only in the proofs of [`Summary::entry`] and [`Summary::safe`] |
+//! | `Ensures { call, clause }` | a `call @g ..` and row `clause` of `g`'s [`Summary::post`] | the row about the call's arguments and result, after the call |
+//! | `Arg { call, clause }` | a `call @g ..` and row `clause` of `g`'s [`Summary::pre`] that reads a `requires` check ([`Pre::entry`]) | the row about the call's arguments, after the call |
 //!
 //! A compare `x < y`, `x <= y`, `x == y` states `x <= y - 1`, `x <= y`, or both `x <= y` and
 //! `y <= x`. Where the larger side `y` of an unsigned strict compare is `sub.sat n c`, it also
@@ -66,6 +69,35 @@
 //! either half). The checker validates it like a removal and removes nothing; the driver reports
 //! it as an error.
 //!
+//! **Summaries.** A [`Summary`] is what a function states to its callers, as [`Row`]s over its
+//! parameters and result ([`Term`]), each certified against the function's own IR:
+//!
+//! - [`Summary::pre`]: what a call must prove of its arguments to skip the `requires` checks. With
+//!   every row true at entry, each `requires` check of the function holds ([`Summary::entry`]: one
+//!   proof per check, in which `Requires` edges stand for the rows), and each instruction of
+//!   [`Summary::safe`] (a trapping `add`/`sub` by a constant) stays in range. A row that is one
+//!   check's goal read through equalities alone ([`Pre::entry`]) also holds whenever that check
+//!   passed, so it is a fact after the call (`Arg`) and can be refuted at a call.
+//! - [`Summary::post`]: what holds of the parameters and the result whenever the function
+//!   returns: proved at the end of every reachable `ret` block ([`Summary::post_at`]), like a
+//!   goal there, with `Result` read as the returned operand.
+//!
+//! A row is about a call by reading `Param(i)` as argument `i` (a constant argument: a value of
+//! the parameter's type) and `Result` as the call's result. A function with a certified entry
+//! has an **unchecked entry**: its body with the failure call of every `requires` check deleted
+//! (the branch stays and its false side is an empty `unreachable` block, so the condition is
+//! still a fact of the body). [`Calls::proved`] lists the calls that prove every `pre` row of
+//! their callee right before the call; the checker retargets exactly those to the unchecked
+//! entry. [`Calls::refuted`] lists calls where the negation of a row that reads a check is
+//! proved: such a call fails that check, or stops before it, whenever it is reached.
+//!
+//! Why this holds across functions, recursion included: take one execution and the first
+//! moment a stated fact is false (a deleted check's condition, a `post` row at a return, a `pre`
+//! row at an unchecked entry). Its proof uses only facts stated earlier in that execution (a
+//! call that returned did so before; parameters are SSA values and keep their entry values), so
+//! all of them hold and so does the proof: a contradiction. The claim is partial correctness:
+//! nothing is said of a call that does not return.
+//!
 //! Dominance is certified, not computed, by the checker: [`FnWitness::dom`] names for every
 //! reachable block one block that dominates it, and the checker accepts the table when every
 //! CFG edge `u → v` has `dom[v]` among the ancestors of `u` in that tree (then every tree
@@ -87,6 +119,8 @@ pub const ASSERT_BLOCKS: usize = 16;
 pub const NO_BLOCK: u32 = u32::MAX;
 /// The largest multiplier of an edge.
 pub const MAX_MUL: u32 = 1 << 16;
+/// The most reachable `ret` blocks of a function whose summary has `post` rows.
+pub const SUMMARY_RETURNS: usize = 16;
 /// The checked-IR paths of the fns a failed `requires` / `ensures` check calls.
 pub const REQUIRES_FAILED: &str = "runtime.panic.requires_failed";
 pub const ENSURES_FAILED: &str = "runtime.panic.ensures_failed";
@@ -114,6 +148,9 @@ pub enum Source {
     Range { value: Value },
     Bits { inst: u32 },
     Cast { inst: u32 },
+    Requires { clause: u32 },
+    Ensures { call: u32, clause: u32 },
+    Arg { call: u32, clause: u32 },
 }
 
 /// `from <= to + w`, added `mul` times.
@@ -150,7 +187,118 @@ pub struct Refuted {
     pub half: u8,
 }
 
-/// The removed and the refuted checks of one function: flat tables, rows in instruction order.
+/// An integer a summary row talks about: of the function's parameters (by index) and result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Term {
+    Zero,
+    /// Int parameter `i`.
+    Param(u32),
+    /// The length of slice parameter `i`.
+    LenParam(u32),
+    /// The int result.
+    Result,
+    /// The length of the slice result.
+    LenResult,
+}
+
+/// `a <= b + w`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Row {
+    pub a: Term,
+    pub b: Term,
+    pub w: i128,
+}
+
+/// One row a call proves of its arguments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Pre {
+    pub row: Row,
+    /// The row of [`Summary::entry`] whose goal `half` this row is, read through equalities
+    /// alone ([`NO_BLOCK`]: a row only other proofs need).
+    pub entry: u32,
+    pub half: u8,
+}
+
+/// One trapping `add`/`sub` by a constant that stays in its type's range when the `pre` rows
+/// hold: the proofs, right before it, of `lo <= x ± c` and of `x ± c <= hi`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Safe {
+    pub inst: u32,
+    pub lo: Span,
+    pub hi: Span,
+}
+
+/// The proof of `post` row `row` at the end of `ret` block `block`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PostAt {
+    pub row: u32,
+    pub block: u32,
+    pub edges: Span,
+}
+
+/// What one function states to its callers (see the module text). Spans are of
+/// [`FnWitness::edges`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    pub pre: Vec<Pre>,
+    /// Per reachable `requires` check, in instruction order: its goals proved from `pre`.
+    /// Empty: no unchecked entry.
+    pub entry: Vec<Removed>,
+    /// In instruction order.
+    pub safe: Vec<Safe>,
+    pub post: Vec<Row>,
+    /// Per row of `post`, per reachable `ret` block in block order.
+    pub post_at: Vec<PostAt>,
+}
+
+impl Summary {
+    /// Whether the function has an unchecked entry.
+    pub fn has_entry(&self) -> bool {
+        !self.entry.is_empty()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pre.is_empty() && self.entry.is_empty() && self.safe.is_empty() && self.post.is_empty()
+    }
+}
+
+/// A call that proves every `pre` row of its callee.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CallProved {
+    /// The `call` instruction.
+    pub inst: u32,
+    pub site: Site,
+    /// Per `pre` row of the callee, its proof: a span of [`Calls::goals`].
+    pub rows: Span,
+}
+
+/// A call whose arguments make `pre` row `row` of its callee false whenever it is reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CallRefuted {
+    pub inst: u32,
+    pub site: Site,
+    pub row: u32,
+    /// The proof of the row's negation.
+    pub edges: Span,
+}
+
+/// The calls of one function the pass decided, rows in instruction order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Calls {
+    pub proved: Vec<CallProved>,
+    /// Spans of [`FnWitness::edges`].
+    pub goals: Vec<Span>,
+    pub refuted: Vec<CallRefuted>,
+}
+
+impl Calls {
+    pub fn is_empty(&self) -> bool {
+        self.proved.is_empty() && self.refuted.is_empty()
+    }
+}
+
+/// The removed and the refuted checks of one function, its summary, and its decided calls: flat
+/// tables, rows in instruction order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnWitness {
     pub func: FuncId,
@@ -159,4 +307,6 @@ pub struct FnWitness {
     pub removed: Vec<Removed>,
     pub refuted: Vec<Refuted>,
     pub edges: Vec<Edge>,
+    pub summary: Summary,
+    pub calls: Calls,
 }

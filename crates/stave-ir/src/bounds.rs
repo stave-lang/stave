@@ -83,6 +83,9 @@
 //! label of the rule that found the chain, for reports and tests.
 
 mod facts;
+mod summary;
+
+use std::sync::Arc;
 
 use crate::ir::{Block, Body, Func, FuncId, Module, Op, Operand, Site, Span, Term, Value, ValueDef};
 use crate::simd::VecOp;
@@ -90,7 +93,8 @@ use crate::types::{TypeId, TypeKey, TypeTable};
 use crate::verify::Dominators;
 use crate::witness::check::{Rejected, check_module, remove};
 use crate::witness::{
-    ENSURES_FAILED, Edge, FnWitness, NO_BLOCK, NOT_DEPTH, Node, REQUIRES_FAILED, Refuted, Removed, Source,
+    CallProved, CallRefuted, Calls, ENSURES_FAILED, Edge, FnWitness, NO_BLOCK, NOT_DEPTH, Node,
+    REQUIRES_FAILED, Refuted, Removed, Source, Summary,
 };
 
 /// The most graph edges one bounds query follows before it gives up and keeps the check: compile
@@ -240,24 +244,13 @@ pub fn findings(m: &Module, p: &Proved) -> Vec<Finding> {
             (Clause::Ensures, Some(s)) => u32::try_from(s).ok().map(Site),
             _ => None,
         };
-        let mut facts: Vec<Site> = Vec::new();
-        for e in spans.iter().flat_map(|s| s.of(&w.edges)) {
-            let s = match (contract_branch(&m.funcs, b, e.src), source_inst(b, e.src)) {
-                // a branch past an earlier contract check: that check's conjunct
-                (Some(call), _) | (None, Some(call)) => site(call),
-                (None, None) => f.name_site,
-            };
-            if s != Site::NONE && !facts.contains(&s) {
-                facts.push(s);
-            }
-        }
         Finding {
             func: w.func,
             clause,
             refuted,
             site: site(inst),
             ret,
-            facts,
+            facts: fact_sites(m, f, b, w, spans),
             traps: conjunct_traps(m, b, inst),
         }
     };
@@ -269,6 +262,65 @@ pub fn findings(m: &Module, p: &Proved) -> Vec<Finding> {
     }
     for (r, &c) in w.refuted.iter().zip(&p.refuted) {
         out.push(make(r.inst, c, true, &[r.edges]));
+    }
+    out
+}
+
+/// The sites of the facts of the proofs `spans` of `w` (the witness of `f`, body `b`), in order,
+/// each once.
+fn fact_sites(m: &Module, f: &Func, b: &Body, w: &FnWitness, spans: &[Span]) -> Vec<Site> {
+    let site = |i: u32| b.insts.site.get(i as usize).copied().unwrap_or(Site::NONE);
+    let mut facts: Vec<Site> = Vec::new();
+    for e in spans.iter().flat_map(|s| s.of(&w.edges)) {
+        let s = match (contract_branch(&m.funcs, b, e.src), source_inst(b, e.src)) {
+            // a branch past an earlier contract check: that check's conjunct
+            (Some(call), _) | (None, Some(call)) => site(call),
+            (None, None) => f.name_site,
+        };
+        if s != Site::NONE && !facts.contains(&s) {
+            facts.push(s);
+        }
+    }
+    facts
+}
+
+/// A call the pass refuted, for diagnostics: read off a [`Proved`] and the module it was proved
+/// on, before any removal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallFinding {
+    /// The caller.
+    pub func: FuncId,
+    pub callee: FuncId,
+    /// The site of the call.
+    pub site: Site,
+    /// The site of the callee's `requires` conjunct that the call fails (a site of the callee).
+    pub clause: Site,
+    /// The sites of the facts of the proof, in order, each once.
+    pub facts: Vec<Site>,
+}
+
+/// The refuted calls of `p` (proved on `m`, unchanged since), in instruction order.
+pub fn call_findings(m: &Module, p: &Proved) -> Vec<CallFinding> {
+    let w = &p.witness;
+    let Some(f) = m.func(w.func) else { return Vec::new() };
+    let Some(b) = &f.body else { return Vec::new() };
+    let mut out = Vec::new();
+    for r in &w.calls.refuted {
+        let Some(&Operand::Func(callee)) = b.args(r.inst).first() else { continue };
+        let clause = claim_func(m, callee)
+            .and_then(|s| {
+                let entry = s.pre.get(r.row as usize)?.entry;
+                s.entry.get(entry as usize).map(|e| e.inst)
+            })
+            .and_then(|q| m.func(callee)?.body.as_ref()?.insts.site.get(q as usize).copied())
+            .unwrap_or(Site::NONE);
+        out.push(CallFinding {
+            func: w.func,
+            callee,
+            site: r.site,
+            clause,
+            facts: fact_sites(m, f, b, w, &[r.edges]),
+        });
     }
     out
 }
@@ -368,8 +420,11 @@ pub fn source_inst(b: &Body, src: Source) -> Option<u32> {
         | Source::SliceMake { inst: i }
         | Source::SubSat { inst: i }
         | Source::Bits { inst: i }
-        | Source::Cast { inst: i } => Some(i),
+        | Source::Cast { inst: i }
+        | Source::Ensures { call: i, .. }
+        | Source::Arg { call: i, .. } => Some(i),
         Source::Range { value } => def(value),
+        Source::Requires { .. } => None,
     }
 }
 
@@ -403,7 +458,7 @@ pub fn audit_func(m: &Module, fid: FuncId) -> (Vec<Access>, Vec<Unguarded>) {
     if !has_access(b) {
         return (Vec::new(), Vec::new());
     }
-    Cx::new(m, b).audit(f, fid)
+    Cx::new(m, b, None).audit(f, fid)
 }
 
 /// Only these ops can be element accesses: without one there is nothing to audit.
@@ -418,19 +473,34 @@ fn has_access(b: &Body) -> bool {
 /// The witnesses of the `check.bounds` of function `fid` that have a proof (`None`: no check
 /// has one). Nothing is removed. Functions are independent: a caller may run them in parallel.
 pub fn prove_func(m: &Module, fid: FuncId) -> Option<Proved> {
-    let b = m.func(fid)?.body.as_ref()?;
-    if !has_check(m, b) {
-        return None;
-    }
-    Cx::new(m, b).prove(fid)
+    prove_func_in(m, fid, None)
 }
 
-/// Whether `b` has a `check.bounds` or a call of a contract failure fn: without one there is
-/// nothing to prove.
-fn has_check(m: &Module, b: &Body) -> bool {
+/// [`prove_func`] reading the callees' summaries from `claims` (`None`: each computed here).
+pub fn prove_func_in(m: &Module, fid: FuncId, claims: Option<&Claims>) -> Option<Proved> {
+    let b = m.func(fid)?.body.as_ref()?;
+    if !has_check(m, b, claims) {
+        return None;
+    }
+    Cx::new(m, b, claims).prove(fid)
+}
+
+/// Whether `b` has a `check.bounds`, a call of a contract failure fn, or a call of a fn that
+/// states a summary: without one there is nothing to prove.
+fn has_check(m: &Module, b: &Body, claims: Option<&Claims>) -> bool {
     (0..b.insts.len() as u32).any(|i| match b.insts.op[i as usize] {
         Op::BoundsCheck => true,
-        Op::Call => fail_clause(&m.funcs, b, i).is_some(),
+        Op::Call => {
+            fail_clause(&m.funcs, b, i).is_some()
+                || match (b.args(i).first(), claims) {
+                    (Some(&Operand::Func(f)), Some(c)) => c.0.get(f.index()).is_some_and(|s| s.is_some()),
+                    // No table: the callee's body tells.
+                    (Some(&Operand::Func(f)), None) => {
+                        m.func(f).and_then(|f| f.body.as_ref()).is_some_and(|cb| has_contract(m, cb))
+                    }
+                    _ => false,
+                }
+        }
         _ => false,
     })
 }
@@ -449,13 +519,18 @@ fn fail_clause(funcs: &[Func], b: &Body, i: u32) -> Option<Clause> {
 /// function. The audit sees the body with every check in place: an access behind a check that
 /// has a witness stays guarded by that check, whose removal the witness checker answers for.
 pub fn analyze_func(m: &Module, fid: FuncId) -> Analysis {
+    analyze_func_in(m, fid, None)
+}
+
+/// [`analyze_func`] reading the callees' summaries from `claims` (`None`: each computed here).
+pub fn analyze_func_in(m: &Module, fid: FuncId, claims: Option<&Claims>) -> Analysis {
     let Some(f) = m.func(fid) else { return Analysis::default() };
     let Some(b) = &f.body else { return Analysis::default() };
-    let (checks, accesses) = (has_check(m, b), has_access(b));
+    let (checks, accesses) = (has_check(m, b, claims), has_access(b));
     if !checks && !accesses {
         return Analysis::default();
     }
-    let cx = Cx::new(m, b);
+    let cx = Cx::new(m, b, claims);
     Analysis {
         proved: if checks { cx.prove(fid) } else { None },
         unguarded: if accesses { cx.audit(f, fid).1 } else { Vec::new() },
@@ -467,7 +542,9 @@ pub fn analyze_func(m: &Module, fid: FuncId) -> Analysis {
 /// instruction) order, or the witnesses the checker refused (then nothing is removed).
 /// Accesses stay guarded ([`audit`] holds before and after).
 pub fn elide(m: &mut Module) -> Result<Vec<Elided>, Vec<Rejected>> {
-    let proved: Vec<Proved> = (0..m.funcs.len() as u32).filter_map(|f| prove_func(m, FuncId(f))).collect();
+    let stated = claims(m);
+    let proved: Vec<Proved> =
+        (0..m.funcs.len() as u32).filter_map(|f| prove_func_in(m, FuncId(f), Some(&stated))).collect();
     let witnesses: Vec<FnWitness> = proved.iter().map(|p| p.witness.clone()).collect();
     let checked = check_module(m, &witnesses)?;
     let mut out = Vec::new();
@@ -488,8 +565,45 @@ fn label(f: &Func) -> String {
     format!("@{} {}", f.instance, f.path)
 }
 
+/// The summaries the functions of a module state ([`crate::witness::Summary`], rows only: the
+/// spans of their proofs mean nothing here), by function; `None`: nothing stated. A summary is
+/// read off the function's own body alone, so every function that calls it reads the same rows
+/// its own witness states.
+#[derive(Clone, Debug, Default)]
+pub struct Claims(Vec<Option<Arc<Summary>>>);
+
+/// The [`Claims`] of `m`. Functions are independent: [`claim_func`] may run in parallel.
+pub fn claims(m: &Module) -> Claims {
+    Claims((0..m.funcs.len() as u32).map(|f| claim_func(m, FuncId(f))).collect())
+}
+
+impl Claims {
+    pub fn from_rows(rows: Vec<Option<Arc<Summary>>>) -> Claims {
+        Claims(rows)
+    }
+}
+
+/// The summary function `fid` states, if it states anything.
+pub fn claim_func(m: &Module, fid: FuncId) -> Option<Arc<Summary>> {
+    let b = m.func(fid)?.body.as_ref()?;
+    if !has_contract(m, b) {
+        return None;
+    }
+    let s = Cx::new(m, b, None).summarize(&mut Vec::new());
+    (!s.is_empty()).then(|| Arc::new(s))
+}
+
+/// Whether `b` calls a contract failure fn.
+fn has_contract(m: &Module, b: &Body) -> bool {
+    (0..b.insts.len() as u32)
+        .any(|i| b.insts.op[i as usize] == Op::Call && fail_clause(&m.funcs, b, i).is_some())
+}
+
 /// Per-function analysis context.
 struct Cx<'a> {
+    m: &'a Module,
+    /// The summaries of the module's functions, when the caller computed them.
+    claims: Option<&'a Claims>,
     types: &'a TypeTable,
     /// The module's functions (callee bodies for asserting calls).
     funcs: &'a [Func],
@@ -573,7 +687,7 @@ fn contract_checks(
 }
 
 impl<'a> Cx<'a> {
-    fn new(m: &'a Module, b: &'a Body) -> Cx<'a> {
+    fn new(m: &'a Module, b: &'a Body, claims: Option<&'a Claims>) -> Cx<'a> {
         let (types, funcs) = (&m.types, &m.funcs[..]);
         let mut block_of = vec![u32::MAX; b.insts.len()];
         for (bi, bd) in b.blocks.iter().enumerate() {
@@ -592,7 +706,32 @@ impl<'a> Cx<'a> {
             })
             .collect();
         let contracts = contract_checks(funcs, b, &dom, &preds);
-        Cx { types, funcs, b, dom, block_of, preds, checks, contracts, facts: facts::Facts::default() }
+        Cx {
+            m,
+            claims,
+            types,
+            funcs,
+            b,
+            dom,
+            block_of,
+            preds,
+            checks,
+            contracts,
+            facts: facts::Facts::default(),
+        }
+    }
+
+    /// The summary function `f` states: from the module's table, or computed here once.
+    fn claim(&self, f: FuncId) -> Option<Arc<Summary>> {
+        if let Some(c) = self.claims {
+            return c.0.get(f.index()).cloned().flatten();
+        }
+        if let Some(s) = self.facts.claims.borrow().get(&f) {
+            return s.clone();
+        }
+        let s = claim_func(self.m, f);
+        self.facts.claims.borrow_mut().insert(f, s.clone());
+        s
     }
 
     fn reachable_inst(&self, i: u32) -> bool {
@@ -881,8 +1020,15 @@ impl<'a> Cx<'a> {
     /// The witnesses of every check that has a proof, and of every contract check that has a
     /// refutation.
     fn prove(&self, func: FuncId) -> Option<Proved> {
-        let mut w =
-            FnWitness { func, dom: Vec::new(), removed: Vec::new(), refuted: Vec::new(), edges: Vec::new() };
+        let mut w = FnWitness {
+            func,
+            dom: Vec::new(),
+            removed: Vec::new(),
+            refuted: Vec::new(),
+            edges: Vec::new(),
+            summary: Summary::default(),
+            calls: Calls::default(),
+        };
         let mut rows: Vec<(Removed, Proof)> = Vec::new();
         let span = |from: usize, to: usize| Span { start: from as u32, len: (to - from) as u32 };
         if !self.checks.is_empty() {
@@ -919,7 +1065,11 @@ impl<'a> Cx<'a> {
                 None => w.edges.truncate(start),
             }
         }
-        if rows.is_empty() && refuted.is_empty() {
+        if !self.contracts.is_empty() {
+            w.summary = self.summarize(&mut w.edges);
+        }
+        self.decide_calls(&mut w);
+        if rows.is_empty() && refuted.is_empty() && w.summary.is_empty() && w.calls.is_empty() {
             return None;
         }
         rows.sort_by_key(|r| r.0.inst);
@@ -929,48 +1079,60 @@ impl<'a> Cx<'a> {
         Some(Proved { witness: w, proofs, refuted })
     }
 
+    /// The calls of functions with an unchecked entry: proved when the facts right before the
+    /// call prove every `pre` row of the callee about its arguments; refuted when they prove the
+    /// negation of a row that reads a `requires` check and the call is at no point shown dead
+    /// (as a contract check); else left alone.
+    fn decide_calls(&self, w: &mut FnWitness) {
+        let span = |from: usize, to: usize| Span { start: from as u32, len: (to - from) as u32 };
+        for i in 0..self.b.insts.len() as u32 {
+            if self.b.insts.op[i as usize] != Op::Call || !self.reachable_inst(i) {
+                continue;
+            }
+            let Some(&Operand::Func(f)) = self.b.args(i).first() else { continue };
+            let Some(s) = self.claim(f).filter(|s| s.has_entry()) else { continue };
+            let (block, site) = (self.block_of[i as usize], self.b.insts.site[i as usize]);
+            let (start, first) = (w.edges.len(), w.calls.goals.len());
+            let proved = s.pre.iter().all(|p| {
+                let from = w.edges.len();
+                let done = self
+                    .call_sides(i, &p.row)
+                    .and_then(|(a, b)| self.side_goal(block, i, (a, b, p.row.w), &mut w.edges));
+                w.calls.goals.push(span(from, w.edges.len()));
+                done.is_some()
+            });
+            if proved {
+                w.calls.proved.push(CallProved { inst: i, site, rows: span(first, w.calls.goals.len()) });
+                continue;
+            }
+            w.edges.truncate(start);
+            w.calls.goals.truncate(first);
+            if self.contradiction(block).is_some() || self.dead_end(block) {
+                continue;
+            }
+            for (k, p) in s.pre.iter().enumerate() {
+                if p.entry == NO_BLOCK {
+                    continue;
+                }
+                // not `a <= b + w`: `b <= a - w - 1`
+                let negated = self.call_sides(i, &p.row).and_then(|(a, b)| {
+                    let w_neg = p.row.w.checked_neg()?.checked_sub(1)?;
+                    self.side_goal(block, i, (b, a, w_neg), &mut w.edges)
+                });
+                if negated.is_some() {
+                    let edges = span(start, w.edges.len());
+                    w.calls.refuted.push(CallRefuted { inst: i, site, row: k as u32, edges });
+                    break;
+                }
+                w.edges.truncate(start);
+            }
+        }
+    }
+
     /// The verdict on contract check `c`, with the edges of its proof or refutation appended to
     /// `out` (nothing when unknown).
     fn contract_proof(&self, c: &ContractCheck, out: &mut Vec<Edge>) -> Option<Verdict> {
-        // the compare under the `not`s, as it reads when the condition is true
-        let (mut o, mut holds) = (c.cond, true);
-        let (op, x, y) = 'cmp: {
-            for _ in 0..=NOT_DEPTH {
-                let Operand::Value(v) = o else { return None };
-                let d = self.def(v)?;
-                match (self.b.insts.op[d as usize], self.b.args(d)) {
-                    (Op::Not, &[a]) => {
-                        o = a;
-                        holds = !holds;
-                    }
-                    (op, &[x, y]) => break 'cmp (op, x, y),
-                    _ => return None,
-                }
-            }
-            return None;
-        };
-        let op = if holds {
-            op
-        } else {
-            match op {
-                Op::Lt => Op::Ge,
-                Op::Le => Op::Gt,
-                Op::Gt => Op::Le,
-                Op::Ge => Op::Lt,
-                Op::Eq => Op::Ne,
-                Op::Ne => Op::Eq,
-                _ => return None,
-            }
-        };
-        let g = |lo, hi, strict| Goal { lo, hi, strict };
-        let goals = match op {
-            Op::Lt => vec![g(x, y, true)],
-            Op::Le => vec![g(x, y, false)],
-            Op::Gt => vec![g(y, x, true)],
-            Op::Ge => vec![g(y, x, false)],
-            Op::Eq => vec![g(x, y, false), g(y, x, false)],
-            _ => return None,
-        };
+        let goals = self.goals_of(c.cond)?;
         let start = out.len();
         let prove_all = |cycle: Option<&(u32, Vec<u32>)>, out: &mut Vec<Edge>| {
             let mut second = None;
@@ -1010,6 +1172,51 @@ impl<'a> Cx<'a> {
             out.truncate(start);
         }
         None
+    }
+
+    /// The goals of the bool `cond` being true: the compare it tests under its `not`s, as one
+    /// inequality, or two for an `==`; `None` for `!=` and for anything that is not a compare.
+    fn goals_of(&self, cond: Operand) -> Option<Vec<Goal>> {
+        // the compare under the `not`s, as it reads when the condition is true
+        let (mut o, mut holds) = (cond, true);
+        let (op, x, y) = 'cmp: {
+            for _ in 0..=NOT_DEPTH {
+                let Operand::Value(v) = o else { return None };
+                let d = self.def(v)?;
+                match (self.b.insts.op[d as usize], self.b.args(d)) {
+                    (Op::Not, &[a]) => {
+                        o = a;
+                        holds = !holds;
+                    }
+                    (op, &[x, y]) => break 'cmp (op, x, y),
+                    _ => return None,
+                }
+            }
+            return None;
+        };
+        let op = if holds {
+            op
+        } else {
+            match op {
+                Op::Lt => Op::Ge,
+                Op::Le => Op::Gt,
+                Op::Gt => Op::Le,
+                Op::Ge => Op::Lt,
+                Op::Eq => Op::Ne,
+                Op::Ne => Op::Eq,
+                _ => return None,
+            }
+        };
+        let g = |lo, hi, strict| Goal { lo, hi, strict };
+        let goals = match op {
+            Op::Lt => vec![g(x, y, true)],
+            Op::Le => vec![g(x, y, false)],
+            Op::Gt => vec![g(y, x, true)],
+            Op::Ge => vec![g(y, x, false)],
+            Op::Eq => vec![g(x, y, false), g(y, x, false)],
+            _ => return None,
+        };
+        Some(goals)
     }
 
     /// The chain of `goal` at the end of block `block`, appended to `out`, if the facts prove it.
