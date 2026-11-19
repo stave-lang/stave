@@ -1,0 +1,54 @@
+//~ CHECK-ONLY
+// What a call stores keeps its origins however the source reaches the call: through an
+// identity cast, as a closure, as a closure whose fn type changes.
+view struct Pick { best: &u32, count: usize }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) {
+        self.best = x;
+        self.count = self.count + 1;
+    }
+}
+
+fn cast_source() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        let a: &u32 = &x;
+        p.take(a as &u32);
+    } //~ ERROR E0501
+    return *p.best;
+}
+
+view struct Job { run: fn() -> u32 }
+
+fn keep(j: &mut Job from f, f: fn() -> u32) {
+    j.run = f;
+}
+
+fn closure_source() -> u32 {
+    let mut j = Job.{ run: fn() -> u32 { return 0; } };
+    {
+        let x: u32 = 7;
+        keep(&mut j, fn() -> u32 { return x; });
+    } //~ ERROR E0501
+    let f = j.run;
+    return f();
+}
+
+view struct Quiet { run: fn() -> u32 without(alloc) }
+
+fn keep_quiet(j: &mut Quiet from f, f: fn() -> u32 without(alloc)) {
+    j.run = f;
+}
+
+fn coerced_source() -> u32 {
+    let mut j = Quiet.{ run: fn() -> u32 { return 0; } };
+    {
+        let x: u32 = 7;
+        keep_quiet(&mut j, fn() -> u32 { return x; });
+    } //~ ERROR E0501
+    let f = j.run;
+    return f();
+}
