@@ -19,6 +19,8 @@ tools/ci-step/run.sh check
 - `clippy`: `cargo clippy --workspace --all-targets -- -D warnings`
 - `test`: `cargo test --workspace`
 - `gen-check`: the generated tables are up to date
+- `lang-budget`: `LANG.md` is at most 15000 tokens, counted as `ceil(bytes / 4)` of the UTF-8 file
+  (`tools/lang-budget/`)
 
 Each step can be run alone (`run.sh test -p stave-cli`; extra arguments go to cargo).
 

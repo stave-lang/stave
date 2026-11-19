@@ -5,6 +5,7 @@ members = [
     "crates/stave-target", "crates/stave-ir", "crates/stave-opt", "crates/stave-codegen-x64", "crates/stave-codegen-a64",
     "crates/stave-obj", "crates/stave-driver", "crates/stave-cli",
     "tools/ll1gen", "tools/diaggen", "tools/gen-tables", "tools/gen-corpus", "tools/touch-fn",
+    "tools/lang-budget",
 ]
 
 [workspace.package]

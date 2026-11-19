@@ -27,9 +27,11 @@ case "$step" in
   gen)     cargo run -q --locked -p ll1gen
            cargo run -q --locked -p diaggen
            cargo run -q --locked -p gen-tables ;;
-  check)   "$0" fmt; "$0" stave-fmt; "$0" clippy; "$0" test; "$0" gen-check ;;
+  lang-budget)
+           cargo run -q --locked -p lang-budget -- LANG.md --limit 15000 ;;
+  check)   "$0" fmt; "$0" stave-fmt; "$0" clippy; "$0" test; "$0" gen-check; "$0" lang-budget ;;
   unsafe-diff) sh tools/ci-step/unsafe-diff.sh ;;
   bench)   sh bench/run.sh "$@" ;;
   cargo)   cargo "$@" ;;
-  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|gen|gen-check|check|unsafe-diff|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
+  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|gen|gen-check|lang-budget|check|unsafe-diff|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
 esac
