@@ -1,0 +1,38 @@
+//~ CHECK-ONLY
+// A part of a split `&mut` source stored into the target and written through there:
+// the callee can split the pointer it is given and store one part through the other, so the
+// view points into itself after the call and stays borrowed for as long as it is used.
+import std.io;
+
+view struct Inner { cur: &u32 }
+view struct Cur { inner: Inner, n: u32 }
+view struct Link { to: &mut Inner }
+view struct Two { rest: &mut Inner, n: &u32 }
+
+fn split(t: (&mut Cur, u32)) -> Two from t {
+    return Two.{ rest: &mut t.0.inner, n: &t.0.n };
+}
+
+// no store goes through `src`: the pointer is stored into `*dst` and written through there
+fn evil(dst: &mut Link from src, src: &mut Cur) {
+    let two = split((src, 0u32));
+    let n: &u32 = two.n;
+    dst.to = two.rest;
+    dst.to.cur = n;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut d = Inner.{ cur: &zero };
+    let mut b = Cur.{ inner: Inner.{ cur: &zero }, n: 1 };
+    {
+        let mut l = Link.{ to: &mut d };
+        evil(&mut l, &mut b);
+    }
+    let r: &u32 = b.inner.cur; //~ ERROR E0501
+    let before: u32 = *r;
+    b.n = 2; //~ ERROR E0501
+    let after: u32 = *r;
+    io.print(f"{before} {after}\n");
+    return 0;
+}

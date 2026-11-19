@@ -1,0 +1,57 @@
+//~ CHECK-ONLY
+// A view that holds `&mut a`, passed by reference as a source of a storing call: the target
+// comes to reach `a` by that borrow, which is among what is stored, so `a` holds it too and
+// stays borrowed for as long as it is used.
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+view struct Sum { best: &u32 }
+view struct Reg { link: &Link }
+
+fn note(r: &mut Sum from copy l, l: &Link) {
+    r.best = l.to.best;
+}
+
+fn keep(r: &mut Reg from l, l: &Link) {
+    r.link = l;
+}
+
+fn note_mut(r: &mut Sum from copy l, l: &mut Link) {
+    r.best = l.to.best;
+}
+
+fn copy_shared(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    {
+        let mut l = Link.{ to: &mut a };
+        let mut s = Sum.{ best: zero };
+        note(&mut s, &l);
+    }
+    a.count = 1; //~ ERROR E0501
+    return a.count; //~ ERROR E0501
+}
+
+fn from_shared(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    {
+        let mut l = Link.{ to: &mut a };
+        let mut r = Reg.{ link: &l };
+        keep(&mut r, &l);
+    } //~ ERROR E0501
+    a.count = 1; //~ ERROR E0501
+    return a.count; //~ ERROR E0501
+}
+
+fn copy_mut(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    {
+        let mut l = Link.{ to: &mut a };
+        let mut s = Sum.{ best: zero };
+        note_mut(&mut s, &mut l);
+    }
+    a.count = 1; //~ ERROR E0501
+    return a.count; //~ ERROR E0501
+}
+
+fn main() -> i32 {
+    return 0;
+}

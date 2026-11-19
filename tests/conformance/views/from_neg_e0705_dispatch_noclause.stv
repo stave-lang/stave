@@ -1,0 +1,13 @@
+//~ CHECK-ONLY
+// A `dispatch fn` without the clause of the methods it selects among.
+view struct Pick { best: &u32, count: usize }
+
+fn put_base(dst: &mut Pick from x, x: &u32) {
+    dst.best = x;
+}
+
+dispatch fn put_any(dst: &mut Pick, x: &u32) { _ => put_base, } //~ ERROR E0705
+
+fn main() -> i32 {
+    return 0;
+}

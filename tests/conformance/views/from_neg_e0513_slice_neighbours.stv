@@ -1,0 +1,35 @@
+//~ CHECK-ONLY
+// `for r in xs` over a `&mut [Cur]` param: an element pointer carries a loan of the fn, and a
+// pointer to one element is not stored into another.
+import std.io;
+
+view struct Cur { cur: &u32, n: u32 }
+
+fn n_of(t: (&mut Cur, u32)) -> &u32 from t {
+    return &t.0.n;
+}
+
+// each element's `cur` is pointed at the previous element's `n`
+fn chain(k: &mut Cur from xs, xs: &mut [Cur]) {
+    let mut prev: Option<&u32> = Option.None;
+    for r in xs { //~ ERROR E0501
+        match prev {
+            Option.Some(p) => { r.cur = p; } //~ ERROR E0513
+            Option.None => {}
+        }
+        prev = Option.Some(n_of((r, 0u32)));
+    }
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut a = Cur.{ cur: &zero, n: 5 };
+    let mut arr = [Cur.{ cur: &zero, n: 1 }, Cur.{ cur: &zero, n: 10 }];
+    chain(&mut a, &mut arr);
+    let r: &u32 = arr[1].cur; //~ ERROR E0501
+    let before: u32 = *r;
+    arr[0].n = 2; //~ ERROR E0501
+    let after: u32 = *r;
+    io.print(f"{before} {after}\n");
+    return 0;
+}

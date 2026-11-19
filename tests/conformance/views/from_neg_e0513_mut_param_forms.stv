@@ -1,0 +1,71 @@
+//~ CHECK-ONLY
+// A `&mut` param inside a struct literal, passed to a generic fn, or inside a generic struct
+// literal is a reborrow: the value holds a loan of the fn and is not stored. Moved into a
+// tuple or an array it stays the param.
+view struct Cur { cur: &u32, n: u32 }
+view struct Two { slot: &mut &u32, n: &u32 }
+view struct Wrap { c: &mut Cur }
+view struct Slot<T: view> { v: T }
+
+fn split_w(w: Wrap) -> Two from w {
+    return Two.{ slot: &mut w.c.cur, n: &w.c.n };
+}
+
+fn split_t(t: (&mut Cur, u32)) -> Two from t {
+    return Two.{ slot: &mut t.0.cur, n: &t.0.n };
+}
+
+fn split_s(s: Slot<&mut Cur>) -> Two from s {
+    return Two.{ slot: &mut s.v.cur, n: &s.v.n };
+}
+
+fn split_o(o: Option<&mut Cur>, z: &u32) -> Two from o + z {
+    match o {
+        Option.Some(c) => { return Two.{ slot: &mut c.cur, n: &c.n }; }
+        Option.None => { loop {} }
+    }
+}
+
+fn n_of(t: (&mut Cur, u32)) -> &u32 from t {
+    return &t.0.n;
+}
+
+fn wrap<T: view>(x: T) -> Slot<T> from x {
+    return Slot.{ v: x };
+}
+
+fn l1(dst: &mut Cur from src, src: &mut Cur) {
+    let w = Wrap.{ c: src };
+    let two = split_w(w);
+    *two.slot = two.n; //~ ERROR E0513
+}
+
+fn l2(dst: &mut Cur from src, src: &mut Cur) {
+    let t = (src, 0u32);
+    let two = split_t(t);
+    *two.slot = two.n;
+}
+
+fn l3(dst: &mut Cur from src, src: &mut Cur) {
+    let two = split_s(wrap(src));
+    *two.slot = two.n; //~ ERROR E0513
+}
+
+fn l4(dst: &mut Cur from src, src: &mut Cur) {
+    let two = split_s(Slot.{ v: src });
+    *two.slot = two.n; //~ ERROR E0513
+}
+
+fn l5(dst: &mut Cur from src, src: &mut Cur) {
+    dst.cur = n_of((src, 0));
+}
+
+fn l6(dst: &mut Cur from src, src: &mut Cur) {
+    let s = src;
+    let two = split_t((s, 0));
+    *two.slot = two.n;
+}
+
+fn main() -> i32 {
+    return 0;
+}

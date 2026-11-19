@@ -1,0 +1,91 @@
+//~ CHECK-ONLY
+// A chain of `from copy` clauses declared in reverse order, a `from copy` result of a copying
+// target, a copy out of a view reached through two `&mut` fields, mutual `from copy`: each
+// view holds what the call's stores leave in the view copied from.
+view struct Pick { best: &u32, count: usize }
+view struct Twin { out: &mut Pick, spare: &u32 }
+view struct Keep { t: &mut Twin }
+
+fn chain(a: &mut Pick from copy b, b: &mut Pick from copy c, c: &mut Pick from x, x: &u32) {
+    c.best = x;
+    b.best = c.best;
+    a.best = b.best;
+}
+
+fn res(a: &mut Pick from copy b, b: &mut Pick from x, x: &u32) -> &u32 from copy a {
+    b.best = x;
+    a.best = b.best;
+    return a.best;
+}
+
+fn via(out: &mut Pick from copy k, k: &mut Keep from x, x: &u32) {
+    k.t.out.best = x;
+    out.best = k.t.out.best;
+}
+
+fn sw(a: &mut Pick from copy b, b: &mut Pick from copy a + x, x: &u32) {
+    b.best = x;
+    let t = a.best;
+    a.best = b.best;
+    b.best = t;
+}
+
+fn t_chain(zero: &u32) -> u32 {
+    let mut pa = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        let x: u32 = i;
+        let mut pb = Pick.{ best: zero, count: 0 };
+        let mut pc = Pick.{ best: zero, count: 0 };
+        chain(&mut pa, &mut pb, &mut pc, &x);
+        i = i + 1;
+    } //~ ERROR E0501
+    return *pa.best;
+}
+
+fn t_res(zero: &u32) -> u32 {
+    let mut r: &u32 = zero;
+    let mut i: u32 = 0;
+    while i < 2 {
+        let x: u32 = i;
+        let mut pa = Pick.{ best: zero, count: 0 };
+        let mut pb = Pick.{ best: zero, count: 0 };
+        r = res(&mut pa, &mut pb, &x);
+        i = i + 1;
+    } //~ ERROR E0501
+    return *r;
+}
+
+fn t_via(zero: &u32) -> u32 {
+    let mut o = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        let x: u32 = i;
+        let mut p = Pick.{ best: zero, count: 0 };
+        let mut tw = Twin.{ out: &mut p, spare: zero }; //~ ERROR E0501
+//~^ ERROR E0501
+        let mut kb = Keep.{ t: &mut tw }; //~ ERROR E0501
+//~^ ERROR E0501
+        via(&mut o, &mut kb, &x);
+        i = i + 1;
+    } //~ ERROR E0501
+//~^ ERROR E0501
+//~^^ ERROR E0501
+    return *o.best;
+}
+
+fn t_sw(zero: &u32) -> u32 {
+    let mut pa = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        let x: u32 = i;
+        let mut pb = Pick.{ best: zero, count: 0 };
+        sw(&mut pa, &mut pb, &x);
+        i = i + 1;
+    } //~ ERROR E0501
+    return *pa.best;
+}
+
+fn main() -> i32 {
+    return 0;
+}
