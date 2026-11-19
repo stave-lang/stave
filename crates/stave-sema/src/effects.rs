@@ -16,6 +16,7 @@
 //! | membership in a call cycle (an SCC that is a cycle) | `recursive`, `trap` (stack overflow) |
 //! | `unsafe("..")` block or expression, outside the built-in packages | `unsafe` |
 //! | a `scope { }` (it waits for its threads at the end) | `block` |
+//! | the runtime fns of [`FD_WAITS`] (a read, write, open, or `flock` that may sleep until another process or thread acts on the file) | `block` |
 //! | a `spawn { }` (it maps a stack and starts a thread) | `alloc io trap` |
 //!
 //! A node's set ([`EffectSets::set`]) is its own effects and the sets of everything it calls or
@@ -130,6 +131,7 @@ pub enum OpKind {
     Unsafe,
     Syscall,
     Join,
+    FdWait,
     Spawn,
     Extern,
     Unseen,
@@ -150,6 +152,7 @@ impl OpKind {
             OpKind::Unsafe => "has an `unsafe` block",
             OpKind::Syscall => "makes a system call",
             OpKind::Join => "waits for other threads",
+            OpKind::FdWait => "may wait on a file descriptor",
             OpKind::Spawn => "starts a thread",
             OpKind::Extern => "is an `extern` fn, which has every effect its `without` does not list",
             OpKind::Unseen => "runs code the call graph does not show",
@@ -193,6 +196,18 @@ pub const BOUNDARY: &[(&str, &str, Effects, OpKind)] = &[
     ),
     ("runtime.thread", "join", Effects::BLOCK, OpKind::Join),
     ("runtime.thread", "scope_join", Effects::BLOCK, OpKind::Join),
+];
+
+/// The runtime system calls that may sleep until another process or thread acts on the file: a
+/// read of an empty pipe, a write to a full one, an open of a FIFO, a `flock`. Their callers have
+/// `block` besides `io`: no static rule bounds such a wait.
+pub const FD_WAITS: &[(&str, &str)] = &[
+    ("runtime.os", "read"),
+    ("runtime.os", "write"),
+    ("runtime.os", "pread64"),
+    ("runtime.os", "pwrite64"),
+    ("runtime.os", "openat"),
+    ("runtime.os", "flock"),
 ];
 
 /// The effects of a `spawn { }` statement for the fn holding it (`runtime.thread.scope_spawn`).
@@ -556,6 +571,8 @@ pub fn solve_with(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>, proved: &[
         .iter()
         .filter_map(|&(m, f, e, k)| crate::mono::item_at(prog, m, f).map(|d| (d, (e, k))))
         .collect();
+    let fd_waits: FxHashSet<DeclId> =
+        FD_WAITS.iter().filter_map(|&(m, f)| crate::mono::item_at(prog, m, f)).collect();
     // source ops per body, once per decl (instances share them)
     let body_ops: Vec<BodyOps> =
         tc.bodies.par_iter().map(|b| if b.has_error { Vec::new() } else { body_ops(prog, b) }).collect();
@@ -590,6 +607,9 @@ pub fn solve_with(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>, proved: &[
             {
                 add(e, Op { kind, span: node.span }, &mut eff);
                 return (eff, true, ops);
+            }
+            if owner == 0 && fd_waits.contains(&decl) {
+                add(Effects::BLOCK, Op { kind: OpKind::FdWait, span: node.span }, &mut eff);
             }
             if let Some(bi) = body_of(decl) {
                 for &(o, e, op) in &body_ops[bi] {
