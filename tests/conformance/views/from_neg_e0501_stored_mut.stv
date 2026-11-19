@@ -1,0 +1,75 @@
+//~ CHECK-ONLY
+// A `&mut` borrow stored into a view by a call: the borrowed view stays exclusively borrowed
+// while the holder is used and is free again afterwards; a fn that is given a `&mut` source may
+// store through it, so every view the source reaches gains what the call stores.
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+
+fn set_link(l: &mut Link from q, q: &mut Pick) {
+    l.to = q;
+}
+
+fn held() -> usize {
+    let zero: u32 = 0;
+    let mut a = Pick.{ best: &zero, count: 0 };
+    let mut b = Pick.{ best: &zero, count: 0 };
+    let mut l = Link.{ to: &mut a };
+    set_link(&mut l, &mut b);
+    b.count = 1; //~ ERROR E0501
+    return l.to.count;
+}
+
+fn released() -> usize {
+    let zero: u32 = 0;
+    let mut a = Pick.{ best: &zero, count: 0 };
+    let mut b = Pick.{ best: &zero, count: 0 };
+    let mut l = Link.{ to: &mut a };
+    set_link(&mut l, &mut b);
+    let n: usize = l.to.count;
+    b.count = 1;
+    return n + b.count;
+}
+
+// The second store finds the borrow of the first still held by the link.
+fn again() -> usize {
+    let zero: u32 = 0;
+    let mut a = Pick.{ best: &zero, count: 0 };
+    let mut b = Pick.{ best: &zero, count: 0 };
+    let mut l = Link.{ to: &mut a };
+    let mut i: usize = 0;
+    while i < 2 {
+        set_link(&mut l, &mut b); //~ ERROR E0501
+//~^ ERROR E0501
+        i = i + 1;
+    }
+    return l.to.count;
+}
+
+view struct Twin { out: &mut Pick, spare: &u32 }
+view struct Keep { t: &mut Twin }
+
+// The clause of `k` names `x` and `y`: what `x` reaches may take `y`'s borrow, and `x` is kept.
+fn stash(k: &mut Keep from x + y, x: &mut Twin, y: &u32) {
+    x.out.best = y;
+    k.t = x;
+}
+
+fn below_the_source() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let mut other = Pick.{ best: &zero, count: 0 };
+    let mut first = Twin.{ out: &mut other, spare: &zero };
+    let mut t = Twin.{ out: &mut p, spare: &zero };
+    let mut k = Keep.{ t: &mut first };
+    {
+        let x: u32 = 7;
+        stash(&mut k, &mut t, &x);
+    } //~ ERROR E0501
+    // `p` and `t` now count as borrowing each other (a store may land in any view the
+    // arguments reach), so this use of `p` is rejected as well
+    return *p.best; //~ ERROR E0501
+}
+
+fn main() -> i32 {
+    return 0;
+}

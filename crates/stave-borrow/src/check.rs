@@ -454,14 +454,14 @@ impl Cx<'_, '_> {
                             i += 1;
                         }
                         let (Some(ptr), Some(arg)) = (ptr, args.get(target as usize)) else { continue };
-                        if let Err(m) = self.flow.store_fits(&ptr, &val, None, true) {
+                        if let Err(m) = self.flow.store_fits(st, &ptr, &val, None, true) {
                             // a pointer held in a named local is written through; a temporary is
                             // named by its expression
                             let mut place = arg.place.clone();
                             if !body.locals[place.local as usize].temp {
                                 place.proj.push(Proj::Deref(DerefKind::Mut));
                             }
-                            let why = Unfit::of(m, val.is_subset(&self.flow.contents_of(&ptr)));
+                            let why = Unfit::of(m, val.is_subset(&self.flow.contents_of(st, &ptr)));
                             self.findings.push(Finding::ViewWrite { place, span: s.span, why });
                         }
                     }
@@ -481,7 +481,7 @@ impl Cx<'_, '_> {
                         let ptr = ptr.unwrap_or_else(|| self.flow.empty());
                         let direct =
                             if dest.derefs() == 1 { body.locals[dest.local as usize].param } else { None };
-                        let fit = self.flow.store_fits(&ptr, &val, direct, false);
+                        let fit = self.flow.store_fits(st, &ptr, &val, direct, false);
                         fit.err().map(|m| Unfit::of(m, val.is_subset(&target)))
                     } else {
                         let mut t = self.flow.empty();
