@@ -1,0 +1,27 @@
+//~ CHECK-ONLY
+// A closure that splits the `&mut` param it captures returns borrows of a `&mut` capture
+// (E0512), which hold a loan of the fn and are not stored. The caller keeps the source view
+// borrowed all the same.
+import std.io;
+
+view struct Cur { cur: &u32, n: u32 }
+view struct Two { slot: &mut &u32, n: &u32 }
+
+fn link(dst: &mut Cur from src, src: &mut Cur) {
+    let f = fn() -> Two { return Two.{ slot: &mut src.cur, n: &src.n }; }; //~ ERROR E0512
+    let two = f();
+    *two.slot = two.n; //~ ERROR E0513
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut a = Cur.{ cur: &zero, n: 5 };
+    let mut b = Cur.{ cur: &zero, n: 1 };
+    link(&mut a, &mut b);
+    let r: &u32 = b.cur; //~ ERROR E0501
+    let before: u32 = *r;
+    b.n = 2; //~ ERROR E0501
+    let after: u32 = *r;
+    io.print(f"{before} {after}\n");
+    return 0;
+}

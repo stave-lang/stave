@@ -152,6 +152,7 @@ fn check_arm(
         && ts.params == disp.params
         && ts.ret == disp.ret
         && ts.origins == disp.origins
+        && ts.param_origins == disp.param_origins
         && ts.is_unsafe == disp.is_unsafe
         && !ts.variadic;
     let have = FeatureSet::from_bits(ts.features).unwrap_or_default();

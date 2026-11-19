@@ -1,0 +1,107 @@
+//~ CHECK-ONLY
+// A call that stores a borrow into a view (the callee's parameter `from` clause) keeps the
+// borrowed place borrowed for as long as the view, or a pointer that reaches it, is used.
+view struct Pick { best: &u32, count: usize }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) {
+        self.best = x;
+        self.count = self.count + 1;
+    }
+}
+
+fn store(dst: &mut Pick from x, x: &u32) {
+    dst.best = x;
+}
+
+fn adopt(dst: &mut Pick from copy other, other: &Pick) {
+    dst.best = other.best;
+}
+
+view struct Builder { out: &mut Pick, used: usize }
+
+impl Builder {
+    fn emit(&mut self from x, x: &u32) {
+        self.out.take(x);
+        self.used = self.used + 1;
+    }
+}
+
+// The stored borrow outlives its local.
+fn dangling() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        p.take(&x);
+    } //~ ERROR E0501
+    return *p.best;
+}
+
+// The borrowed place is written while the view holds the borrow.
+fn written() -> u32 {
+    let zero: u32 = 0;
+    let mut data: [u32; 4] = [3, 8, 5, 6];
+    let mut p = Pick.{ best: &zero, count: 0 };
+    store(&mut p, &data[1]);
+    data[0] = 1; //~ ERROR E0501
+    return *p.best;
+}
+
+// `from copy`: what the other view borrows from, not the other view.
+fn copied() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        let q = Pick.{ best: &x, count: 0 };
+        adopt(&mut p, &q);
+    } //~ ERROR E0501
+    return *p.best;
+}
+
+// The store lands in the view a pointer inside the argument points to.
+fn below() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        let mut b = Builder.{ out: &mut p, used: 0 };
+        b.emit(&x);
+    } //~ ERROR E0501
+    return *p.best;
+}
+
+// The view is used only through a pointer made before the store.
+fn through_pointer() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let r = &mut p;
+    {
+        let x: u32 = 7;
+        store(r, &x);
+    } //~ ERROR E0501
+    return *r.best;
+}
+
+// An assignment through the pointer stores like the call on the other path: the view holds
+// the borrow on this path too.
+fn assigned_on_another_path(c: bool) -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        let r: &u32 = &x;
+        let q = &mut p;
+        if c {
+            store(q, r);
+            return 0;
+        }
+        q.best = r;
+    } //~ ERROR E0501
+    return *p.best;
+}
+
+fn main() -> i32 {
+    return 0;
+}

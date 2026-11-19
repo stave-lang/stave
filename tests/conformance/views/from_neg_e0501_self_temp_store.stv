@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// A storing call whose source borrows the temporary the call's own result is written to.
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+
+fn keep(k: &mut Pick from x, x: &u32) -> u32 {
+    k.best = x;
+    return *x + 1;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut i: u32 = 0;
+    while i < 3 {
+        let mut k = Pick.{ best: &zero, count: 0 };
+        r = &keep(&mut k, r); //~ ERROR E0501
+        // `k.best` is the `r` passed in: the value before the call
+        let seen: u32 = *k.best;
+        let now: u32 = *r;
+        io.print(f"{seen} {now}\n");
+        i = i + 1;
+    }
+    return 0;
+}

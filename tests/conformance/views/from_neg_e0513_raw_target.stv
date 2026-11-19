@@ -1,0 +1,63 @@
+//~ CHECK-ONLY
+// A call that stores through a `&mut` made from a raw pointer is held to the rule of the
+// assignment: the view behind `self` reaches the target, so the store needs `from x` on
+// `self`; a pointer the checker cannot place takes nothing that borrows.
+view struct Pick { best: &u32, count: usize }
+
+fn store(dst: &mut Pick from x, x: &u32) {
+    dst.best = x;
+}
+
+unsafe("p is valid for one Pick that owner keeps alive and lends exclusively while the result lives")
+fn pick_mut(owner: &Pick, p: *mut Pick) -> &mut Pick from owner {
+    return unsafe("p is valid for one Pick and no other live reference reaches it") &mut *p;
+}
+
+view struct Handle { anchor: &Pick, p: *mut Pick }
+
+impl Handle {
+    fn new(target: &mut Pick) -> Handle from target {
+        let p = &mut *target as *mut Pick;
+        return Handle.{ anchor: &*target, p: p };
+    }
+
+    fn sneak(&mut self, x: &u32) {
+        store(unsafe("p is the Pick the anchor lends exclusively") pick_mut(self.anchor, self.p), x); //~ ERROR E0513
+    }
+
+    fn assigned(&mut self, x: &u32) {
+        let slot = unsafe("p is the Pick the anchor lends exclusively") pick_mut(self.anchor, self.p);
+        slot.best = x; //~ ERROR E0513
+    }
+
+    fn declared(&mut self from x, x: &u32) {
+        store(unsafe("p is the Pick the anchor lends exclusively") pick_mut(self.anchor, self.p), x);
+    }
+}
+
+fn raw_local() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let r = &mut p as *mut Pick;
+    {
+        let x: u32 = 7;
+        unsafe("r points to p, which is live and not borrowed here") { store(&mut *r, &x); } //~ ERROR E0513
+    }
+    return *p.best;
+}
+
+// With the clause the caller keeps `x` borrowed as long as the view the handle points to.
+fn declared_dangles() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let mut h = Handle.new(&mut p);
+    {
+        let x: u32 = 7;
+        h.declared(&x);
+    } //~ ERROR E0501
+    return *p.best;
+}
+
+fn main() -> i32 {
+    return 0;
+}

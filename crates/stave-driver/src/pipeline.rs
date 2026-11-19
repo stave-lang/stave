@@ -136,8 +136,8 @@ impl Stage {
     /// | items | E0016 |
     /// | parse | E0004 E0011–E0014 E0019–E0023 E0025–E0028 |
     /// | resolve | E0101–E0107 |
-    /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0700–E0718 (the lowering-class gates E0700 E0701 included), E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck), E1404 (deny clause names); the signature's `from` clause E0520 E0521; E0503 case `static` (writes to a `static`) |
-    /// | borrowck | E05xx except E0520 E0521 (accesses, loans, returned origins) |
+    /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0700–E0718 (the lowering-class gates E0700 E0701 included), E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck), E1404 (deny clause names); the signature's `from` clauses E0514 E0515 E0520 E0521; E0503 case `static` (writes to a `static`) |
+    /// | borrowck | E05xx except E0514 E0515 E0520 E0521 (accesses, loans, returned origins) |
     /// | lower | E0108 (no `fn main`, builds only, reported before lowering); E1401 E1403 (the effect pass), E1405 E1406 (the rank pass), after borrowck on programs without errors, in checks and builds |
     /// | (none) | retired codes: E0511 |
     pub fn of_code(code: &str) -> Option<Stage> {
@@ -161,8 +161,8 @@ impl Stage {
             // lowering
             "E1401" | "E1403" | "E1405" | "E1406" => return Some(Stage::Lower),
             "E1404" => return Some(Stage::Typeck),
-            // Origin table: checked with the signature (stave-sema origins), never from a body.
-            "E0520" | "E0521" => return Some(Stage::Typeck),
+            // `from` clauses: checked with the signature (stave-sema origins), never from a body.
+            "E0514" | "E0515" | "E0520" | "E0521" => return Some(Stage::Typeck),
             // retired: a missing `from` declares the empty origin set
             "E0511" => return None,
             _ => {}
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(of("E0513"), Some(Stage::Borrowck));
         assert_eq!(of("E0511"), None, "retired");
         assert_eq!(of("E0807"), Some(Stage::Typeck));
-        for c in ["E0520", "E0521"] {
+        for c in ["E0514", "E0515", "E0520", "E0521"] {
             assert_eq!(of(c), Some(Stage::Typeck), "{c}");
         }
         assert_eq!(of("E0700"), Some(Stage::Typeck));

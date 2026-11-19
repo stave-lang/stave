@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// A borrow made through a `&` parameter is stored under that parameter's name in the clause: a
+// sub-slice, an element, in an assignment and in a call that stores.
+view struct Window { items: &[u32], first: &u32 }
+
+fn narrow(w: &mut Window from xs, xs: &[u32]) {
+    w.items = &xs[0..1];
+    w.first = &xs[0];
+}
+
+fn narrow_twice(w: &mut Window from xs, xs: &[u32]) {
+    narrow(w, &xs[0..2]);
+}
+
+// The origins of a view: an element of the slice the other window holds.
+fn adopt(w: &mut Window from copy other, other: &Window) {
+    w.first = &other.items[0];
+}
+
+fn caller() -> u32 {
+    let data: [u32; 3] = [1, 2, 3];
+    let mut w = Window.{ items: &data[0..1], first: &data[0] };
+    narrow(&mut w, &data[1..3]);
+    narrow_twice(&mut w, &data[0..3]);
+    return *w.first;
+}

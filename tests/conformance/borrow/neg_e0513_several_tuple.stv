@@ -1,14 +1,14 @@
 //~ CHECK-ONLY
-// A pointer taken out of a tuple may point to any view object the tuple borrows: a store through
-// it needs the value's origins in each of them, not in their union.
+// A pointer taken out of a tuple may point to any view object the tuple borrows mutably: a store
+// through it makes each of them hold the value's borrows, so `oa` keeps `x` borrowed.
 fn dangling() -> u32 {
     let mut oa: Option<&u32> = Option.None;
     {
         let x: u32 = 7;
         let ob: Option<&u32> = Option.Some(&x);
         let t = (&mut oa, &ob);
-        *t.0 = *t.1; //~ ERROR E0513
-    }
+        *t.0 = *t.1;
+    } //~ ERROR E0501
     return match oa { Option.Some(r) => *r, Option.None => 0 };
 }
 

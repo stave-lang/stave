@@ -1,0 +1,59 @@
+//~ CHECK-ONLY
+// A store may go through a parameter that the clause of another `&mut` parameter names,
+// when that clause covers the value: a by-value view, a fn value. The caller's views that
+// the named argument reaches gain the store. Not through a `&` source (E0503), not when the
+// clause names it `from copy`, not when the value is named by another parameter's clause.
+// The view such a source points to then counts as borrowing itself: its later use is
+// rejected too.
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+view struct Twin { out: &mut Pick, spare: &u32 }
+view struct Keep { t: &mut Twin }
+
+fn by_value(k: &mut Pick from l + y, l: Link, y: &u32) {
+    l.to.best = y;
+}
+
+fn by_value_caller() -> u32 {
+    let zero: u32 = 0;
+    let mut a = Pick.{ best: &zero, count: 0 };
+    let mut k = Pick.{ best: &zero, count: 0 };
+    {
+        let y: u32 = 7;
+        by_value(&mut k, Link.{ to: &mut a }, &y);
+    } //~ ERROR E0501
+    return *a.best; //~ ERROR E0501
+}
+
+fn via_fn(k: &mut Pick from f + y, f: fn() -> &mut Pick, y: &u32) {
+    let q = f();
+    q.best = y;
+}
+
+fn via_fn_caller() -> u32 {
+    let zero: u32 = 0;
+    let mut a = Pick.{ best: &zero, count: 0 };
+    let mut k = Pick.{ best: &zero, count: 0 };
+    {
+        let y: u32 = 7;
+        // the closure lends its `&mut` capture again on every call
+        via_fn(&mut k, fn() -> &mut Pick { return &mut a; }, &y); //~ ERROR E0512
+    } //~ ERROR E0501
+    return *a.best; //~ ERROR E0501
+}
+
+fn shared_source(k: &mut Pick from i + y, i: &Twin, y: &u32) {
+    i.out.best = y; //~ ERROR E0503
+}
+
+fn copy_source(k: &mut Keep from copy x + y, x: &mut Twin, y: &u32) {
+    x.out.best = y; //~ ERROR E0513
+}
+
+fn other_clause(a: &mut Keep from x, b: &mut Pick from y, x: &mut Twin, y: &u32) {
+    x.out.best = y; //~ ERROR E0513
+}
+
+fn main() -> i32 {
+    return 0;
+}

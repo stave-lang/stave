@@ -964,35 +964,26 @@ fn emulated_ops_are_listed() {
     assert!(err.contains("E0700"), "{err}");
 }
 
-/// Syntax that parses but has no semantics yet (parameter `from`) is "not implemented yet" for
-/// `stave check` and `stave build` (exit 2, naming the construct and its place); an error in the
-/// same program is reported instead (exit 1).
+/// A `from` clause on a parameter is part of the signature: `stave check` accepts the store it
+/// declares, reports the store without it (E0513), and reports the clause on a parameter that
+/// is not a `&mut` view (E0514).
 #[test]
-fn parsed_only_syntax_is_not_implemented() {
+fn param_from_is_checked_with_the_signature() {
     let d = tmp("v07");
-    let cases = [(
-        "param_from.stv",
-        "view struct S { r: &u32 }\nfn put(s: &mut S from x, x: &u32) {\n    s.r = x;\n}\n\
-         fn main() -> i32 {\n    return 0;\n}\n",
-        "a `from` clause on a parameter at ",
-        ":2:18",
-    )];
-    for (name, src, what, at) in cases {
-        let f = d.join(name);
-        std::fs::write(&f, src).unwrap();
-        let p = f.display().to_string();
-        for cmd in ["check", "build"] {
-            let (c, _, err) = stave_in(&d, &[cmd, &p]);
-            assert_eq!(c, 2, "{name} {cmd}: {err}");
-            assert!(err.contains("is not implemented yet"), "{name} {cmd}: {err}");
-            assert!(err.contains(what) && err.contains(at), "{name} {cmd}: {err}");
-        }
-    }
-    let f = d.join("error.stv");
+    let f = d.join("param_from.stv");
     let src = "view struct S { r: &u32 }\nfn put(s: &mut S from x, x: &u32) {\n    s.r = x;\n}\n\
-               fn main() -> i32 {\n    return nope;\n}\n";
+               fn main() -> i32 {\n    return 0;\n}\n";
     std::fs::write(&f, src).unwrap();
     let (c, _, err) = stave_in(&d, &["check", &f.display().to_string()]);
+    assert_eq!(c, 0, "{err}");
+    let f = d.join("no_clause.stv");
+    std::fs::write(&f, src.replace(" from x", "")).unwrap();
+    let (c, _, err) = stave_in(&d, &["check", &f.display().to_string()]);
     assert_eq!(c, 1, "{err}");
-    assert!(err.contains("E0101"), "{err}");
+    assert!(err.contains("E0513") && err.contains("add `from x` to parameter `s`"), "{err}");
+    let f = d.join("shared.stv");
+    std::fs::write(&f, src.replace("&mut S from x", "&S from x").replace("    s.r = x;\n", "")).unwrap();
+    let (c, _, err) = stave_in(&d, &["check", &f.display().to_string()]);
+    assert_eq!(c, 1, "{err}");
+    assert!(err.contains("E0514"), "{err}");
 }

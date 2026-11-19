@@ -1,0 +1,250 @@
+//~ CHECK-ONLY
+// More ways to pass the source, and the uses of the source view that conflict afterwards.
+import std.io;
+
+view struct Cur { cur: &u32, n: u32 }
+view struct Two { slot: &mut &u32, n: &u32 }
+view struct Hold { c: &mut Cur }
+view struct Slot<T: view> { v: T, k: usize }
+
+fn split(t: (&mut Cur, u32)) -> Two from t {
+    return Two.{ slot: &mut t.0.cur, n: &t.0.n };
+}
+
+fn n_of(t: (&mut Cur, u32)) -> &u32 from t {
+    return &t.0.n;
+}
+
+fn link(dst: &mut Cur from src, src: &mut Cur) {
+    let two = split((src, 0u32));
+    *two.slot = two.n;
+}
+
+// `dst` comes to point into `*src`
+fn point(dst: &mut Cur from src, src: &mut Cur) {
+    dst.cur = n_of((src, 0u32));
+}
+
+fn link_o(dst: &mut Cur from t, t: Option<(&mut Cur, u32)>) {
+    match t {
+        Option.Some(q) => {
+            let two = split(q);
+            *two.slot = two.n;
+        }
+        Option.None => {}
+    }
+}
+
+fn link_g<T: view>(dst: &mut Slot<u32> from x, x: T) {
+}
+
+fn id(q: &mut Cur) -> &mut Cur from q {
+    return q;
+}
+
+fn select_src(zero: &u32, c: bool) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    let mut d = Cur.{ cur: zero, n: 1 };
+    link(&mut a, c.select(&mut b, &mut d));
+    let r: &u32 = b.cur; //~ ERROR E0501
+    d.n = 2; //~ ERROR E0501
+    return *r + *d.cur; //~ ERROR E0501
+}
+
+fn match_src(zero: &u32, c: u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    let mut d = Cur.{ cur: zero, n: 1 };
+    link(&mut a, match c { 0 => &mut b, _ => &mut d });
+    let r: &u32 = b.cur; //~ ERROR E0501
+    d.n = 2; //~ ERROR E0501
+    return *r + *d.cur; //~ ERROR E0501
+}
+
+fn option_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link_o(&mut a, Option.Some((&mut b, 0u32)));
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn fn_value_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    let f: fn(&mut Cur) -> &mut Cur = id;
+    link(&mut a, f(&mut b));
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn hold_field_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    {
+        let h = Hold.{ c: &mut b };
+        link(&mut a, &mut *h.c);
+    }
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn hold_field_moved(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    {
+        let h = Hold.{ c: &mut b };
+        link(&mut a, h.c);
+    }
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn moved_ptr(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    {
+        let q = &mut b;
+        let q2 = q;
+        let q3 = (q2, 1u32);
+        link(&mut a, q3.0);
+    }
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn cast_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link(&mut a, &mut b as &mut Cur);
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+// the uses come before the call in the text, after it in time
+fn loop_back(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    let mut i: u32 = 0;
+    let mut s: u32 = 0;
+    while i < 2 {
+        if i == 1 {
+            let r: &u32 = b.cur; //~ ERROR E0501
+            b.n = 2; //~ ERROR E0501
+            s = s + *r;
+        }
+        if i == 0 {
+            link(&mut a, &mut b); //~ ERROR E0501
+//~^ ERROR E0501
+        }
+        i = i + 1;
+    }
+    return s;
+}
+
+fn loop_back_target(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    let mut i: u32 = 0;
+    let mut s: u32 = 0;
+    while i < 2 {
+        if i == 1 {
+            let r: &u32 = a.cur;
+            b.n = 2; //~ ERROR E0501
+            s = s + *r;
+        }
+        if i == 0 {
+            point(&mut a, &mut b); //~ ERROR E0501
+//~^ ERROR E0501
+        }
+        i = i + 1;
+    }
+    return s;
+}
+
+fn overwrite_live(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    point(&mut a, &mut b);
+    b = Cur.{ cur: zero, n: 9 }; //~ ERROR E0501
+    return *a.cur;
+}
+
+fn inner_scope_source(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        let mut b = Cur.{ cur: zero, n: i };
+        if i == 0 {
+            point(&mut a, &mut b); //~ ERROR E0501
+//~^ ERROR E0501
+        }
+        i = i + 1;
+    } //~ ERROR E0501
+    return *a.cur;
+}
+
+fn closure_reads(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link(&mut a, &mut b);
+    let f = fn() -> u32 { return *b.cur; }; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return f();
+}
+
+fn closure_before(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    let f = fn() -> u32 { return *b.cur; };
+    link(&mut a, &mut b); //~ ERROR E0501
+    return f();
+}
+
+fn fstring_reads(zero: &u32) {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link(&mut a, &mut b);
+    b.n = 2; //~ ERROR E0501
+    io.print(f"{b.n}\n"); //~ ERROR E0501
+}
+
+fn moved_after(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link(&mut a, &mut b);
+    let c = b; //~ ERROR E0501
+    return c.n;
+}
+
+fn pattern_after(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link(&mut a, &mut b);
+    match b {
+        Cur.{ cur, n } => { //~ ERROR E0501
+//~^ ERROR E0501
+            return *cur + n;
+        }
+    }
+}
+
+fn generic_by_value(zero: &u32) -> u32 {
+    let mut s = Slot::<u32>.{ v: 0, k: 0 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link_g(&mut s, &mut b);
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn main() -> i32 {
+    return 0;
+}

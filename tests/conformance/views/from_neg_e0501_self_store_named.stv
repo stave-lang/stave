@@ -1,0 +1,51 @@
+//~ CHECK-ONLY
+// A call whose result is assigned to the place its stored or returned borrow points to.
+view struct Pick { best: &u32, count: usize }
+view struct Chain { v: u32, prev: &u32 }
+
+fn keep(k: &mut Pick from x, x: &u32) -> u32 {
+    k.best = x;
+    return *x + 1;
+}
+
+fn wrap(x: &Chain, v: u32) -> Chain from x {
+    return Chain.{ v: v, prev: &x.v };
+}
+
+fn named(zero: &u32) -> u32 {
+    let mut k = Pick.{ best: zero, count: 0 };
+    let mut x: u32 = 1;
+    x = keep(&mut k, &x); //~ ERROR E0501
+    return *k.best;
+}
+
+fn through_ptr(zero: &u32) -> u32 {
+    let mut k = Pick.{ best: zero, count: 0 };
+    let mut x: u32 = 1;
+    let q = &mut x;
+    *q = keep(&mut k, &*q); //~ ERROR E0501
+    return *k.best;
+}
+
+fn named_flow(zero: &u32) -> u32 {
+    let mut x = Chain.{ v: 1, prev: zero };
+    x = wrap(&x, 2); //~ ERROR E0501
+    return *x.prev;
+}
+
+fn through_ptr_flow(zero: &u32) -> u32 {
+    let mut x = Chain.{ v: 1, prev: zero };
+    let q = &mut x;
+    *q = wrap(&*q, 2); //~ ERROR E0501
+    return *q.prev;
+}
+
+fn field_flow(zero: &u32) -> u32 {
+    let mut x = (Chain.{ v: 1, prev: zero }, 0u32);
+    x.0 = wrap(&x.0, 2); //~ ERROR E0501
+    return *x.0.prev;
+}
+
+fn main() -> i32 {
+    return 0;
+}

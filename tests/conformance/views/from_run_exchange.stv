@@ -1,0 +1,33 @@
+//~ STDOUT from_run_exchange.stdout
+// An exchange with clauses: the old pointer comes back `from copy` the holder.
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+
+// a correct exchange: the old pointer is handed back, the new one is stored
+fn xchg(l: &mut Link from q, q: &mut Pick) -> &mut Pick from copy l {
+    let p = &mut l.to as *mut &mut Pick;
+    let old = unsafe("p comes from l: valid, initialized, not aliased") p.read();
+    unsafe("the slot was moved out by read") { p.write(q); }
+    return old;
+}
+
+fn xchg_g<T: view>(dst: &mut T from v, v: T) -> T from copy dst {
+    let p = &mut *dst as *mut T;
+    let old = unsafe("p comes from dst") p.read();
+    unsafe("the slot was moved out by read") { p.write(v); }
+    return old;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut a = Pick.{ best: &zero, count: 1 };
+    let mut b = Pick.{ best: &zero, count: 2 };
+    let mut l = Link.{ to: &mut a };
+    let old = xchg(&mut l, &mut b);
+    let n: usize = old.count;
+    let m: usize = l.to.count;
+    io.print(f"{n} {m}\n");
+    return 0;
+}

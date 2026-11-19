@@ -1,0 +1,263 @@
+//~ CHECK-ONLY
+// More binders, closures in guards, argument temporaries: the view outlives what a storing
+// call borrowed.
+import std.io;
+import std.string;
+
+view struct Pick { best: &u32, count: usize }
+view struct Text { src: &str, n: usize }
+view struct Cb { f: fn() -> u32, n: usize }
+struct Own { a: u32, b: u32 }
+struct Count { i: u32 }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) -> bool {
+        self.best = x;
+        return true;
+    }
+}
+
+impl Text {
+    fn set(&mut self from s, s: &str) -> bool {
+        self.src = s;
+        return true;
+    }
+}
+
+impl Cb {
+    fn keep(&mut self from f, f: fn() -> u32) -> bool {
+        self.f = f;
+        return true;
+    }
+}
+
+impl Count {
+    fn next(&mut self) -> Option<u32> {
+        if self.i >= 2 {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        return Option.Some(self.i + 39);
+    }
+}
+
+fn next(i: u32) -> u32 {
+    return i + 40;
+}
+
+fn mk(i: u32) -> Own {
+    return Own.{ a: i + 40, b: i };
+}
+
+fn get(i: u32) -> Result<u32, u32> {
+    return Result.Ok(i + 40);
+}
+
+fn value_arm(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    let mut n: u32 = 0;
+    while i < 2 {
+        let m: u32 = match next(i) {
+            v => if i == 0 && p.take(&v) then 1u32 else 2u32, //~ ERROR E0501
+        };
+        n = n + m;
+        i = i + 1;
+    }
+    return *p.best + n;
+}
+
+fn value_guard(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    let mut n: u32 = 0;
+    while i < 2 {
+        let m: u32 = match next(i) {
+            v if i == 0 && p.take(&v) => 1u32, //~ ERROR E0501
+            _ => 2u32,
+        };
+        n = n + m;
+        i = i + 1;
+    }
+    return *p.best + n;
+}
+
+fn guard_ref_into_temp(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        match &mk(i) { //~ ERROR E0501
+            Own.{ a, b } if i == 0 && p.take(a) => {}
+            _ => {}
+        }
+        i = i + 1;
+    }
+    return *p.best;
+}
+
+fn guard_ref_temp(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        match &next(i) { //~ ERROR E0501
+            r if i == 0 && p.take(r) => {}
+            _ => {}
+        }
+        i = i + 1;
+    }
+    return *p.best;
+}
+
+fn guard_closure_capture(zero: &u32) -> u32 {
+    let mut c = Cb.{ f: fn() -> u32 { return 0; }, n: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        match next(i) {
+            v if i == 0 && c.keep(fn() -> u32 { return v; }) => {} //~ ERROR E0501
+            _ => {}
+        }
+        i = i + 1;
+    }
+    let f = c.f;
+    return f();
+}
+
+fn arm_closure_capture(zero: &u32) -> u32 {
+    let mut c = Cb.{ f: fn() -> u32 { return 0; }, n: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        match next(i) {
+            v => { //~ ERROR E0501
+                if i == 0 {
+                    let _ = c.keep(fn() -> u32 { return v; });
+                }
+            }
+        }
+        i = i + 1;
+    }
+    let f = c.f;
+    return f();
+}
+
+fn closure_param(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let f = fn(v: u32) -> bool {
+        return p.take(&v); //~ ERROR E0513
+    };
+    let _ = f(40);
+    let _ = f(41);
+    return *p.best;
+}
+
+fn closure_local_param(zero: &u32) -> u32 {
+    let f = fn(q: &mut Pick, v: u32) -> bool {
+        return q.take(&v); //~ ERROR E0513
+    };
+    let mut p = Pick.{ best: zero, count: 0 };
+    let _ = f(&mut p, 40);
+    let _ = f(&mut p, 41);
+    return *p.best;
+}
+
+fn try_temp(zero: &u32) -> Result<u32, u32> {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        if i == 0 {
+            let _ = p.take(&get(i)?); //~ ERROR E0501
+        }
+        i = i + 1;
+    }
+    return Result.Ok(*p.best);
+}
+
+fn fstring_temp() -> usize {
+    let mut t = Text.{ src: "", n: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        if i == 0 {
+            let _ = t.set(f"x{i}"); //~ ERROR E0501
+        }
+        i = i + 1;
+    }
+    return t.src.len();
+}
+
+fn fstring_named() -> usize {
+    let mut t = Text.{ src: "", n: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        let s = f"x{i}";
+        if i == 0 {
+            let _ = t.set(&s);
+        }
+        i = i + 1;
+    } //~ ERROR E0501
+    return t.src.len();
+}
+
+fn for_iter(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let c = Count.{ i: 0 };
+    for x in c {
+        if x == 40 {
+            let _ = p.take(&x);
+        }
+    } //~ ERROR E0501
+    return *p.best;
+}
+
+fn for_ref_temp_array(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        for x in &[next(i), next(i + 1)] { //~ ERROR E0501
+            if i == 0 {
+                let _ = p.take(x);
+            }
+        }
+        i = i + 1;
+    }
+    return *p.best;
+}
+
+fn for_ref_local_array(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        let xs = [next(i), next(i + 1)];
+        for x in &xs {
+            if i == 0 {
+                let _ = p.take(x);
+            }
+        }
+        i = i + 1;
+    } //~ ERROR E0501
+    return *p.best;
+}
+
+fn scrutinee_temp_field(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        match p.take(&mk(i).a) { //~ ERROR E0501
+            true => {}
+            false => {}
+        }
+        i = i + 1;
+    }
+    return *p.best;
+}
+
+fn block_local(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    {
+        let v: u32 = 40;
+        let _ = p.take(&v);
+    } //~ ERROR E0501
+    return *p.best;
+}
+
+fn main() -> i32 {
+    return 0;
+}

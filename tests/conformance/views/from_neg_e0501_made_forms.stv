@@ -1,0 +1,110 @@
+//~ CHECK-ONLY
+// `q.cur = &q.n` through a reborrow of a reborrow, a pointer in a view field, a pointer
+// returned by a call, a chosen pointer, in a loop; a store through a `&mut` source of a
+// borrow of another part of the same local; a store through a pointer to a part: the local
+// stays borrowed for as long as it is used.
+import std.io;
+
+view struct Cur { cur: &u32, n: u32 }
+view struct W { c: &mut Cur }
+view struct Pick { best: &u32, count: usize }
+view struct Outer { n: u32, inner: Pick }
+
+fn id(c: &mut Cur) -> &mut Cur from c {
+    return c;
+}
+
+fn put(dst: &mut Pick from x, x: &u32) {
+    dst.best = x;
+}
+
+fn stash(a: &mut Pick from q + x, q: &mut Pick, x: &u32) {
+    q.best = x;
+}
+
+fn reborrow2(zero: &u32) -> u32 {
+    let mut p = Cur.{ cur: zero, n: 1 };
+    {
+        let q = &mut p;
+        let q2 = &mut *q;
+        q2.cur = &q2.n;
+    }
+    p.n = 2; //~ ERROR E0501
+    return *p.cur; //~ ERROR E0501
+}
+
+fn in_field(zero: &u32) -> u32 {
+    let mut p = Cur.{ cur: zero, n: 1 };
+    {
+        let w = W.{ c: &mut p };
+        w.c.cur = &w.c.n;
+    }
+    p.n = 2; //~ ERROR E0501
+    return *p.cur; //~ ERROR E0501
+}
+
+fn through_call(zero: &u32) -> u32 {
+    let mut p = Cur.{ cur: zero, n: 1 };
+    {
+        let q = id(&mut p);
+        q.cur = &q.n;
+    }
+    p.n = 2; //~ ERROR E0501
+    return *p.cur; //~ ERROR E0501
+}
+
+fn through_call_temp(zero: &u32) -> u32 {
+    let mut p = Cur.{ cur: zero, n: 1 };
+    let n: &u32 = &id(&mut p).n;
+    p.cur = n; //~ ERROR E0501
+    p.n = 2; //~ ERROR E0501
+    return *p.cur; //~ ERROR E0501
+}
+
+fn chosen(zero: &u32, c: bool) -> u32 {
+    let mut p = Cur.{ cur: zero, n: 1 };
+    let mut p2 = Cur.{ cur: zero, n: 1 };
+    {
+        let q = if c then &mut p else &mut p2;
+        q.cur = &q.n;
+    }
+    p2.n = 2; //~ ERROR E0501
+    return *p2.cur; //~ ERROR E0501
+}
+
+fn looped(zero: &u32) -> u32 {
+    let mut p = Cur.{ cur: zero, n: 1 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        let q = &mut p; //~ ERROR E0501
+        if i == 1 {
+            q.cur = &q.n;
+        }
+        i = i + 1;
+    }
+    p.n = 2; //~ ERROR E0501
+    return *p.cur; //~ ERROR E0501
+}
+
+fn covered_part(zero: &u32) -> u32 {
+    let mut o = Outer.{ n: 1, inner: Pick.{ best: zero, count: 0 } };
+    let mut a = Pick.{ best: zero, count: 0 };
+    stash(&mut a, &mut o.inner, &o.n);
+    o.n = 2; //~ ERROR E0501
+    return *o.inner.best; //~ ERROR E0501
+}
+
+fn ptr_part(zero: &u32) -> u32 {
+    let mut o = Outer.{ n: 1, inner: Pick.{ best: zero, count: 0 } };
+    {
+        let q = &mut o;
+        let r = &mut q.inner;
+        put(r, &q.n);
+    }
+    o.n = 2; //~ ERROR E0501
+    return *o.inner.best; //~ ERROR E0501
+}
+
+fn main() -> i32 {
+    return 0;
+}

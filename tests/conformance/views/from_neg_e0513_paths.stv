@@ -1,0 +1,50 @@
+//~ CHECK-ONLY
+// However the pointer to the view behind a `&mut` parameter is made, a store through it is held
+// to the parameter's clause: a returned reference, a local pointer, a pointer chosen by a
+// condition, a loop over elements; and a borrow of a local is never a declared origin.
+view struct Pick { best: &u32, count: usize }
+
+fn slot(dst: &mut Pick) -> &mut &u32 from dst {
+    return &mut dst.best;
+}
+
+fn through_result(dst: &mut Pick, x: &u32) {
+    *slot(dst) = x; //~ ERROR E0513
+}
+
+fn through_local(dst: &mut Pick, x: &u32) {
+    let q = &mut dst.best;
+    *q = x; //~ ERROR E0513
+}
+
+fn chosen(a: &mut Pick from x, b: &mut Pick, x: &u32, c: bool) {
+    let q = if c then a else b;
+    q.best = x; //~ ERROR E0513
+}
+
+fn elements(xs: &mut [Pick], x: &u32) {
+    for i in 0..xs.len() {
+        xs[i].best = x; //~ ERROR E0513
+    }
+}
+
+fn local_borrow(dst: &mut Pick from x, x: &u32) {
+    let y: u32 = *x;
+    dst.best = &y; //~ ERROR E0513
+}
+
+// With the clause on every parameter the pointer may come from, each form is accepted.
+fn through_result_ok(dst: &mut Pick from x, x: &u32) {
+    *slot(dst) = x;
+}
+
+fn chosen_ok(a: &mut Pick from x, b: &mut Pick from x, x: &u32, c: bool) {
+    let q = if c then a else b;
+    q.best = x;
+}
+
+fn elements_ok(xs: &mut [Pick] from x, x: &u32) {
+    for i in 0..xs.len() {
+        xs[i].best = x;
+    }
+}

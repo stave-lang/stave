@@ -1,0 +1,42 @@
+//~ CHECK-ONLY
+// `*q = v` whose value borrows what the place held: a field behind the pointer, a call
+// result, a pointer chosen between two views.
+import std.io;
+import std.string;
+
+view struct H { name: string.String, s: &str }
+view struct Wrap { h: H, k: u32 }
+view struct Chain { v: u32, prev: &u32 }
+
+fn wrap(x: &Chain, v: u32) -> Chain from x {
+    return Chain.{ v: v, prev: &x.v };
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    // a field behind the pointer
+    let mut w = Wrap.{ h: H.{ name: f"first value of the name", s: "" }, k: 0 };
+    {
+        let q = &mut w;
+        q.h = H.{ name: f"second", s: q.h.name.as_str() }; //~ ERROR E0501
+        let other = f"XXXXXXXXXXXXXXXXXXXXXXX";
+        io.print(q.h.s);
+        io.print("\n");
+        io.print(other.as_str());
+        io.print("\n");
+    }
+    w = Wrap.{ h: H.{ name: f"third", s: "" }, k: 0 };
+    // the value is a call result `from` a borrow of the place
+    let mut x = Chain.{ v: 1, prev: &zero };
+    let q = &mut x;
+    *q = wrap(&*q, 2); //~ ERROR E0501
+    let a: u32 = *q.prev;
+    // a pointer that may point to either of two views
+    let mut y = Chain.{ v: 10, prev: &zero };
+    let mut z = Chain.{ v: 20, prev: &zero };
+    let p = if a == 2 then &mut y else &mut z;
+    *p = Chain.{ v: p.v + 1, prev: &p.v }; //~ ERROR E0501
+    let b: u32 = *p.prev;
+    io.print(f"{a} {b}\n");
+    return 0;
+}

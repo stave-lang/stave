@@ -1480,7 +1480,11 @@ fn sig_matches(
     if r2 != ms.ret && !tys.has_error(r2) && !tys.has_error(ms.ret) {
         return false;
     }
-    if ts.origins != ms.origins || ts.features != ms.features || ts.is_unsafe != ms.is_unsafe {
+    if ts.origins != ms.origins
+        || ts.param_origins != ms.param_origins
+        || ts.features != ms.features
+        || ts.is_unsafe != ms.is_unsafe
+    {
         return false;
     }
     // method generic bounds (by trait decl)

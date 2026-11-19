@@ -72,6 +72,15 @@ pub struct Origin {
     pub copy: bool,
 }
 
+/// One entry of a parameter's `from` clause: the callee may store what `source` borrows (`copy`:
+/// the origins of the view `source` points to) into what `target` points to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParamOrigin {
+    pub target: u8,
+    pub source: u8,
+    pub copy: bool,
+}
+
 /// A fn signature. Methods have the receiver as `params[0]`.
 #[derive(Clone, Debug)]
 pub struct FnSig {
@@ -88,6 +97,8 @@ pub struct FnSig {
     /// Span of the return type (`None`: unit, no `->`).
     pub ret_span: Option<Span>,
     pub origins: Vec<Origin>,
+    /// The parameters' `from` clauses: the valid entries, sorted, deduplicated.
+    pub param_origins: Vec<ParamOrigin>,
     /// stave-target `FeatureSet` bits.
     pub features: u64,
     /// The deny clause ([`crate::effects::Effects`] bits) and the span of each effect it names.
@@ -1558,7 +1569,48 @@ impl<'p> SigBuilder<'p> {
         } else if decl.flags.has(DeclFlags::EXTERN_EXPORT) {
             abi = Abi::C;
         }
-        let sig = FnSig {
+        // The parameters' `from` clauses as written (crate::origins::check_params).
+        let mut clauses: Vec<crate::origins::ParamClause> = Vec::new();
+        for (ti, &p) in param_nodes.iter().enumerate() {
+            let Some(pf) = icx.child(p, NodeKind::ParamFrom) else { continue };
+            let name = match icx.child(p, NodeKind::SelfParam) {
+                Some(_) => "self".to_string(),
+                None => icx.tok_str(icx.a(p)).to_string(),
+            };
+            let from = icx.child(pf, NodeKind::From).unwrap_or(pf);
+            let mut entries = Vec::new();
+            for o in icx.kids_vec(from) {
+                if icx.kind(o) != Some(NodeKind::Origin) {
+                    continue;
+                }
+                let a = icx.a(o);
+                let copy = icx.is(a, Term::KwCopy);
+                let Some(u) = icx.uses(o).first() else { continue };
+                let bnode = match u.res {
+                    Res::Local(b) | Res::SelfValue(b) => b.node,
+                    _ => continue,
+                };
+                let idx = param_nodes
+                    .iter()
+                    .position(|&q| q == bnode || icx.child(q, NodeKind::SelfParam) == Some(bnode));
+                if let Some(i) = idx {
+                    let name_tok = if copy { a + 1 } else { a };
+                    entries.push(crate::origins::ClauseEntry {
+                        source: i.min(255) as u8,
+                        copy,
+                        span: icx.node_span(o),
+                        name: icx.tok_str(name_tok).to_string(),
+                    });
+                }
+            }
+            clauses.push(crate::origins::ParamClause {
+                target: ti.min(255) as u8,
+                name,
+                span: icx.node_span(pf),
+                entries,
+            });
+        }
+        let mut sig = FnSig {
             decl: d,
             generics,
             n_parent,
@@ -1568,6 +1620,7 @@ impl<'p> SigBuilder<'p> {
             ret,
             ret_span,
             origins,
+            param_origins: Vec::new(),
             features,
             deny,
             deny_spans,
@@ -1579,6 +1632,18 @@ impl<'p> SigBuilder<'p> {
         // E0520 E0521 (origin table).
         let ds = crate::origins::check_sig(self.prog, &self.tys, &sig, &origin_at);
         self.diags.extend(ds);
+        // E0514 E0515 E0520 E0521 (the parameters' clauses).
+        if !clauses.is_empty() {
+            let kernel = kind == Some(NodeKind::KernelDecl);
+            let mirrors_trait = decl.kind == DeclKind::Method && {
+                self.ensure(decl.parent);
+                matches!(&self.sigs[decl.parent.idx()], DeclSig::Impl(i) if i.trait_ref.is_some())
+            };
+            let (param_origins, ds) =
+                crate::origins::check_params(self.prog, &self.tys, &sig, kernel, mirrors_trait, &clauses);
+            self.diags.extend(ds);
+            sig.param_origins = param_origins;
+        }
         DeclSig::Fn(Box::new(sig))
     }
 

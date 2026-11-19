@@ -1,0 +1,105 @@
+//~ CHECK-ONLY
+// A `from copy` source and a `from copy` result are read after the call's own stores: what the
+// call stores into a view is in what it copies out of that view.
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+
+impl Pick {
+    fn swap_in(&mut self from x, x: &u32) -> &u32 from copy self {
+        self.best = x;
+        return self.best;
+    }
+}
+
+fn two(a: &mut Pick from x, b: &mut Pick from copy a, x: &u32) {
+    a.best = x;
+    b.best = a.best;
+}
+
+// The copied parameter may be named after the one that copies from it.
+fn rev(a: &mut Pick from copy b, b: &mut Pick from y, y: &u32) {
+    b.best = y;
+    a.best = b.best;
+}
+
+// `x` takes `y`'s borrow under the clause of `k`; `out` copies it from there.
+fn mix(k: &mut Link from x + y, x: &mut Pick, y: &u32, out: &mut Pick from copy x) {
+    x.best = y;
+    out.best = x.best;
+}
+
+// No clause on `dst`: the copy out of `w` holds what the same call stored into `w`.
+fn launder(dst: &mut Pick, x: &u32) {
+    let mut w = Pick.{ best: dst.best, count: 0 };
+    two(&mut w, dst, x); //~ ERROR E0513
+}
+
+fn copied_target() -> u32 {
+    let zero: u32 = 0;
+    let mut pb = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        let mut pa = Pick.{ best: &zero, count: 0 };
+        two(&mut pa, &mut pb, &x);
+    } //~ ERROR E0501
+    return *pb.best;
+}
+
+fn later_target() -> u32 {
+    let zero: u32 = 0;
+    let mut pa = Pick.{ best: &zero, count: 0 };
+    {
+        let y: u32 = 7;
+        let mut pb = Pick.{ best: &zero, count: 0 };
+        rev(&mut pa, &mut pb, &y);
+    } //~ ERROR E0501
+    return *pa.best;
+}
+
+fn covered_source() -> u32 {
+    let zero: u32 = 0;
+    let mut res = Pick.{ best: &zero, count: 0 };
+    let mut p0 = Pick.{ best: &zero, count: 0 };
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let mut k = Link.{ to: &mut p0 };
+    {
+        let y: u32 = 7;
+        mix(&mut k, &mut p, &y, &mut res);
+    } //~ ERROR E0501
+    return *res.best;
+}
+
+fn result_escapes(seed: &u32, v: u32) -> &u32 from seed {
+    let x: u32 = v;
+    let mut p = Pick.{ best: seed, count: 0 };
+    return p.swap_in(&x); //~ ERROR E0512
+}
+
+fn result_kept() -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    {
+        let x: u32 = 7;
+        let mut p = Pick.{ best: &zero, count: 0 };
+        r = p.swap_in(&x);
+    } //~ ERROR E0501
+    return *r;
+}
+
+// The value copied out before the call's store is still what the view held then.
+fn old_value() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let old: &u32 = p.best;
+    {
+        let x: u32 = 7;
+        p.take_only(&x);
+    }
+    return *old;
+}
+
+impl Pick {
+    fn take_only(&mut self from x, x: &u32) {
+        self.best = x;
+    }
+}

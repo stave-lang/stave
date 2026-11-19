@@ -1,0 +1,44 @@
+//~ CHECK-ONLY
+// A bound without `view` is not met by a type that holds a borrow.
+import std.io;
+
+struct Slot<T: view> { v: T, k: usize }
+
+trait Sink<T: view> {
+    fn put(&mut self from x, x: T);
+}
+
+impl<T: view> Sink<T> for Slot<T> {
+    fn put(&mut self from x, x: T) {
+        self.v = x;
+    }
+}
+
+// `S` has no `view` bound: the body is checked as if `*s` held no borrow
+fn through_bound<S: Sink<&u32>>(s: &mut S, x: &u32) {
+    s.put(x);
+}
+
+fn fill(s: &mut Slot<&u32>, i: u32) {
+    let v: u32 = i + 40;
+    through_bound(s, &v); //~ ERROR E0414
+}
+
+fn churn(i: u32) -> u32 {
+    let a: u32 = i * 3 + 1;
+    let b: u32 = a + 7;
+    return a + b;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut s = Slot::<&u32>.{ v: &zero, k: 0 };
+    fill(&mut s, 1);
+    let before: u32 = *s.v;
+    let c = churn(5);
+    fill(&mut s, 2);
+    let _ = churn(c);
+    let after: u32 = *s.v;
+    io.print(f"{before} {after}\n");
+    return 0;
+}

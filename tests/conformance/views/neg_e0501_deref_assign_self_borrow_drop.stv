@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// `*q = v` where `v` borrows a heap buffer of the value the assignment drops.
+import std.io;
+import std.string;
+
+view struct H { name: string.String, s: &str }
+
+fn main() -> i32 {
+    let mut x = H.{ name: f"first value of the name", s: "" };
+    {
+        let q = &mut x;
+        *q = H.{ name: f"second", s: q.name.as_str() }; //~ ERROR E0501
+        let other = f"XXXXXXXXXXXXXXXXXXXXXXX";
+        io.print(q.s);
+        io.print("\n");
+        io.print(other.as_str());
+        io.print("\n");
+    }
+    x = H.{ name: f"third", s: "" };
+    return 0;
+}

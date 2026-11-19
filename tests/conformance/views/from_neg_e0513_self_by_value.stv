@@ -1,0 +1,18 @@
+//~ CHECK-ONLY
+// A by-value `self` of type `&mut Pick` in a trait impl stores nothing without a clause.
+view struct Cur { cur: &u32, n: u32 }
+view struct Pick { best: &u32, count: usize }
+
+trait Sink {
+    fn put(self, x: &u32);
+}
+
+impl Sink for &mut Pick {
+    fn put(self, x: &u32) {
+        self.best = x; //~ ERROR E0513
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

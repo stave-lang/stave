@@ -417,13 +417,6 @@ impl<'t, 'a> W<'t, 'a> {
         self.diags.extend(d);
     }
 
-    fn unimplemented(&mut self, n: u32, what: &'static str) {
-        let tok = self.a(n);
-        if self.res.unimplemented.is_none_or(|(t, _)| tok < t) {
-            self.res.unimplemented = Some((tok, what));
-        }
-    }
-
     fn e0101(&mut self, seg: &Seg) {
         let n = self.name(seg.sym);
         let n = if n.is_empty() { "_" } else { n };
@@ -900,9 +893,6 @@ impl<'t, 'a> W<'t, 'a> {
     }
 
     fn param(&mut self, p: u32, bk: BindKind) {
-        if let Some(pf) = self.ast.child(p, NodeKind::ParamFrom) {
-            self.unimplemented(pf, "a `from` clause on a parameter");
-        }
         if let Some(sp) = self.ast.child(p, NodeKind::SelfParam) {
             let at = BindingRef { node: sp };
             self.self_param = Some(at);
@@ -996,8 +986,22 @@ impl<'t, 'a> W<'t, 'a> {
                 }
             }
             NodeKind::Params | NodeKind::XParams => {
-                let bk = if self.closure_depth() { BindKind::ClosureParam } else { BindKind::Param };
+                let closure = self.closure_depth();
+                let bk = if closure { BindKind::ClosureParam } else { BindKind::Param };
                 let kids = self.ast.children(n);
+                // A parameter's `from` clause may name any parameter of the fn, a later one
+                // too: the clauses are resolved after every parameter is bound. A closure
+                // parameter takes no clause (E0514, from the type checker): its names are not
+                // looked up.
+                if !closure {
+                    for &c in kids.iter().rev() {
+                        if self.ast.kind(c) == Some(NodeKind::Param)
+                            && let Some(pf) = self.ast.child(c, NodeKind::ParamFrom)
+                        {
+                            self.stack.push(Task::Visit(pf));
+                        }
+                    }
+                }
                 for &c in kids.iter().rev() {
                     match self.ast.kind(c) {
                         Some(NodeKind::Param) => self.param(c, bk),

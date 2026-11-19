@@ -213,8 +213,25 @@ impl<'a> Tys<'a> {
     /// Whether a value of `t` can reach, through at least one reference, a `&mut` to a ref-like
     /// type: a pointer a store can go through that is not one of the value's own (unknown types
     /// and view-bounded generic params: yes). A fn value counts as its result, which carries the
-    /// fn value's origins.
+    /// fn value's origins. A raw pointer to a ref-like type, as a type argument or a field of a
+    /// view ADT, counts as a `&mut` to it and as a reference on the way: a view that reaches
+    /// another view object through a raw pointer hands out `&mut`s to it. The fields of other
+    /// ADTs are not looked at: what they point to is their own storage.
     pub fn holds_inner_mut(&mut self, t: TypeId) -> bool {
+        self.reaches_mut(t, false)
+    }
+
+    /// Whether a value of `t` is, or holds at any depth, a `&mut` to a ref-like type: the only
+    /// pointers a ref-like value is stored through (unknown types and view-bounded generic
+    /// params: yes). A `&mut` to a ref-like object is made by borrowing it, by reborrowing
+    /// through another such `&mut`, or by copying one out of a value that holds it, so a value
+    /// of a type without one never leads to a place a store can reach.
+    pub fn holds_mut(&mut self, t: TypeId) -> bool {
+        self.reaches_mut(t, true)
+    }
+
+    /// `below`: whether `t` itself counts as found below a reference.
+    fn reaches_mut(&mut self, t: TypeId, below: bool) -> bool {
         if self.is_unknown(t) {
             return true;
         }
@@ -227,12 +244,25 @@ impl<'a> Tys<'a> {
         let sigs = self.sigs;
         let env = self.env;
         // (type, below a reference)
-        let mut stack = vec![(t, false)];
+        let mut stack = vec![(t, below)];
         let mut seen: Vec<(TypeId, bool)> = Vec::new();
         let mut kids = Vec::new();
         while let Some((x, below)) = stack.pop() {
             if self.is_unknown(x) || seen.len() > 4096 {
                 return true;
+            }
+            if let TypeKind::Ptr { inner, .. } = self.kind(x)
+                && self.ref_like(inner)
+            {
+                // unsafe code makes a `&mut` from it: it stands for one
+                if below {
+                    return true;
+                }
+                if !seen.contains(&(x, below)) {
+                    seen.push((x, below));
+                    stack.push((inner, true));
+                }
+                continue;
             }
             if !self.ref_like(x) || seen.contains(&(x, below)) {
                 continue;

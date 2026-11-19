@@ -1,0 +1,64 @@
+//~ CHECK-ONLY
+// A store whose value borrows a place overlapping the one stored into is a conflict of the
+// two borrows: by a receiver, by an argument, through a pointer, with an earlier borrow.
+// `&mut b` passed as a `&Cur` source keeps `b` borrowed while the target is used.
+view struct Pick { best: &u32, count: u32 }
+view struct Outer { n: u32, inner: Pick }
+view struct Cur { cur: &u32, n: u32 }
+view struct Sum { best: &u32 }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) {
+        self.best = x;
+    }
+}
+
+fn put(dst: &mut Pick from x, x: &u32) {
+    dst.best = x;
+}
+
+fn peek_link(l: &mut Sum from s, s: &Cur) {
+    l.best = &s.n;
+}
+
+fn receiver_overlap(zero: &u32) -> u32 {
+    let mut o = Outer.{ n: 1, inner: Pick.{ best: zero, count: 0 } };
+    o.inner.take(&o.inner.count); //~ ERROR E0501
+    o.inner.count = 2;
+    return *o.inner.best;
+}
+
+fn arg_overlap(zero: &u32) -> u32 {
+    let mut o = Outer.{ n: 1, inner: Pick.{ best: zero, count: 0 } };
+    put(&mut o.inner, &o.inner.count); //~ ERROR E0501
+    o.inner.count = 2;
+    return *o.inner.best;
+}
+
+fn pointer_overlap(zero: &u32) -> u32 {
+    let mut o = Outer.{ n: 1, inner: Pick.{ best: zero, count: 0 } };
+    let q = &mut o.inner;
+    q.best = &o.inner.count; //~ ERROR E0501
+    o.inner.count = 2;
+    return *o.inner.best;
+}
+
+fn earlier_overlap(zero: &u32) -> u32 {
+    let mut o = Outer.{ n: 1, inner: Pick.{ best: zero, count: 0 } };
+    let r = &o.inner.count;
+    put(&mut o.inner, r); //~ ERROR E0501
+    o.inner.count = 2;
+    return *o.inner.best;
+}
+
+fn shared_of_mut(zero: &u32) -> u32 {
+    let mut b = Cur.{ cur: zero, n: 1 };
+    let mut s = Sum.{ best: zero };
+    peek_link(&mut s, &mut b);
+    b.n = 2; //~ ERROR E0501
+    return *s.best;
+}
+
+fn main() -> i32 {
+    return 0;
+}

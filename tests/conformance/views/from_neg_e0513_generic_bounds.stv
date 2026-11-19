@@ -1,0 +1,85 @@
+//~ CHECK-ONLY
+// View-bounded type params at impl, method and trait level: a store without a clause.
+view struct Pick { best: &u32, count: usize }
+struct Slot<T: view> { v: T, k: usize }
+struct Pair<A: view, B: view> { a: A, b: B }
+
+trait Sink<T: view> {
+    fn put(&mut self from x, x: T);
+    fn peek(&mut self, x: T);
+}
+
+impl<T: view> Slot<T> {
+    fn set(&mut self, x: T) {
+        self.v = x; //~ ERROR E0513
+    }
+    fn set_other<U: view>(&mut self, o: &mut Slot<U>, y: U) {
+        o.v = y; //~ ERROR E0513
+    }
+    fn set_pair<U: view>(&mut self, o: &mut Pair<U, T>, y: U, x: T) {
+        o.a = y; //~ ERROR E0513
+        o.b = x; //~ ERROR E0513
+    }
+    fn ok<U: view>(&mut self, o: &mut Pair<U, T> from y + x, y: U, x: T) {
+        o.a = y;
+        o.b = x;
+    }
+}
+
+impl<A: view, B: view> Pair<A, B> {
+    fn first(&mut self from b, a: A, b: B) {
+        self.a = a; //~ ERROR E0513
+    }
+    fn second<C: view>(&mut self, s: &mut Slot<C>, c: C, b: B) {
+        self.b = b; //~ ERROR E0513
+        s.v = c; //~ ERROR E0513
+    }
+}
+
+impl<T: view> Sink<T> for Slot<T> {
+    fn put(&mut self from x, x: T) {
+        self.v = x;
+    }
+    fn peek(&mut self, x: T) {
+        self.v = x; //~ ERROR E0513
+    }
+}
+
+fn free<A: view, B: view>(p: &mut Pair<A, B> from a, a: A, b: B) {
+    p.a = a;
+    p.b = b; //~ ERROR E0513
+}
+
+fn through_bound<S: Sink<&u32>>(s: &mut S, x: &u32) {
+    s.put(x);
+}
+
+fn nested_generic<T: view>(s: &mut Slot<Slot<T>>, x: T) {
+    s.v.v = x; //~ ERROR E0513
+}
+
+fn opt<T: view>(s: &mut Option<T>, x: T) {
+    *s = Option.Some(x); //~ ERROR E0513
+}
+
+fn arr<T: view>(s: &mut [T; 2], x: T, y: T) {
+    s[0] = x; //~ ERROR E0513
+}
+
+fn tup<T: view>(s: &mut (T, u32), x: T) {
+    s.0 = x; //~ ERROR E0513
+}
+
+fn fnslot(s: &mut fn() -> u32, f: fn() -> u32) {
+    *s = f; //~ ERROR E0513
+}
+
+fn closure_in_generic<T: view>(s: &mut Slot<T>, x: T) {
+    let f = fn(q: &mut Slot<T>, y: T) {
+        q.v = y; //~ ERROR E0513
+    };
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -1,0 +1,115 @@
+//~ CHECK-ONLY
+// An exchange with clauses hands the old pointer back with a `from copy` origin: the caller
+// keeps every view the call reached borrowed.
+import std.io;
+
+view struct Pick { best: &u32, count: u32 }
+view struct Link { to: &mut Pick }
+view struct Two { slot: &mut &u32, n: &u32 }
+
+fn xchg(l: &mut Link from q, q: &mut Pick) -> &mut Pick from copy l {
+    let p = &mut l.to as *mut &mut Pick;
+    let old = unsafe("p comes from l: valid, initialized, not aliased") p.read();
+    unsafe("the slot was moved out by read") { p.write(q); }
+    return old;
+}
+
+fn xchg_g<T: view>(dst: &mut T from v, v: T) -> T from copy dst {
+    let p = &mut *dst as *mut T;
+    let old = unsafe("p comes from dst") p.read();
+    unsafe("the slot was moved out by read") { p.write(v); }
+    return old;
+}
+
+fn split(t: (&mut Pick, u32)) -> Two from t {
+    return Two.{ slot: &mut t.0.best, n: &t.0.count };
+}
+
+fn selfref(q: (&mut Pick, u32)) {
+}
+
+// the old pointee comes back; the caller then makes it point into itself
+fn back_and_split(zero: &u32) -> u32 {
+    let mut a = Pick.{ best: zero, count: 1 };
+    let mut b = Pick.{ best: zero, count: 2 };
+    let mut l = Link.{ to: &mut a };
+    {
+        let old = xchg(&mut l, &mut b);
+        let two = split((old, 0u32));
+        *two.slot = two.n;
+    }
+    let r: &u32 = l.to.best;
+    let x: u32 = *r;
+    a.count = 7; //~ ERROR E0501
+    return x + *r;
+}
+
+// `b` was the source, then exchanged out again: `l` no longer points to it
+fn out_again(zero: &u32) -> u32 {
+    let mut a = Pick.{ best: zero, count: 1 };
+    let mut b = Pick.{ best: zero, count: 2 };
+    let mut c = Pick.{ best: zero, count: 3 };
+    let mut l = Link.{ to: &mut a };
+    {
+        let old = xchg(&mut l, &mut b);
+        let back = xchg(&mut l, old);
+        let two = split((back, 0u32));
+        *two.slot = two.n;
+    }
+    let r: &u32 = b.best; //~ ERROR E0501
+    b.count = 9; //~ ERROR E0501
+    return *r;
+}
+
+// the pointer taken out is stored into another holder
+fn into_other(zero: &u32) -> u32 {
+    let mut a = Pick.{ best: zero, count: 1 };
+    let mut b = Pick.{ best: zero, count: 2 };
+    let mut c = Pick.{ best: zero, count: 3 };
+    let mut d = Pick.{ best: zero, count: 4 };
+    let mut l = Link.{ to: &mut a };
+    let mut m = Link.{ to: &mut c };
+    {
+        let old = xchg(&mut l, &mut b);
+        let _ = xchg(&mut m, old);
+    }
+    m.to.count = 5;
+    a.count = 6; //~ ERROR E0501
+    return m.to.count;
+}
+
+fn generic_out(zero: &u32) -> u32 {
+    let mut a = Pick.{ best: zero, count: 1 };
+    let mut b = Pick.{ best: zero, count: 2 };
+    let mut l = Link.{ to: &mut a };
+    {
+        let old: &mut Pick = xchg_g(&mut l.to, &mut b);
+        let two = split((old, 0u32));
+        *two.slot = two.n;
+    }
+    let r: &u32 = a.best; //~ ERROR E0501
+    a.count = 7; //~ ERROR E0501
+    return *r;
+}
+
+// a Copy pointer exchanged: the old value keeps what the slot held
+fn generic_ref(zero: &u32) -> u32 {
+    let mut slot: &u32 = zero;
+    let mut x: u32 = 1;
+    let old: &u32 = xchg_g(&mut slot, &x);
+    x = 2; //~ ERROR E0501
+    return *slot + *old;
+}
+
+fn generic_ref_old(zero: &u32) -> u32 {
+    let mut x: u32 = 1;
+    let mut y: u32 = 1;
+    let mut slot: &u32 = &x;
+    let old: &u32 = xchg_g(&mut slot, &y);
+    x = 2; //~ ERROR E0501
+    return *old;
+}
+
+fn main() -> i32 {
+    return 0;
+}

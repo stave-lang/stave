@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// A fn that stores a parameter's borrow into the view behind a `&mut` parameter without a
+// `from` clause is E0513, and a fn with a clause is not a fn value (E0807): either gap would
+// let `main` read `x` after its scope.
+view struct Pick { best: &u32, count: usize }
+
+fn keep(dst: &mut Pick, x: &u32) {
+    dst.best = x; //~ ERROR E0513
+}
+
+fn store(dst: &mut Pick from x, x: &u32) {
+    dst.best = x;
+}
+
+fn through_value(p: &mut Pick, x: &u32) {
+    let f: fn(&mut Pick, &u32) = store; //~ ERROR E0807
+    f(p, x);
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        keep(&mut p, &x);
+        through_value(&mut p, &x);
+    }
+    return (*p.best) as% i32;
+}

@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// A `&mut` borrow of a temporary made again in the next iteration while the last one is
+// still used: the new borrow conflicts with it, and so does the new value of the temporary.
+fn next(i: u32) -> u32 {
+    return i + 1;
+}
+
+fn main() -> i32 {
+    let mut zero: u32 = 0;
+    let mut r: &mut u32 = &mut zero;
+    let mut i: u32 = 0;
+    while i < 3 {
+        let q: &mut u32 = &mut next(i); //~ ERROR E0501
+//~^ ERROR E0501
+        *r = 100;
+        r = q;
+        i = i + 1;
+    }
+    let v: u32 = *r;
+    return v as% i32;
+}
