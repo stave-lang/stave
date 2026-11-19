@@ -970,11 +970,16 @@ retired = true
 code = "E0512"
 severity = "error"
 area = "borrow"
-rule = "returned value borrows a local"
+rule = "returned value borrows a local; case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)"
 holes = { place = "place" }
 message = "returned value borrows local `{place}`"
 labels = [{ at = "primary", text = "returned here" }, { at = "local", text = "`{place}` is dropped when the function returns" }]
 fix = { description = "return an owned value, or borrow from a parameter named in the `from` clause" }
+
+[diag.cases.mut-capture]
+message = "returned value borrows `{place}` through a `&mut` capture of the closure"
+labels = [{ at = "primary", text = "returned here" }, { at = "capture", text = "the next call of this closure could change `{place}` or lend it again" }]
+fix = { description = "return a copy of the value, or borrow it before the closure (`let r = &{place};`) and return `r` from the closure" }
 
 [[diag]]
 code = "E0513"

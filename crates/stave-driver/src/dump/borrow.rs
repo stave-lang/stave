@@ -1,7 +1,8 @@
 //! `borrow`: `I N access-kind verdict loan` per borrow-checker access (stage-gates.md), for every
 //! body that was borrow checked (bodies with a type error are skipped, `Typeck::has_error`).
 //! N = the place expression (`read write move`) or the local's binding node (`drop
-//! storage-dead`); `loan` = the creation node of the reported loan (stage0's choice: the
+//! storage-dead`; a temporary: its expression node; the `storage-dead` that the initialization
+//! of a borrowed temporary is: the initializing expression); `loan` = the creation node of the reported loan (stage0's choice: the
 //! stage-gates format leaves the loan id open), or `-`. Lines sorted by (I, N), kinds in the
 //! order `read write move drop storage-dead` per node. Needs [`crate::pipeline::Options::borrow_dump`].
 

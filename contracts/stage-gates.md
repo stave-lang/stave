@@ -67,7 +67,10 @@ Common fields: `F` = file index (rank of (package, path)), `O` = byte offset in 
 - `borrow`: one line per access of the borrow checker in every body that was borrow
   checked (bodies with a type error are skipped).
   - `N` is the node of the access: the place expression for `read`, `write`, `move`; for an
-    implicit `drop` or `storage-dead` at the end of a scope, the binding node of the local.
+    implicit `drop` or `storage-dead` at the end of a scope, the binding node of the local (a
+    temporary: its expression node). The initialization of a temporary that some loan borrows
+    is a `storage-dead` of the value its expression made before, at the node of the
+    initializing expression.
   - `access-kind` is one of `read write move drop storage-dead`; on one node they are listed in
     that order.
   - `verdict` is `ok` or the diagnostic code reported for this access (`E0501`, `E0502`, `E0503`,
