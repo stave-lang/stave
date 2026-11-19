@@ -382,11 +382,10 @@ impl<'m, H: Host> Interp<'m, H> {
             })
         });
         let bt = (cfg.check && cfg.borrow).then(|| {
-            let marks = m
-                .funcs
-                .iter()
-                .enumerate()
-                .flat_map(|(f, func)| func.borrows.iter().map(move |b| ((f as u32, b.value.0), *b)));
+            let marks = m.funcs.iter().enumerate().flat_map(|(f, func)| {
+                let marks = func.body.as_ref().map_or(&[][..], |b| &b.borrows);
+                marks.iter().map(move |b| ((f as u32, b.value.0), *b))
+            });
             Box::new(Borrows {
                 tracker: Tracker::new(),
                 shadow: HashMap::new(),
@@ -974,6 +973,19 @@ impl<'m, H: Host> Interp<'m, H> {
     /// is a new borrow (M4); the sum or difference of a tagged word and an untagged one keeps
     /// the tag (M20).
     fn retag(&mut self, body: &Body, f: FuncId, regs: &[Val], i: u32, out: Val) -> R<Val> {
+        let res = body.insts.result.get(i as usize).copied().flatten();
+        // bytes of the place a marked result borrows; of a fat reference, of one element
+        let unit = match res {
+            Some(v) if self.bt.as_ref().is_some_and(|bt| bt.marks.contains_key(&(f.0, v.0))) => {
+                let inner = body.value_ty(v).and_then(|t| self.pointee.get(t.index()).copied().flatten());
+                match inner.and_then(|t| self.m.types.key(t).map(|k| (t, k))) {
+                    Some((_, crate::types::TypeKey::Slice { elem, .. })) => self.layout(*elem)?.size,
+                    Some((t, _)) if !matches!(out, Val::Pair(..) | Val::PairT(..)) => self.layout(t)?.size,
+                    _ => 1,
+                }
+            }
+            _ => 0,
+        };
         let Some(bt) = &mut self.bt else { return Ok(out) };
         let op = body.insts.op.get(i as usize).copied();
         let carried = match (op, &out, body.args(i)) {
@@ -989,12 +1001,11 @@ impl<'m, H: Host> Interp<'m, H> {
             _ => None,
         };
         let out = carried.unwrap_or(out);
-        let Some(Some(res)) = body.insts.result.get(i as usize) else { return Ok(out) };
-        let Some(&mark) = bt.marks.get(&(f.0, res.0)) else { return Ok(out) };
+        let Some(&mark) = res.and_then(|v| bt.marks.get(&(f.0, v.0))) else { return Ok(out) };
         let Some((addr, parent)) = out.word() else { return Ok(out) };
         let len = match out {
-            Val::Pair(_, n) | Val::PairT(_, n, _) => n.saturating_mul(mark.size),
-            _ => mark.size,
+            Val::Pair(_, n) | Val::PairT(_, n, _) => n.saturating_mul(unit),
+            _ => unit,
         };
         let Some((id, off)) = bt.locate(&self.mem, addr) else { return Ok(out) };
         let kind = if mark.mutable { Kind::Mut } else { Kind::Shared };

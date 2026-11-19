@@ -1,0 +1,14 @@
+//~ BORROWCHECK ok
+// Borrows of two fields side by side, a reborrow, and reads through both.
+struct P { a: u32, b: u32 }
+
+fn bump(m: &mut u32, by: &u32) { *m = *m + *by; }
+
+fn main() -> i32 {
+    let mut p = P.{ a: 1u32, b: 2u32 };
+    bump(&mut p.a, &p.b);
+    let r: &u32 = &p.a;
+    let s: &u32 = &*r;
+    if *r + *s == 6u32 { return 0; }
+    return 1;
+}

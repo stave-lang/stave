@@ -549,6 +549,9 @@ pub struct Body {
     pub consts: Vec<Const>,
     pub cases: Vec<SwitchCase>,
     pub values: Vec<ValueData>,
+    /// Borrow events the instructions do not show (contracts/borrow-model.md, "Side table").
+    /// Empty unless the lowering was asked for them; not part of the canonical dump.
+    pub borrows: Vec<BorrowMark>,
 }
 
 impl Body {
@@ -652,13 +655,12 @@ impl Body {
 
 /// A borrow of the side table: the result of the instruction that defines `value` is a new
 /// reference to the place its address names, reached through the tag that address carries.
+/// The place is the pointee of the value's type; of a fat reference, its elements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BorrowMark {
     pub value: Value,
     /// `&mut` (else `&`).
     pub mutable: bool,
-    /// Bytes of the place; of a fat reference, of one element.
-    pub size: u64,
 }
 
 /// A function: signature plus an optional body (`None` = declared only, e.g. an `extern "C"`
@@ -681,9 +683,6 @@ pub struct Func {
     /// The link symbol of an `extern "C"` import or export: its fn name, unmangled (sema
     /// rejects clashes and reserved names, E0812). `None` for Stave fns, named by [`crate::link`].
     pub symbol: Option<String>,
-    /// Borrow events the instructions do not show (contracts/borrow-model.md, "Side table").
-    /// Empty unless the lowering was asked for them; not part of the canonical dump.
-    pub borrows: Vec<BorrowMark>,
 }
 
 /// A source site row (contracts/intrinsics.md site table): what a [`Site`] indexes in
@@ -755,7 +754,6 @@ impl Module {
             body: None,
             name_site: Site::NONE,
             symbol: None,
-            borrows: Vec::new(),
         });
         id
     }

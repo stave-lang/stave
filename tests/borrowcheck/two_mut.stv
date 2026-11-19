@@ -1,0 +1,13 @@
+//~ BORROWCHECK two-exclusive 10 9
+// Two `&mut` to one place, made through two copies of a raw pointer, both written through.
+fn main() -> i32 {
+    let mut x: u32 = 1u32;
+    let p = &mut x as *mut u32;
+    let q = p;
+    let a: &mut u32 = unsafe("deliberate: a second `&mut` follows") &mut *p;
+    let b: &mut u32 = unsafe("deliberate: `a` is still used") &mut *q;
+    *a = 2u32;
+    *b = 3u32;
+    if *a == 3u32 { return 1; }
+    return 0;
+}

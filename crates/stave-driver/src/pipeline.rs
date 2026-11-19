@@ -221,6 +221,9 @@ pub struct Options {
     pub lower: bool,
     /// Collect the borrow checker's per-access lines (the `borrow` dump).
     pub borrow_dump: bool,
+    /// Lower with the borrow side table (`Body::borrows`), for the interpreter's borrow
+    /// tracking. The module is then not the canonical checked IR.
+    pub borrow_marks: bool,
     /// `stave effects`: compute `trap` from the checked IR of every fn, not only of what the deny
     /// clauses reach ([`crate::effects::run`]).
     pub effects_all: bool,
@@ -240,6 +243,7 @@ impl Options {
             tests: false,
             lower: false,
             borrow_dump: false,
+            borrow_marks: false,
             effects_all: false,
             sources: std::collections::BTreeMap::new(),
         }
@@ -575,7 +579,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
 
     // ---- mono + lower + verify + removal of the bounds checks with a checked witness.
     let t0 = Instant::now();
-    let lowered = build::lower(&out.program, &tc, opts.mode());
+    let lowered = build::lower(&out.program, &tc, opts.mode(), opts.borrow_marks);
     let funcs = lowered.as_ref().map_or(0, |l| l.module.funcs.iter().filter(|f| f.body.is_some()).count());
     out.timings.push(timing(Stage::Lower, ms(t0.elapsed()), funcs as u64));
     out.typeck = Some(tc);

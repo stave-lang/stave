@@ -209,7 +209,15 @@ pub(crate) fn finalize(b: Body) -> Body {
         };
         blocks.push(BlockData { params, insts: ispan, term });
     }
-    Body { blocks, block_params, insts, operands, consts: b.consts, cases, values }
+    let borrows = b
+        .borrows
+        .iter()
+        .filter_map(|m| {
+            let v = vmap.get(m.value.index()).copied().filter(|&v| v != u32::MAX)?;
+            Some(stave_ir::BorrowMark { value: Value(v), ..*m })
+        })
+        .collect();
+    Body { blocks, block_params, insts, operands, consts: b.consts, cases, values, borrows }
 }
 
 /// Id maps applied to a body at assembly.

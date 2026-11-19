@@ -28,6 +28,9 @@ pub struct Limits {
     pub max_depth: usize,
     /// The interpreter's checking mode.
     pub check: bool,
+    /// Borrow tracking, on top of `check`. It sees the borrows of a module lowered with
+    /// [`crate::pipeline::Options::borrow_marks`].
+    pub borrow: bool,
 }
 
 /// Whether `STAVE_INTERP_CHECK=1` is set: the default of [`Limits::check`].
@@ -37,7 +40,7 @@ pub fn check_from_env() -> bool {
 
 impl Default for Limits {
     fn default() -> Limits {
-        Limits { max_steps: 20_000_000_000, max_depth: 20_000, check: check_from_env() }
+        Limits { max_steps: 20_000_000_000, max_depth: 20_000, check: check_from_env(), borrow: false }
     }
 }
 
@@ -82,7 +85,8 @@ pub fn run(
     let cfg = Config {
         max_steps: limits.max_steps,
         max_depth: limits.max_depth,
-        check: limits.check,
+        check: limits.check || limits.borrow,
+        borrow: limits.borrow,
         ..Config::default()
     };
     let mut it = Interp::new(&m, host, cfg).map_err(|e| format!("interp: {e:?}"))?;

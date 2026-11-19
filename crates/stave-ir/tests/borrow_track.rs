@@ -28,7 +28,7 @@ fn program(body: impl FnOnce(&mut FuncBuilder, &mut Module, &Tys) -> Vec<BorrowM
     let mut b = FuncBuilder::new(&[]);
     let marks = body(&mut b, &mut m, &t);
     m.define(f, b.finish().expect("builder"));
-    m.funcs[f.0 as usize].borrows = marks;
+    m.funcs[f.0 as usize].body.as_mut().expect("body").borrows = marks;
     (m, f)
 }
 
@@ -48,7 +48,7 @@ fn violation(m: &Module, f: FuncId) -> Box<BorrowReport> {
 }
 
 fn mark(value: Value, mutable: bool) -> BorrowMark {
-    BorrowMark { value, mutable, size: 4 }
+    BorrowMark { value, mutable }
 }
 
 fn put(b: &mut FuncBuilder, p: Value, v: i128) {
