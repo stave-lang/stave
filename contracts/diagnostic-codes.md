@@ -106,8 +106,8 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0511 | retired: a missing `from` clause declares the empty origin set; a returned borrow of a parameter not named is E0510 |
 | E0512 | returned value borrows a local |
 | E0513 | write through `&mut View` with origins not contained in the target's; case `several`: the pointer may point to more than one view object and one of them may lack the origins (a pointer picked from several, or one held in a by-value view parameter, in a closure capture, or below the view a `&mut` parameter points to). Planned: for a `&mut` rooted at a parameter, the origins must be in that parameter's `from` set plus its own origins; fix "add `from x` to parameter `p`" |
-| E0514 | `from` on a parameter that is not `&mut V` (V a view) of a fn item or method (closure, `extern`, and `kernel` params take none). Planned |
-| E0515 | a parameter's `from` clause names the parameter itself. Planned |
+| E0514 | `from` on a parameter that is not `&mut V` (V a view) of a fn item or method (closure, `extern`, and `kernel` params take none; a method of a trait impl repeats the trait method's clause on any `&mut` parameter). Reported with the signature |
+| E0515 | a parameter's `from` clause names the parameter itself. Reported with the signature |
 | E0520 | `from x` names a by-value non-view parameter |
 | E0521 | `from copy x` where x is not a reference to a view |
 | E0601 | chunk loop without a tail policy |
@@ -144,7 +144,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0804 | type not C-safe in an `extern "C"` signature (import or export): C-safe are `i8`..`i64`, `u8`..`u64`, `isize`, `usize`, `f32`, `f64`, `bool`, raw pointers whose pointee is not `[T]` or `str`, and the returns `()` and `never`. Cases `vector-view` (vector, mask, reference, fn value), `struct` (a struct by value). At the type |
 | E0805 | `extern "stave-intrinsic"` outside the shipped `std`, `runtime`, and `runtime-gpu` packages, or a name or signature not in `contracts/intrinsics.md` |
 | E0806 | argument of `thread.join`, `thread.par_for`, or `thread.par_for_mut` is a fn value whose captures are unknown (not a closure literal or fn item) |
-| E0807 | an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through it would skip E0802/E0806). Case `extern`: an `extern "C"` export used as a fn value |
+| E0807 | an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through it would skip E0802/E0806). Case `extern`: an `extern "C"` export used as a fn value. Case `param-from`: a fn with a parameter `from` clause used as a fn value (fn types carry no clause; a call through a fn value stores nothing) |
 | E0808 | `spawn` inside a closure body: a closure is not part of the `scope` block around it, so its `spawn` has no scope to join |
 | E0809 | `static mut` outside the shipped `std`, `runtime`, and `runtime-gpu` packages (user code: `static` with a `Sync` type) |
 | E0810 | impl of an unsafe trait (`Send`, `Sync`, or any trait declared `unsafe("..") trait`) without `unsafe("..")`. At the `impl` |

@@ -47,7 +47,7 @@ use stave_diag::{Diagnostic, Span};
 use crate::Program;
 use crate::diag::mk;
 use crate::kinds;
-use crate::sigs::{Abi, FnSig, GenericParam, NameCx};
+use crate::sigs::{Abi, FnSig, GenericParam, NameCx, ParamOrigin};
 use crate::types::{self, Interner, TypeId, TypeKind};
 
 /// A parameter's row of the origin table.
@@ -209,4 +209,79 @@ pub(crate) fn check_sig<I: Interner + ?Sized>(
         out.extend(mk(code, None, &[("param", name), ("type", &tn)], *sp, &[]));
     }
     out
+}
+
+/// One entry of a parameter's `from` clause as written: the source parameter, `copy`, the
+/// entry's span and written name.
+pub(crate) struct ClauseEntry {
+    pub source: u8,
+    pub copy: bool,
+    pub span: Span,
+    pub name: String,
+}
+
+/// A parameter's `from` clause as written: the parameter it stands on, that parameter's name,
+/// and the clause's span.
+pub(crate) struct ParamClause {
+    pub target: u8,
+    pub name: String,
+    pub span: Span,
+    pub entries: Vec<ClauseEntry>,
+}
+
+/// The checks of the parameters' `from` clauses, and their valid entries (sorted, deduplicated).
+///
+/// A clause stands only on a `&mut V` parameter, V a view ([`ParamClass::RefView`]), of a
+/// Stave-ABI fn that is not a kernel (`kernel`): else E0514, and the clause declares nothing. An
+/// entry naming the parameter itself is E0515; the other entries follow the origin table with
+/// what the parameter points to as the target (E0520, E0521). A parameter with a type error gets
+/// no verdict and no entries.
+///
+/// `mirrors_trait`: a method of a trait impl. Its clauses must equal the trait method's, whose
+/// `Self` and generic params may be views where the impl's types are not: any `&mut` parameter
+/// takes the clause and the origin table is not applied (an entry over a non-view type declares
+/// a store that cannot happen).
+pub(crate) fn check_params<I: Interner + ?Sized>(
+    prog: &Program,
+    tys: &I,
+    sig: &FnSig,
+    kernel: bool,
+    mirrors_trait: bool,
+    clauses: &[ParamClause],
+) -> (Vec<ParamOrigin>, Vec<Diagnostic>) {
+    let mut out = Vec::new();
+    let mut ds = Vec::new();
+    let names = NameCx { prog, generics: &sig.generics };
+    for c in clauses {
+        let Some(&tt) = sig.params.get(c.target as usize) else { continue };
+        let class = classify(prog, tys, tt, &sig.generics);
+        let is_mut = matches!(tys.kind(tt), TypeKind::Ref { mutable: true, .. });
+        let legal = sig.abi == Abi::Stave
+            && !kernel
+            && class.is_none_or(|k| is_mut && (mirrors_trait || k == ParamClass::RefView));
+        if !legal {
+            ds.extend(mk("E0514", None, &[("param", &c.name)], c.span, &[]));
+            continue;
+        }
+        if class.is_none() {
+            continue;
+        }
+        for e in &c.entries {
+            if e.source == c.target {
+                ds.extend(mk("E0515", None, &[("param", &c.name)], e.span, &[]));
+                continue;
+            }
+            let Some(&st) = sig.params.get(e.source as usize) else { continue };
+            if !mirrors_trait && !valid(classify(prog, tys, st, &sig.generics), e.copy) {
+                let tn = types::display(tys, &names, st);
+                let code = if e.copy { "E0521" } else { "E0520" };
+                ds.extend(mk(code, None, &[("param", &e.name), ("type", &tn)], e.span, &[]));
+                continue;
+            }
+            out.push(ParamOrigin { target: c.target, source: e.source, copy: e.copy });
+        }
+    }
+    out.sort();
+    out.dedup();
+    (out, ds)
 }

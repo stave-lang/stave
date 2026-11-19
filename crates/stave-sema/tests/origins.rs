@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use stave_sema::origins::{self, Flow, ParamClass, ResultOrigin};
+use stave_sema::sigs::ParamOrigin;
 use stave_sema::traits::World;
 use stave_sema::types::{Interner, TypeKind};
 use stave_sema::{Config, DeclId, DeclKind, Fs, Program, Typeck};
@@ -127,6 +128,43 @@ fn invalid_from_clauses_flag_the_signature_a_missing_one_is_empty() {
     // no `from`: the empty origin set, not an error
     let s = origins::of_sig(&p, &tc.types, tc.sigs.fn_sig(root_fn(&p, "c")).unwrap());
     assert!(s.ret_view && !s.error && s.origins.is_empty());
+}
+
+#[test]
+fn param_clauses_are_sorted_entries() {
+    let (p, tc) = mem("view struct Lexer { src: &str, pos: usize }\n\
+         view struct Two { a: &u32, b: &u32 }\n\
+         fn set(t: &mut Two from copy l + x + x, x: &u32, l: &Lexer) { }\n\
+         fn late(a: &mut Two from b, b: &u32) { }\n\
+         fn both(a: &mut Two from x, x: &u32, b: &mut Two from x) { }\n\
+         fn generic<T: view>(a: &mut T from x, x: T) { }\n\
+         fn none(a: &mut Two, x: &u32) { }\n");
+    assert!(codes(&p, &tc).is_empty(), "{:?}", codes(&p, &tc));
+    let po = |name: &str| tc.sigs.fn_sig(root_fn(&p, name)).unwrap().param_origins.clone();
+    let e = |target: u8, source: u8, copy: bool| ParamOrigin { target, source, copy };
+    assert_eq!(po("set"), [e(0, 1, false), e(0, 2, true)], "sorted, deduplicated");
+    assert_eq!(po("late"), [e(0, 1, false)], "a clause may name a later parameter");
+    assert_eq!(po("both"), [e(0, 1, false), e(2, 1, false)]);
+    assert_eq!(po("generic"), [e(0, 1, false)]);
+    assert!(po("none").is_empty());
+}
+
+#[test]
+fn invalid_param_clauses_declare_nothing() {
+    let (p, tc) = mem("view struct Two { a: &u32, b: &u32 }\n\
+         fn shared(t: &Two from x, x: &u32) { }\n\
+         fn by_value(t: Two from x, x: &u32) { }\n\
+         fn plain(n: &mut u32 from x, x: &u32) { }\n\
+         fn own(t: &mut Two from t, x: &u32) { }\n\
+         fn owned(t: &mut Two from n, n: u32) { }\n\
+         fn copy_ref(t: &mut Two from copy x, x: &u32) { }\n");
+    let mut c = codes(&p, &tc);
+    c.sort();
+    assert_eq!(c, ["E0514", "E0514", "E0514", "E0515", "E0520", "E0521"]);
+    for name in ["shared", "by_value", "plain", "own", "owned", "copy_ref"] {
+        let sig = tc.sigs.fn_sig(root_fn(&p, name)).unwrap();
+        assert!(sig.param_origins.is_empty(), "{name}");
+    }
 }
 
 #[test]

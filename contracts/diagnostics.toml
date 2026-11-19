@@ -974,7 +974,7 @@ fix = { description = "write through a pointer to one view object: a `&mut` borr
 code = "E0514"
 severity = "error"
 area = "borrow"
-rule = "`from` on a parameter that is not `&mut V` (V a view) of a fn item or method (closures, extern and kernel fns take no parameter `from`) (planned)"
+rule = "`from` on a parameter that is not `&mut V` (V a view) of a fn item or method (closures, extern and kernel fns take no parameter `from`; a method of a trait impl repeats the trait method's clause on any `&mut` parameter)"
 holes = { param = "name" }
 message = "parameter `{param}` cannot have a `from` clause"
 labels = [{ at = "primary", text = "`from` here" }]
@@ -984,7 +984,7 @@ fix = { description = "remove the `from` clause: only a `&mut` parameter whose p
 code = "E0515"
 severity = "error"
 area = "borrow"
-rule = "a parameter's `from` clause names the parameter itself (planned)"
+rule = "a parameter's `from` clause names the parameter itself"
 holes = { param = "name" }
 message = "the `from` clause of `{param}` names `{param}` itself"
 labels = [{ at = "primary", text = "`{param}` in its own `from`" }]
@@ -1388,7 +1388,7 @@ fix = { description = "pass a closure literal or a fn item directly to {callee}"
 code = "E0807"
 severity = "error"
 area = "threads-unsafe-ffi"
-rule = "an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker, so a call through the value would skip E0803). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through the value would skip E0802 and E0806). Case `extern`: an `extern \"C\"` export used as a fn value (its convention is C, not Stave's)"
+rule = "an `unsafe` fn coerced to a fn value (fn types carry no `unsafe` marker, so a call through the value would skip E0803). Case `thread`: `thread.join`, `thread.par_for`, or `thread.par_for_mut` used as a fn value (a call through the value would skip E0802 and E0806). Case `extern`: an `extern \"C\"` export used as a fn value (its convention is C, not Stave's). Case `param-from`: a fn with a parameter `from` clause used as a fn value (fn types carry no clause, and a call through a fn value stores nothing)"
 holes = { name = "path" }
 message = "unsafe fn `{name}` cannot become a fn value"
 labels = [{ at = "primary", text = "unsafe fn used as a fn value" }]
@@ -1403,6 +1403,11 @@ fix = { description = "call `{name}` directly with a closure literal or fn item"
 message = "`extern \"C\"` export `{name}` cannot become a fn value"
 labels = [{ at = "primary", text = "C-ABI fn used as a fn value" }]
 fix = { description = "call `{name}` directly, or wrap the call in a closure" }
+
+[diag.cases.param-from]
+message = "`{name}` cannot become a fn value: a parameter of it has a `from` clause, and a call through a fn value stores nothing"
+labels = [{ at = "primary", text = "fn with a parameter `from` used as a fn value" }]
+fix = { description = "call `{name}` directly, or pass a fn that returns the value and store it at the call site" }
 
 [[diag]]
 code = "E0808"
