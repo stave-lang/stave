@@ -1,7 +1,0 @@
-//~ CHECK-ONLY
-// A fn value (closure or fn item) is a view, so it cannot be put in a heap container.
-import std.vec;
-
-fn count(v: &vec.Vec<fn(u32) -> u32>) -> usize { //~ ERROR E0411
-    return v.len(); //~ ERROR E0411
-}

@@ -1,7 +1,8 @@
 //~ CHECK-ONLY
 // Kinds: a reference or view field needs a `view` ADT (E0410); consts hold no references
-// except `&str` literals (E0413); a generic param without `view` rejects views (E0414), and a
-// std container rejects them as E0411.
+// except `&str` literals (E0413); a generic param without `view` rejects views (E0414), also
+// a std ADT without the bound; `vec.Vec` takes them.
+import std.cell;
 import std.vec;
 struct Bad { r: &u32 } //~ ERROR E0410
 
@@ -21,7 +22,9 @@ struct W<T> { pub v: T }
 
 fn in_type(x: W<&u32>) { } //~ ERROR E0414
 
-fn in_vec(x: vec.Vec<&u8>) { } //~ ERROR E0411
+fn in_cell(x: cell.Cell<&u8>) { } //~ ERROR E0414
+
+fn ok_vec(x: vec.Vec<&u8>) { }
 
 fn ok_option(x: Option<&u8>) { }
 

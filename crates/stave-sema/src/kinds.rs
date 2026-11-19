@@ -13,10 +13,10 @@
 //! - E0410 (sigs, ADT build): a field whose type is a view in a non-view ADT. A field of type
 //!   `T` with `T: view` is allowed (`Option<T: view>`): the instance becomes a view through its
 //!   argument.
-//! - E0411 / E0412 / E0414 ([`view_arg`], at a type argument in a type, sigs `view_args`, and at
+//! - E0412 / E0414 ([`view_arg`], at a type argument in a type, sigs `view_args`, and at
 //!   the generic args of a call, expr `check_bounds`): a view argument for a param without
-//!   `view` is E0412 when the generic is `std.mem.forget`, E0411 when it is an ADT of the std
-//!   package or an impl of one (its heap containers: `Vec`, `Soa*`), else E0414.
+//!   `view` is E0412 when the generic is `std.mem.forget`, else E0414 (case `container` for an
+//!   ADT of the std package or an impl of one: `sync.Mutex`, `soa.Soa`).
 //! - E0413 (sigs, const build): a `const`, `static`, or `static mut` of view type, except `&str`
 //!   from a string literal or another such const.
 //!
@@ -169,8 +169,8 @@ pub(crate) fn e0410(field: &str, ty: &str, adt: &str, at: Span) -> Option<Diagno
 }
 
 /// The diagnostic for view type `ty` (display text) given for generic param `g` of `generic`
-/// (which has no `view` bound): E0412 for `std.mem.forget`, E0411 for an ADT of the std package
-/// (or an impl of one: `vec.Vec.new()`), else E0414 naming the ADT of an impl, or `generic`.
+/// (which has no `view` bound): E0412 for `std.mem.forget`, else E0414 naming the ADT of an impl,
+/// or `generic`; case `container` when that is an ADT of the std package (`sync.Mutex`).
 pub(crate) fn view_arg(
     prog: &Program,
     generic: DeclId,
@@ -189,13 +189,10 @@ pub(crate) fn view_arg(
         _ => generic,
     };
     let is_adt = prog.decl(named).is_some_and(|d| matches!(d.kind, DeclKind::Struct | DeclKind::Enum));
-    if is_adt && in_std(prog, named) {
-        let cn = prog.decl(named).map_or("_".to_string(), |x| prog.strings.get(x.name).to_string());
-        return mk("E0411", None, &[("type", ty), ("container", &cn)], at, &[]);
-    }
+    let case = (is_adt && in_std(prog, named)).then_some("container");
     let pn = prog.strings.get(g.name).to_string();
     let gp = prog.decl_path(named);
-    mk("E0414", None, &[("param", &pn), ("type", ty), ("generic", &gp)], at, &[("param", g.name_span)])
+    mk("E0414", case, &[("param", &pn), ("type", ty), ("generic", &gp)], at, &[("param", g.name_span)])
 }
 
 /// E0413: const (or `static mut`) `name` has view type `ty` (display text).
