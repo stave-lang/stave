@@ -1,0 +1,14 @@
+//~ MEMCHECK out-of-bounds 10
+// A read through a pointer to one local moved onto the next local's place.
+import std.mem;
+
+fn main() -> i32 {
+    let x: u32 = 1u32;
+    let y: u32 = 2u32;
+    let p = &x as *const u32;
+    let q = mem.add(p, 1);
+    let z: u32 = unsafe("deliberate: q is past x") *q;
+    let r = &y as *const u32;
+    if z == 2u32 && (r as usize) != 0 { return 1; }
+    return 0;
+}

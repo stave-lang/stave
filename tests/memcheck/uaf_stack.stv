@@ -1,0 +1,13 @@
+//~ MEMCHECK use-after-free 10
+// A pointer to a local read after its frame returned.
+fn addr_of_local() -> *const u32 {
+    let x: u32 = 5u32;
+    return &x as *const u32;
+}
+
+fn main() -> i32 {
+    let p = addr_of_local();
+    let y: u32 = unsafe("deliberate: the frame of x has returned") *p;
+    if y == 5u32 { return 1; }
+    return 0;
+}

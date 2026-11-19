@@ -1,0 +1,16 @@
+//~ MEMCHECK free-size-mismatch 14
+// A Vec whose capacity field is doubled: its drop frees the block with the wrong size.
+import std.mem;
+import std.vec;
+
+struct RawVec { ptr: *mut u32, len: usize, cap: usize }
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.with_capacity(4);
+    let r = (&mut v as *mut vec.Vec<u32>) as usize as *mut RawVec;
+    unsafe("deliberate: the capacity no longer matches the block") {
+        (*r).cap = (*r).cap * 2;
+    }
+    mem.drop(v);
+    return 0;
+}

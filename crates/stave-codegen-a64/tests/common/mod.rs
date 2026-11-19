@@ -315,6 +315,7 @@ pub fn interp(m: &Module, entry: FuncId) -> Run {
             Run { stdout: h.stdout, stderr: e, code: 101 }
         }
         Outcome::Return(_) => panic!("entry returned"),
+        Outcome::MemError(r) => panic!("{}", r.render(m)),
     }
 }
 

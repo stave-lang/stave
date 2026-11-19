@@ -1,0 +1,16 @@
+//~ MEMCHECK out-of-bounds 13
+// A write one element past a 4-element buffer, where the next block of the same size class
+// would be in a native run.
+import std.mem;
+import std.vec;
+
+fn main() -> i32 {
+    let mut a = vec.Vec::<u32>.with_capacity(4);
+    let mut b = vec.Vec::<u32>.with_capacity(4);
+    b.push(1u32);
+    let p: *mut u32 = a.spare_ptr();
+    let q = mem.add_mut(p, 4);
+    unsafe("deliberate: one past the end of a's buffer") { *q = 9u32; }
+    if b.len() == 1 { return 1; }
+    return 0;
+}

@@ -277,6 +277,16 @@ of the binary's directory that holds a `Cargo.toml` and is a library directory (
 root, for `target/<profile>/stave`). None found: usage error (exit 2) naming the places tried.
 Every dump covers the whole program, `std` and `runtime` included.
 
+**Interpreter checking mode**: no `stave` command runs the stave-ir reference interpreter; the
+test harness does (`stave_driver::interp::run`: the interpreter legs of the run, SIMD, dispatch,
+and differential suites). `STAVE_INTERP_CHECK=1` in the environment of that process turns on its
+checking mode for every run that takes the default limits (`Limits::check` in code). A memory
+error then ends the run as a failure whose text starts `interp: memory error [<class>]`, class one
+of `use-after-free double-free uninit-read out-of-bounds invalid-free free-size-mismatch`, then
+the access, the allocation (id, kind `heap stack host`, size, state), and the access, allocation,
+and free traces (fn, instruction index, `file:line:col`, `near` for an instruction without a
+site of its own). Off, the interpreter behaves as without the switch.
+
 Package layout: `stave.toml` plus `src/main.stv` (`kind = "bin"`) or
 `src/lib.stv` (`kind = "lib"`: a static `.a` plus a C header for `extern "C"` exports). Module path
 = file path (`src/a/b.stv` is `a.b`).
