@@ -1,0 +1,88 @@
+//~ CHECK-ONLY
+// Two pointers into parts of one view can come from one borrow of it. When one is stored
+// through the other the view points into itself: it stays borrowed, by an assignment, by a call,
+// and with both pointers in one by-value source. A part of a view stored into another part
+// keeps that part borrowed. Only the borrow expression itself, as the argument, leaves the
+// borrowed view free after the holder's last use.
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+view struct Both { a: Pick, l: Link }
+view struct Keep { k: &u32 }
+
+impl Both {
+    fn parts(&mut self) -> (&mut Pick, &mut Link) from self {
+        return (&mut self.a, &mut self.l);
+    }
+}
+
+fn set_link(l: &mut Link from q, q: &mut Pick) {
+    l.to = q;
+}
+
+fn link_pair(k: &mut Keep from pair, pair: (&mut Pick, &mut Link)) {
+    let a = pair.0;
+    let l = pair.1;
+    l.to = a;
+}
+
+fn by_assignment(zero: &u32) -> usize {
+    let mut spare = Pick.{ best: zero, count: 0 };
+    let mut o = Both.{ a: Pick.{ best: zero, count: 1 }, l: Link.{ to: &mut spare } };
+    {
+        let t = o.parts();
+        let a = t.0;
+        let l = t.1;
+        l.to = a;
+    }
+    o.a.count = 2; //~ ERROR E0501
+    return o.l.to.count; //~ ERROR E0501
+}
+
+fn by_call(zero: &u32) -> usize {
+    let mut spare = Pick.{ best: zero, count: 0 };
+    let mut o = Both.{ a: Pick.{ best: zero, count: 1 }, l: Link.{ to: &mut spare } };
+    {
+        let t = o.parts();
+        set_link(t.1, t.0);
+    }
+    o.a.count = 2; //~ ERROR E0501
+    return o.l.to.count; //~ ERROR E0501
+}
+
+fn by_value_pair(zero: &u32) -> usize {
+    let mut spare = Pick.{ best: zero, count: 0 };
+    let mut o = Both.{ a: Pick.{ best: zero, count: 1 }, l: Link.{ to: &mut spare } };
+    let mut k = Keep.{ k: zero };
+    link_pair(&mut k, o.parts());
+    o.a.count = 2; //~ ERROR E0501
+    return o.l.to.count; //~ ERROR E0501
+}
+
+fn own_part(zero: &u32) -> usize {
+    let mut spare = Pick.{ best: zero, count: 0 };
+    let mut o = Both.{ a: Pick.{ best: zero, count: 1 }, l: Link.{ to: &mut spare } };
+    set_link(&mut o.l, &mut o.a);
+    o.a.count = 2; //~ ERROR E0501
+    return o.l.to.count;
+}
+
+fn named_pointer(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    let mut b = Pick.{ best: zero, count: 0 };
+    let mut l = Link.{ to: &mut a };
+    let bq = &mut b;
+    set_link(&mut l, bq);
+    let n: usize = l.to.count;
+    b.count = 1; //~ ERROR E0501
+    return n + b.count; //~ ERROR E0501
+}
+
+fn borrow_expression(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    let mut b = Pick.{ best: zero, count: 0 };
+    let mut l = Link.{ to: &mut a };
+    set_link(&mut l, &mut b);
+    let n: usize = l.to.count;
+    b.count = 1;
+    return n + b.count;
+}
