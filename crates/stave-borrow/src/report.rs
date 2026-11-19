@@ -314,6 +314,7 @@ mod tests {
             node: offset,
             reserved: false,
             capture: true,
+            whole: None,
         }
     }
 

@@ -20,7 +20,7 @@ use stave_diag::Span;
 
 use crate::bits::Bits;
 use crate::cfg::{Body, LoanId, LocalId, OpKind, Operand, Place, Proj, RetCheck, Rvalue, Stmt, StmtKind};
-use crate::loans::{Flow, Misfit, State, for_each_op};
+use crate::loans::{CallStore, Flow, Misfit, State, for_each_op};
 use crate::ty::DerefKind;
 
 /// The kind of an access.
@@ -439,11 +439,16 @@ impl Cx<'_, '_> {
                         });
                     }
                 }
-                // what the callee may store through its `&mut` arguments, per target argument
-                if let Rvalue::Call { args, stores, .. } = rv {
-                    for (target, into_view, ptr, val) in self.flow.call_stores(st, args, stores) {
+                // what the callee may store through its `&mut` arguments, per target argument,
+                // with the values as they are once all of the call's stores are made
+                if let Rvalue::Call { args, stores, .. } = rv
+                    && !stores.is_empty()
+                {
+                    let mut made = st.clone();
+                    let (groups, _) = self.flow.settle_call(&mut made, args, stores);
+                    for CallStore { target, into_view, ptr, val, .. } in groups {
                         let Some(arg) = args.get(target as usize) else { continue };
-                        if let Err(m) = self.flow.store_fits(st, &ptr, &val, None, Some(into_view)) {
+                        if let Err(m) = self.flow.store_fits(&made, &ptr, &val, None, Some(into_view)) {
                             // a pointer held in a named local is written through; a temporary is
                             // named by its expression
                             let mut place = arg.place.clone();

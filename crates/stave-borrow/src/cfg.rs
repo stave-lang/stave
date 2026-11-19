@@ -217,6 +217,9 @@ pub struct Loan {
     pub reserved: bool,
     /// A capture loan of a closure or spawn (mutability is checked inside the nested body).
     pub capture: bool,
+    /// The reborrow of a temporary that holds exactly this loan (`f(&mut x)`: the argument is
+    /// `&mut *t` with `t = &mut x`): the same pointer, to the whole of that loan's place.
+    pub whole: Option<LoanId>,
 }
 
 #[derive(Clone, Debug)]
@@ -572,7 +575,15 @@ impl<'a, 'b> Builder<'a, 'b> {
     }
 
     fn new_loan(&mut self, place: &Place, mutable: bool, span: Span, node: u32, reserved: bool) -> LoanId {
-        self.body.loans.push(Loan { place: place.clone(), mutable, span, node, reserved, capture: false });
+        self.body.loans.push(Loan {
+            place: place.clone(),
+            mutable,
+            span,
+            node,
+            reserved,
+            capture: false,
+            whole: None,
+        });
         (self.body.loans.len() - 1) as LoanId
     }
 
@@ -1776,7 +1787,25 @@ impl<'a, 'b> Builder<'a, 'b> {
                 }
                 let span = self.span(n);
                 let m = matches!(c, Coercion::Reborrow);
-                self.borrow(p.with(Proj::Deref(k), inner), m, false, span, n).0
+                // the value is a temporary just made by a borrow expression
+                let whole = match self.cur.and_then(|b| self.body.blocks[b as usize].stmts.last()) {
+                    Some(Stmt {
+                        kind: StmtKind::Assign { dest, rv: Rvalue::Ref { loan, .. }, .. }, ..
+                    }) if p.proj.is_empty()
+                        && dest.proj.is_empty()
+                        && dest.local == p.local
+                        && self.body.locals[p.local as usize].temp =>
+                    {
+                        Some(*loan)
+                    }
+                    _ => None,
+                };
+                let before = self.body.loans.len();
+                let v = self.borrow(p.with(Proj::Deref(k), inner), m, false, span, n).0;
+                if let Some(l) = self.body.loans.get_mut(before) {
+                    l.whole = whole;
+                }
+                v
             }
             Coercion::FmtToStr => {
                 let Some(p) = self.place_of(v, n) else { return V::Never };
