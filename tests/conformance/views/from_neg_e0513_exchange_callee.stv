@@ -1,0 +1,112 @@
+//~ CHECK-ONLY
+// Exchanges inside a callee: a pointer read back out of a view is not stored back by a call,
+// not split and stored through itself, not crossed with the old pointee.
+view struct Pick { best: &u32, count: u32 }
+view struct Link { to: &mut Pick }
+view struct Big { x: Pick, y: Pick }
+view struct Two { slot: &mut &u32, n: &u32 }
+view struct Halves { x: &mut Pick, y: &mut Pick }
+
+fn xchg_g<T: view>(dst: &mut T from v, v: T) -> T from copy dst {
+    let p = &mut *dst as *mut T;
+    let old = unsafe("p comes from dst") p.read();
+    unsafe("the slot was moved out by read") { p.write(v); }
+    return old;
+}
+
+fn xchg_t(l: &mut Link from t, t: (&mut Pick, u32)) -> &mut Pick from copy l {
+    let p = &mut l.to as *mut &mut Pick;
+    let old = unsafe("p comes from l") p.read();
+    unsafe("the slot was moved out by read") { p.write(t.0); }
+    return old;
+}
+
+fn split(t: (&mut Pick, u32)) -> Two from t {
+    return Two.{ slot: &mut t.0.best, n: &t.0.count };
+}
+
+fn halves(t: (&mut Big, u32)) -> Halves from t {
+    return Halves.{ x: &mut t.0.x, y: &mut t.0.y };
+}
+
+fn n_of(t: (&mut Pick, u32)) -> &u32 from t {
+    return &t.0.count;
+}
+
+// c1: the source goes in, the old pointee comes out and is made to point into itself
+fn c1(dst: &mut Link from src, src: &mut Pick) {
+    let old = xchg_t(dst, (src, 0u32));
+    let two = split((old, 0u32));
+    *two.slot = two.n; //~ ERROR E0513
+}
+
+// c2: the old pointee is put back
+fn c2(dst: &mut Link from src, src: &mut Pick) {
+    let old = xchg_t(dst, (src, 0u32));
+    let back = xchg_t(dst, (old, 0u32)); //~ ERROR E0513
+}
+
+// c3: the old pointee is put back by an assignment
+fn c3(dst: &mut Link from src, src: &mut Pick) {
+    let old = xchg_t(dst, (src, 0u32));
+    dst.to = old;
+}
+
+// c4: one half of the source goes in and comes out again with the origin of `*dst`
+fn c4(dst: &mut Link from src, src: &mut Big) {
+    let h = halves((src, 0u32));
+    let old = xchg_t(dst, (h.x, 0u32));
+    let back = xchg_t(dst, (h.y, 0u32));
+    let two = split((back, 0u32));
+    *two.slot = two.n; //~ ERROR E0513
+}
+
+// c5: as c4, the laundered half takes a borrow of the old pointee
+fn c5(dst: &mut Link from src, src: &mut Big) {
+    let h = halves((src, 0u32));
+    let old = xchg_t(dst, (h.x, 0u32));
+    let back = xchg_t(dst, (h.y, 0u32));
+    back.best = n_of((old, 0u32)); //~ ERROR E0513
+}
+
+// c6: the old pointee takes a borrow of the laundered half
+fn c6(dst: &mut Link from src, src: &mut Big) {
+    let h = halves((src, 0u32));
+    let old = xchg_t(dst, (h.x, 0u32));
+    let back = xchg_t(dst, (h.y, 0u32));
+    old.best = n_of((back, 0u32)); //~ ERROR E0513
+}
+
+// c7: the old pointee takes a borrow of the source
+fn c7(dst: &mut Link from src, src: &mut Big) {
+    let h = halves((src, 0u32));
+    let old = xchg_t(dst, (h.x, 0u32));
+    old.best = n_of((h.y, 0u32));
+}
+
+// c8: the result is the old pointee
+fn c8(dst: &mut Link from src, src: &mut Pick) -> &mut Pick from copy dst {
+    return xchg_t(dst, (src, 0u32));
+}
+
+// c9: the result is the laundered half, `from copy dst`
+fn c9(dst: &mut Link from src, src: &mut Big) -> &mut Pick from copy dst {
+    let h = halves((src, 0u32));
+    let old = xchg_t(dst, (h.x, 0u32));
+    let back = xchg_t(dst, (h.y, 0u32));
+    dst.to = old;
+    return back;
+}
+
+// c10: a second target takes the laundered half under `from copy dst` only
+fn c10(dst: &mut Link from src, k: &mut Link from copy dst, src: &mut Big) {
+    let h = halves((src, 0u32));
+    let old = xchg_t(dst, (h.x, 0u32));
+    let back = xchg_t(dst, (h.y, 0u32));
+    dst.to = old;
+    k.to = back;
+}
+
+fn main() -> i32 {
+    return 0;
+}

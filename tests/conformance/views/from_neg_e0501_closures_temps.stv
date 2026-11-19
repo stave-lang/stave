@@ -1,0 +1,178 @@
+//~ CHECK-ONLY
+// Closures and temporaries made again in a loop, as sources of storing calls.
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+view struct Cb { f: fn() -> u32, n: usize }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) -> bool {
+        self.best = x;
+        return true;
+    }
+    fn give(&mut self, l: &mut Link from self) {
+        l.to = self;
+    }
+}
+
+impl Cb {
+    fn keep(&mut self from f, f: fn() -> u32) -> bool {
+        self.f = f;
+        return true;
+    }
+}
+
+fn set_link(l: &mut Link from q, q: &mut Pick) {
+    l.to = q;
+}
+
+fn by_value(k: &mut Pick from l + y, l: Link, y: &u32) {
+    l.to.best = y;
+}
+
+fn via_fn(k: &mut Pick from f + y, f: fn() -> u32, y: &u32) {
+    let _ = f();
+    k.best = y;
+}
+
+fn mk_pick(zero: &u32) -> Pick from zero {
+    return Pick.{ best: zero, count: 0 };
+}
+
+fn next(i: u32) -> u32 {
+    return i + 40;
+}
+
+fn src_temp_view(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    let mut l = Link.{ to: &mut a };
+    let mut i: u32 = 0;
+    while i < 2 {
+        if i == 0 {
+            set_link(&mut l, &mut mk_pick(zero)); //~ ERROR E0501
+//~^ ERROR E0501
+//~^^ ERROR E0501
+        }
+        i = i + 1;
+    }
+    return l.to.count;
+}
+
+fn recv_temp_view(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    let mut l = Link.{ to: &mut a };
+    let mut i: u32 = 0;
+    while i < 2 {
+        if i == 0 {
+            mk_pick(zero).give(&mut l); //~ ERROR E0501
+//~^ ERROR E0501
+        }
+        i = i + 1;
+    }
+    return l.to.count;
+}
+
+fn by_value_temp(zero: &u32) -> u32 {
+    let mut k = Pick.{ best: zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        if i == 0 {
+            by_value(&mut k, Link.{ to: &mut mk_pick(zero) }, &next(i)); //~ ERROR E0501
+//~^ ERROR E0501
+//~^^ ERROR E0501
+//~^^^ ERROR E0501
+        }
+        i = i + 1;
+    }
+    return *k.best;
+}
+
+fn by_value_locked(zero: &u32) -> usize {
+    let mut k = Pick.{ best: zero, count: 0 };
+    let mut a = Pick.{ best: zero, count: 0 };
+    let y: u32 = 4;
+    by_value(&mut k, Link.{ to: &mut a }, &y);
+    let r: &u32 = a.best; //~ ERROR E0501
+    a.count = 2; //~ ERROR E0501
+    return k.count + (*r as usize);
+}
+
+fn closure_source(zero: &u32) -> usize {
+    let mut k = Pick.{ best: zero, count: 0 };
+    let mut a = Pick.{ best: zero, count: 0 };
+    let y: u32 = 4;
+    via_fn(&mut k, fn() -> u32 { a.count = a.count + 1; return 0; }, &y);
+    a.count = 2; //~ ERROR E0501
+    return k.count;
+}
+
+fn closure_kept(zero: &u32) -> u32 {
+    let mut c = Cb.{ f: fn() -> u32 { return 0; }, n: 0 };
+    let mut n: u32 = 1;
+    let _ = c.keep(fn() -> u32 { n = n + 1; return n; });
+    n = 7; //~ ERROR E0501
+    let f = c.f;
+    return f();
+}
+
+fn closure_kept_loop(zero: &u32) -> u32 {
+    let mut c = Cb.{ f: fn() -> u32 { return 0; }, n: 0 };
+    let mut i: u32 = 0;
+    while i < 2 {
+        let mut n: u32 = i;
+        if i == 0 {
+            let _ = c.keep(fn() -> u32 { n = n + 1; return n; }); //~ ERROR E0501
+        }
+        i = i + 1;
+    } //~ ERROR E0501
+    let f = c.f;
+    return f();
+}
+
+fn closure_stores_capture(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let y: u32 = 4;
+    let f = fn() -> bool {
+        return p.take(&y); //~ ERROR E0513
+    };
+    let _ = f();
+    return *p.best;
+}
+
+fn closure_stores_param_ref(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let f = fn(x: &u32) -> bool {
+        return p.take(x); //~ ERROR E0513
+    };
+    let y: u32 = 4;
+    let _ = f(&y);
+    return *p.best;
+}
+
+fn closure_links_captures(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    let mut b = Pick.{ best: zero, count: 0 };
+    let mut l = Link.{ to: &mut a };
+    let f = fn() {
+        set_link(&mut l, &mut b); //~ ERROR E0513
+    };
+    f();
+    b.count = 2;
+    return l.to.count;
+}
+
+fn closure_link_local_to_capture(zero: &u32) -> usize {
+    let mut b = Pick.{ best: zero, count: 0 };
+    let f = fn() -> usize {
+        let mut a = Pick.{ best: b.best, count: 0 };
+        let mut l = Link.{ to: &mut a };
+        set_link(&mut l, &mut b); //~ ERROR E0513
+        return l.to.count;
+    };
+    return f();
+}
+
+fn main() -> i32 {
+    return 0;
+}

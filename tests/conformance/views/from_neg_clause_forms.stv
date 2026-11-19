@@ -1,0 +1,27 @@
+//~ CHECK-ONLY
+// A closure param takes no clause; a fn with a clause is not a fn value.
+view struct Pick { best: &u32, count: usize }
+
+fn set(p: &mut Pick from x, x: &u32) {
+    p.best = x;
+}
+
+fn closure_clause(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let f = fn(q: &mut Pick from x, x: &u32) { q.best = x; }; //~ ERROR E0514
+    let y: u32 = 4;
+    f(&mut p, &y);
+    return *p.best;
+}
+
+fn fn_value(zero: &u32) -> u32 {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let f: fn(&mut Pick, &u32) = set; //~ ERROR E0807
+    let y: u32 = 4;
+    f(&mut p, &y);
+    return *p.best;
+}
+
+fn main() -> i32 {
+    return 0;
+}

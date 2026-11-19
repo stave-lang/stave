@@ -1,0 +1,25 @@
+//~ CHECK-ONLY
+// An operator on a view returns no borrow.
+import std.io;
+
+view struct Cur { cur: &u32, n: u32 }
+
+impl Add for Cur {
+    fn add(self, rhs: Self) -> Self {
+        return Cur.{ cur: rhs.cur, n: self.n + rhs.n }; //~ ERROR E0510
+    }
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut a = Cur.{ cur: &zero, n: 1 };
+    {
+        let x: u32 = 41;
+        let b = Cur.{ cur: &x, n: 1 };
+        a = a + b;
+    }
+    let y: u32 = 99;
+    let before: u32 = *a.cur;
+    io.print(f"{before} {y}\n");
+    return 0;
+}

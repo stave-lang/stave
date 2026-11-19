@@ -1,0 +1,222 @@
+//~ CHECK-ONLY
+// Every way to hand `&mut b` to a callee that splits it: `b` stays borrowed.
+view struct Cur { cur: &u32, n: u32 }
+view struct Two { slot: &mut &u32, n: &u32 }
+view struct Hold { c: &mut Cur }
+view struct Slot<T: view> { v: T, k: usize }
+
+fn split(t: (&mut Cur, u32)) -> Two from t {
+    return Two.{ slot: &mut t.0.cur, n: &t.0.n };
+}
+
+fn link(dst: &mut Cur from src, src: &mut Cur) {
+    let two = split((src, 0u32));
+    *two.slot = two.n;
+}
+
+fn link_t(dst: &mut Cur from t, t: (&mut Cur, u32)) {
+    let two = split(t);
+    *two.slot = two.n;
+}
+
+fn link_h(dst: &mut Cur from h, h: Hold) {
+    let two = split((h.c, 0u32));
+    *two.slot = two.n;
+}
+
+fn link_a(dst: &mut Cur from t, t: [&mut Cur; 1]) {
+    for q in t {
+        let two = split((q, 0u32));
+        *two.slot = two.n;
+    }
+}
+
+fn link_o(dst: &mut Cur from t, t: Option<&mut Cur>) {
+    match t {
+        Option.Some(q) => {
+            let two = split((q, 0u32));
+            *two.slot = two.n;
+        }
+        Option.None => {}
+    }
+}
+
+impl Cur {
+    fn give(&mut self, dst: &mut Cur from self) {
+        let two = split((self, 0u32));
+        *two.slot = two.n;
+    }
+    fn take_from(&mut self from src, src: &mut Cur) {
+        let two = split((src, 0u32));
+        *two.slot = two.n;
+    }
+}
+
+fn id(q: &mut Cur) -> &mut Cur from q {
+    return q;
+}
+
+fn named(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    {
+        let q = &mut b;
+        link(&mut a, q);
+    }
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn reborrowed(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    {
+        let q = &mut b;
+        link(&mut a, &mut *q);
+    }
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn through_id(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link(&mut a, id(&mut b));
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn through_id2(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link(&mut a, id(id(&mut b)));
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn tuple_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link_t(&mut a, (&mut b, 0u32));
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn tuple_named(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    {
+        let t = (&mut b, 0u32);
+        link_t(&mut a, t);
+    }
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn hold_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link_h(&mut a, Hold.{ c: &mut b });
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn array_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link_a(&mut a, [&mut b]);
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn option_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    link_o(&mut a, Option.Some(&mut b));
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn receiver_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    b.give(&mut a);
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn receiver_ptr_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    {
+        let q = &mut b;
+        q.give(&mut a);
+    }
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn receiver_tgt(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    a.take_from(&mut b);
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn if_src(zero: &u32, c: bool) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut b = Cur.{ cur: zero, n: 1 };
+    let mut d = Cur.{ cur: zero, n: 1 };
+    link(&mut a, if c then &mut b else &mut d);
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    let s: &u32 = d.cur; //~ ERROR E0501
+    d.n = 2; //~ ERROR E0501
+    return *r + *s;
+}
+
+fn field_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut s = Slot::<Cur>.{ v: Cur.{ cur: zero, n: 1 }, k: 0 };
+    link(&mut a, &mut s.v);
+    let r: &u32 = s.v.cur; //~ ERROR E0501
+    s.v.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn array_elem_src(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    let mut bs = [Cur.{ cur: zero, n: 1 }, Cur.{ cur: zero, n: 1 }];
+    link(&mut a, &mut bs[0]);
+    let r: &u32 = bs[0].cur; //~ ERROR E0501
+    bs[0].n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn both_same_holder_dead(zero: &u32) -> u32 {
+    let mut b = Cur.{ cur: zero, n: 1 };
+    {
+        let mut a = Cur.{ cur: zero, n: 5 };
+        link(&mut a, &mut b);
+    }
+    let r: &u32 = b.cur; //~ ERROR E0501
+    b.n = 2; //~ ERROR E0501
+    return *r;
+}
+
+fn main() -> i32 {
+    return 0;
+}
