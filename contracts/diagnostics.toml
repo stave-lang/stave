@@ -877,6 +877,16 @@ labels = [{ at = "primary", text = "`static` type" }]
 fix = { description = "wrap the value in a `Sync` type such as `atomic.U64`, `sync.Mutex<{type}, R>`, or `sync.Once<{type}, R>` (R: the lock rank)" }
 
 [[diag]]
+code = "E0418"
+severity = "error"
+area = "kinds"
+rule = "array repeat `[e; n]` whose element type is not Copy, unless `n` is the constant 1: the one value of `e` fills every slot, and length 0 would leave it to no owner (a const generic length counts as neither)"
+holes = { type = "type" }
+message = "`[e; n]` copies its element, but `{type}` is not Copy"
+labels = [{ at = "primary", text = "one value of type `{type}`" }]
+fix = { description = "write the elements out, or give the element type `impl Copy`" }
+
+[[diag]]
 code = "E0501"
 severity = "error"
 area = "borrow"

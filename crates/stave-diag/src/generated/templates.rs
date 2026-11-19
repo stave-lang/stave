@@ -2126,6 +2126,31 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0418",
+        severity: Severity::Error,
+        area: "kinds",
+        rule: "array repeat `[e; n]` whose element type is not Copy, unless `n` is the constant 1: the one value of `e` fills every slot, and length 0 would leave it to no owner (a const generic length counts as neither)",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`[e; n]` copies its element, but `{type}` is not Copy",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "one value of type `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write the elements out, or give the element type `impl Copy`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",

@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// E0418: `[e; n]` fills every slot with the one value of `e`, so its element type must be Copy
+// unless `n` is the constant 1. Length 0 needs Copy too (the value would have no owner), and a
+// const generic length is not known to be 1.
+import std.vec;
+
+struct Owned {
+    pub v: vec.Vec<u32>,
+}
+
+fn generic<T>(x: T) -> [T; 2] {
+    return [x; 2]; //~ ERROR E0418
+}
+
+fn const_len<const N: usize>(v: vec.Vec<u32>) -> [vec.Vec<u32>; N] {
+    return [v; N]; //~ ERROR E0418
+}
+
+fn main() -> i32 {
+    let mut x: u32 = 1;
+    let t = [&mut x; 2]; //~ ERROR E0418
+    let v = vec.Vec::<u32>.new();
+    let w = [v; 2]; //~ ERROR E0418
+    let o = Owned.{ v: vec.Vec::<u32>.new() };
+    let s = [o; 3]; //~ ERROR E0418
+    let z = vec.Vec::<u32>.new();
+    let e = [z; 0]; //~ ERROR E0418
+    let n = t.len() + w.len() + s.len() + e.len();
+    let g = generic::<vec.Vec<u32>>(vec.Vec::<u32>.new());
+    let c = const_len::<1>(vec.Vec::<u32>.new());
+    return (n + g.len() + c.len()) as% i32;
+}

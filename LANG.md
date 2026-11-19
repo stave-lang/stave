@@ -77,7 +77,7 @@ Notes:
 - A pattern binds a name once: `(a, a)` or `P.{ x, y: x }` is E0105.
 - f-string holes: a name, `self`, or a field path (`{n}`, `{self.n}`, `{p.x}`). No tuple steps (`{t.0}`) or expressions: bind to a local first (`let a = t.0;` then `{a}`).
 
-Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl Trait for T`, `trait`, `pub` (items, fields, methods private to their module otherwise, E0106; trait impl methods take no `pub`, E0907), method auto-ref (`x.m()` with `&self`/`&mut self`), auto-deref on `.` through any number of `&`/`&mut`, implicit reborrow of `&mut` args, `&T`/`&mut T` (shared xor exclusive), moves, `?`, `[T; N]`, `[T]`, tuples (`t.0`), `[e; n]`, `while`, `for x in a..b`, `match` exhaustive (E0300), guards `P if c =>`, `*const T`/`*mut T` (deref unsafe; `&x as *const T` and `&mut x as *mut T` are safe casts), `type A = B;`, `const X: T = e;`, `Self`.
+Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl Trait for T`, `trait`, `pub` (items, fields, methods private to their module otherwise, E0106; trait impl methods take no `pub`, E0907), method auto-ref (`x.m()` with `&self`/`&mut self`), auto-deref on `.` through any number of `&`/`&mut`, implicit reborrow of `&mut` args, `&T`/`&mut T` (shared xor exclusive), moves, `?`, `[T; N]`, `[T]`, tuples (`t.0`), `[e; n]` (`e` Copy unless `n` is the constant 1, E0418), `while`, `for x in a..b`, `match` exhaustive (E0300), guards `P if c =>`, `*const T`/`*mut T` (deref unsafe; `&x as *const T` and `&mut x as *mut T` are safe casts), `type A = B;`, `const X: T = e;`, `Self`.
 
 ## 2. Lexical, keywords, items
 
