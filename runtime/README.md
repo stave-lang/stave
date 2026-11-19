@@ -14,6 +14,7 @@ Option, Result, or std traits (only the built-in type names and `size_of`/`align
 | `runtime.alloc` | `alloc.stv` | global allocator over mmap/munmap/mremap |
 | `runtime.panic` | `panic.stv` | panic report, exit 101, SIGSEGV guard-page handler |
 | `runtime.state` | `state.stv` | the process-wide state block, one `static mut`; allocator lock, thread registry; the per-thread `Block` behind the thread pointer (`block()`: thread id, user site, error trace) |
+| `runtime.errtrace` | `errtrace.stv` | the calling thread's error trace in its `state.Block`: `restart`, `push` (the compiler's hooks of `Result.Err(..)` and `?`), `clear`, `save` / `restore` (a `Trace` copy), all trap-free |
 | `runtime.atomic` | `atomic.stv` | CPU atomic intrinsics (load/xchg/add/cas u32/u64) and a three-state futex lock |
 | `runtime.thread` | `thread.stv` | threads: mapping = guard + stack + altstack + record, clone3 (clone if ENOSYS), futex join on CLEARTID, ids, registry; `scope_spawn`/`scope_join` for `scope { spawn { } }`; `start`/`join`/`cpu_count` for std.thread |
 | `runtime.config` | `config.stv` | per-binary settings (`[run] stack`) |

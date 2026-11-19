@@ -1443,6 +1443,12 @@ impl<'a> FnCx<'a> {
             let i = self.int(ri as i128);
             self.opn(Op::EnumMake, rt, &[i, e])
         };
+        // before the scope drops and `ensures` checks: a `Result.Err(..)` made by a `Drop` impl
+        // there then restarts the trace after this via, not before it
+        if !is_opt {
+            let hook = self.g.lang.errtrace_push;
+            self.errtrace_hook(hook, tok);
+        }
         self.drop_temps_keep();
         self.drop_scopes(0);
         self.ensures_checks(Some(r), tok);
@@ -1539,7 +1545,12 @@ impl<'a> FnCx<'a> {
             }
             Some(Target::Variant { decl, index }) => {
                 let adt = self.g.prog.decl(decl).map_or(crate::ids::DeclId::NONE, |d| d.parent);
-                self.variant_ctor(n, adt, index, args, last)
+                let made = self.variant_ctor(n, adt, index, args, last);
+                if adt == self.g.sigs.lang.result && index == self.g.res_err {
+                    let hook = self.g.lang.errtrace_restart;
+                    self.errtrace_hook(hook, ctok);
+                }
+                made
             }
             Some(Target::TraitMethod { method, self_ty, args: ga }) => {
                 let st = self.sub(self_ty);

@@ -29,13 +29,15 @@
 // the IR interpreter has one thread and makes clone fail with ENOSYS (native kernels have
 // clone); there the fn value runs on the calling thread before `start` returns, which gives the
 // same result for `join`, `par_for`, and `scope` (their bodies only communicate through results
-// the caller reads after the join).
+// the caller reads after the join). It runs as a task of its own there too: its error trace
+// starts empty and the caller's is restored after it (runtime.errtrace).
 
 import runtime.os;
 import runtime.state;
 import runtime.atomic;
 import runtime.panic;
 import runtime.config;
+import runtime.errtrace;
 
 struct Thread {
     // kernel tid while the thread runs; 0 once it has exited (futex word, CLONE_CHILD_CLEARTID)
@@ -124,7 +126,10 @@ fn start(f: fn()) -> usize {
             cannot_create();
         }
         // the IR interpreter (one thread): run f here
+        let saved = errtrace.save();
+        errtrace.clear();
         f();
+        errtrace.restore(&saved);
         return 0;
     }
     return th as usize;

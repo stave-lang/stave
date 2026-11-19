@@ -217,7 +217,11 @@ list):
   `runtime.thread.start(f: fn()) -> usize` (every fn value it can be given gets a stack-table
   row; it calls `f` itself where no thread can be created),
   `runtime.panic.trap`, `runtime.panic.trap_msg`, `runtime.panic.on_signal`,
-  `runtime.panic.set_user_site`, `runtime.panic.requires_failed(clause: &str)` and
+  `runtime.panic.set_user_site`, the error-trace hooks `runtime.errtrace.push(site: u32)` (the
+  error path of `?` on a `Result`, before its scope drops and `ensures` checks; site: the `?`
+  token) and `runtime.errtrace.restart(site: u32)` (each evaluated `Result.Err(..)` constructor;
+  site: the `Err` token), both called only in fns of user packages,
+  `runtime.panic.requires_failed(clause: &str)` and
   `runtime.panic.ensures_failed(site: u32, clause: &str)` (a false contract clause),
   `runtime.panic.test_input()` and `runtime.panic.test_skip()` (the stdout markers of a `test fn`
   with parameters, cli.md "Test fn inputs"), `runtime.cpu.WORD` (a `u64` static; dispatch bodies load it),
