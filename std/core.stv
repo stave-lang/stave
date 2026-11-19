@@ -116,6 +116,22 @@ impl<T: view, E: view> Result<T, E> {
     pub fn err(self) -> Option<E> from self {
         return match self { Result.Ok(_) => Option.None, Result.Err(e) => Option.Some(e) };
     }
+
+    // Err(e) becomes Err(f(e)), keeping the error trace: it is the same after f as before (an
+    // error f makes does not restart it), plus one via site at the caller (user site).
+    pub fn map_err<F>(self, f: fn(E) -> F) -> Result<T, F> from self {
+        match self {
+            Result.Ok(v) => { return Result.Ok(v); }
+            Result.Err(e) => {
+                let at = panic.user_site();
+                let saved = errtrace.save();
+                let g = f(e);
+                errtrace.restore(&saved);
+                errtrace.push(at);
+                return Result.Err(g);
+            }
+        }
+    }
 }
 
 // ---- marker traits ----

@@ -203,13 +203,11 @@ fn put_kind(l: &mut Line, kind: u32) {
 
 // "<file>:<line>:<col> in <fn>"
 fn put_site(l: &mut Line, site: u32) {
-    let t = unsafe("intrinsic: address of the compiler-emitted site table") site_table();
-    let count = unsafe("the site table is compiler-emitted read-only data, 8-byte aligned") ld64(t);
-    if site == SITE_NONE || (site as u64) >= count {
+    let row = site_row(site);
+    if row == 0 {
         l.lit("<unknown>:0:0 in <unknown>");
         return;
     }
-    let row = t + 8 + (site as usize) * SITE_ROW;
     unsafe("row is inside the site table; its string addresses point to read-only UTF-8 bytes") {
         let file = ld64(row) as usize;
         let file_len = ld32(row + 8) as usize;
@@ -225,6 +223,17 @@ fn put_site(l: &mut Line, site: u32) {
         l.lit(" in ");
         l.raw(func, func_len);
     }
+}
+
+// The address of row `site` of the site table (layout in the header; std.debug reads its
+// fields); 0 for SITE_NONE or a row the table does not hold.
+pub fn site_row(site: u32) -> usize {
+    let t = unsafe("intrinsic: address of the compiler-emitted site table") site_table();
+    let count = unsafe("the site table is compiler-emitted read-only data, 8-byte aligned") ld64(t);
+    if site == SITE_NONE || (site as u64) >= count {
+        return 0;
+    }
+    return t + 8 + (site as usize) * SITE_ROW;
 }
 
 // Marks the process as panicking. A panic while this thread reports one (or in its signal
