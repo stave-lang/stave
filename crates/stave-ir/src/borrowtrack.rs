@@ -200,6 +200,8 @@ impl Node {
 struct Tree {
     size: u64,
     nodes: Vec<Node>,
+    /// The nodes with a byte that is not `Dead`: the only ones an event can change.
+    live: Vec<u32>,
 }
 
 /// The state of every allocation the caller named.
@@ -235,7 +237,8 @@ impl Tracker {
             made_at: at,
             runs: vec![Run { hi: size, perm, cause: Cause::Made, cause_at: at }],
         };
-        self.trees.insert(alloc, Tree { size, nodes: vec![root] });
+        let live = if size == 0 { Vec::new() } else { vec![0] };
+        self.trees.insert(alloc, Tree { size, nodes: vec![root], live });
     }
 
     /// The node an event on `alloc` through `tag` starts from: the tag's own, or the root for an
@@ -291,6 +294,9 @@ impl Tracker {
             }
         }
         tree.nodes.push(node);
+        if lo < hi {
+            tree.live.push(tree.nodes.len() as u32 - 1);
+        }
         self.tags.insert(self.next, (alloc, tree.nodes.len() as u32 - 1));
         self.next += 1;
         Ok(self.next - 1)
@@ -318,6 +324,7 @@ impl Tracker {
                 let (lo, hi) = (n.lo, n.hi);
                 n.update(lo, hi, Cause::End, at, |_| Perm::Dead);
             }
+            tree.live.clear();
         }
     }
 
@@ -424,8 +431,10 @@ fn apply(tree: &mut Tree, n: u32, ev: Use, lo: u64, hi: u64, at: Ev) {
         }
         cur = p;
     }
-    for (i, node) in tree.nodes.iter_mut().enumerate() {
-        let child = path.contains(&(i as u32));
+    let mut live = std::mem::take(&mut tree.live);
+    for &i in &live {
+        let node = &mut tree.nodes[i as usize];
+        let child = path.contains(&i);
         match (ev, child) {
             (Use::Write, true) => node.update(lo, hi, Cause::Write, at, |p| match p {
                 Perm::Reserved => Perm::Active,
@@ -444,6 +453,11 @@ fn apply(tree: &mut Tree, n: u32, ev: Use, lo: u64, hi: u64, at: Ev) {
             (Use::Borrow, false) => {}
         }
     }
+    // `Dead` stays `Dead` under every event
+    if ev != Use::Read {
+        live.retain(|&i| tree.nodes[i as usize].runs.iter().any(|r| r.perm != Perm::Dead));
+    }
+    tree.live = live;
 }
 
 #[cfg(test)]
@@ -657,6 +671,21 @@ mod tests {
         t.write(X, m, 4, 8, 4).unwrap();
         assert_eq!(t.read(X, r, 4, 8, 5).unwrap_err().cause_at, 4);
         t.write(X, m, 0, 4, 6).unwrap();
+    }
+
+    #[test]
+    fn a_dead_tag_keeps_its_cause() {
+        let mut t = local(4);
+        let first = excl(&mut t, ROOT, 0, 4, 2);
+        t.write(X, first, 0, 4, 3).unwrap();
+        let mut last = first;
+        for k in 0..100u64 {
+            last = excl(&mut t, ROOT, 0, 4, 10 + 2 * k);
+            t.write(X, last, 0, 4, 11 + 2 * k).unwrap();
+        }
+        let e = t.read(X, first, 0, 4, 500).unwrap_err();
+        assert_eq!((e.class, e.cause_at), (Class::TwoExclusive, 11));
+        t.read(X, last, 0, 4, 501).unwrap();
     }
 
     #[test]
