@@ -1,5 +1,6 @@
 //~ CHECK-ONLY
-// A pointer picked by a condition may point to either view object.
+// A pointer picked by a condition may point to either view object: a store through it makes
+// both hold the value's borrows.
 fn dangling(c: bool) -> u32 {
     let mut oa: Option<&u32> = Option.None;
     {
@@ -7,8 +8,8 @@ fn dangling(c: bool) -> u32 {
         let r: &u32 = &x;
         let mut ob: Option<&u32> = Option.Some(r);
         let q = if c then &mut oa else &mut ob;
-        *q = Option.Some(r); //~ ERROR E0513
-    }
+        *q = Option.Some(r);
+    } //~ ERROR E0501
     return match oa { Option.Some(r) => *r, Option.None => 0 };
 }
 

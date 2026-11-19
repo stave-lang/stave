@@ -1,5 +1,6 @@
 //~ CHECK-ONLY
-// A pointer reassigned in a loop may point to every view object it was given.
+// A pointer reassigned in a loop may point to every view object it was given: a store through
+// it makes each of them hold the value's borrows.
 fn dangling() -> u32 {
     let mut oa: Option<&u32> = Option.None;
     {
@@ -9,11 +10,11 @@ fn dangling() -> u32 {
         let v: Option<&u32> = *q;
         let mut i: u32 = 0;
         while i < 2 {
-            *q = v; //~ ERROR E0513
+            *q = v;
             q = &mut oa;
             i = i + 1;
         }
-    }
+    } //~ ERROR E0501
     return match oa { Option.Some(r) => *r, Option.None => 0 };
 }
 

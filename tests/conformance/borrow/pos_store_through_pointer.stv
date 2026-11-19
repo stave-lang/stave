@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// A borrow written through a pointer to a local view is held by that view from there on: the
+// write is accepted, and the borrowed local is free again after the view's last use.
+view struct Pick { best: &u32, count: usize }
+
+fn through_pointer() -> u32 {
+    let mut x: u32 = 7;
+    let mut oa: Option<&u32> = Option.None;
+    let q = &mut oa;
+    *q = Option.Some(&x);
+    let seen: u32 = match oa { Option.Some(r) => *r, Option.None => 0 };
+    x = seen + 1;
+    return x;
+}
+
+fn field_through_pointer(c: bool) -> u32 {
+    let zero: u32 = 0;
+    let x: u32 = 7;
+    let mut a = Pick.{ best: &zero, count: 0 };
+    let mut b = Pick.{ best: &zero, count: 0 };
+    let q = if c then &mut a else &mut b;
+    q.best = &x;
+    return *a.best + *b.best;
+}
+
+fn main() -> i32 {
+    return 0;
+}

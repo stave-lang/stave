@@ -1,6 +1,6 @@
 //~ CHECK-ONLY
 // A pointer read from a field of a view struct local may point to any view object the struct
-// borrows.
+// borrows mutably: a store through it makes each of them hold the value's borrows.
 view struct W { a: &mut Option<&u32>, b: &Option<&u32> }
 
 fn dangling() -> u32 {
@@ -9,8 +9,8 @@ fn dangling() -> u32 {
         let x: u32 = 7;
         let ob: Option<&u32> = Option.Some(&x);
         let w = W.{ a: &mut oa, b: &ob };
-        *w.a = *w.b; //~ ERROR E0513
-    }
+        *w.a = *w.b;
+    } //~ ERROR E0501
     return match oa { Option.Some(r) => *r, Option.None => 0 };
 }
 

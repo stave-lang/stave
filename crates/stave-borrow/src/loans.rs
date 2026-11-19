@@ -28,17 +28,15 @@
 //! a call by `reach(S)` too: the callee may keep a pointer it is given as a source and store
 //! through it. Each of them must end up with `S` in the sets its readers use
 //! ([`Flow::store_fits`]). `S` empty: nothing to do. Else, for every such atom:
-//! - a `&mut` loan `L` of a ref-like place without a dereference, at a call: the set of the
-//!   borrowed local gains `S` from the call on, and so does `contents(L)` ([`Flow::apply`];
-//!   without the loans of that local itself: it is written through `L`, so no other loan of it
-//!   is live and it holds no borrow of itself). The local is read later with that set, and
-//!   through a pointer with what the local's set says where it is read. A place behind a
-//!   dereference is read with the sets of the pointers it was borrowed through, which are in
-//!   the pointer's set with it: nothing is added for it. A captured local of a nested body
-//!   belongs to the enclosing fn, which learns nothing from the closure: it is not grown, and
-//!   takes the store only if `S ⊆ contents(L)`;
-//! - the same loan, at an assignment: `S ⊆ contents(L)` is required, and the borrowed local's
-//!   set gains `S`: `contents(L)` may hold what a call stored on another path;
+//! - a `&mut` loan `L` of a ref-like place without a dereference: the set of the borrowed
+//!   local gains `S` from the store on, and so does `contents(L)` ([`Flow::apply`]; without
+//!   the loans of that local itself: it is written through `L`, so no other loan of it is live
+//!   and it holds no borrow of itself). The local is read later with that set, and through a
+//!   pointer with what the local's set says where it is read. A pointer that may point to
+//!   several locals grows each of them. A place behind a dereference is read with the sets of
+//!   the pointers it was borrowed through, which are in the pointer's set with it: nothing is
+//!   added for it. A captured local of a nested body belongs to the enclosing fn, which learns
+//!   nothing from the closure: it is not grown, and takes the store only if `S ⊆ contents(L)`;
 //! - `Pb(i)`, param `i` a reference whose type can be stored through ([`Tys::holds_mut`]; a
 //!   param of another type is in `P` only as the origins of a value): `S ⊆ decl(i) ∪ {Pc(i)}`,
 //!   with `decl(i)` the atoms the `from` clause of param `i` covers (`from q`: `Pb(q)` and
@@ -450,8 +448,8 @@ impl<'b> Flow<'b> {
 
     /// Whether a value with origins `val` may be stored through a pointer with origins `ptr`
     /// (module doc, **Stores**). `direct`: the param whose own dereference is the only one of
-    /// the place an assignment writes. `call`: the store of a call, which grows the local
-    /// objects ([`Flow::apply`]); an assignment's value must be in them already.
+    /// the place an assignment writes. `call`: the store of a call, which also reaches what
+    /// its sources reach. The local objects are grown by [`Flow::apply`].
     pub fn store_fits(
         &self,
         st: &State,
@@ -489,7 +487,7 @@ impl<'b> Flow<'b> {
                 }
                 placed |= pointed.contains(a);
                 let captured = body.locals[l.place.local as usize].capture.is_some();
-                if (!call || captured) && !val.is_subset(&self.contents[a]) {
+                if captured && !val.is_subset(&self.contents[a]) {
                     object = true;
                 }
             } else if let Some((i, copy)) = self.atoms.param(a) {
@@ -579,14 +577,17 @@ impl<'b> Flow<'b> {
         out
     }
 
-    /// The store of a call: a value with origins `val` through a pointer with origins `ptr`.
-    /// Every local view object the pointer may point to or reach gains `val` (module doc,
-    /// **Stores**); whether a loan's contents changed.
-    fn grow(&mut self, st: &mut State, ptr: &Bits, val: &Bits) -> bool {
+    /// A store of a value with origins `val` through a pointer with origins `ptr`: every local
+    /// view object the pointer may point to or reach gains `val` (module doc, **Stores**).
+    /// `call`: the store of a call, which also reaches what its sources reach. Whether a loan's
+    /// contents changed.
+    fn grow(&mut self, st: &mut State, ptr: &Bits, val: &Bits, call: bool) -> bool {
         let body = self.body;
-        // the callee may keep a pointer it is given as a source and store through it too
         let mut targets = self.reach(st, ptr);
-        targets.union_with(&self.reach(st, val));
+        if call {
+            // the callee may keep a pointer it is given as a source and store through it too
+            targets.union_with(&self.reach(st, val));
+        }
         let mut changed = false;
         for a in targets.iter() {
             let Some(l) = body.loans.get(a) else { continue };
@@ -618,27 +619,6 @@ impl<'b> Flow<'b> {
             }
         }
         changed
-    }
-
-    /// An assignment of a value with origins `val` through the dereferences of `dest`: every
-    /// borrowed local it may land in has `val` from here on (module doc, **Stores**).
-    fn settle(&self, st: &mut State, dest: &Place, val: &Bits) {
-        let (_, Some(ptr)) = self.place_origins(st, dest) else { return };
-        for a in self.reach(st, &ptr).iter() {
-            let Some(l) = self.body.loans.get(a) else { continue };
-            if !l.mutable
-                || l.place.has_deref()
-                || !self.is_ref_like(l.place.ty)
-                || !val.is_subset(&self.contents[a])
-            {
-                continue;
-            }
-            if let Some(&t) = self.tracked.get(l.place.local as usize)
-                && t != u32::MAX
-            {
-                st.o[t as usize].union_with(val);
-            }
-        }
     }
 
     /// The origins of the pointers a borrow of `p` goes through (module doc, **Contents**): of
@@ -738,7 +718,7 @@ impl<'b> Flow<'b> {
                 if let Rvalue::Call { args, stores, .. } = rv {
                     for x in stores {
                         if let Some((ptr, val)) = self.store_sets(st, args, x) {
-                            changed |= self.grow(st, &ptr, &val);
+                            changed |= self.grow(st, &ptr, &val, true);
                         }
                     }
                 }
@@ -750,8 +730,10 @@ impl<'b> Flow<'b> {
                 // re-initialized: moves of the place or below it are undone
                 self.reinit(st, dest);
                 if dest.has_deref() {
-                    if !s.is_empty() {
-                        self.settle(st, dest, &s);
+                    if !s.is_empty()
+                        && let (_, Some(ptr)) = self.place_origins(st, dest)
+                    {
+                        changed |= self.grow(st, &ptr, &s, false);
                     }
                 } else if let Some(&t) = self.tracked.get(dest.local as usize)
                     && t != u32::MAX

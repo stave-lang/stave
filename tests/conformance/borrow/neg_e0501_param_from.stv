@@ -84,8 +84,8 @@ fn through_pointer() -> u32 {
     return *r.best;
 }
 
-// An assignment through the pointer takes a borrow that a call stores on another path: the
-// view holds it on this path too.
+// An assignment through the pointer stores like the call on the other path: the view holds
+// the borrow on this path too.
 fn assigned_on_another_path(c: bool) -> u32 {
     let zero: u32 = 0;
     let mut p = Pick.{ best: &zero, count: 0 };

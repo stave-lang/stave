@@ -2335,7 +2335,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0513",
         severity: Severity::Error,
         area: "borrow",
-        rule: "store of a value into a view (an assignment through `&mut View`, or a call whose callee declares the store with a parameter `from` clause) with origins the view cannot take: through an assignment the target must have them already, and a view captured by a closure takes nothing new; case `param`: the view is the one a `&mut` parameter points to (or one reached from it) and the parameter's `from` clause does not name the origins; case `several`: the pointer may point to more than one view object and one of them may lack the origins (a pointer picked from several, or one held in a by-value view parameter, in a closure capture, or below the view a `&mut` parameter points to)",
+        rule: "store of a value into a view (an assignment through `&mut View`, or a call whose callee declares the store with a parameter `from` clause) with origins the view cannot take (a local view takes any borrow and holds it from then on): a view captured by a closure, or one behind a pointer made from a raw pointer, takes nothing new; case `param`: the view is the one a `&mut` parameter points to (or one reached from it) and the parameter's `from` clause does not name the origins; case `several`: the pointer may point to more than one view object and one of them may lack the origins (a pointer picked from several, or one held in a by-value view parameter, in a closure capture, or below the view a `&mut` parameter points to)",
         retired: false,
         located: true,
         holes: &[
