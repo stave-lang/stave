@@ -11,7 +11,8 @@
 //! that the call graph has no edge for at the caller's node: the runtime helpers lowering inserts
 //! and calls an optimized body makes directly. A call through a fn value takes the call graph's
 //! targets; a node of a function that has one but no such edge, or any such call when a function
-//! made into a fn value has no node, is unresolved, and so is one that calls C code (`ccall`).
+//! made into a fn value has no node, is unresolved, and so is one that calls C code (`ccall`, or
+//! an `extern "C"` import).
 //!
 //! **Depth** of a node: its weight plus the largest depth among its successors, and, if its code
 //! has a trap stub, the depth `T` of a trap: twice the depth of `runtime.panic.trap`. A trap
@@ -273,7 +274,13 @@ fn calls_of(m: &Module, f: FuncId, cpu_init: Option<FuncId>, made: &mut [bool]) 
                 _ => None,
             };
             match (op, callee) {
-                (Some(Op::Call | Op::CallInd), Some(g)) => c.direct.push(g),
+                (Some(Op::Call | Op::CallInd), Some(g)) => {
+                    // an import runs C code on this stack: no frame size is known for it
+                    if m.func(g).is_some_and(|x| x.body.is_none() && x.symbol.is_some()) {
+                        c.foreign = true;
+                    }
+                    c.direct.push(g);
+                }
                 (Some(Op::CallInd), None) => c.indirect = true,
                 (Some(Op::Intrinsic(id)), _) => match m.intrinsic_name(id) {
                     Some("cpu_init") => c.direct.extend(cpu_init),
@@ -590,6 +597,29 @@ pub fn is_spawn(g: &CallGraph, x: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_direct_call_of_an_import_is_foreign() {
+        use stave_ir::{FuncBuilder, InstanceId};
+        let mut m = Module::new();
+        let import = m.declare(InstanceId(vec![0]), "c.puts", Vec::new(), None);
+        m.func_mut(import).unwrap().symbol = Some("puts".to_string());
+        let stave_fn = m.declare(InstanceId(vec![1]), "main.leaf", Vec::new(), None);
+        let mut b = FuncBuilder::new(&[]);
+        b.ret(None);
+        m.define(stave_fn, b.finish().unwrap());
+        let mut made = vec![false; 4];
+        for (callee, foreign) in [(import, true), (stave_fn, false)] {
+            let f = m.declare(InstanceId(vec![2 + callee.index() as u32]), "main.f", Vec::new(), None);
+            let mut b = FuncBuilder::new(&[]);
+            b.call(callee, None, &[]);
+            b.ret(None);
+            m.define(f, b.finish().unwrap());
+            let c = calls_of(&m, f, None, &mut made);
+            assert_eq!(c.foreign, foreign);
+            assert_eq!(c.direct, vec![callee]);
+        }
+    }
 
     fn csr(n: usize, es: &[(u32, u32)]) -> (Vec<u32>, Vec<u32>) {
         let mut es = es.to_vec();
