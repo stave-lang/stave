@@ -223,6 +223,10 @@ pub enum Why {
     Clause,
     /// A fn value made at `site` where a fn type denying `deny` is wanted.
     Made { site: Span },
+    /// A fn item made at `site` into a value of a fn type with the deny clause `deny` (its own,
+    /// or the one it is coerced to there): calls through the value prove nothing, so the item's
+    /// entry effect must not be denied.
+    Value { site: Span },
 }
 
 /// The checks of a program and whether they need the checked IR (a `trap` among the denied
@@ -776,7 +780,7 @@ pub fn plan(prog: &Program, tc: &Typeck) -> Plan {
     let mut checks = Vec::new();
     let mut made: Vec<usize> = Vec::new();
     for (i, b) in tc.bodies.iter().enumerate() {
-        if !b.denied.is_empty() && !b.has_error {
+        if !(b.denied.is_empty() && b.valued.is_empty()) && !b.has_error {
             made.push(i);
         }
     }
@@ -812,7 +816,8 @@ pub fn plan(prog: &Program, tc: &Typeck) -> Plan {
         let Some(icx) = item_cx(prog, b.item, &mut br) else { continue };
         let closures: Vec<u32> =
             crate::closures::closure_nodes(&icx, b.node).into_iter().map(|(node, _)| icx.a(node)).collect();
-        for &(tok, deny, coerced) in &b.denied {
+        let made = b.denied.iter().map(|&x| (x, false));
+        for ((tok, deny, coerced), valued) in made.chain(b.valued.iter().map(|&x| (x, true))) {
             let site = icx.node_span(coerced);
             let deny = Effects(deny);
             for &inst in insts {
@@ -845,7 +850,8 @@ pub fn plan(prog: &Program, tc: &Typeck) -> Plan {
                     nodes.extend(decls.iter().filter_map(|k| key_of.get(k)).flatten().copied());
                 }
                 for m in nodes {
-                    checks.push(Check { node: m, deny, why: Why::Made { site } });
+                    let why = if valued { Why::Value { site } } else { Why::Made { site } };
+                    checks.push(Check { node: m, deny, why });
                 }
             }
         }
@@ -867,13 +873,16 @@ pub fn check(prog: &Program, tc: &Typeck, plan: &Plan, sets: &EffectSets) -> Vec
             continue;
         }
         // a fn value is entered by calls that prove nothing: its entry effect is its own
-        let at_entry = match c.why {
-            Why::Clause => Effects::NONE,
-            Why::Made { .. } => sets.entry.get(c.node as usize).copied().unwrap_or(Effects::NONE),
+        let entry = sets.entry.get(c.node as usize).copied().unwrap_or(Effects::NONE);
+        // what the check is about: the set, the set and the entry effect, or the entry effect
+        let (in_set, at_entry) = match c.why {
+            Why::Clause => (sets.set[c.node as usize], Effects::NONE),
+            Why::Made { .. } => (sets.set[c.node as usize], entry),
+            Why::Value { .. } => (Effects::NONE, entry),
         };
-        let have = Effects((sets.set[c.node as usize].0 | at_entry.0) & c.deny.0);
+        let have = Effects((in_set.0 | at_entry.0) & c.deny.0);
         for e in have.each() {
-            let found = if sets.set[c.node as usize].meets(e) {
+            let found = if in_set.meets(e) {
                 sets.chain_end(g, c.node, e)
             } else {
                 Some((Vec::new(), c.node, true))
@@ -885,7 +894,7 @@ pub fn check(prog: &Program, tc: &Typeck, plan: &Plan, sets: &EffectSets) -> Vec
             let (fn_path, at) = (&names[0], &names[1]);
             let site = match &c.why {
                 Why::Clause => None,
-                Why::Made { site } => Some((site.file.0, site.offset)),
+                Why::Made { site } | Why::Value { site } => Some((site.file.0, site.offset)),
             };
             if !seen.insert((fn_path.clone(), e.0, site)) {
                 continue;
@@ -914,7 +923,7 @@ pub fn check(prog: &Program, tc: &Typeck, plan: &Plan, sets: &EffectSets) -> Vec
                         }
                     }
                 }
-                Why::Made { site } => primary = *site,
+                Why::Made { site } | Why::Value { site } => primary = *site,
             }
             for &ei in &edges {
                 let edge = &g.out[ei as usize];
@@ -933,7 +942,7 @@ pub fn check(prog: &Program, tc: &Typeck, plan: &Plan, sets: &EffectSets) -> Vec
                         [("fn", fn_path.as_str()), ("effect", effect), ("at", at.as_str()), ("op", op_text)];
                     mk("E1401", if edges.is_empty() { Some("self") } else { None }, &holes, primary, &roles)
                 }
-                Why::Made { .. } => {
+                Why::Made { .. } | Why::Value { .. } => {
                     let holes =
                         [("fn", fn_path.as_str()), ("effect", effect), ("at", at.as_str()), ("op", op_text)];
                     mk("E1403", Some("made"), &holes, primary, &roles)

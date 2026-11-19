@@ -3,7 +3,9 @@
 // `requires` false whenever the clauses before it hold makes the fn uncallable (E0215), an
 // `ensures` false whenever a return is reached is an error at that return (E0217). Each operand
 // of a top-level `&&` is its own check; type ranges, signed compares, and `+` by a constant are
-// facts. An instance of a generic fn gets no error: its check stays (`contract_generic_instance`).
+// facts. An instance of a generic fn gets no error on its clause: its check stays
+// (`contract_generic_instance`), and a call from outside generic code that always fails it is the
+// error (E0218). A call of a fn that already has E0215 gets no second error.
 fn contradict(x: u32) -> u32 requires(x < 10) requires(x > 20) { //~ ERROR E0215
     return x;
 }
@@ -39,6 +41,6 @@ fn main() {
     let a = contradict(1) + split(4) + four(4);
     let b = byte(1);
     let c = signed(-6) + sign(1);
-    let d = generic(1u32, 2);
-    let e = generic(3u64, 4);
+    let d = generic(1u32, 2); //~ ERROR E0218
+    let e = generic(3u64, 4); //~ ERROR E0218
 }

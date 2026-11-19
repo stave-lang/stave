@@ -216,8 +216,18 @@ pub fn node_ir(prog: &Program, tc: &Typeck, nodes: &[u32]) -> Result<NodeIrs, Fa
     // conjunct. None in an instance of a generic fn (as E0215), nor in a closure or `spawn` body
     // of one: such a body has no generic arguments of its own, its instance id starts with the
     // enclosing fn's.
+    // None either for a call of a fn that already has E0215: no call of it can pass.
+    let uncallable: Vec<FuncId> = found
+        .iter()
+        .filter(|x| x.refuted && x.clause == Clause::Requires)
+        .map(|x| x.func)
+        .filter(|&f| m.func(f).is_some_and(|f| f.type_args.is_empty()))
+        .collect();
     for x in &removed.calls {
         let Some(func) = m.func(x.func) else { continue };
+        if uncallable.contains(&x.callee) {
+            continue;
+        }
         let root = func.instance.0.first();
         let encloser_generic = m
             .funcs
