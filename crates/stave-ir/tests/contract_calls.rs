@@ -9,12 +9,13 @@ use common::*;
 use stave_ir::bounds::{claims, prove_func, prove_func_in};
 use stave_ir::interp::Val;
 use stave_ir::ir::Span;
-use stave_ir::witness::check::{Reject, check_func, check_module, remove};
+use stave_ir::witness::check::{Checked, Reject, check_func, check_module, remove, remove_whole};
 use stave_ir::witness::{
     CallProved, CallRefuted, ENSURES_FAILED, FnWitness, PostAt, REQUIRES_FAILED, Removed, Row, Source, Term,
 };
 use stave_ir::{
-    Block, FuncBuilder, FuncId, Module, Op, Operand, Outcome, PanicKind, Site, Value, verify_module,
+    Block, FuncBuilder, FuncId, GenericArg, Module, Op, Operand, Outcome, PanicKind, Site, Value,
+    verify_module,
 };
 
 /// Branches to a call of `fail` unless `c`; the builder is left in the block past the check,
@@ -45,9 +46,24 @@ struct Calls {
     ok: Block,
 }
 
+/// What `app.caller` adds to `pos(5)`.
+#[derive(Clone, Copy, PartialEq)]
+enum Second {
+    /// `pos(y)`: a call nothing proves.
+    Unknown,
+    /// `y`.
+    Nothing,
+    /// `pos(y)` through the fn value `@pos`.
+    Value,
+}
+
 /// `app.pos(x: u32) -> u32 requires(x > 0)` returning `x`, and `app.caller(y: u32) -> u32`
 /// returning `pos(5) +% pos(y)`.
 fn calls_fixture() -> Calls {
+    fixture(Second::Unknown)
+}
+
+fn fixture(second: Second) -> Calls {
     let mut m = Module::new();
     let t = m.types.u32();
     let bt = m.types.bool();
@@ -64,12 +80,25 @@ fn calls_fixture() -> Calls {
         let y = b.param(0).unwrap();
         let five = b.int(5);
         let a = b.call(pos, Some(t), &[five]).unwrap();
-        let c = b.call(pos, Some(t), &[y.into()]).unwrap();
+        let c = match second {
+            Second::Unknown => b.call(pos, Some(t), &[y.into()]).unwrap(),
+            Second::Nothing => y,
+            Second::Value => b.call_ind(Operand::Func(pos), Some(t), &[y.into()]).unwrap(),
+        };
         let s = b.binary(Op::AddWrap, t, a, c);
         b.ret(Some(s.into()));
     });
-    verify_module(&m).unwrap_or_else(|e| panic!("{e:?}"));
+    if second != Second::Value {
+        verify_module(&m).unwrap_or_else(|e| panic!("{e:?}"));
+    }
     Calls { m, pos, caller, ok }
+}
+
+/// The witnesses the pass writes for `pos` and `caller`, and their rows as one accepted set.
+fn accepted(m: &Module, pos: FuncId, caller: FuncId) -> Vec<Checked> {
+    let ws: Vec<FnWitness> =
+        [pos, caller].iter().map(|&f| prove_func(m, f).expect("a witness").witness).collect();
+    check_module(m, &ws).unwrap_or_else(|r| panic!("{r:?}"))
 }
 
 /// The reasons the checker refuses `ws` for, in order (none: accepted).
@@ -188,6 +217,85 @@ fn forged_summaries_and_calls_are_refused() {
     let mut ws = good.clone();
     ws[1].calls.refuted.push(refuted(calls[0]));
     assert_eq!(whys(&m, &ws), [Reject::Call]);
+}
+
+/// One witness per function, and one accepted set of rows per removal: a second witness for a
+/// function is refused by the check; two rows for one function, or rows of two checks, are
+/// refused by the removal, which then changes nothing.
+#[test]
+fn rows_that_are_not_one_accepted_set_are_refused() {
+    let Calls { m, pos, caller, .. } = calls_fixture();
+    let good: Vec<FnWitness> =
+        [pos, caller].iter().map(|&f| prove_func(&m, f).expect("a witness").witness).collect();
+    let twice = vec![good[0].clone(), good[1].clone(), good[1].clone()];
+    assert_eq!(whys(&m, &twice), [Reject::Repeated]);
+
+    let alone = check_func(&m, &good[0]).unwrap_or_else(|r| panic!("{r}"));
+    let set = check_module(&m, &good).unwrap_or_else(|r| panic!("{r:?}"));
+    let unchanged = |o: &Module| {
+        o.funcs.len() == m.funcs.len()
+            && insts_with(body(o, pos), Op::Call) == insts_with(body(&m, pos), Op::Call)
+            && body(o, caller).args(0) == body(&m, caller).args(0)
+    };
+    let mut o = m.clone();
+    assert_eq!(remove(&mut o, &[alone.clone(), alone.clone()]).refused, Some(pos));
+    assert!(unchanged(&o));
+    assert_eq!(remove(&mut o, &[set[1].clone(), alone]).refused, Some(pos));
+    assert!(unchanged(&o));
+    assert_eq!(remove(&mut o, &set).refused, None);
+    assert!(!unchanged(&o));
+}
+
+/// A function loses its checked entry only in a whole program, only as an instance of a generic
+/// function without a link symbol, and only when every operand naming it is the callee of an
+/// accepted call. Else the unchecked entry is a new function, without the symbol.
+#[test]
+fn only_a_whole_program_replaces_a_function_by_its_unchecked_entry() {
+    let generic = |m: &mut Module, f: FuncId| {
+        let t = m.types.u32();
+        m.funcs[f.index()].type_args = vec![GenericArg::Type(t)];
+    };
+    let failure_calls = |m: &Module, f: FuncId| insts_with(body(m, f), Op::Call).len();
+
+    // one proved call, nothing else names the instance
+    let Calls { mut m, pos, caller, .. } = fixture(Second::Nothing);
+    generic(&mut m, pos);
+    let rows = accepted(&m, pos, caller);
+    let mut whole = m.clone();
+    let removal = remove_whole(&mut whole, &rows);
+    assert_eq!((removal.unchecked, removal.proved), (vec![(pos, pos)], vec![(caller, pos)]));
+    assert_eq!((whole.funcs.len(), failure_calls(&whole, pos)), (m.funcs.len(), 0));
+    // the same rows on a module that may be a part of the program
+    let mut part = m.clone();
+    let entry = FuncId(m.funcs.len() as u32);
+    let removal = remove(&mut part, &rows);
+    assert_eq!((removal.unchecked, removal.proved), (vec![(pos, entry)], vec![(caller, pos)]));
+    assert_eq!((failure_calls(&part, pos), failure_calls(&part, entry)), (1, 0));
+
+    // an exported function keeps its checked entry and its symbol; the new function has none
+    let Calls { mut m, pos, caller, .. } = fixture(Second::Nothing);
+    generic(&mut m, pos);
+    m.funcs[pos.index()].symbol = Some("pos".to_string());
+    let rows = accepted(&m, pos, caller);
+    let mut o = m.clone();
+    let removal = remove_whole(&mut o, &rows);
+    let entry = FuncId(m.funcs.len() as u32);
+    assert_eq!(removal.unchecked, [(pos, entry)]);
+    let symbol = |f: FuncId| o.funcs[f.index()].symbol.clone();
+    assert_eq!((symbol(pos), symbol(entry)), (Some("pos".to_string()), None));
+    let names = stave_ir::link::func_symbols(&o, &[pos, entry]);
+    assert_ne!(names[pos.index()], names[entry.index()]);
+
+    // a fn value of the instance in the same caller: the value enters the checked entry
+    let Calls { mut m, pos, caller, .. } = fixture(Second::Value);
+    generic(&mut m, pos);
+    let rows = accepted(&m, pos, caller);
+    let mut o = m.clone();
+    let removal = remove_whole(&mut o, &rows);
+    let entry = FuncId(m.funcs.len() as u32);
+    assert_eq!(removal.unchecked, [(pos, entry)]);
+    assert!(removal.proved.is_empty());
+    assert_eq!(failure_calls(&o, pos), 1);
 }
 
 /// `app.small(x: u32) -> u32 ensures(result < 10)` (`x` when below 10, else 9) states

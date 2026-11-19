@@ -76,6 +76,8 @@ pub enum Reject {
     /// A call row does not name a reachable direct call of a function whose summary has an
     /// entry, its proofs are not one per `pre` row, or a refuted row reads no check.
     Call,
+    /// The witnesses are not one per function, or the results are not those of their checks.
+    Repeated,
 }
 
 impl Reject {
@@ -93,6 +95,7 @@ impl Reject {
             Reject::Overflow => "the weights overflow",
             Reject::Summary => "the summary does not fit the function",
             Reject::Call => "not a call of a function with an unchecked entry",
+            Reject::Repeated => "not one witness per function",
         }
     }
 }
@@ -139,6 +142,9 @@ pub struct Checked {
     call_refuted: Vec<u32>,
     /// The accepted summary, if it states anything.
     summary: Option<Arc<Summary>>,
+    /// The check that accepted it ([`check_func`], or one [`check_module`] for all its rows):
+    /// rows of one check read the same summaries and were accepted together.
+    set: u64,
 }
 
 impl Checked {
@@ -173,14 +179,14 @@ impl Checked {
 }
 
 /// The summaries the witnesses of a module state, by function. A proof may read any of them:
-/// each is certified by the check of its own function, and a module is accepted only when every
-/// witness is.
-pub struct Summaries<'a> {
+/// each is certified by the check of its own function, and the rows of a set are handed out
+/// only when every witness of the set is accepted ([`check_module_by`]).
+struct Summaries<'a> {
     by_func: Vec<Option<&'a Summary>>,
 }
 
 impl<'a> Summaries<'a> {
-    pub fn of(m: &Module, ws: impl IntoIterator<Item = &'a FnWitness>) -> Summaries<'a> {
+    fn of(m: &Module, ws: impl IntoIterator<Item = &'a FnWitness>) -> Summaries<'a> {
         let mut by_func = vec![None; m.funcs.len()];
         for w in ws {
             if let Some(slot) = by_func.get_mut(w.func.index()) {
@@ -195,16 +201,25 @@ impl<'a> Summaries<'a> {
     }
 }
 
-/// [`check_func_in`] with no summary but the function's own: a call of another function proves
-/// nothing and states nothing.
+/// The result of checking one witness.
+pub type Verdict = Result<Checked, Rejected>;
+
+/// A fresh mark for the rows one check accepts ([`Checked::set`]).
+fn next_set() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Validates every row of `w` and its summary against its function in `m`, with no summary but
+/// the function's own: a call of another function proves nothing and states nothing.
 pub fn check_func(m: &Module, w: &FnWitness) -> Result<Checked, Rejected> {
-    check_func_in(m, w, &Summaries::of(m, std::iter::once(w)))
+    check_in(m, w, &Summaries::of(m, std::iter::once(w)), next_set())
 }
 
 /// Validates every row of `w` and its summary against its function in `m`, reading the
-/// summaries `sums` of the functions it calls. Functions are independent: a caller may check
-/// them in parallel.
-pub fn check_func_in(m: &Module, w: &FnWitness, sums: &Summaries<'_>) -> Result<Checked, Rejected> {
+/// summaries `sums` of the functions it calls. An `Ok` holds only if every witness behind `sums`
+/// is accepted too: the callers below see to that.
+fn check_in(m: &Module, w: &FnWitness, sums: &Summaries<'_>, set: u64) -> Result<Checked, Rejected> {
     let path = m.func(w.func).map_or(String::new(), |f| format!("@{} {}", f.instance, f.path));
     let fail = |inst: Option<u32>, edge: Option<u32>, why: Reject| Rejected {
         func: w.func,
@@ -251,18 +266,53 @@ pub fn check_func_in(m: &Module, w: &FnWitness, sums: &Summaries<'_>) -> Result<
         calls: w.calls.proved.iter().map(|c| c.inst).collect(),
         call_refuted: w.calls.refuted.iter().map(|c| c.inst).collect(),
         summary: (!w.summary.is_empty()).then(|| Arc::new(w.summary.clone())),
+        set,
     })
 }
 
-/// [`check_func_in`] for every function of `ws`, each reading the summaries of all of them: all
-/// accepted, or every rejection.
+/// Validates the witnesses `ws`, one per function, each reading the summaries of all of them:
+/// all accepted, or every rejection.
 pub fn check_module(m: &Module, ws: &[FnWitness]) -> Result<Vec<Checked>, Vec<Rejected>> {
-    let sums = Summaries::of(m, ws);
+    let ws: Vec<&FnWitness> = ws.iter().collect();
+    check_module_by(m, &ws, |one| (0..ws.len()).map(|k| one(k)).collect())
+}
+
+/// [`check_module`] with the caller running the checks: `run` gets the check of witness `k` and
+/// returns its result for every `k` of `ws`, in order (functions are independent, so it may run
+/// them in parallel). Nothing is accepted unless everything is: a proof may rest on a row of
+/// another function's summary, which only that function's check certifies. A second witness for
+/// one function is refused.
+pub fn check_module_by(
+    m: &Module,
+    ws: &[&FnWitness],
+    run: impl FnOnce(&(dyn Fn(usize) -> Verdict + Sync)) -> Vec<Verdict>,
+) -> Result<Vec<Checked>, Vec<Rejected>> {
+    let refuse = |f: FuncId, why: Reject| Rejected {
+        func: f,
+        path: m.func(f).map_or(String::new(), |x| format!("@{} {}", x.instance, x.path)),
+        inst: None,
+        edge: None,
+        why,
+    };
+    let mut funcs: Vec<FuncId> = ws.iter().map(|w| w.func).collect();
+    funcs.sort_unstable();
+    if let Some(pair) = funcs.windows(2).find(|p| p[0] == p[1]) {
+        return Err(vec![refuse(pair[0], Reject::Repeated)]);
+    }
+    let sums = Summaries::of(m, ws.iter().copied());
+    let set = next_set();
+    let one = |k: usize| check_in(m, ws[k], &sums, set);
+    let results = run(&one);
+    if results.len() != ws.len() {
+        return Err(ws.first().map(|w| refuse(w.func, Reject::Repeated)).into_iter().collect());
+    }
     let mut ok = Vec::with_capacity(ws.len());
     let mut bad = Vec::new();
-    for w in ws {
-        match check_func_in(m, w, &sums) {
-            Ok(c) => ok.push(c),
+    for (w, r) in ws.iter().zip(results) {
+        match r {
+            Ok(c) if c.func == w.func && c.set == set => ok.push(c),
+            // not the result of this witness's check
+            Ok(_) => bad.push(refuse(w.func, Reject::Repeated)),
             Err(r) => bad.push(r),
         }
     }
@@ -272,6 +322,9 @@ pub fn check_module(m: &Module, ws: &[FnWitness]) -> Result<Vec<Checked>, Vec<Re
 /// What [`remove`] did besides deleting checks.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Removal {
+    /// The rows were not one accepted set: two of them are for this function, or its row comes
+    /// from another check than the first row. Then nothing was changed.
+    pub refused: Option<FuncId>,
     /// (function, its unchecked entry) for every function some accepted call was retargeted to:
     /// a new function at the end of the module, or the function itself when every reference to
     /// it was such a call.
@@ -305,8 +358,9 @@ fn func_refs(b: &Body, mut f: impl FnMut(FuncId)) {
 }
 
 /// Deletes the accepted checks and gives the accepted calls their unchecked entries. `m` must be
-/// the module the rows were checked against, unchanged, and `checked` the result of one
-/// [`check_module`] (or of [`check_func_in`] on every witness with one [`Summaries`]).
+/// the module the rows were checked against, unchanged, and `checked` the rows of one check
+/// ([`check_func`], [`check_module`], [`check_module_by`]), at most one per function: anything
+/// else is refused and changes nothing ([`Removal::refused`]).
 ///
 /// - A `check.bounds` goes; a contract check's `cbr` becomes a `br` to its true side, its failure
 ///   call goes, and so does the failure block once nothing branches to it. An index that is not
@@ -314,21 +368,35 @@ fn func_refs(b: &Body, mut f: impl FnMut(FuncId)) {
 /// - An accepted call whose callee has an accepted entry is retargeted to the callee's unchecked
 ///   entry: the callee's body after its own removals, without the failure calls of its `requires`
 ///   checks. That body is a new function, with [`InstanceId::UNCHECKED_ENTRY`] appended to the
-///   instance id,
-///   unless the callee is an instance of a generic function without a link symbol and every
-///   operand of the module that names it is the callee of an accepted call: then the callee
-///   itself becomes it (nothing else can enter such an instance).
+///   instance id and no link symbol. The callee keeps its checks: `m` may be a part of the
+///   program, and what else enters the callee is not known.
 pub fn remove(m: &mut Module, checked: &[Checked]) -> Removal {
+    remove_in(m, checked, false)
+}
+
+/// [`remove`] for a module that is the whole program: every use of a function is an operand of
+/// one of its bodies. Then a callee that is an instance of a generic function without a link
+/// symbol, and that every operand naming it calls with an accepted call, becomes its own
+/// unchecked entry and no new function is made (nothing else can enter such an instance).
+pub fn remove_whole(m: &mut Module, checked: &[Checked]) -> Removal {
+    remove_in(m, checked, true)
+}
+
+fn remove_in(m: &mut Module, checked: &[Checked], whole: bool) -> Removal {
     let n = m.funcs.len();
+    let mut out = Removal::default();
+    let mut with_row = vec![false; n];
     let mut with_entry: Vec<Option<usize>> = vec![None; n];
     for (k, c) in checked.iter().enumerate() {
-        if c.has_entry()
-            && let Some(slot) = with_entry.get_mut(c.func.index())
-        {
-            *slot = Some(k);
+        let Some(seen) = with_row.get_mut(c.func.index()) else { continue };
+        if std::mem::replace(seen, true) || c.set != checked[0].set {
+            out.refused = Some(c.func);
+            return out;
+        }
+        if c.has_entry() {
+            with_entry[c.func.index()] = Some(k);
         }
     }
-    let mut out = Removal::default();
     // Per function with an entry: the operands naming it, and how many of them are the callee
     // of an accepted call.
     let mut refs = vec![0u32; n];
@@ -388,7 +456,8 @@ pub fn remove(m: &mut Module, checked: &[Checked]) -> Removal {
             continue;
         }
         let f = &m.funcs[g];
-        let itself = refs[g] == proved_refs[g] && !f.type_args.is_empty() && f.symbol.is_none();
+        let itself =
+            whole && refs[g] == proved_refs[g] && !f.type_args.is_empty() && f.symbol.is_none();
         let to = if itself {
             FuncId(g as u32)
         } else {
@@ -420,6 +489,9 @@ pub fn remove(m: &mut Module, checked: &[Checked]) -> Removal {
         let InstanceId(mut id) = f.instance;
         id.push(InstanceId::UNCHECKED_ENTRY);
         f.instance = InstanceId(id);
+        // The symbol of an exported function names its checked entry, which foreign callers
+        // enter; this one is named by its path and instance.
+        f.symbol = None;
         m.funcs.push(f);
     }
     for c in checked {

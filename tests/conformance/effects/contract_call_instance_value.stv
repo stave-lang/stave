@@ -1,0 +1,25 @@
+//~ CHECK-ONLY
+// An instance of a generic fn whose only direct call is proved keeps its `requires` check for
+// every other way in: made into a value of a `without(trap)` fn type it is E1403, and a call
+// through a plain fn value that holds it gives the caller `trap` (E1401).
+fn keep<T: Copy>(t: T, n: u32) -> T without(trap) requires(n > 0) {
+    return t;
+}
+
+fn instance() -> u32 without(trap) {
+    return keep(7u32, 2);
+}
+
+fn apply(f: fn(u32, u32) -> u32 without(trap), x: u32) -> u32 without(trap) {
+    return f(x, 0);
+}
+
+fn plain(f: fn(u32, u32) -> u32, x: u32) -> u32 without(trap) { //~ ERROR E1401
+    return f(x, 0);
+}
+
+fn main() {
+    let a = instance();
+    let c = apply(keep::<u32>, 5); //~ ERROR E1403
+    let d = plain(keep::<u32>, 6);
+}

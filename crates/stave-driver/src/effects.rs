@@ -126,7 +126,9 @@ pub fn node_ir(prog: &Program, tc: &Typeck, nodes: &[u32]) -> Result<NodeIrs, Fa
     let (r, _) = stave_sema::lower_graph_nodes(prog, tc, nodes);
     let mut gl = r.map_err(|es| build::lower_failure(&es))?;
     build::verified(&gl.module, Stage::Lower)?;
-    let removed = build::remove_proven_checks(&mut gl.module)?;
+    // The module is a part of the program: every function keeps its checked entry, so the entry
+    // effect read below does not depend on which callers were lowered with it.
+    let removed = build::remove_proven_checks(&mut gl.module, false)?;
     let (found, removal) = (&removed.found, &removed.removal);
     let m = &gl.module;
     // Per function: its entry instructions, which a call that proves its `requires` cannot trap
