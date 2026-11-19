@@ -265,6 +265,12 @@ impl Plan {
     }
 }
 
+/// Whether an edge of kind `k` is a direct call: the only calls a proof of the callee's
+/// `requires` can send past its checks.
+fn direct(k: EdgeKind) -> bool {
+    matches!(k, EdgeKind::Call | EdgeKind::Dispatch { .. })
+}
+
 /// The fn nodes whose bodies have a contract check (a checked `requires` or an `ensures`), and
 /// the nodes that call a fn with a checked `requires`: their checked IR decides which checks stay
 /// and which calls prove or always fail a `requires`, so their `trap` and the contract
@@ -287,7 +293,6 @@ pub fn contract_nodes(tc: &Typeck) -> Vec<u32> {
     (0..g.nodes.len() as u32)
         .filter(|&i| {
             let (requires, ensures) = per_node[i as usize];
-            let direct = |k: EdgeKind| matches!(k, EdgeKind::Call | EdgeKind::Dispatch { .. });
             let calls = || {
                 !matches!(g.nodes[i as usize].kind, NodeKind::Table { .. } | NodeKind::Glue { .. })
                     && g.succ(i).iter().any(|e| direct(e.kind) && per_node[e.to as usize].0)
@@ -335,12 +340,13 @@ impl EffectSets {
         Some(Op { kind: OpKind::Requires, span })
     }
 
-    /// The entry effect of `to` that the edge from `m` carries.
-    fn enters(&self, m: u32, to: u32) -> Effects {
-        if self.proved.binary_search(&(m, to)).is_ok() {
+    /// The entry effect of its target that `edge` from `m` carries: all of it, unless the edge
+    /// is a direct call and every such call in `m` proves the target's `requires`.
+    fn enters(&self, m: u32, edge: &crate::callgraph::Edge) -> Effects {
+        if direct(edge.kind) && self.proved.binary_search(&(m, edge.to)).is_ok() {
             return Effects::NONE;
         }
-        self.entry.get(to as usize).copied().unwrap_or(Effects::NONE)
+        self.entry.get(edge.to as usize).copied().unwrap_or(Effects::NONE)
     }
 
     /// The shortest call chain from `from` to a node that has effect `e` on its own: the edge
@@ -379,7 +385,7 @@ impl EffectSets {
                 }
                 let base = g.out_start[m as usize];
                 for (k, edge) in g.succ(m).iter().enumerate() {
-                    if !(strict && Effects(edge.deny).meets(e)) && self.enters(m, edge.to).meets(e) {
+                    if !(strict && Effects(edge.deny).meets(e)) && self.enters(m, edge).meets(e) {
                         let mut edges = path(&parent, m);
                         edges.push(base + k as u32);
                         return Some((edges, edge.to, true));
@@ -616,8 +622,9 @@ pub fn solve_with(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>, proved: &[
         .collect();
     let entry: Vec<Effects> =
         entry_at.iter().map(|s| if s.is_some() { Effects::TRAP } else { Effects::NONE }).collect();
-    let enters = |m: u32, to: u32| {
-        if proved.binary_search(&(m, to)).is_ok() { Effects::NONE } else { entry[to as usize] }
+    let enters = |m: u32, e: &crate::callgraph::Edge| {
+        let skips = direct(e.kind) && proved.binary_search(&(m, e.to)).is_ok();
+        if skips { Effects::NONE } else { entry[e.to as usize] }
     };
     // levels, callees first: an SCC's set from its members and the SCCs below
     let mut scc_set = vec![Effects::NONE; g.scc_count()];
@@ -636,7 +643,7 @@ pub fn solve_with(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>, proved: &[
                     for e in g.succ(m) {
                         let ts = g.scc_of[e.to as usize];
                         // the callee's entry effect belongs to this edge, also inside a cycle
-                        acc |= Effects(enters(m, e.to).0 & !e.deny);
+                        acc |= Effects(enters(m, e).0 & !e.deny);
                         if ts == s {
                             continue;
                         }
