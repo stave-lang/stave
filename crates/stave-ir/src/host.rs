@@ -272,10 +272,8 @@ impl Host for BufferHost {
             "cpu_init" => Ok(None),
             "thread_block" => Ok(Some(Val::S(self.thread_block))),
             "set_thread_block" => {
-                self.thread_block = args
-                    .first()
-                    .and_then(|v| v.bits())
-                    .ok_or("intrinsic.set_thread_block: operand 0")?;
+                self.thread_block =
+                    args.first().and_then(|v| v.bits()).ok_or("intrinsic.set_thread_block: operand 0")?;
                 Ok(None)
             }
             // one thread only: thread creation fails like an unsupported system call
