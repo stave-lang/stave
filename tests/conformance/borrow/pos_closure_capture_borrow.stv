@@ -1,0 +1,42 @@
+//~ STDOUT pos_closure_capture_borrow.stdout
+// What a closure may return next to its captures: a borrow of a capture it holds by `&`, a copy
+// of a captured `&`, its argument (while it changes a capture), a `&` copied out of a view it
+// changes through, a copy of a capture it changes.
+import std.io;
+
+view struct W { a: &u32, m: &mut u32 }
+
+fn main() -> i32 {
+    let a: u32 = 10;
+    let mut b: u32 = 20;
+    let mut n: u32 = 0;
+
+    let borrow = fn() -> &u32 { return &a; };
+    let r1: &u32 = borrow();
+    let s1: &u32 = borrow();
+
+    let held: &u32 = &a;
+    let same = fn() -> &u32 { return held; };
+    let r2: &u32 = same();
+
+    let count = fn(x: &mut u32) -> &mut u32 { n = n + 1; return x; };
+    let r3: &mut u32 = count(&mut b);
+    *r3 = *r3 + 1;
+    let s3: &mut u32 = count(&mut b);
+    *s3 = *s3 + 1;
+
+    let mut k: u32 = 0;
+    let w = W.{ a: &a, m: &mut k };
+    let bump = fn() -> &u32 { *w.m = *w.m + 1; return w.a; };
+    let r4: &u32 = bump();
+    let s4: &u32 = bump();
+    let v4: u32 = *r4 + *s4;
+
+    let mut c: u32 = 0;
+    let tick = fn() -> u32 { c = c + 1; return c; };
+    let v5: u32 = tick() + tick();
+
+    let v1: u32 = *r1 + *s1 + *r2;
+    io.print(f"{v1} {b} {v4} {v5} {n} {k}\n");
+    return 0;
+}

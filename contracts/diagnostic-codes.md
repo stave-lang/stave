@@ -104,7 +104,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0504 | move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference (`r.f`), an element `v[i]`, or a closure capture (captures are references) |
 | E0510 | returned reference or view not covered by the `from` clause; case `copy`: the value borrows the parameter itself (a field of the view it points to, or what a `&mut` in that view points to) and the clause names it `from copy` |
 | E0511 | retired: a missing `from` clause declares the empty origin set; a returned borrow of a parameter not named is E0510 |
-| E0512 | returned value borrows a local |
+| E0512 | returned value borrows a local; case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again) |
 | E0513 | write through `&mut View` with origins not contained in the target's; case `several`: the pointer may point to more than one view object and one of them may lack the origins (a pointer picked from several, or one held in a by-value view parameter, in a closure capture, or below the view a `&mut` parameter points to). Planned: for a `&mut` rooted at a parameter, the origins must be in that parameter's `from` set plus its own origins; fix "add `from x` to parameter `p`" |
 | E0514 | `from` on a parameter that is not `&mut V` (V a view) of a fn item or method (closure, `extern`, and `kernel` params take none). Planned |
 | E0515 | a parameter's `from` clause names the parameter itself. Planned |

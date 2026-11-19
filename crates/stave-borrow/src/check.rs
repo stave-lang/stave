@@ -12,7 +12,8 @@
 //! checked against the live loans whose places overlap it (E0501); reads and moves against the
 //! maybe-moved sites (E0502); writes and `&mut` borrows against binding and reference mutability
 //! (E0503); writes of a ref-like value through a dereference against the target's origins
-//! (E0513); returns against the `from` clause (E0510) and local borrows (E0512).
+//! (E0513); returns against the `from` clause (E0510), local borrows, and a closure's borrows of
+//! its `&mut` captures (E0512).
 
 use stave_diag::Span;
 
@@ -80,7 +81,8 @@ pub enum Finding {
     Moved { site: u32, place: Place, span: Span },
     /// E0503: an assignment or `&mut` borrow of an immutable place; `shared`: through `&`.
     Immutable { place: Place, span: Span, shared: bool, blame: LocalId },
-    /// E0512: a returned value borrows local storage (the loan).
+    /// E0512: a returned value borrows local storage, or a closure's returned value borrows a
+    /// capture the closure holds by `&mut` (the loan).
     Escape { span: Span, loan: LoanId },
     /// E0510: a returned value has an origin of param `param` not in the `from` clause (`from`:
     /// the clause, or the return type when `clause` is false); `copy`: the clause names the param
@@ -472,9 +474,12 @@ impl Cx<'_, '_> {
             if a < self.flow.atoms.nloans {
                 let l = self.flow.loan(a as LoanId);
                 let root = &body.locals[l.place.local as usize];
-                // a closure may return a borrow of a capture (the closure value holds its loan);
-                // its own params are locals like any other
-                if l.place.has_deref() || (from.is_none() && root.capture.is_some()) {
+                // A closure may return a borrow of a capture it holds by `&` (the closure value
+                // holds its loan, and no call of the closure changes the capture). Of a capture
+                // held by `&mut`, through a dereference too, it may not: the next call can write
+                // the capture or lend it again while this result lives. Its own params are
+                // locals like any other.
+                if !root.capture_mut && (l.place.has_deref() || (from.is_none() && root.capture.is_some())) {
                     continue;
                 }
                 if escape.is_none_or(|e| l.span.offset < self.flow.loan(e).span.offset) {
