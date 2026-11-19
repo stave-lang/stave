@@ -1,0 +1,47 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at bounds_const_cond.stv:6:15 in main.in_if (thread 0)"
+// A constant index out of range of an array always traps; the code that waits on its value
+// (the arms of an `if`, a loop body, the other side of `&&`) is unreachable.
+fn in_if(xs: &[u8; 16], i: u8) -> u8 {
+    if i >= xs[16] {
+        return 1;
+    }
+    return 0;
+}
+
+fn in_else(xs: &[u8; 16], i: u8) -> u8 {
+    if i >= xs[16] {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+fn in_while(xs: &[u8; 16], i: u8) -> u8 {
+    let mut n: u8 = i;
+    while n < xs[16] {
+        n = n + 1;
+    }
+    return n;
+}
+
+fn in_value_if(xs: &[u8; 16], i: u8) -> u8 {
+    let v: u8 = if i >= xs[16] then 1 else 0;
+    return v;
+}
+
+fn in_and(xs: &[u8; 16], i: u8) -> bool {
+    return xs[16] > i && i > 0;
+}
+
+fn main() -> i32 {
+    let a: [u8; 16] = [0; 16];
+    let mut n: u8 = in_if(&a, 3);
+    n = n + in_else(&a, 3);
+    n = n + in_while(&a, 3);
+    n = n + in_value_if(&a, 3);
+    if in_and(&a, 3) {
+        n = n + 1;
+    }
+    return n as i32;
+}

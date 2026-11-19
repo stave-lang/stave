@@ -311,7 +311,8 @@ impl<'a> FnCx<'a> {
     }
 
     fn finish_fn(&mut self) -> Option<stave_ir::Body> {
-        let b = std::mem::replace(&mut self.f.b, FuncBuilder::new(&[]));
+        let mut b = std::mem::replace(&mut self.f.b, FuncBuilder::new(&[]));
+        b.seal_unreached();
         match b.finish() {
             Ok(body) => {
                 let mut body = crate::lower_post::finalize(body);
