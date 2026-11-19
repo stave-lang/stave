@@ -55,8 +55,9 @@
 //!   `Pc(i)` is in `P` only as the origins of the value pointed to.
 //!
 //! An assignment's value must also lie in `contents(reach(P))` plus the `decl` sets of the
-//! params above (a pointer the rules know nothing about, a raw dereference first, takes only
-//! values without origins).
+//! params above, and a call's store needs an atom of `reach(P)` that one of the rules above
+//! applies to: a pointer the rules know nothing about (a raw dereference first, the result of a
+//! call `from` a shared anchor) takes only values without origins.
 //!
 //! After a call's store a loan's contents may hold origins that the locals holding the loan
 //! do not: a loan is live while a live local reaches it ([`Flow::live_loans`] closes under
@@ -423,6 +424,8 @@ impl<'b> Flow<'b> {
         let targets = self.reach(ptr);
         let mut allowed = self.contents_of(&targets);
         let mut object = false;
+        // whether an atom names a view object the pointer may point to
+        let mut placed = false;
         // the one param whose clause lacks origins, with them
         let mut want: Option<(u32, Bits)> = None;
         for a in targets.iter() {
@@ -430,6 +433,7 @@ impl<'b> Flow<'b> {
                 if !l.mutable || l.place.has_deref() || !self.is_ref_like(l.place.ty) {
                     continue;
                 }
+                placed = true;
                 let captured = body.locals[l.place.local as usize].capture.is_some();
                 if (!call || captured) && !val.is_subset(&self.contents[a]) {
                     object = true;
@@ -441,6 +445,7 @@ impl<'b> Flow<'b> {
                 if !through {
                     continue;
                 }
+                placed = true;
                 if !copy && !self.ref_param.contains(iu) {
                     object = true;
                     continue;
@@ -475,7 +480,11 @@ impl<'b> Flow<'b> {
         if let Some((param, missing)) = want {
             return Err(Misfit::Clause { param, add: self.clause_entries(&missing) });
         }
-        if !call && !val.is_subset(&allowed) {
+        // a pointer none of whose origins names a view object (a raw dereference first, a result
+        // `from` a shared anchor): nothing is grown for it, and nothing it points to is known to
+        // hold the value's origins
+        let unplaced = if call { !placed } else { !val.is_subset(&allowed) };
+        if unplaced {
             return Err(Misfit::Object);
         }
         Ok(())

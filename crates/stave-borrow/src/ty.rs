@@ -213,7 +213,10 @@ impl<'a> Tys<'a> {
     /// Whether a value of `t` can reach, through at least one reference, a `&mut` to a ref-like
     /// type: a pointer a store can go through that is not one of the value's own (unknown types
     /// and view-bounded generic params: yes). A fn value counts as its result, which carries the
-    /// fn value's origins.
+    /// fn value's origins. A raw pointer to a ref-like type, as a type argument or a field of a
+    /// view ADT, counts as a `&mut` to it and as a reference on the way: a view that reaches
+    /// another view object through a raw pointer hands out `&mut`s to it. The fields of other
+    /// ADTs are not looked at: what they point to is their own storage.
     pub fn holds_inner_mut(&mut self, t: TypeId) -> bool {
         self.reaches_mut(t, false)
     }
@@ -247,6 +250,19 @@ impl<'a> Tys<'a> {
         while let Some((x, below)) = stack.pop() {
             if self.is_unknown(x) || seen.len() > 4096 {
                 return true;
+            }
+            if let TypeKind::Ptr { inner, .. } = self.kind(x)
+                && self.ref_like(inner)
+            {
+                // unsafe code makes a `&mut` from it: it stands for one
+                if below {
+                    return true;
+                }
+                if !seen.contains(&(x, below)) {
+                    seen.push((x, below));
+                    stack.push((inner, true));
+                }
+                continue;
             }
             if !self.ref_like(x) || seen.contains(&(x, below)) {
                 continue;
