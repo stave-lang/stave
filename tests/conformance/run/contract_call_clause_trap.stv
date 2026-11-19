@@ -1,0 +1,20 @@
+//~ EXIT 101
+//~ STDOUT contract_call_clause_trap.stdout
+//~ STDERR-CONTAINS "panic: Overflow at contract_call_clause_trap.stv:10:30"
+// The `-` of a clause can trap before the clause is tested. A call proves the precondition only
+// with the difference in range: `f(5)` does and skips the checks; `f(0)` makes the clause itself
+// true but not its `-`, keeps the checked entry, and panics `Overflow` there. No compile error:
+// the call fails no clause.
+import std.io;
+
+fn f(x: u8) -> u8 requires(x - 1 < 10) {
+    return x;
+}
+
+fn main() -> i32 {
+    let a = f(5);
+    io.print(f"{a}\n");
+    let b = f(0);
+    io.print(f"not reached {b}\n");
+    return 0;
+}
