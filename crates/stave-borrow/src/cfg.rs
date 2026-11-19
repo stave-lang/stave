@@ -108,6 +108,16 @@ pub struct Operand {
     pub site: u32,
 }
 
+/// One entry of a parameter's `from` clause: a value with the origins of param (at a call:
+/// argument) `source` (`copy`: with the origins of the view it points to) may be stored into
+/// what `target` points to, or into a view object reached from there through `&mut` pointers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Store {
+    pub target: u32,
+    pub source: u32,
+    pub copy: bool,
+}
+
 #[derive(Clone, Debug)]
 pub enum Rvalue {
     Use(Operand),
@@ -122,12 +132,23 @@ pub enum Rvalue {
     Call {
         args: Vec<Operand>,
         flows: Flows,
+        /// What the callee may store through its arguments: the entries of its parameters'
+        /// `from` clauses whose target argument points to a ref-like type and whose source
+        /// argument is ref-like (a call through a fn value, a built-in, an operator: none).
+        stores: Vec<Store>,
         /// The token typeck keys the call by (the call graph's call token): a call's `(`, a
         /// method's name, a user operator, the `for` token of a `next` call.
         tok: u32,
     },
     /// Operators, casts, comparisons, built-ins with a non-ref result: no origins.
     Pure(Vec<Operand>),
+}
+
+impl Rvalue {
+    /// A call that stores nothing through its arguments.
+    fn call(args: Vec<Operand>, flows: Flows, tok: u32) -> Rvalue {
+        Rvalue::Call { args, flows, stores: Vec::new(), tok }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -239,6 +260,10 @@ pub struct Body {
     /// (place, span, the closure's span for a capture), kept as copies in the CFG.
     pub bad_moves: Vec<(Place, Span, Option<Span>)>,
     pub ret: RetCheck,
+    /// The `from` clauses of the fn's params (a nested body: none).
+    pub declared: Vec<Store>,
+    /// A closure or spawn body: its params and captures take no `from` clause.
+    pub is_nested: bool,
     /// Bodies of closures and spawn blocks inside this one.
     pub nested: Vec<Body>,
     /// The join local of each `scope` statement with the statement's span: a read of it is the
@@ -322,7 +347,8 @@ pub struct Builder<'a, 'b> {
     owned_elems: Option<LocalId>,
 }
 
-/// Builds the body of fn decl node `fn_node` (params in `params`, signature `from` list).
+/// Builds the body of fn decl node `fn_node` (params in `params`, signature `from` list, the
+/// params' `from` clauses).
 pub fn build_fn<'a>(
     icx: ItemCx<'a>,
     tb: &'a TypedBody,
@@ -330,6 +356,7 @@ pub fn build_fn<'a>(
     fn_node: u32,
     params: &[TypeId],
     ret: RetCheck,
+    declared: Vec<Store>,
 ) -> Body {
     let mut b = Builder::new(icx, tb, tys, None);
     let infos = {
@@ -338,6 +365,7 @@ pub fn build_fn<'a>(
     };
     b.infos = std::rc::Rc::new(infos);
     b.body.ret = ret;
+    b.body.declared = declared;
     b.fn_body(fn_node, params);
     b.finish()
 }
@@ -351,6 +379,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             move_sites: Vec::new(),
             bad_moves: Vec::new(),
             ret: RetCheck::None,
+            declared: Vec::new(),
+            is_nested: range.is_some(),
             nested: Vec::new(),
             joins: Vec::new(),
             unsupported: None,
@@ -882,9 +912,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 Some(o) => {
                     let user = self.tb.target(icx.a(op)).cloned();
                     match user {
-                        Some(Target::Op { .. }) => {
-                            Rvalue::Call { args: vec![o, r], flows: Flows::None, tok: icx.a(op) }
-                        }
+                        Some(Target::Op { .. }) => Rvalue::call(vec![o, r], Flows::None, icx.a(op)),
                         _ => Rvalue::Pure(vec![o, r]),
                     }
                 }
@@ -1090,7 +1118,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let (rv, _) = self.borrow(p.clone(), true, false, span, iter);
                 let Some(rop) = self.operand(rv, iter) else { return };
                 let opt_ty = self.option_of(*item_ty);
-                let call = Rvalue::Call { args: vec![rop], flows: flows.clone(), tok: icx.a(f) };
+                let call = Rvalue::call(vec![rop], flows.clone(), icx.a(f));
                 let res = self.put_temp(call, opt_ty, iter);
                 let V::P(rp) = res else { return };
                 let some = self.some_index();
@@ -1829,9 +1857,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             let v = self.expr(c);
             let Some(r) = self.operand(v, c) else { return V::Never };
             let rv = match self.tb.target(optok) {
-                Some(Target::Op { .. }) => {
-                    Rvalue::Call { args: vec![acc, r], flows: Flows::None, tok: optok }
-                }
+                Some(Target::Op { .. }) => Rvalue::call(vec![acc, r], Flows::None, optok),
                 _ => Rvalue::Pure(vec![acc, r]),
             };
             let V::P(p) = self.put_temp(rv, ty, n) else { return V::Never };
@@ -1932,7 +1958,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         let Some(op) = self.operand(v, c) else { return V::Never };
         let ty = self.nty(n);
         let rv = match self.tb.target(a) {
-            Some(Target::Op { .. }) => Rvalue::Call { args: vec![op], flows: Flows::None, tok: a },
+            Some(Target::Op { .. }) => Rvalue::call(vec![op], Flows::None, a),
             _ => Rvalue::Pure(vec![op]),
         };
         self.put_temp(rv, ty, n)
@@ -2312,6 +2338,29 @@ impl<'a, 'b> Builder<'a, 'b> {
         if self.tys.ref_like(ret) { f() } else { Flows::None }
     }
 
+    /// The stores of a direct call of `sig` with operands `ops` (the receiver first): the
+    /// entries of its params' `from` clauses that can carry an origin at this instance.
+    fn sig_stores(&mut self, sig: &stave_sema::sigs::FnSig, ops: &[Operand]) -> Vec<Store> {
+        let mut out = Vec::new();
+        for o in &sig.param_origins {
+            let (target, source) = (u32::from(o.target), u32::from(o.source));
+            let (Some(t), Some(s)) = (ops.get(target as usize), ops.get(source as usize)) else { continue };
+            if t.kind == OpKind::Const || s.kind == OpKind::Const {
+                continue;
+            }
+            let tt = t.place.ty;
+            let into_view = match self.tys.deref(tt) {
+                _ if self.tys.is_unknown(tt) => true,
+                Some((inner, _)) => self.tys.ref_like(inner),
+                None => false,
+            };
+            if into_view && self.tys.ref_like(s.place.ty) {
+                out.push(Store { target, source, copy: o.copy });
+            }
+        }
+        out
+    }
+
     fn call(&mut self, n: u32, cur: Cur, paren: u32, args: &[u32], last: bool) -> V {
         let icx = self.icx;
         let tgt = self.tb.target(paren).cloned();
@@ -2360,13 +2409,13 @@ impl<'a, 'b> Builder<'a, 'b> {
                     }
                     _ => Flows::None,
                 };
-                self.call_result(Rvalue::Call { args: ops, flows, tok: paren }, ret, n, span)
+                self.call_result(Rvalue::call(ops, flows, paren), ret, n, span)
             }
             Some(Target::SizeOf { .. }) => V::Const,
             _ => {
                 let Some(ops) = self.args(args) else { return V::Never };
                 let flows = self.flows_if(node_ty, || Flows::AllArgs);
-                self.call_result(Rvalue::Call { args: ops, flows, tok: paren }, node_ty, n, span)
+                self.call_result(Rvalue::call(ops, flows, paren), node_ty, n, span)
             }
         }
     }
@@ -2387,11 +2436,12 @@ impl<'a, 'b> Builder<'a, 'b> {
         let Some(ops) = self.args(args) else { return V::Never };
         let Some(sig) = sigs.fn_sig(decl) else {
             let flows = self.flows_if(node_ty, || Flows::AllArgs);
-            return self.call_result(Rvalue::Call { args: ops, flows, tok }, node_ty, n, span);
+            return self.call_result(Rvalue::call(ops, flows, tok), node_ty, n, span);
         };
         let ret = if last { node_ty } else { self.tys.subst(sig.ret, ga, self_ty) };
         let flows = self.sig_flows(ret, sig);
-        self.call_result(Rvalue::Call { args: ops, flows, tok }, ret, n, span)
+        let stores = self.sig_stores(sig, &ops);
+        self.call_result(Rvalue::Call { args: ops, flows, stores, tok }, ret, n, span)
     }
 
     fn call_result(&mut self, rv: Rvalue, ret: TypeId, n: u32, span: Span) -> V {
@@ -2465,11 +2515,11 @@ impl<'a, 'b> Builder<'a, 'b> {
         if let Some((t, res, a)) = act {
             self.push(StmtKind::Activate { local: t, reserved: res, active: a }, rspan, n);
         }
-        let flows = match sig {
-            Some(s) => self.sig_flows(ret, s),
-            None => self.flows_if(ret, || Flows::AllArgs),
+        let (flows, stores) = match sig {
+            Some(s) => (self.sig_flows(ret, s), self.sig_stores(s, &ops)),
+            None => (self.flows_if(ret, || Flows::AllArgs), Vec::new()),
         };
-        self.call_result(Rvalue::Call { args: ops, flows, tok: seg }, ret, n, span)
+        self.call_result(Rvalue::Call { args: ops, flows, stores, tok: seg }, ret, n, span)
     }
 }
 

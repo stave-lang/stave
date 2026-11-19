@@ -960,11 +960,15 @@ fix = { description = "return an owned value, or borrow from a parameter named i
 code = "E0513"
 severity = "error"
 area = "borrow"
-rule = "write through `&mut View` with origins not contained in the target's; case `several`: the pointer may point to more than one view object and one of them may lack the origins (a pointer picked from several, or one held in a by-value view parameter, in a closure capture, or below the view a `&mut` parameter points to)"
-holes = { place = "place" }
+rule = "store of a value into a view (an assignment through `&mut View`, or a call whose callee declares the store with a parameter `from` clause) with origins the view cannot take: through an assignment the target must have them already, and a view captured by a closure takes nothing new; case `param`: the view is the one a `&mut` parameter points to (or one reached from it) and the parameter's `from` clause does not name the origins; case `several`: the pointer may point to more than one view object and one of them may lack the origins (a pointer picked from several, or one held in a by-value view parameter, in a closure capture, or below the view a `&mut` parameter points to)"
+holes = { place = "place", param = "name", clause = "source" }
 message = "cannot write into `{place}`: the value borrows from origins `{place}` does not have"
 labels = [{ at = "primary", text = "write here" }]
 fix = { description = "write a value that borrows only from the origins of `{place}`, or add the origin to the `from` clause that created `{place}`" }
+
+[diag.cases.param]
+message = "cannot write into `{place}`: parameter `{param}` does not declare that it keeps a borrow of `{clause}`"
+fix = { description = "add `from {clause}` to parameter `{param}` (`+ {clause}` after a `from` it already has)" }
 
 [diag.cases.several]
 message = "cannot write into `{place}`: it may be one of several view objects, and not every one of them has the origins the value borrows from"

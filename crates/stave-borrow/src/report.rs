@@ -16,7 +16,7 @@ use stave_diag::{Diagnostic, Span};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
 use crate::cfg::{Body, LoanId, Place, Proj};
-use crate::check::{Finding, later_use};
+use crate::check::{Finding, Unfit, later_use};
 use crate::loans::Flow;
 use crate::ty::Tys;
 
@@ -232,9 +232,32 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                     None => out.extend(mk("E0504", None, &[("place", &text)], span, &[])),
                 }
             }
-            Finding::ViewWrite { place, span, several } => {
+            Finding::ViewWrite { place, span, why } => {
                 let text = place_text(body, tys, &place);
-                out.extend(mk("E0513", several.then_some("several"), &[("place", &text)], span, &[]));
+                let name = |p: u32| match body.locals.iter().position(|x| x.param == Some(p)) {
+                    Some(i) => local_name(body, tys, i as u32),
+                    None => "_".to_string(),
+                };
+                match why {
+                    Unfit::Origins => out.extend(mk("E0513", None, &[("place", &text)], span, &[])),
+                    Unfit::Several => {
+                        out.extend(mk("E0513", Some("several"), &[("place", &text)], span, &[]))
+                    }
+                    Unfit::Clause { param, add } => {
+                        // the clause as it is written: `x + copy y`
+                        let entries: Vec<String> = add
+                            .iter()
+                            .map(|&(q, copy)| if copy { format!("copy {}", name(q)) } else { name(q) })
+                            .collect();
+                        let (pname, clause) = (name(param), entries.join(" + "));
+                        let holes = [
+                            ("place", text.as_str()),
+                            ("param", pname.as_str()),
+                            ("clause", clause.as_str()),
+                        ];
+                        out.extend(mk("E0513", Some("param"), &holes, span, &[]));
+                    }
+                }
             }
         }
     }
@@ -271,6 +294,8 @@ mod tests {
             move_sites: Vec::new(),
             bad_moves: Vec::new(),
             ret: RetCheck::None,
+            declared: Vec::new(),
+            is_nested: false,
             nested: Vec::new(),
             joins: Vec::new(),
             unsupported: None,

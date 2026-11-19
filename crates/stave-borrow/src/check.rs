@@ -11,14 +11,16 @@
 //! **Access checks**: every access (read, write, move, drop, storage-dead, and the borrows) is
 //! checked against the live loans whose places overlap it (E0501); reads and moves against the
 //! maybe-moved sites (E0502); writes and `&mut` borrows against binding and reference mutability
-//! (E0503); writes of a ref-like value through a dereference against the target's origins
-//! (E0513); returns against the `from` clause (E0510) and local borrows (E0512).
+//! (E0503); stores of a ref-like value (an assignment through a dereference, a call whose
+//! callee has a `from` clause on a `&mut` param) against the view objects the pointer may point
+//! to (E0513, [`crate::loans`] **Stores**); returns against the `from` clause (E0510) and local
+//! borrows (E0512).
 
 use stave_diag::Span;
 
 use crate::bits::Bits;
 use crate::cfg::{Body, LoanId, LocalId, OpKind, Operand, Place, Proj, RetCheck, Rvalue, Stmt, StmtKind};
-use crate::loans::{Flow, State, for_each_op};
+use crate::loans::{Flow, Misfit, State, for_each_op};
 use crate::ty::DerefKind;
 
 /// The kind of an access.
@@ -89,9 +91,32 @@ pub enum Finding {
     /// E0504: a by-value use of a non-Copy place behind a dereference or an index, or of a
     /// capture (`capture`: the closure's span).
     MoveOut { place: Place, span: Span, capture: Option<Span> },
-    /// E0513: a ref-like value written through a dereference has origins the target lacks;
-    /// `several`: the objects the pointer may point to have them together, one of them may not.
-    ViewWrite { place: Place, span: Span, several: bool },
+    /// E0513: a ref-like value written through a dereference, or stored by a call through a
+    /// `&mut` argument, has origins a view object it may land in cannot take.
+    ViewWrite { place: Place, span: Span, why: Unfit },
+}
+
+/// Why a store is E0513.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unfit {
+    /// The target lacks the value's origins.
+    Origins,
+    /// The objects the pointer may point to have them together, one of them may not.
+    Several,
+    /// Only the `from` clause of param `param` lacks them: the entries `add` (param, `copy`)
+    /// declare the store.
+    Clause { param: u32, add: Vec<(u32, bool)> },
+}
+
+impl Unfit {
+    /// `together`: the value's origins are in the union of what the pointer's objects hold.
+    fn of(m: Misfit, together: bool) -> Unfit {
+        match m {
+            Misfit::Clause { param, add } => Unfit::Clause { param, add },
+            Misfit::Object if together => Unfit::Several,
+            Misfit::Object => Unfit::Origins,
+        }
+    }
 }
 
 /// One borrow-dump line of an access: node, kind, verdict code, reported loan's node.
@@ -414,30 +439,59 @@ impl Cx<'_, '_> {
                         });
                     }
                 }
-                // a write through a dereference, or into a closure's capture (a reference to an
-                // outer local whose origins the outer body fixed when it created the closure),
-                // may store only origins the target already has, whichever view object the
-                // pointer points to
+                // what the callee may store through its `&mut` arguments, per target argument
+                if let Rvalue::Call { args, stores, .. } = rv {
+                    let mut i = 0;
+                    while i < stores.len() {
+                        let target = stores[i].target;
+                        let mut ptr = None;
+                        let mut val = self.flow.empty();
+                        while i < stores.len() && stores[i].target == target {
+                            if let Some((p, v)) = self.flow.store_sets(st, args, &stores[i]) {
+                                val.union_with(&v);
+                                ptr = Some(p);
+                            }
+                            i += 1;
+                        }
+                        let (Some(ptr), Some(arg)) = (ptr, args.get(target as usize)) else { continue };
+                        if let Err(m) = self.flow.store_fits(&ptr, &val, None, true) {
+                            // a pointer held in a named local is written through; a temporary is
+                            // named by its expression
+                            let mut place = arg.place.clone();
+                            if !body.locals[place.local as usize].temp {
+                                place.proj.push(Proj::Deref(DerefKind::Mut));
+                            }
+                            let why = Unfit::of(m, val.is_subset(&self.flow.contents_of(&ptr)));
+                            self.findings.push(Finding::ViewWrite { place, span: s.span, why });
+                        }
+                    }
+                }
+                // a write through a dereference stores into the view objects the pointer may
+                // point to; a write into a closure's capture (a reference to an outer local
+                // whose origins the outer body fixed when it created the closure) may store only
+                // origins the capture already has
                 let capture = body.locals[dest.local as usize].capture.is_some();
                 if (dest.has_deref() || capture)
                     && self.flow.is_ref_like(dest.ty)
                     && !matches!(rv, Rvalue::Pure(_))
                 {
                     let (val, _) = self.flow.rv_origins(st, rv, dest.ty);
-                    let (target, ptr) = if dest.has_deref() {
-                        self.flow.place_origins(st, dest)
+                    let why = if dest.has_deref() {
+                        let (target, ptr) = self.flow.place_origins(st, dest);
+                        let ptr = ptr.unwrap_or_else(|| self.flow.empty());
+                        let direct =
+                            if dest.derefs() == 1 { body.locals[dest.local as usize].param } else { None };
+                        let fit = self.flow.store_fits(&ptr, &val, direct, false);
+                        fit.err().map(|m| Unfit::of(m, val.is_subset(&target)))
                     } else {
                         let mut t = self.flow.empty();
                         if let Some(p) = body.locals[dest.local as usize].param {
                             t.insert(self.flow.atoms.pb(p));
                         }
-                        (t, None)
+                        (!val.is_subset(&t)).then_some(Unfit::Origins)
                     };
-                    let several = val.is_subset(&target);
-                    let direct =
-                        if dest.derefs() == 1 { body.locals[dest.local as usize].param } else { None };
-                    if !several || ptr.is_some_and(|p| !self.flow.store_fits(&p, &val, direct)) {
-                        self.findings.push(Finding::ViewWrite { place: dest.clone(), span: s.span, several });
+                    if let Some(why) = why {
+                        self.findings.push(Finding::ViewWrite { place: dest.clone(), span: s.span, why });
                     }
                 }
             }
@@ -570,9 +624,7 @@ pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<Sp
         for (i, s) in stmts.iter().enumerate() {
             if i as u32 >= from {
                 stmt_uses(s, |l, span| {
-                    if flow.local_o(&st, l).contains(loan as usize)
-                        && best.is_none_or(|x| span.offset < x.offset)
-                    {
+                    if flow.holds(&st, l, loan) && best.is_none_or(|x| span.offset < x.offset) {
                         best = Some(span);
                     }
                 });

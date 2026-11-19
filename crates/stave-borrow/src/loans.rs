@@ -19,31 +19,50 @@
 //! (else a second borrow made through it would alias the first); a `&` can be copied out of its
 //! place, so nothing before it is needed.
 //!
-//! **Stores.** A ref-like value written through a dereference lands in one view object that no
-//! origin set is updated for, so every reader of that object must already expect the value's
-//! origins `S`. The pointer's origin set `P` names the objects it may point to
-//! ([`Flow::store_fits`]); the store is accepted iff `S` is empty or all of:
-//! - `S ⊆ contents(P)`;
-//! - for every `&mut` loan `L` in `P` of a ref-like place without a dereference: `S ⊆
-//!   contents(L)`. The borrowed local is read later with at least the set it had when `L` was
-//!   created (a whole assignment in between conflicts with `L`, a part assignment only adds),
-//!   and through `L` with `contents(L)`. A loan of a place behind a dereference needs no test:
-//!   the loans its pointer held are in `P` with it;
-//! - for `Pb(i)` in `P`: param `i` is a reference and `S ⊆ {Pc(i)}`. A reference points to one
-//!   object, and a value with origin `Pc(i)` was read from that object or from what it reaches,
-//!   which the caller's set for the object covers (a borrow carries the borrowed value's
-//!   origins). A by-value view or a capture may hold pointers to several objects of the caller
-//!   under the one atom, so nothing with origins is stored through them;
+//! **Stores.** A store puts a ref-like value with origins `S` into a view object behind a
+//! pointer with origins `P`: an assignment through a dereference, or a call whose callee has a
+//! `from` clause on a `&mut` param ([`Store`]: `P` is the target argument's set, `S` the union
+//! over the clause's entries of the source argument's set, or of its `contents` for `from
+//! copy`). The objects the pointer may point to or reach are named by `reach(P)`
+//! ([`Flow::reach`]: `P` closed under the contents of its loans), and each of them must end up
+//! with `S` in the sets its readers use ([`Flow::store_fits`]). `S` empty: nothing to do. Else,
+//! for every atom of `reach(P)`:
+//! - a `&mut` loan `L` of a ref-like place, at a call: `contents(L)` gains `S`, and so does the
+//!   set of the borrowed local when the place has no dereference, from the call on
+//!   ([`Flow::apply`]). The local is read later with that set, and through `L` with
+//!   `contents(L)`; no other loan of it is live while the `&mut` one is. A captured local of a
+//!   nested body belongs to the enclosing fn, which learns nothing from the closure: it is not
+//!   grown, and takes the store only if `S ⊆ contents(L)`;
+//! - the same loan, at an assignment: `S ⊆ contents(L)` is required (a place behind a
+//!   dereference: no test, the loans its pointer held are in `P` with it), and the borrowed
+//!   local's set gains `S`: `contents(L)` may hold what a call stored on another path;
+//! - `Pb(i)`, param `i` a reference whose type can be stored through ([`Tys::holds_mut`]; a
+//!   param of another type is in `P` only as the origins of a value): `S ⊆ decl(i) ∪ {Pc(i)}`,
+//!   with `decl(i)` the atoms the `from` clause of param `i` covers (`from q`: `Pb(q)` and
+//!   `Pc(q)`; `from copy q`: `Pc(q)`). The caller adds the declared origins to the object
+//!   (the rule above, applied to its call), and a value with origin `Pc(i)` was read from that
+//!   object or from what it reaches. A by-value view or a capture that can be stored through
+//!   may hold pointers to several objects of the caller under the one atom and takes no clause:
+//!   nothing with origins is stored through it;
 //! - if the type of param `i` holds a `&mut` to a ref-like type below a reference
-//!   ([`Tys::holds_inner_mut`]): `Pc(i)` is not in `P`, and with `Pb(i)` in `P` the place written
-//!   is `*i` itself, with no other dereference. A pointer found inside what a param reaches
-//!   points to a caller object whose own set the caller keeps: it may be smaller than the set of
-//!   the object it was read from. Such a pointer has `Pc(i)`, or `Pb(i)` alone when a call
-//!   returned it `from` an argument that was the param moved. Without such a `&mut` in the
-//!   type, `Pc(i)` is in `P` only as the origins of the value pointed to.
+//!   ([`Tys::holds_inner_mut`]): for `Pc(i)`, and for `Pb(i)` unless the place written is `*i`
+//!   itself with no other dereference (a call's argument never counts as that), `S ⊆ decl(i)`.
+//!   A pointer found inside what a param reaches points to a caller object whose own set the
+//!   caller keeps: it may be smaller than the set of the object it was read from, so `Pc(i)`
+//!   does not pass. Such a pointer has `Pc(i)`, or `Pb(i)` alone when a call returned it `from`
+//!   an argument that was the param moved. The caller grows every `&mut` loan in `reach` of its
+//!   argument, so a declared origin may land in any of them. Without such a `&mut` in the type,
+//!   `Pc(i)` is in `P` only as the origins of the value pointed to.
 //!
-//! The caller of a fn therefore updates nothing at a call: a callee stores into the object a
-//! `&mut` param points to only what that object already reaches.
+//! An assignment's value must also lie in `contents(reach(P))` plus the `decl` sets of the
+//! params above (a pointer the rules know nothing about, a raw dereference first, takes only
+//! values without origins).
+//!
+//! After a call's store a loan's contents may hold origins that the locals holding the loan
+//! do not: a loan is live while a live local reaches it ([`Flow::live_loans`] closes under
+//! [`Flow::reach`]), and a value read through a pointer gets the contents as they are at the
+//! fixpoint. A call through a fn value stores nothing: its params take no clause, so its body
+//! is held to the rules above with `decl` empty.
 //!
 //! **Fixpoint.** Forward dataflow in reverse postorder to a fixpoint (union at joins). The
 //! usual bound (loop depth + 1 rounds) holds for gen/kill problems; copies between locals
@@ -53,7 +72,7 @@
 use rustc_hash::FxHashMap;
 
 use crate::bits::Bits;
-use crate::cfg::{Body, LoanId, LocalId, OpKind, Operand, Place, Proj, Rvalue, StmtKind};
+use crate::cfg::{Body, LoanId, LocalId, OpKind, Operand, Place, Proj, Rvalue, StmtKind, Store};
 use crate::ty::{DerefKind, Flows, Tys};
 use stave_sema::types::TypeId;
 
@@ -105,6 +124,16 @@ impl State {
     }
 }
 
+/// Why a store is rejected ([`Flow::store_fits`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Misfit {
+    /// A view object the pointer may point to cannot take the value's origins.
+    Object,
+    /// Only what param `param` points to or reaches lacks them, and a `from` clause on it with
+    /// the entries `add` (param, `copy`) declares the store.
+    Clause { param: u32, add: Vec<(u32, bool)> },
+}
+
 /// The solved dataflow of one body.
 pub struct Flow<'b> {
     pub body: &'b Body,
@@ -121,6 +150,16 @@ pub struct Flow<'b> {
     /// Ref-like params that reach a `&mut` to a ref-like type through a reference: `Pc` may be
     /// a pointer a store goes through.
     pub deep_param: Bits,
+    /// Ref-like params that are or hold a `&mut` to a ref-like type: `Pb` may be a pointer a
+    /// store goes through.
+    pub store_param: Bits,
+    /// Params that take a `from` clause: `&mut` to a ref-like type, in a fn body.
+    pub clause_param: Bits,
+    /// Per param: the atoms its `from` clause covers.
+    pub decl: Vec<Bits>,
+    /// Whether a call's store added origins to a loan's contents: only then can a loan's
+    /// contents hold what the locals holding the loan do not.
+    pub grown: bool,
     /// Block entry states (`None`: unreachable).
     pub entry: Vec<Option<State>>,
     pub preds: Vec<Vec<u32>>,
@@ -156,6 +195,8 @@ impl<'b> Flow<'b> {
         }
         let mut ref_param = Bits::new(nparams);
         let mut deep_param = Bits::new(nparams);
+        let mut store_param = Bits::new(nparams);
+        let mut clause_param = Bits::new(nparams);
         for (i, l) in body.locals.iter().enumerate() {
             let Some(p) = l.param else { continue };
             if tracked[i] == u32::MAX || p as usize >= nparams {
@@ -167,6 +208,27 @@ impl<'b> Flow<'b> {
             if tys.holds_inner_mut(l.ty) {
                 deep_param.insert(p as usize);
             }
+            if tys.holds_mut(l.ty) {
+                store_param.insert(p as usize);
+            }
+            if !body.is_nested
+                && !tys.is_unknown(l.ty)
+                && let Some((inner, DerefKind::Mut)) = tys.deref(l.ty)
+                && tys.ref_like(inner)
+            {
+                clause_param.insert(p as usize);
+            }
+        }
+        let mut decl = vec![Bits::new(atoms.len()); nparams];
+        for s in &body.declared {
+            if s.target as usize >= nparams || s.source as usize >= nparams {
+                continue;
+            }
+            let d = &mut decl[s.target as usize];
+            if !s.copy {
+                d.insert(atoms.pb(s.source));
+            }
+            d.insert(atoms.pc(s.source));
         }
         for b in &body.blocks {
             for s in &b.stmts {
@@ -197,6 +259,10 @@ impl<'b> Flow<'b> {
             ref_like,
             ref_param,
             deep_param,
+            store_param,
+            clause_param,
+            decl,
+            grown: false,
             entry: vec![None; n],
             preds,
             rpo,
@@ -311,38 +377,172 @@ impl<'b> Flow<'b> {
         (cur, ptr)
     }
 
-    /// Whether every view object a pointer with origins `ptr` may point to already has the
-    /// origins `val` (module doc, **Stores**; `val ⊆ contents(ptr)` is the caller's test).
-    /// `direct`: the param whose own dereference is the only one of the place written.
-    pub fn store_fits(&self, ptr: &Bits, val: &Bits, direct: Option<u32>) -> bool {
-        if val.is_empty() {
-            return true;
+    /// `s` closed under the contents of its loans: the origins of everything a value with
+    /// origins `s` reaches.
+    pub fn reach(&self, s: &Bits) -> Bits {
+        let mut out = s.clone();
+        if !self.grown {
+            // every borrow carries the origins of the value it borrows: `s` is closed
+            return out;
         }
-        for a in ptr.iter() {
-            if let Some(l) = self.body.loans.get(a) {
-                if l.mutable
-                    && !l.place.has_deref()
-                    && self.is_ref_like(l.place.ty)
-                    && !val.is_subset(&self.contents[a])
-                {
-                    return false;
-                }
-            } else if let Some((i, copy)) = self.atoms.param(a) {
-                let deep = self.deep_param.contains(i as usize);
-                let fits = if copy {
-                    !deep
-                } else {
-                    let pc = self.atoms.pc(i);
-                    self.ref_param.contains(i as usize)
-                        && val.iter().all(|x| x == pc)
-                        && (!deep || direct == Some(i))
-                };
-                if !fits {
-                    return false;
+        let nloans = self.atoms.nloans;
+        let mut todo: Vec<usize> = s.iter().filter(|&a| a < nloans).collect();
+        while let Some(l) = todo.pop() {
+            for a in self.contents[l].iter() {
+                if out.insert(a) && a < nloans {
+                    todo.push(a);
                 }
             }
         }
-        true
+        out
+    }
+
+    /// The pointer and value origins of store `s` of a call with operands `args` (`None`: the
+    /// value has no origins).
+    pub fn store_sets(&self, st: &State, args: &[Operand], s: &Store) -> Option<(Bits, Bits)> {
+        let (t, q) = (args.get(s.target as usize)?, args.get(s.source as usize)?);
+        let mut val = self.op_origins(st, q);
+        if s.copy {
+            val = self.contents_of(&val);
+        }
+        if val.is_empty() {
+            return None;
+        }
+        Some((self.op_origins(st, t), val))
+    }
+
+    /// Whether a value with origins `val` may be stored through a pointer with origins `ptr`
+    /// (module doc, **Stores**). `direct`: the param whose own dereference is the only one of
+    /// the place an assignment writes. `call`: the store of a call, which grows the local
+    /// objects ([`Flow::apply`]); an assignment's value must be in them already.
+    pub fn store_fits(&self, ptr: &Bits, val: &Bits, direct: Option<u32>, call: bool) -> Result<(), Misfit> {
+        if val.is_empty() {
+            return Ok(());
+        }
+        let body = self.body;
+        let targets = self.reach(ptr);
+        let mut allowed = self.contents_of(&targets);
+        let mut object = false;
+        // the one param whose clause lacks origins, with them
+        let mut want: Option<(u32, Bits)> = None;
+        for a in targets.iter() {
+            if let Some(l) = body.loans.get(a) {
+                if !l.mutable || l.place.has_deref() || !self.is_ref_like(l.place.ty) {
+                    continue;
+                }
+                let captured = body.locals[l.place.local as usize].capture.is_some();
+                if (!call || captured) && !val.is_subset(&self.contents[a]) {
+                    object = true;
+                }
+            } else if let Some((i, copy)) = self.atoms.param(a) {
+                let iu = i as usize;
+                let deep = self.deep_param.contains(iu);
+                let through = if copy { deep } else { self.store_param.contains(iu) };
+                if !through {
+                    continue;
+                }
+                if !copy && !self.ref_param.contains(iu) {
+                    object = true;
+                    continue;
+                }
+                allowed.union_with(&self.decl[iu]);
+                let mut missing = val.clone();
+                missing.subtract(&self.decl[iu]);
+                if !copy && (!deep || direct == Some(i)) {
+                    missing.remove(self.atoms.pc(i));
+                }
+                if missing.is_empty() {
+                    continue;
+                }
+                let fixable = self.clause_param.contains(iu)
+                    && missing.iter().all(|m| self.atoms.param(m).is_some_and(|(q, _)| q != i));
+                want = match want.take() {
+                    Some((p, mut m)) if fixable && p == i => {
+                        m.union_with(&missing);
+                        Some((p, m))
+                    }
+                    None if fixable => Some((i, missing)),
+                    _ => {
+                        object = true;
+                        None
+                    }
+                };
+            }
+        }
+        if object {
+            return Err(Misfit::Object);
+        }
+        if let Some((param, missing)) = want {
+            return Err(Misfit::Clause { param, add: self.clause_entries(&missing) });
+        }
+        if !call && !val.is_subset(&allowed) {
+            return Err(Misfit::Object);
+        }
+        Ok(())
+    }
+
+    /// The `from` entries (param, `copy`) that cover the param atoms `missing`.
+    fn clause_entries(&self, missing: &Bits) -> Vec<(u32, bool)> {
+        let mut out: Vec<(u32, bool)> = Vec::new();
+        for m in missing.iter() {
+            let Some((q, copy)) = self.atoms.param(m) else { continue };
+            // `Pb(q)` comes before `Pc(q)`, and `from q` covers both
+            if out.last().is_some_and(|&(p, _)| p == q) {
+                continue;
+            }
+            out.push((q, copy && self.ref_param.contains(q as usize)));
+        }
+        out
+    }
+
+    /// The store of a call: a value with origins `val` through a pointer with origins `ptr`.
+    /// Every local view object the pointer may point to or reach gains `val` (module doc,
+    /// **Stores**); whether a loan's contents changed.
+    fn grow(&mut self, st: &mut State, ptr: &Bits, val: &Bits) -> bool {
+        let body = self.body;
+        let targets = self.reach(ptr);
+        let mut changed = false;
+        for a in targets.iter() {
+            let Some(l) = body.loans.get(a) else { continue };
+            if !l.mutable
+                || !self.is_ref_like(l.place.ty)
+                || body.locals[l.place.local as usize].capture.is_some()
+            {
+                continue;
+            }
+            if self.contents[a].union_with(val) {
+                changed = true;
+                self.grown = true;
+            }
+            if !l.place.has_deref()
+                && let Some(&t) = self.tracked.get(l.place.local as usize)
+                && t != u32::MAX
+            {
+                st.o[t as usize].union_with(val);
+            }
+        }
+        changed
+    }
+
+    /// An assignment of a value with origins `val` through the dereferences of `dest`: every
+    /// borrowed local it may land in has `val` from here on (module doc, **Stores**).
+    fn settle(&self, st: &mut State, dest: &Place, val: &Bits) {
+        let (_, Some(ptr)) = self.place_origins(st, dest) else { return };
+        for a in self.reach(&ptr).iter() {
+            let Some(l) = self.body.loans.get(a) else { continue };
+            if !l.mutable
+                || l.place.has_deref()
+                || !self.is_ref_like(l.place.ty)
+                || !val.is_subset(&self.contents[a])
+            {
+                continue;
+            }
+            if let Some(&t) = self.tracked.get(l.place.local as usize)
+                && t != u32::MAX
+            {
+                st.o[t as usize].union_with(val);
+            }
+        }
     }
 
     /// The origins of the pointers a borrow of `p` goes through (module doc, **Contents**): of
@@ -439,6 +639,13 @@ impl<'b> Flow<'b> {
             StmtKind::Assign { dest, rv, .. } => {
                 let (s, ch) = self.rv_origins(st, rv, dest.ty);
                 changed |= ch;
+                if let Rvalue::Call { args, stores, .. } = rv {
+                    for x in stores {
+                        if let Some((ptr, val)) = self.store_sets(st, args, x) {
+                            changed |= self.grow(st, &ptr, &val);
+                        }
+                    }
+                }
                 for_each_op(rv, |o| {
                     if o.kind == OpKind::Move {
                         st.moved.insert(o.site as usize);
@@ -446,12 +653,16 @@ impl<'b> Flow<'b> {
                 });
                 // re-initialized: moves of the place or below it are undone
                 self.reinit(st, dest);
-                if let Some(&t) = self.tracked.get(dest.local as usize)
+                if dest.has_deref() {
+                    if !s.is_empty() {
+                        self.settle(st, dest, &s);
+                    }
+                } else if let Some(&t) = self.tracked.get(dest.local as usize)
                     && t != u32::MAX
                 {
                     if dest.proj.is_empty() {
                         st.o[t as usize] = s;
-                    } else if !dest.has_deref() {
+                    } else {
                         st.o[t as usize].union_with(&s);
                     }
                 }
@@ -503,7 +714,8 @@ impl<'b> Flow<'b> {
         }
     }
 
-    /// The loans in the origin sets of the given live locals.
+    /// The loans the given live locals reach: those in their origin sets, and after a call's
+    /// store those in the contents of such loans.
     pub fn live_loans(&self, st: &State, live: &Bits) -> Bits {
         let mut out = self.empty();
         for t in live.iter() {
@@ -511,7 +723,13 @@ impl<'b> Flow<'b> {
                 out.union_with(o);
             }
         }
-        out
+        if self.grown { self.reach(&out) } else { out }
+    }
+
+    /// Whether local `l` reaches loan `loan` ([`Flow::live_loans`]).
+    pub fn holds(&self, st: &State, l: LocalId, loan: LoanId) -> bool {
+        let o = self.local_o(st, l);
+        o.contains(loan as usize) || (self.grown && self.reach(&o).contains(loan as usize))
     }
 
     pub fn loan(&self, l: LoanId) -> &crate::cfg::Loan {

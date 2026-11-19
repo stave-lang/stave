@@ -215,6 +215,20 @@ impl<'a> Tys<'a> {
     /// and view-bounded generic params: yes). A fn value counts as its result, which carries the
     /// fn value's origins.
     pub fn holds_inner_mut(&mut self, t: TypeId) -> bool {
+        self.reaches_mut(t, false)
+    }
+
+    /// Whether a value of `t` is, or holds at any depth, a `&mut` to a ref-like type: the only
+    /// pointers a ref-like value is stored through (unknown types and view-bounded generic
+    /// params: yes). A `&mut` to a ref-like object is made by borrowing it, by reborrowing
+    /// through another such `&mut`, or by copying one out of a value that holds it, so a value
+    /// of a type without one never leads to a place a store can reach.
+    pub fn holds_mut(&mut self, t: TypeId) -> bool {
+        self.reaches_mut(t, true)
+    }
+
+    /// `below`: whether `t` itself counts as found below a reference.
+    fn reaches_mut(&mut self, t: TypeId, below: bool) -> bool {
         if self.is_unknown(t) {
             return true;
         }
@@ -227,7 +241,7 @@ impl<'a> Tys<'a> {
         let sigs = self.sigs;
         let env = self.env;
         // (type, below a reference)
-        let mut stack = vec![(t, false)];
+        let mut stack = vec![(t, below)];
         let mut seen: Vec<(TypeId, bool)> = Vec::new();
         let mut kids = Vec::new();
         while let Some((x, below)) = stack.pop() {

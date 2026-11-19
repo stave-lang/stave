@@ -189,8 +189,13 @@ fn check_body(
     } else {
         cfg::RetCheck::None
     };
+    let declared: Vec<cfg::Store> = sig
+        .param_origins
+        .iter()
+        .map(|o| cfg::Store { target: u32::from(o.target), source: u32::from(o.source), copy: o.copy })
+        .collect();
     let t0 = Instant::now();
-    let body = cfg::build_fn(icx, tb, &mut tys, tb.node, &sig.params, ret);
+    let body = cfg::build_fn(icx, tb, &mut tys, tb.node, &sig.params, ret, declared);
     let mut one = One {
         diags: Vec::new(),
         dump: Vec::new(),
