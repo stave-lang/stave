@@ -35,12 +35,13 @@
 //!   stays (the local then borrows from itself), and so does `L` itself: a value made from
 //!   the pointer written through may point into the local (`q.cur = &q.n`; a callee given
 //!   `&mut b` as a source can split it and store one part through the other), and the local
-//!   is then borrowed for as long as it is used. The local is read later with that set, and through a
-//!   pointer with what the local's set says where it is read. A pointer that may point to
-//!   several locals grows each of them. A place behind a dereference is read with the sets of
-//!   the pointers it was borrowed through, which are in the pointer's set with it: nothing is
-//!   added for it. A captured local of a nested body belongs to the enclosing fn, which learns
-//!   nothing from the closure: it is not grown, and takes the store only if `S ⊆ contents(L)`;
+//!   is then borrowed for as long as it is used. The local is read later with that set, and
+//!   through a pointer with what the local's set says where it is read. A pointer that may
+//!   point to several locals grows each of them. A place behind a dereference is read with
+//!   the sets of the pointers it was borrowed through, which are in the pointer's set with
+//!   it: nothing is added for it. A captured local of a nested body belongs to the enclosing
+//!   fn, which learns nothing from the closure: it is not grown, and takes the store only if
+//!   `S ⊆ contents(L)`;
 //! - `Pb(i)`, param `i` a reference whose type can be stored through ([`Tys::holds_mut`]; a
 //!   param of another type is in `P` only as the origins of a value): `S ⊆ decl(i) ∪ {Pc(i)}`,
 //!   with `decl(i)` the atoms the `from` clause of param `i` covers (`from q`: `Pb(q)` and
