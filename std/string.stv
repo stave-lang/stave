@@ -9,6 +9,8 @@
 //   `io.print(f"n = {n}\n")` passes the temporary's `as_str()`; the temporary String lives to the
 //   end of the enclosing statement.
 
+import runtime.errtrace;
+import runtime.panic;
 import std.core;
 import std.mem;
 import std.vec;
@@ -44,9 +46,13 @@ impl String {
         return r;
     }
 
-    // Takes ownership of bytes if they are valid UTF-8, else gives them back.
+    // Takes ownership of bytes if they are valid UTF-8, else gives them back (the error trace
+    // restarts at the user site).
     pub fn from_utf8(bytes: vec.Vec<u8>) -> Result<String, vec.Vec<u8>> {
-        if !valid_utf8(bytes.as_slice()) { return Result.Err(bytes); }
+        if !valid_utf8(bytes.as_slice()) {
+            errtrace.restart(panic.user_site());
+            return Result.Err(bytes);
+        }
         return Result.Ok(String.{ buf: bytes });
     }
 

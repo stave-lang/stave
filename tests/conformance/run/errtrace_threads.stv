@@ -1,0 +1,47 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Unwrap at errtrace_threads.stv:45:15 in main.main (thread 0)\n  from errtrace_threads.stv:9:23 in main.fail\n  via errtrace_threads.stv:15:20 in main.step\n"
+// Error traces are per task: errors made and propagated in a `spawn` body and in both arms of
+// `thread.join` (one runs on this thread) leave main's trace as it was, on every target.
+import std.thread;
+
+fn fail(n: u32) -> Result<u32, u32> {
+    if n > 3 {
+        return Result.Err(n);
+    }
+    return Result.Ok(n);
+}
+
+fn step(n: u32) -> Result<u32, u32> {
+    let v = fail(n)?;
+    return Result.Ok(v);
+}
+
+fn other_fail(n: u32) -> Result<u32, u32> {
+    if n > 3 {
+        return Result.Err(n);
+    }
+    return Result.Ok(n);
+}
+
+fn other_step(n: u32) -> Result<u32, u32> {
+    let v = other_fail(n)?;
+    return Result.Ok(v);
+}
+
+fn settle(n: u32) -> u32 {
+    return match other_step(n) {
+        Result.Ok(v) => v,
+        Result.Err(e) => e,
+    };
+}
+
+fn main() -> i32 {
+    let r = step(9u32);
+    let mut s: u32 = 0;
+    scope {
+        spawn { s = settle(5u32); }
+    }
+    let (a, b) = thread.join(fn() -> u32 { return settle(6u32); }, fn() -> u32 { return settle(7u32); });
+    let v = r.unwrap();
+    return (v + s + a + b) as% i32;
+}

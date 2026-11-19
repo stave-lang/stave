@@ -12,6 +12,7 @@
 // bump offset is a Cell.
 
 import runtime.alloc;
+import runtime.errtrace;
 import runtime.panic;
 import std.cell;
 import std.core;
@@ -33,6 +34,12 @@ fn oom() -> never {
     panic.trap(panic.KIND_OUT_OF_MEMORY, panic.user_site());
 }
 
+// The error of a failed `try_` method: the error trace restarts at the user site.
+fn alloc_error() -> vec.AllocError {
+    errtrace.restart(panic.user_site());
+    return vec.AllocError.{};
+}
+
 impl Arena {
     // An arena of `capacity` bytes.
     pub fn new(capacity: usize) -> Arena {
@@ -42,7 +49,7 @@ impl Arena {
 
     pub fn try_new(capacity: usize) -> Result<Arena, vec.AllocError> {
         let p = alloc.try_alloc(capacity, BUF_ALIGN);
-        if (p as usize) == 0 { return Result.Err(vec.AllocError.{}); }
+        if (p as usize) == 0 { return Result.Err(alloc_error()); }
         return Result.Ok(Arena.{ base: p, cap: capacity, used: cell.Cell::<usize>.new(0) });
     }
 
@@ -64,7 +71,7 @@ impl Arena {
 
     pub fn try_alloc<T: Copy>(&self, v: T) -> Result<&mut T, vec.AllocError> from self {
         let p = self.take::<T>();
-        if (p as usize) == 0 { return Result.Err(vec.AllocError.{}); }
+        if (p as usize) == 0 { return Result.Err(alloc_error()); }
         unsafe("p is a fresh, aligned slot for one T inside the buffer") { p.write(v); }
         return Result.Ok(unsafe("p was just written; until reset, which needs &mut self, only this reference reaches it") &mut *p);
     }

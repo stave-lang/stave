@@ -3,7 +3,11 @@
 // Report: one line on fd 2, then exit_group(101):
 //     panic: <Kind> at <file>:<line>:<col> in <fn> (thread <n>)
 // `trap_msg` adds one more line holding the message (std.debug.assert); a failed contract
-// clause adds its source text the same way.
+// clause adds its source text the same way. `trap_err` (std's `Result.unwrap` of an `Err`) adds
+// the thread's error trace (runtime.errtrace), oldest first:
+//       from <file>:<line>:<col> in <fn>            the `Result.Err(..)` that restarted it, if any
+//       (<k> earlier via sites not kept)            when more than state.NRING were pushed
+//       via <file>:<line>:<col> in <fn>             one per kept `?`
 //
 // Compiler interface (runtime/README.md has the full contract):
 // - every trapping operation calls `trap(kind, site) -> never`: `kind` one of the KIND_* consts,
@@ -31,6 +35,7 @@ import runtime.os;
 import runtime.state;
 import runtime.config;
 import runtime.atomic;
+import runtime.errtrace;
 
 extern "stave-intrinsic" {
     // contracts/intrinsics.md "Runtime start and traps": addresses of compiler-emitted data and
@@ -266,6 +271,39 @@ pub fn trap_msg(kind: u32, site: u32, msg: &[u8]) -> never {
     l.byte(10);
     l.flush();
     os.exit_group(EXIT_PANIC);
+}
+
+// As `trap`, then the calling thread's error trace (header).
+pub fn trap_err(kind: u32, site: u32) -> never {
+    begin();
+    let mut l = Line.new();
+    head(&mut l, kind, site);
+    put_trace(&mut l);
+    l.flush();
+    os.exit_group(EXIT_PANIC);
+}
+
+fn put_trace(l: &mut Line) {
+    let t = errtrace.save();
+    if t.origin != SITE_NONE {
+        l.lit("  from ");
+        put_site(l, t.origin);
+        l.byte(10);
+    }
+    let cap = state.NRING as% u32;
+    let kept = if t.count > cap then cap else t.count;
+    if t.count > cap {
+        l.lit("  (");
+        l.dec((t.count -% cap) as u64);
+        l.lit(" earlier via sites not kept)\n");
+    }
+    let mut k = t.count -% kept;
+    while k != t.count {
+        l.lit("  via ");
+        put_site(l, t.ring[(k as usize) % state.NRING]);
+        l.byte(10);
+        k = k +% 1;
+    }
 }
 
 // A false `requires` clause: kind Contract at the user site (the caller's call), then the
