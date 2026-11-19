@@ -11,9 +11,13 @@
 // call (runtime.thread: clone3 + guard page + altstack; the stack sized from the compiler's
 // bound for the closure it runs) and joined before the call returns, so a body may borrow the
 // caller's stack.
+// Error traces (runtime.errtrace) are per task: each `join` arm and each body call starts with an
+// empty trace, and the caller's trace is the same after the call as before it, on every target
+// (the caller runs `a` and one par_for worker itself; the IR interpreter runs every body here).
 
 import runtime.thread as rt;
 import runtime.atomic;
+import runtime.errtrace;
 import std.core;
 import std.cell;
 import std.mem;
@@ -21,7 +25,10 @@ import std.mem;
 pub fn join<A: core.Send, B: core.Send>(a: fn() -> A, b: fn() -> B) -> (A, B) {
     let mut rb: Option<B> = Option.None;
     let h = unsafe("rb and b outlive the thread: it is joined below, before they die") rt.start(fn() { rb = Option.Some(b()); });
+    let saved = errtrace.save();
+    errtrace.clear();
     let ra = a();
+    errtrace.restore(&saved);
     unsafe("h came from start and is joined once") { rt.join(h); }
     return (ra, rb.unwrap());
 }
@@ -53,6 +60,7 @@ fn run(lo: usize, hi: usize, body: fn(usize)) {
             if i >= end { break; }
             let stop = if end - i < step then end else i + step;
             for k in (i as usize)..(stop as usize) {
+                errtrace.clear();
                 body(k);
             }
         }
@@ -61,7 +69,9 @@ fn run(lo: usize, hi: usize, body: fn(usize)) {
     for k in 1..w {
         unsafe("work's captures live until scope_join below") { rt.scope_spawn(&mut list, work); }
     }
+    let saved = errtrace.save();
     work();
+    errtrace.restore(&saved);
     rt.scope_join(&mut list);
 }
 

@@ -1,6 +1,14 @@
-// std.debug: assertions.
+// std.debug: assertions and the error trace.
+//
+// The error trace (runtime.errtrace) is per task: `Result.Err(..)` in user code restarts it at
+// the `Err` (the origin), std restarts it where it makes an error (at the user site), and each
+// `?` that passes an `Err` on adds a via site; the last 32 via sites are kept. `err_trace()`
+// copies this task's trace; `Result.unwrap` on an `Err` prints it under the panic line.
 
+import runtime.errtrace;
 import runtime.panic;
+import std.core;
+import std.fmt;
 import std.mem;
 
 // Panics `Assert` at the call (the user site the compiler stores before calling into std,
@@ -9,4 +17,129 @@ pub fn assert(cond: bool, msg: &str) {
     if !cond {
         panic.trap_msg(panic.KIND_ASSERT, panic.user_site(), mem.str_bytes(msg));
     }
+}
+
+// A place in the program's source: one row of the compiler's site table (program data, the same
+// in every build). A row the table lacks reads as file and fn `<unknown>`, line and col 0.
+pub struct Site {
+    row: u32,
+}
+
+impl core.Copy for Site {}
+
+impl Site {
+    // The file as diagnostics name it (`std/vec.stv` for a std site).
+    pub fn file(&self) -> &str {
+        return field_str(self.row, 0);
+    }
+
+    // 1-based.
+    pub fn line(&self) -> u32 {
+        return field_u32(self.row, 12);
+    }
+
+    // 1-based, in bytes.
+    pub fn col(&self) -> u32 {
+        return field_u32(self.row, 28);
+    }
+
+    // The enclosing fn's path (`main.parse`).
+    pub fn func(&self) -> &str {
+        return field_str(self.row, 16);
+    }
+}
+
+// Site-table row fields (runtime.panic header): a string is a u64 address at `off` and a u32
+// byte length at `off + 8`.
+fn field_str(site: u32, off: usize) -> &str {
+    let r = panic.site_row(site);
+    if r == 0 { return "<unknown>"; }
+    let parts: [usize; 2] = unsafe("a site-table row is read-only program data, 8-byte aligned") [*((r + off) as *const u64) as usize, *((r + off + 8) as *const u32) as usize];
+    return unsafe("the row's string is UTF-8 program data that lives as long as the program; a str reference is (data pointer, byte length)") *(&parts as *const [usize; 2] as *const &str);
+}
+
+fn field_u32(site: u32, off: usize) -> u32 {
+    let r = panic.site_row(site);
+    if r == 0 { return 0; }
+    return unsafe("a site-table row is read-only program data, 4-byte aligned") *((r + off) as *const u32);
+}
+
+// A copy of a task's error trace.
+pub struct ErrTrace {
+    origin: u32,
+    count: u32,
+    ring: [u32; 32],
+}
+
+impl core.Copy for ErrTrace {}
+
+impl ErrTrace {
+    // The `Result.Err(..)` (or std error) that started the trace; None for a task that has made
+    // no error yet.
+    pub fn origin(&self) -> Option<Site> {
+        return if self.origin == panic.SITE_NONE then Option.None else Option.Some(Site.{ row: self.origin });
+    }
+
+    // The via sites kept (at most 32).
+    pub fn len(&self) -> usize {
+        return if self.count > 32 then 32 else self.count as usize;
+    }
+
+    // The via sites pushed before the kept ones.
+    pub fn skipped(&self) -> u32 {
+        return if self.count > 32 then self.count - 32 else 0;
+    }
+
+    // Kept via site i, oldest first; panics `Bounds` at the caller if i >= len().
+    pub fn via(&self, i: usize) -> Site {
+        if i >= self.len() {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        let first = (self.count as usize) - self.len();
+        return Site.{ row: self.ring[(first + i) % 32] };
+    }
+}
+
+// The lines of the panic report: `  from <site>` if there is an origin, `  (<k> earlier via
+// sites not kept)` if any were dropped, then `  via <site>` per kept via site, each ending in a
+// newline; nothing for an empty trace.
+impl core.Display for ErrTrace {
+    fn fmt<W: core.Write>(&self, w: &mut W) {
+        match self.origin() {
+            Option.Some(s) => {
+                w.write_str("  from ");
+                write_site(w, s);
+                w.write_str("\n");
+            }
+            Option.None => {}
+        }
+        let k = self.skipped();
+        if k > 0 {
+            w.write_str("  (");
+            fmt.write_u64(w, k as u64);
+            w.write_str(" earlier via sites not kept)\n");
+        }
+        for i in 0..self.len() {
+            w.write_str("  via ");
+            write_site(w, self.via(i));
+            w.write_str("\n");
+        }
+    }
+}
+
+// "<file>:<line>:<col> in <fn>"
+fn write_site<W: core.Write>(w: &mut W, s: Site) {
+    w.write_str(s.file());
+    w.write_str(":");
+    fmt.write_u64(w, s.line() as u64);
+    w.write_str(":");
+    fmt.write_u64(w, s.col() as u64);
+    w.write_str(" in ");
+    w.write_str(s.func());
+}
+
+// This task's error trace (a copy: later errors do not change it).
+pub fn err_trace() -> ErrTrace {
+    let t = errtrace.save();
+    return ErrTrace.{ origin: t.origin, count: t.count, ring: t.ring };
 }

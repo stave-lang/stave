@@ -14,6 +14,7 @@
 // `try_push` gives its value back) and leave the Vec as it was; every other method that allocates panics `OutOfMemory`.
 
 import runtime.alloc;
+import runtime.errtrace;
 import runtime.panic;
 import std.core;
 import std.mem;
@@ -42,6 +43,12 @@ const USIZE_MAX: usize = 0xFFFF_FFFF_FFFF_FFFF;
 
 fn oom() -> never {
     panic.trap(panic.KIND_OUT_OF_MEMORY, panic.user_site());
+}
+
+// The error of a failed `try_` method: the error trace restarts at the user site.
+fn alloc_error() -> AllocError {
+    errtrace.restart(panic.user_site());
+    return AllocError.{};
 }
 
 impl<T> Vec<T> {
@@ -81,7 +88,7 @@ impl<T> Vec<T> {
     }
 
     pub fn try_reserve(&mut self, extra: usize) -> Result<(), AllocError> {
-        if extra > USIZE_MAX - self.len { return Result.Err(AllocError.{}); }
+        if extra > USIZE_MAX - self.len { return Result.Err(alloc_error()); }
         let need = self.len + extra;
         if need <= self.cap { return Result.Ok(()); }
         let mut c = if self.cap < 4 then 4 else self.cap *| 2;
@@ -92,10 +99,10 @@ impl<T> Vec<T> {
     fn try_grow_to(&mut self, new_cap: usize) -> Result<(), AllocError> {
         let size = mem.type_size::<T>();
         let al = mem.type_align::<T>();
-        if size != 0 && new_cap > USIZE_MAX / size { return Result.Err(AllocError.{}); }
+        if size != 0 && new_cap > USIZE_MAX / size { return Result.Err(alloc_error()); }
         let bytes = new_cap * size;
         let p = if self.cap == 0 then alloc.try_alloc(bytes, al) else unsafe("ptr holds cap * size bytes from alloc with this alignment") alloc.try_realloc(self.ptr as *mut u8, self.cap * size, al, bytes);
-        if (p as usize) == 0 { return Result.Err(AllocError.{}); }
+        if (p as usize) == 0 { return Result.Err(alloc_error()); }
         self.ptr = p as *mut T;
         self.cap = new_cap;
         return Result.Ok(());

@@ -522,6 +522,7 @@ impl crate::typeck::Ck<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IArch {
     X86,
+    A64,
     Both,
     Ptx,
 }
@@ -545,7 +546,9 @@ pub fn intrinsic(name: &str) -> Option<(IArch, Vec<TypeId>, IRet)> {
         | "signal_handler_addr"
         | "site_table"
         | "pc_table"
-        | "stack_table" => (IArch::Both, vec![], IRet::T(us)),
+        | "stack_table"
+        | "thread_block" => (IArch::Both, vec![], IRet::T(us)),
+        "set_thread_block" => (IArch::A64, vec![us], IRet::T(ids::UNIT)),
         "call_on_stack" => (IArch::Both, vec![us, us, us], IRet::T(us)),
         "cpu_init" => (IArch::Both, vec![], IRet::T(ids::UNIT)),
         "cpu_baseline" => (IArch::Both, vec![], IRet::T(ids::U64)),

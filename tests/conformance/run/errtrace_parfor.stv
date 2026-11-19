@@ -1,0 +1,38 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Unwrap at errtrace_parfor.stv:36:15 in main.main (thread 0)\n  from errtrace_parfor.stv:21:23 in main.mine\n  via errtrace_parfor.stv:27:20 in main.outer\n"
+// `par_for` bodies make and propagate errors of their own; this thread runs some of them, yet
+// its error trace afterwards is the one it had before the call.
+import std.thread;
+
+fn odd(i: usize) -> Result<usize, usize> {
+    if i % 2 == 1 {
+        return Result.Err(i);
+    }
+    return Result.Ok(i);
+}
+
+fn body_step(i: usize) -> Result<usize, usize> {
+    let v = odd(i)?;
+    return Result.Ok(v);
+}
+
+fn mine(n: u32) -> Result<u32, u32> {
+    if n > 0 {
+        return Result.Err(n);
+    }
+    return Result.Ok(n);
+}
+
+fn outer(n: u32) -> Result<u32, u32> {
+    let v = mine(n)?;
+    return Result.Ok(v);
+}
+
+fn main() -> i32 {
+    let r = outer(3u32);
+    thread.par_for(0, 64, fn(i: usize) {
+        let _ = body_step(i);
+    });
+    let v = r.unwrap();
+    return v as% i32;
+}

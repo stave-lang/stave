@@ -20,6 +20,7 @@
 // allocation failure. Send / Sync like `vec.Vec`: when T is.
 
 import runtime.alloc;
+import runtime.errtrace;
 import runtime.panic;
 import std.core;
 import std.mem;
@@ -38,6 +39,12 @@ const USIZE_MAX: usize = 0xFFFF_FFFF_FFFF_FFFF;
 
 fn oom() -> never {
     panic.trap(panic.KIND_OUT_OF_MEMORY, panic.user_site());
+}
+
+// The error of a failed `try_` method: the error trace restarts at the user site.
+fn alloc_error() -> vec.AllocError {
+    errtrace.restart(panic.user_site());
+    return vec.AllocError.{};
 }
 
 impl<T: core.Flat> Soa<T> {
@@ -76,7 +83,7 @@ impl<T: core.Flat> Soa<T> {
     }
 
     pub fn try_reserve(&mut self, extra: usize) -> Result<(), vec.AllocError> {
-        if extra > USIZE_MAX - self.len { return Result.Err(vec.AllocError.{}); }
+        if extra > USIZE_MAX - self.len { return Result.Err(alloc_error()); }
         let need = self.len + extra;
         if need <= self.cap { return Result.Ok(()); }
         let mut c = if self.cap < 4 then 4 else self.cap *| 2;
@@ -90,11 +97,11 @@ impl<T: core.Flat> Soa<T> {
         let row = soa_row_size::<T>();
         let al = mem.type_align::<T>();
         let mask = al - 1;
-        if want > USIZE_MAX - mask { return Result.Err(vec.AllocError.{}); }
+        if want > USIZE_MAX - mask { return Result.Err(alloc_error()); }
         let new_cap = (want + mask) & ~mask;
-        if new_cap > USIZE_MAX / row { return Result.Err(vec.AllocError.{}); }
+        if new_cap > USIZE_MAX / row { return Result.Err(alloc_error()); }
         let p = alloc.try_alloc(new_cap * row, al);
-        if (p as usize) == 0 { return Result.Err(vec.AllocError.{}); }
+        if (p as usize) == 0 { return Result.Err(alloc_error()); }
         let old = self.ptr as *const u8;
         for i in 0..self.len {
             unsafe("i < len <= cap: row i of the old buffer is initialized; the new one has new_cap > i rows") {

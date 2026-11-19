@@ -1,0 +1,31 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Unwrap at errtrace_chain.stv:29:26 in main.main (thread 0)\n  from errtrace_chain.stv:7:23 in main.digit\n  via errtrace_chain.stv:13:21 in main.parse\n  via errtrace_chain.stv:18:21 in main.load\n  via errtrace_chain.stv:23:20 in main.run\n"
+// An error made by `Result.Err(..)` and propagated by `?` through three fns: `Result.unwrap`
+// reports it with its error trace, the origin first, then one `via` line per `?`, oldest first.
+fn digit(c: u8) -> Result<u32, u8> {
+    if c < 48 || c > 57 {
+        return Result.Err(c);
+    }
+    return Result.Ok((c - 48) as u32);
+}
+
+fn parse(c: u8) -> Result<u32, u8> {
+    let d = digit(c)?;
+    return Result.Ok(d);
+}
+
+fn load(c: u8) -> Result<u32, u8> {
+    let v = parse(c)?;
+    return Result.Ok(v + 1);
+}
+
+fn run(c: u8) -> Result<u32, u8> {
+    let v = load(c)?;
+    return Result.Ok(v * 2);
+}
+
+fn main() -> i32 {
+    let ok = run(55u8).unwrap();
+    let bad = run(120u8).unwrap();
+    return (ok + bad) as% i32;
+}

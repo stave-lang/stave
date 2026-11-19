@@ -3120,12 +3120,14 @@ impl<'a> Ck<'a> {
         let ok = match arch {
             builtins::IArch::Both => true,
             builtins::IArch::X86 => self.prog.target.arch() == stave_target::Arch::X86_64,
+            builtins::IArch::A64 => self.prog.target.arch() == stave_target::Arch::Aarch64,
             builtins::IArch::Ptx => false,
         };
         if !ok {
             let path = self.prog.decl_path(decl);
             let f = match arch {
                 builtins::IArch::X86 => "x86_64",
+                builtins::IArch::A64 => "aarch64",
                 _ => "ptx",
             };
             let roles: Vec<(&str, Span)> =

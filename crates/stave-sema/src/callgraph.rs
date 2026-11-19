@@ -30,8 +30,9 @@
 //!   part (field, element) that needs dropping, as lowering's drop glue does. A recursive value's
 //!   drop is then a cycle through glue: [`CallGraph::is_drop_cycle`].
 //!
-//! Calls of runtime helpers lowering inserts are not edges (`set_user_site`, `scope_spawn` /
-//! `scope_join`, traps, CPU detection), nor is the backend's thread start stub calling
+//! Calls of runtime helpers lowering inserts are not edges (`set_user_site`, the error-trace
+//! hooks `runtime.errtrace.push` / `restart`, `scope_spawn` / `scope_join`, traps, CPU
+//! detection), nor is the backend's thread start stub calling
 //! `runtime.thread.entry`.
 //!
 //! **Tables.** A fn value is made by a fn item used as a value (coercion `FnItem`), a closure
