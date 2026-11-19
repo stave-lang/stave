@@ -120,11 +120,10 @@ fn a_proved_call_enters_past_the_checks() {
         .map(|&f| prove_func_in(&m, f, Some(&stated)).expect("a witness").witness)
         .collect();
     let s = &ws[0].summary;
-    assert_eq!(s.pre.iter().map(|p| p.row).collect::<Vec<_>>(), [Row {
-        a: Term::Zero,
-        b: Term::Param(0),
-        w: -1
-    }]);
+    assert_eq!(
+        s.pre.iter().map(|p| p.row).collect::<Vec<_>>(),
+        [Row { a: Term::Zero, b: Term::Param(0), w: -1 }]
+    );
     assert_eq!((s.entry.len(), s.pre[0].entry, s.safe.len(), s.post.len()), (1, 0, 0, 0));
     let calls = insts_with(body(&m, caller), Op::Call);
     assert_eq!(ws[1].calls.proved.iter().map(|c| c.inst).collect::<Vec<_>>(), [calls[0]]);

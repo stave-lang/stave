@@ -185,16 +185,16 @@ impl Cx<'_> {
         }
         let from = out.len();
         self.down(x, out);
-        self.to_zero(s, node, me, above, out);
+        self.bound_above(s, node, me, above, out);
         let mid = out.len();
-        self.from_zero(s, node, me, below, out);
+        self.bound_below(s, node, me, below, out);
         self.up(x, out);
         Some(Safe { inst: d, hi: span(from, mid), lo: span(mid, out.len()) })
     }
 
     /// Edges from parameter node `node` (summary term `me`) to zero that prove
     /// `node <= bound`.
-    fn to_zero(&self, s: &mut Summary, node: u32, me: Term, bound: i128, out: &mut Vec<Edge>) {
+    fn bound_above(&self, s: &mut Summary, node: u32, me: Term, bound: i128, out: &mut Vec<Edge>) {
         if node == ZERO {
             return;
         }
@@ -241,7 +241,7 @@ impl Cx<'_> {
 
     /// Edges from zero to parameter node `node` (summary term `me`) that prove
     /// `0 <= node + bound`.
-    fn from_zero(&self, s: &mut Summary, node: u32, me: Term, bound: i128, out: &mut Vec<Edge>) {
+    fn bound_below(&self, s: &mut Summary, node: u32, me: Term, bound: i128, out: &mut Vec<Edge>) {
         if node == ZERO {
             return;
         }

@@ -274,7 +274,7 @@ fn check_in(m: &Module, w: &FnWitness, sums: &Summaries<'_>, set: u64) -> Result
 /// all accepted, or every rejection.
 pub fn check_module(m: &Module, ws: &[FnWitness]) -> Result<Vec<Checked>, Vec<Rejected>> {
     let ws: Vec<&FnWitness> = ws.iter().collect();
-    check_module_by(m, &ws, |one| (0..ws.len()).map(|k| one(k)).collect())
+    check_module_by(m, &ws, |one| (0..ws.len()).map(one).collect())
 }
 
 /// [`check_module`] with the caller running the checks: `run` gets the check of witness `k` and
@@ -456,8 +456,7 @@ fn remove_in(m: &mut Module, checked: &[Checked], whole: bool) -> Removal {
             continue;
         }
         let f = &m.funcs[g];
-        let itself =
-            whole && refs[g] == proved_refs[g] && !f.type_args.is_empty() && f.symbol.is_none();
+        let itself = whole && refs[g] == proved_refs[g] && !f.type_args.is_empty() && f.symbol.is_none();
         let to = if itself {
             FuncId(g as u32)
         } else {

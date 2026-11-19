@@ -252,10 +252,8 @@ fn remove_checked(
     let witnesses: Vec<&FnWitness> = proved.iter().map(|p| &p.witness).collect();
     let checked = {
         let m: &Module = m;
-        check_module_by(m, &witnesses, |one| {
-            (0..witnesses.len()).into_par_iter().map(|k| one(k)).collect()
-        })
-        .map_err(|refused| internal(format!("bounds witness: {}", listed(&refused))))?
+        check_module_by(m, &witnesses, |one| (0..witnesses.len()).into_par_iter().map(one).collect())
+            .map_err(|refused| internal(format!("bounds witness: {}", listed(&refused))))?
     };
     prof::mark("witness-check");
     let found: Vec<Finding> = proved.iter().flat_map(|p| findings(m, p)).collect();
