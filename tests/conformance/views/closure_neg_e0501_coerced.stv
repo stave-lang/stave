@@ -1,0 +1,27 @@
+//~ CHECK-ONLY
+// A closure keeps its captures borrowed when its fn type changes: a deny clause added at the
+// literal, a deny clause dropped at a later use.
+fn widened() -> u32 {
+    let zero: u32 = 0;
+    let mut f: fn() -> u32 without(alloc) = fn() -> u32 { return zero; };
+    {
+        let x: u32 = 7;
+        f = fn() -> u32 { return x; };
+    } //~ ERROR E0501
+    return f();
+}
+
+fn narrowed() -> u32 {
+    let zero: u32 = 0;
+    let mut g: fn() -> u32 = fn() -> u32 { return zero; };
+    {
+        let x: u32 = 7;
+        let f: fn() -> u32 without(alloc) = fn() -> u32 { return x; };
+        g = f;
+    } //~ ERROR E0501
+    return g();
+}
+
+fn main() -> i32 {
+    return (widened() + narrowed()) as% i32;
+}
