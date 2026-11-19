@@ -8,6 +8,8 @@
 //! - [`verify`]: structure, dominance, block params, terminators, op typing.
 //! - [`interp`]: the scalar reference interpreter (oracle) over [`mem`] with a pluggable [`host`];
 //!   [`memcheck`]: its checking mode (memory errors as an outcome).
+//! - [`borrowtrack`]: the dynamic borrow model of contracts/borrow-model.md as a state machine
+//!   over allocation ids and byte offsets.
 //! - [`print_checked`]: the canonical checked-IR text of contracts/checked-ir.md.
 //! - [`simd`]: vector and mask ops ([`VecOp`]) and their lane semantics.
 //! - [`arith`]: scalar op and cast semantics; [`layout`]: memory layout of IR types.
@@ -18,6 +20,7 @@
 //! - [`link`]: text order and symbol names of a module's functions and statics (both backends).
 
 pub mod arith;
+pub mod borrowtrack;
 pub mod bounds;
 pub mod build;
 pub mod divmagic;
