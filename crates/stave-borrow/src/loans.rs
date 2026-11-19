@@ -54,6 +54,13 @@
 //!   argument, so a declared origin may land in any of them. Without such a `&mut` in the type,
 //!   `Pc(i)` is in `P` only as the origins of the value pointed to.
 //!
+//! In the two param rules `S` is taken without its passive loans ([`Flow::store_fits`]): a `&`
+//! loan of a place reached last through a `&` (`&xs[a..b]`, `&other.f` with `xs`, `other` of
+//! `&` type) blocks no access of the body, and what it borrows from is the origin set of that
+//! `&` pointer, which is in `S` with it and is held to the rule. A borrow through a `&mut`
+//! stays a loan the caller cannot account for: the body could go on using the `&mut` beside
+//! the stored reference.
+//!
 //! An assignment's value must also lie in `contents(reach(P))` plus the `decl` sets of the
 //! params above, and a call's store needs an atom of `reach(P)` that one of the rules above
 //! applies to: a pointer the rules know nothing about (a raw dereference first, the result of a
@@ -422,6 +429,12 @@ impl<'b> Flow<'b> {
         }
         let body = self.body;
         let targets = self.reach(ptr);
+        // what a caller's object must account for: the passive loans keep nothing in this body
+        // from changing, and what they borrow from is in the value's set beside them
+        let mut held = val.clone();
+        for m in val.iter().filter(|&m| self.passive(m)) {
+            held.remove(m);
+        }
         let mut allowed = self.contents_of(&targets);
         let mut object = false;
         // whether an atom names a view object the pointer may point to
@@ -451,7 +464,7 @@ impl<'b> Flow<'b> {
                     continue;
                 }
                 allowed.union_with(&self.decl[iu]);
-                let mut missing = val.clone();
+                let mut missing = held.clone();
                 missing.subtract(&self.decl[iu]);
                 if !copy && (!deep || direct == Some(i)) {
                     missing.remove(self.atoms.pc(i));
@@ -483,11 +496,29 @@ impl<'b> Flow<'b> {
         // a pointer none of whose origins names a view object (a raw dereference first, a result
         // `from` a shared anchor): nothing is grown for it, and nothing it points to is known to
         // hold the value's origins
-        let unplaced = if call { !placed } else { !val.is_subset(&allowed) };
+        let unplaced = if call { !placed } else { !held.is_subset(&allowed) };
         if unplaced {
             return Err(Misfit::Object);
         }
         Ok(())
+    }
+
+    /// Whether loan `a` is passive: a `&` loan of a place whose last dereference is of a `&`,
+    /// with no raw dereference. Nothing is written through a `&`, so the loan conflicts with no
+    /// access the body can make; the value it is in borrows what that `&` pointer borrows, and
+    /// the pointer's origins are in the value's set with the loan (module doc, **Contents**).
+    fn passive(&self, a: usize) -> bool {
+        self.body.loans.get(a).is_some_and(|l| {
+            let mut last = None;
+            for p in &l.place.proj {
+                match p {
+                    Proj::Deref(DerefKind::Raw) => return false,
+                    Proj::Deref(k) => last = Some(*k),
+                    _ => {}
+                }
+            }
+            !l.mutable && !l.reserved && last == Some(DerefKind::Shared)
+        })
     }
 
     /// The `from` entries (param, `copy`) that cover the param atoms `missing`.

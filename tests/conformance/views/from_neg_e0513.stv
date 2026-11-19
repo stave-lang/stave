@@ -61,3 +61,21 @@ fn below_ok(t: &mut Twin from x, x: &u32) {
     t.out.take(x);
     t.spare = x;
 }
+
+// A borrow made through a `&mut` parameter is not that parameter's own borrow: the fn could go
+// on writing through the parameter beside the stored reference. The `&mut` itself moves in.
+view struct Window { items: &[u32], first: &u32 }
+
+fn through_mut(w: &mut Window from xs, xs: &mut [u32]) {
+    w.first = &xs[0]; //~ ERROR E0513
+}
+
+view struct Link { to: &mut Pick }
+
+fn set_link(l: &mut Link from q, q: &mut Pick) {
+    l.to = q;
+}
+
+fn forward(l: &mut Link from q, q: &mut Pick) {
+    set_link(l, q); //~ ERROR E0513
+}
