@@ -13,7 +13,8 @@
 //! `match`, `&&`/`||`, value `if`, `?`, `break`/`continue`/`return`, and calls to `-> never`
 //! fns. Evaluation order is the lowering's (stave-sema `lower_*`): left to right, the receiver
 //! first, a call's arguments before the call. Temporaries with drop glue die at the end of their
-//! statement (as lowered); others live to the end of the fn.
+//! statement (as lowered); others live until their expression is evaluated again (it writes the
+//! temporary's one slot) or the fn returns.
 //!
 //! Closures and `spawn` blocks are built as nested bodies ([`Body::nested`]) whose captured
 //! locals are params; the closure value (or the `scope`'s join local, which accumulates every
