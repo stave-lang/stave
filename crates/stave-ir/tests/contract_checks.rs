@@ -74,6 +74,8 @@ fn witness(
         removed: Vec::new(),
         refuted: Vec::new(),
         edges: Vec::new(),
+        summary: Default::default(),
+        calls: Default::default(),
     };
     let span = |w: &mut FnWitness, es: &[Edge]| {
         let s = Span { start: w.edges.len() as u32, len: es.len() as u32 };

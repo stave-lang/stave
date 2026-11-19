@@ -1,0 +1,55 @@
+//~ EXIT 101
+//~ STDOUT contract_facts_scope.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_facts_scope.stv:41:16 in main.stepped (thread 0)\nrequires(i < xs.len())\n"
+// What a call states holds of the values it was given and returned, after it returned: in a loop
+// it is new each time round, and a variable assigned again is another value. `moved` keeps its
+// bounds check, `stepped` its `requires` check.
+import std.io;
+
+fn small(x: u32) -> u32 ensures(result < 4) {
+    if x < 4 {
+        return x;
+    }
+    return 3;
+}
+
+fn in_range(xs: &[u32], i: usize) -> u32 requires(i < xs.len()) {
+    return xs[i];
+}
+
+fn sum(xs: &[u32], n: usize) -> u32 {
+    let mut s: u32 = 0;
+    let mut i: usize = 0;
+    while i < n {
+        s = s +% in_range(xs, i);
+        s = s +% xs[i];
+        i = i + 1;
+    }
+    return s;
+}
+
+fn moved(a: &[u32; 4], x: u32) -> u32 {
+    let mut i = small(x);
+    i = i + 3;
+    return a[i as usize];
+}
+
+fn stepped(xs: &[u32], k: usize) -> u32 {
+    let mut i = k;
+    if i < xs.len() {
+        i = i + 1;
+        return in_range(xs, i);
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    let v: [u32; 4] = [1, 2, 3, 4];
+    let a = sum(&v, 4);
+    let b = moved(&v, 0);
+    let c = stepped(&v, 2);
+    io.print(f"{a} {b} {c}\n");
+    let d = stepped(&v, 3);
+    io.print(f"not reached {d}\n");
+    return 0;
+}

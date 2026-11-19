@@ -1423,6 +1423,7 @@ fn empty_body() -> &'static TypedBody {
         implicit: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
+        valued: Vec::new(),
         has_error: true,
         emulated: Vec::new(),
         contracts: None,

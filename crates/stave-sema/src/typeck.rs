@@ -174,6 +174,12 @@ pub struct TypedBody {
     /// ([`crate::effects`], E1403): (the closure's `fn` token or the token of the fn item's value
     /// target, the effects that must be absent, the coerced node), sorted by token.
     pub denied: Vec<(u32, u8, u32)>,
+    /// Fn items used as values whose fn type, where the value is made, has a deny clause (the
+    /// item's own, or that of the fn type it is coerced to there): (the token of the value target,
+    /// that clause, the node), sorted by token. A value of such a type is called without proving
+    /// the item's `requires`, so the effect pass checks the item's entry effect against the clause
+    /// ([`crate::effects`], E1403).
+    pub valued: Vec<(u32, u8, u32)>,
     pub has_error: bool,
     /// Class U ops inside `emulate { }`, in source order ([`crate::gates`]).
     pub emulated: Vec<crate::gates::Emulated>,
@@ -499,6 +505,7 @@ fn empty_body(j: Job) -> TypedBody {
         implicit: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
+        valued: Vec::new(),
         has_error: true,
         emulated: Vec::new(),
         contracts: None,
@@ -691,6 +698,7 @@ pub(crate) struct Ck<'a> {
     pub implicit: Vec<(u32, Target)>,
     pub drops: Vec<(u32, TypeId)>,
     pub denied: Vec<(u32, u8, u32)>,
+    pub valued: Vec<(u32, u8, u32)>,
     pub depth: u32,
     /// E0005 case `expr` was reported for this body.
     pub depth_reported: bool,
@@ -761,6 +769,7 @@ fn check_body(
         implicit: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
+        valued: Vec::new(),
         depth: 0,
         depth_reported: false,
         diverges: false,
@@ -1128,6 +1137,9 @@ impl<'a> Ck<'a> {
                     return want;
                 }
                 if let Some(c) = self.coercible(t, want) {
+                    if c == Coercion::FnItem {
+                        self.fn_value_as(n, want);
+                    }
                     self.coerce_note(n, c);
                     return want;
                 }
@@ -1136,6 +1148,7 @@ impl<'a> Ck<'a> {
                 }
                 if let Some(widened) = self.deny_widened(t, want) {
                     if let Some(tok) = self.made_fn_value(n) {
+                        self.fn_value_as(n, want);
                         self.denied.push((tok, widened, n));
                         self.coerce_note(n, Coercion::FnItem);
                         return want;
@@ -1177,6 +1190,18 @@ impl<'a> Ck<'a> {
         let widened = d2 & !d1;
         (p1 == p2 && r1 == r2 && (f1 & !(f2 | self.proven_features())) == 0 && widened != 0)
             .then_some(widened)
+    }
+
+    /// A fn item made into a value by node `n` is coerced to fn type `want` right there: its
+    /// value has the deny clause of `want` from then on ([`TypedBody::valued`]).
+    fn fn_value_as(&mut self, n: u32, want: TypeId) {
+        let (Some(tok), TypeKind::Fn { deny, .. }) = (self.made_fn_value(n), self.tys.kind(want)) else {
+            return;
+        };
+        let deny = *deny;
+        for v in self.valued.iter_mut().filter(|v| v.0 == tok) {
+            v.1 = deny;
+        }
     }
 
     /// The token a fn value made by node `n` is known by: a closure literal's `fn` token, or the
@@ -1495,6 +1520,9 @@ impl<'a> Ck<'a> {
         self.coercions.dedup();
         self.denied.sort();
         self.denied.dedup();
+        self.valued.retain(|v| v.1 != 0);
+        self.valued.sort();
+        self.valued.dedup();
         let has_error =
             self.has_error || self.diags.iter().any(|d| d.severity() == stave_diag::Severity::Error);
         let body = TypedBody {
@@ -1510,6 +1538,7 @@ impl<'a> Ck<'a> {
             implicit: std::mem::take(&mut self.implicit),
             drops: std::mem::take(&mut self.drops),
             denied: std::mem::take(&mut self.denied),
+            valued: std::mem::take(&mut self.valued),
             has_error,
             emulated: std::mem::take(&mut self.gates.emulated),
             contracts: self.contracts.take(),

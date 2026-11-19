@@ -1762,8 +1762,13 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let span = self.span(n);
                 self.borrow(p, false, false, span, n).0
             }
-            Coercion::FnItem => V::Const,
-            Coercion::NeverToAny | Coercion::ArrayToSlice | Coercion::Unalign | Coercion::StringToStr => v,
+            // a fn item is already a constant; a closure or fn value whose type changes keeps
+            // what it borrows
+            Coercion::FnItem
+            | Coercion::NeverToAny
+            | Coercion::ArrayToSlice
+            | Coercion::Unalign
+            | Coercion::StringToStr => v,
         }
     }
 
@@ -1787,8 +1792,14 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let kids = self.icx.kids_vec(n);
                 let Some(&first) = kids.first() else { return V::Const };
                 let v = self.expr(first);
-                let Some(op) = self.read(v, first) else { return V::Never };
                 let ty = self.nty(n);
+                // a cast whose result can hold borrows or is not Copy is a use of the operand:
+                // the result borrows what the operand borrows, and the operand moves
+                if self.tys.ref_like(ty) || !self.tys.is_copy(ty) {
+                    let Some(op) = self.operand(v, first) else { return V::Never };
+                    return self.put_temp(Rvalue::Use(op), ty, n);
+                }
+                let Some(op) = self.read(v, first) else { return V::Never };
                 self.put_temp(Rvalue::Pure(vec![op]), ty, n)
             }
             NodeKind::Unary => self.unary(n),

@@ -1,0 +1,31 @@
+//~ EXIT 101
+//~ STDOUT contract_call_wrap_cast.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_call_wrap_cast.stv:21:12 in main.wrapped (thread 0)\nrequires(x < 10)\n"
+// A wrapping cast between an unsigned and a signed type is no equality: `y < 10` on a `u32`
+// says nothing of `y as% i32` to the prover, so both calls keep the checked entry. A large `u32`
+// that wraps below 10 passes the check, a small one above it fails.
+import std.io;
+
+fn below(x: i32) -> i32 requires(x < 10) {
+    return x;
+}
+
+fn guarded(y: u32) -> i32 {
+    if y < 10 {
+        return below(y as% i32);
+    }
+    return 0;
+}
+
+fn wrapped(y: u32) -> i32 {
+    return below(y as% i32);
+}
+
+fn main() -> i32 {
+    let a = guarded(7);
+    let b = wrapped(4294967295);
+    io.print(f"{a} {b}\n");
+    let c = wrapped(20);
+    io.print(f"not reached {c}\n");
+    return 0;
+}

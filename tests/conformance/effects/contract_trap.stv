@@ -1,8 +1,9 @@
 //~ CHECK-ONLY
-// A `requires` / `ensures` check the compiler cannot prove stays, and is a trap op of the fn
-// holding it: under `without(trap)` it is E1401 (case `self`), while the same fn without the
-// clause has no trap.
-fn pos(x: u32) -> u32 without(trap) requires(x > 0) { //~ ERROR E1401
+// An `ensures` check the compiler cannot prove stays, and is a trap op of the fn holding it:
+// under `without(trap)` it is E1401 (case `self`), while the same fn without the clause has no
+// trap. A `requires` check that stays is not a trap of its own fn: it gives `trap` to the callers
+// that do not prove the clause (`contract_call_unproved`), so `pos` may deny `trap`.
+fn pos(x: u32) -> u32 without(trap) requires(x > 0) {
     return x;
 }
 

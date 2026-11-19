@@ -166,9 +166,12 @@ fn unremoved(out: &Output) -> Option<Module> {
     stave_sema::lower(&out.program, out.typeck.as_ref()?, stave_sema::Mode::Debug).ok()
 }
 
+/// The `check.bounds` of the fns lowering made: an unchecked entry made as a fn of its own is a
+/// copy of its fn's body, kept checks included, and is not counted.
 fn count_checks(m: &Module) -> usize {
     m.funcs
         .iter()
+        .filter(|f| f.instance.0.last() != Some(&stave_ir::InstanceId::UNCHECKED_ENTRY))
         .filter_map(|f| f.body.as_ref())
         .map(|b| b.insts.op.iter().filter(|op| **op == Op::BoundsCheck).count())
         .sum()

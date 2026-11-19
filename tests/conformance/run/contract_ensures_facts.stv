@@ -1,0 +1,49 @@
+//~ EXIT 101
+//~ STDOUT contract_ensures_facts.stdout
+//~ STDERR-CONTAINS "panic: Bounds at contract_ensures_facts.stv:21:15 in main.at6 (thread 0)"
+// What a callee ensures is known after the call, no more: `inc` ensures `result == x + 1`, so
+// with `x < 6` the index is at most 6: in range of seven elements (no bounds check left), not of
+// six (the check stays and panics). Signed clauses and a clause through a widening cast work the
+// same way.
+import std.io;
+
+fn inc(x: u32) -> u32 requires(x < 100) ensures(result == x + 1) {
+    return x + 1;
+}
+
+fn at7(arr: &[u32; 7], x: u32) -> u32 requires(x < 6) {
+    let y = inc(x);
+    return arr[y as usize];
+}
+
+fn at6(arr: &[u32; 6], x: u32) -> u32 requires(x < 6) {
+    let y = inc(x);
+    return arr[y as usize];
+}
+
+fn flip(x: i32) -> i32 requires(x > -5 && x < 5) ensures(result == 0 - x) {
+    return 0 - x;
+}
+
+fn idx(i: u8, xs: &[u32]) -> u32 requires((i as usize) < xs.len()) {
+    return xs[i as usize];
+}
+
+fn guarded(k: u8, xs: &[u32]) -> u32 {
+    if (k as usize) < xs.len() {
+        return idx(k, xs);
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    let a: [u32; 7] = [0, 1, 2, 3, 4, 5, 6];
+    let b: [u32; 6] = [0, 1, 2, 3, 4, 5];
+    let x = at7(&a, 5);
+    let n = flip(-4) + flip(4);
+    let g = guarded(3, &a) + guarded(200, &a);
+    io.print(f"{x} {n} {g}\n");
+    let y = at6(&b, 5);
+    io.print(f"not reached {y}\n");
+    return 0;
+}
