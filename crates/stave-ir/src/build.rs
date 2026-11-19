@@ -408,6 +408,44 @@ impl FuncBuilder {
         self.terminate(RawTerm::Unreachable);
     }
 
+    /// Ends with `unreachable` every open block that control cannot reach from the entry: a
+    /// block made for code after an operand that turned out to diverge. An open block that is
+    /// reachable stays an error of [`FuncBuilder::finish`].
+    pub fn seal_unreached(&mut self) {
+        let mut seen = vec![false; self.blocks.len()];
+        let mut work: Vec<usize> = Vec::new();
+        if let Some(s) = seen.first_mut() {
+            *s = true;
+            work.push(0);
+        }
+        let mut succs: Vec<Block> = Vec::new();
+        while let Some(b) = work.pop() {
+            succs.clear();
+            match &self.blocks[b].term {
+                Some(RawTerm::Br(t)) => succs.push(t.block),
+                Some(RawTerm::Cbr(_, t, e)) => succs.extend([t.block, e.block]),
+                Some(RawTerm::Switch(_, cases, d)) => {
+                    succs.extend(cases.iter().map(|c| c.target.block));
+                    succs.push(d.block);
+                }
+                Some(RawTerm::Ret(_) | RawTerm::Unreachable) | None => {}
+            }
+            for s in &succs {
+                if let Some(x) = seen.get_mut(s.index())
+                    && !*x
+                {
+                    *x = true;
+                    work.push(s.index());
+                }
+            }
+        }
+        for (blk, reached) in self.blocks.iter_mut().zip(seen) {
+            if !reached && blk.term.is_none() {
+                blk.term = Some(RawTerm::Unreachable);
+            }
+        }
+    }
+
     /// Lays out the body. Errors on recorded misuse or an unterminated block.
     pub fn finish(self) -> Result<Body, BuildError> {
         if let Some(e) = self.error {

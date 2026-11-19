@@ -501,3 +501,19 @@ fn cast_of_fn_values_is_rejected() {
     });
     has(&m3, "cast to");
 }
+
+#[test]
+fn seal_unreached_closes_only_blocks_out_of_reach() {
+    let mut b = FuncBuilder::new(&[]);
+    let dead = b.create_block();
+    b.unreachable();
+    b.seal_unreached();
+    let body = b.finish().expect("an open block out of reach is sealed");
+    assert!(matches!(body.blocks[dead.index()].term, Term::Unreachable));
+
+    let mut b = FuncBuilder::new(&[]);
+    let live = b.create_block();
+    b.br(live, &[]);
+    b.seal_unreached();
+    assert_eq!(b.finish().err(), Some(BuildError::Unterminated(live)));
+}
