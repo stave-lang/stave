@@ -707,16 +707,18 @@ impl Cx<'_> {
         self.prove_lt(at, idx, Term { k: n.k.checked_add(1)?, ..n }, None)
     }
 
-    /// Facts that contradict each other at the end of `block`: a node and a walk of facts back
-    /// to it of negative total weight (`u <= u - 1`). Only the start nodes of branch and assert
-    /// facts holding there are tried (a contradiction needs a condition), at most
-    /// [`CYCLE_STARTS`] of them, each a bounded query.
-    pub(super) fn contradiction(&self, block: u32) -> Option<(u32, Vec<u32>)> {
+    /// Facts that contradict each other right before instruction `at` of `block` (`u32::MAX`: at
+    /// the block's end): a node and a walk of facts back to it of negative total weight
+    /// (`u <= u - 1`). Only the start nodes of branch and assert facts holding there are tried
+    /// (a contradiction needs a condition), at most [`CYCLE_STARTS`] of them, each a bounded
+    /// query. For a call the point is before it: what the call itself states on return (its
+    /// callee's `requires`) contradicts the very facts that refute it.
+    pub(super) fn contradiction(&self, block: u32, at: u32) -> Option<(u32, Vec<u32>)> {
         let g = self.graph();
         let mut starts: Vec<u32> = Vec::new();
         for f in &g.facts {
             if matches!(f.src, Source::Branch { .. } | Source::Assert { .. })
-                && self.holds(f.at, block, u32::MAX)
+                && self.holds(f.at, block, at)
                 && !starts.contains(&f.from)
             {
                 starts.push(f.from);
@@ -728,7 +730,7 @@ impl Cx<'_> {
         starts.into_iter().find_map(|u| {
             let t = Term { node: u, k: 0, root: None };
             let mut path = Vec::new();
-            self.prove_at(block, u32::MAX, t, t, Some(&mut path)).map(|_| (u, path))
+            self.prove_at(block, at, t, t, Some(&mut path)).map(|_| (u, path))
         })
     }
 

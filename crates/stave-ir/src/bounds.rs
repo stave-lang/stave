@@ -1123,7 +1123,7 @@ impl<'a> Cx<'a> {
             }
             w.edges.truncate(start);
             w.calls.goals.truncate(first);
-            if self.contradiction(block).is_some() || self.dead_end(block) {
+            if self.contradiction(block, i).is_some() || self.dead_end(block, i) {
                 continue;
             }
             for (k, p) in s.pre.iter().enumerate() {
@@ -1171,14 +1171,14 @@ impl<'a> Cx<'a> {
         out.truncate(start);
         // A point no execution reaches holds the goal and its negation alike: there a proof may
         // need the contradiction several times (multipliers), and no refutation is reported.
-        if let Some(cycle) = self.contradiction(c.branch) {
+        if let Some(cycle) = self.contradiction(c.branch, u32::MAX) {
             let v = prove_all(Some(&cycle), out);
             if v.is_none() {
                 out.truncate(start);
             }
             return v;
         }
-        if self.dead_end(c.branch) {
+        if self.dead_end(c.branch, u32::MAX) {
             return None;
         }
         for (half, &goal) in goals.iter().enumerate() {
@@ -1350,11 +1350,12 @@ impl<'a> Cx<'a> {
         built
     }
 
-    /// Whether the end of `block` is dead in a way the facts do not show: a dominating branch on a
-    /// compare of two constants entered on the side the compare never takes, or a dominating call
-    /// that cannot return (a callee with no `ret`, or an asserting callee given the constant
-    /// `false` for the parameter it asserts).
-    fn dead_end(&self, block: u32) -> bool {
+    /// Whether the point right before instruction `before` of `block` (`u32::MAX`: its end) is
+    /// dead in a way the facts do not show: a dominating branch on a constant condition entered
+    /// on the side it never takes, or a call that runs before the point and cannot return (a
+    /// callee with no `ret`, or an asserting callee given the constant `false` for the parameter
+    /// it asserts).
+    fn dead_end(&self, block: u32, before: u32) -> bool {
         let mut walk = Some(block as usize);
         while let Some(t) = walk {
             if let Some((cond, pol)) = facts::edge_cond(self.b, &self.preds, t)
@@ -1362,8 +1363,12 @@ impl<'a> Cx<'a> {
             {
                 return true;
             }
+            let here = t == block as usize;
             for i in self.b.blocks[t].insts.indices() {
-                if self.b.insts.op.get(i as usize) == Some(&Op::Call) && self.never_returns(i) {
+                if (!here || i < before)
+                    && self.b.insts.op.get(i as usize) == Some(&Op::Call)
+                    && self.never_returns(i)
+                {
                     return true;
                 }
             }
@@ -1372,10 +1377,14 @@ impl<'a> Cx<'a> {
         false
     }
 
-    /// The value of `cond` when it is a compare of two int constants under `not`s.
+    /// The value of `cond` when it is a bool constant or a compare of two int constants, under
+    /// `not`s.
     fn constant_cond(&self, cond: Operand) -> Option<bool> {
         let (mut o, mut flip) = (cond, false);
         for _ in 0..=NOT_DEPTH {
+            if let Some(c) = self.b.int_const(o) {
+                return Some((c != 0) != flip);
+            }
             let Operand::Value(v) = o else { return None };
             let d = self.def(v)?;
             let (x, y) = match (self.b.insts.op[d as usize], self.b.args(d)) {
