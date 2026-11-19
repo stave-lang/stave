@@ -4,7 +4,7 @@
 use stave_ir::bounds::prove_func;
 use stave_ir::ir::{Body, Span, ValueDef};
 use stave_ir::verify::Dominators;
-use stave_ir::witness::check::check_func;
+use stave_ir::witness::check::{check_func, check_module};
 use stave_ir::witness::{Edge, FnWitness, NO_BLOCK, Node, Removed, Source};
 use stave_ir::{FuncId, Module, Op, Operand, Site, Value};
 
@@ -82,24 +82,65 @@ fn shifted(src: Source) -> Source {
     }
 }
 
+/// The witnesses `w` reads besides its own: those of the functions it calls that state a
+/// summary, and what those read in turn.
+fn read_by(m: &Module, all: &[FnWitness], w: &FnWitness) -> Vec<FnWitness> {
+    let stated = |f: FuncId| {
+        all.iter().find(|x| {
+            let s = &x.summary;
+            x.func == f && !(s.pre.is_empty() && s.entry.is_empty() && s.post.is_empty())
+        })
+    };
+    let mut out: Vec<FnWitness> = Vec::new();
+    let (mut work, mut seen) = (vec![w.func], vec![w.func]);
+    while let Some(f) = work.pop() {
+        let Some(b) = m.func(f).and_then(|f| f.body.as_ref()) else { continue };
+        for i in 0..b.insts.len() as u32 {
+            if b.insts.op[i as usize] == Op::Call
+                && let Some(&Operand::Func(g)) = b.args(i).first()
+                && !seen.contains(&g)
+            {
+                seen.push(g);
+                if let Some(x) = stated(g) {
+                    out.push(x.clone());
+                    work.push(g);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Every witness the pass writes for `m` is accepted, and every one-step corruption of it is
 /// refused: an edge made stronger or weaker, turned around, moved to the next source, or dropped;
 /// a row moved to the next instruction; a dominance table that names a block which does not
 /// dominate. Returns the number of corrupted witnesses tried.
 pub fn mutants_are_refused(m: &Module) -> usize {
     let mut tried = 0;
-    let mut mutant = |w: &FnWitness, what: &str, change: &dyn Fn(&mut FnWitness)| {
-        let mut x = w.clone();
-        change(&mut x);
-        refused(m, &x, what);
+    let all: Vec<FnWitness> =
+        (0..m.funcs.len() as u32).filter_map(|f| prove_func(m, FuncId(f))).map(|p| p.witness).collect();
+    // A witness is checked with those it reads: the summaries of the functions it calls.
+    let mut mutant = |w: &FnWitness, read: &[FnWitness], what: &str, change: &dyn Fn(&mut FnWitness)| {
+        let mut ws = read.to_vec();
+        ws.push(w.clone());
+        if let Some(x) = ws.last_mut() {
+            change(x);
+        }
+        if check_module(m, &ws).is_ok() {
+            panic!("accepted {what}: fn {:?}\n{:#?}", w.func, ws.last());
+        }
         tried += 1;
     };
     for f in 0..m.funcs.len() as u32 {
         let Some(p) = prove_func(m, FuncId(f)) else { continue };
         let w = &p.witness;
         assert_eq!(w.removed.len(), p.proofs.len());
-        if let Err(r) = check_func(m, w) {
-            panic!("the pass's own witness is refused: {r}\n{w:#?}");
+        let read = read_by(m, &all, w);
+        let read = &read[..];
+        let mut own = read.to_vec();
+        own.push(w.clone());
+        if let Err(r) = check_module(m, &own) {
+            panic!("the pass's own witness is refused: {r:?}\n{w:#?}");
         }
         // Every proof of the witness: (row kind, row, which span of it, the span).
         let mut spans: Vec<(u8, usize, u8, Span)> = Vec::new();
@@ -115,17 +156,17 @@ pub fn mutants_are_refused(m: &Module) -> usize {
         for &(kind, ri, which, s) in &spans {
             for k in s.indices() {
                 let k = k as usize;
-                mutant(w, "a stronger edge", &|x| x.edges[k].w -= 1);
-                mutant(w, "a weaker edge", &|x| x.edges[k].w += 1);
-                mutant(w, "an edge at the next source", &|x| x.edges[k].src = shifted(x.edges[k].src));
-                mutant(w, "an edge counted no times", &|x| x.edges[k].mul = 0);
+                mutant(w, read, "a stronger edge", &|x| x.edges[k].w -= 1);
+                mutant(w, read, "a weaker edge", &|x| x.edges[k].w += 1);
+                mutant(w, read, "an edge at the next source", &|x| x.edges[k].src = shifted(x.edges[k].src));
+                mutant(w, read, "an edge counted no times", &|x| x.edges[k].mul = 0);
                 if w.edges[k].from != w.edges[k].to {
-                    mutant(w, "an edge counted twice", &|x| x.edges[k].mul = 2);
-                    mutant(w, "an edge turned around", &|x| {
+                    mutant(w, read, "an edge counted twice", &|x| x.edges[k].mul = 2);
+                    mutant(w, read, "an edge turned around", &|x| {
                         let e = x.edges[k];
                         x.edges[k] = Edge { from: e.to, to: e.from, ..e };
                     });
-                    mutant(w, "a chain without one edge", &|x| {
+                    mutant(w, read, "a chain without one edge", &|x| {
                         // Other proofs keep their spans: the dropped edge is overwritten by
                         // shifting this proof's later edges down and shortening it.
                         let end = (s.start + s.len) as usize;
@@ -140,11 +181,11 @@ pub fn mutants_are_refused(m: &Module) -> usize {
             }
         }
         for ri in 0..w.removed.len() {
-            mutant(w, "a row at the next instruction", &|x| x.removed[ri].inst += 1);
+            mutant(w, read, "a row at the next instruction", &|x| x.removed[ri].inst += 1);
         }
         for ri in 0..w.refuted.len() {
-            mutant(w, "a refuted row at the next instruction", &|x| x.refuted[ri].inst += 1);
-            mutant(w, "a refuted check also removed", &|x| {
+            mutant(w, read, "a refuted row at the next instruction", &|x| x.refuted[ri].inst += 1);
+            mutant(w, read, "a refuted check also removed", &|x| {
                 let r = x.refuted[ri];
                 let at = x.removed.partition_point(|y| y.inst < r.inst);
                 x.removed.insert(
@@ -155,18 +196,18 @@ pub fn mutants_are_refused(m: &Module) -> usize {
         }
         let b = body(m, FuncId(f));
         let dom = Dominators::compute(b);
-        mutant(w, "a short dominance table", &|x| {
+        mutant(w, read, "a short dominance table", &|x| {
             x.dom.pop();
         });
         for bk in 1..b.blocks.len() {
             if !dom.reachable(bk) {
                 continue;
             }
-            mutant(w, "a block that dominates itself only", &|x| x.dom[bk] = bk as u32);
-            mutant(w, "a reachable block without a dominator", &|x| x.dom[bk] = NO_BLOCK);
+            mutant(w, read, "a block that dominates itself only", &|x| x.dom[bk] = bk as u32);
+            mutant(w, read, "a reachable block without a dominator", &|x| x.dom[bk] = NO_BLOCK);
             for other in 0..b.blocks.len() {
                 if dom.reachable(other) && !dom.dominates(other, bk) {
-                    mutant(w, "a parent that does not dominate", &|x| x.dom[bk] = other as u32);
+                    mutant(w, read, "a parent that does not dominate", &|x| x.dom[bk] = other as u32);
                 }
             }
         }

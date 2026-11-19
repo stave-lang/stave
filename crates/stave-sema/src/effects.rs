@@ -882,11 +882,8 @@ pub fn check(prog: &Program, tc: &Typeck, plan: &Plan, sets: &EffectSets) -> Vec
         };
         let have = Effects((in_set.0 | at_entry.0) & c.deny.0);
         for e in have.each() {
-            let found = if in_set.meets(e) {
-                sets.chain_end(g, c.node, e)
-            } else {
-                Some((Vec::new(), c.node, true))
-            };
+            let found =
+                if in_set.meets(e) { sets.chain_end(g, c.node, e) } else { Some((Vec::new(), c.node, true)) };
             let Some((edges, end, entered)) = found else { continue };
             // the names `stave effects` prints: checked-IR paths, type args of an instance,
             // `<fn>.<k>` for a closure, never the fn values a node is specialized on
