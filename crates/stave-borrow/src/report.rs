@@ -208,8 +208,17 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
             Finding::Escape { span, loan } => {
                 let l = &body.loans[loan as usize];
                 let text = place_text(body, tys, &l.place);
-                let lspan = body.locals[l.place.local as usize].span;
-                out.extend(mk("E0512", None, &[("place", &text)], span, &[("local", lspan)]));
+                let root = &body.locals[l.place.local as usize];
+                match root.capture {
+                    Some(c) => out.extend(mk(
+                        "E0512",
+                        Some("mut-capture"),
+                        &[("place", &text)],
+                        span,
+                        &[("capture", c)],
+                    )),
+                    None => out.extend(mk("E0512", None, &[("place", &text)], span, &[("local", root.span)])),
+                }
             }
             Finding::Uncovered { span, param, from, clause, copy } => {
                 let name = match body.locals.iter().position(|x| x.param == Some(param)) {
@@ -287,6 +296,7 @@ mod tests {
             name: format!("l{node}"),
             param: None,
             capture: None,
+            capture_mut: false,
             temp: false,
             guard: false,
             node,

@@ -1,0 +1,125 @@
+//~ STDOUT pos_temp_loop.stdout
+// A borrow of a temporary may be used until its expression is evaluated again: inside one
+// iteration, after the loop, in the expression that makes the next value, and in the next
+// iteration up to that expression. A borrow of a static, a const, or a literal sees the same value
+// after every evaluation.
+import std.io;
+
+static LIMIT: u32 = 5;
+
+const TABLE: [u32; 2] = [7, 9];
+
+struct Pair { a: u32, b: u32 }
+
+view struct Two { x: &u32, y: &u32 }
+
+impl Pair {
+    fn first(&self) -> &u32 from self {
+        return &self.a;
+    }
+    fn flip(&self) -> Pair {
+        return Pair.{ a: self.b, b: self.a };
+    }
+}
+
+fn next(i: u32) -> u32 {
+    return i + 1;
+}
+
+fn pair(i: u32) -> Pair {
+    return Pair.{ a: i, b: i + 1 };
+}
+
+fn two(x: &u32, y: &u32) -> Two from x + y {
+    return Two.{ x: x, y: y };
+}
+
+fn use_ref(r: &u32) -> u32 {
+    return *r;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let a: u32 = 5;
+    let b: u32 = 6;
+    let mut sum: u32 = 0;
+
+    // the borrow dies inside the iteration
+    let mut i: u32 = 0;
+    while i < 3 {
+        let r = &next(i);
+        sum = sum + use_ref(r);
+        i = i + 1;
+    }
+    for j in 0u32..3u32 {
+        let r: &u32 = pair(j).first();
+        sum = sum + *r;
+    }
+
+    // the last borrow leaves the loop: nothing evaluates the expression after it
+    let mut last: &u32 = &zero;
+    i = 0;
+    while i < 3 {
+        last = &next(i);
+        sum = sum + *last;
+        i = i + 1;
+    }
+    sum = sum + *last;
+
+    // the old value is read by the expression that replaces it
+    let mut cur: &u32 = &zero;
+    i = 0;
+    while i < 3 {
+        cur = &next(*cur);
+        i = i + 1;
+    }
+    sum = sum + *cur;
+
+    // a `&` copied out of a view temporary borrows what the view borrows, not the temporary
+    let mut x: &u32 = &zero;
+    i = 0;
+    while i < 3 {
+        let before: &u32 = x;
+        x = two(&a, &b).y;
+        sum = sum + *before;
+        i = i + 1;
+    }
+
+    // a struct read through the borrow of the temporary that the call's result replaces
+    let start = Pair.{ a: 1, b: 2 };
+    let mut p: &Pair = &start;
+    i = 0;
+    while i < 3 {
+        p = &p.flip();
+        i = i + 1;
+    }
+    let pa: u32 = p.a;
+    let pb: u32 = p.b;
+
+    // the borrow is read in the next iteration, before the expression is evaluated again
+    let mut prev: &u32 = &zero;
+    for j in 0u32..3u32 {
+        for k in 0u32..2u32 {
+            sum = sum + *prev + k;
+        }
+        prev = &next(j);
+    }
+
+    let mut lim: &u32 = &zero;
+    let mut tab: &[u32; 2] = &TABLE;
+    let mut lit: &u32 = &zero;
+    i = 0;
+    while i < 3 {
+        let old_lim: &u32 = lim;
+        let old_tab: &[u32; 2] = tab;
+        let old_lit: &u32 = lit;
+        lim = &LIMIT;
+        tab = &TABLE;
+        lit = &4u32;
+        sum = sum + *old_lim + old_tab[0] + *old_lit;
+        i = i + 1;
+    }
+
+    io.print(f"{sum} {pa} {pb}\n");
+    return 0;
+}

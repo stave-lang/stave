@@ -9,12 +9,14 @@
 //! not carry the old loan (so `r = &a; ... r = &b; a = 1; use(r)` is accepted, as in NLL).
 //!
 //! **Access checks**: every access (read, write, move, drop, storage-dead, and the borrows) is
-//! checked against the live loans whose places overlap it (E0501); reads and moves against the
+//! checked against the live loans whose places overlap it (E0501); the initialization of a
+//! temporary is the storage-dead of the value its expression made before (one slot per
+//! temporary, written by every evaluation); reads and moves against the
 //! maybe-moved sites (E0502); writes and `&mut` borrows against binding and reference mutability
 //! (E0503); stores of a ref-like value (an assignment through a dereference, a call whose
 //! callee has a `from` clause on a `&mut` param) against the view objects the pointer may point
-//! to (E0513, [`crate::loans`] **Stores**); returns against the `from` clause (E0510) and local
-//! borrows (E0512).
+//! to (E0513, [`crate::loans`] **Stores**); returns against the `from` clause (E0510), local
+//! borrows, and a closure's borrows of its `&mut` captures (E0512).
 
 use stave_diag::Span;
 
@@ -82,7 +84,8 @@ pub enum Finding {
     Moved { site: u32, place: Place, span: Span },
     /// E0503: an assignment or `&mut` borrow of an immutable place; `shared`: through `&`.
     Immutable { place: Place, span: Span, shared: bool, blame: LocalId },
-    /// E0512: a returned value borrows local storage (the loan).
+    /// E0512: a returned value borrows local storage, or a closure's returned value borrows a
+    /// capture the closure holds by `&mut` (the loan).
     Escape { span: Span, loan: LoanId },
     /// E0510: a returned value has an origin of param `param` not in the `from` clause (`from`:
     /// the clause, or the return type when `clause` is false); `copy`: the clause names the param
@@ -299,6 +302,8 @@ fn live_in(flow: &Flow<'_>, s: &Stmt, after: &Bits) -> Bits {
 
 struct Cx<'f, 'b> {
     flow: &'f mut Flow<'b>,
+    /// The temporaries whose initialization ends an earlier value ([`rewritten_temps`]).
+    rewritten: Bits,
     findings: Vec<Finding>,
     dump: Vec<DumpAccess>,
     want_dump: bool,
@@ -413,6 +418,14 @@ impl Cx<'_, '_> {
                     }
                     _ => for_each_op(rv, |o| self.operand(st, live, at, o)),
                 }
+                // A temporary has one slot, written by every evaluation of its expression: the
+                // value of the evaluation before ends here, and a loan of it still live after
+                // the statement would see the new value. Reported at the temporary's expression
+                // (a value `if` or `match` initializes its temporary once per arm).
+                if *init && dest.proj.is_empty() && self.rewritten.contains(dest.local as usize) {
+                    let span = body.locals[dest.local as usize].span;
+                    self.access(st, after, at, Access::StorageDead, dest, span, s.node, &[]);
+                }
                 if !*init {
                     // the write happens after the right side: its moves count (`s.a = f(s)`)
                     let mut moves = Vec::new();
@@ -520,9 +533,12 @@ impl Cx<'_, '_> {
             if a < self.flow.atoms.nloans {
                 let l = self.flow.loan(a as LoanId);
                 let root = &body.locals[l.place.local as usize];
-                // a closure may return a borrow of a capture (the closure value holds its loan);
-                // its own params are locals like any other
-                if l.place.has_deref() || (from.is_none() && root.capture.is_some()) {
+                // A closure may return a borrow of a capture it holds by `&` (the closure value
+                // holds its loan, and no call of the closure changes the capture). Of a capture
+                // held by `&mut`, through a dereference too, it may not: the next call can write
+                // the capture or lend it again while this result lives. Its own params are
+                // locals like any other.
+                if !root.capture_mut && (l.place.has_deref() || (from.is_none() && root.capture.is_some())) {
                     continue;
                 }
                 if escape.is_none_or(|e| l.span.offset < self.flow.loan(e).span.offset) {
@@ -568,7 +584,8 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         return Checked { findings, dump: Vec::new() };
     }
     let lo = live_out(flow);
-    let mut cx = Cx { flow, findings: Vec::new(), dump: Vec::new(), want_dump };
+    let rewritten = rewritten_temps(body);
+    let mut cx = Cx { flow, rewritten, findings: Vec::new(), dump: Vec::new(), want_dump };
     for b in 0..body.blocks.len() {
         let Some(mut st) = cx.flow.entry[b].clone() else { continue };
         let la = live_after(cx.flow, b, &lo[b]);
@@ -590,6 +607,43 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
     let mut findings = cx.findings;
     bad_moves(body, &mut findings);
     Checked { findings, dump: cx.dump }
+}
+
+/// The borrowed temporaries whose slot an evaluation of their expression can change. Not one
+/// that only `&` loans borrow and a single place initializes by a constant: nothing but that
+/// initialization writes it, with the same value every time, so no loan of it sees a change
+/// (`&X` of a static or a const borrows such a temporary).
+fn rewritten_temps(body: &Body) -> Bits {
+    let n = body.locals.len();
+    let mut lent = Bits::new(n);
+    let mut out = Bits::new(n);
+    for l in &body.loans {
+        let t = l.place.local as usize;
+        if body.locals[t].temp {
+            lent.insert(t);
+            if l.mutable || l.reserved {
+                out.insert(t);
+            }
+        }
+    }
+    if lent.is_empty() {
+        return out;
+    }
+    let mut seen = Bits::new(n);
+    for blk in &body.blocks {
+        for s in &blk.stmts {
+            if let StmtKind::Assign { dest, rv, init: true } = &s.kind
+                && dest.proj.is_empty()
+                && lent.contains(dest.local as usize)
+            {
+                let constant = matches!(rv, Rvalue::Use(o) if o.kind == OpKind::Const);
+                if !constant || !seen.insert(dest.local as usize) {
+                    out.insert(dest.local as usize);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// E0504: one finding per span of the body's bad moves.

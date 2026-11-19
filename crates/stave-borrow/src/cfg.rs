@@ -13,7 +13,8 @@
 //! `match`, `&&`/`||`, value `if`, `?`, `break`/`continue`/`return`, and calls to `-> never`
 //! fns. Evaluation order is the lowering's (stave-sema `lower_*`): left to right, the receiver
 //! first, a call's arguments before the call. Temporaries with drop glue die at the end of their
-//! statement (as lowered); others live to the end of the fn.
+//! statement (as lowered); others live until their expression is evaluated again (it writes the
+//! temporary's one slot) or the fn returns.
 //!
 //! Closures and `spawn` blocks are built as nested bodies ([`Body::nested`]) whose captured
 //! locals are params; the closure value (or the `scope`'s join local, which accumulates every
@@ -23,8 +24,10 @@
 //! body mutates the local or the local is a `&mut T`, else `&`); a capture the nested body writes,
 //! mutably borrows, or reborrows is `&mut` too (a safety net, never weaker than the analysis).
 //! The closure value's origin set is the union of its capture loans, so the loans live while the
-//! value (or a result of a call through it, which takes the callee's origins too) lives. Captures
-//! are references: moving a non-Copy capture out of the body is E0504.
+//! value (or a result of a call through it, which takes the callee's origins too) lives. Every
+//! call of the value uses the same loans, so a closure's result may borrow only the captures held
+//! by `&` (E0512 otherwise: [`Local::capture_mut`]). Captures are references: moving a non-Copy
+//! capture out of the body is E0504.
 
 use rustc_hash::FxHashMap;
 use stave_diag::Span;
@@ -235,6 +238,9 @@ pub struct Local {
     pub param: Option<u32>,
     /// A capture of a nested body: the closure's `fn` / `spawn` token span.
     pub capture: Option<Span>,
+    /// A capture the closure value holds by `&mut`: a call of the closure may write it or lend
+    /// it again.
+    pub capture_mut: bool,
     pub temp: bool,
     /// A binding as seen by a match guard: the guard runs after the arm's bindings are bound
     /// from the scrutinee, so inside it they are read-only views of the scrutinee (no move, no
@@ -485,6 +491,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             name,
             param: None,
             capture: None,
+            capture_mut: false,
             temp,
             guard: false,
             node: u32::MAX,
@@ -1645,7 +1652,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         nb.block(blk);
         nb.end_of_body(n);
         let caps = std::mem::take(&mut nb.captures);
-        let inner = nb.finish();
+        let mut inner = nb.finish();
         // the capture analysis (stave-sema) decides the modes; a capture the CFG shows mutated is
         // `&mut` in any case (never weaker than the analysis)
         let info = self.infos.iter().find(|c| c.node == n).cloned();
@@ -1656,6 +1663,9 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let cl = caps.iter().find(|c| c.0 == cap.binding).map(|c| c.1);
                 let mutated = cap.mode == stave_sema::closures::CaptureMode::RefMut
                     || cl.is_some_and(|cl| mutates(&inner, cl));
+                if let Some(cl) = cl {
+                    inner.locals[cl as usize].capture_mut = mutated;
+                }
                 if let Some(ol) = self.local_of(Res::Local(BindingRef { node: cap.binding })) {
                     out.push((ol, mutated));
                     seen.push(cap.binding);
@@ -1667,6 +1677,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 continue;
             }
             let mutated = mutates(&inner, cl);
+            inner.locals[cl as usize].capture_mut = mutated;
             if let Some(ol) = self.local_of(Res::Local(BindingRef { node: bnode })) {
                 out.push((ol, mutated));
             }

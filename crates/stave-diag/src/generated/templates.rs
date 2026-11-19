@@ -2336,7 +2336,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0512",
         severity: Severity::Error,
         area: "borrow",
-        rule: "returned value borrows a local",
+        rule: "returned value borrows a local; case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)",
         retired: false,
         located: true,
         holes: &[
@@ -2352,6 +2352,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "return an owned value, or borrow from a parameter named in the `from` clause",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-capture",
+                message: "returned value borrows `{place}` through a `&mut` capture of the closure",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "returned here" },
+                    LabelTemplate { at: "capture", text: "the next call of this closure could change `{place}` or lend it again" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "return a copy of the value, or borrow it before the closure (`let r = &{place};`) and return `r` from the closure",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
