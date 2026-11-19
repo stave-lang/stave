@@ -417,7 +417,7 @@ fix = { description = "mark field `{name}` `pub` in `{module}`, or use the colum
 code = "E0107"
 severity = "error"
 area = "resolve"
-rule = "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`), at the module's first token"
+rule = "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`, and so is `src/std.cell.stv`), at the module's first token"
 holes = { name = "name", package = "name", module = "path" }
 message = "import path is ambiguous between dependency `{name}` and module `{name}`"
 labels = [{ at = "primary", text = "`{name}` names a dependency and a module of `{package}`" }]
@@ -1667,7 +1667,7 @@ fix = { description = "run on a `{target}` host, or pass `--runner CMD` (e.g. `-
 code = "E1002"
 severity = "error"
 area = "driver"
-rule = "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, or unreadable manifest; located in `stave.toml`"
+rule = "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, or unreadable manifest; located in `stave.toml`"
 holes = { key = "source", expected = "text-literal", root = "text-literal" }
 choices = { expected = ["string", "integer", "boolean", "array", "table"], root = ["src/main.stv", "src/lib.stv"] }
 message = "unknown key `{key}` in `stave.toml`"
@@ -1723,6 +1723,11 @@ fix = { description = "create `{root}`, or change `kind` to match the root file 
 message = "dependency `{key}`: its `path` holds no `stave.toml`"
 labels = [{ at = "primary", text = "no package at this path" }]
 fix = { description = "point `path` at a package directory (one with `stave.toml`), relative to this `stave.toml`" }
+
+[diag.cases.builtin-dependency]
+message = "dependency `{key}`: its `path` is a built-in package"
+labels = [{ at = "primary", text = "built-in package directory" }]
+fix = { description = "remove dependency `{key}`: `std` is imported without one, and the other built-in packages are not for user code" }
 
 [diag.cases.unreadable]
 message = "`stave.toml` cannot be read"

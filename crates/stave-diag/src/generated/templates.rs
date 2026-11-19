@@ -918,7 +918,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0107",
         severity: Severity::Error,
         area: "resolve",
-        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`), at the module's first token",
+        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`, and so is `src/std.cell.stv`), at the module's first token",
         retired: false,
         located: true,
         holes: &[
@@ -4148,7 +4148,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1002",
         severity: Severity::Error,
         area: "driver",
-        rule: "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, or unreadable manifest; located in `stave.toml`",
+        rule: "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, or unreadable manifest; located in `stave.toml`",
         retired: false,
         located: true,
         holes: &[
@@ -4189,6 +4189,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use a name that is one path component: not empty, `.`, or `..`, without `/`, `\\`, or NUL, and not starting with `-`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "builtin-dependency",
+                message: "dependency `{key}`: its `path` is a built-in package",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "built-in package directory" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove dependency `{key}`: `std` is imported without one, and the other built-in packages are not for user code",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
