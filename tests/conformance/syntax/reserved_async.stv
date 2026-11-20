@@ -1,0 +1,18 @@
+//~ PARSE-ONLY
+// `async`, `await`, and `yield` are reserved keywords with no meaning: never a local, fn, field,
+// param, or module name.
+import async; //~ ERROR E0004
+import std.await; //~ ERROR E0004
+import std.io as yield; //~ ERROR E0004
+fn async() {} //~ ERROR E0004
+fn await() {} //~ ERROR E0004
+fn yield() {} //~ ERROR E0004
+fn f1() { let async = 1; } //~ ERROR E0004
+fn f2() { let await = 1; } //~ ERROR E0004
+fn f3() { let yield = 1; } //~ ERROR E0004
+fn f4(async: u32) {} //~ ERROR E0004
+fn f5(await: u32) {} //~ ERROR E0004
+fn f6(yield: u32) {} //~ ERROR E0004
+struct S1 { async: u32 } //~ ERROR E0004
+struct S2 { await: u32 } //~ ERROR E0004
+struct S3 { yield: u32 } //~ ERROR E0004
