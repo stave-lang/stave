@@ -21,7 +21,7 @@
 
 const DIAG_COUNT: usize = 163;
 const HOLE_COUNT: usize = 250;
-const CHOICE_COUNT: usize = 151;
+const CHOICE_COUNT: usize = 153;
 const SHAPE_COUNT: usize = 266;
 const LABEL_COUNT: usize = 355;
 const EDIT_COUNT: usize = 14;
@@ -2745,46 +2745,46 @@ const HOLE_CHOICE_FIRST: [u32; 251] = [
     95,  // E1303 target
     98,  // E1401 at
     98,  // E1401 effect
-    105, // E1401 fn
-    105, // E1401 op
-    119, // E1402 cycle
-    119, // E1402 name
-    119, // E1403 at
-    119, // E1403 effect
-    126, // E1403 fn
-    126, // E1403 from
-    126, // E1403 op
-    140, // E1403 to
-    140, // E1404 name
-    140, // E1405 fn
-    140, // E1405 held
-    140, // E1405 held_rank
-    140, // E1405 lock
-    140, // E1405 rank
-    140, // E1406 fn
-    140, // E1406 held
-    140, // E1406 held_rank
-    140, // E1406 lock
-    140, // E1406 rank
-    140, // E1407 limit
-    140, // E1407 part
-    140, // E1407 path
-    140, // E1407 reason
-    148, // E1407 type
-    148, // E1408 trait
-    148, // E1408 type
-    148, // E1409 cycle
-    148, // E1409 name
-    148, // E1410 limit
-    148, // E1410 part
-    148, // E1410 path
-    148, // E1410 reason
-    151, // E1410 type
-    151, // E1411 name
-    151, // end
+    106, // E1401 fn
+    106, // E1401 op
+    120, // E1402 cycle
+    120, // E1402 name
+    120, // E1403 at
+    120, // E1403 effect
+    128, // E1403 fn
+    128, // E1403 from
+    128, // E1403 op
+    142, // E1403 to
+    142, // E1404 name
+    142, // E1405 fn
+    142, // E1405 held
+    142, // E1405 held_rank
+    142, // E1405 lock
+    142, // E1405 rank
+    142, // E1406 fn
+    142, // E1406 held
+    142, // E1406 held_rank
+    142, // E1406 lock
+    142, // E1406 rank
+    142, // E1407 limit
+    142, // E1407 part
+    142, // E1407 path
+    142, // E1407 reason
+    150, // E1407 type
+    150, // E1408 trait
+    150, // E1408 type
+    150, // E1409 cycle
+    150, // E1409 name
+    150, // E1410 limit
+    150, // E1410 part
+    150, // E1410 path
+    150, // E1410 reason
+    153, // E1410 type
+    153, // E1411 name
+    153, // end
 ];
 
-const CHOICE_TEXT: [u8; 2275] = [
+const CHOICE_TEXT: [u8; 2283] = [
     // 0 E0003 what: "string"
     115, 116, 114, 105, 110, 103,
     // 1 E0003 what: "f-string"
@@ -3026,140 +3026,144 @@ const CHOICE_TEXT: [u8; 2275] = [
     105, 111,
     // 104 E1401 effect: "block"
     98, 108, 111, 99, 107,
-    // 105 E1401 op: "allocates"
+    // 105 E1401 effect: "park"
+    112, 97, 114, 107,
+    // 106 E1401 op: "allocates"
     97, 108, 108, 111, 99, 97, 116, 101, 115,
-    // 106 E1401 op: "frees memory"
+    // 107 E1401 op: "frees memory"
     102, 114, 101, 101, 115, 32, 109, 101, 109, 111, 114, 121,
-    // 107 E1401 op: "may run out of memory"
+    // 108 E1401 op: "may run out of memory"
     109, 97, 121, 32, 114, 117, 110, 32, 111, 117, 116, 32, 111, 102, 32, 109,
     101, 109, 111, 114, 121,
-    // 108 E1401 op: "may trap"
+    // 109 E1401 op: "may trap"
     109, 97, 121, 32, 116, 114, 97, 112,
-    // 109 E1401 op: "is recursive"
+    // 110 E1401 op: "is recursive"
     105, 115, 32, 114, 101, 99, 117, 114, 115, 105, 118, 101,
-    // 110 E1401 op: "takes a lock"
+    // 111 E1401 op: "takes a lock"
     116, 97, 107, 101, 115, 32, 97, 32, 108, 111, 99, 107,
-    // 111 E1401 op: "has an `unsafe` block"
+    // 112 E1401 op: "has an `unsafe` block"
     104, 97, 115, 32, 97, 110, 32, 96, 117, 110, 115, 97, 102, 101, 96, 32,
     98, 108, 111, 99, 107,
-    // 112 E1401 op: "makes a system call"
+    // 113 E1401 op: "makes a system call"
     109, 97, 107, 101, 115, 32, 97, 32, 115, 121, 115, 116, 101, 109, 32, 99,
     97, 108, 108,
-    // 113 E1401 op: "waits for other threads"
+    // 114 E1401 op: "waits for other threads"
     119, 97, 105, 116, 115, 32, 102, 111, 114, 32, 111, 116, 104, 101, 114, 32,
     116, 104, 114, 101, 97, 100, 115,
-    // 114 E1401 op: "may wait on a file descriptor"
+    // 115 E1401 op: "may wait on a file descriptor"
     109, 97, 121, 32, 119, 97, 105, 116, 32, 111, 110, 32, 97, 32, 102, 105,
     108, 101, 32, 100, 101, 115, 99, 114, 105, 112, 116, 111, 114,
-    // 115 E1401 op: "starts a thread"
+    // 116 E1401 op: "starts a thread"
     115, 116, 97, 114, 116, 115, 32, 97, 32, 116, 104, 114, 101, 97, 100,
-    // 116 E1401 op: "is an `extern` fn, which has every effect its `without` does not list"
+    // 117 E1401 op: "is an `extern` fn, which has every effect its `without` does not list"
     105, 115, 32, 97, 110, 32, 96, 101, 120, 116, 101, 114, 110, 96, 32, 102,
     110, 44, 32, 119, 104, 105, 99, 104, 32, 104, 97, 115, 32, 101, 118, 101,
     114, 121, 32, 101, 102, 102, 101, 99, 116, 32, 105, 116, 115, 32, 96, 119,
     105, 116, 104, 111, 117, 116, 96, 32, 100, 111, 101, 115, 32, 110, 111, 116,
     32, 108, 105, 115, 116,
-    // 117 E1401 op: "runs code the call graph does not show"
+    // 118 E1401 op: "runs code the call graph does not show"
     114, 117, 110, 115, 32, 99, 111, 100, 101, 32, 116, 104, 101, 32, 99, 97,
     108, 108, 32, 103, 114, 97, 112, 104, 32, 100, 111, 101, 115, 32, 110, 111,
     116, 32, 115, 104, 111, 119,
-    // 118 E1401 op: "has a `requires` clause that the call does not prove"
+    // 119 E1401 op: "has a `requires` clause that the call does not prove"
     104, 97, 115, 32, 97, 32, 96, 114, 101, 113, 117, 105, 114, 101, 115, 96,
     32, 99, 108, 97, 117, 115, 101, 32, 116, 104, 97, 116, 32, 116, 104, 101,
     32, 99, 97, 108, 108, 32, 100, 111, 101, 115, 32, 110, 111, 116, 32, 112,
     114, 111, 118, 101,
-    // 119 E1403 effect: "alloc"
+    // 120 E1403 effect: "alloc"
     97, 108, 108, 111, 99,
-    // 120 E1403 effect: "trap"
+    // 121 E1403 effect: "trap"
     116, 114, 97, 112,
-    // 121 E1403 effect: "recursive"
+    // 122 E1403 effect: "recursive"
     114, 101, 99, 117, 114, 115, 105, 118, 101,
-    // 122 E1403 effect: "lock"
+    // 123 E1403 effect: "lock"
     108, 111, 99, 107,
-    // 123 E1403 effect: "unsafe"
+    // 124 E1403 effect: "unsafe"
     117, 110, 115, 97, 102, 101,
-    // 124 E1403 effect: "io"
+    // 125 E1403 effect: "io"
     105, 111,
-    // 125 E1403 effect: "block"
+    // 126 E1403 effect: "block"
     98, 108, 111, 99, 107,
-    // 126 E1403 op: "allocates"
+    // 127 E1403 effect: "park"
+    112, 97, 114, 107,
+    // 128 E1403 op: "allocates"
     97, 108, 108, 111, 99, 97, 116, 101, 115,
-    // 127 E1403 op: "frees memory"
+    // 129 E1403 op: "frees memory"
     102, 114, 101, 101, 115, 32, 109, 101, 109, 111, 114, 121,
-    // 128 E1403 op: "may run out of memory"
+    // 130 E1403 op: "may run out of memory"
     109, 97, 121, 32, 114, 117, 110, 32, 111, 117, 116, 32, 111, 102, 32, 109,
     101, 109, 111, 114, 121,
-    // 129 E1403 op: "may trap"
+    // 131 E1403 op: "may trap"
     109, 97, 121, 32, 116, 114, 97, 112,
-    // 130 E1403 op: "is recursive"
+    // 132 E1403 op: "is recursive"
     105, 115, 32, 114, 101, 99, 117, 114, 115, 105, 118, 101,
-    // 131 E1403 op: "takes a lock"
+    // 133 E1403 op: "takes a lock"
     116, 97, 107, 101, 115, 32, 97, 32, 108, 111, 99, 107,
-    // 132 E1403 op: "has an `unsafe` block"
+    // 134 E1403 op: "has an `unsafe` block"
     104, 97, 115, 32, 97, 110, 32, 96, 117, 110, 115, 97, 102, 101, 96, 32,
     98, 108, 111, 99, 107,
-    // 133 E1403 op: "makes a system call"
+    // 135 E1403 op: "makes a system call"
     109, 97, 107, 101, 115, 32, 97, 32, 115, 121, 115, 116, 101, 109, 32, 99,
     97, 108, 108,
-    // 134 E1403 op: "waits for other threads"
+    // 136 E1403 op: "waits for other threads"
     119, 97, 105, 116, 115, 32, 102, 111, 114, 32, 111, 116, 104, 101, 114, 32,
     116, 104, 114, 101, 97, 100, 115,
-    // 135 E1403 op: "may wait on a file descriptor"
+    // 137 E1403 op: "may wait on a file descriptor"
     109, 97, 121, 32, 119, 97, 105, 116, 32, 111, 110, 32, 97, 32, 102, 105,
     108, 101, 32, 100, 101, 115, 99, 114, 105, 112, 116, 111, 114,
-    // 136 E1403 op: "starts a thread"
+    // 138 E1403 op: "starts a thread"
     115, 116, 97, 114, 116, 115, 32, 97, 32, 116, 104, 114, 101, 97, 100,
-    // 137 E1403 op: "is an `extern` fn, which has every effect its `without` does not list"
+    // 139 E1403 op: "is an `extern` fn, which has every effect its `without` does not list"
     105, 115, 32, 97, 110, 32, 96, 101, 120, 116, 101, 114, 110, 96, 32, 102,
     110, 44, 32, 119, 104, 105, 99, 104, 32, 104, 97, 115, 32, 101, 118, 101,
     114, 121, 32, 101, 102, 102, 101, 99, 116, 32, 105, 116, 115, 32, 96, 119,
     105, 116, 104, 111, 117, 116, 96, 32, 100, 111, 101, 115, 32, 110, 111, 116,
     32, 108, 105, 115, 116,
-    // 138 E1403 op: "runs code the call graph does not show"
+    // 140 E1403 op: "runs code the call graph does not show"
     114, 117, 110, 115, 32, 99, 111, 100, 101, 32, 116, 104, 101, 32, 99, 97,
     108, 108, 32, 103, 114, 97, 112, 104, 32, 100, 111, 101, 115, 32, 110, 111,
     116, 32, 115, 104, 111, 119,
-    // 139 E1403 op: "has a `requires` clause that the call does not prove"
+    // 141 E1403 op: "has a `requires` clause that the call does not prove"
     104, 97, 115, 32, 97, 32, 96, 114, 101, 113, 117, 105, 114, 101, 115, 96,
     32, 99, 108, 97, 117, 115, 101, 32, 116, 104, 97, 116, 32, 116, 104, 101,
     32, 99, 97, 108, 108, 32, 100, 111, 101, 115, 32, 110, 111, 116, 32, 112,
     114, 111, 118, 101,
-    // 140 E1407 reason: "a reference"
+    // 142 E1407 reason: "a reference"
     97, 32, 114, 101, 102, 101, 114, 101, 110, 99, 101,
-    // 141 E1407 reason: "a raw pointer"
+    // 143 E1407 reason: "a raw pointer"
     97, 32, 114, 97, 119, 32, 112, 111, 105, 110, 116, 101, 114,
-    // 142 E1407 reason: "a fn value"
+    // 144 E1407 reason: "a fn value"
     97, 32, 102, 110, 32, 118, 97, 108, 117, 101,
-    // 143 E1407 reason: "a view type"
+    // 145 E1407 reason: "a view type"
     97, 32, 118, 105, 101, 119, 32, 116, 121, 112, 101,
-    // 144 E1407 reason: "`UnsafeCell` (interior mutability)"
+    // 146 E1407 reason: "`UnsafeCell` (interior mutability)"
     96, 85, 110, 115, 97, 102, 101, 67, 101, 108, 108, 96, 32, 40, 105, 110,
     116, 101, 114, 105, 111, 114, 32, 109, 117, 116, 97, 98, 105, 108, 105, 116,
     121, 41,
-    // 145 E1407 reason: "a type with `Drop`"
+    // 147 E1407 reason: "a type with `Drop`"
     97, 32, 116, 121, 112, 101, 32, 119, 105, 116, 104, 32, 96, 68, 114, 111,
     112, 96,
-    // 146 E1407 reason: "a generic parameter without a `Flat` bound"
+    // 148 E1407 reason: "a generic parameter without a `Flat` bound"
     97, 32, 103, 101, 110, 101, 114, 105, 99, 32, 112, 97, 114, 97, 109, 101,
     116, 101, 114, 32, 119, 105, 116, 104, 111, 117, 116, 32, 97, 32, 96, 70,
     108, 97, 116, 96, 32, 98, 111, 117, 110, 100,
-    // 147 E1407 reason: "unsized"
+    // 149 E1407 reason: "unsized"
     117, 110, 115, 105, 122, 101, 100,
-    // 148 E1410 reason: "`UnsafeCell` (interior mutability)"
+    // 150 E1410 reason: "`UnsafeCell` (interior mutability)"
     96, 85, 110, 115, 97, 102, 101, 67, 101, 108, 108, 96, 32, 40, 105, 110,
     116, 101, 114, 105, 111, 114, 32, 109, 117, 116, 97, 98, 105, 108, 105, 116,
     121, 41,
-    // 149 E1410 reason: "a fn value (its captures are not in its type)"
+    // 151 E1410 reason: "a fn value (its captures are not in its type)"
     97, 32, 102, 110, 32, 118, 97, 108, 117, 101, 32, 40, 105, 116, 115, 32,
     99, 97, 112, 116, 117, 114, 101, 115, 32, 97, 114, 101, 32, 110, 111, 116,
     32, 105, 110, 32, 105, 116, 115, 32, 116, 121, 112, 101, 41,
-    // 150 E1410 reason: "a generic parameter without a `Frozen` bound"
+    // 152 E1410 reason: "a generic parameter without a `Frozen` bound"
     97, 32, 103, 101, 110, 101, 114, 105, 99, 32, 112, 97, 114, 97, 109, 101,
     116, 101, 114, 32, 119, 105, 116, 104, 111, 117, 116, 32, 97, 32, 96, 70,
     114, 111, 122, 101, 110, 96, 32, 98, 111, 117, 110, 100,
 ];
 
-const CHOICE_TEXT_OFF: [u32; 152] = [
+const CHOICE_TEXT_OFF: [u32; 154] = [
     0,    // E0003 what
     6,    // E0003 what
     14,   // E0003 what
@@ -3265,53 +3269,55 @@ const CHOICE_TEXT_OFF: [u32; 152] = [
     1278, // E1401 effect
     1284, // E1401 effect
     1286, // E1401 effect
-    1291, // E1401 op
-    1300, // E1401 op
-    1312, // E1401 op
-    1333, // E1401 op
-    1341, // E1401 op
-    1353, // E1401 op
-    1365, // E1401 op
-    1386, // E1401 op
-    1405, // E1401 op
-    1428, // E1401 op
-    1457, // E1401 op
-    1472, // E1401 op
-    1541, // E1401 op
-    1579, // E1401 op
-    1631, // E1403 effect
-    1636, // E1403 effect
+    1291, // E1401 effect
+    1295, // E1401 op
+    1304, // E1401 op
+    1316, // E1401 op
+    1337, // E1401 op
+    1345, // E1401 op
+    1357, // E1401 op
+    1369, // E1401 op
+    1390, // E1401 op
+    1409, // E1401 op
+    1432, // E1401 op
+    1461, // E1401 op
+    1476, // E1401 op
+    1545, // E1401 op
+    1583, // E1401 op
+    1635, // E1403 effect
     1640, // E1403 effect
-    1649, // E1403 effect
+    1644, // E1403 effect
     1653, // E1403 effect
-    1659, // E1403 effect
-    1661, // E1403 effect
-    1666, // E1403 op
-    1675, // E1403 op
-    1687, // E1403 op
-    1708, // E1403 op
+    1657, // E1403 effect
+    1663, // E1403 effect
+    1665, // E1403 effect
+    1670, // E1403 effect
+    1674, // E1403 op
+    1683, // E1403 op
+    1695, // E1403 op
     1716, // E1403 op
-    1728, // E1403 op
-    1740, // E1403 op
-    1761, // E1403 op
-    1780, // E1403 op
-    1803, // E1403 op
-    1832, // E1403 op
-    1847, // E1403 op
-    1916, // E1403 op
-    1954, // E1403 op
-    2006, // E1407 reason
-    2017, // E1407 reason
-    2030, // E1407 reason
-    2040, // E1407 reason
-    2051, // E1407 reason
-    2085, // E1407 reason
-    2103, // E1407 reason
-    2145, // E1407 reason
-    2152, // E1410 reason
-    2186, // E1410 reason
-    2231, // E1410 reason
-    2275, // end
+    1724, // E1403 op
+    1736, // E1403 op
+    1748, // E1403 op
+    1769, // E1403 op
+    1788, // E1403 op
+    1811, // E1403 op
+    1840, // E1403 op
+    1855, // E1403 op
+    1924, // E1403 op
+    1962, // E1403 op
+    2014, // E1407 reason
+    2025, // E1407 reason
+    2038, // E1407 reason
+    2048, // E1407 reason
+    2059, // E1407 reason
+    2093, // E1407 reason
+    2111, // E1407 reason
+    2153, // E1407 reason
+    2160, // E1410 reason
+    2194, // E1410 reason
+    2239, // E1410 reason
+    2283, // end
 ];
 
 const SHAPE_CASE: [u8; 778] = [
@@ -5801,7 +5807,7 @@ const SHAPE_HAS_FIX: [bool; 266] = [
     true, // E1411
 ];
 
-const SHAPE_FIX: [u8; 21706] = [
+const SHAPE_FIX: [u8; 21714] = [
     // 0 E0001: "re-encode the file as UTF-8 (without byte-order mark), or remove the invalid bytes"
     114, 101, 45, 101, 110, 99, 111, 100, 101, 32, 116, 104, 101, 32, 102, 105,
     108, 101, 32, 97, 115, 32, 85, 84, 70, 45, 56, 32, 40, 119, 105, 116,
@@ -7471,12 +7477,12 @@ const SHAPE_FIX: [u8; 21706] = [
     101, 32, 99, 97, 108, 108, 115, 32, 115, 111, 32, 116, 104, 97, 116, 32,
     96, 123, 97, 116, 125, 96, 32, 105, 115, 32, 110, 111, 116, 32, 114, 101,
     97, 99, 104, 101, 100,
-    // 253 E1404: "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`"
+    // 253 E1404: "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`, `park`"
     117, 115, 101, 32, 111, 110, 101, 32, 111, 102, 32, 96, 97, 108, 108, 111,
     99, 96, 44, 32, 96, 116, 114, 97, 112, 96, 44, 32, 96, 114, 101, 99,
     117, 114, 115, 105, 118, 101, 96, 44, 32, 96, 108, 111, 99, 107, 96, 44,
     32, 96, 117, 110, 115, 97, 102, 101, 96, 44, 32, 96, 105, 111, 96, 44,
-    32, 96, 98, 108, 111, 99, 107, 96,
+    32, 96, 98, 108, 111, 99, 107, 96, 44, 32, 96, 112, 97, 114, 107, 96,
     // 254 E1405: "release the guard before this call, give `{lock}` a rank above {held_rank}, or take two mutexes of one rank together with `sync.lock_pair`"
     114, 101, 108, 101, 97, 115, 101, 32, 116, 104, 101, 32, 103, 117, 97, 114,
     100, 32, 98, 101, 102, 111, 114, 101, 32, 116, 104, 105, 115, 32, 99, 97,
@@ -7817,19 +7823,19 @@ const SHAPE_FIX_OFF: [u32; 267] = [
     20418, // E1403
     20489, // E1403 made
     20574, // E1404
-    20646, // E1405
-    20784, // E1405 drop
-    20941, // E1406
-    21017, // E1407
-    21156, // E1407 depth
-    21181, // E1407 self
-    21320, // E1408
-    21390, // E1409
-    21462, // E1410
-    21553, // E1410 depth
-    21578, // E1410 self
-    21669, // E1411
-    21706, // end
+    20654, // E1405
+    20792, // E1405 drop
+    20949, // E1406
+    21025, // E1407
+    21164, // E1407 depth
+    21189, // E1407 self
+    21328, // E1408
+    21398, // E1409
+    21470, // E1410
+    21561, // E1410 depth
+    21586, // E1410 self
+    21677, // E1411
+    21714, // end
 ];
 
 const SHAPE_FIX_APPLICABILITY: [u8; 266] = [
