@@ -15,8 +15,8 @@
 //   fill(x)          every element = x
 //   [u8] find_byte(b), find_any_byte(set): first index of b / of any byte of set
 //   any T: Copy      count(pred), any(pred), all(pred) (pred: fn(T) -> bool; it may be called
-//                    on any elements, in any order, any number of times), copy_from(src)
-//                    (lengths must match: `Assert` panic otherwise)
+//                    on any elements, in any order, any number of times; T may be a view),
+//                    copy_from(src) (T no view; lengths must match: `Assert` panic otherwise)
 //
 // Every method loops in 128-bit vectors (the portable baseline of every CPU target). On x86-64,
 // sum, dot, min, max, find, find_any_byte, eq, fill and copy_from have a second loop in
@@ -2644,8 +2644,8 @@ impl [bool] {
 
 // The predicate of count, any, and all may be called on any elements of the slice, in any order,
 // any number of times: a predicate that can trap may trap even where a sequential loop would have
-// stopped earlier.
-impl<T: Copy> [T] {
+// stopped earlier. They store no element and return none, so T may be a view (`&[&u32]`).
+impl<T: Copy + view> [T] {
     pub fn count(&self, pred: fn(T) -> bool) -> usize {
         let mut n: usize = 0;
         for i in 0..self.len() { n = n + (pred(self[i]) as usize); }
@@ -2677,7 +2677,10 @@ impl<T: Copy> [T] {
         }
         return true;
     }
+}
 
+// copy_from stores into self: over views it would need a `from` clause, so T is no view.
+impl<T: Copy> [T] {
     pub fn copy_from(&mut self, src: &[T]) {
         debug.assert(self.len() == src.len(), "copy_from: the slices differ in length");
         // The byte loops read every byte of an element, so they take only a T whose size equals

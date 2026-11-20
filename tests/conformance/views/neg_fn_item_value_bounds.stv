@@ -1,6 +1,7 @@
 //~ CHECK-ONLY
 // A generic fn item used as a value is an instantiation: its bounds and the view-kind rule
-// hold there as at a call (inferred from the expected fn type, or given).
+// hold there as at a call (inferred from the expected fn type, or given). A method named by path
+// whose impl an unmet trait bound refuses names that bound too, not inference (E0202).
 import std.cell;
 import std.mem;
 import std.sync;
@@ -11,6 +12,12 @@ fn share<T: Sync>(x: &T) { }
 fn apply(f: fn(&mut Option<&u32>, &u32)) { }
 
 struct D { id: u32 }
+
+struct W<T> { v: T, n: u32 }
+
+impl<T: Copy> W<T> {
+    fn get(&self) -> u32 { return self.n; }
+}
 
 fn main() -> i32 {
     let ok: fn(u32) -> (u32, u32) = dup;
@@ -24,5 +31,10 @@ fn main() -> i32 {
     let sw: fn(&mut &u32, &mut &u32) = mem.swap; //~ ERROR E0807
     let s: fn(&cell.Cell<u64>) = share; //~ ERROR E0901
     let mk = cell.Cell::<Option<&u32>>.new; //~ ERROR E0414
+    let w = W::<D>.{ v: D.{ id: 1 }, n: 2 };
+    let n = W::<D>.get(&w); //~ ERROR E0901
+    let g = W::<D>.get; //~ ERROR E0901
+    let mk2 = cell.Cell::<D>.new; //~ ERROR E0901
+    let okw = W::<u32>.get;
     return 0;
 }
