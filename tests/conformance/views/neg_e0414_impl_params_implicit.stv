@@ -1,6 +1,7 @@
 //~ CHECK-ONLY
 // The impls an implied call selects follow the same rule: `next` of a `for` loop, `Display.fmt`
-// of an f-string hole, and an impl method named by path as a fn value.
+// of an f-string hole, and an impl method named by path as a fn value. Each names the param
+// without `view` (E0414), as an explicit call does; a type with no such impl at all is E0208.
 import std.io;
 import std.string;
 
@@ -34,9 +35,9 @@ fn main() -> i32 {
     io.print(f"{own}\n");
     let mut sink: Option<&u32> = Option.None;
     let it = It::<&u32>.{ cur: Option.Some(&a), sink: &mut sink };
-    for x in it { } //~ ERROR E0208
+    for x in it { } //~ ERROR E0414
     let slot = Slot::<&u32>.{ v: Option.Some(&a) };
-    io.print(f"{slot}\n"); //~ ERROR E0208
+    io.print(f"{slot}\n"); //~ ERROR E0414
     let f = Slot::<&u32>.set; //~ ERROR E0414
     return 0;
 }

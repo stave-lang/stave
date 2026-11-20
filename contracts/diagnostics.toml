@@ -422,7 +422,7 @@ fix = { description = "mark field `{name}` `pub` in `{module}`, or use the colum
 code = "E0107"
 severity = "error"
 area = "resolve"
-rule = "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`), at the module's first token; case `dotted`: a module of any package from a file or directory name with a dot (`src/a.b.stv`, `src/c.d/e.stv`): no import can name it and its path text is another module's (`a.b`, or a built-in one for `src/std.cell.stv`), at the module's first token; it takes the place of case `builtin`"
+rule = "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of the root package whose path starts with the name of a built-in package (`src/std/cell.stv` is `std.cell`; a dependency named so is E1002 `builtin-name`), at the module's first token; case `dotted`: a module of any package from a file or directory name with a dot (`src/a.b.stv`, `src/c.d/e.stv`), or of a dependency whose `name` has one (`a.b`: its `src/c.stv` is `a.b.c`): no import can name it and its path text is another module's (`a.b`, `a.b.c`, or a built-in one for `src/std.cell.stv`), at the module's first token; it takes the place of case `builtin`"
 holes = { name = "name", package = "name", module = "path" }
 message = "import path is ambiguous between dependency `{name}` and module `{name}`"
 labels = [{ at = "primary", text = "`{name}` names a dependency and a module of `{package}`" }]
@@ -436,7 +436,7 @@ fix = { description = "rename the directory or file so the module path does not 
 [diag.cases.dotted]
 message = "module `{module}` of package `{package}` comes from a name with a dot, `{name}`"
 labels = [{ at = "primary", text = "no import can name this module" }]
-fix = { description = "rename `{name}` without the dot: a module path's segments are file and directory names, `src/a/b.stv` is `a.b`" }
+fix = { description = "rename `{name}` without the dot: a module path's segments are a dependency's name and file and directory names, `src/a/b.stv` is `a.b`" }
 
 [[diag]]
 code = "E0108"
@@ -1677,7 +1677,7 @@ fix = { description = "run on a `{target}` host, or pass `--runner CMD` (e.g. `-
 code = "E1002"
 severity = "error"
 area = "driver"
-rule = "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, a dependency of a package that is not built in bound under a built-in package's name (`std`, `runtime`; at the name, whatever the dependency's own `name`), or unreadable manifest; located in `stave.toml`"
+rule = "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, a dependency of a package that is not built in bound under a built-in package's name (`std`, `runtime`; at the name, whatever the dependency's own `name`) or such a package's own `name` being one (at the value), or unreadable manifest; located in `stave.toml`"
 holes = { key = "source", expected = "text-literal", root = "text-literal" }
 choices = { expected = ["string", "integer", "boolean", "array", "table"], root = ["src/main.stv", "src/lib.stv"] }
 message = "unknown key `{key}` in `stave.toml`"
@@ -1740,9 +1740,9 @@ labels = [{ at = "primary", text = "built-in package directory" }]
 fix = { description = "remove dependency `{key}`: `std` is imported without one, and the other built-in packages are not for user code" }
 
 [diag.cases.builtin-name]
-message = "dependency `{key}` has the name of a built-in package"
+message = "`{key}` is the name of a built-in package"
 labels = [{ at = "primary", text = "a built-in package's name" }]
-fix = { description = "bind the dependency under another name: `{key}` always names the built-in package (`std` needs no dependency)" }
+fix = { description = "use another name for the package or the dependency: `{key}` always names the built-in package (`std` needs no dependency)" }
 
 [diag.cases.unreadable]
 message = "`stave.toml` cannot be read"

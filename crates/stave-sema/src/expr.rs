@@ -1471,7 +1471,7 @@ impl<'a> Ck<'a> {
                         self.genv().get(p as usize).map(|g| ("param", g.name_span)).into_iter().collect();
                     let d = mk("E0901", None, &[("name", "fmt"), ("param", &pn)], sp, &roles);
                     self.report(d);
-                } else {
+                } else if !self.prog.strings.lookup("fmt").is_some_and(|f| self.refused_view(sp, inner, f)) {
                     let tn = self.show(inner);
                     let d = mk("E0208", None, &[("name", "fmt"), ("type", &tn)], sp, &[]);
                     self.report(d);
@@ -1657,15 +1657,14 @@ impl<'a> Ck<'a> {
     fn impl_args_for(&mut self, imp: DeclId, t: TypeId) -> Option<Vec<GArg>> {
         let idef = self.sigs.impl_def(imp)?;
         let genv = self.genv();
-        let args = self.w.impl_applies(&mut self.tys, idef, t, genv, 0);
-        // `soa.Soa::<X>.new()` with a non-struct or non-Flat X reaches the call, whose bound check
-        // names the problem (E0910, E1407), instead of failing inference
-        let soa_mod = self.prog.decl(self.sigs.lang.soa).map(|d| d.module);
-        if args.is_none() && soa_mod.is_some() && self.prog.decl(imp).map(|d| d.module) == soa_mod {
-            return self.w.impl_head_args(&mut self.tys, idef, t);
-        }
-        // a view for a param without `view` likewise: the use of the method names the param
-        args.or_else(|| self.w.impl_applies_but_views(&mut self.tys, idef, t, genv))
+        // An impl refused only by a bound of its params (a view for a param without `view`, an
+        // unmet trait bound, `soa.Soa::<X>` with a non-struct or non-Flat X) still gives its args:
+        // the use of the method, a call or a fn value, reaches the site check, which names the
+        // unmet bound (E0414, E0901, E0910, E1407) instead of failing inference (E0202).
+        self.w
+            .impl_applies(&mut self.tys, idef, t, genv, 0)
+            .or_else(|| self.w.impl_applies_but_views(&mut self.tys, idef, t, genv))
+            .or_else(|| self.w.impl_head_args(&mut self.tys, idef, t))
     }
 
     /// The value of a finished path state.
@@ -3493,15 +3492,8 @@ impl<'a> Ck<'a> {
                 self.args_only(args)
             }
             Lookup::NotFound => {
-                // an impl that only the view-kind rule refused: name its param
-                if let Some((imp, ia)) = self.w.method_refused_view(&mut self.tys, recv, name, genv)
-                    && let Some(idef) = self.sigs.impl_def(imp)
-                {
-                    let reported = self.diags.len();
-                    self.check_bounds(sspan, imp, &idef.generics, &ia, None);
-                    if self.diags.len() > reported {
-                        return self.args_only(args);
-                    }
+                if self.refused_view(sspan, recv, name) {
+                    return self.args_only(args);
                 }
                 let tn = self.show(recv);
                 let nm = self.prog.strings.get(name).to_string();
@@ -3902,6 +3894,19 @@ impl<'a> Ck<'a> {
         self.tys.intern(TypeKind::Range { elem: b, inclusive: false })
     }
 
+    /// Method `name` of `recv` exists in an impl that only the view-kind rule refused: reports
+    /// the param without `view` (E0414), as every instantiation site does, and returns true.
+    fn refused_view(&mut self, at: Span, recv: TypeId, name: Sym) -> bool {
+        let genv = self.genv();
+        let Some((imp, ia)) = self.w.method_refused_view(&mut self.tys, recv, name, genv) else {
+            return false;
+        };
+        let Some(idef) = self.sigs.impl_def(imp) else { return false };
+        let reported = self.diags.len();
+        self.check_bounds(at, imp, &idef.generics, &ia, None);
+        self.diags.len() > reported
+    }
+
     /// The element type of `for .. in iter` (`it`: the type of `iter`); an iterator's `next` is
     /// recorded as an implicit call at `for_tok`.
     fn element_type(&mut self, for_tok: u32, iter: u32, it: TypeId) -> TypeId {
@@ -3945,6 +3950,11 @@ impl<'a> Ck<'a> {
                     return *x;
                 }
             }
+        }
+        if let Some(next) = self.prog.strings.lookup("next")
+            && self.refused_view(self.icx.node_span(iter), it, next)
+        {
+            return ids::ERROR;
         }
         let tn = self.show(it);
         let d = mk("E0208", None, &[("name", "next"), ("type", &tn)], self.icx.node_span(iter), &[]);
