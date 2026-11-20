@@ -28,8 +28,8 @@
 //! array value binds `T`, over a type with `fn next(&mut self) -> Option<X>` binds `X`; `&[T; N]`
 //! coerces to `&[T]` and `&mut T` to `&T` at coercion sites; fn values are Copy; an f-string hole
 //! whose type has no `Display` impl is E0208 (`fmt`); a bound not satisfied at a call is E0901
-//! case `unsatisfied`; view arguments for a param without `view` are E0414, and E0411 when the
-//! generic ADT is in the std package (its heap containers). Ranges have the internal type
+//! case `unsatisfied`; view arguments for a param without `view` are E0414 (case `container`
+//! when the generic ADT is in the std package). Ranges have the internal type
 //! `Range<T>` (see [`crate::types`]). Expressions, blocks, and patterns nested deeper than
 //! [`MAX_DEPTH`] are E0005 case `expr` (once per body, at the first node over the limit) and get
 //! the error type.

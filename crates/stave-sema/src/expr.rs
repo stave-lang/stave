@@ -2474,7 +2474,7 @@ impl<'a> Ck<'a> {
         }
     }
 
-    /// Bound (E0901 `unsatisfied`, E1407 for `Flat`) and view (E0411/E0412/E0414,
+    /// Bound (E0901 `unsatisfied`, E1407 for `Flat`) and view (E0412/E0414,
     /// [`crate::kinds::view_arg`]) checks of a call's generic args.
     fn check_bounds(
         &mut self,

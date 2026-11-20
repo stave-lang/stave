@@ -646,7 +646,7 @@ fn too_deep<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32) {
     h.report(mk("E0005", Some("type"), &[], icx.node_span(n), &[]));
 }
 
-/// E0414 (E0411 for the std package's containers): a view type argument for a generic param
+/// E0414 (case `container` for the std package's ADTs): a view type argument for a generic param
 /// without the `view` bound ([`crate::kinds::view_arg`]).
 fn view_args<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32, d: DeclId, args: &[GArg]) {
     let gens = h.adt_generics(d);

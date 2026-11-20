@@ -1,0 +1,76 @@
+//~ CHECK-ONLY
+// A vec of views meets generic code only through `view`-bounded params: an impl, a fn item
+// used as a value, and a trait method's own param without the bound reject it.
+import std.cell;
+import std.vec;
+
+struct Bag<T: view> { v: vec.Vec<T> }
+
+impl<T> Bag<T> {
+    fn put(&mut self, x: T) { self.v.push(x); }
+    fn take(&mut self) -> T { return self.v.pop().unwrap(); }
+}
+
+impl<T: Copy> Bag<T> {
+    fn cellify(&self) -> cell.Cell<T> { return cell.Cell.new(*self.v.get_ref(0)); }
+}
+
+impl<T: Copy> Add for Bag<T> {
+    fn add(self, rhs: Self) -> Self {
+        let mut s = self;
+        s.v.push(*rhs.v.get_ref(0));
+        return s;
+    }
+}
+
+trait Merge { fn merge(&mut self, other: &Self); }
+
+impl<T: Copy> Merge for vec.Vec<T> {
+    fn merge(&mut self, other: &Self) { self.push(*other.get_ref(0)); }
+}
+
+fn feed<S: Merge + view>(a: &mut S, b: &S) { a.merge(b); }
+
+view struct Link<T: view> { dst: &mut vec.Vec<T>, src: vec.Vec<T> }
+
+impl<T> Drop for Link<T> { //~ ERROR E0414
+    fn drop(&mut self) { self.dst.push(self.src.pop().unwrap()); }
+}
+
+trait Sink { fn sink<T>(&self, v: &mut vec.Vec<T>, x: T); }
+
+struct Unit {}
+
+impl Sink for Unit {
+    fn sink<T>(&self, v: &mut vec.Vec<T>, x: T) { v.push(x); }
+}
+
+fn leak<S: Sink>(s: &S, v: &mut vec.Vec<&str>, x: &str) {
+    s.sink(v, x); //~ ERROR E0414
+}
+
+fn push<T>(v: &mut vec.Vec<T>, x: T) { v.push(x); }
+
+fn apply(f: fn(&mut vec.Vec<&str>, &str)) { }
+
+fn main() -> i32 {
+    let mut own = Bag::<u32>.{ v: vec.Vec::<u32>.new() };
+    own.put(1);
+    let one = own.take();
+    let mut bag = Bag::<&str>.{ v: vec.Vec::<&str>.new() };
+    let other = Bag::<&str>.{ v: vec.Vec::<&str>.new() };
+    bag.put("x"); //~ ERROR E0414
+    let got = bag.take(); //~ ERROR E0414
+    let c = bag.cellify(); //~ ERROR E0414
+    let mut muts = Bag::<&mut u32>.{ v: vec.Vec::<&mut u32>.new() };
+    let p = muts.take(); //~ ERROR E0414
+    let mut long = vec.Vec::<&str>.new();
+    let short = vec.Vec::<&str>.new();
+    long.merge(&short); //~ ERROR E0414
+    Merge.merge(&mut long, &short); //~ ERROR E0901
+    feed(&mut long, &short); //~ ERROR E0901
+    long.as_mut_slice().copy_from(short.as_slice()); //~ ERROR E0414
+    apply(push); //~ ERROR E0414
+    let sum = bag + other; //~ ERROR E0206
+    return 0;
+}

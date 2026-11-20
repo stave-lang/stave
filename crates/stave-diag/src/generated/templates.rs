@@ -1943,28 +1943,12 @@ pub(super) static ENTRIES: &[Entry] = &[
     Entry {
         code: "E0411",
         severity: Severity::Error,
-        area: "kinds",
-        rule: "view in a heap or container type (Box, Vec, Map, ...)",
-        retired: false,
+        area: "",
+        rule: "retired: `vec.Vec` and the other std containers that may hold views take `T: view`; a std ADT without the bound is E0414 case `container`",
+        retired: true,
         located: true,
-        holes: &[
-            Hole { name: "container", kind: HoleKind::Type, choices: &[] },
-            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
-        ],
-        shapes: &[
-            Shape {
-                case: "",
-                message: "view type `{type}` cannot be stored in `{container}`",
-                labels: &[
-                    LabelTemplate { at: "primary", text: "view inside a heap or container type" },
-                ],
-                fix: Some(FixTemplate {
-                    description: "store an owned value in `{container}`, or keep the view `{type}` in a local",
-                    applicability: Applicability::Placeholder,
-                    edits: &[],
-                }),
-            },
-        ],
+        holes: &[],
+        shapes: &[],
     },
     Entry {
         code: "E0412",
@@ -2063,7 +2047,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "param", text: "`{param}` declared here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "keep `{type}` in a local or in a container whose parameter is `view`-bounded (`vec.Vec`, `Box`, `Option`), or store an owned value",
+                    description: "keep `{type}` in a local or in a container whose parameter is `view`-bounded (`vec.Vec`, `Option`), or store an owned value",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

@@ -1,0 +1,92 @@
+//~ STDOUT vec_run.stdout
+// `vec.Vec`, `std.iter`, `mem.swap`, and `mem.replace` over views: a vec of borrows is built by
+// push and read back, iterated, exchanged; a view struct holds one; a generic fn stores
+// through a `from` clause; a vec of closures is called.
+import std.io;
+import std.iter;
+import std.mem;
+import std.vec;
+
+view struct Bag { items: vec.Vec<&u32>, n: usize }
+
+impl Bag {
+    fn add(&mut self from x, x: &u32) {
+        self.items.push(x);
+        self.n = self.n + 1;
+    }
+}
+
+fn put<T: view>(v: &mut vec.Vec<T> from x, x: T) {
+    v.push(x);
+}
+
+fn take(v: &mut vec.Vec<&u32>) -> &u32 from copy v {
+    return v.pop().unwrap();
+}
+
+fn sum(v: &vec.Vec<&u32>) -> u32 {
+    let mut t: u32 = 0;
+    for r in iter.iter(v.as_slice()) {
+        t = t + **r;
+    }
+    return t;
+}
+
+fn main() -> i32 {
+    let a: u32 = 1;
+    let b: u32 = 20;
+    let c: u32 = 300;
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    v.push(&a);
+    v.push(&b);
+    put(&mut v, &c);
+    let s1 = sum(&v);
+    let second: u32 = **v.get_ref(1);
+    *v.get_mut(0) = &c;
+    let first: u32 = **v.get_ref(0);
+    let arr: [&u32; 2] = [&a, &b];
+    v.extend_from_slice(&arr);
+    let n = v.len();
+    let last: u32 = *take(&mut v);
+    io.print(f"{s1} {second} {first} {n} {last}\n");
+
+    let mut words: vec.Vec<&str> = vec.Vec::<&str>.new();
+    words.push("stave");
+    words.push("views");
+    let w0 = *words.get_ref(0);
+    let w1 = *words.get_ref(1);
+    io.print(f"{w0} {w1}\n");
+
+    let mut x: &u32 = &a;
+    let mut y: &u32 = &b;
+    mem.swap(&mut x, &mut y);
+    let old = mem.replace(&mut x, &c);
+    let (xv, yv, ov) = (*x, *y, *old);
+    io.print(f"{xv} {yv} {ov}\n");
+
+    let mut p: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    p.push(&a);
+    let mut q: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    q.push(&b);
+    q.push(&c);
+    mem.swap(&mut p, &mut q);
+    let (pn, qn) = (p.len(), q.len());
+    io.print(f"{pn} {qn}\n");
+
+    let mut bag = Bag.{ items: vec.Vec::<&u32>.new(), n: 0 };
+    bag.add(&b);
+    bag.add(&c);
+    let bs = sum(&bag.items);
+    let bn = bag.n;
+    io.print(f"{bs} {bn}\n");
+
+    let k: u32 = 5;
+    let mut fs: vec.Vec<fn(u32) -> u32> = vec.Vec::<fn(u32) -> u32>.new();
+    fs.push(fn(z: u32) -> u32 { return z + k; });
+    fs.push(fn(z: u32) -> u32 { return z * k; });
+    let f0 = *fs.get_ref(0);
+    let f1 = *fs.get_ref(1);
+    let (r0, r1) = (f0(2), f1(2));
+    io.print(f"{r0} {r1}\n");
+    return 0;
+}
