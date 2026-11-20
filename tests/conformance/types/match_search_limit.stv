@@ -1,8 +1,9 @@
 //~ CHECK-ONLY
 // The exhaustiveness check has a search limit: a match nested deeper than it is rejected with
 // E0300 case `limit`, never accepted unchecked. The pattern misses `S0.{ a: S1.{ .. false } }`.
+// Such a pattern needs a type as deep, past the type depth limit (E0005 case `type`).
 
-struct S0 { pub a: S1 }
+struct S0 { pub a: S1 } //~ ERROR E0005
 struct S1 { pub a: S2 }
 struct S2 { pub a: S3 }
 struct S3 { pub a: S4 }

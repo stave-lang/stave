@@ -1758,7 +1758,7 @@ impl<'a> Ck<'a> {
             params: sig.params.clone().into_boxed_slice(),
             ret: sig.ret,
             features: sig.features,
-            deny: sig.deny,
+            deny: crate::effects::Effects::fn_type_deny(sig.deny),
         };
         if sig.params.contains(&ids::ERROR) || sig.ret == ids::ERROR {
             return ids::ERROR;
