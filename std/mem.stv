@@ -15,11 +15,11 @@
 
 import runtime.alloc;
 
-pub fn type_size<T>() -> usize {
+pub fn type_size<T: view>() -> usize {
     return size_of::<T>();
 }
 
-pub fn type_align<T>() -> usize {
+pub fn type_align<T: view>() -> usize {
     return align_of::<T>();
 }
 
@@ -29,7 +29,7 @@ pub fn drop<T: view>(x: T) {}
 
 // Puts v into *dst and returns the old value (the fix of E0504: a value cannot be moved out of a
 // borrow, but it can be exchanged for another).
-pub fn replace<T>(dst: &mut T, v: T) -> T {
+pub fn replace<T: view>(dst: &mut T from v, v: T) -> T from copy dst {
     let p = &mut *dst as *mut T;
     let old = unsafe("p comes from dst: valid, aligned, initialized, and not aliased while dst lives") p.read();
     unsafe("the slot was moved out by read: write fills it without dropping") { p.write(v); }
@@ -37,7 +37,7 @@ pub fn replace<T>(dst: &mut T, v: T) -> T {
 }
 
 // Exchanges *a and *b (two `&mut` never overlap).
-pub fn swap<T>(a: &mut T, b: &mut T) {
+pub fn swap<T: view>(a: &mut T from copy b, b: &mut T from copy a) {
     let pa = &mut *a as *mut T;
     let pb = &mut *b as *mut T;
     let t = unsafe("pa comes from a: valid and initialized") pa.read();
@@ -58,15 +58,15 @@ pub fn forget<T>(x: T) {
 }
 
 // A non-null, aligned pointer for empty buffers; never dereferenced.
-pub fn dangling<T>() -> *mut T {
+pub fn dangling<T: view>() -> *mut T {
     return type_align::<T>() as *mut T;
 }
 
-pub fn add<T>(p: *const T, i: usize) -> *const T {
+pub fn add<T: view>(p: *const T, i: usize) -> *const T {
     return ((p as usize) + i * type_size::<T>()) as *const T;
 }
 
-pub fn add_mut<T>(p: *mut T, i: usize) -> *mut T {
+pub fn add_mut<T: view>(p: *mut T, i: usize) -> *mut T {
     return ((p as usize) + i * type_size::<T>()) as *mut T;
 }
 
@@ -93,13 +93,13 @@ pub fn str_bytes(s: &str) -> &[u8] from s {
 
 // The slice of len elements at p, borrowed from owner (A3, A4).
 pub unsafe("p..p+len holds initialized T that owner keeps alive and unmodified while the result lives")
-fn slice<O, T>(owner: &O, p: *const T, len: usize) -> &[T] from owner {
+fn slice<O: view, T: view>(owner: &O, p: *const T, len: usize) -> &[T] from owner {
     let parts: [usize; 2] = [p as usize, len];
     return unsafe("a slice reference is (data pointer, length)") *(&parts as *const [usize; 2] as *const &[T]);
 }
 
 pub unsafe("p..p+len holds initialized T that owner keeps alive and lends exclusively while the result lives")
-fn slice_mut<O, T>(owner: &mut O, p: *mut T, len: usize) -> &mut [T] from owner {
+fn slice_mut<O: view, T: view>(owner: &mut O, p: *mut T, len: usize) -> &mut [T] from owner {
     let parts: [usize; 2] = [p as usize, len];
     // `&mut [T]` is not Copy: moved out with `read` (`*p` by value is for Copy pointees only).
     let q = &parts as *const [usize; 2] as *const &mut [T];

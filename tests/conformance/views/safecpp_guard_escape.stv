@@ -1,13 +1,16 @@
 //~ CHECK-ONLY
 // Safe C++ catalogue, guards: a guard escaping its scope through a struct field,
-// a heap container, a global, or a return without `from`. Stave: E0410, E0411, E0413, E0510.
+// a heap container, a global, or a return without `from`. Stave: E0410, E0413, E0510 (a
+// `vec.Vec` of guards is a view, so it leaves a fn only `from` a param).
 import std.vec;
 
 view struct Guard { cell: &mut u32 }
 
 struct Pool { g: Guard } //~ ERROR E0410
 
-fn many(gs: vec.Vec<Guard>) { } //~ ERROR E0411
+fn many(gs: vec.Vec<Guard>) -> vec.Vec<Guard> {
+    return gs; //~ ERROR E0510
+}
 
 static CURRENT: Option<Guard> = Option.None; //~ ERROR E0413
 

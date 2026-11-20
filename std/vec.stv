@@ -30,14 +30,14 @@ impl core.Display for AllocError {
     }
 }
 
-pub struct Vec<T> {
+pub struct Vec<T: view> {
     ptr: *mut T,
     len: usize,
     cap: usize,
 }
 
-unsafe("a Vec uniquely owns its buffer and elements; moving it moves them") impl<T: core.Send> core.Send for Vec<T> {}
-unsafe("&Vec<T> gives only &T and &[T]; every mutation needs &mut Vec<T>") impl<T: core.Sync> core.Sync for Vec<T> {}
+unsafe("a Vec uniquely owns its buffer and elements; moving it moves them") impl<T: core.Send + view> core.Send for Vec<T> {}
+unsafe("&Vec<T> gives only &T and &[T]; every mutation needs &mut Vec<T>") impl<T: core.Sync + view> core.Sync for Vec<T> {}
 
 const USIZE_MAX: usize = 0xFFFF_FFFF_FFFF_FFFF;
 
@@ -51,7 +51,7 @@ fn alloc_error() -> AllocError {
     return AllocError.{};
 }
 
-impl<T> Vec<T> {
+impl<T: view> Vec<T> {
     pub fn new() -> Vec<T> {
         let zst = mem.type_size::<T>() == 0;
         let cap: usize = if zst then USIZE_MAX else 0;
@@ -108,7 +108,7 @@ impl<T> Vec<T> {
         return Result.Ok(());
     }
 
-    pub fn push(&mut self, x: T) {
+    pub fn push(&mut self from x, x: T) {
         if self.len == self.cap { self.reserve(1); }
         let slot = mem.add_mut(self.ptr, self.len);
         unsafe("len < cap: slot is inside the buffer and uninitialized") { slot.write(x); }
@@ -116,7 +116,7 @@ impl<T> Vec<T> {
     }
 
     // On failure x comes back in the `Err`, so nothing is dropped behind the caller's back.
-    pub fn try_push(&mut self, x: T) -> Result<(), T> {
+    pub fn try_push(&mut self from x, x: T) -> Result<(), T> from x {
         if self.len == self.cap && self.try_reserve(1).is_err() { return Result.Err(x); }
         let slot = mem.add_mut(self.ptr, self.len);
         unsafe("len < cap: slot is inside the buffer and uninitialized") { slot.write(x); }
@@ -124,7 +124,7 @@ impl<T> Vec<T> {
         return Result.Ok(());
     }
 
-    pub fn pop(&mut self) -> Option<T> {
+    pub fn pop(&mut self) -> Option<T> from copy self {
         if self.len == 0 { return Option.None; }
         self.len = self.len - 1;
         let slot = mem.add(self.ptr as *const T, self.len);
@@ -184,28 +184,28 @@ impl<T> Vec<T> {
     }
 }
 
-impl<T: Copy> Vec<T> {
-    pub fn extend_from_slice(&mut self, xs: &[T]) {
+impl<T: Copy + view> Vec<T> {
+    pub fn extend_from_slice(&mut self from copy xs, xs: &[T]) {
         self.reserve(xs.len());
-        self.extend_reserved(xs);
-    }
-
-    pub fn try_extend_from_slice(&mut self, xs: &[T]) -> Result<(), AllocError> {
-        self.try_reserve(xs.len())?;
-        self.extend_reserved(xs);
-        return Result.Ok(());
-    }
-
-    fn extend_reserved(&mut self, xs: &[T]) {
         for i in 0..xs.len() {
             let slot = mem.add_mut(self.ptr, self.len);
-            unsafe("the caller reserved room for xs: slot is inside the buffer and uninitialized") { slot.write(xs[i]); }
+            unsafe("room for xs is reserved: slot is inside the buffer and uninitialized") { slot.write(xs[i]); }
             self.len = self.len + 1;
         }
     }
+
+    pub fn try_extend_from_slice(&mut self from copy xs, xs: &[T]) -> Result<(), AllocError> {
+        self.try_reserve(xs.len())?;
+        for i in 0..xs.len() {
+            let slot = mem.add_mut(self.ptr, self.len);
+            unsafe("room for xs is reserved: slot is inside the buffer and uninitialized") { slot.write(xs[i]); }
+            self.len = self.len + 1;
+        }
+        return Result.Ok(());
+    }
 }
 
-impl<T> core.Drop for Vec<T> {
+impl<T: view> core.Drop for Vec<T> {
     fn drop(&mut self) {
         self.clear();
         let size = mem.type_size::<T>();

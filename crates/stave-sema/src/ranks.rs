@@ -124,8 +124,9 @@ fn import<I: Interner + ?Sized>(cx: &mut I, local: &[TypeKind], t: TypeId) -> Op
 }
 
 /// The parts of a value of type `t` that may hold a lock: each `MutexGuard` reached through
-/// fields, enum payloads, tuple and array elements (not through references, pointers, slices,
-/// or fn values), and each `T: view` param of `generics` reached so. Iterative, each type once.
+/// fields, enum payloads, tuple and array elements, and the pointee of an ADT's raw pointer field
+/// (not through references, other pointers, slices, or fn values), and each `T: view` param of
+/// `generics` reached so. Iterative, each type once.
 pub fn lock_parts<I: Interner + ?Sized>(
     cx: &mut I,
     prog: &Program,
@@ -154,7 +155,13 @@ pub fn lock_parts<I: Interner + ?Sized>(
             }
             TypeKind::Adt { .. } => {
                 if let Some(vs) = crate::mono::adt_fields(sigs, cx, t) {
-                    work.extend(vs.into_iter().flatten());
+                    for f in vs.into_iter().flatten() {
+                        // an ADT owns what a raw pointer field points to (`vec.Vec`'s buffer)
+                        if let TypeKind::Ptr { inner, .. } = cx.kind(f) {
+                            work.push(*inner);
+                        }
+                        work.push(f);
+                    }
                 }
             }
             TypeKind::Tuple(ts) => work.extend(ts.iter().copied()),

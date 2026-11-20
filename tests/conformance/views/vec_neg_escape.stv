@@ -1,0 +1,44 @@
+//~ CHECK-ONLY
+// A vec of views leaves a fn only with what its `from` clause covers: a vec of borrows of
+// locals (E0512), or a borrow of a by-value vec param, which dies at the return (E0512); a
+// closure capturing a local vec of views does not escape either. A vec of views is never
+// const, static, forgotten, or a field of a non-view type.
+import std.mem;
+import std.vec;
+
+fn locals() -> vec.Vec<&u32> {
+    let a: u32 = 3;
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    v.push(&a);
+    return v; //~ ERROR E0512
+}
+
+fn element_of_param(v: vec.Vec<&u32>) -> &&u32 from v {
+    return v.get_ref(0); //~ ERROR E0512
+}
+
+fn closure(a: &u32) -> fn() -> u32 from a {
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    v.push(a);
+    return fn() -> u32 { return **v.get_ref(0); }; //~ ERROR E0512
+}
+
+static V: vec.Vec<&u32> = vec.Vec::<&u32>.new(); //~ ERROR E0413
+
+fn forget(v: vec.Vec<&u32>) {
+    mem.forget(v); //~ ERROR E0412
+}
+
+struct Owner { items: vec.Vec<&u32> } //~ ERROR E0410
+
+// fine: what comes back is covered by `from`
+fn first(v: vec.Vec<&u32>) -> &u32 from v {
+    return *v.get_ref(0);
+}
+
+fn keep(a: &u32, b: &u32) -> vec.Vec<&u32> from a + b {
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    v.push(a);
+    v.push(b);
+    return v;
+}

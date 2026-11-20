@@ -21,8 +21,8 @@ fn main() -> i32 {
     let h: fn(D) -> (D, D) = dup; //~ ERROR E0901
     let h2: fn(&mut u32) -> (&mut u32, &mut u32) = dup; //~ ERROR E0414
     let leak: fn(sync.MutexGuard<u32, 2>) = mem.forget; //~ ERROR E0412
-    let sw: fn(&mut &u32, &mut &u32) = mem.swap; //~ ERROR E0414
+    let sw: fn(&mut &u32, &mut &u32) = mem.swap; //~ ERROR E0807
     let s: fn(&cell.Cell<u64>) = share; //~ ERROR E0901
-    let mk = cell.Cell::<Option<&u32>>.new; //~ ERROR E0411
+    let mk = cell.Cell::<Option<&u32>>.new; //~ ERROR E0414
     return 0;
 }
