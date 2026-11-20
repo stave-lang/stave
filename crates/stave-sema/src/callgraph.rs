@@ -361,7 +361,10 @@ impl CallGraph {
                     EdgeKind::Call => "call".to_string(),
                     EdgeKind::Dispatch { decl } => format!("dispatch {}", prog.decl_path(decl)),
                     EdgeKind::Indirect if e.deny != 0 => {
-                        format!("indirect without({})", crate::effects::Effects(e.deny).names().join(", "))
+                        format!(
+                            "indirect without({})",
+                            crate::effects::Effects(e.deny).minimal().names().join(", ")
+                        )
                     }
                     EdgeKind::Indirect => "indirect".to_string(),
                     EdgeKind::Member => "member".to_string(),

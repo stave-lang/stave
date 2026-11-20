@@ -108,7 +108,7 @@ fix = { description = "write one of {expected} here, or remove {found}" }
 code = "E0005"
 severity = "error"
 area = "lex-parse"
-rule = "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit"
+rule = "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit. Case `type`: a type nested deeper than 1,000 levels (a struct or enum counts one level above each field; a pointee behind `&`, `*`, a slice, or a fn type is measured on its own), written, from an alias, or built by an instance; once per type, at the first signature, field, alias, value, or call that reaches it"
 message = "brackets nested deeper than 10000 levels"
 labels = [{ at = "primary", text = "this opener reaches nesting depth 10001" }]
 fix = { description = "reduce the nesting: move inner expressions into local bindings, functions, or consts" }
@@ -116,6 +116,11 @@ fix = { description = "reduce the nesting: move inner expressions into local bin
 [diag.cases.expr]
 message = "expression nested deeper than 20000 levels"
 labels = [{ at = "primary", text = "this node reaches nesting depth 20001" }]
+
+[diag.cases.type]
+message = "type nested deeper than 1000 levels"
+labels = [{ at = "primary", text = "this type reaches nesting depth 1001" }]
+fix = { description = "nest the type less deeply: hold the inner part behind a reference, pointer, or `Box`, or split it into several fields" }
 
 [[diag]]
 code = "E0006"
@@ -417,7 +422,7 @@ fix = { description = "mark field `{name}` `pub` in `{module}`, or use the colum
 code = "E0107"
 severity = "error"
 area = "resolve"
-rule = "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`, and so is `src/std.cell.stv`), at the module's first token"
+rule = "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of the root package whose path starts with the name of a built-in package (`src/std/cell.stv` is `std.cell`; a dependency named so is E1002 `builtin-name`), at the module's first token; case `dotted`: a module of any package from a file or directory name with a dot (`src/a.b.stv`, `src/c.d/e.stv`), or of a dependency whose `name` has one (`a.b`: its `src/c.stv` is `a.b.c`): no import can name it and its path text is another module's (`a.b`, `a.b.c`, or a built-in one for `src/std.cell.stv`), at the module's first token; it takes the place of case `builtin`"
 holes = { name = "name", package = "name", module = "path" }
 message = "import path is ambiguous between dependency `{name}` and module `{name}`"
 labels = [{ at = "primary", text = "`{name}` names a dependency and a module of `{package}`" }]
@@ -427,6 +432,11 @@ fix = { description = "for the module, start the path with the package's own nam
 message = "module `{module}` of package `{package}` is spelled like the built-in package `{name}`"
 labels = [{ at = "primary", text = "this module is never `{name}`'s" }]
 fix = { description = "rename the directory or file so the module path does not start with `{name}`: compiler-known items come from the built-in packages only" }
+
+[diag.cases.dotted]
+message = "module `{module}` of package `{package}` comes from a name with a dot, `{name}`"
+labels = [{ at = "primary", text = "no import can name this module" }]
+fix = { description = "rename `{name}` without the dot: a module path's segments are a dependency's name and file and directory names, `src/a/b.stv` is `a.b`" }
 
 [[diag]]
 code = "E0108"
@@ -1646,11 +1656,11 @@ fix = { description = "use a struct with one field per column, e.g. `struct Row 
 code = "E0911"
 severity = "error"
 area = "generics"
-rule = "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested more than 256 levels deep; at the call, in a const-expr too"
+rule = "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels (E0005 case `type` reports it too where it is written); at the call, in a const-expr too"
 holes = { type = "type" }
 message = "`{type}` has no layout for `size_of` / `align_of`"
 labels = [{ at = "primary", text = "no size or alignment for this type" }]
-fix = { description = "ask for the size of a sized type nested at most 256 levels deep" }
+fix = { description = "ask for the size of a sized type nested at most 1000 levels deep" }
 
 [[diag]]
 code = "E1001"
@@ -1667,7 +1677,7 @@ fix = { description = "run on a `{target}` host, or pass `--runner CMD` (e.g. `-
 code = "E1002"
 severity = "error"
 area = "driver"
-rule = "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, or unreadable manifest; located in `stave.toml`"
+rule = "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, a dependency of a package that is not built in bound under a built-in package's name (`std`, `runtime`; at the name, whatever the dependency's own `name`) or such a package's own `name` being one (at the value), or unreadable manifest; located in `stave.toml`"
 holes = { key = "source", expected = "text-literal", root = "text-literal" }
 choices = { expected = ["string", "integer", "boolean", "array", "table"], root = ["src/main.stv", "src/lib.stv"] }
 message = "unknown key `{key}` in `stave.toml`"
@@ -1728,6 +1738,11 @@ fix = { description = "point `path` at a package directory (one with `stave.toml
 message = "dependency `{key}`: its `path` is a built-in package"
 labels = [{ at = "primary", text = "built-in package directory" }]
 fix = { description = "remove dependency `{key}`: `std` is imported without one, and the other built-in packages are not for user code" }
+
+[diag.cases.builtin-name]
+message = "`{key}` is the name of a built-in package"
+labels = [{ at = "primary", text = "a built-in package's name" }]
+fix = { description = "use another name for the package or the dependency: `{key}` always names the built-in package (`std` needs no dependency)" }
 
 [diag.cases.unreadable]
 message = "`stave.toml` cannot be read"
@@ -2024,7 +2039,7 @@ severity = "error"
 area = "effects"
 rule = "a fn with a deny clause has a denied effect through what it can call; checked per instance of a generic fn; names the call chain and the op; at the denied effect, or for an instance at the call that instantiates it; case `self` when the op is in the fn itself"
 holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal" }
-choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
+choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
 message = "`{fn}` denies `{effect}`, but it reaches `{at}`, which {op}"
 labels = [{ at = "primary", text = "`{fn}` must not have `{effect}`" }, { at = "deny", text = "`{effect}` denied here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "op", text = "`{at}` {op} here" }]
 fix = { description = "remove `{effect}` from the deny clause, or change the calls so that `{at}` is not reached" }
@@ -2047,9 +2062,9 @@ fix = { description = "mark every fn of the recursion `rec fn` (its depth then h
 code = "E1403"
 severity = "error"
 area = "effects"
-rule = "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1; case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)"
+rule = "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1 (every fn type denies `park`); case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)"
 holes = { from = "type", to = "type", effect = "text-literal", fn = "path", at = "path", op = "text-literal" }
-choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
+choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
 message = "`{from}` cannot be used as `{to}`: it does not deny `{effect}`"
 labels = [{ at = "primary", text = "coerced here" }]
 fix = { description = "add `{effect}` to the deny clause of `{from}`, or remove it from `{to}`" }
@@ -2067,7 +2082,7 @@ rule = "unknown effect name in a deny clause"
 holes = { name = "name" }
 message = "unknown effect `{name}`"
 labels = [{ at = "primary", text = "not an effect" }]
-fix = { description = "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`" }
+fix = { description = "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`, `park`" }
 
 [[diag]]
 code = "E1405"

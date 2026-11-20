@@ -70,11 +70,6 @@ fn vec1(x: u32) -> vec.Vec<u32> {
 /// impl applies (E0208, E0206), not Flat (E1407), not Frozen (E1410).
 pub const RULE_CODES: &[&str] = &["E0414", "E0411", "E0412", "E0901", "E0208", "E0206", "E1407", "E1410"];
 
-/// [`RULE_CODES`] and E0202: an impl method named by path whose impl does not apply for a reason
-/// other than the view kind alone is reported as generic args that cannot be inferred.
-const PATH_VALUE_CODES: &[&str] =
-    &["E0414", "E0411", "E0412", "E0901", "E0208", "E0206", "E1407", "E1410", "E0202"];
-
 /// What a bound asks besides the view kind.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Req {
@@ -649,10 +644,6 @@ pub(super) fn case(r: &mut Rng, idx: usize, want_bad: bool) -> Case {
     }
     b.add("x0 +% x1");
     let label = format!("{}/{}/{}", site.label(), bound.label(), arg.label());
-    let codes = match (bad, site) {
-        (false, _) => &[][..],
-        (true, Site::ImplMethodValue | Site::StdCellNew) => PATH_VALUE_CODES,
-        (true, _) => RULE_CODES,
-    };
+    let codes = if bad { RULE_CODES } else { &[][..] };
     finish(idx, b, items, label, bad, codes)
 }

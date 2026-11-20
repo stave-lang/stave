@@ -38,7 +38,7 @@ pub fn push_pascal(out: &mut String, w: &str) {
 mod tests {
     use super::*;
 
-    const RESERVED: [&str; 62] = [
+    const RESERVED: [&str; 65] = [
         "fn",
         "let",
         "mut",
@@ -97,6 +97,9 @@ mod tests {
         "forall",
         "exists",
         "derive",
+        "async",
+        "await",
+        "yield",
         "never",
         "io",
         "std",

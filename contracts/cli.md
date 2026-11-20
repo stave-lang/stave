@@ -139,7 +139,7 @@ Outputs and statuses of the code-generating commands:
   and its dependencies outside `std` and `runtime` (a generic fn once per instance the program
   makes), in canonical (file F, offset) order, then by name. Human: `<file>:<line>:<col>: <fn>:
   <effects>`, the effects space-separated in the order `alloc trap recursive lock unsafe io
-  block`, or `none`; `--json`: one object per line,
+  block park`, or `none`; `--json`: one object per line,
   `{"file":"src/main.stv","line":9,"col":4,"fn":"main.add","effects":["trap"]}`. `file`, `line`,
   `col` as in `unsafe-report`, at the fn's name (a closure: its `fn` token); `fn` is the
   checked-IR path, with the type args of an instance (`main.id<u32>`), a closure `<fn>.<k>`.

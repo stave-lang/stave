@@ -111,7 +111,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0005",
         severity: Severity::Error,
         area: "lex-parse",
-        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit",
+        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit. Case `type`: a type nested deeper than 1,000 levels (a struct or enum counts one level above each field; a pointee behind `&`, `*`, a slice, or a fn type is measured on its own), written, from an alias, or built by an instance; once per type, at the first signature, field, alias, value, or call that reaches it",
         retired: false,
         located: true,
         holes: &[],
@@ -136,6 +136,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "reduce the nesting: move inner expressions into local bindings, functions, or consts",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "type",
+                message: "type nested deeper than 1000 levels",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this type reaches nesting depth 1001" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "nest the type less deeply: hold the inner part behind a reference, pointer, or `Box`, or split it into several fields",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -918,7 +930,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0107",
         severity: Severity::Error,
         area: "resolve",
-        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`, and so is `src/std.cell.stv`), at the module's first token",
+        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of the root package whose path starts with the name of a built-in package (`src/std/cell.stv` is `std.cell`; a dependency named so is E1002 `builtin-name`), at the module's first token; case `dotted`: a module of any package from a file or directory name with a dot (`src/a.b.stv`, `src/c.d/e.stv`), or of a dependency whose `name` has one (`a.b`: its `src/c.stv` is `a.b.c`): no import can name it and its path text is another module's (`a.b`, `a.b.c`, or a built-in one for `src/std.cell.stv`), at the module's first token; it takes the place of case `builtin`",
         retired: false,
         located: true,
         holes: &[
@@ -947,6 +959,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "rename the directory or file so the module path does not start with `{name}`: compiler-known items come from the built-in packages only",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "dotted",
+                message: "module `{module}` of package `{package}` comes from a name with a dot, `{name}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no import can name this module" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "rename `{name}` without the dot: a module path's segments are a dependency's name and file and directory names, `src/a/b.stv` is `a.b`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4097,7 +4121,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0911",
         severity: Severity::Error,
         area: "generics",
-        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested more than 256 levels deep; at the call, in a const-expr too",
+        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels (E0005 case `type` reports it too where it is written); at the call, in a const-expr too",
         retired: false,
         located: true,
         holes: &[
@@ -4111,7 +4135,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "no size or alignment for this type" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "ask for the size of a sized type nested at most 256 levels deep",
+                    description: "ask for the size of a sized type nested at most 1000 levels deep",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4145,7 +4169,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1002",
         severity: Severity::Error,
         area: "driver",
-        rule: "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, or unreadable manifest; located in `stave.toml`",
+        rule: "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, a dependency of a package that is not built in bound under a built-in package's name (`std`, `runtime`; at the name, whatever the dependency's own `name`) or such a package's own `name` being one (at the value), or unreadable manifest; located in `stave.toml`",
         retired: false,
         located: true,
         holes: &[
@@ -4198,6 +4222,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove dependency `{key}`: `std` is imported without one, and the other built-in packages are not for user code",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "builtin-name",
+                message: "`{key}` is the name of a built-in package",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a built-in package's name" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use another name for the package or the dependency: `{key}` always names the built-in package (`std` needs no dependency)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -5046,7 +5082,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         located: true,
         holes: &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
         ],
@@ -5117,12 +5153,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1403",
         severity: Severity::Error,
         area: "effects",
-        rule: "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1; case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)",
+        rule: "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1 (every fn type denies `park`); case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "from", kind: HoleKind::Type, choices: &[] },
             Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
@@ -5176,7 +5212,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "not an effect" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`",
+                    description: "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`, `park`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

@@ -2,15 +2,18 @@
 //! clause `without(..)` checked against it (E1401), and fn values made where a fn type with a
 //! deny clause is wanted (E1403 case `made`).
 //!
-//! **Effects** ([`Effects`]): `alloc trap recursive lock unsafe io block`. A node's own effects
-//! ([`EffectSets::local`]) come from:
+//! **Effects** ([`Effects`]): `alloc trap recursive lock unsafe io block park`. `park` (a wait on a
+//! completion queue) is a part of `block`: every source of `park` also gives `block`, and a deny
+//! clause that names `block` denies `park` too ([`Effects::deny_of_name`]). Nothing has `park`:
+//! a source with every effect has all but it ([`Effects::ALL`]), and a fn type never has it
+//! ([`Effects::fn_type_deny`]). A node's own effects ([`EffectSets::local`]) come from:
 //!
 //! | Source | Effects |
 //! |---|---|
 //! | the runtime fns of [`BOUNDARY`] (allocator, panic, lock word, futex, thread start and join) | their row; nothing they call counts |
-//! | an `extern "C"` import | all except those its `without` lists (a claim of the block's obligation) |
+//! | an `extern "C"` import | [`Effects::ALL`] except those its `without` lists (a claim of the block's obligation) |
 //! | intrinsic `syscall0`..`syscall6`, `thread_clone` | `io` |
-//! | intrinsic `call_on_stack`, `cpu_init` (they run code no edge shows) | all |
+//! | intrinsic `call_on_stack`, `cpu_init` (they run code no edge shows) | [`Effects::ALL`] |
 //! | a trapping instruction of the checked IR after the removal of proven bounds and contract checks ([`NodeIr`]; a kept `ensures` check is its failure call) | `trap` |
 //! | `panic.out_of_memory` in that IR | `alloc` |
 //! | membership in a call cycle (an SCC that is a cycle) | `recursive`, `trap` (stack overflow) |
@@ -75,17 +78,41 @@ impl Effects {
     pub const UNSAFE: Effects = Effects(1 << 4);
     pub const IO: Effects = Effects(1 << 5);
     pub const BLOCK: Effects = Effects(1 << 6);
+    /// A wait on a completion queue: a part of [`Effects::BLOCK`], never without it.
+    pub const PARK: Effects = Effects(1 << 7);
+    /// Every effect a source can have: all but [`Effects::PARK`]. Only a direct call of a Stave fn
+    /// may park (its caller lays out the waiting frame), so neither an `extern "C"` import nor
+    /// code the call graph does not show has it.
     pub const ALL: Effects = Effects(0x7f);
     /// The effect names, by bit.
-    pub const NAMES: [&'static str; 7] = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"];
+    pub const NAMES: [&'static str; 8] =
+        ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"];
 
     pub fn of_name(s: &str) -> Option<Effects> {
         Self::NAMES.iter().position(|&n| n == s).map(|i| Effects(1 << i))
     }
 
+    /// What a deny clause entry `s` denies: its effect, and for `block` also `park`.
+    pub fn deny_of_name(s: &str) -> Option<Effects> {
+        let e = Self::of_name(s)?;
+        Some(if e == Effects::BLOCK { e | Effects::PARK } else { e })
+    }
+
+    /// The deny bits a fn type stores for clause bits `d`: every fn type denies `park`, so the
+    /// bit is left out and `fn(..) without(park)` is the type `fn(..)`.
+    pub fn fn_type_deny(d: u8) -> u8 {
+        d & !Effects::PARK.0
+    }
+
     /// The names of the effects in the set, in [`Effects::NAMES`] order.
     pub fn names(self) -> Vec<&'static str> {
-        (0..7).filter(|i| self.0 & (1 << i) != 0).map(|i| Self::NAMES[i]).collect()
+        (0..8).filter(|i| self.0 & (1 << i) != 0).map(|i| Self::NAMES[i]).collect()
+    }
+
+    /// The set without the effects another of its effects implies (`park` beside `block`): what
+    /// a deny clause of these bits is written with.
+    pub fn minimal(self) -> Effects {
+        if self.contains(Effects::BLOCK) { Effects(self.0 & !Effects::PARK.0) } else { self }
     }
 
     pub fn contains(self, o: Effects) -> bool {
@@ -102,7 +129,7 @@ impl Effects {
 
     /// The single effects of the set, in [`Effects::NAMES`] order.
     pub fn each(self) -> impl Iterator<Item = Effects> {
-        (0..7).map(|i| Effects(1 << i)).filter(move |e| self.meets(*e))
+        (0..8).map(|i| Effects(1 << i)).filter(move |e| self.meets(*e))
     }
 }
 
@@ -902,8 +929,9 @@ pub fn check(prog: &Program, tc: &Typeck, plan: &Plan, sets: &EffectSets) -> Vec
             Why::Made { .. } => (sets.set[c.node as usize], entry),
             Why::Value { .. } => (Effects::NONE, entry),
         };
+        // a `park` comes with its `block`: one diagnostic, about `block`
         let have = Effects((in_set.0 | at_entry.0) & c.deny.0);
-        for e in have.each() {
+        for e in have.minimal().each() {
             let found =
                 if in_set.meets(e) { sets.chain_end(g, c.node, e) } else { Some((Vec::new(), c.node, true)) };
             let Some((edges, end, entered)) = found else { continue };

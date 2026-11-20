@@ -280,6 +280,8 @@ list):
   `lock_pair`. The rank check (E1405, E1406) knows only these; `try_lock` acquires nothing;
 - `std.thread.join`, `std.thread.par_for`, `std.thread.par_for_mut`, whose fn-value arguments get
   the thread capture checks (E0802, E0806);
+- the pending-operation types of std, which are must-consume (LANG.md §3: consumed only by a
+  `self` method, no implicit drop on any path): `std.gpu.Launch` (designed; E1104);
 - `std.soa.Soa<T>` with fields `ptr: *mut u8`, `len: usize`, `cap: usize`: outside `std.soa`
   its fields are the columns, one per field of the struct T (E0910 for another T): column k
   is the `[F]` place of `len` values of field k's type F at byte `cap * (sizes of fields 0..k)`

@@ -3,7 +3,7 @@
 //! `Term as u16` is the terminal id of `ll1_table`.
 
 /// Number of terminals.
-pub const NTERM: usize = 134;
+pub const NTERM: usize = 137;
 
 /// A terminal of the grammar.
 #[repr(u8)]
@@ -151,132 +151,138 @@ pub enum Term {
     AsPercent = 69,
     /// `as?`
     AsQuestion = 70,
+    /// `async`
+    KwAsync = 71,
     /// `as|`
-    AsPipe = 71,
+    AsPipe = 72,
     /// `as~`
-    AsTilde = 72,
+    AsTilde = 73,
+    /// `await`
+    KwAwait = 74,
     /// `break`
-    KwBreak = 73,
+    KwBreak = 75,
     /// `const`
-    KwConst = 74,
+    KwConst = 76,
     /// `continue`
-    KwContinue = 75,
+    KwContinue = 77,
     /// `copy`
-    KwCopy = 76,
+    KwCopy = 78,
     /// `decreases`
-    KwDecreases = 77,
+    KwDecreases = 79,
     /// `derive`
-    KwDerive = 78,
+    KwDerive = 80,
     /// `dispatch`
-    KwDispatch = 79,
+    KwDispatch = 81,
     /// `else`
-    KwElse = 80,
+    KwElse = 82,
     /// `emulate`
-    KwEmulate = 81,
+    KwEmulate = 83,
     /// `ensures`
-    KwEnsures = 82,
+    KwEnsures = 84,
     /// `enum`
-    KwEnum = 83,
+    KwEnum = 85,
     /// `exact`
-    KwExact = 84,
+    KwExact = 86,
     /// `exists`
-    KwExists = 85,
+    KwExists = 87,
     /// `extern`
-    KwExtern = 86,
+    KwExtern = 88,
     /// `false`
-    KwFalse = 87,
+    KwFalse = 89,
     /// `fn`
-    KwFn = 88,
+    KwFn = 90,
     /// `for`
-    KwFor = 89,
+    KwFor = 91,
     /// `forall`
-    KwForall = 90,
+    KwForall = 92,
     /// `from`
-    KwFrom = 91,
+    KwFrom = 93,
     /// `ghost`
-    KwGhost = 92,
+    KwGhost = 94,
     /// `if`
-    KwIf = 93,
+    KwIf = 95,
     /// `impl`
-    KwImpl = 94,
+    KwImpl = 96,
     /// `import`
-    KwImport = 95,
+    KwImport = 97,
     /// `in`
-    KwIn = 96,
+    KwIn = 98,
     /// `invariant`
-    KwInvariant = 97,
+    KwInvariant = 99,
     /// `kernel`
-    KwKernel = 98,
+    KwKernel = 100,
     /// `let`
-    KwLet = 99,
+    KwLet = 101,
     /// `loop`
-    KwLoop = 100,
+    KwLoop = 102,
     /// `masked`
-    KwMasked = 101,
+    KwMasked = 103,
     /// `match`
-    KwMatch = 102,
+    KwMatch = 104,
     /// `mut`
-    KwMut = 103,
+    KwMut = 105,
     /// `needs`
-    KwNeeds = 104,
+    KwNeeds = 106,
     /// `pub`
-    KwPub = 105,
+    KwPub = 107,
     /// `pure`
-    KwPure = 106,
+    KwPure = 108,
     /// `rec`
-    KwRec = 107,
+    KwRec = 109,
     /// `requires`
-    KwRequires = 108,
+    KwRequires = 110,
     /// `return`
-    KwReturn = 109,
+    KwReturn = 111,
     /// `scalar`
-    KwScalar = 110,
+    KwScalar = 112,
     /// `scope`
-    KwScope = 111,
+    KwScope = 113,
     /// `self`
-    KwSelf = 112,
+    KwSelf = 114,
     /// `spawn`
-    KwSpawn = 113,
+    KwSpawn = 115,
     /// `spec`
-    KwSpec = 114,
+    KwSpec = 116,
     /// `static`
-    KwStatic = 115,
+    KwStatic = 117,
     /// `strict`
-    KwStrict = 116,
+    KwStrict = 118,
     /// `struct`
-    KwStruct = 117,
+    KwStruct = 119,
     /// `tail`
-    KwTail = 118,
+    KwTail = 120,
     /// `test`
-    KwTest = 119,
+    KwTest = 121,
     /// `then`
-    KwThen = 120,
+    KwThen = 122,
     /// `trait`
-    KwTrait = 121,
+    KwTrait = 123,
     /// `true`
-    KwTrue = 122,
+    KwTrue = 124,
     /// `type`
-    KwType = 123,
+    KwType = 125,
     /// `unsafe`
-    KwUnsafe = 124,
+    KwUnsafe = 126,
     /// `view`
-    KwView = 125,
+    KwView = 127,
     /// `while`
-    KwWhile = 126,
+    KwWhile = 128,
     /// `without`
-    KwWithout = 127,
+    KwWithout = 129,
+    /// `yield`
+    KwYield = 130,
     /// `{`
-    LBrace = 128,
+    LBrace = 131,
     /// `|`
-    Pipe = 129,
+    Pipe = 132,
     /// `|=`
-    PipeEq = 130,
+    PipeEq = 133,
     /// `||`
-    PipePipe = 131,
+    PipePipe = 134,
     /// `}`
-    RBrace = 132,
+    RBrace = 135,
     /// `~`
-    Tilde = 133,
+    Tilde = 136,
 }
 
 impl Term {
@@ -294,18 +300,19 @@ impl Term {
         Term::GtGt, Term::GtGtEq, Term::Question, Term::CharLit, Term::Eof, Term::FloatLit,
         Term::FmtLit, Term::Ident, Term::IntLit, Term::KwSelfType, Term::StrLit, Term::LBracket,
         Term::RBracket, Term::Caret, Term::CaretEq, Term::Underscore, Term::KwAlign,
-        Term::KwAllocator, Term::KwAs, Term::AsPercent, Term::AsQuestion, Term::AsPipe,
-        Term::AsTilde, Term::KwBreak, Term::KwConst, Term::KwContinue, Term::KwCopy,
-        Term::KwDecreases, Term::KwDerive, Term::KwDispatch, Term::KwElse, Term::KwEmulate,
-        Term::KwEnsures, Term::KwEnum, Term::KwExact, Term::KwExists, Term::KwExtern,
-        Term::KwFalse, Term::KwFn, Term::KwFor, Term::KwForall, Term::KwFrom, Term::KwGhost,
-        Term::KwIf, Term::KwImpl, Term::KwImport, Term::KwIn, Term::KwInvariant, Term::KwKernel,
-        Term::KwLet, Term::KwLoop, Term::KwMasked, Term::KwMatch, Term::KwMut, Term::KwNeeds,
-        Term::KwPub, Term::KwPure, Term::KwRec, Term::KwRequires, Term::KwReturn, Term::KwScalar,
-        Term::KwScope, Term::KwSelf, Term::KwSpawn, Term::KwSpec, Term::KwStatic, Term::KwStrict,
-        Term::KwStruct, Term::KwTail, Term::KwTest, Term::KwThen, Term::KwTrait, Term::KwTrue,
-        Term::KwType, Term::KwUnsafe, Term::KwView, Term::KwWhile, Term::KwWithout, Term::LBrace,
-        Term::Pipe, Term::PipeEq, Term::PipePipe, Term::RBrace, Term::Tilde,
+        Term::KwAllocator, Term::KwAs, Term::AsPercent, Term::AsQuestion, Term::KwAsync,
+        Term::AsPipe, Term::AsTilde, Term::KwAwait, Term::KwBreak, Term::KwConst, Term::KwContinue,
+        Term::KwCopy, Term::KwDecreases, Term::KwDerive, Term::KwDispatch, Term::KwElse,
+        Term::KwEmulate, Term::KwEnsures, Term::KwEnum, Term::KwExact, Term::KwExists,
+        Term::KwExtern, Term::KwFalse, Term::KwFn, Term::KwFor, Term::KwForall, Term::KwFrom,
+        Term::KwGhost, Term::KwIf, Term::KwImpl, Term::KwImport, Term::KwIn, Term::KwInvariant,
+        Term::KwKernel, Term::KwLet, Term::KwLoop, Term::KwMasked, Term::KwMatch, Term::KwMut,
+        Term::KwNeeds, Term::KwPub, Term::KwPure, Term::KwRec, Term::KwRequires, Term::KwReturn,
+        Term::KwScalar, Term::KwScope, Term::KwSelf, Term::KwSpawn, Term::KwSpec, Term::KwStatic,
+        Term::KwStrict, Term::KwStruct, Term::KwTail, Term::KwTest, Term::KwThen, Term::KwTrait,
+        Term::KwTrue, Term::KwType, Term::KwUnsafe, Term::KwView, Term::KwWhile, Term::KwWithout,
+        Term::KwYield, Term::LBrace, Term::Pipe, Term::PipeEq, Term::PipePipe, Term::RBrace,
+        Term::Tilde,
     ];
 
     /// The terminal id.
@@ -336,12 +343,13 @@ pub const TERM_TEXT: [&str; NTERM] = [
     "...", "..=", ".{", "/", "/=", ":", "::", ";", "<", "<<", "<<%", "<<%=", "<<=", "<=", "=",
     "==", "=>", ">", ">=", ">>", ">>=", "?", "CharLit", "EOF", "FloatLit", "FmtLit", "Ident",
     "IntLit", "Self", "StrLit", "[", "]", "^", "^=", "_", "align", "allocator", "as", "as%", "as?",
-    "as|", "as~", "break", "const", "continue", "copy", "decreases", "derive", "dispatch", "else",
-    "emulate", "ensures", "enum", "exact", "exists", "extern", "false", "fn", "for", "forall",
-    "from", "ghost", "if", "impl", "import", "in", "invariant", "kernel", "let", "loop", "masked",
-    "match", "mut", "needs", "pub", "pure", "rec", "requires", "return", "scalar", "scope", "self",
-    "spawn", "spec", "static", "strict", "struct", "tail", "test", "then", "trait", "true", "type",
-    "unsafe", "view", "while", "without", "{", "|", "|=", "||", "}", "~",
+    "async", "as|", "as~", "await", "break", "const", "continue", "copy", "decreases", "derive",
+    "dispatch", "else", "emulate", "ensures", "enum", "exact", "exists", "extern", "false", "fn",
+    "for", "forall", "from", "ghost", "if", "impl", "import", "in", "invariant", "kernel", "let",
+    "loop", "masked", "match", "mut", "needs", "pub", "pure", "rec", "requires", "return",
+    "scalar", "scope", "self", "spawn", "spec", "static", "strict", "struct", "tail", "test",
+    "then", "trait", "true", "type", "unsafe", "view", "while", "without", "yield", "{", "|", "|=",
+    "||", "}", "~",
 ];
 
 /// Lexical class flag per terminal id.
@@ -356,7 +364,7 @@ pub const TERM_IS_CLASS: [bool; NTERM] = [
     false, false, false, false, false, false, false, false, false, false, false, false, false,
     false, false, false, false, false, false, false, false, false, false, false, false, false,
     false, false, false, false, false, false, false, false, false, false, false, false, false,
-    false, false, false,
+    false, false, false, false, false, false,
 ];
 
 // Split actions (grammar header): D3 `>>` `>=` `>>=` start with the `>` that closes type
@@ -371,7 +379,7 @@ pub const SPLIT_FIRST: [i16; NTERM] = [
     -1, 48, 48, 48, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 ];
 
 /// Split: the terminal left after the first one (`>>` → `>`, `>=` → `=`, `>>=` → `>=`, `&&` → `&`); -1 otherwise.
@@ -381,5 +389,5 @@ pub const SPLIT_REST: [i16; NTERM] = [
     -1, 45, 48, 49, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 ];
