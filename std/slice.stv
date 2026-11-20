@@ -72,7 +72,7 @@ fn cast<T, U>(xs: &[T]) -> &[U] from xs {
 // The mutable view; callers write only values valid as T (bytes 0 and 1 into a bool slice).
 fn cast_mut<T, U>(xs: &mut [T]) -> &mut [U] from xs {
     let n = xs.len() * size_of::<T>() / size_of::<U>();
-    let p = mem.slice_ptr(xs) as usize as *mut U;
+    let p = mem.slice_ptr_mut(xs) as *mut U;
     return unsafe("xs covers n elements of U, borrowed exclusively; only values valid as T are written") mem.slice_mut(xs, p, n);
 }
 
