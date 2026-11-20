@@ -886,39 +886,31 @@ impl<'m, H: Host> Interp<'m, H> {
 
     /// The tags of the reference words of `v`, a value of type `t`, found by the type: of an
     /// enum the live variant; not behind a pointer, not in a fn value.
-    fn ref_tags(&self, t: TypeId, v: &Val, out: &mut Vec<Tag>, depth: usize) -> R<()> {
-        if depth > MAX_TYPE_DEPTH {
-            return Err(InterpError::Unsupported("type nesting too deep".into()));
-        }
-        match self.m.types.key(t) {
-            Some(TypeKey::Ref { .. }) => {
-                if let Some((_, tag)) = v.word().filter(|w| w.1 != ROOT) {
-                    out.push(tag);
+    fn ref_tags(&self, t: TypeId, v: &Val, out: &mut Vec<Tag>) -> R<()> {
+        // a list, not recursion: a value may nest as deep as the type table allows
+        let mut work: Vec<(TypeId, &Val)> = vec![(t, v)];
+        while let Some((t, v)) = work.pop() {
+            match self.m.types.key(t) {
+                Some(TypeKey::Ref { .. }) => {
+                    if let Some((_, tag)) = v.word().filter(|w| w.1 != ROOT) {
+                        out.push(tag);
+                    }
+                    continue;
                 }
-                return Ok(());
+                Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
+                _ => continue,
             }
-            Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
-            _ => return Ok(()),
-        }
-        let Val::Agg(vs) = v else { return Ok(()) };
-        match &self.layout(t)?.shape {
-            Shape::Fields(fs) => {
-                for (&(_, ft), fv) in fs.iter().zip(vs.iter()) {
-                    self.ref_tags(ft, fv, out, depth + 1)?;
+            let Val::Agg(vs) = v else { continue };
+            match &self.layout(t)?.shape {
+                Shape::Fields(fs) => work.extend(fs.iter().zip(vs.iter()).map(|(f, fv)| (f.1, fv))),
+                Shape::Array { elem, .. } => work.extend(vs.iter().map(|fv| (*elem, fv))),
+                Shape::Enum(vars) => {
+                    let live = vs.first().and_then(Val::bits).and_then(|k| vars.get(k as usize));
+                    let fields = live.map_or(&[][..], |f| f.as_slice());
+                    work.extend(fields.iter().zip(vs.iter().skip(1)).map(|(f, fv)| (f.1, fv)));
                 }
+                Shape::Scalar | Shape::Fat | Shape::Bytes => {}
             }
-            Shape::Array { elem, .. } => {
-                for fv in vs.iter() {
-                    self.ref_tags(*elem, fv, out, depth + 1)?;
-                }
-            }
-            Shape::Enum(vars) => {
-                let live = vs.first().and_then(Val::bits).and_then(|k| vars.get(k as usize));
-                for (&(_, ft), fv) in live.into_iter().flatten().zip(vs.iter().skip(1)) {
-                    self.ref_tags(ft, fv, out, depth + 1)?;
-                }
-            }
-            Shape::Scalar | Shape::Fat | Shape::Bytes => {}
         }
         Ok(())
     }
@@ -935,7 +927,7 @@ impl<'m, H: Host> Interp<'m, H> {
         let mut guards = Vec::new();
         if self.bt.is_some() {
             for (&t, a) in func.params.iter().zip(&args) {
-                self.ref_tags(t, a, &mut guards, 0)?;
+                self.ref_tags(t, a, &mut guards)?;
             }
         }
         if let Some(bt) = &mut self.bt {
@@ -1333,53 +1325,59 @@ impl<'m, H: Host> Interp<'m, H> {
     /// The bytes of a value of type `t` that are inside an `UnsafeCell` (M21): of an enum with
     /// such a payload, every byte.
     fn cells(&mut self, t: TypeId) -> R<Rc<[(u64, u64)]>> {
-        if let Some(c) = self.bt.as_ref().and_then(|bt| bt.cells.get(&t)) {
-            return Ok(c.clone());
-        }
-        let mut out = Vec::new();
-        self.cells_into(t, 0, &mut out, 0)?;
-        let out: Rc<[(u64, u64)]> = out.into();
-        if let Some(bt) = &mut self.bt {
-            bt.cells.insert(t, out.clone());
-        }
-        Ok(out)
-    }
-
-    fn cells_into(&self, t: TypeId, base: u64, out: &mut Vec<(u64, u64)>, depth: usize) -> R<()> {
-        if depth > MAX_TYPE_DEPTH {
-            return Err(InterpError::Unsupported("type nesting too deep".into()));
-        }
-        let l = self.layout(t)?;
-        let whole = |out: &mut Vec<(u64, u64)>| push_range(out, base, base.saturating_add(l.size));
-        if let Some(TypeKey::Adt { def, .. }) = self.m.types.key(t)
-            && Some(*def) == self.m.cell
-        {
-            whole(out);
-            return Ok(());
-        }
-        match &l.shape {
-            Shape::Fields(fs) => {
-                for &(off, ft) in fs {
-                    self.cells_into(ft, base.saturating_add(off), out, depth + 1)?;
-                }
+        // Each type after the types of its parts, with a list of the types still open instead
+        // of recursion: a type may nest as deep as the type table allows.
+        let mut open = vec![t];
+        while let Some(&x) = open.last() {
+            let known = |t: &TypeId| self.bt.as_ref().is_some_and(|bt| bt.cells.contains_key(t));
+            if known(&x) {
+                open.pop();
+                continue;
             }
-            Shape::Array { elem, stride, len } => {
-                let mut one = Vec::new();
-                self.cells_into(*elem, 0, &mut one, depth + 1)?;
-                repeat_ranges(out, &one, base, *stride, *len);
+            let l = self.layout(x)?;
+            let cell =
+                matches!(self.m.types.key(x), Some(TypeKey::Adt { def, .. }) if Some(*def) == self.m.cell);
+            let parts: Vec<TypeId> = match &l.shape {
+                _ if cell => Vec::new(),
+                Shape::Fields(fs) => fs.iter().map(|f| f.1).collect(),
+                Shape::Array { elem, .. } => vec![*elem],
+                Shape::Enum(vs) => vs.iter().flatten().map(|f| f.1).collect(),
+                Shape::Scalar | Shape::Fat | Shape::Bytes => Vec::new(),
+            };
+            let before = open.len();
+            open.extend(parts.iter().filter(|p| !known(p)));
+            if open.len() > before {
+                continue;
             }
-            Shape::Enum(vs) => {
-                let mut inner = Vec::new();
-                for &(_, ft) in vs.iter().flatten() {
-                    self.cells_into(ft, 0, &mut inner, depth + 1)?;
+            let of = |t: &TypeId| self.bt.as_ref().and_then(|bt| bt.cells.get(t)).cloned();
+            let mut out = Vec::new();
+            match &l.shape {
+                _ if cell => push_range(&mut out, 0, l.size),
+                Shape::Fields(fs) => {
+                    for (off, ft) in fs {
+                        for &(a, b) in of(ft).iter().flat_map(|c| c.iter()) {
+                            push_range(&mut out, off.saturating_add(a), off.saturating_add(b));
+                        }
+                    }
                 }
-                if !inner.is_empty() {
-                    whole(out);
+                Shape::Array { elem, stride, len } => {
+                    let one = of(elem).unwrap_or_else(|| Rc::from(Vec::new()));
+                    repeat_ranges(&mut out, &one, 0, *stride, *len);
                 }
+                Shape::Enum(_) => {
+                    if parts.iter().any(|p| of(p).is_some_and(|c| !c.is_empty())) {
+                        push_range(&mut out, 0, l.size);
+                    }
+                }
+                Shape::Scalar | Shape::Fat | Shape::Bytes => {}
             }
-            Shape::Scalar | Shape::Fat | Shape::Bytes => {}
+            if let Some(bt) = &mut self.bt {
+                bt.cells.insert(x, out.into());
+            }
+            open.pop();
         }
-        Ok(())
+        let none = || Rc::from(Vec::new());
+        Ok(self.bt.as_ref().and_then(|bt| bt.cells.get(&t)).cloned().unwrap_or_else(none))
     }
 
     /// The tag of the word an operand holds.
