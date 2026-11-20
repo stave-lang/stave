@@ -1,0 +1,3 @@
+pub fn one() -> u32 { //~ ERROR E0107
+    return 2u32;
+}

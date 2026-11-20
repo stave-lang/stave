@@ -482,6 +482,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
         let generic = what.map_or_else(|| "drop glue".to_string(), |d| prog.decl_path(d));
         diags.extend(mk("E0902", Some("graph"), &[("generic", &generic)], span, &[]));
     }
+    diags.extend(crate::typedepth::check(prog, &sigs_table, &tys, &bodies, &call_graph, &brackets));
     let t_graph = t3.elapsed();
     let diagnostics = stave_diag::canonical_order(diags, &prog.source_map);
     Typeck {
