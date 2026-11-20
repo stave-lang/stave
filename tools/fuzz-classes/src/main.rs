@@ -14,12 +14,14 @@
 //! - `ice`: the compiler panicked or died, or failed on a program without error diagnostics;
 //! - `hang`: no answer within `--timeout`;
 //! - `hole`: accepted, but the program must be rejected;
-//! - `precision`: rejected with borrow diagnostics only, but the program is valid;
-//! - `generator`: rejected for a non-borrow reason (the generator wrote invalid Stave), or a bad
+//! - `precision`: rejected with borrow diagnostics only (for `generic-sites`: also bound and
+//!   view-kind ones, `classes::RULE_CODES`), but the program is valid;
+//! - `generator`: rejected for another reason (the generator wrote invalid Stave), or a bad
 //!   program rejected without any expected code;
 //! - `mismatch`: accepted, and a native build prints or exits other than the interpreter;
 //! - `trap`: accepted, and the run trapped (no generated program traps);
-//! - `oracle`: accepted, and the per-program dynamic oracle reported a violation.
+//! - `oracle`: accepted, and the interpreter in checking mode (`STAVE_INTERP_CHECK=1` in the
+//!   environment) or the per-program dynamic oracle reported a memory error.
 //!
 //! Each finding's program is saved under `DIR/findings/<kind>/<class>-<seed>.stv` with the
 //! reason in its head comment; `DIR/summary.txt` gets the table printed at the end,
@@ -150,8 +152,8 @@ fn main() -> ExitCode {
 // ---- child: one program ----
 
 /// The per-program dynamic oracle on the checked IR of an accepted program: a report of a
-/// run-time borrow or memory violation, or `None`. The interpreter has no checking mode yet, so
-/// nothing is reported; a run of `main` under that mode belongs here.
+/// run-time borrow or memory violation, or `None`. Memory errors of the interpreter's checking
+/// mode are reported by the interpreter leg itself; nothing else is checked here yet.
 fn dynamic_oracle(_m: &Module, _main: &str, _target: Triple) -> Option<String> {
     None
 }
@@ -224,6 +226,12 @@ fn exec_one(file: &Path, repo: &Path, release: bool) -> ExitCode {
     let limits = Limits { max_steps: 200_000_000, ..Limits::default() };
     let want = match interp::run(m, &main_path, target, &[], &[], limits) {
         Ok(r) => r.ran,
+        // Checking mode ends the run at the first memory error: a violation, not a crash.
+        Err(e) if e.starts_with("interp: memory error") => {
+            println!("oracle {e:?}");
+            println!("done");
+            return ExitCode::SUCCESS;
+        }
         Err(e) => {
             println!("interp-error {e:?}");
             println!("done");
@@ -361,7 +369,13 @@ fn judge(a: &Args, p: &classes::Program, file: &Path) -> Judged {
                 j.accepted = Some(false);
                 j.codes = rest.to_string();
                 let codes: Vec<&str> = rest.split_whitespace().collect();
-                let borrow_only = codes.iter().all(|c| c.starts_with("E05") || c.starts_with("E04"));
+                // The rule codes of the class: a valid program rejected with them is a
+                // precision note, with others the generator wrote invalid Stave.
+                let borrow_only = codes.iter().all(|c| {
+                    c.starts_with("E05")
+                        || c.starts_with("E04")
+                        || (p.class == Class::GenericSites && classes::RULE_CODES.contains(c))
+                });
                 match p.expect {
                     Verdict::Accept if borrow_only => {
                         set(&mut j, "precision", format!("valid program rejected: {rest}"))
