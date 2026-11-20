@@ -4173,7 +4173,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1002",
         severity: Severity::Error,
         area: "driver",
-        rule: "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, or unreadable manifest; located in `stave.toml`",
+        rule: "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, a dependency of a package that is not built in bound under a built-in package's name (`std`, `runtime`; at the name, whatever the dependency's own `name`), or unreadable manifest; located in `stave.toml`",
         retired: false,
         located: true,
         holes: &[
@@ -4226,6 +4226,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "remove dependency `{key}`: `std` is imported without one, and the other built-in packages are not for user code",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "builtin-name",
+                message: "dependency `{key}` has the name of a built-in package",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a built-in package's name" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bind the dependency under another name: `{key}` always names the built-in package (`std` needs no dependency)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

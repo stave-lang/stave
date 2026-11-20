@@ -1677,7 +1677,7 @@ fix = { description = "run on a `{target}` host, or pass `--runner CMD` (e.g. `-
 code = "E1002"
 severity = "error"
 area = "driver"
-rule = "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, or unreadable manifest; located in `stave.toml`"
+rule = "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, a dependency of a package that is not built in bound under a built-in package's name (`std`, `runtime`; at the name, whatever the dependency's own `name`), or unreadable manifest; located in `stave.toml`"
 holes = { key = "source", expected = "text-literal", root = "text-literal" }
 choices = { expected = ["string", "integer", "boolean", "array", "table"], root = ["src/main.stv", "src/lib.stv"] }
 message = "unknown key `{key}` in `stave.toml`"
@@ -1738,6 +1738,11 @@ fix = { description = "point `path` at a package directory (one with `stave.toml
 message = "dependency `{key}`: its `path` is a built-in package"
 labels = [{ at = "primary", text = "built-in package directory" }]
 fix = { description = "remove dependency `{key}`: `std` is imported without one, and the other built-in packages are not for user code" }
+
+[diag.cases.builtin-name]
+message = "dependency `{key}` has the name of a built-in package"
+labels = [{ at = "primary", text = "a built-in package's name" }]
+fix = { description = "bind the dependency under another name: `{key}` always names the built-in package (`std` needs no dependency)" }
 
 [diag.cases.unreadable]
 message = "`stave.toml` cannot be read"
