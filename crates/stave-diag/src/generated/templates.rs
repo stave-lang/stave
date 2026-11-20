@@ -111,7 +111,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0005",
         severity: Severity::Error,
         area: "lex-parse",
-        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit",
+        rule: "bracket nesting depth over 10,000, at the first opener reaching depth 10,001; one per file, no other parse diagnostics for the file; E0016 takes precedence. Case `expr`: expressions, blocks, and patterns nested deeper than 20,000 levels (nesting without brackets, e.g. a run of unary operators), once per fn body, at the first node over the limit. Case `type`: a type nested deeper than 1,000 levels (a struct or enum counts one level above each field; a pointee behind `&`, `*`, a slice, or a fn type is measured on its own), written, from an alias, or built by an instance; once per type, at the first signature, field, alias, value, or call that reaches it",
         retired: false,
         located: true,
         holes: &[],
@@ -136,6 +136,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "reduce the nesting: move inner expressions into local bindings, functions, or consts",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "type",
+                message: "type nested deeper than 1000 levels",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this type reaches nesting depth 1001" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "nest the type less deeply: hold the inner part behind a reference, pointer, or `Box`, or split it into several fields",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4113,7 +4125,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0911",
         severity: Severity::Error,
         area: "generics",
-        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested more than 256 levels deep; at the call, in a const-expr too",
+        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels (E0005 case `type` reports it too where it is written); at the call, in a const-expr too",
         retired: false,
         located: true,
         holes: &[
@@ -4127,7 +4139,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "no size or alignment for this type" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "ask for the size of a sized type nested at most 256 levels deep",
+                    description: "ask for the size of a sized type nested at most 1000 levels deep",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

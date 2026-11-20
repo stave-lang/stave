@@ -12,6 +12,23 @@ reference for what a program may write and what it means.
   needs ∪ the target baseline (E0707). Reason: CPU features never change while a program runs, so
   a value made where F is proven stays callable.
 
+## §2 Type nesting depth
+
+- A type without components (a scalar, `str`, a mask, a generic parameter) is 1 level deep. A
+  reference, raw pointer, array, slice, tuple, fn type, vector, or range is one level above its
+  deepest component; a struct or enum is one level above its deepest type argument and its
+  deepest field (after substituting its type arguments). A pointee behind `&`, `*`, a slice, or a
+  fn type adds nothing to its holder's depth: it is measured as a type of its own.
+- Deeper than 1,000 levels is E0005 case `type`, wherever the type comes from: written, through
+  an alias, by the fields of a generic struct (`struct D1<T> { x: D0<D0<T>> }` doubles), or built
+  by a generic instance (`W<T>` in `f<T>` called with a 1,000-level `T`), also in a family of types
+  a pointer field instantiates without end (`struct P<T> { n: *const P<(T,)> }`). A type deeper
+  than the limit is reported once, where it is first reached, not again in the types holding it.
+- Reason: lowering, layout, and the IR handle types up to that depth, and every recursion of the
+  checker over type structure (trait queries, `size_of`, drop analysis, substitution) stops at the
+  same limit and answers the rejecting side past it (not Copy, not Send / Sync / Flat / Frozen, no
+  layout: E0911, needs a drop).
+
 ## §3 Storing calls: a view left borrowed
 
 A storing call (a call of a fn whose `&mut` view param has a `from` clause) for a view it reaches

@@ -66,6 +66,7 @@ pub mod testgen;
 mod threads;
 pub mod traits;
 pub mod typeck;
+pub mod typedepth;
 pub mod types;
 pub mod unsafety;
 

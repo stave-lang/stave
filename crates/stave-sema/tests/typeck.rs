@@ -541,23 +541,66 @@ fn contract_diagnostics_name_the_shared_state() {
     assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }
 
-/// Past its depth cutoff the Flat check fails closed (E1407 case `depth`).
+/// The Flat check stops at the type depth limit and fails closed (E1407 case `depth`); the type
+/// itself is past the limit (E0005 case `type`).
 #[test]
 fn flat_depth_cutoff_fails_closed() {
     let nest = |n: usize| format!("{}u32{}", "W<".repeat(n), ">".repeat(n));
     let src = format!(
         "struct W<T> {{ pub v: T }}\nfn need<T: Flat>() {{}}\n\
          fn main() -> i32 {{ need::<{}>(); need::<{}>(); return 0; }}\n",
-        nest(1000),
+        nest(999),
         nest(1100)
     );
     let (p, tc) = mem(&src);
-    let got: Vec<String> =
+    let mut got: Vec<String> =
         tc.all_diagnostics(&p).iter().map(|d| format!("{} {}", d.code(), d.message())).collect();
+    got.sort();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(got[0], "E0005 type nested deeper than 1000 levels");
     // the type text is elided in the middle (`W<W<..>>`)
-    assert_eq!(got.len(), 1, "{got:?}");
-    assert!(got[0].starts_with("E1407 `W<W<"), "{}", got[0]);
-    let tail = ">>` is not `Flat`: it nests deeper than 1024 levels, the limit of the `Flat` check";
-    assert!(got[0].ends_with(tail), "{}", got[0]);
+    assert!(got[1].starts_with("E1407 `W<W<"), "{}", got[1]);
+    let tail = ">>` is not `Flat`: it nests deeper than 1000 levels, the limit of the `Flat` check";
+    assert!(got[1].ends_with(tail), "{}", got[1]);
+    assert_eq!(stave_sema::diagnostic_build_failures(), 0);
+}
+
+/// One shared type depth limit (E0005 case `type`): 1,000 levels pass, 1,001 do not, written,
+/// through references, by fields, or built by an instance; a pointer to another type adds nothing.
+#[test]
+fn type_depth_limit() {
+    let w = |n: usize, leaf: &str| format!("{}{leaf}{}", "W<".repeat(n), ">".repeat(n));
+    let codes = |body: &str| -> Vec<String> {
+        let src = format!("struct W<T> {{ pub v: T }}\n{body}\nfn main() -> i32 {{ return 0; }}\n");
+        let (p, tc) = mem(&src);
+        tc.all_diagnostics(&p).iter().map(|d| d.code().to_string()).collect()
+    };
+    let none: Vec<String> = Vec::new();
+    let one = vec!["E0005".to_string()];
+    assert_eq!(codes(&format!("fn f(x: {}) {{}}", w(999, "u32"))), none);
+    assert_eq!(codes(&format!("fn f(x: {}) {{}}", w(1000, "u32"))), one);
+    assert_eq!(codes(&format!("fn f(x: {}u32) {{}}", "&".repeat(999))), none);
+    assert_eq!(codes(&format!("fn f(x: {}u32) {{}}", "&".repeat(1000))), one);
+    assert_eq!(codes(&format!("fn f(x: &{}) {{}}", w(998, "u32"))), none);
+    assert_eq!(codes(&format!("fn f(x: &{}) {{}}", w(999, "u32"))), one);
+    // fields: `S0` holds `S1` ... holds a `u32`
+    let chain = |n: usize, ptr: bool| -> String {
+        let mut s = String::new();
+        for i in 0..n {
+            let inner = if i + 1 == n { "u32".to_string() } else { format!("S{}", i + 1) };
+            let inner = if ptr && i + 1 < n { format!("*const {inner}") } else { inner };
+            s += &format!("struct S{i} {{ pub x: {inner} }}\n");
+        }
+        s
+    };
+    assert_eq!(codes(&chain(999, false)), none);
+    assert_eq!(codes(&chain(1000, false)), one);
+    assert_eq!(codes(&chain(1100, true)), none);
+    // an instance: `hold::<W^999<u32>>` makes a `W^1000<u32>`
+    let hold = |n: usize| {
+        format!("fn hold<T>(x: T) {{ let y: W<T> = W.{{ v: x }}; }}\nfn g(a: {}) {{ hold(a); }}", w(n, "u32"))
+    };
+    assert_eq!(codes(&hold(998)), none);
+    assert_eq!(codes(&hold(999)), one);
     assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }
