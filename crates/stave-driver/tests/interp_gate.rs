@@ -15,8 +15,9 @@
 //! - **Not runnable**: the interpreter did not run the program as written: no CPU target, a
 //!   pipeline failure, an interpreter error that is no report (step limit, an operation it does
 //!   not support), or a run whose exit status, stdout, or stderr differs from the program's
-//!   expectations (thread ids in panic messages; no `[run] stack` limit), or a program listed
-//!   in [`SLOW`]. Counted and listed with the reason, never passed silently.
+//!   expectations (no `[run] stack` limit; thread ids in panic lines are not compared), or, in
+//!   `check`, a program listed in [`SLOW`]. Counted and listed with the reason, never passed
+//!   silently.
 //! - **Open finding**: a report on a program without unsafe that is known and not fixed yet
 //!   ([`OPEN`]). Printed with the counts; an entry whose program no longer gives that report
 //!   fails the test, so the list only shrinks.
@@ -45,10 +46,11 @@ const JOBS: usize = 4;
 const STACK: usize = 64 << 20;
 /// Programs that take most of the wall time, started first (scheduling only).
 const FIRST: &[&str] = &["conformance/run/num_float_long.stv"];
-/// Programs left out as too slow for the debug-built interpreter under tracking, with the reason.
+/// Programs too slow for the gate of `check`, with the reason: listed as not runnable there, run by
+/// [`with_the_slow_programs`] (the nightly `run.sh interp-gate-slow`).
 const SLOW: &[(&str, &str)] = &[(
     "conformance/std/num_float_exp7.stv",
-    "too slow under tracking: the 10^6-digit float parse takes 185 M steps, minutes in a debug build",
+    "too slow for `check` under tracking: the 10^6-digit float parse takes 185 M steps",
 )];
 
 /// Reports on programs without unsafe that are known and not fixed yet: (program, class).
@@ -206,7 +208,28 @@ fn report_class(e: &str) -> Option<&str> {
     rest.split_once(']').map(|x| x.0)
 }
 
-/// How a clean run differs from what the program expects, if it does.
+/// `s` without the ` (thread <n>)` of panic lines. The interpreter has one thread: it runs a spawned
+/// body on the thread that spawns it, so the ids in its panic lines are not the native ones.
+fn without_thread_ids(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(k) = rest.find(" (thread ") {
+        out.push_str(&rest[..k]);
+        let after = &rest[k + " (thread ".len()..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && after[digits..].starts_with(')') {
+            rest = &after[digits + 1..];
+        } else {
+            out.push_str(" (thread ");
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// How a clean run differs from what the program expects, if it does. `STDERR-CONTAINS` is
+/// compared without thread ids ([`without_thread_ids`]).
 fn differs(want: &Expect, r: &interp::Interpreted) -> Option<String> {
     let exit = r.ran.exit & 0xff;
     if exit != i32::from(want.exit) {
@@ -215,24 +238,31 @@ fn differs(want: &Expect, r: &interp::Interpreted) -> Option<String> {
     if want.stdout.as_ref().is_some_and(|s| *s != r.ran.stdout) {
         return Some("stdout differs from the golden file".to_string());
     }
-    let stderr = String::from_utf8_lossy(&r.ran.stderr);
-    want.stderr_contains.iter().find(|s| !stderr.contains(s.as_str())).map(|s| format!("stderr lacks {s:?}"))
+    let stderr = without_thread_ids(&String::from_utf8_lossy(&r.ran.stderr));
+    want.stderr_contains
+        .iter()
+        .find(|s| !stderr.contains(&without_thread_ids(s)))
+        .map(|s| format!("stderr lacks {s:?}"))
 }
 
 /// The verdict, the time of the interpreter run, and its steps.
-fn judge(c: &Case, lib: &Library) -> (Verdict, Duration, u64) {
-    let (v, took, steps) = judge_run(c, lib);
+fn judge(c: &Case, lib: &Library, slow: bool) -> (Verdict, Duration, u64) {
+    let (v, took, steps) = judge_run(c, lib, slow);
     let v = match (v, OPEN.iter().find(|o| o.0 == c.name)) {
         (v @ (Verdict::Open(_) | Verdict::Fail(_)), _) => v,
-        (_, Some(o)) => Verdict::Fail(format!("listed in OPEN with [{}], which it no longer gives", o.1)),
+        (Verdict::Clean, Some(_)) => Verdict::Fail("runs clean now: remove its entry from OPEN".to_string()),
+        (_, Some(o)) => Verdict::Fail(format!(
+            "listed in OPEN with [{}], which it no longer gives: remove the entry, or correct its class",
+            o.1
+        )),
         (v, None) => v,
     };
     (v, took, steps)
 }
 
-fn judge_run(c: &Case, lib: &Library) -> (Verdict, Duration, u64) {
+fn judge_run(c: &Case, lib: &Library, slow: bool) -> (Verdict, Duration, u64) {
     let none = Duration::ZERO;
-    if let Some(s) = SLOW.iter().find(|s| s.0 == c.name) {
+    if let Some(s) = SLOW.iter().find(|s| !slow && s.0 == c.name) {
         return (Verdict::NotRunnable(s.1.to_string()), none, 0);
     }
     let target = match &c.target {
@@ -303,9 +333,21 @@ fn judge_run(c: &Case, lib: &Library) -> (Verdict, Duration, u64) {
 #[test]
 #[ignore = "minutes: run by `tools/ci-step/run.sh interp-gate`, a part of `check`"]
 fn accepted_programs_run_clean_under_borrow_tracking() {
+    gate(false);
+}
+
+/// The same gate with the programs of [`SLOW`] run too.
+#[test]
+#[ignore = "longer: run nightly by `tools/ci-step/run.sh interp-gate-slow`"]
+fn with_the_slow_programs() {
+    gate(true);
+}
+
+fn gate(slow: bool) {
     let mut cases = conformance_cases();
     cases.extend(borrowcheck_cases());
-    cases.sort_by_key(|c| !FIRST.contains(&c.name.as_str()));
+    let is_slow = |c: &Case| SLOW.iter().any(|s| s.0 == c.name);
+    cases.sort_by_key(|c| !(FIRST.contains(&c.name.as_str()) || (slow && is_slow(c))));
     assert!(cases.len() > 150, "{} programs: discovery is broken", cases.len());
     let lib = Library::in_dir(&repo());
     let next = AtomicUsize::new(0);
@@ -320,7 +362,7 @@ fn accepted_programs_run_clean_under_borrow_tracking() {
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(c) = cases.get(i) else { break };
-                        let r = judge(c, &lib);
+                        let r = judge(c, &lib, slow);
                         results.lock().unwrap()[i] = Some(r);
                     }
                 })

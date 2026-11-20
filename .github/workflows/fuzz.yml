@@ -47,3 +47,12 @@ jobs:
             fuzz-out/summary.txt
             fuzz-out/programs.tsv
           if-no-files-found: ignore
+  # The interpreter gate of `check` with the programs too slow for it (debug build).
+  interp-gate-slow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh tools/ci-step/run.sh interp-gate-slow

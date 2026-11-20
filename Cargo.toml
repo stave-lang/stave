@@ -47,6 +47,11 @@ unsafe_op_in_unsafe_fn = "deny"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
+# The reference interpreter runs most of the test suite's time; optimizing it costs seconds of
+# build. Debug assertions and overflow checks stay on (opt-level does not change them).
+[profile.dev.package.stave-ir]
+opt-level = 1
+
 [profile.release]
 lto = true
 codegen-units = 1
