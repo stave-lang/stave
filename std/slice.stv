@@ -16,7 +16,8 @@
 //   [u8] find_byte(b), find_any_byte(set): first index of b / of any byte of set
 //   any T: Copy      count(pred), any(pred), all(pred) (pred: fn(T) -> bool; it may be called
 //                    on any elements, in any order, any number of times; T may be a view),
-//                    copy_from(src) (T no view; lengths must match: `Assert` panic otherwise)
+//                    copy_from(src) (T no view; lengths must match: `Assert` panic otherwise;
+//                    element by element unless T has 1 byte: padding is never read)
 //
 // Every method loops in 128-bit vectors (the portable baseline of every CPU target). On x86-64,
 // sum, dot, min, max, find, find_any_byte, eq, fill and copy_from have a second loop in
@@ -50,7 +51,7 @@ import std.mem;
 
 // The slice length in elements of 1, 2, 4 and 8 bytes from which the 256-bit loop is never slower
 // than the 128-bit one, with a margin: 1 KiB for 1- and 2-byte elements (and for `eq` and
-// `copy_from` of every type, which work on bytes), 512 B for 4- and 8-byte elements, whose
+// `copy_from` of 1-byte types, which work on bytes), 512 B for 4- and 8-byte elements, whose
 // 128-bit loops cost more per element.
 const LONG_B8: usize = 1024;
 const LONG_B16: usize = 512;
@@ -2678,10 +2679,17 @@ impl<T: Copy + view> [T] {
     }
 }
 
-// copy_from stores into self: over views it would need a `from` clause, so T is no view.
+// copy_from stores into self: over views it would need a `from` clause, so T is no view. A
+// typed copy copies the value, which a padding byte is no part of: padding is never written, so
+// it stays uninitialized, and reading it as a `u8` breaks the obligation of `cast` (every byte an
+// initialized U). Only a 1-byte type surely has none, so only its elements are copied as bytes.
 impl<T: Copy> [T] {
     pub fn copy_from(&mut self, src: &[T]) {
         debug.assert(self.len() == src.len(), "copy_from: the slices differ in length");
+        if size_of::<T>() != 1 {
+            for i in 0..self.len() { self[i] = src[i]; }
+            return;
+        }
         let s = cast::<T, u8>(src);
         let d = cast_mut::<T, u8>(self);
         if d.len() >= LONG_B8 {
