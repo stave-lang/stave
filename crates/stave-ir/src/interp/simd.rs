@@ -63,14 +63,14 @@ impl<H: Host> Interp<'_, H> {
         if simd::elem_ptr_operand(&self.m.types, t).is_some() {
             // unchecked: its bounds check is a separate instruction
             return match self.eval(body, regs, o)? {
-                Val::S(a) => Ok((a, u64::MAX)),
+                Val::S(a) | Val::T(a, _) => Ok((a, u64::MAX)),
                 _ => Err(malformed("memory operand value")),
             };
         }
         let mo = simd::mem_operand(&self.m.types, t).ok_or(malformed("memory operand type"))?;
         match (self.eval(body, regs, o)?, mo.len) {
-            (Val::Pair(a, n), None) => Ok((a, n)),
-            (Val::S(a), Some(n)) => Ok((a, n)),
+            (Val::Pair(a, n) | Val::PairT(a, n, _), None) => Ok((a, n)),
+            (Val::S(a) | Val::T(a, _), Some(n)) => Ok((a, n)),
             _ => Err(malformed("memory operand value")),
         }
     }
@@ -421,14 +421,20 @@ impl<H: Host> Interp<'_, H> {
                     return Err(malformed("vector load past the end without a bounds check"));
                 }
                 let w = (lane.bits() / 8) as u128;
+                let at = |k: usize| (base as u128).wrapping_add((i + k as u128) * w) as u64;
+                if mask.is_none() {
+                    self.track_vec(regs, arg(0)?, at(0), n as u64 * w as u64, false)?;
+                }
                 let mut out = Vec::with_capacity(n as usize);
                 for k in 0..n as usize {
                     if mask.as_ref().is_some_and(|m| !m[k]) {
                         out.push(0);
                         continue;
                     }
-                    let a = (base as u128).wrapping_add((i + k as u128) * w) as u64;
-                    out.push(self.read_lane(lane, a, fid, site)?);
+                    if mask.is_some() {
+                        self.track_vec(regs, arg(0)?, at(k), w as u64, false)?;
+                    }
+                    out.push(self.read_lane(lane, at(k), fid, site)?);
                 }
                 lanes_val(out)
             }
@@ -448,12 +454,18 @@ impl<H: Host> Interp<'_, H> {
                     return Err(malformed("vector store past the end without a bounds check"));
                 }
                 let w = (lane.bits() / 8) as u128;
+                let at = |k: usize| (base as u128).wrapping_add((i + k as u128) * w) as u64;
+                if mask.is_none() {
+                    self.track_vec(regs, arg(0)?, at(0), v.len() as u64 * w as u64, true)?;
+                }
                 for (k, &x) in v.iter().enumerate() {
                     if mask.as_ref().is_some_and(|m| !m[k]) {
                         continue;
                     }
-                    let a = (base as u128).wrapping_add((i + k as u128) * w) as u64;
-                    self.write_lane(lane, a, x, fid, site)?;
+                    if mask.is_some() {
+                        self.track_vec(regs, arg(0)?, at(k), w as u64, true)?;
+                    }
+                    self.write_lane(lane, at(k), x, fid, site)?;
                 }
                 return Ok(VOut::None);
             }
@@ -476,6 +488,7 @@ impl<H: Host> Interp<'_, H> {
                 if op == Gather {
                     let mut out = Vec::with_capacity(idx.len());
                     for &k in &idx {
+                        self.track_vec(regs, arg(0)?, at(k), w, false)?;
                         out.push(self.read_lane(lane, at(k), fid, site)?);
                     }
                     lanes_val(out)
@@ -483,6 +496,7 @@ impl<H: Host> Interp<'_, H> {
                     let v = self.lanes(body, regs, arg(2)?)?;
                     // in lane order: on a duplicate index the highest lane is written last
                     for (&k, &x) in idx.iter().zip(&v) {
+                        self.track_vec(regs, arg(0)?, at(k), w, true)?;
                         self.write_lane(lane, at(k), x, fid, site)?;
                     }
                     return Ok(VOut::None);

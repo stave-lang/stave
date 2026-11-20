@@ -1,0 +1,14 @@
+//~ BORROWCHECK two-exclusive 5 12
+// A `&mut` and a `&` of one local given to one call: the read through the `&` reads bytes
+// that the protected `&mut` param alone may use until the call returns.
+fn quiet(m: &mut u32, r: &u32) -> u32 {
+    let a: u32 = *r;
+    *m = a + 1u32;
+    return a;
+}
+
+fn main() -> i32 {
+    let mut x: u32 = 1u32;
+    if quiet(&mut x, &x) == 1u32 { return 1; }
+    return 0;
+}

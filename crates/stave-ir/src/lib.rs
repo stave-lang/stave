@@ -8,6 +8,8 @@
 //! - [`verify`]: structure, dominance, block params, terminators, op typing.
 //! - [`interp`]: the scalar reference interpreter (oracle) over [`mem`] with a pluggable [`host`];
 //!   [`memcheck`]: its checking mode (memory errors as an outcome).
+//! - [`borrowtrack`]: the dynamic borrow model of contracts/borrow-model.md as a state machine
+//!   over allocation ids and byte offsets.
 //! - [`print_checked`]: the canonical checked-IR text of contracts/checked-ir.md.
 //! - [`simd`]: vector and mask ops ([`VecOp`]) and their lane semantics.
 //! - [`arith`]: scalar op and cast semantics; [`layout`]: memory layout of IR types.
@@ -18,6 +20,7 @@
 //! - [`link`]: text order and symbol names of a module's functions and statics (both backends).
 
 pub mod arith;
+pub mod borrowtrack;
 pub mod bounds;
 pub mod build;
 pub mod divmagic;
@@ -40,8 +43,8 @@ pub use build::{BuildError, FuncBuilder};
 pub use host::{BufferHost, Host, SysResult, SyscallAbi};
 pub use interp::{Config, Interp, InterpError, Outcome, Trap, Val};
 pub use ir::{
-    Block, Body, CastKind, Const, Func, FuncId, InstanceId, IntrinsicId, Module, Op, Operand, PanicKind,
-    Prefetch, PrefetchLoc, Site, SiteInfo, Static, StrId, Term, Value,
+    Block, Body, BorrowMark, CastKind, Const, Func, FuncId, InstanceId, IntrinsicId, Module, Op, Operand,
+    PanicKind, Prefetch, PrefetchLoc, Site, SiteInfo, Static, StrId, Term, Value,
 };
 pub use print_checked::print_checked;
 pub use simd::VecOp;

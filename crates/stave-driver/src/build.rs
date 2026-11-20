@@ -129,8 +129,8 @@ pub struct Lowered {
 
 /// Lowers (mono + lower), verifies, and removes the bounds checks that have a checked witness.
 /// The program must have no error diagnostics.
-pub fn lower(prog: &Program, tc: &Typeck, mode: Mode) -> Result<Lowered, Failure> {
-    let (lowered, tm) = stave_sema::lower_mapped(prog, tc, mode);
+pub fn lower(prog: &Program, tc: &Typeck, mode: Mode, borrows: bool) -> Result<Lowered, Failure> {
+    let (lowered, tm) = stave_sema::lower_mapped(prog, tc, mode, borrows);
     prof::part(".rounds", tm.rounds);
     prof::part(".assemble", tm.assemble);
     prof::mark("lower");

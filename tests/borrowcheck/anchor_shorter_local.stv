@@ -1,0 +1,31 @@
+//~ BORROWCHECK write-under-shared 22 21
+// A `&mut` view made from a raw pointer under a `&` anchor takes a borrow of a local of the loop
+// body: the next round writes that local, and the view still holds the `&` of the round before.
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+
+unsafe("p is valid for one Pick that owner keeps alive and lends exclusively while the result lives")
+fn pick_mut(owner: &Pick, p: *mut Pick) -> &mut Pick from owner {
+    return unsafe("p is valid for one Pick and no other live reference reaches it") &mut *p;
+}
+
+view struct Handle { anchor: &Pick, p: *mut Pick, extra: &mut Pick }
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut a = Pick.{ best: &zero, count: 0 };
+    let raw = &mut a as *mut Pick;
+    let mut i: u32 = 0;
+    while i < 3 {
+        let x: u32 = 10 + i;
+        let seen: u32 = *a.best;
+        io.print(f"round {i}: x = {x}, a.best reads {seen}\n");
+        let mut b = Pick.{ best: &zero, count: 0 };
+        let h = Handle.{ anchor: &a, p: raw, extra: &mut b };
+        let slot = unsafe("p is the Pick the anchor lends") pick_mut(h.anchor, h.p);
+        slot.best = &x;
+        i = i + 1;
+    }
+    return 0;
+}

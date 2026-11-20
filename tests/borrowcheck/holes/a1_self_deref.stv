@@ -1,0 +1,18 @@
+//~ BORROWCHECK write-under-shared 15 14
+import std.io;
+
+view struct Cur { cur: &u32, n: u32 }
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut p = Cur.{ cur: &zero, n: 1 };
+    {
+        let q = &mut p;
+        q.cur = &q.n;
+    }
+    let a: u32 = *p.cur;
+    p.n = 2;
+    let b: u32 = *p.cur;
+    io.print(f"{a} {b}\n");
+    return 0;
+}

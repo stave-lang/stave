@@ -549,6 +549,9 @@ pub struct Body {
     pub consts: Vec<Const>,
     pub cases: Vec<SwitchCase>,
     pub values: Vec<ValueData>,
+    /// Borrow events the instructions do not show (contracts/borrow-model.md, "Side table").
+    /// Empty unless the lowering was asked for them; not part of the canonical dump.
+    pub borrows: Vec<BorrowMark>,
 }
 
 impl Body {
@@ -650,6 +653,16 @@ impl Body {
     }
 }
 
+/// A borrow of the side table: the result of the instruction that defines `value` is a new
+/// reference to the place its address names, reached through the tag that address carries.
+/// The place is the pointee of the value's type; of a fat reference, its elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BorrowMark {
+    pub value: Value,
+    /// `&mut` (else `&`).
+    pub mutable: bool,
+}
+
 /// A function: signature plus an optional body (`None` = declared only, e.g. an `extern "C"`
 /// import; not printed, not executable by the interpreter).
 #[derive(Clone, Debug, PartialEq)]
@@ -714,6 +727,9 @@ pub struct Module {
     /// call is no longer provable from the bodies alone once the callee's own checks are gone:
     /// the bounds audit reads calls with these rows.
     pub stated: Vec<Option<std::sync::Arc<crate::witness::Summary>>>,
+    /// The declaration of `std.cell.UnsafeCell`, in a module lowered with the borrow side
+    /// table: the bytes of a value of such a type are not read-only behind a `&`.
+    pub cell: Option<crate::types::DeclId>,
 }
 
 impl Module {
