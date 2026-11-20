@@ -559,6 +559,7 @@ pub fn intrinsic(name: &str) -> Option<(IArch, Vec<TypeId>, IRet)> {
         "atomic_xchg_u64" | "atomic_add_u64" => (IArch::Both, vec![us, ids::U64], IRet::T(ids::U64)),
         "atomic_cas_u32" => (IArch::Both, vec![us, ids::U32, ids::U32], IRet::T(ids::U32)),
         "atomic_cas_u64" => (IArch::Both, vec![us, ids::U64, ids::U64], IRet::T(ids::U64)),
+        "copy_bytes" => (IArch::Both, vec![], IRet::CopyBytes),
         _ => {
             if is_ptx_intrinsic(name) {
                 (IArch::Ptx, vec![], IRet::Any)
@@ -577,6 +578,17 @@ pub enum IRet {
     Cpuid,
     /// Not checked (PTX set).
     Any,
+    /// The whole signature `(dst: *mut u8, src: *const u8, n: usize)` with a unit result:
+    /// pointer types have no well-known id ([`copy_bytes_ok`]).
+    CopyBytes,
+}
+
+/// Whether `params` and `ret` are the signature of `copy_bytes`.
+pub fn copy_bytes_ok<I: Interner + ?Sized>(cx: &I, params: &[TypeId], ret: TypeId) -> bool {
+    let u8t = cx.fixed_ty(ids::U8);
+    let ptr = |t: TypeId, m: bool| matches!(cx.kind(t), TypeKind::Ptr { mutable, inner } if *mutable == m && *inner == u8t);
+    matches!(params, [d, s, n] if ptr(*d, true) && ptr(*s, false) && *n == cx.fixed_ty(ids::USIZE))
+        && ret == cx.fixed_ty(ids::UNIT)
 }
 
 fn is_ptx_intrinsic(name: &str) -> bool {
@@ -664,11 +676,12 @@ pub(crate) fn check_intrinsics(
         let ok = match intrinsic(name) {
             None => false,
             Some((_, _, IRet::Any)) => true,
+            Some((_, _, IRet::CopyBytes)) => copy_bytes_ok(tys, &sig.params, sig.ret) && !sig.variadic,
             Some((_, params, ret)) => {
                 let ret_ok = match ret {
                     IRet::T(t) => sig.ret == t,
                     IRet::Cpuid => cpuid_ok(tys, sig.ret),
-                    IRet::Any => true,
+                    IRet::Any | IRet::CopyBytes => true,
                 };
                 params == sig.params && ret_ok && !sig.variadic
             }

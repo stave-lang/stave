@@ -1,0 +1,93 @@
+//~ BORROWCHECK ok
+// std.mem and std.cell sites: `replace` and `swap` (raw read / write through a reborrow of each
+// `&mut`) on zero-sized, padded, view, and owning values; `forget` of an owner and of a
+// zero-sized value; the float bit casts on NaN, -0.0, and subnormals; `Cell` of padded and
+// zero-sized values written through two `&` at once; `UnsafeCell.get_mut` / `into_inner`.
+import std.cell;
+import std.mem;
+import std.vec;
+
+struct Pad {
+    pub a: u8,
+    pub b: u64,
+}
+
+impl Copy for Pad {}
+
+struct Z {}
+
+impl Copy for Z {}
+
+struct Holder {
+    pub hits: cell.Cell<Pad>,
+    pub none: cell.Cell<Z>,
+    pub base: u32,
+}
+
+fn mem_ops() -> bool {
+    let mut z1 = Z.{};
+    let mut z2 = Z.{};
+    mem.swap(&mut z1, &mut z2);
+    let z3 = mem.replace(&mut z1, Z.{});
+    let mut p = Pad.{ a: 1, b: 2 };
+    let mut q = Pad.{ a: 3, b: 4 };
+    mem.swap(&mut p, &mut q);
+    let old = mem.replace(&mut p, Pad.{ a: 5, b: 6 });
+    let x: u32 = 10;
+    let y: u32 = 20;
+    let mut rx: &u32 = &x;
+    let mut ry: &u32 = &y;
+    mem.swap(&mut rx, &mut ry);
+    let r0 = mem.replace(&mut rx, &x);
+    let mut v = vec.Vec::<u32>.new();
+    v.push(1);
+    let mut w = vec.Vec::<u32>.new();
+    mem.swap(&mut v, &mut w);
+    let taken = mem.replace(&mut w, vec.Vec::<u32>.new());
+    let mut leak = vec.Vec::<u32>.new();
+    leak.push(9);
+    mem.forget(leak);
+    mem.forget(Z.{});
+    mem.drop(taken);
+    return p.a == 5 && q.b == 2 && old.a == 3 && *rx == 10 && *ry == 10 && *r0 == 20 && v.is_empty() && w.is_empty();
+}
+
+fn bits() -> bool {
+    let nan = mem.f64_from_bits(0x7FF8_0000_0000_0001);
+    let back = mem.f64_bits(nan) == 0x7FF8_0000_0000_0001;
+    let neg0 = mem.f64_bits(-0.0) == 0x8000_0000_0000_0000;
+    let sub = mem.f64_from_bits(1);
+    let tiny = sub > 0.0 && mem.f64_bits(sub) == 1;
+    let f = mem.f32_from_bits(0x7FC0_0001);
+    let fb = mem.f32_bits(f) == 0x7FC0_0001 && mem.f32_bits(-0.0f32) == 0x8000_0000;
+    return back && neg0 && tiny && fb;
+}
+
+fn bump(h: &Holder, other: &Holder) -> u32 {
+    let p = h.hits.get();
+    other.hits.set(Pad.{ a: p.a + 1, b: p.b + 10 });
+    let was = h.hits.replace(Pad.{ a: 0, b: 0 });
+    h.none.set(Z.{});
+    let z = other.none.get();
+    return h.base + (was.a as u32);
+}
+
+fn cells() -> bool {
+    let h = Holder.{ hits: cell.Cell::<Pad>.new(Pad.{ a: 1, b: 1 }), none: cell.Cell::<Z>.new(Z.{}), base: 100 };
+    let a: &Holder = &h;
+    let b: &Holder = &h;
+    let r1 = bump(a, b);
+    let r2 = bump(b, a);
+    let last = h.hits.get();
+    let mut u = cell.UnsafeCell::<Pad>.new(Pad.{ a: 7, b: 8 });
+    u.get_mut().b = 9;
+    let inner = u.into_inner();
+    return r1 == 102 && r2 == 101 && last.a == 0 && inner.b == 9;
+}
+
+fn main() -> i32 {
+    if !mem_ops() { return 1; }
+    if !bits() { return 2; }
+    if !cells() { return 3; }
+    return 0;
+}

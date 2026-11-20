@@ -1639,6 +1639,12 @@ impl<'a> FnCx<'a> {
                 {
                     self.req(Req::Inst(InstKey { decl: e, args: Vec::new() }));
                 }
+                // Native code runs the copy as a call of `std.slice.copy_raw`, which no IR calls.
+                if name == "copy_bytes"
+                    && let Some(c) = self.g.lang.copy_raw
+                {
+                    self.req(Req::Inst(InstKey { decl: c, args: Vec::new() }));
+                }
                 self.call_result(r, ret)
             }
             Some(Target::Variant { decl, index }) => {

@@ -1,0 +1,28 @@
+//~ BORROWCHECK ok
+// `par_for` near the top of usize: its workers claim chunks from one counter, and a counter
+// that overshoots `hi` must never wrap around to indices below `lo`. `par_for_mut` relies on
+// the same rule: each index below the length is handed out exactly once.
+import std.atomic;
+import std.debug;
+import std.thread;
+
+const TOP: usize = 0xFFFF_FFFF_FFFF_FFFF;
+
+fn calls_in(lo: usize, hi: usize) -> bool {
+    let calls = atomic.U64.new(0);
+    let outside = atomic.U64.new(0);
+    let n = (hi - lo) as u64;
+    thread.par_for(lo, hi, fn(i: usize) {
+        let k = calls.fetch_add(1);
+        if i < lo || i >= hi { let _ = outside.fetch_add(1); }
+        debug.assert(k < n, "par_for called its body more often than hi - lo");
+    });
+    return calls.load() == n && outside.load() == 0;
+}
+
+fn main() -> i32 {
+    if !calls_in(TOP - 33, TOP) { return 1; }
+    if !calls_in(TOP - 1000, TOP - 1) { return 2; }
+    if !calls_in(TOP - 1, TOP) { return 3; }
+    return 0;
+}

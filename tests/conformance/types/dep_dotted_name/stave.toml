@@ -1,0 +1,7 @@
+# A dependency's module paths start with its own `name`: `a.b` with `src/c.stv` would be `a.b.c`,
+# the path of this package's `src/a/b/c.stv`.
+name = "dotted_dep"
+kind = "bin"
+
+[dependencies]
+ab = { path = "dep" }

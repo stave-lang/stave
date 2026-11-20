@@ -4,7 +4,9 @@
 //! exact trap semantics (returns [`Outcome::Trap`] with the kind,
 //! the trapping instruction's [`Site`], and the function), wrapping and saturating ops, the `as`
 //! family, and IEEE f32 / f64 via Rust's native operations (round to nearest even).
-//! System calls and other intrinsics go to a pluggable [`Host`].
+//! System calls and other intrinsics go to a pluggable [`Host`], except `copy_bytes`, which the
+//! interpreter runs itself on its memory (native code calls `std.slice.copy_raw` instead, a fn
+//! no IR calls, so the interpreter never runs its body).
 //!
 //! Values ([`Val`]): scalars are raw `u64` bits (ints normalized to their type, floats as IEEE
 //! bits, `bool` 0/1, `char` code point, pointers and fn values as addresses / function indices);
@@ -426,6 +428,29 @@ impl Borrows {
         }
     }
 
+    /// A byte copy of `src..src + n` to `dst`: each tagged word wholly inside the source keeps
+    /// its tag at the same offset from `dst`; a tagged word that the destination covers or cuts
+    /// into loses its tag (its bytes are the copy's now).
+    fn copied(&mut self, dst: u64, src: u64, n: u64) {
+        if self.shadow.is_empty() || n == 0 {
+            return;
+        }
+        let moved: Vec<(u64, (u64, Tag))> = if n >= 8 {
+            let last = src.saturating_add(n - 8);
+            self.shadow.range(src..=last).map(|(&a, &w)| (a - src, w)).collect()
+        } else {
+            Vec::new()
+        };
+        let gone: Vec<u64> =
+            self.shadow.range(dst.saturating_sub(7)..dst.saturating_add(n)).map(|(&a, _)| a).collect();
+        for a in gone {
+            self.shadow.remove(&a);
+        }
+        for (off, w) in moved {
+            self.shadow.insert(dst.wrapping_add(off), w);
+        }
+    }
+
     fn loaded(&self, addr: u64, bits: u64) -> Tag {
         match self.shadow.get(&addr) {
             Some(&(b, t)) if b == bits => t,
@@ -740,17 +765,14 @@ impl<'m, H: Host> Interp<'m, H> {
             if q == 0 {
                 return Some(Ok(Val::S(0)));
             }
-            if new != 0 && self.mem.copy_raw(q, p, old.min(new)).is_err() {
+            if new != 0 && self.mem.copy(q, p, old.min(new)).is_err() {
                 return self.mem.take_report().map(Err);
             }
             let at = self.trace(frames);
             if let Some(bt) = &mut self.bt {
-                // the new block takes the old bytes with their tags and their initialization
-                let moved: Vec<_> =
-                    bt.shadow.range(p..p.saturating_add(old.min(new))).map(|(&a, &w)| (a, w)).collect();
-                for (a, w) in moved {
-                    bt.shadow.insert(q + (a - p), w);
-                }
+                // the new block takes the old bytes with their tags, and the places that were
+                // moved out of stay moved out
+                bt.copied(q, p, old.min(new));
                 let empty = self.mem.alloc_span(p).map_or(Vec::new(), |(id, _, _)| bt.tracker.moved(id));
                 if !empty.is_empty()
                     && new != 0
@@ -1422,6 +1444,46 @@ impl<'m, H: Host> Interp<'m, H> {
         self.track_at(Self::tag_of(regs, o), addr, len, write, bt.at)
     }
 
+    /// `intrinsic.copy_bytes(dst, src, n)`: `n` bytes move from `src` to `dst` with their
+    /// initialisation, as bytes: no typed value is read or written, so no byte needs to be
+    /// initialised. Borrow tracking: a read of the source range through the tag of `src`, then a
+    /// write of the destination range through the tag of `dst` (M1, M2, M20), and the tagged
+    /// words move with their bytes ([`Borrows::copied`]). Checking mode: ranges that share a
+    /// byte are a `copy-overlap` error (the native copy may run in either direction).
+    #[allow(clippy::too_many_arguments)]
+    fn copy_bytes(
+        &mut self,
+        regs: &[Val],
+        args: &[Operand],
+        dst: u64,
+        src: u64,
+        n: u64,
+        f: FuncId,
+        i: u32,
+        site: Site,
+    ) -> R<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        if self.bt.is_some() {
+            let (Some(&d), Some(&s)) = (args.first(), args.get(1)) else {
+                return Err(malformed("copy_bytes"));
+            };
+            self.track(Self::tag_of(regs, s), src, n, false, f, i)?;
+            self.track(Self::tag_of(regs, d), dst, n, true, f, i)?;
+        }
+        let fault = Self::fault(f, site);
+        if self.mem.is_checked() && dst < src.saturating_add(n) && src < dst.saturating_add(n) {
+            self.mem.fail_overlap(dst, n);
+            return Err(fault(Fault { addr: dst, len: n, write: true }));
+        }
+        self.mem.copy(dst, src, n).map_err(fault)?;
+        if let Some(bt) = &mut self.bt {
+            bt.copied(dst, src, n);
+        }
+        Ok(())
+    }
+
     /// Borrow tracking: the access of a CPU atomic intrinsic through the tag of its pointer
     /// operand: a read, and a write when it stores (a `cas` that fails stores nothing).
     fn track_atomic(
@@ -1979,6 +2041,12 @@ impl<'m, H: Host> Interp<'m, H> {
                     let a = vals.get(1).cloned().unwrap_or(Val::S(0));
                     let dest = body.insts.result.get(iu).copied().flatten();
                     return Ok(Step::Call(FuncId(idx), vec![a], dest));
+                }
+                if name == "copy_bytes" {
+                    let u = |k: usize| vals.get(k).and_then(Val::bits).ok_or(malformed("copy_bytes operand"));
+                    let (dst, src, n) = (u(0)?, u(1)?, u(2)?);
+                    self.copy_bytes(regs, args, dst, src, n, fid, i, site)?;
+                    return Ok(Step::Next);
                 }
                 if name == "static_addr" {
                     let k = vals.first().and_then(|v| v.bits()).ok_or(malformed("static_addr index"))?;

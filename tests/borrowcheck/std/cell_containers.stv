@@ -1,0 +1,81 @@
+//~ BORROWCHECK ok
+// References that std makes through raw pointers (`&*slot`, `mem.slice`, a guard's `&*p`, a
+// Once's slot) over values holding an `UnsafeCell`: each must have `Cell` permission on the
+// cell's bytes, so two such references to one element stay usable across writes through each
+// other. Also `&mut` elements in a Vec, moved out by `pop` and written after.
+import std.atomic;
+import std.cell;
+import std.mem;
+import std.sync;
+import std.vec;
+
+fn cells_in_vec() -> bool {
+    let mut v = vec.Vec::<cell.Cell<u32>>.new();
+    for i in 0u32..5 { v.push(cell.Cell::<u32>.new(i)); }
+    let s = v.as_slice();
+    let r = v.get_ref(2);
+    let o = v.get(2).unwrap();
+    s[2].set(10);
+    r.set(r.get() + 1);
+    o.set(o.get() + 1);
+    let a = s[2].get();
+    let b = r.get();
+    let mut w = vec.Vec::<atomic.U32>.new();
+    w.push(atomic.U32.new(1));
+    w.push(atomic.U32.new(2));
+    let ws = w.as_slice();
+    let w0 = w.get_ref(0);
+    let x = ws[0].fetch_add(5);
+    let y = w0.fetch_add(1);
+    return a == 12 && b == 12 && x == 1 && y == 6 && ws[0].load() == 7;
+}
+
+fn cells_behind_locks() -> bool {
+    let m = sync.Mutex::<cell.Cell<u32>, 1>.new(cell.Cell::<u32>.new(1));
+    let g = m.lock();
+    let c1 = g.get();
+    let c2 = g.get();
+    c1.set(c2.get() + 1);
+    c2.set(c1.get() + 1);
+    let mv = c1.get();
+    let o = sync.Once::<atomic.U64, 2>.new();
+    let r1 = o.get_or_init(fn() -> atomic.U64 { return atomic.U64.new(3); });
+    let r2 = o.get_or_init(fn() -> atomic.U64 { return atomic.U64.new(4); });
+    let p = r1.fetch_add(1);
+    let q = r2.fetch_add(1);
+    let oc = sync.Once::<cell.Cell<u8>, 3>.new();
+    let k1 = oc.get_or_init(fn() -> cell.Cell<u8> { return cell.Cell::<u8>.new(1); });
+    let k2 = oc.get_or_init(fn() -> cell.Cell<u8> { return cell.Cell::<u8>.new(2); });
+    k1.set(5);
+    k2.set(k1.get() + 1);
+    return mv == 3 && p == 3 && q == 4 && r1.load() == 5 && k1.get() == 6;
+}
+
+fn mut_refs_in_vec() -> bool {
+    let mut a: u32 = 1;
+    let mut b: u32 = 2;
+    {
+        let mut v = vec.Vec::<&mut u32>.new();
+        v.push(&mut a);
+        v.push(&mut b);
+        **v.get_mut(0) = 10;
+        let top = v.pop().unwrap();
+        *top = 20;
+        let s = v.as_mut_slice();
+        *s[0] = *s[0] + 1;
+        let mut slot: Option<&mut u32> = v.pop();
+        let taken = mem.replace(&mut slot, Option.None);
+        match taken {
+            Option.Some(r) => { *r = *r + 1; }
+            Option.None => {}
+        }
+    }
+    return a == 12 && b == 20;
+}
+
+fn main() -> i32 {
+    if !cells_in_vec() { return 1; }
+    if !cells_behind_locks() { return 2; }
+    if !mut_refs_in_vec() { return 3; }
+    return 0;
+}

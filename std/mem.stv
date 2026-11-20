@@ -41,7 +41,7 @@ pub fn swap<T: view>(a: &mut T from copy b, b: &mut T from copy a) {
     let pa = &mut *a as *mut T;
     let pb = &mut *b as *mut T;
     let t = unsafe("pa comes from a: valid and initialized") pa.read();
-    unsafe("pa was moved out, pb is valid and distinct from pa (a and b are both &mut)") { pa.write(pb.read()); }
+    unsafe("pa was moved out; pb is valid and does not overlap pa (a and b are both &mut)") { pa.write(pb.read()); }
     unsafe("pb was moved out by the read above") { pb.write(t); }
 }
 
@@ -71,13 +71,13 @@ pub fn add_mut<T: view>(p: *mut T, i: usize) -> *mut T {
 }
 
 // (data, len) of a slice and of a str (A3).
-pub fn slice_ptr<T>(xs: &[T]) -> *const T {
+pub fn slice_ptr<T: view>(xs: &[T]) -> *const T {
     let parts = unsafe("a slice reference is (data pointer, length)") *(&xs as *const &[T] as *const [usize; 2]);
     return parts[0] as *const T;
 }
 
 // The data pointer of a slice borrowed exclusively: writes through it are writes through `xs`.
-pub fn slice_ptr_mut<T>(xs: &mut [T]) -> *mut T {
+pub fn slice_ptr_mut<T: view>(xs: &mut [T]) -> *mut T {
     let parts = unsafe("a slice reference is (data pointer, length)") *(&xs as *const &mut [T] as *const [usize; 2]);
     return parts[0] as *mut T;
 }

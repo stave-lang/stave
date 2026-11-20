@@ -618,17 +618,18 @@ impl Program {
             .filter(|p| p.kind == PackageKind::Builtin)
             .map(|p| p.name.as_str())
             .collect();
-        // E0107 case `dotted`: a file or directory name with a dot (`src/a.b.stv`) makes a module
-        // no import can name, whose path text is another module's (`src/a/b.stv`, or a built-in
-        // one), which lookups by path text would take for it.
+        // E0107 case `dotted`: a file or directory name with a dot (`src/a.b.stv`), or the name
+        // of a dependency (`a.b`, whose `src/c.stv` is `a.b.c`), makes a module no import can
+        // name, whose path text is another module's (`src/a/b.stv`, `src/a/b/c.stv`, or a
+        // built-in one), which lookups by path text would take for it. A dependency's module path
+        // starts with its own name, which E1002 `builtin-name` already rejects when it is a
+        // built-in's: case `builtin` is for the root package's modules.
         for (i, m) in mods.iter().enumerate() {
             let rp = &loaded.packages[pending[i].pf.package];
-            let dotted = m.rel.iter().map(|&s| strings.get(s)).find(|s| s.contains('.'));
+            let dotted = m.path.iter().map(|&s| strings.get(s)).find(|s| s.contains('.'));
             let (case, name) = match (dotted, m.path.first()) {
                 (Some(seg), _) => ("dotted", seg),
-                (None, Some(&first))
-                    if rp.kind != PackageKind::Builtin && builtin_roots.contains(&strings.get(first)) =>
-                {
+                (None, Some(&first)) if rp.is_root && builtin_roots.contains(&strings.get(first)) => {
                     ("builtin", strings.get(first))
                 }
                 _ => continue,

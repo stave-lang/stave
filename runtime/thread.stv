@@ -243,11 +243,13 @@ fn register(lo: usize, hi: usize, guard_hi: usize, id: u64) -> usize {
         let k = e * state.REG_WORDS;
         let used = unsafe("the registry lock is held") (*st).reg[k];
         if used == 0 {
-            unsafe("the registry lock is held; lo is written last (readers skip lo == 0)") {
-                (*st).reg[k + 1] = hi;
-                (*st).reg[k + 2] = guard_hi;
+            // The signal handler reads lo, hi, and guard_hi without the lock (runtime.panic
+            // find_entry), so they are stored atomically, lo last: readers skip lo == 0.
+            unsafe("the registry lock is held; k + 3 < REG_LEN: 8-byte aligned words of the registry") {
+                let _ = atomic.swap_u64(reg_word_ptr(k + 1), hi as u64);
+                let _ = atomic.swap_u64(reg_word_ptr(k + 2), guard_hi as u64);
                 (*st).reg[k + 3] = id as usize;
-                (*st).reg[k] = lo;
+                let _ = atomic.swap_u64(reg_word_ptr(k), lo as u64);
             }
             found = e;
             break;
@@ -262,6 +264,15 @@ fn unregister(e: usize) {
     let st = state.get();
     let w = reg_lock();
     unsafe("w is the registry lock word in the state block") { atomic.lock(w); }
-    unsafe("the registry lock is held") { (*st).reg[e * state.REG_WORDS] = 0; }
+    unsafe("the registry lock is held; e < MAX_THREADS: an 8-byte aligned word of the registry") {
+        let _ = atomic.swap_u64(reg_word_ptr(e * state.REG_WORDS), 0);
+    }
     unsafe("this thread holds the registry lock") { atomic.unlock(w); }
+}
+
+// The address of registry word i (i < REG_LEN).
+fn reg_word_ptr(i: usize) -> *mut u64 {
+    let st = state.get();
+    let base = unsafe("st is runtime.state.STATE; only the field address is taken") &mut (*st).reg as *mut [usize; state.REG_LEN] as usize;
+    return (base + i * 8) as *mut u64;
 }

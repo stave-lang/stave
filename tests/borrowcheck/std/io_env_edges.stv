@@ -1,0 +1,92 @@
+//~ BORROWCHECK ok
+// std.io, std.env, std.debug, and std.cpu sites: writes of empty and non-empty text, a file
+// read into the Vec's spare capacity (an empty file, a small one, one longer than a read chunk),
+// paths the open rejects, argv strings copied out of the initial stack, site-table rows read
+// back as `&str`, and an error trace longer than its ring.
+import std.cpu;
+import std.debug;
+import std.env;
+import std.io;
+import std.mem;
+import std.string;
+
+fn read_len(path: &str) -> usize {
+    return match io.read_file(path) {
+        Result.Ok(v) => v.len(),
+        Result.Err(_) => 0xFFFF_FFFF,
+    };
+}
+
+fn files() -> bool {
+    io.print("");
+    io.print("io_env_edges: stdout\n");
+    io.eprint("");
+    let mut w = io.stderr();
+    w.write_str("io_env_edges: stderr\n");
+    let ok_n = read_len("input.txt") == 6 && read_len("empty.txt") == 0 && read_len("big.txt") == 70000;
+    let missing = match io.read_file("missing.txt") {
+        Result.Ok(_) => false,
+        Result.Err(e) => match e {
+            io.Error.NotFound => true,
+            _ => false,
+        },
+    };
+    let nul = match io.read_file("input.txt\0") {
+        Result.Ok(_) => false,
+        Result.Err(e) => match e {
+            io.Error.InvalidInput => true,
+            _ => false,
+        },
+    };
+    let empty_path = read_len("") == 0xFFFF_FFFF;
+    let bad = io.read_to_string("bad.txt").is_err();
+    let text = match io.read_to_string("input.txt") {
+        Result.Ok(s) => s.len() == 6,
+        Result.Err(_) => false,
+    };
+    return ok_n && missing && nul && empty_path && bad && text;
+}
+
+fn args() -> bool {
+    let n = env.count();
+    let a0 = env.arg(0).unwrap();
+    let a1 = env.arg(1).unwrap();
+    let none = env.arg(2).is_none() && env.arg(0xFFFF_FFFF_FFFF_FFFF).is_none();
+    return n == 2 && a0.len() == 4 && mem.str_bytes(a1.as_str()).eq(mem.str_bytes("one")) && none;
+}
+
+rec fn deep(n: u32) -> Result<u32, u32> {
+    if n == 0 {
+        return Result.Err(7u32);
+    }
+    let v = deep(n - 1)?;
+    return Result.Ok(v);
+}
+
+fn traces() -> bool {
+    let empty = debug.err_trace();
+    let fresh = empty.origin().is_none() && empty.len() == 0;
+    let r = deep(40);
+    let t = debug.err_trace();
+    let site = t.origin().unwrap();
+    let file = site.file();
+    let func = site.func();
+    let line = site.line();
+    let first = t.via(0);
+    let last = t.via(t.len() - 1);
+    let mut s = string.String.new();
+    let td = &t;
+    s.push_str("");
+    let text = f"{t}";
+    let ok_site = mem.str_bytes(file).eq(mem.str_bytes("io_env_edges.stv")) && mem.str_bytes(func).eq(mem.str_bytes("main.deep"));
+    return fresh && r.is_err() && ok_site && line > 0 && t.len() == 32 && t.skipped() == 8 && first.col() > 0 && last.line() == first.line() && text.len() > 32 && td.len() == 32;
+}
+
+fn main() -> i32 {
+    debug.assert(true, "never shown");
+    if !traces() { return 3; }
+    if !files() { return 1; }
+    if !args() { return 2; }
+    let f = cpu.features();
+    return 0;
+}

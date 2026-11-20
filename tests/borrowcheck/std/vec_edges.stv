@@ -1,0 +1,124 @@
+//~ BORROWCHECK ok
+// std.vec at the edges its `unsafe` sites rely on: zero-sized elements (no buffer, every slot
+// at the dangling address), elements with padding and with drop glue, view elements, growth by
+// reallocation while earlier elements are read back, empty buffers, and failing `try_` calls.
+import std.mem;
+import std.string;
+import std.vec;
+
+struct Pad {
+    pub a: u8,
+    pub b: u32,
+}
+
+impl Copy for Pad {}
+
+struct Z {}
+
+const HUGE: usize = 0x4000_0000_0000_0000;
+const USIZE_MAX: usize = 0xFFFF_FFFF_FFFF_FFFF;
+
+fn zero_sized() -> bool {
+    let mut z = vec.Vec::<Z>.new();
+    let cap = z.capacity();
+    for i in 0usize..5 { z.push(Z.{}); }
+    let r: &Z = z.get_ref(4);
+    let n = z.as_mut_slice().len();
+    let mut popped: usize = 0;
+    loop {
+        match z.pop() {
+            Option.Some(_) => { popped = popped + 1; }
+            Option.None => { break; }
+        }
+    }
+    z.push(Z.{});
+    z.clear();
+    return cap == USIZE_MAX && n == 5 && popped == 5 && z.is_empty();
+}
+
+fn padded() -> bool {
+    let mut v = vec.Vec::<Pad>.new();
+    for i in 0u32..10 {
+        v.push(Pad.{ a: (i as% u8), b: i * 3 });
+        let first = v.get_ref(0);
+        if first.b != 0 { return false; }
+    }
+    let m = v.get_mut(9);
+    m.a = 200;
+    m.b = 7;
+    let xs: [Pad; 3] = [Pad.{ a: 1, b: 2 }; 3];
+    v.extend_from_slice(&xs[0..3]);
+    let empty: [Pad; 0] = [Pad.{ a: 0, b: 0 }; 0];
+    v.extend_from_slice(&empty[0..0]);
+    let s = v.as_slice();
+    let ok = s.len() == 13 && s[9].a == 200 && s[9].b == 7 && s[12].b == 2;
+    let last = v.pop().unwrap();
+    let w = v.as_mut_slice();
+    w[0].b = 41;
+    return ok && last.a == 1 && v.get(0).unwrap().b == 41 && v.get(12).is_none();
+}
+
+fn owning() -> bool {
+    let mut v = vec.Vec::<string.String>.with_capacity(1);
+    for i in 0u32..6 { v.push(string.String.from_str("ab")); }
+    v.get_mut(2).push_str("cdé");
+    let old = mem.replace(v.get_mut(0), string.String.from_str("x"));
+    let mut w = vec.Vec::<string.String>.new();
+    w.push(string.String.from_str("other"));
+    mem.swap(v.get_mut(1), w.get_mut(0));
+    let ok = old.len() == 2 && v.get_ref(0).len() == 1 && v.get_ref(1).len() == 5 && v.get_ref(2).len() == 6;
+    let dropped = v.pop();
+    v.clear();
+    let mut nested = vec.Vec::<vec.Vec<u8>>.new();
+    for i in 0u8..4 {
+        let mut inner = vec.Vec::<u8>.new();
+        for k in 0u8..i { inner.push(k); }
+        nested.push(inner);
+    }
+    let n3 = nested.get_ref(3).len();
+    return ok && v.is_empty() && w.get_ref(0).len() == 2 && n3 == 3;
+}
+
+fn views() -> bool {
+    let a: u32 = 1;
+    let b: u32 = 2;
+    let c: u32 = 3;
+    let mut v = vec.Vec::<&u32>.new();
+    v.push(&a);
+    v.push(&b);
+    v.push(&c);
+    v.push(&a);
+    v.push(&b);
+    let mut sum: u32 = 0;
+    for i in 0..v.len() { sum = sum + **v.get_ref(i); }
+    let top = v.pop().unwrap();
+    let mut w = vec.Vec::<&u32>.new();
+    w.extend_from_slice(v.as_slice());
+    let copied = w.try_extend_from_slice(v.as_slice()).is_ok();
+    let mut wsum: u32 = 0;
+    for i in 0..w.len() { wsum = wsum + **w.get_ref(i); }
+    return sum == 9 && *top == 2 && copied && w.len() == 8 && wsum == 14;
+}
+
+fn empty_and_failing() -> bool {
+    let mut v = vec.Vec::<u64>.new();
+    let s = v.as_slice();
+    let n0 = s.len();
+    let m0 = v.as_mut_slice().len();
+    let none = v.pop().is_none() && v.get(0).is_none();
+    let big = vec.Vec::<u64>.try_with_capacity(HUGE).is_err();
+    let over = v.try_reserve(USIZE_MAX).is_err();
+    v.push(5);
+    let kept = v.try_reserve(HUGE).is_err() && v.len() == 1 && *v.get_ref(0) == 5;
+    let zero = vec.Vec::<u64>.with_capacity(0);
+    return n0 == 0 && m0 == 0 && none && big && over && kept && zero.capacity() == 0;
+}
+
+fn main() -> i32 {
+    if !zero_sized() { return 1; }
+    if !padded() { return 2; }
+    if !owning() { return 3; }
+    if !views() { return 4; }
+    if !empty_and_failing() { return 5; }
+    return 0;
+}

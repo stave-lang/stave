@@ -123,6 +123,66 @@ fn default_options_follow_the_environment() {
     }
 }
 
+/// `tests/borrowcheck/std/`: safe programs (no `unsafe` of their own) that drive the `unsafe`
+/// sites of std and the runtime with edge inputs. Each runs in the memory checking mode and
+/// under borrow tracking, on both CPU architectures; a report in either is a fault of std, of
+/// the runtime, or of an interpreter mode. First line: `//~ BORROWCHECK ok` (exit 0) or
+/// `//~ BORROWCHECK exit <n>`.
+#[test]
+fn std_programs_have_no_report() {
+    let dir = repo().join("tests/borrowcheck/std");
+    let progs = programs_in(&dir);
+    assert!(!progs.is_empty());
+    let files: Vec<(String, Vec<u8>)> = vec![
+        ("input.txt".into(), b"hello\n".to_vec()),
+        ("empty.txt".into(), Vec::new()),
+        ("bad.txt".into(), vec![0x61, 0xC0, 0x80]),
+        ("big.txt".into(), (0..70_000u32).map(|i| b'a' + (i % 26) as u8).collect()),
+    ];
+    let mut failures = Vec::new();
+    for p in &progs {
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        let src = std::fs::read_to_string(p).unwrap();
+        assert!(!src.contains("unsafe("), "{name}: a std driver program has no `unsafe` of its own");
+        let head = src.lines().next().and_then(|l| l.strip_prefix("//~ BORROWCHECK ")).map(str::trim);
+        let want = match head {
+            Some("ok") => 0,
+            Some(h) => h
+                .strip_prefix("exit ")
+                .and_then(|n| n.parse::<i32>().ok())
+                .unwrap_or_else(|| panic!("{name}: header `{h}`")),
+            None => panic!("{name}: no `//~ BORROWCHECK ..` first line"),
+        };
+        for t in ["x86_64-linux", "aarch64-linux"] {
+            let target = Triple::parse(t).unwrap();
+            let mut o = Options::new(Goal::Check).threads(Some(4));
+            o.lower = true;
+            o.borrow_marks = true;
+            o.target = Some(target);
+            let out = pipeline::run(p, &Library::in_dir(&repo()), &o).unwrap();
+            if out.has_errors() || out.module.is_none() {
+                failures.push(format!("{name} ({t}): diagnostics {:?}", out.diagnostics));
+                continue;
+            }
+            let m = out.module.as_ref().unwrap();
+            for borrow in [false, true] {
+                let lim = Limits { check: true, borrow, max_steps: 400_000_000, ..Limits::default() };
+                let mode = if borrow { "borrow" } else { "memory" };
+                match interp::run(m, "main.main", target, &[&b"one"[..]], &files, lim) {
+                    Ok(r) if r.ran.exit == want && (want != 101 || r.ran.stderr.starts_with(b"panic: ")) => {}
+                    Ok(r) => failures.push(format!(
+                        "{name} ({t}, {mode}): exit {}, want {want}; stderr:\n{}",
+                        r.ran.exit,
+                        String::from_utf8_lossy(&r.ran.stderr)
+                    )),
+                    Err(e) => failures.push(format!("{name} ({t}, {mode}):\n{e}")),
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// What the borrow checker and the tracking interpreter say of one program lowered without
 /// regard to the checker.
 struct Verdict {
