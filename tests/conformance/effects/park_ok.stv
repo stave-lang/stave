@@ -1,0 +1,55 @@
+//~ CHECK-ONLY
+// `park` (a wait on a completion queue) is a part of `block`. A fn may deny `park` alone and still
+// wait for its threads (`block`). Denying `block` denies `park` too. A fn type never has `park`:
+// every `fn(..)` value, an `extern "C"` import, and code the call graph does not show lack it, and
+// `without(park)` on a fn type is accepted and changes nothing. No std fn has `park`, so nothing
+// can have it: a denied `park` (E1401, E1403 case `made`), a `park` fn made into a fn value, and a
+// `park` fn on a call cycle have no negative test.
+unsafe("puts as declared in stdio.h; it allocates nothing") extern "C" {
+    fn puts(s: *const u8) -> i32 without(alloc);
+}
+
+fn joins() without(park) {
+    scope {
+        spawn { }
+    }
+}
+
+fn say(p: *const u8) -> i32 without(park) {
+    return unsafe("p is a NUL-terminated string") puts(p);
+}
+
+fn both(x: u32) -> u32 without(block, park) {
+    return x +% 1u32;
+}
+
+fn run(f: fn(u32) -> u32, x: u32) -> u32 without(park) {
+    return f(x);
+}
+
+fn same(f: fn(u32) -> u32 without(park)) -> u32 {
+    let g: fn(u32) -> u32 = f;
+    let h: fn(u32) -> u32 without(park) = g;
+    return run(h, 1u32);
+}
+
+fn narrow(f: fn(u32) -> u32 without(block)) -> u32 {
+    let g: fn(u32) -> u32 without(park) = f;
+    return run(g, 1u32);
+}
+
+fn inc(x: u32) -> u32 {
+    let nul = 0u8;
+    let r = unsafe("a NUL-terminated string") puts(&nul as *const u8);
+    return x +% 1u32;
+}
+
+fn main() {
+    joins();
+    let nul = 0u8;
+    let a = say(&nul as *const u8);
+    let b = run(both, 1u32);
+    let c = narrow(both);
+    let d = same(inc);
+    let e = run(fn(x: u32) -> u32 { return x +% 2u32; }, 1u32);
+}
