@@ -1,4 +1,4 @@
-# Contract: conformance test annotations (v0.3)
+# Contract: conformance test annotations (v0.4)
 
 `stave test` runs every `tests/conformance/**.stv` file and every package directory (a directory with
 a `stave.toml`) as one test. Expectations are comments in the sources. The GPU targets and stage1 use
@@ -33,9 +33,10 @@ lines that cannot hold a comment (e.g. E0015, where `//` would be inside the unc
 | `//~ CHECK-ONLY` | run `stave check` only (no codegen, no run) |
 | `//~ PARSE-ONLY` | only lex and parse: semantic stages do not run, so only lexical and syntax diagnostics are compared. For syntax tests whose items are not (yet) semantically valid (e.g. `kernel fn`, `allocator` naming no module, unresolved names). Stage0 runs `stave-syntax` in process; there is no `stave` command for it |
 | `//~ RESOURCE-LIMIT` | the program fails on a resource limit (heap, stack); `stave test` ignores it, and the cross-target differential tool (CPU vs `gpu-sm86`) compares only the panic kind and exit status |
+| `//~ INTERP-REPORT <class>` | run test of a program with unsafe code of its own: run in the reference interpreter with borrow tracking ([cli.md](cli.md) "Borrow tracking"), it ends with a report of this class (`use-after-free`, `write-under-shared`, ...) instead of its run expectations; `stave test` ignores it. A program whose own packages have no unsafe site must run clean there, so the annotation on it is a failure of the interpreter gate |
 
 Package tests: located annotations may appear in any file of the package; the directives
-(`STDOUT STDERR-CONTAINS EXIT TARGET ARGS CHECK-ONLY PARSE-ONLY RESOURCE-LIMIT`) only in the root
+(`STDOUT STDERR-CONTAINS EXIT TARGET ARGS CHECK-ONLY PARSE-ONLY RESOURCE-LIMIT INTERP-REPORT`) only in the root
 module (`src/main.stv` or `src/lib.stv`). A package directory with `expected.stdout` and/or `expected.exit` (one decimal
 number) gets the same meaning as `STDOUT expected.stdout` / `EXIT n`.
 
@@ -70,13 +71,15 @@ number) gets the same meaning as `STDOUT expected.stdout` / `EXIT n`.
   argument; trailing text after an annotation; a non-repeatable directive given twice (`TARGET`
   and `STDERR-CONTAINS` repeat; the same `TARGET` twice is malformed); both `expected.stdout` and
   `STDOUT`, or both `expected.exit` and `EXIT`; an `expected.exit` that is not one decimal number
-  0..=255; a negative test with run expectations; `CHECK-ONLY` or `PARSE-ONLY` with run
+  0..=255; a negative test with run expectations; `INTERP-REPORT` on a test that is not a positive
+  run test; `CHECK-ONLY` or `PARSE-ONLY` with run
   expectations; both `CHECK-ONLY` and `PARSE-ONLY`; a directive outside the root module of a
   package; a code not in the registry.
 - **Not run** (E1001): never fails the suite and is never counted as passed. The suite passes iff
   no test failed and none is malformed; the summary lists passed, failed, malformed, and not-run
   counts.
 - `RESOURCE-LIMIT` has no effect in `stave test` (it is read only by the cross-target differential tool).
+  `INTERP-REPORT` neither (it is read only by the interpreter gate).
 
 Directory conventions of other suites (e.g. the GPU kernel suite's `run-nodev/`, which sets
 `CUDA_VISIBLE_DEVICES=""`) add environment, not annotations.

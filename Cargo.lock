@@ -175,7 +175,6 @@ dependencies = [
  "gen-corpus",
  "stave-diag",
  "stave-driver",
- "stave-ir",
  "stave-target",
 ]
 

@@ -91,7 +91,7 @@ fn annotations(text: &str, file: &str, out: &mut Vec<Expect>) -> Result<(), Stri
                 out.push(Expect { severity, code: code_ok(code.trim())?, file: file.into(), line: None });
             }
             "STDOUT" | "STDERR-CONTAINS" | "EXIT" | "TARGET" | "ARGS" | "CHECK-ONLY" | "PARSE-ONLY"
-            | "RESOURCE-LIMIT" => {}
+            | "RESOURCE-LIMIT" | "INTERP-REPORT" => {}
             other => return Err(format!("{file}:{line_no}: unknown annotation {other}")),
         }
     }
