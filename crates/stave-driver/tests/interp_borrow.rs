@@ -153,7 +153,12 @@ fn verdict(p: &Path, target: Triple) -> Verdict {
     // `STAVE_BORROWCHECK_PLAIN`: the same module with the memory checks only (to compare the
     // time and memory of a run with and without tracking)
     let borrow = std::env::var_os("STAVE_BORROWCHECK_PLAIN").is_none();
-    let lim = Limits { check: true, borrow, max_steps: 200_000_000, ..Limits::default() };
+    // `STAVE_BORROWCHECK_STEPS`: the step limit (a directory with programs that never end)
+    let max_steps = std::env::var("STAVE_BORROWCHECK_STEPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200_000_000);
+    let lim = Limits { check: true, borrow, max_steps, ..Limits::default() };
     let ran = interp::run(m, "main.main", target, &[], &[], lim).map(|r| r.ran.exit);
     Verdict { rejected, stopped: None, ran }
 }

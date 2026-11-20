@@ -1,0 +1,37 @@
+//~ BORROWCHECK use-after-referent 15 13
+//~ CHECK-ONLY
+// `v as T` with `T` the type of `v` is a use of `v`: the result borrows what `v` borrows, and
+// a value that is not Copy moves.
+view struct Pick { best: &u32, count: usize }
+
+fn dangling() -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    {
+        let x: u32 = 7;
+        let a: &u32 = &x;
+        r = a as &u32;
+    } //~ ERROR E0501
+    return *r;
+}
+
+fn returned(z: &u32) -> &u32 from z {
+    let x: u32 = *z;
+    let a: &u32 = &x;
+    return a as &u32; //~ ERROR E0512
+}
+
+fn two_mut() -> usize {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let r: &mut Pick = &mut p;
+    let s: &mut Pick = r as &mut Pick;
+    r.count = 1; //~ ERROR E0502
+    s.count = 2;
+    return p.count;
+}
+
+fn main() -> i32 {
+    let _ = dangling();
+    return 0;
+}

@@ -1,0 +1,130 @@
+//~ BORROWCHECK two-exclusive 41 40
+//~ CHECK-ONLY
+// A closure holds a capture it changes (or a captured `&mut T`) by `&mut`, and every call uses
+// that one loan: a returned borrow of such a capture would still be live when the next call
+// writes the capture or lends it again. E0512 (`mut-capture` case), whatever the borrow goes
+// through: a dereference, a field, a local of the closure, a call, an inner closure.
+import std.vec;
+
+view struct W { a: &u32, m: &mut u32 }
+
+view struct Holder { f: fn() -> &mut u32 }
+
+struct S { x: u32 }
+
+impl S {
+    fn field(&mut self) -> u32 {
+        let f = fn() -> &mut u32 { return &mut self.x; }; //~ ERROR E0512
+        let a: &mut u32 = f();
+        return *a;
+    }
+}
+
+fn pass(x: &mut u32) -> &mut u32 from x {
+    return x;
+}
+
+fn twice(f: fn() -> &mut u32) -> u32 {
+    let a: &mut u32 = f();
+    let b: &mut u32 = f();
+    *a = 1;
+    *b = 2;
+    return *a;
+}
+
+fn two_mut() -> u32 {
+    let mut n: u32 = 1;
+    let f = fn() -> &mut u32 { return &mut n; }; //~ ERROR E0512
+    let a: &mut u32 = f();
+    let b: &mut u32 = f();
+    *a = 1;
+    *b = 2;
+    return *a;
+}
+
+fn shared_of_changed() -> u32 {
+    let mut n: u32 = 1;
+    let f = fn() -> &u32 { n = n + 1; return &n; }; //~ ERROR E0512
+    let r: &u32 = f();
+    let again: &u32 = f();
+    return *r + *again;
+}
+
+fn through_mut_ref(p: &mut u32) -> u32 {
+    let f = fn() -> &mut u32 { return &mut *p; }; //~ ERROR E0512
+    let g = fn() -> &u32 { return &*p; }; //~ ERROR E0512
+    return 0;
+}
+
+fn through_view_field(w: W) -> u32 {
+    let f = fn() -> &mut u32 { return &mut *w.m; }; //~ ERROR E0512
+    let a: &mut u32 = f();
+    return *a;
+}
+
+fn through_local_and_call() -> u32 {
+    let mut n: u32 = 1;
+    let f = fn() -> &mut u32 {
+        let q: &mut u32 = &mut n;
+        return q; //~ ERROR E0512
+    };
+    let mut k: u32 = 1;
+    let g = fn() -> &mut u32 { return pass(&mut k); }; //~ ERROR E0512
+    return 0;
+}
+
+fn element_and_method() -> u32 {
+    let mut xs: [u32; 4] = [0; 4];
+    let f = fn(i: usize) -> &mut u32 { return &mut xs[i]; }; //~ ERROR E0512
+    let mut v = vec.Vec::<u32>.new();
+    let g = fn() -> &u32 { v.push(1); return v.get_ref(0); }; //~ ERROR E0512
+    return 0;
+}
+
+fn in_a_view(c: bool) -> u32 {
+    let mut n: u32 = 1;
+    let m: u32 = 2;
+    let f = fn() -> (&u32, u32) { n = n + 1; return (&n, 1); }; //~ ERROR E0512
+    let mut k: u32 = 1;
+    let g = fn() -> &u32 { k = k + 1; return if c then &k else &m; }; //~ ERROR E0512
+    return 0;
+}
+
+fn nested() -> u32 {
+    let mut n: u32 = 1;
+    let f = fn() -> &u32 {
+        n = n + 1;
+        let g = fn() -> &u32 { return &n; };
+        return g(); //~ ERROR E0512
+    };
+    let mut k: u32 = 1;
+    let h = fn() -> u32 {
+        let g = fn() -> &mut u32 { return &mut k; }; //~ ERROR E0512
+        let a: &mut u32 = g();
+        return *a;
+    };
+    return 0;
+}
+
+// A returned closure holds its captures' loans: two results would change `n` side by side.
+fn returned_closure() -> u32 {
+    let mut n: u32 = 1;
+    let f = fn() -> fn() -> u32 {
+        return fn() -> u32 { n = n + 1; return n; }; //~ ERROR E0512
+    };
+    let g = f();
+    let h = f();
+    return g() + h();
+}
+
+fn stored_and_passed() -> u32 {
+    let mut n: u32 = 1;
+    let h = Holder.{ f: fn() -> &mut u32 { return &mut n; } }; //~ ERROR E0512
+    let mut k: u32 = 1;
+    return twice(fn() -> &mut u32 { return &mut k; }); //~ ERROR E0512
+}
+
+fn main() -> i32 {
+    let _ = two_mut();
+    return 0;
+}
