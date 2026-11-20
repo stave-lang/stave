@@ -533,7 +533,7 @@ impl<'m, H: Host> Interp<'m, H> {
             mem.write(a, &st.init[..n]).map_err(|_| oom())?;
             statics.push(a);
         }
-        Ok(Interp {
+        let mut it = Interp {
             m,
             cls,
             pointee,
@@ -547,7 +547,9 @@ impl<'m, H: Host> Interp<'m, H> {
             scratch: Vec::new(),
             alloc_fns,
             bt,
-        })
+        };
+        it.freeze_statics()?;
+        Ok(it)
     }
 
     /// The instruction executing in each frame, innermost first, at most [`TRACE_DEPTH`].
@@ -675,6 +677,60 @@ impl<'m, H: Host> Interp<'m, H> {
             return Some(Ok(Val::S(q)));
         }
         None
+    }
+
+    /// Borrow tracking: the root of each `static` that is not `mut` is `Frozen`, and `Cell` on
+    /// the bytes its type puts inside an `UnsafeCell`.
+    fn freeze_statics(&mut self) -> R<()> {
+        if self.bt.is_none() {
+            return Ok(());
+        }
+        let m = self.m;
+        for (k, st) in m.statics.iter().enumerate() {
+            if m.frozen.get(k) != Some(&true) {
+                continue;
+            }
+            let Some((id, _, size)) = self.statics.get(k).and_then(|&a| self.mem.alloc_span(a)) else {
+                continue;
+            };
+            let cells = self.cells(st.ty)?;
+            if let Some(bt) = &mut self.bt {
+                bt.tracker.begin_static(id, size, &cells, NO_EV);
+            }
+        }
+        Ok(())
+    }
+
+    /// M18: the fn value `out` of a closure literal, with an environment of its own: a copy,
+    /// in a slot of the current frame, of the one `fn.make` instruction `i` names, with the
+    /// capture references it holds. Without stack left the fn value keeps the environment of
+    /// its literal.
+    fn own_env(&mut self, body: &Body, i: u32, out: Val) -> R<Val> {
+        let Val::Pair(code, env) = out else { return Ok(out) };
+        let t = match body.args(i).get(1) {
+            Some(&Operand::Value(e)) => body.value_ty(e).and_then(|t| self.pointee.get(t.index()).copied()),
+            _ => None,
+        };
+        let Some(t) = t.flatten() else { return Ok(out) };
+        let (size, align) = {
+            let l = self.layout(t)?;
+            (l.size, l.align)
+        };
+        if size == 0 {
+            return Ok(out);
+        }
+        let Some(copy) = self.mem.stack_alloc(size, align) else { return Ok(out) };
+        if self.mem.copy_raw(copy, env, size).is_err() {
+            let _ = self.mem.take_report();
+            return Ok(out);
+        }
+        if let Some(bt) = &mut self.bt {
+            let held: Vec<_> = bt.shadow.range(env..env.saturating_add(size)).map(|(&a, &w)| (a, w)).collect();
+            for (a, w) in held {
+                bt.shadow.insert(copy + (a - env), w);
+            }
+        }
+        Ok(Val::Pair(code, copy))
     }
 
     /// Borrow tracking: the allocation at `addr` ends (M3): every tag of it is `Dead`.
@@ -1332,7 +1388,8 @@ impl<'m, H: Host> Interp<'m, H> {
         let Some(rt) = body.value_ty(res) else { return Ok(out) };
         let at = ev(f, i);
         match Mark::ALL.get(code as usize).copied().unwrap_or(Mark::None) {
-            Mark::None | Mark::Env => Ok(out),
+            Mark::None => Ok(out),
+            Mark::Env => self.own_env(body, i, out),
             Mark::Shared => self.borrow_word(rt, out, false, at),
             Mark::Mut => self.borrow_word(rt, out, true, at),
             Mark::Repeat => Err(self.violation(Tracker::repeat(at))),

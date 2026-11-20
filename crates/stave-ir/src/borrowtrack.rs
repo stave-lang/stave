@@ -657,6 +657,17 @@ impl Tracker {
         }
     }
 
+    /// Begins the allocation of a `static` that is not `mut`: its root is `Frozen`, and `Cell`
+    /// on the byte ranges in `cells` (M21).
+    pub fn begin_static(&mut self, alloc: u32, size: u64, cells: &[(u64, u64)], at: Ev) {
+        self.begin(alloc, size, true, at);
+        if let Some(tree) = self.trees.get_mut(&alloc) {
+            for &(a, b) in cells {
+                tree.nodes[0].update(a, b, Cause::Made, at, |_| Perm::Cell);
+            }
+        }
+    }
+
     /// The node an event on `alloc` through `tag` starts from: the tag's own, or the root for an
     /// untagged word and for a tag of another allocation.
     fn node_of(&self, alloc: u32, tag: Tag) -> u32 {

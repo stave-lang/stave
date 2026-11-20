@@ -988,6 +988,8 @@ impl<'a> FnCx<'a> {
         let f = self.req(Req::Closure(k as u32));
         let Some((tup, pt, locals)) = self.env_type(k) else { return Some(Operand::Func(f)) };
         let env = self.new_slot(tup);
+        let modes: Vec<crate::closures::CaptureMode> =
+            self.closure_info.get(k).map_or(Vec::new(), |c| c.captures.iter().map(|c| c.mode).collect());
         for (i, &(l, rt)) in locals.iter().enumerate() {
             let Some(p) = self.f.slot.get(l).copied().flatten() else {
                 self.fail(n, "captured local without a slot");
@@ -996,10 +998,34 @@ impl<'a> FnCx<'a> {
             let fp = self.t_ref(true, rt);
             let ix = self.int(i as i128);
             let a = self.op2(Op::FieldAddr, fp, env, ix);
+            let shared = modes.get(i) != Some(&crate::closures::CaptureMode::RefMut);
+            let p = self.capture(p, rt, shared);
             self.f.b.store(a, p);
         }
         let _ = pt;
-        Some(Operand::Value(self.f.b.fn_make(FnCx::ir(ty), f, env)))
+        let fv = self.f.b.fn_make(FnCx::ir(ty), f, env);
+        if self.g.borrows {
+            // each evaluation of the literal holds its own capture references
+            self.f.events.push(stave_ir::EventMark { value: fv, kind: stave_ir::EventKind::Env });
+        }
+        Some(Operand::Value(fv))
+    }
+
+    /// The capture reference a closure literal makes of the local at `p` (an environment
+    /// element of type `rt`, a `&mut`): with the borrow side table on, a borrow of the local,
+    /// `&` when the body only reads it.
+    fn capture(&mut self, p: Operand, rt: Ty, shared: bool) -> Operand {
+        if !self.g.borrows {
+            return p;
+        }
+        let Some((inner, _, _)) = self.pointee(rt) else { return p };
+        if !shared {
+            return self.borrowed(p, rt);
+        }
+        let st = self.t_ref(false, inner);
+        let s = self.convert_ptr(p, rt, st);
+        let b = self.borrowed(s, st);
+        self.convert_ptr(b, st, rt)
     }
 
     /// The type of a binding pattern (a single name), for the coercion site of its initializer.
@@ -1369,6 +1395,8 @@ impl<'a> FnCx<'a> {
                 };
                 let et = self.t_ref(m, elem);
                 let a = self.op2(Op::ElemAddr, et, v, i);
+                // the binding borrows its element through the sequence's reference
+                let a = self.borrowed(a, et);
                 Some(Place { base: Base::Val(a, et), proj: Vec::new(), ty: et, root: None })
             }
             Some(Seq::Val(mut p, iter)) => {
@@ -1618,10 +1646,13 @@ impl<'a> FnCx<'a> {
             return Place { base: Base::Val(x, vt), proj: Vec::new(), ty: vt, root: None };
         }
         let slot = self.new_slot(vt);
+        // each chunk is a new temporary, and the binding a borrow of it
+        self.event(stave_ir::EventKind::Begin, slot, bind_t);
         self.f.b.store(slot, x);
         let d = self.f.scopes.len();
         self.f.write_backs.push((d, WriteBack { slot, vt, s, i, mask, tok }));
-        Place { base: Base::Val(slot, bind_t), proj: Vec::new(), ty: bind_t, root: None }
+        let r = self.borrowed(slot, bind_t);
+        Place { base: Base::Val(r, bind_t), proj: Vec::new(), ty: bind_t, root: None }
     }
 
     fn slice_ref_ty(&mut self, mutable: bool, elem: Ty) -> Ty {

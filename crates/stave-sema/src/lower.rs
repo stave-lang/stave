@@ -437,6 +437,10 @@ fn lower_in_pool(
         if borrows && !sigs.lang.unsafe_cell.is_none() {
             module.cell = Some(IrDecl(sigs.lang.unsafe_cell.0));
         }
+        if borrows {
+            let frozen = |d: &DeclId| prog.decl(*d).is_some_and(|x| !x.flags.has(DeclFlags::MUT));
+            module.frozen = statics_list.iter().map(frozen).collect();
+        }
         Assembled { module, jobs, order, table, site_pos }
     });
     (r.map_err(|e| vec![e]), tm)

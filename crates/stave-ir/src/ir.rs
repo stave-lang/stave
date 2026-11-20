@@ -758,6 +758,9 @@ pub struct Module {
     /// The declaration of `std.cell.UnsafeCell`, in a module lowered with the borrow side
     /// table: the bytes of a value of such a type are not read-only behind a `&`.
     pub cell: Option<crate::types::DeclId>,
+    /// Per `static`, in a module lowered with the borrow side table: it is not `static mut`,
+    /// so nothing writes its bytes outside an `UnsafeCell`.
+    pub frozen: Vec<bool>,
 }
 
 impl Module {
