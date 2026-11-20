@@ -21,10 +21,19 @@ reference that is never used again conflicts with nothing, except a param while 
 | local (`let`, pattern binding, param) | when its declaration runs (param: frame entry) | exit of the block that declares it, after that block's drops (param: frame exit) |
 | temporary | at each evaluation of its expression | the next evaluation of the same expression in the same frame; the end of its statement, after its drop, when its type has drop glue; frame exit |
 | heap block | `try_alloc` or `try_realloc` returns it | `free`; a `try_realloc` of it that succeeds, also when the address stays (the new block takes the old bytes with their tags and initialization) |
-| `static`, string literal data | program start | never |
+| `static`, string literal data, constant temporary | program start | never |
 
 A `let` that runs again (a loop) begins a new allocation, whatever its address. Two expressions
 never share a temporary. A fn value is not an allocation (M18).
+
+A *constant temporary* is a temporary that a constant initializes and only `&` borrows: the
+value of a literal, of `()`, of `size_of` / `align_of`, or of a path that names no local (a
+`const` item, a variant without payload, a fn item), borrowed by `&e`, by `&` of a field or
+element of it, or as an auto-referenced `&self` receiver. Its value is fixed at compile time
+and nothing writes it, so it is static data like a string literal: every evaluation of the
+expression gives the same allocation, its root is `Frozen`, and a borrow of it is never ended
+by a later evaluation (M14 does not apply). A temporary that `&mut` borrows, and one whose
+value is computed (`&(2 + 2)`, `&-4`, `&f()`), is an ordinary temporary.
 
 **Tags.** A tag is an id made by one event and never reused. The tags of an allocation form a
 tree. The root is made with the allocation and stands for the place itself: an access that names
@@ -229,7 +238,9 @@ fn block_exit() -> u32 {
 ```
 - **M14 (temporaries).** An evaluation of an expression whose value needs a place (`&f()`,
   `&(a + 1)`, the receiver in `f().m()`) first evaluates its operands, which may read the
-  allocation of the evaluation before; then that allocation ends and a new one begins. A
+  allocation of the evaluation before; then that allocation ends and a new one begins. Not a
+  constant temporary ("State"): `lit = &4u32` or `tab = &TABLE` in a loop borrows the same
+  static data in every round, and a reference of the round before stays usable. A
   temporary whose type has drop glue is dropped and ends with its statement, in reverse order
   of creation. Any other one stays until the next evaluation or the frame exit: a borrow of it
   may be used after its statement.
@@ -595,6 +606,9 @@ it is not dumped, not compared with a golden, and not given to a backend.
   - *environment*, on `fn.make`: the interpreter copies the environment into a slot of its
     own in the current frame, so each evaluation of a closure literal holds its own capture
     references (M18).
+  - *constant*, in place of *begin*: the slot of a constant temporary. Its first evaluation
+    begins it; the store of a later one writes the bytes that are there and is no event, so
+    no tag of it changes. Its tags are not judged by M24, like those of a `static`.
 - **A local a value is moved out of lives in a slot**, also when the canonical lowering keeps
   it as an SSA value: a move is an event on the bytes of its place. A local that is never
   borrowed, captured, or moved out of stays an SSA value and is no allocation of the run.
@@ -618,6 +632,11 @@ pointer is a tag made through a raw pointer (M24).
 
 What the tracking mode does not see, or sees later than the rules say:
 
+- A constant temporary has its row for `&e` with `e` a literal or a path to a `const` item
+  (also in parentheses) and for `&` of a field or element of a `const` item. The other
+  constant temporaries (a variant without payload, a fn item, `()`, `size_of`, an
+  auto-referenced receiver) begin anew at each evaluation for the mode. It is a slot of its
+  frame: the mode ends it with the frame, and its root stays `Active`.
 - The moves of a `match` arm that has a guard happen when the guard holds (the names are bound
   before it runs). Of an or-pattern with a guard they have no row: the block the guard runs in
   has one predecessor per alternative.

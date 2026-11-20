@@ -233,6 +233,9 @@ struct Borrows {
     static_ids: HashSet<u32>,
     /// The `from` clauses that a call did not keep (M24).
     signatures: Vec<signature::SignatureReport>,
+    /// The address the next store writes without an event: a constant temporary evaluated
+    /// again.
+    quiet: Option<u64>,
 }
 
 fn ev(f: FuncId, inst: u32) -> Ev {
@@ -254,10 +257,11 @@ enum Mark {
     /// A borrow through a raw pointer.
     SharedRaw,
     MutRaw,
+    Const,
 }
 
 impl Mark {
-    const ALL: [Mark; 10] = [
+    const ALL: [Mark; 11] = [
         Mark::None,
         Mark::Shared,
         Mark::Mut,
@@ -268,6 +272,7 @@ impl Mark {
         Mark::Env,
         Mark::SharedRaw,
         Mark::MutRaw,
+        Mark::Const,
     ];
 
     fn of(e: EventKind) -> Mark {
@@ -277,6 +282,7 @@ impl Mark {
             EventKind::Gone => Mark::Gone,
             EventKind::Repeat => Mark::Repeat,
             EventKind::Env => Mark::Env,
+            EventKind::Const => Mark::Const,
         }
     }
 }
@@ -600,6 +606,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 plans: vec![None; m.funcs.len()],
                 static_ids: HashSet::new(),
                 signatures: Vec::new(),
+                quiet: None,
             })
         });
         let strs = m.strings.iter().map(|s| mem.add_data(s)).collect();
@@ -1511,6 +1518,14 @@ impl<'m, H: Host> Interp<'m, H> {
                 bt.forget(base, len);
                 bt.tracker.end_alloc(id, at)
             }
+            Mark::Const => {
+                // static data from its first evaluation on: no evaluation after it is an event
+                let Some((id, _, _)) = self.mem.alloc_span(addr) else { return Ok(()) };
+                if !bt.static_ids.insert(id) {
+                    bt.quiet = Some(addr);
+                }
+                Ok(())
+            }
             _ => {
                 let Some((id, off)) = bt.locate(&self.mem, addr) else { return Ok(()) };
                 bt.tracker.gone(id, tag, off, off.saturating_add(size), at)
@@ -1836,7 +1851,8 @@ impl<'m, H: Host> Interp<'m, H> {
                     .ok_or(malformed("store type"))?;
                 let a = s!(0);
                 let v = self.eval(body, regs, arg(1)?)?;
-                if self.bt.is_some() {
+                let quiet = self.bt.as_mut().and_then(|bt| bt.quiet.take()) == Some(a);
+                if self.bt.is_some() && !quiet {
                     let n = self.layout(t)?.size;
                     self.track(Self::tag_of(regs, p), a, n, true, fid, i)?;
                 }

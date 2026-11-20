@@ -541,6 +541,14 @@ impl<'a> FnCx<'a> {
             let e = self.expr(c, None);
             let Some(p) = self.place_of(e) else { return E::Never };
             let p = match p.base {
+                Base::Val(v, t) if self.constant_temp(c, v, &p, rt) => {
+                    // static data: the slot does not begin anew at the next evaluation
+                    let s = self.new_slot(t);
+                    let st = self.t_ref(true, t);
+                    self.event(stave_ir::EventKind::Const, s, st);
+                    self.f.b.store(s, v);
+                    Place { base: Base::Mem(s, st), proj: p.proj, ty: p.ty, root: None }
+                }
                 Base::Val(..) => self.own_temp(p),
                 _ => p,
             };
@@ -548,6 +556,37 @@ impl<'a> FnCx<'a> {
             return E::V(self.borrowed(v, rt), rt);
         }
         self.expr(c, want)
+    }
+
+    /// With the borrow side table on: whether `&c`, of reference type `rt`, borrows a constant
+    /// temporary: `c` is a literal or names a `const` item (in parentheses or not), or is a
+    /// field or element of a `const` item, its value `v` is the place `p` is rooted at, and
+    /// the borrow is `&`. Such a temporary only ever holds the one value.
+    fn constant_temp(&mut self, c: u32, v: Operand, p: &Place, rt: Ty) -> bool {
+        if !self.g.borrows || !matches!(self.kind(rt), TypeKind::Ref { mutable: false, .. }) {
+            return false;
+        }
+        if self.f.const_vals.contains(&v) {
+            return true;
+        }
+        if !p.proj.is_empty() || !matches!(v, Operand::Const(_) | Operand::Str(_)) {
+            return false;
+        }
+        let icx = self.icx;
+        let mut x = c;
+        while icx.kind(x) == Some(NodeKind::Primary) && icx.is(icx.a(x), Term::LParen) {
+            let kids = icx.kids_vec(x);
+            if kids.len() != 1 || icx.is(icx.close(icx.a(x)) - 1, Term::Comma) {
+                return false;
+            }
+            x = kids[0];
+        }
+        let a = icx.a(x);
+        let literal = icx.kind(x) == Some(NodeKind::Primary)
+            && [Term::IntLit, Term::FloatLit, Term::KwTrue, Term::KwFalse, Term::CharLit, Term::StrLit]
+                .iter()
+                .any(|&t| icx.is(a, t));
+        literal || self.f.const_toks.contains(&icx.end_tok(x))
     }
 
     /// The reference `v` of type `rt` a borrow expression made. With the borrow side table on,
@@ -907,7 +946,14 @@ impl<'a> FnCx<'a> {
                     let (ty, Some(v)) = (c.ty, c.value.clone()) else {
                         return self.fail_at(Some(tok), "const without a value");
                     };
-                    self.const_val(&v, ty, tok)
+                    let e = self.const_val(&v, ty, tok);
+                    if self.g.borrows {
+                        self.f.const_toks.push(tok);
+                        if let E::V(o @ Operand::Value(_), _) = &e {
+                            self.f.const_vals.push(*o);
+                        }
+                    }
+                    e
                 }
                 Some(crate::decls::DeclKind::Static) => self.static_place(d, tok),
                 Some(crate::decls::DeclKind::Fn | crate::decls::DeclKind::Method) => {

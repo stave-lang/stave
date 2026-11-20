@@ -240,6 +240,10 @@ pub(crate) struct FnState {
     /// While the pattern of a `match` arm with a guard binds: the moves it makes (pointer to
     /// the place, its type). They happen when the guard holds, not when the names are bound.
     pub held: Option<Vec<(Operand, Ty)>>,
+    /// With the borrow side table on: the values of the `const` items named so far that are
+    /// instructions of their own, and the last token of each path that named a `const` item.
+    pub const_vals: Vec<Operand>,
+    pub const_toks: Vec<u32>,
     /// The site of an instruction that has none of its own: the statement's, with the borrow
     /// side table on (a report names source lines); else none.
     pub stmt_site: Site,
@@ -1528,6 +1532,8 @@ impl FnState {
             borrows: Vec::new(),
             events: Vec::new(),
             held: None,
+            const_vals: Vec::new(),
+            const_toks: Vec::new(),
             stmt_site: Site::NONE,
             ensures_end: None,
         }
