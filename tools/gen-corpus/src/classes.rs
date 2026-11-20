@@ -10,9 +10,16 @@
 //! with a bad case must be rejected; a program whose cases are all good must be accepted. A few
 //! shapes are bad for a fixed rule instead (`[e; n]` of a non-Copy `e`, a closure returning a
 //! borrow of a capture it changes, a store a `from` clause does not declare).
+//!
+//! The `generic-sites` class (module `sites`) has its own prelude and cases: a bounded generic
+//! item instantiated at one site kind, bad iff the type argument does not meet the bound.
 
 use crate::rng::Rng;
 use std::fmt::Write as _;
+
+mod sites;
+
+pub use sites::RULE_CODES;
 
 /// One family of programs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -34,10 +41,13 @@ pub enum Class {
     /// Statement-level loan liveness: uses before / after writes, branches, `break`,
     /// `continue`, early `return`, straight-line sequences of several holders.
     Liveness,
+    /// A generic item with a bound instantiated at one site kind with a type argument that
+    /// fits the bound or not.
+    GenericSites,
 }
 
 impl Class {
-    pub const ALL: [Class; 8] = [
+    pub const ALL: [Class; 9] = [
         Class::ClosureCoerce,
         Class::RefCast,
         Class::TempLoop,
@@ -46,6 +56,7 @@ impl Class {
         Class::ParamFrom,
         Class::MoveDrop,
         Class::Liveness,
+        Class::GenericSites,
     ];
 
     pub fn name(self) -> &'static str {
@@ -58,6 +69,7 @@ impl Class {
             Class::ParamFrom => "param-from",
             Class::MoveDrop => "move-drop",
             Class::Liveness => "liveness",
+            Class::GenericSites => "generic-sites",
         }
     }
 
@@ -684,7 +696,8 @@ fn holder(class: Class, r: &mut Rng) -> Holder {
                 None,
             ),
         },
-        Class::Liveness | Class::TempLoop => match r.below(3) {
+        // `generic-sites` makes its cases without holders.
+        Class::Liveness | Class::TempLoop | Class::GenericSites => match r.below(3) {
             0 => h(
                 "ref",
                 vec![s("let r: &u32 = &x;")],
@@ -1128,6 +1141,7 @@ fn fixed(class: Class, r: &mut Rng, idx: usize, want_bad: bool) -> Option<Case> 
 /// The case `idx` of a program of `class`.
 fn case(class: Class, r: &mut Rng, idx: usize, want_bad: bool) -> Case {
     match class {
+        Class::GenericSites => sites::case(r, idx, want_bad),
         Class::TempLoop => {
             if r.chance(700) {
                 temp_loop(r, idx, want_bad)
@@ -1160,7 +1174,7 @@ pub fn generate(class: Class, seed: u64) -> Program {
     let bad_case = if r.chance(450) { Some(r.below(ncases as u32) as usize) } else { None };
     let cases: Vec<Case> = (0..ncases).map(|i| case(class, &mut r, i, bad_case == Some(i))).collect();
     let mut text = format!("// fuzz-classes {} seed {seed}\n", class.name());
-    text.push_str(PRELUDE);
+    text.push_str(if class == Class::GenericSites { sites::PRELUDE } else { PRELUDE });
     for c in &cases {
         text.push('\n');
         if !c.items.is_empty() {
