@@ -51,15 +51,17 @@ fn run(lo: usize, hi: usize, body: fn(usize)) {
     if w > n { w = n; }
     let mut ch = n / (w * 16);
     if ch == 0 { ch = 1; }
-    let next = cell.UnsafeCell::<u64>.new(lo as u64);
-    let end = hi as u64;
-    let step = ch as u64;
+    // The counter numbers chunks, not indices: each worker overshoots it by one claim at most,
+    // so it stays below chunks + w and never wraps to a chunk that was handed out already.
+    let chunks = ((n - 1) / ch + 1) as u64;
+    let next = cell.UnsafeCell::<u64>.new(0);
     let work = fn() {
         loop {
-            let i = unsafe("next lives until every worker is joined") atomic.fetch_add_u64(next.get(), step);
-            if i >= end { break; }
-            let stop = if end - i < step then end else i + step;
-            for k in (i as usize)..(stop as usize) {
+            let c = unsafe("next lives until every worker is joined") atomic.fetch_add_u64(next.get(), 1);
+            if c >= chunks { break; }
+            let i = lo + (c as usize) * ch;
+            let stop = if hi - i < ch then hi else i + ch;
+            for k in i..stop {
                 errtrace.clear();
                 body(k);
             }

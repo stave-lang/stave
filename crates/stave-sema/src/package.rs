@@ -290,6 +290,8 @@ pub(crate) struct RawPackage {
     /// Root module relative path (`["main"]`, `["lib"]`), if any.
     pub root_rel: Option<Vec<String>>,
     pub run_stack: Option<u64>,
+    /// The manifest's `name` value.
+    pub name_span: Option<TSpan>,
 }
 
 #[derive(Debug, Default)]
@@ -313,6 +315,8 @@ struct DepSpec {
 #[derive(Debug, Default)]
 struct ManifestData {
     name: Option<String>,
+    /// The `name` value (E1002 `builtin-name`).
+    name_span: Option<TSpan>,
     kind: Option<PackageKind>,
     /// The `kind` value (E1002 `missing-root`).
     kind_span: Option<TSpan>,
@@ -430,6 +434,7 @@ impl Check<'_> {
             match e.key.as_str() {
                 "name" => {
                     m.name = self.string(e);
+                    m.name_span = Some(e.value.span());
                     if m.name.as_deref().is_some_and(|n| !valid_name(n)) {
                         let (v, at) = (self.src(e.value.span()), e.value.span());
                         self.issues.push(ManifestIssue::new(Some("bad-name"), &[("key", &v)], at));
@@ -602,9 +607,12 @@ fn effective_deps(m: &ManifestData, target: Triple) -> Vec<DepSpec> {
     out
 }
 
-/// Path of `p` for diagnostics: relative to `root` when inside it, else as given.
+/// Path of `p` for diagnostics: relative to `root` when inside it, else `p` without `.` and `..`.
 fn display(root: &Path, p: &Path) -> String {
-    let rel = p.strip_prefix(root).unwrap_or(p);
+    // A dependency's directory is normalized (`dir.join(path)`), the root as given: compare both
+    // normalized, so a root spelled with `..` still shortens the paths of files below it.
+    let (root, p) = (normalize(root), normalize(p));
+    let rel = p.strip_prefix(&root).unwrap_or(&p);
     let parts: Vec<String> = rel
         .components()
         .filter(|c| !matches!(c, Component::CurDir | Component::RootDir))
@@ -642,6 +650,7 @@ pub(crate) fn load(fs: &Fs, root: &Path, target: Triple, builtins: &[BuiltinPack
             is_root: true,
             root_rel: Some(vec!["main".into()]),
             run_stack: None,
+            name_span: None,
         });
         specs.push(Vec::new());
         l.files.push(PendingFile {
@@ -726,6 +735,16 @@ pub(crate) fn load(fs: &Fs, root: &Path, target: Triple, builtins: &[BuiltinPack
             l.packages[p].deps.push((d.name.clone(), id));
         }
     }
+    // A package that is not built in may not take a built-in package's name either: as a
+    // dependency its module paths would be the built-in's (`std.io`), and its own imports of the
+    // built-in (`import std.vec;`) would name its own modules.
+    for p in l.packages.iter().filter(|p| p.kind != PackageKind::Builtin) {
+        if let (Some(m), Some(at)) = (p.manifest, p.name_span)
+            && builtins.iter().any(|b| b.name == p.name)
+        {
+            l.manifests[m].issues.push(ManifestIssue::new(Some("builtin-name"), &[("key", &p.name)], at));
+        }
+    }
     // Every non-built-in package depends on the implicit built-ins (`std`).
     for p in l.packages.iter_mut().filter(|p| p.kind != PackageKind::Builtin) {
         for (k, b) in builtins.iter().enumerate() {
@@ -788,6 +807,7 @@ fn add_package(
             is_root: false,
             root_rel: None,
             run_stack: data.run_stack,
+            name_span: data.name_span,
         });
         for rel in fs.builtin_files(dir) {
             let abs = dir.join(&rel);
@@ -833,6 +853,7 @@ fn add_package(
         is_root,
         root_rel: Some(vec![root_file.to_string()]),
         run_stack: data.run_stack,
+        name_span: data.name_span,
     });
     for rel in files {
         let abs = dir.join("src").join(&rel);
@@ -885,6 +906,7 @@ mod tests {
         assert_eq!(display(root, Path::new("/home/u/lib/b.stv")), "/home/u/lib/b.stv");
         assert_eq!(display(Path::new("pkg"), Path::new("./x.stv")), "x.stv");
         assert_eq!(display(Path::new("pkg"), Path::new("other/x.stv")), "other/x.stv");
+        assert_eq!(display(Path::new("/w/x/../pkg"), Path::new("/w/pkg/dep/src/c.stv")), "dep/src/c.stv");
     }
 
     #[test]
@@ -959,7 +981,8 @@ mod tests {
 
     /// A dependency bound under a built-in package's name is E1002 `builtin-name` at that name,
     /// in every package that is not built in (per-target tables too), whatever its manifest
-    /// `name`; the implicit `std` stays the built-in one. Names that only look alike bind.
+    /// `name`; the implicit `std` stays the built-in one. Names that only look alike bind. A
+    /// package whose own `name` is a built-in's is E1002 `builtin-name` at that value.
     #[test]
     fn builtin_names_bind_no_dependency() {
         let mut m = BTreeMap::new();
@@ -998,7 +1021,10 @@ mod tests {
             .flat_map(|mf| mf.issues.iter().map(move |i| (pk[mf.package].name.clone(), i.case, i.key())))
             .collect();
         let want = |p: &str, k: &str| (p.to_string(), Some("builtin-name"), k.to_string());
-        assert_eq!(got, vec![want("app", "std"), want("app", "runtime"), want("mid", "std")]);
+        assert_eq!(
+            got,
+            vec![want("app", "std"), want("app", "runtime"), want("std", "std"), want("mid", "std")]
+        );
         let deps_of = |name: &str| -> Vec<(String, String)> {
             let p = l.packages.iter().find(|p| p.name == name).unwrap();
             p.deps.iter().map(|(n, id)| (n.clone(), l.packages[*id].dir.display().to_string())).collect()

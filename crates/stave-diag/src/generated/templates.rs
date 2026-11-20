@@ -930,7 +930,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0107",
         severity: Severity::Error,
         area: "resolve",
-        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`), at the module's first token; case `dotted`: a module of any package from a file or directory name with a dot (`src/a.b.stv`, `src/c.d/e.stv`): no import can name it and its path text is another module's (`a.b`, or a built-in one for `src/std.cell.stv`), at the module's first token; it takes the place of case `builtin`",
+        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of the root package whose path starts with the name of a built-in package (`src/std/cell.stv` is `std.cell`; a dependency named so is E1002 `builtin-name`), at the module's first token; case `dotted`: a module of any package from a file or directory name with a dot (`src/a.b.stv`, `src/c.d/e.stv`), or of a dependency whose `name` has one (`a.b`: its `src/c.stv` is `a.b.c`): no import can name it and its path text is another module's (`a.b`, `a.b.c`, or a built-in one for `src/std.cell.stv`), at the module's first token; it takes the place of case `builtin`",
         retired: false,
         located: true,
         holes: &[
@@ -970,7 +970,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "no import can name this module" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "rename `{name}` without the dot: a module path's segments are file and directory names, `src/a/b.stv` is `a.b`",
+                    description: "rename `{name}` without the dot: a module path's segments are a dependency's name and file and directory names, `src/a/b.stv` is `a.b`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4169,7 +4169,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1002",
         severity: Severity::Error,
         area: "driver",
-        rule: "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, a dependency of a package that is not built in bound under a built-in package's name (`std`, `runtime`; at the name, whatever the dependency's own `name`), or unreadable manifest; located in `stave.toml`",
+        rule: "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, a dependency of a package that is not built in bound under a built-in package's name (`std`, `runtime`; at the name, whatever the dependency's own `name`) or such a package's own `name` being one (at the value), or unreadable manifest; located in `stave.toml`",
         retired: false,
         located: true,
         holes: &[
@@ -4228,12 +4228,12 @@ pub(super) static ENTRIES: &[Entry] = &[
             },
             Shape {
                 case: "builtin-name",
-                message: "dependency `{key}` has the name of a built-in package",
+                message: "`{key}` is the name of a built-in package",
                 labels: &[
                     LabelTemplate { at: "primary", text: "a built-in package's name" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "bind the dependency under another name: `{key}` always names the built-in package (`std` needs no dependency)",
+                    description: "use another name for the package or the dependency: `{key}` always names the built-in package (`std` needs no dependency)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

@@ -145,7 +145,7 @@ pub fn features() -> u64 {
 pub fn trace(line: &str) {
     let parts = unsafe("a &str is (data pointer, byte length)") *(&line as *const &str as *const [usize; 2]);
     loop {
-        let r = unsafe("parts is a string literal in read-only program data") os.write(os.STDERR, parts[0] as *const u8, parts[1]);
+        let r = unsafe("parts is the (data, length) of line, which stays readable during the call") os.write(os.STDERR, parts[0] as *const u8, parts[1]);
         if r != -os.EINTR { return; }
     }
 }

@@ -1,0 +1,75 @@
+//~ BORROWCHECK ok
+// std.string and std.fmt sites: `as_str` (a `&str` made over the Vec's bytes) of an empty and of
+// a grown String with 1- to 4-byte characters; `from_utf8` on well-formed and on overlong,
+// surrogate, truncated, and out-of-range input; the integer and char text built in a stack
+// buffer and borrowed as `&str`; float text at the extremes.
+import std.mem;
+import std.string;
+import std.vec;
+
+fn bytes_of(xs: &[u8]) -> vec.Vec<u8> {
+    let mut v = vec.Vec::<u8>.new();
+    v.extend_from_slice(xs);
+    return v;
+}
+
+fn same(a: &str, b: &str) -> bool {
+    return mem.str_bytes(a).eq(mem.str_bytes(b));
+}
+
+fn valid(xs: &[u8]) -> bool {
+    return string.String.from_utf8(bytes_of(xs)).is_ok();
+}
+
+fn strings() -> bool {
+    let e = string.String.new();
+    let es = e.as_str();
+    let mut s = string.String.with_capacity(1);
+    s.push('a');
+    s.push('é');
+    s.push('€');
+    s.push('😀');
+    let n = s.len();
+    s.push_str(e.as_str());
+    let t = f"{s}{s}";
+    let ok_u = valid(s.as_bytes()) && t.len() == 2 * n;
+    let good: [u8; 4] = [0xF4, 0x8F, 0xBF, 0xBF];
+    let overlong: [u8; 2] = [0xC0, 0xAF];
+    let surrogate: [u8; 3] = [0xED, 0xA0, 0x80];
+    let truncated: [u8; 2] = [0xE2, 0x82];
+    let too_big: [u8; 4] = [0xF4, 0x90, 0x80, 0x80];
+    let checks = valid(&good[0..4]) && !valid(&overlong[0..2]) && !valid(&surrogate[0..3]) && !valid(&truncated[0..2]) && !valid(&too_big[0..4]);
+    let back = match string.String.from_utf8(bytes_of(&truncated[0..2])) {
+        Result.Ok(_) => 0,
+        Result.Err(v) => v.len(),
+    };
+    let owned = s.into_bytes();
+    return es.len() == 0 && n == 10 && ok_u && checks && back == 2 && owned.len() == 10;
+}
+
+fn numbers() -> bool {
+    let a: i64 = -9223372036854775807 - 1;
+    let b: u64 = 18446744073709551615;
+    let c: i8 = -128;
+    let z: u8 = 0;
+    let ints = f"{a} {b} {c} {z}";
+    let x: f64 = 5e-324;
+    let y: f64 = 1.7976931348623157e308;
+    let nan: f64 = 0.0 / 0.0;
+    let ninf: f64 = -1.0 / 0.0;
+    let nz: f64 = -0.0;
+    let small: f32 = 1e-45;
+    let floats = f"{x} {y} {nan} {ninf} {nz} {small}";
+    let ch: char = '😀';
+    let t: bool = true;
+    let misc = f"{ch}{t}";
+    let want_i = "-9223372036854775808 18446744073709551615 -128 0";
+    let want_f = "5e-324 1.7976931348623157e308 NaN -inf -0.0 1e-45";
+    return same(&ints, want_i) && same(&floats, want_f) && same(&misc, "😀true");
+}
+
+fn main() -> i32 {
+    if !strings() { return 1; }
+    if !numbers() { return 2; }
+    return 0;
+}

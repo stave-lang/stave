@@ -90,12 +90,12 @@ pub fn thread_id() -> u64 {
 unsafe("i < REG_LEN") fn reg_word(i: usize) -> usize {
     let st = state.get();
     let base = unsafe("st is runtime.state.STATE; only the field address is taken") &(*st).reg as *const [usize; state.REG_LEN] as usize;
-    return unsafe("i < REG_LEN (caller): a word of the registry") *((base +% i *% 8) as *const usize);
+    return unsafe("i < REG_LEN (caller): an 8-byte aligned word of the registry, stored atomically by runtime.thread") atomic.load_u64((base +% i *% 8) as *const u64) as usize;
 }
 
 // The registry entry whose [lo, hi) holds address a; MAX_THREADS if none. Reads without the
-// registry lock: an entry is complete before it is published (lo is written last) and is
-// removed only after its thread has exited.
+// registry lock, by atomic loads: an entry is complete before it is published (lo is stored
+// last) and is removed only after its thread has exited.
 fn find_entry(a: usize) -> usize {
     for e in 0..state.MAX_THREADS {
         let k = e *% state.REG_WORDS;
@@ -410,9 +410,9 @@ fn in_guard(addr: usize) -> bool {
     if lo != 0 && addr >= lo && addr < hi { return true; }
     let e = find_entry(addr);
     if e == state.MAX_THREADS { return false; }
-    let k = e * state.REG_WORDS;
-    let glo = unsafe("k < REG_LEN: inside the registry") (*st).reg[k];
-    let ghi = unsafe("k + 2 < REG_LEN: inside the registry") (*st).reg[k + 2];
+    let k = e *% state.REG_WORDS;
+    let glo = unsafe("e < MAX_THREADS, so k < REG_LEN") reg_word(k);
+    let ghi = unsafe("e < MAX_THREADS, so k + 2 < REG_LEN") reg_word(k +% 2);
     return addr >= glo && addr < ghi;
 }
 

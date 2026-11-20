@@ -15,8 +15,8 @@
 //   fill(x)          every element = x
 //   [u8] find_byte(b), find_any_byte(set): first index of b / of any byte of set
 //   any T: Copy      count(pred), any(pred), all(pred) (pred: fn(T) -> bool; it may be called
-//                    on any elements, in any order, any number of times), copy_from(src)
-//                    (lengths must match: `Assert` panic otherwise)
+//                    on any elements, in any order, any number of times; T may be a view),
+//                    copy_from(src) (T no view; lengths must match: `Assert` panic otherwise)
 //
 // Every method loops in 128-bit vectors (the portable baseline of every CPU target). On x86-64,
 // sum, dot, min, max, find, find_any_byte, eq, fill and copy_from have a second loop in
@@ -63,10 +63,11 @@ const SUM_BLOCK: usize = 4096;
 
 // xs as a slice of U: same address, xs.len() * size_of::<T>() / size_of::<U>() elements. Callers
 // pass T and U of one size, or U = u8; every bit pattern of T is then a valid U (bool is 0 or 1).
+// With U = u8 every byte of T must be initialized: no padding (copy_from checks it).
 fn cast<T, U>(xs: &[T]) -> &[U] from xs {
     let n = xs.len() * size_of::<T>() / size_of::<U>();
     let p = mem.slice_ptr(xs) as usize as *const U;
-    return unsafe("xs covers n elements of U, and every bit pattern of T is a valid U") mem.slice(xs, p, n);
+    return unsafe("xs covers n elements of U, every byte of them initialized, and every bit pattern of T is a valid U") mem.slice(xs, p, n);
 }
 
 // The mutable view; callers write only values valid as T (bytes 0 and 1 into a bool slice).
@@ -2643,8 +2644,8 @@ impl [bool] {
 
 // The predicate of count, any, and all may be called on any elements of the slice, in any order,
 // any number of times: a predicate that can trap may trap even where a sequential loop would have
-// stopped earlier.
-impl<T: Copy> [T] {
+// stopped earlier. They store no element and return none, so T may be a view (`&[&u32]`).
+impl<T: Copy + view> [T] {
     pub fn count(&self, pred: fn(T) -> bool) -> usize {
         let mut n: usize = 0;
         for i in 0..self.len() { n = n + (pred(self[i]) as usize); }
@@ -2676,9 +2677,19 @@ impl<T: Copy> [T] {
         }
         return true;
     }
+}
 
+// copy_from stores into self: over views it would need a `from` clause, so T is no view.
+impl<T: Copy> [T] {
     pub fn copy_from(&mut self, src: &[T]) {
         debug.assert(self.len() == src.len(), "copy_from: the slices differ in length");
+        // The byte loops read every byte of an element, so they take only a T whose size equals
+        // its alignment: one scalar-like value, with no padding and no unused enum payload,
+        // whose bytes are all initialized. Any other T is copied element by element.
+        if size_of::<T>() != align_of::<T>() {
+            for i in 0..self.len() { self[i] = src[i]; }
+            return;
+        }
         let s = cast::<T, u8>(src);
         let d = cast_mut::<T, u8>(self);
         if d.len() >= LONG_B8 {

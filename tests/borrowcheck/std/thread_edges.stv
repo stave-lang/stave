@@ -1,0 +1,93 @@
+//~ BORROWCHECK ok
+// std.thread and runtime.thread sites: `join` (its second arm runs through `start`, which the
+// interpreter runs on the calling thread), `par_for` over empty and reversed ranges, nested in
+// a `join` arm, `par_for_mut` (one `&mut` per element, made from the slice's data pointer)
+// over empty, zero-sized, padded, and owning elements, and `scope` / `spawn` with `&mut`
+// captures.
+import std.atomic;
+import std.string;
+import std.thread;
+import std.vec;
+
+struct Pad {
+    pub a: u8,
+    pub b: u64,
+}
+
+impl Copy for Pad {}
+
+struct Z {}
+
+impl Copy for Z {}
+
+fn joins() -> bool {
+    let xs: [u64; 4] = [1, 2, 3, 4];
+    let (a, b) = thread.join(fn() -> u64 { return xs[0] + xs[1]; }, fn() -> vec.Vec<u64> {
+        let mut v = vec.Vec::<u64>.new();
+        v.push(xs[2] + xs[3]);
+        return v;
+    });
+    let total = atomic.U64.new(0);
+    let (c, d) = thread.join(fn() -> u32 {
+        thread.par_for(0, 10, fn(i: usize) { let _ = total.fetch_add(1); });
+        return 1;
+    }, fn() -> u32 { return 2; });
+    return a == 3 && *b.get_ref(0) == 7 && c + d == 3 && total.load() == 10;
+}
+
+fn par_fors() -> bool {
+    let count = atomic.U64.new(0);
+    thread.par_for(5, 5, fn(i: usize) { let _ = count.fetch_add(1000); });
+    thread.par_for(7, 3, fn(i: usize) { let _ = count.fetch_add(1000); });
+    thread.par_for(0, 100, fn(i: usize) { let _ = count.fetch_add(i as u64); });
+    thread.par_for(1000, 1001, fn(i: usize) { let _ = count.fetch_add(i as u64); });
+    return count.load() == 5950 && thread.workers() >= 1;
+}
+
+fn par_for_muts() -> bool {
+    let mut empty: [u32; 0] = [0u32; 0];
+    thread.par_for_mut(&mut empty[0..0], fn(i: usize, x: &mut u32) { *x = 1; });
+    let mut zs: [Z; 3] = [Z.{}; 3];
+    let seen = atomic.U64.new(0);
+    thread.par_for_mut(&mut zs[0..3], fn(i: usize, z: &mut Z) { let _ = seen.fetch_add(1); });
+    let mut ps: [Pad; 40] = [Pad.{ a: 0, b: 0 }; 40];
+    thread.par_for_mut(&mut ps[0..40], fn(i: usize, p: &mut Pad) {
+        p.a = i as% u8;
+        p.b = (i as u64) * 2;
+    });
+    let mut strs = vec.Vec::<string.String>.new();
+    for k in 0u32..5 { strs.push(string.String.from_str("s")); }
+    thread.par_for_mut(strs.as_mut_slice(), fn(i: usize, s: &mut string.String) { s.push_str("tt"); });
+    let mut ok = seen.load() == 3 && ps[39].a == 39 && ps[39].b == 78 && ps[0].b == 0;
+    for k in 0..strs.len() {
+        if strs.get_ref(k).len() != 3 { ok = false; }
+    }
+    return ok;
+}
+
+fn scopes() -> bool {
+    let mut a: u64 = 0;
+    let mut b = vec.Vec::<u32>.new();
+    scope {
+        spawn { a = 5; }
+        spawn {
+            b.push(1);
+            b.push(2);
+        }
+    }
+    let mut c: u32 = 0;
+    for k in 0u32..3 {
+        scope {
+            spawn { c = c + k; }
+        }
+    }
+    return a == 5 && b.len() == 2 && c == 3;
+}
+
+fn main() -> i32 {
+    if !joins() { return 1; }
+    if !par_fors() { return 2; }
+    if !par_for_muts() { return 3; }
+    if !scopes() { return 4; }
+    return 0;
+}

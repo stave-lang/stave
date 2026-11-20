@@ -1,0 +1,9 @@
+//~ BORROWCHECK exit 101
+// An allocation no address space holds: std.vec's capacity path ends in runtime.panic `trap`
+// with kind OutOfMemory at the user site read from the thread block.
+import std.vec;
+
+fn main() -> i32 {
+    let v = vec.Vec::<u64>.with_capacity(0x0800_0000_0000_0000);
+    return v.len() as% i32;
+}

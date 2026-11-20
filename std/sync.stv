@@ -111,7 +111,7 @@ unsafe("a shared guard only gives out &T, which is safe to share when T is Sync"
 impl<T, const R: u32> MutexGuard<T, R> {
     pub fn get(&self) -> &T from self {
         let p = self.m.v.get();
-        return unsafe("this guard holds the lock: no other access to the value") &*p;
+        return unsafe("this guard holds the lock: nothing writes the value while the guard is shared") &*p;
     }
 
     pub fn get_mut(&mut self) -> &mut T from self {
