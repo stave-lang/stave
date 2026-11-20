@@ -832,7 +832,7 @@ impl<'m, H: Host> Interp<'m, H> {
             return Ok(out);
         }
         let Some(copy) = self.mem.stack_alloc(size, align) else { return Ok(out) };
-        if self.mem.copy_raw(copy, env, size).is_err() {
+        if self.mem.copy(copy, env, size).is_err() {
             let _ = self.mem.take_report();
             return Ok(out);
         }
