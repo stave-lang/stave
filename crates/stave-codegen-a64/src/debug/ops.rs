@@ -1675,6 +1675,15 @@ impl<'a, 'm> Gen<'a, 'm> {
                 Some(sym) => self.call(Ok(sym), &[], None, &[], None),
                 None => Ok(()),
             },
+            Intr::CopyBytes => {
+                let g = m
+                    .find_func(super::support::STD_COPY_RAW)
+                    .filter(|&g| m.func(g).is_some_and(|f| f.body.is_some()))
+                    .ok_or_else(|| bad("intrinsic.copy_bytes without `std.slice.copy_raw`"))?;
+                let gf = m.func(g).ok_or_else(|| bad("callee out of range"))?;
+                let sym = self.cg.func_sym(g)?;
+                self.call(Ok(sym), &gf.params, None, args, None)
+            }
             Intr::Atomic { op, wide } => {
                 // x1 = p, x2 = value / new, x3 = expected; result x0 (sequentially consistent:
                 // ldar, or an ldaxr/stlxr loop)

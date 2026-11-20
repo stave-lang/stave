@@ -4,7 +4,8 @@
 //! `atomic_{load,xchg,add,cas}_{u32,u64}` (sequentially consistent: `mov` / `xchg` / `lock xadd` /
 //! `lock cmpxchg` on `[rcx]`), and `thread_clone` (a thread-creating system call whose child runs
 //! `__stave_thread_start(arg)` on its new stack, then the `exit` system call), `cpu_init` (a
-//! call of `runtime.cpu.init` when the module has it, else nothing), and `thread_block` (`fs:[0]`).
+//! call of `runtime.cpu.init` when the module has it, else nothing), `thread_block` (`fs:[0]`),
+//! and `copy_bytes` (a call of `std.slice.copy_raw` with the intrinsic's operands).
 
 use stave_ir::layout::Shape;
 use stave_ir::{Operand, TypeId, Value};
@@ -158,6 +159,17 @@ impl Cg<'_, '_> {
                 let abi = self.abi_of(&gf.params, gf.ret)?;
                 let sym = self.func_sym(g)?;
                 self.call(Callee::Sym(sym), &[], &abi, None, false)
+            }
+            "copy_bytes" => {
+                // a call of `std.slice.copy_raw(dst, src, n)`, the intrinsic's operands as its
+                // arguments
+                arity(3)?;
+                let g = super::find_body(self.cx.m, "std.slice.copy_raw")
+                    .ok_or_else(|| bad("intrinsic.copy_bytes without `std.slice.copy_raw`"))?;
+                let gf = self.cx.m.func(g).ok_or_else(|| bad("callee out of range"))?;
+                let abi = self.abi_of(&gf.params, gf.ret)?;
+                let sym = self.func_sym(g)?;
+                self.call(Callee::Sym(sym), args, &abi, None, false)
             }
             "thread_start_addr" => addr(self, self.cx.thread_sym, "`runtime.thread.entry`"),
             "main_addr" => addr(self, self.cx.main_sym, "`main`"),

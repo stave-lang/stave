@@ -94,7 +94,8 @@
 //! `[sp]`, `blr x16`. `call_on_stack`: `stp x19, x30, [sp, #-16]!; mov x19, sp; mov sp, top;
 //! blr x16; mov sp, x19; ldp x19, x30, [sp], #16`. `main_addr`, `signal_handler_addr`,
 //! `thread_start_addr`, `site_table`, `pc_table`, `static_addr k`: `adrp` + `add`. `cpu_init`:
-//! `bl runtime.cpu.init` when the module defines it, else nothing. `cpuid`,
+//! `bl runtime.cpu.init` when the module defines it, else nothing. `copy_bytes`: `bl
+//! std.slice.copy_raw` (the Stave convention, the three operands as its arguments). `cpuid`,
 //! `xgetbv` (x86-64 only) and unknown intrinsics are [`ErrorKind::Unsupported`].
 //!
 //! # Emitted symbols ([`prepare`])

@@ -61,9 +61,13 @@ const LONG_B64: usize = 64;
 // many elements are one block, summed by the one-level rule alone.
 const SUM_BLOCK: usize = 4096;
 
+extern "stave-intrinsic" {
+    fn copy_bytes(dst: *mut u8, src: *const u8, n: usize);
+}
+
 // xs as a slice of U: same address, xs.len() * size_of::<T>() / size_of::<U>() elements. Callers
-// pass T and U of one size, or U = u8; every bit pattern of T is then a valid U (bool is 0 or 1).
-// With U = u8 every byte of T must be initialized: no padding (copy_from checks it).
+// pass T and U of one size, or U = u8 with T an int or bool (no padding); every bit pattern of T
+// is then a valid U (bool is 0 or 1). Copies of any T go through `copy_bytes`, never a cast.
 fn cast<T, U>(xs: &[T]) -> &[U] from xs {
     let n = xs.len() * size_of::<T>() / size_of::<U>();
     let p = mem.slice_ptr(xs) as usize as *const U;
@@ -120,7 +124,7 @@ fn bytes_eq_any(a: &[u8], b: &[u8]) -> bool {
     return ((u8x16.load_masked(a, i, m) != u8x16.load_masked(b, i, m)) & m).to_bits() == 0;
 }
 
-fn copy_bytes(s: &[u8], d: &mut [u8]) {
+fn copy_lanes(s: &[u8], d: &mut [u8]) {
     let n = d.len();
     let mut i: usize = 0;
     while i + 64 <= n {
@@ -138,7 +142,7 @@ fn copy_bytes(s: &[u8], d: &mut [u8]) {
     u8x16.load_masked(s, i, m).store_masked(d, i, m);
 }
 
-fn copy_bytes_v3(s: &[u8], d: &mut [u8]) needs(avx2) {
+fn copy_lanes_v3(s: &[u8], d: &mut [u8]) needs(avx2) {
     let n = d.len();
     let mut i: usize = 0;
     while i + 128 <= n {
@@ -156,7 +160,39 @@ fn copy_bytes_v3(s: &[u8], d: &mut [u8]) needs(avx2) {
     u8x32.load_masked(s, i, m).store_masked(d, i, m);
 }
 
-dispatch fn copy_bytes_cpu(s: &[u8], d: &mut [u8]) { avx2 => copy_bytes_v3, _ => copy_bytes, }
+dispatch fn copy_lanes_cpu(s: &[u8], d: &mut [u8]) { avx2 => copy_lanes_v3, _ => copy_lanes, }
+
+// The native code of the `copy_bytes` intrinsic: the backends lower the intrinsic to a call of
+// this fn, and the interpreter runs the intrinsic itself (no IR calls this fn, so the interpreter
+// never reads its u8 vectors, which may hold bytes no value initialized). Short copies stay in
+// the 128-bit loop here, long ones go to the dispatch.
+unsafe("dst..dst+len is writable, src..src+len readable, and they do not overlap")
+fn copy_raw(dst: *mut u8, src: *const u8, len: usize) {
+    let sp: [usize; 2] = [src as usize, len];
+    let dp: [usize; 2] = [dst as usize, len];
+    let s = unsafe("a slice reference is (data pointer, length); src..src+len is readable (caller)") *(&sp as *const [usize; 2] as *const &[u8]);
+    let q = &dp as *const [usize; 2] as *const &mut [u8];
+    let d = unsafe("a slice reference is (data pointer, length); dst..dst+len is writable and no other reference reaches it (caller)") q.read();
+    let n = d.len();
+    if n >= LONG_B8 {
+        copy_lanes_cpu(s, d);
+        return;
+    }
+    let mut i: usize = 0;
+    while i + 64 <= n {
+        u8x16.load(s, i).store(d, i);
+        u8x16.load(s, i + 16).store(d, i + 16);
+        u8x16.load(s, i + 32).store(d, i + 32);
+        u8x16.load(s, i + 48).store(d, i + 48);
+        i = i + 64;
+    }
+    while i + 16 <= n {
+        u8x16.load(s, i).store(d, i);
+        i = i + 16;
+    }
+    let m = mask8x16.first_n(n - i);
+    u8x16.load_masked(s, i, m).store_masked(d, i, m);
+}
 
 fn find_any_byte(xs: &[u8], set: &[u8]) -> Option<usize> {
     let mut i: usize = 0;
@@ -2680,33 +2716,11 @@ impl<T: Copy> [T] {
 
     pub fn copy_from(&mut self, src: &[T]) {
         debug.assert(self.len() == src.len(), "copy_from: the slices differ in length");
-        // The byte loops read every byte of an element, so they take only a T whose size equals
-        // its alignment: one scalar-like value, with no padding and no unused enum payload,
-        // whose bytes are all initialized. Any other T is copied element by element.
-        if size_of::<T>() != align_of::<T>() {
-            for i in 0..self.len() { self[i] = src[i]; }
-            return;
+        let n = self.len() * size_of::<T>();
+        let d = mem.slice_ptr_mut(self) as *mut u8;
+        let s = mem.slice_ptr(src) as *const u8;
+        unsafe("d and s are the data of two slices of n bytes, self borrowed exclusively, so the ranges do not overlap; T is Copy, so moving its bytes, padding included, copies the values") {
+            copy_bytes(d, s, n);
         }
-        let s = cast::<T, u8>(src);
-        let d = cast_mut::<T, u8>(self);
-        if d.len() >= LONG_B8 {
-            copy_bytes_cpu(s, d);
-            return;
-        }
-        let n = d.len();
-        let mut i: usize = 0;
-        while i + 64 <= n {
-            u8x16.load(s, i).store(d, i);
-            u8x16.load(s, i + 16).store(d, i + 16);
-            u8x16.load(s, i + 32).store(d, i + 32);
-            u8x16.load(s, i + 48).store(d, i + 48);
-            i = i + 64;
-        }
-        while i + 16 <= n {
-            u8x16.load(s, i).store(d, i);
-            i = i + 16;
-        }
-        let m = mask8x16.first_n(n - i);
-        u8x16.load_masked(s, i, m).store_masked(d, i, m);
     }
 }

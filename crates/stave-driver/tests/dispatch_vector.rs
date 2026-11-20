@@ -268,7 +268,7 @@ fn slice_methods_dispatch_to_256_bit_loops() {
         "fill_u16",
         "eq_f64",
         "bytes_eq",
-        "copy_bytes",
+        "copy_lanes",
         "find_any_byte",
     ];
     for t in ["x86_64-linux", "x86_64-linux-v3", "aarch64-linux"] {

@@ -7,7 +7,7 @@
 //! call-graph node stands for (drop glue, `dispatch` bodies). A function stands for every node of
 //! its instance ([`stave_sema::lower_mapped`]), so a node weighs the frame of its function (0: not
 //! in this build). The edges are the call graph's, without [`EdgeKind::Spawn`] (the body runs on
-//! another stack), plus each direct call of the module (and the `cpu_init` intrinsic's call)
+//! another stack), plus each direct call of the module (and the calls of the `cpu_init` and `copy_bytes` intrinsics)
 //! that the call graph has no edge for at the caller's node: the runtime helpers lowering inserts
 //! and calls an optimized body makes directly. A call through a fn value takes the call graph's
 //! targets; a node of a function that has one but no such edge, or any such call when a function
@@ -253,9 +253,16 @@ struct Calls {
     foreign: bool,
 }
 
+/// The fns the backends call in place of an intrinsic: `cpu_init` calls `runtime.cpu.init`,
+/// `copy_bytes` calls `std.slice.copy_raw`.
+struct IntrinsicCalls {
+    cpu_init: Option<FuncId>,
+    copy_raw: Option<FuncId>,
+}
+
 /// The direct callees and fn-value calls of `f`, and the functions it makes into fn values
 /// (added to `made`).
-fn calls_of(m: &Module, f: FuncId, cpu_init: Option<FuncId>, made: &mut [bool]) -> Calls {
+fn calls_of(m: &Module, f: FuncId, called: &IntrinsicCalls, made: &mut [bool]) -> Calls {
     let mut c = Calls::default();
     let Some(b) = m.func(f).and_then(|x| x.body.as_ref()) else { return c };
     let value = |o: &Operand, made: &mut [bool]| {
@@ -283,7 +290,8 @@ fn calls_of(m: &Module, f: FuncId, cpu_init: Option<FuncId>, made: &mut [bool]) 
                 }
                 (Some(Op::CallInd), None) => c.indirect = true,
                 (Some(Op::Intrinsic(id)), _) => match m.intrinsic_name(id) {
-                    Some("cpu_init") => c.direct.extend(cpu_init),
+                    Some("cpu_init") => c.direct.extend(called.cpu_init),
+                    Some("copy_bytes") => c.direct.extend(called.copy_raw),
                     Some(name) if name.starts_with("ccall") => c.foreign = true,
                     _ => {}
                 },
@@ -382,9 +390,12 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
             }
         }
     }
-    let cpu_init = find_body(m, "runtime.cpu.init");
+    let called = IntrinsicCalls {
+        cpu_init: find_body(m, "runtime.cpu.init"),
+        copy_raw: find_body(m, "std.slice.copy_raw"),
+    };
     let mut made = vec![false; nf];
-    let calls: Vec<Calls> = (0..nf).map(|f| calls_of(m, FuncId(f as u32), cpu_init, &mut made)).collect();
+    let calls: Vec<Calls> = (0..nf).map(|f| calls_of(m, FuncId(f as u32), &called, &mut made)).collect();
     let unmapped_values = (0..nf).any(|f| made[f] && ids[f].iter().all(|&x| x as usize >= n));
     for (f, c) in calls.iter().enumerate() {
         for &x in &ids[f] {
@@ -615,7 +626,8 @@ mod tests {
             b.call(callee, None, &[]);
             b.ret(None);
             m.define(f, b.finish().unwrap());
-            let c = calls_of(&m, f, None, &mut made);
+            let none = IntrinsicCalls { cpu_init: None, copy_raw: None };
+            let c = calls_of(&m, f, &none, &mut made);
             assert_eq!(c.foreign, foreign);
             assert_eq!(c.direct, vec![callee]);
         }

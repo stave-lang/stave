@@ -522,7 +522,8 @@ fn body_ops(prog: &Program, b: &TypedBody) -> BodyOps {
 }
 
 /// The effects of a call of intrinsic `d`: a system call is `io`; `call_on_stack` and `cpu_init`
-/// run code no call-graph edge shows, so they have every effect.
+/// run code no call-graph edge shows, so they have every effect. `copy_bytes` has none: the code
+/// its call runs (`std.slice.copy_raw`) only moves bytes within the ranges its caller vouches for.
 fn intrinsic(prog: &Program, d: DeclId) -> Option<(Effects, OpKind)> {
     let name = prog.strings.get(prog.decl(d)?.name);
     Some(match name {

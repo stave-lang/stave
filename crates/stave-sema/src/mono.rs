@@ -26,7 +26,8 @@
 //! `runtime.cpu.features`, and a dispatch body that loads the feature word `runtime.cpu.WORD`,
 //! also request `runtime.cpu.init`, which only start code's `cpu_init` intrinsic calls; so does
 //! that intrinsic itself when the target baseline is above its arch's lowest one (start code then
-//! checks the CPU against it).
+//! checks the CPU against it). A lowered `copy_bytes` intrinsic requests `std.slice.copy_raw`,
+//! which only the backends' lowering of the intrinsic calls.
 //!
 //! **Instantiation depth** (E0902, [`depth_check`], run by the type checker): from every
 //! non-generic body, the generic instances its call sites request, depth first, substituting
@@ -87,6 +88,10 @@ pub(crate) struct LangFns {
     /// `runtime.cpu.trace(line: &str)`: writes a dispatch trace line (a dispatch body calls it
     /// when the word's trace bit is set).
     pub cpu_trace: Option<DeclId>,
+    /// `std.slice.copy_raw(dst, src, n)`: the native code of the `copy_bytes` intrinsic; no IR
+    /// calls it (the backends call it in place of the intrinsic), so a lowered `copy_bytes`
+    /// requests it.
+    pub copy_raw: Option<DeclId>,
     /// `runtime.panic.requires_failed(clause: &str) -> never`: a false `requires` (reported at
     /// the user site).
     pub requires_failed: Option<DeclId>,
@@ -154,6 +159,7 @@ impl LangFns {
             cpu_word: item_at(prog, "runtime.cpu", "WORD"),
             cpu_init: item_at(prog, "runtime.cpu", "init"),
             cpu_trace: item_at(prog, "runtime.cpu", "trace"),
+            copy_raw: item_at(prog, "std.slice", "copy_raw"),
             requires_failed: item_at(prog, "runtime.panic", "requires_failed"),
             ensures_failed: item_at(prog, "runtime.panic", "ensures_failed"),
             test_input: item_at(prog, "runtime.panic", "test_input"),

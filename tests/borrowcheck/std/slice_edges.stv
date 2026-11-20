@@ -1,8 +1,8 @@
 //~ BORROWCHECK ok
 // std.slice reinterprets slices (`cast`, `cast_mut`: one tag, the same bytes) for find / eq /
-// fill on signed, size, bool, and float elements and for `copy_from` of any Copy element:
-// empty slices, short ones, ones past the long-loop threshold, zero-sized elements, and
-// elements with padding.
+// fill on signed, size, bool, and float elements, and `copy_from` of any Copy element moves its
+// bytes with the `copy_bytes` intrinsic: empty slices, short ones, ones past the long-loop
+// threshold, zero-sized elements, and elements with padding (`Gap`: size equal to alignment).
 struct Pad {
     pub a: u8,
     pub b: u32,
@@ -13,6 +13,13 @@ impl Copy for Pad {}
 struct Z {}
 
 impl Copy for Z {}
+
+struct Gap {
+    pub a: u32,
+    pub z: [u64; 0],
+}
+
+impl Copy for Gap {}
 
 fn signed() -> bool {
     let mut a8: [i8; 1100] = [0i8; 1100];
@@ -103,7 +110,16 @@ fn copies() -> bool {
     let mut td: [(u8, u16); 600] = [(0u8, 0u16); 600];
     let tds = &mut td[0..600];
     tds.copy_from(&tup[0..600]);
-    return dst[2].b == 2 && long_dst[199].a == 7 && bd[1999] == 9 && od[299].is_none() && td[599].1 == 2;
+    let gs: [Gap; 300] = [Gap.{ a: 4, z: [0u64; 0] }; 300];
+    let mut gd: [Gap; 300] = [Gap.{ a: 0, z: [0u64; 0] }; 300];
+    let gds = &mut gd[0..300];
+    gds.copy_from(&gs[0..300]);
+    let wide: [(u64, u32); 100] = [(3u64, 5u32); 100];
+    let mut wd: [(u64, u32); 100] = [(0u64, 0u32); 100];
+    let wds = &mut wd[0..100];
+    wds.copy_from(&wide[0..100]);
+    let ok = gd[299].a == 4 && wd[99].0 == 3 && wd[0].1 == 5;
+    return ok && dst[2].b == 2 && long_dst[199].a == 7 && bd[1999] == 9 && od[299].is_none() && td[599].1 == 2;
 }
 
 fn main() -> i32 {

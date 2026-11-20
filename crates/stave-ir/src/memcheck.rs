@@ -38,16 +38,19 @@ pub enum Class {
     InvalidFree,
     /// Free or realloc with a size or alignment other than the block's.
     FreeSizeMismatch,
+    /// A `copy_bytes` whose source and destination ranges share a byte.
+    CopyOverlap,
 }
 
 impl Class {
-    pub const ALL: [Class; 6] = [
+    pub const ALL: [Class; 7] = [
         Class::UseAfterFree,
         Class::DoubleFree,
         Class::UninitRead,
         Class::OutOfBounds,
         Class::InvalidFree,
         Class::FreeSizeMismatch,
+        Class::CopyOverlap,
     ];
 
     pub fn name(self) -> &'static str {
@@ -58,6 +61,7 @@ impl Class {
             Class::OutOfBounds => "out-of-bounds",
             Class::InvalidFree => "invalid-free",
             Class::FreeSizeMismatch => "free-size-mismatch",
+            Class::CopyOverlap => "copy-overlap",
         }
     }
 }
@@ -271,6 +275,28 @@ impl Alloc {
         }
         for k in off..off + n {
             self.init[(k / 64) as usize] |= 1 << (k % 64);
+        }
+        if self.init.iter().all(|&w| w == u64::MAX) {
+            self.init = Vec::new();
+        }
+    }
+
+    /// Sets the initialisation of bytes `off..off + init.len()` to `init`, byte by byte.
+    pub fn put_init(&mut self, off: u64, init: &[bool]) {
+        if self.init.is_empty() {
+            if init.iter().all(|&i| i) {
+                return;
+            }
+            self.init = vec![u64::MAX; self.size.div_ceil(64).max(1) as usize];
+        }
+        for (k, &i) in init.iter().enumerate() {
+            let b = off + k as u64;
+            let (w, bit) = ((b / 64) as usize, 1u64 << (b % 64));
+            if i {
+                self.init[w] |= bit;
+            } else {
+                self.init[w] &= !bit;
+            }
         }
         if self.init.iter().all(|&w| w == u64::MAX) {
             self.init = Vec::new();
