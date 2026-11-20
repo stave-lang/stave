@@ -343,8 +343,13 @@ impl<'a> Tys<'a> {
     }
 
     fn needs_drop_d(&mut self, t: TypeId, depth: u32) -> bool {
-        if self.is_unknown(t) || depth > 64 {
+        if self.is_unknown(t) {
             return false;
+        }
+        // Unreachable for a checked type (E0005 case `type`); past it a drop is assumed, so a
+        // borrow the value may hold stays live to its scope end.
+        if depth >= stave_sema::typedepth::MAX_TYPE_DEPTH {
+            return true;
         }
         if let Some(&b) = self.memo(t).drop.get(&t) {
             return b;

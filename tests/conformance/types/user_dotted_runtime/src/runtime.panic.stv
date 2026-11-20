@@ -1,5 +1,5 @@
 // The file stem `runtime.panic` makes the module path text `runtime.panic`, the built-in
-// module's, which IR-level lookups match by text.
+// module's, which IR-level lookups match by text: a dotted stem is E0107 case `dotted`.
 pub fn trap(kind: u32, site: u32) -> u32 { //~ ERROR E0107
     return 0u32;
 }

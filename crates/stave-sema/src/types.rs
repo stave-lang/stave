@@ -438,7 +438,48 @@ pub trait Interner {
     }
 }
 
-const SUBST_DEPTH: u32 = 100_000;
+/// Height of `t` with `Param(i)` replaced by type arg `args[i]`, without building it: a type
+/// without components is 1, every other type one more than its highest component (type
+/// arguments of an ADT included, fields not). Explicit stack, so any height fits.
+pub(crate) fn subst_height<I: Interner + ?Sized>(cx: &I, t: TypeId, args: &[GArg]) -> u32 {
+    let mut memo: FxHashMap<TypeId, u32> = FxHashMap::default();
+    let arg_heights: Vec<Option<u32>> = args
+        .iter()
+        .map(|a| match a {
+            GArg::Type(x) => Some(subst_height(cx, *x, &[])),
+            GArg::Const(_) => None,
+        })
+        .collect();
+    let mut stack = vec![(t, false)];
+    let mut kids = Vec::new();
+    while let Some((u, expanded)) = stack.pop() {
+        if memo.contains_key(&u) {
+            continue;
+        }
+        let k = cx.kind(u);
+        if let TypeKind::Param(i) = k
+            && let Some(Some(h)) = arg_heights.get(*i as usize)
+        {
+            memo.insert(u, *h);
+            continue;
+        }
+        kids.clear();
+        k.children(&mut kids);
+        if !expanded {
+            stack.push((u, true));
+            stack.extend(kids.iter().filter(|c| !memo.contains_key(c)).map(|&c| (c, false)));
+            continue;
+        }
+        let h = kids.iter().map(|c| memo.get(c).copied().unwrap_or(u32::MAX)).max().unwrap_or(0);
+        memo.insert(u, h.saturating_add(1));
+    }
+    memo.get(&t).copied().unwrap_or(u32::MAX)
+}
+
+/// Deepest type [`Interner::subst`] descends: the type depth limit. Its input is a type the
+/// program writes (a signature, field, alias target, or body type), so only a type that
+/// E0005 case `type` rejects reaches it; past it the result is the error type.
+const SUBST_DEPTH: u32 = crate::typedepth::MAX_TYPE_DEPTH;
 
 fn subst_rec<I: Interner + ?Sized>(
     cx: &mut I,
