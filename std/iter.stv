@@ -11,16 +11,16 @@
 
 import std.core;
 
-pub view struct SliceIter<T> {
+pub view struct SliceIter<T: view> {
     s: &[T],
     i: usize,
 }
 
-pub fn iter<T>(xs: &[T]) -> SliceIter<T> from xs {
+pub fn iter<T: view>(xs: &[T]) -> SliceIter<T> from xs {
     return SliceIter::<T>.{ s: xs, i: 0 };
 }
 
-impl<T> SliceIter<T> {
+impl<T: view> SliceIter<T> {
     pub fn next(&mut self) -> Option<&T> from copy self {
         if self.i >= self.s.len() { return Option.None; }
         let k = self.i;
@@ -33,17 +33,17 @@ impl<T> SliceIter<T> {
         return self.s.len() - self.i;
     }
 
-    pub fn map<U>(self, f: fn(&T) -> U) -> Map<T, U> from self + f {
+    pub fn map<U: view>(self, f: fn(&T) -> U) -> Map<T, U> from self + f {
         return Map::<T, U>.{ it: self, f: f };
     }
 }
 
-pub view struct Map<T, U> {
+pub view struct Map<T: view, U: view> {
     it: SliceIter<T>,
     f: fn(&T) -> U,
 }
 
-impl<T, U> Map<T, U> {
+impl<T: view, U: view> Map<T, U> {
     pub fn next(&mut self) -> Option<U> from copy self {
         let f = self.f;
         return match self.it.next() {
@@ -53,16 +53,16 @@ impl<T, U> Map<T, U> {
     }
 }
 
-pub view struct Zip<A, B> {
+pub view struct Zip<A: view, B: view> {
     a: SliceIter<A>,
     b: SliceIter<B>,
 }
 
-pub fn zip<A, B>(xs: &[A], ys: &[B]) -> Zip<A, B> from xs + ys {
+pub fn zip<A: view, B: view>(xs: &[A], ys: &[B]) -> Zip<A, B> from xs + ys {
     return Zip::<A, B>.{ a: iter(xs), b: iter(ys) };
 }
 
-impl<A, B> Zip<A, B> {
+impl<A: view, B: view> Zip<A, B> {
     pub fn next(&mut self) -> Option<(&A, &B)> from copy self {
         if self.a.len() == 0 || self.b.len() == 0 { return Option.None; }
         let x = self.a.next().unwrap();

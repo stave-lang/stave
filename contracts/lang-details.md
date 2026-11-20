@@ -12,6 +12,24 @@ reference for what a program may write and what it means.
   needs ∪ the target baseline (E0707). Reason: CPU features never change while a program runs, so
   a value made where F is proven stays callable.
 
+## §2 Contracts
+
+- A false `requires` panics at the call: the last call user code made into a fn with contracts, a
+  `dispatch fn`, or a fn value. A false `ensures` panics at the `return`. The stderr line after
+  the panic line is the clause's source text.
+- Each operand of a clause's top-level `&&` is its own check.
+- The compiler proves checks from what holds before them: earlier clauses, branches, type ranges,
+  `+` / `-` by constants, widening casts.
+  - A check that always holds is removed. A `requires` implied by the clauses before it is
+    warning E0216 (not in generic fns).
+  - A check that fails whenever reached is an error: E0215 for a `requires` (the fn can never be
+    called), E0217 for an `ensures`, at that `return`. Neither is reported in generic instances
+    or in provably dead code.
+  - Any other check stays a runtime check.
+- Clauses that compare int params, slice param lengths, and constants also hold across calls: a
+  direct call that proves every `requires` of its callee skips them, a call that always fails a
+  clause is E0218, and after a call its callee's `requires` and such `ensures` are known.
+
 ## §3 Storing calls: a view left borrowed
 
 A storing call (a call of a fn whose `&mut` view param has a `from` clause) for a view it reaches

@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       seed:
-        description: first seed (default: the run number times 100000)
+        description: "first seed (default: the run number times 100000)"
         required: false
       budget:
         description: seconds of fuzzing
