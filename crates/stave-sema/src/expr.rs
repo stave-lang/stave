@@ -1657,15 +1657,14 @@ impl<'a> Ck<'a> {
     fn impl_args_for(&mut self, imp: DeclId, t: TypeId) -> Option<Vec<GArg>> {
         let idef = self.sigs.impl_def(imp)?;
         let genv = self.genv();
-        let args = self.w.impl_applies(&mut self.tys, idef, t, genv, 0);
-        // `soa.Soa::<X>.new()` with a non-struct or non-Flat X reaches the call, whose bound check
-        // names the problem (E0910, E1407), instead of failing inference
-        let soa_mod = self.prog.decl(self.sigs.lang.soa).map(|d| d.module);
-        if args.is_none() && soa_mod.is_some() && self.prog.decl(imp).map(|d| d.module) == soa_mod {
-            return self.w.impl_head_args(&mut self.tys, idef, t);
-        }
-        // a view for a param without `view` likewise: the use of the method names the param
-        args.or_else(|| self.w.impl_applies_but_views(&mut self.tys, idef, t, genv))
+        // An impl refused only by a bound of its params (a view for a param without `view`, an
+        // unmet trait bound, `soa.Soa::<X>` with a non-struct or non-Flat X) still gives its args:
+        // the use of the method, a call or a fn value, reaches the site check, which names the
+        // unmet bound (E0414, E0901, E0910, E1407) instead of failing inference (E0202).
+        self.w
+            .impl_applies(&mut self.tys, idef, t, genv, 0)
+            .or_else(|| self.w.impl_applies_but_views(&mut self.tys, idef, t, genv))
+            .or_else(|| self.w.impl_head_args(&mut self.tys, idef, t))
     }
 
     /// The value of a finished path state.
