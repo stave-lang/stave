@@ -234,8 +234,12 @@ pub(crate) struct FnState {
     /// `&mut` chunk bindings: (scope depth of the chunk body, the write-back of the binding's
     /// slot); written back when that scope ends or is left.
     pub write_backs: Vec<(usize, WriteBack)>,
-    /// The borrow side table of the body so far.
+    /// The borrow side table of the body so far: borrows, and the other events.
     pub borrows: Vec<stave_ir::BorrowMark>,
+    pub events: Vec<stave_ir::EventMark>,
+    /// While the pattern of a `match` arm with a guard binds: the moves it makes (pointer to
+    /// the place, its type). They happen when the guard holds, not when the names are bound.
+    pub held: Option<Vec<(Operand, Ty)>>,
     /// The site of an instruction that has none of its own: the statement's, with the borrow
     /// side table on (a report names source lines); else none.
     pub stmt_site: Site,
@@ -312,6 +316,12 @@ pub(crate) struct FnCx<'a> {
     pub flagged: FxHashSet<u32>,
     /// Discovered during this attempt: locals that need a flag.
     pub need_flag: Vec<u32>,
+    /// With the borrow side table on: binding nodes of the locals that live in a slot because a
+    /// value is moved out of them (a move is an event on the bytes of its place).
+    pub slotted: FxHashSet<u32>,
+    /// Discovered during this attempt: locals that need such a slot.
+    pub need_slot: Vec<u32>,
+    copy_memo: FxHashMap<Ty, bool>,
     pub err: Option<LowerError>,
     pub f: FnState,
     pub outs: Vec<FnOut>,
@@ -361,6 +371,9 @@ impl<'a> FnCx<'a> {
             subst_memo: FxHashMap::default(),
             flagged: FxHashSet::default(),
             need_flag: Vec::new(),
+            slotted: FxHashSet::default(),
+            need_slot: Vec::new(),
+            copy_memo: FxHashMap::default(),
             err: None,
             f: FnState::new(&[], TypeId::NONE),
             outs: Vec::new(),
@@ -523,6 +536,58 @@ impl<'a> FnCx<'a> {
         }
         let w = self.g.world();
         crate::mono::needs_drop(&w, &mut self.tys, t, &mut self.drop_memo)
+    }
+
+    /// Whether a by-value use of a place of type `t` copies it (else it moves the value out).
+    pub fn is_copy(&mut self, t: Ty) -> bool {
+        if t.is_none() {
+            return true;
+        }
+        if let Some(&c) = self.copy_memo.get(&t) {
+            return c;
+        }
+        let w = self.g.world();
+        let c = w.is_copy(&mut self.tys, t, &[]);
+        self.copy_memo.insert(t, c);
+        c
+    }
+
+    /// With the borrow side table on: an event of `kind` on the place the thin pointer `p` of
+    /// type `pt` names. Its row is on an instruction of its own, an identity cast of `p`.
+    pub fn event(&mut self, kind: stave_ir::EventKind, p: Operand, pt: Ty) {
+        if !self.g.borrows || !self.open() {
+            return;
+        }
+        let thin = self
+            .pointee(pt)
+            .is_some_and(|(i, _, _)| !matches!(self.kind(i), TypeKind::Slice { .. } | TypeKind::Str));
+        if !thin {
+            return;
+        }
+        if let Operand::Value(value) = self.op1(Op::Cast(CastKind::Exact), pt, p) {
+            self.f.events.push(stave_ir::EventMark { value, kind });
+        }
+    }
+
+    /// [`FnCx::event`] on the slot of local `l`, if it has one.
+    fn local_event(&mut self, kind: stave_ir::EventKind, l: usize) {
+        if !self.g.borrows {
+            return;
+        }
+        if let Some(p) = self.f.slot.get(l).copied().flatten() {
+            let pt = self.t_ref(true, self.locals[l].ty);
+            self.event(kind, p, pt);
+        }
+    }
+
+    /// The locals of a scope end, last declared first (after their drops).
+    pub fn end_locals(&mut self, ls: &[usize]) {
+        if !self.g.borrows {
+            return;
+        }
+        for &l in ls.iter().rev() {
+            self.local_event(stave_ir::EventKind::End, l);
+        }
     }
 
     pub fn adt_fields(&mut self, t: Ty) -> Option<Vec<Vec<Ty>>> {
@@ -697,7 +762,9 @@ impl<'a> FnCx<'a> {
 
     /// Declares local `l` with its initial value (moves it into the slot, if any).
     pub fn bind(&mut self, l: usize, v: Option<Operand>) {
-        if let Some(p) = self.f.slot.get(l).copied().flatten() {
+        let slot = self.f.slot.get(l).copied().flatten();
+        if let Some(p) = slot {
+            self.local_event(stave_ir::EventKind::Begin, l);
             if let Some(v) = v {
                 self.f.b.store(p, v);
             }
@@ -716,9 +783,13 @@ impl<'a> FnCx<'a> {
                 self.f.env.vals[fl] = Some(one);
             }
             self.f.env.st[l] = MState::Init;
-            if let Some(s) = self.f.scopes.last_mut() {
-                s.push(l);
-            }
+        }
+        // a scope lists the locals it drops and, with the borrow side table on, the ones whose
+        // slot ends with it
+        if (self.locals[l].drop || (self.g.borrows && slot.is_some()))
+            && let Some(s) = self.f.scopes.last_mut()
+        {
+            s.push(l);
         }
     }
 
@@ -875,11 +946,13 @@ impl<'a> FnCx<'a> {
     /// `own` and droppable).
     pub fn spill(&mut self, v: Operand, t: Ty, own: bool) -> (Operand, Ty) {
         let p = self.new_slot(t);
+        let pt = self.t_ref(true, t);
+        // each evaluation is a new temporary
+        self.event(stave_ir::EventKind::Begin, p, pt);
         self.f.b.store(p, v);
         if own && self.needs_drop(t) {
             self.f.temps.push((p, t));
         }
-        let pt = self.t_ref(true, t);
         (p, pt)
     }
 
@@ -956,6 +1029,28 @@ impl<'a> FnCx<'a> {
 
     /// Reads a place by value (a move of its droppable root).
     pub fn read(&mut self, p: &Place) -> Option<Operand> {
+        let sized = !matches!(self.tys.kind(p.ty), TypeKind::Slice { .. } | TypeKind::Str);
+        if self.g.borrows
+            && sized
+            && !matches!(p.base, Base::Val(..))
+            && !self.is_unit(p.ty)
+            && !self.is_copy(p.ty)
+        {
+            match &p.base {
+                // a move is an event on the bytes of its place: the local gets a slot
+                Base::Local(l) => self.need_slot.push(self.locals[*l].node),
+                _ => {
+                    let (a, at) = self.addr_t(p, None)?;
+                    let v = Operand::Value(self.f.b.load(Self::ir(p.ty), a));
+                    match &mut self.f.held {
+                        Some(h) => h.push((a, at)),
+                        None => self.event(stave_ir::EventKind::Gone, a, at),
+                    }
+                    self.note_move(p.root, p.ty);
+                    return Some(v);
+                }
+            }
+        }
         let r = self.peek(p);
         self.note_move(p.root, p.ty);
         r
@@ -1135,7 +1230,11 @@ impl<'a> FnCx<'a> {
             None => self.req(Req::Glue(t)),
         };
         self.f.last_site = None;
-        self.f.b.call(f, None, &[a]);
+        // the glue runs on a `&mut` borrow of the place; then the value is gone from it
+        let pt = self.t_ref(true, t);
+        let arg = self.borrowed(a, pt);
+        self.f.b.call(f, None, &[arg]);
+        self.event(stave_ir::EventKind::Gone, a, pt);
     }
 
     /// Drops `p` if the flag value `flag` is set.
@@ -1198,6 +1297,12 @@ impl<'a> FnCx<'a> {
 
     /// Ends the innermost scope: drops its locals (if the block is still open).
     pub fn pop_scope(&mut self) {
+        self.pop_scope_at(false);
+    }
+
+    /// [`FnCx::pop_scope`]; `frame_exit`: the fn returns next, which ends every slot of the
+    /// frame, so the locals get no end of their own.
+    pub fn pop_scope_at(&mut self, frame_exit: bool) {
         let d = self.f.scopes.len();
         while let Some(&(wd, w)) = self.f.write_backs.last()
             && wd == d
@@ -1215,6 +1320,9 @@ impl<'a> FnCx<'a> {
         for &l in ls.iter().rev() {
             self.drop_local(l);
             self.f.env.st[l] = MState::Uninit;
+        }
+        if !frame_exit {
+            self.end_locals(&ls);
         }
     }
 
@@ -1251,8 +1359,15 @@ impl<'a> FnCx<'a> {
             return;
         }
         for &(p, t) in ts.iter().rev() {
-            self.drop_ptr(p, t);
+            self.drop_temp(p, t);
         }
+    }
+
+    /// Drops the statement temporary in slot `p`, which ends with it.
+    pub fn drop_temp(&mut self, p: Operand, t: Ty) {
+        self.drop_ptr(p, t);
+        let pt = self.t_ref(true, t);
+        self.event(stave_ir::EventKind::End, p, pt);
     }
 
     // ---------- calls ----------
@@ -1411,6 +1526,8 @@ impl FnState {
             scope_handles: Vec::new(),
             write_backs: Vec::new(),
             borrows: Vec::new(),
+            events: Vec::new(),
+            held: None,
             stmt_site: Site::NONE,
             ensures_end: None,
         }

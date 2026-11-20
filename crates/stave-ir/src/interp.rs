@@ -24,7 +24,7 @@ use crate::arith::{self, IntTy};
 use crate::borrowtrack::{Ev, Kind, NO_EV, ROOT, Report, Tag, Tracker};
 use crate::host::{Host, SysResult};
 use crate::ir::{
-    Block, Body, BorrowMark, CastKind, Const, FuncId, Module, Op, Operand, PanicKind, Site, Target, Term,
+    Block, Body, CastKind, Const, EventKind, FuncId, Module, Op, Operand, PanicKind, Site, Target, Term,
     Value,
 };
 use crate::layout::{LayoutError, Layouts, Shape};
@@ -216,8 +216,9 @@ struct Borrows {
     /// The tag of the 64-bit word stored at an address, with the word: the tag holds while
     /// the word is there.
     shadow: BTreeMap<u64, (u64, Tag)>,
-    /// The side table by (function, value).
-    marks: HashMap<(u32, u32), BorrowMark>,
+    /// The side table: per function, the row of each value ([`Mark`] as a byte; a function
+    /// without rows has no entries).
+    marks: Vec<Vec<u8>>,
     /// The site of the vector instruction being executed.
     at: Ev,
     /// The bytes of a value of each type that are inside an `UnsafeCell`, as sorted ranges.
@@ -227,6 +228,55 @@ struct Borrows {
 
 fn ev(f: FuncId, inst: u32) -> Ev {
     (u64::from(f.0) + 1) << 32 | u64::from(inst)
+}
+
+/// A row of the side table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum Mark {
+    None,
+    Shared,
+    Mut,
+    Begin,
+    End,
+    Gone,
+    Repeat,
+    Env,
+}
+
+impl Mark {
+    const ALL: [Mark; 8] =
+        [Mark::None, Mark::Shared, Mark::Mut, Mark::Begin, Mark::End, Mark::Gone, Mark::Repeat, Mark::Env];
+
+    fn of(e: EventKind) -> Mark {
+        match e {
+            EventKind::Begin => Mark::Begin,
+            EventKind::End => Mark::End,
+            EventKind::Gone => Mark::Gone,
+            EventKind::Repeat => Mark::Repeat,
+            EventKind::Env => Mark::Env,
+        }
+    }
+}
+
+/// The rows of a body by value.
+fn marks_of(body: &Body) -> Vec<u8> {
+    if body.borrows.is_empty() && body.events.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![Mark::None as u8; body.values.len()];
+    let mut set = |v: Value, m: Mark| {
+        if let Some(x) = out.get_mut(v.index()) {
+            *x = m as u8;
+        }
+    };
+    for b in &body.borrows {
+        set(b.value, if b.mutable { Mark::Mut } else { Mark::Shared });
+    }
+    for e in &body.events {
+        set(e.value, Mark::of(e.kind));
+    }
+    out
 }
 
 impl Borrows {
@@ -251,11 +301,18 @@ impl Borrows {
             self.report.get_or_insert(r);
         }
         if let Some((base, size, _)) = mem.alloc_of(id) {
-            let gone: Vec<u64> =
-                self.shadow.range(base..base.saturating_add(size)).map(|(&a, _)| a).collect();
-            for a in gone {
-                self.shadow.remove(&a);
-            }
+            self.forget(base, size);
+        }
+    }
+
+    /// No word of the `size` bytes at `base` holds a tag any more.
+    fn forget(&mut self, base: u64, size: u64) {
+        if self.shadow.is_empty() {
+            return;
+        }
+        let gone: Vec<u64> = self.shadow.range(base..base.saturating_add(size)).map(|(&a, _)| a).collect();
+        for a in gone {
+            self.shadow.remove(&a);
         }
     }
 
@@ -455,10 +512,7 @@ impl<'m, H: Host> Interp<'m, H> {
             })
         });
         let bt = (cfg.check && cfg.borrow).then(|| {
-            let marks = m.funcs.iter().enumerate().flat_map(|(f, func)| {
-                let marks = func.body.as_ref().map_or(&[][..], |b| &b.borrows);
-                marks.iter().map(move |b| ((f as u32, b.value.0), *b))
-            });
+            let marks = m.funcs.iter().map(|f| f.body.as_ref().map_or(Vec::new(), marks_of));
             Box::new(Borrows {
                 tracker: Tracker::new(),
                 shadow: BTreeMap::new(),
@@ -602,11 +656,18 @@ impl<'m, H: Host> Interp<'m, H> {
             }
             let at = self.trace(frames);
             if let Some(bt) = &mut self.bt {
-                // the new block takes the old bytes with their tags
+                // the new block takes the old bytes with their tags and their initialization
                 let moved: Vec<_> =
                     bt.shadow.range(p..p.saturating_add(old.min(new))).map(|(&a, &w)| (a, w)).collect();
                 for (a, w) in moved {
                     bt.shadow.insert(q + (a - p), w);
+                }
+                let empty = self.mem.alloc_span(p).map_or(Vec::new(), |(id, _, _)| bt.tracker.moved(id));
+                if !empty.is_empty()
+                    && new != 0
+                    && let Some((id, _)) = bt.locate(&self.mem, q)
+                {
+                    bt.tracker.set_moved(id, &empty);
                 }
             }
             self.end_block(p, &at);
@@ -1263,9 +1324,51 @@ impl<'m, H: Host> Interp<'m, H> {
             _ => None,
         };
         let out = carried.unwrap_or(out);
-        let Some(&mark) = res.and_then(|v| bt.marks.get(&(f.0, v.0))) else { return Ok(out) };
-        let Some(rt) = res.and_then(|v| body.value_ty(v)) else { return Ok(out) };
-        self.borrow_word(rt, out, mark.mutable, ev(f, i))
+        let Some(res) = res else { return Ok(out) };
+        let code = bt.marks.get(f.index()).and_then(|m| m.get(res.index())).copied().unwrap_or(0);
+        if code == Mark::None as u8 {
+            return Ok(out);
+        }
+        let Some(rt) = body.value_ty(res) else { return Ok(out) };
+        let at = ev(f, i);
+        match Mark::ALL.get(code as usize).copied().unwrap_or(Mark::None) {
+            Mark::None | Mark::Env => Ok(out),
+            Mark::Shared => self.borrow_word(rt, out, false, at),
+            Mark::Mut => self.borrow_word(rt, out, true, at),
+            Mark::Repeat => Err(self.violation(Tracker::repeat(at))),
+            m => {
+                self.place_event(m, rt, &out, at)?;
+                Ok(out)
+            }
+        }
+    }
+
+    /// An event of the side table on the place the pointer `v` of type `pt` names: a local or
+    /// temporary begins or ends in its slot (M13, M14), or the value leaves the place (M9).
+    fn place_event(&mut self, m: Mark, pt: TypeId, v: &Val, at: Ev) -> R<()> {
+        let Some((addr, tag)) = v.word() else { return Ok(()) };
+        let size = match self.pointee.get(pt.index()).copied().flatten() {
+            Some(t) if m == Mark::Gone => self.layout(t)?.size,
+            _ => 0,
+        };
+        let Some(bt) = &mut self.bt else { return Ok(()) };
+        let r = match m {
+            Mark::Begin => {
+                let Some((id, base, len)) = self.mem.alloc_span(addr) else { return Ok(()) };
+                bt.forget(base, len);
+                bt.tracker.restart(id, at)
+            }
+            Mark::End => {
+                let Some((id, base, len)) = self.mem.alloc_span(addr) else { return Ok(()) };
+                bt.forget(base, len);
+                bt.tracker.end_alloc(id, at)
+            }
+            _ => {
+                let Some((id, off)) = bt.locate(&self.mem, addr) else { return Ok(()) };
+                bt.tracker.gone(id, tag, off, off.saturating_add(size), at)
+            }
+        };
+        r.map_err(|r| self.violation(r))
     }
 
     /// M4: the reference `v` of type `rt` with a new tag, a child of the tag it carries, for

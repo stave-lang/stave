@@ -1,6 +1,6 @@
-//~ BORROWCHECK two-exclusive 11 10
-// A `&mut` read twice out of its place through a raw pointer: each read is a reborrow of its
-// own, and a write through one ends the other.
+//~ BORROWCHECK second-owner 9 8
+// A `&mut` read twice out of its place through a raw pointer: the first `read` moves it out,
+// the second reads a moved-out place.
 fn main() -> i32 {
     let mut x: u32 = 1u32;
     let mut m: &mut u32 = &mut x;

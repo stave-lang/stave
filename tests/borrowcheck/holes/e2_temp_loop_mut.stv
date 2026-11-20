@@ -1,4 +1,4 @@
-//~ BORROWCHECK two-exclusive 12 11
+//~ BORROWCHECK use-after-referent 12 11
 fn next(i: u32) -> u32 {
     return i + 1;
 }

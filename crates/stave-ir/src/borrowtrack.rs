@@ -66,6 +66,8 @@ pub enum Cause {
     Read,
     Write,
     End,
+    /// The value was moved out of the bytes (M9): the cause is the move.
+    Move,
     /// The tag is protected by a call that has not returned (M23): the cause is the call.
     Call,
 }
@@ -117,7 +119,12 @@ pub struct Report {
 impl Report {
     /// The rule the report is under.
     pub fn rule(&self) -> &'static str {
-        if self.cause == Cause::Call { "M23" } else { self.event.rule() }
+        match (self.cause, self.class) {
+            (Cause::Call, _) => "M23",
+            (Cause::Made, Class::SecondOwner) => "M10",
+            (_, Class::SecondOwner) => "M9",
+            _ => self.event.rule(),
+        }
     }
 }
 
@@ -244,9 +251,89 @@ struct Tree {
     ended: bool,
     /// The nodes a call protects.
     guarded: Vec<u32>,
+    /// The moved-out bytes (M9) as sorted disjoint ranges, each with the move that emptied it.
+    moved: Vec<(u64, u64, Ev)>,
 }
 
 impl Tree {
+    /// The first moved-out byte among `lo..hi`, with the move that emptied it.
+    fn moved_in(&self, lo: u64, hi: u64) -> Option<(u64, Ev)> {
+        self.moved.iter().find(|m| m.0 < hi && lo < m.1).map(|m| (m.0.max(lo), m.2))
+    }
+
+    /// The bytes `lo..hi` hold a value again.
+    fn fill(&mut self, lo: u64, hi: u64) {
+        if self.moved_in(lo, hi).is_none() {
+            return;
+        }
+        let mut out = Vec::with_capacity(self.moved.len() + 1);
+        for &(a, b, at) in &self.moved {
+            if b <= lo || hi <= a {
+                out.push((a, b, at));
+                continue;
+            }
+            if a < lo {
+                out.push((a, lo, at));
+            }
+            if hi < b {
+                out.push((hi, b, at));
+            }
+        }
+        self.moved = out;
+    }
+
+    /// The value left the bytes `lo..hi` at `at`.
+    fn empty(&mut self, lo: u64, hi: u64, at: Ev) {
+        self.fill(lo, hi);
+        let k = self.moved.partition_point(|m| m.0 < lo);
+        self.moved.insert(k, (lo, hi, at));
+    }
+
+    /// M9 for an event the tags allow: the report of a read of a moved-out byte among `lo..hi`;
+    /// a write fills the bytes.
+    fn second_owner(&mut self, alloc: u32, ev: Use, lo: u64, hi: u64, at: Ev) -> Option<Box<Report>> {
+        if self.moved.is_empty() {
+            return None;
+        }
+        match ev {
+            Use::Read => {
+                let (offset, moved_at) = self.moved_in(lo, hi)?;
+                let root = &self.nodes[0];
+                Some(Box::new(Report {
+                    class: Class::SecondOwner,
+                    event: ev,
+                    alloc,
+                    offset,
+                    lo,
+                    hi,
+                    tag: ROOT,
+                    kind: root.kind,
+                    perm: Perm::Dead,
+                    at,
+                    cause: Cause::Move,
+                    cause_at: moved_at,
+                    made_at: root.made_at,
+                }))
+            }
+            Use::Write => {
+                self.fill(lo, hi);
+                None
+            }
+            Use::Borrow | Use::End => None,
+        }
+    }
+
+    /// Every tag but the root is `Dead` on every byte: the allocation that was in the bytes
+    /// ended at `at`.
+    fn kill(&mut self, at: Ev) {
+        for n in self.nodes.iter_mut().skip(1).filter(|n| n.tag != FREE) {
+            let (lo, hi) = (n.lo, n.hi);
+            n.update(lo, hi, Cause::End, at, |_| Perm::Dead);
+            n.listed = 0;
+        }
+        self.sets = Default::default();
+    }
+
     /// Puts node `i` in the sets its permissions ask for.
     fn relist(&mut self, i: u32) {
         let n = &mut self.nodes[i as usize];
@@ -723,15 +810,88 @@ impl Tracker {
             return Ok(());
         }
         let size = tree.size;
-        let report = tree.guard(alloc, 0, Use::End, 0, size, at);
-        for n in tree.nodes.iter_mut().filter(|n| n.tag != FREE) {
-            let (lo, hi) = (n.lo, n.hi);
-            n.update(lo, hi, Cause::End, at, |_| Perm::Dead);
-            n.listed = 0;
-        }
-        tree.sets = Default::default();
+        let report = if tree.ended { None } else { tree.guard(alloc, 0, Use::End, 0, size, at) };
+        tree.kill(at);
+        tree.nodes[0].update(0, size, Cause::End, at, |_| Perm::Dead);
+        tree.moved = Vec::new();
         tree.ended = true;
         report.map_or(Ok(()), Err)
+    }
+
+    /// A local or temporary begins in the bytes of `alloc` (M13, M14): the allocation that was
+    /// there ends with every tag of it, and the root stands for the new one. An end under a
+    /// protected tag that is not `Dead` yet is a violation (M23). An allocation no event named
+    /// yet has nothing to end.
+    pub fn restart(&mut self, alloc: u32, at: Ev) -> Result<(), Box<Report>> {
+        if self.ended.remove(&alloc).is_some() {
+            return Ok(());
+        }
+        let Some(tree) = self.trees.get_mut(&alloc) else { return Ok(()) };
+        let size = tree.size;
+        let report = if tree.ended || tree.count == 0 {
+            None
+        } else {
+            let r = tree.guard(alloc, 0, Use::End, 0, size, at);
+            tree.kill(at);
+            r
+        };
+        tree.nodes[0].runs = vec![Run { hi: size, perm: Perm::Active, cause: Cause::Made, cause_at: at }];
+        tree.moved = Vec::new();
+        tree.ended = false;
+        report.map_or(Ok(()), Err)
+    }
+
+    /// M9: the value in the bytes `lo..hi` of `alloc` leaves through `tag`: the bytes end (M3)
+    /// and are moved-out until the next write.
+    pub fn gone(&mut self, alloc: u32, tag: Tag, lo: u64, hi: u64, at: Ev) -> Result<(), Box<Report>> {
+        self.event(alloc, tag, Use::End, lo, hi, at)?;
+        if let Some(tree) = self.trees.get_mut(&alloc)
+            && !tree.ended
+        {
+            let hi = hi.min(tree.size);
+            if lo < hi {
+                tree.empty(lo, hi, at);
+            }
+        }
+        Ok(())
+    }
+
+    /// The moved-out bytes of `alloc`.
+    pub fn moved(&self, alloc: u32) -> Vec<(u64, u64, Ev)> {
+        self.trees.get(&alloc).map_or(Vec::new(), |t| t.moved.clone())
+    }
+
+    /// Bytes of `alloc` that are moved-out from its begin on (a block that took the bytes of
+    /// another, with their initialization).
+    pub fn set_moved(&mut self, alloc: u32, moved: &[(u64, u64, Ev)]) {
+        if let Some(tree) = self.trees.get_mut(&alloc) {
+            for &(lo, hi, at) in moved {
+                let hi = hi.min(tree.size);
+                if lo < hi {
+                    tree.empty(lo, hi, at);
+                }
+            }
+        }
+    }
+
+    /// M10: the report of an array repeat literal at `at` that makes a second owner of a value
+    /// that is not Copy.
+    pub fn repeat(at: Ev) -> Box<Report> {
+        Box::new(Report {
+            class: Class::SecondOwner,
+            event: Use::Read,
+            alloc: 0,
+            offset: 0,
+            lo: 0,
+            hi: 0,
+            tag: ROOT,
+            kind: Kind::Root,
+            perm: Perm::Dead,
+            at,
+            cause: Cause::Made,
+            cause_at: at,
+            made_at: NO_EV,
+        })
     }
 
     /// M23: a call protects `tag` from `at` until [`Tracker::unprotect`]. No effect on a root.
@@ -851,6 +1011,7 @@ impl Tracker {
         let mut hits = std::mem::take(&mut self.hits);
         let r = if tree.nodes[from as usize].holds(lo, hi) {
             let r = tree.check(alloc, from, ev, lo, hi, at);
+            let r = r.or_else(|| tree.second_owner(alloc, ev, lo, hi, at));
             match r.or_else(|| tree.guard(alloc, from, ev, lo, hi, at)) {
                 Some(r) => Err(r),
                 None => {
@@ -861,7 +1022,10 @@ impl Tracker {
                 }
             }
         } else {
-            tree.split(alloc, from, ev, lo..hi, at, &mut hits)
+            match tree.second_owner(alloc, ev, lo, hi, at) {
+                Some(r) => Err(r),
+                None => tree.split(alloc, from, ev, lo..hi, at, &mut hits),
+            }
         };
         self.hits = hits;
         r
@@ -1267,5 +1431,114 @@ mod tests {
         // a protected tag is kept by a collection
         t.collect(&HashSet::new(), 0);
         assert_eq!(t.tags(), 1);
+    }
+
+    #[test]
+    fn a_local_that_begins_again_ends_the_tags_of_the_one_before() {
+        let mut t = local(4);
+        let r = shared(&mut t, ROOT, 0, 4, 2);
+        t.restart(X, 3).unwrap();
+        // the root is the new local's
+        t.write(X, ROOT, 0, 4, 4).unwrap();
+        t.read(X, ROOT, 0, 4, 5).unwrap();
+        let e = t.read(X, r, 0, 4, 6).unwrap_err();
+        assert_eq!((e.class, e.cause, e.cause_at, e.made_at), (Class::UseAfterReferent, Cause::End, 3, 2));
+        assert_eq!(e.rule(), "M1");
+        // a borrow of the new local is a tag of its own
+        let s = shared(&mut t, ROOT, 0, 4, 7);
+        t.read(X, s, 0, 4, 8).unwrap();
+    }
+
+    #[test]
+    fn a_local_between_its_end_and_its_next_begin() {
+        let mut t = local(4);
+        let r = shared(&mut t, ROOT, 0, 4, 2);
+        t.end_alloc(X, 3).unwrap();
+        let e = t.read(X, ROOT, 0, 4, 4).unwrap_err();
+        assert_eq!((e.class, e.cause_at), (Class::UseAfterReferent, 3));
+        t.restart(X, 5).unwrap();
+        t.write(X, ROOT, 0, 4, 6).unwrap();
+        // the tag died at the end, not at the begin after it
+        assert_eq!(t.read(X, r, 0, 4, 7).unwrap_err().cause_at, 3);
+        // without a tag the ended local is one map entry, and begins again all the same
+        t.collect(&HashSet::new(), 0);
+        t.end_alloc(X, 8).unwrap();
+        t.collect(&HashSet::new(), 0);
+        assert!(t.has(X));
+        assert_eq!(t.read(X, ROOT, 0, 4, 9).unwrap_err().cause_at, 8);
+        t.restart(X, 10).unwrap();
+        assert!(!t.has(X));
+    }
+
+    #[test]
+    fn a_begin_under_a_protected_tag() {
+        let mut t = local(4);
+        let r = shared(&mut t, ROOT, 0, 4, 2);
+        t.protect(r, 3);
+        let e = t.restart(X, 4).unwrap_err();
+        assert_eq!(
+            (e.class, e.event, e.cause, e.rule()),
+            (Class::UseAfterReferent, Use::End, Cause::Call, "M23")
+        );
+    }
+
+    #[test]
+    fn a_move_ends_the_bytes_and_empties_them() {
+        let mut t = local(8);
+        let r = shared(&mut t, ROOT, 0, 4, 2);
+        let other = shared(&mut t, ROOT, 4, 8, 3);
+        t.gone(X, ROOT, 0, 4, 4).unwrap();
+        // a reference into the moved value: its referent ended
+        let e = t.read(X, r, 0, 4, 5).unwrap_err();
+        assert_eq!((e.class, e.cause, e.cause_at), (Class::UseAfterReferent, Cause::End, 4));
+        // the place itself: a second owner
+        let e = t.read(X, ROOT, 0, 8, 6).unwrap_err();
+        assert_eq!(
+            (e.class, e.event, e.offset, e.cause_at, e.rule()),
+            (Class::SecondOwner, Use::Read, 0, 4, "M9")
+        );
+        // the bytes beside it are untouched
+        t.read(X, other, 4, 8, 7).unwrap();
+        t.read(X, ROOT, 4, 8, 8).unwrap();
+        // a write fills the place again; the old reference stays dead, by the end
+        t.write(X, ROOT, 0, 4, 9).unwrap();
+        t.read(X, ROOT, 0, 8, 10).unwrap();
+        let e = t.read(X, r, 0, 4, 11).unwrap_err();
+        assert_eq!((e.class, e.cause, e.cause_at), (Class::UseAfterReferent, Cause::End, 4));
+    }
+
+    #[test]
+    fn moved_bytes_are_kept_as_ranges() {
+        let mut t = local(16);
+        t.gone(X, ROOT, 0, 16, 2).unwrap();
+        t.write(X, ROOT, 4, 8, 3).unwrap();
+        assert_eq!(t.moved(X), vec![(0, 4, 2), (8, 16, 2)]);
+        t.gone(X, ROOT, 2, 10, 4).unwrap();
+        assert_eq!(t.moved(X), vec![(0, 2, 2), (2, 10, 4), (10, 16, 2)]);
+        t.read(X, ROOT, 0, 0, 5).unwrap();
+        assert_eq!(t.read(X, ROOT, 9, 12, 6).unwrap_err().cause_at, 4);
+        let mut u = Tracker::new();
+        u.begin(2, 8, false, 1);
+        u.set_moved(2, &t.moved(X));
+        assert_eq!(u.moved(2), vec![(0, 2, 2), (2, 8, 4)]);
+        // a begin and an end leave no moved byte
+        t.restart(X, 7).unwrap();
+        assert!(t.moved(X).is_empty());
+    }
+
+    #[test]
+    fn a_move_through_a_dead_tag() {
+        let mut t = local(4);
+        let m = excl(&mut t, ROOT, 0, 4, 2);
+        t.write(X, ROOT, 0, 4, 3).unwrap();
+        let e = t.gone(X, m, 0, 4, 4).unwrap_err();
+        assert_eq!((e.class, e.event, e.cause_at), (Class::TwoExclusive, Use::End, 3));
+        assert!(t.moved(X).is_empty());
+    }
+
+    #[test]
+    fn an_array_repeat_of_a_value_that_is_not_copy() {
+        let e = Tracker::repeat(7);
+        assert_eq!((e.class, e.at, e.cause_at, e.rule()), (Class::SecondOwner, 7, 7, "M10"));
     }
 }

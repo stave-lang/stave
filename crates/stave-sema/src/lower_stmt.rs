@@ -191,7 +191,8 @@ impl<'a> FnCx<'a> {
         for (_, node, ty) in binds {
             let drop = self.needs_drop(ty);
             let idx = self.locals.len();
-            self.locals.push(LocalInfo { node, ty, mem: drop, drop, flag: None });
+            let mem = drop || self.slotted.contains(&node);
+            self.locals.push(LocalInfo { node, ty, mem, drop, flag: None });
             self.by_node.insert(node, idx);
             if icx.kind(node) == Some(NodeKind::Param)
                 && let Some(sp) = icx.child(node, NodeKind::SelfParam)
@@ -314,9 +315,11 @@ impl<'a> FnCx<'a> {
         let mut b = std::mem::replace(&mut self.f.b, FuncBuilder::new(&[]));
         b.seal_unreached();
         let borrows = std::mem::take(&mut self.f.borrows);
+        let events = std::mem::take(&mut self.f.events);
         match b.finish() {
             Ok(mut body) => {
                 body.borrows = borrows;
+                body.events = events;
                 let mut body = crate::lower_post::finalize(body);
                 stave_ir::fence::place_stream_fences(&mut body);
                 Some(body)
@@ -331,7 +334,7 @@ impl<'a> FnCx<'a> {
     fn end_fn(&mut self) {
         if self.open() {
             while !self.f.scopes.is_empty() {
-                self.pop_scope();
+                self.pop_scope_at(true);
             }
             let r = self.f.ret;
             if self.open() {
@@ -1194,6 +1197,10 @@ impl<'a> FnCx<'a> {
         };
         self.drop_temps_keep();
         self.drop_scopes(lp.scope);
+        for s in (lp.scope..self.f.scopes.len()).rev() {
+            let ls = self.f.scopes[s].clone();
+            self.end_locals(&ls);
+        }
         if is_break {
             self.br_join(lp.exit, &[]);
         } else {
@@ -1293,7 +1300,7 @@ impl<'a> FnCx<'a> {
                     }
                 };
                 let pt = p.ty;
-                let Some(v) = self.read(&p) else { return };
+                let Some(v) = self.peek(&p) else { return };
                 let us = self.t_usize();
                 let n = match len {
                     Some(n) => self.int(n as i128),
@@ -1416,7 +1423,7 @@ impl<'a> FnCx<'a> {
         let Some(p) = self.place_of(e) else { return };
         let (s, mutable) = match self.kind(p.ty) {
             TypeKind::Ref { mutable, inner } => {
-                let Some(v) = self.read(&p) else { return };
+                let Some(v) = self.peek(&p) else { return };
                 match self.kind(inner) {
                     TypeKind::Slice { .. } => {
                         let st = self.slice_ref_ty(mutable, lane);
@@ -1912,12 +1919,19 @@ impl<'a> FnCx<'a> {
                 None => *unreach.get_or_insert_with(|| s.f.b.create_block()),
             };
             let guard_fail = target(self, next_row(a.hi, arm_top(a)));
+            // the moves of a pattern with a guard happen when the guard holds
+            let guarded = self.g.borrows && a.guard.is_some();
+            let mut moves: Vec<(Operand, Ty)> = Vec::new();
             let ok = if a.hi - a.lo == 1 {
                 let fail = target(self, next_row(a.lo + 1, tops[a.lo]));
                 self.f.env = snap.clone();
                 self.f.b.switch_to(rows[a.lo].1);
                 self.push_scope();
+                if guarded {
+                    self.f.held = Some(Vec::new());
+                }
                 let ok = self.pat(rows[a.lo].0, sp.clone(), Mode::Move, Some(fail), switch_mode);
+                moves = self.f.held.take().unwrap_or_default();
                 if ok {
                     match a.gb {
                         Some(gb) => self.f.b.br(gb, &[]),
@@ -1945,7 +1959,13 @@ impl<'a> FnCx<'a> {
                     self.f.env = snap.clone();
                     self.f.b.switch_to(rows[k].1);
                     self.push_scope();
+                    if guarded {
+                        self.f.held = Some(Vec::new());
+                    }
                     let ok = self.pat(rows[k].0, sp.clone(), Mode::Move, Some(fail), switch_mode);
+                    // the block the guard runs in has one predecessor per alternative, and so
+                    // no name for the place the taken one moved out of: these moves get no row
+                    self.f.held = None;
                     if !ok || !self.open() {
                         self.f.scopes.truncate(scope_base);
                         continue;
@@ -1997,6 +2017,9 @@ impl<'a> FnCx<'a> {
                     }
                 }
                 self.f.b.switch_to(a.bb);
+                for (p, pt) in moves {
+                    self.event(stave_ir::EventKind::Gone, p, pt);
+                }
                 if is_expr {
                     let w = Some(vt);
                     if let Some(v) = self.val(a.body, w) {

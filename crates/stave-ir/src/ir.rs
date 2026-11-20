@@ -552,6 +552,8 @@ pub struct Body {
     /// Borrow events the instructions do not show (contracts/borrow-model.md, "Side table").
     /// Empty unless the lowering was asked for them; not part of the canonical dump.
     pub borrows: Vec<BorrowMark>,
+    /// The other events of the side table, by the instruction that carries each.
+    pub events: Vec<EventMark>,
 }
 
 impl Body {
@@ -661,6 +663,32 @@ pub struct BorrowMark {
     pub value: Value,
     /// `&mut` (else `&`).
     pub mutable: bool,
+}
+
+/// An event of the side table that is no borrow: it happens when the instruction that defines
+/// `value` runs. For the kinds with a place, `value` is a pointer to it and the place is the
+/// pointee of the value's type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EventMark {
+    pub value: Value,
+    pub kind: EventKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EventKind {
+    /// A local or temporary begins in the slot the place is: the allocation that was there
+    /// ends, with every tag of it.
+    Begin,
+    /// The local or temporary in the slot ends.
+    End,
+    /// The value left the place (a move, or the end of a drop): the bytes end through the tag
+    /// of the pointer and are moved-out.
+    Gone,
+    /// An array repeat literal makes a second owner of a value that is not Copy.
+    Repeat,
+    /// `fn.make` is to copy the environment the pointer names into a slot of its own, so that
+    /// each evaluation of a closure literal holds its own capture references.
+    Env,
 }
 
 /// A function: signature plus an optional body (`None` = declared only, e.g. an `extern "C"`

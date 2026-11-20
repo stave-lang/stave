@@ -1,0 +1,15 @@
+//~ BORROWCHECK use-after-referent 9 11
+// A `&` of a loop local read in the next round: the local of the round before ended with
+// its block, whatever the next round stores in its slot.
+fn main() -> i32 {
+    let zero: u32 = 0u32;
+    let mut r: &u32 = &zero;
+    let mut sum: u32 = 0u32;
+    for i in 0u32..3u32 {
+        sum = sum + *r;
+        let x: u32 = i;
+        r = &x;
+    }
+    if sum == 1u32 { return 1; }
+    return 0;
+}

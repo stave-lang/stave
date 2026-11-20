@@ -194,6 +194,15 @@ impl<'a> FnCx<'a> {
         }
     }
 
+    /// The value of a reference expression that is dereferenced or reborrowed: a place is
+    /// read, never moved out of.
+    pub fn ref_operand(&mut self, e: E) -> Option<Operand> {
+        match e {
+            E::P(p) => self.peek(&p),
+            e => self.operand_of(e),
+        }
+    }
+
     pub fn e_ty(&mut self, e: &E) -> Ty {
         match e {
             E::V(_, t) => *t,
@@ -233,7 +242,7 @@ impl<'a> FnCx<'a> {
         match c {
             Coercion::MutToShared => {
                 let t = self.e_ty(&e);
-                let Some(v) = self.operand_of(e) else { return E::Never };
+                let Some(v) = self.ref_operand(e) else { return E::Never };
                 let Some((inner, _, raw)) = self.pointee(t) else { return E::V(v, t) };
                 let w = match want {
                     Some(w) => w,
@@ -245,7 +254,7 @@ impl<'a> FnCx<'a> {
             }
             Coercion::ArrayToSlice => {
                 let t = self.e_ty(&e);
-                let Some(v) = self.operand_of(e) else { return E::Never };
+                let Some(v) = self.ref_operand(e) else { return E::Never };
                 let Some((inner, m, _)) = self.pointee(t) else { return E::V(v, t) };
                 let TypeKind::Array { elem, len } = self.kind(inner) else { return E::V(v, t) };
                 let n = len.value().unwrap_or(0);
@@ -265,7 +274,7 @@ impl<'a> FnCx<'a> {
             }
             Coercion::Unalign => {
                 let t = self.e_ty(&e);
-                let Some(v) = self.operand_of(e) else { return E::Never };
+                let Some(v) = self.ref_operand(e) else { return E::Never };
                 let Some((inner, m, _)) = self.pointee(t) else { return E::V(v, t) };
                 let TypeKind::Slice { elem, .. } = self.kind(inner) else { return E::V(v, t) };
                 let w = match want {
@@ -280,7 +289,7 @@ impl<'a> FnCx<'a> {
             }
             Coercion::StringToStr => {
                 let t = self.e_ty(&e);
-                let Some(v) = self.operand_of(e) else { return E::Never };
+                let Some(v) = self.ref_operand(e) else { return E::Never };
                 let s = self.string_ty();
                 let want_ref = self.t_ref(false, s);
                 let v = self.convert_ptr(v, t, want_ref);
@@ -327,7 +336,7 @@ impl<'a> FnCx<'a> {
                     self.coerce(e, &Coercion::Unalign, want)
                 } else if self.g.borrows && matches!(self.kind(t), TypeKind::Ref { .. }) {
                     // an implicit reborrow is a borrow through the reference given (M6)
-                    let Some(v) = self.operand_of(e) else { return E::Never };
+                    let Some(v) = self.ref_operand(e) else { return E::Never };
                     E::V(self.borrowed(v, t), t)
                 } else {
                     e
@@ -524,7 +533,7 @@ impl<'a> FnCx<'a> {
         if t == Term::Star as u8 {
             let e = self.expr(c, None);
             let pt = self.e_ty(&e);
-            let Some(v) = self.operand_of(e) else { return E::Never };
+            let Some(v) = self.ref_operand(e) else { return E::Never };
             return E::P(self.deref(v, pt));
         }
         if t == Term::Amp as u8 || t == Term::AmpAmp as u8 {
@@ -852,6 +861,14 @@ impl<'a> FnCx<'a> {
             if len > (1 << 20) {
                 return self.fail(n, "array repeat literal too long for the IR (no splat op)");
             }
+            if self.g.borrows
+                && len >= 2
+                && !self.is_copy(elem)
+                && let Operand::Value(value) = self.unit_val()
+            {
+                // each element after the first is a second owner of the one value
+                self.f.events.push(stave_ir::EventMark { value, kind: stave_ir::EventKind::Repeat });
+            }
             let vs = vec![v; len as usize];
             return E::V(self.opn(Op::Make, ty, &vs), ty);
         }
@@ -1131,7 +1148,7 @@ impl<'a> FnCx<'a> {
     /// Applies `derefs` auto-derefs to a place.
     fn derefs(&mut self, mut p: Place, k: u32) -> Option<Place> {
         for _ in 0..k {
-            let v = self.read(&p)?;
+            let v = self.peek(&p)?;
             let t = p.ty;
             p = self.deref(v, t);
         }
@@ -1506,7 +1523,7 @@ impl<'a> FnCx<'a> {
     pub fn drop_temps_keep(&mut self) {
         let ts = self.f.temps.clone();
         for &(p, t) in ts.iter().rev() {
-            self.drop_ptr(p, t);
+            self.drop_temp(p, t);
         }
     }
 
@@ -1835,6 +1852,11 @@ impl<'a> FnCx<'a> {
                 let v = self.addr(&p, Some(w))?;
                 Some(self.borrowed(v, w))
             }
+            // a `&mut T` place given as the receiver is reborrowed (M6)
+            None if self.g.borrows && matches!(self.kind(p.ty), TypeKind::Ref { mutable: true, .. }) => {
+                let v = self.peek(&p)?;
+                Some(self.borrowed(v, p.ty))
+            }
             None => self.read(&p),
         }
     }
@@ -1963,7 +1985,12 @@ impl<'a> FnCx<'a> {
                 if self.is_unit(inner) {
                     return E::Unit;
                 }
-                E::V(Operand::Value(self.f.b.load(FnCx::ir(inner), v)), rt)
+                let x = Operand::Value(self.f.b.load(FnCx::ir(inner), v));
+                if self.g.borrows && !self.is_copy(inner) {
+                    // the value moves out of the pointee
+                    self.event(stave_ir::EventKind::Gone, v, pt);
+                }
+                E::V(x, rt)
             }
             "write" | "write_stream" => {
                 let pt = p.ty;
@@ -2086,6 +2113,8 @@ impl<'a> FnCx<'a> {
         };
         let st = self.string_ty();
         let ts = self.new_slot(st);
+        let tst = self.t_ref(true, st);
+        self.event(stave_ir::EventKind::Begin, ts, tst);
         let e = self.call_inst(InstKey { decl: new, args: Vec::new() }, &[], tok);
         let Some(sv) = self.operand_of(e) else { return E::Never };
         self.f.b.store(ts, sv);
@@ -2165,7 +2194,7 @@ impl<'a> FnCx<'a> {
             let Some(p) = self.place_of(e) else { return false };
             let mut p = p;
             while let TypeKind::Ref { .. } = self.kind(p.ty) {
-                let Some(v) = self.read(&p) else { return false };
+                let Some(v) = self.peek(&p) else { return false };
                 let t = p.ty;
                 p = self.deref(v, t);
             }
@@ -2215,7 +2244,7 @@ impl<'a> FnCx<'a> {
                 }
             }
         } else {
-            let Some(mut v) = self.read(&p) else { return false };
+            let Some(mut v) = self.peek(&p) else { return false };
             let mut t = p.ty;
             for _ in 1..refs {
                 let Some((inner, _, _)) = self.pointee(t) else { return false };
