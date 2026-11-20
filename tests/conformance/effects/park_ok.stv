@@ -1,0 +1,39 @@
+//~ CHECK-ONLY
+// `park` (a wait on a completion queue) is a part of `block`. A fn may deny `park` alone and still
+// wait for its threads (`block`). Denying `block` denies `park` too, so a value of
+// `fn(..) without(block)` is usable as `fn(..) without(park)`. No std fn parks, so a call of a
+// parking fn under `without(block)` has no test.
+unsafe("abs as declared in stdlib.h: no allocation, I/O, lock, or wait") extern "C" {
+    fn abs(x: i32) -> i32 without(alloc, io, lock, block);
+}
+
+fn joins() without(park) {
+    scope {
+        spawn { }
+    }
+}
+
+fn magnitude(x: i32) -> i32 without(park) {
+    return unsafe("abs has no precondition") abs(x);
+}
+
+fn both(x: u32) -> u32 without(block, park) {
+    return x +% 1u32;
+}
+
+fn run(f: fn(u32) -> u32 without(park), x: u32) -> u32 without(park) {
+    return f(x);
+}
+
+fn narrow(f: fn(u32) -> u32 without(block)) -> u32 {
+    let g: fn(u32) -> u32 without(park) = f;
+    return run(g, 1u32);
+}
+
+fn main() {
+    joins();
+    let m = magnitude(-4);
+    let a = run(both, 1u32);
+    let b = narrow(both);
+    let c = run(fn(x: u32) -> u32 { return x +% 2u32; }, 1u32);
+}

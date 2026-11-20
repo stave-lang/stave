@@ -30,6 +30,20 @@ reference for what a program may write and what it means.
   direct call that proves every `requires` of its callee skips them, a call that always fails a
   clause is E0218, and after a call its callee's `requires` and such `ensures` are known.
 
+## §2 Deny clause: `block` and `park`
+
+- `block` means "may wait for something outside the fn", not a fixed list of std fns, so a new
+  kind of wait in std needs no language change. In std: a `scope` end, `thread.join`,
+  `par_*`, and the file reads, writes, and opens of `std.io` (a pipe or FIFO may wait on another
+  process or thread; std/README.md lists them).
+- `park` is a wait on a completion queue. It is a part of `block`: whatever has `park` also has
+  `block`, and `without(block)` denies `park`. So `fn(..) without(block)` is usable as
+  `fn(..) without(park)`, not the other way. `without(park)` alone allows other waits: a stage
+  may join threads (`par_for`) and still never wait on a queue.
+- No std fn has `park`. Only what has every effect has it: an `extern "C"` import that does not
+  list it, and code the call graph does not show. A `without(block)` fn calling a parking fn
+  therefore has no conformance test; the type rule above has one.
+
 ## §3 Storing calls: a view left borrowed
 
 A storing call (a call of a fn whose `&mut` view param has a `from` clause) for a view it reaches
@@ -44,6 +58,23 @@ store one part through the other. The cases:
 The caller rule (every view the target reaches holds all the clause's sources from the call on)
 applies also when the target holds no borrow at this instance (`Slot<u32>`): the sources still
 take the store.
+
+## §3 Must-consume
+
+A pending-operation type of std stands for work that is still running (device work, a queued
+operation). Dropping it would lose its result or error and free what the work still uses, so it
+has no implicit drop: a value is consumed only by passing it to a method that takes it by `self`,
+and an implicit drop on any path is an error, also the early return of `?`. The types are a closed
+list of fixed paths in contracts/intrinsics.md; each has its own diagnostic (`gpu.Launch`: E1104).
+No syntax marks such a type.
+
+## §3 Locks and completion waits
+
+Completion-queue waits (`park`) are `block` waits: like file waits they are outside the claim that
+safe code cannot deadlock on locks and joins. No `MutexGuard` may be held across a call that has
+`park`: the guard stays with the OS thread, another task on that thread that wants the lock
+sleeps the thread, and the task that holds it never resumes. No std fn has `park`, so no
+diagnostic checks this rule.
 
 ## §3 Error trace
 

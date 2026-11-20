@@ -1,0 +1,27 @@
+//~ CHECK-ONLY
+// `park` follows the rules of every denied effect: an import that does not list it in its
+// `without` has it (E1401), and a fn item made into a `without(park)` value is checked (E1403
+// case `made`).
+unsafe("puts as declared in stdio.h; it allocates nothing") extern "C" {
+    fn puts(s: *const u8) -> i32 without(alloc);
+}
+
+fn say(p: *const u8) -> i32 without(park) { //~ ERROR E1401
+    return unsafe("p is a NUL-terminated string") puts(p);
+}
+
+fn speak(x: u32) -> u32 {
+    let nul = 0u8;
+    let r = unsafe("a NUL-terminated string") puts(&nul as *const u8);
+    return x;
+}
+
+fn run(f: fn(u32) -> u32 without(park), x: u32) -> u32 {
+    return f(x);
+}
+
+fn main() {
+    let nul = 0u8;
+    let a = say(&nul as *const u8);
+    let b = run(speak, 1u32); //~ ERROR E1403
+}

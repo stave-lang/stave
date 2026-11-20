@@ -109,6 +109,12 @@ fn effect_names() {
     assert_eq!(Effects::of_name("gc"), None);
     assert_eq!(Effects::ALL.names(), Effects::NAMES);
     assert_eq!((Effects::TRAP | Effects::ALLOC).names(), ["alloc", "trap"]);
+    // denying `block` denies its part `park`; a deny clause is shown without the implied part
+    assert_eq!(Effects::deny_of_name("block"), Some(Effects::BLOCK | Effects::PARK));
+    assert_eq!(Effects::deny_of_name("park"), Some(Effects::PARK));
+    assert_eq!(Effects::deny_of_name("io"), Some(Effects::IO));
+    assert_eq!((Effects::BLOCK | Effects::PARK | Effects::IO).minimal().names(), ["io", "block"]);
+    assert_eq!(Effects::PARK.minimal(), Effects::PARK);
 }
 
 /// Every runtime boundary fn exists on both arches: a renamed one would silently let the

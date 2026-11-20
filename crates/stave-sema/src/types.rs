@@ -935,7 +935,10 @@ fn display_into<I: Interner + ?Sized>(cx: &I, names: &dyn Names, t: TypeId, s: &
                 s.push_str(&format!(" needs({})", f.join(", ")));
             }
             if *deny != 0 {
-                s.push_str(&format!(" without({})", crate::effects::Effects(*deny).names().join(", ")));
+                s.push_str(&format!(
+                    " without({})",
+                    crate::effects::Effects(*deny).minimal().names().join(", ")
+                ));
             }
         }
         TypeKind::Vector { lane, n } => {

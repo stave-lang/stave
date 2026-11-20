@@ -1,6 +1,6 @@
 //~ PARSE-ONLY
-// `rec`, `without`, and the reserved words `invariant decreases ghost pure spec forall exists derive`
-// are keywords: never a name.
+// `rec`, `without`, and the reserved words `invariant decreases ghost pure spec forall exists derive
+// async await yield` are keywords: never a name.
 fn rec() {} //~ ERROR E0004
 fn f1() { let without = 1; } //~ ERROR E0004
 fn f2() { let invariant = 1; } //~ ERROR E0004

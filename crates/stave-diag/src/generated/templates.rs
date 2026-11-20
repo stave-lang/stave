@@ -5046,7 +5046,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         located: true,
         holes: &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
         ],
@@ -5122,7 +5122,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         located: true,
         holes: &[
             Hole { name: "at", kind: HoleKind::Path, choices: &[] },
-            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"] },
+            Hole { name: "effect", kind: HoleKind::TextLiteral, choices: &["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"] },
             Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "from", kind: HoleKind::Type, choices: &[] },
             Hole { name: "op", kind: HoleKind::TextLiteral, choices: &["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] },
@@ -5176,7 +5176,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "not an effect" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`",
+                    description: "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`, `io`, `block`, `park`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

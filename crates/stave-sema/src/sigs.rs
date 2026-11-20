@@ -736,7 +736,7 @@ pub(crate) fn deny_bits<H: LowerHost + ?Sized>(
     for e in icx.kids_vec(nd) {
         let t = icx.a(e);
         let name = icx.tok_str(t);
-        match crate::effects::Effects::of_name(name) {
+        match crate::effects::Effects::deny_of_name(name) {
             Some(b) => {
                 bits |= b.0;
                 spans.push((b.0, icx.tok_span(t)));

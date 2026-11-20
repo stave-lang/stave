@@ -244,9 +244,21 @@ fn rec_and_without_in_the_tree() {
         "test rec fn t() { }\nimpl S { pub unsafe(\"x\") rec fn m(&self) { } }\npub unsafe(\"x\") rec fn u() { }",
     );
     // the reserved words are keywords, never names
-    for w in
-        ["rec", "without", "invariant", "decreases", "ghost", "pure", "spec", "forall", "exists", "derive"]
-    {
+    for w in [
+        "rec",
+        "without",
+        "invariant",
+        "decreases",
+        "ghost",
+        "pure",
+        "spec",
+        "forall",
+        "exists",
+        "derive",
+        "async",
+        "await",
+        "yield",
+    ] {
         assert_eq!(one_at(&format!("fn f() {{ let {w} = 1; }}")), ("E0004", w.into()), "{w}");
     }
 }

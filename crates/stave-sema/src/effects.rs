@@ -2,8 +2,10 @@
 //! clause `without(..)` checked against it (E1401), and fn values made where a fn type with a
 //! deny clause is wanted (E1403 case `made`).
 //!
-//! **Effects** ([`Effects`]): `alloc trap recursive lock unsafe io block`. A node's own effects
-//! ([`EffectSets::local`]) come from:
+//! **Effects** ([`Effects`]): `alloc trap recursive lock unsafe io block park`. `park` (a wait on a
+//! completion queue) is a part of `block`: every source of `park` also gives `block`, and a deny
+//! clause that names `block` denies `park` too ([`Effects::deny_of_name`]). The only sources of
+//! `park` are those with every effect. A node's own effects ([`EffectSets::local`]) come from:
 //!
 //! | Source | Effects |
 //! |---|---|
@@ -75,17 +77,32 @@ impl Effects {
     pub const UNSAFE: Effects = Effects(1 << 4);
     pub const IO: Effects = Effects(1 << 5);
     pub const BLOCK: Effects = Effects(1 << 6);
-    pub const ALL: Effects = Effects(0x7f);
+    /// A wait on a completion queue: a part of [`Effects::BLOCK`], never without it.
+    pub const PARK: Effects = Effects(1 << 7);
+    pub const ALL: Effects = Effects(0xff);
     /// The effect names, by bit.
-    pub const NAMES: [&'static str; 7] = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"];
+    pub const NAMES: [&'static str; 8] =
+        ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"];
 
     pub fn of_name(s: &str) -> Option<Effects> {
         Self::NAMES.iter().position(|&n| n == s).map(|i| Effects(1 << i))
     }
 
+    /// What a deny clause entry `s` denies: its effect, and for `block` also `park`.
+    pub fn deny_of_name(s: &str) -> Option<Effects> {
+        let e = Self::of_name(s)?;
+        Some(if e == Effects::BLOCK { e | Effects::PARK } else { e })
+    }
+
     /// The names of the effects in the set, in [`Effects::NAMES`] order.
     pub fn names(self) -> Vec<&'static str> {
-        (0..7).filter(|i| self.0 & (1 << i) != 0).map(|i| Self::NAMES[i]).collect()
+        (0..8).filter(|i| self.0 & (1 << i) != 0).map(|i| Self::NAMES[i]).collect()
+    }
+
+    /// The set without the effects another of its effects implies (`park` beside `block`): what
+    /// a deny clause of these bits is written with.
+    pub fn minimal(self) -> Effects {
+        if self.contains(Effects::BLOCK) { Effects(self.0 & !Effects::PARK.0) } else { self }
     }
 
     pub fn contains(self, o: Effects) -> bool {
@@ -102,7 +119,7 @@ impl Effects {
 
     /// The single effects of the set, in [`Effects::NAMES`] order.
     pub fn each(self) -> impl Iterator<Item = Effects> {
-        (0..7).map(|i| Effects(1 << i)).filter(move |e| self.meets(*e))
+        (0..8).map(|i| Effects(1 << i)).filter(move |e| self.meets(*e))
     }
 }
 
@@ -901,8 +918,9 @@ pub fn check(prog: &Program, tc: &Typeck, plan: &Plan, sets: &EffectSets) -> Vec
             Why::Made { .. } => (sets.set[c.node as usize], entry),
             Why::Value { .. } => (Effects::NONE, entry),
         };
+        // a `park` comes with its `block`: one diagnostic, about `block`
         let have = Effects((in_set.0 | at_entry.0) & c.deny.0);
-        for e in have.each() {
+        for e in have.minimal().each() {
             let found =
                 if in_set.meets(e) { sets.chain_end(g, c.node, e) } else { Some((Vec::new(), c.node, true)) };
             let Some((edges, end, entered)) = found else { continue };
