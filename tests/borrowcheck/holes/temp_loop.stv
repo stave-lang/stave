@@ -1,0 +1,17 @@
+//~ BORROWCHECK write-under-shared 13 12
+// A `&` of a temporary read after the next evaluation of its expression. The tracking mode
+// sees the store of the new value, not the end of the temporary: the class is the write's.
+fn next(i: u32) -> u32 { return i + 1u32; }
+
+fn main() -> i32 {
+    let zero: u32 = 0u32;
+    let mut r: &u32 = &zero;
+    let mut sum: u32 = 0u32;
+    for i in 0u32..3u32 {
+        let before: &u32 = r;
+        r = &next(i);
+        sum = sum + *before;
+    }
+    if sum == 3u32 { return 1; }
+    return 0;
+}

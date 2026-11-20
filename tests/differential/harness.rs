@@ -822,8 +822,7 @@ fn run_kernel(k: &'static Kernel, root: &Path, plan: Plan) -> Vec<Report> {
     o.lower = true;
     let checked = pipeline::run(&dir, &Library::in_dir(&repo()), &o).unwrap();
     assert!(!checked.has_errors(), "{}: diagnostics {:#?}", k.name, checked.diagnostics);
-    let m =
-        checked.module.as_ref().unwrap_or_else(|| panic!("{}: not lowered: {:?}", k.name, checked.failure));
+    let m = checked.for_interp().unwrap_or_else(|| panic!("{}: not lowered: {:?}", k.name, checked.failure));
     let main = stave_driver::build::main_path(&checked.program).unwrap();
     let interp_run = |files: &[(String, Vec<u8>)], args: &[&[u8]]| {
         interp::run(m, &main, t0, args, files, Limits::default())

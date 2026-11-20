@@ -288,8 +288,11 @@ and free traces (fn, instruction index, `file:line:col`, `near` for an instructi
 site of its own). Off, the interpreter behaves as without the switch.
 
 **Borrow tracking** (`borrow-model.md`) is a further mode of the same interpreter, on top of the
-checking mode: `Limits::borrow` in code, on a module lowered with `Options::borrow_marks`
-("Side table" there). No environment variable turns it on. A violation ends the run as a failure
+checking mode: `Limits::borrow` in code, on a module lowered with the borrow side table ("Side
+table" there). `STAVE_INTERP_CHECK=borrow` turns on both modes for every run that takes the
+default limits; the pipeline then lowers each program a second time, with the side table, for the
+interpreter legs (`Options::tracked`, `Output::for_interp`). Dumps, goldens, and the backends get
+the canonical module in every case. A violation ends the run as a failure
 whose text starts `interp: borrow violation [<class>] <rule>`, class one of `write-under-shared
 two-exclusive use-after-referent second-owner`, rule `M1`..`M4`; then the event, its bytes, the
 allocation, the permission and kind of the failing tag; then three lines: `at` (the trace of the

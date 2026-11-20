@@ -217,7 +217,7 @@ fn exec_one(file: &Path, repo: &Path, release: bool) -> ExitCode {
     };
     let main_path = m.func(main).map(|f| f.path.clone()).unwrap_or_default();
     let limits = Limits { max_steps: 200_000_000, ..Limits::default() };
-    let want = match interp::run(m, &main_path, target, &[], &[], limits) {
+    let want = match interp::run(out.for_interp().unwrap_or(m), &main_path, target, &[], &[], limits) {
         Ok(r) => r.ran,
         Err(e) => {
             println!("interp-error {e:?}");

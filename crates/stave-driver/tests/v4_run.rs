@@ -921,7 +921,7 @@ fn dispatch_v4_arm() {
     o.target = Some(triple("x86_64-linux"));
     let checked = pipeline::run(&src, &Library::in_dir(&repo()), &o).unwrap();
     assert!(!checked.has_errors(), "{:?}", checked.diagnostics);
-    let m = checked.module.as_ref().unwrap();
+    let m = checked.for_interp().unwrap();
     let r = interp::run(m, "main.main", triple("x86_64-linux"), &[], &[], Limits::default()).unwrap().ran;
     assert_eq!((r.exit, String::from_utf8_lossy(&r.stdout).into_owned()), (0, want.clone()), "interpreter");
 
@@ -1007,7 +1007,7 @@ fn casts_v4() {
     o.target = Some(v4);
     let checked = pipeline::run(&src, &Library::in_dir(&repo()), &o).unwrap();
     assert!(!checked.has_errors(), "{:?}", checked.diagnostics);
-    let m = checked.module.as_ref().unwrap();
+    let m = checked.for_interp().unwrap();
     let r = interp::run(m, "main.main", v4, &[], &[], Limits::default()).unwrap().ran;
     let want = String::from_utf8_lossy(&r.stdout).into_owned();
     assert_eq!(r.exit, 0, "interpreter:\n{want}");
@@ -1148,7 +1148,7 @@ fn k_ops_match_scalar() {
     o.target = Some(v4);
     let checked = pipeline::run(&src, &Library::in_dir(&repo()), &o).unwrap();
     assert!(!checked.has_errors(), "{:?}", checked.diagnostics);
-    let m = checked.module.as_ref().unwrap();
+    let m = checked.for_interp().unwrap();
     let r = interp::run(m, "main.main", v4, &[], &[], Limits::default()).unwrap().ran;
     let want = String::from_utf8_lossy(&r.stdout).into_owned();
     assert_eq!(r.exit, 0, "interpreter: {want}");

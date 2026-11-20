@@ -1,0 +1,9 @@
+//~ BORROWCHECK write-under-shared 7 6
+// A write of a local under a `&` that is read after it.
+fn main() -> i32 {
+    let mut x: u32 = 1u32;
+    let r: &u32 = &x;
+    x = 2u32;
+    if *r == 2u32 { return 1; }
+    return 0;
+}
