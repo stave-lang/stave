@@ -930,7 +930,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0107",
         severity: Severity::Error,
         area: "resolve",
-        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`, and so is `src/std.cell.stv`), at the module's first token",
+        rule: "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`), at the module's first token; case `dotted`: a module of any package from a file or directory name with a dot (`src/a.b.stv`, `src/c.d/e.stv`): no import can name it and its path text is another module's (`a.b`, or a built-in one for `src/std.cell.stv`), at the module's first token; it takes the place of case `builtin`",
         retired: false,
         located: true,
         holes: &[
@@ -959,6 +959,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "rename the directory or file so the module path does not start with `{name}`: compiler-known items come from the built-in packages only",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "dotted",
+                message: "module `{module}` of package `{package}` comes from a name with a dot, `{name}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no import can name this module" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "rename `{name}` without the dot: a module path's segments are file and directory names, `src/a/b.stv` is `a.b`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

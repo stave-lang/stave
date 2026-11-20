@@ -618,23 +618,29 @@ impl Program {
             .filter(|p| p.kind == PackageKind::Builtin)
             .map(|p| p.name.as_str())
             .collect();
+        // E0107 case `dotted`: a file or directory name with a dot (`src/a.b.stv`) makes a module
+        // no import can name, whose path text is another module's (`src/a/b.stv`, or a built-in
+        // one), which lookups by path text would take for it.
         for (i, m) in mods.iter().enumerate() {
             let rp = &loaded.packages[pending[i].pf.package];
-            let Some(&first) = m.path.first() else { continue };
-            // A file stem may hold dots (`src/runtime.panic.stv`): its path text then starts
-            // like the built-in module's.
-            let head = strings.get(first).split('.').next().unwrap_or_default();
-            if rp.kind == PackageKind::Builtin || !builtin_roots.contains(&head) {
-                continue;
-            }
+            let dotted = m.rel.iter().map(|&s| strings.get(s)).find(|s| s.contains('.'));
+            let (case, name) = match (dotted, m.path.first()) {
+                (Some(seg), _) => ("dotted", seg),
+                (None, Some(&first))
+                    if rp.kind != PackageKind::Builtin && builtin_roots.contains(&strings.get(first)) =>
+                {
+                    ("builtin", strings.get(first))
+                }
+                _ => continue,
+            };
             let f = &files[i];
             let at = if f.parsed.tokens.is_empty() {
                 Span::new(f.id, 0, 0)
             } else {
                 scan::tok_span(f.id, &f.bytes, &f.parsed.tokens, 0)
             };
-            let holes = [("module", m.path_text.as_str()), ("package", rp.name.as_str()), ("name", head)];
-            diags.extend(mk("E0107", Some("builtin"), &holes, at, &[]));
+            let holes = [("module", m.path_text.as_str()), ("package", rp.name.as_str()), ("name", name)];
+            diags.extend(mk("E0107", Some(case), &holes, at, &[]));
         }
         let mut morder: Vec<usize> = (0..mods.len()).collect();
         morder.sort_by(|&a, &b| {
