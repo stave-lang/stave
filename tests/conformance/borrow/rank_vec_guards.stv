@@ -1,0 +1,42 @@
+//~ CHECK-ONLY
+// A guard moved into a `vec.Vec` is still held while the vec lives: the vec's elements are
+// owned through its buffer pointer, so a lock taken meanwhile must rank above it, also when a
+// storing fn pushed the guard. A vec declared after the lock call holds nothing at that call.
+import std.sync;
+import std.vec;
+
+fn lower(lo: &sync.Mutex<u32, 1>, hi: &sync.Mutex<u32, 2>) {
+    let g = hi.lock();
+    let mut gs: vec.Vec<sync.MutexGuard<u32, 2>> = vec.Vec::<sync.MutexGuard<u32, 2>>.new();
+    gs.push(g);
+    let g0 = lo.lock(); //~ ERROR E1405
+}
+
+fn twice(m: &sync.Mutex<u32, 2>) {
+    let g = m.lock();
+    let mut gs: vec.Vec<sync.MutexGuard<u32, 2>> = vec.Vec::<sync.MutexGuard<u32, 2>>.new();
+    gs.push(g);
+    let h = m.lock(); //~ ERROR E1405
+}
+
+fn hold(gs: &mut vec.Vec<sync.MutexGuard<u32, 2>> from g, g: sync.MutexGuard<u32, 2>) {
+    gs.push(g);
+}
+
+fn stored(lo: &sync.Mutex<u32, 1>, hi: &sync.Mutex<u32, 2>) {
+    let g = hi.lock();
+    let mut gs: vec.Vec<sync.MutexGuard<u32, 2>> = vec.Vec::<sync.MutexGuard<u32, 2>>.new();
+    hold(&mut gs, g);
+    let g0 = lo.lock(); //~ ERROR E1405
+}
+
+// fine: higher ranks after, and a lower one once the vec is gone
+fn ordered(lo: &sync.Mutex<u32, 1>, hi: &sync.Mutex<u32, 2>) {
+    {
+        let g = lo.lock();
+        let mut gs: vec.Vec<sync.MutexGuard<u32, 1>> = vec.Vec::<sync.MutexGuard<u32, 1>>.new();
+        gs.push(g);
+        let h = hi.lock();
+    }
+    let again = lo.lock();
+}

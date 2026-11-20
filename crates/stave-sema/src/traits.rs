@@ -63,7 +63,8 @@ pub fn scalar_layout(k: &TypeKind, sub: &mut dyn FnMut(TypeId) -> Option<(u64, u
         TypeKind::Never => (0, 1),
         // fat pointers to slices and `str` are handled by the callers: (16, 8)
         TypeKind::Ref { .. } | TypeKind::Ptr { .. } => (8, 8),
-        TypeKind::Fn { .. } => (8, 8),
+        // a fn value is `(code, environment)`, as the IR lays it out
+        TypeKind::Fn { .. } => (16, 8),
         TypeKind::Array { elem, len: ConstArg::Value(n) } => {
             let (s, a) = sub(*elem)?;
             (s.checked_mul(*n)?, a)

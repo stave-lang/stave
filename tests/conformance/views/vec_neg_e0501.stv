@@ -1,0 +1,184 @@
+//~ CHECK-ONLY
+// A borrow stored into a `vec.Vec` (push, extend, a write through `get_mut` or `as_mut_slice`,
+// `mem.swap`, `mem.replace`, a storing fn) lives as long as the vec: its data may not die or be
+// written while the vec, or a view read out of it (pop, index), is used. A vec of `&mut` holds
+// its borrow exclusively.
+import std.iter;
+import std.mem;
+import std.vec;
+
+fn scope_ends() -> u32 {
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    {
+        let a: u32 = 7;
+        v.push(&a);
+    } //~ ERROR E0501
+    return **v.get_ref(0);
+}
+
+fn loop_body() -> u32 {
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    for i in 0..3u32 {
+        let a: u32 = i;
+        v.push(&a);
+    } //~ ERROR E0501
+    return **v.get_ref(0);
+}
+
+fn written() -> u32 {
+    let mut a: u32 = 1;
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    v.push(&a);
+    a = 5; //~ ERROR E0501
+    return **v.get_ref(0);
+}
+
+fn swapped() -> u32 {
+    let a: u32 = 1;
+    let mut long: &u32 = &a;
+    {
+        let b: u32 = 2;
+        let mut short: &u32 = &b;
+        mem.swap(&mut long, &mut short);
+    } //~ ERROR E0501
+    return *long;
+}
+
+fn replaced() -> u32 {
+    let a: u32 = 1;
+    let mut long: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    long.push(&a);
+    {
+        let b: u32 = 2;
+        let mut short: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+        short.push(&b);
+        let old = mem.replace(&mut long, short);
+    } //~ ERROR E0501
+    return **long.get_ref(0);
+}
+
+fn popped() -> u32 {
+    let mut r: &u32 = &0u32;
+    {
+        let b: u32 = 2;
+        let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+        v.push(&b);
+        r = v.pop().unwrap();
+    } //~ ERROR E0501
+    return *r;
+}
+
+fn indexed() -> u32 {
+    let mut r: &u32 = &0u32;
+    {
+        let b: u32 = 2;
+        let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+        v.push(&b);
+        r = v.as_slice()[0];
+    } //~ ERROR E0501
+    return *r;
+}
+
+fn through_get_mut() -> u32 {
+    let a: u32 = 1;
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    v.push(&a);
+    {
+        let b: u32 = 2;
+        *v.get_mut(0) = &b;
+    } //~ ERROR E0501
+    return **v.get_ref(0);
+}
+
+fn through_slice() -> u32 {
+    let a: u32 = 1;
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    v.push(&a);
+    {
+        let b: u32 = 2;
+        let s = v.as_mut_slice();
+        s[0] = &b;
+    } //~ ERROR E0501
+    return **v.get_ref(0);
+}
+
+fn extended() -> u32 {
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    {
+        let b: u32 = 2;
+        let arr: [&u32; 1] = [&b];
+        v.extend_from_slice(&arr);
+    } //~ ERROR E0501
+    return **v.get_ref(0);
+}
+
+fn put<T: view>(v: &mut vec.Vec<T> from x, x: T) {
+    v.push(x);
+}
+
+fn generic_store() -> u32 {
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    {
+        let b: u32 = 2;
+        put(&mut v, &b);
+    } //~ ERROR E0501
+    return **v.get_ref(0);
+}
+
+fn nested() -> u32 {
+    let mut outer: vec.Vec<vec.Vec<&u32>> = vec.Vec::<vec.Vec<&u32>>.new();
+    {
+        let b: u32 = 2;
+        let mut inner: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+        inner.push(&b);
+        outer.push(inner);
+    } //~ ERROR E0501
+    return **outer.get_ref(0).get_ref(0);
+}
+
+fn mapped() -> u32 {
+    let xs: [u32; 2] = [1, 2];
+    let mut keep: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    {
+        let b: u32 = 40;
+        let mut m = iter.iter(&xs).map(fn(x: &u32) -> &u32 { return &b; });
+        keep.push(m.next().unwrap());
+    } //~ ERROR E0501
+    return **keep.get_ref(0);
+}
+
+fn closures() -> u32 {
+    let mut fs: vec.Vec<fn() -> u32> = vec.Vec::<fn() -> u32>.new();
+    {
+        let b: u32 = 2;
+        fs.push(fn() -> u32 { return b; });
+    } //~ ERROR E0501
+    let f = *fs.get_ref(0);
+    return f();
+}
+
+fn mut_twice() -> usize {
+    let mut a: u32 = 1;
+    let mut v: vec.Vec<&mut u32> = vec.Vec::<&mut u32>.new();
+    v.push(&mut a);
+    v.push(&mut a); //~ ERROR E0501
+    return v.len();
+}
+
+fn mut_and_use() -> u32 {
+    let mut a: u32 = 1;
+    let mut v: vec.Vec<&mut u32> = vec.Vec::<&mut u32>.new();
+    v.push(&mut a);
+    let r: &u32 = &a; //~ ERROR E0501
+    let p = v.pop().unwrap();
+    *p = 9;
+    return *r;
+}
+
+fn push_while_iterating(a: &u32) {
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    v.push(a);
+    for r in iter.iter(v.as_slice()) {
+        v.push(a); //~ ERROR E0501
+    }
+}

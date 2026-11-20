@@ -798,13 +798,8 @@ fix = { description = "declare `{adt}` as `view struct` or `view enum`, or give 
 
 [[diag]]
 code = "E0411"
-severity = "error"
-area = "kinds"
-rule = "view in a heap or container type (Box, Vec, Map, ...)"
-holes = { type = "type", container = "type" }
-message = "view type `{type}` cannot be stored in `{container}`"
-labels = [{ at = "primary", text = "view inside a heap or container type" }]
-fix = { description = "store an owned value in `{container}`, or keep the view `{type}` in a local" }
+rule = "retired: `vec.Vec` and the other std containers that may hold views take `T: view`; a std ADT without the bound is E0414 case `container`"
+retired = true
 
 [[diag]]
 code = "E0412"
@@ -844,7 +839,7 @@ fix = { description = "add the bound `{param}: view` to `{generic}`, or pass an 
 [diag.cases.container]
 message = "`{type}` is a view, and `{generic}` does not accept views: its parameter `{param}` has no `view` bound"
 labels = [{ at = "primary", text = "view type argument" }, { at = "param", text = "`{param}` declared here" }]
-fix = { description = "keep `{type}` in a local or in a container whose parameter is `view`-bounded (`vec.Vec`, `Box`, `Option`), or store an owned value" }
+fix = { description = "keep `{type}` in a local or in a container whose parameter is `view`-bounded (`vec.Vec`, `Option`), or store an owned value" }
 
 [diag.cases.drop]
 message = "`impl Drop for {type}` does not cover views: `{generic}` takes a view there, but parameter `{param}` of the impl has no `view` bound"

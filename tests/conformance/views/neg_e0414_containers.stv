@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// E0414 case `container`: a std ADT whose parameter has no `view` bound (`sync.Mutex`,
+// `cell.Cell`, `cell.UnsafeCell`) takes no view, also as a field type under a `T: view` param.
+// A user type without the bound is plain E0414. `vec.Vec` and `Option` take views.
+import std.cell;
+import std.sync;
+import std.vec;
+
+view struct Lexer { src: &str, pos: usize }
+
+struct Rc<T> { p: *mut T }
+
+fn mutex(m: &sync.Mutex<&u8, 1>) { } //~ ERROR E0414
+fn cells(c: &cell.Cell<&u8>) { } //~ ERROR E0414
+fn fns(c: &cell.UnsafeCell<fn()>) { } //~ ERROR E0414
+fn rc(r: Rc<&u8>) { } //~ ERROR E0414
+struct Shared<T: view> { c: cell.UnsafeCell<T> } //~ ERROR E0414
+
+// fine: `vec.Vec` and `Option` are views when their argument is
+fn refs(v: vec.Vec<&u8>) { }
+fn views(v: vec.Vec<Lexer>) { }
+fn fn_values(v: &vec.Vec<fn() -> u32>) { }
+fn opts(v: vec.Vec<Option<&u8>>) { }
+fn tuples(v: &vec.Vec<(u32, &u8)>) { }
+fn generic<T: view>(v: vec.Vec<T>) { }
+fn owned(v: vec.Vec<u8>, w: &sync.Mutex<u32, 1>) { }

@@ -1,0 +1,73 @@
+//~ CHECK-ONLY
+// A fn stores into a vec of views behind a `&mut` param only what the param's `from` clause
+// declares (`vec.Vec.push`, `mem.replace`, and `mem.swap` carry their clauses); a closure or a
+// spawned thread stores nothing new into a captured vec.
+import std.mem;
+import std.vec;
+
+fn put_generic<T: view>(v: &mut vec.Vec<T>, x: T) {
+    v.push(x); //~ ERROR E0513
+}
+
+fn put(v: &mut vec.Vec<&u32>, x: &u32) {
+    v.push(x); //~ ERROR E0513
+}
+
+fn exchange(dst: &mut &u32, x: &u32) {
+    let old = mem.replace(dst, x); //~ ERROR E0513
+}
+
+fn swap(a: &mut vec.Vec<&u32>, b: &mut vec.Vec<&u32>) {
+    mem.swap(a, b); //~ ERROR E0513
+    //~^ ERROR E0513
+}
+
+view struct Bag { items: vec.Vec<&u32> }
+
+impl Bag {
+    fn add(&mut self, x: &u32) {
+        self.items.push(x); //~ ERROR E0513
+    }
+}
+
+struct Stack<T: view> { items: vec.Vec<T> }
+
+impl<T: view> Stack<T> {
+    fn add(&mut self, x: T) {
+        self.items.push(x); //~ ERROR E0513
+    }
+}
+
+fn closure_local(a: &u32) {
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    v.push(a);
+    let f = fn() {
+        let z: u32 = 5;
+        v.push(&z); //~ ERROR E0513
+    };
+    f();
+}
+
+fn spawned(a: &u32) {
+    let mut v: vec.Vec<&u32> = vec.Vec::<&u32>.new();
+    v.push(a);
+    scope {
+        spawn {
+            let z: u32 = 9;
+            v.push(&z); //~ ERROR E0513
+        }
+    }
+}
+
+// fine: the clauses declare the stores
+fn put_ok<T: view>(v: &mut vec.Vec<T> from x, x: T) {
+    v.push(x);
+}
+
+fn take<T: view>(v: &mut vec.Vec<T>) -> Option<T> from copy v {
+    return v.pop();
+}
+
+fn exchange_ok(dst: &mut &u32 from x, x: &u32) -> &u32 from copy dst {
+    return mem.replace(dst, x);
+}
