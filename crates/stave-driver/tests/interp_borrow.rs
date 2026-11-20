@@ -118,7 +118,8 @@ fn verdict(p: &Path, target: Triple) -> Verdict {
     let rejected: Vec<&'static str> = errors().map(|d| d.code()).filter(|c| borrowck(c)).collect();
     let other: Vec<&'static str> = errors().map(|d| d.code()).filter(|c| !borrowck(c)).collect();
     let Some(m) = out.module.as_ref().filter(|_| other.is_empty()) else {
-        let why = format!("not lowered: errors {other:?}, failure {:?}", out.failure.as_ref().map(|f| f.stage()));
+        let why =
+            format!("not lowered: errors {other:?}, failure {:?}", out.failure.as_ref().map(|f| f.stage()));
         return Verdict { rejected, stopped: Some(why), ran: Ok(0) };
     };
     let lim = Limits { check: true, borrow: true, max_steps: 200_000_000, ..Limits::default() };
