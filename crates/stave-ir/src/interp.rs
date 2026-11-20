@@ -195,7 +195,7 @@ impl BorrowReport {
         format!(
             "borrow violation [{}] {}: {:?} of bytes {}..{} of allocation {} through a {:?} {:?} tag\n  at {}\n  cause ({:?}) at {}\n  tag made at {}",
             r.class.name(),
-            r.event.rule(),
+            r.rule(),
             r.event,
             r.lo,
             r.hi,
@@ -244,9 +244,12 @@ impl Borrows {
         addr.checked_sub(base).map(|off| (id, off))
     }
 
-    /// Allocation `id` ends (M3): every tag of it is `Dead`, and no word in it holds a tag.
+    /// Allocation `id` ends (M3): every tag of it is `Dead`, and no word in it holds a tag. An
+    /// end under a protected tag (M23) leaves its report in `report`.
     fn end_alloc(&mut self, mem: &Memory, id: u32, at: Ev) {
-        self.tracker.end_alloc(id, at);
+        if let Err(r) = self.tracker.end_alloc(id, at) {
+            self.report.get_or_insert(r);
+        }
         if let Some((base, size, _)) = mem.alloc_of(id) {
             let gone: Vec<u64> =
                 self.shadow.range(base..base.saturating_add(size)).map(|(&a, _)| a).collect();
@@ -352,6 +355,8 @@ struct Frame {
     pc: u32,
     mark: usize,
     dest: Option<Value>,
+    /// Borrow tracking: the tags the call protects (M23).
+    guards: Vec<Tag>,
 }
 
 enum Step {
@@ -671,11 +676,64 @@ impl<'m, H: Host> Interp<'m, H> {
         self.cls.get(t.index()).copied().unwrap_or(Cls::Other)
     }
 
-    fn push_frame(&mut self, frames: &mut Vec<Frame>, f: FuncId, args: Vec<Val>) -> R<()> {
-        let func = self.m.func(f).ok_or(InterpError::UnknownFunc(f))?;
+    /// The tags of the reference words of `v`, a value of type `t`, found by the type: of an
+    /// enum the live variant; not behind a pointer, not in a fn value.
+    fn ref_tags(&self, t: TypeId, v: &Val, out: &mut Vec<Tag>, depth: usize) -> R<()> {
+        if depth > MAX_TYPE_DEPTH {
+            return Err(InterpError::Unsupported("type nesting too deep".into()));
+        }
+        match self.m.types.key(t) {
+            Some(TypeKey::Ref { .. }) => {
+                if let Some((_, tag)) = v.word().filter(|w| w.1 != ROOT) {
+                    out.push(tag);
+                }
+                return Ok(());
+            }
+            Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
+            _ => return Ok(()),
+        }
+        let Val::Agg(vs) = v else { return Ok(()) };
+        match &self.layout(t)?.shape {
+            Shape::Fields(fs) => {
+                for (&(_, ft), fv) in fs.iter().zip(vs.iter()) {
+                    self.ref_tags(ft, fv, out, depth + 1)?;
+                }
+            }
+            Shape::Array { elem, .. } => {
+                for fv in vs.iter() {
+                    self.ref_tags(*elem, fv, out, depth + 1)?;
+                }
+            }
+            Shape::Enum(vars) => {
+                let live = vs.first().and_then(Val::bits).and_then(|k| vars.get(k as usize));
+                for (&(_, ft), fv) in live.into_iter().flatten().zip(vs.iter().skip(1)) {
+                    self.ref_tags(ft, fv, out, depth + 1)?;
+                }
+            }
+            Shape::Scalar | Shape::Fat | Shape::Bytes => {}
+        }
+        Ok(())
+    }
+
+    /// Enters `f`. Borrow tracking: the call at `at` protects the references it passes until
+    /// it returns (M23).
+    fn push_frame(&mut self, frames: &mut Vec<Frame>, f: FuncId, args: Vec<Val>, at: Ev) -> R<()> {
+        let m = self.m;
+        let func = m.func(f).ok_or(InterpError::UnknownFunc(f))?;
         let body = func.body.as_ref().ok_or(InterpError::NoBody(f))?;
         if args.len() != func.params.len() {
             return Err(InterpError::ArgCount { func: f, got: args.len(), want: func.params.len() });
+        }
+        let mut guards = Vec::new();
+        if self.bt.is_some() {
+            for (&t, a) in func.params.iter().zip(&args) {
+                self.ref_tags(t, a, &mut guards, 0)?;
+            }
+        }
+        if let Some(bt) = &mut self.bt {
+            for &g in &guards {
+                bt.tracker.protect(g, at);
+            }
         }
         let mut regs = vec![Val::S(0); body.values.len()];
         for (p, a) in body.params(Block(0)).iter().zip(args) {
@@ -683,15 +741,20 @@ impl<'m, H: Host> Interp<'m, H> {
                 *r = a;
             }
         }
-        frames.push(Frame { func: f, regs, block: 0, pc: 0, mark: self.mem.stack_mark(), dest: None });
+        let mark = self.mem.stack_mark();
+        frames.push(Frame { func: f, regs, block: 0, pc: 0, mark, dest: None, guards });
         Ok(())
     }
 
     /// Runs `entry` with `args` to completion.
     pub fn run(&mut self, entry: FuncId, args: Vec<Val>) -> R<Outcome> {
         let m = self.m;
+        if let Some(bt) = &mut self.bt {
+            // the frames of a run that ended in a trap protect nothing
+            bt.tracker.unprotect_all();
+        }
         let mut frames: Vec<Frame> = Vec::new();
-        self.push_frame(&mut frames, entry, args)?;
+        self.push_frame(&mut frames, entry, args, NO_EV)?;
         loop {
             if let Some(bt) = &mut self.bt
                 && bt.tracker.due()
@@ -743,10 +806,16 @@ impl<'m, H: Host> Interp<'m, H> {
                         };
                         let done = frames.pop().ok_or(malformed("frame"))?;
                         if let Some(bt) = &mut self.bt {
+                            for &g in &done.guards {
+                                bt.tracker.unprotect(g);
+                            }
                             // the frame's locals and temporaries end (M13)
                             let at = ev(fid, blk.insts.start + done.pc.saturating_sub(1));
                             for id in self.mem.slots_since(done.mark) {
                                 bt.end_alloc(&self.mem, id, at);
+                            }
+                            if bt.report.is_some() {
+                                return self.failed(malformed("borrow violation"), &frames);
                             }
                         }
                         self.mem.stack_release(done.mark);
@@ -774,6 +843,9 @@ impl<'m, H: Host> Interp<'m, H> {
                     if self.alloc_fns.is_some()
                         && let Some(res) = self.alloc_call(f, &args, &frames)
                     {
+                        if self.bt.as_ref().is_some_and(|bt| bt.report.is_some()) {
+                            return self.failed(malformed("borrow violation"), &frames);
+                        }
                         let v = match res {
                             Ok(v) => v,
                             Err(r) => return Ok(Outcome::MemError(r)),
@@ -795,7 +867,7 @@ impl<'m, H: Host> Interp<'m, H> {
                             func: fid,
                         }));
                     }
-                    self.push_frame(&mut frames, f, args)?;
+                    self.push_frame(&mut frames, f, args, ev(fid, inst))?;
                 }
                 Some(Step::Trap(kind)) => {
                     return Ok(Outcome::Trap(Trap { kind, site: site(inst), func: fid }));
@@ -1192,11 +1264,17 @@ impl<'m, H: Host> Interp<'m, H> {
         };
         let out = carried.unwrap_or(out);
         let Some(&mark) = res.and_then(|v| bt.marks.get(&(f.0, v.0))) else { return Ok(out) };
-        let Some((addr, parent)) = out.word() else { return Ok(out) };
-        // the place the reference names: `n` values of type `elem` (no type: bytes)
-        let inner =
-            res.and_then(|v| body.value_ty(v)).and_then(|t| self.pointee.get(t.index()).copied().flatten());
-        let (elem, n) = match (inner.and_then(|t| self.m.types.key(t)), &out) {
+        let Some(rt) = res.and_then(|v| body.value_ty(v)) else { return Ok(out) };
+        self.borrow_word(rt, out, mark.mutable, ev(f, i))
+    }
+
+    /// M4: the reference `v` of type `rt` with a new tag, a child of the tag it carries, for
+    /// the place its address names: the pointee of `rt`, of a fat reference its elements.
+    fn borrow_word(&mut self, rt: TypeId, v: Val, mutable: bool, at: Ev) -> R<Val> {
+        let Some((addr, parent)) = v.word() else { return Ok(v) };
+        // the place: `n` values of type `elem` (no type: bytes)
+        let inner = self.pointee.get(rt.index()).copied().flatten();
+        let (elem, n) = match (inner.and_then(|t| self.m.types.key(t)), &v) {
             (Some(TypeKey::Slice { elem, .. }), Val::Pair(_, n) | Val::PairT(_, n, _)) => (Some(*elem), *n),
             (_, Val::Pair(_, n) | Val::PairT(_, n, _)) => (None, *n),
             _ => (inner, 1),
@@ -1206,25 +1284,57 @@ impl<'m, H: Host> Interp<'m, H> {
             None => 1,
         };
         let one = match elem {
-            Some(t) if !mark.mutable => self.cells(t)?,
+            Some(t) if !mutable => self.cells(t)?,
             _ => Rc::from(Vec::new()),
         };
-        let Some(bt) = &mut self.bt else { return Ok(out) };
-        let Some((id, off)) = bt.locate(&self.mem, addr) else { return Ok(out) };
+        let Some(bt) = &mut self.bt else { return Ok(v) };
+        let Some((id, off)) = bt.locate(&self.mem, addr) else { return Ok(v) };
         if bt.tracker.exhausted() {
             return Err(InterpError::Unsupported("borrow tracking: every tag is used up".into()));
         }
         let mut cells = Vec::new();
         repeat_ranges(&mut cells, &one, off, unit, n);
-        let kind = if mark.mutable { Kind::Mut } else { Kind::Shared };
+        let kind = if mutable { Kind::Mut } else { Kind::Shared };
         let bytes = off..off.saturating_add(n.saturating_mul(unit));
-        match bt.tracker.borrow(id, parent, kind, bytes, &cells, ev(f, i)) {
-            Ok(tag) => Ok(match out {
+        match bt.tracker.borrow(id, parent, kind, bytes, &cells, at) {
+            Ok(tag) => Ok(match v {
                 Val::Pair(a, n) | Val::PairT(a, n, _) => Val::PairT(a, n, tag),
                 _ => Val::T(addr, tag),
             }),
             Err(r) => Err(self.violation(r)),
         }
+    }
+
+    /// M20: a value of type `t` read through a raw pointer, with a new tag for each reference
+    /// in it (found by the type: of an enum the live variant), a child of the tag stored there.
+    fn reborrow_refs(&mut self, t: TypeId, v: Val, at: Ev, depth: usize) -> R<Val> {
+        if depth > MAX_TYPE_DEPTH {
+            return Err(InterpError::Unsupported("type nesting too deep".into()));
+        }
+        let types = &self.m.types;
+        match types.key(t) {
+            Some(&TypeKey::Ref { mutable, .. }) => return self.borrow_word(t, v, mutable, at),
+            Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
+            _ => return Ok(v),
+        }
+        let Val::Agg(vs) = &v else { return Ok(v) };
+        let parts: Vec<Option<TypeId>> = match &self.layout(t)?.shape {
+            Shape::Fields(fs) => fs.iter().map(|f| Some(f.1)).collect(),
+            Shape::Array { elem, .. } => vec![Some(*elem); vs.len()],
+            Shape::Enum(vars) => {
+                let live = vs.first().and_then(Val::bits).and_then(|k| vars.get(k as usize));
+                std::iter::once(None).chain(live.into_iter().flatten().map(|f| Some(f.1))).collect()
+            }
+            Shape::Scalar | Shape::Fat | Shape::Bytes => return Ok(v),
+        };
+        let mut out = Vec::with_capacity(vs.len());
+        for (k, fv) in vs.iter().enumerate() {
+            out.push(match parts.get(k).copied().flatten() {
+                Some(ft) => self.reborrow_refs(ft, fv.clone(), at, depth + 1)?,
+                None => fv.clone(),
+            });
+        }
+        Ok(Val::agg(out))
     }
 
     fn set(regs: &mut [Val], body: &Body, i: u32, v: Val) {
@@ -1448,7 +1558,14 @@ impl<'m, H: Host> Interp<'m, H> {
                     let n = self.layout(t)?.size;
                     self.track(Self::tag_of(regs, arg(0)?), a, n, false, fid, i)?;
                 }
-                self.load_val(t, a, 0, fid, site)?
+                let v = self.load_val(t, a, 0, fid, site)?;
+                let raw = |p: Operand| match p {
+                    Operand::Value(p) => {
+                        matches!(body.value_ty(p).and_then(|t| m.types.key(t)), Some(TypeKey::RawPtr { .. }))
+                    }
+                    _ => false,
+                };
+                if self.bt.is_some() && raw(arg(0)?) { self.reborrow_refs(t, v, ev(fid, i), 0)? } else { v }
             }
             // hints: no effect on the program's state
             Op::Prefetch(_) | Op::FenceStream => return Ok(Step::Next),

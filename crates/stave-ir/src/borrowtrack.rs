@@ -46,7 +46,8 @@ pub enum Use {
 }
 
 impl Use {
-    /// The rule the event falls under.
+    /// The rule the event falls under (a protection violation falls under M23,
+    /// [`Report::rule`]).
     pub fn rule(self) -> &'static str {
         match self {
             Use::Read => "M1",
@@ -65,6 +66,8 @@ pub enum Cause {
     Read,
     Write,
     End,
+    /// The tag is protected by a call that has not returned (M23): the cause is the call.
+    Call,
 }
 
 /// The report forms. [`Class::name`] is the stable, machine-readable spelling.
@@ -111,6 +114,13 @@ pub struct Report {
     pub made_at: Ev,
 }
 
+impl Report {
+    /// The rule the report is under.
+    pub fn rule(&self) -> &'static str {
+        if self.cause == Cause::Call { "M23" } else { self.event.rule() }
+    }
+}
+
 /// Permission of the bytes from the end of the run before (or the tag's first byte) to `hi`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Run {
@@ -135,6 +145,9 @@ struct Node {
     children: u32,
     /// `Tree::round` of the last event the node was on the path of.
     round: u32,
+    /// How many calls that have not returned protect the tag (M23), and the last of them.
+    guards: u32,
+    guard_at: Ev,
 }
 
 const NO_PARENT: u32 = u32::MAX;
@@ -229,6 +242,8 @@ struct Tree {
     kept: u32,
     round: u32,
     ended: bool,
+    /// The nodes a call protects.
+    guarded: Vec<u32>,
 }
 
 impl Tree {
@@ -320,6 +335,62 @@ impl Tree {
         }
     }
 
+    /// Begins an event through node `n`: `n` and its ancestors are its path.
+    fn enter(&mut self, n: u32) {
+        self.round = self.round.wrapping_add(1);
+        let mut cur = n;
+        while cur != 0 {
+            let node = &mut self.nodes[cur as usize];
+            node.round = self.round;
+            cur = node.parent;
+        }
+    }
+
+    /// M23: the report of event `ev` on the bytes `lo..hi` through node `n`, if it is foreign
+    /// for a protected tag and would make a byte of it `Dead`, or reads a byte a protected
+    /// `&mut` may still write.
+    fn guard(&mut self, alloc: u32, n: u32, ev: Use, lo: u64, hi: u64, at: Ev) -> Option<Box<Report>> {
+        if self.guarded.is_empty() {
+            return None;
+        }
+        self.enter(n);
+        for &g in &self.guarded {
+            let node = &self.nodes[g as usize];
+            if node.round == self.round {
+                continue;
+            }
+            let bad = |p: Perm| match ev {
+                Use::Read => node.kind == Kind::Mut && matches!(p, Perm::Reserved | Perm::Active),
+                Use::Write => matches!(p, Perm::Reserved | Perm::Active | Perm::Frozen),
+                Use::End => p != Perm::Dead,
+                Use::Borrow => false,
+            };
+            if let Some((offset, run)) = node.find(lo, hi, bad) {
+                let class = match (ev, node.kind) {
+                    (Use::End, _) => Class::UseAfterReferent,
+                    (_, Kind::Mut) => Class::TwoExclusive,
+                    _ => Class::WriteUnderShared,
+                };
+                return Some(Box::new(Report {
+                    class,
+                    event: ev,
+                    alloc,
+                    offset,
+                    lo,
+                    hi,
+                    tag: node.tag,
+                    kind: node.kind,
+                    perm: run.perm,
+                    at,
+                    cause: Cause::Call,
+                    cause_at: node.guard_at,
+                    made_at: node.made_at,
+                }));
+            }
+        }
+        None
+    }
+
     /// The permission changes of an allowed event on the bytes `lo..hi` through node `n`: a
     /// child event for `n` and its ancestors, a foreign one for every other tag.
     fn apply(&mut self, n: u32, ev: Use, lo: u64, hi: u64, at: Ev, hits: &mut Vec<u32>) {
@@ -329,21 +400,13 @@ impl Tree {
             Use::End => LIVE,
             Use::Borrow => return,
         };
-        self.round = self.round.wrapping_add(1);
+        self.enter(n);
         let mut cur = n;
-        while cur != 0 {
+        while cur != 0 && ev == Use::Write {
             let node = &mut self.nodes[cur as usize];
-            node.round = self.round;
             let up = node.parent;
-            if ev == Use::Write
-                && node.update(
-                    lo,
-                    hi,
-                    Cause::Write,
-                    at,
-                    |p| if p == Perm::Reserved { Perm::Active } else { p },
-                )
-            {
+            let active = |p| if p == Perm::Reserved { Perm::Active } else { p };
+            if node.update(lo, hi, Cause::Write, at, active) {
                 self.relist(cur);
             }
             cur = up;
@@ -414,7 +477,8 @@ impl Tree {
             n = node.parent;
         }
         for &(n, a, b) in &pieces {
-            if let Some(r) = tree.check(alloc, n, ev, a, b, at) {
+            let r = tree.check(alloc, n, ev, a, b, at).or_else(|| tree.guard(alloc, n, ev, a, b, at));
+            if let Some(r) = r {
                 return Err(r);
             }
         }
@@ -493,6 +557,8 @@ impl Tracker {
             listed: 0,
             children: 0,
             round: 0,
+            guards: 0,
+            guard_at: NO_EV,
         };
         self.ended.remove(&alloc);
         self.tagged.remove(&alloc);
@@ -583,6 +649,8 @@ impl Tracker {
             listed: 0,
             children: 0,
             round: 0,
+            guards: 0,
+            guard_at: NO_EV,
         };
         if kind == Kind::Shared {
             for &(a, b) in cells {
@@ -644,14 +712,18 @@ impl Tracker {
         self.event(alloc, tag, Use::End, lo, hi, at)
     }
 
-    /// The allocation ends: every tag of it is `Dead` on every byte, the root included.
-    pub fn end_alloc(&mut self, alloc: u32, at: Ev) {
-        let Some(tree) = self.trees.get_mut(&alloc) else { return };
+    /// The allocation ends: every tag of it is `Dead` on every byte, the root included. An end
+    /// under a protected tag that is not `Dead` yet is a violation (M23); the allocation ends
+    /// all the same.
+    pub fn end_alloc(&mut self, alloc: u32, at: Ev) -> Result<(), Box<Report>> {
+        let Some(tree) = self.trees.get_mut(&alloc) else { return Ok(()) };
         if tree.count == 0 {
             self.trees.remove(&alloc);
             self.ended.insert(alloc, at);
-            return;
+            return Ok(());
         }
+        let size = tree.size;
+        let report = tree.guard(alloc, 0, Use::End, 0, size, at);
         for n in tree.nodes.iter_mut().filter(|n| n.tag != FREE) {
             let (lo, hi) = (n.lo, n.hi);
             n.update(lo, hi, Cause::End, at, |_| Perm::Dead);
@@ -659,6 +731,39 @@ impl Tracker {
         }
         tree.sets = Default::default();
         tree.ended = true;
+        report.map_or(Ok(()), Err)
+    }
+
+    /// M23: a call protects `tag` from `at` until [`Tracker::unprotect`]. No effect on a root.
+    pub fn protect(&mut self, tag: Tag, at: Ev) {
+        let Some(&(a, i)) = self.tags.get(&tag) else { return };
+        let Some(tree) = self.trees.get_mut(&a) else { return };
+        let n = &mut tree.nodes[i as usize];
+        n.guards += 1;
+        n.guard_at = at;
+        if n.guards == 1 {
+            tree.guarded.push(i);
+        }
+    }
+
+    /// No call protects a tag any more.
+    pub fn unprotect_all(&mut self) {
+        for tree in self.trees.values_mut() {
+            for g in std::mem::take(&mut tree.guarded) {
+                tree.nodes[g as usize].guards = 0;
+            }
+        }
+    }
+
+    /// The call that protected `tag` returned.
+    pub fn unprotect(&mut self, tag: Tag) {
+        let Some(&(a, i)) = self.tags.get(&tag) else { return };
+        let Some(tree) = self.trees.get_mut(&a) else { return };
+        let n = &mut tree.nodes[i as usize];
+        n.guards = n.guards.saturating_sub(1);
+        if n.guards == 0 {
+            tree.guarded.retain(|&g| g != i);
+        }
     }
 
     /// The permission of `tag` at byte `offset` of `alloc`, if the byte is in its range.
@@ -688,7 +793,7 @@ impl Tracker {
         };
         for a in allocs {
             let Some(tree) = self.trees.get_mut(&a) else { continue };
-            let gone = |n: &Node| n.tag != FREE && n.children == 0 && !held.contains(&n.tag);
+            let gone = |n: &Node| n.tag != FREE && n.children == 0 && n.guards == 0 && !held.contains(&n.tag);
             let mut work: Vec<u32> =
                 (1..tree.nodes.len() as u32).filter(|&i| gone(&tree.nodes[i as usize])).collect();
             while let Some(i) = work.pop() {
@@ -745,7 +850,8 @@ impl Tracker {
         }
         let mut hits = std::mem::take(&mut self.hits);
         let r = if tree.nodes[from as usize].holds(lo, hi) {
-            match tree.check(alloc, from, ev, lo, hi, at) {
+            let r = tree.check(alloc, from, ev, lo, hi, at);
+            match r.or_else(|| tree.guard(alloc, from, ev, lo, hi, at)) {
                 Some(r) => Err(r),
                 None => {
                     if !tree.ended {
@@ -921,7 +1027,7 @@ mod tests {
     fn end_of_the_referent() {
         let mut t = local(4);
         let r = shared(&mut t, ROOT, 0, 4, 2);
-        t.end_alloc(X, 3);
+        t.end_alloc(X, 3).unwrap();
         let e = t.read(X, r, 0, 4, 4).unwrap_err();
         assert_eq!((e.class, e.cause, e.cause_at), (Class::UseAfterReferent, Cause::End, 3));
         let e = t.read(X, ROOT, 0, 4, 5).unwrap_err();
@@ -1042,7 +1148,7 @@ mod tests {
     fn an_ended_allocation_reports_after_its_tags_are_freed() {
         let mut t = local(4);
         let r = shared(&mut t, ROOT, 0, 4, 2);
-        t.end_alloc(X, 3);
+        t.end_alloc(X, 3).unwrap();
         let e = t.read(X, r, 0, 4, 4).unwrap_err();
         assert_eq!((e.class, e.tag, e.cause_at, e.made_at), (Class::UseAfterReferent, r, 3, 2));
         t.collect(&HashSet::new(), 0);
@@ -1057,7 +1163,7 @@ mod tests {
         assert_eq!((e.class, e.event), (Class::UseAfterReferent, Use::Borrow));
         // an allocation that ended without a tag
         let mut t = local(4);
-        t.end_alloc(X, 3);
+        t.end_alloc(X, 3).unwrap();
         assert_eq!(t.write(X, ROOT, 0, 4, 4).unwrap_err().cause_at, 3);
     }
 
@@ -1097,5 +1203,69 @@ mod tests {
         t.end(X, ROOT, 0, 4000, 7).unwrap();
         assert!(each.iter().all(|&e| t.perm(X, e, 0).is_none_or(|p| p == Perm::Dead)));
         assert_eq!(t.read(X, each[999], 3996, 4000, 8).unwrap_err().class, Class::UseAfterReferent);
+    }
+
+    #[test]
+    fn a_protected_tag_may_not_die() {
+        // a `&` param: a foreign write under it is a violation at the write
+        let mut t = local(4);
+        let r = shared(&mut t, ROOT, 0, 4, 2);
+        t.protect(r, 3);
+        let e = t.write(X, ROOT, 0, 4, 4).unwrap_err();
+        assert_eq!(
+            (e.class, e.tag, e.cause, e.cause_at, e.rule()),
+            (Class::WriteUnderShared, r, Cause::Call, 3, "M23")
+        );
+        // after the return the write is allowed, and the tag is Dead
+        let mut t = local(4);
+        let r = shared(&mut t, ROOT, 0, 4, 2);
+        t.protect(r, 3);
+        t.read(X, ROOT, 0, 4, 4).unwrap();
+        t.unprotect(r);
+        t.write(X, ROOT, 0, 4, 5).unwrap();
+        assert_eq!(t.perm(X, r, 0), Some(Perm::Dead));
+    }
+
+    #[test]
+    fn a_protected_exclusive_tag_is_not_read_by_others() {
+        let mut t = local(4);
+        let m = excl(&mut t, ROOT, 0, 4, 2);
+        t.protect(m, 3);
+        // its own uses and those of its children are child accesses
+        let c = shared(&mut t, m, 0, 4, 4);
+        t.read(X, c, 0, 4, 5).unwrap();
+        t.write(X, m, 0, 4, 6).unwrap();
+        let e = t.read(X, ROOT, 0, 4, 7).unwrap_err();
+        assert_eq!(
+            (e.class, e.event, e.tag, e.cause_at, e.rule()),
+            (Class::TwoExclusive, Use::Read, m, 3, "M23")
+        );
+        // a `Reserved` one too
+        let mut t = local(8);
+        let m = excl(&mut t, ROOT, 0, 4, 2);
+        t.protect(m, 3);
+        t.read(X, ROOT, 4, 8, 4).unwrap();
+        assert_eq!(t.read(X, ROOT, 0, 4, 5).unwrap_err().cause, Cause::Call);
+    }
+
+    #[test]
+    fn the_end_of_an_allocation_under_a_protected_tag() {
+        let mut t = local(4);
+        let r = shared(&mut t, ROOT, 0, 4, 2);
+        t.protect(r, 3);
+        let e = t.end_alloc(X, 4).unwrap_err();
+        assert_eq!(
+            (e.class, e.event, e.tag, e.cause, e.cause_at),
+            (Class::UseAfterReferent, Use::End, r, Cause::Call, 3)
+        );
+        // a `Cell` tag is not made Dead by a write, but by an end
+        let mut t = local(4);
+        let c = t.borrow(X, ROOT, Kind::Shared, 0..4, &[(0, 4)], 2).unwrap();
+        t.protect(c, 3);
+        t.write(X, ROOT, 0, 4, 4).unwrap();
+        assert_eq!(t.end(X, ROOT, 0, 4, 5).unwrap_err().class, Class::UseAfterReferent);
+        // a protected tag is kept by a collection
+        t.collect(&HashSet::new(), 0);
+        assert_eq!(t.tags(), 1);
     }
 }

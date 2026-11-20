@@ -1,0 +1,11 @@
+//~ BORROWCHECK write-under-shared 9 8
+// An assignment whose new value borrows a field of the value it replaces.
+view struct Chain { v: u32, prev: &u32 }
+
+fn main() -> i32 {
+    let zero: u32 = 0u32;
+    let mut x = Chain.{ v: 1u32, prev: &zero };
+    x = Chain.{ v: 2u32, prev: &x.v };
+    if *x.prev == 2u32 { return 1; }
+    return 0;
+}

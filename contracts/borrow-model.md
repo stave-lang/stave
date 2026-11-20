@@ -564,9 +564,16 @@ it is not dumped, not compared with a golden, and not given to a backend.
 - **Sites.** An instruction without a site of its own has the site of the statement it belongs
   to, so both sites of a report are source lines.
 
-The table has no rows for the other events of the section above (moves, scope ends,
-temporaries, captures, call boundaries with their `from` clauses): the tracking mode does not
-see them, and reports none of the violations that need them.
+What the interpreter reads off the module without a row: a call protects the reference words of
+its arguments, found by the types of the params (M23); a load through a raw pointer gives each
+reference word of the loaded value a new tag (M20); the return of a frame ends its locals and
+temporaries, `free` and `try_realloc` end the block (M3).
+
+The table has no rows for moves, drops, the ends of blocks, the evaluations of temporaries,
+captures, and `from` clauses: the tracking mode does not see these events, and reports none of
+the violations that need them (M9, M10, M12, M13 at a block, M14, M18, M24). The store of a
+temporary's next value is a write like any other: a `&` of the value before is then `Dead` by
+a write, not by an end.
 
 ## Limits
 
