@@ -349,26 +349,55 @@ impl Memory {
         }
     }
 
-    /// Checking mode: copies `n` bytes and their initialisation from `src` to `dst`.
-    pub fn copy_raw(&mut self, dst: u64, src: u64, n: u64) -> Result<(), Fault> {
-        let fault = Fault { addr: src, len: n, write: false };
-        let Some(c) = &mut self.chk else { return Err(fault) };
+    /// Copies `n` bytes from `src` to `dst` as bytes, never as a typed value: in checking mode
+    /// each destination byte is initialised exactly when its source byte was, so an
+    /// uninitialised byte moves without an error. The source range is checked as a read and the
+    /// destination range as a write (bounds, liveness, the read-only data region). Ranges that
+    /// overlap are copied as if through a buffer.
+    pub fn copy(&mut self, dst: u64, src: u64, n: u64) -> Result<(), Fault> {
         if n == 0 {
             return Ok(());
         }
-        let (si, so) = c.check(Access::Read, src, n).ok_or(fault)?;
+        if self.chk.is_none() {
+            let bytes = self.read(src, n)?.to_vec();
+            return self.write(dst, &bytes);
+        }
+        let (bytes, init) = if src >> ID_SHIFT == 0 {
+            // the data region: initialised bytes
+            (self.read(src, n)?.to_vec(), None)
+        } else {
+            let fault = Fault { addr: src, len: n, write: false };
+            let c = self.chk.as_ref().ok_or(fault)?;
+            let (si, so) = c.check(Access::Read, src, n).ok_or(fault)?;
+            let s = c.allocs[si].as_ref().ok_or(fault)?;
+            let bytes = s.bytes.get(so as usize..(so + n) as usize).ok_or(fault)?.to_vec();
+            let init: Option<Vec<bool>> =
+                (!s.is_init(so, n)).then(|| (so..so + n).map(|k| s.is_init(k, 1)).collect());
+            (bytes, init)
+        };
+        if dst >> ID_SHIFT == 0 {
+            return self.write_checked(dst, &bytes);
+        }
+        let fault = Fault { addr: dst, len: n, write: true };
+        let c = self.chk.as_mut().ok_or(fault)?;
         let (di, doff) = c.check(Access::Write, dst, n).ok_or(fault)?;
-        let s = c.allocs[si].as_ref().ok_or(fault)?;
-        let bytes = s.bytes.get(so as usize..(so + n) as usize).ok_or(fault)?.to_vec();
-        let init: Vec<bool> = (so..so + n).map(|k| s.is_init(k, 1)).collect();
         let d = c.allocs[di].as_mut().ok_or(fault)?;
         d.bytes.get_mut(doff as usize..(doff + n) as usize).ok_or(fault)?.copy_from_slice(&bytes);
-        for (k, i) in init.into_iter().enumerate() {
-            if i {
-                d.set_init(doff + k as u64, 1);
-            }
+        match init {
+            None => d.set_init(doff, n),
+            Some(bits) => d.put_init(doff, &bits),
         }
         Ok(())
+    }
+
+    /// Checking mode: reports a copy of `n` bytes to `dst` whose source range overlaps the
+    /// destination (class `copy-overlap`).
+    pub fn fail_overlap(&self, dst: u64, n: u64) {
+        if let Some(c) = &self.chk {
+            let id = (dst >> ID_SHIFT) as usize;
+            let known = matches!(c.allocs.get(id), Some(Some(_)));
+            c.fail(Class::CopyOverlap, Access::Write, dst, n, known.then_some(id));
+        }
     }
 
     /// Checking mode: records where the allocation containing `addr` was made.

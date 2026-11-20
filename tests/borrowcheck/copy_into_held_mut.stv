@@ -1,0 +1,13 @@
+//~ BORROWCHECK two-exclusive 11 0
+// A byte copy is a write of its destination's bytes through the destination's tag: a `&mut`
+// of the same bytes made through a raw pointer before `copy_from` is Dead after it, and the
+// write through it reports (the cause is the copy, inside std).
+fn main() -> i32 {
+    let mut xs: [u32; 4] = [1u32, 2u32, 3u32, 4u32];
+    let ys: [u32; 4] = [5u32; 4];
+    let p = &mut xs as *mut [u32; 4];
+    let a: &mut [u32] = unsafe("deliberate: a holds the bytes the copy writes") &mut (*p)[0..4];
+    xs[0..4].copy_from(&ys[0..4]);
+    a[0] = 9u32;
+    return 0;
+}

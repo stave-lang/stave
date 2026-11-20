@@ -1,0 +1,14 @@
+//~ MEMCHECK copy-overlap 11
+// The `copy_bytes` intrinsic takes ranges that share no byte (`copy_from` gets them from a `&mut`
+// and a `&`, which safe code never makes overlap): two slices of one array made through a raw
+// pointer break that, and the checking mode stops at the copy.
+fn main() -> i32 {
+    let mut xs: [u32; 4] = [1u32, 2u32, 3u32, 4u32];
+    let p = &mut xs as *mut [u32; 4];
+    let q = p as *const [u32; 4];
+    let a: &mut [u32] = unsafe("deliberate: overlaps b") &mut (*p)[1..4];
+    let b: &[u32] = unsafe("deliberate: overlaps a") &(*q)[0..3];
+    a.copy_from(b);
+    if xs[3] == 3u32 { return 1; }
+    return 0;
+}

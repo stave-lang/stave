@@ -19,6 +19,10 @@ import runtime.panic;
 import std.core;
 import std.mem;
 
+extern "stave-intrinsic" {
+    fn copy_bytes(dst: *mut u8, src: *const u8, n: usize);
+}
+
 // The memory a `try_` method asked for is not available (std.vec, std.string, std.arena).
 pub struct AllocError {}
 
@@ -184,23 +188,28 @@ impl<T: view> Vec<T> {
     }
 }
 
+// A Copy T is copied by its bytes (`copy_bytes`), padding included.
 impl<T: Copy + view> Vec<T> {
     pub fn extend_from_slice(&mut self from copy xs, xs: &[T]) {
         self.reserve(xs.len());
-        for i in 0..xs.len() {
-            let slot = mem.add_mut(self.ptr, self.len);
-            unsafe("room for xs is reserved: slot is inside the buffer and uninitialized") { slot.write(xs[i]); }
-            self.len = self.len + 1;
+        let n = xs.len();
+        let d = mem.add_mut(self.ptr, self.len) as *mut u8;
+        let s = mem.slice_ptr(xs) as *const u8;
+        unsafe("room for n elements is reserved: d..d+n*size is spare capacity, which xs (a shared borrow while self is exclusive) does not reach; T is Copy") {
+            copy_bytes(d, s, n * mem.type_size::<T>());
         }
+        self.len = self.len + n;
     }
 
     pub fn try_extend_from_slice(&mut self from copy xs, xs: &[T]) -> Result<(), AllocError> {
         self.try_reserve(xs.len())?;
-        for i in 0..xs.len() {
-            let slot = mem.add_mut(self.ptr, self.len);
-            unsafe("room for xs is reserved: slot is inside the buffer and uninitialized") { slot.write(xs[i]); }
-            self.len = self.len + 1;
+        let n = xs.len();
+        let d = mem.add_mut(self.ptr, self.len) as *mut u8;
+        let s = mem.slice_ptr(xs) as *const u8;
+        unsafe("room for n elements is reserved: d..d+n*size is spare capacity, which xs (a shared borrow while self is exclusive) does not reach; T is Copy") {
+            copy_bytes(d, s, n * mem.type_size::<T>());
         }
+        self.len = self.len + n;
         return Result.Ok(());
     }
 }

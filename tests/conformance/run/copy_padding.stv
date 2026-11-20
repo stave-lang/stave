@@ -1,0 +1,83 @@
+//~ STDOUT copy_padding.stdout
+//~ EXIT 0
+// `copy_from` and `Vec.extend_from_slice` move the bytes of any Copy element, padding included:
+// natively through `std.slice.copy_raw` (the 128-bit loop below 1 KiB, the dispatch from 1 KiB
+// on), in the interpreter as the `copy_bytes` intrinsic. Slices of every length around the loop
+// steps, of ints, floats, and padded tuples and structs, at offsets that are not 16-aligned.
+import std.io;
+import std.vec;
+
+struct P { a: u8, b: u32, c: u16 }
+
+impl Copy for P {}
+
+struct Z { a: u32, z: [u64; 0] }
+
+impl Copy for Z {}
+
+const LENS: [usize; 12] = [0, 1, 15, 16, 17, 63, 64, 65, 1023, 1024, 1500, 2999];
+
+fn bytes() -> u64 {
+    let mut src: [u8; 3000] = [0; 3000];
+    for i in 0usize..3000 { src[i] = (i *% 7 +% 1) as% u8; }
+    let mut h: u64 = 0;
+    for k in 0usize..12 {
+        let n = LENS[k];
+        let mut dst: [u8; 3000] = [0; 3000];
+        (&mut dst[1..n + 1]).copy_from(&src[0..n]);
+        for i in 0usize..3000 { h = h *% 31 +% (dst[i] as u64); }
+    }
+    return h;
+}
+
+fn words() -> u64 {
+    let mut src: [u32; 800] = [0; 800];
+    for i in 0usize..800 { src[i] = (i as% u32) *% 2654435761; }
+    let mut fs: [f64; 400] = [0.0; 400];
+    for i in 0usize..400 { fs[i] = (i as~ f64) * 0.5; }
+    let mut h: u64 = 0;
+    for k in 0usize..8 {
+        let n = LENS[k];
+        let mut dst: [u32; 800] = [0; 800];
+        (&mut dst[3..n + 3]).copy_from(&src[0..n]);
+        for i in 0usize..800 { h = h *% 31 +% (dst[i] as u64); }
+        let m = if n > 399 then 399 else n;
+        let mut fd: [f64; 400] = [0.0; 400];
+        (&mut fd[1..m + 1]).copy_from(&fs[0..m]);
+        for i in 0usize..400 { h = h *% 31 +% (fd[i] as| u64); }
+    }
+    let mut long: [u32; 800] = [0; 800];
+    (&mut long[0..800]).copy_from(&src[0..800]);
+    for i in 0usize..800 { h = h *% 31 +% (long[i] as u64); }
+    return h;
+}
+
+fn padded() -> u64 {
+    let mut ts: [(u64, u32); 200] = [(0, 0); 200];
+    for i in 0usize..200 { ts[i] = ((i as u64) *% 1000003, (i as% u32) +% 7); }
+    let mut td: [(u64, u32); 200] = [(1, 1); 200];
+    (&mut td[5..200]).copy_from(&ts[0..195]);
+    let ps: [P; 90] = [P.{ a: 9, b: 70000, c: 513 }; 90];
+    let mut pd: [P; 90] = [P.{ a: 0, b: 0, c: 0 }; 90];
+    (&mut pd[0..90]).copy_from(&ps[0..90]);
+    let zs: [Z; 300] = [Z.{ a: 77, z: [0u64; 0] }; 300];
+    let mut zd: [Z; 300] = [Z.{ a: 0, z: [0u64; 0] }; 300];
+    (&mut zd[0..300]).copy_from(&zs[0..300]);
+    let mut v = vec.Vec::<(u64, u32)>.new();
+    v.extend_from_slice(&ts[0..17]);
+    v.extend_from_slice(&td[0..200]);
+    let mut h: u64 = 0;
+    let s = v.as_slice();
+    for i in 0..s.len() { h = h *% 31 +% s[i].0 +% (s[i].1 as u64); }
+    for i in 0usize..90 { h = h *% 31 +% (pd[i].a as u64) +% (pd[i].b as u64) +% (pd[i].c as u64); }
+    for i in 0usize..300 { h = h *% 31 +% (zd[i].a as u64); }
+    return h;
+}
+
+fn main() -> i32 {
+    let b = bytes();
+    let w = words();
+    let p = padded();
+    io.print(f"bytes {b}\nwords {w}\npadded {p}\n");
+    return 0;
+}

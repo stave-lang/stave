@@ -36,8 +36,8 @@ access* for every other tag of the allocation, the descendants of `a` included.
 **Tagged words.** A reference value carries its tag in its pointer word (the length word of a
 fat reference has none). The tag belongs to the 64-bit word, not to its type: a raw pointer or
 integer made from the word keeps it (M20). Memory keeps the tag of each stored word, and a load
-returns it. A view value (view struct, tuple, `Option<&T>`) is the words of its fields and has
-no tag of its own.
+returns it; a byte copy (`copy_bytes`, M20) moves it with the word. A view value (view struct,
+tuple, `Option<&T>`) is the words of its fields and has no tag of its own.
 
 **Permissions.** A tag has one permission per byte of its range.
 
@@ -351,7 +351,10 @@ fn widened() -> u32 {
   are accesses through that tag (M1, M2, M9); a byte outside the tag's range is accessed through
   the nearest ancestor whose range holds it. `&*p` and `&mut *p` are borrows (M4) through it. A
   value read through a raw pointer gets a new tag for each reference in it, a child of the tag
-  stored there. An untagged word, and a word whose tag belongs to another allocation, is used
+  stored there. The byte copy `copy_bytes(dst, src, n)` (intrinsics.md "Untyped copy") is a read
+  of `src..src+n` through the tag of `src`, then a write of `dst..dst+n` through the tag of
+  `dst`; it reads no value, so it makes no tag: each stored word it copies whole keeps its tag
+  at its new address, and a word of the destination it overwrites or cuts into loses its own. An untagged word, and a word whose tag belongs to another allocation, is used
   as the root of the allocation that holds its address. Nothing is suspended in `unsafe` code:
   M1 to M3 and M9 stay errors. What the model stops tracking is the pointer's type: a
   `*const T` made from a `&mut T` may write, and a `*mut T` made from a `&T` may not, outside
@@ -557,7 +560,8 @@ by-value use that is a move (M9), also of an SSA local; the begin and end of eac
 temporary (M13, M14); the capture references of each `fn.make` as a value of their own (M18);
 the `from` clauses of each fn (M24).
 `runtime.alloc.{try_alloc, try_realloc, free}` are primitive events. Everything else is read off
-the IR: `load`, `store`, `vec.*` memory ops, and intrinsics that take a pointer are M1 and M2;
+the IR: `load`, `store`, `vec.*` memory ops, and intrinsics that take a pointer are M1 and M2
+(`intrinsic.copy_bytes`: M1 on its source range, then M2 on its destination range);
 `addr.*` and casts keep the tag (M20). What the tracking mode gets of this list, and what it
 does without, is in "Side table".
 
