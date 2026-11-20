@@ -14,7 +14,7 @@ use crate::host::Host;
 use crate::ir::{ClauseKind, FuncId};
 use crate::layout::Shape;
 use crate::memcheck::{At, MemReport, Trace};
-use crate::types::{MAX_TYPE_DEPTH, TypeId, TypeKey};
+use crate::types::{TypeId, TypeKey};
 
 /// How many reference words one walk of a value looks at; a value with more is not judged.
 const MAX_WORDS: usize = 4096;
@@ -25,6 +25,9 @@ const MAX_WORDS: usize = 4096;
 pub(super) enum Src {
     Tag(Tag),
     Root(u32),
+    /// A fn value with an environment: its captures, which its type does not show. A word
+    /// that derives from no other source of a set with this one is not judged.
+    Open,
 }
 
 /// A reference word: where it points, its tag, how many pointees (a slice: its length), and
@@ -105,29 +108,49 @@ impl SignatureReport {
 impl<'m, H: Host> Interp<'m, H> {
     /// Whether a value of type `t` holds a reference word (not behind a pointer, not in a fn
     /// value).
-    fn holds_refs(&mut self, t: TypeId, depth: usize) -> bool {
-        if let Some(&r) = self.bt.as_ref().and_then(|bt| bt.refs.get(&t)) {
-            return r;
-        }
-        let r = match self.m.types.key(t) {
-            Some(TypeKey::Ref { .. }) => true,
-            Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. })
-                if depth < MAX_TYPE_DEPTH =>
-            {
-                let parts: Vec<TypeId> = match self.layout(t).map(|l| &l.shape) {
-                    Ok(Shape::Fields(fs)) => fs.iter().map(|f| f.1).collect(),
-                    Ok(Shape::Array { elem, .. }) => vec![*elem],
-                    Ok(Shape::Enum(vs)) => vs.iter().flatten().map(|f| f.1).collect(),
-                    _ => Vec::new(),
-                };
-                parts.into_iter().any(|p| self.holds_refs(p, depth + 1))
-            }
-            _ => false,
-        };
+    fn holds_refs(&mut self, t: TypeId) -> bool {
+        let r = self.refs_in(t);
         if let Some(bt) = &mut self.bt {
             bt.refs.insert(t, r);
         }
         r
+    }
+
+    /// [`Interp::holds_refs`] without keeping the answer. The types are walked with a list, not
+    /// by recursion: a type may nest as deep as the type table allows.
+    fn refs_in(&self, t: TypeId) -> bool {
+        let known = |t: TypeId| self.bt.as_ref().and_then(|bt| bt.refs.get(&t)).copied();
+        if let Some(r) = known(t) {
+            return r;
+        }
+        let mut seen: HashSet<TypeId> = HashSet::new();
+        let mut work = vec![t];
+        while let Some(x) = work.pop() {
+            if !seen.insert(x) {
+                continue;
+            }
+            match (known(x), self.m.types.key(x)) {
+                (Some(true), _) | (None, Some(TypeKey::Ref { .. } | TypeKey::FnType { .. })) => {
+                    return true;
+                }
+                (None, Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. })) => {
+                    self.part_types(x, &mut work)
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Adds the types of the parts of a value of aggregate type `t`: its fields, its element,
+    /// the fields of each of its variants.
+    fn part_types(&self, t: TypeId, out: &mut Vec<TypeId>) {
+        match self.layout(t).map(|l| &l.shape) {
+            Ok(Shape::Fields(fs)) => out.extend(fs.iter().map(|f| f.1)),
+            Ok(Shape::Array { elem, .. }) => out.push(*elem),
+            Ok(Shape::Enum(vs)) => out.extend(vs.iter().flatten().map(|f| f.1)),
+            _ => {}
+        }
     }
 
     /// The pointee of reference type `rt` as (element type, whether `rt` is `&mut`): of a
@@ -143,26 +166,28 @@ impl<'m, H: Host> Interp<'m, H> {
     }
 
     /// Whether a value of type `t` has a `&mut` word whose pointee holds a reference.
-    fn has_target(&mut self, t: TypeId, depth: usize) -> bool {
-        if depth > MAX_TYPE_DEPTH {
-            return false;
-        }
-        match self.m.types.key(t) {
-            Some(TypeKey::Ref { .. }) => match self.pointee_of(t) {
-                Some((e, true)) => self.holds_refs(e, 0),
-                _ => false,
-            },
-            Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {
-                let parts: Vec<TypeId> = match self.layout(t).map(|l| &l.shape) {
-                    Ok(Shape::Fields(fs)) => fs.iter().map(|f| f.1).collect(),
-                    Ok(Shape::Array { elem, .. }) => vec![*elem],
-                    Ok(Shape::Enum(vs)) => vs.iter().flatten().map(|f| f.1).collect(),
-                    _ => Vec::new(),
-                };
-                parts.into_iter().any(|p| self.has_target(p, depth + 1))
+    fn has_target(&mut self, t: TypeId) -> bool {
+        let mut seen: HashSet<TypeId> = HashSet::new();
+        let mut work = vec![t];
+        while let Some(x) = work.pop() {
+            if !seen.insert(x) {
+                continue;
             }
-            _ => false,
+            match self.m.types.key(x) {
+                Some(TypeKey::Ref { .. }) => {
+                    if let Some((e, true)) = self.pointee_of(x)
+                        && self.holds_refs(e)
+                    {
+                        return true;
+                    }
+                }
+                Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {
+                    self.part_types(x, &mut work)
+                }
+                _ => {}
+            }
         }
+        false
     }
 
     /// The plan of fn `f`; `None` when its calls need no check.
@@ -175,14 +200,14 @@ impl<'m, H: Host> Interp<'m, H> {
         let mut plan = Plan::default();
         if let Some(c) = m.clauses.get(f.index()).filter(|c| c.kind != ClauseKind::Unchecked) {
             plan.closure = c.kind == ClauseKind::Closure;
-            plan.result = func.ret.is_some_and(|t| self.holds_refs(t, 0));
+            plan.result = func.ret.is_some_and(|t| self.holds_refs(t));
             for &t in &func.params {
-                plan.target.push(self.has_target(t, 0));
+                plan.target.push(self.has_target(t));
             }
             plan.source = vec![false; func.params.len()];
             if plan.closure {
                 for (k, &t) in func.params.iter().enumerate() {
-                    plan.source[k] = plan.result && self.holds_refs(t, 0);
+                    plan.source[k] = plan.result && self.holds_refs(t);
                 }
             } else {
                 let named = c.result.iter().map(|r| r.0).chain(c.params.iter().map(|p| p.1));
@@ -201,91 +226,110 @@ impl<'m, H: Host> Interp<'m, H> {
     }
 
     /// The reference words of `v`, a value of type `t` (of an enum the live variant).
-    fn value_words(&self, t: TypeId, v: &Val, out: &mut Vec<Word>, depth: usize) {
-        if depth > MAX_TYPE_DEPTH || out.len() > MAX_WORDS {
-            return;
-        }
-        match self.m.types.key(t) {
-            Some(TypeKey::Ref { .. }) => {
-                let len = match v {
-                    Val::Pair(_, n) | Val::PairT(_, n, _) => *n,
-                    _ => 1,
-                };
-                if let Some((addr, tag)) = v.word() {
-                    out.push(Word { addr, tag, len, ty: t });
-                }
+    fn value_words(&self, t: TypeId, v: &Val, out: &mut Vec<Word>) {
+        let mut work: Vec<(TypeId, &Val)> = vec![(t, v)];
+        while let Some((t, v)) = work.pop() {
+            if out.len() > MAX_WORDS {
                 return;
             }
-            Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
-            _ => return,
-        }
-        let Val::Agg(vs) = v else { return };
-        let Ok(l) = self.layout(t) else { return };
-        match &l.shape {
-            Shape::Fields(fs) => {
-                for (&(_, ft), fv) in fs.iter().zip(vs.iter()) {
-                    self.value_words(ft, fv, out, depth + 1);
+            match self.m.types.key(t) {
+                Some(TypeKey::Ref { .. }) => {
+                    let len = match v {
+                        Val::Pair(_, n) | Val::PairT(_, n, _) => *n,
+                        _ => 1,
+                    };
+                    if let Some((addr, tag)) = v.word() {
+                        out.push(Word { addr, tag, len, ty: t });
+                    }
+                    continue;
                 }
-            }
-            Shape::Array { elem, .. } => {
-                for fv in vs.iter() {
-                    self.value_words(*elem, fv, out, depth + 1);
+                Some(TypeKey::FnType { .. }) => {
+                    // a fn value is (code, environment)
+                    if let Val::Pair(_, env) | Val::PairT(_, env, _) = v
+                        && *env != 0
+                    {
+                        out.push(Word { addr: *env, tag: ROOT, len: 0, ty: t });
+                    }
+                    continue;
                 }
+                Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
+                _ => continue,
             }
-            Shape::Enum(vars) => {
-                let live = vs.first().and_then(Val::bits).and_then(|k| vars.get(k as usize));
-                for (&(_, ft), fv) in live.into_iter().flatten().zip(vs.iter().skip(1)) {
-                    self.value_words(ft, fv, out, depth + 1);
+            let Val::Agg(vs) = v else { continue };
+            let Ok(l) = self.layout(t) else { continue };
+            // the parts are pushed last first, so that the words come out in the value's order
+            match &l.shape {
+                Shape::Fields(fs) => {
+                    work.extend(fs.iter().zip(vs.iter()).rev().map(|(f, fv)| (f.1, fv)));
                 }
+                Shape::Array { elem, .. } => work.extend(vs.iter().rev().map(|fv| (*elem, fv))),
+                Shape::Enum(vars) => {
+                    let live = vs.first().and_then(Val::bits).and_then(|k| vars.get(k as usize));
+                    let fields = live.map_or(&[][..], |f| f.as_slice());
+                    work.extend(fields.iter().zip(vs.iter().skip(1)).rev().map(|(f, fv)| (f.1, fv)));
+                }
+                Shape::Scalar | Shape::Fat | Shape::Bytes => {}
             }
-            Shape::Scalar | Shape::Fat | Shape::Bytes => {}
         }
     }
 
     /// The reference words of the value of type `t` stored at `addr`. Bytes that are not live
     /// and initialised hold none. `false`: more than [`MAX_WORDS`].
-    fn stored_words(&self, t: TypeId, addr: u64, out: &mut Vec<Word>, depth: usize) -> bool {
-        if out.len() > MAX_WORDS {
-            return false;
-        }
-        if depth > MAX_TYPE_DEPTH {
-            return true;
-        }
+    fn stored_words(&self, t: TypeId, addr: u64, out: &mut Vec<Word>) -> bool {
         let Some(bt) = &self.bt else { return true };
-        match self.m.types.key(t) {
-            Some(TypeKey::Ref { .. }) => {
-                let Some(bits) = self.mem.peek_uint(addr, 8) else { return true };
-                let fat = matches!(self.layout(t).map(|l| &l.shape), Ok(Shape::Fat));
-                let len = if fat { self.mem.peek_uint(addr.wrapping_add(8), 8).unwrap_or(0) } else { 1 };
-                out.push(Word { addr: bits, tag: bt.loaded(addr, bits), len, ty: t });
-                return true;
+        let mut work: Vec<(TypeId, u64)> = vec![(t, addr)];
+        while let Some((t, addr)) = work.pop() {
+            if out.len() > MAX_WORDS || work.len() > MAX_WORDS {
+                return false;
             }
-            Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
-            _ => return true,
-        }
-        if !bt.refs.get(&t).copied().unwrap_or(true) {
-            return true;
-        }
-        let Ok(l) = self.layout(t) else { return true };
-        match &l.shape {
-            Shape::Fields(fs) => {
-                fs.iter().all(|&(off, ft)| self.stored_words(ft, addr.wrapping_add(off), out, depth + 1))
+            match self.m.types.key(t) {
+                Some(TypeKey::Ref { .. }) => {
+                    let Some(bits) = self.mem.peek_uint(addr, 8) else { continue };
+                    let fat = matches!(self.layout(t).map(|l| &l.shape), Ok(Shape::Fat));
+                    let len = if fat { self.mem.peek_uint(addr.wrapping_add(8), 8).unwrap_or(0) } else { 1 };
+                    out.push(Word { addr: bits, tag: bt.loaded(addr, bits), len, ty: t });
+                    continue;
+                }
+                Some(TypeKey::FnType { .. }) => {
+                    if let Some(env) = self.mem.peek_uint(addr.wrapping_add(8), 8).filter(|&e| e != 0) {
+                        out.push(Word { addr: env, tag: ROOT, len: 0, ty: t });
+                    }
+                    continue;
+                }
+                Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
+                _ => continue,
             }
-            Shape::Array { elem, stride, len } => (0..*len).all(|k| {
-                self.stored_words(*elem, addr.wrapping_add(k.wrapping_mul(*stride)), out, depth + 1)
-            }),
-            Shape::Enum(vars) => {
-                let live = self.mem.peek_uint(addr, 4).and_then(|k| vars.get(k as usize));
-                live.into_iter()
-                    .flatten()
-                    .all(|&(off, ft)| self.stored_words(ft, addr.wrapping_add(off), out, depth + 1))
+            let Ok(l) = self.layout(t) else { continue };
+            match &l.shape {
+                Shape::Fields(fs) => {
+                    work.extend(fs.iter().rev().map(|&(off, ft)| (ft, addr.wrapping_add(off))));
+                }
+                Shape::Array { elem, stride, len } => {
+                    if !self.refs_in(*elem) {
+                        continue;
+                    }
+                    if *len > MAX_WORDS as u64 {
+                        return false;
+                    }
+                    let at = |k: u64| addr.wrapping_add(k.wrapping_mul(*stride));
+                    work.extend((0..*len).rev().map(|k| (*elem, at(k))));
+                }
+                Shape::Enum(vars) => {
+                    let live = self.mem.peek_uint(addr, 4).and_then(|k| vars.get(k as usize));
+                    let fields = live.map_or(&[][..], |f| f.as_slice());
+                    work.extend(fields.iter().rev().map(|&(off, ft)| (ft, addr.wrapping_add(off))));
+                }
+                Shape::Scalar | Shape::Fat | Shape::Bytes => {}
             }
-            Shape::Scalar | Shape::Fat | Shape::Bytes => true,
         }
+        true
     }
 
     /// What `w` derives from by itself; `None`: it points to no allocation.
     fn src(&self, w: &Word) -> Option<Src> {
+        if matches!(self.m.types.key(w.ty), Some(TypeKey::FnType { .. })) {
+            return Some(Src::Open);
+        }
         if w.tag != ROOT {
             return Some(Src::Tag(w.tag));
         }
@@ -296,12 +340,12 @@ impl<'m, H: Host> Interp<'m, H> {
     fn below(&mut self, w: &Word) -> Option<Vec<Word>> {
         let mut out = Vec::new();
         let Some((elem, _)) = self.pointee_of(w.ty) else { return Some(out) };
-        if !self.holds_refs(elem, 0) {
+        if !self.holds_refs(elem) {
             return Some(out);
         }
         let stride = self.layout(elem).map_or(0, |l| l.size);
         for k in 0..w.len {
-            if !self.stored_words(elem, w.addr.wrapping_add(k.wrapping_mul(stride)), &mut out, 0) {
+            if !self.stored_words(elem, w.addr.wrapping_add(k.wrapping_mul(stride)), &mut out) {
                 return None;
             }
         }
@@ -374,7 +418,7 @@ impl<'m, H: Host> Interp<'m, H> {
             }
             let (Some(&t), Some(v)) = (params.get(k), args.get(k)) else { continue };
             let mut top = Vec::new();
-            self.value_words(t, v, &mut top, 0);
+            self.value_words(t, v, &mut top);
             if source {
                 e.top[k] = top.iter().filter_map(|w| self.src(w)).collect();
                 match self.reach(&top) {
@@ -404,7 +448,7 @@ impl<'m, H: Host> Interp<'m, H> {
             out.extend(b.iter().copied());
         }
         let mut top = Vec::new();
-        self.value_words(t, v, &mut top, 0);
+        self.value_words(t, v, &mut top);
         if !copy {
             out.extend(top.iter().filter_map(|w| self.src(w)));
             out.extend(e.top.get(k).into_iter().flatten().copied());
@@ -423,15 +467,24 @@ impl<'m, H: Host> Interp<'m, H> {
     /// or below such a tag).
     fn derives(&self, w: &Word, from: &HashSet<Src>, chain: &mut Vec<Tag>) -> Option<bool> {
         let bt = self.bt.as_ref()?;
-        if w.tag == ROOT {
-            let id = self.mem.alloc_span(w.addr)?.0;
-            return (!bt.static_ids.contains(&id)).then(|| from.contains(&Src::Root(id)));
-        }
-        let (alloc, raw) = bt.tracker.lineage(w.tag, chain)?;
-        if raw || bt.static_ids.contains(&alloc) {
+        if matches!(self.m.types.key(w.ty), Some(TypeKey::FnType { .. })) {
             return None;
         }
-        Some(chain.iter().any(|&t| from.contains(&Src::Tag(t))) || from.contains(&Src::Root(alloc)))
+        let found = if w.tag == ROOT {
+            let id = self.mem.alloc_span(w.addr)?.0;
+            if bt.static_ids.contains(&id) {
+                return None;
+            }
+            from.contains(&Src::Root(id))
+        } else {
+            let (alloc, raw) = bt.tracker.lineage(w.tag, chain)?;
+            if raw || bt.static_ids.contains(&alloc) {
+                return None;
+            }
+            chain.iter().any(|&t| from.contains(&Src::Tag(t))) || from.contains(&Src::Root(alloc))
+        };
+        // a source that is a fn value may hold what its type does not show
+        if found { Some(true) } else { (!from.contains(&Src::Open)).then_some(false) }
     }
 
     /// M24 at the return of `f` with result `ret`: a report for the first reference word of
@@ -453,7 +506,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 if e.plan.closure { (0..n).map(|x| (x, false)).collect() } else { clauses.result.clone() };
             let whole = named.iter().all(|&(x, copy)| self.add_sources(e, f, x, copy, &mut from));
             let mut words = Vec::new();
-            self.value_words(t, v, &mut words, 0);
+            self.value_words(t, v, &mut words);
             if whole && let Some(w) = words.iter().find(|w| self.derives(w, &from, &mut chain) == Some(false))
             {
                 found.push((None, w.tag));
@@ -465,7 +518,7 @@ impl<'m, H: Host> Interp<'m, H> {
             }
             let (Some(&t), Some(v)) = (func.params.get(p as usize), e.args.get(p as usize)) else { continue };
             let mut top = Vec::new();
-            self.value_words(t, v, &mut top, 0);
+            self.value_words(t, v, &mut top);
             let Some(now) = self.writable(&top) else { continue };
             let before = &e.writable[p as usize];
             let fresh: Vec<Word> =

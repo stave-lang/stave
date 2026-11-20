@@ -626,8 +626,10 @@ What the tracking mode does not see, or sees later than the rules say:
 - *repeat* rows are never reached today: E0418 is a type error, and a program with one is not
   lowered, with or without the borrow checker.
 - M24 walks the views a value points to by type. It does not see the captures of a fn value
-  that is a param, a field, or a result (a fn type does not show them); a closure body's own
-  environment it does. A value with more than 4096 reference words is not judged. The report
+  that is a param, a field, or a result (a fn type does not show them): when a source of a
+  clause holds a fn value with captures, a reference that derives from no other source is not
+  judged, and a fn value in a result or stored into a view is not judged either. A closure
+  body's own environment it walks. A value with more than 4096 reference words is not judged. The report
   names the param by its index and has no site of the store. It does not end the run: a run
   without a violation fails with its signature reports at its end.
 
