@@ -2237,7 +2237,7 @@ impl<'a> FnCx<'a> {
         let lt = self.locals[l].ty;
         let v = match mode {
             Mode::Move => self.read(&place),
-            Mode::Ref(_) => self.addr(&place, Some(lt)),
+            Mode::Ref(_) => self.addr(&place, Some(lt)).map(|v| self.borrowed(v, lt)),
         };
         let Some(v) = v else { return false };
         self.bind(l, Some(v));

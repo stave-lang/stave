@@ -394,6 +394,12 @@ impl Memory {
         Some((id as u32, a.base, a.size))
     }
 
+    /// Checking mode: the first byte and the size of allocation `id`, and whether it is live.
+    pub fn alloc_of(&self, id: u32) -> Option<(u64, u64, bool)> {
+        let a = self.chk.as_ref()?.allocs.get(id as usize)?.as_ref()?;
+        Some((a.base, a.size, a.state == State::Live))
+    }
+
     /// Checking mode: the runtime-allocator blocks still live, as (address, size, allocation site).
     pub fn live_heap_blocks(&self) -> Vec<(u64, u64, Trace)> {
         let Some(c) = &self.chk else { return Vec::new() };

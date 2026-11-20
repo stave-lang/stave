@@ -1,0 +1,15 @@
+//~ BORROWCHECK write-under-shared 12 11
+// A write through a `&` to the field beside a `Cell`: only the bytes of the cell are writable.
+import std.cell;
+
+struct Counter { hits: cell.Cell<u32>, base: u32 }
+
+fn main() -> i32 {
+    let c = Counter.{ hits: cell.Cell::<u32>.new(0u32), base: 5u32 };
+    let r: &Counter = &c;
+    r.hits.set(1u32);
+    let p = &r.base as *const u32 as *mut u32;
+    unsafe("deliberate: base is not inside the cell") { *p = 6u32; }
+    if c.base == 6u32 { return 1; }
+    return 0;
+}

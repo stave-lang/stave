@@ -1832,10 +1832,8 @@ impl<'a> FnCx<'a> {
                     Some(w) => w,
                     None => self.t_ref(m, p.ty),
                 };
-                // A receiver gets no row of the borrow side table: a tag made in each round of a
-                // loop stays live while its place is not written, and every access walks the
-                // live tags. Its uses go through the tag of the place.
-                self.addr(&p, Some(w))
+                let v = self.addr(&p, Some(w))?;
+                Some(self.borrowed(v, w))
             }
             None => self.read(&p),
         }

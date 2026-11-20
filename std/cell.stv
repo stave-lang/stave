@@ -20,7 +20,7 @@ impl<T> UnsafeCell<T> {
 
     // A pointer to the value; reading or writing through it is the caller's unsafe operation.
     pub fn get(&self) -> *mut T {
-        return &self.value as *const T as *mut T;
+        return self as *const UnsafeCell<T> as *mut T;
     }
 
     pub fn get_mut(&mut self) -> &mut T from self {

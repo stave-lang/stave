@@ -433,7 +433,12 @@ fn lower_in_pool(
     let m = assemble(prog, sigs, &mut table, &jobs, &cache, outs, &statics_list);
     tm.assemble = t1.elapsed();
     tm.n_funcs = m.as_ref().map_or(0, |m| m.0.funcs.len());
-    let r = m.map(|(module, order, site_pos)| Assembled { module, jobs, order, table, site_pos });
+    let r = m.map(|(mut module, order, site_pos)| {
+        if borrows && !sigs.lang.unsafe_cell.is_none() {
+            module.cell = Some(IrDecl(sigs.lang.unsafe_cell.0));
+        }
+        Assembled { module, jobs, order, table, site_pos }
+    });
     (r.map_err(|e| vec![e]), tm)
 }
 
