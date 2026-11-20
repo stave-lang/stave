@@ -561,7 +561,7 @@ fn lower_base<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -
             None => 0,
         };
         let deny = match icx.child(n, NodeKind::Without) {
-            Some(nd) => deny_bits(h, &icx, nd).0,
+            Some(nd) => crate::effects::Effects::fn_type_deny(deny_bits(h, &icx, nd).0),
             None => 0,
         };
         if params.contains(&h.error_ty()) || h.is_error_ty(ret) {

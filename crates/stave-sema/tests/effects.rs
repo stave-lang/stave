@@ -107,7 +107,10 @@ fn effect_names() {
         assert_eq!(Effects::of_name(n), Some(Effects(1 << i)));
     }
     assert_eq!(Effects::of_name("gc"), None);
-    assert_eq!(Effects::ALL.names(), Effects::NAMES);
+    // no source has `park`
+    assert_eq!(Effects::ALL.names(), Effects::NAMES[..7]);
+    assert!(!Effects::ALL.meets(Effects::PARK));
+    assert_eq!(Effects::fn_type_deny((Effects::BLOCK | Effects::PARK).0), Effects::BLOCK.0);
     assert_eq!((Effects::TRAP | Effects::ALLOC).names(), ["alloc", "trap"]);
     // denying `block` denies its part `park`; a deny clause is shown without the implied part
     assert_eq!(Effects::deny_of_name("block"), Some(Effects::BLOCK | Effects::PARK));

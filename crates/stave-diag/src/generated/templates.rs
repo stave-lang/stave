@@ -5117,7 +5117,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1403",
         severity: Severity::Error,
         area: "effects",
-        rule: "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1; case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)",
+        rule: "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1 (every fn type denies `park`); case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)",
         retired: false,
         located: true,
         holes: &[

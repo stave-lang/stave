@@ -4,15 +4,16 @@
 //!
 //! **Effects** ([`Effects`]): `alloc trap recursive lock unsafe io block park`. `park` (a wait on a
 //! completion queue) is a part of `block`: every source of `park` also gives `block`, and a deny
-//! clause that names `block` denies `park` too ([`Effects::deny_of_name`]). The only sources of
-//! `park` are those with every effect. A node's own effects ([`EffectSets::local`]) come from:
+//! clause that names `block` denies `park` too ([`Effects::deny_of_name`]). Nothing has `park`:
+//! a source with every effect has all but it ([`Effects::ALL`]), and a fn type never has it
+//! ([`Effects::fn_type_deny`]). A node's own effects ([`EffectSets::local`]) come from:
 //!
 //! | Source | Effects |
 //! |---|---|
 //! | the runtime fns of [`BOUNDARY`] (allocator, panic, lock word, futex, thread start and join) | their row; nothing they call counts |
-//! | an `extern "C"` import | all except those its `without` lists (a claim of the block's obligation) |
+//! | an `extern "C"` import | [`Effects::ALL`] except those its `without` lists (a claim of the block's obligation) |
 //! | intrinsic `syscall0`..`syscall6`, `thread_clone` | `io` |
-//! | intrinsic `call_on_stack`, `cpu_init` (they run code no edge shows) | all |
+//! | intrinsic `call_on_stack`, `cpu_init` (they run code no edge shows) | [`Effects::ALL`] |
 //! | a trapping instruction of the checked IR after the removal of proven bounds and contract checks ([`NodeIr`]; a kept `ensures` check is its failure call) | `trap` |
 //! | `panic.out_of_memory` in that IR | `alloc` |
 //! | membership in a call cycle (an SCC that is a cycle) | `recursive`, `trap` (stack overflow) |
@@ -79,7 +80,10 @@ impl Effects {
     pub const BLOCK: Effects = Effects(1 << 6);
     /// A wait on a completion queue: a part of [`Effects::BLOCK`], never without it.
     pub const PARK: Effects = Effects(1 << 7);
-    pub const ALL: Effects = Effects(0xff);
+    /// Every effect a source can have: all but [`Effects::PARK`]. Only a direct call of a Stave fn
+    /// may park (its caller lays out the waiting frame), so neither an `extern "C"` import nor
+    /// code the call graph does not show has it.
+    pub const ALL: Effects = Effects(0x7f);
     /// The effect names, by bit.
     pub const NAMES: [&'static str; 8] =
         ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block", "park"];
@@ -92,6 +96,12 @@ impl Effects {
     pub fn deny_of_name(s: &str) -> Option<Effects> {
         let e = Self::of_name(s)?;
         Some(if e == Effects::BLOCK { e | Effects::PARK } else { e })
+    }
+
+    /// The deny bits a fn type stores for clause bits `d`: every fn type denies `park`, so the
+    /// bit is left out and `fn(..) without(park)` is the type `fn(..)`.
+    pub fn fn_type_deny(d: u8) -> u8 {
+        d & !Effects::PARK.0
     }
 
     /// The names of the effects in the set, in [`Effects::NAMES`] order.

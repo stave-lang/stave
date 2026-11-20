@@ -38,11 +38,21 @@ reference for what a program may write and what it means.
   process or thread; std/README.md lists them).
 - `park` is a wait on a completion queue. It is a part of `block`: whatever has `park` also has
   `block`, and `without(block)` denies `park`. So `fn(..) without(block)` is usable as
-  `fn(..) without(park)`, not the other way. `without(park)` alone allows other waits: a stage
+  `fn(..) without(park)`, not the other way (every fn type denies `park`, below). `without(park)` alone allows other waits: a stage
   may join threads (`par_for`) and still never wait on a queue.
-- No std fn has `park`. Only what has every effect has it: an `extern "C"` import that does not
-  list it, and code the call graph does not show. A `without(block)` fn calling a parking fn
-  therefore has no conformance test; the type rule above has one.
+- A fn type never has `park`: every `fn(..)` type denies it, so `without(park)` on a fn type is
+  accepted and changes nothing (`fn(..) without(park)` is the type `fn(..)`), and a closure or fn
+  item with `park` made into a fn value is an error (E1403 case `made`). Reason: a fn that parks
+  keeps its frame while it waits, and its caller lays that frame out; a call through a fn value
+  does not know the callee's frame size. So an `extern "C"` import and code the call graph does
+  not show, which have every other effect, do not have `park`, and neither does a `with_lock` or
+  `par_for` body.
+- A call cycle may not contain a fn with `park`: a `rec fn` cannot wait. Reason: the frames of
+  waiting fns nest statically, which a cycle breaks. A `rec fn` called from a waiting fn is
+  allowed while the cycle itself cannot wait.
+- No std fn has `park`, so nothing has it: neither rule above, nor a `without(block)` fn calling
+  a parking fn, nor a denied `park` (E1401), has anything to check or a negative conformance
+  test.
 
 ## §3 Storing calls: a view left borrowed
 

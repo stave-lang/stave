@@ -1,6 +1,6 @@
 //~ CHECK-ONLY
-// E1403: denying `park` alone does not deny `block`, so a `without(park)` value is not usable as a
-// `without(block)` one (the reverse is: park_ok.stv).
+// E1403: denying `park` does not deny `block`, so a `without(park)` value (every fn type denies
+// `park`) is not usable as a `without(block)` one (the reverse is: park_ok.stv).
 fn widen(f: fn(u32) -> u32 without(park)) -> u32 {
     let g: fn(u32) -> u32 without(block) = f; //~ ERROR E1403
     return 0u32;
