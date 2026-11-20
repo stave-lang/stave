@@ -391,7 +391,7 @@ fn double_all(xs: &mut [u64]) {
 
 ## 6. Tooling
 
-- Package: `stave.toml` (`name` required, `kind = "bin" | "lib"`, `version`, path-only `[dependencies]`, per-target `[target.<name>.dependencies]` merged over them, no `cfg`; contracts/cli.md) plus `src/main.stv` or `src/lib.stv`. Bad manifest, or a dependency named like a built-in package (`std`), = E1002.
+- Package: `stave.toml` (`name` required, `kind = "bin" | "lib"`, `version`, path-only `[dependencies]`, per-target `[target.<name>.dependencies]` merged over them, no `cfg`; contracts/cli.md) plus `src/main.stv` or `src/lib.stv`. Bad manifest, or a package or dependency named like a built-in package (`std`), = E1002.
 - `stave check` (fast, no codegen), `stave build [--release] [--target x86_64-linux-v3|aarch64-linux+sve]`, `stave run`, `stave test [--filter S [--exact]] [--runner CMD] [--input N]`, `stave unsafe-report`, `stave effects` (each fn's effects), `stave fmt [--check]` (the one layout), `stave fix [--dry-run]` (applies fixes whose `applicability` is `exact`, re-checks), `stave lowering --target T [--op OP]` (the target's lowering table). Planned: `stave explain E0601`, `stave grammar --format lark|gbnf|ebnf` (for constrained decoding of the code region), `stave caps-report` (OS capabilities each package reaches).
 - `--diagnostics json` emits one JSON diagnostic per line, each with a fix and its `applicability` (`exact`, `maybe`, `placeholder`). Exit codes: 0 ok, 1 diagnostics, 2 usage, 3 compiler bug.
 - The default target is the baseline (v2 / neon), never auto-upgraded.
