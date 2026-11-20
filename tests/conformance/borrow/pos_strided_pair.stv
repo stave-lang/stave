@@ -16,7 +16,7 @@ impl ViewMut {
         debug.assert(step != 0, "step");
         let n = xs.len();
         let len = if start >= n then 0 else (n - start - 1) / step + 1;
-        let p = mem.slice_ptr(xs) as *mut u32;
+        let p = mem.slice_ptr_mut(xs);
         return ViewMut.{ anchor: &xs[0..0], p: mem.add_mut(p, start), len: len, step: step };
     }
 
@@ -48,7 +48,7 @@ impl GridMut {
     fn new(xs: &mut [u32], cols: usize) -> GridMut from xs {
         debug.assert(cols != 0 && xs.len() % cols == 0, "shape");
         let rows = xs.len() / cols;
-        let p = mem.slice_ptr(xs) as *mut u32;
+        let p = mem.slice_ptr_mut(xs);
         return GridMut.{ anchor: &xs[0..0], p: p, rows: rows, cols: cols };
     }
 

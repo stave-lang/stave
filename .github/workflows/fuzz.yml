@@ -25,9 +25,9 @@ jobs:
       # The release profile's fat LTO costs minutes of build time and nothing a fuzz run needs.
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-      # The interpreter leg runs in checking mode: a memory error of an accepted program is an
-      # `oracle` finding.
-      STAVE_INTERP_CHECK: "1"
+      # The interpreter leg runs in checking mode with borrow tracking: a memory error or a
+      # borrow violation of an accepted program is an `oracle` finding.
+      STAVE_INTERP_CHECK: borrow
     steps:
       - uses: actions/checkout@v4
       - run: cargo build --locked --release -p fuzz-classes

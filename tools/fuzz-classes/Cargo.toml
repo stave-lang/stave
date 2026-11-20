@@ -16,5 +16,4 @@ workspace = true
 gen-corpus = { path = "../gen-corpus" }
 stave-diag = { workspace = true }
 stave-driver = { workspace = true }
-stave-ir = { workspace = true }
 stave-target = { workspace = true }

@@ -125,6 +125,8 @@ pub struct TestSpec {
     pub parse_only: bool,
     /// `RESOURCE-LIMIT`: no effect in `stave test` (for the `gpu-sm86` differential tool).
     pub resource_limit: bool,
+    /// `INTERP-REPORT`: no effect in `stave test` (for the interpreter gate).
+    pub interp_report: Option<String>,
 }
 
 impl TestSpec {
@@ -238,6 +240,7 @@ pub fn load_spec(case: &TestCase, known_codes: Option<&BTreeSet<Code>>) -> Resul
                         Directive::CheckOnly => spec.check_only = true,
                         Directive::ParseOnly => spec.parse_only = true,
                         Directive::ResourceLimit => spec.resource_limit = true,
+                        Directive::InterpReport(c) => spec.interp_report = Some(c),
                     }
                 }
             }
@@ -275,6 +278,9 @@ pub fn load_spec(case: &TestCase, known_codes: Option<&BTreeSet<Code>>) -> Resul
     }
     if spec.parse_only && spec.is_run_test() {
         errs.push("PARSE-ONLY cannot be combined with run expectations".to_string());
+    }
+    if spec.interp_report.is_some() && !(spec.kind() == TestKind::Positive && spec.is_run_test()) {
+        errs.push("INTERP-REPORT needs a positive run test".to_string());
     }
     if spec.parse_only && spec.check_only {
         errs.push("PARSE-ONLY and CHECK-ONLY cannot be combined".to_string());

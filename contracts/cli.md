@@ -299,6 +299,14 @@ bytes, the allocation, the permission and kind of the failing tag; then three li
 trace of the violating event), `cause` (the event that made the tag `Frozen` or `Dead`; for
 `M23` the call that protects the tag), `tag made at`.
 
+The `check` CI step runs every positive run test of `tests/conformance/` and every program of
+`tests/borrowcheck/` with borrow tracking (`crates/stave-driver/tests/interp_gate.rs`). A report
+on a program whose own packages have no site in the unsafe inventory (`stave unsafe-report`
+without `std`, `runtime`) fails it; a program with such sites runs clean or ends with the report
+it declares (`INTERP-REPORT`, [conformance-annotations.md](conformance-annotations.md)). The
+fuzzer `tools/fuzz-classes` runs its interpreter leg in the mode of `STAVE_INTERP_CHECK`,
+`borrow` when unset: a report on an accepted program is an `oracle` finding.
+
 Package layout: `stave.toml` plus `src/main.stv` (`kind = "bin"`) or
 `src/lib.stv` (`kind = "lib"`: a static `.a` plus a C header for `extern "C"` exports). Module path
 = file path (`src/a/b.stv` is `a.b`).

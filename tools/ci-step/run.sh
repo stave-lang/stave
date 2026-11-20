@@ -20,6 +20,10 @@ case "$step" in
   clippy)  cargo clippy --locked --workspace --all-targets -- -D warnings ;;
   build)   cargo build --locked --workspace "$@" ;;
   test)    cargo test --locked --workspace "$@" ;;
+  # The accepted programs under borrow tracking (minutes: the interpreter is a debug build);
+  # `test` leaves this ignored test out.
+  interp-gate)
+           cargo test --locked -p stave-driver --test interp_gate -- --ignored --nocapture ;;
   gen-check)
            cargo run -q --locked -p ll1gen -- --check
            cargo run -q --locked -p diaggen -- --check
@@ -29,9 +33,9 @@ case "$step" in
            cargo run -q --locked -p gen-tables ;;
   lang-budget)
            cargo run -q --locked -p lang-budget -- LANG.md --limit 15000 ;;
-  check)   "$0" fmt; "$0" stave-fmt; "$0" clippy; "$0" test; "$0" gen-check; "$0" lang-budget ;;
+  check)   "$0" fmt; "$0" stave-fmt; "$0" clippy; "$0" test; "$0" interp-gate; "$0" gen-check; "$0" lang-budget ;;
   unsafe-diff) sh tools/ci-step/unsafe-diff.sh ;;
   bench)   sh bench/run.sh "$@" ;;
   cargo)   cargo "$@" ;;
-  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|gen|gen-check|lang-budget|check|unsafe-diff|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
+  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|interp-gate|gen|gen-check|lang-budget|check|unsafe-diff|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
 esac
