@@ -1,0 +1,115 @@
+//~ BORROWCHECK ok
+// std.slice reinterprets slices (`cast`, `cast_mut`: one tag, the same bytes) for find / eq /
+// fill on signed, size, bool, and float elements and for `copy_from` of any Copy element:
+// empty slices, short ones, ones past the long-loop threshold, zero-sized elements, and
+// elements with padding.
+struct Pad {
+    pub a: u8,
+    pub b: u32,
+}
+
+impl Copy for Pad {}
+
+struct Z {}
+
+impl Copy for Z {}
+
+fn signed() -> bool {
+    let mut a8: [i8; 1100] = [0i8; 1100];
+    let s8 = &mut a8[0..1100];
+    s8.fill(-3);
+    s8[1099] = 5;
+    let f8 = s8.find(5).unwrap() == 1099 && s8.find(7).is_none();
+    let mut a16: [i16; 600] = [0i16; 600];
+    let s16 = &mut a16[0..600];
+    s16.fill(-300);
+    let mut b16: [i16; 600] = [-300i16; 600];
+    let t16 = &mut b16[0..600];
+    let e16 = s16.eq(t16);
+    t16[599] = 1;
+    let n16 = !s16.eq(t16) && t16.find(1).unwrap() == 599;
+    let mut a32: [i32; 3] = [0i32; 3];
+    let s32 = &mut a32[0..3];
+    s32.fill(-1);
+    let f32_ = s32.find(-1).unwrap() == 0;
+    let mut a64: [i64; 100] = [0i64; 100];
+    let s64 = &mut a64[0..100];
+    s64.fill(-9);
+    let other64: [i64; 100] = [-9i64; 100];
+    let e64 = s64.eq(&other64[0..100]);
+    let mut e: [i64; 0] = [0i64; 0];
+    let e2: [i64; 0] = [0i64; 0];
+    let se = &mut e[0..0];
+    se.fill(1);
+    let ee = se.find(1).is_none() && se.eq(&e2[0..0]);
+    return f8 && e16 && n16 && f32_ && e64 && ee;
+}
+
+fn sizes() -> bool {
+    let mut us: [usize; 70] = [0usize; 70];
+    let su = &mut us[0..70];
+    su.fill(3);
+    su[69] = 4;
+    let ok_u = su.sum() == 211 && su.find(4).unwrap() == 69 && su.max().unwrap() == 4;
+    let mut is: [isize; 70] = [0isize; 70];
+    let si = &mut is[0..70];
+    si.fill(-2);
+    let ok_i = si.sum() == -140 && si.min().unwrap() == -2 && si.find(-2).unwrap() == 0;
+    return ok_u && ok_i;
+}
+
+fn bools_floats() -> bool {
+    let mut bs: [bool; 1030] = [false; 1030];
+    let sb = &mut bs[0..1030];
+    sb.fill(true);
+    sb[1029] = false;
+    let all: [bool; 1030] = [true; 1030];
+    let ok_b = sb.find(false).unwrap() == 1029 && !sb.eq(&all[0..1030]);
+    let mut fs: [f32; 9] = [0.0f32; 9];
+    let sf = &mut fs[0..9];
+    sf.fill(-0.0);
+    let ok_f = sf.find(0.0).unwrap() == 0;
+    let mut ds: [f64; 3] = [0.0; 3];
+    let sd = &mut ds[0..3];
+    sd.fill(1.5);
+    return ok_b && ok_f && sd.sum() == 4.5;
+}
+
+fn copies() -> bool {
+    let src: [Pad; 3] = [Pad.{ a: 1, b: 2 }; 3];
+    let mut dst: [Pad; 3] = [Pad.{ a: 0, b: 0 }; 3];
+    let d = &mut dst[0..3];
+    d.copy_from(&src[0..3]);
+    let long_src: [Pad; 200] = [Pad.{ a: 7, b: 8 }; 200];
+    let mut long_dst: [Pad; 200] = [Pad.{ a: 0, b: 0 }; 200];
+    let ld = &mut long_dst[0..200];
+    ld.copy_from(&long_src[0..200]);
+    let zs: [Z; 4] = [Z.{}; 4];
+    let mut zd: [Z; 4] = [Z.{}; 4];
+    let zds = &mut zd[0..4];
+    zds.copy_from(&zs[0..4]);
+    let bytes: [u8; 2000] = [9u8; 2000];
+    let mut bd: [u8; 2000] = [0u8; 2000];
+    let bds = &mut bd[0..2000];
+    bds.copy_from(&bytes[0..2000]);
+    let mut none: [u8; 0] = [0u8; 0];
+    let ns = &mut none[0..0];
+    ns.copy_from(&bytes[0..0]);
+    let opts: [Option<u32>; 300] = [Option.None; 300];
+    let mut od: [Option<u32>; 300] = [Option.Some(1u32); 300];
+    let ods = &mut od[0..300];
+    ods.copy_from(&opts[0..300]);
+    let tup: [(u8, u16); 600] = [(1u8, 2u16); 600];
+    let mut td: [(u8, u16); 600] = [(0u8, 0u16); 600];
+    let tds = &mut td[0..600];
+    tds.copy_from(&tup[0..600]);
+    return dst[2].b == 2 && long_dst[199].a == 7 && bd[1999] == 9 && od[299].is_none() && td[599].1 == 2;
+}
+
+fn main() -> i32 {
+    if !signed() { return 1; }
+    if !sizes() { return 2; }
+    if !bools_floats() { return 3; }
+    if !copies() { return 4; }
+    return 0;
+}

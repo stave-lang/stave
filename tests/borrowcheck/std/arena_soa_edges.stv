@@ -1,0 +1,92 @@
+//~ BORROWCHECK ok
+// std.arena and std.soa sites: arena slots padded for alignment, filled to the exact capacity,
+// zero-sized values in a full and in an empty arena, many `&mut` results alive at once, reuse
+// after `reset`; Soa rows with padding moved between buffers as the Soa grows, two columns
+// borrowed at once, a zero-sized row type, and failing `try_` calls.
+import std.arena;
+import std.soa;
+
+struct Pad {
+    pub a: u8,
+    pub b: u64,
+}
+
+impl Copy for Pad {}
+
+struct Z {}
+
+impl Copy for Z {}
+
+struct Row {
+    pub tag: u8,
+    pub w: u64,
+    pub h: u16,
+}
+
+impl Copy for Row {}
+
+struct E {}
+
+impl Copy for E {}
+
+const HUGE: usize = 0x4000_0000_0000_0000;
+
+fn arenas() -> bool {
+    let a = arena.Arena.new(24);
+    let x: &mut u8 = a.alloc(1u8);
+    let y: &mut u64 = a.alloc(2u64);
+    let z1: &mut u64 = a.alloc(3u64);
+    let full = a.try_alloc(4u8).is_err();
+    let zz: &mut Z = a.alloc(Z.{});
+    *x = *x + 10;
+    *y = *y + 20;
+    *z1 = *z1 + 30;
+    let ok_a = full && *x == 11 && *y == 22 && *z1 == 33 && a.used() == 24;
+    let mut b = arena.Arena.new(0);
+    let none = b.try_alloc(1u8).is_err();
+    let zb: &mut Z = b.alloc(Z.{});
+    b.reset();
+    let c = arena.Arena.try_new(HUGE).is_err();
+    let mut d = arena.Arena.new(64);
+    let p: &mut Pad = d.alloc(Pad.{ a: 1, b: 2 });
+    p.b = 5;
+    let pb = p.b;
+    d.reset();
+    let q: &mut Pad = d.alloc(Pad.{ a: 3, b: 4 });
+    let qa = q.a;
+    return ok_a && none && c && pb == 5 && qa == 3 && d.used() == 16;
+}
+
+fn soas() -> bool {
+    let mut s = soa.Soa::<Row>.new();
+    for i in 0u32..20 {
+        s.push(Row.{ tag: i as% u8, w: i as u64, h: i as% u16 });
+    }
+    {
+        let ws = &mut s.w;
+        let tags = &s.tag;
+        for i in 0..ws.len() { ws[i] = ws[i] + (tags[i] as u64); }
+    }
+    s.set(3, Row.{ tag: 100, w: 1, h: 2 });
+    let r = s.get(3);
+    let last = s.pop().unwrap();
+    let sum = s.w.sum();
+    let ok_s = r.tag == 100 && r.h == 2 && last.w == 38 && sum == 337 && s.len() == 19;
+    let mut e = soa.Soa::<E>.new();
+    for i in 0u32..10 { e.push(E.{}); }
+    let ecap = e.capacity() == 0xFFFF_FFFF_FFFF_FFFF;
+    let en = e.len() == 10 && e.pop().is_some();
+    let big = soa.Soa::<Row>.try_with_capacity(HUGE).is_err();
+    let over = s.try_reserve(0xFFFF_FFFF_FFFF_FFFF).is_err();
+    s.clear();
+    s.push(Row.{ tag: 1, w: 2, h: 3 });
+    let mut t = soa.Soa::<Row>.with_capacity(0);
+    let tn = t.pop().is_none();
+    return ok_s && ecap && en && big && over && s.get(0).h == 3 && tn;
+}
+
+fn main() -> i32 {
+    if !arenas() { return 1; }
+    if !soas() { return 2; }
+    return 0;
+}
