@@ -1,0 +1,16 @@
+//~ BORROWCHECK write-under-shared 13 12
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+view struct Outer { n: u32, inner: Pick }
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut o = Outer.{ n: 1, inner: Pick.{ best: &zero, count: 0 } };
+    o.inner.best = &o.n;
+    let a: u32 = *o.inner.best;
+    o.n = 2;
+    let b: u32 = *o.inner.best;
+    io.print(f"{a} {b}\n");
+    return 0;
+}

@@ -294,9 +294,10 @@ default limits; the pipeline then lowers each program a second time, with the si
 interpreter legs (`Options::tracked`, `Output::for_interp`). Dumps, goldens, and the backends get
 the canonical module in every case. A violation ends the run as a failure
 whose text starts `interp: borrow violation [<class>] <rule>`, class one of `write-under-shared
-two-exclusive use-after-referent second-owner`, rule `M1`..`M4`; then the event, its bytes, the
-allocation, the permission and kind of the failing tag; then three lines: `at` (the trace of the
-violating event), `cause` (the event that made the tag `Frozen` or `Dead`), `tag made at`.
+two-exclusive use-after-referent second-owner`, rule `M1`..`M4` or `M23`; then the event, its
+bytes, the allocation, the permission and kind of the failing tag; then three lines: `at` (the
+trace of the violating event), `cause` (the event that made the tag `Frozen` or `Dead`; for
+`M23` the call that protects the tag), `tag made at`.
 
 Package layout: `stave.toml` plus `src/main.stv` (`kind = "bin"`) or
 `src/lib.stv` (`kind = "lib"`: a static `.a` plus a C header for `extern "C"` exports). Module path

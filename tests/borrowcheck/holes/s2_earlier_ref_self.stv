@@ -1,0 +1,25 @@
+//~ BORROWCHECK write-under-shared 22 21
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+view struct Win { c: &usize }
+view struct Both { inner: Pick, other: Win }
+
+impl Win {
+    fn take(&mut self from x, x: &usize) {
+        self.c = x;
+    }
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let n: usize = 0;
+    let mut o = Both.{ inner: Pick.{ best: &zero, count: 1 }, other: Win.{ c: &n } };
+    let r: &usize = &o.inner.count;
+    o.other.take(r);
+    let a: usize = *o.other.c;
+    o.inner.count = 2;
+    let b: usize = *o.other.c;
+    io.print(f"{a} {b}\n");
+    return 0;
+}

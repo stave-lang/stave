@@ -1,0 +1,14 @@
+//~ BORROWCHECK write-under-shared 10 6
+import std.io;
+
+fn main() -> i32 {
+    let mut n: u32 = 1;
+    let f = fn() -> &u32 { n = n + 1; return &n; };
+    let r: &u32 = f();
+    let before: u32 = *r;
+    let again: &u32 = f();
+    let after: u32 = *r;
+    let last: u32 = *again;
+    io.print(f"{before} {after} {last}\n");
+    return 0;
+}

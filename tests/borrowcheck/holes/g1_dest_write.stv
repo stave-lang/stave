@@ -1,0 +1,22 @@
+//~ BORROWCHECK write-under-shared 17 15
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+
+fn bump(dst: &mut Pick from x, x: &u32) -> u32 {
+    dst.best = x;
+    return *x + 1;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut n: u32 = 1;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    n = bump(&mut p, &n);
+    let r: &u32 = p.best;
+    let a: u32 = *r;
+    n = bump(&mut p, &n);
+    let b: u32 = *r;
+    io.print(f"{a} {b}\n");
+    return 0;
+}

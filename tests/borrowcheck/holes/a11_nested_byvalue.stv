@@ -1,0 +1,32 @@
+//~ BORROWCHECK write-under-shared 29 28
+import std.io;
+
+view struct Cur { cur: &u32, n: u32 }
+view struct Two { slot: &mut &u32, n: &u32 }
+
+fn split(t: (&mut Cur, u32)) -> Two from t {
+    return Two.{ slot: &mut t.0.cur, n: &t.0.n };
+}
+
+// by-value view source: the store goes through `t`, covered by the clause of `k`
+fn fwd(k: &mut Cur from t, t: (&mut Cur, u32)) {
+    let two = split(t);
+    *two.slot = two.n;
+}
+
+fn link(dst: &mut Cur from src, src: &mut Cur) {
+    fwd(dst, (src, 0u32));
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut a = Cur.{ cur: &zero, n: 5 };
+    let mut b = Cur.{ cur: &zero, n: 1 };
+    link(&mut a, &mut b);
+    let r: &u32 = b.cur;
+    let before: u32 = *r;
+    b.n = 2;
+    let after: u32 = *r;
+    io.print(f"{before} {after}\n");
+    return 0;
+}

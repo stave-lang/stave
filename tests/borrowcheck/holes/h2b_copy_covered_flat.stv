@@ -1,0 +1,27 @@
+//~ BORROWCHECK write-under-shared 18 17
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+
+fn mix(k: &mut Link from x + y, x: &mut Pick, y: &u32, out: &mut Pick from copy x) {
+    x.best = y;
+    out.best = x.best;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut res = Pick.{ best: &zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 3 {
+        let y: u32 = 10 + i;
+        let seen: u32 = *res.best;
+        io.print(f"round {i}: y = {y}, res.best reads {seen}\n");
+        let mut p = Pick.{ best: &zero, count: 0 };
+        let mut p0 = Pick.{ best: &zero, count: 0 };
+        let mut k = Link.{ to: &mut p0 };
+        mix(&mut k, &mut p, &y, &mut res);
+        i = i + 1;
+    }
+    return 0;
+}

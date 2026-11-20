@@ -1,0 +1,20 @@
+//~ BORROWCHECK write-under-shared 17 16
+import std.io;
+
+view struct Cell { best: &u32, n: u32 }
+view struct Pair { a: Cell, b: Cell }
+
+fn point(dst: &mut Cell from src, src: &Cell) {
+    dst.best = &src.n;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut o = Pair.{ a: Cell.{ best: &zero, n: 1 }, b: Cell.{ best: &zero, n: 1 } };
+    point(&mut o.a, &o.b);
+    let x: u32 = *o.a.best;
+    o.b.n = 2;
+    let y: u32 = *o.a.best;
+    io.print(f"{x} {y}\n");
+    return 0;
+}

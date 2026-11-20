@@ -1,0 +1,25 @@
+//~ BORROWCHECK write-under-shared 22 19
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+view struct Both { part: Pick, holder: Option<Link> }
+
+fn set_link(l: &mut Option<Link> from q, q: &mut Pick) {
+    *l = Option.Some(Link.{ to: q });
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut o = Both.{ part: Pick.{ best: &zero, count: 1 }, holder: Option.None };
+    set_link(&mut o.holder, &mut o.part);
+    let r: &usize = &o.part.count;
+    let a: usize = *r;
+    match &mut o.holder {
+        Option.Some(l) => { l.to.count = 2; }
+        Option.None => {}
+    }
+    let b: usize = *r;
+    io.print(f"{a} {b}\n");
+    return 0;
+}

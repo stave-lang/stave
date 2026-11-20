@@ -95,6 +95,32 @@ fn each_program_gives_its_report() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A suite that takes the default options and limits runs under tracking exactly when
+/// `STAVE_INTERP_CHECK=borrow` is set, and the checked IR is the same module either way.
+#[test]
+fn default_options_follow_the_environment() {
+    let on = std::env::var_os("STAVE_INTERP_CHECK").is_some_and(|v| v == "borrow");
+    let target = Triple::parse("x86_64-linux").unwrap();
+    let p = repo().join("tests/borrowcheck/write_under_shared.stv");
+    let mut o = Options::new(Goal::Check).threads(Some(4));
+    o.lower = true;
+    o.target = Some(target);
+    assert_eq!(o.tracked, on);
+    let out = pipeline::run(&p, &Library::in_dir(&repo()), &o).unwrap();
+    assert!(!out.has_errors(), "{:?}", out.diagnostics);
+    assert_eq!(out.tracked.is_some(), on);
+    let marks =
+        |m: &stave_ir::Module| m.funcs.iter().filter_map(|f| f.body.as_ref()).any(|b| !b.borrows.is_empty());
+    assert!(!marks(out.module.as_ref().unwrap()));
+    assert_eq!(marks(out.for_interp().unwrap()), on);
+    let got = interp::run(out.for_interp().unwrap(), "main.main", target, &[], &[], Limits::default());
+    match got {
+        Err(e) if on => assert!(e.starts_with("interp: borrow violation [write-under-shared]"), "{e}"),
+        Ok(r) if !on => assert_eq!(r.ran.exit, 1),
+        r => panic!("tracking {on}: {r:?}"),
+    }
+}
+
 /// What the borrow checker and the tracking interpreter say of one program lowered without
 /// regard to the checker.
 struct Verdict {
