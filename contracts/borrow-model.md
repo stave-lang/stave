@@ -424,8 +424,8 @@ have no caller that misuses the reference.
   - A closure body: every reference param and capture is a source of its result; no param has a
     clause; a capture is a param for the stores.
 
-  The report is "signature": the return site, the param or result, and the site that made the
-  tag. It does not end the run. The check
+  The report is "signature": the return site, the param or result with its clause, the site that
+  made the tag, and the site of the store when the word was written during the call. The check
   is weaker than E0510 / E0513: it does not tell a borrow through a `&mut` field of `*x` from a
   copy out of it, and it sees one execution.
 ```stave
@@ -628,7 +628,8 @@ What the tracking mode does not see, or sees later than the rules say:
 - M24 walks the views a value points to by type. It does not see the captures of a fn value
   that is a param, a field, or a result (a fn type does not show them); a closure body's own
   environment it does. A value with more than 4096 reference words is not judged. The report
-  has no site of the store.
+  names the param by its index and has no site of the store. It does not end the run: a run
+  without a violation fails with its signature reports at its end.
 
 ## Limits
 
