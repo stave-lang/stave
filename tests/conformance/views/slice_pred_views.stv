@@ -1,0 +1,32 @@
+//~ STDOUT slice_pred_views.stdout
+// `count`, `any`, and `all` of `std.slice` read elements and store none, so they take slices of
+// views: `&[&u32]`, and the slice of a `vec.Vec<&str>`.
+import std.io;
+import std.vec;
+
+fn big(x: &u32) -> bool {
+    return *x > 5;
+}
+
+fn long(s: &str) -> bool {
+    return s.len() > 2;
+}
+
+fn main() -> i32 {
+    let a: u32 = 3;
+    let b: u32 = 7;
+    let c: u32 = 9;
+    let xs: [&u32; 3] = [&a, &b, &c];
+    let n = xs[0..3].count(big);
+    let some = xs[0..3].any(big);
+    let every = xs[0..3].all(big);
+    let rest = xs[1..3].all(big);
+    let mut v = vec.Vec::<&str>.new();
+    v.push("ab");
+    v.push("abc");
+    v.push("abcd");
+    let m = v.as_slice().count(long);
+    let none = v.as_slice().any(fn(s: &str) -> bool { return s.len() > 9; });
+    io.print(f"{n} {some} {every} {rest} {m} {none}\n");
+    return 0;
+}
