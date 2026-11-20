@@ -17,8 +17,9 @@
 //!   `[target.T.dependencies]`; a later table overrides a name.
 //! - Invalid manifests are E1002, located in `stave.toml` (cases: unknown key, `wrong-type`,
 //!   `non-path-dependency`, `unknown-target`, `syntax`, `duplicate-key`, `bad-kind`,
-//!   `missing-name`, `bad-name`, `missing-root`, `missing-dependency`, `unreadable`). A source file that
-//!   cannot be read is E1003, at offset 0 of that file.
+//!   `missing-name`, `bad-name`, `missing-root`, `missing-dependency`, `builtin-dependency`,
+//!   `builtin-name`, `unreadable`). A source file that cannot be read is E1003, at offset 0 of
+//!   that file.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -305,6 +306,8 @@ struct DepSpec {
     path: Option<String>,
     /// The `path` value (E1002 `missing-dependency`).
     path_span: TSpan,
+    /// The dependency's name (E1002 `builtin-name`).
+    key_span: TSpan,
 }
 
 #[derive(Debug, Default)]
@@ -397,7 +400,8 @@ impl Check<'_> {
     fn deps(&mut self, t: &TTable) -> Vec<DepSpec> {
         let mut out = Vec::new();
         for e in &t.entries {
-            let mut spec = DepSpec { name: e.key.clone(), path: None, path_span: e.key_span };
+            let mut spec =
+                DepSpec { name: e.key.clone(), path: None, path_span: e.key_span, key_span: e.key_span };
             match &e.value {
                 TValue::Table(d) => {
                     let has_path = d.get("path").is_some();
@@ -672,6 +676,18 @@ pub(crate) fn load(fs: &Fs, root: &Path, target: Triple, builtins: &[BuiltinPack
         let deps = std::mem::take(&mut specs[p]);
         let builtin = l.packages[p].kind == PackageKind::Builtin;
         for d in deps {
+            // A built-in package's name always means that package (the prelude, lang items, and
+            // compiler-known paths are keyed on it): no other package is bound to it.
+            if !builtin && builtins.iter().any(|b| b.name == d.name) {
+                if let Some(m) = l.packages[p].manifest {
+                    l.manifests[m].issues.push(ManifestIssue::new(
+                        Some("builtin-name"),
+                        &[("key", &d.name)],
+                        d.key_span,
+                    ));
+                }
+                continue;
+            }
             let Some(path) = &d.path else { continue };
             let dir = normalize(&l.packages[p].dir.join(path));
             if !fs.is_file(&dir.join("stave.toml")) {
@@ -939,5 +955,59 @@ mod tests {
         }
         let fs = Fs::Mem(m);
         assert_eq!(fs.builtin_files(Path::new("/rt")), vec!["os.stv".to_string(), "sub/x.stv".to_string()]);
+    }
+
+    /// A dependency bound under a built-in package's name is E1002 `builtin-name` at that name,
+    /// in every package that is not built in (per-target tables too), whatever its manifest
+    /// `name`; the implicit `std` stays the built-in one. Names that only look alike bind.
+    #[test]
+    fn builtin_names_bind_no_dependency() {
+        let mut m = BTreeMap::new();
+        let deps = "\n[dependencies]\nstd = { path = \"../fake\" }\nruntime = { path = \"../fake\" }\n\
+                    stdx = { path = \"../fake\" }\nStd = { path = \"../fake\" }\nmid = { path = \"../mid\" }\n";
+        let files = [
+            ("/app/stave.toml", format!("name = \"app\"\nkind = \"bin\"\n{deps}")),
+            ("/app/src/main.stv", String::new()),
+            ("/fake/stave.toml", "name = \"std\"\nkind = \"lib\"\n".to_string()),
+            ("/fake/src/lib.stv", String::new()),
+            (
+                "/mid/stave.toml",
+                "name = \"mid\"\nkind = \"lib\"\n\n[target.x86_64-linux.dependencies]\nstd = { path = \"../fake\" }\n"
+                    .to_string(),
+            ),
+            ("/mid/src/lib.stv", String::new()),
+            ("/std/core.stv", String::new()),
+            ("/rt/os.stv", String::new()),
+        ];
+        for (p, s) in files {
+            m.insert(PathBuf::from(p), s.into_bytes());
+        }
+        let builtin = |name: &str, dir: &str, deps: &[&str], implicit| BuiltinPackage {
+            name: name.into(),
+            dir: dir.into(),
+            deps: deps.iter().map(|d| d.to_string()).collect(),
+            implicit,
+        };
+        let builtins = [builtin("std", "/std", &["runtime"], true), builtin("runtime", "/rt", &[], false)];
+        let target = Triple::parse("x86_64-linux").unwrap();
+        let l = load(&Fs::Mem(m), Path::new("/app"), target, &builtins);
+        let pk = &l.packages;
+        let got: Vec<(String, Option<&str>, String)> = l
+            .manifests
+            .iter()
+            .flat_map(|mf| mf.issues.iter().map(move |i| (pk[mf.package].name.clone(), i.case, i.key())))
+            .collect();
+        let want = |p: &str, k: &str| (p.to_string(), Some("builtin-name"), k.to_string());
+        assert_eq!(got, vec![want("app", "std"), want("app", "runtime"), want("mid", "std")]);
+        let deps_of = |name: &str| -> Vec<(String, String)> {
+            let p = l.packages.iter().find(|p| p.name == name).unwrap();
+            p.deps.iter().map(|(n, id)| (n.clone(), l.packages[*id].dir.display().to_string())).collect()
+        };
+        let pair = |n: &str, d: &str| (n.to_string(), d.to_string());
+        assert_eq!(
+            deps_of("app"),
+            vec![pair("Std", "/fake"), pair("mid", "/mid"), pair("std", "/std"), pair("stdx", "/fake")]
+        );
+        assert_eq!(deps_of("mid"), vec![pair("std", "/std")]);
     }
 }

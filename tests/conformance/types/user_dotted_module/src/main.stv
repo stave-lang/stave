@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// `src/a/b.stv` is module `a.b`; `src/a.b.stv` would have the same path text, and
+// `src/c.d/e.stv` would be `c.d.e`, which no import can name: both are E0107 case `dotted`.
+// `src/a_b.stv` and `src/v2/x1.stv` are plain modules.
+import a.b;
+import a_b;
+import v2.x1;
+
+fn main() -> i32 {
+    if b.one() + a_b.one() + x1.one() != 3u32 {
+        return 1;
+    }
+    return 0;
+}
