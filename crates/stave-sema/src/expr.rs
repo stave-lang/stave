@@ -1471,7 +1471,7 @@ impl<'a> Ck<'a> {
                         self.genv().get(p as usize).map(|g| ("param", g.name_span)).into_iter().collect();
                     let d = mk("E0901", None, &[("name", "fmt"), ("param", &pn)], sp, &roles);
                     self.report(d);
-                } else {
+                } else if !self.prog.strings.lookup("fmt").is_some_and(|f| self.refused_view(sp, inner, f)) {
                     let tn = self.show(inner);
                     let d = mk("E0208", None, &[("name", "fmt"), ("type", &tn)], sp, &[]);
                     self.report(d);
@@ -3492,15 +3492,8 @@ impl<'a> Ck<'a> {
                 self.args_only(args)
             }
             Lookup::NotFound => {
-                // an impl that only the view-kind rule refused: name its param
-                if let Some((imp, ia)) = self.w.method_refused_view(&mut self.tys, recv, name, genv)
-                    && let Some(idef) = self.sigs.impl_def(imp)
-                {
-                    let reported = self.diags.len();
-                    self.check_bounds(sspan, imp, &idef.generics, &ia, None);
-                    if self.diags.len() > reported {
-                        return self.args_only(args);
-                    }
+                if self.refused_view(sspan, recv, name) {
+                    return self.args_only(args);
                 }
                 let tn = self.show(recv);
                 let nm = self.prog.strings.get(name).to_string();
@@ -3901,6 +3894,19 @@ impl<'a> Ck<'a> {
         self.tys.intern(TypeKind::Range { elem: b, inclusive: false })
     }
 
+    /// Method `name` of `recv` exists in an impl that only the view-kind rule refused: reports
+    /// the param without `view` (E0414), as every instantiation site does, and returns true.
+    fn refused_view(&mut self, at: Span, recv: TypeId, name: Sym) -> bool {
+        let genv = self.genv();
+        let Some((imp, ia)) = self.w.method_refused_view(&mut self.tys, recv, name, genv) else {
+            return false;
+        };
+        let Some(idef) = self.sigs.impl_def(imp) else { return false };
+        let reported = self.diags.len();
+        self.check_bounds(at, imp, &idef.generics, &ia, None);
+        self.diags.len() > reported
+    }
+
     /// The element type of `for .. in iter` (`it`: the type of `iter`); an iterator's `next` is
     /// recorded as an implicit call at `for_tok`.
     fn element_type(&mut self, for_tok: u32, iter: u32, it: TypeId) -> TypeId {
@@ -3944,6 +3950,11 @@ impl<'a> Ck<'a> {
                     return *x;
                 }
             }
+        }
+        if let Some(next) = self.prog.strings.lookup("next")
+            && self.refused_view(self.icx.node_span(iter), it, next)
+        {
+            return ids::ERROR;
         }
         let tn = self.show(it);
         let d = mk("E0208", None, &[("name", "next"), ("type", &tn)], self.icx.node_span(iter), &[]);
