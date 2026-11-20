@@ -219,6 +219,8 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
             b"as" => KwAs,
             b"align" => KwAlign,
             b"allocator" => KwAllocator,
+            b"async" => KwAsync,
+            b"await" => KwAwait,
             _ => return None,
         },
         b'b' => match s {
@@ -332,6 +334,10 @@ pub(crate) fn keyword(s: &[u8]) -> Option<u8> {
         b'w' => match s {
             b"while" => KwWhile,
             b"without" => KwWithout,
+            _ => return None,
+        },
+        b'y' => match s {
+            b"yield" => KwYield,
             _ => return None,
         },
         _ => return None,

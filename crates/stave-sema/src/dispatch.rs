@@ -266,7 +266,7 @@ fn fn_type_text(prog: &Program, tys: &mut TypeTable, sig: &FnSig, features: u64)
         params: sig.params.clone().into_boxed_slice(),
         ret: sig.ret,
         features,
-        deny: sig.deny,
+        deny: crate::effects::Effects::fn_type_deny(sig.deny),
     });
     types::display(&*tys, &NameCx { prog, generics: &sig.generics }, t)
 }
