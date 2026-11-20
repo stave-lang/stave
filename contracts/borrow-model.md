@@ -424,8 +424,8 @@ have no caller that misuses the reference.
   - A closure body: every reference param and capture is a source of its result; no param has a
     clause; a capture is a param for the stores.
 
-  The report is "signature": the return site, the param or result with its clause, the site that
-  made the tag, and the site of the store when the word was written during the call. The check
+  The report is "signature": the return site, the param or result, and the site that made the
+  tag. It does not end the run. The check
   is weaker than E0510 / E0513: it does not tell a borrow through a `&mut` field of `*x` from a
   copy out of it, and it sees one execution.
 ```stave
@@ -462,11 +462,6 @@ In (d) the copy is the report: the later double drop, or the two `&mut` to one p
 symptom. Two holders of one `&mut` tag made by a copy cannot be told apart by M1 to M3, so
 (b) never reports them; M9 does, at the first use of the place the value left. The fifth form,
 "signature" (M24), is reported beside these and never instead of them.
-
-An implementation that sees no begin and end of locals and temporaries ("Side table") reports
-the store of the next value where the table says (c): a loop local written again, or a
-temporary evaluated again, makes a reference to the value before `Dead` by a write, so a later
-use through it is (a) for a `&` and (b) for a `&mut`, with that store as the cause.
 
 ## Relation to the static rules
 
@@ -544,7 +539,7 @@ rule the execution out, and the borrow-tracking mode reports it when a run has i
 
 | Program shape | Violation | Class |
 |---|---|---|
-| a `&mut V` made from a raw pointer under a `&` anchor takes a borrow of a shorter-lived local (`tests/borrowcheck/anchor_shorter_local.stv`) | M20, M16 with M13 | (c); (a) by the store of the local's next value ("Reports") |
+| a `&mut V` made from a raw pointer under a `&` anchor takes a borrow of a shorter-lived local (`tests/borrowcheck/anchor_shorter_local.stv`) | M20, M16 with M13 | (c) |
 
 ## What an implementation over the checked IR needs
 
@@ -578,22 +573,62 @@ it is not dumped, not compared with a golden, and not given to a backend.
 - **`Body::borrows`**, one row per such value: the value, and `&` or `&mut`. The interpreter
   makes the tag (M4) when the instruction that defines the value runs: the parent is the tag its
   address word carries; the range starts at the address and has the size of the pointee of the
-  value's type, for a fat reference its length times the element size.
+  value's type, for a fat reference its length times the element size. More borrows than the
+  source spells have a row: a `&mut T` place given as a method receiver (M6); the capture
+  references of a closure literal, one per captured local, `&` when the body only reads it
+  (M18); the binding of a `for` over a reference to an array or slice, a borrow of its element
+  through that reference; a `&mut` chunk binding, a borrow of the chunk's temporary; the
+  `&mut` a drop glue runs on (M12).
+- **`Body::events`**, one row per event that is no borrow, each on an instruction of its own
+  (an identity cast of the pointer to the place; for the last two kinds the instruction named):
+  - *begin*: a local at its declaration, a temporary at each evaluation of its expression
+    (M13, M14). The allocation that was in the slot ends with every tag of it, and the root
+    stands for the new one.
+  - *end*: the locals of a block when it is left by its end, `break`, or `continue`, after
+    their drops; a temporary with drop glue after its drop at the end of its statement. A
+    `return` and a `?` emit none: the return of the frame ends every slot of it. Between its
+    end and its next begin the root of a slot is `Dead`.
+  - *gone*: a by-value use of a place whose type is not Copy, after its read; `p.read()` of
+    such a type; the end of a drop, after the glue (M9, M12). The bytes end through the tag of
+    the pointer and are moved-out until the next write.
+  - *repeat*, on the literal: `[e; n]`, `n >= 2`, of a type that is not Copy (M10).
+  - *environment*, on `fn.make`: the interpreter copies the environment into a slot of its
+    own in the current frame, so each evaluation of a closure literal holds its own capture
+    references (M18).
+- **A local a value is moved out of lives in a slot**, also when the canonical lowering keeps
+  it as an SSA value: a move is an event on the bytes of its place. A local that is never
+  borrowed, captured, or moved out of stays an SSA value and is no allocation of the run.
+- **Which by-value uses are moves.** Every one of a place whose type is not Copy, but a
+  reference that the path of a place dereferences, a reference an implicit reborrow or a
+  coercion takes (M6, M11), and the reference a `for` loop iterates through.
 - **`Module::cell`**, the declaration of `std.cell.UnsafeCell`. A `&` gets `Cell` on the bytes
   that the layout of its pointee type puts inside a value of such a type (M21).
+- **`Module::frozen`**, per `static`: it is not `static mut`. Its root is `Frozen`, and `Cell`
+  on its `UnsafeCell` bytes.
+- **`Module::clauses`**, per function: a fn item or method with the `from` clauses of its
+  result and of its params, or a closure body (M24).
 - **Sites.** An instruction without a site of its own has the site of the statement it belongs
   to, so both sites of a report are source lines.
 
 What the interpreter reads off the module without a row: a call protects the reference words of
 its arguments, found by the types of the params (M23); a load through a raw pointer gives each
 reference word of the loaded value a new tag (M20); the return of a frame ends its locals and
-temporaries, `free` and `try_realloc` end the block (M3).
+temporaries, `free` and `try_realloc` end the block (M3); a borrow whose instruction takes a raw
+pointer is a tag made through a raw pointer (M24).
 
-The table has no rows for moves, drops, the ends of blocks, the evaluations of temporaries,
-captures, and `from` clauses: the tracking mode does not see these events, and reports none of
-the violations that need them (M9, M10, M12, M13 at a block, M14, M18, M24). The store of a
-temporary's next value is a write like any other: a `&` of the value before is then `Dead` by
-a write, not by an end.
+What the tracking mode does not see, or sees later than the rules say:
+
+- The moves of a `match` arm that has a guard happen when the guard holds (the names are bound
+  before it runs). Of an or-pattern with a guard they have no row: the block the guard runs in
+  has one predecessor per alternative.
+- A drop of a moved-out place (M12) is reported by the first read its glue makes of the place,
+  as a read of a moved-out place; a glue that reads nothing is not reported.
+- *repeat* rows are never reached today: E0418 is a type error, and a program with one is not
+  lowered, with or without the borrow checker.
+- M24 walks the views a value points to by type. It does not see the captures of a fn value
+  that is a param, a field, or a result (a fn type does not show them); a closure body's own
+  environment it does. A value with more than 4096 reference words is not judged. The report
+  has no site of the store.
 
 ## Limits
 

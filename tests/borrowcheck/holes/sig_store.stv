@@ -1,0 +1,17 @@
+//~ BORROWCHECK signature 7 14
+// A callee stores a reference that the clause of its param does not name. The caller never
+// uses it after its referent, so no rule of the model is broken: the report is the signature.
+view struct Pick { best: &u32, count: usize }
+
+fn put(dst: &mut Pick, x: &u32) {
+    dst.best = x;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0u32;
+    let y: u32 = 7u32;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    put(&mut p, &y);
+    if p.count == 0 { return 0; }
+    return 1;
+}

@@ -665,6 +665,28 @@ pub struct BorrowMark {
     pub mutable: bool,
 }
 
+/// The `from` clauses of a function: what its signature says of the references its result
+/// holds and of those it stores into the views its params point to.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Clauses {
+    pub kind: ClauseKind,
+    /// The result's clause: (source param, `copy`).
+    pub result: Vec<(u32, bool)>,
+    /// The params' clauses: (target param, source param, `copy`).
+    pub params: Vec<(u32, u32, bool)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClauseKind {
+    /// No signature to check a call against (drop glue).
+    #[default]
+    Unchecked,
+    /// A fn item or method: its clauses are the rows.
+    Item,
+    /// A closure body: no clause; every param and capture is a source of its result.
+    Closure,
+}
+
 /// An event of the side table that is no borrow: it happens when the instruction that defines
 /// `value` runs. For the kinds with a place, `value` is a pointer to it and the place is the
 /// pointee of the value's type.
@@ -761,6 +783,8 @@ pub struct Module {
     /// Per `static`, in a module lowered with the borrow side table: it is not `static mut`,
     /// so nothing writes its bytes outside an `UnsafeCell`.
     pub frozen: Vec<bool>,
+    /// Per function, in a module lowered with the borrow side table: its `from` clauses.
+    pub clauses: Vec<Clauses>,
 }
 
 impl Module {

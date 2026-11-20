@@ -155,6 +155,8 @@ struct Node {
     /// How many calls that have not returned protect the tag (M23), and the last of them.
     guards: u32,
     guard_at: Ev,
+    /// The tag was made through a raw pointer: where it comes from is the claim of unsafe code.
+    raw: bool,
 }
 
 const NO_PARENT: u32 = u32::MAX;
@@ -646,6 +648,7 @@ impl Tracker {
             round: 0,
             guards: 0,
             guard_at: NO_EV,
+            raw: false,
         };
         self.ended.remove(&alloc);
         self.tagged.remove(&alloc);
@@ -749,6 +752,7 @@ impl Tracker {
             round: 0,
             guards: 0,
             guard_at: NO_EV,
+            raw: false,
         };
         if kind == Kind::Shared {
             for &(a, b) in cells {
@@ -788,6 +792,38 @@ impl Tracker {
         self.tags.insert(self.next, (alloc, i));
         self.next += 1;
         Ok(self.next - 1)
+    }
+
+    /// `tag` was made through a raw pointer.
+    pub fn mark_raw(&mut self, tag: Tag) {
+        if let Some(&(a, i)) = self.tags.get(&tag)
+            && let Some(tree) = self.trees.get_mut(&a)
+        {
+            tree.nodes[i as usize].raw = true;
+        }
+    }
+
+    /// The allocation of `tag`, and whether it or one of its ancestors was made through a raw
+    /// pointer; `chain` takes the tag and its ancestors below the root. `None`: no node of
+    /// the tag is left.
+    pub fn lineage(&self, tag: Tag, chain: &mut Vec<Tag>) -> Option<(u32, bool)> {
+        let &(a, mut i) = self.tags.get(&tag)?;
+        let tree = self.trees.get(&a)?;
+        let mut raw = false;
+        chain.clear();
+        while i != 0 {
+            let n = tree.nodes.get(i as usize)?;
+            chain.push(n.tag);
+            raw |= n.raw;
+            i = n.parent;
+        }
+        Some((a, raw))
+    }
+
+    /// Where `tag` was made ([`NO_EV`]: no node of it is left).
+    pub fn made_at(&self, tag: Tag) -> Ev {
+        let node = self.tags.get(&tag).and_then(|&(a, i)| self.trees.get(&a)?.nodes.get(i as usize));
+        node.map_or(NO_EV, |n| n.made_at)
     }
 
     /// Whether every tag is used up: a later borrow makes no tag.
@@ -1545,6 +1581,26 @@ mod tests {
         let e = t.gone(X, m, 0, 4, 4).unwrap_err();
         assert_eq!((e.class, e.event, e.cause_at), (Class::TwoExclusive, Use::End, 3));
         assert!(t.moved(X).is_empty());
+    }
+
+    #[test]
+    fn the_lineage_of_a_tag() {
+        let mut t = local(8);
+        let a = excl(&mut t, ROOT, 0, 8, 2);
+        let b = shared(&mut t, a, 0, 4, 3);
+        let c = shared(&mut t, b, 0, 4, 4);
+        let mut chain = Vec::new();
+        assert_eq!(t.lineage(c, &mut chain), Some((X, false)));
+        assert_eq!(chain, vec![c, b, a]);
+        assert_eq!(t.made_at(b), 3);
+        // a tag made through a raw pointer marks every tag below it
+        t.mark_raw(b);
+        assert_eq!(t.lineage(c, &mut chain), Some((X, true)));
+        assert_eq!(t.lineage(a, &mut chain), Some((X, false)));
+        assert_eq!(chain, vec![a]);
+        // a tag without a node has none
+        assert_eq!(t.lineage(99, &mut chain), None);
+        assert_eq!(t.made_at(99), NO_EV);
     }
 
     #[test]

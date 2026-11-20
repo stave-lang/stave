@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
+mod signature;
 mod simd;
 
 use crate::arith::{self, IntTy};
@@ -25,7 +26,7 @@ use crate::borrowtrack::{Ev, Kind, NO_EV, ROOT, Report, Tag, Tracker};
 use crate::host::{Host, SysResult};
 use crate::ir::{
     Block, Body, CastKind, Const, EventKind, FuncId, Module, Op, Operand, PanicKind, Site, Target, Term,
-    Value,
+    Value, ValueDef,
 };
 use crate::layout::{LayoutError, Layouts, Shape};
 use crate::mem::{Fault, Memory};
@@ -224,6 +225,14 @@ struct Borrows {
     /// The bytes of a value of each type that are inside an `UnsafeCell`, as sorted ranges.
     cells: HashMap<TypeId, Rc<[(u64, u64)]>>,
     report: Option<Box<Report>>,
+    /// Whether a value of each type holds a reference word.
+    refs: HashMap<TypeId, bool>,
+    /// The signature check's plan of each function called so far.
+    plans: Vec<Option<Rc<signature::Plan>>>,
+    /// The allocations of the statics.
+    static_ids: HashSet<u32>,
+    /// The `from` clauses that a call did not keep (M24).
+    signatures: Vec<signature::SignatureReport>,
 }
 
 fn ev(f: FuncId, inst: u32) -> Ev {
@@ -242,11 +251,24 @@ enum Mark {
     Gone,
     Repeat,
     Env,
+    /// A borrow through a raw pointer.
+    SharedRaw,
+    MutRaw,
 }
 
 impl Mark {
-    const ALL: [Mark; 8] =
-        [Mark::None, Mark::Shared, Mark::Mut, Mark::Begin, Mark::End, Mark::Gone, Mark::Repeat, Mark::Env];
+    const ALL: [Mark; 10] = [
+        Mark::None,
+        Mark::Shared,
+        Mark::Mut,
+        Mark::Begin,
+        Mark::End,
+        Mark::Gone,
+        Mark::Repeat,
+        Mark::Env,
+        Mark::SharedRaw,
+        Mark::MutRaw,
+    ];
 
     fn of(e: EventKind) -> Mark {
         match e {
@@ -259,8 +281,48 @@ impl Mark {
     }
 }
 
+/// Whether the borrow that instruction `i` of `body` carries is made from a raw pointer: the
+/// address it borrows is that of a place reached through one (`&*p`, `&(*p).f`, `&(*p)[k]`,
+/// a fat reference put together from one), with no load in between.
+fn from_raw(m: &Module, body: &Body, i: u32) -> bool {
+    let raw = |o: Operand| match o {
+        Operand::Value(v) => {
+            matches!(body.value_ty(v).and_then(|t| m.types.key(t)), Some(TypeKey::RawPtr { .. }))
+        }
+        _ => false,
+    };
+    let def = |o: Operand| match o {
+        Operand::Value(v) => match body.values.get(v.index()).map(|d| d.def) {
+            Some(ValueDef::Inst(k)) => Some(k),
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut cur = i;
+    for _ in 0..16 {
+        let address = matches!(
+            body.insts.op.get(cur as usize),
+            Some(
+                Op::Cast(CastKind::Exact)
+                    | Op::FieldAddr
+                    | Op::EnumFieldAddr
+                    | Op::ElemAddr
+                    | Op::SliceMake
+                    | Op::SlicePtr
+            )
+        );
+        let Some(&a) = body.args(cur).first().filter(|_| address) else { return false };
+        if raw(a) {
+            return true;
+        }
+        let Some(k) = def(a) else { return false };
+        cur = k;
+    }
+    false
+}
+
 /// The rows of a body by value.
-fn marks_of(body: &Body) -> Vec<u8> {
+fn marks_of(m: &Module, body: &Body) -> Vec<u8> {
     if body.borrows.is_empty() && body.events.is_empty() {
         return Vec::new();
     }
@@ -271,7 +333,19 @@ fn marks_of(body: &Body) -> Vec<u8> {
         }
     };
     for b in &body.borrows {
-        set(b.value, if b.mutable { Mark::Mut } else { Mark::Shared });
+        let raw = match body.values.get(b.value.index()).map(|d| d.def) {
+            Some(ValueDef::Inst(i)) => from_raw(m, body, i),
+            _ => false,
+        };
+        set(
+            b.value,
+            match (b.mutable, raw) {
+                (true, false) => Mark::Mut,
+                (false, false) => Mark::Shared,
+                (true, true) => Mark::MutRaw,
+                (false, true) => Mark::SharedRaw,
+            },
+        );
     }
     for e in &body.events {
         set(e.value, Mark::of(e.kind));
@@ -414,6 +488,8 @@ struct Frame {
     dest: Option<Value>,
     /// Borrow tracking: the tags the call protects (M23).
     guards: Vec<Tag>,
+    /// Borrow tracking: what the signature check keeps of the entry (M24).
+    sig: Option<Box<signature::Entry>>,
 }
 
 enum Step {
@@ -512,7 +588,7 @@ impl<'m, H: Host> Interp<'m, H> {
             })
         });
         let bt = (cfg.check && cfg.borrow).then(|| {
-            let marks = m.funcs.iter().map(|f| f.body.as_ref().map_or(Vec::new(), marks_of));
+            let marks = m.funcs.iter().map(|f| f.body.as_ref().map_or(Vec::new(), |b| marks_of(m, b)));
             Box::new(Borrows {
                 tracker: Tracker::new(),
                 shadow: BTreeMap::new(),
@@ -520,6 +596,10 @@ impl<'m, H: Host> Interp<'m, H> {
                 at: NO_EV,
                 cells: HashMap::new(),
                 report: None,
+                refs: HashMap::new(),
+                plans: vec![None; m.funcs.len()],
+                static_ids: HashSet::new(),
+                signatures: Vec::new(),
             })
         });
         let strs = m.strings.iter().map(|s| mem.add_data(s)).collect();
@@ -687,12 +767,15 @@ impl<'m, H: Host> Interp<'m, H> {
         }
         let m = self.m;
         for (k, st) in m.statics.iter().enumerate() {
-            if m.frozen.get(k) != Some(&true) {
-                continue;
-            }
             let Some((id, _, size)) = self.statics.get(k).and_then(|&a| self.mem.alloc_span(a)) else {
                 continue;
             };
+            if let Some(bt) = &mut self.bt {
+                bt.static_ids.insert(id);
+            }
+            if m.frozen.get(k) != Some(&true) {
+                continue;
+            }
             let cells = self.cells(st.ty)?;
             if let Some(bt) = &mut self.bt {
                 bt.tracker.begin_static(id, size, &cells, NO_EV);
@@ -725,7 +808,8 @@ impl<'m, H: Host> Interp<'m, H> {
             return Ok(out);
         }
         if let Some(bt) = &mut self.bt {
-            let held: Vec<_> = bt.shadow.range(env..env.saturating_add(size)).map(|(&a, &w)| (a, w)).collect();
+            let held: Vec<_> =
+                bt.shadow.range(env..env.saturating_add(size)).map(|(&a, &w)| (a, w)).collect();
             for (a, w) in held {
                 bt.shadow.insert(copy + (a - env), w);
             }
@@ -852,6 +936,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 bt.tracker.protect(g, at);
             }
         }
+        let sig = if self.bt.is_some() { self.signature_entry(f, &args) } else { None };
         let mut regs = vec![Val::S(0); body.values.len()];
         for (p, a) in body.params(Block(0)).iter().zip(args) {
             if let Some(r) = regs.get_mut(p.index()) {
@@ -859,7 +944,7 @@ impl<'m, H: Host> Interp<'m, H> {
             }
         }
         let mark = self.mem.stack_mark();
-        frames.push(Frame { func: f, regs, block: 0, pc: 0, mark, dest: None, guards });
+        frames.push(Frame { func: f, regs, block: 0, pc: 0, mark, dest: None, guards, sig });
         Ok(())
     }
 
@@ -921,7 +1006,11 @@ impl<'m, H: Host> Interp<'m, H> {
                             Some(o) => Some(self.eval(body, &fr.regs, o)?),
                             None => None,
                         };
+                        let at = fr.sig.is_some().then(|| self.trace(&frames));
                         let done = frames.pop().ok_or(malformed("frame"))?;
+                        if let (Some(e), Some(at)) = (&done.sig, &at) {
+                            self.signature_return(fid, e, v.as_ref(), at);
+                        }
                         if let Some(bt) = &mut self.bt {
                             for &g in &done.guards {
                                 bt.tracker.unprotect(g);
@@ -1390,8 +1479,10 @@ impl<'m, H: Host> Interp<'m, H> {
         match Mark::ALL.get(code as usize).copied().unwrap_or(Mark::None) {
             Mark::None => Ok(out),
             Mark::Env => self.own_env(body, i, out),
-            Mark::Shared => self.borrow_word(rt, out, false, at),
-            Mark::Mut => self.borrow_word(rt, out, true, at),
+            Mark::Shared => self.borrow_word(rt, out, false, false, at),
+            Mark::Mut => self.borrow_word(rt, out, true, false, at),
+            Mark::SharedRaw => self.borrow_word(rt, out, false, true, at),
+            Mark::MutRaw => self.borrow_word(rt, out, true, true, at),
             Mark::Repeat => Err(self.violation(Tracker::repeat(at))),
             m => {
                 self.place_event(m, rt, &out, at)?;
@@ -1430,7 +1521,7 @@ impl<'m, H: Host> Interp<'m, H> {
 
     /// M4: the reference `v` of type `rt` with a new tag, a child of the tag it carries, for
     /// the place its address names: the pointee of `rt`, of a fat reference its elements.
-    fn borrow_word(&mut self, rt: TypeId, v: Val, mutable: bool, at: Ev) -> R<Val> {
+    fn borrow_word(&mut self, rt: TypeId, v: Val, mutable: bool, raw: bool, at: Ev) -> R<Val> {
         let Some((addr, parent)) = v.word() else { return Ok(v) };
         // the place: `n` values of type `elem` (no type: bytes)
         let inner = self.pointee.get(rt.index()).copied().flatten();
@@ -1457,10 +1548,15 @@ impl<'m, H: Host> Interp<'m, H> {
         let kind = if mutable { Kind::Mut } else { Kind::Shared };
         let bytes = off..off.saturating_add(n.saturating_mul(unit));
         match bt.tracker.borrow(id, parent, kind, bytes, &cells, at) {
-            Ok(tag) => Ok(match v {
-                Val::Pair(a, n) | Val::PairT(a, n, _) => Val::PairT(a, n, tag),
-                _ => Val::T(addr, tag),
-            }),
+            Ok(tag) => {
+                if raw {
+                    bt.tracker.mark_raw(tag);
+                }
+                Ok(match v {
+                    Val::Pair(a, n) | Val::PairT(a, n, _) => Val::PairT(a, n, tag),
+                    _ => Val::T(addr, tag),
+                })
+            }
             Err(r) => Err(self.violation(r)),
         }
     }
@@ -1473,7 +1569,7 @@ impl<'m, H: Host> Interp<'m, H> {
         }
         let types = &self.m.types;
         match types.key(t) {
-            Some(&TypeKey::Ref { mutable, .. }) => return self.borrow_word(t, v, mutable, at),
+            Some(&TypeKey::Ref { mutable, .. }) => return self.borrow_word(t, v, mutable, true, at),
             Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
             _ => return Ok(v),
         }

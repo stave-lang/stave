@@ -1,0 +1,41 @@
+//~ BORROWCHECK ok
+// Calls that keep their `from` clauses: a store the clause names, a copy out of a view, a
+// reborrow of a view, a by-value view as the source, two sources, a store of what another
+// view holds, and a closure that returns a borrow of a capture.
+view struct Pick { best: &u32, count: usize }
+view struct Two { a: &u32, b: &u32 }
+
+fn put(dst: &mut Pick from x, x: &u32) { dst.best = x; }
+
+fn best(p: &Pick) -> &u32 from copy p { return p.best; }
+
+fn field(p: &mut Pick) -> &mut usize from p { return &mut p.count; }
+
+fn pick(t: Two, second: bool) -> &u32 from t { return if second then t.b else t.a; }
+
+fn longer(a: &[u32], b: &[u32]) -> &[u32] from a + b {
+    if a.len() >= b.len() { return a; }
+    return b;
+}
+
+fn copy_into(dst: &mut Pick from copy src, src: &Pick) { dst.best = src.best; }
+
+fn main() -> i32 {
+    let zero: u32 = 0u32;
+    let y: u32 = 7u32;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    put(&mut p, &y);
+    let mut sum: u32 = *best(&p);
+    *field(&mut p) = 3;
+    let mut q = Pick.{ best: &zero, count: 0 };
+    copy_into(&mut q, &p);
+    sum = sum + *q.best;
+    sum = sum + *pick(Two.{ a: &zero, b: &y }, true);
+    let xs: [u32; 3] = [1u32, 2u32, 3u32];
+    let ys: [u32; 2] = [4u32, 5u32];
+    sum = sum + longer(&xs, &ys)[0];
+    let f = fn() -> &u32 { return &y; };
+    sum = sum + *f();
+    if sum == 29u32 && p.count == 3 { return 0; }
+    return 1;
+}

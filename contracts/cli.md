@@ -294,10 +294,15 @@ default limits; the pipeline then lowers each program a second time, with the si
 interpreter legs (`Options::tracked`, `Output::for_interp`). Dumps, goldens, and the backends get
 the canonical module in every case. A violation ends the run as a failure
 whose text starts `interp: borrow violation [<class>] <rule>`, class one of `write-under-shared
-two-exclusive use-after-referent second-owner`, rule `M1`..`M4` or `M23`; then the event, its
-bytes, the allocation, the permission and kind of the failing tag; then three lines: `at` (the
-trace of the violating event), `cause` (the event that made the tag `Frozen` or `Dead`; for
-`M23` the call that protects the tag), `tag made at`.
+two-exclusive use-after-referent second-owner`, rule `M1`..`M4`, `M9`, `M10`, or `M23`; then the
+event, its bytes, the allocation, the permission and kind of the failing tag; then three lines:
+`at` (the trace of the violating event), `cause` (the event that made the tag `Frozen` or `Dead`;
+for `M23` the call that protects the tag; for `M9` the move that emptied the place), `tag made
+at`. A `from` clause that a call did not keep (`M24`) is no violation and does not end the run: a
+run that ends without a violation and has such reports is a failure whose text starts `interp:
+borrow signature [signature] M24`, then what holds the reference (the result of a fn, or a param
+by its index), then two lines: `at` (the trace of the return), `tag made at`; a last line counts
+the further reports.
 
 Package layout: `stave.toml` plus `src/main.stv` (`kind = "bin"`) or
 `src/lib.stv` (`kind = "lib"`: a static `.a` plus a C header for `extern "C"` exports). Module path

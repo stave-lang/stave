@@ -135,6 +135,16 @@ pub fn run(
         Outcome::BorrowError(r) => return Err(format!("interp: {}", r.render(&m))),
         o => return Err(format!("interp: the program did not exit: {o:?}")),
     };
+    // a `from` clause a call did not keep is no violation: the run went on to its end, and
+    // the reports are its result
+    let signatures = it.signature_reports();
+    if let Some(first) = signatures.first() {
+        let more = match signatures.len() {
+            1 => String::new(),
+            n => format!("\n  and {} more signature reports", n - 1),
+        };
+        return Err(format!("interp: {first}{more}"));
+    }
     let steps = it.steps();
     let leaks = it
         .live_heap_blocks()

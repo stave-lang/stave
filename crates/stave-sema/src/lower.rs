@@ -440,6 +440,8 @@ fn lower_in_pool(
         if borrows {
             let frozen = |d: &DeclId| prog.decl(*d).is_some_and(|x| !x.flags.has(DeclFlags::MUT));
             module.frozen = statics_list.iter().map(frozen).collect();
+        } else {
+            module.clauses = Vec::new();
         }
         Assembled { module, jobs, order, table, site_pos }
     });
@@ -1015,6 +1017,7 @@ fn assemble(
     module.strings = all_strs.clone();
     module.intrinsics = all_intrs.clone();
     let mut funcs: Vec<stave_ir::Func> = Vec::with_capacity(nf as usize);
+    let mut clauses: Vec<stave_ir::Clauses> = Vec::with_capacity(nf as usize);
     let mut sites: Vec<SiteInfo> = Vec::new();
     let mut site_pos: Vec<SitePos> = Vec::new();
     // Files of built-in packages are named `<package>/<path in package>` (`std/vec.stv`) in the
@@ -1160,6 +1163,24 @@ fn assemble(
                 b
             });
             let _ = k;
+            clauses.push(match (job, f.closure) {
+                (Job::Inst(_), Some(_)) => {
+                    stave_ir::Clauses { kind: stave_ir::ClauseKind::Closure, ..Default::default() }
+                }
+                (Job::Inst(key), None) => match sigs.fn_sig(key.decl) {
+                    Some(s) => stave_ir::Clauses {
+                        kind: stave_ir::ClauseKind::Item,
+                        result: s.origins.iter().map(|o| (u32::from(o.param), o.copy)).collect(),
+                        params: s
+                            .param_origins
+                            .iter()
+                            .map(|p| (u32::from(p.target), u32::from(p.source), p.copy))
+                            .collect(),
+                    },
+                    None => stave_ir::Clauses::default(),
+                },
+                (Job::Glue(_), _) => stave_ir::Clauses::default(),
+            });
             funcs.push(stave_ir::Func {
                 instance,
                 path: path.clone(),
@@ -1174,6 +1195,7 @@ fn assemble(
         }
     }
     module.funcs = funcs;
+    module.clauses = clauses;
     module.types = types;
     module.sites = sites;
     // 7. statics

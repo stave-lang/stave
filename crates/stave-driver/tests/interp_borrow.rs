@@ -2,14 +2,16 @@
 //! `tests/borrowcheck/`. The first line of each says what the run must give:
 //! `//~ BORROWCHECK <class> <line> <cause line>`: a violation of that class whose violating
 //! event and whose cause are at those lines (cause line 0: the cause is in another file);
+//! `//~ BORROWCHECK signature <line> <line>`: no violation, and a signature report (M24) for
+//! the return at the first line, of a reference whose tag was made at the second;
 //! `//~ BORROWCHECK ok`: no report and exit status 0.
 //!
 //! `tests/borrowcheck/holes/` holds programs the borrow checker rejects, lowered all the same
 //! ([`Options::unchecked_borrows`]): what the dynamic model says of an execution the static
 //! rules forbid. A checker that accepts one of them by mistake has a hole, and the report
 //! here is what shows it. Their first line is as above, or
-//! `//~ BORROWCHECK gap`: the tracking mode does not see the violating event yet, and the run
-//! gives no report.
+//! `//~ BORROWCHECK gap`: the tracking mode does not see the violating event, and the run gives
+//! no report.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -148,7 +150,10 @@ fn verdict(p: &Path, target: Triple) -> Verdict {
             format!("not lowered: errors {other:?}, failure {:?}", out.failure.as_ref().map(|f| f.stage()));
         return Verdict { rejected, stopped: Some(why), ran: Ok(0) };
     };
-    let lim = Limits { check: true, borrow: true, max_steps: 200_000_000, ..Limits::default() };
+    // `STAVE_BORROWCHECK_PLAIN`: the same module with the memory checks only (to compare the
+    // time and memory of a run with and without tracking)
+    let borrow = std::env::var_os("STAVE_BORROWCHECK_PLAIN").is_none();
+    let lim = Limits { check: true, borrow, max_steps: 200_000_000, ..Limits::default() };
     let ran = interp::run(m, "main.main", target, &[], &[], lim).map(|r| r.ran.exit);
     Verdict { rejected, stopped: None, ran }
 }
@@ -156,6 +161,11 @@ fn verdict(p: &Path, target: Triple) -> Verdict {
 /// Whether the error of a run is the report (class, line, cause line) of program `name`.
 fn is_report(e: &str, name: &str, class: &str, line: u32, cause: u32) -> bool {
     let find = |prefix: &str| e.lines().find(|l| l.starts_with(prefix)).unwrap_or("");
+    if class == "signature" {
+        return e.starts_with("interp: borrow signature [signature]")
+            && at_line(find("  at "), name, line)
+            && (cause == 0 || at_line(find("  tag made at "), name, cause));
+    }
     e.starts_with(&format!("interp: borrow violation [{class}]"))
         && at_line(find("  at "), name, line)
         && (cause == 0 || at_line(find("  cause "), name, cause))
@@ -180,7 +190,7 @@ fn each_rejected_program_gives_its_report() {
         }
         let gap = std::fs::read_to_string(p).unwrap().starts_with("//~ BORROWCHECK gap");
         match (if gap { None } else { expected(p) }, v.ran) {
-            (None, Err(e)) if gap && e.starts_with("interp: borrow violation") => {
+            (None, Err(e)) if gap && e.starts_with("interp: borrow ") => {
                 failures.push(format!("{name}: marked `gap`, now reported:\n{e}"))
             }
             (None, _) if gap => {}
@@ -217,7 +227,7 @@ fn verdicts_of_a_directory() {
 /// own) under tracking: a report is a hole of the static rules, a violation in std or the
 /// runtime, or a fault of the tracking mode.
 #[test]
-#[ignore = "the tracking mode does not see every event yet: its reports are to be read, not gated on"]
+#[ignore = "three runs of every run program, one of them 100M steps: minutes in a debug build"]
 fn run_programs_have_no_report() {
     let dir = repo().join("tests/conformance/run");
     let mut progs: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -233,22 +243,24 @@ fn run_programs_have_no_report() {
     progs.sort();
     let target = Triple::parse("x86_64-linux").unwrap();
     let (mut reports, mut other, mut clean) = (Vec::new(), Vec::new(), 0);
-    // wall time of the interpreter without and with tracking, on the same module
-    let (mut plain, mut tracked) = (Duration::ZERO, Duration::ZERO);
+    // wall time of the interpreter: the canonical module with the memory checks, the module
+    // with the side table with the memory checks, and that module with tracking
+    let (mut plain, mut marked, mut tracked) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
     for p in &progs {
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
         let mut o = Options::new(Goal::Check).threads(Some(4));
         o.lower = true;
-        o.borrow_marks = true;
+        o.tracked = true;
         o.target = Some(target);
         let out = match pipeline::run(p, &Library::in_dir(&repo()), &o) {
-            Ok(out) if !out.has_errors() && out.module.is_some() => out,
+            Ok(out) if !out.has_errors() && out.module.is_some() && out.tracked.is_some() => out,
             _ => {
                 other.push(format!("{name}: not lowered"));
                 continue;
             }
         };
-        let m = out.module.as_ref().unwrap();
+        let canonical = out.module.as_ref().unwrap();
+        let m = out.tracked.as_ref().unwrap();
         let mut files = Vec::new();
         if p.is_dir() {
             for f in std::fs::read_dir(p).unwrap().flatten().map(|e| e.path()).filter(|f| f.is_file()) {
@@ -258,34 +270,41 @@ fn run_programs_have_no_report() {
                 ));
             }
         }
+        let checked = Limits { check: true, borrow: false, ..Limits::default() };
         let t = Instant::now();
-        let base =
-            interp::run(m, "main.main", target, &[], &files, Limits { check: true, ..Limits::default() });
+        let base = interp::run(canonical, "main.main", target, &[], &files, checked);
         let d0 = t.elapsed();
+        let t = Instant::now();
+        let with_table = interp::run(m, "main.main", target, &[], &files, checked);
+        let d1 = t.elapsed();
         let lim = Limits { check: true, borrow: true, ..Limits::default() };
         let t = Instant::now();
         let got = interp::run(m, "main.main", target, &[], &files, lim);
-        let d1 = t.elapsed();
+        let d2 = t.elapsed();
         plain += d0;
-        tracked += d1;
+        marked += d1;
+        tracked += d2;
         println!(
-            "{name}: {} steps, {} ms plain, {} ms tracked",
+            "{name}: {} steps, {} with the side table; {} ms plain, {} ms with the side table, {} ms tracked",
             base.as_ref().map_or(0, |r| r.steps),
+            with_table.as_ref().map_or(0, |r| r.steps),
             d0.as_millis(),
-            d1.as_millis()
+            d1.as_millis(),
+            d2.as_millis()
         );
         match got {
             Ok(_) => clean += 1,
-            Err(e) if e.starts_with("interp: borrow violation") => reports.push(format!("{name}: {e}")),
+            Err(e) if e.starts_with("interp: borrow ") => reports.push(format!("{name}: {e}")),
             Err(e) => other.push(format!("{name}: {}", e.lines().next().unwrap_or(""))),
         }
     }
     println!(
-        "{} programs: {clean} clean, {} report, {} not run; {} ms plain, {} ms tracked",
+        "{} programs: {clean} clean, {} report, {} not run; {} ms plain, {} ms with the side table, {} ms tracked",
         progs.len(),
         reports.len(),
         other.len(),
         plain.as_millis(),
+        marked.as_millis(),
         tracked.as_millis()
     );
     assert!(

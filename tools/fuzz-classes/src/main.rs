@@ -21,7 +21,8 @@
 //! - `mismatch`: accepted, and a native build prints or exits other than the interpreter;
 //! - `trap`: accepted, and the run trapped (no generated program traps);
 //! - `oracle`: accepted, and the interpreter in checking mode (`STAVE_INTERP_CHECK=1` in the
-//!   environment) or the per-program dynamic oracle reported a memory error.
+//!   environment) reported a memory error, or in borrow-tracking mode (`STAVE_INTERP_CHECK=borrow`)
+//!   a violation of the borrow model or a `from` clause a call did not keep.
 //!
 //! Each finding's program is saved under `DIR/findings/<kind>/<class>-<seed>.stv` with the
 //! reason in its head comment; `DIR/summary.txt` gets the table printed at the end,
@@ -226,8 +227,9 @@ fn exec_one(file: &Path, repo: &Path, release: bool) -> ExitCode {
     let limits = Limits { max_steps: 200_000_000, ..Limits::default() };
     let want = match interp::run(out.for_interp().unwrap_or(m), &main_path, target, &[], &[], limits) {
         Ok(r) => r.ran,
-        // Checking mode ends the run at the first memory error: a violation, not a crash.
-        Err(e) if e.starts_with("interp: memory error") => {
+        // Checking mode ends the run at the first memory error, borrow tracking at the first
+        // violation of the borrow model: a report, not a crash.
+        Err(e) if e.starts_with("interp: memory error") || e.starts_with("interp: borrow ") => {
             println!("oracle {e:?}");
             println!("done");
             return ExitCode::SUCCESS;
