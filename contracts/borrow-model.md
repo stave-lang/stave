@@ -591,7 +591,7 @@ it is not dumped, not compared with a golden, and not given to a backend.
   through that reference; a `&mut` chunk binding, a borrow of the chunk's temporary; the
   `&mut` a drop glue runs on (M12).
 - **`Body::events`**, one row per event that is no borrow, each on an instruction of its own
-  (an identity cast of the pointer to the place; for the last two kinds the instruction named):
+  (an identity cast of the pointer to the place; for *repeat* and *environment* the instruction named):
   - *begin*: a local at its declaration, a temporary at each evaluation of its expression
     (M13, M14). The allocation that was in the slot ends with every tag of it, and the root
     stands for the new one.
