@@ -136,7 +136,7 @@ impl Stage {
     /// | items | E0016 |
     /// | parse | E0004 E0011–E0014 E0019–E0023 E0025–E0028 |
     /// | resolve | E0101–E0107 |
-    /// | typeck | E0005 (bracket depth from the item cut, case `expr` from typeck), E02xx E03xx (case `limit` included) E04xx E06xx, E0700–E0718 (the lowering-class gates E0700 E0701 included), E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck), E1404 (deny clause names); the signature's `from` clauses E0514 E0515 E0520 E0521; E0503 case `static` (writes to a `static`) |
+    /// | typeck | E0005 (bracket depth from the item cut, cases `expr` and `type` from typeck),E02xx E03xx (case `limit` included) E04xx E06xx, E0700–E0718 (the lowering-class gates E0700 E0701 included), E08xx (E0807 case `thread` included), E09xx (E0902: the instantiation depth check runs with typeck), E1404 (deny clause names); the signature's `from` clauses E0514 E0515 E0520 E0521; E0503 case `static` (writes to a `static`) |
     /// | borrowck | E05xx except E0514 E0515 E0520 E0521 (accesses, loans, returned origins) |
     /// | lower | E0108 (no `fn main`, builds only, reported before lowering); E1401 E1403 (the effect pass), E1405 E1406 (the rank pass), after borrowck on programs without errors, in checks and builds |
     /// | (none) | retired codes: E0511 |
@@ -146,7 +146,7 @@ impl Stage {
                 return Some(Stage::Lex);
             }
             "E0016" => return Some(Stage::Items),
-            // The bracket-depth case comes from the item cut, case `expr` from typeck: the set
+            // The bracket-depth case comes from the item cut, `expr` and `type` from typeck: the set
             // is final after typeck.
             "E0005" => return Some(Stage::Typeck),
             // E0004 also comes from the item cut (pre-item run, late import): both are front end.

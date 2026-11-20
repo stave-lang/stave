@@ -1,0 +1,8 @@
+# The name of a built-in package always means that package: a dependency bound under it would
+# replace the implicit `std` (or stand for `runtime`) in this package, whatever its own `name`.
+name = "builtin_name"
+kind = "bin"
+
+[dependencies]
+std = { path = "../manifest_builtin_dep" } #~ ERROR E1002
+runtime = { path = "../manifest_builtin_dep" } #~ ERROR E1002
