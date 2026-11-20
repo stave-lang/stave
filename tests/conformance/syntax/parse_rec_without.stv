@@ -2,7 +2,7 @@
 // `rec fn` marks a fn that may be part of a call cycle: on fn items, methods, test fns, and after
 // `pub` and `unsafe("..")`. `without(..)` follows `needs(..)` and precedes `requires`/`ensures`;
 // fn types carry it after their `needs(..)`. The effect names: alloc trap recursive lock unsafe
-// io block.
+// io block park.
 rec fn walk(n: u32) -> u32 {
     return if n == 0 then 0 else walk(n - 1) + 1;
 }

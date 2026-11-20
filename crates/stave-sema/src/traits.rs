@@ -93,9 +93,10 @@ pub fn scalar_layout(k: &TypeKind, sub: &mut dyn FnMut(TypeId) -> Option<(u64, u
     })
 }
 
-/// Layout of `t` in table `cx` (concrete types only).
+/// Layout of `t` in table `cx` (concrete types only). `depth`: the parts above `t`; a part
+/// [`crate::typedepth::MAX_TYPE_DEPTH`] parts down has no layout.
 pub fn layout_of<I: Interner + ?Sized>(cx: &mut I, sigs: &Sigs, t: TypeId, depth: u32) -> Option<(u64, u64)> {
-    if depth > 256 {
+    if depth >= crate::typedepth::MAX_TYPE_DEPTH {
         return None;
     }
     let k = cx.kind(t).clone();
@@ -154,11 +155,12 @@ pub fn adt_layout(is_enum: bool, variants: &[Vec<(u64, u64)>]) -> Option<(u64, u
     Some((size, align))
 }
 
-/// Deepest type nesting a trait query descends. Past it a type does not implement the trait:
-/// the conservative answer (not Copy: moved; not Send/Sync: rejected at the thread boundary;
-/// not Flat: rejected at the bound).
-/// Recursive types end earlier, by the coinductive Send/Sync rule ([`Query`]).
-pub(crate) const QUERY_DEPTH: u32 = 1024;
+/// Deepest type nesting a trait query descends: the type depth limit. Past it a type does not
+/// implement the trait: the conservative answer (not Copy: moved; not Send/Sync: rejected at the
+/// thread boundary; not Flat: rejected at the bound). Within one type the limit is not reached
+/// (E0005 case `type` rejects deeper types); a query that follows references through distinct
+/// types can reach it. Recursive types end earlier, by the coinductive Send/Sync rule ([`Query`]).
+pub(crate) const QUERY_DEPTH: u32 = crate::typedepth::MAX_TYPE_DEPTH;
 
 /// State of one top-level trait query: the Send/Sync goals in progress (a goal reached again is
 /// assumed to hold), the lowest in-progress index an assumption used below the current goal

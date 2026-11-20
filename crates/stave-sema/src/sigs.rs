@@ -435,8 +435,9 @@ pub(crate) fn lower_type<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_p
     let mut n = n;
     let mut ret_pos = ret_pos;
     let base = loop {
-        if wraps.len() > 1_000_000 {
-            break h.error_ty();
+        if wraps.len() >= crate::typedepth::MAX_TYPE_DEPTH as usize {
+            too_deep(h, &icx, n);
+            return h.error_ty();
         }
         let a = icx.a(n);
         match icx.kind(n) {
@@ -561,7 +562,7 @@ fn lower_base<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -
             None => 0,
         };
         let deny = match icx.child(n, NodeKind::Without) {
-            Some(nd) => deny_bits(h, &icx, nd).0,
+            Some(nd) => crate::effects::Effects::fn_type_deny(deny_bits(h, &icx, nd).0),
             None => 0,
         };
         if params.contains(&h.error_ty()) || h.is_error_ty(ret) {
@@ -615,6 +616,11 @@ fn lower_base<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -
                     let shape: Vec<Option<TypeId>> =
                         gens.iter().map(|g| g.is_const.then_some(g.const_ty)).collect();
                     let Some(args) = lower_gargs(h, env, gargs_node, &shape, n) else { return h.error_ty() };
+                    // Checked before substituting, which stops at the limit.
+                    if crate::types::subst_height(&*h, target, &args) > crate::typedepth::MAX_TYPE_DEPTH {
+                        too_deep(h, &icx, n);
+                        return h.error_ty();
+                    }
                     let t = h.subst(target, &args, None);
                     if !ret_pos && t == h.fixed_ty(ids::NEVER) {
                         e0209(h, &icx, n);
@@ -633,6 +639,11 @@ fn lower_base<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -
             h.error_ty()
         }
     }
+}
+
+/// E0005 case `type`: the type written at node `n` nests deeper than the type depth limit.
+fn too_deep<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32) {
+    h.report(mk("E0005", Some("type"), &[], icx.node_span(n), &[]));
 }
 
 /// E0414 (case `container` for the std package's ADTs): a view type argument for a generic param
@@ -736,7 +747,7 @@ pub(crate) fn deny_bits<H: LowerHost + ?Sized>(
     for e in icx.kids_vec(nd) {
         let t = icx.a(e);
         let name = icx.tok_str(t);
-        match crate::effects::Effects::of_name(name) {
+        match crate::effects::Effects::deny_of_name(name) {
             Some(b) => {
                 bits |= b.0;
                 spans.push((b.0, icx.tok_span(t)));
