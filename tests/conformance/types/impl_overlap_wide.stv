@@ -1,0 +1,41 @@
+//~ CHECK-ONLY
+// `Q17<T>` and `Q17<u32>` unify, but comparing them takes more steps than impl matching allows.
+// Past that limit two impls count as overlapping (E0903), never as disjoint.
+trait Tr {
+    fn m(&self) -> u32;
+}
+
+type Q0<T> = (T, u8);
+type Q1<T> = (Q0<T>, Q0<T>);
+type Q2<T> = (Q1<T>, Q1<T>);
+type Q3<T> = (Q2<T>, Q2<T>);
+type Q4<T> = (Q3<T>, Q3<T>);
+type Q5<T> = (Q4<T>, Q4<T>);
+type Q6<T> = (Q5<T>, Q5<T>);
+type Q7<T> = (Q6<T>, Q6<T>);
+type Q8<T> = (Q7<T>, Q7<T>);
+type Q9<T> = (Q8<T>, Q8<T>);
+type Q10<T> = (Q9<T>, Q9<T>);
+type Q11<T> = (Q10<T>, Q10<T>);
+type Q12<T> = (Q11<T>, Q11<T>);
+type Q13<T> = (Q12<T>, Q12<T>);
+type Q14<T> = (Q13<T>, Q13<T>);
+type Q15<T> = (Q14<T>, Q14<T>);
+type Q16<T> = (Q15<T>, Q15<T>);
+type Q17<T> = (Q16<T>, Q16<T>);
+
+impl<T> Tr for Q17<T> {
+    fn m(&self) -> u32 {
+        return 1u32;
+    }
+}
+
+impl Tr for Q17<u32> { //~ ERROR E0903
+    fn m(&self) -> u32 {
+        return 2u32;
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

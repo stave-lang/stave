@@ -7,8 +7,12 @@
 //!
 //! `--pair` instead writes one smaller-featured program twice, in Stave and in C99, with the
 //! same fns, control flow, and checksum (`pair`): the compile and run time benchmark input.
+//!
+//! [`classes`] generates single-file programs around borrow-checker constructs, each with the
+//! verdict the checker must give: the input of the `fuzz-classes` oracle.
 
 mod body;
+pub mod classes;
 mod emit;
 pub mod mix;
 mod model;

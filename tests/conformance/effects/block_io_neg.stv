@@ -1,0 +1,22 @@
+//~ CHECK-ONLY
+// `without(block)`: a read, write, or open of a file may wait on another process or thread (an
+// empty or full pipe, a FIFO), so `std.io` has `block`, through a call and in the fn itself.
+import std.io;
+
+fn h() {
+    io.print("hi\n");
+}
+
+fn g() without(block) { //~ ERROR E1401
+    h();
+}
+
+fn r() -> bool without(block) { //~ ERROR E1401
+    let x = io.read_file("/dev/null");
+    return x.is_ok();
+}
+
+fn main() {
+    g();
+    let ok = r();
+}

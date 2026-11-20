@@ -12,7 +12,8 @@
 // while a guard of rank r lives, every lock taken (directly, through any call, and by the threads
 // a `scope` end, `thread.join` or `par_*` waits for) has a rank above r (E1405, E1406). Two
 // mutexes of one rank are taken together only through `lock_pair`, which locks them in address
-// order. `try_lock` never waits, so it is not checked, but its guard counts as held.
+// order. `try_lock` never waits, so it is not checked, but its guard counts as held. On a
+// mutex already held, by this thread too, it returns None.
 //
 // `Once<T, R>` holds a value computed at most once: `get_or_init(f)` runs `f` in the first
 // caller, callers arriving meanwhile sleep on a futex, and every call returns a reference to the

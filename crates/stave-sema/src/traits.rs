@@ -161,16 +161,25 @@ pub(crate) const QUERY_DEPTH: u32 = 1024;
 
 /// State of one top-level trait query: the Send/Sync goals in progress (a goal reached again is
 /// assumed to hold), the lowest in-progress index an assumption used below the current goal
-/// (`usize::MAX`: none), and the results already known.
+/// (`usize::MAX`: none), and the results already known. `any_kind`: impl matching skips the
+/// view-kind rule (a query that asks whether an impl could apply to some instance, or names the
+/// impl a view was refused by; never one that selects an impl).
 struct Query {
     active: Vec<(TypeId, DeclId)>,
     low: usize,
     memo: FxHashMap<(TypeId, DeclId), bool>,
+    any_kind: bool,
 }
 
 impl Default for Query {
     fn default() -> Query {
-        Query { active: Vec::new(), low: usize::MAX, memo: FxHashMap::default() }
+        Query { active: Vec::new(), low: usize::MAX, memo: FxHashMap::default(), any_kind: false }
+    }
+}
+
+impl Query {
+    fn any_kind() -> Query {
+        Query { any_kind: true, ..Query::default() }
     }
 }
 
@@ -323,7 +332,8 @@ impl<'a> World<'a> {
         }
     }
 
-    /// Unifies impl pattern `pat` (generic params = variables in `binds`) with `t`.
+    /// Unifies impl pattern `pat` (generic params = variables in `binds`) with `t`. Past its
+    /// step limit the answer is "no match".
     pub fn match_ty<I: Interner + ?Sized>(
         &self,
         cx: &I,
@@ -331,11 +341,35 @@ impl<'a> World<'a> {
         t: TypeId,
         binds: &mut [Option<GArg>],
     ) -> bool {
+        self.match_ty_in(cx, pat, t, binds, &mut false)
+    }
+
+    /// [`Self::match_ty`], but past the step limit the answer is "may match".
+    pub(crate) fn may_match_ty<I: Interner + ?Sized>(
+        &self,
+        cx: &I,
+        pat: TypeId,
+        t: TypeId,
+        binds: &mut [Option<GArg>],
+    ) -> bool {
+        let mut exceeded = false;
+        self.match_ty_in(cx, pat, t, binds, &mut exceeded) || exceeded
+    }
+
+    fn match_ty_in<I: Interner + ?Sized>(
+        &self,
+        cx: &I,
+        pat: TypeId,
+        t: TypeId,
+        binds: &mut [Option<GArg>],
+        exceeded: &mut bool,
+    ) -> bool {
         let mut stack = vec![(pat, t)];
         let mut steps = 0u32;
         while let Some((p, x)) = stack.pop() {
             steps += 1;
             if steps > 100_000 {
+                *exceeded = true;
                 return false;
             }
             if p == x && !cx.has_params(p) {
@@ -846,6 +880,18 @@ impl<'a> World<'a> {
         self.find_impl_q(cx, t, tr, env, depth, &mut Query::default())
     }
 
+    /// [`World::find_impl`] without the view-kind rule: whether some instance of `t` (its `view`
+    /// params standing for owned types too) has an impl of `tr`.
+    pub fn find_impl_any_kind<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        t: TypeId,
+        tr: &TraitRef,
+        env: &[GenericParam],
+    ) -> Option<(DeclId, Vec<GArg>)> {
+        self.find_impl_q(cx, t, tr, env, 0, &mut Query::any_kind())
+    }
+
     fn find_impl_q<I: Interner + ?Sized>(
         &self,
         cx: &mut I,
@@ -885,6 +931,52 @@ impl<'a> World<'a> {
         depth: u32,
     ) -> Option<Vec<GArg>> {
         self.impl_applies_q(cx, imp, t, env, depth, &mut Query::default())
+    }
+
+    /// [`World::impl_applies`] without the view-kind rule: the impl a view was refused by, for
+    /// the diagnostic that names its param. Never selects an impl.
+    pub fn impl_applies_but_views<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        imp: &ImplDef,
+        t: TypeId,
+        env: &[GenericParam],
+    ) -> Option<Vec<GArg>> {
+        self.impl_applies_q(cx, imp, t, env, 0, &mut Query::any_kind())
+    }
+
+    /// The impl with a method `name` that would apply to `recv` (references peeled) if its params
+    /// took views, and its args: why a method call on a view-holding type found nothing.
+    pub fn method_refused_view<I: Interner + ?Sized>(
+        &self,
+        cx: &mut I,
+        recv: TypeId,
+        name: Sym,
+        env: &[GenericParam],
+    ) -> Option<(DeclId, Vec<GArg>)> {
+        let mut c = recv;
+        loop {
+            let head = self.head(cx, c);
+            let lists: [&[DeclId]; 2] = [
+                head.and_then(|h| self.sigs.impls_by_head.get(&h)).map_or(&[][..], |v| &v[..]),
+                &self.sigs.headless_impls[..],
+            ];
+            for list in lists {
+                for &i in list {
+                    let Some(imp) = self.sigs.impl_def(i) else { continue };
+                    if !imp.methods.iter().any(|&m| self.prog.decl(m).is_some_and(|d| d.name == name)) {
+                        continue;
+                    }
+                    if let Some(args) = self.impl_applies_but_views(cx, imp, c, env) {
+                        return Some((i, args));
+                    }
+                }
+            }
+            match cx.kind(c) {
+                TypeKind::Ref { inner, .. } => c = *inner,
+                _ => return None,
+            }
+        }
     }
 
     /// The generic args of impl `imp` when its self type matches `t`, its bounds unchecked (the
@@ -936,6 +1028,11 @@ impl<'a> World<'a> {
         // Bounds of the impl's params.
         for (k, g) in imp.generics.iter().enumerate() {
             let GArg::Type(a) = args[k] else { continue };
+            // The impl's body is checked with a param without `view` holding no reference, so
+            // the impl does not exist for a view.
+            if !q.any_kind && !g.view && !cx.is_error_ty(a) && self.is_view(&*cx, a, env) {
+                return None;
+            }
             for b in &g.bounds {
                 let b2 = TraitRef {
                     trait_decl: b.trait_decl,
@@ -1335,13 +1432,13 @@ pub(crate) fn check_impls(
         }
         // E0416: Drop on a Copy type.
         if tr.trait_decl == lang.drop && lang.drop.is_some() && !tys.is_error_ty(imp.self_ty) {
+            // a `view` param of the impl stands for owned types too
             let copy_impl = if lang.copy.is_some() {
-                w.find_impl(
+                w.find_impl_any_kind(
                     tys,
                     imp.self_ty,
                     &TraitRef { trait_decl: lang.copy, args: Vec::new() },
                     &imp.generics,
-                    0,
                 )
             } else {
                 None
@@ -1355,6 +1452,47 @@ pub(crate) fn check_impls(
                     .into_iter()
                     .collect();
                 out.extend(mk("E0416", None, &[("type", &self_text)], impl_span, &roles));
+            }
+        }
+        // E0414 case `drop`: the destructor of a type runs for every instance, so its impl must
+        // take a view wherever the type does.
+        if tr.trait_decl == lang.drop
+            && lang.drop.is_some()
+            && let TypeKind::Adt { def, args } = tys.kind(imp.self_ty).clone()
+        {
+            let adt_gens = sigs.generics(def);
+            let mut named: Vec<u32> = Vec::new();
+            for (i, a) in args.iter().enumerate() {
+                let GArg::Type(a) = *a else { continue };
+                if !adt_gens.get(i).is_some_and(|g| g.view) {
+                    continue;
+                }
+                let mut stack = vec![a];
+                let mut kids = Vec::new();
+                while let Some(x) = stack.pop() {
+                    if let TypeKind::Param(k) = *tys.kind(x) {
+                        if imp.generics.get(k as usize).is_some_and(|g| !g.view) && !named.contains(&k) {
+                            named.push(k);
+                        }
+                        continue;
+                    }
+                    kids.clear();
+                    tys.kind(x).children(&mut kids);
+                    stack.extend_from_slice(&kids);
+                }
+            }
+            named.sort_unstable();
+            let adt_path = prog.decl_path(def);
+            for k in named {
+                let g = &imp.generics[k as usize];
+                let pn = prog.strings.get(g.name).to_string();
+                out.extend(mk(
+                    "E0414",
+                    Some("drop"),
+                    &[("param", &pn), ("type", &self_text), ("generic", &adt_path)],
+                    impl_span,
+                    &[("param", g.name_span)],
+                ));
             }
         }
         // E0903: overlapping impls of one trait.
@@ -1391,9 +1529,9 @@ fn overlap(w: &World<'_>, tys: &mut TypeTable, a: &ImplDef, b: &ImplDef) -> bool
         (0..b.generics.len() as u32).map(|i| GArg::Type(tys.mk_param(a.generics.len() as u32 + i))).collect();
     let bt = tys.subst(b.self_ty, &shift, None);
     let mut binds = vec![None; a.generics.len() + b.generics.len()];
-    w.match_ty(tys, a.self_ty, bt, &mut binds) || {
+    w.may_match_ty(tys, a.self_ty, bt, &mut binds) || {
         let mut binds = vec![None; a.generics.len() + b.generics.len()];
-        w.match_ty(tys, bt, a.self_ty, &mut binds)
+        w.may_match_ty(tys, bt, a.self_ty, &mut binds)
     }
 }
 

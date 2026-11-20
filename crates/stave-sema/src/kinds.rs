@@ -70,13 +70,14 @@ pub fn is_view<I: Interner + ?Sized>(
     adt_view: &dyn Fn(DeclId) -> bool,
     param_view: &dyn Fn(u32) -> bool,
 ) -> bool {
+    // Each distinct type is visited once: the walk is exact (no cutoff) and linear in the
+    // number of distinct component types, however often they repeat.
+    let mut seen: rustc_hash::FxHashSet<TypeId> = rustc_hash::FxHashSet::default();
     let mut stack = vec![t];
     let mut kids = Vec::new();
-    let mut steps = 0u32;
     while let Some(x) = stack.pop() {
-        steps += 1;
-        if steps > 1_000_000 {
-            return false;
+        if !seen.insert(x) {
+            continue;
         }
         match tys.kind(x) {
             TypeKind::Ref { .. } | TypeKind::Fn { .. } => return true,

@@ -1,0 +1,56 @@
+//~ STDOUT try_lock_spin.stdout
+// `try_lock` never waits, so it takes no rank, and a `scope` whose thread only tries a mutex may
+// end while that mutex is held. Here the thread spins on `try_lock` of a mutex main holds for the
+// whole scope: without its cap of 1000 tries it would spin forever (a livelock, which the
+// no-deadlock claim does not cover). A `try_lock` of a mutex this thread already holds returns
+// `None`, and one inside a `Once` init needs no rank above the Once's.
+import std.io;
+import std.sync;
+
+fn main() {
+    let m = sync.Mutex::<u32, 1>.new(42);
+    let mut fails: u32 = 0;
+    let mut got: u32 = 0;
+    {
+        let g = m.lock();
+        scope {
+            spawn {
+                loop {
+                    match m.try_lock() {
+                        Option.Some(h) => {
+                            got = *h.get();
+                            break;
+                        }
+                        Option.None => {
+                            fails = fails + 1;
+                            if fails == 1000 { break; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut after: u32 = 0;
+    match m.try_lock() {
+        Option.Some(h) => { after = *h.get(); }
+        Option.None => {}
+    }
+    io.print(f"{fails} {got} {after}\n");
+
+    let g = m.lock();
+    let again = m.try_lock().is_some();
+    let n = sync.Mutex::<u32, 2>.new(8);
+    let h = n.try_lock();
+    let twice = n.try_lock().is_some();
+    let first = h.is_some();
+    io.print(f"{again} {first} {twice}\n");
+
+    let o = sync.Once::<u32, 5>.new();
+    let low = sync.Mutex::<u32, 1>.new(0);
+    let v = *o.get_or_init(fn() -> u32 {
+        let a = low.try_lock();
+        let b = low.try_lock();
+        return if a.is_some() && b.is_none() then 1u32 else 0u32;
+    });
+    io.print(f"{v}\n");
+}

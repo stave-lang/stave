@@ -695,6 +695,18 @@ pub(crate) fn load(fs: &Fs, root: &Path, target: Triple, builtins: &[BuiltinPack
                     id
                 }
             };
+            // A built-in package's pub items include ones that trust their callers (the
+            // runtime's): only built-in packages may name one by path.
+            if !builtin && l.packages[id].kind == PackageKind::Builtin {
+                if let Some(m) = l.packages[p].manifest {
+                    l.manifests[m].issues.push(ManifestIssue::new(
+                        Some("builtin-dependency"),
+                        &[("key", &d.name)],
+                        d.path_span,
+                    ));
+                }
+                continue;
+            }
             l.packages[p].deps.push((d.name.clone(), id));
         }
     }

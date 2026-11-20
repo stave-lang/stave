@@ -28,6 +28,31 @@ the built-in `runtime`, and every package depends on it implicitly. The prelude 
 | `std.num` | `parse_u64 parse_i64 parse_u32 parse_i32 parse_usize parse_f64 parse_f32` (all `-> Option<_>`) |
 | `std.pow10` | generated 128-bit power-of-ten table shared by fmt and num |
 
+## Blocking waits
+
+Every operation of `std` and `runtime` that can wait, and what bounds the wait. "Claim": covered by
+"safe code cannot deadlock" (LANG.md §3, lock ranks). std has no channels, condition variables,
+parking, or sleep; user code cannot import `runtime`, so its futex and thread fns are reached only
+through the rows below.
+
+| Operation | Waits on another thread | Static rule / effect | Claim |
+|---|---|---|---|
+| `Mutex.lock`, `with_lock` | yes: futex until the holder unlocks | rank rule E1405 / E1406; `lock` | yes |
+| `lock_pair` | yes | rank rule (one rank, address order; one mutex twice traps `Deadlock`); `lock` | yes |
+| `Mutex.try_lock` | no: one compare-and-swap; `None` on any held mutex, this thread's too | its guard is held for the rank rule | yes; a retry loop is a livelock: no |
+| `Once.get_or_init` | yes: futex until the first caller's `f` returns | rank rule (acquires R, `f` holds R; re-entry from `f` traps `Deadlock`); `lock` | yes |
+| `MutexGuard` drop | no (futex wake) | none | n/a |
+| `scope` end (also `return`, `break`, `continue`, `?` out of it) | yes: its spawns | join rule E1406; `block` | yes |
+| `spawn` | no | none (`alloc io trap`) | n/a |
+| `thread.join` | yes: arm `b` | join rule E1406; `block` | yes |
+| `thread.par_for`, `par_for_mut` | yes: the workers | join rule E1406; `block` | yes |
+| allocator lock (`runtime.alloc`, every allocation and free) | yes: another allocating thread | none needed: a leaf lock, held only around free-list work and `mmap`, never across a wait or another lock; `alloc` | yes |
+| thread registry lock (`runtime.thread`, thread start and exit) | yes: another starting or exiting thread | none needed: a leaf lock around a table scan; part of `spawn` / join | yes |
+| a second panic while one is reported (`runtime.panic`) | yes: spins until the first report's `exit_group` | none; `trap` | no: the report write can wait on a full stderr pipe |
+| `io.print`, `eprint`, `write_all`, `FdWriter` (write) | only through a pipe whose reader is this process (inherited fd) | `io block` | no |
+| `io.read_all` (read) | only through a pipe whose writer is this process (inherited fd) | `io block` | no |
+| `io.read_file`, `read_to_string` (open, read) | opening a FIFO waits for a writer | `io block` | no |
+
 ## f-string lowering (contract for the front end)
 
 `Display` is `fn fmt<W: Write>(&self, w: &mut W)`, `Write` is `fn write_str(&mut self, s: &str)`.

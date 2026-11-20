@@ -18,7 +18,7 @@ fn halt() -> never {
 
 fn checked(x: u32) -> u32 {
     if x <= LIMIT { return x; }
-    halt();                             // ends the path: no `return` needed after it
+    halt();
 }
 
 struct Guard { pub id: u32 }

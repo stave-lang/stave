@@ -417,7 +417,7 @@ fix = { description = "mark field `{name}` `pub` in `{module}`, or use the colum
 code = "E0107"
 severity = "error"
 area = "resolve"
-rule = "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`), at the module's first token"
+rule = "import path is ambiguous: its first segment is both a dependency of the package and a module (or module directory) of the package; case `builtin`: a module of a package that is not built in whose path starts with the name of a built-in package (`src/std/cell.stv` of a root package is `std.cell`, and so is `src/std.cell.stv`), at the module's first token"
 holes = { name = "name", package = "name", module = "path" }
 message = "import path is ambiguous between dependency `{name}` and module `{name}`"
 labels = [{ at = "primary", text = "`{name}` names a dependency and a module of `{package}`" }]
@@ -603,7 +603,7 @@ severity = "error"
 area = "types"
 rule = "contract operand not allowed: a `requires`/`ensures` expression may call only safe fns whose params are `&` or Copy; no `unsafe`, closure, `spawn`, f-string, `?`, `&mut` borrow, `static`, or intrinsic; a `&mut` param is read, never written or passed as `&mut`; an `ensures` reads params only of `&`, `&mut`, or Copy type; at the first violation per clause; case `trait-impl`: contracts on a trait impl method; case `impure-call`: a callee in a clause reaches `io`, `lock`, or `block` (the call chain and the op); cases `frozen` / `frozen-self` (when the other operand rules hold): the first value the clause touches (an expression, a call result, a built-in receiver, a called fn value) whose type is not `Frozen`, with the path to its `UnsafeCell` or fn value; case `static`: a callee in a clause reaches a `static` whose type is not `Frozen`; case `mut-result`: an `ensures` reads a param that a `&mut` in the return type borrows from (`from v`), outside `old(..)`"
 holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal", value = "source", type = "type", path = "place", part = "type", reason = "text-literal", name = "path" }
-choices = { reason = ["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound", "nested deeper than the limit of the `Frozen` check"], effect = ["lock", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] }
+choices = { reason = ["`UnsafeCell` (interior mutability)", "a fn value (its captures are not in its type)", "a generic parameter without a `Frozen` bound", "nested deeper than the limit of the `Frozen` check"], effect = ["lock", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show"] }
 message = "this expression is not allowed in a contract"
 labels = [{ at = "primary", text = "not allowed in `requires`/`ensures`" }]
 fix = { description = "keep contracts side-effect free: compare params, fields, and `.len()`; move other checks into the body with `std.debug.assert`" }
@@ -835,7 +835,7 @@ fix = { description = "give `{name}` an owned type, or store a raw pointer (`*co
 code = "E0414"
 severity = "error"
 area = "kinds"
-rule = "generic parameter instantiated with a view without the `T: view` bound"
+rule = "generic parameter instantiated with a view without the `T: view` bound: at every use of a generic fn, method, impl, or type (a call, a fn item used as a value, an operator, a trait method's own params); an impl whose param has no `view` bound does not apply to a view; case `drop`: an `impl Drop` whose param has no `view` bound at a place where its type takes one (a destructor runs for every instance of its type)"
 holes = { param = "name", type = "type", generic = "path" }
 message = "`{type}` is a view, but parameter `{param}` of `{generic}` has no `view` bound"
 labels = [{ at = "primary", text = "view type argument" }, { at = "param", text = "`{param}` declared here" }]
@@ -845,6 +845,11 @@ fix = { description = "add the bound `{param}: view` to `{generic}`, or pass an 
 message = "`{type}` is a view, and `{generic}` does not accept views: its parameter `{param}` has no `view` bound"
 labels = [{ at = "primary", text = "view type argument" }, { at = "param", text = "`{param}` declared here" }]
 fix = { description = "keep `{type}` in a local or in a container whose parameter is `view`-bounded (`vec.Vec`, `Box`, `Option`), or store an owned value" }
+
+[diag.cases.drop]
+message = "`impl Drop for {type}` does not cover views: `{generic}` takes a view there, but parameter `{param}` of the impl has no `view` bound"
+labels = [{ at = "primary", text = "`impl Drop` here" }, { at = "param", text = "`{param}` declared here" }]
+fix = { description = "add the bound `{param}: view` to the impl" }
 
 [[diag]]
 code = "E0415"
@@ -1536,11 +1541,16 @@ fix = { description = "implement `{param}` for `{name}`, or pass a type that imp
 code = "E0902"
 severity = "error"
 area = "generics"
-rule = "instantiation depth limit (64) exceeded: an instance of a generic fn or method, reached from a non-generic fn through calls, would be the 65th instance of that generic on its own instantiation chain (polymorphic recursion such as `f::<[T; 1]>(..)` inside `f<T>`); at the call that requests it, once per generic"
+rule = "instantiation depth limit (64) exceeded: an instance of a generic fn or method, reached from a non-generic fn through calls, would be the 65th instance of that generic on its own instantiation chain (polymorphic recursion such as `f::<[T; 1]>(..)` inside `f<T>`); at the call that requests it, once per generic. Case `graph`: the program's call graph (calls, fn values, drop glue) exceeds its limit (256 instances of one generic on one chain, such as a `Drop` impl of `W<T>` that drops a `W<Option<T>>`, or 2,097,152 nodes); at the fn whose body requests the first instance left out, once; the program is rejected"
 holes = { generic = "path" }
 message = "instantiation depth limit (64) exceeded at `{generic}`"
 labels = [{ at = "primary", text = "instantiated here" }]
 fix = { description = "stop the recursive instantiation of `{generic}`: its type arguments must not grow on each level" }
+
+[diag.cases.graph]
+message = "call graph limit exceeded at `{generic}`"
+labels = [{ at = "primary", text = "this body requests instances without end" }]
+fix = { description = "stop the recursive instantiation of `{generic}` through calls, fn values, or drops: its type arguments must not grow on each level" }
 
 [[diag]]
 code = "E0903"
@@ -1556,7 +1566,7 @@ fix = { description = "remove one of the two impls of `{trait}`, or narrow one s
 code = "E0904"
 severity = "error"
 area = "generics"
-rule = "const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id)"
+rule = "const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value"
 holes = { what = "text-literal", name = "name" }
 choices = { what = ["a call", "a loop", "a non-const item"] }
 message = "const-expr contains {what}"
@@ -1567,6 +1577,11 @@ fix = { description = "compute the value with literals, consts, arithmetic, comp
 message = "const `{name}` depends on itself"
 labels = [{ at = "primary", text = "`{name}` starts the cycle" }, { at = "cycle", text = "next const of the cycle" }]
 fix = { description = "break the cycle: define one of these consts without using the others" }
+
+[diag.cases.depth]
+message = "const-expr nested more than 2,000 levels deep"
+labels = [{ at = "primary", text = "nesting limit of const evaluation exceeded here" }]
+fix = { description = "split the expression into several consts" }
 
 [[diag]]
 code = "E0905"
@@ -1633,6 +1648,16 @@ labels = [{ at = "primary", text = "a struct is required here" }]
 fix = { description = "use a struct with one field per column, e.g. `struct Row {{ pub v: {type} }}` and `soa.Soa<Row>`" }
 
 [[diag]]
+code = "E0911"
+severity = "error"
+area = "generics"
+rule = "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested more than 256 levels deep; at the call, in a const-expr too"
+holes = { type = "type" }
+message = "`{type}` has no layout for `size_of` / `align_of`"
+labels = [{ at = "primary", text = "no size or alignment for this type" }]
+fix = { description = "ask for the size of a sized type nested at most 256 levels deep" }
+
+[[diag]]
 code = "E1001"
 severity = "error"
 area = "driver"
@@ -1647,7 +1672,7 @@ fix = { description = "run on a `{target}` host, or pass `--runner CMD` (e.g. `-
 code = "E1002"
 severity = "error"
 area = "driver"
-rule = "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, or unreadable manifest; located in `stave.toml`"
+rule = "invalid `stave.toml`: unknown key or table, wrong value type, non-path dependency, `[target.<t>]` naming no known target, TOML syntax error, duplicate key, bad `kind`, missing `name`, a `name` that is not a plain file name, missing root file, missing dependency directory, a path dependency naming a built-in package's directory, or unreadable manifest; located in `stave.toml`"
 holes = { key = "source", expected = "text-literal", root = "text-literal" }
 choices = { expected = ["string", "integer", "boolean", "array", "table"], root = ["src/main.stv", "src/lib.stv"] }
 message = "unknown key `{key}` in `stave.toml`"
@@ -1703,6 +1728,11 @@ fix = { description = "create `{root}`, or change `kind` to match the root file 
 message = "dependency `{key}`: its `path` holds no `stave.toml`"
 labels = [{ at = "primary", text = "no package at this path" }]
 fix = { description = "point `path` at a package directory (one with `stave.toml`), relative to this `stave.toml`" }
+
+[diag.cases.builtin-dependency]
+message = "dependency `{key}`: its `path` is a built-in package"
+labels = [{ at = "primary", text = "built-in package directory" }]
+fix = { description = "remove dependency `{key}`: `std` is imported without one, and the other built-in packages are not for user code" }
 
 [diag.cases.unreadable]
 message = "`stave.toml` cannot be read"
@@ -1999,7 +2029,7 @@ severity = "error"
 area = "effects"
 rule = "a fn with a deny clause has a denied effect through what it can call; checked per instance of a generic fn; names the call chain and the op; at the denied effect, or for an instance at the call that instantiates it; case `self` when the op is in the fn itself"
 holes = { fn = "path", effect = "text-literal", at = "path", op = "text-literal" }
-choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
+choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
 message = "`{fn}` denies `{effect}`, but it reaches `{at}`, which {op}"
 labels = [{ at = "primary", text = "`{fn}` must not have `{effect}`" }, { at = "deny", text = "`{effect}` denied here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }, { at = "op", text = "`{at}` {op} here" }]
 fix = { description = "remove `{effect}` from the deny clause, or change the calls so that `{at}` is not reached" }
@@ -2024,7 +2054,7 @@ severity = "error"
 area = "effects"
 rule = "fn value coercion widens the effects: a value of `fn(..) without(D1)` used as `fn(..) without(D2)` with D2 not a subset of D1; case `made`: a closure literal or fn item made into such a value has a denied effect (the call chain and the op, as E1401)"
 holes = { from = "type", to = "type", effect = "text-literal", fn = "path", at = "path", op = "text-literal" }
-choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
+choices = { effect = ["alloc", "trap", "recursive", "lock", "unsafe", "io", "block"], op = ["allocates", "frees memory", "may run out of memory", "may trap", "is recursive", "takes a lock", "has an `unsafe` block", "makes a system call", "waits for other threads", "may wait on a file descriptor", "starts a thread", "is an `extern` fn, which has every effect its `without` does not list", "runs code the call graph does not show", "has a `requires` clause that the call does not prove"] }
 message = "`{from}` cannot be used as `{to}`: it does not deny `{effect}`"
 labels = [{ at = "primary", text = "coerced here" }]
 fix = { description = "add `{effect}` to the deny clause of `{from}`, or remove it from `{to}`" }

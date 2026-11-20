@@ -88,10 +88,12 @@ pub fn feature_vector_bits(fs: FeatureSet) -> u32 {
 /// refs, pointers, arrays, slices, tuples, and generic arguments, not into fn types (each fn type
 /// is checked where it is written).
 pub(crate) fn wide_part<I: Interner + ?Sized>(cx: &I, t: TypeId, max: u32) -> Option<(TypeId, u32)> {
+    // Each distinct type is visited once: exact, with no cutoff.
+    let mut seen: rustc_hash::FxHashSet<TypeId> = rustc_hash::FxHashSet::default();
     let mut stack = vec![t];
     while let Some(t) = stack.pop() {
-        if stack.len() > 4096 {
-            return None;
+        if !seen.insert(t) {
+            continue;
         }
         match cx.kind(t) {
             TypeKind::Vector { lane, n: Lanes::Fixed(k) } => {

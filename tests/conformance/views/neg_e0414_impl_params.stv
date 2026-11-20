@@ -1,0 +1,71 @@
+//~ CHECK-ONLY
+// An impl whose param has no `view` bound does not exist for a view (its body is checked with
+// the param holding no reference): method call, path call, trait method, trait path call,
+// bound, operator, std's `impl<T: Copy> [T]`. A `Drop` impl must take a view where its type does.
+struct Slot<T: view> { v: Option<T> }
+
+impl<T> Slot<T> {
+    fn set(&mut self, x: T) { self.v = Option.Some(x); }
+}
+
+impl<T: Copy> Slot<T> {
+    fn get(&self) -> Option<T> { return self.v; }
+}
+
+trait Merge { fn merge(&mut self, other: &Self); }
+
+impl<T: Copy> Merge for Slot<T> {
+    fn merge(&mut self, other: &Self) { self.v = other.v; }
+}
+
+impl<T: Copy> Add for Slot<T> {
+    fn add(self, rhs: Self) -> Self { return rhs; }
+}
+
+fn feed<S: Merge + view>(a: &mut S, b: &S) { a.merge(b); }
+
+view struct Link<T: view> { dst: &mut Option<T>, src: Option<T> }
+
+impl<T: Copy> Drop for Link<T> { //~ ERROR E0414
+    fn drop(&mut self) { *self.dst = self.src; }
+}
+
+struct Owned<T: view> { v: Option<T> }
+
+impl<T: view> Drop for Owned<T> {
+    fn drop(&mut self) { }
+}
+
+// The `Copy` impl applies to the owned instances the `Drop` impl covers too.
+struct Both<T: view> { v: T }
+
+impl<T: Copy> Copy for Both<T> {}
+
+impl<T: Copy + view> Drop for Both<T> { //~ ERROR E0416
+    fn drop(&mut self) { }
+}
+
+fn main() -> i32 {
+    let a: u32 = 1;
+    let mut own = Slot::<u32>.{ v: Option.None };
+    let own2 = Slot::<u32>.{ v: Option.Some(2) };
+    own.set(1);
+    own.merge(&own2);
+    Merge.merge(&mut own, &own2);
+    feed(&mut own, &own2);
+    let got = own.get();
+    let both = own + own2;
+    let mut slot = Slot::<&u32>.{ v: Option.None };
+    let other = Slot::<&u32>.{ v: Option.Some(&a) };
+    slot.set(&a); //~ ERROR E0414
+    let g = slot.get(); //~ ERROR E0414
+    Slot::<&u32>.set(&mut slot, &a); //~ ERROR E0414
+    slot.merge(&other); //~ ERROR E0414
+    Merge.merge(&mut slot, &other); //~ ERROR E0901
+    feed(&mut slot, &other); //~ ERROR E0901
+    let mut long: [&u32; 1] = [&a];
+    let short: [&u32; 1] = [&a];
+    long[0..1].copy_from(&short[0..1]); //~ ERROR E0414
+    let sum = slot + other; //~ ERROR E0206
+    return 0;
+}
