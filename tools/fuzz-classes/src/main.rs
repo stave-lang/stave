@@ -118,6 +118,11 @@ fn parse_args() -> Result<Args, String> {
     if a.count.is_none() && a.budget.is_none() && !a.print && a.exec.is_none() {
         a.count = Some(1);
     }
+    // A built program runs with its source's directory as the working directory, so its path
+    // must not depend on this process's.
+    for p in [Some(&mut a.out), a.exec.as_mut()].into_iter().flatten() {
+        *p = std::path::absolute(&*p).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
     Ok(a)
 }
 
