@@ -1,0 +1,16 @@
+//~ BORROWCHECK exit 101
+// runtime.panic sites on the report path of `Result.unwrap` of an `Err`: the site-table rows
+// read through raw addresses (`ld32`, `ld64`, `Line.raw`), the line buffer flushed to fd 2, and
+// the error trace copied out of the thread block, with more via sites than its ring keeps.
+rec fn deep(n: u32) -> Result<u32, u32> {
+    if n == 0 {
+        return Result.Err(7u32);
+    }
+    let v = deep(n - 1)?;
+    return Result.Ok(v);
+}
+
+fn main() -> i32 {
+    let v = deep(40u32).unwrap();
+    return v as% i32;
+}

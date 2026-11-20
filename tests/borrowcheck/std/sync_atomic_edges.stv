@@ -1,0 +1,112 @@
+//~ BORROWCHECK ok
+// std.sync and std.atomic sites: a guard's `&T` / `&mut T` made from the `UnsafeCell` behind a
+// shared `&Mutex`, written, dropped, and taken again (also through `try_lock`, `with_lock`, and
+// `lock_pair` in both address orders); a mutex of a zero-sized and of an owning value; `Once`
+// read again after its value is set, local and `static`; atomics at their wrap-around, in a
+// `static` and through two `&` at once.
+import std.atomic;
+import std.sync;
+import std.vec;
+
+struct Z {}
+
+static HITS: atomic.U64 = atomic.U64.new(0);
+static FLAG: atomic.Bool = atomic.Bool.new(false);
+static TABLE: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+static ONCE: sync.Once<u64, 2> = sync.Once::<u64, 2>.new();
+
+fn mutexes() -> bool {
+    let m = sync.Mutex::<vec.Vec<u32>, 3>.new(vec.Vec::<u32>.new());
+    {
+        let mut g = m.lock();
+        g.get_mut().push(1);
+        let n = g.get().len();
+        g.get_mut().push((n as% u32) + 1);
+        let busy = m.try_lock().is_none();
+        if !busy { return false; }
+    }
+    let len = m.with_lock(fn(v: &mut vec.Vec<u32>) -> usize {
+        v.push(3);
+        return v.len();
+    });
+    let again = match m.try_lock() {
+        Option.Some(g) => *g.get().get_ref(2) == 3,
+        Option.None => false,
+    };
+    let zm = sync.Mutex::<Z, 3>.new(Z.{});
+    {
+        let mut zg = zm.lock();
+        let z: &mut Z = zg.get_mut();
+    }
+    let a = sync.Mutex::<u32, 4>.new(10);
+    let b = sync.Mutex::<u64, 4>.new(20);
+    {
+        let mut ab = sync.lock_pair(&a, &b);
+        let x = *ab.0.get();
+        *ab.0.get_mut() = x + 1;
+        let y = *ab.1.get();
+        *ab.1.get_mut() = y + 1;
+    }
+    {
+        let mut ba = sync.lock_pair(&b, &a);
+        let x = *ba.1.get();
+        *ba.1.get_mut() = x + 1;
+        let y = *ba.0.get();
+        *ba.0.get_mut() = y + 1;
+    }
+    let mut owned = sync.Mutex::<u32, 5>.new(1);
+    *owned.get_mut() = 2;
+    let t = TABLE.with_lock(fn(x: &mut u32) -> u32 {
+        *x = *x + 1;
+        return *x;
+    });
+    return len == 3 && again && a.into_inner() == 12 && b.into_inner() == 22 && owned.into_inner() == 2 && t == 6;
+}
+
+fn onces() -> bool {
+    let o = sync.Once::<vec.Vec<u8>, 6>.new();
+    let first = o.get_or_init(fn() -> vec.Vec<u8> {
+        let mut v = vec.Vec::<u8>.new();
+        v.push(42);
+        return v;
+    });
+    let second = o.get_or_init(fn() -> vec.Vec<u8> { return vec.Vec::<u8>.new(); });
+    let s = ONCE.get_or_init(fn() -> u64 { return 7; });
+    let s2 = ONCE.get_or_init(fn() -> u64 { return 8; });
+    return first.len() == 1 && *second.get_ref(0) == 42 && *s == 7 && *s2 == 7;
+}
+
+fn add_both(x: &atomic.U32, y: &atomic.U32) -> u32 {
+    let a = x.fetch_add(1);
+    let b = y.fetch_add(1);
+    return a + b;
+}
+
+fn atomics() -> bool {
+    let u = atomic.U32.new(0xFFFF_FFFF);
+    let w = u.fetch_add(1);
+    let wrapped = u.load() == 0 && w == 0xFFFF_FFFF;
+    let sum = add_both(&u, &u);
+    let cas_ok = u.compare_exchange(2, 9).is_ok();
+    let cas_bad = match u.compare_exchange(2, 10) {
+        Result.Ok(_) => false,
+        Result.Err(now) => now == 9,
+    };
+    let big = atomic.U64.new(0xFFFF_FFFF_FFFF_FFFF);
+    let bw = big.fetch_add(2) == 0xFFFF_FFFF_FFFF_FFFF && big.swap(3) == 1;
+    let us = atomic.Usize.new(5);
+    us.store(6);
+    let ok_us = us.fetch_add(1) == 6 && us.compare_exchange(7, 8).is_ok() && us.load() == 8;
+    let h0 = HITS.fetch_add(1);
+    HITS.store(h0 + 10);
+    FLAG.store(true);
+    let fl = FLAG.swap(false) && !FLAG.load() && FLAG.compare_exchange(false, true).is_ok();
+    return wrapped && sum == 1 && cas_ok && cas_bad && bw && ok_us && HITS.load() == 10 && fl;
+}
+
+fn main() -> i32 {
+    if !mutexes() { return 1; }
+    if !onces() { return 2; }
+    if !atomics() { return 3; }
+    return 0;
+}

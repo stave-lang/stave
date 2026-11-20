@@ -63,10 +63,11 @@ const SUM_BLOCK: usize = 4096;
 
 // xs as a slice of U: same address, xs.len() * size_of::<T>() / size_of::<U>() elements. Callers
 // pass T and U of one size, or U = u8; every bit pattern of T is then a valid U (bool is 0 or 1).
+// With U = u8 every byte of T must be initialized: no padding (copy_from checks it).
 fn cast<T, U>(xs: &[T]) -> &[U] from xs {
     let n = xs.len() * size_of::<T>() / size_of::<U>();
     let p = mem.slice_ptr(xs) as usize as *const U;
-    return unsafe("xs covers n elements of U, and every bit pattern of T is a valid U") mem.slice(xs, p, n);
+    return unsafe("xs covers n elements of U, every byte of them initialized, and every bit pattern of T is a valid U") mem.slice(xs, p, n);
 }
 
 // The mutable view; callers write only values valid as T (bytes 0 and 1 into a bool slice).
@@ -2679,6 +2680,13 @@ impl<T: Copy> [T] {
 
     pub fn copy_from(&mut self, src: &[T]) {
         debug.assert(self.len() == src.len(), "copy_from: the slices differ in length");
+        // The byte loops read every byte of an element, so they take only a T whose size equals
+        // its alignment: one scalar-like value, with no padding and no unused enum payload,
+        // whose bytes are all initialized. Any other T is copied element by element.
+        if size_of::<T>() != align_of::<T>() {
+            for i in 0..self.len() { self[i] = src[i]; }
+            return;
+        }
         let s = cast::<T, u8>(src);
         let d = cast_mut::<T, u8>(self);
         if d.len() >= LONG_B8 {

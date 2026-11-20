@@ -1,0 +1,12 @@
+//~ BORROWCHECK exit 101
+// runtime.panic `trap_msg` with a message longer than the report's line buffer (1024 bytes),
+// so the buffer is flushed through its raw pointer more than once.
+import std.debug;
+import std.string;
+
+fn main() -> i32 {
+    let mut msg = string.String.new();
+    for i in 0u32..300 { msg.push_str("abcd"); }
+    debug.assert(msg.len() == 0, msg.as_str());
+    return 0;
+}

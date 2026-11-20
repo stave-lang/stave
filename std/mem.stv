@@ -41,7 +41,7 @@ pub fn swap<T: view>(a: &mut T from copy b, b: &mut T from copy a) {
     let pa = &mut *a as *mut T;
     let pb = &mut *b as *mut T;
     let t = unsafe("pa comes from a: valid and initialized") pa.read();
-    unsafe("pa was moved out, pb is valid and distinct from pa (a and b are both &mut)") { pa.write(pb.read()); }
+    unsafe("pa was moved out; pb is valid and does not overlap pa (a and b are both &mut)") { pa.write(pb.read()); }
     unsafe("pb was moved out by the read above") { pb.write(t); }
 }
 
