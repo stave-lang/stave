@@ -22,6 +22,8 @@ pub const RT_TRAP: &str = "runtime.panic.trap";
 pub const RT_ON_SIGNAL: &str = "runtime.panic.on_signal";
 pub const RT_THREAD_ENTRY: &str = "runtime.thread.entry";
 pub const RT_CPU_INIT: &str = "runtime.cpu.init";
+/// The native code of the `copy_bytes` intrinsic.
+pub const STD_COPY_RAW: &str = "std.slice.copy_raw";
 
 pub const SYM_MAIN: &str = "__stave_main";
 pub const SYM_SIGNAL: &str = "__stave_signal";
@@ -75,6 +77,8 @@ pub(crate) enum Intr {
     StaticAddr,
     ThreadClone,
     CpuInit,
+    /// `bl std.slice.copy_raw` with the intrinsic's three operands.
+    CopyBytes,
     /// `mrs x0, tpidr_el0`.
     ThreadBlock,
     /// `msr tpidr_el0, x0`.
@@ -108,6 +112,7 @@ fn intr_kind(name: &str) -> Intr {
         "static_addr" => Intr::StaticAddr,
         "thread_clone" => Intr::ThreadClone,
         "cpu_init" => Intr::CpuInit,
+        "copy_bytes" => Intr::CopyBytes,
         "thread_block" => Intr::ThreadBlock,
         "set_thread_block" => Intr::SetThreadBlock,
         "cpuid" | "xgetbv" => Intr::X86Only,

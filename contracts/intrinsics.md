@@ -15,7 +15,8 @@ Rules:
   shipped with the compiler. Anywhere else, or with a name or signature that is not in the
   table, it is **E0805**.
 - Calls are `unsafe` (as for every `extern` import). Each intrinsic lowers to the listed
-  instruction sequence inline. No call, no symbol, no relocation.
+  instruction sequence inline. No call, no symbol, no relocation, except where a row names a
+  call (`ccallN`, `call_on_stack`, `cpu_init`, `copy_bytes`).
 - An intrinsic whose arch column does not match the target is not compiled, like any function
   needing another arch's features. Calling it on the wrong arch is E0704.
 - Both compilers (stage0 and stage1) implement exactly this table. The checked IR
@@ -164,6 +165,37 @@ No IR calls `runtime.thread.entry`, so a lowered `thread_clone` or `thread_start
 it, in debug and release alike (checked-ir.md "Instance root set"); a program that lowers neither
 has no `runtime.thread.entry` and no `__stave_thread_start`.
 
+**Untyped copy.** The one byte copy of the language: std copies the values of a Copy type as
+bytes only through it (`[T].copy_from`, `Vec.extend_from_slice`), whatever padding or unused
+enum payload `T` has.
+
+| Intrinsic | Arch | Lowering |
+|---|---|---|
+| `copy_bytes(dst: *mut u8, src: *const u8, n: usize)` | x86-64 / AArch64 | `call` / `bl std.slice.copy_raw` (Stave convention, the three operands as its arguments) |
+
+- **Contract.** The `n` bytes at `src` move to `dst`; the two ranges share no byte (the
+  caller's obligation). It is not a read or write of any typed value: a byte no store
+  initialized (padding, a payload of another variant) moves as it is, which is no read of an
+  uninitialized byte, and afterwards each byte of `dst..dst+n` is initialized exactly when its
+  source byte was. `n = 0` touches nothing (either pointer may dangle). No effect (LANG.md §2
+  deny clauses).
+- **Borrow model** (borrow-model.md M20): a read of `src..src+n` through the tag `src` carries,
+  then a write of `dst..dst+n` through the tag `dst` carries. Memory keeps a tag per stored
+  64-bit word, at the word's address (a typed `store` of a reference or raw pointer puts it
+  there, a typed `load` of the same word returns it); the copy moves each such word that lies
+  wholly inside the source range, with its tag, to the same offset from `dst`, and a tagged
+  word that the destination range covers or cuts into loses its tag. No word is retagged: a
+  reference in the copy gets a new tag only when a later load through a raw pointer reads it
+  (M20), as for any stored word.
+- **Native code.** `std.slice.copy_raw(dst, src, n)`: 128-bit `u8` vector loads and stores below
+  1 KiB, the `std.slice.copy_lanes_cpu` dispatch (a 256-bit loop under `needs(avx2)`, else the
+  128-bit one) from 1 KiB on. No IR calls it: a lowered `intrinsic.copy_bytes` requests it
+  (checked-ir.md "Instance root set"), and the backends call it in place of the intrinsic.
+- **IR interpreter.** Runs the intrinsic itself on its memory (it never runs `copy_raw`'s
+  body). The checking mode keeps the initialization of every byte as above and reports ranges
+  that share a byte as `copy-overlap` (cli.md "Interpreter checking mode"); the tracking mode
+  makes the two accesses and moves the tagged words.
+
 **Runtime start and traps** (CPU). The compiler emits two
 C-ABI stubs and three read-only tables per binary, and these intrinsics give their addresses or
 switch stacks. Each lowers inline (no call except the ones of `call_on_stack` and `cpu_init`).
@@ -231,6 +263,8 @@ list):
   failed `try_realloc` leaving `p` unchanged; `unsafe free(p, size, alignment)`), replaced by the
   same three fns of an `allocator` declaration's module; the trapping `runtime.alloc.{alloc,
   realloc}` are derived from them (`OutOfMemory` on null) and are never replaced;
+  `std.slice.copy_raw(dst: *mut u8, src: *const u8, n: usize)`, the native code of
+  `copy_bytes`;
 - compiler-emitted symbols: `_start`, `__stave_main`, `__stave_signal`, `__stave_thread_start`,
   `__stave_site_table`, `__stave_pc_table`, `__stave_stack_table` (and `__stave_rt` on PTX);
 - `std.cell.UnsafeCell`, the only interior-mutability type: `&T` is readonly for the optimizer

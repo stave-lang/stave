@@ -1,0 +1,22 @@
+//~ MEMCHECK uninit-read 19
+// A byte copy moves each byte's initialization with it: `copy_from` of `P`, whose bytes 1..4
+// are padding no typed store initializes, over bytes written whole leaves those bytes
+// uninitialized again, and a read of one as a `u8` is an uninit-read.
+import std.mem;
+
+struct P { a: u8, b: u32 }
+
+impl Copy for P {}
+
+fn main() -> i32 {
+    let src: [P; 2] = [P.{ a: 1, b: 2 }; 2];
+    let mut dst: [P; 2] = [P.{ a: 0, b: 0 }; 2];
+    let w = &mut dst as *mut [P; 2] as *mut u64;
+    unsafe("deliberate: dst is two u64 words, written whole") { *w = 0; *mem.add_mut(w, 1) = 0; }
+    dst[0..2].copy_from(&src[0..2]);
+    let b = &dst as *const [P; 2] as *const u8;
+    let s = dst[1].b;
+    let pad: u8 = unsafe("deliberate: byte 1 is padding of P") *mem.add(b, 1);
+    if pad == 0 && s == 2 { return 1; }
+    return 0;
+}

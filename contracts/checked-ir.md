@@ -60,6 +60,9 @@ stages' numbering, except `d<D>`):
   the program's `static` and `static mut` decls (one sequence over both forms).
   Every static occupies at least one byte in the image (a zero-size static gets one zero
   byte, aligned as its type), so distinct statics have distinct addresses on every target.
+- `intrinsic.copy_bytes () %dst %src %n` (contracts/intrinsics.md "Untyped copy"): operands
+  `*mut u8`, `*const u8`, `usize`, no result. A copy of `n` bytes with their initialization,
+  not a `load` or `store` of any type: the IR's one untyped memory access.
 
 ## Ops (scalar set, stave-ir `Op`)
 
@@ -396,5 +399,7 @@ reference (`Ref` / `RefMut`); `copy` captures are reserved (no syntax yet, LANG.
   code then checks the CPU against it. Without either request (no reachable dispatch with a
   tested arm, no `std.cpu.features`, a lowest-baseline target) a program has no `runtime.cpu`
   code. `intrinsic.cpu_baseline` is never in the IR: lowering replaces it by its constant.
+- In both modes a lowered `intrinsic.copy_bytes` requests `std.slice.copy_raw`, the fn the
+  backends call in its place (no IR calls it).
 - Generic decls are never printed, only their instances. `kernel fn`s are printed like fns; GPU ops print as
   `gpu.<name>` (gpu-ops.md "Checked-IR spelling"). Intrinsic calls print as `intrinsic.<name>`.

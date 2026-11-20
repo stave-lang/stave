@@ -92,7 +92,12 @@ fn views() -> bool {
     let mut sum: u32 = 0;
     for i in 0..v.len() { sum = sum + **v.get_ref(i); }
     let top = v.pop().unwrap();
-    return sum == 9 && *top == 2;
+    let mut w = vec.Vec::<&u32>.new();
+    w.extend_from_slice(v.as_slice());
+    let copied = w.try_extend_from_slice(v.as_slice()).is_ok();
+    let mut wsum: u32 = 0;
+    for i in 0..w.len() { wsum = wsum + **w.get_ref(i); }
+    return sum == 9 && *top == 2 && copied && w.len() == 8 && wsum == 14;
 }
 
 fn empty_and_failing() -> bool {

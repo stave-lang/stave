@@ -193,7 +193,7 @@ pub(crate) fn option_shape(types: &TypeTable, t: TypeId) -> Option<(u32, u32, Ty
     types.option_shape(t)
 }
 
-const KNOWN_INTRINSICS: &str = "syscall0..6, ccall0..12, cpuid, xgetbv, thread_start_addr";
+const KNOWN_INTRINSICS: &str = "syscall0..6, ccall0..12, cpuid, xgetbv, thread_start_addr, copy_bytes";
 
 struct FnVerifier<'a> {
     m: &'a Module,
@@ -1117,6 +1117,16 @@ impl<'a> FnVerifier<'a> {
             }
             "xgetbv" => sig(vec![u32_t], u64_t),
             "thread_start_addr" => sig(vec![], usize_t),
+            "copy_bytes" => {
+                let u8_t = find(TypeKey::Int { signed: false, bits: IntBits::B8 });
+                let ptr = |mutable| u8_t.and_then(|inner| find(TypeKey::RawPtr { mutable, inner }));
+                let ps: Option<Vec<TypeId>> = [ptr(true), ptr(false), usize_t].into_iter().collect();
+                let ps = ps.ok_or_else(|| format!("intrinsic.{name}: parameter type not in the module"))?;
+                if ty.is_some_and(|r| t.key(r) != Some(&TypeKey::Tuple(Vec::new()))) {
+                    return Err(format!("intrinsic.{name}: wrong result type"));
+                }
+                self.check_args(b, args, &ps).map_err(|e| format!("intrinsic.{name}: {e}"))
+            }
             _ if name.is_empty() => Err(format!("empty intrinsic name (known: {KNOWN_INTRINSICS})")),
             // PTX and later intrinsics: typed by the front end's table; only ids are checked here.
             _ => Ok(()),

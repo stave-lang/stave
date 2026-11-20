@@ -1,7 +1,8 @@
 //! Checking mode of the interpreter: each program of `tests/memcheck/` makes one memory error
 //! through `unsafe` code. Run with checking on, it ends with the error its first line names,
 //! `//~ MEMCHECK <class> <line>`: the report's class, and a frame of the access trace at that
-//! line of the program.
+//! line of the program. A program whose first line is `//~ MEMCHECK clean` makes none: it exits
+//! 0 without a report (std code that must not trip the checks).
 
 use std::path::{Path, PathBuf};
 
@@ -26,16 +27,19 @@ fn programs() -> Vec<PathBuf> {
     v
 }
 
-/// (class, line) of the `//~ MEMCHECK` header.
-fn expected(p: &Path) -> (String, u32) {
+/// (class, line) of the `//~ MEMCHECK` header; `None` for `clean`.
+fn expected(p: &Path) -> Option<(String, u32)> {
     let src = std::fs::read_to_string(p).unwrap();
     let head = src
         .lines()
         .next()
         .and_then(|l| l.strip_prefix("//~ MEMCHECK "))
         .unwrap_or_else(|| panic!("{}: no `//~ MEMCHECK <class> <line>` first line", p.display()));
+    if head.trim() == "clean" {
+        return None;
+    }
     let (class, line) = head.split_once(' ').unwrap();
-    (class.to_string(), line.trim().parse().unwrap())
+    Some((class.to_string(), line.trim().parse().unwrap()))
 }
 
 /// Whether a trace line is at `line` of `file`: exactly, or, for an instruction without a site
@@ -57,7 +61,7 @@ fn each_class_is_reported_at_its_site() {
     let target = Triple::parse("x86_64-linux").unwrap();
     for p in &progs {
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
-        let (class, line) = expected(p);
+        let want = expected(p);
         let mut o = Options::new(Goal::Check).threads(Some(4));
         o.lower = true;
         o.target = Some(target);
@@ -65,7 +69,16 @@ fn each_class_is_reported_at_its_site() {
         assert!(!out.has_errors(), "{name}: diagnostics {:?}", out.diagnostics);
         let m = out.module.as_ref().unwrap_or_else(|| panic!("{name}: no module"));
         let lim = Limits { check: true, ..Limits::default() };
-        let err = match interp::run(m, "main.main", target, &[], &[], lim) {
+        let run = interp::run(m, "main.main", target, &[], &[], lim);
+        let Some((class, line)) = want else {
+            match run {
+                Ok(r) if r.ran.exit == 0 => {}
+                Ok(r) => failures.push(format!("{name}: clean run exits {}", r.ran.exit)),
+                Err(e) => failures.push(format!("{name}: want no report, got:\n{e}")),
+            }
+            continue;
+        };
+        let err = match run {
             Ok(r) => {
                 failures.push(format!("{name}: no report, exit {}", r.ran.exit));
                 continue;
