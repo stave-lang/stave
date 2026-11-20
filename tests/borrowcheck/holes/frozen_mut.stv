@@ -1,0 +1,11 @@
+//~ BORROWCHECK two-exclusive 8 7
+// A read of a local between two writes through one `&mut` of it.
+fn main() -> i32 {
+    let mut x: u32 = 1u32;
+    let m: &mut u32 = &mut x;
+    *m = 2u32;
+    let y: u32 = x;
+    *m = y + 1u32;
+    if x == 3u32 { return 1; }
+    return 0;
+}

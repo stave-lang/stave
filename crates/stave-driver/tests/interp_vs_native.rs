@@ -156,23 +156,24 @@ fn native_equals_interpreter_on_both_arches() {
             assert_static(img.bytes(), target, &name);
             let main_path = m.func(out.main.unwrap()).unwrap().path.clone();
             let lim = Limits::default();
-            let want = match interp::run(m, &main_path, target, &[], &data_files(p), lim) {
-                Ok(r) => {
-                    let allowed = listed_numbers(target);
-                    for nr in &r.syscalls {
-                        if !allowed.contains(nr) {
-                            failures.push(format!(
-                                "{name} [{target}]: syscall {nr} is not in runtime/syscalls.list"
-                            ));
+            let want =
+                match interp::run(out.for_interp().unwrap(), &main_path, target, &[], &data_files(p), lim) {
+                    Ok(r) => {
+                        let allowed = listed_numbers(target);
+                        for nr in &r.syscalls {
+                            if !allowed.contains(nr) {
+                                failures.push(format!(
+                                    "{name} [{target}]: syscall {nr} is not in runtime/syscalls.list"
+                                ));
+                            }
                         }
+                        r.ran
                     }
-                    r.ran
-                }
-                Err(e) => {
-                    failures.push(format!("{name} [{target}]: interpreter: {e}"));
-                    continue;
-                }
-            };
+                    Err(e) => {
+                        failures.push(format!("{name} [{target}]: interpreter: {e}"));
+                        continue;
+                    }
+                };
             let Some(runner) = how else { continue };
             for release in [false, true] {
                 let bin = tmp.path().join(format!("{name}-{target}-{release}"));
@@ -361,7 +362,7 @@ fn simd_programs_run_in_the_interpreter() {
             let name = p.file_stem().unwrap().to_string_lossy().into_owned();
             let side = |ext: &str| p.with_extension(ext);
             let out = lower_only(p, target);
-            let m = out.module.as_ref().unwrap();
+            let m = out.for_interp().unwrap();
             let r = match interp::run(m, "main.main", target, &[], &[], Limits::default()) {
                 Ok(r) => r.ran,
                 Err(e) => {
@@ -421,7 +422,7 @@ fn malformed_mask_load_is_an_interpreter_fault() {
     let p = repo().join("tests/conformance/simd/ub_mask_bits.stv");
     for target in ["x86_64-linux", "aarch64-linux"].map(|t| Triple::parse(t).unwrap()) {
         let out = lower_only(&p, target);
-        let m = out.module.as_ref().unwrap();
+        let m = out.for_interp().unwrap();
         match interp::run(m, "main.main", target, &[], &[], Limits::default()) {
             Err(e) => assert!(e.contains("Fault"), "{target}: {e}"),
             Ok(r) => panic!("{target}: ran to the end\n{}", show(&r.ran)),

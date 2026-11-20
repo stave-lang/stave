@@ -1,0 +1,33 @@
+//~ BORROWCHECK use-after-referent 27 21
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+
+fn two(a: &mut Pick from x, b: &mut Pick from copy a, x: &u32) {
+    a.best = x;
+    b.best = a.best;
+}
+
+// no clause: the checker believes `dst` takes only what it already holds
+fn launder(dst: &mut Pick, x: &u32) {
+    let mut w = Pick.{ best: dst.best, count: 0 };
+    two(&mut w, dst, x);
+}
+
+fn leak(seed: &u32, v: u32) -> &u32 from seed {
+    let x: u32 = v;
+    let mut p = Pick.{ best: seed, count: 0 };
+    launder(&mut p, &x);
+    return p.best;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let r: &u32 = leak(&zero, 7);
+    let before: u32 = *r;
+    let other: &u32 = leak(&zero, 9);
+    let s: u32 = *other;
+    let after: u32 = *r;
+    io.print(f"{before} {after} {s}\n");
+    return 0;
+}

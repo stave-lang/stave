@@ -1,0 +1,29 @@
+//~ BORROWCHECK write-under-shared 24 23
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) {
+        self.best = x;
+    }
+}
+
+fn next(i: u32) -> u32 {
+    return i + 1;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let mut i: u32 = 0;
+    while i < 3 {
+        let before: &u32 = p.best;
+        let old: u32 = *before;
+        p.take(&next(i));
+        let now: u32 = *before;
+        io.print(f"round {i}: before read {old}, after the call reads {now}\n");
+        i = i + 1;
+    }
+    return 0;
+}

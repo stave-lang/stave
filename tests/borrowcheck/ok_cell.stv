@@ -1,0 +1,22 @@
+//~ BORROWCHECK ok
+// Writes through `&` to a `Cell`: the bytes of an `UnsafeCell` are not read-only behind a `&`.
+// Two `&` to one value stay usable across the writes through each other.
+import std.cell;
+
+struct Counter { hits: cell.Cell<u32>, base: u32 }
+
+fn bump(c: &Counter) -> u32 {
+    c.hits.set(c.hits.get() + 1u32);
+    return c.base;
+}
+
+fn main() -> i32 {
+    let c = Counter.{ hits: cell.Cell::<u32>.new(0u32), base: 5u32 };
+    let a: &Counter = &c;
+    let b: &Counter = &c;
+    let x: u32 = bump(a);
+    let y: u32 = bump(b);
+    let z: u32 = bump(a);
+    if c.hits.get() == 3u32 && x + y + z == 15u32 { return 0; }
+    return 1;
+}

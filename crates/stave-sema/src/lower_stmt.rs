@@ -313,8 +313,10 @@ impl<'a> FnCx<'a> {
     fn finish_fn(&mut self) -> Option<stave_ir::Body> {
         let mut b = std::mem::replace(&mut self.f.b, FuncBuilder::new(&[]));
         b.seal_unreached();
+        let borrows = std::mem::take(&mut self.f.borrows);
         match b.finish() {
-            Ok(body) => {
+            Ok(mut body) => {
+                body.borrows = borrows;
                 let mut body = crate::lower_post::finalize(body);
                 stave_ir::fence::place_stream_fences(&mut body);
                 Some(body)
@@ -879,6 +881,10 @@ impl<'a> FnCx<'a> {
     fn stmt(&mut self, s: u32) {
         let icx = self.icx;
         let a = icx.a(s);
+        if self.g.borrows {
+            self.f.stmt_site = self.site(a);
+            self.f.b.set_site(self.f.stmt_site);
+        }
         let t = icx.tk(a);
         let kids = self.kids(s);
         if t == Term::KwLet as u8 {
@@ -2231,7 +2237,7 @@ impl<'a> FnCx<'a> {
         let lt = self.locals[l].ty;
         let v = match mode {
             Mode::Move => self.read(&place),
-            Mode::Ref(_) => self.addr(&place, Some(lt)),
+            Mode::Ref(_) => self.addr(&place, Some(lt)).map(|v| self.borrowed(v, lt)),
         };
         let Some(v) = v else { return false };
         self.bind(l, Some(v));

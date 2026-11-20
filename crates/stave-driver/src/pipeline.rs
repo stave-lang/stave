@@ -221,6 +221,17 @@ pub struct Options {
     pub lower: bool,
     /// Collect the borrow checker's per-access lines (the `borrow` dump).
     pub borrow_dump: bool,
+    /// Lower with the borrow side table (`Body::borrows`), for the interpreter's borrow
+    /// tracking. The module is then not the canonical checked IR.
+    pub borrow_marks: bool,
+    /// Lower a second module with the borrow side table, beside the canonical one
+    /// ([`Output::tracked`]): dumps and the backend get the canonical module, the interpreter the
+    /// second. Default: whether `STAVE_INTERP_CHECK=borrow` is set.
+    pub tracked: bool,
+    /// Lower although the borrow checker rejected the program (its diagnostics stay in
+    /// [`Output::diagnostics`]) or could not check a body: the borrow-tracking interpreter runs
+    /// such a program to see what the dynamic model says. Checks only: a build ignores it.
+    pub unchecked_borrows: bool,
     /// `stave effects`: compute `trap` from the checked IR of every fn, not only of what the deny
     /// clauses reach ([`crate::effects::run`]).
     pub effects_all: bool,
@@ -240,6 +251,9 @@ impl Options {
             tests: false,
             lower: false,
             borrow_dump: false,
+            borrow_marks: false,
+            tracked: crate::interp::borrow_from_env(),
+            unchecked_borrows: false,
             effects_all: false,
             sources: std::collections::BTreeMap::new(),
         }
@@ -297,6 +311,9 @@ pub struct Output {
     /// diagnostics): the lowered program after the removal of the bounds checks that have a
     /// checked witness, the same in every build mode.
     pub module: Option<Module>,
+    /// [`Output::module`] lowered again with the borrow side table ([`Options::tracked`]): what
+    /// the borrow-tracking interpreter runs. Not the canonical checked IR.
+    pub tracked: Option<Module>,
     /// The bounds checks [`Output::module`] no longer has, per function: the witness the
     /// checker accepted and the rule behind each row.
     pub removed_checks: Vec<stave_ir::bounds::Proved>,
@@ -325,6 +342,12 @@ impl Output {
 
     pub fn has_errors(&self) -> bool {
         self.error_count() > 0
+    }
+
+    /// The module the interpreter runs: the one with the borrow side table when there is one
+    /// ([`Options::tracked`]), else the checked IR.
+    pub fn for_interp(&self) -> Option<&Module> {
+        self.tracked.as_ref().or(self.module.as_ref())
     }
 
     /// The build summary's stack lines (empty without a computed bound).
@@ -451,6 +474,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             diagnostics,
             timings,
             module: None,
+            tracked: None,
             removed_checks: Vec::new(),
             main: None,
             image: None,
@@ -473,6 +497,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
             diagnostics,
             timings,
             module: None,
+            tracked: None,
             removed_checks: Vec::new(),
             main: None,
             image: None,
@@ -559,6 +584,7 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
         diagnostics,
         timings,
         module: None,
+        tracked: None,
         removed_checks: Vec::new(),
         main: None,
         image: None,
@@ -568,14 +594,22 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     };
 
     let lower = opts.goal == Goal::Build || opts.lower;
-    if !lower || has_errors || out.failure.is_some() {
+    // the errors that stop lowering: with `unchecked_borrows`, all but the borrow checker's
+    let stopped = if opts.unchecked_borrows && opts.goal == Goal::Check {
+        let borrowck = |d: &Diagnostic| Stage::of_code(d.code()) == Some(Stage::Borrowck);
+        out.diagnostics.iter().any(|d| d.severity() == Severity::Error && !borrowck(d))
+            || out.failure.as_ref().is_some_and(|f| f.stage() != Stage::Borrowck)
+    } else {
+        has_errors || out.failure.is_some()
+    };
+    if !lower || stopped {
         out.typeck = Some(tc);
         return out;
     }
 
     // ---- mono + lower + verify + removal of the bounds checks with a checked witness.
     let t0 = Instant::now();
-    let lowered = build::lower(&out.program, &tc, opts.mode());
+    let lowered = build::lower(&out.program, &tc, opts.mode(), opts.borrow_marks);
     let funcs = lowered.as_ref().map_or(0, |l| l.module.funcs.iter().filter(|f| f.body.is_some()).count());
     out.timings.push(timing(Stage::Lower, ms(t0.elapsed()), funcs as u64));
     out.typeck = Some(tc);
@@ -591,6 +625,18 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     };
     out.main = build::main_path(&out.program).and_then(|p| module.find_func(&p));
     prof::mark("find-main");
+    if opts.tracked
+        && !opts.borrow_marks
+        && let Some(tc) = &out.typeck
+    {
+        match build::lower(&out.program, tc, opts.mode(), true) {
+            Ok(l) => out.tracked = Some(l.module),
+            Err(f) => {
+                out.failure = Some(f);
+                return out;
+            }
+        }
+    }
     if opts.goal == Goal::Build {
         // ---- codegen + link.
         let triple = opts.target.or_else(Triple::host);

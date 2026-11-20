@@ -1,0 +1,10 @@
+//~ BORROWCHECK write-under-shared 8 7
+// A write through a raw pointer made from `&mut x`, under a `&x` that is read after it.
+fn main() -> i32 {
+    let mut x: u32 = 1u32;
+    let p = &mut x as *mut u32;
+    let r: &u32 = &x;
+    unsafe("deliberate: p points to x, which r borrows") { *p = 2u32; }
+    if *r == 2u32 { return 1; }
+    return 0;
+}

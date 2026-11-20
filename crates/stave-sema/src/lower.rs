@@ -108,7 +108,7 @@ pub fn lower_graph_nodes(
     nodes: &[u32],
 ) -> (Result<GraphLowering, Vec<LowerError>>, LowerTimings) {
     crate::pool::on_big_stacks(|| {
-        let (r, tm) = lower_in_pool(prog, tc, Roots::Graph(nodes));
+        let (r, tm) = lower_in_pool(prog, tc, Roots::Graph(nodes), false);
         let r = r.map(|a| {
             let nodes_of_func = graph_nodes_of(tc, &a);
             GraphLowering { module: a.module, nodes_of_func, site_pos: a.site_pos }
@@ -236,7 +236,7 @@ pub fn lower_timed(
     mode: Mode,
 ) -> (Result<Module, Vec<LowerError>>, LowerTimings) {
     crate::pool::on_big_stacks(|| {
-        let (r, tm) = lower_in_pool(prog, tc, Roots::Mode(mode));
+        let (r, tm) = lower_in_pool(prog, tc, Roots::Mode(mode), false);
         (r.map(|a| a.module), tm)
     })
 }
@@ -245,13 +245,17 @@ pub fn lower_timed(
 pub type Mapped = (Module, Vec<Vec<u32>>);
 
 /// [`lower_timed`] plus the call-graph nodes of each function, as [`GraphLowering::nodes_of_func`].
+/// `borrows`: each borrow expression gets an instruction of its own (an identity cast) and a row
+/// in its body's side table (`Body::borrows`), for the interpreter's borrow tracking; the
+/// module is then not the canonical checked IR.
 pub fn lower_mapped(
     prog: &Program,
     tc: &Typeck,
     mode: Mode,
+    borrows: bool,
 ) -> (Result<Mapped, Vec<LowerError>>, LowerTimings) {
     crate::pool::on_big_stacks(|| {
-        let (r, tm) = lower_in_pool(prog, tc, Roots::Mode(mode));
+        let (r, tm) = lower_in_pool(prog, tc, Roots::Mode(mode), borrows);
         let r = r.map(|a| {
             let nodes_of_func = graph_nodes_of(tc, &a);
             (a.module, nodes_of_func)
@@ -264,6 +268,7 @@ fn lower_in_pool(
     prog: &Program,
     tc: &Typeck,
     roots: Roots<'_>,
+    borrows: bool,
 ) -> (Result<Assembled, Vec<LowerError>>, LowerTimings) {
     let mut tm = LowerTimings::default();
     let err = |msg: &str| LowerError {
@@ -377,6 +382,7 @@ fn lower_in_pool(
                 res_ok,
                 res_err,
                 any_requires,
+                borrows,
             };
             pending.par_iter().map(|j| lower_job(&g, any_item, j)).collect()
         };
@@ -427,7 +433,12 @@ fn lower_in_pool(
     let m = assemble(prog, sigs, &mut table, &jobs, &cache, outs, &statics_list);
     tm.assemble = t1.elapsed();
     tm.n_funcs = m.as_ref().map_or(0, |m| m.0.funcs.len());
-    let r = m.map(|(module, order, site_pos)| Assembled { module, jobs, order, table, site_pos });
+    let r = m.map(|(mut module, order, site_pos)| {
+        if borrows && !sigs.lang.unsafe_cell.is_none() {
+            module.cell = Some(IrDecl(sigs.lang.unsafe_cell.0));
+        }
+        Assembled { module, jobs, order, table, site_pos }
+    });
     (r.map_err(|e| vec![e]), tm)
 }
 

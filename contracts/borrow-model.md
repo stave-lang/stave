@@ -102,12 +102,13 @@ M18 and M19, unsafe code M20 and M21, threads M22. M24 is the oracle's check of 
 
 - **M4 (borrow).** `&p` and `&mut p` make a tag. Its parent is the tag `p` is reached through:
   the root when the path of `p` has no dereference, else the tag of the last reference the path
-  dereferences. Its range is the bytes of `p`: of a slice place its elements, of a zero-sized
-  place none. Its permission is `Reserved` for `&mut`, `Frozen` for `&`, and `Cell` on the bytes
-  that are inside an `UnsafeCell` by the type of `p` (M21). The parent and its ancestors must
-  not be `Dead` on the range. A borrow is not an access: it changes no permission. So the moment
-  an auto-referenced receiver is borrowed needs no rule: in `v.push(v.len())` the `&mut v` is
-  first used inside `push`.
+  dereferences; when that tag's range does not hold the bytes of `p` (a raw pointer moved past
+  it, M20), the nearest ancestor whose range holds them. Its range is the bytes of `p`: of a
+  slice place its elements, of a zero-sized place none. Its permission is `Reserved` for
+  `&mut`, `Frozen` for `&`, and `Cell` on the bytes that are inside an `UnsafeCell` by the type
+  of `p` (M21). The parent and its ancestors must not be `Dead` on the range. A borrow is not an
+  access: it changes no permission. So the moment an auto-referenced receiver is borrowed needs
+  no rule: in `v.push(v.len())` the `&mut v` is first used inside `push`.
 ```stave
 fn through_dead() -> u32 {
     let mut x: u32 = 1;
@@ -300,9 +301,10 @@ fn caller(zero: &u32) -> u32 {
   written through it alone.
 ```stave
 fn quiet(m: &mut u32, r: &u32) -> u32 {
-    let a: u32 = *r;
-    *m = a + 1;             // M23 when `r` covers the same bytes: it is protected
-    return a;               // `r` is not used again: M1 would report nothing
+    let a: u32 = *r;        // M23 when `r` covers the bytes of `m`: a foreign read of the
+                            // protected `&mut`, which is still `Reserved`
+    *m = a + 1;             // without M23 no rule fails: `r` is Dead here but not used again
+    return a;
 }
 fn caller() -> u32 {
     let mut x: u32 = 1;
@@ -322,9 +324,9 @@ fn two_results() -> u32 {
     let f = fn() -> &mut u32 { return &mut n; };
     let a: &mut u32 = f();
     let b: &mut u32 = f();  // a second child of the capture tag
-    *a = 1;
-    *b = 2;                 // foreign write for `a`: `a` is Dead
-    return *a;              // M1: read through a Dead `&mut`
+    *a = 1;                 // foreign write for `b`: `b` is Dead
+    *b = 2;                 // M2: write through a Dead `&mut`
+    return *a;
 }
 ```
 - **M19 (fn values).** A fn value is Copy: a copy holds the same capture tags, a `&mut` capture
@@ -349,10 +351,11 @@ fn widened() -> u32 {
   are accesses through that tag (M1, M2, M9); a byte outside the tag's range is accessed through
   the nearest ancestor whose range holds it. `&*p` and `&mut *p` are borrows (M4) through it. A
   value read through a raw pointer gets a new tag for each reference in it, a child of the tag
-  stored there. An untagged word is used as the root of the allocation that holds its address.
-  Nothing is suspended in `unsafe` code: M1 to M3 and M9 stay errors. What the model stops
-  tracking is the pointer's type: a `*const T` made from a `&mut T` may write, and a `*mut T`
-  made from a `&T` may not, outside `Cell` bytes.
+  stored there. An untagged word, and a word whose tag belongs to another allocation, is used
+  as the root of the allocation that holds its address. Nothing is suspended in `unsafe` code:
+  M1 to M3 and M9 stay errors. What the model stops tracking is the pointer's type: a
+  `*const T` made from a `&mut T` may write, and a `*mut T` made from a `&T` may not, outside
+  `Cell` bytes.
 ```stave
 fn behind() -> u32 {
     let mut x: u32 = 1;
@@ -440,16 +443,17 @@ fn harmless(zero: &u32) -> usize {
 
 ## Reports
 
-A report gives the class, the rule, the place (allocation and bytes, as a source place), the
-site of the violating event, the site of its cause, and the site where the failing tag was made.
-The failing tag is the first tag from the accessing tag towards the root whose permission
-forbids the access. A protection violation (M23) has the class its tag and the access give
-(a `&` written: (a); a `&mut` read or written: (b); an end: (c)); its two sites are the call
-that protects the tag and the access.
+A report gives the class, the rule, the place (allocation and bytes), the site of the violating
+event, the site of its cause, and the site where the failing tag was made. The failing tag is
+the first tag from the accessing tag towards the root whose permission forbids the access. A
+protection violation (M23) has the class its tag and the access give (a `&` written: (a); a
+`&mut` read or written: (b); an end: (c)); its two sites are the call that protects the tag and
+the access. The site of a frame exit as a cause is the last instruction the returning frame
+ran.
 
 | Class | Violation | Cause | Rules |
 |---|---|---|---|
-| (a) write under a `&` | a use through a `&` tag that a write made `Dead`; a write through a `Frozen` `&` | that write; for the write through it, the borrow that made the `&` | M1, M2, M4 |
+| (a) write under a `&` | a use through a `&` tag that a write made `Dead`; a write through a `Frozen` `&` or the `Frozen` root of a `static` | that write; for the write through a `&`, the borrow that made it; for the root of a `static`, its begin | M1, M2, M4 |
 | (b) two exclusive users | a use through a `&mut` tag that is `Dead`, or a write through one that is `Frozen` | the foreign write, or the foreign read, through another `&mut`, a `&`, a raw pointer, or the place itself | M1, M2, M4 |
 | (c) use after the referent | a use through a tag of either kind made `Dead` by an end | the end: block or frame exit, a temporary evaluated again or dropped, a move out of the place, `free` | M3, M9, M13, M14 |
 | (d) second owner | a read or drop of a moved-out place; an array repeat of a value that is not Copy | the move that took the value (for the array repeat: the literal itself) | M9, M10, M12 |
@@ -459,10 +463,16 @@ symptom. Two holders of one `&mut` tag made by a copy cannot be told apart by M1
 (b) never reports them; M9 does, at the first use of the place the value left. The fifth form,
 "signature" (M24), is reported beside these and never instead of them.
 
+An implementation that sees no begin and end of locals and temporaries ("Side table") reports
+the store of the next value where the table says (c): a loop local written again, or a
+temporary evaluated again, makes a reference to the value before `Dead` by a write, so a later
+use through it is (a) for a `&` and (b) for a `&mut`, with that store as the cause.
+
 ## Relation to the static rules
 
 The static rules must imply the model: no execution of an accepted program has a violation. A
-program the checker accepts with an execution the model rejects is a hole in the static rules.
+program the checker accepts with an execution the model rejects is a hole in the static rules,
+unless the execution breaks an obligation of its `unsafe` code ("Obligations of `unsafe` code").
 A program the checker rejects with no execution the model rejects is a precision note, not a
 hole. The model never reads a static rule to decide.
 
@@ -515,7 +525,6 @@ The oracle's regression set holds one program per shape. The rule that rejects t
 | a storing call whose `from copy` source, or `from copy` result, is what the same call stored: the taker is used after the block of the stored referent | M16, M17 with M13 | (c) |
 | a callee splits its `&mut` source into two pointers and stores one through the other (the source wrapped in a tuple, struct, array, `Option`, a by-value `self`, a pattern, a closure, a generic param); the caller then writes the part pointed to | M16 with M2 | (a) |
 | a `&mut` source stored in a view; the source's local and the view's pointer both used | M16 with M2 | (b); (a) when the stale user is a `&` of the local |
-| a `&mut V` made from a raw pointer under a `&` anchor takes a borrow of a shorter-lived local | M20, M16 with M13 | (c) |
 | a storing call stores `&n` and its result is assigned to `n` | M16 with M2 | (a) |
 | an assignment whose new value borrows the value it replaces (`x = V.{ r: &x.f }`, `*q = ..`, `w.h = ..`); with a heap buffer in the old value | M12 with M2; M12 with `free` | (a); (c) |
 | a temporary's new value, or a view stored by the same statement, borrows the temporary's earlier value | M14 | (c) |
@@ -527,19 +536,64 @@ a clause a trait impl drops) has no violating execution until a caller uses the 
 reference: the model then rejects that execution by the rows above. Before that, M24 reports
 the call of the body.
 
+## Obligations of `unsafe` code
+
+Each shape below has an execution with a violation that the static rules do not see, because
+it goes through a raw pointer. A checker may accept it; the author of the `unsafe` code must
+rule the execution out, and the borrow-tracking mode reports it when a run has it.
+
+| Program shape | Violation | Class |
+|---|---|---|
+| a `&mut V` made from a raw pointer under a `&` anchor takes a borrow of a shorter-lived local (`tests/borrowcheck/anchor_shorter_local.stv`) | M20, M16 with M13 | (c); (a) by the store of the local's next value ("Reports") |
+
 ## What an implementation over the checked IR needs
 
 The checked IR (`checked-ir.md`) does not show every event. `&x` of a local is its `slot`
 address; a move of an SSA local is a rebinding; a block exit of a local without drop glue and
 the next evaluation of a temporary are nothing; one environment `slot` serves every evaluation
-of a closure literal. The tracking mode therefore takes from lowering, per function and outside
+of a closure literal. An implementation therefore needs from lowering, per function and outside
 the canonical dump: each borrow with its kind, range, and the implicit forms of M6 and M18; each
 by-value use that is a move (M9), also of an SSA local; the begin and end of each local and
 temporary (M13, M14); the capture references of each `fn.make` as a value of their own (M18);
 the `from` clauses of each fn (M24).
 `runtime.alloc.{try_alloc, try_realloc, free}` are primitive events. Everything else is read off
 the IR: `load`, `store`, `vec.*` memory ops, and intrinsics that take a pointer are M1 and M2;
-`addr.*` and casts keep the tag (M20).
+`addr.*` and casts keep the tag (M20). What the tracking mode gets of this list, and what it
+does without, is in "Side table".
+
+## Side table
+
+The tracking mode runs a module lowered for it (`Options::borrow_marks` of the driver's
+pipeline; `Options::tracked`, the default under `STAVE_INTERP_CHECK=borrow`, lowers it beside
+the canonical module; no `stave` command asks for it). That lowering differs from the canonical
+one in what this section lists, and in nothing else. Its module is not the canonical checked IR:
+it is not dumped, not compared with a golden, and not given to a backend.
+
+- **A borrow is a value of its own.** In the canonical IR `&x` is the `slot` value of `x`, and
+  `&*r` is `r`: the same value names the reference and the place, so no table beside the
+  instructions can tell a use of one from a use of the other. Here each borrow expression (`&p`,
+  `&mut p`, the implicit reborrows of M6, `&mut T` given as `&T`, an auto-referenced receiver, a
+  pattern binding by reference) ends in one more instruction: an identity cast for a thin
+  reference; for a fat one the pointer and length taken apart and put together again.
+- **`Body::borrows`**, one row per such value: the value, and `&` or `&mut`. The interpreter
+  makes the tag (M4) when the instruction that defines the value runs: the parent is the tag its
+  address word carries; the range starts at the address and has the size of the pointee of the
+  value's type, for a fat reference its length times the element size.
+- **`Module::cell`**, the declaration of `std.cell.UnsafeCell`. A `&` gets `Cell` on the bytes
+  that the layout of its pointee type puts inside a value of such a type (M21).
+- **Sites.** An instruction without a site of its own has the site of the statement it belongs
+  to, so both sites of a report are source lines.
+
+What the interpreter reads off the module without a row: a call protects the reference words of
+its arguments, found by the types of the params (M23); a load through a raw pointer gives each
+reference word of the loaded value a new tag (M20); the return of a frame ends its locals and
+temporaries, `free` and `try_realloc` end the block (M3).
+
+The table has no rows for moves, drops, the ends of blocks, the evaluations of temporaries,
+captures, and `from` clauses: the tracking mode does not see these events, and reports none of
+the violations that need them (M9, M10, M12, M13 at a block, M14, M18, M24). The store of a
+temporary's next value is a write like any other: a `&` of the value before is then `Dead` by
+a write, not by an end.
 
 ## Limits
 

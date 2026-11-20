@@ -316,6 +316,7 @@ pub fn interp(m: &Module, entry: FuncId) -> Run {
         }
         Outcome::Return(_) => panic!("entry returned"),
         Outcome::MemError(r) => panic!("{}", r.render(m)),
+        Outcome::BorrowError(r) => panic!("{}", r.render(m)),
     }
 }
 

@@ -1,0 +1,13 @@
+//~ BORROWCHECK gap
+// A `&` of a local read after the local's block was left: the end of a block is no event of
+// the tracking mode yet.
+fn main() -> i32 {
+    let zero: u32 = 0u32;
+    let mut r: &u32 = &zero;
+    {
+        let x: u32 = 7u32;
+        r = &x;
+    }
+    if *r == 7u32 { return 1; }
+    return 0;
+}

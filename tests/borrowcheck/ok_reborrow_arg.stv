@@ -1,0 +1,20 @@
+//~ BORROWCHECK ok
+// A `&mut` given to a `&mut` param is reborrowed for each call; the reference itself stays
+// usable between and after the calls.
+fn set(m: &mut u32, v: u32) { *m = v; }
+
+fn twice(m: &mut u32) {
+    set(m, 1u32);
+    set(m, 2u32);
+    *m = *m + 1u32;
+}
+
+fn main() -> i32 {
+    let mut x: u32 = 0u32;
+    twice(&mut x);
+    let r: &mut u32 = &mut x;
+    set(r, 5u32);
+    *r = *r + 1u32;
+    if x == 6u32 { return 0; }
+    return 1;
+}

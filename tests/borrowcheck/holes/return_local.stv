@@ -1,0 +1,12 @@
+//~ BORROWCHECK use-after-referent 10 5
+// A `&` of a local returned from its frame and read by the caller.
+fn local(z: &u32) -> &u32 from z {
+    let x: u32 = *z;
+    return &x;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0u32;
+    if *local(&zero) == 0u32 { return 1; }
+    return 0;
+}

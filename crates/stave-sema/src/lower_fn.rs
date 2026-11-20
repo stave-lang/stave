@@ -56,6 +56,8 @@ pub(crate) struct G<'a> {
     pub res_err: u32,
     /// Some fn checks a `requires`: calls that can reach one store the user site first.
     pub any_requires: bool,
+    /// Borrow expressions get an instruction of their own and a row in `Body::borrows`.
+    pub borrows: bool,
 }
 
 impl<'a> G<'a> {
@@ -232,6 +234,11 @@ pub(crate) struct FnState {
     /// `&mut` chunk bindings: (scope depth of the chunk body, the write-back of the binding's
     /// slot); written back when that scope ends or is left.
     pub write_backs: Vec<(usize, WriteBack)>,
+    /// The borrow side table of the body so far.
+    pub borrows: Vec<stave_ir::BorrowMark>,
+    /// The site of an instruction that has none of its own: the statement's, with the borrow
+    /// side table on (a report names source lines); else none.
+    pub stmt_site: Site,
 }
 
 /// The write-back of a `&mut` chunk binding: the vector in `slot` goes to `s[i..i+N]`, only the
@@ -624,7 +631,7 @@ impl<'a> FnCx<'a> {
         let s = self.site(tok);
         self.f.b.set_site(s);
         let r = self.f.b.inst(op, t.map(Self::ir), args);
-        self.f.b.set_site(Site::NONE);
+        self.f.b.set_site(self.f.stmt_site);
         r.map(Operand::Value)
     }
 
@@ -1325,7 +1332,7 @@ impl<'a> FnCx<'a> {
         let s = self.site(tok);
         self.f.b.set_site(s);
         let r = self.f.b.call(f, rt.map(Self::ir), args);
-        self.f.b.set_site(Site::NONE);
+        self.f.b.set_site(self.f.stmt_site);
         self.call_result(r, ret)
     }
 
@@ -1403,6 +1410,8 @@ impl FnState {
             last_site: None,
             scope_handles: Vec::new(),
             write_backs: Vec::new(),
+            borrows: Vec::new(),
+            stmt_site: Site::NONE,
             ensures_end: None,
         }
     }

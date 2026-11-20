@@ -241,7 +241,7 @@ impl<'a> FnCx<'a> {
                     None => self.t_ref(false, inner),
                 };
                 let r = self.convert_ptr(v, t, w);
-                E::V(r, w)
+                E::V(self.borrowed(r, w), w)
             }
             Coercion::ArrayToSlice => {
                 let t = self.e_ty(&e);
@@ -325,6 +325,10 @@ impl<'a> FnCx<'a> {
                     self.coerce(e, &Coercion::ArrayToSlice, want)
                 } else if unalign {
                     self.coerce(e, &Coercion::Unalign, want)
+                } else if self.g.borrows && matches!(self.kind(t), TypeKind::Ref { .. }) {
+                    // an implicit reborrow is a borrow through the reference given (M6)
+                    let Some(v) = self.operand_of(e) else { return E::Never };
+                    E::V(self.borrowed(v, t), t)
                 } else {
                     e
                 }
@@ -532,9 +536,40 @@ impl<'a> FnCx<'a> {
                 _ => p,
             };
             let Some(v) = self.addr(&p, Some(rt)) else { return E::Never };
-            return E::V(v, rt);
+            return E::V(self.borrowed(v, rt), rt);
         }
         self.expr(c, want)
+    }
+
+    /// The reference `v` of type `rt` a borrow expression made. With the borrow side table on,
+    /// the reference becomes the result of an instruction of its own (an identity cast; a fat
+    /// reference is made again from its parts), so that the borrow is a value, and gets its row.
+    pub(crate) fn borrowed(&mut self, v: Operand, rt: Ty) -> Operand {
+        if !self.g.borrows {
+            return v;
+        }
+        let TypeKind::Ref { mutable, inner } = self.kind(rt) else { return v };
+        let elem_ptr = match self.kind(inner) {
+            TypeKind::Slice { elem, .. } => Some(self.t_ref(mutable, elem)),
+            TypeKind::Str => {
+                let u8t = self.t_int(false, crate::types::IntBits::B8);
+                Some(self.t_ref(false, u8t))
+            }
+            _ => None,
+        };
+        let c = match elem_ptr {
+            Some(ep) => {
+                let us = self.t_usize();
+                let p = self.op1(Op::SlicePtr, ep, v);
+                let n = self.op1(Op::SliceLen, us, v);
+                self.op2(Op::SliceMake, rt, p, n)
+            }
+            None => self.op1(Op::Cast(CastKind::Exact), rt, v),
+        };
+        if let Operand::Value(value) = c {
+            self.f.borrows.push(stave_ir::BorrowMark { value, mutable });
+        }
+        c
     }
 
     fn unop(&mut self, tok: u32, trait_name: &str, op: Op, v: Operand, ty: Ty) -> E {
@@ -1601,7 +1636,7 @@ impl<'a> FnCx<'a> {
                 let s = self.site(ctok);
                 self.f.b.set_site(s);
                 let r = self.f.b.call_ind(fv, rt.map(FnCx::ir), &vs);
-                self.f.b.set_site(stave_ir::Site::NONE);
+                self.f.b.set_site(self.f.stmt_site);
                 self.f.last_site = None;
                 self.call_result(r, ret)
             }
@@ -1797,7 +1832,8 @@ impl<'a> FnCx<'a> {
                     Some(w) => w,
                     None => self.t_ref(m, p.ty),
                 };
-                self.addr(&p, Some(w))
+                let v = self.addr(&p, Some(w))?;
+                Some(self.borrowed(v, w))
             }
             None => self.read(&p),
         }

@@ -531,7 +531,7 @@ fn interpreter_takes_the_default_arm() {
         o.target = Some(target);
         let out = pipeline::run(&src, &Library::in_dir(&repo()), &o).unwrap();
         assert!(!out.has_errors(), "{:?}", out.diagnostics);
-        let m = out.module.as_ref().unwrap();
+        let m = out.for_interp().unwrap();
         let r = interp::run(m, "main.main", target, &[], &[], Limits::default()).unwrap().ran;
         let want = "pick base\nvalue base\nword base\nown base\ndirect base\n";
         assert_eq!(String::from_utf8_lossy(&r.stdout), want, "{target}");

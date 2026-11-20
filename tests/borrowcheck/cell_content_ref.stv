@@ -1,0 +1,12 @@
+//~ BORROWCHECK write-under-shared 10 0
+// A `&u32` into the content of a `Cell`, read after a `set`: the write is in std.
+import std.cell;
+
+fn main() -> i32 {
+    let c = cell.Cell::<u32>.new(1u32);
+    let p = &c as *const cell.Cell<u32> as *const u32;
+    let r: &u32 = unsafe("deliberate: a Cell<u32> is one u32, and r is read after a set") &*p;
+    c.set(2u32);
+    if *r == 2u32 { return 1; }
+    return 0;
+}

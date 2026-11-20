@@ -77,7 +77,7 @@ fn run(lo: usize, hi: usize, body: fn(usize)) {
 
 pub fn par_for_mut<T: core.Send>(xs: &mut [T], body: fn(usize, &mut T)) {
     let n = xs.len();
-    let base = mem.slice_ptr(xs) as usize;
+    let base = mem.slice_ptr_mut(xs) as usize;
     let size = mem.type_size::<T>();
     run(0, n, fn(i: usize) {
         let p = (base + i * size) as *mut T;

@@ -10,6 +10,11 @@
 //! the run with an error whose text starts `interp: memory error [<class>]`
 //! ([`stave_ir::memcheck::MemReport::render`]).
 //!
+//! Borrow tracking ([`Limits::borrow`], default from `STAVE_INTERP_CHECK=borrow`, which turns
+//! the checking mode on too): a violation of contracts/borrow-model.md ends the run with an
+//! error whose text starts `interp: borrow violation [<class>]`. It sees the borrows of a module
+//! lowered with the borrow side table ([`crate::pipeline::Output::for_interp`]).
+//!
 //! Files: the in-memory file system of [`stave_ir::BufferHost`] (`files`, relative paths), so a
 //! program reading `input.txt` from its working directory gets the same bytes.
 
@@ -28,16 +33,31 @@ pub struct Limits {
     pub max_depth: usize,
     /// The interpreter's checking mode.
     pub check: bool,
+    /// Borrow tracking, on top of `check`. It sees the borrows of a module lowered with the
+    /// borrow side table ([`crate::pipeline::Output::for_interp`]); on any other module it sees
+    /// the ends of allocations only.
+    pub borrow: bool,
 }
 
-/// Whether `STAVE_INTERP_CHECK=1` is set: the default of [`Limits::check`].
+/// Whether `STAVE_INTERP_CHECK` is `1` or `borrow`: the default of [`Limits::check`].
 pub fn check_from_env() -> bool {
-    std::env::var_os("STAVE_INTERP_CHECK").is_some_and(|v| v == "1")
+    std::env::var_os("STAVE_INTERP_CHECK").is_some_and(|v| v == "1" || v == "borrow")
+}
+
+/// Whether `STAVE_INTERP_CHECK=borrow` is set: the default of [`Limits::borrow`] and of
+/// [`crate::pipeline::Options::tracked`].
+pub fn borrow_from_env() -> bool {
+    std::env::var_os("STAVE_INTERP_CHECK").is_some_and(|v| v == "borrow")
 }
 
 impl Default for Limits {
     fn default() -> Limits {
-        Limits { max_steps: 20_000_000_000, max_depth: 20_000, check: check_from_env() }
+        Limits {
+            max_steps: 20_000_000_000,
+            max_depth: 20_000,
+            check: check_from_env(),
+            borrow: borrow_from_env(),
+        }
     }
 }
 
@@ -82,7 +102,8 @@ pub fn run(
     let cfg = Config {
         max_steps: limits.max_steps,
         max_depth: limits.max_depth,
-        check: limits.check,
+        check: limits.check || limits.borrow,
+        borrow: limits.borrow,
         ..Config::default()
     };
     let mut it = Interp::new(&m, host, cfg).map_err(|e| format!("interp: {e:?}"))?;
@@ -111,6 +132,7 @@ pub fn run(
     let exit = match out {
         Outcome::Exit(c) => c,
         Outcome::MemError(r) => return Err(format!("interp: {}", r.render(&m))),
+        Outcome::BorrowError(r) => return Err(format!("interp: {}", r.render(&m))),
         o => return Err(format!("interp: the program did not exit: {o:?}")),
     };
     let steps = it.steps();

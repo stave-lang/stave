@@ -18,7 +18,7 @@ GPU) both implement them.
 | `checked-ir.md` | canonical checked-IR print format |
 | `lang-details.md` | fine print behind one-sentence rules of `LANG.md`: output formats, case lists, reasons |
 | `soundness.md` | the argument for each static rule whose failure would let an accepted program misbehave |
-| `borrow-model.md` | what a program may do with references at run time (tags, permissions per byte); the static borrow rules must imply it, and the interpreter's borrow tracking reports against it |
+| `borrow-model.md` | what a program may do with references at run time (tags, permissions per byte); the static borrow rules must imply it, and the interpreter's borrow tracking reports against it; the side table the tracking mode's lowering adds to a body |
 | `intrinsics.md` | `extern "stave-intrinsic"` operations and program entry |
 | `gpu-lang.md`, `gpu-ops.md`, `gpu-diagnostics.md` | GPU kernels (PTX) |
 | `gpu-program.md`, `host-channel.md`, `gpu-program-diagnostics.md` | whole programs on the GPU (`gpu-sm86`) |
