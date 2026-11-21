@@ -175,16 +175,16 @@ fn child(p: &mut u32) -> u32 {
   its ancestors whose range holds the word, M20) or an ancestor of that tag is a `&`, or the
   root of a `static`, that holds the word's bytes `Frozen`: the path the access is judged on
   (a `&mut` tag that a foreign read made `Frozen` is no `&`; a `&mut` made below a `&` from a
-  raw pointer reads through that `&`). A `&mut` word is one that carries a `&mut` tag, whatever
-  type it is read as (the tag belongs to the word): read as a raw pointer or an integer it gets
-  the new `&` tag as well, on all of the stored tag's range and `Cell` on none of it (the type
-  names no pointee), and an integer keeps that tag as M20 says, so a pointer cast back from it
-  is read-only (an integer whose arithmetic dropped the tag is used as the root, M20). A read
-  or a `&` reborrow through the word read is allowed; a write through it is a write through a
-  `Frozen` `&` (M2). The byte copy `copy_bytes` is the one exception: it reads no value and
-  makes no tag (M20), so a `&mut` word it copies from bytes reached through a `&` keeps its
-  tag. User code cannot name it (E0805); std calls it on Copy values (`Vec.extend_from_slice`,
-  `copy_from`) and on blocks no `&` reaches (`realloc`).
+  raw pointer reads through that `&`). The rule binds a word loaded as `&mut`: alone, as a
+  field, element, or payload of a loaded value (both words of a fat one), or reborrowed. A word
+  read through a `&` as a raw pointer or an integer keeps its tag, also when unsafe code reads a
+  `&mut` word with a raw-pointer type; so does a word copied by bytes (`copy_bytes`, which safe
+  code reaches through `copy_from` and `Vec.extend_from_slice` of raw-pointer or integer
+  elements). A vector lane holds no tag: a pointer made from it is used as the root (M20). What
+  is written through such a word is judged by the tag it has, and stays the unsafe block's
+  obligation toward every `&` that can see the bytes. A fn value read
+  through a `&` keeps its capture tags, `&mut` ones included (M19). A read or a `&` reborrow
+  through the word read is allowed; a write through it is a write through a `Frozen` `&` (M2).
   The line is per byte: bytes inside an `UnsafeCell` are `Cell`, not `Frozen` (M21), so a
   `&mut` stored there and read through a `&` keeps its tag; and the new `&` tag is `Cell` on
   the `UnsafeCell` bytes of its own pointee, so a `&&mut Cell<T>` may still `set`. The word in
@@ -685,9 +685,9 @@ it is not dumped, not compared with a golden, and not given to a backend.
 
 What the interpreter reads off the module without a row: a call protects the reference words of
 its arguments, found by the types of the params (M23); a load through a raw pointer gives each
-reference word of the loaded value a new tag (M20); a load of a `&mut` word (one that carries a
-`&mut` tag, as any type) through a `&` on the access path gives it a new `&` tag (M7; through a
-raw pointer that tag is the word's new tag); the return of a frame ends its locals and
+reference word of the loaded value a new tag (M20); a load of a word typed `&mut` through a `&`
+on the access path gives it a new `&` tag (M7; through a raw pointer that tag is the word's new
+tag); the return of a frame ends its locals and
 temporaries, `free` and `try_realloc` end the block (M3); a borrow whose instruction takes a raw
 pointer is a tag made through a raw pointer (M24).
 

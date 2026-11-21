@@ -1,0 +1,26 @@
+//~ BORROWCHECK ok
+// A raw pointer made from a `&mut` and read through a `&` keeps its tag: a `Cell`, a `Mutex`,
+// or an atomic it points to is used through its `&self` API as through any `&` to it.
+import std.atomic;
+import std.cell;
+import std.sync;
+struct H { c: *mut cell.Cell<u32>, m: *mut sync.Mutex<u32, 1>, a: *mut atomic.U32 }
+fn release(g: sync.MutexGuard<u32, 1>) {}
+fn main() -> i32 {
+    let mut c = cell.Cell::<u32>.new(1u32);
+    let mut m = sync.Mutex::<u32, 1>.new(1u32);
+    let mut a = atomic.U32.new(1u32);
+    let h = H.{ c: &mut c as *mut cell.Cell<u32>, m: &mut m as *mut sync.Mutex<u32, 1>, a: &mut a as *mut atomic.U32 };
+    let r: &H = &h;
+    let cr: &cell.Cell<u32> = unsafe("r.c points to c, live and not otherwise used here") &*r.c;
+    cr.set(5u32);
+    let mr: &sync.Mutex<u32, 1> = unsafe("r.m points to m, live and not otherwise used here") &*r.m;
+    let mut g = mr.lock();
+    *g.get_mut() = 6u32;
+    release(g);
+    let ar: &atomic.U32 = unsafe("r.a points to a, live and not otherwise used here") &*r.a;
+    ar.store(7u32);
+    let v = *m.lock().get();
+    if c.get() == 5u32 && v == 6u32 && a.load() == 7u32 { return 0; }
+    return 1;
+}

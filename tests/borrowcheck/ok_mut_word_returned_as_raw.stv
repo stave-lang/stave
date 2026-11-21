@@ -1,6 +1,7 @@
-//~ BORROWCHECK write-under-shared 13 7
-// A `*mut` read from a `&mut` word through a `&` in a callee and returned keeps the `&` tag
-// of the read: a write through it in the caller is a write under a `&`.
+//~ BORROWCHECK ok
+// The read-only rule binds a word loaded as `&mut`: a callee that reads a `&mut` word through
+// a `&` as a raw pointer returns it with its tag, and the caller's write through it is judged
+// by that tag (the holder's `&mut`, so no report).
 view struct S { m: &mut u32 }
 fn ptr_of(s: &S) -> *mut u32 {
     let q = &s.m as *const &mut u32 as *const *mut u32;

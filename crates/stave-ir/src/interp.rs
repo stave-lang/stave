@@ -1662,12 +1662,12 @@ impl<'m, H: Host> Interp<'m, H> {
 
     /// The reference words of a value of type `t` loaded from `addr` through tag `via`. Through
     /// a raw pointer (`raw`), each gets a new tag, a child of the tag stored there (M20). A
-    /// `&mut` word whose bytes the access through `via` reaches through a `&` (`Frozen`, so
-    /// not on the bytes of an `UnsafeCell`) is read-only (M7): it gets a new `&` tag, a child of
-    /// the tag stored there. A `&mut` word is one typed `&mut`, or one that carries a `&mut`
-    /// tag whatever its type (a raw pointer, an integer). The words are found by the type (of
-    /// an enum the live variant). The value is walked with a list, not by recursion: it may
-    /// nest as deep as the type table allows, deeper than a small native stack holds frames.
+    /// word loaded as a `&mut` whose bytes the access through `via` reaches through a `&`
+    /// (`Frozen`, so not on the bytes of an `UnsafeCell`) is read-only (M7): it gets a new `&`
+    /// tag, a child of the tag stored there. A word loaded as a raw pointer or an integer keeps
+    /// its tag, whatever made it. The words are found by the type (of an enum the live
+    /// variant). The value is walked with a list, not by recursion: it may nest as deep as the
+    /// type table allows, deeper than a small native stack holds frames.
     fn reborrow_refs(&mut self, t: TypeId, v: Val, addr: u64, via: Tag, raw: bool, at: Ev) -> R<Val> {
         // per open aggregate: its parts still to do (`None`: a part kept as it is), and the
         // values done
@@ -1719,7 +1719,7 @@ impl<'m, H: Host> Interp<'m, H> {
         let types = &self.m.types;
         match types.key(t) {
             Some(&TypeKey::Ref { mutable, .. }) => {
-                let shared = (mutable || self.mut_word(&v)) && self.frozen_at(via, addr);
+                let shared = mutable && self.frozen_at(via, addr);
                 if raw {
                     return self.borrow_word(t, v, mutable && !shared, true, at).map(Ok);
                 }
@@ -1733,12 +1733,14 @@ impl<'m, H: Host> Interp<'m, H> {
                 }));
             }
             Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
-            Some(TypeKey::RawPtr { .. } | TypeKey::Int { .. }) => {
-                return self.share_word(v, addr, via, at).map(Ok);
-            }
-            _ => return Ok(Ok(v)),
+            // a type the table does not know: no layout tells its words apart, so the load
+            // stops rather than keep a `&mut` word writable
+            None => return Err(malformed("reborrow type")),
+            // a word not loaded as a reference (raw pointer, integer, fn value, vector) keeps
+            // its tag
+            Some(_) => return Ok(Ok(v)),
         }
-        if !raw && !self.holds_mut_refs(t) && !self.holds_mut_word(&v) {
+        if !raw && !self.holds_mut_refs(t) {
             return Ok(Ok(v));
         }
         let Val::Agg(vs) = &v else { return Ok(Ok(v)) };
@@ -1756,56 +1758,6 @@ impl<'m, H: Host> Interp<'m, H> {
             Shape::Scalar | Shape::Fat | Shape::Bytes => return Ok(Ok(v)),
         };
         Ok(Err(vs.iter().enumerate().map(|(k, fv)| (parts.get(k).copied().flatten(), fv.clone())).collect()))
-    }
-
-    /// M7 for a word loaded as a type that names no pointee (a raw pointer, an integer): a
-    /// word that carries a `&mut` tag, read through a `&` (`via` at `addr`), gets a new `&`
-    /// tag, a child of that one ([`Tracker::share`]). The tag is the word's, not its type's.
-    fn share_word(&mut self, v: Val, addr: u64, via: Tag, at: Ev) -> R<Val> {
-        if !self.mut_word(&v) || !self.frozen_at(via, addr) {
-            return Ok(v);
-        }
-        let Some((_, tag)) = v.word() else { return Ok(v) };
-        let Some(bt) = &mut self.bt else { return Ok(v) };
-        if bt.tracker.exhausted() {
-            return Err(InterpError::Unsupported("borrow tracking: every tag is used up".into()));
-        }
-        Ok(match bt.tracker.share(tag, at) {
-            Some(Ok(t)) => match v {
-                Val::PairT(a, n, _) => Val::PairT(a, n, t),
-                Val::T(a, _) => Val::T(a, t),
-                v => v,
-            },
-            // a `&mut` whose tag is Dead already: its next use reports
-            _ => v,
-        })
-    }
-
-    /// Whether the word `v` carries a `&mut` tag.
-    fn mut_word(&self, v: &Val) -> bool {
-        match (&self.bt, v) {
-            (Some(bt), Val::T(_, t) | Val::PairT(_, _, t)) => *t != ROOT && bt.tracker.is_mut(*t),
-            _ => false,
-        }
-    }
-
-    /// Whether the value `v` holds a word that carries a `&mut` tag. Walked with a list.
-    fn holds_mut_word(&self, v: &Val) -> bool {
-        if self.bt.as_ref().is_none_or(|bt| bt.tracker.tags() == 0) {
-            return false;
-        }
-        let mut work = vec![v];
-        while let Some(x) = work.pop() {
-            match x {
-                Val::Agg(vs) => work.extend(vs.iter()),
-                w => {
-                    if self.mut_word(w) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
     }
 
     /// Whether tag `via` holds the byte at `addr` as a `&` does ([`Tracker::shared_at`]).
@@ -2079,7 +2031,7 @@ impl<'m, H: Host> Interp<'m, H> {
                     }
                     _ => false,
                 };
-                if self.bt.is_some() && (raw || self.holds_mut_refs(t) || self.holds_mut_word(&v)) {
+                if self.bt.is_some() && (raw || self.holds_mut_refs(t)) {
                     self.reborrow_refs(t, v, a, Self::tag_of(regs, p), raw, ev(fid, i))?
                 } else {
                     v

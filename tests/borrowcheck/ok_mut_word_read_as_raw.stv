@@ -1,6 +1,8 @@
-//~ BORROWCHECK write-under-shared 11 10
-// A `&mut` word read through a `&` is read-only whatever type it is loaded as: read as a
-// `*mut u32`, it carries a new `&` tag, and a write through it is a write under a `&`.
+//~ BORROWCHECK ok
+// The read-only rule binds a word loaded as `&mut`. A `&mut` word read through a `&` with a
+// raw-pointer type keeps its tag: the write through it is judged by that tag (the holder's
+// `&mut`, so no report), and stays the unsafe block's obligation toward every `&` that sees
+// the bytes.
 view struct S { m: &mut u32 }
 fn main() -> i32 {
     let mut a: u32 = 1u32;
