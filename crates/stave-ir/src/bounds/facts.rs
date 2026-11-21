@@ -75,19 +75,18 @@ pub(super) const ZERO: u32 = 0;
 /// Parameters and fields past this have no [`Node::Field`] term node (their loads stay opaque).
 const FIELD_SPAN: u32 = 1 << 12;
 
-pub(super) fn val_node(v: Value) -> u32 {
-    1 + 3 * v.0
+/// The term node of a witness node (`None`: past the numbering). With [`node_of`] the only code
+/// that knows how nodes are numbered: everything else goes through the two.
+pub(super) fn node_id(n: Node) -> Option<u32> {
+    match n {
+        Node::Zero => Some(ZERO),
+        Node::Val(v) => v.0.checked_mul(3)?.checked_add(1),
+        Node::Len(s) => s.0.checked_mul(3)?.checked_add(2),
+        Node::Field(p, k) => (p.0 < FIELD_SPAN && k < FIELD_SPAN).then(|| 3 + 3 * (p.0 * FIELD_SPAN + k)),
+    }
 }
 
-pub(super) fn len_node(s: Value) -> u32 {
-    2 + 3 * s.0
-}
-
-pub(super) fn field_node(p: Value, k: u32) -> Option<u32> {
-    (p.0 < FIELD_SPAN && k < FIELD_SPAN).then(|| 3 + 3 * (p.0 * FIELD_SPAN + k))
-}
-
-/// The witness node of a term node.
+/// The witness node of a term node: the inverse of [`node_id`].
 pub(super) fn node_of(node: u32) -> Node {
     match node {
         ZERO => Node::Zero,
@@ -98,6 +97,15 @@ pub(super) fn node_of(node: u32) -> Node {
             Node::Field(Value(f / FIELD_SPAN), f % FIELD_SPAN)
         }
     }
+}
+
+// A body has far fewer values than a third of `u32::MAX`.
+pub(super) fn val_node(v: Value) -> u32 {
+    node_id(Node::Val(v)).expect("value index within the node numbering")
+}
+
+pub(super) fn len_node(s: Value) -> u32 {
+    node_id(Node::Len(s)).expect("value index within the node numbering")
 }
 
 /// One side of an inequality as written: the constant zero, an int operand, or the length of a
@@ -280,7 +288,7 @@ impl Cx<'_> {
                 }
                 let Some(d) = self.def(v) else { return Some(opaque) };
                 if let Some((p, field, src)) = self.stable_field(d) {
-                    let Some(node) = field_node(p, field) else { return Some(opaque) };
+                    let Some(node) = node_id(Node::Field(p, field)) else { return Some(opaque) };
                     sink(Edge { from: Node::Val(v), to: Node::Field(p, field), w: 0, src, mul: 1 });
                     return Some(Term { node, k, root: Some(v) });
                 }
@@ -464,8 +472,8 @@ impl Cx<'_> {
         let mut leave: Vec<u32> = g.facts.iter().filter(|f| f.to != ZERO).map(|f| f.from).collect();
         leave.sort_unstable();
         leave.dedup();
-        for node in leave.into_iter().filter(|&n| n % 2 == 1) {
-            let v = Value((node - 1) / 2);
+        for node in leave {
+            let Node::Val(v) = node_of(node) else { continue };
             if let Some((signed, bits)) = self.int_ty(v)
                 && let Some(at) = self.defined_in(v)
             {

@@ -55,18 +55,18 @@
 //! `y <= x`. Where the larger side `y` of an unsigned strict compare is `sub.sat n c`, it also
 //! states `x + c < n`; where the smaller side `x` of an unsigned non-strict one is `sub.sat n c`,
 //! also `n <= y + c`. An equality source (`Arith`, `SliceLen`, `SliceMake`, `Cast`, `FieldLoad`,
-//! `Getter`) gives its edge in both directions. The instruction of every source but `Branch` and `Range` must run
-//! before the check on every path to it; for `Range`, the definition of `value` (an instruction,
-//! or the block of a parameter). For a contract check "the check" is the end of block `P`, never
-//! `F` (which only the failing edge enters).
+//! `Getter`) gives its edge in both directions. The instruction of every source but `Branch` and
+//! `Range` must run before the check on every path to it; for `Range`, the definition of `value`
+//! (an instruction, or the block of a parameter). For a contract check "the check" is the end of
+//! block `P`, never `F` (which only the failing edge enters).
 //!
 //! Why a `Field` node is one value: a write to the bytes behind a `&` parameter of a running
-//! function, outside an `UnsafeCell`, is undefined behaviour (LANG.md §3), and safe code cannot make
-//! one (it needs a `&mut` while the `&` lives). An int field of a T that is not `UnsafeCell` lies
-//! outside every `UnsafeCell`, so every load of it while the function runs, the getter's during a
-//! call included, reads one value. `std.soa.Soa` keeps `len` in such a field and the lowering
-//! builds every column as `slice.make (..) len`, so all columns of a `&Soa` parameter have one
-//! length.
+//! function, outside an `UnsafeCell`, is undefined behaviour (LANG.md §3), and safe code cannot
+//! make one (it needs a `&mut` while the `&` lives). An int field of a T that is not `UnsafeCell`
+//! lies outside every `UnsafeCell`, so every load of it while the function runs, the getter's
+//! during a call included, reads one value. `std.soa.Soa` keeps `len` in such a field and the
+//! lowering builds every column as `slice.make (..) len`, so all columns of a `&Soa` parameter have
+//! one length.
 //!
 //! Why each `Bits` and `Cast` row holds of the values as mathematical integers: on unsigned ints
 //! `x & y` is at most either operand; `rem` traps when `y = 0`, so a result that exists is
