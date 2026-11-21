@@ -161,7 +161,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0906 | impl lacks a trait method, or defines a method the trait does not declare |
 | E0907 | `pub` on a method of a trait impl (it has the trait's visibility). At the `pub` |
 | E0908 | ambiguous method: lookup (inherent impls, then every trait impl of the receiver type) finds it in two traits. Fix: the qualified call `Trait.m(x)` |
-| E0909 | explicit call of `Drop.drop` (`x.drop()` or `Drop.drop(&mut x)`): drop runs only automatically (scope end, overwrite of a place). Fix: let the value go out of scope, or move it into `std.mem.drop(x)` |
+| E0909 | explicit call of `Drop.drop` (`x.drop()`, `Drop.drop(&mut x)`, `S.drop(&mut x)`) or a `Drop` impl method used as a fn value (`let f = S.drop;`): drop runs only automatically (scope end, overwrite of a place). Fix: let the value go out of scope, or move it into `std.mem.drop(x)` |
 | E0910 | the row type of `std.soa.Soa<T>` is not a struct (its fields are the columns). Checked where the type is written and at calls of `std.soa` methods; a generic parameter passes |
 | E0911 | `size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels. At the call, in a const-expr too |
 | E1001 | target not runnable on this host (binary built, tests reported as not run, never as passed). Reported by `stave test` and `stave run`. No location |

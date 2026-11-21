@@ -4085,7 +4085,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0909",
         severity: Severity::Error,
         area: "generics",
-        rule: "explicit call of `Drop.drop` (as `x.drop()` or `Drop.drop(&mut x)`): drop runs only automatically, at scope end and when a place is overwritten",
+        rule: "explicit call of `Drop.drop` (as `x.drop()`, `Drop.drop(&mut x)`, `S.drop(&mut x)`) or a `Drop` impl method used as a fn value (`let f = S.drop;`): drop runs only automatically, at scope end and when a place is overwritten",
         retired: false,
         located: true,
         holes: &[],

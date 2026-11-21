@@ -1773,7 +1773,11 @@ impl<'a> Ck<'a> {
         self.site(tok, self.icx.node_span(n), decl, &args);
         self.coerce_note(n, Coercion::FnItem);
         self.valued.push((tok, sig.deny, n));
-        if self.prog.decl(decl).is_some_and(|d| d.flags.has(DeclFlags::EXTERN_EXPORT)) {
+        if self.is_drop_method(decl) {
+            // a call through the value would run the destructor of a value that is still owned
+            let d = mk("E0909", None, &[], self.icx.node_span(n), &[]);
+            self.report(d);
+        } else if self.prog.decl(decl).is_some_and(|d| d.flags.has(DeclFlags::EXTERN_EXPORT)) {
             // an export has the C convention, a fn value the Stave one
             let path = self.prog.decl_path(decl);
             let d = mk("E0807", Some("extern"), &[("name", &path)], self.icx.node_span(n), &[]);
@@ -3193,6 +3197,19 @@ impl<'a> Ck<'a> {
         }
     }
 
+    /// `Drop.drop` itself or a method of a `Drop` impl: run only by the compiler's drop glue.
+    fn is_drop_method(&self, method: DeclId) -> bool {
+        let drop = self.sigs.lang.drop;
+        let Some(md) = self.prog.decl(method) else { return false };
+        drop.is_some()
+            && (md.parent == drop
+                || self
+                    .sigs
+                    .impl_def(md.parent)
+                    .and_then(|i| i.trait_ref.as_ref())
+                    .is_some_and(|t| t.trait_decl == drop))
+    }
+
     /// Unsafe, visibility, `Drop.drop` (E0909), and feature checks of a method call.
     fn method_checks(&mut self, method: DeclId, at: Span, tok: u32) {
         let Some(sig) = self.sigs.fn_sig(method) else { return };
@@ -3202,11 +3219,7 @@ impl<'a> Ck<'a> {
         self.features_ok(at, method, sig.features);
         let Some(md) = self.prog.decl(method).copied() else { return };
         let imp = self.sigs.impl_def(md.parent);
-        let drop = self.sigs.lang.drop;
-        let is_drop = drop.is_some()
-            && (md.parent == drop
-                || imp.and_then(|i| i.trait_ref.as_ref()).is_some_and(|t| t.trait_decl == drop));
-        if is_drop {
+        if self.is_drop_method(method) {
             let d = mk("E0909", None, &[], at, &[]);
             self.report(d);
         }

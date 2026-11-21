@@ -1642,7 +1642,7 @@ fix = { description = "call it qualified, with the receiver as first argument: `
 code = "E0909"
 severity = "error"
 area = "generics"
-rule = "explicit call of `Drop.drop` (as `x.drop()` or `Drop.drop(&mut x)`): drop runs only automatically, at scope end and when a place is overwritten"
+rule = "explicit call of `Drop.drop` (as `x.drop()`, `Drop.drop(&mut x)`, `S.drop(&mut x)`) or a `Drop` impl method used as a fn value (`let f = S.drop;`): drop runs only automatically, at scope end and when a place is overwritten"
 message = "`drop` cannot be called explicitly"
 labels = [{ at = "primary", text = "explicit `drop` call" }]
 fix = { description = "remove the call: the value is dropped when it goes out of scope or is overwritten; to end its life early, move it into `std.mem.drop(x)`" }

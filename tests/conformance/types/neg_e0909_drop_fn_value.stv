@@ -1,0 +1,12 @@
+// A destructor taken as a fn value would free the Vec, and its owner would free it again.
+import std.io;
+import std.vec;
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u8>.new();
+    v.push(1);
+    let f: fn(&mut vec.Vec<u8>) = vec.Vec::<u8>.drop; //~ ERROR E0909
+    f(&mut v);
+    io.print(f"ok\n");
+    return 0;
+}
