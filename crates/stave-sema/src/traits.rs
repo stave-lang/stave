@@ -347,18 +347,6 @@ impl<'a> World<'a> {
         self.match_ty_in(cx, pat, t, binds, &mut false)
     }
 
-    /// [`Self::match_ty`], but past the step limit the answer is "may match".
-    pub(crate) fn may_match_ty<I: Interner + ?Sized>(
-        &self,
-        cx: &I,
-        pat: TypeId,
-        t: TypeId,
-        binds: &mut [Option<GArg>],
-    ) -> bool {
-        let mut exceeded = false;
-        self.match_ty_in(cx, pat, t, binds, &mut exceeded) || exceeded
-    }
-
     fn match_ty_in<I: Interner + ?Sized>(
         &self,
         cx: &I,
@@ -881,18 +869,6 @@ impl<'a> World<'a> {
         depth: u32,
     ) -> Option<(DeclId, Vec<GArg>)> {
         self.find_impl_q(cx, t, tr, env, depth, &mut Query::default())
-    }
-
-    /// [`World::find_impl`] without the view-kind rule: whether some instance of `t` (its `view`
-    /// params standing for owned types too) has an impl of `tr`.
-    pub fn find_impl_any_kind<I: Interner + ?Sized>(
-        &self,
-        cx: &mut I,
-        t: TypeId,
-        tr: &TraitRef,
-        env: &[GenericParam],
-    ) -> Option<(DeclId, Vec<GArg>)> {
-        self.find_impl_q(cx, t, tr, env, 0, &mut Query::any_kind())
     }
 
     fn find_impl_q<I: Interner + ?Sized>(
@@ -1507,10 +1483,7 @@ pub(crate) fn check_impls(
             if tys.is_error_ty(other.self_ty) || tys.is_error_ty(imp.self_ty) {
                 continue;
             }
-            if other.trait_ref.as_ref().map(|t| &t.args) != Some(&tr.args) {
-                continue;
-            }
-            if overlap(&w, tys, other, imp) {
+            if overlap(tys, other, imp) {
                 let od = prog.decl(o).map_or(impl_span, |x| x.name_span);
                 out.extend(mk(
                     "E0903",
@@ -1527,17 +1500,12 @@ pub(crate) fn check_impls(
     out
 }
 
-/// Whether two impls' self types unify (both sets of params are variables).
-fn overlap(w: &World<'_>, tys: &mut TypeTable, a: &ImplDef, b: &ImplDef) -> bool {
-    // Shift b's params after a's, then unify both ways structurally.
-    let shift: Vec<GArg> =
-        (0..b.generics.len() as u32).map(|i| GArg::Type(tys.mk_param(a.generics.len() as u32 + i))).collect();
-    let bt = tys.subst(b.self_ty, &shift, None);
-    let mut binds = vec![None; a.generics.len() + b.generics.len()];
-    w.may_match_ty(tys, a.self_ty, bt, &mut binds) || {
-        let mut binds = vec![None; a.generics.len() + b.generics.len()];
-        w.may_match_ty(tys, bt, a.self_ty, &mut binds)
-    }
+/// Whether two impls of one trait may both apply to one type and one list of trait args: their
+/// self types and trait args unify together, the params of both impls as variables (bounds are
+/// not consulted).
+fn overlap(tys: &mut TypeTable, a: &ImplDef, b: &ImplDef) -> bool {
+    let (Some(ta), Some(tb)) = (&a.trait_ref, &b.trait_ref) else { return false };
+    heads_unify(tys, a, b, Some((&ta.args, &tb.args))).is_some()
 }
 
 /// A most general unifier of the heads of impls `a` and `b`: `a`'s generic params are the
