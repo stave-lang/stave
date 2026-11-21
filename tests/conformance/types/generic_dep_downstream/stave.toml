@@ -1,0 +1,10 @@
+# A dependency's generic code instantiated with types of downstream packages: every call it
+# makes on them (a bound method, an operator, a `for` loop's `next`, an f-string's `Display`, a
+# destructor, a static fn through a bound) runs the downstream impl, directly and through a
+# middle package. Impls are found by the full trait ref, never by name in a package scope.
+name = "generic_dep_downstream"
+kind = "bin"
+
+[dependencies]
+d = { path = "d" }
+m = { path = "m" }

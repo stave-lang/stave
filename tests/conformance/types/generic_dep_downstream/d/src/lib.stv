@@ -1,0 +1,39 @@
+import std.io;
+
+pub trait Tr {
+    fn m(&self) -> u32;
+}
+
+pub trait It {
+    fn next(&mut self) -> Option<u32>;
+}
+
+pub trait Mk {
+    fn mk(n: u32) -> Self;
+}
+
+pub fn call<T: Tr>(t: &T) -> u32 {
+    return t.m();
+}
+
+pub fn sum<T: Add>(a: T, b: T) -> T {
+    return a + b;
+}
+
+pub fn total<I: It>(it: I) -> u32 {
+    let mut s: u32 = 0;
+    for x in it {
+        s = s + x;
+    }
+    return s;
+}
+
+pub fn show<T: Display>(t: &T) {
+    io.print(f"{t}\n");
+}
+
+pub fn consume<T>(t: T) { }
+
+pub fn make<T: Mk>() -> T {
+    return T.mk(7);
+}
