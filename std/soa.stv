@@ -91,12 +91,12 @@ impl<T: core.Flat> Soa<T> {
         if need <= self.cap { return Result.Ok(()); }
         let mut c = if self.cap < 4 then 4 else self.cap *| 2;
         if c < need { c = need; }
-        return self.try_grow_to(c);
+        return unsafe("c >= need > cap >= len") self.try_grow_to(c);
     }
 
     // Moves the rows into a new buffer of at least `want` rows (columns start at offsets that
     // depend on the capacity, so the buffer is copied row by row, not reallocated).
-    fn try_grow_to(&mut self, want: usize) -> Result<(), vec.AllocError> {
+    unsafe("want >= len") fn try_grow_to(&mut self, want: usize) -> Result<(), vec.AllocError> {
         let row = soa_row_size::<T>();
         let al = mem.type_align::<T>();
         let mask = al - 1;
@@ -107,7 +107,7 @@ impl<T: core.Flat> Soa<T> {
         if (p as usize) == 0 { return Result.Err(alloc_error()); }
         let old = self.ptr as *const u8;
         for i in 0..self.len {
-            unsafe("i < len <= cap: row i of the old buffer is initialized; the new one has new_cap > i rows") {
+            unsafe("i < len <= cap: row i of the old buffer is initialized; the new one has new_cap >= want >= len > i rows (this fn's obligation)") {
                 soa_write::<T>(p, new_cap, i, soa_read::<T>(old, self.cap, i));
             }
         }
@@ -227,19 +227,18 @@ impl<T: core.Flat + core.Copy> Soa<T> {
     // Appends the rows of xs in order.
     pub fn extend_from_slice(&mut self, xs: &[T]) {
         self.reserve(xs.len());
-        self.append(xs);
+        unsafe("reserve made room for xs.len() more rows") { self.append(xs); }
     }
 
     pub fn try_extend_from_slice(&mut self, xs: &[T]) -> Result<(), vec.AllocError> {
         self.try_reserve(xs.len())?;
-        self.append(xs);
+        unsafe("try_reserve returned Ok: room for xs.len() more rows") { self.append(xs); }
         return Result.Ok(());
     }
 
-    // Room for xs.len() more rows is reserved.
-    fn append(&mut self, xs: &[T]) {
+    unsafe("room for xs.len() more rows is reserved") fn append(&mut self, xs: &[T]) {
         for k in 0..xs.len() {
-            unsafe("room is reserved: row len + k is inside the buffer and unused; T is Copy") {
+            unsafe("room is reserved (this fn's obligation): row len + k is inside the buffer and unused; T is Copy") {
                 soa_write::<T>(self.ptr, self.cap, self.len + k, xs[k]);
             }
         }
