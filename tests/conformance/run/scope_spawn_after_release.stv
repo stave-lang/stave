@@ -1,0 +1,30 @@
+// A spawn body that takes a lock the spawner releases before the join: at the join nothing is
+// held, so the join rule accepts it. A target that runs spawned work on one thread runs the
+// body at the join, after the release (the IR interpreter: interp_vs_native runs this too).
+//~ STDOUT scope_spawn_after_release.stdout
+import std.io;
+import std.mem;
+import std.sync;
+import std.thread;
+
+fn main() {
+    let m = sync.Mutex::<u32, 1>.new(0u32);
+    let mut seen: u32 = 0;
+    scope {
+        let g = m.lock();
+        spawn {
+            let h = m.lock();
+            seen = *h.get() + 1;
+        }
+        mem.drop(g);
+    }
+    io.print(f"scope {seen}\n");
+    let (a, b) = thread.join(fn() -> u32 {
+        let g = m.lock();
+        return *g.get() + 1;
+    }, fn() -> u32 {
+        let g = m.lock();
+        return *g.get() + 2;
+    });
+    io.print(f"join {a} {b}\n");
+}

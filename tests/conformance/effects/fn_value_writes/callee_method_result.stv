@@ -1,0 +1,31 @@
+// A method result called in place.
+import std.io;
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+fn mk() -> fn() {
+    return noisy;
+}
+
+struct S {
+    k: u32,
+}
+
+impl S {
+    fn get(&self) -> fn() {
+        return noisy;
+    }
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let s = S.{ k: 1u32 };
+    s.get()();
+}
+
+fn main() {
+    quiet();
+}

@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// A generic source is an iterator only through a bound that gives `next`: without one it is
+// E0219 `not-source` at the definition, whatever the instances. A `vec.Vec` is no iterator:
+// E0219 `as-slice` (iterate `.as_slice()` / `.as_mut_slice()`).
+import std.vec;
+
+fn unbounded<T>(t: T) {
+    for x in t { //~ ERROR E0219
+    }
+}
+
+fn unbounded_mut<T>(t: &mut T) {
+    for x in t { //~ ERROR E0219
+    }
+}
+
+fn vecs(v: vec.Vec<u32>, r: &vec.Vec<u32>, m: &mut vec.Vec<u32>) -> u32 {
+    let mut s: u32 = 0;
+    for x in v { //~ ERROR E0219
+    }
+    for x in r { //~ ERROR E0219
+    }
+    for x in m { //~ ERROR E0219
+    }
+    for x in r.as_slice() {
+        s = s + *x;
+    }
+    for x in m.as_mut_slice() {
+        *x = 0;
+    }
+    return s;
+}

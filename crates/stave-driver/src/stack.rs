@@ -27,10 +27,11 @@
 //! **Stacks.** Main's stack holds the `__stave_main` stub and `main`. A thread runs the
 //! `__stave_thread_start` stub, `runtime.thread.entry`, and the fn value it was started with; each
 //! function a call-graph [`EdgeKind::Spawn`] edge reaches (`spawn` bodies, the closures `std.thread`
-//! starts) or that `runtime.thread.start` can be given (the targets of its fn-value call, which it
-//! makes where no thread can be created) gets a row keyed by its code address. The table holds
-//! the bound plus [`MARGIN`] for bounded stacks and 0 (the `[run] stack` default) for the others;
-//! the runtime rounds up to the page size. No error comes from the bound: frame sizes differ
+//! starts, every fn value `runtime.thread.start` can be given) gets a row keyed by its code
+//! address. The fn-value call of `runtime.thread.run_queued` is left out: it runs a queued value
+//! at a join only in an image without a stack table (the IR interpreter; a native image fails to
+//! create the thread instead, so a spawn body never runs on the joiner's bounded stack). The table holds the bound plus [`MARGIN`] for bounded stacks and 0 (the `[run] stack`
+//! default) for the others; the runtime rounds up to the page size. No error comes from the bound: frame sizes differ
 //! between debug and release.
 
 use stave_ir::{FuncId, Known, Module, Op, Operand, Term};
@@ -386,6 +387,7 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
             }
         }
     }
+    let queued = m.known_body(Known::RunQueued);
     let called =
         IntrinsicCalls { cpu_init: m.known_body(Known::CpuInit), copy_raw: m.known_body(Known::CopyRaw) };
     let mut made = vec![false; nf];
@@ -409,6 +411,7 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
                 poison[x as usize] = Some(Why::Foreign(at(x)));
             }
             if c.indirect
+                && Some(FuncId(f as u32)) != queued
                 && poison[x as usize].is_none()
                 && (!graph || unmapped_values || !succ.iter().any(|e| e.kind == EdgeKind::Indirect))
             {
@@ -480,9 +483,8 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
         }
     }
 
-    // threads: the functions live spawn edges reach, and every fn value a live
-    // `runtime.thread.start` can be given (its fallback calls it, so the call graph has them as
-    // targets of that call)
+    // threads: the functions live spawn edges reach (a node of `runtime.thread.start` has one to
+    // each fn value it can be given)
     let mut rows: Vec<(FuncId, u32)> = Vec::new();
     let add_row = |x: u32, rows: &mut Vec<(FuncId, u32)>| {
         for &f in &funcs_of[x as usize] {
@@ -493,20 +495,6 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
         for e in g.succ(x) {
             if e.kind == EdgeKind::Spawn {
                 add_row(e.to, &mut rows);
-            }
-        }
-    }
-    if let Some(s) = m.known_body(Known::ThreadStart) {
-        for &x in ids[s.index()].iter().filter(|&&x| (x as usize) < n && live[x as usize]) {
-            for e in g.succ(x).iter().filter(|e| e.kind == EdgeKind::Indirect) {
-                match g.nodes[e.to as usize].kind {
-                    NodeKind::Table { .. } => {
-                        for mb in g.succ(e.to).iter().filter(|mb| mb.kind == EdgeKind::Member) {
-                            add_row(mb.to, &mut rows);
-                        }
-                    }
-                    _ => add_row(e.to, &mut rows),
-                }
             }
         }
     }

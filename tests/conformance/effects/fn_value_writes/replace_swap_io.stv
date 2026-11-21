@@ -1,0 +1,26 @@
+// `mem.replace(&mut f, ..)` and `mem.swap(&mut f, &mut g)` write inside std: the `&mut`
+// borrows make f and g untracked.
+import std.io;
+import std.mem;
+import std.vec;
+
+fn nop() {}
+
+fn noisy() {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(1);
+    io.print("io and alloc under without(io, alloc)\n");
+}
+
+fn quiet() without(io, alloc) { //~ ERROR E1401
+//~^ ERROR E1401
+    let mut f: fn() = nop;
+    let mut g: fn() = nop;
+    let old = mem.replace(&mut f, noisy);
+    mem.swap(&mut f, &mut g);
+    g();
+}
+
+fn main() {
+    quiet();
+}

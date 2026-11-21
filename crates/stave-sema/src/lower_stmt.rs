@@ -9,6 +9,7 @@ use stave_ir::{Block, FuncBuilder, Op, Operand, Value, VecOp};
 use stave_syntax::{NodeKind, Term};
 
 use crate::decls::DeclKind;
+use crate::loops::ForKind;
 use crate::lower_fn::{
     Base, E, Env, FnCx, FnOut, FnState, LocalInfo, LoopCx, LoopKind, MState, Place, Proj, Ty, WriteBack,
 };
@@ -260,7 +261,7 @@ impl<'a> FnCx<'a> {
         // closure bodies and their captures: a captured local lives in a slot (the environment
         // holds its address)
         let tys = &self.tys;
-        let infos = crate::closures::closures(&icx, tb, |t| crate::closures::is_mut_ref(tys, t), root);
+        let infos = crate::closures::closures(&icx, tb, tys, root);
         for c in &infos {
             for cap in &c.captures {
                 if let Some(&l) = self.by_node.get(&cap.binding) {
@@ -439,8 +440,12 @@ impl<'a> FnCx<'a> {
             self.test_entry();
         }
         let Some(c) = self.contracts() else { return };
-        for cl in c.checked_requires() {
-            self.contract_check(cl, None);
+        let checked = c.checked_requires();
+        let calls = checked.iter().any(|cl| self.clause_calls(cl.expr))
+            || c.olds.iter().any(|&(_, e)| self.clause_calls(e));
+        let trace = if calls { self.trace_save() } else { None };
+        for cl in checked {
+            self.contract_check(cl, None, trace);
         }
         for &(paren, e) in &c.olds {
             if !self.open() {
@@ -450,6 +455,9 @@ impl<'a> FnCx<'a> {
             let Some(v) = self.val(e, Some(t)) else { return };
             self.drop_temps();
             self.old_vals.insert(paren, (v, t));
+        }
+        if let Some(sv) = trace {
+            self.trace_restore(sv);
         }
         if !c.ensures.is_empty() {
             self.f.ensures_end = end;
@@ -472,6 +480,8 @@ impl<'a> FnCx<'a> {
         self.f.last_site = None;
         self.f.b.call(fi, None, &[]);
         let Some(c) = self.contracts() else { return };
+        let trace =
+            if c.requires.iter().any(|cl| self.clause_calls(cl.expr)) { self.trace_save() } else { None };
         for cl in &c.requires {
             if !self.open() {
                 return;
@@ -496,6 +506,9 @@ impl<'a> FnCx<'a> {
             self.f.b.ret(None);
             self.f.b.switch_to(ok);
         }
+        if let Some(sv) = trace {
+            self.trace_restore(sv);
+        }
     }
 
     /// The `ensures` checks of a return of `v` (`None`: unit) at token `at`, after the drops of
@@ -512,17 +525,78 @@ impl<'a> FnCx<'a> {
             };
             self.bind(l, Some(v));
         }
+        let trace =
+            if c.ensures.iter().any(|cl| self.clause_calls(cl.expr)) { self.trace_save() } else { None };
         for cl in &c.ensures {
-            self.contract_check(cl, Some(at));
+            self.contract_check(cl, Some(at), trace);
         }
+        if let Some(sv) = trace {
+            self.trace_restore(sv);
+        }
+    }
+
+    /// Whether the clause expression `e` calls anything or makes a value of an enum variant: only
+    /// then can its evaluation change the error trace (`Result.Err(..)` restarts it, `?` in a
+    /// callee extends it).
+    fn clause_calls(&self, e: u32) -> bool {
+        let icx = self.icx;
+        let (lo, hi) = (icx.a(e), icx.end_tok(e));
+        let tb = self.tb();
+        let from = tb.targets.partition_point(|(t, _)| *t < lo);
+        tb.targets[from..].iter().take_while(|(t, _)| *t <= hi).any(|(_, t)| {
+            matches!(
+                t,
+                Target::Fn { .. }
+                    | Target::Method { .. }
+                    | Target::TraitMethod { .. }
+                    | Target::Op { .. }
+                    | Target::FnValue { .. }
+                    | Target::Variant { .. }
+            )
+        })
+    }
+
+    /// Saves the error trace into a fresh slot (`runtime.errtrace.save`): the slot's pointer and
+    /// type, `None` without the runtime fns.
+    fn trace_save(&mut self) -> Option<(Operand, Ty)> {
+        let (save, restore) = (self.g.lang.errtrace_save?, self.g.lang.errtrace_restore?);
+        if !self.open() {
+            return None;
+        }
+        let (_, trace) = self.inst_sig(&InstKey { decl: save, args: Vec::new() })?;
+        self.inst_sig(&InstKey { decl: restore, args: Vec::new() })?;
+        let f = self.req(Req::Inst(InstKey { decl: save, args: Vec::new() }));
+        let v = self.f.b.call(f, Some(Self::ir(trace)), &[])?;
+        let (p, _) = self.spill(Operand::Value(v), trace, false);
+        Some((p, trace))
+    }
+
+    /// Puts back the error trace [`FnCx::trace_save`] saved.
+    fn trace_restore(&mut self, (p, trace): (Operand, Ty)) {
+        let Some(restore) = self.g.lang.errtrace_restore else { return };
+        if !self.open() {
+            return;
+        }
+        let Some((ps, _)) = self.inst_sig(&InstKey { decl: restore, args: Vec::new() }) else { return };
+        let Some(&want) = ps.first() else { return };
+        let from = self.t_ref(true, trace);
+        let a = self.convert_ptr(p, from, want);
+        let f = self.req(Req::Inst(InstKey { decl: restore, args: Vec::new() }));
+        self.f.b.call(f, None, &[a]);
     }
 
     /// Branches to the failure call of clause `cl` when it is false: a `requires` (`at` `None`)
     /// or an `ensures` reported at token `at`. Each operand of the clause's top-level `&&` is its
     /// own check, in order (a false one fails before the next is evaluated, as `&&` would); each
     /// reports the whole clause. A check's temporaries are dropped before its branch; those of the
-    /// enclosing statement are left as they are.
-    fn contract_check(&mut self, cl: &crate::contracts::ContractClause, at: Option<u32>) {
+    /// enclosing statement are left as they are. `trace`: the error trace saved before the
+    /// checks, put back before a failure is reported.
+    fn contract_check(
+        &mut self,
+        cl: &crate::contracts::ContractClause,
+        at: Option<u32>,
+        trace: Option<(Operand, Ty)>,
+    ) {
         let conjuncts = if self.nkind(cl.expr) == Some(NodeKind::AndExpr) {
             self.kids(cl.expr).to_vec()
         } else {
@@ -546,6 +620,9 @@ impl<'a> FnCx<'a> {
             let (fail, ok) = (self.f.b.create_block(), self.f.b.create_block());
             self.f.b.cbr(c, ok, &[], fail, &[]);
             self.f.b.switch_to(fail);
+            if let Some(sv) = trace {
+                self.trace_restore(sv);
+            }
             self.contract_fail(cl, e, at);
             self.f.b.switch_to(ok);
         }
@@ -1291,8 +1368,17 @@ impl<'a> FnCx<'a> {
             return;
         }
         let it_ty = self.nty(iter);
+        // the kind the type checker decided on the definition; an instance never changes it
+        let Some(kind) = self.tb().for_kind(f) else {
+            self.fail(f, "`for` over a type that is not a `for` source");
+            return;
+        };
         // ranges: counted loop
-        if let TypeKind::Range { elem, inclusive } = self.kind(it_ty) {
+        if kind == ForKind::Range {
+            let TypeKind::Range { elem, inclusive } = self.kind(it_ty) else {
+                self.fail(f, "a `for` over a range whose instance type is no range");
+                return;
+            };
             if !matches!(self.kind(elem), TypeKind::Int { .. }) {
                 self.unsupported(f, "char ranges in for loops are not supported yet");
                 return;
@@ -1315,13 +1401,22 @@ impl<'a> FnCx<'a> {
         // arrays and slices
         let e = self.expr(iter, None);
         let Some(p) = self.place_of(e) else { return };
-        match self.kind(p.ty) {
-            TypeKind::Ref { inner, .. } => {
-                let (elem, len) = match self.kind(inner) {
-                    TypeKind::Array { elem, len } => (elem, len.value()),
-                    TypeKind::Slice { elem, .. } => (elem, None),
+        match kind {
+            ForKind::Seq { mutable } => {
+                let len = match self.kind(p.ty) {
+                    TypeKind::Ref { inner, mutable: m } if m == mutable => match self.kind(inner) {
+                        TypeKind::Array { len, .. } => len.value(),
+                        TypeKind::Slice { .. } => None,
+                        _ => {
+                            self.fail(
+                                f,
+                                "a `for` over a reference to a sequence whose instance type is none",
+                            );
+                            return;
+                        }
+                    },
                     _ => {
-                        self.iter_loop(f, pat, body, p);
+                        self.fail(f, "a `for` over a reference to a sequence whose instance type is none");
                         return;
                     }
                 };
@@ -1333,16 +1428,22 @@ impl<'a> FnCx<'a> {
                     None => self.op1(Op::SliceLen, us, v),
                 };
                 let z = self.int(0);
-                let _ = elem;
                 self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Ref(v, pt)));
             }
-            TypeKind::Array { len, .. } => {
+            // an array value (a place is E0219): the loop's temporary
+            ForKind::Array => {
+                let TypeKind::Array { len, .. } = self.kind(p.ty) else {
+                    self.fail(f, "a `for` over an array value whose instance type is no array");
+                    return;
+                };
+                let len = len.value().unwrap_or(0);
                 let us = self.t_usize();
-                let n = self.int(len.value().unwrap_or(0) as i128);
+                let n = self.int(len as i128);
                 let z = self.int(0);
                 self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Val(p, iter)));
             }
-            _ => self.iter_loop(f, pat, body, p),
+            ForKind::Iter | ForKind::IterMut => self.iter_loop(f, pat, body, p, kind),
+            ForKind::Range => {}
         }
     }
 
@@ -1449,8 +1550,11 @@ impl<'a> FnCx<'a> {
         // the sequence as a slice reference
         let e = self.expr(iter, None);
         let Some(p) = self.place_of(e) else { return };
-        let (s, mutable) = match self.kind(p.ty) {
-            TypeKind::Ref { mutable, inner } => {
+        // the kind the type checker decided on the definition; the instance type only gives the
+        // sequence's length and layout
+        let kind = self.tb().for_kind(f);
+        let (s, mutable) = match (kind, self.kind(p.ty)) {
+            (Some(ForKind::Seq { mutable: km }), TypeKind::Ref { mutable, inner }) if km == mutable => {
                 let Some(v) = self.peek(&p) else { return };
                 match self.kind(inner) {
                     TypeKind::Slice { .. } => {
@@ -1466,20 +1570,15 @@ impl<'a> FnCx<'a> {
                     }
                 }
             }
-            TypeKind::Array { len, .. } => {
+            // an array value (a place is E0219, a `&mut` binding over a value too): the loop's
+            // temporary, read only
+            (Some(ForKind::Array), TypeKind::Array { len, .. }) => {
                 let n = len.value().unwrap_or(0);
                 let Some(a) = self.addr(&p, None) else { return };
-                (self.array_slice(a, true, lane, n), true)
-            }
-            // a `[T]` place (a sub-slice, a `std.soa` column): its address is the slice
-            TypeKind::Slice { .. } => {
-                let Some((a, at)) = self.addr_t(&p, None) else { return };
-                let mutable = self.pointee(at).is_some_and(|x| x.1);
-                let st = self.slice_ref_ty(mutable, lane);
-                (self.convert_ptr(a, at, st), mutable)
+                (self.array_slice(a, false, lane, n), false)
             }
             _ => {
-                self.fail(f, "chunk loop over a non-sequence");
+                self.fail(f, "chunk loop whose kind and instance type disagree");
                 return;
             }
         };
@@ -1628,8 +1727,10 @@ impl<'a> FnCx<'a> {
         self.enter_live(exit);
     }
 
-    /// The chunk binding's value: the vector `x`, or for a `&mut` binding a slot holding it,
-    /// written back to `s[i..]` (active lanes of `mask`) when the current scope ends or is left.
+    /// The chunk binding's value: the vector `x`, or for a reference binding a slot of the
+    /// current scope holding it; a `&mut` binding's slot is written back to `s[i..]` (active lanes
+    /// of `mask`) when the scope ends or is left (the checker: the binding borrows a temporary
+    /// of its block).
     #[allow(clippy::too_many_arguments)]
     fn chunk_item(
         &mut self,
@@ -1649,6 +1750,11 @@ impl<'a> FnCx<'a> {
         // each chunk is a new temporary, and the binding a borrow of it
         self.event(stave_ir::EventKind::Begin, slot, bind_t);
         self.f.b.store(slot, x);
+        if !matches!(self.kind(bind_t), TypeKind::Ref { mutable: true, .. }) {
+            let st = self.t_ref(true, vt);
+            let p = self.convert_ptr(slot, st, bind_t);
+            return Place { base: Base::Val(p, bind_t), proj: Vec::new(), ty: bind_t, root: None };
+        }
         let d = self.f.scopes.len();
         self.f.write_backs.push((d, WriteBack { slot, vt, s, i, mask, tok }));
         let r = self.borrowed(slot, bind_t);
@@ -1670,31 +1776,51 @@ impl<'a> FnCx<'a> {
         self.op2(Op::SliceMake, st, p, n)
     }
 
-    fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place) {
-        let it = match it.base {
-            Base::Val(..) | Base::Local(_) => {
+    /// `kind` (decided on the definition): `IterMut` advances the iterator through the
+    /// reference, so the caller's iterator moves on; `Iter` moves (copies, if Copy) the iterator
+    /// value into a slot the loop owns, advances it there, and drops it when the loop ends or is
+    /// left (`break`, `return`, `?`), as the checker's loop temporary is. Either way the loop
+    /// calls the `next` the type checker resolved (for a generic source, the bound's), with the
+    /// instance's args: the instance type never picks another loop.
+    fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place, kind: ForKind) {
+        self.push_scope();
+        let it = match kind {
+            ForKind::IterMut => {
+                let TypeKind::Ref { mutable: true, inner } = self.kind(it.ty) else {
+                    self.fail(f, "a `for` over a `&mut` iterator whose instance type is no `&mut`");
+                    self.pop_scope();
+                    return;
+                };
+                let Some(v) = self.read(&it) else {
+                    self.pop_scope();
+                    return;
+                };
+                Place { base: Base::Mem(v, it.ty), proj: Vec::new(), ty: inner, root: None }
+            }
+            _ => {
                 let t = it.ty;
-                let Some(v) = self.read(&it) else { return };
+                let Some(v) = self.read(&it) else {
+                    self.pop_scope();
+                    return;
+                };
                 let (s, st) = self.spill(v, t, false);
+                if self.needs_drop(t) {
+                    let d = self.f.scopes.len();
+                    self.f.loop_owned.push((d, s, t));
+                }
                 Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: None }
             }
-            _ => it,
         };
-        let w = self.g.world();
-        let Some(next) = self.g.prog.strings.lookup("next") else {
-            self.fail(f, "no `next` method");
+        self.iter_loop_over(f, pat, body, it);
+        self.pop_scope();
+    }
+
+    fn iter_loop_over(&mut self, f: u32, pat: u32, body: u32, it: Place) {
+        let Some(Target::Method { method: m, args: gargs, .. }) =
+            self.tb().implicit_at(self.icx.a(f)).cloned()
+        else {
+            self.fail(f, "a `for` over an iterator without the `next` the type checker resolved");
             return;
-        };
-        let m = match w.lookup_method(&mut self.tys, it.ty, next, &[]) {
-            crate::traits::Lookup::Found { m, .. } => m,
-            _ => {
-                self.fail(f, "no `next` method");
-                return;
-            }
-        };
-        let gargs: Vec<GArg> = match &m {
-            crate::traits::MethodRef::Impl { impl_args, .. } => impl_args.clone(),
-            _ => Vec::new(),
         };
         let Some(Resolved::Inst(k)) = self.resolve_method(&m, &gargs) else {
             self.fail(f, "unresolved `next`");

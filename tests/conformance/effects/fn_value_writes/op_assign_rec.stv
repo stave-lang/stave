@@ -1,0 +1,27 @@
+// Recursion through a fn value a compound assignment changed.
+import std.core;
+import std.io;
+
+impl core.Sub for fn(u64) -> u64 {
+    fn sub(self, rhs: Self) -> Self {
+        return down;
+    }
+}
+
+fn stop(n: u64) -> u64 {
+    return n;
+}
+
+fn down(n: u64) -> u64 {
+    let mut f: fn(u64) -> u64 = stop;
+    if n > 0 {
+        f -= stop;
+    }
+    let m = if n > 0 then n - 1 else 0u64;
+    return f(m) + 1; //~ ERROR E1402
+}
+
+fn main() {
+    let r = down(200000u64);
+    io.print(f"{r}\n");
+}

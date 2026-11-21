@@ -1,0 +1,19 @@
+// `without(trap)` through a fn value written by `*p`.
+fn same(x: u32) -> u32 {
+    return x;
+}
+
+fn boom(x: u32) -> u32 {
+    return x + 4294967295;
+}
+
+fn safe(x: u32) -> u32 without(trap) { //~ ERROR E1401
+    let mut f: fn(u32) -> u32 = same;
+    let p = &mut f;
+    *p = boom;
+    return f(x);
+}
+
+fn main() {
+    let r = safe(7);
+}

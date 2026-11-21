@@ -160,7 +160,7 @@ p)` store `p`, `thread_block()` returns it (0 before).
 `nr` is the arch's `clone3` (`a1` = `struct clone_args`, `a2` = its size) or `clone` number
 (runtime `sys.stv` passes the arch's argument order); the `exit` system call of the child path is
 in runtime/syscalls.list. `__stave_thread_start` (above) is emitted for static binaries too. The IR
-interpreter returns `-ENOSYS` for `thread_clone` (runtime.thread then runs the body inline).
+interpreter returns `-ENOSYS` for `thread_clone` (runtime.thread then queues the body and runs it at the join).
 No IR calls `runtime.thread.entry`, so a lowered `thread_clone` or `thread_start_addr` requests
 it, in debug and release alike (checked-ir.md "Instance root set"); a program that lowers neither
 has no `runtime.thread.entry` and no `__stave_thread_start`.

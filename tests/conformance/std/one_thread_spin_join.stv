@@ -1,0 +1,19 @@
+// `thread.join(a, b)` where `a` spins until `b` sets a flag. Natively `b` runs on its own thread;
+// on a one-thread target `b` runs at the join, after `a`, which never ends there (interp_gate lists
+// it as not runnable).
+//~ STDOUT one_thread_spin_join.stdout
+import std.atomic;
+import std.io;
+import std.thread;
+
+fn main() {
+    let flag = atomic.U32.new(0);
+    let (x, y) = thread.join(fn() -> u32 {
+        while flag.load() == 0 {}
+        return 1u32;
+    }, fn() -> u32 {
+        flag.store(1);
+        return 2u32;
+    });
+    io.print(f"done {x} {y}\n");
+}

@@ -106,6 +106,10 @@ pub(crate) struct LangFns {
     pub errtrace_push: Option<DeclId>,
     /// `runtime.errtrace.restart(site: u32)`: a `Result.Err(..)` constructor in a user package.
     pub errtrace_restart: Option<DeclId>,
+    /// `runtime.errtrace.save() -> Trace` / `restore(t: &Trace)`: around the contract checks
+    /// whose clauses call anything, so a clause leaves the error trace as it found it.
+    pub errtrace_save: Option<DeclId>,
+    pub errtrace_restore: Option<DeclId>,
 }
 
 fn sym(prog: &Program, s: &str) -> Option<Sym> {
@@ -132,6 +136,8 @@ impl LangFns {
             test_skip: k(Known::TestSkip),
             errtrace_push: k(Known::ErrtracePush),
             errtrace_restart: k(Known::ErrtraceRestart),
+            errtrace_save: k(Known::ErrtraceSave),
+            errtrace_restore: k(Known::ErrtraceRestore),
         }
     }
 }

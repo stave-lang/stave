@@ -1,0 +1,25 @@
+// Recursion through a fn value written by `*p`.
+import std.io;
+
+fn stop(n: u64) -> u64 {
+    return n;
+}
+
+fn down(n: u64) -> u64 {
+    let mut f: fn(u64) -> u64 = stop;
+    if n > 0 {
+        let p = &mut f;
+        *p = down;
+    }
+    let m = if n > 0 then n - 1 else 0u64;
+    return f(m) + 1; //~ ERROR E1402
+}
+
+fn walk(n: u64) -> u64 without(recursive) {
+    return down(n);
+}
+
+fn main() {
+    let r = walk(200000u64);
+    io.print(f"{r}\n");
+}

@@ -163,6 +163,9 @@ pub struct TypedBody {
     /// `Display.fmt` (a [`Target::TraitMethod`] with the writer type as its own arg, at the
     /// f-string token; one per hole).
     pub implicit: Vec<(u32, Target)>,
+    /// The kind of each `for` loop (by its node), decided once from the source's type as written
+    /// here ([`crate::loops::ForKind`]), sorted; absent for a loop whose source is no source.
+    pub for_kinds: Vec<(u32, crate::loops::ForKind)>,
     /// The value types this body may drop, each with the token where such a value appears, sorted
     /// and without duplicates: its locals (params and pattern bindings, at their binding's first
     /// token) and the values it makes (call results, struct and variant literals). A value the
@@ -202,6 +205,16 @@ impl TypedBody {
     /// The target recorded at token `tok`.
     pub fn target(&self, tok: u32) -> Option<&Target> {
         self.targets.binary_search_by_key(&tok, |x| x.0).ok().map(|i| &self.targets[i].1)
+    }
+
+    /// The kind of the `for` loop at node `f` (`None`: its source is no source, an error).
+    pub fn for_kind(&self, f: u32) -> Option<crate::loops::ForKind> {
+        self.for_kinds.binary_search_by_key(&f, |x| x.0).ok().map(|i| self.for_kinds[i].1)
+    }
+
+    /// The implicit call recorded at token `tok` (a `for` loop's `next`).
+    pub fn implicit_at(&self, tok: u32) -> Option<&Target> {
+        self.implicit.binary_search_by_key(&tok, |x| x.0).ok().map(|i| &self.implicit[i].1)
     }
 
     pub fn coercion(&self, n: u32) -> Option<&Coercion> {
@@ -509,6 +522,7 @@ fn empty_body(j: Job) -> TypedBody {
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),
+        for_kinds: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
         valued: Vec::new(),
@@ -702,6 +716,7 @@ pub(crate) struct Ck<'a> {
     pub coercions: Vec<(u32, Coercion)>,
     pub sites: Vec<CallSite>,
     pub implicit: Vec<(u32, Target)>,
+    pub for_kinds: Vec<(u32, crate::loops::ForKind)>,
     pub drops: Vec<(u32, TypeId)>,
     pub denied: Vec<(u32, u8, u32)>,
     pub valued: Vec<(u32, u8, u32)>,
@@ -773,6 +788,7 @@ fn check_body(
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),
+        for_kinds: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
         valued: Vec::new(),
@@ -1542,6 +1558,11 @@ impl<'a> Ck<'a> {
             coercions: std::mem::take(&mut self.coercions),
             sites: std::mem::take(&mut self.sites),
             implicit: std::mem::take(&mut self.implicit),
+            for_kinds: {
+                let mut k = std::mem::take(&mut self.for_kinds);
+                k.sort_by_key(|x| x.0);
+                k
+            },
             drops: std::mem::take(&mut self.drops),
             denied: std::mem::take(&mut self.denied),
             valued: std::mem::take(&mut self.valued),

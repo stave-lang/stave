@@ -115,11 +115,14 @@ known_items! {
     TestSkip = "runtime.panic" "test_skip";
     ErrtracePush = "runtime.errtrace" "push";
     ErrtraceRestart = "runtime.errtrace" "restart";
+    ErrtraceSave = "runtime.errtrace" "save";
+    ErrtraceRestore = "runtime.errtrace" "restore";
     ThreadEntry = "runtime.thread" "entry";
     ThreadStart = "runtime.thread" "start";
     RtThreadJoin = "runtime.thread" "join";
     ScopeSpawn = "runtime.thread" "scope_spawn";
     ScopeJoin = "runtime.thread" "scope_join";
+    RunQueued = "runtime.thread" "run_queued";
     CpuFeatures = "runtime.cpu" "features";
     CpuWord = "runtime.cpu" "WORD";
     CpuInit = "runtime.cpu" "init";
