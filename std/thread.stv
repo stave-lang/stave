@@ -45,7 +45,7 @@ pub fn par_for(lo: usize, hi: usize, body: fn(usize)) {
 
 // par_for's loop. A separate private fn: its callers' bodies capture fn values (not Sync), which
 // the E0802 check of std.thread.par_for itself would reject; the workers only call them.
-unsafe("body may run on several threads at once: what it captures passed a thread capture check") fn run(lo: usize, hi: usize, body: fn(usize)) {
+unsafe("body is sound to call from several threads at once: its captures passed the thread capture check of par_for or par_for_mut") fn run(lo: usize, hi: usize, body: fn(usize)) {
     if lo >= hi { return; }
     let n = hi - lo;
     let mut w = rt.cpu_count();
