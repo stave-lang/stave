@@ -1,0 +1,77 @@
+//~ CHECK-ONLY
+// A `for` calls its source's `next` unqualified: when two traits supply it (two bounds of a
+// generic source, or two trait impls of a concrete one) the loop is ambiguous (E0908 `for`, and
+// `for-mut` for a `&mut` source). A loop that calls one trait's `next` by path is accepted.
+struct It { i: u64, n: u64 }
+
+trait Next {
+    fn next(&mut self) -> Option<u64>;
+}
+
+trait Back {
+    fn next(&mut self) -> Option<u64>;
+}
+
+impl Next for It {
+    fn next(&mut self) -> Option<u64> {
+        if self.i >= self.n {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        return Option.Some(self.i);
+    }
+}
+
+impl Back for It {
+    fn next(&mut self) -> Option<u64> {
+        if self.i == 0 {
+            return Option.None;
+        }
+        self.i = self.i - 1;
+        return Option.Some(self.i);
+    }
+}
+
+fn two_bounds<T: Next + Back>(t: T) {
+    for x in t { //~ ERROR E0908
+    }
+}
+
+fn two_bounds_mut<T: Next + Back>(t: &mut T) {
+    for x in t { //~ ERROR E0908
+    }
+}
+
+fn two_impls(a: It, b: &mut It) {
+    for x in a { //~ ERROR E0908
+    }
+    for x in b { //~ ERROR E0908
+    }
+}
+
+// the forms the fix suggests
+fn by_path<T: Next + Back>(t: T, r: &mut It) -> u64 {
+    let mut s: u64 = 0;
+    let mut it = t;
+    loop {
+        match Next.next(&mut it) {
+            Option.Some(x) => {
+                s = s + x;
+            }
+            Option.None => {
+                break;
+            }
+        }
+    }
+    loop {
+        match Back.next(r) {
+            Option.Some(x) => {
+                s = s + x;
+            }
+            Option.None => {
+                break;
+            }
+        }
+    }
+    return s;
+}

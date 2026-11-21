@@ -4403,12 +4403,14 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0908",
         severity: Severity::Error,
         area: "generics",
-        rule: "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type in the calling package and its dependencies) finds the method in two traits, or (case `impls`, `impls-static` for a fn without `self`) in two impls of one trait with other trait args (impls with the same trait args are E0903, not this)",
+        rule: "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type in the calling package and its dependencies) finds the method in two traits, or (case `impls`, `impls-static` for a fn without `self`) in two impls of one trait with other trait args (impls with the same trait args are E0903, not this); case `for`, `for-mut` for a `&mut` source: two traits give the `next` of a `for` source, which the loop calls unqualified",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "first", kind: HoleKind::Path, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
+            Hole { name: "place", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "qual", kind: HoleKind::Path, choices: &[] },
             Hole { name: "second", kind: HoleKind::Path, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
@@ -4423,6 +4425,34 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call it qualified, with the receiver as first argument: `{first}.{name}(x)` or `{second}.{name}(x)`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "for",
+                message: "`for` over `{type}` is ambiguous: both `{first}` and `{second}` supply `{name}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "the loop calls `{name}` here" },
+                    LabelTemplate { at: "first", text: "`{first}.{name}` declared here" },
+                    LabelTemplate { at: "second", text: "`{second}.{name}` declared here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "keep one of the two bounds or impls, or advance it through one trait: `let mut it = {place}; loop {{ match {qual}.{name}(&mut it) {{ Option.Some(x) => {{ .. }} Option.None => {{ break; }} }} }}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "for-mut",
+                message: "`for` over `{type}` is ambiguous: both `{first}` and `{second}` supply `{name}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "the loop calls `{name}` here" },
+                    LabelTemplate { at: "first", text: "`{first}.{name}` declared here" },
+                    LabelTemplate { at: "second", text: "`{second}.{name}` declared here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "keep one of the two bounds or impls, or advance it through one trait: `loop {{ match {qual}.{name}({place}) {{ Option.Some(x) => {{ .. }} Option.None => {{ break; }} }} }}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

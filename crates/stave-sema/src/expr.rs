@@ -2085,6 +2085,21 @@ impl<'a> Ck<'a> {
 
     fn e0908(&mut self, seg: u32, recv: TypeId, traits: [DeclId; 2], methods: [DeclId; 2]) {
         let name = self.icx.tok_str(seg).to_string();
+        let at = self.icx.tok_span(seg);
+        self.e0908_at(&name, at, recv, traits, methods, None);
+    }
+
+    /// E0908 for method `name` at `at`; `source`: the text of a `for` source whose implicit
+    /// `next` it is, and whether that source is a `&mut`.
+    fn e0908_at(
+        &mut self,
+        name: &str,
+        at: Span,
+        recv: TypeId,
+        traits: [DeclId; 2],
+        methods: [DeclId; 2],
+        source: Option<(&str, bool)>,
+    ) {
         let tn = self.show(recv);
         let (p1, p2) = (self.prog.decl_path(traits[0]), self.prog.decl_path(traits[1]));
         let mut roles: Vec<(&str, Span)> = Vec::new();
@@ -2101,15 +2116,20 @@ impl<'a> Ck<'a> {
         let case = match (traits[0] == traits[1], stat) {
             (true, false) => Some("impls"),
             (true, true) => Some("impls-static"),
+            (false, _) if source.is_some_and(|s| s.1) => Some("for-mut"),
+            (false, _) if source.is_some() => Some("for"),
             _ => None,
         };
-        let d = mk(
-            "E0908",
-            case,
-            &[("name", &name), ("type", &tn), ("first", &p1), ("second", &p2)],
-            self.icx.tok_span(seg),
-            &roles,
-        );
+        // the fix's code names the trait as this module does: a trait of this module by its name
+        let qual = match self.prog.decl(traits[0]) {
+            Some(d) if d.module == self.icx.res_module() => self.prog.strings.get(d.name).to_string(),
+            _ => p1.clone(),
+        };
+        let mut holes = vec![("name", name), ("type", &tn), ("first", &p1), ("second", &p2)];
+        if let Some((place, _)) = source {
+            holes.extend([("place", place), ("qual", &qual)]);
+        }
+        let d = mk("E0908", case, &holes, at, &roles);
         self.report(d);
     }
 
@@ -4122,9 +4142,17 @@ impl<'a> Ck<'a> {
         if let Some(next) = self.prog.strings.lookup("next") {
             let genv = self.genv();
             let from = self.package();
+            let found = self.w.lookup_method(&mut self.tys, it, next, genv, from);
+            if let Lookup::Ambiguous { traits, methods, recv } = found {
+                let at = self.icx.node_span(iter);
+                let text = self.icx.node_text(iter).to_string();
+                let by_mut = matches!(src, ForSource::IterMut { .. });
+                self.e0908_at("next", at, recv, traits, methods, Some((&text, by_mut)));
+                return ids::ERROR;
+            }
             // a `next` with generic params of its own is no iterator's `next`: the loop has no
             // args to give it
-            if let Lookup::Found { m, .. } = self.w.lookup_method(&mut self.tys, it, next, genv, from)
+            if let Lookup::Found { m, .. } = found
                 && let Some((sig, args, self_ty)) = self.w.method_sig(&m)
                 && sig.generics.len() as u32 == sig.n_parent
             {
