@@ -1,0 +1,238 @@
+//~ STDOUT run_generic_needs.stdout
+// Generic instances at 256-bit vector types inherit `avx2` from their type arguments: the
+// `needs(avx2)` arm uses generics at f32x8, the `_` arm the same generics at f32x4 (other
+// instances, built without features). Shapes: a value through `id`, methods of a generic
+// struct, a trait method through a bound, a closure passed to a generic fold, a generic that only
+// borrows (`first`, which inherits nothing), mutual recursion, a type argument given by
+// turbofish alone, `mem.swap`, `vec.Vec`, `Option.unwrap`, a fn value of an instance, and a value
+// with a generic `Drop` impl. Each result is compared with a scalar reference: the output does
+// not depend on the CPU; with a command-line argument each line also names the arm that ran
+// (crates/stave-driver/tests/dispatch_vector.rs runs it natively, under qemu `-cpu Nehalem`, for
+// x86_64-linux-v3, and for aarch64-linux).
+import std.env;
+import std.io;
+import std.mem;
+import std.vec;
+
+const BASE: u32 = 0;
+const AVX2: u32 = 1;
+
+struct R {
+    v: [f32; 12],
+    arm: u32,
+}
+
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+struct Pair<T> {
+    a: T,
+    b: T,
+    n: u32,
+}
+
+impl<T: Copy> Pair<T> {
+    pub fn new(a: T, b: T) -> Pair<T> {
+        return Pair.{ a: a, b: b, n: 2 };
+    }
+
+    pub fn first(&self) -> T {
+        return self.a;
+    }
+
+    pub fn second(&self) -> &T from self {
+        return &self.b;
+    }
+
+    pub fn count(&self) -> u32 {
+        return self.n;
+    }
+}
+
+trait Get<T> {
+    fn get(&self) -> T;
+}
+
+impl<T: Copy> Get<T> for Pair<T> {
+    fn get(&self) -> T {
+        return self.b;
+    }
+}
+
+fn via<T: Copy, X: Get<T>>(x: &X) -> T {
+    return x.get();
+}
+
+fn fold<T: Copy>(xs: &[T], f: fn(T, T) -> T, z: T) -> T {
+    let mut acc = z;
+    for x in xs {
+        acc = f(acc, *x);
+    }
+    return acc;
+}
+
+// Only borrows a `T`: no instance inherits a feature.
+fn first<T>(xs: &[T]) -> Option<&T> from xs {
+    if xs.len() == 0 {
+        return Option.None;
+    }
+    return Option.Some(&xs[0]);
+}
+
+rec fn ping<T: Copy>(x: &T, n: u32) -> T {
+    if n == 0 {
+        return *x;
+    }
+    return pong(x, n - 1);
+}
+
+rec fn pong<T: Copy>(x: &T, n: u32) -> T {
+    return ping(x, n);
+}
+
+// `T` only in the turbofish and a local.
+fn none_of<T>(n: u32) -> u32 {
+    let o: Option<T> = Option.None;
+    match o {
+        Option.Some(_) => { return 0; }
+        Option.None => { return n; }
+    }
+}
+
+struct Held<T> {
+    v: T,
+}
+
+impl<T> Drop for Held<T> {
+    fn drop(&mut self) {
+    }
+}
+
+fn hold<T>(v: T) -> Held<T> {
+    return Held.{ v: v };
+}
+
+fn add8(x: f32x8, y: f32x8) -> f32x8 needs(avx2) {
+    return x + y;
+}
+
+fn gen_v3(xs: &[f32]) -> R needs(avx2) {
+    let a = f32x8.load(xs, 0);
+    let b = f32x8.load(xs, 8);
+    let mut r = R.{ v: [0.0; 12], arm: AVX2 };
+    r.v[0] = id(a).reduce_add();
+    let p = Pair::<f32x8>.new(a, b);
+    r.v[1] = p.first().reduce_add() + (*p.second()).reduce_add() + (p.count() as~ f32);
+    r.v[2] = via::<f32x8, Pair<f32x8>>(&p).reduce_add();
+    let arr: [f32x8; 2] = [a, b];
+    r.v[3] = fold(&arr, fn(x: f32x8, y: f32x8) -> f32x8 { return x + y; }, f32x8.splat(0.0)).reduce_add();
+    match first(&arr) {
+        Option.Some(v) => { r.v[4] = (*v).reduce_add(); }
+        Option.None => { }
+    }
+    r.v[5] = ping(&b, 3).reduce_add();
+    r.v[6] = none_of::<f32x8>(5) as~ f32;
+    let mut c = a;
+    let mut d = b;
+    mem.swap(&mut c, &mut d);
+    r.v[7] = c.reduce_add() - d.reduce_add();
+    let mut w = vec.Vec::<f32x8>.new();
+    w.push(c);
+    w.push(d);
+    r.v[8] = (*w.get_ref(1)).reduce_add() + (w.len() as~ f32);
+    r.v[9] = Option.Some(a).unwrap().reduce_add();
+    let f = id::<f32x8>;
+    r.v[10] = fold(&arr, add8, f(f32x8.splat(0.0))).reduce_add() - f(a).reduce_add();
+    let h = hold(a);
+    r.v[11] = h.v.reduce_add();
+    return r;
+}
+
+fn add4(x: f32x4, y: f32x4) -> f32x4 {
+    return x + y;
+}
+
+fn gen_base(xs: &[f32]) -> R {
+    let a0 = f32x4.load(xs, 0);
+    let a1 = f32x4.load(xs, 4);
+    let b0 = f32x4.load(xs, 8);
+    let b1 = f32x4.load(xs, 12);
+    let mut r = R.{ v: [0.0; 12], arm: BASE };
+    r.v[0] = id(a0).reduce_add() + id(a1).reduce_add();
+    let p = Pair::<f32x4>.new(a0, b0);
+    let q = Pair::<f32x4>.new(a1, b1);
+    r.v[1] = p.first().reduce_add() + q.first().reduce_add() + (*p.second()).reduce_add()
+        + (*q.second()).reduce_add() + (p.count() as~ f32);
+    r.v[2] = via::<f32x4, Pair<f32x4>>(&p).reduce_add() + via::<f32x4, Pair<f32x4>>(&q).reduce_add();
+    let arr: [f32x4; 4] = [a0, a1, b0, b1];
+    r.v[3] = fold(&arr, fn(x: f32x4, y: f32x4) -> f32x4 { return x + y; }, f32x4.splat(0.0)).reduce_add();
+    match first(&arr) {
+        Option.Some(v) => { r.v[4] = (*v).reduce_add() + a1.reduce_add(); }
+        Option.None => { }
+    }
+    r.v[5] = ping(&b0, 3).reduce_add() + ping(&b1, 3).reduce_add();
+    r.v[6] = none_of::<f32x4>(5) as~ f32;
+    let mut c0 = a0;
+    let mut d0 = b0;
+    let mut c1 = a1;
+    let mut d1 = b1;
+    mem.swap(&mut c0, &mut d0);
+    mem.swap(&mut c1, &mut d1);
+    r.v[7] = c0.reduce_add() + c1.reduce_add() - d0.reduce_add() - d1.reduce_add();
+    let mut w = vec.Vec::<f32x4>.new();
+    w.push(c0);
+    w.push(c1);
+    w.push(d0);
+    w.push(d1);
+    r.v[8] = (*w.get_ref(2)).reduce_add() + (*w.get_ref(3)).reduce_add() + (w.len() as~ f32) - 2.0;
+    r.v[9] = Option.Some(a0).unwrap().reduce_add() + Option.Some(a1).unwrap().reduce_add();
+    let f = id::<f32x4>;
+    r.v[10] = fold(&arr, add4, f(f32x4.splat(0.0))).reduce_add() - f(a0).reduce_add() - f(a1).reduce_add();
+    let h0 = hold(a0);
+    let h1 = hold(a1);
+    r.v[11] = h0.v.reduce_add() + h1.v.reduce_add();
+    return r;
+}
+
+dispatch fn gen(xs: &[f32]) -> R { avx2 => gen_v3, _ => gen_base, }
+
+fn name(i: usize) -> &str {
+    return match i {
+        0 => "id",
+        1 => "pair",
+        2 => "trait",
+        3 => "fold",
+        4 => "first",
+        5 => "recursion",
+        6 => "turbofish",
+        7 => "swap",
+        8 => "vec",
+        9 => "unwrap",
+        10 => "fn_value",
+        _ => "drop",
+    };
+}
+
+fn main() -> i32 {
+    let mut xs: [f32; 16] = [0.0; 16];
+    for i in 0usize..16 {
+        xs[i] = (((i * 3) % 7) as~ f32) * 0.5 - 1.0;
+    }
+    let mut sa: f32 = 0.0;
+    let mut sb: f32 = 0.0;
+    for i in 0usize..8 {
+        sa = sa + xs[i];
+        sb = sb + xs[i + 8];
+    }
+    let want: [f32; 12] = [sa, sa + sb + 2.0, sb, sa + sb, sa, sb, 5.0, sb - sa, sa + 2.0, sa, sb, sa];
+    let got = gen(&xs);
+    for i in 0usize..12 {
+        io.print(name(i));
+        if env.count() > 1 {
+            io.print(if got.arm == AVX2 then " avx2" else " base");
+        }
+        if got.v[i] == want[i] { io.print(" ok\n"); } else { io.print(" MISMATCH\n"); }
+    }
+    return 0;
+}
