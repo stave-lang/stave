@@ -3950,7 +3950,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0905",
         severity: Severity::Error,
         area: "generics",
-        rule: "impl method signature differs from the trait's (params, return, `from`, `needs`, `unsafe`, or the method's own generics: count, order, kind, `view`, and the bounds as complete trait refs with their args, after the trait's params are replaced by the impl's trait args); the fix shows the trait's signature",
+        rule: "impl method signature differs from the trait's (params, return, `from`, `needs`, `unsafe`, or the method's own generics: count, order, kind, `view`, a const param's type, and the bounds as complete trait refs with their args, after the trait's params are replaced by the impl's trait args); the fix shows the trait's signature",
         retired: false,
         located: true,
         holes: &[

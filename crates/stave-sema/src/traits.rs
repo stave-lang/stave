@@ -1943,8 +1943,8 @@ fn sig_matches(
     {
         return false;
     }
-    // The method's own generics, position by position: kind, `view`, and the bounds as a set of
-    // complete trait refs (trait and args) after the same substitution.
+    // The method's own generics, position by position: kind, `view`, a const param's type, and
+    // the bounds as a set of complete trait refs (trait and args) after the same substitution.
     // A caller instantiates them by the trait's declaration and the instance runs the impl's
     // body, so any difference reaches a body with arguments it was not checked for.
     let sub_arg = |tys: &mut TypeTable, a: GArg| match a {
@@ -1955,6 +1955,12 @@ fn sig_matches(
         let (a, b) = (&ts.generics[nt + j], &ms.generics[ni + j]);
         if a.is_const != b.is_const || a.view != b.view {
             return false;
+        }
+        if a.is_const {
+            let at = sub(tys, a.const_ty);
+            if at != b.const_ty && !tys.has_error(at) && !tys.has_error(b.const_ty) {
+                return false;
+            }
         }
         let mut ta: Vec<(DeclId, Vec<GArg>)> = Vec::with_capacity(a.bounds.len());
         for x in &a.bounds {
