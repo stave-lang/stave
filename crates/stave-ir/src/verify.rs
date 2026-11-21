@@ -87,7 +87,7 @@ fn verify_static_refs(m: &Module) -> Vec<String> {
         for r in &st.refs {
             let at = r.offset as usize;
             let word = st.init.get(at..at.saturating_add(8));
-            if at < next || at % 8 != 0 || word.is_none_or(|w| w.iter().any(|&x| x != 0)) {
+            if at < next || !at.is_multiple_of(8) || word.is_none_or(|w| w.iter().any(|&x| x != 0)) {
                 errs.push(format!("static {i}: address word at {at} is misplaced"));
             }
             next = at.saturating_add(8);
