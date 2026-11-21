@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
-use crate::cfg::{Body, LoanId, MoveOut, Place, Proj};
+use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, Place, Proj};
 use crate::check::{Finding, Unfit, later_use};
 use crate::loans::Flow;
 use crate::ty::Tys;
@@ -248,6 +248,21 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                     MoveOut::Behind => out.extend(mk("E0504", None, &[("place", &text)], span, &[])),
                 }
             }
+            Finding::GuardEffect { span, what } => {
+                let (case, place) = match what {
+                    GuardEffect::Move(p) => ("move", Some(p)),
+                    GuardEffect::Assign(p) => ("assign", Some(p)),
+                    GuardEffect::MutBorrow(p) => ("mut-borrow", Some(p)),
+                    GuardEffect::Try => ("try", None),
+                };
+                match place {
+                    Some(p) => {
+                        let text = place_text(body, tys, &p);
+                        out.extend(mk("E0505", Some(case), &[("place", &text)], span, &[]))
+                    }
+                    None => out.extend(mk("E0505", Some(case), &[], span, &[])),
+                }
+            }
             Finding::ViewWrite { place, span, why } => {
                 let text = place_text(body, tys, &place);
                 let name = |p: u32| match body.locals.iter().position(|x| x.param == Some(p)) {
@@ -315,6 +330,7 @@ mod tests {
             loans,
             move_sites: Vec::new(),
             bad_moves: Vec::new(),
+            guard_effects: Vec::new(),
             ret: RetCheck::None,
             declared: Vec::new(),
             is_nested: false,

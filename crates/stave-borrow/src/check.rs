@@ -21,7 +21,10 @@
 use stave_diag::Span;
 
 use crate::bits::Bits;
-use crate::cfg::{Body, LoanId, LocalId, MoveOut, OpKind, Operand, Place, Proj, RetCheck, Rvalue, Stmt, StmtKind};
+use crate::cfg::{
+    Body, GuardEffect, LoanId, LocalId, MoveOut, OpKind, Operand, Place, Proj, RetCheck, Rvalue, Stmt,
+    StmtKind,
+};
 use crate::loans::{CallStore, Flow, Misfit, State, for_each_op};
 use crate::ty::DerefKind;
 
@@ -93,6 +96,8 @@ pub enum Finding {
     Uncovered { span: Span, param: u32, from: Span, clause: bool, copy: bool },
     /// E0504: a by-value use of a non-Copy place that cannot be moved from.
     MoveOut { place: Place, span: Span, why: MoveOut },
+    /// E0505: a match guard (or a closure written in one) does more than read.
+    GuardEffect { span: Span, what: GuardEffect },
     /// E0513: a ref-like value written through a dereference, or stored by a call through a
     /// `&mut` argument, has origins a view object it may land in cannot take.
     ViewWrite { place: Place, span: Span, why: Unfit },
@@ -590,6 +595,7 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
             }
         }
         bad_moves(body, &mut findings);
+        guard_effects(body, &mut findings);
         return Checked { findings, dump: Vec::new() };
     }
     let lo = live_out(flow);
@@ -613,6 +619,7 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
     }
     let mut findings = cx.findings;
     bad_moves(body, &mut findings);
+    guard_effects(body, &mut findings);
     Checked { findings, dump: cx.dump }
 }
 
@@ -651,6 +658,18 @@ fn rewritten_temps(body: &Body) -> Bits {
         }
     }
     out
+}
+
+/// E0505: one finding per span of what the body's guards do besides reading.
+fn guard_effects(body: &Body, findings: &mut Vec<Finding>) {
+    let mut seen: Vec<Span> = Vec::new();
+    for (span, what) in &body.guard_effects {
+        if seen.contains(span) {
+            continue;
+        }
+        seen.push(*span);
+        findings.push(Finding::GuardEffect { span: *span, what: what.clone() });
+    }
 }
 
 /// E0504: one finding per span of the body's bad moves.

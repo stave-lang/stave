@@ -214,3 +214,25 @@ static's value whole; a borrow is a loan of the temporary that never conflicts w
 
 **What would break it.** A path to a static that the builder takes as a constant; a `static
 mut` (unsafe, std and runtime only: not covered).
+
+## Match guards only read
+
+**Claim.** Running a guard leaves every place as it was, so an arm reached after a guard was
+false sees the state from before the match.
+
+**Assumptions.** A guard is evaluated after its arm's pattern is tested; when it is false the
+next arm is tested on the same scrutinee and the same locals. The lowering and the borrow CFG
+start every arm from the state before the match.
+
+**Argument.** The CFG builder marks the evaluation of a guard expression (and of every
+closure body written in it) and rejects there (E0505) each step that can change a place: a
+by-value use of a non-Copy value (the only way to move), an assignment, a `&mut` borrow (the
+only way a call can write a place: an argument by copy or `&` writes nothing outside
+`UnsafeCell`), and `?` (which leaves the fn with the guard's moves undone). A write or `&mut`
+of the arm's own bindings is E0503 and of the scrutinee E0501, as before. What is left reads
+places and makes temporaries, which are dropped at the guard's end on both edges. So no move
+or write made by a guard is undone or repeated by the next arm.
+
+**What would break it.** Interior mutability (`Cell`, atomics, a `Mutex` locked in a guard):
+a write through `&` is not a change this rule sees, and it is not unsound (no place is moved
+or dropped twice); an unsafe write through a raw pointer (its obligation).

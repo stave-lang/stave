@@ -2342,6 +2342,79 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0505",
+        severity: Severity::Error,
+        area: "borrow",
+        rule: "a match guard only reads: inside the guard expression, and inside the blocks and closures written in it, no by-value use of a non-Copy value (a call may take arguments by copy or `&` only), no assignment, no `&mut` borrow (also of a receiver), no `?`",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "place", kind: HoleKind::Place, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "a match guard only reads: it may not move `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}`, or pass `&{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "assign",
+                message: "a match guard only reads: it may not assign to `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "assigned in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "move",
+                message: "a match guard only reads: it may not move `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}`, or pass `&{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-borrow",
+                message: "a match guard only reads: it may not borrow `{place}` mutably",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "mutable borrow in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass `&{place}`, or test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "try",
+                message: "a match guard only reads: `?` may leave the fn from inside it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`?` in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "evaluate the fallible value before the `match`, or test in the arm: `P => {{ if cond? {{ .. }} else {{ .. }} }}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0510",
         severity: Severity::Error,
         area: "borrow",

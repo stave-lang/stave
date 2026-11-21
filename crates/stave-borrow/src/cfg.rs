@@ -265,6 +265,17 @@ pub enum RetCheck {
     From(Vec<(u32, bool)>, Span, bool),
 }
 
+/// What a match guard may not do: it only reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GuardEffect {
+    /// A by-value use of a non-Copy value.
+    Move(Place),
+    Assign(Place),
+    MutBorrow(Place),
+    /// A `?`.
+    Try,
+}
+
 /// Why a by-value use of a non-Copy place is E0504.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MoveOut {
@@ -288,6 +299,8 @@ pub struct Body {
     /// E0504: by-value uses of non-Copy places that cannot be moved from (place, span, why),
     /// kept as copies in the CFG.
     pub bad_moves: Vec<(Place, Span, MoveOut)>,
+    /// E0505: what a match guard (or a closure written in one) does besides reading.
+    pub guard_effects: Vec<(Span, GuardEffect)>,
     pub ret: RetCheck,
     /// The `from` clauses of the fn's params (a nested body: none).
     pub declared: Vec<Store>,
@@ -372,6 +385,10 @@ pub struct Builder<'a, 'b> {
     /// Binding nodes of the match guards being built (in a nested body: those of the enclosing
     /// guards it is built in); see [`Local::guard`].
     guard_binds: Vec<u32>,
+    /// Inside a match guard (or a closure written in one): the guard only reads.
+    in_guard: u32,
+    /// The scrutinees of the guards being built in this body (a `&mut` of one is E0501 already).
+    guard_scruts: Vec<Place>,
     /// The temporary holding the array a `for` loop iterates by value: its elements are moved
     /// into the loop binding one per iteration (not an E0504 move out of an index).
     owned_elems: Option<LocalId>,
@@ -414,6 +431,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             loans: Vec::new(),
             move_sites: Vec::new(),
             bad_moves: Vec::new(),
+            guard_effects: Vec::new(),
             ret: RetCheck::None,
             declared: Vec::new(),
             is_nested: range.is_some(),
@@ -439,6 +457,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             infos: std::rc::Rc::new(Vec::new()),
             joins: Vec::new(),
             guard_binds: Vec::new(),
+            in_guard: 0,
+            guard_scruts: Vec::new(),
             owned_elems: None,
             olds: FxHashMap::default(),
             result: None,
@@ -633,6 +653,9 @@ impl<'a, 'b> Builder<'a, 'b> {
         if !self.open() {
             return (V::Never, None);
         }
+        if mutable && self.in_guard > 0 && !self.guard_reported(&place) {
+            self.body.guard_effects.push((span, GuardEffect::MutBorrow(place.clone())));
+        }
         let ty = self.tys.ov.mk_ref(mutable, place.ty);
         let res = self.new_loan(&place, mutable && !two_phase, span, n, two_phase);
         let act = two_phase.then(|| self.new_loan(&place, true, span, n, false));
@@ -647,6 +670,19 @@ impl<'a, 'b> Builder<'a, 'b> {
             n,
         );
         (V::P(Place::local(t, ty)), act.map(|a| (t, res, a)))
+    }
+
+    /// A write or `&mut` of `p` in a guard that is reported otherwise: of a guard binding (E0503),
+    /// of the guard's scrutinee (E0501), or the reborrow of a temporary `&mut` (the borrow or
+    /// call that made it is).
+    fn guard_reported(&self, p: &Place) -> bool {
+        let Some(l) = self.body.locals.get(p.local as usize) else { return false };
+        l.guard
+            || (l.temp && matches!(p.proj.as_slice(), [Proj::Deref(_)]))
+            || self
+                .guard_scruts
+                .iter()
+                .any(|s| crate::check::places_conflict(p, s, crate::check::Access::MutBorrow))
     }
 
     fn place_of(&mut self, v: V, n: u32) -> Option<Place> {
@@ -713,6 +749,13 @@ impl<'a, 'b> Builder<'a, 'b> {
         // E0504: a move out of a borrow, an index, a capture, a guard binding, a part of a
         // value with a destructor, or a static; checked as a copy
         let movable = by_value && why.is_none();
+        // passing on a fresh `&mut` is the borrow that made it, judged there
+        let fresh_ref = p.proj.is_empty()
+            && self.body.locals.get(p.local as usize).is_some_and(|l| l.temp)
+            && self.tys.deref(p.ty).is_some();
+        if movable && self.in_guard > 0 && !fresh_ref {
+            self.body.guard_effects.push((span, GuardEffect::Move(p.clone())));
+        }
         if let Some(why) = why {
             self.body.bad_moves.push((p.clone(), span, why));
         }
@@ -1096,6 +1139,13 @@ impl<'a, 'b> Builder<'a, 'b> {
             let (lhs, op, rhs) = (kids[0], kids[1], kids[2]);
             let compound = !icx.is(icx.a(op), Term::Eq);
             let lv = self.expr(lhs);
+            if self.in_guard > 0
+                && let V::P(p) = &lv
+                && !self.guard_reported(p)
+            {
+                let span = self.span(lhs);
+                self.body.guard_effects.push((span, GuardEffect::Assign(p.clone())));
+            }
             let Some(lp) = (match lv {
                 V::P(p) => Some(p),
                 _ => None,
@@ -1531,8 +1581,12 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let gmark = self.guard_binds.len();
                 self.bind_alts(&alts, &sp, Mode::Peek, scrut);
                 let mark = self.temps.len();
+                self.in_guard += 1;
+                self.guard_scruts.push(sp.clone());
                 let gv = self.expr(g);
                 let _ = self.read(gv, g);
+                self.guard_scruts.pop();
+                self.in_guard -= 1;
                 self.flush_temps(mark);
                 if let Some(h) = hold {
                     let span = self.span(g);
@@ -1856,6 +1910,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         nb.closure_span = Some(icx.tok_span(icx.a(n)));
         nb.infos = self.infos.clone();
         nb.guard_binds = self.guard_binds.clone();
+        nb.in_guard = self.in_guard;
         nb.push_scope();
         if let Some(ps) = params {
             for (i, p) in icx.kids_vec(ps).into_iter().enumerate() {
@@ -1921,6 +1976,8 @@ impl<'a, 'b> Builder<'a, 'b> {
         let mut ops = Vec::new();
         for (l, m) in caps {
             let lt = self.body.locals[l as usize].ty;
+            // a capture's mutation is reported where the closure body makes it
+            let effects = self.body.guard_effects.len();
             let (v, _) = self.borrow(Place::local(l, lt), m, false, span, n);
             if let Some(last) = self.body.loans.last_mut() {
                 last.capture = true;
@@ -1928,6 +1985,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             if let Some(op) = self.operand(v, n) {
                 ops.push(op);
             }
+            self.body.guard_effects.truncate(effects);
         }
         ops
     }
@@ -2580,6 +2638,9 @@ impl<'a, 'b> Builder<'a, 'b> {
         let Some(bp) = self.place_of(base, n) else { return V::Never };
         let bt = bp.ty;
         let span = self.icx.tok_span(tok);
+        if self.in_guard > 0 {
+            self.body.guard_effects.push((span, GuardEffect::Try));
+        }
         let op = self.op_of_place(bp, span, n, true);
         let V::P(hold) = self.put_temp(Rvalue::Use(op), bt, n) else { return V::Never };
         let (err, cont) = (self.new_block(), self.new_block());

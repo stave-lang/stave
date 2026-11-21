@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+// A guard that moves a local that is not one of its bindings: when the guard is false the next
+// arm runs from the state before the match, so the local would be owned (and dropped) twice. A
+// guard only reads (E0505); the test moves into the arm.
+import std.io;
+import std.vec;
+
+fn consume(v: vec.Vec<u32>) -> bool { return false; }
+
+fn main() -> i32 {
+    let mut other = vec.Vec::<u32>.new();
+    other.push(5);
+    let o: u32 = 3;
+    match o {
+        3 if consume(other) => { io.print("guard true\n"); } //~ ERROR E0505
+        _ => { io.print("fallback\n"); }
+    }
+    io.print("end\n");
+    return 0;
+}
