@@ -60,7 +60,7 @@ fn guarded(s: S) -> u32 {
 
 fn for_owned(ss: [S; 2]) -> u32 {
     let mut t: u32 = 0;
-    for S.{ a, b: _, n } in ss {
+    for S.{ a, b: _, n } in own_s(ss) {
         t = t + a.id + n;
     }
     return t;
@@ -81,3 +81,6 @@ fn reads_only(s: S) -> u32 {
 fn main() -> i32 {
     return 0;
 }
+
+// An owned array is given to a `for` as a value, not as a place.
+fn own_s(ss: [S; 2]) -> [S; 2] { return ss; }
