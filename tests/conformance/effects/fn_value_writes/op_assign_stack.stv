@@ -1,0 +1,27 @@
+// The stack bound counts every fn a compound-assigned fn value can be.
+//~ STDOUT op_assign_stack.stdout
+import std.core;
+import std.io;
+
+impl core.Add for fn() -> u64 {
+    fn add(self, rhs: Self) -> Self {
+        return big;
+    }
+}
+
+fn small() -> u64 {
+    return 1u64;
+}
+
+fn big() -> u64 {
+    let mut buf: [u64; 131072] = [0u64; 131072];
+    buf[131071] = 3;
+    return buf[131071] + buf[7];
+}
+
+fn main() {
+    let mut f: fn() -> u64 = small;
+    f += small;
+    let r = f();
+    io.print(f"{r}\n");
+}

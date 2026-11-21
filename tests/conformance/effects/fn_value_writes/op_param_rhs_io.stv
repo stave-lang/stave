@@ -1,0 +1,26 @@
+// An operator call delivers no argument event: the impl's fn-typed params reach the whole table.
+import std.core;
+import std.io;
+
+impl core.Add for fn() {
+    fn add(self, rhs: Self) -> Self {
+        rhs();
+        return nop;
+    }
+}
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let a: fn() = nop;
+    let b: fn() = noisy;
+    let g = a + b;
+}
+
+fn main() {
+    quiet();
+}

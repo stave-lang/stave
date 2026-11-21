@@ -1,0 +1,18 @@
+// Recursion through a call result called in place.
+import std.io;
+
+fn down_v() -> fn(u64) -> u64 {
+    return down;
+}
+
+fn down(n: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    return down_v()(n - 1) + 1; //~ ERROR E1402
+}
+
+fn main() {
+    let r = down(200000u64);
+    io.print(f"{r}\n");
+}

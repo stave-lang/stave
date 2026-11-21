@@ -1,0 +1,29 @@
+// The stack bound counts `big`, which an operator impl calls through `rhs`.
+//~ STDOUT op_param_stack_rhs.stdout
+import std.core;
+import std.io;
+
+fn small() -> u64 {
+    return 1u64;
+}
+
+fn big() -> u64 {
+    let mut buf: [u64; 131072] = [0u64; 131072];
+    buf[131071] = 3;
+    return buf[131071] + buf[7];
+}
+
+impl core.Add for fn() -> u64 {
+    fn add(self, rhs: Self) -> Self {
+        let r = rhs();
+        return small;
+    }
+}
+
+fn main() {
+    let a: fn() -> u64 = small;
+    let b: fn() -> u64 = big;
+    let c = a + b;
+    let r = c();
+    io.print(f"{r}\n");
+}
