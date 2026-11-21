@@ -1226,7 +1226,7 @@ fix = { description = "use a vector of at most {max} bits, or add `needs(...)` w
 code = "E0703"
 severity = "error"
 area = "features"
-rule = "vector in the signature of a fn, fn type, or closure whose `needs` (plus the target baseline) do not cover its width (`extern \"C\"` signatures: E0804); also in a generic instance's signature after substitution (`id::<f32x8>`, `W<f32x8>.get()`, a fn type arg), against the callee's `needs`, at the use"
+rule = "vector in the signature of a fn, fn type, or closure whose `needs` (plus the target baseline) do not cover its width (`extern \"C\"` signatures: E0804)"
 holes = { type = "type", feature = "name" }
 message = "`{type}` in this signature needs `{feature}`, which the function's `needs` does not list"
 labels = [{ at = "primary", text = "`{type}` needs `{feature}`" }]
