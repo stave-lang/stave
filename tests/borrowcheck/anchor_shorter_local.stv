@@ -1,6 +1,6 @@
-//~ BORROWCHECK write-under-shared 22 21
+//~ BORROWCHECK use-after-referent 22 28
 // A `&mut` view made from a raw pointer under a `&` anchor takes a borrow of a local of the loop
-// body: the next round writes that local, and the view still holds the `&` of the round before.
+// body: the local ends with the round, and the view still holds the `&` of the round before.
 import std.io;
 
 view struct Pick { best: &u32, count: usize }

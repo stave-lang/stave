@@ -1,0 +1,26 @@
+//~ BORROWCHECK ok
+// A constant temporary with `Cell` bytes: a `&` of it writes them, and each evaluation of `&C`
+// writes the constant's value into them again (the one slot of the expression is stored at
+// each evaluation, as the backends do). So each round starts from 0, and the reference of the
+// round before, still usable, reads 0 after the next evaluation.
+import std.atomic;
+
+const C: atomic.U32 = atomic.U32.new(0);
+
+fn main() -> i32 {
+    let z = atomic.U32.new(0);
+    let mut r: &atomic.U32 = &z;
+    let mut total: u32 = 0;
+    let mut seen: u32 = 0;
+    let mut i: u32 = 0;
+    while i < 3 {
+        let before: &atomic.U32 = r;
+        r = &C;
+        seen = seen + before.load();
+        let _ = r.fetch_add(1);
+        total = total + r.load();
+        i = i + 1;
+    }
+    if total == 3 && seen == 0 { return 0; }
+    return 1;
+}

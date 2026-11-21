@@ -191,7 +191,8 @@ impl<'a> FnCx<'a> {
         for (_, node, ty) in binds {
             let drop = self.needs_drop(ty);
             let idx = self.locals.len();
-            self.locals.push(LocalInfo { node, ty, mem: drop, drop, flag: None });
+            let mem = drop || self.slotted.contains(&node);
+            self.locals.push(LocalInfo { node, ty, mem, drop, flag: None });
             self.by_node.insert(node, idx);
             if icx.kind(node) == Some(NodeKind::Param)
                 && let Some(sp) = icx.child(node, NodeKind::SelfParam)
@@ -314,9 +315,11 @@ impl<'a> FnCx<'a> {
         let mut b = std::mem::replace(&mut self.f.b, FuncBuilder::new(&[]));
         b.seal_unreached();
         let borrows = std::mem::take(&mut self.f.borrows);
+        let events = std::mem::take(&mut self.f.events);
         match b.finish() {
             Ok(mut body) => {
                 body.borrows = borrows;
+                body.events = events;
                 let mut body = crate::lower_post::finalize(body);
                 stave_ir::fence::place_stream_fences(&mut body);
                 Some(body)
@@ -331,7 +334,7 @@ impl<'a> FnCx<'a> {
     fn end_fn(&mut self) {
         if self.open() {
             while !self.f.scopes.is_empty() {
-                self.pop_scope();
+                self.pop_scope_at(true);
             }
             let r = self.f.ret;
             if self.open() {
@@ -1061,6 +1064,8 @@ impl<'a> FnCx<'a> {
         let f = self.req(Req::Closure(k as u32));
         let Some((tup, pt, locals)) = self.env_type(k) else { return Some(Operand::Func(f)) };
         let env = self.new_slot(tup);
+        let modes: Vec<crate::closures::CaptureMode> =
+            self.closure_info.get(k).map_or(Vec::new(), |c| c.captures.iter().map(|c| c.mode).collect());
         for (i, &(l, rt)) in locals.iter().enumerate() {
             let Some(p) = self.f.slot.get(l).copied().flatten() else {
                 self.fail(n, "captured local without a slot");
@@ -1069,10 +1074,34 @@ impl<'a> FnCx<'a> {
             let fp = self.t_ref(true, rt);
             let ix = self.int(i as i128);
             let a = self.op2(Op::FieldAddr, fp, env, ix);
+            let shared = modes.get(i) != Some(&crate::closures::CaptureMode::RefMut);
+            let p = self.capture(p, rt, shared);
             self.f.b.store(a, p);
         }
         let _ = pt;
-        Some(Operand::Value(self.f.b.fn_make(FnCx::ir(ty), f, env)))
+        let fv = self.f.b.fn_make(FnCx::ir(ty), f, env);
+        if self.g.borrows {
+            // each evaluation of the literal holds its own capture references
+            self.f.events.push(stave_ir::EventMark { value: fv, kind: stave_ir::EventKind::Env });
+        }
+        Some(Operand::Value(fv))
+    }
+
+    /// The capture reference a closure literal makes of the local at `p` (an environment
+    /// element of type `rt`, a `&mut`): with the borrow side table on, a borrow of the local,
+    /// `&` when the body only reads it.
+    fn capture(&mut self, p: Operand, rt: Ty, shared: bool) -> Operand {
+        if !self.g.borrows {
+            return p;
+        }
+        let Some((inner, _, _)) = self.pointee(rt) else { return p };
+        if !shared {
+            return self.borrowed(p, rt);
+        }
+        let st = self.t_ref(false, inner);
+        let s = self.convert_ptr(p, rt, st);
+        let b = self.borrowed(s, st);
+        self.convert_ptr(b, st, rt)
     }
 
     /// The type of a binding pattern (a single name), for the coercion site of its initializer.
@@ -1270,6 +1299,10 @@ impl<'a> FnCx<'a> {
         };
         self.drop_temps_keep();
         self.drop_scopes(lp.scope);
+        for s in (lp.scope..self.f.scopes.len()).rev() {
+            let ls = self.f.scopes[s].clone();
+            self.end_locals(&ls);
+        }
         if is_break {
             self.br_join(lp.exit, &[]);
         } else {
@@ -1369,7 +1402,7 @@ impl<'a> FnCx<'a> {
                     }
                 };
                 let pt = p.ty;
-                let Some(v) = self.read(&p) else { return };
+                let Some(v) = self.peek(&p) else { return };
                 let us = self.t_usize();
                 let n = match len {
                     Some(n) => self.int(n as i128),
@@ -1438,6 +1471,8 @@ impl<'a> FnCx<'a> {
                 };
                 let et = self.t_ref(m, elem);
                 let a = self.op2(Op::ElemAddr, et, v, i);
+                // the binding borrows its element through the sequence's reference
+                let a = self.borrowed(a, et);
                 Some(Place { base: Base::Val(a, et), proj: Vec::new(), ty: et, root: None })
             }
             Some(Seq::Val(mut p, iter)) => {
@@ -1492,7 +1527,7 @@ impl<'a> FnCx<'a> {
         let Some(p) = self.place_of(e) else { return };
         let (s, mutable) = match self.kind(p.ty) {
             TypeKind::Ref { mutable, inner } => {
-                let Some(v) = self.read(&p) else { return };
+                let Some(v) = self.peek(&p) else { return };
                 match self.kind(inner) {
                     TypeKind::Slice { .. } => {
                         let st = self.slice_ref_ty(mutable, lane);
@@ -1687,10 +1722,13 @@ impl<'a> FnCx<'a> {
             return Place { base: Base::Val(x, vt), proj: Vec::new(), ty: vt, root: None };
         }
         let slot = self.new_slot(vt);
+        // each chunk is a new temporary, and the binding a borrow of it
+        self.event(stave_ir::EventKind::Begin, slot, bind_t);
         self.f.b.store(slot, x);
         let d = self.f.scopes.len();
         self.f.write_backs.push((d, WriteBack { slot, vt, s, i, mask, tok }));
-        Place { base: Base::Val(slot, bind_t), proj: Vec::new(), ty: bind_t, root: None }
+        let r = self.borrowed(slot, bind_t);
+        Place { base: Base::Val(r, bind_t), proj: Vec::new(), ty: bind_t, root: None }
     }
 
     fn slice_ref_ty(&mut self, mutable: bool, elem: Ty) -> Ty {
@@ -1988,12 +2026,19 @@ impl<'a> FnCx<'a> {
                 None => *unreach.get_or_insert_with(|| s.f.b.create_block()),
             };
             let guard_fail = target(self, next_row(a.hi, arm_top(a)));
+            // the moves of a pattern with a guard happen when the guard holds
+            let guarded = self.g.borrows && a.guard.is_some();
+            let mut moves: Vec<(Operand, Ty)> = Vec::new();
             let ok = if a.hi - a.lo == 1 {
                 let fail = target(self, next_row(a.lo + 1, tops[a.lo]));
                 self.f.env = snap.clone();
                 self.f.b.switch_to(rows[a.lo].1);
                 self.push_scope();
+                if guarded {
+                    self.f.held = Some(Vec::new());
+                }
                 let ok = self.pat(rows[a.lo].0, sp.clone(), Mode::Move, Some(fail), switch_mode);
+                moves = self.f.held.take().unwrap_or_default();
                 if ok {
                     match a.gb {
                         Some(gb) => self.f.b.br(gb, &[]),
@@ -2021,7 +2066,13 @@ impl<'a> FnCx<'a> {
                     self.f.env = snap.clone();
                     self.f.b.switch_to(rows[k].1);
                     self.push_scope();
+                    if guarded {
+                        self.f.held = Some(Vec::new());
+                    }
                     let ok = self.pat(rows[k].0, sp.clone(), Mode::Move, Some(fail), switch_mode);
+                    // the block the guard runs in has one predecessor per alternative, and so
+                    // no name for the place the taken one moved out of: these moves get no row
+                    self.f.held = None;
                     if !ok || !self.open() {
                         self.f.scopes.truncate(scope_base);
                         continue;
@@ -2073,6 +2124,9 @@ impl<'a> FnCx<'a> {
                     }
                 }
                 self.f.b.switch_to(a.bb);
+                for (p, pt) in moves {
+                    self.event(stave_ir::EventKind::Gone, p, pt);
+                }
                 if is_expr {
                     let w = Some(vt);
                     if let Some(v) = self.val(a.body, w) {

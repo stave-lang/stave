@@ -1,0 +1,23 @@
+//~ BORROWCHECK use-after-referent 21 19
+view struct Pick { best: &u32, count: usize }
+
+unsafe("p is valid for one Pick that owner keeps alive and lends exclusively while the result lives")
+fn pick_mut(owner: &Pick, p: *mut Pick) -> &mut Pick from owner {
+    return unsafe("p is valid for one Pick and no other live reference reaches it") &mut *p;
+}
+
+view struct Handle { anchor: &Pick, p: *mut Pick }
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut a = Pick.{ best: &zero, count: 0 };
+    let raw = &mut a as *mut Pick;
+    {
+        let x: u32 = 7;
+        let h = Handle.{ anchor: &a, p: raw };
+        let slot = unsafe("p is the Pick the anchor lends") pick_mut(h.anchor, h.p);
+        slot.best = &x;
+    }
+    let v: u32 = *a.best;
+    return v as% i32;
+}

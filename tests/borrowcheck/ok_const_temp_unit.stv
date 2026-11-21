@@ -1,0 +1,17 @@
+//~ BORROWCHECK ok
+// `&()` borrows a constant temporary: the next evaluation does not end it.
+fn main() -> i32 {
+    let first: () = ();
+    let mut r: &() = &first;
+    let mut cnt: u32 = 0;
+    let mut i: u32 = 0;
+    while i < 3 {
+        let before: &() = r;
+        r = &();
+        let u: () = *before;
+        cnt = cnt + 1;
+        i = i + 1;
+    }
+    if cnt == 3 { return 0; }
+    return 1;
+}

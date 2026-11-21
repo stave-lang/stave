@@ -1,0 +1,13 @@
+//~ BORROWCHECK ok
+// A cast of a `&mut` place to a raw pointer reads the reference and does not move it: the
+// reference stays usable after the cast, as it is after a reborrow.
+fn main() -> i32 {
+    let mut x: u32 = 1u32;
+    let r: &mut u32 = &mut x;
+    let p = r as *mut u32;
+    *r = 2u32;
+    let c = r as *const u32;
+    *r = *r + 1u32;
+    if x == 3u32 && p as usize != 0 && c as usize != 0 { return 0; }
+    return 1;
+}

@@ -1,0 +1,117 @@
+//~ BORROWCHECK use-after-referent 51 49
+view struct Pick { best: &u32, count: usize }
+
+impl Pick {
+    fn take(&mut self from x, x: &u32) {
+        self.best = x;
+    }
+    fn put_get(&mut self from x, x: &u32) -> &mut Pick from self {
+        self.best = x;
+        return self;
+    }
+}
+
+fn slot(dst: &mut Pick) -> &mut &u32 from dst {
+    return &mut dst.best;
+}
+
+fn copy_into(dst: &mut Pick from copy src, src: &Pick) {
+    dst.best = src.best;
+}
+
+fn element() -> u32 {
+    let zero: u32 = 0;
+    let mut arr: [Pick; 2] = [Pick.{ best: &zero, count: 0 }, Pick.{ best: &zero, count: 0 }];
+    {
+        let x: u32 = 7;
+        arr[1].take(&x);
+    }
+    return *arr[0].best;
+}
+
+fn two_levels() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        let mut q = &mut p;
+        let pp = &mut q;
+        (**pp).best = &x;
+    }
+    return *p.best;
+}
+
+fn returned_slot() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        *slot(&mut p) = &x;
+    }
+    return *p.best;
+}
+
+fn binding() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        match &mut p {
+            Pick.{ best, count } => { *best = &x; }
+        }
+    }
+    return *p.best;
+}
+
+fn payload() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        let o: Option<&mut Pick> = Option.Some(&mut p);
+        match o {
+            Option.Some(q) => { q.take(&x); }
+            Option.None => {}
+        }
+    }
+    return *p.best;
+}
+
+fn pointer_before() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let q = &mut p;
+    {
+        let x: u32 = 7;
+        q.take(&x);
+    }
+    return *q.best;
+}
+
+fn copy_after_store() -> u32 {
+    let zero: u32 = 0;
+    let mut b = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        let mut a = Pick.{ best: &zero, count: 0 };
+        a.take(&x);
+        copy_into(&mut b, &a);
+    }
+    return *b.best;
+}
+
+fn result_from_target() -> usize {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let mut r: &mut Pick = &mut Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        r = p.put_get(&x);
+    }
+    return r.count;
+}
+
+fn main() -> i32 {
+    let _ = returned_slot();
+    return 0;
+}

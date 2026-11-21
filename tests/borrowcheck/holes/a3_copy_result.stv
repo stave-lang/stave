@@ -1,0 +1,24 @@
+//~ BORROWCHECK use-after-referent 21 19
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+
+impl Pick {
+    fn swap_in(&mut self from x, x: &u32) -> &u32 from copy self {
+        self.best = x;
+        return self.best;
+    }
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    {
+        let x: u32 = 7;
+        let mut p = Pick.{ best: &zero, count: 0 };
+        r = p.swap_in(&x);
+    }
+    let v: u32 = *r;
+    io.print(f"{v}\n");
+    return 0;
+}
