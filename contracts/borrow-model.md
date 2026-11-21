@@ -179,8 +179,12 @@ fn child(p: &mut u32) -> u32 {
   type it is read as (the tag belongs to the word): read as a raw pointer or an integer it gets
   the new `&` tag as well, on all of the stored tag's range and `Cell` on none of it (the type
   names no pointee), and an integer keeps that tag as M20 says, so a pointer cast back from it
-  is read-only (an integer whose arithmetic dropped the tag is used as the root, M20). A read or a `&`
-  reborrow through it is allowed; a write through it is a write through a `Frozen` `&` (M2).
+  is read-only (an integer whose arithmetic dropped the tag is used as the root, M20). A read
+  or a `&` reborrow through the word read is allowed; a write through it is a write through a
+  `Frozen` `&` (M2). The byte copy `copy_bytes` is the one exception: it reads no value and
+  makes no tag (M20), so a `&mut` word it copies from bytes reached through a `&` keeps its
+  tag. User code cannot name it (E0805); std calls it on Copy values (`Vec.extend_from_slice`,
+  `copy_from`) and on blocks no `&` reaches (`realloc`).
   The line is per byte: bytes inside an `UnsafeCell` are `Cell`, not `Frozen` (M21), so a
   `&mut` stored there and read through a `&` keeps its tag; and the new `&` tag is `Cell` on
   the `UnsafeCell` bytes of its own pointee, so a `&&mut Cell<T>` may still `set`. The word in
