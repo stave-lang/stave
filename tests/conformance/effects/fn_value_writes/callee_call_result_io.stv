@@ -1,0 +1,18 @@
+// A fn value called as a call result `mk()()`: the call reaches the whole table of its type.
+import std.io;
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+fn mk() -> fn() {
+    return noisy;
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    mk()();
+}
+
+fn main() {
+    quiet();
+}

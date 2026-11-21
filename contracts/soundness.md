@@ -156,25 +156,29 @@ the one `from copy` names, and a rule that follows the origin of `q` no longer s
 
 ## The whole-program rules: what the call graph must show
 
-The rules below (effects, contract purity, lock ranks, `Once`, recursion, the stack bound) read
-one whole-program call graph and say nothing about code it does not show. **Assumes.** Its nodes
-are every fn and method instance reachable from a non-generic body (every package, `test fn`s
-included), each closure and `spawn` body of an instance, one drop glue per type that needs
-dropping, and one table per fn type keyed by params and return type (every fn item and closure
-of that key made into a value anywhere). An edge is each call the source spells or implies (a
-`for` loop's `next`, an f-string's `String` calls and `Display.fmt`, `String.as_str` of a
-coercion), each arm of a `dispatch fn` the target's arch owns, each value a fn-value call can
-reach (the whole table where an untracked value can), each `spawn` body, and each drop (glue to
-the `Drop` impl and to the glue of each part). The calls lowering inserts (user site, error trace,
-`scope_spawn` / `scope_join`, traps, CPU detection) are no edges: they run no user code, and a
-`spawn` body has its own edge. The values a call through a fn value reaches are the solution of
-copy constraints between slots (each local and param of an instance, each struct field declared
-with a fn type), fed by `let x = e`, `x = e`, `s.f = e`, struct literals, and the arguments of
-direct and fn-value calls; a local fed once, by a fn item or closure literal, holds that value
-everywhere; every other source (a call result, a value `if` / `match`, a payload, a read through a
-reference, a param or field declared generic) is untracked. A tracked place (a fn-typed local or
-param, a field declared with a fn type: one slot per field over all instances and values) is
-precise only while every syntactic use of it is one of these harmless uses:
+The rules below (effects, contract purity, lock ranks, `Once`, recursion, the stack bound) read one
+whole-program call graph and say nothing about code it does not show. **Assumes.** Its nodes are
+every fn and method instance reachable from a non-generic body (every package, `test fn`s included),
+each closure and `spawn` body of an instance, one drop glue per type that needs dropping, and one
+table per fn type keyed by params and return type (every fn item and closure of that key made into a
+value anywhere). An edge is each call the source spells or implies (a `for` loop's `next`, an
+f-string's `String` calls and `Display.fmt`, `String.as_str` of a coercion), each arm of a `dispatch
+fn` the target's arch owns, each value a fn-value call can reach (the whole table where an untracked
+value can), each `spawn` body, and each drop (glue to the `Drop` impl and to the glue of each part).
+The calls lowering inserts (user site, error trace, `scope_spawn` / `scope_join`, traps, CPU
+detection) are no edges: they run no user code, and a `spawn` body has its own edge. The values a
+call through a fn value reaches are the solution of copy constraints between slots (each local and
+param of an instance, each struct field declared with a fn type), fed by `let x = e`, `x = e`, `s.f
+= e`, struct literals, and the arguments of direct and fn-value calls; a local fed once, by a fn
+item or closure literal, holds that value everywhere; every other source (a call result, a value
+`if` / `match`, a payload, a read through a reference, a param or field declared generic) is
+untracked. Every call through a fn value is a site of the flow, whatever expression yields the
+callee (a call result `mk()()`, an index, a deref, a value `if`): its targets are the values its
+callee's slot holds, or the whole table when the callee is no tracked place; it has none only when
+its callee is a slot no value reaches (a param of a node no call gives a value), so the call never
+runs (debug builds check that every such call has a site). A tracked place (a fn-typed local or
+param, a field declared with a fn type: one slot per field over all instances and values) is precise
+only while every syntactic use of it is one of these harmless uses:
 
 - its declaration (a `let x` binding, a param);
 - the target of a plain `=` (`x = e`, `s.f = e`, also through `p.f`), which is an event;

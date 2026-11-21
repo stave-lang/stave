@@ -53,9 +53,11 @@
 //! value of `e` is a fn item, a closure literal, another slot (a local or a field read), or
 //! untracked. Copy constraints between slots are solved to a fixpoint on flat arrays; a call
 //! through a fn value then reaches the values its slot holds, or, if an untracked value flows in,
-//! its table. Untracked: a fn value returned by a call, chosen by a value `if` / `match`, read from
-//! a tuple, array, or enum payload, through a reference or raw pointer, or bound by a pattern
-//! other than `let x`; each passes the whole table on.
+//! its table; every call through a fn value is such a site, whatever expression yields its
+//! callee, and ends with no target only when its callee is a slot no value reaches. Untracked: a
+//! fn value returned by a call, chosen by a value `if` / `match`, read from a tuple, array, or
+//! enum payload, through a reference or raw pointer, or bound by a pattern other than `let x`;
+//! each passes the whole table on.
 //!
 //! A tracked place (a fn-typed local or param, a field declared with a fn type) is precise only
 //! while every use of it is harmless: its declaration, the target of a plain `=` (an event), or a
@@ -1094,10 +1096,13 @@ fn extract<'b>(
     for &tok in &fstrings {
         push(tok, tok, What::Fstring);
     }
-    // a body without a fn-typed value makes no flow: a generic-typed value there reaches a fn
-    // type only through a param or field declared generic, which is untracked (`Walk::expand`,
-    // `Walk::val`)
-    let flows = body.node_types.iter().any(|&t| kinds.has(t, FN))
+    // a body with no fn-typed value and no call through one makes no flow: a generic-typed
+    // value there reaches a fn type only through a param or field declared generic, which is
+    // untracked (`Walk::expand`, `Walk::val`). A call through a fn value counts on its own: its
+    // callee may be no node of the body (the call result `mk()` in `mk()()`).
+    let value_calls = body.targets.iter().filter(|(_, t)| matches!(t, Target::FnValue { .. })).count();
+    let flows = value_calls > 0
+        || body.node_types.iter().any(|&t| kinds.has(t, FN))
         || body.locals.iter().any(|&(_, t)| kinds.has(t, FN | FN_REF));
     if flows {
         flow_events(icx, body, sigs, &closures, &params, kinds, &mut push);
@@ -1106,6 +1111,13 @@ fn extract<'b>(
         cast_events(icx, body, kinds, &mut push);
     }
     drop(push);
+    // every call through a fn value has a site, which reaches its callee's tracked values or the
+    // whole table of its type (`Walk::solve_flow`), never nothing for want of an event
+    debug_assert_eq!(
+        evs.iter().filter(|e| matches!(e.what, What::ValueCall { .. })).count(),
+        value_calls,
+        "a call through a fn value without a flow site"
+    );
     for (k, c) in closures.iter().enumerate() {
         let root = if c.kind == ClosureKind::Spawn { Some(RootKind::Spawn) } else { root_at(c.lo) };
         let started = started.contains(&c.lo);
@@ -1978,10 +1990,13 @@ impl<'a> Walk<'a> {
         }
         let sites = std::mem::take(&mut self.flow.sites);
         for s in &sites {
+            // no target is left only for a slot no value reaches (a param of a node no call
+            // passes a value, so the call never runs); known values that name no node (an
+            // instance the graph could not make) count as untracked
             let untracked = match &s.callee {
                 Val::Top => true,
                 Val::Slot(x) => top[*x as usize],
-                Val::Nodes(_) => false,
+                Val::Nodes(ns) => ns.is_empty(),
             };
             if untracked {
                 if let Some(tb) = s.table {

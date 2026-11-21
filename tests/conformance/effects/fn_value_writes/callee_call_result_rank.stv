@@ -1,0 +1,19 @@
+// Holding rank 1, a call result called in place relocks the mutex.
+import std.io;
+import std.sync;
+
+fn take(m: &sync.Mutex<u32, 1>) {
+    let g = m.lock();
+}
+
+fn mk() -> fn(&sync.Mutex<u32, 1>) {
+    return take;
+}
+
+fn main() {
+    let m = sync.Mutex::<u32, 1>.new(0);
+    let g = m.lock();
+    io.print("relocking\n");
+    mk()(&m); //~ ERROR E1405
+    io.print("unreachable\n");
+}
