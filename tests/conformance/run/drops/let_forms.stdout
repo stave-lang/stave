@@ -1,0 +1,22 @@
+mk 1
+mk 2
+drop 2
+mk 3
+drop 3
+mk 4
+drop 4
+mk 5
+mk 6
+drop 5
+drop 6
+mk 7
+mk 8
+drop 8
+drop 7
+mk 9
+mk 10
+drop 9
+drop 10
+stmts
+end
+drop 1

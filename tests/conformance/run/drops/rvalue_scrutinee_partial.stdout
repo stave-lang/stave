@@ -1,0 +1,19 @@
+mk 1
+mk 2
+arm
+drop 1
+drop 2
+after
+zero
+next
+mk 20
+one
+drop 20
+next
+mk 30
+mk 31
+two
+drop 30
+drop 31
+next
+end

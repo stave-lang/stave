@@ -1,0 +1,9 @@
+mk 1
+mk 2
+drop 2
+drop 1
+mk 4
+mk 5
+drop 5
+drop 4
+end

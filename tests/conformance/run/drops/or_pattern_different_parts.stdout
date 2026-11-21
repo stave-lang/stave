@@ -1,0 +1,26 @@
+mk 1
+mk 2
+x
+drop 1
+after
+drop 2
+mk 11
+mk 12
+x
+drop 12
+after
+drop 11
+c
+after
+mk 41
+mk 42
+x
+drop 41
+drop 42
+mk 51
+mk 52
+x
+drop 52
+drop 51
+c
+end

@@ -300,6 +300,17 @@ impl FuncBuilder {
         v
     }
 
+    /// `store p, v` placed in `b0` right after the slots, whatever the current block: the
+    /// value slot `p` holds when the fn is entered.
+    pub fn entry_store(&mut self, p: impl Into<Operand>, v: impl Into<Operand>) {
+        let args = self.push_operands(&[p.into(), v.into()]);
+        let raw = RawInst { op: Op::Store, ty: None, result: None, args, site: self.site };
+        if let Some(b0) = self.blocks.first_mut() {
+            let at = self.nslots.min(b0.insts.len());
+            b0.insts.insert(at, raw);
+        }
+    }
+
     pub fn load(&mut self, ty: TypeId, p: impl Into<Operand>) -> Value {
         self.op(Op::Load, ty, &[p.into()])
     }

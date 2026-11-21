@@ -86,6 +86,28 @@ The caller rule (every view the target reaches holds all the clause's sources fr
 applies also when the target holds no borrow at this instance (`Slot<u32>`): the sources still
 take the store.
 
+## §3 Drops
+
+Every value with drop glue is dropped exactly once, on every path, by the owner that holds it
+when that owner ends.
+
+- **Parts.** Moving a field out of a local or a temporary (`let x = p.a;`, `mk().a`, a pattern
+  that binds some fields by value: `P.{ a, b: _ }`, `(a, _)`, `E.Two(a, _)`) moves that field
+  only. The owner still drops its other fields, in declaration order, where it would have been
+  dropped as a whole. Assigning the field again (`p.a = v;`) drops the old value only on the
+  paths where it is still there.
+- **Temporaries.** A temporary with drop glue is dropped at the end of its statement, the last
+  made first, and only if the operand that makes it ran (the right side of `&&` / `||`, a branch
+  of a value `if`). These are statements of their own for this rule: the condition of an `if` or
+  `while` (each evaluation), a `match` guard, and the body of an arm of a value `match`. The
+  temporaries of a `match` scrutinee and of a `for` header belong to the `match` / `for`
+  statement: they live across the arms and the loop, and are dropped once after it.
+- **Unbound parts.** What a pattern does not bind of an rvalue (`let (a, _) = mk();`, a
+  scrutinee that is a call) is a temporary of the statement. `let _ = e;` drops `e` at the end
+  of the statement.
+- **Leaving early.** `return`, `break`, `continue`, and `?` drop the temporaries of the
+  statements they leave, then the locals of the scopes they leave.
+
 ## §3 Must-consume
 
 A pending-operation type of std stands for work that is still running (device work, a queued

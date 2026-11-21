@@ -1,0 +1,26 @@
+//~ STDOUT scrutinee_temp_borrow.stdout
+// The scrutinee's temporary lives to the end of the `match`: a borrow of it bound by an arm is
+// valid after other statements of the arm. A temporary of a value `match` scrutinee or of a
+// `for` header is freed once.
+import std.io;
+import std.string;
+import std.vec;
+fn mk() -> string.String { return string.String.from_str("hello"); }
+fn mkv() -> vec.Vec<u32> { let mut v = vec.Vec::<u32>.new(); v.push(41); return v; }
+fn main() -> i32 {
+    match mk().as_str() {
+        s => {
+            io.print("one\n");
+            let t = string.String.from_str("XXXXX");
+            io.print(s);
+            io.print("\n");
+        }
+    }
+    let n: u32 = match mkv().len() { 1 => 5, _ => 6 };
+    io.print(f"{n}\n");
+    for i in 0..mkv().len() + 1 {
+        let w = mkv();
+        io.print("it\n");
+    }
+    return 0;
+}

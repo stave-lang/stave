@@ -231,8 +231,9 @@ fn block_exit() -> u32 {
   `&(a + 1)`, the receiver in `f().m()`) first evaluates its operands, which may read the
   allocation of the evaluation before; then that allocation ends and a new one begins. A
   temporary whose type has drop glue is dropped and ends with its statement, in reverse order
-  of creation. Any other one stays until the next evaluation or the frame exit: a borrow of it
-  may be used after its statement.
+  of creation; the condition of an `if` or `while`, a `match` guard, and the body of an arm of a
+  value `match` are statements of their own here (lang-details.md "Drops"). Any other one stays
+  until the next evaluation or the frame exit: a borrow of it may be used after its statement.
 ```stave
 fn next(i: u32) -> u32 { return i + 1; }
 fn temp_loop() -> u32 {

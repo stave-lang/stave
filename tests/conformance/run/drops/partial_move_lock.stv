@@ -1,0 +1,19 @@
+//~ STDOUT partial_move_lock.stdout
+// One guard moved out of a struct of two: the other guard is dropped with the struct, so its
+// lock is free again after the call.
+import std.io;
+import std.sync;
+view struct Two { pub a: sync.MutexGuard<u32, 1>, pub b: sync.MutexGuard<u32, 2> }
+fn take(m1: &sync.Mutex<u32, 1>, m2: &sync.Mutex<u32, 2>) {
+    let t = Two.{ a: m1.lock(), b: m2.lock() };
+    let x = t.a;
+}
+fn main() -> i32 {
+    let m1 = sync.Mutex::<u32, 1>.new(0);
+    let m2 = sync.Mutex::<u32, 2>.new(0);
+    take(&m1, &m2);
+    io.print("taken\n");
+    let g = m2.lock();
+    io.print("locked again\n");
+    return 0;
+}

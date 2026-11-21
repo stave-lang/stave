@@ -614,7 +614,7 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 return finish_job(cx, out, name);
             }
             let Some(tb) = body else { return empty(None) };
-            let mut flagged: FxHashSet<u32> = FxHashSet::default();
+            let mut flagged: FxHashSet<crate::lower_fn::FlagKey> = FxHashSet::default();
             for _ in 0..64 {
                 let mut cx = FnCx::new(g, icx, path.clone());
                 cx.has_body = true;
@@ -633,7 +633,8 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));
                 let mut out = cx.lower_body(decl.node, &ps, ret);
                 out.name_off = name;
-                let new: Vec<u32> = cx.need_flag.iter().copied().filter(|n| !flagged.contains(n)).collect();
+                let new: Vec<crate::lower_fn::FlagKey> =
+                    cx.need_flag.iter().filter(|n| !flagged.contains(*n)).cloned().collect();
                 if new.is_empty() || cx.err.is_some() {
                     return finish_job(cx, out, name);
                 }

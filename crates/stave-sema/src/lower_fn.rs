@@ -12,10 +12,17 @@
 //! the construct's own leading params (an expression value, a `for` counter). Dead params are
 //! removed afterwards ([`crate::lower_post`]), which leaves exactly the live ones.
 //!
-//! **Drops.** A droppable local is dropped at the end of its scope (reverse declaration order),
-//! at `break`/`continue`/`return` for the scopes they leave, and before it is overwritten, unless
-//! it was moved out. The moved state is tracked statically; when two paths disagree at a join,
-//! the job is lowered again with a dynamic drop flag (a hidden `bool` SSA local) for that local.
+//! **Owners and drops.** An owner is a droppable local or a temporary with drop glue; temporaries
+//! are numbered after the locals, as they are made. The environment holds, per owner, which of
+//! its parts hold a value ([`Init`]): a by-value read of a place moves out the part at its field
+//! path, a binding or an assignment brings it back. The state flows along every edge the
+//! lowering builds: a join merges the states of its edges, and a part that holds a value on one
+//! edge only makes the job be lowered again with a dynamic drop flag for that part (a hidden
+//! `bool`: an SSA local for a local, a slot cleared at entry for a temporary). An owner is
+//! dropped where it ends: a local at the end of its scope (reverse declaration order), a
+//! temporary at the end of its statement (reverse creation order), both on every `break`,
+//! `continue`, `return`, and `?` that leaves them; a place is dropped before it is overwritten.
+//! A drop runs on the parts that still hold a value, and on nothing else.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_ir::ir::ConstId;
@@ -161,22 +168,163 @@ pub(crate) struct LocalInfo {
     /// Lives in a slot.
     pub mem: bool,
     pub drop: bool,
-    /// The hidden flag local of a flagged droppable local.
-    pub flag: Option<usize>,
+    /// The dynamic drop flags of an owner: the part's path and its flag.
+    pub flags: Vec<(Path, Flag)>,
+    /// A temporary.
+    pub temp: Option<Temp>,
 }
 
-/// Static moved state of a droppable local.
+/// One step of a path into a value: a field of a struct or tuple, or field `.1` of variant `.0`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum Step {
+    Field(u32),
+    Variant(u32, u32),
+}
+
+pub(crate) type Path = Vec<Step>;
+
+/// Which parts of an owner hold a value.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Init {
+    /// None: not bound yet, moved out, or dropped.
+    #[default]
+    Gone,
+    /// All.
+    Full,
+    /// All but the parts at these paths (sorted; none is empty or a prefix of another).
+    Part(Vec<Path>),
+}
+
+impl Init {
+    /// Whether exactly the part at `q` was moved out.
+    pub fn has(&self, q: &[Step]) -> bool {
+        match self {
+            Init::Gone => q.is_empty(),
+            Init::Full => false,
+            Init::Part(ps) => ps.iter().any(|p| p == q),
+        }
+    }
+
+    /// Whether the part at `q`, or a part around it, was moved out.
+    pub fn covers(&self, q: &[Step]) -> bool {
+        match self {
+            Init::Gone => true,
+            Init::Full => false,
+            Init::Part(ps) => ps.iter().any(|p| q.starts_with(p)),
+        }
+    }
+
+    /// Whether a part strictly inside the part at `q` was moved out.
+    pub fn inside(&self, q: &[Step]) -> bool {
+        match self {
+            Init::Part(ps) => ps.iter().any(|p| p.len() > q.len() && p.starts_with(q)),
+            _ => false,
+        }
+    }
+
+    /// The part at `p` is moved out.
+    pub fn take(&mut self, p: &[Step]) {
+        if p.is_empty() {
+            *self = Init::Gone;
+            return;
+        }
+        match self {
+            Init::Gone => {}
+            Init::Full => *self = Init::Part(vec![p.to_vec()]),
+            Init::Part(ps) => {
+                if ps.iter().any(|x| p.starts_with(x)) {
+                    return;
+                }
+                ps.retain(|x| !x.starts_with(p));
+                ps.push(p.to_vec());
+                ps.sort_unstable();
+            }
+        }
+    }
+
+    /// The part at `p` holds a value again. A part of a value moved out as a whole stays moved.
+    pub fn put(&mut self, p: &[Step]) {
+        if p.is_empty() {
+            *self = Init::Full;
+            return;
+        }
+        if let Init::Part(ps) = self {
+            ps.retain(|x| !x.starts_with(p));
+            if ps.is_empty() {
+                *self = Init::Full;
+            }
+        }
+    }
+
+    /// The moved-out paths (`Gone`: the empty path).
+    pub fn paths(&self) -> Vec<Path> {
+        match self {
+            Init::Gone => vec![Vec::new()],
+            Init::Full => Vec::new(),
+            Init::Part(ps) => ps.clone(),
+        }
+    }
+
+    pub fn of_paths(mut ps: Vec<Path>) -> Init {
+        if ps.is_empty() {
+            return Init::Full;
+        }
+        if ps.iter().any(|p| p.is_empty()) {
+            return Init::Gone;
+        }
+        ps.sort_unstable();
+        Init::Part(ps)
+    }
+}
+
+/// A dynamic drop flag: set while its part holds a value.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Flag {
+    /// A hidden `bool` local.
+    Ssa(usize),
+    /// A `bool` slot, cleared at fn entry.
+    Mem(Operand),
+}
+
+/// Where a temporary's value is.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Home {
+    Slot(Operand),
+    /// An SSA value, put into a slot only where a part of it is dropped.
+    Val(Operand),
+}
+
+/// What ends a temporary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MState {
-    Uninit,
-    Init,
-    Moved,
+pub(crate) enum Ends {
+    /// Its statement: the index in [`FnState::temps`].
+    Stmt(usize),
+    /// The scope with this index in [`FnState::scopes`].
+    Scope(usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Temp {
+    /// Creation number in the job: the same in every lowering of it.
+    pub seq: u32,
+    pub home: Home,
+    pub ends: Ends,
+}
+
+/// A part that needs a dynamic drop flag: the owner (a local's binding node, or a temporary's
+/// creation number) and the path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct FlagKey {
+    pub temp: bool,
+    pub id: u32,
+    pub path: Path,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Env {
     pub vals: Vec<Option<Operand>>,
-    pub st: Vec<MState>,
+    /// Per owner. Shorter than the owner list when temporaries were made since: those are `Gone`.
+    pub st: Vec<Init>,
 }
 
 /// A join block under construction.
@@ -186,10 +334,14 @@ pub(crate) struct Join {
     pub prefix: Vec<Value>,
     pub locals: Vec<usize>,
     pub params: Vec<Value>,
-    /// Merged moved states of the edges so far (`None`: no edge yet).
-    pub st: Option<Vec<MState>>,
+    /// Merged owner states of the edges so far (`None`: no edge yet).
+    pub st: Option<Vec<Init>>,
     /// Locals declared before the construct (their states merge).
     pub outer: usize,
+    /// The statements and scopes open when the join was made: their temporaries outlive the
+    /// construct (their states merge).
+    pub stmts: usize,
+    pub scopes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -217,8 +369,16 @@ pub(crate) struct FnState {
     pub scopes: Vec<Vec<usize>>,
     pub loops: Vec<LoopCx>,
     pub joins: Vec<Join>,
-    /// Statement temporaries to drop at the end of the statement: (pointer, type).
-    pub temps: Vec<(Operand, Ty)>,
+    /// The temporaries of the open statements, in creation order.
+    pub temps: Vec<usize>,
+    /// Per open statement (or condition, guard, value arm, clause): where its temporaries start
+    /// in `temps`.
+    pub stmts: Vec<usize>,
+    /// Per scope depth: the length of `stmts` when the scope at that depth was last pushed.
+    pub scope_stmts: Vec<usize>,
+    /// The owners from this number on are this fn's own temporaries; those below belong to the
+    /// fns around a closure body (and are the locals).
+    pub own_temps: usize,
     pub ret: Ty,
     pub site_consts: Vec<ConstId>,
     /// The values of the int constants made by [`FnCx::int`], by constant index.
@@ -308,10 +468,14 @@ pub(crate) struct FnCx<'a> {
     site_map: FxHashMap<u32, u32>,
     pub drop_memo: FxHashMap<Ty, bool>,
     subst_memo: FxHashMap<Ty, Ty>,
-    /// Binding nodes of locals that get a dynamic drop flag.
-    pub flagged: FxHashSet<u32>,
-    /// Discovered during this attempt: locals that need a flag.
-    pub need_flag: Vec<u32>,
+    /// The parts that get a dynamic drop flag.
+    pub flagged: FxHashSet<FlagKey>,
+    /// Discovered during this attempt: parts that need a flag.
+    pub need_flag: Vec<FlagKey>,
+    /// The flagged paths per temporary (by creation number).
+    pub temp_flags: FxHashMap<u32, Vec<Path>>,
+    /// Temporaries made so far.
+    pub temp_seq: u32,
     pub err: Option<LowerError>,
     pub f: FnState,
     pub outs: Vec<FnOut>,
@@ -361,6 +525,8 @@ impl<'a> FnCx<'a> {
             subst_memo: FxHashMap::default(),
             flagged: FxHashSet::default(),
             need_flag: Vec::new(),
+            temp_flags: FxHashMap::default(),
+            temp_seq: 0,
             err: None,
             f: FnState::new(&[], TypeId::NONE),
             outs: Vec::new(),
@@ -686,6 +852,15 @@ impl<'a> FnCx<'a> {
 
     pub fn local_place(&mut self, l: usize) -> Place {
         let ty = self.locals[l].ty;
+        if let Some(t) = self.locals[l].temp {
+            return match t.home {
+                Home::Slot(p) => {
+                    let pt = self.t_ref(true, ty);
+                    Place { base: Base::Mem(p, pt), proj: Vec::new(), ty, root: Some(l) }
+                }
+                Home::Val(v) => Place { base: Base::Val(v, ty), proj: Vec::new(), ty, root: Some(l) },
+            };
+        }
         match self.f.slot.get(l).copied().flatten() {
             Some(p) => {
                 let pt = self.t_ref(true, ty);
@@ -711,28 +886,222 @@ impl<'a> FnCx<'a> {
             }
         }
         if self.locals[l].drop {
-            if let Some(fl) = self.locals[l].flag {
-                let one = self.int(1);
-                self.f.env.vals[fl] = Some(one);
-            }
-            self.f.env.st[l] = MState::Init;
+            self.set_flags(l, &[], true);
+            self.set_st(l, Init::Full);
             if let Some(s) = self.f.scopes.last_mut() {
                 s.push(l);
             }
         }
     }
 
-    /// Marks the root local of a place read by value as moved (droppable parts only).
-    pub fn note_move(&mut self, root: Option<usize>, ty: Ty) {
-        let Some(l) = root else { return };
-        if !self.locals[l].drop || !self.needs_drop(ty) {
+    // ---------- owners ----------
+
+    /// Which parts of owner `l` hold a value.
+    pub fn st(&self, l: usize) -> &Init {
+        self.f.env.st.get(l).unwrap_or(&Init::Gone)
+    }
+
+    pub fn set_st(&mut self, l: usize, s: Init) {
+        if self.f.env.st.len() <= l {
+            self.f.env.st.resize(l + 1, Init::Gone);
+        }
+        self.f.env.st[l] = s;
+    }
+
+    /// The path of the part a place denotes: its steps up to the first element step (an element
+    /// stands for its whole array), and whether no element step cut it.
+    pub fn part_path(proj: &[Proj]) -> (Path, bool) {
+        let mut path = Vec::with_capacity(proj.len());
+        for pr in proj {
+            match pr {
+                Proj::Field(i, _) => path.push(Step::Field(*i)),
+                Proj::EnumField(v, f, _) => path.push(Step::Variant(*v, *f)),
+                Proj::Elem(..) => return (path, false),
+            }
+        }
+        (path, true)
+    }
+
+    /// The type of the part at `path` of a value of type `t`.
+    fn part_ty(&mut self, mut t: Ty, path: &[Step]) -> Ty {
+        for st in path {
+            let (v, i) = match *st {
+                Step::Field(i) => (0, i),
+                Step::Variant(v, i) => (v, i),
+            };
+            t = match self.kind(t) {
+                TypeKind::Tuple(ts) => ts.get(i as usize).copied().unwrap_or(TypeId::NONE),
+                _ => self
+                    .adt_fields(t)
+                    .and_then(|vs| vs.get(v as usize).and_then(|fs| fs.get(i as usize).copied()))
+                    .unwrap_or(TypeId::NONE),
+            };
+        }
+        t
+    }
+
+    /// Sets the flags of owner `l` for the parts at or inside `path`.
+    fn set_flags(&mut self, l: usize, path: &[Step], on: bool) {
+        for k in 0..self.locals[l].flags.len() {
+            if !self.locals[l].flags[k].0.starts_with(path) {
+                continue;
+            }
+            let v = self.int(i128::from(on));
+            match self.locals[l].flags[k].1 {
+                Flag::Ssa(fl) => self.f.env.vals[fl] = Some(v),
+                Flag::Mem(p) => {
+                    if self.open() {
+                        self.f.b.store(p, v);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The flag of the part at `path` of owner `l`, if it has one.
+    fn flag_at(&self, l: usize, path: &[Step]) -> Option<Flag> {
+        self.locals[l].flags.iter().find(|f| f.0 == path).map(|f| f.1)
+    }
+
+    /// The value of a flag (`None`: an SSA flag whose local is not bound here).
+    fn flag_val(&mut self, f: Flag) -> Option<Operand> {
+        match f {
+            Flag::Ssa(fl) => self.f.env.vals.get(fl).copied().flatten(),
+            Flag::Mem(p) => {
+                let bt = self.t_bool();
+                Some(Operand::Value(self.f.b.load(Self::ir(bt), p)))
+            }
+        }
+    }
+
+    /// The part at `path` of owner `l` is moved out. An enum whose variant has no droppable
+    /// field left holds nothing to drop: it counts as moved out itself.
+    pub fn mark_moved(&mut self, l: usize, path: &[Step]) {
+        let mut path = path.to_vec();
+        let mut st = self.st(l).clone();
+        if !st.covers(&path) {
+            st.take(&path);
+            let root = self.locals[l].ty;
+            while let Some(&last) = path.last()
+                && let Step::Variant(v, _) = last
+            {
+                let n = path.len() - 1;
+                let et = self.part_ty(root, &path[..n]);
+                let fields =
+                    self.adt_fields(et).and_then(|vs| vs.get(v as usize).cloned()).unwrap_or_default();
+                let mut all = true;
+                for (i, &ft) in fields.iter().enumerate() {
+                    path[n] = Step::Variant(v, i as u32);
+                    all &= !self.needs_drop(ft) || st.has(&path);
+                }
+                if !all {
+                    path[n] = last;
+                    break;
+                }
+                path.truncate(n);
+                st.take(&path);
+            }
+            self.set_st(l, st);
+        }
+        self.set_flags(l, &path, false);
+    }
+
+    /// A by-value read of place `p` moves its part out of the owner it is rooted at (droppable
+    /// parts only).
+    pub fn note_move(&mut self, p: &Place) {
+        let Some(l) = p.root else { return };
+        if !self.locals[l].drop || !self.needs_drop(p.ty) {
             return;
         }
-        if let Some(fl) = self.locals[l].flag {
-            let z = self.int(0);
-            self.f.env.vals[fl] = Some(z);
+        let (path, _) = Self::part_path(&p.proj);
+        self.mark_moved(l, &path);
+    }
+
+    /// A temporary that owns a value of droppable type `ty`: it ends with the innermost open
+    /// statement, or with the innermost scope when `scoped`.
+    pub fn new_temp(&mut self, ty: Ty, home: Home, scoped: bool) -> usize {
+        let seq = self.temp_seq;
+        self.temp_seq += 1;
+        let ends = if scoped {
+            Ends::Scope(self.f.scopes.len().saturating_sub(1))
+        } else {
+            Ends::Stmt(self.f.temps.len())
+        };
+        let mut flags: Vec<(Path, Flag)> = Vec::new();
+        for path in self.temp_flags.get(&seq).cloned().unwrap_or_default() {
+            let bt = self.t_bool();
+            let fs = self.new_slot(bt);
+            let (zero, one) = (self.int(0), self.int(1));
+            self.f.b.entry_store(fs, zero);
+            self.f.b.store(fs, one);
+            flags.push((path, Flag::Mem(fs)));
         }
-        self.f.env.st[l] = MState::Moved;
+        let l = self.locals.len();
+        self.locals.push(LocalInfo {
+            node: 0,
+            ty,
+            mem: true,
+            drop: true,
+            flags,
+            temp: Some(Temp { seq, home, ends }),
+        });
+        self.set_st(l, Init::Full);
+        match ends {
+            Ends::Scope(d) => {
+                if let Some(s) = self.f.scopes.get_mut(d) {
+                    s.push(l);
+                }
+            }
+            Ends::Stmt(_) => self.f.temps.push(l),
+        }
+        l
+    }
+
+    /// A temporary for rvalue `v` in a slot of its own: the place.
+    pub fn slot_temp(&mut self, v: Operand, t: Ty) -> Place {
+        let (s, st, l) = self.slot_temp_at(v, t);
+        Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: Some(l) }
+    }
+
+    /// [`FnCx::slot_temp`] as the slot, its pointer type, and the owner.
+    pub fn slot_temp_at(&mut self, v: Operand, t: Ty) -> (Operand, Ty, usize) {
+        let (s, st) = self.spill(v, t);
+        let l = self.new_temp(t, Home::Slot(s), false);
+        (s, st, l)
+    }
+
+    /// A temporary for rvalue `v`, read as the value it is: the place. With a dynamic flag the
+    /// value lives in a slot, since its drop is then not dominated by `v`.
+    pub fn value_temp(&mut self, v: Operand, t: Ty, scoped: bool) -> Place {
+        if self.temp_flags.contains_key(&self.temp_seq) {
+            let (s, st) = self.spill(v, t);
+            let l = self.new_temp(t, Home::Slot(s), scoped);
+            return Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: Some(l) };
+        }
+        let l = self.new_temp(t, Home::Val(v), scoped);
+        Place { base: Base::Val(v, t), proj: Vec::new(), ty: t, root: Some(l) }
+    }
+
+    /// Forgets the temporaries at the end of the owner list that have ended: their numbers are
+    /// used again, so the list stays as long as the owners alive at once.
+    fn trim_temps(&mut self) {
+        while self.locals.len() > self.f.own_temps
+            && let Some(li) = self.locals.last()
+        {
+            let Some(t) = li.temp else { break };
+            let l = self.locals.len() - 1;
+            let alive = match t.ends {
+                Ends::Stmt(i) => self.f.temps.get(i) == Some(&l),
+                Ends::Scope(d) => self.f.scopes.get(d).is_some_and(|s| s.contains(&l)),
+            };
+            if alive {
+                break;
+            }
+            self.locals.pop();
+            if let Some(s) = self.f.env.st.get_mut(l) {
+                *s = Init::Gone;
+            }
+        }
     }
 
     // ---------- joins ----------
@@ -753,17 +1122,28 @@ impl<'a> FnCx<'a> {
             }
         }
         // drop flags of droppable locals in scope
-        for li in &self.locals {
-            if let Some(fl) = li.flag
-                && li.node < lo
-                && self.f.env.vals.get(fl).is_some_and(|v| v.is_some())
-            {
-                out.push(fl);
-            }
-        }
+        out.extend(self.flag_locals(lo));
         out.sort_unstable();
         out.dedup();
         out.retain(|&l| l < self.locals.len());
+        out
+    }
+
+    /// The SSA drop flags, bound here, of the locals declared before node `lo`.
+    pub fn flag_locals(&self, lo: u32) -> Vec<usize> {
+        let mut out = Vec::new();
+        for li in &self.locals {
+            if li.node >= lo {
+                continue;
+            }
+            for (_, f) in &li.flags {
+                if let Flag::Ssa(fl) = *f
+                    && self.f.env.vals.get(fl).is_some_and(|v| v.is_some())
+                {
+                    out.push(fl);
+                }
+            }
+        }
         out
     }
 
@@ -771,14 +1151,15 @@ impl<'a> FnCx<'a> {
     pub fn join(&mut self, n: u32, prefix: &[Ty]) -> usize {
         let locals = self.assigned_in(n);
         let block = self.f.b.create_block();
-        let pre: Vec<Value> = prefix.iter().map(|&t| self.f.b.add_param(block, Self::ir(t))).collect();
+        let prefix: Vec<Value> = prefix.iter().map(|&t| self.f.b.add_param(block, Self::ir(t))).collect();
         let mut params = Vec::with_capacity(locals.len());
         for &l in &locals {
             let t = self.locals[l].ty;
             params.push(self.f.b.add_param(block, Self::ir(t)));
         }
         let outer = if self.has_body { self.icx.ast.descendants(n).start as usize } else { 0 };
-        self.f.joins.push(Join { block, prefix: pre, locals, params, st: None, outer });
+        let (stmts, scopes) = (self.f.stmts.len(), self.f.scopes.len());
+        self.f.joins.push(Join { block, prefix, locals, params, st: None, outer, stmts, scopes });
         self.f.joins.len() - 1
     }
 
@@ -796,29 +1177,64 @@ impl<'a> FnCx<'a> {
             };
             args.push(v);
         }
-        let outer = self.f.joins[j].outer;
-        let st = self.f.env.st.clone();
+        let st = self.edge_state(j);
         match self.f.joins[j].st.take() {
             None => self.f.joins[j].st = Some(st),
-            Some(prev) => {
-                let mut merged = prev.clone();
-                for (l, (a, b)) in prev.iter().zip(&st).enumerate() {
-                    if a != b {
-                        if (self.locals[l].node as usize) < outer
-                            && self.locals[l].drop
-                            && self.locals[l].flag.is_none()
-                            && *a != MState::Uninit
-                            && *b != MState::Uninit
-                        {
-                            self.need_flag.push(self.locals[l].node);
-                        }
-                        merged[l] = MState::Moved;
-                    }
-                }
+            Some(mut merged) => {
+                self.merge_states(&mut merged, &st);
                 self.f.joins[j].st = Some(merged);
             }
         }
         args
+    }
+
+    /// Merges the owner states `st` of one more edge into `merged`. A part moved out on one
+    /// edge only is told by a flag, asked for here if it has none; `merged` keeps the parts
+    /// moved out on every edge.
+    pub fn merge_states(&mut self, merged: &mut Vec<Init>, st: &[Init]) {
+        if merged.len() < st.len() {
+            merged.resize(st.len(), Init::Gone);
+        }
+        for (l, b) in st.iter().enumerate() {
+            if merged[l] == *b || l >= self.locals.len() {
+                continue;
+            }
+            let (pa, pb) = (merged[l].paths(), b.paths());
+            for q in pa.iter().chain(&pb) {
+                if pa.contains(q) && pb.contains(q) || self.flag_at(l, q).is_some() {
+                    continue;
+                }
+                let li = &self.locals[l];
+                let key = match li.temp {
+                    Some(t) => FlagKey { temp: true, id: t.seq, path: q.clone() },
+                    None => FlagKey { temp: false, id: li.node, path: q.clone() },
+                };
+                self.need_flag.push(key);
+            }
+            merged[l] = Init::of_paths(pa.into_iter().filter(|q| pb.contains(q)).collect());
+        }
+    }
+
+    /// The owner states an edge to join `j` carries from here: those of the owners that outlive
+    /// the construct (a local declared before it, a temporary of a statement or scope that was
+    /// open when the join was made); every other owner has ended.
+    fn edge_state(&self, j: usize) -> Vec<Init> {
+        let jn = &self.f.joins[j];
+        let stmt_temps = self.f.stmts.get(jn.stmts).copied().unwrap_or(self.f.temps.len());
+        let mut st = Vec::with_capacity(self.locals.len());
+        for (l, li) in self.locals.iter().enumerate() {
+            let outlives = li.drop
+                && match li.temp {
+                    Some(_) if l < self.f.own_temps => false,
+                    Some(t) => match t.ends {
+                        Ends::Stmt(i) => i < stmt_temps,
+                        Ends::Scope(d) => d < jn.scopes,
+                    },
+                    None => (li.node as usize) < jn.outer,
+                };
+            st.push(if outlives { self.st(l).clone() } else { Init::Gone });
+        }
+        st
     }
 
     pub fn br_join(&mut self, j: usize, prefix: &[Operand]) {
@@ -842,8 +1258,12 @@ impl<'a> FnCx<'a> {
         }
         let outer = jn.outer;
         for (l, li) in self.locals.iter().enumerate() {
-            if (li.node as usize) >= outer && li.drop {
-                self.f.env.st[l] = MState::Uninit;
+            if (li.node as usize) >= outer
+                && li.drop
+                && li.temp.is_none()
+                && let Some(s) = self.f.env.st.get_mut(l)
+            {
+                *s = Init::Gone;
             }
         }
     }
@@ -871,14 +1291,10 @@ impl<'a> FnCx<'a> {
         Place { base: Base::Mem(v, pt), proj: Vec::new(), ty: inner, root: None }
     }
 
-    /// Spills an rvalue into a fresh temporary slot (dropped at the end of the statement when
-    /// `own` and droppable).
-    pub fn spill(&mut self, v: Operand, t: Ty, own: bool) -> (Operand, Ty) {
+    /// Copies an rvalue into a fresh slot, which owns nothing.
+    pub fn spill(&mut self, v: Operand, t: Ty) -> (Operand, Ty) {
         let p = self.new_slot(t);
         self.f.b.store(p, v);
-        if own && self.needs_drop(t) {
-            self.f.temps.push((p, t));
-        }
         let pt = self.t_ref(true, t);
         (p, pt)
     }
@@ -893,7 +1309,7 @@ impl<'a> FnCx<'a> {
         let (mut cur, mut cur_t) = match &p.base {
             Base::Mem(v, t) => (*v, *t),
             Base::Val(v, t) => {
-                let (s, st) = self.spill(*v, *t, false);
+                let (s, st) = self.spill(*v, *t);
                 (s, st)
             }
             Base::Local(l) => {
@@ -901,7 +1317,7 @@ impl<'a> FnCx<'a> {
                 // an SSA local has no address: copy it (read-only uses)
                 let v = self.f.env.vals.get(l).copied().flatten()?;
                 let t = self.locals[l].ty;
-                self.spill(v, t, false)
+                self.spill(v, t)
             }
         };
         let n = p.proj.len();
@@ -954,10 +1370,10 @@ impl<'a> FnCx<'a> {
         Some((cur, cur_t))
     }
 
-    /// Reads a place by value (a move of its droppable root).
+    /// Reads a place by value (a move of its part out of its owner, when droppable).
     pub fn read(&mut self, p: &Place) -> Option<Operand> {
         let r = self.peek(p);
-        self.note_move(p.root, p.ty);
+        self.note_move(p);
         r
     }
 
@@ -1067,38 +1483,82 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// `place = v`: drops the old value when the place holds an initialized droppable value.
+    /// `place = v`: drops what the place still holds of its old value, then writes it. A place
+    /// rooted at an owner holds a value again afterwards.
     pub fn assign(&mut self, p: &Place, v: Operand) {
-        let whole_local = p.proj.is_empty() && p.root.is_some();
-        if whole_local && let Some(l) = p.root {
-            if self.locals[l].drop {
-                if let Some(fl) = self.locals[l].flag {
-                    let f = self.f.env.vals[fl];
-                    if let Some(f) = f {
-                        self.drop_if(f, p.clone());
+        match p.root {
+            Some(l) if self.locals[l].drop => {
+                let (path, exact) = Self::part_path(&p.proj);
+                self.drop_old(l, p, &path, exact);
+                self.write(p, v);
+                if exact {
+                    let mut st = self.st(l).clone();
+                    st.put(&path);
+                    self.set_st(l, st);
+                    if !self.st(l).covers(&path) {
+                        self.set_flags(l, &path, true);
                     }
-                    let one = self.int(1);
-                    self.f.env.vals[fl] = Some(one);
-                } else if self.f.env.st[l] == MState::Init {
-                    self.drop_place(p);
                 }
-                self.f.env.st[l] = MState::Init;
             }
-            self.write(p, v);
+            Some(_) => self.write(p, v),
+            None => {
+                self.drop_place(p);
+                self.write(p, v);
+            }
+        }
+    }
+
+    /// Drops the old value of place `p`, the part at `path` of owner `l` (`exact`) or an element
+    /// inside that part, before it is overwritten: nothing when a part around it was moved out
+    /// (on a flag: tested), else what the place still holds.
+    fn drop_old(&mut self, l: usize, p: &Place, path: &[Step], exact: bool) {
+        if !self.needs_drop(p.ty) || !self.open() {
             return;
         }
-        if self.needs_drop(p.ty) {
-            let init = match p.root {
-                Some(l) => {
-                    self.f.env.st.get(l).copied() == Some(MState::Init) || self.locals[l].flag.is_some()
+        let around = if exact { path.len() } else { path.len() + 1 };
+        let mut cont: Option<Block> = None;
+        for k in 0..around {
+            match self.flag_at(l, &path[..k]) {
+                Some(f) => {
+                    let Some(fv) = self.flag_val(f) else { return };
+                    match self.kval(fv) {
+                        Some(0) => {
+                            self.end_tests(cont);
+                            return;
+                        }
+                        Some(_) => {}
+                        None => {
+                            let yes = self.f.b.create_block();
+                            let c = *cont.get_or_insert_with(|| self.f.b.create_block());
+                            self.f.b.cbr(fv, yes, &[], c, &[]);
+                            self.f.b.switch_to(yes);
+                        }
+                    }
                 }
-                None => true,
-            };
-            if init {
-                self.drop_place(p);
+                None => {
+                    if self.st(l).has(&path[..k]) {
+                        self.end_tests(cont);
+                        return;
+                    }
+                }
             }
         }
-        self.write(p, v);
+        if exact {
+            self.drop_rest(l, p, &mut path.to_vec());
+        } else {
+            self.drop_place(p);
+        }
+        self.end_tests(cont);
+    }
+
+    /// Continues in `cont`, the block after a chain of flag tests (if there was a test).
+    fn end_tests(&mut self, cont: Option<Block>) {
+        if let Some(c) = cont {
+            if self.open() {
+                self.f.b.br(c, &[]);
+            }
+            self.f.b.switch_to(c);
+        }
     }
 
     // ---------- drops ----------
@@ -1138,36 +1598,184 @@ impl<'a> FnCx<'a> {
         self.f.b.call(f, None, &[a]);
     }
 
-    /// Drops `p` if the flag value `flag` is set.
-    pub fn drop_if(&mut self, flag: Operand, p: Place) {
-        let yes = self.f.b.create_block();
-        let cont = self.f.b.create_block();
-        self.f.b.cbr(flag, yes, &[], cont, &[]);
-        self.f.b.switch_to(yes);
-        self.drop_place(&p);
-        self.f.b.br(cont, &[]);
-        self.f.b.switch_to(cont);
-    }
-
-    /// Drops local `l` at a scope exit (if initialized).
-    pub fn drop_local(&mut self, l: usize) {
+    /// Drops what owner `l` still holds, where it ends (its state is kept: the caller knows
+    /// whether the owner is left on this path only).
+    pub fn drop_owner(&mut self, l: usize) {
         if !self.locals[l].drop || !self.open() {
             return;
         }
-        let p = self.local_place(l);
-        if let Some(fl) = self.locals[l].flag {
-            let Some(f) = self.f.env.vals.get(fl).copied().flatten() else { return };
-            if self.kval(f) == Some(0) {
-                return;
-            }
-            if self.kval(f) == Some(1) {
-                self.drop_place(&p);
-                return;
-            }
-            self.drop_if(f, p);
-        } else if self.f.env.st[l] == MState::Init {
-            self.drop_place(&p);
+        if self.locals[l].flags.is_empty() && *self.st(l) == Init::Gone {
+            return;
         }
+        let p = match self.local_place(l) {
+            // the parts are dropped in memory
+            Place { base: Base::Val(v, t), .. } => {
+                if !self.holds(l, t, &mut Vec::new()) {
+                    return;
+                }
+                let (s, st) = self.spill(v, t);
+                Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: Some(l) }
+            }
+            p => p,
+        };
+        self.drop_rest(l, &p, &mut Vec::new());
+        // a temporary's flag says "made and not dropped" each time its statement runs
+        if let Some(Flag::Mem(fs)) = self.flag_at(l, &[])
+            && self.open()
+        {
+            let zero = self.int(0);
+            self.f.b.store(fs, zero);
+        }
+    }
+
+    /// Whether the part at `path` (of type `t`) of owner `l`, which has no flags, still holds a
+    /// droppable value.
+    fn holds(&mut self, l: usize, t: Ty, path: &mut Path) -> bool {
+        if !self.needs_drop(t) || self.st(l).has(path) {
+            return false;
+        }
+        if !self.st(l).inside(path) {
+            return true;
+        }
+        let (variants, is_enum) = self.variants(t);
+        let n = path.len();
+        for (v, fs) in variants.iter().enumerate() {
+            for (i, &ft) in fs.iter().enumerate() {
+                path.push(if is_enum { Step::Variant(v as u32, i as u32) } else { Step::Field(i as u32) });
+                let h = self.holds(l, ft, path);
+                path.truncate(n);
+                if h {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// The field types of `t` per variant (a struct or tuple: one), and whether `t` is an enum.
+    fn variants(&mut self, t: Ty) -> (Vec<Vec<Ty>>, bool) {
+        match self.kind(t) {
+            TypeKind::Tuple(ts) => (vec![ts.to_vec()], false),
+            TypeKind::Adt { def, .. } => {
+                let is_enum = self.g.sigs.adt(def).is_some_and(|a| a.is_enum);
+                (self.adt_fields(t).unwrap_or_default(), is_enum)
+            }
+            _ => (Vec::new(), false),
+        }
+    }
+
+    /// Drops what the part at `path` of owner `l`, the place `p`, still holds. No part around
+    /// it is moved out. A flag of the part decides when it has one, else the static state.
+    fn drop_rest(&mut self, l: usize, p: &Place, path: &mut Path) {
+        if !self.needs_drop(p.ty) || !self.open() {
+            return;
+        }
+        match self.flag_at(l, path) {
+            Some(f) => {
+                let Some(fv) = self.flag_val(f) else { return };
+                match self.kval(fv) {
+                    Some(0) => {}
+                    Some(_) => self.drop_held(l, p, path),
+                    None => {
+                        let yes = self.f.b.create_block();
+                        let cont = self.f.b.create_block();
+                        self.f.b.cbr(fv, yes, &[], cont, &[]);
+                        self.f.b.switch_to(yes);
+                        self.drop_held(l, p, path);
+                        if self.open() {
+                            self.f.b.br(cont, &[]);
+                        }
+                        self.f.b.switch_to(cont);
+                    }
+                }
+            }
+            None => {
+                if !self.st(l).has(path) {
+                    self.drop_held(l, p, path);
+                }
+            }
+        }
+    }
+
+    /// Drops the part at `path` of owner `l`, which holds a value: as a whole when nothing
+    /// inside it is moved out or flagged, else field by field (an enum: by its variant). The
+    /// `Drop` impl of a type with a part moved out does not run.
+    fn drop_held(&mut self, l: usize, p: &Place, path: &mut Path) {
+        let inside = self.st(l).inside(path)
+            || self.locals[l].flags.iter().any(|f| f.0.len() > path.len() && f.0.starts_with(path));
+        if !inside {
+            self.drop_place(p);
+            return;
+        }
+        let (variants, is_enum) = self.variants(p.ty);
+        if !is_enum {
+            let Some(fields) = variants.into_iter().next() else {
+                self.drop_place(p);
+                return;
+            };
+            for (i, ft) in fields.into_iter().enumerate() {
+                let mut fp = p.clone();
+                fp.proj.push(Proj::Field(i as u32, ft));
+                fp.ty = ft;
+                path.push(Step::Field(i as u32));
+                self.drop_rest(l, &fp, path);
+                path.pop();
+            }
+            return;
+        }
+        // the variants with a part moved out or flagged, each in a block of its own; any
+        // other variant is dropped as a whole
+        let n = path.len();
+        let touched = |q: &Path, v: usize| {
+            q.len() > n && q.starts_with(path) && matches!(q[n], Step::Variant(x, _) if x as usize == v)
+        };
+        let mut hit: Vec<usize> = Vec::new();
+        for v in 0..variants.len() {
+            let st = self.st(l);
+            let moved = matches!(st, Init::Part(ps) if ps.iter().any(|q| touched(q, v)));
+            if moved || self.locals[l].flags.iter().any(|f| touched(&f.0, v)) {
+                hit.push(v);
+            }
+        }
+        let mut rest = false;
+        for (v, fs) in variants.iter().enumerate() {
+            if !hit.contains(&v) {
+                for &ft in fs {
+                    rest |= self.needs_drop(ft);
+                }
+            }
+        }
+        let Some(ev) = self.peek(p) else { return };
+        let u32t = self.t_u32();
+        let tag = self.op1(Op::EnumTag, u32t, ev);
+        let blocks: Vec<Block> = hit.iter().map(|_| self.f.b.create_block()).collect();
+        let other = self.f.b.create_block();
+        let cont = self.f.b.create_block();
+        let cases: Vec<(i128, Block, &[Operand])> =
+            hit.iter().zip(&blocks).map(|(&v, &b)| (v as i128, b, &[][..])).collect();
+        self.f.b.switch(tag, &cases, other, &[]);
+        for (&v, &b) in hit.iter().zip(&blocks) {
+            self.f.b.switch_to(b);
+            for (i, &ft) in variants[v].iter().enumerate() {
+                let mut fp = p.clone();
+                fp.proj.push(Proj::EnumField(v as u32, i as u32, ft));
+                fp.ty = ft;
+                path.push(Step::Variant(v as u32, i as u32));
+                self.drop_rest(l, &fp, path);
+                path.pop();
+            }
+            if self.open() {
+                self.f.b.br(cont, &[]);
+            }
+        }
+        self.f.b.switch_to(other);
+        if rest {
+            self.drop_place(p);
+        }
+        if self.open() {
+            self.f.b.br(cont, &[]);
+        }
+        self.f.b.switch_to(cont);
     }
 
     /// Drops the droppable locals of scopes `from..` (innermost first), keeping their states.
@@ -1187,12 +1795,15 @@ impl<'a> FnCx<'a> {
             }
             let ls = self.f.scopes[s].clone();
             for &l in ls.iter().rev() {
-                self.drop_local(l);
+                self.drop_owner(l);
             }
         }
     }
 
     pub fn push_scope(&mut self) {
+        let d = self.f.scopes.len();
+        self.f.scope_stmts.truncate(d);
+        self.f.scope_stmts.push(self.f.stmts.len());
         self.f.scopes.push(Vec::new());
     }
 
@@ -1213,9 +1824,10 @@ impl<'a> FnCx<'a> {
         }
         let Some(ls) = self.f.scopes.pop() else { return };
         for &l in ls.iter().rev() {
-            self.drop_local(l);
-            self.f.env.st[l] = MState::Uninit;
+            self.drop_owner(l);
+            self.set_st(l, Init::Gone);
         }
+        self.trim_temps();
     }
 
     /// Stores a `&mut` chunk binding's vector back to its slice (active lanes only when masked).
@@ -1244,14 +1856,31 @@ impl<'a> FnCx<'a> {
         self.f.b.call(f, None, &[h]);
     }
 
-    /// Drops the statement temporaries.
-    pub fn drop_temps(&mut self) {
-        let ts = std::mem::take(&mut self.f.temps);
-        if !self.open() {
-            return;
+    /// Opens a statement (or a condition, a guard, a value arm, a clause): the temporaries made
+    /// from here on end at the matching [`FnCx::end_temps`].
+    pub fn begin_temps(&mut self) {
+        self.f.stmts.push(self.f.temps.len());
+    }
+
+    /// Ends the innermost open statement: drops its temporaries, last made first.
+    pub fn end_temps(&mut self) {
+        let Some(from) = self.f.stmts.pop() else { return };
+        let ts: Vec<usize> = self.f.temps.get(from..).unwrap_or(&[]).to_vec();
+        for &l in ts.iter().rev() {
+            self.drop_owner(l);
+            self.set_st(l, Init::Gone);
         }
-        for &(p, t) in ts.iter().rev() {
-            self.drop_ptr(p, t);
+        self.f.temps.truncate(from);
+        self.trim_temps();
+    }
+
+    /// Drops, on a path that leaves them, the temporaries of the open statements from index
+    /// `from` on (0: all, a `return` or `?`), keeping them for the paths that stay.
+    pub fn exit_temps(&mut self, from: usize) {
+        let at = if from == 0 { 0 } else { self.f.stmts.get(from).copied().unwrap_or(self.f.temps.len()) };
+        let ts: Vec<usize> = self.f.temps.get(at..).unwrap_or(&[]).to_vec();
+        for &l in ts.iter().rev() {
+            self.drop_owner(l);
         }
     }
 
@@ -1404,6 +2033,9 @@ impl FnState {
             loops: Vec::new(),
             joins: Vec::new(),
             temps: Vec::new(),
+            stmts: Vec::new(),
+            scope_stmts: Vec::new(),
+            own_temps: 0,
             ret,
             site_consts: Vec::new(),
             kvals: Vec::new(),

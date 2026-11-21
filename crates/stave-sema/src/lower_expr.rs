@@ -6,7 +6,7 @@
 use stave_ir::{CastKind, Op, Operand, PanicKind};
 use stave_syntax::{NodeKind, Term};
 
-use crate::lower_fn::{Base, E, FnCx, Place, Proj, Ty};
+use crate::lower_fn::{Base, E, FnCx, Home, Place, Proj, Ty};
 use crate::mono::{InstKey, Req, Resolved};
 use crate::resolve::{DeferKind, Res};
 use crate::sigs::TraitRef;
@@ -221,10 +221,10 @@ impl<'a> FnCx<'a> {
     fn own_temp(&mut self, p: Place) -> Place {
         if let Base::Val(v, t) = p.base
             && p.proj.is_empty()
+            && p.root.is_none()
             && self.needs_drop(t)
         {
-            let (s, st) = self.spill(v, t, true);
-            return Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: None };
+            return self.slot_temp(v, t);
         }
         p
     }
@@ -290,15 +290,15 @@ impl<'a> FnCx<'a> {
                 let Some(p) = self.place_of(e) else { return E::Never };
                 let s = self.string_ty();
                 let ptr = match (&p.base, p.proj.is_empty()) {
-                    (Base::Mem(m, _), true) if p.root.is_none() => {
-                        self.f.temps.push((*m, s));
+                    // the f-string's own temporary
+                    (Base::Mem(m, _), true) if p.root.is_some_and(|l| self.locals[l].temp.is_some()) => {
                         let r = self.t_ref(false, s);
                         let mt = self.t_ref(true, s);
                         self.convert_ptr(*m, mt, r)
                     }
                     _ => {
                         let Some(v) = self.read(&p) else { return E::Never };
-                        let (m, mt) = self.spill(v, s, true);
+                        let (m, mt, _) = self.slot_temp_at(v, s);
                         let r = self.t_ref(false, s);
                         self.convert_ptr(m, mt, r)
                     }
@@ -1484,7 +1484,7 @@ impl<'a> FnCx<'a> {
             let hook = self.g.lang.errtrace_push;
             self.errtrace_hook(hook, tok);
         }
-        self.drop_temps_keep();
+        self.exit_temps(0);
         self.drop_scopes(0);
         self.ensures_checks(Some(r), tok);
         if self.open() {
@@ -1499,15 +1499,6 @@ impl<'a> FnCx<'a> {
         }
         let (a, b) = (self.int(ok as i128), self.int(0));
         E::V(self.opn(Op::EnumGet, payload, &[v, a, b]), payload)
-    }
-
-    /// Drops the statement temporaries on an exit path without forgetting them for the
-    /// fallthrough path.
-    pub fn drop_temps_keep(&mut self) {
-        let ts = self.f.temps.clone();
-        for &(p, t) in ts.iter().rev() {
-            self.drop_ptr(p, t);
-        }
     }
 
     // ---------- calls ----------
@@ -2024,7 +2015,7 @@ impl<'a> FnCx<'a> {
                 if self.needs_drop(rt) {
                     // the operand not selected is a statement temporary, picked without a branch
                     let u = self.opn(Op::Select, rt, &[c, b, a]);
-                    self.spill(u, rt, true);
+                    let _ = self.slot_temp(u, rt);
                 }
                 E::V(r, rt)
             }
@@ -2115,8 +2106,10 @@ impl<'a> FnCx<'a> {
                 }
             }
         }
+        // the string is a temporary of the statement until it is moved out
         let mt = self.t_ref(true, st);
-        E::P(Place { base: Base::Mem(ts, mt), proj: Vec::new(), ty: st, root: None })
+        let l = self.new_temp(st, Home::Slot(ts), false);
+        E::P(Place { base: Base::Mem(ts, mt), proj: Vec::new(), ty: st, root: Some(l) })
     }
 
     fn fmt_hole(&mut self, n: u32, tok: u32, segs: &[(u32, String)], ts: Operand, st: Ty) -> bool {
@@ -2216,7 +2209,7 @@ impl<'a> FnCx<'a> {
                 _ => {
                     // a copy of the value, borrowed
                     let Some(v) = self.read(&p) else { return false };
-                    let (s, mt) = self.spill(v, d, false);
+                    let (s, mt) = self.spill(v, d);
                     self.convert_ptr(s, mt, rd)
                 }
             }
