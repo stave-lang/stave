@@ -1967,6 +1967,10 @@ impl sigs::LowerHost for Ck<'_> {
         self.generics
     }
 
+    fn const_param_ty(&self, idx: u32) -> Option<TypeId> {
+        self.generics.get(idx as usize).filter(|g| g.is_const).map(|g| g.const_ty)
+    }
+
     fn vector_width(&mut self, span: Span, ty: &str, bits: u32) {
         self.gate_width_of(span, ty, bits);
     }

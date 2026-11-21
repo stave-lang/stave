@@ -70,7 +70,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0106 | `<name>` is private to module `<module>`: an item, field, or method used outside its module without `pub` (trait impl methods have the trait's visibility). Case `column`: a `std.soa.Soa` column whose field of the row struct is private. Related span: the declaration |
 | E0107 | import path is ambiguous: its first segment is both a dependency name of the package and a module (`src/x.stv`) or module directory (`src/x/`) of the package. At the first segment; the import binds an error decl. Fix: `import <package>.x` for the module (the package's own name first), or rename the module or the dependency Case `builtin`: a module of the root package whose path starts with a built-in package's name (`std`, `runtime`, ...; `src/std/cell.stv` is `std.cell`; a dependency named so is E1002 `builtin-name`), at the module's first token; compiler-known items (lang items, fixed paths) are looked up in built-in packages only. Case `dotted`: a module of any package from a file or directory name with a dot (`src/a.b.stv`, `src/c.d/e.stv`), or of a dependency whose `name` has one (`a.b`: its `src/c.stv` is `a.b.c`): no import can name it, and its path text is another module's (`a.b`, `a.b.c`, or a built-in one: `src/std.cell.stv`), which lookups by path text would take for it; at the module's first token, in place of case `builtin` |
 | E0108 | a `bin` package has no `fn main` in its root module (`stave build`, `stave run`, `stave test`; `stave check` does not need it). At offset 0 of the root module; reported only when there is no other error (a dropped or invalid item may be `main`) |
-| E0201 | mismatched types, with no implicit conversion |
+| E0201 | mismatched types, with no implicit conversion; also a const arg whose type is not its param's (a const param passed on included), and case `const-param-type`: a const generic param whose type is not an unsigned integer type |
 | E0202 | literal has no type context (no default type). Add a suffix or an annotation |
 | E0203 | literal out of range for its type |
 | E0204 | lossy `as`. Use `as%`, `as|`, `as?` or `as~` |
@@ -97,9 +97,10 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0413 | view or reference in a `const`, `static`, or `static mut` (except `&str` initialized by a string literal or another such const: static strings) |
 | E0414 | generic parameter instantiated with a view without the `T: view` bound (at every use: call, fn item as a value, operator, trait method's own params; an impl whose param lacks `view` does not apply to a view). Case `drop`: an `impl Drop` param without `view` where its type takes one. Case `container`: an ADT of the std package whose parameter has no `view` bound (`sync.Mutex`, `cell.Cell`, `soa.Soa`) |
 | E0415 | `impl Copy for T {}` where a field or variant payload of T is not Copy (Copy: scalars, `&T`, raw pointers, arrays and tuples of Copy types, ADTs with `impl Copy`; `&mut T` never). Related span: the field |
-| E0416 | `impl Drop` for a Copy type (built-in Copy, or an ADT with `impl Copy`; related span: the `impl Copy`) |
+| E0416 | an `impl Drop` whose head overlaps the head of an `impl Copy`: the two self types unify, the params of both impls as variables, bounds not consulted (`impl<T: Copy> Copy for W<T>` with `impl<U> Drop for W<vec.Vec<U>>` too); related span: the `impl Copy` |
 | E0417 | `static X: T` where T is not `Sync` (a `static` is shared by every thread): use an atomic (`atomic.U64`), `sync.Mutex<T, R>`, or `sync.Once<T, R>` (R: the lock rank) |
 | E0418 | array repeat `[e; n]` whose element type is not Copy (Copy as in E0415), unless `n` is the constant 1: the one value of `e` fills every slot, and length 0 would leave it to no owner (a const generic length counts as neither). At `e` |
+| E0419 | `impl Drop` whose self type is not a struct or enum declared in the impl's package (a tuple, array, slice, reference, raw pointer, fn type, scalar, generic param, or a type of another package): drop glue runs the destructors of ADTs only, and a package adds none to another's types |
 | E0501 | borrow conflict (borrow site, conflicting access, later use). When an access conflicts with several live loans, the loan with the smallest creation offset is reported (ties: `&mut` before `&`, then place path); the later use is the first use after the access that keeps that loan live |
 | E0502 | use after move |
 | E0503 | assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`, reported by the type checker) |
@@ -120,7 +121,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0606 | aligned load or store on a slice whose type lacks that alignment (use `align_to`) |
 | E0607 | vector integer division by a non-constant: `a / b`, or `a.div_const(k)` with `k` not a const-expr (use `div_lanes`). Case `zero`: `a.div_const(k)` with `k` = 0 |
 | E0608 | permute or table index out of range at compile time |
-| E0609 | generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument. Write `f32x8` / `mask32x8` |
+| E0609 | generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument. Write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param |
 | E0700 | operation unavailable (class U) on the target, outside `emulate { }` |
 | E0701 | class M or U operation inside `strict { }` |
 | E0702 | vector type wider than the target's register |
@@ -157,11 +158,11 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0902 | instantiation depth limit (64) exceeded: an instance of a generic fn or method, reached from a non-generic fn through calls, would be the 65th instance of that generic on its own instantiation chain (polymorphic recursion such as `f::<[T; 1]>(..)` inside `f<T>`). At the call that requests it, once per generic. Case `graph`: the program's call graph (calls, fn values, drop glue) exceeds its limit (256 instances of one generic on one chain, such as a `Drop` impl of `W<T>` that drops a `W<Option<T>>`, or 2,097,152 nodes); at the fn whose body requests the first instance left out, once; the program is rejected |
 | E0903 | overlapping impls |
 | E0904 | const-expr uses a call (other than a constructor fixed by path, intrinsics.md), a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value |
-| E0905 | impl method signature differs from the trait's (params, return, `from`, `needs`, or `unsafe`). The fix shows the trait's signature |
+| E0905 | impl method signature differs from the trait's (params, return, `from`, `needs`, `unsafe`, or the method's own generics: count, order, kind, `view`, a const param's type, and the bounds as complete trait refs with their args, after the trait's params are replaced by the impl's trait args). The fix shows the trait's signature |
 | E0906 | impl lacks a trait method, or defines a method the trait does not declare |
 | E0907 | `pub` on a method of a trait impl (it has the trait's visibility). At the `pub` |
 | E0908 | ambiguous method: lookup (inherent impls, then every trait impl of the receiver type) finds it in two traits. Fix: the qualified call `Trait.m(x)` |
-| E0909 | explicit call of `Drop.drop` (`x.drop()` or `Drop.drop(&mut x)`): drop runs only automatically (scope end, overwrite of a place). Fix: let the value go out of scope, or move it into `std.mem.drop(x)` |
+| E0909 | explicit call of `Drop.drop` (`x.drop()`, `Drop.drop(&mut x)`, `S.drop(&mut x)`) or a `Drop` impl method used as a fn value (`let f = S.drop;`): drop runs only automatically (scope end, overwrite of a place). Fix: let the value go out of scope, or move it into `std.mem.drop(x)` |
 | E0910 | the row type of `std.soa.Soa<T>` is not a struct (its fields are the columns). Checked where the type is written and at calls of `std.soa` methods; a generic parameter passes |
 | E0911 | `size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels. At the call, in a const-expr too |
 | E1001 | target not runnable on this host (binary built, tests reported as not run, never as passed). Reported by `stave test` and `stave run`. No location |

@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// A lane count and a mask width are literals: a const param never stands for one.
+fn lanes<const M: usize>(v: vec<u32, M>) -> u32 { //~ ERROR E0609
+    return 0;
+}
+
+fn width<const W: usize>(m: mask<W, 4>) -> u32 { //~ ERROR E0609
+    return 0;
+}
+
+fn count<const M: usize>(m: mask<32, M>) -> u32 { //~ ERROR E0609
+    return 0;
+}
+
+fn three<T>(v: vec<T, 3>) -> u32 { //~ ERROR E0609
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

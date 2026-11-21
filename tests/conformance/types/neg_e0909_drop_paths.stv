@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// A destructor runs only from the compiler's drop glue: every other way to name `Drop.drop` or a
+// `Drop` impl's method, as a call or as a fn value, is E0909.
+import std.vec;
+
+struct D { n: u32 }
+
+impl Drop for D {
+    fn drop(&mut self) { }
+}
+
+fn kill<T: Drop>(x: &mut T) {
+    x.drop(); //~ ERROR E0909
+    Drop.drop(x); //~ ERROR E0909
+    T.drop(x); //~ ERROR E0909
+    // a trait method named through a trait or a bound is no value at all
+    let f: fn(&mut T) = T.drop; //~ ERROR E0201
+}
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u8>.new();
+    let mut d = D.{ n: 1 };
+    let f: fn(&mut vec.Vec<u8>) = vec.Vec::<u8>.drop; //~ ERROR E0909
+    let g = D.drop; //~ ERROR E0909
+    let h: fn(&mut D) = Drop.drop; //~ ERROR E0201
+    let c = fn() {
+        let k: fn(&mut D) = D.drop; //~ ERROR E0909
+    };
+    vec.Vec::<u8>.drop(&mut v); //~ ERROR E0909
+    D.drop(&mut d); //~ ERROR E0909
+    return 0;
+}

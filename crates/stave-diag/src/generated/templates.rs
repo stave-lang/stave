@@ -1055,6 +1055,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "const-param-type",
+                message: "const parameter `{operand}` has type `{found}`, not an unsigned integer type",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a const parameter is `u8`, `u16`, `u32`, `u64`, or `usize`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "declare it with an unsigned integer type: `const {operand}: usize`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "not-callable",
                 message: "`{operand}` of type `{found}` cannot be called",
                 labels: &[
@@ -2099,7 +2111,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0416",
         severity: Severity::Error,
         area: "kinds",
-        rule: "`impl Drop` for a Copy type (built-in Copy, or an ADT with `impl Copy`)",
+        rule: "an `impl Drop` whose head overlaps the head of an `impl Copy`: the two self types unify, the params of both impls as variables, bounds not consulted (`impl<T: Copy> Copy for W<T>` with `impl<U> Drop for W<vec.Vec<U>>` too)",
         retired: false,
         located: true,
         holes: &[
@@ -2108,13 +2120,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         shapes: &[
             Shape {
                 case: "",
-                message: "`{type}` is Copy, so it cannot implement `Drop`",
+                message: "`impl Drop for {type}` overlaps an `impl Copy`: a type with a destructor cannot be Copy",
                 labels: &[
                     LabelTemplate { at: "primary", text: "`impl Drop` here" },
-                    LabelTemplate { at: "copy", text: "`impl Copy for {type}` here" },
+                    LabelTemplate { at: "copy", text: "`impl Copy` whose head overlaps it" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "remove `impl Copy for {type}` (a type with a destructor must move), or remove this `impl Drop`",
+                    description: "remove the `impl Copy` or this `impl Drop`, or make their heads disjoint (no type an instance of both)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2165,6 +2177,31 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write the elements out, or give the element type `impl Copy`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0419",
+        severity: Severity::Error,
+        area: "kinds",
+        rule: "`impl Drop` whose self type is not a struct or enum declared in the impl's package (a tuple, array, slice, reference, raw pointer, fn type, scalar, generic param, or a type of another package): drop glue runs the destructors of ADTs only, and a package adds none to another's types",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`impl Drop for {type}`: a `Drop` impl's self type must be a struct or enum of this package",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`impl Drop` here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "implement `Drop` for a struct or enum declared in this package, for example a wrapper with a field of type `{type}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2797,7 +2834,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0609",
         severity: Severity::Error,
         area: "simd",
-        rule: "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`",
+        rule: "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param",
         retired: false,
         located: true,
         holes: &[
@@ -2817,6 +2854,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                     edits: &[
                         EditTemplate { at: "primary", replacement: "{concrete}" },
                     ],
+                }),
+            },
+            Shape {
+                case: "lanes",
+                message: "`{spelled}` is not a fixed lane count or mask width",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "lanes are 2, 4, 8, 16, 32, or 64; mask widths 8, 16, 32, or 64" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write one of these values as a literal: a const param never stands for a lane count or a mask width",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
                 }),
             },
         ],
@@ -3950,7 +3999,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0905",
         severity: Severity::Error,
         area: "generics",
-        rule: "impl method signature differs from the trait's (params, return, `from`, `needs`, or `unsafe`); the fix shows the trait's signature",
+        rule: "impl method signature differs from the trait's (params, return, `from`, `needs`, `unsafe`, or the method's own generics: count, order, kind, `view`, a const param's type, and the bounds as complete trait refs with their args, after the trait's params are replaced by the impl's trait args); the fix shows the trait's signature",
         retired: false,
         located: true,
         holes: &[
@@ -4073,7 +4122,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0909",
         severity: Severity::Error,
         area: "generics",
-        rule: "explicit call of `Drop.drop` (as `x.drop()` or `Drop.drop(&mut x)`): drop runs only automatically, at scope end and when a place is overwritten",
+        rule: "explicit call of `Drop.drop` (as `x.drop()`, `Drop.drop(&mut x)`, `S.drop(&mut x)`) or a `Drop` impl method used as a fn value (`let f = S.drop;`): drop runs only automatically, at scope end and when a place is overwritten",
         retired: false,
         located: true,
         holes: &[],

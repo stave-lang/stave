@@ -1,0 +1,47 @@
+//~ CHECK-ONLY
+// `Self` in the bound of a trait method's own generic is the impl's self type.
+trait Conv<T> {
+    fn c(&self) -> u32;
+}
+
+struct A {}
+
+trait Tr {
+    fn f<U: Conv<Self>>(u: &U) -> u32;
+}
+
+struct S {}
+
+impl Tr for S {
+    fn f<U: Conv<A>>(u: &U) -> u32 { //~ ERROR E0905
+        return u.c();
+    }
+}
+
+struct S2 {}
+
+impl Tr for S2 {
+    fn f<U: Conv<S2>>(u: &U) -> u32 {
+        return u.c();
+    }
+}
+
+struct S3 {}
+
+impl Tr for S3 {
+    fn f<U: Conv<Self>>(u: &U) -> u32 {
+        return u.c();
+    }
+}
+
+impl Conv<S2> for A {
+    fn c(&self) -> u32 {
+        return 2;
+    }
+}
+
+fn main() -> i32 {
+    let a = A.{};
+    let k: u32 = S2.f(&a);
+    return 0;
+}
