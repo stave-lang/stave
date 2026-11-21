@@ -604,3 +604,33 @@ fn type_depth_limit() {
     assert_eq!(codes(&hold(999)), one);
     assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }
+
+/// The E0908 fixes are code that compiles once the body is filled in: `impls-static` writes the
+/// bound with one impl's trait args, the method's params and result, and the call with its args;
+/// `for` names the trait as the module does.
+#[test]
+fn e0908_fixes_write_the_signature_and_the_trait() {
+    let src = "struct A { n: u32 }\n\
+         trait Mk<T> { fn mk(x: u32, k: u8) -> T; }\n\
+         impl Mk<u32> for A { fn mk(x: u32, k: u8) -> u32 { return x; } }\n\
+         impl Mk<u64> for A { fn mk(x: u32, k: u8) -> u64 { return 0; } }\n\
+         trait Z<T> { fn z(); }\n\
+         impl Z<u8> for A { fn z() { } }\n\
+         impl Z<u16> for A { fn z() { } }\n\
+         trait Next { fn next(&mut self) -> Option<u64>; }\n\
+         trait Back { fn next(&mut self) -> Option<u64>; }\n\
+         fn g<T: Next + Back>(t: T) { for x in t { } }\n\
+         fn main() -> i32 { let m: u32 = A.mk(1u32, 2u8); A.z(); return 0; }\n";
+    let (_, tc) = mem(src);
+    let fixes: Vec<(&str, &str)> =
+        tc.diagnostics.iter().map(|d| (d.code(), d.fix().map_or("", |f| f.description.as_str()))).collect();
+    let has = |needle: &str| fixes.iter().any(|(c, f)| *c == "E0908" && f.contains(needle));
+    assert!(
+        has("`fn pick<X: Mk<u32>>(x: u32, k: u8) -> u32 { return X.mk(x, k); }`, called as `pick::<A>(x, k)`"),
+        "{fixes:?}"
+    );
+    assert!(has("`fn pick<X: Z<u8>>() { return X.z(); }`, called as `pick::<A>()`"), "{fixes:?}");
+    assert!(has("`let mut it = t; loop { match Next.next(&mut it) {"), "{fixes:?}");
+    assert_eq!(fixes.iter().filter(|(c, _)| *c == "E0908").count(), 3, "{fixes:?}");
+    assert!(fixes.iter().all(|(_, f)| !f.contains("<..>")), "{fixes:?}");
+}

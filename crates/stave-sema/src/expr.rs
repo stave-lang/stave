@@ -2129,8 +2129,74 @@ impl<'a> Ck<'a> {
         if let Some((place, _)) = source {
             holes.extend([("place", place), ("qual", &qual)]);
         }
+        let pick = (case == Some("impls-static")).then(|| {
+            self.pick_fix(&qual, methods[0])
+                .unwrap_or_else(|| [format!("{qual}<..>"), String::new(), String::new(), String::new()])
+        });
+        if let Some([bound, params, ret, args]) = &pick {
+            holes.extend([("bound", bound.as_str()), ("params", params), ("ret", ret), ("args", args)]);
+        }
         let d = mk("E0908", case, &holes, at, &roles);
         self.report(d);
+    }
+
+    /// The `impls-static` fix for impl method `method`: the bound naming its impl (`Mk<u32>`),
+    /// its params as written (`x: u32, k: u8`), its result (` -> u32`, empty for `()`), and the
+    /// param names as call args (`x, k`).
+    fn pick_fix(&mut self, qual: &str, method: DeclId) -> Option<[String; 4]> {
+        let sig = self.sigs.fn_sig(method)?;
+        let (params, spans, ret) = (sig.params.clone(), sig.param_spans.clone(), sig.ret);
+        let imp = self.prog.decl(method)?.parent.get()?;
+        let targs = self.sigs.impl_def(imp)?.trait_ref.as_ref()?.args.clone();
+        let mut bound = qual.to_string();
+        if !targs.is_empty() {
+            let shown: Vec<String> = targs
+                .iter()
+                .map(|a| match a {
+                    GArg::Type(t) => self.show(*t),
+                    GArg::Const(ConstArg::Value(v)) => v.to_string(),
+                    GArg::Const(_) => "_".to_string(),
+                })
+                .collect();
+            bound = format!("{bound}<{}>", shown.join(", "));
+        }
+        let mut ps = Vec::new();
+        let mut names = Vec::new();
+        for (i, &t) in params.iter().enumerate() {
+            // the name is the identifier before the `:` that precedes the param's type
+            let n = spans.get(i).map_or(String::new(), |s| self.param_name_before(*s));
+            let n = if n.is_empty() { format!("a{i}") } else { n };
+            ps.push(format!("{n}: {}", self.show(t)));
+            names.push(n);
+        }
+        let ret = if ret == self.tys.fixed_ty(ids::UNIT) {
+            String::new()
+        } else {
+            format!(" -> {}", self.show(ret))
+        };
+        Some([bound, ps.join(", "), ret, names.join(", ")])
+    }
+
+    /// The identifier written before `name:` ahead of the type at span `ty` (empty if none).
+    fn param_name_before(&self, ty: Span) -> String {
+        let Some(f) = self.prog.file(ty.file) else { return String::new() };
+        let b: &[u8] = &f.bytes;
+        let mut i = (ty.offset as usize).min(b.len());
+        while i > 0 && b[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        if i == 0 || b[i - 1] != b':' {
+            return String::new();
+        }
+        i -= 1;
+        while i > 0 && b[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        let end = i;
+        while i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
+            i -= 1;
+        }
+        String::from_utf8_lossy(&b[i..end]).into_owned()
     }
 
     // ---------- fields, index, try ----------

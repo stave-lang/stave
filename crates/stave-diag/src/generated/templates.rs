@@ -4419,10 +4419,14 @@ pub(super) static ENTRIES: &[Entry] = &[
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "args", kind: HoleKind::Source, choices: &[] },
+            Hole { name: "bound", kind: HoleKind::Type, choices: &[] },
             Hole { name: "first", kind: HoleKind::Path, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
+            Hole { name: "params", kind: HoleKind::Source, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
             Hole { name: "qual", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "ret", kind: HoleKind::Type, choices: &[] },
             Hole { name: "second", kind: HoleKind::Path, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
@@ -4492,7 +4496,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "second", text: "another impl's `{name}`" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "name one impl through a bound: `fn pick<X: {first}<..>>() .. X.{name}() ..`, called as `pick::<{type}>()` (no path gives both the type and the trait args of a fn without `self`)",
+                    description: "name one impl through a bound: `fn pick<X: {bound}>({params}){ret} {{ return X.{name}({args}); }}`, called as `pick::<{type}>({args})` (no path gives both the type and the trait args of a fn without `self`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
