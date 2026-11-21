@@ -336,3 +336,36 @@ a `Vec` keeps the id's `raw()` u32. Not changed: a type argument is the only way
 type whose fields hide a `T` (behind an integer or a byte pointer) to T's Flat and Frozen, since
 both are derived and never implemented (E1408); counting only fields would make such types Flat
 with no way out. Whether a marker param should stop counting is open.
+
+## §4 Features of generic instances
+
+An instance of a generic fn or method (one per generic and type arguments) is compiled with the
+features its generic declares plus those it inherits from its type arguments; its closures have
+the same features. The type checker decides them once per instance on the call graph
+(`stave_sema::inherit`), and lowering and codegen read that one set:
+
+- An instance holds a vector by value when a fixed vector or mask, or a tuple, array, struct, or
+  enum with one inside not behind a reference, raw pointer, slice, or fn type, is the type of a
+  param, the return, a local, or an expression of its body after substitution. Not counted: an
+  expression that is only a place there (the operand of `&` / `&mut`, the head of a postfix
+  chain, the target of a plain `=`, a `match` scrutinee, a `for` source), and a type the body
+  spells without a type parameter (it is gated where it is written).
+- It inherits the features whose registers hold each such vector (256 bits: `avx2`; 512 bits:
+  the AVX-512 part of `v4`), beyond its declared `needs` and the target baseline, and what each
+  generic instance it calls, drops (through drop glue), or makes into a fn value inherits.
+- A non-generic fn that calls, drops, or makes a fn value of such an instance needs those
+  features as for a declared `needs` (E0704 case `inherited`, naming the type argument); where no
+  feature of the target's arch holds the vector (256 bits on AArch64), E0702 at that use. A
+  generic instance never fails this rule: it inherits. A dispatch arm with `needs(avx2)` reaches
+  `id::<f32x8>`; the `_` arm reaches `id::<f32x4>`, another instance, with no features.
+- So at `f32x8`: `id<T>(x: T) -> T` inherits `avx2`, and so do `mem.swap` (it copies a `T`) and
+  the drop of `vec.Vec` (it reads each element); `first<T>(xs: &[T]) -> Option<&T>` and
+  `Vec.len` inherit nothing.
+- A fn value of an instance has the instance's declared features in its type, not the inherited
+  ones: it is made only where they are proven (the rule above), and a value made there stays
+  callable anywhere, as for E0707: CPU features never change while a program runs.
+
+Reason the instance and not the generic: a declared `needs` on a generic would make it uncallable
+without the features at every type argument (`Vec.push` at `u8` included), and a rule on the
+written signature misses a vector reached through a type parameter in the body and rejects
+generics that only borrow one.
