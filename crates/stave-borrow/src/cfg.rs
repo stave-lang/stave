@@ -21,9 +21,10 @@
 //! locals are params; the closure value (or the `scope`'s join local, which accumulates every
 //! spawn's loans and is read wherever the scope is left) holds one loan per captured local,
 //! created at the closure's `fn` / `spawn` token. The capture list and modes are
-//! stave-sema's capture analysis (`stave_sema::closures`: by reference only; `&mut` if the
-//! body mutates the local or the local is a `&mut T`, else `&`); a capture the nested body writes,
-//! mutably borrows, or reborrows is `&mut` too (a safety net, never weaker than the analysis).
+//! stave-sema's capture analysis (`stave_sema::closures`: by reference only; `&` only when every
+//! use is a proven read, else `&mut`), the same modes the thread rules read. A capture held by `&`
+//! that the nested body writes, mutably borrows, or activates, or a captured local the analysis
+//! does not list, fails the body as unsupported: the two must agree.
 //! The closure value's origin set is the union of its capture loans, so the loans live while the
 //! value (or a result of a call through it, which takes the callee's origins too) lives. Every
 //! call of the value uses the same loans, so a closure's result may borrow only the captures held
@@ -33,6 +34,7 @@
 use rustc_hash::FxHashMap;
 use stave_diag::Span;
 use stave_sema::itemcx::ItemCx;
+use stave_sema::loops::ForKind;
 use stave_sema::traits::{Adjust, Lookup, World};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 use stave_sema::{BindingRef, Coercion, DeclKind, Res, Target, TypedBody};
@@ -331,6 +333,9 @@ pub struct Body {
     pub joins: Vec<(LocalId, Span)>,
     /// Why this body cannot be checked (nothing is reported for it).
     pub unsupported: Option<&'static str>,
+    /// A disagreement with stave-sema the builder found (a compiler bug): the body is not
+    /// checked, and the run fails as an internal error.
+    pub internal: Option<&'static str>,
 }
 
 impl Body {
@@ -419,6 +424,17 @@ pub struct Builder<'a, 'b> {
     /// The local `result` names in the `ensures` clauses: the returned value, from the return
     /// to the end of the clauses.
     result: Option<LocalId>,
+    /// The block temporaries of reference chunk bindings, with their store back.
+    chunk_temps: FxHashMap<LocalId, ChunkWriteBack>,
+}
+
+/// A by-reference chunk binding's store back (see `Builder::chunk_ref_bind`): the chunk of the
+/// sequence (through the loop's loan), `&mut`, the loop's node.
+#[derive(Clone)]
+struct ChunkWriteBack {
+    chunk: Place,
+    m: bool,
+    node: u32,
 }
 
 /// Builds the body of fn decl node `fn_node` (params in `params`, return type `ret_ty`, signature
@@ -435,7 +451,7 @@ pub fn build_fn<'a>(
     let mut b = Builder::new(icx, tb, tys, None);
     let infos = {
         let ov = &b.tys.ov;
-        stave_sema::closures::closures(&icx, tb, |t| stave_sema::closures::is_mut_ref(ov, t), fn_node)
+        stave_sema::closures::closures(&icx, tb, ov, fn_node)
     };
     b.infos = std::rc::Rc::new(infos);
     b.body.ret = ret;
@@ -460,6 +476,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             nested: Vec::new(),
             joins: Vec::new(),
             unsupported: None,
+            internal: None,
         };
         Builder {
             icx,
@@ -485,6 +502,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             owned_elems: None,
             olds: FxHashMap::default(),
             result: None,
+            chunk_temps: FxHashMap::default(),
         }
     }
 
@@ -977,6 +995,11 @@ impl<'a, 'b> Builder<'a, 'b> {
         let loc = &self.body.locals[l as usize];
         let (ty, node) = (loc.ty, loc.node);
         let span = at.unwrap_or(loc.span);
+        if dead && let Some(w) = self.chunk_temps.get(&l).cloned() {
+            // the block of a reference chunk binding is left (its end, `break`, `continue`,
+            // `return`, `?`): the code stores the chunk back here
+            self.chunk_write_back(w, span);
+        }
         if self.tys.needs_drop(ty) {
             self.push(StmtKind::Drop(Place::local(l, ty)), span, node);
         }
@@ -1404,7 +1427,16 @@ impl<'a, 'b> Builder<'a, 'b> {
 
     // ---------- for ----------
 
+    /// A `for` loop; the iterator it is given (its temporary) is dropped right after it, on
+    /// every path out of it (as the lowering's loop slot).
     fn for_stmt(&mut self, f: u32) {
+        self.push_scope();
+        self.for_loop(f);
+        let at = self.span(f);
+        self.pop_scope(Some(at));
+    }
+
+    fn for_loop(&mut self, f: u32) {
         let icx = self.icx;
         let kids = icx.kids_vec(f);
         let Some(&pat) = kids.first() else { return };
@@ -1413,47 +1445,39 @@ impl<'a, 'b> Builder<'a, 'b> {
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
         let bind_ty = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type));
         let it_ty = self.nty(iter);
-        let chunk_ref = bind_ty.is_some_and(|_| {
-            let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
-            matches!(self.tys.kind(bt), TypeKind::Ref { .. })
-        });
+        let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
+        let chunk_ref = bind_ty.is_some() && matches!(self.tys.kind(bt), TypeKind::Ref { .. });
+        let chunk_mut = bind_ty.is_some() && matches!(self.tys.kind(bt), TypeKind::Ref { mutable: true, .. });
+        // a chunk loop: the binding is a vector or a reference to one
+        let vt = match self.tys.kind(bt) {
+            TypeKind::Ref { inner, .. } => inner,
+            _ => bt,
+        };
+        let chunk = bind_ty.is_some() && matches!(self.tys.kind(vt), TypeKind::Vector { .. });
         enum Src {
             Range,
             Elems(Place, Option<DerefKind>),
             Iter(Place, Flows, TypeId),
         }
         let iv = self.expr(iter);
-        let src = match self.tys.kind(it_ty) {
-            TypeKind::Range { .. } => {
+        let src = match self.tb.for_kind(f) {
+            Some(ForKind::Range) => {
                 let _ = self.read(iv, iter);
                 Src::Range
             }
-            TypeKind::Ref { mutable, inner }
-                if matches!(self.tys.kind(inner), TypeKind::Array { .. } | TypeKind::Slice { .. }) =>
-            {
+            Some(ForKind::Seq { mutable }) => {
                 let Some(p) = self.place_of(iv, iter) else { return };
                 let k = if mutable { DerefKind::Mut } else { DerefKind::Shared };
                 Src::Elems(p, Some(k))
             }
-            TypeKind::Array { .. } => {
+            // an array value (a place is E0219): the loop's temporary
+            Some(ForKind::Array) => {
                 let Some(op) = self.operand(iv, iter) else { return };
                 let V::P(p) = self.put_temp(Rvalue::Use(op), it_ty, iter) else { return };
                 Src::Elems(p, None)
             }
-            // a `[T]` place (a sub-slice, a `std.soa` column) is borrowed for the loop, `&mut`
-            // under a `&mut` chunk binding
-            TypeKind::Slice { .. } => {
-                let Some(p) = self.place_of(iv, iter) else { return };
-                let m = bind_ty.is_some_and(|_| {
-                    let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
-                    matches!(self.tys.kind(bt), TypeKind::Ref { mutable: true, .. })
-                });
-                let span = self.span(iter);
-                let (rv, _) = self.borrow(p, m, false, span, iter);
-                let V::P(rp) = rv else { return };
-                Src::Elems(rp, Some(if m { DerefKind::Mut } else { DerefKind::Shared }))
-            }
-            _ => {
+            // an iterator value or a `&mut` to one
+            Some(ForKind::Iter | ForKind::IterMut) => {
                 let Some(op) = self.operand(iv, iter) else { return };
                 let t = self.temp(it_ty, iter);
                 self.body.locals[t as usize].mutable = true;
@@ -1474,6 +1498,11 @@ impl<'a, 'b> Builder<'a, 'b> {
                         return;
                     }
                 }
+            }
+            // no source: the type checker reported it, and a body with an error is not built
+            _ => {
+                self.unsupported("`for` over a type that is not a `for` source");
+                return;
             }
         };
         if !self.open() {
@@ -1520,6 +1549,12 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
                 if let V::P(p) = self.put_temp(Rvalue::Use(op), bt, iter) {
                     self.destructure(pat, p, Mode::Move, iter);
+                }
+            }
+            (Src::Elems(_, _), Some(ep)) if chunk && chunk_ref => {
+                let span = self.span(pat);
+                if let Some(v) = self.chunk_ref_bind(ep, chunk_mut, vt, span, iter) {
+                    self.bind_pattern(pat, v, Mode::Move, iter);
                 }
             }
             (Src::Elems(_, dk), Some(ep)) => {
@@ -1594,9 +1629,11 @@ impl<'a, 'b> Builder<'a, 'b> {
             let l = self.binding_local(tb);
             let lt = self.body.locals[l as usize].ty;
             let span = self.span(tb);
-            if i == 0 && matches!(self.tys.kind(lt), TypeKind::Ref { mutable: true, .. }) {
-                let (rv, _) = self.borrow(ep.clone(), true, false, span, iter);
-                if let Some(op) = self.operand(rv, iter) {
+            if i == 0
+                && let TypeKind::Ref { mutable, inner } = self.tys.kind(lt)
+            {
+                let Some(v) = self.chunk_ref_bind(ep.clone(), mutable, inner, span, iter) else { continue };
+                if let Some(op) = self.operand(V::P(v), iter) {
                     self.push(
                         StmtKind::Assign { dest: Place::local(l, lt), rv: Rvalue::Use(op), init: true },
                         span,
@@ -1619,6 +1656,47 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.block(b);
         let at = self.close_span(b);
         self.pop_scope(Some(at));
+    }
+
+    /// A by-reference chunk binding over element place `ep` (`m`: `&mut`; `vt`: the vector
+    /// type), in the binding's block (the innermost scope): the loop's code holds the chunk in a
+    /// temporary of that block, loaded from the sequence and, under `&mut`, stored back wherever
+    /// the block is left. So the binding borrows that temporary (it dies with the block: the
+    /// binding cannot leave it), and the chunk of the sequence stays borrowed (`&mut` under
+    /// `&mut`) until the store ([`Builder::end_local`]). Returns the binding's value.
+    fn chunk_ref_bind(&mut self, ep: Place, m: bool, vt: TypeId, span: Span, n: u32) -> Option<Place> {
+        let (rv, _) = self.borrow(ep, m, false, span, n);
+        let V::P(src) = rv else { return None };
+        let k = if m { DerefKind::Mut } else { DerefKind::Shared };
+        let inner = self.tys.deref(src.ty).map_or(TypeId::NONE, |x| x.0);
+        let chunk = src.with(Proj::Deref(k), inner);
+        let c = self.new_local(vt, m, span, String::new(), false);
+        if let Some(s) = self.scopes.last_mut() {
+            s.push(c);
+        }
+        let op = self.op_of_place(chunk.clone(), span, n, false);
+        self.push(StmtKind::Assign { dest: Place::local(c, vt), rv: Rvalue::Use(op), init: true }, span, n);
+        self.chunk_temps.insert(c, ChunkWriteBack { chunk, m, node: n });
+        let (bv, _) = self.borrow(Place::local(c, vt), m, false, span, n);
+        let V::P(b) = bv else { return None };
+        Some(b)
+    }
+
+    /// Where a reference chunk binding's block is left: a `&mut` chunk is stored back into the
+    /// sequence, a `&` one is read there (its loan lasts the block).
+    fn chunk_write_back(&mut self, w: ChunkWriteBack, at: Span) {
+        if !self.open() {
+            return;
+        }
+        if w.m {
+            // the stored lanes hold no borrow: the store is a write through the chunk's loan; the
+            // temporary's end (right after) is what conflicts with a binding kept past the block
+            let op = self.const_op(w.node);
+            self.push(StmtKind::Assign { dest: w.chunk, rv: Rvalue::Use(op), init: false }, at, w.node);
+        } else {
+            let r = self.op_of_place(w.chunk, at, w.node, false);
+            self.push(StmtKind::Read(r), at, w.node);
+        }
     }
 
     fn option_of(&mut self, t: TypeId) -> TypeId {
@@ -2093,17 +2171,22 @@ impl<'a, 'b> Builder<'a, 'b> {
         nb.end_of_body(n);
         let caps = std::mem::take(&mut nb.captures);
         let mut inner = nb.finish();
-        // the capture analysis (stave-sema) decides the modes; a capture the CFG shows mutated is
-        // `&mut` in any case (never weaker than the analysis)
+        // the capture analysis (stave-sema) decides the list and the modes, which the thread rules
+        // read too: a capture the CFG writes, mutably borrows, or activates while the analysis
+        // holds it by `&`, or one the analysis does not list, means the two disagree, and the
+        // body is not known to be checked
         let info = self.infos.iter().find(|c| c.node == n).cloned();
         let mut out = Vec::new();
         let mut seen: Vec<u32> = Vec::new();
+        let mut disagree: Option<&'static str> = None;
         if let Some(info) = &info {
             for cap in &info.captures {
                 let cl = caps.iter().find(|c| c.0 == cap.binding).map(|c| c.1);
-                let mutated = cap.mode == stave_sema::closures::CaptureMode::RefMut
-                    || cl.is_some_and(|cl| mutates(&inner, cl));
+                let mutated = cap.mode == stave_sema::closures::CaptureMode::RefMut;
                 if let Some(cl) = cl {
+                    if !mutated && mutates(&inner, cl) {
+                        disagree.get_or_insert("a capture held by `&` is mutated");
+                    }
                     inner.locals[cl as usize].capture_mut = mutated;
                 }
                 if let Some(ol) = self.local_of(Res::Local(BindingRef { node: cap.binding })) {
@@ -2116,11 +2199,14 @@ impl<'a, 'b> Builder<'a, 'b> {
             if seen.contains(&bnode) {
                 continue;
             }
-            let mutated = mutates(&inner, cl);
-            inner.locals[cl as usize].capture_mut = mutated;
+            disagree.get_or_insert("a capture missing from the capture analysis");
+            inner.locals[cl as usize].capture_mut = true;
             if let Some(ol) = self.local_of(Res::Local(BindingRef { node: bnode })) {
-                out.push((ol, mutated));
+                out.push((ol, true));
             }
+        }
+        if let Some(why) = disagree.or(inner.internal) {
+            self.body.internal.get_or_insert(why);
         }
         if inner.unsupported.is_some() {
             self.unsupported("nested body");

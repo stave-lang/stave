@@ -25,8 +25,13 @@ fn link_h(dst: &mut Cur from h, h: Hold) {
     *two.slot = two.n;
 }
 
+// an array place is no `for` source (E0219); a call result is a value, its elements moved out
+fn own(a: [&mut Cur; 1]) -> [&mut Cur; 1] from a {
+    return a;
+}
+
 fn link_a(dst: &mut Cur from t, t: [&mut Cur; 1]) {
-    for q in t {
+    for q in own(t) {
         let two = split((q, 0u32));
         *two.slot = two.n;
     }

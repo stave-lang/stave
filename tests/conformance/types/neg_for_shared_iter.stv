@@ -1,0 +1,31 @@
+//~ CHECK-ONLY
+// E0219 `shared-iter`: an iterator behind a `&` reference is no `for` source (`next` takes
+// `&mut self`): iterate `&mut it`, or the iterator by value.
+struct Count {
+    i: u64,
+}
+
+impl Count {
+    fn next(&mut self) -> Option<u64> {
+        if self.i >= 3 {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        return Option.Some(self.i);
+    }
+}
+
+fn f(r: &Count) -> u64 {
+    let mut s: u64 = 0;
+    for x in r { //~ ERROR E0219
+        s = s + x;
+    }
+    let mut c = Count.{ i: 0 };
+    for x in &c { //~ ERROR E0219
+        s = s + x;
+    }
+    for x in &mut c {
+        s = s + x;
+    }
+    return s;
+}

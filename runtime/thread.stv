@@ -157,11 +157,11 @@ fn join(h: usize) {
 }
 
 unsafe("th is the record of a mapping no thread uses any more") fn release(th: *mut Thread) {
-    let e = unsafe("caller obligation") (*th).entry;
-    let base = unsafe("caller obligation") (*th).map;
-    let len = unsafe("caller obligation") (*th).map_len;
+    let e = unsafe("th is the record in the mapping, which stays mapped until the munmap below and which no thread writes any more") (*th).entry;
+    let base = unsafe("th is the record in the mapping, which stays mapped until the munmap below and which no thread writes any more") (*th).map;
+    let len = unsafe("th is the record in the mapping, which stays mapped until the munmap below and which no thread writes any more") (*th).map_len;
     unregister(e);
-    let r = unsafe("the mapping holds no live object (caller)") os.munmap(base, len);
+    let r = unsafe("base, len are the mapping start() created, read from its record: no live object lies in it and no thread uses it") os.munmap(base, len);
 }
 
 // ---- `scope { spawn { } }` (compiler-emitted calls) ----
@@ -169,20 +169,22 @@ unsafe("th is the record of a mapping no thread uses any more") fn release(th: *
 // Starts f on a new thread and adds it to the scope list `list`.
 pub unsafe("f's captures stay valid until scope_join(list) returns (the lowering calls it at every exit of the scope)")
 fn scope_spawn(list: &mut usize, f: fn()) {
-    let h = unsafe("caller obligation") start(f);
+    let h = unsafe("f's captures stay valid until scope_join(list) returns: the handle goes on the list that call joins") start(f);
     if h == 0 { return; }
     let th = h as *mut Thread;
     unsafe("th is the live record start returned; only the spawning thread links it") { (*th).next = *list; }
     *list = h;
 }
 
-// Joins every thread of the scope list (newest first) and empties it.
+// Joins every thread of the scope list (newest first) and empties it. A safe fn that trusts its
+// argument: `*list` must be 0 or the head of a chain built only by `scope_spawn` (each record
+// live and joined once, through this call), as the lowering of `scope` and std.thread.run pass it.
 pub fn scope_join(list: &mut usize) {
     let mut h = *list;
     while h != 0 {
         let th = h as *mut Thread;
-        let next = unsafe("h is a live record of this list") (*th).next;
-        unsafe("h came from spawn and is in this list once") { join(h); }
+        let next = unsafe("h is the head of the chain scope_spawn built in *list, so a record start() created that no join has freed") (*th).next;
+        unsafe("h came from start through scope_spawn and is in the list once, so this is its only join") { join(h); }
         h = next;
     }
     *list = 0;
@@ -190,15 +192,17 @@ pub fn scope_join(list: &mut usize) {
 
 // ---- thread start (called by `__stave_thread_start`) ----
 
+// The thread body. A safe fn that trusts its argument: `arg` must be the record start that
+// `start` passed to os.spawn_thread, still mapped and holding the fn value `start` stored.
 pub fn entry(arg: usize) -> usize {
     let th = arg as *const Thread;
-    let alt = unsafe("arg is the record start passed to spawn_thread") (*th).alt;
-    let alt_len = unsafe("arg is the record start passed to spawn_thread") (*th).alt_len;
+    let alt = unsafe("arg is the record start passed to spawn_thread, mapped until join") (*th).alt;
+    let alt_len = unsafe("arg is the record start passed to spawn_thread, mapped until join") (*th).alt_len;
     let ok = panic.set_altstack(alt, alt_len);
-    let code = unsafe("arg is the record start passed to spawn_thread") (*th).code;
-    let env = unsafe("arg is the record start passed to spawn_thread") (*th).env;
+    let code = unsafe("arg is the record start passed to spawn_thread, mapped until join") (*th).code;
+    let env = unsafe("arg is the record start passed to spawn_thread, mapped until join") (*th).env;
     let w: [usize; 2] = [code, env];
-    let f = unsafe("w holds the two words of the fn value start was given") *(&w as *const [usize; 2] as *const fn());
+    let f = unsafe("w holds (code, environment) of the fn value start was given: a fn value is two words, code then environment") *(&w as *const [usize; 2] as *const fn());
     f();
     return 0;
 }

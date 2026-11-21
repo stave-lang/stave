@@ -765,6 +765,46 @@ labels = [{ at = "primary", text = "called here" }, { at = "clause", text = "fal
 fix = { description = "correct the arguments, or call only where the clause holds" }
 
 [[diag]]
+code = "E0219"
+severity = "error"
+area = "types"
+rule = "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one; a struct, enum, or generic type without `next(&mut self) -> Option<T>`, for a generic type from its bounds), and a range or iterator as a chunk source"
+holes = { place = "place" }
+message = "`for` cannot iterate the array or slice `{place}` by value: iterate a reference to it"
+labels = [{ at = "primary", text = "a named array or slice, or a field or element of a value: not an array value" }]
+fix = { description = "write `&{place}` (elements bound as `&T`, chunks by value), or `&mut {place}` to change it in place" }
+
+[diag.cases.mut-binding]
+message = "`for` cannot iterate the array or slice `{place}` by value: iterate a reference to it"
+labels = [{ at = "primary", text = "written in place by the `&mut` chunk binding" }]
+fix = { description = "write `&mut {place}`" }
+
+[diag.cases.mut-chunk]
+message = "`&mut` chunk binding over the value `{place}`: only a temporary would be written"
+labels = [{ at = "primary", text = "not a `&mut` sequence" }]
+fix = { description = "iterate `&mut a` of a mutable array or slice place" }
+
+[diag.cases.shared-iter]
+message = "`for` cannot advance the iterator behind the `&` reference `{place}`"
+labels = [{ at = "primary", text = "`next` takes `&mut self`" }]
+fix = { description = "iterate a `&mut` of the iterator (the loop advances it in place), or the iterator by value (moved into the loop, or copied if it is `Copy`)" }
+
+[diag.cases.ref-ref]
+message = "`for` cannot iterate `{place}`: it is a reference to a reference"
+labels = [{ at = "primary", text = "one reference too many" }]
+fix = { description = "iterate the inner reference itself (`r` instead of `&mut r` or `&r`, or `*r` of a `& &[T]`)" }
+
+[diag.cases.as-slice]
+message = "`for` cannot iterate the container `{place}`: it is no iterator"
+labels = [{ at = "primary", text = "a container with a slice view" }]
+fix = { description = "iterate its slice: `{place}.as_slice()` (elements as `&T`), or `{place}.as_mut_slice()` to change them" }
+
+[diag.cases.not-source]
+message = "`{place}` is not a `for` source"
+labels = [{ at = "primary", text = "not a range, an array value, a reference to an array or slice, or an iterator" }]
+fix = { description = "iterate a range, an array value, `&a` / `&mut a` of an array or slice, an iterator, or a `&mut` to one; a chunk loop takes an array value or a reference to an array or slice" }
+
+[[diag]]
 code = "E0300"
 severity = "error"
 area = "patterns"
@@ -943,7 +983,7 @@ fix = { description = "compute the operand that uses `{place}` into a `let` befo
 code = "E0503"
 severity = "error"
 area = "borrow"
-rule = "assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)"
+rule = "assignment to an immutable binding or through `&` (case `shared-ref` also: a `&mut` chunk binding over a `&` source); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)"
 holes = { place = "place" }
 message = "cannot assign to `{place}`: the binding is not `mut`"
 labels = [{ at = "primary", text = "assignment here" }, { at = "binding", text = "declared without `mut` here" }]
@@ -1055,7 +1095,7 @@ retired = true
 code = "E0512"
 severity = "error"
 area = "borrow"
-rule = "returned value borrows a local; case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)"
+rule = "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)"
 holes = { place = "place" }
 message = "returned value borrows local `{place}`"
 labels = [{ at = "primary", text = "returned here" }, { at = "local", text = "`{place}` is dropped when the function returns" }]
@@ -1435,7 +1475,7 @@ fix = { description = "put the `spawn` inside `scope {{ ... }}`; its threads joi
 code = "E0802"
 severity = "error"
 area = "threads-unsafe-ffi"
-rule = "captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body: a capture that is not `Sync`, or a `&mut` capture"
+rule = "captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body: a capture that is not `Sync`, or a `&mut` capture (any use that is not a proven read, through any dereference, captures by `&mut`)"
 holes = { name = "name", type = "type" }
 message = "captured `{name}` of type `{type}` is not `Send`"
 labels = [{ at = "primary", text = "captured here" }]

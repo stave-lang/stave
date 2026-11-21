@@ -52,7 +52,7 @@ impl<T, const R: u32> Mutex<T, R> {
     }
 
     pub fn try_lock(&self) -> Option<MutexGuard<T, R>> from self {
-        let ok = unsafe("word is this mutex's lock word") atomic.try_lock(self.word.get());
+        let ok = unsafe("word is this mutex's lock word; it lives as long as self") atomic.try_lock(self.word.get());
         return if ok then Option.Some(MutexGuard::<T, R>.{ m: self, marker: 0usize as *const u8 }) else Option.None;
     }
 

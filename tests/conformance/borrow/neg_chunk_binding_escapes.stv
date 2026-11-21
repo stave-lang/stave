@@ -1,0 +1,37 @@
+//~ CHECK-ONLY
+// A `&` / `&mut` chunk binding (and the first `tail masked` binding) borrows a copy of the chunk
+// local to its block, stored back into the sequence where the block ends: it cannot be returned
+// (E0512) or kept past the block (E0501).
+fn ret_mut(s: &mut [u32; 4]) -> Option<&mut u32x4> from s {
+    for v: &mut u32x4 in s {
+        return Option.Some(v); //~ ERROR E0512
+    }
+    return Option.None;
+}
+
+fn ret_shared(s: &[u32]) -> Option<&u32x4> from s {
+    for v: &u32x4 in s {
+        return Option.Some(v); //~ ERROR E0512
+    } tail scalar (x) {
+    }
+    return Option.None;
+}
+
+fn ret_tail(s: &mut [u32]) -> Option<&mut u32x4> from s {
+    for v: &mut u32x4 in s {
+    } tail masked (v, m) {
+        return Option.Some(v); //~ ERROR E0512
+    }
+    return Option.None;
+}
+
+fn kept(s: &mut [u32; 8]) -> u32 {
+    let mut z = u32x4.splat(0u32);
+    let mut keep: &mut u32x4 = &mut z;
+    for v: &mut u32x4 in s {
+        keep = v;
+        break; //~ ERROR E0501
+    }
+    *keep = u32x4.splat(7u32);
+    return s[0];
+}

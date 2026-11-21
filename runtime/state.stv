@@ -87,6 +87,20 @@ pub struct State {
     pub reg: [usize; REG_LEN],
 }
 
+// The one process-wide block. Who may read and write which field, and under what:
+// - start-up fields (argc .. altstack_size, `guard_*`, `stack_*`, `page_size`, `hwcap*`): written
+//   by runtime.start (and runtime.panic.install) before main, while no other thread exists; read-only
+//   afterwards, so reads take no lock;
+// - allocator fields (`free`, `arena_*`, `small_mapped`, `large_mapped`): read and written only
+//   with `alloc_lock` held;
+// - registry (`reg`): written only with `reg_lock` held; words 0..2 of an entry are stored by
+//   atomic swaps and read lock-free by the signal handler with atomic loads, word 3 is read and
+//   written only under the lock;
+// - `alloc_lock`, `reg_lock`, `next_thread`, `ncpu`, `panicking`: accessed only through
+//   runtime.atomic;
+// - `main_block`: read and written only by the main thread.
+// Every access goes through the pointer `get()` returns, in an `unsafe(..)` site that names the
+// rule it relies on.
 static mut STATE: State = State.{
     argc: 0,
     argv: 0,

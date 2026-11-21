@@ -1,0 +1,62 @@
+//~ STDOUT for_sources.stdout
+//~ EXIT 0
+// `for` sources: an array value is the loop's own temporary (elements moved out), a reference
+// is iterated through, and an iterator is advanced as a copy taken at the loop head (the place
+// it was copied from does not change).
+import std.io;
+
+struct D {
+    id: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {
+        let k: u32 = self.id;
+        io.print(f"drop {k}\n");
+    }
+}
+
+struct Count {
+    n: u32,
+}
+
+impl Copy for Count {}
+
+impl Count {
+    fn next(&mut self) -> Option<u32> {
+        if self.n == 3 {
+            return Option.None;
+        }
+        self.n = self.n + 1;
+        return Option.Some(self.n);
+    }
+}
+
+fn mk() -> [D; 2] {
+    return [D.{ id: 1 }, D.{ id: 2 }];
+}
+
+fn main() -> i32 {
+    for d in mk() {
+        let k: u32 = d.id;
+        io.print(f"got {k}\n");
+    }
+    let mut a: [u32; 8] = [1u32; 8];
+    for x in &mut a {
+        *x = *x + 2;
+    }
+    let mut s: u32 = 0;
+    for x in &a {
+        s = s +% *x;
+    }
+    io.print(f"sum {s}\n");
+    let c = Count.{ n: 0 };
+    let r = &c;
+    let mut t: u32 = 0;
+    for x in c {
+        t = t + x;
+    }
+    let n: u32 = r.n;
+    io.print(f"iterator {t} {n}\n");
+    return 0;
+}

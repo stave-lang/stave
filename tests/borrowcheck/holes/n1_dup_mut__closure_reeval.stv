@@ -60,7 +60,7 @@ fn match_move(zero: &u32) -> usize {
 fn for_move(zero: &u32) -> usize {
     let mut p = Pick.{ best: zero, count: 0 };
     let t = [&mut p];
-    for q in t {
+    for q in own(t) {
         q.count = 1;
     }
     t[0].count = 2; //! 65
@@ -102,4 +102,9 @@ fn closure_reeval() -> u32 {
 fn main() -> i32 {
     let _ = closure_reeval();
     return 0;
+}
+
+// an array place is no `for` source (E0219); a call result is a value, its elements moved out
+fn own(a: [&mut Pick; 1]) -> [&mut Pick; 1] from a {
+    return a;
 }

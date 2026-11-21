@@ -368,6 +368,7 @@ mod tests {
             nested: Vec::new(),
             joins: Vec::new(),
             unsupported: None,
+            internal: None,
         }
     }
 
