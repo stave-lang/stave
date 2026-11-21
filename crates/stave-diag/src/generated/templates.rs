@@ -5125,7 +5125,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1402",
         severity: Severity::Error,
         area: "effects",
-        rule: "unmarked recursion: a call cycle (a strongly connected component of the whole-program call graph over instances: calls, implied calls, `dispatch` arms, fn-value calls resolved to the values that reach them, drops) with a fn not declared `rec fn`; one per cycle, at the call leaving its first unmarked fn (smallest path); the cycle is listed from there along a shortest path, and every other unmarked fn of the component gets a label at its name; a cycle made only by dropping a recursive value (drop glue, `Drop` impls, built-in fns) needs no marker; a cycle through a closure literal is E1409",
+        rule: "unmarked recursion: a call cycle (a strongly connected component of the whole-program call graph over instances: calls, implied calls, `dispatch` arms, fn-value calls resolved to the values that reach them, drops) with a fn not declared `rec fn`; one per cycle, at the call leaving its first unmarked fn (smallest path); the cycle is listed from there along a shortest path, and every other unmarked fn of the component gets a label at its name; a cycle made only by dropping a recursive value (drop glue and built-in fns) needs no marker, one through a user `Drop` impl does; a cycle through a closure literal is E1409",
         retired: false,
         located: true,
         holes: &[

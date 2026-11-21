@@ -302,12 +302,14 @@ code, where the trap is the backstop).
 **Assumes.** The call graph above. A cycle is a strongly connected component with more than one
 node or a self-edge. One with a closure body is E1409; else one with an instance of a fn not
 declared `rec` is E1402. A drop cycle is exempt: a cycle with a glue node whose every member is a
-glue node, a `Drop.drop` impl, or a fn of a built-in package. **Guarantees.** In an accepted program
-every recursion that can run goes around a cycle of `rec` fns or a drop cycle, so a program with
-neither has a call depth bounded by the graph. **What would break it.** A missing edge (a fn-value
-write): a cycle the check never sees. The exemption reads only the kinds of the members, not that
-a glue node drops a part of a value of its own type: a `Drop` impl that makes and drops a new value
-of its type recurses without `rec` and without a recursive type.
+glue node or a fn of a built-in package. **Guarantees.** In an accepted program every recursion
+that can run goes around a cycle of `rec` fns or a drop cycle, so a program with neither has a
+call depth bounded by the graph; a drop cycle's depth is the nesting depth of the value dropped,
+since each glue node and built-in `Drop` impl on it drops only parts of the value it is given
+(std's container drops obey it). A user `Drop` impl that makes and drops a value of its own type
+is on an ordinary cycle and needs `rec`. **What would break it.** A missing edge (a fn-value write
+the flow misses): a cycle the check never sees. A built-in `Drop` impl that drops a value it
+makes. Neither kind of cycle has a stack bound: a stack that reaches one keeps `[run] stack`.
 
 ## The stack bound: a bounded stack is never overrun
 

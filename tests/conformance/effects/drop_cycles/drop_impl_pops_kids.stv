@@ -1,0 +1,25 @@
+// A `Drop` impl that takes a part out and drops it (an explicit loop over the children) drops a
+// value of its own type: an ordinary cycle, `rec` needed.
+import std.vec;
+
+struct T {
+    kids: vec.Vec<T>,
+}
+
+impl Drop for T {
+    fn drop(&mut self) {
+        loop {
+            match self.kids.pop() {
+                Option.Some(k) => {} //~ ERROR E1402
+                Option.None => {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn main() {
+    let mut root = T.{ kids: vec.Vec::<T>.new() };
+    root.kids.push(T.{ kids: vec.Vec::<T>.new() });
+}

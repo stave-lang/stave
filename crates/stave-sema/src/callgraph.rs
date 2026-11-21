@@ -287,9 +287,11 @@ impl CallGraph {
     }
 
     /// Whether SCC `s` is a drop cycle: a cycle with a glue node whose every member is a glue
-    /// node, a `Drop.drop` impl, or a fn of a built-in package (a user fn that is not a `Drop`
-    /// impl, a closure, or a table makes it an ordinary cycle). The recursion of dropping a
-    /// recursive value, as glue(N) -> `Vec<N>.drop` -> `Vec<N>.clear` -> glue(N).
+    /// node or a fn of a built-in package (a user fn, a user `Drop` impl among them, a closure,
+    /// or a table makes it an ordinary cycle). The recursion of dropping a recursive value, as
+    /// glue(N) -> `Vec<N>.drop` -> `Vec<N>.clear` -> glue(N): each step drops a part of the value
+    /// the step before drops, so its depth is the value's. A user `Drop` impl on the cycle drops
+    /// values it makes, whose depth nothing bounds.
     pub fn is_drop_cycle(&self, s: u32) -> bool {
         self.scc_drop.get(s as usize).copied().unwrap_or(false)
     }
@@ -2089,15 +2091,6 @@ pub(crate) fn build(
     finish(w)
 }
 
-/// Whether fn decl `d` is a `Drop.drop` impl method.
-fn is_drop_impl(prog: &Program, sigs: &Sigs, d: DeclId) -> bool {
-    prog.decl(d).is_some_and(|x| x.kind == DeclKind::Method)
-        && sigs
-            .impl_def(prog.decl(d).map_or(DeclId::NONE, |x| x.parent))
-            .and_then(|i| i.trait_ref.as_ref())
-            .is_some_and(|t| t.trait_decl == sigs.lang.drop)
-}
-
 /// Whether decl `d` is declared in a built-in package (`std`, `runtime`, and their dependencies).
 fn in_builtin_package(prog: &Program, d: DeclId) -> bool {
     prog.decl(d).and_then(|x| prog.module(x.module)).is_some_and(|m| {
@@ -2107,7 +2100,6 @@ fn in_builtin_package(prog: &Program, d: DeclId) -> bool {
 
 fn finish(w: Walk<'_>) -> CallGraph {
     let prog = w.prog;
-    let sigs = w.sigs;
     let n_fn = w.nodes.len() as u32;
     let mut nodes: Vec<Node> = w.nodes.into_iter().map(|b| Node { kind: b.kind, span: b.span }).collect();
     let mut table_site: Vec<Option<Site>> = vec![None; w.tables.len()];
@@ -2188,14 +2180,12 @@ fn finish(w: Walk<'_>) -> CallGraph {
     let in_from: Vec<u32> = in_edges.iter().map(|&e| callers[e as usize]).collect();
     let (comp, count) = sccs(n, &out_start, &to, &in_start, &in_from);
     let (scc_of, scc_start, scc_nodes, scc_level, level_start) = levels(n, &comp, count, &callers, &to);
-    // members a drop cycle may have: glue, `Drop` impls, built-in fns (module docs)
+    // members a drop cycle may have: glue and built-in fns ([`CallGraph::is_drop_cycle`])
     let drop_path: Vec<bool> = nodes
         .iter()
         .map(|x| match &x.kind {
             NodeKind::Glue { .. } => true,
-            NodeKind::Fn { inst, .. } => {
-                is_drop_impl(prog, sigs, inst.decl) || in_builtin_package(prog, inst.decl)
-            }
+            NodeKind::Fn { inst, .. } => in_builtin_package(prog, inst.decl),
             _ => false,
         })
         .collect();
