@@ -21,6 +21,7 @@ fn ok<const N: u16>() -> u16 {
 fn main() -> i32 {
     let k: u32 = b::<7>();
     let j: i8 = s::<1>();
+    let i: i8 = s::<{-1}>();
     let m: u16 = ok::<65535>();
     return 0;
 }

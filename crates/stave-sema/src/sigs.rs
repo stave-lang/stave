@@ -831,8 +831,12 @@ pub(crate) fn lower_garg<H: LowerHost>(
     let a = icx.a(ga);
     let child = icx.first_child(ga);
     if let Some(declared) = want_const {
-        let cty =
-            if declared.is_none() || h.is_error_ty(declared) { h.fixed_ty(ids::USIZE) } else { declared };
+        if !declared.is_none() && h.is_error_ty(declared) {
+            // the param's declared type was reported: an arg checked against a guess would
+            // only add errors
+            return GArg::Const(ConstArg::Error);
+        }
+        let cty = if declared.is_none() { h.fixed_ty(ids::USIZE) } else { declared };
         if icx.is(a, Term::IntLit) {
             let Some((v, _)) = crate::literals::parse_int_text(icx.tok_str(a)) else {
                 return GArg::Const(ConstArg::Error);
