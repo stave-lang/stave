@@ -12,6 +12,20 @@ reference for what a program may write and what it means.
   needs ∪ the target baseline (E0707). Reason: CPU features never change while a program runs, so
   a value made where F is proven stays callable.
 
+## §1 Closure capture modes
+
+- A closure holds a capture by `&` only when every use of it in the body (nested closures
+  included) is a read, whatever `*`, field, element, or auto-deref steps lead from the local to
+  the use: a `&self` or by-value `self` method receiver, a built-in method's receiver, a fn value
+  called, the operand of `&`, an f-string hole, a by-value use of a type other than `&mut T` (a
+  `&mut T` passed as `&T` counts), the scrutinee of a `match` or destructuring `let` whose type
+  holds no `&mut` outside a `&`, or the sequence of a `for` over a range, an array value, `&[T]`, or
+  `&[T; N]` whose bindings hold no `&mut` (an array or `[T]` place is no source: E0219). Any other use (`*t.0 = ..`, `*a[0] += ..`,
+  `w.v.push(..)` with `w.v: &mut Vec<T>`, `&mut`, a `&mut` chunk or element binding, a `for`
+  over an iterator) makes it `&mut`, and so does a `&mut T` type. The thread rules (E0802) and
+  the borrow checker read the same mode. Reason: a mode the thread rule and the borrow checker
+  derive separately can disagree, and a `&` capture written from many threads races.
+
 ## §2 Type nesting depth
 
 - A type without components (a scalar, `str`, a mask, a generic parameter) is 1 level deep. A
@@ -71,6 +85,72 @@ reference for what a program may write and what it means.
   a parking fn, nor a denied `park` (E1401), has anything to check or a negative conformance
   test.
 
+## §3 Operand order and moves
+
+Every expression with several operands evaluates them left to right, each to a value, before it
+acts: a call (direct, method, through a fn value or closure: the fn value, then the receiver,
+then the arguments), a struct, tuple, array, or variant literal (fields in source order), a
+binary operator (left, then right), `c.select(a, b)`, and `p op= e` (below). A by-value
+operand whose type is not Copy is moved when it is evaluated, so every later operand sees the
+place moved: using it again, a part of it (`s.n`, Copy or not), or borrowing it there is
+E0502 (case `operand`), also inside a nested call, a closure literal, or an f-string hole. A
+Copy operand does not move: a later operand may still use the place (`f(s.n, s)` is fine; the
+checker takes the Copy value as read at the call, which may report a conflict a later operand
+makes with it).
+The fix names the value first: `let n = s.n; f(s, n);`.
+
+An assignment `p = e` evaluates the operands of the place `p` first (an index `xs[i]`, the call
+a dereference `*pick(&mut a)` or a field `sref(&mut s).f` goes through), then `e`, then makes
+the moves of `e` and writes `p`: `xs[i] = bump(&mut i)` writes the element of the old `i`, and
+`s = make(s, dup(&s.d))` is E0502 at `&s.d`. `p op= e` is `p = p op e`: the value of `p` is a
+by-value operand evaluated after the place's operands and before `e`. With a user operator on
+a non-Copy type it is a move, so `e` may not use `p` (E0502) and the write re-initializes `p`;
+a `p` that is not a whole local (a part, a place behind a reference or an index, a capture, a
+static) is E0504, like `*r = *r + e`.
+
+## §3 Whole moves and destructuring patterns
+
+A non-Copy value moves whole. A by-value use of a non-Copy part of a place or of a temporary
+outside a pattern (`let x = s.f;`, `f(t.0)`, `mk().a`, `s.v.into_iter()`, `s.f += e` with a
+user operator) is E0504 case `part`; Copy parts are read freely, borrows of parts (`&s.f`,
+`&mut s.f`) and assignments to parts (`s.f = v`, which drops the old part) are unchanged.
+
+Which patterns move. A `let`, `match` arm, or `for` pattern moves its scrutinee if it binds some
+non-Copy part (at any depth) by value. Every alternative of an or-pattern binds the same names
+with the same modes, so either all of them move or none does. A pattern that binds only Copy
+parts, binds by reference (through a `&` / `&mut` scrutinee), or binds nothing (`_`, a literal,
+`let _ = s;`, `match s { _ => .. }`, `S.{ n, b: _ }` with `n: u32`) only reads: the scrutinee
+stays alive and is dropped with its owner.
+
+When and where. A moving pattern takes the whole value at its binding point: the end of the
+`let` statement's pattern, the entry of the arm (after the guard passed), the start of each
+`for` iteration. There the bindings take their parts, the scrutinee becomes moved as a whole
+(a local is moved; a temporary is consumed, never dropped as a whole at its statement end), and
+each non-Copy part the pattern does not bind by value (a `_`, a field the struct
+pattern does not name, a sub-pattern that binds nothing such as a literal) is dropped there,
+before the arm body or the next statement, in declaration order of the fields, a nested part
+in place of its field (depth first); of an enum, only the matched variant's payload. No state
+"moved except a part" remains after the binding point.
+
+1. `let S.{ a, b: _ } = s;`: `a` takes `s.a`, then `s.b` is dropped, at the `let`; `s` is moved.
+   With a temporary (`let S.{ a, b: _ } = mk();`) the same: `b` is dropped at the `let`.
+2. `match s { S.{ a, b: _ } => .., other => .. }`: in the first arm `b` is dropped at arm entry
+   and `s` is moved; the second arm moves `s` into `other`. A temporary scrutinee: the same;
+   an arm that does not move it leaves it to be dropped at the end of the `match` statement.
+3. With a guard (`S.{ a, b: _ } if p(&a) => ..`): inside the guard the names are read-only
+   views of the scrutinee, nothing is moved or dropped; if the guard fails the value is intact
+   for the next arm; the move and the drop of `b` happen only when it passes. A guard only
+   reads (E0505), so the value it sees is the value the arm takes.
+4. Nested patterns and payloads: `E.Two(a, _)` drops the second payload at arm entry;
+   `W.{ p: P.{ x, y: _ }, q: _ }` drops `p.y`, then `q`. An or-pattern drops what the
+   alternative that matched ignores.
+5. `for P.{ a, b: _ } in src`: each iteration's element is moved into the pattern at the start
+   of the iteration and its `b` dropped there; the elements not reached are dropped by the
+   loop's source as before.
+
+A value whose type has an `impl Drop` is never taken apart, by a pattern either (E0504 case
+`drop`): its destructor runs on the whole value.
+
 ## §3 Storing calls: a view left borrowed
 
 A storing call (a call of a fn whose `&mut` view param has a `from` clause) for a view it reaches
@@ -126,6 +206,47 @@ and fn ABI are unchanged, and it has no effect (`without`).
 - Tests (conformance goldens, cross-target and CPU / GPU comparisons) count every NaN equal to
   every NaN and compare everything else bit for bit (`-0.0` is not `0.0`).
 
+## §4 `for` sources
+
+The kind is decided once, by the type checker, from the source's type as written in the
+definition (`stave_sema::loops::for_source`), and stored with the loop; the borrow checker, the
+capture analysis, and the lowering of every instance read the stored kind (and an iterator's
+resolved `next`), never the instance type. The list is closed: a type not listed is no source.
+
+| source type | element loop `for x in s` | chunk loop `for v: TxN in s` / `v: &mut TxN` |
+|---|---|---|
+| a range `a..b`, `a..=b` | the values | E0219 `not-source` |
+| `&a`, `&mut a`, a `&[T]` / `&mut [T]` / `&[T; N]` value | element `i` of `*s` borrowed per iteration: `&T` / `&mut T` | the chunks of `*s`; `&mut v` needs a `&mut` source (E0503 over `&`) |
+| an array value (a temporary: a call, a literal, a const, a value `if` / `match`, a cast) | the loop's temporary, elements moved out | the temporary, read only (`&mut v`: E0219 `mut-chunk`) |
+| an iterator value or place (`it`, `mk()`, `s.it`: a type with `next(&mut self)`) | moved into the loop (copied if Copy) at the head; the loop owns it, advances it, and drops it right after the loop on every path out (end, `break`, `return`, `?`); a place is unusable after, as after any move (E0502, E0504 behind a reference) | not a chunk source |
+| `&mut it`, `r: &mut It` (also a `&mut It` view field) | `*r` advanced in place: after the loop (also after `break`) the iterator has moved on; the loop drops nothing | not a chunk source |
+| `&it`, `r: &It` | E0219 `shared-iter` (`next` takes `&mut self`) | not a chunk source |
+| an array or `[T]` place | E0219: write `&a` / `&mut a` | E0219 |
+| a reference to a reference (`&mut &mut It`, `&&mut It`, `& &[T]`, `&mut &[T; N]`, ..) | E0219 `ref-ref`: iterate the inner reference | E0219 `ref-ref` |
+| any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, or a reference to one) | E0219 `not-source` | E0219 `not-source` |
+
+An iterator type is a struct, enum, or generic parameter with `next(&mut self) -> Option<X>`
+(else E0219 `not-source`; a `vec.Vec` or a reference to one: E0219 `as-slice`, iterate
+`.as_slice()`). A generic `T` (or `&mut T`) source is always an iterator through its bound's
+`next`: each instance runs that trait method, whatever the instance type is (`T = [u64; 2]` does
+not become an array loop, `T = &mut It` runs `impl Next for &mut It`); a `T` without such a bound
+is E0219 at the definition. Element and binding types, a sequence's length, and the resolved
+`next` come from the instance; the kind, by reference or by value, and the chunk width come from
+the definition. A source behind a view field is classified by the field's
+type (`v.s: &mut [T]`: a reference to a slice; `v.it: &mut It`: a `&mut` to an iterator).
+
+A *place* is: a local, param, `self`, or `static` (also through a module path, `m.TABLE`); `*e`;
+an expression whose last step is a field, tuple field, element `e[i]`, sub-slice `e[a..b]`, or
+`std.soa` column `ps.x` (of any base, `f().a` included); such an expression in parentheses or
+after `unsafe(..)`. Reason: a loop over a place reads (or writes) it while the body may change
+it; a reference makes the borrow visible and gives it one meaning in the checker and the code.
+
+A `&` or `&mut` chunk binding (also the first `tail masked` binding) borrows a copy of the chunk
+that lives in its block; the chunk of the sequence stays borrowed until the block is left (its end, `break`, `continue`, `return`, `?`), where a
+`&mut` copy is stored back. So the binding cannot leave its block (`return Option.Some(v)`:
+E0512; kept in an outer local: E0501). Reason: the chunk is loaded into a vector register or
+slot (a tail is partial, a chunk need not be aligned), never addressed in place.
+
 ## §4 Memory hints
 
 Reason for explicit hints: bandwidth-bound loops need them, and auto-hinting is guesswork.
@@ -134,3 +255,18 @@ Reason for explicit hints: bandwidth-bound loops need them, and auto-hinting is 
 
 Reason for `std.soa`: SIMD over a field of `Vec<Struct>` needs gathers; a column is one contiguous
 slice.
+
+Reason the collection, not the struct, picks the layout: one record passed, returned, or sent over
+FFI is best as a plain struct, while a loop over many records that reads few fields wants only
+those fields' bytes; a layout keyword or layout type parameter would give `&v[i]` two meanings and
+hide the cost, so `Vec` and `Soa` stay two containers of one record type and code over columns names
+the columns it reads (`ps.x[i]`). Reason for indices between records: an `idx.Id<T>` (u32) stays
+valid when a container grows or changes layout, and crosses threads, files, and the GPU as Flat
+data; a pointer does none of these.
+
+Limit: Flat and Frozen count an ADT's type arguments, also one that occurs in no field, so
+`idx.Id<T>` (a `u32` and no `T`) is Flat only when T is; a Soa row that refers to a record owning
+a `Vec` keeps the id's `raw()` u32. Not changed: a type argument is the only way an author ties a
+type whose fields hide a `T` (behind an integer or a byte pointer) to T's Flat and Frozen, since
+both are derived and never implemented (E1408); counting only fields would make such types Flat
+with no way out. Whether a marker param should stop counting is open.

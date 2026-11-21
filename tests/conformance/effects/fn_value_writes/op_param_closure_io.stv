@@ -1,0 +1,25 @@
+// A closure literal as the right operand; the impl calls it.
+import std.core;
+import std.io;
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+impl core.BitOr for fn() {
+    fn bitor(self, rhs: Self) -> Self {
+        rhs();
+        return nop;
+    }
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let a: fn() = nop;
+    let g = a | fn() { noisy(); };
+}
+
+fn main() {
+    quiet();
+}

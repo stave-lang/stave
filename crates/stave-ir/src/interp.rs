@@ -619,9 +619,9 @@ impl<'m, H: Host> Interp<'m, H> {
         };
         let alloc_fns = cfg.check.then(|| {
             Box::new(AllocFns {
-                try_alloc: m.find_func("runtime.alloc.try_alloc"),
-                free: m.find_func("runtime.alloc.free"),
-                try_realloc: m.find_func("runtime.alloc.try_realloc"),
+                try_alloc: m.known_func(crate::Known::TryAlloc),
+                free: m.known_func(crate::Known::Free),
+                try_realloc: m.known_func(crate::Known::TryRealloc),
             })
         });
         let bt = (cfg.check && cfg.borrow).then(|| {

@@ -65,6 +65,9 @@ pub struct Borrowck {
     pub skipped: u64,
     /// Bodies the builder could not model (nothing reported for them), with the reason.
     pub unsupported: Vec<(stave_sema::DeclId, &'static str)>,
+    /// Bodies not checked because the builder found it disagrees with stave-sema (a compiler
+    /// bug), with the reason.
+    pub internal: Vec<(stave_sema::DeclId, &'static str)>,
     /// The largest number of dataflow rounds of one body.
     pub max_rounds: u32,
     pub time: Duration,
@@ -95,6 +98,7 @@ struct One {
     diags: Vec<Diagnostic>,
     dump: Vec<(u32, DumpAccess)>,
     unsupported: Option<&'static str>,
+    internal: Option<&'static str>,
     rounds: u32,
     phases: [Duration; 3],
     locks: locks::Scan,
@@ -139,6 +143,10 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
         out.max_rounds = out.max_rounds.max(r.rounds);
         for (a, b) in out.phases.iter_mut().zip(r.phases) {
             *a += b;
+        }
+        if let Some(why) = r.internal {
+            out.internal.push((tb.decl, why));
+            continue;
         }
         if let Some(why) = r.unsupported {
             out.unsupported.push((tb.decl, why));
@@ -211,11 +219,12 @@ fn check_body(
         diags: Vec::new(),
         dump: Vec::new(),
         unsupported: body.unsupported,
+        internal: body.internal,
         rounds: 0,
         phases: [t0.elapsed(), Duration::ZERO, Duration::ZERO],
         locks: locks::Scan { drops: Some(Vec::new()), ..locks::Scan::default() },
     };
-    if body.unsupported.is_none() {
+    if body.unsupported.is_none() && body.internal.is_none() {
         check_tree(&body, &mut tys, opts, tb.item.0, &mut one);
         if one.locks.holds {
             one.locks.types = tys.ov.local.clone();

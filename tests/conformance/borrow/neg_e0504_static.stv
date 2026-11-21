@@ -1,0 +1,82 @@
+//~ CHECK-ONLY
+// A `static` is a place that is never moved from: a by-value use of a non-Copy static, or of a
+// non-Copy part of one, is E0504 (case `static`), whether it is bound, passed, matched, used as
+// a by-value receiver, or read inside a closure. Copy reads and borrows stay allowed.
+import std.mem;
+import std.sync;
+import std.vec;
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { } }
+impl D { pub fn eat(self) { } }
+
+static O: sync.Once<vec.Vec<u32>, 1> = sync.Once::<vec.Vec<u32>, 1>.new();
+static M: sync.Mutex<u32, 2> = sync.Mutex::<u32, 2>.new(0);
+static S: D = D.{ id: 1 };
+static A: [D; 2] = [D.{ id: 1 }, D.{ id: 2 }];
+static T: (D, u32) = (D.{ id: 3 }, 4);
+static N: u32 = 5;
+
+fn take<X>(x: X) { }
+
+fn bind() {
+    let o = O; //~ ERROR E0504
+}
+
+fn receiver() -> u32 {
+    return M.into_inner(); //~ ERROR E0504
+}
+
+fn drop_it() {
+    mem.drop(S); //~ ERROR E0504
+}
+
+fn element() {
+    let d = A[0]; //~ ERROR E0504
+}
+
+fn tuple_part() {
+    take(T.0); //~ ERROR E0504
+}
+
+fn generic_arg() {
+    take(S); //~ ERROR E0504
+}
+
+fn replace_source() {
+    let mut b = D.{ id: 9 };
+    let old = mem.replace(&mut b, S); //~ ERROR E0504
+}
+
+fn matched() -> u32 {
+    match S {
+        x => { return 1; } //~ ERROR E0504
+    }
+}
+
+fn pattern() -> u32 {
+    let (d, n) = T; //~ ERROR E0504
+    return n;
+}
+
+fn self_by_value() {
+    S.eat(); //~ ERROR E0504
+}
+
+fn in_closure() {
+    let f = fn() { let d = S; }; //~ ERROR E0504
+    f();
+}
+
+fn copy_reads() -> u32 {
+    let n = N;
+    let k = T.1;
+    let i = S.id;
+    let r: &D = &S;
+    let e: &D = &A[1];
+    return n + k + i + r.id + e.id;
+}
+
+fn main() -> i32 {
+    return 0;
+}

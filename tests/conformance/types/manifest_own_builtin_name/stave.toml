@@ -1,6 +1,6 @@
 # A package's own `name` may not be a built-in package's either: `import std.io;` in it would name
-# its own module `src/io.stv`, and as a dependency its modules would be the built-in's
-# (`runtime.x` below), which compiler-known paths would take for them.
+# its own module `src/io.stv`, and as a dependency its modules would be spelled like the built-in's
+# (`runtime.x` below).
 name = "std" #~ ERROR E1002
 kind = "bin"
 

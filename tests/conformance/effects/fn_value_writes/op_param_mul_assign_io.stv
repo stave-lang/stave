@@ -1,0 +1,25 @@
+// `f *= noisy`: the `Mul` impl calls `rhs`.
+import std.core;
+import std.io;
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+impl core.Mul for fn() {
+    fn mul(self, rhs: Self) -> Self {
+        rhs();
+        return nop;
+    }
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let mut f: fn() = nop;
+    f *= noisy;
+}
+
+fn main() {
+    quiet();
+}

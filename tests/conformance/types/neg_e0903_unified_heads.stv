@@ -1,0 +1,85 @@
+//~ CHECK-ONLY
+// Two impls of one trait overlap when their self types and trait args unify together, the
+// params of both impls as variables: neither head needs to be an instance of the other.
+trait Tr {
+    fn t(&self) -> u32;
+}
+
+struct W<T, U> { a: T, b: U }
+
+impl<T> Tr for W<T, u32> {
+    fn t(&self) -> u32 {
+        return 1;
+    }
+}
+
+impl<U> Tr for W<u32, U> { //~ ERROR E0903
+    fn t(&self) -> u32 {
+        return 2;
+    }
+}
+
+trait Conv<T> {
+    fn c(&self) -> u32;
+}
+
+struct A {}
+
+impl<T> Conv<T> for A {
+    fn c(&self) -> u32 {
+        return 1;
+    }
+}
+
+impl Conv<u32> for A { //~ ERROR E0903
+    fn c(&self) -> u32 {
+        return 2;
+    }
+}
+
+struct G<const X: usize, const Y: usize> { x: u8 }
+
+impl<const N: usize> Tr for G<N, 3> {
+    fn t(&self) -> u32 {
+        return 1;
+    }
+}
+
+impl<const M: usize> Tr for G<3, M> { //~ ERROR E0903
+    fn t(&self) -> u32 {
+        return 2;
+    }
+}
+
+// No common instance: accepted.
+struct B {}
+
+impl Conv<u8> for B {
+    fn c(&self) -> u32 {
+        return 1;
+    }
+}
+
+impl Conv<u16> for B {
+    fn c(&self) -> u32 {
+        return 2;
+    }
+}
+
+struct Q<T, U> { a: T, b: U }
+
+impl<T> Tr for Q<T, T> {
+    fn t(&self) -> u32 {
+        return 1;
+    }
+}
+
+impl<U> Tr for Q<U, Option<U>> {
+    fn t(&self) -> u32 {
+        return 2;
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

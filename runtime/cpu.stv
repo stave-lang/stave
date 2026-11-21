@@ -31,7 +31,8 @@ extern "stave-intrinsic" {
 
 // The process word, TRACE included; 0 until `init`. The compiler reads it by this path in every
 // dispatch body that tests an arm, so it stays a `u64` static of this module. Only `init` writes
-// it.
+// it, once, before main and before any other thread exists; every read comes after that write
+// (or sees the initial 0) and takes no lock, since nothing writes it again.
 static mut WORD: u64 = 0;
 
 pub const SSE42: u64 = 1 << 0;
@@ -130,14 +131,14 @@ fn init() {
     // baseline feature, since the baseline is closed downward.
     let mut w = detected & ~env_removed(base);
     if env_trace() { w = w | TRACE; }
-    unsafe("no other thread exists yet (caller)") {
+    unsafe("init runs once, before main and before any other thread exists (its obligation), so no other access to WORD overlaps this write") {
         WORD = w;
     }
 }
 
 // The process word `init` stored (0 before `init`), TRACE included.
 pub fn features() -> u64 {
-    return unsafe("WORD is written only by init, before any other thread") WORD;
+    return unsafe("WORD is written only once, by init before any other thread exists, and never after, so this read overlaps no write") WORD;
 }
 
 // One dispatch trace line (`dispatch: <fn> -> <arm>\n`, a string literal) in one write, so lines

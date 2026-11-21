@@ -46,7 +46,9 @@ mod ffi;
 pub mod gates;
 pub mod itemcx;
 pub mod kinds;
+pub mod known;
 pub mod literals;
+pub mod loops;
 pub mod lower;
 mod lower_expr;
 mod lower_fn;
@@ -96,6 +98,7 @@ pub use diag::failures as diagnostic_build_failures;
 pub use dump::{dump_names, dump_strings, names_file_into, strings_into};
 pub use ids::{BindingRef, DeclId, GenericRef, ItemId, ModuleId, PackageId, Sym};
 pub use intern::Strings;
+pub use known::KnownItems;
 pub use lower::{
     GraphLowering, LowerError, LowerErrorKind, LowerTimings, Mode, lower, lower_graph_nodes, lower_mapped,
     lower_timed,
@@ -295,6 +298,8 @@ pub struct Program {
     pub timings: Timings,
     /// The build target (dependency selection, intrinsic arch checks).
     pub target: Triple,
+    /// The compiler-known items, resolved in the built-in packages.
+    pub known: KnownItems,
     member_list: Vec<DeclId>,
     member_range: Vec<(u32, u32)>,
     member_by_name: FxHashMap<(DeclId, Sym), DeclId>,
@@ -926,10 +931,7 @@ impl Program {
                 })
             })
             .collect();
-        let soa_module = modules
-            .iter()
-            .position(|m| m.path_text == "std.soa" && packages[m.package.idx()].kind == PackageKind::Builtin)
-            .map(|i| ModuleId(i as u32));
+        let soa_module = known::builtin_module(&modules, &packages, &strings, stave_ir::Known::Soa.module());
         let prims: FxHashMap<Sym, Prim> =
             strings.iter().filter_map(|(s, text)| Prim::from_name(text).map(|p| (s, p))).collect();
         let builtins: FxHashMap<Sym, Builtin> =
@@ -1173,7 +1175,7 @@ impl Program {
         timings.resolve = t_resolve;
 
         let diagnostics = stave_diag::canonical_order(diags, &source_map);
-        Program {
+        let mut p = Program {
             packages,
             files,
             source_map,
@@ -1188,12 +1190,15 @@ impl Program {
             diagnostics,
             timings,
             target,
+            known: KnownItems::default(),
             member_list,
             member_range,
             member_by_name,
             impls_by_head,
             module_items,
-        }
+        };
+        p.known = KnownItems::resolve(&p);
+        p
     }
 }
 
@@ -1261,6 +1266,7 @@ impl Program {
             diagnostics,
             timings,
             target,
+            known: KnownItems::default(),
             member_list: Vec::new(),
             member_range: Vec::new(),
             member_by_name: FxHashMap::default(),

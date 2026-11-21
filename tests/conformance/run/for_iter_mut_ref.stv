@@ -1,0 +1,66 @@
+//~ STDOUT for_iter_mut_ref.stdout
+//~ EXIT 0
+// A `&mut` to an iterator as a `for` source (a param, `&mut it`, a view field) advances the
+// iterator through the reference: after the loop, `break` included, the caller's iterator has
+// moved on; the loop does not drop it.
+import std.io;
+import std.iter;
+
+struct Count {
+    i: u64,
+    n: u64,
+}
+
+impl Count {
+    fn next(&mut self) -> Option<u64> {
+        if self.i >= self.n {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        return Option.Some(self.i);
+    }
+}
+
+view struct V {
+    it: &mut Count,
+}
+
+fn take(it: &mut Count) -> u64 {
+    let mut s: u64 = 0;
+    for x in it {
+        s = s + x;
+        if x == 2 {
+            break;
+        }
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let mut c = Count.{ i: 0, n: 5 };
+    let s = take(&mut c);
+    let i = c.i;
+    let mut t: u64 = 0;
+    for x in &mut c {
+        t = t + x;
+        break;
+    }
+    let j = c.i;
+    let mut e = Count.{ i: 0, n: 3 };
+    let v = V.{ it: &mut e };
+    let mut u: u64 = 0;
+    for x in &mut *v.it {
+        u = u + x;
+    }
+    let k = e.i;
+    let xs: [u32; 5] = [1u32, 2u32, 3u32, 4u32, 5u32];
+    let mut it = iter.iter(&xs);
+    let mut w: u32 = 0;
+    for x in &mut it {
+        w = w + *x;
+        break;
+    }
+    let left = it.len();
+    io.print(f"{s} {i} {t} {j} {u} {k} {w} {left}\n");
+    return 0;
+}

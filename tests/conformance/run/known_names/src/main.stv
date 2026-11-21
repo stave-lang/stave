@@ -1,0 +1,88 @@
+// User items named like compiler-known items, in user modules: `mymod.alloc`, `mymod.try_alloc`,
+// `mymod.free`, `mymod.copy_raw`, `panic.trap`, `panic.requires_failed`, `panic.on_signal`,
+// `thread.entry`, `thread.start`, `cpu.init`, a `fn start`, a `fn entry`, a type `Vec` with a
+// `drop`, an inherent `drop` method. Each is an ordinary item at every stage: it runs where the
+// program calls it and nowhere else, and the runtime's own items still run beside it (std's
+// `Vec`, the `requires` check of `half`).
+import std.io;
+import std.vec;
+import cpu;
+import mymod;
+import panic;
+import thread;
+
+struct Vec {
+    pub n: u32,
+}
+
+impl Drop for Vec {
+    fn drop(&mut self) {
+        let n = self.n;
+        io.print(f"drop Vec {n}\n");
+    }
+}
+
+struct Buf {
+    pub k: u32,
+}
+
+impl Buf {
+    pub fn drop(&self) -> u32 {
+        return self.k + 100;
+    }
+}
+
+fn start(x: u32) -> u32 {
+    return x + 1;
+}
+
+fn entry(sp: usize) -> usize {
+    return sp * 2;
+}
+
+fn seven() -> u32 {
+    return 7;
+}
+
+fn half(x: usize) -> usize requires(x % 2 == 0) {
+    return x / 2;
+}
+
+fn main() -> i32 {
+    let a = mymod.alloc(3);
+    let p = mymod.try_alloc(16, 8);
+    let f = mymod.free(p, 16, 8);
+    io.print(f"alloc {a} try_alloc {p} free {f}\n");
+    let src: [u8; 4] = [1u8, 2u8, 3u8, 4u8];
+    let mut dst: [u8; 4] = [0u8; 4];
+    mymod.copy_raw(&mut dst[0..4], &src[0..4], 3);
+    let d0 = dst[0];
+    let d1 = dst[1];
+    let d2 = dst[2];
+    let d3 = dst[3];
+    io.print(f"copy_raw {d0} {d1} {d2} {d3}\n");
+    let t = panic.trap(2, 5);
+    let r = panic.requires_failed(9);
+    let s = panic.on_signal(11);
+    io.print(f"trap {t} requires_failed {r} on_signal {s}\n");
+    let e = thread.entry(4);
+    let st = thread.start(seven);
+    let ci = cpu.init();
+    io.print(f"thread.entry {e} thread.start {st} cpu.init {ci}\n");
+    let s1 = start(1);
+    let e1 = entry(21);
+    let h = half(e1);
+    io.print(f"start {s1} entry {e1} half {h}\n");
+    let b = Buf.{ k: 5 };
+    let bd = b.drop();
+    io.print(f"Buf.drop {bd}\n");
+    let mut v = vec.Vec::<u32>.new();
+    v.push(5);
+    v.push(6);
+    let n = v.len();
+    io.print(f"std Vec len {n}\n");
+    let v1 = Vec.{ n: 1 };
+    let v2 = Vec.{ n: 2 };
+    io.print(f"user Vec {v1.n} {v2.n}\n");
+    return 0;
+}

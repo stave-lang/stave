@@ -1,0 +1,25 @@
+// The stack bound counts every fn a `*p`-written fn value can be: `big` (1 MiB frame) fits.
+//~ STDOUT stack_ptr_store.stdout
+import std.io;
+
+fn small() -> u64 {
+    return 1u64;
+}
+
+fn big() -> u64 {
+    let mut buf: [u64; 131072] = [0u64; 131072];
+    buf[131071] = 3;
+    return buf[131071] + buf[7];
+}
+
+fn pick() -> u64 {
+    let mut f: fn() -> u64 = small;
+    let p = &mut f;
+    *p = big;
+    return f();
+}
+
+fn main() {
+    let r = pick();
+    io.print(f"{r}\n");
+}

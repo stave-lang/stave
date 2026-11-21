@@ -1,0 +1,98 @@
+//~ STDOUT idx_ids.stdout
+// std.idx.Id<T>: records refer to each other by typed index. Ids into a Vec of rows and into a
+// Soa of columns, `NONE` as "no row", the checked conversions, comparison, and a row type that
+// refers to its own rows (`Id<Inst>` in `Soa<Inst>`).
+import std.idx;
+import std.io;
+import std.soa;
+import std.vec;
+
+struct Customer {
+    pub credit: i64,
+}
+
+struct Order {
+    pub customer: idx.Id<Customer>,
+    pub cents: i64,
+}
+
+impl Copy for Order {}
+
+// One instruction of a tiny expression list: `arg` is an earlier result, or NONE. The values
+// are a side column of i64 indexed by `arg.index()` (`arg.of` takes only `[Inst]`).
+struct Inst {
+    pub op: u8,
+    pub arg: idx.Id<Inst>,
+    pub k: i64,
+}
+
+impl Copy for Inst {}
+
+fn add_customer(cs: &mut vec.Vec<Customer>, credit: i64) -> idx.Id<Customer> {
+    let id = idx.Id::<Customer>.new(cs.len());
+    cs.push(Customer.{ credit: credit });
+    return id;
+}
+
+fn eval(insts: &soa.Soa<Inst>) -> i64 {
+    let mut vals = vec.Vec::<i64>.new();
+    for i in 0..insts.len() {
+        let a = insts.arg[i];
+        let done = vals.as_slice();
+        let base: i64 = if a.is_none() then 0 else done[a.index()];
+        let v: i64 = if insts.op[i] == 0 then base + insts.k[i] else base * insts.k[i];
+        vals.push(v);
+    }
+    let last = vals.len() - 1;
+    return vals.as_slice()[last];
+}
+
+fn main() -> i32 {
+    let mut cs = vec.Vec::<Customer>.new();
+    let ann = add_customer(&mut cs, 100);
+    let bob = add_customer(&mut cs, 50);
+    let mut orders = soa.Soa::<Order>.new();
+    orders.push(Order.{ customer: bob, cents: 30 });
+    orders.push(Order.{ customer: ann, cents: 70 });
+    orders.push(Order.{ customer: bob, cents: 15 });
+    for i in 0..orders.len() {
+        let c = orders.customer[i];
+        let rows = cs.as_mut_slice();
+        let cust = c.of_mut(rows);
+        cust.credit = cust.credit - orders.cents[i];
+    }
+    let a = ann.of(cs.as_slice()).credit;
+    let b = bob.of(cs.as_slice()).credit;
+    let o1 = idx.Id::<Order>.new(1);
+    let r = o1.row(&orders);
+    let rc = r.customer.index();
+    io.print(f"credit {a} {b} {rc} {r.cents}\n");
+
+    let none = idx.Id::<Customer>.none();
+    let raw = none.raw();
+    let n1 = none.is_none();
+    let n2 = ann.is_none();
+    let ci = none.checked_index().is_none();
+    let ok = idx.Id::<Customer>.checked_new(0xFFFF_FFFE).is_some();
+    let big = idx.Id::<Customer>.checked_new(0xFFFF_FFFF).is_none();
+    let back = idx.Id::<Customer>.from_raw(raw).is_none();
+    io.print(f"none {raw} {n1} {n2} {ci} {ok} {big} {back}\n");
+
+    let lt = ann.lt(bob);
+    let le = bob.le(bob);
+    let gt = none.gt(bob);
+    let ge = ann.ge(bob);
+    let eq = ann.eq(idx.Id::<Customer>.from_raw(0));
+    let ne = ann.ne(bob);
+    io.print(f"cmp {lt} {le} {gt} {ge} {eq} {ne}\n");
+
+    // (((0 + 2) * 5) + 1) * 3
+    let mut insts = soa.Soa::<Inst>.new();
+    insts.push(Inst.{ op: 0, arg: idx.Id::<Inst>.none(), k: 2 });
+    insts.push(Inst.{ op: 1, arg: idx.Id::<Inst>.new(0), k: 5 });
+    insts.push(Inst.{ op: 0, arg: idx.Id::<Inst>.new(1), k: 1 });
+    insts.push(Inst.{ op: 1, arg: idx.Id::<Inst>.new(2), k: 3 });
+    let e = eval(&insts);
+    io.print(f"eval {e}\n");
+    return 0;
+}

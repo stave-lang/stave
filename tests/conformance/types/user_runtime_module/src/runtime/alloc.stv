@@ -1,0 +1,3 @@
+pub fn try_alloc(size: usize, al: usize) -> usize { //~ ERROR E0107
+    return size + al;
+}

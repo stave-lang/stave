@@ -11,8 +11,8 @@ use stave_ir::interp::Val;
 use stave_ir::witness::check::{Reject, check_func, check_module, remove};
 use stave_ir::witness::{ASSERT_BLOCKS, Edge, FnWitness, NO_BLOCK, Node, Source};
 use stave_ir::{
-    Block, CastKind, FuncBuilder, FuncId, Module, Op, Operand, Outcome, PanicKind, TypeId, Value,
-    verify_module,
+    AdtShape, Block, CastKind, DeclId, FuncBuilder, FuncId, Module, Op, Operand, Outcome, PanicKind, TypeId,
+    Value, verify_module,
 };
 
 struct Ty {
@@ -527,6 +527,114 @@ fn lengths_are_per_slice_value() {
     }
 }
 
+/// How the parameter `s` of `app.f(s, xs: &[u32], i: usize) -> u32` reaches the struct
+/// `S { n: usize, m: usize }`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Behind {
+    /// `s: &S`, the module naming another decl as its `UnsafeCell`.
+    Shared,
+    /// `s: &S`, the module naming no `UnsafeCell`.
+    NoCell,
+    /// `s: &mut S`.
+    Mut,
+    /// `s: &S`, S the module's `UnsafeCell`.
+    Cell,
+}
+
+/// `if i < s.n { check.bounds i s.n; return xs[i]; } return 0;` with `s.n` read twice. The first
+/// read is a `load` of the field, or (`getter` = field 0 or 1) a call of `app.n(s) -> usize`,
+/// whose body loads field `n` or `m`. Returns the module, `f`, `s`, `i`, both reads, the block
+/// the test enters.
+fn field_fixture(behind: Behind, getter: Option<u32>) -> (Module, FuncId, [Value; 4], Block) {
+    let mut m = Module::new();
+    let (u32t, us, bt) = (m.types.u32(), m.types.usize(), m.types.bool());
+    let sd = DeclId(7);
+    let st = m.types.adt(sd, vec![], AdtShape::structure(vec![us, us]));
+    m.cell = match behind {
+        Behind::Cell => Some(sd),
+        Behind::NoCell => None,
+        Behind::Shared | Behind::Mut => Some(DeclId(8)),
+    };
+    let ps = m.types.ref_(behind == Behind::Mut, st);
+    let pf = m.types.ref_(behind == Behind::Mut, us);
+    let sl = m.types.slice(u32t);
+    let psl = m.types.ref_(false, sl);
+    let pe = m.types.ref_(false, u32t);
+    let g = getter.map(|k| {
+        define(&mut m, &[2], "app.n", &[ps], Some(us), |b, _| {
+            let s = b.param(0).unwrap();
+            let kk = b.int(i128::from(k));
+            let a = b.op(Op::FieldAddr, pf, &[s.into(), kk]);
+            let v = b.load(us, a);
+            b.ret(Some(v.into()));
+        })
+    });
+    let mut out = None;
+    let f = define(&mut m, &[1], "app.f", &[ps, psl, us], Some(u32t), |b, _| {
+        let (s, xs, i) = (b.param(0).unwrap(), b.param(1).unwrap(), b.param(2).unwrap());
+        let field = |b: &mut FuncBuilder| {
+            let z = b.int(0);
+            let a = b.op(Op::FieldAddr, pf, &[s.into(), z]);
+            b.load(us, a)
+        };
+        let n1 = match g {
+            Some(g) => b.call(g, Some(us), &[s.into()]).unwrap(),
+            None => field(b),
+        };
+        let c = b.cmp(Op::Lt, bt, i, n1);
+        let (then, els) = branch(b, c);
+        let n2 = field(b);
+        b.bounds_check(i, n2);
+        let p = b.op(Op::ElemAddr, pe, &[xs.into(), i.into()]);
+        let x = b.load(u32t, p);
+        ret(b, x);
+        b.switch_to(els);
+        ret0(b);
+        out = Some(([s, i, n1, n2], then));
+    });
+    verify_module(&m).unwrap_or_else(|e| panic!("{e:?}"));
+    let (vals, then) = out.unwrap();
+    (m, f, vals, then)
+}
+
+/// An int field behind a `&` parameter is one value while the function runs, whether a `load`
+/// or a getter call reads it; behind `&mut`, inside an `UnsafeCell`, or in a module that does not
+/// name its `UnsafeCell`, each read is a value of its own, and a getter of another field states
+/// that field.
+#[test]
+fn a_field_behind_a_shared_param_is_one_value() {
+    for behind in [Behind::Shared, Behind::NoCell, Behind::Mut, Behind::Cell] {
+        for getter in [None, Some(0), Some(1)] {
+            let (m, f, [s, i, n1, n2], then) = field_fixture(behind, getter);
+            let bd = body(&m, f);
+            let first = match getter {
+                Some(_) => Source::Getter { call: inst_of(bd, n1) },
+                None => Source::FieldLoad { inst: inst_of(bd, n1) },
+            };
+            let chain = vec![
+                edge(val(i), val(n1), -1, Source::Branch { block: then.0 }),
+                edge(val(n1), Node::Field(s, 0), 0, first),
+                edge(Node::Field(s, 0), val(n2), 0, Source::FieldLoad { inst: inst_of(bd, n2) }),
+            ];
+            let case = format!("{behind:?} {getter:?}");
+            match (behind, getter) {
+                (Behind::Shared, Some(1)) => {
+                    assert!(proved(&m, f).is_none(), "{case}");
+                    assert_eq!(verdict(&m, f, chain), Err(Reject::Edge), "{case}");
+                }
+                (Behind::Shared, _) => {
+                    let (_, got) = proved(&m, f).expect("a proof");
+                    assert_eq!(got, chain, "{case}");
+                }
+                _ => {
+                    assert!(proved(&m, f).is_none(), "{case}");
+                    assert_eq!(verdict(&m, f, chain), Err(Reject::Source), "{case}");
+                }
+            }
+        }
+    }
+}
+
 /// `w = &a[0..a.len() - 1]` after the test `i < a.len()`: the new slice has its own length, one
 /// less; claiming it has `a`'s is refused. Its true length does give a proof for `i + 1 < n`.
 #[test]
@@ -988,7 +1096,7 @@ fn the_checker_shares_no_code_with_the_pass() {
     let uses: Vec<&str> = code.iter().copied().filter(|l| l.starts_with("use ")).collect();
     assert_eq!(uses.len(), 3, "{uses:?}");
     assert!(uses[0].starts_with("use super::{") && uses[1].starts_with("use crate::ir::{"), "{uses:?}");
-    assert_eq!(uses[2], "use crate::types::{IntBits, TypeKey};");
+    assert_eq!(uses[2], "use crate::types::{IntBits, TypeId, TypeKey};");
     for banned in [
         "bounds::",
         "verify",

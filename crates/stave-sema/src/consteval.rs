@@ -99,7 +99,10 @@ pub(crate) fn eval_item_const<E: CEnv>(env: &mut E, te: &TyEnv<'_>, e: u32, ty: 
 pub(crate) fn eval_u64<E: CEnv>(env: &mut E, te: &TyEnv<'_>, n: u32, ty: TypeId) -> ConstArg {
     // A bare const generic parameter.
     if let Some(p) = const_param_path(te, n) {
-        return ConstArg::Param(p);
+        if ty.is_none() {
+            return ConstArg::Param(p);
+        }
+        return crate::sigs::const_param_arg(env, &te.icx, n, p, ty);
     }
     let mut ev = Ev { env, te, depth: 0, params: Vec::new() };
     let Some((t, v)) = ev.eval(n, Some(ty)) else { return ConstArg::Error };

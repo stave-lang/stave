@@ -27,13 +27,14 @@
 //! **Stacks.** Main's stack holds the `__stave_main` stub and `main`. A thread runs the
 //! `__stave_thread_start` stub, `runtime.thread.entry`, and the fn value it was started with; each
 //! function a call-graph [`EdgeKind::Spawn`] edge reaches (`spawn` bodies, the closures `std.thread`
-//! starts) or that `runtime.thread.start` can be given (the targets of its fn-value call, which it
-//! makes where no thread can be created) gets a row keyed by its code address. The table holds
-//! the bound plus [`MARGIN`] for bounded stacks and 0 (the `[run] stack` default) for the others;
-//! the runtime rounds up to the page size. No error comes from the bound: frame sizes differ
+//! starts, every fn value `runtime.thread.start` can be given) gets a row keyed by its code
+//! address. The fn-value call of `runtime.thread.run_queued` is left out: it runs a queued value
+//! at a join only in an image without a stack table (the IR interpreter; a native image fails to
+//! create the thread instead, so a spawn body never runs on the joiner's bounded stack). The table holds the bound plus [`MARGIN`] for bounded stacks and 0 (the `[run] stack`
+//! default) for the others; the runtime rounds up to the page size. No error comes from the bound: frame sizes differ
 //! between debug and release.
 
-use stave_ir::{FuncId, Module, Op, Operand, Term};
+use stave_ir::{FuncId, Known, Module, Op, Operand, Term};
 use stave_obj::{DataObj, StackUse, SymbolId};
 use stave_sema::callgraph::{CallGraph, EdgeKind, NodeKind};
 
@@ -241,10 +242,6 @@ fn trapping_node(start: &[u32], to: &[u32], traps: &[bool], from: &[u32]) -> Opt
     None
 }
 
-fn find_body(m: &Module, path: &str) -> Option<FuncId> {
-    m.funcs.iter().position(|f| f.path == path && f.body.is_some()).map(|i| FuncId(i as u32))
-}
-
 /// What one function's body calls.
 #[derive(Default)]
 struct Calls {
@@ -390,10 +387,9 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
             }
         }
     }
-    let called = IntrinsicCalls {
-        cpu_init: find_body(m, "runtime.cpu.init"),
-        copy_raw: find_body(m, "std.slice.copy_raw"),
-    };
+    let queued = m.known_body(Known::RunQueued);
+    let called =
+        IntrinsicCalls { cpu_init: m.known_body(Known::CpuInit), copy_raw: m.known_body(Known::CopyRaw) };
     let mut made = vec![false; nf];
     let calls: Vec<Calls> = (0..nf).map(|f| calls_of(m, FuncId(f as u32), &called, &mut made)).collect();
     let unmapped_values = (0..nf).any(|f| made[f] && ids[f].iter().all(|&x| x as usize >= n));
@@ -415,6 +411,7 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
                 poison[x as usize] = Some(Why::Foreign(at(x)));
             }
             if c.indirect
+                && Some(FuncId(f as u32)) != queued
                 && poison[x as usize].is_none()
                 && (!graph || unmapped_values || !succ.iter().any(|e| e.kind == EdgeKind::Indirect))
             {
@@ -456,7 +453,7 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
     // That holds only if nothing `begin` reaches traps (else a trap there starts over).
     let zero = vec![Ok(0); total];
     let first = longest(&start, &to, &weight, &zero, &poison);
-    let trap = match (find_body(m, "runtime.panic.trap"), find_body(m, "runtime.panic.begin")) {
+    let trap = match (m.known_body(Known::Trap), m.known_body(Known::PanicBegin)) {
         (Some(t), Some(b)) => match trapping_node(&start, &to, &traps, &ids[b.index()]) {
             Some(x) => Err(Why::Cycle(at(x))),
             None => over(&first, &ids[t.index()]).map(|d| d.saturating_mul(2)),
@@ -486,9 +483,8 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
         }
     }
 
-    // threads: the functions live spawn edges reach, and every fn value a live
-    // `runtime.thread.start` can be given (its fallback calls it, so the call graph has them as
-    // targets of that call)
+    // threads: the functions live spawn edges reach (a node of `runtime.thread.start` has one to
+    // each fn value it can be given)
     let mut rows: Vec<(FuncId, u32)> = Vec::new();
     let add_row = |x: u32, rows: &mut Vec<(FuncId, u32)>| {
         for &f in &funcs_of[x as usize] {
@@ -502,20 +498,6 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
             }
         }
     }
-    if let Some(s) = find_body(m, "runtime.thread.start") {
-        for &x in ids[s.index()].iter().filter(|&&x| (x as usize) < n && live[x as usize]) {
-            for e in g.succ(x).iter().filter(|e| e.kind == EdgeKind::Indirect) {
-                match g.nodes[e.to as usize].kind {
-                    NodeKind::Table { .. } => {
-                        for mb in g.succ(e.to).iter().filter(|mb| mb.kind == EdgeKind::Member) {
-                            add_row(mb.to, &mut rows);
-                        }
-                    }
-                    _ => add_row(e.to, &mut rows),
-                }
-            }
-        }
-    }
     rows.sort_unstable();
     rows.dedup();
     let mut threads: Vec<Thread> = Vec::new();
@@ -525,7 +507,7 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
             _ => threads.push(Thread { func: f, starts: vec![s], depth: Ok(0) }),
         }
     }
-    let entry = find_body(m, "runtime.thread.entry");
+    let entry = m.known_body(Known::ThreadEntry);
     for t in &mut threads {
         // the nodes a thread can start with, not every node of the function: a node no start
         // reaches (an unspecialized one whose fn-value slots stay empty) never runs on a thread

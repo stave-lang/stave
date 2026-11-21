@@ -22,7 +22,7 @@
 
 use stave_ir::interp::{Config, Interp, Outcome, Val};
 use stave_ir::memcheck::MemReport;
-use stave_ir::{BufferHost, Module, PanicKind, Site, SyscallAbi};
+use stave_ir::{BufferHost, Known, Module, PanicKind, Site, SyscallAbi};
 use stave_target::{Arch, Triple};
 
 use crate::exec::Ran;
@@ -92,9 +92,9 @@ pub fn run(
     let mut m = m.clone();
     let stub =
         stave_sema::lower::interp_main_stub(&mut m, main_path).ok_or_else(|| format!("no `{main_path}`"))?;
-    let find = |p: &str| m.find_func(p).ok_or_else(|| format!("no `{p}` in the module"));
-    let entry = find("runtime.start.entry")?;
-    let trap = find("runtime.panic.trap")?;
+    let find = |k: Known| m.known_func(k).ok_or_else(|| format!("no `{k}` in the module"));
+    let entry = find(Known::StartEntry)?;
+    let trap = find(Known::Trap)?;
     let mut host = BufferHost::new(abi);
     host.values.insert("main_addr".into(), u64::from(stub.0));
     host.values.insert("signal_handler_addr".into(), 0);

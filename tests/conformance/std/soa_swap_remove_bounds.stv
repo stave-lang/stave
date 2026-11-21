@@ -1,0 +1,18 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at soa_swap_remove_bounds.stv:16:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// `Soa.swap_remove` past the length panics `Bounds` at the caller; on an empty Soa every
+// index is past it.
+import std.soa;
+
+struct P {
+    pub v: u32,
+}
+
+impl Copy for P {}
+
+fn main() -> i32 {
+    let mut ps = soa.Soa::<P>.new();
+    let p = ps.swap_remove(0);
+    return 0;
+}

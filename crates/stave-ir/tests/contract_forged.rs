@@ -10,9 +10,7 @@ use common::*;
 use stave_ir::bounds::prove_func;
 use stave_ir::ir::Span;
 use stave_ir::witness::check::{Reject, check_module};
-use stave_ir::witness::{
-    CallRefuted, Edge, FnWitness, NO_BLOCK, Node, Pre, REQUIRES_FAILED, Removed, Row, Source, Term,
-};
+use stave_ir::witness::{CallRefuted, Edge, FnWitness, NO_BLOCK, Node, Pre, Removed, Row, Source, Term};
 use stave_ir::{Block, FuncBuilder, FuncId, Module, Op, PanicKind, Site, Value, verify_module};
 
 fn require(b: &mut FuncBuilder, fail: FuncId, c: Value) -> Block {
@@ -26,7 +24,7 @@ fn require(b: &mut FuncBuilder, fail: FuncId, c: Value) -> Block {
 }
 
 fn failure(m: &mut Module) -> FuncId {
-    define(m, &[9], REQUIRES_FAILED, &[], None, |b, _| {
+    define_known(m, &[9], stave_ir::Known::RequiresFailed, &[], None, |b, _| {
         b.inst(Op::Panic(PanicKind::Contract), None, &[]);
         b.unreachable();
     })

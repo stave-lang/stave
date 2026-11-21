@@ -21,9 +21,11 @@
 //!   untracked value can (below);
 //! - [`EdgeKind::Member`]: a table, to each fn and closure of its type made into a fn value
 //!   anywhere (site: the first place the walk finds it made);
-//! - [`EdgeKind::Spawn`]: the fn or closure holding a `spawn` statement, to the spawn body, and
-//!   the one passing a closure literal to `runtime.thread.start` (which runs it on a new
-//!   thread), to that closure;
+//! - [`EdgeKind::Spawn`]: the fn or closure holding a `spawn` statement, to the spawn body, the
+//!   one passing a closure literal to `runtime.thread.start` (which runs it on a new thread), to
+//!   that closure, and each node of `start` to each value its param takes. Where no thread can
+//!   be created, `start` queues the value and `runtime.thread.run_queued` calls it at the join:
+//!   that call is no edge (the joining node is the one that called `start`, or its caller);
 //! - [`EdgeKind::Drop`]: a fn or closure to the glue of each value type it may drop
 //!   ([`crate::typeck::TypedBody::drops`]: its locals and the values it makes; a value it drops is
 //!   one of them or a part of one), and a glue to its type's `Drop` impl and to the glue of each
@@ -51,9 +53,29 @@
 //! value of `e` is a fn item, a closure literal, another slot (a local or a field read), or
 //! untracked. Copy constraints between slots are solved to a fixpoint on flat arrays; a call
 //! through a fn value then reaches the values its slot holds, or, if an untracked value flows in,
-//! its table. Untracked: a fn value returned by a call, chosen by a value `if` / `match`, read from
-//! a tuple, array, or enum payload, through a reference or raw pointer, or bound by a pattern
-//! other than `let x`; each passes the whole table on.
+//! its table; every call through a fn value is such a site, whatever expression yields its
+//! callee, and ends with no target only when its callee is a slot no value reaches. Untracked: a
+//! fn value returned by a call, chosen by a value `if` / `match`, read from a tuple, array, or
+//! enum payload, through a reference or raw pointer, or bound by a pattern other than `let x`;
+//! each passes the whole table on.
+//!
+//! A tracked place (a fn-typed local or param, a field declared with a fn type) is precise only
+//! while every use of it is harmless: its declaration, the target of a plain `=` (an event), or a
+//! read of its value by copy as a call's callee or argument, a `let` initializer, the source of a
+//! plain `=`, a struct literal field, or a `return` value. Every other use, whatever its form (a
+//! borrow, a compound assignment or operator, a method receiver, a pattern naming the field, an
+//! f-string hole), makes the slot untracked, so a write no event shows needs a use that already
+//! did. Every other place a fn value lives in (an element, a payload, a field declared generic)
+//! is read as untracked. A cast outside the built-in packages that reinterprets memory (another
+//! pointee, an int made a pointer, `*mut` from a shared pointer) makes every call of each fn type
+//! the two pointees hold reach its table ([`Walk::cast`]).
+//!
+//! A param slot is precise only if every edge into its node delivered the argument: each direct
+//! call edge records how much of the callee's params its argument events cover (all, all but
+//! the receiver, none: an operator, an implied call), every other edge into a node covers none,
+//! a call through a fn value covers its targets' params, and a fn-typed param some incoming edge
+//! does not cover is untracked ([`Walk::solve_flow`]; debug builds check that every direct call
+//! edge has such a record).
 //!
 //! **Specialization.** A direct call that passes known fn values (fn items, closure literals, a
 //! local set once to one, or a param that is itself specialized) reaches a node of the callee for
@@ -277,9 +299,11 @@ impl CallGraph {
     }
 
     /// Whether SCC `s` is a drop cycle: a cycle with a glue node whose every member is a glue
-    /// node, a `Drop.drop` impl, or a fn of a built-in package (a user fn that is not a `Drop`
-    /// impl, a closure, or a table makes it an ordinary cycle). The recursion of dropping a
-    /// recursive value, as glue(N) -> `Vec<N>.drop` -> `Vec<N>.clear` -> glue(N).
+    /// node or a fn of a built-in package (a user fn, a user `Drop` impl among them, a closure,
+    /// or a table makes it an ordinary cycle). The recursion of dropping a recursive value, as
+    /// glue(N) -> `Vec<N>.drop` -> `Vec<N>.clear` -> glue(N): each step drops a part of the value
+    /// the step before drops, so its depth is the value's. A user `Drop` impl on the cycle drops
+    /// values it makes, whose depth nothing bounds.
     pub fn is_drop_cycle(&self, s: u32) -> bool {
         self.scc_drop.get(s as usize).copied().unwrap_or(false)
     }
@@ -477,8 +501,9 @@ enum Src<'b> {
 }
 
 enum What<'b> {
-    /// A direct call recorded by typeck (call or implied).
-    Call(&'b Target),
+    /// A direct call recorded by typeck (call or implied), with the params its `Arg` events
+    /// deliver ([`COVER_ALL`], [`COVER_ARGS`], [`COVER_NONE`]).
+    Call(&'b Target, u8),
     /// A call through a fn value of type `ty` coming from `callee`.
     ValueCall { ty: TypeId, callee: Src<'b> },
     /// A built-in method calling a fn value it is passed (a slice predicate).
@@ -489,6 +514,9 @@ enum What<'b> {
     Init { b: u32, src: Src<'b> },
     /// A struct field is set to a fn value.
     Store { decl: DeclId, index: u32, src: Src<'b> },
+    /// A cast to a raw pointer type `to` of an operand of type `from` (typeck's types), in a body
+    /// outside the built-in packages.
+    Cast { from: TypeId, to: TypeId },
     /// A fn item made into a fn value; `root`: it is a thread fn's argument.
     FnItem { decl: DeclId, args: &'b [GArg], root: Option<RootKind> },
     /// Closure `k` made into a fn value (a `spawn` body, or `started` by `runtime.thread.start`:
@@ -499,6 +527,13 @@ enum What<'b> {
     /// `String.new` and `String.push_str` of an f-string.
     Fstring,
 }
+
+/// A call whose parenthesized arguments are every param (a fn or trait method by path).
+const COVER_ALL: u8 = 2;
+/// A method call: the parenthesized arguments are every param but the receiver.
+const COVER_ARGS: u8 = 1;
+/// A call that passes no argument through an event (an operator, an implied call, a drop).
+const COVER_NONE: u8 = 0;
 
 /// Where an event happens: a token, made a [`Span`] only for the edges kept (re-lexing every call
 /// token would cost more than the walk).
@@ -681,24 +716,145 @@ fn classify<'b>(icx: &ItemCx<'_>, body: &'b TypedBody, closures: &[Closure], e: 
     Src::Top
 }
 
-/// The fn-value flow events of `body` (module docs). `fnish(t)`: `t` is a fn type or a generic
-/// param (which an instance may make a fn type).
+/// Classes of typeck's types the event extraction asks about ([`Kinds::has`]).
+struct Kinds {
+    bits: Vec<u8>,
+}
+
+/// A fn type or a generic param (which an instance may make a fn type).
+const FNISH: u8 = 1;
+/// A fn type.
+const FN: u8 = 2;
+/// `&T` or `&mut T`, `T` [`FNISH`].
+const FN_REF: u8 = 4;
+/// A raw pointer type.
+const PTR: u8 = 8;
+
+impl Kinds {
+    fn new(table: &TypeTable) -> Kinds {
+        let mut bits: Vec<u8> = table
+            .iter()
+            .map(|(_, k)| match k {
+                TypeKind::Fn { .. } => FNISH | FN,
+                TypeKind::Param(_) => FNISH,
+                TypeKind::Ptr { .. } => PTR,
+                _ => 0,
+            })
+            .collect();
+        for (i, (_, k)) in table.iter().enumerate() {
+            if let TypeKind::Ref { inner, .. } = k
+                && !inner.is_none()
+                && !inner.is_local()
+                && bits.get(inner.idx()).is_some_and(|b| b & FNISH != 0)
+            {
+                bits[i] |= FN_REF;
+            }
+        }
+        Kinds { bits }
+    }
+
+    fn has(&self, t: TypeId, b: u8) -> bool {
+        !t.is_none() && !t.is_local() && self.bits.get(t.idx()).is_some_and(|x| x & b != 0)
+    }
+}
+
+/// Whether field `index` of struct `decl` is declared with a fn type (a tracked field slot).
+fn fn_field(sigs: &Sigs, kinds: &Kinds, decl: DeclId, index: u32) -> bool {
+    sigs.adt(decl)
+        .and_then(|a| a.variants.first())
+        .and_then(|v| v.fields.get(index as usize))
+        .is_some_and(|f| kinds.has(f.ty, FN))
+}
+
+/// The tracked fields struct pattern `p` names (`S.{ f }`, `S.{ f: q }`): a pattern is no
+/// harmless use (it may bind the field by reference).
+fn pattern_fields(icx: &ItemCx<'_>, sigs: &Sigs, kinds: &Kinds, p: u32) -> Vec<(DeclId, u32)> {
+    let mut out = Vec::new();
+    let a = icx.a(p);
+    if !icx.is(a, Term::Ident) || !icx.is(icx.chain_end(a) + 1, Term::DotLBrace) {
+        return out;
+    }
+    let Some(crate::resolve::Res::Decl(d)) = icx.uses(p).last().map(|u| u.res) else { return out };
+    if icx.prog.decl(d).is_none_or(|x| x.kind != DeclKind::Struct) {
+        return out;
+    }
+    let Some(fields) = sigs.adt(d).and_then(|a| a.variants.first()).map(|v| &v.fields) else { return out };
+    for &k in icx.kids_vec(p).iter() {
+        if icx.kind(k) != Some(Syn::FieldPat) {
+            continue;
+        }
+        let name = icx.sym(icx.a(k));
+        if let Some(fi) = fields.iter().position(|f| f.name == name)
+            && fn_field(sigs, kinds, d, fi as u32)
+        {
+            out.push((d, fi as u32));
+        }
+    }
+    out
+}
+
+/// A position that reads the value there by copy: a call's argument or callee, a `let`
+/// initializer, the source of `=`, a struct literal field, a `return` value.
+const READ: u8 = 1;
+/// The target of a plain `=`.
+const TARGET: u8 = 2;
+
+/// Marks node `m`, the trivial wrappers below it, and the inside of parentheses around it with
+/// `v` in `pos` (indexed from node `lo`).
+fn mark(icx: &ItemCx<'_>, lo: u32, pos: &mut [u8], m: u32, v: u8) {
+    let mut work = vec![m];
+    while let Some(x) = work.pop() {
+        let chain = crate::threads::wrapper_chain(icx, x);
+        for &c in &chain {
+            if let Some(p) = c.checked_sub(lo).and_then(|i| pos.get_mut(i as usize)) {
+                *p |= v;
+            }
+        }
+        let core = chain.last().copied().unwrap_or(x);
+        if icx.kind(core) == Some(Syn::Primary) && icx.is(icx.a(core), Term::LParen) {
+            let kids = icx.kids_vec(core);
+            if kids.len() == 1 && !icx.is(icx.close(icx.a(core)).saturating_sub(1), Term::Comma) {
+                work.push(kids[0]);
+            }
+        }
+    }
+}
+
+/// The fn-value flow events of `body` (module docs).
+#[allow(clippy::too_many_arguments)]
 fn flow_events<'b>(
     icx: &ItemCx<'_>,
     body: &'b TypedBody,
     sigs: &Sigs,
     closures: &[Closure],
     params: &[u32],
-    fnish: &dyn Fn(TypeId) -> bool,
+    kinds: &Kinds,
     push: &mut dyn FnMut(u32, u32, What<'b>),
 ) {
+    let fnish = |t: TypeId| kinds.has(t, FNISH);
     let mut simple: Vec<u32> = Vec::new();
     let lo = icx.ast.descendants(body.node).start;
+    let mut pos = vec![0u8; (body.node + 1 - lo) as usize];
+    // field steps of tracked fields: (token, its `Postfix` node, the field's value is called)
+    let mut field_steps: Vec<(u32, u32, bool)> = Vec::new();
     for n in lo..=body.node {
         match icx.kind(n) {
+            Some(Syn::Pattern) => {
+                for (decl, index) in pattern_fields(icx, sigs, kinds, n) {
+                    push(icx.a(n), icx.a(n), What::Store { decl, index, src: Src::Top });
+                }
+            }
+            Some(Syn::Stmt) if icx.is(icx.a(n), Term::KwReturn) => {
+                if let Some(e) = icx.last_child(n) {
+                    mark(icx, lo, &mut pos, e, READ);
+                }
+            }
             Some(Syn::Stmt) if icx.is(icx.a(n), Term::KwLet) => {
                 let kids = icx.kids_vec(n);
                 let (Some(&pat), Some(&init)) = (kids.first(), kids.last()) else { continue };
+                if kids.len() >= 2 {
+                    mark(icx, lo, &mut pos, init, READ);
+                }
                 if let Some(t) = body.local(crate::ids::BindingRef { node: pat })
                     && fnish(t)
                 {
@@ -712,10 +868,17 @@ fn flow_events<'b>(
             }
             Some(Syn::ExprStmt) => {
                 let kids = icx.kids_vec(n);
-                if kids.len() < 3 || !icx.is(icx.a(kids[1]), Term::Eq) || !fnish(body.ty(kids[2])) {
+                if kids.len() < 3 || !icx.is(icx.a(kids[1]), Term::Eq) {
+                    continue;
+                }
+                mark(icx, lo, &mut pos, kids[0], TARGET);
+                mark(icx, lo, &mut pos, kids[2], READ);
+                if !fnish(body.ty(kids[2])) {
                     continue;
                 }
                 let src = classify(icx, body, closures, kids[2]);
+                // any other target is no tracked place (memory behind a pointer, an element): a
+                // pointer to a tracked place comes from a use that makes it untracked (below)
                 match classify(icx, body, closures, kids[0]) {
                     Src::Local(b) => push(icx.a(n), icx.a(n), What::Init { b, src }),
                     Src::Field(decl, index) => push(icx.a(n), icx.a(n), What::Store { decl, index, src }),
@@ -729,6 +892,7 @@ fn flow_events<'b>(
                     continue;
                 };
                 for &e in icx.kids_vec(n).iter() {
+                    mark(icx, lo, &mut pos, e, READ);
                     if !fnish(body.ty(e)) {
                         continue;
                     }
@@ -753,12 +917,27 @@ fn flow_events<'b>(
                         continue;
                     }
                     if tk != Term::LParen as u8 {
+                        if let Some(Target::Field { decl, index, .. }) = body.target(t)
+                            && fn_field(sigs, kinds, *decl, *index)
+                        {
+                            let called = icx.is(t + 1, Term::LParen)
+                                && matches!(body.target(t + 1), Some(Target::FnValue { .. }));
+                            field_steps.push((t, n, called));
+                        }
                         t += 1;
                         continue;
                     }
                     let lp = t;
                     t = icx.close(lp) + 1;
                     let seg = callee_tok(icx, lp);
+                    if let Some(&k) = kids.iter().skip(1).find(|&&k| icx.a(k) == lp + 1) {
+                        for &e in icx.kids_vec(k).iter() {
+                            mark(icx, lo, &mut pos, e, READ);
+                        }
+                    }
+                    if lp == prim_end + 1 && matches!(body.target(lp), Some(Target::FnValue { .. })) {
+                        mark(icx, lo, &mut pos, prim, READ);
+                    }
                     let (tok, offset, builtin) = match (body.target(lp), body.target(seg)) {
                         (Some(Target::Fn { .. } | Target::TraitMethod { .. }), _) => (lp, 0, false),
                         (Some(Target::FnValue { ty }), _) => {
@@ -794,6 +973,39 @@ fn flow_events<'b>(
             _ => {}
         }
     }
+    // A tracked place stays precise only while every use of it reads its value by copy (`READ`)
+    // or is the target of a plain `=` (an event above). Any other use (a borrow, a compound
+    // assignment, an operator, a receiver, a pattern, an f-string hole, a form added later)
+    // makes it untracked.
+    let at = |m: u32| m.checked_sub(lo).and_then(|i| pos.get(i as usize)).copied().unwrap_or(0);
+    let from = icx.res.uses.partition_point(|u| u.node < lo);
+    for u in icx.res.uses[from..].iter().take_while(|u| u.node <= body.node) {
+        let (crate::resolve::Res::Local(b) | crate::resolve::Res::SelfValue(b)) = u.res else { continue };
+        if !body.local(b).is_some_and(fnish) {
+            continue;
+        }
+        let plain = !u.in_fmt
+            && icx.kind(u.node) == Some(Syn::Primary)
+            && icx.a(u.node) == u.token
+            && icx.end_tok(u.node) == u.token;
+        if !plain || at(u.node) == 0 {
+            push(u.token, u.token, What::Init { b: b.node, src: Src::Top });
+        }
+    }
+    let mut harmless: Vec<u32> = field_steps
+        .iter()
+        .filter(|&&(t, n, called)| called || (t == icx.end_tok(n) && at(n) != 0))
+        .map(|s| s.0)
+        .collect();
+    harmless.sort_unstable();
+    for (t, target) in &body.targets {
+        if let Target::Field { decl, index, .. } = target
+            && fn_field(sigs, kinds, *decl, *index)
+            && harmless.binary_search(t).is_err()
+        {
+            push(*t, *t, What::Store { decl: *decl, index: *index, src: Src::Top });
+        }
+    }
     // any other fn-valued local (a pattern binding but `let x`) is not tracked
     for &(b, t) in &body.locals {
         let is_param = params.contains(&b) || closures.iter().any(|c| c.params.contains(&b));
@@ -803,17 +1015,40 @@ fn flow_events<'b>(
     }
 }
 
+/// The cast events of a body outside the built-in packages: each cast to a raw pointer type is a
+/// [`What::Cast`] ([`Walk::cast`]).
+fn cast_events<'b>(
+    icx: &ItemCx<'_>,
+    body: &'b TypedBody,
+    kinds: &Kinds,
+    push: &mut dyn FnMut(u32, u32, What<'b>),
+) {
+    let lo = icx.ast.descendants(body.node).start;
+    for n in lo..=body.node {
+        if icx.kind(n) != Some(Syn::Cast) {
+            continue;
+        }
+        let Some(&first) = icx.kids_vec(n).first() else { continue };
+        let to = body.ty(n);
+        if kinds.has(to, PTR) {
+            push(icx.a(n), icx.a(n), What::Cast { from: body.ty(first), to });
+        }
+    }
+}
+
 fn extract<'b>(
     icx: &ItemCx<'_>,
     body: &'b TypedBody,
     sigs: &Sigs,
     fns: &[Option<DeclId>; 4],
-    fnish: &dyn Fn(TypeId) -> bool,
-    is_fn: &dyn Fn(TypeId) -> bool,
+    kinds: &Kinds,
+    user: bool,
 ) -> BodyEvents<'b> {
-    // one pass over the block's tokens: f-strings, and whether any closure body can start
+    // one pass over the block's tokens: f-strings, whether any closure body can start, and
+    // whether any cast can
     let mut fstrings: Vec<u32> = Vec::new();
     let mut any_closure = false;
+    let mut any_cast = false;
     if let Some(b) = icx.child(body.node, Syn::Block) {
         let open = icx.a(b);
         if let Some(toks) = icx.toks.get(open as usize..=icx.close(open) as usize) {
@@ -822,6 +1057,7 @@ fn extract<'b>(
                     fstrings.push(open + i as u32);
                 }
                 any_closure |= t.kind == Term::KwFn as u8 || t.kind == Term::KwSpawn as u8;
+                any_cast |= t.kind == Term::KwAs as u8;
             }
         }
     }
@@ -852,19 +1088,23 @@ fn extract<'b>(
         match t {
             Target::Fn { decl, args } => {
                 if icx.is(tok, Term::LParen) {
-                    push(tok, callee_tok(icx, tok), What::Call(t));
+                    push(tok, callee_tok(icx, tok), What::Call(t, COVER_ALL));
                 } else {
                     let what = What::FnItem { decl: *decl, args, root: root_at(tok) };
                     push(tok, tok, what);
                 }
             }
-            Target::Method { .. } | Target::Op { .. } => push(tok, tok, What::Call(t)),
-            Target::TraitMethod { .. } => push(tok, callee_tok(icx, tok), What::Call(t)),
+            Target::Method { .. } => push(tok, tok, What::Call(t, COVER_ARGS)),
+            Target::Op { .. } => push(tok, tok, What::Call(t, COVER_NONE)),
+            Target::TraitMethod { .. } => {
+                let cover = if icx.is(tok, Term::LParen) { COVER_ALL } else { COVER_NONE };
+                push(tok, callee_tok(icx, tok), What::Call(t, cover));
+            }
             _ => {}
         }
     }
     for (tok, t) in &body.implicit {
-        push(*tok, *tok, What::Call(t));
+        push(*tok, *tok, What::Call(t, COVER_NONE));
     }
     for (n, c) in &body.coercions {
         if matches!(c, Coercion::StringToStr | Coercion::FmtToStr) {
@@ -875,14 +1115,28 @@ fn extract<'b>(
     for &tok in &fstrings {
         push(tok, tok, What::Fstring);
     }
-    // a body without a fn-typed value makes no flow: a generic-typed value there reaches a fn
-    // type only through a param or field declared generic, which is untracked (`Walk::expand`,
-    // `Walk::val`)
-    let flows = body.node_types.iter().any(|&t| is_fn(t)) || body.locals.iter().any(|&(_, t)| is_fn(t));
+    // a body with no fn-typed value and no call through one makes no flow: a generic-typed
+    // value there reaches a fn type only through a param or field declared generic, which is
+    // untracked (`Walk::expand`, `Walk::val`). A call through a fn value counts on its own: its
+    // callee may be no node of the body (the call result `mk()` in `mk()()`).
+    let value_calls = body.targets.iter().filter(|(_, t)| matches!(t, Target::FnValue { .. })).count();
+    let flows = value_calls > 0
+        || body.node_types.iter().any(|&t| kinds.has(t, FN))
+        || body.locals.iter().any(|&(_, t)| kinds.has(t, FN | FN_REF));
     if flows {
-        flow_events(icx, body, sigs, &closures, &params, fnish, &mut push);
+        flow_events(icx, body, sigs, &closures, &params, kinds, &mut push);
+    }
+    if user && any_cast {
+        cast_events(icx, body, kinds, &mut push);
     }
     drop(push);
+    // every call through a fn value has a site, which reaches its callee's tracked values or the
+    // whole table of its type (`Walk::solve_flow`), never nothing for want of an event
+    debug_assert_eq!(
+        evs.iter().filter(|e| matches!(e.what, What::ValueCall { .. })).count(),
+        value_calls,
+        "a call through a fn value without a flow site"
+    );
     for (k, c) in closures.iter().enumerate() {
         let root = if c.kind == ClosureKind::Spawn { Some(RootKind::Spawn) } else { root_at(c.lo) };
         let started = started.contains(&c.lo);
@@ -948,6 +1202,9 @@ struct ValueSite {
     /// The deny clause of the called value's fn type: every value that reaches the call was
     /// coerced to that type, so none has those effects.
     deny: u8,
+    /// Its `Arg` events are every argument (a call through a fn value; a built-in method's call
+    /// of the value it is passed has none).
+    full: bool,
 }
 
 /// The fn-value flow constraints the walk collects.
@@ -1010,7 +1267,21 @@ struct Walk<'a> {
     string: [Option<DeclId>; 3],
     /// `runtime.thread.scope_spawn`: lowering passes each `spawn` body to it (param 1).
     scope_spawn: Option<DeclId>,
+    /// `runtime.thread.start` and `run_queued`: where no thread can be created, `start` queues
+    /// its fn value and `run_queued` calls it at the join.
+    thread_start: Option<DeclId>,
+    run_queued: Option<DeclId>,
     flow: Flow,
+    /// Per table: a cast in a body outside the built-in packages reinterprets memory that may
+    /// hold a value of its type, so every call of that type reaches the whole table.
+    poisoned: Vec<bool>,
+    /// (caller, callee, cover) for each direct call edge: which of the callee's params the
+    /// call's `Arg` events deliver ([`Walk::solve_flow`]).
+    covers: Vec<(u32, u32, u8)>,
+    /// The cover of the call being resolved.
+    cover: u8,
+    /// The fn-typed params the fallback made untracked: (node, param index).
+    untracked_params: Vec<(u32, u32)>,
     truncated: bool,
     truncated_at: Option<(Span, Option<DeclId>)>,
 }
@@ -1213,6 +1484,7 @@ impl<'a> Walk<'a> {
         let to = self.fn_targets(decl, args, inst);
         for &t in &to {
             self.edges.push((from, t, kind, site, 0));
+            self.covers.push((from, t, self.cover));
         }
         to
     }
@@ -1342,6 +1614,8 @@ impl<'a> Walk<'a> {
                 }
             }
         }
+        // a param is known only while nothing but its calls sets it
+        self.consts.retain(|c| !sets.iter().any(|s| s.0 == c.0));
         for (b, src, n) in sets {
             if n == 1
                 && matches!(src, Src::FnItem(..) | Src::Closure(_))
@@ -1359,7 +1633,7 @@ impl<'a> Walk<'a> {
         for (ei, ev) in be.evs.iter().enumerate() {
             let from = node_of(ev.owner);
             match &ev.what {
-                What::Call(t) => {
+                What::Call(t, cover) => {
                     // the fn values the call passes: the callee is specialized on them
                     let mut hint: Vec<Vec<u32>> = Vec::new();
                     for a in be.evs[ei + 1..].iter().take_while(|a| a.tok == ev.tok) {
@@ -1377,7 +1651,9 @@ impl<'a> Walk<'a> {
                         }
                     }
                     self.spec_hint = hint;
+                    self.cover = *cover;
                     let to = self.call(from, i, t, &args, ev.site);
+                    self.cover = COVER_NONE;
                     self.spec_hint = Vec::new();
                     self.calls.extend(to.iter().map(|&c| (from, ev.tok, c)));
                     last = (ev.tok, to, None);
@@ -1386,6 +1662,9 @@ impl<'a> Walk<'a> {
                     let t = self.subst(*ty, &args);
                     let table = self.table(t);
                     let deny = self.deny_of(t);
+                    if self.is_run_queued(i) {
+                        continue;
+                    }
                     let callee = self.val(callee, i, base, &args);
                     let (site, tok) = (ev.site, ev.tok);
                     self.flow.sites.push(ValueSite {
@@ -1396,6 +1675,7 @@ impl<'a> Walk<'a> {
                         site,
                         tok,
                         deny,
+                        full: true,
                     });
                     last = (ev.tok, Vec::new(), Some(self.flow.sites.len() - 1));
                 }
@@ -1413,6 +1693,7 @@ impl<'a> Walk<'a> {
                         site,
                         tok,
                         deny,
+                        full: false,
                     });
                 }
                 What::Arg { idx, src } => {
@@ -1440,6 +1721,10 @@ impl<'a> Walk<'a> {
                     let v = self.val(src, i, base, &args);
                     let s = self.flow.slot(SlotKey::Field(*decl, *index));
                     self.flow.add(&v, s);
+                }
+                What::Cast { from, to } => {
+                    let (from, to) = (self.subst(*from, &args), self.subst(*to, &args));
+                    self.cast(from, to);
                 }
                 What::FnItem { decl, args: ga, root } => {
                     let ga = self.subst_args(ga, &args);
@@ -1541,6 +1826,134 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// A cast from `from` to the raw pointer type `to` in a body outside the built-in packages.
+    /// One that keeps the pointee and does not make a `*mut` from a `&` or `*const` writes only
+    /// what the operand could. Any other (an int made a pointer, another pointee, `*mut` from a
+    /// shared pointer) may write or read a value of each fn type its pointee and the operand's
+    /// pointee hold, so every call of those types reaches its whole table.
+    fn cast(&mut self, from: TypeId, to: TypeId) {
+        let TypeKind::Ptr { mutable: tm, inner: ti } = *self.cx.kind(to) else { return };
+        let (si, sm) = match *self.cx.kind(from) {
+            TypeKind::Ref { mutable, inner } | TypeKind::Ptr { mutable, inner } => (Some(inner), mutable),
+            _ => (None, false),
+        };
+        if si == Some(ti) && (sm || !tm) {
+            return;
+        }
+        let mut seen: Vec<TypeId> = Vec::new();
+        let mut work: Vec<TypeId> = [Some(ti), si].into_iter().flatten().collect();
+        while let Some(t) = work.pop() {
+            if seen.contains(&t) || seen.len() > 4096 {
+                continue;
+            }
+            seen.push(t);
+            match self.cx.kind(t).clone() {
+                TypeKind::Fn { .. } => {
+                    if let Some(tb) = self.table(t) {
+                        if self.poisoned.len() <= tb as usize {
+                            self.poisoned.resize(tb as usize + 1, false);
+                        }
+                        self.poisoned[tb as usize] = true;
+                    }
+                }
+                TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => work.push(inner),
+                TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => work.push(elem),
+                TypeKind::Tuple(ts) => work.extend(ts.iter().copied()),
+                TypeKind::Adt { .. } => {
+                    if let Some(vs) = crate::mono::adt_fields(self.sigs, &mut self.cx, t) {
+                        work.extend(vs.into_iter().flatten());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Node `i` is `runtime.thread.run_queued`, whose fn-value call runs, at a join, a value
+    /// `runtime.thread.start` was given where no thread could be created: each `start` node has a
+    /// `Spawn` edge to the values its param takes ([`Walk::solve_flow`]), and the node calling
+    /// `join` is the one that called `start` or its caller, so the call itself is no edge.
+    fn is_run_queued(&self, i: u32) -> bool {
+        matches!(&self.nodes[i as usize].kind, NodeKind::Fn { inst, .. } if self.run_queued == Some(inst.decl))
+    }
+
+    /// The number of params of fn or closure node `n`, and whether param `idx` may hold a fn
+    /// value in this instance (its type is a fn type, or one the graph cannot resolve).
+    fn param_count(&self, n: u32) -> usize {
+        let evs = self.evs;
+        match self.nodes.get(n as usize).map(|x| &x.kind) {
+            Some(NodeKind::Fn { .. }) => {
+                self.nodes[n as usize].body.and_then(|bi| evs[bi].as_ref()).map_or(0, |be| be.params.len())
+            }
+            Some(NodeKind::Closure { parent, index, .. }) => self.nodes[*parent as usize]
+                .body
+                .and_then(|bi| evs[bi].as_ref())
+                .and_then(|be| be.closures.get(*index as usize))
+                .map_or(0, |c| c.params.len()),
+            _ => 0,
+        }
+    }
+
+    fn param_holds_fn(&mut self, n: u32, idx: u32) -> bool {
+        let evs = self.evs;
+        let (inst, b) = match self.nodes.get(n as usize).map(|x| x.kind.clone()) {
+            Some(NodeKind::Fn { .. }) => {
+                let Some(bi) = self.nodes[n as usize].body else { return false };
+                let Some(&b) = evs[bi].as_ref().and_then(|be| be.params.get(idx as usize)) else {
+                    return false;
+                };
+                (n, b)
+            }
+            Some(NodeKind::Closure { parent, index, .. }) => {
+                let Some(bi) = self.nodes[parent as usize].body else { return false };
+                let Some(&b) = evs[bi]
+                    .as_ref()
+                    .and_then(|be| be.closures.get(index as usize))
+                    .and_then(|c| c.params.get(idx as usize))
+                else {
+                    return false;
+                };
+                (parent, b)
+            }
+            _ => return false,
+        };
+        let (Some(bi), NodeKind::Fn { inst: key, .. }) =
+            (self.nodes[inst as usize].body, self.nodes[inst as usize].kind.clone())
+        else {
+            return true;
+        };
+        let Some(t) = self.bodies[bi].local(crate::ids::BindingRef { node: b }) else { return true };
+        let t = self.subst(t, &key.args);
+        matches!(
+            self.cx.kind(t),
+            TypeKind::Fn { .. } | TypeKind::Param(_) | TypeKind::SelfTy | TypeKind::Error
+        )
+    }
+
+    /// Makes the fn-typed params of node `t` that a call into it with `cover` did not deliver
+    /// untracked; whether any slot changed.
+    fn undelivered(&mut self, t: u32, cover: u8, done: &mut rustc_hash::FxHashSet<(u32, u32)>) -> bool {
+        if cover == COVER_ALL {
+            return false;
+        }
+        let mut added = false;
+        for p in 0..self.param_count(t) as u32 {
+            if cover == COVER_ARGS && p > 0 {
+                break;
+            }
+            if done.contains(&(t, p)) || !self.param_holds_fn(t, p) {
+                continue;
+            }
+            done.insert((t, p));
+            if let Some(slot) = self.param_slot(t, p) {
+                self.flow.tops.push(slot);
+                self.untracked_params.push((t, p));
+                added = true;
+            }
+        }
+        added
+    }
+
     /// The slot of param `idx` of fn or closure node `n` (`None` without a checked body).
     fn param_slot(&mut self, n: u32, idx: u32) -> Option<u32> {
         let evs = self.evs;
@@ -1577,6 +1990,35 @@ impl<'a> Walk<'a> {
         let mut done_consts = 0;
         let mut done_tops = 0;
         let mut passed: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
+        // A param slot is precise only if every edge into its node delivered its argument: a
+        // direct call edge with less than full cover, or any other edge kind into a node (a drop,
+        // a spawn), leaves its fn-typed params untracked. Calls through fn values deliver at
+        // their sites (below).
+        let mut done: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
+        debug_assert_eq!(
+            self.edges.iter().filter(|e| matches!(e.2, EdgeKind::Call | EdgeKind::Dispatch { .. })).count(),
+            self.covers.len(),
+            "a direct call edge without a record of the arguments it delivers"
+        );
+        let mut cover_of: FxHashMap<(u32, u32), u8> = FxHashMap::default();
+        for &(f, t, c) in &self.covers {
+            let e = cover_of.entry((f, t)).or_insert(COVER_ALL);
+            *e = (*e).min(c);
+        }
+        let into: Vec<(u32, u8)> = self
+            .edges
+            .iter()
+            .filter(|e| e.1 & TABLE_BIT == 0 && !matches!(e.2, EdgeKind::Indirect | EdgeKind::Member))
+            .map(|e| (e.1, cover_of.get(&(e.0, e.1)).copied().unwrap_or(COVER_NONE)))
+            .collect();
+        for (t, c) in into {
+            self.undelivered(t, c, &mut done);
+        }
+        for s in &mut self.flow.sites {
+            if s.table.is_some_and(|t| self.poisoned.get(t as usize).copied().unwrap_or(false)) {
+                s.callee = Val::Top;
+            }
+        }
         loop {
             let n = self.flow.slots.len();
             sets.resize(n, Vec::new());
@@ -1634,6 +2076,12 @@ impl<'a> Walk<'a> {
             // a call's targets take its arguments
             let mut added = false;
             for si in 0..self.flow.sites.len() {
+                if !self.flow.sites[si].full {
+                    for t in site_targets(&self.flow.sites[si], &sets, &top, &members) {
+                        added |= self.undelivered(t, COVER_NONE, &mut done);
+                    }
+                    continue;
+                }
                 if self.flow.sites[si].args.is_empty() {
                     continue;
                 }
@@ -1655,12 +2103,41 @@ impl<'a> Walk<'a> {
                 break;
             }
         }
+        // `runtime.thread.start` runs its param on a new thread (or queues it for the join)
+        if let Some(start) = self.thread_start {
+            for n in 0..self.nodes.len() as u32 {
+                if !matches!(&self.nodes[n as usize].kind, NodeKind::Fn { inst, .. } if inst.decl == start) {
+                    continue;
+                }
+                let Some(p) = self.param_slot(n, 0) else { continue };
+                let site = Site::At(self.nodes[n as usize].span);
+                let p = p as usize;
+                let targets: Vec<u32> = if top.get(p).copied().unwrap_or(false) {
+                    let unit = self.cx.mk_tuple(Vec::new());
+                    let t = self.cx.intern(TypeKind::Fn {
+                        params: Box::new([]),
+                        ret: unit,
+                        features: 0,
+                        deny: 0,
+                    });
+                    self.table(t).and_then(|tb| members.get(tb as usize)).cloned().unwrap_or_default()
+                } else {
+                    sets.get(p).cloned().unwrap_or_default()
+                };
+                for t in targets {
+                    self.edges.push((n, t, EdgeKind::Spawn, site, 0));
+                }
+            }
+        }
         let sites = std::mem::take(&mut self.flow.sites);
         for s in &sites {
+            // no target is left only for a slot no value reaches (a param of a node no call
+            // passes a value, so the call never runs); known values that name no node (an
+            // instance the graph could not make) count as untracked
             let untracked = match &s.callee {
                 Val::Top => true,
                 Val::Slot(x) => top[*x as usize],
-                Val::Nodes(_) => false,
+                Val::Nodes(ns) => ns.is_empty(),
             };
             if untracked {
                 if let Some(tb) = s.table {
@@ -1729,22 +2206,9 @@ pub(crate) fn build(
     bodies: &[TypedBody],
     brackets: &[Brackets],
 ) -> CallGraph {
-    let [join, par_for, par_for_mut] =
-        ["join", "par_for", "par_for_mut"].map(|n| crate::mono::item_at(prog, "std.thread", n));
-    let fns = [join, par_for, par_for_mut, crate::mono::item_at(prog, "runtime.thread", "start")];
-    // 2: a fn type, 1: a generic param
-    let fn_like: Vec<u8> = table
-        .iter()
-        .map(|(_, k)| match k {
-            TypeKind::Fn { .. } => 2,
-            TypeKind::Param(_) => 1,
-            _ => 0,
-        })
-        .collect();
-    let like =
-        |t: TypeId| if t.is_none() || t.is_local() { 0 } else { fn_like.get(t.idx()).copied().unwrap_or(0) };
-    let fnish = |t: TypeId| like(t) > 0;
-    let is_fn = |t: TypeId| like(t) == 2;
+    use stave_ir::Known as K;
+    let fns = [K::ThreadJoin, K::ParFor, K::ParForMut, K::ThreadStart].map(|k| prog.known.decl(k));
+    let kinds = Kinds::new(table);
     let evs: Vec<Option<BodyEvents<'_>>> = bodies
         .par_iter()
         .map(|b| {
@@ -1753,14 +2217,10 @@ pub(crate) fn build(
                 return None;
             }
             let icx = brackets.get(b.item.idx()).and_then(|br| ItemCx::new(prog, b.item, br))?;
-            Some(extract(&icx, b, sigs, &fns, &fnish, &is_fn))
+            Some(extract(&icx, b, sigs, &fns, &kinds, !in_builtin_package(prog, b.decl)))
         })
         .collect();
-    let string = if sigs.lang.string.is_some() {
-        ["as_str", "new", "push_str"].map(|n| crate::mono::inherent_method(prog, sigs, sigs.lang.string, n))
-    } else {
-        [None; 3]
-    };
+    let string = [K::StringAsStr, K::StringNew, K::StringPushStr].map(|k| prog.known.decl(k));
     let mut w = Walk {
         prog,
         sigs,
@@ -1784,8 +2244,14 @@ pub(crate) fn build(
         roots: Vec::new(),
         arms: FxHashMap::default(),
         string,
-        scope_spawn: crate::mono::item_at(prog, "runtime.thread", "scope_spawn"),
+        scope_spawn: prog.known.decl(K::ScopeSpawn),
+        thread_start: fns[3],
+        run_queued: prog.known.decl(K::RunQueued),
         flow: Flow::default(),
+        poisoned: Vec::new(),
+        covers: Vec::new(),
+        cover: COVER_NONE,
+        untracked_params: Vec::new(),
         truncated: false,
         truncated_at: None,
     };
@@ -1809,17 +2275,8 @@ pub(crate) fn build(
     finish(w)
 }
 
-/// Whether fn decl `d` is a `Drop.drop` impl method.
-fn is_drop_impl(prog: &Program, sigs: &Sigs, d: DeclId) -> bool {
-    prog.decl(d).is_some_and(|x| x.kind == DeclKind::Method)
-        && sigs
-            .impl_def(prog.decl(d).map_or(DeclId::NONE, |x| x.parent))
-            .and_then(|i| i.trait_ref.as_ref())
-            .is_some_and(|t| t.trait_decl == sigs.lang.drop)
-}
-
 /// Whether decl `d` is declared in a built-in package (`std`, `runtime`, and their dependencies).
-fn in_builtin_package(prog: &Program, d: DeclId) -> bool {
+pub(crate) fn in_builtin_package(prog: &Program, d: DeclId) -> bool {
     prog.decl(d).and_then(|x| prog.module(x.module)).is_some_and(|m| {
         prog.packages.get(m.package.idx()).is_some_and(|p| p.kind == crate::package::PackageKind::Builtin)
     })
@@ -1827,7 +2284,6 @@ fn in_builtin_package(prog: &Program, d: DeclId) -> bool {
 
 fn finish(w: Walk<'_>) -> CallGraph {
     let prog = w.prog;
-    let sigs = w.sigs;
     let n_fn = w.nodes.len() as u32;
     let mut nodes: Vec<Node> = w.nodes.into_iter().map(|b| Node { kind: b.kind, span: b.span }).collect();
     let mut table_site: Vec<Option<Site>> = vec![None; w.tables.len()];
@@ -1908,14 +2364,12 @@ fn finish(w: Walk<'_>) -> CallGraph {
     let in_from: Vec<u32> = in_edges.iter().map(|&e| callers[e as usize]).collect();
     let (comp, count) = sccs(n, &out_start, &to, &in_start, &in_from);
     let (scc_of, scc_start, scc_nodes, scc_level, level_start) = levels(n, &comp, count, &callers, &to);
-    // members a drop cycle may have: glue, `Drop` impls, built-in fns (module docs)
+    // members a drop cycle may have: glue and built-in fns ([`CallGraph::is_drop_cycle`])
     let drop_path: Vec<bool> = nodes
         .iter()
         .map(|x| match &x.kind {
             NodeKind::Glue { .. } => true,
-            NodeKind::Fn { inst, .. } => {
-                is_drop_impl(prog, sigs, inst.decl) || in_builtin_package(prog, inst.decl)
-            }
+            NodeKind::Fn { inst, .. } => in_builtin_package(prog, inst.decl),
             _ => false,
         })
         .collect();

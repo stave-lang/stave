@@ -1055,6 +1055,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "const-param-type",
+                message: "const parameter `{operand}` has type `{found}`, not an unsigned integer type",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a const parameter is `u8`, `u16`, `u32`, `u64`, or `usize`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "declare it with an unsigned integer type: `const {operand}: usize`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "not-callable",
                 message: "`{operand}` of type `{found}` cannot be called",
                 labels: &[
@@ -1814,6 +1826,103 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0219",
+        severity: Severity::Error,
+        area: "types",
+        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one; a struct, enum, or generic type without `next(&mut self) -> Option<T>`, for a generic type from its bounds), and a range or iterator as a chunk source",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "place", kind: HoleKind::Place, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`for` cannot iterate the array or slice `{place}` by value: iterate a reference to it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a named array or slice, or a field or element of a value: not an array value" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write `&{place}` (elements bound as `&T`, chunks by value), or `&mut {place}` to change it in place",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "as-slice",
+                message: "`for` cannot iterate the container `{place}`: it is no iterator",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a container with a slice view" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate its slice: `{place}.as_slice()` (elements as `&T`), or `{place}.as_mut_slice()` to change them",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-binding",
+                message: "`for` cannot iterate the array or slice `{place}` by value: iterate a reference to it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "written in place by the `&mut` chunk binding" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write `&mut {place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-chunk",
+                message: "`&mut` chunk binding over the value `{place}`: only a temporary would be written",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not a `&mut` sequence" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate `&mut a` of a mutable array or slice place",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "not-source",
+                message: "`{place}` is not a `for` source",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not a range, an array value, a reference to an array or slice, or an iterator" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate a range, an array value, `&a` / `&mut a` of an array or slice, an iterator, or a `&mut` to one; a chunk loop takes an array value or a reference to an array or slice",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "ref-ref",
+                message: "`for` cannot iterate `{place}`: it is a reference to a reference",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "one reference too many" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate the inner reference itself (`r` instead of `&mut r` or `&r`, or `*r` of a `& &[T]`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "shared-iter",
+                message: "`for` cannot advance the iterator behind the `&` reference `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`next` takes `&mut self`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate a `&mut` of the iterator (the loop advances it in place), or the iterator by value (moved into the loop, or copied if it is `Copy`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0300",
         severity: Severity::Error,
         area: "patterns",
@@ -2099,7 +2208,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0416",
         severity: Severity::Error,
         area: "kinds",
-        rule: "`impl Drop` for a Copy type (built-in Copy, or an ADT with `impl Copy`)",
+        rule: "an `impl Drop` whose head overlaps the head of an `impl Copy`: the two self types unify, the params of both impls as variables, bounds not consulted (`impl<T: Copy> Copy for W<T>` with `impl<U> Drop for W<vec.Vec<U>>` too)",
         retired: false,
         located: true,
         holes: &[
@@ -2108,13 +2217,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         shapes: &[
             Shape {
                 case: "",
-                message: "`{type}` is Copy, so it cannot implement `Drop`",
+                message: "`impl Drop for {type}` overlaps an `impl Copy`: a type with a destructor cannot be Copy",
                 labels: &[
                     LabelTemplate { at: "primary", text: "`impl Drop` here" },
-                    LabelTemplate { at: "copy", text: "`impl Copy for {type}` here" },
+                    LabelTemplate { at: "copy", text: "`impl Copy` whose head overlaps it" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "remove `impl Copy for {type}` (a type with a destructor must move), or remove this `impl Drop`",
+                    description: "remove the `impl Copy` or this `impl Drop`, or make their heads disjoint (no type an instance of both)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2172,6 +2281,31 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0419",
+        severity: Severity::Error,
+        area: "kinds",
+        rule: "`impl Drop` whose self type is not a struct or enum declared in the impl's package (a tuple, array, slice, reference, raw pointer, fn type, scalar, generic param, or a type of another package): drop glue runs the destructors of ADTs only, and a package adds none to another's types",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`impl Drop for {type}`: a `Drop` impl's self type must be a struct or enum of this package",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`impl Drop` here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "implement `Drop` for a struct or enum declared in this package, for example a wrapper with a field of type `{type}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
@@ -2205,10 +2339,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0502",
         severity: Severity::Error,
         area: "borrow",
-        rule: "use after move",
+        rule: "use after move; case `operand`: by a later operand of the expression whose by-value operand moved the place (operands are evaluated left to right, the receiver first)",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "moved", kind: HoleKind::Place, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
         ],
         shapes: &[
@@ -2225,13 +2360,26 @@ pub(super) static ENTRIES: &[Entry] = &[
                     edits: &[],
                 }),
             },
+            Shape {
+                case: "operand",
+                message: "`{place}` is used after an earlier operand of the same expression moved `{moved}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "used here, after the move" },
+                    LabelTemplate { at: "move", text: "`{moved}` moved here: operands are evaluated left to right" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "compute the operand that uses `{place}` into a `let` before the expression and pass that local: operands are evaluated left to right, so `{moved}` is gone when it runs",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
         ],
     },
     Entry {
         code: "E0503",
         severity: Severity::Error,
         area: "borrow",
-        rule: "assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
+        rule: "assignment to an immutable binding or through `&` (case `shared-ref` also: a `&mut` chunk binding over a `&` source); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
         retired: false,
         located: true,
         holes: &[
@@ -2282,10 +2430,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0504",
         severity: Severity::Error,
         area: "borrow",
-        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture",
+        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it; case `part`: a non-Copy part (field, tuple element, payload) of a local or a temporary taken by value outside a pattern that takes the whole value apart (its fix names the pattern; `part-reborrow`: a `&mut` part, passed on by a reborrow; `part-replace`: an owner that cannot be taken apart here, `mem.replace`)",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "owner", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "pattern", kind: HoleKind::Pattern, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
         ],
         shapes: &[
@@ -2310,6 +2460,139 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `&{place}` inside the closure, or take the value out with `mem.replace(&mut {place}, other)` (`import std.mem;`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "drop",
+                message: "cannot move `{place}` out of `{owner}`: the type of `{owner}` implements `Drop`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "borrow it instead (`&{place}`), or take it out and leave another value in its place with `mem.replace(&mut {place}, other)` (`import std.mem;`): the destructor of `{owner}` runs on every part",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "part",
+                message: "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a part moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` or left out is dropped there)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "part-reborrow",
+                message: "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a part moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass the reference on by a reborrow: `&mut *{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "part-replace",
+                message: "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a part moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take the part out and leave a value in its place: `mem.replace(&mut {place}, other)` (`import std.mem;`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "static",
+                message: "cannot move `{place}` out of a `static`: its type is not `Copy`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "borrow it instead (`&{place}`): a `static` is never moved from",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0505",
+        severity: Severity::Error,
+        area: "borrow",
+        rule: "in a match guard, and in a closure written in it: no by-value use of a non-Copy value (a call may take arguments by copy or `&` only), no assignment, no `&mut` borrow (also of a receiver), no `?`; changes through `&` (cells, atomics, locks) and calls of fn values made outside are not covered",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "place", kind: HoleKind::Place, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "a match guard only reads: it may not move `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms), or pass `&{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "assign",
+                message: "a match guard only reads: it may not assign to `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "assigned in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "move",
+                message: "a match guard only reads: it may not move `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms), or pass `&{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-borrow",
+                message: "a match guard only reads: it may not borrow `{place}` mutably",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "mutable borrow in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass `&{place}`, or test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "try",
+                message: "a match guard only reads: `?` may leave the fn from inside it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`?` in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "evaluate the fallible value before the `match`, or test in the arm: `P => {{ if cond? {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2382,7 +2665,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0512",
         severity: Severity::Error,
         area: "borrow",
-        rule: "returned value borrows a local; case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)",
+        rule: "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)",
         retired: false,
         located: true,
         holes: &[
@@ -2797,7 +3080,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0609",
         severity: Severity::Error,
         area: "simd",
-        rule: "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`",
+        rule: "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param",
         retired: false,
         located: true,
         holes: &[
@@ -2817,6 +3100,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                     edits: &[
                         EditTemplate { at: "primary", replacement: "{concrete}" },
                     ],
+                }),
+            },
+            Shape {
+                case: "lanes",
+                message: "`{spelled}` is not a fixed lane count or mask width",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "lanes are 2, 4, 8, 16, 32, or 64; mask widths 8, 16, 32, or 64" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write one of these values as a literal: a const param never stands for a lane count or a mask width",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
                 }),
             },
         ],
@@ -3350,7 +3645,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0802",
         severity: Severity::Error,
         area: "threads-unsafe-ffi",
-        rule: "captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body: a capture that is not `Sync`, or a `&mut` capture",
+        rule: "captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body: a capture that is not `Sync`, or a `&mut` capture (any use that is not a proven read, through any dereference, captures by `&mut`)",
         retired: false,
         located: true,
         holes: &[
@@ -3950,7 +4245,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0905",
         severity: Severity::Error,
         area: "generics",
-        rule: "impl method signature differs from the trait's (params, return, `from`, `needs`, or `unsafe`); the fix shows the trait's signature",
+        rule: "impl method signature differs from the trait's (params, return, `from`, `needs`, `unsafe`, or the method's own generics: count, order, kind, `view`, a const param's type, and the bounds as complete trait refs with their args, after the trait's params are replaced by the impl's trait args); the fix shows the trait's signature",
         retired: false,
         located: true,
         holes: &[
@@ -4073,7 +4368,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0909",
         severity: Severity::Error,
         area: "generics",
-        rule: "explicit call of `Drop.drop` (as `x.drop()` or `Drop.drop(&mut x)`): drop runs only automatically, at scope end and when a place is overwritten",
+        rule: "explicit call of `Drop.drop` (as `x.drop()`, `Drop.drop(&mut x)`, `S.drop(&mut x)`) or a `Drop` impl method used as a fn value (`let f = S.drop;`): drop runs only automatically, at scope end and when a place is overwritten",
         retired: false,
         located: true,
         holes: &[],
@@ -5125,7 +5420,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1402",
         severity: Severity::Error,
         area: "effects",
-        rule: "unmarked recursion: a call cycle (a strongly connected component of the whole-program call graph over instances: calls, implied calls, `dispatch` arms, fn-value calls resolved to the values that reach them, drops) with a fn not declared `rec fn`; one per cycle, at the call leaving its first unmarked fn (smallest path); the cycle is listed from there along a shortest path, and every other unmarked fn of the component gets a label at its name; a cycle made only by dropping a recursive value (drop glue, `Drop` impls, built-in fns) needs no marker; a cycle through a closure literal is E1409",
+        rule: "unmarked recursion: a call cycle (a strongly connected component of the whole-program call graph over instances: calls, implied calls, `dispatch` arms, fn-value calls resolved to the values that reach them, drops) with a fn not declared `rec fn`; one per cycle, at the call leaving its first unmarked fn (smallest path); the cycle is listed from there along a shortest path, and every other unmarked fn of the component gets a label at its name; a cycle made only by dropping a recursive value (drop glue and built-in fns) needs no marker; on one through drop glue and a user fn (a user `Drop` impl) only the user fns need it; a cycle through a closure literal is E1409",
         retired: false,
         located: true,
         holes: &[

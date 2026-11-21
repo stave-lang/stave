@@ -1,0 +1,29 @@
+// `f` is set by its `let` and by `*p`: not set once, so `apply(f)` is not specialized on `cheap`.
+import std.io;
+import std.vec;
+
+fn cheap() -> usize { return 1; }
+
+fn costly() -> usize {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(1);
+    v.push(2);
+    return v.len();
+}
+
+fn apply(f: fn() -> usize) -> usize { return f(); }
+
+fn work() -> usize without(alloc) { //~ ERROR E1401
+    let mut f: fn() -> usize = cheap;
+    {
+        let p = &mut f;
+        *p = costly;
+    }
+    return apply(f);
+}
+
+fn main() -> i32 {
+    let n = work();
+    io.print(f"{n}\n");
+    return 0;
+}

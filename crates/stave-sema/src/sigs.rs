@@ -13,6 +13,7 @@
 
 use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
+use stave_ir::Known;
 use stave_syntax::{NodeKind, Term};
 
 use crate::Program;
@@ -419,6 +420,9 @@ pub(crate) trait LowerHost: Interner {
     fn view_env(&self) -> &[GenericParam] {
         &[]
     }
+    /// The declared type of const generic param `idx` (flat index) in scope; `None` for a host
+    /// that reports nothing (a const arg is then not type-checked).
+    fn const_param_ty(&self, idx: u32) -> Option<TypeId>;
     /// A written fixed vector or mask type `ty` of `bits` bits at `span` (E0702, crate::gates).
     fn vector_width(&mut self, _span: Span, _ty: &str, _bits: u32) {}
     /// Signature type `t` written at `span`, of a fn or fn type with features `features` (E0703,
@@ -669,21 +673,12 @@ fn view_args<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32, d: DeclId, args:
     }
 }
 
-/// Whether `m` is module `soa` of the built-in `std` package.
-pub(crate) fn is_builtin_soa(p: &Program, m: &crate::modules::Module) -> bool {
-    m.path_text == "std.soa"
-        && p.packages.get(m.package.idx()).is_some_and(|k| k.kind == crate::PackageKind::Builtin)
-}
-
 /// E0910: a written `std.soa.Soa<T>` whose row type T is neither a struct nor a generic param.
 fn soa_row<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32, d: DeclId, args: &[GArg]) {
     let Some(GArg::Type(t)) = args.first().copied() else { return };
     let diag = {
         let prog = h.prog();
-        let is_soa = prog.decl(d).is_some_and(|x| {
-            prog.strings.get(x.name) == "Soa"
-                && prog.module(x.module).is_some_and(|m| is_builtin_soa(prog, m))
-        });
+        let is_soa = prog.known.is(d, Known::Soa);
         if !is_soa || h.has_error(t) {
             return;
         }
@@ -794,6 +789,28 @@ pub(crate) fn lower_gargs<H: LowerHost>(
     Some(out)
 }
 
+/// Const generic param `idx` written at node `n` as the argument of a const param of type
+/// `want`: E0201 when its own declared type differs (a value of one type never stands for
+/// another: `300` of a `usize` param is no `u8`).
+pub(crate) fn const_param_arg<H: LowerHost + ?Sized>(
+    h: &mut H,
+    icx: &ItemCx<'_>,
+    n: u32,
+    idx: u32,
+    want: TypeId,
+) -> ConstArg {
+    let Some(t) = h.const_param_ty(idx) else { return ConstArg::Param(idx) };
+    if t == want || h.is_error_ty(t) || h.is_error_ty(want) {
+        return ConstArg::Param(idx);
+    }
+    let names = NameCx { prog: h.prog(), generics: &[] };
+    let (e, f) = (types::display(&*h, &names, want), types::display(&*h, &names, t));
+    let text = icx.node_text(n).to_string();
+    let d = mk("E0201", None, &[("expected", &e), ("found", &f), ("operand", &text)], icx.node_span(n), &[]);
+    h.report(d);
+    ConstArg::Error
+}
+
 /// One `GenericArg`: a type (`want_const` `None`) or a const of the param's declared type
 /// (`usize` when it is unknown).
 pub(crate) fn lower_garg<H: LowerHost>(
@@ -805,8 +822,13 @@ pub(crate) fn lower_garg<H: LowerHost>(
     let icx = env.icx;
     let a = icx.a(ga);
     let child = icx.first_child(ga);
-    if let Some(cty) = want_const {
-        let cty = if cty.is_none() || h.is_error_ty(cty) { h.fixed_ty(ids::USIZE) } else { cty };
+    if let Some(declared) = want_const {
+        if !declared.is_none() && h.is_error_ty(declared) {
+            // the param's declared type was reported: an arg checked against a guess would
+            // only add errors
+            return GArg::Const(ConstArg::Error);
+        }
+        let cty = if declared.is_none() { h.fixed_ty(ids::USIZE) } else { declared };
         if icx.is(a, Term::IntLit) {
             let Some((v, _)) = crate::literals::parse_int_text(icx.tok_str(a)) else {
                 return GArg::Const(ConstArg::Error);
@@ -833,7 +855,10 @@ pub(crate) fn lower_garg<H: LowerHost>(
                             Res::Generic(g) if g.is_const => {
                                 let idx =
                                     if g.level == 0 { g.index as u32 } else { env.n_parent + g.index as u32 };
-                                return GArg::Const(ConstArg::Param(idx));
+                                if declared.is_none() {
+                                    return GArg::Const(ConstArg::Param(idx));
+                                }
+                                return GArg::Const(const_param_arg(h, &icx, c, idx, declared));
                             }
                             Res::Decl(d) if h.prog().decl(d).is_some_and(|x| x.kind == DeclKind::Const) => {
                                 return GArg::Const(h.const_u64(env, c, cty));
@@ -946,12 +971,20 @@ fn lower_prim<H: LowerHost>(
                 lower_garg(h, env, kids[0], us)
             };
             let second = lower_garg(h, env, kids[1], us);
+            // A lane count and a mask width are fixed at the type: no const param stands for one
+            // (an instance would have no layout).
+            let not_fixed = |h: &mut H, at: u32| {
+                let spelled = icx.node_text(at).to_string();
+                let d = mk("E0609", Some("lanes"), &[("spelled", &spelled)], icx.node_span(at), &[]);
+                h.report(d);
+                h.error_ty()
+            };
             let lanes = match second {
                 GArg::Const(ConstArg::Value(v)) if matches!(v, 2 | 4 | 8 | 16 | 32 | 64) => {
                     Lanes::Fixed(v as u8)
                 }
                 GArg::Const(ConstArg::Error) => return h.error_ty(),
-                _ => return h.error_ty(),
+                _ => return not_fixed(h, kids[1]),
             };
             let t = match (p, first) {
                 (Prim::VecGeneric, GArg::Type(lane)) => {
@@ -963,6 +996,8 @@ fn lower_prim<H: LowerHost>(
                 (Prim::MaskGeneric, GArg::Const(ConstArg::Value(w))) if matches!(w, 8 | 16 | 32 | 64) => {
                     h.intern(TypeKind::Mask { width: w as u8, n: lanes })
                 }
+                (Prim::MaskGeneric, GArg::Const(ConstArg::Error)) => return h.error_ty(),
+                (Prim::MaskGeneric, _) => return not_fixed(h, kids[0]),
                 _ => return h.error_ty(),
             };
             // All arguments concrete: the concrete spelling is required.
@@ -990,6 +1025,9 @@ pub(crate) struct SigBuilder<'p> {
     const_stack: Vec<DeclId>,
     /// The generics of the decl being built ([`LowerHost::view_env`]).
     cur_generics: Vec<GenericParam>,
+    /// While the bounds of a generics list are lowered: the params in scope there (their const
+    /// types for [`LowerHost::const_param_ty`]; the view env stays empty).
+    bound_scope: Option<Vec<GenericParam>>,
     layout_busy: Vec<TypeId>,
     /// Lowering the signature of a fn with `needs(...)`: no E0702 (crate::gates).
     ungated: bool,
@@ -1044,6 +1082,11 @@ impl<'p> LowerHost for SigBuilder<'p> {
         &self.cur_generics
     }
 
+    fn const_param_ty(&self, idx: u32) -> Option<TypeId> {
+        let scope = self.bound_scope.as_deref().unwrap_or(&self.cur_generics);
+        scope.get(idx as usize).filter(|g| g.is_const).map(|g| g.const_ty)
+    }
+
     fn vector_width(&mut self, span: Span, ty: &str, bits: u32) {
         if self.ungated || self.wide.contains(&span) {
             return;
@@ -1084,6 +1127,7 @@ impl<'p> SigBuilder<'p> {
             const_stack: Vec::new(),
             layout_busy: Vec::new(),
             cur_generics: Vec::new(),
+            bound_scope: None,
             ungated: false,
             wide: Vec::new(),
         };
@@ -1092,78 +1136,44 @@ impl<'p> SigBuilder<'p> {
     }
 
     fn find_lang_items(&mut self) {
-        let p = self.prog;
-        let find = |module: &[&str], name: &str| -> DeclId {
-            // compiler-known items live in the built-in packages only
-            let Some(m) = p.modules.iter().find(|m| {
-                m.path.len() == module.len()
-                    && m.path.iter().zip(module).all(|(s, t)| p.strings.get(*s) == *t)
-                    && p.packages.get(m.package.idx()).is_some_and(|k| k.kind == crate::PackageKind::Builtin)
-            }) else {
-                return DeclId::NONE;
-            };
-            match p.strings.lookup(name) {
-                Some(s) => p.module_item(m.id, s).unwrap_or(DeclId::NONE),
-                None => DeclId::NONE,
-            }
-        };
-        let core = ["std", "core"];
-        self.lang.option = find(&core, "Option");
-        self.lang.result = find(&core, "Result");
-        self.lang.copy = find(&core, "Copy");
-        self.lang.send = find(&core, "Send");
-        self.lang.sync = find(&core, "Sync");
-        self.lang.flat = find(&core, "Flat");
-        self.lang.frozen = find(&core, "Frozen");
-        self.lang.drop = find(&core, "Drop");
-        self.lang.display = find(&core, "Display");
-        self.lang.write = find(&core, "Write");
-        self.lang.string = find(&["std", "string"], "String");
-        self.lang.unsafe_cell = find(&["std", "cell"], "UnsafeCell");
-        // a user module may also be spelled `std.soa`: only the built-in package's counts
-        self.lang.soa = match (p.modules.iter().find(|m| is_builtin_soa(p, m)), p.strings.lookup("Soa")) {
-            (Some(m), Some(s)) => p.module_item(m.id, s).unwrap_or(DeclId::NONE),
-            _ => DeclId::NONE,
-        };
-        for (t, _) in OP_TRAITS {
-            let d = find(&core, t);
-            if d.is_some() {
-                self.lang.ops.insert(t, d);
+        // compiler-known items live in the built-in packages only (`Program::known`)
+        let known = &self.prog.known;
+        let find = |k: Known| known.decl_or_none(k);
+        self.lang.option = find(Known::Option);
+        self.lang.result = find(Known::Result);
+        self.lang.copy = find(Known::Copy);
+        self.lang.send = find(Known::Send);
+        self.lang.sync = find(Known::Sync);
+        self.lang.flat = find(Known::Flat);
+        self.lang.frozen = find(Known::Frozen);
+        self.lang.drop = find(Known::Drop);
+        self.lang.display = find(Known::Display);
+        self.lang.write = find(Known::Write);
+        self.lang.string = find(Known::String);
+        self.lang.unsafe_cell = find(Known::UnsafeCell);
+        self.lang.soa = find(Known::Soa);
+        for k in stave_ir::known::OP_TRAITS {
+            if let Some(d) = known.decl(k) {
+                self.lang.ops.insert(k.name(), d);
             }
         }
-        let ctors: [(&[&str], &str); 7] = [
-            (&["std", "cell"], "UnsafeCell"),
-            (&["std", "atomic"], "U32"),
-            (&["std", "atomic"], "U64"),
-            (&["std", "atomic"], "Usize"),
-            (&["std", "atomic"], "Bool"),
-            (&["std", "sync"], "Mutex"),
-            (&["std", "sync"], "Once"),
+        let ctors = [
+            Known::UnsafeCellNew,
+            Known::AtomicU32New,
+            Known::AtomicU64New,
+            Known::AtomicUsizeNew,
+            Known::AtomicBoolNew,
+            Known::MutexNew,
+            Known::OnceNew,
         ];
-        if let Some(new) = p.strings.lookup("new") {
-            for (module, name) in ctors {
-                let adt = find(module, name);
-                let m = p.methods.inherent.get(&(TypeHead::Adt(adt), new)).and_then(|v| v.first());
-                if let (true, Some(&m)) = (adt.is_some(), m) {
-                    self.lang.const_ctors.push(m);
-                }
-            }
-        }
-        let sync = ["std", "sync"];
-        let method = |adt: DeclId, name: &str| -> DeclId {
-            let m = p.strings.lookup(name).and_then(|s| p.methods.inherent.get(&(TypeHead::Adt(adt), s)));
-            match m.and_then(|v| v.first()) {
-                Some(&m) if adt.is_some() => m,
-                _ => DeclId::NONE,
-            }
-        };
+        self.lang.const_ctors.extend(ctors.into_iter().filter_map(|k| known.decl(k)));
         let l = &mut self.lang.locks;
-        l.mutex = find(&sync, "Mutex");
-        l.guard = find(&sync, "MutexGuard");
-        l.once = find(&sync, "Once");
-        l.lock = method(l.mutex, "lock");
-        l.get_or_init = method(l.once, "get_or_init");
-        l.lock_pair = find(&sync, "lock_pair");
+        l.mutex = find(Known::Mutex);
+        l.guard = find(Known::MutexGuard);
+        l.once = find(Known::Once);
+        l.lock = find(Known::MutexLock);
+        l.get_or_init = find(Known::OnceGetOrInit);
+        l.lock_pair = find(Known::LockPair);
     }
 
     pub fn icx(&self, item: ItemId) -> Option<ItemCx<'p>> {
@@ -1213,10 +1223,16 @@ impl<'p> SigBuilder<'p> {
         let Some(decl) = self.prog.decl(d).copied() else { return Vec::new() };
         let mut out = Vec::new();
         let mut n_parent = 0u32;
+        let mut self_ty = None;
         if matches!(decl.kind, DeclKind::Method | DeclKind::TraitMethod) && decl.parent.is_some() {
             out = self.generics_of(decl.parent);
             n_parent = out.len() as u32;
+            // `Self` in a method's bounds: the impl's self type, or the trait's `Self`
+            self_ty = self.self_type_of(decl.parent);
         }
+        // `Self` in an impl's own bounds: its self type, lowered once its params are known
+        let impl_self =
+            if decl.kind == DeclKind::Impl { self.prog.impl_info(d).map(|i| i.self_ty) } else { None };
         // Insert a placeholder to stop recursion through bounds that mention the decl.
         self.gen_cache.insert(d, out.clone());
         if let Some(icx) = self.icx(decl.item)
@@ -1225,7 +1241,7 @@ impl<'p> SigBuilder<'p> {
         {
             // bounds are lowered with no view env (their params are not this scope's)
             let saved = std::mem::take(&mut self.cur_generics);
-            let own = self.lower_generics(&icx, g, n_parent, &out);
+            let own = self.lower_generics(&icx, g, n_parent, self_ty, impl_self, &out);
             self.cur_generics = saved;
             out.extend(own);
         }
@@ -1238,6 +1254,8 @@ impl<'p> SigBuilder<'p> {
         icx: &ItemCx<'p>,
         g: u32,
         n_parent: u32,
+        self_ty: Option<TypeId>,
+        impl_self: Option<u32>,
         parent: &[GenericParam],
     ) -> Vec<GenericParam> {
         let mut out: Vec<GenericParam> = Vec::new();
@@ -1261,24 +1279,58 @@ impl<'p> SigBuilder<'p> {
                 view: false,
             });
         }
-        let env = TyEnv { icx: *icx, n_parent, self_ty: None };
-        let _ = parent;
-        let mut k = 0usize;
-        for &c in &kids {
-            if icx.kind(c) != Some(NodeKind::GenericParam) {
-                continue;
+        let env = TyEnv { icx: *icx, n_parent, self_ty };
+        let params: Vec<u32> =
+            kids.iter().copied().filter(|&c| icx.kind(c) == Some(NodeKind::GenericParam)).collect();
+        for (k, &c) in params.iter().enumerate() {
+            if out[k].is_const
+                && let Some(t) = icx.child(c, NodeKind::Type)
+            {
+                let ct = lower_type(self, &env, t, false);
+                // a const arg is a `u64` value, read back in the param's type
+                let unsigned = matches!(self.tys.kind(ct), TypeKind::Int { signed: false, .. });
+                out[k].const_ty = if unsigned || self.tys.is_error_ty(ct) {
+                    ct
+                } else {
+                    let names = NameCx { prog: self.prog, generics: &[] };
+                    let found = types::display(&self.tys, &names, ct);
+                    let name = self.prog.strings.get(out[k].name).to_string();
+                    let d = mk(
+                        "E0201",
+                        Some("const-param-type"),
+                        &[("operand", &name), ("found", &found)],
+                        icx.node_span(t),
+                        &[],
+                    );
+                    self.diags.extend(d);
+                    ids::ERROR
+                };
             }
-            if out[k].is_const {
-                if let Some(t) = icx.child(c, NodeKind::Type) {
-                    out[k].const_ty = lower_type(self, &env, t, false);
-                }
-            } else if let Some(b) = icx.child(c, NodeKind::Bound) {
+        }
+        // a bound may pass any param of the list (or of the parent) as a const arg
+        let scope: Vec<GenericParam> = parent.iter().chain(&out).cloned().collect();
+        let saved = self.bound_scope.replace(scope);
+        let env = match impl_self {
+            Some(node) if node != u32::MAX => {
+                // the impl's signature lowers it again and reports what it finds
+                let (mark, wide) = (self.diags.len(), self.wide.len());
+                let t = lower_type(self, &env, node, false);
+                self.diags.truncate(mark);
+                self.wide.truncate(wide);
+                TyEnv { self_ty: Some(t), ..env }
+            }
+            _ => env,
+        };
+        for (k, &c) in params.iter().enumerate() {
+            if !out[k].is_const
+                && let Some(b) = icx.child(c, NodeKind::Bound)
+            {
                 let (bounds, view) = self.lower_bound(&env, b);
                 out[k].bounds = bounds;
                 out[k].view = view;
             }
-            k += 1;
         }
+        self.bound_scope = saved;
         out
     }
 
@@ -1346,6 +1398,7 @@ impl<'p> SigBuilder<'p> {
             _ => Vec::new(),
         };
         let saved = std::mem::replace(&mut self.cur_generics, env);
+        let saved_scope = self.bound_scope.take();
         let sig = match decl.kind {
             DeclKind::Fn | DeclKind::Method | DeclKind::TraitMethod => self.build_fn(d),
             DeclKind::Struct | DeclKind::Enum => self.build_adt(d),
@@ -1356,6 +1409,7 @@ impl<'p> SigBuilder<'p> {
             _ => DeclSig::None,
         };
         self.cur_generics = saved;
+        self.bound_scope = saved_scope;
         self.sigs[d.idx()] = sig;
         self.state[d.idx()] = State::Done;
     }

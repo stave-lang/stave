@@ -20,8 +20,7 @@ fn set_link(l: &mut Link from q, q: &mut Pick) {
 }
 
 fn link_pair(k: &mut Keep from pair, pair: (&mut Pick, &mut Link)) {
-    let a = pair.0;
-    let l = pair.1;
+    let (a, l) = pair;
     l.to = a;
 }
 
@@ -29,9 +28,7 @@ fn by_assignment(zero: &u32) -> usize {
     let mut spare = Pick.{ best: zero, count: 0 };
     let mut o = Both.{ a: Pick.{ best: zero, count: 1 }, l: Link.{ to: &mut spare } };
     {
-        let t = o.parts();
-        let a = t.0;
-        let l = t.1;
+        let (a, l) = o.parts();
         l.to = a;
     }
     o.a.count = 2; //~ ERROR E0501

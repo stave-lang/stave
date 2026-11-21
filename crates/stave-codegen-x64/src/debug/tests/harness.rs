@@ -174,13 +174,13 @@ impl Prog {
             next_decl: 100,
             ids: Vec::new(),
         };
-        p.entry = p.decl("runtime.start.entry", &[t.pusize], None);
+        p.entry = p.decl_known(stave_ir::Known::StartEntry, &[t.pusize], None);
         p.write = p.decl("t.write", &[t.pu8, t.usize], None);
         p.print = p.decl("t.print_u64", &[t.u64], None);
         p.def_write();
         p.def_print();
         if trap {
-            let f = p.decl("runtime.panic.trap", &[t.u32, t.u32], None);
+            let f = p.decl_known(stave_ir::Known::Trap, &[t.u32, t.u32], None);
             let mut b = FuncBuilder::new(&[t.u32, t.u32]);
             let k = b.param(0).unwrap();
             let kk = b.cast(CastKind::Exact, t.usize, k);
@@ -198,6 +198,13 @@ impl Prog {
     pub fn decl(&mut self, path: &str, params: &[TypeId], ret: Option<TypeId>) -> FuncId {
         self.next_inst += 1;
         self.m.declare(InstanceId(vec![self.next_inst]), path, params.to_vec(), ret)
+    }
+
+    /// Declares the function of compiler-known item `k`, stamped as the front end does.
+    pub fn decl_known(&mut self, k: stave_ir::Known, params: &[TypeId], ret: Option<TypeId>) -> FuncId {
+        let f = self.decl(&k.path(), params, ret);
+        self.m.funcs[f.index()].known = Some(k);
+        f
     }
 
     pub fn def(&mut self, f: FuncId, b: FuncBuilder) {

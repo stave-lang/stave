@@ -1,0 +1,26 @@
+// Holding rank 1 across a scope end whose spawn calls a `*p`-written fn value that locks rank 1.
+import std.io;
+import std.sync;
+
+static M: sync.Mutex<u64, 1> = sync.Mutex::<u64, 1>.new(0);
+
+fn idle() -> u64 { return 0; }
+
+fn relock() -> u64 { return M.with_lock(fn(v: &mut u64) -> u64 { return *v; }); }
+
+fn main() -> i32 {
+    let mut r: u64 = 0;
+    let s = M.with_lock(fn(v: &mut u64) -> u64 { //~ ERROR E1405
+        scope {
+            spawn {
+                let mut f: fn() -> u64 = idle;
+                let p = &mut f;
+                *p = relock;
+                r = f();
+            }
+        }
+        return *v;
+    });
+    io.print(f"{r} {s}\n");
+    return 0;
+}

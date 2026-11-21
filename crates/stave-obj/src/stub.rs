@@ -5,7 +5,9 @@ use crate::{DataObj, FuncCode, Machine, Reloc, RelocKind, SymbolId};
 /// Name of the entry stub.
 pub const START: &str = "_start";
 
-/// Name of the runtime entry the stub calls (`runtime.start.entry(sp: *const usize)`).
+/// The symbol of the runtime entry (`runtime.start.entry(sp: *const usize)`) when its path is its
+/// symbol. The backends hand the stub the entry's symbol id; this name only labels images built
+/// without a front end.
 pub const RUNTIME_ENTRY: &str = "runtime.start.entry";
 
 /// Name of the stack table (contracts/intrinsics.md "Runtime start and traps").
