@@ -645,7 +645,13 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
                 if let StmtKind::Assign { dest, init: false, .. } = &s.kind
                     && let Err((shared, blame)) = mutability(body, dest)
                 {
-                    findings.push(Finding::Immutable { place: dest.clone(), span: s.span, shared, blame, cast: false });
+                    findings.push(Finding::Immutable {
+                        place: dest.clone(),
+                        span: s.span,
+                        shared,
+                        blame,
+                        cast: false,
+                    });
                 }
             }
         }
