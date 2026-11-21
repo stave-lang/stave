@@ -30,10 +30,14 @@ A *constant temporary* is a temporary that a constant initializes and only `&` b
 value of a literal, of `()`, of `size_of` / `align_of`, or of a path that names no local (a
 `const` item or const generic, a variant without payload, a fn item), borrowed by `&e`, by `&`
 of a field or element of it, or as an auto-referenced `&self` receiver, of a type without drop
-glue (a temporary with drop glue ends with its statement, M14). Its value is fixed at compile time
-and nothing writes it, so it is static data like a string literal: every evaluation of the
-expression gives the same allocation, its root is `Frozen`, and a borrow of it is never ended
-by a later evaluation (M14 does not apply). A temporary that `&mut` borrows, and one whose
+glue (a temporary with drop glue ends with its statement, M14). Its value is fixed at compile time,
+so it is static data like a string literal: every evaluation of the expression gives the same
+allocation, its root is `Frozen` (`Cell` on the bytes inside an `UnsafeCell`), and a borrow of
+it is never ended by a later evaluation (M14 does not apply). Nothing writes its bytes outside
+an `UnsafeCell`. Its `Cell` bytes a `&` may write (M21), and each later evaluation writes the
+constant's value into them again, through the root: the backends keep one slot per expression
+and store the value at each evaluation, so a `const C: atomic.U32` borrowed in a loop starts
+each round from its initial value. A temporary that `&mut` borrows, and one whose
 value is computed (`&(2 + 2)`, `&-4`, `&f()`), is an ordinary temporary.
 
 **Tags.** A tag is an id made by one event and never reused. The tags of an allocation form a
@@ -640,8 +644,9 @@ it is not dumped, not compared with a golden, and not given to a backend.
     references (M18).
   - *constant*, in place of *begin*: the slot of a constant temporary (every form "State"
     lists). Its first evaluation
-    begins it; the store of a later one writes the bytes that are there and is no event, so
-    no tag of it changes. Its tags are not judged by M24, like those of a `static`.
+    begins it; the store of a later one is no event on the bytes outside an `UnsafeCell` (they
+    hold the value already) and a write through the root on its `Cell` bytes. Its tags are
+    not judged by M24, like those of a `static`.
 - **A local a value is moved out of lives in a slot**, also when the canonical lowering keeps
   it as an SSA value: a move is an event on the bytes of its place. A local that is never
   borrowed, captured, or moved out of stays an SSA value and is no allocation of the run.
@@ -682,7 +687,9 @@ What the tracking mode does not see, or sees later than the rules say:
   that is a param, a field, or a result (a fn type does not show them): when a source of a
   clause holds a fn value with captures, a reference that derives from no other source is not
   judged, and a fn value in a result or stored into a view is not judged either. A closure
-  body's own environment it walks. A value with more than 4096 reference words is not judged. The report
+  body's own environment it walks. A value with more than 4096 reference words (with the
+  words in the views it reaches) is not judged: a clause whose source it is, and the stores
+  into it, are not; the other clauses of the call are. The report
   names the param by its index and a closure body as `the closure at <file>:<line>:<col> in
   <fn>` (the site of its literal; its environment is its last param), and has no site of the
   store. It does not end the run: a run

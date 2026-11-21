@@ -237,8 +237,8 @@ struct Borrows {
     /// The first of the `from` clauses that a call did not keep (M24), and how many there were.
     signatures: Vec<signature::SignatureReport>,
     signature_count: usize,
-    /// The address the next store writes without an event: a constant temporary evaluated
-    /// again.
+    /// The address the next store writes without an event but on its `Cell` bytes: a
+    /// constant temporary evaluated again.
     quiet: Option<u64>,
 }
 
@@ -1587,7 +1587,8 @@ impl<'m, H: Host> Interp<'m, H> {
                 bt.tracker.end_alloc(id, at)
             }
             Mark::Const => {
-                // static data from its first evaluation on: no evaluation after it is an event
+                // static data from its first evaluation on: an evaluation after it writes only
+                // its `Cell` bytes (the store that follows)
                 let Some((id, _, _)) = self.mem.alloc_span(addr) else { return Ok(()) };
                 if !bt.static_ids.insert(id) {
                     bt.quiet = Some(addr);
@@ -2047,6 +2048,12 @@ impl<'m, H: Host> Interp<'m, H> {
                 if self.bt.is_some() && !quiet {
                     let n = self.layout(t)?.size;
                     self.track(Self::tag_of(regs, p), a, n, true, fid, i)?;
+                } else if quiet {
+                    // a constant temporary evaluated again: its bytes outside an `UnsafeCell`
+                    // hold the value already; its `Cell` bytes are written back to it
+                    for &(lo, hi) in self.cells(t)?.iter() {
+                        self.track(Self::tag_of(regs, p), a.wrapping_add(lo), hi - lo, true, fid, i)?;
+                    }
                 }
                 self.store_val(t, a, &v, 0, fid, site)?;
                 return Ok(Step::Next);
