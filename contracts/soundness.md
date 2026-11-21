@@ -284,9 +284,9 @@ outside the claim. **What would break it.** An acquisition the edges miss (a fn-
 misses: the call is checked against the wrong callee). A guard held where the scan does not look,
 behind a reference: a guard a callee stores through a `&mut` param and keeps is no held lock at the
 callee's own later calls (its caller's slot is counted at the call only because the slot's type
-holds a guard). A target that runs a `spawn` body before the spawning thread goes on, so that the
-child's waits happen where no rule compares them with the locks held. A rank changed by a pointer
-cast (unsafe code).
+holds a guard). A target that runs spawned bodies on one thread (the IR interpreter) runs each
+at its join, where the join rule compared what it takes with the locks held; one run earlier
+(at the `spawn`) would wait where no rule looks. A rank changed by a pointer cast (unsafe code).
 
 ## `Once`: `get_or_init` is never re-entered from its own `f`
 
@@ -324,15 +324,16 @@ stack), plus a node per lowered function the call graph has none for and each di
 lowered module that no edge covers (the runtime helpers lowering inserts). A node weighs the largest
 frame the backend reports for its functions. A fn-value call takes the call graph's targets. No
 bound for a node that calls C code, for one with a fn-value call but no such edge (or any fn-value
-call while some function made into a value has no node), or for one on or above a cycle. A node with
-a trap stub adds twice the depth of `runtime.panic.trap`, which holds while nothing
-`runtime.panic.begin` reaches has a trap stub (checked; else no bound). Main's stack and each thread
-start function's get the bound plus 4 KiB, rounded up to the page, above a 64 KiB `PROT_NONE` guard;
-an unbounded stack gets `[run] stack`. **Guarantees.** The frames live at once on a thread are the
-nodes of one path of the bound's graph from its start, so a bounded thread never reaches its guard;
-a stack that reaches a cycle keeps `[run] stack` and traps `StackOverflow` at the guard. **What
-would break it.** A fn-value call whose real target the call graph misses (a fn-value write the flow
-misses): the bound counts the target it shows, and a bigger frame or a recursion behind the real one
-runs into the guard of a stack the build summary calls bounded. A frame larger than the backend
-reports, and stack use outside frames beyond the 4 KiB margin (signal handlers run on the alternate
-stack).
+call while some function made into a value has no node; the call in `runtime.thread.run_queued` is
+left out: it runs a queued spawn body at the join only where no thread can be created, the IR
+interpreter, which reads no stack table), or for one on or above a cycle. A node with a trap stub
+adds twice the depth of `runtime.panic.trap`, which holds while nothing `runtime.panic.begin`
+reaches has a trap stub (checked; else no bound). Main's stack and each thread start function's get
+the bound plus 4 KiB, rounded up to the page, above a 64 KiB `PROT_NONE` guard; an unbounded stack
+gets `[run] stack`. **Guarantees.** The frames live at once on a thread are the nodes of one path of
+the bound's graph from its start, so a bounded thread never reaches its guard; a stack that reaches
+a cycle keeps `[run] stack` and traps `StackOverflow` at the guard. **What would break it.** A
+fn-value call whose real target the call graph misses (a fn-value write the flow misses): the bound
+counts the target it shows, and a bigger frame or a recursion behind the real one runs into the
+guard of a stack the build summary calls bounded. A frame larger than the backend reports, and stack
+use outside frames beyond the 4 KiB margin (signal handlers run on the alternate stack).

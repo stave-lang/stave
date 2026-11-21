@@ -21,9 +21,11 @@
 //!   untracked value can (below);
 //! - [`EdgeKind::Member`]: a table, to each fn and closure of its type made into a fn value
 //!   anywhere (site: the first place the walk finds it made);
-//! - [`EdgeKind::Spawn`]: the fn or closure holding a `spawn` statement, to the spawn body, and
-//!   the one passing a closure literal to `runtime.thread.start` (which runs it on a new
-//!   thread), to that closure;
+//! - [`EdgeKind::Spawn`]: the fn or closure holding a `spawn` statement, to the spawn body, the
+//!   one passing a closure literal to `runtime.thread.start` (which runs it on a new thread), to
+//!   that closure, and each node of `start` to each value its param takes. Where no thread can
+//!   be created, `start` queues the value and `runtime.thread.run_queued` calls it at the join:
+//!   that call is no edge (the joining node is the one that called `start`, or its caller);
 //! - [`EdgeKind::Drop`]: a fn or closure to the glue of each value type it may drop
 //!   ([`crate::typeck::TypedBody::drops`]: its locals and the values it makes; a value it drops is
 //!   one of them or a part of one), and a glue to its type's `Drop` impl and to the glue of each
@@ -1246,6 +1248,10 @@ struct Walk<'a> {
     string: [Option<DeclId>; 3],
     /// `runtime.thread.scope_spawn`: lowering passes each `spawn` body to it (param 1).
     scope_spawn: Option<DeclId>,
+    /// `runtime.thread.start` and `run_queued`: where no thread can be created, `start` queues
+    /// its fn value and `run_queued` calls it at the join.
+    thread_start: Option<DeclId>,
+    run_queued: Option<DeclId>,
     flow: Flow,
     /// Per table: a cast in a body outside the built-in packages reinterprets memory that may
     /// hold a value of its type, so every call of that type reaches the whole table.
@@ -1627,6 +1633,9 @@ impl<'a> Walk<'a> {
                     let t = self.subst(*ty, &args);
                     let table = self.table(t);
                     let deny = self.deny_of(t);
+                    if self.is_run_queued(i) {
+                        continue;
+                    }
                     let callee = self.val(callee, i, base, &args);
                     let (site, tok) = (ev.site, ev.tok);
                     self.flow.sites.push(ValueSite {
@@ -1829,6 +1838,14 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// Node `i` is `runtime.thread.run_queued`, whose fn-value call runs, at a join, a value
+    /// `runtime.thread.start` was given where no thread could be created: each `start` node has a
+    /// `Spawn` edge to the values its param takes ([`Walk::solve_flow`]), and the node calling
+    /// `join` is the one that called `start` or its caller, so the call itself is no edge.
+    fn is_run_queued(&self, i: u32) -> bool {
+        matches!(&self.nodes[i as usize].kind, NodeKind::Fn { inst, .. } if self.run_queued == Some(inst.decl))
+    }
+
     /// The slot of param `idx` of fn or closure node `n` (`None` without a checked body).
     fn param_slot(&mut self, n: u32, idx: u32) -> Option<u32> {
         let evs = self.evs;
@@ -1946,6 +1963,32 @@ impl<'a> Walk<'a> {
             }
             if !added {
                 break;
+            }
+        }
+        // `runtime.thread.start` runs its param on a new thread (or queues it for the join)
+        if let Some(start) = self.thread_start {
+            for n in 0..self.nodes.len() as u32 {
+                if !matches!(&self.nodes[n as usize].kind, NodeKind::Fn { inst, .. } if inst.decl == start) {
+                    continue;
+                }
+                let Some(p) = self.param_slot(n, 0) else { continue };
+                let site = Site::At(self.nodes[n as usize].span);
+                let p = p as usize;
+                let targets: Vec<u32> = if top.get(p).copied().unwrap_or(false) {
+                    let unit = self.cx.mk_tuple(Vec::new());
+                    let t = self.cx.intern(TypeKind::Fn {
+                        params: Box::new([]),
+                        ret: unit,
+                        features: 0,
+                        deny: 0,
+                    });
+                    self.table(t).and_then(|tb| members.get(tb as usize)).cloned().unwrap_or_default()
+                } else {
+                    sets.get(p).cloned().unwrap_or_default()
+                };
+                for t in targets {
+                    self.edges.push((n, t, EdgeKind::Spawn, site, 0));
+                }
             }
         }
         let sites = std::mem::take(&mut self.flow.sites);
@@ -2066,6 +2109,8 @@ pub(crate) fn build(
         arms: FxHashMap::default(),
         string,
         scope_spawn: crate::mono::item_at(prog, "runtime.thread", "scope_spawn"),
+        thread_start: fns[3],
+        run_queued: crate::mono::item_at(prog, "runtime.thread", "run_queued"),
         flow: Flow::default(),
         poisoned: Vec::new(),
         truncated: false,

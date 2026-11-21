@@ -145,7 +145,8 @@ and `realloc` as roots; std's calls still go to `runtime.alloc`.
   (contracts/intrinsics.md "Thread pointer"): main's in `STATE`, set first by `start.entry`; a
   thread's in its record page, set by `CLONE_SETTLS`. If a thread cannot be created (no memory, the
   guard pages cannot be protected, EAGAIN) the program panics with "cannot create thread"; only in the IR interpreter (clone is ENOSYS)
-  the body runs inline on the creating thread.
+  the body is queued and runs on the joining thread at the join (`join`, `scope_join`), oldest
+  first.
 - **A5** a fn value is two words, (code, environment) (contracts/checked-ir.md "Closures");
   runtime.thread stores and rebuilds one through `*const [usize; 2]`.
 - **Layouts used by pointer casts**: `&str`/`&[u8]` = (data, len) words; kernel structs are
