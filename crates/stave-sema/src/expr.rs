@@ -52,10 +52,14 @@ enum St {
         index: u32,
         args: Option<Vec<GArg>>,
     },
-    Trait,
+    /// A trait path, with the trait args written on it (`Tr::<u32>`).
+    Trait {
+        args: Option<Vec<GArg>>,
+    },
     TraitMethod {
         method: DeclId,
         trait_decl: DeclId,
+        trait_args: Vec<GArg>,
         targs: Option<Vec<GArg>>,
     },
     /// `T.m` for a generic `T` (or `Self` in a trait) through a bound.
@@ -1623,9 +1627,20 @@ impl<'a> Ck<'a> {
                             let own: Vec<Option<TypeId>> = all.get(np..).unwrap_or(&[]).to_vec();
                             self.turbofish(g, &own, g)
                         });
-                        St::TraitMethod { method: d, trait_decl: decl.parent, targs: ga }
+                        // `Tr::<A>.m`: the trait args written on the trait segment
+                        let trait_args = match prev {
+                            Some(St::Trait { args: Some(a) }) => a.clone(),
+                            _ => Vec::new(),
+                        };
+                        St::TraitMethod { method: d, trait_decl: decl.parent, trait_args, targs: ga }
                     }
-                    DeclKind::Trait => St::Trait,
+                    DeclKind::Trait => {
+                        let args = targs.and_then(|g| {
+                            let sh = shape(self, d);
+                            self.turbofish(g, &sh, g)
+                        });
+                        St::Trait { args }
+                    }
                     DeclKind::TypeAlias => match self.sigs.get(d) {
                         crate::sigs::DeclSig::Alias(al) => {
                             let target = al.target;
@@ -1701,7 +1716,7 @@ impl<'a> Ck<'a> {
                 }
             }
             St::Fn { decl, targs } => self.fn_item_value(n, decl, targs, hint),
-            St::NoVal | St::Adt { .. } | St::TypeVal(_) | St::Trait => self.not_value(n),
+            St::NoVal | St::Adt { .. } | St::TypeVal(_) | St::Trait { .. } => self.not_value(n),
             St::Assoc { method, impl_args, targs } => {
                 let Some(sig) = self.sigs.fn_sig(method) else { return Ty::ERR };
                 let mut args: Vec<GArg> = impl_args.unwrap_or_default();
@@ -1866,7 +1881,7 @@ impl<'a> Ck<'a> {
                 }
                 // a member of a value (a step after a type the resolver left unresolved: already
                 // diagnosed, or a method of a dropped impl)
-                if matches!(st, St::Adt { .. } | St::TypeVal(_) | St::NoVal | St::Trait) {
+                if matches!(st, St::Adt { .. } | St::TypeVal(_) | St::NoVal | St::Trait { .. }) {
                     st = St::Err;
                 }
                 let recv = self.value_of(st, prim, None);
@@ -2077,9 +2092,11 @@ impl<'a> Ck<'a> {
         if let Some(d) = self.prog.decl(methods[1]) {
             roles.push(("second", d.name_span));
         }
+        // one trait twice: two of its impls (other trait args) supply the method
+        let case = (traits[0] == traits[1]).then_some("impls");
         let d = mk(
             "E0908",
-            None,
+            case,
             &[("name", &name), ("type", &tn), ("first", &p1), ("second", &p2)],
             self.icx.tok_span(seg),
             &roles,
@@ -2684,8 +2701,8 @@ impl<'a> Ck<'a> {
                 self.site(paren, cspan, method, &gargs);
                 Ty::T(self.tys.subst(sig.ret, &gargs, None))
             }
-            St::TraitMethod { method, trait_decl, targs } => {
-                self.trait_call(n, paren, method, trait_decl, None, Vec::new(), targs, args, hint)
+            St::TraitMethod { method, trait_decl, trait_args, targs } => {
+                self.trait_call(n, paren, method, trait_decl, None, trait_args, targs, args, hint)
             }
             St::BoundAssoc { method, trait_args, self_ty, targs } => {
                 let td = self.prog.decl(method).map_or(DeclId::NONE, |d| d.parent);

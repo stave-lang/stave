@@ -1219,11 +1219,17 @@ impl<'a> World<'a> {
                 else {
                     continue;
                 };
-                if found.iter().any(|(t, _, _)| *t == tr.trait_decl) {
-                    continue;
-                }
                 if let Some(args) = self.impl_applies(cx, imp, c, env, 0) {
-                    let tm = self.prog.member(tr.trait_decl, name).unwrap_or(m);
+                    // two impls of one trait (other trait args) for this type: the call names
+                    // neither, so it is ambiguous; the labels then show the two impls' methods
+                    let same = found.iter().any(|(t, _, _)| *t == tr.trait_decl);
+                    let tm = if same { m } else { self.prog.member(tr.trait_decl, name).unwrap_or(m) };
+                    if same
+                        && let Some(first) = found.iter_mut().find(|(t, _, _)| *t == tr.trait_decl)
+                        && let MethodRef::Impl { method, .. } = first.1
+                    {
+                        first.2 = method;
+                    }
                     found.push((
                         tr.trait_decl,
                         MethodRef::Impl { method: m, impl_decl: i, impl_args: args },

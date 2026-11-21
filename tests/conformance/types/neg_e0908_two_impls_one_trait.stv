@@ -1,0 +1,48 @@
+//~ CHECK-ONLY
+// A method call that two impls of one generic trait (other trait args) both supply names
+// neither: it is ambiguous, whatever order the impls are in. The trait path with its args picks
+// one.
+trait Name<T> {
+    fn id(&self) -> u32;
+}
+
+trait Conv<T> {
+    fn c(&self) -> T;
+}
+
+struct A { n: u32 }
+
+impl Name<u32> for A {
+    fn id(&self) -> u32 {
+        return 32;
+    }
+}
+
+impl Name<u64> for A {
+    fn id(&self) -> u32 {
+        return 64;
+    }
+}
+
+impl Conv<u32> for A {
+    fn c(&self) -> u32 {
+        return 7;
+    }
+}
+
+impl Conv<u64> for A {
+    fn c(&self) -> u64 {
+        return 1099511627776;
+    }
+}
+
+fn main() -> i32 {
+    let a = A.{ n: 1 };
+    let k = a.id(); //~ ERROR E0908
+    let x: u64 = a.c(); //~ ERROR E0908
+    let j: u32 = Name::<u32>.id(&a);
+    let y: u64 = Conv::<u64>.c(&a);
+    // the args written on the trait path are the trait's args, not a guess from the result
+    let z: u32 = Conv::<u64>.c(&a); //~ ERROR E0201
+    return 0;
+}

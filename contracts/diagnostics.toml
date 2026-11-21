@@ -1672,11 +1672,16 @@ fix = { description = "remove `pub`: `{name}` is visible wherever its trait is",
 code = "E0908"
 severity = "error"
 area = "generics"
-rule = "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type) finds the method in two traits"
+rule = "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type in the calling package and its dependencies) finds the method in two traits, or (case `impls`) in two impls of one trait with other trait args"
 holes = { name = "name", type = "type", first = "path", second = "path" }
 message = "method `{name}` of `{type}` is ambiguous: both `{first}` and `{second}` supply it"
 labels = [{ at = "primary", text = "ambiguous call" }, { at = "first", text = "`{first}.{name}` declared here" }, { at = "second", text = "`{second}.{name}` declared here" }]
 fix = { description = "call it qualified, with the receiver as first argument: `{first}.{name}(x)` or `{second}.{name}(x)`" }
+
+[diag.cases.impls]
+message = "method `{name}` of `{type}` is ambiguous: two impls of `{first}` (other trait args) supply it"
+labels = [{ at = "primary", text = "ambiguous call" }, { at = "first", text = "one impl's `{name}`" }, { at = "second", text = "another impl's `{name}`" }]
+fix = { description = "call it through the trait with its args, the receiver as first argument: `{first}::<..>.{name}(x)`" }
 
 [[diag]]
 code = "E0909"

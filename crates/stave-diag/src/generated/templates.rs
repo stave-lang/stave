@@ -4157,7 +4157,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0908",
         severity: Severity::Error,
         area: "generics",
-        rule: "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type) finds the method in two traits",
+        rule: "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type in the calling package and its dependencies) finds the method in two traits, or (case `impls`) in two impls of one trait with other trait args",
         retired: false,
         located: true,
         holes: &[
@@ -4177,6 +4177,20 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call it qualified, with the receiver as first argument: `{first}.{name}(x)` or `{second}.{name}(x)`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "impls",
+                message: "method `{name}` of `{type}` is ambiguous: two impls of `{first}` (other trait args) supply it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "ambiguous call" },
+                    LabelTemplate { at: "first", text: "one impl's `{name}`" },
+                    LabelTemplate { at: "second", text: "another impl's `{name}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "call it through the trait with its args, the receiver as first argument: `{first}::<..>.{name}(x)`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
