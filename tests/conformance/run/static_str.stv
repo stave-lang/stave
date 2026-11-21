@@ -1,0 +1,40 @@
+//~ STDOUT static_str.stdout
+//~ EXIT 0
+// A `static` of type `&str` holds the address and length of its literal's bytes in the image:
+// from a literal or a `&str` const, empty, the same literal as code or as another static, and
+// non-ASCII; read by value, through `&`, and passed to a fn.
+import std.io;
+
+const GREETING: &str = "hello";
+
+static NAME: &str = "stave";
+static HELLO: &str = GREETING;
+static EMPTY: &str = "";
+static AGAIN: &str = "stave";
+static WIDE: &str = "größe ✓";
+pub static LINE: &str = "line\n";
+
+fn show(s: &str) {
+    io.print(f"[{s}]\n");
+}
+
+fn total() -> usize {
+    return NAME.len() + HELLO.len() + EMPTY.len() + WIDE.len();
+}
+
+fn main() -> i32 {
+    show(NAME);
+    show(HELLO);
+    show(EMPTY);
+    show(AGAIN);
+    show(WIDE);
+    show("stave");
+    let r: &&str = &NAME;
+    let s: &str = *r;
+    show(s);
+    let n = total();
+    let w = WIDE.len();
+    io.print(f"{n} {w}\n");
+    io.print(LINE);
+    return 0;
+}
