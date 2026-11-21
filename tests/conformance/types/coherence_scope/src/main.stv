@@ -1,0 +1,21 @@
+//~ STDOUT expected_stdout.txt
+import std.io;
+import dep;
+
+trait Mine {
+    fn m(&self) -> u32;
+}
+
+impl Mine for dep.A {
+    fn m(&self) -> u32 {
+        return 99;
+    }
+}
+
+fn main() -> i32 {
+    let a = dep.A.{ n: 1 };
+    let k: u32 = dep.call(&a);
+    let j: u32 = Mine.m(&a);
+    io.print(f"{k} {j}\n");
+    return 0;
+}

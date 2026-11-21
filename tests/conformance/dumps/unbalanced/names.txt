@@ -1,10 +1,14 @@
 0 3 -> local 0 0
-3 0 -> decl 10
+3 0 -> decl 11
 3 6 -> local 3 2
-4 0 -> decl 8
-4 4 -> decl 10
+4 0 -> decl 9
+4 4 -> decl 11
 4 10 -> local 4 6
-5 0 -> decl 8
-5 4 -> decl 10
+5 0 -> decl 9
+5 4 -> decl 11
 5 10 -> local 5 6
 5 16 -> local 5 14
+7 0 -> decl 2
+9 0 -> decl 2
+9 0 -> decl 11
+9 2 -> decl 17

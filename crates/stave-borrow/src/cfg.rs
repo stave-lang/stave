@@ -34,7 +34,7 @@ use rustc_hash::FxHashMap;
 use stave_diag::Span;
 use stave_sema::itemcx::ItemCx;
 use stave_sema::loops::ForKind;
-use stave_sema::traits::{Adjust, Lookup, World};
+use stave_sema::traits::{Adjust, World};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 use stave_sema::{BindingRef, Coercion, DeclKind, Res, Target, TypedBody};
 use stave_syntax::{NodeKind, Term};
@@ -1223,7 +1223,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 if let Some(s) = self.scopes.last_mut() {
                     s.push(t);
                 }
-                let (flows, item) = self.next_of(it_ty);
+                let (flows, item) = self.next_of(f);
                 match flows {
                     Some(fl) => Src::Iter(Place::local(t, it_ty), fl, item),
                     None => {
@@ -1436,16 +1436,15 @@ impl<'a, 'b> Builder<'a, 'b> {
             .unwrap_or(1) as u32
     }
 
-    /// The flows and item type of `it.next()` for an iterator type.
-    fn next_of(&mut self, it: TypeId) -> (Option<Flows>, TypeId) {
+    /// The flows and item type of the `next` the type checker resolved for `for` loop `f` (never
+    /// a lookup by name here: it would see the impls of this body's package only).
+    fn next_of(&mut self, f: u32) -> (Option<Flows>, TypeId) {
         let prog = self.tys.prog;
-        let Some(next) = prog.strings.lookup("next") else { return (None, TypeId::NONE) };
-        let w = World { prog, sigs: self.tys.sigs };
-        let env = self.tys.env;
-        let Lookup::Found { m, .. } = w.lookup_method(&mut self.tys.ov, it, next, env) else {
+        let Some(Target::Method { method: m, args, .. }) = self.tb.implicit_at(self.icx.a(f)).cloned() else {
             return (None, TypeId::NONE);
         };
-        let Some((sig, args, self_ty)) = w.method_sig(&m) else { return (None, TypeId::NONE) };
+        let w = World { prog, sigs: self.tys.sigs };
+        let Some((sig, _, self_ty)) = w.method_sig(&m) else { return (None, TypeId::NONE) };
         let ret = self.tys.subst(sig.ret, &args, self_ty);
         let item = self.tys.payload(ret);
         let flows =

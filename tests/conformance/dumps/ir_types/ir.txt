@@ -18,8 +18,8 @@ type t16 array t2 3
 type t17 array t4 2
 type t18 slice t4
 type t19 tuple t8 t7
-type t20 adt d17
-type t21 adt d24 t0
+type t20 adt d22
+type t21 adt d29 t0
 type t22 fntype t1 -> t1
 fn @0 main.twice {
 b0(%0: t1):
