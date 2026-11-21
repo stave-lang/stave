@@ -400,8 +400,18 @@ impl Sp {
         let t = p.t;
         let sys6 = p.m.intrinsic("syscall6");
         let static_addr = p.m.intrinsic("static_addr");
-        p.m.statics.push(stave_ir::Static { path: "t.DUMP_PTR".into(), ty: t.u64, init: vec![0; 8] });
-        p.m.statics.push(stave_ir::Static { path: "t.DUMP_LEN".into(), ty: t.u64, init: vec![0; 8] });
+        p.m.statics.push(stave_ir::Static {
+            path: "t.DUMP_PTR".into(),
+            ty: t.u64,
+            init: vec![0; 8],
+            refs: Vec::new(),
+        });
+        p.m.statics.push(stave_ir::Static {
+            path: "t.DUMP_LEN".into(),
+            ty: t.u64,
+            init: vec![0; 8],
+            refs: Vec::new(),
+        });
         let pu64 = p.m.types.ptr(true, t.u64);
         let dump = p.decl("t.dump", &[t.usize, t.usize], None);
         let fill = p.decl("t.fill", &[t.usize, t.usize, t.u64], None);

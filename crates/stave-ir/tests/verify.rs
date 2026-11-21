@@ -452,8 +452,13 @@ fn canonicalize_remaps_statics_once() {
         let tup = m.types.tuple(vec![b]);
         let u8t = m.types.u8();
         let arr = m.types.array(u8t, 3);
-        m.statics.push(stave_ir::Static { path: "t.A".into(), ty: tup, init: vec![0] });
-        m.statics.push(stave_ir::Static { path: "t.B".into(), ty: arr, init: vec![1, 2, 3] });
+        m.statics.push(stave_ir::Static { path: "t.A".into(), ty: tup, init: vec![0], refs: Vec::new() });
+        m.statics.push(stave_ir::Static {
+            path: "t.B".into(),
+            ty: arr,
+            init: vec![1, 2, 3],
+            refs: Vec::new(),
+        });
         for k in 0..nfuncs {
             define(&mut m, &[k as u32], &format!("t.f{k}"), &[], None, |b, _| b.ret(None));
         }
@@ -516,4 +521,30 @@ fn seal_unreached_closes_only_blocks_out_of_reach() {
     b.br(live, &[]);
     b.seal_unreached();
     assert_eq!(b.finish().err(), Some(BuildError::Unterminated(live)));
+}
+
+/// A static's address words: 8-aligned, ascending, inside zero bytes of `init`, into an existing
+/// string or static, at most one past its end.
+#[test]
+fn static_address_words() {
+    use stave_ir::{DataRef, DataTarget, Static};
+    let mut m = Module::new();
+    let u64t = m.types.u64();
+    let pair = m.types.array(u64t, 2);
+    let s = m.add_string(b"abc".to_vec());
+    let word = |offset, target, addend| DataRef { offset, target, addend };
+    let refs = vec![word(0, DataTarget::Str(s), 3), word(8, DataTarget::Static(0), 16)];
+    m.statics.push(Static { path: "t.S".into(), ty: pair, init: vec![0; 16], refs });
+    assert!(errs(&m).is_empty(), "{:#?}", errs(&m));
+    let bad = |refs: Vec<DataRef>, init: Vec<u8>, needle: &str| {
+        let mut m = m.clone();
+        m.statics.push(Static { path: "t.bad".into(), ty: pair, init, refs });
+        has(&m, needle);
+    };
+    bad(vec![word(4, DataTarget::Str(s), 0)], vec![0; 16], "misplaced");
+    bad(vec![word(8, DataTarget::Str(s), 0), word(8, DataTarget::Str(s), 0)], vec![0; 16], "misplaced");
+    bad(vec![word(16, DataTarget::Str(s), 0)], vec![0; 16], "misplaced");
+    bad(vec![word(0, DataTarget::Str(s), 0)], vec![1; 16], "misplaced");
+    bad(vec![word(0, DataTarget::Str(s), 4)], vec![0; 16], "points past");
+    bad(vec![word(0, DataTarget::Static(9), 0)], vec![0; 16], "no target");
 }

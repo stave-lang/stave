@@ -45,9 +45,9 @@ pub use build::{BuildError, FuncBuilder};
 pub use host::{BufferHost, Host, SysResult, SyscallAbi};
 pub use interp::{Config, Interp, InterpError, Outcome, Trap, Val};
 pub use ir::{
-    Block, Body, BorrowMark, CastKind, ClauseKind, Clauses, Const, EventKind, EventMark, Func, FuncId,
-    InstanceId, IntrinsicId, Module, Op, Operand, PanicKind, Prefetch, PrefetchLoc, Site, SiteInfo, Static,
-    StrId, Term, Value,
+    Block, Body, BorrowMark, CastKind, ClauseKind, Clauses, Const, DataRef, DataTarget, EventKind, EventMark,
+    Func, FuncId, InstanceId, IntrinsicId, Module, Op, Operand, PanicKind, Prefetch, PrefetchLoc, Site,
+    SiteInfo, Static, StrId, Term, Value,
 };
 pub use known::Known;
 pub use print_checked::print_checked;

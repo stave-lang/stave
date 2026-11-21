@@ -331,8 +331,18 @@ fn statics_and_module_sites() {
     let mut p = Prog::new();
     let t = p.t;
     let arr = p.m.types.array(t.u8, 4);
-    p.m.statics.push(stave_ir::Static { path: "t.COUNT".into(), ty: t.u64, init: vec![0; 8] });
-    p.m.statics.push(stave_ir::Static { path: "t.MSG".into(), ty: arr, init: b"abc\n".to_vec() });
+    p.m.statics.push(stave_ir::Static {
+        path: "t.COUNT".into(),
+        ty: t.u64,
+        init: vec![0; 8],
+        refs: Vec::new(),
+    });
+    p.m.statics.push(stave_ir::Static {
+        path: "t.MSG".into(),
+        ty: arr,
+        init: b"abc\n".to_vec(),
+        refs: Vec::new(),
+    });
     p.m.sites.push(stave_ir::SiteInfo { file: "src/a.stv".into(), line: 7, col: 3, func: "t.main".into() });
     p.m.sites.push(stave_ir::SiteInfo { file: "src/a.stv".into(), line: 9, col: 11, func: "t.main".into() });
     let sa = p.m.intrinsic("static_addr");

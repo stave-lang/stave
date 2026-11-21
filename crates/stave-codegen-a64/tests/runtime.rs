@@ -22,8 +22,8 @@ fn statics() {
     for x in [7u32, 8, 9] {
         init.extend_from_slice(&x.to_le_bytes());
     }
-    p.m.statics.push(Static { path: "app.A".into(), ty: arr, init });
-    p.m.statics.push(Static { path: "app.Z".into(), ty: t.u64, init: vec![0; 8] });
+    p.m.statics.push(Static { path: "app.A".into(), ty: arr, init, refs: Vec::new() });
+    p.m.statics.push(Static { path: "app.Z".into(), ty: t.u64, init: vec![0; 8], refs: Vec::new() });
     let sa = p.m.intrinsic("static_addr");
     let bump = p.func("app.bump", &[], Some(t.u64), |b, p| {
         let one = b.int(1);

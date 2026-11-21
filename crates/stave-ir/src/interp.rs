@@ -640,7 +640,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 quiet: None,
             })
         });
-        let strs = m.strings.iter().map(|s| mem.add_data(s)).collect();
+        let strs: Vec<u64> = m.strings.iter().map(|s| mem.add_data(s)).collect();
         let layouts = Layouts::compute(&m.types);
         let mut statics = Vec::with_capacity(m.statics.len());
         for st in &m.statics {
@@ -650,6 +650,18 @@ impl<'m, H: Host> Interp<'m, H> {
             let n = (st.init.len() as u64).min(l.size) as usize;
             mem.write(a, &st.init[..n]).map_err(|_| oom())?;
             statics.push(a);
+        }
+        // An address word is an untagged pointer: a load of it is a root, like a string operand.
+        for (st, &a) in m.statics.iter().zip(&statics) {
+            for r in &st.refs {
+                let base = match r.target {
+                    crate::DataTarget::Str(s) => strs.get(s.index()),
+                    crate::DataTarget::Static(k) => statics.get(k as usize),
+                };
+                let addr = base.ok_or(malformed("static address word"))?.wrapping_add(u64::from(r.addend));
+                mem.write(a + u64::from(r.offset), &addr.to_le_bytes())
+                    .map_err(|_| malformed("static address word"))?;
+            }
         }
         let mut it = Interp {
             m,

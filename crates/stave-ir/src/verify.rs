@@ -74,7 +74,35 @@ pub fn verify_types(m: &Module) -> Result<Vec<VerifyError>, Vec<VerifyError>> {
             }
         }
     }
+    errs.extend(verify_static_refs(m).into_iter().map(module_err));
     if types_ok { Ok(errs) } else { Err(errs) }
+}
+
+/// The address words of every static: ascending, non-overlapping, 8-aligned words wholly inside
+/// zero bytes of `init`, each into an existing string or static, at most one past its end.
+fn verify_static_refs(m: &Module) -> Vec<String> {
+    let mut errs = Vec::new();
+    for (i, st) in m.statics.iter().enumerate() {
+        let mut next = 0usize;
+        for r in &st.refs {
+            let at = r.offset as usize;
+            let word = st.init.get(at..at.saturating_add(8));
+            if at < next || at % 8 != 0 || word.is_none_or(|w| w.iter().any(|&x| x != 0)) {
+                errs.push(format!("static {i}: address word at {at} is misplaced"));
+            }
+            next = at.saturating_add(8);
+            let len = match r.target {
+                crate::DataTarget::Str(s) => m.strings.get(s.index()).map(|b| b.len()),
+                crate::DataTarget::Static(k) => m.statics.get(k as usize).map(|t| t.init.len()),
+            };
+            match len {
+                Some(n) if r.addend as usize <= n => {}
+                Some(_) => errs.push(format!("static {i}: address word at {at} points past its target")),
+                None => errs.push(format!("static {i}: address word at {at} has no target")),
+            }
+        }
+    }
+    errs
 }
 
 /// The per-function part of [`verify_module`]: the errors of function `fid` (none for an unknown
