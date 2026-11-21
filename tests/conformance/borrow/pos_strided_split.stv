@@ -17,7 +17,7 @@ impl GridMut {
     fn new(xs: &mut [u32], cols: usize) -> GridMut from xs {
         debug.assert(cols != 0 && xs.len() % cols == 0, "shape");
         let rows = xs.len() / cols;
-        let p = mem.slice_ptr(xs) as *mut u32;
+        let p = mem.slice_ptr_mut(xs);
         return GridMut.{ anchor: &xs[0..0], p: p, rows: rows, cols: cols };
     }
 

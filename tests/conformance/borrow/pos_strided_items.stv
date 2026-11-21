@@ -41,7 +41,7 @@ impl GridMut {
     fn new(xs: &mut [u32], cols: usize) -> GridMut from xs {
         debug.assert(cols != 0 && xs.len() % cols == 0, "shape");
         let rows = xs.len() / cols;
-        let p = mem.slice_ptr(xs) as *mut u32;
+        let p = mem.slice_ptr_mut(xs);
         return GridMut.{ anchor: &xs[0..0], p: p, rows: rows, cols: cols };
     }
 
@@ -80,7 +80,7 @@ view struct PhasesMut { anchor: &[u32], p: *mut u32, n: usize, k: usize, i: usiz
 
 fn phases_mut(xs: &mut [u32], k: usize) -> PhasesMut from xs {
     debug.assert(k != 0, "phases");
-    let p = mem.slice_ptr(xs) as *mut u32;
+    let p = mem.slice_ptr_mut(xs);
     return PhasesMut.{ anchor: &xs[0..0], p: p, n: xs.len(), k: k, i: 0 };
 }
 

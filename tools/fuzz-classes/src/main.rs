@@ -20,9 +20,10 @@
 //!   program rejected without any expected code;
 //! - `mismatch`: accepted, and a native build prints or exits other than the interpreter;
 //! - `trap`: accepted, and the run trapped (no generated program traps);
-//! - `oracle`: accepted, and the interpreter in checking mode (`STAVE_INTERP_CHECK=1` in the
-//!   environment) reported a memory error, or in borrow-tracking mode (`STAVE_INTERP_CHECK=borrow`)
-//!   a violation of the borrow model or a `from` clause a call did not keep.
+//! - `oracle`: accepted, and the interpreter leg in checking mode reported a memory error, a
+//!   borrow violation, or a `from` clause a call did not keep (the report text is the detail).
+//!   The mode is `STAVE_INTERP_CHECK` of the environment, `borrow` when unset (memory checks
+//!   plus borrow tracking, contracts/borrow-model.md); `1` checks memory only.
 //!
 //! Each finding's program is saved under `DIR/findings/<kind>/<class>-<seed>.stv` with the
 //! reason in its head comment; `DIR/summary.txt` gets the table printed at the end,
@@ -43,9 +44,8 @@ use stave_diag::Severity;
 use stave_driver::build::Failure;
 use stave_driver::exec::{self, Ran, RunSpec};
 use stave_driver::interp::{self, Limits};
-use stave_driver::pipeline::{self, Goal, Options, Stage};
+use stave_driver::pipeline::{self, Goal, Options, Output, Stage};
 use stave_driver::shipped::Library;
-use stave_ir::Module;
 use stave_target::Triple;
 
 const USAGE: &str =
@@ -152,11 +152,32 @@ fn main() -> ExitCode {
 
 // ---- child: one program ----
 
-/// The per-program dynamic oracle on the checked IR of an accepted program: a report of a
-/// run-time borrow or memory violation, or `None`. Memory errors of the interpreter's checking
-/// mode are reported by the interpreter leg itself; nothing else is checked here yet.
-fn dynamic_oracle(_m: &Module, _main: &str, _target: Triple) -> Option<String> {
-    None
+/// The checking mode of the children when `STAVE_INTERP_CHECK` is unset.
+const DEFAULT_CHECK: &str = "borrow";
+
+/// What the interpreter leg gave.
+enum Leg {
+    Ran(Ran),
+    /// A report of the checking mode: a memory error or a borrow violation.
+    Report(String),
+    /// Any other interpreter error.
+    Error(String),
+}
+
+/// The dynamic oracle: the interpreter leg of an accepted program, in the checking mode the
+/// environment selects (the build lowered the borrow side table when it is `borrow`,
+/// [`Output::for_interp`]). A program the borrow checker accepted has no report by the
+/// language's rules unless its unsafe code breaks them.
+fn dynamic_oracle(out: &Output, main: &str, target: Triple) -> Leg {
+    let Some(m) = out.for_interp() else { return Leg::Error("no module".to_string()) };
+    let limits = Limits { max_steps: 200_000_000, ..Limits::default() };
+    match interp::run(m, main, target, &[], &[], limits) {
+        Ok(r) => Leg::Ran(r.ran),
+        Err(e) if e.starts_with("interp: memory error") || e.starts_with("interp: borrow ") => {
+            Leg::Report(e)
+        }
+        Err(e) => Leg::Error(e),
+    }
 }
 
 fn host_target() -> Triple {
@@ -224,25 +245,20 @@ fn exec_one(file: &Path, repo: &Path, release: bool) -> ExitCode {
         return ExitCode::SUCCESS;
     };
     let main_path = m.func(main).map(|f| f.path.clone()).unwrap_or_default();
-    let limits = Limits { max_steps: 200_000_000, ..Limits::default() };
-    let want = match interp::run(out.for_interp().unwrap_or(m), &main_path, target, &[], &[], limits) {
-        Ok(r) => r.ran,
-        // Checking mode ends the run at the first memory error, borrow tracking at the first
-        // violation of the borrow model: a report, not a crash.
-        Err(e) if e.starts_with("interp: memory error") || e.starts_with("interp: borrow ") => {
+    let want = match dynamic_oracle(&out, &main_path, target) {
+        Leg::Ran(r) => r,
+        // Checking mode ends the run at the first report: a violation, not a crash.
+        Leg::Report(e) => {
             println!("oracle {e:?}");
             println!("done");
             return ExitCode::SUCCESS;
         }
-        Err(e) => {
+        Leg::Error(e) => {
             println!("interp-error {e:?}");
             println!("done");
             return ExitCode::SUCCESS;
         }
     };
-    if let Some(r) = dynamic_oracle(m, &main_path, target) {
-        println!("oracle {r:?}");
-    }
     if want.exit != 0 {
         println!("trap {:?}", show(&want));
     }
@@ -301,6 +317,9 @@ fn judge(a: &Args, p: &classes::Program, file: &Path) -> Judged {
     let (so, se) = (file.with_extension("out"), file.with_extension("err"));
     let mut cmd = Command::new(exe);
     cmd.arg("--exec").arg(file).arg("--repo").arg(&a.repo);
+    if std::env::var_os("STAVE_INTERP_CHECK").is_none() {
+        cmd.env("STAVE_INTERP_CHECK", DEFAULT_CHECK);
+    }
     if a.release {
         cmd.arg("--release");
     }
@@ -535,10 +554,11 @@ fn run(a: &Args) -> ExitCode {
     }
     let _ = writeln!(
         rep,
-        "{} programs in {secs:.1} s ({:.2}/s, {} jobs), {} accepted, {} precision notes",
+        "{} programs in {secs:.1} s ({:.2}/s, {} jobs, STAVE_INTERP_CHECK={}), {} accepted, {} precision notes",
         all.programs,
         all.programs as f64 / secs.max(1e-9),
         a.jobs,
+        std::env::var("STAVE_INTERP_CHECK").unwrap_or_else(|_| DEFAULT_CHECK.to_string()),
         all.accepted,
         all.findings.get("precision").copied().unwrap_or(0)
     );

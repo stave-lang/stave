@@ -70,6 +70,9 @@ pub enum Directive {
     /// Lex and parse only (no semantic stages).
     ParseOnly,
     ResourceLimit,
+    /// `INTERP-REPORT <class>`: the run in the interpreter's checking mode ends with a report of
+    /// this class (a program with unsafe of its own).
+    InterpReport(String),
 }
 
 impl Directive {
@@ -83,6 +86,7 @@ impl Directive {
             Directive::CheckOnly => "CHECK-ONLY",
             Directive::ParseOnly => "PARSE-ONLY",
             Directive::ResourceLimit => "RESOURCE-LIMIT",
+            Directive::InterpReport(_) => "INTERP-REPORT",
         }
     }
 }
@@ -215,7 +219,7 @@ fn parse_annotation(rest: &str, line_no: u32, syntax: Syntax) -> Result<Annot, S
             Annot::Diag { severity, code: one_code(code.trim_start())?, line: None }
         }
         "STDOUT" | "STDERR-CONTAINS" | "EXIT" | "TARGET" | "ARGS" | "CHECK-ONLY" | "PARSE-ONLY"
-        | "RESOURCE-LIMIT" => {
+        | "RESOURCE-LIMIT" | "INTERP-REPORT" => {
             no_shift(kw)?;
             Annot::Directive(parse_directive(kw, args)?)
         }
@@ -277,6 +281,15 @@ fn parse_directive(kw: &str, args: &str) -> Result<Directive, String> {
         "PARSE-ONLY" => {
             no_args(kw, args)?;
             Directive::ParseOnly
+        }
+        "INTERP-REPORT" => {
+            let class = !args.is_empty() && args.bytes().all(|b| b.is_ascii_lowercase() || b == b'-');
+            if !class {
+                return Err(format!(
+                    "INTERP-REPORT takes one report class (`use-after-free`), found `{args}`"
+                ));
+            }
+            Directive::InterpReport(args.to_string())
         }
         _ => {
             no_args(kw, args)?;
@@ -363,6 +376,10 @@ mod tests {
         assert_eq!(d("//~ CHECK-ONLY"), Ok(Directive::CheckOnly));
         assert_eq!(d("//~ PARSE-ONLY"), Ok(Directive::ParseOnly));
         assert_eq!(d("//~ RESOURCE-LIMIT"), Ok(Directive::ResourceLimit));
+        assert_eq!(
+            d("//~ INTERP-REPORT write-under-shared"),
+            Ok(Directive::InterpReport("write-under-shared".into()))
+        );
     }
 
     #[test]
@@ -399,6 +416,10 @@ mod tests {
             "//~ PARSE-ONLY yes",
             "//~^ PARSE-ONLY",
             "//~ RESOURCE-LIMIT x",
+            "//~ INTERP-REPORT",
+            "//~ INTERP-REPORT two-exclusive x",
+            "//~ INTERP-REPORT Use_After_Free",
+            "//~^ INTERP-REPORT two-exclusive",
             "//~^ EXIT 1",
             "//~ error E0201",
         ] {
