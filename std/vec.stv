@@ -2,7 +2,8 @@
 //
 // Layout: `ptr` to `cap` slots of T, the first `len` initialized. `cap == 0` means no
 // allocation (ptr is mem.dangling). A zero-sized T never allocates (cap is usize max).
-// Out-of-range `get_ref` / `get_mut` panic `Bounds` at the caller (user site, as for every std
+// Out-of-range `get_ref` / `get_mut` / `swap` / `swap_remove`, and a `permute` by a slice that is
+// not a permutation of `0..len`, panic `Bounds` at the caller (user site, as for every std
 // panic raised for its caller); allocation failure panics `OutOfMemory` there too.
 // Slots are filled with `p.write(v)` (no drop of the uninitialized old content) and emptied
 // with `p.read()` (moves out); `*p = v` would drop the old content.
@@ -53,6 +54,30 @@ fn oom() -> never {
 fn alloc_error() -> AllocError {
     errtrace.restart(panic.user_site());
     return AllocError.{};
+}
+
+fn bit(i: usize) -> u64 {
+    return 1u64 << ((i % 64) as u64);
+}
+
+// One bit per index of 0..n, all set; panics `Bounds` at the user site unless perm has n
+// entries holding each of 0..n once.
+fn perm_marks(perm: &[u32], n: usize) -> Vec<u64> {
+    if perm.len() != n {
+        panic.trap(panic.KIND_BOUNDS, panic.user_site());
+    }
+    let words = n / 64 + 1;
+    let mut seen = Vec::<u64>.with_capacity(words);
+    for w in 0..words { seen.push(0); }
+    let s = seen.as_mut_slice();
+    for k in 0..n {
+        let p = perm[k] as usize;
+        if p >= n || s[p / 64] & bit(p) != 0 {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        s[p / 64] = s[p / 64] | bit(p);
+    }
+    return seen;
 }
 
 impl<T: view> Vec<T> {
@@ -170,10 +195,73 @@ impl<T: view> Vec<T> {
 
     // Drops every element; keeps the buffer.
     pub fn clear(&mut self) {
-        while self.len > 0 {
+        self.truncate(0);
+    }
+
+    // Drops the elements from n on, the last first; nothing if n >= len. Keeps the buffer.
+    pub fn truncate(&mut self, n: usize) {
+        while self.len > n {
             self.len = self.len - 1;
             let slot = mem.add(self.ptr as *const T, self.len);
             let dead = unsafe("slot was initialized; len no longer covers it") slot.read();
+        }
+    }
+
+    // Removes element i and returns it; the last element takes its place. Panics `Bounds` if
+    // i >= len.
+    pub fn swap_remove(&mut self, i: usize) -> T from copy self {
+        if i >= self.len {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        let last = self.len - 1;
+        let hole = mem.add_mut(self.ptr, i);
+        let x = unsafe("i < len: an initialized element; it is refilled or len stops covering it") hole.read();
+        if i != last {
+            unsafe("last < len: an initialized element, moved into the hole; len stops covering it") {
+                hole.write(mem.add(self.ptr as *const T, last).read());
+            }
+        }
+        self.len = last;
+        return x;
+    }
+
+    // Exchanges elements i and j; panics `Bounds` if either is >= len.
+    pub fn swap(&mut self, i: usize, j: usize) {
+        if i >= self.len || j >= self.len {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        if i == j { return; }
+        let a = mem.add_mut(self.ptr, i);
+        let b = mem.add_mut(self.ptr, j);
+        unsafe("i != j, both < len: two initialized elements, each moved out and refilled") {
+            let x = a.read();
+            a.write(b.read());
+            b.write(x);
+        }
+    }
+
+    // Reorders the elements: element k becomes the one that was at perm[k]. Panics `Bounds`,
+    // before it moves anything, unless perm has len entries and holds each of 0..len once.
+    // Moves each element once, along the cycles of perm; drops nothing.
+    pub fn permute(&mut self, perm: &[u32]) {
+        let n = self.len;
+        let mut todo = perm_marks(perm, n);
+        let t = todo.as_mut_slice();
+        for s in 0..n {
+            if t[s / 64] & bit(s) != 0 {
+                let first = unsafe("s < len: an initialized element; its slot is refilled when the cycle closes") mem.add(self.ptr as *const T, s).read();
+                let mut j = s;
+                loop {
+                    t[j / 64] = t[j / 64] & ~bit(j);
+                    let k = perm[j] as usize;
+                    if k == s { break; }
+                    unsafe("perm is a permutation of 0..len: slot k is initialized and not yet moved, slot j was just emptied") {
+                        mem.add_mut(self.ptr, j).write(mem.add(self.ptr as *const T, k).read());
+                    }
+                    j = k;
+                }
+                unsafe("j < len: the last slot of the cycle, emptied by the move before") { mem.add_mut(self.ptr, j).write(first); }
+            }
         }
     }
 
