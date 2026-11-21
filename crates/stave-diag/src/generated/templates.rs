@@ -3021,7 +3021,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0703",
         severity: Severity::Error,
         area: "features",
-        rule: "vector in the signature of a fn, fn type, or closure whose `needs` (plus the target baseline) do not cover its width (`extern \"C\"` signatures: E0804)",
+        rule: "vector in the signature of a fn, fn type, or closure whose `needs` (plus the target baseline) do not cover its width (`extern \"C\"` signatures: E0804); also in a generic instance's signature after substitution (`id::<f32x8>`, `W<f32x8>.get()`, a fn type arg), against the callee's `needs`, at the use",
         retired: false,
         located: true,
         holes: &[

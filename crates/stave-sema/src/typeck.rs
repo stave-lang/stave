@@ -1916,7 +1916,52 @@ impl<'a> Ck<'a> {
             return;
         }
         self.check_instance(at, decl, args);
+        self.instance_width(at, decl, args);
         self.sites.push(CallSite { caller: self.decl, node, inst: Instance { decl, args: args.to_vec() } });
+    }
+
+    /// E0703 for an instance: a vector in its signature after substitution (`id::<f32x8>`) needs
+    /// features covering its width, like a written one, from the callee's own `needs` and the
+    /// target baseline: the instance is compiled with the callee's features, whoever calls it.
+    fn instance_width(&mut self, at: Span, decl: DeclId, args: &[GArg]) {
+        let Some(sig) = self.sigs.fn_sig(decl) else { return };
+        let self_ty = match args.get(sig.generics.len()) {
+            Some(GArg::Type(t)) => Some(*t),
+            _ => None,
+        };
+        let target = self.prog.target;
+        for &t in sig.params.iter().chain(std::iter::once(&sig.ret)) {
+            if t.is_none() || !self.tys.has_params(t) {
+                continue;
+            }
+            let st = self.tys.subst(t, args, self_ty);
+            // the type itself against the callee's features; each fn type inside it against
+            // its own `needs` (a call through the value runs with those)
+            let mut checks = vec![(st, sig.features)];
+            let mut stack = vec![st];
+            let mut kids = Vec::new();
+            let mut seen = rustc_hash::FxHashSet::default();
+            while let Some(x) = stack.pop() {
+                if !seen.insert(x) {
+                    continue;
+                }
+                let k = self.tys.kind(x);
+                if let TypeKind::Fn { params, ret, features, .. } = k {
+                    checks.extend(params.iter().chain(std::iter::once(ret)).map(|&p| (p, *features)));
+                }
+                kids.clear();
+                k.children(&mut kids);
+                stack.extend_from_slice(&kids);
+            }
+            for (x, fs) in checks {
+                if let Some((v, bits)) = crate::gates::sig_wide_part(&self.tys, target, x, fs) {
+                    let name = self.show(v);
+                    let d = crate::gates::sig_too_wide(target, fs, &name, bits, at);
+                    self.report(d);
+                    return;
+                }
+            }
+        }
     }
 
     /// E0704: callee features must be a subset of the caller's and the target baseline.
