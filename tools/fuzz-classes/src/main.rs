@@ -173,9 +173,7 @@ fn dynamic_oracle(out: &Output, main: &str, target: Triple) -> Leg {
     let limits = Limits { max_steps: 200_000_000, ..Limits::default() };
     match interp::run(m, main, target, &[], &[], limits) {
         Ok(r) => Leg::Ran(r.ran),
-        Err(e) if e.starts_with("interp: memory error") || e.starts_with("interp: borrow ") => {
-            Leg::Report(e)
-        }
+        Err(e) if e.starts_with("interp: memory error") || e.starts_with("interp: borrow ") => Leg::Report(e),
         Err(e) => Leg::Error(e),
     }
 }
