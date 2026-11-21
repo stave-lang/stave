@@ -45,9 +45,9 @@ enum Shape {
     /// A literal, a range, a constant: a test that binds nothing.
     Test,
     /// A tuple, struct or variant pattern against (peeled) type `ty`: per field of the tuple,
-    /// struct or variant its type and sub-pattern (`None`: not named). `mode`: how names inside
-    /// bind.
-    Parts { ty: Ty, mode: Mode, variant: Option<u32>, fields: Vec<(Ty, Option<Sub>)> },
+    /// struct or variant its type and sub-patterns (none: not named; a struct pattern may name
+    /// a field more than once). `mode`: how names inside bind.
+    Parts { ty: Ty, mode: Mode, variant: Option<u32>, fields: Vec<(Ty, Vec<Sub>)> },
 }
 
 /// The top-level test of a match arm.
@@ -2025,8 +2025,9 @@ impl<'a> FnCx<'a> {
                 None => *unreach.get_or_insert_with(|| s.f.b.create_block()),
             };
             let guard_fail = target(self, next_row(a.hi, arm_top(a)));
-            // the moves of a pattern with a guard happen when the guard holds
-            let guarded = self.g.borrows && a.guard.is_some();
+            // the names a pattern binds take their parts where the arm is entered: a later
+            // test or the guard may still fail
+            let tracked = self.g.borrows;
             let mut moves: Vec<(Operand, Ty)> = Vec::new();
             let pats: Vec<u32> = rows[a.lo..a.hi].iter().map(|r| r.0).collect();
             // An or-pattern under a guard whose alternatives leave different parts to drop:
@@ -2037,7 +2038,7 @@ impl<'a> FnCx<'a> {
                 self.f.env = snap.clone();
                 self.f.b.switch_to(rows[a.lo].1);
                 self.push_scope();
-                if guarded {
+                if tracked {
                     self.f.held = Some(Vec::new());
                 }
                 let ok = self.pat(rows[a.lo].0, sp.clone(), Mode::Move, Some(fail), switch_mode);
@@ -2079,21 +2080,25 @@ impl<'a> FnCx<'a> {
                     self.f.env = snap.clone();
                     self.f.b.switch_to(rows[k].1);
                     self.push_scope();
-                    if guarded {
+                    if tracked {
                         self.f.held = Some(Vec::new());
                     }
                     let ok = self.pat(rows[k].0, sp.clone(), Mode::Move, Some(fail), switch_mode);
-                    // the block the guard runs in has one predecessor per alternative, and so
-                    // no name for the place the taken one moved out of: these moves get no row
-                    self.f.held = None;
+                    let taken_parts = self.f.held.take().unwrap_or_default();
                     if !ok || !self.open() {
                         self.f.scopes.truncate(scope_base);
                         continue;
                     }
                     if a.gb.is_none() {
                         // without a guard the arm is entered here
+                        for (p, pt) in taken_parts {
+                            self.event(stave_ir::EventKind::Gone, p, pt);
+                        }
                         self.commit(rows[k].0, &sp);
                     }
+                    // Under a guard, the block the guard runs in has one predecessor per
+                    // alternative, and so no name for the place the taken one moved out of:
+                    // these moves get no row.
                     let mut args: Vec<Operand> = Vec::with_capacity(ls.len() + 1);
                     for &l in &ls {
                         let v = match self.f.env.vals.get(l).copied().flatten() {
@@ -2342,8 +2347,11 @@ impl<'a> FnCx<'a> {
                 TypeKind::Tuple(ts) => ts.to_vec(),
                 _ => return Shape::Test,
             };
-            let fields =
-                ets.iter().enumerate().map(|(i, &et)| (et, kids.get(i).map(|&k| Sub::Pat(k)))).collect();
+            let fields = ets
+                .iter()
+                .enumerate()
+                .map(|(i, &et)| (et, kids.get(i).map(|&k| Sub::Pat(k)).into_iter().collect()))
+                .collect();
             return Shape::Parts { ty: dt, mode: pm, variant: None, fields };
         }
         if !icx.is(a, Term::Ident) {
@@ -2366,7 +2374,7 @@ impl<'a> FnCx<'a> {
         let Some(fts) = self.adt_fields(dt).and_then(|v| v.get(vi as usize).cloned()) else {
             return Shape::Test;
         };
-        let mut subs: Vec<Option<Sub>> = vec![None; fts.len()];
+        let mut subs: Vec<Vec<Sub>> = vec![Vec::new(); fts.len()];
         if has_rec {
             let names: Vec<crate::ids::Sym> = match self.kind(dt) {
                 TypeKind::Adt { def, .. } => self
@@ -2386,7 +2394,7 @@ impl<'a> FnCx<'a> {
                 if let Some(fi) = names.iter().position(|&x| x == name)
                     && fi < subs.len()
                 {
-                    subs[fi] = Some(match icx.child(fp, NodeKind::Pattern) {
+                    subs[fi].push(match icx.child(fp, NodeKind::Pattern) {
                         Some(sub) => Sub::Pat(sub),
                         None => Sub::Name(fp),
                     });
@@ -2394,11 +2402,19 @@ impl<'a> FnCx<'a> {
             }
         } else if has_paren {
             for (fi, &k) in kids.iter().enumerate().take(subs.len()) {
-                subs[fi] = Some(Sub::Pat(k));
+                subs[fi].push(Sub::Pat(k));
             }
         }
         let fields = fts.into_iter().zip(subs).collect();
         Shape::Parts { ty: dt, mode: pm, variant: is_variant.then_some(vi), fields }
+    }
+
+    /// Whether sub-pattern `sub` of a field of type `ft` binds a non-Copy part by value.
+    fn sub_moves(&mut self, sub: Sub, ft: Ty, mode: Mode) -> bool {
+        match sub {
+            Sub::Pat(q) => self.pat_moves(q, ft, mode),
+            Sub::Name(b) => self.name_moves(b, mode),
+        }
     }
 
     /// Whether binding node `b` takes a non-Copy value by value in mode `mode`.
@@ -2416,12 +2432,10 @@ impl<'a> FnCx<'a> {
             Shape::Name(b) => self.name_moves(b, mode),
             Shape::Parts { mode, fields, .. } => {
                 let mut any = false;
-                for (ft, sub) in fields {
-                    any |= match sub {
-                        Some(Sub::Pat(q)) => self.pat_moves(q, ft, mode),
-                        Some(Sub::Name(b)) => self.name_moves(b, mode),
-                        None => false,
-                    };
+                for (ft, subs) in fields {
+                    for sub in subs {
+                        any |= self.sub_moves(sub, ft, mode);
+                    }
                 }
                 any
             }
@@ -2456,20 +2470,23 @@ impl<'a> FnCx<'a> {
             self.fail(p, "a pattern takes apart a value whose type has a `Drop` impl");
             return;
         }
-        for (fi, (ft, sub)) in fields.into_iter().enumerate() {
+        for (fi, (ft, subs)) in fields.into_iter().enumerate() {
             let mut part = place.clone();
             part.proj.push(match variant {
                 Some(vi) => Proj::EnumField(vi, fi as u32, ft),
                 None => Proj::Field(fi as u32, ft),
             });
             part.ty = ft;
-            match sub {
-                Some(Sub::Pat(q)) => self.ignored(q, part, mode, out),
-                Some(Sub::Name(b)) => {
-                    if !self.name_moves(b, mode) && self.needs_drop(ft) {
-                        out.push(part);
-                    }
+            // of the sub-patterns of one field at most one binds by value (the checker)
+            let mut taker = None;
+            for sub in subs {
+                if taker.is_none() && self.sub_moves(sub, ft, mode) {
+                    taker = Some(sub);
                 }
+            }
+            match taker {
+                Some(Sub::Pat(q)) => self.ignored(q, part, mode, out),
+                Some(Sub::Name(_)) => {}
                 None => {
                     if self.needs_drop(ft) {
                         out.push(part);
@@ -2492,11 +2509,15 @@ impl<'a> FnCx<'a> {
             return false;
         }
         let mut empty = true;
-        for (ft, sub) in fields {
-            empty &= match sub {
-                Some(Sub::Pat(q)) => self.shape_empty(q, ft),
-                _ => !self.needs_drop(ft),
-            };
+        for (ft, subs) in fields {
+            // a part is empty if one of its sub-patterns says so
+            let mut e = !self.needs_drop(ft);
+            for sub in subs {
+                if let Sub::Pat(q) = sub {
+                    e |= self.shape_empty(q, ft);
+                }
+            }
+            empty &= e;
         }
         empty
     }
