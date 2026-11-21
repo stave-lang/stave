@@ -626,7 +626,9 @@ fn e0908_fixes_write_the_signature_and_the_trait() {
         tc.diagnostics.iter().map(|d| (d.code(), d.fix().map_or("", |f| f.description.as_str()))).collect();
     let has = |needle: &str| fixes.iter().any(|(c, f)| *c == "E0908" && f.contains(needle));
     assert!(
-        has("`fn pick<X: Mk<u32>>(x: u32, k: u8) -> u32 { return X.mk(x, k); }`, called as `pick::<A>(x, k)`"),
+        has(
+            "`fn pick<X: Mk<u32>>(x: u32, k: u8) -> u32 { return X.mk(x, k); }`, called as `pick::<A>(x, k)`"
+        ),
         "{fixes:?}"
     );
     assert!(has("`fn pick<X: Z<u8>>() { return X.z(); }`, called as `pick::<A>()`"), "{fixes:?}");

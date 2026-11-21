@@ -995,7 +995,13 @@ fn lower_prim<H: LowerHost>(
                     // a generic lane type has no concrete spelling to suggest
                     if matches!(h.kind(lane), TypeKind::Param(_) | TypeKind::SelfTy) {
                         let spelled = icx.node_text(n).to_string();
-                        let d = mk("E0609", Some("generic-lane"), &[("spelled", &spelled)], icx.node_span(n), &[]);
+                        let d = mk(
+                            "E0609",
+                            Some("generic-lane"),
+                            &[("spelled", &spelled)],
+                            icx.node_span(n),
+                            &[],
+                        );
                         h.report(d);
                         return t;
                     }
