@@ -70,6 +70,11 @@ fn vec1(x: u32) -> vec.Vec<u32> {
 /// impl applies (E0208, E0206), not Flat (E1407), not Frozen (E1410).
 pub const RULE_CODES: &[&str] = &["E0414", "E0411", "E0412", "E0901", "E0208", "E0206", "E1407", "E1410"];
 
+/// [`RULE_CODES`] plus E0219 for a bad `for e in w` site: an impl whose bound the argument does
+/// not meet gives `W<A>` no `next`, so `w` is no iterator (`not-source`).
+const FOR_NEXT_CODES: &[&str] =
+    &["E0414", "E0411", "E0412", "E0901", "E0208", "E0206", "E1407", "E1410", "E0219"];
+
 /// What a bound asks besides the view kind.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Req {
@@ -644,6 +649,10 @@ pub(super) fn case(r: &mut Rng, idx: usize, want_bad: bool) -> Case {
     }
     b.add("x0 +% x1");
     let label = format!("{}/{}/{}", site.label(), bound.label(), arg.label());
-    let codes = if bad { RULE_CODES } else { &[][..] };
+    let codes = match (bad, site) {
+        (false, _) => &[][..],
+        (true, Site::ForNext) => FOR_NEXT_CODES,
+        (true, _) => RULE_CODES,
+    };
     finish(idx, b, items, label, bad, codes)
 }
