@@ -437,6 +437,12 @@ fn lower_in_pool(
         if borrows && !sigs.lang.unsafe_cell.is_none() {
             module.cell = Some(IrDecl(sigs.lang.unsafe_cell.0));
         }
+        if borrows {
+            let frozen = |d: &DeclId| prog.decl(*d).is_some_and(|x| !x.flags.has(DeclFlags::MUT));
+            module.frozen = statics_list.iter().map(frozen).collect();
+        } else {
+            module.clauses = Vec::new();
+        }
         Assembled { module, jobs, order, table, site_pos }
     });
     (r.map_err(|e| vec![e]), tm)
@@ -615,6 +621,7 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
             }
             let Some(tb) = body else { return empty(None) };
             let mut flagged: FxHashSet<crate::lower_fn::FlagKey> = FxHashSet::default();
+            let mut slotted: FxHashSet<u32> = FxHashSet::default();
             for _ in 0..64 {
                 let mut cx = FnCx::new(g, icx, path.clone());
                 cx.has_body = true;
@@ -629,16 +636,19 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 cx.user = !g.builtin_decl(k.decl);
                 cx.needs = needs;
                 cx.flagged = flagged.clone();
+                cx.slotted = slotted.clone();
                 cx.setup(decl.node);
                 let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));
                 let mut out = cx.lower_body(decl.node, &ps, ret);
                 out.name_off = name;
                 let new: Vec<crate::lower_fn::FlagKey> =
                     cx.need_flag.iter().filter(|n| !flagged.contains(*n)).cloned().collect();
-                if new.is_empty() || cx.err.is_some() {
+                let slots: Vec<u32> = cx.need_slot.iter().copied().filter(|n| !slotted.contains(n)).collect();
+                if (new.is_empty() && slots.is_empty()) || cx.err.is_some() {
                     return finish_job(cx, out, name);
                 }
                 flagged.extend(new);
+                slotted.extend(slots);
             }
             empty(Some(LowerError {
                 kind: LowerErrorKind::Internal,
@@ -1008,6 +1018,7 @@ fn assemble(
     module.strings = all_strs.clone();
     module.intrinsics = all_intrs.clone();
     let mut funcs: Vec<stave_ir::Func> = Vec::with_capacity(nf as usize);
+    let mut clauses: Vec<stave_ir::Clauses> = Vec::with_capacity(nf as usize);
     let mut sites: Vec<SiteInfo> = Vec::new();
     let mut site_pos: Vec<SitePos> = Vec::new();
     // Files of built-in packages are named `<package>/<path in package>` (`std/vec.stv`) in the
@@ -1153,6 +1164,24 @@ fn assemble(
                 b
             });
             let _ = k;
+            clauses.push(match (job, f.closure) {
+                (Job::Inst(_), Some(_)) => {
+                    stave_ir::Clauses { kind: stave_ir::ClauseKind::Closure, ..Default::default() }
+                }
+                (Job::Inst(key), None) => match sigs.fn_sig(key.decl) {
+                    Some(s) => stave_ir::Clauses {
+                        kind: stave_ir::ClauseKind::Item,
+                        result: s.origins.iter().map(|o| (u32::from(o.param), o.copy)).collect(),
+                        params: s
+                            .param_origins
+                            .iter()
+                            .map(|p| (u32::from(p.target), u32::from(p.source), p.copy))
+                            .collect(),
+                    },
+                    None => stave_ir::Clauses::default(),
+                },
+                (Job::Glue(_), _) => stave_ir::Clauses::default(),
+            });
             funcs.push(stave_ir::Func {
                 instance,
                 path: path.clone(),
@@ -1167,6 +1196,7 @@ fn assemble(
         }
     }
     module.funcs = funcs;
+    module.clauses = clauses;
     module.types = types;
     module.sites = sites;
     // 7. statics

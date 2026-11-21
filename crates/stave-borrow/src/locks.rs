@@ -4,8 +4,8 @@
 //! A local may hold a lock while its value may contain a `MutexGuard` (or a value of a `T: view`
 //! param) and it may be initialized: forward dataflow over the CFG, union at joins. A local
 //! becomes initialized when it or a part of it is assigned (params and captures on entry), and
-//! stops being so when it is moved out as a whole, dropped as a whole, or dies. A partial move
-//! keeps it (conservative). At a call, the locals the call's arguments move out as a whole are
+//! stops being so when it is moved out, dropped as a whole, or dies (a value moves whole: a
+//! pattern that takes it apart moves its source). At a call, the locals the call's arguments move out as a whole are
 //! not counted: the callee holds them, and its own calls are checked in its body. A drop (a
 //! `Drop` statement, or the old value an assignment overwrites) runs the type's drop glue: it is
 //! checked like a call, without the local it drops. The types a body really drops (a drop of a

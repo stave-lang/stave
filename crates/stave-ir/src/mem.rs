@@ -253,6 +253,22 @@ impl Memory {
         self.chk.as_ref().and_then(|c| c.report.borrow_mut().take())
     }
 
+    /// Checking mode: the little-endian unsigned integer in the `size` bytes (at most 8) at
+    /// `addr`, when they are bytes of a live allocation and initialised. Bytes that are not are
+    /// no error here: nothing is reported.
+    pub fn peek_uint(&self, addr: u64, size: u64) -> Option<u64> {
+        let c = self.chk.as_ref()?;
+        let a = c.allocs.get((addr >> ID_SHIFT) as usize)?.as_ref()?;
+        let off = addr.checked_sub(a.base)?;
+        if a.state != State::Live || off.checked_add(size)? > a.size || !a.is_init(off, size) {
+            return None;
+        }
+        let b = a.bytes.get(off as usize..(off + size) as usize)?;
+        let mut w = [0u8; 8];
+        w.get_mut(..b.len())?.copy_from_slice(b);
+        Some(u64::from_le_bytes(w))
+    }
+
     pub fn has_report(&self) -> bool {
         self.chk.as_ref().is_some_and(|c| c.report.borrow().is_some())
     }

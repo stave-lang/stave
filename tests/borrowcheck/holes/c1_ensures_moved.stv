@@ -1,0 +1,29 @@
+//~ BORROWCHECK second-owner 10 8
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+
+fn keep(x: &mut u32) -> u32 ensures(*x == 5) {
+    let y: &mut u32 = x;
+    *y = 5;
+    return *y;
+}
+
+fn set_link(l: &mut Link from q, q: &mut Pick) ensures(q.count == 7) {
+    l.to = q;
+    l.to.count = 7;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut n: u32 = 1;
+    let a: u32 = keep(&mut n);
+    let mut p = Pick.{ best: &zero, count: 0 };
+    let mut b = Pick.{ best: &zero, count: 0 };
+    let mut l = Link.{ to: &mut p };
+    set_link(&mut l, &mut b);
+    let c: usize = l.to.count;
+    io.print(f"{a} {c}\n");
+    return 0;
+}

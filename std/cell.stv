@@ -28,7 +28,8 @@ impl<T> UnsafeCell<T> {
     }
 
     pub fn into_inner(self) -> T {
-        return self.value;
+        let UnsafeCell.{ value } = self;
+        return value;
     }
 }
 

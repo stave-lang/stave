@@ -1,0 +1,12 @@
+//~ BORROWCHECK second-owner 8 7
+// `r as &mut u32` is a by-value use of `r`: it moves the `&mut`, and the write through `r`
+// reads a moved-out place.
+fn main() -> i32 {
+    let mut x: u32 = 1u32;
+    let r: &mut u32 = &mut x;
+    let s: &mut u32 = r as &mut u32;
+    *r = 2u32;
+    *s = 3u32;
+    if x == 3u32 { return 1; }
+    return 0;
+}

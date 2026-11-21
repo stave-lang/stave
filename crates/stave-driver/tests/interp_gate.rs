@@ -54,11 +54,7 @@ const SLOW: &[(&str, &str)] = &[(
 )];
 
 /// Reports on programs without unsafe that are known and not fixed yet: (program, class).
-const OPEN: &[(&str, &str)] = &[
-    // `&4u32` in a loop: the checker lets a borrow of a literal outlive the next evaluation of
-    // its expression, the model ends that temporary there.
-    ("conformance/borrow/pos_temp_loop.stv", "write-under-shared"),
-];
+const OPEN: &[(&str, &str)] = &[];
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -201,10 +197,13 @@ fn own_unsafe(out: &Output) -> Result<Vec<String>, String> {
 }
 
 /// The class of an interpreter report (`interp: memory error [<class>]`,
-/// `interp: borrow violation [<class>]`), or `None` for any other error.
+/// `interp: borrow violation [<class>]`, `interp: borrow signature [<class>]`), or `None` for any
+/// other error.
 fn report_class(e: &str) -> Option<&str> {
-    let rest =
-        e.strip_prefix("interp: memory error [").or_else(|| e.strip_prefix("interp: borrow violation ["))?;
+    let rest = e
+        .strip_prefix("interp: memory error [")
+        .or_else(|| e.strip_prefix("interp: borrow violation ["))
+        .or_else(|| e.strip_prefix("interp: borrow signature ["))?;
     rest.split_once(']').map(|x| x.0)
 }
 

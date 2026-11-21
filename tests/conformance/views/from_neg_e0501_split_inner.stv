@@ -15,9 +15,8 @@ fn split(t: (&mut Cur, u32)) -> Two from t {
 
 // no store goes through `src`: the pointer is stored into `*dst` and written through there
 fn evil(dst: &mut Link from src, src: &mut Cur) {
-    let two = split((src, 0u32));
-    let n: &u32 = two.n;
-    dst.to = two.rest;
+    let Two.{ rest, n } = split((src, 0u32));
+    dst.to = rest;
     dst.to.cur = n;
 }
 

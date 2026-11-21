@@ -1,0 +1,66 @@
+//~ CHECK-ONLY
+// A const generic param passed on as a const arg has the type of the param it instantiates,
+// wherever that is: a call, a type, an impl head, a trait ref, a bound, an array length.
+struct A<const N: u8> { x: [u8; 2] }
+
+trait Tr<const N: u8> {
+    fn n(&self) -> u8;
+}
+
+struct S<const N: usize> { x: [u8; 2] }
+
+fn inner<const N: u8>() -> u8 {
+    return N;
+}
+
+fn call<const M: usize>() -> u8 {
+    return inner::<M>(); //~ ERROR E0201
+}
+
+fn call_braced<const M: usize>() -> u8 {
+    return inner::<{M}>(); //~ ERROR E0201
+}
+
+fn sig_type<const M: usize>(a: &A<M>) -> u8 { //~ ERROR E0201
+    return 0;
+}
+
+fn literal<const M: usize>() -> u8 {
+    let a = A::<M>.{ x: [0u8; 2] }; //~ ERROR E0201
+    return a.x[0];
+}
+
+impl<const M: usize> Tr<M> for S<M> { //~ ERROR E0201
+    fn n(&self) -> u8 {
+        return 0;
+    }
+}
+
+fn bound<const M: usize, T: Tr<M>>(x: &T) -> u8 { //~ ERROR E0201
+    return 0;
+}
+
+fn array_len<const M: u32>(a: &[u8; M]) -> u8 { //~ ERROR E0201
+    return 0;
+}
+
+fn array_repeat<const M: u8>() -> u8 {
+    let b = [0u8; M]; //~ ERROR E0201
+    return 0;
+}
+
+// The same type: accepted.
+fn same<const M: u8>() -> u8 {
+    return inner::<M>();
+}
+
+fn same_len<const M: usize>(a: &[u8; M]) -> usize {
+    return M;
+}
+
+fn main() -> i32 {
+    let k: u8 = same::<7>();
+    let a = [1u8, 2u8, 3u8];
+    let n: usize = same_len(&a);
+    return 0;
+}

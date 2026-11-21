@@ -1,0 +1,16 @@
+//~ BORROWCHECK ok
+// A by-value source with more reference words than the signature check walks (4096): the call
+// is not judged, also when the words, each a tag of its own, all point to one place.
+fn last(a: [&u32; 5000]) -> &u32 from a { return a[4999]; }
+
+fn main() -> i32 {
+    let y: u32 = 7;
+    let zero: u32 = 0;
+    let mut arr: [&u32; 5000] = [&zero; 5000];
+    for i in 0usize..5000usize {
+        arr[i] = &y;
+    }
+    let r = last(arr);
+    if *r == 7 { return 0; }
+    return 1;
+}

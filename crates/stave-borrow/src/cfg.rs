@@ -12,7 +12,8 @@
 //! The CFG shape follows the syntax nesting (Stave has no goto): `if`, `while`, `loop`, `for`,
 //! `match`, `&&`/`||`, value `if`, `?`, `break`/`continue`/`return`, and calls to `-> never`
 //! fns. Evaluation order is the lowering's (stave-sema `lower_*`): left to right, the receiver
-//! first, a call's arguments before the call. Temporaries with drop glue die at the end of their
+//! first, a call's arguments before the call; a by-value operand moves its place when it is
+//! evaluated, before the operands after it (`Builder::hold`). Temporaries with drop glue die at the end of their
 //! statement (as lowered); others live until their expression is evaluated again (it writes the
 //! temporary's one slot) or the fn returns.
 //!
@@ -248,6 +249,8 @@ pub struct Local {
     pub guard: bool,
     /// The binding node (a temporary: its expression node; borrow dump `N` of drops).
     pub node: u32,
+    /// The temporary standing for the storage of an immutable `static` (never moved from).
+    pub static_root: bool,
 }
 
 /// What a return is checked against.
@@ -262,6 +265,33 @@ pub enum RetCheck {
     From(Vec<(u32, bool)>, Span, bool),
 }
 
+/// What a match guard may not do: it only reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GuardEffect {
+    /// A by-value use of a non-Copy value.
+    Move(Place),
+    Assign(Place),
+    MutBorrow(Place),
+    /// A `?`.
+    Try,
+}
+
+/// Why a by-value use of a non-Copy place is E0504.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MoveOut {
+    /// Behind a dereference or an index, or a guard binding.
+    Behind,
+    /// A capture of the closure with this (`fn` / `spawn` token) span.
+    Capture(Span),
+    /// A part of this place, whose type has an `impl Drop`: its destructor reads every part.
+    Drop(Place),
+    /// An immutable `static` or a part of it.
+    Static,
+    /// A part of this place (a local or a temporary): a non-Copy value is moved whole, or taken
+    /// apart whole by a pattern.
+    Part(Place),
+}
+
 #[derive(Clone, Debug)]
 pub struct Body {
     pub locals: Vec<Local>,
@@ -269,9 +299,14 @@ pub struct Body {
     pub loans: Vec<Loan>,
     /// Move sites: the moved place and the move's span.
     pub move_sites: Vec<(Place, Span)>,
-    /// E0504: by-value uses of non-Copy places behind a dereference, an index, or a capture
-    /// (place, span, the closure's span for a capture), kept as copies in the CFG.
-    pub bad_moves: Vec<(Place, Span, Option<Span>)>,
+    /// E0504: by-value uses of non-Copy places that cannot be moved from (place, span, why),
+    /// kept as copies in the CFG.
+    pub bad_moves: Vec<(Place, Span, MoveOut)>,
+    /// Moves made by an operand that has later operands ([`Builder::hold`]): the move site and
+    /// the span of the whole expression (an E0502 use inside it is case `operand`).
+    pub operand_moves: Vec<(u32, Span)>,
+    /// E0505: what a match guard (or a closure written in one) does besides reading.
+    pub guard_effects: Vec<(Span, GuardEffect)>,
     pub ret: RetCheck,
     /// The `from` clauses of the fn's params (a nested body: none).
     pub declared: Vec<Store>,
@@ -305,7 +340,8 @@ enum V {
 
 /// A postfix chain's state between steps.
 enum Cur {
-    Path(Res),
+    /// A path with the token of its last segment.
+    Path(Res, u32),
     TypeRel,
     Val(V),
 }
@@ -355,6 +391,13 @@ pub struct Builder<'a, 'b> {
     /// Binding nodes of the match guards being built (in a nested body: those of the enclosing
     /// guards it is built in); see [`Local::guard`].
     guard_binds: Vec<u32>,
+    /// Inside a match guard (or a closure written in one): the guard only reads.
+    in_guard: u32,
+    /// The pattern being bound by [`Builder::destructure`]: the projection length of its source
+    /// and the non-Copy parts it took by value.
+    destr: Option<(usize, Vec<Place>)>,
+    /// The scrutinees of the guards being built in this body (a `&mut` of one is E0501 already).
+    guard_scruts: Vec<Place>,
     /// The temporary holding the array a `for` loop iterates by value: its elements are moved
     /// into the loop binding one per iteration (not an E0504 move out of an index).
     owned_elems: Option<LocalId>,
@@ -397,6 +440,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             loans: Vec::new(),
             move_sites: Vec::new(),
             bad_moves: Vec::new(),
+            guard_effects: Vec::new(),
+            operand_moves: Vec::new(),
             ret: RetCheck::None,
             declared: Vec::new(),
             is_nested: range.is_some(),
@@ -422,6 +467,9 @@ impl<'a, 'b> Builder<'a, 'b> {
             infos: std::rc::Rc::new(Vec::new()),
             joins: Vec::new(),
             guard_binds: Vec::new(),
+            in_guard: 0,
+            destr: None,
+            guard_scruts: Vec::new(),
             owned_elems: None,
             olds: FxHashMap::default(),
             result: None,
@@ -503,6 +551,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             temp,
             guard: false,
             node: u32::MAX,
+            static_root: false,
         });
         (self.body.locals.len() - 1) as LocalId
     }
@@ -615,6 +664,9 @@ impl<'a, 'b> Builder<'a, 'b> {
         if !self.open() {
             return (V::Never, None);
         }
+        if mutable && self.in_guard > 0 && !self.guard_reported(&place) {
+            self.body.guard_effects.push((span, GuardEffect::MutBorrow(place.clone())));
+        }
         let ty = self.tys.ov.mk_ref(mutable, place.ty);
         let res = self.new_loan(&place, mutable && !two_phase, span, n, two_phase);
         let act = two_phase.then(|| self.new_loan(&place, true, span, n, false));
@@ -629,6 +681,19 @@ impl<'a, 'b> Builder<'a, 'b> {
             n,
         );
         (V::P(Place::local(t, ty)), act.map(|a| (t, res, a)))
+    }
+
+    /// A write or `&mut` of `p` in a guard that is reported otherwise: of a guard binding (E0503),
+    /// of the guard's scrutinee (E0501), or the reborrow of a temporary `&mut` (the borrow or
+    /// call that made it is).
+    fn guard_reported(&self, p: &Place) -> bool {
+        let Some(l) = self.body.locals.get(p.local as usize) else { return false };
+        l.guard
+            || (l.temp && matches!(p.proj.as_slice(), [Proj::Deref(_)]))
+            || self
+                .guard_scruts
+                .iter()
+                .any(|s| crate::check::places_conflict(p, s, crate::check::Access::MutBorrow))
     }
 
     fn place_of(&mut self, v: V, n: u32) -> Option<Place> {
@@ -671,19 +736,20 @@ impl<'a, 'b> Builder<'a, 'b> {
 
     fn op_of_place(&mut self, p: Place, span: Span, n: u32, consume: bool) -> Operand {
         let by_value = consume && !self.tys.is_copy(p.ty);
-        if by_value && self.owned_elems == Some(p.local) && !p.has_deref() {
-            // a `for` binding takes a fresh element of the owned array on every iteration
-            return Operand { kind: OpKind::Copy, place: p, span, node: n, site: u32::MAX };
+        let why = if by_value { self.move_out(&p, false) } else { None };
+        // a `for` binding takes a fresh element of the owned array on every iteration
+        let fresh_elem = self.owned_elem(&p);
+        let movable = by_value && why.is_none() && !fresh_elem;
+        // passing on a fresh `&mut` is the borrow that made it, judged there
+        let fresh_ref = p.proj.is_empty()
+            && self.body.locals.get(p.local as usize).is_some_and(|l| l.temp)
+            && self.tys.deref(p.ty).is_some();
+        if by_value && why.is_none() && self.in_guard > 0 && !fresh_ref {
+            self.body.guard_effects.push((span, GuardEffect::Move(p.clone())));
         }
-        let behind = p.proj.iter().any(|x| matches!(x, Proj::Deref(_) | Proj::Index | Proj::Column(_)));
-        let (capture, guard) =
-            self.body.locals.get(p.local as usize).map_or((None, false), |l| (l.capture, l.guard));
-        if by_value && (behind || capture.is_some() || guard) {
-            // E0504: a move out of a borrow, an index, a capture, or a guard binding; checked
-            // as a copy
-            self.body.bad_moves.push((p.clone(), span, capture.filter(|_| !behind)));
+        if let Some(why) = why {
+            self.body.bad_moves.push((p.clone(), span, why));
         }
-        let movable = by_value && !behind && capture.is_none() && !guard;
         if movable {
             if p.proj.is_empty()
                 && let Some(i) = self.temps.iter().rposition(|&t| t == p.local)
@@ -696,6 +762,97 @@ impl<'a, 'b> Builder<'a, 'b> {
         } else {
             Operand { kind: OpKind::Copy, place: p, span, node: n, site: u32::MAX }
         }
+    }
+
+    /// Why a by-value use of the non-Copy place `p` is E0504 (`None`: it may move). Every by-value
+    /// use ends here: an operand or receiver through [`Self::op_of_place`], and a binding of a
+    /// `let`, `match` (every alternative, nested sub-patterns), or `for` pattern (over a range, an
+    /// owned array, an iterator) through [`Self::bind_name`] (`part`: a binding inside a pattern
+    /// that takes its value apart, [`Self::destructure`]). Params of fns and closures are names.
+    /// Only a whole value moves: a part of a place is E0504 unless a pattern takes the whole
+    /// value apart, and not even then when the value has a destructor.
+    fn move_out(&mut self, p: &Place, part: bool) -> Option<MoveOut> {
+        let l = self.body.locals.get(p.local as usize)?;
+        let (capture, guard, stat) = (l.capture, l.guard, l.static_root);
+        let from = usize::from(self.owned_elem(p));
+        let behind =
+            p.proj[from..].iter().any(|x| matches!(x, Proj::Deref(_) | Proj::Index | Proj::Column(_)));
+        if stat {
+            Some(MoveOut::Static)
+        } else if let Some(c) = capture.filter(|_| !behind) {
+            Some(MoveOut::Capture(c))
+        } else if behind || guard {
+            Some(MoveOut::Behind)
+        } else if let Some(o) = self.drop_owner(p, from) {
+            Some(MoveOut::Drop(o))
+        } else if !part && p.proj.len() > from {
+            Some(MoveOut::Part(Place { local: p.local, proj: p.proj[..from].to_vec(), ty: TypeId::NONE }))
+        } else {
+            None
+        }
+    }
+
+    /// `p` is an element (or a part of one) of the array a `for` loop owns and moves out
+    /// element by element.
+    fn owned_elem(&self, p: &Place) -> bool {
+        self.owned_elems == Some(p.local) && p.proj.first() == Some(&Proj::Index) && !p.has_deref()
+    }
+
+    /// The longest proper prefix of `p` (from projection `from` on) whose type has an `impl Drop` (moving `p` out of it would
+    /// leave its destructor a moved-out part to read), when `p` is reached by fields only.
+    fn drop_owner(&mut self, p: &Place, from: usize) -> Option<Place> {
+        let mut t = self.body.locals.get(p.local as usize)?.ty;
+        if from > 0 {
+            t = self.tys.elem(t);
+        }
+        let mut owner = None;
+        for (i, pr) in p.proj.iter().enumerate().skip(from) {
+            if self.tys.has_drop_impl(t) {
+                owner = Some(Place { local: p.local, proj: p.proj[..i].to_vec(), ty: t });
+            }
+            t = match *pr {
+                Proj::Field(f) => self.tys.field_ty(t, 0, f),
+                Proj::EnumField(v, f) => self.tys.field_ty(t, v, f),
+                _ => return None,
+            };
+        }
+        owner
+    }
+
+    /// Operand `o` of an expression whose later operands are still to be evaluated. Operands are
+    /// evaluated left to right and a by-value operand takes its value when it is evaluated, so
+    /// a move of a named place is made here, into a temporary the expression then consumes: the
+    /// later operands, and the statements they make (nested calls, borrows), see the place
+    /// moved.
+    fn hold(&mut self, o: Operand, whole: Span) -> Operand {
+        if o.kind != OpKind::Move || !self.open() || self.body.locals[o.place.local as usize].temp {
+            return o;
+        }
+        let ty = o.place.ty;
+        let (span, node) = (o.span, o.node);
+        self.body.operand_moves.push((o.site, whole));
+        let t = self.new_local(ty, false, span, String::new(), true);
+        self.body.locals[t as usize].node = node;
+        self.push(StmtKind::Assign { dest: Place::local(t, ty), rv: Rvalue::Use(o), init: true }, span, node);
+        if self.tys.needs_drop(ty) {
+            self.temps.push(t);
+        }
+        self.op_of_place(Place::local(t, ty), span, node, true)
+    }
+
+    /// The operands of expressions `ns` of the expression at `whole`, each held
+    /// ([`Self::hold`]) until the last is evaluated.
+    fn operands_in_order(&mut self, ns: &[u32], whole: Span) -> Option<Vec<Operand>> {
+        let mut out: Vec<Operand> = Vec::with_capacity(ns.len());
+        for &c in ns {
+            if let Some(prev) = out.pop() {
+                let h = self.hold(prev, whole);
+                out.push(h);
+            }
+            let v = self.expr(c);
+            out.push(self.operand(v, c)?);
+        }
+        Some(out)
     }
 
     /// A non-consuming read of `v`.
@@ -1002,7 +1159,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             return; // `let _ = e;` moves nothing; a temporary is dropped at the end of the statement
         }
         let Some(p) = self.place_of(v, init) else { return };
-        self.bind_pattern(pat, p, Mode::Move, init);
+        self.destructure(pat, p, Mode::Move, init);
     }
 
     fn expr_stmt(&mut self, es: u32) {
@@ -1012,6 +1169,13 @@ impl<'a, 'b> Builder<'a, 'b> {
             let (lhs, op, rhs) = (kids[0], kids[1], kids[2]);
             let compound = !icx.is(icx.a(op), Term::Eq);
             let lv = self.expr(lhs);
+            if self.in_guard > 0
+                && let V::P(p) = &lv
+                && !self.guard_reported(p)
+            {
+                let span = self.span(lhs);
+                self.body.guard_effects.push((span, GuardEffect::Assign(p.clone())));
+            }
             let Some(lp) = (match lv {
                 V::P(p) => Some(p),
                 _ => None,
@@ -1026,7 +1190,19 @@ impl<'a, 'b> Builder<'a, 'b> {
                 }
                 return;
             };
-            let old = if compound { self.read(V::P(lp.clone()), lhs) } else { None };
+            // `p op= e` is `p = p op e`: the left operand is a by-value use of `p` evaluated
+            // before `e` (a move when not Copy, so `e` may not use `p`, and a place that cannot
+            // be moved from is E0504), and the write re-initializes `p`
+            let old = if !compound {
+                None
+            } else if self.tys.is_copy(lp.ty) {
+                self.read(V::P(lp.clone()), lhs)
+            } else {
+                let span = self.span(lhs);
+                let o = self.op_of_place(lp.clone(), span, lhs, true);
+                let whole = self.span(es);
+                Some(self.hold(o, whole))
+            };
             let rv = self.expr(rhs);
             let Some(r) = self.operand(rv, rhs) else { return };
             let rv = match old {
@@ -1252,7 +1428,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let op = self.const_op(iter);
                 let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
                 if let V::P(p) = self.put_temp(Rvalue::Use(op), bt, iter) {
-                    self.bind_pattern(pat, p, Mode::Move, iter);
+                    self.destructure(pat, p, Mode::Move, iter);
                 }
             }
             (Src::Elems(_, dk), Some(ep)) => {
@@ -1262,7 +1438,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                     let span = self.span(iter);
                     let (rv, _) = self.borrow(ep, m, false, span, iter);
                     if let V::P(p) = rv {
-                        self.bind_pattern(pat, p, Mode::Move, iter);
+                        self.destructure(pat, p, Mode::Move, iter);
                     }
                 } else if bind_ty.is_some() {
                     // a chunk by value: read the elements, bind a fresh vector
@@ -1272,16 +1448,27 @@ impl<'a, 'b> Builder<'a, 'b> {
                     let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
                     let op = self.const_op(iter);
                     if let V::P(p) = self.put_temp(Rvalue::Use(op), bt, iter) {
-                        self.bind_pattern(pat, p, Mode::Move, iter);
+                        self.destructure(pat, p, Mode::Move, iter);
                     }
                 } else {
                     // by value over an owned array (the loop's temporary)
                     let saved = self.owned_elems.replace(ep.local);
-                    self.bind_pattern(pat, ep, Mode::Move, iter);
+                    self.destructure(pat, ep, Mode::Move, iter);
                     self.owned_elems = saved;
                 }
             }
-            (Src::Iter(..), Some(ip)) => self.bind_pattern(pat, ip, Mode::Move, iter),
+            (Src::Iter(..), Some(ip)) => {
+                // the item `next` returned is a value of its own, taken out of its `Option`
+                let it = self.temp(ip.ty, iter);
+                let span = self.span(iter);
+                let op = Operand { kind: OpKind::Copy, place: ip.clone(), span, node: iter, site: u32::MAX };
+                self.push(
+                    StmtKind::Assign { dest: Place::local(it, ip.ty), rv: Rvalue::Use(op), init: true },
+                    span,
+                    iter,
+                );
+                self.destructure(pat, Place::local(it, ip.ty), Mode::Move, iter);
+            }
             _ => {}
         }
         self.block(body);
@@ -1416,25 +1603,22 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let gmark = self.guard_binds.len();
                 self.bind_alts(&alts, &sp, Mode::Peek, scrut);
                 let mark = self.temps.len();
+                self.in_guard += 1;
+                self.guard_scruts.push(sp.clone());
                 let gv = self.expr(g);
                 let _ = self.read(gv, g);
+                self.guard_scruts.pop();
+                self.in_guard -= 1;
                 self.flush_temps(mark);
                 if let Some(h) = hold {
                     let span = self.span(g);
                     let r = self.op_of_place(h, span, u32::MAX, false);
                     self.push(StmtKind::Read(r), span, u32::MAX);
                 }
-                // a guard binding is a view of the scrutinee, which the arm then takes or the
-                // next arm tests: its value ends with the guard, and no borrow of it (a call in
-                // the guard may store one into a view) is used later
-                let span = self.span(g);
+                // the guard's view of the bindings ends with it; the arm binds them again. A
+                // guard only reads (E0505), so nothing it made can hold a borrow of them
                 for b in self.guard_binds.split_off(gmark) {
-                    if let Some(l) = self.by_node.remove(&b)
-                        && self.open()
-                    {
-                        let node = self.body.locals[l as usize].node;
-                        self.push(StmtKind::StorageDead(l), span, node);
-                    }
+                    self.by_node.remove(&b);
                 }
                 let ok = self.new_block();
                 let mut next: Vec<BlockId> = vec![ok];
@@ -1493,7 +1677,7 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// branch to one block per alternative: each binds the arm's locals, then they meet again.
     fn bind_alts(&mut self, alts: &[u32], src: &Place, mode: Mode, n: u32) {
         if let [p] = alts {
-            self.bind_pattern(*p, src.clone(), mode, n);
+            self.destructure(*p, src.clone(), mode, n);
             return;
         }
         if !self.open() {
@@ -1504,10 +1688,34 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.terminate(Terminator::Branch(blocks.clone()));
         for (&p, &b) in alts.iter().zip(&blocks) {
             self.switch_to(b);
-            self.bind_pattern(p, src.clone(), mode, n);
+            self.destructure(p, src.clone(), mode, n);
             self.goto(meet);
         }
         self.switch_to(meet);
+    }
+
+    /// Binds a whole pattern `p` against place `src`. A pattern that binds a non-Copy part of
+    /// `src` by value takes the whole value apart: its parts are read into the bindings, then
+    /// `src` moves as one value (the parts it does not bind end there), so `src` itself must be
+    /// a value that may move whole.
+    fn destructure(&mut self, p: u32, src: Place, mode: Mode, n: u32) {
+        let saved = self.destr.replace((src.proj.len(), Vec::new()));
+        self.bind_pattern(p, src.clone(), mode, n);
+        let took = self.destr.take().is_some_and(|(_, parts)| !parts.is_empty());
+        self.destr = saved;
+        if took && self.open() {
+            let span = self.span(n);
+            // a temporary scrutinee stays on the statement's drop list: another arm may leave it
+            // whole (the drop of a moved value does nothing)
+            let pos = self.temps.iter().rposition(|&t| t == src.local && src.proj.is_empty());
+            let op = self.op_of_place(src, span, n, true);
+            if let Some(i) = pos
+                && !self.temps.contains(&op.place.local)
+            {
+                self.temps.insert(i, op.place.local);
+            }
+            self.push(StmtKind::Read(op), span, n);
+        }
     }
 
     /// Binds pattern `p` against place `src` (by move, by reference after peeling references,
@@ -1705,7 +1913,42 @@ impl<'a, 'b> Builder<'a, 'b> {
         match mode {
             Mode::Peek => {}
             Mode::Move => {
-                let op = self.op_of_place(src, span, b, true);
+                let top = self.destr.as_ref().map(|d| d.0);
+                let op = match top {
+                    // a part of the value a pattern takes apart: read here, the whole value
+                    // moves once the pattern is bound
+                    Some(top) if src.proj.len() > top => {
+                        let by_value = !self.tys.is_copy(src.ty);
+                        let why = if by_value { self.move_out(&src, true) } else { None };
+                        match why {
+                            Some(why) => self.body.bad_moves.push((src.clone(), span, why)),
+                            None if by_value => {
+                                // a part bound twice (`P.{ a: x, a: y }`) would have two owners:
+                                // the second binding moves it first, so its read is a use after
+                                // move
+                                let again = self.destr.as_ref().is_some_and(|d| {
+                                    d.1.iter().any(|q| {
+                                        q.proj.starts_with(&src.proj) || src.proj.starts_with(&q.proj)
+                                    })
+                                });
+                                if again {
+                                    let root =
+                                        Place::local(src.local, self.body.locals[src.local as usize].ty);
+                                    self.body.move_sites.push((root.clone(), span));
+                                    let site = (self.body.move_sites.len() - 1) as u32;
+                                    let mv = Operand { kind: OpKind::Move, place: root, span, node: b, site };
+                                    self.push(StmtKind::Read(mv), span, b);
+                                }
+                                if let Some(d) = self.destr.as_mut() {
+                                    d.1.push(src.clone());
+                                }
+                            }
+                            None => {}
+                        }
+                        Operand { kind: OpKind::Copy, place: src, span, node: b, site: u32::MAX }
+                    }
+                    _ => self.op_of_place(src, span, b, true),
+                };
                 self.push(
                     StmtKind::Assign { dest: Place::local(l, lt), rv: Rvalue::Use(op), init: true },
                     span,
@@ -1741,6 +1984,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         nb.closure_span = Some(icx.tok_span(icx.a(n)));
         nb.infos = self.infos.clone();
         nb.guard_binds = self.guard_binds.clone();
+        nb.in_guard = self.in_guard;
         nb.push_scope();
         if let Some(ps) = params {
             for (i, p) in icx.kids_vec(ps).into_iter().enumerate() {
@@ -1806,6 +2050,8 @@ impl<'a, 'b> Builder<'a, 'b> {
         let mut ops = Vec::new();
         for (l, m) in caps {
             let lt = self.body.locals[l as usize].ty;
+            // a capture's mutation is reported where the closure body makes it
+            let effects = self.body.guard_effects.len();
             let (v, _) = self.borrow(Place::local(l, lt), m, false, span, n);
             if let Some(last) = self.body.loans.last_mut() {
                 last.capture = true;
@@ -1813,6 +2059,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             if let Some(op) = self.operand(v, n) {
                 ops.push(op);
             }
+            self.body.guard_effects.truncate(effects);
         }
         ops
     }
@@ -2001,8 +2248,10 @@ impl<'a, 'b> Builder<'a, 'b> {
         let v = self.expr(first);
         let Some(mut acc) = self.operand(v, first) else { return V::Never };
         let ty = self.nty(n);
+        let whole = self.span(n);
         for &c in &kids[1..] {
             let optok = icx.a(c).saturating_sub(1);
+            acc = self.hold(acc, whole);
             let v = self.expr(c);
             let Some(r) = self.operand(v, c) else { return V::Never };
             let rv = match self.tb.target(optok) {
@@ -2161,30 +2410,47 @@ impl<'a, 'b> Builder<'a, 'b> {
         match icx.use_at(n, a) {
             Some(u) => {
                 let r = u.res;
-                self.path_val(r)
+                self.path_val(r, u.token)
             }
             None => V::Const,
         }
     }
 
     fn agg(&mut self, n: u32, kids: &[u32]) -> V {
-        let mut ops = Vec::with_capacity(kids.len());
-        for &c in kids {
-            let v = self.expr(c);
-            match self.operand(v, c) {
-                Some(o) => ops.push(o),
-                None => return V::Never,
-            }
-        }
+        let whole = self.span(n);
+        let Some(ops) = self.operands_in_order(kids, whole) else { return V::Never };
         let ty = self.nty(n);
         self.put_temp(Rvalue::Agg(ops), ty, n)
     }
 
-    fn path_val(&mut self, r: Res) -> V {
-        match self.local_of(r) {
-            Some(l) => V::P(Place::local(l, self.body.locals[l as usize].ty)),
-            None => V::Const,
+    /// The value of path `r` (last segment at token `tok`). An immutable `static` is a place
+    /// that is never moved from: a temporary standing for its storage ([`Local::static_root`]).
+    fn path_val(&mut self, r: Res, tok: u32) -> V {
+        if let Some(l) = self.local_of(r) {
+            return V::P(Place::local(l, self.body.locals[l as usize].ty));
         }
+        let Res::Decl(d) = r else { return V::Const };
+        let Some(decl) = self.tys.prog.decl(d) else { return V::Const };
+        if decl.kind != DeclKind::Static || decl.flags.has(stave_sema::DeclFlags::MUT) || !self.open() {
+            return V::Const;
+        }
+        let Some(ty) = self.tys.sigs.konst(d).map(|c| c.ty) else { return V::Const };
+        let span = self.icx.tok_span(tok);
+        let t = self.new_local(ty, false, span, String::new(), true);
+        self.body.locals[t as usize].static_root = true;
+        let c = Operand {
+            kind: OpKind::Const,
+            place: Place::local(0, TypeId::NONE),
+            span,
+            node: u32::MAX,
+            site: u32::MAX,
+        };
+        self.push(
+            StmtKind::Assign { dest: Place::local(t, ty), rv: Rvalue::Use(c), init: true },
+            span,
+            u32::MAX,
+        );
+        V::P(Place::local(t, ty))
     }
 
     /// An f-string: reads of its holes (names and field paths), an owned `String` result.
@@ -2252,11 +2518,11 @@ impl<'a, 'b> Builder<'a, 'b> {
         let mut kid = 1usize;
         let mut cur = if icx.is(pa, Term::Ident) {
             match icx.use_at(prim, pa) {
-                Some(u) => Cur::Path(u.res),
+                Some(u) => Cur::Path(u.res, u.token),
                 None => Cur::TypeRel,
             }
         } else if icx.is(pa, Term::KwSelfType) {
-            Cur::Path(Res::SelfType)
+            Cur::Path(Res::SelfType, pa)
         } else {
             Cur::Val(self.expr(prim))
         };
@@ -2277,7 +2543,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 if !matches!(cur, Cur::Val(_))
                     && let Some(u) = icx.use_at(prim, seg)
                 {
-                    cur = Cur::Path(u.res);
+                    cur = Cur::Path(u.res, u.token);
                     p = q;
                     continue;
                 }
@@ -2362,7 +2628,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
         match cur {
             Cur::Val(v) => v,
-            Cur::Path(r) => self.path_val(r),
+            Cur::Path(r, tok) => self.path_val(r, tok),
             Cur::TypeRel => V::Const,
         }
     }
@@ -2370,20 +2636,14 @@ impl<'a, 'b> Builder<'a, 'b> {
     fn cur_value(&mut self, cur: Cur) -> V {
         match cur {
             Cur::Val(v) => v,
-            Cur::Path(r) => self.path_val(r),
+            Cur::Path(r, tok) => self.path_val(r, tok),
             Cur::TypeRel => V::Const,
         }
     }
 
     fn agg_ty(&mut self, n: u32, kids: &[u32], ty: TypeId) -> V {
-        let mut ops = Vec::with_capacity(kids.len());
-        for &c in kids {
-            let v = self.expr(c);
-            match self.operand(v, c) {
-                Some(o) => ops.push(o),
-                None => return V::Never,
-            }
-        }
+        let whole = self.span(n);
+        let Some(ops) = self.operands_in_order(kids, whole) else { return V::Never };
         self.put_temp(Rvalue::Agg(ops), ty, n)
     }
 
@@ -2455,6 +2715,9 @@ impl<'a, 'b> Builder<'a, 'b> {
         let Some(bp) = self.place_of(base, n) else { return V::Never };
         let bt = bp.ty;
         let span = self.icx.tok_span(tok);
+        if self.in_guard > 0 {
+            self.body.guard_effects.push((span, GuardEffect::Try));
+        }
         let op = self.op_of_place(bp, span, n, true);
         let V::P(hold) = self.put_temp(Rvalue::Use(op), bt, n) else { return V::Never };
         let (err, cont) = (self.new_block(), self.new_block());
@@ -2468,13 +2731,8 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.put_temp(Rvalue::Use(op), pt, n)
     }
 
-    fn args(&mut self, args: &[u32]) -> Option<Vec<Operand>> {
-        let mut out = Vec::with_capacity(args.len());
-        for &a in args {
-            let v = self.expr(a);
-            out.push(self.operand(v, a)?);
-        }
-        Some(out)
+    fn args(&mut self, args: &[u32], whole: Span) -> Option<Vec<Operand>> {
+        self.operands_in_order(args, whole)
     }
 
     fn sig_flows(&mut self, ret: TypeId, sig: &stave_sema::sigs::FnSig) -> Flows {
@@ -2521,7 +2779,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 self.direct_call(decl, &[], None, args, last, n, (span, paren))
             }
             Some(Target::Variant { .. }) => {
-                let Some(ops) = self.args(args) else { return V::Never };
+                let Some(ops) = self.args(args, span) else { return V::Never };
                 self.put_temp(Rvalue::Agg(ops), node_ty, n)
             }
             Some(Target::TraitMethod { method, self_ty, args: ga }) => {
@@ -2540,7 +2798,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                         _ => TypeId::NONE,
                     }
                 };
-                let Some(mut ops) = self.args(args) else { return V::Never };
+                let Some(mut ops) = self.args(args, span) else { return V::Never };
                 ops.insert(0, fop);
                 // The result takes the origins of every ref/view argument, and of the fn
                 // value itself (operand 0): a closure may return a borrow of what it captured
@@ -2567,7 +2825,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 }
             },
             _ => {
-                let Some(ops) = self.args(args) else { return V::Never };
+                let Some(ops) = self.args(args, span) else { return V::Never };
                 let flows = self.flows_if(node_ty, || Flows::AllArgs);
                 self.call_result(Rvalue::call(ops, flows, paren), node_ty, n, span)
             }
@@ -2587,7 +2845,7 @@ impl<'a, 'b> Builder<'a, 'b> {
     ) -> V {
         let sigs = self.tys.sigs;
         let node_ty = if last { self.nty(n) } else { TypeId::NONE };
-        let Some(ops) = self.args(args) else { return V::Never };
+        let Some(ops) = self.args(args, span) else { return V::Never };
         let Some(sig) = sigs.fn_sig(decl) else {
             let flows = self.flows_if(node_ty, || Flows::AllArgs);
             return self.call_result(Rvalue::call(ops, flows, tok), node_ty, n, span);
@@ -2607,6 +2865,10 @@ impl<'a, 'b> Builder<'a, 'b> {
             && let Some(s) = self.body.blocks[b as usize].stmts.last_mut()
         {
             s.span = span;
+        }
+        // the result is named by the call's text, not by the rest of the chain it starts
+        if let V::P(p) = &v {
+            self.body.locals[p.local as usize].span = span;
         }
         if self.tys.is_never(ret) {
             self.terminate(Terminator::Unreachable);
@@ -2664,7 +2926,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             _ => (Adjust::default(), None, node_ty),
         };
         let Some((rop, act)) = self.receiver(recv, adj, n, rspan) else { return V::Never };
-        let Some(mut ops) = self.args(args) else { return V::Never };
+        let rop = if args.is_empty() { rop } else { self.hold(rop, span) };
+        let Some(mut ops) = self.args(args, span) else { return V::Never };
         ops.insert(0, rop);
         if let Some((t, res, a)) = act {
             self.push(StmtKind::Activate { local: t, reserved: res, active: a }, rspan, n);

@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
-use crate::cfg::{Body, LoanId, Place, Proj};
+use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, Place, Proj};
 use crate::check::{Finding, Unfit, later_use};
 use crate::loans::Flow;
 use crate::ty::Tys;
@@ -169,14 +169,32 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
     let mut ms: Vec<(u32, (Span, Place))> = moved.into_iter().collect();
     ms.sort_by_key(|(s, (sp, _))| (sp.offset, *s));
     let mut used_spans: Vec<u32> = Vec::new();
-    for (site, (span, _)) in ms {
+    for (site, (span, used)) in ms {
         if used_spans.contains(&span.offset) {
             continue;
         }
         used_spans.push(span.offset);
         let (mp, mspan) = &body.move_sites[site as usize];
         let text = place_text(body, tys, mp);
-        out.extend(mk("E0502", None, &[("place", &text)], span, &[("move", *mspan)]));
+        // a later operand of the expression whose earlier operand moved the place
+        let operand = body.operand_moves.iter().any(|&(s, w)| {
+            s == site
+                && w.file == span.file
+                && span.offset > mspan.offset
+                && span.offset + span.len <= w.offset + w.len
+        });
+        if operand {
+            let u = place_text(body, tys, &used);
+            out.extend(mk(
+                "E0502",
+                Some("operand"),
+                &[("place", &u), ("moved", &text)],
+                span,
+                &[("move", *mspan)],
+            ));
+        } else {
+            out.extend(mk("E0502", None, &[("place", &text)], span, &[("move", *mspan)]));
+        }
     }
     for f in findings {
         match f {
@@ -232,13 +250,39 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                 };
                 out.extend(mk("E0510", case, &[("origin", &name)], span, &[("from", from)]));
             }
-            Finding::MoveOut { place, span, capture } => {
+            Finding::MoveOut { place, span, why } => {
                 let text = place_text(body, tys, &place);
-                match capture {
-                    Some(c) => {
+                match why {
+                    MoveOut::Capture(c) => {
                         out.extend(mk("E0504", Some("capture"), &[("place", &text)], span, &[("capture", c)]))
                     }
-                    None => out.extend(mk("E0504", None, &[("place", &text)], span, &[])),
+                    MoveOut::Drop(owner) => {
+                        let o = place_text(body, tys, &owner);
+                        out.extend(mk("E0504", Some("drop"), &[("place", &text), ("owner", &o)], span, &[]))
+                    }
+                    MoveOut::Static => {
+                        out.extend(mk("E0504", Some("static"), &[("place", &text)], span, &[]))
+                    }
+                    MoveOut::Part(owner) => {
+                        let o = place_text(body, tys, &owner);
+                        out.extend(mk("E0504", Some("part"), &[("place", &text), ("owner", &o)], span, &[]))
+                    }
+                    MoveOut::Behind => out.extend(mk("E0504", None, &[("place", &text)], span, &[])),
+                }
+            }
+            Finding::GuardEffect { span, what } => {
+                let (case, place) = match what {
+                    GuardEffect::Move(p) => ("move", Some(p)),
+                    GuardEffect::Assign(p) => ("assign", Some(p)),
+                    GuardEffect::MutBorrow(p) => ("mut-borrow", Some(p)),
+                    GuardEffect::Try => ("try", None),
+                };
+                match place {
+                    Some(p) => {
+                        let text = place_text(body, tys, &p);
+                        out.extend(mk("E0505", Some(case), &[("place", &text)], span, &[]))
+                    }
+                    None => out.extend(mk("E0505", Some(case), &[], span, &[])),
                 }
             }
             Finding::ViewWrite { place, span, why } => {
@@ -299,6 +343,7 @@ mod tests {
             capture_mut: false,
             temp: false,
             guard: false,
+            static_root: false,
             node,
         };
         Body {
@@ -307,6 +352,8 @@ mod tests {
             loans,
             move_sites: Vec::new(),
             bad_moves: Vec::new(),
+            guard_effects: Vec::new(),
+            operand_moves: Vec::new(),
             ret: RetCheck::None,
             declared: Vec::new(),
             is_nested: false,

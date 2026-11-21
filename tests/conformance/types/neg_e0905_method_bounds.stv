@@ -1,0 +1,61 @@
+//~ CHECK-ONLY
+// The bounds of an impl method's own generics are the trait method's, as complete trait refs
+// (trait and args) after the trait's params are replaced by the impl's trait args; their order
+// is free. Callers instantiate the method by the trait's bounds and the instance runs the impl's
+// body.
+trait Conv<T> {
+    fn c(&self) -> T;
+}
+
+trait Tr {
+    fn f<U: Conv<u32>>(u: &U) -> u32;
+}
+
+struct S {}
+
+impl Tr for S {
+    fn f<U: Conv<u64>>(u: &U) -> u32 { //~ ERROR E0905
+        let x: u64 = u.c();
+        return x as% u32;
+    }
+}
+
+struct S2 {}
+
+impl Tr for S2 {
+    fn f<U: Conv<u32> + Conv<u64>>(u: &U) -> u32 { //~ ERROR E0905
+        return 0;
+    }
+}
+
+trait Pick<T> {
+    fn g<U: Conv<T> + Conv<u16>>(u: &U) -> u32;
+}
+
+struct P {}
+
+impl Pick<u8> for P {
+    fn g<U: Conv<u16> + Conv<u8>>(u: &U) -> u32 {
+        return 0;
+    }
+}
+
+struct Q {}
+
+impl Pick<u8> for Q {
+    fn g<U: Conv<u16> + Conv<i8>>(u: &U) -> u32 { //~ ERROR E0905
+        return 0;
+    }
+}
+
+struct R<T> { x: T }
+
+impl<T> Pick<T> for R<T> {
+    fn g<U: Conv<T> + Conv<u16>>(u: &U) -> u32 {
+        return 0;
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

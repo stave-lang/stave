@@ -1,4 +1,4 @@
-//~ BORROWCHECK write-under-shared 16 15
+//~ BORROWCHECK use-after-referent 16 15
 import std.io;
 
 fn next(i: u32) -> u32 {

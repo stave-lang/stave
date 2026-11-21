@@ -1,7 +1,8 @@
 //~ CHECK-ONLY
 // Assigning to a part of a maybe-moved value uses the moved value (the assignment would drop
-// the old part, which the move took). Assigning the whole value, or a part that was moved out
-// itself, re-initializes it.
+// the old part, which the move took). Assigning the whole value re-initializes it; a part is
+// never moved out by itself (E0504), `mem.replace` takes it and leaves another.
+import std.mem;
 import std.string;
 
 struct S { pub a: string.String, pub b: string.String }
@@ -40,8 +41,7 @@ fn whole(c: bool) -> usize {
 
 fn field_moved() -> usize {
     let mut s = mk();
-    let t = s.a;
-    s.a = string.String.new();
+    let t = mem.replace(&mut s.a, string.String.new());
     return s.a.len() + t.len();
 }
 

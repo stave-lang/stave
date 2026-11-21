@@ -1,0 +1,51 @@
+//~ STDOUT self_in_impl_bounds.stdout
+// `Self` in the bounds of an impl's own params is the impl's self type, in trait impls and in
+// inherent impls.
+import std.io;
+
+trait Conv<T> {
+    fn c(&self) -> u32;
+}
+
+trait Tr {
+    fn n(&self) -> u32;
+}
+
+struct W<U> { u: U }
+
+struct V<U> { u: U }
+
+struct B {}
+
+impl Conv<W<B>> for B {
+    fn c(&self) -> u32 {
+        return 5;
+    }
+}
+
+impl Conv<V<B>> for B {
+    fn c(&self) -> u32 {
+        return 6;
+    }
+}
+
+impl<U: Conv<Self>> Tr for W<U> {
+    fn n(&self) -> u32 {
+        return self.u.c();
+    }
+}
+
+impl<U: Conv<Self>> V<U> {
+    pub fn n(&self) -> u32 {
+        return self.u.c();
+    }
+}
+
+fn main() -> i32 {
+    let w = W.{ u: B.{} };
+    let v = V.{ u: B.{} };
+    let a: u32 = w.n();
+    let b: u32 = v.n();
+    io.print(f"{a} {b}\n");
+    return 0;
+}
