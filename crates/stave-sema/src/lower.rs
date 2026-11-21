@@ -147,6 +147,14 @@ fn graph_to_table(
     x
 }
 
+/// The features instance `k` is compiled with: its generic's `needs` and those it inherits from
+/// its type arguments ([`crate::inherit`]).
+fn inst_features(sigs: &crate::sigs::Sigs, inherited: &FxHashMap<InstKey, u64>, k: &InstKey) -> FeatureSet {
+    let declared = sigs.fn_sig(k.decl).map_or(0, |s| s.features);
+    let more = if k.args.is_empty() { 0 } else { inherited.get(k).copied().unwrap_or(0) };
+    FeatureSet::from_bits(declared | more).unwrap_or(FeatureSet::EMPTY)
+}
+
 /// Lowering type `t` as a graph type (typeck's ids, below `n_global`, are shared).
 fn table_to_graph(
     table: &TypeTable,
@@ -358,6 +366,27 @@ fn lower_in_pool(
             out
         }
     };
+    // the features generic instances inherit from their type arguments, keyed in this table
+    let inherited: FxHashMap<InstKey, u64> = if tc.inst_features.is_empty() {
+        FxHashMap::default()
+    } else {
+        let cx = tc.call_graph.types(&tc.types);
+        let mut memo = FxHashMap::default();
+        tc.inst_features
+            .iter()
+            .map(|(k, &f)| {
+                let args = k
+                    .args
+                    .iter()
+                    .map(|x| match x {
+                        GArg::Type(t) => GArg::Type(graph_to_table(&cx, &mut table, &mut memo, *t)),
+                        c => *c,
+                    })
+                    .collect();
+                (InstKey { decl: k.decl, args }, f)
+            })
+            .collect()
+    };
     let mut cache: FxHashMap<Job, usize> = jobs.iter().cloned().enumerate().map(|(i, j)| (j, i)).collect();
     // the job that first requested each job (roots: none)
     let mut parent: Vec<Option<usize>> = vec![None; jobs.len()];
@@ -383,6 +412,7 @@ fn lower_in_pool(
                 res_err,
                 any_requires,
                 borrows,
+                inherited: &inherited,
             };
             pending.par_iter().map(|j| lower_job(&g, any_item, j)).collect()
         };
@@ -430,7 +460,7 @@ fn lower_in_pool(
     }
     let t1 = Instant::now();
     let outs: Vec<JobOut> = outs.into_iter().flatten().collect();
-    let m = assemble(prog, sigs, &mut table, &jobs, &cache, outs, &statics_list);
+    let m = assemble(prog, sigs, &mut table, &jobs, &cache, outs, &statics_list, &inherited);
     tm.assemble = t1.elapsed();
     tm.n_funcs = m.as_ref().map_or(0, |m| m.0.funcs.len());
     let r = m.map(|(mut module, order, site_pos)| {
@@ -582,7 +612,7 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                     msg: "body flagged with a type error but no error diagnostic".into(),
                 }));
             }
-            let needs = FeatureSet::from_bits(sig.features).unwrap_or(FeatureSet::EMPTY);
+            let needs = inst_features(g.sigs, g.inherited, k);
             if decl.flags.has(DeclFlags::DISPATCH) {
                 let mut cx = FnCx::new(g, icx, path);
                 cx.needs = needs;
@@ -801,6 +831,7 @@ fn assemble(
     cache: &FxHashMap<Job, usize>,
     outs: Vec<JobOut>,
     statics_list: &[DeclId],
+    inherited: &FxHashMap<InstKey, u64>,
 ) -> Result<(Module, Vec<usize>, Vec<SitePos>), LowerError> {
     let mut tr = Tr { tmp: IrTypes::new(), memo: FxHashMap::default(), adt_sema: FxHashMap::default() };
     // 1. translate every used type; the printed set P
@@ -1044,10 +1075,7 @@ fn assemble(
             Job::Glue(_) => "drop_glue".to_string(),
         };
         let features = match job {
-            Job::Inst(k) => sigs
-                .fn_sig(k.decl)
-                .and_then(|s| FeatureSet::from_bits(s.features))
-                .unwrap_or(FeatureSet::EMPTY),
+            Job::Inst(k) => inst_features(sigs, inherited, k),
             Job::Glue(_) => FeatureSet::EMPTY,
         };
         let symbol = match job {
@@ -1118,6 +1146,25 @@ fn assemble(
                 }
                 if name_at == Some((stave_diag::FileId(file), off)) {
                     name_site = Site(row);
+                }
+            }
+            // a generic instance holds by value only vectors its features hold: the type checker
+            // decided them from its type arguments ([`crate::inherit`])
+            #[cfg(debug_assertions)]
+            if let (Job::Inst(k), Some(b)) = (job, &f.body)
+                && !k.args.is_empty()
+            {
+                let width = crate::gates::feature_vector_bits(prog.target.baseline().union(features));
+                let mut ov = Overlay::new(&*table);
+                let held =
+                    f.params.iter().copied().chain(f.ret).chain(b.values.iter().map(|v| TypeId(v.ty.0)));
+                for t in held.filter(|t| !t.is_none() && !t.is_local()) {
+                    let wide = crate::inherit::held_wide(&mut ov, sigs, t).filter(|w| w.1 > width);
+                    debug_assert!(
+                        wide.is_none(),
+                        "{path} holds a {}-bit vector outside its features",
+                        wide.map_or(0, |w| w.1)
+                    );
                 }
             }
             let body = f.body.take().map(|mut b| {

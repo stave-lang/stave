@@ -66,6 +66,8 @@ pub(crate) struct G<'a> {
     pub any_requires: bool,
     /// Borrow expressions get an instruction of their own and a row in `Body::borrows`.
     pub borrows: bool,
+    /// The features generic instances inherit from their type arguments, beyond their `needs`.
+    pub inherited: &'a FxHashMap<InstKey, u64>,
 }
 
 impl<'a> G<'a> {

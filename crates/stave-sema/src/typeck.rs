@@ -255,6 +255,10 @@ pub struct Typeck {
     pub instances: Vec<Instance>,
     /// The whole-program call graph ([`crate::callgraph`]).
     pub call_graph: CallGraph,
+    /// Per generic instance that inherits features from its type arguments: those beyond its
+    /// declared `needs` and the target baseline (keys in the call graph's type ids;
+    /// [`crate::inherit`]).
+    pub inst_features: rustc_hash::FxHashMap<crate::mono::InstKey, u64>,
     /// Type-checking diagnostics (canonical order). [`Typeck::all_diagnostics`] merges resolution's.
     pub diagnostics: Vec<Diagnostic>,
     pub timings: TypeckTimings,
@@ -498,8 +502,12 @@ fn check_in_pool(prog: &Program) -> Typeck {
     } else {
         crate::callgraph::build(prog, &sigs_table, &tys, &bodies, &brackets)
     };
+    let mut inst_features = rustc_hash::FxHashMap::default();
     if !call_graph.truncated {
         diags.extend(crate::recursion::check(prog, &sigs_table, &tys, &call_graph));
+        let inh = crate::inherit::check(prog, &sigs_table, &tys, &bodies, &call_graph, &brackets);
+        diags.extend(inh.diagnostics);
+        inst_features = inh.features;
     } else if !too_deep && let Some((span, what)) = call_graph.truncated_at {
         // Every check over the graph (recursion, effects, ranks, contract purity, stack) would
         // miss the left-out instances: the program is rejected.
@@ -515,6 +523,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
         bodies,
         instances,
         call_graph,
+        inst_features,
         diagnostics,
         timings: TypeckTimings { sigs: t_sigs, bodies: t_bodies, canon: t_canon, graph: t_graph },
         error_type: err,

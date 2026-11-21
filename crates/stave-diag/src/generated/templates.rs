@@ -3306,10 +3306,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0704",
         severity: Severity::Error,
         area: "features",
-        rule: "callee needs features neither the caller nor the target baseline has",
+        rule: "callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "arg", kind: HoleKind::Type, choices: &[] },
             Hole { name: "callee", kind: HoleKind::Path, choices: &[] },
             Hole { name: "feature", kind: HoleKind::Name, choices: &[] },
         ],
@@ -3323,6 +3324,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `needs({feature})` to the caller, or call `{callee}` through a `dispatch` function",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "inherited",
+                message: "`{callee}` at type argument `{arg}` needs `{feature}`, which the caller does not have",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this use needs `{feature}`" },
+                    LabelTemplate { at: "callee", text: "declared here: at `{arg}` it holds a vector by value, so it inherits `{feature}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "add `needs({feature})` to the caller, or reach `{callee}` through a `dispatch` function",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

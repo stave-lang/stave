@@ -133,6 +133,16 @@ pub(crate) fn sig_wide_part<I: Interner + ?Sized>(
     wide_part(cx, t, feature_vector_bits(target.baseline().union(fs)))
 }
 
+/// The features whose registers hold a `bits`-wide vector or mask on `target`, beyond 128 bits
+/// (empty: none of its arch's features is that wide).
+pub(crate) fn width_features(target: Triple, bits: u32) -> Vec<Feature> {
+    match target.arch() {
+        Arch::X86_64 if bits <= 256 => vec![Feature::Avx2],
+        Arch::X86_64 if bits <= 512 => wide512().to_vec(),
+        _ => Vec::new(),
+    }
+}
+
 /// E0703 for vector type `ty` (`bits` wide) in a signature at `span` whose features `features`
 /// (with the target baseline) do not cover it, naming the missing features (those not implied by
 /// another, in feature order); E0702 where no feature of the target's arch is that wide.
@@ -143,11 +153,7 @@ pub(crate) fn sig_too_wide(
     bits: u32,
     span: Span,
 ) -> Option<stave_diag::Diagnostic> {
-    let need = match target.arch() {
-        Arch::X86_64 if bits <= 256 => vec![Feature::Avx2],
-        Arch::X86_64 if bits <= 512 => wide512().to_vec(),
-        _ => Vec::new(),
-    };
+    let need = width_features(target, bits);
     let have = target.baseline().union(FeatureSet::from_bits(features).unwrap_or_default());
     let missing = FeatureSet::from_features(need.into_iter().filter(|f| !have.contains(*f)));
     let names = types::feature_names(missing.bits());

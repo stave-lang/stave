@@ -44,6 +44,7 @@ mod dispatch;
 pub mod effects;
 mod ffi;
 pub mod gates;
+mod inherit;
 pub mod itemcx;
 pub mod kinds;
 pub mod known;

@@ -1341,11 +1341,16 @@ fix = { description = "add `needs({feature})` to the signature, or use a vector 
 code = "E0704"
 severity = "error"
 area = "features"
-rule = "callee needs features neither the caller nor the target baseline has"
-holes = { callee = "path", feature = "name" }
+rule = "callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it"
+holes = { callee = "path", feature = "name", arg = "type" }
 message = "`{callee}` needs `{feature}`, which the caller does not have"
 labels = [{ at = "primary", text = "call needs `{feature}`" }, { at = "callee", text = "`{callee}` declares `needs({feature})` here" }]
 fix = { description = "add `needs({feature})` to the caller, or call `{callee}` through a `dispatch` function" }
+
+[diag.cases.inherited]
+message = "`{callee}` at type argument `{arg}` needs `{feature}`, which the caller does not have"
+labels = [{ at = "primary", text = "this use needs `{feature}`" }, { at = "callee", text = "declared here: at `{arg}` it holds a vector by value, so it inherits `{feature}`" }]
+fix = { description = "add `needs({feature})` to the caller, or reach `{callee}` through a `dispatch` function" }
 
 [[diag]]
 code = "E0705"
