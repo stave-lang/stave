@@ -1,0 +1,40 @@
+mk 1
+mk 2
+mk 12
+drop 2
+drop 1
+local
+mk 3
+mk 4
+mk 5
+mk 35
+drop 5
+drop 3
+mk 6
+mk 46
+drop 6
+drop 4
+fields
+mk 7
+mk 8
+mk 9
+mk 1
+mk 71
+drop 1
+drop 7
+mk 2
+mk 3
+mk 4
+mk 34
+drop 4
+drop 3
+nested
+end
+drop 2
+drop 34
+drop 71
+drop 8
+drop 9
+drop 35
+drop 46
+drop 12

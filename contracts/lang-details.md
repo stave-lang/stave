@@ -96,6 +96,10 @@ when that owner ends.
   only. The owner still drops its other fields, in declaration order, where it would have been
   dropped as a whole. Assigning the field again (`p.a = v;`) drops the old value only on the
   paths where it is still there.
+- **Compound assignment.** `p op= e` with a user operator is `p = p op e`: the operator call
+  takes the old value of `p` (the callee owns it), and its result is written into `p`, which
+  holds no value at that point: nothing is dropped at the write. A `?` in `e` leaves the old
+  value in `p`.
 - **Temporaries.** A temporary with drop glue is dropped at the end of its statement, the last
   made first, and only if the operand that makes it ran (the right side of `&&` / `||`, a branch
   of a value `if`). These are statements of their own for this rule: the condition of an `if` or
