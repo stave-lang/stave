@@ -2309,6 +2309,9 @@ impl crate::sigs::LowerHost for TyHost<'_, '_> {
         crate::consteval::eval_u64(self, env, n, ty)
     }
     fn report(&mut self, _d: Option<stave_diag::Diagnostic>) {}
+    fn const_param_ty(&self, _idx: u32) -> Option<TypeId> {
+        None
+    }
 }
 
 impl crate::consteval::CEnv for TyHost<'_, '_> {
