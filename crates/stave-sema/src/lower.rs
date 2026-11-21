@@ -996,6 +996,11 @@ fn assemble(
     }
     // 5. strings and intrinsics
     let mut all_strs: Vec<Vec<u8>> = outs.iter().flat_map(|o| o.strs.iter().cloned()).collect();
+    for &d in statics_list {
+        if let Some(v) = sigs.konst(d).and_then(|c| c.value.as_ref()) {
+            str_bytes(v, &mut all_strs);
+        }
+    }
     all_strs.sort_by(|a, b| {
         stave_intern::hash::xxh32(a, 0).cmp(&stave_intern::hash::xxh32(b, 0)).then_with(|| a.cmp(b))
     });
@@ -1213,19 +1218,13 @@ fn assemble(
         let ty = ty_final(c.ty, &mut tr, table);
         let size = layouts.size_of(ty).unwrap_or(0) as usize;
         let mut init = vec![0u8; size];
+        let mut refs = Vec::new();
         if let Some(v) = &c.value {
-            if has_str(v) {
-                // the image has no relocations inside a static's bytes
-                return Err(LowerError {
-                    kind: LowerErrorKind::Unsupported,
-                    func: prog.decl_path(d),
-                    at: String::new(),
-                    msg: "a `static` holding a `&str` is not implemented yet (use a `const`)".into(),
-                });
-            }
-            write_val(&module.types, &layouts, ty, v, &mut init, 0);
+            let mut out = ValOut { bytes: &mut init, refs: &mut refs, strs: &str_index };
+            write_val(&module.types, &layouts, ty, v, &mut out, 0);
         }
-        module.statics.push(Static { path: prog.decl_path(d), ty, init });
+        refs.sort_by_key(|r: &stave_ir::DataRef| r.offset);
+        module.statics.push(Static { path: prog.decl_path(d), ty, init, refs });
     }
     Ok((module, order, site_pos))
 }
@@ -1248,31 +1247,40 @@ fn ty_final_pure(tr: &Tr, fin: &[stave_ir::TypeId], t: u32) -> stave_ir::TypeId 
     }
 }
 
-/// Writes a const value's bytes at `off` (stave-ir layout).
-/// Whether a const value holds a string (a pointer into program data).
-fn has_str(v: &crate::consteval::Val) -> bool {
+/// The string bytes a const value holds, appended to `out`.
+fn str_bytes(v: &crate::consteval::Val, out: &mut Vec<Vec<u8>>) {
     use crate::consteval::Val;
     match v {
-        Val::Str(_) => true,
-        Val::Agg(vs) | Val::Variant(_, vs) => vs.iter().any(has_str),
-        _ => false,
+        Val::Str(s) => out.push(s.to_vec()),
+        Val::Agg(vs) | Val::Variant(_, vs) => vs.iter().for_each(|x| str_bytes(x, out)),
+        _ => {}
     }
 }
 
+/// Where [`write_val`] writes a static's image: its bytes, its address words, and the string
+/// table ([`str_bytes`] put every string of the value in it).
+struct ValOut<'a> {
+    bytes: &'a mut [u8],
+    refs: &'a mut Vec<stave_ir::DataRef>,
+    strs: &'a FxHashMap<&'a [u8], u32>,
+}
+
+/// Writes a const value's bytes at `off` (stave-ir layout); a string is an address word (to
+/// its bytes in the string table) and its length.
 fn write_val(
     types: &IrTypes,
     lay: &stave_ir::layout::Layouts,
     t: stave_ir::TypeId,
     v: &crate::consteval::Val,
-    out: &mut [u8],
+    out: &mut ValOut<'_>,
     off: usize,
 ) {
     use crate::consteval::Val;
     use stave_ir::layout::Shape;
     let Ok(l) = lay.get_layout(t) else { return };
-    let put = |out: &mut [u8], at: usize, n: usize, bits: u64| {
+    let put = |out: &mut ValOut<'_>, at: usize, n: usize, bits: u64| {
         for (k, byte) in bits.to_le_bytes().iter().enumerate().take(n.min(8)) {
-            if let Some(x) = out.get_mut(at + k) {
+            if let Some(x) = out.bytes.get_mut(at + k) {
                 *x = *byte;
             }
         }
@@ -1289,6 +1297,13 @@ fn write_val(
         },
         (Shape::Scalar, Val::Bool(b)) => put(out, off, 1, *b as u64),
         (Shape::Scalar, Val::Char(c)) => put(out, off, 4, *c as u64),
+        (Shape::Fat, Val::Str(s)) => {
+            if let Some(&sid) = out.strs.get(&s[..]) {
+                let target = stave_ir::DataTarget::Str(stave_ir::StrId(sid));
+                out.refs.push(stave_ir::DataRef { offset: off as u32, target, addend: 0 });
+            }
+            put(out, off + 8, 8, s.len() as u64);
+        }
         (Shape::Fields(fs), Val::Agg(vs)) => {
             for ((fo, ft), fv) in fs.iter().zip(vs) {
                 write_val(types, lay, *ft, fv, out, off + *fo as usize);

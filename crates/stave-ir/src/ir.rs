@@ -764,6 +764,29 @@ pub struct Static {
     pub ty: TypeId,
     /// Exactly the type's size in bytes.
     pub init: Vec<u8>,
+    /// The address words inside `init`, by ascending offset: each 8-byte word at `offset` holds
+    /// the address of other program data (its bytes in `init` are zero). Every target resolves
+    /// them when it lays out the image, so a static never runs code to initialize.
+    pub refs: Vec<DataRef>,
+}
+
+/// An absolute 64-bit address inside a static's bytes: `target`'s first byte plus `addend`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DataRef {
+    /// Byte offset of the word in [`Static::init`]; the word is 8-aligned in the static.
+    pub offset: u32,
+    pub target: DataTarget,
+    /// At most the target's size (one past the end is a valid address).
+    pub addend: u32,
+}
+
+/// What a [`DataRef`] points into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataTarget {
+    /// The bytes of string constant `s<S>` (read-only).
+    Str(StrId),
+    /// Static number `i` (`intrinsic.static_addr i`).
+    Static(u32),
 }
 
 /// A whole program (or the part of it being printed / run).
