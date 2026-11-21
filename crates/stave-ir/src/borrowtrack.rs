@@ -1016,6 +1016,25 @@ impl Tracker {
         tree.first_on_path(p, offset, end, |n, perm| n.kind != Kind::Mut && perm == Perm::Frozen).is_some()
     }
 
+    /// Whether `tag` is a `&mut` tag the tracker holds a node for.
+    pub fn is_mut(&self, tag: Tag) -> bool {
+        let node = self.tags.get(&tag).and_then(|&(a, i)| self.trees.get(&a)?.nodes.get(i as usize));
+        node.is_some_and(|n| n.kind == Kind::Mut)
+    }
+
+    /// M7: a new `&` tag, a child of the `&mut` tag `tag` on all of its range, for a word of
+    /// it read through a `&` whose type does not name the pointee: no byte of it is `Cell`.
+    /// `None`: no node of `tag` is left, or every tag is used up.
+    pub fn share(&mut self, tag: Tag, at: Ev) -> Option<Result<Tag, Box<Report>>> {
+        let &(a, i) = self.tags.get(&tag)?;
+        let n = self.trees.get(&a)?.nodes.get(i as usize)?;
+        let (lo, hi) = (n.lo, n.hi);
+        match self.borrow(a, tag, Kind::Shared, lo..hi, &[], at) {
+            Ok(ROOT) => None,
+            r => Some(r),
+        }
+    }
+
     /// Tags but the roots that the tracker holds a node for.
     pub fn tags(&self) -> usize {
         self.count
