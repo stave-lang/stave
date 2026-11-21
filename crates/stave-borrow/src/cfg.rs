@@ -249,6 +249,8 @@ pub struct Local {
     pub guard: bool,
     /// The binding node (a temporary: its expression node; borrow dump `N` of drops).
     pub node: u32,
+    /// The temporary standing for the storage of an immutable `static` (never moved from).
+    pub static_root: bool,
 }
 
 /// What a return is checked against.
@@ -272,6 +274,8 @@ pub enum MoveOut {
     Capture(Span),
     /// A part of this place, whose type has an `impl Drop`: its destructor reads every part.
     Drop(Place),
+    /// An immutable `static` or a part of it.
+    Static,
 }
 
 #[derive(Clone, Debug)]
@@ -317,7 +321,8 @@ enum V {
 
 /// A postfix chain's state between steps.
 enum Cur {
-    Path(Res),
+    /// A path with the token of its last segment.
+    Path(Res, u32),
     TypeRel,
     Val(V),
 }
@@ -515,6 +520,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             temp,
             guard: false,
             node: u32::MAX,
+            static_root: false,
         });
         (self.body.locals.len() - 1) as LocalId
     }
@@ -688,10 +694,15 @@ impl<'a, 'b> Builder<'a, 'b> {
             return Operand { kind: OpKind::Copy, place: p, span, node: n, site: u32::MAX };
         }
         let behind = p.proj.iter().any(|x| matches!(x, Proj::Deref(_) | Proj::Index | Proj::Column(_)));
-        let (capture, guard) =
-            self.body.locals.get(p.local as usize).map_or((None, false), |l| (l.capture, l.guard));
+        let (capture, guard, stat) = self
+            .body
+            .locals
+            .get(p.local as usize)
+            .map_or((None, false, false), |l| (l.capture, l.guard, l.static_root));
         let why = if !by_value {
             None
+        } else if stat {
+            Some(MoveOut::Static)
         } else if let Some(c) = capture.filter(|_| !behind) {
             Some(MoveOut::Capture(c))
         } else if behind || guard {
@@ -699,8 +710,8 @@ impl<'a, 'b> Builder<'a, 'b> {
         } else {
             self.drop_owner(&p).map(MoveOut::Drop)
         };
-        // E0504: a move out of a borrow, an index, a capture, a guard binding, or a part of a
-        // value with a destructor; checked as a copy
+        // E0504: a move out of a borrow, an index, a capture, a guard binding, a part of a
+        // value with a destructor, or a static; checked as a copy
         let movable = by_value && why.is_none();
         if let Some(why) = why {
             self.body.bad_moves.push((p.clone(), span, why));
@@ -2266,7 +2277,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         match icx.use_at(n, a) {
             Some(u) => {
                 let r = u.res;
-                self.path_val(r)
+                self.path_val(r, u.token)
             }
             None => V::Const,
         }
@@ -2278,11 +2289,34 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.put_temp(Rvalue::Agg(ops), ty, n)
     }
 
-    fn path_val(&mut self, r: Res) -> V {
-        match self.local_of(r) {
-            Some(l) => V::P(Place::local(l, self.body.locals[l as usize].ty)),
-            None => V::Const,
+    /// The value of path `r` (last segment at token `tok`). An immutable `static` is a place
+    /// that is never moved from: a temporary standing for its storage ([`Local::static_root`]).
+    fn path_val(&mut self, r: Res, tok: u32) -> V {
+        if let Some(l) = self.local_of(r) {
+            return V::P(Place::local(l, self.body.locals[l as usize].ty));
         }
+        let Res::Decl(d) = r else { return V::Const };
+        let Some(decl) = self.tys.prog.decl(d) else { return V::Const };
+        if decl.kind != DeclKind::Static || decl.flags.has(stave_sema::DeclFlags::MUT) || !self.open() {
+            return V::Const;
+        }
+        let Some(ty) = self.tys.sigs.konst(d).map(|c| c.ty) else { return V::Const };
+        let span = self.icx.tok_span(tok);
+        let t = self.new_local(ty, false, span, String::new(), true);
+        self.body.locals[t as usize].static_root = true;
+        let c = Operand {
+            kind: OpKind::Const,
+            place: Place::local(0, TypeId::NONE),
+            span,
+            node: u32::MAX,
+            site: u32::MAX,
+        };
+        self.push(
+            StmtKind::Assign { dest: Place::local(t, ty), rv: Rvalue::Use(c), init: true },
+            span,
+            u32::MAX,
+        );
+        V::P(Place::local(t, ty))
     }
 
     /// An f-string: reads of its holes (names and field paths), an owned `String` result.
@@ -2350,11 +2384,11 @@ impl<'a, 'b> Builder<'a, 'b> {
         let mut kid = 1usize;
         let mut cur = if icx.is(pa, Term::Ident) {
             match icx.use_at(prim, pa) {
-                Some(u) => Cur::Path(u.res),
+                Some(u) => Cur::Path(u.res, u.token),
                 None => Cur::TypeRel,
             }
         } else if icx.is(pa, Term::KwSelfType) {
-            Cur::Path(Res::SelfType)
+            Cur::Path(Res::SelfType, pa)
         } else {
             Cur::Val(self.expr(prim))
         };
@@ -2375,7 +2409,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 if !matches!(cur, Cur::Val(_))
                     && let Some(u) = icx.use_at(prim, seg)
                 {
-                    cur = Cur::Path(u.res);
+                    cur = Cur::Path(u.res, u.token);
                     p = q;
                     continue;
                 }
@@ -2460,7 +2494,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
         match cur {
             Cur::Val(v) => v,
-            Cur::Path(r) => self.path_val(r),
+            Cur::Path(r, tok) => self.path_val(r, tok),
             Cur::TypeRel => V::Const,
         }
     }
@@ -2468,7 +2502,7 @@ impl<'a, 'b> Builder<'a, 'b> {
     fn cur_value(&mut self, cur: Cur) -> V {
         match cur {
             Cur::Val(v) => v,
-            Cur::Path(r) => self.path_val(r),
+            Cur::Path(r, tok) => self.path_val(r, tok),
             Cur::TypeRel => V::Const,
         }
     }

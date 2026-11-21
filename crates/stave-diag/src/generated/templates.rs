@@ -2282,7 +2282,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0504",
         severity: Severity::Error,
         area: "borrow",
-        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`",
+        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it",
         retired: false,
         located: true,
         holes: &[
@@ -2323,6 +2323,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "borrow it instead (`&{place}`), or take it out and leave another value in its place with `mem.replace(&mut {place}, other)` (`import std.mem;`): the destructor of `{owner}` runs on every part",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "static",
+                message: "cannot move `{place}` out of a `static`: its type is not `Copy`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "borrow it instead (`&{place}`): a `static` is never moved from",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

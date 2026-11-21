@@ -196,3 +196,21 @@ whose remaining fields are dropped one by one.
 **What would break it.** A move path that builds a by-value operand without that step; a drop
 glue that runs a destructor on a value whose part was taken by `p.read()` (unsafe: its
 obligation).
+
+## Places that are never moved from: statics
+
+**Claim.** No accepted program moves the value of an immutable `static` or of a part of it.
+
+**Assumptions.** A static has one value for the whole run; every use reads it in place, and
+none drops it. The borrow CFG gives every use of an immutable static path a temporary standing
+for its storage; field, tuple, and index steps are places under it.
+
+**Argument.** A by-value use of a non-Copy place rooted at such a temporary is E0504 case
+`static`, at the same builder step as every other move, so `let o = O;`, `O.into_inner()`, an
+argument, a literal field, a match or `let` pattern binding by value, a `for` over a static
+array, and a use inside a closure are all rejected. A Copy read copies bytes and leaves the
+static's value whole; a borrow is a loan of the temporary that never conflicts with a move.
+`const` items are not places: each use is a fresh value.
+
+**What would break it.** A path to a static that the builder takes as a constant; a `static
+mut` (unsafe, std and runtime only: not covered).

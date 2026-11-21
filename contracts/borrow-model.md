@@ -490,7 +490,7 @@ hole. The model never reads a static rule to decide.
 | E0502: use after move (also by a later operand of the expression that moved it, M15); assignment into a part of a moved value | M9 |
 | E0503: assignment through `&`; `&mut` of a place behind `&`; writes of a `static` | M2 on `Frozen` |
 | E0503: assignment to, or `&mut` of, an immutable binding | none (the root of a local is `Active`) |
-| E0504: move out of `*r`, `r.f`, `v[i]`, a capture, a part of a value whose type has `impl Drop` | M9, M12 (the owner later reads or drops the moved-out place; a destructor reads every part) |
+| E0504: move out of `*r`, `r.f`, `v[i]`, a capture, a part of a value whose type has `impl Drop`, a `static` | M9, M12 (the owner later reads or drops the moved-out place; a destructor reads every part; a static's value is read by every later use) |
 | E0510: a returned borrow the `from` clause lacks | M24 (result); M13, M2 in the caller, which reads the clause |
 | E0512: a returned borrow of a local | M13; M24 (result) |
 | E0512 `mut-capture` | M18 |
