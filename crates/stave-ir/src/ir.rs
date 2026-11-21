@@ -737,6 +737,9 @@ pub struct Func {
     /// The link symbol of an `extern "C"` import or export: its fn name, unmangled (sema
     /// rejects clashes and reserved names, E0812). `None` for Stave fns, named by [`crate::link`].
     pub symbol: Option<String>,
+    /// The compiler-known item this function is an instance of (the front end resolved it in a
+    /// built-in package); not printed. Stages find known functions by it, never by `path`.
+    pub known: Option<crate::Known>,
 }
 
 /// A source site row (contracts/intrinsics.md site table): what a [`Site`] indexes in
@@ -781,8 +784,9 @@ pub struct Module {
     /// call is no longer provable from the bodies alone once the callee's own checks are gone:
     /// the bounds audit reads calls with these rows.
     pub stated: Vec<Option<std::sync::Arc<crate::witness::Summary>>>,
-    /// The declaration of `std.cell.UnsafeCell`, in a module lowered with the borrow side
-    /// table: the bytes of a value of such a type are not read-only behind a `&`.
+    /// The declaration of `std.cell.UnsafeCell` (`None`: the program has none, or it is
+    /// unknown): the bytes of a value of such a type are not read-only behind a `&`. The
+    /// bounds pass reads a field behind a `&` parameter as one value only when this is known.
     pub cell: Option<crate::types::DeclId>,
     /// Per `static`, in a module lowered with the borrow side table: it is not `static mut`,
     /// so nothing writes its bytes outside an `UnsafeCell`.
@@ -816,6 +820,7 @@ impl Module {
             body: None,
             name_site: Site::NONE,
             symbol: None,
+            known: None,
         });
         id
     }
@@ -842,6 +847,21 @@ impl Module {
     /// Finds a function by path (first match).
     pub fn find_func(&self, path: &str) -> Option<FuncId> {
         self.funcs.iter().position(|f| f.path == path).map(|i| FuncId(i as u32))
+    }
+
+    /// The first function stamped as known item `k`.
+    pub fn known_func(&self, k: crate::Known) -> Option<FuncId> {
+        self.funcs.iter().position(|f| f.known == Some(k)).map(|i| FuncId(i as u32))
+    }
+
+    /// The first function with a body stamped as known item `k`.
+    pub fn known_body(&self, k: crate::Known) -> Option<FuncId> {
+        self.funcs.iter().position(|f| f.known == Some(k) && f.body.is_some()).map(|i| FuncId(i as u32))
+    }
+
+    /// Whether function `f` is stamped as known item `k`.
+    pub fn is_known(&self, f: FuncId, k: crate::Known) -> bool {
+        self.func(f).is_some_and(|x| x.known == Some(k))
     }
 
     pub fn add_string(&mut self, bytes: impl Into<Vec<u8>>) -> StrId {

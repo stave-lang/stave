@@ -1,0 +1,99 @@
+//~ CHECK-ONLY
+// A match guard only reads (E0505): in the guard, and in the blocks and closures written in it,
+// no by-value use of a non-Copy value, no assignment, no `&mut` borrow (also an auto-referenced
+// `&mut self` receiver), no `?`. A guard that fails passes on to the next arm, which must see
+// the state from before the match. Calls with Copy or `&` arguments are reads.
+import std.vec;
+
+struct C { pub n: u32 }
+impl C {
+    pub fn bump(&mut self) -> bool { self.n = self.n + 1; return true; }
+    pub fn peek(&self) -> bool { return self.n > 0; }
+}
+
+fn consume(v: vec.Vec<u32>) -> bool { return false; }
+fn grow(v: &mut vec.Vec<u32>) -> bool { v.push(1); return true; }
+fn seen(v: &vec.Vec<u32>) -> bool { return v.len() > 0; }
+fn mk() -> vec.Vec<u32> { return vec.Vec::<u32>.new(); }
+fn check(k: u32) -> Option<bool> { return Option.Some(k > 1); }
+
+fn move_other(o: u32, other: vec.Vec<u32>) -> u32 {
+    match o {
+        3 if consume(other) => { return 1; } //~ ERROR E0505
+        _ => { return 0; }
+    }
+}
+
+fn move_temporary(o: u32) -> u32 {
+    match o {
+        3 if consume(mk()) => { return 1; } //~ ERROR E0505
+        _ => { return 0; }
+    }
+}
+
+fn mut_borrow(o: u32, v: vec.Vec<u32>) -> u32 {
+    let mut w = v;
+    match o {
+        3 if grow(&mut w) => { return 1; } //~ ERROR E0505
+        _ => { return 0; }
+    }
+}
+
+fn mut_receiver(o: u32) -> u32 {
+    let mut c = C.{ n: 0 };
+    match o {
+        3 if c.bump() => { return 1; } //~ ERROR E0505
+        _ => { return c.n; }
+    }
+}
+
+fn assign_in_closure(o: u32) -> u32 {
+    let mut n: u32 = 0;
+    match o {
+        3 if (fn() -> bool { n = 5; return true; })() => { return 1; } //~ ERROR E0505
+        _ => { return n; }
+    }
+}
+
+fn move_in_closure(o: u32, other: vec.Vec<u32>) -> u32 {
+    match o {
+        3 if (fn() -> bool { return consume(mk()); })() => { return 1; } //~ ERROR E0505
+        _ => { return 0; }
+    }
+}
+
+fn try_in_guard(o: u32) -> Option<u32> {
+    match o {
+        3 if check(o)? => { return Option.Some(1); } //~ ERROR E0505
+        _ => { return Option.Some(0); }
+    }
+}
+
+fn value_match(o: u32, other: vec.Vec<u32>) -> u32 {
+    return match o {
+        3 if consume(other) => 1, //~ ERROR E0505
+        _ => 0,
+    };
+}
+
+fn reads_ok(o: u32, v: vec.Vec<u32>) -> u32 {
+    let c = C.{ n: 1 };
+    match o {
+        3 if seen(&v) && c.peek() && v.len() == 0 && c.n > 0 => { return 1; }
+        _ => { return 0; }
+    }
+}
+
+fn in_the_arm(o: u32, other: vec.Vec<u32>) -> u32 {
+    match o {
+        3 => {
+            if consume(other) { return 1; }
+            return 2;
+        }
+        _ => { return 0; }
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

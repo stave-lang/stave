@@ -29,11 +29,11 @@ fn make_two() -> Two {
     return Two.{ a: make(1), b: make(2), id: 3 };
 }
 
-// moves `a` out, so only the field `b` is dropped here
+// takes `t` apart and forgets `a`, so only the field `b` is dropped here
 fn keep_a(t: Two) -> u32 {
-    let n = t.id;
-    mem.forget(t.a);
-    return n;
+    let Two.{ a, b, id } = t;
+    mem.forget(a);
+    return id;
 }
 
 fn make(n: u32) -> Flush {

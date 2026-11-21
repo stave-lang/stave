@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use stave_ir::layout::Layouts;
-use stave_ir::{FuncId, Module, Op, Operand, TypeId};
+use stave_ir::{FuncId, Known, Module, Op, Operand, TypeId};
 use stave_obj::{
     DataObj, FileId, FuncCode, ImageBuilder, Machine, ObjectImage, Options, Reloc, RelocKind, StackUse,
     SymbolId,
@@ -15,15 +15,6 @@ use super::emit::Gen;
 use super::ty::{Sc, Ty, classify};
 use super::{Error, ErrorKind, R, bad, unsupported};
 use crate::enc::{AddSub, Addr, Asm, Cond, Ext, Fp, FpBin, Logic, Reg, Shift, VReg, Width};
-
-/// Fixed runtime entry points (contracts/intrinsics.md "Paths fixed by the compiler").
-pub const RT_ENTRY: &str = "runtime.start.entry";
-pub const RT_TRAP: &str = "runtime.panic.trap";
-pub const RT_ON_SIGNAL: &str = "runtime.panic.on_signal";
-pub const RT_THREAD_ENTRY: &str = "runtime.thread.entry";
-pub const RT_CPU_INIT: &str = "runtime.cpu.init";
-/// The native code of the `copy_bytes` intrinsic.
-pub const STD_COPY_RAW: &str = "std.slice.copy_raw";
 
 pub const SYM_MAIN: &str = "__stave_main";
 pub const SYM_SIGNAL: &str = "__stave_signal";
@@ -278,9 +269,9 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
         }
     }
     let text = &order[..];
-    let find = |p: &str| m.find_func(p).filter(|f| m.func(*f).is_some_and(|f| f.body.is_some()));
+    let find = |k: Known| m.known_body(k);
     let sym_of = |f: Option<FuncId>| f.and_then(|f| funcs.get(f.index()).copied().flatten());
-    let trap = sym_of(find(RT_TRAP));
+    let trap = sym_of(find(Known::Trap));
     // Strings.
     let mut blob = Vec::new();
     let mut str_off = Vec::with_capacity(m.strings.len());
@@ -369,7 +360,7 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
         }
         None => None,
     };
-    let signal_stub = match sym_of(find(RT_ON_SIGNAL)) {
+    let signal_stub = match sym_of(find(Known::OnSignal)) {
         Some(t) => {
             let mut a = Asm::new();
             a.mov(Width::W, Reg::xn(0), Reg::xn(0))?;
@@ -378,7 +369,7 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
         }
         None => None,
     };
-    let thread_stub = match sym_of(find(RT_THREAD_ENTRY)) {
+    let thread_stub = match sym_of(find(Known::ThreadEntry)) {
         Some(t) => {
             let mut a = Asm::new();
             a.b_sym(t);
@@ -386,9 +377,9 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
         }
         None => None,
     };
-    let cpu_init = sym_of(find(RT_CPU_INIT));
+    let cpu_init = sym_of(find(Known::CpuInit));
     let fmod = b.func(SYM_FMOD, fmod_code()?)?;
-    if let Some(e) = sym_of(find(RT_ENTRY)) {
+    if let Some(e) = sym_of(find(Known::StartEntry)) {
         b.add_start_stub(e)?;
     }
     Ok(Symbols {

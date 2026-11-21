@@ -38,6 +38,7 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::Diagnostic;
+use stave_ir::Known;
 
 use crate::Program;
 use crate::decls::{DeclFlags, DeclKind};
@@ -115,63 +116,28 @@ fn sym(prog: &Program, s: &str) -> Option<Sym> {
     prog.strings.lookup(s)
 }
 
-/// The module of a built-in package whose path text is `path` (compiler-known items never come
-/// from another package, whatever its module paths).
-pub(crate) fn module_decl(prog: &Program, path: &str) -> Option<crate::ids::ModuleId> {
-    prog.modules
-        .iter()
-        .find(|m| {
-            m.path_text == path
-                && prog.packages.get(m.package.idx()).is_some_and(|p| p.kind == crate::PackageKind::Builtin)
-        })
-        .map(|m| m.id)
-}
-
-/// Item `name` of module `path`.
-pub(crate) fn item_at(prog: &Program, path: &str, name: &str) -> Option<DeclId> {
-    let m = module_decl(prog, path)?;
-    prog.module_item(m, sym(prog, name)?)
-}
-
-/// The inherent method `name` of ADT `adt` (first match, impl order).
-pub(crate) fn inherent_method(prog: &Program, sigs: &Sigs, adt: DeclId, name: &str) -> Option<DeclId> {
-    let s = sym(prog, name)?;
-    let list = sigs.impls_by_head.get(&crate::resolve::TypeHead::Adt(adt))?;
-    for &i in list {
-        let Some(imp) = sigs.impl_def(i) else { continue };
-        if imp.trait_ref.is_some() {
-            continue;
-        }
-        if let Some(m) = imp.methods.iter().copied().find(|&m| prog.decl(m).is_some_and(|d| d.name == s)) {
-            return Some(m);
-        }
-    }
-    None
-}
-
 impl LangFns {
-    pub fn find(prog: &Program, sigs: &Sigs) -> LangFns {
-        let s = sigs.lang.string;
-        let m = |n: &str| if s.is_some() { inherent_method(prog, sigs, s, n) } else { None };
+    pub fn find(prog: &Program) -> LangFns {
+        let k = |k: Known| prog.known.decl(k);
         LangFns {
-            string_new: m("new"),
-            string_push_str: m("push_str"),
-            string_as_str: m("as_str"),
-            set_user_site: item_at(prog, "runtime.panic", "set_user_site"),
-            thread_entry: item_at(prog, "runtime.thread", "entry"),
-            cpu_features: item_at(prog, "runtime.cpu", "features"),
-            cpu_word: item_at(prog, "runtime.cpu", "WORD"),
-            cpu_init: item_at(prog, "runtime.cpu", "init"),
-            cpu_trace: item_at(prog, "runtime.cpu", "trace"),
-            copy_raw: item_at(prog, "std.slice", "copy_raw"),
-            requires_failed: item_at(prog, "runtime.panic", "requires_failed"),
-            ensures_failed: item_at(prog, "runtime.panic", "ensures_failed"),
-            test_input: item_at(prog, "runtime.panic", "test_input"),
-            test_skip: item_at(prog, "runtime.panic", "test_skip"),
-            errtrace_push: item_at(prog, "runtime.errtrace", "push"),
-            errtrace_restart: item_at(prog, "runtime.errtrace", "restart"),
-            errtrace_save: item_at(prog, "runtime.errtrace", "save"),
-            errtrace_restore: item_at(prog, "runtime.errtrace", "restore"),
+            string_new: k(Known::StringNew),
+            string_push_str: k(Known::StringPushStr),
+            string_as_str: k(Known::StringAsStr),
+            set_user_site: k(Known::SetUserSite),
+            thread_entry: k(Known::ThreadEntry),
+            cpu_features: k(Known::CpuFeatures),
+            cpu_word: k(Known::CpuWord),
+            cpu_init: k(Known::CpuInit),
+            cpu_trace: k(Known::CpuTrace),
+            copy_raw: k(Known::CopyRaw),
+            requires_failed: k(Known::RequiresFailed),
+            ensures_failed: k(Known::EnsuresFailed),
+            test_input: k(Known::TestInput),
+            test_skip: k(Known::TestSkip),
+            errtrace_push: k(Known::ErrtracePush),
+            errtrace_restart: k(Known::ErrtraceRestart),
+            errtrace_save: k(Known::ErrtraceSave),
+            errtrace_restore: k(Known::ErrtraceRestore),
         }
     }
 }
@@ -241,13 +207,8 @@ pub(crate) fn roots(prog: &Program, tc: &Typeck, mode: RootMode, test: bool) -> 
             add(&mut out, sym(prog, n).and_then(|s| prog.module_item(m, s)));
         }
     }
-    for (m, n) in [
-        ("runtime.start", "entry"),
-        ("runtime.panic", "trap"),
-        ("runtime.panic", "trap_msg"),
-        ("runtime.panic", "on_signal"),
-    ] {
-        add(&mut out, item_at(prog, m, n));
+    for k in [Known::StartEntry, Known::Trap, Known::TrapMsg, Known::OnSignal] {
+        add(&mut out, prog.known.decl(k));
     }
     out[own..].sort();
     if mode == RootMode::Release {

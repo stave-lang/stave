@@ -1,0 +1,186 @@
+//~ STDOUT vec_soa_reorder.stdout
+// `swap swap_remove truncate permute extend_from_slice` on `vec.Vec` and `soa.Soa`: the same
+// results on rows and on columns. A Vec of a type with `Drop` drops each removed element once
+// and nothing it only moved; a Soa row owns nothing (Flat), so only the lengths count there.
+// Zero length, a full buffer, growth inside `extend_from_slice`, a permutation longer than one
+// 64-bit word of marks, a Flat row type that is not Copy, and a row type of size 0.
+import std.atomic;
+import std.io;
+import std.mem;
+import std.soa;
+import std.vec;
+
+static DROPS: atomic.U64 = atomic.U64.new(0);
+
+struct Loud {
+    pub id: u32,
+}
+
+impl Drop for Loud {
+    fn drop(&mut self) {
+        let _ = DROPS.fetch_add(1);
+    }
+}
+
+struct P {
+    pub x: u32,
+    pub y: u64,
+    pub tag: u8,
+}
+
+impl Copy for P {}
+
+struct Tok {
+    pub id: u32,
+}
+
+struct Empty {}
+
+impl Copy for Empty {}
+
+fn drops() -> u64 {
+    return DROPS.load();
+}
+
+fn ids(v: &vec.Vec<Loud>) -> u64 {
+    let mut h: u64 = 0;
+    let s = v.as_slice();
+    for i in 0..s.len() { h = h * 10 + (s[i].id as u64); }
+    return h;
+}
+
+fn xs(ps: &soa.Soa<P>) -> u64 {
+    let mut h: u64 = 0;
+    for i in 0..ps.x.len() { h = h * 10 + (ps.x[i] as u64); }
+    return h;
+}
+
+// Every column agrees with x: y = 100 * x, tag = x + 1.
+fn rows_agree(ps: &soa.Soa<P>) -> bool {
+    for i in 0..ps.len() {
+        let p = ps.get(i);
+        if p.y != (p.x as u64) * 100 || (p.tag as u32) != p.x + 1 { return false; }
+    }
+    return true;
+}
+
+fn row(x: u32) -> P {
+    return P.{ x: x, y: (x as u64) * 100, tag: (x + 1) as% u8 };
+}
+
+fn vec_part() {
+    let mut v = vec.Vec::<Loud>.new();
+    for i in 0u32..6 { v.push(Loud.{ id: i }); }
+    v.swap(0, 5);
+    v.swap(2, 2);
+    let a = ids(&v);
+    let d0 = drops();
+    let r = v.swap_remove(1);
+    let rid = r.id;
+    let d1 = drops();
+    mem.drop(r);
+    let d2 = drops();
+    let b = ids(&v);
+    let k = v.len() - 1;
+    let last = v.swap_remove(k);
+    let lid = last.id;
+    mem.drop(last);
+    let c = ids(&v);
+    let perm: [u32; 4] = [3, 0, 1, 2];
+    v.permute(&perm);
+    let d3 = drops();
+    let p = ids(&v);
+    v.truncate(9);
+    v.truncate(2);
+    let d4 = drops();
+    let t = ids(&v);
+    let n = v.len();
+    io.print(f"vec {a} {rid} {d0} {d1} {d2} {b} {lid} {c} {p} {d3} {t} {d4} {n}\n");
+
+    let mut e = vec.Vec::<Loud>.new();
+    let none = vec.Vec::<u32>.new();
+    e.permute(none.as_slice());
+    e.truncate(0);
+    let mut w = vec.Vec::<u32>.with_capacity(4);
+    w.extend_from_slice(&[7u32, 8, 9, 10]);
+    let full = w.len() == w.capacity();
+    let wr = w.swap_remove(0);
+    let w0 = w.as_slice()[0];
+    let wl = w.len();
+    io.print(f"vec-edge {full} {wr} {w0} {wl}\n");
+}
+
+fn soa_part() {
+    let mut ps = soa.Soa::<P>.with_capacity(4);
+    let cap = ps.capacity();
+    for i in 0u32..8 { ps.push(row(i)); }
+    let full = ps.len() == ps.capacity();
+    ps.swap(0, 7);
+    ps.swap(1, 1);
+    let a = xs(&ps);
+    let r = ps.swap_remove(1);
+    let b = xs(&ps);
+    let k = ps.len() - 1;
+    let last = ps.swap_remove(k);
+    let c = xs(&ps);
+    ps.extend_from_slice(&[row(8), row(9), row(1)]);
+    let cap2 = ps.capacity();
+    let d = xs(&ps);
+    let perm: [u32; 9] = [8, 6, 0, 1, 2, 3, 4, 5, 7];
+    ps.permute(&perm);
+    let p = xs(&ps);
+    let ok = rows_agree(&ps);
+    ps.truncate(12);
+    ps.truncate(3);
+    let t = xs(&ps);
+    let n = ps.len();
+    io.print(f"soa {cap} {full} {a} {r.x} {b} {last.x} {c} {cap2} {d} {p} {ok} {t} {n}\n");
+
+    // 130 rows: three words of marks; reversing is 65 cycles of two, rotating by one is one cycle.
+    let mut big = soa.Soa::<P>.new();
+    let mut rev = vec.Vec::<u32>.new();
+    let mut rot = vec.Vec::<u32>.new();
+    for i in 0u32..130 {
+        big.push(row(i % 10));
+        rev.push(129 - i);
+        rot.push((i + 1) % 130);
+    }
+    big.permute(rev.as_slice());
+    let b0 = big.x[0];
+    let b129 = big.x[129];
+    big.permute(rot.as_slice());
+    let r0 = big.x[0];
+    let r129 = big.x[129];
+    let bok = rows_agree(&big);
+    io.print(f"soa-big {b0} {b129} {r0} {r129} {bok}\n");
+
+    let mut ts = soa.Soa::<Tok>.new();
+    for i in 0u32..3 { ts.push(Tok.{ id: i }); }
+    let tperm: [u32; 3] = [2, 0, 1];
+    ts.permute(&tperm);
+    ts.swap(0, 1);
+    let tk = ts.swap_remove(0);
+    let t0 = ts.id[0];
+    let t1 = ts.id[1];
+    io.print(f"soa-tok {tk.id} {t0} {t1}\n");
+
+    let mut es = soa.Soa::<Empty>.new();
+    let none = vec.Vec::<u32>.new();
+    es.permute(none.as_slice());
+    es.truncate(0);
+    let ok0 = es.try_extend_from_slice(&[Empty.{}, Empty.{}, Empty.{}]).is_ok();
+    let eperm: [u32; 3] = [1, 2, 0];
+    es.permute(&eperm);
+    es.swap(0, 2);
+    let gone = es.swap_remove(0);
+    let el = es.len();
+    io.print(f"soa-empty {ok0} {el}\n");
+}
+
+fn main() -> i32 {
+    vec_part();
+    let left = drops();
+    io.print(f"drops {left}\n");
+    soa_part();
+    return 0;
+}

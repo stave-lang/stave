@@ -508,7 +508,8 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks], drops: &[BodyDro
         .collect();
     let skip = unused_drops(g, &mut tycx, &glue, drops);
     let low = lowest(g, &own, &skip);
-    let threads = ["join", "par_for", "par_for_mut"].map(|n| crate::mono::item_at(prog, "std.thread", n));
+    let threads = [stave_ir::Known::ThreadJoin, stave_ir::Known::ParFor, stave_ir::Known::ParForMut]
+        .map(|k| prog.known.decl(k));
     let mut cx = Cx { prog, tc, g, own, low, skip, threads, out: Vec::new(), seen: FxHashSet::default() };
     let by_decl: FxHashMap<DeclId, &BodyLocks> = bodies.iter().map(|b| (b.decl, b)).collect();
     // the calls of each fn node to check (its closures' calls under it): (token, callees)

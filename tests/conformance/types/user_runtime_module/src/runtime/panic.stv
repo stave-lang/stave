@@ -1,0 +1,3 @@
+pub fn trap(kind: u32, site: u32) -> u32 { //~ ERROR E0107
+    return kind + site;
+}

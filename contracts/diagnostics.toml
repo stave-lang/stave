@@ -33,6 +33,8 @@
 #                           in generated-table terminal order, joined by ", "
 #               int         a decimal integer
 #               place       a borrow place: local name, then `.field`, `[_]`, prefixed `*` per deref
+#               pattern     a destructuring pattern spelled from the declarations of a value's type
+#                           along a place: `S.{ a, b: T.{ c }, n }`, `(e0, e1)` (no type arguments)
 #               source      the exact source bytes of a span
 #               text-literal one of the strings listed for that hole in `choices`
 #   choices   { hole = ["...", ...] } for text-literal holes
@@ -991,11 +993,16 @@ fix = { description = "end the borrow before this point: move the later use befo
 code = "E0502"
 severity = "error"
 area = "borrow"
-rule = "use after move"
-holes = { place = "place" }
+rule = "use after move; case `operand`: by a later operand of the expression whose by-value operand moved the place (operands are evaluated left to right, the receiver first)"
+holes = { place = "place", moved = "place" }
 message = "use of moved value `{place}`"
 labels = [{ at = "primary", text = "used here after the move" }, { at = "move", text = "`{place}` moved here" }]
 fix = { description = "use `{place}` before it is moved, or pass a reference (`&{place}`) instead of moving it" }
+
+[diag.cases.operand]
+message = "`{place}` is used after an earlier operand of the same expression moved `{moved}`"
+labels = [{ at = "primary", text = "used here, after the move" }, { at = "move", text = "`{moved}` moved here: operands are evaluated left to right" }]
+fix = { description = "compute the operand that uses `{place}` into a `let` before the expression and pass that local: operands are evaluated left to right, so `{moved}` is gone when it runs" }
 
 [[diag]]
 code = "E0503"
@@ -1021,8 +1028,8 @@ fix = { description = "give `{place}` a type with interior mutability (`atomic.U
 code = "E0504"
 severity = "error"
 area = "borrow"
-rule = "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture"
-holes = { place = "place" }
+rule = "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it; case `part`: a non-Copy part (field, tuple element, payload) of a local or a temporary taken by value outside a pattern that takes the whole value apart (its fix names the pattern; `part-reborrow`: a `&mut` part, passed on by a reborrow; `part-replace`: an owner that cannot be taken apart here, `mem.replace`)"
+holes = { place = "place", owner = "place", pattern = "pattern" }
 message = "cannot move `{place}` out of a borrow or an index: its type is not `Copy`"
 labels = [{ at = "primary", text = "moved here" }]
 fix = { description = "borrow it instead (`&{place}`), or take the value out and leave another in its place with `mem.replace(&mut {place}, other)` or `mem.swap` (`import std.mem;`)" }
@@ -1031,6 +1038,59 @@ fix = { description = "borrow it instead (`&{place}`), or take the value out and
 message = "cannot move captured `{place}` out of a closure: closures capture by reference"
 labels = [{ at = "primary", text = "moved here" }, { at = "capture", text = "captured by reference by this closure" }]
 fix = { description = "use `&{place}` inside the closure, or take the value out with `mem.replace(&mut {place}, other)` (`import std.mem;`)" }
+
+[diag.cases.drop]
+message = "cannot move `{place}` out of `{owner}`: the type of `{owner}` implements `Drop`"
+labels = [{ at = "primary", text = "moved here" }]
+fix = { description = "borrow it instead (`&{place}`), or take it out and leave another value in its place with `mem.replace(&mut {place}, other)` (`import std.mem;`): the destructor of `{owner}` runs on every part" }
+
+[diag.cases.part]
+message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"
+labels = [{ at = "primary", text = "a part moved here" }]
+fix = { description = "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` or left out is dropped there)" }
+
+[diag.cases.part-reborrow]
+message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"
+labels = [{ at = "primary", text = "a part moved here" }]
+fix = { description = "pass the reference on by a reborrow: `&mut *{place}`" }
+
+[diag.cases.part-replace]
+message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"
+labels = [{ at = "primary", text = "a part moved here" }]
+fix = { description = "take the part out and leave a value in its place: `mem.replace(&mut {place}, other)` (`import std.mem;`)" }
+
+[diag.cases.static]
+message = "cannot move `{place}` out of a `static`: its type is not `Copy`"
+labels = [{ at = "primary", text = "moved here" }]
+fix = { description = "borrow it instead (`&{place}`): a `static` is never moved from" }
+
+[[diag]]
+code = "E0505"
+severity = "error"
+area = "borrow"
+rule = "in a match guard, and in a closure written in it: no by-value use of a non-Copy value (a call may take arguments by copy or `&` only), no assignment, no `&mut` borrow (also of a receiver), no `?`; changes through `&` (cells, atomics, locks) and calls of fn values made outside are not covered"
+holes = { place = "place" }
+message = "a match guard only reads: it may not move `{place}`"
+labels = [{ at = "primary", text = "moved in the guard" }]
+fix = { description = "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms), or pass `&{place}`" }
+
+[diag.cases.move]
+message = "a match guard only reads: it may not move `{place}`"
+
+[diag.cases.assign]
+message = "a match guard only reads: it may not assign to `{place}`"
+labels = [{ at = "primary", text = "assigned in the guard" }]
+fix = { description = "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)" }
+
+[diag.cases.mut-borrow]
+message = "a match guard only reads: it may not borrow `{place}` mutably"
+labels = [{ at = "primary", text = "mutable borrow in the guard" }]
+fix = { description = "pass `&{place}`, or test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)" }
+
+[diag.cases.try]
+message = "a match guard only reads: `?` may leave the fn from inside it"
+labels = [{ at = "primary", text = "`?` in the guard" }]
+fix = { description = "evaluate the fallible value before the `match`, or test in the arm: `P => {{ if cond? {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)" }
 
 [[diag]]
 code = "E0510"

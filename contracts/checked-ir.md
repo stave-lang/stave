@@ -277,7 +277,12 @@ b2():
   `add`/`sub` of constants, unsigned bit ops (`and x y` is at most `x` and `y`, `rem x y` below
   `y` and at most `x`, `shr x k` at most `x`), the range of an int type, and
   `cast`/`cast.wrap`/`cast.sat` to a type holding every value of the source type as the same
-  value; a check or a strict unsigned compare against `sub.sat n c` reads as `i + c < n`). The
+  value; a check or a strict unsigned compare against `sub.sat n c` reads as `i + c < n`; every
+  `load (addr.field p k)` of an int field behind `p`, a `&T` (not `&mut`) parameter of the entry
+  block with T not `std.cell.UnsafeCell`, and every call `@g p` of a getter (one parameter, the
+  body `addr.field %0 k; load; ret`) of that field, as one value for the whole call, so the
+  columns of a `&soa.Soa` parameter have the length its `len()` returns: this one rests on the
+  memory model, not on an earlier event, see soundness.md "Removed checks"). The
   same facts decide the contract checks (above). The pass runs in every build and never looks at
   the build mode: a function keeps the same checks in debug and release, and the checked IR (the
   `ir` dump, the interpreter's input) is its result. Each removed check has a witness, the proof

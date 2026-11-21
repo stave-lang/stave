@@ -1,0 +1,3 @@
+pub fn init() -> u32 {
+    return 42;
+}

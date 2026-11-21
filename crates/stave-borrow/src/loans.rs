@@ -132,7 +132,8 @@ impl Atoms {
     }
 }
 
-/// The dataflow state at a point: origin sets of tracked locals, maybe-moved sites.
+/// The dataflow state at a point: origin sets of tracked locals, maybe-moved locals (a value
+/// moves whole: one bit per local).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct State {
     pub o: Vec<Bits>,
@@ -331,7 +332,7 @@ impl<'b> Flow<'b> {
                 o[t as usize].insert(self.atoms.pb(p));
             }
         }
-        State { o, moved: Bits::new(self.body.move_sites.len()) }
+        State { o, moved: Bits::new(self.body.locals.len()) }
     }
 
     /// Whether the body has no state to track: no ref-like local, no loan, no move site. Then no
@@ -830,7 +831,7 @@ impl<'b> Flow<'b> {
                 changed |= ch;
                 for_each_op(rv, |o| {
                     if o.kind == OpKind::Move {
-                        st.moved.insert(o.site as usize);
+                        st.moved.insert(o.place.local as usize);
                     }
                 });
                 // re-initialized: moves of the place or below it are undone
@@ -882,7 +883,7 @@ impl<'b> Flow<'b> {
             }
             StmtKind::Return(o) | StmtKind::Read(o) => {
                 if o.kind == OpKind::Move {
-                    st.moved.insert(o.site as usize);
+                    st.moved.insert(o.place.local as usize);
                 }
             }
             StmtKind::Drop(_) => {}
@@ -890,16 +891,11 @@ impl<'b> Flow<'b> {
         changed
     }
 
+    /// A write of a whole local initializes it again; a write of a part of a moved local is a
+    /// use of it (E0502).
     fn reinit(&self, st: &mut State, dest: &Place) {
-        if st.moved.is_empty() {
-            return;
-        }
-        let ids: Vec<usize> = st.moved.iter().collect();
-        for i in ids {
-            let Some((m, _)) = self.body.move_sites.get(i) else { continue };
-            if m.local == dest.local && m.proj.starts_with(&dest.proj) {
-                st.moved.remove(i);
-            }
+        if dest.proj.is_empty() {
+            st.moved.remove(dest.local as usize);
         }
     }
 

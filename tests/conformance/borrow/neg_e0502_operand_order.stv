@@ -1,0 +1,163 @@
+//~ CHECK-ONLY
+// Operands are evaluated left to right, the receiver first. A by-value operand that is not Copy
+// moves its place when it is evaluated: a later operand of the same call, method call, literal,
+// or operator that uses the place, or a part of it, uses a moved value (E0502). Each shape
+// would give the value two owners.
+import std.sync;
+import std.vec;
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { } }
+impl Add for D { fn add(self, rhs: Self) -> Self { return D.{ id: self.id + rhs.id }; } }
+
+struct S { pub d: D, pub v: vec.Vec<u32>, pub n: u32 }
+impl S {
+    pub fn consume(self, w: &vec.Vec<u32>) -> u32 { return self.n; }
+    pub fn take(self, e: &D) -> u32 { return self.n; }
+    pub fn with(self, k: u32) -> u32 { return k; }
+    pub fn len(&self) -> u32 { return self.n; }
+}
+impl D { pub fn eat(self, o: D) { } }
+
+struct K { pub n: u32 }
+impl K { pub fn m(&self, a: D, b: D) { } }
+
+struct W { pub s: S, pub e: D }
+enum E { Two(D, D) }
+
+view struct G { pub r: &mut u32, pub n: u32 }
+impl G { pub fn split(self, k: u32) -> u32 { return k; } }
+
+fn two(a: D, b: D) { }
+fn sd(s: S, e: &D) -> u32 { return s.n; }
+fn sn(s: S, n: u32) -> u32 { return n; }
+fn vv(a: vec.Vec<u32>, b: vec.Vec<u32>) { }
+fn make(s: S, e: D) -> S {
+    let S.{ d: _, v, n } = s;
+    return S.{ d: e, v: v, n: n };
+}
+fn dup(d: &D) -> D { return D.{ id: d.id }; }
+fn guards(a: sync.MutexGuard<u32, 1>, b: sync.MutexGuard<u32, 1>) { }
+fn mk() -> S { return S.{ d: D.{ id: 1 }, v: vec.Vec::<u32>.new(), n: 1 }; }
+
+fn same_local(v: vec.Vec<u32>) {
+    vv(v, v); //~ ERROR E0502
+}
+
+fn receiver_then_field(s: S) -> u32 {
+    return s.consume(&s.v); //~ ERROR E0502
+}
+
+fn receiver_then_drop_field(s: S) -> u32 {
+    return s.take(&s.d); //~ ERROR E0502
+}
+
+fn receiver_then_method(s: S) -> u32 {
+    return s.with(s.len()); //~ ERROR E0502
+}
+
+fn receiver_then_copy_field(s: S) -> u32 {
+    return s.with(s.n); //~ ERROR E0502
+}
+
+fn receiver_whole_twice(d: D) {
+    d.eat(d); //~ ERROR E0502
+}
+
+fn whole_then_field(s: S) -> u32 {
+    return sd(s, &s.d); //~ ERROR E0502
+}
+
+fn whole_then_copy_field(s: S) -> u32 {
+    return sn(s, s.n); //~ ERROR E0502
+}
+
+fn tuple(s: S) {
+    let t = (s, &s.d); //~ ERROR E0502
+}
+
+fn tuple_let(d: D) {
+    let (a, b) = (d, d); //~ ERROR E0502
+}
+
+fn struct_literal(s: S) {
+    let w = W.{ s: s, e: dup(&s.d) }; //~ ERROR E0502
+}
+
+fn array_literal(d: D) {
+    let t = [d, dup(&d)]; //~ ERROR E0502
+}
+
+fn variant(d: D) {
+    let e = E.Two(d, d); //~ ERROR E0502
+}
+
+fn operator(d: D) {
+    let e = d + d; //~ ERROR E0502
+}
+
+fn compound(d: D) {
+    let mut x = d;
+    x += x; //~ ERROR E0502
+}
+
+fn select(d: D, c: bool) {
+    let x = c.select(d, d); //~ ERROR E0502
+}
+
+fn method_two_args(k: K, d: D) {
+    k.m(d, d); //~ ERROR E0502
+}
+
+fn assign_from_self() {
+    let mut s = mk();
+    s = make(s, dup(&s.d)); //~ ERROR E0502
+}
+
+fn return_tuple(d: D) -> (D, D) {
+    return (d, d); //~ ERROR E0502
+}
+
+fn fn_value(d: D) {
+    let f: fn(D, D) = two;
+    f(d, d); //~ ERROR E0502
+}
+
+fn mut_ref_twice() -> u32 {
+    let mut x: u32 = 0;
+    let r = &mut x;
+    let (a, b) = (r, r); //~ ERROR E0502
+    *a = 1;
+    *b = 2;
+    return x;
+}
+
+fn guard_twice(m: &sync.Mutex<u32, 1>) {
+    let g = m.lock();
+    guards(g, g); //~ ERROR E0502
+}
+
+fn view_then_copy_field() -> u32 {
+    let mut x: u32 = 0;
+    let g = G.{ r: &mut x, n: 2 };
+    return g.split(g.n / 2); //~ ERROR E0502
+}
+
+fn borrow_after_move(s: S) -> u32 {
+    return sn(s, (&s).n); //~ ERROR E0502
+}
+
+fn call(k: fn() -> u32) -> u32 { return k(); }
+
+fn closure_after_move(s: S) -> u32 {
+    return sn(s, call(fn() -> u32 { return s.n; })); //~ ERROR E0502
+}
+
+fn named_first(s: S) -> u32 {
+    let n = s.n;
+    return sn(s, n);
+}
+
+fn main() -> i32 {
+    return 0;
+}

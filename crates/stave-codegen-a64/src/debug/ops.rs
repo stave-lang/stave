@@ -1677,8 +1677,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             },
             Intr::CopyBytes => {
                 let g = m
-                    .find_func(super::support::STD_COPY_RAW)
-                    .filter(|&g| m.func(g).is_some_and(|f| f.body.is_some()))
+                    .known_body(stave_ir::Known::CopyRaw)
                     .ok_or_else(|| bad("intrinsic.copy_bytes without `std.slice.copy_raw`"))?;
                 let gf = m.func(g).ok_or_else(|| bad("callee out of range"))?;
                 let sym = self.cg.func_sym(g)?;

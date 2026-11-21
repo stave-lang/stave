@@ -66,6 +66,7 @@ impl Cx<'_> {
             Node::Zero => Some(Term::Zero),
             Node::Val(v) => index(v).map(Term::Param),
             Node::Len(v) => index(v).map(Term::LenParam),
+            Node::Field(..) => None,
         }
     }
 

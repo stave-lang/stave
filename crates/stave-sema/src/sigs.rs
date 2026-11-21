@@ -13,6 +13,7 @@
 
 use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
+use stave_ir::Known;
 use stave_syntax::{NodeKind, Term};
 
 use crate::Program;
@@ -672,21 +673,12 @@ fn view_args<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32, d: DeclId, args:
     }
 }
 
-/// Whether `m` is module `soa` of the built-in `std` package.
-pub(crate) fn is_builtin_soa(p: &Program, m: &crate::modules::Module) -> bool {
-    m.path_text == "std.soa"
-        && p.packages.get(m.package.idx()).is_some_and(|k| k.kind == crate::PackageKind::Builtin)
-}
-
 /// E0910: a written `std.soa.Soa<T>` whose row type T is neither a struct nor a generic param.
 fn soa_row<H: LowerHost>(h: &mut H, icx: &ItemCx<'_>, n: u32, d: DeclId, args: &[GArg]) {
     let Some(GArg::Type(t)) = args.first().copied() else { return };
     let diag = {
         let prog = h.prog();
-        let is_soa = prog.decl(d).is_some_and(|x| {
-            prog.strings.get(x.name) == "Soa"
-                && prog.module(x.module).is_some_and(|m| is_builtin_soa(prog, m))
-        });
+        let is_soa = prog.known.is(d, Known::Soa);
         if !is_soa || h.has_error(t) {
             return;
         }
@@ -1144,78 +1136,44 @@ impl<'p> SigBuilder<'p> {
     }
 
     fn find_lang_items(&mut self) {
-        let p = self.prog;
-        let find = |module: &[&str], name: &str| -> DeclId {
-            // compiler-known items live in the built-in packages only
-            let Some(m) = p.modules.iter().find(|m| {
-                m.path.len() == module.len()
-                    && m.path.iter().zip(module).all(|(s, t)| p.strings.get(*s) == *t)
-                    && p.packages.get(m.package.idx()).is_some_and(|k| k.kind == crate::PackageKind::Builtin)
-            }) else {
-                return DeclId::NONE;
-            };
-            match p.strings.lookup(name) {
-                Some(s) => p.module_item(m.id, s).unwrap_or(DeclId::NONE),
-                None => DeclId::NONE,
-            }
-        };
-        let core = ["std", "core"];
-        self.lang.option = find(&core, "Option");
-        self.lang.result = find(&core, "Result");
-        self.lang.copy = find(&core, "Copy");
-        self.lang.send = find(&core, "Send");
-        self.lang.sync = find(&core, "Sync");
-        self.lang.flat = find(&core, "Flat");
-        self.lang.frozen = find(&core, "Frozen");
-        self.lang.drop = find(&core, "Drop");
-        self.lang.display = find(&core, "Display");
-        self.lang.write = find(&core, "Write");
-        self.lang.string = find(&["std", "string"], "String");
-        self.lang.unsafe_cell = find(&["std", "cell"], "UnsafeCell");
-        // a user module may also be spelled `std.soa`: only the built-in package's counts
-        self.lang.soa = match (p.modules.iter().find(|m| is_builtin_soa(p, m)), p.strings.lookup("Soa")) {
-            (Some(m), Some(s)) => p.module_item(m.id, s).unwrap_or(DeclId::NONE),
-            _ => DeclId::NONE,
-        };
-        for (t, _) in OP_TRAITS {
-            let d = find(&core, t);
-            if d.is_some() {
-                self.lang.ops.insert(t, d);
+        // compiler-known items live in the built-in packages only (`Program::known`)
+        let known = &self.prog.known;
+        let find = |k: Known| known.decl_or_none(k);
+        self.lang.option = find(Known::Option);
+        self.lang.result = find(Known::Result);
+        self.lang.copy = find(Known::Copy);
+        self.lang.send = find(Known::Send);
+        self.lang.sync = find(Known::Sync);
+        self.lang.flat = find(Known::Flat);
+        self.lang.frozen = find(Known::Frozen);
+        self.lang.drop = find(Known::Drop);
+        self.lang.display = find(Known::Display);
+        self.lang.write = find(Known::Write);
+        self.lang.string = find(Known::String);
+        self.lang.unsafe_cell = find(Known::UnsafeCell);
+        self.lang.soa = find(Known::Soa);
+        for k in stave_ir::known::OP_TRAITS {
+            if let Some(d) = known.decl(k) {
+                self.lang.ops.insert(k.name(), d);
             }
         }
-        let ctors: [(&[&str], &str); 7] = [
-            (&["std", "cell"], "UnsafeCell"),
-            (&["std", "atomic"], "U32"),
-            (&["std", "atomic"], "U64"),
-            (&["std", "atomic"], "Usize"),
-            (&["std", "atomic"], "Bool"),
-            (&["std", "sync"], "Mutex"),
-            (&["std", "sync"], "Once"),
+        let ctors = [
+            Known::UnsafeCellNew,
+            Known::AtomicU32New,
+            Known::AtomicU64New,
+            Known::AtomicUsizeNew,
+            Known::AtomicBoolNew,
+            Known::MutexNew,
+            Known::OnceNew,
         ];
-        if let Some(new) = p.strings.lookup("new") {
-            for (module, name) in ctors {
-                let adt = find(module, name);
-                let m = p.methods.inherent.get(&(TypeHead::Adt(adt), new)).and_then(|v| v.first());
-                if let (true, Some(&m)) = (adt.is_some(), m) {
-                    self.lang.const_ctors.push(m);
-                }
-            }
-        }
-        let sync = ["std", "sync"];
-        let method = |adt: DeclId, name: &str| -> DeclId {
-            let m = p.strings.lookup(name).and_then(|s| p.methods.inherent.get(&(TypeHead::Adt(adt), s)));
-            match m.and_then(|v| v.first()) {
-                Some(&m) if adt.is_some() => m,
-                _ => DeclId::NONE,
-            }
-        };
+        self.lang.const_ctors.extend(ctors.into_iter().filter_map(|k| known.decl(k)));
         let l = &mut self.lang.locks;
-        l.mutex = find(&sync, "Mutex");
-        l.guard = find(&sync, "MutexGuard");
-        l.once = find(&sync, "Once");
-        l.lock = method(l.mutex, "lock");
-        l.get_or_init = method(l.once, "get_or_init");
-        l.lock_pair = find(&sync, "lock_pair");
+        l.mutex = find(Known::Mutex);
+        l.guard = find(Known::MutexGuard);
+        l.once = find(Known::Once);
+        l.lock = find(Known::MutexLock);
+        l.get_or_init = find(Known::OnceGetOrInit);
+        l.lock_pair = find(Known::LockPair);
     }
 
     pub fn icx(&self, item: ItemId) -> Option<ItemCx<'p>> {

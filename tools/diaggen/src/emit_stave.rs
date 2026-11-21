@@ -19,8 +19,8 @@ const LAYOUT: &str = "\
 //   DIAG_*   one row per code. DIAG_SEVERITY: 0 error, 1 warning. A retired code has no holes
 //            and no shapes (its severity is a placeholder).
 //   HOLE_*   the declared holes of each code, by name. HOLE_KIND: 0 name, 1 path, 2 type,
-//            3 token-kinds, 4 int, 5 place, 6 source, 7 text-literal. CHOICE_TEXT: the allowed
-//            values of a text-literal hole.
+//            3 token-kinds, 4 int, 5 place, 6 source, 7 text-literal, 8 pattern. CHOICE_TEXT:
+//            the allowed values of a text-literal hole.
 //   SHAPE_*  the shapes of each code: the base (case \"\") first, then the cases by name, each
 //            complete. SHAPE_HAS_FIX false: no fix (SHAPE_FIX is then \"\").
 //            SHAPE_FIX_APPLICABILITY: 0 exact, 1 maybe, 2 placeholder (also without a fix).
@@ -43,6 +43,7 @@ fn kind_id(kind: &str) -> u8 {
         "int" => 4,
         "place" => 5,
         "source" => 6,
+        "pattern" => 8,
         _ => 7,
     }
 }

@@ -51,6 +51,7 @@
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::{Diagnostic, Span};
+use stave_ir::Known;
 use stave_syntax::{NodeKind as Syn, Term};
 
 use crate::Program;
@@ -195,47 +196,36 @@ pub struct Op {
     pub span: Span,
 }
 
-/// The runtime fns whose effects are fixed: (module, fn, effects, op). Their bodies implement
-/// the effect (the allocator's lock word and system calls are its allocation; a panic's write and
-/// exit are its trap), so what they call does not count.
-pub const BOUNDARY: &[(&str, &str, Effects, OpKind)] = &[
-    ("runtime.alloc", "alloc", Effects(Effects::ALLOC.0 | Effects::TRAP.0), OpKind::Alloc),
-    ("runtime.alloc", "try_alloc", Effects::ALLOC, OpKind::Alloc),
-    ("runtime.alloc", "free", Effects::ALLOC, OpKind::Free),
-    ("runtime.alloc", "realloc", Effects(Effects::ALLOC.0 | Effects::TRAP.0), OpKind::Alloc),
-    ("runtime.alloc", "try_realloc", Effects::ALLOC, OpKind::Alloc),
-    ("runtime.panic", "trap", Effects::TRAP, OpKind::Trap),
-    ("runtime.panic", "trap_msg", Effects::TRAP, OpKind::Trap),
-    ("runtime.panic", "trap_err", Effects::TRAP, OpKind::Trap),
-    ("runtime.panic", "abort", Effects::TRAP, OpKind::Trap),
-    ("runtime.panic", "requires_failed", Effects::TRAP, OpKind::Trap),
-    ("runtime.panic", "ensures_failed", Effects::TRAP, OpKind::Trap),
-    ("runtime.atomic", "lock", Effects::LOCK, OpKind::Lock),
-    ("runtime.atomic", "try_lock", Effects::NONE, OpKind::Lock),
-    ("runtime.atomic", "unlock", Effects::NONE, OpKind::Lock),
-    ("runtime.os", "futex", Effects::LOCK, OpKind::Lock),
-    ("runtime.thread", "start", Effects(Effects::ALLOC.0 | Effects::IO.0 | Effects::TRAP.0), OpKind::Spawn),
-    (
-        "runtime.thread",
-        "scope_spawn",
-        Effects(Effects::ALLOC.0 | Effects::IO.0 | Effects::TRAP.0),
-        OpKind::Spawn,
-    ),
-    ("runtime.thread", "join", Effects::BLOCK, OpKind::Join),
-    ("runtime.thread", "scope_join", Effects::BLOCK, OpKind::Join),
+/// The runtime fns whose effects are fixed: (fn, effects, op). Their bodies implement the effect
+/// (the allocator's lock word and system calls are its allocation; a panic's write and exit are
+/// its trap), so what they call does not count.
+pub const BOUNDARY: &[(Known, Effects, OpKind)] = &[
+    (Known::Alloc, Effects(Effects::ALLOC.0 | Effects::TRAP.0), OpKind::Alloc),
+    (Known::TryAlloc, Effects::ALLOC, OpKind::Alloc),
+    (Known::Free, Effects::ALLOC, OpKind::Free),
+    (Known::Realloc, Effects(Effects::ALLOC.0 | Effects::TRAP.0), OpKind::Alloc),
+    (Known::TryRealloc, Effects::ALLOC, OpKind::Alloc),
+    (Known::Trap, Effects::TRAP, OpKind::Trap),
+    (Known::TrapMsg, Effects::TRAP, OpKind::Trap),
+    (Known::TrapErr, Effects::TRAP, OpKind::Trap),
+    (Known::Abort, Effects::TRAP, OpKind::Trap),
+    (Known::RequiresFailed, Effects::TRAP, OpKind::Trap),
+    (Known::EnsuresFailed, Effects::TRAP, OpKind::Trap),
+    (Known::AtomicLock, Effects::LOCK, OpKind::Lock),
+    (Known::AtomicTryLock, Effects::NONE, OpKind::Lock),
+    (Known::AtomicUnlock, Effects::NONE, OpKind::Lock),
+    (Known::Futex, Effects::LOCK, OpKind::Lock),
+    (Known::ThreadStart, Effects(Effects::ALLOC.0 | Effects::IO.0 | Effects::TRAP.0), OpKind::Spawn),
+    (Known::ScopeSpawn, Effects(Effects::ALLOC.0 | Effects::IO.0 | Effects::TRAP.0), OpKind::Spawn),
+    (Known::RtThreadJoin, Effects::BLOCK, OpKind::Join),
+    (Known::ScopeJoin, Effects::BLOCK, OpKind::Join),
 ];
 
 /// The runtime system calls that may sleep until another process or thread acts on the file: a
 /// read of an empty pipe, a write to a full one, an open of a FIFO, a `flock`. Their callers have
 /// `block` besides `io`: no static rule bounds such a wait.
-pub const FD_WAITS: &[(&str, &str)] = &[
-    ("runtime.os", "read"),
-    ("runtime.os", "write"),
-    ("runtime.os", "pread64"),
-    ("runtime.os", "pwrite64"),
-    ("runtime.os", "openat"),
-    ("runtime.os", "flock"),
-];
+pub const FD_WAITS: &[Known] =
+    &[Known::OsRead, Known::OsWrite, Known::OsPread64, Known::OsPwrite64, Known::OsOpenat, Known::OsFlock];
 
 /// The effects of a `spawn { }` statement for the fn holding it (`runtime.thread.scope_spawn`).
 const SPAWN: Effects = Effects(Effects::ALLOC.0 | Effects::IO.0 | Effects::TRAP.0);
@@ -595,12 +585,9 @@ pub fn solve(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>) -> EffectSets {
 pub fn solve_with(prog: &Program, tc: &Typeck, ir: Option<&[NodeIr]>, proved: &[(u32, u32)]) -> EffectSets {
     let g = &tc.call_graph;
     let n = g.nodes.len();
-    let boundary: FxHashMap<DeclId, (Effects, OpKind)> = BOUNDARY
-        .iter()
-        .filter_map(|&(m, f, e, k)| crate::mono::item_at(prog, m, f).map(|d| (d, (e, k))))
-        .collect();
-    let fd_waits: FxHashSet<DeclId> =
-        FD_WAITS.iter().filter_map(|&(m, f)| crate::mono::item_at(prog, m, f)).collect();
+    let boundary: FxHashMap<DeclId, (Effects, OpKind)> =
+        BOUNDARY.iter().filter_map(|&(f, e, k)| prog.known.decl(f).map(|d| (d, (e, k)))).collect();
+    let fd_waits: FxHashSet<DeclId> = FD_WAITS.iter().filter_map(|&f| prog.known.decl(f)).collect();
     // source ops per body, once per decl (instances share them)
     let body_ops: Vec<BodyOps> =
         tc.bodies.par_iter().map(|b| if b.has_error { Vec::new() } else { body_ops(prog, b) }).collect();

@@ -16,6 +16,8 @@ pub enum HoleKind {
     TokenKinds,
     Int,
     Place,
+    /// A destructuring pattern spelled from the declarations of a type along a place.
+    Pattern,
     Source,
     TextLiteral,
 }
@@ -30,6 +32,7 @@ impl HoleKind {
             HoleKind::TokenKinds => "token-kinds",
             HoleKind::Int => "int",
             HoleKind::Place => "place",
+            HoleKind::Pattern => "pattern",
             HoleKind::Source => "source",
             HoleKind::TextLiteral => "text-literal",
         }
@@ -258,7 +261,9 @@ fn check_value(code: &'static str, hole: &'static Hole, value: &str) -> Result<(
             !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
         }
         HoleKind::TextLiteral => hole.choices.contains(&value),
-        HoleKind::Name | HoleKind::Path | HoleKind::Place => !value.is_empty() && !value.contains('\n'),
+        HoleKind::Name | HoleKind::Path | HoleKind::Place | HoleKind::Pattern => {
+            !value.is_empty() && !value.contains('\n')
+        }
         HoleKind::Type | HoleKind::TokenKinds => !value.contains('\n'),
         HoleKind::Source => true,
     };

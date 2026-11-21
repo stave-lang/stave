@@ -2404,10 +2404,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0502",
         severity: Severity::Error,
         area: "borrow",
-        rule: "use after move",
+        rule: "use after move; case `operand`: by a later operand of the expression whose by-value operand moved the place (operands are evaluated left to right, the receiver first)",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "moved", kind: HoleKind::Place, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
         ],
         shapes: &[
@@ -2420,6 +2421,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `{place}` before it is moved, or pass a reference (`&{place}`) instead of moving it",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "operand",
+                message: "`{place}` is used after an earlier operand of the same expression moved `{moved}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "used here, after the move" },
+                    LabelTemplate { at: "move", text: "`{moved}` moved here: operands are evaluated left to right" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "compute the operand that uses `{place}` into a `let` before the expression and pass that local: operands are evaluated left to right, so `{moved}` is gone when it runs",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2481,10 +2495,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0504",
         severity: Severity::Error,
         area: "borrow",
-        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture",
+        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it; case `part`: a non-Copy part (field, tuple element, payload) of a local or a temporary taken by value outside a pattern that takes the whole value apart (its fix names the pattern; `part-reborrow`: a `&mut` part, passed on by a reborrow; `part-replace`: an owner that cannot be taken apart here, `mem.replace`)",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "owner", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "pattern", kind: HoleKind::Pattern, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
         ],
         shapes: &[
@@ -2509,6 +2525,139 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `&{place}` inside the closure, or take the value out with `mem.replace(&mut {place}, other)` (`import std.mem;`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "drop",
+                message: "cannot move `{place}` out of `{owner}`: the type of `{owner}` implements `Drop`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "borrow it instead (`&{place}`), or take it out and leave another value in its place with `mem.replace(&mut {place}, other)` (`import std.mem;`): the destructor of `{owner}` runs on every part",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "part",
+                message: "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a part moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` or left out is dropped there)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "part-reborrow",
+                message: "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a part moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass the reference on by a reborrow: `&mut *{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "part-replace",
+                message: "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a part moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take the part out and leave a value in its place: `mem.replace(&mut {place}, other)` (`import std.mem;`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "static",
+                message: "cannot move `{place}` out of a `static`: its type is not `Copy`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "borrow it instead (`&{place}`): a `static` is never moved from",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
+        code: "E0505",
+        severity: Severity::Error,
+        area: "borrow",
+        rule: "in a match guard, and in a closure written in it: no by-value use of a non-Copy value (a call may take arguments by copy or `&` only), no assignment, no `&mut` borrow (also of a receiver), no `?`; changes through `&` (cells, atomics, locks) and calls of fn values made outside are not covered",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "place", kind: HoleKind::Place, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "a match guard only reads: it may not move `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms), or pass `&{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "assign",
+                message: "a match guard only reads: it may not assign to `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "assigned in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "move",
+                message: "a match guard only reads: it may not move `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms), or pass `&{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-borrow",
+                message: "a match guard only reads: it may not borrow `{place}` mutably",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "mutable borrow in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass `&{place}`, or test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "try",
+                message: "a match guard only reads: `?` may leave the fn from inside it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`?` in the guard" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "evaluate the fallible value before the `match`, or test in the arm: `P => {{ if cond? {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

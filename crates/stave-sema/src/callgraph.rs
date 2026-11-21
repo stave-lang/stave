@@ -2206,9 +2206,8 @@ pub(crate) fn build(
     bodies: &[TypedBody],
     brackets: &[Brackets],
 ) -> CallGraph {
-    let [join, par_for, par_for_mut] =
-        ["join", "par_for", "par_for_mut"].map(|n| crate::mono::item_at(prog, "std.thread", n));
-    let fns = [join, par_for, par_for_mut, crate::mono::item_at(prog, "runtime.thread", "start")];
+    use stave_ir::Known as K;
+    let fns = [K::ThreadJoin, K::ParFor, K::ParForMut, K::ThreadStart].map(|k| prog.known.decl(k));
     let kinds = Kinds::new(table);
     let evs: Vec<Option<BodyEvents<'_>>> = bodies
         .par_iter()
@@ -2221,11 +2220,7 @@ pub(crate) fn build(
             Some(extract(&icx, b, sigs, &fns, &kinds, !in_builtin_package(prog, b.decl)))
         })
         .collect();
-    let string = if sigs.lang.string.is_some() {
-        ["as_str", "new", "push_str"].map(|n| crate::mono::inherent_method(prog, sigs, sigs.lang.string, n))
-    } else {
-        [None; 3]
-    };
+    let string = [K::StringAsStr, K::StringNew, K::StringPushStr].map(|k| prog.known.decl(k));
     let mut w = Walk {
         prog,
         sigs,
@@ -2249,9 +2244,9 @@ pub(crate) fn build(
         roots: Vec::new(),
         arms: FxHashMap::default(),
         string,
-        scope_spawn: crate::mono::item_at(prog, "runtime.thread", "scope_spawn"),
+        scope_spawn: prog.known.decl(K::ScopeSpawn),
         thread_start: fns[3],
-        run_queued: crate::mono::item_at(prog, "runtime.thread", "run_queued"),
+        run_queued: prog.known.decl(K::RunQueued),
         flow: Flow::default(),
         poisoned: Vec::new(),
         covers: Vec::new(),

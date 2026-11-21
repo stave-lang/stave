@@ -21,7 +21,10 @@
 use stave_diag::Span;
 
 use crate::bits::Bits;
-use crate::cfg::{Body, LoanId, LocalId, OpKind, Operand, Place, Proj, RetCheck, Rvalue, Stmt, StmtKind};
+use crate::cfg::{
+    Body, GuardEffect, LoanId, LocalId, MoveOut, OpKind, Operand, Place, Proj, RetCheck, Rvalue, Stmt,
+    StmtKind,
+};
 use crate::loans::{CallStore, Flow, Misfit, State, for_each_op};
 use crate::ty::DerefKind;
 
@@ -91,9 +94,10 @@ pub enum Finding {
     /// the clause, or the return type when `clause` is false); `copy`: the clause names the param
     /// as `from copy`, which covers only the origins of the view it points to.
     Uncovered { span: Span, param: u32, from: Span, clause: bool, copy: bool },
-    /// E0504: a by-value use of a non-Copy place behind a dereference or an index, or of a
-    /// capture (`capture`: the closure's span).
-    MoveOut { place: Place, span: Span, capture: Option<Span> },
+    /// E0504: a by-value use of a non-Copy place that cannot be moved from.
+    MoveOut { place: Place, span: Span, why: MoveOut },
+    /// E0505: a match guard (or a closure written in one) does more than read.
+    GuardEffect { span: Span, what: GuardEffect },
     /// E0513: a ref-like value written through a dereference, or stored by a call through a
     /// `&mut` argument, has origins a view object it may land in cannot take.
     ViewWrite { place: Place, span: Span, why: Unfit },
@@ -155,6 +159,19 @@ pub fn stmt_uses(s: &Stmt, mut f: impl FnMut(LocalId, Span)) {
         }
         StmtKind::Drop(p) => f(p.local, s.span),
         StmtKind::StorageDead(_) => {}
+    }
+}
+
+/// The move operands of a statement.
+fn stmt_moves(s: &Stmt, mut f: impl FnMut(&Operand)) {
+    match &s.kind {
+        StmtKind::Assign { rv, .. } => for_each_op(rv, |o| {
+            if o.kind == OpKind::Move {
+                f(o)
+            }
+        }),
+        StmtKind::Read(o) | StmtKind::Return(o) if o.kind == OpKind::Move => f(o),
+        _ => {}
     }
 }
 
@@ -307,6 +324,9 @@ struct Cx<'f, 'b> {
     findings: Vec<Finding>,
     dump: Vec<DumpAccess>,
     want_dump: bool,
+    /// The moves the statement being checked has made so far (local, site): earlier operands of
+    /// its rvalue, and the whole rvalue before its write.
+    pending: Vec<(LocalId, u32)>,
 }
 
 impl Cx<'_, '_> {
@@ -350,31 +370,65 @@ impl Cx<'_, '_> {
                 loans,
             });
         }
-        // use after move (implicit drops of moved values are no-ops); a write re-initializes the
-        // place it names, but a write strictly inside a moved place uses it (and would drop a
-        // part the move took)
-        if !matches!(kind, Access::Drop | Access::StorageDead) && !st.moved.is_empty() {
-            let mut best: Option<(u32, u32)> = None;
-            for s in st.moved.iter() {
-                let Some((m, ms)) = self.flow.body.move_sites.get(s) else { continue };
-                let overlap = m.local == place.local
-                    && if kind == Access::Write {
-                        place.proj.len() > m.proj.len() && place.proj.starts_with(&m.proj)
-                    } else {
-                        m.proj.starts_with(&place.proj) || place.proj.starts_with(&m.proj)
-                    };
-                if overlap && best.is_none_or(|(o, _)| ms.offset < o) {
-                    best = Some((ms.offset, s as u32));
-                }
-            }
-            if let Some((_, site)) = best {
-                verdict.get_or_insert("E0502");
-                self.findings.push(Finding::Moved { site, place: place.clone(), span });
-            }
+        // use after move (implicit drops of moved values are no-ops); a write of the whole local
+        // initializes it again, a write of a part of it uses it
+        if !matches!(kind, Access::Drop | Access::StorageDead)
+            && st.moved.contains(place.local as usize)
+            && !(kind == Access::Write && place.proj.is_empty())
+            && let Some(site) = self.move_site(at, place.local)
+        {
+            verdict.get_or_insert("E0502");
+            self.findings.push(Finding::Moved { site, place: place.clone(), span });
         }
         if self.want_dump && node != u32::MAX {
             self.dump.push(DumpAccess { node, kind: kind.dump_name(), verdict, loan: reported });
         }
+    }
+
+    /// The move of local `l` a use at statement `at` sees: one made earlier in the statement, else
+    /// the one with the smallest offset among the moves that reach `at` without a whole write of
+    /// `l` between (blocks walked backward).
+    fn move_site(&self, at: (u32, u32), l: LocalId) -> Option<u32> {
+        if let Some(&(_, s)) = self.pending.iter().find(|p| p.0 == l) {
+            return Some(s);
+        }
+        let body = self.flow.body;
+        let mut seen = vec![false; body.blocks.len()];
+        let mut work = vec![(at.0, at.1 as usize)];
+        let mut best: Option<u32> = None;
+        while let Some((b, end)) = work.pop() {
+            let stmts = &body.blocks[b as usize].stmts;
+            let mut reached_start = true;
+            for s in stmts[..end.min(stmts.len())].iter().rev() {
+                if stmt_def(s) == Some(l) && !matches!(s.kind, StmtKind::StorageDead(_)) {
+                    reached_start = false;
+                    break;
+                }
+                let mut site = None;
+                stmt_moves(s, |o| {
+                    if o.place.local == l {
+                        site = Some(o.site);
+                    }
+                });
+                if let Some(site) = site {
+                    let off = body.move_sites.get(site as usize).map_or(u32::MAX, |m| m.1.offset);
+                    if best.is_none_or(|x| off < body.move_sites[x as usize].1.offset) {
+                        best = Some(site);
+                    }
+                    reached_start = false;
+                    break;
+                }
+            }
+            if reached_start {
+                for &p in &self.flow.preds[b as usize] {
+                    if !seen[p as usize] {
+                        seen[p as usize] = true;
+                        work.push((p, body.blocks[p as usize].stmts.len()));
+                    }
+                }
+            }
+        }
+        best
     }
 
     fn operand(&mut self, st: &State, live: &Bits, at: (u32, u32), o: &Operand) {
@@ -416,7 +470,18 @@ impl Cx<'_, '_> {
                             });
                         }
                     }
-                    _ => for_each_op(rv, |o| self.operand(st, live, at, o)),
+                    _ => {
+                        // operands are evaluated left to right: each sees the moves of the ones
+                        // before it
+                        let mut moved: Option<State> = None;
+                        for_each_op(rv, |o| {
+                            self.operand(moved.as_ref().unwrap_or(st), live, at, o);
+                            if o.kind == OpKind::Move {
+                                moved.get_or_insert_with(|| st.clone()).moved.insert(o.place.local as usize);
+                                self.pending.push((o.place.local, o.site));
+                            }
+                        });
+                    }
                 }
                 // A temporary has one slot, written by every evaluation of its expression: the
                 // value of the evaluation before ends here, and a loan of it still live after
@@ -431,16 +496,17 @@ impl Cx<'_, '_> {
                     let mut moves = Vec::new();
                     for_each_op(rv, |o| {
                         if o.kind == OpKind::Move {
-                            moves.push(o.site as usize);
+                            moves.push((o.place.local, o.site));
                         }
                     });
                     if moves.is_empty() {
                         self.access(st, after, at, Access::Write, dest, s.span, s.node, &[]);
                     } else {
                         let mut st2 = st.clone();
-                        for m in moves {
-                            st2.moved.insert(m);
+                        for &(l, _) in &moves {
+                            st2.moved.insert(l as usize);
                         }
+                        self.pending.extend(moves);
                         self.access(&st2, after, at, Access::Write, dest, s.span, s.node, &[]);
                     }
                     if let Err((shared, blame)) = mutability(body, dest) {
@@ -581,11 +647,13 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
             }
         }
         bad_moves(body, &mut findings);
+        guard_effects(body, &mut findings);
         return Checked { findings, dump: Vec::new() };
     }
     let lo = live_out(flow);
     let rewritten = rewritten_temps(body);
-    let mut cx = Cx { flow, rewritten, findings: Vec::new(), dump: Vec::new(), want_dump };
+    let mut cx =
+        Cx { flow, rewritten, findings: Vec::new(), dump: Vec::new(), want_dump, pending: Vec::new() };
     for b in 0..body.blocks.len() {
         let Some(mut st) = cx.flow.entry[b].clone() else { continue };
         let la = live_after(cx.flow, b, &lo[b]);
@@ -598,12 +666,14 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
             let mut post = st.clone();
             cx.flow.apply(&s.kind, &mut post);
             let after = cx.flow.live_loans(&post, &la[i]);
+            cx.pending.clear();
             cx.stmt(&st, &live, &after, (b as u32, i as u32), s);
             st = post;
         }
     }
     let mut findings = cx.findings;
     bad_moves(body, &mut findings);
+    guard_effects(body, &mut findings);
     Checked { findings, dump: cx.dump }
 }
 
@@ -644,15 +714,27 @@ fn rewritten_temps(body: &Body) -> Bits {
     out
 }
 
-/// E0504: one finding per span of the body's bad moves.
-fn bad_moves(body: &Body, findings: &mut Vec<Finding>) {
+/// E0505: one finding per span of what the body's guards do besides reading.
+fn guard_effects(body: &Body, findings: &mut Vec<Finding>) {
     let mut seen: Vec<Span> = Vec::new();
-    for (place, span, capture) in &body.bad_moves {
+    for (span, what) in &body.guard_effects {
         if seen.contains(span) {
             continue;
         }
         seen.push(*span);
-        findings.push(Finding::MoveOut { place: place.clone(), span: *span, capture: *capture });
+        findings.push(Finding::GuardEffect { span: *span, what: what.clone() });
+    }
+}
+
+/// E0504: one finding per span of the body's bad moves.
+fn bad_moves(body: &Body, findings: &mut Vec<Finding>) {
+    let mut seen: Vec<Span> = Vec::new();
+    for (place, span, why) in &body.bad_moves {
+        if seen.contains(span) {
+            continue;
+        }
+        seen.push(*span);
+        findings.push(Finding::MoveOut { place: place.clone(), span: *span, why: why.clone() });
     }
 }
 
