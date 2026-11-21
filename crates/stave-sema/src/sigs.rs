@@ -991,7 +991,15 @@ fn lower_prim<H: LowerHost>(
                     if h.is_error_ty(lane) {
                         return h.error_ty();
                     }
-                    h.intern(TypeKind::Vector { lane, n: lanes })
+                    let t = h.intern(TypeKind::Vector { lane, n: lanes });
+                    // a generic lane type has no concrete spelling to suggest
+                    if matches!(h.kind(lane), TypeKind::Param(_) | TypeKind::SelfTy) {
+                        let spelled = icx.node_text(n).to_string();
+                        let d = mk("E0609", Some("generic-lane"), &[("spelled", &spelled)], icx.node_span(n), &[]);
+                        h.report(d);
+                        return t;
+                    }
+                    t
                 }
                 (Prim::MaskGeneric, GArg::Const(ConstArg::Value(w))) if matches!(w, 8 | 16 | 32 | 64) => {
                     h.intern(TypeKind::Mask { width: w as u8, n: lanes })

@@ -1279,7 +1279,7 @@ fix = { description = "use lane indices from 0 to {lanes} - 1" }
 code = "E0609"
 severity = "error"
 area = "simd"
-rule = "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param"
+rule = "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param. Case `generic-lane`: T is a generic param (a generic lane type is planned)"
 holes = { spelled = "source", concrete = "type" }
 message = "`{spelled}` has no generic argument: write `{concrete}`"
 labels = [{ at = "primary", text = "generic spelling of a concrete type" }]
@@ -1289,6 +1289,11 @@ fix = { description = "write `{concrete}`", edits = [{ at = "primary", replaceme
 message = "`{spelled}` is not a fixed lane count or mask width"
 labels = [{ at = "primary", text = "lanes are 2, 4, 8, 16, 32, or 64; mask widths 8, 16, 32, or 64" }]
 fix = { description = "write one of these values as a literal: a const param never stands for a lane count or a mask width" }
+
+[diag.cases.generic-lane]
+message = "`{spelled}` has a generic lane type: vectors of a generic param are not supported yet"
+labels = [{ at = "primary", text = "the lane type is a generic param" }]
+fix = { description = "write a concrete vector type such as `f32x8` or `u32x4`, one fn per lane type" }
 
 [[diag]]
 code = "E0700"

@@ -1,0 +1,24 @@
+//~ CHECK-ONLY
+// A vector's lane type is concrete: a generic param as the lane type is E0609 `generic-lane`, in a
+// signature and in a chunk binding alike. A concrete lane in the generic spelling is E0609 too.
+fn gen<T>(x: vec<T, 4>) -> u32 { //~ ERROR E0609
+    return 0;
+}
+
+fn chunks<T: Copy>(xs: &[T]) -> u64 {
+    let mut k: u64 = 0;
+    for v: vec<T, 4> in xs { //~ ERROR E0609
+        k = k + 1;
+    } tail scalar (x) {
+        k = k + 100;
+    }
+    return k;
+}
+
+fn concrete(x: vec<u32, 4>) -> u32 { //~ ERROR E0609
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

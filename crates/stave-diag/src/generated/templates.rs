@@ -3145,7 +3145,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0609",
         severity: Severity::Error,
         area: "simd",
-        rule: "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param",
+        rule: "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param. Case `generic-lane`: T is a generic param (a generic lane type is planned)",
         retired: false,
         located: true,
         holes: &[
@@ -3165,6 +3165,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                     edits: &[
                         EditTemplate { at: "primary", replacement: "{concrete}" },
                     ],
+                }),
+            },
+            Shape {
+                case: "generic-lane",
+                message: "`{spelled}` has a generic lane type: vectors of a generic param are not supported yet",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "the lane type is a generic param" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write a concrete vector type such as `f32x8` or `u32x4`, one fn per lane type",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
                 }),
             },
             Shape {
