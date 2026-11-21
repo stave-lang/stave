@@ -1,0 +1,46 @@
+//~ CHECK-ONLY
+// A const param of an impl method has the type of the trait method's: the caller checks its
+// argument against the trait's declaration.
+trait Tr {
+    fn f<const N: usize>() -> usize;
+}
+
+struct S {}
+
+impl Tr for S {
+    fn f<const N: u8>() -> usize { //~ ERROR E0905
+        return N as usize;
+    }
+}
+
+struct B {}
+
+impl Tr for B {
+    fn f<const N: u64>() -> usize { //~ ERROR E0905
+        return 0;
+    }
+}
+
+struct Same {}
+
+impl Tr for Same {
+    fn f<const M: usize>() -> usize {
+        return M;
+    }
+}
+
+trait Tw<T> {
+    fn h<const N: u32>(x: T) -> u32;
+}
+
+struct W {}
+
+impl Tw<u8> for W {
+    fn h<const N: u32>(x: u8) -> u32 {
+        return N + (x as u32);
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

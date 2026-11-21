@@ -1,0 +1,15 @@
+// A Vec used after its destructor ran through a fn value.
+import std.io;
+import std.vec;
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(5);
+    let f: fn(&mut vec.Vec<u32>) = vec.Vec::<u32>.drop; //~ ERROR E0909
+    f(&mut v);
+    let mut w = vec.Vec::<u32>.new();
+    w.push(77);
+    let k: u32 = *v.get_ref(0);
+    io.print(f"{k}\n");
+    return 0;
+}

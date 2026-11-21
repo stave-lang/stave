@@ -1,0 +1,42 @@
+//~ STDOUT const_args_in_bounds.stdout
+// A bound's const args are substituted like its type args: at a call (`T: Has<N>` with N = 3),
+// in an impl's own bounds, and in an impl's trait args (`impl<const N: usize> Has<N> for G<N>`).
+import std.io;
+
+trait Has<const N: usize> {
+    fn get(&self) -> usize;
+}
+
+struct A {}
+
+impl Has<3> for A {
+    fn get(&self) -> usize {
+        return 3;
+    }
+}
+
+struct G<const N: usize> { x: u8 }
+
+impl<const N: usize> Has<N> for G<N> {
+    fn get(&self) -> usize {
+        return N;
+    }
+}
+
+fn via<T: Has<5>>(t: &T) -> usize {
+    return t.get();
+}
+
+fn pass<const N: usize, T: Has<N>>(t: &T) -> usize {
+    return t.get();
+}
+
+fn main() -> i32 {
+    let a = A.{};
+    let g = G::<5>.{ x: 0 };
+    let x: usize = via(&g);
+    let y: usize = pass::<3, A>(&a);
+    let z: usize = pass::<5, G<5>>(&g);
+    io.print(f"{x} {y} {z}\n");
+    return 0;
+}

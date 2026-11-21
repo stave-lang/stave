@@ -1,0 +1,29 @@
+//~ CHECK-ONLY
+// A bound with a const arg holds for the substituted arg: `T: Has<N>` in scope does not give
+// `T: Has<5>`.
+trait Has<const N: usize> {
+    fn get(&self) -> usize;
+}
+
+struct A {}
+
+impl Has<3> for A {
+    fn get(&self) -> usize {
+        return 3;
+    }
+}
+
+fn inner<const M: usize, U: Has<M>>(u: &U) -> usize {
+    return u.get();
+}
+
+fn outer<const N: usize, T: Has<N>>(t: &T) -> usize {
+    return inner::<5, T>(t); //~ ERROR E0901
+}
+
+fn main() -> i32 {
+    let a = A.{};
+    let k: usize = outer::<3, A>(&a);
+    let j: usize = inner::<4, A>(&a); //~ ERROR E0901
+    return 0;
+}
