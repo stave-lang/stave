@@ -219,6 +219,27 @@ when that owner ends.
   of the enclosing expressions that were already evaluated (earlier arguments, a by-value
   receiver, earlier fields of a literal), the last evaluated first.
 
+## §3 Temporaries end with their statement
+
+A temporary is the place an rvalue gets when its address is needed: `&e` and `&mut e` of a value
+that is no place, an auto-referenced receiver (`f().m()`), an element or field of such a value
+(`&mk().a`, `&arr()[1]`), and an rvalue with drop glue ("Drops"). Every temporary ends with its
+statement (the statements of "Drops", "Temporaries"), after the drops of the ones with drop
+glue; a `break`, `continue`, `return`, or `?` that leaves the statement ends it there. A borrow
+of a temporary may be used inside its statement; one used after it is E0501 case `temporary`,
+whatever holds it: a `let` (`let r = &f();`), an assignment, a field of a literal (`S.{ r: &f()
+}`), a tuple or array element, a call or method result that borrows it (`let r =
+mk().first();`), a binding of a `match` over `&mk()`, a value `if` / `match`. Write `let t =
+f(); let r = &t;`. There is no exception for constants: `&4u32`, `&[1, 2, 3]`, `&S.{ a: 1 }`,
+`&()`, `&C` of a `const` item, `&size_of::<T>()`, and a variant without payload make a temporary
+at each evaluation, as `&f()` does; data that outlives the statement is a local or a `static`. A
+string literal is no temporary: it is a `&str` to static data. A `static` is a place.
+
+The header of a `for` and the scrutinee of a `match` belong to the `for` / `match` statement, so
+their temporaries live through the loop and the arms: `for x in &mk()` and a `for` over an array
+value (the loop's own temporary, "`for` sources") end with the loop, which is their statement,
+not past it.
+
 ## §3 Must-consume
 
 A pending-operation type of std stands for work that is still running (device work, a queued

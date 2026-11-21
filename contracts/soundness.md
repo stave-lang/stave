@@ -65,9 +65,8 @@ callee's `requires` (acceptance is all or nothing for that reason).
 ## Overwritten values: loans are read after the statement
 
 **Claim.** When a statement ends the value of a place and reports no live loan of it, no
-reference into the ended value is used after the statement. The statements are an assignment to
-a place that holds a value (`p = e`, `p.f = e`, `*q = e`) and the initialization of a temporary
-by another evaluation of its expression (a temporary has one slot).
+reference into the ended value is used after the statement. The statements are the assignments
+to a place that holds a value (`p = e`, `p.f = e`, `*q = e`).
 
 **Assumptions.** The origin set of a local at a point holds the loan of every borrow its value
 may hold there. A loan is live after a statement when a local that is used later holds it in the
@@ -91,7 +90,9 @@ The other statements that end a value give no local a new value that the state b
 not show. A drop and the end of a local's storage give no value at all. A move out of a place is
 a read of an operand: a loan in the value it makes came through an operand of the same
 statement, and an operand's local is live at the statement. These are checked against the loans
-live at the statement.
+live at the statement. The end of a statement's temporaries is such an end of storage, placed
+after the statement's write: a borrow of one that the destination took is live there, so a
+temporary kept past its statement conflicts (E0501 `temporary`).
 
 **Not claimed.** A destination that is never read again may take a borrow of its own old value:
 no reference is used. A destination with drop glue is read by its drop.
@@ -233,9 +234,8 @@ type error reports nothing more. A value of a body without type errors must ther
 have one: its parts could be moved out unseen, and a borrow of it could outlive its drop. Every
 temporary the CFG builder makes for a value goes through one step, which fails the body as not
 checked (an internal error, the program is not accepted) when the type is unknown. A variant
-without payload whose enum has drop glue is a temporary that ends with its statement, as a
-constructor's value is; only one without drop glue is a constant (contracts/borrow-model.md
-"constant temporary").
+without payload whose enum has drop glue is a temporary with drop glue, as a constructor's value
+is; one without drop glue is a constant, and a borrow of it makes a temporary, as of any value.
 
 **What would break it.** A stage that computes such a type for itself (inferring a literal's
 generic args from its field values gives no answer where a field value is coerced, and ignores
