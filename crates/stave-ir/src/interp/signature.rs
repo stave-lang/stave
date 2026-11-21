@@ -87,7 +87,7 @@ pub struct SignatureReport {
 impl SignatureReport {
     /// Multi-line text: `borrow signature [signature] M24: ...`, then the two sites.
     pub fn render(&self, m: &crate::ir::Module) -> String {
-        let path = m.func(self.func).map_or("?", |f| f.path.as_str());
+        let path = Self::fn_name(m, self.func);
         let what = match self.param {
             None => format!("the result of {path} holds a reference its `from` clause does not give"),
             Some(p) => {
@@ -102,6 +102,18 @@ impl SignatureReport {
             "borrow signature [signature] M24: {what}\n  at {}\n  tag made at {made}",
             MemReport::trace_text(m, &self.at)
         )
+    }
+
+    /// A fn item by its path; a closure body, which shares the path of the fn that holds its
+    /// literal, as `the closure at <file>:<line>:<col> in <path>` (the site of the literal).
+    fn fn_name(m: &crate::ir::Module, f: FuncId) -> String {
+        let Some(func) = m.func(f) else { return "?".into() };
+        let closure = m.clauses.get(f.index()).is_some_and(|c| c.kind == ClauseKind::Closure);
+        match m.sites.get(func.name_site.0 as usize) {
+            Some(s) if closure => format!("the closure at {}:{}:{} in {}", s.file, s.line, s.col, func.path),
+            _ if closure => format!("a closure in {}", func.path),
+            _ => func.path.clone(),
+        }
     }
 }
 

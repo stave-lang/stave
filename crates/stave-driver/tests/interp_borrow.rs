@@ -183,6 +183,28 @@ fn std_programs_have_no_report() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A signature report on a closure body names the closure by the site of its literal and the
+/// fn that holds it.
+#[test]
+fn signature_report_names_the_closure() {
+    let target = Triple::parse("x86_64-linux").unwrap();
+    let p = repo().join("tests/borrowcheck/closure_store_capture.stv");
+    let mut o = Options::new(Goal::Check).threads(Some(2));
+    o.lower = true;
+    o.borrow_marks = true;
+    o.target = Some(target);
+    let out = pipeline::run(&p, &Library::in_dir(&repo()), &o).unwrap();
+    assert!(!out.has_errors(), "{:?}", out.diagnostics);
+    let m = out.module.as_ref().expect("checked IR");
+    let lim = Limits { check: true, borrow: true, ..Limits::default() };
+    let e = interp::run(m, "main.main", target, &[], &[], lim).unwrap_err();
+    let first = e.lines().next().unwrap_or("");
+    assert!(
+        first.ends_with("param 1 of the closure at closure_store_capture.stv:11:15 in main.main took a reference the `from` clauses do not give"),
+        "{e}"
+    );
+}
+
 /// Borrow tracking walks the values it is given with lists, not by recursion: a view nested
 /// 341 levels deep, loaded through raw pointers (each load gives its reference words new tags),
 /// runs clean on a 256 KB native stack, as it does without tracking.
