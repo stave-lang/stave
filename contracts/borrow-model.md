@@ -182,6 +182,8 @@ fn moved_under() -> u32 {
 - **M10 (array repeat).** `[e; n]` evaluates `e` once; each element takes the value by one
   by-value use of it. For a type that is not Copy the second use reads a moved-out value (M9):
   the literal makes `n` owners of one value. `n = 1` is one move. `n = 0` uses it never.
+  No oracle run shows this rule: such a literal is E0418, a type error, and a program with a
+  type error is not lowered (the oracle lowers past borrow errors only).
 ```stave
 fn twice(x: &mut u32) -> u32 {
     let t = [x; 2];         // M10: the second element is a second owner of one `&mut`
@@ -506,7 +508,7 @@ hole. The model never reads a static rule to decide.
 | E0514, E0515, E0520, E0521, E0905, E0807: form of clauses, fn values of fns with clauses | none (they keep M24 and the callers' reading of a signature well-defined) |
 | E0410 to E0414: where references and views may be held | M13, heap `free` (a reference where no rule sees its holder) |
 | E0415, E0416: Copy only for types without `&mut` and drop glue | M8, M9 |
-| E0418: array repeat | M10 |
+| E0418: array repeat (a type error: no oracle run shows it) | M10 |
 | E0211: an `ensures` reads no param whose `&mut` the result holds; no clause writes | M1 (the clause's read would freeze the result's tag before the caller writes through it) |
 | temporaries: lifetime, one place per expression | M14 |
 | E0801, E0808, `scope` / `join` structure | M13, M22 (threads end before the captured locals) |
