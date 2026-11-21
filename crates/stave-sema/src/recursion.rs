@@ -4,12 +4,14 @@
 //! A cycle is a strongly connected component with more than one node or a self-edge. Exempt: a
 //! drop cycle ([`CallGraph::is_drop_cycle`]), the recursion of dropping a recursive value. A
 //! component with a closure body is E1409; else one with a fn instance not declared `rec` is
-//! E1402. One diagnostic per component, at the component's first closure (smallest node id) or
-//! its unmarked fn with the smallest name; the message lists a shortest cycle from there (breadth
-//! first within the component, out-edges in node order), tables and the `Member` step hidden: a
-//! call through a fn value shows as a call of the value it reaches. Instances of one generic that
-//! repeat a cycle at the same call sites are reported once. Names are definition paths, with the
-//! type args of a generic instance.
+//! E1402, where on a component through drop glue only the user-written fns need the marker (the
+//! built-in fns there, `Vec.drop` and `Vec.clear` of a user type, cannot carry it). One
+//! diagnostic per component, at the component's first closure (smallest node id) or its unmarked
+//! fn with the smallest name; the message lists a shortest cycle from there (breadth first within
+//! the component, out-edges in node order), tables and the `Member` step hidden: a call through a
+//! fn value shows as a call of the value it reaches. Instances of one generic that repeat a cycle
+//! at the same call sites are reported once. Names are definition paths, with the type args of a
+//! generic instance.
 
 use rustc_hash::FxHashSet;
 use stave_diag::{Diagnostic, Span};
@@ -60,12 +62,16 @@ pub(crate) fn check(prog: &Program, sigs: &Sigs, table: &TypeTable, g: &CallGrap
         let members = g.scc(s);
         let closure =
             members.iter().copied().find(|&n| matches!(g.nodes[n as usize].kind, NodeKind::Closure { .. }));
-        let unmarked = members
-            .iter()
-            .copied()
-            .filter(|&n| matches!(g.nodes[n as usize].kind, NodeKind::Fn { rec: false, .. }))
-            .map(|n| (name(n), n))
-            .min();
+        // on a cycle through drop glue, a fn of a built-in package is there only because a user
+        // type's drop reaches it again: the user fns of the cycle carry the marker
+        let glue = members.iter().any(|&n| matches!(g.nodes[n as usize].kind, NodeKind::Glue { .. }));
+        let needs_rec = |n: u32| match &g.nodes[n as usize].kind {
+            NodeKind::Fn { rec: false, inst, .. } => {
+                !(glue && crate::callgraph::in_builtin_package(prog, inst.decl))
+            }
+            _ => false,
+        };
+        let unmarked = members.iter().copied().filter(|&n| needs_rec(n)).map(|n| (name(n), n)).min();
         let (code, start) = match (closure, unmarked) {
             (Some(c), _) => ("E1409", c),
             (None, Some((_, n))) => ("E1402", n),
@@ -102,9 +108,7 @@ pub(crate) fn check(prog: &Program, sigs: &Sigs, table: &TypeTable, g: &CallGrap
             // the other unmarked fns of the component, once per definition, by name
             let mut others: Vec<(String, Span)> = members
                 .iter()
-                .filter(|&&n| {
-                    n != first && matches!(g.nodes[n as usize].kind, NodeKind::Fn { rec: false, .. })
-                })
+                .filter(|&&n| n != first && needs_rec(n))
                 .map(|&n| (def_name(prog, sigs, g, n), g.nodes[n as usize].span))
                 .filter(|(d, _)| *d != who)
                 .collect();

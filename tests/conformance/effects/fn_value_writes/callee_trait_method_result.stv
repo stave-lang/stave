@@ -1,0 +1,35 @@
+// A trait method result called in place.
+import std.io;
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+fn mk() -> fn() {
+    return noisy;
+}
+
+trait Make {
+    fn make(&self) -> fn();
+}
+
+struct M {
+    k: u32,
+}
+
+impl Make for M {
+    fn make(&self) -> fn() {
+        return noisy;
+    }
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let m = M.{ k: 0u32 };
+    m.make()();
+}
+
+fn main() {
+    quiet();
+}

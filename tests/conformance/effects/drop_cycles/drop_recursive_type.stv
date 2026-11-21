@@ -1,0 +1,24 @@
+// Dropping a recursive value is a drop cycle (glue and std's `Vec` drop only), also when the
+// type has a `Drop` impl that drops no value of its own type: no marker.
+//~ STDOUT drop_recursive_type.stdout
+import std.io;
+import std.vec;
+
+struct T {
+    kids: vec.Vec<T>,
+    id: u32,
+}
+
+impl Drop for T {
+    fn drop(&mut self) {
+        let id = self.id;
+        io.print(f"drop {id}\n");
+    }
+}
+
+fn main() {
+    let mut root = T.{ kids: vec.Vec::<T>.new(), id: 0u32 };
+    let mut mid = T.{ kids: vec.Vec::<T>.new(), id: 1u32 };
+    mid.kids.push(T.{ kids: vec.Vec::<T>.new(), id: 2u32 });
+    root.kids.push(mid);
+}

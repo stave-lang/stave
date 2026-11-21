@@ -1,0 +1,28 @@
+// The stack bound counts what an operator impl's `rhs` can be.
+//~ STDOUT op_param_stack.stdout
+import std.core;
+import std.io;
+
+impl core.Add for fn() -> u64 {
+    fn add(self, rhs: Self) -> Self {
+        let v = rhs();
+        return small;
+    }
+}
+
+fn small() -> u64 {
+    return 1u64;
+}
+
+fn big() -> u64 {
+    let mut buf: [u64; 131072] = [0u64; 131072];
+    buf[131071] = 3;
+    return buf[131071] + buf[7];
+}
+
+fn main() {
+    let a: fn() -> u64 = small;
+    let b: fn() -> u64 = big;
+    let c = a + b;
+    io.print("done\n");
+}

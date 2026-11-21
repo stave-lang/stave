@@ -26,11 +26,15 @@
 //
 // If a thread cannot be created (no memory for the mapping, the guard pages cannot be
 // protected, clone failing: EAGAIN) the program panics with "cannot create thread". Exception:
-// the IR interpreter has one thread and makes clone fail with ENOSYS (native kernels have
-// clone); there the fn value runs on the calling thread before `start` returns, which gives the
-// same result for `join`, `par_for`, and `scope` (their bodies only communicate through results
-// the caller reads after the join). It runs as a task of its own there too: its error trace
-// starts empty and the caller's is restored after it (runtime.errtrace).
+// the IR interpreter has one thread and makes clone fail with ENOSYS, and its image has no stack
+// table (`config.has_stack_table`; a native image always has one, so a native ENOSYS is the
+// failure above); there `start` keeps the record with the fn value queued (`queued` = 1) and the
+// fn value runs on the joining thread when `join` gets the handle (`scope_join`, std.thread's
+// `join` and `par_for`), oldest spawn first. So the body waits for nothing the joiner holds at the join,
+// which the join rule (E1406) checks. It runs as a task of its own there too: its error trace
+// starts empty and the caller's is restored after it (runtime.errtrace). A handle never joined
+// never runs its fn value on such a target: `start`'s obligation joins every handle, and a panic
+// ends the process before it.
 
 import runtime.os;
 import runtime.state;
@@ -42,7 +46,8 @@ import runtime.errtrace;
 struct Thread {
     // kernel tid while the thread runs; 0 once it has exited (futex word, CLONE_CHILD_CLEARTID)
     tid: u32,
-    pad: u32,
+    // 1: no thread was created; `join` runs the fn value (code, env) on the joining thread
+    queued: u32,
     // the fn value to run: (code, environment)
     code: usize,
     env: usize,
@@ -66,7 +71,8 @@ fn fn_words(f: fn()) -> [usize; 2] {
     return unsafe("a fn value is two words, code then environment") *(&f as *const fn() as *const [usize; 2]);
 }
 
-// Starts a thread running f; returns its handle for `join` (0 if f already ran here).
+// Starts a thread running f (or queues f for `join` where no thread can be created); returns
+// its handle for `join`.
 pub unsafe("f and everything it captures stay valid until join(handle) returns")
 fn start(f: fn()) -> usize {
     let page = state.page_size();
@@ -96,7 +102,7 @@ fn start(f: fn()) -> usize {
     unsafe("th is the record page of the fresh mapping; no thread uses it yet") {
         th.write(Thread.{
             tid: 0,
-            pad: 0,
+            queued: 0,
             code: w[0],
             env: w[1],
             map: base,
@@ -121,18 +127,24 @@ fn start(f: fn()) -> usize {
     let tidp = unsafe("th is the record (above)") &mut (*th).tid as *mut u32;
     let r = unsafe("[base + guard, + size) is the fresh stack; tid and the block live in the record until join unmaps it; entry reads th") os.spawn_thread(base + guard, size, tidp, bp as usize, th as usize);
     if r < 0 {
-        unsafe("the thread was not created: nothing else uses the mapping") { release(th); }
-        if r != -os.ENOSYS {
+        if r != -os.ENOSYS || config.has_stack_table() {
+            unsafe("the thread was not created: nothing else uses the mapping") { release(th); }
             cannot_create();
         }
-        // the IR interpreter (one thread): run f here
-        let saved = errtrace.save();
-        errtrace.clear();
-        f();
-        errtrace.restore(&saved);
-        return 0;
+        // the IR interpreter (one thread, no stack table): f runs at the join
+        unsafe("th is the record above; no thread uses it") { (*th).queued = 1; }
     }
     return th as usize;
+}
+
+// Runs the fn value queued in record th on this thread, as a task of its own.
+unsafe("th is a live record whose fn value's captures are valid (start's obligation)") fn run_queued(th: *mut Thread) {
+    let w: [usize; 2] = unsafe("th is the live record start filled: code and env are the two words of its fn value") [(*th).code, (*th).env];
+    let f = unsafe("w holds the two words of the fn value start was given") *(&w as *const [usize; 2] as *const fn());
+    let saved = errtrace.save();
+    errtrace.clear();
+    f();
+    errtrace.restore(&saved);
 }
 
 // The panic of a failed thread creation (kind Assert at the user site, message on the next line).
@@ -141,11 +153,15 @@ fn cannot_create() -> never {
     panic.abort(unsafe("&str and &[u8] are both (data pointer, byte length)") *(&msg as *const &str as *const &[u8]));
 }
 
-// Waits until the thread of handle h has exited, then frees its mapping (h = 0: nothing).
+// Waits until the thread of handle h has exited (or runs its queued fn value here), then frees
+// its mapping (h = 0: nothing).
 pub unsafe("h came from start and is joined once")
 fn join(h: usize) {
     if h == 0 { return; }
     let th = h as *mut Thread;
+    if unsafe("th is a live record (caller)") (*th).queued == 1 {
+        unsafe("th is live; start's obligation keeps the captures valid until this join") { run_queued(th); }
+    }
     let tidp = unsafe("th is a live record (caller)") &mut (*th).tid as *mut u32;
     loop {
         let t = unsafe("tidp is the record's futex word") atomic.load_u32(tidp as *const u32);
@@ -166,24 +182,35 @@ unsafe("th is the record of a mapping no thread uses any more") fn release(th: *
 
 // ---- `scope { spawn { } }` (compiler-emitted calls) ----
 
-// Starts f on a new thread and adds it to the scope list `list`.
+// Starts f on a new thread (queued where none can be created) and adds it to the scope list
+// `list`.
 pub unsafe("f's captures stay valid until scope_join(list) returns (the lowering calls it at every exit of the scope)")
 fn scope_spawn(list: &mut usize, f: fn()) {
     let h = unsafe("f's captures stay valid until scope_join(list) returns: the handle goes on the list that call joins") start(f);
-    if h == 0 { return; }
     let th = h as *mut Thread;
     unsafe("th is the live record start returned; only the spawning thread links it") { (*th).next = *list; }
     *list = h;
 }
 
-// Joins every thread of the scope list (newest first) and empties it. A safe fn that trusts its
-// argument: `*list` must be 0 or the head of a chain built only by `scope_spawn` (each record
-// live and joined once, through this call), as the lowering of `scope` and std.thread.run pass it.
+// Joins every thread of the scope list, oldest first (the order queued fn values run in), and
+// empties it. A safe fn that trusts its argument: `*list` must be 0 or the head of a chain built
+// only by `scope_spawn` (each record live and joined once, through this call), as the lowering of
+// `scope` and std.thread.run pass it.
 pub fn scope_join(list: &mut usize) {
+    // the list is newest first: reverse it
+    let mut old: usize = 0;
     let mut h = *list;
     while h != 0 {
         let th = h as *mut Thread;
         let next = unsafe("h is the head of the chain scope_spawn built in *list, so a record start() created that no join has freed") (*th).next;
+        unsafe("only the spawning thread links the list") { (*th).next = old; }
+        old = h;
+        h = next;
+    }
+    h = old;
+    while h != 0 {
+        let th = h as *mut Thread;
+        let next = unsafe("h is a record of the reversed chain: start() created it and no join has freed it") (*th).next;
         unsafe("h came from start through scope_spawn and is in the list once, so this is its only join") { join(h); }
         h = next;
     }

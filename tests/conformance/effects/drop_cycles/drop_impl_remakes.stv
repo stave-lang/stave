@@ -1,0 +1,20 @@
+// A `Drop` impl that makes and drops a value of its own type is on an ordinary call cycle
+// (glue(N) -> N.drop -> glue(N)), not a drop cycle: it needs `rec`.
+import std.io;
+
+struct N {
+    k: u64,
+}
+
+impl Drop for N {
+    fn drop(&mut self) {
+        if self.k > 0 {
+            let n = N.{ k: self.k - 1 }; //~ ERROR E1402
+        }
+    }
+}
+
+fn main() {
+    let n = N.{ k: 3u64 };
+    io.print("made\n");
+}

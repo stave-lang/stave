@@ -1,0 +1,20 @@
+// Holding rank 1, a call through a fn value written by `*p` locks the same mutex.
+import std.io;
+import std.sync;
+
+fn nop(m: &sync.Mutex<u32, 1>) {}
+
+fn take(m: &sync.Mutex<u32, 1>) {
+    let g = m.lock();
+}
+
+fn main() {
+    let m = sync.Mutex::<u32, 1>.new(0);
+    let g = m.lock();
+    let mut f: fn(&sync.Mutex<u32, 1>) = nop;
+    let p = &mut f;
+    *p = take;
+    io.print("relocking\n");
+    f(&m); //~ ERROR E1405
+    io.print("unreachable\n");
+}

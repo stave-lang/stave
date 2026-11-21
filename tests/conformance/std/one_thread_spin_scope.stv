@@ -1,0 +1,16 @@
+// The spawning thread spins on an atomic until its child sets it, before the join. Natively the
+// child runs alongside; on a target that runs spawned work on one thread (the IR interpreter) the
+// body runs only at the join, so this never ends there (interp_gate lists it as not runnable).
+//~ STDOUT one_thread_spin_scope.stdout
+import std.atomic;
+import std.io;
+
+fn main() {
+    let flag = atomic.U32.new(0);
+    scope {
+        spawn { flag.store(1); }
+        while flag.load() == 0 {}
+    }
+    let v = flag.load();
+    io.print(f"done {v}\n");
+}

@@ -1,0 +1,24 @@
+// `mk2()()()`: each call through a fn value in the chain reaches its table.
+import std.io;
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+fn mk() -> fn() {
+    return noisy;
+}
+
+fn mk2() -> fn() -> fn() {
+    return mk;
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    mk2()()();
+}
+
+fn main() {
+    quiet();
+}

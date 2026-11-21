@@ -1,0 +1,30 @@
+// `h.f += noisy` on a view field: the field slot is untracked.
+import std.core;
+import std.io;
+
+impl core.Add for fn() {
+    fn add(self, rhs: Self) -> Self {
+        return noisy;
+    }
+}
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+view struct H {
+    f: fn(),
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let mut h = H.{ f: nop };
+    h.f += noisy;
+    let g = h.f;
+    g();
+}
+
+fn main() {
+    quiet();
+}

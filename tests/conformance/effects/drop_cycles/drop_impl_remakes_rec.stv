@@ -1,0 +1,20 @@
+// The same cycle with `rec fn drop` is accepted; it runs 4 nested drops.
+//~ STDOUT drop_impl_remakes_rec.stdout
+import std.io;
+
+struct N {
+    k: u64,
+}
+
+impl Drop for N {
+    rec fn drop(&mut self) {
+        io.print("drop\n");
+        if self.k > 0 {
+            let n = N.{ k: self.k - 1 };
+        }
+    }
+}
+
+fn main() {
+    let n = N.{ k: 3u64 };
+}
