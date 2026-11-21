@@ -2264,8 +2264,8 @@ impl<'a> FnCx<'a> {
                         }
                     }
                 }
-                // a temporary matched as a variant without droppable fields holds nothing to
-                // drop
+                // A temporary matched as a variant without droppable fields holds nothing to
+                // drop, unless a `Drop` impl of its type or of a type around it has to run.
                 if is_variant
                     && pm == Mode::Move
                     && let Some(l) = dp.root
@@ -2274,7 +2274,7 @@ impl<'a> FnCx<'a> {
                     && !fts.iter().any(|&t| self.needs_drop(t))
                 {
                     let (path, exact) = Self::part_path(&dp.proj);
-                    if exact {
+                    if exact && !self.drop_impl_around(l, &path, true) {
                         self.mark_moved(l, &path);
                     }
                 }

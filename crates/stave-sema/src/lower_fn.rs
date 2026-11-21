@@ -925,6 +925,22 @@ impl<'a> FnCx<'a> {
         (path, true)
     }
 
+    /// Whether the type of a part around the part at `path` of owner `l` has a `Drop` impl, or,
+    /// with `itself`, the type of that part too. Such a value is dropped by its impl as a whole:
+    /// no part of it is moved out or dropped on its own.
+    pub fn drop_impl_around(&mut self, l: usize, path: &[Step], itself: bool) -> bool {
+        let root = self.locals[l].ty;
+        let n = if itself { path.len() + 1 } else { path.len() };
+        for k in 0..n {
+            let t = self.part_ty(root, &path[..k]);
+            let w = self.g.world();
+            if crate::mono::drop_method(&w, &mut self.tys, t).is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
     /// The type of the part at `path` of a value of type `t`.
     fn part_ty(&mut self, mut t: Ty, path: &[Step]) -> Ty {
         for st in path {
@@ -980,6 +996,10 @@ impl<'a> FnCx<'a> {
     /// The part at `path` of owner `l` is moved out. An enum whose variant has no droppable
     /// field left holds nothing to drop: it counts as moved out itself.
     pub fn mark_moved(&mut self, l: usize, path: &[Step]) {
+        if self.drop_impl_around(l, path, false) {
+            self.fail_at(None, "a part moved out of a value whose type has a `Drop` impl");
+            return;
+        }
         let mut path = path.to_vec();
         let mut st = self.st(l).clone();
         if !st.covers(&path) {
@@ -1732,13 +1752,18 @@ impl<'a> FnCx<'a> {
     }
 
     /// Drops the part at `path` of owner `l`, which holds a value: as a whole when nothing
-    /// inside it is moved out or flagged, else field by field (an enum: by its variant). The
-    /// `Drop` impl of a type with a part moved out does not run.
+    /// inside it is moved out or flagged, else field by field (an enum: by its variant). A type
+    /// with a `Drop` impl is never taken apart.
     fn drop_held(&mut self, l: usize, p: &Place, path: &mut Path) {
         let inside = self.st(l).inside(path)
             || self.locals[l].flags.iter().any(|f| f.0.len() > path.len() && f.0.starts_with(path));
         if !inside {
             self.drop_place(p);
+            return;
+        }
+        let w = self.g.world();
+        if crate::mono::drop_method(&w, &mut self.tys, p.ty).is_some() {
+            self.fail_at(None, "a value whose type has a `Drop` impl has a part moved out");
             return;
         }
         let (variants, is_enum) = self.variants(p.ty);

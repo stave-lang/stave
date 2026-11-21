@@ -1,0 +1,32 @@
+mk 10
+b
+drop 10
+after
+mk 1011
+mk 11
+a
+drop 1011
+drop 11
+after
+mk 12
+b
+drop 12
+after
+mk 1013
+mk 13
+a
+drop 1013
+drop 13
+after
+mk 20
+drop 20
+mk 1021
+mk 21
+drop 1021
+drop 21
+mk 22
+rest
+drop 22
+mk 24
+drop 24
+end
