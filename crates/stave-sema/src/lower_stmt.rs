@@ -602,7 +602,7 @@ impl<'a> FnCx<'a> {
         self.inst_sig(&InstKey { decl: restore, args: Vec::new() })?;
         let f = self.req(Req::Inst(InstKey { decl: save, args: Vec::new() }));
         let v = self.f.b.call(f, Some(Self::ir(trace)), &[])?;
-        let (p, _) = self.spill(Operand::Value(v), trace, false);
+        let (p, _) = self.spill(Operand::Value(v), trace);
         Some((p, trace))
     }
 
