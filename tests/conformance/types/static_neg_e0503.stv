@@ -16,6 +16,7 @@ static P: Pt = Pt.{ x: 1, y: 2 };
 static T: [u8; 2] = [1, 2];
 static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0);
 static C: atomic.U32 = atomic.U32.new(0);
+static S: &str = "s";
 
 fn takes(r: &mut u32) { *r = 0; }
 
@@ -30,9 +31,12 @@ fn main() -> i32 {
     P.bump(); //~ ERROR E0503
     let g: &mut u32 = M.get_mut(); //~ ERROR E0503
     unsafe("no obligation makes a `static` writable") { N = 3; } //~ ERROR E0503
+    S = "t"; //~ ERROR E0503
+    let rs: &mut &str = &mut S; //~ ERROR E0503
     // reads, `&`, and `&self` methods are fine
     let s = P.sum() + N;
     let q: &Pt = &P;
+    let t: &&str = &S;
     let old = C.swap(s);
     M.with_lock(fn(v: &mut u32) { *v = 1; });
     return 0;
