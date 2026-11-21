@@ -294,6 +294,11 @@ an expression whose last step is a field, tuple field, element `e[i]`, sub-slice
 after `unsafe(..)`. Reason: a loop over a place reads (or writes) it while the body may change
 it; a reference makes the borrow visible and gives it one meaning in the checker and the code.
 
+By value: `for x in &a { let v = *x; .. }` reads each element of a Copy `T`. To move the
+elements of an array place out, make it a temporary: `for x in mem.replace(&mut a, b) { .. }`
+(or pass it through a fn that returns it). A `vec.Vec` gives up its elements by move through
+`pop()`, last first: `loop { match v.pop() { Option.Some(x) => { .. } Option.None => { break; } } }`.
+
 A `&` or `&mut` chunk binding (also the first `tail masked` binding) borrows a copy of the chunk
 that lives in its block; the chunk of the sequence stays borrowed until the block is left (its end, `break`, `continue`, `return`, `?`), where a
 `&mut` copy is stored back. So the binding cannot leave its block (`return Option.Some(v)`:
