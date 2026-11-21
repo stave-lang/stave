@@ -1,0 +1,13 @@
+//~ BORROWCHECK write-under-shared 10 0
+// A write of a `static` that is not `mut`, through a pointer without a tag: the root of the
+// static is read-only.
+static X: u32 = 1u32;
+
+fn main() -> i32 {
+    let p = &X as *const u32;
+    let a: usize = (p as usize) * 1;
+    let q = a as *mut u32;
+    unsafe("deliberate: a write of a static that is not mut") { *q = 2u32; }
+    if X == 2u32 { return 1; }
+    return 0;
+}

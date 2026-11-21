@@ -12,8 +12,10 @@
 //!
 //! Borrow tracking ([`Limits::borrow`], default from `STAVE_INTERP_CHECK=borrow`, which turns
 //! the checking mode on too): a violation of contracts/borrow-model.md ends the run with an
-//! error whose text starts `interp: borrow violation [<class>]`. It sees the borrows of a module
-//! lowered with the borrow side table ([`crate::pipeline::Output::for_interp`]).
+//! error whose text starts `interp: borrow violation [<class>]`; a run without one that has a
+//! `from` clause a call did not keep (M24) ends with an error whose text starts `interp: borrow
+//! signature [signature]`. It sees the borrows of a module lowered with the borrow side table
+//! ([`crate::pipeline::Output::for_interp`]).
 //!
 //! Files: the in-memory file system of [`stave_ir::BufferHost`] (`files`, relative paths), so a
 //! program reading `input.txt` from its working directory gets the same bytes.
@@ -135,6 +137,16 @@ pub fn run(
         Outcome::BorrowError(r) => return Err(format!("interp: {}", r.render(&m))),
         o => return Err(format!("interp: the program did not exit: {o:?}")),
     };
+    // a `from` clause a call did not keep is no violation: the run went on to its end, and
+    // the reports are its result
+    let signatures = it.signature_reports();
+    if let Some(first) = signatures.first() {
+        let more = match it.signature_count() {
+            0 | 1 => String::new(),
+            n => format!("\n  and {} more signature reports", n - 1),
+        };
+        return Err(format!("interp: {first}{more}"));
+    }
     let steps = it.steps();
     let leaks = it
         .live_heap_blocks()

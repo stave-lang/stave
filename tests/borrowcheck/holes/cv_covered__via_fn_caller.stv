@@ -1,0 +1,53 @@
+//~ BORROWCHECK use-after-referent 35 33
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+view struct Twin { out: &mut Pick, spare: &u32 }
+view struct Keep { t: &mut Twin }
+
+fn by_value(k: &mut Pick from l + y, l: Link, y: &u32) {
+    l.to.best = y;
+}
+
+fn by_value_caller() -> u32 {
+    let zero: u32 = 0;
+    let mut a = Pick.{ best: &zero, count: 0 };
+    let mut k = Pick.{ best: &zero, count: 0 };
+    {
+        let y: u32 = 7;
+        by_value(&mut k, Link.{ to: &mut a }, &y);
+    }
+    return *a.best;
+}
+
+fn via_fn(k: &mut Pick from f + y, f: fn() -> &mut Pick, y: &u32) {
+    let q = f();
+    q.best = y;
+}
+
+fn via_fn_caller() -> u32 {
+    let zero: u32 = 0;
+    let mut a = Pick.{ best: &zero, count: 0 };
+    let mut k = Pick.{ best: &zero, count: 0 };
+    {
+        let y: u32 = 7;
+        via_fn(&mut k, fn() -> &mut Pick { return &mut a; }, &y);
+    }
+    return *a.best;
+}
+
+fn shared_source(k: &mut Pick from i + y, i: &Twin, y: &u32) {
+    i.out.best = y;
+}
+
+fn copy_source(k: &mut Keep from copy x + y, x: &mut Twin, y: &u32) {
+    x.out.best = y;
+}
+
+fn other_clause(a: &mut Keep from x, b: &mut Pick from y, x: &mut Twin, y: &u32) {
+    x.out.best = y;
+}
+
+fn main() -> i32 {
+    let _ = via_fn_caller();
+    return 0;
+}

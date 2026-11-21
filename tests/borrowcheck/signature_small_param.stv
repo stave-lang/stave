@@ -1,0 +1,20 @@
+//~ BORROWCHECK signature 10 17
+// The control of `signature_cut_param.stv`: 8 words behind `sink`, so the walks are not cut.
+// The result, which its clause gives from `a`, holds `b`'s word.
+
+fn f(sink: &mut [&u32; 8], a: &u32, b: &u32) -> &u32 from a {
+    let mut r: &u32 = a;
+    let pr = &mut r as *mut &u32;
+    unsafe("deliberate: the result is b") { pr.write(b); }
+    sink[0] = sink[1];
+    return r;
+}
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let x: u32 = 1;
+    let y: u32 = 2;
+    let mut s: [&u32; 8] = [&zero; 8];
+    let r = f(&mut s, &x, &y);
+    if *r == 2 { return 0; }
+    return 1;
+}

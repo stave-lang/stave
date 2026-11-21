@@ -1,0 +1,27 @@
+//~ BORROWCHECK ok
+// A view nested 341 levels deep, holding one `&u32`, read through raw pointers: the walk that
+// gives each reference word of a raw load a new tag (M20) needs no deep native stack.
+view struct W<T: view> { pub v: T }
+view struct W4<T: view> { pub v: W<W<W<W<T>>>> }
+view struct W16<T: view> { pub v: W4<W4<W4<W4<T>>>> }
+view struct W64<T: view> { pub v: W16<W16<W16<W16<T>>>> }
+view struct W256<T: view> { pub v: W64<W64<W64<W64<T>>>> }
+
+fn w<T: view>(x: T) -> W<T> from x { return W.{ v: x }; }
+fn w4<T: view>(x: T) -> W4<T> from x { return W4.{ v: w(w(w(w(x)))) }; }
+fn w16<T: view>(x: T) -> W16<T> from x { return W16.{ v: w4(w4(w4(w4(x)))) }; }
+fn w64<T: view>(x: T) -> W64<T> from x { return W64.{ v: w16(w16(w16(w16(x)))) }; }
+fn w256<T: view>(x: T) -> W256<T> from x { return W256.{ v: w64(w64(w64(w64(x)))) }; }
+
+fn main() -> i32 {
+    let y: u32 = 7;
+    let deep = w256(&y);
+    let p = &deep as *const W256<&u32>;
+    let back: W256<&u32> = unsafe("p points to deep") p.read();
+    let again = &back as *const W256<&u32>;
+    let twice: W256<&u32> = unsafe("again points to back") again.read();
+    let q = &twice as *const W256<&u32> as *const &u32;
+    let r: &u32 = unsafe("the one reference is the first word of the view") q.read();
+    if *r == 7 { return 0; }
+    return 1;
+}

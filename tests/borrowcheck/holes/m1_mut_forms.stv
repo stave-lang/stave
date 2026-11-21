@@ -1,0 +1,71 @@
+//~ BORROWCHECK second-owner 21 19
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+view struct Link { to: &mut Pick }
+
+fn lit(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    let q: &mut Pick = &mut a;
+    let l = Link.{ to: q };
+    l.to.count = 2;
+    q.count = 1;
+    return a.count;
+}
+
+fn letb(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    let q: &mut Pick = &mut a;
+    let q2: &mut Pick = q;
+    q2.count = 2;
+    q.count = 1;
+    return a.count;
+}
+
+fn some(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    let q: &mut Pick = &mut a;
+    let o: Option<&mut Pick> = Option.Some(q);
+    match o {
+        Option.Some(p) => { p.count = 2; }
+        Option.None => {}
+    }
+    q.count = 1;
+    return a.count;
+}
+
+fn tup(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    let q: &mut Pick = &mut a;
+    let t = (q, 0u32);
+    t.0.count = 2;
+    q.count = 1;
+    return a.count;
+}
+
+fn assign(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    let mut b = Pick.{ best: zero, count: 0 };
+    let q: &mut Pick = &mut a;
+    let mut l = Link.{ to: &mut b };
+    l.to = q;
+    l.to.count = 2;
+    q.count = 1;
+    return a.count;
+}
+
+fn arr(zero: &u32) -> usize {
+    let mut a = Pick.{ best: zero, count: 0 };
+    let q: &mut Pick = &mut a;
+    let t = [q];
+    t[0].count = 2;
+    q.count = 1;
+    return a.count;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let n = lit(&zero) + letb(&zero) + some(&zero) + tup(&zero) + assign(&zero) + arr(&zero);
+    io.print(f"{n}\n");
+    return 0;
+}

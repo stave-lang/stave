@@ -552,6 +552,8 @@ pub struct Body {
     /// Borrow events the instructions do not show (contracts/borrow-model.md, "Side table").
     /// Empty unless the lowering was asked for them; not part of the canonical dump.
     pub borrows: Vec<BorrowMark>,
+    /// The other events of the side table, by the instruction that carries each.
+    pub events: Vec<EventMark>,
 }
 
 impl Body {
@@ -663,6 +665,58 @@ pub struct BorrowMark {
     pub mutable: bool,
 }
 
+/// The `from` clauses of a function: what its signature says of the references its result
+/// holds and of those it stores into the views its params point to.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Clauses {
+    pub kind: ClauseKind,
+    /// The result's clause: (source param, `copy`).
+    pub result: Vec<(u32, bool)>,
+    /// The params' clauses: (target param, source param, `copy`).
+    pub params: Vec<(u32, u32, bool)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClauseKind {
+    /// No signature to check a call against (drop glue).
+    #[default]
+    Unchecked,
+    /// A fn item or method: its clauses are the rows.
+    Item,
+    /// A closure body: no clause; every param and capture is a source of its result.
+    Closure,
+}
+
+/// An event of the side table that is no borrow: it happens when the instruction that defines
+/// `value` runs. For the kinds with a place, `value` is a pointer to it and the place is the
+/// pointee of the value's type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EventMark {
+    pub value: Value,
+    pub kind: EventKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EventKind {
+    /// A local or temporary begins in the slot the place is: the allocation that was there
+    /// ends, with every tag of it.
+    Begin,
+    /// The local or temporary in the slot ends.
+    End,
+    /// The value left the place (a move, or the end of a drop): the bytes end through the tag
+    /// of the pointer and are moved-out.
+    Gone,
+    /// An array repeat literal makes a second owner of a value that is not Copy.
+    Repeat,
+    /// `fn.make` is to copy the environment the pointer names into a slot of its own, so that
+    /// each evaluation of a closure literal holds its own capture references.
+    Env,
+    /// The slot holds a constant temporary, which is static data: its first evaluation begins
+    /// it, and the store of a later one (the instruction that follows) writes the bytes that
+    /// are there and is no event.
+    Const,
+}
+
 /// A function: signature plus an optional body (`None` = declared only, e.g. an `extern "C"`
 /// import; not printed, not executable by the interpreter).
 #[derive(Clone, Debug, PartialEq)]
@@ -730,6 +784,11 @@ pub struct Module {
     /// The declaration of `std.cell.UnsafeCell`, in a module lowered with the borrow side
     /// table: the bytes of a value of such a type are not read-only behind a `&`.
     pub cell: Option<crate::types::DeclId>,
+    /// Per `static`, in a module lowered with the borrow side table: it is not `static mut`,
+    /// so nothing writes its bytes outside an `UnsafeCell`.
+    pub frozen: Vec<bool>,
+    /// Per function, in a module lowered with the borrow side table: its `from` clauses.
+    pub clauses: Vec<Clauses>,
 }
 
 impl Module {

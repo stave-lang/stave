@@ -1,0 +1,50 @@
+//~ BORROWCHECK ok
+// An auto-referenced `&self` receiver that is a constant (a `const` item, a variant without
+// payload, a literal in parentheses) is a constant temporary: a result that borrows it stays
+// usable after the next evaluation of the call.
+struct P { x: u32 }
+enum Dir { Up, Down }
+
+impl P {
+    fn get(&self) -> &u32 from self { return &self.x; }
+}
+
+impl Dir {
+    fn me(&self) -> &Dir from self { return self; }
+}
+
+trait Peek {
+    fn peek(&self) -> &u32 from self;
+}
+
+impl Peek for u32 {
+    fn peek(&self) -> &u32 from self { return self; }
+}
+
+const K: P = P.{ x: 3u32 };
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let start: Dir = Dir.Down;
+    let mut r: &u32 = &zero;
+    let mut d: &Dir = &start;
+    let mut l: &u32 = &zero;
+    let mut sum: u32 = 0;
+    let mut i: u32 = 0;
+    while i < 3 {
+        let before: &u32 = r;
+        let dir: &Dir = d;
+        let lit: &u32 = l;
+        r = K.get();
+        d = (Dir.Up).me();
+        l = (4u32).peek();
+        sum = sum + *before + *lit;
+        match *dir {
+            Dir.Up => { sum = sum + 1; }
+            Dir.Down => {}
+        }
+        i = i + 1;
+    }
+    if sum == 16 { return 0; }
+    return 1;
+}

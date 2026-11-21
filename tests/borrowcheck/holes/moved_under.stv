@@ -1,6 +1,5 @@
-//~ BORROWCHECK gap
-// A `&` into a value read after the value was moved: a move is no event of the tracking mode
-// yet.
+//~ BORROWCHECK use-after-referent 9 8
+// A `&` into a value read after the value was moved: the move ended the bytes it borrowed.
 struct S { a: u32 }
 
 fn main() -> i32 {

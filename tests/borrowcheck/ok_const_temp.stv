@@ -1,0 +1,33 @@
+//~ BORROWCHECK ok
+// A borrow of a constant temporary (a literal, a `const` item, an element of one) is a borrow
+// of static data: the next evaluation of its expression does not end it, and a reference of
+// the round before stays usable.
+const TABLE: [u32; 2] = [7u32, 9u32];
+const K: u32 = 3u32;
+
+fn main() -> i32 {
+    let zero: u32 = 0u32;
+    let mut lit: &u32 = &zero;
+    let mut tab: &[u32; 2] = &TABLE;
+    let mut k: &u32 = &zero;
+    let mut el: &u32 = &zero;
+    let mut par: &u32 = &zero;
+    let mut sum: u32 = 0u32;
+    let mut i: u32 = 0u32;
+    while i < 3u32 {
+        let old_lit: &u32 = lit;
+        let old_tab: &[u32; 2] = tab;
+        let old_k: &u32 = k;
+        let old_el: &u32 = el;
+        let old_par: &u32 = par;
+        lit = &4u32;
+        tab = &TABLE;
+        k = &K;
+        el = &TABLE[1];
+        par = &(5u32);
+        sum = sum + *old_lit + old_tab[0] + *old_k + *old_el + *old_par;
+        i = i + 1u32;
+    }
+    if sum == 63u32 { return 0; }
+    return 1;
+}
