@@ -65,9 +65,11 @@ fn case4_nested() {
     io.print("4 end\n");
 }
 
+fn own(ss: [S; 2]) -> [S; 2] { return ss; }
+
 fn case5_for() {
     let ss: [S; 2] = [mk(80), mk(90)];
-    for S.{ a, b: _, n } in ss {
+    for S.{ a, b: _, n } in own(ss) {
         io.print(f"5 iter {n}\n");
     }
     io.print("5 end\n");

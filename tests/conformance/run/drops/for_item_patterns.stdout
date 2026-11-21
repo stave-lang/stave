@@ -20,6 +20,7 @@ drop 11
 drop 12
 body
 drop 10
+drop 3
 loop 1 done
 mk 1
 mk 10
@@ -29,6 +30,7 @@ read
 drop 10
 drop 11
 drop 12
+drop 1
 mk 2
 mk 20
 mk 21
@@ -44,7 +46,5 @@ drop 12
 whole
 drop 10
 drop 11
-end
 drop 2
-drop 1
-drop 3
+end
