@@ -1688,14 +1688,15 @@ impl<'a> Ck<'a> {
                     }),
                 };
                 let tok = self.icx.end_tok(n);
-                self.target(tok, Target::Variant { decl, index });
                 match args {
                     Some(a) => {
                         let t = self.tys.mk_adt(adt, a);
+                        self.target(tok, Target::Variant { decl, index, ty: t });
                         self.owned(tok, t);
                         Ty::T(t)
                     }
                     None => {
+                        self.target(tok, Target::Variant { decl, index, ty: ids::ERROR });
                         self.e0202_infer(n);
                         Ty::ERR
                     }
@@ -2738,8 +2739,8 @@ impl<'a> Ck<'a> {
                 let gargs: Vec<GArg> = binds.into_iter().flatten().collect();
                 let gens = adef.generics.clone();
                 self.check_bounds(cspan, adt, &gens, &gargs, None);
-                self.target(paren, Target::Variant { decl, index });
                 let t = self.tys.mk_adt(adt, gargs);
+                self.target(paren, Target::Variant { decl, index, ty: t });
                 self.owned(paren, t);
                 Ty::T(t)
             }
@@ -3391,7 +3392,9 @@ impl<'a> Ck<'a> {
                     // vector operands.
                     let mut ats = Vec::new();
                     let (ret, out) = if b.name == "select" && matches!(self.tys.kind(c), TypeKind::Bool) {
-                        (ret, self.select_operands(args, hint))
+                        let out = self.select_operands(args, hint);
+                        self.selects.push((seg, out));
+                        (ret, out)
                     } else {
                         ats = self.builtin_args(&ps, args);
                         let ret = if b.name == "select" { self.select_ty(c, &ats, args) } else { ret };
@@ -3804,8 +3807,8 @@ impl<'a> Ck<'a> {
         let gens = adef.generics.clone();
         self.check_bounds(icx.tok_span(tok), adt, &gens, &gargs, None);
         match vidx {
-            Some(i) => self.target(tok, Target::Variant { decl: v.decl, index: i }),
-            None => self.target(tok, Target::Struct { decl: adt }),
+            Some(i) => self.target(tok, Target::Variant { decl: v.decl, index: i, ty: t }),
+            None => self.target(tok, Target::Struct { decl: adt, ty: t }),
         }
         self.owned(tok, t);
         Ty::T(t)

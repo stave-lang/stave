@@ -71,10 +71,10 @@ pub enum Target {
     Builtin { name: &'static str, recv: TypeId, adjust: Adjust, ret: TypeId, consts: Vec<u64> },
     /// A user-type operator: the trait method (`Add.add`) through the impl or a bound.
     Op { method: MethodRef, args: Vec<GArg> },
-    /// An enum variant constructor or value.
-    Variant { decl: DeclId, index: u32 },
-    /// A struct literal.
-    Struct { decl: DeclId },
+    /// An enum variant constructor or value; `ty`: the enum type of the value made.
+    Variant { decl: DeclId, index: u32, ty: TypeId },
+    /// A struct literal; `ty`: the struct type of the value made.
+    Struct { decl: DeclId, ty: TypeId },
     /// Field `index` of the struct (after `derefs` auto-derefs).
     Field { decl: DeclId, index: u32, derefs: u32 },
     /// Tuple element.
@@ -578,7 +578,11 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
                 *recv = f(*recv);
                 *ret = f(*ret);
             }
-            Target::SizeOf { ty, .. } | Target::FnValue { ty } | Target::SoaRow { ty, .. } => *ty = f(*ty),
+            Target::SizeOf { ty, .. }
+            | Target::FnValue { ty }
+            | Target::SoaRow { ty, .. }
+            | Target::Variant { ty, .. }
+            | Target::Struct { ty, .. } => *ty = f(*ty),
             _ => {}
         }
     }
@@ -717,6 +721,9 @@ pub(crate) struct Ck<'a> {
     pub sites: Vec<CallSite>,
     pub implicit: Vec<(u32, Target)>,
     pub for_kinds: Vec<(u32, crate::loops::ForKind)>,
+    /// `c.select(a, b)` on a `bool`: the token of its target and the type of its operands, which
+    /// is its result type once the literals among them are fixed.
+    pub selects: Vec<(u32, Ty)>,
     pub drops: Vec<(u32, TypeId)>,
     pub denied: Vec<(u32, u8, u32)>,
     pub valued: Vec<(u32, u8, u32)>,
@@ -789,6 +796,7 @@ fn check_body(
         sites: Vec::new(),
         implicit: Vec::new(),
         for_kinds: Vec::new(),
+        selects: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
         valued: Vec::new(),
@@ -1535,6 +1543,16 @@ impl<'a> Ck<'a> {
         }
         let mut locals: Vec<(u32, TypeId)> = self.locals.iter().map(|(&k, &v)| (k, v)).collect();
         locals.sort_by_key(|x| x.0);
+        for (tok, out) in std::mem::take(&mut self.selects) {
+            let t = match self.resolve(out) {
+                Ty::T(t) => t,
+                Ty::Lit(_) => ids::ERROR,
+            };
+            if let Some((_, Target::Builtin { ret, .. })) = self.targets.iter_mut().rev().find(|x| x.0 == tok)
+            {
+                *ret = t;
+            }
+        }
         self.targets.sort_by_key(|x| x.0);
         self.implicit.sort_by_key(|x| x.0);
         self.record_drops();

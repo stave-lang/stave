@@ -1724,7 +1724,7 @@ impl<'a> FnCx<'a> {
                 }
                 self.call_result(r, ret)
             }
-            Some(Target::Variant { decl, index }) => {
+            Some(Target::Variant { decl, index, .. }) => {
                 let adt = self.g.prog.decl(decl).map_or(crate::ids::DeclId::NONE, |d| d.parent);
                 let made = self.variant_ctor(n, adt, index, args, last);
                 if adt == self.g.sigs.lang.result && index == self.g.res_err {
@@ -1903,8 +1903,8 @@ impl<'a> FnCx<'a> {
 
     fn struct_lit(&mut self, n: u32, sl: Option<u32>, tok: u32, last: bool) -> E {
         let (adt, vidx) = match self.target(tok) {
-            Some(Target::Struct { decl }) => (*decl, None),
-            Some(Target::Variant { decl, index }) => {
+            Some(Target::Struct { decl, .. }) => (*decl, None),
+            Some(Target::Variant { decl, index, .. }) => {
                 (self.g.prog.decl(*decl).map_or(crate::ids::DeclId::NONE, |d| d.parent), Some(*index))
             }
             _ => return self.fail_at(Some(tok), "struct literal without a target"),

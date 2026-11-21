@@ -208,6 +208,32 @@ a whole value is dropped or read only when it is initialized.
 **What would break it.** A by-value use built without `move_out`; a pattern whose ignored parts
 the lowering keeps in the place; `p.read()` of a part (unsafe: its obligation).
 
+## The type of a value: one answer for every stage
+
+**Claim.** The borrow checker judges each value (Copy or moved, with drop glue or without, what
+it borrows) on the type the type checker gave it, and the lowering builds a value of that type.
+
+**Assumptions.** A chain's node has the type of its last step only. For a step in the middle
+that makes a value the type checker records the type with the step's target: the value of a
+struct literal, of a variant constructor, and of a variant without payload; the result of a
+built-in, which for `select` on a `bool` is its operands' type. A call's result type is its
+signature's under the recorded generic args, a fn value's is in its fn type. The CFG builder
+and the lowering read these and infer nothing from the operands.
+
+**Argument.** An unknown type counts as Copy and as having no drop glue, so that a body with a
+type error reports nothing more. A value of a body without type errors must therefore never
+have one: its parts could be moved out unseen, and a borrow of it could outlive its drop. Every
+temporary the CFG builder makes for a value goes through one step, which fails the body as not
+checked (an internal error, the program is not accepted) when the type is unknown. A variant
+without payload whose enum has drop glue is a temporary that ends with its statement, as a
+constructor's value is; only one without drop glue is a constant (contracts/borrow-model.md
+"constant temporary").
+
+**What would break it.** A stage that computes such a type for itself (inferring a literal's
+generic args from its field values gives no answer where a field value is coerced, and ignores
+written args), a step form that takes the chain's type for its own, or a value the CFG builder
+makes without a typed temporary.
+
 ## Places that are never moved from: statics
 
 **Claim.** No accepted program moves the value of an immutable `static` or of a part of it.

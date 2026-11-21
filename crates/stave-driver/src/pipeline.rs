@@ -681,7 +681,7 @@ fn unchecked_failure(
         return Some(Failure::Internal {
             stage: Stage::Borrowck,
             message: format!(
-                "the borrow checker disagrees with the capture analysis on `{}` ({why})",
+                "the borrow checker disagrees with the stages before it on `{}` ({why})",
                 path(d)
             ),
         });
@@ -744,13 +744,13 @@ mod tests {
             "`borrowck` is not implemented yet for this program: the borrow checker cannot check \
              `pkg.f7` (expression nesting too deep)"
         );
-        // a disagreement with the capture analysis is a compiler bug, whatever else is unchecked
+        // a disagreement with an earlier stage is a compiler bug, whatever else is unchecked
         bc.internal.push((stave_sema::DeclId(8), "a capture held by `&` is mutated"));
         let f = unchecked_failure(&bc, |d| format!("pkg.f{}", d.0)).unwrap();
         assert!(matches!(&f, Failure::Internal { stage: Stage::Borrowck, .. }));
         assert_eq!(
             f.to_string(),
-            "borrowck failed: the borrow checker disagrees with the capture analysis on `pkg.f8` \
+            "borrowck failed: the borrow checker disagrees with the stages before it on `pkg.f8` \
              (a capture held by `&` is mutated)"
         );
     }

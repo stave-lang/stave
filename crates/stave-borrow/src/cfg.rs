@@ -37,7 +37,7 @@ use stave_sema::itemcx::ItemCx;
 use stave_sema::loops::ForKind;
 use stave_sema::traits::{Adjust, Lookup, World};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
-use stave_sema::{BindingRef, Coercion, DeclKind, Res, Sym, Target, TypedBody};
+use stave_sema::{BindingRef, Coercion, DeclKind, Res, Target, TypedBody};
 use stave_syntax::{NodeKind, Term};
 
 use crate::ty::{DerefKind, Flows, Tys, call_flows, fn_value_flows};
@@ -516,6 +516,14 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
     }
 
+    /// The type of a value the type checker recorded no type for. An unknown type counts as
+    /// Copy and as having no drop glue, so a value of one would be moved, taken apart, and
+    /// outlived by its borrows unseen: the body is not checked, and the run fails.
+    fn untyped(&mut self) -> TypeId {
+        self.body.internal.get_or_insert("a value without a type");
+        TypeId::NONE
+    }
+
     // ---------- CFG primitives ----------
 
     fn new_block(&mut self) -> BlockId {
@@ -658,6 +666,9 @@ impl<'a, 'b> Builder<'a, 'b> {
     fn put_temp(&mut self, rv: Rvalue, ty: TypeId, n: u32) -> V {
         if !self.open() {
             return V::Never;
+        }
+        if self.tys.is_unknown(ty) {
+            self.untyped();
         }
         let t = self.temp(ty, n);
         let span = self.span(n);
@@ -2572,7 +2583,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         match icx.use_at(n, a) {
             Some(u) => {
                 let r = u.res;
-                self.path_val(r, u.token)
+                self.path_val(r, u.token, n, icx.end_tok(n))
             }
             None => V::Const,
         }
@@ -2587,12 +2598,31 @@ impl<'a, 'b> Builder<'a, 'b> {
 
     /// The value of path `r` (last segment at token `tok`). An immutable `static` is a place
     /// that is never moved from: a temporary standing for its storage ([`Local::static_root`]).
-    fn path_val(&mut self, r: Res, tok: u32) -> V {
+    /// The value of the path resolved to `r` whose last segment is at token `tok`, in the chain
+    /// of node `n`; `at`: the token where the type checker records the target of a path value
+    /// that ends there.
+    fn path_val(&mut self, r: Res, tok: u32, n: u32, at: u32) -> V {
         if let Some(l) = self.local_of(r) {
             return V::P(Place::local(l, self.body.locals[l as usize].ty));
         }
         let Res::Decl(d) = r else { return V::Const };
         let Some(decl) = self.tys.prog.decl(d) else { return V::Const };
+        if decl.kind == DeclKind::Variant {
+            // a variant without payload is a value of its enum: when the enum has drop glue it
+            // is a temporary that ends with its statement, as a constructor's value is
+            let ty = match self.tb.target(at) {
+                Some(Target::Variant { ty, .. }) if !self.tys.is_unknown(*ty) => *ty,
+                _ => self.untyped(),
+            };
+            if !self.tys.needs_drop(ty) {
+                return V::Const;
+            }
+            let v = self.put_temp(Rvalue::Agg(Vec::new()), ty, n);
+            if let V::P(tp) = &v {
+                self.body.locals[tp.local as usize].span = self.icx.range_span(self.icx.a(n), tok);
+            }
+            return v;
+        }
         if decl.kind != DeclKind::Static || decl.flags.has(stave_sema::DeclFlags::MUT) || !self.open() {
             return V::Const;
         }
@@ -2717,7 +2747,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                     p = q;
                     continue;
                 }
-                let recv = self.cur_value(cur);
+                let recv = self.cur_value(cur, n);
                 if matches!(recv, V::Never) {
                     return V::Never;
                 }
@@ -2740,7 +2770,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 continue;
             }
             if t == Term::Dot as u8 && icx.is(p + 1, Term::IntLit) {
-                let recv = self.cur_value(cur);
+                let recv = self.cur_value(cur, n);
                 cur = Cur::Val(self.field_step(recv, p + 1, n));
                 p += 2;
                 continue;
@@ -2751,13 +2781,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 kid += 1;
                 let last = close == pend;
                 let fields = sl.map(|s| icx.kids_vec(s)).unwrap_or_default();
-                let ty = if last {
-                    self.nty(n)
-                } else {
-                    let named: Vec<(Option<Sym>, u32)> =
-                        fields.iter().map(|&e| (Some(icx.sym(icx.a(e).saturating_sub(2))), e)).collect();
-                    self.literal_ty(p, &named)
-                };
+                let ty = self.literal_ty(p);
                 cur = Cur::Val(self.agg_ty(n, &fields, ty));
                 // the value is named by the literal's text, not by the rest of the chain
                 if !last && let Cur::Val(V::P(tp)) = &cur {
@@ -2784,13 +2808,13 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let close = icx.close(p);
                 let ie = kids.get(kid).copied();
                 kid += 1;
-                let base = self.cur_value(cur);
+                let base = self.cur_value(cur, n);
                 cur = Cur::Val(self.index_step(base, ie, p, n));
                 p = close + 1;
                 continue;
             }
             if t == Term::Question as u8 {
-                let base = self.cur_value(cur);
+                let base = self.cur_value(cur, n);
                 let last = p == pend;
                 cur = Cur::Val(self.try_step(n, base, p, last));
                 p += 1;
@@ -2800,53 +2824,31 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
         match cur {
             Cur::Val(v) => v,
-            Cur::Path(r, tok) => self.path_val(r, tok),
+            Cur::Path(r, tok) => self.path_val(r, tok, n, pend),
             Cur::TypeRel => V::Const,
         }
     }
 
-    fn cur_value(&mut self, cur: Cur) -> V {
+    /// The value of the chain of node `n` so far, used by its next step.
+    fn cur_value(&mut self, cur: Cur, n: u32) -> V {
         match cur {
             Cur::Val(v) => v,
-            Cur::Path(r, tok) => self.path_val(r, tok),
+            Cur::Path(r, tok) => {
+                let at = self.icx.chain_head(n).map_or(tok, |prim| self.icx.primary_end(prim));
+                self.path_val(r, tok, n, at)
+            }
             Cur::TypeRel => V::Const,
         }
     }
 
-    /// The type of the struct literal or variant constructor whose target is at token `tok`,
-    /// when it is not the last step of its chain (the chain's node has the type of the last
-    /// step only): the ADT, its generic args inferred from the types of the field values
-    /// (`fields`: the field's name, or `None` for the next positional one, and its value's node).
-    /// A value without a type would count as Copy, and a part moved out of it would go unseen.
-    fn literal_ty(&mut self, tok: u32, fields: &[(Option<Sym>, u32)]) -> TypeId {
-        let (adt, vi) = match self.tb.target(tok) {
-            Some(Target::Struct { decl }) => (*decl, 0usize),
-            Some(Target::Variant { decl, index }) => match self.tys.prog.decl(*decl) {
-                Some(d) => (d.parent, *index as usize),
-                None => return TypeId::NONE,
-            },
-            _ => return TypeId::NONE,
-        };
-        let sigs = self.tys.sigs;
-        let Some(ad) = sigs.adt(adt) else { return TypeId::NONE };
-        let mut binds: Vec<Option<GArg>> = vec![None; ad.generics.len()];
-        if let Some(v) = ad.variants.get(vi) {
-            let w = World { prog: self.tys.prog, sigs };
-            for (k, &(name, e)) in fields.iter().enumerate() {
-                let field = match name {
-                    Some(name) => v.fields.iter().find(|f| f.name == name),
-                    None => v.fields.get(k),
-                };
-                if let Some(f) = field {
-                    let t = self.nty(e);
-                    let _ = w.match_ty(&self.tys.ov, f.ty, t, &mut binds);
-                }
-            }
+    /// The type of the struct literal or variant constructor whose target is at token `tok`:
+    /// the one the type checker gave the value it makes (the chain's node has the type of the
+    /// last step only). Nothing is inferred here: a second answer could differ from the first.
+    fn literal_ty(&mut self, tok: u32) -> TypeId {
+        match self.tb.target(tok) {
+            Some(Target::Struct { ty, .. } | Target::Variant { ty, .. }) if !self.tys.is_unknown(*ty) => *ty,
+            _ => self.untyped(),
         }
-        if binds.iter().any(|b| b.is_none()) {
-            return TypeId::NONE;
-        }
-        self.tys.ov.mk_adt(adt, binds.into_iter().flatten().collect())
     }
 
     fn agg_ty(&mut self, n: u32, kids: &[u32], ty: TypeId) -> V {
@@ -2988,12 +2990,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
             Some(Target::Variant { .. }) => {
                 let Some(ops) = self.args(args, span) else { return V::Never };
-                let ty = if last {
-                    node_ty
-                } else {
-                    let positional: Vec<(Option<Sym>, u32)> = args.iter().map(|&a| (None, a)).collect();
-                    self.literal_ty(paren, &positional)
-                };
+                let ty = self.literal_ty(paren);
                 let v = self.put_temp(Rvalue::Agg(ops), ty, n);
                 if !last && let V::P(tp) = &v {
                     self.body.locals[tp.local as usize].span = span;
@@ -3004,7 +3001,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 self.direct_call(method, &ga, Some(self_ty), args, last, n, (span, paren))
             }
             Some(Target::FnValue { .. }) => {
-                let fv = self.cur_value(cur);
+                let fv = self.cur_value(cur, n);
                 let Some(fp) = self.place_of(fv, n) else { return V::Never };
                 let ft = fp.ty;
                 let fop = self.op_of_place(fp, span, n, false);
@@ -3044,8 +3041,24 @@ impl<'a, 'b> Builder<'a, 'b> {
             },
             _ => {
                 let Some(ops) = self.args(args, span) else { return V::Never };
-                let flows = self.flows_if(node_ty, || Flows::AllArgs);
-                self.call_result(Rvalue::call(ops, flows, paren), node_ty, n, span)
+                // a type-relative built-in (`f32x4.splat(x)`) has its target at its name token
+                let ty = if last {
+                    node_ty
+                } else {
+                    let mut name = paren.saturating_sub(1);
+                    if icx.is(name, Term::Gt) || icx.is(name, Term::GtGt) {
+                        while name > icx.a(n) && !icx.is(name, Term::ColonColon) {
+                            name -= 1;
+                        }
+                        name = name.saturating_sub(1);
+                    }
+                    match self.tb.target(name) {
+                        Some(Target::Builtin { ret, .. }) => *ret,
+                        _ => TypeId::NONE,
+                    }
+                };
+                let flows = self.flows_if(ty, || Flows::AllArgs);
+                self.call_result(Rvalue::call(ops, flows, paren), ty, n, span)
             }
         }
     }
@@ -3140,7 +3153,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                     None => (*adjust, None, node_ty),
                 }
             }
-            Some(Target::Builtin { adjust, .. }) => (*adjust, None, node_ty),
+            Some(Target::Builtin { adjust, ret, .. }) => (*adjust, None, if last { node_ty } else { *ret }),
             _ => (Adjust::default(), None, node_ty),
         };
         let Some((rop, act)) = self.receiver(recv, adj, n, rspan) else { return V::Never };
