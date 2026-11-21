@@ -226,6 +226,8 @@ pub struct Loan {
     /// The reborrow of a temporary that holds exactly this loan (`f(&mut x)`: the argument is
     /// `&mut *t` with `t = &mut x`): the same pointer, to the whole of that loan's place.
     pub whole: Option<LoanId>,
+    /// The reborrow a `&mut` place cast to `*mut` stands for.
+    pub cast: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -677,6 +679,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             reserved,
             capture: false,
             whole: None,
+            cast: false,
         });
         (self.body.loans.len() - 1) as LoanId
     }
@@ -2392,6 +2395,9 @@ impl<'a, 'b> Builder<'a, 'b> {
                     let span = self.span(n);
                     let (r, _) =
                         self.borrow(p.clone().with(Proj::Deref(DerefKind::Mut), inner), true, false, span, n);
+                    if let Some(l) = self.body.loans.last_mut() {
+                        l.cast = true;
+                    }
                     let Some(op) = self.read(r, first) else { return V::Never };
                     return self.put_temp(Rvalue::Pure(vec![op]), ty, n);
                 }
