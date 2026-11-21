@@ -1,0 +1,14 @@
+//~ BORROWCHECK signature 11 11
+// A fn returns a reference that the clause of its result does not name. Both referents
+// outlive the result, so no rule of the model is broken: the report is the signature.
+fn first(a: &u32, b: &u32) -> &u32 from a {
+    return b;
+}
+
+fn main() -> i32 {
+    let x: u32 = 1u32;
+    let y: u32 = 2u32;
+    let r: &u32 = first(&x, &y);
+    if *r == 2u32 { return 0; }
+    return 1;
+}

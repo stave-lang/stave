@@ -1,0 +1,122 @@
+//~ BORROWCHECK use-after-referent 23 106
+// A statement that replaces a holder: the new value keeps what the old one borrowed.
+import std.io;
+import std.string;
+
+view struct Pick { best: &u32, count: usize }
+view struct Cur { cur: &u32, n: u32 }
+view struct Hold { c: &mut Cur }
+view struct Text { src: &str, n: usize }
+
+fn idv(c: Cur) -> Cur from c {
+    return c;
+}
+
+fn dup(p: &Pick) -> Pick from copy p {
+    return Pick.{ best: p.best, count: p.count };
+}
+
+fn point(dst: &mut Cur from src, src: &mut Cur) {
+}
+
+fn keep2(t: &mut Text from s, s: &str, owner: string.String) {
+    t.src = s;
+}
+
+fn swap_g<T: view>(a: &mut T from copy b, b: &mut T from copy a) {
+    let pa = &mut *a as *mut T;
+    let pb = &mut *b as *mut T;
+    let t = unsafe("pa comes from a") pa.read();
+    unsafe("pa was moved out, pb is distinct") { pa.write(pb.read()); }
+    unsafe("pb was moved out") { pb.write(t); }
+}
+
+fn rebuilt_from_itself(zero: &u32) -> u32 {
+    let mut x: u32 = 1;
+    let mut k = Pick.{ best: &x, count: 0 };
+    k = Pick.{ best: k.best, count: 1 };
+    x = 5; //!
+    return *k.best;
+}
+
+fn alias_copied_out(zero: &u32) -> u32 {
+    let mut x: u32 = 1;
+    let mut k = Pick.{ best: &x, count: 0 };
+    let r: &u32 = k.best;
+    k = Pick.{ best: zero, count: 1 };
+    x = 5; //!
+    return *r + *k.best;
+}
+
+fn by_value_round_trip(zero: &u32) -> u32 {
+    let mut x: u32 = 1;
+    let mut c = Cur.{ cur: &x, n: 0 };
+    c = idv(c);
+    x = 5; //!
+    return *c.cur;
+}
+
+fn copy_round_trip(zero: &u32) -> u32 {
+    let mut x: u32 = 1;
+    let mut k = Pick.{ best: &x, count: 0 };
+    k = dup(&k);
+    x = 5; //!
+    return *k.best;
+}
+
+fn holder_rebuilt(zero: &u32) -> u32 {
+    let mut b = Cur.{ cur: zero, n: 1 };
+    let mut h = Hold.{ c: &mut b };
+    h = Hold.{ c: h.c };
+    b.n = 2; //!
+    return h.c.n;
+}
+
+fn grown_then_rebuilt(zero: &u32) -> u32 {
+    let mut a = Cur.{ cur: zero, n: 5 };
+    {
+        let mut b = Cur.{ cur: zero, n: 1 };
+        point(&mut a, &mut b);
+        a = Cur.{ cur: a.cur, n: 6 };
+    } //!
+    return *a.cur;
+}
+
+fn swapped(zero: &u32) -> u32 {
+    let mut x: u32 = 1;
+    let mut a = Pick.{ best: &x, count: 0 };
+    let mut b = Pick.{ best: zero, count: 0 };
+    swap_g(&mut a, &mut b);
+    a = Pick.{ best: zero, count: 2 };
+    x = 5; //!
+    return *b.best;
+}
+
+fn swapped_tuple(zero: &u32) -> u32 {
+    let mut x: u32 = 1;
+    let mut t: (&u32, &u32) = (&x, zero);
+    t = (t.1, t.0);
+    x = 5; //!
+    return *t.1;
+}
+
+fn moved_owner_in_call() -> usize {
+    let mut t = Text.{ src: "", n: 0 };
+    let s = f"owned text";
+    keep2(&mut t, s.as_str(), s); //!
+    return t.src.len();
+}
+
+fn pointer_walk(zero: &u32) -> u32 {
+    let mut x: u32 = 1;
+    let mut c = Cur.{ cur: &x, n: 0 };
+    let mut q = &mut c;
+    q = &mut *q;
+    x = 5; //!
+    return *q.cur;
+}
+
+fn main() -> i32 {
+    let _ = moved_owner_in_call();
+    return 0;
+}

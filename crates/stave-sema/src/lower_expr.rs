@@ -194,6 +194,15 @@ impl<'a> FnCx<'a> {
         }
     }
 
+    /// The value of a reference expression that is dereferenced or reborrowed: a place is
+    /// read, never moved out of.
+    pub fn ref_operand(&mut self, e: E) -> Option<Operand> {
+        match e {
+            E::P(p) => self.peek(&p),
+            e => self.operand_of(e),
+        }
+    }
+
     pub fn e_ty(&mut self, e: &E) -> Ty {
         match e {
             E::V(_, t) => *t,
@@ -233,7 +242,7 @@ impl<'a> FnCx<'a> {
         match c {
             Coercion::MutToShared => {
                 let t = self.e_ty(&e);
-                let Some(v) = self.operand_of(e) else { return E::Never };
+                let Some(v) = self.ref_operand(e) else { return E::Never };
                 let Some((inner, _, raw)) = self.pointee(t) else { return E::V(v, t) };
                 let w = match want {
                     Some(w) => w,
@@ -245,7 +254,7 @@ impl<'a> FnCx<'a> {
             }
             Coercion::ArrayToSlice => {
                 let t = self.e_ty(&e);
-                let Some(v) = self.operand_of(e) else { return E::Never };
+                let Some(v) = self.ref_operand(e) else { return E::Never };
                 let Some((inner, m, _)) = self.pointee(t) else { return E::V(v, t) };
                 let TypeKind::Array { elem, len } = self.kind(inner) else { return E::V(v, t) };
                 let n = len.value().unwrap_or(0);
@@ -265,7 +274,7 @@ impl<'a> FnCx<'a> {
             }
             Coercion::Unalign => {
                 let t = self.e_ty(&e);
-                let Some(v) = self.operand_of(e) else { return E::Never };
+                let Some(v) = self.ref_operand(e) else { return E::Never };
                 let Some((inner, m, _)) = self.pointee(t) else { return E::V(v, t) };
                 let TypeKind::Slice { elem, .. } = self.kind(inner) else { return E::V(v, t) };
                 let w = match want {
@@ -280,7 +289,7 @@ impl<'a> FnCx<'a> {
             }
             Coercion::StringToStr => {
                 let t = self.e_ty(&e);
-                let Some(v) = self.operand_of(e) else { return E::Never };
+                let Some(v) = self.ref_operand(e) else { return E::Never };
                 let s = self.string_ty();
                 let want_ref = self.t_ref(false, s);
                 let v = self.convert_ptr(v, t, want_ref);
@@ -327,7 +336,7 @@ impl<'a> FnCx<'a> {
                     self.coerce(e, &Coercion::Unalign, want)
                 } else if self.g.borrows && matches!(self.kind(t), TypeKind::Ref { .. }) {
                     // an implicit reborrow is a borrow through the reference given (M6)
-                    let Some(v) = self.operand_of(e) else { return E::Never };
+                    let Some(v) = self.ref_operand(e) else { return E::Never };
                     E::V(self.borrowed(v, t), t)
                 } else {
                     e
@@ -524,7 +533,7 @@ impl<'a> FnCx<'a> {
         if t == Term::Star as u8 {
             let e = self.expr(c, None);
             let pt = self.e_ty(&e);
-            let Some(v) = self.operand_of(e) else { return E::Never };
+            let Some(v) = self.ref_operand(e) else { return E::Never };
             return E::P(self.deref(v, pt));
         }
         if t == Term::Amp as u8 || t == Term::AmpAmp as u8 {
@@ -532,6 +541,7 @@ impl<'a> FnCx<'a> {
             let e = self.expr(c, None);
             let Some(p) = self.place_of(e) else { return E::Never };
             let p = match p.base {
+                Base::Val(v, t) if self.constant_temp(Some(c), v, &p, rt) => self.const_slot(p, v, t),
                 Base::Val(..) => self.own_temp(p),
                 _ => p,
             };
@@ -539,6 +549,58 @@ impl<'a> FnCx<'a> {
             return E::V(self.borrowed(v, rt), rt);
         }
         self.expr(c, want)
+    }
+
+    /// With the borrow side table on: whether a `&` of reference type `rt` of the place `p`,
+    /// rooted at value `v` (of expression `c`, when known), borrows a constant temporary: `v` is
+    /// the value of a `const` item or const generic, of a variant without payload, of a fn
+    /// item, or of `size_of` / `align_of` (`FnState::const_vals`), or `c` is a literal or
+    /// `()` (in parentheses or not); `p` may be a field or element of such a value, and its
+    /// type has no drop glue. Such a temporary only ever holds the one value.
+    fn constant_temp(&mut self, c: Option<u32>, v: Operand, p: &Place, rt: Ty) -> bool {
+        if !self.g.borrows || !matches!(self.kind(rt), TypeKind::Ref { mutable: false, .. }) {
+            return false;
+        }
+        if let Base::Val(_, t) = p.base
+            && self.needs_drop(t)
+        {
+            return false;
+        }
+        if self.f.const_vals.contains(&v) {
+            return true;
+        }
+        let Some(c) = c else { return false };
+        let icx = self.icx;
+        let mut x = c;
+        while icx.kind(x) == Some(NodeKind::Primary) && icx.is(icx.a(x), Term::LParen) {
+            let kids = icx.kids_vec(x);
+            if kids.is_empty() {
+                return p.proj.is_empty() && self.is_unit(p.ty);
+            }
+            if kids.len() != 1 || icx.is(icx.close(icx.a(x)) - 1, Term::Comma) {
+                return false;
+            }
+            x = kids[0];
+        }
+        if !p.proj.is_empty() || !matches!(v, Operand::Const(_) | Operand::Str(_)) {
+            return false;
+        }
+        let a = icx.a(x);
+        let literal = icx.kind(x) == Some(NodeKind::Primary)
+            && [Term::IntLit, Term::FloatLit, Term::KwTrue, Term::KwFalse, Term::CharLit, Term::StrLit]
+                .iter()
+                .any(|&t| icx.is(a, t));
+        literal || self.f.const_toks.contains(&icx.end_tok(x))
+    }
+
+    /// The place `p` rooted at constant value `v` of type `t`, in a slot of its own that holds
+    /// static data: the slot does not begin anew at the next evaluation (the *constant* row).
+    fn const_slot(&mut self, p: Place, v: Operand, t: Ty) -> Place {
+        let s = self.new_slot(t);
+        let st = self.t_ref(true, t);
+        self.event(stave_ir::EventKind::Const, s, st);
+        self.f.b.store(s, v);
+        Place { base: Base::Mem(s, st), proj: p.proj, ty: p.ty, root: None }
     }
 
     /// The reference `v` of type `rt` a borrow expression made. With the borrow side table on,
@@ -629,8 +691,25 @@ impl<'a> FnCx<'a> {
         let Some(&first) = kids.first() else { return self.fail(n, "bad cast") };
         let e = self.expr(first, None);
         let mut from = self.e_ty(&e);
-        let Some(mut acc) = self.operand_of(e) else { return E::Never };
         let last = kids.len().saturating_sub(1);
+        // A `&mut T` place cast to a raw pointer is read, not moved: the pointer carries a
+        // reborrow of the reference (M11), and the reference stays usable.
+        let to_raw = |s: &mut Self| {
+            let Some(&tn) = kids.get(1) else { return false };
+            let rt = if last == 1 { s.nty(n) } else { s.lower_type(tn) };
+            matches!(s.kind(rt), TypeKind::Ptr { .. })
+        };
+        let acc = match e {
+            E::P(p)
+                if self.g.borrows
+                    && matches!(self.kind(from), TypeKind::Ref { mutable: true, .. })
+                    && to_raw(self) =>
+            {
+                self.peek(&p).map(|v| self.borrowed(v, from))
+            }
+            e => self.operand_of(e),
+        };
+        let Some(mut acc) = acc else { return E::Never };
         for (k, &tn) in kids.iter().enumerate().skip(1) {
             let icx = self.icx;
             let optok = icx.a(tn).saturating_sub(1);
@@ -852,6 +931,14 @@ impl<'a> FnCx<'a> {
             if len > (1 << 20) {
                 return self.fail(n, "array repeat literal too long for the IR (no splat op)");
             }
+            if self.g.borrows
+                && len >= 2
+                && !self.is_copy(elem)
+                && let Operand::Value(value) = self.unit_val()
+            {
+                // each element after the first is a second owner of the one value
+                self.f.events.push(stave_ir::EventMark { value, kind: stave_ir::EventKind::Repeat });
+            }
             let vs = vec![v; len as usize];
             return E::V(self.opn(Op::Make, ty, &vs), ty);
         }
@@ -879,7 +966,9 @@ impl<'a> FnCx<'a> {
                 match self.args.get(idx as usize) {
                     Some(GArg::Const(ConstArg::Value(v))) => {
                         let v = *v as i128;
-                        E::V(self.int(v), ct)
+                        let o = self.int(v);
+                        self.constant_value(o);
+                        E::V(o, ct)
                     }
                     _ => self.fail_at(Some(tok), "unbound const generic"),
                 }
@@ -890,7 +979,14 @@ impl<'a> FnCx<'a> {
                     let (ty, Some(v)) = (c.ty, c.value.clone()) else {
                         return self.fail_at(Some(tok), "const without a value");
                     };
-                    self.const_val(&v, ty, tok)
+                    let e = self.const_val(&v, ty, tok);
+                    if self.g.borrows {
+                        self.f.const_toks.push(tok);
+                        if let E::V(o @ (Operand::Value(_) | Operand::Const(_)), _) = &e {
+                            self.f.const_vals.insert(*o);
+                        }
+                    }
+                    e
                 }
                 Some(crate::decls::DeclKind::Static) => self.static_place(d, tok),
                 Some(crate::decls::DeclKind::Fn | crate::decls::DeclKind::Method) => {
@@ -901,6 +997,7 @@ impl<'a> FnCx<'a> {
                             let args: Vec<GArg> = args.iter().map(|a| self.sub_garg(*a)).collect();
                             let ty = self.nty(node);
                             let f = self.req(Req::Inst(InstKey { decl, args }));
+                            self.constant_value(Operand::Func(f));
                             E::V(Operand::Func(f), ty)
                         }
                         _ => self.fail_at(Some(tok), "fn value without a target"),
@@ -917,11 +1014,21 @@ impl<'a> FnCx<'a> {
                         return self.fail_at(Some(tok), "variant value type");
                     }
                     let i = self.int(idx as i128);
-                    E::V(self.opn(Op::EnumMake, ty, &[i]), ty)
+                    let o = self.opn(Op::EnumMake, ty, &[i]);
+                    self.constant_value(o);
+                    E::V(o, ty)
                 }
                 _ => self.fail_at(Some(tok), "not a value"),
             },
             _ => self.fail_at(Some(tok), "not a value"),
+        }
+    }
+
+    /// With the borrow side table on: `o` is the value of an expression the model counts as a
+    /// constant (State, "constant temporary"); a `&` of a temporary it initializes is static data.
+    fn constant_value(&mut self, o: Operand) {
+        if self.g.borrows {
+            self.f.const_vals.insert(o);
         }
     }
 
@@ -1059,7 +1166,8 @@ impl<'a> FnCx<'a> {
                         a.map(|a| icx.kids_vec(a)).unwrap_or_default()
                     };
                     let last = close == pend;
-                    cur = Cur::Val(self.method_call(n, recv, seg, &args, last));
+                    let head = (p == prim_end + 1).then_some(prim);
+                    cur = Cur::Val(self.method_call(n, recv, head, seg, &args, last));
                     p = close + 1;
                 } else {
                     cur = Cur::Val(self.field_step(recv, seg));
@@ -1131,7 +1239,7 @@ impl<'a> FnCx<'a> {
     /// Applies `derefs` auto-derefs to a place.
     fn derefs(&mut self, mut p: Place, k: u32) -> Option<Place> {
         for _ in 0..k {
-            let v = self.read(&p)?;
+            let v = self.peek(&p)?;
             let t = p.ty;
             p = self.deref(v, t);
         }
@@ -1506,7 +1614,7 @@ impl<'a> FnCx<'a> {
     pub fn drop_temps_keep(&mut self) {
         let ts = self.f.temps.clone();
         for &(p, t) in ts.iter().rev() {
-            self.drop_ptr(p, t);
+            self.drop_temp(p, t);
         }
     }
 
@@ -1659,7 +1767,9 @@ impl<'a> FnCx<'a> {
                 let t = self.sub(ty);
                 let Some((s, a)) = self.layout(t) else { return self.fail_at(Some(ctok), "layout") };
                 let us = self.t_usize();
-                E::V(self.int(if align { a } else { s } as i128), us)
+                let o = self.int(if align { a } else { s } as i128);
+                self.constant_value(o);
+                E::V(o, us)
             }
             Some(_) => self.vector_unsupported(Some(ctok), "vector built-in"),
             // A type-relative built-in (`f32x4.splat(x)`) has its target at the name token.
@@ -1827,10 +1937,25 @@ impl<'a> FnCx<'a> {
         E::V(self.opn(op, ty, &ops), ty)
     }
 
-    /// The receiver after typeck's adjustment.
-    fn receiver(&mut self, recv: E, adj: Adjust, want: Option<Ty>) -> Option<Operand> {
+    /// The receiver after typeck's adjustment; `node`: the receiver's expression, when it is
+    /// the head of the chain.
+    fn receiver(&mut self, recv: E, node: Option<u32>, adj: Adjust, want: Option<Ty>) -> Option<Operand> {
         let p = self.place_of(recv)?;
-        let p = if adj.autoref.is_some() { self.own_temp(p) } else { p };
+        let val = match p.base {
+            Base::Val(v, t) => Some((v, t)),
+            _ => None,
+        };
+        let p = match (adj.autoref, val) {
+            (Some(m), Some((v, t))) if adj.derefs == 0 => {
+                let w = match want {
+                    Some(w) => w,
+                    None => self.t_ref(m, p.ty),
+                };
+                if self.constant_temp(node, v, &p, w) { self.const_slot(p, v, t) } else { self.own_temp(p) }
+            }
+            (Some(_), _) => self.own_temp(p),
+            (None, _) => p,
+        };
         let p = self.derefs(p, adj.derefs)?;
         match adj.autoref {
             Some(m) => {
@@ -1841,24 +1966,31 @@ impl<'a> FnCx<'a> {
                 let v = self.addr(&p, Some(w))?;
                 Some(self.borrowed(v, w))
             }
+            // a `&mut T` place given as the receiver is reborrowed (M6)
+            None if self.g.borrows && matches!(self.kind(p.ty), TypeKind::Ref { mutable: true, .. }) => {
+                let v = self.peek(&p)?;
+                Some(self.borrowed(v, p.ty))
+            }
             None => self.read(&p),
         }
     }
 
-    fn method_call(&mut self, n: u32, recv: E, seg: u32, args: &[u32], last: bool) -> E {
+    fn method_call(&mut self, n: u32, recv: E, head: Option<u32>, seg: u32, args: &[u32], last: bool) -> E {
         let _ = last;
         self.cur_tok = seg;
         match self.target(seg).cloned() {
             Some(Target::Method { method, args: ga, adjust }) => match self.resolve_method(&method, &ga) {
                 Some(Resolved::Inst(k)) => {
                     let Some((ps, _)) = self.inst_sig(&k) else { return self.fail_at(Some(seg), "callee") };
-                    let Some(rv) = self.receiver(recv, adjust, ps.first().copied()) else { return E::Never };
+                    let Some(rv) = self.receiver(recv, head, adjust, ps.first().copied()) else {
+                        return E::Never;
+                    };
                     let Some(mut vs) = self.args(args, ps.get(1..).unwrap_or(&[])) else { return E::Never };
                     vs.insert(0, rv);
                     self.call_inst(k, &vs, seg)
                 }
                 Some(Resolved::BuiltinOp(name)) => {
-                    let Some(rv) = self.receiver(recv, adjust, None) else { return E::Never };
+                    let Some(rv) = self.receiver(recv, head, adjust, None) else { return E::Never };
                     let ty = self.nty(n);
                     let Some(mut vs) = self.args(args, &[ty]) else { return E::Never };
                     vs.insert(0, rv);
@@ -1969,7 +2101,12 @@ impl<'a> FnCx<'a> {
                 if self.is_unit(inner) {
                     return E::Unit;
                 }
-                E::V(Operand::Value(self.f.b.load(FnCx::ir(inner), v)), rt)
+                let x = Operand::Value(self.f.b.load(FnCx::ir(inner), v));
+                if self.g.borrows && !self.is_copy(inner) {
+                    // the value moves out of the pointee
+                    self.event(stave_ir::EventKind::Gone, v, pt);
+                }
+                E::V(x, rt)
             }
             "write" | "write_stream" => {
                 let pt = p.ty;
@@ -2092,6 +2229,8 @@ impl<'a> FnCx<'a> {
         };
         let st = self.string_ty();
         let ts = self.new_slot(st);
+        let tst = self.t_ref(true, st);
+        self.event(stave_ir::EventKind::Begin, ts, tst);
         let e = self.call_inst(InstKey { decl: new, args: Vec::new() }, &[], tok);
         let Some(sv) = self.operand_of(e) else { return E::Never };
         self.f.b.store(ts, sv);
@@ -2171,7 +2310,7 @@ impl<'a> FnCx<'a> {
             let Some(p) = self.place_of(e) else { return false };
             let mut p = p;
             while let TypeKind::Ref { .. } = self.kind(p.ty) {
-                let Some(v) = self.read(&p) else { return false };
+                let Some(v) = self.peek(&p) else { return false };
                 let t = p.ty;
                 p = self.deref(v, t);
             }
@@ -2221,7 +2360,7 @@ impl<'a> FnCx<'a> {
                 }
             }
         } else {
-            let Some(mut v) = self.read(&p) else { return false };
+            let Some(mut v) = self.peek(&p) else { return false };
             let mut t = p.ty;
             for _ in 1..refs {
                 let Some((inner, _, _)) = self.pointee(t) else { return false };

@@ -1,0 +1,19 @@
+//~ BORROWCHECK ok
+// `&` of a fn item borrows a constant temporary: the next evaluation does not end it.
+fn twice(x: u32) -> u32 { return x * 2; }
+fn inc(x: u32) -> u32 { return x + 1; }
+
+fn main() -> i32 {
+    let first: fn(u32) -> u32 = inc;
+    let mut r: &fn(u32) -> u32 = &first;
+    let mut sum: u32 = 0;
+    let mut i: u32 = 0;
+    while i < 3 {
+        let before: &fn(u32) -> u32 = r;
+        r = &twice;
+        sum = sum + (*before)(i);
+        i = i + 1;
+    }
+    if sum == 7 { return 0; }
+    return 1;
+}

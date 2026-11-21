@@ -1,0 +1,22 @@
+//~ BORROWCHECK use-after-referent 20 0
+import std.string;
+
+view struct Name { s: &string.String, count: usize }
+
+impl Name {
+    fn take(&mut self from x, x: &string.String) {
+        self.s = x;
+    }
+}
+
+fn make() -> string.String {
+    return string.String.new();
+}
+
+fn main() -> i32 {
+    let first: string.String = string.String.new();
+    let mut p = Name.{ s: &first, count: 0 };
+    p.take(&make());
+    let n: usize = p.s.len();
+    return n as% i32;
+}

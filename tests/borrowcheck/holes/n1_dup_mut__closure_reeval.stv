@@ -1,0 +1,105 @@
+//~ BORROWCHECK two-exclusive 93 90
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+view struct Two { a: &mut Pick, b: &mut Pick }
+view struct W { c: &mut Pick }
+
+fn lit_twice(zero: &u32) -> usize {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let q: &mut Pick = &mut p;
+    let t = Two.{ a: q, b: q }; //! 10
+    t.a.count = 1;
+    t.b.count = 2;
+    return t.a.count;
+}
+
+fn some_twice(zero: &u32) -> usize {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let q: &mut Pick = &mut p;
+    let t = (Option.Some(q), Option.Some(q)); //! 19
+    match t {
+        (Option.Some(a), Option.Some(b)) => {
+            a.count = 1;
+            b.count = 2;
+            return a.count;
+        }
+        _ => { return 0; }
+    }
+}
+
+fn arr_some(zero: &u32) -> usize {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let q: &mut Pick = &mut p;
+    let t = [W.{ c: q }, W.{ c: q }]; //! 33
+    t[0].c.count = 1;
+    t[1].c.count = 2;
+    return t[0].c.count;
+}
+
+fn through_shared(w: &W) -> usize {
+    let l = W.{ c: w.c }; //! 40
+    l.c.count = 1;
+    return w.c.count;
+}
+
+fn match_move(zero: &u32) -> usize {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let o: Option<&mut Pick> = Option.Some(&mut p);
+    match o {
+        Option.Some(a) => { a.count = 1; }
+        Option.None => {}
+    }
+    match o { //! 52
+        Option.Some(b) => { b.count = 2; }
+        Option.None => {}
+    }
+    return p.count;
+}
+
+fn for_move(zero: &u32) -> usize {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let t = [&mut p];
+    for q in t {
+        q.count = 1;
+    }
+    t[0].count = 2; //! 65
+    return p.count;
+}
+
+fn select_move(zero: &u32, c: bool) -> usize {
+    let mut p = Pick.{ best: zero, count: 0 };
+    let mut p2 = Pick.{ best: zero, count: 0 };
+    let a: &mut Pick = &mut p;
+    let b: &mut Pick = &mut p2;
+    let m = c.select(a, b);
+    m.count = 1;
+    a.count = 2; //! 76
+    return m.count;
+}
+
+fn slice_coerce(xs: &mut [u32; 4]) -> u32 {
+    let s: &mut [u32] = xs;
+    xs[0] = 1; //! 82
+    s[0] = 2;
+    return xs[0];
+}
+
+fn closure_reeval() -> u32 {
+    let mut n: u32 = 0;
+    let mut g: fn() = fn() { n = n + 1; };
+    let mut i: u32 = 0;
+    while i < 2 {
+        let f = fn() { n = n + 2; }; //! 92
+        g();
+        g = f;
+        i = i + 1;
+    }
+    g();
+    return n;
+}
+
+fn main() -> i32 {
+    let _ = closure_reeval();
+    return 0;
+}

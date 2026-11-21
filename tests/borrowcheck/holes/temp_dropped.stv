@@ -1,0 +1,16 @@
+//~ BORROWCHECK use-after-referent 14 13
+// A `&` of a temporary with drop glue read after its statement: the temporary was dropped
+// and ended with the statement.
+import std.vec;
+
+fn make() -> vec.Vec<u32> {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(7u32);
+    return v;
+}
+
+fn main() -> i32 {
+    let r: &vec.Vec<u32> = &make();
+    if r.len() == 1 { return 1; }
+    return 0;
+}

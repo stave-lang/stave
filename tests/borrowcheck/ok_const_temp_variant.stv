@@ -1,0 +1,27 @@
+//~ BORROWCHECK ok
+// `&` of a variant without payload is a borrow of a constant temporary: the next evaluation
+// of its expression does not end it.
+enum Dir { Up, Down }
+
+fn main() -> i32 {
+    let first: Option<u32> = Option.None;
+    let start: Dir = Dir.Down;
+    let mut r: &Option<u32> = &first;
+    let mut d: &Dir = &start;
+    let mut cnt: u32 = 0;
+    let mut i: u32 = 0;
+    while i < 3 {
+        let before: &Option<u32> = r;
+        let dir: &Dir = d;
+        r = &Option.None;
+        d = &Dir.Up;
+        if before.is_none() { cnt = cnt + 1; }
+        match *dir {
+            Dir.Up => { cnt = cnt + 1; }
+            Dir.Down => {}
+        }
+        i = i + 1;
+    }
+    if cnt == 5 { return 0; }
+    return 1;
+}
