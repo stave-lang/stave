@@ -1,0 +1,94 @@
+//~ CHECK-ONLY
+// A non-Copy value moves whole, also when it is a temporary: a by-value use of a non-Copy part
+// of any rvalue is E0504 (case `part`; an array element: the index case). The rvalue forms: a
+// struct literal (also generic and nested; as an operand, a receiver, a scrutinee), a tuple
+// literal, an array literal, a call result, a parenthesised value, the value of an `if` and of
+// a `match`. Copy parts are read, parts are borrowed, and a pattern takes the whole temporary
+// apart.
+import std.vec;
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { } }
+impl D { fn consume(self) -> u32 { return self.id; } }
+
+struct S { pub a: D, pub v: vec.Vec<u32>, pub n: u32 }
+struct W { pub s: S, pub d: D }
+struct G<T> { pub x: T, pub k: u32 }
+
+fn mk() -> S { return S.{ a: D.{ id: 1 }, v: vec.Vec::<u32>.new(), n: 1 }; }
+fn eat(d: D) { }
+fn len(v: vec.Vec<u32>) -> usize { return v.len(); }
+
+fn struct_literal() {
+    let d = S.{ a: D.{ id: 1 }, v: vec.Vec::<u32>.new(), n: 1 }.a; //~ ERROR E0504
+}
+
+fn struct_literal_arg() -> usize {
+    return len(S.{ a: D.{ id: 1 }, v: vec.Vec::<u32>.new(), n: 1 }.v); //~ ERROR E0504
+}
+
+fn struct_literal_receiver() -> u32 {
+    return S.{ a: D.{ id: 1 }, v: vec.Vec::<u32>.new(), n: 1 }.a.consume(); //~ ERROR E0504
+}
+
+fn struct_literal_scrutinee() -> u32 {
+    match S.{ a: D.{ id: 1 }, v: vec.Vec::<u32>.new(), n: 1 }.a {
+        x => { return x.id; } //~ ERROR E0504
+    }
+}
+
+fn generic_literal() {
+    let d = G.{ x: D.{ id: 1 }, k: 2 }.x; //~ ERROR E0504
+}
+
+fn nested_literal() {
+    let d = W.{ s: mk(), d: D.{ id: 2 } }.s.a; //~ ERROR E0504
+    let s = W.{ s: mk(), d: D.{ id: 2 } }.s; //~ ERROR E0504
+}
+
+fn tuple_literal() {
+    let d = (D.{ id: 1 }, D.{ id: 2 }).0; //~ ERROR E0504
+}
+
+fn array_literal() {
+    let d = [D.{ id: 1 }, D.{ id: 2 }][0]; //~ ERROR E0504
+}
+
+fn call_result() {
+    let d = mk().a; //~ ERROR E0504
+}
+
+fn parenthesised() {
+    let d = (mk()).a; //~ ERROR E0504
+    let e = (S.{ a: D.{ id: 1 }, v: vec.Vec::<u32>.new(), n: 1 }).a; //~ ERROR E0504
+}
+
+fn if_value(c: bool) {
+    let d = (if c then mk() else mk()).a; //~ ERROR E0504
+}
+
+fn match_value(k: u32) {
+    eat((match k { 0 => mk(), _ => mk() }).a); //~ ERROR E0504
+}
+
+fn ok_copy_parts() -> u32 {
+    let n = S.{ a: D.{ id: 1 }, v: vec.Vec::<u32>.new(), n: 1 }.n;
+    let k = G.{ x: D.{ id: 1 }, k: 2 }.k;
+    return n + k + mk().a.id + (D.{ id: 1 }, 2u32).1;
+}
+
+fn ok_borrow_part() -> usize {
+    return S.{ a: D.{ id: 1 }, v: vec.Vec::<u32>.new(), n: 1 }.v.len();
+}
+
+fn ok_pattern() -> usize {
+    let S.{ a, v, n: _ } = S.{ a: D.{ id: 1 }, v: vec.Vec::<u32>.new(), n: 1 };
+    eat(a);
+    let G.{ x, k: _ } = G.{ x: D.{ id: 1 }, k: 2 };
+    eat(x);
+    let (p, _) = (D.{ id: 1 }, D.{ id: 2 });
+    eat(p);
+    return v.len();
+}
+
+fn main() -> i32 { return 0; }

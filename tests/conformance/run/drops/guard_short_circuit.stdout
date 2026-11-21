@@ -1,0 +1,12 @@
+mk 1
+mk 2
+drop 2
+drop 1
+rest
+mk 4
+drop 4
+one
+mk 6
+drop 6
+two
+end

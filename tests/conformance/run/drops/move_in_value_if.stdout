@@ -1,0 +1,16 @@
+mk 1
+mk 2
+drop 2
+mk 3
+mk 4
+mk 8
+mk 5
+mk 6
+drop 6
+picked
+end
+drop 5
+drop 8
+drop 3
+drop 4
+drop 1

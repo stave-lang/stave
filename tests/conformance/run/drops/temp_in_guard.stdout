@@ -1,0 +1,14 @@
+rest
+mk 11
+mk 80
+drop 80
+rest
+drop 11
+mk 21
+mk 22
+mk 70
+drop 70
+drop 22
+two
+drop 21
+end

@@ -12,10 +12,18 @@
 //! the construct's own leading params (an expression value, a `for` counter). Dead params are
 //! removed afterwards ([`crate::lower_post`]), which leaves exactly the live ones.
 //!
-//! **Drops.** A droppable local is dropped at the end of its scope (reverse declaration order),
-//! at `break`/`continue`/`return` for the scopes they leave, and before it is overwritten, unless
-//! it was moved out. The moved state is tracked statically; when two paths disagree at a join,
-//! the job is lowered again with a dynamic drop flag (a hidden `bool` SSA local) for that local.
+//! **Owners and drops.** An owner is a droppable local or a temporary with drop glue; temporaries
+//! are numbered after the locals, as they are made. The environment holds, per owner, whether it
+//! holds its value ([`Init`]): a by-value read of the owner moves it out, a binding or an
+//! assignment of the whole brings it back. A value moves whole: a pattern that binds a part by
+//! value takes the owner apart where the pattern is committed and drops the parts it ignores
+//! there; a part moved by an expression does not reach the lowering. The state flows along
+//! every edge the lowering builds: a join merges the states of its edges, and an owner that
+//! holds its value on one edge only makes the job be lowered again with a dynamic drop flag for
+//! it (a hidden `bool`: an SSA local for a local, a slot cleared at entry for a temporary). An
+//! owner is dropped where it ends: a local at the end of its scope (reverse declaration order),
+//! a temporary at the end of its statement (reverse creation order), both on every `break`,
+//! `continue`, `return`, and `?` that leaves them; a place is dropped before it is overwritten.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_ir::ir::ConstId;
@@ -161,22 +169,71 @@ pub(crate) struct LocalInfo {
     /// Lives in a slot.
     pub mem: bool,
     pub drop: bool,
-    /// The hidden flag local of a flagged droppable local.
-    pub flag: Option<usize>,
+    /// The dynamic drop flag of an owner.
+    pub flag: Option<Flag>,
+    /// A temporary.
+    pub temp: Option<Temp>,
 }
 
-/// Static moved state of a droppable local.
+/// Whether an owner holds its value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Init {
+    /// No: not bound yet, moved out, or dropped.
+    #[default]
+    Gone,
+    Full,
+}
+
+/// A dynamic drop flag: set while its owner holds its value.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Flag {
+    /// A hidden `bool` local.
+    Ssa(usize),
+    /// A `bool` slot, cleared at fn entry.
+    Mem(Operand),
+}
+
+/// Where a temporary's value is.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Home {
+    Slot(Operand),
+    /// An SSA value, put into a slot only where a part of it is dropped.
+    Val(Operand),
+    /// The array of a `for` loop over an array value, in a slot: the loop takes its elements one
+    /// by one, and the owner holds the ones from the index in the second slot (a `usize`) on.
+    Rest(Operand, Operand),
+}
+
+/// What ends a temporary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MState {
-    Uninit,
-    Init,
-    Moved,
+pub(crate) enum Ends {
+    /// Its statement: the index in [`FnState::temps`].
+    Stmt(usize),
+    /// The scope with this index in [`FnState::scopes`].
+    Scope(usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Temp {
+    /// Creation number in the job: the same in every lowering of it.
+    pub seq: u32,
+    pub home: Home,
+    pub ends: Ends,
+}
+
+/// An owner that needs a dynamic drop flag: a local's binding node, or a temporary's creation
+/// number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct FlagKey {
+    pub temp: bool,
+    pub id: u32,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Env {
     pub vals: Vec<Option<Operand>>,
-    pub st: Vec<MState>,
+    /// Per owner. Shorter than the owner list when temporaries were made since: those are `Gone`.
+    pub st: Vec<Init>,
 }
 
 /// A join block under construction.
@@ -186,10 +243,14 @@ pub(crate) struct Join {
     pub prefix: Vec<Value>,
     pub locals: Vec<usize>,
     pub params: Vec<Value>,
-    /// Merged moved states of the edges so far (`None`: no edge yet).
-    pub st: Option<Vec<MState>>,
+    /// Merged owner states of the edges so far (`None`: no edge yet).
+    pub st: Option<Vec<Init>>,
     /// Locals declared before the construct (their states merge).
     pub outer: usize,
+    /// The statements and scopes open when the join was made: their temporaries outlive the
+    /// construct (their states merge).
+    pub stmts: usize,
+    pub scopes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -217,8 +278,16 @@ pub(crate) struct FnState {
     pub scopes: Vec<Vec<usize>>,
     pub loops: Vec<LoopCx>,
     pub joins: Vec<Join>,
-    /// Statement temporaries to drop at the end of the statement: (pointer, type).
-    pub temps: Vec<(Operand, Ty)>,
+    /// The temporaries of the open statements, in creation order.
+    pub temps: Vec<usize>,
+    /// Per open statement (or condition, guard, value arm, clause): where its temporaries start
+    /// in `temps`.
+    pub stmts: Vec<usize>,
+    /// Per scope depth: the length of `stmts` when the scope at that depth was last pushed.
+    pub scope_stmts: Vec<usize>,
+    /// The owners from this number on are this fn's own temporaries; those below belong to the
+    /// fns around a closure body (and are the locals).
+    pub own_temps: usize,
     pub ret: Ty,
     pub site_consts: Vec<ConstId>,
     /// The values of the int constants made by [`FnCx::int`], by constant index.
@@ -234,9 +303,6 @@ pub(crate) struct FnState {
     /// `&mut` chunk bindings: (scope depth of the chunk body, the write-back of the binding's
     /// slot); written back when that scope ends or is left.
     pub write_backs: Vec<(usize, WriteBack)>,
-    /// Values a loop owns (the iterator moved into a `for`): (scope depth of the loop, slot,
-    /// type); dropped when that scope ends or is left.
-    pub loop_owned: Vec<(usize, Operand, Ty)>,
     /// The borrow side table of the body so far: borrows, and the other events.
     pub borrows: Vec<stave_ir::BorrowMark>,
     pub events: Vec<stave_ir::EventMark>,
@@ -321,10 +387,17 @@ pub(crate) struct FnCx<'a> {
     site_map: FxHashMap<u32, u32>,
     pub drop_memo: FxHashMap<Ty, bool>,
     subst_memo: FxHashMap<Ty, Ty>,
-    /// Binding nodes of locals that get a dynamic drop flag.
-    pub flagged: FxHashSet<u32>,
-    /// Discovered during this attempt: locals that need a flag.
-    pub need_flag: Vec<u32>,
+    /// The owners that get a dynamic drop flag.
+    pub flagged: FxHashSet<FlagKey>,
+    /// Discovered during this attempt: owners that need a flag.
+    pub need_flag: Vec<FlagKey>,
+    /// Temporaries made so far.
+    pub temp_seq: u32,
+    /// The `?` tokens of the body, sorted.
+    pub try_toks: Vec<u32>,
+    /// While a match guard is lowered: the owner states when it started, and whether an owner
+    /// that held a value then was moved out of since.
+    pub guard: Option<(Vec<Init>, bool)>,
     /// With the borrow side table on: binding nodes of the locals that live in a slot because a
     /// value is moved out of them (a move is an event on the bytes of its place).
     pub slotted: FxHashSet<u32>,
@@ -380,6 +453,9 @@ impl<'a> FnCx<'a> {
             subst_memo: FxHashMap::default(),
             flagged: FxHashSet::default(),
             need_flag: Vec::new(),
+            temp_seq: 0,
+            try_toks: Vec::new(),
+            guard: None,
             slotted: FxHashSet::default(),
             need_slot: Vec::new(),
             copy_memo: FxHashMap::default(),
@@ -760,6 +836,15 @@ impl<'a> FnCx<'a> {
 
     pub fn local_place(&mut self, l: usize) -> Place {
         let ty = self.locals[l].ty;
+        if let Some(t) = self.locals[l].temp {
+            return match t.home {
+                Home::Slot(p) | Home::Rest(p, _) => {
+                    let pt = self.t_ref(true, ty);
+                    Place { base: Base::Mem(p, pt), proj: Vec::new(), ty, root: Some(l) }
+                }
+                Home::Val(v) => Place { base: Base::Val(v, ty), proj: Vec::new(), ty, root: Some(l) },
+            };
+        }
         match self.f.slot.get(l).copied().flatten() {
             Some(p) => {
                 let pt = self.t_ref(true, ty);
@@ -787,11 +872,8 @@ impl<'a> FnCx<'a> {
             }
         }
         if self.locals[l].drop {
-            if let Some(fl) = self.locals[l].flag {
-                let one = self.int(1);
-                self.f.env.vals[fl] = Some(one);
-            }
-            self.f.env.st[l] = MState::Init;
+            self.set_flag(l, true);
+            self.set_st(l, Init::Full);
         }
         // a scope lists the locals it drops and, with the borrow side table on, the ones whose
         // slot ends with it
@@ -802,17 +884,192 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// Marks the root local of a place read by value as moved (droppable parts only).
-    pub fn note_move(&mut self, root: Option<usize>, ty: Ty) {
-        let Some(l) = root else { return };
-        if !self.locals[l].drop || !self.needs_drop(ty) {
+    // ---------- owners ----------
+
+    /// Whether owner `l` holds its value.
+    pub fn st(&self, l: usize) -> Init {
+        self.f.env.st.get(l).copied().unwrap_or(Init::Gone)
+    }
+
+    pub fn set_st(&mut self, l: usize, s: Init) {
+        if self.f.env.st.len() <= l {
+            self.f.env.st.resize(l + 1, Init::Gone);
+        }
+        self.f.env.st[l] = s;
+    }
+
+    /// Sets the flag of owner `l`, if it has one.
+    fn set_flag(&mut self, l: usize, on: bool) {
+        let Some(f) = self.locals[l].flag else { return };
+        let v = self.int(i128::from(on));
+        match f {
+            Flag::Ssa(fl) => self.f.env.vals[fl] = Some(v),
+            Flag::Mem(p) => {
+                if self.open() {
+                    self.f.b.store(p, v);
+                }
+            }
+        }
+    }
+
+    /// The value of a flag (`None`: an SSA flag whose local is not bound here).
+    fn flag_val(&mut self, f: Flag) -> Option<Operand> {
+        match f {
+            Flag::Ssa(fl) => self.f.env.vals.get(fl).copied().flatten(),
+            Flag::Mem(p) => {
+                let bt = self.t_bool();
+                Some(Operand::Value(self.f.b.load(Self::ir(bt), p)))
+            }
+        }
+    }
+
+    /// Owner `l` is moved out.
+    pub fn mark_moved(&mut self, l: usize) {
+        if let Some((st, moved)) = &mut self.guard
+            && st.get(l).is_some_and(|s| *s != Init::Gone)
+        {
+            *moved = true;
+        }
+        self.set_st(l, Init::Gone);
+        self.set_flag(l, false);
+    }
+
+    /// Whether place `p` is its owner as a whole, or an element of it (which stands for its
+    /// whole array): the places a value with drop glue is moved out of.
+    pub fn whole(p: &Place) -> bool {
+        !matches!(p.proj.first(), Some(Proj::Field(..) | Proj::EnumField(..)))
+    }
+
+    /// A by-value read of place `p` moves the owner it is rooted at (droppable values only). A
+    /// value moves whole: the checker rejects a move of a part (E0504).
+    pub fn note_move(&mut self, p: &Place) {
+        let Some(l) = p.root else { return };
+        if !self.locals[l].drop || !self.needs_drop(p.ty) {
             return;
         }
-        if let Some(fl) = self.locals[l].flag {
-            let z = self.int(0);
-            self.f.env.vals[fl] = Some(z);
+        if !Self::whole(p) {
+            self.fail_at(None, "a part of a value is moved out");
+            return;
         }
-        self.f.env.st[l] = MState::Moved;
+        self.mark_moved(l);
+    }
+
+    /// A temporary that owns a value of droppable type `ty`: it ends with the innermost open
+    /// statement, or with the innermost scope when `scoped`.
+    pub fn new_temp(&mut self, ty: Ty, home: Home, scoped: bool) -> usize {
+        let seq = self.temp_seq;
+        self.temp_seq += 1;
+        let ends = if scoped {
+            Ends::Scope(self.f.scopes.len().saturating_sub(1))
+        } else {
+            Ends::Stmt(self.f.temps.len())
+        };
+        let mut flag = None;
+        if self.flagged.contains(&FlagKey { temp: true, id: seq }) {
+            let bt = self.t_bool();
+            let fs = self.new_slot(bt);
+            let (zero, one) = (self.int(0), self.int(1));
+            self.f.b.entry_store(fs, zero);
+            self.f.b.store(fs, one);
+            flag = Some(Flag::Mem(fs));
+        }
+        let l = self.locals.len();
+        self.locals.push(LocalInfo {
+            node: 0,
+            ty,
+            mem: true,
+            drop: true,
+            flag,
+            temp: Some(Temp { seq, home, ends }),
+        });
+        self.set_st(l, Init::Full);
+        match ends {
+            Ends::Scope(d) => {
+                if let Some(s) = self.f.scopes.get_mut(d) {
+                    s.push(l);
+                }
+            }
+            Ends::Stmt(_) => self.f.temps.push(l),
+        }
+        l
+    }
+
+    /// A temporary for rvalue `v` in a slot of its own: the place.
+    pub fn slot_temp(&mut self, v: Operand, t: Ty) -> Place {
+        let (s, st, l) = self.slot_temp_at(v, t);
+        Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: Some(l) }
+    }
+
+    /// [`FnCx::slot_temp`] as the slot, its pointer type, and the owner.
+    pub fn slot_temp_at(&mut self, v: Operand, t: Ty) -> (Operand, Ty, usize) {
+        let (s, st) = self.spill(v, t);
+        let l = self.new_temp(t, Home::Slot(s), false);
+        (s, st, l)
+    }
+
+    /// A temporary for rvalue `v`, read as the value it is: the place. With a dynamic flag the
+    /// value lives in a slot, since its drop is then not dominated by `v`.
+    pub fn value_temp(&mut self, v: Operand, t: Ty, scoped: bool) -> Place {
+        if self.flagged.contains(&FlagKey { temp: true, id: self.temp_seq }) {
+            let (s, st) = self.spill(v, t);
+            let l = self.new_temp(t, Home::Slot(s), scoped);
+            return Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: Some(l) };
+        }
+        let l = self.new_temp(t, Home::Val(v), scoped);
+        Place { base: Base::Val(v, t), proj: Vec::new(), ty: t, root: Some(l) }
+    }
+
+    /// Forgets the temporaries at the end of the owner list that have ended: their numbers are
+    /// used again, so the list stays as long as the owners alive at once.
+    fn trim_temps(&mut self) {
+        while self.locals.len() > self.f.own_temps
+            && let Some(li) = self.locals.last()
+        {
+            let Some(t) = li.temp else { break };
+            let l = self.locals.len() - 1;
+            let alive = match t.ends {
+                Ends::Stmt(i) => self.f.temps.get(i) == Some(&l),
+                Ends::Scope(d) => self.f.scopes.get(d).is_some_and(|s| s.contains(&l)),
+            };
+            if alive {
+                break;
+            }
+            self.locals.pop();
+            if let Some(s) = self.f.env.st.get_mut(l) {
+                *s = Init::Gone;
+            }
+        }
+    }
+
+    /// Whether a `?` is written in tokens `a..=b`.
+    pub fn try_between(&self, a: u32, b: u32) -> bool {
+        let i = self.try_toks.partition_point(|&t| t < a);
+        self.try_toks.get(i).is_some_and(|&t| t <= b)
+    }
+
+    /// Whether one of the operands `rest` may leave the fn by `?`.
+    pub fn try_in(&self, rest: &[u32]) -> bool {
+        match (rest.first(), rest.last()) {
+            (Some(&a), Some(&b)) if !self.try_toks.is_empty() => {
+                self.try_between(self.icx.a(a), self.icx.end_tok(b))
+            }
+            _ => false,
+        }
+    }
+
+    /// Operand value `v`, already evaluated, becomes a temporary until [`FnCx::release`]: a `?`
+    /// in a later operand drops it.
+    pub fn hold(&mut self, v: Operand, t: Ty, held: &mut Vec<usize>) {
+        if !t.is_none() && self.needs_drop(t) {
+            held.push(self.slot_temp_at(v, t).2);
+        }
+    }
+
+    /// The held operands were consumed.
+    pub fn release(&mut self, held: &[usize]) {
+        for &l in held {
+            self.mark_moved(l);
+        }
     }
 
     // ---------- joins ----------
@@ -833,17 +1090,26 @@ impl<'a> FnCx<'a> {
             }
         }
         // drop flags of droppable locals in scope
+        out.extend(self.flag_locals(lo));
+        out.sort_unstable();
+        out.dedup();
+        out.retain(|&l| l < self.locals.len());
+        out
+    }
+
+    /// The SSA drop flags, bound here, of the locals declared before node `lo`.
+    pub fn flag_locals(&self, lo: u32) -> Vec<usize> {
+        let mut out = Vec::new();
         for li in &self.locals {
-            if let Some(fl) = li.flag
-                && li.node < lo
+            if li.node >= lo {
+                continue;
+            }
+            if let Some(Flag::Ssa(fl)) = li.flag
                 && self.f.env.vals.get(fl).is_some_and(|v| v.is_some())
             {
                 out.push(fl);
             }
         }
-        out.sort_unstable();
-        out.dedup();
-        out.retain(|&l| l < self.locals.len());
         out
     }
 
@@ -851,14 +1117,15 @@ impl<'a> FnCx<'a> {
     pub fn join(&mut self, n: u32, prefix: &[Ty]) -> usize {
         let locals = self.assigned_in(n);
         let block = self.f.b.create_block();
-        let pre: Vec<Value> = prefix.iter().map(|&t| self.f.b.add_param(block, Self::ir(t))).collect();
+        let prefix: Vec<Value> = prefix.iter().map(|&t| self.f.b.add_param(block, Self::ir(t))).collect();
         let mut params = Vec::with_capacity(locals.len());
         for &l in &locals {
             let t = self.locals[l].ty;
             params.push(self.f.b.add_param(block, Self::ir(t)));
         }
         let outer = if self.has_body { self.icx.ast.descendants(n).start as usize } else { 0 };
-        self.f.joins.push(Join { block, prefix: pre, locals, params, st: None, outer });
+        let (stmts, scopes) = (self.f.stmts.len(), self.f.scopes.len());
+        self.f.joins.push(Join { block, prefix, locals, params, st: None, outer, stmts, scopes });
         self.f.joins.len() - 1
     }
 
@@ -876,29 +1143,58 @@ impl<'a> FnCx<'a> {
             };
             args.push(v);
         }
-        let outer = self.f.joins[j].outer;
-        let st = self.f.env.st.clone();
+        let st = self.edge_state(j);
         match self.f.joins[j].st.take() {
             None => self.f.joins[j].st = Some(st),
-            Some(prev) => {
-                let mut merged = prev.clone();
-                for (l, (a, b)) in prev.iter().zip(&st).enumerate() {
-                    if a != b {
-                        if (self.locals[l].node as usize) < outer
-                            && self.locals[l].drop
-                            && self.locals[l].flag.is_none()
-                            && *a != MState::Uninit
-                            && *b != MState::Uninit
-                        {
-                            self.need_flag.push(self.locals[l].node);
-                        }
-                        merged[l] = MState::Moved;
-                    }
-                }
+            Some(mut merged) => {
+                self.merge_states(&mut merged, &st);
                 self.f.joins[j].st = Some(merged);
             }
         }
         args
+    }
+
+    /// Merges the owner states `st` of one more edge into `merged`. An owner that holds its
+    /// value on one edge only is told by its flag, asked for here if it has none.
+    pub fn merge_states(&mut self, merged: &mut Vec<Init>, st: &[Init]) {
+        if merged.len() < st.len() {
+            merged.resize(st.len(), Init::Gone);
+        }
+        for (l, b) in st.iter().enumerate() {
+            if merged[l] == *b || l >= self.locals.len() {
+                continue;
+            }
+            let li = &self.locals[l];
+            if li.flag.is_none() {
+                self.need_flag.push(match li.temp {
+                    Some(t) => FlagKey { temp: true, id: t.seq },
+                    None => FlagKey { temp: false, id: li.node },
+                });
+            }
+            merged[l] = Init::Full;
+        }
+    }
+
+    /// The owner states an edge to join `j` carries from here: those of the owners that outlive
+    /// the construct (a local declared before it, a temporary of a statement or scope that was
+    /// open when the join was made); every other owner has ended.
+    fn edge_state(&self, j: usize) -> Vec<Init> {
+        let jn = &self.f.joins[j];
+        let stmt_temps = self.f.stmts.get(jn.stmts).copied().unwrap_or(self.f.temps.len());
+        let mut st = Vec::with_capacity(self.locals.len());
+        for (l, li) in self.locals.iter().enumerate() {
+            let outlives = li.drop
+                && match li.temp {
+                    Some(_) if l < self.f.own_temps => false,
+                    Some(t) => match t.ends {
+                        Ends::Stmt(i) => i < stmt_temps,
+                        Ends::Scope(d) => d < jn.scopes,
+                    },
+                    None => (li.node as usize) < jn.outer,
+                };
+            st.push(if outlives { self.st(l) } else { Init::Gone });
+        }
+        st
     }
 
     pub fn br_join(&mut self, j: usize, prefix: &[Operand]) {
@@ -922,8 +1218,12 @@ impl<'a> FnCx<'a> {
         }
         let outer = jn.outer;
         for (l, li) in self.locals.iter().enumerate() {
-            if (li.node as usize) >= outer && li.drop {
-                self.f.env.st[l] = MState::Uninit;
+            if (li.node as usize) >= outer
+                && li.drop
+                && li.temp.is_none()
+                && let Some(s) = self.f.env.st.get_mut(l)
+            {
+                *s = Init::Gone;
             }
         }
     }
@@ -951,17 +1251,13 @@ impl<'a> FnCx<'a> {
         Place { base: Base::Mem(v, pt), proj: Vec::new(), ty: inner, root: None }
     }
 
-    /// Spills an rvalue into a fresh temporary slot (dropped at the end of the statement when
-    /// `own` and droppable).
-    pub fn spill(&mut self, v: Operand, t: Ty, own: bool) -> (Operand, Ty) {
+    /// Copies an rvalue into a fresh slot, which owns nothing.
+    pub fn spill(&mut self, v: Operand, t: Ty) -> (Operand, Ty) {
         let p = self.new_slot(t);
         let pt = self.t_ref(true, t);
         // each evaluation is a new temporary
         self.event(stave_ir::EventKind::Begin, p, pt);
         self.f.b.store(p, v);
-        if own && self.needs_drop(t) {
-            self.f.temps.push((p, t));
-        }
         (p, pt)
     }
 
@@ -975,7 +1271,7 @@ impl<'a> FnCx<'a> {
         let (mut cur, mut cur_t) = match &p.base {
             Base::Mem(v, t) => (*v, *t),
             Base::Val(v, t) => {
-                let (s, st) = self.spill(*v, *t, false);
+                let (s, st) = self.spill(*v, *t);
                 (s, st)
             }
             Base::Local(l) => {
@@ -983,7 +1279,7 @@ impl<'a> FnCx<'a> {
                 // an SSA local has no address: copy it (read-only uses)
                 let v = self.f.env.vals.get(l).copied().flatten()?;
                 let t = self.locals[l].ty;
-                self.spill(v, t, false)
+                self.spill(v, t)
             }
         };
         let n = p.proj.len();
@@ -1036,8 +1332,16 @@ impl<'a> FnCx<'a> {
         Some((cur, cur_t))
     }
 
-    /// Reads a place by value (a move of its droppable root).
+    /// Reads a place by value (a move of its owner, when droppable).
     pub fn read(&mut self, p: &Place) -> Option<Operand> {
+        let r = self.take(p);
+        self.note_move(p);
+        r
+    }
+
+    /// The value of a place that is moved out of it, without the move of its owner: a part a
+    /// pattern binds by value (its owner is moved where the pattern is committed).
+    pub fn take(&mut self, p: &Place) -> Option<Operand> {
         let sized = !matches!(self.tys.kind(p.ty), TypeKind::Slice { .. } | TypeKind::Str);
         if self.g.borrows
             && sized
@@ -1055,14 +1359,11 @@ impl<'a> FnCx<'a> {
                         Some(h) => h.push((a, at)),
                         None => self.event(stave_ir::EventKind::Gone, a, at),
                     }
-                    self.note_move(p.root, p.ty);
                     return Some(v);
                 }
             }
         }
-        let r = self.peek(p);
-        self.note_move(p.root, p.ty);
-        r
+        self.peek(p)
     }
 
     /// Reads a place without moving out of it (discriminants, copies of borrowed values).
@@ -1171,38 +1472,92 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// `place = v`: drops the old value when the place holds an initialized droppable value.
+    /// `place = v`: drops the old value of the place where it holds one, then writes it. An
+    /// owner assigned as a whole holds its value afterwards.
     pub fn assign(&mut self, p: &Place, v: Operand) {
-        let whole_local = p.proj.is_empty() && p.root.is_some();
-        if whole_local && let Some(l) = p.root {
-            if self.locals[l].drop {
-                if let Some(fl) = self.locals[l].flag {
-                    let f = self.f.env.vals[fl];
-                    if let Some(f) = f {
-                        self.drop_if(f, p.clone());
-                    }
-                    let one = self.int(1);
-                    self.f.env.vals[fl] = Some(one);
-                } else if self.f.env.st[l] == MState::Init {
-                    self.drop_place(p);
+        match p.root {
+            Some(l) if self.locals[l].drop => {
+                self.drop_if_held(l, p);
+                self.write(p, v);
+                if p.proj.is_empty() {
+                    self.set_st(l, Init::Full);
+                    self.set_flag(l, true);
                 }
-                self.f.env.st[l] = MState::Init;
             }
-            self.write(p, v);
+            Some(_) => self.write(p, v),
+            None => {
+                self.drop_place(p);
+                self.write(p, v);
+            }
+        }
+    }
+
+    /// Drops the value in place `p`, which is owner `l` or a part of it, if the owner holds its
+    /// value: its flag decides when it has one (a constant flag is folded), else the state.
+    fn drop_if_held(&mut self, l: usize, p: &Place) {
+        if !self.needs_drop(p.ty) || !self.open() {
             return;
         }
-        if self.needs_drop(p.ty) {
-            let init = match p.root {
-                Some(l) => {
-                    self.f.env.st.get(l).copied() == Some(MState::Init) || self.locals[l].flag.is_some()
+        let Some(f) = self.locals[l].flag else {
+            if self.st(l) == Init::Full {
+                self.drop_held(l, p);
+            }
+            return;
+        };
+        let Some(fv) = self.flag_val(f) else { return };
+        match self.kval(fv) {
+            Some(0) => {}
+            Some(_) => self.drop_held(l, p),
+            None => {
+                let yes = self.f.b.create_block();
+                let cont = self.f.b.create_block();
+                self.f.b.cbr(fv, yes, &[], cont, &[]);
+                self.f.b.switch_to(yes);
+                self.drop_held(l, p);
+                if self.open() {
+                    self.f.b.br(cont, &[]);
                 }
-                None => true,
-            };
-            if init {
-                self.drop_place(p);
+                self.f.b.switch_to(cont);
             }
         }
-        self.write(p, v);
+    }
+
+    /// Drops what owner `l` holds of its value in place `p`: all of it, or, of the array a `for`
+    /// loop takes element by element, the elements the loop has not taken.
+    fn drop_held(&mut self, l: usize, p: &Place) {
+        match self.locals[l].temp {
+            Some(Temp { home: Home::Rest(s, taken), .. }) => self.drop_rest(s, taken, p.ty),
+            _ => self.drop_place(p),
+        }
+    }
+
+    /// Drops the elements of the array of type `t` in slot `s` from the index in slot `taken`
+    /// on, in order.
+    fn drop_rest(&mut self, s: Operand, taken: Operand, t: Ty) {
+        let TypeKind::Array { elem, len } = self.kind(t) else {
+            self.fail_at(None, "a `for` loop owns a value that is no array");
+            return;
+        };
+        let us = self.t_usize();
+        let bt = self.t_bool();
+        let (head, hv) = self.f.b.create_block_with(&[Self::ir(us)]);
+        let body = self.f.b.create_block();
+        let exit = self.f.b.create_block();
+        let first = Operand::Value(self.f.b.load(Self::ir(us), taken));
+        self.f.b.br(head, &[first]);
+        self.f.b.switch_to(head);
+        let i = Operand::Value(hv[0]);
+        let n = self.int(len.value().unwrap_or(0) as i128);
+        let c = self.op2(Op::Lt, bt, i, n);
+        self.f.b.cbr(c, body, &[], exit, &[]);
+        self.f.b.switch_to(body);
+        let ep = self.t_ref(true, elem);
+        let a = self.op2(Op::ElemAddr, ep, s, i);
+        self.drop_ptr(a, elem);
+        let one = self.int(1);
+        let next = self.op2(Op::AddWrap, us, i, one);
+        self.f.b.br(head, &[next]);
+        self.f.b.switch_to(exit);
     }
 
     // ---------- drops ----------
@@ -1246,35 +1601,35 @@ impl<'a> FnCx<'a> {
         self.event(stave_ir::EventKind::Gone, a, pt);
     }
 
-    /// Drops `p` if the flag value `flag` is set.
-    pub fn drop_if(&mut self, flag: Operand, p: Place) {
-        let yes = self.f.b.create_block();
-        let cont = self.f.b.create_block();
-        self.f.b.cbr(flag, yes, &[], cont, &[]);
-        self.f.b.switch_to(yes);
-        self.drop_place(&p);
-        self.f.b.br(cont, &[]);
-        self.f.b.switch_to(cont);
-    }
-
-    /// Drops local `l` at a scope exit (if initialized).
-    pub fn drop_local(&mut self, l: usize) {
+    /// Drops owner `l` where it ends, if it holds its value (its state is kept: the caller knows
+    /// whether the owner is left on this path only).
+    pub fn drop_owner(&mut self, l: usize) {
         if !self.locals[l].drop || !self.open() {
             return;
         }
-        let p = self.local_place(l);
-        if let Some(fl) = self.locals[l].flag {
-            let Some(f) = self.f.env.vals.get(fl).copied().flatten() else { return };
-            if self.kval(f) == Some(0) {
-                return;
+        if self.locals[l].flag.is_none() && self.st(l) == Init::Gone {
+            return;
+        }
+        let p = match self.local_place(l) {
+            // the value is dropped in memory
+            Place { base: Base::Val(v, t), .. } => {
+                let (s, st) = self.spill(v, t);
+                Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: Some(l) }
             }
-            if self.kval(f) == Some(1) {
-                self.drop_place(&p);
-                return;
-            }
-            self.drop_if(f, p);
-        } else if self.f.env.st[l] == MState::Init {
-            self.drop_place(&p);
+            p => p,
+        };
+        self.drop_if_held(l, &p);
+        if let Some(Temp { home: Home::Slot(s) | Home::Rest(s, _), .. }) = self.locals[l].temp {
+            // the slot of a temporary ends with it
+            let pt = self.t_ref(true, self.locals[l].ty);
+            self.event(stave_ir::EventKind::End, s, pt);
+        }
+        // a temporary's flag says "made and not dropped" each time its statement runs
+        if let Some(Flag::Mem(fs)) = self.locals[l].flag
+            && self.open()
+        {
+            let zero = self.int(0);
+            self.f.b.store(fs, zero);
         }
     }
 
@@ -1295,19 +1650,15 @@ impl<'a> FnCx<'a> {
             }
             let ls = self.f.scopes[s].clone();
             for &l in ls.iter().rev() {
-                self.drop_local(l);
-            }
-            let owned: Vec<(Operand, Ty)> =
-                self.f.loop_owned.iter().rev().filter(|o| o.0 == s + 1).map(|o| (o.1, o.2)).collect();
-            for (p, t) in owned {
-                if self.open() {
-                    self.drop_temp(p, t);
-                }
+                self.drop_owner(l);
             }
         }
     }
 
     pub fn push_scope(&mut self) {
+        let d = self.f.scopes.len();
+        self.f.scope_stmts.truncate(d);
+        self.f.scope_stmts.push(self.f.stmts.len());
         self.f.scopes.push(Vec::new());
     }
 
@@ -1334,20 +1685,13 @@ impl<'a> FnCx<'a> {
         }
         let Some(ls) = self.f.scopes.pop() else { return };
         for &l in ls.iter().rev() {
-            self.drop_local(l);
-            self.f.env.st[l] = MState::Uninit;
-        }
-        while let Some(&(od, p, t)) = self.f.loop_owned.last()
-            && od == d
-        {
-            self.f.loop_owned.pop();
-            if self.open() {
-                self.drop_temp(p, t);
-            }
+            self.drop_owner(l);
+            self.set_st(l, Init::Gone);
         }
         if !frame_exit {
             self.end_locals(&ls);
         }
+        self.trim_temps();
     }
 
     /// Stores a `&mut` chunk binding's vector back to its slice (active lanes only when masked).
@@ -1376,22 +1720,32 @@ impl<'a> FnCx<'a> {
         self.f.b.call(f, None, &[h]);
     }
 
-    /// Drops the statement temporaries.
-    pub fn drop_temps(&mut self) {
-        let ts = std::mem::take(&mut self.f.temps);
-        if !self.open() {
-            return;
-        }
-        for &(p, t) in ts.iter().rev() {
-            self.drop_temp(p, t);
-        }
+    /// Opens a statement (or a condition, a guard, a value arm, a clause): the temporaries made
+    /// from here on end at the matching [`FnCx::end_temps`].
+    pub fn begin_temps(&mut self) {
+        self.f.stmts.push(self.f.temps.len());
     }
 
-    /// Drops the statement temporary in slot `p`, which ends with it.
-    pub fn drop_temp(&mut self, p: Operand, t: Ty) {
-        self.drop_ptr(p, t);
-        let pt = self.t_ref(true, t);
-        self.event(stave_ir::EventKind::End, p, pt);
+    /// Ends the innermost open statement: drops its temporaries, last made first.
+    pub fn end_temps(&mut self) {
+        let Some(from) = self.f.stmts.pop() else { return };
+        let ts: Vec<usize> = self.f.temps.get(from..).unwrap_or(&[]).to_vec();
+        for &l in ts.iter().rev() {
+            self.drop_owner(l);
+            self.set_st(l, Init::Gone);
+        }
+        self.f.temps.truncate(from);
+        self.trim_temps();
+    }
+
+    /// Drops, on a path that leaves them, the temporaries of the open statements from index
+    /// `from` on (0: all, a `return` or `?`), keeping them for the paths that stay.
+    pub fn exit_temps(&mut self, from: usize) {
+        let at = if from == 0 { 0 } else { self.f.stmts.get(from).copied().unwrap_or(self.f.temps.len()) };
+        let ts: Vec<usize> = self.f.temps.get(at..).unwrap_or(&[]).to_vec();
+        for &l in ts.iter().rev() {
+            self.drop_owner(l);
+        }
     }
 
     // ---------- calls ----------
@@ -1543,13 +1897,15 @@ impl FnState {
             loops: Vec::new(),
             joins: Vec::new(),
             temps: Vec::new(),
+            stmts: Vec::new(),
+            scope_stmts: Vec::new(),
+            own_temps: 0,
             ret,
             site_consts: Vec::new(),
             kvals: Vec::new(),
             last_site: None,
             scope_handles: Vec::new(),
             write_backs: Vec::new(),
-            loop_owned: Vec::new(),
             borrows: Vec::new(),
             events: Vec::new(),
             held: None,
@@ -1575,6 +1931,7 @@ fn empty_body() -> &'static TypedBody {
         sites: Vec::new(),
         implicit: Vec::new(),
         for_kinds: Vec::new(),
+        moves: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
         valued: Vec::new(),

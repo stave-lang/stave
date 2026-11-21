@@ -71,10 +71,10 @@ pub enum Target {
     Builtin { name: &'static str, recv: TypeId, adjust: Adjust, ret: TypeId, consts: Vec<u64> },
     /// A user-type operator: the trait method (`Add.add`) through the impl or a bound.
     Op { method: MethodRef, args: Vec<GArg> },
-    /// An enum variant constructor or value.
-    Variant { decl: DeclId, index: u32 },
-    /// A struct literal.
-    Struct { decl: DeclId },
+    /// An enum variant constructor or value; `ty`: the enum type of the value made.
+    Variant { decl: DeclId, index: u32, ty: TypeId },
+    /// A struct literal; `ty`: the struct type of the value made.
+    Struct { decl: DeclId, ty: TypeId },
     /// Field `index` of the struct (after `derefs` auto-derefs).
     Field { decl: DeclId, index: u32, derefs: u32 },
     /// Tuple element.
@@ -166,6 +166,11 @@ pub struct TypedBody {
     /// The kind of each `for` loop (by its node), decided once from the source's type as written
     /// here ([`crate::loops::ForKind`]), sorted; absent for a loop whose source is no source.
     pub for_kinds: Vec<(u32, crate::loops::ForKind)>,
+    /// The pattern bindings that take a value that is not Copy by value: binding nodes, sorted.
+    /// Decided on the types of the definition (a type parameter without a `Copy` bound is not
+    /// Copy, whatever an instance gives it), so a pattern moves its value in every instance or in
+    /// none.
+    pub moves: Vec<u32>,
     /// The value types this body may drop, each with the token where such a value appears, sorted
     /// and without duplicates: its locals (params and pattern bindings, at their binding's first
     /// token) and the values it makes (call results, struct and variant literals). A value the
@@ -215,6 +220,12 @@ impl TypedBody {
     /// The implicit call recorded at token `tok` (a `for` loop's `next`).
     pub fn implicit_at(&self, tok: u32) -> Option<&Target> {
         self.implicit.binary_search_by_key(&tok, |x| x.0).ok().map(|i| &self.implicit[i].1)
+    }
+
+    /// Whether the pattern binding at node `b` takes a value that is not Copy by value
+    /// ([`TypedBody::moves`]).
+    pub fn binds_by_move(&self, b: u32) -> bool {
+        self.moves.binary_search(&b).is_ok()
     }
 
     pub fn coercion(&self, n: u32) -> Option<&Coercion> {
@@ -523,6 +534,7 @@ fn empty_body(j: Job) -> TypedBody {
         sites: Vec::new(),
         implicit: Vec::new(),
         for_kinds: Vec::new(),
+        moves: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
         valued: Vec::new(),
@@ -578,7 +590,11 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
                 *recv = f(*recv);
                 *ret = f(*ret);
             }
-            Target::SizeOf { ty, .. } | Target::FnValue { ty } | Target::SoaRow { ty, .. } => *ty = f(*ty),
+            Target::SizeOf { ty, .. }
+            | Target::FnValue { ty }
+            | Target::SoaRow { ty, .. }
+            | Target::Variant { ty, .. }
+            | Target::Struct { ty, .. } => *ty = f(*ty),
             _ => {}
         }
     }
@@ -717,6 +733,11 @@ pub(crate) struct Ck<'a> {
     pub sites: Vec<CallSite>,
     pub implicit: Vec<(u32, Target)>,
     pub for_kinds: Vec<(u32, crate::loops::ForKind)>,
+    /// `c.select(a, b)` on a `bool`: the token of its target and the type of its operands, which
+    /// is its result type once the literals among them are fixed.
+    pub selects: Vec<(u32, Ty)>,
+    /// [`TypedBody::moves`], unsorted.
+    pub moves: Vec<u32>,
     pub drops: Vec<(u32, TypeId)>,
     pub denied: Vec<(u32, u8, u32)>,
     pub valued: Vec<(u32, u8, u32)>,
@@ -789,6 +810,8 @@ fn check_body(
         sites: Vec::new(),
         implicit: Vec::new(),
         for_kinds: Vec::new(),
+        selects: Vec::new(),
+        moves: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
         valued: Vec::new(),
@@ -1535,6 +1558,19 @@ impl<'a> Ck<'a> {
         }
         let mut locals: Vec<(u32, TypeId)> = self.locals.iter().map(|(&k, &v)| (k, v)).collect();
         locals.sort_by_key(|x| x.0);
+        let mut moves = std::mem::take(&mut self.moves);
+        moves.sort_unstable();
+        moves.dedup();
+        for (tok, out) in std::mem::take(&mut self.selects) {
+            let t = match self.resolve(out) {
+                Ty::T(t) => t,
+                Ty::Lit(_) => ids::ERROR,
+            };
+            if let Some((_, Target::Builtin { ret, .. })) = self.targets.iter_mut().rev().find(|x| x.0 == tok)
+            {
+                *ret = t;
+            }
+        }
         self.targets.sort_by_key(|x| x.0);
         self.implicit.sort_by_key(|x| x.0);
         self.record_drops();
@@ -1563,6 +1599,7 @@ impl<'a> Ck<'a> {
                 k.sort_by_key(|x| x.0);
                 k
             },
+            moves,
             drops: std::mem::take(&mut self.drops),
             denied: std::mem::take(&mut self.denied),
             valued: std::mem::take(&mut self.valued),

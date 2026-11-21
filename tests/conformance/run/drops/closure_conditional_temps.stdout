@@ -1,0 +1,11 @@
+mk 1
+mk 2
+drop 2
+drop 1
+mk 20
+drop 20
+mk 30
+mk 31
+drop 31
+drop 30
+end

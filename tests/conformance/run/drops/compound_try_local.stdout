@@ -1,0 +1,21 @@
+mk 1
+mk 2
+mk 12
+drop 2
+drop 1
+mk 3
+mk 8
+mk 9
+drop 8
+mk 5
+mk 35
+drop 5
+drop 3
+drop 9
+drop 35
+drop 12
+ok 47
+mk 1
+drop 1
+err 2
+end

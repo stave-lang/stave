@@ -1,0 +1,13 @@
+zero
+after
+mk 11
+one
+drop 11
+after
+mk 21
+mk 22
+drop 22
+two
+drop 21
+after
+end

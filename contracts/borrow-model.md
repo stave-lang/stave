@@ -258,8 +258,9 @@ fn block_exit() -> u32 {
   constant temporary ("State"): `lit = &4u32` or `tab = &TABLE` in a loop borrows the same
   static data in every round, and a reference of the round before stays usable. A
   temporary whose type has drop glue is dropped and ends with its statement, in reverse order
-  of creation. Any other one stays until the next evaluation or the frame exit: a borrow of it
-  may be used after its statement.
+  of creation; the condition of an `if` or `while`, a `match` guard, and the body of an arm of a
+  value `match` are statements of their own here (lang-details.md "Drops"). Any other one stays
+  until the next evaluation or the frame exit: a borrow of it may be used after its statement.
 ```stave
 fn next(i: u32) -> u32 { return i + 1; }
 fn temp_loop() -> u32 {

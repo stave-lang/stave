@@ -1,0 +1,163 @@
+//~ CHECK-ONLY
+// A struct literal, a variant constructor, a variant without payload, or a `select` that is not
+// the last step of its chain is a temporary of the type the type checker gave it, whatever its
+// field values are coerced from (`&mut x` for a `&T` field, an array for a `&[T]` field) and
+// however its generic args are known (inferred, written `::<..>`, or taken from the enclosing
+// fn's params). A temporary with drop glue ends with its statement (E0501 for a borrow of it
+// used later), and a non-Copy part of it is not moved out (E0504).
+import std.vec;
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { } }
+fn mk(k: u32) -> D { return D.{ id: k }; }
+fn mkv(k: u32) -> vec.Vec<u32> {
+    let mut v: vec.Vec<u32> = vec.Vec.new();
+    v.push(k);
+    return v;
+}
+fn peek(d: &D) -> u32 { return d.id; }
+impl D { fn me(&self) -> &D from self { return self; } }
+struct P { pub a: D, pub b: D }
+fn mkp(k: u32) -> P { return P.{ a: mk(k), b: mk(k + 1) }; }
+
+enum F { A(u32), B }
+impl Drop for F { fn drop(&mut self) { } }
+impl F { fn me(&self) -> &F from self { return self; } }
+
+view struct GR<T> { pub d: D, pub r: &T }
+impl<T> GR<T> { fn dref(&self) -> &D from self { return &self.d; } }
+
+view struct GS<T> { pub d: D, pub s: &[T] }
+impl<T> GS<T> { fn dref(&self) -> &D from self { return &self.d; } }
+
+view struct GV<T> { pub v: vec.Vec<u32>, pub s: &[T] }
+impl<T> GV<T> { fn vs(&self) -> &[u32] from self { return self.v.as_slice(); } }
+
+view enum ES<T> { A(D, &[T]), B(D) }
+impl<T> ES<T> {
+    fn dref(&self) -> &D from self {
+        return match self {
+            ES.A(d, _) => d,
+            ES.B(d) => d,
+        };
+    }
+}
+
+view enum ER<T> { A { d: D, r: &T }, B }
+
+enum E2<T> { A(D), B(D, T) }
+impl<T> E2<T> {
+    fn first(&self) -> &D from self {
+        return match self {
+            E2.A(d) => d,
+            E2.B(d, _) => d,
+        };
+    }
+}
+
+struct PH<T> { pub d: D }
+impl<T> PH<T> { fn dref(&self) -> &D from self { return &self.d; } }
+
+struct AN<const N: usize> { pub d: D }
+impl<const N: usize> AN<N> { fn dref(&self) -> &D from self { return &self.d; } }
+
+fn mut_ref_for_shared() -> u32 {
+    let mut x: u32 = 5;
+    let r = GR.{ d: mk(1), r: &mut x }.dref(); //~ ERROR E0501
+    return peek(r);
+}
+
+fn array_for_slice() -> u32 {
+    let xs: [u32; 2] = [1, 2];
+    let r = GS.{ d: mk(1), s: &xs }.dref(); //~ ERROR E0501
+    return peek(r);
+}
+
+fn array_for_slice_heap() -> u32 {
+    let xs: [u32; 2] = [1, 2];
+    let r = GV.{ v: mkv(7), s: &xs }.vs(); //~ ERROR E0501
+    let w = mkv(9);
+    return r[0] + w.as_slice()[0];
+}
+
+fn variant_array_for_slice() -> u32 {
+    let xs: [u32; 2] = [1, 2];
+    let r = ES.A(mk(1), &xs).dref(); //~ ERROR E0501
+    return peek(r);
+}
+
+fn part_of_coerced_literal() {
+    let mut x: u32 = 5;
+    let d = GR.{ d: mk(1), r: &mut x }.d; //~ ERROR E0504
+}
+
+fn part_of_coerced_scrutinee() {
+    let mut x: u32 = 5;
+    match GR.{ d: mk(1), r: &mut x }.d {
+        k => { } //~ ERROR E0504
+    }
+}
+
+fn written_args_variant() -> u32 {
+    let r = E2::<u32>.A(mk(1)).first(); //~ ERROR E0501
+    return peek(r);
+}
+
+fn written_args_in_no_field() -> u32 {
+    let r = PH::<u32>.{ d: mk(1) }.dref(); //~ ERROR E0501
+    return peek(r);
+}
+
+fn written_args_part() {
+    let d = PH::<u32>.{ d: mk(1) }.d; //~ ERROR E0504
+}
+
+fn written_const_arg_part() {
+    let d = AN::<3>.{ d: mk(1) }.d; //~ ERROR E0504
+}
+
+fn written_const_arg() -> u32 {
+    let r = AN::<3>.{ d: mk(1) }.dref(); //~ ERROR E0501
+    return peek(r);
+}
+
+fn args_of_the_fn<T>() -> u32 {
+    let r = E2::<T>.A(mk(1)).first(); //~ ERROR E0501
+    return peek(r);
+}
+
+fn variant_without_payload() -> bool {
+    let r = F.B.me(); //~ ERROR E0501
+    return match r {
+        F.B => true,
+        F.A(_) => false,
+    };
+}
+
+fn select_borrow(c: bool) -> u32 {
+    let r = c.select(mk(1), mk(2)).me(); //~ ERROR E0501
+    return peek(r);
+}
+
+fn select_part(c: bool) {
+    let d = c.select(mkp(1), mkp(3)).a; //~ ERROR E0504
+}
+
+fn ok_in_one_statement() -> u32 {
+    let mut x: u32 = 5;
+    let xs: [u32; 2] = [1, 2];
+    let a = peek(GR.{ d: mk(1), r: &mut x }.dref());
+    let b = peek(ES.A(mk(1), &xs).dref());
+    let c = peek(E2::<u32>.A(mk(1)).first());
+    let d = PH::<u32>.{ d: mk(1) }.d.id;
+    let e = peek((a > 0).select(mk(1), mk(2)).me());
+    let f: u32 = match F.B.me() {
+        F.B => 1,
+        F.A(n) => *n,
+    };
+    return a + b + c + d + e + f;
+}
+
+fn main() -> i32 {
+    return 0;
+}
