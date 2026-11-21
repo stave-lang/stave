@@ -1,4 +1,4 @@
-// A compound assignment in a `Once` init makes the fn field call the init again.
+// A compound assignment in a `Once` init calls an impl whose fn field call runs the init again.
 import std.core;
 import std.io;
 import std.sync;
@@ -11,7 +11,9 @@ view struct H {
 
 impl core.BitOr for H {
     fn bitor(self, rhs: Self) -> Self {
-        return H.{ f: init };
+        let k = self.f;
+        let r = k(); //~ ERROR E1402
+        return H.{ f: zero };
     }
 }
 
@@ -22,11 +24,11 @@ fn zero() -> u32 {
 fn init() -> u32 {
     let mut h = H.{ f: zero };
     h |= H.{ f: zero };
-    let k = h.f;
-    return k() + 1; //~ ERROR E1402
+    return 1u32;
 }
 
 fn main() -> i32 {
+    let t = H.{ f: init };
     let v = *CFG.get_or_init(init);
     io.print(f"{v}\n");
     return 0;

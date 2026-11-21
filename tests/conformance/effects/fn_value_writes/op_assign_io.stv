@@ -1,5 +1,5 @@
-// `h += x` (a user `Add` on a struct holding a fn value) writes the fn field through the impl's
-// result: calls of the field reach every fn any `H` literal puts there.
+// `h += x` calls the operator impl, which calls the fn field of `self`: that reaches every fn
+// any `H` literal puts there, so a `without(io)` fn using `+=` is denied.
 import std.core;
 import std.io;
 
@@ -9,7 +9,9 @@ view struct H {
 
 impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        return H.{ f: noisy };
+        let k = self.f;
+        k();
+        return H.{ f: nop };
     }
 }
 
@@ -22,10 +24,9 @@ fn noisy() {
 fn quiet() without(io) { //~ ERROR E1401
     let mut h = H.{ f: nop };
     h += H.{ f: nop };
-    let g = h.f;
-    g();
 }
 
 fn main() {
+    let n = H.{ f: noisy };
     quiet();
 }

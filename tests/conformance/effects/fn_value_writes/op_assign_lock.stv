@@ -1,31 +1,33 @@
-// Holding rank 1, a fn field a compound assignment changed re-locks the mutex.
+// Holding rank 1, a compound assignment calls an impl whose fn field call re-locks the mutex.
 import std.core;
 import std.io;
 import std.sync;
 
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0);
+
 view struct H {
-    f: fn(&sync.Mutex<u32, 1>),
+    f: fn(),
 }
 
 impl core.Mul for H {
     fn mul(self, rhs: Self) -> Self {
-        return H.{ f: take };
+        let k = self.f;
+        k();
+        return H.{ f: nop };
     }
 }
 
-fn nop(m: &sync.Mutex<u32, 1>) {}
+fn nop() {}
 
-fn take(m: &sync.Mutex<u32, 1>) {
-    let g = m.lock();
+fn take() {
+    let g = M.lock();
 }
 
 fn main() {
-    let m = sync.Mutex::<u32, 1>.new(0);
-    let g = m.lock();
+    let t = H.{ f: take };
+    let g = M.lock();
     let mut h = H.{ f: nop };
-    h *= H.{ f: nop };
     io.print("relocking\n");
-    let k = h.f;
-    k(&m); //~ ERROR E1405
+    h *= H.{ f: nop }; //~ ERROR E1405
     io.print("unreachable\n");
 }

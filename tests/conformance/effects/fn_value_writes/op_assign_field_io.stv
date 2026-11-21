@@ -1,4 +1,4 @@
-// `o.h += x` on a view field holding the fn wrapper: the impl's result reaches the fn field.
+// `o.h += x` on a view field holding the fn wrapper: the impl behind it calls the fn field.
 import std.core;
 import std.io;
 
@@ -10,7 +10,9 @@ impl Copy for H {}
 
 impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        return H.{ f: noisy };
+        let k = self.f;
+        k();
+        return H.{ f: nop };
     }
 }
 
@@ -27,10 +29,9 @@ fn noisy() {
 fn quiet() without(io) { //~ ERROR E1401
     let mut o = O.{ h: H.{ f: nop } };
     o.h += H.{ f: nop };
-    let g = o.h.f;
-    g();
 }
 
 fn main() {
+    let n = H.{ f: noisy };
     quiet();
 }
