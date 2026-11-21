@@ -1,0 +1,7 @@
+pub fn entry(x: usize) -> usize {
+    return x + 3;
+}
+
+pub fn start(f: fn() -> u32) -> u32 {
+    return f() + 1;
+}

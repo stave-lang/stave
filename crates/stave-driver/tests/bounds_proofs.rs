@@ -375,12 +375,11 @@ fn dump_cases_are_the_run_programs() {
 fn kept_contracts(m: &Module, path: &str) -> usize {
     let f = m.funcs.iter().find(|f| f.path == path).unwrap_or_else(|| panic!("no fn {path}"));
     let b = f.body.as_ref().unwrap();
-    let fails = [stave_ir::witness::REQUIRES_FAILED, stave_ir::witness::ENSURES_FAILED];
     (0..b.insts.len() as u32)
         .filter(|&i| {
             b.insts.op[i as usize] == Op::Call
                 && matches!(b.args(i).first(), Some(stave_ir::Operand::Func(g))
-                    if fails.contains(&m.funcs[g.index()].path.as_str()))
+                    if stave_ir::known::is_contract_failed(&m.funcs[g.index()]))
         })
         .count()
 }

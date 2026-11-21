@@ -154,6 +154,8 @@ impl Prog {
         let entry = m.declare(inst(), "runtime.start.entry", vec![t.pu8], None);
         let trap = m.declare(inst(), "runtime.panic.trap", vec![t.u32, t.u32], None);
         let main = m.declare(inst(), "app.main", vec![], None);
+        m.funcs[entry.index()].known = Some(stave_ir::Known::StartEntry);
+        m.funcs[trap.index()].known = Some(stave_ir::Known::Trap);
         let mut p = Prog { m, t, main, out_u64, out_f64, out_f32, out_str, entry, trap, sys1, sys3 };
         p.define_runtime();
         p
@@ -244,6 +246,19 @@ impl Prog {
         let mut b = FuncBuilder::new(params);
         f(&mut b, self);
         self.m.define(id, b.finish().expect("builder"));
+        id
+    }
+
+    /// [`Prog::func`] for compiler-known item `k`, stamped as the front end does.
+    pub fn func_known(
+        &mut self,
+        k: stave_ir::Known,
+        params: &[TypeId],
+        ret: Option<TypeId>,
+        f: impl FnOnce(&mut FuncBuilder, &Prog),
+    ) -> FuncId {
+        let id = self.func(&k.path(), params, ret, f);
+        self.m.funcs[id.index()].known = Some(k);
         id
     }
 

@@ -295,8 +295,7 @@ pub fn contract_checks(m: &Module, f: FuncId) -> Vec<(u32, Option<Goal>)> {
             continue;
         }
         let Some(&Operand::Func(callee)) = b.args(q).first() else { continue };
-        let path = &m.funcs[callee.index()].path;
-        if path != stave_ir::witness::REQUIRES_FAILED && path != stave_ir::witness::ENSURES_FAILED {
+        if !stave_ir::known::is_contract_failed(&m.funcs[callee.index()]) {
             continue;
         }
         let branch = b.blocks.iter().find_map(|p| match p.term {

@@ -845,7 +845,7 @@ impl Sp {
     /// `runtime.panic.trap`: prints the dump window if one is set, then exits `100 + kind`.
     fn def_trap(&mut self) {
         let t = self.p.t;
-        let f = self.p.decl("runtime.panic.trap", &[t.u32, t.u32], None);
+        let f = self.p.decl_known(stave_ir::Known::Trap, &[t.u32, t.u32], None);
         let mut b = FuncBuilder::new(&[t.u32, t.u32]);
         let k = b.param(0).unwrap();
         let p1 = self.static_ptr(&mut b, 1);

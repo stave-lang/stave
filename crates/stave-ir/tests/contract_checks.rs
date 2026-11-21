@@ -10,7 +10,7 @@ use stave_ir::bounds::{Clause, Proof, prove_func};
 use stave_ir::interp::Val;
 use stave_ir::ir::Span;
 use stave_ir::witness::check::{Reject, check_func, remove};
-use stave_ir::witness::{Edge, FnWitness, Node, REQUIRES_FAILED, Refuted, Removed, Source};
+use stave_ir::witness::{Edge, FnWitness, Node, Refuted, Removed, Source};
 use stave_ir::{
     Block, FuncBuilder, FuncId, Module, Op, Operand, Outcome, PanicKind, Site, TypeId, Value, verify_module,
 };
@@ -37,7 +37,7 @@ fn contract_fn<R>(
     let mut m = Module::new();
     let t = ty(&mut m);
     let bt = m.types.bool();
-    let fail = define(&mut m, &[9], REQUIRES_FAILED, &[], None, |b, _| {
+    let fail = define_known(&mut m, &[9], stave_ir::Known::RequiresFailed, &[], None, |b, _| {
         b.inst(Op::Panic(PanicKind::Contract), None, &[]);
         b.unreachable();
     });

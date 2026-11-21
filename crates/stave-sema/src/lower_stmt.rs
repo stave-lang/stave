@@ -1046,7 +1046,7 @@ impl<'a> FnCx<'a> {
         let unit = self.t_unit();
         let ft = self.tys.intern(TypeKind::Fn { params: Box::new([]), ret: unit, features: 0, deny: 0 });
         let Some(fv) = self.closure_value(s, k, ft) else { return };
-        let Some(d) = crate::mono::item_at(self.g.prog, "runtime.thread", "scope_spawn") else {
+        let Some(d) = self.g.prog.known.decl(stave_ir::Known::ScopeSpawn) else {
             self.fail(s, "`runtime.thread.scope_spawn` not found");
             return;
         };

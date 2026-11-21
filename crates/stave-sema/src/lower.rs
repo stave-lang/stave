@@ -296,7 +296,7 @@ fn lower_in_pool(
     // interned after the canonical ones; the module's type ids are re-ranked at assembly.
     let mut table = tc.types.clone();
     let sigs = &tc.sigs;
-    let lang = LangFns::find(prog, sigs);
+    let lang = LangFns::find(prog);
     let mut statics_list: Vec<DeclId> = Vec::new();
     for (k, d) in prog.decls.iter().enumerate() {
         let id = DeclId(k as u32);
@@ -1053,6 +1053,10 @@ fn assemble(
             Job::Inst(k) => c_symbol(prog, sigs, k.decl),
             Job::Glue(_) => None,
         };
+        let known = match job {
+            Job::Inst(k) => prog.known.of(k.decl),
+            Job::Glue(_) => None,
+        };
         let type_args = fin_args(j);
         let reqs = o.reqs.clone();
         let job_sites = o.sites.clone();
@@ -1193,6 +1197,7 @@ fn assemble(
                 body,
                 name_site,
                 symbol: if f.closure.is_some() { None } else { symbol.clone() },
+                known: if f.closure.is_some() { None } else { known },
             });
         }
     }

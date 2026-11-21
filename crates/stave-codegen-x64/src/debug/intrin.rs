@@ -8,7 +8,7 @@
 //! and `copy_bytes` (a call of `std.slice.copy_raw` with the intrinsic's operands).
 
 use stave_ir::layout::Shape;
-use stave_ir::{Operand, TypeId, Value};
+use stave_ir::{Known, Operand, TypeId, Value};
 use stave_obj::SymbolId;
 
 use super::abi::{ARG_GPRS, CallAbi, Loc, Piece, RetLoc};
@@ -154,7 +154,7 @@ impl Cg<'_, '_> {
             "cpu_init" => {
                 // a call of `runtime.cpu.init` if the program has it, else no code
                 arity(0)?;
-                let Some(g) = super::find_body(self.cx.m, "runtime.cpu.init") else { return Ok(()) };
+                let Some(g) = self.cx.m.known_body(Known::CpuInit) else { return Ok(()) };
                 let gf = self.cx.m.func(g).ok_or_else(|| bad("callee out of range"))?;
                 let abi = self.abi_of(&gf.params, gf.ret)?;
                 let sym = self.func_sym(g)?;
@@ -164,7 +164,10 @@ impl Cg<'_, '_> {
                 // a call of `std.slice.copy_raw(dst, src, n)`, the intrinsic's operands as its
                 // arguments
                 arity(3)?;
-                let g = super::find_body(self.cx.m, "std.slice.copy_raw")
+                let g = self
+                    .cx
+                    .m
+                    .known_body(Known::CopyRaw)
                     .ok_or_else(|| bad("intrinsic.copy_bytes without `std.slice.copy_raw`"))?;
                 let gf = self.cx.m.func(g).ok_or_else(|| bad("callee out of range"))?;
                 let abi = self.abi_of(&gf.params, gf.ret)?;

@@ -34,7 +34,7 @@
 //! default) for the others; the runtime rounds up to the page size. No error comes from the bound: frame sizes differ
 //! between debug and release.
 
-use stave_ir::{FuncId, Module, Op, Operand, Term};
+use stave_ir::{FuncId, Known, Module, Op, Operand, Term};
 use stave_obj::{DataObj, StackUse, SymbolId};
 use stave_sema::callgraph::{CallGraph, EdgeKind, NodeKind};
 
@@ -242,10 +242,6 @@ fn trapping_node(start: &[u32], to: &[u32], traps: &[bool], from: &[u32]) -> Opt
     None
 }
 
-fn find_body(m: &Module, path: &str) -> Option<FuncId> {
-    m.funcs.iter().position(|f| f.path == path && f.body.is_some()).map(|i| FuncId(i as u32))
-}
-
 /// What one function's body calls.
 #[derive(Default)]
 struct Calls {
@@ -391,11 +387,9 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
             }
         }
     }
-    let queued = find_body(m, "runtime.thread.run_queued");
-    let called = IntrinsicCalls {
-        cpu_init: find_body(m, "runtime.cpu.init"),
-        copy_raw: find_body(m, "std.slice.copy_raw"),
-    };
+    let queued = m.known_body(Known::RunQueued);
+    let called =
+        IntrinsicCalls { cpu_init: m.known_body(Known::CpuInit), copy_raw: m.known_body(Known::CopyRaw) };
     let mut made = vec![false; nf];
     let calls: Vec<Calls> = (0..nf).map(|f| calls_of(m, FuncId(f as u32), &called, &mut made)).collect();
     let unmapped_values = (0..nf).any(|f| made[f] && ids[f].iter().all(|&x| x as usize >= n));
@@ -459,7 +453,7 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
     // That holds only if nothing `begin` reaches traps (else a trap there starts over).
     let zero = vec![Ok(0); total];
     let first = longest(&start, &to, &weight, &zero, &poison);
-    let trap = match (find_body(m, "runtime.panic.trap"), find_body(m, "runtime.panic.begin")) {
+    let trap = match (m.known_body(Known::Trap), m.known_body(Known::PanicBegin)) {
         (Some(t), Some(b)) => match trapping_node(&start, &to, &traps, &ids[b.index()]) {
             Some(x) => Err(Why::Cycle(at(x))),
             None => over(&first, &ids[t.index()]).map(|d| d.saturating_mul(2)),
@@ -513,7 +507,7 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
             _ => threads.push(Thread { func: f, starts: vec![s], depth: Ok(0) }),
         }
     }
-    let entry = find_body(m, "runtime.thread.entry");
+    let entry = m.known_body(Known::ThreadEntry);
     for t in &mut threads {
         // the nodes a thread can start with, not every node of the function: a node no start
         // reaches (an unspecialized one whose fn-value slots stay empty) never runs on a thread

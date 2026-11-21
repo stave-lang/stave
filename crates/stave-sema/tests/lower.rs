@@ -633,3 +633,45 @@ fn generated_programs_run_in_the_interpreter() {
         let _ = std::fs::remove_dir_all(&out);
     }
 }
+
+/// Compiler-known items are stamped by identity: in a program whose own items are named like
+/// them (`tests/conformance/run/known_names`: `mymod.try_alloc`, `panic.trap`, `thread.entry`,
+/// `fn start`, a type `Vec` with a `drop`, ...), no user decl resolves to a known item and no
+/// user function carries a stamp, while the runtime's functions carry theirs.
+#[test]
+fn known_items_are_stamped_by_identity() {
+    use stave_ir::Known;
+    let root = repo().join("tests/conformance/run/known_names");
+    for target in ["x86_64-linux", "aarch64-linux"] {
+        let p = Program::load(&config(&root, target, None));
+        for (i, d) in p.decls.iter().enumerate() {
+            let user = p.module(d.module).is_some_and(|m| p.packages[m.package.idx()].is_root);
+            let id = stave_sema::DeclId(i as u32);
+            assert!(!user || p.known.of(id).is_none(), "{target}: user decl `{}` is known", p.decl_path(id));
+        }
+        let m = lowered(&root, target, Mode::Debug, None);
+        let builtin = |path: &str| path.starts_with("std.") || path.starts_with("runtime.");
+        let mut user_names = Vec::new();
+        for f in &m.funcs {
+            match f.known {
+                Some(k) => {
+                    assert!(builtin(&f.path), "{target}: `{}` stamped `{k}`", f.path);
+                    if k.method().is_none() {
+                        assert_eq!(f.path, k.path(), "{target}");
+                    }
+                }
+                None if !builtin(&f.path) => user_names.push(f.path.rsplit('.').next().unwrap_or("")),
+                None => {}
+            }
+        }
+        for name in
+            ["alloc", "try_alloc", "free", "copy_raw", "trap", "requires_failed", "entry", "start", "init"]
+        {
+            assert!(user_names.contains(&name), "{target}: no user fn `{name}` lowered: {user_names:?}");
+        }
+        for k in [Known::StartEntry, Known::Trap, Known::RequiresFailed] {
+            let f = m.known_body(k).unwrap_or_else(|| panic!("{target}: no `{k}`"));
+            assert_eq!(m.funcs[f.index()].path, k.path(), "{target}");
+        }
+    }
+}

@@ -1,0 +1,11 @@
+pub fn trap(kind: u32, site: u32) -> u32 {
+    return kind * 100 + site;
+}
+
+pub fn requires_failed(code: u32) -> u32 {
+    return code + 1;
+}
+
+pub fn on_signal(sig: u32) -> u32 {
+    return sig;
+}
