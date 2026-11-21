@@ -1,7 +1,8 @@
 //~ CHECK-ONLY
 // A non-Copy value moves whole (E0504 case `part`): a by-value use of a non-Copy part of a
 // place or of a temporary outside a pattern that takes the whole value apart. Copy parts are
-// read, parts are borrowed and assigned, and a pattern may take the whole value apart.
+// read, parts are borrowed and assigned, and a pattern may take the whole value apart (a part
+// bound twice by it would have two owners: E0502).
 import std.mem;
 import std.vec;
 
@@ -59,6 +60,10 @@ fn compound_field(s: S) {
 
 fn return_field(s: S) -> vec.Vec<u32> {
     return s.v; //~ ERROR E0504
+}
+
+fn part_bound_twice(s: S) {
+    let S.{ a: x, a: y, v, n } = s; //~ ERROR E0502
 }
 
 fn ok_copy_part(s: S) -> u32 {
