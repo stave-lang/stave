@@ -711,10 +711,6 @@ pub enum EventKind {
     /// `fn.make` is to copy the environment the pointer names into a slot of its own, so that
     /// each evaluation of a closure literal holds its own capture references.
     Env,
-    /// The slot holds a constant temporary, which is static data: its first evaluation begins
-    /// it, and the store of a later one (the instruction that follows) writes the bytes that
-    /// are there and is no event.
-    Const,
 }
 
 /// A function: signature plus an optional body (`None` = declared only, e.g. an `extern "C"`

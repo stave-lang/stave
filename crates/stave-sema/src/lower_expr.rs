@@ -551,7 +551,6 @@ impl<'a> FnCx<'a> {
             let e = self.expr(c, None);
             let Some(p) = self.place_of(e) else { return E::Never };
             let p = match p.base {
-                Base::Val(v, t) if self.constant_temp(Some(c), v, &p, rt) => self.const_slot(p, v, t),
                 Base::Val(..) => self.own_temp(p),
                 _ => p,
             };
@@ -559,58 +558,6 @@ impl<'a> FnCx<'a> {
             return E::V(self.borrowed(v, rt), rt);
         }
         self.expr(c, want)
-    }
-
-    /// With the borrow side table on: whether a `&` of reference type `rt` of the place `p`,
-    /// rooted at value `v` (of expression `c`, when known), borrows a constant temporary: `v` is
-    /// the value of a `const` item or const generic, of a variant without payload, of a fn
-    /// item, or of `size_of` / `align_of` (`FnState::const_vals`), or `c` is a literal or
-    /// `()` (in parentheses or not); `p` may be a field or element of such a value, and its
-    /// type has no drop glue. Such a temporary only ever holds the one value.
-    fn constant_temp(&mut self, c: Option<u32>, v: Operand, p: &Place, rt: Ty) -> bool {
-        if !self.g.borrows || !matches!(self.kind(rt), TypeKind::Ref { mutable: false, .. }) {
-            return false;
-        }
-        if let Base::Val(_, t) = p.base
-            && self.needs_drop(t)
-        {
-            return false;
-        }
-        if self.f.const_vals.contains(&v) {
-            return true;
-        }
-        let Some(c) = c else { return false };
-        let icx = self.icx;
-        let mut x = c;
-        while icx.kind(x) == Some(NodeKind::Primary) && icx.is(icx.a(x), Term::LParen) {
-            let kids = icx.kids_vec(x);
-            if kids.is_empty() {
-                return p.proj.is_empty() && self.is_unit(p.ty);
-            }
-            if kids.len() != 1 || icx.is(icx.close(icx.a(x)) - 1, Term::Comma) {
-                return false;
-            }
-            x = kids[0];
-        }
-        if !p.proj.is_empty() || !matches!(v, Operand::Const(_) | Operand::Str(_)) {
-            return false;
-        }
-        let a = icx.a(x);
-        let literal = icx.kind(x) == Some(NodeKind::Primary)
-            && [Term::IntLit, Term::FloatLit, Term::KwTrue, Term::KwFalse, Term::CharLit, Term::StrLit]
-                .iter()
-                .any(|&t| icx.is(a, t));
-        literal || self.f.const_toks.contains(&icx.end_tok(x))
-    }
-
-    /// The place `p` rooted at constant value `v` of type `t`, in a slot of its own that holds
-    /// static data: the slot does not begin anew at the next evaluation (the *constant* row).
-    fn const_slot(&mut self, p: Place, v: Operand, t: Ty) -> Place {
-        let s = self.new_slot(t);
-        let st = self.t_ref(true, t);
-        self.event(stave_ir::EventKind::Const, s, st);
-        self.f.b.store(s, v);
-        Place { base: Base::Mem(s, st), proj: p.proj, ty: p.ty, root: None }
     }
 
     /// The reference `v` of type `rt` a borrow expression made. With the borrow side table on,
@@ -982,9 +929,7 @@ impl<'a> FnCx<'a> {
                 match self.args.get(idx as usize) {
                     Some(GArg::Const(ConstArg::Value(v))) => {
                         let v = *v as i128;
-                        let o = self.int(v);
-                        self.constant_value(o);
-                        E::V(o, ct)
+                        E::V(self.int(v), ct)
                     }
                     _ => self.fail_at(Some(tok), "unbound const generic"),
                 }
@@ -995,14 +940,7 @@ impl<'a> FnCx<'a> {
                     let (ty, Some(v)) = (c.ty, c.value.clone()) else {
                         return self.fail_at(Some(tok), "const without a value");
                     };
-                    let e = self.const_val(&v, ty, tok);
-                    if self.g.borrows {
-                        self.f.const_toks.push(tok);
-                        if let E::V(o @ (Operand::Value(_) | Operand::Const(_)), _) = &e {
-                            self.f.const_vals.insert(*o);
-                        }
-                    }
-                    e
+                    self.const_val(&v, ty, tok)
                 }
                 Some(crate::decls::DeclKind::Static) => self.static_place(d, tok),
                 Some(crate::decls::DeclKind::Fn | crate::decls::DeclKind::Method) => {
@@ -1013,7 +951,6 @@ impl<'a> FnCx<'a> {
                             let args: Vec<GArg> = args.iter().map(|a| self.sub_garg(*a)).collect();
                             let ty = self.nty(node);
                             let f = self.req(Req::Inst(InstKey { decl, args }));
-                            self.constant_value(Operand::Func(f));
                             E::V(Operand::Func(f), ty)
                         }
                         _ => self.fail_at(Some(tok), "fn value without a target"),
@@ -1032,21 +969,11 @@ impl<'a> FnCx<'a> {
                         return self.fail_at(Some(tok), "variant value type");
                     }
                     let i = self.int(idx as i128);
-                    let o = self.opn(Op::EnumMake, ty, &[i]);
-                    self.constant_value(o);
-                    E::V(o, ty)
+                    E::V(self.opn(Op::EnumMake, ty, &[i]), ty)
                 }
                 _ => self.fail_at(Some(tok), "not a value"),
             },
             _ => self.fail_at(Some(tok), "not a value"),
-        }
-    }
-
-    /// With the borrow side table on: `o` is the value of an expression the model counts as a
-    /// constant (State, "constant temporary"); a `&` of a temporary it initializes is static data.
-    fn constant_value(&mut self, o: Operand) {
-        if self.g.borrows {
-            self.f.const_vals.insert(o);
         }
     }
 
@@ -1184,8 +1111,7 @@ impl<'a> FnCx<'a> {
                         a.map(|a| icx.kids_vec(a)).unwrap_or_default()
                     };
                     let last = close == pend;
-                    let head = (p == prim_end + 1).then_some(prim);
-                    cur = Cur::Val(self.method_call(n, recv, head, seg, &args, last));
+                    cur = Cur::Val(self.method_call(n, recv, seg, &args, last));
                     p = close + 1;
                 } else {
                     cur = Cur::Val(self.field_step(recv, seg));
@@ -1799,9 +1725,7 @@ impl<'a> FnCx<'a> {
                 let t = self.sub(ty);
                 let Some((s, a)) = self.layout(t) else { return self.fail_at(Some(ctok), "layout") };
                 let us = self.t_usize();
-                let o = self.int(if align { a } else { s } as i128);
-                self.constant_value(o);
-                E::V(o, us)
+                E::V(self.int(if align { a } else { s } as i128), us)
             }
             Some(_) => self.vector_unsupported(Some(ctok), "vector built-in"),
             // A type-relative built-in (`f32x4.splat(x)`) has its target at the name token.
@@ -1906,25 +1830,10 @@ impl<'a> FnCx<'a> {
         E::V(self.opn(op, ty, &ops), ty)
     }
 
-    /// The receiver after typeck's adjustment; `node`: the receiver's expression, when it is
-    /// the head of the chain.
-    fn receiver(&mut self, recv: E, node: Option<u32>, adj: Adjust, want: Option<Ty>) -> Option<Operand> {
+    /// The receiver after typeck's adjustment.
+    fn receiver(&mut self, recv: E, adj: Adjust, want: Option<Ty>) -> Option<Operand> {
         let p = self.place_of(recv)?;
-        let val = match p.base {
-            Base::Val(v, t) => Some((v, t)),
-            _ => None,
-        };
-        let p = match (adj.autoref, val) {
-            (Some(m), Some((v, t))) if adj.derefs == 0 => {
-                let w = match want {
-                    Some(w) => w,
-                    None => self.t_ref(m, p.ty),
-                };
-                if self.constant_temp(node, v, &p, w) { self.const_slot(p, v, t) } else { self.own_temp(p) }
-            }
-            (Some(_), _) => self.own_temp(p),
-            (None, _) => p,
-        };
+        let p = if adj.autoref.is_some() { self.own_temp(p) } else { p };
         let p = self.derefs(p, adj.derefs)?;
         match adj.autoref {
             Some(m) => {
@@ -1944,7 +1853,7 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    fn method_call(&mut self, n: u32, recv: E, head: Option<u32>, seg: u32, args: &[u32], last: bool) -> E {
+    fn method_call(&mut self, n: u32, recv: E, seg: u32, args: &[u32], last: bool) -> E {
         let _ = last;
         self.cur_tok = seg;
         match self.target(seg).cloned() {
@@ -1952,7 +1861,7 @@ impl<'a> FnCx<'a> {
                 Some(Resolved::Inst(k)) => {
                     let Some((ps, _)) = self.inst_sig(&k) else { return self.fail_at(Some(seg), "callee") };
                     let by_value = adjust.autoref.is_none();
-                    let Some(rv) = self.receiver(recv, head, adjust, ps.first().copied()) else {
+                    let Some(rv) = self.receiver(recv, adjust, ps.first().copied()) else {
                         return E::Never;
                     };
                     let mut held = Vec::new();
@@ -1969,7 +1878,7 @@ impl<'a> FnCx<'a> {
                     self.call_inst(k, &vs, seg)
                 }
                 Some(Resolved::BuiltinOp(name)) => {
-                    let Some(rv) = self.receiver(recv, head, adjust, None) else { return E::Never };
+                    let Some(rv) = self.receiver(recv, adjust, None) else { return E::Never };
                     let ty = self.nty(n);
                     let Some(mut vs) = self.args(args, &[ty]) else { return E::Never };
                     vs.insert(0, rv);

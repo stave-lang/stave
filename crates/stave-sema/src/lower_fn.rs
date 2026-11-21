@@ -309,12 +309,11 @@ pub(crate) struct FnState {
     /// While the pattern of a `match` arm with a guard binds: the moves it makes (pointer to
     /// the place, its type). They happen when the guard holds, not when the names are bound.
     pub held: Option<Vec<(Operand, Ty)>>,
-    /// With the borrow side table on: the values of constant expressions so far (`const` items
-    /// and const generics, variants without payload, fn items, `size_of` / `align_of`; each
-    /// such operand is made for one evaluation, a fn item's names its fn), and the last token
-    /// of each path that named a `const` item.
-    pub const_vals: FxHashSet<Operand>,
-    pub const_toks: Vec<u32>,
+    /// With the borrow side table on: the slots of the rvalues whose address the open
+    /// statements took (pointer, its type), in order, and per open statement where its slots
+    /// start. Each ends with its statement ([`FnCx::end_temps`]).
+    pub stmt_slots: Vec<(Operand, Ty)>,
+    pub slot_marks: Vec<usize>,
     /// The site of an instruction that has none of its own: the statement's, with the borrow
     /// side table on (a report names source lines); else none.
     pub stmt_site: Site,
@@ -1272,6 +1271,9 @@ impl<'a> FnCx<'a> {
             Base::Mem(v, t) => (*v, *t),
             Base::Val(v, t) => {
                 let (s, st) = self.spill(*v, *t);
+                if self.g.borrows && !self.f.stmts.is_empty() {
+                    self.f.stmt_slots.push((s, st));
+                }
                 (s, st)
             }
             Base::Local(l) => {
@@ -1724,9 +1726,12 @@ impl<'a> FnCx<'a> {
     /// from here on end at the matching [`FnCx::end_temps`].
     pub fn begin_temps(&mut self) {
         self.f.stmts.push(self.f.temps.len());
+        self.f.slot_marks.push(self.f.stmt_slots.len());
     }
 
-    /// Ends the innermost open statement: drops its temporaries, last made first.
+    /// Ends the innermost open statement: drops its temporaries, last made first, then ends
+    /// the slots of the rvalues it took the address of (every temporary ends with its
+    /// statement, M14).
     pub fn end_temps(&mut self) {
         let Some(from) = self.f.stmts.pop() else { return };
         let ts: Vec<usize> = self.f.temps.get(from..).unwrap_or(&[]).to_vec();
@@ -1736,6 +1741,9 @@ impl<'a> FnCx<'a> {
         }
         self.f.temps.truncate(from);
         self.trim_temps();
+        let at = self.f.slot_marks.pop().unwrap_or(0);
+        self.end_slots(at);
+        self.f.stmt_slots.truncate(at);
     }
 
     /// Drops, on a path that leaves them, the temporaries of the open statements from index
@@ -1745,6 +1753,21 @@ impl<'a> FnCx<'a> {
         let ts: Vec<usize> = self.f.temps.get(at..).unwrap_or(&[]).to_vec();
         for &l in ts.iter().rev() {
             self.drop_owner(l);
+        }
+        let at = if from == 0 {
+            0
+        } else {
+            self.f.slot_marks.get(from).copied().unwrap_or(self.f.stmt_slots.len())
+        };
+        self.end_slots(at);
+    }
+
+    /// The end of the rvalue slots of the open statements from `stmt_slots[at]` on, last
+    /// taken first.
+    fn end_slots(&mut self, at: usize) {
+        let ss: Vec<(Operand, Ty)> = self.f.stmt_slots.get(at..).unwrap_or(&[]).to_vec();
+        for &(s, st) in ss.iter().rev() {
+            self.event(stave_ir::EventKind::End, s, st);
         }
     }
 
@@ -1909,8 +1932,8 @@ impl FnState {
             borrows: Vec::new(),
             events: Vec::new(),
             held: None,
-            const_vals: FxHashSet::default(),
-            const_toks: Vec::new(),
+            stmt_slots: Vec::new(),
+            slot_marks: Vec::new(),
             stmt_site: Site::NONE,
             ensures_end: None,
         }
