@@ -1,0 +1,10 @@
+alloc 30 try_alloc 24 free 0
+copy_raw 1 2 3 0
+trap 205 requires_failed 10 on_signal 11
+thread.entry 7 thread.start 8 cpu.init 42
+start 2 entry 42 half 21
+Buf.drop 105
+std Vec len 2
+user Vec 1 2
+drop Vec 2
+drop Vec 1

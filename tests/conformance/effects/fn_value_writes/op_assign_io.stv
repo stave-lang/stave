@@ -1,0 +1,25 @@
+// `f += noisy` (a user `Add` on `fn()`) is no harmless use of `f`: its calls reach every fn of its type.
+import std.core;
+import std.io;
+
+impl core.Add for fn() {
+    fn add(self, rhs: Self) -> Self {
+        return noisy;
+    }
+}
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let mut f: fn() = nop;
+    f += noisy;
+    f();
+}
+
+fn main() {
+    quiet();
+}

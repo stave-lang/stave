@@ -1,0 +1,18 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at soa_permute_dup.stv:16:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// `Soa.permute` by a slice that names a row twice (so misses another) panics `Bounds` at the
+// caller before it moves a row.
+import std.soa;
+
+struct P {
+    pub v: u32,
+}
+
+fn main() -> i32 {
+    let mut ps = soa.Soa::<P>.new();
+    for i in 0u32..3 { ps.push(P.{ v: i }); }
+    let perm: [u32; 3] = [2, 0, 2];
+    ps.permute(&perm);
+    return 0;
+}

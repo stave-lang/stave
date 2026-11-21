@@ -14,7 +14,10 @@
 // The row built-ins `soa_read`, `soa_write`, and `soa_row_size` (this module only) move one row
 // between a T and the columns and give the sum of T's field sizes.
 // T is Flat, so a row owns nothing: rows are moved and copied bitwise and never dropped.
-// Out-of-range `get` / `set` panic `Bounds` at the caller; allocation failure panics
+// Every method that moves rows (`swap swap_remove permute extend_from_slice`, the growth copy)
+// moves whole rows through `soa_read` / `soa_write`, so all columns take the same path.
+// Out-of-range `get` / `set` / `swap` / `swap_remove` and a `permute` by a slice that is not a
+// permutation of `0..len` panic `Bounds` at the caller; allocation failure panics
 // `OutOfMemory` there, except in the `try_` methods, which return `Result.Err` (`try_push` gives
 // its value back) and leave the Soa as it was. Capacity arithmetic that overflows usize is an
 // allocation failure. Send / Sync like `vec.Vec`: when T is.
@@ -150,6 +153,65 @@ impl<T: core.Flat> Soa<T> {
     pub fn clear(&mut self) {
         self.len = 0;
     }
+
+    // Removes the rows from n on; nothing if n >= len. Keeps the buffer.
+    pub fn truncate(&mut self, n: usize) {
+        if n < self.len { self.len = n; }
+    }
+
+    // Removes row i and returns it; the last row takes its place. Panics `Bounds` if i >= len.
+    pub fn swap_remove(&mut self, i: usize) -> T {
+        if i >= self.len {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        let last = self.len - 1;
+        let x = unsafe("i < len: an initialized row; it is refilled or len stops covering it") soa_read::<T>(self.ptr as *const u8, self.cap, i);
+        if i != last {
+            unsafe("last < len: an initialized row, moved into row i; len stops covering it") {
+                soa_write::<T>(self.ptr, self.cap, i, soa_read::<T>(self.ptr as *const u8, self.cap, last));
+            }
+        }
+        self.len = last;
+        return x;
+    }
+
+    // Exchanges rows i and j in every column; panics `Bounds` if either is >= len.
+    pub fn swap(&mut self, i: usize, j: usize) {
+        if i >= self.len || j >= self.len {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        if i == j { return; }
+        unsafe("i != j, both < len: two initialized rows, each moved out and refilled") {
+            let x = soa_read::<T>(self.ptr as *const u8, self.cap, i);
+            soa_write::<T>(self.ptr, self.cap, i, soa_read::<T>(self.ptr as *const u8, self.cap, j));
+            soa_write::<T>(self.ptr, self.cap, j, x);
+        }
+    }
+
+    // Reorders the rows of every column: row k becomes the one that was at perm[k]. Panics
+    // `Bounds`, before it moves anything, unless perm has len entries and holds each of 0..len
+    // once. Moves each row once, along the cycles of perm.
+    pub fn permute(&mut self, perm: &[u32]) {
+        let mut todo = vec.PermMarks.new(perm, self.len);
+        for s in 0..self.len {
+            if todo.take(s) {
+                let first = unsafe("s < len: an initialized row; it is refilled when the cycle closes") soa_read::<T>(self.ptr as *const u8, self.cap, s);
+                let mut j = s;
+                loop {
+                    let k = perm[j] as usize;
+                    if k == s { break; }
+                    let _ = todo.take(k);
+                    unsafe("perm is a permutation of 0..len: row k is initialized and not yet moved; row j is empty, read into first (j == s) or moved out of by the step before") {
+                        soa_write::<T>(self.ptr, self.cap, j, soa_read::<T>(self.ptr as *const u8, self.cap, k));
+                    }
+                    j = k;
+                }
+                unsafe("j is the last row of the cycle: emptied by the move out of it, or j == s, emptied by the read of first") {
+                    soa_write::<T>(self.ptr, self.cap, j, first);
+                }
+            }
+        }
+    }
 }
 
 impl<T: core.Flat + core.Copy> Soa<T> {
@@ -160,6 +222,28 @@ impl<T: core.Flat + core.Copy> Soa<T> {
             panic.trap(panic.KIND_BOUNDS, panic.user_site());
         }
         return unsafe("i < len: an initialized row; T is Copy, so the copy leaves the row valid") soa_read::<T>(self.ptr as *const u8, self.cap, i);
+    }
+
+    // Appends the rows of xs in order.
+    pub fn extend_from_slice(&mut self, xs: &[T]) {
+        self.reserve(xs.len());
+        self.append(xs);
+    }
+
+    pub fn try_extend_from_slice(&mut self, xs: &[T]) -> Result<(), vec.AllocError> {
+        self.try_reserve(xs.len())?;
+        self.append(xs);
+        return Result.Ok(());
+    }
+
+    // Room for xs.len() more rows is reserved.
+    fn append(&mut self, xs: &[T]) {
+        for k in 0..xs.len() {
+            unsafe("room is reserved: row len + k is inside the buffer and unused; T is Copy") {
+                soa_write::<T>(self.ptr, self.cap, self.len + k, xs[k]);
+            }
+        }
+        self.len = self.len + xs.len();
     }
 }
 

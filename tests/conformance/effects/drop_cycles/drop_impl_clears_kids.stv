@@ -1,0 +1,18 @@
+// Without `rec`, a `Drop` that clears its children of its own type is E1402 at the user impl,
+// not inside std.
+import std.vec;
+
+struct N {
+    kids: vec.Vec<N>,
+}
+
+impl Drop for N {
+    fn drop(&mut self) {
+        self.kids.clear(); //~ ERROR E1402
+    }
+}
+
+fn main() {
+    let mut n = N.{ kids: vec.Vec::<N>.new() };
+    n.kids.push(N.{ kids: vec.Vec::<N>.new() });
+}

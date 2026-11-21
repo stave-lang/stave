@@ -76,6 +76,8 @@ fn shifted(src: Source) -> Source {
         Source::Range { value } => Source::Range { value: Value(value.0 + 1) },
         Source::Bits { inst } => Source::Bits { inst: inst + 1 },
         Source::Cast { inst } => Source::Cast { inst: inst + 1 },
+        Source::FieldLoad { inst } => Source::FieldLoad { inst: inst + 1 },
+        Source::Getter { call } => Source::Getter { call: call + 1 },
         Source::Requires { clause } => Source::Requires { clause: clause + 1 },
         Source::Ensures { call, clause } => Source::Ensures { call: call + 1, clause },
         Source::Arg { call, clause } => Source::Arg { call: call + 1, clause },
@@ -259,6 +261,8 @@ pub fn forgeries_are_refused(m: &Module, f: FuncId) -> usize {
                 Source::SubSat { inst },
                 Source::Bits { inst },
                 Source::Cast { inst },
+                Source::FieldLoad { inst },
+                Source::Getter { call: inst },
                 Source::Assert { call: inst, arg: 0 },
                 Source::Assert { call: inst, arg: 1 },
             ] {
@@ -291,8 +295,7 @@ pub fn contract_checks(m: &Module, f: FuncId) -> Vec<(u32, Option<Goal>)> {
             continue;
         }
         let Some(&Operand::Func(callee)) = b.args(q).first() else { continue };
-        let path = &m.funcs[callee.index()].path;
-        if path != stave_ir::witness::REQUIRES_FAILED && path != stave_ir::witness::ENSURES_FAILED {
+        if !stave_ir::known::is_contract_failed(&m.funcs[callee.index()]) {
             continue;
         }
         let branch = b.blocks.iter().find_map(|p| match p.term {
@@ -387,6 +390,8 @@ pub fn contract_forgeries_are_refused(m: &Module, f: FuncId) -> usize {
                 Source::SubSat { inst },
                 Source::Bits { inst },
                 Source::Cast { inst },
+                Source::FieldLoad { inst },
+                Source::Getter { call: inst },
                 Source::Assert { call: inst, arg: 0 },
                 Source::Assert { call: inst, arg: 1 },
             ]);

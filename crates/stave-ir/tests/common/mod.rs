@@ -31,6 +31,21 @@ pub fn run_host(m: &Module, f: FuncId, args: Vec<Val>) -> (Outcome, BufferHost) 
     }
 }
 
+/// Declares and defines the function of compiler-known item `k` (its path, stamped with `k`, as
+/// the front end lowers it).
+pub fn define_known(
+    m: &mut Module,
+    id: &[u32],
+    k: stave_ir::Known,
+    params: &[TypeId],
+    ret: Option<TypeId>,
+    body: impl FnOnce(&mut FuncBuilder, &mut Module),
+) -> FuncId {
+    let f = define(m, id, &k.path(), params, ret, body);
+    m.funcs[f.index()].known = Some(k);
+    f
+}
+
 /// Declares and defines a function in one step.
 pub fn define(
     m: &mut Module,

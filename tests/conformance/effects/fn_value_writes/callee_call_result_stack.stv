@@ -1,0 +1,18 @@
+// The stack bound counts `big`, reached only as a call result called in place.
+//~ STDOUT callee_call_result_stack.stdout
+import std.io;
+
+fn big() -> u64 {
+    let mut buf: [u64; 131072] = [0u64; 131072];
+    buf[131071] = 3;
+    return buf[131071] + buf[7];
+}
+
+fn mk() -> fn() -> u64 {
+    return big;
+}
+
+fn main() {
+    let r = mk()();
+    io.print(f"{r}\n");
+}

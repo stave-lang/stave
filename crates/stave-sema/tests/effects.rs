@@ -129,8 +129,9 @@ fn boundary_fns_exist() {
         assert!(errs.is_empty(), "{errs:?}");
         let g = &tc.call_graph;
         let names = g.node_names(&p, &tc, &(0..g.nodes.len() as u32).collect::<Vec<_>>());
-        for (m, f, _, _) in BOUNDARY {
-            let path = format!("{m}.{f}");
+        for (k, _, _) in BOUNDARY {
+            let path = k.path();
+            assert!(p.known.decl(*k).is_some(), "{target}: `{path}` not resolved");
             assert!(names.contains(&path), "{target}: no node `{path}`");
         }
     }

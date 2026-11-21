@@ -103,7 +103,7 @@ use std::fmt;
 
 use rustc_hash::FxHashMap;
 use stave_ir::layout::Layouts;
-use stave_ir::{Func, FuncId, Module, Operand, Site, VerifyError};
+use stave_ir::{Func, FuncId, Known, Module, Operand, Site, VerifyError};
 use stave_obj::{
     FileId, FuncCode, ImageBuilder, Machine, ObjError, ObjectImage, SourceFile, StackUse, SymbolId,
 };
@@ -366,14 +366,6 @@ fn classify(m: &Module, layouts: &Layouts) -> [Vec<Option<VCls>>; 3] {
     ]
 }
 
-const RUNTIME_TRAP: &str = "runtime.panic.trap";
-const RUNTIME_SIGNAL: &str = "runtime.panic.on_signal";
-const RUNTIME_THREAD: &str = "runtime.thread.entry";
-
-fn find_body(m: &Module, path: &str) -> Option<FuncId> {
-    m.funcs.iter().position(|f| f.path == path && f.body.is_some()).map(|i| FuncId(i as u32))
-}
-
 fn find_main(m: &Module, o: &Options) -> Option<FuncId> {
     o.main.filter(|&f| m.func(f).is_some_and(|x| x.body.is_some()))
 }
@@ -420,8 +412,8 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
     for (i, s) in m.strings.iter().enumerate() {
         str_sym.push(b.rodata(&format!("__stave_str.{i}"), stave_obj::DataObj::new(s.clone(), 1))?);
     }
-    let sym_of = |p: &str| find_body(m, p).and_then(|f| func_sym[f.index()]);
-    let trap_sym = match sym_of(RUNTIME_TRAP) {
+    let sym_of = |k: Known| m.known_body(k).and_then(|f| func_sym[f.index()]);
+    let trap_sym = match sym_of(Known::Trap) {
         Some(s) => s,
         None => stubs::panic_fallback(b)?,
     };
@@ -430,11 +422,11 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
         Some(f) => Some(stubs::stave_main(m, b, f, func_sym[f.index()])?),
         None => None,
     };
-    let signal_sym = match sym_of(RUNTIME_SIGNAL) {
+    let signal_sym = match sym_of(Known::OnSignal) {
         Some(s) => Some(stubs::tail_stub(b, stubs::SIGNAL, s, true)?),
         None => None,
     };
-    let thread_sym = match sym_of(RUNTIME_THREAD) {
+    let thread_sym = match sym_of(Known::ThreadEntry) {
         Some(s) => Some(stubs::tail_stub(b, stubs::THREAD, s, false)?),
         None => None,
     };
@@ -494,7 +486,7 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
             b.define_func(s, code)?;
         }
     }
-    if let Some(entry) = sym_of(stave_obj::stub::RUNTIME_ENTRY) {
+    if let Some(entry) = sym_of(Known::StartEntry) {
         b.add_start_stub(entry)?;
     }
     let pc_rows = order
@@ -576,11 +568,8 @@ fn compile_all(cx: &Ctx<'_>, order: &[FuncId], threads: usize) -> (Vec<Compiled>
 pub fn compile_module(m: &Module, o: &Options) -> Result<ObjectImage, Error> {
     let mut b = ImageBuilder::new(Machine::X86_64, o.image.clone());
     let e = emit_module(m, o, &mut b)?;
-    if find_body(m, stave_obj::stub::RUNTIME_ENTRY).is_none() {
-        return Err(unsup(format!(
-            "no `{}` in the module: nothing to start",
-            stave_obj::stub::RUNTIME_ENTRY
-        )));
+    if m.known_body(Known::StartEntry).is_none() {
+        return Err(unsup(format!("no `{}` in the module: nothing to start", Known::StartEntry)));
     }
     link(b, &e)
 }

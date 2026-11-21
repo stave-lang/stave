@@ -146,7 +146,7 @@ fn thread_child_stack_is_aligned() {
     let load = p.m.intrinsic("atomic_load_u64");
     let xchg = p.m.intrinsic("atomic_xchg_u64");
     let pu64 = p.m.types.ref_(true, t.u64);
-    p.func("runtime.thread.entry", &[us], Some(us), |b, _| {
+    p.func_known(stave_ir::Known::ThreadEntry, &[us], Some(us), |b, _| {
         let arg = b.param(0).unwrap();
         let s = b.slot(pu64);
         let a = b.cast(CastKind::Exact, us, s);

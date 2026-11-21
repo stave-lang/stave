@@ -18,6 +18,7 @@
 //!   deletes a check.
 //! - [`traps`]: the instructions that give a function the `trap` effect.
 //! - [`link`]: text order and symbol names of a module's functions and statics (both backends).
+//! - [`known`]: the compiler-known items ([`Known`]) functions are stamped with.
 
 pub mod arith;
 pub mod borrowtrack;
@@ -28,6 +29,7 @@ pub mod fence;
 pub mod host;
 pub mod interp;
 pub mod ir;
+pub mod known;
 pub mod layout;
 pub mod link;
 pub mod mem;
@@ -47,6 +49,7 @@ pub use ir::{
     InstanceId, IntrinsicId, Module, Op, Operand, PanicKind, Prefetch, PrefetchLoc, Site, SiteInfo, Static,
     StrId, Term, Value,
 };
+pub use known::Known;
 pub use print_checked::print_checked;
 pub use simd::VecOp;
 pub use types::{AdtShape, DeclId, FloatBits, GenericArg, IntBits, Lanes, TypeId, TypeKey, TypeTable};

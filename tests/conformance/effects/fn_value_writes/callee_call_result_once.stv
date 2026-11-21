@@ -1,0 +1,26 @@
+// A `Once` init calls a call result that asks the same `Once`.
+import std.io;
+import std.sync;
+
+static CFG: sync.Once<u32, 1> = sync.Once::<u32, 1>.new();
+
+fn two() -> u32 {
+    return 2u32;
+}
+
+fn inner() -> u32 {
+    return *CFG.get_or_init(two);
+}
+
+fn mk() -> fn() -> u32 {
+    return inner;
+}
+
+fn init() -> u32 {
+    return mk()() + 1; //~ ERROR E1402
+}
+
+fn main() {
+    let v = *CFG.get_or_init(init);
+    io.print(f"{v}\n");
+}

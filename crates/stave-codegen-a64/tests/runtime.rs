@@ -275,14 +275,14 @@ fn native_runtime_intrinsics() {
         let s = b.binary(Op::MulWrap, us, s, z);
         b.ret(Some(s.into()));
     });
-    let thread_entry = p.func("runtime.thread.entry", &[us], Some(us), |b, _| {
+    let thread_entry = p.func_known(stave_ir::Known::ThreadEntry, &[us], Some(us), |b, _| {
         let x = b.param(0).unwrap();
         let k = b.int(1000);
         let r = b.binary(Op::AddWrap, us, x, k);
         b.ret(Some(r.into()));
     });
     let sys1 = p.sys1;
-    let on_signal = p.func("runtime.panic.on_signal", &[us, us, us], None, |b, p| {
+    let on_signal = p.func_known(stave_ir::Known::OnSignal, &[us, us, us], None, |b, p| {
         for k in 0..3 {
             let x = b.param(k).unwrap();
             p.out(b, x, us);

@@ -1,0 +1,7 @@
+//~ CHECK-ONLY
+// Root package modules spelled `runtime.alloc` and `runtime.panic` (`src/runtime/alloc.stv`,
+// `src/runtime/panic.stv`) are E0107 case `builtin`: a module path that starts with a built-in
+// package's name never names that package's module.
+fn main() -> i32 {
+    return 0;
+}

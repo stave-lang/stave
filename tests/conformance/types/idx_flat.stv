@@ -1,0 +1,42 @@
+//~ CHECK-ONLY
+// `idx.Id<T>` holds only a u32, but the Flat rule counts type arguments (E1407 case `<T>`): an
+// `Id<T>` is Flat only when T is, so a `soa.Soa` row may hold the id of a Flat record and not
+// that of a record owning a `Vec`. Such a row stores the raw `u32` (`id.raw()`, `from_raw`).
+import std.idx;
+import std.soa;
+import std.vec;
+
+struct Item {
+    pub qty: u32,
+}
+
+struct Doc {
+    pub text: vec.Vec<u8>,
+}
+
+struct Line {
+    pub item: idx.Id<Item>,
+    pub n: u32,
+}
+
+struct Ref {
+    pub doc: idx.Id<Doc>,
+}
+
+struct RawRef {
+    pub doc: u32,
+}
+
+fn need<T: Flat>() {}
+
+fn main() -> i32 {
+    need::<idx.Id<Item>>();
+    need::<idx.Id<Doc>>(); //~ ERROR E1407
+    let mut lines = soa.Soa::<Line>.new();
+    lines.push(Line.{ item: idx.Id::<Item>.new(0), n: 1 });
+    let refs = soa.Soa::<Ref>.new(); //~ ERROR E1407
+    let mut raws = soa.Soa::<RawRef>.new();
+    raws.push(RawRef.{ doc: idx.Id::<Doc>.new(0).raw() });
+    let d = idx.Id::<Doc>.from_raw(raws.doc[0]);
+    return 0;
+}

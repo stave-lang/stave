@@ -1,0 +1,16 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Overflow at idx_new_overflow.stv:14:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// `idx.Id.new(i)` panics `Overflow` at the caller unless i < `idx.NONE` (u32 max): NONE itself
+// is no row number.
+import std.idx;
+
+struct R {
+    pub v: u32,
+}
+
+fn main() -> i32 {
+    let last = idx.Id::<R>.new(0xFFFF_FFFE);
+    let none = idx.Id::<R>.new(0xFFFF_FFFF);
+    return 0;
+}

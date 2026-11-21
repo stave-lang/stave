@@ -1,0 +1,40 @@
+// A recursive type whose `Drop` clears or pops its children: the cycle runs through std's
+// `Vec.clear` / `Vec.drop`, which need no marker; `rec fn drop` on the user impl is enough.
+//~ STDOUT drop_impl_clears_kids_rec.stdout
+import std.io;
+import std.vec;
+
+struct N {
+    kids: vec.Vec<N>,
+}
+
+impl Drop for N {
+    rec fn drop(&mut self) {
+        self.kids.clear();
+    }
+}
+
+struct T {
+    kids: vec.Vec<T>,
+}
+
+impl Drop for T {
+    rec fn drop(&mut self) {
+        loop {
+            match self.kids.pop() {
+                Option.Some(k) => {}
+                Option.None => {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn main() {
+    let mut n = N.{ kids: vec.Vec::<N>.new() };
+    n.kids.push(N.{ kids: vec.Vec::<N>.new() });
+    let mut t = T.{ kids: vec.Vec::<T>.new() };
+    t.kids.push(T.{ kids: vec.Vec::<T>.new() });
+    io.print("done\n");
+}

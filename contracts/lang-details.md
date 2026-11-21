@@ -288,3 +288,18 @@ Reason for explicit hints: bandwidth-bound loops need them, and auto-hinting is 
 
 Reason for `std.soa`: SIMD over a field of `Vec<Struct>` needs gathers; a column is one contiguous
 slice.
+
+Reason the collection, not the struct, picks the layout: one record passed, returned, or sent over
+FFI is best as a plain struct, while a loop over many records that reads few fields wants only
+those fields' bytes; a layout keyword or layout type parameter would give `&v[i]` two meanings and
+hide the cost, so `Vec` and `Soa` stay two containers of one record type and code over columns names
+the columns it reads (`ps.x[i]`). Reason for indices between records: an `idx.Id<T>` (u32) stays
+valid when a container grows or changes layout, and crosses threads, files, and the GPU as Flat
+data; a pointer does none of these.
+
+Limit: Flat and Frozen count an ADT's type arguments, also one that occurs in no field, so
+`idx.Id<T>` (a `u32` and no `T`) is Flat only when T is; a Soa row that refers to a record owning
+a `Vec` keeps the id's `raw()` u32. Not changed: a type argument is the only way an author ties a
+type whose fields hide a `T` (behind an integer or a byte pointer) to T's Flat and Frozen, since
+both are derived and never implemented (E1408); counting only fields would make such types Flat
+with no way out. Whether a marker param should stop counting is open.

@@ -474,8 +474,12 @@ impl<'a> FnCx<'a> {
             self.test_entry();
         }
         let Some(c) = self.contracts() else { return };
-        for cl in c.checked_requires() {
-            self.contract_check(cl, None);
+        let checked = c.checked_requires();
+        let calls = checked.iter().any(|cl| self.clause_calls(cl.expr))
+            || c.olds.iter().any(|&(_, e)| self.clause_calls(e));
+        let trace = if calls { self.trace_save() } else { None };
+        for cl in checked {
+            self.contract_check(cl, None, trace);
         }
         for &(paren, e) in &c.olds {
             if !self.open() {
@@ -487,6 +491,9 @@ impl<'a> FnCx<'a> {
             self.end_temps();
             let Some(v) = v else { return };
             self.old_vals.insert(paren, (v, t));
+        }
+        if let Some(sv) = trace {
+            self.trace_restore(sv);
         }
         if !c.ensures.is_empty() {
             self.f.ensures_end = end;
@@ -509,6 +516,8 @@ impl<'a> FnCx<'a> {
         self.f.last_site = None;
         self.f.b.call(fi, None, &[]);
         let Some(c) = self.contracts() else { return };
+        let trace =
+            if c.requires.iter().any(|cl| self.clause_calls(cl.expr)) { self.trace_save() } else { None };
         for cl in &c.requires {
             if !self.open() {
                 return;
@@ -532,6 +541,9 @@ impl<'a> FnCx<'a> {
             self.f.b.ret(None);
             self.f.b.switch_to(ok);
         }
+        if let Some(sv) = trace {
+            self.trace_restore(sv);
+        }
     }
 
     /// The `ensures` checks of a return of `v` (`None`: unit) at token `at`, after the drops of
@@ -548,17 +560,78 @@ impl<'a> FnCx<'a> {
             };
             self.bind(l, Some(v));
         }
+        let trace =
+            if c.ensures.iter().any(|cl| self.clause_calls(cl.expr)) { self.trace_save() } else { None };
         for cl in &c.ensures {
-            self.contract_check(cl, Some(at));
+            self.contract_check(cl, Some(at), trace);
         }
+        if let Some(sv) = trace {
+            self.trace_restore(sv);
+        }
+    }
+
+    /// Whether the clause expression `e` calls anything or makes a value of an enum variant: only
+    /// then can its evaluation change the error trace (`Result.Err(..)` restarts it, `?` in a
+    /// callee extends it).
+    fn clause_calls(&self, e: u32) -> bool {
+        let icx = self.icx;
+        let (lo, hi) = (icx.a(e), icx.end_tok(e));
+        let tb = self.tb();
+        let from = tb.targets.partition_point(|(t, _)| *t < lo);
+        tb.targets[from..].iter().take_while(|(t, _)| *t <= hi).any(|(_, t)| {
+            matches!(
+                t,
+                Target::Fn { .. }
+                    | Target::Method { .. }
+                    | Target::TraitMethod { .. }
+                    | Target::Op { .. }
+                    | Target::FnValue { .. }
+                    | Target::Variant { .. }
+            )
+        })
+    }
+
+    /// Saves the error trace into a fresh slot (`runtime.errtrace.save`): the slot's pointer and
+    /// type, `None` without the runtime fns.
+    fn trace_save(&mut self) -> Option<(Operand, Ty)> {
+        let (save, restore) = (self.g.lang.errtrace_save?, self.g.lang.errtrace_restore?);
+        if !self.open() {
+            return None;
+        }
+        let (_, trace) = self.inst_sig(&InstKey { decl: save, args: Vec::new() })?;
+        self.inst_sig(&InstKey { decl: restore, args: Vec::new() })?;
+        let f = self.req(Req::Inst(InstKey { decl: save, args: Vec::new() }));
+        let v = self.f.b.call(f, Some(Self::ir(trace)), &[])?;
+        let (p, _) = self.spill(Operand::Value(v), trace, false);
+        Some((p, trace))
+    }
+
+    /// Puts back the error trace [`FnCx::trace_save`] saved.
+    fn trace_restore(&mut self, (p, trace): (Operand, Ty)) {
+        let Some(restore) = self.g.lang.errtrace_restore else { return };
+        if !self.open() {
+            return;
+        }
+        let Some((ps, _)) = self.inst_sig(&InstKey { decl: restore, args: Vec::new() }) else { return };
+        let Some(&want) = ps.first() else { return };
+        let from = self.t_ref(true, trace);
+        let a = self.convert_ptr(p, from, want);
+        let f = self.req(Req::Inst(InstKey { decl: restore, args: Vec::new() }));
+        self.f.b.call(f, None, &[a]);
     }
 
     /// Branches to the failure call of clause `cl` when it is false: a `requires` (`at` `None`)
     /// or an `ensures` reported at token `at`. Each operand of the clause's top-level `&&` is its
     /// own check, in order (a false one fails before the next is evaluated, as `&&` would); each
     /// reports the whole clause. A check's temporaries are dropped before its branch; those of the
-    /// enclosing statement are left as they are.
-    fn contract_check(&mut self, cl: &crate::contracts::ContractClause, at: Option<u32>) {
+    /// enclosing statement are left as they are. `trace`: the error trace saved before the
+    /// checks, put back before a failure is reported.
+    fn contract_check(
+        &mut self,
+        cl: &crate::contracts::ContractClause,
+        at: Option<u32>,
+        trace: Option<(Operand, Ty)>,
+    ) {
         let conjuncts = if self.nkind(cl.expr) == Some(NodeKind::AndExpr) {
             self.kids(cl.expr).to_vec()
         } else {
@@ -581,6 +654,9 @@ impl<'a> FnCx<'a> {
             let (fail, ok) = (self.f.b.create_block(), self.f.b.create_block());
             self.f.b.cbr(c, ok, &[], fail, &[]);
             self.f.b.switch_to(fail);
+            if let Some(sv) = trace {
+                self.trace_restore(sv);
+            }
             self.contract_fail(cl, e, at);
             self.f.b.switch_to(ok);
         }
@@ -1006,7 +1082,7 @@ impl<'a> FnCx<'a> {
         let unit = self.t_unit();
         let ft = self.tys.intern(TypeKind::Fn { params: Box::new([]), ret: unit, features: 0, deny: 0 });
         let Some(fv) = self.closure_value(s, k, ft) else { return };
-        let Some(d) = crate::mono::item_at(self.g.prog, "runtime.thread", "scope_spawn") else {
+        let Some(d) = self.g.prog.known.decl(stave_ir::Known::ScopeSpawn) else {
             self.fail(s, "`runtime.thread.scope_spawn` not found");
             return;
         };
