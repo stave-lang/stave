@@ -172,91 +172,115 @@ copy constraints between slots (each local and param of an instance, each struct
 with a fn type), fed by `let x = e`, `x = e`, `s.f = e`, struct literals, and the arguments of
 direct and fn-value calls; a local fed once, by a fn item or closure literal, holds that value
 everywhere; every other source (a call result, a value `if` / `match`, a payload, a read through a
-reference, a param or field declared generic) is untracked. A graph left incomplete (an
-instantiation chain too deep, too many nodes) rejects the program (E0902 case `graph`).
+reference, a param or field declared generic) is untracked. A slot is precise only while every
+write to it is such an event: taking its address makes it untracked (table below). A graph left
+incomplete (an instantiation chain too deep, too many nodes) rejects the program (E0902 case
+`graph`).
+
+Where a fn value can be stored, and how the flow sees each write (a fn value is a view: LANG.md
+§3):
+
+| Place | Written by | Flow |
+|---|---|---|
+| local of fn type | `let x = e`, `x = e` (also in a closure or `spawn` body: the same slot) | event |
+| local, address taken: `&mut x` (then `*p = g`, `mem.replace`, `mem.swap`, a helper, a generic `&mut T`, a view field holding it), a `&mut self` receiver (`impl Tr for fn()`), outside the built-in packages a borrow cast to a raw pointer | anything through the pointer | slot untracked |
+| local bound by a pattern other than `let x` (arm, tuple, `for`) | the pattern | untracked |
+| param of fn type | the argument of every call that reaches the node | event; params are immutable, no `&mut` |
+| field declared with a fn type (one slot per field, all instances and values) | `s.f = e` (also through `p.f`), a struct literal | event |
+| that field, address taken: `&mut s.f` by any path, a `&mut self` receiver `s.f.m()`, a struct pattern binding it through a `&mut` (`let S.{ f } = &mut s`, `match self`), a borrow cast to a raw pointer | anything through the pointer | slot untracked |
+| a whole struct value (`*p = s2`, `mem.swap(&mut a, &mut b)`, a `Vec<S>` move) | a copy of a value of the type | none needed: every value's field holds a value of the slot |
+| field declared generic, tuple / array / slice element, enum payload (`Option<fn()>`), `Vec` / iterator element | anything | read untracked |
+| a call result, a value `if` / `match` | | untracked |
+| `static`, `const`; `Mutex`, `Once`, `Cell`, `UnsafeCell`, `Arena`; atomics; a thread's captures | | impossible: E0413, E0414 (no `view` bound), ints only, E0802 (a fn value is neither Send nor Sync) |
+| memory a cast outside the built-in packages reinterprets (another pointee, an int made a pointer, `*mut` from `&` or `*const`) | bytes | every call of each fn type the two pointees hold reaches its table |
+
+A write through `&mut T` in generic code (`*p = v`, `p.write(v)`) reaches a tracked slot only
+through one of those addresses: generic code makes a `&mut T` only from a place of type `T` it
+owns (an element, a field declared generic: untracked) or one it is given. The built-in packages
+reinterpret memory only where no tracked place lives (a container's buffer, a cell's content,
+the thread record), and C code writes no fn value (its block's obligation). A call through a fn
+value whose bits were made from another type is undefined behaviour (LANG.md §3).
 **Guarantees.** If every write of a fn-typed place is one of those events or makes its slot
 untracked, the edges of each call include every fn or closure that call can run, so every run is
-a path of the graph. **What would break it.** A write of a fn-typed place that no event shows
-while its slot stays tracked: an assignment through a pointer (`*p = g` with `p: &mut fn()`, also
-a pointer to a field) or a write inside a std generic the place is passed to
-(`mem.replace(&mut f, g)`, `mem.swap`). The slot keeps its value and the call's edges miss what
-runs. Also an unseen call in a built-in package, and the specialization of a callee on known fn
-values (at most 16 nodes per instance, then the shared node, whose param slots must take the
-values of every call that reaches it).
+a path of the graph. **What would break it.** A way to write a tracked place that the table above
+misses (a new kind of borrow, a built-in method taking `&mut` of its receiver unseen), unsafe code
+in a built-in package that breaks the rule above, an unseen call in a built-in package, and the
+specialization of a callee on known fn values (at most 16 nodes per instance, then the shared
+node, whose param slots must take the values of every call that reaches it).
 
 ## Effects and `without(..)`: a denied effect never happens
 
 **Assumes.** The call graph above. A node's own effects come from a fixed table: the runtime's
 boundary fns (allocator, panic, lock word, futex, thread start and join) have fixed rows and what
-they call does not count; an `extern "C"` import has every effect but those its `without` lists
-(a claim of its block's obligation, never checked); a system-call intrinsic is `io`;
-`call_on_stack` and `cpu_init` have every effect; a trapping instruction of the node's checked IR
-after the removal of proven checks is `trap`, and a `panic.out_of_memory` there is `alloc`;
-membership in a call cycle is `recursive` and `trap`; an `unsafe(..)` outside the built-in
-packages is `unsafe`; a `scope` and the runtime's file waits (`read`, `write`, `pread64`,
-`pwrite64`, `openat`, `flock`) are `block`; a `spawn` is `alloc io trap`. A node's set is its own
-effects and, over each edge, the callee's set minus the deny clause of a fn-value call's type:
-every value of that type is checked where it is made (E1403 case `made`, and the coercion rule
-between fn types). A kept `requires` check is its fn's entry effect `trap`, carried by every edge
-except one whose calls are all direct and all proved in the caller's checked IR. That IR is
-lowered for the nodes the checks reach, as a build lowers them, so every build mode traps at the
-same instructions. **Guarantees.** No run of a fn with `without(D)`, or of a value of
-`fn(..) without(D)`, performs an effect of D: every op it runs belongs to a node on a path of
-edges from it, and that node has the op's effect on its own. For `trap`: no panic but
-`StackOverflow`, which no instruction raises; it needs a call cycle (itself `trap`) or a wrong
-stack bound. **What would break it.** A missing edge (the fn-value writes above): the denied effect
-runs in a callee the set never sees. A boundary fn whose body does more than its row, an import
-whose `without` is false, and an IR built differently from the one that runs.
+they call does not count; an `extern "C"` import has every effect but those its `without` lists (a
+claim of its block's obligation, never checked); a system-call intrinsic is `io`; `call_on_stack`
+and `cpu_init` have every effect; a trapping instruction of the node's checked IR after the removal
+of proven checks is `trap`, and a `panic.out_of_memory` there is `alloc`; membership in a call cycle
+is `recursive` and `trap`; an `unsafe(..)` outside the built-in packages is `unsafe`; a `scope` and
+the runtime's file waits (`read`, `write`, `pread64`, `pwrite64`, `openat`, `flock`) are `block`; a
+`spawn` is `alloc io trap`. A node's set is its own effects and, over each edge, the callee's set
+minus the deny clause of a fn-value call's type: every value of that type is checked where it is
+made (E1403 case `made`, and the coercion rule between fn types). A kept `requires` check is its
+fn's entry effect `trap`, carried by every edge except one whose calls are all direct and all proved
+in the caller's checked IR. That IR is lowered for the nodes the checks reach, as a build lowers
+them, so every build mode traps at the same instructions. **Guarantees.** No run of a fn with
+`without(D)`, or of a value of `fn(..) without(D)`, performs an effect of D: every op it runs
+belongs to a node on a path of edges from it, and that node has the op's effect on its own. For
+`trap`: no panic but `StackOverflow`, which no instruction raises; it needs a call cycle (itself
+`trap`) or a wrong stack bound. **What would break it.** A missing edge (a write of a fn-typed place
+the flow misses): the denied effect runs in a callee the set never sees. A boundary fn whose body
+does more than its row, an import whose `without` is false, and an IR built differently from the one
+that runs.
 
 ## Contract purity: a clause changes nothing the program can observe
 
-**Assumes.** The operand rules (E0211): no `unsafe`, closure literal, `spawn`, f-string, `?`,
-`&mut` borrow, `static`, or intrinsic; calls only of safe fns whose every param is a shared
-reference or a Copy value; a value consumed other than by a call is Copy or a shared reference.
-Every value a clause touches (each expression, call result, receiver, called fn value) is
-`Frozen`, so nothing reachable from it changes while it is shared; a `Frozen` type writes through
-no `&` outside `UnsafeCell` (std's types obey it, unsafe code could break it). No callee of a
-clause has `io`, `lock`, or `block` in its effect set or reaches a body naming a `static` that is
-not `Frozen` (a `static mut` of the built-in packages does not count). A clause is borrow-checked
-as code of its fn where it runs. **Guarantees.** A clause writes no place of its fn, moves nothing,
-and reaches no shared mutable state through its arguments or a user `static`: what a callee
-changes is its own frames and memory it allocates (`alloc` and `trap` are allowed), so a run that
-skips a proven check behaves like one that evaluates it. **What would break it.** State the
-built-in packages keep outside user statics that the program can read back: the error trace,
-which every `Result.Err(..)` evaluation restarts and every `?` on an error extends, is read by
-`debug.err_trace()`, so a clause whose callee makes an error changes what the body sees. A missing
-edge (a fn-value write), which hides the `static` or the `io` / `lock` / `block` callee from both
-reach checks. A type that is wrongly `Frozen`.
+**Assumes.** The operand rules (E0211): no `unsafe`, closure literal, `spawn`, f-string, `?`, `&mut`
+borrow, `static`, or intrinsic; calls only of safe fns whose every param is a shared reference or a
+Copy value; a value consumed other than by a call is Copy or a shared reference. Every value a
+clause touches (each expression, call result, receiver, called fn value) is `Frozen`, so nothing
+reachable from it changes while it is shared; a `Frozen` type writes through no `&` outside
+`UnsafeCell` (std's types obey it, unsafe code could break it). No callee of a clause has `io`,
+`lock`, or `block` in its effect set or reaches a body naming a `static` that is not `Frozen` (a
+`static mut` of the built-in packages does not count). A clause is borrow-checked as code of its fn
+where it runs. **Guarantees.** A clause writes no place of its fn, moves nothing, and reaches no
+shared mutable state through its arguments or a user `static`: what a callee changes is its own
+frames and memory it allocates (`alloc` and `trap` are allowed), so a run that skips a proven check
+behaves like one that evaluates it. **What would break it.** State the built-in packages keep
+outside user statics that the program can read back: the error trace, which every `Result.Err(..)`
+evaluation restarts and every `?` on an error extends, is read by `debug.err_trace()`, so a clause
+whose callee makes an error changes what the body sees. A missing edge (a fn-value write the flow
+misses), which hides the `static` or the `io` / `lock` / `block` callee from both reach checks. A
+type that is wrongly `Frozen`.
 
 ## Lock ranks and the join rule: no wait cycle on locks and joins
 
 **Assumes.** The acquisitions are the instances of `std.sync`'s `Mutex.lock`, `Once.get_or_init`,
 and `lock_pair`, found in the built-in package, each acquiring its const rank `R`; `try_lock` waits
-for nothing and acquires nothing. The lowest rank a node may acquire is the minimum over
-everything its edges reach (calls, fn values, spawns, drops; a body's drop edges narrowed to the
-types the borrow checker says it drops). A lock is held by a local whose type reaches a
-`MutexGuard` through fields, payloads, tuple and array elements, or an ADT's raw-pointer pointee
-(or a `T: view` param an instance makes one) while the local may be initialized: params from
-entry, until moved out or dropped as a whole, and not at a call that moves it whole into the
-callee. `get_or_init` holds `R` at every call in its body (its `f`). At each call the highest held
-rank is below the lowest the callee acquires; at each `scope` join and each call of `thread.join`
-or `par_*`, below the lowest the joined threads acquire; at each drop, below the drop glue's. A
-call the borrow checker's CFG has no token for is checked against every lock the body may hold
-anywhere. **Guarantees.** Give a waiting thread the rank it waits for: the mutex's, or at a join
-the lowest the joined threads may take. Every lock it holds ranks below that, except inside
-`lock_pair`, whose second wait has the first's rank and follows address order (compare rank, then
-address). A thread waiting for a lock waits for the thread holding it, whose own wait therefore
-ranks higher; a thread waiting at a join waits for its children, whose waits are on ranks among
-what the join was checked against, so at least as high. Along a wait cycle the rank never falls
-and rises at each lock step, and a cycle of joins alone would make a thread its own descendant.
-So safe code has no wait cycle on ranked locks and joins; spins on `try_lock` or on atomics, file
-waits, and a panic report stuck on stderr are outside the claim. **What would break it.** An
-acquisition the edges miss (a fn-value write: the call is checked against the wrong callee). A
-guard held where the scan does not look, behind a reference: a guard a callee stores through a
-`&mut` param and keeps is no held lock at the callee's own later calls (its caller's slot is
-counted at the call only because the slot's type holds a guard). A target that runs a `spawn`
-body before the spawning thread goes on, so that the child's waits happen where no rule compares
-them with the locks held. A rank changed by a pointer cast (unsafe code).
+for nothing and acquires nothing. The lowest rank a node may acquire is the minimum over everything
+its edges reach (calls, fn values, spawns, drops; a body's drop edges narrowed to the types the
+borrow checker says it drops). A lock is held by a local whose type reaches a `MutexGuard` through
+fields, payloads, tuple and array elements, or an ADT's raw-pointer pointee (or a `T: view` param an
+instance makes one) while the local may be initialized: params from entry, until moved out or
+dropped as a whole, and not at a call that moves it whole into the callee. `get_or_init` holds `R`
+at every call in its body (its `f`). At each call the highest held rank is below the lowest the
+callee acquires; at each `scope` join and each call of `thread.join` or `par_*`, below the lowest
+the joined threads acquire; at each drop, below the drop glue's. A call the borrow checker's CFG has
+no token for is checked against every lock the body may hold anywhere. **Guarantees.** Give a
+waiting thread the rank it waits for: the mutex's, or at a join the lowest the joined threads may
+take. Every lock it holds ranks below that, except inside `lock_pair`, whose second wait has the
+first's rank and follows address order (compare rank, then address). A thread waiting for a lock
+waits for the thread holding it, whose own wait therefore ranks higher; a thread waiting at a join
+waits for its children, whose waits are on ranks among what the join was checked against, so at
+least as high. Along a wait cycle the rank never falls and rises at each lock step, and a cycle of
+joins alone would make a thread its own descendant. So safe code has no wait cycle on ranked locks
+and joins; spins on `try_lock` or on atomics, file waits, and a panic report stuck on stderr are
+outside the claim. **What would break it.** An acquisition the edges miss (a fn-value write the flow
+misses: the call is checked against the wrong callee). A guard held where the scan does not look,
+behind a reference: a guard a callee stores through a `&mut` param and keeps is no held lock at the
+callee's own later calls (its caller's slot is counted at the call only because the slot's type
+holds a guard). A target that runs a `spawn` body before the spawning thread goes on, so that the
+child's waits happen where no rule compares them with the locks held. A rank changed by a pointer
+cast (unsafe code).
 
 ## `Once`: `get_or_init` is never re-entered from its own `f`
 
@@ -264,14 +288,14 @@ them with the locks held. A rank changed by a pointer cast (unsafe code).
 holding `R`, so everything `f` reaches, on its thread or on threads it joins, must acquire above
 `R`; the same `Once` has rank `R`. At run time the first caller moves the state from empty to
 running, writes its thread id to the owner word before `f` runs, and publishes the value after; a
-caller that finds the state running and the owner word naming its own thread traps `Deadlock`,
-any other sleeps on the state word until the value is there. **Guarantees.** In an accepted program
+caller that finds the state running and the owner word naming its own thread traps `Deadlock`, any
+other sleeps on the state word until the value is there. **Guarantees.** In an accepted program
 without unsafe code `f` reaches no `get_or_init` of its own `Once` (rank `R` is not above `R`), so
 neither the `Deadlock` trap nor a sleep that never ends can happen there; a thread waiting for the
 value holds only ranks below `R`, and the running `f` takes only ranks above it. **What would break
-it.** A call from `f` the graph misses (a fn-value write), which makes the trap reachable from safe
-code, and a `Once` reached under another rank through a pointer cast (unsafe code, where the trap
-is the backstop).
+it.** A call from `f` the graph misses (a fn-value write the flow misses), which makes the trap
+reachable from safe code, and a `Once` reached under another rank through a pointer cast (unsafe
+code, where the trap is the backstop).
 
 ## The recursion check: every call cycle is marked
 
@@ -287,20 +311,20 @@ of its type recurses without `rec` and without a recursive type.
 
 ## The stack bound: a bounded stack is never overrun
 
-**Assumes.** The bound's graph is the call graph without `Spawn` edges (a spawn body runs on its
-own stack), plus a node per lowered function the call graph has none for and each direct call of
-the lowered module that no edge covers (the runtime helpers lowering inserts). A node weighs the
-largest frame the backend reports for its functions. A fn-value call takes the call graph's
-targets. No bound for a node that calls C code, for one with a fn-value call but no such edge (or
-any fn-value call while some function made into a value has no node), or for one on or above a
-cycle. A node with a trap stub adds twice the depth of `runtime.panic.trap`, which holds while
-nothing `runtime.panic.begin` reaches has a trap stub (checked; else no bound). Main's stack and
-each thread start function's get the bound plus 4 KiB, rounded up to the page, above a 64 KiB
-`PROT_NONE` guard; an unbounded stack gets `[run] stack`. **Guarantees.** The frames live at once on
-a thread are the nodes of one path of the bound's graph from its start, so a bounded thread never
-reaches its guard; a stack that reaches a cycle keeps `[run] stack` and traps `StackOverflow` at
-the guard. **What would break it.** A fn-value call whose real target the call graph misses (a
-fn-value write): the bound counts the target it shows, and a bigger frame or a recursion behind the
-real one runs into the guard of a stack the build summary calls bounded. A frame larger than the
-backend reports, and stack use outside frames beyond the 4 KiB margin (signal handlers run on the
-alternate stack).
+**Assumes.** The bound's graph is the call graph without `Spawn` edges (a spawn body runs on its own
+stack), plus a node per lowered function the call graph has none for and each direct call of the
+lowered module that no edge covers (the runtime helpers lowering inserts). A node weighs the largest
+frame the backend reports for its functions. A fn-value call takes the call graph's targets. No
+bound for a node that calls C code, for one with a fn-value call but no such edge (or any fn-value
+call while some function made into a value has no node), or for one on or above a cycle. A node with
+a trap stub adds twice the depth of `runtime.panic.trap`, which holds while nothing
+`runtime.panic.begin` reaches has a trap stub (checked; else no bound). Main's stack and each thread
+start function's get the bound plus 4 KiB, rounded up to the page, above a 64 KiB `PROT_NONE` guard;
+an unbounded stack gets `[run] stack`. **Guarantees.** The frames live at once on a thread are the
+nodes of one path of the bound's graph from its start, so a bounded thread never reaches its guard;
+a stack that reaches a cycle keeps `[run] stack` and traps `StackOverflow` at the guard. **What
+would break it.** A fn-value call whose real target the call graph misses (a fn-value write the flow
+misses): the bound counts the target it shows, and a bigger frame or a recursion behind the real one
+runs into the guard of a stack the build summary calls bounded. A frame larger than the backend
+reports, and stack use outside frames beyond the 4 KiB margin (signal handlers run on the alternate
+stack).

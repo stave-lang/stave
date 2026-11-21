@@ -1,0 +1,20 @@
+// A fn-typed local written through `*p` (p = &mut f): `&mut f` makes f untracked, so `f()` reaches
+// every fn of its type and `without(io)` sees `noisy`.
+import std.io;
+
+fn nop() {}
+
+fn noisy() {
+    io.print("io under without(io)\n");
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let mut f: fn() = nop;
+    let p = &mut f;
+    *p = noisy;
+    f();
+}
+
+fn main() {
+    quiet();
+}

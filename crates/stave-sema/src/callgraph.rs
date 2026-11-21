@@ -55,6 +55,16 @@
 //! a tuple, array, or enum payload, through a reference or raw pointer, or bound by a pattern
 //! other than `let x`; each passes the whole table on.
 //!
+//! A slot is precise only while every write to it is one of those events. A write the events do
+//! not show goes through the place's address, so taking it makes the slot untracked: `&mut` of
+//! the local or field (also as a `&mut self` receiver), a field bound through a `&mut` reference
+//! by a struct pattern, and, outside the built-in packages, a borrow of it made into a raw
+//! pointer. Every other place a fn value lives in (an element, a payload, a field declared
+//! generic) is read as untracked, and a write through `&mut T` in generic code reaches a tracked
+//! slot only through such an address. A cast outside the built-in packages that reinterprets
+//! memory (another pointee, an int made a pointer, `*mut` from a shared pointer) makes every call
+//! of each fn type the two pointees hold reach its table ([`Walk::cast`]).
+//!
 //! **Specialization.** A direct call that passes known fn values (fn items, closure literals, a
 //! local set once to one, or a param that is itself specialized) reaches a node of the callee for
 //! those values ([`NodeKind::Fn`] `spec`), so a helper such as `apply(f, x)` called with `g` from
@@ -489,6 +499,9 @@ enum What<'b> {
     Init { b: u32, src: Src<'b> },
     /// A struct field is set to a fn value.
     Store { decl: DeclId, index: u32, src: Src<'b> },
+    /// A cast to a raw pointer type `to` of an operand of type `from` (typeck's types), in a body
+    /// outside the built-in packages.
+    Cast { from: TypeId, to: TypeId },
     /// A fn item made into a fn value; `root`: it is a thread fn's argument.
     FnItem { decl: DeclId, args: &'b [GArg], root: Option<RootKind> },
     /// Closure `k` made into a fn value (a `spawn` body, or `started` by `runtime.thread.start`:
@@ -681,21 +694,168 @@ fn classify<'b>(icx: &ItemCx<'_>, body: &'b TypedBody, closures: &[Closure], e: 
     Src::Top
 }
 
-/// The fn-value flow events of `body` (module docs). `fnish(t)`: `t` is a fn type or a generic
-/// param (which an instance may make a fn type).
+/// Classes of typeck's types the event extraction asks about ([`Kinds::has`]).
+struct Kinds {
+    bits: Vec<u8>,
+}
+
+/// A fn type or a generic param (which an instance may make a fn type).
+const FNISH: u8 = 1;
+/// A fn type.
+const FN: u8 = 2;
+/// `&mut T`, `T` [`FNISH`].
+const MUT_FN_REF: u8 = 4;
+/// A raw pointer type.
+const PTR: u8 = 8;
+
+impl Kinds {
+    fn new(table: &TypeTable) -> Kinds {
+        let mut bits: Vec<u8> = table
+            .iter()
+            .map(|(_, k)| match k {
+                TypeKind::Fn { .. } => FNISH | FN,
+                TypeKind::Param(_) => FNISH,
+                TypeKind::Ptr { .. } => PTR,
+                _ => 0,
+            })
+            .collect();
+        for (i, (_, k)) in table.iter().enumerate() {
+            if let TypeKind::Ref { mutable: true, inner } = k
+                && !inner.is_none()
+                && !inner.is_local()
+                && bits.get(inner.idx()).is_some_and(|b| b & FNISH != 0)
+            {
+                bits[i] |= MUT_FN_REF;
+            }
+        }
+        Kinds { bits }
+    }
+
+    fn has(&self, t: TypeId, b: u8) -> bool {
+        !t.is_none() && !t.is_local() && self.bits.get(t.idx()).is_some_and(|x| x & b != 0)
+    }
+}
+
+/// The event that makes the fn-typed place `e` untracked, if `e` is a tracked one (a local or a
+/// field): its address is taken, so writes through that address are no events.
+fn untrack<'b>(
+    icx: &ItemCx<'_>,
+    body: &'b TypedBody,
+    closures: &[Closure],
+    kinds: &Kinds,
+    e: u32,
+) -> Option<What<'b>> {
+    if !kinds.has(body.ty(e), FNISH) {
+        return None;
+    }
+    match classify(icx, body, closures, e) {
+        Src::Local(b) => Some(What::Init { b, src: Src::Top }),
+        Src::Field(decl, index) => Some(What::Store { decl, index, src: Src::Top }),
+        _ => None,
+    }
+}
+
+/// The operand of borrow `n` (`&e` or `&mut e`; `&&e` is two borrows), and whether it is `&mut`.
+fn borrow_of(icx: &ItemCx<'_>, n: u32) -> Option<(u32, bool)> {
+    if icx.kind(n) != Some(Syn::Unary) {
+        return None;
+    }
+    let a = icx.a(n);
+    if !icx.is(a, Term::Amp) && !icx.is(a, Term::AmpAmp) {
+        return None;
+    }
+    let c = icx.last_child(n)?;
+    // `&&e`: the outer borrow's operand is the inner one, which starts at the same token
+    let inner = icx.a(c) == a;
+    Some((c, !inner && icx.is(a + 1, Term::KwMut)))
+}
+
+/// The struct-pattern events of pattern `p`: a field of a struct bound through a `&mut`
+/// reference (`let S.{ f } = p;` with `p: &mut S`) gives a `&mut` to the field place.
+fn pattern_events<'b>(
+    icx: &ItemCx<'_>,
+    body: &'b TypedBody,
+    sigs: &Sigs,
+    kinds: &Kinds,
+    p: u32,
+) -> Vec<What<'b>> {
+    let mut out = Vec::new();
+    let a = icx.a(p);
+    if !icx.is(a, Term::Ident) {
+        return out;
+    }
+    let e = icx.chain_end(a);
+    let (rec, paren) = (icx.is(e + 1, Term::DotLBrace), icx.is(e + 1, Term::LParen));
+    if !rec && !paren {
+        return out;
+    }
+    let Some(crate::resolve::Res::Decl(d)) = icx.uses(p).last().map(|u| u.res) else { return out };
+    if icx.prog.decl(d).is_none_or(|x| x.kind != DeclKind::Struct) {
+        return out;
+    }
+    let Some(fields) = sigs.adt(d).and_then(|a| a.variants.first()).map(|v| &v.fields) else { return out };
+    // the binding node of a sub-pattern that is a plain binding (`x`, `mut x`)
+    let bound = |sp: u32| -> Option<u32> {
+        let t = icx.a(sp);
+        let plain = icx.is(t, Term::KwMut)
+            || (icx.is(t, Term::Ident)
+                && icx.chain_end(t) == t
+                && !icx.is(t + 1, Term::LParen)
+                && !icx.is(t + 1, Term::DotLBrace));
+        plain.then_some(sp)
+    };
+    for (i, &k) in icx.kids_vec(p).iter().enumerate() {
+        let (index, b) = if rec {
+            if icx.kind(k) != Some(Syn::FieldPat) {
+                continue;
+            }
+            let name = icx.sym(icx.a(k));
+            let Some(fi) = fields.iter().position(|f| f.name == name) else { continue };
+            let b = match icx.child(k, Syn::Pattern) {
+                Some(sp) => bound(sp),
+                None => Some(k),
+            };
+            (fi, b)
+        } else {
+            (i, bound(k))
+        };
+        if let Some(b) = b
+            && body.local(crate::ids::BindingRef { node: b }).is_some_and(|t| kinds.has(t, MUT_FN_REF))
+        {
+            out.push(What::Store { decl: d, index: index as u32, src: Src::Top });
+        }
+    }
+    out
+}
+
+/// The fn-value flow events of `body` (module docs).
+#[allow(clippy::too_many_arguments)]
 fn flow_events<'b>(
     icx: &ItemCx<'_>,
     body: &'b TypedBody,
     sigs: &Sigs,
     closures: &[Closure],
     params: &[u32],
-    fnish: &dyn Fn(TypeId) -> bool,
+    kinds: &Kinds,
     push: &mut dyn FnMut(u32, u32, What<'b>),
 ) {
+    let fnish = |t: TypeId| kinds.has(t, FNISH);
     let mut simple: Vec<u32> = Vec::new();
     let lo = icx.ast.descendants(body.node).start;
     for n in lo..=body.node {
         match icx.kind(n) {
+            Some(Syn::Unary) => {
+                if let Some((c, true)) = borrow_of(icx, n)
+                    && let Some(w) = untrack(icx, body, closures, kinds, c)
+                {
+                    push(icx.a(n), icx.a(n), w);
+                }
+            }
+            Some(Syn::Pattern) => {
+                for w in pattern_events(icx, body, sigs, kinds, n) {
+                    push(icx.a(n), icx.a(n), w);
+                }
+            }
             Some(Syn::Stmt) if icx.is(icx.a(n), Term::KwLet) => {
                 let kids = icx.kids_vec(n);
                 let (Some(&pat), Some(&init)) = (kids.first(), kids.last()) else { continue };
@@ -716,6 +876,8 @@ fn flow_events<'b>(
                     continue;
                 }
                 let src = classify(icx, body, closures, kids[2]);
+                // any other target is memory behind a pointer or an element: a pointer to a tracked
+                // place exists only after an event made the place untracked (`untrack`)
                 match classify(icx, body, closures, kids[0]) {
                     Src::Local(b) => push(icx.a(n), icx.a(n), What::Init { b, src }),
                     Src::Field(decl, index) => push(icx.a(n), icx.a(n), What::Store { decl, index, src }),
@@ -759,6 +921,30 @@ fn flow_events<'b>(
                     let lp = t;
                     t = icx.close(lp) + 1;
                     let seg = callee_tok(icx, lp);
+                    // a `&mut self` method of a fn-typed place borrows the place
+                    if let Some(Target::Method { adjust, .. } | Target::Builtin { adjust, .. }) =
+                        body.target(seg)
+                        && adjust.autoref == Some(true)
+                        && adjust.derefs == 0
+                    {
+                        let recv = if seg == prim_end + 2 {
+                            untrack(icx, body, closures, kinds, prim)
+                        } else if let Some(Target::Field { decl, index, .. }) =
+                            body.target(seg.saturating_sub(2))
+                            && sigs
+                                .adt(*decl)
+                                .and_then(|a| a.variants.first())
+                                .and_then(|v| v.fields.get(*index as usize))
+                                .is_some_and(|f| kinds.has(f.ty, FN))
+                        {
+                            Some(What::Store { decl: *decl, index: *index, src: Src::Top })
+                        } else {
+                            None
+                        };
+                        if let Some(w) = recv {
+                            push(seg, seg, w);
+                        }
+                    }
                     let (tok, offset, builtin) = match (body.target(lp), body.target(seg)) {
                         (Some(Target::Fn { .. } | Target::TraitMethod { .. }), _) => (lp, 0, false),
                         (Some(Target::FnValue { ty }), _) => {
@@ -803,17 +989,60 @@ fn flow_events<'b>(
     }
 }
 
+/// The cast events of a body outside the built-in packages: a borrow of a tracked place made into
+/// a pointer makes the place untracked, and each cast to a raw pointer type is a [`What::Cast`]
+/// ([`Walk::cast`]).
+fn cast_events<'b>(
+    icx: &ItemCx<'_>,
+    body: &'b TypedBody,
+    closures: &[Closure],
+    kinds: &Kinds,
+    push: &mut dyn FnMut(u32, u32, What<'b>),
+) {
+    let lo = icx.ast.descendants(body.node).start;
+    for n in lo..=body.node {
+        if icx.kind(n) != Some(Syn::Cast) {
+            continue;
+        }
+        let Some(&first) = icx.kids_vec(n).first() else { continue };
+        let mut op = first;
+        while icx.kind(op) == Some(Syn::Primary) && icx.is(icx.a(op), Term::LParen) {
+            let kids = icx.kids_vec(op);
+            if kids.len() != 1 || icx.is(icx.close(icx.a(op)).saturating_sub(1), Term::Comma) {
+                break;
+            }
+            op = kids[0];
+        }
+        let mut depth = 0;
+        while let Some((c, _)) = borrow_of(icx, op)
+            && depth < 64
+        {
+            if let Some(w) = untrack(icx, body, closures, kinds, c) {
+                push(icx.a(n), icx.a(n), w);
+            }
+            op = c;
+            depth += 1;
+        }
+        let to = body.ty(n);
+        if kinds.has(to, PTR) {
+            push(icx.a(n), icx.a(n), What::Cast { from: body.ty(first), to });
+        }
+    }
+}
+
 fn extract<'b>(
     icx: &ItemCx<'_>,
     body: &'b TypedBody,
     sigs: &Sigs,
     fns: &[Option<DeclId>; 4],
-    fnish: &dyn Fn(TypeId) -> bool,
-    is_fn: &dyn Fn(TypeId) -> bool,
+    kinds: &Kinds,
+    user: bool,
 ) -> BodyEvents<'b> {
-    // one pass over the block's tokens: f-strings, and whether any closure body can start
+    // one pass over the block's tokens: f-strings, whether any closure body can start, and
+    // whether any cast can
     let mut fstrings: Vec<u32> = Vec::new();
     let mut any_closure = false;
+    let mut any_cast = false;
     if let Some(b) = icx.child(body.node, Syn::Block) {
         let open = icx.a(b);
         if let Some(toks) = icx.toks.get(open as usize..=icx.close(open) as usize) {
@@ -822,6 +1051,7 @@ fn extract<'b>(
                     fstrings.push(open + i as u32);
                 }
                 any_closure |= t.kind == Term::KwFn as u8 || t.kind == Term::KwSpawn as u8;
+                any_cast |= t.kind == Term::KwAs as u8;
             }
         }
     }
@@ -878,9 +1108,13 @@ fn extract<'b>(
     // a body without a fn-typed value makes no flow: a generic-typed value there reaches a fn
     // type only through a param or field declared generic, which is untracked (`Walk::expand`,
     // `Walk::val`)
-    let flows = body.node_types.iter().any(|&t| is_fn(t)) || body.locals.iter().any(|&(_, t)| is_fn(t));
+    let flows = body.node_types.iter().any(|&t| kinds.has(t, FN))
+        || body.locals.iter().any(|&(_, t)| kinds.has(t, FN | MUT_FN_REF));
     if flows {
-        flow_events(icx, body, sigs, &closures, &params, fnish, &mut push);
+        flow_events(icx, body, sigs, &closures, &params, kinds, &mut push);
+    }
+    if user && any_cast {
+        cast_events(icx, body, &closures, kinds, &mut push);
     }
     drop(push);
     for (k, c) in closures.iter().enumerate() {
@@ -1011,6 +1245,9 @@ struct Walk<'a> {
     /// `runtime.thread.scope_spawn`: lowering passes each `spawn` body to it (param 1).
     scope_spawn: Option<DeclId>,
     flow: Flow,
+    /// Per table: a cast in a body outside the built-in packages reinterprets memory that may
+    /// hold a value of its type, so every call of that type reaches the whole table.
+    poisoned: Vec<bool>,
     truncated: bool,
     truncated_at: Option<(Span, Option<DeclId>)>,
 }
@@ -1342,6 +1579,8 @@ impl<'a> Walk<'a> {
                 }
             }
         }
+        // a param is known only while nothing but its calls sets it
+        self.consts.retain(|c| !sets.iter().any(|s| s.0 == c.0));
         for (b, src, n) in sets {
             if n == 1
                 && matches!(src, Src::FnItem(..) | Src::Closure(_))
@@ -1440,6 +1679,10 @@ impl<'a> Walk<'a> {
                     let v = self.val(src, i, base, &args);
                     let s = self.flow.slot(SlotKey::Field(*decl, *index));
                     self.flow.add(&v, s);
+                }
+                What::Cast { from, to } => {
+                    let (from, to) = (self.subst(*from, &args), self.subst(*to, &args));
+                    self.cast(from, to);
                 }
                 What::FnItem { decl, args: ga, root } => {
                     let ga = self.subst_args(ga, &args);
@@ -1541,6 +1784,49 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// A cast from `from` to the raw pointer type `to` in a body outside the built-in packages.
+    /// One that keeps the pointee and does not make a `*mut` from a `&` or `*const` writes only
+    /// what the operand could. Any other (an int made a pointer, another pointee, `*mut` from a
+    /// shared pointer) may write or read a value of each fn type its pointee and the operand's
+    /// pointee hold, so every call of those types reaches its whole table.
+    fn cast(&mut self, from: TypeId, to: TypeId) {
+        let TypeKind::Ptr { mutable: tm, inner: ti } = *self.cx.kind(to) else { return };
+        let (si, sm) = match *self.cx.kind(from) {
+            TypeKind::Ref { mutable, inner } | TypeKind::Ptr { mutable, inner } => (Some(inner), mutable),
+            _ => (None, false),
+        };
+        if si == Some(ti) && (sm || !tm) {
+            return;
+        }
+        let mut seen: Vec<TypeId> = Vec::new();
+        let mut work: Vec<TypeId> = [Some(ti), si].into_iter().flatten().collect();
+        while let Some(t) = work.pop() {
+            if seen.contains(&t) || seen.len() > 4096 {
+                continue;
+            }
+            seen.push(t);
+            match self.cx.kind(t).clone() {
+                TypeKind::Fn { .. } => {
+                    if let Some(tb) = self.table(t) {
+                        if self.poisoned.len() <= tb as usize {
+                            self.poisoned.resize(tb as usize + 1, false);
+                        }
+                        self.poisoned[tb as usize] = true;
+                    }
+                }
+                TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => work.push(inner),
+                TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => work.push(elem),
+                TypeKind::Tuple(ts) => work.extend(ts.iter().copied()),
+                TypeKind::Adt { .. } => {
+                    if let Some(vs) = crate::mono::adt_fields(self.sigs, &mut self.cx, t) {
+                        work.extend(vs.into_iter().flatten());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// The slot of param `idx` of fn or closure node `n` (`None` without a checked body).
     fn param_slot(&mut self, n: u32, idx: u32) -> Option<u32> {
         let evs = self.evs;
@@ -1577,6 +1863,11 @@ impl<'a> Walk<'a> {
         let mut done_consts = 0;
         let mut done_tops = 0;
         let mut passed: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
+        for s in &mut self.flow.sites {
+            if s.table.is_some_and(|t| self.poisoned.get(t as usize).copied().unwrap_or(false)) {
+                s.callee = Val::Top;
+            }
+        }
         loop {
             let n = self.flow.slots.len();
             sets.resize(n, Vec::new());
@@ -1732,19 +2023,7 @@ pub(crate) fn build(
     let [join, par_for, par_for_mut] =
         ["join", "par_for", "par_for_mut"].map(|n| crate::mono::item_at(prog, "std.thread", n));
     let fns = [join, par_for, par_for_mut, crate::mono::item_at(prog, "runtime.thread", "start")];
-    // 2: a fn type, 1: a generic param
-    let fn_like: Vec<u8> = table
-        .iter()
-        .map(|(_, k)| match k {
-            TypeKind::Fn { .. } => 2,
-            TypeKind::Param(_) => 1,
-            _ => 0,
-        })
-        .collect();
-    let like =
-        |t: TypeId| if t.is_none() || t.is_local() { 0 } else { fn_like.get(t.idx()).copied().unwrap_or(0) };
-    let fnish = |t: TypeId| like(t) > 0;
-    let is_fn = |t: TypeId| like(t) == 2;
+    let kinds = Kinds::new(table);
     let evs: Vec<Option<BodyEvents<'_>>> = bodies
         .par_iter()
         .map(|b| {
@@ -1753,7 +2032,7 @@ pub(crate) fn build(
                 return None;
             }
             let icx = brackets.get(b.item.idx()).and_then(|br| ItemCx::new(prog, b.item, br))?;
-            Some(extract(&icx, b, sigs, &fns, &fnish, &is_fn))
+            Some(extract(&icx, b, sigs, &fns, &kinds, !in_builtin_package(prog, b.decl)))
         })
         .collect();
     let string = if sigs.lang.string.is_some() {
@@ -1786,6 +2065,7 @@ pub(crate) fn build(
         string,
         scope_spawn: crate::mono::item_at(prog, "runtime.thread", "scope_spawn"),
         flow: Flow::default(),
+        poisoned: Vec::new(),
         truncated: false,
         truncated_at: None,
     };

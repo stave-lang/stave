@@ -1,0 +1,25 @@
+// The spawn stack bound counts `big`, which a `*p`-written fn value can be.
+//~ STDOUT spawn_stack_bound.stdout
+import std.io;
+
+fn small(k: usize) -> u64 { return 1; }
+
+fn big(k: usize) -> u64 {
+    let mut a: [u64; 524288] = [0u64; 524288];
+    a[k] = 3;
+    return a[k] + a[524287 - k];
+}
+
+fn main() -> i32 {
+    let mut r: u64 = 0;
+    scope {
+        spawn {
+            let mut f: fn(usize) -> u64 = small;
+            let p = &mut f;
+            *p = big;
+            r = f(5);
+        }
+    }
+    io.print(f"{r}\n");
+    return 0;
+}
