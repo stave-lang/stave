@@ -1,0 +1,13 @@
+//~ BORROWCHECK write-under-shared 10 10
+// A `&mut` reached through a `&` is read-only: the reference loaded through the shared one
+// gets a `&` of its own, and a write through it is a write under a `&`.
+fn main() -> i32 {
+    let mut a: u32 = 1u32;
+    let m: &mut u32 = &mut a;
+    let r: &&mut u32 = &m;
+    let p = r as *const &mut u32 as *mut &mut u32;
+    let x: u32 = **r;
+    unsafe("deliberate: a write through a `&mut` reached through a `&`") { **p = 5u32; }
+    if a == 5u32 && x == 1u32 { return 1; }
+    return 0;
+}

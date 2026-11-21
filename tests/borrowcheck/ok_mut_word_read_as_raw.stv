@@ -1,0 +1,16 @@
+//~ BORROWCHECK ok
+// The read-only rule binds a word loaded as `&mut`. A `&mut` word read through a `&` with a
+// raw-pointer type keeps its tag: the write through it is judged by that tag (the holder's
+// `&mut`, so no report), and stays the unsafe block's obligation toward every `&` that sees
+// the bytes.
+view struct S { m: &mut u32 }
+fn main() -> i32 {
+    let mut a: u32 = 1u32;
+    let s = S.{ m: &mut a };
+    let r: &S = &s;
+    let q = &r.m as *const &mut u32 as *const *mut u32;
+    let p: *mut u32 = unsafe("deliberate") *q;
+    unsafe("deliberate") { *p = 5u32; }
+    if a == 5u32 { return 0; }
+    return 1;
+}

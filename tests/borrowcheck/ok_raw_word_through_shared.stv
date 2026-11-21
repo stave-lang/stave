@@ -1,0 +1,31 @@
+//~ BORROWCHECK ok
+// A raw pointer or an integer address made from a `&mut` keeps its tag when it is read through
+// a `&`: a `&*mut T` param, a `Vec<*mut T>` read with `get_ref`, and a `usize` base the
+// threads of a `scope` capture by `&` all write through the `&mut` they were made from.
+import std.mem;
+import std.vec;
+fn put(pp: &*mut u32, v: u32) {
+    unsafe("the caller's pointer is valid and nothing else uses its pointee meanwhile") { **pp = v; }
+}
+fn main() -> i32 {
+    let mut x: u32 = 1u32;
+    let p = &mut x as *mut u32;
+    put(&p, 5u32);
+    let mut b: u32 = 2u32;
+    let mut v: vec.Vec<*mut u32> = vec.Vec::<*mut u32>.new();
+    v.push(&mut b as *mut u32);
+    for i in 0..v.len() {
+        let q = *v.get_ref(i);
+        unsafe("q points to b, live and not otherwise used here") { *q = *q + 10u32; }
+    }
+    let mut a: [u32; 8] = [0u32; 8];
+    let base = mem.slice_ptr_mut(&mut a[0..8]) as usize;
+    scope {
+        spawn { for i in 0usize..4usize { unsafe("each thread writes its own half of a") { *((base + i * 4usize) as *mut u32) = 1u32; } } }
+        spawn { for i in 4usize..8usize { unsafe("each thread writes its own half of a") { *((base + i * 4usize) as *mut u32) = 2u32; } } }
+    }
+    let mut s: u32 = 0u32;
+    for i in 0usize..8usize { s = s + a[i]; }
+    if x == 5u32 && b == 12u32 && s == 12u32 { return 0; }
+    return 1;
+}
