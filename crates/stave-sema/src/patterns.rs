@@ -227,7 +227,7 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
                             let scope = ck.prog.decl_path(v.decl);
                             let dg = mk(
                                 "E0105",
-                                None,
+                                Some("pattern-field"),
                                 &[("name", &nm), ("scope", &scope)],
                                 icx.tok_span(fa),
                                 &[("first", icx.tok_span(first))],

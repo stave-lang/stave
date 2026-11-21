@@ -863,7 +863,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0105",
         severity: Severity::Error,
         area: "resolve",
-        rule: "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern); reported at each later declaration, related span: the first declaration",
+        rule: "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern; case `pattern-field`: the struct pattern); reported at each later declaration, related span: the first declaration",
         retired: false,
         located: true,
         holes: &[
@@ -880,6 +880,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "rename this `{name}`, or remove one of the two declarations",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "pattern-field",
+                message: "field `{name}` of `{scope}` is named twice in one pattern",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{name}` named again here" },
+                    LabelTemplate { at: "first", text: "`{name}` first named here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "name `{name}` once: keep one sub-pattern for it, and to use the value twice bind it by name and reuse the binding",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

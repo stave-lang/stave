@@ -399,11 +399,16 @@ fix = { description = "keep one `allocator` declaration in the binary and remove
 code = "E0105"
 severity = "error"
 area = "resolve"
-rule = "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern); reported at each later declaration, related span: the first declaration"
+rule = "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern; case `pattern-field`: the struct pattern); reported at each later declaration, related span: the first declaration"
 holes = { name = "name", scope = "path" }
 message = "duplicate declaration of `{name}` in `{scope}`"
 labels = [{ at = "primary", text = "`{name}` declared again here" }, { at = "first", text = "first declaration of `{name}`" }]
 fix = { description = "rename this `{name}`, or remove one of the two declarations" }
+
+[diag.cases.pattern-field]
+message = "field `{name}` of `{scope}` is named twice in one pattern"
+labels = [{ at = "primary", text = "`{name}` named again here" }, { at = "first", text = "`{name}` first named here" }]
+fix = { description = "name `{name}` once: keep one sub-pattern for it, and to use the value twice bind it by name and reuse the binding" }
 
 [[diag]]
 code = "E0106"

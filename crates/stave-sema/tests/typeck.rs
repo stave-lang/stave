@@ -634,3 +634,21 @@ fn e0908_fixes_write_the_signature_and_the_trait() {
     assert_eq!(fixes.iter().filter(|(c, _)| *c == "E0908").count(), 3, "{fixes:?}");
     assert!(fixes.iter().all(|(_, f)| !f.contains("<..>")), "{fixes:?}");
 }
+
+/// A field named twice in a struct pattern is E0105 `pattern-field`: no field of a pattern is
+/// renamed, so the text speaks of naming the field once.
+#[test]
+fn e0105_in_a_pattern_says_name_the_field_once() {
+    let src = "struct H { n: u32, d: u32 }\n\
+         fn main() -> i32 { let h = H.{ n: 1u32, d: 2u32 }; let H.{ n, n: m, d: _ } = h; return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str)> = tc
+        .diagnostics
+        .iter()
+        .filter(|d| d.code() == "E0105")
+        .map(|d| (d.message(), d.fix().map_or("", |f| f.description.as_str())))
+        .collect();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "field `n` of `main.H` is named twice in one pattern");
+    assert!(got[0].1.starts_with("name `n` once") && !got[0].1.contains("rename"), "{got:?}");
+}
