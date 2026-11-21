@@ -120,7 +120,8 @@ non-Copy part (at any depth) by value. Every alternative of an or-pattern binds 
 with the same modes, so either all of them move or none does. A pattern that binds only Copy
 parts, binds by reference (through a `&` / `&mut` scrutinee), or binds nothing (`_`, a literal,
 `let _ = s;`, `match s { _ => .. }`, `S.{ n, b: _ }` with `n: u32`) only reads: the scrutinee
-stays alive and is dropped with its owner.
+stays alive and is dropped with its owner. A struct pattern names a field once (E0105), so each
+part of the value has one sub-pattern: it is bound, or ignored, never both.
 
 When and where. A moving pattern takes the whole value at its binding point: the end of the
 `let` statement's pattern, the entry of the arm (after the guard passed), the start of each

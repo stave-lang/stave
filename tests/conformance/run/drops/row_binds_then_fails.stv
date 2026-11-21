@@ -1,6 +1,6 @@
-//~ STDOUT rows_and_field_named_twice.stdout
+//~ STDOUT row_binds_then_fails.stdout
 // A name bound by a row whose later test fails takes nothing: the row that matches drops and binds
-// from the whole value. A field a pattern names twice is ignored only if no name takes it.
+// from the whole value.
 import std.io;
 import std.env;
 struct D { pub id: u32 }
@@ -45,13 +45,6 @@ fn main() -> i32 {
             _ => { io.print("rest\n"); }
         }
         io.print("after\n");
-    }
-    match mkp(40) {
-        P.{ a, a: _, b } => { io.print("twice\n"); }
-    }
-    let q = mkp(50);
-    match q {
-        P.{ a: _, a, b: _ } => { io.print("twice\n"); }
     }
     let r = (mkp(60), 1u32);
     let n: u32 = match r {

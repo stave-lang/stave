@@ -14,16 +14,6 @@ rest
 drop 21
 drop 22
 after
-mk 40
-mk 41
-twice
-drop 41
-drop 40
-mk 50
-mk 51
-drop 51
-twice
-drop 50
 mk 60
 mk 61
 drop 60

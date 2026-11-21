@@ -198,8 +198,8 @@ does not bind at that point (contracts/lang-details.md "Whole moves").
 **Argument.** Outside a pattern, a by-value use of a place with a field, tuple, or payload
 projection is E0504 case `part`; a projection through a reference, an index, a capture, or a
 static is E0504 already. Inside a pattern the bindings read parts and the source moves whole,
-and the source itself must be a whole value by the same step; a part a pattern binds twice
-(`P.{ a: x, a: y }`) is E0502, so each part has one owner. A value whose type has an
+and the source itself must be a whole value by the same step; a pattern names a field once
+(`P.{ a: x, a: y }` is E0105), so each part has one sub-pattern and one owner. A value whose type has an
 `impl Drop` is not taken apart at all (case `drop`): its destructor gets every part. So every
 move operand names a whole local or temporary, the checker's move state is one bit per local,
 and a write of a part of a moved local is E0502. What is moved-out is always a whole value, and

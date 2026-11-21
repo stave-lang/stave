@@ -40,6 +40,10 @@ fn patterns(p: (i32, i32), t: Two, k: Pick) -> i32 {
     match t {
         Two.{ x, y: x } => { } //~ ERROR E0105
     }
+    match t {
+        // the shorthand given twice binds one name twice: one error
+        Two.{ x, x, y: _ } => { } //~ ERROR E0105
+    }
     match k {
         // the alternatives of an arm bind the same names: no duplicate
         Pick.One(m, n) | Pick.Other(n, m) => { let _ = m + n; }

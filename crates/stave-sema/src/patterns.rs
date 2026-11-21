@@ -192,6 +192,7 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
                     return arity_pat(ck, p, ftys.len(), kids.len(), &kids);
                 }
                 let mut subs = vec![Pat::Wild; ftys.len()];
+                let mut seen: Vec<(usize, u32, bool)> = Vec::new();
                 for fp in kids {
                     if icx.kind(fp) != Some(NodeKind::FieldPat) {
                         continue;
@@ -210,6 +211,33 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
                         }
                         continue;
                     };
+                    // a pattern names a field once: each part of the value has one sub-pattern,
+                    // which alone says whether the part is bound, tested, or ignored
+                    if let Some(&(_, first, first_binds)) = seen.iter().find(|x| x.0 == fi) {
+                        let sub = icx.child(fp, NodeKind::Pattern);
+                        // `P.{ a, a }` binds the name `a` twice, which is reported as that
+                        if !(first_binds && sub.is_none()) {
+                            let nm = ck.prog.strings.get(name).to_string();
+                            let scope = ck.prog.decl_path(v.decl);
+                            let dg = mk(
+                                "E0105",
+                                None,
+                                &[("name", &nm), ("scope", &scope)],
+                                icx.tok_span(fa),
+                                &[("first", icx.tok_span(first))],
+                            );
+                            ck.report(dg);
+                        }
+                        ck.has_error = true;
+                        match sub {
+                            Some(sp) => {
+                                check_pattern(ck, sp, ids::ERROR, pm);
+                            }
+                            None => bind(ck, fp, ids::ERROR, Mode::Move),
+                        }
+                        continue;
+                    }
+                    seen.push((fi, fa, icx.child(fp, NodeKind::Pattern).is_none()));
                     match icx.child(fp, NodeKind::Pattern) {
                         Some(sp) => subs[fi] = check_pattern(ck, sp, ftys[fi], pm),
                         None => bind(ck, fp, ftys[fi], pm),

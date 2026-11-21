@@ -411,8 +411,8 @@ pub struct Builder<'a, 'b> {
     /// Inside a match guard (or a closure written in one): the guard only reads.
     in_guard: u32,
     /// The pattern being bound by [`Builder::destructure`]: the projection length of its source
-    /// and the non-Copy parts it took by value.
-    destr: Option<(usize, Vec<Place>)>,
+    /// and whether it took a non-Copy part by value.
+    destr: Option<(usize, bool)>,
     /// The scrutinees of the guards being built in this body (a `&mut` of one is E0501 already).
     guard_scruts: Vec<Place>,
     /// The temporary holding the array a `for` loop iterates by value: its elements are moved
@@ -1868,9 +1868,9 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// `src` moves as one value (the parts it does not bind end there), so `src` itself must be
     /// a value that may move whole.
     fn destructure(&mut self, p: u32, src: Place, mode: Mode, n: u32) {
-        let saved = self.destr.replace((src.proj.len(), Vec::new()));
+        let saved = self.destr.replace((src.proj.len(), false));
         self.bind_pattern(p, src.clone(), mode, n);
-        let took = self.destr.take().is_some_and(|(_, parts)| !parts.is_empty());
+        let took = self.destr.take().is_some_and(|(_, took)| took);
         self.destr = saved;
         if took && self.open() {
             let span = self.span(n);
@@ -2091,25 +2091,10 @@ impl<'a, 'b> Builder<'a, 'b> {
                         let why = if by_value { self.move_out(&src, true) } else { None };
                         match why {
                             Some(why) => self.body.bad_moves.push((src.clone(), span, why)),
+                            // a pattern names each part once, so this binding is its one owner
                             None if by_value => {
-                                // a part bound twice (`P.{ a: x, a: y }`) would have two owners:
-                                // the second binding moves it first, so its read is a use after
-                                // move
-                                let again = self.destr.as_ref().is_some_and(|d| {
-                                    d.1.iter().any(|q| {
-                                        q.proj.starts_with(&src.proj) || src.proj.starts_with(&q.proj)
-                                    })
-                                });
-                                if again {
-                                    let root =
-                                        Place::local(src.local, self.body.locals[src.local as usize].ty);
-                                    self.body.move_sites.push((root.clone(), span));
-                                    let site = (self.body.move_sites.len() - 1) as u32;
-                                    let mv = Operand { kind: OpKind::Move, place: root, span, node: b, site };
-                                    self.push(StmtKind::Read(mv), span, b);
-                                }
                                 if let Some(d) = self.destr.as_mut() {
-                                    d.1.push(src.clone());
+                                    d.1 = true;
                                 }
                             }
                             None => {}
