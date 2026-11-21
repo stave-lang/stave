@@ -1338,10 +1338,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0208",
         severity: Severity::Error,
         area: "types",
-        rule: "no method or field `<name>` on type `<T>`",
+        rule: "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "added", kind: HoleKind::Pattern, choices: &[] },
+            Hole { name: "missing", kind: HoleKind::Pattern, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
@@ -1378,6 +1380,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give every field: `{name}: <value>`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "pattern-missing-field",
+                message: "a pattern of `{type}` leaves fields out: `{missing}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a pattern names every field of `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "name each field, `f: _` for one the pattern ignores: add `{added}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2561,7 +2575,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "a part moved here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` or left out is dropped there)",
+                    description: "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` is dropped there)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

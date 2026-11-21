@@ -579,8 +579,8 @@ fix = { description = "end every path of `{name}` with a call of a `-> never` fn
 code = "E0208"
 severity = "error"
 area = "types"
-rule = "no method or field `<name>` on type `<T>`"
-holes = { name = "name", type = "type" }
+rule = "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern"
+holes = { name = "name", type = "type", missing = "pattern", added = "pattern" }
 message = "no method or field `{name}` on type `{type}`"
 labels = [{ at = "primary", text = "`{type}` has no `{name}`" }]
 fix = { description = "correct the spelling, or convert the value to a type that has `{name}` (`stave explain E0208`)" }
@@ -589,6 +589,11 @@ fix = { description = "correct the spelling, or convert the value to a type that
 message = "missing field `{name}` in a literal of `{type}`"
 labels = [{ at = "primary", text = "`{name}` not given" }]
 fix = { description = "give every field: `{name}: <value>`" }
+
+[diag.cases.pattern-missing-field]
+message = "a pattern of `{type}` leaves fields out: `{missing}`"
+labels = [{ at = "primary", text = "a pattern names every field of `{type}`" }]
+fix = { description = "name each field, `f: _` for one the pattern ignores: add `{added}`" }
 
 [diag.cases.column]
 message = "`{type}` has no column `{name}`: its columns are the fields of its row struct"
@@ -1052,7 +1057,7 @@ fix = { description = "borrow it instead (`&{place}`), or take it out and leave 
 [diag.cases.part]
 message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"
 labels = [{ at = "primary", text = "a part moved here" }]
-fix = { description = "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` or left out is dropped there)" }
+fix = { description = "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` is dropped there)" }
 
 [diag.cases.part-reborrow]
 message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"

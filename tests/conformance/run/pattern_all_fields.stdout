@@ -1,0 +1,25 @@
+drop 2
+let
+drop 1
+drop 3
+drop 5
+nested 7
+drop 4
+drop 6
+generic
+drop 7
+drop 8
+arm
+drop 9
+drop 11
+iteration
+drop 10
+drop 13
+iteration
+drop 12
+by reference 14
+end
+drop 18
+drop 17
+drop 14
+drop 15

@@ -199,6 +199,7 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
                 }
                 let mut subs = vec![Pat::Wild; ftys.len()];
                 let mut seen: Vec<(usize, u32, bool)> = Vec::new();
+                let mut unknown = false;
                 for fp in kids {
                     if icx.kind(fp) != Some(NodeKind::FieldPat) {
                         continue;
@@ -210,6 +211,7 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
                         let nm = ck.prog.strings.get(name).to_string();
                         let dg = mk("E0208", None, &[("name", &nm), ("type", &tn)], icx.tok_span(fa), &[]);
                         ck.report(dg);
+                        unknown = true;
                         if let Some(sp) = icx.child(fp, NodeKind::Pattern) {
                             check_pattern(ck, sp, ids::ERROR, pm);
                         } else {
@@ -248,6 +250,27 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
                         Some(sp) => subs[fi] = check_pattern(ck, sp, ftys[fi], pm),
                         None => bind(ck, fp, ftys[fi], pm),
                     }
+                }
+                // every field is named, by value or through a reference alike: a part no
+                // sub-pattern mentions would be dropped without being written, and a field
+                // added to the type must be acknowledged by every pattern over it. A misspelled
+                // field already reported is not reported again as a missing one.
+                let missing: Vec<String> = (0..v.fields.len())
+                    .filter(|fi| !seen.iter().any(|x| x.0 == *fi))
+                    .map(|fi| ck.prog.strings.get(v.fields[fi].name).to_string())
+                    .collect();
+                if !missing.is_empty() && !unknown {
+                    let tn = ck.show(pt);
+                    let names = missing.join(", ");
+                    let added = missing.iter().map(|m| format!("{m}: _")).collect::<Vec<_>>().join(", ");
+                    let dg = mk(
+                        "E0208",
+                        Some("pattern-missing-field"),
+                        &[("type", &tn), ("missing", &names), ("added", &added)],
+                        icx.tok_span(e),
+                        &[],
+                    );
+                    ck.report(dg);
                 }
                 return Pat::Ctor(ctor, subs);
             }
