@@ -108,10 +108,12 @@ when that owner ends.
   of a value `if`). These are statements of their own for this rule: the condition of an `if` or
   `while` (each evaluation), a `match` guard, and the body of an arm of a value `match`. The
   temporaries of a `match` scrutinee and of a `for` header belong to the `match` / `for`
-  statement: they live across the arms and the loop, and are dropped once after it.
+  statement: they live across the arms and the loop, and are dropped once after it. The
+  iterator of a `for` (an rvalue the loop calls `next` on) is not a temporary: with drop glue
+  it lives to the end of the enclosing block, like a local declared before the loop.
 - **Unbound parts.** What a pattern does not bind of an rvalue (`let (a, _) = mk();`, a
-  scrutinee that is a call) is a temporary of the statement. `let _ = e;` drops `e` at the end
-  of the statement.
+  scrutinee that is a call) is a temporary of the statement. `let _ = e;` with an rvalue `e`
+  drops it at the end of the statement; with a place `e` it moves nothing and drops nothing.
 - **Leaving early.** `return`, `break`, `continue`, and `?` drop the temporaries of the
   statements they leave, then the locals of the scopes they leave. `?` also drops the operands
   of the enclosing expressions that were already evaluated (earlier arguments, a by-value
