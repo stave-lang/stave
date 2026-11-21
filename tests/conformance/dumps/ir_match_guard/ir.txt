@@ -2,7 +2,7 @@ type t0 int u 8
 type t1 int u 32
 type t2 int s 32
 type t3 bool
-type t4 adt d19
+type t4 adt d24
 fn @0 main.area {
 b0(%0: t4, %1: t3):
   %2 = enum.tag t1 %0

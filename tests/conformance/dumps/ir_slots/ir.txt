@@ -4,7 +4,7 @@ type t2 bool
 type t3 ref t0
 type t4 ref mut t0
 type t5 ref mut t6
-type t6 adt d18
+type t6 adt d23
 fn @0 main.read {
 b0(%0: t3):
   %1 = load t0 %0

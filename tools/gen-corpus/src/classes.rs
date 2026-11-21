@@ -628,7 +628,8 @@ fn holder(class: Class, r: &mut Rng) -> Holder {
                     vec![
                         s("let mut t = (Pick.{ best: &zero, count: 0 }, 0u32);"),
                         s("set_t(&mut t, &x);"),
-                        s("p = t.0;"),
+                        s("let (tp, _) = t;"),
+                        s("p = tp;"),
                     ],
                 ),
                 8 => (

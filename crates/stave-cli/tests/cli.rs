@@ -194,8 +194,8 @@ fn single_file_argument() {
     assert!(err.starts_with("recover_two_items.stv:"), "{err}");
 }
 
-/// Lines of `tests/conformance/dumps/_lib` (std/core.stv, std/io.stv, runtime/empty.stv).
-const STD_LINES: u64 = 31;
+/// Lines of `tests/conformance/dumps/_lib` (std/core.stv, std/io.stv, std/string.stv, runtime/empty.stv).
+const STD_LINES: u64 = 40;
 
 const GOLDEN_DUMPS: &str = "--dump=tokens,items,ast,strings,names,types,diags,stats";
 const GOLDEN_FILES: [&str; 7] =

@@ -1,11 +1,19 @@
-// The stack bound counts every fn a compound-assigned fn value can be.
+// The stack bound counts `big`, which the operator impl behind a compound assignment calls
+// through the fn field of `self`.
 //~ STDOUT op_assign_stack.stdout
 import std.core;
 import std.io;
 
-impl core.Add for fn() -> u64 {
+view struct H {
+    f: fn() -> u64,
+}
+
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        return big;
+        let k = self.f;
+        let r = k();
+        io.print(f"{r}\n");
+        return H.{ f: small };
     }
 }
 
@@ -20,8 +28,6 @@ fn big() -> u64 {
 }
 
 fn main() {
-    let mut f: fn() -> u64 = small;
-    f += small;
-    let r = f();
-    io.print(f"{r}\n");
+    let mut h = H.{ f: big };
+    h += H.{ f: small };
 }

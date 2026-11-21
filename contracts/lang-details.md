@@ -11,6 +11,12 @@ reference for what a program may write and what it means.
 - A `fn(..) needs(F)` value is usable as `fn(..) needs(G)` only if F ⊆ G ∪ the enclosing fn's
   needs ∪ the target baseline (E0707). Reason: CPU features never change while a program runs, so
   a value made where F is proven stays callable.
+- No operator applies to a fn value: the operator traits and fn types both belong to `std`, which
+  implements none for a fn type, so `impl core.Add for fn()` elsewhere is E0420 and `f += g` on a
+  fn-typed `f` has no impl. An operator over fn values goes through a struct that holds them
+  (`view struct H { f: fn() }`, `impl core.Add for H`): `H.f` is a field declared with a fn type,
+  a tracked slot of the call graph (contracts/soundness.md), fed by every `H` literal, the impl's
+  results included.
 
 ## §1 Closure capture modes
 

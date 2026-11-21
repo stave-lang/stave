@@ -1,0 +1,7 @@
+# An impl is in the package of its type (inherent), or of its trait or its type's head (trait
+# impl); built-in types belong to `std`.
+name = "coherence_neg"
+kind = "bin"
+
+[dependencies]
+dep = { path = "dep" }

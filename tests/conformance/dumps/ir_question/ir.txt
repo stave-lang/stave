@@ -1,7 +1,7 @@
 type t0 int u 32
 type t1 int s 32
 type t2 bool
-type t3 adt d4 t0
+type t3 adt d5 t0
 fn @0 main.half {
 b0(%0: t0):
   %1 = rem t0 %0 2
