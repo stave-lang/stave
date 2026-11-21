@@ -381,12 +381,17 @@ impl<'a> Tys<'a> {
         r
     }
 
-    /// Whether `t` is an ADT with an `impl Drop` of its own (not only drop glue of its fields).
+    /// Whether `t` is an ADT with an `impl Drop` of its own (not only drop glue of its fields),
+    /// declared in the ADT's package (another package's is E0419 and drops nothing).
     pub fn has_drop_impl(&mut self, t: TypeId) -> bool {
         let TypeKind::Adt { def, .. } = self.kind(t) else { return false };
-        self.drop_impls
-            .iter()
-            .any(|&i| self.sigs.impl_def(i).is_some_and(|d| d.head == Some(stave_sema::TypeHead::Adt(def))))
+        let prog = self.prog;
+        let package_of =
+            |d: stave_sema::DeclId| prog.decl(d).and_then(|x| prog.module(x.module)).map(|m| m.package);
+        self.drop_impls.iter().any(|&i| {
+            self.sigs.impl_def(i).is_some_and(|d| d.head == Some(stave_sema::TypeHead::Adt(def)))
+                && package_of(i) == package_of(def)
+        })
     }
 
     /// The pointee of a reference or raw pointer.
