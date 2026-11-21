@@ -11,8 +11,10 @@
 // check. A stale Id, or one of another container of the same T, names a wrong row or panics
 // `Bounds`, never memory outside a container.
 //
-// Copy; Send and Sync for every T (it holds a u32); Flat when T is (the Flat rule counts type
-// arguments), so an `Id<T>` field of a Soa row needs a Flat T.
+// Copy; Send and Sync for every T (it holds a u32). Flat and Frozen only when T is: those rules
+// count type arguments, so an `Id<T>` field of a Soa row (and a copy to a file or the GPU) needs
+// a Flat T; a row referring to a record that is not Flat stores `raw()` and reads it back with
+// `from_raw`.
 
 import runtime.panic;
 import std.core;
