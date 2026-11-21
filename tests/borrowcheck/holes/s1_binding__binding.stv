@@ -1,0 +1,19 @@
+//~ BORROWCHECK use-after-referent 13 10
+view struct Pick { best: &u32, count: usize }
+
+fn binding() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        match &mut p {
+            Pick.{ best, count } => { *best = &x; }
+        }
+    }
+    return *p.best;
+}
+
+fn main() -> i32 {
+    let _ = binding();
+    return 0;
+}

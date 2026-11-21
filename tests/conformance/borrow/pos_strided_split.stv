@@ -43,7 +43,8 @@ rec fn tile(g: GridMut, depth: u32) {
         r[1] = 1;
         return;
     }
-    let (top, bottom) = g.split_rows(g.rows / 2);
+    let half = g.rows / 2;
+    let (top, bottom) = g.split_rows(half);
     tile(top, depth + 1);
     tile(bottom, depth + 1);
 }

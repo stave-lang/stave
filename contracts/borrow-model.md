@@ -21,10 +21,24 @@ reference that is never used again conflicts with nothing, except a param while 
 | local (`let`, pattern binding, param) | when its declaration runs (param: frame entry) | exit of the block that declares it, after that block's drops (param: frame exit) |
 | temporary | at each evaluation of its expression | the next evaluation of the same expression in the same frame; the end of its statement, after its drop, when its type has drop glue; frame exit |
 | heap block | `try_alloc` or `try_realloc` returns it | `free`; a `try_realloc` of it that succeeds, also when the address stays (the new block takes the old bytes with their tags and initialization) |
-| `static`, string literal data | program start | never |
+| `static`, string literal data, constant temporary | program start | never |
 
 A `let` that runs again (a loop) begins a new allocation, whatever its address. Two expressions
 never share a temporary. A fn value is not an allocation (M18).
+
+A *constant temporary* is a temporary that a constant initializes and only `&` borrows: the
+value of a literal, of `()`, of `size_of` / `align_of`, or of a path that names no local (a
+`const` item or const generic, a variant without payload, a fn item), borrowed by `&e`, by `&`
+of a field or element of it, or as an auto-referenced `&self` receiver, of a type without drop
+glue (a temporary with drop glue ends with its statement, M14). Its value is fixed at compile time,
+so it is static data like a string literal: every evaluation of the expression gives the same
+allocation, its root is `Frozen` (`Cell` on the bytes inside an `UnsafeCell`), and a borrow of
+it is never ended by a later evaluation (M14 does not apply). Nothing writes its bytes outside
+an `UnsafeCell`. Its `Cell` bytes a `&` may write (M21), and each later evaluation writes the
+constant's value into them again, through the root: the backends keep one slot per expression
+and store the value at each evaluation, so a `const C: atomic.U32` borrowed in a loop starts
+each round from its initial value. A temporary that `&mut` borrows, and one whose
+value is computed (`&(2 + 2)`, `&-4`, `&f()`), is an ordinary temporary.
 
 **Tags.** A tag is an id made by one event and never reused. The tags of an allocation form a
 tree. The root is made with the allocation and stands for the place itself: an access that names
@@ -133,8 +147,9 @@ fn overlap(xs: &mut [u32]) -> u32 {
 - **M6 (reborrow).** `&*r`, `&mut *r`, `&r.f` are borrows (M4) through the tag of `r`. The
   implicit forms are the same event: a `&mut T` place given where a `&mut T` parameter (fn,
   method receiver, closure, built-in), variant constructor argument, or struct literal field
-  takes it is `&mut *p`; a `&mut T` given where `&T` is expected is `&*p`. Every other by-value
-  use of a `&mut T` place moves it (M9).
+  takes it is `&mut *p`; a `&mut T` given where `&T` is expected is `&*p`; a `&mut T` place
+  cast to a raw pointer is `&mut *p` (M11). Every other by-value use of a `&mut T` place moves
+  it (M9).
 ```stave
 fn child(p: &mut u32) -> u32 {
     let c: &mut u32 = &mut *p;
@@ -175,6 +190,8 @@ fn moved_under() -> u32 {
 - **M10 (array repeat).** `[e; n]` evaluates `e` once; each element takes the value by one
   by-value use of it. For a type that is not Copy the second use reads a moved-out value (M9):
   the literal makes `n` owners of one value. `n = 1` is one move. `n = 0` uses it never.
+  No oracle run shows this rule: such a literal is E0418, a type error, and a program with a
+  type error is not lowered (the oracle lowers past borrow errors only).
 ```stave
 fn twice(x: &mut u32) -> u32 {
     let t = [x; 2];         // M10: the second element is a second owner of one `&mut`
@@ -187,7 +204,8 @@ fn twice(x: &mut u32) -> u32 {
 | Form | Event |
 |---|---|
 | `v as T`, `T` the type of `v` | a by-value use of `v` (M8 or M9); the words keep their tags |
-| `&x as *const T`, `&mut x as *mut T`, pointer to pointer, pointer to and from a 64-bit integer | the same word with the same tag (M20) |
+| `r as *mut T`, `r as *const T`, `r` a `&mut T` place | a reborrow `&mut *r` (M6) whose word the pointer is: `r` is read, not moved, and stays usable; a later use of `r` is a foreign access for the pointer's tag |
+| `&x as *const T`, `&mut x as *mut T`, pointer to pointer, pointer to and from a 64-bit integer, a `&T` to a raw pointer | the same word with the same tag (M20) |
 | `&mut T` to `&T` | a reborrow (M6) |
 | `&[T; N]` to `&[T]`, `&[T align A]` to `&[T]` | the same tag and range |
 | `&String` to `&str`, an f-string to `&str` | a call of `as_str` (the f-string is a temporary with drop glue) |
@@ -233,7 +251,9 @@ fn block_exit() -> u32 {
 ```
 - **M14 (temporaries).** An evaluation of an expression whose value needs a place (`&f()`,
   `&(a + 1)`, the receiver in `f().m()`) first evaluates its operands, which may read the
-  allocation of the evaluation before; then that allocation ends and a new one begins. A
+  allocation of the evaluation before; then that allocation ends and a new one begins. Not a
+  constant temporary ("State"): `lit = &4u32` or `tab = &TABLE` in a loop borrows the same
+  static data in every round, and a reference of the round before stays usable. A
   temporary whose type has drop glue is dropped and ends with its statement, in reverse order
   of creation. Any other one stays until the next evaluation or the frame exit: a borrow of it
   may be used after its statement.
@@ -472,11 +492,6 @@ symptom. Two holders of one `&mut` tag made by a copy cannot be told apart by M1
 (b) never reports them; M9 does, at the first use of the place the value left. The fifth form,
 "signature" (M24), is reported beside these and never instead of them.
 
-An implementation that sees no begin and end of locals and temporaries ("Side table") reports
-the store of the next value where the table says (c): a loop local written again, or a
-temporary evaluated again, makes a reference to the value before `Dead` by a write, so a later
-use through it is (a) for a `&` and (b) for a `&mut`, with that store as the cause.
-
 ## Relation to the static rules
 
 The static rules must imply the model: no execution of an accepted program has a violation. A
@@ -503,7 +518,7 @@ hole. The model never reads a static rule to decide.
 | E0514, E0515, E0520, E0521, E0905, E0807: form of clauses, fn values of fns with clauses | none (they keep M24 and the callers' reading of a signature well-defined) |
 | E0410 to E0414: where references and views may be held | M13, heap `free` (a reference where no rule sees its holder) |
 | E0415, E0416: Copy only for types without `&mut` and drop glue | M8, M9 |
-| E0418: array repeat | M10 |
+| E0418: array repeat (a type error: no oracle run shows it) | M10 |
 | E0211: an `ensures` reads no param whose `&mut` the result holds; no clause writes | M1 (the clause's read would freeze the result's tag before the caller writes through it) |
 | temporaries: lifetime, one place per expression | M14 |
 | E0801, E0808, `scope` / `join` structure | M13, M22 (threads end before the captured locals) |
@@ -553,7 +568,7 @@ rule the execution out, and the borrow-tracking mode reports it when a run has i
 
 | Program shape | Violation | Class |
 |---|---|---|
-| a `&mut V` made from a raw pointer under a `&` anchor takes a borrow of a shorter-lived local (`tests/borrowcheck/anchor_shorter_local.stv`) | M20, M16 with M13 | (c); (a) by the store of the local's next value ("Reports") |
+| a `&mut V` made from a raw pointer under a `&` anchor takes a borrow of a shorter-lived local (`tests/borrowcheck/anchor_shorter_local.stv`) | M20, M16 with M13 | (c) |
 
 ## What an implementation over the checked IR needs
 
@@ -588,22 +603,80 @@ it is not dumped, not compared with a golden, and not given to a backend.
 - **`Body::borrows`**, one row per such value: the value, and `&` or `&mut`. The interpreter
   makes the tag (M4) when the instruction that defines the value runs: the parent is the tag its
   address word carries; the range starts at the address and has the size of the pointee of the
-  value's type, for a fat reference its length times the element size.
+  value's type, for a fat reference its length times the element size. More borrows than the
+  source spells have a row: a `&mut T` place given as a method receiver (M6) or cast to a raw
+  pointer (M11); the capture
+  references of a closure literal, one per captured local, `&` when the body only reads it
+  (M18); the binding of a `for` over a reference to an array or slice, a borrow of its element
+  through that reference; a `&mut` chunk binding, a borrow of the chunk's temporary; the
+  `&mut` a drop glue runs on (M12).
+- **`Body::events`**, one row per event that is no borrow, each on an instruction of its own
+  (an identity cast of the pointer to the place; for *repeat* and *environment* the instruction named there):
+  - *begin*: a local at its declaration, a temporary at each evaluation of its expression
+    (M13, M14). The allocation that was in the slot ends with every tag of it, and the root
+    stands for the new one.
+  - *end*: the locals of a block when it is left by its end, `break`, or `continue`, after
+    their drops; a temporary with drop glue after its drop at the end of its statement. A
+    `return` and a `?` emit none: the return of the frame ends every slot of it. Between its
+    end and its next begin the root of a slot is `Dead`.
+  - *gone*: a by-value use of a place whose type is not Copy, after its read; `p.read()` of
+    such a type; the end of a drop, after the glue (M9, M12). The bytes end through the tag of
+    the pointer and are moved-out until the next write.
+  - *repeat*, on a unit value made where the literal is evaluated, after `e`: `[e; n]`,
+    `n >= 2`, of a type that is not Copy (M10).
+  - *environment*, on `fn.make`: the interpreter copies the environment into a slot of its
+    own in the current frame, so each evaluation of a closure literal holds its own capture
+    references (M18).
+  - *constant*, in place of *begin*: the slot of a constant temporary (every form "State"
+    lists). Its first evaluation
+    begins it; the store of a later one is no event on the bytes outside an `UnsafeCell` (they
+    hold the value already) and a write through the root on its `Cell` bytes. Its tags are
+    not judged by M24, like those of a `static`.
+- **A local a value is moved out of lives in a slot**, also when the canonical lowering keeps
+  it as an SSA value: a move is an event on the bytes of its place. A local that is never
+  borrowed, captured, or moved out of stays an SSA value and is no allocation of the run.
+- **Which by-value uses are moves.** Every one of a place whose type is not Copy, but a
+  reference that the path of a place dereferences, a reference an implicit reborrow or a
+  coercion takes (M6, M11), a `&mut T` place cast to a raw pointer (M11), and the reference a
+  `for` loop iterates through.
 - **`Module::cell`**, the declaration of `std.cell.UnsafeCell`. A `&` gets `Cell` on the bytes
   that the layout of its pointee type puts inside a value of such a type (M21).
+- **`Module::frozen`**, per `static`: it is not `static mut`. Its root is `Frozen`, and `Cell`
+  on its `UnsafeCell` bytes.
+- **`Module::clauses`**, per function: a fn item or method with the `from` clauses of its
+  result and of its params, or a closure body (M24).
 - **Sites.** An instruction without a site of its own has the site of the statement it belongs
   to, so both sites of a report are source lines.
 
 What the interpreter reads off the module without a row: a call protects the reference words of
 its arguments, found by the types of the params (M23); a load through a raw pointer gives each
 reference word of the loaded value a new tag (M20); the return of a frame ends its locals and
-temporaries, `free` and `try_realloc` end the block (M3).
+temporaries, `free` and `try_realloc` end the block (M3); a borrow whose instruction takes a raw
+pointer is a tag made through a raw pointer (M24).
 
-The table has no rows for moves, drops, the ends of blocks, the evaluations of temporaries,
-captures, and `from` clauses: the tracking mode does not see these events, and reports none of
-the violations that need them (M9, M10, M12, M13 at a block, M14, M18, M24). The store of a
-temporary's next value is a write like any other: a `&` of the value before is then `Dead` by
-a write, not by an end.
+What the tracking mode does not see, or sees later than the rules say:
+
+- A constant temporary is a slot of its frame, as in the code the backends get (one slot per
+  expression, which each evaluation stores the same bytes into): the mode ends it with the
+  frame, and its root stays `Active`.
+- The moves of a `match` arm that has a guard happen when the guard holds (the names are bound
+  before it runs). Of an or-pattern with a guard they have no row: the block the guard runs in
+  has one predecessor per alternative.
+- A drop of a moved-out place (M12) is reported by the first read its glue makes of the place,
+  as a read of a moved-out place; a glue that reads nothing is not reported.
+- *repeat* rows are never reached today: E0418 is a type error, and a program with one is not
+  lowered, with or without the borrow checker.
+- M24 walks the views a value points to by type. It does not see the captures of a fn value
+  that is a param, a field, or a result (a fn type does not show them): when a source of a
+  clause holds a fn value with captures, a reference that derives from no other source is not
+  judged, and a fn value in a result or stored into a view is not judged either. A closure
+  body's own environment it walks. A value with more than 4096 reference words (with the
+  words in the views it reaches) is not judged: a clause whose source it is, and the stores
+  into it, are not; the other clauses of the call are. The report
+  names the param by its index and a closure body as `the closure at <file>:<line>:<col> in
+  <fn>` (the site of its literal; its environment is its last param), and has no site of the
+  store. It does not end the run: a run
+  without a violation fails with its signature reports at its end.
 
 ## Limits
 

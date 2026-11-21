@@ -1,0 +1,12 @@
+//~ BORROWCHECK second-owner 10 9
+// A field of a local read after the local was moved: a read of a moved-out place.
+struct S { a: u32 }
+
+fn take(s: S) -> u32 { return s.a; }
+
+fn main() -> i32 {
+    let s = S.{ a: 1u32 };
+    let n: u32 = take(s);
+    if n + s.a == 2u32 { return 1; }
+    return 0;
+}

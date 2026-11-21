@@ -1,0 +1,25 @@
+//~ BORROWCHECK use-after-referent 23 21
+view struct Pick { best: &u32, count: usize }
+view struct Twin { out: &mut Pick, spare: &u32 }
+view struct Keep { t: &mut Twin }
+
+fn mix(k: &mut Keep from x + y, x: &mut Twin, y: &u32, out: &mut Pick from copy x) {
+    x.spare = y;
+    out.best = x.spare;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut res = Pick.{ best: &zero, count: 0 };
+    {
+        let y: u32 = 7;
+        let mut p = Pick.{ best: &zero, count: 0 };
+        let mut p0 = Pick.{ best: &zero, count: 0 };
+        let mut t0 = Twin.{ out: &mut p0, spare: &zero };
+        let mut t = Twin.{ out: &mut p, spare: &zero };
+        let mut k = Keep.{ t: &mut t0 };
+        mix(&mut k, &mut t, &y, &mut res);
+    }
+    let v: u32 = *res.best;
+    return v as% i32;
+}

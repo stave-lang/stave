@@ -1,0 +1,246 @@
+//~ BORROWCHECK use-after-referent 237 236
+//~ CHECK-ONLY
+// A temporary has one slot, and every evaluation of its expression writes it: a borrow of the
+// value made by the evaluation before must be dead by then (E0501), wherever the temporary
+// sits: under `&`, in a call argument, in a literal's field, behind an `if`, as a receiver, or
+// around a part of it.
+struct Pair { a: u32, b: u32 }
+
+view struct Name { s: &u32, count: u32 }
+
+view struct Two { x: &u32, y: &u32 }
+
+impl Pair {
+    fn first(&self) -> &u32 from self {
+        return &self.a;
+    }
+}
+
+fn next(i: u32) -> u32 {
+    return i + 1;
+}
+
+fn pair(i: u32) -> Pair {
+    return Pair.{ a: i, b: i + 1 };
+}
+
+fn arr(i: u32) -> [u32; 2] {
+    return [i, i + 1];
+}
+
+fn tup(i: u32) -> (u32, u32) {
+    return (i, i + 1);
+}
+
+fn keep(a: &u32, b: &u32) -> &u32 from a + b {
+    return if *a > *b then a else b;
+}
+
+fn two(x: &u32, y: &u32) -> Two from x + y {
+    return Two.{ x: x, y: y };
+}
+
+fn in_loop() -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut i: u32 = 0;
+    let mut sum: u32 = 0;
+    loop {
+        if i == 3 {
+            break;
+        }
+        let before: &u32 = r;
+        r = &next(i); //~ ERROR E0501
+        sum = sum + *before;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn in_for() -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut sum: u32 = 0;
+    for i in 0u32..3u32 {
+        let before: &u32 = r;
+        r = &next(i); //~ ERROR E0501
+        sum = sum + *before;
+    }
+    return sum;
+}
+
+fn call_arg() -> u32 {
+    let zero: u32 = 0;
+    let mut best: &u32 = &zero;
+    let mut i: u32 = 0;
+    while i < 3 {
+        best = keep(best, &next(i)); //~ ERROR E0501
+        i = i + 1;
+    }
+    return *best;
+}
+
+fn literal_field() -> u32 {
+    let zero: u32 = 0;
+    let mut p = Name.{ s: &zero, count: 0 };
+    let mut i: u32 = 0;
+    let mut sum: u32 = 0;
+    while i < 3 {
+        let old = p.s;
+        p = Name.{ s: &next(i), count: i }; //~ ERROR E0501
+        sum = sum + *old;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn behind_if(c: bool) -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut i: u32 = 0;
+    let mut sum: u32 = 0;
+    while i < 3 {
+        let before: &u32 = r;
+        if c {
+            r = &next(i); //~ ERROR E0501
+        }
+        sum = sum + *before;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn view_temp() -> u32 {
+    let a: u32 = 1;
+    let b: u32 = 2;
+    let first = two(&a, &b);
+    let mut r: &Two = &first;
+    let mut i: u32 = 0;
+    let mut sum: u32 = 0;
+    while i < 3 {
+        let before: &Two = r;
+        r = &two(&b, &a); //~ ERROR E0501
+        sum = sum + *before.x;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn auto_ref() -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut i: u32 = 0;
+    let mut sum: u32 = 0;
+    while i < 3 {
+        let before: &u32 = r;
+        r = pair(i).first(); //~ ERROR E0501
+        sum = sum + *before;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn value_if(c: bool) -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut i: u32 = 0;
+    let mut sum: u32 = 0;
+    while i < 3 {
+        let before: &u32 = r;
+        r = &(if c then i else 7u32); //~ ERROR E0501
+        sum = sum + *before;
+        i = i + 1;
+    }
+    return sum;
+}
+
+// One temporary, two constants: the arms give it different values.
+fn value_if_constants(c: bool) -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut i: u32 = 0;
+    let mut sum: u32 = 0;
+    while i < 3 {
+        let before: &u32 = r;
+        r = &(if c then 1u32 else 2u32); //~ ERROR E0501
+        sum = sum + *before;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn scrutinee(o: Option<u32>) -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut q: &u32 = &zero;
+    let mut i: u32 = 0;
+    let mut sum: u32 = 0;
+    while i < 3 {
+        let br: &u32 = r;
+        let bq: &u32 = q;
+        match &pair(i) { //~ ERROR E0501
+            Pair.{ a, b } => {
+                r = a;
+            }
+        }
+        q = &(match o { Option.Some(v) => v, Option.None => 3u32 }); //~ ERROR E0501
+        sum = sum + *br + *bq;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn parts() -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut q: &u32 = &zero;
+    let mut s: &u32 = &zero;
+    let mut i: u32 = 0;
+    let mut sum: u32 = 0;
+    while i < 3 {
+        let br: &u32 = r;
+        let bq: &u32 = q;
+        let bs: &u32 = s;
+        r = &arr(i)[1]; //~ ERROR E0501
+        q = &tup(i).1; //~ ERROR E0501
+        s = &pair(i).b; //~ ERROR E0501
+        sum = sum + *br + *bq + *bs;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn ref_of_ref() -> u32 {
+    let zero: u32 = 0;
+    let z: &u32 = &zero;
+    let one: u32 = 1;
+    let mut r: & &u32 = &z;
+    let mut i: u32 = 0;
+    let mut sum: u32 = 0;
+    while i < 3 {
+        let before: & &u32 = r;
+        r = & &one; //~ ERROR E0501
+        sum = sum + **before;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn literal() -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut i: u32 = 0;
+    let mut sum: u32 = 0;
+    while i < 3 {
+        let before: &u32 = r;
+        r = &(i + 1); //~ ERROR E0501
+        sum = sum + *before;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn main() -> i32 {
+    let _ = literal();
+    return 0;
+}

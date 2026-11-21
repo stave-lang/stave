@@ -1,6 +1,6 @@
-//~ BORROWCHECK write-under-shared 13 12
-// A `&` of a temporary read after the next evaluation of its expression. The tracking mode
-// sees the store of the new value, not the end of the temporary: the class is the write's.
+//~ BORROWCHECK use-after-referent 13 12
+// A `&` of a temporary read after the next evaluation of its expression: the temporary of
+// the round before ended there.
 fn next(i: u32) -> u32 { return i + 1u32; }
 
 fn main() -> i32 {

@@ -51,3 +51,26 @@ fn a_few_seeds_per_class() {
         assert!(files.is_empty(), "{kind}: {files:?}\n{summary}\n{found}");
     }
 }
+
+/// `--exec` runs the interpreter leg with borrow tracking when `STAVE_INTERP_CHECK` is unset,
+/// as the batch run does: an accepted program whose unsafe code breaks the model gives its
+/// `oracle` line.
+#[test]
+fn exec_defaults_to_borrow_tracking() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = Command::new(env!("CARGO_BIN_EXE_fuzz-classes"))
+        .arg("--exec")
+        .arg(repo.join("tests/borrowcheck/two_mut.stv"))
+        .arg("--repo")
+        .arg(&repo)
+        .env_remove("STAVE_INTERP_CHECK")
+        .output()
+        .unwrap();
+    let lines = String::from_utf8_lossy(&out.stdout);
+    assert!(lines.lines().any(|l| l == "accepted"), "{lines}");
+    assert!(
+        lines.lines().any(|l| l.starts_with("oracle \"interp: borrow violation [two-exclusive]")),
+        "{lines}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -1,0 +1,19 @@
+//~ BORROWCHECK use-after-referent 17 15
+view struct Pick { best: &u32, count: usize }
+
+fn rev(a: &mut Pick from copy b, b: &mut Pick from y, y: &u32) {
+    b.best = y;
+    a.best = b.best;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut pa = Pick.{ best: &zero, count: 0 };
+    {
+        let y: u32 = 7;
+        let mut pb = Pick.{ best: &zero, count: 0 };
+        rev(&mut pa, &mut pb, &y);
+    }
+    let v: u32 = *pa.best;
+    return v as% i32;
+}
