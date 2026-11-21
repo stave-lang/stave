@@ -368,7 +368,8 @@ pub fn site_for_pc(pc: usize) -> u32 {
 // ---- signals ----
 // Installs main's alternate signal stack and the process-wide SIGSEGV/SIGBUS handler. Called
 // by runtime.start.entry before main. Returns false if a call failed.
-pub fn install() -> bool {
+pub unsafe("called once, before main and before any thread other than the start thread exists")
+fn install() -> bool {
     let st = state.get();
     let size = round_up(config.ALTSTACK, state.page_size());
     let prot = os.PROT_READ | os.PROT_WRITE;
@@ -376,11 +377,11 @@ pub fn install() -> bool {
     let p = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, size, prot, flags, -1, 0);
     if p < 0 { return false; }
     let base = p as% usize;
-    unsafe("st is runtime.state.STATE; no other thread exists yet") {
+    unsafe("st is runtime.state.STATE; no other thread exists yet (this fn's obligation)") {
         (*st).altstack = base;
         (*st).altstack_size = size;
     }
-    if !set_altstack(base, size) { return false; }
+    if !unsafe("base..base+size is the fresh mapping above, used for nothing else and never unmapped") set_altstack(base, size) { return false; }
     let none = 0usize as *mut u64;
     let h = unsafe("intrinsic: address of the compiler-emitted __stave_signal stub") signal_handler_addr() as u64;
     // The restorer is never used: the handler either exits or re-raises with the default
@@ -394,10 +395,11 @@ pub fn install() -> bool {
 
 // The calling thread's alternate signal stack (per thread; runtime.thread calls it for each
 // new thread). Returns false if the call failed.
-pub fn set_altstack(base: usize, size: usize) -> bool {
+pub unsafe("base..base+size is a mapping used only as the calling thread's signal stack, mapped while the thread runs")
+fn set_altstack(base: usize, size: usize) -> bool {
     let ss: [u64; 3] = [base as u64, 0, size as u64];
     let none = 0usize as *mut u64;
-    let r = unsafe("ss is three words; the altstack stays mapped while the thread runs") os.sigaltstack(&ss as *const [u64; 3] as *const u64, none);
+    let r = unsafe("ss is three words; the altstack is mapped while the thread runs and used for nothing else (this fn's obligation)") os.sigaltstack(&ss as *const [u64; 3] as *const u64, none);
     return r >= 0;
 }
 

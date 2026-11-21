@@ -91,7 +91,7 @@ fn entry(sp: *const usize) -> never {
     }
 
     // 2. alternate signal stack and SIGSEGV/SIGBUS handler
-    if !panic.install() { early_fail(); }
+    if !unsafe("once, before main and before any other thread exists") panic.install() { early_fail(); }
 
     // 3. main's stack: [base, base + guard) PROT_NONE, then `size` usable bytes
     let size = round_up(config.main_stack(), page);
