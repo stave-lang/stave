@@ -19,8 +19,8 @@ reference for what a program may write and what it means.
   the use: a `&self` or by-value `self` method receiver, a built-in method's receiver, a fn value
   called, the operand of `&`, an f-string hole, a by-value use of a type other than `&mut T` (a
   `&mut T` passed as `&T` counts), the scrutinee of a `match` or destructuring `let` whose type
-  holds no `&mut` outside a `&`, or the sequence of a `for` over a range, an array, a `[T]` place,
-  `&[T]`, or `&[T; N]` whose bindings hold no `&mut`. Any other use (`*t.0 = ..`, `*a[0] += ..`,
+  holds no `&mut` outside a `&`, or the sequence of a `for` over a range, an array value, `&[T]`, or
+  `&[T; N]` whose bindings hold no `&mut` (an array or `[T]` place is no source: E0219). Any other use (`*t.0 = ..`, `*a[0] += ..`,
   `w.v.push(..)` with `w.v: &mut Vec<T>`, `&mut`, a `&mut` chunk or element binding, a `for`
   over an iterator) makes it `&mut`, and so does a `&mut T` type. The thread rules (E0802) and
   the borrow checker read the same mode. Reason: a mode the thread rule and the borrow checker

@@ -25,8 +25,8 @@
 //! argument, an initializer, a returned value, a condition, an index, a field or element of a
 //! literal) where its type is not `&mut T` (a `&mut T` passed as `&T` is a read); the scrutinee
 //! of a `match` or a destructuring `let` whose type holds no `&mut` (patterns bind through
-//! peeled references); or the sequence of a `for` over a range, an array, a `[T]` place, or
-//! `&[T]` / `&[T; N]` whose bindings hold no `&mut`. A by-value use of a non-Copy place is a move
+//! peeled references); or the sequence of a `for` over a range, an array value, or `&[T]` /
+//! `&[T; N]` whose bindings hold no `&mut` (an array or `[T]` place is no source: E0219). A by-value use of a non-Copy place is a move
 //! out of the capture, E0504 in the borrow checker. Everything else (an assignment target, the
 //! operand of `&mut`, a `&mut self` receiver, a `&mut` chunk or element binding, a `for` over an
 //! iterator) mutates.
