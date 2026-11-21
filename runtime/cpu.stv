@@ -261,17 +261,17 @@ fn env(name: &str) -> usize {
     loop {
         let e = unsafe("envp is a NULL-terminated array on the initial stack, which stays mapped") *(p as *const usize);
         if e == 0 { return 0; }
-        // the entry's NUL differs from every byte of `name`, so the scan stops inside the entry
+        // a NUL byte of `name` ends the scan, so it never passes the entry's NUL
         let mut k: usize = 0;
-        while k < x.len() && unsafe("bytes e..e+k matched name, which has no NUL, so e + k is at or before the entry's NUL") at(e + k) == x[k] { k = k + 1; }
-        if k == x.len() && unsafe("bytes e..e+k matched name, which has no NUL, so e + k is at or before the entry's NUL") at(e + k) == 61u8 { return e + k + 1; }
+        while k < x.len() && x[k] != 0 && unsafe("bytes e..e+k matched non-NUL bytes of name, so e + k is at or before the entry's NUL") at(e + k) == x[k] { k = k + 1; }
+        if k == x.len() && unsafe("bytes e..e+k matched non-NUL bytes of name, so e + k is at or before the entry's NUL") at(e + k) == 61u8 { return e + k + 1; }
         p = p + 8;
     }
 }
 
 // The byte at address a of an environment string.
-unsafe("a lies inside a NUL-terminated environment string, at or before its NUL") fn at(a: usize) -> u8 {
-    return unsafe("a lies inside a NUL-terminated environment string (this fn's obligation) on the initial stack, which stays mapped") *(a as *const u8);
+unsafe("a lies inside a NUL-terminated environment string on the initial stack, at or before its NUL") fn at(a: usize) -> u8 {
+    return unsafe("a lies inside a NUL-terminated environment string on the initial stack (this fn's obligation), which stays mapped") *(a as *const u8);
 }
 
 // &str -> its UTF-8 bytes (`&str` and `&[u8]` share the (data, len) representation).
