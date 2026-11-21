@@ -1,0 +1,78 @@
+//~ CHECK-ONLY
+// A `for` over `&a` / `&mut a` borrows `a` for the loop: `&mut a` needs a mutable place (E0503:
+// a `static`, an immutable binding, `*r` of `r: &T`), and the body may not write, reassign, or
+// mutably borrow `a` (E0501), in a closure too.
+import std.thread;
+
+static TABLE: [u32; 4] = [0u32; 4];
+
+struct D {
+    id: u32,
+}
+
+fn static_mut() {
+    for v: &mut u32x4 in &mut TABLE { //~ ERROR E0503
+        *v = *v +% u32x4.splat(1);
+    }
+}
+
+fn static_mut_threads() {
+    thread.par_for(0, 100, fn(i: usize) {
+        for v: &mut u32x4 in &mut TABLE { //~ ERROR E0503
+            *v = *v +% u32x4.splat(1);
+        }
+    });
+}
+
+fn immutable_local() -> u32 {
+    let arr: [u32; 8] = [1u32; 8];
+    for v: &mut u32x4 in &mut arr { //~ ERROR E0503
+        *v = *v +% u32x4.splat(5);
+    }
+    return arr[0];
+}
+
+fn through_shared(a: &[u32; 8]) {
+    for v: &mut u32x4 in &mut *a { //~ ERROR E0503
+        *v = *v +% u32x4.splat(5);
+    }
+}
+
+fn live_shared() -> u32 {
+    let mut xs: [u32; 4] = [1u32; 4];
+    let r = &xs[1];
+    for v: &mut u32x4 in &mut xs { //~ ERROR E0501
+        *v = u32x4.splat(5u32);
+    }
+    return *r;
+}
+
+fn closure_live_shared() -> u32 {
+    let mut arr: [u32; 8] = [1u32; 8];
+    let g = fn() -> &u32 { return &arr[0]; };
+    let r = g();
+    let f = fn() { //~ ERROR E0501
+        for v: &mut u32x4 in &mut arr {
+            *v = *v +% u32x4.splat(5);
+        }
+    };
+    f();
+    return *r;
+}
+
+fn reassign_in_body() {
+    let mut arr: [D; 2] = [D.{ id: 1 }, D.{ id: 2 }];
+    for d in &arr {
+        arr = [D.{ id: 10 }, D.{ id: 20 }]; //~ ERROR E0501
+    }
+}
+
+fn store_in_body() -> u32 {
+    let z: u32 = 1;
+    let mut arr: [&u32; 2] = [&z, &z];
+    for r in &arr {
+        let y: u32 = 5;
+        arr[1] = &y; //~ ERROR E0501
+    } //~ ERROR E0501
+    return *arr[0];
+}

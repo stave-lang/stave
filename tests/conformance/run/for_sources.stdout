@@ -1,0 +1,6 @@
+got 1
+drop 1
+got 2
+drop 2
+sum 24
+iterator 6 0
