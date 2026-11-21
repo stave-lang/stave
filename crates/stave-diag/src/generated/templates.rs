@@ -2209,6 +2209,44 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0420",
+        severity: Severity::Error,
+        area: "kinds",
+        rule: "impl outside the packages of its trait and type: an inherent impl is in the package that declares its self type (a struct or enum); a trait impl is in the package of the trait or of the self type's head (a struct or enum belongs to the package that declares it; built-in types, also references, tuples, arrays, slices, raw pointers, and fn types, belong to `std`; a generic param to none); case `inherent`",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "trait", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`impl {trait} for {type}` is in neither the package of `{trait}` nor that of `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "impl in another package" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "move the impl to the package of `{trait}` or of `{type}`, or implement `{trait}` for a struct or enum of this package that holds a `{type}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "inherent",
+                message: "inherent `impl {type}` outside the package that declares `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "only the package of a struct or enum adds inherent methods to it" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "declare a trait in this package and implement it for `{type}`, or give a struct of this package a field of type `{type}` and its methods",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",

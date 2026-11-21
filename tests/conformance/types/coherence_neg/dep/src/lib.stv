@@ -1,0 +1,19 @@
+pub struct A { i: usize }
+
+pub fn mk() -> A {
+    return A.{ i: 3 };
+}
+
+pub trait Idx {
+    fn idx(&self) -> usize;
+}
+
+impl Idx for A {
+    fn idx(&self) -> usize {
+        return self.i;
+    }
+}
+
+pub trait Show {
+    fn show(&self) -> u32;
+}

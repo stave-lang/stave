@@ -1364,7 +1364,8 @@ impl<'a, 'b> Builder<'a, 'b> {
         let Some(next) = prog.strings.lookup("next") else { return (None, TypeId::NONE) };
         let w = World { prog, sigs: self.tys.sigs };
         let env = self.tys.env;
-        let Lookup::Found { m, .. } = w.lookup_method(&mut self.tys.ov, it, next, env) else {
+        let from = prog.module(self.icx.res_module()).map(|m| m.package);
+        let Lookup::Found { m, .. } = w.lookup_method(&mut self.tys.ov, it, next, env, from) else {
             return (None, TypeId::NONE);
         };
         let Some((sig, args, self_ty)) = w.method_sig(&m) else { return (None, TypeId::NONE) };

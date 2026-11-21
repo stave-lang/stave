@@ -1,0 +1,100 @@
+//~ CHECK-ONLY
+import std.vec;
+import dep;
+
+// another package's struct: no inherent methods from here
+impl dep.A { //~ ERROR E0420
+    pub fn idx(&self) -> usize {
+        return 100000;
+    }
+}
+
+// another package's trait for another package's type
+impl dep.Show for dep.A { //~ ERROR E0420
+    fn show(&self) -> u32 {
+        return 1;
+    }
+}
+
+// std's operator traits and built-in types are both std's
+impl Add for u8 { //~ ERROR E0420
+    fn add(self, rhs: Self) -> Self {
+        return self +% rhs;
+    }
+}
+
+impl Neg for u32 { //~ ERROR E0420
+    fn neg(self) -> Self {
+        return 0 -% self;
+    }
+}
+
+impl dep.Show for fn() -> u32 { //~ ERROR E0420
+    fn show(&self) -> u32 {
+        return 3;
+    }
+}
+
+impl Display for vec.Vec<u8> { //~ ERROR E0420
+    fn fmt<W: Write>(&self, w: &mut W) { }
+}
+
+impl u32 { //~ ERROR E0420
+    pub fn twice(self) -> u32 {
+        return self * 2;
+    }
+}
+
+impl dep.Show for (u8, u8) { //~ ERROR E0420
+    fn show(&self) -> u32 {
+        return 2;
+    }
+}
+
+// legal: a trait of this package for any type, a std or dependency trait for a type of this
+// package, inherent methods on a type of this package
+trait Mine {
+    fn mine(&self) -> u32;
+}
+
+impl Mine for dep.A {
+    fn mine(&self) -> u32 {
+        return 7;
+    }
+}
+
+impl Mine for u32 {
+    fn mine(&self) -> u32 {
+        return *self;
+    }
+}
+
+impl<T> Mine for [T] {
+    fn mine(&self) -> u32 {
+        return 0;
+    }
+}
+
+struct Own { n: u32 }
+
+impl Own {
+    pub fn n(&self) -> u32 {
+        return self.n;
+    }
+}
+
+impl dep.Show for Own {
+    fn show(&self) -> u32 {
+        return self.n;
+    }
+}
+
+impl Add for Own {
+    fn add(self, rhs: Self) -> Self {
+        return Own.{ n: self.n + rhs.n };
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

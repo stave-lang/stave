@@ -2017,7 +2017,8 @@ impl<'a> Ck<'a> {
         }
         let genv = self.genv();
         // trait `Self` in a trait body: methods of the trait itself
-        match self.w.lookup_method(&mut self.tys, base, name, genv) {
+        let from = self.package();
+        match self.w.lookup_method(&mut self.tys, base, name, genv, from) {
             Lookup::Found { m: MethodRef::Impl { method, impl_args, .. }, level: 0, .. } => {
                 let ga = targs.and_then(|g| {
                     let sig = self.sigs.fn_sig(method);
@@ -3198,6 +3199,11 @@ impl<'a> Ck<'a> {
     }
 
     /// `Drop.drop` itself or a method of a `Drop` impl: run only by the compiler's drop glue.
+    /// The package of the checked body (method lookup sees its impls and its dependencies').
+    fn package(&self) -> Option<crate::PackageId> {
+        self.prog.module(self.icx.res_module()).map(|m| m.package)
+    }
+
     fn is_drop_method(&self, method: DeclId) -> bool {
         let drop = self.sigs.lang.drop;
         let Some(md) = self.prog.decl(method) else { return false };
@@ -3337,7 +3343,8 @@ impl<'a> Ck<'a> {
             return self.args_only(args);
         }
         let genv = self.genv();
-        let lk = self.w.lookup_method(&mut self.tys, recv, name, genv);
+        let from = self.package();
+        let lk = self.w.lookup_method(&mut self.tys, recv, name, genv, from);
         match lk {
             Lookup::Found { m, level, recv: c } => match m {
                 MethodRef::Builtin(b) => {
@@ -3940,7 +3947,8 @@ impl<'a> Ck<'a> {
         // an iterator: `fn next(&mut self) -> Option<X>`
         if let Some(next) = self.prog.strings.lookup("next") {
             let genv = self.genv();
-            if let Lookup::Found { m, .. } = self.w.lookup_method(&mut self.tys, it, next, genv)
+            let from = self.package();
+            if let Lookup::Found { m, .. } = self.w.lookup_method(&mut self.tys, it, next, genv, from)
                 && let Some((sig, args, self_ty)) = self.w.method_sig(&m)
             {
                 let ret = self.tys.subst(sig.ret, &args, self_ty);

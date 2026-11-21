@@ -1685,7 +1685,8 @@ impl<'a> FnCx<'a> {
             self.fail(f, "no `next` method");
             return;
         };
-        let m = match w.lookup_method(&mut self.tys, it.ty, next, &[]) {
+        let from = self.g.prog.module(self.icx.res_module()).map(|m| m.package);
+        let m = match w.lookup_method(&mut self.tys, it.ty, next, &[], from) {
             crate::traits::Lookup::Found { m, .. } => m,
             _ => {
                 self.fail(f, "no `next` method");
