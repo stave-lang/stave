@@ -45,7 +45,7 @@ Read whole file before writing Stave. Assume Rust **only** where this file is si
 | default trait methods | none | Trait bodies hold signatures only: `fn f(&self) -> T;` | per-function checking |
 | overloading, truthiness, null | none | `if n != 0`, not `if n` | one meaning per name; explicit tests |
 | `mut self` param | `self`, `&self`, `&mut self` only | Rebind: `let mut s = self;` | params are immutable bindings |
-| `x @ P`, `..` rest | not in grammar | Write the full pattern; bind the value by name to reuse it | not admitted yet (simplicity) |
+| `x @ P`, `..` rest | not in grammar | Bind the value by name to reuse it. A struct pattern may leave fields out: a left-out field is an ignored part like `_` (a moving pattern drops it where it binds, §3) | not admitted yet (simplicity) |
 | `v.pop();` (value ignored) | `let _ = v.pop();` | A non-`()`, non-`never` expression statement is E0210 | an ignored `Result` is always visible |
 
 Casts and overflow operators (outside the table: they contain `|`):
