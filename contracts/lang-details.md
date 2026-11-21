@@ -106,7 +106,9 @@ when that owner ends.
   scrutinee that is a call) is a temporary of the statement. `let _ = e;` drops `e` at the end
   of the statement.
 - **Leaving early.** `return`, `break`, `continue`, and `?` drop the temporaries of the
-  statements they leave, then the locals of the scopes they leave.
+  statements they leave, then the locals of the scopes they leave. `?` also drops the operands
+  of the enclosing expressions that were already evaluated (earlier arguments, a by-value
+  receiver, earlier fields of a literal), the last evaluated first.
 
 ## §3 Must-consume
 

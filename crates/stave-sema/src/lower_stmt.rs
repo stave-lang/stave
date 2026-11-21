@@ -303,6 +303,8 @@ impl<'a> FnCx<'a> {
         for ps in self.temp_flags.values_mut() {
             ps.sort_unstable();
         }
+        let q = Term::Question as u8;
+        self.try_toks = (icx.a(root)..=icx.end_tok(root)).filter(|&t| icx.tk(t) == q).collect();
     }
 
     fn fresh_env(&mut self, params: &[Ty], ret: Ty) {

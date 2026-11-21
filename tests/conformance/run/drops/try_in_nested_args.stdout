@@ -1,0 +1,13 @@
+mk 1
+mk 2
+drop 2
+drop 1
+err 1
+mk 4
+mk 5
+drop 5
+mk 6
+drop 6
+drop 4
+ok 7
+end

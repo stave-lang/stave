@@ -476,6 +476,8 @@ pub(crate) struct FnCx<'a> {
     pub temp_flags: FxHashMap<u32, Vec<Path>>,
     /// Temporaries made so far.
     pub temp_seq: u32,
+    /// The `?` tokens of the body, sorted.
+    pub try_toks: Vec<u32>,
     pub err: Option<LowerError>,
     pub f: FnState,
     pub outs: Vec<FnOut>,
@@ -527,6 +529,7 @@ impl<'a> FnCx<'a> {
             need_flag: Vec::new(),
             temp_flags: FxHashMap::default(),
             temp_seq: 0,
+            try_toks: Vec::new(),
             err: None,
             f: FnState::new(&[], TypeId::NONE),
             outs: Vec::new(),
@@ -1101,6 +1104,37 @@ impl<'a> FnCx<'a> {
             if let Some(s) = self.f.env.st.get_mut(l) {
                 *s = Init::Gone;
             }
+        }
+    }
+
+    /// Whether a `?` is written in tokens `a..=b`.
+    pub fn try_between(&self, a: u32, b: u32) -> bool {
+        let i = self.try_toks.partition_point(|&t| t < a);
+        self.try_toks.get(i).is_some_and(|&t| t <= b)
+    }
+
+    /// Whether one of the operands `rest` may leave the fn by `?`.
+    pub fn try_in(&self, rest: &[u32]) -> bool {
+        match (rest.first(), rest.last()) {
+            (Some(&a), Some(&b)) if !self.try_toks.is_empty() => {
+                self.try_between(self.icx.a(a), self.icx.end_tok(b))
+            }
+            _ => false,
+        }
+    }
+
+    /// Operand value `v`, already evaluated, becomes a temporary until [`FnCx::release`]: a `?`
+    /// in a later operand drops it.
+    pub fn hold(&mut self, v: Operand, t: Ty, held: &mut Vec<usize>) {
+        if !t.is_none() && self.needs_drop(t) {
+            held.push(self.slot_temp_at(v, t).2);
+        }
+    }
+
+    /// The held operands were consumed.
+    pub fn release(&mut self, held: &[usize]) {
+        for &l in held {
+            self.mark_moved(l, &[]);
         }
     }
 

@@ -417,8 +417,10 @@ impl<'a> FnCx<'a> {
         };
         let icx = self.icx;
         let op = icx.tk(icx.a(opn));
-        let Some(a) = self.val(l, None) else { return E::Never };
+        let mut held = Vec::new();
+        let Some((a, _)) = self.operand_held(l, None, &[r], &mut held) else { return E::Never };
         let Some(b) = self.val(r, None) else { return E::Never };
+        self.release(&held);
         let o = if op == Term::EqEq as u8 {
             Op::Eq
         } else if op == Term::BangEq as u8 {
@@ -444,12 +446,20 @@ impl<'a> FnCx<'a> {
         let kids = self.kids(n);
         let ty = self.nty(n);
         let Some(&first) = kids.first() else { return self.fail(n, "empty") };
-        let Some(mut acc) = self.val(first, None) else { return E::Never };
+        let fe = self.expr(first, None);
+        let mut acc_t = self.e_ty(&fe);
+        let Some(mut acc) = self.operand_of(fe) else { return E::Never };
         for &c in &kids[1..] {
             let icx = self.icx;
             let optok = icx.a(c).saturating_sub(1);
             let op = icx.tk(optok);
+            let mut held = Vec::new();
+            if self.try_in(&[c]) {
+                self.hold(acc, acc_t, &mut held);
+            }
             let Some(r) = self.val(c, None) else { return E::Never };
+            self.release(&held);
+            acc_t = ty;
             match self.binop(optok, op, acc, r, ty) {
                 Some(v) => acc = v,
                 None => return E::Never,
@@ -833,11 +843,13 @@ impl<'a> FnCx<'a> {
             _ => vec![TypeId::NONE; kids.len()],
         };
         let mut vs = Vec::with_capacity(kids.len());
+        let mut held = Vec::new();
         for (k, &c) in kids.iter().enumerate() {
             let w = ets.get(k).copied().filter(|t| !t.is_none());
-            let Some(v) = self.val(c, w) else { return E::Never };
+            let Some((v, _)) = self.operand_held(c, w, &kids[k + 1..], &mut held) else { return E::Never };
             vs.push(v);
         }
+        self.release(&held);
         E::V(self.opn(Op::Make, ty, &vs), ty)
     }
 
@@ -856,10 +868,14 @@ impl<'a> FnCx<'a> {
             return E::V(self.opn(Op::Make, ty, &vs), ty);
         }
         let mut vs = Vec::with_capacity(kids.len());
-        for &c in &kids {
-            let Some(v) = self.val(c, Some(elem)) else { return E::Never };
+        let mut held = Vec::new();
+        for (k, &c) in kids.iter().enumerate() {
+            let Some((v, _)) = self.operand_held(c, Some(elem), &kids[k + 1..], &mut held) else {
+                return E::Never;
+            };
             vs.push(v);
         }
+        self.release(&held);
         E::V(self.opn(Op::Make, ty, &vs), ty)
     }
 
@@ -1503,13 +1519,38 @@ impl<'a> FnCx<'a> {
 
     // ---------- calls ----------
 
+    /// The value and type of operand `n`, one of a list evaluated left to right. When a later
+    /// operand (`rest`) may leave the fn by `?`, the value is held as a temporary, which that
+    /// exit drops; the caller releases `held` once the list is consumed.
+    fn operand_held(
+        &mut self,
+        n: u32,
+        want: Option<Ty>,
+        rest: &[u32],
+        held: &mut Vec<usize>,
+    ) -> Option<(Operand, Ty)> {
+        let e = self.expr(n, want);
+        let t = self.e_ty(&e);
+        let v = self.operand_of(e)?;
+        if self.try_in(rest) {
+            self.hold(v, t, held);
+        }
+        Some((v, t))
+    }
+
     /// Lowers call arguments against parameter types.
     fn args(&mut self, args: &[u32], params: &[Ty]) -> Option<Vec<Operand>> {
+        self.args_after(args, params, Vec::new())
+    }
+
+    /// [`FnCx::args`] after operands already evaluated and held (a by-value receiver).
+    fn args_after(&mut self, args: &[u32], params: &[Ty], mut held: Vec<usize>) -> Option<Vec<Operand>> {
         let mut out = Vec::with_capacity(args.len());
         for (k, &a) in args.iter().enumerate() {
             let w = params.get(k).copied();
-            out.push(self.val(a, w)?);
+            out.push(self.operand_held(a, w, &args[k + 1..], &mut held)?.0);
         }
+        self.release(&held);
         Some(out)
     }
 
@@ -1731,14 +1772,14 @@ impl<'a> FnCx<'a> {
         };
         let mut vs = Vec::with_capacity(args.len());
         let mut tys = Vec::with_capacity(args.len());
+        let mut held = Vec::new();
         for (k, &a) in args.iter().enumerate() {
             let w = fts.as_ref().and_then(|f| f.get(k).copied());
-            let e = self.expr(a, w);
-            let t = self.e_ty(&e);
-            let Some(v) = self.operand_of(e) else { return E::Never };
+            let Some((v, t)) = self.operand_held(a, w, &args[k + 1..], &mut held) else { return E::Never };
             vs.push(v);
             tys.push((k, t));
         }
+        self.release(&held);
         if ty.is_none() {
             ty = self.adt_type(n, adt, last, index as usize, &tys);
         }
@@ -1772,18 +1813,18 @@ impl<'a> FnCx<'a> {
             if ty.is_none() { None } else { self.adt_fields(ty).and_then(|v| v.get(vi).cloned()) };
         let mut vals: Vec<Option<Operand>> = vec![None; field_names.len()];
         let mut tys = Vec::new();
-        for &e in &exprs {
+        let mut held = Vec::new();
+        for (k, &e) in exprs.iter().enumerate() {
             let name = icx.sym(icx.a(e).saturating_sub(2));
             let Some(fi) = field_names.iter().position(|&f| f == name) else {
                 return self.fail(e, "unknown field");
             };
             let w = fts.as_ref().and_then(|f| f.get(fi).copied());
-            let ex = self.expr(e, w);
-            let t = self.e_ty(&ex);
-            let Some(v) = self.operand_of(ex) else { return E::Never };
+            let Some((v, t)) = self.operand_held(e, w, &exprs[k + 1..], &mut held) else { return E::Never };
             vals[fi] = Some(v);
             tys.push((fi, t));
         }
+        self.release(&held);
         if ty.is_none() {
             ty = self.adt_type(n, adt, last, vi, &tys);
         }
@@ -1843,8 +1884,18 @@ impl<'a> FnCx<'a> {
             Some(Target::Method { method, args: ga, adjust }) => match self.resolve_method(&method, &ga) {
                 Some(Resolved::Inst(k)) => {
                     let Some((ps, _)) = self.inst_sig(&k) else { return self.fail_at(Some(seg), "callee") };
+                    let by_value = adjust.autoref.is_none();
                     let Some(rv) = self.receiver(recv, adjust, ps.first().copied()) else { return E::Never };
-                    let Some(mut vs) = self.args(args, ps.get(1..).unwrap_or(&[])) else { return E::Never };
+                    let mut held = Vec::new();
+                    if by_value
+                        && self.try_in(args)
+                        && let Some(&t) = ps.first()
+                    {
+                        self.hold(rv, t, &mut held);
+                    }
+                    let Some(mut vs) = self.args_after(args, ps.get(1..).unwrap_or(&[]), held) else {
+                        return E::Never;
+                    };
                     vs.insert(0, rv);
                     self.call_inst(k, &vs, seg)
                 }
@@ -2006,8 +2057,10 @@ impl<'a> FnCx<'a> {
                     return self.fail_at(Some(seg), "select operands");
                 };
                 // both operands are evaluated, left to right, whatever `c` is
-                let Some(a) = self.val(an, Some(rt)) else { return E::Never };
+                let mut held = Vec::new();
+                let Some((a, _)) = self.operand_held(an, Some(rt), &[bn], &mut held) else { return E::Never };
                 let Some(b) = self.val(bn, Some(rt)) else { return E::Never };
+                self.release(&held);
                 if self.is_unit(rt) {
                     return E::Unit;
                 }
