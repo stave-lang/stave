@@ -1817,7 +1817,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0219",
         severity: Severity::Error,
         area: "types",
-        rule: "the source of a `for` loop is an array or `[T]` place (a local, param, `self`, or `static`; `*e`; a field, tuple field, element, sub-slice, or `std.soa` column; a parenthesized place): iterate `&a` or `&mut a`; case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source",
+        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`)",
         retired: false,
         located: true,
         holes: &[
@@ -1826,12 +1826,24 @@ pub(super) static ENTRIES: &[Entry] = &[
         shapes: &[
             Shape {
                 case: "",
-                message: "`for` over the place `{place}`: iterate a reference to it",
+                message: "`for` cannot iterate the array or slice `{place}` by value: iterate a reference to it",
                 labels: &[
-                    LabelTemplate { at: "primary", text: "array or slice place" },
+                    LabelTemplate { at: "primary", text: "a named array or slice, or a field or element of a value: not an array value" },
                 ],
                 fix: Some(FixTemplate {
                     description: "write `&{place}` (elements bound as `&T`, chunks by value), or `&mut {place}` to change it in place",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-binding",
+                message: "`for` cannot iterate the array or slice `{place}` by value: iterate a reference to it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "written in place by the `&mut` chunk binding" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write `&mut {place}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1844,6 +1856,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "iterate `&mut a` of a mutable array or slice place",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "shared-iter",
+                message: "`for` cannot advance the iterator behind the `&` reference `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`next` takes `&mut self`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate a `&mut` of the iterator (the loop advances it in place), or the iterator by value (moved into the loop, or copied if it is `Copy`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

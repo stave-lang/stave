@@ -147,7 +147,9 @@ and fn ABI are unchanged, and it has no effect (`without`).
 | a range `a..b` | the values | not a chunk source |
 | `&a`, `&mut a`, a `&[T]` / `&mut [T]` / `&[T; N]` value | element `i` of `*s` borrowed per iteration: `&T` / `&mut T` | the chunks of `*s`; `&mut v` needs a `&mut` source (E0503 over `&`) |
 | an array value (a temporary: a call, a literal, a const, a value `if` / `match`, a cast) | the loop's temporary, elements moved out | the temporary, read only (`&mut v`: E0219 `mut-chunk`) |
-| an iterator (any place or value with `next(&mut self)`) | a copy of it (a move if not Copy) taken at the loop head | not a chunk source |
+| an iterator value or place (`it`, `mk()`, `s.it`: a type with `next(&mut self)`) | moved into the loop (copied if Copy) at the head; the loop owns it, advances it, and drops it right after the loop on every path out (end, `break`, `return`, `?`); a place is unusable after, as after any move (E0502, E0504 behind a reference) | not a chunk source |
+| `&mut it`, `r: &mut It` (also a `&mut It` view field) | `*r` advanced in place: after the loop (also after `break`) the iterator has moved on; the loop drops nothing | not a chunk source |
+| `&it`, `r: &It` | E0219 `shared-iter` (`next` takes `&mut self`) | not a chunk source |
 | an array or `[T]` place | E0219: write `&a` / `&mut a` | E0219 |
 
 A *place* is: a local, param, `self`, or `static` (also through a module path, `m.TABLE`); `*e`;

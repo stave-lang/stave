@@ -3901,7 +3901,10 @@ impl<'a> Ck<'a> {
             // the loop would read (and write) the place while the body may change it: a
             // reference says which
             let text = icx.node_text(iter).to_string();
-            let d = mk("E0219", None, &[("place", &text)], icx.node_span(iter), &[]);
+            let mut_binding =
+                bt_pre.is_some_and(|b| matches!(self.tys.kind(b), TypeKind::Ref { mutable: true, .. }));
+            let case = if mut_binding { Some("mut-binding") } else { None };
+            let d = mk("E0219", case, &[("place", &text)], icx.node_span(iter), &[]);
             self.report(d);
         }
         let (base_elem, arr_len) = {
@@ -4039,6 +4042,13 @@ impl<'a> Ck<'a> {
             if let Lookup::Found { m, .. } = self.w.lookup_method(&mut self.tys, it, next, genv)
                 && let Some((sig, args, self_ty)) = self.w.method_sig(&m)
             {
+                if matches!(self.tys.kind(it), TypeKind::Ref { mutable: false, .. }) {
+                    // `next` takes `&mut self`: a shared reference cannot advance the iterator
+                    let text = self.icx.node_text(iter).to_string();
+                    let d =
+                        mk("E0219", Some("shared-iter"), &[("place", &text)], self.icx.node_span(iter), &[]);
+                    self.report(d);
+                }
                 let ret = self.tys.subst(sig.ret, &args, self_ty);
                 // lowering resolves `next` with the impl's args (none of its own)
                 let call_args = match &m {

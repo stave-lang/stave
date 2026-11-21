@@ -1674,11 +1674,19 @@ impl<'a> FnCx<'a> {
     }
 
     fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place) {
+        // a `&mut` iterator is advanced through the reference: the caller's iterator moves on;
         // an iterator value is moved (copied, if Copy) into a slot the loop owns, advanced
         // there, and dropped when the loop ends or is left (`break`, `return`, `?`), as the
         // checker's loop temporary is
         self.push_scope();
         let it = match self.kind(it.ty) {
+            TypeKind::Ref { mutable: true, inner } => {
+                let Some(v) = self.read(&it) else {
+                    self.pop_scope();
+                    return;
+                };
+                Place { base: Base::Mem(v, it.ty), proj: Vec::new(), ty: inner, root: None }
+            }
             _ => {
                 let t = it.ty;
                 let Some(v) = self.read(&it) else {

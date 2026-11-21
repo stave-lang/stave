@@ -187,8 +187,9 @@ touches.
 `for` sources), so no loop reads a place the body may change without a borrow saying so: the
 source is a reference (each element or chunk of `*r` is borrowed per iteration, `&mut` only
 through a `&mut` source), an array value (the loop's own temporary, which nothing else names),
-a range, or an iterator, which both the CFG and the code advance as a copy taken at the loop
-head. A reference chunk binding is a borrow of the block's chunk temporary, which is what the
+a range, or an iterator: a value is moved into a loop temporary at the head, advanced there
+and dropped right after the loop on every path out, in both the CFG and the code; a `&mut` to
+an iterator is advanced through the reference in both (a `&` to one is E0219). A reference chunk binding is a borrow of the block's chunk temporary, which is what the
 code binds, so it cannot outlive the block, and the chunk of the source stays borrowed until the
 store back.
 
