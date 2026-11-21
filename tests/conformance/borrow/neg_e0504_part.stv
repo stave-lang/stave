@@ -62,6 +62,20 @@ fn return_field(s: S) -> vec.Vec<u32> {
     return s.v; //~ ERROR E0504
 }
 
+view struct G { pub r: &mut u32, pub n: u32 }
+
+fn mut_ref_field(g: G) -> u32 {
+    let r = g.r; //~ ERROR E0504
+    *r = 1;
+    return g.n;
+}
+
+fn ok_reborrow_field(g: G) -> u32 {
+    let r = &mut *g.r;
+    *r = 1;
+    return g.n;
+}
+
 fn part_bound_twice(s: S) {
     let S.{ a: x, a: y, v, n } = s; //~ ERROR E0502
 }

@@ -164,7 +164,11 @@ fn child(p: &mut u32) -> u32 {
   element, a vector load or store its lanes, a masked form its active lanes, `fill`, `copy_from`,
   `sum` the elements they touch, `xs.len()` none. A reference the path dereferences is first
   read from its own place. A chunk loop with a `&mut` binding reads the chunk when its block is
-  entered and writes it when the block is left. Violations: M1, M2 (the examples above).
+  entered and writes it when the block is left; the binding points to a copy of the chunk that
+  ends with the block (M13). The source of a loop is never an array or `[T]` place (E0219): it
+  is a reference, whose elements or chunks are read through it per iteration, or a value (an
+  array temporary, an iterator copied at the loop head, M8 / M9). Violations: M1, M2 (the
+  examples above).
 - **M8 (copy).** A by-value use of a place whose type is Copy is a read. The words of the result
   keep their tags: two copies of a `&`, or of a Copy view, hold the same tags, and no rule tells
   them apart. A copy has no violation of its own; the copies become `Dead` together.
@@ -337,7 +341,9 @@ fn caller() -> u32 {
 }
 ```
 - **M18 (closure literal).** Evaluating a closure literal borrows (M4) each captured local once:
-  `&mut` when the body writes it or borrows it mutably, else `&`. The fn value is the code and
+  `&` when every use in the body is a read, through any dereference (contracts/lang-details.md
+  §1 Closure capture modes), else `&mut` (a write, a `&mut` borrow, a `&mut self` receiver, a
+  `&mut` chunk or element binding over it, `*t.0 = ..` with `t.0: &mut T`). The fn value is the code and
   these references, held by value like the fields of a view. It is not a temporary: values made
   by earlier evaluations of the literal keep their tags and stay usable. In the body a use of a
   captured local goes through its capture tag, and a borrow made there is a child of that tag.

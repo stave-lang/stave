@@ -12,6 +12,20 @@ reference for what a program may write and what it means.
   needs ∪ the target baseline (E0707). Reason: CPU features never change while a program runs, so
   a value made where F is proven stays callable.
 
+## §1 Closure capture modes
+
+- A closure holds a capture by `&` only when every use of it in the body (nested closures
+  included) is a read, whatever `*`, field, element, or auto-deref steps lead from the local to
+  the use: a `&self` or by-value `self` method receiver, a built-in method's receiver, a fn value
+  called, the operand of `&`, an f-string hole, a by-value use of a type other than `&mut T` (a
+  `&mut T` passed as `&T` counts), the scrutinee of a `match` or destructuring `let` whose type
+  holds no `&mut` outside a `&`, or the sequence of a `for` over a range, an array value, `&[T]`, or
+  `&[T; N]` whose bindings hold no `&mut` (an array or `[T]` place is no source: E0219). Any other use (`*t.0 = ..`, `*a[0] += ..`,
+  `w.v.push(..)` with `w.v: &mut Vec<T>`, `&mut`, a `&mut` chunk or element binding, a `for`
+  over an iterator) makes it `&mut`, and so does a `&mut T` type. The thread rules (E0802) and
+  the borrow checker read the same mode. Reason: a mode the thread rule and the borrow checker
+  derive separately can disagree, and a `&` capture written from many threads races.
+
 ## §2 Type nesting depth
 
 - A type without components (a scalar, `str`, a mask, a generic parameter) is 1 level deep. A
@@ -174,8 +188,8 @@ when that owner ends.
   `while` (each evaluation), a `match` guard, and the body of an arm of a value `match`. The
   temporaries of a `match` scrutinee and of a `for` header belong to the `match` / `for`
   statement: they live across the arms and the loop, and are dropped once after it. The
-  iterator of a `for` (an rvalue the loop calls `next` on) is not a temporary: with drop glue
-  it lives to the end of the enclosing block, like a local declared before the loop.
+  iterator value a `for` is given is moved into the loop and, with drop glue, dropped once when
+  the loop ends or is left ("`for` sources").
 - **Rvalues under patterns.** An rvalue that a pattern only reads (`let P.{ n, a: _ } = mk();`
   with `n: u32`, a scrutinee that is a call in an arm that binds nothing by value) is a
   temporary of the statement and is dropped at its end. `let _ = e;` with an rvalue `e` drops
@@ -224,6 +238,47 @@ and fn ABI are unchanged, and it has no effect (`without`).
   predicates, `par_for` / `par_for_mut` bodies, and threads.
 - Tests (conformance goldens, cross-target and CPU / GPU comparisons) count every NaN equal to
   every NaN and compare everything else bit for bit (`-0.0` is not `0.0`).
+
+## §4 `for` sources
+
+The kind is decided once, by the type checker, from the source's type as written in the
+definition (`stave_sema::loops::for_source`), and stored with the loop; the borrow checker, the
+capture analysis, and the lowering of every instance read the stored kind (and an iterator's
+resolved `next`), never the instance type. The list is closed: a type not listed is no source.
+
+| source type | element loop `for x in s` | chunk loop `for v: TxN in s` / `v: &mut TxN` |
+|---|---|---|
+| a range `a..b`, `a..=b` | the values | E0219 `not-source` |
+| `&a`, `&mut a`, a `&[T]` / `&mut [T]` / `&[T; N]` value | element `i` of `*s` borrowed per iteration: `&T` / `&mut T` | the chunks of `*s`; `&mut v` needs a `&mut` source (E0503 over `&`) |
+| an array value (a temporary: a call, a literal, a const, a value `if` / `match`, a cast) | the loop's temporary, elements moved out | the temporary, read only (`&mut v`: E0219 `mut-chunk`) |
+| an iterator value or place (`it`, `mk()`, `s.it`: a type with `next(&mut self)`) | moved into the loop (copied if Copy) at the head; the loop owns it, advances it, and drops it right after the loop on every path out (end, `break`, `return`, `?`); a place is unusable after, as after any move (E0502, E0504 behind a reference) | not a chunk source |
+| `&mut it`, `r: &mut It` (also a `&mut It` view field) | `*r` advanced in place: after the loop (also after `break`) the iterator has moved on; the loop drops nothing | not a chunk source |
+| `&it`, `r: &It` | E0219 `shared-iter` (`next` takes `&mut self`) | not a chunk source |
+| an array or `[T]` place | E0219: write `&a` / `&mut a` | E0219 |
+| a reference to a reference (`&mut &mut It`, `&&mut It`, `& &[T]`, `&mut &[T; N]`, ..) | E0219 `ref-ref`: iterate the inner reference | E0219 `ref-ref` |
+| any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, or a reference to one) | E0219 `not-source` | E0219 `not-source` |
+
+An iterator type is a struct, enum, or generic parameter with `next(&mut self) -> Option<X>`
+(else E0219 `not-source`; a `vec.Vec` or a reference to one: E0219 `as-slice`, iterate
+`.as_slice()`). A generic `T` (or `&mut T`) source is always an iterator through its bound's
+`next`: each instance runs that trait method, whatever the instance type is (`T = [u64; 2]` does
+not become an array loop, `T = &mut It` runs `impl Next for &mut It`); a `T` without such a bound
+is E0219 at the definition. Element and binding types, a sequence's length, and the resolved
+`next` come from the instance; the kind, by reference or by value, and the chunk width come from
+the definition. A source behind a view field is classified by the field's
+type (`v.s: &mut [T]`: a reference to a slice; `v.it: &mut It`: a `&mut` to an iterator).
+
+A *place* is: a local, param, `self`, or `static` (also through a module path, `m.TABLE`); `*e`;
+an expression whose last step is a field, tuple field, element `e[i]`, sub-slice `e[a..b]`, or
+`std.soa` column `ps.x` (of any base, `f().a` included); such an expression in parentheses or
+after `unsafe(..)`. Reason: a loop over a place reads (or writes) it while the body may change
+it; a reference makes the borrow visible and gives it one meaning in the checker and the code.
+
+A `&` or `&mut` chunk binding (also the first `tail masked` binding) borrows a copy of the chunk
+that lives in its block; the chunk of the sequence stays borrowed until the block is left (its end, `break`, `continue`, `return`, `?`), where a
+`&mut` copy is stored back. So the binding cannot leave its block (`return Option.Some(v)`:
+E0512; kept in an outer local: E0501). Reason: the chunk is loaded into a vector register or
+slot (a tail is partial, a chunk need not be aligned), never addressed in place.
 
 ## §4 Memory hints
 

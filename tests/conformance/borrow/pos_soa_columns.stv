@@ -32,7 +32,7 @@ fn main() -> i32 {
     shift(&mut ps);
     let k = f32x4.splat(2.0);
     let ys = &ps.y;
-    for v: &mut f32x4 in ps.x {
+    for v: &mut f32x4 in &mut ps.x {
         *v = *v * k;
     } tail masked (v, m) {
         *v = *v * k;

@@ -1,0 +1,88 @@
+//~ CHECK-ONLY
+// E0219: the source of a `for` is a range, a reference, an iterator, or an array value; an
+// array or `[T]` place is an error (iterate `&a` or `&mut a`). A `&mut` chunk binding needs a
+// `&mut` source: E0503 over `&`, E0219 `mut-chunk` over an array value.
+import std.soa;
+
+static TABLE: [u32; 4] = [0u32; 4];
+
+struct S {
+    a: [u32; 4],
+}
+
+struct P {
+    x: f32,
+}
+
+fn mk() -> [u32; 4] {
+    return [1u32; 4];
+}
+
+fn element_local() -> u32 {
+    let arr: [u32; 4] = [1u32; 4];
+    let mut s: u32 = 0;
+    for x in arr { //~ ERROR E0219
+        s = s + x;
+    }
+    return s;
+}
+
+fn chunk_deref(a: &[u32; 8]) {
+    for v: &mut u32x4 in *a { //~ ERROR E0219
+        *v = *v +% u32x4.splat(5);
+    }
+}
+
+fn chunk_static() {
+    for v: u32x4 in TABLE { //~ ERROR E0219
+    }
+}
+
+fn field_and_parens(s: &S) {
+    for x in s.a { //~ ERROR E0219
+    }
+    for x in (s.a) { //~ ERROR E0219
+    }
+}
+
+fn sub_slice(xs: &[u32]) {
+    for v: u32x4 in xs[0..4] { //~ ERROR E0219
+    } tail scalar (e) {
+    }
+}
+
+fn column(ps: &soa.Soa<P>) {
+    for v: f32x4 in ps.x { //~ ERROR E0219
+    } tail scalar (e) {
+    }
+}
+
+fn mut_chunk_over_shared(s: &[u32]) {
+    for v: &mut u32x4 in s { //~ ERROR E0503
+        *v = u32x4.splat(5u32);
+    } tail scalar (x) {
+    }
+}
+
+fn mut_chunk_over_value() {
+    for v: &mut u32x4 in mk() { //~ ERROR E0219
+        *v = u32x4.splat(5u32);
+    }
+}
+
+fn values_and_references(s: &S) -> u32 {
+    let mut t: u32 = 0;
+    for x in mk() {
+        t = t +% x;
+    }
+    for x in [1u32, 2, 3] {
+        t = t +% x;
+    }
+    for x in &s.a {
+        t = t +% *x;
+    }
+    for v: u32x4 in &TABLE {
+        t = t +% v.reduce_add_wrap();
+    }
+    return t;
+}

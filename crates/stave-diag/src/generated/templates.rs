@@ -1826,6 +1826,103 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0219",
+        severity: Severity::Error,
+        area: "types",
+        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one; a struct, enum, or generic type without `next(&mut self) -> Option<T>`, for a generic type from its bounds), and a range or iterator as a chunk source",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "place", kind: HoleKind::Place, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`for` cannot iterate the array or slice `{place}` by value: iterate a reference to it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a named array or slice, or a field or element of a value: not an array value" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write `&{place}` (elements bound as `&T`, chunks by value), or `&mut {place}` to change it in place",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "as-slice",
+                message: "`for` cannot iterate the container `{place}`: it is no iterator",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a container with a slice view" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate its slice: `{place}.as_slice()` (elements as `&T`), or `{place}.as_mut_slice()` to change them",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-binding",
+                message: "`for` cannot iterate the array or slice `{place}` by value: iterate a reference to it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "written in place by the `&mut` chunk binding" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write `&mut {place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-chunk",
+                message: "`&mut` chunk binding over the value `{place}`: only a temporary would be written",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not a `&mut` sequence" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate `&mut a` of a mutable array or slice place",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "not-source",
+                message: "`{place}` is not a `for` source",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not a range, an array value, a reference to an array or slice, or an iterator" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate a range, an array value, `&a` / `&mut a` of an array or slice, an iterator, or a `&mut` to one; a chunk loop takes an array value or a reference to an array or slice",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "ref-ref",
+                message: "`for` cannot iterate `{place}`: it is a reference to a reference",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "one reference too many" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate the inner reference itself (`r` instead of `&mut r` or `&r`, or `*r` of a `& &[T]`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "shared-iter",
+                message: "`for` cannot advance the iterator behind the `&` reference `{place}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`next` takes `&mut self`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate a `&mut` of the iterator (the loop advances it in place), or the iterator by value (moved into the loop, or copied if it is `Copy`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0300",
         severity: Severity::Error,
         area: "patterns",
@@ -2282,7 +2379,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0503",
         severity: Severity::Error,
         area: "borrow",
-        rule: "assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
+        rule: "assignment to an immutable binding or through `&` (case `shared-ref` also: a `&mut` chunk binding over a `&` source); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
         retired: false,
         located: true,
         holes: &[
@@ -2333,11 +2430,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0504",
         severity: Severity::Error,
         area: "borrow",
-        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it; case `part`: a non-Copy part (field, tuple element, payload) of a local or a temporary taken by value outside a pattern that takes the whole value apart",
+        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it; case `part`: a non-Copy part (field, tuple element, payload) of a local or a temporary taken by value outside a pattern that takes the whole value apart (its fix names the pattern; `part-reborrow`: a `&mut` part, passed on by a reborrow; `part-replace`: an owner that cannot be taken apart here, `mem.replace`)",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "owner", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "pattern", kind: HoleKind::Pattern, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
         ],
         shapes: &[
@@ -2385,7 +2483,31 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "a part moved here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "take the whole value apart with a pattern (`let S.{{ f, g }} = {owner};`, every part bound or `_`), or take the part and leave a value in its place: `mem.replace(&mut {place}, other)` (`import std.mem;`)",
+                    description: "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` or left out is dropped there)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "part-reborrow",
+                message: "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a part moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass the reference on by a reborrow: `&mut *{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "part-replace",
+                message: "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a part moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take the part out and leave a value in its place: `mem.replace(&mut {place}, other)` (`import std.mem;`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2543,7 +2665,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0512",
         severity: Severity::Error,
         area: "borrow",
-        rule: "returned value borrows a local; case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)",
+        rule: "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)",
         retired: false,
         located: true,
         holes: &[
@@ -3523,7 +3645,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0802",
         severity: Severity::Error,
         area: "threads-unsafe-ffi",
-        rule: "captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body: a capture that is not `Sync`, or a `&mut` capture",
+        rule: "captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body: a capture that is not `Sync`, or a `&mut` capture (any use that is not a proven read, through any dereference, captures by `&mut`)",
         retired: false,
         located: true,
         holes: &[

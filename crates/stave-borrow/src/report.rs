@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
-use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, Place, Proj};
+use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, PartFix, Place, Proj};
 use crate::check::{Finding, Unfit, later_use};
 use crate::loans::Flow;
 use crate::ty::Tys;
@@ -263,9 +263,17 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                     MoveOut::Static => {
                         out.extend(mk("E0504", Some("static"), &[("place", &text)], span, &[]))
                     }
-                    MoveOut::Part(owner) => {
+                    MoveOut::Part(owner, fix) => {
                         let o = place_text(body, tys, &owner);
-                        out.extend(mk("E0504", Some("part"), &[("place", &text), ("owner", &o)], span, &[]))
+                        let holes = [("place", text.as_str()), ("owner", o.as_str())];
+                        out.extend(match fix {
+                            PartFix::Reborrow => mk("E0504", Some("part-reborrow"), &holes, span, &[]),
+                            PartFix::Replace => mk("E0504", Some("part-replace"), &holes, span, &[]),
+                            PartFix::Pattern(pat) => {
+                                let holes = [holes[0], holes[1], ("pattern", pat.as_str())];
+                                mk("E0504", Some("part"), &holes, span, &[])
+                            }
+                        })
                     }
                     MoveOut::Behind => out.extend(mk("E0504", None, &[("place", &text)], span, &[])),
                 }
@@ -360,6 +368,7 @@ mod tests {
             nested: Vec::new(),
             joins: Vec::new(),
             unsupported: None,
+            internal: None,
         }
     }
 
