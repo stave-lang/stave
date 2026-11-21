@@ -20,10 +20,10 @@
 //!   program rejected without any expected code;
 //! - `mismatch`: accepted, and a native build prints or exits other than the interpreter;
 //! - `trap`: accepted, and the run trapped (no generated program traps);
-//! - `oracle`: accepted, and the interpreter leg in checking mode reported a memory error or a
-//!   borrow violation (the report text is the detail). The mode is `STAVE_INTERP_CHECK` of the
-//!   environment, `borrow` when unset (memory checks plus borrow tracking,
-//!   contracts/borrow-model.md); `1` checks memory only.
+//! - `oracle`: accepted, and the interpreter leg in checking mode reported a memory error, a
+//!   borrow violation, or a `from` clause a call did not keep (the report text is the detail).
+//!   The mode is `STAVE_INTERP_CHECK` of the environment, `borrow` when unset (memory checks
+//!   plus borrow tracking, contracts/borrow-model.md); `1` checks memory only.
 //!
 //! Each finding's program is saved under `DIR/findings/<kind>/<class>-<seed>.stv` with the
 //! reason in its head comment; `DIR/summary.txt` gets the table printed at the end,
@@ -152,30 +152,38 @@ fn main() -> ExitCode {
 
 // ---- child: one program ----
 
-/// The checking mode of the children when `STAVE_INTERP_CHECK` is unset.
+/// The checking mode of `--exec` and of the children when `STAVE_INTERP_CHECK` is unset.
 const DEFAULT_CHECK: &str = "borrow";
+
+/// The checking mode of the interpreter leg, `STAVE_INTERP_CHECK` or [`DEFAULT_CHECK`]: (memory
+/// checks, borrow tracking).
+fn check_mode() -> (bool, bool) {
+    let v = std::env::var_os("STAVE_INTERP_CHECK");
+    let v = v.as_deref().unwrap_or(std::ffi::OsStr::new(DEFAULT_CHECK));
+    (v == "1" || v == "borrow", v == "borrow")
+}
 
 /// What the interpreter leg gave.
 enum Leg {
     Ran(Ran),
-    /// A report of the checking mode: a memory error or a borrow violation.
+    /// A report of the checking mode: a memory error, a borrow violation, or a `from` clause a
+    /// call did not keep.
     Report(String),
     /// Any other interpreter error.
     Error(String),
 }
 
-/// The dynamic oracle: the interpreter leg of an accepted program, in the checking mode the
-/// environment selects (the build lowered the borrow side table when it is `borrow`,
+/// The dynamic oracle: the interpreter leg of an accepted program, in the checking mode of
+/// [`check_mode`] (the build lowered the borrow side table when it is `borrow`,
 /// [`Output::for_interp`]). A program the borrow checker accepted has no report by the
 /// language's rules unless its unsafe code breaks them.
 fn dynamic_oracle(out: &Output, main: &str, target: Triple) -> Leg {
     let Some(m) = out.for_interp() else { return Leg::Error("no module".to_string()) };
-    let limits = Limits { max_steps: 200_000_000, ..Limits::default() };
+    let (check, borrow) = check_mode();
+    let limits = Limits { max_steps: 200_000_000, check, borrow, ..Limits::default() };
     match interp::run(m, main, target, &[], &[], limits) {
         Ok(r) => Leg::Ran(r.ran),
-        Err(e) if e.starts_with("interp: memory error") || e.starts_with("interp: borrow violation") => {
-            Leg::Report(e)
-        }
+        Err(e) if e.starts_with("interp: memory error") || e.starts_with("interp: borrow ") => Leg::Report(e),
         Err(e) => Leg::Error(e),
     }
 }
@@ -203,6 +211,7 @@ fn exec_one(file: &Path, repo: &Path, release: bool) -> ExitCode {
         let mut o = Options::new(Goal::Build).threads(Some(1));
         o.target = Some(target);
         o.release = release;
+        o.tracked = check_mode().1;
         pipeline::run(file, &lib, &o)
     };
     let out = match build(false) {

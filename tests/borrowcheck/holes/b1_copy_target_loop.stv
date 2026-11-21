@@ -1,4 +1,4 @@
-//~ BORROWCHECK write-under-shared 17 16
+//~ BORROWCHECK use-after-referent 17 21
 import std.io;
 
 view struct Pick { best: &u32, count: usize }

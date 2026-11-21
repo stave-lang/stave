@@ -1,6 +1,5 @@
-//~ BORROWCHECK gap
-// A `&` of a local read after the local's block was left: the end of a block is no event of
-// the tracking mode yet.
+//~ BORROWCHECK use-after-referent 10 8
+// A `&` of a local read after the local's block was left: the local ended with the block.
 fn main() -> i32 {
     let zero: u32 = 0u32;
     let mut r: &u32 = &zero;

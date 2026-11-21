@@ -1,0 +1,22 @@
+//~ BORROWCHECK use-after-referent 19 17
+import std.io;
+
+view struct Pick { best: &u32, count: usize }
+
+fn two(a: &mut Pick from x, b: &mut Pick from copy a, x: &u32) {
+    a.best = x;
+    b.best = a.best;
+}
+
+fn main() -> i32 {
+    let zero: u32 = 0;
+    let mut pb = Pick.{ best: &zero, count: 0 };
+    {
+        let x: u32 = 7;
+        let mut pa = Pick.{ best: &zero, count: 0 };
+        two(&mut pa, &mut pb, &x);
+    }
+    let v: u32 = *pb.best;
+    io.print(f"{v}\n");
+    return 0;
+}

@@ -217,7 +217,15 @@ pub(crate) fn finalize(b: Body) -> Body {
             Some(stave_ir::BorrowMark { value: Value(v), ..*m })
         })
         .collect();
-    Body { blocks, block_params, insts, operands, consts: b.consts, cases, values, borrows }
+    let events = b
+        .events
+        .iter()
+        .filter_map(|m| {
+            let v = vmap.get(m.value.index()).copied().filter(|&v| v != u32::MAX)?;
+            Some(stave_ir::EventMark { value: Value(v), ..*m })
+        })
+        .collect();
+    Body { blocks, block_params, insts, operands, consts: b.consts, cases, values, borrows, events }
 }
 
 /// Id maps applied to a body at assembly.

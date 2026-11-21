@@ -1,0 +1,19 @@
+//~ BORROWCHECK use-after-referent 14 0
+import std.string;
+
+fn make(i: usize) -> string.String {
+    return string.String.new();
+}
+
+fn main() -> i32 {
+    let first: string.String = string.String.new();
+    let mut r: &string.String = &first;
+    let mut n: usize = 0;
+    let mut i: usize = 0;
+    while i < 3 {
+        n = n + r.len();
+        r = &make(i);
+        i = i + 1;
+    }
+    return n as% i32;
+}

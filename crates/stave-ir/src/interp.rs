@@ -20,14 +20,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
+mod signature;
 mod simd;
 
 use crate::arith::{self, IntTy};
 use crate::borrowtrack::{Ev, Kind, NO_EV, ROOT, Report, Tag, Tracker};
 use crate::host::{Host, SysResult};
 use crate::ir::{
-    Block, Body, BorrowMark, CastKind, Const, FuncId, Module, Op, Operand, PanicKind, Site, Target, Term,
-    Value,
+    Block, Body, CastKind, Const, EventKind, FuncId, Module, Op, Operand, PanicKind, Site, Target, Term,
+    Value, ValueDef,
 };
 use crate::layout::{LayoutError, Layouts, Shape};
 use crate::mem::{Fault, Memory};
@@ -218,17 +219,147 @@ struct Borrows {
     /// The tag of the 64-bit word stored at an address, with the word: the tag holds while
     /// the word is there.
     shadow: BTreeMap<u64, (u64, Tag)>,
-    /// The side table by (function, value).
-    marks: HashMap<(u32, u32), BorrowMark>,
+    /// The side table: per function, the row of each value ([`Mark`] as a byte; a function
+    /// without rows has no entries).
+    marks: Vec<Vec<u8>>,
     /// The site of the vector instruction being executed.
     at: Ev,
     /// The bytes of a value of each type that are inside an `UnsafeCell`, as sorted ranges.
     cells: HashMap<TypeId, Rc<[(u64, u64)]>>,
     report: Option<Box<Report>>,
+    /// Whether a value of each type holds a reference word.
+    refs: HashMap<TypeId, bool>,
+    /// The signature check's plan of each function called so far.
+    plans: Vec<Option<Rc<signature::Plan>>>,
+    /// The allocations of the statics.
+    static_ids: HashSet<u32>,
+    /// The first of the `from` clauses that a call did not keep (M24), and how many there were.
+    signatures: Vec<signature::SignatureReport>,
+    signature_count: usize,
+    /// The address the next store writes without an event but on its `Cell` bytes: a
+    /// constant temporary evaluated again.
+    quiet: Option<u64>,
 }
 
 fn ev(f: FuncId, inst: u32) -> Ev {
     (u64::from(f.0) + 1) << 32 | u64::from(inst)
+}
+
+/// A row of the side table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum Mark {
+    None,
+    Shared,
+    Mut,
+    Begin,
+    End,
+    Gone,
+    Repeat,
+    Env,
+    /// A borrow through a raw pointer.
+    SharedRaw,
+    MutRaw,
+    Const,
+}
+
+impl Mark {
+    const ALL: [Mark; 11] = [
+        Mark::None,
+        Mark::Shared,
+        Mark::Mut,
+        Mark::Begin,
+        Mark::End,
+        Mark::Gone,
+        Mark::Repeat,
+        Mark::Env,
+        Mark::SharedRaw,
+        Mark::MutRaw,
+        Mark::Const,
+    ];
+
+    fn of(e: EventKind) -> Mark {
+        match e {
+            EventKind::Begin => Mark::Begin,
+            EventKind::End => Mark::End,
+            EventKind::Gone => Mark::Gone,
+            EventKind::Repeat => Mark::Repeat,
+            EventKind::Env => Mark::Env,
+            EventKind::Const => Mark::Const,
+        }
+    }
+}
+
+/// Whether the borrow that instruction `i` of `body` carries is made from a raw pointer: the
+/// address it borrows is that of a place reached through one (`&*p`, `&(*p).f`, `&(*p)[k]`,
+/// a fat reference put together from one), with no load in between.
+fn from_raw(m: &Module, body: &Body, i: u32) -> bool {
+    let raw = |o: Operand| match o {
+        Operand::Value(v) => {
+            matches!(body.value_ty(v).and_then(|t| m.types.key(t)), Some(TypeKey::RawPtr { .. }))
+        }
+        _ => false,
+    };
+    let def = |o: Operand| match o {
+        Operand::Value(v) => match body.values.get(v.index()).map(|d| d.def) {
+            Some(ValueDef::Inst(k)) => Some(k),
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut cur = i;
+    for _ in 0..16 {
+        let address = matches!(
+            body.insts.op.get(cur as usize),
+            Some(
+                Op::Cast(CastKind::Exact)
+                    | Op::FieldAddr
+                    | Op::EnumFieldAddr
+                    | Op::ElemAddr
+                    | Op::SliceMake
+                    | Op::SlicePtr
+            )
+        );
+        let Some(&a) = body.args(cur).first().filter(|_| address) else { return false };
+        if raw(a) {
+            return true;
+        }
+        let Some(k) = def(a) else { return false };
+        cur = k;
+    }
+    false
+}
+
+/// The rows of a body by value.
+fn marks_of(m: &Module, body: &Body) -> Vec<u8> {
+    if body.borrows.is_empty() && body.events.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![Mark::None as u8; body.values.len()];
+    let mut set = |v: Value, m: Mark| {
+        if let Some(x) = out.get_mut(v.index()) {
+            *x = m as u8;
+        }
+    };
+    for b in &body.borrows {
+        let raw = match body.values.get(b.value.index()).map(|d| d.def) {
+            Some(ValueDef::Inst(i)) => from_raw(m, body, i),
+            _ => false,
+        };
+        set(
+            b.value,
+            match (b.mutable, raw) {
+                (true, false) => Mark::Mut,
+                (false, false) => Mark::Shared,
+                (true, true) => Mark::MutRaw,
+                (false, true) => Mark::SharedRaw,
+            },
+        );
+    }
+    for e in &body.events {
+        set(e.value, Mark::of(e.kind));
+    }
+    out
 }
 
 impl Borrows {
@@ -253,11 +384,18 @@ impl Borrows {
             self.report.get_or_insert(r);
         }
         if let Some((base, size, _)) = mem.alloc_of(id) {
-            let gone: Vec<u64> =
-                self.shadow.range(base..base.saturating_add(size)).map(|(&a, _)| a).collect();
-            for a in gone {
-                self.shadow.remove(&a);
-            }
+            self.forget(base, size);
+        }
+    }
+
+    /// No word of the `size` bytes at `base` holds a tag any more.
+    fn forget(&mut self, base: u64, size: u64) {
+        if self.shadow.is_empty() {
+            return;
+        }
+        let gone: Vec<u64> = self.shadow.range(base..base.saturating_add(size)).map(|(&a, _)| a).collect();
+        for a in gone {
+            self.shadow.remove(&a);
         }
     }
 
@@ -382,6 +520,8 @@ struct Frame {
     dest: Option<Value>,
     /// Borrow tracking: the tags the call protects (M23).
     guards: Vec<Tag>,
+    /// Borrow tracking: what the signature check keeps of the entry (M24).
+    sig: Option<Box<signature::Entry>>,
 }
 
 enum Step {
@@ -423,6 +563,10 @@ struct AllocFns {
 
 /// An aggregate being loaded: its parts (type, address), the next part, the values so far.
 type Open = (Vec<(TypeId, u64)>, usize, Vec<Val>);
+
+/// A part of an aggregate a reborrow walk has still to do: its type (`None`: kept as it is)
+/// and value.
+type Part = (Option<TypeId>, Val);
 
 /// One level of a load: a value, or an aggregate's parts and the values before them.
 enum Loaded {
@@ -480,10 +624,7 @@ impl<'m, H: Host> Interp<'m, H> {
             })
         });
         let bt = (cfg.check && cfg.borrow).then(|| {
-            let marks = m.funcs.iter().enumerate().flat_map(|(f, func)| {
-                let marks = func.body.as_ref().map_or(&[][..], |b| &b.borrows);
-                marks.iter().map(move |b| ((f as u32, b.value.0), *b))
-            });
+            let marks = m.funcs.iter().map(|f| f.body.as_ref().map_or(Vec::new(), |b| marks_of(m, b)));
             Box::new(Borrows {
                 tracker: Tracker::new(),
                 shadow: BTreeMap::new(),
@@ -491,6 +632,12 @@ impl<'m, H: Host> Interp<'m, H> {
                 at: NO_EV,
                 cells: HashMap::new(),
                 report: None,
+                refs: HashMap::new(),
+                plans: vec![None; m.funcs.len()],
+                static_ids: HashSet::new(),
+                signatures: Vec::new(),
+                signature_count: 0,
+                quiet: None,
             })
         });
         let strs = m.strings.iter().map(|s| mem.add_data(s)).collect();
@@ -504,7 +651,7 @@ impl<'m, H: Host> Interp<'m, H> {
             mem.write(a, &st.init[..n]).map_err(|_| oom())?;
             statics.push(a);
         }
-        Ok(Interp {
+        let mut it = Interp {
             m,
             cls,
             pointee,
@@ -518,7 +665,9 @@ impl<'m, H: Host> Interp<'m, H> {
             scratch: Vec::new(),
             alloc_fns,
             bt,
-        })
+        };
+        it.freeze_statics()?;
+        Ok(it)
     }
 
     /// The instruction executing in each frame, innermost first, at most [`TRACE_DEPTH`].
@@ -627,14 +776,80 @@ impl<'m, H: Host> Interp<'m, H> {
             }
             let at = self.trace(frames);
             if let Some(bt) = &mut self.bt {
-                // the new block takes the old bytes with their tags
+                // the new block takes the old bytes with their tags, and the places that were
+                // moved out of stay moved out
                 bt.copied(q, p, old.min(new));
+                let empty = self.mem.alloc_span(p).map_or(Vec::new(), |(id, _, _)| bt.tracker.moved(id));
+                if !empty.is_empty()
+                    && new != 0
+                    && let Some((id, _)) = bt.locate(&self.mem, q)
+                {
+                    bt.tracker.set_moved(id, &empty);
+                }
             }
             self.end_block(p, &at);
             self.mem.heap_free(p, at);
             return Some(Ok(Val::S(q)));
         }
         None
+    }
+
+    /// Borrow tracking: the root of each `static` that is not `mut` is `Frozen`, and `Cell` on
+    /// the bytes its type puts inside an `UnsafeCell`.
+    fn freeze_statics(&mut self) -> R<()> {
+        if self.bt.is_none() {
+            return Ok(());
+        }
+        let m = self.m;
+        for (k, st) in m.statics.iter().enumerate() {
+            let Some((id, _, size)) = self.statics.get(k).and_then(|&a| self.mem.alloc_span(a)) else {
+                continue;
+            };
+            if let Some(bt) = &mut self.bt {
+                bt.static_ids.insert(id);
+            }
+            if m.frozen.get(k) != Some(&true) {
+                continue;
+            }
+            let cells = self.cells(st.ty)?;
+            if let Some(bt) = &mut self.bt {
+                bt.tracker.begin_static(id, size, &cells, NO_EV);
+            }
+        }
+        Ok(())
+    }
+
+    /// M18: the fn value `out` of a closure literal, with an environment of its own: a copy,
+    /// in a slot of the current frame, of the one `fn.make` instruction `i` names, with the
+    /// capture references it holds. Without stack left the fn value keeps the environment of
+    /// its literal.
+    fn own_env(&mut self, body: &Body, i: u32, out: Val) -> R<Val> {
+        let Val::Pair(code, env) = out else { return Ok(out) };
+        let t = match body.args(i).get(1) {
+            Some(&Operand::Value(e)) => body.value_ty(e).and_then(|t| self.pointee.get(t.index()).copied()),
+            _ => None,
+        };
+        let Some(t) = t.flatten() else { return Ok(out) };
+        let (size, align) = {
+            let l = self.layout(t)?;
+            (l.size, l.align)
+        };
+        if size == 0 {
+            return Ok(out);
+        }
+        let Some(copy) = self.mem.stack_alloc(size, align) else { return Ok(out) };
+        if self.mem.copy(copy, env, size).is_err() {
+            let _ = self.mem.take_report();
+            return Ok(out);
+        }
+        if let Some(bt) = &mut self.bt {
+            let held: Vec<_> =
+                bt.shadow.range(env..env.saturating_add(size)).map(|(&a, &w)| (a, w)).collect();
+            for (a, w) in held {
+                bt.shadow.insert(copy + (a - env), w);
+            }
+        }
+        Ok(Val::Pair(code, copy))
     }
 
     /// Borrow tracking: the allocation at `addr` ends (M3): every tag of it is `Dead`.
@@ -699,39 +914,31 @@ impl<'m, H: Host> Interp<'m, H> {
 
     /// The tags of the reference words of `v`, a value of type `t`, found by the type: of an
     /// enum the live variant; not behind a pointer, not in a fn value.
-    fn ref_tags(&self, t: TypeId, v: &Val, out: &mut Vec<Tag>, depth: usize) -> R<()> {
-        if depth > MAX_TYPE_DEPTH {
-            return Err(InterpError::Unsupported("type nesting too deep".into()));
-        }
-        match self.m.types.key(t) {
-            Some(TypeKey::Ref { .. }) => {
-                if let Some((_, tag)) = v.word().filter(|w| w.1 != ROOT) {
-                    out.push(tag);
+    fn ref_tags(&self, t: TypeId, v: &Val, out: &mut Vec<Tag>) -> R<()> {
+        // a list, not recursion: a value may nest as deep as the type table allows
+        let mut work: Vec<(TypeId, &Val)> = vec![(t, v)];
+        while let Some((t, v)) = work.pop() {
+            match self.m.types.key(t) {
+                Some(TypeKey::Ref { .. }) => {
+                    if let Some((_, tag)) = v.word().filter(|w| w.1 != ROOT) {
+                        out.push(tag);
+                    }
+                    continue;
                 }
-                return Ok(());
+                Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
+                _ => continue,
             }
-            Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
-            _ => return Ok(()),
-        }
-        let Val::Agg(vs) = v else { return Ok(()) };
-        match &self.layout(t)?.shape {
-            Shape::Fields(fs) => {
-                for (&(_, ft), fv) in fs.iter().zip(vs.iter()) {
-                    self.ref_tags(ft, fv, out, depth + 1)?;
+            let Val::Agg(vs) = v else { continue };
+            match &self.layout(t)?.shape {
+                Shape::Fields(fs) => work.extend(fs.iter().zip(vs.iter()).map(|(f, fv)| (f.1, fv))),
+                Shape::Array { elem, .. } => work.extend(vs.iter().map(|fv| (*elem, fv))),
+                Shape::Enum(vars) => {
+                    let live = vs.first().and_then(Val::bits).and_then(|k| vars.get(k as usize));
+                    let fields = live.map_or(&[][..], |f| f.as_slice());
+                    work.extend(fields.iter().zip(vs.iter().skip(1)).map(|(f, fv)| (f.1, fv)));
                 }
+                Shape::Scalar | Shape::Fat | Shape::Bytes => {}
             }
-            Shape::Array { elem, .. } => {
-                for fv in vs.iter() {
-                    self.ref_tags(*elem, fv, out, depth + 1)?;
-                }
-            }
-            Shape::Enum(vars) => {
-                let live = vs.first().and_then(Val::bits).and_then(|k| vars.get(k as usize));
-                for (&(_, ft), fv) in live.into_iter().flatten().zip(vs.iter().skip(1)) {
-                    self.ref_tags(ft, fv, out, depth + 1)?;
-                }
-            }
-            Shape::Scalar | Shape::Fat | Shape::Bytes => {}
         }
         Ok(())
     }
@@ -748,7 +955,7 @@ impl<'m, H: Host> Interp<'m, H> {
         let mut guards = Vec::new();
         if self.bt.is_some() {
             for (&t, a) in func.params.iter().zip(&args) {
-                self.ref_tags(t, a, &mut guards, 0)?;
+                self.ref_tags(t, a, &mut guards)?;
             }
         }
         if let Some(bt) = &mut self.bt {
@@ -756,6 +963,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 bt.tracker.protect(g, at);
             }
         }
+        let sig = if self.bt.is_some() { self.signature_entry(f, &args) } else { None };
         let mut regs = vec![Val::S(0); body.values.len()];
         for (p, a) in body.params(Block(0)).iter().zip(args) {
             if let Some(r) = regs.get_mut(p.index()) {
@@ -763,7 +971,7 @@ impl<'m, H: Host> Interp<'m, H> {
             }
         }
         let mark = self.mem.stack_mark();
-        frames.push(Frame { func: f, regs, block: 0, pc: 0, mark, dest: None, guards });
+        frames.push(Frame { func: f, regs, block: 0, pc: 0, mark, dest: None, guards, sig });
         Ok(())
     }
 
@@ -825,7 +1033,11 @@ impl<'m, H: Host> Interp<'m, H> {
                             Some(o) => Some(self.eval(body, &fr.regs, o)?),
                             None => None,
                         };
+                        let at = fr.sig.is_some().then(|| self.trace(&frames));
                         let done = frames.pop().ok_or(malformed("frame"))?;
+                        if let (Some(e), Some(at)) = (&done.sig, &at) {
+                            self.signature_return(fid, e, v.as_ref(), at);
+                        }
                         if let Some(bt) = &mut self.bt {
                             for &g in &done.guards {
                                 bt.tracker.unprotect(g);
@@ -1141,53 +1353,59 @@ impl<'m, H: Host> Interp<'m, H> {
     /// The bytes of a value of type `t` that are inside an `UnsafeCell` (M21): of an enum with
     /// such a payload, every byte.
     fn cells(&mut self, t: TypeId) -> R<Rc<[(u64, u64)]>> {
-        if let Some(c) = self.bt.as_ref().and_then(|bt| bt.cells.get(&t)) {
-            return Ok(c.clone());
-        }
-        let mut out = Vec::new();
-        self.cells_into(t, 0, &mut out, 0)?;
-        let out: Rc<[(u64, u64)]> = out.into();
-        if let Some(bt) = &mut self.bt {
-            bt.cells.insert(t, out.clone());
-        }
-        Ok(out)
-    }
-
-    fn cells_into(&self, t: TypeId, base: u64, out: &mut Vec<(u64, u64)>, depth: usize) -> R<()> {
-        if depth > MAX_TYPE_DEPTH {
-            return Err(InterpError::Unsupported("type nesting too deep".into()));
-        }
-        let l = self.layout(t)?;
-        let whole = |out: &mut Vec<(u64, u64)>| push_range(out, base, base.saturating_add(l.size));
-        if let Some(TypeKey::Adt { def, .. }) = self.m.types.key(t)
-            && Some(*def) == self.m.cell
-        {
-            whole(out);
-            return Ok(());
-        }
-        match &l.shape {
-            Shape::Fields(fs) => {
-                for &(off, ft) in fs {
-                    self.cells_into(ft, base.saturating_add(off), out, depth + 1)?;
-                }
+        // Each type after the types of its parts, with a list of the types still open instead
+        // of recursion: a type may nest as deep as the type table allows.
+        let mut open = vec![t];
+        while let Some(&x) = open.last() {
+            let known = |t: &TypeId| self.bt.as_ref().is_some_and(|bt| bt.cells.contains_key(t));
+            if known(&x) {
+                open.pop();
+                continue;
             }
-            Shape::Array { elem, stride, len } => {
-                let mut one = Vec::new();
-                self.cells_into(*elem, 0, &mut one, depth + 1)?;
-                repeat_ranges(out, &one, base, *stride, *len);
+            let l = self.layout(x)?;
+            let cell =
+                matches!(self.m.types.key(x), Some(TypeKey::Adt { def, .. }) if Some(*def) == self.m.cell);
+            let parts: Vec<TypeId> = match &l.shape {
+                _ if cell => Vec::new(),
+                Shape::Fields(fs) => fs.iter().map(|f| f.1).collect(),
+                Shape::Array { elem, .. } => vec![*elem],
+                Shape::Enum(vs) => vs.iter().flatten().map(|f| f.1).collect(),
+                Shape::Scalar | Shape::Fat | Shape::Bytes => Vec::new(),
+            };
+            let before = open.len();
+            open.extend(parts.iter().filter(|p| !known(p)));
+            if open.len() > before {
+                continue;
             }
-            Shape::Enum(vs) => {
-                let mut inner = Vec::new();
-                for &(_, ft) in vs.iter().flatten() {
-                    self.cells_into(ft, 0, &mut inner, depth + 1)?;
+            let of = |t: &TypeId| self.bt.as_ref().and_then(|bt| bt.cells.get(t)).cloned();
+            let mut out = Vec::new();
+            match &l.shape {
+                _ if cell => push_range(&mut out, 0, l.size),
+                Shape::Fields(fs) => {
+                    for (off, ft) in fs {
+                        for &(a, b) in of(ft).iter().flat_map(|c| c.iter()) {
+                            push_range(&mut out, off.saturating_add(a), off.saturating_add(b));
+                        }
+                    }
                 }
-                if !inner.is_empty() {
-                    whole(out);
+                Shape::Array { elem, stride, len } => {
+                    let one = of(elem).unwrap_or_else(|| Rc::from(Vec::new()));
+                    repeat_ranges(&mut out, &one, 0, *stride, *len);
                 }
+                Shape::Enum(_) => {
+                    if parts.iter().any(|p| of(p).is_some_and(|c| !c.is_empty())) {
+                        push_range(&mut out, 0, l.size);
+                    }
+                }
+                Shape::Scalar | Shape::Fat | Shape::Bytes => {}
             }
-            Shape::Scalar | Shape::Fat | Shape::Bytes => {}
+            if let Some(bt) = &mut self.bt {
+                bt.cells.insert(x, out.into());
+            }
+            open.pop();
         }
-        Ok(())
+        let none = || Rc::from(Vec::new());
+        Ok(self.bt.as_ref().and_then(|bt| bt.cells.get(&t)).cloned().unwrap_or_else(none))
     }
 
     /// The tag of the word an operand holds.
@@ -1324,14 +1542,68 @@ impl<'m, H: Host> Interp<'m, H> {
             _ => None,
         };
         let out = carried.unwrap_or(out);
-        let Some(&mark) = res.and_then(|v| bt.marks.get(&(f.0, v.0))) else { return Ok(out) };
-        let Some(rt) = res.and_then(|v| body.value_ty(v)) else { return Ok(out) };
-        self.borrow_word(rt, out, mark.mutable, ev(f, i))
+        let Some(res) = res else { return Ok(out) };
+        let code = bt.marks.get(f.index()).and_then(|m| m.get(res.index())).copied().unwrap_or(0);
+        if code == Mark::None as u8 {
+            return Ok(out);
+        }
+        let Some(rt) = body.value_ty(res) else { return Ok(out) };
+        let at = ev(f, i);
+        match Mark::ALL.get(code as usize).copied().unwrap_or(Mark::None) {
+            Mark::None => Ok(out),
+            Mark::Env => self.own_env(body, i, out),
+            Mark::Shared => self.borrow_word(rt, out, false, false, at),
+            Mark::Mut => self.borrow_word(rt, out, true, false, at),
+            Mark::SharedRaw => self.borrow_word(rt, out, false, true, at),
+            Mark::MutRaw => self.borrow_word(rt, out, true, true, at),
+            Mark::Repeat => Err(self.violation(Tracker::repeat(at))),
+            m => {
+                self.place_event(m, rt, &out, at)?;
+                Ok(out)
+            }
+        }
+    }
+
+    /// An event of the side table on the place the pointer `v` of type `pt` names: a local or
+    /// temporary begins or ends in its slot (M13, M14), or the value leaves the place (M9).
+    fn place_event(&mut self, m: Mark, pt: TypeId, v: &Val, at: Ev) -> R<()> {
+        let Some((addr, tag)) = v.word() else { return Ok(()) };
+        let size = match self.pointee.get(pt.index()).copied().flatten() {
+            Some(t) if m == Mark::Gone => self.layout(t)?.size,
+            _ => 0,
+        };
+        let Some(bt) = &mut self.bt else { return Ok(()) };
+        let r = match m {
+            Mark::Begin => {
+                let Some((id, base, len)) = self.mem.alloc_span(addr) else { return Ok(()) };
+                bt.forget(base, len);
+                bt.tracker.restart(id, at)
+            }
+            Mark::End => {
+                let Some((id, base, len)) = self.mem.alloc_span(addr) else { return Ok(()) };
+                bt.forget(base, len);
+                bt.tracker.end_alloc(id, at)
+            }
+            Mark::Const => {
+                // static data from its first evaluation on: an evaluation after it writes only
+                // its `Cell` bytes (the store that follows)
+                let Some((id, _, _)) = self.mem.alloc_span(addr) else { return Ok(()) };
+                if !bt.static_ids.insert(id) {
+                    bt.quiet = Some(addr);
+                }
+                Ok(())
+            }
+            _ => {
+                let Some((id, off)) = bt.locate(&self.mem, addr) else { return Ok(()) };
+                bt.tracker.gone(id, tag, off, off.saturating_add(size), at)
+            }
+        };
+        r.map_err(|r| self.violation(r))
     }
 
     /// M4: the reference `v` of type `rt` with a new tag, a child of the tag it carries, for
     /// the place its address names: the pointee of `rt`, of a fat reference its elements.
-    fn borrow_word(&mut self, rt: TypeId, v: Val, mutable: bool, at: Ev) -> R<Val> {
+    fn borrow_word(&mut self, rt: TypeId, v: Val, mutable: bool, raw: bool, at: Ev) -> R<Val> {
         let Some((addr, parent)) = v.word() else { return Ok(v) };
         // the place: `n` values of type `elem` (no type: bytes)
         let inner = self.pointee.get(rt.index()).copied().flatten();
@@ -1358,44 +1630,79 @@ impl<'m, H: Host> Interp<'m, H> {
         let kind = if mutable { Kind::Mut } else { Kind::Shared };
         let bytes = off..off.saturating_add(n.saturating_mul(unit));
         match bt.tracker.borrow(id, parent, kind, bytes, &cells, at) {
-            Ok(tag) => Ok(match v {
-                Val::Pair(a, n) | Val::PairT(a, n, _) => Val::PairT(a, n, tag),
-                _ => Val::T(addr, tag),
-            }),
+            Ok(tag) => {
+                if raw {
+                    bt.tracker.mark_raw(tag);
+                }
+                Ok(match v {
+                    Val::Pair(a, n) | Val::PairT(a, n, _) => Val::PairT(a, n, tag),
+                    _ => Val::T(addr, tag),
+                })
+            }
             Err(r) => Err(self.violation(r)),
         }
     }
 
     /// M20: a value of type `t` read through a raw pointer, with a new tag for each reference
     /// in it (found by the type: of an enum the live variant), a child of the tag stored there.
-    fn reborrow_refs(&mut self, t: TypeId, v: Val, at: Ev, depth: usize) -> R<Val> {
-        if depth > MAX_TYPE_DEPTH {
-            return Err(InterpError::Unsupported("type nesting too deep".into()));
+    /// The value is walked with a list, not by recursion: it may nest as deep as the type table
+    /// allows, deeper than a small native stack holds frames.
+    fn reborrow_refs(&mut self, t: TypeId, v: Val, at: Ev) -> R<Val> {
+        // per open aggregate: its parts still to do (`None`: a part kept as it is), and the
+        // values done
+        let mut stack: Vec<(std::vec::IntoIter<Part>, Vec<Val>)> = Vec::new();
+        let mut todo = Some((t, v));
+        loop {
+            let mut done = None;
+            if let Some((t, v)) = todo.take() {
+                if stack.len() > MAX_TYPE_DEPTH {
+                    return Err(InterpError::Unsupported("type nesting too deep".into()));
+                }
+                match self.reborrow_one(t, v, at)? {
+                    Ok(v) => done = Some(v),
+                    Err(parts) => {
+                        let n = parts.len();
+                        stack.push((parts.into_iter(), Vec::with_capacity(n)));
+                    }
+                }
+            }
+            if done.is_none() {
+                let Some(top) = stack.last_mut() else { return Err(malformed("reborrow")) };
+                match top.0.next() {
+                    Some((Some(pt), pv)) => todo = Some((pt, pv)),
+                    Some((None, pv)) => top.1.push(pv),
+                    None => done = stack.pop().map(|(_, out)| Val::agg(out)),
+                }
+            }
+            if let Some(v) = done {
+                match stack.last_mut() {
+                    Some(top) => top.1.push(v),
+                    None => return Ok(v),
+                }
+            }
         }
+    }
+
+    /// One level of [`Interp::reborrow_refs`]: the value done (a reference with its new tag, a
+    /// value that holds none), or the parts of an aggregate with their types.
+    fn reborrow_one(&mut self, t: TypeId, v: Val, at: Ev) -> R<Result<Val, Vec<Part>>> {
         let types = &self.m.types;
         match types.key(t) {
-            Some(&TypeKey::Ref { mutable, .. }) => return self.borrow_word(t, v, mutable, at),
+            Some(&TypeKey::Ref { mutable, .. }) => return self.borrow_word(t, v, mutable, true, at).map(Ok),
             Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
-            _ => return Ok(v),
+            _ => return Ok(Ok(v)),
         }
-        let Val::Agg(vs) = &v else { return Ok(v) };
-        let parts: Vec<Option<TypeId>> = match &self.layout(t)?.shape {
+        let Val::Agg(vs) = &v else { return Ok(Ok(v)) };
+        let tys: Vec<Option<TypeId>> = match &self.layout(t)?.shape {
             Shape::Fields(fs) => fs.iter().map(|f| Some(f.1)).collect(),
             Shape::Array { elem, .. } => vec![Some(*elem); vs.len()],
             Shape::Enum(vars) => {
                 let live = vs.first().and_then(Val::bits).and_then(|k| vars.get(k as usize));
                 std::iter::once(None).chain(live.into_iter().flatten().map(|f| Some(f.1))).collect()
             }
-            Shape::Scalar | Shape::Fat | Shape::Bytes => return Ok(v),
+            Shape::Scalar | Shape::Fat | Shape::Bytes => return Ok(Ok(v)),
         };
-        let mut out = Vec::with_capacity(vs.len());
-        for (k, fv) in vs.iter().enumerate() {
-            out.push(match parts.get(k).copied().flatten() {
-                Some(ft) => self.reborrow_refs(ft, fv.clone(), at, depth + 1)?,
-                None => fv.clone(),
-            });
-        }
-        Ok(Val::agg(out))
+        Ok(Err(vs.iter().enumerate().map(|(k, fv)| (tys.get(k).copied().flatten(), fv.clone())).collect()))
     }
 
     fn set(regs: &mut [Val], body: &Body, i: u32, v: Val) {
@@ -1626,7 +1933,7 @@ impl<'m, H: Host> Interp<'m, H> {
                     }
                     _ => false,
                 };
-                if self.bt.is_some() && raw(arg(0)?) { self.reborrow_refs(t, v, ev(fid, i), 0)? } else { v }
+                if self.bt.is_some() && raw(arg(0)?) { self.reborrow_refs(t, v, ev(fid, i))? } else { v }
             }
             // hints: no effect on the program's state
             Op::Prefetch(_) | Op::FenceStream => return Ok(Step::Next),
@@ -1641,9 +1948,16 @@ impl<'m, H: Host> Interp<'m, H> {
                     .ok_or(malformed("store type"))?;
                 let a = s!(0);
                 let v = self.eval(body, regs, arg(1)?)?;
-                if self.bt.is_some() {
+                let quiet = self.bt.as_mut().and_then(|bt| bt.quiet.take()) == Some(a);
+                if self.bt.is_some() && !quiet {
                     let n = self.layout(t)?.size;
                     self.track(Self::tag_of(regs, p), a, n, true, fid, i)?;
+                } else if quiet {
+                    // a constant temporary evaluated again: its bytes outside an `UnsafeCell`
+                    // hold the value already; its `Cell` bytes are written back to it
+                    for &(lo, hi) in self.cells(t)?.iter() {
+                        self.track(Self::tag_of(regs, p), a.wrapping_add(lo), hi - lo, true, fid, i)?;
+                    }
                 }
                 self.store_val(t, a, &v, 0, fid, site)?;
                 return Ok(Step::Next);

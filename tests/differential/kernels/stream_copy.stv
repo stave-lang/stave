@@ -15,7 +15,7 @@ fn head_len<T>(s: &mut [T]) -> usize {
 
 // `s` as a slice aligned to 16 bytes.
 fn align16<T>(s: &mut [T]) -> &mut [T align 16] from s {
-    let parts: [usize; 2] = [mem.slice_ptr(s) as usize, s.len()];
+    let parts: [usize; 2] = [mem.slice_ptr_mut(s) as usize, s.len()];
     let q = &parts as *const [usize; 2] as *const &mut [T align 16];
     return unsafe("the caller starts s at a 16-byte boundary; the view is s itself, lent while it lives") q.read();
 }
