@@ -1,6 +1,6 @@
 //~ STDOUT for_iter_drop.stdout
 //~ EXIT 0
-// The loop owns the iterator value it is given (a moved local, a field, a call result): it is
+// The loop owns the iterator value it is given (a moved local, a call result): it is
 // dropped exactly once, right after the loop, on every way out (the end, `break`, `continue` to
 // the end, `return`, `?`). An iterator holding a `MutexGuard` releases the lock there.
 import std.io;
@@ -91,10 +91,10 @@ fn main() -> i32 {
     let r = q(4);
     io.print(f"after 4\n");
     let st = S.{ it: mk(5), k: 9 };
-    for x in st.it {
+    let S.{ it: it5, k } = st;
+    for x in it5 {
         s = s + x;
     }
-    let k = st.k;
     io.print(f"after 5 {k}\n");
     let m = sync.Mutex::<u32, 1>.new(5);
     for x in Held.{ g: m.lock(), i: 0 } {

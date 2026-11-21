@@ -65,7 +65,7 @@ fn id(v: vec.Vec<u32>) -> vec.Vec<u32> { return v; }
 
 fn for_pattern(ws: [W; 2]) -> usize {
     let mut n: usize = 0;
-    for W.{ v, n: k } in ws { //~ ERROR E0504
+    for W.{ v, n: k } in own_w(ws) { //~ ERROR E0504
         n = n + v.len();
     }
     return n;
@@ -73,7 +73,7 @@ fn for_pattern(ws: [W; 2]) -> usize {
 
 fn for_payload(es: [E; 1]) -> u32 {
     let mut n: u32 = 0;
-    for e in es {
+    for e in own_e(es) {
         match e {
             E.A(v) => { n = n + 1; } //~ ERROR E0504
             E.B => { }
@@ -84,7 +84,7 @@ fn for_payload(es: [E; 1]) -> u32 {
 
 fn ok_for_whole(ws: [W; 2]) -> u32 {
     let mut n: u32 = 0;
-    for w in ws {
+    for w in own_w(ws) {
         n = n + w.n;
     }
     return n;
@@ -111,3 +111,8 @@ fn ok_borrow(w: &W) -> usize {
 fn main() -> i32 {
     return 0;
 }
+
+// An owned array is given to a `for` as a value, not as a place.
+fn own_w(ws: [W; 2]) -> [W; 2] { return ws; }
+
+fn own_e(es: [E; 1]) -> [E; 1] { return es; }
