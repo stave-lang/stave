@@ -1,0 +1,30 @@
+//~ BORROWCHECK write-under-shared 17 28
+// The bounds pass reads the `len` of a `&soa.Soa` param as one value for the whole call: a write
+// to it while the call runs is undefined behaviour, and the tracking interpreter reports it.
+import std.soa;
+
+struct P {
+    pub x: u32,
+}
+
+impl Copy for P {}
+
+fn f(ps: &soa.Soa<P>, raw: *mut soa.Soa<P>) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..ps.len() {
+        if i == 1 {
+            let lp = ((raw as usize) + 8) as *mut usize;
+            unsafe("deliberate: lp points to the len field of the referent of ps") { *lp = 1; }
+        }
+        s = s + ps.x[i];
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let mut ps = soa.Soa::<P>.new();
+    for i in 0u32..4 { ps.push(P.{ x: i }); }
+    let raw = &mut ps as *mut soa.Soa<P>;
+    let s = f(&ps, raw);
+    return if s == 0 then 1 else 0;
+}
