@@ -889,7 +889,9 @@ impl<'a> World<'a> {
                 let ok = itr.args.len() == tr.args.len()
                     && itr.args.iter().zip(&tr.args).all(|(a, b)| match (a, b) {
                         (GArg::Type(x), GArg::Type(y)) => cx.subst(*x, &args, Some(t)) == *y,
-                        (GArg::Const(x), GArg::Const(y)) => x == y,
+                        (GArg::Const(x), GArg::Const(y)) => {
+                            crate::mono::subst_garg(cx, GArg::Const(*x), &args) == GArg::Const(*y)
+                        }
                         _ => false,
                     });
                 if ok {
@@ -1015,14 +1017,7 @@ impl<'a> World<'a> {
             for b in &g.bounds {
                 let b2 = TraitRef {
                     trait_decl: b.trait_decl,
-                    args: b
-                        .args
-                        .iter()
-                        .map(|x| match x {
-                            GArg::Type(t) => GArg::Type(cx.subst(*t, &args, None)),
-                            c => *c,
-                        })
-                        .collect(),
+                    args: b.args.iter().map(|&x| crate::mono::subst_garg(cx, x, &args)).collect(),
                 };
                 if !self.implements_q(cx, a, &b2, env, depth + 1, q) {
                     return None;

@@ -2511,7 +2511,7 @@ impl<'a> Ck<'a> {
                     .iter()
                     .map(|x| match x {
                         GArg::Type(t) => GArg::Type(self.tys.subst(*t, args, self_ty)),
-                        c => *c,
+                        c => crate::mono::subst_garg(&mut self.tys, *c, args),
                     })
                     .collect();
                 let tr = TraitRef { trait_decl: b.trait_decl, args: bargs };
