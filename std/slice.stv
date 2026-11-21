@@ -65,20 +65,20 @@ extern "stave-intrinsic" {
     fn copy_bytes(dst: *mut u8, src: *const u8, n: usize);
 }
 
-// xs as a slice of U: same address, xs.len() * size_of::<T>() / size_of::<U>() elements. Callers
-// pass T and U of one size, or U = u8 with T an int or bool (no padding); every bit pattern of T
-// is then a valid U (bool is 0 or 1). Copies of any T go through `copy_bytes`, never a cast.
-unsafe("T and U are one size, or U is u8 and T an int or bool, so every bit pattern of T is a valid U") fn cast<T, U>(xs: &[T]) -> &[U] from xs {
+// xs as a slice of U: same address, xs.len() * size_of::<T>() / size_of::<U>() elements. One size
+// alone is not enough: `cast::<u8, bool>` yields invalid bools and `cast::<[u8; 8], u64>` a
+// misaligned slice. Copies of any T go through `copy_bytes`, never a cast.
+unsafe("every bit pattern of T is a valid U and U's alignment is at most T's (T, U ints or floats of one size, or U = u8 and T an int or bool)") fn cast<T, U>(xs: &[T]) -> &[U] from xs {
     let n = xs.len() * size_of::<T>() / size_of::<U>();
     let p = mem.slice_ptr(xs) as usize as *const U;
-    return unsafe("xs covers n elements of U, every byte of them initialized, and every bit pattern of T is a valid U (this fn's obligation)") mem.slice(xs, p, n);
+    return unsafe("xs covers n elements of U, every byte of them initialized, at an address aligned for U, and every bit pattern of T is a valid U (this fn's obligation)") mem.slice(xs, p, n);
 }
 
 // The mutable view; callers write only values valid as T (bytes 0 and 1 into a bool slice).
-unsafe("T and U are one size, or U is u8 and T an int or bool; only values valid as T are written through the result") fn cast_mut<T, U>(xs: &mut [T]) -> &mut [U] from xs {
+unsafe("every bit pattern of T is a valid U and U's alignment is at most T's (T, U ints or floats of one size, or U = u8 and T an int or bool); only values valid as T are written through the result") fn cast_mut<T, U>(xs: &mut [T]) -> &mut [U] from xs {
     let n = xs.len() * size_of::<T>() / size_of::<U>();
     let p = mem.slice_ptr_mut(xs) as *mut U;
-    return unsafe("xs covers n elements of U, borrowed exclusively; only values valid as T are written (this fn's obligation)") mem.slice_mut(xs, p, n);
+    return unsafe("xs covers n elements of U at an address aligned for U, borrowed exclusively; every T is a valid U and only values valid as T are written (this fn's obligation)") mem.slice_mut(xs, p, n);
 }
 
 fn some_at(i: usize, bits: u64) -> Option<usize> {
@@ -589,7 +589,7 @@ impl [u16] {
     }
 
     pub fn eq(&self, other: &[u16]) -> bool {
-        return unsafe("u16 has no padding and each of its bytes is a valid u8") bytes_eq_any(cast::<u16, u8>(self), cast::<u16, u8>(other));
+        return unsafe("u16 has no padding, each of its bytes is a valid u8, and u8's alignment 1 is at most u16's") bytes_eq_any(cast::<u16, u8>(self), cast::<u16, u8>(other));
     }
 
     pub fn fill(&mut self, x: u16) {
@@ -764,7 +764,7 @@ impl [u32] {
     }
 
     pub fn eq(&self, other: &[u32]) -> bool {
-        return unsafe("u32 has no padding and each of its bytes is a valid u8") bytes_eq_any(cast::<u32, u8>(self), cast::<u32, u8>(other));
+        return unsafe("u32 has no padding, each of its bytes is a valid u8, and u8's alignment 1 is at most u32's") bytes_eq_any(cast::<u32, u8>(self), cast::<u32, u8>(other));
     }
 
     pub fn fill(&mut self, x: u32) {
@@ -939,7 +939,7 @@ impl [u64] {
     }
 
     pub fn eq(&self, other: &[u64]) -> bool {
-        return unsafe("u64 has no padding and each of its bytes is a valid u8") bytes_eq_any(cast::<u64, u8>(self), cast::<u64, u8>(other));
+        return unsafe("u64 has no padding, each of its bytes is a valid u8, and u8's alignment 1 is at most u64's") bytes_eq_any(cast::<u64, u8>(self), cast::<u64, u8>(other));
     }
 
     pub fn fill(&mut self, x: u64) {
@@ -1062,15 +1062,15 @@ impl [i8] {
     }
 
     pub fn find(&self, x: i8) -> Option<usize> {
-        return unsafe("i8 has no padding and each of its bytes is a valid u8") cast::<i8, u8>(self).find(x as% u8);
+        return unsafe("i8 has no padding, each of its bytes is a valid u8, and u8's alignment 1 is at most i8's") cast::<i8, u8>(self).find(x as% u8);
     }
 
     pub fn eq(&self, other: &[i8]) -> bool {
-        return unsafe("i8 has no padding and each of its bytes is a valid u8") bytes_eq_any(cast::<i8, u8>(self), cast::<i8, u8>(other));
+        return unsafe("i8 has no padding, each of its bytes is a valid u8, and u8's alignment 1 is at most i8's") bytes_eq_any(cast::<i8, u8>(self), cast::<i8, u8>(other));
     }
 
     pub fn fill(&mut self, x: i8) {
-        unsafe("i8 and u8 have one size; fill writes a bit pattern, valid for i8") { cast_mut::<i8, u8>(self).fill(x as% u8); }
+        unsafe("i8 and u8 are ints of one size and one alignment; fill writes a bit pattern, valid for i8") { cast_mut::<i8, u8>(self).fill(x as% u8); }
     }
 }
 
@@ -1182,15 +1182,15 @@ impl [i16] {
     }
 
     pub fn find(&self, x: i16) -> Option<usize> {
-        return unsafe("i16 and u16 have one size and every bit pattern is valid for both") cast::<i16, u16>(self).find(x as% u16);
+        return unsafe("i16 and u16 are ints of one size and one alignment, and every bit pattern is valid for both") cast::<i16, u16>(self).find(x as% u16);
     }
 
     pub fn eq(&self, other: &[i16]) -> bool {
-        return unsafe("i16 has no padding and each of its bytes is a valid u8") bytes_eq_any(cast::<i16, u8>(self), cast::<i16, u8>(other));
+        return unsafe("i16 has no padding, each of its bytes is a valid u8, and u8's alignment 1 is at most i16's") bytes_eq_any(cast::<i16, u8>(self), cast::<i16, u8>(other));
     }
 
     pub fn fill(&mut self, x: i16) {
-        unsafe("i16 and u16 have one size; fill writes a bit pattern, valid for i16") { cast_mut::<i16, u16>(self).fill(x as% u16); }
+        unsafe("i16 and u16 are ints of one size and one alignment; fill writes a bit pattern, valid for i16") { cast_mut::<i16, u16>(self).fill(x as% u16); }
     }
 }
 
@@ -1302,15 +1302,15 @@ impl [i32] {
     }
 
     pub fn find(&self, x: i32) -> Option<usize> {
-        return unsafe("i32 and u32 have one size and every bit pattern is valid for both") cast::<i32, u32>(self).find(x as% u32);
+        return unsafe("i32 and u32 are ints of one size and one alignment, and every bit pattern is valid for both") cast::<i32, u32>(self).find(x as% u32);
     }
 
     pub fn eq(&self, other: &[i32]) -> bool {
-        return unsafe("i32 has no padding and each of its bytes is a valid u8") bytes_eq_any(cast::<i32, u8>(self), cast::<i32, u8>(other));
+        return unsafe("i32 has no padding, each of its bytes is a valid u8, and u8's alignment 1 is at most i32's") bytes_eq_any(cast::<i32, u8>(self), cast::<i32, u8>(other));
     }
 
     pub fn fill(&mut self, x: i32) {
-        unsafe("i32 and u32 have one size; fill writes a bit pattern, valid for i32") { cast_mut::<i32, u32>(self).fill(x as% u32); }
+        unsafe("i32 and u32 are ints of one size and one alignment; fill writes a bit pattern, valid for i32") { cast_mut::<i32, u32>(self).fill(x as% u32); }
     }
 }
 
@@ -1422,80 +1422,80 @@ impl [i64] {
     }
 
     pub fn find(&self, x: i64) -> Option<usize> {
-        return unsafe("i64 and u64 have one size and every bit pattern is valid for both") cast::<i64, u64>(self).find(x as% u64);
+        return unsafe("i64 and u64 are ints of one size and one alignment, and every bit pattern is valid for both") cast::<i64, u64>(self).find(x as% u64);
     }
 
     pub fn eq(&self, other: &[i64]) -> bool {
-        return unsafe("i64 has no padding and each of its bytes is a valid u8") bytes_eq_any(cast::<i64, u8>(self), cast::<i64, u8>(other));
+        return unsafe("i64 has no padding, each of its bytes is a valid u8, and u8's alignment 1 is at most i64's") bytes_eq_any(cast::<i64, u8>(self), cast::<i64, u8>(other));
     }
 
     pub fn fill(&mut self, x: i64) {
-        unsafe("i64 and u64 have one size; fill writes a bit pattern, valid for i64") { cast_mut::<i64, u64>(self).fill(x as% u64); }
+        unsafe("i64 and u64 are ints of one size and one alignment; fill writes a bit pattern, valid for i64") { cast_mut::<i64, u64>(self).fill(x as% u64); }
     }
 }
 
 // usize and isize are 64-bit on every target: the u64 / i64 code.
 impl [usize] {
     pub fn sum(&self) -> usize {
-        return unsafe("usize and u64 have one size and every bit pattern is valid for both") cast::<usize, u64>(self).sum() as usize;
+        return unsafe("usize and u64 are ints of one size and one alignment, and every bit pattern is valid for both") cast::<usize, u64>(self).sum() as usize;
     }
 
     pub fn min(&self) -> Option<usize> {
-        return match unsafe("usize and u64 have one size and every bit pattern is valid for both") cast::<usize, u64>(self).min() {
+        return match unsafe("usize and u64 are ints of one size and one alignment, and every bit pattern is valid for both") cast::<usize, u64>(self).min() {
             Option.Some(x) => Option.Some(x as usize),
             Option.None => Option.None,
         };
     }
 
     pub fn max(&self) -> Option<usize> {
-        return match unsafe("usize and u64 have one size and every bit pattern is valid for both") cast::<usize, u64>(self).max() {
+        return match unsafe("usize and u64 are ints of one size and one alignment, and every bit pattern is valid for both") cast::<usize, u64>(self).max() {
             Option.Some(x) => Option.Some(x as usize),
             Option.None => Option.None,
         };
     }
 
     pub fn find(&self, x: usize) -> Option<usize> {
-        return unsafe("usize and u64 have one size and every bit pattern is valid for both") cast::<usize, u64>(self).find(x as u64);
+        return unsafe("usize and u64 are ints of one size and one alignment, and every bit pattern is valid for both") cast::<usize, u64>(self).find(x as u64);
     }
 
     pub fn eq(&self, other: &[usize]) -> bool {
-        return unsafe("usize has no padding and each of its bytes is a valid u8") bytes_eq_any(cast::<usize, u8>(self), cast::<usize, u8>(other));
+        return unsafe("usize has no padding, each of its bytes is a valid u8, and u8's alignment 1 is at most usize's") bytes_eq_any(cast::<usize, u8>(self), cast::<usize, u8>(other));
     }
 
     pub fn fill(&mut self, x: usize) {
-        unsafe("usize and u64 have one size; fill writes a bit pattern, valid for usize") { cast_mut::<usize, u64>(self).fill(x as u64); }
+        unsafe("usize and u64 are ints of one size and one alignment; fill writes a bit pattern, valid for usize") { cast_mut::<usize, u64>(self).fill(x as u64); }
     }
 }
 
 impl [isize] {
     pub fn sum(&self) -> isize {
-        return unsafe("isize and i64 have one size and every bit pattern is valid for both") cast::<isize, i64>(self).sum() as isize;
+        return unsafe("isize and i64 are ints of one size and one alignment, and every bit pattern is valid for both") cast::<isize, i64>(self).sum() as isize;
     }
 
     pub fn min(&self) -> Option<isize> {
-        return match unsafe("isize and i64 have one size and every bit pattern is valid for both") cast::<isize, i64>(self).min() {
+        return match unsafe("isize and i64 are ints of one size and one alignment, and every bit pattern is valid for both") cast::<isize, i64>(self).min() {
             Option.Some(x) => Option.Some(x as isize),
             Option.None => Option.None,
         };
     }
 
     pub fn max(&self) -> Option<isize> {
-        return match unsafe("isize and i64 have one size and every bit pattern is valid for both") cast::<isize, i64>(self).max() {
+        return match unsafe("isize and i64 are ints of one size and one alignment, and every bit pattern is valid for both") cast::<isize, i64>(self).max() {
             Option.Some(x) => Option.Some(x as isize),
             Option.None => Option.None,
         };
     }
 
     pub fn find(&self, x: isize) -> Option<usize> {
-        return unsafe("isize and u64 have one size and every bit pattern is valid for both") cast::<isize, u64>(self).find(x as% u64);
+        return unsafe("isize and u64 are ints of one size and one alignment, and every bit pattern is valid for both") cast::<isize, u64>(self).find(x as% u64);
     }
 
     pub fn eq(&self, other: &[isize]) -> bool {
-        return unsafe("isize has no padding and each of its bytes is a valid u8") bytes_eq_any(cast::<isize, u8>(self), cast::<isize, u8>(other));
+        return unsafe("isize has no padding, each of its bytes is a valid u8, and u8's alignment 1 is at most isize's") bytes_eq_any(cast::<isize, u8>(self), cast::<isize, u8>(other));
     }
 
     pub fn fill(&mut self, x: isize) {
-        unsafe("isize and u64 have one size; fill writes a bit pattern, valid for isize") { cast_mut::<isize, u64>(self).fill(x as% u64); }
+        unsafe("isize and u64 are ints of one size and one alignment; fill writes a bit pattern, valid for isize") { cast_mut::<isize, u64>(self).fill(x as% u64); }
     }
 }
 
@@ -2080,7 +2080,7 @@ impl [f32] {
     }
 
     pub fn fill(&mut self, x: f32) {
-        unsafe("f32 and u32 have one size; fill writes the bits of an f32") { cast_mut::<f32, u32>(self).fill(mem.f32_bits(x)); }
+        unsafe("f32 and u32 have one size and one alignment, every f32 bit pattern is a valid u32, and fill writes the bits of an f32") { cast_mut::<f32, u32>(self).fill(mem.f32_bits(x)); }
     }
 }
 
@@ -2659,22 +2659,22 @@ impl [f64] {
     }
 
     pub fn fill(&mut self, x: f64) {
-        unsafe("f64 and u64 have one size; fill writes the bits of an f64") { cast_mut::<f64, u64>(self).fill(mem.f64_bits(x)); }
+        unsafe("f64 and u64 have one size and one alignment, every f64 bit pattern is a valid u64, and fill writes the bits of an f64") { cast_mut::<f64, u64>(self).fill(mem.f64_bits(x)); }
     }
 }
 
 // A bool is one byte, 0 or 1.
 impl [bool] {
     pub fn find(&self, x: bool) -> Option<usize> {
-        return unsafe("a bool is one byte, 0 or 1, a valid u8") cast::<bool, u8>(self).find(x as u8);
+        return unsafe("a bool is one byte, 0 or 1, a valid u8, and both have alignment 1") cast::<bool, u8>(self).find(x as u8);
     }
 
     pub fn eq(&self, other: &[bool]) -> bool {
-        return unsafe("a bool is one byte, 0 or 1, a valid u8") bytes_eq_any(cast::<bool, u8>(self), cast::<bool, u8>(other));
+        return unsafe("a bool is one byte, 0 or 1, a valid u8, and both have alignment 1") bytes_eq_any(cast::<bool, u8>(self), cast::<bool, u8>(other));
     }
 
     pub fn fill(&mut self, x: bool) {
-        unsafe("a bool is one byte; fill writes 0 or 1, a valid bool") { cast_mut::<bool, u8>(self).fill(x as u8); }
+        unsafe("a bool and a u8 are one byte of alignment 1, every bool is a valid u8, and fill writes 0 or 1, a valid bool") { cast_mut::<bool, u8>(self).fill(x as u8); }
     }
 }
 
