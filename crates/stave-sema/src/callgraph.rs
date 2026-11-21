@@ -2122,7 +2122,7 @@ pub(crate) fn build(
 }
 
 /// Whether decl `d` is declared in a built-in package (`std`, `runtime`, and their dependencies).
-fn in_builtin_package(prog: &Program, d: DeclId) -> bool {
+pub(crate) fn in_builtin_package(prog: &Program, d: DeclId) -> bool {
     prog.decl(d).and_then(|x| prog.module(x.module)).is_some_and(|m| {
         prog.packages.get(m.package.idx()).is_some_and(|p| p.kind == crate::package::PackageKind::Builtin)
     })
