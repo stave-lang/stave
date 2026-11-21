@@ -70,6 +70,12 @@ fn bind_ty(ck: &mut Ck<'_>, t: TypeId, mode: Mode) -> TypeId {
 fn bind(ck: &mut Ck<'_>, node: u32, t: TypeId, mode: Mode) {
     let bt = bind_ty(ck, t, mode);
     ck.locals.insert(node, bt);
+    if mode == Mode::Move {
+        let genv = ck.genv();
+        if !ck.w.is_copy(&mut ck.tys, t, genv) {
+            ck.moves.push(node);
+        }
+    }
     if let Some(binds) = &mut ck.or_binds {
         binds.push((node, bt, mode));
     }

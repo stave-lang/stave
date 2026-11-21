@@ -2480,6 +2480,13 @@ impl<'a> FnCx<'a> {
         (t, mode)
     }
 
+    /// A pattern [`FnCx::pat_shape`] cannot read. Taking it for a test would leave its value
+    /// whole while its names took parts of it, so the job fails.
+    fn no_shape(&mut self, p: u32) -> Shape {
+        self.fail(p, "a pattern of no known shape");
+        Shape::Test
+    }
+
     /// The shape of pattern `p` against a value of type `t`, as [`FnCx::pat`] reads it.
     fn pat_shape(&mut self, p: u32, t: Ty, mode: Mode) -> Shape {
         let icx = self.icx;
@@ -2502,14 +2509,14 @@ impl<'a> FnCx<'a> {
             let (dt, pm) = self.peel_ty(t, mode);
             let ets = match self.kind(dt) {
                 TypeKind::Tuple(ts) => ts.to_vec(),
-                _ => return Shape::Test,
+                _ => return self.no_shape(p),
             };
             let fields =
                 ets.iter().enumerate().map(|(i, &et)| (et, kids.get(i).map(|&k| Sub::Pat(k)))).collect();
             return Shape::Parts { ty: dt, mode: pm, variant: None, fields };
         }
         if !icx.is(a, Term::Ident) {
-            return Shape::Test;
+            return self.no_shape(p);
         }
         let e = icx.chain_end(a);
         let has_paren = icx.is(e + 1, Term::LParen);
@@ -2517,16 +2524,17 @@ impl<'a> FnCx<'a> {
         if e == a && !has_paren && !has_rec {
             return Shape::Name(p);
         }
-        let Some(Res::Decl(d)) = icx.uses(p).last().map(|u| u.res) else { return Shape::Test };
+        let Some(Res::Decl(d)) = icx.uses(p).last().map(|u| u.res) else { return self.no_shape(p) };
         let is_variant = match self.decl_kind(d) {
             Some(DeclKind::Variant) => true,
             Some(DeclKind::Struct) => false,
-            _ => return Shape::Test,
+            Some(DeclKind::Const) => return Shape::Test,
+            _ => return self.no_shape(p),
         };
         let (dt, pm) = self.peel_ty(t, mode);
         let vi = if is_variant { self.g.prog.decl(d).map_or(0, |x| x.index) } else { 0 };
         let Some(fts) = self.adt_fields(dt).and_then(|v| v.get(vi as usize).cloned()) else {
-            return Shape::Test;
+            return self.no_shape(p);
         };
         let mut subs: Vec<Option<Sub>> = vec![None; fts.len()];
         if has_rec {
@@ -2574,11 +2582,26 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// Whether binding node `b` takes a non-Copy value by value in mode `mode`.
+    /// Whether binding node `b` takes a non-Copy value by value in mode `mode`: the answer of
+    /// the definition ([`crate::typeck::TypedBody::moves`]), the same for every instance. An
+    /// instance may make a moved value Copy, never the reverse.
     fn name_moves(&mut self, b: u32, mode: Mode) -> bool {
-        let Some(&l) = self.by_node.get(&b) else { return false };
+        if mode != Mode::Move {
+            return false;
+        }
+        if self.tb().binds_by_move(b) {
+            return true;
+        }
+        let Some(&l) = self.by_node.get(&b) else {
+            self.fail(b, "a pattern binding without a local");
+            return true;
+        };
         let lt = self.locals[l].ty;
-        mode == Mode::Move && !self.is_copy(lt)
+        if !self.is_copy(lt) {
+            self.fail(b, "a binding that is Copy on the definition is not Copy in an instance");
+            return true;
+        }
+        false
     }
 
     /// Whether pattern `p` against a value of type `t` binds a non-Copy part by value: such a

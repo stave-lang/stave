@@ -1,0 +1,137 @@
+//~ STDOUT generic_pattern_instances.stdout
+// Whether a pattern moves its value is decided on the definition: a binding whose type is a type
+// parameter without a `Copy` bound takes its part by value in every instance, so the parts the
+// pattern ignores are dropped at the binding point for `T = u32` as for `T = D`, and a lock
+// guard among them is released there. With a `Copy` bound, or with the type written out, the
+// pattern only reads.
+import std.io;
+import std.sync;
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { let i = self.id; io.print(f"drop {i}\n"); } }
+fn mk(i: u32) -> D { io.print(f"mk {i}\n"); return D.{ id: i }; }
+
+struct GH<T> { pub a: T, pub d: D }
+enum GE<T> { Two(T, D), No }
+view struct GL<T> { pub a: T, pub g: sync.MutexGuard<u32, 1> }
+
+fn let_pat<T>(x: GH<T>) {
+    let GH.{ a, d: _ } = x;
+    io.print("after let\n");
+}
+
+fn tuple_pat<T>(x: (T, D)) {
+    let (a, _) = x;
+    io.print("after let\n");
+}
+
+fn match_pat<T>(x: GH<T>) {
+    match x {
+        GH.{ a, d: _ } => { io.print("arm\n"); }
+    }
+    io.print("after match\n");
+}
+
+fn guard_pat<T>(x: GH<T>, c: bool) {
+    match x {
+        GH.{ a, d: _ } if c => { io.print("arm\n"); }
+        _ => { io.print("other\n"); }
+    }
+    io.print("after match\n");
+}
+
+fn enum_pat<T>(e: GE<T>) {
+    match e {
+        GE.Two(x, _) => { io.print("two\n"); }
+        GE.No => { io.print("no\n"); }
+    }
+    io.print("after match\n");
+}
+
+fn rvalue_pat<T>(v: T, k: u32) {
+    let GH.{ a, d: _ } = GH.{ a: v, d: mk(k) };
+    io.print("after let\n");
+}
+
+fn own<T>(xs: [GH<T>; 2]) -> [GH<T>; 2] { return xs; }
+
+fn for_pat<T>(xs: [GH<T>; 2]) {
+    for GH.{ a, d: _ } in own(xs) {
+        io.print("it\n");
+    }
+    io.print("after for\n");
+}
+
+fn copy_bound<T: Copy>(x: GH<T>) {
+    let GH.{ a, d: _ } = x;
+    io.print("after let\n");
+}
+
+fn written(x: GH<u32>) {
+    let GH.{ a, d: _ } = x;
+    io.print("after let\n");
+}
+
+fn relock<T>(gl: GL<T>, m: &sync.Mutex<u32, 1>) {
+    let GL.{ a, g: _ } = gl;
+    let h = m.lock();
+    io.print("relocked\n");
+}
+
+fn relock_match<T>(gl: GL<T>, m: &sync.Mutex<u32, 1>) {
+    match gl {
+        GL.{ a, g: _ } => {
+            let h = m.lock();
+            io.print("relocked in arm\n");
+        }
+    }
+}
+
+fn try_lock<T>(v: T, m: &sync.Mutex<u32, 1>) {
+    let gl = GL.{ a: v, g: m.lock() };
+    let GL.{ a, g: _ } = gl;
+    match m.try_lock() {
+        Option.Some(h) => { io.print("free\n"); }
+        Option.None => { io.print("held\n"); }
+    }
+}
+
+fn main() -> i32 {
+    io.print("let\n");
+    let_pat(GH.{ a: 5u32, d: mk(1) });
+    let_pat(GH.{ a: mk(2), d: mk(3) });
+    io.print("tuple\n");
+    tuple_pat((5u32, mk(4)));
+    tuple_pat((mk(5), mk(6)));
+    io.print("match\n");
+    match_pat(GH.{ a: 5u32, d: mk(7) });
+    match_pat(GH.{ a: mk(8), d: mk(9) });
+    io.print("guard\n");
+    guard_pat(GH.{ a: 5u32, d: mk(10) }, true);
+    guard_pat(GH.{ a: 5u32, d: mk(11) }, false);
+    guard_pat(GH.{ a: mk(12), d: mk(13) }, true);
+    guard_pat(GH.{ a: mk(14), d: mk(15) }, false);
+    io.print("enum\n");
+    enum_pat(GE.Two(5u32, mk(16)));
+    enum_pat(GE.Two(mk(17), mk(18)));
+    enum_pat(GE::<u32>.No);
+    io.print("rvalue\n");
+    rvalue_pat(5u32, 19);
+    rvalue_pat(mk(20), 21);
+    io.print("for\n");
+    for_pat([GH.{ a: 5u32, d: mk(22) }, GH.{ a: 6u32, d: mk(23) }]);
+    for_pat([GH.{ a: mk(24), d: mk(25) }, GH.{ a: mk(26), d: mk(27) }]);
+    io.print("copy bound\n");
+    copy_bound(GH.{ a: 5u32, d: mk(28) });
+    io.print("written\n");
+    written(GH.{ a: 5u32, d: mk(29) });
+    io.print("locks\n");
+    let m = sync.Mutex::<u32, 1>.new(0u32);
+    relock(GL.{ a: 5u32, g: m.lock() }, &m);
+    relock(GL.{ a: mk(30), g: m.lock() }, &m);
+    relock_match(GL.{ a: 5u32, g: m.lock() }, &m);
+    try_lock(5u32, &m);
+    try_lock(mk(31), &m);
+    io.print("end\n");
+    return 0;
+}

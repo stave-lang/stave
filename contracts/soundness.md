@@ -205,8 +205,16 @@ move operand names a whole local or temporary, the checker's move state is one b
 and a write of a part of a moved local is E0502. What is moved-out is always a whole value, and
 a whole value is dropped or read only when it is initialized.
 
+A generic body is checked once and run as its instances. Whether a pattern binding takes a
+non-Copy value by value is decided by the type checker on the definition's types (a type
+parameter without a `Copy` bound is not Copy), and both the CFG builder and the lowering of
+every instance read that answer. So where the checked body moves a value and ends the parts
+its pattern ignores (a lock guard released for the rank rule, a borrow ended), every instance
+does, also one whose type argument is Copy.
+
 **What would break it.** A by-value use built without `move_out`; a pattern whose ignored parts
-the lowering keeps in the place; `p.read()` of a part (unsafe: its obligation).
+the lowering keeps in the place; a stage that decides from the instance type whether a pattern
+moves; `p.read()` of a part (unsafe: its obligation).
 
 ## The type of a value: one answer for every stage
 

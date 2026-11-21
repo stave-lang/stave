@@ -2098,7 +2098,13 @@ impl<'a, 'b> Builder<'a, 'b> {
                     // a part of the value a pattern takes apart: read here, the whole value
                     // moves once the pattern is bound
                     Some(top) if src.proj.len() > top => {
-                        let by_value = !self.tys.is_copy(src.ty);
+                        // the type checker's answer, which the lowering reads too
+                        let by_value = self.tb.binds_by_move(b);
+                        if by_value == self.tys.is_copy(src.ty) {
+                            self.body
+                                .internal
+                                .get_or_insert("a binding whose value is Copy for one stage only");
+                        }
                         let why = if by_value { self.move_out(&src, true) } else { None };
                         match why {
                             Some(why) => self.body.bad_moves.push((src.clone(), span, why)),

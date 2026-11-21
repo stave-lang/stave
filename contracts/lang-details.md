@@ -123,6 +123,14 @@ parts, binds by reference (through a `&` / `&mut` scrutinee), or binds nothing (
 stays alive and is dropped with its owner. A struct pattern names a field once (E0105), so each
 part of the value has one sub-pattern: it is bound, or ignored, never both.
 
+Decided on the definition. "Non-Copy" is the type as written where the pattern is: in a generic
+fn a part of type `T` is Copy only under a `T: Copy` bound. So `let G.{ a, d: _ } = x;` with
+`a: T` moves `x` and drops `d` at the `let` in every instance, also for `T = u32`, where the
+same pattern in a fn written for `G<u32>` only reads and leaves `d` to the end of `x`'s scope.
+The type checker decides this once per binding; the borrow checker (what is moved, which
+borrows and lock guards end at the binding point) and the code of each instance read that
+answer, so an instance never keeps alive what the check saw end.
+
 When and where. A moving pattern takes the whole value at its binding point: the end of the
 `let` statement's pattern, the entry of the arm (after the guard passed), the start of each
 `for` iteration. There the bindings take their parts, the scrutinee becomes moved as a whole
