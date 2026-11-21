@@ -176,7 +176,14 @@ untracked. Every call through a fn value is a site of the flow, whatever express
 callee (a call result `mk()()`, an index, a deref, a value `if`): its targets are the values its
 callee's slot holds, or the whole table when the callee is no tracked place; it has none only when
 its callee is a slot no value reaches (a param of a node no call gives a value), so the call never
-runs (debug builds check that every such call has a site). A tracked place (a fn-typed local or
+runs (debug builds check that every such call has a site). A param slot takes its values from the
+argument events of the calls into its node, so it is precise only if every edge into the node
+delivered them: a direct call with parenthesized arguments delivers every param (a method call
+every param but the receiver), a call through a fn value delivers its arguments to each target;
+any other edge into the node (an operator or compound assignment, an implied call such as a `for`
+loop's `next` or a `Display.fmt`, a drop, a built-in method calling the fn value it is given)
+delivers none, and each fn-typed param an edge does not deliver reaches the whole table. A node no
+edge enters keeps empty param slots: nothing calls it. A tracked place (a fn-typed local or
 param, a field declared with a fn type: one slot per field over all instances and values) is precise
 only while every syntactic use of it is one of these harmless uses:
 

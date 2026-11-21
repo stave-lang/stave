@@ -70,6 +70,13 @@
 //! pointee, an int made a pointer, `*mut` from a shared pointer) makes every call of each fn type
 //! the two pointees hold reach its table ([`Walk::cast`]).
 //!
+//! A param slot is precise only if every edge into its node delivered the argument: each direct
+//! call edge records how much of the callee's params its argument events cover (all, all but
+//! the receiver, none: an operator, an implied call), every other edge into a node covers none,
+//! a call through a fn value covers its targets' params, and a fn-typed param some incoming edge
+//! does not cover is untracked ([`Walk::solve_flow`]; debug builds check that every direct call
+//! edge has such a record).
+//!
 //! **Specialization.** A direct call that passes known fn values (fn items, closure literals, a
 //! local set once to one, or a param that is itself specialized) reaches a node of the callee for
 //! those values ([`NodeKind::Fn`] `spec`), so a helper such as `apply(f, x)` called with `g` from
@@ -494,8 +501,9 @@ enum Src<'b> {
 }
 
 enum What<'b> {
-    /// A direct call recorded by typeck (call or implied).
-    Call(&'b Target),
+    /// A direct call recorded by typeck (call or implied), with the params its `Arg` events
+    /// deliver ([`COVER_ALL`], [`COVER_ARGS`], [`COVER_NONE`]).
+    Call(&'b Target, u8),
     /// A call through a fn value of type `ty` coming from `callee`.
     ValueCall { ty: TypeId, callee: Src<'b> },
     /// A built-in method calling a fn value it is passed (a slice predicate).
@@ -519,6 +527,13 @@ enum What<'b> {
     /// `String.new` and `String.push_str` of an f-string.
     Fstring,
 }
+
+/// A call whose parenthesized arguments are every param (a fn or trait method by path).
+const COVER_ALL: u8 = 2;
+/// A method call: the parenthesized arguments are every param but the receiver.
+const COVER_ARGS: u8 = 1;
+/// A call that passes no argument through an event (an operator, an implied call, a drop).
+const COVER_NONE: u8 = 0;
 
 /// Where an event happens: a token, made a [`Span`] only for the edges kept (re-lexing every call
 /// token would cost more than the walk).
@@ -1073,19 +1088,23 @@ fn extract<'b>(
         match t {
             Target::Fn { decl, args } => {
                 if icx.is(tok, Term::LParen) {
-                    push(tok, callee_tok(icx, tok), What::Call(t));
+                    push(tok, callee_tok(icx, tok), What::Call(t, COVER_ALL));
                 } else {
                     let what = What::FnItem { decl: *decl, args, root: root_at(tok) };
                     push(tok, tok, what);
                 }
             }
-            Target::Method { .. } | Target::Op { .. } => push(tok, tok, What::Call(t)),
-            Target::TraitMethod { .. } => push(tok, callee_tok(icx, tok), What::Call(t)),
+            Target::Method { .. } => push(tok, tok, What::Call(t, COVER_ARGS)),
+            Target::Op { .. } => push(tok, tok, What::Call(t, COVER_NONE)),
+            Target::TraitMethod { .. } => {
+                let cover = if icx.is(tok, Term::LParen) { COVER_ALL } else { COVER_NONE };
+                push(tok, callee_tok(icx, tok), What::Call(t, cover));
+            }
             _ => {}
         }
     }
     for (tok, t) in &body.implicit {
-        push(*tok, *tok, What::Call(t));
+        push(*tok, *tok, What::Call(t, COVER_NONE));
     }
     for (n, c) in &body.coercions {
         if matches!(c, Coercion::StringToStr | Coercion::FmtToStr) {
@@ -1183,6 +1202,9 @@ struct ValueSite {
     /// The deny clause of the called value's fn type: every value that reaches the call was
     /// coerced to that type, so none has those effects.
     deny: u8,
+    /// Its `Arg` events are every argument (a call through a fn value; a built-in method's call
+    /// of the value it is passed has none).
+    full: bool,
 }
 
 /// The fn-value flow constraints the walk collects.
@@ -1253,6 +1275,13 @@ struct Walk<'a> {
     /// Per table: a cast in a body outside the built-in packages reinterprets memory that may
     /// hold a value of its type, so every call of that type reaches the whole table.
     poisoned: Vec<bool>,
+    /// (caller, callee, cover) for each direct call edge: which of the callee's params the
+    /// call's `Arg` events deliver ([`Walk::solve_flow`]).
+    covers: Vec<(u32, u32, u8)>,
+    /// The cover of the call being resolved.
+    cover: u8,
+    /// The fn-typed params the fallback made untracked: (node, param index).
+    untracked_params: Vec<(u32, u32)>,
     truncated: bool,
     truncated_at: Option<(Span, Option<DeclId>)>,
 }
@@ -1455,6 +1484,7 @@ impl<'a> Walk<'a> {
         let to = self.fn_targets(decl, args, inst);
         for &t in &to {
             self.edges.push((from, t, kind, site, 0));
+            self.covers.push((from, t, self.cover));
         }
         to
     }
@@ -1603,7 +1633,7 @@ impl<'a> Walk<'a> {
         for (ei, ev) in be.evs.iter().enumerate() {
             let from = node_of(ev.owner);
             match &ev.what {
-                What::Call(t) => {
+                What::Call(t, cover) => {
                     // the fn values the call passes: the callee is specialized on them
                     let mut hint: Vec<Vec<u32>> = Vec::new();
                     for a in be.evs[ei + 1..].iter().take_while(|a| a.tok == ev.tok) {
@@ -1621,7 +1651,9 @@ impl<'a> Walk<'a> {
                         }
                     }
                     self.spec_hint = hint;
+                    self.cover = *cover;
                     let to = self.call(from, i, t, &args, ev.site);
+                    self.cover = COVER_NONE;
                     self.spec_hint = Vec::new();
                     self.calls.extend(to.iter().map(|&c| (from, ev.tok, c)));
                     last = (ev.tok, to, None);
@@ -1643,6 +1675,7 @@ impl<'a> Walk<'a> {
                         site,
                         tok,
                         deny,
+                        full: true,
                     });
                     last = (ev.tok, Vec::new(), Some(self.flow.sites.len() - 1));
                 }
@@ -1660,6 +1693,7 @@ impl<'a> Walk<'a> {
                         site,
                         tok,
                         deny,
+                        full: false,
                     });
                 }
                 What::Arg { idx, src } => {
@@ -1843,6 +1877,83 @@ impl<'a> Walk<'a> {
         matches!(&self.nodes[i as usize].kind, NodeKind::Fn { inst, .. } if self.run_queued == Some(inst.decl))
     }
 
+    /// The number of params of fn or closure node `n`, and whether param `idx` may hold a fn
+    /// value in this instance (its type is a fn type, or one the graph cannot resolve).
+    fn param_count(&self, n: u32) -> usize {
+        let evs = self.evs;
+        match self.nodes.get(n as usize).map(|x| &x.kind) {
+            Some(NodeKind::Fn { .. }) => {
+                self.nodes[n as usize].body.and_then(|bi| evs[bi].as_ref()).map_or(0, |be| be.params.len())
+            }
+            Some(NodeKind::Closure { parent, index, .. }) => self.nodes[*parent as usize]
+                .body
+                .and_then(|bi| evs[bi].as_ref())
+                .and_then(|be| be.closures.get(*index as usize))
+                .map_or(0, |c| c.params.len()),
+            _ => 0,
+        }
+    }
+
+    fn param_holds_fn(&mut self, n: u32, idx: u32) -> bool {
+        let evs = self.evs;
+        let (inst, b) = match self.nodes.get(n as usize).map(|x| x.kind.clone()) {
+            Some(NodeKind::Fn { .. }) => {
+                let Some(bi) = self.nodes[n as usize].body else { return false };
+                let Some(&b) = evs[bi].as_ref().and_then(|be| be.params.get(idx as usize)) else {
+                    return false;
+                };
+                (n, b)
+            }
+            Some(NodeKind::Closure { parent, index, .. }) => {
+                let Some(bi) = self.nodes[parent as usize].body else { return false };
+                let Some(&b) = evs[bi]
+                    .as_ref()
+                    .and_then(|be| be.closures.get(index as usize))
+                    .and_then(|c| c.params.get(idx as usize))
+                else {
+                    return false;
+                };
+                (parent, b)
+            }
+            _ => return false,
+        };
+        let (Some(bi), NodeKind::Fn { inst: key, .. }) =
+            (self.nodes[inst as usize].body, self.nodes[inst as usize].kind.clone())
+        else {
+            return true;
+        };
+        let Some(t) = self.bodies[bi].local(crate::ids::BindingRef { node: b }) else { return true };
+        let t = self.subst(t, &key.args);
+        matches!(
+            self.cx.kind(t),
+            TypeKind::Fn { .. } | TypeKind::Param(_) | TypeKind::SelfTy | TypeKind::Error
+        )
+    }
+
+    /// Makes the fn-typed params of node `t` that a call into it with `cover` did not deliver
+    /// untracked; whether any slot changed.
+    fn undelivered(&mut self, t: u32, cover: u8, done: &mut rustc_hash::FxHashSet<(u32, u32)>) -> bool {
+        if cover == COVER_ALL {
+            return false;
+        }
+        let mut added = false;
+        for p in 0..self.param_count(t) as u32 {
+            if cover == COVER_ARGS && p > 0 {
+                break;
+            }
+            if done.contains(&(t, p)) || !self.param_holds_fn(t, p) {
+                continue;
+            }
+            done.insert((t, p));
+            if let Some(slot) = self.param_slot(t, p) {
+                self.flow.tops.push(slot);
+                self.untracked_params.push((t, p));
+                added = true;
+            }
+        }
+        added
+    }
+
     /// The slot of param `idx` of fn or closure node `n` (`None` without a checked body).
     fn param_slot(&mut self, n: u32, idx: u32) -> Option<u32> {
         let evs = self.evs;
@@ -1879,6 +1990,30 @@ impl<'a> Walk<'a> {
         let mut done_consts = 0;
         let mut done_tops = 0;
         let mut passed: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
+        // A param slot is precise only if every edge into its node delivered its argument: a
+        // direct call edge with less than full cover, or any other edge kind into a node (a drop,
+        // a spawn), leaves its fn-typed params untracked. Calls through fn values deliver at
+        // their sites (below).
+        let mut done: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
+        debug_assert_eq!(
+            self.edges.iter().filter(|e| matches!(e.2, EdgeKind::Call | EdgeKind::Dispatch { .. })).count(),
+            self.covers.len(),
+            "a direct call edge without a record of the arguments it delivers"
+        );
+        let mut cover_of: FxHashMap<(u32, u32), u8> = FxHashMap::default();
+        for &(f, t, c) in &self.covers {
+            let e = cover_of.entry((f, t)).or_insert(COVER_ALL);
+            *e = (*e).min(c);
+        }
+        let into: Vec<(u32, u8)> = self
+            .edges
+            .iter()
+            .filter(|e| e.1 & TABLE_BIT == 0 && !matches!(e.2, EdgeKind::Indirect | EdgeKind::Member))
+            .map(|e| (e.1, cover_of.get(&(e.0, e.1)).copied().unwrap_or(COVER_NONE)))
+            .collect();
+        for (t, c) in into {
+            self.undelivered(t, c, &mut done);
+        }
         for s in &mut self.flow.sites {
             if s.table.is_some_and(|t| self.poisoned.get(t as usize).copied().unwrap_or(false)) {
                 s.callee = Val::Top;
@@ -1941,6 +2076,12 @@ impl<'a> Walk<'a> {
             // a call's targets take its arguments
             let mut added = false;
             for si in 0..self.flow.sites.len() {
+                if !self.flow.sites[si].full {
+                    for t in site_targets(&self.flow.sites[si], &sets, &top, &members) {
+                        added |= self.undelivered(t, COVER_NONE, &mut done);
+                    }
+                    continue;
+                }
                 if self.flow.sites[si].args.is_empty() {
                     continue;
                 }
@@ -2113,6 +2254,9 @@ pub(crate) fn build(
         run_queued: crate::mono::item_at(prog, "runtime.thread", "run_queued"),
         flow: Flow::default(),
         poisoned: Vec::new(),
+        covers: Vec::new(),
+        cover: COVER_NONE,
+        untracked_params: Vec::new(),
         truncated: false,
         truncated_at: None,
     };

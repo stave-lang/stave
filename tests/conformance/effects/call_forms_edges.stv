@@ -1,0 +1,132 @@
+// Every call form that runs user code has a call-graph edge: each fn below denies `io` and
+// reaches `noisy` only through one form not written as a plain call (E1401 per fn).
+import std.core;
+import std.io;
+import std.vec;
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+struct S {
+    k: u32,
+}
+
+impl core.Add for S {
+    fn add(self, rhs: Self) -> Self {
+        noisy();
+        return S.{ k: self.k + rhs.k };
+    }
+}
+
+impl core.Neg for S {
+    fn neg(self) -> Self {
+        noisy();
+        return self;
+    }
+}
+
+impl core.Mul for S {
+    fn mul(self, rhs: Self) -> Self {
+        noisy();
+        return rhs;
+    }
+}
+
+impl S {
+    fn shout(&self) {
+        noisy();
+    }
+}
+
+trait Hey {
+    fn hey(&self);
+}
+
+impl Hey for S {
+    fn hey(&self) {
+        noisy();
+    }
+}
+
+impl Display for S {
+    fn fmt<W: Write>(&self, w: &mut W) {
+        noisy();
+        w.write_str("s");
+    }
+}
+
+struct D {
+    k: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {
+        noisy();
+    }
+}
+
+struct It {
+    n: u32,
+}
+
+impl It {
+    fn next(&mut self) -> Option<u32> {
+        noisy();
+        return Option.None;
+    }
+}
+
+fn binary_op() without(io) { //~ ERROR E1401
+    let c = S.{ k: 1u32 } + S.{ k: 2u32 };
+}
+
+fn unary_op() without(io) { //~ ERROR E1401
+    let c = -S.{ k: 1u32 };
+}
+
+fn compound_assign() without(io) { //~ ERROR E1401
+    let mut c = S.{ k: 1u32 };
+    c *= S.{ k: 2u32 };
+}
+
+fn method() without(io) { //~ ERROR E1401
+    let s = S.{ k: 1u32 };
+    s.shout();
+}
+
+fn trait_method_by_path() without(io) { //~ ERROR E1401
+    let s = S.{ k: 1u32 };
+    Hey.hey(&s);
+}
+
+fn fstring_display() without(io) { //~ ERROR E1401
+    let s = S.{ k: 1u32 };
+    let t = f"{s}";
+}
+
+fn drop_impl() without(io) { //~ ERROR E1401
+    let d = D.{ k: 1u32 };
+}
+
+fn for_next() without(io) { //~ ERROR E1401
+    let it = It.{ n: 1u32 };
+    for x in it {}
+}
+
+fn fn_value_call() without(io) { //~ ERROR E1401
+    let f: fn() = noisy;
+    f();
+}
+
+fn main() {
+    binary_op();
+    unary_op();
+    compound_assign();
+    method();
+    trait_method_by_path();
+    fstring_display();
+    drop_impl();
+    for_next();
+    fn_value_call();
+}
