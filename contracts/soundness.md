@@ -352,3 +352,46 @@ fn-value call whose real target the call graph misses (a fn-value write the flow
 counts the target it shows, and a bigger frame or a recursion behind the real one runs into the
 guard of a stack the build summary calls bounded. A frame larger than the backend reports, and stack
 use outside frames beyond the 4 KiB margin (signal handlers run on the alternate stack).
+
+## Capture modes: one answer for every rule
+
+**Claim.** A capture held by `&` is never written, mutably borrowed, or moved out by its
+closure, so the thread rule may ask only `T: Sync` for it, and the borrow checker may give it a
+shared loan.
+
+**Assumptions.** The capture analysis (stave-sema `closures`) gives each capture one mode, and
+the thread rules (E0802) and the borrow checker read that mode; no rule derives its own. A
+capture is `&` only when every use of it is a read in one of the listed contexts (LANG.md §1,
+contracts/lang-details.md §1), whatever dereferences lie between the local and the use; a
+by-value use of a non-Copy place is a move out of the capture, E0504.
+
+**Argument.** A write or `&mut` through a capture reaches the captured place by a chain of
+steps rooted at the local; the analysis classifies the context the chain ends in, not the
+chain, so a dereference on the way (`*t.0`, `*a[0]`, `w.v.push`) cannot hide it. An unlisted
+context is a mutation (fail-closed). The borrow checker's CFG writes, mutably borrows, and
+activates places explicitly; where it does one of these to a capture the analysis held by `&`,
+or captures a local the analysis did not list, the body fails as not checked instead of being
+accepted with two answers.
+
+**What would break it.** A rule that computes a mode of its own (for example the borrow
+checker strengthening a mode only for itself), a new expression form that mutates a place
+without the CFG showing it, or a context added to the read list that can write.
+
+## `for` over a place: the checker's loop is the lowered loop
+
+**Claim.** What the borrow checker assumes a `for` loop touches is what the generated code
+touches.
+
+**Argument.** An array or `[T]` place is never a source (E0219, contracts/lang-details.md §4
+`for` sources), so no loop reads a place the body may change without a borrow saying so: the
+source is a reference (each element or chunk of `*r` is borrowed per iteration, `&mut` only
+through a `&mut` source), an array value (the loop's own temporary, which nothing else names),
+a range, or an iterator: a value is moved into a loop temporary at the head, advanced there
+and dropped right after the loop on every path out, in both the CFG and the code; a `&mut` to
+an iterator is advanced through the reference in both (a `&` to one is E0219). A reference chunk binding is a borrow of the block's chunk temporary, which is what the
+code binds, so it cannot outlive the block, and the chunk of the source stays borrowed until the
+store back.
+
+**What would break it.** A `for` source form the CFG models as a copy and the code reads in
+place (as an array place was before E0219), or a binding the code points into memory the CFG
+does not model as borrowed.
