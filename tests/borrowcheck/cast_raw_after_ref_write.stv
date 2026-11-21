@@ -1,0 +1,12 @@
+//~ BORROWCHECK two-exclusive 9 8
+// A raw pointer cast from a `&mut` place carries a tag made from the reference's, as a
+// reborrow would: a later write through the reference is a foreign write for it.
+fn main() -> i32 {
+    let mut x: u32 = 1u32;
+    let r: &mut u32 = &mut x;
+    let p = r as *mut u32;
+    *r = 2u32;
+    unsafe("deliberate: the reference wrote after the cast") { p.write(3u32); }
+    if x == 3u32 { return 1; }
+    return 0;
+}

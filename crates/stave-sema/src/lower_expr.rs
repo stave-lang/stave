@@ -677,8 +677,25 @@ impl<'a> FnCx<'a> {
         let Some(&first) = kids.first() else { return self.fail(n, "bad cast") };
         let e = self.expr(first, None);
         let mut from = self.e_ty(&e);
-        let Some(mut acc) = self.operand_of(e) else { return E::Never };
         let last = kids.len().saturating_sub(1);
+        // A `&mut T` place cast to a raw pointer is read, not moved: the pointer carries a
+        // reborrow of the reference (M11), and the reference stays usable.
+        let to_raw = |s: &mut Self| {
+            let Some(&tn) = kids.get(1) else { return false };
+            let rt = if last == 1 { s.nty(n) } else { s.lower_type(tn) };
+            matches!(s.kind(rt), TypeKind::Ptr { .. })
+        };
+        let acc = match e {
+            E::P(p)
+                if self.g.borrows
+                    && matches!(self.kind(from), TypeKind::Ref { mutable: true, .. })
+                    && to_raw(self) =>
+            {
+                self.peek(&p).map(|v| self.borrowed(v, from))
+            }
+            e => self.operand_of(e),
+        };
+        let Some(mut acc) = acc else { return E::Never };
         for (k, &tn) in kids.iter().enumerate().skip(1) {
             let icx = self.icx;
             let optok = icx.a(tn).saturating_sub(1);

@@ -142,8 +142,9 @@ fn overlap(xs: &mut [u32]) -> u32 {
 - **M6 (reborrow).** `&*r`, `&mut *r`, `&r.f` are borrows (M4) through the tag of `r`. The
   implicit forms are the same event: a `&mut T` place given where a `&mut T` parameter (fn,
   method receiver, closure, built-in), variant constructor argument, or struct literal field
-  takes it is `&mut *p`; a `&mut T` given where `&T` is expected is `&*p`. Every other by-value
-  use of a `&mut T` place moves it (M9).
+  takes it is `&mut *p`; a `&mut T` given where `&T` is expected is `&*p`; a `&mut T` place
+  cast to a raw pointer is `&mut *p` (M11). Every other by-value use of a `&mut T` place moves
+  it (M9).
 ```stave
 fn child(p: &mut u32) -> u32 {
     let c: &mut u32 = &mut *p;
@@ -192,7 +193,8 @@ fn twice(x: &mut u32) -> u32 {
 | Form | Event |
 |---|---|
 | `v as T`, `T` the type of `v` | a by-value use of `v` (M8 or M9); the words keep their tags |
-| `&x as *const T`, `&mut x as *mut T`, pointer to pointer, pointer to and from a 64-bit integer | the same word with the same tag (M20) |
+| `r as *mut T`, `r as *const T`, `r` a `&mut T` place | a reborrow `&mut *r` (M6) whose word the pointer is: `r` is read, not moved, and stays usable; a later use of `r` is a foreign access for the pointer's tag |
+| `&x as *const T`, `&mut x as *mut T`, pointer to pointer, pointer to and from a 64-bit integer, a `&T` to a raw pointer | the same word with the same tag (M20) |
 | `&mut T` to `&T` | a reborrow (M6) |
 | `&[T; N]` to `&[T]`, `&[T align A]` to `&[T]` | the same tag and range |
 | `&String` to `&str`, an f-string to `&str` | a call of `as_str` (the f-string is a temporary with drop glue) |
@@ -589,7 +591,8 @@ it is not dumped, not compared with a golden, and not given to a backend.
   makes the tag (M4) when the instruction that defines the value runs: the parent is the tag its
   address word carries; the range starts at the address and has the size of the pointee of the
   value's type, for a fat reference its length times the element size. More borrows than the
-  source spells have a row: a `&mut T` place given as a method receiver (M6); the capture
+  source spells have a row: a `&mut T` place given as a method receiver (M6) or cast to a raw
+  pointer (M11); the capture
   references of a closure literal, one per captured local, `&` when the body only reads it
   (M18); the binding of a `for` over a reference to an array or slice, a borrow of its element
   through that reference; a `&mut` chunk binding, a borrow of the chunk's temporary; the
@@ -618,7 +621,8 @@ it is not dumped, not compared with a golden, and not given to a backend.
   borrowed, captured, or moved out of stays an SSA value and is no allocation of the run.
 - **Which by-value uses are moves.** Every one of a place whose type is not Copy, but a
   reference that the path of a place dereferences, a reference an implicit reborrow or a
-  coercion takes (M6, M11), and the reference a `for` loop iterates through.
+  coercion takes (M6, M11), a `&mut T` place cast to a raw pointer (M11), and the reference a
+  `for` loop iterates through.
 - **`Module::cell`**, the declaration of `std.cell.UnsafeCell`. A `&` gets `Cell` on the bytes
   that the layout of its pointee type puts inside a value of such a type (M21).
 - **`Module::frozen`**, per `static`: it is not `static mut`. Its root is `Frozen`, and `Cell`
