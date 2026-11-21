@@ -1,13 +1,17 @@
-// A clause callee reaches a static through a fn value a compound assignment changed.
+// A clause callee reaches a static through a fn field a compound assignment changed.
 import std.atomic;
 import std.core;
 import std.io;
 
 static N: atomic.U64 = atomic.U64.new(0);
 
-impl core.Add for fn() {
+view struct H {
+    f: fn(),
+}
+
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        return bump;
+        return H.{ f: bump };
     }
 }
 
@@ -18,9 +22,10 @@ fn bump() {
 }
 
 fn sneaky() -> bool {
-    let mut f: fn() = nop;
-    f += nop;
-    f();
+    let mut h = H.{ f: nop };
+    h += H.{ f: nop };
+    let k = h.f;
+    k();
     return true;
 }
 

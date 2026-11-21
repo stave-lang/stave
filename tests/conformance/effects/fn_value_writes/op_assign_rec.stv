@@ -1,10 +1,14 @@
-// Recursion through a fn value a compound assignment changed.
+// Recursion through a fn field a compound assignment changed.
 import std.core;
 import std.io;
 
-impl core.Sub for fn(u64) -> u64 {
+view struct H {
+    f: fn(u64) -> u64,
+}
+
+impl core.Sub for H {
     fn sub(self, rhs: Self) -> Self {
-        return down;
+        return H.{ f: down };
     }
 }
 
@@ -13,12 +17,13 @@ fn stop(n: u64) -> u64 {
 }
 
 fn down(n: u64) -> u64 {
-    let mut f: fn(u64) -> u64 = stop;
+    let mut h = H.{ f: stop };
     if n > 0 {
-        f -= stop;
+        h -= H.{ f: stop };
     }
     let m = if n > 0 then n - 1 else 0u64;
-    return f(m) + 1; //~ ERROR E1402
+    let k = h.f;
+    return k(m) + 1; //~ ERROR E1402
 }
 
 fn main() {

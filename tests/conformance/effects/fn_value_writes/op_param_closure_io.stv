@@ -1,6 +1,10 @@
-// A closure literal as the right operand; the impl calls it.
+// A closure literal in the right operand's fn field; the impl calls it.
 import std.core;
 import std.io;
+
+view struct H {
+    f: fn(),
+}
 
 fn nop() {}
 
@@ -8,16 +12,17 @@ fn noisy() {
     io.print("noisy\n");
 }
 
-impl core.BitOr for fn() {
+impl core.BitOr for H {
     fn bitor(self, rhs: Self) -> Self {
-        rhs();
-        return nop;
+        let k = rhs.f;
+        k();
+        return H.{ f: nop };
     }
 }
 
 fn quiet() without(io) { //~ ERROR E1401
-    let a: fn() = nop;
-    let g = a | fn() { noisy(); };
+    let a = H.{ f: nop };
+    let g = a | H.{ f: fn() { noisy(); } };
 }
 
 fn main() {

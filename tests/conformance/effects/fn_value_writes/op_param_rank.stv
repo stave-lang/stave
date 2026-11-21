@@ -1,6 +1,10 @@
-// Holding rank 1, an operator impl calls its `rhs`, which takes a rank-1 lock.
+// Holding rank 1, an operator impl calls its `rhs` fn field, which takes a rank-1 lock.
 import std.core;
 import std.sync;
+
+view struct H {
+    f: fn(&sync.Mutex<u32, 1>),
+}
 
 fn nop(m: &sync.Mutex<u32, 1>) {}
 
@@ -8,18 +12,19 @@ fn take(m: &sync.Mutex<u32, 1>) {
     let g = m.lock();
 }
 
-impl core.Add for fn(&sync.Mutex<u32, 1>) {
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
         let m2 = sync.Mutex::<u32, 1>.new(0u32);
-        rhs(&m2);
-        return nop;
+        let k = rhs.f;
+        k(&m2);
+        return H.{ f: nop };
     }
 }
 
 fn main() {
     let m = sync.Mutex::<u32, 1>.new(0u32);
-    let a: fn(&sync.Mutex<u32, 1>) = nop;
-    let b: fn(&sync.Mutex<u32, 1>) = take;
+    let a = H.{ f: nop };
+    let b = H.{ f: take };
     let g = m.lock();
     let c = a + b; //~ ERROR E1405
 }

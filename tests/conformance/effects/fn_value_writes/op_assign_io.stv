@@ -1,10 +1,15 @@
-// `f += noisy` (a user `Add` on `fn()`) is no harmless use of `f`: its calls reach every fn of its type.
+// `h += x` (a user `Add` on a struct holding a fn value) writes the fn field through the impl's
+// result: calls of the field reach every fn any `H` literal puts there.
 import std.core;
 import std.io;
 
-impl core.Add for fn() {
+view struct H {
+    f: fn(),
+}
+
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        return noisy;
+        return H.{ f: noisy };
     }
 }
 
@@ -15,9 +20,10 @@ fn noisy() {
 }
 
 fn quiet() without(io) { //~ ERROR E1401
-    let mut f: fn() = nop;
-    f += noisy;
-    f();
+    let mut h = H.{ f: nop };
+    h += H.{ f: nop };
+    let g = h.f;
+    g();
 }
 
 fn main() {

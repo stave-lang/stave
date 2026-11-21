@@ -1,11 +1,17 @@
-// The compound assignment in a closure; the fn value joins a thread that takes rank 1.
+// The compound assignment in a closure; the fn field it changes joins a thread that takes rank 1.
 import std.core;
 import std.io;
 import std.sync;
 
-impl core.Add for fn(&sync.Mutex<u32, 1>) {
+view struct H {
+    f: fn(&sync.Mutex<u32, 1>),
+}
+
+impl Copy for H {}
+
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        return fan;
+        return H.{ f: fan };
     }
 }
 
@@ -21,11 +27,12 @@ fn fan(m: &sync.Mutex<u32, 1>) {
 
 fn main() {
     let m = sync.Mutex::<u32, 1>.new(0);
-    let mut f: fn(&sync.Mutex<u32, 1>) = nop;
-    let set = fn() { f += nop; };
+    let mut h = H.{ f: nop };
+    let set = fn() { h += H.{ f: nop }; };
     set();
     let g = m.lock();
     io.print("joining\n");
-    f(&m); //~ ERROR E1405
+    let k = h.f;
+    k(&m); //~ ERROR E1405
     io.print("unreachable\n");
 }

@@ -29,6 +29,15 @@ impl Neg for u32 { //~ ERROR E0420
     }
 }
 
+// fn types are std's: no operator call writes or takes a bare fn value
+fn nop() {}
+
+impl Add for fn() { //~ ERROR E0420
+    fn add(self, rhs: Self) -> Self {
+        return nop;
+    }
+}
+
 impl dep.Show for fn() -> u32 { //~ ERROR E0420
     fn show(&self) -> u32 {
         return 3;

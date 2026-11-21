@@ -1,11 +1,17 @@
-// A compound assignment calls the operator impl, whose `rhs` param reaches the whole table.
+// A compound assignment calls the operator impl, whose call of its `rhs` fn field reaches the
+// fn the right operand holds.
 import std.core;
 import std.io;
 
-impl core.Add for fn() {
+view struct H {
+    f: fn(),
+}
+
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        rhs();
-        return nop;
+        let k = rhs.f;
+        k();
+        return H.{ f: nop };
     }
 }
 
@@ -16,8 +22,8 @@ fn noisy() {
 }
 
 fn quiet() without(io) { //~ ERROR E1401
-    let mut f: fn() = nop;
-    f += noisy;
+    let mut h = H.{ f: nop };
+    h += H.{ f: noisy };
 }
 
 fn main() {

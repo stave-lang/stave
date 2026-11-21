@@ -1,11 +1,15 @@
-// The stack bound counts every fn a compound-assigned fn value can be.
+// The stack bound counts every fn a compound-assigned fn field can be.
 //~ STDOUT op_assign_stack.stdout
 import std.core;
 import std.io;
 
-impl core.Add for fn() -> u64 {
+view struct H {
+    f: fn() -> u64,
+}
+
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        return big;
+        return H.{ f: big };
     }
 }
 
@@ -20,8 +24,9 @@ fn big() -> u64 {
 }
 
 fn main() {
-    let mut f: fn() -> u64 = small;
-    f += small;
-    let r = f();
+    let mut h = H.{ f: small };
+    h += H.{ f: small };
+    let k = h.f;
+    let r = k();
     io.print(f"{r}\n");
 }

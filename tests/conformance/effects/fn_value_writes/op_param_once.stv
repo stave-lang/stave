@@ -1,23 +1,20 @@
-// A `Once` init evaluates an operator whose impl calls `rhs`, which asks the same `Once`.
+// A `Once` init evaluates an operator whose impl calls its `rhs` fn field, which holds the init.
 import std.core;
 import std.io;
 import std.sync;
 
 static CFG: sync.Once<u32, 1> = sync.Once::<u32, 1>.new();
 
-impl core.Add for fn() -> u32 {
+view struct H {
+    f: fn() -> u32,
+}
+
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        let v = rhs(); //~ ERROR E1402
-        return zero;
+        let k = rhs.f;
+        let v = k(); //~ ERROR E1402
+        return H.{ f: zero };
     }
-}
-
-fn two() -> u32 {
-    return 2u32;
-}
-
-fn inner() -> u32 {
-    return *CFG.get_or_init(two);
 }
 
 fn zero() -> u32 {
@@ -25,8 +22,8 @@ fn zero() -> u32 {
 }
 
 fn init() -> u32 {
-    let a: fn() -> u32 = zero;
-    let b: fn() -> u32 = inner;
+    let a = H.{ f: zero };
+    let b = H.{ f: init };
     let c = a + b;
     return 1u32;
 }
