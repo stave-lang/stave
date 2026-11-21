@@ -56,28 +56,43 @@ fn alloc_error() -> AllocError {
     return AllocError.{};
 }
 
+// The indices of 0..n a permutation has not yet moved, one bit each: what `Vec.permute` and
+// `soa.Soa.permute` walk. `new` panics `Bounds` at the user site, before anything moves, unless
+// perm has n entries holding each of 0..n once.
+pub struct PermMarks {
+    words: Vec<u64>,
+}
+
 fn bit(i: usize) -> u64 {
     return 1u64 << ((i % 64) as u64);
 }
 
-// One bit per index of 0..n, all set; panics `Bounds` at the user site unless perm has n
-// entries holding each of 0..n once.
-fn perm_marks(perm: &[u32], n: usize) -> Vec<u64> {
-    if perm.len() != n {
-        panic.trap(panic.KIND_BOUNDS, panic.user_site());
-    }
-    let words = n / 64 + 1;
-    let mut seen = Vec::<u64>.with_capacity(words);
-    for w in 0..words { seen.push(0); }
-    let s = seen.as_mut_slice();
-    for k in 0..n {
-        let p = perm[k] as usize;
-        if p >= n || s[p / 64] & bit(p) != 0 {
+impl PermMarks {
+    pub fn new(perm: &[u32], n: usize) -> PermMarks {
+        if perm.len() != n {
             panic.trap(panic.KIND_BOUNDS, panic.user_site());
         }
-        s[p / 64] = s[p / 64] | bit(p);
+        let words = n / 64 + 1;
+        let mut seen = Vec::<u64>.with_capacity(words);
+        for w in 0..words { seen.push(0); }
+        let s = seen.as_mut_slice();
+        for k in 0..n {
+            let p = perm[k] as usize;
+            if p >= n || s[p / 64] & bit(p) != 0 {
+                panic.trap(panic.KIND_BOUNDS, panic.user_site());
+            }
+            s[p / 64] = s[p / 64] | bit(p);
+        }
+        return PermMarks.{ words: seen };
     }
-    return seen;
+
+    // Whether index i (< n) was still unmoved; it is marked moved from now on.
+    pub fn take(&mut self, i: usize) -> bool {
+        let w = self.words.as_mut_slice();
+        let was = w[i / 64] & bit(i) != 0;
+        w[i / 64] = w[i / 64] & ~bit(i);
+        return was;
+    }
 }
 
 impl<T: view> Vec<T> {
@@ -244,23 +259,23 @@ impl<T: view> Vec<T> {
     // before it moves anything, unless perm has len entries and holds each of 0..len once.
     // Moves each element once, along the cycles of perm; drops nothing.
     pub fn permute(&mut self, perm: &[u32]) {
-        let n = self.len;
-        let mut todo = perm_marks(perm, n);
-        let t = todo.as_mut_slice();
-        for s in 0..n {
-            if t[s / 64] & bit(s) != 0 {
+        let mut todo = PermMarks.new(perm, self.len);
+        for s in 0..self.len {
+            if todo.take(s) {
                 let first = unsafe("s < len: an initialized element; its slot is refilled when the cycle closes") mem.add(self.ptr as *const T, s).read();
                 let mut j = s;
                 loop {
-                    t[j / 64] = t[j / 64] & ~bit(j);
                     let k = perm[j] as usize;
                     if k == s { break; }
-                    unsafe("perm is a permutation of 0..len: slot k is initialized and not yet moved, slot j was just emptied") {
+                    let _ = todo.take(k);
+                    unsafe("perm is a permutation of 0..len: slot k is initialized and not yet moved; slot j is empty, read into first (j == s) or moved out of by the step before") {
                         mem.add_mut(self.ptr, j).write(mem.add(self.ptr as *const T, k).read());
                     }
                     j = k;
                 }
-                unsafe("j < len: the last slot of the cycle, emptied by the move before") { mem.add_mut(self.ptr, j).write(first); }
+                unsafe("j is the last slot of the cycle: emptied by the move out of it, or j == s, emptied by the read of first") {
+                    mem.add_mut(self.ptr, j).write(first);
+                }
             }
         }
     }

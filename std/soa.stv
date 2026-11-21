@@ -50,30 +50,6 @@ fn alloc_error() -> vec.AllocError {
     return vec.AllocError.{};
 }
 
-fn bit(i: usize) -> u64 {
-    return 1u64 << ((i % 64) as u64);
-}
-
-// One bit per index of 0..n, all set; panics `Bounds` at the user site unless perm has n
-// entries holding each of 0..n once (the rule of `vec.Vec.permute`).
-fn perm_marks(perm: &[u32], n: usize) -> vec.Vec<u64> {
-    if perm.len() != n {
-        panic.trap(panic.KIND_BOUNDS, panic.user_site());
-    }
-    let words = n / 64 + 1;
-    let mut seen = vec.Vec::<u64>.with_capacity(words);
-    for w in 0..words { seen.push(0); }
-    let s = seen.as_mut_slice();
-    for k in 0..n {
-        let p = perm[k] as usize;
-        if p >= n || s[p / 64] & bit(p) != 0 {
-            panic.trap(panic.KIND_BOUNDS, panic.user_site());
-        }
-        s[p / 64] = s[p / 64] | bit(p);
-    }
-    return seen;
-}
-
 impl<T: core.Flat> Soa<T> {
     pub fn new() -> Soa<T> {
         let cap: usize = if soa_row_size::<T>() == 0 then USIZE_MAX else 0;
@@ -216,23 +192,23 @@ impl<T: core.Flat> Soa<T> {
     // `Bounds`, before it moves anything, unless perm has len entries and holds each of 0..len
     // once. Moves each row once, along the cycles of perm.
     pub fn permute(&mut self, perm: &[u32]) {
-        let n = self.len;
-        let mut todo = perm_marks(perm, n);
-        let t = todo.as_mut_slice();
-        for s in 0..n {
-            if t[s / 64] & bit(s) != 0 {
+        let mut todo = vec.PermMarks.new(perm, self.len);
+        for s in 0..self.len {
+            if todo.take(s) {
                 let first = unsafe("s < len: an initialized row; it is refilled when the cycle closes") soa_read::<T>(self.ptr as *const u8, self.cap, s);
                 let mut j = s;
                 loop {
-                    t[j / 64] = t[j / 64] & ~bit(j);
                     let k = perm[j] as usize;
                     if k == s { break; }
-                    unsafe("perm is a permutation of 0..len: row k is initialized and not yet moved, row j was just emptied") {
+                    let _ = todo.take(k);
+                    unsafe("perm is a permutation of 0..len: row k is initialized and not yet moved; row j is empty, read into first (j == s) or moved out of by the step before") {
                         soa_write::<T>(self.ptr, self.cap, j, soa_read::<T>(self.ptr as *const u8, self.cap, k));
                     }
                     j = k;
                 }
-                unsafe("j < len: the last row of the cycle, emptied by the move before") { soa_write::<T>(self.ptr, self.cap, j, first); }
+                unsafe("j is the last row of the cycle: emptied by the move out of it, or j == s, emptied by the read of first") {
+                    soa_write::<T>(self.ptr, self.cap, j, first);
+                }
             }
         }
     }
