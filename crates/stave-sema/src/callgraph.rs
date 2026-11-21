@@ -57,15 +57,16 @@
 //! a tuple, array, or enum payload, through a reference or raw pointer, or bound by a pattern
 //! other than `let x`; each passes the whole table on.
 //!
-//! A slot is precise only while every write to it is one of those events. A write the events do
-//! not show goes through the place's address, so taking it makes the slot untracked: `&mut` of
-//! the local or field (also as a `&mut self` receiver), a field bound through a `&mut` reference
-//! by a struct pattern, and, outside the built-in packages, a borrow of it made into a raw
-//! pointer. Every other place a fn value lives in (an element, a payload, a field declared
-//! generic) is read as untracked, and a write through `&mut T` in generic code reaches a tracked
-//! slot only through such an address. A cast outside the built-in packages that reinterprets
-//! memory (another pointee, an int made a pointer, `*mut` from a shared pointer) makes every call
-//! of each fn type the two pointees hold reach its table ([`Walk::cast`]).
+//! A tracked place (a fn-typed local or param, a field declared with a fn type) is precise only
+//! while every use of it is harmless: its declaration, the target of a plain `=` (an event), or a
+//! read of its value by copy as a call's callee or argument, a `let` initializer, the source of a
+//! plain `=`, a struct literal field, or a `return` value. Every other use, whatever its form (a
+//! borrow, a compound assignment or operator, a method receiver, a pattern naming the field, an
+//! f-string hole), makes the slot untracked, so a write no event shows needs a use that already
+//! did. Every other place a fn value lives in (an element, a payload, a field declared generic)
+//! is read as untracked. A cast outside the built-in packages that reinterprets memory (another
+//! pointee, an int made a pointer, `*mut` from a shared pointer) makes every call of each fn type
+//! the two pointees hold reach its table ([`Walk::cast`]).
 //!
 //! **Specialization.** A direct call that passes known fn values (fn items, closure literals, a
 //! local set once to one, or a param that is itself specialized) reaches a node of the callee for
@@ -707,8 +708,8 @@ struct Kinds {
 const FNISH: u8 = 1;
 /// A fn type.
 const FN: u8 = 2;
-/// `&mut T`, `T` [`FNISH`].
-const MUT_FN_REF: u8 = 4;
+/// `&T` or `&mut T`, `T` [`FNISH`].
+const FN_REF: u8 = 4;
 /// A raw pointer type.
 const PTR: u8 = 8;
 
@@ -724,12 +725,12 @@ impl Kinds {
             })
             .collect();
         for (i, (_, k)) in table.iter().enumerate() {
-            if let TypeKind::Ref { mutable: true, inner } = k
+            if let TypeKind::Ref { inner, .. } = k
                 && !inner.is_none()
                 && !inner.is_local()
                 && bits.get(inner.idx()).is_some_and(|b| b & FNISH != 0)
             {
-                bits[i] |= MUT_FN_REF;
+                bits[i] |= FN_REF;
             }
         }
         Kinds { bits }
@@ -740,57 +741,20 @@ impl Kinds {
     }
 }
 
-/// The event that makes the fn-typed place `e` untracked, if `e` is a tracked one (a local or a
-/// field): its address is taken, so writes through that address are no events.
-fn untrack<'b>(
-    icx: &ItemCx<'_>,
-    body: &'b TypedBody,
-    closures: &[Closure],
-    kinds: &Kinds,
-    e: u32,
-) -> Option<What<'b>> {
-    if !kinds.has(body.ty(e), FNISH) {
-        return None;
-    }
-    match classify(icx, body, closures, e) {
-        Src::Local(b) => Some(What::Init { b, src: Src::Top }),
-        Src::Field(decl, index) => Some(What::Store { decl, index, src: Src::Top }),
-        _ => None,
-    }
+/// Whether field `index` of struct `decl` is declared with a fn type (a tracked field slot).
+fn fn_field(sigs: &Sigs, kinds: &Kinds, decl: DeclId, index: u32) -> bool {
+    sigs.adt(decl)
+        .and_then(|a| a.variants.first())
+        .and_then(|v| v.fields.get(index as usize))
+        .is_some_and(|f| kinds.has(f.ty, FN))
 }
 
-/// The operand of borrow `n` (`&e` or `&mut e`; `&&e` is two borrows), and whether it is `&mut`.
-fn borrow_of(icx: &ItemCx<'_>, n: u32) -> Option<(u32, bool)> {
-    if icx.kind(n) != Some(Syn::Unary) {
-        return None;
-    }
-    let a = icx.a(n);
-    if !icx.is(a, Term::Amp) && !icx.is(a, Term::AmpAmp) {
-        return None;
-    }
-    let c = icx.last_child(n)?;
-    // `&&e`: the outer borrow's operand is the inner one, which starts at the same token
-    let inner = icx.a(c) == a;
-    Some((c, !inner && icx.is(a + 1, Term::KwMut)))
-}
-
-/// The struct-pattern events of pattern `p`: a field of a struct bound through a `&mut`
-/// reference (`let S.{ f } = p;` with `p: &mut S`) gives a `&mut` to the field place.
-fn pattern_events<'b>(
-    icx: &ItemCx<'_>,
-    body: &'b TypedBody,
-    sigs: &Sigs,
-    kinds: &Kinds,
-    p: u32,
-) -> Vec<What<'b>> {
+/// The tracked fields struct pattern `p` names (`S.{ f }`, `S.{ f: q }`): a pattern is no
+/// harmless use (it may bind the field by reference).
+fn pattern_fields(icx: &ItemCx<'_>, sigs: &Sigs, kinds: &Kinds, p: u32) -> Vec<(DeclId, u32)> {
     let mut out = Vec::new();
     let a = icx.a(p);
-    if !icx.is(a, Term::Ident) {
-        return out;
-    }
-    let e = icx.chain_end(a);
-    let (rec, paren) = (icx.is(e + 1, Term::DotLBrace), icx.is(e + 1, Term::LParen));
-    if !rec && !paren {
+    if !icx.is(a, Term::Ident) || !icx.is(icx.chain_end(a) + 1, Term::DotLBrace) {
         return out;
     }
     let Some(crate::resolve::Res::Decl(d)) = icx.uses(p).last().map(|u| u.res) else { return out };
@@ -798,38 +762,45 @@ fn pattern_events<'b>(
         return out;
     }
     let Some(fields) = sigs.adt(d).and_then(|a| a.variants.first()).map(|v| &v.fields) else { return out };
-    // the binding node of a sub-pattern that is a plain binding (`x`, `mut x`)
-    let bound = |sp: u32| -> Option<u32> {
-        let t = icx.a(sp);
-        let plain = icx.is(t, Term::KwMut)
-            || (icx.is(t, Term::Ident)
-                && icx.chain_end(t) == t
-                && !icx.is(t + 1, Term::LParen)
-                && !icx.is(t + 1, Term::DotLBrace));
-        plain.then_some(sp)
-    };
-    for (i, &k) in icx.kids_vec(p).iter().enumerate() {
-        let (index, b) = if rec {
-            if icx.kind(k) != Some(Syn::FieldPat) {
-                continue;
-            }
-            let name = icx.sym(icx.a(k));
-            let Some(fi) = fields.iter().position(|f| f.name == name) else { continue };
-            let b = match icx.child(k, Syn::Pattern) {
-                Some(sp) => bound(sp),
-                None => Some(k),
-            };
-            (fi, b)
-        } else {
-            (i, bound(k))
-        };
-        if let Some(b) = b
-            && body.local(crate::ids::BindingRef { node: b }).is_some_and(|t| kinds.has(t, MUT_FN_REF))
+    for &k in icx.kids_vec(p).iter() {
+        if icx.kind(k) != Some(Syn::FieldPat) {
+            continue;
+        }
+        let name = icx.sym(icx.a(k));
+        if let Some(fi) = fields.iter().position(|f| f.name == name)
+            && fn_field(sigs, kinds, d, fi as u32)
         {
-            out.push(What::Store { decl: d, index: index as u32, src: Src::Top });
+            out.push((d, fi as u32));
         }
     }
     out
+}
+
+/// A position that reads the value there by copy: a call's argument or callee, a `let`
+/// initializer, the source of `=`, a struct literal field, a `return` value.
+const READ: u8 = 1;
+/// The target of a plain `=`.
+const TARGET: u8 = 2;
+
+/// Marks node `m`, the trivial wrappers below it, and the inside of parentheses around it with
+/// `v` in `pos` (indexed from node `lo`).
+fn mark(icx: &ItemCx<'_>, lo: u32, pos: &mut [u8], m: u32, v: u8) {
+    let mut work = vec![m];
+    while let Some(x) = work.pop() {
+        let chain = crate::threads::wrapper_chain(icx, x);
+        for &c in &chain {
+            if let Some(p) = c.checked_sub(lo).and_then(|i| pos.get_mut(i as usize)) {
+                *p |= v;
+            }
+        }
+        let core = chain.last().copied().unwrap_or(x);
+        if icx.kind(core) == Some(Syn::Primary) && icx.is(icx.a(core), Term::LParen) {
+            let kids = icx.kids_vec(core);
+            if kids.len() == 1 && !icx.is(icx.close(icx.a(core)).saturating_sub(1), Term::Comma) {
+                work.push(kids[0]);
+            }
+        }
+    }
 }
 
 /// The fn-value flow events of `body` (module docs).
@@ -846,23 +817,27 @@ fn flow_events<'b>(
     let fnish = |t: TypeId| kinds.has(t, FNISH);
     let mut simple: Vec<u32> = Vec::new();
     let lo = icx.ast.descendants(body.node).start;
+    let mut pos = vec![0u8; (body.node + 1 - lo) as usize];
+    // field steps of tracked fields: (token, its `Postfix` node, the field's value is called)
+    let mut field_steps: Vec<(u32, u32, bool)> = Vec::new();
     for n in lo..=body.node {
         match icx.kind(n) {
-            Some(Syn::Unary) => {
-                if let Some((c, true)) = borrow_of(icx, n)
-                    && let Some(w) = untrack(icx, body, closures, kinds, c)
-                {
-                    push(icx.a(n), icx.a(n), w);
+            Some(Syn::Pattern) => {
+                for (decl, index) in pattern_fields(icx, sigs, kinds, n) {
+                    push(icx.a(n), icx.a(n), What::Store { decl, index, src: Src::Top });
                 }
             }
-            Some(Syn::Pattern) => {
-                for w in pattern_events(icx, body, sigs, kinds, n) {
-                    push(icx.a(n), icx.a(n), w);
+            Some(Syn::Stmt) if icx.is(icx.a(n), Term::KwReturn) => {
+                if let Some(e) = icx.last_child(n) {
+                    mark(icx, lo, &mut pos, e, READ);
                 }
             }
             Some(Syn::Stmt) if icx.is(icx.a(n), Term::KwLet) => {
                 let kids = icx.kids_vec(n);
                 let (Some(&pat), Some(&init)) = (kids.first(), kids.last()) else { continue };
+                if kids.len() >= 2 {
+                    mark(icx, lo, &mut pos, init, READ);
+                }
                 if let Some(t) = body.local(crate::ids::BindingRef { node: pat })
                     && fnish(t)
                 {
@@ -876,12 +851,17 @@ fn flow_events<'b>(
             }
             Some(Syn::ExprStmt) => {
                 let kids = icx.kids_vec(n);
-                if kids.len() < 3 || !icx.is(icx.a(kids[1]), Term::Eq) || !fnish(body.ty(kids[2])) {
+                if kids.len() < 3 || !icx.is(icx.a(kids[1]), Term::Eq) {
+                    continue;
+                }
+                mark(icx, lo, &mut pos, kids[0], TARGET);
+                mark(icx, lo, &mut pos, kids[2], READ);
+                if !fnish(body.ty(kids[2])) {
                     continue;
                 }
                 let src = classify(icx, body, closures, kids[2]);
-                // any other target is memory behind a pointer or an element: a pointer to a tracked
-                // place exists only after an event made the place untracked (`untrack`)
+                // any other target is no tracked place (memory behind a pointer, an element): a
+                // pointer to a tracked place comes from a use that makes it untracked (below)
                 match classify(icx, body, closures, kids[0]) {
                     Src::Local(b) => push(icx.a(n), icx.a(n), What::Init { b, src }),
                     Src::Field(decl, index) => push(icx.a(n), icx.a(n), What::Store { decl, index, src }),
@@ -895,6 +875,7 @@ fn flow_events<'b>(
                     continue;
                 };
                 for &e in icx.kids_vec(n).iter() {
+                    mark(icx, lo, &mut pos, e, READ);
                     if !fnish(body.ty(e)) {
                         continue;
                     }
@@ -919,35 +900,26 @@ fn flow_events<'b>(
                         continue;
                     }
                     if tk != Term::LParen as u8 {
+                        if let Some(Target::Field { decl, index, .. }) = body.target(t)
+                            && fn_field(sigs, kinds, *decl, *index)
+                        {
+                            let called = icx.is(t + 1, Term::LParen)
+                                && matches!(body.target(t + 1), Some(Target::FnValue { .. }));
+                            field_steps.push((t, n, called));
+                        }
                         t += 1;
                         continue;
                     }
                     let lp = t;
                     t = icx.close(lp) + 1;
                     let seg = callee_tok(icx, lp);
-                    // a `&mut self` method of a fn-typed place borrows the place
-                    if let Some(Target::Method { adjust, .. } | Target::Builtin { adjust, .. }) =
-                        body.target(seg)
-                        && adjust.autoref == Some(true)
-                        && adjust.derefs == 0
-                    {
-                        let recv = if seg == prim_end + 2 {
-                            untrack(icx, body, closures, kinds, prim)
-                        } else if let Some(Target::Field { decl, index, .. }) =
-                            body.target(seg.saturating_sub(2))
-                            && sigs
-                                .adt(*decl)
-                                .and_then(|a| a.variants.first())
-                                .and_then(|v| v.fields.get(*index as usize))
-                                .is_some_and(|f| kinds.has(f.ty, FN))
-                        {
-                            Some(What::Store { decl: *decl, index: *index, src: Src::Top })
-                        } else {
-                            None
-                        };
-                        if let Some(w) = recv {
-                            push(seg, seg, w);
+                    if let Some(&k) = kids.iter().skip(1).find(|&&k| icx.a(k) == lp + 1) {
+                        for &e in icx.kids_vec(k).iter() {
+                            mark(icx, lo, &mut pos, e, READ);
                         }
+                    }
+                    if lp == prim_end + 1 && matches!(body.target(lp), Some(Target::FnValue { .. })) {
+                        mark(icx, lo, &mut pos, prim, READ);
                     }
                     let (tok, offset, builtin) = match (body.target(lp), body.target(seg)) {
                         (Some(Target::Fn { .. } | Target::TraitMethod { .. }), _) => (lp, 0, false),
@@ -984,6 +956,39 @@ fn flow_events<'b>(
             _ => {}
         }
     }
+    // A tracked place stays precise only while every use of it reads its value by copy (`READ`)
+    // or is the target of a plain `=` (an event above). Any other use (a borrow, a compound
+    // assignment, an operator, a receiver, a pattern, an f-string hole, a form added later)
+    // makes it untracked.
+    let at = |m: u32| m.checked_sub(lo).and_then(|i| pos.get(i as usize)).copied().unwrap_or(0);
+    let from = icx.res.uses.partition_point(|u| u.node < lo);
+    for u in icx.res.uses[from..].iter().take_while(|u| u.node <= body.node) {
+        let (crate::resolve::Res::Local(b) | crate::resolve::Res::SelfValue(b)) = u.res else { continue };
+        if !body.local(b).is_some_and(fnish) {
+            continue;
+        }
+        let plain = !u.in_fmt
+            && icx.kind(u.node) == Some(Syn::Primary)
+            && icx.a(u.node) == u.token
+            && icx.end_tok(u.node) == u.token;
+        if !plain || at(u.node) == 0 {
+            push(u.token, u.token, What::Init { b: b.node, src: Src::Top });
+        }
+    }
+    let mut harmless: Vec<u32> = field_steps
+        .iter()
+        .filter(|&&(t, n, called)| called || (t == icx.end_tok(n) && at(n) != 0))
+        .map(|s| s.0)
+        .collect();
+    harmless.sort_unstable();
+    for (t, target) in &body.targets {
+        if let Target::Field { decl, index, .. } = target
+            && fn_field(sigs, kinds, *decl, *index)
+            && harmless.binary_search(t).is_err()
+        {
+            push(*t, *t, What::Store { decl: *decl, index: *index, src: Src::Top });
+        }
+    }
     // any other fn-valued local (a pattern binding but `let x`) is not tracked
     for &(b, t) in &body.locals {
         let is_param = params.contains(&b) || closures.iter().any(|c| c.params.contains(&b));
@@ -993,13 +998,11 @@ fn flow_events<'b>(
     }
 }
 
-/// The cast events of a body outside the built-in packages: a borrow of a tracked place made into
-/// a pointer makes the place untracked, and each cast to a raw pointer type is a [`What::Cast`]
-/// ([`Walk::cast`]).
+/// The cast events of a body outside the built-in packages: each cast to a raw pointer type is a
+/// [`What::Cast`] ([`Walk::cast`]).
 fn cast_events<'b>(
     icx: &ItemCx<'_>,
     body: &'b TypedBody,
-    closures: &[Closure],
     kinds: &Kinds,
     push: &mut dyn FnMut(u32, u32, What<'b>),
 ) {
@@ -1009,24 +1012,6 @@ fn cast_events<'b>(
             continue;
         }
         let Some(&first) = icx.kids_vec(n).first() else { continue };
-        let mut op = first;
-        while icx.kind(op) == Some(Syn::Primary) && icx.is(icx.a(op), Term::LParen) {
-            let kids = icx.kids_vec(op);
-            if kids.len() != 1 || icx.is(icx.close(icx.a(op)).saturating_sub(1), Term::Comma) {
-                break;
-            }
-            op = kids[0];
-        }
-        let mut depth = 0;
-        while let Some((c, _)) = borrow_of(icx, op)
-            && depth < 64
-        {
-            if let Some(w) = untrack(icx, body, closures, kinds, c) {
-                push(icx.a(n), icx.a(n), w);
-            }
-            op = c;
-            depth += 1;
-        }
         let to = body.ty(n);
         if kinds.has(to, PTR) {
             push(icx.a(n), icx.a(n), What::Cast { from: body.ty(first), to });
@@ -1113,12 +1098,12 @@ fn extract<'b>(
     // type only through a param or field declared generic, which is untracked (`Walk::expand`,
     // `Walk::val`)
     let flows = body.node_types.iter().any(|&t| kinds.has(t, FN))
-        || body.locals.iter().any(|&(_, t)| kinds.has(t, FN | MUT_FN_REF));
+        || body.locals.iter().any(|&(_, t)| kinds.has(t, FN | FN_REF));
     if flows {
         flow_events(icx, body, sigs, &closures, &params, kinds, &mut push);
     }
     if user && any_cast {
-        cast_events(icx, body, &closures, kinds, &mut push);
+        cast_events(icx, body, kinds, &mut push);
     }
     drop(push);
     for (k, c) in closures.iter().enumerate() {

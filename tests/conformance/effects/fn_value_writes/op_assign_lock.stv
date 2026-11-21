@@ -1,0 +1,26 @@
+// Holding rank 1, a fn value a compound assignment changed re-locks the mutex.
+import std.core;
+import std.io;
+import std.sync;
+
+impl core.Mul for fn(&sync.Mutex<u32, 1>) {
+    fn mul(self, rhs: Self) -> Self {
+        return take;
+    }
+}
+
+fn nop(m: &sync.Mutex<u32, 1>) {}
+
+fn take(m: &sync.Mutex<u32, 1>) {
+    let g = m.lock();
+}
+
+fn main() {
+    let m = sync.Mutex::<u32, 1>.new(0);
+    let g = m.lock();
+    let mut f: fn(&sync.Mutex<u32, 1>) = nop;
+    f *= nop;
+    io.print("relocking\n");
+    f(&m); //~ ERROR E1405
+    io.print("unreachable\n");
+}

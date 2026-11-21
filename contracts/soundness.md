@@ -172,41 +172,42 @@ copy constraints between slots (each local and param of an instance, each struct
 with a fn type), fed by `let x = e`, `x = e`, `s.f = e`, struct literals, and the arguments of
 direct and fn-value calls; a local fed once, by a fn item or closure literal, holds that value
 everywhere; every other source (a call result, a value `if` / `match`, a payload, a read through a
-reference, a param or field declared generic) is untracked. A slot is precise only while every
-write to it is such an event: taking its address makes it untracked (table below). A graph left
-incomplete (an instantiation chain too deep, too many nodes) rejects the program (E0902 case
-`graph`).
+reference, a param or field declared generic) is untracked. A tracked place (a fn-typed local or
+param, a field declared with a fn type: one slot per field over all instances and values) is
+precise only while every syntactic use of it is one of these harmless uses:
 
-Where a fn value can be stored, and how the flow sees each write (a fn value is a view: LANG.md
-§3):
+- its declaration (a `let x` binding, a param);
+- the target of a plain `=` (`x = e`, `s.f = e`, also through `p.f`), which is an event;
+- a read of its value by copy as the callee of a fn-value call (`x(..)`, `s.f(..)`), an argument
+  of any call, a `let` initializer, the source of a plain `=`, a struct literal field, or a
+  `return` value, possibly in parentheses.
 
-| Place | Written by | Flow |
-|---|---|---|
-| local of fn type | `let x = e`, `x = e` (also in a closure or `spawn` body: the same slot) | event |
-| local, address taken: `&mut x` (then `*p = g`, `mem.replace`, `mem.swap`, a helper, a generic `&mut T`, a view field holding it), a `&mut self` receiver (`impl Tr for fn()`), outside the built-in packages a borrow cast to a raw pointer | anything through the pointer | slot untracked |
-| local bound by a pattern other than `let x` (arm, tuple, `for`) | the pattern | untracked |
-| param of fn type | the argument of every call that reaches the node | event; params are immutable, no `&mut` |
-| field declared with a fn type (one slot per field, all instances and values) | `s.f = e` (also through `p.f`), a struct literal | event |
-| that field, address taken: `&mut s.f` by any path, a `&mut self` receiver `s.f.m()`, a struct pattern binding it through a `&mut` (`let S.{ f } = &mut s`, `match self`), a borrow cast to a raw pointer | anything through the pointer | slot untracked |
-| a whole struct value (`*p = s2`, `mem.swap(&mut a, &mut b)`, a `Vec<S>` move) | a copy of a value of the type | none needed: every value's field holds a value of the slot |
-| field declared generic, tuple / array / slice element, enum payload (`Option<fn()>`), `Vec` / iterator element | anything | read untracked |
-| a call result, a value `if` / `match` | | untracked |
-| `static`, `const`; `Mutex`, `Once`, `Cell`, `UnsafeCell`, `Arena`; atomics; a thread's captures | | impossible: E0413, E0414 (no `view` bound), ints only, E0802 (a fn value is neither Send nor Sync) |
-| memory a cast outside the built-in packages reinterprets (another pointee, an int made a pointer, `*mut` from `&` or `*const`) | bytes | every call of each fn type the two pointees hold reaches its table |
-
-A write through `&mut T` in generic code (`*p = v`, `p.write(v)`) reaches a tracked slot only
-through one of those addresses: generic code makes a `&mut T` only from a place of type `T` it
-owns (an element, a field declared generic: untracked) or one it is given. The built-in packages
-reinterpret memory only where no tracked place lives (a container's buffer, a cell's content,
-the thread record), and C code writes no fn value (its block's obligation). A call through a fn
-value whose bits were made from another type is undefined behaviour (LANG.md §3).
-**Guarantees.** If every write of a fn-typed place is one of those events or makes its slot
-untracked, the edges of each call include every fn or closure that call can run, so every run is
-a path of the graph. **What would break it.** A way to write a tracked place that the table above
-misses (a new kind of borrow, a built-in method taking `&mut` of its receiver unseen), unsafe code
-in a built-in package that breaks the rule above, an unseen call in a built-in package, and the
-specialization of a callee on known fn values (at most 16 nodes per instance, then the shared
-node, whose param slots must take the values of every call that reaches it).
+Any other use, of a kind the flow code knows or not (a borrow `&x` / `&mut x`, a compound
+assignment, an operator operand, a method receiver by value or by reference, a struct pattern
+naming the field, a value `if` / `match` arm, an array or tuple element, an f-string hole, a `from`
+origin), makes the slot untracked, and so does every use of a form added later: the check lists
+the harmless forms and treats the rest as untracked. A read by copy writes nothing, and a plain
+`=` is an event, so a write that no event shows (through a pointer, inside a callee, by a user
+operator impl on a fn type) needs a use of another kind first. Whole values of a struct copied
+or swapped (`*p = s2`, `mem.swap(&mut a, &mut b)`) carry field values the slot already holds. A
+fn value elsewhere (a field declared generic, a tuple / array / slice element, an enum payload, a
+`Vec` element) is read as untracked. A `static`, `const`, `Mutex`, `Once`, `Cell`, `UnsafeCell`,
+`Arena`, atomic, or thread capture cannot hold one (E0413, E0414, E0802). A cast outside the
+built-in packages that reinterprets memory (another pointee, an int made a pointer, `*mut` from `&`
+or `*const`) makes every call of each fn type the two pointees hold reach its table. The built-in
+packages reinterpret memory only where no tracked place lives (a container's buffer, a cell's
+content, the thread record, which holds a `fn()` as two words), and C code writes no fn value
+(its block's obligation). A call through a fn value whose words were not made as a value of a fn
+type with its params and return type (a cast from another fn type) is undefined behaviour
+(LANG.md §3): the tables are keyed by params and return type; the runtime rebuilds a `fn()` only
+from the words of a `fn()`. A graph left incomplete (an instantiation chain too
+deep, too many nodes) rejects the program (E0902 case `graph`). **Guarantees.** The edges of each
+call include every fn or closure that call can run, so every run is a path of the graph. **What
+would break it.** A use the check counts as harmless that is not a copy read (a built-in method
+that takes its receiver by reference while its argument position is counted as a read would be
+one), unsafe code in a built-in package that breaks the rule above, an unseen call in a built-in
+package, and the specialization of a callee on known fn values (at most 16 nodes per instance,
+then the shared node, whose param slots must take the values of every call that reaches it).
 
 ## Effects and `without(..)`: a denied effect never happens
 

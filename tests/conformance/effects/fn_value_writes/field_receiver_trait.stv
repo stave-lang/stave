@@ -1,0 +1,34 @@
+// A `&mut self` method called on a fn field: the field slot is untracked.
+import std.core;
+import std.io;
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+trait Set {
+    fn set(&mut self);
+}
+
+impl Set for fn() {
+    fn set(&mut self) {
+        *self = noisy;
+    }
+}
+
+view struct H {
+    f: fn(),
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let mut h = H.{ f: nop };
+    h.f.set();
+    let g = h.f;
+    g();
+}
+
+fn main() {
+    quiet();
+}
