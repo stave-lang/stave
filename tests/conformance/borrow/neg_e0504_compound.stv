@@ -1,69 +1,60 @@
 //~ CHECK-ONLY
-// `p op= e` is `p = p op e`: with a user operator on a non-Copy type the left operand is a
-// by-value use of `p`, evaluated before `e`. Out of a place that cannot be moved from (behind
-// a reference, an index, a capture, a part of a `Drop` value) it is E0504, as the spelled-out
-// form, and so is a part of a local (a value moves whole); on a local it is a move that the
-// write re-initializes, and `e` may not use `p` (E0502).
-import std.vec;
+// `p op= e` is `p = p op e`: the left operand is a by-value use of `p`, evaluated before `e`.
+// A user operator's self type is Copy (E0422), so it moves only an operand of a generic type
+// without a `Copy` bound. Out of a place that cannot be moved from (behind a reference, an
+// index, a capture, a part of a `Drop` value) it is E0504, as the spelled-out form, and so is a
+// part of a local (a value moves whole); on a local it is a move that the write re-initializes,
+// and `e` may not use `p` (E0502).
+struct W<T> { pub d: T }
+impl<T> Drop for W<T> { fn drop(&mut self) { } }
 
-struct D { pub id: u32 }
-impl Drop for D { fn drop(&mut self) { } }
-impl Add for D { fn add(self, rhs: Self) -> Self { return D.{ id: self.id + rhs.id }; } }
+struct P<T> { pub d: T, pub n: u32 }
 
-struct W { pub d: D }
-impl Drop for W { fn drop(&mut self) { } }
-
-struct P { pub d: D, pub n: u32 }
-
-fn mk(k: u32) -> D { return D.{ id: k }; }
-fn dup(d: &D) -> D { return D.{ id: d.id }; }
-
-fn through_ref(r: &mut D) {
-    *r += mk(1); //~ ERROR E0504
+fn through_ref<T: Add>(r: &mut T, e: T) {
+    *r += e; //~ ERROR E0504
 }
 
-fn spelled_out(r: &mut D) {
-    *r = *r + mk(1); //~ ERROR E0504
+fn spelled_out<T: Add>(r: &mut T, e: T) {
+    *r = *r + e; //~ ERROR E0504
 }
 
-fn index(a: &mut [D; 2]) {
-    a[0] += mk(2); //~ ERROR E0504
+fn index<T: Add>(a: &mut [T; 2], e: T) {
+    a[0] += e; //~ ERROR E0504
 }
 
-fn owned_index() {
-    let mut a = [mk(1), mk(2)];
-    a[1] += mk(3); //~ ERROR E0504
+fn owned_index<T: Add>(x: T, y: T, e: T) {
+    let mut a = [x, y];
+    a[1] += e; //~ ERROR E0504
 }
 
-fn drop_part(w: W) {
+fn drop_part<T: Add>(w: W<T>, e: T) {
     let mut v = w;
-    v.d += mk(4); //~ ERROR E0504
+    v.d += e; //~ ERROR E0504
 }
 
-fn capture() {
-    let mut d = mk(1);
-    let f = fn() { d += mk(5); }; //~ ERROR E0504
-    f();
+fn capture<T: Add>(d: T) {
+    let mut x = d;
+    let f = fn(e: T) { x += e; }; //~ ERROR E0504
 }
 
-fn rhs_reads_old(r: &mut D) {
+fn rhs_reads_old<T: Add>(r: &mut T, dup: fn(&T) -> T) {
     *r += dup(r); //~ ERROR E0504
 }
 
-fn local_rhs_reads(d: D) {
+fn local_rhs_reads<T: Add>(d: T, dup: fn(&T) -> T) {
     let mut x = d;
     x += dup(&x); //~ ERROR E0502
 }
 
-fn ok_local(d: D) -> u32 {
+fn ok_local<T: Add>(d: T, e: T) -> T {
     let mut x = d;
-    x += mk(2);
-    return x.id;
+    x += e;
+    return x;
 }
 
-fn field(p: P) {
+fn field<T: Add>(p: P<T>, e: T) {
     let mut q = p;
-    q.d += mk(3); //~ ERROR E0504
+    q.d += e; //~ ERROR E0504
 }
 
 fn main() -> i32 {

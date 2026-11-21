@@ -6,6 +6,8 @@ view struct H {
     f: fn(),
 }
 
+impl Copy for H {}
+
 fn nop() {}
 
 fn noisy() {

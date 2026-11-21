@@ -2,13 +2,13 @@
 // Operands are evaluated left to right, the receiver first. A by-value operand that is not Copy
 // moves its place when it is evaluated: a later operand of the same call, method call, literal,
 // or operator that uses the place, or a part of it, uses a moved value (E0502). Each shape
-// would give the value two owners.
+// would give the value two owners. An operator moves only an operand of a generic type without
+// a `Copy` bound: a user operator's self type is Copy (E0422).
 import std.sync;
 import std.vec;
 
 struct D { pub id: u32 }
 impl Drop for D { fn drop(&mut self) { } }
-impl Add for D { fn add(self, rhs: Self) -> Self { return D.{ id: self.id + rhs.id }; } }
 
 struct S { pub d: D, pub v: vec.Vec<u32>, pub n: u32 }
 impl S {
@@ -92,11 +92,11 @@ fn variant(d: D) {
     let e = E.Two(d, d); //~ ERROR E0502
 }
 
-fn operator(d: D) {
+fn operator<T: Add>(d: T) {
     let e = d + d; //~ ERROR E0502
 }
 
-fn compound(d: D) {
+fn compound<T: Add>(d: T) {
     let mut x = d;
     x += x; //~ ERROR E0502
 }
