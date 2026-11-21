@@ -1171,40 +1171,20 @@ impl<'a, 'b> Builder<'a, 'b> {
                 }
                 return;
             };
-            // `p op= e` takes the value of `p` before `e` is evaluated. One that is not Copy is
-            // moved out of `p` until the write puts the result back: `e` may not use `p`. Out of a
-            // place that cannot be moved from (behind a reference, an index, a capture) it is
-            // kept under a shared loan instead, so `e` may only read `p`.
-            let mut held = None;
+            // `p op= e` is `p = p op e`: the left operand is a by-value use of `p` evaluated
+            // before `e` (a move when not Copy, so `e` may not use `p`, and a place that cannot
+            // be moved from is E0504), and the write re-initializes `p`
             let old = if !compound {
                 None
             } else if self.tys.is_copy(lp.ty) {
                 self.read(V::P(lp.clone()), lhs)
             } else {
                 let span = self.span(lhs);
-                let behind =
-                    lp.proj.iter().any(|x| matches!(x, Proj::Deref(_) | Proj::Index | Proj::Column(_)));
-                let l = &self.body.locals[lp.local as usize];
-                if behind || l.capture.is_some() || l.guard {
-                    held = match self.borrow(lp.clone(), false, false, span, lhs).0 {
-                        V::P(t) => Some(t),
-                        _ => None,
-                    };
-                    self.read(V::P(lp.clone()), lhs)
-                } else {
-                    self.body.move_sites.push((lp.clone(), span));
-                    let site = (self.body.move_sites.len() - 1) as u32;
-                    let mv = Operand { kind: OpKind::Move, place: lp.clone(), span, node: lhs, site };
-                    Some(self.hold(mv))
-                }
+                let o = self.op_of_place(lp.clone(), span, lhs, true);
+                Some(self.hold(o))
             };
             let rv = self.expr(rhs);
             let Some(r) = self.operand(rv, rhs) else { return };
-            if let Some(t) = held {
-                let span = self.span(lhs);
-                let o = self.op_of_place(t, span, lhs, false);
-                self.push(StmtKind::Read(o), span, lhs);
-            }
             let rv = match old {
                 Some(o) => {
                     let user = self.tb.target(icx.a(op)).cloned();
