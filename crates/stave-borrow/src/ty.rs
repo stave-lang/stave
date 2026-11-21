@@ -381,6 +381,14 @@ impl<'a> Tys<'a> {
         r
     }
 
+    /// Whether `t` is an ADT with an `impl Drop` of its own (not only drop glue of its fields).
+    pub fn has_drop_impl(&mut self, t: TypeId) -> bool {
+        let TypeKind::Adt { def, .. } = self.kind(t) else { return false };
+        self.drop_impls
+            .iter()
+            .any(|&i| self.sigs.impl_def(i).is_some_and(|d| d.head == Some(stave_sema::TypeHead::Adt(def))))
+    }
+
     /// The pointee of a reference or raw pointer.
     pub fn deref(&self, t: TypeId) -> Option<(TypeId, DerefKind)> {
         match self.ov.kind(t) {

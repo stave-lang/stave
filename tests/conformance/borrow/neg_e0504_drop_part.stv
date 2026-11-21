@@ -1,0 +1,85 @@
+//~ CHECK-ONLY
+// No part of a value whose type has an `impl Drop` may be moved out: its destructor runs on the
+// whole value and reads every part (E0504 case `drop`). By field path, by a pattern binding
+// (`let`, `match`, struct and variant payloads), out of a temporary, and out of a nested part.
+// Copy parts are copied; the whole value moves; `mem.replace` takes a part and leaves another.
+import std.mem;
+import std.vec;
+
+struct W { pub v: vec.Vec<u32>, pub n: u32 }
+impl Drop for W { fn drop(&mut self) { } }
+
+struct Outer { pub w: W, pub t: vec.Vec<u32> }
+
+enum E { A(vec.Vec<u32>), B }
+impl Drop for E { fn drop(&mut self) { } }
+
+struct H { pub arr: [vec.Vec<u32>; 1] }
+impl Drop for H { fn drop(&mut self) { } }
+
+fn mk() -> W { return W.{ v: vec.Vec::<u32>.new(), n: 1 }; }
+
+fn field(w: W) -> vec.Vec<u32> {
+    return w.v; //~ ERROR E0504
+}
+
+fn let_field(w: W) {
+    let x = w.v; //~ ERROR E0504
+}
+
+fn let_pattern(w: W) {
+    let W.{ v, n } = w; //~ ERROR E0504
+}
+
+fn match_pattern(w: W) -> u32 {
+    match w {
+        W.{ v: x, n } => { return n; } //~ ERROR E0504
+    }
+}
+
+fn payload(e: E) -> u32 {
+    match e {
+        E.A(v) => { return 1; } //~ ERROR E0504
+        E.B => { return 0; }
+    }
+}
+
+fn temporary() -> vec.Vec<u32> {
+    return mk().v; //~ ERROR E0504
+}
+
+fn nested(o: Outer) -> vec.Vec<u32> {
+    return o.w.v; //~ ERROR E0504
+}
+
+fn array_field(h: H) -> [vec.Vec<u32>; 1] {
+    return h.arr; //~ ERROR E0504
+}
+
+fn argument(w: W) -> usize {
+    return id(w.v).len(); //~ ERROR E0504
+}
+
+fn id(v: vec.Vec<u32>) -> vec.Vec<u32> { return v; }
+
+fn ok_copy_part(w: W) -> u32 {
+    return w.n;
+}
+
+fn ok_whole(o: Outer) -> W {
+    let t = o.t;
+    return o.w;
+}
+
+fn ok_replace(w: W) -> vec.Vec<u32> {
+    let mut w2 = w;
+    return mem.replace(&mut w2.v, vec.Vec::<u32>.new());
+}
+
+fn ok_borrow(w: &W) -> usize {
+    return w.v.len();
+}
+
+fn main() -> i32 {
+    return 0;
+}

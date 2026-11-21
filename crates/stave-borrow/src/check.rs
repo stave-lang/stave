@@ -21,7 +21,7 @@
 use stave_diag::Span;
 
 use crate::bits::Bits;
-use crate::cfg::{Body, LoanId, LocalId, OpKind, Operand, Place, Proj, RetCheck, Rvalue, Stmt, StmtKind};
+use crate::cfg::{Body, LoanId, LocalId, MoveOut, OpKind, Operand, Place, Proj, RetCheck, Rvalue, Stmt, StmtKind};
 use crate::loans::{CallStore, Flow, Misfit, State, for_each_op};
 use crate::ty::DerefKind;
 
@@ -91,9 +91,8 @@ pub enum Finding {
     /// the clause, or the return type when `clause` is false); `copy`: the clause names the param
     /// as `from copy`, which covers only the origins of the view it points to.
     Uncovered { span: Span, param: u32, from: Span, clause: bool, copy: bool },
-    /// E0504: a by-value use of a non-Copy place behind a dereference or an index, or of a
-    /// capture (`capture`: the closure's span).
-    MoveOut { place: Place, span: Span, capture: Option<Span> },
+    /// E0504: a by-value use of a non-Copy place that cannot be moved from.
+    MoveOut { place: Place, span: Span, why: MoveOut },
     /// E0513: a ref-like value written through a dereference, or stored by a call through a
     /// `&mut` argument, has origins a view object it may land in cannot take.
     ViewWrite { place: Place, span: Span, why: Unfit },
@@ -657,12 +656,12 @@ fn rewritten_temps(body: &Body) -> Bits {
 /// E0504: one finding per span of the body's bad moves.
 fn bad_moves(body: &Body, findings: &mut Vec<Finding>) {
     let mut seen: Vec<Span> = Vec::new();
-    for (place, span, capture) in &body.bad_moves {
+    for (place, span, why) in &body.bad_moves {
         if seen.contains(span) {
             continue;
         }
         seen.push(*span);
-        findings.push(Finding::MoveOut { place: place.clone(), span: *span, capture: *capture });
+        findings.push(Finding::MoveOut { place: place.clone(), span: *span, why: why.clone() });
     }
 }
 

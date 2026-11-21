@@ -263,6 +263,17 @@ pub enum RetCheck {
     From(Vec<(u32, bool)>, Span, bool),
 }
 
+/// Why a by-value use of a non-Copy place is E0504.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MoveOut {
+    /// Behind a dereference or an index, or a guard binding.
+    Behind,
+    /// A capture of the closure with this (`fn` / `spawn` token) span.
+    Capture(Span),
+    /// A part of this place, whose type has an `impl Drop`: its destructor reads every part.
+    Drop(Place),
+}
+
 #[derive(Clone, Debug)]
 pub struct Body {
     pub locals: Vec<Local>,
@@ -270,9 +281,9 @@ pub struct Body {
     pub loans: Vec<Loan>,
     /// Move sites: the moved place and the move's span.
     pub move_sites: Vec<(Place, Span)>,
-    /// E0504: by-value uses of non-Copy places behind a dereference, an index, or a capture
-    /// (place, span, the closure's span for a capture), kept as copies in the CFG.
-    pub bad_moves: Vec<(Place, Span, Option<Span>)>,
+    /// E0504: by-value uses of non-Copy places that cannot be moved from (place, span, why),
+    /// kept as copies in the CFG.
+    pub bad_moves: Vec<(Place, Span, MoveOut)>,
     pub ret: RetCheck,
     /// The `from` clauses of the fn's params (a nested body: none).
     pub declared: Vec<Store>,
@@ -679,12 +690,21 @@ impl<'a, 'b> Builder<'a, 'b> {
         let behind = p.proj.iter().any(|x| matches!(x, Proj::Deref(_) | Proj::Index | Proj::Column(_)));
         let (capture, guard) =
             self.body.locals.get(p.local as usize).map_or((None, false), |l| (l.capture, l.guard));
-        if by_value && (behind || capture.is_some() || guard) {
-            // E0504: a move out of a borrow, an index, a capture, or a guard binding; checked
-            // as a copy
-            self.body.bad_moves.push((p.clone(), span, capture.filter(|_| !behind)));
+        let why = if !by_value {
+            None
+        } else if let Some(c) = capture.filter(|_| !behind) {
+            Some(MoveOut::Capture(c))
+        } else if behind || guard {
+            Some(MoveOut::Behind)
+        } else {
+            self.drop_owner(&p).map(MoveOut::Drop)
+        };
+        // E0504: a move out of a borrow, an index, a capture, a guard binding, or a part of a
+        // value with a destructor; checked as a copy
+        let movable = by_value && why.is_none();
+        if let Some(why) = why {
+            self.body.bad_moves.push((p.clone(), span, why));
         }
-        let movable = by_value && !behind && capture.is_none() && !guard;
         if movable {
             if p.proj.is_empty()
                 && let Some(i) = self.temps.iter().rposition(|&t| t == p.local)
@@ -697,6 +717,24 @@ impl<'a, 'b> Builder<'a, 'b> {
         } else {
             Operand { kind: OpKind::Copy, place: p, span, node: n, site: u32::MAX }
         }
+    }
+
+    /// The longest proper prefix of `p` whose type has an `impl Drop` (moving `p` out of it would
+    /// leave its destructor a moved-out part to read), when `p` is reached by fields only.
+    fn drop_owner(&mut self, p: &Place) -> Option<Place> {
+        let mut t = self.body.locals.get(p.local as usize)?.ty;
+        let mut owner = None;
+        for (i, pr) in p.proj.iter().enumerate() {
+            if self.tys.has_drop_impl(t) {
+                owner = Some(Place { local: p.local, proj: p.proj[..i].to_vec(), ty: t });
+            }
+            t = match *pr {
+                Proj::Field(f) => self.tys.field_ty(t, 0, f),
+                Proj::EnumField(v, f) => self.tys.field_ty(t, v, f),
+                _ => return None,
+            };
+        }
+        owner
     }
 
     /// Operand `o` of an expression whose later operands are still to be evaluated. Operands are

@@ -175,3 +175,24 @@ the ones before them, so two operands of one rvalue never share a moved place ei
 **What would break it.** An expression kind whose operands the builder takes without this step;
 a lowering that evaluates operands in another order than the CFG; a Copy operand treated as a
 move (it reads its bytes where it stands and leaves them).
+
+## Places that are never moved from: parts of a `Drop` value
+
+**Claim.** In an accepted program no destructor (`impl Drop`) runs on a value a part of which
+was moved out.
+
+**Assumptions.** A value whose type has an `impl Drop` is dropped whole: its `drop` gets
+`&mut self` and may read every part, and drop glue then drops every field. Every by-value use
+of a non-Copy place goes through one CFG builder step (`op_of_place`): a field path, a pattern
+binding (`let`, `match`, struct and variant payloads, tuples), a by-value receiver, an operand.
+
+**Argument.** That step walks the projections of the moved place from its root and rejects
+the move (E0504 case `drop`) when a proper prefix has a type with an `impl Drop`. A move of the
+whole value is allowed: the destructor then runs once, on the new owner. Closures capture by
+reference, so a move inside one is E0504 already; an index or a dereference is E0504 already.
+So the only values left with a moved-out part are values without a destructor of their own,
+whose remaining fields are dropped one by one.
+
+**What would break it.** A move path that builds a by-value operand without that step; a drop
+glue that runs a destructor on a value whose part was taken by `p.read()` (unsafe: its
+obligation).

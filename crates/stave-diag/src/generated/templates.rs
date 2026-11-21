@@ -2282,10 +2282,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0504",
         severity: Severity::Error,
         area: "borrow",
-        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture",
+        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "owner", kind: HoleKind::Place, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
         ],
         shapes: &[
@@ -2310,6 +2311,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `&{place}` inside the closure, or take the value out with `mem.replace(&mut {place}, other)` (`import std.mem;`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "drop",
+                message: "cannot move `{place}` out of `{owner}`: the type of `{owner}` implements `Drop`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "borrow it instead (`&{place}`), or take it out and leave another value in its place with `mem.replace(&mut {place}, other)` (`import std.mem;`): the destructor of `{owner}` runs on every part",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

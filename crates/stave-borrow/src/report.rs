@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
-use crate::cfg::{Body, LoanId, Place, Proj};
+use crate::cfg::{Body, LoanId, MoveOut, Place, Proj};
 use crate::check::{Finding, Unfit, later_use};
 use crate::loans::Flow;
 use crate::ty::Tys;
@@ -232,13 +232,17 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                 };
                 out.extend(mk("E0510", case, &[("origin", &name)], span, &[("from", from)]));
             }
-            Finding::MoveOut { place, span, capture } => {
+            Finding::MoveOut { place, span, why } => {
                 let text = place_text(body, tys, &place);
-                match capture {
-                    Some(c) => {
+                match why {
+                    MoveOut::Capture(c) => {
                         out.extend(mk("E0504", Some("capture"), &[("place", &text)], span, &[("capture", c)]))
                     }
-                    None => out.extend(mk("E0504", None, &[("place", &text)], span, &[])),
+                    MoveOut::Drop(owner) => {
+                        let o = place_text(body, tys, &owner);
+                        out.extend(mk("E0504", Some("drop"), &[("place", &text), ("owner", &o)], span, &[]))
+                    }
+                    MoveOut::Behind => out.extend(mk("E0504", None, &[("place", &text)], span, &[])),
                 }
             }
             Finding::ViewWrite { place, span, why } => {

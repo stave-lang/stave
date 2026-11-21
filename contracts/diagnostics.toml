@@ -941,8 +941,8 @@ fix = { description = "give `{place}` a type with interior mutability (`atomic.U
 code = "E0504"
 severity = "error"
 area = "borrow"
-rule = "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture"
-holes = { place = "place" }
+rule = "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`"
+holes = { place = "place", owner = "place" }
 message = "cannot move `{place}` out of a borrow or an index: its type is not `Copy`"
 labels = [{ at = "primary", text = "moved here" }]
 fix = { description = "borrow it instead (`&{place}`), or take the value out and leave another in its place with `mem.replace(&mut {place}, other)` or `mem.swap` (`import std.mem;`)" }
@@ -951,6 +951,11 @@ fix = { description = "borrow it instead (`&{place}`), or take the value out and
 message = "cannot move captured `{place}` out of a closure: closures capture by reference"
 labels = [{ at = "primary", text = "moved here" }, { at = "capture", text = "captured by reference by this closure" }]
 fix = { description = "use `&{place}` inside the closure, or take the value out with `mem.replace(&mut {place}, other)` (`import std.mem;`)" }
+
+[diag.cases.drop]
+message = "cannot move `{place}` out of `{owner}`: the type of `{owner}` implements `Drop`"
+labels = [{ at = "primary", text = "moved here" }]
+fix = { description = "borrow it instead (`&{place}`), or take it out and leave another value in its place with `mem.replace(&mut {place}, other)` (`import std.mem;`): the destructor of `{owner}` runs on every part" }
 
 [[diag]]
 code = "E0510"

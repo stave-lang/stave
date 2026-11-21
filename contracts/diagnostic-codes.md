@@ -103,7 +103,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0501 | borrow conflict (borrow site, conflicting access, later use). When an access conflicts with several live loans, the loan with the smallest creation offset is reported (ties: `&mut` before `&`, then place path); the later use is the first use after the access that keeps that loan live |
 | E0502 | use after move, also by a later operand of the expression whose by-value operand moved the place (operands are evaluated left to right, the receiver first) |
 | E0503 | assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`, reported by the type checker) |
-| E0504 | move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference (`r.f`), an element `v[i]`, or a closure capture (captures are references) |
+| E0504 | move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference (`r.f`), an element `v[i]`, or a closure capture (captures are references); case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop` |
 | E0510 | returned reference or view not covered by the `from` clause; case `copy`: the value borrows the parameter itself (a field of the view it points to, or what a `&mut` in that view points to) and the clause names it `from copy` |
 | E0511 | retired: a missing `from` clause declares the empty origin set; a returned borrow of a parameter not named is E0510 |
 | E0512 | returned value borrows a local; case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again) |
