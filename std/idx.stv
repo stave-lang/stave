@@ -1,0 +1,127 @@
+// std.idx: `Id<T>`, a typed index: the number of a row of some container of T records
+// (`vec.Vec<T>`, `soa.Soa<T>`, `[T]`), a `u32` inside. Records refer to each other by Id, not by
+// pointer: an Id survives growth, a change of layout, threads, files, and the GPU. Ids of
+// different T are different types, so an `Id<Order>` never indexes the items.
+//
+// `NONE` (u32 max) is the "no row" sentinel: an optional reference costs 4 bytes in a column,
+// no `Option` tag. A row number is below `NONE`.
+//
+// An Id is not tied to one container: `new` makes one from any usize below `NONE` (ids also come
+// from files, the GPU, and sort permutations), and every use goes through the container's bounds
+// check. A stale Id, or one of another container of the same T, names a wrong row or panics
+// `Bounds`, never memory outside a container.
+//
+// Copy; Send and Sync for every T (it holds a u32); Flat when T is (the Flat rule counts type
+// arguments), so an `Id<T>` field of a Soa row needs a Flat T.
+
+import runtime.panic;
+import std.core;
+import std.soa;
+
+pub const NONE: u32 = 0xFFFF_FFFF;
+
+pub struct Id<T> {
+    v: u32,
+}
+
+impl<T> core.Copy for Id<T> {}
+
+impl<T> Id<T> {
+    // The id of row i; panics `Overflow` unless i < NONE.
+    pub fn new(i: usize) -> Id<T> {
+        if i >= (NONE as usize) {
+            panic.trap(panic.KIND_OVERFLOW, panic.user_site());
+        }
+        return Self.{ v: i as% u32 };
+    }
+
+    // The id of row i; `None` unless i < NONE.
+    pub fn checked_new(i: usize) -> Option<Id<T>> {
+        if i >= (NONE as usize) { return Option.None; }
+        return Option.Some(Self.{ v: i as% u32 });
+    }
+
+    // The id whose u32 is v, NONE included.
+    pub fn from_raw(v: u32) -> Id<T> {
+        return Self.{ v: v };
+    }
+
+    pub fn none() -> Id<T> {
+        return Self.{ v: NONE };
+    }
+
+    pub fn is_none(self) -> bool {
+        return self.v == NONE;
+    }
+
+    pub fn raw(self) -> u32 {
+        return self.v;
+    }
+
+    // The row number; panics `Bounds` on NONE, which names no row.
+    pub fn index(self) -> usize {
+        if self.v == NONE {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        return self.v as usize;
+    }
+
+    // The row number; `None` for NONE.
+    pub fn checked_index(self) -> Option<usize> {
+        if self.v == NONE { return Option.None; }
+        return Option.Some(self.v as usize);
+    }
+
+    pub fn eq(self, other: Id<T>) -> bool {
+        return self.v == other.v;
+    }
+
+    pub fn ne(self, other: Id<T>) -> bool {
+        return self.v != other.v;
+    }
+
+    // Row order; NONE is above every row.
+    pub fn lt(self, other: Id<T>) -> bool {
+        return self.v < other.v;
+    }
+
+    pub fn le(self, other: Id<T>) -> bool {
+        return self.v <= other.v;
+    }
+
+    pub fn gt(self, other: Id<T>) -> bool {
+        return self.v > other.v;
+    }
+
+    pub fn ge(self, other: Id<T>) -> bool {
+        return self.v >= other.v;
+    }
+
+    // The row it names in xs (a Vec: `v.as_slice()`); panics `Bounds` on NONE and past the end.
+    pub fn of(self, xs: &[T]) -> &T from xs {
+        let i = self.v as usize;
+        if self.v == NONE || i >= xs.len() {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        return &xs[i];
+    }
+
+    pub fn of_mut(self, xs: &mut [T]) -> &mut T from xs {
+        let i = self.v as usize;
+        if self.v == NONE || i >= xs.len() {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        return &mut xs[i];
+    }
+}
+
+impl<T: core.Flat + core.Copy> Id<T> {
+    // The row it names in s, by value (a column: `s.x[id.index()]`); panics `Bounds` on NONE
+    // and past the end.
+    pub fn row(self, s: &soa.Soa<T>) -> T {
+        if self.v == NONE {
+            panic.trap(panic.KIND_BOUNDS, panic.user_site());
+        }
+        return s.get(self.v as usize);
+    }
+}

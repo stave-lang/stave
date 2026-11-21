@@ -1,0 +1,18 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at idx_of_bounds.stv:16:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// An Id is not tied to one container: one past the end of the rows it reads panics `Bounds`
+// at the caller.
+import std.idx;
+import std.vec;
+
+struct R {
+    pub v: u32,
+}
+
+fn main() -> i32 {
+    let mut rs = vec.Vec::<R>.new();
+    rs.push(R.{ v: 1 });
+    let r = idx.Id::<R>.new(1).of(rs.as_slice());
+    return 0;
+}

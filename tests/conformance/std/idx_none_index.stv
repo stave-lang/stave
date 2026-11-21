@@ -1,0 +1,16 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at idx_none_index.stv:14:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// `idx.Id.index` of `NONE` panics `Bounds` at the caller: NONE names no row, whatever the
+// container's length.
+import std.idx;
+
+struct R {
+    pub v: u32,
+}
+
+fn main() -> i32 {
+    let none = idx.Id::<R>.none();
+    let i = none.index();
+    return 0;
+}

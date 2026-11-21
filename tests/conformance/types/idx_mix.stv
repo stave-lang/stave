@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// `idx.Id<T>` is typed by its record: an `Id<Order>` is not an `Id<Item>`, so it neither
+// converts, compares with one, nor reads the rows of another record type (E0201).
+import std.idx;
+import std.vec;
+
+struct Order {
+    pub day: u32,
+}
+
+struct Item {
+    pub qty: u32,
+}
+
+fn takes(i: idx.Id<Item>) {}
+
+fn main() -> i32 {
+    let o = idx.Id::<Order>.new(0);
+    let i = idx.Id::<Item>.new(0);
+    let mut items = vec.Vec::<Item>.new();
+    items.push(Item.{ qty: 1 });
+    let a: idx.Id<Item> = o; //~ ERROR E0201
+    takes(o); //~ ERROR E0201
+    let same = o.eq(i); //~ ERROR E0201
+    let r = o.of(items.as_slice()); //~ ERROR E0201
+    let ok = i.of(items.as_slice()).qty;
+    return 0;
+}
