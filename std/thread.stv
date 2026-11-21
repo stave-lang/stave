@@ -80,14 +80,10 @@ fn run(lo: usize, hi: usize, body: fn(usize)) {
 
 pub fn par_for_mut<T: core.Send>(xs: &mut [T], body: fn(usize, &mut T)) {
     let n = xs.len();
-    // The workers read the closure's captures through a `&`, which makes a `&mut` word read
-    // there read-only; the bytes of an `UnsafeCell` are not frozen by a `&`, so the pointer
-    // kept in one stays the `&mut` of `xs` it was made from.
-    let base = cell.UnsafeCell::<usize>.new(mem.slice_ptr_mut(xs) as usize);
+    let base = mem.slice_ptr_mut(xs) as usize;
     let size = mem.type_size::<T>();
     run(0, n, fn(i: usize) {
-        let b = unsafe("base is written once, before any worker starts") *base.get();
-        let p = (b + i * size) as *mut T;
+        let p = (base + i * size) as *mut T;
         body(i, unsafe("par_for calls each i < len once: the elements handed out are disjoint; xs is borrowed for the whole call") &mut *p);
     });
 }

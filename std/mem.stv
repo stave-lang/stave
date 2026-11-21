@@ -78,9 +78,7 @@ pub fn slice_ptr<T: view>(xs: &[T]) -> *const T {
 
 // The data pointer of a slice borrowed exclusively: writes through it are writes through `xs`.
 pub fn slice_ptr_mut<T: view>(xs: &mut [T]) -> *mut T {
-    // Read through a `&mut` of the reference: a `&mut` word read through a `&` is read-only.
-    let mut held = xs;
-    let parts = unsafe("a slice reference is (data pointer, length); held is a local of this fn") *(&mut held as *mut &mut [T] as *const [usize; 2]);
+    let parts = unsafe("a slice reference is (data pointer, length)") *(&xs as *const &mut [T] as *const [usize; 2]);
     return parts[0] as *mut T;
 }
 
