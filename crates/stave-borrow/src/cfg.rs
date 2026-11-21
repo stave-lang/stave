@@ -13,9 +13,9 @@
 //! `match`, `&&`/`||`, value `if`, `?`, `break`/`continue`/`return`, and calls to `-> never`
 //! fns. Evaluation order is the lowering's (stave-sema `lower_*`): left to right, the receiver
 //! first, a call's arguments before the call; a by-value operand moves its place when it is
-//! evaluated, before the operands after it (`Builder::hold`). Temporaries with drop glue die at the end of their
-//! statement (as lowered); others live until their expression is evaluated again (it writes the
-//! temporary's one slot) or the fn returns.
+//! evaluated, before the operands after it (`Builder::hold`). Every temporary ends with its
+//! statement, after the drops of the ones with drop glue (`Builder::end_stmt_temps`), as
+//! lowered.
 //!
 //! Closures and `spawn` blocks are built as nested bodies ([`Body::nested`]) whose captured
 //! locals are params; the closure value (or the `scope`'s join local, which accumulates every
@@ -377,7 +377,15 @@ struct LoopCx {
     head: BlockId,
     exit: BlockId,
     scopes: usize,
-    temps: usize,
+    temps: TempMark,
+}
+
+/// Where the temporaries of an open statement begin: on the drop list and in the list of every
+/// temporary made ([`Builder::end_stmt_temps`]).
+#[derive(Clone, Copy)]
+struct TempMark {
+    drops: usize,
+    made: usize,
 }
 
 /// Builds one body.
@@ -389,7 +397,12 @@ pub struct Builder<'a, 'b> {
     cur: Option<BlockId>,
     scopes: Vec<Vec<LocalId>>,
     loops: Vec<LoopCx>,
+    /// The temporaries of the open statements that have drop glue and still hold their value.
     temps: Vec<LocalId>,
+    /// Every temporary the open statements made, in order ([`Builder::end_stmt_temps`]).
+    made: Vec<LocalId>,
+    /// By local: a loan of the local's own bytes was made (not one through a dereference).
+    lent: Vec<bool>,
     by_node: FxHashMap<u32, LocalId>,
     /// The node spans computed so far, by node index from the body's first node (sized on first
     /// use): a node's span is taken for its temporary, its statement, and each of its operands,
@@ -489,6 +502,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             scopes: Vec::new(),
             loops: Vec::new(),
             temps: Vec::new(),
+            made: Vec::new(),
+            lent: Vec::new(),
             by_node: FxHashMap::default(),
             spans: Vec::new(),
             depth: 0,
@@ -593,7 +608,19 @@ impl<'a, 'b> Builder<'a, 'b> {
             node: u32::MAX,
             static_root: false,
         });
-        (self.body.locals.len() - 1) as LocalId
+        let l = (self.body.locals.len() - 1) as LocalId;
+        if temp {
+            self.made.push(l);
+        }
+        l
+    }
+
+    /// Temporary `t` lives past the statement that made it: its owner ends it (a `for` loop's
+    /// iterator, an `old(e)` value, the storage of a `static`).
+    fn past_stmt(&mut self, t: LocalId) {
+        if let Some(i) = self.made.iter().rposition(|&m| m == t) {
+            self.made.remove(i);
+        }
     }
 
     /// The local of binding node `b` (created on first sight: patterns bind in place). A
@@ -682,6 +709,13 @@ impl<'a, 'b> Builder<'a, 'b> {
     }
 
     fn new_loan(&mut self, place: &Place, mutable: bool, span: Span, node: u32, reserved: bool) -> LoanId {
+        if !place.has_deref() {
+            let l = place.local as usize;
+            if self.lent.len() <= l {
+                self.lent.resize(l + 1, false);
+            }
+            self.lent[l] = true;
+        }
         self.body.loans.push(Loan {
             place: place.clone(),
             mutable,
@@ -1022,23 +1056,60 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
     }
 
-    /// Drops the statement temporaries from `mark` on.
-    fn flush_temps(&mut self, mark: usize) {
-        if mark >= self.temps.len() {
-            return;
-        }
-        let ts: Vec<LocalId> = self.temps.drain(mark..).collect();
+    /// The start of the temporaries of a statement opened here.
+    fn temp_mark(&self) -> TempMark {
+        TempMark { drops: self.temps.len(), made: self.made.len() }
+    }
+
+    /// The end of the statement opened at `mark` (also a condition, a guard, the body of a
+    /// value-`match` arm, a clause): every temporary it made ends here. The ones with drop glue
+    /// that still hold their value are dropped first, the last made first; then every other
+    /// one that was borrowed ends, so a borrow of a temporary used after its statement is
+    /// E0501. No temporary is kept longer, whatever holds the borrow (a `let`, a literal, a
+    /// call result, a `match` binding); the exceptions are the ones [`Self::past_stmt`] names.
+    fn end_stmt_temps(&mut self, mark: TempMark) {
+        let ts: Vec<LocalId> = self.temps.drain(mark.drops.min(self.temps.len())..).collect();
         for &t in ts.iter().rev() {
             self.end_local(t, true, None);
         }
+        let made: Vec<LocalId> = self.made.drain(mark.made.min(self.made.len())..).collect();
+        for &t in made.iter().rev() {
+            if self.lent.get(t as usize) == Some(&true) && !ts.contains(&t) {
+                self.end_local_storage(t, None);
+            }
+        }
+    }
+
+    /// The storage-dead of a temporary that has no drop left to run.
+    fn end_local_storage(&mut self, l: LocalId, at: Option<Span>) {
+        let loc = &self.body.locals[l as usize];
+        let span = at.unwrap_or(loc.span);
+        let node = loc.node;
+        self.push(StmtKind::StorageDead(l), span, node);
+    }
+
+    /// Forgets the temporaries of the statement opened at `mark` on a path that is closed.
+    fn forget_stmt_temps(&mut self, mark: TempMark) {
+        self.temps.truncate(mark.drops);
+        self.made.truncate(mark.made);
     }
 
     /// Drops on an exit path (temps and scopes above the marks), without forgetting them. A
     /// `scope` statement left on the way joins its threads before its own locals are dropped.
-    fn exit_path(&mut self, scopes: usize, temps: usize, dead: bool, at: Span) {
-        let ts: Vec<LocalId> = self.temps.get(temps..).unwrap_or(&[]).to_vec();
+    /// Leaving to a loop's head or exit (`dead`) ends the temporaries of the statements left
+    /// as [`Self::end_stmt_temps`] does.
+    fn exit_path(&mut self, scopes: usize, temps: TempMark, dead: bool, at: Span) {
+        let ts: Vec<LocalId> = self.temps.get(temps.drops..).unwrap_or(&[]).to_vec();
         for &t in ts.iter().rev() {
             self.end_local(t, dead, Some(at));
+        }
+        if dead {
+            let made: Vec<LocalId> = self.made.get(temps.made..).unwrap_or(&[]).to_vec();
+            for &t in made.iter().rev() {
+                if self.lent.get(t as usize) == Some(&true) && !ts.contains(&t) {
+                    self.end_local_storage(t, Some(at));
+                }
+            }
         }
         let ss: Vec<Vec<LocalId>> = self.scopes.get(scopes..).unwrap_or(&[]).to_vec();
         for (k, s) in ss.iter().enumerate().rev() {
@@ -1099,7 +1170,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 self.leave(op, at);
                 return;
             }
-            self.exit_path(0, 0, false, at);
+            self.exit_path(0, TempMark { drops: 0, made: 0 }, false, at);
             let op = self.const_op(n);
             let span = self.span(n);
             self.push(StmtKind::Return(op), span, n);
@@ -1122,18 +1193,19 @@ impl<'a, 'b> Builder<'a, 'b> {
             if !self.open() {
                 return;
             }
-            let mark = self.temps.len();
+            let mark = self.temp_mark();
             let v = self.expr(e);
             let Some(op) = self.operand(v, e) else { return };
             let (ty, span) = (self.nty(e), self.span(e));
             let l = self.new_local(ty, false, span, String::new(), true);
+            self.past_stmt(l);
             self.body.locals[l as usize].node = e;
             self.push(
                 StmtKind::Assign { dest: Place::local(l, ty), rv: Rvalue::Use(op), init: true },
                 span,
                 e,
             );
-            self.flush_temps(mark);
+            self.end_stmt_temps(mark);
             self.olds.insert(paren, l);
         }
         if let Some(first) = c.ensures.first() {
@@ -1150,7 +1222,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         if !self.open() {
             return;
         }
-        let mark = self.temps.len();
+        let mark = self.temp_mark();
         let v = self.expr(e);
         if let Some(op) = self.read(v, e)
             && op.kind != OpKind::Const
@@ -1158,7 +1230,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             let span = op.span;
             self.push(StmtKind::Read(op), span, e);
         }
-        self.flush_temps(mark);
+        self.end_stmt_temps(mark);
     }
 
     /// Returns `op` from the fn at `at`. With `ensures` clauses the value goes to `result`, the
@@ -1168,13 +1240,13 @@ impl<'a, 'b> Builder<'a, 'b> {
         let (span, node) = (op.span, op.node);
         let Some(res) = self.result else {
             self.push(StmtKind::Return(op), span, node);
-            self.exit_path(0, 0, false, at);
+            self.exit_path(0, TempMark { drops: 0, made: 0 }, false, at);
             self.terminate(Terminator::Return);
             return;
         };
         let dest = Place::local(res, self.body.locals[res as usize].ty);
         self.push(StmtKind::Assign { dest: dest.clone(), rv: Rvalue::Use(op), init: true }, span, node);
-        self.exit_path(0, 0, false, at);
+        self.exit_path(0, TempMark { drops: 0, made: 0 }, false, at);
         let tb = self.tb;
         let clauses = tb.contracts.as_deref().map_or(&[][..], |c| &c.ensures);
         // a clause is built once per return: the bindings of a `match` in it are fresh locals
@@ -1223,7 +1295,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         let icx = self.icx;
         let a = icx.a(s);
         let kids = icx.kids_vec(s);
-        let mark = self.temps.len();
+        let mark = self.temp_mark();
         let is = |t: Term| icx.is(a, t);
         if is(Term::KwLet) {
             self.let_stmt(&kids);
@@ -1269,9 +1341,9 @@ impl<'a, 'b> Builder<'a, 'b> {
             self.expr_stmt(e);
         }
         if self.open() {
-            self.flush_temps(mark);
+            self.end_stmt_temps(mark);
         } else {
-            self.temps.truncate(mark);
+            self.forget_stmt_temps(mark);
         }
     }
 
@@ -1356,10 +1428,10 @@ impl<'a, 'b> Builder<'a, 'b> {
         let kids = icx.kids_vec(n);
         let (Some(&c), Some(&tb)) = (kids.first(), kids.get(1)) else { return };
         let els = kids.get(2).copied();
-        let mark = self.temps.len();
+        let mark = self.temp_mark();
         let cv = self.expr(c);
         let _ = self.read(cv, c);
-        self.flush_temps(mark);
+        self.end_stmt_temps(mark);
         if !self.open() {
             return;
         }
@@ -1388,13 +1460,13 @@ impl<'a, 'b> Builder<'a, 'b> {
         let exit = self.new_block();
         self.goto(head);
         self.switch_to(head);
-        let mark = self.temps.len();
+        let mark = self.temp_mark();
         let cv = self.expr(c);
         let _ = self.read(cv, c);
-        self.flush_temps(mark);
+        self.end_stmt_temps(mark);
         self.terminate(Terminator::Branch(vec![body, exit]));
         self.switch_to(body);
-        self.loops.push(LoopCx { head, exit, scopes: self.scopes.len(), temps: self.temps.len() });
+        self.loops.push(LoopCx { head, exit, scopes: self.scopes.len(), temps: self.temp_mark() });
         self.block(b);
         self.goto(head);
         self.loops.pop();
@@ -1406,7 +1478,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         let exit = self.new_block();
         self.goto(body);
         self.switch_to(body);
-        self.loops.push(LoopCx { head: body, exit, scopes: self.scopes.len(), temps: self.temps.len() });
+        self.loops.push(LoopCx { head: body, exit, scopes: self.scopes.len(), temps: self.temp_mark() });
         self.block(b);
         self.goto(body);
         self.loops.pop();
@@ -1494,6 +1566,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             Some(ForKind::Iter | ForKind::IterMut) => {
                 let Some(op) = self.operand(iv, iter) else { return };
                 let t = self.temp(it_ty, iter);
+                self.past_stmt(t);
                 self.body.locals[t as usize].mutable = true;
                 let span = self.span(iter);
                 self.push(
@@ -1555,7 +1628,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         };
         self.terminate(Terminator::Branch(vec![bb, exit]));
         self.switch_to(bb);
-        self.loops.push(LoopCx { head, exit, scopes: self.scopes.len(), temps: self.temps.len() });
+        self.loops.push(LoopCx { head, exit, scopes: self.scopes.len(), temps: self.temp_mark() });
         self.push_scope();
         match (&src, item) {
             (Src::Range, _) => {
@@ -1784,14 +1857,14 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let hold = self.guard_hold(&sp, scrut);
                 let gmark = self.guard_binds.len();
                 self.bind_alts(&alts, &sp, Mode::Peek, scrut);
-                let mark = self.temps.len();
+                let mark = self.temp_mark();
                 self.in_guard += 1;
                 self.guard_scruts.push(sp.clone());
                 let gv = self.expr(g);
                 let _ = self.read(gv, g);
                 self.guard_scruts.pop();
                 self.in_guard -= 1;
-                self.flush_temps(mark);
+                self.end_stmt_temps(mark);
                 if let Some(h) = hold {
                     let span = self.span(g);
                     let r = self.op_of_place(h, span, u32::MAX, false);
@@ -1810,7 +1883,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
             self.bind_alts(&alts, &sp, Mode::Move, scrut);
             if is_expr {
-                let mark = self.temps.len();
+                let mark = self.temp_mark();
                 let v = self.expr(body);
                 if let (Some(op), Some(t)) = (self.operand(v, body), result) {
                     let span = self.span(body);
@@ -1820,7 +1893,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                         body,
                     );
                 }
-                self.flush_temps(mark);
+                self.end_stmt_temps(mark);
             } else {
                 self.block(body);
             }
@@ -2653,6 +2726,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         let Some(ty) = self.tys.sigs.konst(d).map(|c| c.ty) else { return V::Const };
         let span = self.icx.tok_span(tok);
         let t = self.new_local(ty, false, span, String::new(), true);
+        self.past_stmt(t);
         self.body.locals[t as usize].static_root = true;
         let c = Operand {
             kind: OpKind::Const,
@@ -3140,7 +3214,12 @@ impl<'a, 'b> Builder<'a, 'b> {
         n: u32,
         rspan: Span,
     ) -> Option<(Operand, Option<Activation>)> {
+        let constant = matches!(recv, V::Const);
         let p = self.place_of(recv, n)?;
+        if constant {
+            // the temporary is the receiver's value, named by the receiver's text
+            self.body.locals[p.local as usize].span = rspan;
+        }
         let p = self.apply_derefs(p, adj.derefs);
         match adj.autoref {
             Some(m) => {

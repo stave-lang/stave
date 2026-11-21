@@ -208,9 +208,10 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                 if let Some(u) = later_use(flow, (block, stmt), l) {
                     roles.push(("use", u));
                 }
+                let case = crate::check::temp_end(body, access, &place).then_some("temporary");
                 out.extend(mk(
                     "E0501",
-                    None,
+                    case,
                     &[("access", access.verb()), ("place", &text), ("loan", kind), ("loaned", &loaned)],
                     span,
                     &roles,

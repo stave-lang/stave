@@ -982,12 +982,17 @@ fix = { description = "use `{param}` in the self type, move it to the methods th
 code = "E0501"
 severity = "error"
 area = "borrow"
-rule = "borrow conflict (borrow site, conflicting access, later use)"
+rule = "borrow conflict (borrow site, conflicting access, later use); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement)"
 holes = { access = "text-literal", place = "place", loan = "text-literal", loaned = "place" }
 choices = { access = ["borrow mutably", "borrow", "move", "assign to", "drop"], loan = ["`&mut`", "`&`"] }
 message = "cannot {access} `{place}`: it has a live {loan} borrow"
 labels = [{ at = "primary", text = "{access} here" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used later here" }]
 fix = { description = "end the borrow before this point: move the later use before it, or copy the value out first" }
+
+[diag.cases.temporary]
+message = "the temporary `{place}` ends with its statement, but a {loan} borrow of it is used later"
+labels = [{ at = "primary", text = "temporary made here: it ends at the end of the statement" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used later here" }]
+fix = { description = "bind the value to a local first and borrow the local: `let t = {place};`, then `&t`" }
 
 [[diag]]
 code = "E0502"

@@ -9,9 +9,8 @@
 //! not carry the old loan (so `r = &a; ... r = &b; a = 1; use(r)` is accepted, as in NLL).
 //!
 //! **Access checks**: every access (read, write, move, drop, storage-dead, and the borrows) is
-//! checked against the live loans whose places overlap it (E0501); the initialization of a
-//! temporary is the storage-dead of the value its expression made before (one slot per
-//! temporary, written by every evaluation); reads and moves against the
+//! checked against the live loans whose places overlap it (E0501; the storage-dead of a
+//! temporary at the end of its statement is case `temporary`); reads and moves against the
 //! maybe-moved sites (E0502); writes and `&mut` borrows against binding and reference mutability
 //! (E0503); stores of a ref-like value (an assignment through a dereference, a call whose
 //! callee has a `from` clause on a `&mut` param) against the view objects the pointer may point
@@ -205,6 +204,14 @@ pub fn places_conflict(p: &Place, q: &Place, kind: Access) -> bool {
     !(kind.shallow() && q.proj[n..].iter().any(|x| matches!(x, Proj::Deref(_))))
 }
 
+/// Whether an access that conflicts with a live loan is the end of a temporary (its drop or
+/// storage-dead where its statement ends, or where a `break` / `continue` leaves it): the
+/// borrow outlives the temporary (E0501 case `temporary`).
+pub fn temp_end(body: &Body, kind: Access, p: &Place) -> bool {
+    let l = &body.locals[p.local as usize];
+    matches!(kind, Access::Drop | Access::StorageDead) && p.proj.is_empty() && l.temp && !l.static_root
+}
+
 /// E0503: whether `p` may be written (or mutably borrowed); `Err((shared, blame))` otherwise.
 fn mutability(body: &Body, p: &Place) -> Result<(), (bool, LocalId)> {
     let raw = p.proj.iter().any(|x| matches!(x, Proj::Deref(DerefKind::Raw)));
@@ -320,8 +327,6 @@ fn live_in(flow: &Flow<'_>, s: &Stmt, after: &Bits) -> Bits {
 
 struct Cx<'f, 'b> {
     flow: &'f mut Flow<'b>,
-    /// The temporaries whose initialization ends an earlier value ([`rewritten_temps`]).
-    rewritten: Bits,
     findings: Vec<Finding>,
     dump: Vec<DumpAccess>,
     want_dump: bool,
@@ -484,14 +489,6 @@ impl Cx<'_, '_> {
                             }
                         });
                     }
-                }
-                // A temporary has one slot, written by every evaluation of its expression: the
-                // value of the evaluation before ends here, and a loan of it still live after
-                // the statement would see the new value. Reported at the temporary's expression
-                // (a value `if` or `match` initializes its temporary once per arm).
-                if *init && dest.proj.is_empty() && self.rewritten.contains(dest.local as usize) {
-                    let span = body.locals[dest.local as usize].span;
-                    self.access(st, after, at, Access::StorageDead, dest, span, s.node, &[]);
                 }
                 if !*init {
                     // the write happens after the right side: its moves count (`s.a = f(s)`)
@@ -660,9 +657,7 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         return Checked { findings, dump: Vec::new() };
     }
     let lo = live_out(flow);
-    let rewritten = rewritten_temps(body);
-    let mut cx =
-        Cx { flow, rewritten, findings: Vec::new(), dump: Vec::new(), want_dump, pending: Vec::new() };
+    let mut cx = Cx { flow, findings: Vec::new(), dump: Vec::new(), want_dump, pending: Vec::new() };
     for b in 0..body.blocks.len() {
         let Some(mut st) = cx.flow.entry[b].clone() else { continue };
         let la = live_after(cx.flow, b, &lo[b]);
@@ -684,43 +679,6 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
     bad_moves(body, &mut findings);
     guard_effects(body, &mut findings);
     Checked { findings, dump: cx.dump }
-}
-
-/// The borrowed temporaries whose slot an evaluation of their expression can change. Not one
-/// that only `&` loans borrow and a single place initializes by a constant: nothing but that
-/// initialization writes it, with the same value every time, so no loan of it sees a change
-/// (`&X` of a static or a const borrows such a temporary).
-fn rewritten_temps(body: &Body) -> Bits {
-    let n = body.locals.len();
-    let mut lent = Bits::new(n);
-    let mut out = Bits::new(n);
-    for l in &body.loans {
-        let t = l.place.local as usize;
-        if body.locals[t].temp {
-            lent.insert(t);
-            if l.mutable || l.reserved {
-                out.insert(t);
-            }
-        }
-    }
-    if lent.is_empty() {
-        return out;
-    }
-    let mut seen = Bits::new(n);
-    for blk in &body.blocks {
-        for s in &blk.stmts {
-            if let StmtKind::Assign { dest, rv, init: true } = &s.kind
-                && dest.proj.is_empty()
-                && lent.contains(dest.local as usize)
-            {
-                let constant = matches!(rv, Rvalue::Use(o) if o.kind == OpKind::Const);
-                if !constant || !seen.insert(dest.local as usize) {
-                    out.insert(dest.local as usize);
-                }
-            }
-        }
-    }
-    out
 }
 
 /// E0505: one finding per span of what the body's guards do besides reading.

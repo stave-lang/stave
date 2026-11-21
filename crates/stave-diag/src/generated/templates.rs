@@ -2374,7 +2374,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
-        rule: "borrow conflict (borrow site, conflicting access, later use)",
+        rule: "borrow conflict (borrow site, conflicting access, later use); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement)",
         retired: false,
         located: true,
         holes: &[
@@ -2394,6 +2394,20 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "end the borrow before this point: move the later use before it, or copy the value out first",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "temporary",
+                message: "the temporary `{place}` ends with its statement, but a {loan} borrow of it is used later",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "temporary made here: it ends at the end of the statement" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
+                    LabelTemplate { at: "use", text: "borrow used later here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bind the value to a local first and borrow the local: `let t = {place};`, then `&t`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
