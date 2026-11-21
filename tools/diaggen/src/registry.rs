@@ -7,8 +7,8 @@ use serde::Deserialize;
 use crate::md::{self, Row};
 use crate::template;
 
-pub const HOLE_KINDS: [&str; 8] =
-    ["name", "path", "type", "token-kinds", "int", "place", "source", "text-literal"];
+pub const HOLE_KINDS: [&str; 9] =
+    ["name", "path", "type", "token-kinds", "int", "place", "pattern", "source", "text-literal"];
 
 /// Code range prefix (first three characters) → area name.
 pub const AREAS: [(&str, &str); 15] = [

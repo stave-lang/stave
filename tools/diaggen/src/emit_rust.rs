@@ -26,8 +26,9 @@ fn kind_variant(kind: &str) -> &'static str {
         "token-kinds" => "TokenKinds",
         "int" => "Int",
         "place" => "Place",
+        "pattern" => "Pattern",
         "source" => "Source",
-        // The registry check admits only the eight kinds.
+        // The registry check admits only the nine kinds.
         _ => "TextLiteral",
     }
 }

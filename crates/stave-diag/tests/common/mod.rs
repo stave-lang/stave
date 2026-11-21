@@ -22,6 +22,7 @@ pub fn sample_value(kind: HoleKind, choices: &'static [&'static str]) -> &'stati
         HoleKind::TokenKinds => "SEMI, RBRACE",
         HoleKind::Int => "3",
         HoleKind::Place => "*v.f",
+        HoleKind::Pattern => "S.{ a, b: (e0, e1) }",
         HoleKind::Source => "x + 1",
         HoleKind::TextLiteral => choices.first().copied().unwrap_or(""),
     }

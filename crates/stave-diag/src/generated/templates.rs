@@ -2333,11 +2333,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0504",
         severity: Severity::Error,
         area: "borrow",
-        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it; case `part`: a non-Copy part (field, tuple element, payload) of a local or a temporary taken by value outside a pattern that takes the whole value apart",
+        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it; case `part`: a non-Copy part (field, tuple element, payload) of a local or a temporary taken by value outside a pattern that takes the whole value apart (its fix names the pattern; `part-reborrow`: a `&mut` part, passed on by a reborrow; `part-replace`: an owner that cannot be taken apart here, `mem.replace`)",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "owner", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "pattern", kind: HoleKind::Pattern, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
         ],
         shapes: &[
@@ -2385,7 +2386,31 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "a part moved here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "take the whole value apart with a pattern (`let S.{{ f, g }} = {owner};`, every part bound or `_`), or take the part and leave a value in its place: `mem.replace(&mut {place}, other)` (`import std.mem;`)",
+                    description: "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` or left out is dropped there)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "part-reborrow",
+                message: "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a part moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "pass the reference on by a reborrow: `&mut *{place}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "part-replace",
+                message: "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a part moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take the part out and leave a value in its place: `mem.replace(&mut {place}, other)` (`import std.mem;`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

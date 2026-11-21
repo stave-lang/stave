@@ -289,7 +289,19 @@ pub enum MoveOut {
     Static,
     /// A part of this place (a local or a temporary): a non-Copy value is moved whole, or taken
     /// apart whole by a pattern.
-    Part(Place),
+    Part(Place, PartFix),
+}
+
+/// The fix an E0504 `part` names, by what is moved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PartFix {
+    /// A `&mut` part: pass it on by a reborrow.
+    Reborrow,
+    /// Take the owner apart with this pattern (every part bound).
+    Pattern(String),
+    /// The owner cannot be taken apart here (an enum on the way, a field private to another
+    /// module): `mem.replace`.
+    Replace,
 }
 
 #[derive(Clone, Debug)]
@@ -773,7 +785,7 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// value apart, and not even then when the value has a destructor.
     fn move_out(&mut self, p: &Place, part: bool) -> Option<MoveOut> {
         let l = self.body.locals.get(p.local as usize)?;
-        let (capture, guard, stat) = (l.capture, l.guard, l.static_root);
+        let (capture, guard, stat, lty) = (l.capture, l.guard, l.static_root, l.ty);
         let from = usize::from(self.owned_elem(p));
         let behind =
             p.proj[from..].iter().any(|x| matches!(x, Proj::Deref(_) | Proj::Index | Proj::Column(_)));
@@ -786,9 +798,88 @@ impl<'a, 'b> Builder<'a, 'b> {
         } else if let Some(o) = self.drop_owner(p, from) {
             Some(MoveOut::Drop(o))
         } else if !part && p.proj.len() > from {
-            Some(MoveOut::Part(Place { local: p.local, proj: p.proj[..from].to_vec(), ty: TypeId::NONE }))
+            let owner = Place { local: p.local, proj: p.proj[..from].to_vec(), ty: TypeId::NONE };
+            let fix = if matches!(self.tys.deref(p.ty), Some((_, DerefKind::Mut))) {
+                PartFix::Reborrow
+            } else {
+                let mut t = lty;
+                if from > 0 {
+                    t = self.tys.elem(t);
+                }
+                let path = p.proj[from..].to_vec();
+                match self.part_pattern(t, &path, "e", 0) {
+                    Some(pat) => PartFix::Pattern(pat),
+                    None => PartFix::Replace,
+                }
+            };
+            Some(MoveOut::Part(owner, fix))
         } else {
             None
+        }
+    }
+
+    /// The pattern that takes a value of type `t` apart along projections `path`: every part
+    /// bound by name (a tuple element `{prefix}{i}`), the part on the path nested; `None` when a
+    /// part cannot be named here (an enum, a field private to another module).
+    fn part_pattern(&mut self, t: TypeId, path: &[Proj], prefix: &str, depth: u32) -> Option<String> {
+        if depth > 64 {
+            return None;
+        }
+        let next = |i: usize| match path.first() {
+            Some(Proj::Field(f)) if *f as usize == i && path.len() > 1 => Some(&path[1..]),
+            _ => None,
+        };
+        match self.tys.kind(t) {
+            TypeKind::Tuple(ts) => {
+                let mut parts = Vec::new();
+                for (i, &et) in ts.iter().enumerate() {
+                    let name = format!("{prefix}{i}");
+                    parts.push(match next(i) {
+                        Some(rest) => self.part_pattern(et, rest, &format!("{name}_"), depth + 1)?,
+                        None => name,
+                    });
+                }
+                let comma = if parts.len() == 1 { "," } else { "" };
+                Some(format!("({}{comma})", parts.join(", ")))
+            }
+            TypeKind::Adt { def, .. } => {
+                let prog = self.tys.prog;
+                let here = prog.item(self.icx.item).map(|i| i.module);
+                let decl = prog.decl(def)?;
+                let adt = self.tys.sigs.adt(def)?;
+                if adt.is_enum {
+                    return None;
+                }
+                let same = Some(decl.module) == here;
+                let fields: Vec<(String, bool)> = adt
+                    .variants
+                    .first()?
+                    .fields
+                    .iter()
+                    .map(|f| (prog.strings.get(f.name).to_string(), f.is_pub))
+                    .collect();
+                let mut parts = Vec::new();
+                for (i, (name, is_pub)) in fields.into_iter().enumerate() {
+                    if !is_pub && !same {
+                        return None;
+                    }
+                    parts.push(match next(i) {
+                        Some(rest) => {
+                            let ft = self.tys.field_ty(t, 0, i as u32);
+                            let sub = self.part_pattern(ft, rest, &format!("{name}_"), depth + 1)?;
+                            format!("{name}: {sub}")
+                        }
+                        None => name,
+                    });
+                }
+                let tn = prog.strings.get(decl.name);
+                Some(if parts.is_empty() {
+                    format!("{tn}.{{}}")
+                } else {
+                    format!("{tn}.{{ {} }}", parts.join(", "))
+                })
+            }
+            _ => None,
         }
     }
 
