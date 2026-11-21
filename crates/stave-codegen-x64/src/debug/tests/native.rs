@@ -343,6 +343,13 @@ fn statics_and_module_sites() {
         init: b"abc\n".to_vec(),
         refs: Vec::new(),
     });
+    let xyz = p.m.add_string(b"xyz".to_vec());
+    for (path, target, addend) in
+        [("t.TO_MSG", stave_ir::DataTarget::Static(1), 2), ("t.TO_STR", stave_ir::DataTarget::Str(xyz), 1)]
+    {
+        let refs = vec![stave_ir::DataRef { offset: 0, target, addend }];
+        p.m.statics.push(stave_ir::Static { path: path.into(), ty: t.pu8, init: vec![0; 8], refs });
+    }
     p.m.sites.push(stave_ir::SiteInfo { file: "src/a.stv".into(), line: 7, col: 3, func: "t.main".into() });
     p.m.sites.push(stave_ir::SiteInfo { file: "src/a.stv".into(), line: 9, col: 11, func: "t.main".into() });
     let sa = p.m.intrinsic("static_addr");
@@ -364,6 +371,15 @@ fn statics_and_module_sites() {
         let mp = b.cast(CastKind::Exact, p.t.pu8, m);
         let n = b.int(4);
         b.call(p.write, None, &[mp.into(), n]);
+        // address words: into `t.MSG` at 2 ('c') and into the string at 1 ('y')
+        let ppu8 = p.m.types.ptr(true, p.t.pu8);
+        for k in [2, 3] {
+            let kk = b.int(k);
+            let w = b.intrinsic(sa, Some(ppu8), &[kk]).unwrap();
+            let q = b.load(p.t.pu8, w);
+            let c = b.load(t.u8, q);
+            p.print(b, c.into(), t.u8);
+        }
         b.set_site(Site(1));
         let c = b.int(i64::MIN as i128);
         let v = p.opaque(b, c, t.i64);
@@ -373,7 +389,7 @@ fn statics_and_module_sites() {
     });
     p.m.funcs[main.index()].name_site = Site(0);
     let r = super::harness::check(&p, "statics");
-    assert_eq!(r.stdout, b"000000000000000f\nabc\n");
+    assert_eq!(r.stdout, b"000000000000000f\nabc\n0000000000000063\n0000000000000079\n");
     assert_eq!(r.code, 101);
     // the table, natively: row 1 line and column
     let mut q = Prog::new();
