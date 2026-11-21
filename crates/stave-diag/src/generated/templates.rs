@@ -2111,7 +2111,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0416",
         severity: Severity::Error,
         area: "kinds",
-        rule: "`impl Drop` for a type with an instance that may be Copy: built-in Copy, or an `impl Copy` whose head unifies with the `impl Drop`'s (`impl<T: Copy> Copy for W<T>` with `impl<T> Drop for W<T>`; ruled out only by a bound that fails on a type without params)",
+        rule: "an `impl Drop` whose head overlaps the head of an `impl Copy`: the two self types unify, the params of both impls as variables, bounds not consulted (`impl<T: Copy> Copy for W<T>` with `impl<U> Drop for W<vec.Vec<U>>` too)",
         retired: false,
         located: true,
         holes: &[
@@ -2120,13 +2120,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         shapes: &[
             Shape {
                 case: "",
-                message: "`{type}` is Copy, so it cannot implement `Drop`",
+                message: "`impl Drop for {type}` overlaps an `impl Copy`: a type with a destructor cannot be Copy",
                 labels: &[
                     LabelTemplate { at: "primary", text: "`impl Drop` here" },
-                    LabelTemplate { at: "copy", text: "`impl Copy for {type}` here" },
+                    LabelTemplate { at: "copy", text: "`impl Copy` whose head overlaps it" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "remove `impl Copy for {type}` (a type with a destructor must move), or remove this `impl Drop`",
+                    description: "remove the `impl Copy` or this `impl Drop`, or make their heads disjoint (no type an instance of both)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

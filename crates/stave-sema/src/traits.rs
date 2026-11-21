@@ -1546,91 +1546,15 @@ fn heads_unify(
     Some(u.binds)
 }
 
-/// A Copy impl that may apply to an instance of Drop impl `drop`'s head. A unifier rules the
-/// pair out only when it binds a param of either impl to a type without params that fails one
-/// of that param's bounds; any other unifier counts (a bound on a type with params may hold for
-/// some instance).
+/// A Copy impl whose head unifies with the head of Drop impl `drop`. Bounds are not consulted:
+/// the rule is about the heads, so it does not depend on which types implement what.
 fn copy_impl_overlapping(w: &World<'_>, tys: &mut TypeTable, drop: &ImplDef) -> Option<DeclId> {
-    let copy = w.sigs.lang.copy;
-    let list = w.sigs.impls_by_trait.get(&copy)?;
-    let na = drop.generics.len();
-    for &ci in list {
-        let Some(cimp) = w.sigs.impl_def(ci) else { continue };
-        if tys.is_error_ty(cimp.self_ty) {
-            continue;
-        }
-        let Some(binds) = heads_unify(tys, drop, cimp, None) else { continue };
-        let n = binds.len();
-        let args: Vec<GArg> = binds
-            .iter()
-            .enumerate()
-            .map(|(i, b)| match b {
-                Some(a) => *a,
-                None if i >= na && cimp.generics[i - na].is_const => GArg::Const(ConstArg::Param(i as u32)),
-                None if i < na && drop.generics[i].is_const => GArg::Const(ConstArg::Param(i as u32)),
-                None => GArg::Type(tys.mk_param(i as u32)),
-            })
-            .collect();
-        // the bindings are acyclic: n rounds of substitution reach the fixed point
-        let resolve = |tys: &mut TypeTable, a: GArg| {
-            let mut a = a;
-            for _ in 0..=n {
-                let b = crate::mono::subst_garg(tys, a, &args);
-                if b == a {
-                    break;
-                }
-                a = b;
-            }
-            a
-        };
-        let shift: Vec<GArg> = (0..cimp.generics.len())
-            .map(|i| {
-                if cimp.generics[i].is_const {
-                    GArg::Const(ConstArg::Param((na + i) as u32))
-                } else {
-                    GArg::Type(tys.mk_param((na + i) as u32))
-                }
-            })
-            .collect();
-        let mut excluded = false;
-        let params =
-            drop.generics.iter().map(|g| (g, None)).chain(cimp.generics.iter().map(|g| (g, Some(&shift))));
-        for (k, (g, sh)) in params.enumerate() {
-            if g.is_const || g.bounds.is_empty() {
-                continue;
-            }
-            let p = tys.mk_param(k as u32);
-            let GArg::Type(t) = resolve(tys, GArg::Type(p)) else { continue };
-            if tys.has_params(t) {
-                continue;
-            }
-            for b in &g.bounds {
-                let mut bargs = Vec::with_capacity(b.args.len());
-                for &x in &b.args {
-                    let x = match sh {
-                        Some(sh) => crate::mono::subst_garg(tys, x, sh),
-                        None => x,
-                    };
-                    bargs.push(resolve(tys, x));
-                }
-                let ground = bargs.iter().all(|x| match x {
-                    GArg::Type(x) => !tys.has_params(*x),
-                    GArg::Const(c) => !matches!(c, ConstArg::Param(_)),
-                });
-                if ground && !w.implements(tys, t, &TraitRef { trait_decl: b.trait_decl, args: bargs }, &[]) {
-                    excluded = true;
-                    break;
-                }
-            }
-            if excluded {
-                break;
-            }
-        }
-        if !excluded {
-            return Some(ci);
-        }
-    }
-    None
+    let list = w.sigs.impls_by_trait.get(&w.sigs.lang.copy)?;
+    list.iter().copied().find(|&ci| {
+        w.sigs.impl_def(ci).is_some_and(|cimp| {
+            !tys.is_error_ty(cimp.self_ty) && heads_unify(tys, drop, cimp, None).is_some()
+        })
+    })
 }
 
 /// Most steps of one [`heads_unify`].

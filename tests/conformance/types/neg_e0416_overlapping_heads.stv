@@ -1,6 +1,6 @@
 //~ CHECK-ONLY
-// Copy and Drop exclude each other on every instance: an `impl Drop` is E0416 when some instance
-// of its head may be Copy, whichever impl comes first and whichever is the more general.
+// An `impl Drop` whose head overlaps (unifies with) the head of an `impl Copy` is E0416, whichever
+// impl comes first and whichever is the more general; bounds do not separate heads.
 import std.vec;
 
 struct A<T> { x: T }
@@ -43,20 +43,38 @@ impl<const N: usize> Drop for G<N> { //~ ERROR E0416
     fn drop(&mut self) { }
 }
 
-// No instance has both.
+// The rule compares heads, not bounds: `F<vec.Vec<u8>>` is an instance of the head `F<T>`
+// though `vec.Vec<u8>` is not Copy, and `R<&mut U>` one of `R<T>` though `&mut U` never is.
+struct F<T> { x: T }
+
+impl<T: Copy> Copy for F<T> {}
+
+impl Drop for F<vec.Vec<u8>> { //~ ERROR E0416
+    fn drop(&mut self) { }
+}
+
+struct V<T> { x: T }
+
+impl<T: Copy> Copy for V<T> {}
+
+impl<U> Drop for V<vec.Vec<U>> { //~ ERROR E0416
+    fn drop(&mut self) { }
+}
+
+view struct R<T: view> { x: T }
+
+impl<T: Copy + view> Copy for R<T> {}
+
+impl<U: view> Drop for R<&mut U> { //~ ERROR E0416
+    fn drop(&mut self) { }
+}
+
+// Disjoint heads: accepted.
 struct E<T> { x: T }
 
 impl Copy for E<u32> {}
 
 impl Drop for E<u64> {
-    fn drop(&mut self) { }
-}
-
-struct F<T> { x: T }
-
-impl<T: Copy> Copy for F<T> {}
-
-impl Drop for F<vec.Vec<u8>> {
     fn drop(&mut self) { }
 }
 
