@@ -1,0 +1,38 @@
+// A `Once` init evaluates an operator whose impl calls `rhs`, which asks the same `Once`.
+import std.core;
+import std.io;
+import std.sync;
+
+static CFG: sync.Once<u32, 1> = sync.Once::<u32, 1>.new();
+
+impl core.Add for fn() -> u32 {
+    fn add(self, rhs: Self) -> Self {
+        let v = rhs(); //~ ERROR E1402
+        return zero;
+    }
+}
+
+fn two() -> u32 {
+    return 2u32;
+}
+
+fn inner() -> u32 {
+    return *CFG.get_or_init(two);
+}
+
+fn zero() -> u32 {
+    return 0u32;
+}
+
+fn init() -> u32 {
+    let a: fn() -> u32 = zero;
+    let b: fn() -> u32 = inner;
+    let c = a + b;
+    return 1u32;
+}
+
+fn main() -> i32 {
+    let v = *CFG.get_or_init(init);
+    io.print(f"{v}\n");
+    return 0;
+}

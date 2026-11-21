@@ -1,0 +1,22 @@
+// Recursion through a fn value written by `mem.swap`.
+import std.io;
+import std.mem;
+
+fn stop(n: u64) -> u64 {
+    return n;
+}
+
+fn down(n: u64) -> u64 {
+    let mut f: fn(u64) -> u64 = stop;
+    let mut g: fn(u64) -> u64 = down;
+    if n > 0 {
+        mem.swap(&mut f, &mut g);
+    }
+    let m = if n > 0 then n - 1 else 0u64;
+    return f(m) + 1; //~ ERROR E1402
+}
+
+fn main() {
+    let r = down(200000u64);
+    io.print(f"{r}\n");
+}

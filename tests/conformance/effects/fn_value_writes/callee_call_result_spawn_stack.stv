@@ -1,0 +1,23 @@
+// A spawn body calls a call result in place: its stack bound counts `big`.
+//~ STDOUT callee_call_result_spawn_stack.stdout
+import std.io;
+
+fn big() -> u64 {
+    let mut buf: [u64; 131072] = [0u64; 131072];
+    buf[131071] = 3;
+    return buf[131071] + buf[7];
+}
+
+fn mk() -> fn() -> u64 {
+    return big;
+}
+
+fn main() {
+    let mut r: u64 = 0;
+    scope {
+        spawn {
+            r = mk()();
+        }
+    }
+    io.print(f"{r}\n");
+}
