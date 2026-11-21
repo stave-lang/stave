@@ -225,12 +225,14 @@ impl<'m, H: Host> Interp<'m, H> {
         (!plan.idle()).then_some(plan)
     }
 
-    /// The reference words of `v`, a value of type `t` (of an enum the live variant).
-    fn value_words(&self, t: TypeId, v: &Val, out: &mut Vec<Word>) {
+    /// The reference words of `v`, a value of type `t` (of an enum the live variant). `false`:
+    /// more than [`MAX_WORDS`], and `out` holds only some of them.
+    #[must_use]
+    fn value_words(&self, t: TypeId, v: &Val, out: &mut Vec<Word>) -> bool {
         let mut work: Vec<(TypeId, &Val)> = vec![(t, v)];
         while let Some((t, v)) = work.pop() {
             if out.len() > MAX_WORDS {
-                return;
+                return false;
             }
             match self.m.types.key(t) {
                 Some(TypeKey::Ref { .. }) => {
@@ -271,6 +273,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 Shape::Scalar | Shape::Fat | Shape::Bytes => {}
             }
         }
+        out.len() <= MAX_WORDS
     }
 
     /// The reference words of the value of type `t` stored at `addr`. Bytes that are not live
@@ -418,7 +421,10 @@ impl<'m, H: Host> Interp<'m, H> {
             }
             let (Some(&t), Some(v)) = (params.get(k), args.get(k)) else { continue };
             let mut top = Vec::new();
-            self.value_words(t, v, &mut top);
+            if !self.value_words(t, v, &mut top) {
+                e.cut = true;
+                break;
+            }
             if source {
                 e.top[k] = top.iter().filter_map(|w| self.src(w)).collect();
                 match self.reach(&top) {
@@ -448,7 +454,9 @@ impl<'m, H: Host> Interp<'m, H> {
             out.extend(b.iter().copied());
         }
         let mut top = Vec::new();
-        self.value_words(t, v, &mut top);
+        if !self.value_words(t, v, &mut top) {
+            return false;
+        }
         if !copy {
             out.extend(top.iter().filter_map(|w| self.src(w)));
             out.extend(e.top.get(k).into_iter().flatten().copied());
@@ -506,7 +514,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 if e.plan.closure { (0..n).map(|x| (x, false)).collect() } else { clauses.result.clone() };
             let whole = named.iter().all(|&(x, copy)| self.add_sources(e, f, x, copy, &mut from));
             let mut words = Vec::new();
-            self.value_words(t, v, &mut words);
+            let whole = whole && self.value_words(t, v, &mut words);
             if whole && let Some(w) = words.iter().find(|w| self.derives(w, &from, &mut chain) == Some(false))
             {
                 found.push((None, w.tag));
@@ -518,7 +526,9 @@ impl<'m, H: Host> Interp<'m, H> {
             }
             let (Some(&t), Some(v)) = (func.params.get(p as usize), e.args.get(p as usize)) else { continue };
             let mut top = Vec::new();
-            self.value_words(t, v, &mut top);
+            if !self.value_words(t, v, &mut top) {
+                continue;
+            }
             let Some(now) = self.writable(&top) else { continue };
             let before = &e.writable[p as usize];
             let fresh: Vec<Word> =
