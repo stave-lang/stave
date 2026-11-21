@@ -1055,6 +1055,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "const-param-type",
+                message: "const parameter `{operand}` has type `{found}`, not an unsigned integer type",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a const parameter is `u8`, `u16`, `u32`, `u64`, or `usize`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "declare it with an unsigned integer type: `const {operand}: usize`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "not-callable",
                 message: "`{operand}` of type `{found}` cannot be called",
                 labels: &[

@@ -467,6 +467,11 @@ message = "`{operand}` is not a const generic argument"
 labels = [{ at = "primary", text = "expected an int literal, a const, or `{{ const-expr }}`" }]
 fix = { description = "pass a const-expr, braced when it is not a literal or a name: `{{N + 1}}`" }
 
+[diag.cases.const-param-type]
+message = "const parameter `{operand}` has type `{found}`, not an unsigned integer type"
+labels = [{ at = "primary", text = "a const parameter is `u8`, `u16`, `u32`, `u64`, or `usize`" }]
+fix = { description = "declare it with an unsigned integer type: `const {operand}: usize`" }
+
 [diag.cases.arity]
 message = "`{operand}` takes {count} arguments, found {given}"
 labels = [{ at = "primary", text = "wrong number of arguments" }]

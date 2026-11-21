@@ -1310,7 +1310,25 @@ impl<'p> SigBuilder<'p> {
             if out[k].is_const
                 && let Some(t) = icx.child(c, NodeKind::Type)
             {
-                out[k].const_ty = lower_type(self, &env, t, false);
+                let ct = lower_type(self, &env, t, false);
+                // a const arg is a `u64` value, read back in the param's type
+                let unsigned = matches!(self.tys.kind(ct), TypeKind::Int { signed: false, .. });
+                out[k].const_ty = if unsigned || self.tys.is_error_ty(ct) {
+                    ct
+                } else {
+                    let names = NameCx { prog: self.prog, generics: &[] };
+                    let found = types::display(&self.tys, &names, ct);
+                    let name = self.prog.strings.get(out[k].name).to_string();
+                    let d = mk(
+                        "E0201",
+                        Some("const-param-type"),
+                        &[("operand", &name), ("found", &found)],
+                        icx.node_span(t),
+                        &[],
+                    );
+                    self.diags.extend(d);
+                    ids::ERROR
+                };
             }
         }
         // a bound may pass any param of the list (or of the parent) as a const arg
