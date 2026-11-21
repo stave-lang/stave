@@ -2099,7 +2099,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0416",
         severity: Severity::Error,
         area: "kinds",
-        rule: "`impl Drop` for a Copy type (built-in Copy, or an ADT with `impl Copy`)",
+        rule: "`impl Drop` for a type with an instance that may be Copy: built-in Copy, or an `impl Copy` whose head unifies with the `impl Drop`'s (`impl<T: Copy> Copy for W<T>` with `impl<T> Drop for W<T>`; ruled out only by a bound that fails on a type without params)",
         retired: false,
         located: true,
         holes: &[
