@@ -245,10 +245,16 @@ reachable from it changes while it is shared; a `Frozen` type writes through no 
 where it runs. **Guarantees.** A clause writes no place of its fn, moves nothing, and reaches no
 shared mutable state through its arguments or a user `static`: what a callee changes is its own
 frames and memory it allocates (`alloc` and `trap` are allowed), so a run that skips a proven check
-behaves like one that evaluates it. **What would break it.** State the built-in packages keep
-outside user statics that the program can read back: the error trace, which every `Result.Err(..)`
-evaluation restarts and every `?` on an error extends, is read by `debug.err_trace()`, so a clause
-whose callee makes an error changes what the body sees. A missing edge (a fn-value write the flow
+behaves like one that evaluates it. The error trace, the one state of the built-in packages
+outside user statics that the program reads back (`debug.err_trace()`, an `unwrap` panic), is
+restarted by every `Result.Err(..)` and extended by every `?` on an error, also in a clause's
+callees: lowering saves it before the `requires` checks (and the `old(e)` snapshots) and before the
+`ensures` checks of each return, when a clause calls anything or makes a variant, and puts it back
+after them and before a failing check reports. The user site a clause's callees store is read only
+after a later store of the caller (every user call into std stores it first), except by std code
+after it calls back into user code, whose own calls store it as well (a panic location there may
+name a clause's call). **What would break it.** State of the built-in packages a clause can change
+and the program can read back other than the error trace. A missing edge (a fn-value write the flow
 misses), which hides the `static` or the `io` / `lock` / `block` callee from both reach checks. A
 type that is wrongly `Frozen`.
 

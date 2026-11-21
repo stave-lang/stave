@@ -1,0 +1,78 @@
+// A clause leaves the error trace as it found it: `requires` and `ensures` callees that make an
+// error (`Result.Err(..)`) or pass one on with `?` change nothing `debug.err_trace()` returns
+// after the call; the body's own trace changes stay.
+//~ STDOUT contract_errtrace_kept.stdout
+import std.debug;
+import std.io;
+
+fn made() -> bool {
+    let r: Result<u32, u32> = Result.Err(1u32);
+    return true;
+}
+
+fn err() -> Result<u32, u32> {
+    return Result.Err(2u32);
+}
+
+fn passed() -> bool {
+    let r = pass();
+    return true;
+}
+
+fn pass() -> Result<u32, u32> {
+    let v = err()?;
+    return Result.Ok(v);
+}
+
+fn req_made(x: u32) -> u32 requires(made()) {
+    return x;
+}
+
+fn req_passed(x: u32) -> u32 requires(passed() && x < 10) {
+    return x;
+}
+
+fn ens(x: u32) -> u32 ensures(made() && passed()) {
+    return x;
+}
+
+// the body's `?` adds a via; the `ensures` callees add nothing
+fn ens_question(x: u32) -> Result<u32, u32> ensures(passed()) {
+    let v = err()?;
+    return Result.Ok(v + x);
+}
+
+fn origin(t: &debug.ErrTrace) -> u32 {
+    return match t.origin() {
+        Option.Some(s) => s.line(),
+        Option.None => 0u32,
+    };
+}
+
+fn show(what: &str, a: &debug.ErrTrace, b: &debug.ErrTrace) {
+    let same = origin(a) == origin(b) && a.len() == b.len();
+    if same {
+        io.print(f"{what}: kept\n");
+    } else {
+        io.print(f"{what}: changed\n");
+    }
+}
+
+fn main() {
+    let first = err();
+    let t0 = debug.err_trace();
+    let a = req_made(1u32);
+    let t1 = debug.err_trace();
+    show("requires Err", &t0, &t1);
+    let b = req_passed(2u32);
+    let t2 = debug.err_trace();
+    show("requires ?", &t0, &t2);
+    let c = ens(3u32);
+    let t3 = debug.err_trace();
+    show("ensures", &t0, &t3);
+    let d = ens_question(4u32);
+    let t4 = debug.err_trace();
+    let o = origin(&t4);
+    let n = t4.len();
+    io.print(f"ensures after ?: origin {o}, vias {n}\n");
+}
