@@ -169,14 +169,32 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
     let mut ms: Vec<(u32, (Span, Place))> = moved.into_iter().collect();
     ms.sort_by_key(|(s, (sp, _))| (sp.offset, *s));
     let mut used_spans: Vec<u32> = Vec::new();
-    for (site, (span, _)) in ms {
+    for (site, (span, used)) in ms {
         if used_spans.contains(&span.offset) {
             continue;
         }
         used_spans.push(span.offset);
         let (mp, mspan) = &body.move_sites[site as usize];
         let text = place_text(body, tys, mp);
-        out.extend(mk("E0502", None, &[("place", &text)], span, &[("move", *mspan)]));
+        // a later operand of the expression whose earlier operand moved the place
+        let operand = body.operand_moves.iter().any(|&(s, w)| {
+            s == site
+                && w.file == span.file
+                && span.offset > mspan.offset
+                && span.offset + span.len <= w.offset + w.len
+        });
+        if operand {
+            let u = place_text(body, tys, &used);
+            out.extend(mk(
+                "E0502",
+                Some("operand"),
+                &[("place", &u), ("moved", &text)],
+                span,
+                &[("move", *mspan)],
+            ));
+        } else {
+            out.extend(mk("E0502", None, &[("place", &text)], span, &[("move", *mspan)]));
+        }
     }
     for f in findings {
         match f {
@@ -331,6 +349,7 @@ mod tests {
             move_sites: Vec::new(),
             bad_moves: Vec::new(),
             guard_effects: Vec::new(),
+            operand_moves: Vec::new(),
             ret: RetCheck::None,
             declared: Vec::new(),
             is_nested: false,

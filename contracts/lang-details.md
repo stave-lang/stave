@@ -79,9 +79,10 @@ then the arguments), a struct, tuple, array, or variant literal (fields in sourc
 binary operator (left, then right), `c.select(a, b)`, and `p op= e` (below). A by-value
 operand whose type is not Copy is moved when it is evaluated, so every later operand sees the
 place moved: using it again, a part of it (`s.n`, Copy or not), or borrowing it there is
-E0502, also inside a nested call, a closure literal, or an f-string hole. A Copy operand
-does not move: a later operand may still use the place (`f(s.n, s)` is fine; the checker takes
-the Copy value as read at the call, which may report a conflict a later operand makes with it).
+E0502 (case `operand`), also inside a nested call, a closure literal, or an f-string hole. A
+Copy operand does not move: a later operand may still use the place (`f(s.n, s)` is fine; the
+checker takes the Copy value as read at the call, which may report a conflict a later operand
+makes with it).
 The fix names the value first: `let n = s.n; f(s, n);`.
 
 An assignment `p = e` evaluates the operands of the place `p` first (an index `xs[i]`, the call

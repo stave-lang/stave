@@ -911,11 +911,16 @@ fix = { description = "end the borrow before this point: move the later use befo
 code = "E0502"
 severity = "error"
 area = "borrow"
-rule = "use after move, also by a later operand of the expression whose by-value operand moved the place (operands are evaluated left to right, the receiver first)"
-holes = { place = "place" }
+rule = "use after move; case `operand`: by a later operand of the expression whose by-value operand moved the place (operands are evaluated left to right, the receiver first)"
+holes = { place = "place", moved = "place" }
 message = "use of moved value `{place}`"
 labels = [{ at = "primary", text = "used here after the move" }, { at = "move", text = "`{place}` moved here" }]
 fix = { description = "use `{place}` before it is moved, or pass a reference (`&{place}`) instead of moving it" }
+
+[diag.cases.operand]
+message = "`{place}` is used after an earlier operand of the same expression moved `{moved}`"
+labels = [{ at = "primary", text = "used here, after the move" }, { at = "move", text = "`{moved}` moved here: operands are evaluated left to right" }]
+fix = { description = "compute the operand that uses `{place}` into a `let` before the expression and pass that local: operands are evaluated left to right, so `{moved}` is gone when it runs" }
 
 [[diag]]
 code = "E0503"

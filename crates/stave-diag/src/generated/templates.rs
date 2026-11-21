@@ -2205,10 +2205,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0502",
         severity: Severity::Error,
         area: "borrow",
-        rule: "use after move, also by a later operand of the expression whose by-value operand moved the place (operands are evaluated left to right, the receiver first)",
+        rule: "use after move; case `operand`: by a later operand of the expression whose by-value operand moved the place (operands are evaluated left to right, the receiver first)",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "moved", kind: HoleKind::Place, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
         ],
         shapes: &[
@@ -2221,6 +2222,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use `{place}` before it is moved, or pass a reference (`&{place}`) instead of moving it",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "operand",
+                message: "`{place}` is used after an earlier operand of the same expression moved `{moved}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "used here, after the move" },
+                    LabelTemplate { at: "move", text: "`{moved}` moved here: operands are evaluated left to right" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "compute the operand that uses `{place}` into a `let` before the expression and pass that local: operands are evaluated left to right, so `{moved}` is gone when it runs",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

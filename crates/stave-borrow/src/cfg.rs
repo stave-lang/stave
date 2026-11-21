@@ -299,6 +299,9 @@ pub struct Body {
     /// E0504: by-value uses of non-Copy places that cannot be moved from (place, span, why),
     /// kept as copies in the CFG.
     pub bad_moves: Vec<(Place, Span, MoveOut)>,
+    /// Moves made by an operand that has later operands ([`Builder::hold`]): the move site and
+    /// the span of the whole expression (an E0502 use inside it is case `operand`).
+    pub operand_moves: Vec<(u32, Span)>,
     /// E0505: what a match guard (or a closure written in one) does besides reading.
     pub guard_effects: Vec<(Span, GuardEffect)>,
     pub ret: RetCheck,
@@ -432,6 +435,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             move_sites: Vec::new(),
             bad_moves: Vec::new(),
             guard_effects: Vec::new(),
+            operand_moves: Vec::new(),
             ret: RetCheck::None,
             declared: Vec::new(),
             is_nested: range.is_some(),
@@ -807,12 +811,13 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// a move of a named place is made here, into a temporary the expression then consumes: the
     /// later operands, and the statements they make (nested calls, borrows), see the place
     /// moved.
-    fn hold(&mut self, o: Operand) -> Operand {
+    fn hold(&mut self, o: Operand, whole: Span) -> Operand {
         if o.kind != OpKind::Move || !self.open() || self.body.locals[o.place.local as usize].temp {
             return o;
         }
         let ty = o.place.ty;
         let (span, node) = (o.span, o.node);
+        self.body.operand_moves.push((o.site, whole));
         let t = self.new_local(ty, false, span, String::new(), true);
         self.body.locals[t as usize].node = node;
         self.push(StmtKind::Assign { dest: Place::local(t, ty), rv: Rvalue::Use(o), init: true }, span, node);
@@ -822,12 +827,13 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.op_of_place(Place::local(t, ty), span, node, true)
     }
 
-    /// The operands of expressions `ns`, each held ([`Self::hold`]) until the last is evaluated.
-    fn operands_in_order(&mut self, ns: &[u32]) -> Option<Vec<Operand>> {
+    /// The operands of expressions `ns` of the expression at `whole`, each held
+    /// ([`Self::hold`]) until the last is evaluated.
+    fn operands_in_order(&mut self, ns: &[u32], whole: Span) -> Option<Vec<Operand>> {
         let mut out: Vec<Operand> = Vec::with_capacity(ns.len());
         for &c in ns {
             if let Some(prev) = out.pop() {
-                let h = self.hold(prev);
+                let h = self.hold(prev, whole);
                 out.push(h);
             }
             let v = self.expr(c);
@@ -1181,7 +1187,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             } else {
                 let span = self.span(lhs);
                 let o = self.op_of_place(lp.clone(), span, lhs, true);
-                Some(self.hold(o))
+                let whole = self.span(es);
+                Some(self.hold(o, whole))
             };
             let rv = self.expr(rhs);
             let Some(r) = self.operand(rv, rhs) else { return };
@@ -2165,9 +2172,10 @@ impl<'a, 'b> Builder<'a, 'b> {
         let v = self.expr(first);
         let Some(mut acc) = self.operand(v, first) else { return V::Never };
         let ty = self.nty(n);
+        let whole = self.span(n);
         for &c in &kids[1..] {
             let optok = icx.a(c).saturating_sub(1);
-            acc = self.hold(acc);
+            acc = self.hold(acc, whole);
             let v = self.expr(c);
             let Some(r) = self.operand(v, c) else { return V::Never };
             let rv = match self.tb.target(optok) {
@@ -2333,7 +2341,8 @@ impl<'a, 'b> Builder<'a, 'b> {
     }
 
     fn agg(&mut self, n: u32, kids: &[u32]) -> V {
-        let Some(ops) = self.operands_in_order(kids) else { return V::Never };
+        let whole = self.span(n);
+        let Some(ops) = self.operands_in_order(kids, whole) else { return V::Never };
         let ty = self.nty(n);
         self.put_temp(Rvalue::Agg(ops), ty, n)
     }
@@ -2557,7 +2566,8 @@ impl<'a, 'b> Builder<'a, 'b> {
     }
 
     fn agg_ty(&mut self, n: u32, kids: &[u32], ty: TypeId) -> V {
-        let Some(ops) = self.operands_in_order(kids) else { return V::Never };
+        let whole = self.span(n);
+        let Some(ops) = self.operands_in_order(kids, whole) else { return V::Never };
         self.put_temp(Rvalue::Agg(ops), ty, n)
     }
 
@@ -2645,8 +2655,8 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.put_temp(Rvalue::Use(op), pt, n)
     }
 
-    fn args(&mut self, args: &[u32]) -> Option<Vec<Operand>> {
-        self.operands_in_order(args)
+    fn args(&mut self, args: &[u32], whole: Span) -> Option<Vec<Operand>> {
+        self.operands_in_order(args, whole)
     }
 
     fn sig_flows(&mut self, ret: TypeId, sig: &stave_sema::sigs::FnSig) -> Flows {
@@ -2693,7 +2703,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 self.direct_call(decl, &[], None, args, last, n, (span, paren))
             }
             Some(Target::Variant { .. }) => {
-                let Some(ops) = self.args(args) else { return V::Never };
+                let Some(ops) = self.args(args, span) else { return V::Never };
                 self.put_temp(Rvalue::Agg(ops), node_ty, n)
             }
             Some(Target::TraitMethod { method, self_ty, args: ga }) => {
@@ -2712,7 +2722,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                         _ => TypeId::NONE,
                     }
                 };
-                let Some(mut ops) = self.args(args) else { return V::Never };
+                let Some(mut ops) = self.args(args, span) else { return V::Never };
                 ops.insert(0, fop);
                 // The result takes the origins of every ref/view argument, and of the fn
                 // value itself (operand 0): a closure may return a borrow of what it captured
@@ -2739,7 +2749,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 }
             },
             _ => {
-                let Some(ops) = self.args(args) else { return V::Never };
+                let Some(ops) = self.args(args, span) else { return V::Never };
                 let flows = self.flows_if(node_ty, || Flows::AllArgs);
                 self.call_result(Rvalue::call(ops, flows, paren), node_ty, n, span)
             }
@@ -2759,7 +2769,7 @@ impl<'a, 'b> Builder<'a, 'b> {
     ) -> V {
         let sigs = self.tys.sigs;
         let node_ty = if last { self.nty(n) } else { TypeId::NONE };
-        let Some(ops) = self.args(args) else { return V::Never };
+        let Some(ops) = self.args(args, span) else { return V::Never };
         let Some(sig) = sigs.fn_sig(decl) else {
             let flows = self.flows_if(node_ty, || Flows::AllArgs);
             return self.call_result(Rvalue::call(ops, flows, tok), node_ty, n, span);
@@ -2779,6 +2789,10 @@ impl<'a, 'b> Builder<'a, 'b> {
             && let Some(s) = self.body.blocks[b as usize].stmts.last_mut()
         {
             s.span = span;
+        }
+        // the result is named by the call's text, not by the rest of the chain it starts
+        if let V::P(p) = &v {
+            self.body.locals[p.local as usize].span = span;
         }
         if self.tys.is_never(ret) {
             self.terminate(Terminator::Unreachable);
@@ -2836,8 +2850,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             _ => (Adjust::default(), None, node_ty),
         };
         let Some((rop, act)) = self.receiver(recv, adj, n, rspan) else { return V::Never };
-        let rop = if args.is_empty() { rop } else { self.hold(rop) };
-        let Some(mut ops) = self.args(args) else { return V::Never };
+        let rop = if args.is_empty() { rop } else { self.hold(rop, span) };
+        let Some(mut ops) = self.args(args, span) else { return V::Never };
         ops.insert(0, rop);
         if let Some((t, res, a)) = act {
             self.push(StmtKind::Activate { local: t, reserved: res, active: a }, rspan, n);
