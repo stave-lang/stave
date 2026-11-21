@@ -1,0 +1,25 @@
+//~ BORROWCHECK ok
+// A `&mut` reached through a `&` may be read through, also through a raw pointer, and
+// reborrowed as `&`; a `Cell` it points to may be written through `&self`. The reference keeps
+// its own permission: after the shared one's last use it writes again.
+import std.cell;
+
+fn read(x: &u32) -> u32 { return *x; }
+
+fn main() -> i32 {
+    let mut a: u32 = 1u32;
+    let m: &mut u32 = &mut a;
+    let r: &&mut u32 = &m;
+    let p = r as *const &mut u32;
+    let x: u32 = **r + read(*r);
+    let y: u32 = unsafe("p points to m, which is live") **p;
+    *m = 4u32;
+    let mut c = cell.Cell::<u32>.new(0u32);
+    let mc: &mut cell.Cell<u32> = &mut c;
+    let rc: &&mut cell.Cell<u32> = &mc;
+    rc.set(6u32);
+    let s: u32 = (**rc).get();
+    mc.set(s + 1u32);
+    if x == 2u32 && y == 1u32 && a == 4u32 && c.get() == 7u32 { return 0; }
+    return 1;
+}

@@ -161,6 +161,25 @@ fn child(p: &mut u32) -> u32 {
   `sum` the elements they touch, `xs.len()` none. A reference the path dereferences is first
   read from its own place. A chunk loop with a `&mut` binding reads the chunk when its block is
   entered and writes it when the block is left. Violations: M1, M2 (the examples above).
+  A `&mut` reached through a `&` is read-only: a `&mut` word read from memory through a `&`
+  tag or the root of a `static` that holds the word's bytes `Frozen` (a `&mut` tag that a
+  foreign read made `Frozen` is no `&`; a raw pointer reads through the tag it carries, M20)
+  gets a new `&` tag,
+  a child of the tag stored there (M4), and the value read holds that one. A read or a `&`
+  reborrow through it is allowed; a write through it is a write through a `Frozen` `&` (M2).
+  The line is per byte: bytes inside an `UnsafeCell` are `Cell`, not `Frozen` (M21), so a
+  `&mut` stored there and read through a `&` keeps its tag; and the new `&` tag is `Cell` on
+  the `UnsafeCell` bytes of its own pointee, so a `&&mut Cell<T>` may still `set`. The word in
+  memory keeps its tag: the holder of the `&mut` writes through it again once the `&` is no
+  longer used.
+```stave
+fn shared_mut(m: &mut u32) -> u32 {
+    let r: &&mut u32 = &m;
+    let p = r as *const &mut u32 as *mut &mut u32;
+    unsafe("deliberate") { **p = 5; }   // M2: the `&mut` read through `r` is a `&`
+    return *m;
+}
+```
 - **M8 (copy).** A by-value use of a place whose type is Copy is a read. The words of the result
   keep their tags: two copies of a `&`, or of a Copy view, hold the same tags, and no rule tells
   them apart. A copy has no violation of its own; the copies become `Dead` together.
@@ -472,7 +491,7 @@ ran.
 
 | Class | Violation | Cause | Rules |
 |---|---|---|---|
-| (a) write under a `&` | a use through a `&` tag that a write made `Dead`; a write through a `Frozen` `&` or the `Frozen` root of a `static` | that write; for the write through a `&`, the borrow that made it; for the root of a `static`, its begin | M1, M2, M4 |
+| (a) write under a `&` | a use through a `&` tag that a write made `Dead`; a write through a `Frozen` `&` (also a `&mut` read through a `&`, M7) or the `Frozen` root of a `static` | that write; for the write through a `&`, the borrow that made it (for a `&mut` read through a `&`, the read); for the root of a `static`, its begin | M1, M2, M4, M7 |
 | (b) two exclusive users | a use through a `&mut` tag that is `Dead`, or a write through one that is `Frozen` | the foreign write, or the foreign read, through another `&mut`, a `&`, a raw pointer, or the place itself | M1, M2, M4 |
 | (c) use after the referent | a use through a tag of either kind made `Dead` by an end | the end: block or frame exit, a temporary evaluated again or dropped, a move out of the place, `free` | M3, M9, M13, M14 |
 | (d) second owner | a read or drop of a moved-out place; an array repeat of a value that is not Copy | the move that took the value (for the array repeat: the literal itself) | M9, M10, M12 |
@@ -499,6 +518,7 @@ hole. The model never reads a static rule to decide.
 | two-phase receiver borrows | M4 (a borrow is not an access), M23 (protection starts at the entry) |
 | E0502: use after move; assignment into a part of a moved value | M9 |
 | E0503: assignment through `&`; `&mut` of a place behind `&`; writes of a `static` | M2 on `Frozen` |
+| E0503: assignment through a `&mut` reached through a `&` (`**r = v`, `r: &&mut T`) | M7 (the `&mut` read through a `&` is a `&`), M2 on `Frozen` |
 | E0503: assignment to, or `&mut` of, an immutable binding | none (the root of a local is `Active`) |
 | E0504: move out of `*r`, `r.f`, `v[i]`, a capture | M9, M12 (the owner later reads or drops the moved-out place) |
 | E0510: a returned borrow the `from` clause lacks | M24 (result); M13, M2 in the caller, which reads the clause |
@@ -544,6 +564,7 @@ The oracle's regression set holds one program per shape. The rule that rejects t
 | a temporary's new value, or a view stored by the same statement, borrows the temporary's earlier value | M14 | (c) |
 | a temporary with drop glue borrowed by a storing call and read after the statement | M14 | (c) |
 | a `&mut` pointer exchanged out of a view through raw `read` / `write`, then split and stored into itself | M20, M16 with M2 | (a) |
+| a write through a `&mut` reached through a `&` (`**r = v` with `r: &&mut T`, also `r` from a `vec.Vec<&mut T>`) | M7 with M2 | (a) |
 
 A program that only shows a callee body the static rules must reject (a store its clause lacks,
 a clause a trait impl drops) has no violating execution until a caller uses the stored
@@ -639,7 +660,9 @@ it is not dumped, not compared with a golden, and not given to a backend.
 
 What the interpreter reads off the module without a row: a call protects the reference words of
 its arguments, found by the types of the params (M23); a load through a raw pointer gives each
-reference word of the loaded value a new tag (M20); the return of a frame ends its locals and
+reference word of the loaded value a new tag (M20); a load of a `&mut` word through a `&` tag
+that holds its bytes `Frozen` gives it a new `&` tag (M7; through a raw pointer that tag is the
+word's new tag); the return of a frame ends its locals and
 temporaries, `free` and `try_realloc` end the block (M3); a borrow whose instruction takes a raw
 pointer is a tag made through a raw pointer (M24).
 

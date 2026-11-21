@@ -979,6 +979,16 @@ impl Tracker {
         n.find(offset, offset + 1, |_| true).map(|(_, r)| r.perm)
     }
 
+    /// Whether `tag` holds the byte at `offset` of `alloc` as a `&` does: it is a `&` tag, or
+    /// the root of a `static`, and the byte is `Frozen` for it (not `Cell`). A `&mut` that a
+    /// foreign read made `Frozen` is no `&`.
+    pub fn shared_at(&self, alloc: u32, tag: Tag, offset: u64) -> bool {
+        let Some(tree) = self.trees.get(&alloc) else { return false };
+        let Some(n) = tree.nodes.get(self.node_of(alloc, tag) as usize) else { return false };
+        n.kind != Kind::Mut
+            && n.find(offset, offset + 1, |_| true).is_some_and(|(_, r)| r.perm == Perm::Frozen)
+    }
+
     /// Tags but the roots that the tracker holds a node for.
     pub fn tags(&self) -> usize {
         self.count
