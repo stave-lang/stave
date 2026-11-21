@@ -1,0 +1,12 @@
+mk 1
+mk 2
+kept
+drop 2
+took
+mk 20
+drop 1
+kept
+one
+drop 20
+done
+end

@@ -1,0 +1,13 @@
+mk 0
+drop 0
+mk 1
+drop 1
+mk 11
+drop 11
+mk 12
+drop 12
+mk 13
+drop 13
+mk 34
+drop 34
+end

@@ -1,0 +1,7 @@
+mk 3
+mk 11
+drop 11
+mk 12
+drop 12
+drop 3
+end

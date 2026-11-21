@@ -11,7 +11,8 @@ use stave_syntax::{NodeKind, Term};
 use crate::decls::DeclKind;
 use crate::loops::ForKind;
 use crate::lower_fn::{
-    Base, E, Env, FnCx, FnOut, FnState, LocalInfo, LoopCx, LoopKind, MState, Place, Proj, Ty, WriteBack,
+    Base, E, Env, Flag, FlagKey, FnCx, FnOut, FnState, Home, Init, LocalInfo, LoopCx, LoopKind, Place, Proj,
+    Ty, WriteBack,
 };
 use crate::mono::{InstKey, Req, Resolved};
 use crate::resolve::Res;
@@ -26,6 +27,28 @@ pub(crate) type EnvType = (Ty, Ty, Vec<(usize, Ty)>);
 enum Mode {
     Move,
     Ref(bool),
+}
+
+/// A field's sub-pattern: a pattern, or a field named without one (a binding of that name).
+#[derive(Clone, Copy, Debug)]
+enum Sub {
+    Pat(u32),
+    Name(u32),
+}
+
+/// What a pattern is against a value.
+#[derive(Clone, Debug)]
+enum Shape {
+    /// `_`.
+    Wild,
+    /// One name: the binding node.
+    Name(u32),
+    /// A literal, a range, a constant: a test that binds nothing.
+    Test,
+    /// A tuple, struct or variant pattern against (peeled) type `ty`: per field of the tuple,
+    /// struct or variant its type and its sub-pattern (none: not named; a pattern names a field
+    /// once). `mode`: how names inside bind.
+    Parts { ty: Ty, mode: Mode, variant: Option<u32>, fields: Vec<(Ty, Option<Sub>)> },
 }
 
 /// The top-level test of a match arm.
@@ -193,7 +216,7 @@ impl<'a> FnCx<'a> {
             let drop = self.needs_drop(ty);
             let idx = self.locals.len();
             let mem = drop || self.slotted.contains(&node);
-            self.locals.push(LocalInfo { node, ty, mem, drop, flag: None });
+            self.locals.push(LocalInfo { node, ty, mem, drop, flag: None, temp: None });
             self.by_node.insert(node, idx);
             if icx.kind(node) == Some(NodeKind::Param)
                 && let Some(sp) = icx.child(node, NodeKind::SelfParam)
@@ -271,24 +294,28 @@ impl<'a> FnCx<'a> {
         }
         self.closure_nodes = infos.iter().map(|c| c.node).collect();
         self.closure_info = infos;
-        // dynamic drop flags
-        let n = self.locals.len();
+        // dynamic drop flags: a hidden `bool` local per flagged local (a temporary's flag is made
+        // with it)
+        let n = if self.flagged.is_empty() { 0 } else { self.locals.len() };
         for l in 0..n {
-            if self.locals[l].drop && self.flagged.contains(&self.locals[l].node) {
+            let node = self.locals[l].node;
+            if self.locals[l].drop && self.flagged.contains(&FlagKey { temp: false, id: node }) {
                 let fl = self.locals.len();
                 let bt = self.t_bool();
-                let node = self.locals[l].node;
-                self.locals.push(LocalInfo { node, ty: bt, mem: false, drop: false, flag: None });
-                self.locals[l].flag = Some(fl);
+                self.locals.push(LocalInfo { node, ty: bt, mem: false, drop: false, flag: None, temp: None });
+                self.locals[l].flag = Some(Flag::Ssa(fl));
             }
         }
+        let q = Term::Question as u8;
+        self.try_toks = (icx.a(root)..=icx.end_tok(root)).filter(|&t| icx.tk(t) == q).collect();
     }
 
     fn fresh_env(&mut self, params: &[Ty], ret: Ty) {
         self.f = FnState::new(params, ret);
         let n = self.locals.len();
         self.f.slot = vec![None; n];
-        self.f.env = Env { vals: vec![None; n], st: vec![MState::Uninit; n] };
+        self.f.env = Env { vals: vec![None; n], st: vec![Init::Gone; n] };
+        self.f.own_temps = n;
     }
 
     /// Slots of the mem locals owned by `owner` (`None`: the fn itself), in local order.
@@ -393,7 +420,14 @@ impl<'a> FnCx<'a> {
             return;
         }
         let idx = self.locals.len();
-        self.locals.push(LocalInfo { node: c.result, ty: ret, mem: false, drop: false, flag: None });
+        self.locals.push(LocalInfo {
+            node: c.result,
+            ty: ret,
+            mem: false,
+            drop: false,
+            flag: None,
+            temp: None,
+        });
         self.by_node.insert(c.result, idx);
         self.result_local = Some(idx);
         let scalar = matches!(self.tys.kind(ret), TypeKind::Int { .. } | TypeKind::Bool);
@@ -452,8 +486,10 @@ impl<'a> FnCx<'a> {
                 return;
             }
             let t = self.nty(e);
-            let Some(v) = self.val(e, Some(t)) else { return };
-            self.drop_temps();
+            self.begin_temps();
+            let v = self.val(e, Some(t));
+            self.end_temps();
+            let Some(v) = v else { return };
             self.old_vals.insert(paren, (v, t));
         }
         if let Some(sv) = trace {
@@ -486,13 +522,12 @@ impl<'a> FnCx<'a> {
             if !self.open() {
                 return;
             }
-            let saved = std::mem::take(&mut self.f.temps);
             let bt = self.t_bool();
             self.hold_site = true;
+            self.begin_temps();
             let v = self.val(cl.expr, Some(bt));
-            self.drop_temps();
+            self.end_temps();
             self.hold_site = false;
-            self.f.temps = saved;
             let Some(v) = v else { return };
             if !self.open() {
                 return;
@@ -567,7 +602,7 @@ impl<'a> FnCx<'a> {
         self.inst_sig(&InstKey { decl: restore, args: Vec::new() })?;
         let f = self.req(Req::Inst(InstKey { decl: save, args: Vec::new() }));
         let v = self.f.b.call(f, Some(Self::ir(trace)), &[])?;
-        let (p, _) = self.spill(Operand::Value(v), trace, false);
+        let (p, _) = self.spill(Operand::Value(v), trace);
         Some((p, trace))
     }
 
@@ -606,13 +641,12 @@ impl<'a> FnCx<'a> {
             if !self.open() {
                 return;
             }
-            let saved = std::mem::take(&mut self.f.temps);
             let bt = self.t_bool();
             self.hold_site = at.is_none();
+            self.begin_temps();
             let c = self.val(e, Some(bt));
-            self.drop_temps();
+            self.end_temps();
             self.hold_site = false;
-            self.f.temps = saved;
             let Some(c) = c else { return };
             if !self.open() {
                 return;
@@ -704,7 +738,8 @@ impl<'a> FnCx<'a> {
         let saved = std::mem::replace(&mut self.f, FnState::new(&all, ret));
         let nl = self.locals.len();
         self.f.slot = vec![None; nl];
-        self.f.env = Env { vals: vec![None; nl], st: vec![MState::Uninit; nl] };
+        self.f.env = Env { vals: vec![None; nl], st: vec![Init::Gone; nl] };
+        self.f.own_temps = nl;
         // captured locals: their slots are the addresses in the environment
         if let Some((_, _, locals)) = &env
             && let Some(ep) = self.f.b.param(params.len()).map(Operand::Value)
@@ -967,6 +1002,7 @@ impl<'a> FnCx<'a> {
         }
         let t = icx.tk(a);
         let kids = self.kids(s);
+        self.begin_temps();
         if t == Term::KwLet as u8 {
             self.let_stmt(&kids);
         } else if t == Term::KwIf as u8 {
@@ -1008,7 +1044,7 @@ impl<'a> FnCx<'a> {
         } else if let Some(&e) = kids.first() {
             self.expr_stmt(e);
         }
-        self.drop_temps();
+        self.end_temps();
     }
 
     /// `scope { .. }`: a thread-list handle (`usize`, 0 = empty) in a slot; the block's spawns
@@ -1141,11 +1177,37 @@ impl<'a> FnCx<'a> {
                 && p.proj.is_empty()
                 && self.needs_drop(t)
             {
-                let _ = self.spill(v, t, true);
+                let _ = self.slot_temp(v, t);
             }
             return;
         }
-        let _ = self.pat(pat, p, Mode::Move, None, false);
+        let p = self.owned_for(pat, p, false);
+        self.bind_pat(pat, p);
+    }
+
+    /// Binds irrefutable pattern `pat` to place `p` and commits it: the binding point of a `let`
+    /// and of a `for` iteration.
+    fn bind_pat(&mut self, pat: u32, p: Place) {
+        if self.pat(pat, p.clone(), Mode::Move, None, false) {
+            self.commit(pat, &p);
+        }
+    }
+
+    /// The place a pattern is matched against: an rvalue with drop glue becomes a temporary (of
+    /// the statement, or of the innermost scope when `scoped`), which a pattern that only reads
+    /// leaves to be dropped there. A pattern that is one name takes the whole value.
+    fn owned_for(&mut self, pat: u32, p: Place, scoped: bool) -> Place {
+        match p.base {
+            Base::Val(v, t)
+                if p.proj.is_empty()
+                    && p.root.is_none()
+                    && self.binding_ty(pat).is_none()
+                    && self.needs_drop(t) =>
+            {
+                self.value_temp(v, t, scoped)
+            }
+            _ => p,
+        }
     }
 
     fn expr_stmt(&mut self, es: u32) {
@@ -1167,35 +1229,25 @@ impl<'a> FnCx<'a> {
                 let Some(r) = self.val(rhs, Some(lt)) else { return };
                 let tok = icx.a(op);
                 let Some(nv) = self.binop(tok, bin as u8, old, r, lt) else { return };
-                self.assign(&lp, nv);
+                if self.needs_drop(lt) {
+                    // `p op= e` is `p = p op e`: the operator call took the old value (the callee
+                    // owns it), so the result goes into a place that holds none. Until the call
+                    // the place still owns the old value: a `?` in `e` leaves it there.
+                    self.write(&lp, nv);
+                } else {
+                    self.assign(&lp, nv);
+                }
             }
             return;
         }
         let Some(&e) = kids.first() else { return };
         let ex = self.expr(e, None);
-        match ex {
-            E::V(v, t) => {
-                if self.needs_drop(t) {
-                    let _ = self.spill(v, t, true);
-                }
-            }
-            E::P(p) => {
-                // a place statement reads nothing; an owned f-string temporary is dropped
-                if let Base::Mem(m, _) = p.base
-                    && p.root.is_none()
-                    && p.proj.is_empty()
-                    && self.is_fmt_temp(e)
-                {
-                    let t = p.ty;
-                    self.f.temps.push((m, t));
-                }
-            }
-            _ => {}
+        // a place statement reads nothing
+        if let E::V(v, t) = ex
+            && self.needs_drop(t)
+        {
+            let _ = self.slot_temp(v, t);
         }
-    }
-
-    fn is_fmt_temp(&self, e: u32) -> bool {
-        self.down_to_primary(e).is_some_and(|p| self.icx.is(self.icx.a(p), Term::FmtLit))
     }
 
     fn if_stmt(&mut self, n: u32) {
@@ -1206,7 +1258,11 @@ impl<'a> FnCx<'a> {
         let eb = els.map(|_| self.f.b.create_block());
         let j = self.join(n, &[]);
         let bt = self.t_bool();
-        let Some(cv) = self.val(c, Some(bt)) else { return };
+        // the condition's temporaries end before the branch
+        self.begin_temps();
+        let cv = self.val(c, Some(bt));
+        self.end_temps();
+        let Some(cv) = cv else { return };
         let snap = self.f.env.clone();
         match eb {
             Some(eb) => self.f.b.cbr(cv, then, &[], eb, &[]),
@@ -1249,7 +1305,10 @@ impl<'a> FnCx<'a> {
         self.br_join(head, &[]);
         self.enter(head);
         let bt = self.t_bool();
-        let Some(cv) = self.val(c, Some(bt)) else { return };
+        self.begin_temps();
+        let cv = self.val(c, Some(bt));
+        self.end_temps();
+        let Some(cv) = cv else { return };
         let args = self.edge(exit, &[]);
         let eb = self.f.joins[exit].block;
         self.f.b.cbr(cv, body, &[], eb, &args);
@@ -1298,7 +1357,9 @@ impl<'a> FnCx<'a> {
             self.fail_at(Some(tok), "break outside a loop");
             return;
         };
-        self.drop_temps_keep();
+        // the statements opened inside the loop's body are left
+        let from = self.f.scope_stmts.get(lp.scope).copied().unwrap_or(self.f.stmts.len());
+        self.exit_temps(from.max(1));
         self.drop_scopes(lp.scope);
         for s in (lp.scope..self.f.scopes.len()).rev() {
             let ls = self.f.scopes[s].clone();
@@ -1335,7 +1396,7 @@ impl<'a> FnCx<'a> {
             }
             None => None,
         };
-        self.drop_temps_keep();
+        self.exit_temps(0);
         self.drop_scopes(0);
         self.ensures_checks(v, at);
         if self.open() {
@@ -1432,7 +1493,7 @@ impl<'a> FnCx<'a> {
             }
             // an array value (a place is E0219): the loop's temporary
             ForKind::Array => {
-                let TypeKind::Array { len, .. } = self.kind(p.ty) else {
+                let TypeKind::Array { len, elem } = self.kind(p.ty) else {
                     self.fail(f, "a `for` over an array value whose instance type is no array");
                     return;
                 };
@@ -1440,7 +1501,23 @@ impl<'a> FnCx<'a> {
                 let us = self.t_usize();
                 let n = self.int(len as i128);
                 let z = self.int(0);
-                self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Val(p, iter)));
+                if !self.needs_drop(elem) {
+                    self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Val(p, iter)));
+                    return;
+                }
+                // elements with drop glue: the loop owns the array in a slot and hands each
+                // element to its iteration; what it has not handed out when it ends or is left
+                // (`break`, `return`, `?`) is dropped there
+                let at = p.ty;
+                let Some(v) = self.read(&p) else { return };
+                self.push_scope();
+                let (s, st) = self.spill(v, at);
+                let taken = self.new_slot(us);
+                self.f.b.store(taken, z);
+                let l = self.new_temp(at, Home::Rest(s, taken), true);
+                let arr = Place { base: Base::Mem(s, st), proj: Vec::new(), ty: at, root: Some(l) };
+                self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Owned(arr, taken, iter)));
+                self.pop_scope();
             }
             ForKind::Iter | ForKind::IterMut => self.iter_loop(f, pat, body, p, kind),
             ForKind::Range => {}
@@ -1510,9 +1587,27 @@ impl<'a> FnCx<'a> {
                 p.ty = elem;
                 Some(p)
             }
+            Some(Seq::Owned(mut p, taken, iter)) => {
+                let elem = match self.kind(p.ty) {
+                    TypeKind::Array { elem, .. } => elem,
+                    _ => TypeId::NONE,
+                };
+                // the element is the iteration's from here on: a value of its own, which a
+                // pattern that only reads leaves to be dropped when the iteration ends
+                let one = self.int(1);
+                let next = self.op2(Op::AddWrap, ty, i, one);
+                self.f.b.store(taken, next);
+                let tok = self.icx.a(iter);
+                p.proj.push(Proj::Elem(i, elem, tok));
+                p.ty = elem;
+                self.take(&p).map(|x| {
+                    let item = Place { base: Base::Val(x, elem), proj: Vec::new(), ty: elem, root: None };
+                    self.owned_for(pat, item, true)
+                })
+            }
         };
         if let Some(item) = item {
-            let _ = self.pat(pat, item, Mode::Move, None, false);
+            self.bind_pat(pat, item);
         }
         self.block(body);
         self.pop_scope();
@@ -1803,12 +1898,12 @@ impl<'a> FnCx<'a> {
                     self.pop_scope();
                     return;
                 };
-                let (s, st) = self.spill(v, t, false);
-                if self.needs_drop(t) {
-                    let d = self.f.scopes.len();
-                    self.f.loop_owned.push((d, s, t));
-                }
-                Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: None }
+                let (s, st) = self.spill(v, t);
+                // an iterator with drop glue is a temporary of the loop's scope: dropped when
+                // the loop ends or is left
+                let root =
+                    if self.needs_drop(t) { Some(self.new_temp(t, Home::Slot(s), true)) } else { None };
+                Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root }
             }
         };
         self.iter_loop_over(f, pat, body, it);
@@ -1859,7 +1954,8 @@ impl<'a> FnCx<'a> {
         let (s, z) = (self.int(self.g.opt_some as i128), self.int(0));
         let x = self.opn(Op::EnumGet, xt, &[rv, s, z]);
         let item = Place { base: Base::Val(x, xt), proj: Vec::new(), ty: xt, root: None };
-        let _ = self.pat(pat, item, Mode::Move, None, false);
+        let item = self.owned_for(pat, item, true);
+        self.bind_pat(pat, item);
         self.block(body);
         self.pop_scope();
         self.br_join(head, &[]);
@@ -1998,6 +2094,14 @@ impl<'a> FnCx<'a> {
         let j = self.join(n, &pre);
         let e = self.expr(scrut, None);
         let Some(sp) = self.place_of(e) else { return E::Never };
+        // an rvalue scrutinee with drop glue is a temporary of the enclosing statement: what the
+        // arms do not bind is dropped with it
+        let sp = match sp.base {
+            Base::Val(v, t) if sp.proj.is_empty() && sp.root.is_none() && self.needs_drop(t) => {
+                self.value_temp(v, t, false)
+            }
+            _ => sp,
+        };
         let Some((dp, _)) = self.peel(sp.clone(), Mode::Move) else { return E::Never };
         let dk = self.kind(dp.ty);
         let tops: Vec<Top> = rows.iter().map(|r| self.top_of(r.0, dp.ty)).collect();
@@ -2032,6 +2136,8 @@ impl<'a> FnCx<'a> {
         };
         let snap = self.f.env.clone();
         let scope_base = self.f.scopes.len();
+        // Every row starts from the state before the match: the names a pattern binds are
+        // copies until its arm is committed, and a guard changes no owner (checked below).
         let mut unreach: Option<Block> = None;
         if switch_mode {
             let d = if matches!(dk, TypeKind::Adt { .. }) {
@@ -2076,15 +2182,20 @@ impl<'a> FnCx<'a> {
                 None => *unreach.get_or_insert_with(|| s.f.b.create_block()),
             };
             let guard_fail = target(self, next_row(a.hi, arm_top(a)));
-            // the moves of a pattern with a guard happen when the guard holds
-            let guarded = self.g.borrows && a.guard.is_some();
+            // the names a pattern binds take their parts where the arm is entered: a later
+            // test or the guard may still fail
+            let tracked = self.g.borrows;
             let mut moves: Vec<(Operand, Ty)> = Vec::new();
+            let pats: Vec<u32> = rows[a.lo..a.hi].iter().map(|r| r.0).collect();
+            // An or-pattern under a guard whose alternatives leave different parts to drop:
+            // the alternative taken, a param of the guard's block.
+            let mut taken: Option<Value> = None;
             let ok = if a.hi - a.lo == 1 {
                 let fail = target(self, next_row(a.lo + 1, tops[a.lo]));
                 self.f.env = snap.clone();
                 self.f.b.switch_to(rows[a.lo].1);
                 self.push_scope();
-                if guarded {
+                if tracked {
                     self.f.held = Some(Vec::new());
                 }
                 let ok = self.pat(rows[a.lo].0, sp.clone(), Mode::Move, Some(fail), switch_mode);
@@ -2109,6 +2220,16 @@ impl<'a> FnCx<'a> {
                         self.f.b.add_param(shared, Self::ir(t))
                     })
                     .collect();
+                if a.gb.is_some() {
+                    let mut drops = false;
+                    for &q in &pats {
+                        drops |= !self.ignored_parts(q, &sp).is_empty();
+                    }
+                    if drops {
+                        let u32t = self.t_u32();
+                        taken = Some(self.f.b.add_param(shared, Self::ir(u32t)));
+                    }
+                }
                 // the env and the scope's locals after the first alternative that lowers
                 let mut bound: Option<(Env, Vec<usize>)> = None;
                 for k in a.lo..a.hi {
@@ -2116,18 +2237,26 @@ impl<'a> FnCx<'a> {
                     self.f.env = snap.clone();
                     self.f.b.switch_to(rows[k].1);
                     self.push_scope();
-                    if guarded {
+                    if tracked {
                         self.f.held = Some(Vec::new());
                     }
                     let ok = self.pat(rows[k].0, sp.clone(), Mode::Move, Some(fail), switch_mode);
-                    // the block the guard runs in has one predecessor per alternative, and so
-                    // no name for the place the taken one moved out of: these moves get no row
-                    self.f.held = None;
+                    let taken_parts = self.f.held.take().unwrap_or_default();
                     if !ok || !self.open() {
                         self.f.scopes.truncate(scope_base);
                         continue;
                     }
-                    let mut args: Vec<Operand> = Vec::with_capacity(ls.len());
+                    if a.gb.is_none() {
+                        // without a guard the arm is entered here
+                        for (p, pt) in taken_parts {
+                            self.event(stave_ir::EventKind::Gone, p, pt);
+                        }
+                        self.commit(rows[k].0, &sp);
+                    }
+                    // Under a guard, the block the guard runs in has one predecessor per
+                    // alternative, and so no name for the place the taken one moved out of:
+                    // these moves get no row.
+                    let mut args: Vec<Operand> = Vec::with_capacity(ls.len() + 1);
                     for &l in &ls {
                         let v = match self.f.env.vals.get(l).copied().flatten() {
                             Some(v) => v,
@@ -2138,17 +2267,23 @@ impl<'a> FnCx<'a> {
                         };
                         args.push(v);
                     }
+                    if taken.is_some() {
+                        args.push(self.int((k - a.lo) as i128));
+                    }
                     self.f.b.br(shared, &args);
                     let mut scope = self.f.scopes.pop().unwrap_or_default();
-                    if let Some((env, first)) = &bound {
+                    if let Some((env, first)) = &mut bound {
                         // the alternatives bind the same names with the same types and modes,
-                        // so they initialize and move the same locals
+                        // so they initialize the same locals; one that only reads may leave
+                        // the scrutinee with something to drop where another does not
                         let mut first = first.clone();
                         first.sort_unstable();
                         scope.sort_unstable();
-                        if env.st != self.f.env.st || first != scope {
+                        if first != scope {
                             self.fail(rows[k].0, "or-pattern alternatives bind differently");
                         }
+                        let st = self.f.env.st.clone();
+                        self.merge_states(&mut env.st, &st);
                     } else {
                         bound = Some((self.f.env.clone(), scope));
                     }
@@ -2169,7 +2304,23 @@ impl<'a> FnCx<'a> {
                 if let (Some(g), Some(gb)) = (a.guard, a.gb) {
                     self.f.b.switch_to(gb);
                     let bt = self.t_bool();
-                    if let Some(gv) = self.val(g, Some(bt)) {
+                    let bound = self.f.env.clone();
+                    let around = self.guard.replace((bound.st.clone(), false));
+                    // the guard's temporaries end before the branch
+                    self.begin_temps();
+                    let gv = self.val(g, Some(bt));
+                    self.end_temps();
+                    let moved = std::mem::replace(&mut self.guard, around).is_some_and(|w| w.1);
+                    if let Some(gv) = gv {
+                        // The rows after a failed guard start from the state before the match.
+                        // A move on some path of the guard only leaves the state as it was at
+                        // the guard's own join: the move itself is what counts.
+                        let n = bound.st.len().max(self.f.env.st.len());
+                        if moved
+                            || (0..n).any(|l| bound.st.get(l).copied().unwrap_or(Init::Gone) != self.st(l))
+                        {
+                            self.fail(g, "a match guard moved a value or made one");
+                        }
                         self.f.b.cbr(gv, a.bb, &[], guard_fail, &[]);
                     }
                 }
@@ -2177,10 +2328,19 @@ impl<'a> FnCx<'a> {
                 for (p, pt) in moves {
                     self.event(stave_ir::EventKind::Gone, p, pt);
                 }
+                // the arm is entered: its pattern takes the scrutinee
+                if pats.len() == 1 {
+                    self.commit(pats[0], &sp);
+                } else if a.gb.is_some() {
+                    self.commit_taken(taken, &pats, &sp);
+                }
                 if is_expr {
                     let w = Some(vt);
-                    if let Some(v) = self.val(a.body, w) {
-                        self.drop_temps_keep();
+                    // the arm's temporaries end with the arm
+                    self.begin_temps();
+                    let v = self.val(a.body, w);
+                    self.end_temps();
+                    if let Some(v) = v {
                         self.pop_scope();
                         self.br_join(j, &[v]);
                     }
@@ -2202,6 +2362,333 @@ impl<'a> FnCx<'a> {
             return E::Never;
         }
         if is_expr { E::V(Operand::Value(self.f.joins[j].prefix[0]), vt) } else { E::Unit }
+    }
+
+    /// The binding point of pattern `p` on scrutinee `sp` (after a `let`, at the entry of an arm
+    /// once its guard passed, at the start of a `for` iteration). A pattern that binds a
+    /// non-Copy part by value takes the whole value: the parts it ignores are dropped here, in
+    /// field order, and the scrutinee's owner is moved. Any other pattern only reads.
+    fn commit(&mut self, p: u32, sp: &Place) {
+        if !self.open() {
+            return;
+        }
+        if self.pat_moves(p, sp.ty, Mode::Move) {
+            let parts = self.ignored_parts(p, sp);
+            self.drop_parts(sp, parts);
+            self.moved_whole(sp);
+        } else if self.reads_empty(&[p], sp) {
+            self.moved_whole(sp);
+        }
+    }
+
+    /// [`FnCx::commit`] for an or-pattern under a guard, in the block the guard passed to:
+    /// `taken` is the index of the alternative that matched, when the alternatives differ in
+    /// what they leave to drop.
+    fn commit_taken(&mut self, taken: Option<Value>, pats: &[u32], sp: &Place) {
+        if !self.open() {
+            return;
+        }
+        let Some(&first) = pats.first() else { return };
+        let Some(t) = taken else {
+            // every alternative moves or none does, and none leaves a part to drop
+            if self.pat_moves(first, sp.ty, Mode::Move) || self.reads_empty(pats, sp) {
+                self.moved_whole(sp);
+            }
+            return;
+        };
+        let blocks: Vec<Block> = pats.iter().map(|_| self.f.b.create_block()).collect();
+        let body = self.f.b.create_block();
+        let cases: Vec<(i128, Block, &[Operand])> =
+            blocks.iter().enumerate().skip(1).map(|(i, &b)| (i as i128, b, &[][..])).collect();
+        self.f.b.switch(Operand::Value(t), &cases, blocks[0], &[]);
+        let before = self.f.env.clone();
+        for (&q, &b) in pats.iter().zip(&blocks) {
+            self.f.env = before.clone();
+            self.f.b.switch_to(b);
+            let parts = self.ignored_parts(q, sp);
+            self.drop_parts(sp, parts);
+            self.moved_whole(sp);
+            if self.open() {
+                self.f.b.br(body, &[]);
+            }
+        }
+        self.f.b.switch_to(body);
+    }
+
+    /// The owner of scrutinee `sp` is moved as a whole.
+    fn moved_whole(&mut self, sp: &Place) {
+        let Some(l) = sp.root else { return };
+        if !self.locals[l].drop {
+            return;
+        }
+        if Self::whole(sp) {
+            self.mark_moved(l);
+        } else {
+            self.fail_at(None, "a pattern takes a part of a value apart");
+        }
+    }
+
+    /// Whether a temporary scrutinee that the patterns `pats` only read holds nothing to drop
+    /// when one of them matched: it then counts as moved out, like in the arms that take it.
+    fn reads_empty(&mut self, pats: &[u32], sp: &Place) -> bool {
+        let temp = sp.root.is_some_and(|l| self.locals[l].temp.is_some());
+        if !temp || !sp.proj.is_empty() || !self.needs_drop(sp.ty) {
+            return false;
+        }
+        let mut empty = true;
+        for &q in pats {
+            empty &= self.shape_empty(q, sp.ty);
+        }
+        empty
+    }
+
+    /// Drops the parts `parts` of scrutinee `sp`. An SSA scrutinee goes into a slot first.
+    fn drop_parts(&mut self, sp: &Place, parts: Vec<Place>) {
+        if parts.is_empty() {
+            return;
+        }
+        let base = match sp.base {
+            Base::Val(v, t) => {
+                let (s, st) = self.spill(v, t);
+                Some(Base::Mem(s, st))
+            }
+            _ => None,
+        };
+        for mut part in parts {
+            if let Some(b) = &base {
+                part.base = b.clone();
+            }
+            self.drop_place(&part);
+        }
+    }
+
+    /// The type a pattern that is not one name sees: references peeled, the binding mode
+    /// becoming by reference under one.
+    fn peel_ty(&self, mut t: Ty, mut mode: Mode) -> (Ty, Mode) {
+        for _ in 0..1_000_000 {
+            match self.tys.kind(t) {
+                TypeKind::Ref { mutable, inner } => {
+                    mode = match mode {
+                        Mode::Move => Mode::Ref(*mutable),
+                        Mode::Ref(m) => Mode::Ref(m && *mutable),
+                    };
+                    t = *inner;
+                }
+                _ => break,
+            }
+        }
+        (t, mode)
+    }
+
+    /// A pattern [`FnCx::pat_shape`] cannot read. Taking it for a test would leave its value
+    /// whole while its names took parts of it, so the job fails.
+    fn no_shape(&mut self, p: u32) -> Shape {
+        self.fail(p, "a pattern of no known shape");
+        Shape::Test
+    }
+
+    /// The shape of pattern `p` against a value of type `t`, as [`FnCx::pat`] reads it.
+    fn pat_shape(&mut self, p: u32, t: Ty, mode: Mode) -> Shape {
+        let icx = self.icx;
+        let a = icx.a(p);
+        if icx.is(a, Term::Underscore) {
+            return Shape::Wild;
+        }
+        if icx.is(a, Term::KwMut) {
+            return Shape::Name(p);
+        }
+        let kids = icx.kids_vec(p);
+        if kids.first().is_some_and(|&l0| icx.kind(l0) == Some(NodeKind::Literal)) {
+            return Shape::Test;
+        }
+        if icx.is(a, Term::LParen) {
+            let close = icx.close(a);
+            if kids.len() == 1 && !icx.is(close - 1, Term::Comma) {
+                return self.pat_shape(kids[0], t, mode);
+            }
+            let (dt, pm) = self.peel_ty(t, mode);
+            let ets = match self.kind(dt) {
+                TypeKind::Tuple(ts) => ts.to_vec(),
+                _ => return self.no_shape(p),
+            };
+            let fields =
+                ets.iter().enumerate().map(|(i, &et)| (et, kids.get(i).map(|&k| Sub::Pat(k)))).collect();
+            return Shape::Parts { ty: dt, mode: pm, variant: None, fields };
+        }
+        if !icx.is(a, Term::Ident) {
+            return self.no_shape(p);
+        }
+        let e = icx.chain_end(a);
+        let has_paren = icx.is(e + 1, Term::LParen);
+        let has_rec = icx.is(e + 1, Term::DotLBrace);
+        if e == a && !has_paren && !has_rec {
+            return Shape::Name(p);
+        }
+        let Some(Res::Decl(d)) = icx.uses(p).last().map(|u| u.res) else { return self.no_shape(p) };
+        let is_variant = match self.decl_kind(d) {
+            Some(DeclKind::Variant) => true,
+            Some(DeclKind::Struct) => false,
+            Some(DeclKind::Const) => return Shape::Test,
+            _ => return self.no_shape(p),
+        };
+        let (dt, pm) = self.peel_ty(t, mode);
+        let vi = if is_variant { self.g.prog.decl(d).map_or(0, |x| x.index) } else { 0 };
+        let Some(fts) = self.adt_fields(dt).and_then(|v| v.get(vi as usize).cloned()) else {
+            return self.no_shape(p);
+        };
+        let mut subs: Vec<Option<Sub>> = vec![None; fts.len()];
+        if has_rec {
+            let names: Vec<crate::ids::Sym> = match self.kind(dt) {
+                TypeKind::Adt { def, .. } => self
+                    .g
+                    .sigs
+                    .adt(def)
+                    .and_then(|ad| ad.variants.get(vi as usize))
+                    .map(|v| v.fields.iter().map(|f| f.name).collect())
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            for fp in kids {
+                if icx.kind(fp) != Some(NodeKind::FieldPat) {
+                    continue;
+                }
+                let name = icx.sym(icx.a(fp));
+                if let Some(fi) = names.iter().position(|&x| x == name)
+                    && fi < subs.len()
+                {
+                    if subs[fi].is_some() {
+                        self.fail(fp, "a pattern names a field twice");
+                    }
+                    subs[fi] = Some(match icx.child(fp, NodeKind::Pattern) {
+                        Some(sub) => Sub::Pat(sub),
+                        None => Sub::Name(fp),
+                    });
+                }
+            }
+        } else if has_paren {
+            for (fi, &k) in kids.iter().enumerate().take(subs.len()) {
+                subs[fi] = Some(Sub::Pat(k));
+            }
+        }
+        let fields = fts.into_iter().zip(subs).collect();
+        Shape::Parts { ty: dt, mode: pm, variant: is_variant.then_some(vi), fields }
+    }
+
+    /// Whether sub-pattern `sub` of a field of type `ft` binds a non-Copy part by value.
+    fn sub_moves(&mut self, sub: Sub, ft: Ty, mode: Mode) -> bool {
+        match sub {
+            Sub::Pat(q) => self.pat_moves(q, ft, mode),
+            Sub::Name(b) => self.name_moves(b, mode),
+        }
+    }
+
+    /// Whether binding node `b` takes a non-Copy value by value in mode `mode`: the answer of
+    /// the definition ([`crate::typeck::TypedBody::moves`]), the same for every instance. An
+    /// instance may make a moved value Copy, never the reverse.
+    fn name_moves(&mut self, b: u32, mode: Mode) -> bool {
+        if mode != Mode::Move {
+            return false;
+        }
+        if self.tb().binds_by_move(b) {
+            return true;
+        }
+        let Some(&l) = self.by_node.get(&b) else {
+            self.fail(b, "a pattern binding without a local");
+            return true;
+        };
+        let lt = self.locals[l].ty;
+        if !self.is_copy(lt) {
+            self.fail(b, "a binding that is Copy on the definition is not Copy in an instance");
+            return true;
+        }
+        false
+    }
+
+    /// Whether pattern `p` against a value of type `t` binds a non-Copy part by value: such a
+    /// pattern moves its scrutinee, any other only reads it.
+    fn pat_moves(&mut self, p: u32, t: Ty, mode: Mode) -> bool {
+        match self.pat_shape(p, t, mode) {
+            Shape::Wild | Shape::Test => false,
+            Shape::Name(b) => self.name_moves(b, mode),
+            Shape::Parts { mode, fields, .. } => {
+                let mut any = false;
+                for (ft, sub) in fields {
+                    if let Some(sub) = sub {
+                        any |= self.sub_moves(sub, ft, mode);
+                    }
+                }
+                any
+            }
+        }
+    }
+
+    /// The parts of scrutinee `sp` that pattern `p`, which moves it, does not bind by value and
+    /// that have drop glue: in field order, a nested part in place of its field.
+    fn ignored_parts(&mut self, p: u32, sp: &Place) -> Vec<Place> {
+        let mut out = Vec::new();
+        if self.pat_moves(p, sp.ty, Mode::Move) {
+            self.ignored(p, sp.clone(), Mode::Move, &mut out);
+        }
+        out
+    }
+
+    fn ignored(&mut self, p: u32, place: Place, mode: Mode, out: &mut Vec<Place>) {
+        // a part behind a reference is not the scrutinee's
+        if mode != Mode::Move || !self.needs_drop(place.ty) {
+            return;
+        }
+        if !self.pat_moves(p, place.ty, mode) {
+            out.push(place);
+            return;
+        }
+        let Shape::Parts { ty, mode, variant, fields } = self.pat_shape(p, place.ty, mode) else { return };
+        if mode != Mode::Move {
+            return;
+        }
+        let w = self.g.world();
+        if crate::mono::drop_method(&w, &mut self.tys, ty).is_some() {
+            self.fail(p, "a pattern takes apart a value whose type has a `Drop` impl");
+            return;
+        }
+        for (fi, (ft, sub)) in fields.into_iter().enumerate() {
+            let mut part = place.clone();
+            part.proj.push(match variant {
+                Some(vi) => Proj::EnumField(vi, fi as u32, ft),
+                None => Proj::Field(fi as u32, ft),
+            });
+            part.ty = ft;
+            match sub {
+                Some(Sub::Pat(q)) => self.ignored(q, part, mode, out),
+                Some(Sub::Name(b)) if self.name_moves(b, mode) => {}
+                Some(Sub::Name(_)) | None => {
+                    if self.needs_drop(ft) {
+                        out.push(part);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether a value of type `t` that pattern `p` matched without binding a part by value
+    /// holds nothing with drop glue: every droppable part is under a variant the pattern names
+    /// that has none, and no type on the way has a `Drop` impl.
+    fn shape_empty(&mut self, p: u32, t: Ty) -> bool {
+        if !self.needs_drop(t) {
+            return true;
+        }
+        let Shape::Parts { ty, mode, fields, .. } = self.pat_shape(p, t, Mode::Move) else { return false };
+        let w = self.g.world();
+        if mode != Mode::Move || crate::mono::drop_method(&w, &mut self.tys, ty).is_some() {
+            return false;
+        }
+        let mut empty = true;
+        for (ft, sub) in fields {
+            empty &= match sub {
+                Some(Sub::Pat(q)) => self.shape_empty(q, ft),
+                Some(Sub::Name(_)) | None => !self.needs_drop(ft),
+            };
+        }
+        empty
     }
 
     /// Tests pattern `p` against place `place` (branching to `fail` on mismatch) and binds its
@@ -2416,7 +2903,8 @@ impl<'a> FnCx<'a> {
         };
         let lt = self.locals[l].ty;
         let v = match mode {
-            Mode::Move => self.read(&place),
+            // the owner is moved where the pattern is committed
+            Mode::Move => self.take(&place),
             Mode::Ref(_) => self.addr(&place, Some(lt)).map(|v| self.borrowed(v, lt)),
         };
         let Some(v) = v else { return false };
@@ -2441,6 +2929,9 @@ enum Seq {
     Ref(Operand, Ty),
     /// An array value (place) and the iterable's node; the binding is `T`.
     Val(Place, u32),
+    /// An array value whose elements have drop glue, in the slot of the loop's owner; the slot
+    /// of the number of elements handed out; the iterable's node. The binding is `T`.
+    Owned(Place, Operand, u32),
 }
 
 fn compound_op(opt: u8) -> Term {

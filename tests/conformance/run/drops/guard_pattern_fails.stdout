@@ -1,0 +1,26 @@
+rest
+mk 80
+mk 90
+drop 90
+drop 80
+mk 11
+mk 61
+drop 61
+one
+drop 11
+mk 81
+mk 91
+drop 91
+drop 81
+mk 21
+mk 22
+mk 52
+drop 52
+mk 72
+drop 72
+drop 21
+or
+drop 22
+mk 82
+drop 82
+end

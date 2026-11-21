@@ -1,0 +1,82 @@
+//~ STDOUT drop_impl_inside_rvalue.stdout
+// An enum with a `Drop` impl inside an `Option` or a struct rvalue that patterns read: its `drop`
+// runs once.
+import std.io;
+import std.env;
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { let i = self.id; io.print(f"drop {i}\n"); } }
+impl D {
+    fn get(&self) -> u32 { return self.id; }
+    fn consume(self, n: u32) -> u32 { return n; }
+}
+fn mk(i: u32) -> D { io.print(f"mk {i}\n"); return D.{ id: i }; }
+struct P { pub a: D, pub b: D }
+fn mkp(i: u32) -> P { return P.{ a: mk(i), b: mk(i + 1) }; }
+struct Q { pub p: P, pub c: D }
+fn mkq(i: u32) -> Q { return Q.{ p: mkp(i), c: mk(i + 2) }; }
+enum E { Two(D, D), One(D), Zero }
+fn mke(k: u32, i: u32) -> E {
+    if k == 2 { return E.Two(mk(i), mk(i + 1)); }
+    if k == 1 { return E.One(mk(i)); }
+    return E.Zero;
+}
+fn yes() -> bool { return env.count() > 0; }
+fn no() -> bool { return env.count() > 100; }
+fn eat(d: D) { }
+fn eatp(p: P) { }
+fn check(d: D) -> bool { return d.id > 0; }
+fn idof(d: &D) -> u32 { return d.id; }
+fn use2(d: D, n: u32) -> u32 { return n; }
+fn use3(a: D, n: u32, b: D) -> u32 { return n; }
+fn fail() -> Result<u32, u32> { if yes() { return Result.Err(1); } return Result.Ok(0); }
+fn pass() -> Result<u32, u32> { if no() { return Result.Err(1); } return Result.Ok(7); }
+fn mkres(i: u32, ok: bool) -> Result<D, u32> { if ok { return Result.Ok(mk(i)); } return Result.Err(i); }
+fn show(r: Result<u32, u32>) {
+    match r {
+        Result.Ok(n) => { io.print(f"ok {n}\n"); }
+        Result.Err(n) => { io.print(f"err {n}\n"); }
+    }
+}
+enum F { A(D), B(u32) }
+impl Drop for F {
+    fn drop(&mut self) {
+        let i: u32 = match self { F.A(d) => 1000 + d.id, F.B(n) => *n };
+        io.print(f"drop {i}\n");
+    }
+}
+fn mkf(k: u32) -> F {
+    if k % 2 == 1 { let j = 1000 + k; io.print(f"mk {j}\n"); return F.A(mk(k)); }
+    io.print(f"mk {k}\n");
+    return F.B(k);
+}
+struct S { pub o: Option<D>, pub n: u32 }
+impl Drop for S { fn drop(&mut self) { let i = self.n; io.print(f"drop {i}\n"); } }
+fn mks(k: u32) -> S {
+    io.print(f"mk {k}\n");
+    if k % 2 == 1 { return S.{ o: Option.Some(mk(k + 1000)), n: k }; }
+    return S.{ o: Option.None, n: k };
+}
+struct H { pub f: F, pub n: u32 }
+fn mkh(k: u32) -> H { return H.{ f: mkf(k), n: k }; }
+fn some(k: u32) -> Option<F> { if k > 90 { return Option.None; } return Option.Some(mkf(k)); }
+fn main() -> i32 {
+    for k in 10..14u32 {
+        match some(k) {
+            Option.Some(F.B(n)) => { io.print("some b\n"); }
+            Option.Some(_) => { io.print("some a\n"); }
+            Option.None => { io.print("none\n"); }
+        }
+        match mkh(k + 10) {
+            H.{ f: F.B(_), n: j } => { io.print("h b\n"); }
+            H.{ f: _, n: j } => { io.print("h a\n"); }
+        }
+    }
+    match some(99) {
+        Option.Some(F.B(n)) => { io.print("some b\n"); }
+        _ => { io.print("other\n"); }
+    }
+    let (x, _) = (mkf(40), mkf(42));
+    let (_, y) = (mkf(44), 1u32);
+    io.print("end\n");
+    return 0;
+}

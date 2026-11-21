@@ -1,0 +1,170 @@
+mk 10
+mk 11
+mk 12
+n 10
+drop 10
+n 11
+drop 11
+n 12
+drop 12
+after
+mk 20
+mk 21
+mk 22
+it
+drop 20
+it
+drop 21
+it
+drop 22
+after
+mk 30
+mk 31
+n 30
+drop 30
+n 31
+drop 31
+after
+mk 40
+mk 41
+mk 42
+n 40
+drop 40
+n 41
+drop 41
+n 42
+drop 42
+after
+mk 50
+mk 51
+mk 52
+n 50
+drop 50
+drop 51
+n 52
+drop 52
+after
+mk 60
+mk 61
+mk 62
+mk 63
+drop 61
+a 60
+drop 60
+drop 63
+a 62
+drop 62
+after
+mk 70
+mk 71
+mk 72
+d 70
+drop 70
+d 71
+drop 71
+d 72
+drop 72
+after
+mk 80
+mk 81
+mk 82
+eat 80
+drop 80
+eat 81
+drop 81
+eat 82
+drop 82
+after
+mk 100
+mk 101
+mk 102
+d 100
+drop 100
+drop 101
+drop 102
+after
+mk 110
+mk 111
+mk 112
+n 110
+drop 110
+n 111
+drop 111
+drop 112
+after
+mk 120
+mk 121
+mk 122
+mk 123
+drop 121
+a 120
+drop 120
+drop 122
+drop 123
+after
+mk 130
+mk 131
+mk 132
+drop 130
+drop 131
+drop 132
+after
+mk 140
+mk 141
+mk 142
+drop 140
+drop 141
+drop 142
+returned 141
+mk 140
+mk 141
+mk 142
+drop 140
+drop 141
+drop 142
+after
+returned 0
+mk 150
+mk 151
+mk 152
+ok 0
+drop 150
+drop 151
+drop 152
+err 1
+mk 160
+mk 161
+mk 162
+mk 170
+mk 171
+mk 172
+drop 170
+drop 171
+drop 172
+outer 160
+drop 160
+mk 170
+mk 171
+mk 172
+drop 170
+drop 171
+drop 172
+outer 161
+drop 161
+drop 162
+after
+mk 180
+mk 181
+mk 182
+drop 180
+drop 181
+drop 182
+round
+mk 190
+mk 191
+mk 192
+drop 190
+drop 191
+drop 192
+round
+end

@@ -198,15 +198,49 @@ does not bind at that point (contracts/lang-details.md "Whole moves").
 **Argument.** Outside a pattern, a by-value use of a place with a field, tuple, or payload
 projection is E0504 case `part`; a projection through a reference, an index, a capture, or a
 static is E0504 already. Inside a pattern the bindings read parts and the source moves whole,
-and the source itself must be a whole value by the same step; a part a pattern binds twice
-(`P.{ a: x, a: y }`) is E0502, so each part has one owner. A value whose type has an
+and the source itself must be a whole value by the same step; a pattern names a field once
+(`P.{ a: x, a: y }` is E0105), so each part has one sub-pattern and one owner. A value whose type has an
 `impl Drop` is not taken apart at all (case `drop`): its destructor gets every part. So every
 move operand names a whole local or temporary, the checker's move state is one bit per local,
 and a write of a part of a moved local is E0502. What is moved-out is always a whole value, and
 a whole value is dropped or read only when it is initialized.
 
+A generic body is checked once and run as its instances. Whether a pattern binding takes a
+non-Copy value by value is decided by the type checker on the definition's types (a type
+parameter without a `Copy` bound is not Copy), and both the CFG builder and the lowering of
+every instance read that answer. So where the checked body moves a value and ends the parts
+its pattern ignores (a lock guard released for the rank rule, a borrow ended), every instance
+does, also one whose type argument is Copy.
+
 **What would break it.** A by-value use built without `move_out`; a pattern whose ignored parts
-the lowering keeps in the place; `p.read()` of a part (unsafe: its obligation).
+the lowering keeps in the place; a stage that decides from the instance type whether a pattern
+moves; `p.read()` of a part (unsafe: its obligation).
+
+## The type of a value: one answer for every stage
+
+**Claim.** The borrow checker judges each value (Copy or moved, with drop glue or without, what
+it borrows) on the type the type checker gave it, and the lowering builds a value of that type.
+
+**Assumptions.** A chain's node has the type of its last step only. For a step in the middle
+that makes a value the type checker records the type with the step's target: the value of a
+struct literal, of a variant constructor, and of a variant without payload; the result of a
+built-in, which for `select` on a `bool` is its operands' type. A call's result type is its
+signature's under the recorded generic args, a fn value's is in its fn type. The CFG builder
+and the lowering read these and infer nothing from the operands.
+
+**Argument.** An unknown type counts as Copy and as having no drop glue, so that a body with a
+type error reports nothing more. A value of a body without type errors must therefore never
+have one: its parts could be moved out unseen, and a borrow of it could outlive its drop. Every
+temporary the CFG builder makes for a value goes through one step, which fails the body as not
+checked (an internal error, the program is not accepted) when the type is unknown. A variant
+without payload whose enum has drop glue is a temporary that ends with its statement, as a
+constructor's value is; only one without drop glue is a constant (contracts/borrow-model.md
+"constant temporary").
+
+**What would break it.** A stage that computes such a type for itself (inferring a literal's
+generic args from its field values gives no answer where a field value is coerced, and ignores
+written args), a step form that takes the chain's type for its own, or a value the CFG builder
+makes without a typed temporary.
 
 ## Places that are never moved from: statics
 

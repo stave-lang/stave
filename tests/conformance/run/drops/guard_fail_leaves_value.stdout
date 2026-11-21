@@ -1,0 +1,31 @@
+mk 1
+mk 2
+kept
+after local
+mk 3
+mk 4
+drop 3
+second
+drop 4
+after temp
+mk 5
+mk 6
+kept
+drop 5
+drop 6
+after temp 2
+rest
+next
+mk 20
+one
+drop 20
+next
+mk 30
+mk 31
+drop 30
+two
+drop 31
+next
+end
+drop 1
+drop 2

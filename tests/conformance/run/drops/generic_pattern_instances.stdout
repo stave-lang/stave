@@ -1,0 +1,110 @@
+let
+mk 1
+drop 1
+after let
+mk 2
+mk 3
+drop 3
+after let
+drop 2
+tuple
+mk 4
+drop 4
+after let
+mk 5
+mk 6
+drop 6
+after let
+drop 5
+match
+mk 7
+drop 7
+arm
+after match
+mk 8
+mk 9
+drop 9
+arm
+drop 8
+after match
+guard
+mk 10
+drop 10
+arm
+after match
+mk 11
+other
+after match
+drop 11
+mk 12
+mk 13
+drop 13
+arm
+drop 12
+after match
+mk 14
+mk 15
+other
+after match
+drop 14
+drop 15
+enum
+mk 16
+drop 16
+two
+after match
+mk 17
+mk 18
+drop 18
+two
+drop 17
+after match
+no
+after match
+rvalue
+mk 19
+drop 19
+after let
+mk 20
+mk 21
+drop 21
+after let
+drop 20
+for
+mk 22
+mk 23
+drop 22
+it
+drop 23
+it
+after for
+mk 24
+mk 25
+mk 26
+mk 27
+drop 25
+it
+drop 24
+drop 27
+it
+drop 26
+after for
+copy bound
+mk 28
+after let
+drop 28
+written
+mk 29
+after let
+drop 29
+locks
+relocked
+mk 30
+relocked
+drop 30
+relocked in arm
+free
+mk 31
+free
+drop 31
+end

@@ -1,0 +1,9 @@
+mk 1
+drop 1
+err 2
+mk 1
+mk 2
+drop 1
+drop 2
+ok 1
+end

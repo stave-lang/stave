@@ -1,0 +1,19 @@
+//~ STDOUT try_operand_lock.stdout
+// `?` in a later field of a struct literal drops the guard already made for an earlier field:
+// the lock is free again after the call.
+import std.io;
+import std.sync;
+view struct G { pub g: sync.MutexGuard<u32, 1>, pub n: u32 }
+fn fail() -> Result<u32, u32> { return Result.Err(1); }
+fn mk(m: &sync.Mutex<u32, 1>) -> Result<u32, u32> {
+    let t = G.{ g: m.lock(), n: fail()? };
+    return Result.Ok(t.n);
+}
+fn main() -> i32 {
+    let m = sync.Mutex::<u32, 1>.new(0);
+    let r = mk(&m);
+    io.print("returned\n");
+    let g = m.lock();
+    io.print("locked again\n");
+    return 0;
+}

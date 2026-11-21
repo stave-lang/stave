@@ -887,7 +887,7 @@ fn flow_events<'b>(
             }
             Some(Syn::StructLit) => {
                 let tok = icx.a(n);
-                let Some(Target::Struct { decl }) = body.target(tok) else { continue };
+                let Some(Target::Struct { decl, .. }) = body.target(tok) else { continue };
                 let Some(fields) = sigs.adt(*decl).and_then(|a| a.variants.first()).map(|v| &v.fields) else {
                     continue;
                 };

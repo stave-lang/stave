@@ -1,0 +1,12 @@
+mk 1
+mk 2
+drop 2
+drop 1
+mk 50
+drop 50
+mk 3
+mk 60
+drop 60
+drop 3
+51 60
+end

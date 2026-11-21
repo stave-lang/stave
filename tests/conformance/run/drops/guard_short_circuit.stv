@@ -1,0 +1,51 @@
+//~ STDOUT guard_short_circuit.stdout
+// Temporaries of `&&` / `||` operands and of a value `if` inside a guard: dropped only if made.
+import std.io;
+import std.env;
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { let i = self.id; io.print(f"drop {i}\n"); } }
+impl D {
+    fn get(&self) -> u32 { return self.id; }
+    fn consume(self, n: u32) -> u32 { return n; }
+}
+fn mk(i: u32) -> D { io.print(f"mk {i}\n"); return D.{ id: i }; }
+struct P { pub a: D, pub b: D }
+fn mkp(i: u32) -> P { return P.{ a: mk(i), b: mk(i + 1) }; }
+struct Q { pub p: P, pub c: D }
+fn mkq(i: u32) -> Q { return Q.{ p: mkp(i), c: mk(i + 2) }; }
+enum E { Two(D, D), One(D), Zero }
+fn mke(k: u32, i: u32) -> E {
+    if k == 2 { return E.Two(mk(i), mk(i + 1)); }
+    if k == 1 { return E.One(mk(i)); }
+    return E.Zero;
+}
+fn yes() -> bool { return env.count() > 0; }
+fn no() -> bool { return env.count() > 100; }
+fn eat(d: D) { }
+fn eatp(p: P) { }
+fn check(d: D) -> bool { return d.id > 0; }
+fn idof(d: &D) -> u32 { return d.id; }
+fn use2(d: D, n: u32) -> u32 { return n; }
+fn use3(a: D, n: u32, b: D) -> u32 { return n; }
+fn fail() -> Result<u32, u32> { if yes() { return Result.Err(1); } return Result.Ok(0); }
+fn pass() -> Result<u32, u32> { if no() { return Result.Err(1); } return Result.Ok(7); }
+fn mkres(i: u32, ok: bool) -> Result<D, u32> { if ok { return Result.Ok(mk(i)); } return Result.Err(i); }
+fn show(r: Result<u32, u32>) {
+    match r {
+        Result.Ok(n) => { io.print(f"ok {n}\n"); }
+        Result.Err(n) => { io.print(f"err {n}\n"); }
+    }
+}
+fn main() -> i32 {
+    for o in 0..3u32 {
+        match o {
+            0 if yes() && mk(1).id == 1 && mk(2).id == 0 => { io.print("no\n"); }
+            1 if no() && mk(3).id == 3 => { io.print("no\n"); }
+            1 if no() || mk(4).id == 4 => { io.print("one\n"); }
+            2 if (if no() then mk(5).id else mk(6).id) == 6 => { io.print("two\n"); }
+            _ => { io.print("rest\n"); }
+        }
+    }
+    io.print("end\n");
+    return 0;
+}

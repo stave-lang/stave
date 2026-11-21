@@ -1,0 +1,91 @@
+//~ STDOUT step_value_types.stdout
+// A struct literal, a variant constructor, a variant without payload, and a `select` in the
+// middle of a chain make a value of the type the type checker gave them, also where the field
+// values do not determine the generic args (written `::<..>`, the enclosing fn's params) or are
+// coerced. A temporary with drop glue made this way is dropped at the end of its statement.
+import std.io;
+import std.env;
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { let i = self.id; io.print(f"drop {i}\n"); } }
+impl D {
+    fn get(&self) -> u32 { return self.id; }
+    fn eat(self) -> u32 { return self.id; }
+}
+fn mk(k: u32) -> D { io.print(f"mk {k}\n"); return D.{ id: k }; }
+fn yes() -> bool { return env.count() > 0; }
+
+enum E2<T> { A(D), B(D, T) }
+impl<T> E2<T> {
+    fn n(&self) -> u32 {
+        return match self {
+            E2.A(d) => d.id,
+            E2.B(d, _) => d.id,
+        };
+    }
+}
+
+struct PH<T> { pub d: D }
+impl<T> PH<T> { fn n(&self) -> u32 { return self.d.id; } }
+
+struct AN<const N: usize> { pub d: D }
+impl<const N: usize> AN<N> { fn n(&self) -> usize { return N; } }
+
+view struct GR<T> { pub d: D, pub r: &T }
+impl<T> GR<T> { fn n(&self) -> u32 { return self.d.id; } }
+
+view struct GS<T> { pub d: D, pub s: &[T] }
+impl<T> GS<T> { fn len(&self) -> usize { return self.s.len(); } }
+
+enum F { A(u32), B }
+impl Drop for F { fn drop(&mut self) { io.print("drop F\n"); } }
+impl F {
+    fn k(&self) -> u32 {
+        return match self {
+            F.A(n) => *n,
+            F.B => 7,
+        };
+    }
+}
+
+enum G<T> { Nothing, Just(T) }
+impl<T> G<T> {
+    fn is_nothing(&self) -> bool {
+        return match self {
+            G.Nothing => true,
+            G.Just(_) => false,
+        };
+    }
+}
+
+fn in_generic<T>() -> u32 { return E2::<T>.A(mk(4)).n(); }
+
+fn main() -> i32 {
+    let k = E2::<u32>.A(mk(1)).n();
+    io.print(f"k {k}\n");
+    let k = PH::<u32>.{ d: mk(2) }.n();
+    io.print(f"k {k}\n");
+    let k = AN::<3>.{ d: mk(3) }.n();
+    io.print(f"k {k}\n");
+    let k = in_generic::<u8>();
+    io.print(f"k {k}\n");
+    let mut x: u32 = 5;
+    let k = GR.{ d: mk(5), r: &mut x }.n();
+    io.print(f"k {k}\n");
+    let xs: [u32; 2] = [1, 2];
+    let k = GS.{ d: mk(6), s: &xs }.len();
+    io.print(f"k {k}\n");
+    let k = F.B.k();
+    io.print(f"k {k}\n");
+    let k = F.A(8u32).k();
+    io.print(f"k {k}\n");
+    if G::<D>.Nothing.is_nothing() { io.print("nothing\n"); }
+    let k = yes().select(mk(9), mk(10)).get();
+    io.print(f"k {k}\n");
+    let k = yes().select(mk(11), mk(12)).eat();
+    io.print(f"k {k}\n");
+    let k = yes().select(5u32, 6u32).popcount();
+    io.print(f"k {k}\n");
+    io.print("end\n");
+    return 0;
+}

@@ -1,0 +1,109 @@
+//~ CHECK-ONLY
+// A struct pattern names a field once (E0105 at each later naming), like a struct literal: each
+// part of the value has one sub-pattern, which alone says whether the part is bound, tested, or
+// ignored. Two sub-patterns of one field could bind the same part twice, or bind in one what
+// the other ignores.
+import std.vec;
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { } }
+struct P { pub a: D, pub b: D }
+struct Q { pub p: P, pub c: u32 }
+struct T2 { pub t: (D, D) }
+enum E { Two(D, D), Rec { x: D, y: u32 }, Zero }
+struct S { pub e: E }
+struct W { pub o: Option<u32>, pub n: u32 }
+struct VP { pub a: vec.Vec<u32>, pub b: vec.Vec<u32> }
+
+fn same_part(p: P) {
+    let P.{ a: x, a: y, b: _ } = p; //~ ERROR E0105
+}
+
+fn name_and_ignore(p: P) {
+    let P.{ a, a: _, b } = p; //~ ERROR E0105
+}
+
+fn ignore_and_name(p: P) {
+    match p {
+        P.{ a: _, a, b: _ } => { } //~ ERROR E0105
+    }
+}
+
+fn different_parts(q: Q) {
+    let Q.{ p: P.{ a, b: _ }, p: P.{ a: _, b }, c: _ } = q; //~ ERROR E0105
+}
+
+fn different_parts_match(q: Q) {
+    match q {
+        Q.{ p: P.{ a, b: _ }, p: P.{ a: _, b }, c: _ } => { } //~ ERROR E0105
+    }
+}
+
+fn guarded(q: Q, n: u32) {
+    match q {
+        Q.{ p: P.{ a, b: _ }, p: P.{ a: _, b }, c: _ } if n > 0 => { } //~ ERROR E0105
+        _ => { }
+    }
+}
+
+fn tuple_payload(t: T2) {
+    let T2.{ t: (a, _), t: (_, b) } = t; //~ ERROR E0105
+}
+
+fn variant_payload(s: S) {
+    match s {
+        S.{ e: E.Two(a, _), e: E.Two(_, b) } => { } //~ ERROR E0105
+        _ => { }
+    }
+}
+
+fn record_variant(e: E) {
+    match e {
+        E.Rec.{ x, x: _, y: _ } => { } //~ ERROR E0105
+        _ => { }
+    }
+}
+
+fn own(xs: [Q; 1]) -> [Q; 1] { return xs; }
+
+fn for_item(xs: [Q; 1]) {
+    for Q.{ p: P.{ a, b: _ }, p: P.{ a: _, b }, c: _ } in own(xs) { } //~ ERROR E0105
+}
+
+fn vectors(v: VP) {
+    let VP.{ a, a: _, b: _ } = v; //~ ERROR E0105
+}
+
+// Copy parts and tests too: the first sub-pattern is the field's, so this match does not
+// cover `Option.None` (E0300).
+fn test_then_ignore(w: W) -> u32 {
+    match w { //~ ERROR E0300
+        W.{ o: Option.Some(n), o: _, n: _ } => { return n; } //~ ERROR E0105
+    }
+    return 0;
+}
+
+fn copy_twice(w: W) -> u32 {
+    let W.{ n: x, n: y, o: _ } = w; //~ ERROR E0105
+    return x;
+}
+
+fn three_times(w: W) -> u32 {
+    let W.{ n: x, n: _, n: _, o: _ } = w; //~ ERROR E0105
+    //~^ ERROR E0105
+    return x;
+}
+
+fn by_reference(p: &P) -> u32 {
+    let P.{ a: x, a: y, b: _ } = p; //~ ERROR E0105
+    return x.id;
+}
+
+fn ok_each_once(q: Q) -> u32 {
+    let Q.{ p: P.{ a, b: _ }, c } = q;
+    return a.id + c;
+}
+
+fn main() -> i32 {
+    return 0;
+}

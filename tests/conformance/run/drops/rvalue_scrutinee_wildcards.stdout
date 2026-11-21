@@ -1,0 +1,20 @@
+other
+mk 11
+other
+drop 11
+mk 21
+mk 22
+two
+drop 21
+drop 22
+mk 40
+mk 41
+any
+drop 40
+drop 41
+mk 50
+mk 51
+bound
+drop 50
+drop 51
+end
