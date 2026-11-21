@@ -169,10 +169,10 @@ dispatch fn copy_lanes_cpu(s: &[u8], d: &mut [u8]) { avx2 => copy_lanes_v3, _ =>
 unsafe("dst..dst+len is writable, src..src+len readable, and they do not overlap")
 fn copy_raw(dst: *mut u8, src: *const u8, len: usize) {
     let sp: [usize; 2] = [src as usize, len];
-    let dp: [usize; 2] = [dst as usize, len];
+    let mut dp: [usize; 2] = [dst as usize, len];
     let s = unsafe("a slice reference is (data pointer, length); src..src+len is readable (caller)") *(&sp as *const [usize; 2] as *const &[u8]);
-    let q = &dp as *const [usize; 2] as *const &mut [u8];
-    let d = unsafe("a slice reference is (data pointer, length); dst..dst+len is writable and no other reference reaches it (caller)") q.read();
+    let q = &mut dp as *mut [usize; 2] as *mut &mut [u8];
+    let d = unsafe("a slice reference is (data pointer, length); q points to dp, held exclusively here; dst..dst+len is writable and no other reference reaches it (caller)") q.read();
     let n = d.len();
     if n >= LONG_B8 {
         copy_lanes_cpu(s, d);

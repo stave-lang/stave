@@ -1008,7 +1008,7 @@ fix = { description = "compute the operand that uses `{place}` into a `let` befo
 code = "E0503"
 severity = "error"
 area = "borrow"
-rule = "assignment to an immutable binding or through `&` (case `shared-ref` also: a `&mut` chunk binding over a `&` source); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)"
+rule = "assignment to an immutable binding or through `&` (case `shared-ref` also: `&mut` of a place behind `&`, a `&mut` chunk binding over a `&` source); a cast to `*mut T` of a `&mut` place behind `&` (case `shared-ref-cast`); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)"
 holes = { place = "place" }
 message = "cannot assign to `{place}`: the binding is not `mut`"
 labels = [{ at = "primary", text = "assignment here" }, { at = "binding", text = "declared without `mut` here" }]
@@ -1018,6 +1018,11 @@ fix = { description = "declare the binding with `let mut`" }
 message = "cannot assign to `{place}` through a `&` reference"
 labels = [{ at = "primary", text = "assignment through `&`" }, { at = "binding", text = "`&` reference created here" }]
 fix = { description = "create a `&mut` reference instead of `&` where this reference comes from" }
+
+[diag.cases.shared-ref-cast]
+message = "cannot make a `*mut` pointer to `{place}`: it is reached through a `&` reference"
+labels = [{ at = "primary", text = "`*mut` cast of a `&mut` reached through `&`" }, { at = "binding", text = "`&` reference created here" }]
+fix = { description = "cast to `*const T` to read through it, or reach the `&mut` through a `&mut` reference instead of `&`" }
 
 [diag.cases.static]
 message = "cannot assign to or mutably borrow `{place}`: a `static` is immutable"

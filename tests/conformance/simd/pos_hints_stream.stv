@@ -8,9 +8,9 @@ import std.io;
 // The 16 floats of `buf`, as a slice aligned to 16 bytes.
 fn aligned(buf: &mut [f32x4; 4]) -> &mut [f32 align 16] from buf {
     let a = &mut buf[0] as *mut f32x4 as usize;
-    let parts: [usize; 2] = [a, 16];
-    let q = &parts as *const [usize; 2] as *const &mut [f32 align 16];
-    return unsafe("buf holds 16 f32 at a 16-byte aligned address, lent while the view lives") q.read();
+    let mut parts: [usize; 2] = [a, 16];
+    let q = &mut parts as *mut [usize; 2] as *mut &mut [f32 align 16];
+    return unsafe("buf holds 16 f32 at a 16-byte aligned address, lent while the view lives; q points to parts, held exclusively here") q.read();
 }
 
 fn fill(s: &mut [f32 align 16], x: f32) {

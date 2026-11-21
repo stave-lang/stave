@@ -217,10 +217,14 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                 ));
             }
             Finding::Moved { .. } => {}
-            Finding::Immutable { place, span, shared, blame } => {
+            Finding::Immutable { place, span, shared, blame, cast } => {
                 let text = place_text(body, tys, &place);
                 let bspan = body.locals[blame as usize].span;
-                let case = if shared { Some("shared-ref") } else { None };
+                let case = match (shared, cast) {
+                    (true, true) => Some("shared-ref-cast"),
+                    (true, false) => Some("shared-ref"),
+                    (false, _) => None,
+                };
                 out.extend(mk("E0503", case, &[("place", &text)], span, &[("binding", bspan)]));
             }
             Finding::Escape { span, loan } => {
@@ -381,6 +385,7 @@ mod tests {
             reserved: false,
             capture: true,
             whole: None,
+            cast: false,
         }
     }
 

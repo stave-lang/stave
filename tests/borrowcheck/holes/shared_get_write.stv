@@ -1,0 +1,18 @@
+//~ BORROWCHECK write-under-shared 15 15
+// `**r = 5` with `r: &&mut u32` (E0503): the `&mut` read through the `&` the vector gives is
+// read-only, so the write is a write under a `&`.
+import std.core;
+import std.vec;
+
+fn main() -> i32 {
+    let mut a: u32 = 1;
+    let mut v: vec.Vec<&mut u32> = vec.Vec::<&mut u32>.new();
+    v.push(&mut a);
+    let r = v.get_ref(0);
+    let x: u32 = **r;
+    // the next line is E0503; lowered all the same, it writes `a` through the `&mut` that the
+    // shared `r` reaches
+    **r = 5;
+    if x == 1 { return 0; }
+    return 1;
+}

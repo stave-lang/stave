@@ -388,40 +388,65 @@ impl Tree {
     /// The report of event `ev` on the bytes `lo..hi` through node `n`, if `n` or an ancestor
     /// forbids it.
     fn check(&self, alloc: u32, n: u32, ev: Use, lo: u64, hi: u64, at: Ev) -> Option<Box<Report>> {
+        let bad = |_: &Node, p: Perm| p == Perm::Dead || (ev == Use::Write && p == Perm::Frozen);
+        let (cur, offset, run) = self.first_on_path(n, lo, hi, bad)?;
+        let node = &self.nodes[cur as usize];
+        let class = match (run.cause, node.kind) {
+            (Cause::End, _) => Class::UseAfterReferent,
+            (_, Kind::Mut) => Class::TwoExclusive,
+            _ => Class::WriteUnderShared,
+        };
+        Some(Box::new(Report {
+            class,
+            event: ev,
+            alloc,
+            offset,
+            lo,
+            hi,
+            tag: node.tag,
+            kind: node.kind,
+            perm: run.perm,
+            at,
+            cause: run.cause,
+            cause_at: run.cause_at,
+            made_at: node.made_at,
+        }))
+    }
+
+    /// The first of node `n` and its ancestors, towards the root, with a run among the bytes
+    /// `lo..hi` that `bad` rejects for that node: the node, the run's first byte in the range,
+    /// and the run. The path every event and borrow through `n` is judged on.
+    fn first_on_path(
+        &self,
+        n: u32,
+        lo: u64,
+        hi: u64,
+        bad: impl Fn(&Node, Perm) -> bool,
+    ) -> Option<(u32, u64, Run)> {
         if lo >= hi {
             return None;
         }
         let mut cur = n;
         loop {
             let node = &self.nodes[cur as usize];
-            let bad = |p: Perm| p == Perm::Dead || (ev == Use::Write && p == Perm::Frozen);
-            if let Some((offset, run)) = node.find(lo, hi, bad) {
-                let class = match (run.cause, node.kind) {
-                    (Cause::End, _) => Class::UseAfterReferent,
-                    (_, Kind::Mut) => Class::TwoExclusive,
-                    _ => Class::WriteUnderShared,
-                };
-                return Some(Box::new(Report {
-                    class,
-                    event: ev,
-                    alloc,
-                    offset,
-                    lo,
-                    hi,
-                    tag: node.tag,
-                    kind: node.kind,
-                    perm: run.perm,
-                    at,
-                    cause: run.cause,
-                    cause_at: run.cause_at,
-                    made_at: node.made_at,
-                }));
+            if let Some((offset, run)) = node.find(lo, hi, |p| bad(node, p)) {
+                return Some((cur, offset, run));
             }
             if node.parent == NO_PARENT {
                 return None;
             }
             cur = node.parent;
         }
+    }
+
+    /// The nearest of node `n` and its ancestors whose range holds all of `lo..hi`, the root at
+    /// the latest: the node an event or a borrow on those bytes through `n` goes through (M20).
+    fn holder(&self, n: u32, lo: u64, hi: u64) -> u32 {
+        let mut p = n;
+        while !self.nodes[p as usize].holds(lo, hi) && self.nodes[p as usize].parent != NO_PARENT {
+            p = self.nodes[p as usize].parent;
+        }
+        p
     }
 
     /// Begins an event through node `n`: `n` and its ancestors are its path.
@@ -731,10 +756,7 @@ impl Tracker {
             return Ok(ROOT);
         }
         let (lo, hi) = (lo.min(tree.size), hi.min(tree.size).max(lo.min(tree.size)));
-        let mut p = from;
-        while !tree.nodes[p as usize].holds(lo, hi) && tree.nodes[p as usize].parent != NO_PARENT {
-            p = tree.nodes[p as usize].parent;
-        }
+        let p = tree.holder(from, lo, hi);
         if let Some(r) = tree.check(alloc, p, Use::Borrow, lo, hi, at) {
             return Err(r);
         }
@@ -977,6 +999,21 @@ impl Tracker {
     pub fn perm(&self, alloc: u32, tag: Tag, offset: u64) -> Option<Perm> {
         let n = &self.trees.get(&alloc)?.nodes[self.node_of(alloc, tag) as usize];
         n.find(offset, offset + 1, |_| true).map(|(_, r)| r.perm)
+    }
+
+    /// Whether an access through `tag` to the byte at `offset` of `alloc` goes through a `&`:
+    /// on the path an event takes (the nearest of the tag and its ancestors whose range holds
+    /// the byte, then its ancestors) a `&` tag, or the root of a `static`, holds the byte
+    /// `Frozen` (not `Cell`). A `&mut` that a foreign read made `Frozen` is no `&`.
+    pub fn shared_at(&self, alloc: u32, tag: Tag, offset: u64) -> bool {
+        let Some(tree) = self.trees.get(&alloc) else { return false };
+        let from = self.node_of(alloc, tag);
+        if from as usize >= tree.nodes.len() {
+            return false;
+        }
+        let end = offset.saturating_add(1);
+        let p = tree.holder(from, offset, end);
+        tree.first_on_path(p, offset, end, |n, perm| n.kind != Kind::Mut && perm == Perm::Frozen).is_some()
     }
 
     /// Tags but the roots that the tracker holds a node for.

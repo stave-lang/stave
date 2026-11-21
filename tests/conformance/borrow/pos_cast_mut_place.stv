@@ -1,0 +1,27 @@
+//~ EXIT 7
+// A `&mut` place cast to `*mut T` through its owner or a `&mut` is the reborrow `&mut *place`;
+// cast to `*const T` through a `&` it is a read.
+view struct S { m: &mut u32 }
+
+fn peek(r: &S) -> u32 {
+    let p = r.m as *const u32;
+    return unsafe("p is made from the `&mut` in `r.m` and only read while `r` lives") *p;
+}
+
+fn bump(s: &mut S) {
+    let p = s.m as *mut u32;
+    unsafe("p is made from `s.m`, which `s` holds exclusively") { *p = *p + 2u32; }
+}
+
+fn main() -> i32 {
+    let mut a: u32 = 1u32;
+    let mut s = S.{ m: &mut a };
+    let p = s.m as *mut u32;
+    unsafe("p is made from `s.m`, which `s` holds exclusively") { *p = 3u32; }
+    bump(&mut s);
+    let r: &S = &s;
+    let x: u32 = peek(r);
+    *s.m = *s.m + 2u32;
+    if x == 5u32 && a == 7u32 { return 7; }
+    return 1;
+}
