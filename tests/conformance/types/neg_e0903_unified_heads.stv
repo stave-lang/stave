@@ -23,15 +23,15 @@ trait Conv<T> {
     fn c(&self) -> u32;
 }
 
-struct A {}
+struct A<T> { x: T }
 
-impl<T> Conv<T> for A {
+impl<T> Conv<T> for A<T> {
     fn c(&self) -> u32 {
         return 1;
     }
 }
 
-impl Conv<u32> for A { //~ ERROR E0903
+impl Conv<u32> for A<u32> { //~ ERROR E0903
     fn c(&self) -> u32 {
         return 2;
     }

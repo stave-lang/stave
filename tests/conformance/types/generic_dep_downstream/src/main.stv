@@ -1,0 +1,66 @@
+//~ STDOUT expected_stdout.txt
+import std.io;
+import d;
+import m;
+
+struct R { k: u32 }
+
+impl d.Tr for R {
+    fn m(&self) -> u32 {
+        return self.k;
+    }
+}
+
+impl d.It for R {
+    fn next(&mut self) -> Option<u32> {
+        if self.k == 0 {
+            return Option.None;
+        }
+        self.k = self.k - 1;
+        return Option.Some(self.k);
+    }
+}
+
+impl d.Mk for R {
+    fn mk(n: u32) -> Self {
+        return R.{ k: n };
+    }
+}
+
+struct P { n: u32 }
+
+impl Add for P {
+    fn add(self, rhs: Self) -> Self {
+        return P.{ n: self.n + rhs.n };
+    }
+}
+
+impl Display for P {
+    fn fmt<W: Write>(&self, w: &mut W) {
+        w.write_str("P");
+    }
+}
+
+struct G { id: u32 }
+
+impl Drop for G {
+    fn drop(&mut self) {
+        let i: u32 = self.id;
+        io.print(f"drop {i}\n");
+    }
+}
+
+fn main() -> i32 {
+    let r = R.{ k: 3 };
+    let a: u32 = d.call(&r);
+    let p = d.sum(P.{ n: 2 }, P.{ n: 5 });
+    let b: u32 = p.n;
+    let c: u32 = d.total(R.{ k: 4 });
+    let e: u32 = m.run();
+    let made: R = d.make::<R>();
+    let f: u32 = made.k;
+    io.print(f"{a} {b} {c} {e} {f}\n");
+    d.show(&p);
+    d.consume(G.{ id: 9 });
+    return 0;
+}

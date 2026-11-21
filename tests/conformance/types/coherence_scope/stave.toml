@@ -1,0 +1,7 @@
+# A method call sees the impls of its own package and of its dependencies only: the root's
+# trait `Mine` with a method `m` for `dep.A` changes nothing in `dep.call`.
+name = "coherence_scope"
+kind = "bin"
+
+[dependencies]
+dep = { path = "dep" }

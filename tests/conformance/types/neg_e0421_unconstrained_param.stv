@@ -1,0 +1,69 @@
+//~ CHECK-ONLY
+// Every type and const param of an impl occurs in its self type: a use of the impl binds them
+// from the receiver's type alone. A param in the trait's args only does not count.
+trait Tr {
+    fn n(&self) -> usize;
+}
+
+trait Pick<T> {
+    fn p(&self, x: T) -> T;
+}
+
+struct A { x: u32 }
+
+impl<T> A { //~ ERROR E0421
+    pub fn sz(&self) -> usize {
+        return size_of::<T>();
+    }
+}
+
+impl<const N: usize> Tr for A { //~ ERROR E0421
+    fn n(&self) -> usize {
+        return N;
+    }
+}
+
+impl<T: Copy> Pick<T> for A { //~ ERROR E0421
+    fn p(&self, x: T) -> T {
+        return x;
+    }
+}
+
+struct B<T> { x: T }
+
+impl<T, U> B<T> { //~ ERROR E0421
+    pub fn get(&self) -> u32 {
+        return 0;
+    }
+}
+
+struct D { x: u32 }
+
+impl<T> Drop for D { //~ ERROR E0421
+    fn drop(&mut self) { }
+}
+
+// Every param in the self type: accepted.
+impl<T> B<T> {
+    pub fn first(&self) -> &T from self {
+        return &self.x;
+    }
+}
+
+struct G<const N: usize> { x: [u8; N] }
+
+impl<const N: usize> Tr for G<N> {
+    fn n(&self) -> usize {
+        return N;
+    }
+}
+
+impl<T: Copy> Pick<T> for B<T> {
+    fn p(&self, x: T) -> T {
+        return x;
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

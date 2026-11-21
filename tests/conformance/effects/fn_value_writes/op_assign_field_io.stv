@@ -1,11 +1,23 @@
-// `h.f += noisy` on a view field: the field slot is untracked.
+// `o.h += x` on a view field holding the fn wrapper: the impl behind it calls the fn field.
 import std.core;
 import std.io;
 
-impl core.Add for fn() {
+view struct H {
+    f: fn(),
+}
+
+impl Copy for H {}
+
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        return noisy;
+        let k = self.f;
+        k();
+        return H.{ f: nop };
     }
+}
+
+view struct O {
+    h: H,
 }
 
 fn nop() {}
@@ -14,17 +26,12 @@ fn noisy() {
     io.print("noisy\n");
 }
 
-view struct H {
-    f: fn(),
-}
-
 fn quiet() without(io) { //~ ERROR E1401
-    let mut h = H.{ f: nop };
-    h.f += noisy;
-    let g = h.f;
-    g();
+    let mut o = O.{ h: H.{ f: nop } };
+    o.h += H.{ f: nop };
 }
 
 fn main() {
+    let n = H.{ f: noisy };
     quiet();
 }

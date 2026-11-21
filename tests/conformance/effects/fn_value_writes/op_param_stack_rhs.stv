@@ -1,7 +1,11 @@
-// The stack bound counts `big`, which an operator impl calls through `rhs`.
+// The stack bound counts `big`, which an operator impl calls through its `rhs` fn field.
 //~ STDOUT op_param_stack_rhs.stdout
 import std.core;
 import std.io;
+
+view struct H {
+    f: fn() -> u64,
+}
 
 fn small() -> u64 {
     return 1u64;
@@ -13,17 +17,17 @@ fn big() -> u64 {
     return buf[131071] + buf[7];
 }
 
-impl core.Add for fn() -> u64 {
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        let r = rhs();
-        return small;
+        let k = rhs.f;
+        let r = k();
+        io.print(f"{r}\n");
+        return H.{ f: small };
     }
 }
 
 fn main() {
-    let a: fn() -> u64 = small;
-    let b: fn() -> u64 = big;
+    let a = H.{ f: small };
+    let b = H.{ f: big };
     let c = a + b;
-    let r = c();
-    io.print(f"{r}\n");
 }

@@ -1,13 +1,20 @@
-// A clause callee reaches a static through a fn value a compound assignment changed.
+// A clause callee reaches a static through the fn field the operator impl behind a compound
+// assignment calls.
 import std.atomic;
 import std.core;
 import std.io;
 
 static N: atomic.U64 = atomic.U64.new(0);
 
-impl core.Add for fn() {
+view struct H {
+    f: fn(),
+}
+
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        return bump;
+        let k = self.f;
+        k();
+        return H.{ f: nop };
     }
 }
 
@@ -18,9 +25,8 @@ fn bump() {
 }
 
 fn sneaky() -> bool {
-    let mut f: fn() = nop;
-    f += nop;
-    f();
+    let mut h = H.{ f: nop };
+    h += H.{ f: nop };
     return true;
 }
 
@@ -29,6 +35,7 @@ fn g(x: u32) -> u32 requires(sneaky()) { //~ ERROR E0211
 }
 
 fn main() {
+    let t = H.{ f: bump };
     let a = g(1);
     let b = g(2);
     let n = N.load();

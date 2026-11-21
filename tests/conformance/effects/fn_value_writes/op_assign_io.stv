@@ -1,10 +1,17 @@
-// `f += noisy` (a user `Add` on `fn()`) is no harmless use of `f`: its calls reach every fn of its type.
+// `h += x` calls the operator impl, which calls the fn field of `self`: that reaches every fn
+// any `H` literal puts there, so a `without(io)` fn using `+=` is denied.
 import std.core;
 import std.io;
 
-impl core.Add for fn() {
+view struct H {
+    f: fn(),
+}
+
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        return noisy;
+        let k = self.f;
+        k();
+        return H.{ f: nop };
     }
 }
 
@@ -15,11 +22,11 @@ fn noisy() {
 }
 
 fn quiet() without(io) { //~ ERROR E1401
-    let mut f: fn() = nop;
-    f += noisy;
-    f();
+    let mut h = H.{ f: nop };
+    h += H.{ f: nop };
 }
 
 fn main() {
+    let n = H.{ f: noisy };
     quiet();
 }
