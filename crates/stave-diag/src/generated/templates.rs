@@ -4157,7 +4157,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0908",
         severity: Severity::Error,
         area: "generics",
-        rule: "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type in the calling package and its dependencies) finds the method in two traits, or (case `impls`) in two impls of one trait with other trait args",
+        rule: "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type in the calling package and its dependencies) finds the method in two traits, or (case `impls`, `impls-static` for a fn without `self`) in two impls of one trait with other trait args (impls with the same trait args are E0903, not this)",
         retired: false,
         located: true,
         holes: &[
@@ -4191,6 +4191,20 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "call it through the trait with its args, the receiver as first argument: `{first}::<..>.{name}(x)`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "impls-static",
+                message: "`{type}.{name}` is ambiguous: two impls of `{first}` (other trait args) supply it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "ambiguous call" },
+                    LabelTemplate { at: "first", text: "one impl's `{name}`" },
+                    LabelTemplate { at: "second", text: "another impl's `{name}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "name one impl through a bound: `fn pick<X: {first}<..>>() .. X.{name}() ..`, called as `pick::<{type}>()` (no path gives both the type and the trait args of a fn without `self`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

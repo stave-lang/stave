@@ -36,7 +36,30 @@ impl Conv<u64> for A {
     }
 }
 
+trait Mk<T> {
+    fn mk() -> T;
+}
+
+impl Mk<u32> for A {
+    fn mk() -> u32 {
+        return 32;
+    }
+}
+
+impl Mk<u64> for A {
+    fn mk() -> u64 {
+        return 64;
+    }
+}
+
+// a fn without `self`: only a bound names one impl
+fn pick<X: Mk<u32>>() -> u32 {
+    return X.mk();
+}
+
 fn main() -> i32 {
+    let m: u32 = A.mk(); //~ ERROR E0908
+    let p: u32 = pick::<A>();
     let a = A.{ n: 1 };
     let k = a.id(); //~ ERROR E0908
     let x: u64 = a.c(); //~ ERROR E0908

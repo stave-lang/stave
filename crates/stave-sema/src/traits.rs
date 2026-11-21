@@ -1223,6 +1223,30 @@ impl<'a> World<'a> {
                     // two impls of one trait (other trait args) for this type: the call names
                     // neither, so it is ambiguous; the labels then show the two impls' methods
                     let same = found.iter().any(|(t, _, _)| *t == tr.trait_decl);
+                    if same {
+                        // the same trait args again: overlapping impls, E0903 at the impl
+                        let mine: Vec<GArg> =
+                            tr.args.iter().map(|&a| crate::mono::subst_garg(cx, a, &args)).collect();
+                        let dup = found.iter().any(|(t, f, _)| {
+                            *t == tr.trait_decl
+                                && match f {
+                                    MethodRef::Impl { impl_decl, impl_args, .. } => self
+                                        .sigs
+                                        .impl_def(*impl_decl)
+                                        .and_then(|x| x.trait_ref.as_ref())
+                                        .is_some_and(|ftr| {
+                                            ftr.args
+                                                .iter()
+                                                .map(|&a| crate::mono::subst_garg(cx, a, impl_args))
+                                                .eq(mine.iter().copied())
+                                        }),
+                                    _ => false,
+                                }
+                        });
+                        if dup {
+                            continue;
+                        }
+                    }
                     let tm = if same { m } else { self.prog.member(tr.trait_decl, name).unwrap_or(m) };
                     if same
                         && let Some(first) = found.iter_mut().find(|(t, _, _)| *t == tr.trait_decl)

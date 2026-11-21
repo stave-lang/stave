@@ -2093,7 +2093,14 @@ impl<'a> Ck<'a> {
             roles.push(("second", d.name_span));
         }
         // one trait twice: two of its impls (other trait args) supply the method
-        let case = (traits[0] == traits[1]).then_some("impls");
+        // a static fn has no receiver to give `Self` on a trait path: only a bound names one
+        // impl then
+        let stat = self.sigs.fn_sig(methods[0]).is_some_and(|s| s.self_kind.is_none());
+        let case = match (traits[0] == traits[1], stat) {
+            (true, false) => Some("impls"),
+            (true, true) => Some("impls-static"),
+            _ => None,
+        };
         let d = mk(
             "E0908",
             case,
