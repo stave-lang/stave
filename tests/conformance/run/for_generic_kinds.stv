@@ -1,0 +1,138 @@
+//~ STDOUT for_generic_kinds.stdout
+//~ EXIT 0
+// A `for` over a generic source is decided at the definition: `T` (or `&mut T`) is an iterator,
+// and every instance calls the bound's `next`, whatever the instance type is (an array, a
+// `&mut` to an iterator, a struct), through one and two levels of generic fns, a trait method,
+// and a closure. A source whose kind does not depend on `T` (`&[T]`, `&mut [T]`, `&[T; N]`) keeps
+// that kind.
+import std.io;
+
+struct It {
+    i: u64,
+    n: u64,
+}
+
+impl It {
+    fn next(&mut self) -> Option<u64> {
+        if self.i >= self.n {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        return Option.Some(self.i);
+    }
+}
+
+trait Next {
+    fn next(&mut self) -> Option<u64>;
+}
+
+impl Next for It {
+    fn next(&mut self) -> Option<u64> {
+        if self.i >= self.n {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        return Option.Some(self.i);
+    }
+}
+
+impl Next for &mut It {
+    fn next(&mut self) -> Option<u64> {
+        if self.i >= self.n {
+            return Option.None;
+        }
+        self.i = self.i + 10;
+        return Option.Some(self.i);
+    }
+}
+
+impl Next for [u64; 2] {
+    fn next(&mut self) -> Option<u64> {
+        if self[0] == 0 {
+            return Option.None;
+        }
+        self[0] = self[0] - 1;
+        return Option.Some(100u64);
+    }
+}
+
+fn total<T: Next + view>(t: T) -> u64 {
+    let mut s: u64 = 0;
+    for x in t {
+        s = s + x;
+    }
+    return s;
+}
+
+fn outer<T: Next + view>(t: T) -> u64 {
+    return total::<T>(t);
+}
+
+fn through<T: Next>(t: &mut T) -> u64 {
+    let mut s: u64 = 0;
+    for x in t {
+        s = s + x;
+    }
+    return s;
+}
+
+fn in_closure<T: Next + Copy>(t: T) -> u64 {
+    let f = fn() -> u64 {
+        let mut s: u64 = 0;
+        let u = t;
+        for x in u {
+            s = s + x;
+        }
+        return s;
+    };
+    return f();
+}
+
+fn elems<T: Copy>(xs: &[T], ys: &mut [T], a: [T; 2]) -> u64 {
+    let mut n: u64 = 0;
+    for x in xs {
+        n = n + 1;
+    }
+    for y in ys {
+        n = n + 10;
+    }
+    for z in &a {
+        n = n + 100;
+    }
+    return n;
+}
+
+struct S {
+    k: u64,
+}
+
+trait Run {
+    fn run<T: Next + view>(&self, t: T) -> u64;
+}
+
+impl Run for S {
+    fn run<T: Next + view>(&self, t: T) -> u64 {
+        return self.k + total::<T>(t);
+    }
+}
+
+fn main() -> i32 {
+    let a = total::<[u64; 2]>([3u64, 7u64]);
+    let mut it = It.{ i: 0, n: 30 };
+    let b = total::<&mut It>(&mut it);
+    let c = total::<It>(It.{ i: 0, n: 3 });
+    let d = outer::<[u64; 2]>([2u64, 0u64]);
+    let mut arr: [u64; 2] = [1u64, 0u64];
+    let e = through::<[u64; 2]>(&mut arr);
+    let mut it2 = It.{ i: 0, n: 2 };
+    let g = through::<It>(&mut it2);
+    let h = in_closure::<[u64; 2]>([1u64, 5u64]);
+    let xs: [u64; 3] = [1, 2, 3];
+    let mut ys: [u64; 2] = [1, 2];
+    let k = elems::<u64>(&xs, &mut ys, [5u64, 6u64]);
+    let s = S.{ k: 1 };
+    let r = s.run::<[u64; 2]>([1u64, 9u64]);
+    io.print(f"{a} {b} {c} {d}\n");
+    io.print(f"{e} {g} {h} {k} {r}\n");
+    return 0;
+}

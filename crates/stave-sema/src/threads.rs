@@ -59,7 +59,7 @@ impl Ck<'_> {
         }
         let icx = self.icx;
         let tys = &self.tys;
-        let infos = crate::closures::closures(&icx, body, |t| crate::closures::is_mut_ref(tys, t), body.node);
+        let infos = crate::closures::closures(&icx, body, tys, body.node);
         let find = |name: &str| crate::mono::item_at(self.prog, "std.thread", name);
         let fns: [ThreadFn<'_>; 3] = [
             (find("join"), "`thread.join`", &[(0, Cross::Sent), (1, Cross::Sent)]),

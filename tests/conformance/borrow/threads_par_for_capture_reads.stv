@@ -1,0 +1,42 @@
+//~ CHECK-ONLY
+// A capture whose every use is a read is held by `&`: a parallel loop body may read it through
+// dereferences, fields, elements, `&self` methods, `&`, f-string holes, a `match` on a value
+// without `&mut`, and `for` loops through `&` (by-value element or chunk bindings).
+import std.thread;
+import std.vec;
+
+struct P {
+    a: u32,
+    b: [u32; 4],
+}
+
+fn reads(xs: &[u32], v: &vec.Vec<u32>) -> u32 {
+    let k: u32 = 3;
+    let p = P.{ a: 1, b: [1u32; 4] };
+    let t = (&k, 2u32);
+    let o: Option<u32> = Option.Some(4);
+    let arr: [u32; 8] = [1u32; 8];
+    thread.par_for(0, 16, fn(i: usize) {
+        let x: u32 = *t.0 + t.1 + p.a + p.b[i % 4] + xs[0];
+        let n = v.len();
+        let r = &p.b;
+        let y = match o {
+            Option.Some(z) => z,
+            Option.None => 0,
+        };
+        let mut s: u32 = 0;
+        for e in &arr {
+            s = s +% *e;
+        }
+        for c: u32x4 in &arr {
+            s = s +% c.reduce_add_wrap();
+        }
+        for c: u32x4 in xs {
+            s = s +% c.reduce_add_wrap();
+        } tail scalar (e) {
+            s = s +% e;
+        }
+        let q = x + y + r[0] + (n as% u32) + s;
+    });
+    return k;
+}

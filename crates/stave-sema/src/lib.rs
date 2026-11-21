@@ -47,6 +47,7 @@ pub mod gates;
 pub mod itemcx;
 pub mod kinds;
 pub mod literals;
+pub mod loops;
 pub mod lower;
 mod lower_expr;
 mod lower_fn;

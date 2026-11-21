@@ -230,14 +230,15 @@ fn for_range(zero: &u32) -> u32 {
     return *p.best;
 }
 
-fn for_owned_array(zero: &u32) -> u32 {
-    let mut p = Pick.{ best: zero, count: 0 };
+// over `&xs` the binding borrows `xs`, which outlives the loop: no error
+fn for_array_ref(zero: &u32) -> u32 {
     let xs: [u32; 2] = [40, 41];
-    for x in xs {
-        if x == 40 {
-            let _ = p.take(&x);
+    let mut p = Pick.{ best: zero, count: 0 };
+    for x in &xs {
+        if *x == 40 {
+            let _ = p.take(x);
         }
-    } //~ ERROR E0501
+    }
     return *p.best;
 }
 
@@ -253,8 +254,7 @@ fn for_owned_array_temp(zero: &u32) -> u32 {
 
 fn for_owned_pairs(zero: &u32) -> u32 {
     let mut p = Pick.{ best: zero, count: 0 };
-    let xs: [(u32, u32); 2] = [(40, 0), (41, 1)];
-    for (x, k) in xs {
+    for (x, k) in [(40u32, 0u32), (41u32, 1u32)] {
         if k == 0 {
             let _ = p.take(&x);
         }

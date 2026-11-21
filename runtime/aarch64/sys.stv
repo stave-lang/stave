@@ -105,8 +105,10 @@ pub const NR: [usize; 36] = [
 // (uc_mcontext at 176 (16-aligned after the 128-byte sigmask area), then fault_address, regs[31], sp, pc: 176 + 8 + 248 + 8).
 pub const UCONTEXT_PC: usize = 440;
 
+// The system calls sc0..sc6 are safe fns that trust their arguments: any address among them must be
+// valid for the call `id` names. runtime.os is the only caller and states that memory per wrapper.
 pub fn sc0(id: usize) -> isize {
-    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall0(NR[id]);
+    return unsafe("id is a syscalls.list index; the addresses in a1.. are valid for that call because only runtime.os calls sc0..sc6, and each wrapper there states the memory the call touches") syscall0(NR[id]);
 }
 
 // exit_group and sched_yield name their number directly, so no trapping operation (the NR
@@ -120,30 +122,31 @@ pub fn sched_yield() -> isize {
 }
 
 pub fn sc1(id: usize, a1: usize) -> isize {
-    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall1(NR[id], a1);
+    return unsafe("id is a syscalls.list index; the addresses in a1.. are valid for that call because only runtime.os calls sc0..sc6, and each wrapper there states the memory the call touches") syscall1(NR[id], a1);
 }
 
 pub fn sc2(id: usize, a1: usize, a2: usize) -> isize {
-    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall2(NR[id], a1, a2);
+    return unsafe("id is a syscalls.list index; the addresses in a1.. are valid for that call because only runtime.os calls sc0..sc6, and each wrapper there states the memory the call touches") syscall2(NR[id], a1, a2);
 }
 
 pub fn sc3(id: usize, a1: usize, a2: usize, a3: usize) -> isize {
-    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall3(NR[id], a1, a2, a3);
+    return unsafe("id is a syscalls.list index; the addresses in a1.. are valid for that call because only runtime.os calls sc0..sc6, and each wrapper there states the memory the call touches") syscall3(NR[id], a1, a2, a3);
 }
 
 pub fn sc4(id: usize, a1: usize, a2: usize, a3: usize, a4: usize) -> isize {
-    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall4(NR[id], a1, a2, a3, a4);
+    return unsafe("id is a syscalls.list index; the addresses in a1.. are valid for that call because only runtime.os calls sc0..sc6, and each wrapper there states the memory the call touches") syscall4(NR[id], a1, a2, a3, a4);
 }
 
 pub fn sc5(id: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> isize {
-    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall5(NR[id], a1, a2, a3, a4, a5);
+    return unsafe("id is a syscalls.list index; the addresses in a1.. are valid for that call because only runtime.os calls sc0..sc6, and each wrapper there states the memory the call touches") syscall5(NR[id], a1, a2, a3, a4, a5);
 }
 
 pub fn sc6(id: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize) -> isize {
-    return unsafe("id is a syscalls.list index; runtime.os states each call's memory obligations") syscall6(NR[id], a1, a2, a3, a4, a5, a6);
+    return unsafe("id is a syscalls.list index; the addresses in a1.. are valid for that call because only runtime.os calls sc0..sc6, and each wrapper there states the memory the call touches") syscall6(NR[id], a1, a2, a3, a4, a5, a6);
 }
 
-// PC of the interrupted instruction, read from a signal handler's ucontext.
+// PC of the interrupted instruction, read from a signal handler's ucontext. A safe fn that trusts
+// its argument: `uctx` must be the ucontext_t the kernel passed to the running handler.
 pub fn ucontext_pc(uctx: usize) -> usize {
     return unsafe("uctx is the ucontext_t the kernel passed to the running SA_SIGINFO handler") *((uctx + UCONTEXT_PC) as *const usize);
 }
@@ -152,18 +155,18 @@ pub fn ucontext_pc(uctx: usize) -> usize {
 // runtime.thread.entry(arg).
 pub unsafe("args is a struct clone_args of size bytes whose stack is valid; arg is what runtime.thread.entry expects")
 fn clone3_thread(args: usize, size: usize, arg: usize) -> isize {
-    return unsafe("caller obligation") thread_clone(NR_CLONE3, args, size, 0, 0, 0, arg);
+    return unsafe("args is the struct clone_args of size bytes whose stack is valid (this fn's obligation); the child starts runtime.thread.entry(arg) on that stack and returns into the exit system call") thread_clone(NR_CLONE3, args, size, 0, 0, 0, arg);
 }
 
 // A new thread with the older `clone` (clone(flags, newsp, parent_tid, tls, child_tid) on AArch64), for kernels and emulators without clone3.
 pub unsafe("sp is the 16-byte aligned top of a fresh stack; ptid and ctid are valid u32 words; tls is the thread's block; arg is what runtime.thread.entry expects")
 fn clone_thread(flags: usize, sp: usize, ptid: usize, ctid: usize, tls: usize, arg: usize) -> isize {
-    return unsafe("caller obligation") thread_clone(NR_CLONE, flags, sp, ptid, tls, ctid, arg);
+    return unsafe("sp is the 16-byte aligned top of the fresh stack, ptid and ctid are valid u32 words and tls the thread's block (this fn's obligation); the child starts runtime.thread.entry(arg) on that stack") thread_clone(NR_CLONE, flags, sp, ptid, tls, ctid, arg);
 }
 
 // The calling thread's thread pointer (TPIDR_EL0) := p; no system call.
 pub unsafe("p is a runtime.state Block of this thread that outlives it")
 fn set_thread_pointer(p: usize) -> isize {
-    unsafe("caller obligation") { set_thread_block(p); }
+    unsafe("p is a runtime.state Block of this thread that outlives it (this fn's obligation); the intrinsic only writes TPIDR_EL0") { set_thread_block(p); }
     return 0;
 }
