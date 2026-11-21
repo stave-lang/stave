@@ -1,5 +1,5 @@
 //~ STDOUT compound_try_local.stdout
-// `?` on the right of a compound assignment leaves the old value to its place: it is dropped once,
+// `?` on the right of a compound assignment leaves the old value to its local: it is dropped once,
 // with its scope.
 import std.io;
 import std.env;
@@ -43,11 +43,9 @@ impl Add for D {
 fn f(ok: bool) -> Result<u32, u32> {
     let mut d = mk(1);
     d += mkres(2, ok)?;
-    let mut p = mkp(3);
-    p.b += mkres(5, ok)?;
-    let mut t = (mk(6), mk(7));
-    t.0 += if use2(mk(8), mkres(9, ok)?.id) == 0 then mk(10) else mk(11);
-    return Result.Ok(d.id + p.b.id);
+    let mut e = mk(3);
+    e += if use2(mk(8), mkres(9, ok)?.id) == 0 then mk(4) else mk(5);
+    return Result.Ok(d.id + e.id);
 }
 fn main() -> i32 {
     show(f(yes()));

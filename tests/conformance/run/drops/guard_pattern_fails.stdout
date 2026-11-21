@@ -18,9 +18,9 @@ mk 52
 drop 52
 mk 72
 drop 72
+drop 21
 or
 drop 22
-drop 21
 mk 82
 drop 82
 end

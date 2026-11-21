@@ -7,7 +7,7 @@ drop 2
 err 1
 mk 4
 mk 5
-drop 4
 drop 5
+drop 4
 err 1
 end

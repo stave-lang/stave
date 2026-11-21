@@ -157,18 +157,17 @@ take the store.
 Every value with drop glue is dropped exactly once, on every path, by the owner that holds it
 when that owner ends.
 
-- **Parts.** Moving a field out of a local or a temporary (`let x = p.a;`, `mk().a`, a pattern
-  that binds some fields by value: `P.{ a, b: _ }`, `(a, _)`, `E.Two(a, _)`) moves that field
-  only. The owner still drops its other fields, in declaration order, where it would have been
-  dropped as a whole. Assigning the field again (`p.a = v;`) drops the old value only on the
-  paths where it is still there.
+- **Whole values.** A value is moved whole or taken apart by a pattern ("Whole moves and
+  destructuring patterns" above): the parts a moving pattern ignores are dropped at its
+  binding point, and nothing of the value is left to its former owner. Assigning a field
+  (`p.a = v;`) drops the field's old value.
 - **`impl Drop`.** A value whose type has an `impl Drop` is dropped as a whole: its `drop`
-  runs once, then its fields are dropped. It is never dropped part by part, also not when a
-  pattern names one of its variants or fields without binding them (`match mk() { F.B => .. }`).
-- **Compound assignment.** `p op= e` with a user operator is `p = p op e`: the operator call
-  takes the old value of `p` (the callee owns it), and its result is written into `p`, which
-  holds no value at that point: nothing is dropped at the write. A `?` in `e` leaves the old
-  value in `p`.
+  runs once, then its fields are dropped. No pattern takes it apart; one that only reads it
+  (`match mk() { F.B => .. }`) leaves it to be dropped where its owner ends.
+- **Compound assignment.** `p op= e` with a user operator on a value with drop glue: the
+  operator call takes the old value of `p` (the callee owns it), and the result is written into
+  `p` without a drop. When `e` leaves by `?`, the old value is dropped once, with `p`, on that
+  exit.
 - **Temporaries.** A temporary with drop glue is dropped at the end of its statement, the last
   made first, and only if the operand that makes it ran (the right side of `&&` / `||`, a branch
   of a value `if`). These are statements of their own for this rule: the condition of an `if` or
@@ -177,9 +176,10 @@ when that owner ends.
   statement: they live across the arms and the loop, and are dropped once after it. The
   iterator of a `for` (an rvalue the loop calls `next` on) is not a temporary: with drop glue
   it lives to the end of the enclosing block, like a local declared before the loop.
-- **Unbound parts.** What a pattern does not bind of an rvalue (`let (a, _) = mk();`, a
-  scrutinee that is a call) is a temporary of the statement. `let _ = e;` with an rvalue `e`
-  drops it at the end of the statement; with a place `e` it moves nothing and drops nothing.
+- **Rvalues under patterns.** An rvalue that a pattern only reads (`let P.{ n, a: _ } = mk();`
+  with `n: u32`, a scrutinee that is a call in an arm that binds nothing by value) is a
+  temporary of the statement and is dropped at its end. `let _ = e;` with an rvalue `e` drops
+  it at the end of the statement; with a place `e` it moves nothing and drops nothing.
 - **Leaving early.** `return`, `break`, `continue`, and `?` drop the temporaries of the
   statements they leave, then the locals of the scopes they leave. `?` also drops the operands
   of the enclosing expressions that were already evaluated (earlier arguments, a by-value

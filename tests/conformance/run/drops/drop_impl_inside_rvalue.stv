@@ -1,6 +1,6 @@
 //~ STDOUT drop_impl_inside_rvalue.stdout
-// An enum with a `Drop` impl inside an `Option` or a struct rvalue that a pattern takes apart: its
-// `drop` runs once.
+// An enum with a `Drop` impl inside an `Option` or a struct rvalue that patterns read: its `drop`
+// runs once.
 import std.io;
 import std.env;
 struct D { pub id: u32 }

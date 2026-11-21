@@ -1,0 +1,37 @@
+drop 11
+1 let
+drop 10
+drop 21
+1 temp
+drop 20
+2 other
+drop 30
+drop 31
+2 end
+drop 41
+2 temp arm
+drop 40
+2 temp end
+3 whole
+drop 50
+drop 51
+3 end
+drop 61
+drop 62
+4 nested
+drop 71
+4 payload
+drop 70
+4 end
+drop 60
+drop 81
+5 iter 80
+drop 80
+drop 91
+5 iter 90
+drop 90
+5 end
+r read
+r end
+drop 100
+drop 101

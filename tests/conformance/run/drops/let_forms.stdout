@@ -11,12 +11,16 @@ drop 5
 drop 6
 mk 7
 mk 8
-drop 8
 drop 7
+drop 8
 mk 9
 mk 10
 drop 9
 drop 10
+mk 11
+mk 12
+drop 11
+drop 12
 stmts
 end
 drop 1

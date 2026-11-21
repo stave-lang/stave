@@ -1,0 +1,50 @@
+mk 3
+mk 30
+mk 31
+mk 32
+drop 31
+drop 32
+body
+drop 30
+mk 20
+mk 21
+mk 22
+drop 21
+drop 22
+body
+drop 20
+mk 10
+mk 11
+mk 12
+drop 11
+drop 12
+body
+drop 10
+loop 1 done
+mk 1
+mk 10
+mk 11
+mk 12
+read
+drop 10
+drop 11
+drop 12
+mk 2
+mk 20
+mk 21
+mk 22
+drop 22
+whole
+drop 20
+drop 21
+mk 10
+mk 11
+mk 12
+drop 12
+whole
+drop 10
+drop 11
+end
+drop 2
+drop 1
+drop 3

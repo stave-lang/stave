@@ -6,6 +6,6 @@ mk 20
 drop 20
 mk 30
 mk 31
-drop 30
 drop 31
+drop 30
 end

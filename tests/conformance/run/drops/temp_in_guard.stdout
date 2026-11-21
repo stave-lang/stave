@@ -8,7 +8,7 @@ mk 21
 mk 22
 mk 70
 drop 70
+drop 22
 two
 drop 21
-drop 22
 end

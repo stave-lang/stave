@@ -1,5 +1,6 @@
 //~ STDOUT let_forms.stdout
-// Temporaries of `let` forms and of field reads of a call result end with their statement.
+// Temporaries of `let` forms: an rvalue under `_`, under a pattern that binds a part, and under one
+// that only reads.
 import std.io;
 import std.env;
 struct D { pub id: u32 }
@@ -41,8 +42,10 @@ fn main() -> i32 {
     let _ = mk(3);
     let n4 = idof(&mk(4));
     let n = mkp(5).a.id;
-    eat(mkp(7).b);
+    let P.{ a: _, b } = mkp(7);
+    eat(b);
     let m = mkp(9).a.get();
+    let P.{ a: _, b: _ } = mkp(11);
     io.print("stmts\n");
     io.print("end\n");
     return 0;

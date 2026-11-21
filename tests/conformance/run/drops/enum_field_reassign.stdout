@@ -1,8 +1,0 @@
-mk 1
-mk 2
-some
-drop 1
-mk 3
-drop 3
-end
-drop 2

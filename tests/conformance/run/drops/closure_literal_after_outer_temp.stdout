@@ -8,17 +8,17 @@ drop 2
 drop 1
 mk 5
 mk 6
+drop 6
 mk 9
 mk 50
 mk 51
+drop 50
 drop 51
 mk 7
 mk 8
-drop 7
 drop 8
-drop 50
+drop 7
 drop 9
 drop 5
-drop 6
 6 16
 end

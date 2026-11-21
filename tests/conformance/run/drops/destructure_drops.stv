@@ -1,0 +1,94 @@
+//~ STDOUT destructure_drops.stdout
+// Where a pattern that takes a value apart drops the parts it ignores: at its binding point (a
+// `let`, the entry of the arm once its guard passed, the start of a `for` iteration), in field
+// declaration order, nested parts depth first; a pattern that binds no non-Copy part by value
+// only reads and leaves the value whole. Each value is dropped exactly once.
+import std.io;
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { let i = self.id; io.print(f"drop {i}\n"); } }
+
+struct S { pub a: D, pub b: D, pub n: u32 }
+struct W { pub p: S, pub q: D }
+enum E { Two(D, D), One(D) }
+
+fn mk(k: u32) -> S { return S.{ a: D.{ id: k }, b: D.{ id: k + 1 }, n: k }; }
+
+fn case1_local() {
+    let s = mk(10);
+    let S.{ a, b: _, n } = s;
+    io.print("1 let\n");
+}
+
+fn case1_temp() {
+    let S.{ a, b: _, n } = mk(20);
+    io.print("1 temp\n");
+}
+
+fn case2_local(k: u32) {
+    let s = mk(30);
+    match k {
+        _ => {
+            match s {
+                S.{ a, b: _, n: 0 } => { io.print("2 zero\n"); }
+                other => { io.print("2 other\n"); }
+            }
+        }
+    }
+    io.print("2 end\n");
+}
+
+fn case2_temp() {
+    match mk(40) {
+        S.{ a, b: _, n } => { io.print("2 temp arm\n"); }
+    }
+    io.print("2 temp end\n");
+}
+
+fn case3_guard() {
+    let s = mk(50);
+    match s {
+        S.{ a, b: _, n } if n == 0 => { io.print("3 never\n"); }
+        whole => { io.print("3 whole\n"); }
+    }
+    io.print("3 end\n");
+}
+
+fn case4_nested() {
+    let w = W.{ p: mk(60), q: D.{ id: 62 } };
+    let W.{ p: S.{ a, b: _, n }, q: _ } = w;
+    io.print("4 nested\n");
+    let e = E.Two(D.{ id: 70 }, D.{ id: 71 });
+    match e {
+        E.Two(x, _) | E.One(x) => { io.print("4 payload\n"); }
+    }
+    io.print("4 end\n");
+}
+
+fn case5_for() {
+    let ss: [S; 2] = [mk(80), mk(90)];
+    for S.{ a, b: _, n } in ss {
+        io.print(f"5 iter {n}\n");
+    }
+    io.print("5 end\n");
+}
+
+fn reads_only() {
+    let s = mk(100);
+    let S.{ n, a: _, b: _ } = s;
+    let _ = s;
+    match s { _ => { io.print("r read\n"); } }
+    io.print("r end\n");
+}
+
+fn main() -> i32 {
+    case1_local();
+    case1_temp();
+    case2_local(0);
+    case2_temp();
+    case3_guard();
+    case4_nested();
+    case5_for();
+    reads_only();
+    return 0;
+}

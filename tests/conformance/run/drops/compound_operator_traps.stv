@@ -50,8 +50,8 @@ fn main() -> i32 {
     let mut d = mk(1);
     d += mk(0);
     io.print("first\n");
-    let mut p = mkp(3);
-    p.a += mk(5);
+    let mut e = mk(3);
+    e += mk(5);
     io.print("not reached\n");
     io.print("end\n");
     return 0;

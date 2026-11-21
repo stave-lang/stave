@@ -36,10 +36,13 @@ fn show(r: Result<u32, u32>) {
         Result.Err(n) => { io.print(f"err {n}\n"); }
     }
 }
+fn first(p: P) -> D { let P.{ a, b: _ } = p; return a; }
+fn second(p: P) -> D { let P.{ a: _, b } = p; return b; }
+fn checkp(p: P) -> bool { return p.a.id > 0; }
 fn main() -> i32 {
     let d = yes().select(mk(1), mk(2));
     let n = if yes() then idof(&mkp(3).a) else idof(&mkp(5).b);
-    let m = if no() then use2(mkp(7).a, 1) else use2(mkp(9).b, 2);
+    let m = if no() then use2(first(mkp(7)), 1) else use2(second(mkp(9)), 2);
     io.print("end\n");
     return 0;
 }

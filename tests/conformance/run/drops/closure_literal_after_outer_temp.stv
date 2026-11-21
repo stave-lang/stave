@@ -37,13 +37,16 @@ fn show(r: Result<u32, u32>) {
         Result.Err(n) => { io.print(f"err {n}\n"); }
     }
 }
+fn first(p: P) -> D { let P.{ a, b: _ } = p; return a; }
+fn second(p: P) -> D { let P.{ a: _, b } = p; return b; }
+fn checkp(p: P) -> bool { return p.a.id > 0; }
 fn call(d: &D, f: fn() -> u32) -> u32 { return d.id + f(); }
 fn call2(d: D, f: fn(u32) -> u32, e: D) -> u32 { return f(d.id) + e.id; }
 fn main() -> i32 {
     let n = call(&mk(1), fn() -> u32 { return idof(&mk(2)) + mkp(3).a.id; });
-    let m = call2(mkp(5).a, fn(k: u32) -> u32 {
+    let m = call2(first(mkp(5)), fn(k: u32) -> u32 {
         let p = mkp(10 * k);
-        if k == 5 { eat(p.b); }
+        if k == 5 { eatp(p); }
         return match mke(2, 7) { E.Two(a, _) => a.id, _ => 0 };
     }, mk(9));
     io.print(f"{n} {m}\n");

@@ -1,6 +1,6 @@
 //~ STDOUT rvalue_scrutinee_in_expression.stdout
-// An rvalue scrutinee is a temporary of the statement: what the arm did not bind is dropped at its
-// end.
+// An rvalue scrutinee: an arm that takes it drops the ignored part at its entry; an arm that only
+// reads leaves it to the end of the statement.
 import std.io;
 import std.env;
 struct D { pub id: u32 }

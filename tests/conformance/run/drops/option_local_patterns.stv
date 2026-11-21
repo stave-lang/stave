@@ -1,5 +1,5 @@
 //~ STDOUT option_local_patterns.stdout
-// Nested patterns move a part out of an enum payload.
+// Nested patterns take a payload apart: the ignored part is dropped at the entry of the arm.
 import std.io;
 import std.env;
 struct D { pub id: u32 }

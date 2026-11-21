@@ -1,5 +1,5 @@
 //~ STDOUT or_pattern_different_parts.stdout
-// The alternatives of an or-pattern move different parts out of the scrutinee.
+// The alternatives of an or-pattern ignore different parts: the one that matched drops its own.
 import std.io;
 import std.env;
 struct D { pub id: u32 }

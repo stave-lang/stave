@@ -1,6 +1,5 @@
 //~ STDOUT temp_in_guard.stdout
-// A guard's temporaries are dropped when the guard ends; a failed guard gives the bindings back to
-// the scrutinee.
+// A guard's temporaries are dropped when the guard ends; a failed guard leaves the scrutinee whole.
 import std.io;
 import std.env;
 struct D { pub id: u32 }

@@ -1,6 +1,5 @@
 //~ STDOUT rvalue_scrutinee_partial.stdout
-// An rvalue scrutinee whose arm binds a part: the rest is dropped at the end of the `match`
-// statement.
+// An rvalue scrutinee whose arm binds a part: the rest is dropped at the entry of the arm.
 import std.io;
 import std.env;
 struct D { pub id: u32 }
