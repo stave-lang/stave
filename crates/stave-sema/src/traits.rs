@@ -1,7 +1,8 @@
 //! Traits and impls for non-generic code and core generics: Copy, Send/Sync, and Flat (the view
 //! kind and [`crate::kinds::Kind`] are in [`crate::kinds`]), layouts, impl matching, trait-bound
 //! checks, method lookup, and impl conformance (E0905 E0906 E0907, Copy E0415, Drop
-//! E0416, overlapping impls E0903, any impl of Flat E1408).
+//! E0416, an operator trait on a non-Copy type E0422, overlapping impls E0903, any impl of Flat
+//! E1408).
 //!
 //! **Impl matching** unifies an impl's self type (its generic params are variables) with a
 //! concrete or rigid type (a generic param of the checked fn is rigid); the impl applies when its
@@ -1473,6 +1474,15 @@ pub(crate) fn check_impls(
                     break 'fields;
                 }
             }
+        }
+        // E0422: an operator is a call not written as one, so its operands must never move: an
+        // operator trait's self type (also its rhs and result) is Copy in every instance the impl
+        // covers, i.e. Copy under the impl's own bounds.
+        if lang.ops.values().any(|&t| t == tr.trait_decl)
+            && !tys.is_error_ty(imp.self_ty)
+            && !w.is_copy(tys, imp.self_ty, &imp.generics)
+        {
+            out.extend(mk("E0422", None, &[("trait", &trait_path), ("type", &self_text)], impl_span, &[]));
         }
         // E0419: drop glue runs the destructors of ADTs only, and a package adds none to the
         // types of another (their values would drop differently in each package).

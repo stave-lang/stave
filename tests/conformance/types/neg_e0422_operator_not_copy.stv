@@ -1,0 +1,117 @@
+//~ CHECK-ONLY
+// An operator trait of `std.core` is implemented only for a type that is Copy in every instance
+// the impl covers (Copy under the impl's own bounds): an operator never moves its operands. A
+// type that owns memory takes a method instead (`a.add(&b)`).
+import std.string;
+import std.vec;
+
+struct Big { pub limbs: vec.Vec<u64> }
+
+impl Add for Big { //~ ERROR E0422
+    fn add(self, rhs: Self) -> Self { return rhs; }
+}
+
+impl SatMul for Big { //~ ERROR E0422
+    fn sat_mul(self, rhs: Self) -> Self { return self; }
+}
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { } }
+
+impl Sub for D { //~ ERROR E0422
+    fn sub(self, rhs: Self) -> Self { return D.{ id: self.id - rhs.id }; }
+}
+
+impl Neg for D { //~ ERROR E0422
+    fn neg(self) -> Self { return self; }
+}
+
+enum Tok { Word(string.String), End }
+
+impl BitOr for Tok { //~ ERROR E0422
+    fn bitor(self, rhs: Self) -> Self { return rhs; }
+}
+
+// all fields Copy, but no `impl Copy`
+struct Plain { pub n: u32 }
+
+impl WrapShl for Plain { //~ ERROR E0422
+    fn wrap_shl(self, rhs: Self) -> Self { return self; }
+}
+
+// Copy only where its param is
+struct W<T> { pub v: T }
+impl<T: Copy> Copy for W<T> {}
+
+impl<T: Copy> Add for W<T> {
+    fn add(self, rhs: Self) -> Self { return rhs; }
+}
+
+impl<T> Sub for W<T> { //~ ERROR E0422
+    fn sub(self, rhs: Self) -> Self { return rhs; }
+}
+
+// Copy for one instance only
+struct K<T> { pub v: T }
+impl Copy for K<u32> {}
+
+impl Mul for K<u32> {
+    fn mul(self, rhs: Self) -> Self { return rhs; }
+}
+
+impl<T: Copy> Div for K<T> { //~ ERROR E0422
+    fn div(self, rhs: Self) -> Self { return rhs; }
+}
+
+// the `impl Copy` asks more than the operator impl's bounds give
+struct F<T> { pub v: T }
+impl<T: Copy + Frozen> Copy for F<T> {}
+
+impl<T: Copy> BitXor for F<T> { //~ ERROR E0422
+    fn bitxor(self, rhs: Self) -> Self { return rhs; }
+}
+
+impl<T: Copy + Frozen> BitAnd for F<T> {
+    fn bitand(self, rhs: Self) -> Self { return rhs; }
+}
+
+struct V { pub n: u32 }
+impl Copy for V {}
+
+impl Not for V {
+    fn not(self) -> Self { return V.{ n: ~self.n }; }
+}
+
+impl Rem for V {
+    fn rem(self, rhs: Self) -> Self { return V.{ n: self.n % rhs.n }; }
+}
+
+// the method form for a type that owns memory
+struct Text { pub s: string.String }
+
+impl Text {
+    pub fn add(&self, rhs: &Text) -> Text {
+        let mut s = string.String.new();
+        s.push_str(self.s.as_str());
+        s.push_str(rhs.s.as_str());
+        return Text.{ s: s };
+    }
+}
+
+fn twice<T: Rem + Copy>(x: T) -> T { return x % x; }
+
+fn main() -> i32 {
+    let d1 = D.{ id: 3 };
+    let d2 = D.{ id: 1 };
+    let d3 = d1 - d2;
+    let w = W::<u32>.{ v: 1 } + W::<u32>.{ v: 2 };
+    let k = K::<u32>.{ v: 1 } * K::<u32>.{ v: 2 };
+    let f = F::<u32>.{ v: 1 } & F::<u32>.{ v: 2 };
+    let mut v = V.{ n: 7 };
+    v %= V.{ n: 4 };
+    let n = ~v;
+    let t = Text.{ s: string.String.new() };
+    let u = t.add(&t);
+    let x = twice(v);
+    return 0;
+}

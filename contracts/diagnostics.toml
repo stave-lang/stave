@@ -979,6 +979,16 @@ labels = [{ at = "primary", text = "impl here" }, { at = "param", text = "`{para
 fix = { description = "use `{param}` in the self type, move it to the methods that need it (`fn m<{param}>(..)`), or remove it" }
 
 [[diag]]
+code = "E0422"
+severity = "error"
+area = "kinds"
+rule = "impl of an operator trait of `std.core` (`Add Sub Mul Div Rem Shl Shr BitAnd BitOr BitXor Neg Not` and the wrapping and saturating forms) whose self type is not Copy in every instance the impl covers (Copy under the impl's bounds): an operator never moves its operands"
+holes = { trait = "path", type = "type" }
+message = "`{type}` cannot implement operator trait `{trait}`: it is not Copy"
+labels = [{ at = "primary", text = "operator impl here" }]
+fix = { description = "make `{type}` Copy (`impl Copy for ..`, with `Copy` bounds on the impl's params if the `impl Copy` has them), or give it a method instead: `fn add(&self, rhs: &Self) -> Self`, called as `a.add(&b)`" }
+
+[[diag]]
 code = "E0501"
 severity = "error"
 area = "borrow"

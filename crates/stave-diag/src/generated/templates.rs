@@ -2371,6 +2371,32 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0422",
+        severity: Severity::Error,
+        area: "kinds",
+        rule: "impl of an operator trait of `std.core` (`Add Sub Mul Div Rem Shl Shr BitAnd BitOr BitXor Neg Not` and the wrapping and saturating forms) whose self type is not Copy in every instance the impl covers (Copy under the impl's bounds): an operator never moves its operands",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "trait", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{type}` cannot implement operator trait `{trait}`: it is not Copy",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "operator impl here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "make `{type}` Copy (`impl Copy for ..`, with `Copy` bounds on the impl's params if the `impl Copy` has them), or give it a method instead: `fn add(&self, rhs: &Self) -> Self`, called as `a.add(&b)`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
