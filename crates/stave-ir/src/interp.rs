@@ -563,6 +563,10 @@ struct AllocFns {
 /// An aggregate being loaded: its parts (type, address), the next part, the values so far.
 type Open = (Vec<(TypeId, u64)>, usize, Vec<Val>);
 
+/// A part of an aggregate a reborrow walk has still to do: its type (`None`: kept as it is)
+/// and value.
+type Part = (Option<TypeId>, Val);
+
 /// One level of a load: a value, or an aggregate's parts and the values before them.
 enum Loaded {
     Val(Val),
@@ -1638,34 +1642,64 @@ impl<'m, H: Host> Interp<'m, H> {
 
     /// M20: a value of type `t` read through a raw pointer, with a new tag for each reference
     /// in it (found by the type: of an enum the live variant), a child of the tag stored there.
-    fn reborrow_refs(&mut self, t: TypeId, v: Val, at: Ev, depth: usize) -> R<Val> {
-        if depth > MAX_TYPE_DEPTH {
-            return Err(InterpError::Unsupported("type nesting too deep".into()));
+    /// The value is walked with a list, not by recursion: it may nest as deep as the type table
+    /// allows, deeper than a small native stack holds frames.
+    fn reborrow_refs(&mut self, t: TypeId, v: Val, at: Ev) -> R<Val> {
+        // per open aggregate: its parts still to do (`None`: a part kept as it is), and the
+        // values done
+        let mut stack: Vec<(std::vec::IntoIter<Part>, Vec<Val>)> = Vec::new();
+        let mut todo = Some((t, v));
+        loop {
+            let mut done = None;
+            if let Some((t, v)) = todo.take() {
+                if stack.len() > MAX_TYPE_DEPTH {
+                    return Err(InterpError::Unsupported("type nesting too deep".into()));
+                }
+                match self.reborrow_one(t, v, at)? {
+                    Ok(v) => done = Some(v),
+                    Err(parts) => {
+                        let n = parts.len();
+                        stack.push((parts.into_iter(), Vec::with_capacity(n)));
+                    }
+                }
+            }
+            if done.is_none() {
+                let Some(top) = stack.last_mut() else { return Err(malformed("reborrow")) };
+                match top.0.next() {
+                    Some((Some(pt), pv)) => todo = Some((pt, pv)),
+                    Some((None, pv)) => top.1.push(pv),
+                    None => done = stack.pop().map(|(_, out)| Val::agg(out)),
+                }
+            }
+            if let Some(v) = done {
+                match stack.last_mut() {
+                    Some(top) => top.1.push(v),
+                    None => return Ok(v),
+                }
+            }
         }
+    }
+
+    /// One level of [`Interp::reborrow_refs`]: the value done (a reference with its new tag, a
+    /// value that holds none), or the parts of an aggregate with their types.
+    fn reborrow_one(&mut self, t: TypeId, v: Val, at: Ev) -> R<Result<Val, Vec<Part>>> {
         let types = &self.m.types;
         match types.key(t) {
-            Some(&TypeKey::Ref { mutable, .. }) => return self.borrow_word(t, v, mutable, true, at),
+            Some(&TypeKey::Ref { mutable, .. }) => return self.borrow_word(t, v, mutable, true, at).map(Ok),
             Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
-            _ => return Ok(v),
+            _ => return Ok(Ok(v)),
         }
-        let Val::Agg(vs) = &v else { return Ok(v) };
-        let parts: Vec<Option<TypeId>> = match &self.layout(t)?.shape {
+        let Val::Agg(vs) = &v else { return Ok(Ok(v)) };
+        let tys: Vec<Option<TypeId>> = match &self.layout(t)?.shape {
             Shape::Fields(fs) => fs.iter().map(|f| Some(f.1)).collect(),
             Shape::Array { elem, .. } => vec![Some(*elem); vs.len()],
             Shape::Enum(vars) => {
                 let live = vs.first().and_then(Val::bits).and_then(|k| vars.get(k as usize));
                 std::iter::once(None).chain(live.into_iter().flatten().map(|f| Some(f.1))).collect()
             }
-            Shape::Scalar | Shape::Fat | Shape::Bytes => return Ok(v),
+            Shape::Scalar | Shape::Fat | Shape::Bytes => return Ok(Ok(v)),
         };
-        let mut out = Vec::with_capacity(vs.len());
-        for (k, fv) in vs.iter().enumerate() {
-            out.push(match parts.get(k).copied().flatten() {
-                Some(ft) => self.reborrow_refs(ft, fv.clone(), at, depth + 1)?,
-                None => fv.clone(),
-            });
-        }
-        Ok(Val::agg(out))
+        Ok(Err(vs.iter().enumerate().map(|(k, fv)| (tys.get(k).copied().flatten(), fv.clone())).collect()))
     }
 
     fn set(regs: &mut [Val], body: &Body, i: u32, v: Val) {
@@ -1896,7 +1930,7 @@ impl<'m, H: Host> Interp<'m, H> {
                     }
                     _ => false,
                 };
-                if self.bt.is_some() && raw(arg(0)?) { self.reborrow_refs(t, v, ev(fid, i), 0)? } else { v }
+                if self.bt.is_some() && raw(arg(0)?) { self.reborrow_refs(t, v, ev(fid, i))? } else { v }
             }
             // hints: no effect on the program's state
             Op::Prefetch(_) | Op::FenceStream => return Ok(Step::Next),

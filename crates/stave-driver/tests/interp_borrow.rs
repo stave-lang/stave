@@ -183,6 +183,35 @@ fn std_programs_have_no_report() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Borrow tracking walks the values it is given with lists, not by recursion: a view nested
+/// 341 levels deep, loaded through raw pointers (each load gives its reference words new tags),
+/// runs clean on a 256 KB native stack, as it does without tracking.
+#[test]
+fn deep_values_need_no_deep_stack_under_tracking() {
+    let target = Triple::parse("x86_64-linux").unwrap();
+    let p = repo().join("tests/borrowcheck/ok_deep_view_raw_load.stv");
+    let mut o = Options::new(Goal::Check).threads(Some(2));
+    o.lower = true;
+    o.borrow_marks = true;
+    o.target = Some(target);
+    let out = pipeline::run(&p, &Library::in_dir(&repo()), &o).unwrap();
+    assert!(!out.has_errors(), "{:?}", out.diagnostics);
+    let m = out.module.expect("checked IR");
+    for borrow in [false, true] {
+        let m = m.clone();
+        let ran = std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn(move || {
+                let lim = Limits { check: true, borrow, ..Limits::default() };
+                interp::run(&m, "main.main", target, &[], &[], lim).map(|r| r.ran.exit)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(ran, Ok(0), "tracking {borrow}");
+    }
+}
+
 /// What the borrow checker and the tracking interpreter say of one program lowered without
 /// regard to the checker.
 struct Verdict {
