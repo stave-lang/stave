@@ -1,8 +1,12 @@
-// A clause callee uses an operator whose impl calls a fn bumping a static.
+// A clause callee uses an operator whose impl calls a fn field holding a fn bumping a static.
 import std.atomic;
 import std.core;
 
 static N: atomic.U64 = atomic.U64.new(0);
+
+view struct H {
+    f: fn(),
+}
 
 fn nop() {}
 
@@ -10,16 +14,17 @@ fn bump() {
     let o = N.fetch_add(1);
 }
 
-impl core.Add for fn() {
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        rhs();
-        return nop;
+        let k = rhs.f;
+        k();
+        return H.{ f: nop };
     }
 }
 
 fn sneaky() -> bool {
-    let a: fn() = nop;
-    let b: fn() = bump;
+    let a = H.{ f: nop };
+    let b = H.{ f: bump };
     let c = a + b;
     return true;
 }

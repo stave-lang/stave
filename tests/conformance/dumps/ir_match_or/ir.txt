@@ -4,7 +4,7 @@ type t2 int s 32
 type t3 bool
 type t4 ref t1
 type t5 ref mut t1
-type t6 adt d21
+type t6 adt d26
 fn @0 main.over {
 b0(%0: t6, %1: t1):
   br b1()

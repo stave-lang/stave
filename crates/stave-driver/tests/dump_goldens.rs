@@ -159,19 +159,20 @@ fn golden_properties() {
         }
         match case {
             "unbalanced" => {
-                // F 0..2: the stand-in runtime and std; F 3: the package's src/main.stv.
-                assert!(items.lines().all(|l| l.split(' ').nth(1) != Some("3")), "E0016: no items");
-                assert!(tokens.lines().any(|l| l.starts_with("3 ")), "tokens before the stop are kept");
+                // F 0..3: the stand-in runtime and std; F 4: the package's src/main.stv.
+                assert!(items.lines().all(|l| l.split(' ').nth(1) != Some("4")), "E0016: no items");
+                assert!(tokens.lines().any(|l| l.starts_with("4 ")), "tokens before the stop are kept");
                 assert!(read(&dir.join("diags.txt")).contains("\"code\":\"E0016\""));
             }
             "dropped_item" => assert_eq!(items.lines().filter(|l| l.ends_with(" dropped")).count(), 1),
             "valid_small" => assert!(read(&dir.join("diags.txt")).is_empty()),
             "multi_file" => {
                 // F = rank of (package, path): multi_file's src/main.stv, src/util.stv,
-                // src/util/math.stv, then runtime's empty.stv (no tokens), std's core.stv, io.stv.
+                // src/util/math.stv, then runtime's empty.stv (no tokens), std's core.stv, io.stv,
+                // string.stv.
                 let files: std::collections::BTreeSet<&str> =
                     tokens.lines().filter_map(|l| l.split(' ').next()).collect();
-                assert_eq!(files.into_iter().collect::<Vec<_>>(), ["0", "1", "2", "4", "5"]);
+                assert_eq!(files.into_iter().collect::<Vec<_>>(), ["0", "1", "2", "4", "5", "6"]);
                 let d = read(&dir.join("diags.txt"));
                 assert!(d.contains("\"file\":\"src/util/math.stv\",\"line\":6"), "{d}");
             }

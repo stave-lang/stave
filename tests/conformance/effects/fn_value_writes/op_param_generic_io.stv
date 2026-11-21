@@ -1,6 +1,10 @@
-// A generic `<T: view + core.Add>` adds two fn values; the impl calls its `rhs`.
+// A generic `<T: view + core.Add>` adds two fn wrappers; the impl calls its `rhs` fn field.
 import std.core;
 import std.io;
+
+view struct H {
+    f: fn(),
+}
 
 fn nop() {}
 
@@ -8,10 +12,11 @@ fn noisy() {
     io.print("noisy\n");
 }
 
-impl core.Add for fn() {
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        rhs();
-        return nop;
+        let k = rhs.f;
+        k();
+        return H.{ f: nop };
     }
 }
 
@@ -20,8 +25,8 @@ fn plus<T: view + core.Add>(a: T, b: T) -> T {
 }
 
 fn quiet() without(io) { //~ ERROR E1401
-    let a: fn() = nop;
-    let b: fn() = noisy;
+    let a = H.{ f: nop };
+    let b = H.{ f: noisy };
     let c = plus(a, b);
 }
 

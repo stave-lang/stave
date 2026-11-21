@@ -1,0 +1,34 @@
+// A wrapper whose field is declared generic is untracked: the impl's call of `rhs.f` reaches
+// the whole `fn()` table, `noisy` included though no `G` literal holds it.
+import std.core;
+import std.io;
+
+view struct G<T: view> {
+    f: T,
+}
+
+impl core.Add for G<fn()> {
+    fn add(self, rhs: Self) -> Self {
+        let k = rhs.f;
+        k();
+        return G::<fn()>.{ f: nop };
+    }
+}
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let a = G::<fn()>.{ f: nop };
+    let b = G::<fn()>.{ f: nop };
+    let g = a + b;
+}
+
+fn main() {
+    let n: fn() = noisy;
+    n();
+    quiet();
+}

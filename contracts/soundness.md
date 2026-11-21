@@ -292,11 +292,13 @@ assignment, an operator operand, a method receiver by value or by reference, a s
 naming the field, a value `if` / `match` arm, an array or tuple element, an f-string hole, a `from`
 origin), makes the slot untracked, and so does every use of a form added later: the check lists
 the harmless forms and treats the rest as untracked. A read by copy writes nothing, and a plain
-`=` is an event, so a write that no event shows (through a pointer, inside a callee, by a user
-operator impl on a fn type) needs a use of another kind first. Whole values of a struct copied
-or swapped (`*p = s2`, `mem.swap(&mut a, &mut b)`) carry field values the slot already holds. A
-fn value elsewhere (a field declared generic, a tuple / array / slice element, an enum payload, a
-`Vec` element) is read as untracked. A `static`, `const`, `Mutex`, `Once`, `Cell`, `UnsafeCell`,
+`=` is an event, so a write that no event shows (through a pointer, inside a callee) needs a use
+of another kind first. No operator impl writes a fn value without an event: one for a fn type is
+E0420 (operator traits and fn types are both `std`'s, and `std` has none), so an operator over fn
+values takes a struct holding them, whose fields the impl's struct literals feed. Whole values
+of a struct copied or swapped (`*p = s2`, `mem.swap(&mut a, &mut b)`) carry field values the slot
+already holds. A fn value elsewhere (a field declared generic, a tuple / array / slice element,
+an enum payload, a `Vec` element) is read as untracked. A `static`, `const`, `Mutex`, `Once`, `Cell`, `UnsafeCell`,
 `Arena`, atomic, or thread capture cannot hold one (E0413, E0414, E0802). A cast outside the
 built-in packages that reinterprets memory (another pointee, an int made a pointer, `*mut` from `&`
 or `*const`) makes every call of each fn type the two pointees hold reach its table. The built-in

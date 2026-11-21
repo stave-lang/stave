@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// Two impls with the same trait args overlap (E0903 at the impl); a call they both supply is
+// not reported again as ambiguous.
+trait TA {
+    fn m(&self) -> u32;
+}
+
+impl<T> TA for T {
+    fn m(&self) -> u32 {
+        return 1;
+    }
+}
+
+struct L { n: u32 }
+
+impl TA for L { //~ ERROR E0903
+    fn m(&self) -> u32 {
+        return 2;
+    }
+}
+
+fn main() -> i32 {
+    let l = L.{ n: 1 };
+    let k: u32 = l.m();
+    return 0;
+}

@@ -1,19 +1,24 @@
-// Recursion through an operator impl that calls its `rhs`.
+// Recursion through an operator impl that calls its `rhs` fn field.
 import std.core;
 import std.io;
+
+view struct H {
+    f: fn(),
+}
 
 fn leaf() {}
 
 fn again() {
-    let a: fn() = leaf;
-    let b: fn() = again;
-    let c = a + b; //~ ERROR E1402
+    let a = H.{ f: leaf };
+    let b = H.{ f: again };
+    let c = a + b;
 }
 
-impl core.Add for fn() {
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        rhs();
-        return leaf;
+        let k = rhs.f;
+        k(); //~ ERROR E1402
+        return H.{ f: leaf };
     }
 }
 

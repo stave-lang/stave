@@ -1,11 +1,17 @@
-// An operator call delivers no argument event: the impl's fn-typed params reach the whole table.
+// An operator call delivers no argument event: the impl's call of its `rhs` fn field reaches
+// every fn any `H` literal puts there.
 import std.core;
 import std.io;
 
-impl core.Add for fn() {
+view struct H {
+    f: fn(),
+}
+
+impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
-        rhs();
-        return nop;
+        let k = rhs.f;
+        k();
+        return H.{ f: nop };
     }
 }
 
@@ -16,8 +22,8 @@ fn noisy() {
 }
 
 fn quiet() without(io) { //~ ERROR E1401
-    let a: fn() = nop;
-    let b: fn() = noisy;
+    let a = H.{ f: nop };
+    let b = H.{ f: noisy };
     let g = a + b;
 }
 

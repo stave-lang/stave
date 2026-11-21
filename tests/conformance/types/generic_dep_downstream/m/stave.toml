@@ -1,0 +1,5 @@
+name = "m"
+kind = "lib"
+
+[dependencies]
+d = { path = "../d" }
