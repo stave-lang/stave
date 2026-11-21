@@ -26,10 +26,11 @@
 //
 // If a thread cannot be created (no memory for the mapping, the guard pages cannot be
 // protected, clone failing: EAGAIN) the program panics with "cannot create thread". Exception:
-// the IR interpreter has one thread and makes clone fail with ENOSYS (native kernels have
-// clone); there `start` keeps the record with the fn value queued (`queued` = 1) and the fn value
-// runs on the joining thread when `join` gets the handle (`scope_join`, std.thread's `join` and
-// `par_for`), oldest spawn first. So the body waits for nothing the joiner holds at the join,
+// the IR interpreter has one thread and makes clone fail with ENOSYS, and its image has no stack
+// table (`config.has_stack_table`; a native image always has one, so a native ENOSYS is the
+// failure above); there `start` keeps the record with the fn value queued (`queued` = 1) and the
+// fn value runs on the joining thread when `join` gets the handle (`scope_join`, std.thread's
+// `join` and `par_for`), oldest spawn first. So the body waits for nothing the joiner holds at the join,
 // which the join rule (E1406) checks. It runs as a task of its own there too: its error trace
 // starts empty and the caller's is restored after it (runtime.errtrace). A handle never joined
 // never runs its fn value on such a target: `start`'s obligation joins every handle, and a panic
@@ -126,11 +127,11 @@ fn start(f: fn()) -> usize {
     let tidp = unsafe("th is the record (above)") &mut (*th).tid as *mut u32;
     let r = unsafe("[base + guard, + size) is the fresh stack; tid and the block live in the record until join unmaps it; entry reads th") os.spawn_thread(base + guard, size, tidp, bp as usize, th as usize);
     if r < 0 {
-        if r != -os.ENOSYS {
+        if r != -os.ENOSYS || config.has_stack_table() {
             unsafe("the thread was not created: nothing else uses the mapping") { release(th); }
             cannot_create();
         }
-        // the IR interpreter (one thread): f runs at the join
+        // the IR interpreter (one thread, no stack table): f runs at the join
         unsafe("th is the record above; no thread uses it") { (*th).queued = 1; }
     }
     return th as usize;

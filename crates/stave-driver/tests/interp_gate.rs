@@ -16,7 +16,8 @@
 //!   pipeline failure, an interpreter error that is no report (step limit, an operation it does
 //!   not support), or a run whose exit status, stdout, or stderr differs from the program's
 //!   expectations (no `[run] stack` limit; thread ids in panic lines are not compared), or, in
-//!   `check`, a program listed in [`SLOW`]. Counted and listed with the reason, never passed
+//!   `check`, a program listed in [`SLOW`], or one listed in [`ONE_THREAD`] (it waits for a
+//!   spawned body before the join, which the interpreter runs only at the join). Counted and listed with the reason, never passed
 //!   silently.
 //! - **Open finding**: a report on a program without unsafe that is known and not fixed yet
 //!   ([`OPEN`]). Printed with the counts; an entry whose program no longer gives that report
@@ -52,6 +53,20 @@ const SLOW: &[(&str, &str)] = &[(
     "conformance/std/num_float_exp7.stv",
     "too slow for `check` under tracking: the 10^6-digit float parse takes 185 M steps",
 )];
+
+/// Programs whose spawning thread waits for its child before the join, with the reason: the
+/// interpreter runs a spawned body at the join (one thread), so they never end there. Listed as
+/// not runnable, never run.
+const ONE_THREAD: &[(&str, &str)] = &[
+    (
+        "conformance/std/one_thread_spin_scope.stv",
+        "spins until its `spawn` body acts: one thread runs the body only at the scope's join",
+    ),
+    (
+        "conformance/std/one_thread_spin_join.stv",
+        "`thread.join` arm `a` spins until arm `b` acts: one thread runs `b` only at the join",
+    ),
+];
 
 /// Reports on programs without unsafe that are known and not fixed yet: (program, class).
 const OPEN: &[(&str, &str)] = &[];
@@ -264,6 +279,9 @@ fn judge_run(c: &Case, lib: &Library, slow: bool) -> (Verdict, Duration, u64) {
     if let Some(s) = SLOW.iter().find(|s| !slow && s.0 == c.name) {
         return (Verdict::NotRunnable(s.1.to_string()), none, 0);
     }
+    if let Some(s) = ONE_THREAD.iter().find(|s| s.0 == c.name) {
+        return (Verdict::NotRunnable(s.1.to_string()), none, 0);
+    }
     let target = match &c.target {
         Ok(t) => *t,
         Err(why) => return (Verdict::NotRunnable(why.clone()), none, 0),
@@ -382,7 +400,7 @@ fn gate(slow: bool) {
             Verdict::Fail(why) => failed.push(format!("{}: {why}", c.name)),
         }
     }
-    for o in OPEN.iter().map(|o| o.0).chain(SLOW.iter().map(|s| s.0)) {
+    for o in OPEN.iter().map(|o| o.0).chain(SLOW.iter().map(|s| s.0)).chain(ONE_THREAD.iter().map(|s| s.0)) {
         assert!(cases.iter().any(|c| c.name == o), "{o} is listed, but it is not a program here");
     }
     let mut slow: Vec<(Duration, u64, &str)> =

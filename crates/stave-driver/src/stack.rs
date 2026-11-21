@@ -29,8 +29,8 @@
 //! function a call-graph [`EdgeKind::Spawn`] edge reaches (`spawn` bodies, the closures `std.thread`
 //! starts, every fn value `runtime.thread.start` can be given) gets a row keyed by its code
 //! address. The fn-value call of `runtime.thread.run_queued` is left out: it runs a queued value
-//! at a join only where no thread can be created (the IR interpreter, which reads no stack
-//! table). The table holds the bound plus [`MARGIN`] for bounded stacks and 0 (the `[run] stack`
+//! at a join only in an image without a stack table (the IR interpreter; a native image fails to
+//! create the thread instead, so a spawn body never runs on the joiner's bounded stack). The table holds the bound plus [`MARGIN`] for bounded stacks and 0 (the `[run] stack`
 //! default) for the others; the runtime rounds up to the page size. No error comes from the bound: frame sizes differ
 //! between debug and release.
 

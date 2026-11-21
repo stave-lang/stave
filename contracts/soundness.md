@@ -328,8 +328,9 @@ lowered module that no edge covers (the runtime helpers lowering inserts). A nod
 frame the backend reports for its functions. A fn-value call takes the call graph's targets. No
 bound for a node that calls C code, for one with a fn-value call but no such edge (or any fn-value
 call while some function made into a value has no node; the call in `runtime.thread.run_queued` is
-left out: it runs a queued spawn body at the join only where no thread can be created, the IR
-interpreter, which reads no stack table), or for one on or above a cycle. A node with a trap stub
+left out: it runs a queued spawn body at the join only in an image without a stack table, the IR
+interpreter; natively a failed thread creation panics, so no spawn body runs on the joiner's
+stack), or for one on or above a cycle. A node with a trap stub
 adds twice the depth of `runtime.panic.trap`, which holds while nothing `runtime.panic.begin`
 reaches has a trap stub (checked; else no bound). Main's stack and each thread start function's get
 the bound plus 4 KiB, rounded up to the page, above a 64 KiB `PROT_NONE` guard; an unbounded stack

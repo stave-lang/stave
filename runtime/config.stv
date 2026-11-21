@@ -34,6 +34,11 @@ fn default_stack(t: usize) -> usize {
     return d as usize;
 }
 
+// Whether the image has a stack table (every native image; not the IR interpreter's).
+pub fn has_stack_table() -> bool {
+    return unsafe("intrinsic: address of the compiler-emitted stack table") stack_table() != 0;
+}
+
 // Stack bytes of main (before rounding up to the page size).
 pub fn main_stack() -> usize {
     let t = unsafe("intrinsic: address of the compiler-emitted stack table") stack_table();
