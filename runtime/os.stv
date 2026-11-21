@@ -259,16 +259,16 @@ fn spawn_thread(stack: usize, size: usize, tid: *mut u32, tls: usize, arg: usize
     let t = tid as usize;
     let args: [u64; 8] = [CLONE_THREAD_FLAGS, 0, t as u64, t as u64, 0, stack as u64, size as u64, tls as u64];
     let ap = &args as *const [u64; 8] as usize;
-    let r = unsafe("args is a clone_args (VER0, 64 bytes) for a fresh stack (caller)") sys.clone3_thread(ap, CLONE_ARGS_SIZE, arg);
+    let r = unsafe("args is the local clone_args (VER0, 64 bytes) that lives through the call, naming the fresh stack [stack, stack + size) of this fn's obligation; arg is the record entry expects") sys.clone3_thread(ap, CLONE_ARGS_SIZE, arg);
     if r != -ENOSYS { return r; }
-    return unsafe("the same thread with clone (caller)") sys.clone_thread(CLONE_THREAD_FLAGS as usize, stack + size, t, t, tls, arg);
+    return unsafe("stack + size is the 16-byte aligned top of the fresh stack, t the tid word for ptid and ctid, tls the block, all of this fn's obligation") sys.clone_thread(CLONE_THREAD_FLAGS as usize, stack + size, t, t, tls, arg);
 }
 
 // Points the calling thread's thread pointer at p (runtime.state Block): x86-64 `arch_prctl`,
 // AArch64 `msr tpidr_el0`. Returns 0 or -errno.
 pub unsafe("p is a runtime.state Block of this thread that outlives it")
 fn set_thread_pointer(p: usize) -> isize {
-    return unsafe("caller obligation") sys.set_thread_pointer(p);
+    return unsafe("p is a runtime.state Block of this thread that outlives it (this fn's obligation), which is what the thread pointer must address") sys.set_thread_pointer(p);
 }
 
 pub fn sched_yield() -> isize {
