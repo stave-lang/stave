@@ -126,16 +126,50 @@ pub fn layout_of<I: Interner + ?Sized>(cx: &mut I, sigs: &Sigs, t: TypeId, depth
 }
 
 fn struct_layout(fields: &[(u64, u64)], start: u64) -> Option<(u64, u64)> {
+    struct_offsets(fields, start).map(|(_, size, align)| (size, align))
+}
+
+/// C-like record from `start`: each field's offset, and the record's `(size, align)`.
+fn struct_offsets(fields: &[(u64, u64)], start: u64) -> Option<(Vec<u64>, u64, u64)> {
     let mut off = start;
     let mut align = 1u64;
+    let mut offs = Vec::with_capacity(fields.len());
     for &(s, a) in fields {
         let a = a.max(1);
         off = off.checked_add(a - 1)? / a * a;
+        offs.push(off);
         off = off.checked_add(s)?;
         align = align.max(a);
     }
     let size = off.checked_add(align - 1)? / align * align;
-    Some((size, align))
+    Some((offs, size, align))
+}
+
+/// The field offsets of a concrete struct, enum (per variant, after the `u32` tag), or tuple, by
+/// the rules of [`adt_layout`]; `None` for other types and types without a layout.
+pub fn field_offsets<I: Interner + ?Sized>(cx: &mut I, sigs: &Sigs, t: TypeId) -> Option<Vec<Vec<u64>>> {
+    let (variants, start) = match cx.kind(t).clone() {
+        TypeKind::Adt { def, args } => {
+            let adt = sigs.adt(def)?;
+            let fs: Vec<Vec<TypeId>> = adt
+                .variants
+                .iter()
+                .map(|v| v.fields.iter().map(|f| cx.subst(f.ty, &args, None)).collect())
+                .collect();
+            (fs, if adt.is_enum { 4 } else { 0 })
+        }
+        TypeKind::Tuple(ts) => (vec![ts.to_vec()], 0),
+        _ => return None,
+    };
+    let mut out = Vec::with_capacity(variants.len());
+    for v in variants {
+        let mut ls = Vec::with_capacity(v.len());
+        for f in v {
+            ls.push(layout_of(cx, sigs, f, 1)?);
+        }
+        out.push(struct_offsets(&ls, start)?.0);
+    }
+    Some(out)
 }
 
 /// ADT layout: a struct is C-like; an enum has a `u32` tag at 0, then each variant's fields from
