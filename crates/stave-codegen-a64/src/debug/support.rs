@@ -282,21 +282,37 @@ pub fn prepare(b: &mut ImageBuilder, m: &Module, main: Option<FuncId>) -> Result
     let strings = b.rodata(SYM_STRINGS, DataObj::new(blob, 1))?;
     // Statics.
     let layouts = Layouts::compute(&m.types);
+    // every symbol first: an address word may name a later static
     let mut statics = Vec::with_capacity(m.statics.len());
-    for (i, st) in m.statics.iter().enumerate() {
-        let l = layouts.get_layout(st.ty).map_err(|e| unsupported(format!("static {}: {e}", st.path)))?;
+    for i in 0..m.statics.len() {
         let name = stave_ir::link::static_symbol(m, i, |p| b.lookup(p).is_some());
+        statics.push(b.declare(&name));
+    }
+    for (st, &id) in m.statics.iter().zip(&statics) {
+        let l = layouts.get_layout(st.ty).map_err(|e| unsupported(format!("static {}: {e}", st.path)))?;
         let size = usize::try_from(l.size).map_err(|_| unsupported("static size"))?;
         let align = u32::try_from(l.align.max(1)).map_err(|_| unsupported("static alignment"))?;
         // At least one byte (contracts/checked-ir.md): distinct statics have distinct addresses.
-        let id = if st.init.iter().all(|&x| x == 0) {
-            b.bss(&name, l.size.max(1), align)?
-        } else {
-            let mut bytes = st.init.clone();
-            bytes.resize(size.max(1), 0);
-            b.data(&name, DataObj::new(bytes, align))?
-        };
-        statics.push(id);
+        if st.refs.is_empty() && st.init.iter().all(|&x| x == 0) {
+            b.define_bss(id, l.size.max(1), align)?;
+            continue;
+        }
+        let mut bytes = st.init.clone();
+        bytes.resize(size.max(1), 0);
+        let mut obj = DataObj::new(bytes, align);
+        // each address word is an `Abs64` relocation the linker resolves
+        for r in &st.refs {
+            let (sym, base) = match r.target {
+                stave_ir::DataTarget::Str(s) => (Some(strings), str_off.get(s.index()).copied()),
+                stave_ir::DataTarget::Static(k) => (statics.get(k as usize).copied(), Some(0)),
+            };
+            let (Some(sym), Some(base)) = (sym, base) else {
+                return Err(unsupported("static address word target"));
+            };
+            let addend = i64::from(base) + i64::from(r.addend);
+            obj.relocs.push(Reloc { offset: r.offset, kind: RelocKind::Abs64, sym, addend });
+        }
+        b.define_data(id, obj)?;
     }
     // Lines and the site table.
     let mut lines = Vec::with_capacity(m.sites.len());

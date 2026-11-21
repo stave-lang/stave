@@ -1,0 +1,24 @@
+//~ CHECK-ONLY
+// E0413: the one reference a `static` or `const` may have is a whole `&str` from a string
+// literal or a `&str` const. A string inside an array, tuple, `Option`, or view struct, a slice,
+// a reference to another static, and a fn value are errors at check, before any build.
+view struct Named { name: &str, n: u32 }
+
+fn one() -> u32 { return 1; }
+
+static BYTES: [u8; 3] = [1, 2, 3];
+static VALUE: u32 = 1;
+
+static NAMES: [&str; 3] = ["a", "bb", "ccc"]; //~ ERROR E0413
+static GRID: [[&str; 2]; 2] = [["a", "b"], ["c", "d"]]; //~ ERROR E0413
+static PAIR: (u32, &str) = (1, "a"); //~ ERROR E0413
+static MAYBE: Option<&str> = Option.Some("a"); //~ ERROR E0413
+static NAMED: Named = Named.{ name: "x", n: 1 }; //~ ERROR E0413
+static SLICE: &[u8] = &BYTES; //~ ERROR E0413
+static PTR: &u32 = &VALUE; //~ ERROR E0413
+static FUNC: fn() -> u32 = one; //~ ERROR E0413
+const LIST: [&str; 2] = ["a", "b"]; //~ ERROR E0413
+
+fn main() -> i32 {
+    return 0;
+}

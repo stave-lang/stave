@@ -26,7 +26,7 @@ fn order_and_names() {
     assert_eq!(names[undefined.index()], None);
     assert!(is_reserved("__stave_fmod") && is_reserved("_start") && !is_reserved("start"));
     for (path, init) in [("a.X", vec![1]), ("", vec![0]), ("a.f", vec![0]), ("__stave_strings", vec![0])] {
-        m.statics.push(Static { path: path.into(), ty: u8t, init });
+        m.statics.push(Static { path: path.into(), ty: u8t, init, refs: Vec::new() });
     }
     let taken = |p: &str| p == "a.f";
     let s: Vec<String> = (0..4).map(|i| static_symbol(&m, i, taken)).collect();
