@@ -285,6 +285,9 @@ pub struct Body {
     pub joins: Vec<(LocalId, Span)>,
     /// Why this body cannot be checked (nothing is reported for it).
     pub unsupported: Option<&'static str>,
+    /// A disagreement with stave-sema the builder found (a compiler bug): the body is not
+    /// checked, and the run fails as an internal error.
+    pub internal: Option<&'static str>,
 }
 
 impl Body {
@@ -415,6 +418,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             nested: Vec::new(),
             joins: Vec::new(),
             unsupported: None,
+            internal: None,
         };
         Builder {
             icx,
@@ -1861,8 +1865,8 @@ impl<'a, 'b> Builder<'a, 'b> {
                 out.push((ol, true));
             }
         }
-        if let Some(why) = disagree {
-            self.unsupported(why);
+        if let Some(why) = disagree.or(inner.internal) {
+            self.body.internal.get_or_insert(why);
         }
         if inner.unsupported.is_some() {
             self.unsupported("nested body");
