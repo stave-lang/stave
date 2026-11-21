@@ -1591,17 +1591,10 @@ impl<'a, 'b> Builder<'a, 'b> {
                     let r = self.op_of_place(h, span, u32::MAX, false);
                     self.push(StmtKind::Read(r), span, u32::MAX);
                 }
-                // a guard binding is a view of the scrutinee, which the arm then takes or the
-                // next arm tests: its value ends with the guard, and no borrow of it (a call in
-                // the guard may store one into a view) is used later
-                let span = self.span(g);
+                // the guard's view of the bindings ends with it; the arm binds them again. A
+                // guard only reads (E0505), so nothing it made can hold a borrow of them
                 for b in self.guard_binds.split_off(gmark) {
-                    if let Some(l) = self.by_node.remove(&b)
-                        && self.open()
-                    {
-                        let node = self.body.locals[l as usize].node;
-                        self.push(StmtKind::StorageDead(l), span, node);
-                    }
+                    self.by_node.remove(&b);
                 }
                 let ok = self.new_block();
                 let mut next: Vec<BlockId> = vec![ok];

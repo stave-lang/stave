@@ -2359,7 +2359,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0505",
         severity: Severity::Error,
         area: "borrow",
-        rule: "a match guard only reads: inside the guard expression, and inside the blocks and closures written in it, no by-value use of a non-Copy value (a call may take arguments by copy or `&` only), no assignment, no `&mut` borrow (also of a receiver), no `?`",
+        rule: "in a match guard, and in a closure written in it: no by-value use of a non-Copy value (a call may take arguments by copy or `&` only), no assignment, no `&mut` borrow (also of a receiver), no `?`; changes through `&` (cells, atomics, locks) and calls of fn values made outside are not covered",
         retired: false,
         located: true,
         holes: &[
@@ -2373,7 +2373,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "moved in the guard" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}`, or pass `&{place}`",
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms), or pass `&{place}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2385,7 +2385,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "assigned in the guard" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}`",
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2397,7 +2397,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "moved in the guard" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}`, or pass `&{place}`",
+                    description: "test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms), or pass `&{place}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2409,7 +2409,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "mutable borrow in the guard" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "pass `&{place}`, or test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}`",
+                    description: "pass `&{place}`, or test in the arm instead: `P => {{ if cond {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2421,7 +2421,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "`?` in the guard" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "evaluate the fallible value before the `match`, or test in the arm: `P => {{ if cond? {{ .. }} else {{ .. }} }}`",
+                    description: "evaluate the fallible value before the `match`, or test in the arm: `P => {{ if cond? {{ .. }} else {{ .. }} }}` (the `else` branch replaces the later arms)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
