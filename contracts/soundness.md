@@ -153,3 +153,25 @@ in the signature that the callee keeps the source pointer whole and stores nothi
 `q` at all. A promise about values that hold the origin of `q` is not enough either: once the
 pointer is in a view, an exchange returns it by value with the origin of that view's content,
 the one `from copy` names, and a rule that follows the origin of `q` no longer sees it.
+
+## Operands: a move is checked where it is evaluated
+
+**Claim.** In an accepted program no operand of an expression reads, borrows, or moves a place
+that an earlier by-value operand of the same expression moved.
+
+**Assumptions.** The lowering evaluates the operands of a call (the receiver first), a literal,
+an operator, `select`, and `p op= e` left to right, each to a value, and a nested call or borrow
+of an operand before the operands after it. A by-value operand that is not Copy ends the bytes
+of its place when it is evaluated (M9, M15).
+
+**Argument.** The borrow CFG makes the move of every by-value operand that has operands after
+it a statement of its own, at the operand's position, into a temporary the expression consumes
+at its end. The statements of the later operands (nested calls, borrows, closure captures,
+reads) and the expression's own statement come after it in the CFG, so each is checked against
+a state in which the place is moved: a use of it or of a part of it is E0502, as for a use in a
+later statement. Within one statement the operands are checked in order against the moves of
+the ones before them, so two operands of one rvalue never share a moved place either.
+
+**What would break it.** An expression kind whose operands the builder takes without this step;
+a lowering that evaluates operands in another order than the CFG; a Copy operand treated as a
+move (it reads its bytes where it stands and leaves them).

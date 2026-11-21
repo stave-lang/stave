@@ -911,7 +911,7 @@ fix = { description = "end the borrow before this point: move the later use befo
 code = "E0502"
 severity = "error"
 area = "borrow"
-rule = "use after move"
+rule = "use after move, also by a later operand of the expression whose by-value operand moved the place (operands are evaluated left to right, the receiver first)"
 holes = { place = "place" }
 message = "use of moved value `{place}`"
 labels = [{ at = "primary", text = "used here after the move" }, { at = "move", text = "`{place}` moved here" }]

@@ -2205,7 +2205,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0502",
         severity: Severity::Error,
         area: "borrow",
-        rule: "use after move",
+        rule: "use after move, also by a later operand of the expression whose by-value operand moved the place (operands are evaluated left to right, the receiver first)",
         retired: false,
         located: true,
         holes: &[

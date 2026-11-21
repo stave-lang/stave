@@ -416,7 +416,17 @@ impl Cx<'_, '_> {
                             });
                         }
                     }
-                    _ => for_each_op(rv, |o| self.operand(st, live, at, o)),
+                    _ => {
+                        // operands are evaluated left to right: each sees the moves of the ones
+                        // before it
+                        let mut moved: Option<State> = None;
+                        for_each_op(rv, |o| {
+                            self.operand(moved.as_ref().unwrap_or(st), live, at, o);
+                            if o.kind == OpKind::Move {
+                                moved.get_or_insert_with(|| st.clone()).moved.insert(o.site as usize);
+                            }
+                        });
+                    }
                 }
                 // A temporary has one slot, written by every evaluation of its expression: the
                 // value of the evaluation before ends here, and a loan of it still live after

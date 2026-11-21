@@ -71,6 +71,23 @@ reference for what a program may write and what it means.
   a parking fn, nor a denied `park` (E1401), has anything to check or a negative conformance
   test.
 
+## §3 Operand order and moves
+
+Every expression with several operands evaluates them left to right, each to a value, before it
+acts: a call (direct, method, through a fn value or closure: the fn value, then the receiver,
+then the arguments), a struct, tuple, array, or variant literal (fields in source order), a
+binary operator (left, then right), `c.select(a, b)`, and `p op= e` (the value of `p`, then
+`e`, then the write). A by-value operand whose type is not Copy is moved when it is evaluated,
+so every later operand sees the place moved: using it again, a part of it (`s.n`, Copy or not),
+or borrowing it there is E0502, also inside a nested call, a closure literal, or an f-string
+hole. A Copy operand is read where it stands and does not block the later ones (`f(s.n, s)` is
+fine). The fix names the value first: `let n = s.n; f(s, n);`.
+
+`p op= e` with a non-Copy `p` (a user operator) moves the value out of `p` until the write puts
+the result back, so `e` may not use `p`; when `p` is behind a reference, an index, or a capture
+(no move out of it is possible), `e` may read `p` but not write, move, or `&mut` borrow it
+(E0501). An assignment `p = e` evaluates `e` first: `s = make(s, s.d)` is E0502 at `s.d`.
+
 ## §3 Storing calls: a view left borrowed
 
 A storing call (a call of a fn whose `&mut` view param has a `from` clause) for a view it reaches
