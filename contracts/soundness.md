@@ -176,26 +176,28 @@ the ones before them, so two operands of one rvalue never share a moved place ei
 a lowering that evaluates operands in another order than the CFG; a Copy operand treated as a
 move (it reads its bytes where it stands and leaves them).
 
-## Places that are never moved from: parts of a `Drop` value
+## Whole moves: no value is left with a moved-out part
 
-**Claim.** In an accepted program no destructor (`impl Drop`) runs on a value a part of which
-was moved out.
+**Claim.** In an accepted program a place is either wholly initialized or wholly moved-out:
+no drop, destructor, read, or later move sees a value with a moved-out part.
 
-**Assumptions.** A value whose type has an `impl Drop` is dropped whole: its `drop` gets
-`&mut self` and may read every part, and drop glue then drops every field. Every by-value use
-of a non-Copy place goes through one CFG builder step (`op_of_place`): a field path, a pattern
-binding (`let`, `match`, struct and variant payloads, tuples), a by-value receiver, an operand.
+**Assumptions.** Every by-value use of a non-Copy place is built by one CFG builder step
+(`move_out`, through `op_of_place` for operands and receivers and `bind_name` for pattern
+bindings of `let`, `match`, and `for`). A pattern that binds a non-Copy part by value reads its
+parts into the bindings and then moves its source as one value; the lowering drops the parts it
+does not bind at that point (contracts/lang-details.md "Whole moves").
 
-**Argument.** That step walks the projections of the moved place from its root and rejects
-the move (E0504 case `drop`) when a proper prefix has a type with an `impl Drop`. A move of the
-whole value is allowed: the destructor then runs once, on the new owner. Closures capture by
-reference, so a move inside one is E0504 already; an index or a dereference is E0504 already.
-So the only values left with a moved-out part are values without a destructor of their own,
-whose remaining fields are dropped one by one.
+**Argument.** Outside a pattern, a by-value use of a place with a field, tuple, or payload
+projection is E0504 case `part`; a projection through a reference, an index, a capture, or a
+static is E0504 already. Inside a pattern the bindings read parts and the source moves whole,
+and the source itself must be a whole value by the same step. A value whose type has an
+`impl Drop` is not taken apart at all (case `drop`): its destructor gets every part. So every
+move operand names a whole local or temporary, the checker's move state is one bit per local,
+and a write of a part of a moved local is E0502. What is moved-out is always a whole value, and
+a whole value is dropped or read only when it is initialized.
 
-**What would break it.** A move path that builds a by-value operand without that step; a drop
-glue that runs a destructor on a value whose part was taken by `p.read()` (unsafe: its
-obligation).
+**What would break it.** A by-value use built without `move_out`; a pattern whose ignored parts
+the lowering keeps in the place; `p.read()` of a part (unsafe: its obligation).
 
 ## Places that are never moved from: statics
 

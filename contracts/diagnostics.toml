@@ -946,7 +946,7 @@ fix = { description = "give `{place}` a type with interior mutability (`atomic.U
 code = "E0504"
 severity = "error"
 area = "borrow"
-rule = "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it"
+rule = "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it; case `part`: a non-Copy part (field, tuple element, payload) of a local or a temporary taken by value outside a pattern that takes the whole value apart"
 holes = { place = "place", owner = "place" }
 message = "cannot move `{place}` out of a borrow or an index: its type is not `Copy`"
 labels = [{ at = "primary", text = "moved here" }]
@@ -961,6 +961,11 @@ fix = { description = "use `&{place}` inside the closure, or take the value out 
 message = "cannot move `{place}` out of `{owner}`: the type of `{owner}` implements `Drop`"
 labels = [{ at = "primary", text = "moved here" }]
 fix = { description = "borrow it instead (`&{place}`), or take it out and leave another value in its place with `mem.replace(&mut {place}, other)` (`import std.mem;`): the destructor of `{owner}` runs on every part" }
+
+[diag.cases.part]
+message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"
+labels = [{ at = "primary", text = "a part moved here" }]
+fix = { description = "take the whole value apart with a pattern (`let S.{{ f, g }} = {owner};`, every part bound or `_`), or take the part and leave a value in its place: `mem.replace(&mut {place}, other)` (`import std.mem;`)" }
 
 [diag.cases.static]
 message = "cannot move `{place}` out of a `static`: its type is not `Copy`"

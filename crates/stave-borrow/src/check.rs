@@ -162,6 +162,19 @@ pub fn stmt_uses(s: &Stmt, mut f: impl FnMut(LocalId, Span)) {
     }
 }
 
+/// The move operands of a statement.
+fn stmt_moves(s: &Stmt, mut f: impl FnMut(&Operand)) {
+    match &s.kind {
+        StmtKind::Assign { rv, .. } => for_each_op(rv, |o| {
+            if o.kind == OpKind::Move {
+                f(o)
+            }
+        }),
+        StmtKind::Read(o) | StmtKind::Return(o) if o.kind == OpKind::Move => f(o),
+        _ => {}
+    }
+}
+
 /// The local a statement redefines entirely.
 pub fn stmt_def(s: &Stmt) -> Option<LocalId> {
     match &s.kind {
@@ -311,6 +324,9 @@ struct Cx<'f, 'b> {
     findings: Vec<Finding>,
     dump: Vec<DumpAccess>,
     want_dump: bool,
+    /// The moves the statement being checked has made so far (local, site): earlier operands of
+    /// its rvalue, and the whole rvalue before its write.
+    pending: Vec<(LocalId, u32)>,
 }
 
 impl Cx<'_, '_> {
@@ -354,31 +370,65 @@ impl Cx<'_, '_> {
                 loans,
             });
         }
-        // use after move (implicit drops of moved values are no-ops); a write re-initializes the
-        // place it names, but a write strictly inside a moved place uses it (and would drop a
-        // part the move took)
-        if !matches!(kind, Access::Drop | Access::StorageDead) && !st.moved.is_empty() {
-            let mut best: Option<(u32, u32)> = None;
-            for s in st.moved.iter() {
-                let Some((m, ms)) = self.flow.body.move_sites.get(s) else { continue };
-                let overlap = m.local == place.local
-                    && if kind == Access::Write {
-                        place.proj.len() > m.proj.len() && place.proj.starts_with(&m.proj)
-                    } else {
-                        m.proj.starts_with(&place.proj) || place.proj.starts_with(&m.proj)
-                    };
-                if overlap && best.is_none_or(|(o, _)| ms.offset < o) {
-                    best = Some((ms.offset, s as u32));
-                }
-            }
-            if let Some((_, site)) = best {
-                verdict.get_or_insert("E0502");
-                self.findings.push(Finding::Moved { site, place: place.clone(), span });
-            }
+        // use after move (implicit drops of moved values are no-ops); a write of the whole local
+        // initializes it again, a write of a part of it uses it
+        if !matches!(kind, Access::Drop | Access::StorageDead)
+            && st.moved.contains(place.local as usize)
+            && !(kind == Access::Write && place.proj.is_empty())
+            && let Some(site) = self.move_site(at, place.local)
+        {
+            verdict.get_or_insert("E0502");
+            self.findings.push(Finding::Moved { site, place: place.clone(), span });
         }
         if self.want_dump && node != u32::MAX {
             self.dump.push(DumpAccess { node, kind: kind.dump_name(), verdict, loan: reported });
         }
+    }
+
+    /// The move of local `l` a use at statement `at` sees: one made earlier in the statement, else
+    /// the one with the smallest offset among the moves that reach `at` without a whole write of
+    /// `l` between (blocks walked backward).
+    fn move_site(&self, at: (u32, u32), l: LocalId) -> Option<u32> {
+        if let Some(&(_, s)) = self.pending.iter().find(|p| p.0 == l) {
+            return Some(s);
+        }
+        let body = self.flow.body;
+        let mut seen = vec![false; body.blocks.len()];
+        let mut work = vec![(at.0, at.1 as usize)];
+        let mut best: Option<u32> = None;
+        while let Some((b, end)) = work.pop() {
+            let stmts = &body.blocks[b as usize].stmts;
+            let mut reached_start = true;
+            for s in stmts[..end.min(stmts.len())].iter().rev() {
+                if stmt_def(s) == Some(l) && !matches!(s.kind, StmtKind::StorageDead(_)) {
+                    reached_start = false;
+                    break;
+                }
+                let mut site = None;
+                stmt_moves(s, |o| {
+                    if o.place.local == l {
+                        site = Some(o.site);
+                    }
+                });
+                if let Some(site) = site {
+                    let off = body.move_sites.get(site as usize).map_or(u32::MAX, |m| m.1.offset);
+                    if best.is_none_or(|x| off < body.move_sites[x as usize].1.offset) {
+                        best = Some(site);
+                    }
+                    reached_start = false;
+                    break;
+                }
+            }
+            if reached_start {
+                for &p in &self.flow.preds[b as usize] {
+                    if !seen[p as usize] {
+                        seen[p as usize] = true;
+                        work.push((p, body.blocks[p as usize].stmts.len()));
+                    }
+                }
+            }
+        }
+        best
     }
 
     fn operand(&mut self, st: &State, live: &Bits, at: (u32, u32), o: &Operand) {
@@ -427,7 +477,8 @@ impl Cx<'_, '_> {
                         for_each_op(rv, |o| {
                             self.operand(moved.as_ref().unwrap_or(st), live, at, o);
                             if o.kind == OpKind::Move {
-                                moved.get_or_insert_with(|| st.clone()).moved.insert(o.site as usize);
+                                moved.get_or_insert_with(|| st.clone()).moved.insert(o.place.local as usize);
+                                self.pending.push((o.place.local, o.site));
                             }
                         });
                     }
@@ -445,16 +496,17 @@ impl Cx<'_, '_> {
                     let mut moves = Vec::new();
                     for_each_op(rv, |o| {
                         if o.kind == OpKind::Move {
-                            moves.push(o.site as usize);
+                            moves.push((o.place.local, o.site));
                         }
                     });
                     if moves.is_empty() {
                         self.access(st, after, at, Access::Write, dest, s.span, s.node, &[]);
                     } else {
                         let mut st2 = st.clone();
-                        for m in moves {
-                            st2.moved.insert(m);
+                        for &(l, _) in &moves {
+                            st2.moved.insert(l as usize);
                         }
+                        self.pending.extend(moves);
                         self.access(&st2, after, at, Access::Write, dest, s.span, s.node, &[]);
                     }
                     if let Err((shared, blame)) = mutability(body, dest) {
@@ -600,7 +652,8 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
     }
     let lo = live_out(flow);
     let rewritten = rewritten_temps(body);
-    let mut cx = Cx { flow, rewritten, findings: Vec::new(), dump: Vec::new(), want_dump };
+    let mut cx =
+        Cx { flow, rewritten, findings: Vec::new(), dump: Vec::new(), want_dump, pending: Vec::new() };
     for b in 0..body.blocks.len() {
         let Some(mut st) = cx.flow.entry[b].clone() else { continue };
         let la = live_after(cx.flow, b, &lo[b]);
@@ -613,6 +666,7 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
             let mut post = st.clone();
             cx.flow.apply(&s.kind, &mut post);
             let after = cx.flow.live_loans(&post, &la[i]);
+            cx.pending.clear();
             cx.stmt(&st, &live, &after, (b as u32, i as u32), s);
             st = post;
         }

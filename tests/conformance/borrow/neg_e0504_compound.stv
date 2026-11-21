@@ -2,8 +2,8 @@
 // `p op= e` is `p = p op e`: with a user operator on a non-Copy type the left operand is a
 // by-value use of `p`, evaluated before `e`. Out of a place that cannot be moved from (behind
 // a reference, an index, a capture, a part of a `Drop` value) it is E0504, as the spelled-out
-// form; on a local or a field of one it is a move that the write re-initializes, and `e` may
-// not use `p` (E0502).
+// form, and so is a part of a local (a value moves whole); on a local it is a move that the
+// write re-initializes, and `e` may not use `p` (E0502).
 import std.vec;
 
 struct D { pub id: u32 }
@@ -61,10 +61,9 @@ fn ok_local(d: D) -> u32 {
     return x.id;
 }
 
-fn ok_field(p: P) -> u32 {
+fn field(p: P) {
     let mut q = p;
-    q.d += mk(3);
-    return q.d.id + q.n;
+    q.d += mk(3); //~ ERROR E0504
 }
 
 fn main() -> i32 {

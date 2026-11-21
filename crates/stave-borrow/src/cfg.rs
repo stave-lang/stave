@@ -287,6 +287,9 @@ pub enum MoveOut {
     Drop(Place),
     /// An immutable `static` or a part of it.
     Static,
+    /// A part of this place (a local or a temporary): a non-Copy value is moved whole, or taken
+    /// apart whole by a pattern.
+    Part(Place),
 }
 
 #[derive(Clone, Debug)]
@@ -390,6 +393,9 @@ pub struct Builder<'a, 'b> {
     guard_binds: Vec<u32>,
     /// Inside a match guard (or a closure written in one): the guard only reads.
     in_guard: u32,
+    /// The pattern being bound by [`Builder::destructure`]: the projection length of its source
+    /// and how many non-Copy parts it took by value.
+    destr: Option<(usize, u32)>,
     /// The scrutinees of the guards being built in this body (a `&mut` of one is E0501 already).
     guard_scruts: Vec<Place>,
     /// The temporary holding the array a `for` loop iterates by value: its elements are moved
@@ -462,6 +468,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             joins: Vec::new(),
             guard_binds: Vec::new(),
             in_guard: 0,
+            destr: None,
             guard_scruts: Vec::new(),
             owned_elems: None,
             olds: FxHashMap::default(),
@@ -729,7 +736,7 @@ impl<'a, 'b> Builder<'a, 'b> {
 
     fn op_of_place(&mut self, p: Place, span: Span, n: u32, consume: bool) -> Operand {
         let by_value = consume && !self.tys.is_copy(p.ty);
-        let why = if by_value { self.move_out(&p) } else { None };
+        let why = if by_value { self.move_out(&p, false) } else { None };
         // a `for` binding takes a fresh element of the owned array on every iteration
         let fresh_elem = self.owned_elem(&p);
         let movable = by_value && why.is_none() && !fresh_elem;
@@ -757,12 +764,14 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
     }
 
-    /// Why a by-value use of the non-Copy place `p` is E0504 (`None`: it may move). Every way to
-    /// take a value apart ends here, through [`Self::op_of_place`]: a by-value operand or
-    /// receiver, and a binding by value of a `let`, `match` (every alternative, nested
-    /// sub-patterns), or `for` pattern (over a range, an owned array, an iterator). Params of fns
-    /// and closures are names, `_` takes nothing, and patterns have no rest part.
-    fn move_out(&mut self, p: &Place) -> Option<MoveOut> {
+    /// Why a by-value use of the non-Copy place `p` is E0504 (`None`: it may move). Every by-value
+    /// use ends here: an operand or receiver through [`Self::op_of_place`], and a binding of a
+    /// `let`, `match` (every alternative, nested sub-patterns), or `for` pattern (over a range, an
+    /// owned array, an iterator) through [`Self::bind_name`] (`part`: a binding inside a pattern
+    /// that takes its value apart, [`Self::destructure`]). Params of fns and closures are names.
+    /// Only a whole value moves: a part of a place is E0504 unless a pattern takes the whole
+    /// value apart, and not even then when the value has a destructor.
+    fn move_out(&mut self, p: &Place, part: bool) -> Option<MoveOut> {
         let l = self.body.locals.get(p.local as usize)?;
         let (capture, guard, stat) = (l.capture, l.guard, l.static_root);
         let from = usize::from(self.owned_elem(p));
@@ -774,8 +783,12 @@ impl<'a, 'b> Builder<'a, 'b> {
             Some(MoveOut::Capture(c))
         } else if behind || guard {
             Some(MoveOut::Behind)
+        } else if let Some(o) = self.drop_owner(p, from) {
+            Some(MoveOut::Drop(o))
+        } else if !part && p.proj.len() > from {
+            Some(MoveOut::Part(Place { local: p.local, proj: p.proj[..from].to_vec(), ty: TypeId::NONE }))
         } else {
-            self.drop_owner(p, from).map(MoveOut::Drop)
+            None
         }
     }
 
@@ -1146,7 +1159,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             return; // `let _ = e;` moves nothing; a temporary is dropped at the end of the statement
         }
         let Some(p) = self.place_of(v, init) else { return };
-        self.bind_pattern(pat, p, Mode::Move, init);
+        self.destructure(pat, p, Mode::Move, init);
     }
 
     fn expr_stmt(&mut self, es: u32) {
@@ -1415,7 +1428,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let op = self.const_op(iter);
                 let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
                 if let V::P(p) = self.put_temp(Rvalue::Use(op), bt, iter) {
-                    self.bind_pattern(pat, p, Mode::Move, iter);
+                    self.destructure(pat, p, Mode::Move, iter);
                 }
             }
             (Src::Elems(_, dk), Some(ep)) => {
@@ -1425,7 +1438,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                     let span = self.span(iter);
                     let (rv, _) = self.borrow(ep, m, false, span, iter);
                     if let V::P(p) = rv {
-                        self.bind_pattern(pat, p, Mode::Move, iter);
+                        self.destructure(pat, p, Mode::Move, iter);
                     }
                 } else if bind_ty.is_some() {
                     // a chunk by value: read the elements, bind a fresh vector
@@ -1435,16 +1448,27 @@ impl<'a, 'b> Builder<'a, 'b> {
                     let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
                     let op = self.const_op(iter);
                     if let V::P(p) = self.put_temp(Rvalue::Use(op), bt, iter) {
-                        self.bind_pattern(pat, p, Mode::Move, iter);
+                        self.destructure(pat, p, Mode::Move, iter);
                     }
                 } else {
                     // by value over an owned array (the loop's temporary)
                     let saved = self.owned_elems.replace(ep.local);
-                    self.bind_pattern(pat, ep, Mode::Move, iter);
+                    self.destructure(pat, ep, Mode::Move, iter);
                     self.owned_elems = saved;
                 }
             }
-            (Src::Iter(..), Some(ip)) => self.bind_pattern(pat, ip, Mode::Move, iter),
+            (Src::Iter(..), Some(ip)) => {
+                // the item `next` returned is a value of its own, taken out of its `Option`
+                let it = self.temp(ip.ty, iter);
+                let span = self.span(iter);
+                let op = Operand { kind: OpKind::Copy, place: ip.clone(), span, node: iter, site: u32::MAX };
+                self.push(
+                    StmtKind::Assign { dest: Place::local(it, ip.ty), rv: Rvalue::Use(op), init: true },
+                    span,
+                    iter,
+                );
+                self.destructure(pat, Place::local(it, ip.ty), Mode::Move, iter);
+            }
             _ => {}
         }
         self.block(body);
@@ -1653,7 +1677,7 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// branch to one block per alternative: each binds the arm's locals, then they meet again.
     fn bind_alts(&mut self, alts: &[u32], src: &Place, mode: Mode, n: u32) {
         if let [p] = alts {
-            self.bind_pattern(*p, src.clone(), mode, n);
+            self.destructure(*p, src.clone(), mode, n);
             return;
         }
         if !self.open() {
@@ -1664,10 +1688,34 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.terminate(Terminator::Branch(blocks.clone()));
         for (&p, &b) in alts.iter().zip(&blocks) {
             self.switch_to(b);
-            self.bind_pattern(p, src.clone(), mode, n);
+            self.destructure(p, src.clone(), mode, n);
             self.goto(meet);
         }
         self.switch_to(meet);
+    }
+
+    /// Binds a whole pattern `p` against place `src`. A pattern that binds a non-Copy part of
+    /// `src` by value takes the whole value apart: its parts are read into the bindings, then
+    /// `src` moves as one value (the parts it does not bind end there), so `src` itself must be
+    /// a value that may move whole.
+    fn destructure(&mut self, p: u32, src: Place, mode: Mode, n: u32) {
+        let saved = self.destr.replace((src.proj.len(), 0));
+        self.bind_pattern(p, src.clone(), mode, n);
+        let took = self.destr.is_some_and(|(_, k)| k > 0);
+        self.destr = saved;
+        if took && self.open() {
+            let span = self.span(n);
+            // a temporary scrutinee stays on the statement's drop list: another arm may leave it
+            // whole (the drop of a moved value does nothing)
+            let pos = self.temps.iter().rposition(|&t| t == src.local && src.proj.is_empty());
+            let op = self.op_of_place(src, span, n, true);
+            if let Some(i) = pos
+                && !self.temps.contains(&op.place.local)
+            {
+                self.temps.insert(i, op.place.local);
+            }
+            self.push(StmtKind::Read(op), span, n);
+        }
     }
 
     /// Binds pattern `p` against place `src` (by move, by reference after peeling references,
@@ -1865,7 +1913,21 @@ impl<'a, 'b> Builder<'a, 'b> {
         match mode {
             Mode::Peek => {}
             Mode::Move => {
-                let op = self.op_of_place(src, span, b, true);
+                let op = match self.destr {
+                    // a part of the value a pattern takes apart: read here, the whole value
+                    // moves once the pattern is bound
+                    Some((top, k)) if src.proj.len() > top => {
+                        let by_value = !self.tys.is_copy(src.ty);
+                        let why = if by_value { self.move_out(&src, true) } else { None };
+                        match why {
+                            Some(why) => self.body.bad_moves.push((src.clone(), span, why)),
+                            None if by_value => self.destr = Some((top, k + 1)),
+                            None => {}
+                        }
+                        Operand { kind: OpKind::Copy, place: src, span, node: b, site: u32::MAX }
+                    }
+                    _ => self.op_of_place(src, span, b, true),
+                };
                 self.push(
                     StmtKind::Assign { dest: Place::local(l, lt), rv: Rvalue::Use(op), init: true },
                     span,

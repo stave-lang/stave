@@ -263,6 +263,10 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                     MoveOut::Static => {
                         out.extend(mk("E0504", Some("static"), &[("place", &text)], span, &[]))
                     }
+                    MoveOut::Part(owner) => {
+                        let o = place_text(body, tys, &owner);
+                        out.extend(mk("E0504", Some("part"), &[("place", &text), ("owner", &o)], span, &[]))
+                    }
                     MoveOut::Behind => out.extend(mk("E0504", None, &[("place", &text)], span, &[])),
                 }
             }

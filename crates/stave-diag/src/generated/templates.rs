@@ -2296,7 +2296,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0504",
         severity: Severity::Error,
         area: "borrow",
-        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it",
+        rule: "move out of a borrow or an index: a non-Copy value taken by value from `*r`, a field reached through a reference, an element `v[i]`, or a closure capture; case `drop`: a part (field, payload, pattern binding) of a value whose type has an `impl Drop`; case `static`: an immutable `static` or a part of it; case `part`: a non-Copy part (field, tuple element, payload) of a local or a temporary taken by value outside a pattern that takes the whole value apart",
         retired: false,
         located: true,
         holes: &[
@@ -2337,6 +2337,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "borrow it instead (`&{place}`), or take it out and leave another value in its place with `mem.replace(&mut {place}, other)` (`import std.mem;`): the destructor of `{owner}` runs on every part",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "part",
+                message: "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a part moved here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take the whole value apart with a pattern (`let S.{{ f, g }} = {owner};`, every part bound or `_`), or take the part and leave a value in its place: `mem.replace(&mut {place}, other)` (`import std.mem;`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

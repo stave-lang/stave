@@ -1,7 +1,8 @@
 //~ BORROWCHECK ok
 // Moves, drops, temporaries, and loop locals of an accepted program: a value moved out of a
-// local, a field, an `Option`, a raw pointer, and a container; a place written again after a
-// move; a temporary with drop glue; a local borrowed anew in every round of a loop.
+// local, a field (taken with `mem.replace`, then the value taken apart by a pattern), an
+// `Option`, a raw pointer, and a container; a place written again after a move; a temporary
+// with drop glue; a local borrowed anew in every round of a loop.
 import std.mem;
 import std.vec;
 
@@ -31,9 +32,9 @@ fn make(n: u32) -> vec.Vec<u32> {
 fn main() -> i32 {
     let mut sum: u32 = 0u32;
     let mut p = Pair.{ a: make(1u32), b: 2u32 };
-    let a = p.a;
-    p.a = make(3u32);
-    sum = sum + total(a) + total(p.a) + p.b;
+    let a = mem.replace(&mut p.a, make(3u32));
+    let Pair.{ a: pa, b: pb } = p;
+    sum = sum + total(a) + total(pa) + pb;
     let mut x: u32 = 4u32;
     let m: &mut u32 = &mut x;
     let n = m;

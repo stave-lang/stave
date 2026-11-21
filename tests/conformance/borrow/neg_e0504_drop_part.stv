@@ -95,8 +95,8 @@ fn ok_copy_part(w: W) -> u32 {
 }
 
 fn ok_whole(o: Outer) -> W {
-    let t = o.t;
-    return o.w;
+    let Outer.{ w, t: _ } = o;
+    return w;
 }
 
 fn ok_replace(w: W) -> vec.Vec<u32> {
