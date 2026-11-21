@@ -368,38 +368,38 @@ pub fn site_for_pc(pc: usize) -> u32 {
 // ---- signals ----
 // Installs main's alternate signal stack and the process-wide SIGSEGV/SIGBUS handler. Called
 // by runtime.start.entry before main. Returns false if a call failed.
-pub unsafe("called once, before main and before any thread other than the start thread exists")
+pub unsafe("called before main, while no thread other than the start thread exists")
 fn install() -> bool {
     let st = state.get();
     let size = round_up(config.ALTSTACK, state.page_size());
     let prot = os.PROT_READ | os.PROT_WRITE;
     let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS;
-    let p = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, size, prot, flags, -1, 0);
+    let p = unsafe("no MAP_FIXED and fd -1: fresh anonymous pages the kernel picks") os.mmap(0, size, prot, flags, -1, 0);
     if p < 0 { return false; }
     let base = p as% usize;
     unsafe("st is runtime.state.STATE; no other thread exists yet (this fn's obligation)") {
         (*st).altstack = base;
         (*st).altstack_size = size;
     }
-    if !unsafe("base..base+size is the fresh mapping above, used for nothing else and never unmapped") set_altstack(base, size) { return false; }
+    if !unsafe("base..base+size is the fresh mapping above, used for nothing else and never unmapped; size is config.ALTSTACK rounded up") set_altstack(base, size) { return false; }
     let none = 0usize as *mut u64;
     let h = unsafe("intrinsic: address of the compiler-emitted __stave_signal stub") signal_handler_addr() as u64;
     // The restorer is never used: the handler either exits or re-raises with the default
     // action. x86-64 still requires SA_RESTORER and a non-zero address.
     let act: [u64; 4] = [h, os.SA_SIGINFO | os.SA_ONSTACK | os.SA_RESTORER, h, 0];
     let ap = &act as *const [u64; 4] as *const u64;
-    let r1 = unsafe("act is the kernel's four-word struct sigaction") os.rt_sigaction(os.SIGSEGV, ap, none);
-    let r2 = unsafe("act is the kernel's four-word struct sigaction") os.rt_sigaction(os.SIGBUS, ap, none);
+    let r1 = unsafe("act is the kernel's four-word struct sigaction; handler and restorer are the compiler's __stave_signal stub, an SA_SIGINFO handler that never returns") os.rt_sigaction(os.SIGSEGV, ap, none);
+    let r2 = unsafe("act is the kernel's four-word struct sigaction; handler and restorer are the compiler's __stave_signal stub, an SA_SIGINFO handler that never returns") os.rt_sigaction(os.SIGBUS, ap, none);
     return r1 == 0 && r2 == 0;
 }
 
 // The calling thread's alternate signal stack (per thread; runtime.thread calls it for each
 // new thread). Returns false if the call failed.
-pub unsafe("base..base+size is a mapping used only as the calling thread's signal stack, mapped while the thread runs")
+pub unsafe("base..base+size is used only as the calling thread's signal stack and stays mapped while it runs; size holds the kernel's signal frame and the handler's stack use (on_signal and the panic report, which no stack bound counts; config.ALTSTACK suffices), since nothing guards the region's bottom: a thread's altstack lies directly above its stack")
 fn set_altstack(base: usize, size: usize) -> bool {
     let ss: [u64; 3] = [base as u64, 0, size as u64];
     let none = 0usize as *mut u64;
-    let r = unsafe("ss is three words; the altstack is mapped while the thread runs and used for nothing else (this fn's obligation)") os.sigaltstack(&ss as *const [u64; 3] as *const u64, none);
+    let r = unsafe("ss is three words naming base..base+size: the thread's own signal stack, mapped while it runs, used for nothing else, and large enough (this fn's obligation)") os.sigaltstack(&ss as *const [u64; 3] as *const u64, none);
     return r >= 0;
 }
 
@@ -437,7 +437,7 @@ fn on_signal(sig: usize, info: usize, uctx: usize) -> never {
     let none = 0usize as *mut u64;
     let dfl: [u64; 4] = [0, 0, 0, 0];
     let sig32 = sig as% i32;
-    let r = unsafe("dfl is the kernel's four-word struct sigaction") os.rt_sigaction(sig32, &dfl as *const [u64; 4] as *const u64, none);
+    let r = unsafe("dfl is the kernel's four-word struct sigaction for SIG_DFL") os.rt_sigaction(sig32, &dfl as *const [u64; 4] as *const u64, none);
     let set: [u64; 1] = [1u64 << ((sig as u64) - 1)];
     let r2 = unsafe("set is one sigset word") os.rt_sigprocmask(os.SIG_UNBLOCK, &set as *const [u64; 1] as *const u64, none);
     let r3 = os.kill(os.getpid(), sig32);

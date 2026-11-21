@@ -111,10 +111,10 @@ pub const UCONTEXT_PC: usize = 168;
 pub const ARCH_SET_FS: usize = 0x1002;
 
 // The system calls sc0..sc6: call `id` with untyped words. Each caller (runtime.os) states the
-// memory its call touches.
-pub unsafe("id is a syscalls.list index and every address among a1.. is valid for the accesses of the call id names")
+// memory its call touches and changes.
+pub unsafe("id is a syscalls.list index; every address among a1.. is valid for the accesses of the call id names; and the call's other effects on memory (unmapping, remapping, protection or content changes, fixed mappings, new threads, installed handlers or signal stacks) reach no memory that a live Stave object or running code uses")
 fn sc0(id: usize) -> isize {
-    return unsafe("id is a syscalls.list index and the addresses in a1.. are valid for that call (this fn's obligation)") syscall0(NR[id]);
+    return unsafe("id is a syscalls.list index, the addresses in a1.. are valid for that call, and its other effects reach no memory in use (this fn's obligation)") syscall0(NR[id]);
 }
 
 // exit_group and sched_yield name their number directly, so no trapping operation (the NR
@@ -127,34 +127,34 @@ pub fn sched_yield() -> isize {
     return unsafe("sched_yield takes no memory") syscall0(NR_SCHED_YIELD);
 }
 
-pub unsafe("id is a syscalls.list index and every address among a1.. is valid for the accesses of the call id names")
+pub unsafe("id is a syscalls.list index; every address among a1.. is valid for the accesses of the call id names; and the call's other effects on memory (unmapping, remapping, protection or content changes, fixed mappings, new threads, installed handlers or signal stacks) reach no memory that a live Stave object or running code uses")
 fn sc1(id: usize, a1: usize) -> isize {
-    return unsafe("id is a syscalls.list index and the addresses in a1.. are valid for that call (this fn's obligation)") syscall1(NR[id], a1);
+    return unsafe("id is a syscalls.list index, the addresses in a1.. are valid for that call, and its other effects reach no memory in use (this fn's obligation)") syscall1(NR[id], a1);
 }
 
-pub unsafe("id is a syscalls.list index and every address among a1.. is valid for the accesses of the call id names")
+pub unsafe("id is a syscalls.list index; every address among a1.. is valid for the accesses of the call id names; and the call's other effects on memory (unmapping, remapping, protection or content changes, fixed mappings, new threads, installed handlers or signal stacks) reach no memory that a live Stave object or running code uses")
 fn sc2(id: usize, a1: usize, a2: usize) -> isize {
-    return unsafe("id is a syscalls.list index and the addresses in a1.. are valid for that call (this fn's obligation)") syscall2(NR[id], a1, a2);
+    return unsafe("id is a syscalls.list index, the addresses in a1.. are valid for that call, and its other effects reach no memory in use (this fn's obligation)") syscall2(NR[id], a1, a2);
 }
 
-pub unsafe("id is a syscalls.list index and every address among a1.. is valid for the accesses of the call id names")
+pub unsafe("id is a syscalls.list index; every address among a1.. is valid for the accesses of the call id names; and the call's other effects on memory (unmapping, remapping, protection or content changes, fixed mappings, new threads, installed handlers or signal stacks) reach no memory that a live Stave object or running code uses")
 fn sc3(id: usize, a1: usize, a2: usize, a3: usize) -> isize {
-    return unsafe("id is a syscalls.list index and the addresses in a1.. are valid for that call (this fn's obligation)") syscall3(NR[id], a1, a2, a3);
+    return unsafe("id is a syscalls.list index, the addresses in a1.. are valid for that call, and its other effects reach no memory in use (this fn's obligation)") syscall3(NR[id], a1, a2, a3);
 }
 
-pub unsafe("id is a syscalls.list index and every address among a1.. is valid for the accesses of the call id names")
+pub unsafe("id is a syscalls.list index; every address among a1.. is valid for the accesses of the call id names; and the call's other effects on memory (unmapping, remapping, protection or content changes, fixed mappings, new threads, installed handlers or signal stacks) reach no memory that a live Stave object or running code uses")
 fn sc4(id: usize, a1: usize, a2: usize, a3: usize, a4: usize) -> isize {
-    return unsafe("id is a syscalls.list index and the addresses in a1.. are valid for that call (this fn's obligation)") syscall4(NR[id], a1, a2, a3, a4);
+    return unsafe("id is a syscalls.list index, the addresses in a1.. are valid for that call, and its other effects reach no memory in use (this fn's obligation)") syscall4(NR[id], a1, a2, a3, a4);
 }
 
-pub unsafe("id is a syscalls.list index and every address among a1.. is valid for the accesses of the call id names")
+pub unsafe("id is a syscalls.list index; every address among a1.. is valid for the accesses of the call id names; and the call's other effects on memory (unmapping, remapping, protection or content changes, fixed mappings, new threads, installed handlers or signal stacks) reach no memory that a live Stave object or running code uses")
 fn sc5(id: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> isize {
-    return unsafe("id is a syscalls.list index and the addresses in a1.. are valid for that call (this fn's obligation)") syscall5(NR[id], a1, a2, a3, a4, a5);
+    return unsafe("id is a syscalls.list index, the addresses in a1.. are valid for that call, and its other effects reach no memory in use (this fn's obligation)") syscall5(NR[id], a1, a2, a3, a4, a5);
 }
 
-pub unsafe("id is a syscalls.list index and every address among a1.. is valid for the accesses of the call id names")
+pub unsafe("id is a syscalls.list index; every address among a1.. is valid for the accesses of the call id names; and the call's other effects on memory (unmapping, remapping, protection or content changes, fixed mappings, new threads, installed handlers or signal stacks) reach no memory that a live Stave object or running code uses")
 fn sc6(id: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize) -> isize {
-    return unsafe("id is a syscalls.list index and the addresses in a1.. are valid for that call (this fn's obligation)") syscall6(NR[id], a1, a2, a3, a4, a5, a6);
+    return unsafe("id is a syscalls.list index, the addresses in a1.. are valid for that call, and its other effects reach no memory in use (this fn's obligation)") syscall6(NR[id], a1, a2, a3, a4, a5, a6);
 }
 
 // PC of the interrupted instruction, read from a signal handler's ucontext.

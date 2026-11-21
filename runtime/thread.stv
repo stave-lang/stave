@@ -83,7 +83,7 @@ fn start(f: fn()) -> usize {
     let len = guard + size + alt + page;
     let prot = os.PROT_READ | os.PROT_WRITE;
     let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS | os.MAP_NORESERVE | os.MAP_STACK;
-    let m = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, len, prot, flags, -1, 0);
+    let m = unsafe("no MAP_FIXED and fd -1: fresh anonymous pages the kernel picks") os.mmap(0, len, prot, flags, -1, 0);
     if m < 0 {
         cannot_create();
     }
@@ -219,12 +219,12 @@ fn scope_join(list: &mut usize) {
 // ---- thread start (called by `__stave_thread_start`) ----
 
 // The thread body.
-pub unsafe("arg is the record start passed to os.spawn_thread, mapped until its join and holding the fn value start stored")
+pub unsafe("arg is the record start passed to os.spawn_thread, mapped until its join and holding the fn value start stored; called once, as the body of the thread spawn_thread created for it; the fn value's captures stay valid while it runs (start's obligation)")
 fn entry(arg: usize) -> usize {
     let th = arg as *const Thread;
     let alt = unsafe("arg is the record start passed to spawn_thread, mapped until join (this fn's obligation)") (*th).alt;
     let alt_len = unsafe("arg is the record start passed to spawn_thread, mapped until join (this fn's obligation)") (*th).alt_len;
-    let ok = unsafe("[alt, alt + alt_len) is this thread's altstack in the mapping start made, used for nothing else and mapped until join") panic.set_altstack(alt, alt_len);
+    let ok = unsafe("[alt, alt + alt_len) is this thread's altstack, config.ALTSTACK rounded up, in the mapping start made; used for nothing else, since entry runs once for its record (this fn's obligation); mapped while the thread runs, since join unmaps only after the kernel's exit-time CLEARTID wake") panic.set_altstack(alt, alt_len);
     let code = unsafe("arg is the record start passed to spawn_thread, mapped until join (this fn's obligation)") (*th).code;
     let env = unsafe("arg is the record start passed to spawn_thread, mapped until join (this fn's obligation)") (*th).env;
     let w: [usize; 2] = [code, env];

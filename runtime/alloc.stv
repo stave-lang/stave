@@ -96,7 +96,7 @@ fn try_realloc(p: *mut u8, old_size: usize, alignment: usize, new_size: usize) -
         let lo = round_up(old_size, page);
         let ln = round_up(new_size, page);
         if lo == ln { return p; }
-        let r = unsafe("p..p+lo is a large mapping owned by the caller") os.mremap(p as usize, lo, ln, os.MREMAP_MAYMOVE);
+        let r = unsafe("p..p+lo is a large mapping owned by the caller that nothing else points into; MREMAP_MAYMOVE alone") os.mremap(p as usize, lo, ln, os.MREMAP_MAYMOVE);
         if r < 0 { return null(); }
         add_large(ln);
         sub_large(lo);
@@ -254,7 +254,7 @@ unsafe("this thread holds the allocator lock") fn take_slab() -> usize {
     }
     let prot = os.PROT_READ | os.PROT_WRITE;
     let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS | os.MAP_NORESERVE;
-    let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, CHUNK, prot, flags, -1, 0);
+    let r = unsafe("no MAP_FIXED and fd -1: fresh anonymous pages the kernel picks") os.mmap(0, CHUNK, prot, flags, -1, 0);
     if r < 0 { return 0; }
     let base = r as% usize;
     unsafe("st is runtime.state.STATE; the allocator lock is held") {
@@ -273,7 +273,7 @@ fn large_alloc(size: usize, alignment: usize) -> *mut u8 {
     let prot = os.PROT_READ | os.PROT_WRITE;
     let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS | os.MAP_NORESERVE;
     if alignment <= page {
-        let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, len, prot, flags, -1, 0);
+        let r = unsafe("no MAP_FIXED and fd -1: fresh anonymous pages the kernel picks") os.mmap(0, len, prot, flags, -1, 0);
         if r < 0 { return null(); }
         add_large(len);
         return (r as% usize) as *mut u8;
@@ -281,7 +281,7 @@ fn large_alloc(size: usize, alignment: usize) -> *mut u8 {
     // Over-map by alignment, then return the unaligned head and the tail_len to the kernel, so the
     // mapping is exactly [p, p + len) as free() expects.
     if len > USIZE_MAX - alignment { return null(); }
-    let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, len + alignment, prot, flags, -1, 0);
+    let r = unsafe("no MAP_FIXED and fd -1: fresh anonymous pages the kernel picks") os.mmap(0, len + alignment, prot, flags, -1, 0);
     if r < 0 { return null(); }
     let base = r as% usize;
     let p = round_up(base, alignment);
