@@ -19,6 +19,9 @@ use crate::types::{TypeId, TypeKey};
 /// How many reference words one walk of a value looks at; a value with more is not judged.
 const MAX_WORDS: usize = 4096;
 
+/// How many signature reports a run keeps; the further ones are counted.
+pub const MAX_KEPT: usize = 16;
+
 /// What a reference word derives from: a tag, or the root of an allocation (a word without a
 /// tag acts as the root of the allocation it points to).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -564,8 +567,9 @@ impl<'m, H: Host> Interp<'m, H> {
         }
         let Some(bt) = &mut self.bt else { return };
         for (param, tag) in found {
-            if bt.signatures.len() >= 16 {
-                break;
+            bt.signature_count += 1;
+            if bt.signatures.len() >= MAX_KEPT {
+                continue;
             }
             let made = bt.tracker.made_at(tag);
             let made_at = (|| {
@@ -576,8 +580,13 @@ impl<'m, H: Host> Interp<'m, H> {
         }
     }
 
-    /// The signature reports of the run so far (M24), as text.
+    /// The first [`MAX_KEPT`] signature reports of the run so far (M24), as text.
     pub fn signature_reports(&self) -> Vec<String> {
         self.bt.as_ref().map_or(Vec::new(), |bt| bt.signatures.iter().map(|s| s.render(self.m)).collect())
+    }
+
+    /// How many signature reports the run has made so far, the ones not kept included.
+    pub fn signature_count(&self) -> usize {
+        self.bt.as_ref().map_or(0, |bt| bt.signature_count)
     }
 }

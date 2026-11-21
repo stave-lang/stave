@@ -158,7 +158,8 @@ const DEFAULT_CHECK: &str = "borrow";
 /// What the interpreter leg gave.
 enum Leg {
     Ran(Ran),
-    /// A report of the checking mode: a memory error or a borrow violation.
+    /// A report of the checking mode: a memory error, a borrow violation, or a `from` clause a
+    /// call did not keep.
     Report(String),
     /// Any other interpreter error.
     Error(String),

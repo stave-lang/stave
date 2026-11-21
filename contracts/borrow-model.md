@@ -599,7 +599,7 @@ it is not dumped, not compared with a golden, and not given to a backend.
   through that reference; a `&mut` chunk binding, a borrow of the chunk's temporary; the
   `&mut` a drop glue runs on (M12).
 - **`Body::events`**, one row per event that is no borrow, each on an instruction of its own
-  (an identity cast of the pointer to the place; for *repeat* and *environment* the instruction named):
+  (an identity cast of the pointer to the place; for *repeat* and *environment* the instruction named there):
   - *begin*: a local at its declaration, a temporary at each evaluation of its expression
     (M13, M14). The allocation that was in the slot ends with every tag of it, and the root
     stands for the new one.
@@ -610,7 +610,8 @@ it is not dumped, not compared with a golden, and not given to a backend.
   - *gone*: a by-value use of a place whose type is not Copy, after its read; `p.read()` of
     such a type; the end of a drop, after the glue (M9, M12). The bytes end through the tag of
     the pointer and are moved-out until the next write.
-  - *repeat*, on the literal: `[e; n]`, `n >= 2`, of a type that is not Copy (M10).
+  - *repeat*, on a unit value made where the literal is evaluated, after `e`: `[e; n]`,
+    `n >= 2`, of a type that is not Copy (M10).
   - *environment*, on `fn.make`: the interpreter copies the environment into a slot of its
     own in the current frame, so each evaluation of a closure literal holds its own capture
     references (M18).

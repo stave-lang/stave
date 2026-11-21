@@ -233,8 +233,9 @@ struct Borrows {
     plans: Vec<Option<Rc<signature::Plan>>>,
     /// The allocations of the statics.
     static_ids: HashSet<u32>,
-    /// The `from` clauses that a call did not keep (M24).
+    /// The first of the `from` clauses that a call did not keep (M24), and how many there were.
     signatures: Vec<signature::SignatureReport>,
+    signature_count: usize,
     /// The address the next store writes without an event: a constant temporary evaluated
     /// again.
     quiet: Option<u64>,
@@ -635,6 +636,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 plans: vec![None; m.funcs.len()],
                 static_ids: HashSet::new(),
                 signatures: Vec::new(),
+                signature_count: 0,
                 quiet: None,
             })
         });
