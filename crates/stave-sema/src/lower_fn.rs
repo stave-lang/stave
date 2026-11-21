@@ -234,6 +234,9 @@ pub(crate) struct FnState {
     /// `&mut` chunk bindings: (scope depth of the chunk body, the write-back of the binding's
     /// slot); written back when that scope ends or is left.
     pub write_backs: Vec<(usize, WriteBack)>,
+    /// Values a loop owns (the iterator moved into a `for`): (scope depth of the loop, slot,
+    /// type); dropped when that scope ends or is left.
+    pub loop_owned: Vec<(usize, Operand, Ty)>,
     /// The borrow side table of the body so far: borrows, and the other events.
     pub borrows: Vec<stave_ir::BorrowMark>,
     pub events: Vec<stave_ir::EventMark>,
@@ -1294,6 +1297,13 @@ impl<'a> FnCx<'a> {
             for &l in ls.iter().rev() {
                 self.drop_local(l);
             }
+            let owned: Vec<(Operand, Ty)> =
+                self.f.loop_owned.iter().rev().filter(|o| o.0 == s + 1).map(|o| (o.1, o.2)).collect();
+            for (p, t) in owned {
+                if self.open() {
+                    self.drop_temp(p, t);
+                }
+            }
         }
     }
 
@@ -1326,6 +1336,14 @@ impl<'a> FnCx<'a> {
         for &l in ls.iter().rev() {
             self.drop_local(l);
             self.f.env.st[l] = MState::Uninit;
+        }
+        while let Some(&(od, p, t)) = self.f.loop_owned.last()
+            && od == d
+        {
+            self.f.loop_owned.pop();
+            if self.open() {
+                self.drop_temp(p, t);
+            }
         }
         if !frame_exit {
             self.end_locals(&ls);
@@ -1531,6 +1549,7 @@ impl FnState {
             last_site: None,
             scope_handles: Vec::new(),
             write_backs: Vec::new(),
+            loop_owned: Vec::new(),
             borrows: Vec::new(),
             events: Vec::new(),
             held: None,

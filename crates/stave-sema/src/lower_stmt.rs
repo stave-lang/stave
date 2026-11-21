@@ -1674,14 +1674,30 @@ impl<'a> FnCx<'a> {
     }
 
     fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place) {
-        // the loop advances a copy of the iterator (a move of a non-Copy one) taken at the loop
-        // head, as the checker does; a `&mut` iterator is copied as the pointer
-        let it = {
-            let t = it.ty;
-            let Some(v) = self.read(&it) else { return };
-            let (s, st) = self.spill(v, t, false);
-            Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: None }
+        // an iterator value is moved (copied, if Copy) into a slot the loop owns, advanced
+        // there, and dropped when the loop ends or is left (`break`, `return`, `?`), as the
+        // checker's loop temporary is
+        self.push_scope();
+        let it = match self.kind(it.ty) {
+            _ => {
+                let t = it.ty;
+                let Some(v) = self.read(&it) else {
+                    self.pop_scope();
+                    return;
+                };
+                let (s, st) = self.spill(v, t, false);
+                if self.needs_drop(t) {
+                    let d = self.f.scopes.len();
+                    self.f.loop_owned.push((d, s, t));
+                }
+                Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: None }
+            }
         };
+        self.iter_loop_over(f, pat, body, it);
+        self.pop_scope();
+    }
+
+    fn iter_loop_over(&mut self, f: u32, pat: u32, body: u32, it: Place) {
         let w = self.g.world();
         let Some(next) = self.g.prog.strings.lookup("next") else {
             self.fail(f, "no `next` method");

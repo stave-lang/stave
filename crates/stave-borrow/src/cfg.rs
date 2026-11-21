@@ -1155,7 +1155,16 @@ impl<'a, 'b> Builder<'a, 'b> {
 
     // ---------- for ----------
 
+    /// A `for` loop; the iterator it is given (its temporary) is dropped right after it, on
+    /// every path out of it (as the lowering's loop slot).
     fn for_stmt(&mut self, f: u32) {
+        self.push_scope();
+        self.for_loop(f);
+        let at = self.span(f);
+        self.pop_scope(Some(at));
+    }
+
+    fn for_loop(&mut self, f: u32) {
         let icx = self.icx;
         let kids = icx.kids_vec(f);
         let Some(&pat) = kids.first() else { return };
