@@ -11,8 +11,11 @@
 //! code, so no wrap reasoning is needed. `slice.len (slice.make p n)` is the term of `n`. A
 //! `cast`, `cast.wrap`, or `cast.sat` of an int value to an int type that holds every value of
 //! the source type (same signedness and at least as wide, or unsigned to a wider signed type) is
-//! the term of its operand: such a cast keeps the value under all three. Wrapping arithmetic,
-//! other casts, loads, and everything else are opaque nodes.
+//! the term of its operand: such a cast keeps the value under all three. A `load` of an int field
+//! behind a `&` parameter (T not `UnsafeCell`), or a call of a getter of one, is the field's node:
+//! it holds one value while the function runs ([`Node::Field`]), so the `len` of a `&Soa` that
+//! `len()` returns and every column reads is one node. Wrapping arithmetic, other casts, other
+//! loads, and everything else are opaque nodes.
 //!
 //! A fact `x <= y + w` is an edge `x → y` of weight `w`, valid in a region of the function:
 //!
@@ -52,8 +55,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use super::{BOUNDS_STEP_LIMIT, Cx, Proof, preds_of};
-use crate::ir::{Block, Body, CastKind, FuncId, Op, Operand, Term as IrTerm, Value, ValueDef};
-use crate::types::TypeKey;
+use crate::ir::{Block, Body, CastKind, Func, FuncId, Op, Operand, Term as IrTerm, Value, ValueDef};
+use crate::types::{TypeId, TypeKey};
 use crate::verify::Dominators;
 use crate::witness::{
     ASSERT_BLOCKS, Edge, MAX_CONST, NO_BLOCK, NOT_DEPTH, Node, Row, Source, Summary, Term as RowTerm,
@@ -69,21 +72,40 @@ const MAX_K: i128 = MAX_CONST;
 
 pub(super) const ZERO: u32 = 0;
 
-pub(super) fn val_node(v: Value) -> u32 {
-    1 + 2 * v.0
+/// Parameters and fields past this have no [`Node::Field`] term node (their loads stay opaque).
+const FIELD_SPAN: u32 = 1 << 12;
+
+/// The term node of a witness node (`None`: past the numbering). With [`node_of`] the only code
+/// that knows how nodes are numbered: everything else goes through the two.
+pub(super) fn node_id(n: Node) -> Option<u32> {
+    match n {
+        Node::Zero => Some(ZERO),
+        Node::Val(v) => v.0.checked_mul(3)?.checked_add(1),
+        Node::Len(s) => s.0.checked_mul(3)?.checked_add(2),
+        Node::Field(p, k) => (p.0 < FIELD_SPAN && k < FIELD_SPAN).then(|| 3 + 3 * (p.0 * FIELD_SPAN + k)),
+    }
 }
 
-pub(super) fn len_node(s: Value) -> u32 {
-    2 + 2 * s.0
-}
-
-/// The witness node of a term node.
+/// The witness node of a term node: the inverse of [`node_id`].
 pub(super) fn node_of(node: u32) -> Node {
     match node {
         ZERO => Node::Zero,
-        n if n % 2 == 1 => Node::Val(Value((n - 1) / 2)),
-        n => Node::Len(Value((n - 2) / 2)),
+        n if n % 3 == 1 => Node::Val(Value((n - 1) / 3)),
+        n if n % 3 == 2 => Node::Len(Value((n - 2) / 3)),
+        n => {
+            let f = (n - 3) / 3;
+            Node::Field(Value(f / FIELD_SPAN), f % FIELD_SPAN)
+        }
     }
+}
+
+// A body has far fewer values than a third of `u32::MAX`.
+pub(super) fn val_node(v: Value) -> u32 {
+    node_id(Node::Val(v)).expect("value index within the node numbering")
+}
+
+pub(super) fn len_node(s: Value) -> u32 {
+    node_id(Node::Len(s)).expect("value index within the node numbering")
 }
 
 /// One side of an inequality as written: the constant zero, an int operand, or the length of a
@@ -265,6 +287,11 @@ impl Cx<'_> {
                     return Some(opaque);
                 }
                 let Some(d) = self.def(v) else { return Some(opaque) };
+                if let Some((p, field, src)) = self.stable_field(d) {
+                    let Some(node) = node_id(Node::Field(p, field)) else { return Some(opaque) };
+                    sink(Edge { from: Node::Val(v), to: Node::Field(p, field), w: 0, src, mul: 1 });
+                    return Some(Term { node, k, root: Some(v) });
+                }
                 let args = self.b.args(d);
                 match (self.b.insts.op[d as usize], args) {
                     (Op::Add, &[x, y]) => {
@@ -347,6 +374,46 @@ impl Cx<'_> {
         }
     }
 
+    /// `(p, k, source)` when instruction `d` reads int field `k` behind `p`, a `&T` parameter
+    /// of the entry block with T not `UnsafeCell` (one value while the function runs,
+    /// [`Node::Field`]): a `load` of `addr.field p k`, or a call of a getter of that field. The
+    /// caller has checked that `d`'s result is an int.
+    fn stable_field(&self, d: u32) -> Option<(Value, u32, Source)> {
+        match (self.b.insts.op[d as usize], self.b.args(d)) {
+            (Op::Load, &[Operand::Value(a)]) => {
+                let fd = self.def(a)?;
+                let (Op::FieldAddr, &[Operand::Value(p), k]) =
+                    (self.b.insts.op[fd as usize], self.b.args(fd))
+                else {
+                    return None;
+                };
+                self.shared_param(p)?;
+                Some((p, u32::try_from(self.b.int_const(k)?).ok()?, Source::FieldLoad { inst: d }))
+            }
+            (Op::Call, &[Operand::Func(g), Operand::Value(p)]) => {
+                let pt = self.shared_param(p)?;
+                let k = getter_field(self.funcs.get(g.index())?, pt)?;
+                Some((p, k, Source::Getter { call: d }))
+            }
+            _ => None,
+        }
+    }
+
+    /// The type of `p` when it is a parameter of the entry block of type `&T`, T not
+    /// `UnsafeCell`, in a module that names its `UnsafeCell`.
+    fn shared_param(&self, p: Value) -> Option<TypeId> {
+        let cell = self.m.cell?;
+        if !self.b.params(Block(0)).contains(&p) {
+            return None;
+        }
+        let t = self.b.value_ty(p)?;
+        let &TypeKey::Ref { mutable: false, inner } = self.key(t)? else { return None };
+        match self.key(inner)? {
+            TypeKey::Adt { def, .. } if *def == cell => None,
+            _ => Some(t),
+        }
+    }
+
     /// The length term of the slice `p` points to (`p` itself a slice reference).
     pub(super) fn slice_len_term(&self, p: Operand) -> Option<Term> {
         let Operand::Value(pv) = p else { return None };
@@ -405,8 +472,8 @@ impl Cx<'_> {
         let mut leave: Vec<u32> = g.facts.iter().filter(|f| f.to != ZERO).map(|f| f.from).collect();
         leave.sort_unstable();
         leave.dedup();
-        for node in leave.into_iter().filter(|&n| n % 2 == 1) {
-            let v = Value((node - 1) / 2);
+        for node in leave {
+            let Node::Val(v) = node_of(node) else { continue };
             if let Some((signed, bits)) = self.int_ty(v)
                 && let Some(at) = self.defined_in(v)
             {
@@ -957,4 +1024,29 @@ fn asserted_params(b: &Body) -> u64 {
         mask &= here;
     }
     if returns { mask } else { 0 }
+}
+
+/// Field `k` when `g` has the one parameter type `pt` and the body `a = addr.field %0 k;
+/// r = load a; ret r`.
+fn getter_field(g: &Func, pt: TypeId) -> Option<u32> {
+    let b = g.body.as_ref()?;
+    if g.params[..] != [pt]
+        || b.blocks.len() != 1
+        || b.insts.len() != 2
+        || b.blocks[0].insts.indices() != (0..2)
+    {
+        return None;
+    }
+    let &[p] = b.params(Block(0)) else { return None };
+    let (Some(a), Some(r)) = (b.insts.result[0], b.insts.result[1]) else { return None };
+    match (b.insts.op[0], b.args(0), b.insts.op[1], b.args(1), b.blocks[0].term) {
+        (
+            Op::FieldAddr,
+            &[Operand::Value(x), k],
+            Op::Load,
+            &[Operand::Value(y)],
+            IrTerm::Ret(Some(Operand::Value(z))),
+        ) if x == p && y == a && z == r => u32::try_from(b.int_const(k)?).ok(),
+        _ => None,
+    }
 }

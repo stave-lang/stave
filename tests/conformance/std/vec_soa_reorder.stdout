@@ -1,0 +1,7 @@
+vec 512340 1 0 0 1 50234 4 5023 3502 2 35 4 2
+vec-edge true 7 10 3
+drops 6
+soa 8 true 71234560 1 7023456 6 702345 16 702345891 187023459 true 187 3
+soa-big 9 0 8 9 true
+soa-tok 0 1 2
+soa-empty true 2

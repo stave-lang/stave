@@ -76,6 +76,8 @@ fn shifted(src: Source) -> Source {
         Source::Range { value } => Source::Range { value: Value(value.0 + 1) },
         Source::Bits { inst } => Source::Bits { inst: inst + 1 },
         Source::Cast { inst } => Source::Cast { inst: inst + 1 },
+        Source::FieldLoad { inst } => Source::FieldLoad { inst: inst + 1 },
+        Source::Getter { call } => Source::Getter { call: call + 1 },
         Source::Requires { clause } => Source::Requires { clause: clause + 1 },
         Source::Ensures { call, clause } => Source::Ensures { call: call + 1, clause },
         Source::Arg { call, clause } => Source::Arg { call: call + 1, clause },
@@ -259,6 +261,8 @@ pub fn forgeries_are_refused(m: &Module, f: FuncId) -> usize {
                 Source::SubSat { inst },
                 Source::Bits { inst },
                 Source::Cast { inst },
+                Source::FieldLoad { inst },
+                Source::Getter { call: inst },
                 Source::Assert { call: inst, arg: 0 },
                 Source::Assert { call: inst, arg: 1 },
             ] {
@@ -387,6 +391,8 @@ pub fn contract_forgeries_are_refused(m: &Module, f: FuncId) -> usize {
                 Source::SubSat { inst },
                 Source::Bits { inst },
                 Source::Cast { inst },
+                Source::FieldLoad { inst },
+                Source::Getter { call: inst },
                 Source::Assert { call: inst, arg: 0 },
                 Source::Assert { call: inst, arg: 1 },
             ]);

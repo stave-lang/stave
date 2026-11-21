@@ -14,8 +14,9 @@
 //!   `x <= y` and `y <= x`; `!=` has none. Removing it turns the `cbr` into a `br T` and deletes
 //!   the call: whenever `P` ends, `c` holds, so control went to `T` anyway.
 //!
-//! **Integers.** A [`Node`] is an integer: zero, an int SSA value, or the length of an SSA slice
-//! value (what every `slice.len` of that value reads). A value's node is its mathematical value
+//! **Integers.** A [`Node`] is an integer: zero, an int SSA value, the length of an SSA slice
+//! value (what every `slice.len` of that value reads), or an int field behind a `&` parameter
+//! (what every load of it reads, [`Node::Field`]). A value's node is its mathematical value
 //! under its own type: unsigned plain, signed two's complement. An operand denotes `node + k`: an
 //! int constant `c` (`|c| <=` [`MAX_CONST`]) is `Zero + c`, an int value `v` is `Val(v) + 0`.
 //! Since every node has one reading, an inequality between a signed and an unsigned node is an
@@ -44,6 +45,8 @@
 //! | `Range { value }` | the type of `value`, an int of `bits` bits | unsigned: `0 <= value <= 2^bits - 1`; signed: `-2^(bits-1) <= value <= 2^(bits-1) - 1` |
 //! | `Bits { inst }` | `v = and x y`, `v = rem x y`, or `v = shr x k`, unsigned; a constant operand `c` within the type (`rem`: `1 <= c`) | `and`: `v <= x`, `v <= y`; `rem`: `v <= x`, `v <= y - 1`; `shr`: `v <= x` |
 //! | `Cast { inst }` | `v = cast x`, `cast.wrap x`, or `cast.sat x`: `x` an int value whose every value `v`'s int type holds (same signedness and at least as wide, or unsigned to a wider signed type) | `v = x` |
+//! | `FieldLoad { inst }` | `v = load a`, `a = addr.field p k`, `p` a parameter of the entry block of type `&T` (not `&mut`), T not `std.cell.UnsafeCell`, `v` an int | `v = Field(p, k)` |
+//! | `Getter { call }` | `v = call @g p`, `p` such a parameter, `g` of the one parameter of `p`'s type and the one-block body `a = addr.field %0 k; r = load a; ret r`, `r` an int | `v = Field(p, k)` |
 //! | `Requires { clause }` | row `clause` of the function's own [`Summary::pre`] | the row about the function's parameters; only in the proofs of [`Summary::entry`] and [`Summary::safe`] |
 //! | `Ensures { call, clause }` | a `call @g ..` and row `clause` of `g`'s [`Summary::post`] | the row about the call's arguments and result, after the call |
 //! | `Arg { call, clause }` | a `call @g ..` and row `clause` of `g`'s [`Summary::pre`] that reads a `requires` check ([`Pre::entry`]) | the row about the call's arguments, after the call |
@@ -51,11 +54,19 @@
 //! A compare `x < y`, `x <= y`, `x == y` states `x <= y - 1`, `x <= y`, or both `x <= y` and
 //! `y <= x`. Where the larger side `y` of an unsigned strict compare is `sub.sat n c`, it also
 //! states `x + c < n`; where the smaller side `x` of an unsigned non-strict one is `sub.sat n c`,
-//! also `n <= y + c`. An equality source (`Arith`, `SliceLen`, `SliceMake`, `Cast`) gives its
-//! edge in both directions. The instruction of every source but `Branch` and `Range` must run
-//! before the check on every path to it; for `Range`, the definition of `value` (an instruction,
-//! or the block of a parameter). For a contract check "the check" is the end of block `P`, never
-//! `F` (which only the failing edge enters).
+//! also `n <= y + c`. An equality source (`Arith`, `SliceLen`, `SliceMake`, `Cast`, `FieldLoad`,
+//! `Getter`) gives its edge in both directions. The instruction of every source but `Branch` and
+//! `Range` must run before the check on every path to it; for `Range`, the definition of `value`
+//! (an instruction, or the block of a parameter). For a contract check "the check" is the end of
+//! block `P`, never `F` (which only the failing edge enters).
+//!
+//! Why a `Field` node is one value: a write to the bytes behind a `&` parameter of a running
+//! function, outside an `UnsafeCell`, is undefined behaviour (LANG.md §3), and safe code cannot
+//! make one (it needs a `&mut` while the `&` lives). An int field of a T that is not `UnsafeCell`
+//! lies outside every `UnsafeCell`, so every load of it while the function runs, the getter's
+//! during a call included, reads one value. `std.soa.Soa` keeps `len` in such a field and the
+//! lowering builds every column as `slice.make (..) len`, so all columns of a `&Soa` parameter have
+//! one length.
 //!
 //! Why each `Bits` and `Cast` row holds of the values as mathematical integers: on unsigned ints
 //! `x & y` is at most either operand; `rem` traps when `y = 0`, so a result that exists is
@@ -133,6 +144,9 @@ pub enum Node {
     Val(Value),
     /// The length of an SSA slice value.
     Len(Value),
+    /// Int field `.1` of what parameter `.0` of the entry block, a `&T` (T not
+    /// `std.cell.UnsafeCell`), points to: one value while the function runs.
+    Field(Value, u32),
 }
 
 /// Where an inequality is read off the IR (see the module table).
@@ -148,6 +162,8 @@ pub enum Source {
     Range { value: Value },
     Bits { inst: u32 },
     Cast { inst: u32 },
+    FieldLoad { inst: u32 },
+    Getter { call: u32 },
     Requires { clause: u32 },
     Ensures { call: u32, clause: u32 },
     Arg { call: u32, clause: u32 },
