@@ -18,6 +18,7 @@ use crate::builtins::{self, ArgTy};
 use crate::decls::{DeclFlags, DeclKind};
 use crate::diag::mk;
 use crate::ids::{DeclId, Sym};
+use crate::loops::ForSource;
 use crate::prim::{Builtin, Lanes, Prim};
 use crate::resolve::{DeferKind, Res};
 use crate::sigs::{GenericParam, TraitRef, VariantShape};
@@ -3909,24 +3910,49 @@ impl<'a> Ck<'a> {
         };
         let it = self.expr(iter, it_hint);
         let it = self.force(it);
-        if matches!(self.tys.kind(it), TypeKind::Array { .. } | TypeKind::Slice { .. }) && self.is_place(iter)
+        let src = crate::loops::for_source(&self.tys, it);
+        let chunk = bt_pre.is_some_and(|b| {
+            let v = match self.tys.kind(b) {
+                TypeKind::Ref { inner, .. } => *inner,
+                _ => b,
+            };
+            matches!(self.tys.kind(v), TypeKind::Vector { .. })
+        });
         {
-            // the loop would read (and write) the place while the body may change it: a
-            // reference says which
             let text = icx.node_text(iter).to_string();
-            let mut_binding =
-                bt_pre.is_some_and(|b| matches!(self.tys.kind(b), TypeKind::Ref { mutable: true, .. }));
-            let case = if mut_binding { Some("mut-binding") } else { None };
-            let d = mk("E0219", case, &[("place", &text)], icx.node_span(iter), &[]);
-            self.report(d);
-        }
-        let (base_elem, arr_len) = {
-            let (inner, _) = self.tys.peel_refs(it);
-            match self.tys.kind(inner).clone() {
-                TypeKind::Array { elem, len } => (Some(elem), len.value()),
-                TypeKind::Slice { elem, .. } => (Some(elem), None),
-                _ => (None, None),
+            let at = icx.node_span(iter);
+            let case = match src {
+                // the loop would read (and write) the place while the body may change it: a
+                // reference says which
+                ForSource::Array { .. } | ForSource::SlicePlace if self.is_place(iter) => {
+                    let mut_binding = bt_pre
+                        .is_some_and(|b| matches!(self.tys.kind(b), TypeKind::Ref { mutable: true, .. }));
+                    Some(if mut_binding { "mut-binding" } else { "" })
+                }
+                ForSource::SharedIter => Some("shared-iter"),
+                ForSource::RefRef => Some("ref-ref"),
+                ForSource::NotSource | ForSource::SlicePlace => Some("not-source"),
+                // ranges and iterators have no chunks
+                ForSource::Range { .. } | ForSource::Iter | ForSource::IterMut { .. } if chunk => {
+                    Some("not-source")
+                }
+                _ => None,
+            };
+            if let Some(c) = case {
+                let d = mk("E0219", (!c.is_empty()).then_some(c), &[("place", &text)], at, &[]);
+                self.report(d);
             }
+        }
+        let (base_elem, arr_len) = match (src, self.tys.kind(it).clone()) {
+            (ForSource::Array { elem }, TypeKind::Array { len, .. }) => (Some(elem), len.value()),
+            (ForSource::SlicePlace, TypeKind::Slice { elem, .. }) => (Some(elem), None),
+            (ForSource::Seq { elem, .. }, TypeKind::Ref { inner, .. }) => {
+                match self.tys.kind(inner).clone() {
+                    TypeKind::Array { len, .. } => (Some(elem), len.value()),
+                    _ => (Some(elem), None),
+                }
+            }
+            _ => (None, None),
         };
         let elem_t = if let Some(b) = bt_pre {
             // chunk loop: the binding type is a vector (or `&mut` vector)
@@ -3945,7 +3971,10 @@ impl<'a> Ck<'a> {
                     (_, Lanes::Native) => true,
                     _ => false,
                 };
-                if tail.is_none() && !multiple && it != ids::ERROR {
+                if tail.is_none()
+                    && !multiple
+                    && matches!(src, ForSource::Array { .. } | ForSource::Seq { .. })
+                {
                     let tn = self.show(it);
                     let d = mk("E0601", None, &[("type", &tn)], icx.node_span(iter), &[]);
                     self.report(d);
@@ -3954,12 +3983,12 @@ impl<'a> Ck<'a> {
                     // a `&mut` chunk binding writes its sequence in place: it needs a `&mut` one
                     let text = icx.node_text(iter).to_string();
                     let at = icx.node_span(iter);
-                    match self.tys.kind(it).clone() {
-                        TypeKind::Ref { mutable: false, .. } => {
+                    match src {
+                        ForSource::Seq { mutable: false, .. } => {
                             let d = mk("E0503", Some("shared-ref"), &[("place", &text)], at, &[]);
                             self.report(d);
                         }
-                        TypeKind::Array { .. } if !self.is_place(iter) => {
+                        ForSource::Array { .. } if !self.is_place(iter) => {
                             let d = mk("E0219", Some("mut-chunk"), &[("place", &text)], at, &[]);
                             self.report(d);
                         }
@@ -4038,16 +4067,12 @@ impl<'a> Ck<'a> {
         if it == ids::ERROR || self.tys.has_error(it) {
             return ids::ERROR;
         }
-        match self.tys.kind(it).clone() {
-            TypeKind::Range { elem, .. } => return elem,
-            TypeKind::Array { elem, .. } => return elem,
-            TypeKind::Ref { mutable, inner } => match self.tys.kind(inner).clone() {
-                TypeKind::Array { elem, .. } | TypeKind::Slice { elem, .. } => {
-                    return self.tys.mk_ref(mutable, elem);
-                }
-                _ => {}
-            },
-            _ => {}
+        match crate::loops::for_source(&self.tys, it) {
+            ForSource::Range { elem } | ForSource::Array { elem } => return elem,
+            ForSource::Seq { mutable, elem } => return self.tys.mk_ref(mutable, elem),
+            ForSource::Iter | ForSource::IterMut { .. } => {}
+            // reported by `for_stmt`
+            _ => return ids::ERROR,
         }
         // an iterator: `fn next(&mut self) -> Option<X>`
         if let Some(next) = self.prog.strings.lookup("next") {
@@ -4055,13 +4080,6 @@ impl<'a> Ck<'a> {
             if let Lookup::Found { m, .. } = self.w.lookup_method(&mut self.tys, it, next, genv)
                 && let Some((sig, args, self_ty)) = self.w.method_sig(&m)
             {
-                if matches!(self.tys.kind(it), TypeKind::Ref { mutable: false, .. }) {
-                    // `next` takes `&mut self`: a shared reference cannot advance the iterator
-                    let text = self.icx.node_text(iter).to_string();
-                    let d =
-                        mk("E0219", Some("shared-iter"), &[("place", &text)], self.icx.node_span(iter), &[]);
-                    self.report(d);
-                }
                 let ret = self.tys.subst(sig.ret, &args, self_ty);
                 // lowering resolves `next` with the impl's args (none of its own)
                 let call_args = match &m {

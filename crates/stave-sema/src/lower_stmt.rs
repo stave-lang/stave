@@ -1315,15 +1315,14 @@ impl<'a> FnCx<'a> {
         // arrays and slices
         let e = self.expr(iter, None);
         let Some(p) = self.place_of(e) else { return };
-        match self.kind(p.ty) {
-            TypeKind::Ref { inner, .. } => {
-                let (elem, len) = match self.kind(inner) {
-                    TypeKind::Array { elem, len } => (elem, len.value()),
-                    TypeKind::Slice { elem, .. } => (elem, None),
-                    _ => {
-                        self.iter_loop(f, pat, body, p);
-                        return;
-                    }
+        match crate::loops::for_source(&self.tys, p.ty) {
+            crate::loops::ForSource::Seq { .. } => {
+                let len = match self.kind(p.ty) {
+                    TypeKind::Ref { inner, .. } => match self.kind(inner) {
+                        TypeKind::Array { len, .. } => len.value(),
+                        _ => None,
+                    },
+                    _ => None,
                 };
                 let pt = p.ty;
                 let Some(v) = self.peek(&p) else { return };
@@ -1333,17 +1332,26 @@ impl<'a> FnCx<'a> {
                     None => self.op1(Op::SliceLen, us, v),
                 };
                 let z = self.int(0);
-                let _ = elem;
                 self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Ref(v, pt)));
             }
             // an array value (a place is E0219): the loop's temporary
-            TypeKind::Array { len, .. } => {
+            crate::loops::ForSource::Array { .. } => {
+                let len = match self.kind(p.ty) {
+                    TypeKind::Array { len, .. } => len.value().unwrap_or(0),
+                    _ => 0,
+                };
                 let us = self.t_usize();
-                let n = self.int(len.value().unwrap_or(0) as i128);
+                let n = self.int(len as i128);
                 let z = self.int(0);
                 self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Val(p, iter)));
             }
-            _ => self.iter_loop(f, pat, body, p),
+            crate::loops::ForSource::Iter | crate::loops::ForSource::IterMut { .. } => {
+                self.iter_loop(f, pat, body, p)
+            }
+            // the type checker reports every other kind
+            _ => {
+                self.fail(f, "`for` over a type that is not a `for` source");
+            }
         }
     }
 
@@ -1679,8 +1687,8 @@ impl<'a> FnCx<'a> {
         // there, and dropped when the loop ends or is left (`break`, `return`, `?`), as the
         // checker's loop temporary is
         self.push_scope();
-        let it = match self.kind(it.ty) {
-            TypeKind::Ref { mutable: true, inner } => {
+        let it = match crate::loops::for_source(&self.tys, it.ty) {
+            crate::loops::ForSource::IterMut { inner } => {
                 let Some(v) = self.read(&it) else {
                     self.pop_scope();
                     return;

@@ -1,0 +1,133 @@
+//~ CHECK-ONLY
+// The `for` source kinds are closed (contracts/lang-details.md §4 `for` sources): each kind with
+// up to two reference levels, a generic source, and sources behind view fields. A reference to
+// a reference is E0219 `ref-ref`; a type that is no source is E0219 `not-source`.
+struct It {
+    i: u32,
+}
+
+impl It {
+    fn next(&mut self) -> Option<u32> {
+        if self.i >= 3 {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        return Option.Some(self.i);
+    }
+}
+
+trait Next {
+    fn next(&mut self) -> Option<u32>;
+}
+
+view struct V {
+    s: &mut [u32],
+    it: &mut It,
+    rr: &mut &mut It,
+    sr: &[u32],
+}
+
+fn ranges() {
+    let a = 0u32..3u32;
+    let mut b = 0u32..3u32;
+    for x in a {
+    }
+    for x in &a { //~ ERROR E0219
+    }
+    for x in &mut b { //~ ERROR E0219
+    }
+    let ra = &a;
+    for x in &ra { //~ ERROR E0219
+    }
+}
+
+fn arrays(a: &[u32; 4], m: &mut [u32; 4], aa: & &[u32; 4], am: &mut &[u32; 4], ma: & &mut [u32; 4], mm: &mut &mut [u32; 4]) {
+    for x in [1u32, 2] {
+    }
+    for x in a {
+    }
+    for x in m {
+    }
+    for x in aa { //~ ERROR E0219
+    }
+    for x in am { //~ ERROR E0219
+    }
+    for x in ma { //~ ERROR E0219
+    }
+    for x in mm { //~ ERROR E0219
+    }
+}
+
+fn slices(s: &[u32], m: &mut [u32], ss: & &[u32], sm: &mut &[u32], ms: & &mut [u32], mms: &mut &mut [u32]) {
+    for x in s {
+    }
+    for x in m {
+    }
+    for x in ss { //~ ERROR E0219
+    }
+    for x in sm { //~ ERROR E0219
+    }
+    for x in ms { //~ ERROR E0219
+    }
+    for x in mms { //~ ERROR E0219
+    }
+    for v: u32x4 in ss { //~ ERROR E0219
+    } tail scalar (e) {
+    }
+}
+
+fn iterators(it: It, r: &It, m: &mut It, rr: & &It, rm: & &mut It, mr: &mut &It, mm: &mut &mut It) {
+    for x in it {
+    }
+    for x in r { //~ ERROR E0219
+    }
+    for x in m {
+    }
+    for x in rr { //~ ERROR E0219
+    }
+    for x in rm { //~ ERROR E0219
+    }
+    for x in mr { //~ ERROR E0219
+    }
+    for x in mm { //~ ERROR E0219
+    }
+    let mut m2 = It.{ i: 0 };
+    let mut p = &mut m2;
+    for x in &mut p { //~ ERROR E0219
+    }
+    for v: u32x4 in m { //~ ERROR E0219
+    }
+}
+
+fn scalars(n: u32, r: &u32, t: (u32, u32), v: u32x4) {
+    for x in n { //~ ERROR E0219
+    }
+    for x in r { //~ ERROR E0219
+    }
+    for x in t { //~ ERROR E0219
+    }
+    for x in v { //~ ERROR E0219
+    }
+    for x in 0u32..4 {
+    }
+}
+
+fn generic<T: Next>(t: T, r: &T, m: &mut T) {
+    for x in t {
+    }
+    for x in r { //~ ERROR E0219
+    }
+    for x in m {
+    }
+}
+
+fn view_fields(v: V) {
+    for x in v.s {
+    }
+    for x in v.it {
+    }
+    for x in v.rr { //~ ERROR E0219
+    }
+    for x in v.sr {
+    }
+}

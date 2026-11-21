@@ -142,15 +142,25 @@ and fn ABI are unchanged, and it has no effect (`without`).
 
 ## §4 `for` sources
 
-| source | element loop `for x in s` | chunk loop `for v: TxN in s` / `v: &mut TxN` |
+The kind is decided by the source's type alone (`stave_sema::loops::for_source`, read by the type
+checker, the borrow checker, and the lowering); the list is closed: a type not listed is no source.
+
+| source type | element loop `for x in s` | chunk loop `for v: TxN in s` / `v: &mut TxN` |
 |---|---|---|
-| a range `a..b` | the values | not a chunk source |
+| a range `a..b`, `a..=b` | the values | E0219 `not-source` |
 | `&a`, `&mut a`, a `&[T]` / `&mut [T]` / `&[T; N]` value | element `i` of `*s` borrowed per iteration: `&T` / `&mut T` | the chunks of `*s`; `&mut v` needs a `&mut` source (E0503 over `&`) |
 | an array value (a temporary: a call, a literal, a const, a value `if` / `match`, a cast) | the loop's temporary, elements moved out | the temporary, read only (`&mut v`: E0219 `mut-chunk`) |
 | an iterator value or place (`it`, `mk()`, `s.it`: a type with `next(&mut self)`) | moved into the loop (copied if Copy) at the head; the loop owns it, advances it, and drops it right after the loop on every path out (end, `break`, `return`, `?`); a place is unusable after, as after any move (E0502, E0504 behind a reference) | not a chunk source |
 | `&mut it`, `r: &mut It` (also a `&mut It` view field) | `*r` advanced in place: after the loop (also after `break`) the iterator has moved on; the loop drops nothing | not a chunk source |
 | `&it`, `r: &It` | E0219 `shared-iter` (`next` takes `&mut self`) | not a chunk source |
 | an array or `[T]` place | E0219: write `&a` / `&mut a` | E0219 |
+| a reference to a reference (`&mut &mut It`, `&&mut It`, `& &[T]`, `&mut &[T; N]`, ..) | E0219 `ref-ref`: iterate the inner reference | E0219 `ref-ref` |
+| any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, or a reference to one) | E0219 `not-source` | E0219 `not-source` |
+
+An iterator type is a struct, enum, or generic parameter (it must have `next(&mut self)`, else
+E0208); a generic `T` source is an iterator value, and an instance with `T = &mut It` advances
+`It` in place, which is the same loop. A source behind a view field is classified by the field's
+type (`v.s: &mut [T]`: a reference to a slice; `v.it: &mut It`: a `&mut` to an iterator).
 
 A *place* is: a local, param, `self`, or `static` (also through a module path, `m.TABLE`); `*e`;
 an expression whose last step is a field, tuple field, element `e[i]`, sub-slice `e[a..b]`, or

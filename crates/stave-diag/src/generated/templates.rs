@@ -1829,7 +1829,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0219",
         severity: Severity::Error,
         area: "types",
-        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`)",
+        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one), and a range or iterator as a chunk source",
         retired: false,
         located: true,
         holes: &[
@@ -1868,6 +1868,30 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "iterate `&mut a` of a mutable array or slice place",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "not-source",
+                message: "`{place}` is not a `for` source",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not a range, an array value, a reference to an array or slice, or an iterator" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate a range, an array value, `&a` / `&mut a` of an array or slice, an iterator, or a `&mut` to one; a chunk loop takes an array value or a reference to an array or slice",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "ref-ref",
+                message: "`for` cannot iterate `{place}`: it is a reference to a reference",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "one reference too many" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate the inner reference itself (`r` instead of `&mut r` or `&r`, or `*r` of a `& &[T]`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
