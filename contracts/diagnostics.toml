@@ -758,6 +758,21 @@ labels = [{ at = "primary", text = "called here" }, { at = "clause", text = "fal
 fix = { description = "correct the arguments, or call only where the clause holds" }
 
 [[diag]]
+code = "E0219"
+severity = "error"
+area = "types"
+rule = "the source of a `for` loop is an array or `[T]` place (a local, param, `self`, or `static`; `*e`; a field, tuple field, element, sub-slice, or `std.soa` column; a parenthesized place): iterate `&a` or `&mut a`; case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source"
+holes = { place = "place" }
+message = "`for` over the place `{place}`: iterate a reference to it"
+labels = [{ at = "primary", text = "array or slice place" }]
+fix = { description = "write `&{place}` (elements bound as `&T`, chunks by value), or `&mut {place}` to change it in place" }
+
+[diag.cases.mut-chunk]
+message = "`&mut` chunk binding over the value `{place}`: only a temporary would be written"
+labels = [{ at = "primary", text = "not a `&mut` sequence" }]
+fix = { description = "iterate `&mut a` of a mutable array or slice place" }
+
+[[diag]]
 code = "E0300"
 severity = "error"
 area = "patterns"
@@ -921,7 +936,7 @@ fix = { description = "use `{place}` before it is moved, or pass a reference (`&
 code = "E0503"
 severity = "error"
 area = "borrow"
-rule = "assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)"
+rule = "assignment to an immutable binding or through `&` (case `shared-ref` also: a `&mut` chunk binding over a `&` source); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)"
 holes = { place = "place" }
 message = "cannot assign to `{place}`: the binding is not `mut`"
 labels = [{ at = "primary", text = "assignment here" }, { at = "binding", text = "declared without `mut` here" }]
@@ -980,7 +995,7 @@ retired = true
 code = "E0512"
 severity = "error"
 area = "borrow"
-rule = "returned value borrows a local; case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)"
+rule = "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)"
 holes = { place = "place" }
 message = "returned value borrows local `{place}`"
 labels = [{ at = "primary", text = "returned here" }, { at = "local", text = "`{place}` is dropped when the function returns" }]

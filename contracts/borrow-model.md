@@ -149,7 +149,11 @@ fn child(p: &mut u32) -> u32 {
   element, a vector load or store its lanes, a masked form its active lanes, `fill`, `copy_from`,
   `sum` the elements they touch, `xs.len()` none. A reference the path dereferences is first
   read from its own place. A chunk loop with a `&mut` binding reads the chunk when its block is
-  entered and writes it when the block is left. Violations: M1, M2 (the examples above).
+  entered and writes it when the block is left; the binding points to a copy of the chunk that
+  ends with the block (M13). The source of a loop is never an array or `[T]` place (E0219): it
+  is a reference, whose elements or chunks are read through it per iteration, or a value (an
+  array temporary, an iterator copied at the loop head, M8 / M9). Violations: M1, M2 (the
+  examples above).
 - **M8 (copy).** A by-value use of a place whose type is Copy is a read. The words of the result
   keep their tags: two copies of a `&`, or of a Copy view, hold the same tags, and no rule tells
   them apart. A copy has no violation of its own; the copies become `Dead` together.

@@ -177,3 +177,21 @@ accepted with two answers.
 **What would break it.** A rule that computes a mode of its own (for example the borrow
 checker strengthening a mode only for itself), a new expression form that mutates a place
 without the CFG showing it, or a context added to the read list that can write.
+
+## `for` over a place: the checker's loop is the lowered loop
+
+**Claim.** What the borrow checker assumes a `for` loop touches is what the generated code
+touches.
+
+**Argument.** An array or `[T]` place is never a source (E0219, contracts/lang-details.md §4
+`for` sources), so no loop reads a place the body may change without a borrow saying so: the
+source is a reference (each element or chunk of `*r` is borrowed per iteration, `&mut` only
+through a `&mut` source), an array value (the loop's own temporary, which nothing else names),
+a range, or an iterator, which both the CFG and the code advance as a copy taken at the loop
+head. A reference chunk binding is a borrow of the block's chunk temporary, which is what the
+code binds, so it cannot outlive the block, and the chunk of the source stays borrowed until the
+store back.
+
+**What would break it.** A `for` source form the CFG models as a copy and the code reads in
+place (as an array place was before E0219), or a binding the code points into memory the CFG
+does not model as borrowed.

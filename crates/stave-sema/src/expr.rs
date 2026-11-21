@@ -3546,6 +3546,91 @@ impl<'a> Ck<'a> {
         Some(d)
     }
 
+    /// Whether expression `n` is a place as a `for` source (E0219): a local, param, `self`, or
+    /// `static` (a path to one); `*e`; a field, tuple field, element, sub-slice, or column step
+    /// as the chain's last step; a place in parentheses or after `unsafe(..)`. A call, method
+    /// call, `?`, literal, const, value `if` / `match`, or cast is a value.
+    fn is_place(&self, n: u32) -> bool {
+        let icx = self.icx;
+        let a = icx.a(n);
+        match icx.kind(n) {
+            Some(NodeKind::Unary) => {
+                if icx.is(a, Term::Star) {
+                    return true;
+                }
+                icx.is(a, Term::KwUnsafe) && icx.last_child(n).is_some_and(|c| self.is_place(c))
+            }
+            Some(NodeKind::Primary) => {
+                if icx.is(a, Term::LParen) {
+                    let kids = icx.kids_vec(n);
+                    return kids.len() == 1
+                        && !icx.is(icx.close(a) - 1, Term::Comma)
+                        && kids.first().is_some_and(|&c| self.is_place(c));
+                }
+                (icx.is(a, Term::Ident) || icx.is(a, Term::KwSelf)) && self.names_place(n)
+            }
+            Some(NodeKind::Postfix) => {
+                let Some(prim) = icx.first_child(n) else { return false };
+                let end = icx.postfix_end(n);
+                let mut p = icx.primary_end(prim) + 1;
+                // whether every step so far is a module path step (`m.TABLE`)
+                let mut path = icx.is_path_head(prim);
+                let mut place = false;
+                while p <= end {
+                    if icx.is(p, Term::Dot) && icx.is(p + 1, Term::Ident) {
+                        let mut q = p + 2;
+                        if icx.is(q, Term::ColonColon) {
+                            let (e, partial) = icx.angle_end(q + 1);
+                            q = if partial { e - 1 } else { e };
+                        }
+                        if icx.is(q, Term::LParen) {
+                            place = false;
+                            path = false;
+                            p = icx.close(q) + 1;
+                            continue;
+                        }
+                        let step_is_path = path && icx.use_at(prim, p + 1).is_some();
+                        place = !step_is_path;
+                        path = step_is_path;
+                        p = q;
+                    } else if icx.is(p, Term::Dot) && icx.is(p + 1, Term::IntLit) {
+                        place = true;
+                        path = false;
+                        p += 2;
+                    } else if icx.is(p, Term::LBracket) {
+                        place = true;
+                        path = false;
+                        p = icx.close(p) + 1;
+                    } else if icx.is(p, Term::LParen) || icx.is(p, Term::DotLBrace) {
+                        place = false;
+                        path = false;
+                        p = icx.close(p) + 1;
+                    } else {
+                        // `?`
+                        place = false;
+                        path = false;
+                        p += 1;
+                    }
+                }
+                if path {
+                    return self.names_place(prim);
+                }
+                place
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the path headed by `Primary` `prim` names a local, `self`, or a `static`.
+    fn names_place(&self, prim: u32) -> bool {
+        let Some(u) = self.icx.uses(prim).last() else { return false };
+        match u.res {
+            Res::Local(_) | Res::SelfValue(_) => true,
+            Res::Decl(d) => self.prog.decl(d).is_some_and(|x| x.kind == DeclKind::Static),
+            _ => false,
+        }
+    }
+
     /// E0503 case `static` at `at` when `n` names the storage of an immutable `static`.
     pub fn static_mutation(&mut self, n: u32, at: Span) {
         self.static_mutation_upto(n, None, at);
@@ -3811,6 +3896,14 @@ impl<'a> Ck<'a> {
         };
         let it = self.expr(iter, it_hint);
         let it = self.force(it);
+        if matches!(self.tys.kind(it), TypeKind::Array { .. } | TypeKind::Slice { .. }) && self.is_place(iter)
+        {
+            // the loop would read (and write) the place while the body may change it: a
+            // reference says which
+            let text = icx.node_text(iter).to_string();
+            let d = mk("E0219", None, &[("place", &text)], icx.node_span(iter), &[]);
+            self.report(d);
+        }
         let (base_elem, arr_len) = {
             let (inner, _) = self.tys.peel_refs(it);
             match self.tys.kind(inner).clone() {
@@ -3840,6 +3933,22 @@ impl<'a> Ck<'a> {
                     let tn = self.show(it);
                     let d = mk("E0601", None, &[("type", &tn)], icx.node_span(iter), &[]);
                     self.report(d);
+                }
+                if matches!(self.tys.kind(b), TypeKind::Ref { mutable: true, .. }) && it != ids::ERROR {
+                    // a `&mut` chunk binding writes its sequence in place: it needs a `&mut` one
+                    let text = icx.node_text(iter).to_string();
+                    let at = icx.node_span(iter);
+                    match self.tys.kind(it).clone() {
+                        TypeKind::Ref { mutable: false, .. } => {
+                            let d = mk("E0503", Some("shared-ref"), &[("place", &text)], at, &[]);
+                            self.report(d);
+                        }
+                        TypeKind::Array { .. } if !self.is_place(iter) => {
+                            let d = mk("E0219", Some("mut-chunk"), &[("place", &text)], at, &[]);
+                            self.report(d);
+                        }
+                        _ => {}
+                    }
                 }
                 self.gate(icx.a(f), "loop.chunk", vec_t, "");
                 if let Some(tc) = tail {

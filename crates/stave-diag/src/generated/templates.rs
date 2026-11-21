@@ -1814,6 +1814,43 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0219",
+        severity: Severity::Error,
+        area: "types",
+        rule: "the source of a `for` loop is an array or `[T]` place (a local, param, `self`, or `static`; `*e`; a field, tuple field, element, sub-slice, or `std.soa` column; a parenthesized place): iterate `&a` or `&mut a`; case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "place", kind: HoleKind::Place, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`for` over the place `{place}`: iterate a reference to it",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "array or slice place" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write `&{place}` (elements bound as `&T`, chunks by value), or `&mut {place}` to change it in place",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "mut-chunk",
+                message: "`&mut` chunk binding over the value `{place}`: only a temporary would be written",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "not a `&mut` sequence" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate `&mut a` of a mutable array or slice place",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0300",
         severity: Severity::Error,
         area: "patterns",
@@ -2231,7 +2268,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0503",
         severity: Severity::Error,
         area: "borrow",
-        rule: "assignment to an immutable binding or through `&`; assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
+        rule: "assignment to an immutable binding or through `&` (case `shared-ref` also: a `&mut` chunk binding over a `&` source); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
         retired: false,
         located: true,
         holes: &[
@@ -2382,7 +2419,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0512",
         severity: Severity::Error,
         area: "borrow",
-        rule: "returned value borrows a local; case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)",
+        rule: "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)",
         retired: false,
         located: true,
         holes: &[

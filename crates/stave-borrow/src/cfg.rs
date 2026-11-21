@@ -365,6 +365,17 @@ pub struct Builder<'a, 'b> {
     /// The local `result` names in the `ensures` clauses: the returned value, from the return
     /// to the end of the clauses.
     result: Option<LocalId>,
+    /// The block temporaries of reference chunk bindings, with their store back.
+    chunk_temps: FxHashMap<LocalId, ChunkWriteBack>,
+}
+
+/// A by-reference chunk binding's store back (see `Builder::chunk_ref_bind`): the chunk of the
+/// sequence (through the loop's loan), `&mut`, the loop's node.
+#[derive(Clone)]
+struct ChunkWriteBack {
+    chunk: Place,
+    m: bool,
+    node: u32,
 }
 
 /// Builds the body of fn decl node `fn_node` (params in `params`, return type `ret_ty`, signature
@@ -426,6 +437,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             owned_elems: None,
             olds: FxHashMap::default(),
             result: None,
+            chunk_temps: FxHashMap::default(),
         }
     }
 
@@ -730,6 +742,11 @@ impl<'a, 'b> Builder<'a, 'b> {
         let loc = &self.body.locals[l as usize];
         let (ty, node) = (loc.ty, loc.node);
         let span = at.unwrap_or(loc.span);
+        if dead && let Some(w) = self.chunk_temps.get(&l).cloned() {
+            // the block of a reference chunk binding is left (its end, `break`, `continue`,
+            // `return`, `?`): the code stores the chunk back here
+            self.chunk_write_back(w, span);
+        }
         if self.tys.needs_drop(ty) {
             self.push(StmtKind::Drop(Place::local(l, ty)), span, node);
         }
@@ -1147,10 +1164,15 @@ impl<'a, 'b> Builder<'a, 'b> {
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
         let bind_ty = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type));
         let it_ty = self.nty(iter);
-        let chunk_ref = bind_ty.is_some_and(|_| {
-            let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
-            matches!(self.tys.kind(bt), TypeKind::Ref { .. })
-        });
+        let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
+        let chunk_ref = bind_ty.is_some() && matches!(self.tys.kind(bt), TypeKind::Ref { .. });
+        let chunk_mut = bind_ty.is_some() && matches!(self.tys.kind(bt), TypeKind::Ref { mutable: true, .. });
+        // a chunk loop: the binding is a vector or a reference to one
+        let vt = match self.tys.kind(bt) {
+            TypeKind::Ref { inner, .. } => inner,
+            _ => bt,
+        };
+        let chunk = bind_ty.is_some() && matches!(self.tys.kind(vt), TypeKind::Vector { .. });
         enum Src {
             Range,
             Elems(Place, Option<DerefKind>),
@@ -1169,23 +1191,11 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let k = if mutable { DerefKind::Mut } else { DerefKind::Shared };
                 Src::Elems(p, Some(k))
             }
+            // an array value (a place is E0219): the loop's temporary
             TypeKind::Array { .. } => {
                 let Some(op) = self.operand(iv, iter) else { return };
                 let V::P(p) = self.put_temp(Rvalue::Use(op), it_ty, iter) else { return };
                 Src::Elems(p, None)
-            }
-            // a `[T]` place (a sub-slice, a `std.soa` column) is borrowed for the loop, `&mut`
-            // under a `&mut` chunk binding
-            TypeKind::Slice { .. } => {
-                let Some(p) = self.place_of(iv, iter) else { return };
-                let m = bind_ty.is_some_and(|_| {
-                    let bt = self.tb.local(BindingRef { node: pat }).unwrap_or(TypeId::NONE);
-                    matches!(self.tys.kind(bt), TypeKind::Ref { mutable: true, .. })
-                });
-                let span = self.span(iter);
-                let (rv, _) = self.borrow(p, m, false, span, iter);
-                let V::P(rp) = rv else { return };
-                Src::Elems(rp, Some(if m { DerefKind::Mut } else { DerefKind::Shared }))
             }
             _ => {
                 let Some(op) = self.operand(iv, iter) else { return };
@@ -1256,6 +1266,12 @@ impl<'a, 'b> Builder<'a, 'b> {
                     self.bind_pattern(pat, p, Mode::Move, iter);
                 }
             }
+            (Src::Elems(_, _), Some(ep)) if chunk && chunk_ref => {
+                let span = self.span(pat);
+                if let Some(v) = self.chunk_ref_bind(ep, chunk_mut, vt, span, iter) {
+                    self.bind_pattern(pat, v, Mode::Move, iter);
+                }
+            }
             (Src::Elems(_, dk), Some(ep)) => {
                 let by_ref = dk.is_some() && (bind_ty.is_none() || chunk_ref);
                 if by_ref {
@@ -1317,9 +1333,11 @@ impl<'a, 'b> Builder<'a, 'b> {
             let l = self.binding_local(tb);
             let lt = self.body.locals[l as usize].ty;
             let span = self.span(tb);
-            if i == 0 && matches!(self.tys.kind(lt), TypeKind::Ref { mutable: true, .. }) {
-                let (rv, _) = self.borrow(ep.clone(), true, false, span, iter);
-                if let Some(op) = self.operand(rv, iter) {
+            if i == 0
+                && let TypeKind::Ref { mutable, inner } = self.tys.kind(lt)
+            {
+                let Some(v) = self.chunk_ref_bind(ep.clone(), mutable, inner, span, iter) else { continue };
+                if let Some(op) = self.operand(V::P(v), iter) {
                     self.push(
                         StmtKind::Assign { dest: Place::local(l, lt), rv: Rvalue::Use(op), init: true },
                         span,
@@ -1342,6 +1360,47 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.block(b);
         let at = self.close_span(b);
         self.pop_scope(Some(at));
+    }
+
+    /// A by-reference chunk binding over element place `ep` (`m`: `&mut`; `vt`: the vector
+    /// type), in the binding's block (the innermost scope): the loop's code holds the chunk in a
+    /// temporary of that block, loaded from the sequence and, under `&mut`, stored back wherever
+    /// the block is left. So the binding borrows that temporary (it dies with the block: the
+    /// binding cannot leave it), and the chunk of the sequence stays borrowed (`&mut` under
+    /// `&mut`) until the store ([`Builder::end_local`]). Returns the binding's value.
+    fn chunk_ref_bind(&mut self, ep: Place, m: bool, vt: TypeId, span: Span, n: u32) -> Option<Place> {
+        let (rv, _) = self.borrow(ep, m, false, span, n);
+        let V::P(src) = rv else { return None };
+        let k = if m { DerefKind::Mut } else { DerefKind::Shared };
+        let inner = self.tys.deref(src.ty).map_or(TypeId::NONE, |x| x.0);
+        let chunk = src.with(Proj::Deref(k), inner);
+        let c = self.new_local(vt, m, span, String::new(), false);
+        if let Some(s) = self.scopes.last_mut() {
+            s.push(c);
+        }
+        let op = self.op_of_place(chunk.clone(), span, n, false);
+        self.push(StmtKind::Assign { dest: Place::local(c, vt), rv: Rvalue::Use(op), init: true }, span, n);
+        self.chunk_temps.insert(c, ChunkWriteBack { chunk, m, node: n });
+        let (bv, _) = self.borrow(Place::local(c, vt), m, false, span, n);
+        let V::P(b) = bv else { return None };
+        Some(b)
+    }
+
+    /// Where a reference chunk binding's block is left: a `&mut` chunk is stored back into the
+    /// sequence, a `&` one is read there (its loan lasts the block).
+    fn chunk_write_back(&mut self, w: ChunkWriteBack, at: Span) {
+        if !self.open() {
+            return;
+        }
+        if w.m {
+            // the stored lanes hold no borrow: the store is a write through the chunk's loan; the
+            // temporary's end (right after) is what conflicts with a binding kept past the block
+            let op = self.const_op(w.node);
+            self.push(StmtKind::Assign { dest: w.chunk, rv: Rvalue::Use(op), init: false }, at, w.node);
+        } else {
+            let r = self.op_of_place(w.chunk, at, w.node, false);
+            self.push(StmtKind::Read(r), at, w.node);
+        }
     }
 
     fn option_of(&mut self, t: TypeId) -> TypeId {

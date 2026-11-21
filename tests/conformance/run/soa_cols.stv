@@ -51,14 +51,14 @@ fn main() -> i32 {
     io.print(f"{n2} {id3} {yl}\n");
 
     let mut acc = f32x4.splat(0.0);
-    for v: f32x4 in ps.y {
+    for v: f32x4 in &ps.y {
         acc = acc + v;
     } tail masked (v, m) {
         acc = acc + v;
     }
     let vy = acc.reduce_add();
     let two = f32x4.splat(2.0);
-    for v: &mut f32x4 in ps.x {
+    for v: &mut f32x4 in &mut ps.x {
         *v = *v * two;
     } tail masked (v, m) {
         *v = *v * two;

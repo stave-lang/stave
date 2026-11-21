@@ -1303,6 +1303,7 @@ impl<'a> FnCx<'a> {
                 let _ = elem;
                 self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Ref(v, pt)));
             }
+            // an array value (a place is E0219): the loop's temporary
             TypeKind::Array { len, .. } => {
                 let us = self.t_usize();
                 let n = self.int(len.value().unwrap_or(0) as i128);
@@ -1431,17 +1432,12 @@ impl<'a> FnCx<'a> {
                     }
                 }
             }
+            // an array value (a place is E0219, a `&mut` binding over a value too): the loop's
+            // temporary, read only
             TypeKind::Array { len, .. } => {
                 let n = len.value().unwrap_or(0);
                 let Some(a) = self.addr(&p, None) else { return };
-                (self.array_slice(a, true, lane, n), true)
-            }
-            // a `[T]` place (a sub-slice, a `std.soa` column): its address is the slice
-            TypeKind::Slice { .. } => {
-                let Some((a, at)) = self.addr_t(&p, None) else { return };
-                let mutable = self.pointee(at).is_some_and(|x| x.1);
-                let st = self.slice_ref_ty(mutable, lane);
-                (self.convert_ptr(a, at, st), mutable)
+                (self.array_slice(a, false, lane, n), false)
             }
             _ => {
                 self.fail(f, "chunk loop over a non-sequence");
@@ -1593,8 +1589,10 @@ impl<'a> FnCx<'a> {
         self.enter_live(exit);
     }
 
-    /// The chunk binding's value: the vector `x`, or for a `&mut` binding a slot holding it,
-    /// written back to `s[i..]` (active lanes of `mask`) when the current scope ends or is left.
+    /// The chunk binding's value: the vector `x`, or for a reference binding a slot of the
+    /// current scope holding it; a `&mut` binding's slot is written back to `s[i..]` (active lanes
+    /// of `mask`) when the scope ends or is left (the checker: the binding borrows a temporary
+    /// of its block).
     #[allow(clippy::too_many_arguments)]
     fn chunk_item(
         &mut self,
@@ -1612,6 +1610,11 @@ impl<'a> FnCx<'a> {
         }
         let slot = self.new_slot(vt);
         self.f.b.store(slot, x);
+        if !matches!(self.kind(bind_t), TypeKind::Ref { mutable: true, .. }) {
+            let st = self.t_ref(true, vt);
+            let p = self.convert_ptr(slot, st, bind_t);
+            return Place { base: Base::Val(p, bind_t), proj: Vec::new(), ty: bind_t, root: None };
+        }
         let d = self.f.scopes.len();
         self.f.write_backs.push((d, WriteBack { slot, vt, s, i, mask, tok }));
         Place { base: Base::Val(slot, bind_t), proj: Vec::new(), ty: bind_t, root: None }
@@ -1633,14 +1636,13 @@ impl<'a> FnCx<'a> {
     }
 
     fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place) {
-        let it = match it.base {
-            Base::Val(..) | Base::Local(_) => {
-                let t = it.ty;
-                let Some(v) = self.read(&it) else { return };
-                let (s, st) = self.spill(v, t, false);
-                Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: None }
-            }
-            _ => it,
+        // the loop advances a copy of the iterator (a move of a non-Copy one) taken at the loop
+        // head, as the checker does; a `&mut` iterator is copied as the pointer
+        let it = {
+            let t = it.ty;
+            let Some(v) = self.read(&it) else { return };
+            let (s, st) = self.spill(v, t, false);
+            Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: None }
         };
         let w = self.g.world();
         let Some(next) = self.g.prog.strings.lookup("next") else {

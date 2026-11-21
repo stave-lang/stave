@@ -140,6 +140,28 @@ and fn ABI are unchanged, and it has no effect (`without`).
 - Tests (conformance goldens, cross-target and CPU / GPU comparisons) count every NaN equal to
   every NaN and compare everything else bit for bit (`-0.0` is not `0.0`).
 
+## §4 `for` sources
+
+| source | element loop `for x in s` | chunk loop `for v: TxN in s` / `v: &mut TxN` |
+|---|---|---|
+| a range `a..b` | the values | not a chunk source |
+| `&a`, `&mut a`, a `&[T]` / `&mut [T]` / `&[T; N]` value | element `i` of `*s` borrowed per iteration: `&T` / `&mut T` | the chunks of `*s`; `&mut v` needs a `&mut` source (E0503 over `&`) |
+| an array value (a temporary: a call, a literal, a const, a value `if` / `match`, a cast) | the loop's temporary, elements moved out | the temporary, read only (`&mut v`: E0219 `mut-chunk`) |
+| an iterator (any place or value with `next(&mut self)`) | a copy of it (a move if not Copy) taken at the loop head | not a chunk source |
+| an array or `[T]` place | E0219: write `&a` / `&mut a` | E0219 |
+
+A *place* is: a local, param, `self`, or `static` (also through a module path, `m.TABLE`); `*e`;
+an expression whose last step is a field, tuple field, element `e[i]`, sub-slice `e[a..b]`, or
+`std.soa` column `ps.x` (of any base, `f().a` included); such an expression in parentheses or
+after `unsafe(..)`. Reason: a loop over a place reads (or writes) it while the body may change
+it; a reference makes the borrow visible and gives it one meaning in the checker and the code.
+
+A `&` or `&mut` chunk binding (also the first `tail masked` binding) borrows a copy of the chunk
+that lives in its block; the chunk of the sequence stays borrowed until the block is left (its end, `break`, `continue`, `return`, `?`), where a
+`&mut` copy is stored back. So the binding cannot leave its block (`return Option.Some(v)`:
+E0512; kept in an outer local: E0501). Reason: the chunk is loaded into a vector register or
+slot (a tail is partial, a chunk need not be aligned), never addressed in place.
+
 ## §4 Memory hints
 
 Reason for explicit hints: bandwidth-bound loops need them, and auto-hinting is guesswork.
