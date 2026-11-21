@@ -1,0 +1,26 @@
+// A helper stores through its `&mut fn()` param: `&mut f` at the call makes f untracked.
+import std.io;
+import std.vec;
+
+fn cheap() -> usize { return 1; }
+
+fn costly() -> usize {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(1);
+    v.push(2);
+    return v.len();
+}
+
+fn set(p: &mut fn() -> usize) { *p = costly; }
+
+fn work() -> usize without(alloc) { //~ ERROR E1401
+    let mut f: fn() -> usize = cheap;
+    set(&mut f);
+    return f();
+}
+
+fn main() -> i32 {
+    let n = work();
+    io.print(f"{n}\n");
+    return 0;
+}

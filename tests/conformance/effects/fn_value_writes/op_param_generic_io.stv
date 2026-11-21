@@ -1,0 +1,30 @@
+// A generic `<T: view + core.Add>` adds two fn values; the impl calls its `rhs`.
+import std.core;
+import std.io;
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+impl core.Add for fn() {
+    fn add(self, rhs: Self) -> Self {
+        rhs();
+        return nop;
+    }
+}
+
+fn plus<T: view + core.Add>(a: T, b: T) -> T {
+    return a + b;
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let a: fn() = nop;
+    let b: fn() = noisy;
+    let c = plus(a, b);
+}
+
+fn main() {
+    quiet();
+}

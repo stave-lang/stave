@@ -13,7 +13,8 @@
 // caller's stack.
 // Error traces (runtime.errtrace) are per task: each `join` arm and each body call starts with an
 // empty trace, and the caller's trace is the same after the call as before it, on every target
-// (the caller runs `a` and one par_for worker itself; the IR interpreter runs every body here).
+// (the caller runs `a` and one par_for worker itself; the IR interpreter runs every other body
+// on this thread at the join).
 
 import runtime.thread as rt;
 import runtime.atomic;

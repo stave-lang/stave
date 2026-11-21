@@ -1,0 +1,36 @@
+// A compound assignment in a `Once` init makes the fn value re-enter the `Once`.
+import std.core;
+import std.io;
+import std.sync;
+
+static CFG: sync.Once<u32, 1> = sync.Once::<u32, 1>.new();
+
+impl core.BitOr for fn() -> u32 {
+    fn bitor(self, rhs: Self) -> Self {
+        return inner;
+    }
+}
+
+fn two() -> u32 {
+    return 2u32;
+}
+
+fn inner() -> u32 {
+    return *CFG.get_or_init(two);
+}
+
+fn zero() -> u32 {
+    return 0u32;
+}
+
+fn init() -> u32 {
+    let mut f: fn() -> u32 = zero;
+    f |= zero;
+    return f() + 1; //~ ERROR E1402
+}
+
+fn main() -> i32 {
+    let v = *CFG.get_or_init(init);
+    io.print(f"{v}\n");
+    return 0;
+}

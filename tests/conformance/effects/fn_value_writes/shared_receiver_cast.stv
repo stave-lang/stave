@@ -1,0 +1,32 @@
+// A `&self` method on `fn()` is no harmless use; its unsafe write through `self` changes `f`.
+import std.core;
+import std.io;
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+trait Poke {
+    fn poke(&self);
+}
+
+impl Poke for fn() {
+    fn poke(&self) {
+        let p = self as *const fn() as *mut fn();
+        unsafe("self is a live local the caller does not read meanwhile") {
+            *p = noisy;
+        }
+    }
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let f: fn() = nop;
+    f.poke();
+    f();
+}
+
+fn main() {
+    quiet();
+}

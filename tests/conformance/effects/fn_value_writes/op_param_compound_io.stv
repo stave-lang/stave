@@ -1,0 +1,25 @@
+// A compound assignment calls the operator impl, whose `rhs` param reaches the whole table.
+import std.core;
+import std.io;
+
+impl core.Add for fn() {
+    fn add(self, rhs: Self) -> Self {
+        rhs();
+        return nop;
+    }
+}
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let mut f: fn() = nop;
+    f += noisy;
+}
+
+fn main() {
+    quiet();
+}

@@ -1,0 +1,28 @@
+// A clause callee calls a call result that bumps a static atomic.
+import std.atomic;
+import std.io;
+
+static N: atomic.U64 = atomic.U64.new(0);
+
+fn bump() {
+    let o = N.fetch_add(1);
+}
+
+fn mk() -> fn() {
+    return bump;
+}
+
+fn sneaky() -> bool {
+    mk()();
+    return true;
+}
+
+fn g(x: u32) -> u32 requires(sneaky()) { //~ ERROR E0211
+    return x;
+}
+
+fn main() {
+    let a = g(1);
+    let n = N.load();
+    io.print(f"N = {n}\n");
+}

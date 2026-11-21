@@ -1,0 +1,23 @@
+// Holding a static mutex, a fn value written by `*p` re-locks it.
+import std.io;
+import std.sync;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(0);
+
+fn idle() -> u32 { return 0; }
+
+fn relock() -> u32 {
+    return M.with_lock(fn(v: &mut u32) -> u32 { return *v; });
+}
+
+fn main() -> i32 {
+    let mut f: fn() -> u32 = idle;
+    let p = &mut f;
+    *p = relock;
+    let r = M.with_lock(fn(v: &mut u32) -> u32 { //~ ERROR E1405
+        io.print(f"locked\n");
+        return f();
+    });
+    io.print(f"{r}\n");
+    return 0;
+}

@@ -1,0 +1,23 @@
+// Recursion through an operator impl that calls its `rhs`.
+import std.core;
+import std.io;
+
+fn leaf() {}
+
+fn again() {
+    let a: fn() = leaf;
+    let b: fn() = again;
+    let c = a + b; //~ ERROR E1402
+}
+
+impl core.Add for fn() {
+    fn add(self, rhs: Self) -> Self {
+        rhs();
+        return leaf;
+    }
+}
+
+fn main() {
+    again();
+    io.print("done\n");
+}

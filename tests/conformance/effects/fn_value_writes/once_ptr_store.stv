@@ -1,0 +1,31 @@
+// `init` of a `Once` calls a fn value written by `*p`; its table holds `init` itself (a
+// cycle) and `inner`, which asks the same `Once`.
+import std.io;
+import std.sync;
+
+static CFG: sync.Once<u32, 1> = sync.Once::<u32, 1>.new();
+
+fn two() -> u32 {
+    return 2u32;
+}
+
+fn inner() -> u32 {
+    return *CFG.get_or_init(two);
+}
+
+fn zero() -> u32 {
+    return 0u32;
+}
+
+fn init() -> u32 {
+    let mut f: fn() -> u32 = zero;
+    let p = &mut f;
+    *p = inner;
+    return f() + 1; //~ ERROR E1402
+}
+
+fn main() -> i32 {
+    let v = *CFG.get_or_init(init);
+    io.print(f"{v}\n");
+    return 0;
+}

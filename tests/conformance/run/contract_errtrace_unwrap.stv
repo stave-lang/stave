@@ -1,0 +1,26 @@
+// The panic report of an `unwrap` after a call whose `requires` callee made an error shows the
+// trace the caller had: the clause put it back.
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Unwrap"
+//~ STDERR-CONTAINS "from contract_errtrace_unwrap.stv:9:19 in main.fail\n"
+import std.io;
+
+fn fail() -> Result<u32, u32> {
+    return Result.Err(7u32);
+}
+
+fn probe() -> bool {
+    let r: Result<u32, u32> = Result.Err(1u32);
+    return true;
+}
+
+fn f(x: u32) -> u32 requires(probe()) {
+    return x;
+}
+
+fn main() {
+    let r = fail();
+    let y = f(3u32);
+    io.print("unwrapping\n");
+    let v = r.unwrap();
+}

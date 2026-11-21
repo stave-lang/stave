@@ -1,0 +1,24 @@
+// A fn-typed view field written through `&mut h.f`: the field slot is untracked.
+import std.io;
+
+fn nop() {}
+
+fn noisy() {
+    io.print("noisy\n");
+}
+
+view struct H {
+    f: fn(),
+}
+
+fn quiet() without(io) { //~ ERROR E1401
+    let mut h = H.{ f: nop };
+    let q = &mut h.f;
+    *q = noisy;
+    let g = h.f;
+    g();
+}
+
+fn main() {
+    quiet();
+}

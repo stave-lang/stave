@@ -1,0 +1,36 @@
+// A clause callee reaches a static through a fn value a compound assignment changed.
+import std.atomic;
+import std.core;
+import std.io;
+
+static N: atomic.U64 = atomic.U64.new(0);
+
+impl core.Add for fn() {
+    fn add(self, rhs: Self) -> Self {
+        return bump;
+    }
+}
+
+fn nop() {}
+
+fn bump() {
+    let o = N.fetch_add(1);
+}
+
+fn sneaky() -> bool {
+    let mut f: fn() = nop;
+    f += nop;
+    f();
+    return true;
+}
+
+fn g(x: u32) -> u32 requires(sneaky()) { //~ ERROR E0211
+    return x;
+}
+
+fn main() {
+    let a = g(1);
+    let b = g(2);
+    let n = N.load();
+    io.print(f"N = {n}\n");
+}
