@@ -538,7 +538,7 @@ hole. The model never reads a static rule to decide.
 | two-phase receiver borrows | M4 (a borrow is not an access), M23 (protection starts at the entry) |
 | E0502: use after move (also by a later operand of the expression that moved it, M15); assignment into a part of a moved value (a value moves whole) | M9 |
 | E0503: assignment through `&`; `&mut` of a place behind `&`; writes of a `static` | M2 on `Frozen` |
-| E0503: assignment through a `&mut` reached through a `&` (`**r = v`, `r: &&mut T`) | M7 (the `&mut` read through a `&` is a `&`), M2 on `Frozen` |
+| E0503: assignment through a `&mut` reached through a `&` (`**r = v`, `r: &&mut T`), or its cast to `*mut T` (`*r as *mut T`) | M7 (the `&mut` read through a `&` is a `&`), M2 on `Frozen` |
 | E0503: assignment to, or `&mut` of, an immutable binding | none (the root of a local is `Active`) |
 | E0504: move out of `*r`, `r.f`, `v[i]`, a capture, a part of a value whose type has `impl Drop`, a `static`, a non-Copy part of a place outside a pattern that takes the whole value | M9, M12 (the owner later reads or drops the moved-out place; a destructor reads every part; a static's value is read by every later use) |
 | E0510: a returned borrow the `from` clause lacks | M24 (result); M13, M2 in the caller, which reads the clause |

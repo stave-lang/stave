@@ -2382,6 +2382,18 @@ impl<'a, 'b> Builder<'a, 'b> {
                 let Some(&first) = kids.first() else { return V::Const };
                 let v = self.expr(first);
                 let ty = self.nty(n);
+                // a `&mut T` place cast to `*mut` is `&mut *place` (a fresh `&mut` temporary is
+                // judged where it was made): behind a `&` it is E0503, as the reborrow is
+                if let V::P(p) = &v
+                    && matches!(self.tys.kind(ty), TypeKind::Ptr { mutable: true, .. })
+                    && let Some((inner, DerefKind::Mut)) = self.tys.deref(p.ty)
+                    && !(p.proj.is_empty() && self.body.locals.get(p.local as usize).is_some_and(|l| l.temp))
+                {
+                    let span = self.span(n);
+                    let (r, _) = self.borrow(p.clone().with(Proj::Deref(DerefKind::Mut), inner), true, false, span, n);
+                    let Some(op) = self.read(r, first) else { return V::Never };
+                    return self.put_temp(Rvalue::Pure(vec![op]), ty, n);
+                }
                 // a cast whose result can hold borrows or is not Copy is a use of the operand:
                 // the result borrows what the operand borrows, and the operand moves
                 if self.tys.ref_like(ty) || !self.tys.is_copy(ty) {

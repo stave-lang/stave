@@ -2444,7 +2444,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0503",
         severity: Severity::Error,
         area: "borrow",
-        rule: "assignment to an immutable binding or through `&` (case `shared-ref` also: a `&mut` chunk binding over a `&` source); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
+        rule: "assignment to an immutable binding or through `&` (case `shared-ref` also: `&mut` of a place behind `&`, a cast to `*mut T` of a `&mut` place behind `&`, a `&mut` chunk binding over a `&` source); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
         retired: false,
         located: true,
         holes: &[

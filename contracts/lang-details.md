@@ -204,6 +204,14 @@ restarts it (std restarts it at the user site where it makes an error: I/O, `All
 task's latest error, not necessarily the unwrapped one. The trace is out of band: `Result` layout
 and fn ABI are unchanged, and it has no effect (`without`).
 
+## §3 A `&mut` place cast to a raw pointer
+
+- `p as *mut T` with `p` a `&mut` place is the reborrow `&mut *p` (borrow-model M6): it needs
+  what that reborrow needs, so behind a `&` (`r.m as *mut T` with `r: &S`, `*r as *mut T` with
+  `r: &&mut T`) it is E0503 `shared-ref`, as `&mut *r.m as *mut T` is. Reason: a `&mut`
+  reached through a `&` is read-only (M7), and a `*mut` made from it may not write.
+- `p as *const T` reads the place: it is allowed behind a `&`.
+
 ## §3 Unspecified results
 
 - No op with an int or `bool` result is on the closed list: such a result sees an unspecified
