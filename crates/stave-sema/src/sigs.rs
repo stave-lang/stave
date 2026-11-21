@@ -1268,6 +1268,9 @@ impl<'p> SigBuilder<'p> {
             // `Self` in a method's bounds: the impl's self type, or the trait's `Self`
             self_ty = self.self_type_of(decl.parent);
         }
+        // `Self` in an impl's own bounds: its self type, lowered once its params are known
+        let impl_self =
+            if decl.kind == DeclKind::Impl { self.prog.impl_info(d).map(|i| i.self_ty) } else { None };
         // Insert a placeholder to stop recursion through bounds that mention the decl.
         self.gen_cache.insert(d, out.clone());
         if let Some(icx) = self.icx(decl.item)
@@ -1276,7 +1279,7 @@ impl<'p> SigBuilder<'p> {
         {
             // bounds are lowered with no view env (their params are not this scope's)
             let saved = std::mem::take(&mut self.cur_generics);
-            let own = self.lower_generics(&icx, g, n_parent, self_ty, &out);
+            let own = self.lower_generics(&icx, g, n_parent, self_ty, impl_self, &out);
             self.cur_generics = saved;
             out.extend(own);
         }
@@ -1290,6 +1293,7 @@ impl<'p> SigBuilder<'p> {
         g: u32,
         n_parent: u32,
         self_ty: Option<TypeId>,
+        impl_self: Option<u32>,
         parent: &[GenericParam],
     ) -> Vec<GenericParam> {
         let mut out: Vec<GenericParam> = Vec::new();
@@ -1344,6 +1348,17 @@ impl<'p> SigBuilder<'p> {
         // a bound may pass any param of the list (or of the parent) as a const arg
         let scope: Vec<GenericParam> = parent.iter().chain(&out).cloned().collect();
         let saved = self.bound_scope.replace(scope);
+        let env = match impl_self {
+            Some(node) if node != u32::MAX => {
+                // the impl's signature lowers it again and reports what it finds
+                let (mark, wide) = (self.diags.len(), self.wide.len());
+                let t = lower_type(self, &env, node, false);
+                self.diags.truncate(mark);
+                self.wide.truncate(wide);
+                TyEnv { self_ty: Some(t), ..env }
+            }
+            _ => env,
+        };
         for (k, &c) in params.iter().enumerate() {
             if !out[k].is_const
                 && let Some(b) = icx.child(c, NodeKind::Bound)
