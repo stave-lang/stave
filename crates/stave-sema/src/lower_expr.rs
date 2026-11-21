@@ -1020,12 +1020,14 @@ impl<'a> FnCx<'a> {
                     }
                 }
                 Some(crate::decls::DeclKind::Variant) => {
+                    // the enum type the type checker gave the value: the chain's node has the
+                    // type of its last step only
                     let end = icx.end_tok(node);
-                    let idx = match self.target(end).or_else(|| self.target(tok)) {
-                        Some(Target::Variant { index, .. }) => *index,
-                        _ => self.g.prog.decl(d).map_or(0, |x| x.index),
+                    let (idx, ty) = match self.target(end) {
+                        Some(Target::Variant { index, ty, .. }) => (*index, *ty),
+                        _ => return self.fail_at(Some(tok), "a variant value without a target"),
                     };
-                    let ty = self.nty(node);
+                    let ty = self.sub(ty);
                     if !matches!(self.kind(ty), TypeKind::Adt { .. }) {
                         return self.fail_at(Some(tok), "variant value type");
                     }
@@ -1201,8 +1203,7 @@ impl<'a> FnCx<'a> {
                 let close = icx.close(p);
                 let sl = kids.get(kid).copied();
                 kid += 1;
-                let last = close == pend;
-                cur = Cur::Val(self.struct_lit(n, sl, p, last));
+                cur = Cur::Val(self.struct_lit(sl, p));
                 p = close + 1;
                 continue;
             }
@@ -1215,8 +1216,7 @@ impl<'a> FnCx<'a> {
                     kid += 1;
                     a.map(|a| icx.kids_vec(a)).unwrap_or_default()
                 };
-                let last = close == pend;
-                cur = Cur::Val(self.call(n, cur, prim, p, &args, last));
+                cur = Cur::Val(self.call(n, cur, prim, p, &args));
                 p = close + 1;
                 continue;
             }
@@ -1662,7 +1662,7 @@ impl<'a> FnCx<'a> {
         Some(out)
     }
 
-    fn call(&mut self, n: u32, cur: Cur, prim: u32, paren: u32, args: &[u32], last: bool) -> E {
+    fn call(&mut self, n: u32, cur: Cur, prim: u32, paren: u32, args: &[u32]) -> E {
         let icx = self.icx;
         let ctok = {
             let mut t = paren.saturating_sub(1);
@@ -1726,7 +1726,7 @@ impl<'a> FnCx<'a> {
             }
             Some(Target::Variant { decl, index, .. }) => {
                 let adt = self.g.prog.decl(decl).map_or(crate::ids::DeclId::NONE, |d| d.parent);
-                let made = self.variant_ctor(n, adt, index, args, last);
+                let made = self.variant_ctor(paren, adt, index, args);
                 if adt == self.g.sigs.lang.result && index == self.g.res_err {
                     let hook = self.g.lang.errtrace_restart;
                     self.errtrace_hook(hook, ctok);
@@ -1833,75 +1833,36 @@ impl<'a> FnCx<'a> {
         (mask & !have.bits() == 0).then(|| k.clone())
     }
 
-    /// The ADT type of a literal or constructor: the node type when it is the last step, else
-    /// inferred from the field values.
-    fn adt_type(
-        &mut self,
-        n: u32,
-        adt: crate::ids::DeclId,
-        last: bool,
-        vi: usize,
-        vals: &[(usize, Ty)],
-    ) -> Ty {
-        if last {
-            let t = self.nty(n);
-            if matches!(self.kind(t), TypeKind::Adt { def, .. } if def == adt) {
-                return t;
-            }
-        }
-        let Some(ad) = self.g.sigs.adt(adt) else { return TypeId::NONE };
-        let ng = ad.generics.len();
-        if ng == 0 {
-            return self.tys.mk_adt(adt, Vec::new());
-        }
-        let mut binds: Vec<Option<GArg>> = vec![None; ng];
-        let w = self.g.world();
-        if let Some(v) = ad.variants.get(vi) {
-            for &(fi, t) in vals {
-                if let Some(f) = v.fields.get(fi) {
-                    let _ = w.match_ty(&self.tys, f.ty, t, &mut binds);
-                }
-            }
-        }
-        if binds.iter().any(|b| b.is_none()) {
-            return TypeId::NONE;
-        }
-        let args: Vec<GArg> = binds.into_iter().flatten().collect();
-        self.tys.mk_adt(adt, args)
+    /// The type of the value the struct literal or variant constructor with its target at token
+    /// `tok` makes: the one the type checker gave it, substituted. Nothing is inferred here.
+    fn made_type(&mut self, tok: u32, adt: crate::ids::DeclId) -> Option<Ty> {
+        let ty = match self.target(tok) {
+            Some(Target::Struct { ty, .. } | Target::Variant { ty, .. }) => *ty,
+            _ => return None,
+        };
+        let ty = self.sub(ty);
+        matches!(self.kind(ty), TypeKind::Adt { def, .. } if def == adt).then_some(ty)
     }
 
-    fn variant_ctor(&mut self, n: u32, adt: crate::ids::DeclId, index: u32, args: &[u32], last: bool) -> E {
-        let mut ty = if last { self.nty(n) } else { TypeId::NONE };
-        if !matches!(self.kind(ty), TypeKind::Adt { def, .. } if def == adt) {
-            ty = TypeId::NONE;
-        }
-        let fts: Option<Vec<Ty>> = if ty.is_none() {
-            None
-        } else {
-            self.adt_fields(ty).and_then(|v| v.get(index as usize).cloned())
+    fn variant_ctor(&mut self, tok: u32, adt: crate::ids::DeclId, index: u32, args: &[u32]) -> E {
+        let Some(ty) = self.made_type(tok, adt) else {
+            return self.fail_at(Some(tok), "a variant constructor without the type of its value");
         };
+        let fts = self.adt_fields(ty).and_then(|v| v.get(index as usize).cloned());
         let mut vs = Vec::with_capacity(args.len());
-        let mut tys = Vec::with_capacity(args.len());
         let mut held = Vec::new();
         for (k, &a) in args.iter().enumerate() {
             let w = fts.as_ref().and_then(|f| f.get(k).copied());
-            let Some((v, t)) = self.operand_held(a, w, &args[k + 1..], &mut held) else { return E::Never };
+            let Some((v, _)) = self.operand_held(a, w, &args[k + 1..], &mut held) else { return E::Never };
             vs.push(v);
-            tys.push((k, t));
         }
         self.release(&held);
-        if ty.is_none() {
-            ty = self.adt_type(n, adt, last, index as usize, &tys);
-        }
-        if ty.is_none() {
-            return self.fail(n, "cannot infer the type of a variant constructor");
-        }
         let mut ops = vec![self.int(index as i128)];
         ops.extend(vs);
         E::V(self.opn(Op::EnumMake, ty, &ops), ty)
     }
 
-    fn struct_lit(&mut self, n: u32, sl: Option<u32>, tok: u32, last: bool) -> E {
+    fn struct_lit(&mut self, sl: Option<u32>, tok: u32) -> E {
         let (adt, vidx) = match self.target(tok) {
             Some(Target::Struct { decl, .. }) => (*decl, None),
             Some(Target::Variant { decl, index, .. }) => {
@@ -1915,14 +1876,11 @@ impl<'a> FnCx<'a> {
         let field_names: Vec<crate::ids::Sym> = var.fields.iter().map(|f| f.name).collect();
         let icx = self.icx;
         let exprs = sl.map(|s| icx.kids_vec(s)).unwrap_or_default();
-        let mut ty = if last { self.nty(n) } else { TypeId::NONE };
-        if !matches!(self.kind(ty), TypeKind::Adt { def, .. } if def == adt) {
-            ty = TypeId::NONE;
-        }
-        let fts: Option<Vec<Ty>> =
-            if ty.is_none() { None } else { self.adt_fields(ty).and_then(|v| v.get(vi).cloned()) };
+        let Some(ty) = self.made_type(tok, adt) else {
+            return self.fail_at(Some(tok), "a struct literal without the type of its value");
+        };
+        let fts = self.adt_fields(ty).and_then(|v| v.get(vi).cloned());
         let mut vals: Vec<Option<Operand>> = vec![None; field_names.len()];
-        let mut tys = Vec::new();
         let mut held = Vec::new();
         for (k, &e) in exprs.iter().enumerate() {
             let name = icx.sym(icx.a(e).saturating_sub(2));
@@ -1930,31 +1888,10 @@ impl<'a> FnCx<'a> {
                 return self.fail(e, "unknown field");
             };
             let w = fts.as_ref().and_then(|f| f.get(fi).copied());
-            let Some((v, t)) = self.operand_held(e, w, &exprs[k + 1..], &mut held) else { return E::Never };
+            let Some((v, _)) = self.operand_held(e, w, &exprs[k + 1..], &mut held) else { return E::Never };
             vals[fi] = Some(v);
-            tys.push((fi, t));
         }
         self.release(&held);
-        if ty.is_none() {
-            ty = self.adt_type(n, adt, last, vi, &tys);
-        }
-        if ty.is_none() {
-            let k = self.nty(n);
-            let kk = self.kind(k);
-            let raw = self.tb().ty(n);
-            let rk = self.kind(raw);
-            let args = self.args.clone();
-            let ak: Vec<TypeKind> = args
-                .iter()
-                .filter_map(|a| if let GArg::Type(t) = a { Some(self.kind(*t)) } else { None })
-                .collect();
-            return self.fail_at(
-                Some(tok),
-                format!(
-                    "cannot infer the type of a struct literal ({kk:?} raw {rk:?} args {ak:?}, last {last})"
-                ),
-            );
-        }
         let mut ops = Vec::with_capacity(vals.len() + 1);
         if let Some(v) = vidx {
             ops.push(self.int(v as i128));
@@ -2187,8 +2124,6 @@ impl<'a> FnCx<'a> {
                 if !matches!(self.kind(p.ty), TypeKind::Bool) {
                     return self.vector_unsupported(Some(seg), "mask select");
                 }
-                // the operands' type: the checker records no result type for this built-in
-                let rt = self.nty(n);
                 let Some(c) = self.read(&p) else { return E::Never };
                 let (Some(&an), Some(&bn)) = (args.first(), args.get(1)) else {
                     return self.fail_at(Some(seg), "select operands");

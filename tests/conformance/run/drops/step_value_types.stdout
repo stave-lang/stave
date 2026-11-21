@@ -1,0 +1,35 @@
+mk 1
+drop 1
+k 1
+mk 2
+drop 2
+k 2
+mk 3
+drop 3
+k 3
+mk 4
+drop 4
+k 4
+mk 5
+drop 5
+k 5
+mk 6
+drop 6
+k 2
+drop F
+k 7
+drop F
+k 8
+nothing
+mk 9
+mk 10
+drop 9
+drop 10
+k 9
+mk 11
+mk 12
+drop 11
+drop 12
+k 11
+k 2
+end
