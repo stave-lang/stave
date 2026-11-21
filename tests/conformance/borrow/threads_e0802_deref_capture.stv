@@ -1,0 +1,66 @@
+//~ CHECK-ONLY
+// E0802 `par-mut`: a write or a `&mut` borrow rooted at a capture through a dereference mutates
+// the capture: `*t.0 = ..` (a tuple holding a `&mut`), `*a[0] += ..` (an array of `&mut`),
+// `w.v.push(..)` (an auto-deref `&mut self` receiver through a view field). A join arm holding
+// such a capture needs `Send`, not `Sync`.
+import std.sync;
+import std.thread;
+import std.vec;
+
+view struct W {
+    v: &mut vec.Vec<u64>,
+}
+
+fn tuple_of_mut() {
+    let mut x: u64 = 0;
+    let t = (&mut x, 0u32);
+    thread.par_for(0, 100, fn(i: usize) {
+        *t.0 = *t.0 + 1; //~ ERROR E0802
+    });
+}
+
+fn array_of_mut() {
+    let mut x: u64 = 0;
+    let a = [&mut x];
+    thread.par_for(0, 100, fn(i: usize) {
+        *a[0] = *a[0] + 1; //~ ERROR E0802
+    });
+}
+
+fn view_receiver() {
+    let mut v = vec.Vec::<u64>.new();
+    let w = W.{ v: &mut v };
+    thread.par_for(0, 100, fn(i: usize) {
+        w.v.push(i as u64); //~ ERROR E0802
+    });
+}
+
+fn par_for_mut_body(xs: &mut [u64]) {
+    let mut n: u64 = 0;
+    let t = (&mut n, 0u32);
+    thread.par_for_mut(xs, fn(i: usize, x: &mut u64) {
+        *x = 1;
+        *t.0 = *t.0 + 1; //~ ERROR E0802
+    });
+}
+
+fn nested(xs: &mut [u64]) {
+    thread.par_for_mut(xs, fn(i: usize, x: &mut u64) {
+        let t = (x, 0u32);
+        thread.par_for(0, 4, fn(j: usize) {
+            *t.0 = *t.0 + 1; //~ ERROR E0802
+        });
+    });
+}
+
+fn join_arm() -> u32 {
+    let m = sync.Mutex::<u64, 1>.new(0);
+    let mut g = m.lock();
+    let t = (&mut g, 0u32);
+    let (a, b) = thread.join(fn() -> u32 { return 1u32; }, fn() -> u32 {
+        let v = t.0.get_mut(); //~ ERROR E0802
+        *v = 5;
+        return 2u32;
+    });
+    return a + b;
+}

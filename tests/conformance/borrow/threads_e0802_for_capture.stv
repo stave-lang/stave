@@ -1,0 +1,86 @@
+//~ CHECK-ONLY
+// A `for` loop whose bindings may write its sequence (a `&mut` chunk or tail binding, a `&mut`
+// element) is a `&mut` use of the captured place it iterates: E0802 `par-mut` in a parallel loop
+// body, whatever dereferences lead to the sequence (an array, a slice, a view field, a `Vec`).
+import std.thread;
+import std.vec;
+
+view struct W {
+    s: &mut [u32],
+}
+
+fn chunk_array() {
+    let mut arr: [u32; 4] = [0u32; 4];
+    thread.par_for(0, 10, fn(i: usize) {
+        for v: &mut u32x4 in &mut arr { //~ ERROR E0802
+            *v = *v +% u32x4.splat(1);
+        }
+    });
+}
+
+fn chunk_tail_masked(xs: &mut [u32]) {
+    let t = (xs, 0u32);
+    thread.par_for(0, 10, fn(i: usize) {
+        for v: &mut u32x4 in t.0 { //~ ERROR E0802
+            *v = *v +% u32x4.splat(1);
+        } tail masked (v, m) {
+            *v = *v +% u32x4.splat(1);
+        }
+    });
+}
+
+fn chunk_view(w: W) {
+    thread.par_for(0, 10, fn(i: usize) {
+        for v: &mut u32x4 in w.s { //~ ERROR E0802
+            *v = *v +% u32x4.splat(1);
+        } tail scalar (x) {
+        }
+    });
+}
+
+fn elements_view(w: W) {
+    thread.par_for(0, 10, fn(i: usize) {
+        for x in w.s { //~ ERROR E0802
+            *x = 1;
+        }
+    });
+}
+
+fn elements_mut_borrow() {
+    let mut arr: [u32; 4] = [0u32; 4];
+    thread.par_for(0, 10, fn(i: usize) {
+        for x in &mut arr { //~ ERROR E0802
+            *x = 1;
+        }
+    });
+}
+
+fn vec_mut_slice() {
+    let mut v = vec.Vec::<u32>.new();
+    thread.par_for(0, 10, fn(i: usize) {
+        for x in v.as_mut_slice() { //~ ERROR E0802
+            *x = 1;
+        }
+    });
+}
+
+fn reads(w: W) -> u32 {
+    let arr: [u32; 8] = [1u32; 8];
+    let v = vec.Vec::<u32>.new();
+    thread.par_for(0, 10, fn(i: usize) {
+        let mut s: u32 = 0;
+        for x in &arr {
+            s = s +% *x;
+        }
+        for c: u32x4 in &arr {
+            s = s +% c.reduce_add_wrap();
+        }
+        for c: &u32x4 in &arr {
+            s = s +% (*c).reduce_add_wrap();
+        }
+        for x in v.as_slice() {
+            s = s +% *x;
+        }
+    });
+    return 0;
+}

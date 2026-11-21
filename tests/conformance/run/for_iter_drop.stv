@@ -1,0 +1,111 @@
+//~ STDOUT for_iter_drop.stdout
+//~ EXIT 0
+// The loop owns the iterator value it is given (a moved local, a field, a call result): it is
+// dropped exactly once, right after the loop, on every way out (the end, `break`, `continue` to
+// the end, `return`, `?`). An iterator holding a `MutexGuard` releases the lock there.
+import std.io;
+import std.sync;
+
+struct It {
+    i: u32,
+    id: u32,
+}
+
+impl It {
+    fn next(&mut self) -> Option<u32> {
+        if self.i >= 3 {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        return Option.Some(self.i);
+    }
+}
+
+impl Drop for It {
+    fn drop(&mut self) {
+        let k = self.id;
+        let i = self.i;
+        io.print(f"drop {k} at {i}\n");
+    }
+}
+
+struct S {
+    it: It,
+    k: u32,
+}
+
+view struct Held {
+    g: sync.MutexGuard<u32, 1>,
+    i: u32,
+}
+
+impl Held {
+    fn next(&mut self) -> Option<u32> {
+        if self.i >= 2 {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        return Option.Some(self.i);
+    }
+}
+
+fn mk(id: u32) -> It {
+    return It.{ i: 0, id: id };
+}
+
+fn ret(id: u32) -> u32 {
+    for x in mk(id) {
+        if x == 2 {
+            return x;
+        }
+    }
+    return 0;
+}
+
+fn q(id: u32) -> Option<u32> {
+    let mut s: u32 = 0;
+    for x in mk(id) {
+        let o: Option<u32> = if x == 2 then Option.None else Option.Some(x);
+        s = s + o?;
+    }
+    return Option.Some(s);
+}
+
+fn main() -> i32 {
+    let mut s: u32 = 0;
+    for x in mk(1) {
+        if x == 1 {
+            continue;
+        }
+        s = s + x;
+    }
+    io.print(f"after 1\n");
+    let b = mk(2);
+    for x in b {
+        s = s + x;
+        break;
+    }
+    io.print(f"after 2\n");
+    s = s + ret(3);
+    io.print(f"after 3\n");
+    let r = q(4);
+    io.print(f"after 4\n");
+    let st = S.{ it: mk(5), k: 9 };
+    for x in st.it {
+        s = s + x;
+    }
+    let k = st.k;
+    io.print(f"after 5 {k}\n");
+    let m = sync.Mutex::<u32, 1>.new(5);
+    for x in Held.{ g: m.lock(), i: 0 } {
+        s = s + x;
+    }
+    let g = m.lock();
+    let v = *g.get();
+    let n = match r {
+        Option.Some(w) => w,
+        Option.None => 99,
+    };
+    io.print(f"{s} {n} {v}\n");
+    return 0;
+}
