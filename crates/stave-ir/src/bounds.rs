@@ -40,9 +40,10 @@
 //! | `Offset` | the facts below prove `i + k < n` for the index `i + k` (`k` a constant, possibly negative or 0) without an equality; for a check against `n -| c` (a vector access), `k` includes `c`: the last lane |
 //!
 //! "The same" index or length is the same operand, or two `slice.len` of one slice value (the
-//! lowering reads the length again at every use). `Dominated` and `LoopBound` are found for all
-//! checks of a function at once, by sorting them with the candidate sources and one scan in
-//! dominator-tree order ([`Cx::twins`], [`Cx::loop_heads`]).
+//! lowering reads the length again at every use). For `LenEq` and `Offset`, two reads of one int
+//! field behind a `&` parameter are one node too (a `std.soa` column's length is its Soa's `len`).
+//! `Dominated` and `LoopBound` are found for all checks of a function at once, by sorting them with
+//! the candidate sources and one scan in dominator-tree order ([`Cx::twins`], [`Cx::loop_heads`]).
 //!
 //! `LenEq` and `Offset` come from one difference-constraint graph per function (`bounds/facts.rs`):
 //! facts `x <= y + c` over SSA values from dominating branches (unsigned compares, a loop's
@@ -431,6 +432,8 @@ pub fn source_inst(b: &Body, src: Source) -> Option<u32> {
         | Source::SubSat { inst: i }
         | Source::Bits { inst: i }
         | Source::Cast { inst: i }
+        | Source::FieldLoad { inst: i }
+        | Source::Getter { call: i }
         | Source::Ensures { call: i, .. }
         | Source::Arg { call: i, .. } => Some(i),
         Source::Range { value } => def(value),
@@ -1713,6 +1716,28 @@ mod tests {
         let arr = m.types.array(u32t, 4);
         let pa = m.types.ref_(false, arr);
         (m, us, u32t, pa)
+    }
+
+    /// Every node kind round-trips through the numbering, and no two nodes share a number.
+    #[test]
+    fn node_numbering_round_trips() {
+        let mut seen = std::collections::HashMap::new();
+        let mut nodes = vec![Node::Zero];
+        for v in [0u32, 1, 2, 3, 4, 5, 7, 4095, 4096, 1 << 20] {
+            nodes.extend([Node::Val(Value(v)), Node::Len(Value(v))]);
+            for k in [0u32, 1, 2, 4095] {
+                nodes.push(Node::Field(Value(v), k));
+            }
+        }
+        for n in nodes {
+            let Some(id) = facts::node_id(n) else {
+                assert!(matches!(n, Node::Field(p, _) if p.0 >= 4096), "{n:?}");
+                continue;
+            };
+            assert_eq!(facts::node_of(id), n);
+            assert_eq!(seen.insert(id, n), None, "{n:?} shares {id}");
+        }
+        assert_eq!(facts::node_id(Node::Val(Value(u32::MAX))), None);
     }
 
     /// `fn f(a: &[u32; 4], i: usize) -> u32 { return (*a)[i]; }` with and without its check.

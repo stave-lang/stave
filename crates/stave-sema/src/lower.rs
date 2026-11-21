@@ -434,7 +434,9 @@ fn lower_in_pool(
     tm.assemble = t1.elapsed();
     tm.n_funcs = m.as_ref().map_or(0, |m| m.0.funcs.len());
     let r = m.map(|(mut module, order, site_pos)| {
-        if borrows && !sigs.lang.unsafe_cell.is_none() {
+        // Also without the borrow side table: the bounds pass reads a field behind a `&` as one
+        // value only outside an `UnsafeCell`.
+        if !sigs.lang.unsafe_cell.is_none() {
             module.cell = Some(IrDecl(sigs.lang.unsafe_cell.0));
         }
         if borrows {

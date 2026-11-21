@@ -81,9 +81,10 @@ fn arb_witness() -> impl Strategy<Value = FnWitness> {
             Just(Node::Zero),
             (0..12u32).prop_map(|v| Node::Val(Value(v))),
             (0..12u32).prop_map(|v| Node::Len(Value(v))),
+            (0..4u32, 0..3u32).prop_map(|(v, k)| Node::Field(Value(v), k)),
         ]
     };
-    let src = (0..10u8, 0..14u32, 0..3u32).prop_map(|(kind, at, arg)| match kind {
+    let src = (0..12u8, 0..14u32, 0..3u32).prop_map(|(kind, at, arg)| match kind {
         0 => Source::Branch { block: at },
         1 => Source::Assert { call: at, arg },
         2 => Source::Check { inst: at },
@@ -93,6 +94,8 @@ fn arb_witness() -> impl Strategy<Value = FnWitness> {
         6 => Source::Range { value: Value(at) },
         7 => Source::Bits { inst: at },
         8 => Source::Cast { inst: at },
+        9 => Source::FieldLoad { inst: at },
+        10 => Source::Getter { call: at },
         _ => Source::SubSat { inst: at },
     });
     let edge = (node(), node(), -3i128..4, src, 0..3u32).prop_map(|(from, to, w, src, mul)| Edge {

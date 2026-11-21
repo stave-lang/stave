@@ -1,10 +1,14 @@
 //~ ARGS --release
 //~ STDOUT bounds_proofs.stdout
 // A build drops the bounds checks a proof covers (equal lengths, constant offsets from the loop
-// bound, a `requires` clause, unsigned masks, remainders, and right shifts, the range of a byte)
-// and keeps the others, in release as in debug; every result is the same in both.
+// bound, a `requires` clause, unsigned masks, remainders, and right shifts, the range of a byte,
+// the one length of every column of a `&soa.Soa`) and keeps the others, in release as in debug;
+// every result is the same in both.
+import std.atomic;
+import std.cell;
 import std.debug;
 import std.io;
+import std.soa;
 
 fn dot(a: &[u32], b: &[u32]) -> u32 {
     debug.assert(a.len() == b.len(), "dot: lengths differ");
@@ -237,6 +241,161 @@ fn by_signed(tbl: &[u32; 256], b: i8) -> u32 {
     return tbl[b as% usize];
 }
 
+struct P {
+    pub x: u32,
+    pub y: u32,
+}
+
+impl Copy for P {}
+
+// `ps.len()` and every column read the `len` of the one Soa behind `&`.
+fn soa_sum(ps: &soa.Soa<P>) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..ps.len() {
+        s += ps.x[i] + ps.y[i];
+    }
+    return s;
+}
+
+fn soa_by_column(ps: &soa.Soa<P>) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..ps.x.len() {
+        s += ps.y[i];
+    }
+    return s;
+}
+
+// two Soa values: their lengths are not known equal, so `b.y[i]` keeps its check
+fn soa_two(a: &soa.Soa<P>, b: &soa.Soa<P>) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..a.len() {
+        s += a.x[i] + b.y[i];
+    }
+    return s;
+}
+
+// behind `&mut` the length may change between two reads: every column access keeps its check
+fn soa_mut(ps: &mut soa.Soa<P>) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..ps.len() {
+        s += ps.x[i];
+        ps.y[i] = s;
+    }
+    return s;
+}
+
+// A local Soa: its `len` is a load from the local's slot, not a field behind a `&` param.
+fn soa_local(xs: &[P]) -> u32 {
+    let mut ps = soa.Soa::<P>.new();
+    ps.extend_from_slice(xs);
+    let mut s: u32 = 0;
+    for i in 0..ps.len() {
+        s += ps.x[i] + ps.y[i];
+    }
+    return s;
+}
+
+struct Holder {
+    pub ps: soa.Soa<P>,
+}
+
+// A Soa reached through a field of the param: not a field of the param itself.
+fn soa_held(h: &Holder) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..h.ps.len() {
+        s += h.ps.x[i] + h.ps.y[i];
+    }
+    return s;
+}
+
+// The rule is about any int field behind a `&` param, read directly or through a getter.
+struct N {
+    pub n: usize,
+    pub m: usize,
+}
+
+impl N {
+    pub fn get_n(&self) -> usize {
+        return self.n;
+    }
+
+    pub fn get_m(&self) -> usize {
+        return self.m;
+    }
+}
+
+fn field_twice(s: &N, xs: &[u32], i: usize) -> u32 {
+    if i < s.n {
+        if s.n <= xs.len() { return xs[i]; }
+    }
+    return 0;
+}
+
+fn getter_twice(s: &N, xs: &[u32], i: usize) -> u32 {
+    if i < s.get_n() {
+        if s.n <= xs.len() { return xs[i]; }
+    }
+    return 0;
+}
+
+// a getter of another field states that field
+fn getter_other(s: &N, xs: &[u32], i: usize) -> u32 {
+    if i < s.get_m() {
+        if s.n <= xs.len() { return xs[i]; }
+    }
+    return 0;
+}
+
+// two params of one type are two places
+fn two_params(s: &N, t: &N, xs: &[u32], i: usize) -> u32 {
+    if i < s.n {
+        if t.n <= xs.len() { return xs[i]; }
+    }
+    return 0;
+}
+
+// after `r = t`, `r.n` is `t`'s field
+fn shadowed(s: &N, t: &N, xs: &[u32], i: usize) -> u32 {
+    let mut r = s;
+    if i < r.n {
+        r = t;
+        if r.n <= xs.len() { return xs[i]; }
+    }
+    return 0;
+}
+
+fn field_mut(s: &mut N, xs: &[u32], i: usize) -> u32 {
+    if i < s.n {
+        if s.n <= xs.len() { return xs[i]; }
+    }
+    return 0;
+}
+
+// interior mutability: every read may see another value
+fn in_cell(c: &cell.Cell<usize>, xs: &[u32], i: usize) -> u32 {
+    if i < c.get() {
+        if c.get() <= xs.len() { return xs[i]; }
+    }
+    return 0;
+}
+
+fn in_atomic(a: &atomic.Usize, xs: &[u32], i: usize) -> u32 {
+    if i < a.load() {
+        if a.load() <= xs.len() { return xs[i]; }
+    }
+    return 0;
+}
+
+fn in_unsafe_cell(u: &cell.UnsafeCell<usize>, xs: &[u32], i: usize) -> u32 {
+    let p = u.get();
+    let n1 = unsafe("p points to the cell's usize; nothing writes it meanwhile") *p;
+    if i < n1 {
+        let n2 = unsafe("p points to the cell's usize; nothing writes it meanwhile") *p;
+        if n2 <= xs.len() { return xs[i]; }
+    }
+    return 0;
+}
+
 fn main() -> i32 {
     let a: [u32; 4] = [1, 3, 6, 10];
     let b: [u32; 4] = [2, 2, 2, 2];
@@ -282,5 +441,32 @@ fn main() -> i32 {
     let y3 = by_u16(&t, 44u16);
     let y4 = by_signed(&t, 44i8);
     io.print(f"{x1} {x2} {x3} {x4} {x5} {x6} {x7} {y1} {y2} {y3} {y4}\n");
+    let mut ps = soa.Soa::<P>.new();
+    for i in 0u32..4 { ps.push(P.{ x: i, y: 10 * i }); }
+    let z1 = soa_sum(&ps);
+    let z2 = soa_by_column(&ps);
+    let z3 = soa_two(&ps, &ps);
+    let z4 = soa_mut(&mut ps);
+    io.print(f"{z1} {z2} {z3} {z4}\n");
+    let rows: [P; 2] = [P.{ x: 1, y: 2 }, P.{ x: 3, y: 4 }];
+    let mut h = Holder.{ ps: soa.Soa::<P>.new() };
+    h.ps.extend_from_slice(&rows);
+    let z5 = soa_local(&rows);
+    let z6 = soa_held(&h);
+    let mut n = N.{ n: 3, m: 9 };
+    let n2 = N.{ n: 4, m: 4 };
+    let u1 = field_twice(&n, &a, 2);
+    let u2 = getter_twice(&n, &a, 2);
+    let u3 = getter_other(&n, &a, 2);
+    let u4 = two_params(&n, &n2, &a, 2);
+    let u5 = shadowed(&n, &n2, &a, 2);
+    let u6 = field_mut(&mut n, &a, 2);
+    let ce = cell.Cell::<usize>.new(3);
+    let at = atomic.Usize.new(3);
+    let uc = cell.UnsafeCell::<usize>.new(3);
+    let u7 = in_cell(&ce, &a, 2);
+    let u8a = in_atomic(&at, &a, 2);
+    let u9 = in_unsafe_cell(&uc, &a, 2);
+    io.print(f"{z5} {z6} {u1} {u2} {u3} {u4} {u5} {u6} {u7} {u8a} {u9}\n");
     return 0;
 }

@@ -1,0 +1,12 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at vec_swap_bounds.stv:10:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// `Vec.swap` with an index >= len panics `Bounds` at the caller, also when the other is valid.
+import std.vec;
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.new();
+    v.extend_from_slice(&[5u32, 6]);
+    v.swap(1, 2);
+    return 0;
+}

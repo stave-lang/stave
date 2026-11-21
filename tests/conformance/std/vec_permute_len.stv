@@ -1,0 +1,13 @@
+//~ EXIT 101
+//~ STDERR-CONTAINS "panic: Bounds at vec_permute_len.stv:11:"
+//~ STDERR-CONTAINS "in main.main (thread 0)"
+// `Vec.permute` by a slice of another length than the Vec panics `Bounds` at the caller.
+import std.vec;
+
+fn main() -> i32 {
+    let mut v = vec.Vec::<u32>.new();
+    v.extend_from_slice(&[5u32, 6, 7]);
+    let perm: [u32; 2] = [1, 0];
+    v.permute(&perm);
+    return 0;
+}

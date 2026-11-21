@@ -36,7 +36,14 @@ re-derives each step from the function's IR and from certified summaries of its 
 fact a witness cites is established earlier in the same execution: a branch taken, a check that
 stayed, a check that was removed with its own witness, or a call that returned (its callee's
 `ensures` rows, and its `requires` rows, which held at the call or the callee would have
-trapped).
+trapped). One kind of fact rests on the memory model instead: two reads of an int field behind a
+`&` parameter of the running function (T not `UnsafeCell`; a direct load, or a getter call) give
+one value (`Field` nodes, checked-ir.md "Bounds checks"). It holds because nothing writes those
+bytes while the call runs: safe code cannot (a `&mut` to them would conflict with the live `&`,
+E0501; a private field such as `Soa.len` is written only by `&mut self` methods), and such a write
+by unsafe code is undefined behaviour (LANG.md §3, the protected `&` param; borrow-model.md M21,
+M23: the tracking interpreter reports it as `write-under-shared`). So the claim holds for every
+execution without undefined behaviour; one with it has no meaning to keep.
 
 **Argument.** Suppose some execution of the program with checks removed differs from the
 execution with all checks kept. Take the first removed check, in execution order, that would have
@@ -49,7 +56,8 @@ contradiction.
 its own `ensures` after a recursive call returns: that call's checks ran earlier. Nothing is
 claimed about a call that does not return (partial correctness).
 
-**What would break it.** A witness accepted by code other than the checker; a summary row not
+**What would break it.** A witness accepted by code other than the checker; a write behind a
+`&` parameter outside an `UnsafeCell` that the memory model allows (a `Field` fact would be stale); a summary row not
 certified against the callee's own IR; a fact taken from a point that does not dominate the
 check; an unchecked entry reached by a call whose proof covered only some conjuncts of the
 callee's `requires` (acceptance is all or nothing for that reason).
