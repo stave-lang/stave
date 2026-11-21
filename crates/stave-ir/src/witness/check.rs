@@ -40,7 +40,7 @@ use super::{
 use crate::ir::{
     Block, Body, CastKind, FuncId, InstanceId, Module, Op, Operand, Span, Target, Term, Value, ValueDef,
 };
-use crate::types::{IntBits, TypeKey};
+use crate::types::{IntBits, TypeId, TypeKey};
 
 /// Why a witness does not hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1075,6 +1075,50 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The type of `p` when it is a parameter of the entry block of type `&T` (not `&mut`), T
+    /// not `std.cell.UnsafeCell`, in a module that names that type: what `p` points to stays
+    /// unchanged outside an `UnsafeCell` while the function runs (writing it is undefined
+    /// behaviour), so a field of it is one [`Node::Field`].
+    fn shared_param(&self, p: Value) -> Option<TypeId> {
+        let cell = self.m.cell?;
+        if !self.b.params(Block(0)).contains(&p) {
+            return None;
+        }
+        let t = self.b.value_ty(p)?;
+        let Some(&TypeKey::Ref { mutable: false, inner }) = self.m.types.key(t) else { return None };
+        match self.m.types.key(inner) {
+            Some(TypeKey::Adt { def, .. }) if *def == cell => None,
+            Some(_) => Some(t),
+            None => None,
+        }
+    }
+
+    /// Field `k` when `g`'s one parameter has type `pt` and its body is the one block
+    /// `a = addr.field %0 k; r = load a; ret r`: a call reads the field at the call.
+    fn getter(&self, g: FuncId, pt: TypeId) -> Option<u32> {
+        let f = self.m.func(g)?;
+        let b = f.body.as_ref()?;
+        if f.params.as_slice() != [pt] || b.blocks.len() != 1 || b.insts.len() != 2 {
+            return None;
+        }
+        let blk = &b.blocks[0];
+        let &[p] = b.params(Block(0)) else { return None };
+        if blk.insts.start != 0 || blk.insts.len != 2 {
+            return None;
+        }
+        let (Some(a), Some(r)) = (b.insts.result[0], b.insts.result[1]) else { return None };
+        let (&[Operand::Value(x), k], &[Operand::Value(y)]) = (b.args(0), b.args(1)) else { return None };
+        let ok = b.insts.op[0] == Op::FieldAddr
+            && b.insts.op[1] == Op::Load
+            && x == p
+            && y == a
+            && blk.term == Term::Ret(Some(Operand::Value(r)));
+        if !ok {
+            return None;
+        }
+        b.int_const(k).and_then(|k| u32::try_from(k).ok())
+    }
+
     /// The result and operands of instruction `i`, which must run before point `at`.
     fn defined(&self, i: u32, at: At) -> Result<(Value, &'a [Operand]), Reject> {
         let v = self.b.insts.result.get(i as usize).copied().flatten().ok_or(Reject::Source)?;
@@ -1390,6 +1434,32 @@ impl<'a> Cx<'a> {
                 }
                 stated.push(Node::Val(v), Node::Val(x), 0);
                 stated.push(Node::Val(x), Node::Val(v), 0);
+            }
+            Source::FieldLoad { inst } => {
+                let (v, args) = self.defined(inst, at)?;
+                let (Some(Op::Load), &[Operand::Value(a)]) = (self.op(inst), args) else {
+                    return Err(Reject::Source);
+                };
+                let fa = self.def(a).ok_or(Reject::Source)?;
+                let (Some(Op::FieldAddr), &[Operand::Value(p), k]) = (self.op(fa), self.b.args(fa)) else {
+                    return Err(Reject::Source);
+                };
+                self.shared_param(p).ok_or(Reject::Source)?;
+                let k = self.konst(k).and_then(|k| u32::try_from(k).ok()).ok_or(Reject::Source)?;
+                self.int_ty(v).ok_or(Reject::Operand)?;
+                stated.push(Node::Val(v), Node::Field(p, k), 0);
+                stated.push(Node::Field(p, k), Node::Val(v), 0);
+            }
+            Source::Getter { call } => {
+                let (v, args) = self.defined(call, at)?;
+                let (Some(Op::Call), &[Operand::Func(g), Operand::Value(p)]) = (self.op(call), args) else {
+                    return Err(Reject::Source);
+                };
+                let pt = self.shared_param(p).ok_or(Reject::Source)?;
+                let k = self.getter(g, pt).ok_or(Reject::Source)?;
+                self.int_ty(v).ok_or(Reject::Operand)?;
+                stated.push(Node::Val(v), Node::Field(p, k), 0);
+                stated.push(Node::Field(p, k), Node::Val(v), 0);
             }
             Source::Requires { clause } => {
                 if !self.assume {

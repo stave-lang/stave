@@ -40,7 +40,8 @@
 //! | `Offset` | the facts below prove `i + k < n` for the index `i + k` (`k` a constant, possibly negative or 0) without an equality; for a check against `n -| c` (a vector access), `k` includes `c`: the last lane |
 //!
 //! "The same" index or length is the same operand, or two `slice.len` of one slice value (the
-//! lowering reads the length again at every use). `Dominated` and `LoopBound` are found for all
+//! lowering reads the length again at every use). For `LenEq` and `Offset`, two reads of one int
+//! field behind a `&` parameter are one node too (a `std.soa` column's length is its Soa's `len`). `Dominated` and `LoopBound` are found for all
 //! checks of a function at once, by sorting them with the candidate sources and one scan in
 //! dominator-tree order ([`Cx::twins`], [`Cx::loop_heads`]).
 //!
@@ -431,6 +432,8 @@ pub fn source_inst(b: &Body, src: Source) -> Option<u32> {
         | Source::SubSat { inst: i }
         | Source::Bits { inst: i }
         | Source::Cast { inst: i }
+        | Source::FieldLoad { inst: i }
+        | Source::Getter { call: i }
         | Source::Ensures { call: i, .. }
         | Source::Arg { call: i, .. } => Some(i),
         Source::Range { value } => def(value),

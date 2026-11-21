@@ -1,10 +1,12 @@
 //~ ARGS --release
 //~ STDOUT bounds_proofs.stdout
 // A build drops the bounds checks a proof covers (equal lengths, constant offsets from the loop
-// bound, a `requires` clause, unsigned masks, remainders, and right shifts, the range of a byte)
-// and keeps the others, in release as in debug; every result is the same in both.
+// bound, a `requires` clause, unsigned masks, remainders, and right shifts, the range of a byte,
+// the one length of every column of a `&soa.Soa`) and keeps the others, in release as in debug;
+// every result is the same in both.
 import std.debug;
 import std.io;
+import std.soa;
 
 fn dot(a: &[u32], b: &[u32]) -> u32 {
     debug.assert(a.len() == b.len(), "dot: lengths differ");
@@ -237,6 +239,49 @@ fn by_signed(tbl: &[u32; 256], b: i8) -> u32 {
     return tbl[b as% usize];
 }
 
+struct P {
+    pub x: u32,
+    pub y: u32,
+}
+
+impl Copy for P {}
+
+// `ps.len()` and every column read the `len` of the one Soa behind `&`.
+fn soa_sum(ps: &soa.Soa<P>) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..ps.len() {
+        s += ps.x[i] + ps.y[i];
+    }
+    return s;
+}
+
+fn soa_by_column(ps: &soa.Soa<P>) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..ps.x.len() {
+        s += ps.y[i];
+    }
+    return s;
+}
+
+// two Soa values: their lengths are not known equal, so `b.y[i]` keeps its check
+fn soa_two(a: &soa.Soa<P>, b: &soa.Soa<P>) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..a.len() {
+        s += a.x[i] + b.y[i];
+    }
+    return s;
+}
+
+// behind `&mut` the length may change between two reads: every column access keeps its check
+fn soa_mut(ps: &mut soa.Soa<P>) -> u32 {
+    let mut s: u32 = 0;
+    for i in 0..ps.len() {
+        s += ps.x[i];
+        ps.y[i] = s;
+    }
+    return s;
+}
+
 fn main() -> i32 {
     let a: [u32; 4] = [1, 3, 6, 10];
     let b: [u32; 4] = [2, 2, 2, 2];
@@ -282,5 +327,12 @@ fn main() -> i32 {
     let y3 = by_u16(&t, 44u16);
     let y4 = by_signed(&t, 44i8);
     io.print(f"{x1} {x2} {x3} {x4} {x5} {x6} {x7} {y1} {y2} {y3} {y4}\n");
+    let mut ps = soa.Soa::<P>.new();
+    for i in 0u32..4 { ps.push(P.{ x: i, y: 10 * i }); }
+    let z1 = soa_sum(&ps);
+    let z2 = soa_by_column(&ps);
+    let z3 = soa_two(&ps, &ps);
+    let z4 = soa_mut(&mut ps);
+    io.print(f"{z1} {z2} {z3} {z4}\n");
     return 0;
 }
