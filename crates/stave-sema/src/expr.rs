@@ -4122,8 +4122,11 @@ impl<'a> Ck<'a> {
         if let Some(next) = self.prog.strings.lookup("next") {
             let genv = self.genv();
             let from = self.package();
+            // a `next` with generic params of its own is no iterator's `next`: the loop has no
+            // args to give it
             if let Lookup::Found { m, .. } = self.w.lookup_method(&mut self.tys, it, next, genv, from)
                 && let Some((sig, args, self_ty)) = self.w.method_sig(&m)
+                && sig.generics.len() as u32 == sig.n_parent
             {
                 let ret = self.tys.subst(sig.ret, &args, self_ty);
                 // lowering resolves `next` with the impl's args (none of its own)

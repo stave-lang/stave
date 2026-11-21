@@ -278,8 +278,8 @@ resolved `next`), never the instance type. The list is closed: a type not listed
 | a reference to a reference (`&mut &mut It`, `&&mut It`, `& &[T]`, `&mut &[T; N]`, ..) | E0219 `ref-ref`: iterate the inner reference | E0219 `ref-ref` |
 | any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, or a reference to one) | E0219 `not-source` | E0219 `not-source` |
 
-An iterator type is a struct, enum, or generic parameter with `next(&mut self) -> Option<X>`
-(else E0219 `not-source`; a `vec.Vec` or a reference to one: E0219 `as-slice`, iterate
+An iterator type is a struct, enum, or generic parameter with `next(&mut self) -> Option<X>`,
+no generic params of its own (else E0219 `not-source`; a `vec.Vec` or a reference to one: E0219 `as-slice`, iterate
 `.as_slice()`). A generic `T` (or `&mut T`) source is always an iterator through its bound's
 `next`: each instance runs that trait method, whatever the instance type is (`T = [u64; 2]` does
 not become an array loop, `T = &mut It` runs `impl Next for &mut It`); a `T` without such a bound
