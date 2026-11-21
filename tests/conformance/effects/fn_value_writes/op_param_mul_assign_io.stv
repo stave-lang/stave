@@ -1,6 +1,10 @@
-// `f *= noisy`: the `Mul` impl calls `rhs`.
+// `h *= H.{ f: noisy }`: the `Mul` impl calls its `rhs` fn field.
 import std.core;
 import std.io;
+
+view struct H {
+    f: fn(),
+}
 
 fn nop() {}
 
@@ -8,16 +12,17 @@ fn noisy() {
     io.print("noisy\n");
 }
 
-impl core.Mul for fn() {
+impl core.Mul for H {
     fn mul(self, rhs: Self) -> Self {
-        rhs();
-        return nop;
+        let k = rhs.f;
+        k();
+        return H.{ f: nop };
     }
 }
 
 fn quiet() without(io) { //~ ERROR E1401
-    let mut f: fn() = nop;
-    f *= noisy;
+    let mut h = H.{ f: nop };
+    h *= H.{ f: noisy };
 }
 
 fn main() {

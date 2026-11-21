@@ -1,0 +1,15 @@
+pub struct A { pub n: u32 }
+
+pub trait Tr {
+    fn m(&self) -> u32;
+}
+
+impl Tr for A {
+    fn m(&self) -> u32 {
+        return self.n;
+    }
+}
+
+pub fn call(a: &A) -> u32 {
+    return a.m();
+}

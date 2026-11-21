@@ -264,22 +264,22 @@ pub(crate) fn resolve_trait_method<I: Interner + ?Sized>(
     let md = w.prog.decl(method)?;
     let trait_decl = md.parent;
     let name = md.name;
-    let tr = TraitRef { trait_decl, args: trait_args.to_vec() };
-    if let Some((imp, impl_args)) = w.find_impl(cx, self_ty, &tr, &[], 0)
-        && let Some(idef) = w.sigs.impl_def(imp)
-        && let Some(m) =
-            idef.methods.iter().copied().find(|&m| w.prog.decl(m).is_some_and(|d| d.name == name))
-    {
-        let mut args = impl_args;
-        args.extend_from_slice(own_args);
-        return Some(Resolved::Inst(InstKey { decl: m, args }));
-    }
+    // A built-in operator is the only impl of its trait for its type: an impl beside it is
+    // E0903 (and E0420 outside std), so the order of the two lookups does not matter.
     let tname = w.prog.strings.get(w.prog.decl(trait_decl)?.name);
-    let op = crate::sigs::OP_TRAITS.iter().find(|(t, _)| *t == tname)?.0;
-    if w.sigs.lang.ops.get(op) == Some(&trait_decl) && crate::traits::builtin_op_impl(cx, op, self_ty) {
+    if let Some(&(op, _)) = crate::sigs::OP_TRAITS.iter().find(|(t, _)| *t == tname)
+        && w.sigs.lang.ops.get(op) == Some(&trait_decl)
+        && crate::traits::builtin_op_impl(cx, op, self_ty)
+    {
         return Some(Resolved::BuiltinOp(op));
     }
-    None
+    let tr = TraitRef { trait_decl, args: trait_args.to_vec() };
+    let (imp, impl_args) = w.find_impl(cx, self_ty, &tr, &[], 0)?;
+    let idef = w.sigs.impl_def(imp)?;
+    let m = idef.methods.iter().copied().find(|&m| w.prog.decl(m).is_some_and(|d| d.name == name))?;
+    let mut args = impl_args;
+    args.extend_from_slice(own_args);
+    Some(Resolved::Inst(InstKey { decl: m, args }))
 }
 
 /// The `Drop.drop` impl method instance of `t`, if `t` implements `Drop`.

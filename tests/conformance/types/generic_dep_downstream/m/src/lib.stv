@@ -1,0 +1,17 @@
+import d;
+
+pub struct Cnt { pub k: u32 }
+
+impl d.It for Cnt {
+    fn next(&mut self) -> Option<u32> {
+        if self.k == 0 {
+            return Option.None;
+        }
+        self.k = self.k - 1;
+        return Option.Some(self.k);
+    }
+}
+
+pub fn run() -> u32 {
+    return d.total(Cnt.{ k: 5 });
+}

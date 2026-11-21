@@ -1,21 +1,25 @@
 0 3 -> local 0 0
-3 0 -> decl 10
+3 0 -> decl 11
 3 6 -> local 3 2
-4 0 -> decl 8
-4 4 -> decl 10
+4 0 -> decl 9
+4 4 -> decl 11
 4 10 -> local 4 6
-5 0 -> decl 8
-5 4 -> decl 10
+5 0 -> decl 9
+5 4 -> decl 11
 5 10 -> local 5 6
 5 16 -> local 5 14
-7 0 -> decl 3
-9 10 -> local 9 2
-9 11 -> local 9 5
-10 4 -> decl 18
-10 11 -> decl 17
-10 12 -> local 10 3
-10 14 -> local 10 3
-10 19 -> decl 3
-10 19 -> decl 16
-10 20 -> local 10 10
-10 25 -> local 10 10
+7 0 -> decl 2
+9 0 -> decl 2
+9 0 -> decl 11
+9 2 -> decl 17
+10 0 -> decl 4
+12 10 -> local 12 2
+12 11 -> local 12 5
+13 4 -> decl 23
+13 11 -> decl 22
+13 12 -> local 13 3
+13 14 -> local 13 3
+13 19 -> decl 4
+13 19 -> decl 21
+13 20 -> local 13 10
+13 25 -> local 13 10

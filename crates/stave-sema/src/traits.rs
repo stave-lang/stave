@@ -1117,12 +1117,15 @@ impl<'a> World<'a> {
     }
 
     /// Method lookup for receiver type `recv`.
+    /// `from`: the package of the call; only impls of packages it sees take part (see
+    /// [`incoherent`]).
     pub fn lookup_method<I: Interner + ?Sized>(
         &self,
         cx: &mut I,
         recv: TypeId,
         name: Sym,
         env: &[GenericParam],
+        from: Option<crate::PackageId>,
     ) -> Lookup {
         let mut c = recv;
         for level in 0..64u32 {
@@ -1149,7 +1152,7 @@ impl<'a> World<'a> {
                     }
                 }
             }
-            if let Some(r) = self.lookup_at(cx, c, name, env) {
+            if let Some(r) = self.lookup_at(cx, c, name, env, from) {
                 return match r {
                     Ok(m) => Lookup::Found { m, level, recv: c },
                     Err((traits, methods)) => Lookup::Ambiguous { traits, methods, recv: c },
@@ -1174,7 +1177,12 @@ impl<'a> World<'a> {
         c: TypeId,
         name: Sym,
         env: &[GenericParam],
+        from: Option<crate::PackageId>,
     ) -> Option<Result<MethodRef, ([DeclId; 2], [DeclId; 2])>> {
+        let seen = |i: DeclId| match (from, package_of(self.prog, i)) {
+            (Some(f), Some(p)) => package_sees(self.prog, f, p),
+            _ => true,
+        };
         let head = self.head(cx, c);
         let lists: [&[DeclId]; 2] = [
             head.and_then(|h| self.sigs.impls_by_head.get(&h)).map_or(&[][..], |v| &v[..]),
@@ -1184,7 +1192,7 @@ impl<'a> World<'a> {
         for list in lists {
             for &i in list {
                 let Some(imp) = self.sigs.impl_def(i) else { continue };
-                if imp.trait_ref.is_some() {
+                if imp.trait_ref.is_some() || !seen(i) {
                     continue;
                 }
                 let Some(m) =
@@ -1203,16 +1211,49 @@ impl<'a> World<'a> {
             for &i in list {
                 let Some(imp) = self.sigs.impl_def(i) else { continue };
                 let Some(tr) = &imp.trait_ref else { continue };
+                if !seen(i) {
+                    continue;
+                }
                 let Some(m) =
                     imp.methods.iter().copied().find(|&m| self.prog.decl(m).is_some_and(|d| d.name == name))
                 else {
                     continue;
                 };
-                if found.iter().any(|(t, _, _)| *t == tr.trait_decl) {
-                    continue;
-                }
                 if let Some(args) = self.impl_applies(cx, imp, c, env, 0) {
-                    let tm = self.prog.member(tr.trait_decl, name).unwrap_or(m);
+                    // two impls of one trait (other trait args) for this type: the call names
+                    // neither, so it is ambiguous; the labels then show the two impls' methods
+                    let same = found.iter().any(|(t, _, _)| *t == tr.trait_decl);
+                    if same {
+                        // the same trait args again: overlapping impls, E0903 at the impl
+                        let mine: Vec<GArg> =
+                            tr.args.iter().map(|&a| crate::mono::subst_garg(cx, a, &args)).collect();
+                        let dup = found.iter().any(|(t, f, _)| {
+                            *t == tr.trait_decl
+                                && match f {
+                                    MethodRef::Impl { impl_decl, impl_args, .. } => self
+                                        .sigs
+                                        .impl_def(*impl_decl)
+                                        .and_then(|x| x.trait_ref.as_ref())
+                                        .is_some_and(|ftr| {
+                                            ftr.args
+                                                .iter()
+                                                .map(|&a| crate::mono::subst_garg(cx, a, impl_args))
+                                                .eq(mine.iter().copied())
+                                        }),
+                                    _ => false,
+                                }
+                        });
+                        if dup {
+                            continue;
+                        }
+                    }
+                    let tm = if same { m } else { self.prog.member(tr.trait_decl, name).unwrap_or(m) };
+                    if same
+                        && let Some(first) = found.iter_mut().find(|(t, _, _)| *t == tr.trait_decl)
+                        && let MethodRef::Impl { method, .. } = first.1
+                    {
+                        first.2 = method;
+                    }
                     found.push((
                         tr.trait_decl,
                         MethodRef::Impl { method: m, impl_decl: i, impl_args: args },
@@ -1299,7 +1340,29 @@ pub(crate) fn check_impls(
         let impl_span = decl.name_span;
         let names = NameCx { prog, generics: &imp.generics };
         let self_text = types::display(tys, &names, imp.self_ty);
-        let Some(tr) = &imp.trait_ref else { continue };
+        // E0421: a use of the impl binds its params from the self type alone (method lookup
+        // knows only the receiver), so a param that does not occur there would get no type.
+        let free = unconstrained_params(tys, imp);
+        if !free.is_empty() {
+            for k in free {
+                let g = &imp.generics[k as usize];
+                let pn = prog.strings.get(g.name).to_string();
+                out.extend(mk(
+                    "E0421",
+                    None,
+                    &[("param", &pn), ("type", &self_text)],
+                    impl_span,
+                    &[("param", g.name_span)],
+                ));
+            }
+            continue;
+        }
+        let Some(tr) = &imp.trait_ref else {
+            if let Some(dg) = incoherent(prog, sigs, tys, d, imp, &self_text) {
+                out.push(dg);
+            }
+            continue;
+        };
         // E1408: Flat and Frozen come from the type's structure only, so the impl is rejected
         // whole and no other impl check applies to it.
         let lang = &sigs.lang;
@@ -1310,6 +1373,13 @@ pub(crate) fn check_impls(
         }
         let Some(trait_def) = sigs.trait_def(tr.trait_decl) else { continue };
         let trait_path = prog.decl_path(tr.trait_decl);
+        // a `Drop` impl has the stricter E0419 below
+        if tr.trait_decl != lang.drop
+            && let Some(dg) = incoherent(prog, sigs, tys, d, imp, &self_text)
+        {
+            out.push(dg);
+            continue;
+        }
         // E0810: an unsafe trait (Send and Sync are declared unsafe in std.core) is implemented
         // only by an `unsafe("..") impl`; otherwise safe code could declare any type Sync.
         if let Some(td) = prog.decl(tr.trait_decl)
@@ -1468,7 +1538,13 @@ pub(crate) fn check_impls(
                 ));
             }
         }
-        // E0903: overlapping impls of one trait.
+        // E0903: overlapping impls of one trait; a built-in operator impl counts as one.
+        if let Some(op) = lang.ops.iter().find(|(_, t)| **t == tr.trait_decl).map(|(n, _)| *n)
+            && builtin_op_impl(tys, op, imp.self_ty)
+        {
+            out.extend(mk("E0903", None, &[("trait", &trait_path), ("type", &self_text)], impl_span, &[]));
+            continue;
+        }
         let prev = seen.entry(tr.trait_decl).or_default();
         for &o in prev.iter() {
             let Some(other) = sigs.impl_def(o) else { continue };
@@ -1490,6 +1566,103 @@ pub(crate) fn check_impls(
         prev.push(d);
     }
     out
+}
+
+/// The generic params of `imp` (type and const) that do not occur in its self type.
+fn unconstrained_params(tys: &TypeTable, imp: &ImplDef) -> Vec<u32> {
+    if tys.is_error_ty(imp.self_ty) {
+        return Vec::new();
+    }
+    let mut used = vec![false; imp.generics.len()];
+    let mut mark = |i: u32| {
+        if let Some(u) = used.get_mut(i as usize) {
+            *u = true;
+        }
+    };
+    let mut stack = vec![imp.self_ty];
+    let mut kids = Vec::new();
+    while let Some(t) = stack.pop() {
+        let k = tys.kind(t);
+        match k {
+            TypeKind::Param(i) | TypeKind::ConstParam(i) => mark(*i),
+            TypeKind::Array { len: ConstArg::Param(i), .. } => mark(*i),
+            TypeKind::Adt { args, .. } => {
+                for a in args.iter() {
+                    if let GArg::Const(ConstArg::Param(i)) = a {
+                        mark(*i);
+                    }
+                }
+            }
+            _ => {}
+        }
+        kids.clear();
+        k.children(&mut kids);
+        stack.extend_from_slice(&kids);
+    }
+    (0..imp.generics.len() as u32).filter(|&i| !used[i as usize]).collect()
+}
+
+/// The package that declares `d`.
+pub(crate) fn package_of(prog: &Program, d: DeclId) -> Option<crate::PackageId> {
+    prog.decl(d).and_then(|x| prog.module(x.module)).map(|m| m.package)
+}
+
+/// Whether package `from` sees the items of package `to`: itself or a dependency, at any depth.
+pub(crate) fn package_sees(prog: &Program, from: crate::PackageId, to: crate::PackageId) -> bool {
+    if from == to {
+        return true;
+    }
+    let mut seen = vec![from];
+    let mut stack = vec![from];
+    while let Some(p) = stack.pop() {
+        let Some(pk) = prog.packages.get(p.idx()) else { continue };
+        for &(_, q) in &pk.deps {
+            if q == to {
+                return true;
+            }
+            if !seen.contains(&q) {
+                seen.push(q);
+                stack.push(q);
+            }
+        }
+    }
+    false
+}
+
+/// E0420, coherence by package: an inherent impl is in the package that declares its self type;
+/// a trait impl is in the package of the trait or in that of the self type's head. A struct or
+/// enum belongs to the package that declares it; the built-in types (scalars, vectors, masks,
+/// `str`, references, raw pointers, slices, arrays, tuples, fn types, ranges) belong to `std`; a
+/// generic param belongs to none. So for one type and one trait the impls a package may see come
+/// from that package and its dependencies only, and one package never changes what a method
+/// call in another one means.
+fn incoherent(
+    prog: &Program,
+    sigs: &Sigs,
+    tys: &TypeTable,
+    d: DeclId,
+    imp: &ImplDef,
+    self_text: &str,
+) -> Option<Diagnostic> {
+    if tys.is_error_ty(imp.self_ty) {
+        return None;
+    }
+    let at = prog.decl(d)?.name_span;
+    let pkg = package_of(prog, d);
+    let std_pkg = if sigs.lang.copy.is_some() { package_of(prog, sigs.lang.copy) } else { None };
+    let head_local = match tys.kind(imp.self_ty) {
+        TypeKind::Adt { def, .. } => package_of(prog, *def) == pkg,
+        TypeKind::Param(_) | TypeKind::ConstParam(_) | TypeKind::SelfTy | TypeKind::Error => false,
+        _ => pkg.is_some() && std_pkg == pkg,
+    };
+    match &imp.trait_ref {
+        None if !head_local => mk("E0420", Some("inherent"), &[("type", self_text)], at, &[]),
+        Some(tr) if !head_local && package_of(prog, tr.trait_decl) != pkg => {
+            let path = prog.decl_path(tr.trait_decl);
+            mk("E0420", None, &[("trait", &path), ("type", self_text)], at, &[])
+        }
+        _ => None,
+    }
 }
 
 /// Whether two impls of one trait may both apply to one type and one list of trait args: their
