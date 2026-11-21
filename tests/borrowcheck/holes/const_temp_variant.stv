@@ -1,6 +1,5 @@
-//~ BORROWCHECK ok
-// `&` of a variant without payload is a borrow of a constant temporary: the next evaluation
-// of its expression does not end it.
+//~ BORROWCHECK use-after-referent 17 15
+// `&` of a variant without payload borrows a temporary that ends with its statement.
 enum Dir { Up, Down }
 
 fn main() -> i32 {

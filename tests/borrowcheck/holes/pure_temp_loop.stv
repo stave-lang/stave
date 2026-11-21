@@ -1,6 +1,5 @@
-//~ BORROWCHECK use-after-referent 12 11
-// The negative control of a constant temporary: `2 + 2` is computed at each evaluation, so
-// its temporary ends at the next one, whatever value it gets.
+//~ BORROWCHECK use-after-referent 11 10
+// `&(2 + 2)` kept for the next round: the temporary ended with its statement.
 fn main() -> i32 {
     let zero: u32 = 0u32;
     let mut lit: &u32 = &zero;

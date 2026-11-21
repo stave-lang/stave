@@ -1,5 +1,6 @@
-//~ BORROWCHECK ok
-// `&()` borrows a constant temporary: the next evaluation does not end it.
+//~ BORROWCHECK gap
+// `&()` borrows a temporary that ends with its statement. The read of a zero-size value
+// through the reference of the round before touches no byte: the run shows nothing.
 fn main() -> i32 {
     let first: () = ();
     let mut r: &() = &first;

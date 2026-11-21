@@ -1,7 +1,7 @@
-//~ BORROWCHECK ok
+//~ BORROWCHECK use-after-referent 41 38
 // An auto-referenced `&self` receiver that is a constant (a `const` item, a variant without
-// payload, a literal in parentheses) is a constant temporary: a result that borrows it stays
-// usable after the next evaluation of the call.
+// payload, a literal in parentheses) is a temporary that ends with its statement: a result that
+// borrows it is used after that end.
 struct P { x: u32 }
 enum Dir { Up, Down }
 

@@ -1,9 +1,9 @@
 //~ BORROWCHECK use-after-referent 223 222
 //~ CHECK-ONLY
-// A temporary has one slot, and every evaluation of its expression writes it: a borrow of the
-// value made by the evaluation before must be dead by then (E0501), wherever the temporary
-// sits: under `&`, in a call argument, in a literal's field, behind an `if`, as a receiver, or
-// around a part of it.
+// A temporary ends with its statement: a borrow of it kept for the next iteration of a loop is
+// E0501, wherever the temporary sits: under `&`, in a call argument, in a literal's field,
+// behind an `if`, as a receiver, or around a part of it, and whatever its value is (constants
+// too).
 struct Pair { a: u32, b: u32 }
 
 view struct Name { s: &u32, count: u32 }

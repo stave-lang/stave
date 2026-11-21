@@ -1,8 +1,8 @@
 //~ CHECK-ONLY
 // An assignment whose new value borrows something other than the value it ends: another local,
 // what the old value itself borrowed, the old value moved into a call, another field of the
-// destination; a temporary whose new value is made from a copy read through the earlier borrow,
-// or holds only what the earlier value borrowed.
+// destination; in a loop, a new value made from a copy read through a borrow of the old one,
+// or one that holds only what the old value borrowed.
 import std.io;
 import std.string;
 
@@ -53,24 +53,25 @@ fn other_field(zero: &u32) -> u32 {
     return *x.b;
 }
 
-fn temp_from_copy() -> u32 {
-    let mut r: &u32 = &0u32;
+fn copy_through_borrow() -> u32 {
+    let mut v: u32 = 0;
     let mut i: u32 = 0;
     while i < 3 {
-        r = &next(*r);
+        let r: &u32 = &v;
+        v = next(*r);
         i = i + 1;
     }
-    return *r;
+    return v;
 }
 
-fn temp_keeps_old_borrow(base: &Chain) -> u32 {
-    let mut r: &Chain = base;
+fn keeps_old_borrow(base: &Chain) -> u32 {
+    let mut c: Chain = relink(base, 0);
     let mut i: u32 = 0;
     while i < 3 {
-        r = &relink(r, i + 1);
+        c = relink(&c, i + 1);
         i = i + 1;
     }
-    return *r.prev;
+    return *c.prev;
 }
 
 fn main() -> i32 {
