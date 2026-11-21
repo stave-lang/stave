@@ -467,6 +467,11 @@ message = "`{operand}` is not a const generic argument"
 labels = [{ at = "primary", text = "expected an int literal, a const, or `{{ const-expr }}`" }]
 fix = { description = "pass a const-expr, braced when it is not a literal or a name: `{{N + 1}}`" }
 
+[diag.cases.const-param-type]
+message = "const parameter `{operand}` has type `{found}`, not an unsigned integer type"
+labels = [{ at = "primary", text = "a const parameter is `u8`, `u16`, `u32`, `u64`, or `usize`" }]
+fix = { description = "declare it with an unsigned integer type: `const {operand}: usize`" }
+
 [diag.cases.arity]
 message = "`{operand}` takes {count} arguments, found {given}"
 labels = [{ at = "primary", text = "wrong number of arguments" }]
@@ -895,11 +900,11 @@ fix = { description = "remove `impl Copy for {type}`, or give `{field}` a Copy t
 code = "E0416"
 severity = "error"
 area = "kinds"
-rule = "`impl Drop` for a Copy type (built-in Copy, or an ADT with `impl Copy`)"
+rule = "an `impl Drop` whose head overlaps the head of an `impl Copy`: the two self types unify, the params of both impls as variables, bounds not consulted (`impl<T: Copy> Copy for W<T>` with `impl<U> Drop for W<vec.Vec<U>>` too)"
 holes = { type = "type" }
-message = "`{type}` is Copy, so it cannot implement `Drop`"
-labels = [{ at = "primary", text = "`impl Drop` here" }, { at = "copy", text = "`impl Copy for {type}` here" }]
-fix = { description = "remove `impl Copy for {type}` (a type with a destructor must move), or remove this `impl Drop`" }
+message = "`impl Drop for {type}` overlaps an `impl Copy`: a type with a destructor cannot be Copy"
+labels = [{ at = "primary", text = "`impl Drop` here" }, { at = "copy", text = "`impl Copy` whose head overlaps it" }]
+fix = { description = "remove the `impl Copy` or this `impl Drop`, or make their heads disjoint (no type an instance of both)" }
 
 [[diag]]
 code = "E0417"
@@ -920,6 +925,16 @@ holes = { type = "type" }
 message = "`[e; n]` copies its element, but `{type}` is not Copy"
 labels = [{ at = "primary", text = "one value of type `{type}`" }]
 fix = { description = "write the elements out, or give the element type `impl Copy`" }
+
+[[diag]]
+code = "E0419"
+severity = "error"
+area = "kinds"
+rule = "`impl Drop` whose self type is not a struct or enum declared in the impl's package (a tuple, array, slice, reference, raw pointer, fn type, scalar, generic param, or a type of another package): drop glue runs the destructors of ADTs only, and a package adds none to another's types"
+holes = { type = "type" }
+message = "`impl Drop for {type}`: a `Drop` impl's self type must be a struct or enum of this package"
+labels = [{ at = "primary", text = "`impl Drop` here" }]
+fix = { description = "implement `Drop` for a struct or enum declared in this package, for example a wrapper with a field of type `{type}`" }
 
 [[diag]]
 code = "E0501"
@@ -1164,11 +1179,16 @@ fix = { description = "use lane indices from 0 to {lanes} - 1" }
 code = "E0609"
 severity = "error"
 area = "simd"
-rule = "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`"
+rule = "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param"
 holes = { spelled = "source", concrete = "type" }
 message = "`{spelled}` has no generic argument: write `{concrete}`"
 labels = [{ at = "primary", text = "generic spelling of a concrete type" }]
 fix = { description = "write `{concrete}`", edits = [{ at = "primary", replacement = "{concrete}" }] }
+
+[diag.cases.lanes]
+message = "`{spelled}` is not a fixed lane count or mask width"
+labels = [{ at = "primary", text = "lanes are 2, 4, 8, 16, 32, or 64; mask widths 8, 16, 32, or 64" }]
+fix = { description = "write one of these values as a literal: a const param never stands for a lane count or a mask width" }
 
 [[diag]]
 code = "E0700"
@@ -1617,7 +1637,7 @@ fix = { description = "split the expression into several consts" }
 code = "E0905"
 severity = "error"
 area = "generics"
-rule = "impl method signature differs from the trait's (params, return, `from`, `needs`, or `unsafe`); the fix shows the trait's signature"
+rule = "impl method signature differs from the trait's (params, return, `from`, `needs`, `unsafe`, or the method's own generics: count, order, kind, `view`, a const param's type, and the bounds as complete trait refs with their args, after the trait's params are replaced by the impl's trait args); the fix shows the trait's signature"
 holes = { name = "name", signature = "source" }
 message = "method `{name}` does not match the trait's signature"
 labels = [{ at = "primary", text = "impl signature" }, { at = "trait", text = "trait declares `{name}` here" }]
@@ -1662,7 +1682,7 @@ fix = { description = "call it qualified, with the receiver as first argument: `
 code = "E0909"
 severity = "error"
 area = "generics"
-rule = "explicit call of `Drop.drop` (as `x.drop()` or `Drop.drop(&mut x)`): drop runs only automatically, at scope end and when a place is overwritten"
+rule = "explicit call of `Drop.drop` (as `x.drop()`, `Drop.drop(&mut x)`, `S.drop(&mut x)`) or a `Drop` impl method used as a fn value (`let f = S.drop;`): drop runs only automatically, at scope end and when a place is overwritten"
 message = "`drop` cannot be called explicitly"
 labels = [{ at = "primary", text = "explicit `drop` call" }]
 fix = { description = "remove the call: the value is dropped when it goes out of scope or is overwritten; to end its life early, move it into `std.mem.drop(x)`" }

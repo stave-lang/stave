@@ -347,18 +347,6 @@ impl<'a> World<'a> {
         self.match_ty_in(cx, pat, t, binds, &mut false)
     }
 
-    /// [`Self::match_ty`], but past the step limit the answer is "may match".
-    pub(crate) fn may_match_ty<I: Interner + ?Sized>(
-        &self,
-        cx: &I,
-        pat: TypeId,
-        t: TypeId,
-        binds: &mut [Option<GArg>],
-    ) -> bool {
-        let mut exceeded = false;
-        self.match_ty_in(cx, pat, t, binds, &mut exceeded) || exceeded
-    }
-
     fn match_ty_in<I: Interner + ?Sized>(
         &self,
         cx: &I,
@@ -883,18 +871,6 @@ impl<'a> World<'a> {
         self.find_impl_q(cx, t, tr, env, depth, &mut Query::default())
     }
 
-    /// [`World::find_impl`] without the view-kind rule: whether some instance of `t` (its `view`
-    /// params standing for owned types too) has an impl of `tr`.
-    pub fn find_impl_any_kind<I: Interner + ?Sized>(
-        &self,
-        cx: &mut I,
-        t: TypeId,
-        tr: &TraitRef,
-        env: &[GenericParam],
-    ) -> Option<(DeclId, Vec<GArg>)> {
-        self.find_impl_q(cx, t, tr, env, 0, &mut Query::any_kind())
-    }
-
     fn find_impl_q<I: Interner + ?Sized>(
         &self,
         cx: &mut I,
@@ -913,7 +889,9 @@ impl<'a> World<'a> {
                 let ok = itr.args.len() == tr.args.len()
                     && itr.args.iter().zip(&tr.args).all(|(a, b)| match (a, b) {
                         (GArg::Type(x), GArg::Type(y)) => cx.subst(*x, &args, Some(t)) == *y,
-                        (GArg::Const(x), GArg::Const(y)) => x == y,
+                        (GArg::Const(x), GArg::Const(y)) => {
+                            crate::mono::subst_garg(cx, GArg::Const(*x), &args) == GArg::Const(*y)
+                        }
                         _ => false,
                     });
                 if ok {
@@ -1039,14 +1017,7 @@ impl<'a> World<'a> {
             for b in &g.bounds {
                 let b2 = TraitRef {
                     trait_decl: b.trait_decl,
-                    args: b
-                        .args
-                        .iter()
-                        .map(|x| match x {
-                            GArg::Type(t) => GArg::Type(cx.subst(*t, &args, None)),
-                            c => *c,
-                        })
-                        .collect(),
+                    args: b.args.iter().map(|&x| crate::mono::subst_garg(cx, x, &args)).collect(),
                 };
                 if !self.implements_q(cx, a, &b2, env, depth + 1, q) {
                     return None;
@@ -1433,27 +1404,26 @@ pub(crate) fn check_impls(
                 }
             }
         }
-        // E0416: Drop on a Copy type.
+        // E0419: drop glue runs the destructors of ADTs only, and a package adds none to the
+        // types of another (their values would drop differently in each package).
+        // E0416: Drop on a Copy type. Copy and Drop exclude each other on every instance, so
+        // the impls conflict when one instance of the Drop impl's head may be Copy: a Copy impl
+        // whose head unifies with it.
         if tr.trait_decl == lang.drop && lang.drop.is_some() && !tys.is_error_ty(imp.self_ty) {
-            // a `view` param of the impl stands for owned types too
-            let copy_impl = if lang.copy.is_some() {
-                w.find_impl_any_kind(
-                    tys,
-                    imp.self_ty,
-                    &TraitRef { trait_decl: lang.copy, args: Vec::new() },
-                    &imp.generics,
-                )
-            } else {
-                None
+            let package_of = |m| prog.module(m).map(|x| x.package);
+            let own_adt = match tys.kind(imp.self_ty) {
+                TypeKind::Adt { def, .. } => {
+                    prog.decl(*def).is_some_and(|x| package_of(x.module) == package_of(decl.module))
+                }
+                _ => false,
             };
-            let builtin_copy = !matches!(tys.kind(imp.self_ty), TypeKind::Adt { .. } | TypeKind::Param(_))
-                && w.is_copy(tys, imp.self_ty, &imp.generics);
-            if copy_impl.is_some() || builtin_copy {
-                let roles: Vec<(&str, Span)> = copy_impl
-                    .and_then(|(ci, _)| prog.decl(ci))
-                    .map(|x| ("copy", x.name_span))
-                    .into_iter()
-                    .collect();
+            if !own_adt {
+                out.extend(mk("E0419", None, &[("type", &self_text)], impl_span, &[]));
+                // the impl takes part in nothing else: no overlap reports for or against it
+                continue;
+            } else if let Some(ci) = copy_impl_overlapping(&w, tys, imp) {
+                let roles: Vec<(&str, Span)> =
+                    prog.decl(ci).map(|x| ("copy", x.name_span)).into_iter().collect();
                 out.extend(mk("E0416", None, &[("type", &self_text)], impl_span, &roles));
             }
         }
@@ -1505,10 +1475,7 @@ pub(crate) fn check_impls(
             if tys.is_error_ty(other.self_ty) || tys.is_error_ty(imp.self_ty) {
                 continue;
             }
-            if other.trait_ref.as_ref().map(|t| &t.args) != Some(&tr.args) {
-                continue;
-            }
-            if overlap(&w, tys, other, imp) {
+            if overlap(tys, other, imp) {
                 let od = prog.decl(o).map_or(impl_span, |x| x.name_span);
                 out.extend(mk(
                     "E0903",
@@ -1525,16 +1492,248 @@ pub(crate) fn check_impls(
     out
 }
 
-/// Whether two impls' self types unify (both sets of params are variables).
-fn overlap(w: &World<'_>, tys: &mut TypeTable, a: &ImplDef, b: &ImplDef) -> bool {
-    // Shift b's params after a's, then unify both ways structurally.
-    let shift: Vec<GArg> =
-        (0..b.generics.len() as u32).map(|i| GArg::Type(tys.mk_param(a.generics.len() as u32 + i))).collect();
+/// Whether two impls of one trait may both apply to one type and one list of trait args: their
+/// self types and trait args unify together, the params of both impls as variables (bounds are
+/// not consulted).
+fn overlap(tys: &mut TypeTable, a: &ImplDef, b: &ImplDef) -> bool {
+    let (Some(ta), Some(tb)) = (&a.trait_ref, &b.trait_ref) else { return false };
+    heads_unify(tys, a, b, Some((&ta.args, &tb.args))).is_some()
+}
+
+/// A most general unifier of the heads of impls `a` and `b`: `a`'s generic params are the
+/// variables `0..na`, `b`'s are renumbered to `na..`. `trait_args`: the two impls' trait args,
+/// unified along with the self types. `None`: no type is an instance of both heads. Past the step
+/// limit the answer is a unifier with the bindings found so far ("may unify").
+fn heads_unify(
+    tys: &mut TypeTable,
+    a: &ImplDef,
+    b: &ImplDef,
+    trait_args: Option<(&[GArg], &[GArg])>,
+) -> Option<Vec<Option<GArg>>> {
+    let na = a.generics.len() as u32;
+    let shift: Vec<GArg> = b
+        .generics
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            if g.is_const {
+                GArg::Const(ConstArg::Param(na + i as u32))
+            } else {
+                GArg::Type(tys.mk_param(na + i as u32))
+            }
+        })
+        .collect();
+    let mut u = Unifier { binds: vec![None; a.generics.len() + b.generics.len()], steps: 0 };
     let bt = tys.subst(b.self_ty, &shift, None);
-    let mut binds = vec![None; a.generics.len() + b.generics.len()];
-    w.may_match_ty(tys, a.self_ty, bt, &mut binds) || {
-        let mut binds = vec![None; a.generics.len() + b.generics.len()];
-        w.may_match_ty(tys, bt, a.self_ty, &mut binds)
+    if !u.unify(tys, a.self_ty, bt) {
+        return None;
+    }
+    if let Some((xa, xb)) = trait_args {
+        if xa.len() != xb.len() {
+            return None;
+        }
+        for (&p, &x) in xa.iter().zip(xb) {
+            let ok = match (p, crate::mono::subst_garg(tys, x, &shift)) {
+                (GArg::Type(p), GArg::Type(x)) => u.unify(tys, p, x),
+                (GArg::Const(p), GArg::Const(x)) => u.unify_const(p, x),
+                _ => false,
+            };
+            if !ok {
+                return None;
+            }
+        }
+    }
+    Some(u.binds)
+}
+
+/// A Copy impl whose head unifies with the head of Drop impl `drop`. Bounds are not consulted:
+/// the rule is about the heads, so it does not depend on which types implement what.
+fn copy_impl_overlapping(w: &World<'_>, tys: &mut TypeTable, drop: &ImplDef) -> Option<DeclId> {
+    let list = w.sigs.impls_by_trait.get(&w.sigs.lang.copy)?;
+    list.iter().copied().find(|&ci| {
+        w.sigs.impl_def(ci).is_some_and(|cimp| {
+            !tys.is_error_ty(cimp.self_ty) && heads_unify(tys, drop, cimp, None).is_some()
+        })
+    })
+}
+
+/// Most steps of one [`heads_unify`].
+const UNIFY_STEPS: u32 = 100_000;
+
+/// Syntactic unification with an occurs check over the variables `binds` (type and const
+/// params; a variable is bound at most once and bindings never form a cycle).
+struct Unifier {
+    binds: Vec<Option<GArg>>,
+    steps: u32,
+}
+
+impl Unifier {
+    fn resolve(&self, cx: &TypeTable, mut t: TypeId) -> TypeId {
+        while let TypeKind::Param(i) = cx.kind(t) {
+            match self.binds.get(*i as usize) {
+                Some(Some(GArg::Type(x))) => t = *x,
+                _ => break,
+            }
+        }
+        t
+    }
+
+    fn resolve_const(&self, mut c: ConstArg) -> ConstArg {
+        while let ConstArg::Param(i) = c {
+            match self.binds.get(i as usize) {
+                Some(Some(GArg::Const(x))) => c = *x,
+                _ => break,
+            }
+        }
+        c
+    }
+
+    /// Whether variable `v` occurs in `t` (bindings followed).
+    fn occurs(&mut self, cx: &TypeTable, v: u32, t: TypeId) -> bool {
+        let mut stack = vec![t];
+        let mut kids = Vec::new();
+        while let Some(x) = stack.pop() {
+            self.steps += 1;
+            if self.steps > UNIFY_STEPS {
+                return false;
+            }
+            let x = self.resolve(cx, x);
+            if let TypeKind::Param(i) = cx.kind(x) {
+                if *i == v {
+                    return true;
+                }
+                continue;
+            }
+            kids.clear();
+            cx.kind(x).children(&mut kids);
+            stack.extend_from_slice(&kids);
+        }
+        false
+    }
+
+    fn bind(&mut self, cx: &TypeTable, v: u32, t: TypeId) -> bool {
+        // a param outside both impls' generics cannot be bound: compare it as a rigid type
+        if !matches!(self.binds.get(v as usize), Some(None)) {
+            return false;
+        }
+        if self.occurs(cx, v, t) {
+            return false;
+        }
+        self.binds[v as usize] = Some(GArg::Type(t));
+        true
+    }
+
+    fn unify_const(&mut self, p: ConstArg, x: ConstArg) -> bool {
+        let (p, x) = (self.resolve_const(p), self.resolve_const(x));
+        if p == x || p == ConstArg::Error || x == ConstArg::Error {
+            return true;
+        }
+        for (v, other) in [(p, x), (x, p)] {
+            if let ConstArg::Param(i) = v
+                && let Some(slot @ None) = self.binds.get_mut(i as usize)
+            {
+                *slot = Some(GArg::Const(other));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `false`: `a` and `b` have no common instance. Past the step limit: `true`.
+    fn unify(&mut self, cx: &TypeTable, a: TypeId, b: TypeId) -> bool {
+        let mut stack = vec![(a, b)];
+        while let Some((p, x)) = stack.pop() {
+            self.steps += 1;
+            if self.steps > UNIFY_STEPS {
+                return true;
+            }
+            let (p, x) = (self.resolve(cx, p), self.resolve(cx, x));
+            if p == x || cx.is_error_ty(p) || cx.is_error_ty(x) {
+                continue;
+            }
+            match (cx.kind(p), cx.kind(x)) {
+                (TypeKind::Param(i), _) if (*i as usize) < self.binds.len() => {
+                    if !self.bind(cx, *i, x) {
+                        return false;
+                    }
+                }
+                (_, TypeKind::Param(i)) if (*i as usize) < self.binds.len() => {
+                    if !self.bind(cx, *i, p) {
+                        return false;
+                    }
+                }
+                (TypeKind::Ref { mutable: m1, inner: i1 }, TypeKind::Ref { mutable: m2, inner: i2 })
+                | (TypeKind::Ptr { mutable: m1, inner: i1 }, TypeKind::Ptr { mutable: m2, inner: i2 }) => {
+                    if m1 != m2 {
+                        return false;
+                    }
+                    stack.push((*i1, *i2));
+                }
+                (TypeKind::Array { elem: e1, len: l1 }, TypeKind::Array { elem: e2, len: l2 }) => {
+                    let (e1, e2, l1, l2) = (*e1, *e2, *l1, *l2);
+                    if !self.unify_const(l1, l2) {
+                        return false;
+                    }
+                    stack.push((e1, e2));
+                }
+                (TypeKind::Slice { elem: e1, align: a1 }, TypeKind::Slice { elem: e2, align: a2 }) => {
+                    if a1 != a2 {
+                        return false;
+                    }
+                    stack.push((*e1, *e2));
+                }
+                (
+                    TypeKind::Range { elem: e1, inclusive: i1 },
+                    TypeKind::Range { elem: e2, inclusive: i2 },
+                ) => {
+                    if i1 != i2 {
+                        return false;
+                    }
+                    stack.push((*e1, *e2));
+                }
+                (TypeKind::Tuple(ta), TypeKind::Tuple(tb)) => {
+                    if ta.len() != tb.len() {
+                        return false;
+                    }
+                    stack.extend(ta.iter().copied().zip(tb.iter().copied()));
+                }
+                (TypeKind::Adt { def: d1, args: a1 }, TypeKind::Adt { def: d2, args: a2 }) => {
+                    if d1 != d2 || a1.len() != a2.len() {
+                        return false;
+                    }
+                    let pairs: Vec<(GArg, GArg)> = a1.iter().copied().zip(a2.iter().copied()).collect();
+                    for (ga, gb) in pairs {
+                        match (ga, gb) {
+                            (GArg::Type(ta), GArg::Type(tb)) => stack.push((ta, tb)),
+                            (GArg::Const(ca), GArg::Const(cb)) => {
+                                if !self.unify_const(ca, cb) {
+                                    return false;
+                                }
+                            }
+                            _ => return false,
+                        }
+                    }
+                }
+                (
+                    TypeKind::Fn { params: p1, ret: r1, features: f1, deny: d1 },
+                    TypeKind::Fn { params: p2, ret: r2, features: f2, deny: d2 },
+                ) => {
+                    if f1 != f2 || d1 != d2 || p1.len() != p2.len() {
+                        return false;
+                    }
+                    stack.extend(p1.iter().copied().zip(p2.iter().copied()));
+                    stack.push((*r1, *r2));
+                }
+                (TypeKind::Vector { lane: l1, n: n1 }, TypeKind::Vector { lane: l2, n: n2 }) => {
+                    if n1 != n2 {
+                        return false;
+                    }
+                    stack.push((*l1, *l2));
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 }
 
@@ -1628,17 +1827,41 @@ fn sig_matches(
     {
         return false;
     }
-    // method generic bounds (by trait decl)
+    // The method's own generics, position by position: kind, `view`, a const param's type, and
+    // the bounds as a set of complete trait refs (trait and args) after the same substitution.
+    // A caller instantiates them by the trait's declaration and the instance runs the impl's
+    // body, so any difference reaches a body with arguments it was not checked for.
+    let sub_arg = |tys: &mut TypeTable, a: GArg| match a {
+        GArg::Type(t) => GArg::Type(tys.subst(t, &args, Some(imp.self_ty))),
+        c => crate::mono::subst_garg(tys, c, &args),
+    };
     for j in 0..own_t {
         let (a, b) = (&ts.generics[nt + j], &ms.generics[ni + j]);
         if a.is_const != b.is_const || a.view != b.view {
             return false;
         }
-        let mut ta: Vec<DeclId> = a.bounds.iter().map(|x| x.trait_decl).collect();
-        let mut tb: Vec<DeclId> = b.bounds.iter().map(|x| x.trait_decl).collect();
+        if a.is_const {
+            let at = sub(tys, a.const_ty);
+            if at != b.const_ty && !tys.has_error(at) && !tys.has_error(b.const_ty) {
+                return false;
+            }
+        }
+        let mut ta: Vec<(DeclId, Vec<GArg>)> = Vec::with_capacity(a.bounds.len());
+        for x in &a.bounds {
+            let xs = x.args.iter().map(|&g| sub_arg(tys, g)).collect();
+            ta.push((x.trait_decl, xs));
+        }
+        let mut tb: Vec<(DeclId, Vec<GArg>)> =
+            b.bounds.iter().map(|x| (x.trait_decl, x.args.clone())).collect();
         ta.sort();
+        ta.dedup();
         tb.sort();
-        if ta != tb {
+        tb.dedup();
+        let erroneous = ta.iter().chain(&tb).flat_map(|(_, xs)| xs).any(|x| match x {
+            GArg::Type(t) => tys.has_error(*t),
+            GArg::Const(c) => *c == ConstArg::Error,
+        });
+        if ta != tb && !erroneous {
             return false;
         }
     }
