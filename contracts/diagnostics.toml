@@ -1355,7 +1355,7 @@ fix = { description = "put the `spawn` inside `scope {{ ... }}`; its threads joi
 code = "E0802"
 severity = "error"
 area = "threads-unsafe-ffi"
-rule = "captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body: a capture that is not `Sync`, or a `&mut` capture"
+rule = "captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body: a capture that is not `Sync`, or a `&mut` capture (any use that is not a proven read, through any dereference, captures by `&mut`)"
 holes = { name = "name", type = "type" }
 message = "captured `{name}` of type `{type}` is not `Send`"
 labels = [{ at = "primary", text = "captured here" }]

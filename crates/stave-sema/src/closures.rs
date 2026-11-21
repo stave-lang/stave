@@ -12,11 +12,29 @@
 //! captures everything its nested bodies capture from outside it. Captures are sorted by binding
 //! node (declaration order). Each has a [`CaptureMode`]:
 //!
-//! - [`CaptureMode::RefMut`]: the body may mutate the local: it is the root of an assignment
-//!   target (`x = ..`, `x.f = ..`, `x[i] += ..`), the operand root of `&mut`, the root of a method
-//!   receiver auto-borrowed as `&mut self`, or the local has a `&mut T` type (using a `&mut`
-//!   through a capture needs it uniquely; conservative). The closure holds a unique loan on it.
-//! - [`CaptureMode::Ref`]: every other use (reads, `&x`, `&self` receivers). A shared loan.
+//! - [`CaptureMode::Ref`]: every use of the local in the body (nested bodies included) is a
+//!   proven read: a shared loan.
+//! - [`CaptureMode::RefMut`]: any other capture: a unique loan. The local has a `&mut T` type, or
+//!   some use is not proven a read ([`use_reads`]). Fail-closed: a use counts as a read only in a
+//!   context listed there, whatever dereferences lie between the local and the context.
+//!
+//! A use is the head of a place `x`, `x.f`, `x.0`, `x[i]`, `*x`, `(x)`, `*x.p[i]` (any mix of
+//! these steps, auto-deref through `&` and `&mut` included). The place is read when it is:
+//! the receiver of a built-in method or of a `&self` or by-value `self` method; called as a fn
+//! value; the operand of `&` (not `&mut`); an f-string hole; used by value (an operand, an
+//! argument, an initializer, a returned value, a condition, an index, a field or element of a
+//! literal) where its type is not `&mut T` (a `&mut T` passed as `&T` is a read); the scrutinee
+//! of a `match` or a destructuring `let` whose type holds no `&mut` (patterns bind through
+//! peeled references); or the sequence of a `for` over a range, an array, a `[T]` place, or
+//! `&[T]` / `&[T; N]` whose bindings hold no `&mut`. A by-value use of a non-Copy place is a move
+//! out of the capture, E0504 in the borrow checker. Everything else (an assignment target, the
+//! operand of `&mut`, a `&mut self` receiver, a `&mut` chunk or element binding, a `for` over an
+//! iterator) mutates.
+//!
+//! The thread rules ([`crate::threads`]) and the borrow checker (stave-borrow) read these modes;
+//! the borrow checker fails the body as unsupported where its CFG writes, mutably borrows, or
+//! activates a two-phase loan of a capture held by `&` (the two must agree). Lowering takes
+//! only the capture list: every environment entry is the captured slot's address.
 //!
 //! There is no copy or move capture (LANG.md §8).
 //!
@@ -34,11 +52,11 @@ use stave_syntax::{NodeKind, Term};
 
 use crate::itemcx::ItemCx;
 use crate::resolve::Res;
-use crate::typeck::{Target, TypedBody};
+use crate::typeck::{Coercion, Target, TypedBody};
 use crate::types::{Interner, TypeId, TypeKind};
 
 /// Whether `t` is `&mut T` in `types`.
-pub fn is_mut_ref(types: &impl Interner, t: TypeId) -> bool {
+pub fn is_mut_ref<I: Interner + ?Sized>(types: &I, t: TypeId) -> bool {
     matches!(types.kind(t), TypeKind::Ref { mutable: true, .. })
 }
 
@@ -98,12 +116,11 @@ pub fn closure_kind(icx: &ItemCx<'_>, m: u32) -> Option<ClosureKind> {
 }
 
 /// The closure bodies inside the body at `root` (a fn decl node), in `@<enclosing>.<k>` order,
-/// with their captures. `is_mut_ref(t)`: whether `tb`'s type `t` is `&mut T`
-/// ([`is_mut_ref`] over the table `tb`'s types live in).
-pub fn closures(
+/// with their captures. `tys`: the table `tb`'s types live in.
+pub fn closures<I: Interner + ?Sized>(
     icx: &ItemCx<'_>,
     tb: &TypedBody,
-    is_mut_ref: impl Fn(TypeId) -> bool,
+    tys: &I,
     root: u32,
 ) -> Vec<ClosureInfo> {
     let lo = icx.ast.descendants(root).start;
@@ -134,8 +151,9 @@ pub fn closures(
         }
         out[i].parent = best.map(|b| b.0);
     }
-    // mutating uses: binding node → first mutating token
-    let muts = mutations(icx, tb, lo, root);
+    let cx = UseCx { icx, tb, tys, parents: parents(icx, lo, root) };
+    // per (key node, token) of a use of an outer local: `None` read, `Some(t)` mutating at `t`
+    let mut verdicts: rustc_hash::FxHashMap<(u32, u32), Option<u32>> = rustc_hash::FxHashMap::default();
     for (i, c) in out.iter_mut().enumerate() {
         let (s, e) = ranges[i];
         let mut caps: Vec<Capture> = Vec::new();
@@ -145,28 +163,35 @@ pub fn closures(
                 if (s..=e).contains(&b.node) {
                     continue; // declared inside the body
                 }
-                match caps.iter_mut().find(|x| x.binding == b.node) {
-                    Some(x) => x.first_use = x.first_use.min(u.token),
-                    None => caps.push(Capture {
-                        binding: b.node,
-                        mode: CaptureMode::Ref,
-                        first_use: u.token,
-                        first_mut: u.token,
-                    }),
+                let v = *verdicts.entry((m, u.token)).or_insert_with(|| use_reads(&cx, m, u.token));
+                let x = match caps.iter_mut().position(|x| x.binding == b.node) {
+                    Some(i) => &mut caps[i],
+                    None => {
+                        caps.push(Capture {
+                            binding: b.node,
+                            mode: CaptureMode::Ref,
+                            first_use: u.token,
+                            first_mut: u32::MAX,
+                        });
+                        caps.last_mut().expect("just pushed")
+                    }
+                };
+                x.first_use = x.first_use.min(u.token);
+                if let Some(t) = v {
+                    x.mode = CaptureMode::RefMut;
+                    x.first_mut = x.first_mut.min(t);
                 }
             }
         }
         for x in &mut caps {
             let by_type = tb
                 .local(crate::ids::BindingRef { node: x.binding })
-                .is_some_and(|t| !t.is_none() && is_mut_ref(t));
-            let inner =
-                muts.iter().filter(|&&(b, n)| b == x.binding && (s..e).contains(&n)).map(|&(_, n)| n).min();
-            if let Some(n) = inner {
+                .is_some_and(|t| !t.is_none() && is_mut_ref(tys, t));
+            if by_type {
                 x.mode = CaptureMode::RefMut;
-                x.first_mut = icx.a(n);
-            } else if by_type {
-                x.mode = CaptureMode::RefMut;
+            }
+            if x.first_mut == u32::MAX {
+                x.first_mut = x.first_use;
             }
         }
         caps.sort_by_key(|x| x.binding);
@@ -200,88 +225,181 @@ pub fn closure_nodes(icx: &ItemCx<'_>, root: u32) -> Vec<(u32, ClosureKind)> {
     out
 }
 
-/// Mutating uses in `lo..=root`: (binding node, node of the mutating expression).
-fn mutations(icx: &ItemCx<'_>, tb: &TypedBody, lo: u32, root: u32) -> Vec<(u32, u32)> {
-    let mut out = Vec::new();
-    for m in lo..=root {
-        match icx.kind(m) {
-            Some(NodeKind::ExprStmt) => {
-                let kids = icx.kids_vec(m);
-                if kids.len() >= 3
-                    && let Some(b) = root_binding(icx, tb, kids[0])
-                {
-                    out.push((b, m));
-                }
+/// What [`use_reads`] needs: the body, its types, and the parent of every node of the body.
+struct UseCx<'c, 'p, I: Interner + ?Sized> {
+    icx: &'c ItemCx<'p>,
+    tb: &'c TypedBody,
+    tys: &'c I,
+    /// (`lo`, `v`): `v[n - lo]` is the parent of node `n` (`u32::MAX`: none in the body).
+    parents: (u32, Vec<u32>),
+}
+
+impl<I: Interner + ?Sized> UseCx<'_, '_, I> {
+    fn parent(&self, n: u32) -> Option<u32> {
+        let (lo, v) = &self.parents;
+        n.checked_sub(*lo).and_then(|i| v.get(i as usize)).copied().filter(|&p| p != u32::MAX)
+    }
+}
+
+fn parents(icx: &ItemCx<'_>, lo: u32, root: u32) -> (u32, Vec<u32>) {
+    let mut v = vec![u32::MAX; (root + 1 - lo) as usize];
+    for n in lo..=root {
+        for k in icx.kids_vec(n) {
+            if let Some(slot) = k.checked_sub(lo).and_then(|i| v.get_mut(i as usize)) {
+                *slot = n;
             }
+        }
+    }
+    (lo, v)
+}
+
+/// Whether a value of type `t` may hold a `&mut` that a pattern or a copy reaches without going
+/// through a `&`: a `&mut`, a view ADT, a generic param, `Self`, or an unknown type, at any depth
+/// outside a shared reference, a raw pointer, or a fn type.
+fn may_hold_mut<I: Interner + ?Sized>(prog: &crate::Program, tys: &I, t: TypeId) -> bool {
+    let mut stack = vec![t];
+    let mut seen: Vec<TypeId> = Vec::new();
+    let mut kids = Vec::new();
+    while let Some(x) = stack.pop() {
+        if x.is_none() || seen.len() > 4096 {
+            return true;
+        }
+        if seen.contains(&x) {
+            continue;
+        }
+        seen.push(x);
+        match tys.kind(x) {
+            TypeKind::Ref { mutable: true, .. } | TypeKind::Param(_) | TypeKind::SelfTy | TypeKind::Error => {
+                return true;
+            }
+            TypeKind::Ref { mutable: false, .. } | TypeKind::Ptr { .. } | TypeKind::Fn { .. } => {}
+            TypeKind::Adt { def, .. } if crate::kinds::adt_is_view(prog, *def) => return true,
+            k => {
+                kids.clear();
+                k.children(&mut kids);
+                stack.extend_from_slice(&kids);
+            }
+        }
+    }
+    false
+}
+
+/// Whether the use of an outer local at token `tok` (keyed at node `key`) is a proven read
+/// (`None`); else the token of the construct that may mutate it (module docs).
+fn use_reads<I: Interner + ?Sized>(cx: &UseCx<'_, '_, I>, key: u32, tok: u32) -> Option<u32> {
+    let icx = cx.icx;
+    if icx.kind(key) != Some(NodeKind::Primary) {
+        return Some(tok);
+    }
+    let a = icx.a(key);
+    if icx.is(a, Term::FmtLit) {
+        // an f-string hole is formatted through `&`
+        return None;
+    }
+    if a != tok || !(icx.is(a, Term::Ident) || icx.is(a, Term::KwSelf)) || icx.primary_end(key) != a {
+        return Some(tok);
+    }
+    let mut cur = key;
+    for _ in 0..1_000_000 {
+        let Some(p) = cx.parent(cur) else { return Some(icx.a(cur)) };
+        let pa = icx.a(p);
+        match icx.kind(p) {
+            Some(NodeKind::Postfix) if icx.first_child(p) == Some(cur) => match chain_reads(cx, p, cur) {
+                Chain::Place => cur = p,
+                Chain::Read => return None,
+                Chain::Mut(t) => return Some(t),
+            },
+            // an index operand
+            Some(NodeKind::Postfix) => return by_value(cx, cur),
             Some(NodeKind::Unary) => {
-                let a = icx.a(m);
-                if (icx.is(a, Term::Amp) || icx.is(a, Term::AmpAmp))
-                    && icx.is(a + 1, Term::KwMut)
-                    && let Some(c) = icx.last_child(m)
-                    && let Some(b) = root_binding(icx, tb, c)
-                {
-                    out.push((b, m));
+                if icx.is(pa, Term::Star) {
+                    cur = p;
+                } else if icx.is(pa, Term::Amp) || icx.is(pa, Term::AmpAmp) {
+                    // `&&x` = `& &x`: the outer half when the child Unary starts at the same token
+                    let outer = icx.is(pa, Term::AmpAmp)
+                        && icx.kind(cur) == Some(NodeKind::Unary)
+                        && icx.a(cur) == pa;
+                    return if !outer && icx.is(pa + 1, Term::KwMut) { Some(pa) } else { None };
+                } else if icx.is(pa, Term::KwUnsafe) {
+                    if icx.last_child(p) != Some(cur) {
+                        return Some(icx.a(cur));
+                    }
+                    cur = p;
+                } else {
+                    return by_value(cx, cur);
                 }
             }
-            Some(NodeKind::Postfix) => {
-                if let Some(b) = chain_binding(icx, tb, m, true) {
-                    out.push((b, m));
+            Some(NodeKind::Primary) => {
+                let kids = icx.kids_vec(p);
+                if icx.is(pa, Term::LParen) && kids.len() == 1 && !icx.is(icx.close(pa) - 1, Term::Comma) {
+                    cur = p;
+                } else if icx.is(pa, Term::LParen) || icx.is(pa, Term::LBracket) {
+                    return by_value(cx, cur);
+                } else {
+                    return Some(icx.a(cur));
                 }
             }
-            _ => {}
+            Some(
+                NodeKind::Args
+                | NodeKind::StructLit
+                | NodeKind::Add
+                | NodeKind::Mul
+                | NodeKind::Shift
+                | NodeKind::BitAnd
+                | NodeKind::BitOr
+                | NodeKind::BitXor
+                | NodeKind::CmpExpr
+                | NodeKind::AndExpr
+                | NodeKind::OrExpr
+                | NodeKind::RangeExpr
+                | NodeKind::Cast
+                | NodeKind::IfExpr
+                | NodeKind::IfStmt
+                | NodeKind::ExprArm
+                | NodeKind::StmtArm,
+            ) => return by_value(cx, cur),
+            Some(NodeKind::MatchExpr) if icx.first_child(p) == Some(cur) => return scrutinee(cx, cur),
+            Some(NodeKind::ExprStmt) => {
+                let kids = icx.kids_vec(p);
+                if kids.len() >= 3 && kids.first() == Some(&cur) {
+                    return Some(pa);
+                }
+                return by_value(cx, cur);
+            }
+            Some(NodeKind::Stmt) => {
+                if icx.is(pa, Term::KwLet) {
+                    let plain = icx.first_child(p).is_some_and(|pat| binds_whole(icx, pat));
+                    return if plain { by_value(cx, cur) } else { scrutinee(cx, cur) };
+                }
+                if icx.is(pa, Term::KwReturn) || icx.is(pa, Term::KwWhile) {
+                    return by_value(cx, cur);
+                }
+                if icx.is(pa, Term::KwMatch) {
+                    return scrutinee(cx, cur);
+                }
+                return Some(icx.a(cur));
+            }
+            Some(NodeKind::ForStmt) => return for_reads(cx, p, cur),
+            _ => return Some(icx.a(cur)),
         }
     }
-    out
+    Some(tok)
 }
 
-/// The binding a place expression is rooted at without a dereference.
-fn root_binding(icx: &ItemCx<'_>, tb: &TypedBody, n: u32) -> Option<u32> {
-    let c = n;
-    match icx.kind(c)? {
-        NodeKind::Unary if icx.is(icx.a(c), Term::KwUnsafe) => root_binding(icx, tb, icx.last_child(c)?),
-        NodeKind::Postfix => chain_binding(icx, tb, c, false),
-        NodeKind::Primary => {
-            let a = icx.a(c);
-            if icx.is(a, Term::KwSelf) || icx.is(a, Term::Ident) {
-                return local_use(icx, c, a);
-            }
-            if icx.is(a, Term::LParen) {
-                let kids = icx.kids_vec(c);
-                if kids.len() == 1 && !icx.is(icx.close(a) - 1, Term::Comma) {
-                    return root_binding(icx, tb, kids[0]);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
+enum Chain {
+    /// Every step is a field, element, or sub-slice: the whole chain is a place of the local.
+    Place,
+    Read,
+    Mut(u32),
 }
 
-fn local_use(icx: &ItemCx<'_>, n: u32, tok: u32) -> Option<u32> {
-    let u = icx.use_at(n, tok).or_else(|| icx.uses(n).first())?;
-    match u.res {
-        Res::Local(b) | Res::SelfValue(b) => Some(b.node),
-        _ => None,
-    }
-}
-
-/// A postfix chain rooted at a local through field / tuple / index steps with no auto-deref:
-/// `recv_mut`: the binding when some method call on that place auto-borrows it as `&mut self`;
-/// else the binding when the whole chain is such a place.
-fn chain_binding(icx: &ItemCx<'_>, tb: &TypedBody, n: u32, recv_mut: bool) -> Option<u32> {
-    let kids = icx.kids_vec(n);
-    let prim = *kids.first()?;
-    let pa = icx.a(prim);
-    let base = if icx.is(pa, Term::Ident) || icx.is(pa, Term::KwSelf) {
-        local_use(icx, prim, pa)
-    } else if icx.is(pa, Term::LParen) {
-        root_binding(icx, tb, prim)
-    } else {
-        None
-    };
-    let mut root = base;
-    let mut p = icx.primary_end(prim) + 1;
-    for _ in 0..10_000_000 {
+/// The steps of postfix chain `n` after its head `head` (a place of the local).
+fn chain_reads<I: Interner + ?Sized>(cx: &UseCx<'_, '_, I>, n: u32, head: u32) -> Chain {
+    let (icx, tb) = (cx.icx, cx.tb);
+    let at = icx.a(n);
+    let end = icx.postfix_end(n);
+    let mut p = icx.primary_end(head) + 1;
+    while p <= end {
         let t = icx.tk(p);
         if t == Term::Dot as u8 && icx.is(p + 1, Term::Ident) {
             let seg = p + 1;
@@ -290,62 +408,127 @@ fn chain_binding(icx: &ItemCx<'_>, tb: &TypedBody, n: u32, recv_mut: bool) -> Op
                 let (e, partial) = icx.angle_end(q + 1);
                 q = if partial { e - 1 } else { e };
             }
-            if icx.use_at(prim, seg).is_some() {
-                // a path step (module item), not a field
-                root = None;
-                p = q;
-                continue;
-            }
             if icx.is(q, Term::LParen) {
-                let adjust = match tb.target(seg) {
-                    Some(Target::Method { adjust, .. } | Target::Builtin { adjust, .. }) => Some(adjust),
-                    _ => None,
+                return match tb.target(seg) {
+                    // a built-in takes its receiver by value (a scalar, vector, or pointer) or by `&`
+                    Some(Target::Builtin { .. }) => Chain::Read,
+                    Some(Target::Method { adjust, .. }) => {
+                        if adjust.autoref == Some(true) || adjust.reborrow {
+                            Chain::Mut(at)
+                        } else {
+                            Chain::Read
+                        }
+                    }
+                    Some(Target::Field { .. }) if matches!(tb.target(q), Some(Target::FnValue { .. })) => {
+                        Chain::Read
+                    }
+                    _ => Chain::Mut(at),
                 };
-                if recv_mut
-                    && let (Some(r), Some(a)) = (root, adjust)
-                    && a.autoref == Some(true)
-                    && a.derefs == 0
-                {
-                    return Some(r);
-                }
-                root = None;
-                p = icx.close(q) + 1;
-                continue;
             }
             match tb.target(seg) {
-                Some(Target::Field { derefs, .. } | Target::Column { derefs, .. }) if *derefs == 0 => {}
-                _ => root = None,
+                Some(Target::Field { .. } | Target::Column { .. }) => {}
+                _ => return Chain::Mut(at),
             }
             p = q;
-            continue;
-        }
-        if t == Term::Dot as u8 && icx.is(p + 1, Term::IntLit) {
-            match tb.target(p + 1) {
-                Some(Target::TupleField { derefs, .. }) if *derefs == 0 => {}
-                _ => root = None,
+        } else if t == Term::Dot as u8 && icx.is(p + 1, Term::IntLit) {
+            if !matches!(tb.target(p + 1), Some(Target::TupleField { .. })) {
+                return Chain::Mut(at);
             }
             p += 2;
-            continue;
-        }
-        if t == Term::LBracket as u8 {
-            match tb.target(p) {
-                Some(Target::Index { derefs } | Target::Slice { derefs }) if *derefs == 0 => {}
-                _ => root = None,
+        } else if t == Term::LBracket as u8 {
+            if !matches!(tb.target(p), Some(Target::Index { .. } | Target::Slice { .. })) {
+                return Chain::Mut(at);
             }
             p = icx.close(p) + 1;
-            continue;
+        } else if t == Term::LParen as u8 {
+            return if matches!(tb.target(p), Some(Target::FnValue { .. })) {
+                Chain::Read
+            } else {
+                Chain::Mut(at)
+            };
+        } else if t == Term::Question as u8 {
+            // by value: a copy, or a move out of the capture (E0504)
+            return Chain::Read;
+        } else {
+            return Chain::Mut(at);
         }
-        if t == Term::LParen as u8 || t == Term::DotLBrace as u8 {
-            root = None;
-            p = icx.close(p) + 1;
-            continue;
-        }
-        if t == Term::Question as u8 {
-            root = None;
-            p += 1;
-            continue;
-        }
-        break;
     }
-    if recv_mut { None } else { root }
+    Chain::Place
+}
+
+/// Place `n` used by value: a read unless it is a `&mut T` (a reborrow or a move of it) not
+/// passed as `&T`. A non-Copy place is moved out of the capture: E0504.
+fn by_value<I: Interner + ?Sized>(cx: &UseCx<'_, '_, I>, n: u32) -> Option<u32> {
+    let t = cx.tb.ty(n);
+    if t.is_none() {
+        return Some(cx.icx.a(n));
+    }
+    match cx.tys.kind(t) {
+        TypeKind::Ref { mutable: true, .. } if cx.tb.coercion(n) != Some(&Coercion::MutToShared) => {
+            Some(cx.icx.a(n))
+        }
+        TypeKind::Error => Some(cx.icx.a(n)),
+        _ => None,
+    }
+}
+
+/// Place `n` matched against patterns (a `match`, a destructuring `let`): patterns bind through
+/// the references they peel.
+fn scrutinee<I: Interner + ?Sized>(cx: &UseCx<'_, '_, I>, n: u32) -> Option<u32> {
+    let t = cx.tb.ty(n);
+    if may_hold_mut(cx.icx.prog, cx.tys, t) { Some(cx.icx.a(n)) } else { None }
+}
+
+/// Whether pattern `pat` binds the whole value to one name (or to `_`).
+fn binds_whole(icx: &ItemCx<'_>, pat: u32) -> bool {
+    if icx.kind(pat) != Some(NodeKind::Pattern) || !icx.ast.descendants(pat).is_empty() {
+        return false;
+    }
+    let a = icx.a(pat);
+    if icx.is(a, Term::Underscore) || icx.is(a, Term::KwMut) {
+        return true;
+    }
+    icx.is(a, Term::Ident)
+        && icx.chain_end(a) == a
+        && !icx.is(a + 1, Term::LParen)
+        && !icx.is(a + 1, Term::DotLBrace)
+}
+
+/// Place `n` as the sequence of `for` loop `f`.
+fn for_reads<I: Interner + ?Sized>(cx: &UseCx<'_, '_, I>, f: u32, n: u32) -> Option<u32> {
+    let (icx, tb) = (cx.icx, cx.tb);
+    let at = Some(icx.a(f));
+    let kids = icx.kids_vec(f);
+    if kids.iter().copied().find(|&c| icx.is_expr(c)) != Some(n) {
+        return at;
+    }
+    // the loop's bindings (pattern and tail): a `&mut` element or chunk writes the sequence
+    let mut binds: Vec<u32> = Vec::new();
+    if let Some(&pat) = kids.first() {
+        binds.extend(icx.ast.descendants(pat));
+        binds.push(pat);
+    }
+    if let Some(tc) = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause)) {
+        binds.extend(icx.kids_vec(tc).into_iter().filter(|&c| icx.kind(c) == Some(NodeKind::TailBind)));
+    }
+    for b in binds {
+        if let Some(t) = tb.local(crate::ids::BindingRef { node: b })
+            && may_hold_mut(icx.prog, cx.tys, t)
+        {
+            return at;
+        }
+    }
+    let t = tb.ty(n);
+    if t.is_none() {
+        return at;
+    }
+    match cx.tys.kind(t) {
+        TypeKind::Range { .. } | TypeKind::Array { .. } | TypeKind::Slice { .. } => None,
+        TypeKind::Ref { mutable: false, inner } => match cx.tys.kind(*inner) {
+            TypeKind::Array { .. } | TypeKind::Slice { .. } => None,
+            _ => at,
+        },
+        // an iterator: `next(&mut self)`
+        _ => at,
+    }
 }

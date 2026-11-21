@@ -3350,7 +3350,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0802",
         severity: Severity::Error,
         area: "threads-unsafe-ffi",
-        rule: "captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body: a capture that is not `Sync`, or a `&mut` capture",
+        rule: "captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body: a capture that is not `Sync`, or a `&mut` capture (any use that is not a proven read, through any dereference, captures by `&mut`)",
         retired: false,
         located: true,
         holes: &[

@@ -153,3 +153,27 @@ in the signature that the callee keeps the source pointer whole and stores nothi
 `q` at all. A promise about values that hold the origin of `q` is not enough either: once the
 pointer is in a view, an exchange returns it by value with the origin of that view's content,
 the one `from copy` names, and a rule that follows the origin of `q` no longer sees it.
+
+## Capture modes: one answer for every rule
+
+**Claim.** A capture held by `&` is never written, mutably borrowed, or moved out by its
+closure, so the thread rule may ask only `T: Sync` for it, and the borrow checker may give it a
+shared loan.
+
+**Assumptions.** The capture analysis (stave-sema `closures`) gives each capture one mode, and
+the thread rules (E0802) and the borrow checker read that mode; no rule derives its own. A
+capture is `&` only when every use of it is a read in one of the listed contexts (LANG.md §1,
+contracts/lang-details.md §1), whatever dereferences lie between the local and the use; a
+by-value use of a non-Copy place is a move out of the capture, E0504.
+
+**Argument.** A write or `&mut` through a capture reaches the captured place by a chain of
+steps rooted at the local; the analysis classifies the context the chain ends in, not the
+chain, so a dereference on the way (`*t.0`, `*a[0]`, `w.v.push`) cannot hide it. An unlisted
+context is a mutation (fail-closed). The borrow checker's CFG writes, mutably borrows, and
+activates places explicitly; where it does one of these to a capture the analysis held by `&`,
+or captures a local the analysis did not list, the body fails as not checked instead of being
+accepted with two answers.
+
+**What would break it.** A rule that computes a mode of its own (for example the borrow
+checker strengthening a mode only for itself), a new expression form that mutates a place
+without the CFG showing it, or a context added to the read list that can write.

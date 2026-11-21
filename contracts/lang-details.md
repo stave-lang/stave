@@ -12,6 +12,20 @@ reference for what a program may write and what it means.
   needs ∪ the target baseline (E0707). Reason: CPU features never change while a program runs, so
   a value made where F is proven stays callable.
 
+## §1 Closure capture modes
+
+- A closure holds a capture by `&` only when every use of it in the body (nested closures
+  included) is a read, whatever `*`, field, element, or auto-deref steps lead from the local to
+  the use: a `&self` or by-value `self` method receiver, a built-in method's receiver, a fn value
+  called, the operand of `&`, an f-string hole, a by-value use of a type other than `&mut T` (a
+  `&mut T` passed as `&T` counts), the scrutinee of a `match` or destructuring `let` whose type
+  holds no `&mut` outside a `&`, or the sequence of a `for` over a range, an array, a `[T]` place,
+  `&[T]`, or `&[T; N]` whose bindings hold no `&mut`. Any other use (`*t.0 = ..`, `*a[0] += ..`,
+  `w.v.push(..)` with `w.v: &mut Vec<T>`, `&mut`, a `&mut` chunk or element binding, a `for`
+  over an iterator) makes it `&mut`, and so does a `&mut T` type. The thread rules (E0802) and
+  the borrow checker read the same mode. Reason: a mode the thread rule and the borrow checker
+  derive separately can disagree, and a `&` capture written from many threads races.
+
 ## §2 Type nesting depth
 
 - A type without components (a scalar, `str`, a mask, a generic parameter) is 1 level deep. A

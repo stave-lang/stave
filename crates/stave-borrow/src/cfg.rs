@@ -20,9 +20,10 @@
 //! locals are params; the closure value (or the `scope`'s join local, which accumulates every
 //! spawn's loans and is read wherever the scope is left) holds one loan per captured local,
 //! created at the closure's `fn` / `spawn` token. The capture list and modes are
-//! stave-sema's capture analysis (`stave_sema::closures`: by reference only; `&mut` if the
-//! body mutates the local or the local is a `&mut T`, else `&`); a capture the nested body writes,
-//! mutably borrows, or reborrows is `&mut` too (a safety net, never weaker than the analysis).
+//! stave-sema's capture analysis (`stave_sema::closures`: by reference only; `&` only when every
+//! use is a proven read, else `&mut`), the same modes the thread rules read. A capture held by `&`
+//! that the nested body writes, mutably borrows, or activates, or a captured local the analysis
+//! does not list, fails the body as unsupported: the two must agree.
 //! The closure value's origin set is the union of its capture loans, so the loans live while the
 //! value (or a result of a call through it, which takes the callee's origins too) lives. Every
 //! call of the value uses the same loans, so a closure's result may borrow only the captures held
@@ -380,7 +381,7 @@ pub fn build_fn<'a>(
     let mut b = Builder::new(icx, tb, tys, None);
     let infos = {
         let ov = &b.tys.ov;
-        stave_sema::closures::closures(&icx, tb, |t| stave_sema::closures::is_mut_ref(ov, t), fn_node)
+        stave_sema::closures::closures(&icx, tb, ov, fn_node)
     };
     b.infos = std::rc::Rc::new(infos);
     b.body.ret = ret;
@@ -1758,17 +1759,22 @@ impl<'a, 'b> Builder<'a, 'b> {
         nb.end_of_body(n);
         let caps = std::mem::take(&mut nb.captures);
         let mut inner = nb.finish();
-        // the capture analysis (stave-sema) decides the modes; a capture the CFG shows mutated is
-        // `&mut` in any case (never weaker than the analysis)
+        // the capture analysis (stave-sema) decides the list and the modes, which the thread rules
+        // read too: a capture the CFG writes, mutably borrows, or activates while the analysis
+        // holds it by `&`, or one the analysis does not list, means the two disagree, and the
+        // body is not known to be checked
         let info = self.infos.iter().find(|c| c.node == n).cloned();
         let mut out = Vec::new();
         let mut seen: Vec<u32> = Vec::new();
+        let mut disagree: Option<&'static str> = None;
         if let Some(info) = &info {
             for cap in &info.captures {
                 let cl = caps.iter().find(|c| c.0 == cap.binding).map(|c| c.1);
-                let mutated = cap.mode == stave_sema::closures::CaptureMode::RefMut
-                    || cl.is_some_and(|cl| mutates(&inner, cl));
+                let mutated = cap.mode == stave_sema::closures::CaptureMode::RefMut;
                 if let Some(cl) = cl {
+                    if !mutated && mutates(&inner, cl) {
+                        disagree.get_or_insert("a capture held by `&` is mutated");
+                    }
                     inner.locals[cl as usize].capture_mut = mutated;
                 }
                 if let Some(ol) = self.local_of(Res::Local(BindingRef { node: cap.binding })) {
@@ -1781,11 +1787,14 @@ impl<'a, 'b> Builder<'a, 'b> {
             if seen.contains(&bnode) {
                 continue;
             }
-            let mutated = mutates(&inner, cl);
-            inner.locals[cl as usize].capture_mut = mutated;
+            disagree.get_or_insert("a capture missing from the capture analysis");
+            inner.locals[cl as usize].capture_mut = true;
             if let Some(ol) = self.local_of(Res::Local(BindingRef { node: bnode })) {
-                out.push((ol, mutated));
+                out.push((ol, true));
             }
+        }
+        if let Some(why) = disagree {
+            self.unsupported(why);
         }
         if inner.unsupported.is_some() {
             self.unsupported("nested body");

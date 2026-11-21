@@ -312,7 +312,9 @@ fn caller() -> u32 {
 }
 ```
 - **M18 (closure literal).** Evaluating a closure literal borrows (M4) each captured local once:
-  `&mut` when the body writes it or borrows it mutably, else `&`. The fn value is the code and
+  `&` when every use in the body is a read, through any dereference (contracts/lang-details.md
+  §1 Closure capture modes), else `&mut` (a write, a `&mut` borrow, a `&mut self` receiver, a
+  `&mut` chunk or element binding over it, `*t.0 = ..` with `t.0: &mut T`). The fn value is the code and
   these references, held by value like the fields of a view. It is not a temporary: values made
   by earlier evaluations of the literal keep their tags and stay usable. In the body a use of a
   captured local goes through its capture tag, and a borrow made there is a child of that tag.

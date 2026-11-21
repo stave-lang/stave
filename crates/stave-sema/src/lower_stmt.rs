@@ -259,7 +259,7 @@ impl<'a> FnCx<'a> {
         // closure bodies and their captures: a captured local lives in a slot (the environment
         // holds its address)
         let tys = &self.tys;
-        let infos = crate::closures::closures(&icx, tb, |t| crate::closures::is_mut_ref(tys, t), root);
+        let infos = crate::closures::closures(&icx, tb, tys, root);
         for c in &infos {
             for cap in &c.captures {
                 if let Some(&l) = self.by_node.get(&cap.binding) {

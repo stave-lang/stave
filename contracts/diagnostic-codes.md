@@ -141,7 +141,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0717 | VL-dependent float reduction on a sizeless vector (use `reduce_add_ordered`). Planned |
 | E0718 | dispatch arm never picked: its features (implied ones counted, with the dispatch's) include those of an earlier arm |
 | E0801 | `spawn` outside a `scope` block |
-| E0802 | captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body (shared by many threads): a capture that is not `Sync`, or a `&mut` capture |
+| E0802 | captured value is not `Send` (by value or `&mut`) or not `Sync` (`&`); for a `par_for`/`par_for_mut` body (shared by many threads): a capture that is not `Sync`, or a `&mut` capture (any use not proven a read, through any dereference, captures by `&mut`) |
 | E0803 | unsafe operation outside `unsafe(..)`: raw-pointer `*p`, `p.read()`, `p.write(v)`, `p.write_stream(v)`, `fence_stream()`; a call of an `unsafe` fn or `extern` import; any use (read, write, borrow) of a `static mut` |
 | E0804 | type not C-safe in an `extern "C"` signature (import or export): C-safe are `i8`..`i64`, `u8`..`u64`, `isize`, `usize`, `f32`, `f64`, `bool`, raw pointers whose pointee is not `[T]` or `str`, and the returns `()` and `never`. Cases `vector-view` (vector, mask, reference, fn value), `struct` (a struct by value). At the type |
 | E0805 | `extern "stave-intrinsic"` outside the shipped `std`, `runtime`, and `runtime-gpu` packages, or a name or signature not in `contracts/intrinsics.md` |
