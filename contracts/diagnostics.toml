@@ -1120,7 +1120,7 @@ retired = true
 code = "E0512"
 severity = "error"
 area = "borrow"
-rule = "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)"
+rule = "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows; a borrow of a `static` or a part of it borrows nothing); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)"
 holes = { place = "place" }
 message = "returned value borrows local `{place}`"
 labels = [{ at = "primary", text = "returned here" }, { at = "local", text = "`{place}` is dropped when the function returns" }]

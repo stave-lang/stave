@@ -2730,7 +2730,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0512",
         severity: Severity::Error,
         area: "borrow",
-        rule: "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)",
+        rule: "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows; a borrow of a `static` or a part of it borrows nothing); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)",
         retired: false,
         located: true,
         holes: &[

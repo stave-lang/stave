@@ -599,6 +599,11 @@ impl Cx<'_, '_> {
             if a < self.flow.atoms.nloans {
                 let l = self.flow.loan(a as LoanId);
                 let root = &body.locals[l.place.local as usize];
+                // A static's storage never ends: a borrow of it borrows nothing, like a string
+                // literal.
+                if root.static_root {
+                    continue;
+                }
                 // A closure may return a borrow of a capture it holds by `&` (the closure value
                 // holds its loan, and no call of the closure changes the capture). Of a capture
                 // held by `&mut`, through a dereference too, it may not: the next call can write
