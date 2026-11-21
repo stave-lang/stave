@@ -1,0 +1,126 @@
+//~ CHECK-ONLY
+// A non-Copy value moves whole (E0504 case `part`): a by-value use of a non-Copy part of a
+// place or of a temporary outside a pattern that takes the whole value apart. Copy parts are
+// read, parts are borrowed and assigned, and a pattern may take the whole value apart (a part
+// bound twice by it would have two owners: E0502).
+import std.mem;
+import std.vec;
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { } }
+impl Add for D { fn add(self, rhs: Self) -> Self { return D.{ id: self.id + rhs.id }; } }
+
+struct S { pub a: D, pub v: vec.Vec<u32>, pub n: u32 }
+impl S { pub fn take_v(&mut self) -> vec.Vec<u32> { return mem.replace(&mut self.v, vec.Vec::<u32>.new()); } }
+
+enum E { A(vec.Vec<u32>), B }
+
+struct H { pub e: E, pub t: (D, u32) }
+
+fn mk() -> S { return S.{ a: D.{ id: 1 }, v: vec.Vec::<u32>.new(), n: 1 }; }
+fn eat(d: D) { }
+fn len(v: vec.Vec<u32>) -> usize { return v.len(); }
+
+fn let_field(s: S) {
+    let x = s.a; //~ ERROR E0504
+}
+
+fn arg_field(s: S) {
+    eat(s.a); //~ ERROR E0504
+}
+
+fn temp_field() -> usize {
+    return len(mk().v); //~ ERROR E0504
+}
+
+fn tuple_elem(h: H) {
+    eat(h.t.0); //~ ERROR E0504
+}
+
+fn receiver_field(s: S) -> usize {
+    return s.v.len() + len(s.v); //~ ERROR E0504
+}
+
+fn pattern_on_part(h: H) -> usize {
+    match h.e { //~ ERROR E0504
+        E.A(v) => { return v.len(); }
+        E.B => { return 0; }
+    }
+}
+
+fn let_pattern_on_part(h: H) -> u32 {
+    let (d, k) = h.t; //~ ERROR E0504
+    return k;
+}
+
+fn compound_field(s: S) {
+    let mut t = s;
+    t.a += D.{ id: 2 }; //~ ERROR E0504
+}
+
+fn return_field(s: S) -> vec.Vec<u32> {
+    return s.v; //~ ERROR E0504
+}
+
+view struct G { pub r: &mut u32, pub n: u32 }
+
+fn mut_ref_field(g: G) -> u32 {
+    let r = g.r; //~ ERROR E0504
+    *r = 1;
+    return g.n;
+}
+
+fn ok_reborrow_field(g: G) -> u32 {
+    let r = &mut *g.r;
+    *r = 1;
+    return g.n;
+}
+
+fn part_bound_twice(s: S) {
+    let S.{ a: x, a: y, v, n } = s; //~ ERROR E0502
+}
+
+fn ok_copy_part(s: S) -> u32 {
+    return s.n + s.a.id;
+}
+
+fn ok_borrow_parts(s: S) -> usize {
+    let mut t = s;
+    let r = &t.v;
+    let n = r.len();
+    let w = &mut t.a;
+    w.id = 3;
+    return n;
+}
+
+fn ok_assign_part(s: S) {
+    let mut t = s;
+    t.a = D.{ id: 9 };
+}
+
+fn ok_replace(s: S) -> vec.Vec<u32> {
+    let mut t = s;
+    return t.take_v();
+}
+
+fn ok_destructure(s: S) -> usize {
+    let S.{ a, v, n: _ } = s;
+    eat(a);
+    return v.len();
+}
+
+fn ok_destructure_temp() -> usize {
+    let S.{ a: _, v, n } = mk();
+    return v.len() + (n as usize);
+}
+
+fn ok_nested(h: H) -> usize {
+    match h {
+        H.{ e: E.A(v), t: (d, k) } => { return v.len() + (k as usize); }
+        H.{ e: E.B, t } => { return 0; }
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

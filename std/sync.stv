@@ -68,7 +68,8 @@ impl<T, const R: u32> Mutex<T, R> {
     }
 
     pub fn into_inner(self) -> T {
-        return self.v.into_inner();
+        let Mutex.{ word: _, v } = self;
+        return v.into_inner();
     }
 }
 

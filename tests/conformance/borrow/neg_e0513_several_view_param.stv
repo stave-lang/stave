@@ -8,8 +8,8 @@ fn mix(w: W) {
 }
 
 fn moved_out(w: W) {
-    let a = w.a;
-    *a = *w.b; //~ ERROR E0513
+    let W.{ a, b } = w;
+    *a = *b; //~ ERROR E0513
 }
 
 fn clear(w: W) {

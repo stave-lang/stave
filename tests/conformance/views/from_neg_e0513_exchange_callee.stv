@@ -54,34 +54,34 @@ fn c3(dst: &mut Link from src, src: &mut Pick) {
 
 // c4: one half of the source goes in and comes out again with the origin of `*dst`
 fn c4(dst: &mut Link from src, src: &mut Big) {
-    let h = halves((src, 0u32));
-    let old = xchg_t(dst, (h.x, 0u32));
-    let back = xchg_t(dst, (h.y, 0u32));
+    let Halves.{ x: hx, y: hy } = halves((src, 0u32));
+    let old = xchg_t(dst, (hx, 0u32));
+    let back = xchg_t(dst, (hy, 0u32));
     let two = split((back, 0u32));
     *two.slot = two.n; //~ ERROR E0513
 }
 
 // c5: as c4, the laundered half takes a borrow of the old pointee
 fn c5(dst: &mut Link from src, src: &mut Big) {
-    let h = halves((src, 0u32));
-    let old = xchg_t(dst, (h.x, 0u32));
-    let back = xchg_t(dst, (h.y, 0u32));
+    let Halves.{ x: hx, y: hy } = halves((src, 0u32));
+    let old = xchg_t(dst, (hx, 0u32));
+    let back = xchg_t(dst, (hy, 0u32));
     back.best = n_of((old, 0u32)); //~ ERROR E0513
 }
 
 // c6: the old pointee takes a borrow of the laundered half
 fn c6(dst: &mut Link from src, src: &mut Big) {
-    let h = halves((src, 0u32));
-    let old = xchg_t(dst, (h.x, 0u32));
-    let back = xchg_t(dst, (h.y, 0u32));
+    let Halves.{ x: hx, y: hy } = halves((src, 0u32));
+    let old = xchg_t(dst, (hx, 0u32));
+    let back = xchg_t(dst, (hy, 0u32));
     old.best = n_of((back, 0u32)); //~ ERROR E0513
 }
 
 // c7: the old pointee takes a borrow of the source
 fn c7(dst: &mut Link from src, src: &mut Big) {
-    let h = halves((src, 0u32));
-    let old = xchg_t(dst, (h.x, 0u32));
-    old.best = n_of((h.y, 0u32));
+    let Halves.{ x: hx, y: hy } = halves((src, 0u32));
+    let old = xchg_t(dst, (hx, 0u32));
+    old.best = n_of((hy, 0u32));
 }
 
 // c8: the result is the old pointee
@@ -91,18 +91,18 @@ fn c8(dst: &mut Link from src, src: &mut Pick) -> &mut Pick from copy dst {
 
 // c9: the result is the laundered half, `from copy dst`
 fn c9(dst: &mut Link from src, src: &mut Big) -> &mut Pick from copy dst {
-    let h = halves((src, 0u32));
-    let old = xchg_t(dst, (h.x, 0u32));
-    let back = xchg_t(dst, (h.y, 0u32));
+    let Halves.{ x: hx, y: hy } = halves((src, 0u32));
+    let old = xchg_t(dst, (hx, 0u32));
+    let back = xchg_t(dst, (hy, 0u32));
     dst.to = old;
     return back;
 }
 
 // c10: a second target takes the laundered half under `from copy dst` only
 fn c10(dst: &mut Link from src, k: &mut Link from copy dst, src: &mut Big) {
-    let h = halves((src, 0u32));
-    let old = xchg_t(dst, (h.x, 0u32));
-    let back = xchg_t(dst, (h.y, 0u32));
+    let Halves.{ x: hx, y: hy } = halves((src, 0u32));
+    let old = xchg_t(dst, (hx, 0u32));
+    let back = xchg_t(dst, (hy, 0u32));
     dst.to = old;
     k.to = back;
 }

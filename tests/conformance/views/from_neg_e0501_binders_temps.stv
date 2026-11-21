@@ -1,6 +1,7 @@
 //~ CHECK-ONLY
 // More binders, closures in guards, argument temporaries: the view outlives what a storing
-// call borrowed.
+// call borrowed. A storing call in a match guard takes its view by `&mut`, which a guard may
+// not (E0505).
 import std.io;
 import std.string;
 
@@ -73,7 +74,7 @@ fn value_guard(zero: &u32) -> u32 {
     let mut n: u32 = 0;
     while i < 2 {
         let m: u32 = match next(i) {
-            v if i == 0 && p.take(&v) => 1u32, //~ ERROR E0501
+            v if i == 0 && p.take(&v) => 1u32, //~ ERROR E0505
             _ => 2u32,
         };
         n = n + m;
@@ -87,7 +88,7 @@ fn guard_ref_into_temp(zero: &u32) -> u32 {
     let mut i: u32 = 0;
     while i < 2 {
         match &mk(i) { //~ ERROR E0501
-            Own.{ a, b } if i == 0 && p.take(a) => {}
+            Own.{ a, b } if i == 0 && p.take(a) => {} //~ ERROR E0505
             _ => {}
         }
         i = i + 1;
@@ -100,7 +101,7 @@ fn guard_ref_temp(zero: &u32) -> u32 {
     let mut i: u32 = 0;
     while i < 2 {
         match &next(i) { //~ ERROR E0501
-            r if i == 0 && p.take(r) => {}
+            r if i == 0 && p.take(r) => {} //~ ERROR E0505
             _ => {}
         }
         i = i + 1;
@@ -113,7 +114,7 @@ fn guard_closure_capture(zero: &u32) -> u32 {
     let mut i: u32 = 0;
     while i < 2 {
         match next(i) {
-            v if i == 0 && c.keep(fn() -> u32 { return v; }) => {} //~ ERROR E0501
+            v if i == 0 && c.keep(fn() -> u32 { return v; }) => {} //~ ERROR E0505
             _ => {}
         }
         i = i + 1;

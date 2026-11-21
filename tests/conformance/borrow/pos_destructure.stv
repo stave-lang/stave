@@ -1,0 +1,86 @@
+//~ CHECK-ONLY
+// A non-Copy value is taken apart whole by a pattern: nested struct, tuple, and enum payload
+// patterns, `_` parts, a field the pattern does not name, arms that bind different parts, a
+// temporary, a `for` over an owned array. A pattern that binds no non-Copy part by value only
+// reads: the value stays usable.
+import std.vec;
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { } }
+
+struct S { pub a: D, pub b: D, pub n: u32 }
+struct W { pub p: S, pub q: (D, vec.Vec<u32>) }
+enum E { Two(D, D), One(D), Zero }
+
+fn mk(k: u32) -> S { return S.{ a: D.{ id: k }, b: D.{ id: k }, n: k }; }
+
+fn nested(w: W) -> usize {
+    let W.{ p: S.{ a, b: _, n }, q: (_, v) } = w;
+    return v.len() + (n as usize) + (a.id as usize);
+}
+
+fn unnamed_field(s: S) -> u32 {
+    let S.{ a, n } = s;
+    return a.id + n;
+}
+
+fn arms(e: E) -> u32 {
+    match e {
+        E.Two(x, _) => { return x.id; }
+        E.One(y) => { return y.id; }
+        E.Zero => { return 0; }
+    }
+}
+
+fn arms_whole_or_part(s: S) -> u32 {
+    match s {
+        S.{ a, b: _, n: 0 } => { return a.id; }
+        other => { return other.n; }
+    }
+}
+
+fn or_pattern(e: E) -> u32 {
+    match e {
+        E.Two(x, _) | E.One(x) => { return x.id; }
+        E.Zero => { return 0; }
+    }
+}
+
+fn temporary() -> u32 {
+    let S.{ a: _, b, n } = mk(3);
+    return b.id + n;
+}
+
+fn guarded(s: S) -> u32 {
+    match s {
+        S.{ a, b, n } if n > 2 => { return a.id + b.id; }
+        whole => { return whole.n; }
+    }
+}
+
+fn for_owned(ss: [S; 2]) -> u32 {
+    let mut t: u32 = 0;
+    for S.{ a, b: _, n } in own_s(ss) {
+        t = t + a.id + n;
+    }
+    return t;
+}
+
+fn reads_only(s: S) -> u32 {
+    let S.{ n, a: _, b: _ } = s;
+    let _ = s;
+    match s {
+        S.{ n: 0, a: _, b: _ } => { }
+        _ => { }
+    }
+    let k = s.n + n;
+    let whole = s;
+    return k + whole.n;
+}
+
+fn main() -> i32 {
+    return 0;
+}
+
+// An owned array is given to a `for` as a value, not as a place.
+fn own_s(ss: [S; 2]) -> [S; 2] { return ss; }

@@ -225,7 +225,10 @@ fn two_mut() -> u32 {
   the place, then ends its bytes (M3); they are moved-out. A drop of a moved-out place is a
   violation. `p = v` evaluates `v`, drops the value in `p` when `p` is initialized and has drop
   glue, then writes `p` (M2): a reference into the old value is `Dead` after the statement,
-  whoever holds it, the new value included.
+  whoever holds it, the new value included. A pattern that binds a non-Copy part by value takes
+  the whole scrutinee at its binding point (after a guard passed): each binding reads its part,
+  the scrutinee's bytes are moved-out as a whole (M9), and each non-Copy part it does not bind
+  is dropped there, in field declaration order (contracts/lang-details.md "Whole moves").
 ```stave
 view struct Chain { v: u32, prev: &u32 }
 fn self_borrow(zero: &u32) -> u32 {
@@ -272,7 +275,8 @@ fn temp_loop() -> u32 {
 }
 ```
 - **M15 (call).** Arguments are evaluated left to right and passed by copy or move with their
-  tags; `&mut` places are reborrowed (M6). A param is a local of the callee that holds the
+  tags; `&mut` places are reborrowed (M6). A by-value argument (the receiver too) is a use of
+  its place when it is evaluated (M8, M9), before the arguments after it. A param is a local of the callee that holds the
   argument. A call makes no other tag. The references it passes are protected until it returns
   (M23, with the example). A call through a fn value is the same.
 - **M16 (store into a view).** Writing a reference into a view reached through `&mut V` is a
@@ -507,10 +511,10 @@ hole. The model never reads a static rule to decide.
 | E0501 after a storing call, after a write through `&mut V`, for a view that borrows itself | M16 with M2, M13 |
 | E0501 at a call: an argument's referent reachable by the callee another way (a second argument, a capture of a fn-value argument, a thread) | M23 |
 | two-phase receiver borrows | M4 (a borrow is not an access), M23 (protection starts at the entry) |
-| E0502: use after move; assignment into a part of a moved value | M9 |
+| E0502: use after move (also by a later operand of the expression that moved it, M15); assignment into a part of a moved value (a value moves whole) | M9 |
 | E0503: assignment through `&`; `&mut` of a place behind `&`; writes of a `static` | M2 on `Frozen` |
 | E0503: assignment to, or `&mut` of, an immutable binding | none (the root of a local is `Active`) |
-| E0504: move out of `*r`, `r.f`, `v[i]`, a capture | M9, M12 (the owner later reads or drops the moved-out place) |
+| E0504: move out of `*r`, `r.f`, `v[i]`, a capture, a part of a value whose type has `impl Drop`, a `static`, a non-Copy part of a place outside a pattern that takes the whole value | M9, M12 (the owner later reads or drops the moved-out place; a destructor reads every part; a static's value is read by every later use) |
 | E0510: a returned borrow the `from` clause lacks | M24 (result); M13, M2 in the caller, which reads the clause |
 | E0512: a returned borrow of a local | M13; M24 (result) |
 | E0512 `mut-capture` | M18 |
