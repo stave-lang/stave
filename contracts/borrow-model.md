@@ -170,10 +170,12 @@ fn child(p: &mut u32) -> u32 {
   array temporary, an iterator copied at the loop head, M8 / M9). Violations: M1, M2 (the
   examples above).
   A `&mut` reached through a `&` is read-only: a `&mut` word read from memory through a `&`
-  tag or the root of a `static` that holds the word's bytes `Frozen` (a `&mut` tag that a
-  foreign read made `Frozen` is no `&`; a raw pointer reads through the tag it carries, M20)
-  gets a new `&` tag,
-  a child of the tag stored there (M4), and the value read holds that one. A read or a `&`
+  gets a new `&` tag, a child of the tag stored there (M4), and the value read holds that one.
+  The read is through a `&` when the tag it goes through (the nearest of the pointer's tag and
+  its ancestors whose range holds the word, M20) or an ancestor of that tag is a `&`, or the
+  root of a `static`, that holds the word's bytes `Frozen`: the path the access is judged on
+  (a `&mut` tag that a foreign read made `Frozen` is no `&`; a `&mut` made below a `&` from a
+  raw pointer reads through that `&`). A read or a `&`
   reborrow through it is allowed; a write through it is a write through a `Frozen` `&` (M2).
   The line is per byte: bytes inside an `UnsafeCell` are `Cell`, not `Frozen` (M21), so a
   `&mut` stored there and read through a `&` keeps its tag; and the new `&` tag is `Cell` on

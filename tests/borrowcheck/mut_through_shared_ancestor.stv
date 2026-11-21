@@ -1,0 +1,15 @@
+//~ BORROWCHECK write-under-shared 12 11
+// A read of bytes outside the range of the pointer's tag goes through the nearest ancestor
+// that holds them: here the `&` of the holder, so the `&mut` word read there is read-only.
+view struct H { x: u64, m: &mut u32 }
+fn main() -> i32 {
+    let mut a: u32 = 1u32;
+    let h = H.{ x: 0u64, m: &mut a };
+    let r: &H = &h;
+    let rx: &u64 = &r.x;
+    let q = ((rx as *const u64 as usize) + 8usize) as *const &mut u32;
+    let m = unsafe("deliberate") q.read();
+    *m = 5u32;
+    if a == 5u32 { return 0; }
+    return 1;
+}
