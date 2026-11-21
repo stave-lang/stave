@@ -1934,7 +1934,17 @@ impl<'a> FnCx<'a> {
         let scope_base = self.f.scopes.len();
         // Every row starts from the state before the match: a failed test gives the bindings
         // made so far back to the scrutinee, and a guard changes no owner (checked below).
-        let flags = self.flag_locals(icx.ast.descendants(n).start);
+        // The scrutinee's SSA drop flags: what a pattern's bindings may clear.
+        let mut flags: Vec<usize> = Vec::new();
+        if let Some(l) = sp.root {
+            for (_, f) in &self.locals[l].flags {
+                if let Flag::Ssa(fl) = *f
+                    && self.f.env.vals.get(fl).is_some_and(|v| v.is_some())
+                {
+                    flags.push(fl);
+                }
+            }
+        }
         // A flag in memory does not go back with the env: each row sets the scrutinee's flags
         // to what they are here.
         let mut saved: Vec<(Operand, Operand)> = Vec::new();
@@ -2011,10 +2021,7 @@ impl<'a> FnCx<'a> {
                 // An or-pattern: every alternative binds the same locals and branches to the
                 // one block the arm continues in, which takes the SSA locals as params.
                 let shared = a.gb.unwrap_or(a.bb);
-                let mut ls = self.ssa_bindings(rows[a.lo].0);
-                // the alternatives may move different parts out of the scrutinee: the block
-                // takes the drop flags too
-                ls.extend(flags.iter().copied());
+                let ls = self.ssa_bindings(rows[a.lo].0);
                 let params: Vec<Value> = ls
                     .iter()
                     .map(|&l| {
@@ -2024,6 +2031,9 @@ impl<'a> FnCx<'a> {
                     .collect();
                 // the env and the scope's locals after the first alternative that lowers
                 let mut bound: Option<(Env, Vec<usize>)> = None;
+                // per alternative that lowers: the block it ends in, its args for the shared
+                // block, and the values it leaves in the scrutinee's drop flags
+                let mut ends: Vec<(Block, Vec<Operand>, Vec<Option<Operand>>)> = Vec::new();
                 for k in a.lo..a.hi {
                     let fail = target(self, next_row(k + 1, tops[k]));
                     self.f.env = snap.clone();
@@ -2048,7 +2058,11 @@ impl<'a> FnCx<'a> {
                         };
                         args.push(v);
                     }
-                    self.f.b.br(shared, &args);
+                    let left: Vec<Option<Operand>> =
+                        flags.iter().map(|&fl| self.f.env.vals.get(fl).copied().flatten()).collect();
+                    if let Some(b) = self.f.b.current() {
+                        ends.push((b, args, left));
+                    }
                     let mut scope = self.f.scopes.pop().unwrap_or_default();
                     if let Some((env, first)) = &mut bound {
                         // the alternatives bind the same names with the same types and modes,
@@ -2072,6 +2086,38 @@ impl<'a> FnCx<'a> {
                         self.f.scopes.push(scope);
                         for (&l, &p) in ls.iter().zip(&params) {
                             self.f.env.vals[l] = Some(Operand::Value(p));
+                        }
+                        // The alternatives may move different parts out of the scrutinee: a
+                        // flag they leave with different values is one more param.
+                        for (i, &fl) in flags.iter().enumerate() {
+                            let mut same = true;
+                            for k in 1..ends.len() {
+                                let (x, y) = (ends[0].2[i], ends[k].2[i]);
+                                let const_eq = match (x, y) {
+                                    (Some(x), Some(y)) => {
+                                        self.kval(x).is_some() && self.kval(x) == self.kval(y)
+                                    }
+                                    _ => false,
+                                };
+                                same &= x == y || const_eq;
+                            }
+                            if same {
+                                continue;
+                            }
+                            let bt = self.t_bool();
+                            let p = self.f.b.add_param(shared, Self::ir(bt));
+                            self.f.env.vals[fl] = Some(Operand::Value(p));
+                            for e in &mut ends {
+                                let v = match e.2[i] {
+                                    Some(v) => v,
+                                    None => self.f.b.int(0),
+                                };
+                                e.1.push(v);
+                            }
+                        }
+                        for (b, args, _) in &ends {
+                            self.f.b.switch_to(*b);
+                            self.f.b.br(shared, args);
                         }
                         true
                     }
