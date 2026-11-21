@@ -37,7 +37,7 @@ use stave_sema::itemcx::ItemCx;
 use stave_sema::loops::ForKind;
 use stave_sema::traits::{Adjust, Lookup, World};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
-use stave_sema::{BindingRef, Coercion, DeclKind, Res, Target, TypedBody};
+use stave_sema::{BindingRef, Coercion, DeclKind, Res, Sym, Target, TypedBody};
 use stave_syntax::{NodeKind, Term};
 
 use crate::ty::{DerefKind, Flows, Tys, call_flows, fn_value_flows};
@@ -2766,8 +2766,18 @@ impl<'a, 'b> Builder<'a, 'b> {
                 kid += 1;
                 let last = close == pend;
                 let fields = sl.map(|s| icx.kids_vec(s)).unwrap_or_default();
-                let ty = if last { self.nty(n) } else { TypeId::NONE };
+                let ty = if last {
+                    self.nty(n)
+                } else {
+                    let named: Vec<(Option<Sym>, u32)> =
+                        fields.iter().map(|&e| (Some(icx.sym(icx.a(e).saturating_sub(2))), e)).collect();
+                    self.literal_ty(p, &named)
+                };
                 cur = Cur::Val(self.agg_ty(n, &fields, ty));
+                // the value is named by the literal's text, not by the rest of the chain
+                if !last && let Cur::Val(V::P(tp)) = &cur {
+                    self.body.locals[tp.local as usize].span = icx.range_span(icx.a(n), close);
+                }
                 p = close + 1;
                 continue;
             }
@@ -2816,6 +2826,42 @@ impl<'a, 'b> Builder<'a, 'b> {
             Cur::Path(r, tok) => self.path_val(r, tok),
             Cur::TypeRel => V::Const,
         }
+    }
+
+    /// The type of the struct literal or variant constructor whose target is at token `tok`,
+    /// when it is not the last step of its chain (the chain's node has the type of the last
+    /// step only): the ADT, its generic args inferred from the types of the field values
+    /// (`fields`: the field's name, or `None` for the next positional one, and its value's node).
+    /// A value without a type would count as Copy, and a part moved out of it would go unseen.
+    fn literal_ty(&mut self, tok: u32, fields: &[(Option<Sym>, u32)]) -> TypeId {
+        let (adt, vi) = match self.tb.target(tok) {
+            Some(Target::Struct { decl }) => (*decl, 0usize),
+            Some(Target::Variant { decl, index }) => match self.tys.prog.decl(*decl) {
+                Some(d) => (d.parent, *index as usize),
+                None => return TypeId::NONE,
+            },
+            _ => return TypeId::NONE,
+        };
+        let sigs = self.tys.sigs;
+        let Some(ad) = sigs.adt(adt) else { return TypeId::NONE };
+        let mut binds: Vec<Option<GArg>> = vec![None; ad.generics.len()];
+        if let Some(v) = ad.variants.get(vi) {
+            let w = World { prog: self.tys.prog, sigs };
+            for (k, &(name, e)) in fields.iter().enumerate() {
+                let field = match name {
+                    Some(name) => v.fields.iter().find(|f| f.name == name),
+                    None => v.fields.get(k),
+                };
+                if let Some(f) = field {
+                    let t = self.nty(e);
+                    let _ = w.match_ty(&self.tys.ov, f.ty, t, &mut binds);
+                }
+            }
+        }
+        if binds.iter().any(|b| b.is_none()) {
+            return TypeId::NONE;
+        }
+        self.tys.ov.mk_adt(adt, binds.into_iter().flatten().collect())
     }
 
     fn agg_ty(&mut self, n: u32, kids: &[u32], ty: TypeId) -> V {
@@ -2957,7 +3003,17 @@ impl<'a, 'b> Builder<'a, 'b> {
             }
             Some(Target::Variant { .. }) => {
                 let Some(ops) = self.args(args, span) else { return V::Never };
-                self.put_temp(Rvalue::Agg(ops), node_ty, n)
+                let ty = if last {
+                    node_ty
+                } else {
+                    let positional: Vec<(Option<Sym>, u32)> = args.iter().map(|&a| (None, a)).collect();
+                    self.literal_ty(paren, &positional)
+                };
+                let v = self.put_temp(Rvalue::Agg(ops), ty, n);
+                if !last && let V::P(tp) = &v {
+                    self.body.locals[tp.local as usize].span = span;
+                }
+                v
             }
             Some(Target::TraitMethod { method, self_ty, args: ga }) => {
                 self.direct_call(method, &ga, Some(self_ty), args, last, n, (span, paren))
