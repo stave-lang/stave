@@ -28,8 +28,9 @@ never share a temporary. A fn value is not an allocation (M18).
 
 A *constant temporary* is a temporary that a constant initializes and only `&` borrows: the
 value of a literal, of `()`, of `size_of` / `align_of`, or of a path that names no local (a
-`const` item, a variant without payload, a fn item), borrowed by `&e`, by `&` of a field or
-element of it, or as an auto-referenced `&self` receiver. Its value is fixed at compile time
+`const` item or const generic, a variant without payload, a fn item), borrowed by `&e`, by `&`
+of a field or element of it, or as an auto-referenced `&self` receiver, of a type without drop
+glue (a temporary with drop glue ends with its statement, M14). Its value is fixed at compile time
 and nothing writes it, so it is static data like a string literal: every evaluation of the
 expression gives the same allocation, its root is `Frozen`, and a borrow of it is never ended
 by a later evaluation (M14 does not apply). A temporary that `&mut` borrows, and one whose
@@ -613,7 +614,8 @@ it is not dumped, not compared with a golden, and not given to a backend.
   - *environment*, on `fn.make`: the interpreter copies the environment into a slot of its
     own in the current frame, so each evaluation of a closure literal holds its own capture
     references (M18).
-  - *constant*, in place of *begin*: the slot of a constant temporary. Its first evaluation
+  - *constant*, in place of *begin*: the slot of a constant temporary (every form "State"
+    lists). Its first evaluation
     begins it; the store of a later one writes the bytes that are there and is no event, so
     no tag of it changes. Its tags are not judged by M24, like those of a `static`.
 - **A local a value is moved out of lives in a slot**, also when the canonical lowering keeps
@@ -640,11 +642,9 @@ pointer is a tag made through a raw pointer (M24).
 
 What the tracking mode does not see, or sees later than the rules say:
 
-- A constant temporary has its row for `&e` with `e` a literal or a path to a `const` item
-  (also in parentheses) and for `&` of a field or element of a `const` item. The other
-  constant temporaries (a variant without payload, a fn item, `()`, `size_of`, an
-  auto-referenced receiver) begin anew at each evaluation for the mode. It is a slot of its
-  frame: the mode ends it with the frame, and its root stays `Active`.
+- A constant temporary is a slot of its frame, as in the code the backends get (one slot per
+  expression, which each evaluation stores the same bytes into): the mode ends it with the
+  frame, and its root stays `Active`.
 - The moves of a `match` arm that has a guard happen when the guard holds (the names are bound
   before it runs). Of an or-pattern with a guard they have no row: the block the guard runs in
   has one predecessor per alternative.

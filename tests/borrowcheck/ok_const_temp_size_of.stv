@@ -1,0 +1,20 @@
+//~ BORROWCHECK ok
+// `&size_of::<T>()` and `&align_of::<T>()` borrow constant temporaries: the next evaluation
+// of the expression does not end them.
+fn main() -> i32 {
+    let zero: usize = 0;
+    let mut r: &usize = &zero;
+    let mut a: &usize = &zero;
+    let mut sum: usize = 0;
+    let mut i: u32 = 0;
+    while i < 3 {
+        let before: &usize = r;
+        let al: &usize = a;
+        r = &size_of::<u64>();
+        a = &(align_of::<u32>());
+        sum = sum + *before + *al;
+        i = i + 1;
+    }
+    if sum == 24 { return 0; }
+    return 1;
+}
