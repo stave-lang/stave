@@ -1,0 +1,14 @@
+rest
+mk 31
+drop 31
+rest
+mk 32
+drop 32
+two
+mk 13
+drop 13
+mk 23
+drop 23
+three
+rest
+end
