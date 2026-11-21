@@ -725,35 +725,15 @@ impl<'a, 'b> Builder<'a, 'b> {
 
     fn op_of_place(&mut self, p: Place, span: Span, n: u32, consume: bool) -> Operand {
         let by_value = consume && !self.tys.is_copy(p.ty);
-        if by_value && self.owned_elems == Some(p.local) && !p.has_deref() {
-            // a `for` binding takes a fresh element of the owned array on every iteration
-            return Operand { kind: OpKind::Copy, place: p, span, node: n, site: u32::MAX };
-        }
-        let behind = p.proj.iter().any(|x| matches!(x, Proj::Deref(_) | Proj::Index | Proj::Column(_)));
-        let (capture, guard, stat) = self
-            .body
-            .locals
-            .get(p.local as usize)
-            .map_or((None, false, false), |l| (l.capture, l.guard, l.static_root));
-        let why = if !by_value {
-            None
-        } else if stat {
-            Some(MoveOut::Static)
-        } else if let Some(c) = capture.filter(|_| !behind) {
-            Some(MoveOut::Capture(c))
-        } else if behind || guard {
-            Some(MoveOut::Behind)
-        } else {
-            self.drop_owner(&p).map(MoveOut::Drop)
-        };
-        // E0504: a move out of a borrow, an index, a capture, a guard binding, a part of a
-        // value with a destructor, or a static; checked as a copy
-        let movable = by_value && why.is_none();
+        let why = if by_value { self.move_out(&p) } else { None };
+        // a `for` binding takes a fresh element of the owned array on every iteration
+        let fresh_elem = self.owned_elem(&p);
+        let movable = by_value && why.is_none() && !fresh_elem;
         // passing on a fresh `&mut` is the borrow that made it, judged there
         let fresh_ref = p.proj.is_empty()
             && self.body.locals.get(p.local as usize).is_some_and(|l| l.temp)
             && self.tys.deref(p.ty).is_some();
-        if movable && self.in_guard > 0 && !fresh_ref {
+        if by_value && why.is_none() && self.in_guard > 0 && !fresh_ref {
             self.body.guard_effects.push((span, GuardEffect::Move(p.clone())));
         }
         if let Some(why) = why {
@@ -773,12 +753,43 @@ impl<'a, 'b> Builder<'a, 'b> {
         }
     }
 
-    /// The longest proper prefix of `p` whose type has an `impl Drop` (moving `p` out of it would
+    /// Why a by-value use of the non-Copy place `p` is E0504 (`None`: it may move). Every way to
+    /// take a value apart ends here, through [`Self::op_of_place`]: a by-value operand or
+    /// receiver, and a binding by value of a `let`, `match` (every alternative, nested
+    /// sub-patterns), or `for` pattern (over a range, an owned array, an iterator). Params of fns
+    /// and closures are names, `_` takes nothing, and patterns have no rest part.
+    fn move_out(&mut self, p: &Place) -> Option<MoveOut> {
+        let l = self.body.locals.get(p.local as usize)?;
+        let (capture, guard, stat) = (l.capture, l.guard, l.static_root);
+        let from = usize::from(self.owned_elem(p));
+        let behind =
+            p.proj[from..].iter().any(|x| matches!(x, Proj::Deref(_) | Proj::Index | Proj::Column(_)));
+        if stat {
+            Some(MoveOut::Static)
+        } else if let Some(c) = capture.filter(|_| !behind) {
+            Some(MoveOut::Capture(c))
+        } else if behind || guard {
+            Some(MoveOut::Behind)
+        } else {
+            self.drop_owner(p, from).map(MoveOut::Drop)
+        }
+    }
+
+    /// `p` is an element (or a part of one) of the array a `for` loop owns and moves out
+    /// element by element.
+    fn owned_elem(&self, p: &Place) -> bool {
+        self.owned_elems == Some(p.local) && p.proj.first() == Some(&Proj::Index) && !p.has_deref()
+    }
+
+    /// The longest proper prefix of `p` (from projection `from` on) whose type has an `impl Drop` (moving `p` out of it would
     /// leave its destructor a moved-out part to read), when `p` is reached by fields only.
-    fn drop_owner(&mut self, p: &Place) -> Option<Place> {
+    fn drop_owner(&mut self, p: &Place, from: usize) -> Option<Place> {
         let mut t = self.body.locals.get(p.local as usize)?.ty;
+        if from > 0 {
+            t = self.tys.elem(t);
+        }
         let mut owner = None;
-        for (i, pr) in p.proj.iter().enumerate() {
+        for (i, pr) in p.proj.iter().enumerate().skip(from) {
             if self.tys.has_drop_impl(t) {
                 owner = Some(Place { local: p.local, proj: p.proj[..i].to_vec(), ty: t });
             }
