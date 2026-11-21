@@ -1733,7 +1733,9 @@ impl<'m, H: Host> Interp<'m, H> {
                 }));
             }
             Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
-            Some(TypeKey::RawPtr { .. } | TypeKey::Int { .. }) => return self.share_word(v, addr, via, at).map(Ok),
+            Some(TypeKey::RawPtr { .. } | TypeKey::Int { .. }) => {
+                return self.share_word(v, addr, via, at).map(Ok);
+            }
             _ => return Ok(Ok(v)),
         }
         if !raw && !self.holds_mut_refs(t) && !self.holds_mut_word(&v) {

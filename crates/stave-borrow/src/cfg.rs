@@ -2390,7 +2390,8 @@ impl<'a, 'b> Builder<'a, 'b> {
                     && !(p.proj.is_empty() && self.body.locals.get(p.local as usize).is_some_and(|l| l.temp))
                 {
                     let span = self.span(n);
-                    let (r, _) = self.borrow(p.clone().with(Proj::Deref(DerefKind::Mut), inner), true, false, span, n);
+                    let (r, _) =
+                        self.borrow(p.clone().with(Proj::Deref(DerefKind::Mut), inner), true, false, span, n);
                     let Some(op) = self.read(r, first) else { return V::Never };
                     return self.put_temp(Rvalue::Pure(vec![op]), ty, n);
                 }
