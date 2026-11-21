@@ -1493,7 +1493,7 @@ impl<'a> FnCx<'a> {
             }
             // an array value (a place is E0219): the loop's temporary
             ForKind::Array => {
-                let TypeKind::Array { len, .. } = self.kind(p.ty) else {
+                let TypeKind::Array { len, elem } = self.kind(p.ty) else {
                     self.fail(f, "a `for` over an array value whose instance type is no array");
                     return;
                 };
@@ -1501,7 +1501,23 @@ impl<'a> FnCx<'a> {
                 let us = self.t_usize();
                 let n = self.int(len as i128);
                 let z = self.int(0);
-                self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Val(p, iter)));
+                if !self.needs_drop(elem) {
+                    self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Val(p, iter)));
+                    return;
+                }
+                // elements with drop glue: the loop owns the array in a slot and hands each
+                // element to its iteration; what it has not handed out when it ends or is left
+                // (`break`, `return`, `?`) is dropped there
+                let at = p.ty;
+                let Some(v) = self.read(&p) else { return };
+                self.push_scope();
+                let (s, st) = self.spill(v, at);
+                let taken = self.new_slot(us);
+                self.f.b.store(taken, z);
+                let l = self.new_temp(at, Home::Rest(s, taken), true);
+                let arr = Place { base: Base::Mem(s, st), proj: Vec::new(), ty: at, root: Some(l) };
+                self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Owned(arr, taken, iter)));
+                self.pop_scope();
             }
             ForKind::Iter | ForKind::IterMut => self.iter_loop(f, pat, body, p, kind),
             ForKind::Range => {}
@@ -1570,6 +1586,24 @@ impl<'a> FnCx<'a> {
                 p.proj.push(Proj::Elem(i, elem, tok));
                 p.ty = elem;
                 Some(p)
+            }
+            Some(Seq::Owned(mut p, taken, iter)) => {
+                let elem = match self.kind(p.ty) {
+                    TypeKind::Array { elem, .. } => elem,
+                    _ => TypeId::NONE,
+                };
+                // the element is the iteration's from here on: a value of its own, which a
+                // pattern that only reads leaves to be dropped when the iteration ends
+                let one = self.int(1);
+                let next = self.op2(Op::AddWrap, ty, i, one);
+                self.f.b.store(taken, next);
+                let tok = self.icx.a(iter);
+                p.proj.push(Proj::Elem(i, elem, tok));
+                p.ty = elem;
+                self.take(&p).map(|x| {
+                    let item = Place { base: Base::Val(x, elem), proj: Vec::new(), ty: elem, root: None };
+                    self.owned_for(pat, item, true)
+                })
             }
         };
         if let Some(item) = item {
@@ -2872,6 +2906,9 @@ enum Seq {
     Ref(Operand, Ty),
     /// An array value (place) and the iterable's node; the binding is `T`.
     Val(Place, u32),
+    /// An array value whose elements have drop glue, in the slot of the loop's owner; the slot
+    /// of the number of elements handed out; the iterable's node. The binding is `T`.
+    Owned(Place, Operand, u32),
 }
 
 fn compound_op(opt: u8) -> Term {

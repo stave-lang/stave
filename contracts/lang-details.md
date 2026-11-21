@@ -146,8 +146,11 @@ in place of its field (depth first); of an enum, only the matched variant's payl
    `W.{ p: P.{ x, y: _ }, q: _ }` drops `p.y`, then `q`. An or-pattern drops what the
    alternative that matched ignores.
 5. `for P.{ a, b: _ } in src`: each iteration's element is moved into the pattern at the start
-   of the iteration and its `b` dropped there; the elements not reached are dropped by the
-   loop's source as before.
+   of the iteration and its `b` dropped there. An item the pattern only reads (`for _ in src`,
+   `for H.{ n, d: _ } in src` with `n: u32`) is a value of its iteration and is dropped when
+   the iteration ends (also by `continue`, `break`, `return`, `?`). The elements not reached
+   are dropped by the loop's source: an iterator by its own drop, an array value by the loop
+   when it ends or is left, in order, after the item of the iteration that left.
 
 A value whose type has an `impl Drop` is never taken apart, by a pattern either (E0504 case
 `drop`): its destructor runs on the whole value.
@@ -190,7 +193,9 @@ when that owner ends.
   temporaries of a `match` scrutinee and of a `for` header belong to the `match` / `for`
   statement: they live across the arms and the loop, and are dropped once after it. The
   iterator value a `for` is given is moved into the loop and, with drop glue, dropped once when
-  the loop ends or is left ("`for` sources").
+  the loop ends or is left ("`for` sources"). An array value a `for` is given is the loop's too:
+  each element is handed to its iteration, and the elements the loop has not handed out when it
+  ends or is left are dropped there, in order.
 - **Rvalues under patterns.** An rvalue that a pattern only reads (`let P.{ n, a: _ } = mk();`
   with `n: u32`, a scrutinee that is a call in an arm that binds nothing by value) is a
   temporary of the statement and is dropped at its end. `let _ = e;` with an rvalue `e` drops
@@ -251,7 +256,7 @@ resolved `next`), never the instance type. The list is closed: a type not listed
 |---|---|---|
 | a range `a..b`, `a..=b` | the values | E0219 `not-source` |
 | `&a`, `&mut a`, a `&[T]` / `&mut [T]` / `&[T; N]` value | element `i` of `*s` borrowed per iteration: `&T` / `&mut T` | the chunks of `*s`; `&mut v` needs a `&mut` source (E0503 over `&`) |
-| an array value (a temporary: a call, a literal, a const, a value `if` / `match`, a cast) | the loop's temporary, elements moved out | the temporary, read only (`&mut v`: E0219 `mut-chunk`) |
+| an array value (a temporary: a call, a literal, a const, a value `if` / `match`, a cast) | the loop's temporary: each element is moved out to its iteration, the ones not reached are dropped right after the loop on every path out (end, `break`, `return`, `?`) | the temporary, read only (`&mut v`: E0219 `mut-chunk`) |
 | an iterator value or place (`it`, `mk()`, `s.it`: a type with `next(&mut self)`) | moved into the loop (copied if Copy) at the head; the loop owns it, advances it, and drops it right after the loop on every path out (end, `break`, `return`, `?`); a place is unusable after, as after any move (E0502, E0504 behind a reference) | not a chunk source |
 | `&mut it`, `r: &mut It` (also a `&mut It` view field) | `*r` advanced in place: after the loop (also after `break`) the iterator has moved on; the loop drops nothing | not a chunk source |
 | `&it`, `r: &It` | E0219 `shared-iter` (`next` takes `&mut self`) | not a chunk source |

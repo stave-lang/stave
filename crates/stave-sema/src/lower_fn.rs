@@ -199,6 +199,9 @@ pub(crate) enum Home {
     Slot(Operand),
     /// An SSA value, put into a slot only where a part of it is dropped.
     Val(Operand),
+    /// The array of a `for` loop over an array value, in a slot: the loop takes its elements one
+    /// by one, and the owner holds the ones from the index in the second slot (a `usize`) on.
+    Rest(Operand, Operand),
 }
 
 /// What ends a temporary.
@@ -835,7 +838,7 @@ impl<'a> FnCx<'a> {
         let ty = self.locals[l].ty;
         if let Some(t) = self.locals[l].temp {
             return match t.home {
-                Home::Slot(p) => {
+                Home::Slot(p) | Home::Rest(p, _) => {
                     let pt = self.t_ref(true, ty);
                     Place { base: Base::Mem(p, pt), proj: Vec::new(), ty, root: Some(l) }
                 }
@@ -1497,26 +1500,64 @@ impl<'a> FnCx<'a> {
         }
         let Some(f) = self.locals[l].flag else {
             if self.st(l) == Init::Full {
-                self.drop_place(p);
+                self.drop_held(l, p);
             }
             return;
         };
         let Some(fv) = self.flag_val(f) else { return };
         match self.kval(fv) {
             Some(0) => {}
-            Some(_) => self.drop_place(p),
+            Some(_) => self.drop_held(l, p),
             None => {
                 let yes = self.f.b.create_block();
                 let cont = self.f.b.create_block();
                 self.f.b.cbr(fv, yes, &[], cont, &[]);
                 self.f.b.switch_to(yes);
-                self.drop_place(p);
+                self.drop_held(l, p);
                 if self.open() {
                     self.f.b.br(cont, &[]);
                 }
                 self.f.b.switch_to(cont);
             }
         }
+    }
+
+    /// Drops what owner `l` holds of its value in place `p`: all of it, or, of the array a `for`
+    /// loop takes element by element, the elements the loop has not taken.
+    fn drop_held(&mut self, l: usize, p: &Place) {
+        match self.locals[l].temp {
+            Some(Temp { home: Home::Rest(s, taken), .. }) => self.drop_rest(s, taken, p.ty),
+            _ => self.drop_place(p),
+        }
+    }
+
+    /// Drops the elements of the array of type `t` in slot `s` from the index in slot `taken`
+    /// on, in order.
+    fn drop_rest(&mut self, s: Operand, taken: Operand, t: Ty) {
+        let TypeKind::Array { elem, len } = self.kind(t) else {
+            self.fail_at(None, "a `for` loop owns a value that is no array");
+            return;
+        };
+        let us = self.t_usize();
+        let bt = self.t_bool();
+        let (head, hv) = self.f.b.create_block_with(&[Self::ir(us)]);
+        let body = self.f.b.create_block();
+        let exit = self.f.b.create_block();
+        let first = Operand::Value(self.f.b.load(Self::ir(us), taken));
+        self.f.b.br(head, &[first]);
+        self.f.b.switch_to(head);
+        let i = Operand::Value(hv[0]);
+        let n = self.int(len.value().unwrap_or(0) as i128);
+        let c = self.op2(Op::Lt, bt, i, n);
+        self.f.b.cbr(c, body, &[], exit, &[]);
+        self.f.b.switch_to(body);
+        let ep = self.t_ref(true, elem);
+        let a = self.op2(Op::ElemAddr, ep, s, i);
+        self.drop_ptr(a, elem);
+        let one = self.int(1);
+        let next = self.op2(Op::AddWrap, us, i, one);
+        self.f.b.br(head, &[next]);
+        self.f.b.switch_to(exit);
     }
 
     // ---------- drops ----------
@@ -1578,7 +1619,7 @@ impl<'a> FnCx<'a> {
             p => p,
         };
         self.drop_if_held(l, &p);
-        if let Some(Temp { home: Home::Slot(s), .. }) = self.locals[l].temp {
+        if let Some(Temp { home: Home::Slot(s) | Home::Rest(s, _), .. }) = self.locals[l].temp {
             // the slot of a temporary ends with it
             let pt = self.t_ref(true, self.locals[l].ty);
             self.event(stave_ir::EventKind::End, s, pt);

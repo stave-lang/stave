@@ -1,0 +1,173 @@
+//~ STDOUT for_array_value_items.stdout
+// A `for` over an array value owns its elements, and each is dropped once. An item the pattern
+// only reads (or `_`) is dropped when its iteration ends; a moving pattern drops what it
+// ignores where it binds; a name owns its item. The elements the loop did not reach (`break`,
+// `return`, `?`) are dropped when the loop is left, in order, after the item of the iteration
+// that left.
+import std.io;
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { let i = self.id; io.print(f"drop {i}\n"); } }
+fn mk(i: u32) -> D { io.print(f"mk {i}\n"); return D.{ id: i }; }
+fn eat(d: D) { let i = d.id; io.print(f"eat {i}\n"); }
+
+struct H { pub d: D, pub n: u32 }
+fn mkh(i: u32) -> H { return H.{ d: mk(i), n: i }; }
+fn hs(i: u32) -> [H; 3] { return [mkh(i), mkh(i + 1), mkh(i + 2)]; }
+fn ds(i: u32) -> [D; 3] { return [mk(i), mk(i + 1), mk(i + 2)]; }
+fn pairs(i: u32) -> [(D, u32); 2] { return [(mk(i), i), (mk(i + 1), i + 1)]; }
+struct P { pub a: D, pub b: D }
+fn ps(i: u32) -> [P; 2] { return [P.{ a: mk(i), b: mk(i + 1) }, P.{ a: mk(i + 2), b: mk(i + 3) }]; }
+fn fail(n: u32) -> Result<u32, u32> {
+    if n == 1 { return Result.Err(n); }
+    return Result.Ok(n);
+}
+
+fn read_only() {
+    for H.{ d: _, n } in hs(10) { io.print(f"n {n}\n"); }
+    io.print("after\n");
+}
+
+fn wild() {
+    for _ in hs(20) { io.print("it\n"); }
+    io.print("after\n");
+}
+
+fn tuple_item() {
+    for (_, n) in pairs(30) { io.print(f"n {n}\n"); }
+    io.print("after\n");
+}
+
+fn field_left_out() {
+    for H.{ n } in hs(40) { io.print(f"n {n}\n"); }
+    io.print("after\n");
+}
+
+fn with_continue() {
+    for H.{ d: _, n } in hs(50) {
+        if n == 51 { continue; }
+        io.print(f"n {n}\n");
+    }
+    io.print("after\n");
+}
+
+fn moving() {
+    for P.{ a, b: _ } in ps(60) {
+        let i = a.id;
+        io.print(f"a {i}\n");
+    }
+    io.print("after\n");
+}
+
+fn by_name() {
+    for d in ds(70) {
+        let i = d.id;
+        io.print(f"d {i}\n");
+    }
+    io.print("after\n");
+}
+
+fn name_moved() {
+    for d in ds(80) { eat(d); }
+    io.print("after\n");
+}
+
+fn break_name() {
+    for d in ds(100) {
+        let i = d.id;
+        io.print(f"d {i}\n");
+        break;
+    }
+    io.print("after\n");
+}
+
+fn break_read() {
+    for H.{ d: _, n } in hs(110) {
+        io.print(f"n {n}\n");
+        if n == 111 { break; }
+    }
+    io.print("after\n");
+}
+
+fn break_moving() {
+    for P.{ a, b: _ } in ps(120) {
+        let i = a.id;
+        io.print(f"a {i}\n");
+        break;
+    }
+    io.print("after\n");
+}
+
+fn break_last() {
+    for d in ds(130) {
+        if d.id == 132 { break; }
+    }
+    io.print("after\n");
+}
+
+fn returns(k: u32) -> u32 {
+    for H.{ d: _, n } in hs(140) {
+        if n == k { return n; }
+    }
+    io.print("after\n");
+    return 0;
+}
+
+fn tries(k: u32) -> Result<u32, u32> {
+    for d in ds(k) {
+        let i = fail(d.id - k)?;
+        io.print(f"ok {i}\n");
+    }
+    io.print("after\n");
+    return Result.Ok(0);
+}
+
+fn nested() {
+    for d in ds(160) {
+        for H.{ d: _, n } in hs(170) {
+            if n == 171 { break; }
+        }
+        let i = d.id;
+        io.print(f"outer {i}\n");
+        if i == 161 { break; }
+    }
+    io.print("after\n");
+}
+
+fn in_loop() {
+    let mut k: u32 = 0;
+    while k < 2 {
+        for d in ds(180 + 10 * k) {
+            if d.id % 10 == 1 { break; }
+        }
+        io.print("round\n");
+        k += 1;
+    }
+}
+
+fn main() -> i32 {
+    read_only();
+    wild();
+    tuple_item();
+    field_left_out();
+    with_continue();
+    moving();
+    by_name();
+    name_moved();
+    break_name();
+    break_read();
+    break_moving();
+    break_last();
+    let r = returns(141);
+    io.print(f"returned {r}\n");
+    let r = returns(9);
+    io.print(f"returned {r}\n");
+    match tries(150) {
+        Result.Ok(n) => { io.print(f"ok {n}\n"); }
+        Result.Err(n) => { io.print(f"err {n}\n"); }
+    }
+    nested();
+    in_loop();
+    io.print("end\n");
+    return 0;
+}
