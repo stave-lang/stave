@@ -2083,14 +2083,18 @@ impl<'a> FnCx<'a> {
                     self.f.b.switch_to(gb);
                     let bt = self.t_bool();
                     let bound = self.f.env.clone();
+                    let around = self.guard.replace((bound.st.clone(), false));
                     // the guard's temporaries end before the branch
                     self.begin_temps();
                     let gv = self.val(g, Some(bt));
                     self.end_temps();
+                    let moved = std::mem::replace(&mut self.guard, around).is_some_and(|w| w.1);
                     if let Some(gv) = gv {
-                        // the rows after a failed guard start from the state before the match
+                        // The rows after a failed guard start from the state before the match.
+                        // A move on some path of the guard only leaves the state as it was at
+                        // the guard's own join: the move itself is what counts.
                         let n = bound.st.len().max(self.f.env.st.len());
-                        if (0..n).any(|l| bound.st.get(l).unwrap_or(&Init::Gone) != self.st(l)) {
+                        if moved || (0..n).any(|l| bound.st.get(l).unwrap_or(&Init::Gone) != self.st(l)) {
                             self.fail(g, "a match guard moved a value or made one");
                         }
                         self.f.b.cbr(gv, a.bb, &[], guard_fail, &[]);

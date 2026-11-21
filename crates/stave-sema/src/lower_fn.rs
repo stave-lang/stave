@@ -478,6 +478,9 @@ pub(crate) struct FnCx<'a> {
     pub temp_seq: u32,
     /// The `?` tokens of the body, sorted.
     pub try_toks: Vec<u32>,
+    /// While a match guard is lowered: the owner states when it started, and whether an owner
+    /// that held a value then was moved out of since.
+    pub guard: Option<(Vec<Init>, bool)>,
     pub err: Option<LowerError>,
     pub f: FnState,
     pub outs: Vec<FnOut>,
@@ -530,6 +533,7 @@ impl<'a> FnCx<'a> {
             temp_flags: FxHashMap::default(),
             temp_seq: 0,
             try_toks: Vec::new(),
+            guard: None,
             err: None,
             f: FnState::new(&[], TypeId::NONE),
             outs: Vec::new(),
@@ -996,6 +1000,11 @@ impl<'a> FnCx<'a> {
     /// The part at `path` of owner `l` is moved out. An enum whose variant has no droppable
     /// field left holds nothing to drop: it counts as moved out itself.
     pub fn mark_moved(&mut self, l: usize, path: &[Step]) {
+        if let Some((st, moved)) = &mut self.guard
+            && st.get(l).is_some_and(|s| *s != Init::Gone)
+        {
+            *moved = true;
+        }
         if self.drop_impl_around(l, path, false) {
             self.fail_at(None, "a part moved out of a value whose type has a `Drop` impl");
             return;
