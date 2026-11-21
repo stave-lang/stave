@@ -2457,7 +2457,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0503",
         severity: Severity::Error,
         area: "borrow",
-        rule: "assignment to an immutable binding or through `&` (case `shared-ref` also: a `&mut` chunk binding over a `&` source); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
+        rule: "assignment to an immutable binding or through `&` (case `shared-ref` also: `&mut` of a place behind `&`, a `&mut` chunk binding over a `&` source); a cast to `*mut T` of a `&mut` place behind `&` (case `shared-ref-cast`); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
         retired: false,
         located: true,
         holes: &[
@@ -2486,6 +2486,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "create a `&mut` reference instead of `&` where this reference comes from",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "shared-ref-cast",
+                message: "cannot make a `*mut` pointer to `{place}`: it is reached through a `&` reference",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`*mut` cast of a `&mut` reached through `&`" },
+                    LabelTemplate { at: "binding", text: "`&` reference created here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "cast to `*const T` to read through it, or reach the `&mut` through a `&mut` reference instead of `&`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

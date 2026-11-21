@@ -1,0 +1,15 @@
+//~ BORROWCHECK write-under-shared 12 11
+// A `&mut` made from a raw pointer of a `&` is below that `&`: a `&mut` word read through it
+// is read through the `&`, so it is read-only.
+view struct S { m: &mut u32 }
+fn main() -> i32 {
+    let mut a: u32 = 1u32;
+    let s = S.{ m: &mut a };
+    let r: &S = &s;
+    let q = &r.m as *const &mut u32 as *mut &mut u32;
+    let pm: &mut &mut u32 = unsafe("deliberate") &mut *q;
+    let m: &mut u32 = &mut **pm;
+    *m = 5u32;
+    if a == 5u32 { return 0; }
+    return 1;
+}

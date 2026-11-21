@@ -1,0 +1,14 @@
+//~ BORROWCHECK write-under-shared 11 11
+// A `&mut` of the holder made from a raw pointer of a `&` of it is below that `&`: a `&mut`
+// word read through it is read through the `&`, so it is read-only.
+view struct S { m: &mut u32 }
+fn main() -> i32 {
+    let mut a: u32 = 1u32;
+    let s = S.{ m: &mut a };
+    let r: &S = &s;
+    let q = r as *const S as *mut S;
+    let ps: &mut S = unsafe("deliberate") &mut *q;
+    *ps.m = 5u32;
+    if a == 5u32 { return 0; }
+    return 1;
+}

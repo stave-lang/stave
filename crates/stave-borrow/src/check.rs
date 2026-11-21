@@ -85,8 +85,9 @@ pub enum Finding {
     Conflict { block: u32, stmt: u32, access: Access, place: Place, span: Span, loans: Vec<LoanId> },
     /// E0502: a use of a moved place (the move site).
     Moved { site: u32, place: Place, span: Span },
-    /// E0503: an assignment or `&mut` borrow of an immutable place; `shared`: through `&`.
-    Immutable { place: Place, span: Span, shared: bool, blame: LocalId },
+    /// E0503: an assignment or `&mut` borrow of an immutable place; `shared`: through `&`;
+    /// `cast`: the borrow is a `&mut` place cast to `*mut`.
+    Immutable { place: Place, span: Span, shared: bool, blame: LocalId, cast: bool },
     /// E0512: a returned value borrows local storage, or a closure's returned value borrows a
     /// capture the closure holds by `&mut` (the loan).
     Escape { span: Span, loan: LoanId },
@@ -456,7 +457,7 @@ impl Cx<'_, '_> {
                         } else {
                             Access::SharedBorrow
                         };
-                        let capture = l.capture;
+                        let (capture, cast) = (l.capture, l.cast);
                         self.access(st, live, at, kind, place, s.span, s.node, &[]);
                         if *mutable
                             && !capture
@@ -467,6 +468,7 @@ impl Cx<'_, '_> {
                                 span: s.span,
                                 shared,
                                 blame,
+                                cast,
                             });
                         }
                     }
@@ -515,6 +517,7 @@ impl Cx<'_, '_> {
                             span: s.span,
                             shared,
                             blame,
+                            cast: false,
                         });
                     }
                 }
@@ -647,7 +650,13 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
                 if let StmtKind::Assign { dest, init: false, .. } = &s.kind
                     && let Err((shared, blame)) = mutability(body, dest)
                 {
-                    findings.push(Finding::Immutable { place: dest.clone(), span: s.span, shared, blame });
+                    findings.push(Finding::Immutable {
+                        place: dest.clone(),
+                        span: s.span,
+                        shared,
+                        blame,
+                        cast: false,
+                    });
                 }
             }
         }

@@ -227,8 +227,9 @@ struct Borrows {
     /// The bytes of a value of each type that are inside an `UnsafeCell`, as sorted ranges.
     cells: HashMap<TypeId, Rc<[(u64, u64)]>>,
     report: Option<Box<Report>>,
-    /// Whether a value of each type holds a reference word.
+    /// Whether a value of each type holds a reference word, and a `&mut` word.
     refs: HashMap<TypeId, bool>,
+    muts: HashMap<TypeId, bool>,
     /// The signature check's plan of each function called so far.
     plans: Vec<Option<Rc<signature::Plan>>>,
     /// The allocations of the statics.
@@ -564,9 +565,9 @@ struct AllocFns {
 /// An aggregate being loaded: its parts (type, address), the next part, the values so far.
 type Open = (Vec<(TypeId, u64)>, usize, Vec<Val>);
 
-/// A part of an aggregate a reborrow walk has still to do: its type (`None`: kept as it is)
-/// and value.
-type Part = (Option<TypeId>, Val);
+/// A part of an aggregate a reborrow walk has still to do: its type and address (`None`: kept
+/// as it is) and value.
+type Part = (Option<(TypeId, u64)>, Val);
 
 /// One level of a load: a value, or an aggregate's parts and the values before them.
 enum Loaded {
@@ -633,6 +634,7 @@ impl<'m, H: Host> Interp<'m, H> {
                 cells: HashMap::new(),
                 report: None,
                 refs: HashMap::new(),
+                muts: HashMap::new(),
                 plans: vec![None; m.funcs.len()],
                 static_ids: HashSet::new(),
                 signatures: Vec::new(),
@@ -1604,7 +1606,22 @@ impl<'m, H: Host> Interp<'m, H> {
     /// M4: the reference `v` of type `rt` with a new tag, a child of the tag it carries, for
     /// the place its address names: the pointee of `rt`, of a fat reference its elements.
     fn borrow_word(&mut self, rt: TypeId, v: Val, mutable: bool, raw: bool, at: Ev) -> R<Val> {
-        let Some((addr, parent)) = v.word() else { return Ok(v) };
+        match self.try_borrow_word(rt, v, mutable, raw, at)? {
+            Ok(v) => Ok(v),
+            Err(r) => Err(self.violation(r)),
+        }
+    }
+
+    /// [`Interp::borrow_word`] with the violation of the borrow given back, not reported.
+    fn try_borrow_word(
+        &mut self,
+        rt: TypeId,
+        v: Val,
+        mutable: bool,
+        raw: bool,
+        at: Ev,
+    ) -> R<Result<Val, Box<Report>>> {
+        let Some((addr, parent)) = v.word() else { return Ok(Ok(v)) };
         // the place: `n` values of type `elem` (no type: bytes)
         let inner = self.pointee.get(rt.index()).copied().flatten();
         let (elem, n) = match (inner.and_then(|t| self.m.types.key(t)), &v) {
@@ -1620,8 +1637,8 @@ impl<'m, H: Host> Interp<'m, H> {
             Some(t) if !mutable => self.cells(t)?,
             _ => Rc::from(Vec::new()),
         };
-        let Some(bt) = &mut self.bt else { return Ok(v) };
-        let Some((id, off)) = bt.locate(&self.mem, addr) else { return Ok(v) };
+        let Some(bt) = &mut self.bt else { return Ok(Ok(v)) };
+        let Some((id, off)) = bt.locate(&self.mem, addr) else { return Ok(Ok(v)) };
         if bt.tracker.exhausted() {
             return Err(InterpError::Unsupported("borrow tracking: every tag is used up".into()));
         }
@@ -1634,31 +1651,35 @@ impl<'m, H: Host> Interp<'m, H> {
                 if raw {
                     bt.tracker.mark_raw(tag);
                 }
-                Ok(match v {
+                Ok(Ok(match v {
                     Val::Pair(a, n) | Val::PairT(a, n, _) => Val::PairT(a, n, tag),
                     _ => Val::T(addr, tag),
-                })
+                }))
             }
-            Err(r) => Err(self.violation(r)),
+            Err(r) => Ok(Err(r)),
         }
     }
 
-    /// M20: a value of type `t` read through a raw pointer, with a new tag for each reference
-    /// in it (found by the type: of an enum the live variant), a child of the tag stored there.
-    /// The value is walked with a list, not by recursion: it may nest as deep as the type table
-    /// allows, deeper than a small native stack holds frames.
-    fn reborrow_refs(&mut self, t: TypeId, v: Val, at: Ev) -> R<Val> {
+    /// The reference words of a value of type `t` loaded from `addr` through tag `via`. Through
+    /// a raw pointer (`raw`), each gets a new tag, a child of the tag stored there (M20). A
+    /// word loaded as a `&mut` whose bytes the access through `via` reaches through a `&`
+    /// (`Frozen`, so not on the bytes of an `UnsafeCell`) is read-only (M7): it gets a new `&`
+    /// tag, a child of the tag stored there. A word loaded as a raw pointer or an integer keeps
+    /// its tag, whatever made it. The words are found by the type (of an enum the live
+    /// variant). The value is walked with a list, not by recursion: it may nest as deep as the
+    /// type table allows, deeper than a small native stack holds frames.
+    fn reborrow_refs(&mut self, t: TypeId, v: Val, addr: u64, via: Tag, raw: bool, at: Ev) -> R<Val> {
         // per open aggregate: its parts still to do (`None`: a part kept as it is), and the
         // values done
         let mut stack: Vec<(std::vec::IntoIter<Part>, Vec<Val>)> = Vec::new();
-        let mut todo = Some((t, v));
+        let mut todo = Some((t, addr, v));
         loop {
             let mut done = None;
-            if let Some((t, v)) = todo.take() {
+            if let Some((t, addr, v)) = todo.take() {
                 if stack.len() > MAX_TYPE_DEPTH {
                     return Err(InterpError::Unsupported("type nesting too deep".into()));
                 }
-                match self.reborrow_one(t, v, at)? {
+                match self.reborrow_one(t, v, addr, via, raw, at)? {
                     Ok(v) => done = Some(v),
                     Err(parts) => {
                         let n = parts.len();
@@ -1669,7 +1690,7 @@ impl<'m, H: Host> Interp<'m, H> {
             if done.is_none() {
                 let Some(top) = stack.last_mut() else { return Err(malformed("reborrow")) };
                 match top.0.next() {
-                    Some((Some(pt), pv)) => todo = Some((pt, pv)),
+                    Some((Some((pt, pa)), pv)) => todo = Some((pt, pa, pv)),
                     Some((None, pv)) => top.1.push(pv),
                     None => done = stack.pop().map(|(_, out)| Val::agg(out)),
                 }
@@ -1684,25 +1705,101 @@ impl<'m, H: Host> Interp<'m, H> {
     }
 
     /// One level of [`Interp::reborrow_refs`]: the value done (a reference with its new tag, a
-    /// value that holds none), or the parts of an aggregate with their types.
-    fn reborrow_one(&mut self, t: TypeId, v: Val, at: Ev) -> R<Result<Val, Vec<Part>>> {
+    /// value that holds none), or the parts of an aggregate with their types and addresses.
+    #[allow(clippy::too_many_arguments)]
+    fn reborrow_one(
+        &mut self,
+        t: TypeId,
+        v: Val,
+        addr: u64,
+        via: Tag,
+        raw: bool,
+        at: Ev,
+    ) -> R<Result<Val, Vec<Part>>> {
         let types = &self.m.types;
         match types.key(t) {
-            Some(&TypeKey::Ref { mutable, .. }) => return self.borrow_word(t, v, mutable, true, at).map(Ok),
+            Some(&TypeKey::Ref { mutable, .. }) => {
+                let shared = mutable && self.frozen_at(via, addr);
+                if raw {
+                    return self.borrow_word(t, v, mutable && !shared, true, at).map(Ok);
+                }
+                if !shared {
+                    return Ok(Ok(v));
+                }
+                // a `&mut` whose tag is Dead already: its next use reports
+                return Ok(Ok(match self.try_borrow_word(t, v.clone(), false, false, at)? {
+                    Ok(w) => w,
+                    Err(_) => v,
+                }));
+            }
             Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {}
-            _ => return Ok(Ok(v)),
+            // a type the table does not know: no layout tells its words apart, so the load
+            // stops rather than keep a `&mut` word writable
+            None => return Err(malformed("reborrow type")),
+            // a word not loaded as a reference (raw pointer, integer, fn value, vector) keeps
+            // its tag
+            Some(_) => return Ok(Ok(v)),
+        }
+        if !raw && !self.holds_mut_refs(t) {
+            return Ok(Ok(v));
         }
         let Val::Agg(vs) = &v else { return Ok(Ok(v)) };
-        let tys: Vec<Option<TypeId>> = match &self.layout(t)?.shape {
-            Shape::Fields(fs) => fs.iter().map(|f| Some(f.1)).collect(),
-            Shape::Array { elem, .. } => vec![Some(*elem); vs.len()],
+        let at_off = |off: u64| Some(addr.wrapping_add(off));
+        let parts: Vec<Option<(TypeId, u64)>> = match &self.layout(t)?.shape {
+            Shape::Fields(fs) => fs.iter().map(|&(off, ft)| at_off(off).map(|a| (ft, a))).collect(),
+            Shape::Array { elem, stride, .. } => {
+                (0..vs.len() as u64).map(|k| at_off(k.wrapping_mul(*stride)).map(|a| (*elem, a))).collect()
+            }
             Shape::Enum(vars) => {
                 let live = vs.first().and_then(Val::bits).and_then(|k| vars.get(k as usize));
-                std::iter::once(None).chain(live.into_iter().flatten().map(|f| Some(f.1))).collect()
+                let fields = live.into_iter().flatten().map(|&(off, ft)| at_off(off).map(|a| (ft, a)));
+                std::iter::once(None).chain(fields).collect()
             }
             Shape::Scalar | Shape::Fat | Shape::Bytes => return Ok(Ok(v)),
         };
-        Ok(Err(vs.iter().enumerate().map(|(k, fv)| (tys.get(k).copied().flatten(), fv.clone())).collect()))
+        Ok(Err(vs.iter().enumerate().map(|(k, fv)| (parts.get(k).copied().flatten(), fv.clone())).collect()))
+    }
+
+    /// Whether tag `via` holds the byte at `addr` as a `&` does ([`Tracker::shared_at`]).
+    fn frozen_at(&self, via: Tag, addr: u64) -> bool {
+        let Some(bt) = &self.bt else { return false };
+        let Some((id, base, _)) = self.mem.alloc_span(addr) else { return false };
+        bt.tracker.shared_at(id, via, addr.wrapping_sub(base))
+    }
+
+    /// Whether a value of type `t` holds a `&mut` word (not behind a pointer, not in a fn
+    /// value). The types are walked with a list.
+    fn holds_mut_refs(&mut self, t: TypeId) -> bool {
+        if let Some(&r) = self.bt.as_ref().and_then(|bt| bt.muts.get(&t)) {
+            return r;
+        }
+        let mut seen: HashSet<TypeId> = HashSet::new();
+        let mut work = vec![t];
+        let mut found = false;
+        while let Some(x) = work.pop() {
+            if !seen.insert(x) {
+                continue;
+            }
+            match self.m.types.key(x) {
+                Some(TypeKey::Ref { mutable: true, .. }) => {
+                    found = true;
+                    break;
+                }
+                Some(TypeKey::Tuple(_) | TypeKey::Array { .. } | TypeKey::Adt { .. }) => {
+                    match self.layout(x).map(|l| &l.shape) {
+                        Ok(Shape::Fields(fs)) => work.extend(fs.iter().map(|f| f.1)),
+                        Ok(Shape::Array { elem, .. }) => work.push(*elem),
+                        Ok(Shape::Enum(vs)) => work.extend(vs.iter().flatten().map(|f| f.1)),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(bt) = &mut self.bt {
+            bt.muts.insert(t, found);
+        }
+        found
     }
 
     fn set(regs: &mut [Val], body: &Body, i: u32, v: Val) {
@@ -1927,13 +2024,18 @@ impl<'m, H: Host> Interp<'m, H> {
                     self.track(Self::tag_of(regs, arg(0)?), a, n, false, fid, i)?;
                 }
                 let v = self.load_val(t, a, 0, fid, site)?;
-                let raw = |p: Operand| match p {
+                let p = arg(0)?;
+                let raw = match p {
                     Operand::Value(p) => {
                         matches!(body.value_ty(p).and_then(|t| m.types.key(t)), Some(TypeKey::RawPtr { .. }))
                     }
                     _ => false,
                 };
-                if self.bt.is_some() && raw(arg(0)?) { self.reborrow_refs(t, v, ev(fid, i))? } else { v }
+                if self.bt.is_some() && (raw || self.holds_mut_refs(t)) {
+                    self.reborrow_refs(t, v, a, Self::tag_of(regs, p), raw, ev(fid, i))?
+                } else {
+                    v
+                }
             }
             // hints: no effect on the program's state
             Op::Prefetch(_) | Op::FenceStream => return Ok(Step::Next),

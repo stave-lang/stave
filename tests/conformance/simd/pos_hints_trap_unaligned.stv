@@ -7,9 +7,9 @@ import std.io;
 
 fn aligned(buf: &mut [f32x4; 3]) -> &mut [f32 align 16] from buf {
     let a = &mut buf[0] as *mut f32x4 as usize;
-    let parts: [usize; 2] = [a, 12];
-    let q = &parts as *const [usize; 2] as *const &mut [f32 align 16];
-    return unsafe("buf holds 12 f32 at a 16-byte aligned address, lent while the view lives") q.read();
+    let mut parts: [usize; 2] = [a, 12];
+    let q = &mut parts as *mut [usize; 2] as *mut &mut [f32 align 16];
+    return unsafe("buf holds 12 f32 at a 16-byte aligned address, lent while the view lives; q points to parts, held exclusively here") q.read();
 }
 
 fn main() -> i32 {
