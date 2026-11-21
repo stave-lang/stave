@@ -71,8 +71,9 @@ pub(super) struct Entry {
     below: Vec<HashSet<Src>>,
     /// Per target param: the sources of the words writable through it.
     writable: Vec<HashSet<Src>>,
-    /// A walk at the entry was cut short: the call is not judged.
-    cut: bool,
+    /// Per param: a walk of its value at the entry was cut short. A clause that reads it (a
+    /// source, or the param whose stores are checked) is not judged.
+    cut: Vec<bool>,
 }
 
 /// A `from` clause one call did not keep.
@@ -427,7 +428,7 @@ impl<'m, H: Host> Interp<'m, H> {
             top: vec![Vec::new(); n],
             below: vec![HashSet::new(); n],
             writable: vec![HashSet::new(); n],
-            cut: false,
+            cut: vec![false; n],
         };
         for k in 0..n {
             let (source, target) = (plan.source.get(k) == Some(&true), plan.target.get(k) == Some(&true));
@@ -437,20 +438,20 @@ impl<'m, H: Host> Interp<'m, H> {
             let (Some(&t), Some(v)) = (params.get(k), args.get(k)) else { continue };
             let mut top = Vec::new();
             if !self.value_words(t, v, &mut top) {
-                e.cut = true;
-                break;
+                e.cut[k] = true;
+                continue;
             }
             if source {
                 e.top[k] = top.iter().filter_map(|w| self.src(w)).collect();
                 match self.reach(&top) {
                     Some(s) => e.below[k] = s,
-                    None => e.cut = true,
+                    None => e.cut[k] = true,
                 }
             }
             if target {
                 match self.writable(&top) {
                     Some(ws) => e.writable[k] = ws.iter().filter_map(|w| self.src(w)).collect(),
-                    None => e.cut = true,
+                    None => e.cut[k] = true,
                 }
             }
         }
@@ -461,6 +462,9 @@ impl<'m, H: Host> Interp<'m, H> {
     /// argument `x` at the entry or now, without its own words when `copy`. `false`: too many.
     fn add_sources(&mut self, e: &Entry, f: FuncId, x: u32, copy: bool, out: &mut HashSet<Src>) -> bool {
         let k = x as usize;
+        if e.cut.get(k) == Some(&true) {
+            return false;
+        }
         let m = self.m;
         let (Some(&t), Some(v)) = (m.func(f).and_then(|g| g.params.get(k)), e.args.get(k)) else {
             return true;
@@ -513,9 +517,6 @@ impl<'m, H: Host> Interp<'m, H> {
     /// M24 at the return of `f` with result `ret`: a report for the first reference word of
     /// the result, and for the first one each param's views took, that no source gives.
     pub(super) fn signature_return(&mut self, f: FuncId, e: &Entry, ret: Option<&Val>, at: &Trace) {
-        if e.cut {
-            return;
-        }
         let m = self.m;
         let Some(func) = m.func(f) else { return };
         let none = crate::ir::Clauses::default();
@@ -536,7 +537,7 @@ impl<'m, H: Host> Interp<'m, H> {
             }
         }
         for p in 0..n {
-            if e.plan.target.get(p as usize) != Some(&true) {
+            if e.plan.target.get(p as usize) != Some(&true) || e.cut.get(p as usize) == Some(&true) {
                 continue;
             }
             let (Some(&t), Some(v)) = (func.params.get(p as usize), e.args.get(p as usize)) else { continue };

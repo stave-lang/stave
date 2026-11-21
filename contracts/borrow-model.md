@@ -664,7 +664,9 @@ What the tracking mode does not see, or sees later than the rules say:
   that is a param, a field, or a result (a fn type does not show them): when a source of a
   clause holds a fn value with captures, a reference that derives from no other source is not
   judged, and a fn value in a result or stored into a view is not judged either. A closure
-  body's own environment it walks. A value with more than 4096 reference words is not judged. The report
+  body's own environment it walks. A value with more than 4096 reference words (with the
+  words in the views it reaches) is not judged: a clause whose source it is, and the stores
+  into it, are not; the other clauses of the call are. The report
   names the param by its index and a closure body as `the closure at <file>:<line>:<col> in
   <fn>` (the site of its literal; its environment is its last param), and has no site of the
   store. It does not end the run: a run
