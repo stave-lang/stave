@@ -1320,7 +1320,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             };
             // `p op= e` is `p = p op e`: the left operand is a by-value use of `p` evaluated
             // before `e` (a move when not Copy, so `e` may not use `p`, and a place that cannot
-            // be moved from is E0504), and the write re-initializes `p`
+            // be moved from is E0504), and the write re-initializes `p`. Operator impls are on
+            // Copy types only (E0422): the move is of a generic operand without a `Copy` bound.
             let old = if !compound {
                 None
             } else if self.tys.is_copy(lp.ty) {

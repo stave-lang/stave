@@ -1229,14 +1229,8 @@ impl<'a> FnCx<'a> {
                 let Some(r) = self.val(rhs, Some(lt)) else { return };
                 let tok = icx.a(op);
                 let Some(nv) = self.binop(tok, bin as u8, old, r, lt) else { return };
-                if self.needs_drop(lt) {
-                    // `p op= e` is `p = p op e`: the operator call took the old value (the callee
-                    // owns it), so the result goes into a place that holds none. Until the call
-                    // the place still owns the old value: a `?` in `e` leaves it there.
-                    self.write(&lp, nv);
-                } else {
-                    self.assign(&lp, nv);
-                }
+                // operator operands are Copy (E0422), so the old value has no drop glue
+                self.assign(&lp, nv);
             }
             return;
         }
