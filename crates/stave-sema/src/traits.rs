@@ -1404,29 +1404,26 @@ pub(crate) fn check_impls(
                 }
             }
         }
+        // E0419: drop glue runs the destructors of ADTs only, and a package adds none to the
+        // types of another (their values would drop differently in each package).
         // E0416: Drop on a Copy type. Copy and Drop exclude each other on every instance, so
         // the impls conflict when one instance of the Drop impl's head may be Copy: a Copy impl
-        // whose head unifies with it, or a built-in Copy type.
+        // whose head unifies with it.
         if tr.trait_decl == lang.drop && lang.drop.is_some() && !tys.is_error_ty(imp.self_ty) {
-            let copy_impl = copy_impl_overlapping(&w, tys, imp);
-            let builtin_copy = match tys.kind(imp.self_ty) {
-                TypeKind::Adt { .. } => false,
-                TypeKind::Param(_) => true,
-                _ => {
-                    // every type param stands for a Copy type too
-                    let mut env = imp.generics.clone();
-                    for g in env.iter_mut().filter(|g| !g.is_const) {
-                        g.bounds.push(TraitRef { trait_decl: lang.copy, args: Vec::new() });
-                    }
-                    w.is_copy(tys, imp.self_ty, &env)
+            let package_of = |m| prog.module(m).map(|x| x.package);
+            let own_adt = match tys.kind(imp.self_ty) {
+                TypeKind::Adt { def, .. } => {
+                    prog.decl(*def).is_some_and(|x| package_of(x.module) == package_of(decl.module))
                 }
+                _ => false,
             };
-            if copy_impl.is_some() || builtin_copy {
-                let roles: Vec<(&str, Span)> = copy_impl
-                    .and_then(|ci| prog.decl(ci))
-                    .map(|x| ("copy", x.name_span))
-                    .into_iter()
-                    .collect();
+            if !own_adt {
+                out.extend(mk("E0419", None, &[("type", &self_text)], impl_span, &[]));
+                // the impl takes part in nothing else: no overlap reports for or against it
+                continue;
+            } else if let Some(ci) = copy_impl_overlapping(&w, tys, imp) {
+                let roles: Vec<(&str, Span)> =
+                    prog.decl(ci).map(|x| ("copy", x.name_span)).into_iter().collect();
                 out.extend(mk("E0416", None, &[("type", &self_text)], impl_span, &roles));
             }
         }

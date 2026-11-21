@@ -12,7 +12,7 @@ fn root() -> std::path::PathBuf {
 #[test]
 fn real_registry_passes() {
     let reg = load(&root()).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(reg.entries.len(), 163, "145 rows of diagnostic-codes.md + 12 E11xx + 6 E12xx");
+    assert_eq!(reg.entries.len(), 164, "146 rows of diagnostic-codes.md + 12 E11xx + 6 E12xx");
     for e in &reg.entries {
         assert!(md::is_code(&e.code), "{}", e.code);
         for h in &e.holes {

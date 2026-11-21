@@ -2184,6 +2184,31 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0419",
+        severity: Severity::Error,
+        area: "kinds",
+        rule: "`impl Drop` whose self type is not a struct or enum declared in the impl's package (a tuple, array, slice, reference, raw pointer, fn type, scalar, generic param, or a type of another package): drop glue runs the destructors of ADTs only, and a package adds none to another's types",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`impl Drop for {type}`: a `Drop` impl's self type must be a struct or enum of this package",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`impl Drop` here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "implement `Drop` for a struct or enum declared in this package, for example a wrapper with a field of type `{type}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
