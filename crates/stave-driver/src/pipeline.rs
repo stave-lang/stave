@@ -545,7 +545,12 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     }
     // A body the borrow checker could not model is not known to be sound: the run fails (check
     // and build alike) instead of accepting it without its E05xx diagnostics.
-    let mut failure = if has_errors { None } else { unchecked_failure(&bc, |d| program.decl_path(d)) };
+    let mut failure = if has_errors {
+        None
+    } else {
+        silent_error(&tc, |d| program.decl_path(d))
+            .or_else(|| unchecked_failure(&bc, |d| program.decl_path(d)))
+    };
 
     // ---- effects: deny clauses against the effect sets of the call graph.
     let mut effect_sets = None;
@@ -673,6 +678,16 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
 }
 
 /// The failure for the first body borrowck could not check (its decl path from `path`), if any.
+/// A body the checker gave an error type while no error diagnostic was reported: the checker
+/// lost an error, so the program is not known to be well typed (exit 3, check and build alike).
+fn silent_error(tc: &stave_sema::Typeck, path: impl Fn(stave_sema::DeclId) -> String) -> Option<Failure> {
+    let b = tc.bodies.iter().find(|b| b.has_error)?;
+    Some(Failure::Internal {
+        stage: Stage::Typeck,
+        message: format!("`{}` has a type error but no error diagnostic", path(b.decl)),
+    })
+}
+
 fn unchecked_failure(
     bc: &stave_borrow::Borrowck,
     path: impl Fn(stave_sema::DeclId) -> String,

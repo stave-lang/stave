@@ -1310,6 +1310,23 @@ pub(crate) fn check_impls(
         let impl_span = decl.name_span;
         let names = NameCx { prog, generics: &imp.generics };
         let self_text = types::display(tys, &names, imp.self_ty);
+        // E0421: a use of the impl binds its params from the self type alone (method lookup
+        // knows only the receiver), so a param that does not occur there would get no type.
+        let free = unconstrained_params(tys, imp);
+        if !free.is_empty() {
+            for k in free {
+                let g = &imp.generics[k as usize];
+                let pn = prog.strings.get(g.name).to_string();
+                out.extend(mk(
+                    "E0421",
+                    None,
+                    &[("param", &pn), ("type", &self_text)],
+                    impl_span,
+                    &[("param", g.name_span)],
+                ));
+            }
+            continue;
+        }
         let Some(tr) = &imp.trait_ref else {
             if let Some(dg) = incoherent(prog, sigs, tys, d, imp, &self_text) {
                 out.push(dg);
@@ -1519,6 +1536,40 @@ pub(crate) fn check_impls(
         prev.push(d);
     }
     out
+}
+
+/// The generic params of `imp` (type and const) that do not occur in its self type.
+fn unconstrained_params(tys: &TypeTable, imp: &ImplDef) -> Vec<u32> {
+    if tys.is_error_ty(imp.self_ty) {
+        return Vec::new();
+    }
+    let mut used = vec![false; imp.generics.len()];
+    let mut mark = |i: u32| {
+        if let Some(u) = used.get_mut(i as usize) {
+            *u = true;
+        }
+    };
+    let mut stack = vec![imp.self_ty];
+    let mut kids = Vec::new();
+    while let Some(t) = stack.pop() {
+        let k = tys.kind(t);
+        match k {
+            TypeKind::Param(i) | TypeKind::ConstParam(i) => mark(*i),
+            TypeKind::Array { len: ConstArg::Param(i), .. } => mark(*i),
+            TypeKind::Adt { args, .. } => {
+                for a in args.iter() {
+                    if let GArg::Const(ConstArg::Param(i)) = a {
+                        mark(*i);
+                    }
+                }
+            }
+            _ => {}
+        }
+        kids.clear();
+        k.children(&mut kids);
+        stack.extend_from_slice(&kids);
+    }
+    (0..imp.generics.len() as u32).filter(|&i| !used[i as usize]).collect()
 }
 
 /// The package that declares `d`.

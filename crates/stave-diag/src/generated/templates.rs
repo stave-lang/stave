@@ -2247,6 +2247,33 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0421",
+        severity: Severity::Error,
+        area: "kinds",
+        rule: "impl generic param (type or const) that does not occur in the impl's self type, also one that occurs only in the trait's args: a use of the impl binds its params from the self type alone; at the impl, once per such param",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "param", kind: HoleKind::Name, choices: &[] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "impl param `{param}` does not occur in the self type `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "impl here" },
+                    LabelTemplate { at: "param", text: "`{param}` declared here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use `{param}` in the self type, move it to the methods that need it (`fn m<{param}>(..)`), or remove it",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
