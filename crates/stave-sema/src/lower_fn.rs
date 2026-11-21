@@ -1349,7 +1349,7 @@ impl<'a> FnCx<'a> {
         if !self.open() {
             return;
         }
-        let Some(d) = crate::mono::item_at(self.g.prog, "runtime.thread", "scope_join") else {
+        let Some(d) = self.g.prog.known.decl(stave_ir::Known::ScopeJoin) else {
             self.fail_at(None, "`runtime.thread.scope_join` not found");
             return;
         };

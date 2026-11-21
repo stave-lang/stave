@@ -142,16 +142,7 @@ pub fn kind_of<I: Interner + ?Sized>(w: World<'_>, cx: &mut I, t: TypeId, env: &
 
 /// Whether `d` is `std.mem.forget` (E0412).
 pub fn is_forget(prog: &Program, d: DeclId) -> bool {
-    let Some(x) = prog.decl(d) else { return false };
-    if x.kind != DeclKind::Fn || prog.strings.get(x.name) != "forget" {
-        return false;
-    }
-    prog.module(x.module).is_some_and(|m| {
-        m.path.len() == 2
-            && prog.strings.get(m.path[0]) == "std"
-            && prog.strings.get(m.path[1]) == "mem"
-            && prog.packages.get(m.package.idx()).is_some_and(|p| p.kind == crate::PackageKind::Builtin)
-    })
+    prog.known.is(d, stave_ir::Known::MemForget) && prog.decl(d).is_some_and(|x| x.kind == DeclKind::Fn)
 }
 
 /// Whether decl `d` belongs to the built-in std package.

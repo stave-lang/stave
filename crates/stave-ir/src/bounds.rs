@@ -103,8 +103,8 @@ use crate::types::{TypeId, TypeKey, TypeTable};
 use crate::verify::Dominators;
 use crate::witness::check::{Rejected, check_module, remove};
 use crate::witness::{
-    CallProved, CallRefuted, Calls, ENSURES_FAILED, Edge, FnWitness, NO_BLOCK, NOT_DEPTH, Node,
-    REQUIRES_FAILED, Refuted, Removed, Source, Summary,
+    CallProved, CallRefuted, Calls, Edge, FnWitness, NO_BLOCK, NOT_DEPTH, Node, Refuted, Removed, Source,
+    Summary,
 };
 
 /// The most graph edges one bounds query follows before it gives up and keeps the check: compile
@@ -524,9 +524,9 @@ fn has_check(m: &Module, b: &Body, claims: Option<&Claims>) -> bool {
 /// The kind of contract check whose failure call instruction `i` is, by its callee.
 fn fail_clause(funcs: &[Func], b: &Body, i: u32) -> Option<Clause> {
     let Some(&Operand::Func(f)) = b.args(i).first() else { return None };
-    match funcs.get(f.index())?.path.as_str() {
-        REQUIRES_FAILED => Some(Clause::Requires),
-        ENSURES_FAILED => Some(Clause::Ensures),
+    match funcs.get(f.index())?.known? {
+        crate::Known::RequiresFailed => Some(Clause::Requires),
+        crate::Known::EnsuresFailed => Some(Clause::Ensures),
         _ => None,
     }
 }

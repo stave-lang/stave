@@ -18,8 +18,8 @@
 //! ([`scan_without`]).
 
 use crate::ir::{Body, Const, FuncId, Module, Op, Operand, PanicKind, Site};
+use crate::known::{is_contract_failed, is_requires_failed};
 use crate::types::TypeKey;
-use crate::witness::{ENSURES_FAILED, REQUIRES_FAILED};
 
 /// The first trapping instruction of a function and its first `panic.out_of_memory`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub fn scan(m: &Module, f: FuncId) -> Traps {
 /// `runtime.panic.requires_failed`, in order.
 pub fn requires_checks(m: &Module, f: FuncId) -> Vec<u32> {
     let Some(b) = m.func(f).and_then(|x| x.body.as_ref()) else { return Vec::new() };
-    let fails = |g: FuncId| m.func(g).is_some_and(|g| g.path == REQUIRES_FAILED);
+    let fails = |g: FuncId| m.func(g).is_some_and(is_requires_failed);
     (0..b.insts.len() as u32)
         .filter(|&i| {
             b.insts.op[i as usize] == Op::Call
@@ -129,10 +129,9 @@ pub fn trap_of(m: &Module, b: &Body, i: u32) -> Option<PanicKind> {
         }
         Op::Vec(v) => v.trap_kinds().iter().copied().find(|&k| k != PanicKind::StackOverflow),
         Op::Call => match args.first() {
-            Some(Operand::Func(f)) => m
-                .func(*f)
-                .filter(|f| f.path == REQUIRES_FAILED || f.path == ENSURES_FAILED)
-                .map(|_| PanicKind::Contract),
+            Some(Operand::Func(f)) => {
+                m.func(*f).filter(|f| is_contract_failed(f)).map(|_| PanicKind::Contract)
+            }
             _ => None,
         },
         _ => None,

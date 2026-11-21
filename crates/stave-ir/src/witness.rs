@@ -121,9 +121,6 @@ pub const NO_BLOCK: u32 = u32::MAX;
 pub const MAX_MUL: u32 = 1 << 16;
 /// The most reachable `ret` blocks of a function whose summary has `post` rows.
 pub const SUMMARY_RETURNS: usize = 16;
-/// The checked-IR paths of the fns a failed `requires` / `ensures` check calls.
-pub const REQUIRES_FAILED: &str = "runtime.panic.requires_failed";
-pub const ENSURES_FAILED: &str = "runtime.panic.ensures_failed";
 
 /// An integer a witness talks about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

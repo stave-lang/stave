@@ -33,9 +33,8 @@
 //! does not panic.
 
 use super::{
-    ASSERT_BLOCKS, CallProved, CallRefuted, ENSURES_FAILED, Edge, FnWitness, MAX_CONST, MAX_MUL, NO_BLOCK,
-    NOT_DEPTH, Node, Pre, REQUIRES_FAILED, Refuted, Removed, Row, SUMMARY_RETURNS, Safe, Source, Summary,
-    Term as RowTerm,
+    ASSERT_BLOCKS, CallProved, CallRefuted, Edge, FnWitness, MAX_CONST, MAX_MUL, NO_BLOCK, NOT_DEPTH, Node,
+    Pre, Refuted, Removed, Row, SUMMARY_RETURNS, Safe, Source, Summary, Term as RowTerm,
 };
 use crate::ir::{
     Block, Body, CastKind, FuncId, InstanceId, Module, Op, Operand, Span, Target, Term, Value, ValueDef,
@@ -1088,8 +1087,7 @@ impl<'a> Cx<'a> {
     /// call), if `q` is one.
     fn contract(&self, q: u32) -> Option<(u32, Operand)> {
         let (Some(Op::Call), [Operand::Func(f), ..]) = (self.op(q), self.b.args(q)) else { return None };
-        let path = self.m.func(*f)?.path.as_str();
-        if path != REQUIRES_FAILED && path != ENSURES_FAILED {
+        if !crate::known::is_contract_failed(self.m.func(*f)?) {
             return None;
         }
         let fb = *self.block_of.get(q as usize)?;
@@ -1521,7 +1519,7 @@ impl<'a> Cx<'a> {
             for q in 0..self.b.insts.len() as u32 {
                 let Some((f, _, _)) = self.direct_call(q) else { continue };
                 let bk = self.block_of.get(q as usize).copied().unwrap_or(NO_BLOCK) as usize;
-                if self.m.func(f).is_some_and(|f| f.path == REQUIRES_FAILED)
+                if self.m.func(f).is_some_and(crate::known::is_requires_failed)
                     && self.encloses(bk, bk)
                     && rows.next().map(|r| r.inst) != Some(q)
                 {

@@ -10,9 +10,7 @@ use stave_ir::bounds::{claims, prove_func, prove_func_in};
 use stave_ir::interp::Val;
 use stave_ir::ir::Span;
 use stave_ir::witness::check::{Checked, Reject, check_func, check_module, remove, remove_whole};
-use stave_ir::witness::{
-    CallProved, CallRefuted, ENSURES_FAILED, FnWitness, PostAt, REQUIRES_FAILED, Removed, Row, Source, Term,
-};
+use stave_ir::witness::{CallProved, CallRefuted, FnWitness, PostAt, Removed, Row, Source, Term};
 use stave_ir::{
     Block, FuncBuilder, FuncId, GenericArg, Module, Op, Operand, Outcome, PanicKind, Site, Value,
     verify_module,
@@ -31,8 +29,8 @@ fn require(b: &mut FuncBuilder, fail: FuncId, c: Value) -> Block {
 }
 
 /// A contract failure fn at `path` that panics `Contract`.
-fn failure(m: &mut Module, id: u32, path: &str) -> FuncId {
-    define(m, &[id], path, &[], None, |b, _| {
+fn failure(m: &mut Module, id: u32, k: stave_ir::Known) -> FuncId {
+    define_known(m, &[id], k, &[], None, |b, _| {
         b.inst(Op::Panic(PanicKind::Contract), None, &[]);
         b.unreachable();
     })
@@ -67,7 +65,7 @@ fn fixture(second: Second) -> Calls {
     let mut m = Module::new();
     let t = m.types.u32();
     let bt = m.types.bool();
-    let fail = failure(&mut m, 9, REQUIRES_FAILED);
+    let fail = failure(&mut m, 9, stave_ir::Known::RequiresFailed);
     let mut ok = Block(0);
     let pos = define(&mut m, &[1], "app.pos", &[t], Some(t), |b, _| {
         let x = b.param(0).unwrap();
@@ -305,7 +303,7 @@ fn an_ensures_is_a_fact_after_the_call() {
     let mut m = Module::new();
     let t = m.types.u32();
     let bt = m.types.bool();
-    let fail = failure(&mut m, 9, ENSURES_FAILED);
+    let fail = failure(&mut m, 9, stave_ir::Known::EnsuresFailed);
     let small = define(&mut m, &[1], "app.small", &[t], Some(t), |b, _| {
         let x = b.param(0).unwrap();
         let (ten, nine) = (b.int(10), b.int(9));

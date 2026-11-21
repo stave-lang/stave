@@ -21,6 +21,7 @@
 //! the borrow checker's E0501 (both closures are live during the call).
 
 use stave_diag::Diagnostic;
+use stave_ir::Known;
 use stave_syntax::{NodeKind, Term};
 
 use crate::closures::{CaptureMode, ClosureInfo, ClosureKind};
@@ -33,15 +34,11 @@ use crate::typeck::{Ck, Coercion, Target, TypedBody};
 type ThreadFn<'s> = (Option<DeclId>, &'s str, &'s [(usize, Cross)]);
 
 /// The `std.thread` functions whose calls check their fn arguments' captures.
-const CHECKED: [&str; 3] = ["join", "par_for", "par_for_mut"];
+const CHECKED: [Known; 3] = [Known::ThreadJoin, Known::ParFor, Known::ParForMut];
 
 /// Whether `d` is one of [`CHECKED`].
 pub(crate) fn is_checked_thread_fn(prog: &crate::Program, d: DeclId) -> bool {
-    let Some(x) = prog.decl(d) else { return false };
-    if !CHECKED.contains(&prog.strings.get(x.name)) {
-        return false;
-    }
-    crate::mono::item_at(prog, "std.thread", prog.strings.get(x.name)) == Some(d)
+    prog.known.of(d).is_some_and(|k| CHECKED.contains(&k))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,11 +57,11 @@ impl Ck<'_> {
         let icx = self.icx;
         let tys = &self.tys;
         let infos = crate::closures::closures(&icx, body, |t| crate::closures::is_mut_ref(tys, t), body.node);
-        let find = |name: &str| crate::mono::item_at(self.prog, "std.thread", name);
+        let find = |k: Known| self.prog.known.decl(k);
         let fns: [ThreadFn<'_>; 3] = [
-            (find("join"), "`thread.join`", &[(0, Cross::Sent), (1, Cross::Sent)]),
-            (find("par_for"), "`thread.par_for`", &[(2, Cross::Shared)]),
-            (find("par_for_mut"), "`thread.par_for_mut`", &[(1, Cross::Shared)]),
+            (find(Known::ThreadJoin), "`thread.join`", &[(0, Cross::Sent), (1, Cross::Sent)]),
+            (find(Known::ParFor), "`thread.par_for`", &[(2, Cross::Shared)]),
+            (find(Known::ParForMut), "`thread.par_for_mut`", &[(1, Cross::Shared)]),
         ];
         for c in infos.iter().filter(|c| c.kind == ClosureKind::Spawn) {
             self.check_captures(c, body, Cross::Sent, &mut out);

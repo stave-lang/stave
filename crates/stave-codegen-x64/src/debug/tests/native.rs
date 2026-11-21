@@ -86,7 +86,7 @@ fn ccall_stubs_cpuid() {
         b.ret(Some(acc));
         p.def(many, b);
     }
-    let te = p.decl("runtime.thread.entry", &[t.usize], Some(t.usize));
+    let te = p.decl_known(stave_ir::Known::ThreadEntry, &[t.usize], Some(t.usize));
     {
         let mut b = FuncBuilder::new(&[t.usize]);
         let x = b.param(0).unwrap();
@@ -95,7 +95,7 @@ fn ccall_stubs_cpuid() {
         b.ret(Some(r.into()));
         p.def(te, b);
     }
-    let os = p.decl("runtime.panic.on_signal", &[t.usize; 3], None);
+    let os = p.decl_known(stave_ir::Known::OnSignal, &[t.usize; 3], None);
     {
         let mut b = FuncBuilder::new(&[t.usize; 3]);
         let sig = b.param(0).unwrap();
@@ -162,7 +162,7 @@ fn ccall_stubs_cpuid() {
 fn tables_and_sites() {
     let mut p = Prog::with_trap(false);
     let t = p.t;
-    let trap = p.decl("runtime.panic.trap", &[t.u32, t.u32], None);
+    let trap = p.decl_known(stave_ir::Known::Trap, &[t.u32, t.u32], None);
     {
         let mut b = FuncBuilder::new(&[t.u32, t.u32]);
         let site = b.param(1).unwrap();
@@ -273,7 +273,7 @@ fn clean_errors() {
     // no runtime entry
     let mut q = Prog::new();
     q.main(|_, _| {});
-    q.m.funcs[q.entry.index()].path = "not.the.entry".into();
+    q.m.funcs[q.entry.index()].known = None;
     assert!(compile_module(&q.m, &Options::default()).is_err());
     // unverified garbage: still no panic
     let mut r = Prog::new();
