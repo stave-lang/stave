@@ -975,12 +975,20 @@ fn lower_prim<H: LowerHost>(
                 lower_garg(h, env, kids[0], us)
             };
             let second = lower_garg(h, env, kids[1], us);
+            // A lane count and a mask width are fixed at the type: no const param stands for one
+            // (an instance would have no layout).
+            let not_fixed = |h: &mut H, at: u32| {
+                let spelled = icx.node_text(at).to_string();
+                let d = mk("E0609", Some("lanes"), &[("spelled", &spelled)], icx.node_span(at), &[]);
+                h.report(d);
+                h.error_ty()
+            };
             let lanes = match second {
                 GArg::Const(ConstArg::Value(v)) if matches!(v, 2 | 4 | 8 | 16 | 32 | 64) => {
                     Lanes::Fixed(v as u8)
                 }
                 GArg::Const(ConstArg::Error) => return h.error_ty(),
-                _ => return h.error_ty(),
+                _ => return not_fixed(h, kids[1]),
             };
             let t = match (p, first) {
                 (Prim::VecGeneric, GArg::Type(lane)) => {
@@ -992,6 +1000,8 @@ fn lower_prim<H: LowerHost>(
                 (Prim::MaskGeneric, GArg::Const(ConstArg::Value(w))) if matches!(w, 8 | 16 | 32 | 64) => {
                     h.intern(TypeKind::Mask { width: w as u8, n: lanes })
                 }
+                (Prim::MaskGeneric, GArg::Const(ConstArg::Error)) => return h.error_ty(),
+                (Prim::MaskGeneric, _) => return not_fixed(h, kids[0]),
                 _ => return h.error_ty(),
             };
             // All arguments concrete: the concrete spelling is required.

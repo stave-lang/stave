@@ -121,7 +121,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0606 | aligned load or store on a slice whose type lacks that alignment (use `align_to`) |
 | E0607 | vector integer division by a non-constant: `a / b`, or `a.div_const(k)` with `k` not a const-expr (use `div_lanes`). Case `zero`: `a.div_const(k)` with `k` = 0 |
 | E0608 | permute or table index out of range at compile time |
-| E0609 | generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument. Write `f32x8` / `mask32x8` |
+| E0609 | generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument. Write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param |
 | E0700 | operation unavailable (class U) on the target, outside `emulate { }` |
 | E0701 | class M or U operation inside `strict { }` |
 | E0702 | vector type wider than the target's register |

@@ -146,7 +146,7 @@ Same as Rust: `fn`, `let`/`let mut`, `struct`, `enum` (tagged), `impl T`, `impl 
 
 **Status.** Stage0 checks vector code and lowers it to checked IR (fixed lane counts; the IR interpreter runs it). Vector machine code: x86-64 (`x86_64-linux`: vectors up to 128 bits, SSE4.2; `x86_64-linux-v3`: up to 256 bits, AVX2) and `aarch64-linux` (Advanced SIMD, up to 128 bits); no f16/bf16 lanes. Planned (not enforced yet): E0710-E0717, E0700/E0701 on `gpu-sm86`, sizeless vectors past type checking. E0601-E0604, E0607, E0704 are checked in part.
 
-**Types.** `TxN`: T ∈ `i8..i64 u8..u64 f32 f64 f16 bf16`, N a power of two from 2 to 64. Total width ≤ target register: 128 bits everywhere (portable), 256 needs `avx2`, 512 needs `v4` (`avx512f` alone is not enough). Too wide = E0702. Masks `maskWxN` are typed by lane **width** and count: `i32x8`, `u32x8` and `f32x8` compares all give `mask32x8`. Generic spelling `vec<T, N>` / `mask<W, N>` only when an argument is generic.
+**Types.** `TxN`: T ∈ `i8..i64 u8..u64 f32 f64 f16 bf16`, N a power of two from 2 to 64. Total width ≤ target register: 128 bits everywhere (portable), 256 needs `avx2`, 512 needs `v4` (`avx512f` alone is not enough). Too wide = E0702. Masks `maskWxN` are typed by lane **width** and count: `i32x8`, `u32x8` and `f32x8` compares all give `mask32x8`. Generic spelling `vec<T, N>` only when T is generic; lane counts and mask widths are literals (a const param as N or W in `vec<T, N>` / `mask<W, N>`: E0609).
 
 **Strictness.**
 - Only identical vector types combine (E0603). Scalar with vector = E0602: write `f32x4.splat(1.0)`.

@@ -2834,7 +2834,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0609",
         severity: Severity::Error,
         area: "simd",
-        rule: "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`",
+        rule: "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param",
         retired: false,
         located: true,
         holes: &[
@@ -2854,6 +2854,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                     edits: &[
                         EditTemplate { at: "primary", replacement: "{concrete}" },
                     ],
+                }),
+            },
+            Shape {
+                case: "lanes",
+                message: "`{spelled}` is not a fixed lane count or mask width",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "lanes are 2, 4, 8, 16, 32, or 64; mask widths 8, 16, 32, or 64" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write one of these values as a literal: a const param never stands for a lane count or a mask width",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
                 }),
             },
         ],
