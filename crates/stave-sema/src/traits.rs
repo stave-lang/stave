@@ -1943,17 +1943,35 @@ fn sig_matches(
     {
         return false;
     }
-    // method generic bounds (by trait decl)
+    // The method's own generics, position by position: kind, `view`, and the bounds as a set of
+    // complete trait refs (trait and args) after the same substitution.
+    // A caller instantiates them by the trait's declaration and the instance runs the impl's
+    // body, so any difference reaches a body with arguments it was not checked for.
+    let sub_arg = |tys: &mut TypeTable, a: GArg| match a {
+        GArg::Type(t) => GArg::Type(tys.subst(t, &args, Some(imp.self_ty))),
+        c => crate::mono::subst_garg(tys, c, &args),
+    };
     for j in 0..own_t {
         let (a, b) = (&ts.generics[nt + j], &ms.generics[ni + j]);
         if a.is_const != b.is_const || a.view != b.view {
             return false;
         }
-        let mut ta: Vec<DeclId> = a.bounds.iter().map(|x| x.trait_decl).collect();
-        let mut tb: Vec<DeclId> = b.bounds.iter().map(|x| x.trait_decl).collect();
+        let mut ta: Vec<(DeclId, Vec<GArg>)> = Vec::with_capacity(a.bounds.len());
+        for x in &a.bounds {
+            let xs = x.args.iter().map(|&g| sub_arg(tys, g)).collect();
+            ta.push((x.trait_decl, xs));
+        }
+        let mut tb: Vec<(DeclId, Vec<GArg>)> =
+            b.bounds.iter().map(|x| (x.trait_decl, x.args.clone())).collect();
         ta.sort();
+        ta.dedup();
         tb.sort();
-        if ta != tb {
+        tb.dedup();
+        let erroneous = ta.iter().chain(&tb).flat_map(|(_, xs)| xs).any(|x| match x {
+            GArg::Type(t) => tys.has_error(*t),
+            GArg::Const(c) => *c == ConstArg::Error,
+        });
+        if ta != tb && !erroneous {
             return false;
         }
     }

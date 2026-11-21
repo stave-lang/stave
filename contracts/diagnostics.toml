@@ -1592,7 +1592,7 @@ fix = { description = "split the expression into several consts" }
 code = "E0905"
 severity = "error"
 area = "generics"
-rule = "impl method signature differs from the trait's (params, return, `from`, `needs`, or `unsafe`); the fix shows the trait's signature"
+rule = "impl method signature differs from the trait's (params, return, `from`, `needs`, `unsafe`, or the method's own generics: count, order, kind, `view`, and the bounds as complete trait refs with their args, after the trait's params are replaced by the impl's trait args); the fix shows the trait's signature"
 holes = { name = "name", signature = "source" }
 message = "method `{name}` does not match the trait's signature"
 labels = [{ at = "primary", text = "impl signature" }, { at = "trait", text = "trait declares `{name}` here" }]
