@@ -9,6 +9,7 @@ use stave_ir::{Block, FuncBuilder, Op, Operand, Value, VecOp};
 use stave_syntax::{NodeKind, Term};
 
 use crate::decls::DeclKind;
+use crate::loops::ForKind;
 use crate::lower_fn::{
     Base, E, Env, FnCx, FnOut, FnState, LocalInfo, LoopCx, LoopKind, MState, Place, Proj, Ty, WriteBack,
 };
@@ -1291,8 +1292,17 @@ impl<'a> FnCx<'a> {
             return;
         }
         let it_ty = self.nty(iter);
+        // the kind the type checker decided on the definition; an instance never changes it
+        let Some(kind) = self.tb().for_kind(f) else {
+            self.fail(f, "`for` over a type that is not a `for` source");
+            return;
+        };
         // ranges: counted loop
-        if let TypeKind::Range { elem, inclusive } = self.kind(it_ty) {
+        if kind == ForKind::Range {
+            let TypeKind::Range { elem, inclusive } = self.kind(it_ty) else {
+                self.fail(f, "a `for` over a range whose instance type is no range");
+                return;
+            };
             if !matches!(self.kind(elem), TypeKind::Int { .. }) {
                 self.unsupported(f, "char ranges in for loops are not supported yet");
                 return;
@@ -1315,14 +1325,24 @@ impl<'a> FnCx<'a> {
         // arrays and slices
         let e = self.expr(iter, None);
         let Some(p) = self.place_of(e) else { return };
-        match crate::loops::for_source(&self.tys, p.ty) {
-            crate::loops::ForSource::Seq { .. } => {
+        match kind {
+            ForKind::Seq { mutable } => {
                 let len = match self.kind(p.ty) {
-                    TypeKind::Ref { inner, .. } => match self.kind(inner) {
+                    TypeKind::Ref { inner, mutable: m } if m == mutable => match self.kind(inner) {
                         TypeKind::Array { len, .. } => len.value(),
-                        _ => None,
+                        TypeKind::Slice { .. } => None,
+                        _ => {
+                            self.fail(
+                                f,
+                                "a `for` over a reference to a sequence whose instance type is none",
+                            );
+                            return;
+                        }
                     },
-                    _ => None,
+                    _ => {
+                        self.fail(f, "a `for` over a reference to a sequence whose instance type is none");
+                        return;
+                    }
                 };
                 let pt = p.ty;
                 let Some(v) = self.peek(&p) else { return };
@@ -1335,23 +1355,19 @@ impl<'a> FnCx<'a> {
                 self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Ref(v, pt)));
             }
             // an array value (a place is E0219): the loop's temporary
-            crate::loops::ForSource::Array { .. } => {
-                let len = match self.kind(p.ty) {
-                    TypeKind::Array { len, .. } => len.value().unwrap_or(0),
-                    _ => 0,
+            ForKind::Array => {
+                let TypeKind::Array { len, .. } = self.kind(p.ty) else {
+                    self.fail(f, "a `for` over an array value whose instance type is no array");
+                    return;
                 };
+                let len = len.value().unwrap_or(0);
                 let us = self.t_usize();
                 let n = self.int(len as i128);
                 let z = self.int(0);
                 self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Val(p, iter)));
             }
-            crate::loops::ForSource::Iter | crate::loops::ForSource::IterMut { .. } => {
-                self.iter_loop(f, pat, body, p)
-            }
-            // the type checker reports every other kind
-            _ => {
-                self.fail(f, "`for` over a type that is not a `for` source");
-            }
+            ForKind::Iter | ForKind::IterMut => self.iter_loop(f, pat, body, p, kind),
+            ForKind::Range => {}
         }
     }
 
@@ -1458,8 +1474,11 @@ impl<'a> FnCx<'a> {
         // the sequence as a slice reference
         let e = self.expr(iter, None);
         let Some(p) = self.place_of(e) else { return };
-        let (s, mutable) = match self.kind(p.ty) {
-            TypeKind::Ref { mutable, inner } => {
+        // the kind the type checker decided on the definition; the instance type only gives the
+        // sequence's length and layout
+        let kind = self.tb().for_kind(f);
+        let (s, mutable) = match (kind, self.kind(p.ty)) {
+            (Some(ForKind::Seq { mutable: km }), TypeKind::Ref { mutable, inner }) if km == mutable => {
                 let Some(v) = self.peek(&p) else { return };
                 match self.kind(inner) {
                     TypeKind::Slice { .. } => {
@@ -1477,13 +1496,13 @@ impl<'a> FnCx<'a> {
             }
             // an array value (a place is E0219, a `&mut` binding over a value too): the loop's
             // temporary, read only
-            TypeKind::Array { len, .. } => {
+            (Some(ForKind::Array), TypeKind::Array { len, .. }) => {
                 let n = len.value().unwrap_or(0);
                 let Some(a) = self.addr(&p, None) else { return };
                 (self.array_slice(a, false, lane, n), false)
             }
             _ => {
-                self.fail(f, "chunk loop over a non-sequence");
+                self.fail(f, "chunk loop whose kind and instance type disagree");
                 return;
             }
         };
@@ -1681,14 +1700,21 @@ impl<'a> FnCx<'a> {
         self.op2(Op::SliceMake, st, p, n)
     }
 
-    fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place) {
-        // a `&mut` iterator is advanced through the reference: the caller's iterator moves on;
-        // an iterator value is moved (copied, if Copy) into a slot the loop owns, advanced
-        // there, and dropped when the loop ends or is left (`break`, `return`, `?`), as the
-        // checker's loop temporary is
+    /// `kind` (decided on the definition): `IterMut` advances the iterator through the
+    /// reference, so the caller's iterator moves on; `Iter` moves (copies, if Copy) the iterator
+    /// value into a slot the loop owns, advances it there, and drops it when the loop ends or is
+    /// left (`break`, `return`, `?`), as the checker's loop temporary is. Either way the loop
+    /// calls the `next` the type checker resolved (for a generic source, the bound's), with the
+    /// instance's args: the instance type never picks another loop.
+    fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place, kind: ForKind) {
         self.push_scope();
-        let it = match crate::loops::for_source(&self.tys, it.ty) {
-            crate::loops::ForSource::IterMut { inner } => {
+        let it = match kind {
+            ForKind::IterMut => {
+                let TypeKind::Ref { mutable: true, inner } = self.kind(it.ty) else {
+                    self.fail(f, "a `for` over a `&mut` iterator whose instance type is no `&mut`");
+                    self.pop_scope();
+                    return;
+                };
                 let Some(v) = self.read(&it) else {
                     self.pop_scope();
                     return;
@@ -1714,21 +1740,11 @@ impl<'a> FnCx<'a> {
     }
 
     fn iter_loop_over(&mut self, f: u32, pat: u32, body: u32, it: Place) {
-        let w = self.g.world();
-        let Some(next) = self.g.prog.strings.lookup("next") else {
-            self.fail(f, "no `next` method");
+        let Some(Target::Method { method: m, args: gargs, .. }) =
+            self.tb().implicit_at(self.icx.a(f)).cloned()
+        else {
+            self.fail(f, "a `for` over an iterator without the `next` the type checker resolved");
             return;
-        };
-        let m = match w.lookup_method(&mut self.tys, it.ty, next, &[]) {
-            crate::traits::Lookup::Found { m, .. } => m,
-            _ => {
-                self.fail(f, "no `next` method");
-                return;
-            }
-        };
-        let gargs: Vec<GArg> = match &m {
-            crate::traits::MethodRef::Impl { impl_args, .. } => impl_args.clone(),
-            _ => Vec::new(),
         };
         let Some(Resolved::Inst(k)) = self.resolve_method(&m, &gargs) else {
             self.fail(f, "unresolved `next`");

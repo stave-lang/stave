@@ -39,15 +39,34 @@ pub enum ForSource {
 impl ForSource {
     /// Whether a `for` loop may iterate a source of this kind.
     pub fn is_source(self) -> bool {
-        matches!(
-            self,
-            ForSource::Range { .. }
-                | ForSource::Array { .. }
-                | ForSource::Seq { .. }
-                | ForSource::Iter
-                | ForSource::IterMut { .. }
-        )
+        self.kind().is_some()
     }
+
+    /// The loop kind of a source, `None` for a kind that is no source.
+    pub fn kind(self) -> Option<ForKind> {
+        match self {
+            ForSource::Range { .. } => Some(ForKind::Range),
+            ForSource::Array { .. } => Some(ForKind::Array),
+            ForSource::Seq { mutable, .. } => Some(ForKind::Seq { mutable }),
+            ForSource::Iter => Some(ForKind::Iter),
+            ForSource::IterMut { .. } => Some(ForKind::IterMut),
+            _ => None,
+        }
+    }
+}
+
+/// The kind of a checked `for` loop, decided once from the source's type as written in the
+/// definition ([`for_source`]) and stored with the body
+/// ([`crate::typeck::TypedBody::for_kind`]): the borrow checker, the capture analysis, and the
+/// lowering of every instance read it, never an instance type. An iterator kind calls the `next`
+/// the type checker resolved (for a generic source: the bound's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForKind {
+    Range,
+    Array,
+    Seq { mutable: bool },
+    Iter,
+    IterMut,
 }
 
 /// The kind of a `for` source of type `t` in `tys`.

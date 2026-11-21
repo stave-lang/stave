@@ -33,7 +33,7 @@
 use rustc_hash::FxHashMap;
 use stave_diag::Span;
 use stave_sema::itemcx::ItemCx;
-use stave_sema::loops::ForSource;
+use stave_sema::loops::ForKind;
 use stave_sema::traits::{Adjust, Lookup, World};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 use stave_sema::{BindingRef, Coercion, DeclKind, Res, Target, TypedBody};
@@ -1193,24 +1193,24 @@ impl<'a, 'b> Builder<'a, 'b> {
             Iter(Place, Flows, TypeId),
         }
         let iv = self.expr(iter);
-        let src = match stave_sema::loops::for_source(&self.tys.ov, it_ty) {
-            ForSource::Range { .. } => {
+        let src = match self.tb.for_kind(f) {
+            Some(ForKind::Range) => {
                 let _ = self.read(iv, iter);
                 Src::Range
             }
-            ForSource::Seq { mutable, .. } => {
+            Some(ForKind::Seq { mutable }) => {
                 let Some(p) = self.place_of(iv, iter) else { return };
                 let k = if mutable { DerefKind::Mut } else { DerefKind::Shared };
                 Src::Elems(p, Some(k))
             }
             // an array value (a place is E0219): the loop's temporary
-            ForSource::Array { .. } => {
+            Some(ForKind::Array) => {
                 let Some(op) = self.operand(iv, iter) else { return };
                 let V::P(p) = self.put_temp(Rvalue::Use(op), it_ty, iter) else { return };
                 Src::Elems(p, None)
             }
             // an iterator value or a `&mut` to one
-            ForSource::Iter | ForSource::IterMut { .. } => {
+            Some(ForKind::Iter | ForKind::IterMut) => {
                 let Some(op) = self.operand(iv, iter) else { return };
                 let t = self.temp(it_ty, iter);
                 self.body.locals[t as usize].mutable = true;

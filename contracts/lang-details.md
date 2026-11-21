@@ -142,8 +142,10 @@ and fn ABI are unchanged, and it has no effect (`without`).
 
 ## §4 `for` sources
 
-The kind is decided by the source's type alone (`stave_sema::loops::for_source`, read by the type
-checker, the borrow checker, and the lowering); the list is closed: a type not listed is no source.
+The kind is decided once, by the type checker, from the source's type as written in the
+definition (`stave_sema::loops::for_source`), and stored with the loop; the borrow checker, the
+capture analysis, and the lowering of every instance read the stored kind (and an iterator's
+resolved `next`), never the instance type. The list is closed: a type not listed is no source.
 
 | source type | element loop `for x in s` | chunk loop `for v: TxN in s` / `v: &mut TxN` |
 |---|---|---|
@@ -157,9 +159,14 @@ checker, the borrow checker, and the lowering); the list is closed: a type not l
 | a reference to a reference (`&mut &mut It`, `&&mut It`, `& &[T]`, `&mut &[T; N]`, ..) | E0219 `ref-ref`: iterate the inner reference | E0219 `ref-ref` |
 | any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, or a reference to one) | E0219 `not-source` | E0219 `not-source` |
 
-An iterator type is a struct, enum, or generic parameter (it must have `next(&mut self)`, else
-E0208); a generic `T` source is an iterator value, and an instance with `T = &mut It` advances
-`It` in place, which is the same loop. A source behind a view field is classified by the field's
+An iterator type is a struct, enum, or generic parameter with `next(&mut self) -> Option<X>`
+(else E0219 `not-source`; a `vec.Vec` or a reference to one: E0219 `as-slice`, iterate
+`.as_slice()`). A generic `T` (or `&mut T`) source is always an iterator through its bound's
+`next`: each instance runs that trait method, whatever the instance type is (`T = [u64; 2]` does
+not become an array loop, `T = &mut It` runs `impl Next for &mut It`); a `T` without such a bound
+is E0219 at the definition. Element and binding types, a sequence's length, and the resolved
+`next` come from the instance; the kind, by reference or by value, and the chunk width come from
+the definition. A source behind a view field is classified by the field's
 type (`v.s: &mut [T]`: a reference to a slice; `v.it: &mut It`: a `&mut` to an iterator).
 
 A *place* is: a local, param, `self`, or `static` (also through a module path, `m.TABLE`); `*e`;

@@ -51,6 +51,7 @@
 use stave_syntax::{NodeKind, Term};
 
 use crate::itemcx::ItemCx;
+use crate::loops::ForKind;
 use crate::resolve::Res;
 use crate::typeck::{Coercion, Target, TypedBody};
 use crate::types::{Interner, TypeId, TypeKind};
@@ -518,17 +519,10 @@ fn for_reads<I: Interner + ?Sized>(cx: &UseCx<'_, '_, I>, f: u32, n: u32) -> Opt
             return at;
         }
     }
-    let t = tb.ty(n);
-    if t.is_none() {
-        return at;
-    }
-    match cx.tys.kind(t) {
-        TypeKind::Range { .. } | TypeKind::Array { .. } | TypeKind::Slice { .. } => None,
-        TypeKind::Ref { mutable: false, inner } => match cx.tys.kind(*inner) {
-            TypeKind::Array { .. } | TypeKind::Slice { .. } => None,
-            _ => at,
-        },
-        // an iterator: `next(&mut self)`
+    // the loop's kind, as the type checker decided it (crate::loops)
+    match tb.for_kind(f) {
+        Some(ForKind::Range | ForKind::Array | ForKind::Seq { mutable: false }) => None,
+        // `&mut` elements, an iterator (`next(&mut self)`), or no source
         _ => at,
     }
 }

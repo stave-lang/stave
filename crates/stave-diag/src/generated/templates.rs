@@ -1829,7 +1829,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0219",
         severity: Severity::Error,
         area: "types",
-        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one), and a range or iterator as a chunk source",
+        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one; a struct, enum, or generic type without `next(&mut self) -> Option<T>`, for a generic type from its bounds), and a range or iterator as a chunk source",
         retired: false,
         located: true,
         holes: &[
@@ -1844,6 +1844,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write `&{place}` (elements bound as `&T`, chunks by value), or `&mut {place}` to change it in place",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "as-slice",
+                message: "`for` cannot iterate the container `{place}`: it is no iterator",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a container with a slice view" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "iterate its slice: `{place}.as_slice()` (elements as `&T`), or `{place}.as_mut_slice()` to change them",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

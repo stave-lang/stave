@@ -18,7 +18,7 @@ use crate::builtins::{self, ArgTy};
 use crate::decls::{DeclFlags, DeclKind};
 use crate::diag::mk;
 use crate::ids::{DeclId, Sym};
-use crate::loops::ForSource;
+use crate::loops::{ForKind, ForSource};
 use crate::prim::{Builtin, Lanes, Prim};
 use crate::resolve::{DeferKind, Res};
 use crate::sigs::{GenericParam, TraitRef, VariantShape};
@@ -3929,6 +3929,7 @@ impl<'a> Ck<'a> {
                         .is_some_and(|b| matches!(self.tys.kind(b), TypeKind::Ref { mutable: true, .. }));
                     Some(if mut_binding { "mut-binding" } else { "" })
                 }
+                ForSource::SharedIter if self.has_as_slice(it) => Some("as-slice"),
                 ForSource::SharedIter => Some("shared-iter"),
                 ForSource::RefRef => Some("ref-ref"),
                 ForSource::NotSource | ForSource::SlicePlace => Some("not-source"),
@@ -3941,6 +3942,11 @@ impl<'a> Ck<'a> {
             if let Some(c) = case {
                 let d = mk("E0219", (!c.is_empty()).then_some(c), &[("place", &text)], at, &[]);
                 self.report(d);
+            } else if let Some(k) = src.kind()
+                && !matches!(k, ForKind::Iter | ForKind::IterMut)
+            {
+                // an iterator kind is recorded with its `next` (`element_type`)
+                self.for_kinds.push((f, k));
             }
         }
         let (base_elem, arr_len) = match (src, self.tys.kind(it).clone()) {
@@ -4013,7 +4019,7 @@ impl<'a> Ck<'a> {
                 }
             } else if b != ids::ERROR {
                 // a plain annotated element binding: it must be the element type
-                let et = self.element_type(icx.a(f), iter, it);
+                let et = self.element_type(f, iter, it);
                 if et != b && et != ids::ERROR && !self.tys.has_error(et) {
                     let want = self.tys_range_of(b);
                     self.mismatch(iter, Ty::T(it), want, None);
@@ -4027,7 +4033,7 @@ impl<'a> Ck<'a> {
             if let Some(tc) = tail {
                 self.tail_clause(tc, ids::ERROR, ids::ERROR, Lanes::Fixed(1));
             }
-            self.element_type(icx.a(f), iter, it)
+            self.element_type(f, iter, it)
         };
         let pp = self.pattern(pat, elem_t, crate::patterns::Mode::Move);
         crate::patterns::irrefutable(self, pat, &pp, elem_t);
@@ -4063,11 +4069,15 @@ impl<'a> Ck<'a> {
 
     /// The element type of `for .. in iter` (`it`: the type of `iter`); an iterator's `next` is
     /// recorded as an implicit call at `for_tok`.
-    fn element_type(&mut self, for_tok: u32, iter: u32, it: TypeId) -> TypeId {
+    /// The element type of `for` loop `f` over `iter` (of type `it`); an iterator's `next` is
+    /// recorded as an implicit call at the `for` token, and the loop's kind with the body.
+    fn element_type(&mut self, f: u32, iter: u32, it: TypeId) -> TypeId {
+        let for_tok = self.icx.a(f);
         if it == ids::ERROR || self.tys.has_error(it) {
             return ids::ERROR;
         }
-        match crate::loops::for_source(&self.tys, it) {
+        let src = crate::loops::for_source(&self.tys, it);
+        match src {
             ForSource::Range { elem } | ForSource::Array { elem } => return elem,
             ForSource::Seq { mutable, elem } => return self.tys.mk_ref(mutable, elem),
             ForSource::Iter | ForSource::IterMut { .. } => {}
@@ -4097,6 +4107,9 @@ impl<'a> Ck<'a> {
                     && def == self.sigs.lang.option
                     && let Some(GArg::Type(x)) = args.first()
                 {
+                    if let Some(k) = src.kind() {
+                        self.for_kinds.push((f, k));
+                    }
                     return *x;
                 }
             }
@@ -4106,10 +4119,24 @@ impl<'a> Ck<'a> {
         {
             return ids::ERROR;
         }
-        let tn = self.show(it);
-        let d = mk("E0208", None, &[("name", "next"), ("type", &tn)], self.icx.node_span(iter), &[]);
+        // no `next(&mut self) -> Option<X>`: no iterator (for a generic source, no bound gives one)
+        let text = self.icx.node_text(iter).to_string();
+        let case = if self.has_as_slice(it) { "as-slice" } else { "not-source" };
+        let d = mk("E0219", Some(case), &[("place", &text)], self.icx.node_span(iter), &[]);
         self.report(d);
         ids::ERROR
+    }
+
+    /// Whether `t`, or what a reference `t` points to, has an `as_slice` method (a std container
+    /// with a slice view, such as `vec.Vec`).
+    pub(crate) fn has_as_slice(&mut self, t: TypeId) -> bool {
+        let Some(name) = self.prog.strings.lookup("as_slice") else { return false };
+        let base = match self.tys.kind(t) {
+            TypeKind::Ref { inner, .. } => *inner,
+            _ => t,
+        };
+        let genv = self.genv();
+        matches!(self.w.lookup_method(&mut self.tys, base, name, genv), Lookup::Found { .. })
     }
 
     fn tail_clause(&mut self, tc: u32, bind: TypeId, lane: TypeId, n: Lanes) {

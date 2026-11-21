@@ -1574,6 +1574,7 @@ fn empty_body() -> &'static TypedBody {
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),
+        for_kinds: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
         valued: Vec::new(),
