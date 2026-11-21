@@ -1,0 +1,17 @@
+//~ BORROWCHECK ok
+// The read-only rule binds a word loaded as `&mut`: a callee that reads a `&mut` word through
+// a `&` as a raw pointer returns it with its tag, and the caller's write through it is judged
+// by that tag (the holder's `&mut`, so no report).
+view struct S { m: &mut u32 }
+fn ptr_of(s: &S) -> *mut u32 {
+    let q = &s.m as *const &mut u32 as *const *mut u32;
+    return unsafe("deliberate") *q;
+}
+fn main() -> i32 {
+    let mut a: u32 = 1u32;
+    let s = S.{ m: &mut a };
+    let p = ptr_of(&s);
+    unsafe("deliberate") { *p = 5u32; }
+    if a == 5u32 { return 0; }
+    return 1;
+}

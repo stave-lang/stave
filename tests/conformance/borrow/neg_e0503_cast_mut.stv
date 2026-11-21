@@ -1,0 +1,24 @@
+//~ CHECK-ONLY
+// A `&mut` place cast to `*mut T` is the reborrow `&mut *place`: behind a `&` it is E0503, as
+// the reborrow written out is. A cast to `*const T` only reads the place.
+view struct S { m: &mut u32 }
+
+fn field(r: &S) -> *mut u32 {
+    return r.m as *mut u32; //~ ERROR E0503
+}
+
+fn deref(r: &&mut u32) -> *mut u32 {
+    return *r as *mut u32; //~ ERROR E0503
+}
+
+fn written_out(r: &S) -> *mut u32 {
+    return &mut *r.m as *mut u32; //~ ERROR E0503
+}
+
+fn read_only(r: &S) -> *const u32 {
+    return r.m as *const u32;
+}
+
+fn main() -> i32 {
+    return 0;
+}

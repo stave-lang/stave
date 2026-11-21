@@ -7,9 +7,9 @@ import std.mem;
 
 unsafe("p..p+len are valid u32 slots that owner keeps alive and lends exclusively while the result lives")
 fn items_mut(owner: &[u32], p: *mut u32, len: usize) -> &mut [u32] from owner {
-    let parts: [usize; 2] = [p as usize, len];
-    let q = &parts as *const [usize; 2] as *const &mut [u32];
-    return unsafe("a slice reference is (data pointer, length)") q.read();
+    let mut parts: [usize; 2] = [p as usize, len];
+    let q = &mut parts as *mut [usize; 2] as *mut &mut [u32];
+    return unsafe("a slice reference is (data pointer, length); q points to parts, held exclusively here") q.read();
 }
 
 unsafe("p is valid for one u32 that owner keeps alive and lends exclusively while the result lives")
