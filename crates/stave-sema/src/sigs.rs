@@ -1251,9 +1251,12 @@ impl<'p> SigBuilder<'p> {
         let Some(decl) = self.prog.decl(d).copied() else { return Vec::new() };
         let mut out = Vec::new();
         let mut n_parent = 0u32;
+        let mut self_ty = None;
         if matches!(decl.kind, DeclKind::Method | DeclKind::TraitMethod) && decl.parent.is_some() {
             out = self.generics_of(decl.parent);
             n_parent = out.len() as u32;
+            // `Self` in a method's bounds: the impl's self type, or the trait's `Self`
+            self_ty = self.self_type_of(decl.parent);
         }
         // Insert a placeholder to stop recursion through bounds that mention the decl.
         self.gen_cache.insert(d, out.clone());
@@ -1263,7 +1266,7 @@ impl<'p> SigBuilder<'p> {
         {
             // bounds are lowered with no view env (their params are not this scope's)
             let saved = std::mem::take(&mut self.cur_generics);
-            let own = self.lower_generics(&icx, g, n_parent, &out);
+            let own = self.lower_generics(&icx, g, n_parent, self_ty, &out);
             self.cur_generics = saved;
             out.extend(own);
         }
@@ -1276,6 +1279,7 @@ impl<'p> SigBuilder<'p> {
         icx: &ItemCx<'p>,
         g: u32,
         n_parent: u32,
+        self_ty: Option<TypeId>,
         parent: &[GenericParam],
     ) -> Vec<GenericParam> {
         let mut out: Vec<GenericParam> = Vec::new();
@@ -1299,7 +1303,7 @@ impl<'p> SigBuilder<'p> {
                 view: false,
             });
         }
-        let env = TyEnv { icx: *icx, n_parent, self_ty: None };
+        let env = TyEnv { icx: *icx, n_parent, self_ty };
         let params: Vec<u32> =
             kids.iter().copied().filter(|&c| icx.kind(c) == Some(NodeKind::GenericParam)).collect();
         for (k, &c) in params.iter().enumerate() {
