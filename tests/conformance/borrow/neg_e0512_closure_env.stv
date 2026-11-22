@@ -1,0 +1,56 @@
+//~ CHECK-ONLY
+// A closure value with captures points to its environment (the addresses of what it captures),
+// which is made in the frame of the body that evaluates the closure literal: a value holding
+// it cannot be returned from that body (E0512), even when each capture is one the enclosing
+// closure holds by `&`, nor stored into a captured place (E0513). Captures are references only,
+// so what a call of such a closure returns points to captured places: it is judged by their
+// loans (a local of the outer closure: E0512).
+import std.vec;
+
+view struct H { pub f: fn() -> u64 }
+
+fn pass(c: bool) -> fn() -> u64 {
+    let x: u64 = 1;
+    return fn() -> u64 { return x; }; //~ ERROR E0512
+}
+
+fn main() -> i32 {
+    let x: u64 = 42;
+    let y: u64 = 7;
+    let c = x > y;
+    let direct = fn() -> fn() -> u64 { return fn() -> u64 { return x; }; }; //~ ERROR E0512
+    let two = fn() -> fn() -> u64 { return fn() -> u64 { return x + y; }; }; //~ ERROR E0512
+    let kept = fn() -> fn() -> u64 {
+        let g = fn() -> u64 { return x; };
+        return g; //~ ERROR E0512
+    };
+    let in_view = fn() -> H { return H.{ f: fn() -> u64 { return x; } }; }; //~ ERROR E0512
+    let in_some = fn() -> Option<fn() -> u64> {
+        return Option.Some(fn() -> u64 { return x; }); //~ ERROR E0512
+    };
+    let picked = fn() -> fn() -> u64 {
+        return if c then fn() -> u64 { return x; } else fn() -> u64 { return y; }; //~ ERROR E0512
+    };
+    let deep = fn() -> fn() -> fn() -> u64 {
+        return fn() -> fn() -> u64 { //~ ERROR E0512
+            return fn() -> u64 { return x; }; //~ ERROR E0512
+        };
+    };
+    let local_ref = fn() -> &u64 {
+        let z: u64 = 3;
+        let get = fn() -> &u64 { return &z; };
+        return get(); //~ ERROR E0512
+    };
+    let through_third = fn() -> fn() -> u64 {
+        let inner = fn() -> u64 { return x; };
+        return fn() -> u64 { return inner(); }; //~ ERROR E0512
+    };
+    let via_call = fn() -> fn() -> u64 {
+        let inner = fn() -> u64 { return x; };
+        let id = fn() -> fn() -> u64 { return inner; };
+        return id(); //~ ERROR E0512
+    };
+    let mut fs = vec.Vec::<fn() -> u64>.new();
+    let mut store = fn() { fs.push(fn() -> u64 { return x; }); }; //~ ERROR E0513
+    return 0;
+}
