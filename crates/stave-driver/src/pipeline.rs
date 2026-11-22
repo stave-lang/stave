@@ -238,6 +238,14 @@ pub struct Options {
     /// Contents that stand in for source files on disk ([`stave_sema::Config::sources`]): a
     /// check of edits that are not written yet.
     pub sources: std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    /// The borrow checker's dataflow. Default: [`stave_borrow::Dataflow::from_env`].
+    pub borrow_dataflow: stave_borrow::Dataflow,
+}
+
+/// The borrow checker's dataflow that `STAVE_BORROW_DATAFLOW` names; an unknown name is an error
+/// ([`stave_borrow::Dataflow::named`]).
+pub fn borrow_dataflow_from_env() -> Result<stave_borrow::Dataflow, String> {
+    stave_borrow::Dataflow::named(std::env::var(stave_borrow::DATAFLOW_ENV).ok().as_deref())
 }
 
 impl Options {
@@ -256,6 +264,7 @@ impl Options {
             unchecked_borrows: false,
             effects_all: false,
             sources: std::collections::BTreeMap::new(),
+            borrow_dataflow: stave_borrow::Dataflow::from_env(),
         }
     }
 
@@ -550,7 +559,11 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
 
     // ---- borrowck (per body, parallel; bodies with a type error are skipped).
     let t0 = Instant::now();
-    let bc = stave_borrow::check(&program, &tc, stave_borrow::Options { dump: opts.borrow_dump });
+    let bc = stave_borrow::check(
+        &program,
+        &tc,
+        stave_borrow::Options { dump: opts.borrow_dump, dataflow: opts.borrow_dataflow },
+    );
     timings.push(timing(Stage::Borrowck, ms(t0.elapsed()), bc.checked));
     prof::part(".cfg-cpu", bc.phases[0]);
     prof::part(".dataflow-cpu", bc.phases[1]);
@@ -560,12 +573,22 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
         diagnostics.extend(bc.diagnostics.iter().cloned());
         diagnostics = stave_diag::canonical_order(diagnostics, &program.source_map);
     }
+    // The two borrow dataflows disagree on a body: the run fails as an internal error and
+    // reports nothing else, so that no diagnostic of another body hides it.
+    let differ = bc.differ.first().map(|&d| Failure::Internal {
+        stage: Stage::Borrowck,
+        message: format!("the sparse and the dense borrow dataflow disagree on `{}`", program.decl_path(d)),
+    });
+    if differ.is_some() {
+        diagnostics.clear();
+    }
 
     let mut has_errors = diagnostics.iter().any(|d| d.severity() == Severity::Error);
     // E0108: a build needs `main` (reported only without other errors: a dropped or invalid item
     // may be `main`)
     if opts.goal == Goal::Build
         && !has_errors
+        && differ.is_none()
         && let Some(d) = build::no_main(&program)
     {
         diagnostics.push(d);
@@ -574,7 +597,9 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     }
     // A body the borrow checker could not model is not known to be sound: the run fails (check
     // and build alike) instead of accepting it without its E05xx diagnostics.
-    let mut failure = if has_errors {
+    let mut failure = if differ.is_some() {
+        differ
+    } else if has_errors {
         None
     } else {
         silent_error(&tc, |d| program.decl_path(d))

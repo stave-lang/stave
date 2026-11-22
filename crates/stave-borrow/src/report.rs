@@ -16,8 +16,7 @@ use stave_diag::{Diagnostic, Span};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
 use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, PartFix, Place, Proj, TempEnd};
-use crate::check::{Finding, Unfit, later_use};
-use crate::loans::Flow;
+use crate::check::{Finding, Unfit};
 use crate::ty::Tys;
 
 /// The loan an E0501 names.
@@ -166,9 +165,15 @@ fn temp_case(end: Option<TempEnd>) -> (&'static str, &'static str) {
     }
 }
 
-/// The diagnostics of one body's findings.
-pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding>) -> Vec<Diagnostic> {
-    let body = flow.body;
+/// The diagnostics of one body's findings. `later_use`: the first use after a statement (block,
+/// index) of a value that holds a loan, and whether it is in a later iteration
+/// ([`crate::check::later_use`]).
+pub fn diagnostics(
+    body: &Body,
+    tys: &mut Tys<'_>,
+    findings: Vec<Finding>,
+    later_use: &mut dyn FnMut((u32, u32), LoanId) -> Option<(Span, bool)>,
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     // E0502: one per move site, at its first (smallest offset) use
     let mut moved: FxHashMap<u32, (Span, Place)> = FxHashMap::default();
@@ -219,7 +224,7 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                 let text = place_text(body, tys, &place);
                 let loaned = place_text(body, tys, &loan.place);
                 let mut roles = vec![("loan", loan.span)];
-                let later = later_use(flow, (block, stmt), l);
+                let later = later_use((block, stmt), l);
                 if let Some((u, _)) = later {
                     roles.push(("use", u));
                 }
