@@ -272,7 +272,7 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
 | load/store aligned | `TxN.load_aligned(s, i)` | N | N | N | N | N |
 | masked load/store 32/64-bit | `TxN.load_masked(s, i, m)`, `v.store_masked(s, i, m)` | M | N | N | M | N |
 | masked load/store 8/16-bit | same | M | M | N | M | N |
-| first-fault load | `TxN.load_first_fault(s, i)` | U | U | U | U | M |
+| first-fault load | `TxN.load_first_fault(s, i)` (reserved: E0208 in stage0) | U | U | U | U | M |
 | gather 32/64 | `TxN.gather(s, idx)` | U | M 32, N | N | U | N |
 | scatter 32/64 | `v.scatter(s, idx)` | U | U | N | U | N |
 | compress 32/64 | `v.compress(m)` | M | M | N | M | N |
