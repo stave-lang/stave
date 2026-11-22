@@ -136,7 +136,8 @@ fn diagnostics_human_and_json() {
     let (c, _, err) = stave_env(&["check", &input("multi_file"), "--diagnostics", "json", "--timings"], &[]);
     assert_eq!(c, 1);
     let lines: Vec<&str> = err.lines().collect();
-    assert_eq!(lines.len(), 3, "{err}");
+    assert_eq!(lines.len(), 2, "stderr holds only JSON objects: {err}");
+    assert!(lines.iter().all(|l| serde_json::from_str::<serde_json::Value>(l).is_ok()), "{err}");
     let d: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!((d["kind"].as_str(), d["code"].as_str()), (Some("diagnostic"), Some("E0004")));
     assert_eq!(d["primary"]["file"], "src/util/math.stv");
@@ -155,7 +156,6 @@ fn diagnostics_human_and_json() {
     let t: serde_json::Value = serde_json::from_str(err.lines().nth(1).unwrap()).unwrap();
     assert_eq!(t["stages"][0]["items"], 18 + STD_LINES, "{err}");
     assert_eq!(t["stages"][0]["items"], t["stages"][1]["items"], "read and parse count the same lines");
-    assert_eq!(format!("{}\n", lines[2]), SUMMARY_AUTO);
 }
 
 #[test]

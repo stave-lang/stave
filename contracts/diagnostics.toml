@@ -414,7 +414,7 @@ fix = { description = "name `{name}` once: keep one sub-pattern for it, and to u
 code = "E0106"
 severity = "error"
 area = "resolve"
-rule = "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility); case `pattern`: a struct pattern naming any struct with a private field outside its module, once at the type name"
+rule = "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility); case `pattern`: a struct pattern naming any struct with a private field outside its module, once at the type name, no E0208 or E0105 beside it, and not again where the path to a private struct is reported"
 holes = { name = "name", module = "path" }
 message = "`{name}` is private to module `{module}`"
 labels = [{ at = "primary", text = "private `{name}` used here" }, { at = "decl", text = "`{name}` declared here without `pub`" }]
@@ -428,7 +428,7 @@ fix = { description = "mark field `{name}` `pub` in `{module}`, or use the colum
 [diag.cases.pattern]
 message = "struct `{name}` has a private field: its pattern outside module `{module}` is not allowed"
 labels = [{ at = "primary", text = "`{name}` cannot be taken apart outside `{module}`" }, { at = "decl", text = "field declared here without `pub`" }]
-fix = { description = "take `{name}` apart inside `{module}` (a `pub` fn there), or use its `pub` fields and methods outside it" }
+fix = { description = "take `{name}` apart inside `{module}` (a `pub` fn there), or use its methods outside it" }
 
 [[diag]]
 code = "E0107"
@@ -1004,7 +1004,7 @@ code = "E0422"
 severity = "error"
 area = "kinds"
 rule = "impl of an operator trait of `std.core` (`Add Sub Mul Div Rem Shl Shr BitAnd BitOr BitXor Neg Not` and the wrapping and saturating forms) whose self type is not Copy in every instance the impl covers (Copy under the impl's bounds), at the impl; case `operand`: a binary or unary operator or compound assignment on a user type whose operand is not Copy where it is used (a generic param bounded by the operator trait but not by `Copy`, also behind a reference), at the operator: an operator never moves its operands; the operand is a type param (`operand`), a type that names params (`operand-args`), or any other type (`operand-type`)"
-holes = { trait = "path", type = "type", op = "source", bound = "name", sig = "source", call = "source" }
+holes = { trait = "path", type = "type", op = "source", bound = "name", sig = "source", call = "source", example = "source" }
 message = "`{type}` cannot implement operator trait `{trait}`: it is not Copy"
 labels = [{ at = "primary", text = "operator impl here" }]
 fix = { description = "make `{type}` Copy (`impl Copy for ..`, with `Copy` bounds on the impl's params if the `impl Copy` has them), or give it a method instead: `{sig}`, called as `{call}`" }
@@ -1017,7 +1017,7 @@ fix = { description = "add `Copy` beside the operator bound: `{type}: {bound} + 
 [diag.cases.operand-args]
 message = "operator `{op}` copies its operands, but `{type}` is not known to be Copy here"
 labels = [{ at = "primary", text = "`{op}` on `{type}`" }, { at = "impl", text = "operator impl here" }]
-fix = { description = "give the params that `{type}` names the `Copy` bounds its `impl Copy` asks for (`T: Copy`), or use a method that borrows: `{call}`" }
+fix = { description = "give the params that `{type}` names the `Copy` bounds its `impl Copy` asks for ({example}), or use a method that borrows: `{call}`" }
 
 [diag.cases.operand-type]
 message = "operator `{op}` copies its operands, but `{type}` is not Copy"
@@ -1432,7 +1432,7 @@ fix = { description = "add `needs({feature})` to the signature, or use a vector 
 code = "E0704"
 severity = "error"
 area = "features"
-rule = "callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it"
+rule = "callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it. Case `drops`: the same, where the instance only drops a vector through a container"
 holes = { callee = "path", feature = "name", arg = "type" }
 message = "`{callee}` needs `{feature}`, which the caller does not have"
 labels = [{ at = "primary", text = "call needs `{feature}`" }, { at = "callee", text = "`{callee}` declares `needs({feature})` here" }]
@@ -1441,6 +1441,11 @@ fix = { description = "add `needs({feature})` to the caller, or call `{callee}` 
 [diag.cases.inherited]
 message = "`{callee}` at type argument `{arg}` needs `{feature}`, which the caller does not have"
 labels = [{ at = "primary", text = "this use needs `{feature}`" }, { at = "callee", text = "declared here: at `{arg}` it holds a vector by value, so it inherits `{feature}`" }]
+fix = { description = "add `needs({feature})` to the caller, or reach `{callee}` through a `dispatch` function" }
+
+[diag.cases.drops]
+message = "`{callee}` at type argument `{arg}` needs `{feature}`, which the caller does not have"
+labels = [{ at = "primary", text = "this use needs `{feature}`" }, { at = "callee", text = "declared here: at `{arg}` it drops a vector by value, so it inherits `{feature}`" }]
 fix = { description = "add `needs({feature})` to the caller, or reach `{callee}` through a `dispatch` function" }
 
 [[diag]]

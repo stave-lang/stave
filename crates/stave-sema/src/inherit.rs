@@ -561,21 +561,22 @@ pub(crate) fn check(
     // argument, and missing features: the value dropped is one the caller made or received by
     // a use reported already (`Vec.new` and the `Vec` drop it brings are one cause).
     let at = |d: &Diagnostic| d.primary().map_or((u32::MAX, u32::MAX), |s| (s.file.0, s.offset));
-    let mut uses: Vec<((u32, String, u64), Diagnostic)> = Vec::new();
+    let mut uses: Vec<Used> = Vec::new();
     let mut drops: FxHashMap<(u32, String, u64), Diagnostic> = FxHashMap::default();
-    let mut report = |key: (u32, String, u64), drop: bool, d: Option<Diagnostic>| {
-        let Some(d) = d else { return };
-        if !drop {
-            uses.push((key, d));
-            return;
-        }
-        match drops.get(&key) {
-            Some(old) if at(old) <= at(&d) => {}
-            _ => {
-                drops.insert(key, d);
+    let mut report =
+        |key: (u32, String, u64), drop: bool, d: Option<Diagnostic>, call: (Option<TypeId>, Span, u32)| {
+            let Some(d) = d else { return };
+            if !drop {
+                uses.push(Used { key, d, ty: call.0, site: call.1, end: call.2 });
+                return;
             }
-        }
-    };
+            match drops.get(&key) {
+                Some(old) if at(old) <= at(&d) => {}
+                _ => {
+                    drops.insert(key, d);
+                }
+            }
+        };
     let mut done: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
     for &(o, m, site, drop) in &deps {
         let NodeKind::Fn { inst: caller, .. } = &g.nodes[o as usize].kind else { continue };
@@ -601,8 +602,10 @@ pub(crate) fn check(
         let names = NameCx { prog, generics: &[] };
         let show = |cx: &crate::types::Overlay<'_>, t: TypeId| crate::types::display(cx, &names, t);
         let width = crate::gates::feature_vector_bits(FeatureSet::from_bits(have).unwrap_or_default());
-        let (path, arg, roles) = match blame(g, &own, &feats, &passes, m) {
-            Some(Source::Inst(callee)) => {
+        let end = call_end(prog, brackets, caller.decl, site);
+        let mut case = "inherited";
+        let (path, arg, arg_ty, roles) = match blame(g, &own, &feats, &passes, m) {
+            Some(Source::Inst(callee, drops)) => {
                 let types = || {
                     callee.args.iter().filter_map(|a| match a {
                         GArg::Type(t) => Some(*t),
@@ -614,10 +617,12 @@ pub(crate) fn check(
                     .or_else(|| types().next());
                 let roles: Vec<(&str, Span)> =
                     prog.decl(callee.decl).map(|d| ("callee", d.name_span)).into_iter().collect();
-                (prog.decl_path(callee.decl), arg.map_or_else(String::new, |t| show(&cx, t)), roles)
+                let path = crate::lower::fn_path(prog, sigs, callee.decl);
+                case = if drops { "drops" } else { "inherited" };
+                (path, arg.map_or_else(String::new, |t| show(&cx, t)), arg, roles)
             }
-            Some(Source::Glue(t)) => ("drop".to_string(), show(&cx, t), Vec::new()),
-            None => ("drop".to_string(), String::new(), Vec::new()),
+            Some(Source::Glue(t)) => ("drop".to_string(), show(&cx, t), Some(t), Vec::new()),
+            None => ("drop".to_string(), String::new(), None, Vec::new()),
         };
         if let Some((v, bits)) = x.wide {
             let (ty, b, mx) =
@@ -632,6 +637,7 @@ pub(crate) fn check(
                     site,
                     &roles,
                 ),
+                (arg_ty, site, end),
             );
             continue;
         }
@@ -641,24 +647,87 @@ pub(crate) fn check(
             drop,
             crate::diag::mk(
                 "E0704",
-                Some("inherited"),
+                Some(case),
                 &[("callee", &path), ("feature", &f), ("arg", &arg)],
                 site,
                 &roles,
             ),
+            (arg_ty, site, end),
         );
     }
-    let used: rustc_hash::FxHashSet<&(u32, String, u64)> = uses.iter().map(|x| &x.0).collect();
+    let used: rustc_hash::FxHashSet<&(u32, String, u64)> = uses.iter().map(|x| &x.key).collect();
     let mut diagnostics: Vec<Diagnostic> =
         drops.iter().filter(|(k, _)| !used.contains(k)).map(|(_, d)| d.clone()).collect();
-    diagnostics.extend(uses.iter().map(|x| x.1.clone()));
+    // A call whose type argument is built from the one of a call written inside its argument
+    // list, for the same caller and features, is one cause with it: the value it takes is the
+    // one made there.
+    let built_from = |a: TypeId, b: TypeId| a != b && mentions(&cx, a, b, 0);
+    diagnostics.extend(
+        uses.iter()
+            .filter(|u| {
+                let fed = u.key.2 != 0
+                    && u.ty.is_some_and(|a| {
+                        uses.iter().any(|v| {
+                            v.key.0 == u.key.0
+                                && v.key.2 == u.key.2
+                                && v.site.file == u.site.file
+                                && u.site.offset < v.site.offset
+                                && v.site.offset < u.end
+                                && v.ty.is_some_and(|b| built_from(a, b))
+                        })
+                    });
+                !fed
+            })
+            .map(|u| u.d.clone()),
+    );
     diagnostics.sort_by_key(at);
     Inherited { features, glue, diagnostics }
 }
 
+/// A reported use of an instance.
+struct Used {
+    key: (u32, String, u64),
+    d: Diagnostic,
+    /// The type argument the report names.
+    ty: Option<TypeId>,
+    site: Span,
+    /// The byte offset of the `)` closing the call written at `site` (0: no such call).
+    end: u32,
+}
+
+/// The byte offset of the `)` that closes the argument list of the call whose callee name is the
+/// token at `site`, in the item of `caller`; 0 where none follows it.
+fn call_end(prog: &Program, brackets: &[Brackets], caller: crate::ids::DeclId, site: Span) -> u32 {
+    let Some(item) = prog.decl(caller).map(|d| d.item) else { return 0 };
+    let Some(icx) = brackets.get(item.idx()).and_then(|br| ItemCx::new(prog, item, br)) else { return 0 };
+    if icx.fid() != site.file {
+        return 0;
+    }
+    let t = icx.toks.partition_point(|x| x.start < site.offset) as u32;
+    if icx.tok_start(t) != site.offset {
+        return 0;
+    }
+    let open = if icx.is(t + 1, Term::ColonColon) { icx.angle_end(t + 2).0 } else { t + 1 };
+    if icx.is(open, Term::LParen) { icx.tok_start(icx.close(open)) } else { 0 }
+}
+
+/// Whether `b` is `a` or occurs in it.
+fn mentions<I: Interner + ?Sized>(cx: &I, a: TypeId, b: TypeId, depth: u32) -> bool {
+    if a == b {
+        return true;
+    }
+    if depth > 64 {
+        return false;
+    }
+    let mut parts = Vec::new();
+    cx.kind(a).children(&mut parts);
+    parts.into_iter().any(|p| mentions(cx, p, b, depth + 1))
+}
+
 /// What brings a caller the features it lacks.
 enum Source {
-    Inst(InstKey),
+    /// The instance, and whether it gets the features only by dropping a value.
+    Inst(InstKey, bool),
     /// The drop glue of this type, for the values it loads itself.
     Glue(TypeId),
 }
@@ -681,7 +750,11 @@ fn blame(
         match &g.nodes[v as usize].kind {
             NodeKind::Fn { inst, .. } => {
                 if !passes(feats, v as usize).is_empty() {
-                    return Some(Source::Inst(inst.clone()));
+                    let drops = own[v as usize].is_empty()
+                        && g.succ(v)
+                            .iter()
+                            .any(|e| e.kind == EdgeKind::Drop && !passes(feats, e.to as usize).is_empty());
+                    return Some(Source::Inst(inst.clone(), drops));
                 }
             }
             NodeKind::Glue { ty } => {

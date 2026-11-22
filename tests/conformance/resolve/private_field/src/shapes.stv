@@ -1,0 +1,10 @@
+// `a` is `pub`; `b` is private to this module.
+pub struct P { pub a: u32, b: u32 }
+
+pub fn mk(a: u32, b: u32) -> P {
+    return P.{ a: a, b: b };
+}
+
+pub fn both(p: &P) -> u32 {
+    return p.a + p.b;
+}

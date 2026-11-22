@@ -903,7 +903,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0106",
         severity: Severity::Error,
         area: "resolve",
-        rule: "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility); case `pattern`: a struct pattern naming any struct with a private field outside its module, once at the type name",
+        rule: "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility); case `pattern`: a struct pattern naming any struct with a private field outside its module, once at the type name, no E0208 or E0105 beside it, and not again where the path to a private struct is reported",
         retired: false,
         located: true,
         holes: &[
@@ -945,7 +945,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "decl", text: "field declared here without `pub`" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "take `{name}` apart inside `{module}` (a `pub` fn there), or use its `pub` fields and methods outside it",
+                    description: "take `{name}` apart inside `{module}` (a `pub` fn there), or use its methods outside it",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2434,6 +2434,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         holes: &[
             Hole { name: "bound", kind: HoleKind::Name, choices: &[] },
             Hole { name: "call", kind: HoleKind::Source, choices: &[] },
+            Hole { name: "example", kind: HoleKind::Source, choices: &[] },
             Hole { name: "op", kind: HoleKind::Source, choices: &[] },
             Hole { name: "sig", kind: HoleKind::Source, choices: &[] },
             Hole { name: "trait", kind: HoleKind::Path, choices: &[] },
@@ -2473,7 +2474,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "impl", text: "operator impl here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "give the params that `{type}` names the `Copy` bounds its `impl Copy` asks for (`T: Copy`), or use a method that borrows: `{call}`",
+                    description: "give the params that `{type}` names the `Copy` bounds its `impl Copy` asks for ({example}), or use a method that borrows: `{call}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3557,7 +3558,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0704",
         severity: Severity::Error,
         area: "features",
-        rule: "callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it",
+        rule: "callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it. Case `drops`: the same, where the instance only drops a vector through a container",
         retired: false,
         located: true,
         holes: &[
@@ -3575,6 +3576,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `needs({feature})` to the caller, or call `{callee}` through a `dispatch` function",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "drops",
+                message: "`{callee}` at type argument `{arg}` needs `{feature}`, which the caller does not have",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this use needs `{feature}`" },
+                    LabelTemplate { at: "callee", text: "declared here: at `{arg}` it drops a vector by value, so it inherits `{feature}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "add `needs({feature})` to the caller, or reach `{callee}` through a `dispatch` function",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
