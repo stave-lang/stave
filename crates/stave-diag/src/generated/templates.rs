@@ -2497,14 +2497,18 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
-        rule: "borrow conflict (borrow site, conflicting access, later use)",
+        rule: "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check or the operand of `old(e)`; `temporary-loop`: the iterator value of a `for`, which ends with the loop",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "access", kind: HoleKind::TextLiteral, choices: &["borrow mutably", "borrow", "move", "assign to", "drop"] },
+            Hole { name: "bind", kind: HoleKind::TextLiteral, choices: &["let t", "let mut t"] },
+            Hole { name: "later", kind: HoleKind::TextLiteral, choices: &["later here", "here, in the next iteration"] },
             Hole { name: "loan", kind: HoleKind::TextLiteral, choices: &["`&mut`", "`&`"] },
             Hole { name: "loaned", kind: HoleKind::Place, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "stmt", kind: HoleKind::TextLiteral, choices: &["statement", "condition", "guard", "branch", "arm", "check", "loop"] },
+            Hole { name: "tref", kind: HoleKind::TextLiteral, choices: &["&t", "&mut t"] },
         ],
         shapes: &[
             Shape {
@@ -2517,6 +2521,76 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "end the borrow before this point: move the later use before it, or copy the value out first",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "temporary",
+                message: "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "temporary made here: it ends at the end of its {stmt}" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
+                    LabelTemplate { at: "use", text: "borrow used {later}" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bind the value to a local first and borrow the local: `{bind} = {place};`, then `{tref}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "temporary-arm",
+                message: "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "temporary made here: it ends at the end of its {stmt}" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
+                    LabelTemplate { at: "use", text: "borrow used {later}" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bind it with `let` before the `match`: `{bind} = {place};`, then `{tref}` in the arm",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "temporary-branch",
+                message: "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "temporary made here: it ends at the end of its {stmt}" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
+                    LabelTemplate { at: "use", text: "borrow used {later}" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bind it with `let` before the `if`: `{bind} = {place};`, then `{tref}` in the branch",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "temporary-clause",
+                message: "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "temporary made here: it ends at the end of its {stmt}" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
+                    LabelTemplate { at: "use", text: "borrow used {later}" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "a contract clause binds no local: use the value `{place}`, not a borrow of it",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "temporary-loop",
+                message: "the iterator `{place}` ends with its {stmt}, but a {loan} borrow of it is used later",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "iterator made here: it ends at the end of its {stmt}" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` created here" },
+                    LabelTemplate { at: "use", text: "borrow used {later}" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bind the iterator to a local before the loop and iterate through `&mut`: `let mut t = {place};`, then `for .. in &mut t`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

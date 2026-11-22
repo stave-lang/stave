@@ -1,0 +1,47 @@
+//~ CHECK-ONLY
+// A branch of a value `if` and the body of an arm of a value `match` are statements of their own:
+// a temporary made there ends with the branch or arm, so a borrow of it used by the rest of the
+// statement is E0501 (cases `temporary-branch`, `temporary-arm`).
+fn f() -> u32 {
+    return 5;
+}
+
+fn ok(r: &u32) -> u32 {
+    return *r;
+}
+
+fn then_branch(c: bool) -> u32 {
+    let x: u32 = 1;
+    return ok(if c then &f() else &x); //~ ERROR E0501
+}
+
+fn else_branch(c: bool) -> u32 {
+    let x: u32 = 1;
+    return ok(if c then &x else &f()); //~ ERROR E0501
+}
+
+fn else_if(c: bool, d: bool) -> u32 {
+    let x: u32 = 1;
+    return ok(if c then &x else if d then &f() else &x); //~ ERROR E0501
+}
+
+fn if_in_arm(k: u32, c: bool) -> u32 {
+    let x: u32 = 1;
+    return ok(match k { 0 => if c then &f() else &x, _ => &x }); //~ ERROR E0501
+}
+
+fn arm(k: u32) -> u32 {
+    let x: u32 = 1;
+    return ok(match k { 0 => &f(), _ => &x }); //~ ERROR E0501
+}
+
+fn mut_branch(c: bool) -> u32 {
+    let mut y: u32 = 1;
+    let r: &mut u32 = if c then &mut f() else &mut y; //~ ERROR E0501
+    *r = 2;
+    return *r;
+}
+
+fn main() -> i32 {
+    return 0;
+}

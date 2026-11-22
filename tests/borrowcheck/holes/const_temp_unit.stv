@@ -1,0 +1,33 @@
+//~ BORROWCHECK gap
+// `&()`, `&Z.{}` and `&[]` of a `[u32; 0]` borrow temporaries that end with their statement. A
+// read of a zero-size value through the reference of the round before touches no byte: the run
+// shows nothing, for any of them.
+struct Z {}
+
+impl Copy for Z {}
+
+fn main() -> i32 {
+    let first: () = ();
+    let fz = Z.{};
+    let fa: [u32; 0] = [];
+    let mut r: &() = &first;
+    let mut rz: &Z = &fz;
+    let mut ra: &[u32; 0] = &fa;
+    let mut cnt: u32 = 0;
+    let mut i: u32 = 0;
+    while i < 3 {
+        let before: &() = r;
+        let bz: &Z = rz;
+        let ba: &[u32; 0] = ra;
+        r = &();
+        rz = &Z.{};
+        ra = &[];
+        let u: () = *before;
+        let z: Z = *bz;
+        let a: [u32; 0] = *ba;
+        cnt = cnt + 1;
+        i = i + 1;
+    }
+    if cnt == 3 { return 0; }
+    return 1;
+}

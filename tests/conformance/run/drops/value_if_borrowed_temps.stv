@@ -1,6 +1,7 @@
 //~ STDOUT value_if_borrowed_temps.stdout
-// A temporary made in one branch of a value `if` lives to the end of the statement, and only if
-// that branch ran.
+// A temporary made in a branch of a value `if` ends with that branch: it is dropped there, before
+// the rest of the statement runs. A borrow kept past the branch borrows a value bound before the
+// `if`.
 import std.io;
 import std.env;
 struct D { pub id: u32 }
@@ -38,9 +39,12 @@ fn show(r: Result<u32, u32>) {
     }
 }
 fn main() -> i32 {
-    let n = idof(if yes() then &mk(1) else &mk(2)) + idof(&mk(3));
-    let m = idof(if no() then &mk(4) else &mk(5)) + idof(&mk(6));
-    io.print(f"{n} {m}\n");
+    let n = (if yes() then mk(1).get() else mk(2).get()) + idof(&mk(3));
+    let m = (if no() then mk(4).get() else mk(5).get()) + idof(&mk(6));
+    let a = mk(7);
+    let b = mk(8);
+    let k = idof(if yes() then &a else &b);
+    io.print(f"{n} {m} {k}\n");
     io.print("end\n");
     return 0;
 }

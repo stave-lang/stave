@@ -1,0 +1,45 @@
+//~ CHECK-ONLY
+// The fix of E0501 `temporary-branch` / `temporary-arm`: bind the value with `let` before the
+// `if` / `match` and borrow the local in the branch or arm. A borrow of a branch's temporary used
+// inside the branch is fine.
+fn f() -> u32 {
+    return 5;
+}
+
+fn ok(r: &u32) -> u32 {
+    return *r;
+}
+
+fn then_branch(c: bool) -> u32 {
+    let x: u32 = 1;
+    let t = f();
+    return ok(if c then &t else &x);
+}
+
+fn else_if(c: bool, d: bool) -> u32 {
+    let x: u32 = 1;
+    let t = f();
+    return ok(if c then &x else if d then &t else &x);
+}
+
+fn if_in_arm(k: u32, c: bool) -> u32 {
+    let x: u32 = 1;
+    let t = f();
+    return ok(match k { 0 => if c then &t else &x, _ => &x });
+}
+
+fn mut_branch(c: bool) -> u32 {
+    let mut y: u32 = 1;
+    let mut t = f();
+    let r: &mut u32 = if c then &mut t else &mut y;
+    *r = 2;
+    return *r;
+}
+
+fn used_in_branch(c: bool) -> u32 {
+    return if c then ok(&f()) + 1 else ok(&f());
+}
+
+fn main() -> i32 {
+    return 0;
+}

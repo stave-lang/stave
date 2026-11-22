@@ -1,0 +1,23 @@
+//~ BORROWCHECK gap
+// A reference to a temporary that ended with its statement, used only for a length: `len()` of
+// a `&[u32; 2]` is the array type's constant, and `len()` of a `&str` reads the reference's
+// length word, so no byte of the referent is read (the `&str` of an f-string owns a heap block
+// that its statement's end frees). The run shows nothing.
+fn main() -> i32 {
+    let n: u32 = 5;
+    let first: [u32; 2] = [1u32, 2u32];
+    let mut r: &[u32; 2] = &first;
+    let mut s: &str = "";
+    let mut total: usize = 0;
+    let mut i: u32 = 0;
+    while i < 3 {
+        let before: &[u32; 2] = r;
+        let sb: &str = s;
+        r = &[1u32, 2u32];
+        s = f"v {n}";
+        total = total + before.len() + sb.len();
+        i = i + 1;
+    }
+    if total == 12 { return 0; }
+    return 1;
+}

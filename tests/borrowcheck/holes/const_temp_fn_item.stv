@@ -1,5 +1,5 @@
-//~ BORROWCHECK ok
-// `&` of a fn item borrows a constant temporary: the next evaluation does not end it.
+//~ BORROWCHECK use-after-referent 14 13
+// `&` of a fn item borrows a temporary that ends with its statement.
 fn twice(x: u32) -> u32 { return x * 2; }
 fn inc(x: u32) -> u32 { return x + 1; }
 
