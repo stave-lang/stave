@@ -27,8 +27,10 @@ unsafe("a is 8-byte aligned and readable") fn ld64(a: usize) -> u64 {
     return unsafe("a is 8-byte aligned and readable (caller)") *(a as *const u64);
 }
 
-// `[run] stack` of table t (not 0).
-fn default_stack(t: usize) -> usize {
+// `[run] stack` of the stack table (RUN_STACK without one).
+fn default_stack() -> usize {
+    let t = unsafe("intrinsic: address of the compiler-emitted stack table") stack_table();
+    if t == 0 { return RUN_STACK; }
     let d = unsafe("t is the compiler-emitted stack table, 8-byte aligned") ld64(t);
     if d == 0 { return RUN_STACK; }
     return d as usize;
@@ -44,7 +46,7 @@ pub fn main_stack() -> usize {
     let t = unsafe("intrinsic: address of the compiler-emitted stack table") stack_table();
     if t == 0 { return RUN_STACK; }
     let b = unsafe("t is the stack table: its main word") ld64(t + 8);
-    if b == 0 { return default_stack(t); }
+    if b == 0 { return default_stack(); }
     return b as usize;
 }
 
@@ -62,5 +64,5 @@ pub fn thread_stack(code: usize) -> usize {
             if b != 0 { return b as usize; }
         }
     }
-    return default_stack(t);
+    return default_stack();
 }
