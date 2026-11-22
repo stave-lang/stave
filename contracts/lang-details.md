@@ -346,17 +346,24 @@ the same features. The type checker decides them once per instance on the call g
 
 - An instance holds a vector by value when a fixed vector or mask, or a tuple, array, struct, or
   enum with one inside not behind a reference, raw pointer, slice, or fn type, is the type of a
-  param, the return, a local, or an expression of its body after substitution. Not counted: an
-  expression that is only a place there (the operand of `&` / `&mut`, the head of a postfix
-  chain, the target of a plain `=`, a `match` scrutinee, a `for` source), and a type that does
-  not depend on a type parameter (the body gate below checks it against the generic's own
-  `needs`).
+  param, the return, a local, or an expression of its body after substitution, or is a value a
+  postfix chain makes or reads between steps: a built-in's vector receiver and result, a
+  literal, the operand of `?`, the result of a call through a fn or closure value. Not counted:
+  an expression that is only a place there (the operand of `&` / `&mut`, the head of a postfix
+  chain, the target of a plain `=`, a `for` source; parentheses do not change that), the result
+  of a call to a known fn, method, operator, or dispatch (its signature is the callee's, checked
+  by E0703 / E0704 / this rule), and a part that does not depend on a type parameter (the body
+  gate below checks it against the generic's own `needs`). A `match` scrutinee counts the enums
+  in it, through references too: matching reads an enum's tag from the whole value.
 - It inherits the features whose registers hold each such vector (256 bits: `avx2`; 512 bits:
   the AVX-512 part of `v4`), beyond its declared `needs` and the target baseline, and what each
   generic instance it calls, drops (through drop glue), or makes into a fn value inherits.
+- Drop glue reads the enums it drops whole: the glue of a type holding a wider vector than the
+  baseline is compiled with the features that hold it, and every dropper inherits them.
 - A non-generic fn that calls, drops, or makes a fn value of such an instance needs those
   features as for a declared `needs` (E0704 case `inherited`, naming the type argument); where no
-  feature of the target's arch holds the vector (256 bits on AArch64), E0702 at that use. A
+  feature of the target's arch holds the vector (256 bits on AArch64), E0702 case `inherited` at
+  that use. Where the fn's own body holds the same vectors, its E0702 is the only report. A
   generic instance never fails this rule: it inherits. A dispatch arm with `needs(avx2)` reaches
   `id::<f32x8>`; the `_` arm reaches `id::<f32x4>`, another instance, with no features.
 - So at `f32x8`: `id<T>(x: T) -> T` inherits `avx2`, and so do `mem.swap` (it copies a `T`) and
@@ -370,9 +377,9 @@ Every fn body, generic or not, closures included, is gated the same way (E0702):
 holds by value, as above, whether their type is written or only inferred (a built-in's receiver
 and result inside a postfix chain count), hold no vector wider than the registers of the fn's
 own `needs` plus the target baseline: `needs(avx)` and `needs(fma)` give 128 bits, `needs(avx2)`
-256, any AArch64 feature 128. A value a callee returns is covered by the callee's features,
-which the caller has (E0704). So a check that passes never leaves a vector to the build that the
-fn's features do not hold.
+256, any AArch64 feature 128. A fn value is callable without its features (§2 Fn types), so the result of
+a call through one is the caller's to hold. Lowering checks every fn, instance, and glue against
+its features again: a vector left outside them is an internal error, never code.
 
 Reason the instance and not the generic: a declared `needs` on a generic would make it uncallable
 without the features at every type argument (`Vec.push` at `u8` included), and a rule on the

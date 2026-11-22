@@ -1980,6 +1980,7 @@ impl<'a> Ck<'a> {
             if t == Term::Question as u8 {
                 let base = self.value_of(st, prim, None);
                 let base = self.force(base);
+                self.tries.push((p, base));
                 let r = self.try_op(base, p);
                 st = St::Val(Ty::T(r));
                 p += 1;

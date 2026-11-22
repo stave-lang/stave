@@ -128,7 +128,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0609 | generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument. Write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param |
 | E0700 | operation unavailable (class U) on the target, outside `emulate { }` |
 | E0701 | class M or U operation inside `strict { }` |
-| E0702 | vector type wider than the target's register; in a fn body, a value (written or inferred type) holding a vector wider than the registers of the fn's `needs` plus the target baseline |
+| E0702 | vector type wider than the target's register; in a fn body, a value (written or inferred type) holding a vector wider than the registers of the fn's `needs` plus the target baseline. Case `inherited`: a generic instance (or a drop) holds such a vector for a type argument, and no feature of the target holds it |
 | E0703 | vector in the signature of a fn, fn type, or closure whose `needs` (plus the target baseline) do not cover its width (`extern "C"` signatures: E0804) |
 | E0704 | callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it |
 | E0705 | dispatch arm signature differs from the dispatch signature |

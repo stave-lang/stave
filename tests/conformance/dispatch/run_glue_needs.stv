@@ -1,0 +1,49 @@
+//~ STDOUT run_glue_needs.stdout
+// Drop glue loads the enum it drops: the glue of `Option<(f32x8, Vec<u32>)>` holds a 256-bit
+// payload and is compiled with `avx2`, which every fn dropping such a value has. The `avx2` arm
+// drops one; the `_` arm drops the 128-bit form. A tuple field read through `(*r)` projects.
+// The output does not depend on the arm that ran.
+import std.io;
+import std.vec;
+
+fn wide(xs: &[f32]) -> f32 needs(avx2) {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(3);
+    let o = Option.Some((f32x8.load(xs, 0), v));
+    let t = (f32x8.load(xs, 0), 2.0f32);
+    let r = &t;
+    match &o {
+        Option.Some(p) => {
+            return p.0.reduce_add() + (*r).1;
+        }
+        Option.None => {
+            return 0.0;
+        }
+    }
+}
+
+fn narrow(xs: &[f32]) -> f32 {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(3);
+    let o = Option.Some((f32x4.load(xs, 0), v));
+    match &o {
+        Option.Some(p) => {
+            return p.0.reduce_add() * 2.0 + 2.0;
+        }
+        Option.None => {
+            return 0.0;
+        }
+    }
+}
+
+dispatch fn pick(xs: &[f32]) -> f32 {
+    avx2 => wide,
+    _ => narrow,
+}
+
+fn main() -> i32 {
+    let a: [f32; 8] = [1.0; 8];
+    let s = pick(&a);
+    io.print(f"{s}\n");
+    return 0;
+}

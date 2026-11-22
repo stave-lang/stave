@@ -155,6 +155,9 @@ pub struct TypedBody {
     /// token of a field, method, or path step, the `(` of a call, the `[` of an index, the `.{`
     /// of a struct literal, the operator token of a user-type operator), sorted by token.
     pub targets: Vec<(u32, Target)>,
+    /// The operand type of each `?`, keyed by its token, sorted: a value the step reads whole that
+    /// has no node of its own when `?` follows another step.
+    pub tries: Vec<(u32, TypeId)>,
     /// Implicit coercions keyed by the node of the coerced expression, sorted.
     pub coercions: Vec<(u32, Coercion)>,
     pub sites: Vec<CallSite>,
@@ -259,6 +262,9 @@ pub struct Typeck {
     /// declared `needs` and the target baseline (keys in the call graph's type ids;
     /// [`crate::inherit`]).
     pub inst_features: rustc_hash::FxHashMap<crate::mono::InstKey, u64>,
+    /// Per type whose drop glue loads a vector wider than the target baseline holds: the
+    /// features the glue is compiled with (keys in the call graph's type ids; [`crate::inherit`]).
+    pub glue_features: rustc_hash::FxHashMap<TypeId, u64>,
     /// Type-checking diagnostics (canonical order). [`Typeck::all_diagnostics`] merges resolution's.
     pub diagnostics: Vec<Diagnostic>,
     pub timings: TypeckTimings,
@@ -487,7 +493,8 @@ fn check_in_pool(prog: &Program) -> Typeck {
     bodies.par_iter_mut().for_each(|b| remap_body(b, &map));
     let mut sigs_table = sigs_table;
     remap_sigs(&mut sigs_table, &map_sig);
-    diags.extend(crate::inherit::gate_bodies(prog, &sigs_table, &tys, &bodies, &brackets));
+    let gated = crate::inherit::gate_bodies(prog, &sigs_table, &tys, &bodies, &brackets);
+    diags.extend(gated.diagnostics);
     let mut instances: Vec<Instance> =
         bodies.iter().flat_map(|b| b.sites.iter().map(|s| s.inst.clone())).collect();
     instances.sort();
@@ -504,11 +511,14 @@ fn check_in_pool(prog: &Program) -> Typeck {
         crate::callgraph::build(prog, &sigs_table, &tys, &bodies, &brackets)
     };
     let mut inst_features = rustc_hash::FxHashMap::default();
+    let mut glue_features = rustc_hash::FxHashMap::default();
     if !call_graph.truncated {
         diags.extend(crate::recursion::check(prog, &sigs_table, &tys, &call_graph));
-        let inh = crate::inherit::check(prog, &sigs_table, &tys, &bodies, &call_graph, &brackets);
+        let inh =
+            crate::inherit::check(prog, &sigs_table, &tys, &bodies, &call_graph, &brackets, &gated.needs);
         diags.extend(inh.diagnostics);
         inst_features = inh.features;
+        glue_features = inh.glue;
     } else if !too_deep && let Some((span, what)) = call_graph.truncated_at {
         // Every check over the graph (recursion, effects, ranks, contract purity, stack) would
         // miss the left-out instances: the program is rejected.
@@ -525,6 +535,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
         instances,
         call_graph,
         inst_features,
+        glue_features,
         diagnostics,
         timings: TypeckTimings { sigs: t_sigs, bodies: t_bodies, canon: t_canon, graph: t_graph },
         error_type: err,
@@ -540,6 +551,7 @@ fn empty_body(j: Job) -> TypedBody {
         node_types: Vec::new(),
         locals: Vec::new(),
         targets: Vec::new(),
+        tries: Vec::new(),
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),
@@ -607,6 +619,9 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
             | Target::Struct { ty, .. } => *ty = f(*ty),
             _ => {}
         }
+    }
+    for (_, t) in &mut b.tries {
+        *t = f(*t);
     }
     for s in &mut b.sites {
         map_gargs(&mut s.inst.args, f);
@@ -739,6 +754,8 @@ pub(crate) struct Ck<'a> {
     pub diags: Vec<Diagnostic>,
     pub has_error: bool,
     pub targets: Vec<(u32, Target)>,
+    /// The operand type of each `?` (by its token).
+    pub tries: Vec<(u32, TypeId)>,
     pub coercions: Vec<(u32, Coercion)>,
     pub sites: Vec<CallSite>,
     pub implicit: Vec<(u32, Target)>,
@@ -816,6 +833,7 @@ fn check_body(
         diags: Vec::new(),
         has_error: false,
         targets: Vec::new(),
+        tries: Vec::new(),
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),
@@ -1601,6 +1619,11 @@ impl<'a> Ck<'a> {
             node_types,
             locals,
             targets: std::mem::take(&mut self.targets),
+            tries: {
+                let mut t = std::mem::take(&mut self.tries);
+                t.sort_by_key(|x| x.0);
+                t
+            },
             coercions: std::mem::take(&mut self.coercions),
             sites: std::mem::take(&mut self.sites),
             implicit: std::mem::take(&mut self.implicit),

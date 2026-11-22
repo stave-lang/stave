@@ -3253,11 +3253,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0702",
         severity: Severity::Error,
         area: "features",
-        rule: "vector type wider than the target's register; in a fn body, a value (written or inferred type) holding a vector wider than the registers of the fn's `needs` plus the target baseline",
+        rule: "vector type wider than the target's register; in a fn body, a value (written or inferred type) holding a vector wider than the registers of the fn's `needs` plus the target baseline. Case `inherited`: a generic instance (or a drop) holds such a vector for a type argument, and no feature of the target holds it",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "arg", kind: HoleKind::Type, choices: &[] },
             Hole { name: "bits", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "callee", kind: HoleKind::Path, choices: &[] },
             Hole { name: "max", kind: HoleKind::Int, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
@@ -3270,6 +3272,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use a vector of at most {max} bits, or add `needs(...)` with features that have wider registers (`avx2`: 256, `v4`: 512)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "inherited",
+                message: "`{callee}` at type argument `{arg}` holds `{type}` by value ({bits} bits), the target's vector registers have {max}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this use reaches it" },
+                    LabelTemplate { at: "callee", text: "declared here: at `{arg}` it holds `{type}` by value" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "reach `{callee}` with a type argument of at most {max}-bit vectors",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

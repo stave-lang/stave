@@ -387,6 +387,14 @@ fn lower_in_pool(
             })
             .collect()
     };
+    // the features drop glue is compiled with, keyed in this table
+    let glue_features: FxHashMap<TypeId, u64> = if tc.glue_features.is_empty() {
+        FxHashMap::default()
+    } else {
+        let cx = tc.call_graph.types(&tc.types);
+        let mut memo = FxHashMap::default();
+        tc.glue_features.iter().map(|(&t, &f)| (graph_to_table(&cx, &mut table, &mut memo, t), f)).collect()
+    };
     let mut cache: FxHashMap<Job, usize> = jobs.iter().cloned().enumerate().map(|(i, j)| (j, i)).collect();
     // the job that first requested each job (roots: none)
     let mut parent: Vec<Option<usize>> = vec![None; jobs.len()];
@@ -460,7 +468,7 @@ fn lower_in_pool(
     }
     let t1 = Instant::now();
     let outs: Vec<JobOut> = outs.into_iter().flatten().collect();
-    let m = assemble(prog, sigs, &mut table, &jobs, &cache, outs, &statics_list, &inherited);
+    let m = assemble(prog, sigs, &mut table, &jobs, &cache, outs, &statics_list, &inherited, &glue_features);
     tm.assemble = t1.elapsed();
     tm.n_funcs = m.as_ref().map_or(0, |m| m.0.funcs.len());
     let r = m.map(|(mut module, order, site_pos)| {
@@ -832,6 +840,7 @@ fn assemble(
     outs: Vec<JobOut>,
     statics_list: &[DeclId],
     inherited: &FxHashMap<InstKey, u64>,
+    glue_features: &FxHashMap<TypeId, u64>,
 ) -> Result<(Module, Vec<usize>, Vec<SitePos>), LowerError> {
     let mut tr = Tr { tmp: IrTypes::new(), memo: FxHashMap::default(), adt_sema: FxHashMap::default() };
     // 1. translate every used type; the printed set P
@@ -1059,6 +1068,8 @@ fn assemble(
     let mut clauses: Vec<stave_ir::Clauses> = Vec::with_capacity(nf as usize);
     let mut sites: Vec<SiteInfo> = Vec::new();
     let mut site_pos: Vec<SitePos> = Vec::new();
+    // per type: the widest vector a value of it holds (0: none)
+    let mut held_bits: FxHashMap<TypeId, u32> = FxHashMap::default();
     // Files of built-in packages are named `<package>/<path in package>` (`std/vec.stv`) in the
     // site table, so a binary does not depend on where the library is installed.
     let site_names: FxHashMap<u32, String> = prog
@@ -1081,7 +1092,9 @@ fn assemble(
         };
         let features = match job {
             Job::Inst(k) => inst_features(sigs, inherited, k),
-            Job::Glue(_) => FeatureSet::EMPTY,
+            Job::Glue(t) => {
+                FeatureSet::from_bits(glue_features.get(t).copied().unwrap_or(0)).unwrap_or(FeatureSet::EMPTY)
+            }
         };
         let symbol = match job {
             Job::Inst(k) => c_symbol(prog, sigs, k.decl),
@@ -1153,22 +1166,29 @@ fn assemble(
                     name_site = Site(row);
                 }
             }
-            // an instance holds by value only vectors its features hold: the type checker gated
-            // the body and decided a generic instance's features from its type arguments
-            // ([`crate::inherit`])
-            #[cfg(debug_assertions)]
-            if let (Job::Inst(_), Some(b)) = (job, &f.body) {
+            // A fn holds by value only vectors its features hold: the type checker gated each
+            // body, decided a generic instance's features from its type arguments, and drop
+            // glue's from its type ([`crate::inherit`]). Anything else is a checker bug: an
+            // internal error in every build, never code left to the backend.
+            if let Some(b) = &f.body {
                 let width = crate::gates::feature_vector_bits(prog.target.baseline().union(features));
-                let mut ov = Overlay::new(&*table);
                 let held =
                     f.params.iter().copied().chain(f.ret).chain(b.values.iter().map(|v| TypeId(v.ty.0)));
                 for t in held.filter(|t| !t.is_none() && !t.is_local()) {
-                    let wide = crate::inherit::held_wide(&mut ov, sigs, t).filter(|w| w.1 > width);
-                    debug_assert!(
-                        wide.is_none(),
-                        "{path} holds a {}-bit vector outside its features",
-                        wide.map_or(0, |w| w.1)
-                    );
+                    let bits = *held_bits.entry(t).or_insert_with(|| {
+                        let mut ov = Overlay::new(&*table);
+                        crate::inherit::held_wide(&mut ov, sigs, t).map_or(0, |w| w.1)
+                    });
+                    if bits > width {
+                        return Err(LowerError {
+                            kind: LowerErrorKind::Internal,
+                            func: path.clone(),
+                            at: String::new(),
+                            msg: format!(
+                                "holds a {bits}-bit vector outside its features ({width}-bit registers)"
+                            ),
+                        });
+                    }
                 }
             }
             let body = f.body.take().map(|mut b| {

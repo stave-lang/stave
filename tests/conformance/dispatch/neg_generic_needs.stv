@@ -46,7 +46,6 @@ fn fma_only() -> usize needs(fma) {
     let f = twice::<f32x8>; //~ ERROR E0704
     let s = swap_via::<f32x8>; //~ ERROR E0704
     let w = vec.Vec::<f32x8>.new(); //~ ERROR E0704
-    //~^ ERROR E0704
     let r = first::<f32x8>;
     let c = count::<f32x8>;
     return n + w.len();

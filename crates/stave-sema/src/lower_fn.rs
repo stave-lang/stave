@@ -1929,6 +1929,7 @@ fn empty_body() -> &'static TypedBody {
         node_types: Vec::new(),
         locals: Vec::new(),
         targets: Vec::new(),
+        tries: Vec::new(),
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),
