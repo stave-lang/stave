@@ -20,7 +20,10 @@
 //!
 //! **Access checks**: every access (read, write, move, drop, storage-dead, and the borrows) is
 //! checked against the live loans whose places overlap it (E0501; the storage-dead of a
-//! temporary at the end of its statement is case `temporary`); reads and moves against the
+//! temporary at the end of its statement is case `temporary`; a write, a drop, and a storage-dead
+//! do not reach below a dereference, except a drop whose destructor may reach what the value
+//! references, [`Access::DeepDrop`], also checked against the loans of the value its block
+//! returned); reads and moves against the
 //! maybe-moved sites (E0502); writes and `&mut` borrows against binding and reference mutability
 //! (E0503); stores of a ref-like value (an assignment through a dereference, a call whose
 //! callee has a `from` clause on a `&mut` param) against the view objects the pointer may point
@@ -51,6 +54,10 @@ pub enum Access {
     Write,
     Move,
     Drop,
+    /// The drop of a value whose destructor may reach what the value references
+    /// ([`crate::cfg::Body::deep_drop`]): deep, except below a `&` (the destructor can only
+    /// read there, and no `&mut` loan is made below a `&`).
+    DeepDrop,
     StorageDead,
 }
 
@@ -71,9 +78,14 @@ impl Access {
             Access::Read | Access::SharedBorrow | Access::Reserve => "read",
             Access::MutBorrow | Access::Activate | Access::Write => "write",
             Access::Move => "move",
-            Access::Drop => "drop",
+            Access::Drop | Access::DeepDrop => "drop",
             Access::StorageDead => "storage-dead",
         }
+    }
+
+    /// The end of a value: a drop or a storage-dead.
+    pub(crate) fn ends(self) -> bool {
+        matches!(self, Access::Drop | Access::DeepDrop | Access::StorageDead)
     }
 
     /// The E0501 `access` hole.
@@ -83,7 +95,7 @@ impl Access {
             Access::MutBorrow | Access::Activate => "borrow mutably",
             Access::Write => "assign to",
             Access::Move => "move",
-            Access::Drop | Access::StorageDead => "drop",
+            Access::Drop | Access::DeepDrop | Access::StorageDead => "drop",
         }
     }
 }
@@ -211,8 +223,13 @@ pub fn places_conflict(p: &Place, q: &Place, kind: Access) -> bool {
     if p.proj.len() >= q.proj.len() {
         return true;
     }
-    // the access is above the loan: a shallow access does not reach through a dereference
-    !(kind.shallow() && q.proj[n..].iter().any(|x| matches!(x, Proj::Deref(_))))
+    // the access is above the loan: a shallow access does not reach through a dereference, and
+    // a destructor reaches below a `&` only to read
+    let below = &q.proj[n..];
+    match kind {
+        Access::DeepDrop => !below.iter().any(|x| matches!(x, Proj::Deref(DerefKind::Shared))),
+        _ => !(kind.shallow() && below.iter().any(|x| matches!(x, Proj::Deref(_)))),
+    }
 }
 
 /// Whether an access that conflicts with a live loan is the end of a temporary (its drop or
@@ -220,7 +237,7 @@ pub fn places_conflict(p: &Place, q: &Place, kind: Access) -> bool {
 /// borrow outlives the temporary (E0501 case `temporary`).
 pub fn temp_end(body: &Body, kind: Access, p: &Place) -> bool {
     let l = &body.locals[p.local as usize];
-    matches!(kind, Access::Drop | Access::StorageDead) && p.proj.is_empty() && l.temp && !l.static_root
+    kind.ends() && p.proj.is_empty() && l.temp && !l.static_root
 }
 
 /// E0503: whether `p` may be written (or mutably borrowed); `Err((shared, blame))` otherwise.
@@ -263,6 +280,10 @@ struct Cx<'f, 'b> {
     /// The locals those moves moved: moved for the statement's later accesses, beside the ones
     /// the state marks.
     moved_now: Vec<LocalId>,
+    /// The loans of the value the block returned: the drops of the exit come after the return
+    /// in the block, and a destructor that runs there may reach what the returned value
+    /// borrows through the dropped value.
+    returned: Vec<LoanId>,
     /// Per loan: how many of the live tracked locals hold it at the point reached. A loan is
     /// live while that is not zero, or while it is `reached`.
     holders: Vec<u32>,
@@ -512,6 +533,7 @@ impl Cx<'_, '_> {
     /// Checks the statements of block `b`, entered in state `st`.
     fn block(&mut self, st: &mut State, b: usize) {
         self.block = b;
+        self.returned.clear();
         self.block_no += 1;
         let flow = &*self.flow;
         let blk = &flow.body.blocks[b];
@@ -636,7 +658,21 @@ impl Cx<'_, '_> {
                 l = self.next[l as usize];
             }
         }
+        // a returned borrow of the dropped value's own storage is E0512; one made through its
+        // references is reached by the destructor
+        if kind == Access::DeepDrop {
+            for &l in &self.returned {
+                let q = &self.flow.loan(l).place;
+                if !exclude.contains(&l)
+                    && places_conflict(place, q, kind)
+                    && !places_conflict(place, q, Access::Drop)
+                {
+                    loans.push(l);
+                }
+            }
+        }
         loans.sort_unstable();
+        loans.dedup();
         let mut verdict = None;
         let mut reported = None;
         if !loans.is_empty() {
@@ -653,7 +689,7 @@ impl Cx<'_, '_> {
         }
         // use after move (implicit drops of moved values are no-ops); a write of the whole local
         // initializes it again, a write of a part of it uses it
-        if !matches!(kind, Access::Drop | Access::StorageDead)
+        if !kind.ends()
             && (st.is_moved(place.local) || self.moved_now.contains(&place.local))
             && !(kind == Access::Write && place.proj.is_empty())
             && let Some(site) = self.move_site(at, place.local)
@@ -781,6 +817,10 @@ impl Cx<'_, '_> {
                     });
                     self.moved_now.extend(moves.iter().map(|m| m.0));
                     self.pending.extend(moves);
+                    // behind a dereference the write stands for the drop of the old value
+                    if dest.has_deref() && body.deep_drop(dest.ty) {
+                        self.access(st, at, Access::DeepDrop, dest, s.span, s.node, &[]);
+                    }
                     self.access(st, at, Access::Write, dest, s.span, s.node, &[]);
                     if let Err((shared, blame)) = mutability(body, dest) {
                         self.findings.push(Finding::Immutable {
@@ -800,13 +840,20 @@ impl Cx<'_, '_> {
                 self.access(st, at, Access::Activate, &p, s.span, s.node, &[*reserved, *active]);
             }
             StmtKind::Read(o) => self.operand(st, at, o),
-            StmtKind::Drop(p) => self.access(st, at, Access::Drop, p, s.span, s.node, &[]),
+            StmtKind::Drop(p) => {
+                let kind = if body.deep_drop(p.ty) { Access::DeepDrop } else { Access::Drop };
+                self.access(st, at, kind, p, s.span, s.node, &[]);
+            }
             StmtKind::StorageDead(l) => {
                 let p = Place::local(*l, body.locals[*l as usize].ty);
                 self.access(st, at, Access::StorageDead, &p, s.span, s.node, &[]);
             }
             StmtKind::Return(o) => {
                 self.operand(st, at, o);
+                let s = self.flow.op_origins(st, o);
+                let held = if self.flow.grown { self.flow.reach(st, &s) } else { s };
+                let n = self.flow.atoms.nloans;
+                self.returned.extend(held.iter().filter(|&a| a < n).map(|a| a as LoanId));
                 self.ret(st, o);
             }
         }
@@ -984,6 +1031,7 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         want_dump,
         pending: Vec::new(),
         moved_now: Vec::new(),
+        returned: Vec::new(),
     };
     // The walk follows the reverse postorder, where a block without an entry state comes right
     // after the block whose end state it takes; the findings are then put in block order.

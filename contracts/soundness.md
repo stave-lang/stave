@@ -237,6 +237,35 @@ have no schedule and are not compared.
 function refuses a drop nobody asked for). A row added without its statement. A statement the
 checks read as something weaker than a use of the value and a call of its glue.
 
+## Destructors: a drop reaches what the value references
+
+**Claim.** When a drop runs a destructor that can reach a borrow, no reference made through the
+dropped value's references is used after the drop. Such a drop is a deep access of the
+dropped place.
+
+**Assumptions.** A destructor is `drop(&mut self)` of an ADT with a `Drop` impl. It can read and
+write through every `&mut` and read through every `&` the value holds. The borrow CFG keeps
+one answer per dropped type, `Body::deep_drop` (stave-borrow `Tys::drop_reaches_refs`). That
+answer is yes when the drop glue reaches, through fields, enum payloads, tuple and array
+elements, and type arguments, an ADT with a `Drop` impl whose type is ref-like. It is also yes
+for a view-bounded param that is not Copy and for an unknown type. A type that is not ref-like
+holds no reference, so its destructor reaches only its own storage.
+
+**Argument.** A shallow drop conflicts only with loans of the dropped place and of places in its
+own storage. A reborrow `&mut *w.r` is a loan of a place below the dereference of `w.r`, so a
+shallow drop lets it pass, while `W.drop` writes `*w.r`. A deep drop conflicts with every live
+loan of a place below the dropped one, except below a `&`. There the destructor can only read,
+and no `&mut` loan is made below a `&` (E0503). The drop statements are the ones of the
+schedule: scope ends, exits, a statement's temporaries, the parts a pattern ignores, and the
+old value of an assignment. An assignment through a dereference stands for its old value's drop
+and is checked as that drop too. At a return the exit's drops come after the `Return`
+statement, so the returned value no longer counts as live there. The loans the returned value
+holds are checked against each deep drop of that exit, because the destructor runs while the
+caller already holds the result.
+
+**Not claimed.** A destructor reaching memory through a raw pointer field is the unsafe code's
+obligation. The drop of a moved value runs nothing and is no access.
+
 ## Whole moves: no value is left with a moved-out part
 
 **Claim.** In an accepted program a place is either wholly initialized or wholly moved-out:

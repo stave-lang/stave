@@ -44,7 +44,7 @@
 //! by `&` (E0512 otherwise: [`Local::capture_mut`]). Captures are references: moving a non-Copy
 //! capture out of the body is E0504.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::Span;
 use stave_sema::drops::{Owner, Point, Row, Schedule};
 use stave_sema::itemcx::ItemCx;
@@ -382,9 +382,18 @@ pub struct Body {
     /// The drop schedule of the body ([`stave_sema::drops`]): one row per drop statement made
     /// ([`Builder::drop_at`]), and per assignment that overwrites a value with drop glue.
     pub schedule: Schedule,
+    /// The types of the dropped values whose drop may run a destructor on a value holding
+    /// references ([`Tys::drop_reaches_refs`]): their drop, and an assignment through a
+    /// dereference that drops one, is an access of what the value reaches.
+    pub deep_drops: FxHashSet<TypeId>,
 }
 
 impl Body {
+    /// Whether dropping a value of `t` accesses what it reaches (decided by the builder).
+    pub fn deep_drop(&self, t: TypeId) -> bool {
+        self.deep_drops.contains(&t)
+    }
+
     pub fn n_params(&self) -> usize {
         self.locals.iter().filter(|l| l.param.is_some()).count()
     }
@@ -565,6 +574,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             internal: None,
             loops: Vec::new(),
             schedule: Schedule::default(),
+            deep_drops: FxHashSet::default(),
         };
         Builder {
             icx,
@@ -697,10 +707,17 @@ impl<'a, 'b> Builder<'a, 'b> {
     fn drop_at(&mut self, p: Place, point: Point, owner: Owner, span: Span, node: u32) {
         let head = stave_sema::drops::head(&self.tys.ov, p.ty);
         self.body.schedule.add(Row { point, owner, head });
+        self.note_deep_drop(p.ty);
         if let Some(b) = self.cur {
             self.due.push((b, point, owner));
         }
         self.push(StmtKind::Drop(p), span, node);
+    }
+
+    fn note_deep_drop(&mut self, t: TypeId) {
+        if self.tys.drop_reaches_refs(t) {
+            self.body.deep_drops.insert(t);
+        }
     }
 
     // ---------- locals, temps, loans ----------
@@ -1597,6 +1614,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             // (it uses the pointer, and the lock check reads it as the drop).
             if self.tys.needs_drop(lp.ty) {
                 if lp.has_deref() {
+                    self.note_deep_drop(lp.ty);
                     let head = stave_sema::drops::head(&self.tys.ov, lp.ty);
                     self.body.schedule.add(Row { point: Point::Assign(lhs), owner: Owner::Old, head });
                     if let Some(b) = self.cur {

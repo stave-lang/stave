@@ -1,0 +1,166 @@
+//~ CHECK-ONLY
+// A destructor of a value that holds references reaches what they point to: its drop is an
+// access of everything the value reaches, not only of its own storage. A reborrow through a
+// `&mut` field may not be used after that value is dropped: overwritten, at its scope end, as a
+// statement's temporary, through a dereference, or at the return of the fn that owns it. The
+// destructor may sit on the type itself, on a field, a tuple or array element, or a type
+// argument. Below a `&` the destructor only reads, and a value without a destructor reaches
+// nothing when dropped.
+import std.io;
+
+struct P { x: i64 }
+
+view struct W { r: &mut P }
+
+impl Drop for W {
+    fn drop(&mut self) { self.r.x = 0; }
+}
+
+view struct H { w: W, n: u32 }
+
+view struct G<T: view> { t: T }
+
+view struct V { r: &mut P }
+
+view struct R { r: &P }
+
+impl Drop for R {
+    fn drop(&mut self) {
+        let n = self.r.x;
+        io.print(f"drop {n}\n");
+    }
+}
+
+fn overwritten() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut w = W.{ r: &mut a };
+    let q = &mut *w.r;
+    w = W.{ r: &mut b }; //~ ERROR E0501
+    q.x = 5;
+}
+
+fn scope_end() {
+    let mut a = P.{ x: 1 };
+    let mut y = P.{ x: 2 };
+    let mut q = &mut y;
+    {
+        let w = W.{ r: &mut a };
+        q = &mut *w.r;
+    } //~ ERROR E0501
+    q.x = 5;
+}
+
+fn through_deref() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut w = W.{ r: &mut a };
+    let pw = &mut w;
+    let q = &mut *pw.r;
+    *pw = W.{ r: &mut b }; //~ ERROR E0501
+    q.x = 5;
+}
+
+fn temporary() {
+    let mut a = P.{ x: 1 };
+    let q = &mut *W.{ r: &mut a }.r; //~ ERROR E0501
+    q.x = 5;
+}
+
+fn returned(w: W) -> &mut P from w {
+    return &mut *w.r; //~ ERROR E0501
+}
+
+fn field() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut h = H.{ w: W.{ r: &mut a }, n: 0 };
+    let q = &mut *h.w.r;
+    h = H.{ w: W.{ r: &mut b }, n: 1 }; //~ ERROR E0501
+    q.x = 5;
+}
+
+fn tuple() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut t = (W.{ r: &mut a }, 0u32);
+    let q = &mut *t.0.r;
+    t = (W.{ r: &mut b }, 1u32); //~ ERROR E0501
+    q.x = 5;
+}
+
+fn array() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut ws = [W.{ r: &mut a }];
+    let q = &mut *ws[0].r;
+    ws = [W.{ r: &mut b }]; //~ ERROR E0501
+    q.x = 5;
+}
+
+fn type_argument() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut g = G::<W>.{ t: W.{ r: &mut a } };
+    let q = &mut *g.t.r;
+    g = G::<W>.{ t: W.{ r: &mut b } }; //~ ERROR E0501
+    q.x = 5;
+}
+
+fn in_loop() {
+    let mut a = P.{ x: 1 };
+    let mut y = P.{ x: 2 };
+    let mut q = &mut y;
+    for i in 0u32..2 {
+        q.x = 5;
+        let w = W.{ r: &mut a };
+        q = &mut *w.r;
+    } //~ ERROR E0501
+}
+
+fn used_before() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut w = W.{ r: &mut a };
+    let q = &mut *w.r;
+    q.x = 5;
+    w = W.{ r: &mut b };
+    w.r.x = 7;
+}
+
+fn no_destructor() {
+    let mut a = P.{ x: 1 };
+    let mut b = P.{ x: 2 };
+    let mut v = V.{ r: &mut a };
+    let q = &mut *v.r;
+    v = V.{ r: &mut b };
+    q.x = 5;
+    v.r.x = 3;
+}
+
+fn below_shared() -> i64 {
+    let a = P.{ x: 1 };
+    let b = P.{ x: 2 };
+    let mut w = R.{ r: &a };
+    let s = &*w.r;
+    w = R.{ r: &b };
+    return s.x;
+}
+
+fn main() -> i32 {
+    overwritten();
+    scope_end();
+    through_deref();
+    temporary();
+    let mut a = P.{ x: 1 };
+    let q = returned(W.{ r: &mut a });
+    q.x = 2;
+    field();
+    tuple();
+    array();
+    type_argument();
+    in_loop();
+    used_before();
+    no_destructor();
+    return below_shared() as% i32;
+}
