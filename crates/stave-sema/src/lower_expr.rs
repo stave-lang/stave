@@ -14,6 +14,10 @@ use crate::traits::Adjust;
 use crate::typeck::{Coercion, Target};
 use crate::types::{ConstArg, FloatBits, GArg, Interner, TypeId, TypeKind};
 
+/// The longest array repeat `[e; n]` lowered as one `make` of `n` operands; a longer one is
+/// filled by a loop ([`FnCx::repeat_fill`]).
+const REPEAT_MAKE_MAX: u64 = 16;
+
 /// A postfix chain's state between steps.
 enum Cur {
     Path(Res, u32),
@@ -890,10 +894,6 @@ impl<'a> FnCx<'a> {
         if kids.len() == 2 && icx.is(icx.end_tok(kids[0]) + 1, Term::Semi) {
             let Some(v) = self.val(kids[0], Some(elem)) else { return E::Never };
             let Some(len) = len.value() else { return self.fail(n, "array length") };
-            // the checker rejects a longer literal of a concrete type (E0904 `size`)
-            if len > crate::consteval::MAX_ARRAY_CELLS {
-                return self.fail(n, "array repeat literal of a generic instance past the array size limit");
-            }
             if self.g.borrows
                 && len >= 2
                 && !self.is_copy(elem)
@@ -902,8 +902,7 @@ impl<'a> FnCx<'a> {
                 // each element after the first is a second owner of the one value
                 self.f.events.push(stave_ir::EventMark { value, kind: stave_ir::EventKind::Repeat });
             }
-            let vs = vec![v; len as usize];
-            return E::V(self.opn(Op::Make, ty, &vs), ty);
+            return self.repeat_fill(v, elem, ty, len);
         }
         let mut vs = Vec::with_capacity(kids.len());
         let mut held = Vec::new();
@@ -915,6 +914,45 @@ impl<'a> FnCx<'a> {
         }
         self.release(&held);
         E::V(self.opn(Op::Make, ty, &vs), ty)
+    }
+
+    /// Array `ty` of `len` copies of the lowered value `v` of type `elem`. Up to
+    /// [`REPEAT_MAKE_MAX`] elements it is one `make` of `len` operands. A longer array is a
+    /// frame slot filled by a counted loop that stores `v` into each element (no loop for a
+    /// zero-size element), so the code does not grow with `len`; the result is then the slot's
+    /// place, which owns nothing: more than one copy of a value needs it to be Copy.
+    pub(crate) fn repeat_fill(&mut self, v: Operand, elem: Ty, ty: Ty, len: u64) -> E {
+        if len <= REPEAT_MAKE_MAX {
+            let vs = vec![v; len as usize];
+            return E::V(self.opn(Op::Make, ty, &vs), ty);
+        }
+        let s = self.new_slot(ty);
+        let pt = self.t_ref(true, ty);
+        // each evaluation is a new temporary
+        self.event(stave_ir::EventKind::Begin, s, pt);
+        if self.layout(elem).is_none_or(|l| l.0 > 0) {
+            let us = self.t_usize();
+            let (head, hv) = self.f.b.create_block_with(&[FnCx::ir(us)]);
+            let body = self.f.b.create_block();
+            let exit = self.f.b.create_block();
+            let z = self.int(0);
+            self.f.b.br(head, &[z]);
+            self.f.b.switch_to(head);
+            let i = Operand::Value(hv[0]);
+            let nn = self.int(len as i128);
+            let bt = self.t_bool();
+            let c = self.op2(Op::Lt, bt, i, nn);
+            self.f.b.cbr(c, body, &[], exit, &[]);
+            self.f.b.switch_to(body);
+            let ep = self.t_ref(true, elem);
+            let a = self.op2(Op::ElemAddr, ep, s, i);
+            self.f.b.store(a, v);
+            let one = self.int(1);
+            let next = self.op2(Op::AddWrap, us, i, one);
+            self.f.b.br(head, &[next]);
+            self.f.b.switch_to(exit);
+        }
+        E::P(Place { base: Base::Mem(s, pt), proj: Vec::new(), ty, root: None })
     }
 
     // ---------- paths ----------
