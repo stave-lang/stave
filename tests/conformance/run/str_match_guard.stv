@@ -1,0 +1,24 @@
+//~ STDOUT str_match_guard.stdout
+//~ EXIT 0
+// The fix of E0206 `pattern-str`, applied: a `&str` has no `==`, so a string is matched by
+// comparing its bytes in a guard.
+import std.io;
+import std.mem;
+
+fn f(x: &str) -> u32 {
+    match x {
+        s if mem.str_bytes(s).eq(mem.str_bytes("a")) => {
+            return 1;
+        }
+        _ => {
+            return 2;
+        }
+    }
+}
+
+fn main() -> i32 {
+    let a = f("a");
+    let b = f("b");
+    io.print(f"{a} {b}\n");
+    return 0;
+}

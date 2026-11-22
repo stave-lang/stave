@@ -24,7 +24,7 @@ use crate::resolve::{DeferKind, Res};
 use crate::sigs::{GenericParam, TraitRef, VariantShape};
 use crate::traits::{Adjust, Lookup, MethodRef};
 use crate::typeck::{Ck, Coercion, PendingCheck, Target, Ty};
-use crate::types::{self, ConstArg, GArg, Interner, TypeId, TypeKind, ids};
+use crate::types::{self, ConstArg, GArg, IntBits, Interner, TypeId, TypeKind, ids};
 
 /// A postfix chain's state between steps.
 #[derive(Clone, Debug)]
@@ -661,9 +661,13 @@ impl<'a> Ck<'a> {
     /// scope; a general form when it names none.
     fn copy_bounds_of(&self, t: TypeId) -> String {
         let mut seen = std::collections::BTreeSet::new();
+        let mut visited = rustc_hash::FxHashSet::default();
         let mut stack = vec![t];
         let mut kids = Vec::new();
         while let Some(x) = stack.pop() {
+            if !visited.insert(x) {
+                continue;
+            }
             let k = self.tys.kind(x);
             if let TypeKind::Param(p) = k {
                 seen.insert(*p);
@@ -1023,83 +1027,7 @@ impl<'a> Ck<'a> {
     }
 
     fn scalar_cast_ok(&mut self, op: u8, from: TypeId, to: TypeId) -> bool {
-        let fk = self.tys.kind(from).clone();
-        let tk = self.tys.kind(to).clone();
-        let is64 = |t: TypeId| matches!(t, ids::U64 | ids::USIZE | ids::I64 | ids::ISIZE);
-        let sig_bits = |k: &TypeKind| -> u32 {
-            match k {
-                TypeKind::Float(types::FloatBits::F16) => 11,
-                TypeKind::Float(types::FloatBits::B16) => 8,
-                TypeKind::Float(types::FloatBits::F32) => 24,
-                TypeKind::Float(types::FloatBits::F64) => 53,
-                _ => 0,
-            }
-        };
-        let int_mag = |k: &TypeKind| -> Option<(bool, u32)> {
-            match k {
-                TypeKind::Int { signed, bits } => Some((*signed, bits.bits())),
-                _ => None,
-            }
-        };
-        let is_ptr = |k: &TypeKind| matches!(k, TypeKind::Ptr { .. });
-        let fint = int_mag(&fk);
-        let tint = int_mag(&tk);
-        let ffloat = matches!(fk, TypeKind::Float(_));
-        let tfloat = matches!(tk, TypeKind::Float(_));
-        if op == Term::KwAs as u8 {
-            if let (Some((fs, fb)), Some((ts, tb))) = (fint, tint) {
-                return (fs == ts && tb >= fb) || (!fs && ts && tb > fb);
-            }
-            if matches!(fk, TypeKind::Bool) && tint.is_some() {
-                return true;
-            }
-            if matches!(fk, TypeKind::Char) {
-                return matches!(to, ids::U32 | ids::U64 | ids::I64 | ids::USIZE | ids::ISIZE);
-            }
-            if from == ids::U8 && matches!(tk, TypeKind::Char) {
-                return true;
-            }
-            if let (Some((fs, fb)), true) = (fint, tfloat) {
-                let need = if fs { fb - 1 } else { fb };
-                return need <= sig_bits(&tk);
-            }
-            if ffloat && tfloat {
-                return matches!(
-                    (&fk, &tk),
-                    (
-                        TypeKind::Float(types::FloatBits::F16 | types::FloatBits::B16),
-                        TypeKind::Float(types::FloatBits::F32 | types::FloatBits::F64)
-                    ) | (TypeKind::Float(types::FloatBits::F32), TypeKind::Float(types::FloatBits::F64))
-                );
-            }
-            if is_ptr(&fk) && is_ptr(&tk) {
-                return true;
-            }
-            if (is_ptr(&fk) && is64(to)) || (is64(from) && is_ptr(&tk)) {
-                return true;
-            }
-            return false;
-        }
-        if op == Term::AsPercent as u8 {
-            return tint.is_some()
-                && (fint.is_some() || matches!(fk, TypeKind::Bool | TypeKind::Char) || is_ptr(&fk));
-        }
-        if op == Term::AsPipe as u8 {
-            return tint.is_some() && (fint.is_some() || ffloat || matches!(fk, TypeKind::Char));
-        }
-        if op == Term::AsTilde as u8 {
-            return tfloat && (fint.is_some() || ffloat);
-        }
-        if op == Term::AsQuestion as u8 {
-            if tint.is_some() {
-                return fint.is_some() || ffloat || matches!(fk, TypeKind::Char);
-            }
-            if matches!(tk, TypeKind::Char) || tfloat {
-                return fint.is_some() || (ffloat && tfloat);
-            }
-            return false;
-        }
-        false
+        scalar_cast_ok(op, self.tys.kind(from), self.tys.kind(to))
     }
 
     fn range_expr(&mut self, n: u32, hint: Option<TypeId>) -> Ty {
@@ -1377,6 +1305,10 @@ impl<'a> Ck<'a> {
             if et == ids::ERROR || len == ConstArg::Error {
                 return Ty::ERR;
             }
+            let at = self.tys.intern(TypeKind::Array { elem: et, len });
+            if !self.array_size_ok(n, at) {
+                return Ty::ERR;
+            }
             // The one value of `e` fills every slot, so more than one slot needs Copy. Length 0
             // needs it too: the lowering evaluates `e` and keeps no slot to drop it from.
             if len != ConstArg::Value(1) && !self.tys.has_error(et) {
@@ -1387,7 +1319,7 @@ impl<'a> Ck<'a> {
                     self.report(d);
                 }
             }
-            return Ty::T(self.tys.intern(TypeKind::Array { elem: et, len }));
+            return Ty::T(at);
         }
         if kids.is_empty() {
             self.free_kids(kids);
@@ -1432,7 +1364,26 @@ impl<'a> Ck<'a> {
         if elem_t == ids::ERROR {
             return Ty::ERR;
         }
-        Ty::T(self.tys.intern(TypeKind::Array { elem: elem_t, len: ConstArg::Value(len) }))
+        let at = self.tys.intern(TypeKind::Array { elem: elem_t, len: ConstArg::Value(len) });
+        if !self.array_size_ok(n, at) {
+            return Ty::ERR;
+        }
+        Ty::T(at)
+    }
+
+    /// The array limit on the type `at` of literal `n` (E0904 case `size`; the rule const
+    /// evaluation applies to the same literal, `consteval::cells`). A generic element type is
+    /// left to its instances.
+    fn array_size_ok(&mut self, n: u32, at: TypeId) -> bool {
+        match crate::consteval::too_large(self, at) {
+            Some((c, b)) => {
+                let tn = self.show(at);
+                let d = crate::consteval::size_diag(&tn, c, b, self.icx.node_span(n));
+                self.report(d);
+                false
+            }
+            None => true,
+        }
     }
 
     fn closure(&mut self, n: u32) -> Ty {
@@ -2544,11 +2495,11 @@ impl<'a> Ck<'a> {
     fn unresolved(&self, t: TypeId, binds: &[Option<GArg>]) -> bool {
         let mut stack = vec![t];
         let mut kids = Vec::new();
-        let mut steps = 0;
+        // each distinct component once: types share them
+        let mut seen = rustc_hash::FxHashSet::default();
         while let Some(x) = stack.pop() {
-            steps += 1;
-            if steps > 100_000 {
-                return true;
+            if !seen.insert(x) {
+                continue;
             }
             let k = self.tys.kind(x);
             match k {
@@ -4496,4 +4447,89 @@ impl<I: Interner> ParamPlaceholder for I {
     fn mk_param_placeholder(&mut self, i: usize) -> TypeId {
         self.mk_param(i as u32)
     }
+}
+
+/// Whether operator `op` of the `as` family casts a value of kind `fk` to kind `tk` (scalars,
+/// vector lanes, raw pointers): the one rule of the checker and of const evaluation.
+pub(crate) fn scalar_cast_ok(op: u8, fk: &TypeKind, tk: &TypeKind) -> bool {
+    let is64 = |k: &TypeKind| matches!(k, TypeKind::Int { bits: IntBits::B64 | IntBits::Size, .. });
+    let sig_bits = |k: &TypeKind| -> u32 {
+        match k {
+            TypeKind::Float(types::FloatBits::F16) => 11,
+            TypeKind::Float(types::FloatBits::B16) => 8,
+            TypeKind::Float(types::FloatBits::F32) => 24,
+            TypeKind::Float(types::FloatBits::F64) => 53,
+            _ => 0,
+        }
+    };
+    let int_mag = |k: &TypeKind| -> Option<(bool, u32)> {
+        match k {
+            TypeKind::Int { signed, bits } => Some((*signed, bits.bits())),
+            _ => None,
+        }
+    };
+    let is_ptr = |k: &TypeKind| matches!(k, TypeKind::Ptr { .. });
+    let fint = int_mag(fk);
+    let tint = int_mag(tk);
+    let ffloat = matches!(*fk, TypeKind::Float(_));
+    let tfloat = matches!(tk, TypeKind::Float(_));
+    if op == Term::KwAs as u8 {
+        if let (Some((fs, fb)), Some((ts, tb))) = (fint, tint) {
+            return (fs == ts && tb >= fb) || (!fs && ts && tb > fb);
+        }
+        if matches!(*fk, TypeKind::Bool) && tint.is_some() {
+            return true;
+        }
+        if matches!(*fk, TypeKind::Char) {
+            return matches!(
+                tk,
+                TypeKind::Int { signed: false, bits: IntBits::B32 | IntBits::B64 | IntBits::Size }
+                    | TypeKind::Int { signed: true, bits: IntBits::B64 | IntBits::Size }
+            );
+        }
+        if matches!(*fk, TypeKind::Int { signed: false, bits: IntBits::B8 }) && matches!(*tk, TypeKind::Char)
+        {
+            return true;
+        }
+        if let (Some((fs, fb)), true) = (fint, tfloat) {
+            let need = if fs { fb - 1 } else { fb };
+            return need <= sig_bits(tk);
+        }
+        if ffloat && tfloat {
+            return matches!(
+                (fk, tk),
+                (
+                    TypeKind::Float(types::FloatBits::F16 | types::FloatBits::B16),
+                    TypeKind::Float(types::FloatBits::F32 | types::FloatBits::F64)
+                ) | (TypeKind::Float(types::FloatBits::F32), TypeKind::Float(types::FloatBits::F64))
+            );
+        }
+        if is_ptr(fk) && is_ptr(tk) {
+            return true;
+        }
+        if (is_ptr(fk) && is64(tk)) || (is64(fk) && is_ptr(tk)) {
+            return true;
+        }
+        return false;
+    }
+    if op == Term::AsPercent as u8 {
+        return tint.is_some()
+            && (fint.is_some() || matches!(*fk, TypeKind::Bool | TypeKind::Char) || is_ptr(fk));
+    }
+    if op == Term::AsPipe as u8 {
+        return tint.is_some() && (fint.is_some() || ffloat || matches!(*fk, TypeKind::Char));
+    }
+    if op == Term::AsTilde as u8 {
+        return tfloat && (fint.is_some() || ffloat);
+    }
+    if op == Term::AsQuestion as u8 {
+        if tint.is_some() {
+            return fint.is_some() || ffloat || matches!(*fk, TypeKind::Char);
+        }
+        if matches!(*tk, TypeKind::Char) || tfloat {
+            return fint.is_some() || (ffloat && tfloat);
+        }
+        return false;
+    }
+    false
 }

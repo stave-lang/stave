@@ -1985,5 +1985,6 @@ fn empty_body() -> &'static TypedBody {
         contracts: None,
         test_domain: None,
         stmt_ends: crate::temps::StmtEnds::default(),
+        internal: Vec::new(),
     })
 }

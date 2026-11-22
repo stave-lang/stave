@@ -50,6 +50,23 @@ reference for what a program may write and what it means.
   same limit and answers the rejecting side past it (not Copy, not Send / Sync / Flat / Frozen, no
   layout: E0911, needs a drop).
 
+## §2 Array size limit
+
+- The values of a type: 1 for a scalar, reference, raw pointer, fn value, vector, or mask; the
+  sum over the fields of a tuple, struct, or enum variant (the largest variant), at least 1;
+  `n` times the element's for `[T; n]`. Computed on the type, nested, without overflow (it
+  saturates).
+- An array literal `[a, b, ..]` or `[e; n]` whose type holds more than 2^20 (1,048,576) values
+  or 2^24 bytes (16 MiB) is E0904 case `size`, at the literal, in a const-expr and in a fn body
+  alike: `[0u8; 2000000]`, `[[0u8; 65536]; 65536]`, `[S.{ a: [0u8; 1024] }; 2048]`. A
+  parameter, binding, or return value of a fn whose type takes more than 2^24 bytes is E0911
+  case `size` (`fn f(x: [u8; 20000000])`, a tuple nested 40 levels deep). A generic type is
+  checked where it is concrete only.
+- Reason: const evaluation keeps one value per element and the lowering builds a `[e; n]` from
+  `n` copies, so the cost of a literal is its values; a back end keeps every value in one slot
+  of its frame, and an AArch64 frame holds 16 MiB. One computation on the type (values and bytes,
+  without overflow) is the answer the checker, const evaluation, and the lowering read.
+
 ## §2 Contracts
 
 - A false `requires` panics at the call: the last call user code made into a fn with contracts, a

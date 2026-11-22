@@ -661,7 +661,7 @@ pub(crate) fn check(
     // A call whose type argument is built from the one of a call written inside its argument
     // list, for the same caller and features, is one cause with it: the value it takes is the
     // one made there.
-    let built_from = |a: TypeId, b: TypeId| a != b && mentions(&cx, a, b, 0);
+    let built_from = |a: TypeId, b: TypeId| a != b && mentions(&cx, a, b);
     diagnostics.extend(
         uses.iter()
             .filter(|u| {
@@ -712,16 +712,23 @@ fn call_end(prog: &Program, brackets: &[Brackets], caller: crate::ids::DeclId, s
 }
 
 /// Whether `b` is `a` or occurs in it.
-fn mentions<I: Interner + ?Sized>(cx: &I, a: TypeId, b: TypeId, depth: u32) -> bool {
-    if a == b {
-        return true;
-    }
-    if depth > 64 {
-        return false;
-    }
+fn mentions<I: Interner + ?Sized>(cx: &I, a: TypeId, b: TypeId) -> bool {
+    // each distinct component once: types share them
+    let mut seen = rustc_hash::FxHashSet::default();
+    let mut stack = vec![a];
     let mut parts = Vec::new();
-    cx.kind(a).children(&mut parts);
-    parts.into_iter().any(|p| mentions(cx, p, b, depth + 1))
+    while let Some(t) = stack.pop() {
+        if t == b {
+            return true;
+        }
+        if !seen.insert(t) {
+            continue;
+        }
+        parts.clear();
+        cx.kind(t).children(&mut parts);
+        stack.extend_from_slice(&parts);
+    }
+    false
 }
 
 /// What brings a caller the features it lacks.

@@ -485,7 +485,14 @@ impl TypeTable {
             (
                 K::FnType { params: p1, ret: r1, features: f1 },
                 K::FnType { params: p2, ret: r2, features: f2 },
-            ) => list(p1, p2)?.then(self.cmp_depth(*r1, *r2, d)?).then(f1.bits().cmp(&f2.bits())),
+            ) => {
+                // the return type only on equal params: comparing it anyway costs 2^depth on
+                // fn types that share components (`type A = fn(B, B) -> B`)
+                match list(p1, p2)? {
+                    Ordering::Equal => self.cmp_depth(*r1, *r2, d)?.then(f1.bits().cmp(&f2.bits())),
+                    o => o,
+                }
+            }
             (K::Vec { lane: l1, n: n1 }, K::Vec { lane: l2, n: n2 }) => {
                 self.cmp_depth(*l1, *l2, d)?.then(n1.cmp(n2))
             }

@@ -890,8 +890,9 @@ impl<'a> FnCx<'a> {
         if kids.len() == 2 && icx.is(icx.end_tok(kids[0]) + 1, Term::Semi) {
             let Some(v) = self.val(kids[0], Some(elem)) else { return E::Never };
             let Some(len) = len.value() else { return self.fail(n, "array length") };
-            if len > (1 << 20) {
-                return self.fail(n, "array repeat literal too long for the IR (no splat op)");
+            // the checker rejects a longer literal of a concrete type (E0904 `size`)
+            if len > crate::consteval::MAX_ARRAY_CELLS {
+                return self.fail(n, "array repeat literal of a generic instance past the array size limit");
             }
             if self.g.borrows
                 && len >= 2
@@ -2365,4 +2366,6 @@ impl crate::consteval::CEnv for TyHost<'_, '_> {
     fn fn_types(&mut self, d: crate::ids::DeclId) -> Option<(Vec<TypeId>, TypeId)> {
         self.sigs.fn_sig(d).map(|f| (f.params.clone(), f.ret))
     }
+    // The checker lowered the same type first and stopped on the same internal error.
+    fn internal(&mut self, _msg: String) {}
 }

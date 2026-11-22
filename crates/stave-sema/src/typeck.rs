@@ -200,6 +200,8 @@ pub struct TypedBody {
     pub test_domain: Option<Box<crate::testgen::Domain>>,
     /// Where each temporary of the body ends: the one answer checker and lowering read.
     pub stmt_ends: crate::temps::StmtEnds,
+    /// Internal errors found while checking the body (const evaluation).
+    pub internal: Vec<String>,
 }
 
 impl TypedBody {
@@ -271,6 +273,8 @@ pub struct Typeck {
     pub diagnostics: Vec<Diagnostic>,
     pub timings: TypeckTimings,
     pub error_type: TypeId,
+    /// Internal errors of the checker (const evaluation): the compilation stops with the first.
+    pub internal: Vec<String>,
 }
 
 impl Typeck {
@@ -418,6 +422,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
         .collect();
     let mut sb = SigBuilder::new(prog, &brackets);
     sb.build_all();
+    let mut internal = std::mem::take(&mut sb.internal);
     let (mut tys, sigs_table, mut diags) = sb.finish();
     diags.extend(crate::traits::check_impls(prog, &sigs_table, &mut tys, &brackets));
     diags.extend(crate::builtins::check_intrinsics(prog, &sigs_table, &tys, &brackets));
@@ -473,6 +478,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
     let mut bodies = Vec::with_capacity(results.len());
     for (mut b, local, ds) in results {
         diags.extend(ds);
+        internal.append(&mut b.internal);
         if !local.is_empty() {
             let m = tys.merge(&local);
             remap_body(&mut b, &|t: TypeId| {
@@ -541,6 +547,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
         diagnostics,
         timings: TypeckTimings { sigs: t_sigs, bodies: t_bodies, canon: t_canon, graph: t_graph },
         error_type: err,
+        internal,
     }
 }
 
@@ -567,6 +574,7 @@ fn empty_body(j: Job) -> TypedBody {
         contracts: None,
         test_domain: None,
         stmt_ends: crate::temps::StmtEnds::default(),
+        internal: Vec::new(),
     }
 }
 
@@ -669,7 +677,11 @@ fn remap_sigs(s: &mut Sigs, f: &dyn Fn(TypeId) -> TypeId) {
                 }
             }
             DeclSig::Trait(t) => remap_generics(&mut t.generics, f),
-            DeclSig::Const(c) | DeclSig::Static(c) => c.ty = f(c.ty),
+            DeclSig::Const(c) | DeclSig::Static(c) => {
+                c.ty = f(c.ty);
+                // the checker compared them before the renumbering
+                c.types = Vec::new();
+            }
             DeclSig::Alias(a) => {
                 remap_generics(&mut a.generics, f);
                 a.target = f(a.target);
@@ -790,6 +802,8 @@ pub(crate) struct Ck<'a> {
     pub contracts: Option<Box<crate::contracts::Contracts>>,
     /// The input domain of a `test fn` with parameters ([`crate::testgen`]).
     pub domain: Option<Box<crate::testgen::Domain>>,
+    /// [`TypedBody::internal`].
+    pub internal: Vec<String>,
 }
 
 fn check_body(
@@ -857,6 +871,7 @@ fn check_body(
         olds: Vec::new(),
         contracts: None,
         domain: None,
+        internal: Vec::new(),
     };
     match j.kind {
         JobKind::Fn => {
@@ -1575,14 +1590,23 @@ impl<'a> Ck<'a> {
             }
         }
         // A const initializer must be a const-expr: the signature phase computes its value, and
-        // the diagnostic it deferred holds once the rest of the body checked clean.
+        // the diagnostic it deferred is reported unless this body reported an error (a failed
+        // const without a deferred one has its diagnostic elsewhere: the evaluation's own, or
+        // that of the const or type it failed on).
+        let reported = self.diags.iter().any(|d| d.severity() == stave_diag::Severity::Error);
         if j.kind == JobKind::Const
             && let Some(c) = self.sigs.konst(self.decl)
-            && c.value.is_none()
         {
-            let d = if self.has_error { None } else { c.deferred.clone() };
-            self.has_error = true;
-            self.report(d);
+            if c.value.is_none() {
+                let d = if reported { None } else { c.deferred.clone() };
+                self.has_error = true;
+                self.report(d);
+            } else if !reported && !self.has_error {
+                self.same_const_types(&c.types);
+            }
+        }
+        if j.kind == JobKind::Fn {
+            self.value_sizes(j);
         }
         let mut node_types = Vec::with_capacity(self.node_ty.len());
         for i in 0..self.node_ty.len() {
@@ -1651,11 +1675,59 @@ impl<'a> Ck<'a> {
             contracts: self.contracts.take(),
             test_domain: self.domain.take(),
             stmt_ends,
+            internal: std::mem::take(&mut self.internal),
         };
         // thread-crossing capture checks (E0802, E0806; crate::threads)
         let td = self.thread_checks(&body);
         self.diags.extend(td);
         (body, self.tys.local, self.diags)
+    }
+
+    /// E0911 case `size`: a value of this fn (a parameter, a binding, the return value) whose
+    /// type has more than [`crate::consteval::MAX_VALUE_BYTES`]: a back end keeps each value in
+    /// one frame slot. Once per type, at its first binding; a generic type is left to its
+    /// instances.
+    fn value_sizes(&mut self, j: Job) {
+        let mut held: Vec<(u32, TypeId)> = self.locals.iter().map(|(&n, &t)| (n, t)).collect();
+        held.sort_unstable_by_key(|x| x.0);
+        let mut seen = rustc_hash::FxHashSet::default();
+        let name_span = self.prog.decl(j.decl).map(|d| d.name_span);
+        let ret = self.sigs.fn_sig(j.decl).map(|s| s.ret);
+        let spans: Vec<(Span, TypeId)> =
+            held.into_iter().map(|(n, t)| (self.icx.node_span(n), t)).chain(name_span.zip(ret)).collect();
+        for (sp, t) in spans {
+            if t.is_none() || !seen.insert(t) || self.tys.has_error(t) || self.tys.has_params(t) {
+                continue;
+            }
+            let Some((bytes, _)) = crate::traits::layout_of(&mut self.tys, self.sigs, t, 0) else { continue };
+            if bytes > crate::consteval::MAX_VALUE_BYTES {
+                let tn = self.show(t);
+                let d = mk("E0911", Some("size"), &[("type", &tn), ("bytes", &bytes.to_string())], sp, &[]);
+                self.report(d);
+            }
+        }
+    }
+
+    /// The types const evaluation decided for the scalar nodes of this const initializer are
+    /// the ones this checker gave them: else the value is not the one the source means.
+    fn same_const_types(&mut self, types: &[(u32, TypeId)]) {
+        for &(n, t) in types {
+            let Some(&got) = n.checked_sub(self.lo).and_then(|i| self.node_ty.get(i as usize)) else {
+                continue;
+            };
+            let got = match self.resolve(got) {
+                Ty::T(g) => g,
+                Ty::Lit(_) => TypeId::NONE,
+            };
+            if got != t {
+                let text = self.icx.node_text(n).to_string();
+                let g = if got.is_none() { "no type".to_string() } else { self.show(got) };
+                let e = self.show(t);
+                self.has_error = true;
+                self.internal.push(format!("const evaluation typed `{text}` as `{e}`, the checker as `{g}`"));
+                return;
+            }
+        }
     }
 
     // ---------- statements ----------
@@ -2120,6 +2192,11 @@ impl crate::consteval::CEnv for Ck<'_> {
 
     fn fn_types(&mut self, d: DeclId) -> Option<(Vec<TypeId>, TypeId)> {
         self.sigs.fn_sig(d).map(|f| (f.params.clone(), f.ret))
+    }
+
+    fn internal(&mut self, msg: String) {
+        self.has_error = true;
+        self.internal.push(msg);
     }
 }
 

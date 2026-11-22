@@ -671,6 +671,47 @@ fn doubling_instance_chain_is_e0902_promptly() {
     assert!(start.elapsed() < std::time::Duration::from_secs(60), "{:?}", start.elapsed());
 }
 
+/// The (code, message, fix) of every error of `src`.
+fn texts(src: &str) -> Vec<(&'static str, String, String)> {
+    let (_, tc) = mem(src);
+    tc.diagnostics
+        .iter()
+        .filter(|d| d.severity() == stave_diag::Severity::Error)
+        .map(|d| {
+            (d.code(), d.message().to_string(), d.fix().map_or(String::new(), |f| f.description.clone()))
+        })
+        .collect()
+}
+
+/// Each fix can be followed: the `&str` pattern fix compares bytes (a `&str` has no `==`), a
+/// `let` pattern and a match ending in `_` are not told to add a `_` arm, a generic `size_of`
+/// length says why it has no value, an empty array has no index range, and the shift range is
+/// a number.
+#[test]
+fn fixes_that_apply() {
+    let t = texts(
+        "fn f(s: &str) -> u32 { match s { \"a\" => { return 1; } _ => { return 2; } } }\nfn main() -> i32 { return f(\"a\") as% i32; }\n",
+    );
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert!(t[0].0 == "E0206" && t[0].2.contains("mem.str_bytes(s).eq(mem.str_bytes(\"a\"))"), "{t:?}");
+    let t = texts(
+        "fn f(o: Option<u32>) -> u32 { let Option.Some(x) = o; return x; }\nfn main() -> i32 { return f(Option.None) as% i32; }\n",
+    );
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert!(t[0].0 == "E0300" && !t[0].2.contains("`_` arm"), "{t:?}");
+    let t = texts(
+        "fn f<T>() -> usize { let a = [0u8; size_of::<T>()]; return a.len(); }\nfn main() -> i32 { return f::<u32>() as% i32; }\n",
+    );
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert!(t[0].0 == "E0904" && t[0].1.contains("type parameter") && !t[0].1.contains("outside"), "{t:?}");
+    let t = texts("const E: [u8; 0] = [];\nconst X: u8 = E[0];\nfn main() -> i32 { return X as i32; }\n");
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert!(t[0].0 == "E0203" && !t[0].2.contains("-1"), "{t:?}");
+    let t = texts("const K: i32 = -1;\nconst S: i32 = 1i32 >> K;\nfn main() -> i32 { return S; }\n");
+    assert_eq!(t.len(), 1, "{t:?}");
+    assert!(t[0].0 == "E0205" && t[0].2.contains("by 0 to 31,"), "{t:?}");
+}
+
 /// A field given twice in a struct literal is E0105 `literal-field`: a literal renames nothing,
 /// so the text says to remove one of the two values.
 #[test]

@@ -1,0 +1,24 @@
+//~ CHECK-ONLY
+// An array literal whose type holds more than 2^20 values (elements of nested arrays
+// multiplied, fields added) is rejected at the literal (E0904 `size`), in a const-expr and in a
+// fn body: one limit on the literal's type, which const evaluation and the lowering read.
+struct S {
+    a: [u8; 1024],
+}
+
+impl Copy for S {}
+
+const NESTED: [[u8; 65536]; 65536] = [[0u8; 65536]; 65536]; //~ ERROR E0904
+static WIDE: [[u8; 16777216]; 2] = [[0u8; 16777216]; 2]; //~ ERROR E0904
+const OF_STRUCTS: [S; 2048] = [S.{ a: [0u8; 1024] }; 2048]; //~ ERROR E0904
+static AT_LIMIT: [u8; 1048576] = [0u8; 1048576];
+
+fn body() -> usize {
+    let a = [0u8; 20000000]; //~ ERROR E0904
+    let b = [[0u16; 1024]; 1024];
+    return a.len() + b.len();
+}
+
+fn main() -> i32 {
+    return 0;
+}

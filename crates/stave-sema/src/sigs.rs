@@ -182,8 +182,11 @@ pub struct ConstDef {
     /// `None` if the initializer is not a valid const-expr (diagnosed).
     pub value: Option<Val>,
     /// Without a value and without a diagnostic of the evaluation: the one the body checker
-    /// reports if the initializer is otherwise well typed (`consteval` module doc).
+    /// reports if it reports no error in the initializer (`consteval` module doc).
     pub deferred: Option<Diagnostic>,
+    /// The types const evaluation decided for the scalar literal and operator nodes of the
+    /// initializer (`consteval::Evaluated::types`).
+    pub types: Vec<(u32, TypeId)>,
 }
 
 /// A type alias.
@@ -1112,6 +1115,8 @@ pub(crate) struct SigBuilder<'p> {
     pub lang: LangItems,
     /// Const evaluation stack (cycle reporting).
     const_stack: Vec<DeclId>,
+    /// Internal errors of const evaluation.
+    pub internal: Vec<String>,
     /// The generics of the decl being built ([`LowerHost::view_env`]).
     cur_generics: Vec<GenericParam>,
     /// While the bounds of a generics list are lowered: the params in scope there (their const
@@ -1218,6 +1223,7 @@ impl<'p> SigBuilder<'p> {
             diags: Vec::new(),
             lang: LangItems::default(),
             const_stack: Vec::new(),
+            internal: Vec::new(),
             layout_busy: Vec::new(),
             layout_memo: FxHashMap::default(),
             cur_generics: Vec::new(),
@@ -1962,6 +1968,9 @@ impl<'p> SigBuilder<'p> {
         let kids = icx.kids_vec(decl.node);
         let ty_node = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::Type));
         let init = kids.iter().copied().find(|&c| icx.is_expr(c));
+        // A const's type is part of it: a use of the const in its own type is a cycle
+        // (E0904 through `ensure`), like a use in its initializer.
+        self.const_stack.push(d);
         let ty = match ty_node {
             Some(t) => lower_type(self, &env, t, false),
             None => ids::ERROR,
@@ -1979,15 +1988,18 @@ impl<'p> SigBuilder<'p> {
             self.diags.extend(crate::kinds::e0413(is_static, &name, &tname, sp));
             e0413 = true;
         }
-        // The value: cycles report E0904 through `ensure` (InProgress).
-        self.const_stack.push(d);
-        // Publish the type before evaluating (a self-reference sees the type, not the value).
-        let (value, deferred) = match init {
-            Some(e) if ty != ids::ERROR && !e0413 => consteval::eval_item_const(self, &env, e, ty),
-            _ => (None, None),
+        // An erroneous type was reported where it was made: no value, nothing to defer.
+        let ev = match init {
+            Some(e) if !self.tys.has_error(ty) && !e0413 => {
+                Some(consteval::eval_item_const(self, &env, e, ty))
+            }
+            _ => None,
         };
         self.const_stack.pop();
-        let c = ConstDef { ty, value, deferred };
+        let c = match ev {
+            Some(ev) => ConstDef { ty, value: ev.value, deferred: ev.deferred, types: ev.types },
+            None => ConstDef { ty, value: None, deferred: None, types: Vec::new() },
+        };
         if is_static { DeclSig::Static(c) } else { DeclSig::Const(c) }
     }
 

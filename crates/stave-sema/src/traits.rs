@@ -1662,7 +1662,11 @@ pub(crate) fn check_impls(
                 }
                 let mut stack = vec![a];
                 let mut kids = Vec::new();
+                let mut seen = rustc_hash::FxHashSet::default();
                 while let Some(x) = stack.pop() {
+                    if !seen.insert(x) {
+                        continue;
+                    }
                     if let TypeKind::Param(k) = *tys.kind(x) {
                         if imp.generics.get(k as usize).is_some_and(|g| !g.view) && !named.contains(&k) {
                             named.push(k);
@@ -1731,7 +1735,12 @@ fn unconstrained_params(tys: &TypeTable, imp: &ImplDef) -> Vec<u32> {
     };
     let mut stack = vec![imp.self_ty];
     let mut kids = Vec::new();
+    // each distinct component once: types share them
+    let mut seen = rustc_hash::FxHashSet::default();
     while let Some(t) = stack.pop() {
+        if !seen.insert(t) {
+            continue;
+        }
         let k = tys.kind(t);
         match k {
             TypeKind::Param(i) | TypeKind::ConstParam(i) => mark(*i),

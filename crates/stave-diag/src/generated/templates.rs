@@ -1208,7 +1208,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0203",
         severity: Severity::Error,
         area: "types",
-        rule: "literal out of range for its type; also overflow and division by zero in a const-expr, and case `index`: a const-expr index past the end of its const array",
+        rule: "literal out of range for its type; also overflow, division by zero, `MIN / -1`, and `MIN % -1` of an operation a const-expr evaluates (each in the operation's own type: a literal takes it from its chain), and case `index`: a const-expr index past the end of its const array; case `index-empty`: an index into an empty const array",
         retired: false,
         located: true,
         holes: &[
@@ -1250,6 +1250,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "index from {min} to {max}",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "index-empty",
+                message: "index `{literal}` into the empty array `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "the const array has no elements" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "an array of length 0 has no element to read: index a longer array, or remove the index",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1298,12 +1310,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0205",
         severity: Severity::Error,
         area: "types",
-        rule: "constant shift amount >= bit width; case `negative`: a negative amount in a const-expr",
+        rule: "constant shift amount >= bit width; also an amount outside `0..bits` that a const-expr evaluates; case `negative`: a negative amount in a const-expr",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "amount", kind: HoleKind::Int, choices: &[] },
             Hole { name: "bits", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "last", kind: HoleKind::Int, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[
@@ -1326,7 +1339,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "shift by {amount}" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "shift `{type}` by 0 to {bits} - 1, or use `<<%` to mask the amount of a left shift",
+                    description: "shift `{type}` by 0 to {last}, or use `<<%` to mask the amount of a left shift",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1337,7 +1350,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0206",
         severity: Severity::Error,
         area: "types",
-        rule: "operator not defined for type (e.g. `+%` on a float). Case `pattern`: a literal or const pattern tests `==`, so its type must have `==` (a `&str` literal, a const of a struct, enum, tuple, or array type)",
+        rule: "operator not defined for type (e.g. `+%` on a float). Case `pattern`: a literal or const pattern tests `==`, so its type must have `==` (a const of a struct, enum, tuple, or array type); case `pattern-str`: the same for a string literal or `&str` const pattern",
         retired: false,
         located: true,
         holes: &[
@@ -1365,6 +1378,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "bind the value with a name or take it apart with a struct, tuple, or variant pattern, and compare its parts in a guard (`x if x.a == 1 =>`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "pattern-str",
+                message: "this pattern tests `==`, which is not defined for `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`==` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bind the string with a name and compare its bytes in a guard: `s if mem.str_bytes(s).eq(mem.str_bytes(\"a\")) =>` (`import std.mem;`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2029,7 +2054,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0300",
         severity: Severity::Error,
         area: "patterns",
-        rule: "non-exhaustive match. Case `limit`: the exhaustiveness check of the match exceeds its search limit (patterns nested more than 2,000 levels deep, or over 1,000,000 search steps); the match is rejected",
+        rule: "non-exhaustive match. Case `let`: a `let` or `for` pattern that does not cover every value. Case `limit`: the exhaustiveness check of the match exceeds its search limit (patterns nested more than 2,000 levels deep, or over 1,000,000 search steps); the match is rejected. Case `limit-split`: the same where a final `_` arm is no help (a `let` or `for` pattern, a match ending with an unguarded `_` arm)",
         retired: false,
         located: true,
         holes: &[
@@ -2049,6 +2074,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "let",
+                message: "pattern does not cover every value of `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "some values of `{type}` do not match" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use a pattern every value matches (a name, `_`, or a tuple or struct pattern of such), or a `match` with arms for the other values",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "limit",
                 message: "match on `{type}` is too large to check for exhaustiveness",
                 labels: &[
@@ -2056,6 +2093,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "split the match: match on fewer or less deeply nested values at a time, or add a final `_` arm",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "limit-split",
+                message: "pattern on `{type}` is too large to check for exhaustiveness",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "exhaustiveness check limit exceeded" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "split the pattern: take the value apart in steps, matching fewer or less deeply nested values at a time",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4599,11 +4648,14 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0904",
         severity: Severity::Error,
         area: "generics",
-        rule: "const-expr uses a call (a method call on a value and an operator of a user impl included), a loop, a non-const item, a form outside the const-expr list (at the innermost expression without a value), or a const that depends on itself (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value. Case `size`: a `[e; n]` of more than 2^24 elements",
+        rule: "const-expr uses a call (a method call on a value and an operator of a user impl included), a loop, a non-const item, a form outside the const-expr list (at the innermost expression without a value), or a const that depends on itself, through its initializer or its type (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value. Case `generic`: `size_of::<T>()` / `align_of::<T>()` of a type with a type parameter (its value is known per instance only). Case `size`: an array literal or `[e; n]`, in a const-expr or a fn body, whose type holds more than 2^20 values or 2^24 bytes (contracts/lang-details.md, Array size limit)",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "bytes", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "cells", kind: HoleKind::Int, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
             Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["a call", "a loop", "a non-const item", "an expression outside the const-expr forms"] },
         ],
         shapes: &[
@@ -4645,10 +4697,22 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
-                case: "size",
-                message: "const-expr builds an array of more than 16,777,216 elements",
+                case: "generic",
+                message: "`{name}::<{type}>()` depends on a type parameter: it has no value where the const-expr is checked",
                 labels: &[
-                    LabelTemplate { at: "primary", text: "too many elements to evaluate" },
+                    LabelTemplate { at: "primary", text: "known per instance only" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use a concrete type, or pass the length as a const generic parameter (`<const N: usize>`) and use `N`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "size",
+                message: "array of type `{type}` is too large: {cells} values, {bytes} bytes (at most 1,048,576 values and 16,777,216 bytes)",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "too large an array value" },
                 ],
                 fix: Some(FixTemplate {
                     description: "use a smaller array, or fill a heap buffer (`vec.Vec`) at run time",
@@ -4897,10 +4961,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0911",
         severity: Severity::Error,
         area: "generics",
-        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels (E0005 case `type` reports it too where it is written); at the call, in a const-expr too",
+        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels (E0005 case `type` reports it too where it is written); at the call, in a const-expr too. Case `size`: a parameter, binding, or return value of a fn whose type takes more than 2^24 bytes (contracts/lang-details.md, Array size limit), once per type and fn, at its first binding",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "bytes", kind: HoleKind::Int, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[
@@ -4912,6 +4977,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "ask for the size of a sized type nested at most 1000 levels deep",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "size",
+                message: "a value of type `{type}` takes {bytes} bytes, more than 16,777,216",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "too large a value" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "keep a value this large behind a reference, or in a heap buffer (`vec.Vec`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

@@ -1,0 +1,14 @@
+//~ CHECK-ONLY
+// A const read where its own value is being decided depends on itself (E0904 `cycle`): also
+// through its type, or through the type of a const its initializer reads. The cycle is found
+// before any other rule of the initializer, and a const without a value always has a
+// diagnostic.
+const A: usize = B.len(); //~ ERROR E0904
+const B: [u8; A] = [0u8; 3];
+const C: [u8; C[0] as usize] = [1u8]; //~ ERROR E0904
+const D: usize = E[0] as usize;
+const E: [u8; D] = [0u8; 2]; //~ ERROR E0904
+
+fn main() -> i32 {
+    return 0;
+}

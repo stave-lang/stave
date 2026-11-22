@@ -545,7 +545,10 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     }
     // A body the borrow checker could not model is not known to be sound: the run fails (check
     // and build alike) instead of accepting it without its E05xx diagnostics.
-    let mut failure = if has_errors {
+    // An internal error of the checker stops the run whatever else it reported.
+    let mut failure = if let Some(m) = tc.internal.first() {
+        Some(Failure::Internal { stage: Stage::Typeck, message: m.clone() })
+    } else if has_errors {
         None
     } else {
         silent_error(&tc, |d| program.decl_path(d))
