@@ -257,11 +257,18 @@ when that owner ends.
   iterator value a `for` is given is moved into the loop and, with drop glue, dropped once when
   the loop ends or is left ("`for` sources"). An array value a `for` is given is the loop's too:
   each element is handed to its iteration, and the elements the loop has not handed out when it
-  ends or is left are dropped there, in order.
+  ends or is left are dropped there, in order. Both belong to the loop's scope, around the
+  body's: a `break`, `return`, or `?` in the body drops the body's locals first, while the
+  iterator and the rest of the array are alive.
 - **Rvalues under patterns.** An rvalue that a pattern only reads (`let P.{ n, a: _ } = mk();`
   with `n: u32`, a scrutinee that is a call in an arm that binds nothing by value) is a
   temporary of the statement and is dropped at its end. `let _ = e;` with an rvalue `e` drops
-  it at the end of the statement; with a place `e` it moves nothing and drops nothing.
+  it at the end of the statement; with a place `e` it moves nothing and drops nothing. A
+  scrutinee one arm takes (by a name, `x if c => ..` or `other => ..`, or by a moving pattern)
+  is that temporary on every way through the `match` that leaves it: a guard that fails,
+  another arm. What it borrows stays borrowed there, to the end of the statement. The value a
+  `for` iteration is given is the iteration's when the loop's pattern does not move it: it is
+  dropped where the body ends or is left.
 - **`select`.** `c.select(a, b)` evaluates both operands; the one it does not pick is a
   temporary of the statement, made when the `select` is evaluated. Which operand that is is
   known only when the program runs: what either operand borrows stays borrowed to the end of
@@ -276,8 +283,8 @@ when that owner ends.
   statement, the part of a pattern with a given index, an overwritten value). The rows are made
   with the borrow checker's control-flow graph, one per drop statement, so the borrow check,
   the move check, the lock-rank and join rules read exactly the scheduled drops; the code
-  generator asks the schedule for every drop it emits, and a drop without a row stops the
-  build as a compiler error. The parts a pattern ignores and the steps of a value's drop glue
+  generator asks the schedule for every drop it emits, and a drop without a row, or the drops
+  of one end or exit in another order than their rows, stop the build as a compiler error. The parts a pattern ignores and the steps of a value's drop glue
   are each computed by one function both sides call. Whether a scheduled drop runs is the
   owner's init bit: one per owner, a temporary included.
 

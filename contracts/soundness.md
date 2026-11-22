@@ -205,7 +205,9 @@ elsewhere; for a write through a dereference the assignment statement stands for
 the old value (it uses the pointer, and the lock check reads it as a drop). The lowering emits
 a drop only through one function, which fails the build when the schedule of the body has no
 row for the point, the owner, and the outermost constructor of the dropped type (an instance
-is checked against its definition's schedule, whose keys are nodes and tokens of the source).
+is checked against its definition's schedule, whose keys are nodes and tokens of the source),
+or when the drops of one scope end, statement end, or exit are emitted in an order the rows of
+that point do not have.
 Which parts a moving pattern ignores, in what order, and what a type's drop glue runs, in what
 order, are each one function called by both.
 
@@ -220,10 +222,10 @@ consumes it drops it; the lowering holds it as an owner over the same interval. 
 then conservative in one direction only: a drop statement for a value that was moved on this
 path does nothing in the code and is at most a use the code does not make.
 
-**Not claimed.** That the rows are in the order the code runs them within one point, or that
-two temporaries of one statement with the same outermost type are told apart: the row is
-found by point, owner, and type constructor. Bodies the borrow checker does not build (const
-and `static mut` initializers) have no schedule and are not compared.
+**Not claimed.** That two temporaries of one statement with the same outermost type are told
+apart: a row is found by point, owner, and type constructor, and a temporary's owner key is
+its statement. Bodies the borrow checker does not build (const and `static mut` initializers)
+have no schedule and are not compared.
 
 **What would break it.** A drop emitted by code that does not ask the schedule (the one
 function refuses a drop nobody asked for). A row added without its statement. A statement the
@@ -567,7 +569,8 @@ touches.
 source is a reference (each element or chunk of `*r` is borrowed per iteration, `&mut` only
 through a `&mut` source), an array value (the loop's own temporary, which nothing else names),
 a range, or an iterator: a value is moved into a loop temporary at the head, advanced there
-and dropped right after the loop on every path out, in both the CFG and the code; a `&mut` to
+and dropped right after the loop on every path out, after the locals of a body that is left, in
+both the CFG and the code (the array value likewise; the drop schedule checks the order); a `&mut` to
 an iterator is advanced through the reference in both (a `&` to one is E0219). A reference chunk binding is a borrow of the block's chunk temporary, which is what the
 code binds, so it cannot outlive the block, and the chunk of the source stays borrowed until the
 store back.

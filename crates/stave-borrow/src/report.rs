@@ -424,6 +424,7 @@ mod tests {
             end: None,
             guard: false,
             static_root: false,
+            stmt: u32::MAX,
             node,
         };
         Body {
@@ -442,6 +443,7 @@ mod tests {
             unsupported: None,
             internal: None,
             loops: Vec::new(),
+            schedule: Default::default(),
         }
     }
 

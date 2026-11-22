@@ -1691,6 +1691,15 @@ impl<'a, 'b> Builder<'a, 'b> {
             Some(ForKind::Array) => {
                 let Some(op) = self.operand(iv, iter) else { return };
                 let V::P(p) = self.put_temp(Rvalue::Use(op), it_ty, iter) else { return };
+                // The loop owns the array, as it owns an iterator: what it has not handed out
+                // is dropped with the loop's scope, after the locals of a body that is left.
+                if let Some(i) = self.temps.iter().rposition(|&t| t == p.local) {
+                    self.temps.remove(i);
+                    self.past_stmt(p.local);
+                    if let Some(s) = self.scopes.last_mut() {
+                        s.push(p.local);
+                    }
+                }
                 Src::Elems(p, None)
             }
             // an iterator value or a `&mut` to one

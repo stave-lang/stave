@@ -1,0 +1,55 @@
+//~ CHECK-ONLY
+// A `for` over an array value owns the array: the elements it has not handed out are dropped
+// when the loop ends or is left, after the locals of the body that is left. So a `return`,
+// `break`, or `?` in the body drops the body's locals while the rest of the array is alive: a
+// guard in a later element is held then (E1405 at the exit). Leaving by the end of the loop,
+// every element was handed out and nothing is held.
+import std.io;
+import std.sync;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+
+struct Lk { pub id: u32 }
+
+impl Drop for Lk {
+    fn drop(&mut self) {
+        let g = M.lock();
+    }
+}
+
+view struct H { pub id: u32, pub g: Option<sync.MutexGuard<u32, 1>> }
+
+fn some(i: u32) -> Option<u32> { return if i == 0 then Option.None else Option.Some(i); }
+
+fn by_return() -> u32 {
+    for H.{ id, g: _ } in [H.{ id: 1, g: Option.None }, H.{ id: 2, g: M.try_lock() }] {
+        let l = Lk.{ id: id };
+        return 1; //~ ERROR E1405
+    }
+    return 0;
+}
+
+fn by_break() -> u32 {
+    let mut n: u32 = 0;
+    for H.{ id, g: _ } in [H.{ id: 1, g: Option.None }, H.{ id: 2, g: M.try_lock() }] {
+        let l = Lk.{ id: id };
+        n = n + id;
+        break; //~ ERROR E1405
+    }
+    return n;
+}
+
+fn by_try() -> Option<u32> {
+    for H.{ id, g: _ } in [H.{ id: 1, g: Option.None }, H.{ id: 2, g: M.try_lock() }] {
+        let l = Lk.{ id: id };
+        let k = some(id)?; //~ ERROR E1405
+    } //~ ERROR E1405
+    return Option.Some(0);
+}
+
+fn main() {
+    let a = by_return();
+    let b = by_break();
+    let c = by_try();
+    io.print(f"{a} {b}\n");
+}

@@ -8,8 +8,9 @@
 //! body by the builder of the borrow CFG (stave-borrow `cfg`), each together with the CFG
 //! statement that models the drop, so every check that reads the CFG (loans, moves, lock ranks,
 //! joins) reads the schedule. The lowering asks the schedule for every drop it emits
-//! ([`Schedule::has`]): a drop without a row is code no check has seen, an internal error of the
-//! build. Whether a scheduled drop runs is the owner's init bit: the CFG's dataflow and the
+//! ([`Schedule::has`]) and for the order of the drops of each end and exit
+//! ([`Schedule::in_order`]): a drop without a row, or in another order, is code no check has
+//! seen, an internal error of the build. Whether a scheduled drop runs is the owner's init bit: the CFG's dataflow and the
 //! lowering's owner states (or dynamic flags) both follow the moves.
 //!
 //! **Parts of a pattern.** A pattern that binds a non-Copy part by value takes its whole value;
@@ -99,29 +100,50 @@ pub struct Row {
 #[derive(Clone, Debug, Default)]
 pub struct Schedule {
     rows: Vec<Row>,
+    /// The drops in the order they were scheduled; once sealed, grouped by point.
+    order: Vec<(Point, Owner)>,
     sorted: bool,
 }
 
 impl Schedule {
+    /// Adds a row. The rows of one point are added in the order their drops run.
     pub fn add(&mut self, row: Row) {
         self.rows.push(row);
+        self.order.push((row.point, row.owner));
         self.sorted = false;
     }
 
     pub fn extend(&mut self, other: &Schedule) {
         self.rows.extend_from_slice(&other.rows);
+        self.order.extend_from_slice(&other.order);
         self.sorted = false;
     }
 
-    /// Sorts the rows for [`Schedule::has`].
+    /// Sorts the rows for [`Schedule::has`] and [`Schedule::in_order`].
     pub fn seal(&mut self) {
         self.rows.sort_unstable();
         self.rows.dedup();
+        // stable: the drops of a point stay in the order they run
+        self.order.sort_by_key(|x| x.0);
         self.sorted = true;
     }
 
     pub fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    /// Whether drops of `owners`, run one after the other at `point`, are scheduled there in
+    /// that order (other scheduled drops may lie between them: a drop of a value that was moved
+    /// out on the way does not run).
+    pub fn in_order(&self, point: Point, owners: &[Owner]) -> bool {
+        let (lo, hi) = if self.sorted {
+            let lo = self.order.partition_point(|x| x.0 < point);
+            (lo, lo + self.order[lo..].partition_point(|x| x.0 == point))
+        } else {
+            (0, self.order.len())
+        };
+        let mut rest = self.order[lo..hi].iter().filter(|x| x.0 == point).map(|x| x.1);
+        owners.iter().all(|o| rest.any(|x| x == *o))
     }
 
     /// Whether a drop of `owner` at `point` is scheduled for a value whose type has head `head`.
@@ -452,4 +474,54 @@ fn ignored<'a, C: PatCx<'a> + ?Sized>(
 /// Field types of the variants of ADT type `t` (struct: one variant).
 pub fn adt_fields<I: Interner + ?Sized>(sigs: &Sigs, cx: &mut I, t: TypeId) -> Option<Vec<Vec<TypeId>>> {
     crate::mono::adt_fields(sigs, cx, t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(point: Point, owner: Owner, head: Head) -> Row {
+        Row { point, owner, head }
+    }
+
+    #[test]
+    fn a_row_is_found_by_point_owner_and_head() {
+        let mut s = Schedule::default();
+        s.add(row(Point::End, Owner::Local(7), Head::Tuple(2)));
+        s.add(row(Point::Try(40), Owner::Temp(12), Head::Any));
+        s.add(row(Point::Bind(9), Owner::Part(1), Head::Array));
+        for sealed in [false, true] {
+            if sealed {
+                s.seal();
+            }
+            assert!(s.has(Point::End, Owner::Local(7), Head::Tuple(2)));
+            // an instance's type under a definition's type parameter, and the reverse
+            assert!(s.has(Point::Try(40), Owner::Temp(12), Head::Array));
+            assert!(s.has(Point::End, Owner::Local(7), Head::Any));
+            assert!(!s.has(Point::End, Owner::Local(7), Head::Tuple(3)));
+            assert!(!s.has(Point::End, Owner::Local(8), Head::Tuple(2)));
+            assert!(!s.has(Point::Return(40), Owner::Temp(12), Head::Any));
+            assert!(!s.has(Point::Bind(9), Owner::Part(0), Head::Array));
+        }
+    }
+
+    #[test]
+    fn drops_of_one_point_keep_their_order() {
+        let mut s = Schedule::default();
+        let (a, b, c) = (Owner::Temp(3), Owner::Local(5), Owner::Local(4));
+        s.add(row(Point::Jump(20), a, Head::Any));
+        s.add(row(Point::End, c, Head::Any));
+        s.add(row(Point::Jump(20), a, Head::Any));
+        s.add(row(Point::Jump(20), b, Head::Any));
+        s.add(row(Point::Jump(20), c, Head::Any));
+        s.seal();
+        assert!(s.in_order(Point::Jump(20), &[a, a, b, c]));
+        // a scheduled drop of a value that was moved out does not run
+        assert!(s.in_order(Point::Jump(20), &[a, c]));
+        assert!(s.in_order(Point::Jump(20), &[]));
+        assert!(!s.in_order(Point::Jump(20), &[b, a]));
+        assert!(!s.in_order(Point::Jump(20), &[a, a, a]));
+        assert!(!s.in_order(Point::End, &[c, c]));
+        assert!(!s.in_order(Point::Return(20), &[a]));
+    }
 }

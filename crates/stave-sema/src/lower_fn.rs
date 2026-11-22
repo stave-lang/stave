@@ -334,6 +334,9 @@ pub(crate) struct FnState {
     pub point: Point,
     /// The drop about to be emitted was found on the schedule ([`FnCx::scheduled`]).
     pub ticket: bool,
+    /// While the owners of one end or exit are dropped: the ones dropped so far, in order
+    /// ([`FnCx::end_run`]).
+    pub run: Option<Vec<Owner>>,
 }
 
 /// The write-back of a `&mut` chunk binding: the vector in `slot` goes to `s[i..i+N]`, only the
@@ -1541,11 +1544,35 @@ impl<'a> FnCx<'a> {
     /// ([`crate::drops`]) must have it. A drop it lacks is one no check has seen.
     pub fn scheduled(&mut self, point: Point, owner: Owner, t: Ty) {
         self.f.ticket = true;
+        if let Some(r) = &mut self.f.run {
+            r.push(owner);
+        }
         let Some(s) = self.sched else { return };
         let head = crate::drops::head(&self.tys, t);
         if !s.has(point, owner, head) {
             let tok = self.has_body.then(|| self.icx.a(self.f.cur));
             self.fail_at(tok, format!("a drop the schedule does not have: {owner:?} at {point:?}"));
+        }
+    }
+
+    /// The owners of one end (a scope, a statement) or exit are dropped from here to the
+    /// matching [`FnCx::end_run`].
+    fn begin_run(&mut self) {
+        self.f.run = Some(Vec::new());
+    }
+
+    /// The drops emitted since [`FnCx::begin_run`] ran in this order: the schedule must have
+    /// them in that order at the point, since the checks judge each drop by what is still
+    /// alive when it runs.
+    fn end_run(&mut self) {
+        let Some(run) = self.f.run.take() else { return };
+        if let Some(s) = self.sched
+            && run.len() > 1
+            && !s.in_order(self.f.point, &run)
+        {
+            let tok = self.has_body.then(|| self.icx.a(self.f.cur));
+            let point = self.f.point;
+            self.fail_at(tok, format!("drops in an order the schedule does not have: {run:?} at {point:?}"));
         }
     }
 
@@ -1756,10 +1783,12 @@ impl<'a> FnCx<'a> {
             self.scope_join(h);
         }
         let Some(ls) = self.f.scopes.pop() else { return };
+        self.begin_run();
         for &l in ls.iter().rev() {
             self.drop_owner(l);
             self.set_st(l, Init::Gone);
         }
+        self.end_run();
         if !frame_exit {
             self.end_locals(&ls);
         }
@@ -1809,10 +1838,12 @@ impl<'a> FnCx<'a> {
     pub fn end_temps(&mut self) {
         let Some(from) = self.f.stmts.pop() else { return };
         let ts: Vec<usize> = self.f.temps.get(from..).unwrap_or(&[]).to_vec();
+        self.begin_run();
         for &l in ts.iter().rev() {
             self.drop_owner(l);
             self.set_st(l, Init::Gone);
         }
+        self.end_run();
         self.f.temps.truncate(from);
         self.trim_temps();
         let at = self.f.slot_marks.pop().unwrap_or(0);
@@ -1841,8 +1872,10 @@ impl<'a> FnCx<'a> {
     /// then the locals of scopes `scopes..`.
     pub fn exit_drops(&mut self, point: Point, stmts: usize, scopes: usize) {
         let outer = std::mem::replace(&mut self.f.point, point);
+        self.begin_run();
         self.exit_temps(stmts);
         self.drop_scopes(scopes);
+        self.end_run();
         self.f.point = outer;
     }
 
@@ -2023,6 +2056,7 @@ impl FnState {
             stmt_site: Site::NONE,
             point: Point::End,
             ticket: false,
+            run: None,
             ensures_end: None,
         }
     }
