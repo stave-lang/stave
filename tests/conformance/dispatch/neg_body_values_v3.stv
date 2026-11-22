@@ -1,0 +1,60 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v3
+// On `x86_64-linux-v3` the baseline holds 256 bits: matching an `Option<f32x8>` place and
+// dropping an `Option<(f32x8, Vec<u32>)>` need no features, while the 512-bit forms still need
+// `v4` (a `match` loads the enum, drop glue loads it too).
+import std.soa;
+import std.vec;
+
+struct W<T> {
+    x: T,
+    n: u32,
+}
+
+impl<T: Copy> Copy for W<T> {}
+
+fn match_x8() -> u32 needs(fma) {
+    let s = soa.Soa::<W<Option<f32x8>>>.new();
+    if s.len() > 0 {
+        match &s.x[0] {
+            Option.Some(_) => {
+                return 1;
+            }
+            Option.None => {
+                return 2;
+            }
+        }
+    }
+    return 3;
+}
+
+fn match_x16() -> u32 needs(fma) {
+    let s = soa.Soa::<W<Option<f32x16>>>.new();
+    if s.len() > 0 {
+        match &s.x[0] { //~ ERROR E0702
+            Option.Some(_) => {
+                return 1;
+            }
+            Option.None => {
+                return 2;
+            }
+        }
+    }
+    return 3;
+}
+
+fn glue_x8(xs: &[f32]) -> u32 {
+    let v = vec.Vec::<u32>.new();
+    let o = Option.Some((f32x8.load(xs, 0), v));
+    return 0;
+}
+
+fn glue_x16(xs: &[f32]) -> u32 needs(fma) {
+    let v = vec.Vec::<u32>.new();
+    let o = Option.Some((f32x16.load(xs, 0), v)); //~ ERROR E0702
+    return 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

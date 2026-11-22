@@ -1,0 +1,70 @@
+//~ CHECK-ONLY
+//~ TARGET aarch64-linux
+// On AArch64 no feature holds more than 128 bits: a `match` on an enum place loads it whole,
+// even through `&`; a generic whose chain reads a `W<T>` by value holds it at its type
+// argument (E0702 case `inherited` at the use, naming the instance); the drop of a value whose
+// drop glue loads a 256-bit payload is out of reach. A tuple field read through `(*r)` projects
+// like `r.1`, and a 128-bit payload needs nothing.
+import std.mem;
+import std.soa;
+import std.vec;
+
+struct W<T> {
+    x: T,
+    n: f32,
+}
+
+impl<T: Copy> Copy for W<T> {}
+
+fn match_column() -> f32 needs(dotprod) {
+    let s = soa.Soa::<W<Option<f32x8>>>.new();
+    if s.len() > 0 {
+        match &s.x[0] { //~ ERROR E0702
+            Option.Some(_) => {
+                return 1.0;
+            }
+            Option.None => {
+                return 2.0;
+            }
+        }
+    }
+    return 3.0;
+}
+
+fn rd<T>(xs: &[f32]) -> f32 {
+    let p = mem.slice_ptr(xs) as usize as *const W<T>;
+    return unsafe("xs holds a W<T>") p.read().n;
+}
+
+fn read_chain(xs: &[f32]) -> f32 needs(dotprod) {
+    return rd::<f32x8>(xs); //~ ERROR E0702
+}
+
+fn glue_vec() -> usize {
+    let v = vec.Vec::<Option<(f32x8, vec.Vec<u32>)>>.new(); //~ ERROR E0702
+    return v.len();
+}
+
+fn paren_field(xs: &[f32]) -> f32 needs(dotprod) {
+    let s: &[(f32x8, f32)] = unsafe("xs holds 16 f32") mem.slice(xs, mem.slice_ptr(xs) as usize as *const (f32x8, f32), 1);
+    let r = &s[0];
+    return (*r).1 + r.1;
+}
+
+fn narrow_glue(xs: &[f32]) -> f32 needs(dotprod) {
+    let mut v = vec.Vec::<u32>.new();
+    v.push(3);
+    let o = Option.Some((f32x4.load(xs, 0), v));
+    match &o {
+        Option.Some(p) => {
+            return p.0.reduce_add();
+        }
+        Option.None => {
+            return 0.0;
+        }
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -244,6 +244,9 @@ pub struct CallGraph {
     /// Where the first instance was left out: the requesting node's span and the instance's
     /// generic (`None` for drop glue).
     pub truncated_at: Option<(Span, Option<DeclId>)>,
+    /// Every fn item made into a value: (the fn or closure node making it, its node, the first
+    /// place), sorted.
+    pub made: Vec<(u32, u32, Span)>,
     /// Every call site with each node it reaches: (calling fn or closure node, call token, callee
     /// node), sorted. The token is the one typeck keys the call by (a call's `(`, a method's
     /// name, an operator, the `for` token, an f-string); a fn-value call reaches the values that
@@ -1261,6 +1264,8 @@ struct Walk<'a> {
     table_of: FxHashMap<TypeId, u32>,
     /// (table, node, site)
     members: Vec<(u32, u32, Site)>,
+    /// (maker, fn node, site): a fn item made into a value
+    made: Vec<(u32, u32, Site)>,
     roots: Vec<(u32, RootKind, Site)>,
     arms: FxHashMap<DeclId, Vec<DeclId>>,
     /// `String.as_str`, `String.new`, `String.push_str`.
@@ -1733,6 +1738,7 @@ impl<'a> Walk<'a> {
                         if let Some(tb) = tb {
                             self.members.push((tb, n, ev.site));
                         }
+                        self.made.push((from, n, ev.site));
                         if let Some(r) = root {
                             self.root(n, *r, ev.site);
                         }
@@ -2241,6 +2247,7 @@ pub(crate) fn build(
         tables: Vec::new(),
         table_of: FxHashMap::default(),
         members: Vec::new(),
+        made: Vec::new(),
         roots: Vec::new(),
         arms: FxHashMap::default(),
         string,
@@ -2373,6 +2380,11 @@ fn finish(w: Walk<'_>) -> CallGraph {
             _ => false,
         })
         .collect();
+    // the first site of each (maker, fn) pair: a stable sort keeps source order
+    let mut made_raw = w.made;
+    made_raw.sort_by_key(|m| (m.0, m.1));
+    made_raw.dedup_by_key(|m| (m.0, m.1));
+    let made: Vec<(u32, u32, Span)> = made_raw.iter().map(|&(f, t, s)| (f, t, s.span(prog))).collect();
     let mut g = CallGraph {
         nodes,
         out_start,
@@ -2391,6 +2403,7 @@ fn finish(w: Walk<'_>) -> CallGraph {
         truncated: w.truncated,
         truncated_at: w.truncated_at,
         calls,
+        made,
     };
     g.scc_drop = (0..g.scc_count() as u32)
         .map(|s| {

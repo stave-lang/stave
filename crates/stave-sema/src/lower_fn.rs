@@ -66,6 +66,8 @@ pub(crate) struct G<'a> {
     pub any_requires: bool,
     /// Borrow expressions get an instruction of their own and a row in `Body::borrows`.
     pub borrows: bool,
+    /// The features generic instances inherit from their type arguments, beyond their `needs`.
+    pub inherited: &'a FxHashMap<InstKey, u64>,
 }
 
 impl<'a> G<'a> {
@@ -1974,6 +1976,7 @@ fn empty_body() -> &'static TypedBody {
         node_types: Vec::new(),
         locals: Vec::new(),
         targets: Vec::new(),
+        tries: Vec::new(),
         coercions: Vec::new(),
         sites: Vec::new(),
         implicit: Vec::new(),

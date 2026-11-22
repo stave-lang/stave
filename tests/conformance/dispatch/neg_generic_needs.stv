@@ -1,0 +1,61 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux
+// E0704 case `inherited`: a generic instance that holds a 256-bit vector by value inherits
+// `avx2` from its type argument (512 bits: the AVX-512 part of `v4`), and a non-generic fn
+// without it reaches the instance: by a call, by a fn value (of one reaching another generic),
+// by a drop (`Vec`'s drop reads each element; `Vec.new` makes a value it may drop). Generics
+// that only borrow the vector inherit nothing and stay usable there.
+import std.mem;
+import std.vec;
+
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+fn twice<T: Copy>(x: T) -> (T, T) {
+    return (x, x);
+}
+
+fn swap_via<T: Copy>(a: &mut T, b: &mut T) {
+    mem.swap(a, b);
+}
+
+fn first<T>(xs: &[T]) -> Option<&T> from xs {
+    if xs.len() == 0 {
+        return Option.None;
+    }
+    return Option.Some(&xs[0]);
+}
+
+fn count<T>(xs: &[T]) -> usize {
+    let mut n: usize = 0;
+    for x in xs {
+        n = n + 1;
+    }
+    return n;
+}
+
+fn holds<T>() -> usize {
+    let o: Option<T> = Option.None;
+    return 1;
+}
+
+// the fn itself holds no 256-bit value (E0702 would come first): it reaches instances that do
+fn fma_only() -> usize needs(fma) {
+    let n = holds::<f32x8>(); //~ ERROR E0704
+    let f = twice::<f32x8>; //~ ERROR E0704
+    let s = swap_via::<f32x8>; //~ ERROR E0704
+    let w = vec.Vec::<f32x8>.new(); //~ ERROR E0704
+    let r = first::<f32x8>;
+    let c = count::<f32x8>;
+    return n + w.len();
+}
+
+fn avx2_only() needs(avx2) {
+    let v = id::<f32x16>; //~ ERROR E0704
+    let u = id(f32x8.splat(1.0));
+}
+
+fn main() -> i32 {
+    return 0;
+}

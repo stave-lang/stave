@@ -252,6 +252,88 @@ fn vector_arms_match_scalar_references() {
     assert!(failures.is_empty(), "{} failure(s):\n{}", failures.len(), failures.join("\n"));
 }
 
+/// The features of each instance of the generics `run_generic_needs` uses at f32x8 and f32x4:
+/// on x86_64-linux the f32x8 instance inherits `avx2` and the f32x4 one needs nothing; on
+/// x86_64-linux-v3 the baseline covers them (nothing inherited); on AArch64 the `avx2` arm is
+/// dropped with its f32x8 instances. `first` only borrows: no instance of it inherits.
+fn check_generic_ir(m: &Module, target: Triple) -> Result<(), String> {
+    let avx2 = |p: &str| -> Vec<bool> {
+        let mut v: Vec<bool> = m
+            .funcs
+            .iter()
+            .filter(|f| f.path == p && f.body.is_some())
+            .map(|f| f.features.contains(stave_target::Feature::Avx2))
+            .collect();
+        v.sort();
+        v
+    };
+    // x86_64-linux: one instance with avx2, one without; elsewhere none with (on -v3 a release
+    // build keeps only the f32x8 instances: the dispatch always takes the avx2 arm)
+    let inherits = target.arch() == Arch::X86_64 && !target.baseline().contains(stave_target::Feature::Avx2);
+    let ok = |v: &[bool]| if inherits { v == [false, true] } else { !v.is_empty() && v.iter().all(|b| !b) };
+    for p in ["main.id", "main.fold", "main.ping", "main.pong", "main.via", "std.mem.swap"] {
+        if !ok(&avx2(p)) {
+            return Err(format!("`{p}` instances with avx2: {:?}", avx2(p)));
+        }
+    }
+    let first = avx2("main.first");
+    if first.is_empty() || first.iter().any(|b| *b) {
+        return Err(format!("`main.first` instances with avx2: {first:?}"));
+    }
+    Ok(())
+}
+
+/// Generic instances at f32x8 under a `needs(avx2)` arm and at f32x4 under the `_` arm
+/// (`run_generic_needs`): the arm the CPU has runs, with the instance feature sets of
+/// [`check_generic_ir`].
+#[test]
+fn generic_instances_inherit_arm_features() {
+    let v2 = Triple::parse("x86_64-linux").unwrap();
+    let v3 = Triple::parse("x86_64-linux-v3").unwrap();
+    let a64 = Triple::parse("aarch64-linux").unwrap();
+    let native_v2 = legs::gate(v2.name(), exec::can_run(v2));
+    let native_v3 = legs::gate(v3.name(), exec::can_run(v3));
+    let qemu_a64 = legs::gate(a64.name(), cfg!(target_os = "linux") && have("qemu-aarch64"));
+    let qemu_x86 = cfg!(target_os = "linux") && have("qemu-x86_64");
+    let (avx2, _) = host_x86();
+    let names = [
+        "id",
+        "pair",
+        "trait",
+        "fold",
+        "first",
+        "recursion",
+        "turbofish",
+        "swap",
+        "vec",
+        "unwrap",
+        "fn_value",
+        "drop",
+    ];
+    let arms = |wide: bool| -> Vec<(&'static str, &'static str)> {
+        names.iter().map(|n| (*n, if wide { "avx2" } else { "base" })).collect()
+    };
+    let runs = |t: Triple| {
+        let mut r = Vec::new();
+        if t == v2 && native_v2 {
+            r.push((None, arms(avx2), "native".to_string()));
+        }
+        if t == v2 && qemu_x86 {
+            r.push((Some("qemu-x86_64 -cpu Nehalem".to_string()), arms(false), "Nehalem".into()));
+        }
+        if t == v3 && native_v3 {
+            r.push((None, arms(true), "native".into()));
+        }
+        if t == a64 && qemu_a64 {
+            r.push((Some("qemu-aarch64".to_string()), arms(false), "qemu".into()));
+        }
+        r
+    };
+    let (n, failures) = run_program("run_generic_needs", &[v2, v3, a64], &runs, &check_generic_ir);
+    eprintln!("{n} runs");
+    assert!(failures.is_empty(), "{} failure(s):\n{}", failures.len(), failures.join("\n"));
+}
+
 /// The `std.slice` methods reach their 256-bit loops through dispatch fns: on x86_64-linux the
 /// dispatch tests the feature word and picks the `needs(avx2)` loop or the 128-bit one; on
 /// x86_64-linux-v3 the method calls the 256-bit loop directly; AArch64 builds no 256-bit loop.

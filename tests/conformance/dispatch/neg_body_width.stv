@@ -1,0 +1,62 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux
+// E0702 in a body: a fn holds by value only vectors and masks that the registers of its own
+// `needs` and the target baseline hold (256 bits: `avx2`; 512 bits: the AVX-512 part of `v4`),
+// whether the type is written or only inferred, in a closure as in the fn (a closure has the
+// fn's needs). `avx` and `fma` alone give no 256-bit vectors. One error per body, at the first
+// such value.
+fn apply(f: fn(usize) -> f32, i: usize) -> f32 {
+    return f(i);
+}
+
+fn on_avx(xs: &[f32]) -> f32 needs(avx) {
+    let v = f32x8.load(xs, 0); //~ ERROR E0702
+    return v.reduce_add();
+}
+
+fn on_fma(xs: &[f32]) -> f32 needs(fma) {
+    let v: f32x8 = f32x8.load(xs, 0); //~ ERROR E0702
+    return v.reduce_add();
+}
+
+fn chain_fma(xs: &[f32]) -> f32 needs(fma) {
+    return f32x8.load(xs, 0).reduce_add(); //~ ERROR E0702
+}
+
+fn on_avx2(xs: &[f32]) -> f32 needs(avx2) {
+    return f32x16.load(xs, 0).reduce_add(); //~ ERROR E0702
+}
+
+fn inferred(xs: &[f32]) -> u32 needs(fma) {
+    let a = f32x4.load(xs, 0);
+    let m = (a < a).rewiden::<64>(); //~ ERROR E0702
+    return 0;
+}
+
+fn in_closure() -> f32 needs(fma) {
+    return apply(fn(i: usize) -> f32 { return f32x8.splat(1.0).reduce_add(); }, 0); //~ ERROR E0702
+}
+
+fn in_array(xs: &[f32]) -> usize needs(fma) {
+    let arr = [f32x8.load(xs, 0); 2]; //~ ERROR E0702
+    return arr.len();
+}
+
+fn generic_body<T>(x: T) -> T needs(fma) {
+    let v = f32x8.splat(1.0); //~ ERROR E0702
+    return x;
+}
+
+struct P {
+    n: u32,
+}
+
+impl P {
+    pub fn wide(&self) -> f32 needs(fma) {
+        return f32x8.splat(1.0).reduce_add(); //~ ERROR E0702
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

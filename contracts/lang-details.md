@@ -410,3 +410,52 @@ a `Vec` keeps the id's `raw()` u32. Not changed: a type argument is the only way
 type whose fields hide a `T` (behind an integer or a byte pointer) to T's Flat and Frozen, since
 both are derived and never implemented (E1408); counting only fields would make such types Flat
 with no way out. Whether a marker param should stop counting is open.
+
+## §4 Features of generic instances
+
+An instance of a generic fn or method (one per generic and type arguments) is compiled with the
+features its generic declares plus those it inherits from its type arguments; its closures have
+the same features. The type checker decides them once per instance on the call graph
+(`stave_sema::inherit`), and lowering and codegen read that one set:
+
+- An instance holds a vector by value when a fixed vector or mask, or a tuple, array, struct, or
+  enum with one inside not behind a reference, raw pointer, slice, or fn type, is the type of a
+  param, the return, a local, or an expression of its body after substitution, or is a value a
+  postfix chain makes or reads between steps: a built-in's vector receiver and result, a
+  literal, the operand of `?`, the result of a call through a fn or closure value. Not counted:
+  an expression that is only a place there (the operand of `&` / `&mut`, the head of a postfix
+  chain, the target of a plain `=`, a `for` source; parentheses do not change that), the result
+  of a call to a known fn, method, operator, or dispatch (its signature is the callee's, checked
+  by E0703 / E0704 / this rule), and a part that does not depend on a type parameter (the body
+  gate below checks it against the generic's own `needs`). A `match` scrutinee counts the enums
+  in it, through references too: matching reads an enum's tag from the whole value.
+- It inherits the features whose registers hold each such vector (256 bits: `avx2`; 512 bits:
+  the AVX-512 part of `v4`), beyond its declared `needs` and the target baseline, and what each
+  generic instance it calls, drops (through drop glue), or makes into a fn value inherits.
+- Drop glue reads the enums it drops whole: the glue of a type holding a wider vector than the
+  baseline is compiled with the features that hold it, and every dropper inherits them.
+- A non-generic fn that calls, drops, or makes a fn value of such an instance needs those
+  features as for a declared `needs` (E0704 case `inherited`, naming the type argument); where no
+  feature of the target's arch holds the vector (256 bits on AArch64), E0702 case `inherited` at
+  that use. Where the fn's own body holds the same vectors, its E0702 is the only report. A
+  generic instance never fails this rule: it inherits. A dispatch arm with `needs(avx2)` reaches
+  `id::<f32x8>`; the `_` arm reaches `id::<f32x4>`, another instance, with no features.
+- So at `f32x8`: `id<T>(x: T) -> T` inherits `avx2`, and so do `mem.swap` (it copies a `T`) and
+  the drop of `vec.Vec` (it reads each element); `first<T>(xs: &[T]) -> Option<&T>` and
+  `Vec.len` inherit nothing.
+- A fn value of an instance has the instance's declared features in its type, not the inherited
+  ones: it is made only where they are proven (the rule above), and a value made there stays
+  callable anywhere, as for E0707: CPU features never change while a program runs.
+
+Every fn body, generic or not, closures included, is gated the same way (E0702): the values it
+holds by value, as above, whether their type is written or only inferred (a built-in's receiver
+and result inside a postfix chain count), hold no vector wider than the registers of the fn's
+own `needs` plus the target baseline: `needs(avx)` and `needs(fma)` give 128 bits, `needs(avx2)`
+256, any AArch64 feature 128. A fn value is callable without its features (§2 Fn types), so the result of
+a call through one is the caller's to hold. Lowering checks every fn, instance, and glue against
+its features again: a vector left outside them is an internal error, never code.
+
+Reason the instance and not the generic: a declared `needs` on a generic would make it uncallable
+without the features at every type argument (`Vec.push` at `u8` included), and a rule on the
+written signature misses a vector reached through a type parameter in the body and rejects
+generics that only borrow one.

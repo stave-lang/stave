@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+//~ TARGET aarch64-linux
+// A generic instance that holds a 256-bit vector by value inherits features no AArch64 feature
+// provides (Advanced SIMD and SVE registers here are 128 bits): E0702 where a non-generic fn
+// reaches it. At 128 bits the instance needs nothing.
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+fn wide() needs(dotprod) {
+    let f = id::<f32x8>; //~ ERROR E0702
+}
+
+fn narrow() -> f32 {
+    return id(f32x4.splat(1.0)).reduce_add();
+}
+
+fn main() -> i32 {
+    return 0;
+}

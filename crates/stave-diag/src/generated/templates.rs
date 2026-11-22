@@ -3476,11 +3476,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0702",
         severity: Severity::Error,
         area: "features",
-        rule: "vector type wider than the target's register",
+        rule: "vector type wider than the target's register; in a fn body, a value (written or inferred type) holding a vector wider than the registers of the fn's `needs` plus the target baseline. Case `inherited`: a generic instance (or a drop) holds such a vector for a type argument, and no feature of the target holds it",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "arg", kind: HoleKind::Type, choices: &[] },
             Hole { name: "bits", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "callee", kind: HoleKind::Path, choices: &[] },
             Hole { name: "max", kind: HoleKind::Int, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
@@ -3493,6 +3495,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use a vector of at most {max} bits, or add `needs(...)` with features that have wider registers (`avx2`: 256, `v4`: 512)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "inherited",
+                message: "`{callee}` at type argument `{arg}` holds `{type}` by value ({bits} bits), the target's vector registers have {max}",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this use reaches it" },
+                    LabelTemplate { at: "callee", text: "declared here: at `{arg}` it holds `{type}` by value" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "reach `{callee}` with a type argument of at most {max}-bit vectors",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3529,10 +3544,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0704",
         severity: Severity::Error,
         area: "features",
-        rule: "callee needs features neither the caller nor the target baseline has",
+        rule: "callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "arg", kind: HoleKind::Type, choices: &[] },
             Hole { name: "callee", kind: HoleKind::Path, choices: &[] },
             Hole { name: "feature", kind: HoleKind::Name, choices: &[] },
         ],
@@ -3546,6 +3562,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `needs({feature})` to the caller, or call `{callee}` through a `dispatch` function",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "inherited",
+                message: "`{callee}` at type argument `{arg}` needs `{feature}`, which the caller does not have",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this use needs `{feature}`" },
+                    LabelTemplate { at: "callee", text: "declared here: at `{arg}` it holds a vector by value, so it inherits `{feature}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "add `needs({feature})` to the caller, or reach `{callee}` through a `dispatch` function",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

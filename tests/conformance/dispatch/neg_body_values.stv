@@ -1,0 +1,78 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux
+// The values a body holds by value include the ones no node of its own holds: the result of a
+// call through a fn or closure value (callable without the value's features, so its result is
+// the caller's), the operand of `?`, and the enum a `match` loads, even through `&` (a pattern
+// reads the tag of the whole enum, payload included). A generic body's chain steps count for
+// its instances. The result of a call to a known fn, method, or dispatch is covered by E0704.
+import std.mem;
+import std.soa;
+
+struct W<T> {
+    x: T,
+    n: f32,
+}
+
+impl<T: Copy> Copy for W<T> {}
+
+fn v4_ref(f: fn(&[f32]) -> f32x16 needs(v4), xs: &[f32]) -> f32 needs(avx2) {
+    let r = &f(xs); //~ ERROR E0702
+    return 1.0;
+}
+
+fn v4_match(f: fn(&[f32]) -> f32x16 needs(v4), xs: &[f32]) -> f32 needs(avx2) {
+    match f(xs) { //~ ERROR E0702
+        _ => {
+            return 1.0;
+        }
+    }
+}
+
+fn avx2_field(f: fn(&[f32]) -> (f32x8, f32) needs(avx2), xs: &[f32]) -> f32 needs(fma) {
+    return f(xs).1; //~ ERROR E0702
+}
+
+fn mk16(xs: &[f32]) -> f32x16 needs(v4) {
+    return f32x16.load(xs, 0);
+}
+
+fn known_ref(xs: &[f32]) -> f32 needs(avx2) {
+    let r = &mk16(xs); //~ ERROR E0704
+    return 1.0;
+}
+
+fn match_column() -> f32 needs(fma) {
+    let s = soa.Soa::<W<Option<f32x8>>>.new();
+    if s.len() > 0 {
+        match &s.x[0] { //~ ERROR E0702
+            Option.Some(_) => {
+                return 1.0;
+            }
+            Option.None => {
+                return 2.0;
+            }
+        }
+    }
+    return 3.0;
+}
+
+fn try_column() -> Option<u32> needs(fma) {
+    let s = soa.Soa::<W<Option<f32x8>>>.new();
+    if s.len() > 0 {
+        let r = &s.x[0]?; //~ ERROR E0702
+    }
+    return Option.Some(1);
+}
+
+fn rd<T>(xs: &[f32]) -> f32 {
+    let p = mem.slice_ptr(xs) as usize as *const W<T>;
+    return unsafe("xs holds a W<T>") p.read().n;
+}
+
+fn read_chain(xs: &[f32]) -> f32 needs(fma) {
+    return rd::<i32x8>(xs); //~ ERROR E0704
+}
+
+fn main() -> i32 {
+    return 0;
+}

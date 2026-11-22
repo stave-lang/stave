@@ -1,0 +1,34 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux
+// A body holds the vectors its own `needs` and the target baseline give registers for: 256 bits
+// with `avx2`, 512 with `v4`, 128 with any other features. A vector only behind a reference or a
+// fn type is not held by value (a fn value of `first::<f32x8>` reads none).
+fn apply(f: fn(usize) -> f32, i: usize) -> f32 {
+    return f(i);
+}
+
+fn first<T>(xs: &[T]) -> usize {
+    return xs.len();
+}
+
+fn on_avx2(xs: &[f32]) -> f32 needs(avx2) {
+    let v = f32x8.load(xs, 0);
+    let m = (f32x4.load(xs, 0) < f32x4.splat(0.0)).rewiden::<64>();
+    let c = apply(fn(i: usize) -> f32 { return f32x8.splat(2.0).reduce_add(); }, 0);
+    return v.reduce_add() + f32x8.load(xs, 0).reduce_add() + c;
+}
+
+fn on_v4(xs: &[f32]) -> f32 needs(v4) {
+    let v = f32x16.load(xs, 0);
+    return v.reduce_add() + f32x16.load(xs, 0).reduce_add();
+}
+
+fn on_fma(xs: &[f32]) -> f32 needs(fma) {
+    let a = f32x4.load(xs, 0);
+    let f = first::<f32x8>;
+    return a.fma(a, a).reduce_add() + apply(fn(i: usize) -> f32 { return f32x4.splat(1.0).reduce_add(); }, 0);
+}
+
+fn main() -> i32 {
+    return 0;
+}
