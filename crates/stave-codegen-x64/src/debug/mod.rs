@@ -446,7 +446,7 @@ pub fn emit_module(m: &Module, o: &Options, b: &mut ImageBuilder) -> Result<Emit
         o.fn_sites.clone()
     };
     let layouts = Layouts::compute(&m.types);
-    let static_sym = stubs::statics(m, &layouts, b)?;
+    let static_sym = stubs::statics(m, &layouts, &str_sym, b)?;
     let cls = classify(m, &layouts);
     let soft_fma = order.iter().map(|f| &m.funcs[f.index()]).any(|f| {
         !Feats::of(o.features.union(f.features)).fma

@@ -491,7 +491,7 @@ impl Caller<'_> {
         let idx = *self.statics.entry((t, bytes.clone())).or_insert(next);
         if idx == next {
             let path = format!("__stave_test_inputs.{}.{}", self.tag, idx);
-            self.m.statics.push(Static { path, ty: t, init: bytes });
+            self.m.statics.push(Static { path, ty: t, init: bytes, refs: Vec::new() });
         }
         let pt = self.m.types.ptr(true, t);
         let i = b.int(idx as i128);

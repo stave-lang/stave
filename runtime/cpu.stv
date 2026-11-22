@@ -172,19 +172,21 @@ fn unsupported(missing: u64) -> never {
 // wrong reason.
 fn env_removed(base: u64) -> u64 {
     let v = env("STAVE_CPU");
-    if v == 0 || at(v) == 0 { return 0; }
+    if v == 0 || unsafe("v is the value env found, a NUL-terminated environment string") at(v) == 0 { return 0; }
     let mut out: u64 = 0;
     let mut a = v;
     loop {
-        if at(a) != 45u8 { bad_syntax(); }
+        if unsafe("a is inside the value string: every scan stops at its NUL") at(a) != 45u8 { bad_syntax(); }
         a = a + 1;
         let s = a;
-        while at(a) != 0 && at(a) != 44u8 { a = a + 1; }
+        while unsafe("a is inside the value string: every scan stops at its NUL") at(a) != 0 && unsafe("a is inside the value string: every scan stops at its NUL") at(a) != 44u8 { a = a + 1; }
         if a == s { bad_syntax(); }
-        let i = lookup(s, a - s);
-        if i == NFEATURES { unknown(s, a - s); }
+        let i = unsafe("s..a lies inside the value string, before its NUL") lookup(s, a - s);
+        if i == NFEATURES {
+            unsafe("s..a lies inside the value string, before its NUL") { unknown(s, a - s); }
+        }
         if base & (1u64 << (i as u64)) == 0 { out = out | implying(i); }
-        if at(a) == 0 { return out; }
+        if unsafe("a is inside the value string: every scan stops at its NUL") at(a) == 0 { return out; }
         a = a + 1;
     }
 }
@@ -192,8 +194,8 @@ fn env_removed(base: u64) -> u64 {
 // Whether STAVE_DISPATCH_TRACE is set to a value other than empty or `0`.
 fn env_trace() -> bool {
     let v = env("STAVE_DISPATCH_TRACE");
-    if v == 0 || at(v) == 0 { return false; }
-    return !(at(v) == 48u8 && at(v + 1) == 0);
+    if v == 0 || unsafe("v is the value env found, a NUL-terminated environment string") at(v) == 0 { return false; }
+    return !(unsafe("v is the value env found, a NUL-terminated environment string") at(v) == 48u8 && unsafe("byte v is not the NUL, so v + 1 is inside the string") at(v + 1) == 0);
 }
 
 // Feature i and every feature that implies it.
@@ -207,13 +209,13 @@ fn implying(i: usize) -> u64 {
 }
 
 // The feature named by the n bytes at address s; NFEATURES if none.
-fn lookup(s: usize, n: usize) -> usize {
+unsafe("s..s+n lies inside one NUL-terminated environment string") fn lookup(s: usize, n: usize) -> usize {
     let x = str_bytes(NAMES);
     for i in 0..NFEATURES {
         let (a, e) = word(i);
         if e - a == n {
             let mut k: usize = 0;
-            while k < n && at(s + k) == x[a + k] { k = k + 1; }
+            while k < n && unsafe("k < n: inside s..s+n (this fn's obligation)") at(s + k) == x[a + k] { k = k + 1; }
             if k == n { return i; }
         }
     }
@@ -241,11 +243,11 @@ fn bad_syntax() -> never {
     m.fail();
 }
 
-fn unknown(s: usize, n: usize) -> never {
+unsafe("s..s+n lies inside one NUL-terminated environment string") fn unknown(s: usize, n: usize) -> never {
     let mut m = Msg.new();
     m.lit("stave: STAVE_CPU: unknown feature '");
     let shown = if n < NAME_CAP then n else NAME_CAP;
-    for k in 0..shown { m.byte(at(s + k)); }
+    for k in 0..shown { m.byte(unsafe("k < shown <= n: inside s..s+n (this fn's obligation)") at(s + k)); }
     m.lit("'\n");
     m.fail();
 }
@@ -259,17 +261,17 @@ fn env(name: &str) -> usize {
     loop {
         let e = unsafe("envp is a NULL-terminated array on the initial stack, which stays mapped") *(p as *const usize);
         if e == 0 { return 0; }
-        // the entry's NUL differs from every byte of `name`, so the scan stops inside the entry
+        // a NUL byte of `name` ends the scan, so it never passes the entry's NUL
         let mut k: usize = 0;
-        while k < x.len() && at(e + k) == x[k] { k = k + 1; }
-        if k == x.len() && at(e + k) == 61u8 { return e + k + 1; }
+        while k < x.len() && x[k] != 0 && unsafe("bytes e..e+k matched non-NUL bytes of name, so e + k is at or before the entry's NUL") at(e + k) == x[k] { k = k + 1; }
+        if k == x.len() && unsafe("bytes e..e+k matched non-NUL bytes of name, so e + k is at or before the entry's NUL") at(e + k) == 61u8 { return e + k + 1; }
         p = p + 8;
     }
 }
 
-// The byte at address a of an environment string; callers never read past its NUL.
-fn at(a: usize) -> u8 {
-    return unsafe("a lies inside a NUL-terminated environment string on the initial stack, which stays mapped") *(a as *const u8);
+// The byte at address a of an environment string.
+unsafe("a lies inside a NUL-terminated environment string on the initial stack, at or before its NUL") fn at(a: usize) -> u8 {
+    return unsafe("a lies inside a NUL-terminated environment string on the initial stack (this fn's obligation), which stays mapped") *(a as *const u8);
 }
 
 // &str -> its UTF-8 bytes (`&str` and `&[u8]` share the (data, len) representation).
