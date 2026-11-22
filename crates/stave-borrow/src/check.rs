@@ -3,10 +3,17 @@
 //! **Liveness by path exploration**: a loan is live at a
 //! point iff some value whose origin set contains it may still be used. Per tracked local, every
 //! use is walked backward through the CFG until the local's definition (for a borrow temporary,
-//! that is the loan's creation), marking the local live on the way; the loans live at a point are
-//! the union of the origin sets of the locals live there. This is the SSA-value form of "walk
-//! backward from the use to the loan's creation": a path on which the local was redefined does
-//! not carry the old loan (so `r = &a; ... r = &b; a = 1; use(r)` is accepted, as in NLL).
+//! that is the loan's creation), marking the local live on the way ([`crate::live`]); the loans
+//! live at a point are the union of the origin sets of the locals live there. This is the
+//! SSA-value form of "walk backward from the use to the loan's creation": a path on which the
+//! local was redefined does not carry the old loan (so `r = &a; ... r = &b; a = 1; use(r)` is
+//! accepted, as in NLL).
+//!
+//! The live loans are kept as a count per loan of the live locals that hold it, moved from
+//! statement to statement by what the statement changes: the sets it writes, the locals whose
+//! last use it is, the local it defines. The live loans of each local are chained, the `&mut`
+//! ones apart from the others, and an access looks only at those of its own local that its
+//! kind can conflict with.
 //!
 //! **Access checks**: every access (read, write, move, drop, storage-dead, and the borrows) is
 //! checked against the live loans whose places overlap it (E0501; the storage-dead of a
@@ -19,12 +26,14 @@
 
 use stave_diag::Span;
 
-use crate::bits::Bits;
+use rustc_hash::FxHashMap;
+
 use crate::cfg::{
     Body, GuardEffect, LoanId, LocalId, MoveOut, OpKind, Operand, Place, Proj, RetCheck, Rvalue, Stmt,
     StmtKind,
 };
-use crate::loans::{CallStore, Flow, Misfit, State, for_each_op};
+use crate::loans::{CallStore, Flow, Misfit, Saved, State, for_each_op};
+use crate::set::Set;
 use crate::ty::DerefKind;
 
 /// The kind of an access.
@@ -45,12 +54,12 @@ pub enum Access {
 
 impl Access {
     /// Conflicts with shared loans too (not only `&mut` ones).
-    fn exclusive(self) -> bool {
+    pub(crate) fn exclusive(self) -> bool {
         !matches!(self, Access::Read | Access::SharedBorrow | Access::Reserve)
     }
 
     /// A shallow access: a loan of a place below it reached through a dereference is not affected.
-    fn shallow(self) -> bool {
+    pub(crate) fn shallow(self) -> bool {
         matches!(self, Access::Write | Access::Drop | Access::StorageDead)
     }
 
@@ -117,7 +126,7 @@ pub enum Unfit {
 
 impl Unfit {
     /// `together`: the value's origins are in the union of what the pointer's objects hold.
-    fn of(m: Misfit, together: bool) -> Unfit {
+    pub(crate) fn of(m: Misfit, together: bool) -> Unfit {
         match m {
             Misfit::Clause { param, add } => Unfit::Clause { param, add },
             Misfit::Object if together => Unfit::Several,
@@ -163,7 +172,7 @@ pub fn stmt_uses(s: &Stmt, mut f: impl FnMut(LocalId, Span)) {
 }
 
 /// The move operands of a statement.
-fn stmt_moves(s: &Stmt, mut f: impl FnMut(&Operand)) {
+pub(crate) fn stmt_moves(s: &Stmt, mut f: impl FnMut(&Operand)) {
     match &s.kind {
         StmtKind::Assign { rv, .. } => for_each_op(rv, |o| {
             if o.kind == OpKind::Move {
@@ -213,7 +222,7 @@ pub fn temp_end(body: &Body, kind: Access, p: &Place) -> bool {
 }
 
 /// E0503: whether `p` may be written (or mutably borrowed); `Err((shared, blame))` otherwise.
-fn mutability(body: &Body, p: &Place) -> Result<(), (bool, LocalId)> {
+pub(crate) fn mutability(body: &Body, p: &Place) -> Result<(), (bool, LocalId)> {
     let raw = p.proj.iter().any(|x| matches!(x, Proj::Deref(DerefKind::Raw)));
     if body.locals[p.local as usize].guard && !raw {
         return Err((true, p.local));
@@ -241,90 +250,6 @@ pub struct Checked {
     pub dump: Vec<DumpAccess>,
 }
 
-/// Liveness: live-out sets per block over tracked locals (path exploration per local).
-pub fn live_out(flow: &Flow<'_>) -> Vec<Bits> {
-    let body = flow.body;
-    let nb = body.blocks.len();
-    let nt = flow.ntracked;
-    let mut ue = vec![Bits::new(nt); nb];
-    let mut kill = vec![Bits::new(nt); nb];
-    for (b, blk) in body.blocks.iter().enumerate() {
-        for s in &blk.stmts {
-            stmt_uses(s, |l, _| {
-                let t = flow.tracked[l as usize];
-                if t != u32::MAX && !kill[b].contains(t as usize) {
-                    ue[b].insert(t as usize);
-                }
-            });
-            if let Some(d) = stmt_def(s) {
-                let t = flow.tracked[d as usize];
-                if t != u32::MAX {
-                    kill[b].insert(t as usize);
-                }
-            }
-        }
-    }
-    let mut out = vec![Bits::new(nt); nb];
-    let mut work: Vec<u32> = Vec::new();
-    for x in 0..nt {
-        work.clear();
-        for (b, u) in ue.iter().enumerate() {
-            if u.contains(x) {
-                work.push(b as u32);
-            }
-        }
-        while let Some(b) = work.pop() {
-            for &p in &flow.preds[b as usize] {
-                if out[p as usize].insert(x) && !kill[p as usize].contains(x) {
-                    work.push(p);
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Live-after sets of every statement of block `b` (from its live-out).
-pub fn live_after(flow: &Flow<'_>, b: usize, out: &Bits) -> Vec<Bits> {
-    let stmts = &flow.body.blocks[b].stmts;
-    let mut la = vec![out.clone(); stmts.len()];
-    let mut cur = out.clone();
-    for (i, s) in stmts.iter().enumerate().rev() {
-        la[i] = cur.clone();
-        if let Some(d) = stmt_def(s) {
-            let t = flow.tracked[d as usize];
-            if t != u32::MAX {
-                cur.remove(t as usize);
-            }
-        }
-        stmt_uses(s, |l, _| {
-            let t = flow.tracked[l as usize];
-            if t != u32::MAX {
-                cur.insert(t as usize);
-            }
-        });
-    }
-    la
-}
-
-/// The live-in set of a statement given its live-after set.
-fn live_in(flow: &Flow<'_>, s: &Stmt, after: &Bits) -> Bits {
-    let mut li = after.clone();
-    if let Some(d) = stmt_def(s) {
-        let t = flow.tracked[d as usize];
-        if t != u32::MAX {
-            li.remove(t as usize);
-        }
-    }
-    stmt_uses(s, |l, _| {
-        let t = flow.tracked[l as usize];
-        if t != u32::MAX {
-            li.insert(t as usize);
-        }
-    });
-    li
-}
-
 struct Cx<'f, 'b> {
     flow: &'f mut Flow<'b>,
     findings: Vec<Finding>,
@@ -333,14 +258,289 @@ struct Cx<'f, 'b> {
     /// The moves the statement being checked has made so far (local, site): earlier operands of
     /// its rvalue, and the whole rvalue before its write.
     pending: Vec<(LocalId, u32)>,
+    /// The locals those moves moved: moved for the statement's later accesses, beside the ones
+    /// the state marks.
+    moved_now: Vec<LocalId>,
+    /// Per loan: how many of the live tracked locals hold it at the point reached. A loan is
+    /// live while that is not zero.
+    holders: Vec<u32>,
+    /// Per tracked local: the id of the set whose loans are counted for it in `holders` (0:
+    /// none). At a point reached that is its set if it is live.
+    counted_id: Vec<u32>,
+    /// The tracked locals that may have a set counted, each once (`in_counted`).
+    counted: Vec<u32>,
+    in_counted: Vec<bool>,
+    /// The live loans of each local, chained: per local the first one that is not `&mut` and
+    /// the first `&mut` one, per loan the next and the one before (`u32::MAX`: none).
+    first: Vec<LoanId>,
+    next: Vec<LoanId>,
+    prev: Vec<LoanId>,
+    /// The block being checked, and its number among the blocks checked.
+    block: usize,
+    block_no: u32,
+    /// Per tracked local: whether it is live at the point reached. It holds for the locals
+    /// with `known_at == block_no`; any other is not named by the block, and is live in all
+    /// of it or in none of it.
+    live: Vec<bool>,
+    known_at: Vec<u32>,
+    /// With an entry state per block ([`Flow::exact`]): the loans the live locals reach, while
+    /// they are counted in `holders` ([`Cx::open`]); its scratch.
+    reached: Option<Set>,
+    live_held: Vec<u32>,
+    /// Per statement of the block being checked: the tracked locals it uses last, as a range
+    /// of `dies`, and the tracked local it defines that is used later (`u32::MAX`: none).
+    last_uses: Vec<(u32, u32)>,
+    dies: Vec<u32>,
+    born: Vec<u32>,
+}
+
+/// The chain of loan `l`'s local that the loan is in while it is live ([`Cx::first`]).
+fn chain(body: &Body, l: usize) -> usize {
+    let loan = &body.loans[l];
+    2 * loan.place.local as usize + usize::from(loan.mutable && !loan.reserved)
 }
 
 impl Cx<'_, '_> {
+    /// One more live local holds loan `l`.
+    fn hold(&mut self, l: usize) {
+        self.holders[l] += 1;
+        if self.holders[l] > 1 {
+            return;
+        }
+        let c = chain(self.flow.body, l);
+        let head = self.first[c];
+        self.next[l] = head;
+        self.prev[l] = u32::MAX;
+        if head != u32::MAX {
+            self.prev[head as usize] = l as LoanId;
+        }
+        self.first[c] = l as LoanId;
+    }
+
+    /// One live local less holds loan `l`.
+    fn release(&mut self, l: usize) {
+        self.holders[l] -= 1;
+        if self.holders[l] > 0 {
+            return;
+        }
+        let (next, prev) = (self.next[l], self.prev[l]);
+        if next != u32::MAX {
+            self.prev[next as usize] = prev;
+        }
+        if prev != u32::MAX {
+            self.next[prev as usize] = next;
+        } else {
+            let c = chain(self.flow.body, l);
+            self.first[c] = next;
+        }
+    }
+
+    /// Counts the loans of set `id` for tracked local `t` in place of the ones counted for
+    /// it (0: none).
+    fn count(&mut self, t: u32, id: u32) {
+        let old = self.counted_id[t as usize];
+        if old == id {
+            return;
+        }
+        let nloans = self.flow.atoms.nloans;
+        // the new ones first: a loan both sets hold stays live
+        for k in 0..self.flow.sets.get(id).len() {
+            let a = self.flow.sets.get(id).atoms()[k] as usize;
+            if a >= nloans {
+                break;
+            }
+            self.hold(a);
+        }
+        for k in 0..self.flow.sets.get(old).len() {
+            let a = self.flow.sets.get(old).atoms()[k] as usize;
+            if a >= nloans {
+                break;
+            }
+            self.release(a);
+        }
+        self.counted_id[t as usize] = id;
+        if id != 0 && !self.in_counted[t as usize] {
+            self.in_counted[t as usize] = true;
+            self.counted.push(t);
+        }
+    }
+
+    /// Whether tracked local `t` is live at the point reached.
+    fn alive(&mut self, t: u32) -> bool {
+        if self.known_at[t as usize] != self.block_no {
+            self.known_at[t as usize] = self.block_no;
+            self.live[t as usize] = self.flow.live.live_in(t, self.block as u32);
+        }
+        self.live[t as usize]
+    }
+
+    /// With an entry state per block the live loans are not kept from statement to statement
+    /// (they are closed under what the borrowed locals hold in the state): counts the loans the
+    /// live locals reach in `st`, until [`Cx::close`].
+    fn open(&mut self, st: &State) {
+        if !self.flow.exact() {
+            return;
+        }
+        let mut live = std::mem::take(&mut self.live_held);
+        live.clear();
+        for &t in st.held() {
+            if self.alive(t) {
+                live.push(t);
+            }
+        }
+        let reached = self.flow.live_loans(st, &live);
+        self.live_held = live;
+        let nloans = self.flow.atoms.nloans;
+        for a in reached.iter().filter(|&a| a < nloans) {
+            self.hold(a);
+        }
+        self.reached = Some(reached);
+    }
+
+    fn close(&mut self) {
+        let Some(reached) = self.reached.take() else { return };
+        let nloans = self.flow.atoms.nloans;
+        for a in reached.iter().filter(|&a| a < nloans) {
+            self.release(a);
+        }
+    }
+
+    /// Applies statement `i` of the block being checked to `st` and moves the live locals and
+    /// loans to the point after it.
+    fn step(&mut self, st: &mut State, s: &Stmt, i: usize) {
+        let (lo, hi) = self.last_uses[i];
+        let born = self.born[i];
+        let exact = self.flow.exact();
+        if !exact {
+            st.record();
+        }
+        self.flow.apply(&s.kind, st);
+        for k in lo..hi {
+            let t = self.dies[k as usize];
+            self.live[t as usize] = false;
+        }
+        if born != u32::MAX {
+            self.live[born as usize] = true;
+        }
+        if exact {
+            return;
+        }
+        // the locals whose set or liveness the statement changed
+        for k in 0..st.recorded().len() {
+            let t = st.recorded()[k].0;
+            let id = if self.alive(t) { st.id(t) } else { 0 };
+            self.count(t, id);
+        }
+        for k in lo..hi {
+            self.count(self.dies[k as usize], 0);
+        }
+        if born != u32::MAX {
+            self.count(born, st.id(born));
+        }
+    }
+
+    /// Checks the statements of block `b`, entered in state `st`.
+    fn block(&mut self, st: &mut State, b: usize) {
+        self.block = b;
+        self.block_no += 1;
+        let flow = &*self.flow;
+        let blk = &flow.body.blocks[b];
+        let n = blk.stmts.len();
+        // backward from the block's end: what each statement ends and starts. A local is first
+        // met with its liveness at the end, and has its liveness at the entry after the walk.
+        self.dies.clear();
+        self.last_uses.clear();
+        self.last_uses.resize(n, (0, 0));
+        self.born.clear();
+        self.born.resize(n, u32::MAX);
+        let block_no = self.block_no;
+        let (live, known_at) = (&mut self.live, &mut self.known_at);
+        for (i, s) in blk.stmts.iter().enumerate().rev() {
+            let def = stmt_def(s).map(|d| flow.tracked[d as usize]).filter(|&t| t != u32::MAX);
+            let mut after = false;
+            if let Some(t) = def {
+                if known_at[t as usize] != block_no {
+                    known_at[t as usize] = block_no;
+                    live[t as usize] = flow.live.live_out(t, b as u32);
+                }
+                after = live[t as usize];
+                live[t as usize] = false;
+            }
+            let lo = self.dies.len() as u32;
+            stmt_uses(s, |l, _| {
+                let t = flow.tracked[l as usize];
+                if t == u32::MAX {
+                    return;
+                }
+                if known_at[t as usize] != block_no {
+                    known_at[t as usize] = block_no;
+                    live[t as usize] = flow.live.live_out(t, b as u32);
+                }
+                if !live[t as usize] {
+                    live[t as usize] = true;
+                    if !(after && def == Some(t)) {
+                        self.dies.push(t);
+                    }
+                }
+            });
+            self.last_uses[i] = (lo, self.dies.len() as u32);
+            if let Some(t) = def
+                && after
+                && !live[t as usize]
+            {
+                self.born[i] = t;
+            }
+        }
+        if !flow.exact() {
+            self.recount(st, b);
+        }
+        let body = self.flow.body;
+        for (i, s) in body.blocks[b].stmts.iter().enumerate() {
+            self.pending.clear();
+            self.moved_now.clear();
+            self.stmt(st, (b as u32, i as u32), s, i);
+        }
+    }
+
+    /// Makes the counted sets those of the locals live at the entry of block `b`, entered in
+    /// state `st`, from what the block checked before left counted.
+    fn recount(&mut self, st: &State, b: usize) {
+        // a block entered in its entry state: that keeps the sets of the live locals only
+        let fresh = !self.flow.carried(b);
+        if !fresh {
+            let before = self.flow.preds[b][0] as usize;
+            if self.flow.body.blocks[before].term.succs().len() == 1 {
+                // the point after the block before: nothing has changed
+                return;
+            }
+        }
+        let mut k = 0;
+        for i in 0..self.counted.len() {
+            let t = self.counted[i];
+            let id = if fresh || self.alive(t) { st.id(t) } else { 0 };
+            self.count(t, id);
+            if id == 0 {
+                self.in_counted[t as usize] = false;
+            } else {
+                self.counted[k] = t;
+                k += 1;
+            }
+        }
+        self.counted.truncate(k);
+        for i in 0..st.held().len() {
+            let t = st.held()[i];
+            if self.counted_id[t as usize] == 0 && (fresh || self.alive(t)) {
+                self.count(t, st.id(t));
+            }
+        }
+    }
+
+    /// Checks an access against the live loans and the moved places. With an entry state per
+    /// block the live loans are those of the innermost [`Cx::open`].
     #[allow(clippy::too_many_arguments)]
     fn access(
         &mut self,
         st: &State,
-        live: &Bits,
         at: (u32, u32),
         kind: Access,
         place: &Place,
@@ -349,19 +549,21 @@ impl Cx<'_, '_> {
         exclude: &[LoanId],
     ) {
         let mut loans = Vec::new();
-        for l in live.iter() {
-            if l >= self.flow.atoms.nloans || exclude.contains(&(l as LoanId)) {
-                continue;
+        // only a loan of the same local can conflict, and with an access that is not
+        // exclusive only a `&mut` one
+        for of_mut in [true, false] {
+            if !of_mut && !kind.exclusive() {
+                break;
             }
-            let loan = self.flow.loan(l as LoanId);
-            let loan_mut = loan.mutable && !loan.reserved;
-            if !(kind.exclusive() || loan_mut) {
-                continue;
-            }
-            if places_conflict(place, &loan.place, kind) {
-                loans.push(l as LoanId);
+            let mut l = self.first[2 * place.local as usize + usize::from(of_mut)];
+            while l != u32::MAX {
+                if !exclude.contains(&l) && places_conflict(place, &self.flow.loan(l).place, kind) {
+                    loans.push(l);
+                }
+                l = self.next[l as usize];
             }
         }
+        loans.sort_unstable();
         let mut verdict = None;
         let mut reported = None;
         if !loans.is_empty() {
@@ -379,7 +581,7 @@ impl Cx<'_, '_> {
         // use after move (implicit drops of moved values are no-ops); a write of the whole local
         // initializes it again, a write of a part of it uses it
         if !matches!(kind, Access::Drop | Access::StorageDead)
-            && st.moved.contains(place.local as usize)
+            && (st.is_moved(place.local) || self.moved_now.contains(&place.local))
             && !(kind == Access::Write && place.proj.is_empty())
             && let Some(site) = self.move_site(at, place.local)
         {
@@ -437,19 +639,23 @@ impl Cx<'_, '_> {
         best
     }
 
-    fn operand(&mut self, st: &State, live: &Bits, at: (u32, u32), o: &Operand) {
+    fn operand(&mut self, st: &State, at: (u32, u32), o: &Operand) {
         let kind = match o.kind {
             OpKind::Const => return,
             OpKind::Copy => Access::Read,
             OpKind::Move => Access::Move,
         };
-        self.access(st, live, at, kind, &o.place, o.span, o.node, &[]);
+        self.access(st, at, kind, &o.place, o.span, o.node, &[]);
     }
 
-    /// `live`: loans live at the statement (its operands are read); `after`: loans live after it
-    /// (the assignment's write happens last).
-    fn stmt(&mut self, st: &State, live: &Bits, after: &Bits, at: (u32, u32), s: &Stmt) {
+    /// Checks statement `i` of the block, `s`, and steps `st` over it. Its operands are read
+    /// under the loans live before it; an assignment's write happens last, under the loans live
+    /// after it. Those are read from the state after the statement: the value the statement
+    /// gives its destination may hold a loan that no other live local holds
+    /// (`x = V.{ r: &x.f }`: the write of `x` ends the value the new one borrows).
+    fn stmt(&mut self, st: &mut State, at: (u32, u32), s: &Stmt, i: usize) {
         let body = self.flow.body;
+        self.open(st);
         match &s.kind {
             StmtKind::Assign { dest, rv, init } => {
                 match rv {
@@ -463,7 +669,7 @@ impl Cx<'_, '_> {
                             Access::SharedBorrow
                         };
                         let (capture, cast) = (l.capture, l.cast);
-                        self.access(st, live, at, kind, place, s.span, s.node, &[]);
+                        self.access(st, at, kind, place, s.span, s.node, &[]);
                         if *mutable
                             && !capture
                             && let Err((shared, blame)) = mutability(body, place)
@@ -480,16 +686,20 @@ impl Cx<'_, '_> {
                     _ => {
                         // operands are evaluated left to right: each sees the moves of the ones
                         // before it
-                        let mut moved: Option<State> = None;
                         for_each_op(rv, |o| {
-                            self.operand(moved.as_ref().unwrap_or(st), live, at, o);
+                            self.operand(st, at, o);
                             if o.kind == OpKind::Move {
-                                moved.get_or_insert_with(|| st.clone()).moved.insert(o.place.local as usize);
+                                self.moved_now.push(o.place.local);
                                 self.pending.push((o.place.local, o.site));
                             }
                         });
                     }
                 }
+                // the stores are judged in the state before the statement, and reported after
+                // its write
+                let stores = self.stores(st, s, dest, rv);
+                self.close();
+                self.step(st, s, i);
                 if !*init {
                     // the write happens after the right side: its moves count (`s.a = f(s)`)
                     let mut moves = Vec::new();
@@ -498,16 +708,11 @@ impl Cx<'_, '_> {
                             moves.push((o.place.local, o.site));
                         }
                     });
-                    if moves.is_empty() {
-                        self.access(st, after, at, Access::Write, dest, s.span, s.node, &[]);
-                    } else {
-                        let mut st2 = st.clone();
-                        for &(l, _) in &moves {
-                            st2.moved.insert(l as usize);
-                        }
-                        self.pending.extend(moves);
-                        self.access(&st2, after, at, Access::Write, dest, s.span, s.node, &[]);
-                    }
+                    self.moved_now.extend(moves.iter().map(|m| m.0));
+                    self.pending.extend(moves);
+                    self.open(st);
+                    self.access(st, at, Access::Write, dest, s.span, s.node, &[]);
+                    self.close();
                     if let Err((shared, blame)) = mutability(body, dest) {
                         self.findings.push(Finding::Immutable {
                             place: dest.clone(),
@@ -518,71 +723,84 @@ impl Cx<'_, '_> {
                         });
                     }
                 }
-                // what the callee may store through its `&mut` arguments, per target argument,
-                // with the values as they are once all of the call's stores are made
-                if let Rvalue::Call { args, stores, .. } = rv
-                    && !stores.is_empty()
-                {
-                    let mut made = st.clone();
-                    let (groups, _) = self.flow.settle_call(&mut made, args, stores);
-                    for CallStore { target, into_view, ptr, val } in groups {
-                        let Some(arg) = args.get(target as usize) else { continue };
-                        if let Err(m) = self.flow.store_fits(&made, &ptr, &val, None, Some(into_view)) {
-                            // a pointer held in a named local is written through; a temporary is
-                            // named by its expression
-                            let mut place = arg.place.clone();
-                            if !body.locals[place.local as usize].temp {
-                                place.proj.push(Proj::Deref(DerefKind::Mut));
-                            }
-                            let why = Unfit::of(m, val.is_subset(&self.flow.contents_of(st, &ptr)));
-                            self.findings.push(Finding::ViewWrite { place, span: s.span, why });
-                        }
-                    }
-                }
-                // a write through a dereference stores into the view objects the pointer may
-                // point to; a write into a closure's capture (a reference to an outer local
-                // whose origins the outer body fixed when it created the closure) may store only
-                // origins the capture already has
-                let capture = body.locals[dest.local as usize].capture.is_some();
-                if (dest.has_deref() || capture)
-                    && self.flow.is_ref_like(dest.ty)
-                    && !matches!(rv, Rvalue::Pure(_))
-                {
-                    let (val, _) = self.flow.rv_origins(st, rv, dest.ty);
-                    let why = if dest.has_deref() {
-                        let (target, ptr) = self.flow.place_origins(st, dest);
-                        let ptr = ptr.unwrap_or_else(|| self.flow.empty());
-                        let direct =
-                            if dest.derefs() == 1 { body.locals[dest.local as usize].param } else { None };
-                        let fit = self.flow.store_fits(st, &ptr, &val, direct, None);
-                        fit.err().map(|m| Unfit::of(m, val.is_subset(&target)))
-                    } else {
-                        let mut t = self.flow.empty();
-                        if let Some(p) = body.locals[dest.local as usize].param {
-                            t.insert(self.flow.atoms.pb(p));
-                        }
-                        (!val.is_subset(&t)).then_some(Unfit::Origins)
-                    };
-                    if let Some(why) = why {
-                        self.findings.push(Finding::ViewWrite { place: dest.clone(), span: s.span, why });
-                    }
-                }
+                self.findings.extend(stores);
+                return;
             }
             StmtKind::Activate { reserved, active, .. } => {
                 let p = self.flow.loan(*reserved).place.clone();
-                self.access(st, live, at, Access::Activate, &p, s.span, s.node, &[*reserved, *active]);
+                self.access(st, at, Access::Activate, &p, s.span, s.node, &[*reserved, *active]);
             }
-            StmtKind::Read(o) => self.operand(st, live, at, o),
-            StmtKind::Drop(p) => self.access(st, live, at, Access::Drop, p, s.span, s.node, &[]),
+            StmtKind::Read(o) => self.operand(st, at, o),
+            StmtKind::Drop(p) => self.access(st, at, Access::Drop, p, s.span, s.node, &[]),
             StmtKind::StorageDead(l) => {
                 let p = Place::local(*l, body.locals[*l as usize].ty);
-                self.access(st, live, at, Access::StorageDead, &p, s.span, s.node, &[]);
+                self.access(st, at, Access::StorageDead, &p, s.span, s.node, &[]);
             }
             StmtKind::Return(o) => {
-                self.operand(st, live, at, o);
+                self.operand(st, at, o);
                 self.ret(st, o);
             }
         }
+        self.close();
+        self.step(st, s, i);
+    }
+
+    /// E0513: the stores of assignment `s` that do not fit, judged in the state `st` before
+    /// it (which is left as it was).
+    fn stores(&mut self, st: &mut State, s: &Stmt, dest: &Place, rv: &Rvalue) -> Vec<Finding> {
+        let body = self.flow.body;
+        let mut out = Vec::new();
+        // what the callee may store through its `&mut` arguments, per target argument,
+        // with the values as they are once all of the call's stores are made
+        if let Rvalue::Call { args, stores, .. } = rv
+            && !stores.is_empty()
+        {
+            st.record();
+            let (groups, _) = self.flow.settle_call(st, args, stores);
+            let mut unfit = Vec::new();
+            for CallStore { target, into_view, ptr, val } in groups {
+                let Some(arg) = args.get(target as usize) else { continue };
+                if let Err(m) = self.flow.store_fits(st, &ptr, &val, None, Some(into_view)) {
+                    unfit.push((arg, m, ptr, val));
+                }
+            }
+            st.undo();
+            for (arg, m, ptr, val) in unfit {
+                // a pointer held in a named local is written through; a temporary is
+                // named by its expression
+                let mut place = arg.place.clone();
+                if !body.locals[place.local as usize].temp {
+                    place.proj.push(Proj::Deref(DerefKind::Mut));
+                }
+                let why = Unfit::of(m, val.is_subset(&self.flow.contents_of(st, &ptr)));
+                out.push(Finding::ViewWrite { place, span: s.span, why });
+            }
+        }
+        // a write through a dereference stores into the view objects the pointer may
+        // point to; a write into a closure's capture (a reference to an outer local
+        // whose origins the outer body fixed when it created the closure) may store only
+        // origins the capture already has
+        let capture = body.locals[dest.local as usize].capture.is_some();
+        if (dest.has_deref() || capture) && self.flow.is_ref_like(dest.ty) && !matches!(rv, Rvalue::Pure(_)) {
+            let (val, _) = self.flow.rv_origins(st, rv, dest.ty);
+            let why = if dest.has_deref() {
+                let (target, ptr) = self.flow.place_origins(st, dest);
+                let ptr = ptr.unwrap_or_else(|| self.flow.empty());
+                let direct = if dest.derefs() == 1 { body.locals[dest.local as usize].param } else { None };
+                let fit = self.flow.store_fits(st, &ptr, &val, direct, None);
+                fit.err().map(|m| Unfit::of(m, val.is_subset(&target)))
+            } else {
+                let mut t = self.flow.empty();
+                if let Some(p) = body.locals[dest.local as usize].param {
+                    t.insert(self.flow.atoms.pb(p));
+                }
+                (!val.is_subset(&t)).then_some(Unfit::Origins)
+            };
+            if let Some(why) = why {
+                out.push(Finding::ViewWrite { place: dest.clone(), span: s.span, why });
+            }
+        }
+        out
     }
 
     fn ret(&mut self, st: &State, o: &Operand) {
@@ -635,7 +853,7 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         // moves. The dump lists every access, so it takes the general path.
         let mut findings = Vec::new();
         for (b, blk) in body.blocks.iter().enumerate() {
-            if flow.entry[b].is_none() {
+            if !flow.reached(b) {
                 continue;
             }
             for s in &blk.stmts {
@@ -656,33 +874,69 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         guard_effects(body, &mut findings);
         return Checked { findings, dump: Vec::new() };
     }
-    let lo = live_out(flow);
-    let mut cx = Cx { flow, findings: Vec::new(), dump: Vec::new(), want_dump, pending: Vec::new() };
-    for b in 0..body.blocks.len() {
-        let Some(mut st) = cx.flow.entry[b].clone() else { continue };
-        let la = live_after(cx.flow, b, &lo[b]);
-        for (i, s) in body.blocks[b].stmts.iter().enumerate() {
-            let li = live_in(cx.flow, s, &la[i]);
-            let live = cx.flow.live_loans(&st, &li);
-            // The loans live after the statement are read from the state after it: the value
-            // the statement gives its destination may hold a loan that no other live local
-            // holds (`x = V.{ r: &x.f }`: the write of `x` ends the value the new one borrows).
-            let mut post = st.clone();
-            cx.flow.apply(&s.kind, &mut post);
-            let after = cx.flow.live_loans(&post, &la[i]);
-            cx.pending.clear();
-            cx.stmt(&st, &live, &after, (b as u32, i as u32), s);
-            st = post;
+    let (nt, nloans) = (flow.ntracked, flow.atoms.nloans);
+    let mut cx = Cx {
+        holders: vec![0; nloans],
+        counted_id: vec![0; nt],
+        counted: Vec::new(),
+        in_counted: vec![false; nt],
+        first: vec![u32::MAX; 2 * body.locals.len()],
+        next: vec![u32::MAX; nloans],
+        prev: vec![u32::MAX; nloans],
+        block: 0,
+        block_no: 0,
+        live: vec![false; nt],
+        known_at: vec![0; nt],
+        reached: None,
+        live_held: Vec::new(),
+        last_uses: Vec::new(),
+        dies: Vec::new(),
+        born: Vec::new(),
+        flow,
+        findings: Vec::new(),
+        dump: Vec::new(),
+        want_dump,
+        pending: Vec::new(),
+        moved_now: Vec::new(),
+    };
+    // The walk follows the reverse postorder, where a block without an entry state comes right
+    // after the block whose end state it takes; the findings are then put in block order.
+    let mut st = cx.flow.state();
+    let order = cx.flow.rpo.clone();
+    let mut have = false;
+    let mut found: Vec<(u32, Vec<Finding>)> = Vec::new();
+    let mut dumped: Vec<(u32, Vec<DumpAccess>)> = Vec::new();
+    for &b in &order {
+        if !cx.flow.carried(b as usize) {
+            have = cx.flow.load(b as usize, &mut st);
+        }
+        if !have {
+            continue;
+        }
+        cx.block(&mut st, b as usize);
+        if body.blocks[b as usize].term.succs().len() > 1 {
+            // the walk goes on in one successor: what is dead in all of them is not looked
+            // at again
+            cx.flow.prune(b as usize, &mut st);
+        }
+        if !cx.findings.is_empty() {
+            found.push((b, std::mem::take(&mut cx.findings)));
+        }
+        if !cx.dump.is_empty() {
+            dumped.push((b, std::mem::take(&mut cx.dump)));
         }
     }
-    let mut findings = cx.findings;
+    cx.flow.recycle(st);
+    found.sort_by_key(|x| x.0);
+    dumped.sort_by_key(|x| x.0);
+    let mut findings: Vec<Finding> = found.into_iter().flat_map(|x| x.1).collect();
     bad_moves(body, &mut findings);
     guard_effects(body, &mut findings);
-    Checked { findings, dump: cx.dump }
+    Checked { findings, dump: dumped.into_iter().flat_map(|x| x.1).collect() }
 }
 
 /// E0505: one finding per span of what the body's guards do besides reading.
-fn guard_effects(body: &Body, findings: &mut Vec<Finding>) {
+pub(crate) fn guard_effects(body: &Body, findings: &mut Vec<Finding>) {
     let mut seen: Vec<Span> = Vec::new();
     for (span, what) in &body.guard_effects {
         if seen.contains(span) {
@@ -694,7 +948,7 @@ fn guard_effects(body: &Body, findings: &mut Vec<Finding>) {
 }
 
 /// E0504: one finding per span of the body's bad moves.
-fn bad_moves(body: &Body, findings: &mut Vec<Finding>) {
+pub(crate) fn bad_moves(body: &Body, findings: &mut Vec<Finding>) {
     let mut seen: Vec<Span> = Vec::new();
     for (place, span, why) in &body.bad_moves {
         if seen.contains(span) {
@@ -719,6 +973,9 @@ pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(S
     let mut work = std::collections::BinaryHeap::new();
     work.push(Reverse((0usize, usize::MAX, at.0, at.1)));
     let mut best: Option<(usize, Span, bool)> = None;
+    let mut st = flow.state();
+    // the state at the end of a block walked, for the successor that has no entry state
+    let mut handed: FxHashMap<u32, Saved> = FxHashMap::default();
     while let Some(Reverse((d, again, b, from))) = work.pop() {
         if best.is_some_and(|x| x.0 < d) {
             break;
@@ -729,7 +986,16 @@ pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(S
             }
             seen[b as usize] = true;
         }
-        let Some(mut st) = flow.entry[b as usize].clone() else { continue };
+        let ready = match handed.remove(&b) {
+            Some(e) if from == 0 => {
+                flow.restore(&e, &mut st);
+                true
+            }
+            _ => flow.enter(b as usize, &mut st),
+        };
+        if !ready {
+            continue;
+        }
         let stmts = &body.blocks[b as usize].stmts;
         let mut found: Option<(usize, Span)> = None;
         for (i, s) in stmts.iter().enumerate() {
@@ -757,18 +1023,24 @@ pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(S
         let len = stmts.len().saturating_sub(from as usize);
         for &succ in body.blocks[b as usize].term.succs() {
             let next = if again == usize::MAX { back_edge(body, b, succ) } else { again };
+            if flow.carried(succ as usize) && !seen[succ as usize] {
+                let mut e = Saved::default();
+                flow.keep(succ as usize, &st, &mut e);
+                handed.insert(succ, e);
+            }
             work.push(Reverse((d + len + 1, next, succ, 0)));
         }
     }
+    flow.recycle(st);
     best.map(|x| (x.1, x.2))
 }
 
 /// The loop whose head the edge `from -> to` goes back to, from inside it (`usize::MAX`: none).
-fn back_edge(body: &Body, from: u32, to: u32) -> usize {
+pub(crate) fn back_edge(body: &Body, from: u32, to: u32) -> usize {
     body.loops.iter().position(|&l| to == l.0 && in_loop(l, from)).unwrap_or(usize::MAX)
 }
 
 /// Whether block `b` is one of the blocks of loop `(head, exit, end)`.
-fn in_loop((head, exit, end): (u32, u32, u32), b: u32) -> bool {
+pub(crate) fn in_loop((head, exit, end): (u32, u32, u32), b: u32) -> bool {
     b >= head && b < end && b != exit
 }

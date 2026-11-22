@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// A value read through a borrow of a reference borrows what the reference held when the borrow
+// was made, on every path, also when a later store adds origins to another view object.
+import std.io;
+
+fn main() -> i32 {
+    let mut a: u32 = 1;
+    let b: u32 = 2;
+    let c: u32 = 3;
+    let d: u32 = 4;
+    let mut x: &u32 = &a;
+    let p = &x;
+    x = &b; //~ ERROR E0501
+    let y: &u32 = *p;
+    if c > 0 {
+        a = 5; //~ ERROR E0501
+    } else {
+        a = 6; //~ ERROR E0501
+    }
+    let mut v: &u32 = &c;
+    let q = &mut v;
+    *q = &d;
+    let s: u32 = *y +% *v;
+    io.print(f"{s}\n");
+    return 0;
+}

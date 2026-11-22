@@ -35,12 +35,16 @@
 pub mod bits;
 pub mod cfg;
 pub mod check;
+pub mod live;
 pub mod loans;
 pub mod locks;
+pub mod old;
 pub mod report;
+pub mod set;
 pub mod ty;
 
 use std::cell::Cell;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -77,6 +81,8 @@ pub struct Borrowck {
     pub locks: Vec<stave_sema::ranks::BodyLocks>,
     /// The types each checked body may drop, in body order.
     pub drops: Vec<stave_sema::ranks::BodyDrops>,
+    /// What the sparse dataflow did, summed over the bodies.
+    pub cost: loans::Cost,
 }
 
 impl Borrowck {
@@ -87,11 +93,38 @@ impl Borrowck {
     }
 }
 
+/// Which dataflow checks the bodies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Dataflow {
+    /// [`loans`] and [`check`].
+    #[default]
+    Sparse,
+    /// [`old`].
+    Dense,
+    /// Both: a body for which they give different diagnostics or dump lines is not checked and
+    /// fails the run as an internal error ([`Borrowck::internal`]).
+    Both,
+}
+
+impl Dataflow {
+    /// The choice of `STAVE_BORROW_DATAFLOW`, read once: `old` is the dense one, `both` both,
+    /// anything else the sparse one.
+    pub fn from_env() -> Dataflow {
+        static CHOICE: OnceLock<Dataflow> = OnceLock::new();
+        *CHOICE.get_or_init(|| match std::env::var("STAVE_BORROW_DATAFLOW").as_deref() {
+            Ok("old") => Dataflow::Dense,
+            Ok("both") => Dataflow::Both,
+            _ => Dataflow::Sparse,
+        })
+    }
+}
+
 /// Options.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     /// Collect the `borrow` dump.
     pub dump: bool,
+    pub dataflow: Dataflow,
 }
 
 struct One {
@@ -102,6 +135,7 @@ struct One {
     rounds: u32,
     phases: [Duration; 3],
     locks: locks::Scan,
+    cost: loans::Cost,
 }
 
 /// Borrow-checks every fn body of the program without a type error.
@@ -141,6 +175,7 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
         let Some(r) = r else { continue };
         out.checked += 1;
         out.max_rounds = out.max_rounds.max(r.rounds);
+        out.cost.add(r.cost);
         for (a, b) in out.phases.iter_mut().zip(r.phases) {
             *a += b;
         }
@@ -223,6 +258,7 @@ fn check_body(
         rounds: 0,
         phases: [t0.elapsed(), Duration::ZERO, Duration::ZERO],
         locks: locks::Scan { drops: Some(Vec::new()), ..locks::Scan::default() },
+        cost: loans::Cost::default(),
     };
     if body.unsupported.is_none() && body.internal.is_none() {
         check_tree(&body, &mut tys, opts, tb.item.0, &mut one);
@@ -233,18 +269,84 @@ fn check_body(
     Some(one)
 }
 
-fn check_tree(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item: u32, one: &mut One) {
+/// Checks `root` and then the bodies nested in it, each before the ones nested in it, in order.
+fn check_tree(root: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item: u32, one: &mut One) {
+    let mut todo: Vec<&cfg::Body> = vec![root];
+    while let Some(body) = todo.pop() {
+        check_body_flow(body, tys, opts, item, one);
+        todo.extend(body.nested.iter().rev());
+    }
+}
+
+/// What a dataflow found in one body.
+#[derive(PartialEq, Eq)]
+struct Found {
+    diags: Vec<Diagnostic>,
+    dump: Vec<DumpAccess>,
+}
+
+/// One body under the sparse dataflow.
+fn sparse<'b>(
+    body: &'b cfg::Body,
+    tys: &mut ty::Tys<'_>,
+    dump: bool,
+    phases: &mut [Duration; 3],
+) -> (Found, loans::Flow<'b>) {
     let t0 = Instant::now();
     let mut flow = loans::Flow::new(body, tys);
     flow.solve();
-    one.rounds = one.rounds.max(flow.rounds);
     let t1 = Instant::now();
-    let c = check::check(&mut flow, opts.dump);
-    one.diags.extend(report::diagnostics(&mut flow, tys, c.findings));
-    one.phases[1] += t1 - t0;
-    one.phases[2] += t1.elapsed();
-    one.dump.extend(c.dump.into_iter().map(|d| (item, d)));
-    let l = locks::scan(&flow, tys);
+    let c = check::check(&mut flow, dump);
+    let diags =
+        report::diagnostics(body, tys, c.findings, &mut |at, loan| check::later_use(&mut flow, at, loan));
+    phases[1] += t1 - t0;
+    phases[2] += t1.elapsed();
+    (Found { diags, dump: c.dump }, flow)
+}
+
+/// One body under the dense dataflow.
+fn dense<'b>(
+    body: &'b cfg::Body,
+    tys: &mut ty::Tys<'_>,
+    dump: bool,
+    phases: &mut [Duration; 3],
+) -> (Found, old::loans::Flow<'b>) {
+    let t0 = Instant::now();
+    let mut flow = old::loans::Flow::new(body, tys);
+    flow.solve();
+    let t1 = Instant::now();
+    let c = old::check::check(&mut flow, dump);
+    let diags = report::diagnostics(body, tys, c.findings, &mut |at, loan| {
+        old::check::later_use(&mut flow, at, loan)
+    });
+    phases[1] += t1 - t0;
+    phases[2] += t1.elapsed();
+    (Found { diags, dump: c.dump }, flow)
+}
+
+fn check_body_flow(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item: u32, one: &mut One) {
+    let (found, rounds, l) = match opts.dataflow {
+        Dataflow::Sparse | Dataflow::Both => {
+            let (found, flow) = sparse(body, tys, opts.dump, &mut one.phases);
+            if opts.dataflow == Dataflow::Both {
+                let (other, _) = dense(body, tys, opts.dump, &mut [Duration::ZERO; 3]);
+                if other != found {
+                    one.internal.get_or_insert("the sparse and the dense borrow dataflow disagree");
+                }
+            }
+            one.cost.add(flow.cost);
+            let l = locks::scan(body, &flow.rpo, &|t| flow.is_ref_like(t), tys);
+            (found, flow.rounds, l)
+        }
+        Dataflow::Dense => {
+            let (found, flow) = dense(body, tys, opts.dump, &mut one.phases);
+            let l = locks::scan(body, &flow.rpo, &|t| flow.is_ref_like(t), tys);
+            (found, flow.rounds, l)
+        }
+    };
+    one.rounds = one.rounds.max(rounds);
+    one.diags.extend(found.diags);
+    one.dump.extend(found.dump.into_iter().map(|d| (item, d)));
     one.locks.holds |= l.holds;
     one.locks.sites.extend(l.sites);
     one.locks.any.extend(l.any);
@@ -256,9 +358,6 @@ fn check_tree(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item: u32,
         }
         _ => None,
     };
-    for nb in &body.nested {
-        check_tree(nb, tys, opts, item, one);
-    }
 }
 
 // ---------- big-stack workers (the builder recurses over expression nesting) ----------

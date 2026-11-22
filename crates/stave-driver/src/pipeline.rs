@@ -238,6 +238,8 @@ pub struct Options {
     /// Contents that stand in for source files on disk ([`stave_sema::Config::sources`]): a
     /// check of edits that are not written yet.
     pub sources: std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    /// The borrow checker's dataflow. Default: [`stave_borrow::Dataflow::from_env`].
+    pub borrow_dataflow: stave_borrow::Dataflow,
 }
 
 impl Options {
@@ -256,6 +258,7 @@ impl Options {
             unchecked_borrows: false,
             effects_all: false,
             sources: std::collections::BTreeMap::new(),
+            borrow_dataflow: stave_borrow::Dataflow::from_env(),
         }
     }
 
@@ -521,7 +524,11 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
 
     // ---- borrowck (per body, parallel; bodies with a type error are skipped).
     let t0 = Instant::now();
-    let bc = stave_borrow::check(&program, &tc, stave_borrow::Options { dump: opts.borrow_dump });
+    let bc = stave_borrow::check(
+        &program,
+        &tc,
+        stave_borrow::Options { dump: opts.borrow_dump, dataflow: opts.borrow_dataflow },
+    );
     timings.push(timing(Stage::Borrowck, ms(t0.elapsed()), bc.checked));
     prof::part(".cfg-cpu", bc.phases[0]);
     prof::part(".dataflow-cpu", bc.phases[1]);
