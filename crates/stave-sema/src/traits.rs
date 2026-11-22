@@ -426,24 +426,24 @@ impl<'a> World<'a> {
         t: TypeId,
         binds: &mut [Option<GArg>],
     ) -> bool {
-        self.match_ty_in(cx, pat, t, binds, &mut false)
+        self.match_ty_in(cx, pat, t, binds)
     }
 
+    /// Exact: each pair of (pattern, type) components is matched once. A pair met again gives
+    /// the same answer (a param binds once, later occurrences compare), and types share
+    /// components, so the walk is linear in the distinct pairs, not in the leaves.
     fn match_ty_in<I: Interner + ?Sized>(
         &self,
         cx: &I,
         pat: TypeId,
         t: TypeId,
         binds: &mut [Option<GArg>],
-        exceeded: &mut bool,
     ) -> bool {
         let mut stack = vec![(pat, t)];
-        let mut steps = 0u32;
+        let mut seen: rustc_hash::FxHashSet<(TypeId, TypeId)> = rustc_hash::FxHashSet::default();
         while let Some((p, x)) = stack.pop() {
-            steps += 1;
-            if steps > 100_000 {
-                *exceeded = true;
-                return false;
+            if !seen.insert((p, x)) {
+                continue;
             }
             if p == x && !cx.has_params(p) {
                 continue;
@@ -1855,7 +1855,7 @@ fn heads_unify(
             }
         })
         .collect();
-    let mut u = Unifier { binds: vec![None; a.generics.len() + b.generics.len()], steps: 0 };
+    let mut u = Unifier { binds: vec![None; a.generics.len() + b.generics.len()], done: Default::default() };
     let bt = tys.subst(b.self_ty, &shift, None);
     if !u.unify(tys, a.self_ty, bt) {
         return None;
@@ -1889,14 +1889,13 @@ fn copy_impl_overlapping(w: &World<'_>, tys: &mut TypeTable, drop: &ImplDef) -> 
     })
 }
 
-/// Most steps of one [`heads_unify`].
-const UNIFY_STEPS: u32 = 100_000;
-
 /// Syntactic unification with an occurs check over the variables `binds` (type and const
-/// params; a variable is bound at most once and bindings never form a cycle).
+/// params; a variable is bound at most once and bindings never form a cycle). Exact and linear
+/// in the distinct components: a pair once unified stays unified (bindings only grow), so it is
+/// not unified again (`done`), and the occurs check visits each component once.
 struct Unifier {
     binds: Vec<Option<GArg>>,
-    steps: u32,
+    done: rustc_hash::FxHashSet<(TypeId, TypeId)>,
 }
 
 impl Unifier {
@@ -1924,12 +1923,12 @@ impl Unifier {
     fn occurs(&mut self, cx: &TypeTable, v: u32, t: TypeId) -> bool {
         let mut stack = vec![t];
         let mut kids = Vec::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         while let Some(x) = stack.pop() {
-            self.steps += 1;
-            if self.steps > UNIFY_STEPS {
-                return false;
-            }
             let x = self.resolve(cx, x);
+            if !seen.insert(x) {
+                continue;
+            }
             if let TypeKind::Param(i) = cx.kind(x) {
                 if *i == v {
                     return true;
@@ -1971,13 +1970,12 @@ impl Unifier {
         false
     }
 
-    /// `false`: `a` and `b` have no common instance. Past the step limit: `true`.
+    /// `false`: `a` and `b` have no common instance.
     fn unify(&mut self, cx: &TypeTable, a: TypeId, b: TypeId) -> bool {
         let mut stack = vec![(a, b)];
         while let Some((p, x)) = stack.pop() {
-            self.steps += 1;
-            if self.steps > UNIFY_STEPS {
-                return true;
+            if !self.done.insert((p, x)) {
+                continue;
             }
             let (p, x) = (self.resolve(cx, p), self.resolve(cx, x));
             if p == x || cx.is_error_ty(p) || cx.is_error_ty(x) {

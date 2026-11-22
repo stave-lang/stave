@@ -1846,13 +1846,13 @@ impl<'a> Walk<'a> {
         if si == Some(ti) && (sm || !tm) {
             return;
         }
-        let mut seen: Vec<TypeId> = Vec::new();
+        // each distinct component once (exact: every fn table it reaches is marked)
+        let mut seen: rustc_hash::FxHashSet<TypeId> = rustc_hash::FxHashSet::default();
         let mut work: Vec<TypeId> = [Some(ti), si].into_iter().flatten().collect();
         while let Some(t) = work.pop() {
-            if seen.contains(&t) || seen.len() > 4096 {
+            if !seen.insert(t) {
                 continue;
             }
-            seen.push(t);
             match self.cx.kind(t).clone() {
                 TypeKind::Fn { .. } => {
                     if let Some(tb) = self.table(t) {

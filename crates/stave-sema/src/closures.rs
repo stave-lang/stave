@@ -259,16 +259,16 @@ fn parents(icx: &ItemCx<'_>, lo: u32, root: u32) -> (u32, Vec<u32>) {
 /// outside a shared reference, a raw pointer, or a fn type.
 fn may_hold_mut<I: Interner + ?Sized>(prog: &crate::Program, tys: &I, t: TypeId) -> bool {
     let mut stack = vec![t];
-    let mut seen: Vec<TypeId> = Vec::new();
+    // each distinct component once (exact; types share components)
+    let mut seen: rustc_hash::FxHashSet<TypeId> = rustc_hash::FxHashSet::default();
     let mut kids = Vec::new();
     while let Some(x) = stack.pop() {
-        if x.is_none() || seen.len() > 4096 {
+        if x.is_none() {
             return true;
         }
-        if seen.contains(&x) {
+        if !seen.insert(x) {
             continue;
         }
-        seen.push(x);
         match tys.kind(x) {
             TypeKind::Ref { mutable: true, .. } | TypeKind::Param(_) | TypeKind::SelfTy | TypeKind::Error => {
                 return true;
