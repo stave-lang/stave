@@ -102,6 +102,9 @@ pub struct FnSig {
     pub param_origins: Vec<ParamOrigin>,
     /// stave-target `FeatureSet` bits.
     pub features: u64,
+    /// Each name `needs(..)` lists, in source order, with the feature bits it stands for (a
+    /// group name: its members').
+    pub needs_named: Vec<(String, u64)>,
     /// The deny clause ([`crate::effects::Effects`] bits) and the span of each effect it names.
     pub deny: u8,
     pub deny_spans: Vec<(u8, Span)>,
@@ -765,6 +768,18 @@ pub(crate) fn needs_bits<H: LowerHost + ?Sized>(h: &mut H, icx: &ItemCx<'_>, nd:
         }
     }
     fs.bits()
+}
+
+/// The names a `Needs` node lists, in source order, with the feature bits of each.
+fn needs_named(icx: &ItemCx<'_>, nd: u32) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    for f in icx.kids_vec(nd) {
+        let name = icx.tok_str(icx.a(f));
+        if let Some(set) = stave_target::FeatureSet::of_name(name) {
+            out.push((name.to_string(), set.bits()));
+        }
+    }
+    out
 }
 
 /// The effects a `without(..)` clause names, with the span of each; E1404 for an unknown name.
@@ -1663,6 +1678,7 @@ impl<'p> SigBuilder<'p> {
             Some(nd) => needs_bits(self, &icx, nd),
             None => 0,
         };
+        let mut needs_named = needs_node.map_or_else(Vec::new, |nd| needs_named(&icx, nd));
         if let Some(nd) = needs_node
             && let Some(what) = self.needs_forbidden(d, &decl)
         {
@@ -1671,6 +1687,7 @@ impl<'p> SigBuilder<'p> {
             let dg = mk("E0709", None, &[("what", what)], icx.node_span(nd), &[]);
             self.diags.extend(dg);
             features = 0;
+            needs_named = Vec::new();
         } else if needs_node.is_some()
             && stave_target::FeatureSet::from_bits(features)
                 .is_some_and(|fs| fs.is_owned_by(self.prog.target.arch()))
@@ -1758,6 +1775,7 @@ impl<'p> SigBuilder<'p> {
             origins,
             param_origins: Vec::new(),
             features,
+            needs_named,
             deny,
             deny_spans,
             is_unsafe,

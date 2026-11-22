@@ -201,21 +201,33 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
                 let mut seen: Vec<(usize, u32, bool)> = Vec::new();
                 let mut faulty = false;
                 // a struct with a private field cannot be taken apart outside its module, whichever
-                // fields the pattern names: reported once, where the missing-field rule would
-                // otherwise ask for the private fields
+                // fields the pattern names: reported once (not again where the path to a private
+                // struct is reported already), with no field error beside it, where the
+                // missing-field rule would otherwise ask for the private fields
+                let mut hidden = false;
                 if decl.kind == DeclKind::Struct
                     && let Some(fd) = v.fields.iter().find_map(|f| ck.hidden_field(f.decl))
                 {
-                    let tn = ck.prog.strings.get(decl.name).to_string();
-                    let module = ck.prog.module(fd.module).map_or(String::new(), |m| m.path_text.clone());
-                    let dg = mk(
-                        "E0106",
-                        Some("pattern"),
-                        &[("name", &tn), ("module", &module)],
-                        icx.tok_span(e),
-                        &[("decl", fd.name_span)],
-                    );
-                    ck.report(dg);
+                    let all = icx.uses(p);
+                    let through_module = all.len() >= 2
+                        && matches!(all[all.len() - 2].res, Res::Decl(m)
+                            if ck.prog.decl(m).is_some_and(|m| m.kind == DeclKind::Module));
+                    let path_reported = through_module && !decl.is_pub() && decl.module != icx.res_module();
+                    if !path_reported {
+                        let tn = ck.prog.strings.get(decl.name).to_string();
+                        let module = ck.prog.module(fd.module).map_or(String::new(), |m| m.path_text.clone());
+                        let dg = mk(
+                            "E0106",
+                            Some("pattern"),
+                            &[("name", &tn), ("module", &module)],
+                            icx.tok_span(e),
+                            &[("decl", fd.name_span)],
+                        );
+                        ck.report(dg);
+                    } else {
+                        ck.has_error = true;
+                    }
+                    hidden = true;
                     faulty = true;
                 }
                 for fp in kids {
@@ -227,8 +239,11 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
                     let Some(fi) = v.fields.iter().position(|f| f.name == name) else {
                         let tn = ck.show(pt);
                         let nm = ck.prog.strings.get(name).to_string();
-                        let dg = mk("E0208", None, &[("name", &nm), ("type", &tn)], icx.tok_span(fa), &[]);
-                        ck.report(dg);
+                        if !hidden {
+                            let dg =
+                                mk("E0208", None, &[("name", &nm), ("type", &tn)], icx.tok_span(fa), &[]);
+                            ck.report(dg);
+                        }
                         faulty = true;
                         if let Some(sp) = icx.child(fp, NodeKind::Pattern) {
                             check_pattern(ck, sp, ids::ERROR, pm);
@@ -242,7 +257,7 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
                     if let Some(&(_, first, first_binds)) = seen.iter().find(|x| x.0 == fi) {
                         let sub = icx.child(fp, NodeKind::Pattern);
                         // `P.{ a, a }` binds the name `a` twice, which is reported as that
-                        if !(first_binds && sub.is_none()) {
+                        if !hidden && !(first_binds && sub.is_none()) {
                             let nm = ck.prog.strings.get(name).to_string();
                             let scope = ck.prog.decl_path(v.decl);
                             let dg = mk(
