@@ -20,7 +20,7 @@ use stave_sema::ranks::{At, Held, HeldAt, Part};
 
 use crate::bits::Bits;
 use crate::cfg::{Body, LocalId, OpKind, Rvalue, StmtKind};
-use crate::loans::{Flow, for_each_op};
+use crate::loans::for_each_op;
 use crate::ty::Tys;
 
 /// The locks of one body (nested bodies are scanned separately).
@@ -77,9 +77,14 @@ fn later_parts(rest: &[crate::cfg::Stmt], p: &crate::cfg::Place) -> Option<Vec<s
     None
 }
 
-/// Scans `flow`'s body.
-pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
-    let body: &Body = flow.body;
+/// Scans `body`: `rpo` is the reverse postorder of its reachable blocks, `ref_like` whether a
+/// type of one of its locals is ref-like.
+pub fn scan(
+    body: &Body,
+    rpo: &[u32],
+    ref_like: &dyn Fn(stave_sema::TypeId) -> bool,
+    tys: &mut Tys<'_>,
+) -> Scan {
     let mut out = Scan { drops: Some(Vec::new()), ..Scan::default() };
     let mut drops_any = false;
     for b in &body.blocks {
@@ -95,7 +100,7 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
     let mut idx: Vec<u32> = vec![u32::MAX; body.locals.len()];
     let mut memo: Vec<(stave_sema::TypeId, Vec<Part>)> = Vec::new();
     for (i, l) in body.locals.iter().enumerate() {
-        if l.ty.is_none() || !flow.is_ref_like(l.ty) {
+        if l.ty.is_none() || !ref_like(l.ty) {
             continue;
         }
         let ps = match memo.iter().find(|m| m.0 == l.ty) {
@@ -158,7 +163,7 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
     };
     loop {
         let mut changed = false;
-        for &b in &flow.rpo {
+        for &b in rpo {
             let Some(mut st) = entry[b as usize].clone() else { continue };
             for s in &body.blocks[b as usize].stmts {
                 step(&s.kind, &mut st);
@@ -204,7 +209,7 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
     };
     let mut dropped: Vec<stave_sema::TypeId> = Vec::new();
     let mut any = Bits::new(n);
-    for &b in &flow.rpo {
+    for &b in rpo {
         let Some(mut st) = entry[b as usize].clone() else { continue };
         let stmts = &body.blocks[b as usize].stmts;
         for (si, s) in stmts.iter().enumerate() {

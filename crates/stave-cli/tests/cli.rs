@@ -234,6 +234,9 @@ fn bad_stave_threads_and_dump_stage_are_usage_errors() {
     let (c, _, err) = stave_env(&["check", &input("valid_small")], &[("STAVE_THREADS", "0")]);
     assert_eq!(c, 2);
     assert!(err.starts_with("stave: STAVE_THREADS must be a thread count"), "{err}");
+    let (c, _, err) = stave_env(&["check", &input("valid_small")], &[("STAVE_BORROW_DATAFLOW", "bth")]);
+    assert_eq!(c, 2, "{err}");
+    assert!(err.starts_with("stave: STAVE_BORROW_DATAFLOW must be `new`, `old` or `both`"), "{err}");
     let (c, _, err) = stave_env(&["check", &input("valid_small"), "--dump=lex", "--dump-dir", "/tmp/x"], &[]);
     assert_eq!(c, 2);
     assert!(err.contains("unknown --dump stage"), "{err}");

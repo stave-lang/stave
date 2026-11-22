@@ -1,0 +1,29 @@
+//~ STDOUT run_fn_value_needs_call.stdout
+// A value whose fn type keeps `needs(avx2)` may be made anywhere and is called where avx2 is
+// proven: in a `needs(avx2)` fn (a dispatch arm) and in a fn whose needs imply it.
+import std.io;
+
+fn k(x: u32) -> u32 needs(avx2) {
+    return x * 2;
+}
+
+fn call(f: fn(u32) -> u32 needs(avx2), x: u32) -> u32 needs(avx2) {
+    return f(x);
+}
+
+fn wide(x: u32) -> u32 needs(avx2) {
+    let f: fn(u32) -> u32 needs(avx2) = k;
+    return call(f, x) + f(1);
+}
+
+fn base(x: u32) -> u32 {
+    return x * 2 + 2;
+}
+
+dispatch fn go(x: u32) -> u32 { avx2 => wide, _ => base, }
+
+fn main() -> i32 {
+    let r = go(20);
+    io.print(f"{r}\n");
+    return 0;
+}

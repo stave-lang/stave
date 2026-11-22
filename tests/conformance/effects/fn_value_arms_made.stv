@@ -1,0 +1,53 @@
+//~ CHECK-ONLY
+// E1403 case `made`: a value `if` / `match` (or parentheses) converted to a fn type with a deny
+// clause is the conversion of each arm, so every fn item and closure literal an arm names is
+// checked against the clause, not only the last one; in a `let` with a type, an argument, a
+// `return`, a struct literal field, and an `else if` chain alike.
+import std.io;
+import std.vec;
+
+fn quiet() {}
+
+fn noisy() {
+    io.print("io\n");
+}
+
+fn grow() {
+    let mut v = vec.Vec::<u64>.new();
+    v.push(1u64);
+}
+
+fn run(f: fn() without(io)) without(io) {
+    f();
+}
+
+fn run_a(f: fn() without(alloc)) without(alloc) {
+    f();
+}
+
+view struct H {
+    f: fn() without(io),
+}
+
+fn pick(c: bool) -> fn() without(io) {
+    return if c then noisy else quiet; //~ ERROR E1403
+}
+
+fn main() {
+    let c = true;
+    let g: fn() without(io) = if c then noisy else quiet; //~ ERROR E1403
+    run(g);
+    run_a(if c then grow else quiet); //~ ERROR E1403
+    let k = 2u32;
+    let m: fn() without(io) = match k {
+        0u32 => quiet,
+        1u32 => noisy, //~ ERROR E1403
+        _ => quiet,
+    };
+    run(m);
+    let h = H.{ f: if c then quiet else if k > 1u32 then noisy else quiet }; //~ ERROR E1403
+    run(h.f);
+    let p: fn() without(io) = (if c then fn() { io.print("closure\n"); } else quiet); //~ ERROR E1403
+    run(p);
+    run(pick(c));
+}

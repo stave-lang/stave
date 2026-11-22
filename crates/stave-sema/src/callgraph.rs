@@ -74,8 +74,8 @@
 //! call edge records how much of the callee's params its argument events cover (all, all but
 //! the receiver, none: an operator, an implied call), every other edge into a node covers none,
 //! a call through a fn value covers its targets' params, and a fn-typed param some incoming edge
-//! does not cover is untracked ([`Walk::solve_flow`]; debug builds check that every direct call
-//! edge has such a record).
+//! does not cover is untracked ([`Walk::solve_flow`]; every build checks that every direct call
+//! edge has such a record, and that every call through a fn value is a site).
 //!
 //! **Specialization.** A direct call that passes known fn values (fn items, closure literals, a
 //! local set once to one, or a param that is itself specialized) reaches a node of the callee for
@@ -666,8 +666,7 @@ fn thread_args(
                 let root = RootKind::ThreadArg { callee: *decl, arg: i };
                 if crate::closures::closure_kind(icx, core) == Some(ClosureKind::Literal) {
                     out.push((icx.a(core), root));
-                } else if let Some(&c) = chain.iter().find(|&&c| body.coercion(c) == Some(&Coercion::FnItem))
-                {
+                } else if let Some(&c) = chain.iter().find(|&&c| body.is_fn_item(c)) {
                     out.push((icx.end_tok(c), root));
                 }
             }
@@ -681,8 +680,9 @@ fn classify<'b>(icx: &ItemCx<'_>, body: &'b TypedBody, closures: &[Closure], e: 
     let chain = crate::threads::wrapper_chain(icx, e);
     let end = icx.end_tok(e);
     for &c in &chain {
-        // `FnItem` also marks a fn value whose features drop: only a fn item has a target here
-        if body.coercion(c) == Some(&Coercion::FnItem)
+        // only the node naming a fn item is that item: a value `if` / `match` whose last arm names
+        // one is untracked (below), whatever coercion it has
+        if body.is_fn_item(c)
             && let Some(Target::Fn { decl, args }) = body.target(icx.end_tok(c))
         {
             return Src::FnItem(*decl, args);
@@ -1135,7 +1135,7 @@ fn extract<'b>(
     drop(push);
     // every call through a fn value has a site, which reaches its callee's tracked values or the
     // whole table of its type (`Walk::solve_flow`), never nothing for want of an event
-    debug_assert_eq!(
+    assert_eq!(
         evs.iter().filter(|e| matches!(e.what, What::ValueCall { .. })).count(),
         value_calls,
         "a call through a fn value without a flow site"
@@ -1995,7 +1995,7 @@ impl<'a> Walk<'a> {
         // a spawn), leaves its fn-typed params untracked. Calls through fn values deliver at
         // their sites (below).
         let mut done: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
-        debug_assert_eq!(
+        assert_eq!(
             self.edges.iter().filter(|e| matches!(e.2, EdgeKind::Call | EdgeKind::Dispatch { .. })).count(),
             self.covers.len(),
             "a direct call edge without a record of the arguments it delivers"

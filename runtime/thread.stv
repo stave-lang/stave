@@ -99,6 +99,9 @@ fn start(f: fn()) -> usize {
     let idp = unsafe("st is runtime.state.STATE; only the field address is taken") &mut (*st).next_thread as *mut u64;
     let id = unsafe("idp is the thread counter of the state block") atomic.fetch_add_u64(idp, 1) + 1;
     let e = register(base, base + len, base + guard, id);
+    // until the thread stores its own, a report names the creating thread's user site: the
+    // user call that started the thread
+    let site = panic.user_site();
     unsafe("th is the record page of the fresh mapping; no thread uses it yet") {
         th.write(Thread.{
             tid: 0,
@@ -114,7 +117,7 @@ fn start(f: fn()) -> usize {
             blk: state.Block.{
                 this: 0,
                 thread_id: id,
-                user_site: 0,
+                user_site: site,
                 requires_site: 0,
                 origin: state.NO_SITE,
                 count: 0,

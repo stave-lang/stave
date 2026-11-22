@@ -32,7 +32,9 @@
 //! as not implemented (exit 2): no flag is accepted and ignored.
 //!
 //! `STAVE_THREADS` sets the worker count; `STAVE_SEMA_SHUFFLE` is stave-sema's test knob (dumps must not
-//! change); `STAVE_PROFILE` prints the step profile of a compile on stderr (`stave_driver::prof`).
+//! change); `STAVE_PROFILE` prints the step profile of a compile on stderr (`stave_driver::prof`);
+//! `STAVE_BORROW_DATAFLOW` (`new`, `old`, `both`) picks the borrow checker's dataflow while both
+//! exist (`stave_borrow::Dataflow`), any other value is a usage error.
 
 pub mod args;
 pub mod effects_report;
@@ -88,7 +90,13 @@ pub fn run(argv: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             let _ = writeln!(out, "stave {} (stage0)", env!("CARGO_PKG_VERSION"));
             EXIT_OK
         }
-        Ok(Parsed::Args(a)) => dispatch(&a, out, err),
+        Ok(Parsed::Args(a)) => match stave_driver::pipeline::borrow_dataflow_from_env() {
+            Err(msg) => {
+                let _ = writeln!(err, "stave: {msg}\nrun `stave --help` for usage");
+                EXIT_USAGE
+            }
+            Ok(_) => dispatch(&a, out, err),
+        },
     }
 }
 
@@ -337,7 +345,12 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
 
     let lib_pkg = output.program.packages.iter().any(|p| p.is_root && p.kind == PackageKind::Lib);
     let mut program: Option<Executable> = None;
-    let code = if output.has_errors() {
+    let code = if let Some(f @ Failure::Internal { .. }) = &output.failure {
+        // a compiler bug fails the run even beside error diagnostics (a dropped one may be the
+        // only real error)
+        let _ = internal_error(&f.to_string(), err);
+        EXIT_ICE
+    } else if output.has_errors() {
         EXIT_USER
     } else if goal == Goal::Build && lib_pkg {
         let _ = writeln!(err, "stave: building a library (`kind = \"lib\"`) is not implemented yet");

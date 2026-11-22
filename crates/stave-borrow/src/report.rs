@@ -16,8 +16,7 @@ use stave_diag::{Diagnostic, Span};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
 use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, OpKind, PartFix, Place, Proj, StmtKind, TempEnd};
-use crate::check::{Access, Finding, Unfit, later_use};
-use crate::loans::Flow;
+use crate::check::{Access, Finding, Unfit};
 use crate::ty::Tys;
 
 /// The loan an E0501 names.
@@ -188,9 +187,15 @@ fn paired(body: &Body, block: u32, stmt: u32, place: &Place) -> Option<(u32, boo
     }
 }
 
-/// The diagnostics of one body's findings.
-pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding>) -> Vec<Diagnostic> {
-    let body = flow.body;
+/// The diagnostics of one body's findings. `later_use`: the first use after a statement (block,
+/// index) of a value that holds a loan, and whether it is in a later iteration
+/// ([`crate::check::later_use`]).
+pub fn diagnostics(
+    body: &Body,
+    tys: &mut Tys<'_>,
+    findings: Vec<Finding>,
+    later_use: &mut dyn FnMut((u32, u32), LoanId) -> Option<(Span, bool)>,
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     // E0502: one per move site, at its first (smallest offset) use
     let mut moved: FxHashMap<u32, (Span, Place)> = FxHashMap::default();
@@ -259,7 +264,7 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                 let text = place_text(body, tys, &place);
                 let loaned = place_text(body, tys, &loan.place);
                 let mut roles = vec![("loan", loan.span)];
-                let later = later_use(flow, (block, stmt), l);
+                let later = later_use((block, stmt), l);
                 if let Some((u, _)) = later {
                     roles.push(("use", u));
                 }
@@ -279,6 +284,10 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                     ];
                     let all: Vec<(&str, &str)> = holes.iter().chain(&more).copied().collect();
                     out.extend(mk("E0501", Some(case), &all, t.span, &roles));
+                } else if later.is_some_and(|(u, _)| body.joins.iter().any(|j| j.1 == u)) {
+                    // the later use stands for a thread of the scope, which runs until the scope
+                    // is left ([`crate::cfg`] `hold_spawns`): it is named at the spawn
+                    out.extend(mk("E0501", Some("thread"), &holes, span, &[("loan", loan.span)]));
                 } else {
                     out.extend(mk("E0501", None, &holes, span, &roles));
                 }
@@ -306,6 +315,9 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                         span,
                         &[("capture", c)],
                     )),
+                    None if root.env => {
+                        out.extend(mk("E0512", Some("env"), &[], span, &[("closure", root.span)]))
+                    }
                     None => out.extend(mk("E0512", None, &[("place", &text)], span, &[("local", root.span)])),
                 }
             }
@@ -425,6 +437,7 @@ mod tests {
             guard: false,
             static_root: false,
             stmt: u32::MAX,
+            env: false,
             node,
         };
         Body {

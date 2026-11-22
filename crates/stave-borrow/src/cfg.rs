@@ -30,12 +30,14 @@
 //!
 //! Closures and `spawn` blocks are built as nested bodies ([`Body::nested`]) whose captured
 //! locals are params; the closure value (or the `scope`'s join local, which accumulates every
-//! spawn's loans and is read wherever the scope is left) holds one loan per captured local,
-//! created at the closure's `fn` / `spawn` token. The capture list and modes are
-//! stave-sema's capture analysis (`stave_sema::closures`: by reference only; `&` only when every
-//! use is a proven read, else `&mut`), the same modes the thread rules read. A capture held by `&`
-//! that the nested body writes, mutably borrows, or activates, or a captured local the analysis
-//! does not list, fails the body as unsupported: the two must agree.
+//! spawn's loans and is read wherever the scope is left, and used on every path that stops or
+//! loops for ever inside it) holds one loan per captured local, created at the closure's `fn` /
+//! `spawn` token; a closure value with captures also borrows its environment ([`Local::env`]).
+//! The capture list and modes are stave-sema's capture analysis (`stave_sema::closures`: by
+//! reference only; `&` only when every use is a proven read, else `&mut`), the same modes the
+//! thread rules read. A capture held by `&` that the nested body writes, mutably borrows, or
+//! activates, or a captured local the analysis does not list, fails the body as unsupported: the
+//! two must agree.
 //! The closure value's origin set is the union of its capture loans, so the loans live while the
 //! value (or a result of a call through it, which takes the callee's origins too) lives. Every
 //! call of the value uses the same loans, so a closure's result may borrow only the captures held
@@ -273,6 +275,13 @@ pub struct Local {
     /// The local standing for the storage of an immutable `static` (never moved from). A
     /// `static mut` has a local of its own too, without this mark ([`Builder::path_val`]).
     pub static_root: bool,
+    /// The environment of a closure literal with captures (the captured places' addresses): a
+    /// slot of the frame of the body that evaluates the literal, which the fn value points to.
+    /// It lives as long as that frame, is never written or moved, and is borrowed by every fn
+    /// value made from the literal, so such a value cannot leave the frame (E0512 case `env`,
+    /// E0513); a call result or returned value that cannot reach a fn value does not keep that
+    /// loan ([`Builder::drop_env`]).
+    pub env: bool,
 }
 
 /// What ends a temporary: its statement ([`stave_sema::temps`]), or the `for` loop whose
@@ -488,6 +497,19 @@ pub struct Builder<'a, 'b> {
     /// The scheduled drops with the block their statement is in: the ones in a block the
     /// entry reaches are due ([`Schedule::require`]).
     due: Vec<(BlockId, Point, Owner)>,
+    /// The environments of the closure literals this body evaluates ([`Builder::make_envs`]).
+    envs: Vec<EnvSlot>,
+}
+
+/// The environment of a closure literal with captures ([`Local::env`]): its local, the loan every
+/// fn value made from the literal holds, and the passive loan of `*env` that stands for it where
+/// a value cannot reach a fn value ([`Builder::drop_env`]).
+#[derive(Clone, Copy)]
+struct EnvSlot {
+    node: u32,
+    local: LocalId,
+    loan: LoanId,
+    passive: LoanId,
 }
 
 /// A by-reference chunk binding's store back (see `Builder::chunk_ref_bind`): the chunk of the
@@ -516,6 +538,7 @@ pub fn build_fn<'a>(
         stave_sema::closures::closures(&icx, tb, ov, fn_node)
     };
     b.infos = std::rc::Rc::new(infos);
+    b.make_envs(None, fn_node);
     b.body.ret = ret;
     b.body.declared = declared;
     b.fn_body(fn_node, params, ret_ty);
@@ -574,6 +597,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             old_drops: Vec::new(),
             arm_scrut: false,
             due: Vec::new(),
+            envs: Vec::new(),
         }
     }
 
@@ -723,6 +747,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             guard: false,
             node: u32::MAX,
             static_root: false,
+            env: false,
         });
         let l = (self.body.locals.len() - 1) as LocalId;
         if let Some(n) = temp {
@@ -1396,6 +1421,7 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// scopes are left, the clauses run in order over the params as the body left them, and
     /// `result` is returned: it is live across the clauses, as is every `old(e)` a clause reads.
     fn leave(&mut self, op: Operand, at: Span, point: Point) {
+        let op = self.env_free(op);
         let (span, node) = (op.span, op.node);
         let Some(res) = self.result else {
             self.push(StmtKind::Return(op), span, node);
@@ -2488,6 +2514,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         nb.depth = self.depth;
         nb.closure_span = Some(icx.tok_span(icx.a(n)));
         nb.infos = self.infos.clone();
+        nb.make_envs(self.infos.iter().position(|c| c.node == n).map(|i| i as u32), n);
         nb.guard_binds = self.guard_binds.clone();
         nb.in_guard = self.in_guard;
         nb.push_scope();
@@ -2583,7 +2610,92 @@ impl<'a, 'b> Builder<'a, 'b> {
         let Some(blk) = icx.child(n, NodeKind::Block) else { return V::Const };
         let caps = self.nested(n, blk, icx.child(n, NodeKind::Params), true);
         let ty = self.nty(n);
-        self.capture_value(caps, ty, n)
+        let mut ops = self.capture_ops(caps, n);
+        ops.extend(self.env_loan(n));
+        self.put_temp(Rvalue::Agg(ops), ty, n)
+    }
+
+    /// The environments of the closure literals this body evaluates: those whose directly
+    /// enclosing body is `parent` (the info index of this nested body, `None` for the fn) and
+    /// that have captures, as the capture analysis lowering reads to make the slot lists them.
+    /// All are made before the body is built, so every call in it knows every environment loan.
+    /// The loans are made at the end of body `n`, where the frame holding the environment ends:
+    /// after every other loan, so a returned value that also borrows a local or a capture is
+    /// reported as that borrow (E0512 picks the first loan).
+    fn make_envs(&mut self, parent: Option<u32>, n: u32) {
+        let infos = self.infos.clone();
+        let ty = self.tys.ov.intern(TypeKind::Tuple(Box::new([])));
+        let end = self.body_end(n);
+        for c in infos.iter() {
+            if c.kind != stave_sema::closures::ClosureKind::Literal
+                || c.parent != parent
+                || c.captures.is_empty()
+            {
+                continue;
+            }
+            let fn_tok = self.icx.tok_span(c.token);
+            let local = self.new_local(ty, false, fn_tok, String::new(), None);
+            self.body.locals[local as usize].env = true;
+            self.body.locals[local as usize].node = c.node;
+            let place = Place::local(local, ty);
+            let loan = self.new_loan(&place, false, end, c.node, false);
+            let inner = place.with(Proj::Deref(DerefKind::Shared), ty);
+            let passive = self.new_loan(&inner, false, end, c.node, false);
+            self.envs.push(EnvSlot { node: c.node, local, loan, passive });
+        }
+    }
+
+    /// The loan of the environment of closure literal `n` ([`Local::env`]) if it has one.
+    fn env_loan(&mut self, n: u32) -> Option<Operand> {
+        let e = *self.envs.iter().find(|e| e.node == n)?;
+        if !self.open() {
+            return None;
+        }
+        let place = Place::local(e.local, self.body.locals[e.local as usize].ty);
+        let ty = self.tys.ov.mk_ref(false, place.ty);
+        let span = self.span(n);
+        let t = self.new_local(ty, false, span, String::new(), Some(n));
+        let rv = Rvalue::Ref { place, mutable: false, loan: e.loan };
+        self.push(StmtKind::Assign { dest: Place::local(t, ty), rv, init: true }, span, n);
+        self.operand(V::P(Place::local(t, ty)), n)
+    }
+
+    /// Returned operand `op` without environment loans where its type cannot reach a fn value
+    /// ([`Self::drop_env`]); a part of a local is copied out first, so the local keeps them.
+    fn env_free(&mut self, op: Operand) -> Operand {
+        let ty = op.place.ty;
+        if op.kind == OpKind::Const
+            || self.envs.is_empty()
+            || !self.tys.ref_like(ty)
+            || self.tys.may_hold_fn(ty)
+        {
+            return op;
+        }
+        if op.place.proj.is_empty() {
+            self.drop_env(op.place.local, ty, op.span);
+            return op;
+        }
+        let l = self.new_local(ty, false, op.span, String::new(), None);
+        let dest = Place::local(l, ty);
+        let span = op.span;
+        self.push(StmtKind::Assign { dest: dest.clone(), rv: Rvalue::Use(op), init: true }, span, u32::MAX);
+        self.drop_env(l, ty, span);
+        Operand { kind: OpKind::Copy, place: dest, span, node: u32::MAX, site: u32::MAX }
+    }
+
+    /// Local `l` of type `ty` holds a value that cannot be or reach a fn value, so nothing in it
+    /// points to a closure environment: only a fn value does, no expression names an
+    /// environment, and what a body reaches through a capture is the captured place, which its
+    /// capture loan borrows. Each environment loan in the origin set is swapped for that
+    /// environment's passive loan (an activation), so a borrow made by a call of a closure of
+    /// this body may leave the body as far as the capture loans it holds allow (E0512, E0513).
+    fn drop_env(&mut self, l: LocalId, ty: TypeId, at: Span) {
+        if self.envs.is_empty() || !self.tys.ref_like(ty) || self.tys.may_hold_fn(ty) {
+            return;
+        }
+        for e in self.envs.clone() {
+            self.push(StmtKind::Activate { local: l, reserved: e.loan, active: e.passive }, at, u32::MAX);
+        }
     }
 
     fn scope_stmt(&mut self, s: u32, b: u32) {
@@ -2597,6 +2709,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             StmtKind::Assign { dest: Place::local(j, TypeId::NONE), rv: Rvalue::Agg(Vec::new()), init: true };
         self.push(init, sspan, u32::MAX);
         self.joins.push((self.scopes.len(), j));
+        let (entry, first_block, first_loop) = (self.cur, self.body.blocks.len(), self.body.loops.len());
         for st in self.icx.kids_vec(b) {
             if !self.open() {
                 break;
@@ -2604,10 +2717,67 @@ impl<'a, 'b> Builder<'a, 'b> {
             self.stmt(st);
         }
         self.joins.pop();
-        // the join point: every spawn's captures stay borrowed until here
         let span = self.close_span(b);
+        self.hold_spawns(j, sspan, entry, first_block, first_loop);
+        // the join point: every spawn's captures stay borrowed until here
         self.join_read(j, span, s);
         self.pop_scope(Some(span));
+    }
+
+    /// The threads of a `scope` run until its join, so their capture loans stay live on every path
+    /// through the body after the spawn, also on one that never reaches the join: a path that
+    /// stops (a block closed by a `-> never` call, a trap, a `match` without a reachable arm) uses
+    /// the join local where it stops, and a path that stays in the body for ever (a loop inside it
+    /// whose head reaches no exit) uses it on each edge back to the loop's head. A path that leaves the body
+    /// (its end, `break`, `continue`, `return`, `?`) joins there. The use is no join: a read of the
+    /// join local is one ([`crate::locks`]), so the local is assigned to itself. The use is at
+    /// `at`, the `scope` statement's span, which no join has: a conflict with it names the thread
+    /// at its `spawn` (E0501 case `thread`). The body's blocks are `entry` and those from index
+    /// `blocks` on; its loops, those from index `loops` on.
+    fn hold_spawns(&mut self, j: LocalId, at: Span, entry: Option<BlockId>, blocks: usize, loops: usize) {
+        // a loop whose exit its head reaches is left on some path, which then reaches a join or
+        // another of these uses: only a loop that is never left needs one
+        let heads: Vec<BlockId> = self.body.loops[loops..]
+            .iter()
+            .filter(|&&(head, exit, _)| !self.reaches(head, exit))
+            .map(|l| l.0)
+            .collect();
+        let jp = Place::local(j, self.body.locals[j as usize].ty);
+        let made = entry.into_iter().chain(blocks as BlockId..self.body.blocks.len() as BlockId);
+        for b in made {
+            if Some(b) == self.cur {
+                continue;
+            }
+            let blk = &mut self.body.blocks[b as usize];
+            let stops = matches!(blk.term, Terminator::Unreachable);
+            if stops || blk.term.succs().iter().any(|s| heads.contains(s)) {
+                let op = Operand {
+                    kind: OpKind::Copy,
+                    place: jp.clone(),
+                    span: at,
+                    node: u32::MAX,
+                    site: u32::MAX,
+                };
+                let kind = StmtKind::Assign { dest: jp.clone(), rv: Rvalue::Use(op), init: true };
+                blk.stmts.push(Stmt { kind, span: at, node: u32::MAX });
+            }
+        }
+    }
+
+    /// Whether block `to` is reachable from block `from` along CFG edges.
+    fn reaches(&self, from: BlockId, to: BlockId) -> bool {
+        let mut seen = vec![false; self.body.blocks.len()];
+        let mut work = vec![from];
+        while let Some(b) = work.pop() {
+            if b == to {
+                return true;
+            }
+            if std::mem::replace(&mut seen[b as usize], true) {
+                continue;
+            }
+            work.extend_from_slice(self.body.blocks[b as usize].term.succs());
+        }
+        false
     }
 
     fn spawn(&mut self, s: u32, b: u32) {
@@ -3462,6 +3632,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         // the result is named by the call's text, not by the rest of the chain it starts
         if let V::P(p) = &v {
             self.body.locals[p.local as usize].span = span;
+            self.drop_env(p.local, ret, span);
         }
         if self.tys.is_never(ret) {
             self.terminate(Terminator::Unreachable);
