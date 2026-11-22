@@ -223,7 +223,14 @@ the CFG keeps a temporary on the drop list from the statement that makes it to t
 that moves it out, so an exit taken between an operand's evaluation and the expression that
 consumes it drops it; the lowering holds it as an owner over the same interval. The checks are
 then conservative in one direction only: a drop statement for a value that was moved on this
-path does nothing in the code and is at most a use the code does not make.
+path does nothing in the code and is at most a use the code does not make. It uses nothing a
+loan check reads, because a local moved whole holds the empty origin set until it is written
+again. The value took its borrows along: into the destination, into a callee's declared
+stores, or nowhere (a callee param without a `from` clause keeps nothing past the call). The
+local itself is not read (E0502 is judged on the moved marks, not on the sets), and no loan
+of it is live across the move (the move conflicts with one). Where the local is moved on some
+paths only, the join of the sets is the set of the other paths, and that is what the drop on
+them reads.
 
 **Not claimed.** That two temporaries of one statement with the same outermost type are told
 apart: a row is found by point, owner, and type constructor, and a temporary's owner key is
