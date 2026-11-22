@@ -1029,6 +1029,10 @@ impl<'a> FnCx<'a> {
         let kids = self.kids(b);
         for s in kids {
             if !self.open() {
+                // the rest of the block cannot run (the code here knows more than the borrow
+                // CFG: an index out of a constant length traps): it has no code, so no drop
+                let icx = self.icx;
+                self.dead.push((icx.a(s), icx.close(icx.a(b))));
                 break;
             }
             self.stmt(s);
@@ -1211,22 +1215,27 @@ impl<'a> FnCx<'a> {
             return;
         }
         let Some(p) = self.place_of(e) else { return };
-        self.bind_irrefutable(pat, p);
+        let made = crate::drops::value_key(&icx, init);
+        self.bind_irrefutable(pat, p, made);
     }
 
-    fn bind_irrefutable(&mut self, pat: u32, p: Place) {
+    /// `made`: the token naming the value of `p` in the drop schedule, if it is an rvalue.
+    fn bind_irrefutable(&mut self, pat: u32, p: Place, made: u32) {
         let icx = self.icx;
         if icx.is(icx.a(pat), Term::Underscore) {
             // `let _ = e;`: an owned temporary is dropped at the end of the statement
             if let Base::Val(v, t) = p.base
                 && p.proj.is_empty()
-                && self.needs_drop(t)
             {
-                let _ = self.slot_temp(v, t);
+                if self.needs_drop(t) {
+                    let _ = self.slot_temp(v, t, made);
+                } else {
+                    self.no_temp(made);
+                }
             }
             return;
         }
-        let p = self.owned_for(pat, p, false);
+        let p = self.owned_for(pat, p, false, made);
         self.bind_pat(pat, p);
     }
 
@@ -1240,16 +1249,16 @@ impl<'a> FnCx<'a> {
 
     /// The place a pattern is matched against: an rvalue with drop glue becomes a temporary (of
     /// the statement, or of the innermost scope when `scoped`), which a pattern that only reads
-    /// leaves to be dropped there. A pattern that is one name takes the whole value.
-    fn owned_for(&mut self, pat: u32, p: Place, scoped: bool) -> Place {
+    /// leaves to be dropped there. A pattern that is one name takes the whole value. `made`: the
+    /// token naming the value in the drop schedule.
+    fn owned_for(&mut self, pat: u32, p: Place, scoped: bool, made: u32) -> Place {
         match p.base {
-            Base::Val(v, t)
-                if p.proj.is_empty()
-                    && p.root.is_none()
-                    && self.binding_ty(pat).is_none()
-                    && self.needs_drop(t) =>
-            {
-                self.value_temp(v, t, scoped)
+            Base::Val(v, t) if p.proj.is_empty() && p.root.is_none() && self.binding_ty(pat).is_none() => {
+                if self.needs_drop(t) {
+                    return self.value_temp(v, t, scoped, made);
+                }
+                self.no_temp(made);
+                p
             }
             _ => p,
         }
@@ -1282,10 +1291,13 @@ impl<'a> FnCx<'a> {
         let Some(&e) = kids.first() else { return };
         let ex = self.expr(e, None);
         // a place statement reads nothing
-        if let E::V(v, t) = ex
-            && self.needs_drop(t)
-        {
-            let _ = self.slot_temp(v, t);
+        if let E::V(v, t) = ex {
+            let made = crate::drops::value_key(&icx, e);
+            if self.needs_drop(t) {
+                let _ = self.slot_temp(v, t, made);
+            } else {
+                self.no_temp(made);
+            }
         }
     }
 
@@ -1551,12 +1563,13 @@ impl<'a> FnCx<'a> {
                 let (s, st) = self.spill(v, at);
                 let taken = self.new_slot(us);
                 self.f.b.store(taken, z);
-                let l = self.new_temp(at, Home::Rest(s, taken), true);
+                let l =
+                    self.new_temp(at, Home::Rest(s, taken), true, crate::drops::value_key(&self.icx, iter));
                 let arr = Place { base: Base::Mem(s, st), proj: Vec::new(), ty: at, root: Some(l) };
                 self.counted_loop(f, pat, body, us, z, n, false, Some(Seq::Owned(arr, taken, iter)));
                 self.pop_scope();
             }
-            ForKind::Iter | ForKind::IterMut => self.iter_loop(f, pat, body, p, kind),
+            ForKind::Iter | ForKind::IterMut => self.iter_loop(f, (pat, iter), body, p, kind),
             ForKind::Range => {}
         }
     }
@@ -1639,7 +1652,7 @@ impl<'a> FnCx<'a> {
                 p.ty = elem;
                 self.take(&p).map(|x| {
                     let item = Place { base: Base::Val(x, elem), proj: Vec::new(), ty: elem, root: None };
-                    self.owned_for(pat, item, true)
+                    self.owned_for(pat, item, true, self.icx.a(f))
                 })
             }
         };
@@ -1914,7 +1927,7 @@ impl<'a> FnCx<'a> {
     /// left (`break`, `return`, `?`), as the checker's loop temporary is. Either way the loop
     /// calls the `next` the type checker resolved (for a generic source, the bound's), with the
     /// instance's args: the instance type never picks another loop.
-    fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place, kind: ForKind) {
+    fn iter_loop(&mut self, f: u32, (pat, iter): (u32, u32), body: u32, it: Place, kind: ForKind) {
         self.push_scope();
         // the slot of an iterator without drop glue ends where a drop would end it
         let mut bare: Option<(Operand, Ty)> = None;
@@ -1940,8 +1953,13 @@ impl<'a> FnCx<'a> {
                 let (s, st) = self.spill(v, t);
                 // an iterator with drop glue is a temporary of the loop's scope: dropped when
                 // the loop ends or is left
-                let root =
-                    if self.needs_drop(t) { Some(self.new_temp(t, Home::Slot(s), true)) } else { None };
+                let made = crate::drops::value_key(&self.icx, iter);
+                let root = if self.needs_drop(t) {
+                    Some(self.new_temp(t, Home::Slot(s), true, made))
+                } else {
+                    self.no_temp(made);
+                    None
+                };
                 if root.is_none() {
                     bare = Some((s, st));
                 }
@@ -1999,7 +2017,7 @@ impl<'a> FnCx<'a> {
         let (s, z) = (self.int(self.g.opt_some as i128), self.int(0));
         let x = self.opn(Op::EnumGet, xt, &[rv, s, z]);
         let item = Place { base: Base::Val(x, xt), proj: Vec::new(), ty: xt, root: None };
-        let item = self.owned_for(pat, item, true);
+        let item = self.owned_for(pat, item, true, self.icx.a(f));
         self.bind_pat(pat, item);
         self.block(body);
         self.pop_scope();
@@ -2142,8 +2160,14 @@ impl<'a> FnCx<'a> {
         // an rvalue scrutinee with drop glue is a temporary of the enclosing statement: what the
         // arms do not bind is dropped with it
         let sp = match sp.base {
-            Base::Val(v, t) if sp.proj.is_empty() && sp.root.is_none() && self.needs_drop(t) => {
-                self.value_temp(v, t, false)
+            Base::Val(v, t) if sp.proj.is_empty() && sp.root.is_none() => {
+                let made = crate::drops::value_key(&self.icx, scrut);
+                if self.needs_drop(t) {
+                    self.value_temp(v, t, false, made)
+                } else {
+                    self.no_temp(made);
+                    sp
+                }
             }
             _ => sp,
         };

@@ -1,0 +1,50 @@
+// A `const` of a type with drop glue is E0413 at its declaration, whatever reads it: a field
+// read (`K.n`, also in a condition, a contract clause, `old(..)`), a `&self` method, `let _`, a
+// read-only `match`, an element of a const array.
+import std.io;
+
+struct Q {
+    pub n: u32,
+}
+
+impl Drop for Q {
+    fn drop(&mut self) {
+        let n = self.n;
+        io.print(f"dropQ{n} ");
+    }
+}
+
+impl Q {
+    fn get(&self) -> u32 {
+        return self.n;
+    }
+}
+
+const K: Q = Q.{ n: 1 }; //~ ERROR E0413
+const A: [Q; 2] = [Q.{ n: 1 }, Q.{ n: 2 }]; //~ ERROR E0413
+const O: Option<Q> = Option.Some(Q.{ n: 3 }); //~ ERROR E0413
+
+fn check(x: u32) -> u32 requires(x >= K.n) ensures(result == old(K.n) + x) {
+    return K.n + x;
+}
+
+fn main() -> i32 {
+    let b = K.n;
+    let c = K.get();
+    let _ = K;
+    if K.n == 1 {
+        io.print("one\n");
+    }
+    let d = A[1].n;
+    match O {
+        Option.Some(_) => {
+            io.print("some\n");
+        }
+        Option.None => {
+            io.print("none\n");
+        }
+    }
+    let e = check(b);
+    io.print(f"{b} {c} {d} {e}\n");
+    return 0;
+}

@@ -109,6 +109,8 @@ pub enum Finding {
     MoveOut { place: Place, span: Span, why: MoveOut },
     /// E0505: a match guard (or a closure written in one) does more than read.
     GuardEffect { span: Span, what: GuardEffect },
+    /// E0503 case `temporary`: an assignment to a part of a temporary (the target's text).
+    TempWrite { span: Span, text: String },
     /// E0513: a ref-like value written through a dereference, or stored by a call through a
     /// `&mut` argument, has origins a view object it may land in cannot take.
     ViewWrite { place: Place, span: Span, why: Unfit },
@@ -931,6 +933,7 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         }
         bad_moves(body, &mut findings);
         guard_effects(body, &mut findings);
+        temp_writes(body, &mut findings);
         return Checked { findings, dump: Vec::new() };
     }
     let (nt, nloans) = (flow.ntracked, flow.atoms.nloans);
@@ -1015,7 +1018,15 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
     let mut findings: Vec<Finding> = found.into_iter().flat_map(|x| x.1).collect();
     bad_moves(body, &mut findings);
     guard_effects(body, &mut findings);
+    temp_writes(body, &mut findings);
     Checked { findings, dump: dumped.into_iter().flat_map(|x| x.1).collect() }
+}
+
+/// E0503 case `temporary`: one finding per assignment to a part of a temporary.
+pub(crate) fn temp_writes(body: &Body, findings: &mut Vec<Finding>) {
+    for (span, text) in &body.temp_writes {
+        findings.push(Finding::TempWrite { span: *span, text: text.clone() });
+    }
 }
 
 /// E0505: one finding per span of what the body's guards do besides reading.

@@ -2142,7 +2142,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0413",
         severity: Severity::Error,
         area: "kinds",
-        rule: "view or reference in a `const`, `static`, or `static mut` (except `&str` initialized by a string literal or another such const: static strings)",
+        rule: "view or reference in a `const`, `static`, or `static mut` (except `&str` initialized by a string literal or another such const: static strings); case `drop`: a `const` whose type has drop glue (a `Drop` impl anywhere inside, not behind a pointer): a const is a new copy of its value at each use, so a destructor would run at each use; one value with a destructor is a `static`",
         retired: false,
         located: true,
         holes: &[
@@ -2158,6 +2158,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give `{name}` an owned type (an array `[T; N]` instead of `&[T]`), or build the value in a function (only `&str` from a string literal or another such const may be borrowed)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "drop",
+                message: "const `{name}` has type `{type}`, which has drop glue",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "type with a destructor" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "make `{name}` a `static` (one value, never dropped), or a fn that returns a new value at each call",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2655,7 +2667,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0503",
         severity: Severity::Error,
         area: "borrow",
-        rule: "assignment to an immutable binding or through `&` (case `shared-ref` also: `&mut` of a place behind `&`, a `&mut` chunk binding over a `&` source); a cast to `*mut T` of a `&mut` place behind `&` (case `shared-ref-cast`); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`)",
+        rule: "assignment to an immutable binding or through `&` (case `shared-ref` also: `&mut` of a place behind `&`, a `&mut` chunk binding over a `&` source); a cast to `*mut T` of a `&mut` place behind `&` (case `shared-ref-cast`); assignment to, `&mut` of, or a `&mut self` call on a `static` or a part of one (case `static`); case `temporary`: an assignment (`=` or a compound `op=`) whose target is not a place rooted in a local, a `static`, or a dereference: a part of a call result, literal, `const`, value `if` / `match`, or other temporary, which the statement drops (a `&mut` of a temporary is a borrow, not a target)",
         retired: false,
         located: true,
         holes: &[
@@ -2709,6 +2721,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give `{place}` a type with interior mutability (`atomic.U64`, `sync.Mutex<T, R>`) and change it through its `&self` methods",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "temporary",
+                message: "cannot assign to `{place}`: it is a part of a temporary value, dropped at the end of the statement",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "assignment to a temporary" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bind the value with `let mut` first and assign to the binding (a `const` is a new value at each use)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

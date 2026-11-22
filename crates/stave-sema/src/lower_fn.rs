@@ -229,9 +229,11 @@ pub(crate) struct Temp {
     pub seq: u32,
     pub home: Home,
     pub ends: Ends,
-    /// The innermost statement open when it was made ([`crate::temps`]): its owner key in the
-    /// drop schedule.
+    /// The innermost statement open when it was made ([`crate::temps`]).
     pub stmt: u32,
+    /// The token naming the value it holds ([`crate::drops::Owner::Temp`]): with `stmt` its
+    /// owner key in the drop schedule.
+    pub made: u32,
 }
 
 /// An owner that needs a dynamic drop flag: a local's binding node, or a temporary's creation
@@ -454,6 +456,15 @@ pub(crate) struct FnCx<'a> {
     /// The scheduled drops the lowering decided: emitted, or left out because the owner holds
     /// no value there or its type has no drop glue in this instance ([`FnCx::check_asked`]).
     pub asked: FxHashSet<(Point, Owner)>,
+    /// The temporaries (statement, token) the schedule may have that the lowering made none
+    /// for: their type has no drop glue in this instance ([`FnCx::no_temp`]).
+    pub no_glue: FxHashSet<(u32, u32)>,
+    /// The scheduled drops emitted so far, each once ([`FnCx::scheduled`]).
+    pub consumed: FxHashSet<(Point, Owner)>,
+    /// Token ranges of the statements left unlowered because no path reaches them.
+    pub dead: Vec<(u32, u32)>,
+    /// The statements lowered so far ([`FnCx::begin_temps`]).
+    pub opened: FxHashSet<u32>,
 }
 
 impl<'a> FnCx<'a> {
@@ -503,6 +514,10 @@ impl<'a> FnCx<'a> {
             hold_site: false,
             sched: None,
             asked: FxHashSet::default(),
+            no_glue: FxHashSet::default(),
+            consumed: FxHashSet::default(),
+            dead: Vec::new(),
+            opened: FxHashSet::default(),
         }
     }
 
@@ -988,8 +1003,9 @@ impl<'a> FnCx<'a> {
     }
 
     /// A temporary that owns a value of droppable type `ty`: it ends with the innermost open
-    /// statement, or with the innermost scope when `scoped`.
-    pub fn new_temp(&mut self, ty: Ty, home: Home, scoped: bool) -> usize {
+    /// statement, or with the innermost scope when `scoped`. `made`: the token naming the value
+    /// in the drop schedule ([`crate::drops::Owner::Temp`]).
+    pub fn new_temp(&mut self, ty: Ty, home: Home, scoped: bool, made: u32) -> usize {
         let seq = self.temp_seq;
         self.temp_seq += 1;
         let ends = if scoped {
@@ -1018,6 +1034,7 @@ impl<'a> FnCx<'a> {
                 home,
                 ends,
                 stmt: self.f.open.last().copied().unwrap_or(crate::temps::NONE),
+                made,
             }),
         });
         self.set_st(l, Init::Full);
@@ -1044,29 +1061,38 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// A temporary for rvalue `v` in a slot of its own: the place.
-    pub fn slot_temp(&mut self, v: Operand, t: Ty) -> Place {
-        let (s, st, l) = self.slot_temp_at(v, t);
+    /// A temporary for rvalue `v` in a slot of its own: the place. `made`: as for
+    /// [`FnCx::new_temp`].
+    pub fn slot_temp(&mut self, v: Operand, t: Ty, made: u32) -> Place {
+        let (s, st, l) = self.slot_temp_at(v, t, made);
         Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: Some(l) }
     }
 
     /// [`FnCx::slot_temp`] as the slot, its pointer type, and the owner.
-    pub fn slot_temp_at(&mut self, v: Operand, t: Ty) -> (Operand, Ty, usize) {
+    pub fn slot_temp_at(&mut self, v: Operand, t: Ty, made: u32) -> (Operand, Ty, usize) {
         let (s, st) = self.spill(v, t);
-        let l = self.new_temp(t, Home::Slot(s), false);
+        let l = self.new_temp(t, Home::Slot(s), false, made);
         (s, st, l)
     }
 
     /// A temporary for rvalue `v`, read as the value it is: the place. With a dynamic flag the
     /// value lives in a slot, since its drop is then not dominated by `v`.
-    pub fn value_temp(&mut self, v: Operand, t: Ty, scoped: bool) -> Place {
+    pub fn value_temp(&mut self, v: Operand, t: Ty, scoped: bool, made: u32) -> Place {
         if self.flagged.contains(&FlagKey { temp: true, id: self.temp_seq }) {
             let (s, st) = self.spill(v, t);
-            let l = self.new_temp(t, Home::Slot(s), scoped);
+            let l = self.new_temp(t, Home::Slot(s), scoped, made);
             return Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root: Some(l) };
         }
-        let l = self.new_temp(t, Home::Val(v), scoped);
+        let l = self.new_temp(t, Home::Val(v), scoped, made);
         Place { base: Base::Val(v, t), proj: Vec::new(), ty: t, root: Some(l) }
+    }
+
+    /// A value the drop schedule may name as a temporary (`made`, of the innermost open
+    /// statement) gets none here: its type has no drop glue in this instance, so its scheduled
+    /// drops are decided ([`FnCx::check_asked`]).
+    pub fn no_temp(&mut self, made: u32) {
+        let stmt = self.f.open.last().copied().unwrap_or(crate::temps::NONE);
+        self.no_glue.insert((stmt, made));
     }
 
     /// Forgets the temporaries at the end of the owner list that have ended: their numbers are
@@ -1108,10 +1134,12 @@ impl<'a> FnCx<'a> {
     }
 
     /// Operand value `v`, already evaluated, becomes a temporary until [`FnCx::release`]: a `?`
-    /// in a later operand drops it.
-    pub fn hold(&mut self, v: Operand, t: Ty, held: &mut Vec<usize>) {
+    /// in a later operand drops it. `made`: as for [`FnCx::new_temp`].
+    pub fn hold(&mut self, v: Operand, t: Ty, held: &mut Vec<usize>, made: u32) {
         if !t.is_none() && self.needs_drop(t) {
-            held.push(self.slot_temp_at(v, t).2);
+            held.push(self.slot_temp_at(v, t, made).2);
+        } else {
+            self.no_temp(made);
         }
     }
 
@@ -1568,7 +1596,9 @@ impl<'a> FnCx<'a> {
     }
 
     /// A drop of a value of type `t` is about to be emitted: the body's schedule
-    /// ([`crate::drops`]) must have it. A drop it lacks is one no check has seen.
+    /// ([`crate::drops`]) must have it, and no drop emitted before may have consumed its row.
+    /// A drop it lacks is one no check has seen; a row two drops match is a drop no check has
+    /// seen behind one it has.
     pub fn scheduled(&mut self, point: Point, owner: Owner, t: Ty) {
         self.f.ticket = true;
         if let Some(r) = &mut self.f.run {
@@ -1579,6 +1609,9 @@ impl<'a> FnCx<'a> {
         if !s.has(point, owner, head) {
             let tok = self.has_body.then(|| self.icx.a(self.f.cur));
             self.fail_at(tok, format!("a drop the schedule does not have: {owner:?} at {point:?}"));
+        } else if !self.consumed.insert((point, owner)) {
+            let tok = self.has_body.then(|| self.icx.a(self.f.cur));
+            self.fail_at(tok, format!("a scheduled drop emitted twice: {owner:?} at {point:?}"));
         }
     }
 
@@ -1603,12 +1636,11 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// Every drop the body's schedule has for a local, an overwritten value, or a part a
-    /// pattern ignores must have been decided by the lowering where it lowered that point
-    /// ([`FnCx::asked`]): a scheduled drop it never considered is a value it leaks. A local
-    /// whose type has no drop glue in this instance is none. Temporaries are not compared: the
-    /// schedule keys them by statement, and has ones the code never makes (a value it moves
-    /// on without a slot).
+    /// Every drop the body's schedule has in code that can run must have been decided by the
+    /// lowering where it lowered that point ([`FnCx::asked`]): a scheduled drop it never
+    /// considered is a value it leaks, or one the checks keep alive that the code never made.
+    /// A local or a temporary whose type has no drop glue in this instance is none, and so is
+    /// a drop in code the lowering found unreachable ([`FnCx::dead`]).
     pub fn check_asked(&mut self) {
         let Some(s) = self.sched else { return };
         if self.err.is_some() {
@@ -1616,21 +1648,34 @@ impl<'a> FnCx<'a> {
         }
         for &(point, owner) in s.due() {
             let due = match owner {
-                Owner::Temp(_) => false,
+                Owner::Temp(stmt, made) => !self.no_glue.contains(&(stmt, made)),
                 Owner::Local(n) => self.by_node.get(&n).is_none_or(|&l| self.locals[l].drop),
                 Owner::Part(_) | Owner::Old => true,
             };
-            if due && !self.asked.contains(&(point, owner)) {
+            let at = Self::row_tok(&self.icx, point, owner);
+            let dead = self.dead.iter().any(|&(a, b)| (a..=b).contains(&at));
+            if due && !dead && !self.asked.contains(&(point, owner)) {
                 self.fail_at(None, format!("a scheduled drop the lowering left out: {owner:?} at {point:?}"));
                 return;
             }
         }
     }
 
+    /// A token of the source a scheduled drop belongs to: its exit, its pattern or assignment,
+    /// its local's binding, its temporary's expression.
+    fn row_tok(icx: &ItemCx<'_>, point: Point, owner: Owner) -> u32 {
+        match (point, owner) {
+            (Point::Return(t) | Point::Try(t) | Point::Jump(t), _) => t,
+            (Point::Bind(n) | Point::Assign(n), _) | (Point::End, Owner::Local(n)) => icx.a(n),
+            (Point::End, Owner::Temp(_, t)) => t,
+            (Point::End, Owner::Part(_) | Owner::Old) => u32::MAX,
+        }
+    }
+
     /// The schedule key of owner `l` at the point being lowered.
     fn owner_key(&self, l: usize) -> (Point, Owner) {
         let owner = match self.locals[l].temp {
-            Some(t) => Owner::Temp(t.stmt),
+            Some(t) => Owner::Temp(t.stmt, t.made),
             None => Owner::Local(self.locals[l].node),
         };
         (self.f.point, owner)
@@ -1886,6 +1931,13 @@ impl<'a> FnCx<'a> {
         self.f.stmts.push(self.f.temps.len());
         self.f.slot_marks.push(self.f.stmt_slots.len());
         self.f.open.push(b);
+        if !self.opened.insert(b) {
+            // a statement lowered again (an `ensures` clause at each return) is code of its
+            // own: its drops consume their rows again
+            let icx = self.icx;
+            let (lo, hi) = (icx.a(b), icx.end_tok(b));
+            self.consumed.retain(|&(p, o)| !(lo..=hi).contains(&Self::row_tok(&icx, p, o)));
+        }
     }
 
     /// Ends the innermost open statement: drops its temporaries, last made first, then ends

@@ -7,15 +7,17 @@
 //! part a moving pattern ignores, the value an assignment overwrites). The rows are made once per
 //! body by the builder of the borrow CFG (stave-borrow `cfg`), each together with the CFG
 //! statement that models the drop, so every check that reads the CFG (loans, moves, lock ranks,
-//! joins) reads the schedule. The lowering asks the schedule for every drop it emits
-//! ([`Schedule::has`]) and for the order of the drops of each end and exit
-//! ([`Schedule::in_order`]): a drop without a row, or in another order, is code no check has
-//! seen, an internal error of the build. The other way round, the rows of code that can run
-//! are due ([`Schedule::require`]): where the lowering lowers their point it must have decided
-//! each one for a local, an overwritten value, or an ignored part, so a drop it leaves out
-//! fails the build too. A temporary's row is not due: the CFG gives every value a temporary,
-//! the code only the ones that need a slot. Whether a scheduled drop runs is the owner's init bit: the CFG's dataflow and the
-//! lowering's owner states (or dynamic flags) both follow the moves.
+//! joins) reads the schedule. A row is one value: a temporary is named by its statement and
+//! the token that ends the expression whose value it holds ([`Owner::Temp`], [`value_key`]),
+//! which both stages compute from the syntax where they make it. The lowering asks the
+//! schedule for every drop it emits ([`Schedule::has`]), each row at most once, and for the
+//! order of the drops of each end and exit ([`Schedule::in_order`]): a drop without a row, a
+//! second drop of one row, or a drop in another order is code no check has seen, an internal
+//! error of the build. The other way round, the rows of code that can run are due
+//! ([`Schedule::require`]): where the lowering lowers their point it must have decided each
+//! one, so a drop it leaves out, or a value the checks keep alive that the code never made,
+//! fails the build too. Whether a scheduled drop runs is the owner's init bit: the CFG's
+//! dataflow and the lowering's owner states (or dynamic flags) both follow the moves.
 //!
 //! **Parts of a pattern.** A pattern that binds a non-Copy part by value takes its whole value;
 //! the parts it does not bind are dropped at its binding point, in the order of
@@ -60,8 +62,11 @@ pub enum Point {
 pub enum Owner {
     /// The local of this binding node (a param: its node).
     Local(u32),
-    /// A temporary of the statement with this node ([`crate::temps`]).
-    Temp(u32),
+    /// A temporary of the statement with this node ([`crate::temps`]) holding the value of the
+    /// expression that ends at this token (a step of a postfix chain: the step's last token).
+    /// Both stages name a temporary so, each from the syntax where it makes the temporary: one
+    /// row is one value.
+    Temp(u32, u32),
     /// The part with this index in [`ignored_parts`] of the pattern at the point.
     Part(u32),
     /// The value the assignment at the point overwrites.
@@ -76,6 +81,25 @@ pub enum Head {
     Adt(DeclId),
     Tuple(u32),
     Array,
+}
+
+/// The token naming a temporary that holds the value of expression `n` ([`Owner::Temp`]): the
+/// expression's last token, looking through parentheses (`(e)` is the value of `e`).
+pub fn value_key(icx: &ItemCx<'_>, mut n: u32) -> u32 {
+    for _ in 0..1_000_000 {
+        let a = icx.a(n);
+        if icx.kind(n) != Some(NodeKind::Primary)
+            || !icx.is(a, Term::LParen)
+            || icx.is(icx.close(a) - 1, Term::Comma)
+        {
+            break;
+        }
+        match icx.only_child(n) {
+            Some(c) => n = c,
+            None => break,
+        }
+    }
+    icx.end_tok(n)
 }
 
 /// The [`Head`] of type `t`.
@@ -509,7 +533,7 @@ mod tests {
     fn a_row_is_found_by_point_owner_and_head() {
         let mut s = Schedule::default();
         s.add(row(Point::End, Owner::Local(7), Head::Tuple(2)));
-        s.add(row(Point::Try(40), Owner::Temp(12), Head::Any));
+        s.add(row(Point::Try(40), Owner::Temp(12, 13), Head::Any));
         s.add(row(Point::Bind(9), Owner::Part(1), Head::Array));
         for sealed in [false, true] {
             if sealed {
@@ -517,11 +541,11 @@ mod tests {
             }
             assert!(s.has(Point::End, Owner::Local(7), Head::Tuple(2)));
             // an instance's type under a definition's type parameter, and the reverse
-            assert!(s.has(Point::Try(40), Owner::Temp(12), Head::Array));
+            assert!(s.has(Point::Try(40), Owner::Temp(12, 13), Head::Array));
             assert!(s.has(Point::End, Owner::Local(7), Head::Any));
             assert!(!s.has(Point::End, Owner::Local(7), Head::Tuple(3)));
             assert!(!s.has(Point::End, Owner::Local(8), Head::Tuple(2)));
-            assert!(!s.has(Point::Return(40), Owner::Temp(12), Head::Any));
+            assert!(!s.has(Point::Return(40), Owner::Temp(12, 13), Head::Any));
             assert!(!s.has(Point::Bind(9), Owner::Part(0), Head::Array));
         }
     }
@@ -529,7 +553,7 @@ mod tests {
     #[test]
     fn drops_of_one_point_keep_their_order() {
         let mut s = Schedule::default();
-        let (a, b, c) = (Owner::Temp(3), Owner::Local(5), Owner::Local(4));
+        let (a, b, c) = (Owner::Temp(3, 4), Owner::Local(5), Owner::Local(4));
         s.add(row(Point::Jump(20), a, Head::Any));
         s.add(row(Point::End, c, Head::Any));
         s.add(row(Point::Jump(20), a, Head::Any));

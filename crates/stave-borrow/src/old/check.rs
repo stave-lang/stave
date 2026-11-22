@@ -7,7 +7,7 @@ use crate::bits::Bits;
 use crate::cfg::{LoanId, LocalId, OpKind, Operand, Place, Proj, RetCheck, Rvalue, Stmt, StmtKind};
 use crate::check::{
     Access, Checked, DumpAccess, Finding, Unfit, back_edge, bad_moves, guard_effects, in_loop, mutability,
-    places_conflict, stmt_def, stmt_moves, stmt_uses,
+    places_conflict, stmt_def, stmt_moves, stmt_uses, temp_writes,
 };
 use crate::loans::for_each_op;
 use crate::old::loans::{CallStore, Flow, State};
@@ -426,6 +426,7 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         }
         bad_moves(body, &mut findings);
         guard_effects(body, &mut findings);
+        temp_writes(body, &mut findings);
         return Checked { findings, dump: Vec::new() };
     }
     let lo = live_out(flow);
@@ -450,6 +451,7 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
     let mut findings = cx.findings;
     bad_moves(body, &mut findings);
     guard_effects(body, &mut findings);
+    temp_writes(body, &mut findings);
     Checked { findings, dump: cx.dump }
 }
 
