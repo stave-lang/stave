@@ -1,0 +1,88 @@
+//~ CHECK-ONLY
+// `x = e` drops the value `x` holds before the write: a use of what that value borrows. A
+// local whose type has drop glue therefore keeps its borrows live up to the assignment that
+// replaces it (E0501 where the borrowed local ends before that), in a loop too, and for a
+// container of such values. A local that holds no value there (moved out on every path) drops
+// nothing, so the assignment uses nothing.
+import std.io;
+import std.vec;
+
+view struct R { pub r: &u64 }
+
+impl Drop for R {
+    fn drop(&mut self) {
+        let n = *self.r;
+        io.print(f"drop {n}\n");
+    }
+}
+
+view struct H { pub f: fn() -> u64 }
+
+impl Drop for H {
+    fn drop(&mut self) {
+        let n = (self.f)();
+        io.print(f"drop {n}\n");
+    }
+}
+
+fn zero() -> u64 { return 0; }
+
+fn consume(r: R) {}
+
+fn ref_field() {
+    let z: u64 = 0;
+    let mut h = R.{ r: &z };
+    {
+        let y: u64 = 5;
+        h = R.{ r: &y };
+    } //~ ERROR E0501
+    h = R.{ r: &z };
+}
+
+fn closure_field() {
+    let mut h = H.{ f: zero };
+    {
+        let y: u64 = 5;
+        h = H.{ f: fn() -> u64 { return y; } };
+    } //~ ERROR E0501
+    h = H.{ f: zero };
+}
+
+fn in_loop() {
+    let mut h = H.{ f: zero };
+    for i in 0..3u64 {
+        let y: u64 = i * 10 + 7;
+        h = H.{ f: fn() -> u64 { return y; } };
+    } //~ ERROR E0501
+    h = H.{ f: zero };
+}
+
+fn in_vec() {
+    let z: u64 = 0;
+    let mut v = vec.Vec::<R>.new();
+    {
+        let y: u64 = 5;
+        v.push(R.{ r: &y });
+    } //~ ERROR E0501
+    v = vec.Vec::<R>.new();
+}
+
+fn moved_out_first() {
+    let z: u64 = 0;
+    let mut h = R.{ r: &z };
+    {
+        let y: u64 = 5;
+        consume(h);
+        h = R.{ r: &y };
+        consume(h);
+    }
+    h = R.{ r: &z };
+}
+
+fn main() {
+    ref_field();
+    closure_field();
+    in_loop();
+    in_vec();
+    moved_out_first();
+}

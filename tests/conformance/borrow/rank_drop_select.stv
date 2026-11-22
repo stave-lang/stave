@@ -1,0 +1,49 @@
+//~ CHECK-ONLY
+// `c.select(a, b)` evaluates both operands; the one it does not pick is a temporary of the
+// statement and is dropped at its end. That drop is a row of the drop schedule, so it is
+// checked against the locks held (E1405 at the `select`): `Lk`'s destructor takes `M` while the
+// guard is held, in a callee too (an error at the call). Released first, nothing is wrong.
+import std.io;
+import std.mem;
+import std.sync;
+import std.vec;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+
+struct Lk { pub id: u32 }
+
+impl Drop for Lk {
+    fn drop(&mut self) {
+        let g = M.lock();
+    }
+}
+
+fn under_guard(c: bool) {
+    let mut v = vec.Vec::<Lk>.new();
+    let g = M.lock();
+    v.push(c.select(Lk.{ id: 1 }, Lk.{ id: 2 })); //~ ERROR E1405
+}
+
+fn pick(c: bool) -> Lk {
+    return c.select(Lk.{ id: 1 }, Lk.{ id: 2 });
+}
+
+fn in_callee(c: bool) {
+    let g = M.lock();
+    let l = pick(c); //~ ERROR E1405
+    mem.forget(l);
+}
+
+fn released_first(c: bool) {
+    let mut v = vec.Vec::<Lk>.new();
+    let g = M.lock();
+    mem.drop(g);
+    v.push(c.select(Lk.{ id: 1 }, Lk.{ id: 2 }));
+}
+
+fn main() {
+    under_guard(false);
+    in_callee(true);
+    released_first(false);
+    io.print("done\n");
+}

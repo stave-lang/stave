@@ -1,0 +1,62 @@
+//~ CHECK-ONLY
+// The own-guard check of a dropped value (E1405 case `own`) is decided from the steps of the
+// value's drop glue for any type, also one no fn names, as the tuple of a statement temporary:
+// `(Lk, guard)` drops `Lk`, whose destructor takes the lock, while the guard beside it is held.
+// At the end of the statement for an argument, a `let _`, a `match` that leaves the value, a
+// value `match`, and a receiver. The guard first is fine.
+import std.io;
+import std.sync;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+
+struct Lk { pub id: u32 }
+
+impl Drop for Lk {
+    fn drop(&mut self) {
+        let g = M.lock();
+    }
+}
+
+impl Lk { pub fn n(&self) -> u32 { return self.id; } }
+
+fn peek(t: &(Lk, sync.MutexGuard<u32, 1>)) -> u32 { return 1; }
+
+fn argument() -> u32 {
+    let n = peek(&(Lk.{ id: 1 }, M.lock())); //~ ERROR E1405
+    return n;
+}
+
+fn let_wild() {
+    let _ = (Lk.{ id: 1 }, M.lock()); //~ ERROR E1405
+}
+
+fn match_wild() {
+    match (Lk.{ id: 1 }, M.lock()) { //~ ERROR E1405
+        _ => { io.print("arm\n"); }
+    }
+}
+
+fn value_match() -> u32 {
+    let n = match (Lk.{ id: 1 }, M.lock()) { //~ ERROR E1405
+        _ => 1u32,
+    };
+    return n;
+}
+
+fn receiver() -> u32 {
+    let n = (Lk.{ id: 1 }, M.lock()).0.n(); //~ ERROR E1405
+    return n;
+}
+
+fn guard_first() {
+    let _ = (M.lock(), Lk.{ id: 1 });
+}
+
+fn main() {
+    let a = argument();
+    let_wild();
+    match_wild();
+    let b = value_match();
+    let c = receiver();
+    guard_first();
+}

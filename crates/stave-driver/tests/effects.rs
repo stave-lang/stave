@@ -46,7 +46,7 @@ fn every_node_maps_to_its_ir() {
         let tc = out.typeck.as_ref().unwrap();
         let g = &tc.call_graph;
         let all: Vec<u32> = (0..g.nodes.len() as u32).collect();
-        let l = stave_driver::effects::node_ir(&out.program, tc, &all).unwrap();
+        let l = stave_driver::effects::node_ir(&out.program, tc, &all, None).unwrap();
         let unmapped = g.node_names(&out.program, tc, &l.unmapped);
         assert!(unmapped.is_empty(), "{file}: {unmapped:?}");
         let bodies = g
@@ -118,10 +118,10 @@ fn check_and_builds_report_the_same() {
 fn no_trap_denied_lowers_nothing() {
     let out = run("tests/conformance/effects/io_neg.stv", Goal::Check, |_| {});
     let tc = out.typeck.as_ref().unwrap();
-    let r = stave_driver::effects::run(&out.program, tc, false).unwrap();
+    let r = stave_driver::effects::run(&out.program, tc, false, None).unwrap();
     assert_eq!(r.lowered, 0);
     assert!(!r.sets.trap_from_ir);
     assert_eq!(r.diagnostics.len(), 1);
-    let r = stave_driver::effects::run(&out.program, tc, true).unwrap();
+    let r = stave_driver::effects::run(&out.program, tc, true, None).unwrap();
     assert!(r.lowered > 0);
 }

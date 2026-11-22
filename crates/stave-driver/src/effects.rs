@@ -45,7 +45,12 @@ pub struct EffectRun {
 
 /// Runs the effect pass on a checked program without error diagnostics. `all`: compute `trap`
 /// from the IR of every node (the report), not only of what the checks reach.
-pub fn run(prog: &Program, tc: &Typeck, all: bool) -> Result<EffectRun, Failure> {
+pub fn run(
+    prog: &Program,
+    tc: &Typeck,
+    all: bool,
+    drops: Option<&stave_sema::drops::Schedules>,
+) -> Result<EffectRun, Failure> {
     let plan = effects::plan(prog, tc);
     let contracts = effects::contract_nodes(tc);
     let mut lowered = 0;
@@ -58,7 +63,7 @@ pub fn run(prog: &Program, tc: &Typeck, all: bool) -> Result<EffectRun, Failure>
         nodes.extend(&contracts);
         nodes.sort_unstable();
         nodes.dedup();
-        match node_ir(prog, tc, &nodes) {
+        match node_ir(prog, tc, &nodes, drops) {
             Ok(l) => {
                 lowered = l.funcs;
                 diagnostics = l.contracts;
@@ -72,7 +77,7 @@ pub fn run(prog: &Program, tc: &Typeck, all: bool) -> Result<EffectRun, Failure>
             Err(_) if !contracts.is_empty() => {
                 let mut seen: Vec<(&'static str, Option<Span>, String)> = Vec::new();
                 for &c in &contracts {
-                    let Ok(l) = node_ir(prog, tc, &[c]) else { continue };
+                    let Ok(l) = node_ir(prog, tc, &[c], drops) else { continue };
                     lowered += l.funcs;
                     for d in l.contracts {
                         let key = (d.code(), d.primary(), d.message().to_string());
@@ -83,7 +88,7 @@ pub fn run(prog: &Program, tc: &Typeck, all: bool) -> Result<EffectRun, Failure>
                     }
                 }
                 if traps {
-                    let l = node_ir(prog, tc, &planned)?;
+                    let l = node_ir(prog, tc, &planned, drops)?;
                     lowered += l.funcs;
                     proved = l.proved;
                     Some(l.ir)
@@ -121,9 +126,14 @@ pub struct NodeIrs {
 }
 
 /// What the checked IR says about each graph node, from lowering `nodes`.
-pub fn node_ir(prog: &Program, tc: &Typeck, nodes: &[u32]) -> Result<NodeIrs, Failure> {
+pub fn node_ir(
+    prog: &Program,
+    tc: &Typeck,
+    nodes: &[u32],
+    drops: Option<&stave_sema::drops::Schedules>,
+) -> Result<NodeIrs, Failure> {
     let g = &tc.call_graph;
-    let (r, _) = stave_sema::lower_graph_nodes(prog, tc, nodes);
+    let (r, _) = stave_sema::lower_graph_nodes(prog, tc, nodes, drops);
     let mut gl = r.map_err(|es| build::lower_failure(&es))?;
     build::verified(&gl.module, Stage::Lower)?;
     // The module is a part of the program: every function keeps its checked entry, so the entry

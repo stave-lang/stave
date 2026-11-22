@@ -1,6 +1,7 @@
 //~ CHECK-ONLY
 // `*q = v` whose value borrows what the place held: a field behind the pointer, a call
-// result, a pointer chosen between two views.
+// result, a pointer chosen between two views. A value left borrowing from itself cannot be
+// overwritten either: the assignment drops it first.
 import std.io;
 import std.string;
 
@@ -25,7 +26,7 @@ fn main() -> i32 {
         io.print(other.as_str());
         io.print("\n");
     }
-    w = Wrap.{ h: H.{ name: f"third", s: "" }, k: 0 };
+    w = Wrap.{ h: H.{ name: f"third", s: "" }, k: 0 }; //~ ERROR E0501
     // the value is a call result `from` a borrow of the place
     let mut x = Chain.{ v: 1, prev: &zero };
     let q = &mut x;

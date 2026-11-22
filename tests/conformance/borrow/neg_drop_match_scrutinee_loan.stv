@@ -1,0 +1,42 @@
+//~ CHECK-ONLY
+// A temporary `match` scrutinee that one arm takes whole by a name is still alive in the arms
+// that do not take it, and is dropped at the end of the statement there: what it borrows stays
+// borrowed in those arms (E0501). After the statement the borrow is over.
+import std.io;
+
+view struct W { pub r: &mut u32 }
+
+impl Drop for W {
+    fn drop(&mut self) {
+        *self.r = *self.r + 100;
+    }
+}
+
+fn set(x: &mut u32) -> u32 { *x = 7; return 0; }
+
+fn eat(w: W) -> u32 { return 1; }
+
+fn left_whole(c: bool) -> u32 {
+    let mut x: u32 = 1;
+    let n = match W.{ r: &mut x } {
+        w if c => eat(w),
+        _ => set(&mut x), //~ ERROR E0501
+    };
+    return n + x;
+}
+
+fn after_the_statement(c: bool) -> u32 {
+    let mut x: u32 = 1;
+    let n = match W.{ r: &mut x } {
+        w if c => eat(w),
+        _ => 0,
+    };
+    let m = set(&mut x);
+    return n + m + x;
+}
+
+fn main() {
+    let a = left_whole(false);
+    let b = after_the_statement(true);
+    io.print(f"{a} {b}\n");
+}

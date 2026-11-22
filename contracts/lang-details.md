@@ -238,11 +238,21 @@ when that owner ends.
 
 - **Whole values.** A value is moved whole or taken apart by a pattern ("Whole moves and
   destructuring patterns" above): the parts a moving pattern ignores are dropped at its
-  binding point, and nothing of the value is left to its former owner. Assigning a field
-  (`p.a = v;`) drops the field's old value.
-- **`impl Drop`.** A value whose type has an `impl Drop` is dropped as a whole: its `drop`
-  runs once, then its fields are dropped. No pattern takes it apart; one that only reads it
-  (`match mk() { F.B => .. }`) leaves it to be dropped where its owner ends.
+  binding point, and nothing of the value is left to its former owner.
+- **Assignment.** `x = e;` evaluates `e`, drops the value `x` holds, then writes; a field
+  (`p.a = v;`) likewise drops the field's old value. The drop is a use of what the old value
+  borrows when its type has drop glue: those borrows are live up to the assignment (E0501 where
+  a borrowed local ends before it, and where the old value borrows `x` itself). An `x` that
+  holds no value there on any path (moved out, not assigned since) drops nothing and uses
+  nothing. A captured place assigned inside a closure or `spawn` body is no exception: a
+  capture always holds a value when the body runs, so each run of the assignment drops the
+  old value (`o = Option.None;` in a closure releases a guard `o` held).
+- **`impl Drop`, order inside a value.** A value whose type has an `impl Drop` is dropped as a
+  whole: its `drop` runs once, then its fields are dropped, in declaration order (tuple and
+  array elements in index order; of an enum, the fields of the value's variant). No pattern
+  takes it apart; one that only reads it (`match mk() { F.B => .. }`) leaves it to be dropped
+  where its owner ends. A part is alive until its turn: a `MutexGuard` in a field is held while
+  the type's `drop` and the drops of the fields before it run ("Locks and completion waits").
 - **Compound assignment.** `p op= e` drops nothing: every operand of an operator is Copy where
   it is used (§2 Operator traits), so the old value of `p` has no drop glue.
 - **Temporaries.** A temporary with drop glue is dropped at the end of its statement, the last
@@ -257,15 +267,40 @@ when that owner ends.
   iterator value a `for` is given is moved into the loop and, with drop glue, dropped once when
   the loop ends or is left ("`for` sources"). An array value a `for` is given is the loop's too:
   each element is handed to its iteration, and the elements the loop has not handed out when it
-  ends or is left are dropped there, in order.
+  ends or is left are dropped there, in order. Both belong to the loop's scope, around the
+  body's: a `break`, `return`, or `?` in the body drops the body's locals first, while the
+  iterator and the rest of the array are alive.
 - **Rvalues under patterns.** An rvalue that a pattern only reads (`let P.{ n, a: _ } = mk();`
   with `n: u32`, a scrutinee that is a call in an arm that binds nothing by value) is a
   temporary of the statement and is dropped at its end. `let _ = e;` with an rvalue `e` drops
-  it at the end of the statement; with a place `e` it moves nothing and drops nothing.
+  it at the end of the statement; with a place `e` it moves nothing and drops nothing. A
+  scrutinee one arm takes (by a name, `x if c => ..` or `other => ..`, or by a moving pattern)
+  is that temporary on every way through the `match` that leaves it: a guard that fails,
+  another arm. What it borrows stays borrowed there, to the end of the statement. The value a
+  `for` iteration is given is the iteration's when the loop's pattern does not move it: it is
+  dropped where the body ends or is left.
+- **`select`.** `c.select(a, b)` evaluates both operands; the one it does not pick is a
+  temporary of the statement, made when the `select` is evaluated. Which operand that is is
+  known only when the program runs: what either operand borrows stays borrowed to the end of
+  the statement, and the temporary's drop is checked as either operand's.
 - **Leaving early.** `return`, `break`, `continue`, and `?` drop the temporaries of the
   statements they leave, then the locals of the scopes they leave. `?` also drops the operands
   of the enclosing expressions that were already evaluated (earlier arguments, a by-value
   receiver, earlier fields of a literal), the last evaluated first.
+- **One schedule.** Where each drop runs is decided once per body, as its drop schedule
+  (stave-sema `drops`): one row per drop, naming the point (the owner's end, the exit taken, a
+  pattern's binding point, an assignment) and what is dropped there (a local, a temporary of a
+  statement, the part of a pattern with a given index, an overwritten value). The rows are made
+  with the borrow checker's control-flow graph, one per drop statement, so the borrow check,
+  the move check, the lock-rank and join rules read exactly the scheduled drops; the code
+  generator asks the schedule for every drop it emits, and a drop without a row, or the drops
+  of one end or exit in another order than their rows, stop the build as a compiler error. So
+  does a row the generator never decided: every scheduled drop of a local, of an overwritten
+  value, and of a part a pattern ignores must have been emitted or left out for a stated
+  reason (the owner holds no value there, the type has no drop glue in this instance) where the
+  generator lowered that point. Temporaries are compared in the first direction only. The parts a pattern ignores and the steps of a value's drop glue
+  are each computed by one function both sides call. Whether a scheduled drop runs is the
+  owner's init bit: one per owner, a temporary included.
 
 ## §3 Temporaries end with their statement
 
@@ -299,6 +334,18 @@ list of fixed paths in contracts/intrinsics.md; each has its own diagnostic (`gp
 No syntax marks such a type.
 
 ## §3 Locks and completion waits
+
+The rank rule (LANG.md §3, E1405) is checked at every drop of the drop schedule ("Drops"), not
+only at calls: a drop runs the dropped type's drop glue, which may take a lock. Two sets of
+guards are held there. The guards of the other values alive at that point; and the guards
+inside the dropped value itself, each until the glue reaches it (case `own`): `(L, guard)`
+drops `L` while the guard is held, `(guard, L)` releases the guard first; a type's own `drop`
+runs while every field is alive. A guard a `vec.Vec` owns counts as held while the `Vec` is
+dropped. A destructor that joins threads (a `scope` in `drop`) takes what those threads take.
+The steps are read from the type itself, for any type (a tuple or array made in place too); a
+step the check cannot follow counts as taking any lock (case `opaque`). Array elements are
+judged by their type: `[E.G(guard), E.K(l)]` is rejected although this order is safe, since the
+check does not know which element holds which variant.
 
 Completion-queue waits (`park`) are `block` waits: like file waits they are outside the claim that
 safe code cannot deadlock on locks and joins. No `MutexGuard` may be held across a call that has
