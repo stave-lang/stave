@@ -278,11 +278,6 @@ of the binary's directory that holds a `Cargo.toml` and is a library directory (
 root, for `target/<profile>/stave`). None found: usage error (exit 2) naming the places tried.
 Every dump covers the whole program, `std` and `runtime` included.
 
-**Borrow dataflow switch**: while the borrow checker carries two dataflows, `STAVE_BORROW_DATAFLOW`
-picks one for every command that checks: `new` (the default: unset or empty), `old`, or `both` (each
-body through both; a difference is an internal error, exit 3). Any other value is a usage error
-(exit 2). The switch is a debugging aid and goes away with the old dataflow.
-
 **Interpreter checking mode**: no `stave` command runs the stave-ir reference interpreter; the
 test harness does (`stave_driver::interp::run`: the interpreter legs of the run, SIMD, dispatch,
 and differential suites). `STAVE_INTERP_CHECK=1` in the environment of that process turns on its
