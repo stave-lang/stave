@@ -1,10 +1,10 @@
 //~ CHECK-ONLY
 //~ TARGET x86_64-linux
-// The values a body holds by value include the ones no node of its own holds: the result of a
-// call through a fn or closure value (callable without the value's features, so its result is
-// the caller's), the operand of `?`, and the enum a `match` loads, even through `&` (a pattern
-// reads the tag of the whole enum, payload included). A generic body's chain steps count for
-// its instances. The result of a call to a known fn, method, or dispatch is covered by E0704.
+// The values a body holds by value include the ones no node of its own holds: the operand of
+// `?`, and the enum a `match` loads, even through `&` (a pattern reads the tag of the whole enum,
+// payload included). A generic body's chain steps count for its instances. The result of a call
+// to a known fn, method, or dispatch is covered by E0704, and so is a call through a fn or
+// closure value whose type has features the caller lacks (case `value`).
 import std.mem;
 import std.soa;
 
@@ -16,12 +16,12 @@ struct W<T> {
 impl<T: Copy> Copy for W<T> {}
 
 fn v4_ref(f: fn(&[f32]) -> f32x16 needs(v4), xs: &[f32]) -> f32 needs(avx2) {
-    let r = &f(xs); //~ ERROR E0702
+    let r = &f(xs); //~ ERROR E0704
     return 1.0;
 }
 
 fn v4_match(f: fn(&[f32]) -> f32x16 needs(v4), xs: &[f32]) -> f32 needs(avx2) {
-    match f(xs) { //~ ERROR E0702
+    match f(xs) { //~ ERROR E0704
         _ => {
             return 1.0;
         }
@@ -29,7 +29,7 @@ fn v4_match(f: fn(&[f32]) -> f32x16 needs(v4), xs: &[f32]) -> f32 needs(avx2) {
 }
 
 fn avx2_field(f: fn(&[f32]) -> (f32x8, f32) needs(avx2), xs: &[f32]) -> f32 needs(fma) {
-    return f(xs).1; //~ ERROR E0702
+    return f(xs).1; //~ ERROR E0704
 }
 
 fn mk16(xs: &[f32]) -> f32x16 needs(v4) {

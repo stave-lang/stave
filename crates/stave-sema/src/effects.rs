@@ -847,12 +847,29 @@ pub fn plan(prog: &Program, tc: &Typeck) -> Plan {
     let mut cx = g.types(&tc.types);
     for bi in made {
         let b = &tc.bodies[bi];
-        let Some(insts) = inst_of.get(&b.decl) else { continue };
         let mut br = None;
         let Some(icx) = item_cx(prog, b.item, &mut br) else { continue };
         let closures: Vec<u32> =
             crate::closures::closure_nodes(&icx, b.node).into_iter().map(|(node, _)| icx.a(node)).collect();
         let made = b.denied.iter().map(|&x| (x, false));
+        for ((tok, _, coerced), _) in made.clone().chain(b.valued.iter().map(|&x| (x, true))) {
+            // every value a conversion checks is the value its node makes: a closure literal or
+            // a node naming a fn item, never a node whose value is chosen among others
+            let names = crate::threads::wrapper_chain(&icx, coerced).into_iter().find_map(|c| {
+                if crate::closures::closure_kind(&icx, c) == Some(crate::closures::ClosureKind::Literal) {
+                    Some(icx.a(c))
+                } else {
+                    b.is_fn_item(c).then(|| icx.end_tok(c))
+                }
+            });
+            let known = closures.contains(&tok) || matches!(b.target(tok), Some(Target::Fn { .. }));
+            assert!(
+                names == Some(tok) && known,
+                "internal error: a fn value conversion at {:?} checks no value its node makes",
+                icx.node_span(coerced)
+            );
+        }
+        let Some(insts) = inst_of.get(&b.decl) else { continue };
         for ((tok, deny, coerced), valued) in made.chain(b.valued.iter().map(|&x| (x, true))) {
             let site = icx.node_span(coerced);
             let deny = Effects(deny);

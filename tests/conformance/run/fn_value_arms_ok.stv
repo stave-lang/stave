@@ -1,0 +1,60 @@
+//~ STDOUT fn_value_arms_ok.stdout
+// A value `if` / `match` of fn values whose every arm satisfies the wanted fn type's deny clause
+// is accepted and runs the arm chosen: fn items, a closure literal, parentheses, an `else if`
+// chain, and a features drop inside a `needs(avx2)` fn.
+import std.io;
+
+fn one() -> u32 {
+    return 1u32;
+}
+
+fn two() -> u32 {
+    return 2u32;
+}
+
+fn three() -> u32 {
+    return 3u32;
+}
+
+fn call(f: fn() -> u32 without(io)) -> u32 without(io) {
+    return f();
+}
+
+fn wide_a() -> u32 needs(avx2) {
+    return 10u32;
+}
+
+fn wide_b() -> u32 needs(avx2) {
+    return 20u32;
+}
+
+fn plain(c: bool) -> u32 needs(avx2) {
+    let f: fn() -> u32 = if c then wide_a else wide_b;
+    return f();
+}
+
+fn base(c: bool) -> u32 {
+    if c {
+        return 10u32;
+    }
+    return 20u32;
+}
+
+dispatch fn wide(c: bool) -> u32 { avx2 => plain, _ => base, }
+
+fn main() {
+    let c = false;
+    let f: fn() -> u32 without(io) = if c then one else two;
+    let k = 2u32;
+    let g: fn() -> u32 without(io) = match k {
+        0u32 => one,
+        1u32 => two,
+        _ => (if c then three else fn() -> u32 { return 4u32; }),
+    };
+    let h: fn() -> u32 without(io) = if c then one else if k > 1u32 then three else two;
+    let a = call(f);
+    let b = call(g);
+    let d = call(h);
+    let w = wide(true) + wide(false);
+    io.print(f"{a} {b} {d} {w}\n");
+}
