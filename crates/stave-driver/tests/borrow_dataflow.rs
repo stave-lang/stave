@@ -148,6 +148,27 @@ fn large(shape: &str, n: usize) -> String {
             }
             o += "    let k: usize = vr.len();\n";
         }
+        // n / 4 borrows of one view held to the end in a grown body, n / 20 joins after them:
+        // every search meets all the borrows of the view, which hold one set
+        "views" => {
+            o += "view struct V { r: &u32 }\nfn main() -> i32 {\n";
+            o += BASE;
+            o += "    let z: u32 = 9;\n    let y: u32 = 8;\n";
+            o += "    let mut vr = vec.Vec::<&u32>.new();\n    vr.push(&z);\n    let mut u = V.{ r: &y };\n";
+            for i in 0..4 {
+                o += &format!("    if cond(s) {{ u = V.{{ r: &a{i} }}; }}\n");
+            }
+            for i in 0..n / 4 {
+                o += &format!("    let r{i} = &u;\n");
+            }
+            for i in 0..n / 20 {
+                o += &format!("    if cond(s) {{ s = s +% {}; }}\n", i % 100);
+            }
+            for i in (0..n / 4).rev() {
+                o += &format!("    s = s +% *r{i}.r;\n");
+            }
+            o += "    let k: usize = vr.len();\n";
+        }
         // one E0501 per 500 statements: a write of a local whose loan is used right after
         "errors" => {
             o += "fn main() -> i32 {\n";
@@ -231,7 +252,7 @@ struct Shape {
     states: u64,
 }
 
-const SHAPES: [Shape; 11] = [
+const SHAPES: [Shape; 12] = [
     Shape { name: "line", errors: 0, applied: 4, copied: 1, counted: 2, atoms: 2, rebuilt: 0, states: 0 },
     Shape { name: "loans", errors: 0, applied: 4, copied: 1, counted: 2, atoms: 2, rebuilt: 0, states: 0 },
     Shape { name: "locals", errors: 0, applied: 4, copied: 1, counted: 2, atoms: 2, rebuilt: 0, states: 0 },
@@ -245,6 +266,17 @@ const SHAPES: [Shape; 11] = [
     Shape { name: "grown", errors: 0, applied: 6, copied: 1, counted: 2, atoms: 3, rebuilt: 12, states: 0 },
     // solved twice: without and with an entry state per block
     Shape { name: "stale", errors: 0, applied: 10, copied: 1, counted: 2, atoms: 4, rebuilt: 20, states: 0 },
+    // a search per borrow of the view and per join; each reads the view's set once
+    Shape {
+        name: "views",
+        errors: 0,
+        applied: 6,
+        copied: 0,
+        counted: 12,
+        atoms: 12,
+        rebuilt: 11_000,
+        states: 0,
+    },
     // each E0501 replays its block to find the later use: 20 replays of 15 000 statements
     Shape { name: "errors", errors: 1, applied: 36, copied: 1, counted: 1, atoms: 1, rebuilt: 0, states: 0 },
     Shape { name: "owners", errors: 0, applied: 6, copied: 1, counted: 1, atoms: 1, rebuilt: 0, states: 0 },
@@ -308,8 +340,8 @@ fn large_fns_stay_cheap() {
         if per_live > MAX_PER_LIVE {
             bad.push(format!("{shape}: {per_live:.2} state entries copied per live local and block"));
         }
-        // the store of `grown` and `stale` grows a view; only `stale` needs the per-block mode
-        let want = (u64::from(shape == "grown" || shape == "stale"), u64::from(shape == "stale"));
+        // the store of `grown`, `stale` and `views` grows a view; only `stale` needs the per-block mode
+        let want = (u64::from(matches!(shape, "grown" | "stale" | "views")), u64::from(shape == "stale"));
         if (grown, exact) != want {
             bad.push(format!("{shape}: {grown} bodies grown, {exact} with an entry state per block"));
         }
