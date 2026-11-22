@@ -1,0 +1,16 @@
+import std.io;
+
+fn main() -> i32 {
+    let vs: [i64; 3] = [300, -5, 42];
+    for i in 0..vs.len() {
+        let v = vs[i];
+        let s: u8 = v as| u8;
+        let w: u8 = v as% u8;
+        let c: Option<u8> = v as? u8;
+        match c {
+            Option.Some(x) => { io.print(f"{v}: sat {s} wrap {w} checked {x}\n"); }
+            Option.None => { io.print(f"{v}: sat {s} wrap {w} checked none\n"); }
+        }
+    }
+    return 0;
+}

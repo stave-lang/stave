@@ -1,0 +1,29 @@
+import std.io;
+
+fn split_at_max(xs: &[i32]) -> (&[i32], &[i32]) from xs {
+    let mut m: usize = 0;
+    for i in 1..xs.len() {
+        if xs[i] > xs[m] {
+            m = i;
+        }
+    }
+    return (&xs[0..m], &xs[m..xs.len()]);
+}
+
+fn bigger(a: &i32, b: &i32) -> &i32 from a + b {
+    return if *a >= *b then a else b;
+}
+
+fn main() -> i32 {
+    let xs: [i32; 7] = [4, -2, 9, 1, 9, -5, 3];
+    let (l, r) = split_at_max(&xs[0..7]);
+    let ls = l.sum();
+    let ln = l.len();
+    let rs = r.sum();
+    let rn = r.len();
+    io.print(f"left sum {ls} len {ln}\n");
+    io.print(f"right sum {rs} len {rn}\n");
+    let b = *bigger(&xs[0], &xs[6]);
+    io.print(f"bigger {b}\n");
+    return 0;
+}

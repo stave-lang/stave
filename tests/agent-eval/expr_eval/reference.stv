@@ -1,0 +1,33 @@
+import std.io;
+import std.vec;
+
+enum Expr { Num(i64), Add(usize, usize), Mul(usize, usize), Neg(usize) }
+
+rec fn eval(ns: &[Expr], i: usize) -> i64 {
+    return match ns[i] {
+        Expr.Num(v) => v,
+        Expr.Add(a, b) => eval(ns, a) + eval(ns, b),
+        Expr.Mul(a, b) => eval(ns, a) * eval(ns, b),
+        Expr.Neg(a) => -eval(ns, a),
+    };
+}
+
+fn main() -> i32 {
+    let mut ns = vec.Vec::<Expr>.new();
+    ns.push(Expr.Num(2));
+    ns.push(Expr.Num(3));
+    ns.push(Expr.Add(0, 1));
+    ns.push(Expr.Num(4));
+    ns.push(Expr.Neg(3));
+    ns.push(Expr.Mul(2, 4));
+    ns.push(Expr.Num(7));
+    ns.push(Expr.Add(5, 6));
+    ns.push(Expr.Mul(7, 7));
+    let want: [usize; 4] = [2, 5, 7, 8];
+    for k in 0..want.len() {
+        let i = want[k];
+        let v = eval(ns.as_slice(), i);
+        io.print(f"node {i} = {v}\n");
+    }
+    return 0;
+}

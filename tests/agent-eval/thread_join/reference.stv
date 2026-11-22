@@ -1,0 +1,26 @@
+import std.io;
+import std.thread;
+
+fn total(xs: &[u64]) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..xs.len() {
+        s = s + xs[i];
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let mut xs: [u64; 1000] = [0; 1000];
+    for i in 0..xs.len() {
+        xs[i] = (i as u64) + 1;
+    }
+    let (a, b) = thread.join(fn() -> u64 { return total(&xs[0..500]); }, fn() -> u64 { return total(&xs[500..1000]); });
+    let t = a + b;
+    io.print(f"left {a}\n");
+    io.print(f"right {b}\n");
+    io.print(f"total {t}\n");
+    thread.par_for_mut(&mut xs[0..1000], fn(i: usize, x: &mut u64) { *x = *x * 2; });
+    let d = total(&xs[0..1000]);
+    io.print(f"doubled {d}\n");
+    return 0;
+}

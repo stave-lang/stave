@@ -32,5 +32,6 @@ stave-syntax.workspace = true
 stave-target.workspace = true
 
 [dev-dependencies]
+agent-eval.workspace = true
 serde_json.workspace = true
 toml.workspace = true
