@@ -559,51 +559,80 @@ impl<'a> Ck<'a> {
         };
         let method_name = crate::sigs::OP_TRAITS.iter().find(|x| x.0 == trait_name).map_or("", |x| x.1);
         let msym = self.prog.strings.lookup(method_name);
-        if let TypeKind::Param(p) = self.tys.kind(t).clone() {
-            let has =
-                self.genv().get(p as usize).is_some_and(|g| g.bounds.iter().any(|b| b.trait_decl == tr));
-            if has {
-                if let Some(m) = msym.and_then(|s| self.prog.member(tr, s)) {
-                    self.target(
-                        tok,
-                        Target::Op {
-                            method: MethodRef::Bound { method: m, trait_args: Vec::new(), self_ty: t },
-                            args: Vec::new(),
-                        },
-                    );
-                }
-                return Ty::T(t);
+        let genv = self.genv();
+        let mut found_impl = None;
+        let target = if let TypeKind::Param(p) = self.tys.kind(t).clone() {
+            if !genv.get(p as usize).is_some_and(|g| g.bounds.iter().any(|b| b.trait_decl == tr)) {
+                self.e0901(tok, p);
+                return Ty::ERR;
             }
-            self.e0901(tok, p);
+            msym.and_then(|s| self.prog.member(tr, s)).map(|m| {
+                let method = MethodRef::Bound { method: m, trait_args: Vec::new(), self_ty: t };
+                (Target::Op { method, args: Vec::new() }, None)
+            })
+        } else {
+            let tref = TraitRef { trait_decl: tr, args: Vec::new() };
+            let Some((imp, args)) = self.w.find_impl(&mut self.tys, t, &tref, genv, 0) else {
+                self.e0206(tok, t);
+                return Ty::ERR;
+            };
+            found_impl = Some(imp);
+            let m = self.sigs.impl_def(imp).and_then(|i| {
+                i.methods
+                    .iter()
+                    .copied()
+                    .find(|&m| msym.is_some_and(|s| self.prog.decl(m).is_some_and(|d| d.name == s)))
+            });
+            m.map(|m| {
+                let method = MethodRef::Impl { method: m, impl_decl: imp, impl_args: args.clone() };
+                (Target::Op { method, args: args.clone() }, Some((m, args)))
+            })
+        };
+        // An operator copies its operands: every operand (and so the result, of the same type) is
+        // Copy where the operator is used, by the Copy query of the checked fn's own bounds. A
+        // bound on an operator trait alone does not make a type Copy. The borrow checker and the
+        // lowering take operator operands as copies on this answer alone.
+        if !self.w.is_copy(&mut self.tys, t, genv) {
+            self.e0422_operand(tok, trait_name, t, found_impl);
             return Ty::ERR;
         }
-        let genv = self.genv();
-        let tref = TraitRef { trait_decl: tr, args: Vec::new() };
-        match self.w.find_impl(&mut self.tys, t, &tref, genv, 0) {
-            Some((imp, args)) => {
-                let m = self.sigs.impl_def(imp).and_then(|i| {
-                    i.methods
-                        .iter()
-                        .copied()
-                        .find(|&m| msym.is_some_and(|s| self.prog.decl(m).is_some_and(|d| d.name == s)))
-                });
-                if let Some(m) = m {
-                    self.target(
-                        tok,
-                        Target::Op {
-                            method: MethodRef::Impl { method: m, impl_decl: imp, impl_args: args.clone() },
-                            args: args.clone(),
-                        },
-                    );
-                    self.site(tok, self.icx.tok_span(tok), m, &args);
-                }
-                Ty::T(t)
-            }
-            None => {
-                self.e0206(tok, t);
-                Ty::ERR
+        if let Some((target, site)) = target {
+            self.target(tok, target);
+            if let Some((m, args)) = site {
+                self.site(tok, self.icx.tok_span(tok), m, &args);
             }
         }
+        Ty::T(t)
+    }
+
+    /// E0422 on an operator whose operand is not Copy where it is used. A type param is told to
+    /// add `Copy` to its bounds (case `operand`); a type that names params, to give them the
+    /// bounds of its `impl Copy` (`operand-args`); any other type, to be Copy or to take a method
+    /// (`operand-type`), with the operator impl it went through (`imp`) as a related span.
+    fn e0422_operand(&mut self, tok: u32, trait_name: &str, t: TypeId, imp: Option<DeclId>) {
+        let op = self.icx.tok_str(tok).to_string();
+        let tn = self.show(t);
+        let mut roles: Vec<(&str, Span)> = Vec::new();
+        let case = match self.tys.kind(t) {
+            TypeKind::Param(p) => {
+                roles.extend(self.genv().get(*p as usize).map(|g| ("param", g.name_span)));
+                "operand"
+            }
+            _ => {
+                roles.extend(imp.and_then(|i| self.prog.decl(i)).map(|d| ("impl", d.name_span)));
+                if self.tys.has_params(t) { "operand-args" } else { "operand-type" }
+            }
+        };
+        let forms = self.sigs.op_forms(self.prog, trait_name);
+        let call = if op.ends_with('=') { &forms.compound_call } else { &forms.call };
+        let d = mk(
+            "E0422",
+            Some(case),
+            &[("op", &op), ("type", &tn), ("bound", trait_name), ("sig", &forms.sig), ("call", call)],
+            self.icx.tok_span(tok),
+            &roles,
+        );
+        self.report(d);
     }
 
     pub fn e0901(&mut self, tok: u32, param: u32) {

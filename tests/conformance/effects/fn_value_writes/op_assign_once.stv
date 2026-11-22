@@ -9,6 +9,8 @@ view struct H {
     f: fn() -> u32,
 }
 
+impl Copy for H {}
+
 impl core.BitOr for H {
     fn bitor(self, rhs: Self) -> Self {
         let k = self.f;

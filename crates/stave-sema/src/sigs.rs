@@ -303,6 +303,17 @@ pub const OP_TRAITS: [(&str, &str); 19] = [
     ("Not", "not"),
 ];
 
+/// The borrowing method that stands in for an operator trait (the E0422 fix texts).
+pub struct OpForms {
+    /// `fn add(&self, rhs: &Self) -> Self`; for a trait whose method takes no `rhs` (`Neg`,
+    /// `Not`): `fn neg(&self) -> Self`.
+    pub sig: String,
+    /// `a.add(&b)`, `a.neg()`.
+    pub call: String,
+    /// The call that replaces `a += b`: `a = a.add(&b)`; the same as `call` for a unary trait.
+    pub compound_call: String,
+}
+
 /// The frozen signature table.
 #[derive(Debug, Default)]
 pub struct Sigs {
@@ -317,6 +328,31 @@ pub struct Sigs {
 }
 
 impl Sigs {
+    /// The method of operator trait `trait_name` (a name of [`OP_TRAITS`]) as a borrowing
+    /// method; unary exactly when the trait's own method takes `self` alone.
+    pub fn op_forms(&self, prog: &Program, trait_name: &str) -> OpForms {
+        let method = OP_TRAITS.iter().find(|x| x.0 == trait_name).map_or("method", |x| x.1);
+        let unary = self
+            .lang
+            .ops
+            .get(trait_name)
+            .zip(prog.strings.lookup(method))
+            .and_then(|(&tr, m)| prog.member(tr, m))
+            .and_then(|m| self.fn_sig(m))
+            .is_some_and(|f| f.params.len() == 1);
+        if unary {
+            let call = format!("a.{method}()");
+            OpForms { sig: format!("fn {method}(&self) -> Self"), compound_call: call.clone(), call }
+        } else {
+            let call = format!("a.{method}(&b)");
+            OpForms {
+                sig: format!("fn {method}(&self, rhs: &Self) -> Self"),
+                compound_call: format!("a = {call}"),
+                call,
+            }
+        }
+    }
+
     pub fn get(&self, d: DeclId) -> &DeclSig {
         static NONE: DeclSig = DeclSig::None;
         self.decls.get(d.idx()).unwrap_or(&NONE)

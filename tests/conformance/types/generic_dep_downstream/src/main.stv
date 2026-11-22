@@ -29,6 +29,8 @@ impl d.Mk for R {
 
 struct P { n: u32 }
 
+impl Copy for P {}
+
 impl Add for P {
     fn add(self, rhs: Self) -> Self {
         return P.{ n: self.n + rhs.n };

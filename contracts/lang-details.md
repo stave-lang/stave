@@ -13,8 +13,9 @@ reference for what a program may write and what it means.
   a value made where F is proven stays callable.
 - No operator applies to a fn value: the operator traits and fn types both belong to `std`, which
   implements none for a fn type, so `impl core.Add for fn()` elsewhere is E0420 and `f += g` on a
-  fn-typed `f` has no impl. An operator over fn values goes through a struct that holds them
-  (`view struct H { f: fn() }`, `impl core.Add for H`): `H.f` is a field declared with a fn type,
+  fn-typed `f` has no impl. An operator over fn values goes through a Copy struct that holds them
+  (`view struct H { f: fn() }`, `impl Copy for H {}`, `impl core.Add for H`, §2 Operator traits):
+  `H.f` is a field declared with a fn type,
   a tracked slot of the call graph (contracts/soundness.md), fed by every `H` literal, the impl's
   results included.
 
@@ -91,6 +92,31 @@ reference for what a program may write and what it means.
   a parking fn, nor a denied `park` (E1401), has anything to check or a negative conformance
   test.
 
+## §2 Operator traits
+
+The operator traits of `std.core` are `Add WrapAdd SatAdd Sub WrapSub SatSub Mul WrapMul SatMul
+Div Rem Shl WrapShl Shr BitAnd BitOr BitXor Neg Not`; a compound assignment (`a += b`) uses the
+trait of its operator, and the comparisons, `!`, `&&`, and `||` are no traits. Every method is
+`fn op(self, rhs: Self) -> Self` (unary `fn op(self) -> Self`; E0905 keeps an impl to it), so
+every operand and the result have the impl's self type. That type must be Copy in every instance
+the impl covers (E0422), decided by the query that decides Copy in a generic body: the impl's
+params are rigid and carry exactly the impl's bounds. `impl<T: Copy> Add for W<T>` with
+`impl<T: Copy> Copy for W<T>` passes; `impl<T> Add for W<T>` does not, nor `impl<T: Copy> Add
+for F<T>` when F's `impl Copy` asks `T: Copy + Frozen`, nor an impl for a type (or an instance,
+`impl<T: Copy> Div for K<T>` with only `impl Copy for K<u32>`) that has no `impl Copy`. Reason:
+an operator is a call that is not written as one, and on operands that are not Copy it would
+move them unseen (`d + d`, `a += b` out of a place that cannot be moved from, the old value of
+`a` dropped inside the call). A type that owns memory (a big integer, a heap matrix, a string)
+takes a method: `fn add(&self, rhs: &Self) -> Self`, called as `a.add(&b)`.
+
+An operator copies its operands, so every operand is Copy where the operator is used (E0422
+case `operand`, at the operator), by the Copy query of the checked fn's own bounds. A bound on an
+operator trait does not imply `Copy`: in `fn f<T: Add>(a: T, b: T)`, `a + b` is E0422 and the
+fix is `T: Add + Copy`. The rule covers binary and unary operators and compound assignment, an
+operand behind a reference (`*r + e`, `*r += e`), a field, an element, a capture, and a type
+whose operator impl is itself E0422. With it no operator moves an operand: the borrow checker
+reads operator operands as copies, and the lowering drops nothing for them.
+
 ## §3 Operand order and moves
 
 Every expression with several operands evaluates them left to right, each to a value, before it
@@ -109,16 +135,15 @@ An assignment `p = e` evaluates the operands of the place `p` first (an index `x
 a dereference `*pick(&mut a)` or a field `sref(&mut s).f` goes through), then `e`, then makes
 the moves of `e` and writes `p`: `xs[i] = bump(&mut i)` writes the element of the old `i`, and
 `s = make(s, dup(&s.d))` is E0502 at `&s.d`. `p op= e` is `p = p op e`: the value of `p` is a
-by-value operand evaluated after the place's operands and before `e`. With a user operator on
-a non-Copy type it is a move, so `e` may not use `p` (E0502) and the write re-initializes `p`;
-a `p` that is not a whole local (a part, a place behind a reference or an index, a capture, a
-static) is E0504, like `*r = *r + e`.
+by-value operand evaluated after the place's operands and before `e`. It is a copy (§2
+Operator traits), so `e` may use `p` and may change it: `c += set(&mut c, 4)` adds the old value
+of `c`.
 
 ## §3 Whole moves and destructuring patterns
 
 A non-Copy value moves whole. A by-value use of a non-Copy part of a place or of a temporary
-outside a pattern (`let x = s.f;`, `f(t.0)`, `mk().a`, `s.v.into_iter()`, `s.f += e` with a
-user operator) is E0504 case `part`; Copy parts are read freely, borrows of parts (`&s.f`,
+outside a pattern (`let x = s.f;`, `f(t.0)`, `mk().a`, `s.v.into_iter()`) is E0504 case
+`part`; Copy parts are read freely, borrows of parts (`&s.f`,
 `&mut s.f`) and assignments to parts (`s.f = v`, which drops the old part) are unchanged.
 
 Which patterns move. A `let`, `match` arm, or `for` pattern moves its scrutinee if it binds some
@@ -200,10 +225,8 @@ when that owner ends.
 - **`impl Drop`.** A value whose type has an `impl Drop` is dropped as a whole: its `drop`
   runs once, then its fields are dropped. No pattern takes it apart; one that only reads it
   (`match mk() { F.B => .. }`) leaves it to be dropped where its owner ends.
-- **Compound assignment.** `p op= e` with a user operator on a value with drop glue: the
-  operator call takes the old value of `p` (the callee owns it), and the result is written into
-  `p` without a drop. When `e` leaves by `?`, the old value is dropped once, with `p`, on that
-  exit.
+- **Compound assignment.** `p op= e` drops nothing: every operand of an operator is Copy where
+  it is used (§2 Operator traits), so the old value of `p` has no drop glue.
 - **Temporaries.** A temporary with drop glue is dropped at the end of its statement, the last
   made first, and only if the operand that makes it ran (the right side of `&&` / `||`, a branch
   of a value `if`). These are statements of their own for this rule: the condition of an `if` or

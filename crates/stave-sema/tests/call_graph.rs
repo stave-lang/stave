@@ -156,7 +156,7 @@ impl Sq {
     fn new(s: u32) -> Sq { return Sq.{ s: s }; }
     fn grow(&mut self) { self.s = self.s + 1u32; }
 }
-struct V { x: u32 }
+struct V { x: u32 } impl Copy for V {}
 impl Add for V {
     fn add(self, o: V) -> V { return V.{ x: self.x + o.x }; }
 }

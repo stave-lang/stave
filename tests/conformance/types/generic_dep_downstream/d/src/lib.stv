@@ -16,7 +16,7 @@ pub fn call<T: Tr>(t: &T) -> u32 {
     return t.m();
 }
 
-pub fn sum<T: Add>(a: T, b: T) -> T {
+pub fn sum<T: Add + Copy>(a: T, b: T) -> T {
     return a + b;
 }
 

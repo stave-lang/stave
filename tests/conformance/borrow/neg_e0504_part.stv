@@ -8,7 +8,6 @@ import std.vec;
 
 struct D { pub id: u32 }
 impl Drop for D { fn drop(&mut self) { } }
-impl Add for D { fn add(self, rhs: Self) -> Self { return D.{ id: self.id + rhs.id }; } }
 
 struct S { pub a: D, pub v: vec.Vec<u32>, pub n: u32 }
 impl S { pub fn take_v(&mut self) -> vec.Vec<u32> { return mem.replace(&mut self.v, vec.Vec::<u32>.new()); } }
@@ -51,11 +50,6 @@ fn pattern_on_part(h: H) -> usize {
 fn let_pattern_on_part(h: H) -> u32 {
     let (d, k) = h.t; //~ ERROR E0504
     return k;
-}
-
-fn compound_field(s: S) {
-    let mut t = s;
-    t.a += D.{ id: 2 }; //~ ERROR E0504
 }
 
 fn return_field(s: S) -> vec.Vec<u32> {
