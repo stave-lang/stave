@@ -90,7 +90,9 @@ that calls `runtime.panic.on_signal(sig: usize, info: usize, uctx: usize) -> nev
 the `signal_handler_addr()` intrinsic. A SIGSEGV with `si_addr` in `[guard_lo, guard_hi)` reports
 `StackOverflow` at the faulting fn's name token (PC table); any other SIGSEGV/SIGBUS re-raises with
 the default action. Frames larger than `runtime.config.GUARD` (64 KiB) must be probed page by page
-by the prologue, or an overflow can jump the guard.
+by the prologue, or an overflow can jump the guard. A fn on a call cycle reads its reserve below
+its frame at entry every 60 KiB (contracts/intrinsics.md "reserve table"), which needs a guard of
+at least 64 KiB on every stack.
 
 **Tables** (read-only data; little-endian; addresses from `site_table()`, `pc_table()`, and
 `stack_table()`):

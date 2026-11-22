@@ -231,14 +231,28 @@ truth):
   the runtime's 8 MiB default), `+8 main: u64` (bytes of main's stack; 0: no bound), `+16 count:
   u64`, then `count` rows of 16 bytes: `+0 code: u64` (the code address a fn value holds, as
   `fn.make` and fn items store it: the jump-table stub where the image has one), `+8 bytes: u64`
-  (bytes of the stack of a thread started with a fn value of that code address; 0: no bound).
-  A stack with a bound gets it (rounded up to the page size), whatever `[run] stack` says; a
-  stack without one (no row, or 0) gets `default`. The compiler computes the bound per root from
+  (bytes of the stack of a thread started with a fn value of that code address; 0: not computed).
+  A stack with bytes gets them (rounded up to the page size), whatever `[run] stack` says; a
+  stack without (no row, or 0) gets `default`. The compiler computes the bound per root from
   the frame sizes of the generated code over the call graph: main's stack holds `__stave_main`
   and what `main` can call; a thread's holds `__stave_thread_start`, `runtime.thread.entry`, and
   what its fn value can call; a stack whose calls can reach a call cycle (recursion, or a drop
-  cycle of a recursive type) has no bound; a `rec fn` on no cycle is bounded like any fn. The bytes include a margin of 4 KiB. Signal handlers
+  cycle of a recursive type) has no bound, and its bytes are `[run] stack` (its default) plus the
+  bound with each cycle taken as one frame of its largest member that calls what all of them
+  call; a `rec fn` on no cycle is bounded like any fn. A stack that reaches a call of C code or of
+  a fn value with unknown targets has 0. The bytes include a margin of 4 KiB. Signal handlers
   run on the alternate signal stack, so no bound counts them.
+- **reserve table** `__stave_reserve_table` (`.rodata`, 8-byte aligned): one `u64` per function
+  with a node on a cycle of the stack bound's graph, in function order: its *reserve*, the most
+  stack that what it calls off its cycle can use below its frame (a fn on another cycle counted
+  as 16 bytes, since it probes for itself), or a trap report from its own code, if more. The
+  entry of such a function, after allocating its frame, reads one word at most every 60 KiB
+  (`PROBE_STRIDE`, the 64 KiB guard less one page) from its stack pointer down to the reserve
+  below its frame's lowest byte, and that byte (x86-64: the reserve into `r11`, then `cmp qword
+  [r10], 0` reads; AArch64: `adrp`/`ldr` into `x16`, then `ldr xzr, [x17]` reads), so a stack too
+  short for what runs below a recursion faults in its guard there, in the recursing fn. A read
+  is at most 64 KiB below a byte the frame wrote (its frame pointer, or the last 4 KiB step of
+  the frame's own probe), so it is in the stack or in the guard, never past it.
 
 **Paths fixed by the compiler** (no attributes or lang items exist; these names are the whole
 list):

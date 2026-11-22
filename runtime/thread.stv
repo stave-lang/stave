@@ -3,7 +3,7 @@
 // A thread runs one fn value `fn()` (a closure: code + environment, contracts/checked-ir.md
 // "Closures") on its own mapping, laid out bottom to top as
 //     [guard: config.GUARD, PROT_NONE][stack][altstack: config.ALTSTACK][record]
-// where the stack has config.thread_stack(code of the fn value) bytes: the computed bound of
+// where the stack has config.thread_stack(code of the fn value) bytes: the compiler's bytes for
 // threads started with that fn, else `[run] stack`.
 // The record (one page) holds the futex word `tid`, the fn value, the mapping, and the thread's
 // block (runtime.state Block: its thread pointer, set by the clone). The thread

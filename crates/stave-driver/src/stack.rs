@@ -1,28 +1,42 @@
 //! The computed stack bound of a build: the most stack each thread of the program can use, from
 //! the frame sizes the code generator reports ([`stave_obj::StackUse`]) and the call graph
 //! ([`stave_sema::callgraph`]), written to the image as `__stave_stack_table`
-//! (contracts/intrinsics.md), which the runtime reads when it maps a stack.
+//! (contracts/intrinsics.md), which the runtime reads when it maps a stack, and the reserve of
+//! each function on a cycle, written as `__stave_reserve_table`, which its entry probes.
 //!
-//! **Graph.** The nodes are the call-graph nodes plus one node per function of the module that no
-//! call-graph node stands for (drop glue, `dispatch` bodies). A function stands for every node of
-//! its instance ([`stave_sema::lower_mapped`]), so a node weighs the frame of its function (0: not
-//! in this build). The edges are the call graph's, without [`EdgeKind::Spawn`] (the body runs on
-//! another stack), plus each direct call of the module (and the calls of the `cpu_init` and `copy_bytes` intrinsics)
-//! that the call graph has no edge for at the caller's node: the runtime helpers lowering inserts
-//! and calls an optimized body makes directly. A call through a fn value takes the call graph's
-//! targets; a node of a function that has one but no such edge, or any such call when a function
-//! made into a fn value has no node, is unresolved, and so is one that calls C code (`ccall`, or
-//! an `extern "C"` import).
+//! **Graph** ([`graph`], before code generation: it needs no frame size). The nodes are the
+//! call-graph nodes plus one node per function of the module that no call-graph node stands for
+//! (drop glue, `dispatch` bodies). A function stands for every node of its instance
+//! ([`stave_sema::lower_mapped`]), so a node weighs the frame of its function (0: not in this
+//! build). The edges are the call graph's, without [`EdgeKind::Spawn`] (the body runs on another
+//! stack), plus each direct call of the module (and the calls of the `cpu_init` and `copy_bytes`
+//! intrinsics) that the call graph has no edge for at the caller's node: the runtime helpers
+//! lowering inserts and calls an optimized body makes directly. A call through a fn value takes
+//! the call graph's targets; a node of a function that has one but no such edge, or any such call
+//! when a function made into a fn value has no node, is unresolved, and so is one that calls C
+//! code (`ccall`, or an `extern "C"` import). A node is a *member* when its strongly connected
+//! component is a cycle (more than one node, or a self-edge): a call cycle (named by its
+//! `rec fn`), a drop cycle of a recursive type, or one the added edges close. A function with a
+//! member node *probes*: it gets a slot of the reserve table, and its entry, after the frame,
+//! touches every page down to its reserve below the frame (the back ends), so that a stack too
+//! short for what runs below it faults in that entry, a member, and never further down.
 //!
-//! **Depth** of a node: its weight plus the largest depth among its successors, and, if its code
-//! has a trap stub, the depth `T` of a trap: twice the depth of `runtime.panic.trap`. A trap
-//! raised while one is reported calls `runtime.panic.begin` first, which exits, so it adds at
-//! most one more such path; that needs every function `begin` reaches to be free of trap stubs,
-//! which the pass checks (else every trapping stack is unbounded).
-//! Computed sinks first by out-degree peeling, on flat arrays without recursion. A node that is
-//! unresolved, on a cycle, or reaches either has no bound: a call cycle (named by its `rec fn`),
-//! a drop cycle of a recursive type, or one the added edges close. A `rec fn` on no cycle of
-//! this graph is bounded like any fn.
+//! **Depth** of a node: its weight plus the largest depth among its successors and its *leaf*:
+//! if its code has a trap stub, the depth `T` of a trap, twice the depth of `runtime.panic.trap`
+//! (a trap raised while one is reported calls `runtime.panic.begin` first, which exits, so it
+//! adds at most one more such path; that needs every function `begin` reaches to be free of trap
+//! stubs, which the pass checks, else every trapping stack is unbounded), and, for a node of a
+//! probing function, that function's reserve, which its entry touches. Computed sinks first by
+//! out-degree peeling, on flat arrays without recursion. A node that is unresolved, on a cycle,
+//! or reaches either has no bound. A `rec fn` on no cycle of this graph is bounded like any fn.
+//!
+//! **Reserve** of a member: the largest depth among its successors outside its component, and its
+//! own trap leaf, where every member counts as the 16 bytes its caller's call puts down before
+//! the member's entry probes (what is below a member is that member's own reserve), and what an
+//! unresolved node calls counts as nothing (it is not known). A probing function's reserve is the
+//! largest of its members'. A function with a member node and a node off every cycle below it
+//! feeds its own reserve: the computation repeats until no reserve grows, at most
+//! [`RESERVE_ROUNDS`] times.
 //!
 //! **Stacks.** Main's stack holds the `__stave_main` stub and `main`. A thread runs the
 //! `__stave_thread_start` stub, `runtime.thread.entry`, and the fn value it was started with; each
@@ -30,9 +44,13 @@
 //! starts, every fn value `runtime.thread.start` can be given) gets a row keyed by its code
 //! address. The fn-value call of `runtime.thread.run_queued` is left out: it runs a queued value
 //! at a join only in an image without a stack table (the IR interpreter; a native image fails to
-//! create the thread instead, so a spawn body never runs on the joiner's bounded stack). The table holds the bound plus [`MARGIN`] for bounded stacks and 0 (the `[run] stack`
-//! default) for the others; the runtime rounds up to the page size. No error comes from the bound: frame sizes differ
-//! between debug and release.
+//! create the thread instead, so a spawn body never runs on the joiner's bounded stack). A stack
+//! with a bound gets it plus [`MARGIN`]. A stack that reaches a cycle gets `[run] stack` plus
+//! its *acyclic bound* plus [`MARGIN`]: the depth over the graph with each component collapsed
+//! to one node (the largest weight and leaf of its members, the successors of all of them), so
+//! every path that runs while no member is live fits, and the first entry of a member finds its
+//! reserve. A stack that reaches an unresolved node gets `[run] stack`. The runtime rounds up to
+//! the page size. No error comes from the bound: frame sizes differ between debug and release.
 
 use stave_ir::{FuncId, Known, Module, Op, Operand, Term};
 use stave_obj::{DataObj, StackUse, SymbolId};
@@ -97,6 +115,8 @@ pub struct Thread {
     /// The call-graph nodes of `func` that a [`EdgeKind::Spawn`] edge reaches.
     pub starts: Vec<u32>,
     pub depth: Depth,
+    /// Without a bound for a cycle: the acyclic bound (each component collapsed), if known.
+    pub acyclic: Option<u64>,
 }
 
 /// The bound of every stack of a build.
@@ -105,8 +125,15 @@ pub struct Report {
     /// `[run] stack` of the manifest, if it sets one.
     pub run_stack: Option<u64>,
     pub main: Depth,
+    /// Without a bound for main's stack: its acyclic bound, if known.
+    pub main_acyclic: Option<u64>,
     /// By function.
     pub threads: Vec<Thread>,
+    /// By reserve-table slot ([`Graph::slots`]): the bytes the function's entry probes below its
+    /// frame.
+    pub reserve: Vec<u64>,
+    /// By reserve-table slot: the function.
+    pub probes: Vec<FuncId>,
 }
 
 impl Report {
@@ -115,9 +142,14 @@ impl Report {
         self.run_stack.unwrap_or(DEFAULT_RUN_STACK)
     }
 
-    /// The stack bytes a table row holds: the bound plus [`MARGIN`], or 0 (the default applies).
-    pub fn bytes(d: Depth) -> u64 {
-        d.map_or(0, |b| b.saturating_add(MARGIN))
+    /// The stack bytes a table row holds: the bound plus [`MARGIN`]; without one, `[run] stack`
+    /// plus the acyclic bound plus [`MARGIN`]; without that either, 0 (the default applies).
+    pub fn bytes(&self, d: Depth, acyclic: Option<u64>) -> u64 {
+        match (d, acyclic) {
+            (Ok(b), _) => b.saturating_add(MARGIN),
+            (Err(_), Some(a)) => self.run_stack().saturating_add(a).saturating_add(MARGIN),
+            (Err(_), None) => 0,
+        }
     }
 
     /// `__stave_stack_table`, with `syms` the symbol of each function.
@@ -125,10 +157,17 @@ impl Report {
         let rows: Vec<(SymbolId, u64)> = self
             .threads
             .iter()
-            .filter(|t| t.depth.is_ok())
-            .filter_map(|t| syms.get(t.func.index()).copied().flatten().map(|s| (s, Report::bytes(t.depth))))
+            .map(|t| (t, self.bytes(t.depth, t.acyclic)))
+            .filter(|&(_, n)| n != 0)
+            .filter_map(|(t, n)| syms.get(t.func.index()).copied().flatten().map(|s| (s, n)))
             .collect();
-        stave_obj::stub::stack_table(self.run_stack.unwrap_or(0), Report::bytes(self.main), &rows)
+        let main = self.bytes(self.main, self.main_acyclic);
+        stave_obj::stub::stack_table(self.run_stack.unwrap_or(0), main, &rows)
+    }
+
+    /// `__stave_reserve_table`.
+    pub fn reserve_table(&self) -> DataObj {
+        stave_obj::stub::reserve_table(&self.reserve)
     }
 }
 
@@ -325,9 +364,129 @@ fn calls_of(m: &Module, f: FuncId, called: &IntrinsicCalls, made: &mut [bool]) -
     c
 }
 
-/// The bound of every stack of module `m` (the module code generation compiled: release builds
-/// after the optimizer), with `uses` the backend's report per function.
-pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -> Report {
+/// What a caller's call puts on the stack before a member's entry probes: the return address
+/// (x86-64), rounded to the stack alignment.
+const ENTRY: u64 = 16;
+
+/// Most passes of the reserve computation (see the module docs).
+pub const RESERVE_ROUNDS: usize = 8;
+
+/// No reserve-table slot.
+pub const NO_SLOT: u32 = u32::MAX;
+
+/// The bound's graph of a module (see the module docs), with its components.
+pub struct Graph {
+    /// Call-graph nodes; the nodes from `n` on are functions with no call-graph node.
+    n: usize,
+    total: usize,
+    /// Per function: its nodes.
+    ids: Vec<Vec<u32>>,
+    /// Per node: the functions that stand for it.
+    funcs_of: Vec<Vec<FuncId>>,
+    pseudo_func: Vec<FuncId>,
+    start: Vec<u32>,
+    to: Vec<u32>,
+    /// Per edge: through a fn value.
+    ind: Vec<bool>,
+    poison: Vec<Option<Why>>,
+    /// Per node: its component, numbered sinks first (an edge between two components goes to
+    /// the smaller number).
+    comp: Vec<u32>,
+    /// Per component: whether it is a cycle.
+    cycle: Vec<bool>,
+    /// Per function: its reserve-table slot ([`NO_SLOT`]: it does not probe).
+    slots: Vec<u32>,
+    nslots: usize,
+    incomplete: bool,
+}
+
+impl Graph {
+    /// Per function: the reserve-table slot of a function that probes at entry, else
+    /// [`NO_SLOT`]. Slots are numbered in function order from 0.
+    pub fn slots(&self) -> &[u32] {
+        &self.slots
+    }
+
+    /// Whether call-graph node `x` is a member (its component in this graph is a cycle).
+    pub fn member(&self, x: u32) -> bool {
+        (x as usize) < self.n && self.cycle[self.comp[x as usize] as usize]
+    }
+
+    fn at(&self, x: u32) -> At {
+        if (x as usize) < self.n { At::Graph(x) } else { At::Func(self.pseudo_func[x as usize - self.n]) }
+    }
+
+    fn succ(&self, x: u32) -> &[u32] {
+        &self.to[self.start[x as usize] as usize..self.start[x as usize + 1] as usize]
+    }
+}
+
+/// Strongly connected components of a graph in CSR form (iterative Tarjan): a component per
+/// node, numbered in the order they complete, so an edge between two components goes to the
+/// smaller number.
+fn components(start: &[u32], to: &[u32]) -> Vec<u32> {
+    const NONE: u32 = u32::MAX;
+    let n = start.len() - 1;
+    let mut index = vec![NONE; n];
+    let mut low = vec![0u32; n];
+    let mut on = vec![false; n];
+    let mut comp = vec![NONE; n];
+    let mut stack: Vec<u32> = Vec::new();
+    // (node, its next out-edge)
+    let mut path: Vec<(u32, u32)> = Vec::new();
+    let (mut next, mut count) = (0u32, 0u32);
+    for r in 0..n as u32 {
+        if index[r as usize] != NONE {
+            continue;
+        }
+        index[r as usize] = next;
+        low[r as usize] = next;
+        next += 1;
+        stack.push(r);
+        on[r as usize] = true;
+        path.push((r, start[r as usize]));
+        while let Some(&(v, e)) = path.last() {
+            let vi = v as usize;
+            if e < start[vi + 1] {
+                if let Some(top) = path.last_mut() {
+                    top.1 += 1;
+                }
+                let w = to[e as usize];
+                let wi = w as usize;
+                if index[wi] == NONE {
+                    index[wi] = next;
+                    low[wi] = next;
+                    next += 1;
+                    stack.push(w);
+                    on[wi] = true;
+                    path.push((w, start[wi]));
+                } else if on[wi] {
+                    low[vi] = low[vi].min(index[wi]);
+                }
+                continue;
+            }
+            path.pop();
+            if let Some(&(p, _)) = path.last() {
+                low[p as usize] = low[p as usize].min(low[vi]);
+            }
+            if low[vi] == index[vi] {
+                while let Some(w) = stack.pop() {
+                    on[w as usize] = false;
+                    comp[w as usize] = count;
+                    if w == v {
+                        break;
+                    }
+                }
+                count += 1;
+            }
+        }
+    }
+    comp
+}
+
+/// The bound's graph of module `m` (the module code generation compiles: release builds after
+/// the optimizer).
+pub fn graph(m: &Module, input: &Input<'_>) -> Graph {
     let g = input.graph;
     let n = g.nodes.len();
     let nf = m.funcs.len();
@@ -335,7 +494,6 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
     // the nodes of each function: its call-graph nodes, else one node of its own
     let mut ids: Vec<Vec<u32>> = Vec::with_capacity(nf);
     let mut funcs_of: Vec<Vec<FuncId>> = vec![Vec::new(); n];
-    let mut total = n;
     for f in 0..nf {
         let mut v: Vec<u32> = input
             .nodes_of_func
@@ -346,35 +504,17 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
             .filter(|&x| (x as usize) < n)
             .collect();
         if v.is_empty() && has_body(f) {
-            v.push(total as u32);
-            total += 1;
+            v.push(funcs_of.len() as u32);
+            funcs_of.push(Vec::new());
         }
         for &x in &v {
-            if let Some(fs) = funcs_of.get_mut(x as usize) {
-                fs.push(FuncId(f as u32));
-            }
+            funcs_of[x as usize].push(FuncId(f as u32));
         }
         ids.push(v);
     }
-    let mut pseudo_func = vec![FuncId(0); total - n];
-    for (f, v) in ids.iter().enumerate() {
-        for &x in v {
-            if x as usize >= n {
-                pseudo_func[x as usize - n] = FuncId(f as u32);
-            }
-        }
-    }
+    let total = funcs_of.len();
+    let pseudo_func: Vec<FuncId> = funcs_of[n..].iter().map(|fs| fs[0]).collect();
     let at = |x: u32| if (x as usize) < n { At::Graph(x) } else { At::Func(pseudo_func[x as usize - n]) };
-    let frame = |f: FuncId| uses.get(f.index()).copied().unwrap_or_default();
-    let mut weight = vec![0u64; total];
-    let mut traps = vec![false; total];
-    for (f, v) in ids.iter().enumerate() {
-        let u = frame(FuncId(f as u32));
-        for &x in v {
-            weight[x as usize] = weight[x as usize].max(u64::from(u.frame));
-            traps[x as usize] |= u.traps;
-        }
-    }
     // A `rec fn` is bounded unless it is on a cycle of this graph: the marker only names the cycle.
     let mut poison: Vec<Option<Why>> = vec![None; total];
 
@@ -430,13 +570,68 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
     }
     let to: Vec<u32> = edges.iter().map(|e| e.1).collect();
     let ind: Vec<bool> = edges.iter().map(|e| e.2).collect();
+    let comp = components(&start, &to);
+    let ncomp = comp.iter().map(|&c| c as usize + 1).max().unwrap_or(0);
+    let mut size = vec![0u32; ncomp];
+    for &c in &comp {
+        size[c as usize] += 1;
+    }
+    let mut cycle: Vec<bool> = size.iter().map(|&k| k > 1).collect();
+    for &(a, b, _) in &edges {
+        if a == b {
+            cycle[comp[a as usize] as usize] = true;
+        }
+    }
+    let mut slots = vec![NO_SLOT; nf];
+    let mut nslots = 0usize;
+    for f in 0..nf {
+        if has_body(f) && ids[f].iter().any(|&x| cycle[comp[x as usize] as usize]) {
+            slots[f] = nslots as u32;
+            nslots += 1;
+        }
+    }
+    Graph {
+        n,
+        total,
+        ids,
+        funcs_of,
+        pseudo_func,
+        start,
+        to,
+        ind,
+        poison,
+        comp,
+        cycle,
+        slots,
+        nslots,
+        incomplete: g.truncated,
+    }
+}
+
+/// The bound of every stack of graph `bg` of module `m`, with `uses` the backend's report per
+/// function.
+pub fn compute(bg: &Graph, m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -> Report {
+    let g = input.graph;
+    let Graph { n, total, ref ids, ref start, ref to, ref ind, ref poison, ref comp, ref cycle, .. } = *bg;
+    let frame = |f: FuncId| uses.get(f.index()).copied().unwrap_or_default();
+    let mut weight = vec![0u64; total];
+    let mut traps = vec![false; total];
+    for (f, v) in ids.iter().enumerate() {
+        let u = frame(FuncId(f as u32));
+        for &x in v {
+            weight[x as usize] = weight[x as usize].max(u64::from(u.frame));
+            traps[x as usize] |= u.traps;
+        }
+    }
+    let at = |x: u32| bg.at(x);
+    let member = |x: u32| cycle[comp[x as usize] as usize];
 
     let finish = |done: &[Option<Depth>], x: u32| -> Depth {
         match done[x as usize] {
             Some(d) => d,
             None => {
                 // a cycle through a `rec fn` is reported as that fn
-                let cycle = on_cycle(&start, &to, done, x);
+                let cycle = on_cycle(start, to, done, x);
                 match cycle.iter().find(|&&c| (c as usize) < n && g.nodes[c as usize].rec()) {
                     Some(&c) => Err(Why::Rec(at(c))),
                     None => Err(Why::Cycle(at(cycle[0]))),
@@ -452,9 +647,9 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
     // more trap raised anywhere on it, which calls `runtime.panic.begin` first and exits there.
     // That holds only if nothing `begin` reaches traps (else a trap there starts over).
     let zero = vec![Ok(0); total];
-    let first = longest(&start, &to, &weight, &zero, &poison);
+    let first = longest(start, to, &weight, &zero, poison);
     let trap = match (m.known_body(Known::Trap), m.known_body(Known::PanicBegin)) {
-        (Some(t), Some(b)) => match trapping_node(&start, &to, &traps, &ids[b.index()]) {
+        (Some(t), Some(b)) => match trapping_node(start, to, &traps, &ids[b.index()]) {
             Some(x) => Err(Why::Cycle(at(x))),
             None => over(&first, &ids[t.index()]).map(|d| d.saturating_mul(2)),
         },
@@ -463,11 +658,97 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
         (None, _) => Ok(16),
     };
     let leaf: Vec<Depth> = traps.iter().map(|&t| if t { trap } else { Ok(0) }).collect();
-    let done = longest(&start, &to, &weight, &leaf, &poison);
 
-    let incomplete = g.truncated;
+    // nodes sinks first: by component, which numbers every callee's component below its caller's
+    let mut order: Vec<u32> = (0..total as u32).collect();
+    order.sort_unstable_by_key(|&x| comp[x as usize]);
+    let slots_of: Vec<Vec<usize>> = (0..total)
+        .map(|x| {
+            bg.funcs_of[x]
+                .iter()
+                .map(|f| bg.slots[f.index()])
+                .filter(|&s| s != NO_SLOT)
+                .map(|s| s as usize)
+                .collect()
+        })
+        .collect();
+    // what is known: an unresolved node counts its own frame, a trap leaf without a bound nothing
+    let known = |d: Depth| d.unwrap_or(0);
+    let mut reserve = vec![0u64; bg.nslots];
+    for _ in 0..RESERVE_ROUNDS {
+        // the depth of a node below a member's frame, where a member counts as `ENTRY`
+        let mut acyc = vec![0u64; total];
+        let mut next = vec![0u64; bg.nslots];
+        for &x in &order {
+            let xi = x as usize;
+            if member(x) {
+                acyc[xi] = ENTRY;
+                let mut r = known(leaf[xi]);
+                for &y in bg.succ(x) {
+                    if comp[y as usize] != comp[xi] {
+                        r = r.max(acyc[y as usize]);
+                    }
+                }
+                for &s in &slots_of[xi] {
+                    next[s] = next[s].max(r);
+                }
+            } else {
+                let mut d = known(leaf[xi]);
+                for &s in &slots_of[xi] {
+                    d = d.max(reserve[s]);
+                }
+                for &y in bg.succ(x) {
+                    d = d.max(acyc[y as usize]);
+                }
+                acyc[xi] = weight[xi].saturating_add(d);
+            }
+        }
+        if next == reserve {
+            break;
+        }
+        reserve = next;
+    }
+    // a node of a probing function touches its reserve below its frame
+    let leaf: Vec<Depth> =
+        (0..total).map(|x| slots_of[x].iter().fold(leaf[x], |d, &s| max_d(d, Ok(reserve[s])))).collect();
+    let done = longest(start, to, &weight, &leaf, poison);
+
+    // the acyclic bound of each component: its largest member weight, plus the largest leaf of
+    // its members and acyclic bound of a callee component (all smaller, so complete when read)
+    let ncomp = cycle.len();
+    let mut cw = vec![0u64; ncomp];
+    for x in 0..total {
+        let c = comp[x] as usize;
+        cw[c] = cw[c].max(weight[x]);
+    }
+    let mut below: Vec<Depth> = vec![Ok(0); ncomp];
+    for &x in &order {
+        let (xi, c) = (x as usize, comp[x as usize] as usize);
+        let mut d = max_d(below[c], leaf[xi]);
+        if let Some(w) = poison[xi] {
+            d = Err(w);
+        }
+        for &y in bg.succ(x) {
+            let cy = comp[y as usize] as usize;
+            if cy != c {
+                d = max_d(d, add_d(cw[cy], below[cy]));
+            }
+        }
+        below[c] = d;
+    }
+    let flat = |x: u32| -> Depth {
+        let c = comp[x as usize] as usize;
+        add_d(cw[c], below[c])
+    };
+    let over_flat = |xs: &[u32]| -> Depth { xs.iter().try_fold(0, |acc, &x| flat(x).map(|d| acc.max(d))) };
+
+    let incomplete = bg.incomplete;
     let main_d =
         if incomplete { Err(Why::Incomplete) } else { add_d(MAIN_STUB, over(&done, &ids[main.index()])) };
+    let main_acyclic = match main_d {
+        Err(Why::Rec(_) | Why::Cycle(_)) => add_d(MAIN_STUB, over_flat(&ids[main.index()])).ok(),
+        _ => None,
+    };
 
     // what can run: reachable from main over the calls and the spawn edges (a call-graph node
     // exists for every non-generic fn, called or not)
@@ -477,7 +758,7 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
         if std::mem::replace(&mut live[x as usize], true) {
             continue;
         }
-        work.extend_from_slice(&to[start[x as usize] as usize..start[x as usize + 1] as usize]);
+        work.extend_from_slice(bg.succ(x));
         if (x as usize) < n {
             work.extend(g.succ(x).iter().filter(|e| e.kind == EdgeKind::Spawn).map(|e| e.to));
         }
@@ -486,15 +767,10 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
     // threads: the functions live spawn edges reach (a node of `runtime.thread.start` has one to
     // each fn value it can be given)
     let mut rows: Vec<(FuncId, u32)> = Vec::new();
-    let add_row = |x: u32, rows: &mut Vec<(FuncId, u32)>| {
-        for &f in &funcs_of[x as usize] {
-            rows.push((f, x));
-        }
-    };
     for x in (0..n as u32).filter(|&x| live[x as usize]) {
         for e in g.succ(x) {
             if e.kind == EdgeKind::Spawn {
-                add_row(e.to, &mut rows);
+                rows.extend(bg.funcs_of[e.to as usize].iter().map(|&f| (f, e.to)));
             }
         }
     }
@@ -504,15 +780,13 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
     for (f, s) in rows {
         match threads.last_mut() {
             Some(t) if t.func == f => t.starts.push(s),
-            _ => threads.push(Thread { func: f, starts: vec![s], depth: Ok(0) }),
+            _ => threads.push(Thread { func: f, starts: vec![s], depth: Ok(0), acyclic: None }),
         }
     }
     let entry = m.known_body(Known::ThreadEntry);
-    for t in &mut threads {
-        // the nodes a thread can start with, not every node of the function: a node no start
-        // reaches (an unspecialized one whose fn-value slots stay empty) never runs on a thread
-        let body = over(&done, &t.starts);
-        t.depth = match entry {
+    // a thread's stack, from `body` (its start nodes) and `node` (the depth of any other node)
+    let thread_depth = |body: Depth, node: &dyn Fn(u32) -> Depth| -> Depth {
+        match entry {
             _ if incomplete => Err(Why::Incomplete),
             None => body,
             Some(e) => {
@@ -525,7 +799,7 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
                             let mut best = max_d(leaf[xi], body);
                             for k in start[xi]..start[xi + 1] {
                                 if !ind[k as usize] {
-                                    best = max_d(best, finish(&done, to[k as usize]));
+                                    best = max_d(best, node(to[k as usize]));
                                 }
                             }
                             add_d(weight[xi], best)
@@ -536,9 +810,23 @@ pub fn compute(m: &Module, input: &Input<'_>, uses: &[StackUse], main: FuncId) -
                 }
                 add_d(THREAD_STUB, d)
             }
-        };
+        }
+    };
+    for t in &mut threads {
+        // the nodes a thread can start with, not every node of the function: a node no start
+        // reaches (an unspecialized one whose fn-value slots stay empty) never runs on a thread
+        t.depth = thread_depth(over(&done, &t.starts), &|x| finish(&done, x));
+        if let Err(Why::Rec(_) | Why::Cycle(_)) = t.depth {
+            t.acyclic = thread_depth(over_flat(&t.starts), &flat).ok();
+        }
     }
-    Report { run_stack: input.run_stack, main: main_d, threads }
+    let mut probes = vec![FuncId(0); bg.nslots];
+    for (f, &k) in bg.slots.iter().enumerate() {
+        if k != NO_SLOT {
+            probes[k as usize] = FuncId(f as u32);
+        }
+    }
+    Report { run_stack: input.run_stack, main: main_d, main_acyclic, threads, reserve, probes }
 }
 
 /// The build summary's stack lines (contracts/cli.md): main first, then one per thread start
@@ -555,7 +843,7 @@ pub fn summary(
         At::Graph(x) => g.source_names(prog, tc, &[x]).pop().unwrap_or_default(),
         At::Func(f) => m.func(f).map_or_else(String::new, |f| f.path.clone()),
     };
-    let line = |what: String, d: Depth| match d {
+    let line = |what: String, d: Depth, acyclic: Option<u64>| match d {
         Ok(b) => format!("stack: {what}: {b} bytes"),
         Err(w) => {
             let why = match w {
@@ -565,10 +853,14 @@ pub fn summary(
                 Why::Foreign(a) => format!("calls C code in `{}`", name(a)),
                 Why::Incomplete => "the call graph is incomplete".to_string(),
             };
-            format!("stack: {what}: unbounded ({why}), [run] stack {} bytes", r.run_stack())
+            let run = r.run_stack();
+            match acyclic {
+                Some(a) => format!("stack: {what}: unbounded ({why}), [run] stack {run} + {a} bytes"),
+                None => format!("stack: {what}: unbounded ({why}), [run] stack {run} bytes"),
+            }
         }
     };
-    let mut out = vec![line("main".to_string(), r.main)];
+    let mut out = vec![line("main".to_string(), r.main, r.main_acyclic)];
     for t in &r.threads {
         let what = match t.starts.iter().find(|&&x| is_spawn(g, x)) {
             Some(&x) => format!("spawn at {}", locate(g.nodes[x as usize].span)),
@@ -577,7 +869,7 @@ pub fn summary(
                 None => format!("thread `{}`", name(At::Func(t.func))),
             },
         };
-        out.push(line(what, t.depth));
+        out.push(line(what, t.depth, t.acyclic));
     }
     out
 }
@@ -675,6 +967,24 @@ mod tests {
         assert_eq!(c, vec![1, 2]);
     }
 
+    /// A cycle is one component; every edge between components goes to a smaller number.
+    #[test]
+    fn components_number_callees_first() {
+        let es = [(0, 1), (1, 2), (2, 1), (2, 3), (4, 4), (0, 4)];
+        let (start, to) = csr(5, &es);
+        let c = components(&start, &to);
+        assert_eq!(c[1], c[2]);
+        assert_eq!(c.iter().collect::<std::collections::BTreeSet<_>>().len(), 4);
+        for &(a, b) in &es {
+            assert!(c[a as usize] >= c[b as usize], "{a} -> {b}: {c:?}");
+        }
+        // a long chain needs no recursion
+        let n = 200_000usize;
+        let es: Vec<(u32, u32)> = (0..n as u32 - 1).map(|i| (i, i + 1)).chain([(n as u32 - 1, 0)]).collect();
+        let (start, to) = csr(n, &es);
+        assert!(components(&start, &to).iter().all(|&k| k == 0));
+    }
+
     /// The trap stubs `runtime.panic.begin`'s callees may not have: found anywhere below it.
     #[test]
     fn trapping_node_below() {
@@ -701,7 +1011,16 @@ mod tests {
 
     #[test]
     fn table_bytes() {
-        assert_eq!(Report::bytes(Ok(100)), 100 + MARGIN);
-        assert_eq!(Report::bytes(Err(Why::Incomplete)), 0);
+        let r = Report {
+            run_stack: Some(1 << 16),
+            main: Ok(0),
+            main_acyclic: None,
+            threads: Vec::new(),
+            reserve: Vec::new(),
+            probes: Vec::new(),
+        };
+        assert_eq!(r.bytes(Ok(100), None), 100 + MARGIN);
+        assert_eq!(r.bytes(Err(Why::Incomplete), None), 0);
+        assert_eq!(r.bytes(Err(Why::Rec(At::Graph(0))), Some(100)), (1 << 16) + 100 + MARGIN);
     }
 }

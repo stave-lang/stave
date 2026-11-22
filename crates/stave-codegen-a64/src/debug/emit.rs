@@ -138,6 +138,9 @@ pub(crate) struct Gen<'a, 'm> {
     /// the next value of ([`Self::edge_hint`]); the result is defined there. `NOREG` otherwise.
     hint: u8,
     line_site: u32,
+    /// The reserve-table byte offset and the bytes below the frame (what `call_on_stack` pushes)
+    /// of a function that probes its reserve at entry.
+    pub reserve: Option<(i64, u64)>,
 }
 
 impl<'a, 'm> Gen<'a, 'm> {
@@ -179,6 +182,7 @@ impl<'a, 'm> Gen<'a, 'm> {
             at: 0,
             hint: NOREG,
             line_site: NONE,
+            reserve: None,
         }
     }
 
@@ -1112,6 +1116,28 @@ impl<'a, 'm> Gen<'a, 'm> {
             }
         } else if frame > 0 {
             self.a.addsub_imm(AddSub::Sub, X, SP, SP, frame as u64)?;
+        }
+        if let Some((off, below)) = self.reserve {
+            // Read the reserve below the frame's lowest byte, from `sp` down in steps of at most
+            // `PROBE_STRIDE`, so a stack too short for what runs below faults here, in the guard.
+            // `x16`: the lowest byte; `x17`: the read address.
+            let sym = self.cg.syms.reserve_table;
+            self.a.adrp_sym(S16, sym, off)?;
+            self.a.ldr_lo12_sym(MemSize::X, S16, S16, sym, off)?;
+            if below > 0 {
+                self.a.addsub_imm(AddSub::Add, X, S16, S16, below)?;
+            }
+            self.a.mov(X, S17, SP)?;
+            self.a.addsub_reg(AddSub::Sub, X, S16, S17, S16, Shift::Lsl, 0)?;
+            let (top, test) = (self.a.new_label(), self.a.new_label());
+            self.a.b(test)?;
+            self.a.bind(top)?;
+            self.a.ldr(MemSize::X, ZR, Addr::Off(S17, 0))?;
+            self.a.bind(test)?;
+            self.a.addsub_imm(AddSub::Sub, X, S17, S17, stave_obj::stub::PROBE_STRIDE)?;
+            self.a.cmp(X, S17, S16)?;
+            self.a.b_cond(Cond::Hi, top)?;
+            self.a.ldr(MemSize::X, ZR, Addr::Off(S16, 0))?;
         }
         if matches!(self.f.ret.map(|t| self.cg.ty(t)), Some(Ty::Mem { .. })) {
             let off = i64::from(self.an.x8_off);

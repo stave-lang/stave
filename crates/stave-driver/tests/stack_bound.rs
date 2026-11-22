@@ -3,10 +3,12 @@
 //! - a call chain without recursion and with large frames gets its bound on main and on a
 //!   spawned thread, the bound wins over a much smaller `[run] stack`, and the program runs
 //!   (`tests/conformance/run/stack_bound`);
-//! - the same chain through a call cycle of a `rec fn` has no bound, keeps that `[run] stack`,
-//!   and overflows (`stack_rec`): so the chain needs more than `[run] stack`, and the computed
-//!   stack is what lets `stack_bound` run; with the `rec fn` on no cycle it is bounded and runs
-//!   (`stack_rec_stale`);
+//! - the same chain through a call cycle of a `rec fn` has no bound; it gets that `[run] stack`
+//!   plus the bound of the chain with the cycle collapsed, and runs (`stack_rec`); with the
+//!   `rec fn` on no cycle it is bounded and runs (`stack_rec_stale`);
+//! - a `rec fn` whose recursion leaves too little stack for the `without(trap)` chain below it
+//!   overflows in its own entry, which probes the chain's reserve, not in the chain
+//!   (`stack_rec_reserve`);
 //! - each `spawn` body is a root with its own bound (`stack_spawn.stv`);
 //! - a trap in the deepest frame of a bounded chain, on main and on a spawned thread, still
 //!   prints the whole panic report (`run/stack_trap_main`, `borrow/stack_trap_spawn`);
@@ -116,28 +118,56 @@ fn the_bound_wins_over_run_stack() {
     }
 }
 
-/// The same chain through a call cycle of a `rec fn`: no bound, `[run] stack` (64 KiB) applies,
-/// and the chain overflows it at the guard page.
+/// The same chain through a call cycle of a `rec fn`: no bound; the stack is `[run] stack`
+/// (64 KiB) plus the chain's bound with the cycle collapsed, and the chain runs.
 #[test]
-fn a_rec_fn_keeps_run_stack() {
+fn a_rec_fn_gets_run_stack_plus_the_acyclic_bound() {
     let p = run_dir().join("stack_rec");
+    let want = std::fs::read(p.join("expected.stdout")).unwrap();
     for target in targets() {
         for release in [false, true] {
             let out = build(&p, target, release);
             let r = out.stack.as_ref().unwrap();
             let what = format!("stack_rec [{target}, release {release}]");
             assert!(matches!(r.main, Err(Why::Rec(At::Graph(_)))), "{what}: {:?}", r.main);
+            let acyclic = r.main_acyclic.unwrap_or_else(|| panic!("{what}: no acyclic bound"));
+            assert!(acyclic > 8 * 32768, "{what}: {acyclic}");
             assert_eq!(
                 out.stack_lines(),
-                vec![
-                    "stack: main: unbounded (reaches rec fn `main.f4`), [run] stack 65536 bytes".to_string()
-                ],
+                vec![format!(
+                    "stack: main: unbounded (reaches rec fn `main.f4`), [run] stack 65536 + {acyclic} bytes"
+                )],
                 "{what}"
             );
+            // `f4` probes what it calls outside its cycle: the four frames below it
+            assert_eq!(r.reserve.len(), 1, "{what}: {:?}", r.reserve);
+            assert!(r.reserve[0] > 4 * 32768, "{what}: {:?}", r.reserve);
             let Some(got) = run(&out, target, "stack_rec", &p) else { continue };
-            let err = String::from_utf8_lossy(&got.stderr);
-            assert_eq!(got.exit, 101, "{what}: {err}");
-            assert!(err.contains("panic: StackOverflow"), "{what}: {err}");
+            assert_eq!(
+                (got.exit, &got.stdout),
+                (0, &want),
+                "{what}: {}",
+                String::from_utf8_lossy(&got.stderr)
+            );
+        }
+    }
+}
+
+/// A recursion that leaves less than the chain below it needs: the recursing fn's entry faults,
+/// never a frame of the chain.
+#[test]
+fn a_member_probes_its_reserve() {
+    let p = run_dir().join("stack_rec_reserve");
+    let want = "panic: StackOverflow at src/main.stv:33:8 in main.f4 (thread 0)\n";
+    for target in targets() {
+        for release in [false, true] {
+            let out = build(&p, target, release);
+            let r = out.stack.as_ref().unwrap();
+            let what = format!("stack_rec_reserve [{target}, release {release}]");
+            assert!(r.reserve.len() == 1 && r.reserve[0] > 4 << 20, "{what}: {:?}", r.reserve);
+            let Some(got) = run(&out, target, "stack_rec_reserve", &p) else { continue };
+            assert_eq!(got.exit, 101, "{what}");
+            assert_eq!(String::from_utf8_lossy(&got.stderr), want, "{what}");
         }
     }
 }
@@ -166,6 +196,19 @@ fn a_trap_at_the_bottom_of_the_bound_reports_in_full() {
             }
         }
     }
+}
+
+/// A reserve probe reads at most `PROBE_STRIDE` below the last read, which is at most 4 KiB below
+/// a written stack byte: the runtime's guard below every stack must be at least that wide.
+#[test]
+fn the_probe_stride_cannot_pass_the_guard() {
+    let cfg = std::fs::read_to_string(repo().join("runtime/config.stv")).unwrap();
+    let guard: u64 = cfg
+        .lines()
+        .find_map(|l| l.strip_prefix("pub const GUARD: usize = "))
+        .and_then(|v| v.trim_end_matches(';').parse().ok())
+        .expect("runtime.config.GUARD");
+    assert!(stave_obj::stub::PROBE_STRIDE + 4096 <= guard, "guard {guard}");
 }
 
 /// Two `spawn` bodies, one deep and one shallow: two rows with their own bounds.
