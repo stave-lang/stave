@@ -1,0 +1,30 @@
+//~ CHECK-ONLY
+// The `next` a `for` loop calls is checked as the call `it.next()` is: an `unsafe fn next` is
+// E0803 outside `unsafe(..)`, for the loop as for the call, and fine inside it.
+struct It { i: u64 }
+
+impl It {
+    unsafe("reads nothing") fn next(&mut self) -> Option<u64> {
+        return Option.None;
+    }
+}
+
+fn outside(it: It) {
+    for x in it { //~ ERROR E0803
+    }
+}
+
+fn explicit(it: &mut It) {
+    let o = it.next(); //~ ERROR E0803
+}
+
+fn inside(it: It) {
+    unsafe("`next` reads nothing") {
+        for x in it {
+        }
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -711,6 +711,8 @@ fn e0908_fixes_name_instances_that_resolve() {
     assert!(has("`fn pick<X: Mk<[u64; 1]>>(x: [u64; 1]) -> [u64; 1] { return X.mk(x); }`"), "{fixes:?}");
     assert!(has("match Nx::<u64>.next(&mut it)"), "{fixes:?}");
     assert!(has("match Back.next(&mut it)"), "{fixes:?}");
+    // two instances of one trait under a loop: the loop-shaped fix too
+    assert!(has("let mut it = t; loop { match Nx::<u8>.next(&mut it)"), "{fixes:?}");
     assert!(has("`geo.X1.m(x)` or `geo.X2.m(x)`"), "{fixes:?}");
     assert!(has("`tr.Z1.n(x)`") && has("after adding `import tr;` to the imports"), "{fixes:?}");
     assert_eq!(fixes.len(), 8, "{fixes:?}");

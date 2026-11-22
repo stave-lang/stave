@@ -303,11 +303,14 @@ resolved `next`), never the instance type. The list is closed: a type not listed
 
 An iterator type is a struct, enum, or generic parameter whose `next` (method lookup, for `T`
 its bounds) is exactly `fn next(&mut self) -> Option<X>`: the loop passes the source and nothing
-else. Another receiver (`&self`, `self`, none), another param, generic params of its own,
-`unsafe`, or another result is E0219 `next-shape`; no `next` at all is E0219 `not-source` (a
-`vec.Vec` or a reference to one: `as-slice`, iterate `.as_slice()`). Two `next`s (two traits,
-or two instances of one trait: `T: Nx<u8> + Nx<u16>`) are E0908, as for a call, when one of them
-has that shape. A generic `T` (or `&mut T`) source is always an iterator through its bound's
+else. Another receiver (`&self`, `self`, none), another param, generic params of its own, or
+another result is E0219 `next-shape`; no `next` at all is E0219 `not-source` (a `vec.Vec` or a
+reference to one: `as-slice`, iterate `.as_slice()`). Two `next`s (two traits, or two instances
+of one trait: `T: Nx<u8> + Nx<u16>`) are E0908, as for a call, when one of them has that shape.
+The loop's call of `next` is checked as `recv.next()` is, through the same check of a method
+call: its `needs` against the enclosing fn's (E0704), its privacy (E0106), an `unsafe fn next`
+outside `unsafe(..)` (E0803), the instance's bounds; it is an edge of the call graph (effects,
+`without`, `rec`, lock ranks) and its `requires` runs at its entry. A generic `T` (or `&mut T`) source is always an iterator through its bound's
 `next`: each instance runs that trait method, whatever the instance type is (`T = [u64; 2]` does
 not become an array loop, `T = &mut It` runs `impl Next for &mut It`); a `T` without such a bound
 is E0219 at the definition. Element and binding types, a sequence's length, and the resolved

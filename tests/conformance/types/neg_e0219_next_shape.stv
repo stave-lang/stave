@@ -1,13 +1,12 @@
 //~ CHECK-ONLY
 // The loop calls `next` with the source alone, so only `fn next(&mut self) -> Option<X>` makes an
-// iterator: another receiver, another param, `unsafe`, or another result is E0219 `next-shape`,
+// iterator: another receiver, another param, or another result is E0219 `next-shape`,
 // for a concrete source and through a bound alike (else the check passes and no call is built).
 struct Arg { i: u64 }
 struct ByRef { i: u64 }
 struct ByVal { i: u64 }
 struct NoSelf { i: u64 }
 struct NotOpt { i: u64 }
-struct Unsafe { i: u64 }
 
 impl Arg {
     fn next(&mut self, k: u64) -> Option<u64> {
@@ -40,11 +39,6 @@ impl NotOpt {
     }
 }
 
-impl Unsafe {
-    unsafe("reads nothing") fn next(&mut self) -> Option<u64> {
-        return Option.None;
-    }
-}
 
 trait TArg {
     fn next(&mut self, k: u32) -> Option<u32>;
@@ -68,7 +62,7 @@ impl TArg for Arg {
     }
 }
 
-fn concrete(a: Arg, b: ByRef, c: ByVal, d: NoSelf, e: NotOpt, f: Unsafe) {
+fn concrete(a: Arg, b: ByRef, c: ByVal, d: NoSelf, e: NotOpt) {
     for x in a { //~ ERROR E0219
     }
     for x in b { //~ ERROR E0219
@@ -78,8 +72,6 @@ fn concrete(a: Arg, b: ByRef, c: ByVal, d: NoSelf, e: NotOpt, f: Unsafe) {
     for x in d { //~ ERROR E0219
     }
     for x in e { //~ ERROR E0219
-    }
-    for x in f { //~ ERROR E0219
     }
 }
 

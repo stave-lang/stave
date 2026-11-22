@@ -328,7 +328,6 @@ pub enum NotNext {
     Params,
     /// Generic params of its own.
     Generics,
-    Unsafe,
     /// A result other than `Option<X>`.
     Result,
     /// A built-in method (none is named `next`).
@@ -342,7 +341,6 @@ impl NotNext {
             NotNext::Receiver => "it does not take `&mut self`",
             NotNext::Params => "it takes params besides `&mut self`",
             NotNext::Generics => "it has generic params of its own",
-            NotNext::Unsafe => "it is `unsafe`",
             NotNext::Result | NotNext::Builtin => "it does not return an `Option`",
         }
     }
@@ -1364,9 +1362,10 @@ impl<'a> World<'a> {
     }
 
     /// `m` as the `next` a `for` loop calls, which passes the source and nothing else: exactly
-    /// `fn next(&mut self) -> Option<X>` (no other param, no generic param of its own, not
-    /// `unsafe`); its element type `X`. Every other shape is no iterator's `next`: the first
-    /// part that differs.
+    /// `fn next(&mut self) -> Option<X>` (no other param, no generic param of its own); its
+    /// element type `X`. Every other shape is no iterator's `next`: the first part that differs.
+    /// The shape only: the loop's call is then checked as `recv.next()` is (features, privacy,
+    /// `unsafe`, ..).
     pub fn for_next_elem<I: Interner + ?Sized>(&self, cx: &mut I, m: &MethodRef) -> Result<TypeId, NotNext> {
         let (sig, args, self_ty) = self.method_sig(m).ok_or(NotNext::Builtin)?;
         if sig.self_kind != Some(crate::sigs::SelfKind::RefMut) {
@@ -1377,9 +1376,6 @@ impl<'a> World<'a> {
         }
         if sig.generics.len() != sig.n_parent as usize {
             return Err(NotNext::Generics);
-        }
-        if sig.is_unsafe {
-            return Err(NotNext::Unsafe);
         }
         let ret = cx.subst(sig.ret, &args, self_ty);
         match cx.kind(ret) {

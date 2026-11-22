@@ -1,0 +1,40 @@
+//~ STDOUT run_for_next_needs.stdout
+// A `for` over an iterator whose `next` needs `avx2` is fine in a fn that needs `avx2`; a
+// dispatch picks that fn only on a CPU with the feature. Both arms give the same sum, so the
+// output does not depend on the CPU.
+import std.io;
+
+struct It { i: u32, x: f32 }
+
+impl It {
+    fn next(&mut self) -> Option<f32> needs(avx2) {
+        if self.i >= 3 {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        let v = f32x8.splat(1.0);
+        self.x = self.x + v.reduce_add();
+        return Option.Some(self.x);
+    }
+}
+
+fn sum_v3(n: u32) -> f32 needs(avx2) {
+    let mut s: f32 = 0.0;
+    for x in It.{ i: 0, x: n as~ f32 } {
+        s = s + x;
+    }
+    return s;
+}
+
+fn sum_base(n: u32) -> f32 {
+    let b = n as~ f32;
+    return (b + 8.0) + (b + 16.0) + (b + 24.0);
+}
+
+dispatch fn sum(n: u32) -> f32 { avx2 => sum_v3, _ => sum_base, }
+
+fn main() -> i32 {
+    let s = sum(1);
+    io.print(f"{s}\n");
+    return 0;
+}

@@ -1,0 +1,53 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// The `next` a `for` loop calls is checked as the call `it.next()` is: a `next` that needs `avx2`
+// needs `avx2` in the fn with the loop (E0704), by value and through `&mut` alike. A fn that has
+// the feature loops over it.
+struct It { i: u32, x: f32 }
+
+impl It {
+    fn next(&mut self) -> Option<f32> needs(avx2) {
+        if self.i >= 2 {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        let v = f32x8.splat(self.x) + f32x8.splat(1.0);
+        self.x = v.reduce_add();
+        return Option.Some(self.x);
+    }
+}
+
+fn by_value() -> f32 {
+    let mut s: f32 = 0.0;
+    for x in It.{ i: 0, x: 0.0 } { //~ ERROR E0704
+        s = s + x;
+    }
+    return s;
+}
+
+fn by_mut(it: &mut It) -> f32 {
+    let mut s: f32 = 0.0;
+    for x in it { //~ ERROR E0704
+        s = s + x;
+    }
+    return s;
+}
+
+fn explicit(it: &mut It) -> f32 {
+    return match it.next() { //~ ERROR E0704
+        Option.Some(x) => x,
+        Option.None => 0.0,
+    };
+}
+
+fn with_feature() -> f32 needs(avx2) {
+    let mut s: f32 = 0.0;
+    for x in It.{ i: 0, x: 0.0 } {
+        s = s + x;
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    return 0;
+}

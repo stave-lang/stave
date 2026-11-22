@@ -2123,11 +2123,12 @@ impl<'a> Ck<'a> {
         // a static fn has no receiver to give `Self` on a trait path: only a bound names one
         // impl then
         let stat = self.sigs.fn_sig(methods[0]).is_some_and(|s| s.self_kind.is_none());
+        // a `for` source gets the loop-shaped text, also for two instances of one trait
         let case = match (traits[0] == traits[1], stat) {
+            _ if source.is_some_and(|s| s.1) => Some("for-mut"),
+            _ if source.is_some() => Some("for"),
             (true, false) => Some("impls"),
             (true, true) => Some("impls-static"),
-            (false, _) if source.is_some_and(|s| s.1) => Some("for-mut"),
-            (false, _) if source.is_some() => Some("for"),
             _ => None,
         };
         // the fix's code names each trait instance as this module does (`Nx::<u8>` in a call,
@@ -2135,6 +2136,13 @@ impl<'a> Ck<'a> {
         let mut imports: Vec<String> = Vec::new();
         let [(path1, args1), (path2, args2)] =
             [0, 1].map(|i| self.trait_instance(traits[i], &refs[i], &mut imports));
+        // the loop's text names the two suppliers: of one trait, its two instances
+        let (p1, p2) = if source.is_some() && traits[0] == traits[1] {
+            let inst = |p: &str, a: &str| if a.is_empty() { p.to_string() } else { format!("{p}<{a}>") };
+            (inst(&p1, &args1), inst(&p2, &args2))
+        } else {
+            (p1, p2)
+        };
         let call = |p: &str, a: &str| if a.is_empty() { p.to_string() } else { format!("{p}::<{a}>") };
         let (qual, qual2) = match source {
             Some((_, _, 1)) => (call(&path2, &args2), call(&path1, &args1)),
@@ -2810,7 +2818,7 @@ impl<'a> Ck<'a> {
                 if !self.arity(n, paren, sig.params.len(), args.len(), false) {
                     return self.args_only(args);
                 }
-                self.method_checks(method, cspan, ctok);
+                self.method_checks(method, cspan);
                 let np = sig.n_parent as usize;
                 let mut binds: Vec<Option<GArg>> = vec![None; sig.generics.len()];
                 if let Some(ia) = impl_args {
@@ -3364,8 +3372,40 @@ impl<'a> Ck<'a> {
                     .is_some_and(|t| t.trait_decl == drop))
     }
 
-    /// Unsafe, visibility, `Drop.drop` (E0909), and feature checks of a method call.
-    fn method_checks(&mut self, method: DeclId, at: Span, tok: u32) {
+    /// A call of method `m` (as lookup resolved it) with generic args `gargs` (the container's,
+    /// then the method's own) and receiver adjustment `adjust`, reported at `at`: every check of
+    /// a method call ([`Self::method_checks`]; the instance's bounds and its call site, through
+    /// [`Ck::site`]), and its target. `key`: the token the target is recorded at, the name of
+    /// `recv.m(..)`, or the `for` token for the `next` a loop calls (`implicit`).
+    #[allow(clippy::too_many_arguments)]
+    fn method_target(
+        &mut self,
+        key: u32,
+        implicit: bool,
+        m: MethodRef,
+        gargs: Vec<GArg>,
+        adjust: Adjust,
+        at: Span,
+    ) {
+        let (method, self_ty) = match &m {
+            MethodRef::Impl { method, .. } => (*method, None),
+            MethodRef::Bound { method, self_ty, .. } => (*method, Some(*self_ty)),
+            MethodRef::Builtin(_) => return,
+        };
+        self.method_checks(method, at);
+        let target = Target::Method { method: m, args: gargs.clone(), adjust };
+        if implicit {
+            self.implicit.push((key, target));
+        } else {
+            self.target(key, target);
+        }
+        let mut site_args = gargs;
+        site_args.extend(self_ty.map(GArg::Type));
+        self.site(key, at, method, &site_args);
+    }
+
+    /// Unsafe, visibility, `Drop.drop` (E0909), and feature checks of a method call at `at`.
+    fn method_checks(&mut self, method: DeclId, at: Span) {
         let Some(sig) = self.sigs.fn_sig(method) else { return };
         if sig.is_unsafe {
             self.unsafe_op(at);
@@ -3389,13 +3429,7 @@ impl<'a> Ck<'a> {
         {
             let module = self.prog.module(o.module).map_or(String::new(), |m| m.path_text.clone());
             let nm = self.prog.strings.get(md.name).to_string();
-            let d = mk(
-                "E0106",
-                None,
-                &[("name", &nm), ("module", &module)],
-                self.icx.tok_span(tok),
-                &[("decl", o.name_span)],
-            );
+            let d = mk("E0106", None, &[("name", &nm), ("module", &module)], at, &[("decl", o.name_span)]);
             self.report(d);
         }
     }
@@ -3421,7 +3455,7 @@ impl<'a> Ck<'a> {
         if !self.arity(n, paren, sig.params.len(), args.len(), false) {
             return self.args_only(args);
         }
-        self.method_checks(method, cspan, ctok);
+        self.method_checks(method, cspan);
         let ng = sig.generics.len();
         let np = sig.n_parent as usize;
         // `Self` is variable `ng`.
@@ -3582,7 +3616,6 @@ impl<'a> Ck<'a> {
                     if !self.arity(n, paren, sig.params.len() - 1, args.len(), false) {
                         return self.args_only(args);
                     }
-                    self.method_checks(method, sspan, seg);
                     let np = sig.n_parent as usize;
                     let mut binds: Vec<Option<GArg>> = vec![None; sig.generics.len()];
                     for (i, a) in impl_args.iter().enumerate().take(np) {
@@ -3605,8 +3638,7 @@ impl<'a> Ck<'a> {
                     if adjust.autoref == Some(true) && level == 0 {
                         self.static_mutation_upto(n, Some(seg - 1), sspan);
                     }
-                    self.target(seg, Target::Method { method: m.clone(), args: gargs.clone(), adjust });
-                    self.site(seg, sspan, method, &gargs);
+                    self.method_target(seg, false, m.clone(), gargs.clone(), adjust, sspan);
                     Ty::T(self.tys.subst(sig.ret, &gargs, None))
                 }
                 MethodRef::Bound { method, ref trait_args, self_ty } => {
@@ -3621,7 +3653,6 @@ impl<'a> Ck<'a> {
                     if !self.arity(n, paren, sig.params.len() - 1, args.len(), false) {
                         return self.args_only(args);
                     }
-                    self.method_checks(method, sspan, seg);
                     let np = sig.n_parent as usize;
                     let mut binds: Vec<Option<GArg>> = vec![None; sig.generics.len()];
                     for (i, a) in trait_args.iter().enumerate().take(np) {
@@ -3646,10 +3677,7 @@ impl<'a> Ck<'a> {
                     if adjust.autoref == Some(true) && level == 0 {
                         self.static_mutation_upto(n, Some(seg - 1), sspan);
                     }
-                    self.target(seg, Target::Method { method: m.clone(), args: gargs.clone(), adjust });
-                    let mut site_args = gargs.clone();
-                    site_args.push(GArg::Type(self_ty));
-                    self.site(seg, sspan, method, &site_args);
+                    self.method_target(seg, false, m.clone(), gargs.clone(), adjust, sspan);
                     Ty::T(self.tys.subst(ret, &gargs, None))
                 }
             },
@@ -4263,18 +4291,16 @@ impl<'a> Ck<'a> {
             } else if let Lookup::Found { m, .. } = found {
                 match self.w.for_next_elem(&mut self.tys, &m) {
                     Ok(x) => {
-                        // lowering resolves `next` with the impl's args (none of its own)
+                        // the call `recv.next()` would be, with the same checks (`next` has no
+                        // generic params of its own, so its args are its container's); the
+                        // loop takes the source's address itself, so no receiver adjustment
                         let call_args = match &m {
                             MethodRef::Impl { impl_args, .. } => impl_args.clone(),
-                            _ => Vec::new(),
+                            MethodRef::Bound { trait_args, .. } => trait_args.clone(),
+                            MethodRef::Builtin(_) => Vec::new(),
                         };
-                        if let MethodRef::Impl { method, .. } = &m {
-                            self.check_instance(self.icx.node_span(iter), *method, &call_args);
-                        }
-                        self.implicit.push((
-                            for_tok,
-                            Target::Method { method: m, args: call_args, adjust: Adjust::default() },
-                        ));
+                        let at = self.icx.node_span(iter);
+                        self.method_target(for_tok, true, m, call_args, Adjust::default(), at);
                         if let Some(k) = src.kind() {
                             self.for_kinds.push((f, k));
                         }
