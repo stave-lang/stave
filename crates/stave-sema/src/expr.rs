@@ -549,6 +549,7 @@ impl<'a> Ck<'a> {
         let method_name = crate::sigs::OP_TRAITS.iter().find(|x| x.0 == trait_name).map_or("", |x| x.1);
         let msym = self.prog.strings.lookup(method_name);
         let genv = self.genv();
+        let mut found_impl = None;
         let target = if let TypeKind::Param(p) = self.tys.kind(t).clone() {
             if !genv.get(p as usize).is_some_and(|g| g.bounds.iter().any(|b| b.trait_decl == tr)) {
                 self.e0901(tok, p);
@@ -564,6 +565,7 @@ impl<'a> Ck<'a> {
                 self.e0206(tok, t);
                 return Ty::ERR;
             };
+            found_impl = Some(imp);
             let m = self.sigs.impl_def(imp).and_then(|i| {
                 i.methods
                     .iter()
@@ -580,7 +582,7 @@ impl<'a> Ck<'a> {
         // bound on an operator trait alone does not make a type Copy. The borrow checker and the
         // lowering take operator operands as copies on this answer alone.
         if !self.w.is_copy(&mut self.tys, t, genv) {
-            self.e0422_operand(tok, trait_name, t);
+            self.e0422_operand(tok, trait_name, t, found_impl);
             return Ty::ERR;
         }
         if let Some((target, site)) = target {
@@ -592,20 +594,30 @@ impl<'a> Ck<'a> {
         Ty::T(t)
     }
 
-    /// E0422 case `operand`: an operator on an operand not known to be Copy.
-    fn e0422_operand(&mut self, tok: u32, trait_name: &str, t: TypeId) {
+    /// E0422 on an operator whose operand is not Copy where it is used. A type param is told to
+    /// add `Copy` to its bounds (case `operand`); a type that names params, to give them the
+    /// bounds of its `impl Copy` (`operand-args`); any other type, to be Copy or to take a method
+    /// (`operand-type`), with the operator impl it went through (`imp`) as a related span.
+    fn e0422_operand(&mut self, tok: u32, trait_name: &str, t: TypeId, imp: Option<DeclId>) {
         let op = self.icx.tok_str(tok).to_string();
         let tn = self.show(t);
-        let roles: Vec<(&str, Span)> = match self.tys.kind(t) {
+        let mut roles: Vec<(&str, Span)> = Vec::new();
+        let case = match self.tys.kind(t) {
             TypeKind::Param(p) => {
-                self.genv().get(*p as usize).map(|g| ("param", g.name_span)).into_iter().collect()
+                roles.extend(self.genv().get(*p as usize).map(|g| ("param", g.name_span)));
+                "operand"
             }
-            _ => Vec::new(),
+            _ => {
+                roles.extend(imp.and_then(|i| self.prog.decl(i)).map(|d| ("impl", d.name_span)));
+                if self.tys.has_params(t) { "operand-args" } else { "operand-type" }
+            }
         };
+        let forms = self.sigs.op_forms(self.prog, trait_name);
+        let call = if op.ends_with('=') { &forms.compound_call } else { &forms.call };
         let d = mk(
             "E0422",
-            Some("operand"),
-            &[("op", &op), ("type", &tn), ("bound", trait_name)],
+            Some(case),
+            &[("op", &op), ("type", &tn), ("bound", trait_name), ("sig", &forms.sig), ("call", call)],
             self.icx.tok_span(tok),
             &roles,
         );

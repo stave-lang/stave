@@ -105,6 +105,111 @@ fn big_compound(a: Big, b: Big) -> Big {
     return x;
 }
 
+// the same place written as source and as destination, an array owned by the fn, a field of a
+// value with a destructor, a right-hand side that reads the place it updates, one place twice
+fn spelled_out<T: Add>(r: &mut T, e: T) {
+    *r = *r + e; //~ ERROR E0422
+}
+
+fn owned_element<T: Add>(x: T, y: T, e: T) {
+    let mut a = [x, y];
+    a[1] += e; //~ ERROR E0422
+}
+
+struct Guarded<T> { pub d: T }
+
+impl<T> Drop for Guarded<T> {
+    fn drop(&mut self) { }
+}
+
+fn drop_part<T: Add>(g: Guarded<T>, e: T) {
+    let mut v = g;
+    v.d += e; //~ ERROR E0422
+}
+
+fn rhs_reads_old<T: Add>(r: &mut T, f: fn(&T) -> T) {
+    *r += f(r); //~ ERROR E0422
+}
+
+fn local_rhs_reads<T: Add>(d: T, f: fn(&T) -> T) {
+    let mut x = d;
+    x += f(&x); //~ ERROR E0422
+}
+
+fn same_place<T: Add>(d: T) -> T {
+    return d + d; //~ ERROR E0422
+}
+
+fn self_compound<T: Add>(d: T) {
+    let mut x = d;
+    x += x; //~ ERROR E0422
+}
+
+// the same shapes on a concrete type that has a destructor and an operator impl
+struct D { pub id: u32 }
+
+impl Drop for D {
+    fn drop(&mut self) { }
+}
+
+impl Add for D { //~ ERROR E0422
+    fn add(self, rhs: Self) -> Self { return D.{ id: self.id + rhs.id }; }
+}
+
+struct Holder { pub d: D }
+
+impl Drop for Holder {
+    fn drop(&mut self) { }
+}
+
+fn mk(k: u32) -> D {
+    return D.{ id: k };
+}
+
+fn dup(d: &D) -> D {
+    return D.{ id: d.id };
+}
+
+fn d_through_ref(r: &mut D) {
+    *r += mk(1); //~ ERROR E0422
+}
+
+fn d_spelled_out(r: &mut D) {
+    *r = *r + mk(1); //~ ERROR E0422
+}
+
+fn d_element(a: &mut [D; 2]) {
+    a[0] += mk(2); //~ ERROR E0422
+}
+
+fn d_owned_element() {
+    let mut a = [mk(1), mk(2)];
+    a[1] += mk(3); //~ ERROR E0422
+}
+
+fn d_drop_part(h: Holder) {
+    let mut v = h;
+    v.d += mk(4); //~ ERROR E0422
+}
+
+fn d_rhs_reads_old(r: &mut D) {
+    *r += dup(r); //~ ERROR E0422
+}
+
+fn d_local_rhs_reads(d: D) {
+    let mut x = d;
+    x += dup(&x); //~ ERROR E0422
+}
+
+fn d_same_place(d: D) {
+    let e = d + d; //~ ERROR E0422
+}
+
+fn d_self_compound(d: D) {
+    let mut x = d;
+    x += x; //~ ERROR E0422
+}
+
 fn main() -> i32 {
     return 0;
 }

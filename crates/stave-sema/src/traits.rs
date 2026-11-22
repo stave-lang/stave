@@ -1482,7 +1482,15 @@ pub(crate) fn check_impls(
             && !tys.is_error_ty(imp.self_ty)
             && !w.is_copy(tys, imp.self_ty, &imp.generics)
         {
-            out.extend(mk("E0422", None, &[("trait", &trait_path), ("type", &self_text)], impl_span, &[]));
+            let name = lang.ops.iter().find(|&(_, &t)| t == tr.trait_decl).map_or("", |(n, _)| *n);
+            let forms = sigs.op_forms(prog, name);
+            out.extend(mk(
+                "E0422",
+                None,
+                &[("trait", &trait_path), ("type", &self_text), ("sig", &forms.sig), ("call", &forms.call)],
+                impl_span,
+                &[],
+            ));
         }
         // E0419: drop glue runs the destructors of ADTs only, and a package adds none to the
         // types of another (their values would drop differently in each package).
