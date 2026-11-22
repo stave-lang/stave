@@ -25,7 +25,7 @@ const TRY: u32 = Option.Some(1u32)?; //~ ERROR E0904
 const PAST: u8 = T[5]; //~ ERROR E0203
 const SHR: i32 = 1i32 >> KM1; //~ ERROR E0205
 const OVER: bool = 200 + 100 == 44u8; //~ ERROR E0203
-const HUGE: [u8; 20000000] = [0u8; 20000000]; //~ ERROR E0904
+const HUGE: [u8; 100000000] = [0u8; 100000000]; //~ ERROR E0904
 // no operator impl: the operator's own error, and no second one for the const-expr
 const NO_IMPL: Q = Q.{ x: 1 } + Q.{ x: 2 }; //~ ERROR E0206
 // a const that depends on one without a value: the error is at that one only
