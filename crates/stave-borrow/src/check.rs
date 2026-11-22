@@ -282,6 +282,8 @@ struct Cx<'f, 'b> {
     reached_list: Vec<LoanId>,
     /// Per loan: the last search that met it (a count of the searches).
     met: Vec<u32>,
+    /// Per local: the last search that read its set ([`Flow::read_local`]).
+    read_at: Vec<u32>,
     searches: u32,
     stale: bool,
     /// Loans counted in or out and loans met by the searches; the searches.
@@ -395,6 +397,13 @@ impl Cx<'_, '_> {
         let mut found: Vec<LoanId> = Vec::new();
         let mut todo = self.roots.clone();
         while let Some(l) = todo.pop() {
+            // every loan of a local whose set is read holds that set: one look meets them all
+            if let Some(x) = self.flow.read_local(l as usize) {
+                if self.read_at[x as usize] == self.searches {
+                    continue;
+                }
+                self.read_at[x as usize] = self.searches;
+            }
             let held = self.flow.loan_holds(st, l as usize);
             for a in held.iter().take_while(|&a| a < nloans) {
                 self.counted_loans += 1;
@@ -937,12 +946,7 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
     // after a store has grown a local: the loans whose places or contents lead to more loans
     let grown = flow.grown;
     let leads: Vec<bool> = if grown {
-        (0..nloans)
-            .map(|l| {
-                let place = &body.loans[l].place;
-                (!place.has_deref() && flow.is_ref_like(place.ty)) || !flow.contents[l].is_empty()
-            })
-            .collect()
+        (0..nloans).map(|l| flow.read_local(l).is_some() || !flow.contents[l].is_empty()).collect()
     } else {
         Vec::new()
     };
@@ -956,6 +960,7 @@ pub fn check(flow: &mut Flow<'_>, want_dump: bool) -> Checked {
         reached: vec![false; per_loan],
         reached_list: Vec::new(),
         met: vec![0; per_loan],
+        read_at: vec![0; if grown { body.locals.len() } else { 0 }],
         searches: 0,
         stale: false,
         counted_loans: 0,
@@ -1119,11 +1124,11 @@ pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(S
 }
 
 /// The loop whose head the edge `from -> to` goes back to, from inside it (`usize::MAX`: none).
-pub(crate) fn back_edge(body: &Body, from: u32, to: u32) -> usize {
+fn back_edge(body: &Body, from: u32, to: u32) -> usize {
     body.loops.iter().position(|&l| to == l.0 && in_loop(l, from)).unwrap_or(usize::MAX)
 }
 
 /// Whether block `b` is one of the blocks of loop `(head, exit, end)`.
-pub(crate) fn in_loop((head, exit, end): (u32, u32, u32), b: u32) -> bool {
+fn in_loop((head, exit, end): (u32, u32, u32), b: u32) -> bool {
     b >= head && b < end && b != exit
 }
