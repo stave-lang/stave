@@ -62,7 +62,7 @@ struct Cx<'a> {
 impl Cx<'_> {
     /// Compares sema type `t` with IR type `it` at `path`, then their parts.
     fn compare(&mut self, t: TypeId, it: stave_ir::TypeId, path: &str) {
-        let sema = stave_sema::traits::layout_of(&mut self.tys, &self.tc.sigs, t, 0);
+        let sema = stave_sema::traits::layout_of(&mut self.tys, &self.tc.sigs, t);
         let ir = self.ir.get_layout(it).unwrap_or_else(|e| panic!("{path}: no IR layout: {e}"));
         assert_eq!(sema, Some((ir.size, ir.align)), "{path}: (size, align), sema vs IR");
         self.checked.push(format!("{path}: size {} align {}", ir.size, ir.align));
@@ -97,7 +97,7 @@ impl Cx<'_> {
                     panic!("{path}: IR array, sema {:?}", self.tys.kind(t));
                 };
                 assert_eq!(n, len, "{path}: array length");
-                let es = stave_sema::traits::layout_of(&mut self.tys, &self.tc.sigs, se, 0).map(|l| l.0);
+                let es = stave_sema::traits::layout_of(&mut self.tys, &self.tc.sigs, se).map(|l| l.0);
                 assert_eq!(es, Some(stride), "{path}: stride, sema element size vs IR");
                 self.compare(se, elem, &format!("{path}[_]"));
             }

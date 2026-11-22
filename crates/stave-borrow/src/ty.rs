@@ -168,13 +168,12 @@ impl<'a> Tys<'a> {
         let env = self.env;
         let mut stack = vec![t];
         let mut kids = Vec::new();
-        let mut steps = 0u32;
+        // each distinct component once: exact (the types are finitely many)
+        let mut seen = rustc_hash::FxHashSet::default();
         let mut r = false;
         while let Some(x) = stack.pop() {
-            steps += 1;
-            if steps > 100_000 {
-                r = true;
-                break;
+            if !seen.insert(x) {
+                continue;
             }
             match self.ov.kind(x) {
                 TypeKind::Ref { .. } | TypeKind::Fn { .. } => {
@@ -245,10 +244,10 @@ impl<'a> Tys<'a> {
         let env = self.env;
         // (type, below a reference)
         let mut stack = vec![(t, below)];
-        let mut seen: Vec<(TypeId, bool)> = Vec::new();
+        let mut seen: rustc_hash::FxHashSet<(TypeId, bool)> = rustc_hash::FxHashSet::default();
         let mut kids = Vec::new();
         while let Some((x, below)) = stack.pop() {
-            if self.is_unknown(x) || seen.len() > 4096 {
+            if self.is_unknown(x) {
                 return true;
             }
             if let TypeKind::Ptr { inner, .. } = self.kind(x)
@@ -258,16 +257,14 @@ impl<'a> Tys<'a> {
                 if below {
                     return true;
                 }
-                if !seen.contains(&(x, below)) {
-                    seen.push((x, below));
+                if seen.insert((x, below)) {
                     stack.push((inner, true));
                 }
                 continue;
             }
-            if !self.ref_like(x) || seen.contains(&(x, below)) {
+            if !self.ref_like(x) || !seen.insert((x, below)) {
                 continue;
             }
-            seen.push((x, below));
             match self.kind(x) {
                 TypeKind::Ref { mutable, inner } => {
                     if below && mutable && self.ref_like(inner) {
@@ -311,16 +308,15 @@ impl<'a> Tys<'a> {
     pub fn may_hold_fn(&mut self, t: TypeId) -> bool {
         let sigs = self.sigs;
         let mut stack = vec![t];
-        let mut seen: Vec<TypeId> = Vec::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         let mut kids = Vec::new();
         while let Some(x) = stack.pop() {
-            if self.is_unknown(x) || seen.len() > 4096 {
+            if self.is_unknown(x) {
                 return true;
             }
-            if seen.contains(&x) {
+            if !seen.insert(x) {
                 continue;
             }
-            seen.push(x);
             match self.kind(x) {
                 TypeKind::Fn { .. } | TypeKind::Param(_) => return true,
                 TypeKind::Adt { def, args } => {

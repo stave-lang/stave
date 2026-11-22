@@ -2968,7 +2968,7 @@ impl<'a> Ck<'a> {
                 // A concrete type must have a layout here: lowering has no other answer.
                 if !self.tys.has_params(t)
                     && !self.tys.has_error(t)
-                    && crate::traits::layout_of(&mut self.tys, self.sigs, t, 0).is_none()
+                    && crate::traits::layout_of(&mut self.tys, self.sigs, t).is_none()
                 {
                     let tn = self.show(t);
                     let d = mk("E0911", None, &[("type", &tn)], self.icx.node_span(n), &[]);

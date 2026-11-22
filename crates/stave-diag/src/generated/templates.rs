@@ -4999,11 +4999,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0911",
         severity: Severity::Error,
         area: "generics",
-        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels (E0005 case `type` reports it too where it is written); at the call, in a const-expr too. Case `size`: a parameter, binding, array or tuple literal, or return value of a fn whose type takes more than 2^28 bytes (contracts/lang-details.md, Size limits), once per type and fn, at its first binding. Case `instance`: the same in an instance of a generic fn, once per instance, at the generic fn, naming the instance",
+        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`); a type taller than the type height limit is never created (E0005 case `type`); at the call, in a const-expr too. Case `size`: a parameter, binding, array, tuple, or struct literal, value `if` / `match`, or return value of a fn whose type takes more than 2^28 bytes (contracts/lang-details.md, Size limits), once per type and fn, at its first binding. Case `overflow`: such a value whose type's size does not fit in 64 bits. Case `frame`: the values of a fn (those, plus each call's result and by-value arguments) take more than 704,643,072 bytes together ((1 GiB - 16 MiB) / 1.5), at the fn. Case `instance`: a value past 2^28 bytes in an instance of a generic fn; `overflow` and `frame` also apply per instance, naming it; once per instance, at the generic fn",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "bytes", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "fn", kind: HoleKind::Path, choices: &[] },
             Hole { name: "instance", kind: HoleKind::Path, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
@@ -5021,6 +5022,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "frame",
+                message: "the values `{fn}` holds take {bytes} bytes together, more than 704,643,072",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "too large a stack frame" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "split the fn, or keep large values in a heap buffer (`vec.Vec`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "instance",
                 message: "in `{instance}`, a value of type `{type}` takes {bytes} bytes, more than 268,435,456",
                 labels: &[
@@ -5028,6 +5041,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "instantiate with a smaller type or length, or keep the value in a heap buffer (`vec.Vec`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "overflow",
+                message: "in `{fn}`, the size of type `{type}` does not fit in 64 bits",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "no value of this type can exist" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use a smaller array length or type argument",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

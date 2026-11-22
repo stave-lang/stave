@@ -215,6 +215,10 @@ pub struct TypedBody {
     /// return value. Their types are checked against [`crate::consteval::MAX_VALUE_BYTES`] here
     /// for a concrete type and per instance for a generic one ([`instance_sizes`]).
     pub held: Vec<(u32, TypeId)>,
+    /// The frame temporaries no node of [`TypedBody::held`] stands for: per call, its result and
+    /// each argument passed by value (the caller's copy). With `held` they make the frame sum
+    /// ([`crate::consteval::MAX_FRAME_BYTES`]).
+    pub temps: Vec<TypeId>,
 }
 
 impl TypedBody {
@@ -479,13 +483,13 @@ fn check_in_pool(prog: &Program) -> Typeck {
         jobs.push(Job { decl, item: d.item, node: d.node, kind });
     }
     let w = World { prog, sigs: &sigs_table };
-    let results: Vec<(TypedBody, Vec<TypeKind>, Vec<Diagnostic>)> = jobs
+    let results: Vec<BodyResult> = jobs
         .par_iter()
         .map(|j| {
             let br = &brackets[j.item.idx()];
             match ItemCx::new(prog, j.item, br) {
                 Some(icx) => check_body(w, &tys, icx, *j),
-                None => (empty_body(*j), Vec::new(), Vec::new()),
+                None => (empty_body(*j), (Vec::new(), 0), Vec::new()),
             }
         })
         .collect();
@@ -494,8 +498,9 @@ fn check_in_pool(prog: &Program) -> Typeck {
     // Merge overlays (decl order), then canonical ids.
     let t2 = Instant::now();
     let mut bodies = Vec::with_capacity(results.len());
-    for (mut b, local, ds) in results {
+    for (mut b, (local, refused), ds) in results {
         diags.extend(ds);
+        tys.add_refusals(refused);
         internal.append(&mut b.internal);
         if !local.is_empty() {
             let m = tys.merge(&local);
@@ -556,6 +561,16 @@ fn check_in_pool(prog: &Program) -> Typeck {
     if !call_graph.truncated {
         diags.extend(instance_sizes(prog, &sigs_table, &tys, &bodies, &call_graph));
     }
+    // A type refused for its height (`types::MAX_TYPE_HEIGHT`) is one E0005 case `type` measures
+    // (its depth counts at least those levels), so a program that made one is rejected there.
+    // Without that error the program would run on error types: it stops instead.
+    if tys.refusals().saturating_add(call_graph.refused) > 0
+        && !diags.iter().any(|d| d.severity() == stave_diag::Severity::Error)
+    {
+        internal.push(
+            "a type taller than the type height limit was refused, and no diagnostic rejects it".into(),
+        );
+    }
     let t_graph = t3.elapsed();
     let diagnostics = stave_diag::canonical_order(diags, &prog.source_map);
     Typeck {
@@ -573,10 +588,58 @@ fn check_in_pool(prog: &Program) -> Typeck {
     }
 }
 
-/// E0911 case `instance`: a value a generic fn holds ([`TypedBody::held`]) takes more than
-/// [`crate::consteval::MAX_VALUE_BYTES`] in one of its instances (every instance of the call
-/// graph, so also one a generic fn instantiates). Once per instance, at the generic fn, naming
-/// the instance.
+/// The size checks of one fn instance ([`TypedBody::held`], [`TypedBody::temps`] with `args`
+/// substituted; `args` empty: the fn itself): the first value past
+/// [`crate::consteval::MAX_VALUE_BYTES`] or without a size (`(node, type, bytes)`, bytes
+/// `None`: past `u64`), and the frame sum (saturating; `u64::MAX` when a size is past `u64`).
+/// Values whose type keeps a param (a generic fn checked by itself) are left out.
+fn frame_of<I: Interner + ?Sized>(
+    cx: &mut I,
+    sigs: &Sigs,
+    b: &TypedBody,
+    args: &[GArg],
+) -> (Option<(u32, TypeId, Option<u64>)>, u64) {
+    let mut first = None;
+    let mut sum = 0u64;
+    let mut memo: FxHashMap<TypeId, Result<u64, crate::traits::NoLayout>> = FxHashMap::default();
+    let items = b.held.iter().map(|&(n, t)| (Some(n), t)).chain(b.temps.iter().map(|&t| (None, t)));
+    for (n, t) in items {
+        let it = if args.is_empty() { t } else { cx.subst(t, args, None) };
+        if cx.has_params(it) || cx.has_error(it) {
+            continue;
+        }
+        let r = match memo.get(&it) {
+            Some(&r) => r,
+            None => {
+                let r = crate::traits::type_bytes(&mut crate::traits::WithSigs { cx: &mut *cx, sigs }, it)
+                    .map(|l| l.0);
+                memo.insert(it, r);
+                r
+            }
+        };
+        let bytes = match r {
+            Ok(x) => Some(x),
+            Err(crate::traits::NoLayout::Overflow) => None,
+            // no layout for another reason: its own diagnostic (E0005, E0911)
+            Err(crate::traits::NoLayout::Unknown) => continue,
+        };
+        sum = sum.saturating_add(bytes.unwrap_or(u64::MAX));
+        if let Some(n) = n
+            && first.is_none()
+            && bytes.is_none_or(|x| x > crate::consteval::MAX_VALUE_BYTES)
+        {
+            first = Some((n, it, bytes));
+        }
+    }
+    (first, sum)
+}
+
+/// The size limits per instance of a generic fn (every `Fn` instance of the call graph, so also
+/// one a generic fn instantiates), once per instance, at the generic fn, naming the instance:
+/// E0911 case `instance` for a value past [`crate::consteval::MAX_VALUE_BYTES`], case
+/// `overflow` for one whose size does not fit in a `u64`, case `frame` for a frame sum past
+/// [`crate::consteval::MAX_FRAME_BYTES`]. A fn without generic args is checked by
+/// [`Ck::value_sizes`].
 fn instance_sizes(
     prog: &Program,
     sigs: &Sigs,
@@ -593,40 +656,42 @@ fn instance_sizes(
             continue;
         }
         let Some(b) = body_of.get(&inst.decl) else { continue };
-        let mut seen = rustc_hash::FxHashSet::default();
-        for &(_, t) in &b.held {
-            if !ov.has_params(t) || !seen.insert(t) {
-                continue;
-            }
-            let it = ov.subst(t, &inst.args, None);
-            if ov.has_params(it) || ov.has_error(it) {
-                continue;
-            }
-            let Some((bytes, _)) = crate::traits::layout_of(&mut ov, sigs, it, 0) else { continue };
-            if bytes <= crate::consteval::MAX_VALUE_BYTES {
-                continue;
-            }
-            let names = NameCx { prog, generics: &[] };
-            let tn = types::display(&ov, &names, it);
-            let args: Vec<String> = inst
-                .args
-                .iter()
-                .map(|a| match a {
-                    GArg::Type(x) => types::display(&ov, &names, *x),
-                    GArg::Const(ConstArg::Value(v)) => v.to_string(),
-                    GArg::Const(_) => "_".to_string(),
-                })
-                .collect();
-            let name = format!("{}::<{}>", prog.decl_path(inst.decl), args.join(", "));
-            out.extend(mk(
-                "E0911",
-                Some("instance"),
-                &[("type", &tn), ("bytes", &bytes.to_string()), ("instance", &name)],
-                node.span,
-                &[],
-            ));
-            break;
+        if !b.held.iter().any(|&(_, t)| ov.has_params(t)) && !b.temps.iter().any(|&t| ov.has_params(t)) {
+            continue;
         }
+        let (first, sum) = frame_of(&mut ov, sigs, b, &inst.args);
+        let names = NameCx { prog, generics: &[] };
+        let args: Vec<String> = inst
+            .args
+            .iter()
+            .map(|a| match a {
+                GArg::Type(x) => types::display(&ov, &names, *x),
+                GArg::Const(ConstArg::Value(v)) => v.to_string(),
+                GArg::Const(_) => "_".to_string(),
+            })
+            .collect();
+        let name = format!("{}::<{}>", prog.decl_path(inst.decl), args.join(", "));
+        let d = match first {
+            Some((_, it, Some(bytes))) => {
+                let tn = types::display(&ov, &names, it);
+                mk(
+                    "E0911",
+                    Some("instance"),
+                    &[("type", &tn), ("bytes", &bytes.to_string()), ("instance", &name)],
+                    node.span,
+                    &[],
+                )
+            }
+            Some((_, it, None)) => {
+                let tn = types::display(&ov, &names, it);
+                mk("E0911", Some("overflow"), &[("type", &tn), ("fn", &name)], node.span, &[])
+            }
+            None if sum > crate::consteval::MAX_FRAME_BYTES => {
+                mk("E0911", Some("frame"), &[("fn", &name), ("bytes", &sum.to_string())], node.span, &[])
+            }
+            None => None,
+        };
+        out.extend(d);
     }
     out
 }
@@ -657,6 +722,7 @@ fn empty_body(j: Job) -> TypedBody {
         stmt_ends: crate::temps::StmtEnds::default(),
         internal: Vec::new(),
         held: Vec::new(),
+        temps: Vec::new(),
     }
 }
 
@@ -688,6 +754,9 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
         *t = f(*t);
     }
     for (_, t) in b.locals.iter_mut().chain(b.held.iter_mut()) {
+        *t = f(*t);
+    }
+    for t in &mut b.temps {
         *t = f(*t);
     }
     for (_, t) in b.targets.iter_mut().chain(b.implicit.iter_mut()) {
@@ -890,12 +959,11 @@ pub(crate) struct Ck<'a> {
     pub internal: Vec<String>,
 }
 
-fn check_body(
-    w: World<'_>,
-    global: &TypeTable,
-    icx: ItemCx<'_>,
-    j: Job,
-) -> (TypedBody, Vec<TypeKind>, Vec<Diagnostic>) {
+/// A checked body, its overlay's local types and refusal count
+/// ([`crate::types::Interner::refusals`]), and its diagnostics.
+type BodyResult = (TypedBody, (Vec<TypeKind>, u32), Vec<Diagnostic>);
+
+fn check_body(w: World<'_>, global: &TypeTable, icx: ItemCx<'_>, j: Job) -> BodyResult {
     let prog = w.prog;
     let sigs = w.sigs;
     let lo = icx.ast.descendants(j.node).start;
@@ -1752,7 +1820,7 @@ impl<'a> Ck<'a> {
         }
     }
 
-    fn finish(mut self, j: Job) -> (TypedBody, Vec<TypeKind>, Vec<Diagnostic>) {
+    fn finish(mut self, j: Job) -> BodyResult {
         // Pending literal groups left: no context anywhere (E0202).
         for g in 0..self.lits.len() as u32 {
             let r = self.find(g);
@@ -1776,7 +1844,8 @@ impl<'a> Ck<'a> {
                 self.same_const_types(&c.types);
             }
         }
-        let held = if j.kind == JobKind::Fn { self.value_sizes(j) } else { Vec::new() };
+        let (held, temps) =
+            if j.kind == JobKind::Fn { self.value_sizes(j) } else { (Vec::new(), Vec::new()) };
         let mut node_types = Vec::with_capacity(self.node_ty.len());
         for i in 0..self.node_ty.len() {
             let t = self.node_ty[i];
@@ -1852,27 +1921,47 @@ impl<'a> Ck<'a> {
             stmt_ends,
             internal: std::mem::take(&mut self.internal),
             held,
+            temps,
         };
         // thread-crossing capture checks (E0802, E0806; crate::threads)
         let td = self.thread_checks(&body);
         self.diags.extend(td);
-        (body, self.tys.local, self.diags)
+        (body, (self.tys.local, self.tys.refused), self.diags)
     }
 
-    /// E0911 case `size`: a value of this fn (a parameter, a binding, the return value) whose
-    /// type has more than [`crate::consteval::MAX_VALUE_BYTES`]: a back end keeps each value in
-    /// one frame slot. Once per type, at its first binding; a generic type is left to its
-    /// instances.
-    fn value_sizes(&mut self, j: Job) -> Vec<(u32, TypeId)> {
+    /// The values this fn holds ([`TypedBody::held`]: parameters and bindings, array, tuple,
+    /// and struct literals, value `if` and `match`, the return value) and its other frame
+    /// temporaries ([`TypedBody::temps`]), and their limits where the types are concrete:
+    /// E0911 case `size` for a value past [`crate::consteval::MAX_VALUE_BYTES`] (once per type,
+    /// at its first binding), case `overflow` for one whose size does not fit in a `u64`, case
+    /// `frame` for a frame sum past [`crate::consteval::MAX_FRAME_BYTES`] (at the fn). A generic
+    /// type is left to the instances ([`instance_sizes`]).
+    fn value_sizes(&mut self, j: Job) -> (Vec<(u32, TypeId)>, Vec<TypeId>) {
         let icx = self.icx;
         let mut held: Vec<(u32, TypeId)> = self.locals.iter().map(|(&n, &t)| (n, t)).collect();
         for i in 0..self.node_ty.len() {
             let n = self.lo + i as u32;
-            let literal = icx.kind(n) == Some(NodeKind::Primary)
-                && (icx.is(icx.a(n), Term::LBracket)
-                    || icx.is(icx.a(n), Term::LParen) && icx.kids_vec(n).len() > 1);
-            if literal && let Ty::T(t) = self.resolve(self.node_ty[i]) {
-                held.push((n, t));
+            let made = match icx.kind(n) {
+                Some(NodeKind::Primary) => {
+                    icx.is(icx.a(n), Term::LBracket)
+                        || icx.is(icx.a(n), Term::LParen) && icx.kids_vec(n).len() > 1
+                }
+                Some(NodeKind::StructLit | NodeKind::IfExpr | NodeKind::MatchExpr) => true,
+                _ => false,
+            };
+            if made && let Ty::T(t) = self.resolve(self.node_ty[i]) {
+                // a value `if` / `match` takes one copy per arm (the arms join in copies)
+                let copies = match icx.kind(n) {
+                    Some(NodeKind::IfExpr) => 2,
+                    Some(NodeKind::MatchExpr) => icx
+                        .kids_vec(n)
+                        .iter()
+                        .filter(|&&c| icx.kind(c) == Some(NodeKind::ExprArm))
+                        .count()
+                        .max(1),
+                    _ => 1,
+                };
+                held.extend(std::iter::repeat_n((n, t), copies));
             }
         }
         held.sort_unstable_by_key(|x| x.0);
@@ -1880,24 +1969,89 @@ impl<'a> Ck<'a> {
             held.push((j.node, sig.ret));
         }
         held.retain(|&(_, t)| !t.is_none() && t != ids::ERROR && !self.tys.has_error(t));
-        let mut seen = rustc_hash::FxHashSet::default();
-        for &(n, t) in &held {
-            if !seen.insert(t) || self.tys.has_params(t) {
-                continue;
-            }
-            let Some((bytes, _)) = crate::traits::layout_of(&mut self.tys, self.sigs, t, 0) else { continue };
-            if bytes > crate::consteval::MAX_VALUE_BYTES {
-                let sp = if n == j.node {
-                    self.prog.decl(j.decl).map_or(icx.node_span(n), |d| d.name_span)
-                } else {
-                    icx.node_span(n)
-                };
-                let tn = self.show(t);
-                let d = mk("E0911", Some("size"), &[("type", &tn), ("bytes", &bytes.to_string())], sp, &[]);
-                self.report(d);
+        let mut temps = Vec::new();
+        for (tok, tgt) in self.targets.clone() {
+            let call = icx.is(tok, Term::LParen) || !matches!(tgt, Target::Fn { .. });
+            let (sig, args, self_ty) = match &tgt {
+                Target::Fn { decl, args } if call => match self.sigs.fn_sig(*decl) {
+                    Some(s) => (s, args.clone(), None),
+                    None => continue,
+                },
+                Target::Method { method, .. } | Target::Op { method, .. } => {
+                    match self.w.method_sig(method) {
+                        Some((s, a, st)) => {
+                            let mut a = a;
+                            if let Target::Method { args, .. } = &tgt
+                                && args.len() >= a.len()
+                            {
+                                a = args.clone();
+                            }
+                            (s, a, st)
+                        }
+                        None => continue,
+                    }
+                }
+                Target::TraitMethod { method, self_ty, args } => match self.sigs.fn_sig(*method) {
+                    Some(s) => (s, args.clone(), Some(*self_ty)),
+                    None => continue,
+                },
+                Target::Builtin { ret, .. } => {
+                    temps.push(*ret);
+                    continue;
+                }
+                _ => continue,
+            };
+            let parts: Vec<TypeId> = std::iter::once(sig.ret).chain(sig.params.iter().copied()).collect();
+            for t in parts {
+                let st = self.tys.subst(t, &args, self_ty);
+                if !st.is_none() && !self.tys.has_error(st) {
+                    temps.push(st);
+                }
             }
         }
-        held
+        let mut seen = rustc_hash::FxHashSet::default();
+        let empty = TypedBody { held, temps, ..empty_body(j) };
+        let (first, sum) = frame_of(&mut self.tys, self.sigs, &empty, &[]);
+        let TypedBody { held, temps, .. } = empty;
+        let span_of = |n: u32| {
+            if n == j.node {
+                self.prog.decl(j.decl).map_or(icx.node_span(n), |d| d.name_span)
+            } else {
+                icx.node_span(n)
+            }
+        };
+        for &(n, t) in &held {
+            if !seen.insert(t) || self.tys.has_params(t) || self.tys.has_error(t) {
+                continue;
+            }
+            let r = crate::traits::type_bytes(
+                &mut crate::traits::WithSigs { cx: &mut self.tys, sigs: self.sigs },
+                t,
+            );
+            let tn = self.show(t);
+            let d = match r {
+                Ok((bytes, _)) if bytes > crate::consteval::MAX_VALUE_BYTES => mk(
+                    "E0911",
+                    Some("size"),
+                    &[("type", &tn), ("bytes", &bytes.to_string())],
+                    span_of(n),
+                    &[],
+                ),
+                Err(crate::traits::NoLayout::Overflow) => {
+                    let f = self.prog.decl_path(j.decl);
+                    mk("E0911", Some("overflow"), &[("type", &tn), ("fn", &f)], span_of(n), &[])
+                }
+                _ => None,
+            };
+            self.report(d);
+        }
+        if first.is_none() && sum > crate::consteval::MAX_FRAME_BYTES {
+            let f = self.prog.decl_path(j.decl);
+            let d =
+                mk("E0911", Some("frame"), &[("fn", &f), ("bytes", &sum.to_string())], span_of(j.node), &[]);
+            self.report(d);
+        }
+        (held, temps)
     }
 
     /// The types const evaluation decided for the scalar nodes of this const initializer are
@@ -2386,8 +2540,8 @@ impl crate::consteval::CEnv for Ck<'_> {
         self.sigs.adt(d).cloned()
     }
 
-    fn layout(&mut self, t: TypeId) -> Option<(u64, u64)> {
-        crate::traits::layout_of(&mut self.tys, self.sigs, t, 0)
+    fn layout(&mut self, t: TypeId) -> Result<(u64, u64), crate::traits::NoLayout> {
+        crate::traits::type_bytes(&mut crate::traits::WithSigs { cx: &mut self.tys, sigs: self.sigs }, t)
     }
 
     fn lang(&self) -> &sigs::LangItems {
@@ -2411,6 +2565,9 @@ impl Interner for Ck<'_> {
 
     fn intern(&mut self, k: TypeKind) -> TypeId {
         self.tys.intern(k)
+    }
+    fn refusals(&self) -> u32 {
+        self.tys.refusals()
     }
 
     fn fixed_ty(&self, f: TypeId) -> TypeId {

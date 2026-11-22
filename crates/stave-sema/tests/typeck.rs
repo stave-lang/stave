@@ -375,8 +375,8 @@ fn type_helpers_on_the_canonical_table() {
     assert_eq!(world.impl_applies(&mut t, imp_def, wu8, &[], 0), Some(vec![GArg::Type(u8t)]));
     assert_eq!(world.impl_applies(&mut t, imp_def, u8t, &[], 0), None);
     // layout: Option<u8> (tag + payload) then u8
-    let lx = stave_sema::traits::layout_of(&mut t, &tc.sigs, sx, 0).expect("layout");
-    let lw = stave_sema::traits::layout_of(&mut t, &tc.sigs, wu8, 0).expect("layout");
+    let lx = stave_sema::traits::layout_of(&mut t, &tc.sigs, sx).expect("layout");
+    let lw = stave_sema::traits::layout_of(&mut t, &tc.sigs, wu8).expect("layout");
     assert!(lw.0 > lx.0, "{lx:?} {lw:?}");
 }
 
@@ -541,8 +541,8 @@ fn contract_diagnostics_name_the_shared_state() {
     assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }
 
-/// The Flat check stops at the type depth limit and fails closed (E1407 case `depth`); the type
-/// itself is past the limit (E0005 case `type`).
+/// A type past the type height limit is never created: E0005 case `type` where it is written,
+/// and no `Flat` check runs on it.
 #[test]
 fn flat_depth_cutoff_fails_closed() {
     let nest = |n: usize| format!("{}u32{}", "W<".repeat(n), ">".repeat(n));
@@ -556,12 +556,7 @@ fn flat_depth_cutoff_fails_closed() {
     let mut got: Vec<String> =
         tc.all_diagnostics(&p).iter().map(|d| format!("{} {}", d.code(), d.message())).collect();
     got.sort();
-    assert_eq!(got.len(), 2, "{got:?}");
-    assert_eq!(got[0], "E0005 type nested deeper than 1000 levels");
-    // the type text is elided in the middle (`W<W<..>>`)
-    assert!(got[1].starts_with("E1407 `W<W<"), "{}", got[1]);
-    let tail = ">>` is not `Flat`: it nests deeper than 1000 levels, the limit of the `Flat` check";
-    assert!(got[1].ends_with(tail), "{}", got[1]);
+    assert_eq!(got, vec!["E0005 type nested deeper than 1000 levels".to_string()]);
     assert_eq!(stave_sema::diagnostic_build_failures(), 0);
 }
 

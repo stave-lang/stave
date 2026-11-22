@@ -282,10 +282,30 @@ pub mod ids {
 /// Number of well-known types ([`ids`]).
 const FIXED: usize = ids::COUNT as usize;
 
+/// The tallest type term a table holds: a type is one level above its tallest component (type
+/// arguments, elements, fields of a tuple, parameters and result of a fn type), a type without
+/// components is 1 high. Interning a taller type gives the error type and counts a refusal
+/// ([`Interner::refusals`]). So the types of a program are finitely many (every type is built
+/// from the finitely many written ones by substitution, and none passes this height), and every
+/// walk over types with a visited set ends; polymorphic recursion (`P<T>` holding a `P<(T, T)>`)
+/// grows the height by one per instance and stops here. A program reaches it only with a type
+/// E0005 case `type` rejects anyway (that depth counts at least these levels).
+pub const MAX_TYPE_HEIGHT: u32 = crate::typedepth::MAX_TYPE_DEPTH;
+
+/// The height of key `k` whose components have heights `h` ([`MAX_TYPE_HEIGHT`]).
+fn key_height(k: &TypeKind, h: impl Fn(TypeId) -> u32) -> u32 {
+    let mut kids = Vec::new();
+    k.children(&mut kids);
+    1 + kids.into_iter().map(h).max().unwrap_or(0)
+}
+
 /// Interning access shared by the global table and body overlays.
 pub trait Interner {
     fn kind(&self, t: TypeId) -> &TypeKind;
+    /// The id of key `k`; the error type if `k` is taller than [`MAX_TYPE_HEIGHT`].
     fn intern(&mut self, k: TypeKind) -> TypeId;
+    /// How many keys this table refused to intern ([`MAX_TYPE_HEIGHT`]). A wrapper forwards it.
+    fn refusals(&self) -> u32;
 
     /// The id in this table of the well-known type `f` (one of [`ids`]; any other id is returned
     /// unchanged). Identity for a table that was never canonicalized; [`TypeTable`] and
@@ -556,6 +576,12 @@ impl TypeKind {
 #[derive(Clone, Debug)]
 pub struct TypeTable {
     kinds: Vec<TypeKind>,
+    /// Per type: its height ([`MAX_TYPE_HEIGHT`]).
+    heights: Vec<u32>,
+    /// Keys refused for their height, here and in the overlays merged into this table.
+    refused: u32,
+    /// The keys refused here: one refused again is not counted again.
+    refused_keys: rustc_hash::FxHashSet<TypeKind>,
     map: FxHashMap<TypeKind, TypeId>,
     /// `fixed[i]`: the id of well-known type `ids::*` number `i` (identity until canonicalized).
     fixed: [TypeId; FIXED],
@@ -571,6 +597,9 @@ impl TypeTable {
     pub fn new() -> TypeTable {
         let mut t = TypeTable {
             kinds: Vec::new(),
+            heights: Vec::new(),
+            refused: 0,
+            refused_keys: Default::default(),
             map: FxHashMap::default(),
             fixed: std::array::from_fn(|i| TypeId(i as u32)),
         };
@@ -631,6 +660,16 @@ impl TypeTable {
         self.kinds.iter().enumerate().map(|(i, k)| (TypeId(i as u32), k))
     }
 
+    /// The height of `t` ([`MAX_TYPE_HEIGHT`]); 0 for an id not in the table.
+    pub fn height(&self, t: TypeId) -> u32 {
+        self.heights.get(t.idx()).copied().unwrap_or(0)
+    }
+
+    /// Counts `n` refusals made in an overlay of this table ([`Interner::refusals`]).
+    pub fn add_refusals(&mut self, n: u32) {
+        self.refused = self.refused.saturating_add(n);
+    }
+
     /// Merges an overlay's local types: returns the local index → global id map.
     pub fn merge(&mut self, local: &[TypeKind]) -> Vec<TypeId> {
         let mut out: Vec<TypeId> = Vec::with_capacity(local.len());
@@ -660,10 +699,13 @@ impl TypeTable {
             old_to_new[old as usize] = TypeId(new as u32);
         }
         let mut kinds: Vec<TypeKind> = Vec::with_capacity(n);
+        let mut heights: Vec<u32> = Vec::with_capacity(n);
         for &old in &order {
             let k = self.kinds[old as usize].map(|c| old_to_new.get(c.idx()).copied().unwrap_or(c));
             kinds.push(k);
+            heights.push(self.heights[old as usize]);
         }
+        self.heights = heights;
         self.map = kinds.iter().enumerate().map(|(i, k)| (k.clone(), TypeId(i as u32))).collect();
         self.kinds = kinds;
         for f in &mut self.fixed {
@@ -693,10 +735,22 @@ impl Interner for TypeTable {
         if let Some(&id) = self.map.get(&k) {
             return id;
         }
+        let h = key_height(&k, |c| self.height(c));
+        if h > MAX_TYPE_HEIGHT {
+            if self.refused_keys.insert(k) {
+                self.refused = self.refused.saturating_add(1);
+            }
+            return self.error_ty();
+        }
         let id = TypeId(self.kinds.len() as u32);
         self.kinds.push(k.clone());
+        self.heights.push(h);
         self.map.insert(k, id);
         id
+    }
+
+    fn refusals(&self) -> u32 {
+        self.refused
     }
 }
 
@@ -774,12 +828,30 @@ fn cmp_types(kinds: &[TypeKind], a: TypeId, b: TypeId) -> Ordering {
 pub struct Overlay<'g> {
     pub global: &'g TypeTable,
     pub local: Vec<TypeKind>,
+    /// Per local type: its height ([`MAX_TYPE_HEIGHT`]).
+    heights: Vec<u32>,
+    /// Keys this overlay refused for their height; merging adds them to the global count.
+    pub refused: u32,
+    /// The keys refused here (and not in the global table).
+    refused_keys: rustc_hash::FxHashSet<TypeKind>,
     map: FxHashMap<TypeKind, TypeId>,
 }
 
 impl<'g> Overlay<'g> {
     pub fn new(global: &'g TypeTable) -> Overlay<'g> {
-        Overlay { global, local: Vec::new(), map: FxHashMap::default() }
+        Overlay {
+            global,
+            local: Vec::new(),
+            heights: Vec::new(),
+            refused: 0,
+            refused_keys: Default::default(),
+            map: FxHashMap::default(),
+        }
+    }
+
+    /// The height of `t` ([`MAX_TYPE_HEIGHT`]).
+    pub fn height(&self, t: TypeId) -> u32 {
+        if t.is_local() { self.heights.get(t.idx()).copied().unwrap_or(0) } else { self.global.height(t) }
     }
 }
 
@@ -801,10 +873,22 @@ impl Interner for Overlay<'_> {
         if let Some(&id) = self.map.get(&k) {
             return id;
         }
+        let h = key_height(&k, |c| self.height(c));
+        if h > MAX_TYPE_HEIGHT {
+            if !self.global.refused_keys.contains(&k) && self.refused_keys.insert(k) {
+                self.refused = self.refused.saturating_add(1);
+            }
+            return self.error_ty();
+        }
         let id = TypeId(self.local.len() as u32 | TypeId::LOCAL);
         self.local.push(k.clone());
+        self.heights.push(h);
         self.map.insert(k, id);
         id
+    }
+
+    fn refusals(&self) -> u32 {
+        self.refused.saturating_add(self.global.refusals())
     }
 }
 

@@ -48,10 +48,109 @@ use crate::sigs::{FnSig, GenericParam, ImplDef, NameCx, Sigs, TraitRef};
 use crate::types::{self, ConstArg, FloatBits, GArg, Interner, TypeId, TypeKind, TypeTable};
 use crate::{Program, prim::Prim};
 
-/// C-like layout of a non-ADT type: `(size, align)`; `sub` gives the layout
-/// of component types. `None` for unsized and generic types.
-pub fn scalar_layout(k: &TypeKind, sub: &mut dyn FnMut(TypeId) -> Option<(u64, u64)>) -> Option<(u64, u64)> {
-    Some(match k {
+/// Why a type has no layout ([`type_bytes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoLayout {
+    /// Its size does not fit in a `u64`: no value of it can exist, and every reader rejects it.
+    Overflow,
+    /// Not concrete, the error type, a by-value cycle, or nested past the type depth limit: each
+    /// of these has its own diagnostic.
+    Unknown,
+}
+
+/// The ADT definitions a layout reads: the checker's ([`Sigs`]) or the signature builder's.
+pub trait LayoutEnv: Interner {
+    /// Is it an enum, and the field types of each variant (unsubstituted).
+    fn adt_shape(&mut self, d: crate::ids::DeclId) -> Option<(bool, Vec<Vec<TypeId>>)>;
+}
+
+/// A table with the checker's ADT definitions.
+pub struct WithSigs<'a, I: Interner + ?Sized> {
+    pub cx: &'a mut I,
+    pub sigs: &'a Sigs,
+}
+
+impl<I: Interner + ?Sized> Interner for WithSigs<'_, I> {
+    fn kind(&self, t: TypeId) -> &TypeKind {
+        self.cx.kind(t)
+    }
+    fn intern(&mut self, k: TypeKind) -> TypeId {
+        self.cx.intern(k)
+    }
+    fn refusals(&self) -> u32 {
+        self.cx.refusals()
+    }
+    fn fixed_ty(&self, f: TypeId) -> TypeId {
+        self.cx.fixed_ty(f)
+    }
+}
+
+impl<I: Interner + ?Sized> LayoutEnv for WithSigs<'_, I> {
+    fn adt_shape(&mut self, d: crate::ids::DeclId) -> Option<(bool, Vec<Vec<TypeId>>)> {
+        let adt = self.sigs.adt(d)?;
+        Some((adt.is_enum, adt.variants.iter().map(|v| v.fields.iter().map(|f| f.ty).collect()).collect()))
+    }
+}
+
+/// `(size, align)` of `t`: the one answer to "how many bytes" (equal to stave-ir's layout rules),
+/// with a size past `u64` as [`NoLayout::Overflow`]. Memoised by type and depth: types share
+/// components, so without it a `(A, A)` nested k deep costs 2^k.
+pub fn type_bytes<E: LayoutEnv + ?Sized>(env: &mut E, t: TypeId) -> Result<(u64, u64), NoLayout> {
+    bytes_memo(env, t, 0, &mut FxHashMap::default())
+}
+
+/// A layout or why there is none ([`type_bytes`]).
+type Bytes = Result<(u64, u64), NoLayout>;
+
+fn bytes_memo<E: LayoutEnv + ?Sized>(
+    env: &mut E,
+    t: TypeId,
+    depth: u32,
+    memo: &mut FxHashMap<(TypeId, u32), Bytes>,
+) -> Bytes {
+    if depth >= crate::typedepth::MAX_TYPE_DEPTH {
+        return Err(NoLayout::Unknown);
+    }
+    if let Some(&l) = memo.get(&(t, depth)) {
+        return l;
+    }
+    let k = env.kind(t).clone();
+    let r = match k {
+        TypeKind::Adt { def, args } => match env.adt_shape(def) {
+            None => Err(NoLayout::Unknown),
+            Some((is_enum, variants)) => (|| {
+                let mut vls = Vec::with_capacity(variants.len());
+                for v in &variants {
+                    let mut fs = Vec::with_capacity(v.len());
+                    for &f in v {
+                        let ft = env.subst(f, &args, None);
+                        fs.push(bytes_memo(env, ft, depth + 1, memo)?);
+                    }
+                    vls.push(fs);
+                }
+                adt_layout(is_enum, &vls)
+            })(),
+        },
+        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
+            Ok(if matches!(env.kind(inner), TypeKind::Str | TypeKind::Slice { .. }) {
+                (16, 8)
+            } else {
+                (8, 8)
+            })
+        }
+        _ => scalar_layout(&k, &mut |x| bytes_memo(env, x, depth + 1, memo)),
+    };
+    memo.insert((t, depth), r);
+    r
+}
+
+/// Layout of a scalar or a type built from components (arrays, tuples, ranges, vectors, masks);
+/// `sub` lays out a component.
+pub fn scalar_layout(
+    k: &TypeKind,
+    sub: &mut dyn FnMut(TypeId) -> Result<(u64, u64), NoLayout>,
+) -> Result<(u64, u64), NoLayout> {
+    Ok(match k {
         TypeKind::Int { bits, .. } => {
             let b = (bits.bits() / 8) as u64;
             (b, b)
@@ -68,7 +167,7 @@ pub fn scalar_layout(k: &TypeKind, sub: &mut dyn FnMut(TypeId) -> Option<(u64, u
         TypeKind::Fn { .. } => (16, 8),
         TypeKind::Array { elem, len: ConstArg::Value(n) } => {
             let (s, a) = sub(*elem)?;
-            (s.checked_mul(*n)?, a)
+            (s.checked_mul(*n).ok_or(NoLayout::Overflow)?, a)
         }
         TypeKind::Tuple(ts) => {
             let mut fields = Vec::new();
@@ -83,69 +182,24 @@ pub fn scalar_layout(k: &TypeKind, sub: &mut dyn FnMut(TypeId) -> Option<(u64, u
         }
         TypeKind::Vector { lane, n: crate::prim::Lanes::Fixed(n) } => {
             let (s, _) = sub(*lane)?;
-            let total = s * (*n as u64);
+            let total = s.checked_mul(*n as u64).ok_or(NoLayout::Overflow)?;
             (total, total)
         }
         TypeKind::Mask { width, n: crate::prim::Lanes::Fixed(n) } => {
             let total = (*width as u64 / 8) * (*n as u64);
             (total, total)
         }
-        _ => return None,
+        _ => return Err(NoLayout::Unknown),
     })
 }
 
-/// Layout of `t` in table `cx` (concrete types only). `depth`: the parts above `t`; a part
-/// [`crate::typedepth::MAX_TYPE_DEPTH`] parts down has no layout.
-pub fn layout_of<I: Interner + ?Sized>(cx: &mut I, sigs: &Sigs, t: TypeId, depth: u32) -> Option<(u64, u64)> {
-    layout_memo(cx, sigs, t, depth, &mut FxHashMap::default())
+/// Layout of `t` in table `cx` (concrete types only): [`type_bytes`] without the reason.
+pub fn layout_of<I: Interner + ?Sized>(cx: &mut I, sigs: &Sigs, t: TypeId) -> Option<(u64, u64)> {
+    type_bytes(&mut WithSigs { cx, sigs }, t).ok()
 }
 
-/// [`layout_of`] with the layouts found so far, by type and depth (a found layout holds at its
-/// depth; `None`s are not kept, they end the walk at once). Types share components, so without
-/// it a `(A, A)` nested k deep costs 2^k.
-fn layout_memo<I: Interner + ?Sized>(
-    cx: &mut I,
-    sigs: &Sigs,
-    t: TypeId,
-    depth: u32,
-    memo: &mut FxHashMap<(TypeId, u32), (u64, u64)>,
-) -> Option<(u64, u64)> {
-    if depth >= crate::typedepth::MAX_TYPE_DEPTH {
-        return None;
-    }
-    if let Some(&l) = memo.get(&(t, depth)) {
-        return Some(l);
-    }
-    let k = cx.kind(t).clone();
-    let r = match k {
-        TypeKind::Adt { def, args } => {
-            let adt = sigs.adt(def)?;
-            let mut vls = Vec::new();
-            for v in &adt.variants {
-                let mut fs = Vec::new();
-                for f in &v.fields {
-                    let ft = cx.subst(f.ty, &args, None);
-                    fs.push(layout_memo(cx, sigs, ft, depth + 1, memo)?);
-                }
-                vls.push(fs);
-            }
-            adt_layout(adt.is_enum, &vls)
-        }
-        TypeKind::Ref { inner, .. } | TypeKind::Ptr { inner, .. } => {
-            Some(if matches!(cx.kind(inner), TypeKind::Str | TypeKind::Slice { .. }) {
-                (16, 8)
-            } else {
-                (8, 8)
-            })
-        }
-        _ => scalar_layout(&k, &mut |x| layout_memo(cx, sigs, x, depth + 1, memo)),
-    }?;
-    memo.insert((t, depth), r);
-    Some(r)
-}
-
-fn struct_layout(fields: &[(u64, u64)], start: u64) -> Option<(u64, u64)> {
-    struct_offsets(fields, start).map(|(_, size, align)| (size, align))
+fn struct_layout(fields: &[(u64, u64)], start: u64) -> Result<(u64, u64), NoLayout> {
+    struct_offsets(fields, start).map(|(_, size, align)| (size, align)).ok_or(NoLayout::Overflow)
 }
 
 /// C-like record from `start`: each field's offset, and the record's `(size, align)`.
@@ -184,7 +238,7 @@ pub fn field_offsets<I: Interner + ?Sized>(cx: &mut I, sigs: &Sigs, t: TypeId) -
     for v in variants {
         let mut ls = Vec::with_capacity(v.len());
         for f in v {
-            ls.push(layout_of(cx, sigs, f, 1)?);
+            ls.push(layout_of(cx, sigs, f)?);
         }
         out.push(struct_offsets(&ls, start)?.0);
     }
@@ -193,7 +247,7 @@ pub fn field_offsets<I: Interner + ?Sized>(cx: &mut I, sigs: &Sigs, t: TypeId) -
 
 /// ADT layout: a struct is C-like; an enum has a `u32` tag at 0, then each variant's fields from
 /// offset 4, size the largest variant rounded up.
-pub fn adt_layout(is_enum: bool, variants: &[Vec<(u64, u64)>]) -> Option<(u64, u64)> {
+pub fn adt_layout(is_enum: bool, variants: &[Vec<(u64, u64)>]) -> Result<(u64, u64), NoLayout> {
     if !is_enum {
         return struct_layout(variants.first().map_or(&[][..], |v| &v[..]), 0);
     }
@@ -204,8 +258,8 @@ pub fn adt_layout(is_enum: bool, variants: &[Vec<(u64, u64)>]) -> Option<(u64, u
         size = size.max(s);
         align = align.max(a);
     }
-    let size = size.checked_add(align - 1)? / align * align;
-    Some((size, align))
+    let size = size.checked_add(align - 1).ok_or(NoLayout::Overflow)? / align * align;
+    Ok((size, align))
 }
 
 /// Deepest type nesting a trait query descends: the type depth limit. Past it a type does not

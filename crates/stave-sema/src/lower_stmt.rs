@@ -2706,9 +2706,10 @@ impl<'a> FnCx<'a> {
                 if skip_top {
                     return true;
                 }
-                let Some(c) = self.g.sigs.konst(d) else { return false };
-                let (ct, Some(cv)) = (c.ty, c.value.clone()) else { return false };
-                let ce = self.const_val(&cv, ct, a);
+                if self.g.sigs.konst(d).is_none_or(|c| c.value.is_none()) {
+                    return false;
+                }
+                let ce = self.const_use(d, a);
                 let Some(k) = self.operand_of(ce) else { return false };
                 let Some(v) = self.peek(&dp) else { return false };
                 let bt = self.t_bool();

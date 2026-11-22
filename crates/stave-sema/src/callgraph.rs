@@ -241,6 +241,8 @@ pub struct CallGraph {
     /// Instances were left out: an instantiation chain too deep (E0902 reported, or a chain only
     /// fn values or implied calls make), or too many instances. The graph is then incomplete.
     pub truncated: bool,
+    /// Keys the graph's type overlay refused for their height ([`crate::types::MAX_TYPE_HEIGHT`]).
+    pub refused: u32,
     /// Where the first instance was left out: the requesting node's span and the instance's
     /// generic (`None` for drop glue).
     pub truncated_at: Option<(Span, Option<DeclId>)>,
@@ -2393,6 +2395,7 @@ fn finish(w: Walk<'_>) -> CallGraph {
         scc_level,
         level_start,
         scc_drop: Vec::new(),
+        refused: w.cx.refused,
         local_types: w.cx.local,
         truncated: w.truncated,
         truncated_at: w.truncated_at,

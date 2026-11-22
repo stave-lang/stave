@@ -49,6 +49,7 @@ use crate::sigs::{
     AdtDef, LangItems, LowerHost, NameCx, SigBuilder, TyEnv, VariantShape, lower_garg, lower_type,
 };
 use crate::types::{self, ConstArg, FloatBits, GArg, TypeId, TypeKind, ids};
+use std::sync::Arc;
 
 /// A const value (its type is kept alongside).
 #[derive(Clone, Debug, PartialEq)]
@@ -58,20 +59,23 @@ pub enum Val {
     Bool(bool),
     Char(u32),
     Str(Box<[u8]>),
-    /// Tuples, arrays, structs (fields in declaration order); unit is `Agg([])`.
-    Agg(Vec<Val>),
+    /// Tuples, arrays, structs (fields in declaration order); unit is `Agg([])`. Shared: a value
+    /// used twice (`(C, C)`) is one value, so evaluation memory grows with its steps, not with
+    /// the value's leaves.
+    Agg(Arc<[Val]>),
     /// An array of `n` copies of one value (`[e; n]`): one value, not `n`, so compile-time data
     /// costs what it is written with.
-    Rep(Box<Val>, u64),
+    Rep(Arc<Val>, u64),
     /// An enum value: variant index, fields.
-    Variant(u32, Vec<Val>),
+    Variant(u32, Arc<[Val]>),
 }
 
 /// What a const evaluation needs from its context.
 pub(crate) trait CEnv: LowerHost {
     fn const_value(&mut self, d: DeclId) -> Option<(TypeId, Val)>;
     fn adt_def(&mut self, d: DeclId) -> Option<AdtDef>;
-    fn layout(&mut self, t: TypeId) -> Option<(u64, u64)>;
+    /// [`crate::traits::type_bytes`] in this environment's table.
+    fn layout(&mut self, t: TypeId) -> Result<(u64, u64), crate::traits::NoLayout>;
     fn lang(&self) -> &LangItems;
     /// The parameter types and return type of fn `d`.
     fn fn_types(&mut self, d: DeclId) -> Option<(Vec<TypeId>, TypeId)>;
@@ -88,7 +92,7 @@ impl CEnv for SigBuilder<'_> {
         SigBuilder::adt_def(self, d)
     }
 
-    fn layout(&mut self, t: TypeId) -> Option<(u64, u64)> {
+    fn layout(&mut self, t: TypeId) -> Result<(u64, u64), crate::traits::NoLayout> {
         SigBuilder::layout(self, t)
     }
 
@@ -184,15 +188,38 @@ struct Ev<'e, 'a, E: CEnv> {
 
 const MAX_DEPTH: u32 = 2000;
 
-/// The most bytes of compile-time data an array literal of a const-expr may have
-/// (contracts/lang-details.md "Size limits"): const evaluation holds the value and the image
-/// holds its bytes (an all-zero `static` takes no file bytes: `.bss`).
+/// The most bytes of compile-time data a value of a const-expr may have, and the most bytes of
+/// a `const` or `static` (contracts/lang-details.md "Size limits"): const evaluation holds the
+/// value and the image holds its bytes.
 pub const MAX_DATA_BYTES: u64 = 1 << 26;
+
+/// The compile-time data limit on type `t` ([`MAX_DATA_BYTES`]): `Err(bytes)` past it, with
+/// `u64::MAX` for a size past `u64`. A type with params or an error passes (its instances, or
+/// the error's diagnostic, decide); a type without a layout otherwise is rejected.
+pub(crate) fn data_size<E: CEnv + ?Sized>(env: &mut E, t: TypeId) -> Result<(), u64> {
+    if env.has_params(t) || env.has_error(t) {
+        return Ok(());
+    }
+    match env.layout(t) {
+        Ok((b, _)) if b <= MAX_DATA_BYTES => Ok(()),
+        Ok((b, _)) => Err(b),
+        Err(_) => Err(u64::MAX),
+    }
+}
 
 /// The most bytes a value of a fn may have (a parameter, binding, temporary, or return value,
 /// per instance; contracts/lang-details.md "Size limits"): the x86-64 back end keeps a value
 /// in one frame slot of at most 256 MiB.
 pub const MAX_VALUE_BYTES: u64 = 1 << 28;
+
+/// The most bytes the values of one fn instance may take together (its frame sum: parameters,
+/// bindings, literals, one copy per arm of a value `if` / `match`, call results and by-value
+/// arguments, the return value; contracts/lang-details.md "Size limits"). A back end's frame
+/// holds at most 1 GiB. Its frame is that sum for most shapes, and up to 1.5 times it where a
+/// whole aggregate is loaded to read a part of it (through a `*p`, a borrowed binding, or a
+/// closure's capture); 16 MiB are kept for the back end's own slots and spills:
+/// (1 GiB - 16 MiB) / 1.5.
+pub const MAX_FRAME_BYTES: u64 = ((1 << 30) - (1 << 24)) / 3 * 2;
 
 /// The `what` of the E0904 at the innermost node without a value.
 const OUTSIDE: &str = "an expression outside the const-expr forms";
@@ -1011,7 +1038,11 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                     None => self.force(ct)?,
                 });
             }
-            return Some(Ty::T(self.env.mk_tuple(tys)));
+            let tt = self.env.mk_tuple(tys);
+            if !self.size_ok(n, tt) {
+                return None;
+            }
+            return Some(Ty::T(tt));
         }
         if t == Term::LBracket as u8 {
             let eh = match hint.map(|w| self.env.kind(w).clone()) {
@@ -1082,18 +1113,15 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         None
     }
 
-    /// The array limit on the type of literal `n` (E0904 `size`, also reported by the body
-    /// checker for the same literal, so deferred).
-    /// The limit on compile-time data ([`MAX_DATA_BYTES`]) on the type of array literal `n`.
+    /// The limit on compile-time data ([`data_size`]) on the type of a value const evaluation
+    /// builds at `n`: an array, tuple, struct, or variant literal, or a const ctor call. Checked
+    /// on the type before the value is built, so no evaluation holds more data than the limit.
     fn size_ok(&mut self, n: u32, at: TypeId) -> bool {
-        if self.env.has_params(at) {
-            return true;
-        }
-        match self.env.layout(at) {
-            Some((b, _)) if b <= MAX_DATA_BYTES => true,
-            l => {
+        match data_size(self.env, at) {
+            Ok(()) => true,
+            Err(bytes) => {
                 let tn = self.show(at);
-                let bytes = l.map_or(u64::MAX, |l| l.0).to_string();
+                let bytes = bytes.to_string();
                 let d = mk(
                     "E0904",
                     Some("size"),
@@ -1229,7 +1257,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 let d = mk("E0904", Some("generic"), &[("name", f), ("type", &tn)], icx.node_span(n), &[]);
                 return self.defer(d);
             }
-            let Some((size, align)) = self.env.layout(t) else {
+            let Ok((size, align)) = self.env.layout(t) else {
                 let tn = self.show(t);
                 let d = mk("E0911", None, &[("type", &tn)], icx.node_span(n), &[]);
                 self.report(d);
@@ -1323,7 +1351,11 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                     && self.env.prog().decl(d).is_some_and(|x| x.kind == DeclKind::Variant)
                 {
                     path = None;
-                    cur = Some(self.decide_variant(d, &args, want, targs, &mut steps)?);
+                    let vt = self.decide_variant(d, &args, want, targs, &mut steps)?;
+                    if !self.size_ok(n, vt) {
+                        return None;
+                    }
+                    cur = Some(vt);
                     p = close + 1;
                     continue;
                 }
@@ -1332,7 +1364,11 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                     && self.env.lang().const_ctors.contains(&d)
                 {
                     path = None;
-                    cur = Some(self.decide_ctor(d, &args, want, &mut steps)?);
+                    let ct = self.decide_ctor(d, &args, want, &mut steps)?;
+                    if !self.size_ok(n, ct) {
+                        return None;
+                    }
+                    cur = Some(ct);
                     p = close + 1;
                     continue;
                 }
@@ -1342,7 +1378,11 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 let sl = *kids.get(kid)?;
                 kid += 1;
                 let Some(Res::Decl(d)) = path.take() else { return self.e0904(n, "a non-const item") };
-                cur = Some(self.decide_struct(d, sl, want, targs, &mut steps)?);
+                let st = self.decide_struct(d, sl, want, targs, &mut steps)?;
+                if !self.size_ok(n, st) {
+                    return None;
+                }
+                cur = Some(st);
                 p = icx.close(p) + 1;
                 continue;
             }
@@ -1636,7 +1676,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
             for &c in kids {
                 vals.push(self.value(c)?.1);
             }
-            return Some((ty, Val::Agg(vals)));
+            return Some((ty, Val::Agg(vals.into())));
         }
         if t == Term::LBracket as u8 {
             if kids.len() == 2 && icx.is(icx.end_tok(kids[0]) + 1, Term::Semi) {
@@ -1644,13 +1684,13 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 let TypeKind::Array { len: ConstArg::Value(len), .. } = self.env.kind(ty).clone() else {
                     return self.ice(n, "an array literal without a length");
                 };
-                return Some((ty, Val::Rep(Box::new(v), len)));
+                return Some((ty, Val::Rep(Arc::new(v), len)));
             }
             let mut vals = Vec::with_capacity(kids.len());
             for &c in kids {
                 vals.push(self.value(c)?.1);
             }
-            return Some((ty, Val::Agg(vals)));
+            return Some((ty, Val::Agg(vals.into())));
         }
         self.ice(n, "a form without a value")
     }
@@ -1664,19 +1704,19 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 Step::Known(v) => v,
                 Step::Node(p) => self.value(p)?.1,
                 Step::Part(i) => match cur? {
-                    Val::Agg(mut vs) if i < vs.len() => vs.swap_remove(i),
+                    Val::Agg(vs) if i < vs.len() => vs[i].clone(),
                     _ => return self.ice(n, "a field of a value without it"),
                 },
                 Step::Index(ie, at) => {
                     let (_, iv) = self.value(ie)?;
                     let Val::Int(i) = iv else { return self.ice(ie, "an index that is not an integer") };
                     match cur? {
-                        Val::Agg(mut vs) => match usize::try_from(i).ok().filter(|&i| i < vs.len()) {
-                            Some(i) => vs.swap_remove(i),
+                        Val::Agg(vs) => match usize::try_from(i).ok().filter(|&i| i < vs.len()) {
+                            Some(i) => vs[i].clone(),
                             None => return self.index_range(ie, at, vs.len()),
                         },
                         Val::Rep(v, len) => match u64::try_from(i).ok().filter(|&i| i < len) {
-                            Some(_) => *v,
+                            Some(_) => Arc::unwrap_or_clone(v),
                             None => {
                                 return self.index_range(ie, at, usize::try_from(len).unwrap_or(usize::MAX));
                             }
@@ -1689,7 +1729,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                     for a in args {
                         vals.push(self.value(a)?.1);
                     }
-                    Val::Variant(idx, vals)
+                    Val::Variant(idx, vals.into())
                 }
                 Step::Struct { idx, is_enum, n: count, fields } => {
                     let mut vals: Vec<Option<Val>> = vec![None; count];
@@ -1697,7 +1737,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                         vals[fi] = Some(self.value(e)?.1);
                     }
                     let vals: Vec<Val> = vals.into_iter().collect::<Option<_>>()?;
-                    if is_enum { Val::Variant(idx, vals) } else { Val::Agg(vals) }
+                    if is_enum { Val::Variant(idx, vals.into()) } else { Val::Agg(vals.into()) }
                 }
                 Step::Ctor(m, args) => self.ctor_call(n, m, &args, ty)?,
             });
@@ -1991,11 +2031,11 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
     }
 
     fn none_of(&mut self, inner: TypeId) -> R {
-        Some((self.option_of(inner)?, Val::Variant(0, Vec::new())))
+        Some((self.option_of(inner)?, Val::Variant(0, Arc::new([]))))
     }
 
     fn some_of(&mut self, inner: TypeId, v: Val) -> R {
-        Some((self.option_of(inner)?, Val::Variant(1, vec![v])))
+        Some((self.option_of(inner)?, Val::Variant(1, Arc::new([v]))))
     }
 }
 

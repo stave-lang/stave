@@ -60,20 +60,28 @@ reference for what a program may write and what it means.
 
 ## §2 Size limits
 
-- Compile-time data: an array literal `[a, b, ..]` or `[e; n]` of a const-expr (a `const` or
-  `static` initializer) whose type takes more than 2^26 bytes (64 MiB) is E0904 case `size`, at
-  the literal: `[[0u8; 65536]; 65536]`, `[[0u8; 16777216]; 8]`. A zero-size element takes no
-  bytes (`[(); 2000000]` is fine). `[e; n]` is one value repeated, never `n` values, so its cost
-  is the bytes of its type; an all-zero `static` takes no file bytes.
-- A `[e; n]` in a fn body is a fill at run time: `e` is evaluated once and stored into each
-  element. Its count has no limit of its own.
-- A value a fn holds (a parameter, binding, array or tuple literal, or the return value) whose
-  type takes more than 2^28 bytes (256 MiB) is E0911 case `size`, once per type and fn
-  (`fn f(x: [u8; 300000000])`, a tuple nested 40 levels deep). A type with generic params is
-  checked per instance: E0911 case `instance`, once per instance, at the generic fn, naming the
-  instance (`fill::<300000000>` holding `[u8; N]`).
-- Reason: const evaluation and the image hold compile-time data; a back end keeps each value
-  of a fn in one slot of its frame, and a frame holds at most 1 GiB.
+Each limit is decided in one place; every reader of a size takes a size past `u64` as a reject.
+
+| limited | bound | diagnostic | decided in |
+|---|---|---|---|
+| height of a type (a type is one level above its tallest component; written, from an alias, or built by substitution) | 1,000 | E0005 `type` | the type table: a taller type is never interned (the error type), and E0005 is reported where it is written (`sigs::lower_type`) or reached (`typedepth`) |
+| bytes of a type | `u64` | E0911 `overflow` (a value of it) | `traits::type_bytes`, the one size function |
+| compile-time data: every tuple, array, struct, or variant value a const-expr builds (so every `const` and `static`) | 2^26 bytes | E0904 `size`, at the literal | `consteval::data_size`, on the literal's type before the value is built |
+| a value a fn holds: parameter, binding, array / tuple / struct literal, value `if` / `match`, return value | 2^28 bytes | E0911 `size` (concrete), `instance` (per instance) | `typeck::frame_of` |
+| frame sum of a fn instance: those values, one copy per arm of a value `if` / `match`, each call's result and by-value arguments | 704,643,072 bytes | E0911 `frame`, per instance naming it | `typeck::frame_of` |
+
+- `[e; n]` is one value repeated, in const evaluation (never `n` values) and in a fn body (a
+  fill at run time: `e` once, stored into each element; no count limit of its own). A const
+  used twice is one value (`(C, C)` costs a step, not a copy), so doubling consts stop at the
+  data limit without building it. An all-zero `static` takes no file bytes; a const of more
+  than 64 value cells is read from its image where it is used.
+- Reason: const evaluation and the image hold compile-time data. A back end keeps each value of
+  a fn in a slot of its frame, and a frame holds at most 1 GiB: the measured frames are the
+  frame sum, and up to 1.5 times it where a whole aggregate is loaded to read a part (`*p`, a
+  borrowed binding, a closure's capture), so the frame bound is (1 GiB - 16 MiB) / 1.5. The
+  height bound makes the types of a program finitely many, so every walk over them with a
+  visited set ends; polymorphic recursion (`P<T>` holding a `P<(T, T)>`) grows one level per
+  instance and stops there.
 
 ## §2 Contracts
 
