@@ -75,7 +75,8 @@ impl std::ops::Deref for SourceBytes {
 }
 
 /// Builds a located diagnostic from its registry templates. A template failure is a compiler bug:
-/// it panics in debug builds and drops the diagnostic in release builds.
+/// it is counted ([`diagnostic_build_failures`]), and the driver fails the run as an internal
+/// error, so a diagnostic never vanishes; no input can crash a lexer or parser worker.
 pub(crate) fn make_diag(
     code: &str,
     case: Option<&str>,
@@ -86,10 +87,22 @@ pub(crate) fn make_diag(
     match stave_diag::Diagnostic::new(code, case, holes, Some(primary), roles) {
         Ok(d) => Some(d),
         Err(e) => {
-            if cfg!(debug_assertions) {
-                panic!("stave-syntax: cannot build {code}: {e}");
-            }
+            let _ = FIRST_FAILURE.set(format!("{code}: {e}"));
+            FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             None
         }
     }
+}
+
+static FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FIRST_FAILURE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// How many diagnostics could not be built from their templates since process start.
+pub fn diagnostic_build_failures() -> u64 {
+    FAILURES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The first diagnostic since process start that could not be built: its code and the error.
+pub fn first_diagnostic_build_failure() -> Option<&'static str> {
+    FIRST_FAILURE.get().map(String::as_str)
 }

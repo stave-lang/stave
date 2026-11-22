@@ -1,0 +1,39 @@
+//~ CHECK-ONLY
+// A value `if` of fn items is no single fn item for the call graph, also where its conversion
+// only drops features (inside a `needs(avx2)` fn, two `needs(avx2)` items used as a plain fn
+// type) or adds a deny clause both arms satisfy: a call through the value reaches every fn of
+// its type, so the cycle through `down` is seen (E1402).
+fn stop(n: u64) -> u64 needs(avx2) {
+    return n;
+}
+
+fn down(n: u64) -> u64 needs(avx2) {
+    let f: fn(u64) -> u64 = if n > 0u64 then down else stop;
+    if n == 0u64 {
+        return 0u64;
+    }
+    return f(n - 1u64) + 1u64; //~ ERROR E1402
+}
+
+fn stop2(n: u32) -> u32 {
+    return n;
+}
+
+fn down2(n: u32) -> u32 {
+    let f: fn(u32) -> u32 without(io) = if n > 0u32 then down2 else stop2;
+    if n == 0u32 {
+        return 0u32;
+    }
+    return f(n - 1u32) + 1u32; //~ ERROR E1402
+}
+
+fn base(n: u64) -> u64 {
+    return n;
+}
+
+dispatch fn go(n: u64) -> u64 { avx2 => down, _ => base, }
+
+fn main() {
+    let r = go(3u64);
+    let s = down2(3u32);
+}

@@ -16,7 +16,7 @@ use crate::lower_fn::{
 };
 use crate::mono::{InstKey, Req, Resolved};
 use crate::resolve::Res;
-use crate::typeck::Target;
+use crate::typeck::{Coercion, Target};
 use crate::types::{ConstArg, GArg, Interner, TypeId, TypeKind};
 
 /// A closure environment: (tuple type, `&mut` tuple type, per capture (local, `&mut T` type)).
@@ -475,8 +475,8 @@ impl<'a> FnCx<'a> {
         }
         let Some(c) = self.contracts() else { return };
         let checked = c.checked_requires();
-        let calls = checked.iter().any(|cl| self.clause_calls(cl.expr))
-            || c.olds.iter().any(|&(_, e)| self.clause_calls(e));
+        let calls = checked.iter().any(|cl| self.clause_runs_code(cl.expr))
+            || c.olds.iter().any(|&(_, e)| self.clause_runs_code(e));
         let trace = if calls { self.trace_save() } else { None };
         for cl in checked {
             self.contract_check(cl, None, trace);
@@ -517,7 +517,7 @@ impl<'a> FnCx<'a> {
         self.f.b.call(fi, None, &[]);
         let Some(c) = self.contracts() else { return };
         let trace =
-            if c.requires.iter().any(|cl| self.clause_calls(cl.expr)) { self.trace_save() } else { None };
+            if c.requires.iter().any(|cl| self.clause_runs_code(cl.expr)) { self.trace_save() } else { None };
         // each check of a clause is its own filter, in order, as in `contract_check`
         let icx = self.icx;
         let checks: Vec<u32> =
@@ -565,7 +565,7 @@ impl<'a> FnCx<'a> {
             self.bind(l, Some(v));
         }
         let trace =
-            if c.ensures.iter().any(|cl| self.clause_calls(cl.expr)) { self.trace_save() } else { None };
+            if c.ensures.iter().any(|cl| self.clause_runs_code(cl.expr)) { self.trace_save() } else { None };
         for cl in &c.ensures {
             self.contract_check(cl, Some(at), trace);
         }
@@ -574,29 +574,61 @@ impl<'a> FnCx<'a> {
         }
     }
 
-    /// Whether the clause expression `e` calls anything or makes a value of an enum variant: only
-    /// then can its evaluation change the error trace (`Result.Err(..)` restarts it, `?` in a
-    /// callee extends it).
-    fn clause_calls(&self, e: u32) -> bool {
+    /// Whether evaluating clause expression `e` may change the thread's report state (the error
+    /// trace: `Result.Err(..)` restarts it, `?` extends it; the user site every user call into
+    /// a built-in package stores): yes unless every form in it is one that runs no code but the
+    /// clause's own and drops no value. Those forms: a field, tuple element, column, element, or
+    /// sub-slice access, a `const` read, `size_of`, an `old(..)` read, the built-in operators and
+    /// methods (`len`); any other target, an implied call, an `as_str` coercion, a fn value, or a
+    /// value of a type that needs dropping counts as running code.
+    fn clause_runs_code(&mut self, e: u32) -> bool {
         let icx = self.icx;
-        let (lo, hi) = (icx.a(e), icx.end_tok(e));
         let tb = self.tb();
+        let (lo, hi) = (icx.a(e), icx.end_tok(e));
         let from = tb.targets.partition_point(|(t, _)| *t < lo);
-        tb.targets[from..].iter().take_while(|(t, _)| *t <= hi).any(|(_, t)| {
-            matches!(
+        let runs = tb.targets[from..].iter().take_while(|(t, _)| *t <= hi).any(|(_, t)| {
+            !matches!(
                 t,
-                Target::Fn { .. }
-                    | Target::Method { .. }
-                    | Target::TraitMethod { .. }
-                    | Target::Op { .. }
-                    | Target::FnValue { .. }
-                    | Target::Variant { .. }
+                Target::Field { .. }
+                    | Target::TupleField { .. }
+                    | Target::Column { .. }
+                    | Target::Index { .. }
+                    | Target::Slice { .. }
+                    | Target::Global { .. }
+                    | Target::SizeOf { .. }
+                    | Target::Old
+                    | Target::Builtin { .. }
             )
+        });
+        let from = tb.implicit.partition_point(|(t, _)| *t < lo);
+        if runs || tb.implicit.get(from).is_some_and(|(t, _)| *t <= hi) {
+            return true;
+        }
+        let nodes = icx.ast.descendants(e);
+        let from = tb.coercions.partition_point(|(n, _)| *n < nodes.start);
+        if tb.coercions[from..].iter().take_while(|(n, _)| *n <= e).any(|(_, c)| {
+            !matches!(
+                c,
+                Coercion::NeverToAny
+                    | Coercion::MutToShared
+                    | Coercion::Reborrow
+                    | Coercion::ArrayToSlice
+                    | Coercion::Unalign
+                    | Coercion::FnItem
+            )
+        }) {
+            return true;
+        }
+        // a built-in method runs no code of its own but the fn values it is given and the drops
+        // of the values it takes
+        (nodes.start..=e).any(|n| {
+            let t = self.nty(n);
+            matches!(self.kind(t), TypeKind::Fn { .. }) || self.needs_drop(t)
         })
     }
 
-    /// Saves the error trace into a fresh slot (`runtime.errtrace.save`): the slot's pointer and
-    /// type, `None` without the runtime fns.
+    /// Saves the error trace and the user site into a fresh slot (`runtime.errtrace.save`): the
+    /// slot's pointer and type, `None` without the runtime fns.
     fn trace_save(&mut self) -> Option<(Operand, Ty)> {
         let (save, restore) = (self.g.lang.errtrace_save?, self.g.lang.errtrace_restore?);
         if !self.open() {
@@ -610,7 +642,7 @@ impl<'a> FnCx<'a> {
         Some((p, trace))
     }
 
-    /// Puts back the error trace [`FnCx::trace_save`] saved.
+    /// Puts back the error trace and the user site [`FnCx::trace_save`] saved.
     fn trace_restore(&mut self, (p, trace): (Operand, Ty)) {
         let Some(restore) = self.g.lang.errtrace_restore else { return };
         if !self.open() {
@@ -622,14 +654,17 @@ impl<'a> FnCx<'a> {
         let a = self.convert_ptr(p, from, want);
         let f = self.req(Req::Inst(InstKey { decl: restore, args: Vec::new() }));
         self.f.b.call(f, None, &[a]);
+        // the stored user site is the saved one again, not the last one this fn stored
+        self.f.last_site = None;
     }
 
     /// Branches to the failure call of clause `cl` when it is false: a `requires` (`at` `None`)
     /// or an `ensures` reported at token `at`. Each operand of the clause's top-level `&&` is its
     /// own check, in order (a false one fails before the next is evaluated, as `&&` would); each
     /// reports the whole clause. A check's temporaries are dropped before its branch; those of the
-    /// enclosing statement are left as they are. `trace`: the error trace saved before the
-    /// checks, put back before a failure is reported.
+    /// enclosing statement are left as they are. `trace`: the error trace and user site saved
+    /// before the checks, put back before a failure is reported (a false `requires` reports the
+    /// user site: the call).
     fn contract_check(
         &mut self,
         cl: &crate::contracts::ContractClause,

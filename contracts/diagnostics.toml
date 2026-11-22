@@ -1437,8 +1437,8 @@ fix = { description = "add `needs({feature})` to the signature, or use a vector 
 code = "E0704"
 severity = "error"
 area = "features"
-rule = "callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it. Case `drops`: the same, where the instance only drops a vector through a container"
-holes = { callee = "path", feature = "name", arg = "type" }
+rule = "callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it. Case `drops`: the same, where the instance only drops a vector through a container. Case `value`: the callee is a fn value whose type has `needs(..)`"
+holes = { callee = "path", feature = "name", arg = "type", fn_type = "type" }
 message = "`{callee}` needs `{feature}`, which the caller does not have"
 labels = [{ at = "primary", text = "call needs `{feature}`" }, { at = "callee", text = "`{callee}` declares `needs({feature})` here" }]
 fix = { description = "add `needs({feature})` to the caller, or call `{callee}` through a `dispatch` function" }
@@ -1452,6 +1452,11 @@ fix = { description = "add `needs({feature})` to the caller, or reach `{callee}`
 message = "`{callee}` at type argument `{arg}` needs `{feature}`, which the caller does not have"
 labels = [{ at = "primary", text = "this use needs `{feature}`" }, { at = "callee", text = "declared here: at `{arg}` it drops a vector by value, so it inherits `{feature}`" }]
 fix = { description = "add `needs({feature})` to the caller, or reach `{callee}` through a `dispatch` function" }
+
+[diag.cases.value]
+message = "a call through a value of type `{fn_type}` needs `{feature}`, which the caller does not have"
+labels = [{ at = "primary", text = "call needs `{feature}`" }]
+fix = { description = "add `needs({feature})` to the caller, or make the call in a `dispatch` arm that has it" }
 
 [[diag]]
 code = "E0705"

@@ -1,0 +1,53 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0704 case `value`: a call through a value whose fn type keeps `needs(F)` runs a fn with F, so
+// the caller must have F proven, as for a direct call: through a param, a local, a view field, a
+// generic fn's param, a returned value, and inside a trait impl method (which cannot declare
+// `needs`).
+fn k(x: u32) -> u32 needs(avx2) {
+    return x;
+}
+
+fn call(f: fn(u32) -> u32 needs(avx2), x: u32) -> u32 {
+    return f(x); //~ ERROR E0704
+}
+
+view struct H {
+    f: fn(u32) -> u32 needs(avx2),
+}
+
+fn ap<T>(f: fn(T) -> T needs(avx2), x: T) -> T {
+    return f(x); //~ ERROR E0704
+}
+
+fn get() -> fn(u32) -> u32 needs(avx2) {
+    return k;
+}
+
+trait Run {
+    fn run(&self, x: u32) -> u32;
+}
+
+struct R {
+    n: u32,
+}
+
+impl Run for R {
+    fn run(&self, x: u32) -> u32 {
+        let g: fn(u32) -> u32 needs(avx2) = k;
+        return g(x); //~ ERROR E0704
+    }
+}
+
+fn main() -> i32 {
+    let f: fn(u32) -> u32 needs(avx2) = k;
+    let a = call(f, 1);
+    let b = f(2); //~ ERROR E0704
+    let h = H.{ f: k };
+    let c = (h.f)(3); //~ ERROR E0704
+    let d = ap(f, 4u32);
+    let e = get()(5); //~ ERROR E0704
+    let r = R.{ n: 0 };
+    let s = r.run(6);
+    return 0;
+}

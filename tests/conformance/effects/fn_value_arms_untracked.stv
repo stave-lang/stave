@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// E1403: an arm of a value `if` that is no fn item or closure literal (a call result, a param)
+// keeps its own type when the whole is converted to a fn type with a deny clause, as it would
+// alone.
+import std.io;
+
+fn quiet() {}
+
+fn noisy() {
+    io.print("io\n");
+}
+
+fn mk() -> fn() {
+    return noisy;
+}
+
+fn run(c: bool, p: fn()) without(io) {
+    let f: fn() without(io) = if c then mk() else quiet; //~ ERROR E1403
+    f();
+    let g: fn() without(io) = if c then quiet else p; //~ ERROR E1403
+    g();
+}
+
+fn main() {
+    run(true, noisy);
+}
