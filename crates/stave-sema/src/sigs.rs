@@ -122,7 +122,6 @@ pub struct FieldDef {
     pub decl: DeclId,
     pub name: Sym,
     pub ty: TypeId,
-    pub is_pub: bool,
     pub span: Span,
 }
 
@@ -1821,7 +1820,7 @@ impl<'p> SigBuilder<'p> {
                     Some(t) => lower_type(b, &env, t, false),
                     None => ids::ERROR,
                 };
-                out.push(FieldDef { decl: f, name: fd.name, ty, is_pub: fd.is_pub(), span: fd.name_span });
+                out.push(FieldDef { decl: f, name: fd.name, ty, span: fd.name_span });
             }
             out
         };
@@ -1840,7 +1839,6 @@ impl<'p> SigBuilder<'p> {
                                 decl: DeclId::NONE,
                                 name: Sym::NONE,
                                 ty,
-                                is_pub: true,
                                 span: icx.node_span(c),
                             });
                         }

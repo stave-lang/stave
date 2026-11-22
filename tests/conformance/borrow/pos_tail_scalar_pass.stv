@@ -1,0 +1,37 @@
+// `tail scalar` passes are iterations: a borrow used only within its pass, or replaced before
+// the next pass uses it, is fine; each pass sees the element it is given.
+import std.io;
+import std.vec;
+
+fn per_pass(a: &[u32], v: &mut vec.Vec<u32>) -> u32 {
+    let mut k: u32 = 0;
+    for c: u32x4 in a { } tail scalar (x) {
+        v.push(x);
+        let r: &u32 = &v.as_slice()[0];
+        k = k + *r + x;
+    }
+    return k;
+}
+
+fn replaced(a: &[u32]) -> u32 {
+    let mut b: u32 = 0;
+    let z: u32 = 0;
+    let mut r: &u32 = &z;
+    let mut k: u32 = 0;
+    for c: u32x4 in a { } tail scalar (x) {
+        r = &z;
+        b = x;
+        k = k + *r + b;
+        r = &b;
+    }
+    return k;
+}
+
+fn main() -> i32 {
+    let a: [u32; 7] = [1, 2, 3, 4, 5, 6, 7];
+    let mut v = vec.Vec::<u32>.new();
+    let p = per_pass(&a, &mut v);
+    let q = replaced(&a);
+    io.print(f"{p} {q}\n");
+    return 0;
+}

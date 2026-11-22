@@ -1284,11 +1284,16 @@ fix = { description = "write `from {param}` instead of `from copy {param}`" }
 code = "E0601"
 severity = "error"
 area = "simd"
-rule = "chunk loop without a tail policy"
+rule = "chunk loop without a tail policy; case `element-loop`: a tail clause on a loop that is not a chunk loop (its annotation, as written, is no vector or reference to one: a range, an iterator, an element loop, also a generic `T`)"
 holes = { type = "type" }
 message = "chunk loop over `{type}` has no tail clause"
 labels = [{ at = "primary", text = "remaining elements are not handled" }]
 fix = { description = "add a tail clause after the loop body: `tail masked (v, m) {{ ... }}`, `tail scalar (x) {{ ... }}`, or `tail exact;`" }
+
+[diag.cases.element-loop]
+message = "a tail clause on a loop that is not a chunk loop"
+labels = [{ at = "primary", text = "tail clause of an element loop: it visits every element, none is left over" }]
+fix = { description = "remove the tail clause; for a chunk loop, annotate the binding with a vector type written out (`for v: f32x8 in xs`), not a generic one" }
 
 [[diag]]
 code = "E0602"

@@ -171,6 +171,10 @@ pub struct TypedBody {
     /// The kind of each `for` loop (by its node), decided once from the source's type as written
     /// here ([`crate::loops::ForKind`]), sorted; absent for a loop whose source is no source.
     pub for_kinds: Vec<(u32, crate::loops::ForKind)>,
+    /// The chunk loops (by node), sorted: a `for` whose annotation, as written here, is a vector
+    /// or a reference to one. Decided once on the definition (a generic `T` or `&T` is never a
+    /// vector annotation, whatever an instance gives it); every other `for` is an element loop.
+    pub chunk_loops: Vec<u32>,
     /// The pattern bindings that take a value that is not Copy by value: binding nodes, sorted.
     /// Decided on the types of the definition (a type parameter without a `Copy` bound is not
     /// Copy, whatever an instance gives it), so a pattern moves its value in every instance or in
@@ -228,6 +232,11 @@ impl TypedBody {
     /// The kind of the `for` loop at node `f` (`None`: its source is no source, an error).
     pub fn for_kind(&self, f: u32) -> Option<crate::loops::ForKind> {
         self.for_kinds.binary_search_by_key(&f, |x| x.0).ok().map(|i| self.for_kinds[i].1)
+    }
+
+    /// Whether the `for` loop at node `f` is a chunk loop ([`TypedBody::chunk_loops`]).
+    pub fn is_chunk_loop(&self, f: u32) -> bool {
+        self.chunk_loops.binary_search(&f).is_ok()
     }
 
     /// The implicit call recorded at token `tok` (a `for` loop's `next`).
@@ -571,6 +580,7 @@ fn empty_body(j: Job) -> TypedBody {
         sites: Vec::new(),
         implicit: Vec::new(),
         for_kinds: Vec::new(),
+        chunk_loops: Vec::new(),
         moves: Vec::new(),
         drops: Vec::new(),
         denied: Vec::new(),
@@ -777,6 +787,7 @@ pub(crate) struct Ck<'a> {
     pub sites: Vec<CallSite>,
     pub implicit: Vec<(u32, Target)>,
     pub for_kinds: Vec<(u32, crate::loops::ForKind)>,
+    pub chunk_loops: Vec<u32>,
     /// `c.select(a, b)` on a `bool`: the token of its target and the type of its operands, which
     /// is its result type once the literals among them are fixed.
     pub selects: Vec<(u32, Ty)>,
@@ -857,6 +868,7 @@ fn check_body(
         sites: Vec::new(),
         implicit: Vec::new(),
         for_kinds: Vec::new(),
+        chunk_loops: Vec::new(),
         selects: Vec::new(),
         moves: Vec::new(),
         drops: Vec::new(),
@@ -1737,6 +1749,11 @@ impl<'a> Ck<'a> {
             for_kinds: {
                 let mut k = std::mem::take(&mut self.for_kinds);
                 k.sort_by_key(|x| x.0);
+                k
+            },
+            chunk_loops: {
+                let mut k = std::mem::take(&mut self.chunk_loops);
+                k.sort_unstable();
                 k
             },
             moves,

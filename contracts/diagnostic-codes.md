@@ -118,7 +118,7 @@ terminal order of the generated parse table (`tools/ll1gen`).
 | E0515 | a parameter's `from` clause names the parameter itself. Reported with the signature |
 | E0520 | `from x` names a by-value non-view parameter |
 | E0521 | `from copy x` where x is not a reference to a view |
-| E0601 | chunk loop without a tail policy |
+| E0601 | chunk loop without a tail policy; case `element-loop`: a tail clause on a loop that is not a chunk loop (no vector annotation as written) |
 | E0602 | scalar and vector mixed (use `TxN.splat`) |
 | E0603 | vector types differ in lane type or count (use widen/narrow/split/join/bitcast) |
 | E0604 | plain `+ - *` on an integer vector (choose `+%`, `+|`, or `checked_add`) |

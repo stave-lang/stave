@@ -4161,6 +4161,9 @@ impl<'a> Ck<'a> {
             };
             matches!(self.tys.kind(v), TypeKind::Vector { .. })
         });
+        if chunk {
+            self.chunk_loops.push(f);
+        }
         {
             let text = icx.node_text(iter).to_string();
             let at = icx.node_span(iter);
@@ -4268,13 +4271,13 @@ impl<'a> Ck<'a> {
                     self.mismatch(iter, Ty::T(it), want, None);
                 }
                 if let Some(tc) = tail {
-                    self.tail_clause(tc, b, ids::ERROR, Lanes::Fixed(1));
+                    self.element_loop_tail(tc);
                 }
             }
             b
         } else {
             if let Some(tc) = tail {
-                self.tail_clause(tc, ids::ERROR, ids::ERROR, Lanes::Fixed(1));
+                self.element_loop_tail(tc);
             }
             self.element_type(f, iter, it)
         };
@@ -4412,6 +4415,14 @@ impl<'a> Ck<'a> {
         let genv = self.genv();
         let from = self.package();
         matches!(self.w.lookup_method(&mut self.tys, base, name, genv, from), Lookup::Found { .. })
+    }
+
+    /// A tail clause on a loop that is not a chunk loop: E0601 `element-loop` (an element loop
+    /// has no elements left over). Its body is still typed, with its bindings unknown.
+    fn element_loop_tail(&mut self, tc: u32) {
+        let d = mk("E0601", Some("element-loop"), &[], self.icx.node_span(tc), &[]);
+        self.report(d);
+        self.tail_clause(tc, ids::ERROR, ids::ERROR, Lanes::Fixed(1));
     }
 
     fn tail_clause(&mut self, tc: u32, bind: TypeId, lane: TypeId, n: Lanes) {

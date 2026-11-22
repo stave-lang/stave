@@ -3173,7 +3173,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0601",
         severity: Severity::Error,
         area: "simd",
-        rule: "chunk loop without a tail policy",
+        rule: "chunk loop without a tail policy; case `element-loop`: a tail clause on a loop that is not a chunk loop (its annotation, as written, is no vector or reference to one: a range, an iterator, an element loop, also a generic `T`)",
         retired: false,
         located: true,
         holes: &[
@@ -3188,6 +3188,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add a tail clause after the loop body: `tail masked (v, m) {{ ... }}`, `tail scalar (x) {{ ... }}`, or `tail exact;`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "element-loop",
+                message: "a tail clause on a loop that is not a chunk loop",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "tail clause of an element loop: it visits every element, none is left over" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove the tail clause; for a chunk loop, annotate the binding with a vector type written out (`for v: f32x8 in xs`), not a generic one",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
