@@ -568,11 +568,6 @@ impl<'b> Flow<'b> {
         self.carried[b]
     }
 
-    /// Whether every reachable block has an entry state.
-    pub fn exact(&self) -> bool {
-        self.exact
-    }
-
     /// What the dataflow did so far.
     pub fn cost(&self) -> Cost {
         Cost { atoms: self.sets.work(), ..self.cost }
