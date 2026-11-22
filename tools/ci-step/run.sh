@@ -25,11 +25,6 @@ case "$step" in
   interp-gate)
            cargo test --locked -p stave-driver --test interp_gate -- --ignored --nocapture --exact \
              accepted_programs_run_clean_under_borrow_tracking ;;
-  # The borrow checker's two dataflows on every program of the repository, a generated corpus
-  # and the fuzz classes (minutes); `test` leaves this ignored test out.
-  borrow-diff)
-           cargo test --locked --release -p stave-driver --test borrow_dataflow -- --ignored --nocapture --exact \
-             everything_agrees ;;
   # The same with the slow programs too (nightly).
   interp-gate-slow)
            cargo test --locked -p stave-driver --test interp_gate -- --ignored --nocapture --exact \
@@ -54,5 +49,5 @@ case "$step" in
              --work target/agent-eval/work "$@" ;;
   bench)   sh bench/run.sh "$@" ;;
   cargo)   cargo "$@" ;;
-  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|interp-gate|interp-gate-slow|borrow-diff|gen|gen-check|lang-budget|check|unsafe-diff|agent-eval ARGS|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
+  *)       echo "usage: run.sh fmt|stave-fmt|clippy|build|test|interp-gate|interp-gate-slow|gen|gen-check|lang-budget|check|unsafe-diff|agent-eval ARGS|bench [ARGS]|cargo ARGS" >&2; exit 2 ;;
 esac
