@@ -752,3 +752,58 @@ fn e0219_next_shape_and_e0609_lane_type_say_why() {
     assert!(got.iter().any(|(c, m, _)| *c == "E0609" && *m == lane), "{got:?}");
     assert_eq!(got.len(), 3, "{got:?}");
 }
+
+/// `TxN.load_first_fault` is reserved (E0208 `reserved`): the fix writes the masked load of the
+/// lanes in bounds with the vector's own mask type, also inside `emulate { }`.
+#[test]
+fn e0208_reserved_first_fault_load_names_the_masked_load() {
+    let src = "fn f(s: &[f32]) -> f32x4 { return f32x4.load_first_fault(s, 0); }\n\
+         fn g(s: &[u16]) { emulate { let v = u16x8.load_first_fault(s, 1); } }\n\
+         fn main() -> i32 { return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str, &str)> = tc
+        .diagnostics
+        .iter()
+        .map(|d| (d.code(), d.message(), d.fix().map_or("", |f| f.description.as_str())))
+        .collect();
+    let has = |ty: &str, mask: &str| {
+        got.iter().any(|(c, m, f)| {
+            *c == "E0208"
+                && *m
+                    == format!("`{ty}.load_first_fault` is reserved: first-fault loads are not available yet")
+                && f.contains(&format!("`{ty}.load_masked(s, i, {mask}.first_n(s.len() -| i))`"))
+        })
+    };
+    assert!(has("f32x4", "mask32x4"), "{got:?}");
+    assert!(has("u16x8", "mask16x8"), "{got:?}");
+    assert_eq!(got.len(), 2, "{got:?}");
+}
+
+/// E0201 for value arms of fn types that differ only in `needs` / `without` names a change that
+/// compiles, never an `as` (E0204 for fn types): with no wanted type the fn type both arms
+/// convert to; with one, the arm not usable as it, converted alone first (in a `match`, also an
+/// earlier arm).
+#[test]
+fn e0201_fn_arms_fixes_name_what_compiles() {
+    let src = "fn twice(x: u64) -> u64 { return x * 2u64; }\n\
+         fn stop(x: u64) -> u64 without(io) { return x; }\n\
+         fn wide(x: u64) -> u64 needs(avx2) { return x; }\n\
+         fn apply(f: fn(u64) -> u64 without(io), x: u64) -> u64 without(io) { return f(x); }\n\
+         fn main() -> i32 {\n\
+         let c = true;\n\
+         let k = 1u32;\n\
+         let a = if c then stop else twice;\n\
+         let b = if c then wide else twice;\n\
+         let r = apply(if c then twice else stop, 3u64);\n\
+         let s = apply(match k { 0u32 => twice, _ => stop }, 3u64);\n\
+         return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str)> =
+        tc.diagnostics.iter().map(|d| (d.code(), d.fix().map_or("", |f| f.description.as_str()))).collect();
+    let has = |needle: &str| got.iter().filter(|(c, f)| *c == "E0201" && f.contains(needle)).count();
+    assert_eq!(has("`let f: fn(u64) -> u64 = ..;`"), 1, "{got:?}");
+    assert_eq!(has("`let f: fn(u64) -> u64 needs(avx2) = ..;`"), 1, "{got:?}");
+    assert_eq!(has("`let g: fn(u64) -> u64 without(io) = twice;`"), 2, "{got:?}");
+    assert!(got.iter().all(|(_, f)| !f.contains(" as fn")), "{got:?}");
+    assert_eq!(got.len(), 4, "{got:?}");
+}

@@ -1030,10 +1030,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0201",
         severity: Severity::Error,
         area: "types",
-        rule: "mismatched types, with no implicit conversion",
+        rule: "mismatched types, with no implicit conversion; cases `fn-arms`, `fn-arms-wanted`: value `if` / `match` arms of fn types that differ only in `needs` or `without`",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "common", kind: HoleKind::Type, choices: &[] },
             Hole { name: "count", kind: HoleKind::Int, choices: &[] },
             Hole { name: "expected", kind: HoleKind::Type, choices: &[] },
             Hole { name: "found", kind: HoleKind::Type, choices: &[] },
@@ -1088,6 +1089,32 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "declare it with an unsigned integer type: `const {operand}: usize`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "fn-arms",
+                message: "the arms have different fn types: `{expected}` and `{found}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "give the value a fn type both arms convert to: `let f: {common} = ..;` (`as` converts no fn value)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "fn-arms-wanted",
+                message: "arm of type `{found}` is not usable as `{expected}`: a fn item arm gains a `without` clause only alone",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "this is `{found}`" },
+                    LabelTemplate { at: "expected", text: "`{expected}` required by this" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "convert the arm alone first: `let g: {expected} = {operand};`, then use `g` as the arm (`as` converts no fn value)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1364,11 +1391,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0208",
         severity: Severity::Error,
         area: "types",
-        rule: "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern",
+        rule: "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern; case `reserved`: a type-relative name reserved for a built-in stage0 does not compile (`TxN.load_first_fault`)",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "added", kind: HoleKind::Pattern, choices: &[] },
+            Hole { name: "mask", kind: HoleKind::Type, choices: &[] },
             Hole { name: "missing", kind: HoleKind::Pattern, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
@@ -1418,6 +1446,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "name each field, `f: _` for one the pattern ignores: add `{added}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "reserved",
+                message: "`{type}.{name}` is reserved: first-fault loads are not available yet",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "reserved name" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "load the lanes in bounds with a masked load: `{type}.load_masked(s, i, {mask}.first_n(s.len() -| i))` (inactive lanes read 0)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
