@@ -463,11 +463,39 @@ fix = { description = "add `fn main() -> i32 {{ return 0; }}` to the root module
 code = "E0201"
 severity = "error"
 area = "types"
-rule = "mismatched types, with no implicit conversion; cases `fn-arms`, `fn-arms-wanted`: value `if` / `match` arms of fn types that differ only in `needs` or `without`"
-holes = { expected = "type", found = "type", operand = "source", count = "int", given = "int", common = "type" }
+rule = "mismatched types, with no implicit conversion; cases `fn-arms`, `fn-arms-wanted`: value `if` / `match` arms of fn types that differ only in `needs` or `without`; the fix names a form that converts (cases `cast-marked`, `some`, `ok`, `unwrap-option`, `unwrap-result`, `borrow`, `borrow-mut`, `deref`), plain `as` only where the cast table admits it, else case `no-cast`"
+holes = { expected = "type", found = "type", operand = "source", count = "int", given = "int", common = "type", cast = "text-literal" }
+choices = { cast = ["as%", "as|", "as~"] }
 message = "mismatched types: expected `{expected}`, found `{found}`"
 labels = [{ at = "primary", text = "this is `{found}`" }, { at = "expected", text = "`{expected}` required by this" }]
 fix = { description = "convert explicitly: `{operand} as {expected}` (or `as%`, `as|`, `as?`, `as~` when lossy)", edits = [{ at = "primary", replacement = "{operand} as {expected}" }] }
+
+[diag.cases.cast-marked]
+fix = { description = "convert explicitly: `{operand} {cast} {expected}` (plain `as` from `{found}` can lose information, E0204; `as%` wraps or truncates, `as|` saturates, `as~` rounds)", edits = [{ at = "primary", replacement = "{operand} {cast} {expected}" }] }
+
+[diag.cases.some]
+fix = { description = "wrap the value: `Option.Some({operand})`", edits = [{ at = "primary", replacement = "Option.Some({operand})" }] }
+
+[diag.cases.ok]
+fix = { description = "wrap the value: `Result.Ok({operand})`", edits = [{ at = "primary", replacement = "Result.Ok({operand})" }] }
+
+[diag.cases.unwrap-option]
+fix = { description = "take the value out: `{operand}.unwrap()` (panics `Unwrap` on `Option.None`), `{operand}?` in a fn returning `Option`, or `match {operand} {{ Option.Some(v) => v, Option.None => .. }}`" }
+
+[diag.cases.unwrap-result]
+fix = { description = "take the value out: `{operand}.unwrap()` (panics `Unwrap` on `Result.Err`), `{operand}?` in a fn returning `Result` of the same error type, or `match {operand} {{ Result.Ok(v) => v, Result.Err(e) => .. }}`" }
+
+[diag.cases.borrow]
+fix = { description = "borrow it: `&{operand}`", edits = [{ at = "primary", replacement = "&{operand}" }] }
+
+[diag.cases.borrow-mut]
+fix = { description = "borrow it mutably: `&mut {operand}`", edits = [{ at = "primary", replacement = "&mut {operand}" }] }
+
+[diag.cases.deref]
+fix = { description = "copy the value out: `*{operand}`", edits = [{ at = "primary", replacement = "*{operand}" }] }
+
+[diag.cases.no-cast]
+fix = { description = "write a value of type `{expected}` here, or change what requires `{expected}`" }
 
 [diag.cases.type-args]
 message = "`{operand}` takes {count} generic arguments, found {given}"
@@ -572,11 +600,30 @@ fix = { description = "shift by less than {bits}, or use `<<%` to mask the amoun
 code = "E0206"
 severity = "error"
 area = "types"
-rule = "operator not defined for type (e.g. `+%` on a float)"
-holes = { op = "source", type = "type" }
+rule = "operator not defined for type (e.g. `+%` on a float); case `ref-operand`: an operand of reference type; cases `deref`, `deref-read`, `deref-write`, `deref-accessors`: unary `*` on a value that is no reference or raw pointer, the fix naming the type's methods that take `&self` / `&mut self` alone and return a reference"
+holes = { op = "source", type = "type", operand = "source", get = "name", get_mut = "name" }
 message = "operator `{op}` is not defined for `{type}`"
 labels = [{ at = "primary", text = "`{op}` on `{type}`" }]
 fix = { description = "use an operator that `{type}` defines (floats: plain `+ - * /`), or convert the operands with `as` first" }
+
+[diag.cases.ref-operand]
+fix = { description = "`{type}` is a reference: apply `{op}` to the value behind it (`*a {op} *b`; the bindings of a `match` on a reference are references)" }
+
+[diag.cases.deref]
+message = "`*` cannot dereference `{type}`: it is no reference or raw pointer"
+fix = { description = "`{operand}` is a value already: use it without `*`" }
+
+[diag.cases.deref-read]
+message = "`*` cannot dereference `{type}`: it is no reference or raw pointer"
+fix = { description = "`{type}` gives a `&` from its method `{get}`: read `*{operand}.{get}()`" }
+
+[diag.cases.deref-write]
+message = "`*` cannot dereference `{type}`: it is no reference or raw pointer"
+fix = { description = "`{type}` gives a `&mut` from its method `{get_mut}`: `let r = {operand}.{get_mut}();`, then `*r` for every read and write" }
+
+[diag.cases.deref-accessors]
+message = "`*` cannot dereference `{type}`: it is no reference or raw pointer"
+fix = { description = "`{type}` gives a `&` from its method `{get}` and a `&mut` from `{get_mut}`: read `*{operand}.{get}()`; to change the value, `let r = {operand}.{get_mut}();`, then `*r` for every read and write (`*r = *r + 1;`)" }
 
 [[diag]]
 code = "E0207"

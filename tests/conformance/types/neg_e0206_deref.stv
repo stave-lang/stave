@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// Unary `*` on a value that is no reference or raw pointer is E0206: a lock guard is read through
+// `get` and written through `get_mut`; an operator on a reference applies to the value behind it.
+import std.sync;
+
+fn read(m: &sync.Mutex<u64, 1>) -> u64 {
+    let g = m.lock();
+    return *g; //~ ERROR E0206
+}
+
+fn plain(x: u64) -> u64 {
+    return *x; //~ ERROR E0206
+}
+
+fn refs(a: &u64, b: &u64) -> u64 {
+    return a + b; //~ ERROR E0206
+}
+
+fn fixed(m: &sync.Mutex<u64, 1>) -> u64 {
+    let mut g = m.lock();
+    let r = g.get_mut();
+    *r = *r + 1;
+    return *r;
+}
+
+fn main() -> i32 {
+    return 0;
+}
