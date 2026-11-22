@@ -1511,7 +1511,8 @@ impl<'a> Ck<'a> {
         let operand = self.icx.node_text(n).to_string();
         let roles: Vec<(&str, Span)> = why.map(|s| ("expected", s)).into_iter().collect();
         let fix = self.mismatch_fix(got, want);
-        let mut holes = vec![("expected", expected.as_str()), ("found", found.as_str()), ("operand", operand.as_str())];
+        let mut holes =
+            vec![("expected", expected.as_str()), ("found", found.as_str()), ("operand", operand.as_str())];
         let case = match fix {
             MismatchFix::Cast => None,
             MismatchFix::Marked(op) => {
