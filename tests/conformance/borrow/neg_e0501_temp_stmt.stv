@@ -1,0 +1,284 @@
+//~ CHECK-ONLY
+// Every temporary ends with its statement: a borrow of one used after the statement is E0501
+// (case `temporary`), whatever holds the borrow and whatever the temporary's value is. A
+// constant is a temporary like any other value; nothing extends a temporary.
+import std.atomic;
+import std.vec;
+
+struct Pair { a: u32, b: u32 }
+
+view struct Holder { r: &u32 }
+
+enum Dir { Up, Down }
+
+impl Pair {
+    fn first(&self) -> &u32 from self {
+        return &self.a;
+    }
+}
+
+impl Dir {
+    fn me(&self) -> &Dir from self {
+        return self;
+    }
+}
+
+trait Peek {
+    fn peek(&self) -> &u32 from self;
+}
+
+impl Peek for u32 {
+    fn peek(&self) -> &u32 from self {
+        return self;
+    }
+}
+
+const TABLE: [u32; 2] = [7, 9];
+
+const K: Pair = Pair.{ a: 3, b: 4 };
+
+const C: atomic.U32 = atomic.U32.new(0);
+
+fn next(i: u32) -> u32 {
+    return i + 1;
+}
+
+fn pair(i: u32) -> Pair {
+    return Pair.{ a: i, b: i + 1 };
+}
+
+fn tup(i: u32) -> (u32, u32) {
+    return (i, i + 1);
+}
+
+fn arr(i: u32) -> [u32; 2] {
+    return [i, i + 1];
+}
+
+fn mkv(k: u32) -> vec.Vec<u32> {
+    let mut v: vec.Vec<u32> = vec.Vec.new();
+    v.push(k);
+    return v;
+}
+
+fn keep(a: &u32, b: &u32) -> &u32 from a + b {
+    return if *a > *b then a else b;
+}
+
+fn twice(x: u32) -> u32 {
+    return x * 2;
+}
+
+fn let_borrow() -> u32 {
+    let r = &next(1); //~ ERROR E0501
+    return *r;
+}
+
+fn let_mut_borrow() -> u32 {
+    let r: &mut u32 = &mut next(1); //~ ERROR E0501
+    *r = 2;
+    return *r;
+}
+
+fn assigned() -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    r = &next(2); //~ ERROR E0501
+    return *r;
+}
+
+fn field_of_temp() -> u32 {
+    let r = &pair(1).b; //~ ERROR E0501
+    return *r;
+}
+
+fn element_of_temp() -> u32 {
+    let r = &arr(1)[1]; //~ ERROR E0501
+    return *r;
+}
+
+fn tuple_field_of_temp() -> u32 {
+    let r = &tup(1).1; //~ ERROR E0501
+    return *r;
+}
+
+fn struct_literal() -> u32 {
+    let h = Holder.{ r: &next(3) }; //~ ERROR E0501
+    return *h.r;
+}
+
+fn tuple_literal() -> u32 {
+    let t: (&u32, u32) = (&next(4), 1); //~ ERROR E0501
+    return *t.0;
+}
+
+fn array_literal() -> u32 {
+    let one: u32 = 1;
+    let a: [&u32; 2] = [&next(5), &one]; //~ ERROR E0501
+    return *a[0];
+}
+
+fn call_result() -> u32 {
+    let x: u32 = 1;
+    let r = keep(&next(7), &x); //~ ERROR E0501
+    return *r;
+}
+
+fn method_chain() -> u32 {
+    let r = pair(8).first(); //~ ERROR E0501
+    return *r;
+}
+
+fn match_binding() -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    match &pair(9) { //~ ERROR E0501
+        Pair.{ a, b: _ } => {
+            r = a;
+        }
+    }
+    return *r;
+}
+
+fn value_match() -> u32 {
+    let r: &u32 = match &pair(10) { //~ ERROR E0501
+        Pair.{ a, b: _ } => a,
+    };
+    return *r;
+}
+
+fn value_if(c: bool) -> u32 {
+    let r = &(if c then next(1) else 7u32); //~ ERROR E0501
+    return *r;
+}
+
+fn ref_of_ref() -> u32 {
+    let one: u32 = 1;
+    let r: & &u32 = & &one; //~ ERROR E0501
+    return **r;
+}
+
+fn with_drop() -> usize {
+    let r = &mkv(1); //~ ERROR E0501
+    return r.len();
+}
+
+fn literal() -> u32 {
+    let r = &4u32; //~ ERROR E0501
+    return *r;
+}
+
+fn literal_in_parens() -> u32 {
+    let r = &(5u32); //~ ERROR E0501
+    return *r;
+}
+
+fn array_literal_constant() -> u32 {
+    let s: &[u32] = &[1u32, 2u32, 3u32]; //~ ERROR E0501
+    return s[0];
+}
+
+fn struct_literal_constant() -> u32 {
+    let p = &Pair.{ a: 1, b: 2 }; //~ ERROR E0501
+    return p.a;
+}
+
+fn unit() -> u32 {
+    let u: &() = &(); //~ ERROR E0501
+    let v: () = *u;
+    return 0;
+}
+
+fn const_item() -> u32 {
+    let t: &[u32; 2] = &TABLE; //~ ERROR E0501
+    return t[0];
+}
+
+fn const_element() -> u32 {
+    let e = &TABLE[1]; //~ ERROR E0501
+    return *e;
+}
+
+fn const_with_cell() -> u32 {
+    let c: &atomic.U32 = &C; //~ ERROR E0501
+    return c.load();
+}
+
+fn const_receiver() -> u32 {
+    let r = K.get_a(); //~ ERROR E0501
+    return *r;
+}
+
+fn literal_receiver() -> u32 {
+    let r = (4u32).peek(); //~ ERROR E0501
+    return *r;
+}
+
+fn variant() -> bool {
+    let d: &Dir = &Dir.Up; //~ ERROR E0501
+    return match *d {
+        Dir.Up => true,
+        Dir.Down => false,
+    };
+}
+
+fn variant_receiver() -> bool {
+    let d = (Dir.Up).me(); //~ ERROR E0501
+    return match *d {
+        Dir.Up => true,
+        Dir.Down => false,
+    };
+}
+
+fn option_none() -> bool {
+    let r: &Option<u32> = &Option.None; //~ ERROR E0501
+    return r.is_none();
+}
+
+fn fn_item() -> u32 {
+    let f: &fn(u32) -> u32 = &twice; //~ ERROR E0501
+    return (*f)(2);
+}
+
+fn size() -> usize {
+    let s: &usize = &size_of::<u64>(); //~ ERROR E0501
+    return *s;
+}
+
+fn const_generic<const N: usize>() -> usize {
+    let n: &usize = &N; //~ ERROR E0501
+    return *n;
+}
+
+fn in_loop() -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut sum: u32 = 0;
+    for i in 0u32..3u32 {
+        sum = sum + *r;
+        r = &next(i); //~ ERROR E0501
+    }
+    return sum;
+}
+
+fn in_condition() -> u32 {
+    let zero: u32 = 0;
+    let mut r: &u32 = &zero;
+    let mut i: u32 = 0;
+    while *keep(&next(i), &zero) < 3 {
+        r = keep(&next(i), &zero); //~ ERROR E0501
+        i = i + 1;
+    }
+    return *r;
+}
+
+impl Pair {
+    fn get_a(&self) -> &u32 from self {
+        return &self.a;
+    }
+}
+
+fn main() -> i32 {
+    let _ = const_generic::<2>();
+    return 0;
+}

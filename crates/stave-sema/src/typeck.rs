@@ -198,6 +198,8 @@ pub struct TypedBody {
     pub contracts: Option<Box<crate::contracts::Contracts>>,
     /// A `test fn` with parameters: the domain its inputs come from.
     pub test_domain: Option<Box<crate::testgen::Domain>>,
+    /// Where each temporary of the body ends: the one answer checker and lowering read.
+    pub stmt_ends: crate::temps::StmtEnds,
 }
 
 impl TypedBody {
@@ -564,6 +566,7 @@ fn empty_body(j: Job) -> TypedBody {
         emulated: Vec::new(),
         contracts: None,
         test_domain: None,
+        stmt_ends: crate::temps::StmtEnds::default(),
     }
 }
 
@@ -1611,6 +1614,7 @@ impl<'a> Ck<'a> {
         self.valued.dedup();
         let has_error =
             self.has_error || self.diags.iter().any(|d| d.severity() == stave_diag::Severity::Error);
+        let stmt_ends = crate::temps::StmtEnds::new(&self.icx, j.node, self.lo, self.contracts.as_deref());
         let body = TypedBody {
             decl: j.decl,
             item: j.item,
@@ -1640,6 +1644,7 @@ impl<'a> Ck<'a> {
             emulated: std::mem::take(&mut self.gates.emulated),
             contracts: self.contracts.take(),
             test_domain: self.domain.take(),
+            stmt_ends,
         };
         // thread-crossing capture checks (E0802, E0806; crate::threads)
         let td = self.thread_checks(&body);

@@ -1,0 +1,35 @@
+//~ BORROWCHECK use-after-referent 30 27
+// The iterator value a `for` is given ends with the loop, also without drop glue: an item that
+// borrows it, kept past a `break`, is read after that end.
+struct It { buf: [u32; 3], i: usize }
+
+impl It {
+    fn next(&mut self) -> Option<&u32> from self {
+        if self.i >= 3 {
+            return Option.None;
+        }
+        let k = self.i;
+        self.i = k + 1;
+        return Option.Some(&self.buf[k]);
+    }
+}
+
+fn mkit() -> It {
+    return It.{ buf: [7, 8, 9], i: 0 };
+}
+
+fn main() -> i32 {
+    let y: u32 = 1;
+    let mut keep: &u32 = &y;
+    for x in mkit() {
+        if *x == 8 {
+            keep = x;
+            break;
+        }
+    }
+    let v: u32 = *keep;
+    if v == 8 {
+        return 0;
+    }
+    return 1;
+}

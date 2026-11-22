@@ -1,0 +1,160 @@
+//~ CHECK-ONLY
+// A struct pattern, also of a struct-like variant's payload, names every field (E0208 case
+// `pattern-missing-field`, at the type name), in every pattern position: `let`, `for`, and
+// `match` arms. `f: _` ignores a field. A pattern through `&` or `&mut` moves and drops nothing,
+// and still names every field: a field added to a type makes every pattern over it say what
+// happens to the field. A misspelled field of the same pattern is reported alone (E0208).
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { } }
+struct P { pub a: D, pub b: D }
+struct C { pub x: u32, pub y: u32, pub z: u32 }
+impl Copy for C {}
+struct Q { pub p: P, pub c: u32 }
+struct G<T> { pub v: T, pub n: u32 }
+enum E { Rec { x: D, y: u32 }, Zero }
+
+fn own(xs: [P; 1]) -> [P; 1] { return xs; }
+fn own_e(xs: [E; 1]) -> [E; 1] { return xs; }
+
+// let
+fn let_struct(p: P) {
+    let P.{ a } = p; //~ ERROR E0208
+}
+
+fn let_copy(c: C) -> u32 {
+    let C.{ x } = c; //~ ERROR E0208
+    return x;
+}
+
+fn let_generic(g: G<D>) {
+    let G.{ v } = g; //~ ERROR E0208
+}
+
+fn let_generic_param<T>(g: G<T>) -> u32 {
+    let G.{ n } = g; //~ ERROR E0208
+    return n;
+}
+
+fn let_nested(q: Q) {
+    let Q.{ p: P.{ a }, c: _ } = q; //~ ERROR E0208
+}
+
+fn let_nested_outer(q: Q) {
+    let Q.{ p: P.{ a, b: _ } } = q; //~ ERROR E0208
+}
+
+fn let_both_levels(q: Q) {
+    let Q.{ p: P.{ b } } = q; //~ ERROR E0208
+    //~^ ERROR E0208
+}
+
+fn let_tuple_inside(t: (u32, C)) -> u32 {
+    let (n, C.{ y, z: _ }) = t; //~ ERROR E0208
+    return n + y;
+}
+
+fn let_ref(p: &P) -> u32 {
+    let P.{ a } = p; //~ ERROR E0208
+    return a.id;
+}
+
+fn let_mut_ref(c: &mut C) {
+    let C.{ x, y: _ } = c; //~ ERROR E0208
+    *x = 1;
+}
+
+// match, statement arms and expression arms
+fn match_struct(p: P) {
+    match p {
+        P.{ b } => { } //~ ERROR E0208
+    }
+}
+
+fn match_variant(e: E) -> u32 {
+    match e {
+        E.Rec.{ y } => { return y; } //~ ERROR E0208
+        E.Zero => { return 0; }
+    }
+}
+
+fn match_variant_expr(e: E) -> u32 {
+    return match e { E.Rec.{ x } => x.id, E.Zero => 0 }; //~ ERROR E0208
+}
+
+fn match_or(c: C) -> u32 {
+    match c {
+        C.{ x: 0, y, z: _ } | C.{ x: _, y } => { return y; } //~ ERROR E0208
+    }
+}
+
+fn match_guarded(c: C, k: u32) -> u32 {
+    match c {
+        C.{ x, y: _ } if x > k => { return x; } //~ ERROR E0208
+        _ => { return 0; }
+    }
+}
+
+fn match_generic(g: G<u32>) -> u32 {
+    return match g { G.{ v: 0 } => 1, _ => 2 }; //~ ERROR E0208
+}
+
+fn match_nested_variant(o: Option<C>) -> u32 {
+    match o {
+        Option.Some(C.{ z }) => { return z; } //~ ERROR E0208
+        Option.None => { return 0; }
+    }
+}
+
+fn match_ref(e: &E) -> u32 {
+    match e {
+        E.Rec.{ x } => { return x.id; } //~ ERROR E0208
+        E.Zero => { return 0; }
+    }
+}
+
+fn match_mut_ref(g: &mut G<D>) {
+    match g {
+        G.{ n } => { *n = 0; } //~ ERROR E0208
+    }
+}
+
+// for
+fn for_struct(xs: [P; 1]) {
+    for P.{ a } in own(xs) { } //~ ERROR E0208
+}
+
+fn for_variant(xs: [E; 1]) {
+    for e in own_e(xs) {
+        match e {
+            E.Rec.{ x: _ } => { } //~ ERROR E0208
+            E.Zero => { }
+        }
+    }
+}
+
+fn for_ref(xs: &[C]) -> u32 {
+    let mut s = 0u32;
+    for C.{ x, z: _ } in xs { s = s + *x; } //~ ERROR E0208
+    return s;
+}
+
+fn for_mut_ref(xs: &mut [C]) {
+    for C.{ y } in xs { *y = 0; } //~ ERROR E0208
+}
+
+fn for_nested(xs: &[(u32, C)]) -> u32 {
+    let mut s = 0u32;
+    for (n, C.{ x }) in xs { s = s + *n + *x; } //~ ERROR E0208
+    return s;
+}
+
+// a misspelled field is reported alone
+fn misspelled(c: C) -> u32 {
+    let C.{ x, yy: _, z: _ } = c; //~ ERROR E0208
+    return x;
+}
+
+fn main() -> i32 {
+    return 0;
+}

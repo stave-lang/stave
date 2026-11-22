@@ -1,0 +1,32 @@
+pub struct Hidden { pub i: u32 }
+pub struct Open { pub i: u32 }
+
+trait Secret {
+    fn next(&mut self) -> Option<u32>;
+}
+
+pub struct ViaTrait { pub i: u32 }
+
+impl Hidden {
+    fn next(&mut self) -> Option<u32> {
+        return Option.None;
+    }
+}
+
+impl Open {
+    pub fn next(&mut self) -> Option<u32> {
+        return Option.None;
+    }
+}
+
+impl Secret for ViaTrait {
+    fn next(&mut self) -> Option<u32> {
+        return Option.None;
+    }
+}
+
+// in its own module a private `next` is fine, for the loop as for the call
+pub fn own() {
+    for x in Hidden.{ i: 0 } {
+    }
+}

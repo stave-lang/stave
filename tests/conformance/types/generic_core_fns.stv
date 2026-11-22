@@ -22,7 +22,7 @@ fn first<T>(xs: &[T]) -> &T from xs {
     return &xs[0];
 }
 
-fn sum<T: Add>(a: T, b: T) -> T {
+fn sum<T: Add + Copy>(a: T, b: T) -> T {
     return a + b;
 }
 

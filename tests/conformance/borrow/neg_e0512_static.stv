@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// Only a borrow of the static itself borrows nothing. A copy of a static in a local, a const
+// (a temporary), and a guard of a static mutex are locals: returning a borrow of one is E0512.
+// A borrow of a param next to a static still needs the `from` clause (E0510).
+import std.sync;
+
+static T: [u32; 2] = [1, 2];
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(9u32);
+
+const C: u32 = 3;
+
+fn copied() -> &[u32] {
+    let t = T;
+    return &t[0..1]; //~ ERROR E0512
+}
+
+fn konst() -> &u32 {
+    return &C; //~ ERROR E0512
+}
+
+fn guard() -> &u32 {
+    let g = M.lock();
+    return g.get(); //~ ERROR E0512
+}
+
+fn mixed(p: &u32, c: bool) -> &u32 {
+    return if c then p else &T[0]; //~ ERROR E0510
+}
+
+fn main() -> i32 {
+    return 0;
+}

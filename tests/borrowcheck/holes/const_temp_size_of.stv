@@ -1,6 +1,5 @@
-//~ BORROWCHECK ok
-// `&size_of::<T>()` and `&align_of::<T>()` borrow constant temporaries: the next evaluation
-// of the expression does not end them.
+//~ BORROWCHECK use-after-referent 14 12
+// `&size_of::<T>()` and `&align_of::<T>()` borrow temporaries that end with their statement.
 fn main() -> i32 {
     let zero: usize = 0;
     let mut r: &usize = &zero;

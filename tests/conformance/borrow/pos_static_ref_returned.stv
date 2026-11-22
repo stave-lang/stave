@@ -1,0 +1,55 @@
+//~ STDOUT pos_static_ref_returned.stdout
+// A static's storage never ends: a borrow of a static, a part of it, or an element of it
+// borrows nothing, like a string literal, so it is returned without a `from` clause and
+// satisfies any clause.
+import std.io;
+import std.atomic;
+import std.sync;
+
+struct P { a: u32, b: [u32; 3] }
+
+static A: atomic.U64 = atomic.U64.new(4);
+static T: [u32; 3] = [1, 2, 3];
+static S: P = P.{ a: 7, b: [4, 5, 6] };
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(9u32);
+
+view struct Pair { x: &u32, y: &u32 }
+
+fn get() -> &atomic.U64 {
+    return &A;
+}
+
+fn elem(i: usize) -> &u32 {
+    return &T[i];
+}
+
+fn field() -> &u32 {
+    return &S.b[2];
+}
+
+fn either(p: &u32, c: bool) -> &u32 from p {
+    return if c then p else &S.a;
+}
+
+fn pair() -> Pair {
+    return Pair.{ x: &S.a, y: &T[0] };
+}
+
+fn mutex() -> &sync.Mutex<u32, 1> {
+    return &M;
+}
+
+fn main() -> i32 {
+    let v = get().fetch_add(1);
+    let w = get().load();
+    let e = *elem(1);
+    let f = *field();
+    let k: u32 = 11;
+    let g = *either(&k, false);
+    let p = pair();
+    let px = *p.x;
+    let py = *p.y;
+    let m = *mutex().lock().get();
+    io.print(f"{v} {w} {e} {f} {g} {px} {py} {m}\n");
+    return 0;
+}

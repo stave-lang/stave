@@ -28,7 +28,8 @@ pub enum Class {
     ClosureCoerce,
     /// Casts of references and views to their own type.
     RefCast,
-    /// Borrows of temporaries whose expression is evaluated again in a loop.
+    /// Borrows of temporaries in loops: used inside their statement, held past it, or of a
+    /// local the value was bound to first.
     TempLoop,
     /// `[e; n]` with Copy and non-Copy elements, arrays of references.
     ArrayRepeat,
@@ -975,7 +976,7 @@ fn temp_loop(r: &mut Rng, idx: usize, want_bad: bool) -> Case {
     head(&mut b, r.range(1, 50));
     let shape = r.below(4);
     if shape == 3 {
-        // a temporary with a drop lives until its statement ends
+        // a temporary ends with its statement
         if want_bad {
             b.line("let r: &u32 = &mkg(seed).id;");
             b.add("*r");
@@ -994,18 +995,21 @@ fn temp_loop(r: &mut Rng, idx: usize, want_bad: bool) -> Case {
         b.add("*best");
         return finish(idx, b, String::new(), s("call-arg"), true, &["E0501"]);
     }
-    let temp = pick(
+    // (the value, the borrow of it with `t` standing for the value)
+    let (val, of_t) = *pick(
         r,
         &[
-            "&next(i)",
-            "pair(i).first()",
-            "&pair(i).b",
-            "&tup(i).1",
-            "&arr(i)[1]",
-            "&(i +% 1)",
-            "&(if seed > 3 then i else 7u32)",
+            ("next(i)", "&t"),
+            ("pair(i)", "t.first()"),
+            ("pair(i)", "&t.b"),
+            ("tup(i)", "&t.1"),
+            ("arr(i)", "&t[1]"),
+            ("(i +% 1)", "&t"),
+            ("(if seed > 3 then i else 7u32)", "&t"),
+            ("4u32", "&t"),
         ],
     );
+    let temp = of_t.replacen('t', val, 1);
     b.line("let mut r: &u32 = &zero;");
     b.line("let mut i: u32 = 0;");
     let looph = if r.chance(500) { format!("while i < {n}") } else { s("loop") };
@@ -1015,18 +1019,22 @@ fn temp_loop(r: &mut Rng, idx: usize, want_bad: bool) -> Case {
         b.line(&format!("if i == {n} {{ break; }}"));
     }
     b.line("let before: &u32 = r;");
-    if !want_bad {
-        b.add("*before");
-    }
-    if r.chance(300) {
-        b.line(&format!("if {c} {{ r = {temp}; }}"));
-    } else {
-        b.line(&format!("r = {temp};"));
-    }
+    b.add("*before");
     if want_bad {
-        b.add("*before");
+        // the borrow of the temporary is held past its statement
+        if r.chance(300) {
+            b.line(&format!("if {c} {{ r = {temp}; }}"));
+        } else {
+            b.line(&format!("r = {temp};"));
+        }
     } else if r.chance(500) {
-        b.add("*r");
+        // used inside its statement only
+        b.add(&format!("read({temp})"));
+    } else {
+        // the value bound to a local first, the local borrowed
+        b.line(&format!("let t = {val};"));
+        b.line(&format!("let q: &u32 = {of_t};"));
+        b.add("*q");
     }
     b.line("i = i +% 1;");
     b.close();

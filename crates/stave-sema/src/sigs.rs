@@ -303,6 +303,17 @@ pub const OP_TRAITS: [(&str, &str); 19] = [
     ("Not", "not"),
 ];
 
+/// The borrowing method that stands in for an operator trait (the E0422 fix texts).
+pub struct OpForms {
+    /// `fn add(&self, rhs: &Self) -> Self`; for a trait whose method takes no `rhs` (`Neg`,
+    /// `Not`): `fn neg(&self) -> Self`.
+    pub sig: String,
+    /// `a.add(&b)`, `a.neg()`.
+    pub call: String,
+    /// The call that replaces `a += b`: `a = a.add(&b)`; the same as `call` for a unary trait.
+    pub compound_call: String,
+}
+
 /// The frozen signature table.
 #[derive(Debug, Default)]
 pub struct Sigs {
@@ -317,6 +328,31 @@ pub struct Sigs {
 }
 
 impl Sigs {
+    /// The method of operator trait `trait_name` (a name of [`OP_TRAITS`]) as a borrowing
+    /// method; unary exactly when the trait's own method takes `self` alone.
+    pub fn op_forms(&self, prog: &Program, trait_name: &str) -> OpForms {
+        let method = OP_TRAITS.iter().find(|x| x.0 == trait_name).map_or("method", |x| x.1);
+        let unary = self
+            .lang
+            .ops
+            .get(trait_name)
+            .zip(prog.strings.lookup(method))
+            .and_then(|(&tr, m)| prog.member(tr, m))
+            .and_then(|m| self.fn_sig(m))
+            .is_some_and(|f| f.params.len() == 1);
+        if unary {
+            let call = format!("a.{method}()");
+            OpForms { sig: format!("fn {method}(&self) -> Self"), compound_call: call.clone(), call }
+        } else {
+            let call = format!("a.{method}(&b)");
+            OpForms {
+                sig: format!("fn {method}(&self, rhs: &Self) -> Self"),
+                compound_call: format!("a = {call}"),
+                call,
+            }
+        }
+    }
+
     pub fn get(&self, d: DeclId) -> &DeclSig {
         static NONE: DeclSig = DeclSig::None;
         self.decls.get(d.idx()).unwrap_or(&NONE)
@@ -957,7 +993,7 @@ fn lower_prim<H: LowerHost>(
             h.intern(TypeKind::Mask { width, n: lanes })
         }
         Prim::VecGeneric | Prim::MaskGeneric => {
-            // `vec<T, N>` / `mask<W, N>` (E0609 when no argument is generic).
+            // `vec<T, N>` / `mask<W, N>`: always E0609; the case says what to write instead.
             let kids = gargs.map(|g| icx.kids_vec(g)).unwrap_or_default();
             if kids.len() != 2 {
                 let us = h.fixed_ty(ids::USIZE);
@@ -991,7 +1027,42 @@ fn lower_prim<H: LowerHost>(
                     if h.is_error_ty(lane) {
                         return h.error_ty();
                     }
-                    h.intern(TypeKind::Vector { lane, n: lanes })
+                    let t = h.intern(TypeKind::Vector { lane, n: lanes });
+                    // a generic lane type has no concrete spelling to suggest
+                    if matches!(h.kind(lane), TypeKind::Param(_) | TypeKind::SelfTy) {
+                        let spelled = icx.node_text(n).to_string();
+                        let d = mk(
+                            "E0609",
+                            Some("generic-lane"),
+                            &[("spelled", &spelled)],
+                            icx.node_span(n),
+                            &[],
+                        );
+                        h.report(d);
+                        return t;
+                    }
+                    // `bool`, `usize`, a struct, ..: no `TxN` spelling exists for it
+                    let lane_ok = match h.kind(lane) {
+                        TypeKind::Int { bits, .. } => *bits != types::IntBits::Size,
+                        TypeKind::Float(_) => true,
+                        _ => false,
+                    };
+                    if !lane_ok {
+                        let spelled = icx.node_text(n).to_string();
+                        let shown = types::display(h, &NameCx { prog: h.prog(), generics: &[] }, lane);
+                        let Lanes::Fixed(k) = lanes else { return h.error_ty() };
+                        let k = k.to_string();
+                        let d = mk(
+                            "E0609",
+                            Some("lane-type"),
+                            &[("spelled", &spelled), ("lane", &shown), ("n", &k)],
+                            icx.node_span(n),
+                            &[],
+                        );
+                        h.report(d);
+                        return h.error_ty();
+                    }
+                    t
                 }
                 (Prim::MaskGeneric, GArg::Const(ConstArg::Value(w))) if matches!(w, 8 | 16 | 32 | 64) => {
                     h.intern(TypeKind::Mask { width: w as u8, n: lanes })

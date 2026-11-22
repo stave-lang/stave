@@ -46,9 +46,9 @@ enum Shape {
     /// A literal, a range, a constant: a test that binds nothing.
     Test,
     /// A tuple, struct or variant pattern against (peeled) type `ty`: per field of the tuple,
-    /// struct or variant its type and its sub-pattern (none: not named; a pattern names a field
-    /// once). `mode`: how names inside bind.
-    Parts { ty: Ty, mode: Mode, variant: Option<u32>, fields: Vec<(Ty, Option<Sub>)> },
+    /// struct or variant its type and its sub-pattern (a pattern names every field, once).
+    /// `mode`: how names inside bind.
+    Parts { ty: Ty, mode: Mode, variant: Option<u32>, fields: Vec<(Ty, Sub)> },
 }
 
 /// The top-level test of a match arm.
@@ -486,7 +486,7 @@ impl<'a> FnCx<'a> {
                 return;
             }
             let t = self.nty(e);
-            self.begin_temps();
+            self.begin_temps(e);
             let v = self.val(e, Some(t));
             self.end_temps();
             let Some(v) = v else { return };
@@ -518,14 +518,18 @@ impl<'a> FnCx<'a> {
         let Some(c) = self.contracts() else { return };
         let trace =
             if c.requires.iter().any(|cl| self.clause_calls(cl.expr)) { self.trace_save() } else { None };
-        for cl in &c.requires {
+        // each check of a clause is its own filter, in order, as in `contract_check`
+        let icx = self.icx;
+        let checks: Vec<u32> =
+            c.requires.iter().flat_map(|cl| crate::temps::conjuncts(&icx, cl.expr)).collect();
+        for e in checks {
             if !self.open() {
                 return;
             }
             let bt = self.t_bool();
             self.hold_site = true;
-            self.begin_temps();
-            let v = self.val(cl.expr, Some(bt));
+            self.begin_temps(e);
+            let v = self.val(e, Some(bt));
             self.end_temps();
             self.hold_site = false;
             let Some(v) = v else { return };
@@ -632,18 +636,13 @@ impl<'a> FnCx<'a> {
         at: Option<u32>,
         trace: Option<(Operand, Ty)>,
     ) {
-        let conjuncts = if self.nkind(cl.expr) == Some(NodeKind::AndExpr) {
-            self.kids(cl.expr).to_vec()
-        } else {
-            vec![cl.expr]
-        };
-        for e in conjuncts {
+        for e in crate::temps::conjuncts(&self.icx, cl.expr) {
             if !self.open() {
                 return;
             }
             let bt = self.t_bool();
             self.hold_site = at.is_none();
-            self.begin_temps();
+            self.begin_temps(e);
             let c = self.val(e, Some(bt));
             self.end_temps();
             self.hold_site = false;
@@ -1002,7 +1001,8 @@ impl<'a> FnCx<'a> {
         }
         let t = icx.tk(a);
         let kids = self.kids(s);
-        self.begin_temps();
+        let outer = std::mem::replace(&mut self.f.cur, s);
+        self.begin_temps(s);
         if t == Term::KwLet as u8 {
             self.let_stmt(&kids);
         } else if t == Term::KwIf as u8 {
@@ -1045,6 +1045,7 @@ impl<'a> FnCx<'a> {
             self.expr_stmt(e);
         }
         self.end_temps();
+        self.f.cur = outer;
     }
 
     /// `scope { .. }`: a thread-list handle (`usize`, 0 = empty) in a slot; the block's spawns
@@ -1229,14 +1230,8 @@ impl<'a> FnCx<'a> {
                 let Some(r) = self.val(rhs, Some(lt)) else { return };
                 let tok = icx.a(op);
                 let Some(nv) = self.binop(tok, bin as u8, old, r, lt) else { return };
-                if self.needs_drop(lt) {
-                    // `p op= e` is `p = p op e`: the operator call took the old value (the callee
-                    // owns it), so the result goes into a place that holds none. Until the call
-                    // the place still owns the old value: a `?` in `e` leaves it there.
-                    self.write(&lp, nv);
-                } else {
-                    self.assign(&lp, nv);
-                }
+                // operator operands are Copy (E0422), so the old value has no drop glue
+                self.assign(&lp, nv);
             }
             return;
         }
@@ -1259,7 +1254,7 @@ impl<'a> FnCx<'a> {
         let j = self.join(n, &[]);
         let bt = self.t_bool();
         // the condition's temporaries end before the branch
-        self.begin_temps();
+        self.begin_temps(c);
         let cv = self.val(c, Some(bt));
         self.end_temps();
         let Some(cv) = cv else { return };
@@ -1305,7 +1300,7 @@ impl<'a> FnCx<'a> {
         self.br_join(head, &[]);
         self.enter(head);
         let bt = self.t_bool();
-        self.begin_temps();
+        self.begin_temps(c);
         let cv = self.val(c, Some(bt));
         self.end_temps();
         let Some(cv) = cv else { return };
@@ -1879,6 +1874,8 @@ impl<'a> FnCx<'a> {
     /// instance's args: the instance type never picks another loop.
     fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place, kind: ForKind) {
         self.push_scope();
+        // the slot of an iterator without drop glue ends where a drop would end it
+        let mut bare: Option<(Operand, Ty)> = None;
         let it = match kind {
             ForKind::IterMut => {
                 let TypeKind::Ref { mutable: true, inner } = self.kind(it.ty) else {
@@ -1903,10 +1900,16 @@ impl<'a> FnCx<'a> {
                 // the loop ends or is left
                 let root =
                     if self.needs_drop(t) { Some(self.new_temp(t, Home::Slot(s), true)) } else { None };
+                if root.is_none() {
+                    bare = Some((s, st));
+                }
                 Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root }
             }
         };
         self.iter_loop_over(f, pat, body, it);
+        if let Some((s, st)) = bare {
+            self.event(stave_ir::EventKind::End, s, st);
+        }
         self.pop_scope();
     }
 
@@ -2307,7 +2310,7 @@ impl<'a> FnCx<'a> {
                     let bound = self.f.env.clone();
                     let around = self.guard.replace((bound.st.clone(), false));
                     // the guard's temporaries end before the branch
-                    self.begin_temps();
+                    self.begin_temps(g);
                     let gv = self.val(g, Some(bt));
                     self.end_temps();
                     let moved = std::mem::replace(&mut self.guard, around).is_some_and(|w| w.1);
@@ -2337,7 +2340,7 @@ impl<'a> FnCx<'a> {
                 if is_expr {
                     let w = Some(vt);
                     // the arm's temporaries end with the arm
-                    self.begin_temps();
+                    self.begin_temps(a.body);
                     let v = self.val(a.body, w);
                     self.end_temps();
                     if let Some(v) = v {
@@ -2511,8 +2514,10 @@ impl<'a> FnCx<'a> {
                 TypeKind::Tuple(ts) => ts.to_vec(),
                 _ => return self.no_shape(p),
             };
-            let fields =
-                ets.iter().enumerate().map(|(i, &et)| (et, kids.get(i).map(|&k| Sub::Pat(k)))).collect();
+            if kids.len() != ets.len() {
+                return self.no_shape(p);
+            }
+            let fields = ets.iter().zip(&kids).map(|(&et, &k)| (et, Sub::Pat(k))).collect();
             return Shape::Parts { ty: dt, mode: pm, variant: None, fields };
         }
         if !icx.is(a, Term::Ident) {
@@ -2570,6 +2575,11 @@ impl<'a> FnCx<'a> {
                 subs[fi] = Some(Sub::Pat(k));
             }
         }
+        // the type checker rejects a pattern that leaves a field out (E0208)
+        let Some(subs) = subs.into_iter().collect::<Option<Vec<Sub>>>() else {
+            self.fail(p, "a pattern leaves a field out");
+            return Shape::Test;
+        };
         let fields = fts.into_iter().zip(subs).collect();
         Shape::Parts { ty: dt, mode: pm, variant: is_variant.then_some(vi), fields }
     }
@@ -2613,9 +2623,7 @@ impl<'a> FnCx<'a> {
             Shape::Parts { mode, fields, .. } => {
                 let mut any = false;
                 for (ft, sub) in fields {
-                    if let Some(sub) = sub {
-                        any |= self.sub_moves(sub, ft, mode);
-                    }
+                    any |= self.sub_moves(sub, ft, mode);
                 }
                 any
             }
@@ -2658,9 +2666,9 @@ impl<'a> FnCx<'a> {
             });
             part.ty = ft;
             match sub {
-                Some(Sub::Pat(q)) => self.ignored(q, part, mode, out),
-                Some(Sub::Name(b)) if self.name_moves(b, mode) => {}
-                Some(Sub::Name(_)) | None => {
+                Sub::Pat(q) => self.ignored(q, part, mode, out),
+                Sub::Name(b) if self.name_moves(b, mode) => {}
+                Sub::Name(_) => {
                     if self.needs_drop(ft) {
                         out.push(part);
                     }
@@ -2684,8 +2692,8 @@ impl<'a> FnCx<'a> {
         let mut empty = true;
         for (ft, sub) in fields {
             empty &= match sub {
-                Some(Sub::Pat(q)) => self.shape_empty(q, ft),
-                Some(Sub::Name(_)) | None => !self.needs_drop(ft),
+                Sub::Pat(q) => self.shape_empty(q, ft),
+                Sub::Name(_) => !self.needs_drop(ft),
             };
         }
         empty

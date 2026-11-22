@@ -1,8 +1,6 @@
-//~ BORROWCHECK ok
-// A constant temporary with `Cell` bytes: a `&` of it writes them, and each evaluation of `&C`
-// writes the constant's value into them again (the one slot of the expression is stored at
-// each evaluation, as the backends do). So each round starts from 0, and the reference of the
-// round before, still usable, reads 0 after the next evaluation.
+//~ BORROWCHECK use-after-referent 18 16
+// A `const` with `Cell` bytes is a value like any other: `&C` borrows a temporary that ends
+// with its statement, and a call through the reference after it uses an ended allocation.
 import std.atomic;
 
 const C: atomic.U32 = atomic.U32.new(0);

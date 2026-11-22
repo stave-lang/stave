@@ -1,13 +1,16 @@
 //~ STDOUT pos_temp_loop.stdout
-// A borrow of a temporary may be used until its expression is evaluated again: inside one
-// iteration, after the loop, in the expression that makes the next value, and in the next
-// iteration up to that expression. A borrow of a static, a const, or a literal sees the same value
-// after every evaluation.
+// A borrow of a temporary is used inside its statement; a value that is borrowed longer is
+// bound to a local first (`let t = f(); let r = &t;`). The temporaries of a `for` header and a
+// `match` scrutinee live through the loop and the arms, which are their statement. A `static`
+// and a string literal are no temporaries: a borrow of one may be kept.
 import std.io;
+import std.vec;
 
 static LIMIT: u32 = 5;
 
-const TABLE: [u32; 2] = [7, 9];
+static TABLE: [u32; 2] = [7, 9];
+
+const SMALL: [u32; 2] = [1, 2];
 
 struct Pair { a: u32, b: u32 }
 
@@ -30,6 +33,17 @@ fn pair(i: u32) -> Pair {
     return Pair.{ a: i, b: i + 1 };
 }
 
+fn arr(i: u32) -> [u32; 3] {
+    return [i, i + 1, i + 2];
+}
+
+fn mkv(k: u32) -> vec.Vec<u32> {
+    let mut v: vec.Vec<u32> = vec.Vec.new();
+    v.push(k);
+    v.push(k + 1);
+    return v;
+}
+
 fn two(x: &u32, y: &u32) -> Two from x + y {
     return Two.{ x: x, y: y };
 }
@@ -44,36 +58,34 @@ fn main() -> i32 {
     let b: u32 = 6;
     let mut sum: u32 = 0;
 
-    // the borrow dies inside the iteration
+    // used inside the statement
     let mut i: u32 = 0;
     while i < 3 {
-        let r = &next(i);
-        sum = sum + use_ref(r);
+        sum = sum + use_ref(&next(i)) + *pair(i).first() + use_ref(&4u32) + mkv(i).as_slice()[0];
         i = i + 1;
     }
+
+    // bound to a local first, then borrowed
     for j in 0u32..3u32 {
-        let r: &u32 = pair(j).first();
-        sum = sum + *r;
+        let t = next(j);
+        let r = &t;
+        let p = pair(j);
+        let f: &u32 = p.first();
+        let k = 4u32;
+        let lit = &k;
+        sum = sum + *r + *f + *lit;
     }
 
-    // the last borrow leaves the loop: nothing evaluates the expression after it
-    let mut last: &u32 = &zero;
+    // the last borrow leaves the loop: its local is declared before the loop
+    let mut held: u32 = 0;
     i = 0;
     while i < 3 {
-        last = &next(i);
-        sum = sum + *last;
+        held = next(i);
+        sum = sum + held;
         i = i + 1;
     }
+    let last: &u32 = &held;
     sum = sum + *last;
-
-    // the old value is read by the expression that replaces it
-    let mut cur: &u32 = &zero;
-    i = 0;
-    while i < 3 {
-        cur = &next(*cur);
-        i = i + 1;
-    }
-    sum = sum + *cur;
 
     // a `&` copied out of a view temporary borrows what the view borrows, not the temporary
     let mut x: &u32 = &zero;
@@ -85,41 +97,59 @@ fn main() -> i32 {
         i = i + 1;
     }
 
-    // a struct read through the borrow of the temporary that the call's result replaces
-    let start = Pair.{ a: 1, b: 2 };
-    let mut p: &Pair = &start;
+    // a value a loop replaces is read through a borrow of the local
+    let mut p = Pair.{ a: 1, b: 2 };
     i = 0;
     while i < 3 {
-        p = &p.flip();
+        p = p.flip();
         i = i + 1;
     }
     let pa: u32 = p.a;
     let pb: u32 = p.b;
 
-    // the borrow is read in the next iteration, before the expression is evaluated again
-    let mut prev: &u32 = &zero;
-    for j in 0u32..3u32 {
-        for k in 0u32..2u32 {
-            sum = sum + *prev + k;
-        }
-        prev = &next(j);
+    // the temporaries of a `for` header and of a `match` scrutinee live through the statement
+    for e in &arr(10) {
+        sum = sum + *e;
     }
+    for e in arr(20) {
+        sum = sum + e;
+    }
+    for e in &[1u32, 2u32, 3u32] {
+        sum = sum + *e;
+    }
+    for e in mkv(30).as_slice() {
+        sum = sum + *e;
+    }
+    match &pair(40) {
+        Pair.{ a, b } => {
+            sum = sum + *a + *b;
+        }
+    }
+    let m: u32 = match pair(50).first() {
+        r => *r,
+    };
+    sum = sum + m;
 
+    // a const is a value: bind it to borrow it longer
+    let small = SMALL;
+    let s: &[u32] = &small;
+    sum = sum + s[1];
+
+    // statics and string literals are no temporaries
     let mut lim: &u32 = &zero;
     let mut tab: &[u32; 2] = &TABLE;
-    let mut lit: &u32 = &zero;
+    let mut word: &str = "";
     i = 0;
     while i < 3 {
         let old_lim: &u32 = lim;
         let old_tab: &[u32; 2] = tab;
-        let old_lit: &u32 = lit;
         lim = &LIMIT;
         tab = &TABLE;
-        lit = &4u32;
-        sum = sum + *old_lim + old_tab[0] + *old_lit;
+        word = "ab";
+        sum = sum + *old_lim + old_tab[0];
         i = i + 1;
     }
 
-    io.print(f"{sum} {pa} {pb}\n");
+    io.print(f"{sum} {pa} {pb} {word}\n");
     return 0;
 }

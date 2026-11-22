@@ -1,7 +1,7 @@
-//~ BORROWCHECK ok
-// A borrow of a constant temporary (a literal, a `const` item, an element of one) is a borrow
-// of static data: the next evaluation of its expression does not end it, and a reference of
-// the round before stays usable.
+//~ BORROWCHECK use-after-referent 28 11
+// A borrow of a constant (a literal, a `const` item, an element of one) is a borrow of a
+// temporary, which ends with its statement: the reference of the round before is used after
+// that end.
 const TABLE: [u32; 2] = [7u32, 9u32];
 const K: u32 = 3u32;
 

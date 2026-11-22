@@ -1,0 +1,55 @@
+//~ CHECK-ONLY
+// An iterator's `next` takes no generic args of its own: the loop has none to give it. A `next`
+// with generic params makes no iterator, for a concrete source and through a bound alike
+// (E0219 `not-source`).
+struct It { i: u64, n: u64 }
+
+trait GNext {
+    fn next<U>(&mut self) -> Option<u64>;
+}
+
+impl GNext for It {
+    fn next<U>(&mut self) -> Option<u64> {
+        if self.i >= self.n {
+            return Option.None;
+        }
+        self.i = self.i + 1;
+        return Option.Some(size_of::<U>() as u64);
+    }
+}
+
+struct Ct { i: u64 }
+
+impl Ct {
+    fn next<const N: usize>(&mut self) -> Option<u64> {
+        self.i = self.i + 1;
+        return if self.i > (N as u64) then Option.None else Option.Some(self.i);
+    }
+}
+
+fn through_bound<T: GNext>(t: T) {
+    for x in t { //~ ERROR E0219
+    }
+}
+
+fn through_bound_mut<T: GNext>(t: &mut T) {
+    for x in t { //~ ERROR E0219
+    }
+}
+
+fn concrete(a: It, b: Ct) -> u64 {
+    let mut s: u64 = 0;
+    for x in a { //~ ERROR E0219
+    }
+    for x in b { //~ ERROR E0219
+    }
+    // called by name with its args, it is an ordinary method
+    let mut c = It.{ i: 0, n: 1 };
+    match c.next::<u32>() {
+        Option.Some(v) => {
+            s = s + v;
+        }
+        Option.None => {}
+    }
+    return s;
+}
