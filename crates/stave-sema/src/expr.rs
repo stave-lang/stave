@@ -139,6 +139,17 @@ fn is_shift(op: u8) -> bool {
 }
 
 impl<'a> Ck<'a> {
+    /// The declaration of struct field `f` when it is private to a module other than the one being
+    /// checked: field reads, struct literals, struct patterns, and columns all ask this. Enum
+    /// variant fields have no privacy.
+    pub(crate) fn hidden_field(&self, f: DeclId) -> Option<crate::decls::Decl> {
+        let fd = self.prog.decl(f).copied()?;
+        (!fd.is_pub()
+            && self.prog.decl(fd.parent).is_some_and(|p| p.kind == DeclKind::Struct)
+            && fd.module != self.icx.res_module())
+        .then_some(fd)
+    }
+
     /// Types expression node `n` with context type `hint` and records the type on `n`.
     pub fn expr(&mut self, n: u32, hint: Option<TypeId>) -> Ty {
         if !self.enter(n) {
@@ -2165,10 +2176,7 @@ impl<'a> Ck<'a> {
             && let Some((i, f)) = v.fields.iter().enumerate().find(|(_, f)| f.name == name)
         {
             let ft = self.tys.subst(f.ty, &args, None);
-            if let Some(fd) = self.prog.decl(f.decl)
-                && !fd.is_pub()
-                && fd.module != self.icx.res_module()
-            {
+            if let Some(fd) = self.hidden_field(f.decl) {
                 let module = self.prog.module(fd.module).map_or(String::new(), |m| m.path_text.clone());
                 let nm = self.prog.strings.get(name).to_string();
                 let d =
@@ -2211,10 +2219,7 @@ impl<'a> Ck<'a> {
             && let Some((i, f)) = v.fields.iter().enumerate().find(|(_, f)| f.name == name)
         {
             let ft = self.tys.subst(f.ty, &rargs, None);
-            if let Some(fd) = self.prog.decl(f.decl)
-                && !fd.is_pub()
-                && fd.module != self.icx.res_module()
-            {
+            if let Some(fd) = self.hidden_field(f.decl) {
                 let module = self.prog.module(fd.module).map_or(String::new(), |m| m.path_text.clone());
                 let nm = self.prog.strings.get(name).to_string();
                 let d = mk(
@@ -3788,7 +3793,6 @@ impl<'a> Ck<'a> {
         let mut params = Vec::new();
         let mut spans = Vec::new();
         let mut nodes = Vec::new();
-        let my_module = icx.res_module();
         for &e in &exprs {
             let name_tok = icx.a(e).saturating_sub(2);
             let name = icx.sym(name_tok);
@@ -3814,11 +3818,7 @@ impl<'a> Ck<'a> {
                     }
                     seen.push(fi);
                     let f = &v.fields[fi];
-                    if let Some(fd) = self.prog.decl(f.decl)
-                        && !fd.is_pub()
-                        && self.prog.decl(fd.parent).is_some_and(|p| p.kind == DeclKind::Struct)
-                        && fd.module != my_module
-                    {
+                    if let Some(fd) = self.hidden_field(f.decl) {
                         let module =
                             self.prog.module(fd.module).map_or(String::new(), |m| m.path_text.clone());
                         let nm = self.prog.strings.get(name).to_string();

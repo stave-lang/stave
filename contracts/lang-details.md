@@ -151,8 +151,12 @@ non-Copy part (at any depth) by value. Every alternative of an or-pattern binds 
 with the same modes, so either all of them move or none does. A pattern that binds only Copy
 parts, binds by reference (through a `&` / `&mut` scrutinee), or binds nothing (`_`, a literal,
 `let _ = s;`, `match s { _ => .. }`, `S.{ n, b: _ }` with `n: u32`) only reads: the scrutinee
-stays alive and is dropped with its owner. A struct pattern names a field once (E0105), so each
-part of the value has one sub-pattern: it is bound, or ignored, never both.
+stays alive and is dropped with its owner. A struct pattern, also of a struct-like variant's
+payload, names every field (E0208 case `pattern-missing-field`) and each field once (E0105), so
+each part of the value has exactly one written sub-pattern: it is bound, or ignored, never both,
+never neither. This holds for a pattern through a reference too, which moves and drops nothing:
+a field added to a type makes every pattern over it say what happens to the field. There is no
+rest marker; `f: _` ignores one field.
 
 Decided on the definition. "Non-Copy" is the type as written where the pattern is: in a generic
 fn a part of type `T` is Copy only under a `T: Copy` bound. So `let G.{ a, d: _ } = x;` with
@@ -166,8 +170,8 @@ When and where. A moving pattern takes the whole value at its binding point: the
 `let` statement's pattern, the entry of the arm (after the guard passed), the start of each
 `for` iteration. There the bindings take their parts, the scrutinee becomes moved as a whole
 (a local is moved; a temporary is consumed, never dropped as a whole at its statement end), and
-each non-Copy part the pattern does not bind by value (a `_`, a field the struct
-pattern does not name, a sub-pattern that binds nothing such as a literal) is dropped there,
+each non-Copy part the pattern does not bind by value (a `_`, so `f: _` for a field, a
+sub-pattern that binds nothing such as a literal) is dropped there,
 before the arm body or the next statement, in declaration order of the fields, a nested part
 in place of its field (depth first); of an enum, only the matched variant's payload. No state
 "moved except a part" remains after the binding point.

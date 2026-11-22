@@ -1,0 +1,74 @@
+//~ CHECK-ONLY
+// A struct with any private field has no pattern outside its module (E0106 case `pattern`, once
+// at the type name): whichever fields the pattern names, also none of the private ones, and with
+// no missing-field E0208 beside it. A struct with only `pub` fields has patterns everywhere.
+import shapes;
+import std.vec;
+
+fn names_private(m: shapes.Mixed) -> u32 {
+    let shapes.Mixed.{ a, b } = m; //~ ERROR E0106
+    return a + b;
+}
+
+fn names_public_only(m: shapes.Mixed) -> u32 {
+    let shapes.Mixed.{ a } = m; //~ ERROR E0106
+    return a;
+}
+
+fn ignores_private(m: shapes.Mixed) -> u32 {
+    let shapes.Mixed.{ a, b: _ } = m; //~ ERROR E0106
+    return a;
+}
+
+fn only_private(h: shapes.Hidden) -> u32 {
+    match h {
+        shapes.Hidden.{ x: 7, y: _ } => { return 1; } //~ ERROR E0106
+        _ => { return 0; }
+    }
+}
+
+fn through_mut(m: &mut shapes.Mixed) {
+    match m {
+        shapes.Mixed.{ a: _, b } => { *b = 99; } //~ ERROR E0106
+    }
+}
+
+fn in_tuple(t: (u32, shapes.Mixed)) -> u32 {
+    let (k, shapes.Mixed.{ a, b: _ }) = t; //~ ERROR E0106
+    return k + a;
+}
+
+fn in_for() -> u32 {
+    let mut s: u32 = 0;
+    for shapes.Mixed.{ a, b: _ } in shapes.row() { //~ ERROR E0106
+        s = s + a;
+    }
+    return s;
+}
+
+fn generic(g: shapes.Gen<u32>) -> u32 {
+    let shapes.Gen.{ v, n: _ } = g; //~ ERROR E0106
+    return v;
+}
+
+fn std_vec(v: &mut vec.Vec<u64>) {
+    match v {
+        vec.Vec.{ ptr: _, len, cap: _ } => { *len = 100000000; } //~ ERROR E0106
+    }
+}
+
+fn all_public(o: shapes.Open) -> u32 {
+    let shapes.Open.{ p, q } = o;
+    return p + q;
+}
+
+fn main() -> i32 {
+    let s = shapes.sum(shapes.mixed(1, 2));
+    let mut m = shapes.mixed(3, 4);
+    shapes.bump(&mut m);
+    let h = shapes.first(&shapes.hidden());
+    let g = generic(shapes.gen(5));
+    let f = in_for();
+    let o = all_public(shapes.open());
+    return (s + h + g + f + o) as% i32;
+}
