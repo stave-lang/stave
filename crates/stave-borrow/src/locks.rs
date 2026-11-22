@@ -84,9 +84,8 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
     let mut drops_any = false;
     for b in &body.blocks {
         for s in &b.stmts {
-            match &s.kind {
-                StmtKind::Assign { rv: Rvalue::Call { tok, .. }, .. } => out.calls.push(*tok),
-                _ => {}
+            if let StmtKind::Assign { rv: Rvalue::Call { tok, .. }, .. } = &s.kind {
+                out.calls.push(*tok);
             }
             drops_any |= matches!(&s.kind, StmtKind::Drop(_) | StmtKind::Assign { init: false, .. });
         }
@@ -266,7 +265,8 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
                 // it takes apart moves. Of that value, the parts bound are the bindings' by
                 // then, the ignored parts before this one are gone, and the ones after it are
                 // still inside: those are held, the value as a whole is not.
-                let later = whole.filter(|p| !p.proj.is_empty()).and_then(|p| later_parts(&stmts[si + 1..], p));
+                let later =
+                    whole.filter(|p| !p.proj.is_empty()).and_then(|p| later_parts(&stmts[si + 1..], p));
                 let mut more: Vec<Held> = Vec::new();
                 if let Some(p) = whole
                     && (p.proj.is_empty() || later.is_some())
