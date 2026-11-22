@@ -1,0 +1,66 @@
+//~ STDOUT operator_generic_copy.stdout
+// An operator on a generic operand needs `Copy` among the bounds (`T: Add + Copy`): then every
+// form applies, also to an operand behind a reference, a field, or an element, and one place
+// may be both operands.
+import std.io;
+
+struct M { pub v: u32 }
+
+impl Copy for M {}
+
+impl Add for M {
+    fn add(self, rhs: Self) -> Self { return M.{ v: self.v + rhs.v }; }
+}
+
+impl Not for M {
+    fn not(self) -> Self { return M.{ v: self.v * 10 }; }
+}
+
+fn twice<T: Add + Copy>(a: T) -> T {
+    return a + a;
+}
+
+fn inv_sum<T: Add + Not + Copy>(a: T, b: T) -> T {
+    return ~(a + b);
+}
+
+fn bump<T: Add + Copy>(r: &mut T, e: T) {
+    *r += e;
+    *r = *r + e;
+}
+
+fn square<T: Mul + Copy>(r: &T) -> T {
+    return *r * *r;
+}
+
+fn total<T: Add + Copy>(xs: &[T; 3]) -> T {
+    let mut s = xs[0];
+    s += xs[1];
+    s += xs[2];
+    return s;
+}
+
+struct P<T> { pub a: T, pub b: T }
+
+impl<T: Add + Copy> P<T> {
+    pub fn sum(&self) -> T { return self.a + self.b; }
+}
+
+fn main() -> i32 {
+    let m = twice(M.{ v: 3 });
+    let n = inv_sum(M.{ v: 1 }, M.{ v: 2 });
+    let mut k = M.{ v: 1 };
+    bump(&mut k, M.{ v: 2 });
+    let q: u32 = 9;
+    let sq = square(&q);
+    let xs: [u32; 3] = [1, 2, 4];
+    let t = total(&xs);
+    let p = P::<M>.{ a: M.{ v: 5 }, b: M.{ v: 6 } };
+    let s = p.sum();
+    let a = m.v;
+    let b = n.v;
+    let c = k.v;
+    let d = s.v;
+    io.print(f"{a} {b} {c} {sq} {t} {d}\n");
+    return 0;
+}

@@ -456,19 +456,13 @@ impl<'a> FnCx<'a> {
         let ty = self.nty(n);
         let Some(&first) = kids.first() else { return self.fail(n, "empty") };
         let fe = self.expr(first, None);
-        let mut acc_t = self.e_ty(&fe);
         let Some(mut acc) = self.operand_of(fe) else { return E::Never };
         for &c in &kids[1..] {
             let icx = self.icx;
             let optok = icx.a(c).saturating_sub(1);
             let op = icx.tk(optok);
-            let mut held = Vec::new();
-            if self.try_in(&[c]) {
-                self.hold(acc, acc_t, &mut held);
-            }
+            // operands are Copy (E0422): a `?` in a later operand leaves nothing to drop
             let Some(r) = self.val(c, None) else { return E::Never };
-            self.release(&held);
-            acc_t = ty;
             match self.binop(optok, op, acc, r, ty) {
                 Some(v) => acc = v,
                 None => return E::Never,

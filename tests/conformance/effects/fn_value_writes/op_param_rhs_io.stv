@@ -7,6 +7,8 @@ view struct H {
     f: fn(),
 }
 
+impl Copy for H {}
+
 impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
         let k = rhs.f;

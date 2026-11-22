@@ -903,7 +903,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0106",
         severity: Severity::Error,
         area: "resolve",
-        rule: "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility)",
+        rule: "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility); case `pattern`: a struct pattern naming any struct with a private field outside its module, once at the type name",
         retired: false,
         located: true,
         holes: &[
@@ -933,6 +933,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "mark field `{name}` `pub` in `{module}`, or use the column only inside `{module}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "pattern",
+                message: "struct `{name}` has a private field: its pattern outside module `{module}` is not allowed",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{name}` cannot be taken apart outside `{module}`" },
+                    LabelTemplate { at: "decl", text: "field declared here without `pub`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "take `{name}` apart inside `{module}` (a `pub` fn there), or use its `pub` fields and methods outside it",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1351,10 +1364,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0208",
         severity: Severity::Error,
         area: "types",
-        rule: "no method or field `<name>` on type `<T>`",
+        rule: "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern",
         retired: false,
         located: true,
         holes: &[
+            Hole { name: "added", kind: HoleKind::Pattern, choices: &[] },
+            Hole { name: "missing", kind: HoleKind::Pattern, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
@@ -1391,6 +1406,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "give every field: `{name}: <value>`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "pattern-missing-field",
+                message: "a pattern of `{type}` leaves fields out: `{missing}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "a pattern names every field of `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "name each field, `f: _` for one the pattern ignores: add `{added}`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2398,6 +2425,75 @@ pub(super) static ENTRIES: &[Entry] = &[
         ],
     },
     Entry {
+        code: "E0422",
+        severity: Severity::Error,
+        area: "kinds",
+        rule: "impl of an operator trait of `std.core` (`Add Sub Mul Div Rem Shl Shr BitAnd BitOr BitXor Neg Not` and the wrapping and saturating forms) whose self type is not Copy in every instance the impl covers (Copy under the impl's bounds), at the impl; case `operand`: a binary or unary operator or compound assignment on a user type whose operand is not Copy where it is used (a generic param bounded by the operator trait but not by `Copy`, also behind a reference), at the operator: an operator never moves its operands; the operand is a type param (`operand`), a type that names params (`operand-args`), or any other type (`operand-type`)",
+        retired: false,
+        located: true,
+        holes: &[
+            Hole { name: "bound", kind: HoleKind::Name, choices: &[] },
+            Hole { name: "call", kind: HoleKind::Source, choices: &[] },
+            Hole { name: "op", kind: HoleKind::Source, choices: &[] },
+            Hole { name: "sig", kind: HoleKind::Source, choices: &[] },
+            Hole { name: "trait", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "type", kind: HoleKind::Type, choices: &[] },
+        ],
+        shapes: &[
+            Shape {
+                case: "",
+                message: "`{type}` cannot implement operator trait `{trait}`: it is not Copy",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "operator impl here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "make `{type}` Copy (`impl Copy for ..`, with `Copy` bounds on the impl's params if the `impl Copy` has them), or give it a method instead: `{sig}`, called as `{call}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "operand",
+                message: "operator `{op}` copies its operands, but `{type}` is not known to be Copy here",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                    LabelTemplate { at: "param", text: "`{type}` declared here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "add `Copy` beside the operator bound: `{type}: {bound} + Copy`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "operand-args",
+                message: "operator `{op}` copies its operands, but `{type}` is not known to be Copy here",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                    LabelTemplate { at: "impl", text: "operator impl here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "give the params that `{type}` names the `Copy` bounds its `impl Copy` asks for (`T: Copy`), or use a method that borrows: `{call}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "operand-type",
+                message: "operator `{op}` copies its operands, but `{type}` is not Copy",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{op}` on `{type}`" },
+                    LabelTemplate { at: "impl", text: "operator impl here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "make `{type}` Copy with `impl Copy for {type} {{}}`, if all its fields are Copy and it has no `Drop` impl; or replace its operator impl with a method that borrows: `{sig}`, called as `{call}`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+        ],
+    },
+    Entry {
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
@@ -2588,7 +2684,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "primary", text: "a part moved here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` or left out is dropped there)",
+                    description: "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` is dropped there)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

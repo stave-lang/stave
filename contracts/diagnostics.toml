@@ -414,7 +414,7 @@ fix = { description = "name `{name}` once: keep one sub-pattern for it, and to u
 code = "E0106"
 severity = "error"
 area = "resolve"
-rule = "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility)"
+rule = "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility); case `pattern`: a struct pattern naming any struct with a private field outside its module, once at the type name"
 holes = { name = "name", module = "path" }
 message = "`{name}` is private to module `{module}`"
 labels = [{ at = "primary", text = "private `{name}` used here" }, { at = "decl", text = "`{name}` declared here without `pub`" }]
@@ -424,6 +424,11 @@ fix = { description = "mark `{name}` `pub` in `{module}`, or use it only inside 
 message = "column `{name}` is private to module `{module}`: its field of the row struct is not `pub`"
 labels = [{ at = "primary", text = "private column `{name}` used here" }, { at = "decl", text = "field `{name}` declared here without `pub`" }]
 fix = { description = "mark field `{name}` `pub` in `{module}`, or use the column only inside `{module}`" }
+
+[diag.cases.pattern]
+message = "struct `{name}` has a private field: its pattern outside module `{module}` is not allowed"
+labels = [{ at = "primary", text = "`{name}` cannot be taken apart outside `{module}`" }, { at = "decl", text = "field declared here without `pub`" }]
+fix = { description = "take `{name}` apart inside `{module}` (a `pub` fn there), or use its `pub` fields and methods outside it" }
 
 [[diag]]
 code = "E0107"
@@ -584,8 +589,8 @@ fix = { description = "end every path of `{name}` with a call of a `-> never` fn
 code = "E0208"
 severity = "error"
 area = "types"
-rule = "no method or field `<name>` on type `<T>`"
-holes = { name = "name", type = "type" }
+rule = "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern"
+holes = { name = "name", type = "type", missing = "pattern", added = "pattern" }
 message = "no method or field `{name}` on type `{type}`"
 labels = [{ at = "primary", text = "`{type}` has no `{name}`" }]
 fix = { description = "correct the spelling, or convert the value to a type that has `{name}` (`stave explain E0208`)" }
@@ -594,6 +599,11 @@ fix = { description = "correct the spelling, or convert the value to a type that
 message = "missing field `{name}` in a literal of `{type}`"
 labels = [{ at = "primary", text = "`{name}` not given" }]
 fix = { description = "give every field: `{name}: <value>`" }
+
+[diag.cases.pattern-missing-field]
+message = "a pattern of `{type}` leaves fields out: `{missing}`"
+labels = [{ at = "primary", text = "a pattern names every field of `{type}`" }]
+fix = { description = "name each field, `f: _` for one the pattern ignores: add `{added}`" }
 
 [diag.cases.column]
 message = "`{type}` has no column `{name}`: its columns are the fields of its row struct"
@@ -990,6 +1000,31 @@ labels = [{ at = "primary", text = "impl here" }, { at = "param", text = "`{para
 fix = { description = "use `{param}` in the self type, move it to the methods that need it (`fn m<{param}>(..)`), or remove it" }
 
 [[diag]]
+code = "E0422"
+severity = "error"
+area = "kinds"
+rule = "impl of an operator trait of `std.core` (`Add Sub Mul Div Rem Shl Shr BitAnd BitOr BitXor Neg Not` and the wrapping and saturating forms) whose self type is not Copy in every instance the impl covers (Copy under the impl's bounds), at the impl; case `operand`: a binary or unary operator or compound assignment on a user type whose operand is not Copy where it is used (a generic param bounded by the operator trait but not by `Copy`, also behind a reference), at the operator: an operator never moves its operands; the operand is a type param (`operand`), a type that names params (`operand-args`), or any other type (`operand-type`)"
+holes = { trait = "path", type = "type", op = "source", bound = "name", sig = "source", call = "source" }
+message = "`{type}` cannot implement operator trait `{trait}`: it is not Copy"
+labels = [{ at = "primary", text = "operator impl here" }]
+fix = { description = "make `{type}` Copy (`impl Copy for ..`, with `Copy` bounds on the impl's params if the `impl Copy` has them), or give it a method instead: `{sig}`, called as `{call}`" }
+
+[diag.cases.operand]
+message = "operator `{op}` copies its operands, but `{type}` is not known to be Copy here"
+labels = [{ at = "primary", text = "`{op}` on `{type}`" }, { at = "param", text = "`{type}` declared here" }]
+fix = { description = "add `Copy` beside the operator bound: `{type}: {bound} + Copy`" }
+
+[diag.cases.operand-args]
+message = "operator `{op}` copies its operands, but `{type}` is not known to be Copy here"
+labels = [{ at = "primary", text = "`{op}` on `{type}`" }, { at = "impl", text = "operator impl here" }]
+fix = { description = "give the params that `{type}` names the `Copy` bounds its `impl Copy` asks for (`T: Copy`), or use a method that borrows: `{call}`" }
+
+[diag.cases.operand-type]
+message = "operator `{op}` copies its operands, but `{type}` is not Copy"
+labels = [{ at = "primary", text = "`{op}` on `{type}`" }, { at = "impl", text = "operator impl here" }]
+fix = { description = "make `{type}` Copy with `impl Copy for {type} {{}}`, if all its fields are Copy and it has no `Drop` impl; or replace its operator impl with a method that borrows: `{sig}`, called as `{call}`" }
+
+[[diag]]
 code = "E0501"
 severity = "error"
 area = "borrow"
@@ -1063,7 +1098,7 @@ fix = { description = "borrow it instead (`&{place}`), or take it out and leave 
 [diag.cases.part]
 message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"
 labels = [{ at = "primary", text = "a part moved here" }]
-fix = { description = "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` or left out is dropped there)" }
+fix = { description = "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` is dropped there)" }
 
 [diag.cases.part-reborrow]
 message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"

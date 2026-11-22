@@ -4,6 +4,8 @@ import std.io;
 
 view struct Cur { cur: &u32, n: u32 }
 
+impl Copy for Cur {}
+
 impl Add for Cur {
     fn add(self, rhs: Self) -> Self from self + rhs { //~ ERROR E0905
         return Cur.{ cur: rhs.cur, n: self.n + rhs.n };

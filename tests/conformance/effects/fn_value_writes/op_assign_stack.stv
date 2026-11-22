@@ -8,6 +8,8 @@ view struct H {
     f: fn() -> u64,
 }
 
+impl Copy for H {}
+
 impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
         let k = self.f;

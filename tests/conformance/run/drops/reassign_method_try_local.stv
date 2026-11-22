@@ -1,6 +1,6 @@
-//~ STDOUT compound_try_local.stdout
-// `?` on the right of a compound assignment leaves the old value to its local: it is dropped once,
-// with its scope.
+//~ STDOUT reassign_method_try_local.stdout
+// `?` in the argument of `d = d.add(e)`, after the receiver moved: the old value is dropped once,
+// on that exit.
 import std.io;
 import std.env;
 struct D { pub id: u32 }
@@ -37,14 +37,14 @@ fn show(r: Result<u32, u32>) {
         Result.Err(n) => { io.print(f"err {n}\n"); }
     }
 }
-impl Add for D {
+impl D {
     fn add(self, rhs: Self) -> Self { return mk(self.id * 10 + rhs.id); }
 }
 fn f(ok: bool) -> Result<u32, u32> {
     let mut d = mk(1);
-    d += mkres(2, ok)?;
+    d = d.add(mkres(2, ok)?);
     let mut e = mk(3);
-    e += if use2(mk(8), mkres(9, ok)?.id) == 0 then mk(4) else mk(5);
+    e = e.add(if use2(mk(8), mkres(9, ok)?.id) == 0 then mk(4) else mk(5));
     return Result.Ok(d.id + e.id);
 }
 fn main() -> i32 {
