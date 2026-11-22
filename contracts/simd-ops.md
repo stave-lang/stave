@@ -109,7 +109,8 @@ except `cuda` (a usable NVIDIA device), owned by x86-64, AArch64, and `gpu-sm86`
     zero) and `m.to_vec::<iW>()`.
   - `m.rewiden::<W2>()` is N on v4/sve and M elsewhere. Constructors: `maskWxN.first_n(k)`,
     `maskWxN.all()`, `maskWxN.none()`.
-- Generic spelling: `vec<T, N>` / `mask<W, N>`, legal only with generic arguments (E0609).
+- Generic spelling: `vec<T, N>` / `mask<W, N>` is E0609 (write `f32x8` / `mask32x8`); a generic lane
+  type T is planned (case `generic-lane` today).
 - `Txn` / `maskWxn` (sizeless) need `needs(sve)` in v1 (E0710). Restrictions are
   E0711–E0716 (see diagnostic-codes.md).
 - **ABI rule:** a vector type in a signature (fn, fn type, closure) requires `needs` covering

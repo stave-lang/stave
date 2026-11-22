@@ -9,6 +9,8 @@ view struct H {
     f: fn() -> u32,
 }
 
+impl Copy for H {}
+
 impl core.Add for H {
     fn add(self, rhs: Self) -> Self {
         let k = rhs.f;

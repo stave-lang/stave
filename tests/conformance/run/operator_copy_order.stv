@@ -1,0 +1,47 @@
+//~ STDOUT operator_copy_order.stdout
+// A user operator's operands are Copy (E0422): each side is evaluated to a copy, left to right,
+// before the impl runs, so a later operand may change the place an earlier one copied, and
+// `p op= e` copies `p` before `e` runs. One place may be both operands.
+import std.io;
+
+struct M { pub v: u32 }
+
+impl Copy for M {}
+
+impl Add for M {
+    fn add(self, rhs: Self) -> Self {
+        let a = self.v;
+        let b = rhs.v;
+        io.print(f"add {a} {b}\n");
+        return M.{ v: a * 10 + b };
+    }
+}
+
+impl Not for M {
+    fn not(self) -> Self {
+        let a = self.v;
+        io.print(f"not {a}\n");
+        return M.{ v: a + 1 };
+    }
+}
+
+fn set(m: &mut M, k: u32) -> M {
+    io.print(f"set {k}\n");
+    m.v = k;
+    return M.{ v: k };
+}
+
+fn main() -> i32 {
+    let mut a = M.{ v: 1 };
+    let b = a + set(&mut a, 2);
+    let mut c = M.{ v: 3 };
+    c += set(&mut c, 4);
+    let d = b + b;
+    let e = ~d + d;
+    let x = a.v;
+    let y = b.v;
+    let z = c.v;
+    let w = e.v;
+    io.print(f"{x} {y} {z} {w}\n");
+    return 0;
+}

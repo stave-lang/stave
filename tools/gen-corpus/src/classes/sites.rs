@@ -470,7 +470,13 @@ pub(super) fn case(r: &mut Rng, idx: usize, want_bad: bool) -> Case {
         };
         (b, arg)
     };
-    let good = |bound: Bound, arg: Arg| if site == Site::DropImpl { bound.view } else { arg.fits(bound) };
+    // An operator impl covers Copy types only (E0422): `W<T>` is Copy under `T: Copy`, so the
+    // operator site also asks the argument to be Copy.
+    let good = |bound: Bound, arg: Arg| match site {
+        Site::DropImpl => bound.view,
+        Site::Operator => arg.fits(bound) && arg.kinds().copy,
+        _ => arg.fits(bound),
+    };
     let drawable = |bound: Bound, arg: Arg| {
         site != Site::TypeOnly || arg.fits(bound) || (arg.kinds().view && !bound.view)
     };
@@ -569,9 +575,14 @@ pub(super) fn case(r: &mut Rng, idx: usize, want_bad: bool) -> Case {
             }
         }
         Site::Operator => {
+            let obt = match bound.req {
+                Req::None | Req::Copy => ": Copy".to_string(),
+                _ => format!(": Copy + {}", bt.trim_start_matches(": ")),
+            };
             items.push_str(&wstruct);
+            items.push_str(&format!("\nimpl<T: Copy> Copy for W{i}<T> {{}}\n"));
             items.push_str(&format!(
-                "\nimpl<T{bt}> Add for W{i}<T> {{\n    fn add(self, rhs: Self) -> Self {{\n        return rhs;\n    }}\n}}\n"
+                "\nimpl<T{obt}> Add for W{i}<T> {{\n    fn add(self, rhs: Self) -> Self {{\n        return rhs;\n    }}\n}}\n"
             ));
             b.line(&format!("let a1: {at} = {};", arg.value(1)));
             make_w(&mut b, "w", 0);

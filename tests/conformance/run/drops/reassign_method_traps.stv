@@ -1,8 +1,8 @@
-//~ STDOUT compound_operator_traps.stdout
+//~ STDOUT reassign_method_traps.stdout
 //~ EXIT 101
 //~ STDERR-CONTAINS "panic: Bounds at "
 //~ STDERR-CONTAINS " in main.D.add (thread 0)"
-// A user operator that traps in a compound assignment: no value was dropped twice before the trap.
+// A method that traps in `d = d.add(e)`: no value was dropped twice before the trap.
 import std.io;
 import std.env;
 struct D { pub id: u32 }
@@ -39,7 +39,7 @@ fn show(r: Result<u32, u32>) {
         Result.Err(n) => { io.print(f"err {n}\n"); }
     }
 }
-impl Add for D {
+impl D {
     fn add(self, rhs: Self) -> Self {
         let xs = [1u32, 2u32];
         let k = xs[rhs.id as% usize];
@@ -48,10 +48,10 @@ impl Add for D {
 }
 fn main() -> i32 {
     let mut d = mk(1);
-    d += mk(0);
+    d = d.add(mk(0));
     io.print("first\n");
     let mut e = mk(3);
-    e += mk(5);
+    e = e.add(mk(5));
     io.print("not reached\n");
     io.print("end\n");
     return 0;

@@ -399,17 +399,22 @@ fix = { description = "keep one `allocator` declaration in the binary and remove
 code = "E0105"
 severity = "error"
 area = "resolve"
-rule = "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern); reported at each later declaration, related span: the first declaration"
+rule = "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern; case `pattern-field`: the struct pattern); reported at each later declaration, related span: the first declaration"
 holes = { name = "name", scope = "path" }
 message = "duplicate declaration of `{name}` in `{scope}`"
 labels = [{ at = "primary", text = "`{name}` declared again here" }, { at = "first", text = "first declaration of `{name}`" }]
 fix = { description = "rename this `{name}`, or remove one of the two declarations" }
 
+[diag.cases.pattern-field]
+message = "field `{name}` of `{scope}` is named twice in one pattern"
+labels = [{ at = "primary", text = "`{name}` named again here" }, { at = "first", text = "`{name}` first named here" }]
+fix = { description = "name `{name}` once: keep one sub-pattern for it, and to use the value twice bind it by name and reuse the binding" }
+
 [[diag]]
 code = "E0106"
 severity = "error"
 area = "resolve"
-rule = "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility)"
+rule = "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility); case `pattern`: a struct pattern naming any struct with a private field outside its module, once at the type name"
 holes = { name = "name", module = "path" }
 message = "`{name}` is private to module `{module}`"
 labels = [{ at = "primary", text = "private `{name}` used here" }, { at = "decl", text = "`{name}` declared here without `pub`" }]
@@ -419,6 +424,11 @@ fix = { description = "mark `{name}` `pub` in `{module}`, or use it only inside 
 message = "column `{name}` is private to module `{module}`: its field of the row struct is not `pub`"
 labels = [{ at = "primary", text = "private column `{name}` used here" }, { at = "decl", text = "field `{name}` declared here without `pub`" }]
 fix = { description = "mark field `{name}` `pub` in `{module}`, or use the column only inside `{module}`" }
+
+[diag.cases.pattern]
+message = "struct `{name}` has a private field: its pattern outside module `{module}` is not allowed"
+labels = [{ at = "primary", text = "`{name}` cannot be taken apart outside `{module}`" }, { at = "decl", text = "field declared here without `pub`" }]
+fix = { description = "take `{name}` apart inside `{module}` (a `pub` fn there), or use its `pub` fields and methods outside it" }
 
 [[diag]]
 code = "E0107"
@@ -579,8 +589,8 @@ fix = { description = "end every path of `{name}` with a call of a `-> never` fn
 code = "E0208"
 severity = "error"
 area = "types"
-rule = "no method or field `<name>` on type `<T>`"
-holes = { name = "name", type = "type" }
+rule = "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern"
+holes = { name = "name", type = "type", missing = "pattern", added = "pattern" }
 message = "no method or field `{name}` on type `{type}`"
 labels = [{ at = "primary", text = "`{type}` has no `{name}`" }]
 fix = { description = "correct the spelling, or convert the value to a type that has `{name}` (`stave explain E0208`)" }
@@ -589,6 +599,11 @@ fix = { description = "correct the spelling, or convert the value to a type that
 message = "missing field `{name}` in a literal of `{type}`"
 labels = [{ at = "primary", text = "`{name}` not given" }]
 fix = { description = "give every field: `{name}: <value>`" }
+
+[diag.cases.pattern-missing-field]
+message = "a pattern of `{type}` leaves fields out: `{missing}`"
+labels = [{ at = "primary", text = "a pattern names every field of `{type}`" }]
+fix = { description = "name each field, `f: _` for one the pattern ignores: add `{added}`" }
 
 [diag.cases.column]
 message = "`{type}` has no column `{name}`: its columns are the fields of its row struct"
@@ -768,8 +783,9 @@ fix = { description = "correct the arguments, or call only where the clause hold
 code = "E0219"
 severity = "error"
 area = "types"
-rule = "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one; a struct, enum, or generic type without `next(&mut self) -> Option<T>`, for a generic type from its bounds), and a range or iterator as a chunk source"
-holes = { place = "place" }
+rule = "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `next-shape`: the source type's `next` (a generic type's from its bounds; of two ambiguous ones, when neither fits) is not exactly `fn next(&mut self) -> Option<T>`: another receiver, other params, generic params of its own, or another result (the call itself is then checked as `recv.next()` is: E0704, E0106, E0803, ..); case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one; a struct, enum, or generic type without a `next`), and a range or iterator as a chunk source"
+holes = { place = "place", why = "text-literal" }
+choices = { why = ["it does not take `&mut self`", "it takes params besides `&mut self`", "it has generic params of its own", "it does not return an `Option`"] }
 message = "`for` cannot iterate the array or slice `{place}` by value: iterate a reference to it"
 labels = [{ at = "primary", text = "a named array or slice, or a field or element of a value: not an array value" }]
 fix = { description = "write `&{place}` (elements bound as `&T`, chunks by value), or `&mut {place}` to change it in place" }
@@ -803,6 +819,11 @@ fix = { description = "iterate its slice: `{place}.as_slice()` (elements as `&T`
 message = "`{place}` is not a `for` source"
 labels = [{ at = "primary", text = "not a range, an array value, a reference to an array or slice, or an iterator" }]
 fix = { description = "iterate a range, an array value, `&a` / `&mut a` of an array or slice, an iterator, or a `&mut` to one; a chunk loop takes an array value or a reference to an array or slice" }
+
+[diag.cases.next-shape]
+message = "`{place}` is not a `for` source: its `next` is not `fn next(&mut self) -> Option<T>`"
+labels = [{ at = "primary", text = "the loop calls `next` with this source alone" }, { at = "next", text = "{why}" }]
+fix = { description = "give the type `fn next(&mut self) -> Option<T>` (no other params, no generic params of its own), or call this `next` in a `loop` with its args" }
 
 [[diag]]
 code = "E0300"
@@ -979,6 +1000,31 @@ labels = [{ at = "primary", text = "impl here" }, { at = "param", text = "`{para
 fix = { description = "use `{param}` in the self type, move it to the methods that need it (`fn m<{param}>(..)`), or remove it" }
 
 [[diag]]
+code = "E0422"
+severity = "error"
+area = "kinds"
+rule = "impl of an operator trait of `std.core` (`Add Sub Mul Div Rem Shl Shr BitAnd BitOr BitXor Neg Not` and the wrapping and saturating forms) whose self type is not Copy in every instance the impl covers (Copy under the impl's bounds), at the impl; case `operand`: a binary or unary operator or compound assignment on a user type whose operand is not Copy where it is used (a generic param bounded by the operator trait but not by `Copy`, also behind a reference), at the operator: an operator never moves its operands; the operand is a type param (`operand`), a type that names params (`operand-args`), or any other type (`operand-type`)"
+holes = { trait = "path", type = "type", op = "source", bound = "name", sig = "source", call = "source" }
+message = "`{type}` cannot implement operator trait `{trait}`: it is not Copy"
+labels = [{ at = "primary", text = "operator impl here" }]
+fix = { description = "make `{type}` Copy (`impl Copy for ..`, with `Copy` bounds on the impl's params if the `impl Copy` has them), or give it a method instead: `{sig}`, called as `{call}`" }
+
+[diag.cases.operand]
+message = "operator `{op}` copies its operands, but `{type}` is not known to be Copy here"
+labels = [{ at = "primary", text = "`{op}` on `{type}`" }, { at = "param", text = "`{type}` declared here" }]
+fix = { description = "add `Copy` beside the operator bound: `{type}: {bound} + Copy`" }
+
+[diag.cases.operand-args]
+message = "operator `{op}` copies its operands, but `{type}` is not known to be Copy here"
+labels = [{ at = "primary", text = "`{op}` on `{type}`" }, { at = "impl", text = "operator impl here" }]
+fix = { description = "give the params that `{type}` names the `Copy` bounds its `impl Copy` asks for (`T: Copy`), or use a method that borrows: `{call}`" }
+
+[diag.cases.operand-type]
+message = "operator `{op}` copies its operands, but `{type}` is not Copy"
+labels = [{ at = "primary", text = "`{op}` on `{type}`" }, { at = "impl", text = "operator impl here" }]
+fix = { description = "make `{type}` Copy with `impl Copy for {type} {{}}`, if all its fields are Copy and it has no `Drop` impl; or replace its operator impl with a method that borrows: `{sig}`, called as `{call}`" }
+
+[[diag]]
 code = "E0501"
 severity = "error"
 area = "borrow"
@@ -1077,7 +1123,7 @@ fix = { description = "borrow it instead (`&{place}`), or take it out and leave 
 [diag.cases.part]
 message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"
 labels = [{ at = "primary", text = "a part moved here" }]
-fix = { description = "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` or left out is dropped there)" }
+fix = { description = "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` is dropped there)" }
 
 [diag.cases.part-reborrow]
 message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"
@@ -1150,7 +1196,7 @@ retired = true
 code = "E0512"
 severity = "error"
 area = "borrow"
-rule = "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)"
+rule = "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows; a borrow of a `static` or a part of it borrows nothing); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)"
 holes = { place = "place" }
 message = "returned value borrows local `{place}`"
 labels = [{ at = "primary", text = "returned here" }, { at = "local", text = "`{place}` is dropped when the function returns" }]
@@ -1309,8 +1355,8 @@ fix = { description = "use lane indices from 0 to {lanes} - 1" }
 code = "E0609"
 severity = "error"
 area = "simd"
-rule = "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param"
-holes = { spelled = "source", concrete = "type" }
+rule = "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param. Case `generic-lane`: T is a generic param (a generic lane type is planned). Case `lane-type`: T is no lane type (`bool`, `usize`, `char`, a struct, ..), so no `TxN` spelling exists"
+holes = { spelled = "source", concrete = "type", lane = "type", n = "int" }
 message = "`{spelled}` has no generic argument: write `{concrete}`"
 labels = [{ at = "primary", text = "generic spelling of a concrete type" }]
 fix = { description = "write `{concrete}`", edits = [{ at = "primary", replacement = "{concrete}" }] }
@@ -1319,6 +1365,16 @@ fix = { description = "write `{concrete}`", edits = [{ at = "primary", replaceme
 message = "`{spelled}` is not a fixed lane count or mask width"
 labels = [{ at = "primary", text = "lanes are 2, 4, 8, 16, 32, or 64; mask widths 8, 16, 32, or 64" }]
 fix = { description = "write one of these values as a literal: a const param never stands for a lane count or a mask width" }
+
+[diag.cases.generic-lane]
+message = "`{spelled}` has a generic lane type: vectors of a generic param are not supported yet"
+labels = [{ at = "primary", text = "the lane type is a generic param" }]
+fix = { description = "write a concrete vector type such as `f32x8` or `u32x4`, one fn per lane type" }
+
+[diag.cases.lane-type]
+message = "`{spelled}` has the lane type `{lane}`, which no vector has"
+labels = [{ at = "primary", text = "lanes are `i8`..`i64`, `u8`..`u64`, `f16`, `bf16`, `f32`, `f64`" }]
+fix = { description = "use an array `[{lane}; {n}]`, or a vector of a lane type such as `u32x{n}` (a mask such as `mask32x{n}` for `bool` lanes)" }
 
 [[diag]]
 code = "E0700"
@@ -1802,21 +1858,31 @@ fix = { description = "remove `pub`: `{name}` is visible wherever its trait is",
 code = "E0908"
 severity = "error"
 area = "generics"
-rule = "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type in the calling package and its dependencies) finds the method in two traits, or (case `impls`, `impls-static` for a fn without `self`) in two impls of one trait with other trait args (impls with the same trait args are E0903, not this)"
-holes = { name = "name", type = "type", first = "path", second = "path" }
+rule = "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type in the calling package and its dependencies; for a generic type, its bounds) finds the method in two traits, or (case `impls`, `impls-static` for a fn without `self`) in two instances of one trait with other trait args: two impls, or two bounds `T: Tr<u8> + Tr<u16>` (impls with the same trait args are E0903, not this); case `for`, `for-mut` for a `&mut` source: two traits, or two instances of one trait (named with their args), give the `next` of a `for` source, which the loop calls unqualified (when neither `next` has the iterator shape: E0219 `next-shape`). The fix names each trait instance as the calling module does: by its name, or through an import of its module (with the `import` to add when there is none), with its trait args"
+holes = { name = "name", type = "type", first = "path", second = "path", place = "place", qual = "source", qual2 = "source", imports = "source", bound = "type", params = "source", ret = "type", args = "source" }
 message = "method `{name}` of `{type}` is ambiguous: both `{first}` and `{second}` supply it"
 labels = [{ at = "primary", text = "ambiguous call" }, { at = "first", text = "`{first}.{name}` declared here" }, { at = "second", text = "`{second}.{name}` declared here" }]
-fix = { description = "call it qualified, with the receiver as first argument: `{first}.{name}(x)` or `{second}.{name}(x)`" }
+fix = { description = "call it qualified, with the receiver as first argument (`&x` for `&self`, `&mut x` for `&mut self`): `{qual}.{name}(x)` or `{qual2}.{name}(x)`{imports}" }
 
 [diag.cases.impls]
-message = "method `{name}` of `{type}` is ambiguous: two impls of `{first}` (other trait args) supply it"
-labels = [{ at = "primary", text = "ambiguous call" }, { at = "first", text = "one impl's `{name}`" }, { at = "second", text = "another impl's `{name}`" }]
-fix = { description = "call it through the trait with its args, the receiver as first argument: `{first}::<..>.{name}(x)`" }
+message = "method `{name}` of `{type}` is ambiguous: two instances of `{first}` (other trait args) supply it"
+labels = [{ at = "primary", text = "ambiguous call" }, { at = "first", text = "one instance's `{name}`" }, { at = "second", text = "another instance's `{name}`" }]
+fix = { description = "call it through one instance, with the receiver as first argument (`&x` for `&self`, `&mut x` for `&mut self`): `{qual}.{name}(x)` or `{qual2}.{name}(x)`{imports}" }
 
 [diag.cases.impls-static]
-message = "`{type}.{name}` is ambiguous: two impls of `{first}` (other trait args) supply it"
-labels = [{ at = "primary", text = "ambiguous call" }, { at = "first", text = "one impl's `{name}`" }, { at = "second", text = "another impl's `{name}`" }]
-fix = { description = "name one impl through a bound: `fn pick<X: {first}<..>>() .. X.{name}() ..`, called as `pick::<{type}>()` (no path gives both the type and the trait args of a fn without `self`)" }
+message = "`{type}.{name}` is ambiguous: two instances of `{first}` (other trait args) supply it"
+labels = [{ at = "primary", text = "ambiguous call" }, { at = "first", text = "one instance's `{name}`" }, { at = "second", text = "another instance's `{name}`" }]
+fix = { description = "name one impl through a bound: `fn pick<X: {bound}>({params}){ret} {{ return X.{name}({args}); }}`, called as `pick::<{type}>({args})`{imports} (no path gives both the type and the trait args of a fn without `self`)" }
+
+[diag.cases.for]
+message = "`for` over `{type}` is ambiguous: both `{first}` and `{second}` supply `{name}`"
+labels = [{ at = "primary", text = "the loop calls `{name}` here" }, { at = "first", text = "`{first}.{name}` declared here" }, { at = "second", text = "`{second}.{name}` declared here" }]
+fix = { description = "keep one of the two bounds or impls, or advance it through one trait: `let mut it = {place}; loop {{ match {qual}.{name}(&mut it) {{ Option.Some(x) => {{ .. }} Option.None => {{ break; }} }} }}`{imports}" }
+
+[diag.cases.for-mut]
+message = "`for` over `{type}` is ambiguous: both `{first}` and `{second}` supply `{name}`"
+labels = [{ at = "primary", text = "the loop calls `{name}` here" }, { at = "first", text = "`{first}.{name}` declared here" }, { at = "second", text = "`{second}.{name}` declared here" }]
+fix = { description = "keep one of the two bounds or impls, or advance it through one trait: `loop {{ match {qual}.{name}({place}) {{ Option.Some(x) => {{ .. }} Option.None => {{ break; }} }} }}`{imports}" }
 
 [[diag]]
 code = "E0909"

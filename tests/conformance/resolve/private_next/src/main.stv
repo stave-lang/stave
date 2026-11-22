@@ -1,0 +1,23 @@
+//~ CHECK-ONLY
+// The `next` a `for` loop calls is checked as the call `it.next()` is: a `next` private to
+// another module (an inherent one without `pub`, or one of a private trait) is E0106 for the
+// loop, by value and through `&mut`, as for the call.
+import iters;
+
+fn by_mut(h: &mut iters.Hidden) {
+    for x in h { //~ ERROR E0106
+    }
+}
+
+fn main() -> i32 {
+    for x in iters.Hidden.{ i: 0 } { //~ ERROR E0106
+    }
+    let mut h = iters.Hidden.{ i: 0 };
+    let a = h.next(); //~ ERROR E0106
+    for x in iters.ViaTrait.{ i: 0 } { //~ ERROR E0106
+    }
+    for x in iters.Open.{ i: 0 } {
+    }
+    iters.own();
+    return 0;
+}

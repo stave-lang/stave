@@ -15,14 +15,6 @@ impl<T: Copy> Bag<T> {
     fn cellify(&self) -> cell.Cell<T> { return cell.Cell.new(*self.v.get_ref(0)); }
 }
 
-impl<T: Copy> Add for Bag<T> {
-    fn add(self, rhs: Self) -> Self {
-        let mut s = self;
-        s.v.push(*rhs.v.get_ref(0));
-        return s;
-    }
-}
-
 trait Merge { fn merge(&mut self, other: &Self); }
 
 impl<T: Copy> Merge for vec.Vec<T> {
@@ -58,7 +50,6 @@ fn main() -> i32 {
     own.put(1);
     let one = own.take();
     let mut bag = Bag::<&str>.{ v: vec.Vec::<&str>.new() };
-    let other = Bag::<&str>.{ v: vec.Vec::<&str>.new() };
     bag.put("x"); //~ ERROR E0414
     let got = bag.take(); //~ ERROR E0414
     let c = bag.cellify(); //~ ERROR E0414
@@ -71,6 +62,5 @@ fn main() -> i32 {
     feed(&mut long, &short); //~ ERROR E0901
     long.as_mut_slice().copy_from(short.as_slice()); //~ ERROR E0414
     apply(push); //~ ERROR E0414
-    let sum = bag + other; //~ ERROR E0206
     return 0;
 }

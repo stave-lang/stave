@@ -12,6 +12,8 @@ struct S {
     k: u32,
 }
 
+impl Copy for S {}
+
 impl core.Add for S {
     fn add(self, rhs: Self) -> Self {
         noisy();

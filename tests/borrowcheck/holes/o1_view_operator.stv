@@ -1,7 +1,9 @@
-//~ BORROWCHECK use-after-referent 21 18
+//~ BORROWCHECK use-after-referent 23 20
 import std.io;
 
 view struct Cur { cur: &u32, n: u32 }
+
+impl Copy for Cur {}
 
 impl Add for Cur {
     fn add(self, rhs: Self) -> Self {

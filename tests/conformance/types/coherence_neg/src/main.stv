@@ -86,6 +86,8 @@ impl<T> Mine for [T] {
 
 struct Own { n: u32 }
 
+impl Copy for Own {}
+
 impl Own {
     pub fn n(&self) -> u32 {
         return self.n;

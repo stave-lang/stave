@@ -1,0 +1,71 @@
+//~ STDOUT pos_static_ref_stored.stdout
+// A `&` of an immutable static borrows nothing, like a string literal, wherever it flows:
+// stored through a `&mut` param (into a view field, a `&u32`, an `Option`), into a captured
+// reference, a returned struct, an element, and read on other threads.
+import std.io;
+import std.thread;
+static A: u32 = 7;
+static B: [u32; 2] = [8, 9];
+view struct Holder { r: &u32 }
+// through a `&mut` param into a view field
+fn put(h: &mut Holder) {
+    h.r = &A;
+}
+// through a `&mut` to a field
+fn put2(p: &mut &u32) {
+    *p = &A;
+}
+// into an `Option` behind a `&mut` param
+fn put_opt(q: &mut Option<&u32>) {
+    *q = Option.Some(&A);
+}
+// a struct value holding it, returned without `from`
+fn mk() -> Holder {
+    return Holder.{ r: &A };
+}
+// an element
+fn elem() -> &u32 {
+    return &B[1];
+}
+// as a string literal is, for comparison
+fn put_lit(p: &mut &str) {
+    *p = "lit";
+}
+fn main() -> i32 {
+    let k: u32 = 1;
+    let mut h = Holder.{ r: &k };
+    put(&mut h);
+    let a = *h.r;
+    let mut h2 = Holder.{ r: &k };
+    put2(&mut h2.r);
+    let b = *h2.r;
+    let mut o: Option<&u32> = Option.None;
+    put_opt(&mut o);
+    let c = match o {
+        Option.Some(r) => *r,
+        Option.None => 0,
+    };
+    let d = *mk().r;
+    // into a captured reference
+    let mut r: &u32 = &k;
+    let mut set = fn() { r = &A; };
+    set();
+    let e = *r;
+    let f = *elem();
+    // across threads: a thread's result, and a reference a sink filled read on other threads
+    let mut z: &u32 = &k;
+    put2(&mut z);
+    let (g, q) = thread.join(fn() -> u32 { return *z; }, fn() -> u32 { return *mk().r; });
+    let mut w: &u32 = &k;
+    put2(&mut w);
+    let mut i: u32 = 0;
+    scope {
+        spawn {
+            i = *w + q - 7;
+        }
+    }
+    let mut s: &str = "x";
+    put_lit(&mut s);
+    io.print(f"{a} {b} {c} {d} {e} {f} {g} {i} {s}\n");
+    return 0;
+}

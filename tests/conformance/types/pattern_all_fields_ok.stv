@@ -1,0 +1,92 @@
+//~ CHECK-ONLY
+// The patterns of neg_e0208_pattern_missing_field.stv with every field named: each field is
+// bound (`f`, `f: pat`) or ignored (`f: _`), by value and through `&` / `&mut`, in `let`, `for`,
+// and `match` arms.
+
+struct D { pub id: u32 }
+impl Drop for D { fn drop(&mut self) { } }
+struct P { pub a: D, pub b: D }
+struct C { pub x: u32, pub y: u32, pub z: u32 }
+impl Copy for C {}
+struct Q { pub p: P, pub c: u32 }
+struct G<T> { pub v: T, pub n: u32 }
+enum E { Rec { x: D, y: u32 }, Zero }
+
+fn own(xs: [P; 1]) -> [P; 1] { return xs; }
+
+fn let_struct(p: P) -> u32 {
+    let P.{ a, b: _ } = p;
+    return a.id;
+}
+
+fn let_copy(c: C) -> u32 {
+    let C.{ x, y: _, z: _ } = c;
+    return x;
+}
+
+fn let_generic_param<T>(g: G<T>) -> u32 {
+    let G.{ v: _, n } = g;
+    return n;
+}
+
+fn let_nested(q: Q) -> u32 {
+    let Q.{ p: P.{ a, b: _ }, c } = q;
+    return a.id + c;
+}
+
+fn let_ref(p: &P) -> u32 {
+    let P.{ a, b: _ } = p;
+    return a.id;
+}
+
+fn let_mut_ref(c: &mut C) {
+    let C.{ x, y: _, z } = c;
+    *x = *z;
+}
+
+fn match_variant_expr(e: E) -> u32 {
+    return match e { E.Rec.{ x, y: _ } => x.id, E.Zero => 0 };
+}
+
+fn match_or(c: C) -> u32 {
+    match c {
+        C.{ x: 0, y, z: _ } | C.{ x: _, y, z: 1 } => { return y; }
+        _ => { return 0; }
+    }
+}
+
+fn match_nested_variant(o: Option<C>) -> u32 {
+    match o {
+        Option.Some(C.{ x: _, y: _, z }) => { return z; }
+        Option.None => { return 0; }
+    }
+}
+
+fn match_ref(e: &E) -> u32 {
+    match e {
+        E.Rec.{ x, y } => { return x.id + *y; }
+        E.Zero => { return 0; }
+    }
+}
+
+fn match_mut_ref(g: &mut G<D>) {
+    match g {
+        G.{ v: _, n } => { *n = 0; }
+    }
+}
+
+fn for_struct(xs: [P; 1]) -> u32 {
+    let mut s = 0u32;
+    for P.{ a: _, b } in own(xs) { s = s + b.id; }
+    return s;
+}
+
+fn for_ref(xs: &[(u32, C)]) -> u32 {
+    let mut s = 0u32;
+    for (n, C.{ x, y: _, z: _ }) in xs { s = s + *n + *x; }
+    return s;
+}
+
+fn main() -> i32 {
+    return 0;
+}

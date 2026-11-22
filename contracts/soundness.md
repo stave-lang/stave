@@ -185,6 +185,11 @@ the ones before them, so two operands of one rvalue never share a moved place ei
 a lowering that evaluates operands in another order than the CFG; a Copy operand treated as a
 move (it reads its bytes where it stands and leaves them).
 
+No operator moves an operand: the type checker accepts an operator only on operands that are
+Copy where it is used (E0422 case `operand`; a bound `T: Add` without `Copy` is rejected), and
+an operator trait is implemented only for Copy types (E0422), so the CFG takes every operator
+operand as a copy and `p op= e` overwrites a value without drop glue.
+
 ## Whole moves: no value is left with a moved-out part
 
 **Claim.** In an accepted program a place is either wholly initialized or wholly moved-out:
@@ -329,7 +334,8 @@ the harmless forms and treats the rest as untracked. A read by copy writes nothi
 `=` is an event, so a write that no event shows (through a pointer, inside a callee) needs a use
 of another kind first. No operator impl writes a fn value without an event: one for a fn type is
 E0420 (operator traits and fn types are both `std`'s, and `std` has none), so an operator over fn
-values takes a struct holding them, whose fields the impl's struct literals feed. Whole values
+values takes a struct holding them (a Copy one, E0422), whose fields the impl's struct literals
+feed. Whole values
 of a struct copied or swapped (`*p = s2`, `mem.swap(&mut a, &mut b)`) carry field values the slot
 already holds. A fn value elsewhere (a field declared generic, a tuple / array / slice element,
 an enum payload, a `Vec` element) is read as untracked. A `static`, `const`, `Mutex`, `Once`, `Cell`, `UnsafeCell`,

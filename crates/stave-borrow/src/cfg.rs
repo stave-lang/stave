@@ -774,6 +774,25 @@ impl<'a, 'b> Builder<'a, 'b> {
             self.body.guard_effects.push((span, GuardEffect::MutBorrow(place.clone())));
         }
         let ty = self.tys.ov.mk_ref(mutable, place.ty);
+        // A `&` of an immutable static's storage (it never ends, is never moved from, and is
+        // written only through interior mutability) borrows nothing: the reference is a
+        // constant, as a string literal is, wherever it flows.
+        if !mutable && self.body.locals.get(place.local as usize).is_some_and(|l| l.static_root) {
+            let t = self.new_local(ty, false, span, String::new(), Some(n));
+            let c = Operand {
+                kind: OpKind::Const,
+                place: Place::local(0, TypeId::NONE),
+                span,
+                node: n,
+                site: u32::MAX,
+            };
+            self.push(
+                StmtKind::Assign { dest: Place::local(t, ty), rv: Rvalue::Use(c), init: true },
+                span,
+                n,
+            );
+            return (V::P(Place::local(t, ty)), None);
+        }
         let res = self.new_loan(&place, mutable && !two_phase, span, n, two_phase);
         let act = two_phase.then(|| self.new_loan(&place, true, span, n, false));
         let t = self.new_local(ty, false, span, String::new(), Some(n));
@@ -1444,19 +1463,10 @@ impl<'a, 'b> Builder<'a, 'b> {
                 }
                 return;
             };
-            // `p op= e` is `p = p op e`: the left operand is a by-value use of `p` evaluated
-            // before `e` (a move when not Copy, so `e` may not use `p`, and a place that cannot
-            // be moved from is E0504), and the write re-initializes `p`
-            let old = if !compound {
-                None
-            } else if self.tys.is_copy(lp.ty) {
-                self.read(V::P(lp.clone()), lhs)
-            } else {
-                let span = self.span(lhs);
-                let o = self.op_of_place(lp.clone(), span, lhs, true);
-                let whole = self.span(es);
-                Some(self.hold(o, whole))
-            };
+            // `p op= e` is `p = p op e`: the left operand is a copy of `p` read before `e` (the
+            // type checker accepts an operator only on operands that are Copy where it is used,
+            // E0422), and the write replaces `p`.
+            let old = if compound { self.read(V::P(lp.clone()), lhs) } else { None };
             let rv = self.expr(rhs);
             let Some(r) = self.operand(rv, rhs) else { return };
             let rv = match old {
@@ -2578,26 +2588,27 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.put_temp(Rvalue::Pure(ops), ty, n)
     }
 
+    /// A binary operator chain: operands are read left to right, each a copy (the type checker
+    /// accepts an operator only on operands that are Copy where it is used, E0422), so none
+    /// moves and none is held for the later ones.
     fn binary(&mut self, n: u32) -> V {
         let icx = self.icx;
         let kids = icx.kids_vec(n);
         let Some(&first) = kids.first() else { return V::Const };
         let v = self.expr(first);
-        let Some(mut acc) = self.operand(v, first) else { return V::Never };
+        let Some(mut acc) = self.read(v, first) else { return V::Never };
         let ty = self.nty(n);
-        let whole = self.span(n);
         for &c in &kids[1..] {
             let optok = icx.a(c).saturating_sub(1);
-            acc = self.hold(acc, whole);
             let v = self.expr(c);
-            let Some(r) = self.operand(v, c) else { return V::Never };
+            let Some(r) = self.read(v, c) else { return V::Never };
             let rv = match self.tb.target(optok) {
                 Some(Target::Op { .. }) => Rvalue::call(vec![acc, r], Flows::None, optok),
                 _ => Rvalue::Pure(vec![acc, r]),
             };
             let V::P(p) = self.put_temp(rv, ty, n) else { return V::Never };
             let sp = self.span(n);
-            acc = self.op_of_place(p, sp, n, true);
+            acc = self.op_of_place(p, sp, n, false);
         }
         self.put_temp(Rvalue::Use(acc), ty, n)
     }
@@ -2690,9 +2701,9 @@ impl<'a, 'b> Builder<'a, 'b> {
             let span = self.span(n);
             return self.borrow(p, mutable, false, span, n).0;
         }
-        // `-` `!` `~`: a value without origins (user operators are calls by value)
+        // `-` `!` `~`: a value without origins; the operand is a copy (E0422)
         let v = self.expr(c);
-        let Some(op) = self.operand(v, c) else { return V::Never };
+        let Some(op) = self.read(v, c) else { return V::Never };
         let ty = self.nty(n);
         let rv = match self.tb.target(a) {
             Some(Target::Op { .. }) => Rvalue::call(vec![op], Flows::None, a),

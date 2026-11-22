@@ -383,6 +383,38 @@ impl Program {
         self.module_items.get(m.idx())?.get(&name).copied()
     }
 
+    /// How code in module `from` names the top-level item `d`: by its name (an item of `from`,
+    /// or of the prelude when `from` binds no other item or import of that name), or as
+    /// `alias.name` through an import of `d`'s module. When `from` imports no such module: the
+    /// path through the `import` this returns as well, which binds the module's last segment
+    /// (`as` another name when `from` binds that one already). A path's head never names a
+    /// package itself, so the decl path (`main.T`) is no answer.
+    pub fn path_from(&self, from: ModuleId, d: DeclId) -> (String, Option<String>) {
+        let Some(decl) = self.decl(d) else { return (String::new(), None) };
+        let name = self.strings.get(decl.name);
+        let imports = self.module(from).map_or(&[][..], |m| &m.imports[..]);
+        let binds = |s: &str| {
+            self.strings
+                .lookup(s)
+                .is_some_and(|s| self.module_item(from, s).is_some() || imports.iter().any(|i| i.bound == s))
+        };
+        let in_prelude = self.prelude.iter().any(|&(s, p)| s == decl.name && p == d);
+        if decl.module == from || (in_prelude && !binds(name)) {
+            return (name.to_string(), None);
+        }
+        if let Some(i) = imports.iter().find(|i| i.target == decl.module) {
+            return (format!("{}.{name}", self.strings.get(i.bound)), None);
+        }
+        let Some(m) = self.module(decl.module) else { return (self.decl_path(d), None) };
+        let last = m.path_text.rsplit('.').next().unwrap_or("");
+        if binds(last) {
+            let alias = format!("{last}_m");
+            let import = format!("import {} as {alias};", m.path_text);
+            return (format!("{alias}.{name}"), Some(import));
+        }
+        (format!("{last}.{name}"), Some(format!("import {};", m.path_text)))
+    }
+
     /// Dotted path text of a decl (`a.b.S.f`; a module: its module path).
     pub fn decl_path(&self, d: DeclId) -> String {
         let Some(decl) = self.decl(d) else { return String::new() };

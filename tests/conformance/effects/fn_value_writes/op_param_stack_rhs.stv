@@ -7,6 +7,8 @@ view struct H {
     f: fn() -> u64,
 }
 
+impl Copy for H {}
+
 fn small() -> u64 {
     return 1u64;
 }

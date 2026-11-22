@@ -38,8 +38,8 @@ fn tuple_item() {
     io.print("after\n");
 }
 
-fn field_left_out() {
-    for H.{ n } in hs(40) { io.print(f"n {n}\n"); }
+fn field_ignored() {
+    for H.{ d: _, n } in hs(40) { io.print(f"n {n}\n"); }
     io.print("after\n");
 }
 
@@ -149,7 +149,7 @@ fn main() -> i32 {
     read_only();
     wild();
     tuple_item();
-    field_left_out();
+    field_ignored();
     with_continue();
     moving();
     by_name();

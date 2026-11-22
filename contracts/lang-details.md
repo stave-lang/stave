@@ -13,8 +13,9 @@ reference for what a program may write and what it means.
   a value made where F is proven stays callable.
 - No operator applies to a fn value: the operator traits and fn types both belong to `std`, which
   implements none for a fn type, so `impl core.Add for fn()` elsewhere is E0420 and `f += g` on a
-  fn-typed `f` has no impl. An operator over fn values goes through a struct that holds them
-  (`view struct H { f: fn() }`, `impl core.Add for H`): `H.f` is a field declared with a fn type,
+  fn-typed `f` has no impl. An operator over fn values goes through a Copy struct that holds them
+  (`view struct H { f: fn() }`, `impl Copy for H {}`, `impl core.Add for H`, §2 Operator traits):
+  `H.f` is a field declared with a fn type,
   a tracked slot of the call graph (contracts/soundness.md), fed by every `H` literal, the impl's
   results included.
 
@@ -91,6 +92,31 @@ reference for what a program may write and what it means.
   a parking fn, nor a denied `park` (E1401), has anything to check or a negative conformance
   test.
 
+## §2 Operator traits
+
+The operator traits of `std.core` are `Add WrapAdd SatAdd Sub WrapSub SatSub Mul WrapMul SatMul
+Div Rem Shl WrapShl Shr BitAnd BitOr BitXor Neg Not`; a compound assignment (`a += b`) uses the
+trait of its operator, and the comparisons, `!`, `&&`, and `||` are no traits. Every method is
+`fn op(self, rhs: Self) -> Self` (unary `fn op(self) -> Self`; E0905 keeps an impl to it), so
+every operand and the result have the impl's self type. That type must be Copy in every instance
+the impl covers (E0422), decided by the query that decides Copy in a generic body: the impl's
+params are rigid and carry exactly the impl's bounds. `impl<T: Copy> Add for W<T>` with
+`impl<T: Copy> Copy for W<T>` passes; `impl<T> Add for W<T>` does not, nor `impl<T: Copy> Add
+for F<T>` when F's `impl Copy` asks `T: Copy + Frozen`, nor an impl for a type (or an instance,
+`impl<T: Copy> Div for K<T>` with only `impl Copy for K<u32>`) that has no `impl Copy`. Reason:
+an operator is a call that is not written as one, and on operands that are not Copy it would
+move them unseen (`d + d`, `a += b` out of a place that cannot be moved from, the old value of
+`a` dropped inside the call). A type that owns memory (a big integer, a heap matrix, a string)
+takes a method: `fn add(&self, rhs: &Self) -> Self`, called as `a.add(&b)`.
+
+An operator copies its operands, so every operand is Copy where the operator is used (E0422
+case `operand`, at the operator), by the Copy query of the checked fn's own bounds. A bound on an
+operator trait does not imply `Copy`: in `fn f<T: Add>(a: T, b: T)`, `a + b` is E0422 and the
+fix is `T: Add + Copy`. The rule covers binary and unary operators and compound assignment, an
+operand behind a reference (`*r + e`, `*r += e`), a field, an element, a capture, and a type
+whose operator impl is itself E0422. With it no operator moves an operand: the borrow checker
+reads operator operands as copies, and the lowering drops nothing for them.
+
 ## §3 Operand order and moves
 
 Every expression with several operands evaluates them left to right, each to a value, before it
@@ -109,16 +135,15 @@ An assignment `p = e` evaluates the operands of the place `p` first (an index `x
 a dereference `*pick(&mut a)` or a field `sref(&mut s).f` goes through), then `e`, then makes
 the moves of `e` and writes `p`: `xs[i] = bump(&mut i)` writes the element of the old `i`, and
 `s = make(s, dup(&s.d))` is E0502 at `&s.d`. `p op= e` is `p = p op e`: the value of `p` is a
-by-value operand evaluated after the place's operands and before `e`. With a user operator on
-a non-Copy type it is a move, so `e` may not use `p` (E0502) and the write re-initializes `p`;
-a `p` that is not a whole local (a part, a place behind a reference or an index, a capture, a
-static) is E0504, like `*r = *r + e`.
+by-value operand evaluated after the place's operands and before `e`. It is a copy (§2
+Operator traits), so `e` may use `p` and may change it: `c += set(&mut c, 4)` adds the old value
+of `c`.
 
 ## §3 Whole moves and destructuring patterns
 
 A non-Copy value moves whole. A by-value use of a non-Copy part of a place or of a temporary
-outside a pattern (`let x = s.f;`, `f(t.0)`, `mk().a`, `s.v.into_iter()`, `s.f += e` with a
-user operator) is E0504 case `part`; Copy parts are read freely, borrows of parts (`&s.f`,
+outside a pattern (`let x = s.f;`, `f(t.0)`, `mk().a`, `s.v.into_iter()`) is E0504 case
+`part`; Copy parts are read freely, borrows of parts (`&s.f`,
 `&mut s.f`) and assignments to parts (`s.f = v`, which drops the old part) are unchanged.
 
 Which patterns move. A `let`, `match` arm, or `for` pattern moves its scrutinee if it binds some
@@ -126,8 +151,12 @@ non-Copy part (at any depth) by value. Every alternative of an or-pattern binds 
 with the same modes, so either all of them move or none does. A pattern that binds only Copy
 parts, binds by reference (through a `&` / `&mut` scrutinee), or binds nothing (`_`, a literal,
 `let _ = s;`, `match s { _ => .. }`, `S.{ n, b: _ }` with `n: u32`) only reads: the scrutinee
-stays alive and is dropped with its owner. A struct pattern names a field once (E0105), so each
-part of the value has one sub-pattern: it is bound, or ignored, never both.
+stays alive and is dropped with its owner. A struct pattern, also of a struct-like variant's
+payload, names every field (E0208 case `pattern-missing-field`) and each field once (E0105), so
+each part of the value has exactly one written sub-pattern: it is bound, or ignored, never both,
+never neither. This holds for a pattern through a reference too, which moves and drops nothing:
+a field added to a type makes every pattern over it say what happens to the field. There is no
+rest marker; `f: _` ignores one field.
 
 Decided on the definition. "Non-Copy" is the type as written where the pattern is: in a generic
 fn a part of type `T` is Copy only under a `T: Copy` bound. So `let G.{ a, d: _ } = x;` with
@@ -141,8 +170,8 @@ When and where. A moving pattern takes the whole value at its binding point: the
 `let` statement's pattern, the entry of the arm (after the guard passed), the start of each
 `for` iteration. There the bindings take their parts, the scrutinee becomes moved as a whole
 (a local is moved; a temporary is consumed, never dropped as a whole at its statement end), and
-each non-Copy part the pattern does not bind by value (a `_`, a field the struct
-pattern does not name, a sub-pattern that binds nothing such as a literal) is dropped there,
+each non-Copy part the pattern does not bind by value (a `_`, so `f: _` for a field, a
+sub-pattern that binds nothing such as a literal) is dropped there,
 before the arm body or the next statement, in declaration order of the fields, a nested part
 in place of its field (depth first); of an enum, only the matched variant's payload. No state
 "moved except a part" remains after the binding point.
@@ -184,6 +213,16 @@ The caller rule (every view the target reaches holds all the clause's sources fr
 applies also when the target holds no borrow at this instance (`Slot<u32>`): the sources still
 take the store.
 
+## §3 A borrow of a static
+
+A `&` of an immutable `static` or a part of it (`&A`, `&T[i]`, `&S.f`, the auto-ref of a
+`&self` method call on it) borrows nothing: the storage never ends, is never moved from, and
+changes only through interior mutability, so the reference is a constant like a string literal,
+wherever it flows: returned without `from`, stored through a `&mut` param, into a captured
+reference, a struct field, an `Option`, or a value another thread reads. Still rejected: `&mut A`
+(E0503), a `static mut` (E0809), a local or param that shadows the static, and a `const` (a
+temporary) are borrows of locals (E0512, E0513).
+
 ## §3 Drops
 
 Every value with drop glue is dropped exactly once, on every path, by the owner that holds it
@@ -196,10 +235,8 @@ when that owner ends.
 - **`impl Drop`.** A value whose type has an `impl Drop` is dropped as a whole: its `drop`
   runs once, then its fields are dropped. No pattern takes it apart; one that only reads it
   (`match mk() { F.B => .. }`) leaves it to be dropped where its owner ends.
-- **Compound assignment.** `p op= e` with a user operator on a value with drop glue: the
-  operator call takes the old value of `p` (the callee owns it), and the result is written into
-  `p` without a drop. When `e` leaves by `?`, the old value is dropped once, with `p`, on that
-  exit.
+- **Compound assignment.** `p op= e` drops nothing: every operand of an operator is Copy where
+  it is used (§2 Operator traits), so the old value of `p` has no drop glue.
 - **Temporaries.** A temporary with drop glue is dropped at the end of its statement, the last
   made first, and only if the operand that makes it ran (the right side of `&&` / `||`). These
   are statements of their own for this rule: the condition of an `if` or `while` (each
@@ -316,9 +353,16 @@ resolved `next`), never the instance type. The list is closed: a type not listed
 | a reference to a reference (`&mut &mut It`, `&&mut It`, `& &[T]`, `&mut &[T; N]`, ..) | E0219 `ref-ref`: iterate the inner reference | E0219 `ref-ref` |
 | any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, or a reference to one) | E0219 `not-source` | E0219 `not-source` |
 
-An iterator type is a struct, enum, or generic parameter with `next(&mut self) -> Option<X>`
-(else E0219 `not-source`; a `vec.Vec` or a reference to one: E0219 `as-slice`, iterate
-`.as_slice()`). A generic `T` (or `&mut T`) source is always an iterator through its bound's
+An iterator type is a struct, enum, or generic parameter whose `next` (method lookup, for `T`
+its bounds) is exactly `fn next(&mut self) -> Option<X>`: the loop passes the source and nothing
+else. Another receiver (`&self`, `self`, none), another param, generic params of its own, or
+another result is E0219 `next-shape`; no `next` at all is E0219 `not-source` (a `vec.Vec` or a
+reference to one: `as-slice`, iterate `.as_slice()`). Two `next`s (two traits, or two instances
+of one trait: `T: Nx<u8> + Nx<u16>`) are E0908, as for a call, when one of them has that shape.
+The loop's call of `next` is checked as `recv.next()` is, through the same check of a method
+call: its `needs` against the enclosing fn's (E0704), its privacy (E0106), an `unsafe fn next`
+outside `unsafe(..)` (E0803), the instance's bounds; it is an edge of the call graph (effects,
+`without`, `rec`, lock ranks) and its `requires` runs at its entry. A generic `T` (or `&mut T`) source is always an iterator through its bound's
 `next`: each instance runs that trait method, whatever the instance type is (`T = [u64; 2]` does
 not become an array loop, `T = &mut It` runs `impl Next for &mut It`); a `T` without such a bound
 is E0219 at the definition. Element and binding types, a sequence's length, and the resolved
@@ -331,6 +375,11 @@ an expression whose last step is a field, tuple field, element `e[i]`, sub-slice
 `std.soa` column `ps.x` (of any base, `f().a` included); such an expression in parentheses or
 after `unsafe(..)`. Reason: a loop over a place reads (or writes) it while the body may change
 it; a reference makes the borrow visible and gives it one meaning in the checker and the code.
+
+By value: `for x in &a { let v = *x; .. }` reads each element of a Copy `T`. To move the
+elements of an array place out, make it a temporary: `for x in mem.replace(&mut a, b) { .. }`
+(or pass it through a fn that returns it). A `vec.Vec` gives up its elements by move through
+`pop()`, last first: `loop { match v.pop() { Option.Some(x) => { .. } Option.None => { break; } } }`.
 
 A `&` or `&mut` chunk binding (also the first `tail masked` binding) borrows a copy of the chunk
 that lives in its block; the chunk of the sequence stays borrowed until the block is left (its end, `break`, `continue`, `return`, `?`), where a

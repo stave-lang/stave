@@ -18,6 +18,8 @@ impl<T: Copy> Merge for Slot<T> {
     fn merge(&mut self, other: &Self) { self.v = other.v; }
 }
 
+impl<T: Copy> Copy for Slot<T> {}
+
 impl<T: Copy> Add for Slot<T> {
     fn add(self, rhs: Self) -> Self { return rhs; }
 }
