@@ -1,0 +1,34 @@
+//~ CHECK-ONLY
+// Polymorphic recursion whose type argument doubles: the instance at depth k has a type of 2^k
+// leaves, but only k + 1 distinct types, and every walk over it visits each distinct type once.
+// So the chain reaches the depth limit (E0902) as fast as a linear one (`instantiation_depth`).
+rec fn twice<T: Copy>(x: T, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    return twice::<(T, T)>((x, x), n - 1); //~ ERROR E0902
+}
+
+rec fn as_value<T>(x: T) -> u32 {
+    let g: fn((T, T)) -> u32 = as_value::<(T, T)>; //~ ERROR E0902
+    let _ = g;
+    let _ = x;
+    return 0;
+}
+
+struct P<A, B> { pub a: A, pub b: B }
+impl<A: Copy, B: Copy> Copy for P<A, B> {}
+
+rec fn in_struct<T: Copy>(x: T, y: T) -> u32 {
+    if false {
+        let _ = in_struct::<P<T, T>>(P.{ a: x, b: y }, P.{ a: x, b: y }); //~ ERROR E0902
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    let a = twice(1u32, 3);
+    let b = as_value(1u8);
+    let c = in_struct(1u8, 2u8);
+    return (a + b + c) as% i32;
+}

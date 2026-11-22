@@ -655,6 +655,22 @@ fn e0105_in_a_pattern_says_name_the_field_once() {
     assert!(got[0].1.starts_with("name `n` once") && !got[0].1.contains("rename"), "{got:?}");
 }
 
+/// Polymorphic recursion at `(T, T)` doubles the type argument per level (2^k leaves, k + 1
+/// distinct types): it reaches E0902 as promptly as linear growth, as the type walks visit each
+/// distinct type once. The bound is generous for a loaded CI host; a tree walk needs 2^64 steps.
+#[test]
+fn doubling_instance_chain_is_e0902_promptly() {
+    let src = "rec fn f<T: Copy>(x: T, n: u32) -> u32 {\n\
+         if n == 0 { return 0; }\n\
+         return f::<(T, T)>((x, x), n - 1);\n}\n\
+         fn main() -> i32 { let a = f(1u32, 3); return 0; }\n";
+    let start = std::time::Instant::now();
+    let (_, tc) = mem(src);
+    let codes: Vec<&str> = tc.diagnostics.iter().map(|d| d.code()).collect();
+    assert_eq!(codes, ["E0902"], "{codes:?}");
+    assert!(start.elapsed() < std::time::Duration::from_secs(60), "{:?}", start.elapsed());
+}
+
 /// A field given twice in a struct literal is E0105 `literal-field`: a literal renames nothing,
 /// so the text says to remove one of the two values.
 #[test]

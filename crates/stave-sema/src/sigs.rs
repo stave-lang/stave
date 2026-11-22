@@ -1103,6 +1103,10 @@ pub(crate) struct SigBuilder<'p> {
     /// types for [`LowerHost::const_param_ty`]; the view env stays empty).
     bound_scope: Option<Vec<GenericParam>>,
     layout_busy: Vec<TypeId>,
+    /// The layouts found so far. Only found ones: a `None` may come from the busy stack (a
+    /// cycle, or its limit) and not hold elsewhere. Types share components, so without it a
+    /// `(A, A)` nested k deep costs 2^k.
+    layout_memo: FxHashMap<TypeId, (u64, u64)>,
     /// Lowering the signature of a fn with `needs(...)`: no E0702 (crate::gates).
     ungated: bool,
     /// E0702 spans already reported.
@@ -1200,6 +1204,7 @@ impl<'p> SigBuilder<'p> {
             lang: LangItems::default(),
             const_stack: Vec::new(),
             layout_busy: Vec::new(),
+            layout_memo: FxHashMap::default(),
             cur_generics: Vec::new(),
             bound_scope: None,
             ungated: false,
@@ -2027,12 +2032,18 @@ impl<'p> SigBuilder<'p> {
 
     /// Layout `(size, align)` of a concrete type, demand-driven.
     pub fn layout(&mut self, t: TypeId) -> Option<(u64, u64)> {
+        if let Some(&l) = self.layout_memo.get(&t) {
+            return Some(l);
+        }
         if self.layout_busy.contains(&t) || self.layout_busy.len() > 4096 {
             return None;
         }
         self.layout_busy.push(t);
         let r = self.layout_inner(t);
         self.layout_busy.pop();
+        if let Some(l) = r {
+            self.layout_memo.insert(t, l);
+        }
         r
     }
 

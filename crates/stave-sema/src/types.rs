@@ -22,7 +22,7 @@
 
 use std::cmp::Ordering;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ids::DeclId;
 use crate::prim::{Lanes, Scalar};
@@ -361,44 +361,19 @@ pub trait Interner {
         ) {
             return false;
         }
-        let mut stack = vec![t];
-        let mut kids = Vec::new();
-        while let Some(x) = stack.pop() {
-            let k = self.kind(x);
-            if matches!(k, TypeKind::Error) {
-                return true;
-            }
-            if let TypeKind::Array { len: ConstArg::Error, .. } = k {
-                return true;
-            }
-            kids.clear();
-            k.children(&mut kids);
-            stack.extend_from_slice(&kids);
-        }
-        false
+        any_component(self, t, |k| {
+            matches!(k, TypeKind::Error | TypeKind::Array { len: ConstArg::Error, .. })
+        })
     }
 
     /// Whether `t` mentions a generic parameter (type or const) or `SelfTy`.
     fn has_params(&self, t: TypeId) -> bool {
-        let mut stack = vec![t];
-        let mut kids = Vec::new();
-        while let Some(x) = stack.pop() {
-            let k = self.kind(x);
-            match k {
-                TypeKind::Param(_) | TypeKind::ConstParam(_) | TypeKind::SelfTy => return true,
-                TypeKind::Array { len: ConstArg::Param(_), .. } => return true,
-                TypeKind::Adt { args, .. }
-                    if args.iter().any(|a| matches!(a, GArg::Const(ConstArg::Param(_)))) =>
-                {
-                    return true;
-                }
-                _ => {}
-            }
-            kids.clear();
-            k.children(&mut kids);
-            stack.extend_from_slice(&kids);
-        }
-        false
+        any_component(self, t, |k| match k {
+            TypeKind::Param(_) | TypeKind::ConstParam(_) | TypeKind::SelfTy => true,
+            TypeKind::Array { len: ConstArg::Param(_), .. } => true,
+            TypeKind::Adt { args, .. } => args.iter().any(|a| matches!(a, GArg::Const(ConstArg::Param(_)))),
+            _ => false,
+        })
     }
 
     /// `t` with `Param(i)` replaced by `args[i]` (type args; const args replace const params in
@@ -437,6 +412,34 @@ pub trait Interner {
         (t, n)
     }
 }
+
+/// Whether `t` or a component of it at any depth has a kind `hit` accepts. Interned types share
+/// components (`(T, T)` nested k deep has 2^k leaves but k + 1 distinct ids), so past the first
+/// [`TREE_WALK`] visits each distinct id is visited once: linear in the distinct ids.
+fn any_component<I: Interner + ?Sized>(cx: &I, t: TypeId, hit: impl Fn(&TypeKind) -> bool) -> bool {
+    let mut seen: FxHashSet<TypeId> = FxHashSet::default();
+    let mut visits = 0usize;
+    let mut stack = vec![t];
+    let mut kids = Vec::new();
+    while let Some(x) = stack.pop() {
+        visits += 1;
+        if visits > TREE_WALK && !seen.insert(x) {
+            continue;
+        }
+        let k = cx.kind(x);
+        if hit(k) {
+            return true;
+        }
+        kids.clear();
+        k.children(&mut kids);
+        stack.extend_from_slice(&kids);
+    }
+    false
+}
+
+/// Visits a component walk makes before it remembers the ids it visited (most types are small
+/// trees, which need no set).
+const TREE_WALK: usize = 64;
 
 /// Height of `t` with `Param(i)` replaced by type arg `args[i]`, without building it: a type
 /// without components is 1, every other type one more than its highest component (type
@@ -872,7 +875,7 @@ pub trait Names {
 }
 
 /// The Stave surface spelling of `t` (`&mut [u8]`, `Option<u32>`, `fn(i32) -> i32`), used in
-/// diagnostics. ADTs print by their declared name. Depth-limited.
+/// diagnostics. ADTs print by their declared name. Depth- and length-limited (`..` elides).
 pub fn display<I: Interner + ?Sized>(cx: &I, names: &dyn Names, t: TypeId) -> String {
     let mut s = String::new();
     display_into(cx, names, t, &mut s, 0);
@@ -886,8 +889,12 @@ pub(crate) fn feature_names(bits: u64) -> Vec<&'static str> {
     all.iter().filter(|f| !all.iter().any(|g| g != *f && g.implies().contains(f))).map(|f| f.name()).collect()
 }
 
+/// The longest text [`display`] writes before it elides the rest: a type that shares
+/// components may have exponentially many leaves (`(T, T)` nested 64 deep).
+const DISPLAY_MAX: usize = 4096;
+
 fn display_into<I: Interner + ?Sized>(cx: &I, names: &dyn Names, t: TypeId, s: &mut String, depth: u32) {
-    if depth > 64 {
+    if depth > 64 || s.len() > DISPLAY_MAX {
         s.push_str("..");
         return;
     }
@@ -1219,5 +1226,34 @@ mod tests {
         let r = t.mk_ref(false, p0);
         let s = t.subst(r, &[GArg::Type(ids::U32)], None);
         assert_eq!(t.kind(s), &TypeKind::Ref { mutable: false, inner: ids::U32 });
+    }
+
+    /// `(T, T)` nested 100 deep has 2^100 leaves but 101 distinct ids: the component walks and
+    /// the display finish (a walk of the tree would not), and the display is bounded.
+    #[test]
+    fn shared_components_are_walked_once() {
+        struct N;
+        impl Names for N {
+            fn adt_name(&self, _: DeclId) -> String {
+                "A".into()
+            }
+            fn param_name(&self, i: u32) -> String {
+                format!("T{i}")
+            }
+        }
+        let mut t = TypeTable::new();
+        let (mut closed, mut open) = (ids::U8, t.mk_param(0));
+        for _ in 0..100 {
+            closed = t.mk_tuple(vec![closed, closed]);
+            open = t.mk_tuple(vec![open, open]);
+        }
+        let open_last = t.mk_tuple(vec![closed, open]);
+        assert!(!t.has_params(closed) && !t.has_error(closed));
+        assert!(t.has_params(open) && t.has_params(open_last));
+        let wrong = t.mk_ref(false, ids::ERROR);
+        let with_error = t.mk_tuple(vec![closed, wrong]);
+        assert!(t.has_error(with_error));
+        let s = display(&t, &N, closed);
+        assert!(s.len() <= DISPLAY_MAX + 1024 && s.contains(".."), "{}", s.len());
     }
 }

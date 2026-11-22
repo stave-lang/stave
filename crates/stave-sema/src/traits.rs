@@ -97,11 +97,27 @@ pub fn scalar_layout(k: &TypeKind, sub: &mut dyn FnMut(TypeId) -> Option<(u64, u
 /// Layout of `t` in table `cx` (concrete types only). `depth`: the parts above `t`; a part
 /// [`crate::typedepth::MAX_TYPE_DEPTH`] parts down has no layout.
 pub fn layout_of<I: Interner + ?Sized>(cx: &mut I, sigs: &Sigs, t: TypeId, depth: u32) -> Option<(u64, u64)> {
+    layout_memo(cx, sigs, t, depth, &mut FxHashMap::default())
+}
+
+/// [`layout_of`] with the layouts found so far, by type and depth (a found layout holds at its
+/// depth; `None`s are not kept, they end the walk at once). Types share components, so without
+/// it a `(A, A)` nested k deep costs 2^k.
+fn layout_memo<I: Interner + ?Sized>(
+    cx: &mut I,
+    sigs: &Sigs,
+    t: TypeId,
+    depth: u32,
+    memo: &mut FxHashMap<(TypeId, u32), (u64, u64)>,
+) -> Option<(u64, u64)> {
     if depth >= crate::typedepth::MAX_TYPE_DEPTH {
         return None;
     }
+    if let Some(&l) = memo.get(&(t, depth)) {
+        return Some(l);
+    }
     let k = cx.kind(t).clone();
-    match k {
+    let r = match k {
         TypeKind::Adt { def, args } => {
             let adt = sigs.adt(def)?;
             let mut vls = Vec::new();
@@ -109,7 +125,7 @@ pub fn layout_of<I: Interner + ?Sized>(cx: &mut I, sigs: &Sigs, t: TypeId, depth
                 let mut fs = Vec::new();
                 for f in &v.fields {
                     let ft = cx.subst(f.ty, &args, None);
-                    fs.push(layout_of(cx, sigs, ft, depth + 1)?);
+                    fs.push(layout_memo(cx, sigs, ft, depth + 1, memo)?);
                 }
                 vls.push(fs);
             }
@@ -122,8 +138,10 @@ pub fn layout_of<I: Interner + ?Sized>(cx: &mut I, sigs: &Sigs, t: TypeId, depth
                 (8, 8)
             })
         }
-        _ => scalar_layout(&k, &mut |x| layout_of(cx, sigs, x, depth + 1)),
-    }
+        _ => scalar_layout(&k, &mut |x| layout_memo(cx, sigs, x, depth + 1, memo)),
+    }?;
+    memo.insert((t, depth), r);
+    Some(r)
 }
 
 fn struct_layout(fields: &[(u64, u64)], start: u64) -> Option<(u64, u64)> {
