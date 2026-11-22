@@ -305,11 +305,14 @@ param of an instance, each struct field declared with a fn type), fed by `let x 
 = e`, struct literals, and the arguments of direct and fn-value calls; a local fed once, by a fn
 item or closure literal, holds that value everywhere; every other source (a call result, a value
 `if` / `match`, a payload, a read through a reference, a param or field declared generic) is
+untracked. An expression is a fn item only if it is the node naming one (typeck's list of such
+nodes), never because its last token names one: a value `if` whose last arm is a fn item is
 untracked. Every call through a fn value is a site of the flow, whatever expression yields the
 callee (a call result `mk()()`, an index, a deref, a value `if`): its targets are the values its
 callee's slot holds, or the whole table when the callee is no tracked place; it has none only when
 its callee is a slot no value reaches (a param of a node no call gives a value), so the call never
-runs (debug builds check that every such call has a site). A param slot takes its values from the
+runs (every build checks that every such call has a site, and that every direct call edge has a
+record of the arguments it delivers). A param slot takes its values from the
 argument events of the calls into its node, so it is precise only if every edge into the node
 delivered them: a direct call with parenthesized arguments delivers every param (a method call
 every param but the receiver), a call through a fn value delivers its arguments to each target;
@@ -368,7 +371,10 @@ is `recursive` and `trap`; an `unsafe(..)` outside the built-in packages is `uns
 the runtime's file waits (`read`, `write`, `pread64`, `pwrite64`, `openat`, `flock`) are `block`; a
 `spawn` is `alloc io trap`. A node's set is its own effects and, over each edge, the callee's set
 minus the deny clause of a fn-value call's type: every value of that type is checked where it is
-made (E1403 case `made`, and the coercion rule between fn types). A kept `requires` check is its
+made or converted (E1403 case `made`, and the coercion rule between fn types). A conversion of a
+value `if` / `match` or parentheses is the conversion of each arm: a fn item or closure literal
+arm is checked on its effects, any other arm keeps its own type (E1403); every build checks that
+each checked value is the one its node makes. A kept `requires` check is its
 fn's entry effect `trap`, carried by every edge except one whose calls are all direct and all proved
 in the caller's checked IR. That IR is lowered for the nodes the checks reach, as a build lowers
 them, so every build mode traps at the same instructions. **Guarantees.** No run of a fn with
@@ -376,7 +382,8 @@ them, so every build mode traps at the same instructions. **Guarantees.** No run
 belongs to a node on a path of edges from it, and that node has the op's effect on its own. For
 `trap`: no panic but `StackOverflow`, which no instruction raises; it needs a call cycle (itself
 `trap`) or a wrong stack bound. **What would break it.** A missing edge (a write of a fn-typed place
-the flow misses): the denied effect runs in a callee the set never sees. A boundary fn whose body
+the flow misses): the denied effect runs in a callee the set never sees. A conversion that
+checks fewer values than its expression can have (the last arm of a value `if` only). A boundary fn whose body
 does more than its row, an import whose `without` is false, and an IR built differently from the one
 that runs.
 
@@ -393,18 +400,42 @@ reachable from it changes while it is shared; a `Frozen` type writes through no 
 where it runs. **Guarantees.** A clause writes no place of its fn, moves nothing, and reaches no
 shared mutable state through its arguments or a user `static`: what a callee changes is its own
 frames and memory it allocates (`alloc` and `trap` are allowed), so a run that skips a proven check
-behaves like one that evaluates it. The error trace, the one state of the built-in packages
-outside user statics that the program reads back (`debug.err_trace()`, an `unwrap` panic), is
-restarted by every `Result.Err(..)` and extended by every `?` on an error, also in a clause's
-callees: lowering saves it before the `requires` checks (and the `old(e)` snapshots) and before the
-`ensures` checks of each return, when a clause calls anything or makes a variant, and puts it back
-after them and before a failing check reports. The user site a clause's callees store is read only
-after a later store of the caller (every user call into std stores it first), except by std code
-after it calls back into user code, whose own calls store it as well (a panic location there may
-name a clause's call). **What would break it.** State of the built-in packages a clause can change
-and the program can read back other than the error trace. A missing edge (a fn-value write the flow
+behaves like one that evaluates it. The error trace and the user site are the states of the
+built-in packages outside user statics that the program reads back (`debug.err_trace()`, an
+`unwrap` panic, the location of a panic std raises or of a false `requires`). The trace is
+restarted by every `Result.Err(..)` and extended by every `?` on an error, the site stored by every
+user call into a built-in package, also in a clause's callees. Lowering saves both before
+the `requires` checks (and the `old(e)` snapshots) and before the `ensures` checks of each return,
+and puts both back after them and before a failing check reports, unless every form in the
+clauses is one that runs no code but the clause's own and drops no value (a field, element, or
+sub-slice access, a `const`, `size_of`, `old(..)`, a built-in operator or method such as `len`);
+every other form (any other call, a struct or variant literal, an implied call, a fn value, a value
+that needs dropping) counts as running code.
+**What would break it.** State of the built-in packages a clause can change and the program can
+read back other than the error trace and the user site. A form counted as running no code that
+does. A missing edge (a fn-value write the flow
 misses), which hides the `static` or the `io` / `lock` / `block` callee from both reach checks. A
 type that is wrongly `Frozen`.
+
+## Fn values: what a conversion and a call check
+
+**Assumes.** A fn value's type states what every value of it guarantees (params and return type,
+`needs`, `without`), and three rules keep it true. (a) Converting an expression to a fn type
+checks every fn item and closure literal the expression can evaluate to against the target's
+clauses: a value `if` / `match` and parentheses are converted arm by arm, a fn item or closure
+literal arm is checked where it is made (its features covered by the target's `needs` and those
+proven there, E0707; its effects against the target's `without`, E1403 case `made`), and any other
+arm (a call result, a local, a field, a param) must already have a type that converts. (b) Calling
+a fn value checks the caller against the value type's `needs`, as a direct call is checked against
+the callee's (E0704 case `value`): a value whose type keeps `needs(F)` runs F's code only where F
+is proven; one whose type drops F was made where F is proven, and CPU features never change while a
+program runs. (c) Nothing is silently dropped: a diagnostic that cannot be built from its registry
+template fails the run as an internal error, and every build checks that each value a conversion
+checks is the one its node makes. **Guarantees.** Every call through a fn value runs code its
+caller may run: no feature-gated instruction on a CPU without the feature, no denied effect.
+**What would break it.** A value-producing form converted as a whole, a call through a fn value
+that skips (b), a fn type changed outside the conversion rule (a cast reinterpreting memory:
+undefined behaviour, LANG.md §3).
 
 ## Lock ranks and the join rule: no wait cycle on locks and joins
 

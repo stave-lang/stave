@@ -345,7 +345,12 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
 
     let lib_pkg = output.program.packages.iter().any(|p| p.is_root && p.kind == PackageKind::Lib);
     let mut program: Option<Executable> = None;
-    let code = if output.has_errors() {
+    let code = if let Some(f @ Failure::Internal { .. }) = &output.failure {
+        // a compiler bug fails the run even beside error diagnostics (a dropped one may be the
+        // only real error)
+        let _ = internal_error(&f.to_string(), err);
+        EXIT_ICE
+    } else if output.has_errors() {
         EXIT_USER
     } else if goal == Goal::Build && lib_pkg {
         let _ = writeln!(err, "stave: building a library (`kind = \"lib\"`) is not implemented yet");

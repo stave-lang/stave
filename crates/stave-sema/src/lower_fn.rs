@@ -1985,6 +1985,7 @@ fn empty_body() -> &'static TypedBody {
         drops: Vec::new(),
         denied: Vec::new(),
         valued: Vec::new(),
+        fn_items: Vec::new(),
         has_error: true,
         emulated: Vec::new(),
         contracts: None,

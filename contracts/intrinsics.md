@@ -251,7 +251,9 @@ list):
   `runtime.panic.set_user_site`, the error-trace hooks `runtime.errtrace.push(site: u32)` (the
   error path of `?` on a `Result`, before its scope drops and `ensures` checks; site: the `?`
   token) and `runtime.errtrace.restart(site: u32)` (each evaluated `Result.Err(..)` constructor;
-  site: the `Err` token), both called only in fns of user packages,
+  site: the `Err` token), both called only in fns of user packages, `runtime.errtrace.save() ->
+  Trace` and `restore(t: &Trace)` (around the contract checks whose clauses may run code; a
+  `Trace` holds the user site too),
   `runtime.panic.requires_failed(clause: &str)` and
   `runtime.panic.ensures_failed(site: u32, clause: &str)` (a false contract clause),
   `runtime.panic.test_input()` and `runtime.panic.test_skip()` (the stdout markers of a `test fn`
