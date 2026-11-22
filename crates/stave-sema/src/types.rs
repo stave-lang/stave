@@ -285,7 +285,7 @@ const FIXED: usize = ids::COUNT as usize;
 /// The tallest type term a table holds: a type is one level above its tallest component (type
 /// arguments, elements, fields of a tuple, parameters and result of a fn type), a type without
 /// components is 1 high. Interning a taller type gives the error type and counts a refusal
-/// ([`Interner::refusals`]). So the types of a program are finitely many (every type is built
+/// ([`Interner::refusals`], every attempt). So the types of a program are finitely many (every type is built
 /// from the finitely many written ones by substitution, and none passes this height), and every
 /// walk over types with a visited set ends; polymorphic recursion (`P<T>` holding a `P<(T, T)>`)
 /// grows the height by one per instance and stops here. A program reaches it only with a type
@@ -580,8 +580,6 @@ pub struct TypeTable {
     heights: Vec<u32>,
     /// Keys refused for their height, here and in the overlays merged into this table.
     refused: u32,
-    /// The keys refused here: one refused again is not counted again.
-    refused_keys: rustc_hash::FxHashSet<TypeKind>,
     map: FxHashMap<TypeKind, TypeId>,
     /// `fixed[i]`: the id of well-known type `ids::*` number `i` (identity until canonicalized).
     fixed: [TypeId; FIXED],
@@ -599,7 +597,6 @@ impl TypeTable {
             kinds: Vec::new(),
             heights: Vec::new(),
             refused: 0,
-            refused_keys: Default::default(),
             map: FxHashMap::default(),
             fixed: std::array::from_fn(|i| TypeId(i as u32)),
         };
@@ -737,9 +734,7 @@ impl Interner for TypeTable {
         }
         let h = key_height(&k, |c| self.height(c));
         if h > MAX_TYPE_HEIGHT {
-            if self.refused_keys.insert(k) {
-                self.refused = self.refused.saturating_add(1);
-            }
+            self.refused = self.refused.saturating_add(1);
             return self.error_ty();
         }
         let id = TypeId(self.kinds.len() as u32);
@@ -832,21 +827,12 @@ pub struct Overlay<'g> {
     heights: Vec<u32>,
     /// Keys this overlay refused for their height; merging adds them to the global count.
     pub refused: u32,
-    /// The keys refused here (and not in the global table).
-    refused_keys: rustc_hash::FxHashSet<TypeKind>,
     map: FxHashMap<TypeKind, TypeId>,
 }
 
 impl<'g> Overlay<'g> {
     pub fn new(global: &'g TypeTable) -> Overlay<'g> {
-        Overlay {
-            global,
-            local: Vec::new(),
-            heights: Vec::new(),
-            refused: 0,
-            refused_keys: Default::default(),
-            map: FxHashMap::default(),
-        }
+        Overlay { global, local: Vec::new(), heights: Vec::new(), refused: 0, map: FxHashMap::default() }
     }
 
     /// The height of `t` ([`MAX_TYPE_HEIGHT`]).
@@ -875,9 +861,7 @@ impl Interner for Overlay<'_> {
         }
         let h = key_height(&k, |c| self.height(c));
         if h > MAX_TYPE_HEIGHT {
-            if !self.global.refused_keys.contains(&k) && self.refused_keys.insert(k) {
-                self.refused = self.refused.saturating_add(1);
-            }
+            self.refused = self.refused.saturating_add(1);
             return self.error_ty();
         }
         let id = TypeId(self.local.len() as u32 | TypeId::LOCAL);

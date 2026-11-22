@@ -483,8 +483,8 @@ thread_local! {
 
 /// Lowers a `Type` or `TypeBase` node. `ret_pos`: directly after `->` (where `never` is legal).
 /// A written type taller than [`crate::types::MAX_TYPE_HEIGHT`] is E0005 case `type`, at the
-/// whole written type, once per refused type (one refused again, as an alias's target is at
-/// each use, is not reported again; the types holding it are error types).
+/// whole written type (the outermost one being lowered; the types holding the refused one are
+/// error types, so a type written with it is reported once).
 pub(crate) fn lower_type<H: LowerHost>(h: &mut H, env: &TyEnv<'_>, n: u32, ret_pos: bool) -> TypeId {
     let before = h.refusals();
     let outer = LOWERING.with(|c| {
