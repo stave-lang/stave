@@ -3545,13 +3545,14 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0704",
         severity: Severity::Error,
         area: "features",
-        rule: "callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it. Case `drops`: the same, where the instance only drops a vector through a container",
+        rule: "callee needs features neither the caller nor the target baseline has. Case `inherited`: a generic instance needs them for a type argument (a vector it holds by value), and a non-generic fn calls it, drops it, or makes a fn value of it. Case `drops`: the same, where the instance only drops a vector through a container. Case `value`: the callee is a fn value whose type has `needs(..)`",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "arg", kind: HoleKind::Type, choices: &[] },
             Hole { name: "callee", kind: HoleKind::Path, choices: &[] },
             Hole { name: "feature", kind: HoleKind::Name, choices: &[] },
+            Hole { name: "fn_type", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[
             Shape {
@@ -3589,6 +3590,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add `needs({feature})` to the caller, or reach `{callee}` through a `dispatch` function",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "value",
+                message: "a call through a value of type `{fn_type}` needs `{feature}`, which the caller does not have",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "call needs `{feature}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "add `needs({feature})` to the caller, or make the call in a `dispatch` arm that has it",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

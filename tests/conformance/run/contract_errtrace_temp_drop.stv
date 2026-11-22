@@ -1,0 +1,55 @@
+//~ STDOUT contract_errtrace_temp_drop.stdout
+// A clause leaves the error trace as it found it also when it calls nothing: a struct literal's
+// temporary in a `requires`, an `ensures`, or an `old(..)` runs its `Drop`, which makes a
+// `Result.Err(..)`. Only clauses made of forms that run no code and drop nothing go unbracketed.
+import std.debug;
+import std.io;
+
+struct D {
+    k: u32,
+}
+
+impl Drop for D {
+    fn drop(&mut self) {
+        let r: Result<u32, u32> = Result.Err(self.k);
+    }
+}
+
+fn req(x: u32) -> u32 requires(D.{ k: x }.k < 10u32) {
+    return x;
+}
+
+fn ens(x: u32) -> u32 ensures(D.{ k: result }.k == x) {
+    return x;
+}
+
+fn olds(x: u32) -> u32 ensures(result == old(D.{ k: x }.k)) {
+    return x;
+}
+
+fn plain(xs: &[u32], i: usize) -> u32 requires(i < 4 && xs[i] < 100u32) {
+    return xs[i];
+}
+
+fn line_of(t: &debug.ErrTrace) -> u32 {
+    return match t.origin() {
+        Option.Some(s) => s.line(),
+        Option.None => 0u32,
+    };
+}
+
+fn fail() -> Result<u32, u32> {
+    return Result.Err(7u32);
+}
+
+fn main() {
+    let a = fail();
+    let t0 = debug.err_trace();
+    let b = line_of(&t0);
+    let y = req(3u32) + ens(4u32) + olds(5u32);
+    let t1 = debug.err_trace();
+    let c = line_of(&t1);
+    let xs: [u32; 4] = [1u32, 2u32, 3u32, 4u32];
+    let z = plain(&xs, 2);
+    io.print(f"origin {b} {c}, {y} {z}\n");
+}

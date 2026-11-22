@@ -107,7 +107,8 @@ pub(crate) struct LangFns {
     /// `runtime.errtrace.restart(site: u32)`: a `Result.Err(..)` constructor in a user package.
     pub errtrace_restart: Option<DeclId>,
     /// `runtime.errtrace.save() -> Trace` / `restore(t: &Trace)`: around the contract checks
-    /// whose clauses call anything, so a clause leaves the error trace as it found it.
+    /// whose clauses may run code, so a clause leaves the error trace and the user site as it
+    /// found them.
     pub errtrace_save: Option<DeclId>,
     pub errtrace_restore: Option<DeclId>,
 }

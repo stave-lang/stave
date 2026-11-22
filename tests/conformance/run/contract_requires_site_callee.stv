@@ -1,0 +1,28 @@
+//~ EXIT 101
+//~ STDOUT contract_requires_site_callee.stdout
+//~ STDERR-CONTAINS "panic: Contract at contract_requires_site_callee.stv:26:13 in main.main (thread 0)\nrequires(small(v) && x < 10u32)\n"
+// A false `requires` is located at the call, also when an earlier operand of the clause called a
+// user fn whose own call into std stored another user site: the checks save the user site with
+// the error trace and put it back before a failing check reports.
+import std.io;
+import std.vec;
+
+fn small(v: &vec.Vec<u32>) -> bool {
+    return v.len() < 100;
+}
+
+fn f(v: &vec.Vec<u32>, x: u32) -> u32 requires(small(v) && x < 10u32) {
+    return x;
+}
+
+fn g(x: u32) -> u32 requires(x < 10u32) {
+    return x;
+}
+
+fn main() {
+    let v = vec.Vec::<u32>.new();
+    let a = f(&v, 5u32) + g(1u32);
+    io.print(f"{a}\n");
+    let r = f(&v, 50u32);
+    io.print(f"not reached {r}\n");
+}

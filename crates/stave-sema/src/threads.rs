@@ -28,7 +28,7 @@ use crate::closures::{CaptureMode, ClosureInfo, ClosureKind};
 use crate::diag::mk;
 use crate::ids::{BindingRef, DeclId};
 use crate::sigs::TraitRef;
-use crate::typeck::{Ck, Coercion, Target, TypedBody};
+use crate::typeck::{Ck, Target, TypedBody};
 
 /// A checked fn: its decl, its name for E0806, and (argument index, crossing) per fn-value arg.
 type ThreadFn<'s> = (Option<DeclId>, &'s str, &'s [(usize, Cross)]);
@@ -98,7 +98,7 @@ impl Ck<'_> {
                     let core = chain.last().copied().unwrap_or(arg);
                     if let Some(c) = infos.iter().find(|c| c.node == core) {
                         self.check_captures(c, body, cross, &mut out);
-                    } else if !chain.iter().any(|&n| body.coercion(n) == Some(&Coercion::FnItem)) {
+                    } else if !chain.iter().any(|&n| body.is_fn_item(n)) {
                         let at = icx.node_span(arg);
                         out.extend(mk("E0806", None, &[("callee", callee)], at, &[]));
                     }

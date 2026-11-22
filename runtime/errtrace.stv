@@ -9,7 +9,10 @@
 //   `ensures` checks (site: the `?` token): one more via site.
 // std calls `restart(panic.user_site())` where it makes an error itself, and `save` / `restore`
 // around work that must leave its caller's trace as it was: a task body run on the calling thread
-// (runtime.thread, std.thread) and the fn of `Result.map_err`. `clear` starts a task empty.
+// (runtime.thread, std.thread) and the fn of `Result.map_err`. The compiler calls them around
+// contract checks whose clauses may run code. A saved trace also holds the user site
+// (runtime.panic set_user_site), so the work leaves both as it found them. `clear` starts a task
+// empty.
 //
 // Nothing here traps, allocates, locks, or makes a system call (no effect, and the panic report
 // reads the trace): the ring index is masked and the count wraps.
@@ -17,11 +20,12 @@
 import runtime.state;
 
 // A copy of a trace: the restarting site (state.NO_SITE: none), the via sites pushed since
-// (wrapping), and the last state.NRING of them, via k at index k % NRING.
+// (wrapping), and the last state.NRING of them, via k at index k % NRING; and the user site.
 pub struct Trace {
     pub origin: u32,
     pub count: u32,
     pub ring: [u32; state.NRING],
+    pub site: u32,
 }
 
 const RING_MASK: usize = state.NRING - 1;
@@ -51,7 +55,7 @@ pub fn clear() {
 
 pub fn save() -> Trace {
     let b = state.block();
-    return unsafe("b is this thread's block; only this thread uses it") Trace.{ origin: (*b).origin, count: (*b).count, ring: (*b).ring };
+    return unsafe("b is this thread's block; only this thread uses it") Trace.{ origin: (*b).origin, count: (*b).count, ring: (*b).ring, site: (*b).user_site };
 }
 
 pub fn restore(t: &Trace) {
@@ -60,5 +64,6 @@ pub fn restore(t: &Trace) {
         (*b).origin = t.origin;
         (*b).count = t.count;
         (*b).ring = t.ring;
+        (*b).user_site = t.site;
     }
 }
