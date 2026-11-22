@@ -1124,11 +1124,11 @@ pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(S
 }
 
 /// The loop whose head the edge `from -> to` goes back to, from inside it (`usize::MAX`: none).
-pub(crate) fn back_edge(body: &Body, from: u32, to: u32) -> usize {
+fn back_edge(body: &Body, from: u32, to: u32) -> usize {
     body.loops.iter().position(|&l| to == l.0 && in_loop(l, from)).unwrap_or(usize::MAX)
 }
 
 /// Whether block `b` is one of the blocks of loop `(head, exit, end)`.
-pub(crate) fn in_loop((head, exit, end): (u32, u32, u32), b: u32) -> bool {
+fn in_loop((head, exit, end): (u32, u32, u32), b: u32) -> bool {
     b >= head && b < end && b != exit
 }

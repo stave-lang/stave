@@ -1,27 +1,13 @@
-//! The borrow checker's sparse dataflow against the dense one, and its cost on very large fns.
-//!
-//! - `borrow_tests_agree`: every test of `tests/conformance/borrow` and `tests/borrowcheck`
-//!   under both dataflows in one run (`stave_borrow::Dataflow::Both`: a body whose diagnostics
-//!   or dump lines differ fails the run as an internal error);
-//! - `everything_agrees` (`--ignored`; `tools/ci-step/run.sh borrow-diff`): every package and
-//!   every `.stv` file of the repository (tests, conformance corpus, `bench`, `stage1`, `std`,
-//!   `runtime`), a generated corpus, and the fuzz classes at many seeds, each checked once per
-//!   dataflow: `--diagnostics json` must be byte-identical, and so must the verdict; a third
-//!   run with both in one process compares the per-access dump lines too;
-//! - `large_fns_stay_cheap`: fns of 10 000 statements in the shapes that cost the dense
-//!   dataflow the most are checked within a time bound, and the dataflow's own counts stay under
-//!   fixed bounds, which no machine load changes: per statement the statements applied, the
-//!   state entries copied (a state is copied only into or out of an entry state), the loans
-//!   counted in or out of the live loans, the atoms of the sets entered or joined, and in all
-//!   the times the loans reached through the live ones were searched again and the whole states
-//!   made.
+//! The borrow checker's dataflow on very large fns (`large_fns_stay_cheap`): fns of 10 000
+//! statements in the shapes that cost a dataflow with a full state per block the most are
+//! checked within a time bound, and the dataflow's own counts stay under fixed bounds, which no
+//! machine load changes: per statement the statements applied, the state entries copied (a
+//! state is copied only into or out of an entry state), the loans counted in or out of the live
+//! loans, the atoms of the sets entered or joined, and in all the times the loans reached
+//! through the live ones were searched again and the whole states made.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use gen_corpus::classes::{self, Class};
-use stave_borrow::Dataflow;
 use stave_driver::pipeline::{self, Goal, Options, Output, Stage};
 use stave_driver::shipped::Library;
 
@@ -35,158 +21,9 @@ fn tmp(name: &str) -> PathBuf {
     dir
 }
 
-fn check(root: &Path, dataflow: Dataflow, dump: bool, threads: usize) -> Output {
-    let mut o = Options::new(Goal::Check).threads(Some(threads));
-    o.borrow_dataflow = dataflow;
-    o.borrow_dump = dump;
+fn check(root: &Path, threads: usize) -> Output {
+    let o = Options::new(Goal::Check).threads(Some(threads));
     pipeline::run(root, &Library::in_dir(&repo()), &o).unwrap()
-}
-
-/// What a run says about a program: the diagnostics as `--diagnostics json` prints them, and
-/// why it failed without one.
-fn verdict(out: &Output) -> String {
-    let json = stave_diag::emit_json(&out.diagnostics, out.files()).unwrap();
-    format!("{json}\nfailure: {:?}\n", out.failure.as_ref().map(|f| format!("{f:?}")))
-}
-
-/// Runs `f` on every root, on `jobs` threads; the `Some` results, in root order.
-fn each(roots: &[PathBuf], jobs: usize, f: impl Fn(&Path) -> Option<String> + Sync) -> Vec<String> {
-    let next = AtomicUsize::new(0);
-    let found: Mutex<Vec<(usize, String)>> = Mutex::new(Vec::new());
-    std::thread::scope(|s| {
-        for _ in 0..jobs {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(root) = roots.get(i) else { break };
-                    if let Some(m) = f(root) {
-                        found.lock().unwrap().push((i, m));
-                    }
-                }
-            });
-        }
-    });
-    let mut found = found.into_inner().unwrap();
-    found.sort();
-    found.into_iter().map(|x| x.1).collect()
-}
-
-/// The `.stv` files and the package directories (those with a `stave.toml`) under `dir`.
-fn roots_under(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    entries.sort();
-    for p in entries {
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if p.is_dir() {
-            if name.starts_with('.') || name == "target" || name == "specs" {
-                continue;
-            }
-            if p.join("stave.toml").is_file() {
-                out.push(p.clone());
-            }
-            roots_under(&p, out);
-        } else if name.ends_with(".stv") {
-            out.push(p);
-        }
-    }
-}
-
-/// `None` when the two dataflows agree on `root`, else what differs.
-fn differs(root: &Path) -> Option<String> {
-    let dense = check(root, Dataflow::Dense, false, 1);
-    let sparse = check(root, Dataflow::Sparse, false, 1);
-    let (a, b) = (verdict(&dense), verdict(&sparse));
-    if a != b {
-        return Some(format!("{}:\n--- dense\n{a}--- sparse\n{b}", root.display()));
-    }
-    let both = check(root, Dataflow::Both, true, 1);
-    if let Some(f) = &both.failure
-        && format!("{f:?}").contains("dataflow disagree")
-    {
-        return Some(format!("{}: {f:?}", root.display()));
-    }
-    None
-}
-
-fn jobs() -> usize {
-    std::thread::available_parallelism().map_or(4, |n| n.get()).min(16)
-}
-
-#[test]
-fn borrow_tests_agree() {
-    let mut roots = Vec::new();
-    roots_under(&repo().join("tests/conformance/borrow"), &mut roots);
-    roots_under(&repo().join("tests/borrowcheck"), &mut roots);
-    assert!(roots.len() >= 150, "{}", roots.len());
-    let bad = each(&roots, jobs(), |root| {
-        let out = check(root, Dataflow::Both, true, 1);
-        let f = format!("{:?}", out.failure);
-        f.contains("dataflow disagree").then(|| format!("{}: {f}", root.display()))
-    });
-    assert!(bad.is_empty(), "{}", bad.join("\n"));
-}
-
-#[test]
-#[ignore = "minutes: every program of the repository, a generated corpus, the fuzz classes (run with --ignored)"]
-fn everything_agrees() {
-    let mut roots = Vec::new();
-    roots_under(&repo(), &mut roots);
-    let in_repo = roots.len();
-    assert!(in_repo >= 1300, "{in_repo}");
-    // a generated corpus, as one package and file by file
-    let dir = tmp("corpus");
-    let mix = gen_corpus::Mix::default_mix().unwrap();
-    gen_corpus::generate(&gen_corpus::Options {
-        lines: 30_000,
-        seed: 7,
-        out: dir.clone(),
-        mix,
-        threads: 0,
-        force: true,
-    })
-    .unwrap();
-    roots.push(dir.clone());
-    roots_under(&dir, &mut roots);
-    let generated = roots.len() - in_repo;
-    // the fuzz classes
-    let dir = tmp("classes");
-    let seeds: u64 = std::env::var("STAVE_DIFF_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(150);
-    for class in Class::ALL {
-        for seed in 0..seeds {
-            let p = dir.join(format!("{}-{seed}.stv", class.name()));
-            std::fs::write(&p, classes::generate(class, seed).text).unwrap();
-            roots.push(p);
-        }
-    }
-    let fuzzed = roots.len() - in_repo - generated;
-    let bad = each(&roots, jobs(), differs);
-    // what the programs exercise: borrow diagnostics, bodies in which a store grew a view,
-    // bodies solved with an entry state per block (and whether each such program has an E0501)
-    let seen = each(&roots, jobs(), |r| {
-        let out = check(r, Dataflow::Sparse, false, 1);
-        let code = out.diagnostics.iter().any(|d| d.code().starts_with("E05"));
-        let conflict = out.diagnostics.iter().any(|d| d.code() == "E0501");
-        let bc = out.borrowck.as_ref()?;
-        let quiet = u8::from(bc.cost.exact > 0 && !conflict);
-        Some(format!("{} {} {} {} {quiet}", u8::from(code), bc.checked, bc.cost.grown, bc.cost.exact))
-    });
-    let sum = |k: usize| -> u64 {
-        seen.iter().map(|s| s.split(' ').nth(k).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0)).sum()
-    };
-    eprintln!(
-        "programs: {} ({in_repo} of the repository, {generated} generated, {fuzzed} of the fuzz classes); \
-         {} with a borrow diagnostic; bodies checked: {}, {} of them with a grown view, {} with an entry \
-         state per block ({} programs with such a body and no E0501); differences: {}",
-        roots.len(),
-        sum(0),
-        sum(1),
-        sum(2),
-        sum(3),
-        sum(4),
-        bad.len()
-    );
-    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
 // ---------- large fns ----------
@@ -358,7 +195,7 @@ struct Measured {
 fn measure(shape: &str, n: usize, errors: usize) -> Measured {
     let path = tmp("large").join(format!("{shape}_{n}.stv"));
     std::fs::write(&path, large(shape, n)).unwrap();
-    let out = check(&path, Dataflow::Sparse, false, 2);
+    let out = check(&path, 2);
     let codes: Vec<&str> = out.diagnostics.iter().map(|d| d.code()).collect();
     let first: Vec<String> =
         out.diagnostics.iter().take(3).map(|d| format!("{} {}", d.code(), d.message())).collect();

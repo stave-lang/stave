@@ -1554,7 +1554,7 @@ pub fn for_each_op(rv: &Rvalue, mut f: impl FnMut(&Operand)) {
 }
 
 /// Visits every place a statement names.
-pub fn for_each_place(k: &StmtKind, mut f: impl FnMut(&Place)) {
+fn for_each_place(k: &StmtKind, mut f: impl FnMut(&Place)) {
     match k {
         StmtKind::Assign { dest, rv, .. } => {
             f(dest);
