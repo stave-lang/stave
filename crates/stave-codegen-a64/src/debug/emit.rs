@@ -193,7 +193,9 @@ impl<'a, 'm> Gen<'a, 'm> {
         Ok(Addr::Off(S17, 0))
     }
 
-    /// `rd = rn + imm` (any imm; uses `rd` or `x17` as a temporary for large ones).
+    /// `rd = rn + imm` (any imm; |imm| ≥ 16 MiB is formed in `rd`, or in `x17` when `rd` is `rn`
+    /// or `sp`). `addsub_reg` takes the extended-register form when `rd` or `rn` is `sp`, where
+    /// register 31 is `sp` rather than `xzr`.
     pub fn add_imm(&mut self, rd: Reg, rn: Reg, imm: i64) -> R<()> {
         let (op, mag) = if imm >= 0 { (AddSub::Add, imm as u64) } else { (AddSub::Sub, imm.unsigned_abs()) };
         if mag < 4096 {
@@ -208,6 +210,9 @@ impl<'a, 'm> Gen<'a, 'm> {
             }
         } else {
             let t = if rd != rn && !rd.is_sp() { rd } else { S17 };
+            if t == rn {
+                return Err(bad("add_imm: a large offset from x17 into x17 or sp has no temporary"));
+            }
             self.a.mov_imm(X, t, imm as u64)?;
             self.a.addsub_reg(AddSub::Add, X, rd, rn, t, Shift::Lsl, 0)?;
         }
