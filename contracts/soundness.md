@@ -489,6 +489,34 @@ counts the target it shows, and a bigger frame or a recursion behind the real on
 guard of a stack the build summary calls bounded. A frame larger than the backend reports, and stack
 use outside frames beyond the 4 KiB margin (signal handlers run on the alternate stack).
 
+## Threads of a `scope`: their captures stay borrowed until the join
+
+**Assumes.** A spawned thread runs from its `spawn` until the `scope` joins it, which happens only
+where control leaves the scope's block (its end, `return`, `break`, `continue`, `?`). The borrow
+CFG keeps each spawn's capture loans in the scope's join local, read at each of those exits.
+**Guarantees.** Main never writes, moves, drops, or `&mut`-borrows a captured place while a thread
+may use it: the join local is used on every path from the spawn on, also on one that never leaves
+the block. A path that stops in it (a block closed by a `-> never` call, also through a fn value or
+a closure, a trap, a `match` with no reachable arm, an inner scope that stops) uses the join local
+where it stops, and every edge back to the head of a loop inside the block uses it too, so a loop
+that is never left keeps the loans live through its whole body. Before the spawn the join local
+holds none of its loans (they are made at the `spawn`), and those uses are no joins for the lock
+ranks. **What would break it.** A way to stop or cycle the CFG does not show as a closed block or a
+loop back edge, or a spawn whose loans go elsewhere than the join local.
+
+## Closure environments: a fn value does not outlive the frame of its literal
+
+**Assumes.** Lowering stores the environment of a closure literal with captures (the captured
+places' addresses) in a slot of the frame of the body that evaluates the literal, and the fn value
+points to it; a literal without captures has no environment. **Guarantees.** The fn value borrows
+that slot (a local of the evaluating body that is never written, moved, or ended inside it), so a
+value holding it is never returned from that body (E0512) nor stored where the body's locals cannot
+go (E0513), whatever the captures are: in a closure body they may all be the outer closure's `&`
+captures, which may themselves be returned. Within the frame the slot holds the same addresses at
+every evaluation, so values of earlier evaluations stay valid. **What would break it.** An
+environment placed elsewhere (a heap or caller slot) without changing the rule, or a fn value made
+from a literal that skips the closure path of the CFG.
+
 ## Capture modes: one answer for every rule
 
 **Claim.** A capture held by `&` is never written, mutably borrowed, or moved out by its

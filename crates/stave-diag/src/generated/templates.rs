@@ -2940,7 +2940,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0512",
         severity: Severity::Error,
         area: "borrow",
-        rule: "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows; a borrow of a `static` or a part of it borrows nothing); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)",
+        rule: "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows; a borrow of a `static` or a part of it borrows nothing); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again); case `env`: the returned value holds a closure value made in this body, whose environment (the addresses of its captures) is in this body's frame",
         retired: false,
         located: true,
         holes: &[
@@ -2956,6 +2956,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "return an owned value, or borrow from a parameter named in the `from` clause",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "env",
+                message: "returned value holds a closure whose environment is in this body's frame",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "returned here" },
+                    LabelTemplate { at: "closure", text: "this closure's environment (the addresses of its captures) is made in this frame and ends when it returns" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "write the closure in the fn that owns the captured locals, or return a value computed from them instead of a closure",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

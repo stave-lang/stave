@@ -1196,7 +1196,7 @@ retired = true
 code = "E0512"
 severity = "error"
 area = "borrow"
-rule = "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows; a borrow of a `static` or a part of it borrows nothing); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)"
+rule = "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows; a borrow of a `static` or a part of it borrows nothing); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again); case `env`: the returned value holds a closure value made in this body, whose environment (the addresses of its captures) is in this body's frame"
 holes = { place = "place" }
 message = "returned value borrows local `{place}`"
 labels = [{ at = "primary", text = "returned here" }, { at = "local", text = "`{place}` is dropped when the function returns" }]
@@ -1206,6 +1206,11 @@ fix = { description = "return an owned value, or borrow from a parameter named i
 message = "returned value borrows `{place}` through a `&mut` capture of the closure"
 labels = [{ at = "primary", text = "returned here" }, { at = "capture", text = "the next call of this closure could change `{place}` or lend it again" }]
 fix = { description = "return a copy of the value, or borrow it before the closure (`let r = &{place};`) and return `r` from the closure" }
+
+[diag.cases.env]
+message = "returned value holds a closure whose environment is in this body's frame"
+labels = [{ at = "primary", text = "returned here" }, { at = "closure", text = "this closure's environment (the addresses of its captures) is made in this frame and ends when it returns" }]
+fix = { description = "write the closure in the fn that owns the captured locals, or return a value computed from them instead of a closure" }
 
 [[diag]]
 code = "E0513"

@@ -266,6 +266,9 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                         span,
                         &[("capture", c)],
                     )),
+                    None if root.env => {
+                        out.extend(mk("E0512", Some("env"), &[], span, &[("closure", root.span)]))
+                    }
                     None => out.extend(mk("E0512", None, &[("place", &text)], span, &[("local", root.span)])),
                 }
             }
@@ -384,6 +387,7 @@ mod tests {
             end: None,
             guard: false,
             static_root: false,
+            env: false,
             node,
         };
         Body {

@@ -1,0 +1,39 @@
+//~ STDOUT pos_closure_env.stdout
+// A closure value lives as long as the frame its literal was evaluated in: it may be called,
+// kept, and passed on there (also made in a loop); a closure may return a closure without
+// captures, or one it captured.
+import std.io;
+import std.vec;
+
+view struct H { pub f: fn() -> u64 }
+
+fn seven() -> u64 { return 7; }
+
+fn call(f: fn() -> u64) -> u64 { return f(); }
+
+fn main() -> i32 {
+    let x: u64 = 42;
+    let none = fn() -> fn() -> u64 { return fn() -> u64 { return 1; }; };
+    let item = fn() -> fn() -> u64 { return seven; };
+    let g = fn() -> u64 { return x; };
+    let again = fn() -> fn() -> u64 { return g; };
+    let inner = fn() -> u64 { let h = fn() -> u64 { return x + 1; }; return h() + 1; };
+    let a = none();
+    let b = item();
+    let r = again();
+    let (va, vb, vr, vi) = (a(), b(), r(), inner());
+    io.print(f"{va} {vb} {vr} {vi}\n");
+    let mut fs = vec.Vec::<fn() -> u64>.new();
+    for i in 0..3u64 {
+        fs.push(fn() -> u64 { return x + 2; });
+    }
+    let mut s: u64 = 0;
+    for i in 0..fs.len() {
+        let f = *fs.get_ref(i);
+        s = s + f();
+    }
+    let hv = H.{ f: fn() -> u64 { return x * 2; } };
+    let t = call(g) + (hv.f)();
+    io.print(f"{s} {t}\n");
+    return 0;
+}
