@@ -32,16 +32,83 @@ optimizer rules, planned diagnostics); they say so where they do.
 
 ## Known limits
 
-- Memory safety is the aim, not yet a guarantee: the borrow checker is young, and soundness bugs
-  are expected. A safe program that corrupts memory is a compiler bug; please report it.
-- Generated code is slow next to `-O2`: `--release` assigns registers and cleans up slice accesses,
-  but nothing is inlined, hoisted out of loops, or vectorized.
-- The borrow checker's memory use grows quadratically with the number of borrows in one function.
-- Linux only. No C interop yet (`extern "C"` imports cannot be linked).
+Stave is pre-alpha. This list is meant to be complete: a safe program that breaks a guarantee
+below, or is rejected for no good reason, and is not listed here is a bug; please report it.
+Examples and rewrites: [contracts/known-limits.md](contracts/known-limits.md).
+
+**Guarantees and their gaps**
+
+- Memory safety is the aim, not a proof: the borrow checker is young, and soundness bugs are
+  expected. A safe program that corrupts memory is a compiler bug.
+- Unsafe code in `std` and `runtime` was checked against the borrow model by reading it; thread
+  start and the system-call paths do not run under the interpreter. Unsafe code and C code are
+  trusted not to write function values into places the compiler tracks.
+- Races through raw pointers or `UnsafeCell` are the author's obligation; nothing checks them.
 - "Safe code cannot deadlock" covers ranked locks and thread joins only. Not covered: a file wait
   (`std.io` read, write, open: the `block` effect) on a pipe or FIFO whose other end this process
   holds, a loop that spins on `try_lock` or an atomic until another thread acts (livelock), and a
   panic report stuck on a full stderr pipe. The table is in [std/README.md](std/README.md).
+- Lock-order tracking at run time and an interpreter scheduler are not built: the interpreter runs
+  a spawned body on its one thread, at the join.
+- A `rec fn` cycle and the drop of a recursive value have no computed stack bound: they get
+  `[run] stack` and trap `StackOverflow` past it. Signal handlers run on an alternate stack that no
+  bound counts. There is no GPU stack bound.
+- The effects of `runtime` functions come from a table in the compiler, and `io` leaves out the
+  allocator's, a lock's and a thread's system calls. Effect checks (`without(..)`) run only on
+  programs with no other error. The effect sets over-approximate: a value moved out is still
+  charged the drop where it was made.
+
+**What the interpreter's checking does not see.** It runs the positive conformance programs and
+the fuzzer's programs with borrow tracking and a memory mode; it is the oracle for checker holes.
+
+- A verdict covers the run it saw (one input, one schedule). There is no data-race detection.
+  A program where one thread waits for another before the join never ends there.
+- Leaks, destructors that never run, and hangs are reported by neither mode.
+- A pointer that lost its tag acts as the root of its allocation, accesses by C code and the
+  kernel are not seen, and the captures of a function value that is a param, field or result are
+  not walked. Moves are tracked less exactly than the rules say (guarded or-patterns, drops of
+  moved-out places).
+- Programs with `unsafe` need not run clean there, and the fuzzer builds programs from fixed
+  classes of borrow constructs: a hole outside them is not found by it.
+
+**Valid programs the checker rejects** (each has a rewrite)
+
+- `v.push(*v.get_ref(0));` and `*g.get_mut() = *g.get() + 1;` are E0501: read into a local first.
+- Lock holding is per local type, not per value (E1405): `g = Option.None;` does not release a
+  guard, and an empty `vec.Vec<MutexGuard<..>>` blocks the lock pushed into it.
+- A closure that passes a closure to a helper that calls it is E1409; a closure that returns what
+  an inner closure returns is E0512 when that is a reference to a function value or a view with
+  a function-valued field.
+- A view keeps every loan stored into it after a field is overwritten, and a pattern that takes a
+  view apart does not end a field's borrow: moving the borrowed value afterwards is E0501.
+- Calls through function values are as precise as their flow: some uses of a function-typed place
+  make its calls reach every function value of its type, which can give a false effect, lock-rank,
+  recursion or stack-bound error. `c.select(f, g)` of two function items is one plain fn type.
+- Generic code over masks or vectors (`T: Not` at `mask32x4`) is E0901. A vector type wider than
+  the target's registers cannot be named in a fn without `needs(..)`, even as `Vec` element type.
+- The exhaustiveness search has a limit: a `match` past it is E0300 `limit`.
+
+**Deliberate rules** (they reject programs that would run; each has a rewrite)
+
+- Moves go left to right: `s.consume(s.len())` and `f(s, s.n)` are E0502. No partial moves: a
+  non-Copy value moves whole or is taken apart whole by a pattern (E0504); a `static` is never
+  moved from.
+- `for` names its borrow: an array or slice place is E0219 (`for x in &arr`). A `match` guard only
+  reads (E0505). A temporary ends with its statement, with no constant promotion:
+  `let r = &f();` is E0501.
+- `Drop` impls only on a type of the same package (E0419), not overlapping a `Copy` impl (E0416),
+  and a `Drop` impl on a call cycle needs `rec fn drop`. Operator traits only on `Copy` types.
+- Two bounds of one trait on a param make a method call ambiguous (E0908). Const parameters are
+  unsigned integers. A type nests at most 1,000 levels (E0005).
+
+**Targets and tooling**
+
+- Generated code is slow next to `-O2`: `--release` assigns registers and cleans up slice accesses,
+  but nothing is inlined, hoisted out of loops, or vectorized.
+- Linux only. No C interop yet: `extern "C"` imports check, but a program that reaches one cannot
+  be built. `[target.<T>.link]` in `stave.toml` is reserved for C link inputs.
+- GPU: design only; no PTX back end, no kernel checks beyond the front end. The optimizer is not
+  started.
 
 ## Roadmap
 
