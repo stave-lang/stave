@@ -137,10 +137,10 @@ impl<T: view> Vec<T> {
         if need <= self.cap { return Result.Ok(()); }
         let mut c = if self.cap < 4 then 4 else self.cap *| 2;
         if c < need { c = need; }
-        return self.try_grow_to(c);
+        return unsafe("c >= need > cap >= len") self.try_grow_to(c);
     }
 
-    fn try_grow_to(&mut self, new_cap: usize) -> Result<(), AllocError> {
+    unsafe("new_cap >= len") fn try_grow_to(&mut self, new_cap: usize) -> Result<(), AllocError> {
         let size = mem.type_size::<T>();
         let al = mem.type_align::<T>();
         if size != 0 && new_cap > USIZE_MAX / size { return Result.Err(alloc_error()); }

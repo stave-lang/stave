@@ -111,7 +111,7 @@ pub const AT_HWCAP2: usize = 26;
 // Interrupted PC from the `ucontext_t` of an SA_SIGINFO handler.
 pub unsafe("uctx is the ucontext pointer the kernel passed to the running signal handler")
 fn signal_pc(uctx: usize) -> usize {
-    return sys.ucontext_pc(uctx);
+    return unsafe("uctx is the ucontext pointer the kernel passed to the running signal handler (this fn's obligation)") sys.ucontext_pc(uctx);
 }
 
 fn fd_arg(fd: i32) -> usize {
@@ -129,125 +129,120 @@ fn mut_arg(p: *mut u8) -> usize {
 // ---- files ----
 pub unsafe("buf..buf+len is writable for the duration of the call")
 fn read(fd: i32, buf: *mut u8, len: usize) -> isize {
-    return sys.sc3(SYS_READ, fd_arg(fd), mut_arg(buf), len);
+    return unsafe("read writes at most len bytes at buf, writable for the call (this fn's obligation)") sys.sc3(SYS_READ, fd_arg(fd), mut_arg(buf), len);
 }
 
 pub unsafe("buf..buf+len is readable for the duration of the call")
 fn write(fd: i32, buf: *const u8, len: usize) -> isize {
-    return sys.sc3(SYS_WRITE, fd_arg(fd), ptr_arg(buf), len);
+    return unsafe("write reads len bytes at buf, readable for the call (this fn's obligation)") sys.sc3(SYS_WRITE, fd_arg(fd), ptr_arg(buf), len);
 }
 
 pub unsafe("buf..buf+len is writable for the duration of the call")
 fn pread64(fd: i32, buf: *mut u8, len: usize, off: u64) -> isize {
-    return sys.sc4(SYS_PREAD64, fd_arg(fd), mut_arg(buf), len, off as usize);
+    return unsafe("pread64 writes at most len bytes at buf, writable for the call (this fn's obligation)") sys.sc4(SYS_PREAD64, fd_arg(fd), mut_arg(buf), len, off as usize);
 }
 
 pub unsafe("buf..buf+len is readable for the duration of the call")
 fn pwrite64(fd: i32, buf: *const u8, len: usize, off: u64) -> isize {
-    return sys.sc4(SYS_PWRITE64, fd_arg(fd), ptr_arg(buf), len, off as usize);
+    return unsafe("pwrite64 reads len bytes at buf, readable for the call (this fn's obligation)") sys.sc4(SYS_PWRITE64, fd_arg(fd), ptr_arg(buf), len, off as usize);
 }
 
 pub unsafe("path points to a NUL-terminated byte string")
 fn openat(dirfd: i32, path: *const u8, flags: u32, mode: u32) -> isize {
-    return sys.sc4(SYS_OPENAT, fd_arg(dirfd), ptr_arg(path), flags as usize, mode as usize);
+    return unsafe("openat reads the NUL-terminated string at path (this fn's obligation) and no other memory") sys.sc4(SYS_OPENAT, fd_arg(dirfd), ptr_arg(path), flags as usize, mode as usize);
 }
 
 pub fn close(fd: i32) -> isize {
-    return sys.sc1(SYS_CLOSE, fd_arg(fd));
+    return unsafe("close takes no memory") sys.sc1(SYS_CLOSE, fd_arg(fd));
 }
 
 // `st` must hold the arch's `struct stat` (144 bytes on x86-64, 128 on AArch64).
 pub unsafe("st points to a writable buffer of at least 144 bytes")
 fn fstat(fd: i32, st: *mut u8) -> isize {
-    return sys.sc2(SYS_FSTAT, fd_arg(fd), mut_arg(st));
+    return unsafe("fstat writes the arch's struct stat (at most 144 bytes) at st, writable (this fn's obligation)") sys.sc2(SYS_FSTAT, fd_arg(fd), mut_arg(st));
 }
 
 pub fn lseek(fd: i32, off: i64, whence: i32) -> isize {
-    return sys.sc3(SYS_LSEEK, fd_arg(fd), off as% usize, whence as% usize);
+    return unsafe("lseek takes no memory") sys.sc3(SYS_LSEEK, fd_arg(fd), off as% usize, whence as% usize);
 }
 
 pub fn fsync(fd: i32) -> isize {
-    return sys.sc1(SYS_FSYNC, fd_arg(fd));
+    return unsafe("fsync takes no memory") sys.sc1(SYS_FSYNC, fd_arg(fd));
 }
 
 pub fn fdatasync(fd: i32) -> isize {
-    return sys.sc1(SYS_FDATASYNC, fd_arg(fd));
+    return unsafe("fdatasync takes no memory") sys.sc1(SYS_FDATASYNC, fd_arg(fd));
 }
 
 pub fn ftruncate(fd: i32, len: u64) -> isize {
-    return sys.sc2(SYS_FTRUNCATE, fd_arg(fd), len as usize);
+    return unsafe("ftruncate takes no memory") sys.sc2(SYS_FTRUNCATE, fd_arg(fd), len as usize);
 }
 
 pub unsafe("arg is valid for cmd (a pointer argument points to the kernel's expected struct)")
 fn fcntl(fd: i32, cmd: i32, arg: usize) -> isize {
-    return sys.sc3(SYS_FCNTL, fd_arg(fd), cmd as% usize, arg);
+    return unsafe("arg is valid for cmd (this fn's obligation)") sys.sc3(SYS_FCNTL, fd_arg(fd), cmd as% usize, arg);
 }
 
 pub fn flock(fd: i32, op: i32) -> isize {
-    return sys.sc2(SYS_FLOCK, fd_arg(fd), op as% usize);
+    return unsafe("flock takes no memory") sys.sc2(SYS_FLOCK, fd_arg(fd), op as% usize);
 }
 
 pub unsafe("buf..buf+len is writable for the duration of the call")
 fn getdents64(fd: i32, buf: *mut u8, len: usize) -> isize {
-    return sys.sc3(SYS_GETDENTS64, fd_arg(fd), mut_arg(buf), len);
+    return unsafe("getdents64 writes at most len bytes at buf, writable for the call (this fn's obligation)") sys.sc3(SYS_GETDENTS64, fd_arg(fd), mut_arg(buf), len);
 }
 
 pub unsafe("path points to a NUL-terminated byte string")
 fn unlinkat(dirfd: i32, path: *const u8, flags: u32) -> isize {
-    return sys.sc3(SYS_UNLINKAT, fd_arg(dirfd), ptr_arg(path), flags as usize);
+    return unsafe("unlinkat reads the NUL-terminated string at path (this fn's obligation) and no other memory") sys.sc3(SYS_UNLINKAT, fd_arg(dirfd), ptr_arg(path), flags as usize);
 }
 
 pub unsafe("path points to a NUL-terminated byte string")
 fn mkdirat(dirfd: i32, path: *const u8, mode: u32) -> isize {
-    return sys.sc3(SYS_MKDIRAT, fd_arg(dirfd), ptr_arg(path), mode as usize);
+    return unsafe("mkdirat reads the NUL-terminated string at path (this fn's obligation) and no other memory") sys.sc3(SYS_MKDIRAT, fd_arg(dirfd), ptr_arg(path), mode as usize);
 }
 
 pub unsafe("old and new point to NUL-terminated byte strings")
 fn renameat2(olddir: i32, old: *const u8, newdir: i32, new: *const u8, flags: u32) -> isize {
-    return sys.sc5(SYS_RENAMEAT2, fd_arg(olddir), ptr_arg(old), fd_arg(newdir), ptr_arg(new), flags as usize);
+    return unsafe("renameat2 reads the NUL-terminated strings at old and new (this fn's obligation) and no other memory") sys.sc5(SYS_RENAMEAT2, fd_arg(olddir), ptr_arg(old), fd_arg(newdir), ptr_arg(new), flags as usize);
 }
 
 // ---- memory ----
 // Returns the address (as isize) or -errno. Without MAP_FIXED it touches no existing mapping.
-pub unsafe("with MAP_FIXED, addr..addr+len holds no live Stave object")
+pub unsafe("with MAP_FIXED, addr..addr+len holds no live Stave object and no code or stack in use; fd is -1: the pages are anonymous")
 fn mmap(addr: usize, len: usize, prot: u32, flags: u32, fd: i32, off: u64) -> isize {
-    return sys.sc6(SYS_MMAP, addr, len, prot as usize, flags as usize, fd_arg(fd), off as usize);
+    return unsafe("mmap reads no memory; without MAP_FIXED it replaces no mapping, a MAP_FIXED range holds nothing in use, and fd is -1, so no file backs the new pages (this fn's obligation)") sys.sc6(SYS_MMAP, addr, len, prot as usize, flags as usize, fd_arg(fd), off as usize);
 }
 
-pub unsafe("addr..addr+len holds no live Stave object")
+pub unsafe("addr..addr+len holds no live Stave object and no code or stack in use")
 fn munmap(addr: usize, len: usize) -> isize {
-    return sys.sc2(SYS_MUNMAP, addr, len);
+    return unsafe("munmap removes only addr..addr+len, which holds no live Stave object and no code or stack in use (this fn's obligation)") sys.sc2(SYS_MUNMAP, addr, len);
 }
 
-pub unsafe("old_addr..old_addr+old_len is a mapping owned by the caller; nothing else points into it")
+pub unsafe("old_addr..old_addr+old_len is a mapping owned by the caller that nothing else points into; flags has neither MREMAP_FIXED nor MREMAP_DONTUNMAP")
 fn mremap(old_addr: usize, old_len: usize, new_len: usize, flags: u32) -> isize {
-    return sys.sc5(SYS_MREMAP, old_addr, old_len, new_len, flags as usize, 0);
+    return unsafe("old_addr..old_addr+old_len is the caller's mapping that nothing else points into, and without MREMAP_FIXED the kernel ignores the new address word 0 and moves it only to fresh pages (this fn's obligation)") sys.sc5(SYS_MREMAP, old_addr, old_len, new_len, flags as usize, 0);
 }
 
-pub unsafe("no live Stave object in addr..addr+len needs an access that prot removes")
+pub unsafe("no live Stave object, code, or stack in use in addr..addr+len needs an access that prot removes")
 fn mprotect(addr: usize, len: usize, prot: u32) -> isize {
-    return sys.sc3(SYS_MPROTECT, addr, len, prot as usize);
+    return unsafe("mprotect changes only addr..addr+len, where nothing in use needs an access that prot removes (this fn's obligation)") sys.sc3(SYS_MPROTECT, addr, len, prot as usize);
 }
 
-pub unsafe("the advice does not discard memory holding live Stave objects")
+pub unsafe("the advice discards no memory holding live Stave objects, code, or a stack in use")
 fn madvise(addr: usize, len: usize, advice: i32) -> isize {
-    return sys.sc3(SYS_MADVISE, addr, len, advice as% usize);
+    return unsafe("madvise touches only addr..addr+len, and the advice discards nothing in use there (this fn's obligation)") sys.sc3(SYS_MADVISE, addr, len, advice as% usize);
 }
 
 // ---- threads ----
-pub unsafe("args points to a `struct clone_args` of size bytes; the child stack and entry are valid")
-fn clone3(args: *mut u8, size: usize) -> isize {
-    return sys.sc2(SYS_CLONE3, mut_arg(args), size);
-}
-
 pub unsafe("uaddr (and uaddr2, timeout when the op uses them) are valid for the op")
 fn futex(uaddr: *mut u32, op: i32, val: u32, timeout: usize, uaddr2: usize, val3: u32) -> isize {
-    return sys.sc6(SYS_FUTEX, uaddr as usize, op as% usize, val as usize, timeout, uaddr2, val3 as usize);
+    return unsafe("uaddr, and uaddr2 and timeout where op uses them, are valid for op (this fn's obligation)") sys.sc6(SYS_FUTEX, uaddr as usize, op as% usize, val as usize, timeout, uaddr2, val3 as usize);
 }
 
 pub unsafe("mask..mask+len is writable")
 fn sched_getaffinity(pid: i32, len: usize, mask: *mut u8) -> isize {
-    return sys.sc3(SYS_SCHED_GETAFFINITY, pid as% usize, len, mut_arg(mask));
+    return unsafe("sched_getaffinity writes at most len bytes at mask, writable (this fn's obligation)") sys.sc3(SYS_SCHED_GETAFFINITY, pid as% usize, len, mut_arg(mask));
 }
 
 // A thread running runtime.thread.entry(arg) on the stack [stack, stack + size): clone3, or
@@ -283,39 +278,39 @@ pub fn exit_group(code: i32) -> never {
 }
 
 pub fn getpid() -> i32 {
-    let r = sys.sc0(SYS_GETPID);
+    let r = unsafe("getpid takes no memory") sys.sc0(SYS_GETPID);
     return r as% i32;
 }
 
 pub fn kill(pid: i32, sig: i32) -> isize {
-    return sys.sc2(SYS_KILL, pid as% usize, sig as% usize);
+    return unsafe("kill takes no memory and changes none") sys.sc2(SYS_KILL, pid as% usize, sig as% usize);
 }
 
 pub unsafe("buf..buf+len is writable")
 fn getrandom(buf: *mut u8, len: usize, flags: u32) -> isize {
-    return sys.sc3(SYS_GETRANDOM, mut_arg(buf), len, flags as usize);
+    return unsafe("getrandom writes at most len bytes at buf, writable (this fn's obligation)") sys.sc3(SYS_GETRANDOM, mut_arg(buf), len, flags as usize);
 }
 
 // `struct timespec` is two 64-bit words on both arches: ts[0] = seconds, ts[1] = nanoseconds.
 pub fn clock_gettime(clock: i32, ts: &mut [i64; 2]) -> isize {
     let p = ts as *mut [i64; 2];
-    return sys.sc2(SYS_CLOCK_GETTIME, clock as% usize, p as usize);
+    return unsafe("p is ts: two writable i64 words, the kernel's struct timespec") sys.sc2(SYS_CLOCK_GETTIME, clock as% usize, p as usize);
 }
 
 // ---- signals ----
 // Kernel `struct sigaction` (x86-64 and AArch64): handler, flags, restorer, mask: four words.
-pub unsafe("act and old are null or point to four writable/readable u64 words")
+pub unsafe("act and old are null or point to four readable/writable u64 words; act's handler is SIG_DFL, SIG_IGN, or code that follows the SA_SIGINFO handler ABI, and its restorer is never returned into or is restorer code")
 fn rt_sigaction(sig: i32, act: *const u64, old: *mut u64) -> isize {
-    return sys.sc4(SYS_RT_SIGACTION, sig as% usize, act as usize, old as usize, 8);
+    return unsafe("act and old are null or four-word struct sigactions, and the handler act installs is valid code for every signal it gets (this fn's obligation); 8 is the size of the kernel sigset") sys.sc4(SYS_RT_SIGACTION, sig as% usize, act as usize, old as usize, 8);
 }
 
 pub unsafe("set and old are null or point to one u64 (the kernel sigset)")
 fn rt_sigprocmask(how: i32, set: *const u64, old: *mut u64) -> isize {
-    return sys.sc4(SYS_RT_SIGPROCMASK, how as% usize, set as usize, old as usize, 8);
+    return unsafe("set and old are null or one sigset word (this fn's obligation); 8 is its size; masking changes no memory") sys.sc4(SYS_RT_SIGPROCMASK, how as% usize, set as usize, old as usize, 8);
 }
 
 // `stack_t`: ss_sp (word 0), ss_flags (low 32 bits of word 1), ss_size (word 2).
-pub unsafe("ss and old are null or point to three words; ss_sp..ss_sp+ss_size stays mapped")
+pub unsafe("ss and old are null or point to three words; ss_sp..ss_sp+ss_size is used for nothing else, stays mapped while the thread runs, and holds the kernel's signal frame and the handler's stack use")
 fn sigaltstack(ss: *const u64, old: *mut u64) -> isize {
-    return sys.sc2(SYS_SIGALTSTACK, ss as usize, old as usize);
+    return unsafe("ss and old are null or three-word stack_t records, and the stack ss names is the thread's own, large enough and used for nothing else (this fn's obligation)") sys.sc2(SYS_SIGALTSTACK, ss as usize, old as usize);
 }
