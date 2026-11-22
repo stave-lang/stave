@@ -9,14 +9,17 @@
 //! into a fn value inherits. A type the body holds by value: the type of a param, the return, a
 //! local, or an expression, except an expression that is only a place the body does not read
 //! whole (the operand of `&` / `&mut`, the head of a postfix chain, the target of a plain `=`, a
-//! `match` scrutinee, a `for` source). Only a type mentioning a type parameter counts: a type the
-//! body spells is gated where it is spelled. So `first<T>(xs: &[T]) -> Option<&T>` at `f32x8`
+//! `match` scrutinee, a `for` source). Only a type mentioning a type parameter counts: the rest
+//! is the generic body's, gated as in any body ([`gate_bodies`]). So `first<T>(xs: &[T]) -> Option<&T>` at `f32x8`
 //! inherits nothing (it moves no `T`), and `id<T>(x: T) -> T` at `f32x8` inherits `avx2`.
 //!
 //! **Checks.** A non-generic fn (its closures included) that calls, drops, or makes a fn value of
 //! an instance whose inherited features neither its `needs` nor the target baseline has is
 //! E0704 case `inherited` at the first such site, naming the type argument; where no feature of
 //! the target's arch holds the vector, E0702 there. A generic instance never fails: it inherits.
+//! Every fn body (its closures included) holds by value only vectors the registers of its own
+//! `needs` and the target baseline hold, written or inferred, by the same measure (E0702 at the
+//! first other one, [`gate_bodies`]).
 
 use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
@@ -28,7 +31,7 @@ use crate::callgraph::{CallGraph, EdgeKind, NodeKind};
 use crate::itemcx::{Brackets, ItemCx};
 use crate::mono::InstKey;
 use crate::sigs::{NameCx, Sigs};
-use crate::typeck::{TypedBody, is_expr_kind};
+use crate::typeck::{Target, TypedBody, is_expr_kind};
 use crate::types::{GArg, Interner, TypeId, TypeKind, TypeTable};
 
 /// The widest fixed vector or mask that a value of type `t` holds by value (not behind a
@@ -134,6 +137,28 @@ fn place_only(icx: &ItemCx<'_>, n: u32, p: u32) -> bool {
     }
 }
 
+/// The value nodes of body `b` whose type passes `keep`, with their types, in node order: its
+/// local bindings (closure params included), then each expression that is not only a place
+/// (module docs).
+fn held_nodes(icx: &ItemCx<'_>, b: &TypedBody, mut keep: impl FnMut(TypeId) -> bool) -> Vec<(u32, TypeId)> {
+    let mut out: Vec<(u32, TypeId)> =
+        b.locals.iter().copied().filter(|&(_, t)| !t.is_none() && keep(t)).collect();
+    let mut up: Option<Vec<u32>> = None;
+    for (i, &t) in b.node_types.iter().enumerate() {
+        let n = b.lo + i as u32;
+        if t.is_none() || !icx.kind(n).is_some_and(is_expr_kind) || !keep(t) {
+            continue;
+        }
+        let up = up.get_or_insert_with(|| parents(icx, b.lo, b.node));
+        let p = up.get(i).copied().unwrap_or(u32::MAX);
+        if p != u32::MAX && place_only(icx, n, p) {
+            continue;
+        }
+        out.push((n, t));
+    }
+    out
+}
+
 /// The types mentioning a type parameter that body `b` (of a fn with params `params` and return
 /// `ret`) holds by value, each once (module docs).
 fn body_values<I: Interner + ?Sized>(
@@ -143,34 +168,115 @@ fn body_values<I: Interner + ?Sized>(
     params: &[TypeId],
     ret: TypeId,
 ) -> Vec<TypeId> {
-    let mut out: Vec<TypeId> = Vec::new();
-    let add = |t: TypeId, out: &mut Vec<TypeId>| {
-        if t.is_none() || !cx.has_params(t) || out.contains(&t) {
-            return;
-        }
-        if matches!(cx.kind(t), TypeKind::Ref { .. } | TypeKind::Ptr { .. } | TypeKind::Fn { .. }) {
-            return;
-        }
-        out.push(t);
+    let keep = |t: TypeId| {
+        !t.is_none()
+            && cx.has_params(t)
+            && !matches!(cx.kind(t), TypeKind::Ref { .. } | TypeKind::Ptr { .. } | TypeKind::Fn { .. })
     };
-    for &t in params.iter().chain(std::iter::once(&ret)) {
-        add(t, &mut out);
+    let mut out: Vec<TypeId> = Vec::new();
+    let held = held_nodes(icx, b, &keep).into_iter().map(|x| x.1);
+    for t in params.iter().copied().chain(std::iter::once(ret)).filter(|&t| keep(t)).chain(held) {
+        if !out.contains(&t) {
+            out.push(t);
+        }
     }
-    for &(_, t) in &b.locals {
-        add(t, &mut out);
-    }
-    let lo = b.lo;
-    let up = parents(icx, lo, b.node);
-    for (i, &t) in b.node_types.iter().enumerate() {
-        let n = lo + i as u32;
-        if t.is_none() || !cx.has_params(t) || !icx.kind(n).is_some_and(is_expr_kind) {
+    out
+}
+
+/// Whether a value of type `t` holds by value a vector or mask wider than `width` bits.
+fn wide_held(
+    cx: &mut crate::types::Overlay<'_>,
+    memo: &mut FxHashMap<TypeId, Option<(TypeId, u32)>>,
+    sigs: &Sigs,
+    t: TypeId,
+    width: u32,
+) -> bool {
+    let h = match memo.get(&t) {
+        Some(h) => *h,
+        None => {
+            let h = held_wide(cx, sigs, t);
+            memo.insert(t, h);
+            h
+        }
+    };
+    h.is_some_and(|w| w.1 > width)
+}
+
+/// The width gate of fn bodies (LANG.md §4 "Types": 256 bits need `avx2`, 512 the AVX-512 part
+/// of `v4`): E0702 for a fn body, its closures included, that holds by value a fixed vector or
+/// mask wider than the registers of its `needs` and the target baseline, at the first such value
+/// in source order, whether its type is written or inferred. The part of a type that depends on
+/// a type parameter is not gated here: each instance inherits the features it needs. A body with
+/// a type error, and a fn whose signature is too wide, already have their diagnostic.
+pub(crate) fn gate_bodies(
+    prog: &Program,
+    sigs: &Sigs,
+    table: &TypeTable,
+    bodies: &[TypedBody],
+    brackets: &[Brackets],
+) -> Vec<Diagnostic> {
+    let target = prog.target;
+    let mut cx = crate::types::Overlay::new(table);
+    let mut memo: FxHashMap<TypeId, Option<(TypeId, u32)>> = FxHashMap::default();
+    let mut out = Vec::new();
+    for b in bodies {
+        if b.has_error {
             continue;
         }
-        let p = up.get(i).copied().unwrap_or(u32::MAX);
-        if p != u32::MAX && place_only(icx, n, p) {
+        let Some(sig) = sigs.fn_sig(b.decl) else { continue };
+        let have = target.baseline().union(FeatureSet::from_bits(sig.features).unwrap_or_default());
+        let width = crate::gates::feature_vector_bits(have);
+        let sig_types = sig.params.iter().copied().chain(std::iter::once(sig.ret));
+        if sig_types.filter(|t| !t.is_none()).any(|t| crate::gates::wide_part(&cx, t, width).is_some()) {
             continue;
         }
-        add(t, &mut out);
+        let Some(icx) = brackets.get(b.item.idx()).and_then(|br| ItemCx::new(prog, b.item, br)) else {
+            continue;
+        };
+        let mut found: Vec<(Span, TypeId)> =
+            held_nodes(&icx, b, |t| wide_held(&mut cx, &mut memo, sigs, t, width))
+                .into_iter()
+                .map(|(n, t)| (icx.node_span(n), t))
+                .collect();
+        // Values a postfix chain makes between its steps have no node of their own. A built-in
+        // reads its vector or mask receiver and makes its result; a literal makes its value. A
+        // call makes a value of the callee's signature, which the callee's features cover and
+        // E0704 checks against this fn's (generic callees: by the features they inherit). The
+        // other steps are places, read by a later step or by the chain's node.
+        for (tok, tg) in &b.targets {
+            let made = match tg {
+                Target::Builtin { recv, ret, .. } => {
+                    let r = matches!(cx.kind(*recv), TypeKind::Vector { .. } | TypeKind::Mask { .. });
+                    [if r { *recv } else { TypeId::NONE }, *ret]
+                }
+                Target::Struct { ty, .. } | Target::Variant { ty, .. } => [*ty, TypeId::NONE],
+                Target::Fn { .. }
+                | Target::Method { .. }
+                | Target::TraitMethod { .. }
+                | Target::Op { .. }
+                | Target::FnValue { .. }
+                | Target::Intrinsic { .. }
+                | Target::Field { .. }
+                | Target::TupleField { .. }
+                | Target::Column { .. }
+                | Target::Index { .. }
+                | Target::Slice { .. }
+                | Target::Global { .. }
+                | Target::SoaRow { .. }
+                | Target::SizeOf { .. }
+                | Target::FenceStream
+                | Target::Old => [TypeId::NONE; 2],
+            };
+            for t in made.into_iter().filter(|t| !t.is_none()) {
+                if wide_held(&mut cx, &mut memo, sigs, t, width) {
+                    found.push((icx.tok_span(*tok), t));
+                }
+            }
+        }
+        let Some(&(span, t)) = found.iter().min_by_key(|x| x.0.offset) else { continue };
+        let Some((v, bits)) = memo.get(&t).copied().flatten() else { continue };
+        let ty = crate::types::display(&cx, &NameCx { prog, generics: &[] }, v);
+        out.extend(crate::gates::too_wide(&ty, bits, width, span));
     }
     out
 }

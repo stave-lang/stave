@@ -487,6 +487,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
     bodies.par_iter_mut().for_each(|b| remap_body(b, &map));
     let mut sigs_table = sigs_table;
     remap_sigs(&mut sigs_table, &map_sig);
+    diags.extend(crate::inherit::gate_bodies(prog, &sigs_table, &tys, &bodies, &brackets));
     let mut instances: Vec<Instance> =
         bodies.iter().flat_map(|b| b.sites.iter().map(|s| s.inst.clone())).collect();
     instances.sort();

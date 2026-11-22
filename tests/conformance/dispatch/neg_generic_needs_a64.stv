@@ -7,8 +7,8 @@ fn id<T>(x: T) -> T {
     return x;
 }
 
-fn wide() -> f32 needs(dotprod) {
-    return id(f32x8.splat(1.0)).reduce_add(); //~ ERROR E0702
+fn wide() needs(dotprod) {
+    let f = id::<f32x8>; //~ ERROR E0702
 }
 
 fn narrow() -> f32 {

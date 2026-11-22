@@ -7,8 +7,9 @@
 //!   `x86_64-linux-v3`, 512 on `x86_64-linux-v4`), where a type is written and where a built-in
 //!   returns a value wider than its receiver.
 //!
-//! The blocks are lexical: a closure inside one is inside it. A fn with `needs(...)` is not gated:
-//! its features, not the target baseline, decide what it may use. Ops on a vector with a generic
+//! The blocks are lexical: a closure inside one is inside it. A fn with `needs(...)` is not gated
+//! here: its features, not the target baseline, decide what it may use (the values its body holds:
+//! [`crate::inherit::gate_bodies`]). Ops on a vector with a generic
 //! lane or a sizeless lane count are not gated. A gather or scatter with 8- or 16-bit data or
 //! index lanes is class U; otherwise it takes the worse class of its data and index lane widths.
 //! On `gpu-sm86` only E0702 applies (at 128 bits). A class U op inside `emulate` is recorded for

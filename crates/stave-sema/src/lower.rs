@@ -1153,12 +1153,11 @@ fn assemble(
                     name_site = Site(row);
                 }
             }
-            // a generic instance holds by value only vectors its features hold: the type checker
-            // decided them from its type arguments ([`crate::inherit`])
+            // an instance holds by value only vectors its features hold: the type checker gated
+            // the body and decided a generic instance's features from its type arguments
+            // ([`crate::inherit`])
             #[cfg(debug_assertions)]
-            if let (Job::Inst(k), Some(b)) = (job, &f.body)
-                && !k.args.is_empty()
-            {
+            if let (Job::Inst(_), Some(b)) = (job, &f.body) {
                 let width = crate::gates::feature_vector_bits(prog.target.baseline().union(features));
                 let mut ov = Overlay::new(&*table);
                 let held =

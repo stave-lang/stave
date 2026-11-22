@@ -348,8 +348,9 @@ the same features. The type checker decides them once per instance on the call g
   enum with one inside not behind a reference, raw pointer, slice, or fn type, is the type of a
   param, the return, a local, or an expression of its body after substitution. Not counted: an
   expression that is only a place there (the operand of `&` / `&mut`, the head of a postfix
-  chain, the target of a plain `=`, a `match` scrutinee, a `for` source), and a type the body
-  spells without a type parameter (it is gated where it is written).
+  chain, the target of a plain `=`, a `match` scrutinee, a `for` source), and a type that does
+  not depend on a type parameter (the body gate below checks it against the generic's own
+  `needs`).
 - It inherits the features whose registers hold each such vector (256 bits: `avx2`; 512 bits:
   the AVX-512 part of `v4`), beyond its declared `needs` and the target baseline, and what each
   generic instance it calls, drops (through drop glue), or makes into a fn value inherits.
@@ -364,6 +365,14 @@ the same features. The type checker decides them once per instance on the call g
 - A fn value of an instance has the instance's declared features in its type, not the inherited
   ones: it is made only where they are proven (the rule above), and a value made there stays
   callable anywhere, as for E0707: CPU features never change while a program runs.
+
+Every fn body, generic or not, closures included, is gated the same way (E0702): the values it
+holds by value, as above, whether their type is written or only inferred (a built-in's receiver
+and result inside a postfix chain count), hold no vector wider than the registers of the fn's
+own `needs` plus the target baseline: `needs(avx)` and `needs(fma)` give 128 bits, `needs(avx2)`
+256, any AArch64 feature 128. A value a callee returns is covered by the callee's features,
+which the caller has (E0704). So a check that passes never leaves a vector to the build that the
+fn's features do not hold.
 
 Reason the instance and not the generic: a declared `needs` on a generic would make it uncallable
 without the features at every type argument (`Vec.push` at `u8` included), and a rule on the

@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+//~ TARGET aarch64-linux
+// E0702 in a body on AArch64: no feature has registers wider than 128 bits, so a fn with
+// `needs(..)` holds no wider vector or mask either, written or inferred, in a closure as in the
+// fn. At 128 bits it needs nothing.
+fn apply(f: fn(usize) -> f32, i: usize) -> f32 {
+    return f(i);
+}
+
+fn on_dotprod(xs: &[f32]) -> f32 needs(dotprod) {
+    let v = f32x8.load(xs, 0); //~ ERROR E0702
+    return v.reduce_add();
+}
+
+fn inferred(xs: &[f32]) -> u32 needs(dotprod) {
+    let a = f32x4.load(xs, 0);
+    let m = (a < a).rewiden::<64>(); //~ ERROR E0702
+    return 0;
+}
+
+fn in_closure() -> f32 needs(dotprod) {
+    return apply(fn(i: usize) -> f32 { return f32x8.splat(1.0).reduce_add(); }, 0); //~ ERROR E0702
+}
+
+fn narrow(xs: &[f32]) -> f32 needs(dotprod) {
+    let v = f32x4.load(xs, 0);
+    return v.reduce_add() + apply(fn(i: usize) -> f32 { return f32x4.splat(1.0).reduce_add(); }, 0);
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -3253,7 +3253,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0702",
         severity: Severity::Error,
         area: "features",
-        rule: "vector type wider than the target's register",
+        rule: "vector type wider than the target's register; in a fn body, a value (written or inferred type) holding a vector wider than the registers of the fn's `needs` plus the target baseline",
         retired: false,
         located: true,
         holes: &[

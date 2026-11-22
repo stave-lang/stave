@@ -2,9 +2,9 @@
 //~ TARGET x86_64-linux
 // E0704 case `inherited`: a generic instance that holds a 256-bit vector by value inherits
 // `avx2` from its type argument (512 bits: the AVX-512 part of `v4`), and a non-generic fn
-// without it reaches the instance: by a call, through another generic, by a fn value, by a drop
-// (`Vec`'s drop reads each element; `Vec.new` makes a value it may drop). Generics that only
-// borrow the vector inherit nothing and stay callable there.
+// without it reaches the instance: by a call, by a fn value (of one reaching another generic),
+// by a drop (`Vec`'s drop reads each element; `Vec.new` makes a value it may drop). Generics
+// that only borrow the vector inherit nothing and stay usable there.
 import std.mem;
 import std.vec;
 
@@ -35,22 +35,25 @@ fn count<T>(xs: &[T]) -> usize {
     return n;
 }
 
-fn fma_only(xs: &[f32]) -> usize needs(fma) {
-    let v = f32x8.load(xs, 0);
-    let a = id(v); //~ ERROR E0704
-    let mut b = v;
-    let mut c = v;
-    swap_via(&mut b, &mut c); //~ ERROR E0704
+fn holds<T>() -> usize {
+    let o: Option<T> = Option.None;
+    return 1;
+}
+
+// the fn itself holds no 256-bit value (E0702 would come first): it reaches instances that do
+fn fma_only() -> usize needs(fma) {
+    let n = holds::<f32x8>(); //~ ERROR E0704
     let f = twice::<f32x8>; //~ ERROR E0704
+    let s = swap_via::<f32x8>; //~ ERROR E0704
     let w = vec.Vec::<f32x8>.new(); //~ ERROR E0704
     //~^ ERROR E0704
-    let arr: [f32x8; 2] = [v, v];
-    let r = first(&arr);
-    return count(&arr) + w.len();
+    let r = first::<f32x8>;
+    let c = count::<f32x8>;
+    return n + w.len();
 }
 
 fn avx2_only() needs(avx2) {
-    let v = id(f32x16.splat(1.0)); //~ ERROR E0704
+    let v = id::<f32x16>; //~ ERROR E0704
     let u = id(f32x8.splat(1.0));
 }
 
