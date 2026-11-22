@@ -654,3 +654,99 @@ fn e0105_in_a_pattern_says_name_the_field_once() {
     assert_eq!(got[0].0, "field `n` of `main.H` is named twice in one pattern");
     assert!(got[0].1.starts_with("name `n` once") && !got[0].1.contains("rename"), "{got:?}");
 }
+
+/// The E0908 fixes name each trait instance as the calling module does: a trait of this module
+/// by its name, a generic one with its args (`Nx::<u64>`), a trait of an imported module through
+/// the import (`geo.X1`), one of a module not imported with the `import` to add; `impls-static`
+/// writes the instance's types, not the impl's params. Of two `next`s the `for` fix names the
+/// one with the iterator shape. `main.X` would name `fn main`, so no fix starts with it.
+#[test]
+fn e0908_fixes_name_instances_that_resolve() {
+    let geo = "pub struct It { pub i: u64 }\n\
+         pub struct Jt { pub i: u64 }\n\
+         pub trait X1 { fn m(&self) -> u64; }\n\
+         pub trait X2 { fn m(&self) -> u64; }\n\
+         impl X1 for It { fn m(&self) -> u64 { return 1; } }\n\
+         impl X2 for It { fn m(&self) -> u64 { return 2; } }\n";
+    let tr = "import geo;\n\
+         pub trait Z1 { fn n(&self) -> u64; }\n\
+         pub trait Z2 { fn n(&self) -> u64; }\n\
+         impl Z1 for geo.Jt { fn n(&self) -> u64 { return 3; } }\n\
+         impl Z2 for geo.Jt { fn n(&self) -> u64 { return 4; } }\n";
+    let src = "import geo;\n\
+         struct It { i: u64 }\n\
+         struct W<T> { v: T }\n\
+         trait X1 { fn m(&self) -> u64; }\n\
+         trait X2 { fn m(&self) -> u64; }\n\
+         impl X1 for It { fn m(&self) -> u64 { return 1; } }\n\
+         impl X2 for It { fn m(&self) -> u64 { return 2; } }\n\
+         trait Nx<X> { fn next(&mut self) -> Option<X>; }\n\
+         trait Back { fn next(&mut self) -> Option<u64>; }\n\
+         trait GNext { fn next<U>(&mut self) -> Option<u64>; }\n\
+         impl Nx<u8> for W<u8> { fn next(&mut self) -> Option<u8> { return Option.None; } }\n\
+         impl Nx<u16> for W<u8> { fn next(&mut self) -> Option<u16> { return Option.None; } }\n\
+         trait Mk<T> { fn mk(x: T) -> T; }\n\
+         impl<T: Copy> Mk<[T; 1]> for W<T> { fn mk(x: [T; 1]) -> [T; 1] { return x; } }\n\
+         impl Mk<u64> for W<u64> { fn mk(x: u64) -> u64 { return x; } }\n\
+         fn f<T: Nx<u64> + Back>(t: T) { for x in t { } }\n\
+         fn g<T: GNext + Back>(t: T) { for x in t { } }\n\
+         fn h<T: Nx<u8> + Nx<u16>>(t: T) { for x in t { } }\n\
+         fn main() -> i32 {\n\
+           let it = It.{ i: 0 }; let a = it.m();\n\
+           let mut w = W::<u8>.{ v: 0 }; let b = w.next();\n\
+           let c: u64 = W::<u64>.mk(1u64);\n\
+           let gi = geo.It.{ i: 0 }; let d = gi.m();\n\
+           let gj = geo.Jt.{ i: 0 }; let e = gj.n();\n\
+           return 0; }\n";
+    let (_, tc) = mem_with(src, &[("/m/src/geo.stv", geo), ("/m/src/tr.stv", tr)]);
+    let fixes: Vec<&str> = tc
+        .diagnostics
+        .iter()
+        .filter(|d| d.code() == "E0908")
+        .map(|d| d.fix().map_or("", |f| f.description.as_str()))
+        .collect();
+    let has = |needle: &str| fixes.iter().any(|f| f.contains(needle));
+    assert!(has("`X1.m(x)` or `X2.m(x)`"), "{fixes:?}");
+    assert!(has("`Nx::<u8>.next(x)` or `Nx::<u16>.next(x)`"), "{fixes:?}");
+    assert!(has("`fn pick<X: Mk<[u64; 1]>>(x: [u64; 1]) -> [u64; 1] { return X.mk(x); }`"), "{fixes:?}");
+    assert!(has("match Nx::<u64>.next(&mut it)"), "{fixes:?}");
+    assert!(has("match Back.next(&mut it)"), "{fixes:?}");
+    assert!(has("`geo.X1.m(x)` or `geo.X2.m(x)`"), "{fixes:?}");
+    assert!(has("`tr.Z1.n(x)`") && has("after adding `import tr;` to the imports"), "{fixes:?}");
+    assert_eq!(fixes.len(), 8, "{fixes:?}");
+    assert!(
+        fixes.iter().all(|f| !f.contains("main.") && !f.contains("T0") && !f.contains("<..>")),
+        "{fixes:?}"
+    );
+}
+
+/// E0219 `next-shape` says what keeps a `next` from being an iterator's, at that `next`; E0609
+/// `lane-type` names the lane type no vector has.
+#[test]
+fn e0219_next_shape_and_e0609_lane_type_say_why() {
+    let src = "struct It { i: u64 }\n\
+         struct G { i: u64 }\n\
+         struct P { a: u32 }\n\
+         impl It { fn next(&mut self, k: u64) -> Option<u64> { return Option.None; } }\n\
+         impl G { fn next<U>(&mut self) -> Option<u64> { return Option.None; } }\n\
+         fn v(x: vec<P, 4>) { }\n\
+         fn main() -> i32 { for x in It.{ i: 0 } { } for y in G.{ i: 0 } { } return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str, Vec<&str>)> = tc
+        .diagnostics
+        .iter()
+        .map(|d| (d.code(), d.message(), d.related().iter().map(|r| r.label.as_str()).collect()))
+        .collect();
+    let shape = |why: &str| {
+        got.iter().any(|(c, m, l)| {
+            *c == "E0219"
+                && m.ends_with("its `next` is not `fn next(&mut self) -> Option<T>`")
+                && l.contains(&why)
+        })
+    };
+    assert!(shape("it takes params besides `&mut self`"), "{got:?}");
+    assert!(shape("it has generic params of its own"), "{got:?}");
+    let lane = "`vec<P, 4>` has the lane type `P`, which no vector has";
+    assert!(got.iter().any(|(c, m, _)| *c == "E0609" && *m == lane), "{got:?}");
+    assert_eq!(got.len(), 3, "{got:?}");
+}

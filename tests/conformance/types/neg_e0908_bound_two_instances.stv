@@ -1,0 +1,89 @@
+//~ CHECK-ONLY
+// Two bounds of one trait with other args (`T: Nx<u8> + Nx<u16>`) both supply `next`, as two impls
+// of it do for a concrete type: E0908, for the loop and for a method call alike. Of two `next`s
+// where only one has the iterator shape, the loop is still ambiguous (E0908); where neither has
+// it, there is no iterator (E0219). Named through one instance, the calls are fine.
+struct It { i: u32 }
+
+trait Nx<X> {
+    fn next(&mut self) -> Option<X>;
+}
+
+trait GNext {
+    fn next<U>(&mut self) -> Option<u64>;
+}
+
+trait Next {
+    fn next(&mut self) -> Option<u64>;
+}
+
+trait RefA {
+    fn next(&self) -> Option<u64>;
+}
+
+trait RefB {
+    fn next(&self) -> Option<u64>;
+}
+
+impl Nx<u8> for It {
+    fn next(&mut self) -> Option<u8> {
+        return Option.None;
+    }
+}
+
+impl Nx<u16> for It {
+    fn next(&mut self) -> Option<u16> {
+        return Option.None;
+    }
+}
+
+fn two_args<T: Nx<u8> + Nx<u16>>(t: T) {
+    for x in t { //~ ERROR E0908
+    }
+}
+
+fn two_args_mut<T: Nx<u8> + Nx<u16>>(t: &mut T) {
+    for x in t { //~ ERROR E0908
+    }
+}
+
+fn two_args_call<T: Nx<u8> + Nx<u16>>(t: T) {
+    let mut it = t;
+    let v = it.next(); //~ ERROR E0908
+}
+
+fn same_args_twice<T: Nx<u8> + Nx<u8>>(t: T) {
+    for x in t {
+    }
+}
+
+fn one_shaped<T: GNext + Next>(t: T) {
+    for x in t { //~ ERROR E0908
+    }
+}
+
+fn none_shaped<T: RefA + RefB>(t: T) {
+    for x in t { //~ ERROR E0219
+    }
+}
+
+fn fixed<T: Nx<u8> + Nx<u16>>(t: T) -> u32 {
+    let mut it = t;
+    let mut s: u32 = 0;
+    loop {
+        match Nx::<u16>.next(&mut it) {
+            Option.Some(x) => {
+                s = s + (x as u32);
+            }
+            Option.None => {
+                break;
+            }
+        }
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let s = fixed(It.{ i: 0 });
+    return 0;
+}

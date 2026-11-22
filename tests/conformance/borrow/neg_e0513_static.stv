@@ -1,0 +1,32 @@
+//~ CHECK-ONLY
+// Only a `&` of an immutable static itself borrows nothing. Stored where a longer-lived reference
+// is expected, a local that shadows the static, a closure param that does, and a const (a
+// temporary) are borrows of locals: E0513. `&mut` of a static is E0503 there too.
+static A: u32 = 7;
+
+const C: u32 = 3;
+
+fn shadowed(p: &mut &u32) {
+    let A: u32 = 3;
+    *p = &A; //~ ERROR E0513
+}
+
+fn konst(p: &mut &u32) {
+    *p = &C; //~ ERROR E0513
+}
+
+fn closure_param() -> u32 {
+    let k: u32 = 1;
+    let mut r: &u32 = &k;
+    let mut set = fn(A: u32) { r = &A; }; //~ ERROR E0513
+    set(2);
+    return *r;
+}
+
+fn mutable(p: &mut &mut u32) {
+    *p = &mut A; //~ ERROR E0503
+}
+
+fn main() -> i32 {
+    return 0;
+}

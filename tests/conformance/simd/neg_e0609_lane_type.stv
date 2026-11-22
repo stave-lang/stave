@@ -1,0 +1,24 @@
+//~ CHECK-ONLY
+// A lane type outside `i8..i64 u8..u64 f16 bf16 f32 f64` has no `TxN` spelling to suggest: E0609
+// `lane-type` (`bool`, `usize`, `char`, a struct). The array and the mask its fix names are fine.
+struct P { a: u32 }
+
+fn a(x: vec<P, 4>) { //~ ERROR E0609
+}
+
+fn b(x: vec<bool, 4>) { //~ ERROR E0609
+}
+
+fn c(x: vec<usize, 2>) { //~ ERROR E0609
+}
+
+fn d(x: vec<char, 8>) { //~ ERROR E0609
+}
+
+fn fixed(x: [P; 4], m: mask32x4) -> bool {
+    return x[0].a == 0 || m.to_bits() != 0;
+}
+
+fn main() -> i32 {
+    return 0;
+}

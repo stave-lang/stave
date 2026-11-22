@@ -2062,8 +2062,8 @@ impl<'a> Ck<'a> {
                 });
                 St::BoundAssoc { method, trait_args, self_ty, targs: ga }
             }
-            Lookup::Ambiguous { traits, methods, recv } => {
-                self.e0908(seg, recv, traits, methods);
+            Lookup::Ambiguous { traits, methods, refs, recv } => {
+                self.e0908(seg, recv, traits, methods, &refs);
                 St::Err
             }
             Lookup::NotInBounds { param } => {
@@ -2083,14 +2083,23 @@ impl<'a> Ck<'a> {
         }
     }
 
-    fn e0908(&mut self, seg: u32, recv: TypeId, traits: [DeclId; 2], methods: [DeclId; 2]) {
+    fn e0908(
+        &mut self,
+        seg: u32,
+        recv: TypeId,
+        traits: [DeclId; 2],
+        methods: [DeclId; 2],
+        refs: &[MethodRef; 2],
+    ) {
         let name = self.icx.tok_str(seg).to_string();
         let at = self.icx.tok_span(seg);
-        self.e0908_at(&name, at, recv, traits, methods, None);
+        self.e0908_at(&name, at, recv, traits, methods, refs, None);
     }
 
-    /// E0908 for method `name` at `at`; `source`: the text of a `for` source whose implicit
-    /// `next` it is, and whether that source is a `&mut`.
+    /// E0908 for method `name` at `at`; `refs`: the two methods found. `source`: the text of a
+    /// `for` source whose implicit `next` it is, whether that source is a `&mut`, and which of
+    /// the two `next`s has the iterator shape (the fix advances the source through that one).
+    #[allow(clippy::too_many_arguments)]
     fn e0908_at(
         &mut self,
         name: &str,
@@ -2098,7 +2107,8 @@ impl<'a> Ck<'a> {
         recv: TypeId,
         traits: [DeclId; 2],
         methods: [DeclId; 2],
-        source: Option<(&str, bool)>,
+        refs: &[MethodRef; 2],
+        source: Option<(&str, bool, usize)>,
     ) {
         let tn = self.show(recv);
         let (p1, p2) = (self.prog.decl_path(traits[0]), self.prog.decl_path(traits[1]));
@@ -2120,18 +2130,38 @@ impl<'a> Ck<'a> {
             (false, _) if source.is_some() => Some("for"),
             _ => None,
         };
-        // the fix's code names the trait as this module does: a trait of this module by its name
-        let qual = match self.prog.decl(traits[0]) {
-            Some(d) if d.module == self.icx.res_module() => self.prog.strings.get(d.name).to_string(),
-            _ => p1.clone(),
+        // the fix's code names each trait instance as this module does (`Nx::<u8>` in a call,
+        // `Nx<u8>` in a bound), with the imports that takes
+        let mut imports: Vec<String> = Vec::new();
+        let [(path1, args1), (path2, args2)] =
+            [0, 1].map(|i| self.trait_instance(traits[i], &refs[i], &mut imports));
+        let call = |p: &str, a: &str| if a.is_empty() { p.to_string() } else { format!("{p}::<{a}>") };
+        let (qual, qual2) = match source {
+            Some((_, _, 1)) => (call(&path2, &args2), call(&path1, &args1)),
+            _ => (call(&path1, &args1), call(&path2, &args2)),
         };
-        let mut holes = vec![("name", name), ("type", &tn), ("first", &p1), ("second", &p2)];
-        if let Some((place, _)) = source {
-            holes.extend([("place", place), ("qual", &qual)]);
+        imports.dedup();
+        let imports = if imports.is_empty() {
+            String::new()
+        } else {
+            format!(", after adding `{}` to the imports", imports.join(" "))
+        };
+        let mut holes = vec![
+            ("name", name),
+            ("type", &tn),
+            ("first", &p1),
+            ("second", &p2),
+            ("qual", &qual),
+            ("qual2", &qual2),
+            ("imports", &imports),
+        ];
+        if let Some((place, _, _)) = source {
+            holes.push(("place", place));
         }
         let pick = (case == Some("impls-static")).then(|| {
-            self.pick_fix(&qual, methods[0])
-                .unwrap_or_else(|| [format!("{qual}<..>"), String::new(), String::new(), String::new()])
+            let bound = if args1.is_empty() { path1.clone() } else { format!("{path1}<{args1}>") };
+            let [params, ret, args] = self.pick_fix(&refs[0]).unwrap_or_default();
+            [bound, params, ret, args]
         });
         if let Some([bound, params, ret, args]) = &pick {
             holes.extend([("bound", bound.as_str()), ("params", params), ("ret", ret), ("args", args)]);
@@ -2140,26 +2170,32 @@ impl<'a> Ck<'a> {
         self.report(d);
     }
 
-    /// The `impls-static` fix for impl method `method`: the bound naming its impl (`Mk<u32>`),
-    /// its params as written (`x: u32, k: u8`), its result (` -> u32`, empty for `()`), and the
-    /// param names as call args (`x, k`).
-    fn pick_fix(&mut self, qual: &str, method: DeclId) -> Option<[String; 4]> {
-        let sig = self.sigs.fn_sig(method)?;
+    /// How this module names trait `tr` (the import that takes, if any, is pushed to
+    /// `imports`), and the trait args of the instance that supplies `m`, as written (empty for
+    /// a trait without params).
+    fn trait_instance(&mut self, tr: DeclId, m: &MethodRef, imports: &mut Vec<String>) -> (String, String) {
+        let (path, import) = self.prog.path_from(self.icx.res_module(), tr);
+        imports.extend(import);
+        let targs = self.w.trait_args_of(&mut self.tys, m).unwrap_or_default();
+        let shown: Vec<String> = targs
+            .iter()
+            .map(|a| match a {
+                GArg::Type(t) => self.show(*t),
+                GArg::Const(ConstArg::Value(v)) => v.to_string(),
+                GArg::Const(_) => "_".to_string(),
+            })
+            .collect();
+        (path, shown.join(", "))
+    }
+
+    /// The `impls-static` fix for method `m` (its container's args substituted): its params as
+    /// written (`x: u32, k: u8`), its result (` -> u32`, empty for `()`), and the param names as
+    /// call args (`x, k`).
+    fn pick_fix(&mut self, m: &MethodRef) -> Option<[String; 3]> {
+        let (sig, args, self_ty) = self.w.method_sig(m)?;
         let (params, spans, ret) = (sig.params.clone(), sig.param_spans.clone(), sig.ret);
-        let imp = self.prog.decl(method)?.parent.get()?;
-        let targs = self.sigs.impl_def(imp)?.trait_ref.as_ref()?.args.clone();
-        let mut bound = qual.to_string();
-        if !targs.is_empty() {
-            let shown: Vec<String> = targs
-                .iter()
-                .map(|a| match a {
-                    GArg::Type(t) => self.show(*t),
-                    GArg::Const(ConstArg::Value(v)) => v.to_string(),
-                    GArg::Const(_) => "_".to_string(),
-                })
-                .collect();
-            bound = format!("{bound}<{}>", shown.join(", "));
-        }
+        let params: Vec<TypeId> = params.iter().map(|&t| self.tys.subst(t, &args, self_ty)).collect();
+        let ret = self.tys.subst(ret, &args, self_ty);
         let mut ps = Vec::new();
         let mut names = Vec::new();
         for (i, &t) in params.iter().enumerate() {
@@ -2174,7 +2210,7 @@ impl<'a> Ck<'a> {
         } else {
             format!(" -> {}", self.show(ret))
         };
-        Some([bound, ps.join(", "), ret, names.join(", ")])
+        Some([ps.join(", "), ret, names.join(", ")])
     }
 
     /// The identifier written before `name:` ahead of the type at span `ty` (empty if none).
@@ -3617,8 +3653,8 @@ impl<'a> Ck<'a> {
                     Ty::T(self.tys.subst(ret, &gargs, None))
                 }
             },
-            Lookup::Ambiguous { traits, methods, recv: c } => {
-                self.e0908(seg, c, traits, methods);
+            Lookup::Ambiguous { traits, methods, refs, recv: c } => {
+                self.e0908(seg, c, traits, methods, &refs);
                 self.args_only(args)
             }
             Lookup::NotInBounds { param } => {
@@ -4187,8 +4223,6 @@ impl<'a> Ck<'a> {
         self.diags.len() > reported
     }
 
-    /// The element type of `for .. in iter` (`it`: the type of `iter`); an iterator's `next` is
-    /// recorded as an implicit call at `for_tok`.
     /// The element type of `for` loop `f` over `iter` (of type `it`); an iterator's `next` is
     /// recorded as an implicit call at the `for` token, and the loop's kind with the body.
     fn element_type(&mut self, f: u32, iter: u32, it: TypeId) -> TypeId {
@@ -4204,45 +4238,56 @@ impl<'a> Ck<'a> {
             // reported by `for_stmt`
             _ => return ids::ERROR,
         }
-        // an iterator: `fn next(&mut self) -> Option<X>`
+        // an iterator: its `next` has the one shape `for_next_elem` accepts, for a concrete source
+        // and through a bound alike
+        // the `next` found and why it makes no iterator
+        let mut bad_next: Option<(DeclId, crate::traits::NotNext)> = None;
         if let Some(next) = self.prog.strings.lookup("next") {
             let genv = self.genv();
             let from = self.package();
             let found = self.w.lookup_method(&mut self.tys, it, next, genv, from);
-            if let Lookup::Ambiguous { traits, methods, recv } = found {
-                let at = self.icx.node_span(iter);
-                let text = self.icx.node_text(iter).to_string();
-                let by_mut = matches!(src, ForSource::IterMut { .. });
-                self.e0908_at("next", at, recv, traits, methods, Some((&text, by_mut)));
-                return ids::ERROR;
-            }
-            // a `next` with generic params of its own is no iterator's `next`: the loop has no
-            // args to give it
-            if let Lookup::Found { m, .. } = found
-                && let Some((sig, args, self_ty)) = self.w.method_sig(&m)
-                && sig.generics.len() as u32 == sig.n_parent
-            {
-                let ret = self.tys.subst(sig.ret, &args, self_ty);
-                // lowering resolves `next` with the impl's args (none of its own)
-                let call_args = match &m {
-                    MethodRef::Impl { impl_args, .. } => impl_args.clone(),
-                    _ => Vec::new(),
-                };
-                if let MethodRef::Impl { method, .. } = &m {
-                    self.check_instance(self.icx.node_span(iter), *method, &call_args);
+            if let Lookup::Ambiguous { traits, methods, refs, recv } = found {
+                // the loop's unqualified call is ambiguous whatever the shapes; the fix needs a
+                // `next` the loop could call
+                let shapes = [0, 1].map(|i| self.w.for_next_elem(&mut self.tys, &refs[i]));
+                if let Some(pick) = shapes.iter().position(|s| s.is_ok()) {
+                    let at = self.icx.node_span(iter);
+                    let text = self.icx.node_text(iter).to_string();
+                    let by_mut = matches!(src, ForSource::IterMut { .. });
+                    self.e0908_at("next", at, recv, traits, methods, &refs, Some((&text, by_mut, pick)));
+                    return ids::ERROR;
                 }
-                self.implicit.push((
-                    for_tok,
-                    Target::Method { method: m, args: call_args, adjust: Adjust::default() },
-                ));
-                if let TypeKind::Adt { def, args } = self.tys.kind(ret).clone()
-                    && def == self.sigs.lang.option
-                    && let Some(GArg::Type(x)) = args.first()
-                {
-                    if let Some(k) = src.kind() {
-                        self.for_kinds.push((f, k));
+                if let Err(why) = shapes[0] {
+                    bad_next = Some((methods[0], why));
+                }
+            } else if let Lookup::Found { m, .. } = found {
+                match self.w.for_next_elem(&mut self.tys, &m) {
+                    Ok(x) => {
+                        // lowering resolves `next` with the impl's args (none of its own)
+                        let call_args = match &m {
+                            MethodRef::Impl { impl_args, .. } => impl_args.clone(),
+                            _ => Vec::new(),
+                        };
+                        if let MethodRef::Impl { method, .. } = &m {
+                            self.check_instance(self.icx.node_span(iter), *method, &call_args);
+                        }
+                        self.implicit.push((
+                            for_tok,
+                            Target::Method { method: m, args: call_args, adjust: Adjust::default() },
+                        ));
+                        if let Some(k) = src.kind() {
+                            self.for_kinds.push((f, k));
+                        }
+                        return x;
                     }
-                    return *x;
+                    Err(why) => {
+                        bad_next = match &m {
+                            MethodRef::Impl { method, .. } | MethodRef::Bound { method, .. } => {
+                                Some((*method, why))
+                            }
+                            MethodRef::Builtin(_) => None,
+                        }
+                    }
                 }
             }
         }
@@ -4253,8 +4298,20 @@ impl<'a> Ck<'a> {
         }
         // no `next(&mut self) -> Option<X>`: no iterator (for a generic source, no bound gives one)
         let text = self.icx.node_text(iter).to_string();
-        let case = if self.has_as_slice(it) { "as-slice" } else { "not-source" };
-        let d = mk("E0219", Some(case), &[("place", &text)], self.icx.node_span(iter), &[]);
+        let at = self.icx.node_span(iter);
+        let d = match bad_next.and_then(|(m, why)| Some((self.prog.decl(m)?.name_span, why))) {
+            Some((decl, why)) => mk(
+                "E0219",
+                Some("next-shape"),
+                &[("place", &text), ("why", why.why())],
+                at,
+                &[("next", decl)],
+            ),
+            None => {
+                let case = if self.has_as_slice(it) { "as-slice" } else { "not-source" };
+                mk("E0219", Some(case), &[("place", &text)], at, &[])
+            }
+        };
         self.report(d);
         ids::ERROR
     }

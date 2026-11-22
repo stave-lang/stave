@@ -319,6 +319,35 @@ pub enum MethodRef {
     Builtin(crate::builtins::BuiltinMethod),
 }
 
+/// Why a method is no `for` loop's `next` ([`World::for_next_elem`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotNext {
+    /// Not `&mut self` (`&self`, `self`, or no `self`).
+    Receiver,
+    /// Params besides `self`.
+    Params,
+    /// Generic params of its own.
+    Generics,
+    Unsafe,
+    /// A result other than `Option<X>`.
+    Result,
+    /// A built-in method (none is named `next`).
+    Builtin,
+}
+
+impl NotNext {
+    /// The E0219 `next-shape` reason (a `why` choice of the registry).
+    pub fn why(self) -> &'static str {
+        match self {
+            NotNext::Receiver => "it does not take `&mut self`",
+            NotNext::Params => "it takes params besides `&mut self`",
+            NotNext::Generics => "it has generic params of its own",
+            NotNext::Unsafe => "it is `unsafe`",
+            NotNext::Result | NotNext::Builtin => "it does not return an `Option`",
+        }
+    }
+}
+
 /// The receiver adjustment of a method call (made explicit for lowering and borrowck).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Adjust {
@@ -338,10 +367,12 @@ pub enum Lookup {
         level: u32,
         recv: TypeId,
     },
-    /// Two traits supply it (E0908): the trait decls and their method decls.
+    /// Two traits, or two instances of one trait, supply it (E0908): the trait decls, their
+    /// method decls, and the two methods as resolved.
     Ambiguous {
         traits: [DeclId; 2],
         methods: [DeclId; 2],
+        refs: Box<[MethodRef; 2]>,
         recv: TypeId,
     },
     /// A generic param without a bound providing it (E0901).
@@ -1135,14 +1166,15 @@ impl<'a> World<'a> {
     }
 
     /// Trait methods named `name` reachable from a generic param's bounds:
-    /// (trait decl, method decl, trait args).
+    /// (trait decl, method decl, trait args). Two bounds of one trait with other args
+    /// (`T: Nx<u8> + Nx<u16>`) are two entries, as two impls of one trait are.
     fn bound_methods(&self, env: &[GenericParam], param: u32, name: Sym) -> Vec<(DeclId, DeclId, Vec<GArg>)> {
         let mut out = Vec::new();
         let Some(g) = env.get(param as usize) else { return out };
         for b in &g.bounds {
             if let Some(m) = self.prog.member(b.trait_decl, name)
                 && self.prog.decl(m).is_some_and(|x| x.kind == DeclKind::TraitMethod)
-                && !out.iter().any(|(t, _, _)| *t == b.trait_decl)
+                && !out.iter().any(|(t, _, a)| *t == b.trait_decl && *a == b.args)
             {
                 out.push((b.trait_decl, m, b.args.clone()));
             }
@@ -1177,7 +1209,17 @@ impl<'a> World<'a> {
                         };
                     }
                     [a, b, ..] => {
-                        return Lookup::Ambiguous { traits: [a.0, b.0], methods: [a.1, b.1], recv: c };
+                        let r = |x: &(DeclId, DeclId, Vec<GArg>)| MethodRef::Bound {
+                            method: x.1,
+                            trait_args: x.2.clone(),
+                            self_ty: c,
+                        };
+                        return Lookup::Ambiguous {
+                            traits: [a.0, b.0],
+                            methods: [a.1, b.1],
+                            refs: Box::new([r(a), r(b)]),
+                            recv: c,
+                        };
                     }
                     [] => {
                         if !matches!(cx.kind(c), TypeKind::Ref { .. }) {
@@ -1189,7 +1231,7 @@ impl<'a> World<'a> {
             if let Some(r) = self.lookup_at(cx, c, name, env, from) {
                 return match r {
                     Ok(m) => Lookup::Found { m, level, recv: c },
-                    Err((traits, methods)) => Lookup::Ambiguous { traits, methods, recv: c },
+                    Err((traits, methods, refs)) => Lookup::Ambiguous { traits, methods, refs, recv: c },
                 };
             }
             if let Some(b) = crate::builtins::builtin_method(cx, c, self.prog.strings.get(name)) {
@@ -1212,7 +1254,7 @@ impl<'a> World<'a> {
         name: Sym,
         env: &[GenericParam],
         from: Option<crate::PackageId>,
-    ) -> Option<Result<MethodRef, ([DeclId; 2], [DeclId; 2])>> {
+    ) -> Option<Result<MethodRef, ([DeclId; 2], [DeclId; 2], Box<[MethodRef; 2]>)>> {
         let seen = |i: DeclId| match (from, package_of(self.prog, i)) {
             (Some(f), Some(p)) => package_sees(self.prog, f, p),
             _ => true,
@@ -1301,7 +1343,8 @@ impl<'a> World<'a> {
             1 => found.pop().map(|(_, m, _)| Ok(m)),
             _ => {
                 found.sort_by_key(|(t, _, _)| *t);
-                Some(Err(([found[0].0, found[1].0], [found[0].2, found[1].2])))
+                let refs = Box::new([found[0].1.clone(), found[1].1.clone()]);
+                Some(Err(([found[0].0, found[1].0], [found[0].2, found[1].2], refs)))
             }
         }
     }
@@ -1316,6 +1359,47 @@ impl<'a> World<'a> {
             MethodRef::Bound { method, trait_args, self_ty } => {
                 Some((self.sigs.fn_sig(*method)?, trait_args.clone(), Some(*self_ty)))
             }
+            MethodRef::Builtin(_) => None,
+        }
+    }
+
+    /// `m` as the `next` a `for` loop calls, which passes the source and nothing else: exactly
+    /// `fn next(&mut self) -> Option<X>` (no other param, no generic param of its own, not
+    /// `unsafe`); its element type `X`. Every other shape is no iterator's `next`: the first
+    /// part that differs.
+    pub fn for_next_elem<I: Interner + ?Sized>(&self, cx: &mut I, m: &MethodRef) -> Result<TypeId, NotNext> {
+        let (sig, args, self_ty) = self.method_sig(m).ok_or(NotNext::Builtin)?;
+        if sig.self_kind != Some(crate::sigs::SelfKind::RefMut) {
+            return Err(NotNext::Receiver);
+        }
+        if sig.params.len() != 1 {
+            return Err(NotNext::Params);
+        }
+        if sig.generics.len() != sig.n_parent as usize {
+            return Err(NotNext::Generics);
+        }
+        if sig.is_unsafe {
+            return Err(NotNext::Unsafe);
+        }
+        let ret = cx.subst(sig.ret, &args, self_ty);
+        match cx.kind(ret) {
+            TypeKind::Adt { def, args } if *def == self.sigs.lang.option => match args.first() {
+                Some(GArg::Type(x)) => Ok(*x),
+                _ => Err(NotNext::Result),
+            },
+            _ => Err(NotNext::Result),
+        }
+    }
+
+    /// The trait args of the trait instance that supplies `m` (an impl's, its args substituted,
+    /// or a bound's); `None` for an inherent or built-in method.
+    pub fn trait_args_of<I: Interner + ?Sized>(&self, cx: &mut I, m: &MethodRef) -> Option<Vec<GArg>> {
+        match m {
+            MethodRef::Impl { impl_decl, impl_args, .. } => {
+                let tr = self.sigs.impl_def(*impl_decl)?.trait_ref.as_ref()?;
+                Some(tr.args.iter().map(|&a| crate::mono::subst_garg(cx, a, impl_args)).collect())
+            }
+            MethodRef::Bound { trait_args, .. } => Some(trait_args.clone()),
             MethodRef::Builtin(_) => None,
         }
     }

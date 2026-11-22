@@ -1842,11 +1842,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0219",
         severity: Severity::Error,
         area: "types",
-        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one; a struct, enum, or generic type without a `next(&mut self) -> Option<T>` that has no generic params of its own, for a generic type from its bounds), and a range or iterator as a chunk source",
+        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `next-shape`: the source type's `next` (a generic type's from its bounds; of two ambiguous ones, when neither fits) is not exactly `fn next(&mut self) -> Option<T>`: another receiver, other params, generic params of its own, `unsafe`, or another result; case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one; a struct, enum, or generic type without a `next`), and a range or iterator as a chunk source",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
+            Hole { name: "why", kind: HoleKind::TextLiteral, choices: &["it does not take `&mut self`", "it takes params besides `&mut self`", "it has generic params of its own", "it is `unsafe`", "it does not return an `Option`"] },
         ],
         shapes: &[
             Shape {
@@ -1893,6 +1894,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "iterate `&mut a` of a mutable array or slice place",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "next-shape",
+                message: "`{place}` is not a `for` source: its `next` is not `fn next(&mut self) -> Option<T>`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "the loop calls `next` with this source alone" },
+                    LabelTemplate { at: "next", text: "{why}" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "give the type `fn next(&mut self) -> Option<T>` (no other params, no generic params of its own), or call this `next` in a `loop` with its args",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3171,11 +3185,13 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0609",
         severity: Severity::Error,
         area: "simd",
-        rule: "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param. Case `generic-lane`: T is a generic param (a generic lane type is planned)",
+        rule: "generic vector spelling `vec<T, N>` / `mask<W, N>` with no generic argument; write `f32x8` / `mask32x8`. Case `lanes`: N or W is not a literal lane count (2..64, a power of two) or mask width (8, 16, 32, 64), e.g. a const param. Case `generic-lane`: T is a generic param (a generic lane type is planned). Case `lane-type`: T is no lane type (`bool`, `usize`, `char`, a struct, ..), so no `TxN` spelling exists",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "concrete", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "lane", kind: HoleKind::Type, choices: &[] },
+            Hole { name: "n", kind: HoleKind::Int, choices: &[] },
             Hole { name: "spelled", kind: HoleKind::Source, choices: &[] },
         ],
         shapes: &[
@@ -3201,6 +3217,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write a concrete vector type such as `f32x8` or `u32x4`, one fn per lane type",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "lane-type",
+                message: "`{spelled}` has the lane type `{lane}`, which no vector has",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "lanes are `i8`..`i64`, `u8`..`u64`, `f16`, `bf16`, `f32`, `f64`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use an array `[{lane}; {n}]`, or a vector of a lane type such as `u32x{n}` (a mask such as `mask32x{n}` for `bool` lanes)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4441,17 +4469,19 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0908",
         severity: Severity::Error,
         area: "generics",
-        rule: "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type in the calling package and its dependencies) finds the method in two traits, or (case `impls`, `impls-static` for a fn without `self`) in two impls of one trait with other trait args (impls with the same trait args are E0903, not this); case `for`, `for-mut` for a `&mut` source: two traits give the `next` of a `for` source, which the loop calls unqualified",
+        rule: "ambiguous method call: method lookup (inherent impls first, then every trait impl of the receiver type in the calling package and its dependencies; for a generic type, its bounds) finds the method in two traits, or (case `impls`, `impls-static` for a fn without `self`) in two instances of one trait with other trait args: two impls, or two bounds `T: Tr<u8> + Tr<u16>` (impls with the same trait args are E0903, not this); case `for`, `for-mut` for a `&mut` source: two traits give the `next` of a `for` source, which the loop calls unqualified (when neither `next` has the iterator shape: E0219 `next-shape`). The fix names each trait instance as the calling module does: by its name, or through an import of its module (with the `import` to add when there is none), with its trait args",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "args", kind: HoleKind::Source, choices: &[] },
             Hole { name: "bound", kind: HoleKind::Type, choices: &[] },
             Hole { name: "first", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "imports", kind: HoleKind::Source, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
             Hole { name: "params", kind: HoleKind::Source, choices: &[] },
             Hole { name: "place", kind: HoleKind::Place, choices: &[] },
-            Hole { name: "qual", kind: HoleKind::Path, choices: &[] },
+            Hole { name: "qual", kind: HoleKind::Source, choices: &[] },
+            Hole { name: "qual2", kind: HoleKind::Source, choices: &[] },
             Hole { name: "ret", kind: HoleKind::Type, choices: &[] },
             Hole { name: "second", kind: HoleKind::Path, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
@@ -4466,7 +4496,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "second", text: "`{second}.{name}` declared here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "call it qualified, with the receiver as first argument: `{first}.{name}(x)` or `{second}.{name}(x)`",
+                    description: "call it qualified, with the receiver as first argument (`&x` for `&self`, `&mut x` for `&mut self`): `{qual}.{name}(x)` or `{qual2}.{name}(x)`{imports}",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4480,7 +4510,7 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "second", text: "`{second}.{name}` declared here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "keep one of the two bounds or impls, or advance it through one trait: `let mut it = {place}; loop {{ match {qual}.{name}(&mut it) {{ Option.Some(x) => {{ .. }} Option.None => {{ break; }} }} }}`",
+                    description: "keep one of the two bounds or impls, or advance it through one trait: `let mut it = {place}; loop {{ match {qual}.{name}(&mut it) {{ Option.Some(x) => {{ .. }} Option.None => {{ break; }} }} }}`{imports}",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4494,35 +4524,35 @@ pub(super) static ENTRIES: &[Entry] = &[
                     LabelTemplate { at: "second", text: "`{second}.{name}` declared here" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "keep one of the two bounds or impls, or advance it through one trait: `loop {{ match {qual}.{name}({place}) {{ Option.Some(x) => {{ .. }} Option.None => {{ break; }} }} }}`",
+                    description: "keep one of the two bounds or impls, or advance it through one trait: `loop {{ match {qual}.{name}({place}) {{ Option.Some(x) => {{ .. }} Option.None => {{ break; }} }} }}`{imports}",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
             Shape {
                 case: "impls",
-                message: "method `{name}` of `{type}` is ambiguous: two impls of `{first}` (other trait args) supply it",
+                message: "method `{name}` of `{type}` is ambiguous: two instances of `{first}` (other trait args) supply it",
                 labels: &[
                     LabelTemplate { at: "primary", text: "ambiguous call" },
-                    LabelTemplate { at: "first", text: "one impl's `{name}`" },
-                    LabelTemplate { at: "second", text: "another impl's `{name}`" },
+                    LabelTemplate { at: "first", text: "one instance's `{name}`" },
+                    LabelTemplate { at: "second", text: "another instance's `{name}`" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "call it through the trait with its args, the receiver as first argument: `{first}::<..>.{name}(x)`",
+                    description: "call it through one instance, with the receiver as first argument (`&x` for `&self`, `&mut x` for `&mut self`): `{qual}.{name}(x)` or `{qual2}.{name}(x)`{imports}",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
             },
             Shape {
                 case: "impls-static",
-                message: "`{type}.{name}` is ambiguous: two impls of `{first}` (other trait args) supply it",
+                message: "`{type}.{name}` is ambiguous: two instances of `{first}` (other trait args) supply it",
                 labels: &[
                     LabelTemplate { at: "primary", text: "ambiguous call" },
-                    LabelTemplate { at: "first", text: "one impl's `{name}`" },
-                    LabelTemplate { at: "second", text: "another impl's `{name}`" },
+                    LabelTemplate { at: "first", text: "one instance's `{name}`" },
+                    LabelTemplate { at: "second", text: "another instance's `{name}`" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "name one impl through a bound: `fn pick<X: {bound}>({params}){ret} {{ return X.{name}({args}); }}`, called as `pick::<{type}>({args})` (no path gives both the type and the trait args of a fn without `self`)",
+                    description: "name one impl through a bound: `fn pick<X: {bound}>({params}){ret} {{ return X.{name}({args}); }}`, called as `pick::<{type}>({args})`{imports} (no path gives both the type and the trait args of a fn without `self`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
