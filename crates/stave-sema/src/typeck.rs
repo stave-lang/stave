@@ -210,6 +210,11 @@ pub struct TypedBody {
     pub stmt_ends: crate::temps::StmtEnds,
     /// Internal errors found while checking the body (const evaluation).
     pub internal: Vec<String>,
+    /// The values the fn holds whole, by the node that makes or binds them (the decl's node
+    /// for the return value), sorted: parameters and bindings, array and tuple literals, the
+    /// return value. Their types are checked against [`crate::consteval::MAX_VALUE_BYTES`] here
+    /// for a concrete type and per instance for a generic one ([`instance_sizes`]).
+    pub held: Vec<(u32, TypeId)>,
 }
 
 impl TypedBody {
@@ -521,6 +526,7 @@ fn check_in_pool(prog: &Program) -> Typeck {
     instances.sort();
     instances.dedup();
     let deep = crate::mono::depth_check(prog, &sigs_table, &tys, &bodies, &brackets);
+
     // polymorphic recursion (E0902) has no finite instance graph
     let too_deep = !deep.is_empty();
     diags.extend(deep);
@@ -547,6 +553,9 @@ fn check_in_pool(prog: &Program) -> Typeck {
         diags.extend(mk("E0902", Some("graph"), &[("generic", &generic)], span, &[]));
     }
     diags.extend(crate::typedepth::check(prog, &sigs_table, &tys, &bodies, &call_graph, &brackets));
+    if !call_graph.truncated {
+        diags.extend(instance_sizes(prog, &sigs_table, &tys, &bodies, &call_graph));
+    }
     let t_graph = t3.elapsed();
     let diagnostics = stave_diag::canonical_order(diags, &prog.source_map);
     Typeck {
@@ -562,6 +571,64 @@ fn check_in_pool(prog: &Program) -> Typeck {
         error_type: err,
         internal,
     }
+}
+
+/// E0911 case `instance`: a value a generic fn holds ([`TypedBody::held`]) takes more than
+/// [`crate::consteval::MAX_VALUE_BYTES`] in one of its instances (every instance of the call
+/// graph, so also one a generic fn instantiates). Once per instance, at the generic fn, naming
+/// the instance.
+fn instance_sizes(
+    prog: &Program,
+    sigs: &Sigs,
+    tys: &TypeTable,
+    bodies: &[TypedBody],
+    g: &CallGraph,
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let body_of: FxHashMap<DeclId, &TypedBody> = bodies.iter().map(|b| (b.decl, b)).collect();
+    let mut ov = g.types(tys);
+    for node in &g.nodes {
+        let crate::callgraph::NodeKind::Fn { inst, body: true, .. } = &node.kind else { continue };
+        if inst.args.is_empty() {
+            continue;
+        }
+        let Some(b) = body_of.get(&inst.decl) else { continue };
+        let mut seen = rustc_hash::FxHashSet::default();
+        for &(_, t) in &b.held {
+            if !ov.has_params(t) || !seen.insert(t) {
+                continue;
+            }
+            let it = ov.subst(t, &inst.args, None);
+            if ov.has_params(it) || ov.has_error(it) {
+                continue;
+            }
+            let Some((bytes, _)) = crate::traits::layout_of(&mut ov, sigs, it, 0) else { continue };
+            if bytes <= crate::consteval::MAX_VALUE_BYTES {
+                continue;
+            }
+            let names = NameCx { prog, generics: &[] };
+            let tn = types::display(&ov, &names, it);
+            let args: Vec<String> = inst
+                .args
+                .iter()
+                .map(|a| match a {
+                    GArg::Type(x) => types::display(&ov, &names, *x),
+                    GArg::Const(ConstArg::Value(v)) => v.to_string(),
+                    GArg::Const(_) => "_".to_string(),
+                })
+                .collect();
+            let name = format!("{}::<{}>", prog.decl_path(inst.decl), args.join(", "));
+            out.extend(mk(
+                "E0911",
+                Some("instance"),
+                &[("type", &tn), ("bytes", &bytes.to_string()), ("instance", &name)],
+                node.span,
+                &[],
+            ));
+            break;
+        }
+    }
+    out
 }
 
 fn empty_body(j: Job) -> TypedBody {
@@ -589,6 +656,7 @@ fn empty_body(j: Job) -> TypedBody {
         test_domain: None,
         stmt_ends: crate::temps::StmtEnds::default(),
         internal: Vec::new(),
+        held: Vec::new(),
     }
 }
 
@@ -619,7 +687,7 @@ fn remap_body(b: &mut TypedBody, f: &dyn Fn(TypeId) -> TypeId) {
     for t in &mut b.node_types {
         *t = f(*t);
     }
-    for (_, t) in &mut b.locals {
+    for (_, t) in b.locals.iter_mut().chain(b.held.iter_mut()) {
         *t = f(*t);
     }
     for (_, t) in b.targets.iter_mut().chain(b.implicit.iter_mut()) {
@@ -1708,9 +1776,7 @@ impl<'a> Ck<'a> {
                 self.same_const_types(&c.types);
             }
         }
-        if j.kind == JobKind::Fn {
-            self.value_sizes(j);
-        }
+        let held = if j.kind == JobKind::Fn { self.value_sizes(j) } else { Vec::new() };
         let mut node_types = Vec::with_capacity(self.node_ty.len());
         for i in 0..self.node_ty.len() {
             let t = self.node_ty[i];
@@ -1785,6 +1851,7 @@ impl<'a> Ck<'a> {
             test_domain: self.domain.take(),
             stmt_ends,
             internal: std::mem::take(&mut self.internal),
+            held,
         };
         // thread-crossing capture checks (E0802, E0806; crate::threads)
         let td = self.thread_checks(&body);
@@ -1796,25 +1863,41 @@ impl<'a> Ck<'a> {
     /// type has more than [`crate::consteval::MAX_VALUE_BYTES`]: a back end keeps each value in
     /// one frame slot. Once per type, at its first binding; a generic type is left to its
     /// instances.
-    fn value_sizes(&mut self, j: Job) {
+    fn value_sizes(&mut self, j: Job) -> Vec<(u32, TypeId)> {
+        let icx = self.icx;
         let mut held: Vec<(u32, TypeId)> = self.locals.iter().map(|(&n, &t)| (n, t)).collect();
+        for i in 0..self.node_ty.len() {
+            let n = self.lo + i as u32;
+            let literal = icx.kind(n) == Some(NodeKind::Primary)
+                && (icx.is(icx.a(n), Term::LBracket)
+                    || icx.is(icx.a(n), Term::LParen) && icx.kids_vec(n).len() > 1);
+            if literal && let Ty::T(t) = self.resolve(self.node_ty[i]) {
+                held.push((n, t));
+            }
+        }
         held.sort_unstable_by_key(|x| x.0);
+        if let Some(sig) = self.sigs.fn_sig(j.decl) {
+            held.push((j.node, sig.ret));
+        }
+        held.retain(|&(_, t)| !t.is_none() && t != ids::ERROR && !self.tys.has_error(t));
         let mut seen = rustc_hash::FxHashSet::default();
-        let name_span = self.prog.decl(j.decl).map(|d| d.name_span);
-        let ret = self.sigs.fn_sig(j.decl).map(|s| s.ret);
-        let spans: Vec<(Span, TypeId)> =
-            held.into_iter().map(|(n, t)| (self.icx.node_span(n), t)).chain(name_span.zip(ret)).collect();
-        for (sp, t) in spans {
-            if t.is_none() || !seen.insert(t) || self.tys.has_error(t) || self.tys.has_params(t) {
+        for &(n, t) in &held {
+            if !seen.insert(t) || self.tys.has_params(t) {
                 continue;
             }
             let Some((bytes, _)) = crate::traits::layout_of(&mut self.tys, self.sigs, t, 0) else { continue };
             if bytes > crate::consteval::MAX_VALUE_BYTES {
+                let sp = if n == j.node {
+                    self.prog.decl(j.decl).map_or(icx.node_span(n), |d| d.name_span)
+                } else {
+                    icx.node_span(n)
+                };
                 let tn = self.show(t);
                 let d = mk("E0911", Some("size"), &[("type", &tn), ("bytes", &bytes.to_string())], sp, &[]);
                 self.report(d);
             }
         }
+        held
     }
 
     /// The types const evaluation decided for the scalar nodes of this const initializer are

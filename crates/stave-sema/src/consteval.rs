@@ -31,7 +31,8 @@
 //! Arithmetic overflow, division by zero, `MIN / -1`, and `MIN % -1` in a const are errors
 //! (const contexts keep their errors): E0203 at the operation (no dedicated code). A shift
 //! amount outside `0..bits` is E0205 (the body checker reports a literal or const amount).
-//! An array literal whose type holds more than [`MAX_ARRAY_CELLS`] values is E0904 case `size`.
+//! An array literal of more than [`MAX_DATA_BYTES`] bytes is E0904 case `size`; `[e; n]` is one
+//! value repeated ([`Val::Rep`]), never `n` values.
 
 use rustc_hash::FxHashMap;
 use stave_diag::Diagnostic;
@@ -59,6 +60,9 @@ pub enum Val {
     Str(Box<[u8]>),
     /// Tuples, arrays, structs (fields in declaration order); unit is `Agg([])`.
     Agg(Vec<Val>),
+    /// An array of `n` copies of one value (`[e; n]`): one value, not `n`, so compile-time data
+    /// costs what it is written with.
+    Rep(Box<Val>, u64),
     /// An enum value: variant index, fields.
     Variant(u32, Vec<Val>),
 }
@@ -180,15 +184,15 @@ struct Ev<'e, 'a, E: CEnv> {
 
 const MAX_DEPTH: u32 = 2000;
 
-/// The most value cells the type of an array literal may hold (contracts/lang-details.md
-/// "Array size limit"): one per scalar, reference, or fn value; the fields of a tuple, struct, or
-/// enum variant added; an array `[T; n]` n times `T`'s.
-pub const MAX_ARRAY_CELLS: u64 = 1 << 20;
+/// The most bytes of compile-time data an array literal of a const-expr may have
+/// (contracts/lang-details.md "Size limits"): const evaluation holds the value and the image
+/// holds its bytes (an all-zero `static` takes no file bytes: `.bss`).
+pub const MAX_DATA_BYTES: u64 = 1 << 26;
 
-/// The most bytes a value may have: an array literal, and a parameter, binding, or return value
-/// of a fn (contracts/lang-details.md "Array size limit"). A back end keeps a value in one slot
-/// of its frame, and the AArch64 frame holds 16 MiB.
-pub const MAX_VALUE_BYTES: u64 = 1 << 24;
+/// The most bytes a value of a fn may have (a parameter, binding, temporary, or return value,
+/// per instance; contracts/lang-details.md "Size limits"): the x86-64 back end keeps a value
+/// in one frame slot of at most 256 MiB.
+pub const MAX_VALUE_BYTES: u64 = 1 << 28;
 
 /// The `what` of the E0904 at the innermost node without a value.
 const OUTSIDE: &str = "an expression outside the const-expr forms";
@@ -273,7 +277,8 @@ fn wrap_int(v: i128, signed: bool, bits: u32) -> i128 {
     if signed && bits < 128 && (m >> (bits - 1)) & 1 == 1 { (m as i128) - (1i128 << bits) } else { m as i128 }
 }
 
-/// The value cells of concrete type `t` (see [`MAX_ARRAY_CELLS`]), saturating at `u64::MAX`;
+/// The value cells of concrete type `t`: one per scalar, reference, or fn value; the fields of a
+/// tuple, struct, or enum variant added; an array `[T; n]` n times `T`'s. Saturates at `u64::MAX`;
 /// `None` for a type without a known shape (generic, erroneous, nested past the type limit).
 /// Memoised per type: types share components.
 pub(crate) fn cells<E: CEnv + ?Sized>(env: &mut E, t: TypeId) -> Option<u64> {
@@ -1079,15 +1084,26 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
 
     /// The array limit on the type of literal `n` (E0904 `size`, also reported by the body
     /// checker for the same literal, so deferred).
+    /// The limit on compile-time data ([`MAX_DATA_BYTES`]) on the type of array literal `n`.
     fn size_ok(&mut self, n: u32, at: TypeId) -> bool {
-        match too_large(self.env, at) {
-            Some((c, b)) => {
+        if self.env.has_params(at) {
+            return true;
+        }
+        match self.env.layout(at) {
+            Some((b, _)) if b <= MAX_DATA_BYTES => true,
+            l => {
                 let tn = self.show(at);
-                let d = size_diag(&tn, c, b, self.te.icx.node_span(n));
+                let bytes = l.map_or(u64::MAX, |l| l.0).to_string();
+                let d = mk(
+                    "E0904",
+                    Some("size"),
+                    &[("type", &tn), ("bytes", &bytes)],
+                    self.te.icx.node_span(n),
+                    &[],
+                );
                 let _: Option<()> = self.defer(d);
                 false
             }
-            None => true,
         }
     }
 
@@ -1105,7 +1121,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                         }
                         None => self.explained(),
                     },
-                    DeclKind::Variant => self.decide_variant(d, &[], want, steps),
+                    DeclKind::Variant => self.decide_variant(d, &[], want, None, steps),
                     DeclKind::Error => self.explained(),
                     _ => self.e0904(n, "a non-const item"),
                 }
@@ -1128,13 +1144,14 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         v: DeclId,
         args: &[u32],
         want: Option<TypeId>,
+        targs: Option<u32>,
         steps: &mut Vec<Step>,
     ) -> Option<TypeId> {
         let decl = *self.env.prog().decl(v)?;
         let adt = self.env.adt_def(decl.parent)?;
         let idx = adt.variants.iter().position(|x| x.decl == v)?;
         let vd = adt.variants[idx].clone();
-        let gargs = self.adt_args_from(adt.decl, want, adt.generics.len())?;
+        let gargs = self.adt_args_from(adt.decl, want, adt.generics.len(), targs)?;
         if vd.fields.len() != args.len() {
             return None;
         }
@@ -1148,14 +1165,40 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
     }
 
     /// The type args of ADT `d` from the expected type (consts have declared types).
-    fn adt_args_from(&mut self, d: DeclId, want: Option<TypeId>, count: usize) -> Option<Vec<GArg>> {
+    /// The type args of ADT `d`: those of the expected type, else its turbofish `targs`
+    /// (`W::<u16>.{ .. }` with nothing expected) when they are concrete. The expected type comes
+    /// first: in a const ctor's body evaluated for a call it is the instance, while the
+    /// turbofish names the body's own params.
+    fn adt_args_from(
+        &mut self,
+        d: DeclId,
+        want: Option<TypeId>,
+        count: usize,
+        targs: Option<u32>,
+    ) -> Option<Vec<GArg>> {
         if count == 0 {
             return Some(Vec::new());
         }
-        match want.map(|w| self.env.kind(w).clone()) {
-            Some(TypeKind::Adt { def, args }) if def == d => Some(args.to_vec()),
-            _ => None,
+        if let Some(TypeKind::Adt { def, args }) = want.map(|w| self.env.kind(w).clone())
+            && def == d
+        {
+            return Some(args.to_vec());
         }
+        let ga = targs?;
+        let icx = self.te.icx;
+        let params: Vec<Option<TypeId>> =
+            self.env.adt_def(d)?.generics.iter().map(|g| g.is_const.then_some(g.const_ty)).collect();
+        let nodes = icx.kids_vec(ga);
+        if nodes.len() != count || params.len() != count {
+            return None;
+        }
+        let args: Vec<GArg> =
+            nodes.iter().zip(&params).map(|(&a, &c)| lower_garg(self.env, self.te, a, c)).collect();
+        let concrete = args.iter().all(|a| match a {
+            GArg::Type(t) => !self.env.has_params(*t) && !self.is_err(*t),
+            GArg::Const(c) => matches!(c, ConstArg::Value(_)),
+        });
+        concrete.then_some(args)
     }
 
     fn decide_postfix(&mut self, n: u32, kids: &[u32], want: Option<TypeId>) -> Option<Ty> {
@@ -1202,8 +1245,11 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         let mut steps: Vec<Step> = Vec::new();
         let mut cur: Option<TypeId> = None;
         let mut path: Option<Res> = None;
+        // the turbofish of the current path segment (`W::<u16>.{ .. }`): the ADT's type args
+        let mut targs: Option<u32> = None;
         if icx.is(pa, Term::Ident) {
             path = icx.use_at(prim, pa).map(|u| u.res);
+            targs = icx.kids_vec(prim).iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::GenericArgs));
         } else {
             let t = self.decide(prim, None)?;
             cur = Some(self.force(t)?);
@@ -1218,6 +1264,8 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                     p += 2;
                     if icx.is(p, Term::ColonColon) {
                         p = icx.angle_end(p + 1).0;
+                        targs =
+                            kids.get(kid).copied().filter(|&g| icx.kind(g) == Some(NodeKind::GenericArgs));
                         kid += 1;
                     }
                     continue;
@@ -1275,7 +1323,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                     && self.env.prog().decl(d).is_some_and(|x| x.kind == DeclKind::Variant)
                 {
                     path = None;
-                    cur = Some(self.decide_variant(d, &args, want, &mut steps)?);
+                    cur = Some(self.decide_variant(d, &args, want, targs, &mut steps)?);
                     p = close + 1;
                     continue;
                 }
@@ -1294,7 +1342,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 let sl = *kids.get(kid)?;
                 kid += 1;
                 let Some(Res::Decl(d)) = path.take() else { return self.e0904(n, "a non-const item") };
-                cur = Some(self.decide_struct(d, sl, want, &mut steps)?);
+                cur = Some(self.decide_struct(d, sl, want, targs, &mut steps)?);
                 p = icx.close(p) + 1;
                 continue;
             }
@@ -1375,6 +1423,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         d: DeclId,
         sl: u32,
         want: Option<TypeId>,
+        targs: Option<u32>,
         steps: &mut Vec<Step>,
     ) -> Option<TypeId> {
         let icx = self.te.icx;
@@ -1393,7 +1442,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         if vd.shape != VariantShape::Record {
             return None;
         }
-        let gargs = self.adt_args_from(adt_decl, want, adt.generics.len())?;
+        let gargs = self.adt_args_from(adt_decl, want, adt.generics.len(), targs)?;
         let mut fields = Vec::new();
         for e in icx.kids_vec(sl) {
             let name_tok = icx.a(e).checked_sub(2)?;
@@ -1595,7 +1644,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 let TypeKind::Array { len: ConstArg::Value(len), .. } = self.env.kind(ty).clone() else {
                     return self.ice(n, "an array literal without a length");
                 };
-                return Some((ty, Val::Agg(vec![v; len as usize])));
+                return Some((ty, Val::Rep(Box::new(v), len)));
             }
             let mut vals = Vec::with_capacity(kids.len());
             for &c in kids {
@@ -1625,6 +1674,12 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                         Val::Agg(mut vs) => match usize::try_from(i).ok().filter(|&i| i < vs.len()) {
                             Some(i) => vs.swap_remove(i),
                             None => return self.index_range(ie, at, vs.len()),
+                        },
+                        Val::Rep(v, len) => match u64::try_from(i).ok().filter(|&i| i < len) {
+                            Some(_) => *v,
+                            None => {
+                                return self.index_range(ie, at, usize::try_from(len).unwrap_or(usize::MAX));
+                            }
                         },
                         _ => return self.ice(n, "an index into a value that is not an array"),
                     }
@@ -1961,20 +2016,6 @@ fn down_to_primary(icx: &ItemCx<'_>, n: u32) -> Option<u32> {
         }
         cur = kids[0];
     }
-}
-
-/// E0904 case `size` at `span`: an array literal of type `ty` with `cells` value cells.
-pub(crate) fn size_diag(ty: &str, cells: u64, bytes: u64, span: stave_diag::Span) -> Option<Diagnostic> {
-    let (c, b) = (cells.to_string(), bytes.to_string());
-    mk("E0904", Some("size"), &[("type", ty), ("cells", &c), ("bytes", &b)], span, &[])
-}
-
-/// The values and bytes of array literal type `at` if it is past a limit ([`MAX_ARRAY_CELLS`],
-/// [`MAX_VALUE_BYTES`]): the one answer of the checker, const evaluation, and the lowering.
-pub(crate) fn too_large<E: CEnv + ?Sized>(env: &mut E, at: TypeId) -> Option<(u64, u64)> {
-    let c = cells(env, at)?;
-    let b = env.layout(at).map_or(u64::MAX, |l| l.0);
-    (c > MAX_ARRAY_CELLS || b > MAX_VALUE_BYTES).then_some((c, b))
 }
 
 fn round_float(f: f64, k: &TypeKind) -> f64 {

@@ -1082,6 +1082,14 @@ impl<'a> FnCx<'a> {
                 }
                 E::V(self.opn(Op::EnumMake, ty, &ops), ty)
             }
+            Val::Rep(x, n) => {
+                let TypeKind::Array { elem, .. } = self.kind(ty) else {
+                    return self.fail_at(Some(tok), "const repeat of a type that is not an array");
+                };
+                let e = self.const_val(x, elem, tok);
+                let Some(o) = self.operand_of(e) else { return E::Never };
+                self.repeat_fill(o, elem, ty, *n)
+            }
         }
     }
 

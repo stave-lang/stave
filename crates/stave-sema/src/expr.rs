@@ -1306,9 +1306,6 @@ impl<'a> Ck<'a> {
                 return Ty::ERR;
             }
             let at = self.tys.intern(TypeKind::Array { elem: et, len });
-            if !self.array_size_ok(n, at) {
-                return Ty::ERR;
-            }
             // The one value of `e` fills every slot, so more than one slot needs Copy. Length 0
             // needs it too: the lowering evaluates `e` and keeps no slot to drop it from.
             if len != ConstArg::Value(1) && !self.tys.has_error(et) {
@@ -1364,26 +1361,7 @@ impl<'a> Ck<'a> {
         if elem_t == ids::ERROR {
             return Ty::ERR;
         }
-        let at = self.tys.intern(TypeKind::Array { elem: elem_t, len: ConstArg::Value(len) });
-        if !self.array_size_ok(n, at) {
-            return Ty::ERR;
-        }
-        Ty::T(at)
-    }
-
-    /// The array limit on the type `at` of literal `n` (E0904 case `size`; the rule const
-    /// evaluation applies to the same literal, `consteval::cells`). A generic element type is
-    /// left to its instances.
-    fn array_size_ok(&mut self, n: u32, at: TypeId) -> bool {
-        match crate::consteval::too_large(self, at) {
-            Some((c, b)) => {
-                let tn = self.show(at);
-                let d = crate::consteval::size_diag(&tn, c, b, self.icx.node_span(n));
-                self.report(d);
-                false
-            }
-            None => true,
-        }
+        Ty::T(self.tys.intern(TypeKind::Array { elem: elem_t, len: ConstArg::Value(len) }))
     }
 
     fn closure(&mut self, n: u32) -> Ty {

@@ -1319,6 +1319,7 @@ fn str_bytes(v: &crate::consteval::Val, out: &mut Vec<Vec<u8>>) {
     match v {
         Val::Str(s) => out.push(s.to_vec()),
         Val::Agg(vs) | Val::Variant(_, vs) => vs.iter().for_each(|x| str_bytes(x, out)),
+        Val::Rep(v, _) => str_bytes(v, out),
         _ => {}
     }
 }
@@ -1378,6 +1379,36 @@ fn write_val(
         (Shape::Array { elem, stride, .. }, Val::Agg(vs)) => {
             for (k, fv) in vs.iter().enumerate() {
                 write_val(types, lay, *elem, fv, out, off + k * *stride as usize);
+            }
+        }
+        (Shape::Array { elem, stride, .. }, Val::Rep(v, n)) => {
+            // the element once, then its bytes (and address words) copied: the buffer starts
+            // zeroed, so an all-zero element needs nothing more
+            let (stride, n) = (*stride as usize, *n as usize);
+            let refs0 = out.refs.len();
+            write_val(types, lay, *elem, v, out, off);
+            let new_refs: Vec<stave_ir::DataRef> = out.refs[refs0..].to_vec();
+            let end = (off + stride).min(out.bytes.len());
+            if n < 2
+                || stride == 0
+                || (new_refs.is_empty() && out.bytes[off.min(end)..end].iter().all(|b| *b == 0))
+            {
+                return;
+            }
+            let mut done = 1;
+            while done < n {
+                let k = done.min(n - done);
+                let (src, dst) = (off, off + done * stride);
+                if dst + k * stride > out.bytes.len() {
+                    break;
+                }
+                out.bytes.copy_within(src..src + k * stride, dst);
+                done += k;
+            }
+            for i in 1..n {
+                for r in &new_refs {
+                    out.refs.push(stave_ir::DataRef { offset: r.offset + (i * stride) as u32, ..*r });
+                }
             }
         }
         (Shape::Enum(vs), Val::Variant(vi, fs)) => {

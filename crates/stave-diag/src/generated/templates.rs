@@ -4687,12 +4687,11 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0904",
         severity: Severity::Error,
         area: "generics",
-        rule: "const-expr uses a call (a method call on a value and an operator of a user impl included), a loop, a non-const item, a form outside the const-expr list (at the innermost expression without a value), or a const that depends on itself, through its initializer or its type (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value. Case `generic`: `size_of::<T>()` / `align_of::<T>()` of a type with a type parameter (its value is known per instance only). Case `size`: an array literal or `[e; n]`, in a const-expr or a fn body, whose type holds more than 2^20 values or 2^24 bytes (contracts/lang-details.md, Array size limit)",
+        rule: "const-expr uses a call (a method call on a value and an operator of a user impl included), a loop, a non-const item, a form outside the const-expr list (at the innermost expression without a value), or a const that depends on itself, through its initializer or its type (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value. Case `generic`: `size_of::<T>()` / `align_of::<T>()` of a type with a type parameter (its value is known per instance only). Case `size`: an array literal of a const-expr (a `const` or `static` initializer: compile-time data) whose type takes more than 2^26 bytes (contracts/lang-details.md, Size limits); a `[e; n]` in a fn body is a fill at run time and has no such limit",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "bytes", kind: HoleKind::Int, choices: &[] },
-            Hole { name: "cells", kind: HoleKind::Int, choices: &[] },
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
             Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["a call", "a loop", "a non-const item", "an expression outside the const-expr forms"] },
@@ -4749,12 +4748,12 @@ pub(super) static ENTRIES: &[Entry] = &[
             },
             Shape {
                 case: "size",
-                message: "array of type `{type}` is too large: {cells} values, {bytes} bytes (at most 1,048,576 values and 16,777,216 bytes)",
+                message: "compile-time data of type `{type}` takes {bytes} bytes, more than 67,108,864",
                 labels: &[
-                    LabelTemplate { at: "primary", text: "too large an array value" },
+                    LabelTemplate { at: "primary", text: "too large for a const-expr" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "use a smaller array, or fill a heap buffer (`vec.Vec`) at run time",
+                    description: "fill the array at run time (a `[e; n]` in a fn body has no size limit), or use a heap buffer (`vec.Vec`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -5000,11 +4999,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0911",
         severity: Severity::Error,
         area: "generics",
-        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels (E0005 case `type` reports it too where it is written); at the call, in a const-expr too. Case `size`: a parameter, binding, or return value of a fn whose type takes more than 2^24 bytes (contracts/lang-details.md, Array size limit), once per type and fn, at its first binding",
+        rule: "`size_of::<T>()` / `align_of::<T>()` of a concrete type that has no layout to report: unsized (`str`, `[T]`), or nested deeper than 1,000 levels (E0005 case `type` reports it too where it is written); at the call, in a const-expr too. Case `size`: a parameter, binding, array or tuple literal, or return value of a fn whose type takes more than 2^28 bytes (contracts/lang-details.md, Size limits), once per type and fn, at its first binding. Case `instance`: the same in an instance of a generic fn, once per instance, at the generic fn, naming the instance",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "bytes", kind: HoleKind::Int, choices: &[] },
+            Hole { name: "instance", kind: HoleKind::Path, choices: &[] },
             Hole { name: "type", kind: HoleKind::Type, choices: &[] },
         ],
         shapes: &[
@@ -5021,8 +5021,20 @@ pub(super) static ENTRIES: &[Entry] = &[
                 }),
             },
             Shape {
+                case: "instance",
+                message: "in `{instance}`, a value of type `{type}` takes {bytes} bytes, more than 268,435,456",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "too large a value in this instance" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "instantiate with a smaller type or length, or keep the value in a heap buffer (`vec.Vec`)",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
                 case: "size",
-                message: "a value of type `{type}` takes {bytes} bytes, more than 16,777,216",
+                message: "a value of type `{type}` takes {bytes} bytes, more than 268,435,456",
                 labels: &[
                     LabelTemplate { at: "primary", text: "too large a value" },
                 ],

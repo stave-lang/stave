@@ -58,22 +58,22 @@ reference for what a program may write and what it means.
   same limit and answers the rejecting side past it (not Copy, not Send / Sync / Flat / Frozen, no
   layout: E0911, needs a drop).
 
-## §2 Array size limit
+## §2 Size limits
 
-- The values of a type: 1 for a scalar, reference, raw pointer, fn value, vector, or mask; the
-  sum over the fields of a tuple, struct, or enum variant (the largest variant), at least 1;
-  `n` times the element's for `[T; n]`. Computed on the type, nested, without overflow (it
-  saturates).
-- An array literal `[a, b, ..]` or `[e; n]` whose type holds more than 2^20 (1,048,576) values
-  or 2^24 bytes (16 MiB) is E0904 case `size`, at the literal, in a const-expr and in a fn body
-  alike: `[0u8; 2000000]`, `[[0u8; 65536]; 65536]`, `[S.{ a: [0u8; 1024] }; 2048]`. A
-  parameter, binding, or return value of a fn whose type takes more than 2^24 bytes is E0911
-  case `size` (`fn f(x: [u8; 20000000])`, a tuple nested 40 levels deep). A generic type is
-  checked where it is concrete only.
-- Reason: const evaluation keeps one value per element and the lowering builds a `[e; n]` from
-  `n` copies, so the cost of a literal is its values; a back end keeps every value in one slot
-  of its frame, and an AArch64 frame holds 16 MiB. One computation on the type (values and bytes,
-  without overflow) is the answer the checker, const evaluation, and the lowering read.
+- Compile-time data: an array literal `[a, b, ..]` or `[e; n]` of a const-expr (a `const` or
+  `static` initializer) whose type takes more than 2^26 bytes (64 MiB) is E0904 case `size`, at
+  the literal: `[[0u8; 65536]; 65536]`, `[[0u8; 16777216]; 8]`. A zero-size element takes no
+  bytes (`[(); 2000000]` is fine). `[e; n]` is one value repeated, never `n` values, so its cost
+  is the bytes of its type; an all-zero `static` takes no file bytes.
+- A `[e; n]` in a fn body is a fill at run time: `e` is evaluated once and stored into each
+  element. Its count has no limit of its own.
+- A value a fn holds (a parameter, binding, array or tuple literal, or the return value) whose
+  type takes more than 2^28 bytes (256 MiB) is E0911 case `size`, once per type and fn
+  (`fn f(x: [u8; 300000000])`, a tuple nested 40 levels deep). A type with generic params is
+  checked per instance: E0911 case `instance`, once per instance, at the generic fn, naming the
+  instance (`fill::<300000000>` holding `[u8; N]`).
+- Reason: const evaluation and the image hold compile-time data; a back end keeps each value
+  of a fn in one slot of its frame, and a frame holds at most 1 GiB.
 
 ## §2 Contracts
 
