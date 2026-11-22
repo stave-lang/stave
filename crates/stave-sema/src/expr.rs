@@ -1830,6 +1830,7 @@ impl<'a> Ck<'a> {
         self.target(tok, Target::Fn { decl, args: args.clone() });
         self.site(tok, self.icx.node_span(n), decl, &args);
         self.coerce_note(n, Coercion::FnItem);
+        self.fn_items.push(n);
         self.valued.push((tok, sig.deny, n));
         if self.is_drop_method(decl) {
             // a call through the value would run the destructor of a value that is still owned
@@ -3032,9 +3033,7 @@ impl<'a> Ck<'a> {
                         if !self.arity(n, paren, params.len(), args.len(), false) {
                             return self.args_only(args);
                         }
-                        if features & !self.proven_features() != 0 {
-                            self.features_ok(cspan, DeclId::NONE, features);
-                        }
+                        self.value_features_ok(cspan, t, features);
                         for (i, &a) in args.iter().enumerate() {
                             let want = params[i];
                             let t2 = self.check_expr(a, want, None);

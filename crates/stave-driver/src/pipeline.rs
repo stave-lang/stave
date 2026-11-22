@@ -422,6 +422,35 @@ fn line_count(b: &[u8]) -> u64 {
 }
 
 fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
+    let dropped = dropped_diagnostics();
+    let mut out = run_stages(root, lib, opts);
+    if dropped_diagnostics() != dropped && !matches!(out.failure, Some(Failure::Internal { .. })) {
+        out.failure = Some(dropped_failure());
+    }
+    out
+}
+
+/// Diagnostics the lexer, parser, checkers could not build from their registry templates since
+/// process start: each is a compiler bug that would drop a diagnostic.
+fn dropped_diagnostics() -> u64 {
+    stave_syntax::diagnostic_build_failures()
+        + stave_sema::diagnostic_build_failures()
+        + stave_borrow::diagnostic_build_failures()
+}
+
+/// A run in which a diagnostic could not be built fails as an internal error (exit 3), whatever
+/// else it reports: the dropped diagnostic may be its only error.
+fn dropped_failure() -> Failure {
+    let what = stave_sema::first_diagnostic_build_failure()
+        .or_else(stave_syntax::first_diagnostic_build_failure)
+        .unwrap_or("a borrow checker diagnostic");
+    Failure::Internal {
+        stage: Stage::Typeck,
+        message: format!("a diagnostic could not be built from its registry template ({what})"),
+    }
+}
+
+fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     let parse_only = opts.goal == Goal::Parse;
     let mut cfg = lib.config(root);
     if parse_only {

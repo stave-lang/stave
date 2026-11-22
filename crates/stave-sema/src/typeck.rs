@@ -120,7 +120,9 @@ pub enum Coercion {
     StringToStr,
     /// An f-string temporary borrowed as `&str` (`String.as_str`, lives to the end of the statement).
     FmtToStr,
-    /// A fn item used as a fn value.
+    /// A fn value's type changes to the wanted fn type (features dropped to those proven, or a
+    /// deny clause changed): at the node naming a fn item ([`TypedBody::fn_items`]) also with no
+    /// change, and at a value `if` / `match` or parentheses only after each arm got its own.
     FnItem,
 }
 
@@ -191,6 +193,12 @@ pub struct TypedBody {
     /// the item's `requires`, so the effect pass checks the item's entry effect against the clause
     /// ([`crate::effects`], E1403).
     pub valued: Vec<(u32, u8, u32)>,
+    /// The nodes that name a fn item as a value (a path, a generic instance, a method item),
+    /// sorted: each node's value is the fn item of the value target at its last token. The one
+    /// answer to "this expression is that fn item": a conversion between fn types checks it, and
+    /// the call graph's fn-value flow and the thread fns' argument checks read it. A node is never one of these because a part of it is (the last arm of a value
+    /// `if`, say).
+    pub fn_items: Vec<u32>,
     pub has_error: bool,
     /// Class U ops inside `emulate { }`, in source order ([`crate::gates`]).
     pub emulated: Vec<crate::gates::Emulated>,
@@ -237,6 +245,11 @@ impl TypedBody {
 
     pub fn coercion(&self, n: u32) -> Option<&Coercion> {
         self.coercions.binary_search_by_key(&n, |x| x.0).ok().map(|i| &self.coercions[i].1)
+    }
+
+    /// Whether node `n` names a fn item as a value ([`TypedBody::fn_items`]).
+    pub fn is_fn_item(&self, n: u32) -> bool {
+        self.fn_items.binary_search(&n).is_ok()
     }
 }
 
@@ -569,6 +582,7 @@ fn empty_body(j: Job) -> TypedBody {
         drops: Vec::new(),
         denied: Vec::new(),
         valued: Vec::new(),
+        fn_items: Vec::new(),
         has_error: true,
         emulated: Vec::new(),
         contracts: None,
@@ -783,6 +797,8 @@ pub(crate) struct Ck<'a> {
     pub drops: Vec<(u32, TypeId)>,
     pub denied: Vec<(u32, u8, u32)>,
     pub valued: Vec<(u32, u8, u32)>,
+    /// [`TypedBody::fn_items`], unsorted.
+    pub fn_items: Vec<u32>,
     pub depth: u32,
     /// E0005 case `expr` was reported for this body.
     pub depth_reported: bool,
@@ -860,6 +876,7 @@ fn check_body(
         drops: Vec::new(),
         denied: Vec::new(),
         valued: Vec::new(),
+        fn_items: Vec::new(),
         depth: 0,
         depth_reported: false,
         diverges: false,
@@ -1213,7 +1230,13 @@ impl<'a> Ck<'a> {
                 ids::ERROR
             }
             Ty::T(t) => {
-                if t == want || t == ids::ERROR || self.tys.has_error(t) {
+                if t == ids::ERROR || self.tys.has_error(t) {
+                    return want;
+                }
+                if let Some(r) = self.coerce_arms(n, t, want, why) {
+                    return r;
+                }
+                if t == want {
                     return want;
                 }
                 if t.is_none() {
@@ -1268,6 +1291,81 @@ impl<'a> Ck<'a> {
         }
     }
 
+    /// A conversion to fn type `want` of a node whose value is that of one of its arms (a value
+    /// `if` / `match`, parentheses: [`Ck::value_arms`]) is the conversion of each arm, so every
+    /// value the node can have is checked against `want` where it is made. `None`: `n` has no
+    /// arms, or the types are no fn types.
+    fn coerce_arms(&mut self, n: u32, t: TypeId, want: TypeId, why: Option<Span>) -> Option<TypeId> {
+        if !matches!(self.tys.kind(t), TypeKind::Fn { .. })
+            || !matches!(self.tys.kind(want), TypeKind::Fn { .. })
+        {
+            return None;
+        }
+        let mut arms = Vec::new();
+        self.value_arms(n, &mut arms);
+        if arms == [n] {
+            return None;
+        }
+        let mut ok = true;
+        for a in arms {
+            let at = a
+                .checked_sub(self.lo)
+                .and_then(|i| self.node_ty.get(i as usize))
+                .copied()
+                .unwrap_or(Ty::NONE);
+            if at == Ty::NONE {
+                continue;
+            }
+            ok &= self.coerce(a, at, want, why) != ids::ERROR;
+        }
+        if t != want {
+            self.coerce_note(n, Coercion::FnItem);
+        }
+        Some(if ok { want } else { ids::ERROR })
+    }
+
+    /// The nodes whose value node `n`'s value is, unchanged: the arms of a value `if` / `match`
+    /// and the inside of parentheses, recursively; else `n` itself.
+    fn value_arms(&self, n: u32, out: &mut Vec<u32>) {
+        let icx = &self.icx;
+        match icx.kind(n) {
+            Some(NodeKind::IfExpr) => {
+                let k = icx.kids_vec(n);
+                if let [_, a, b] = k[..] {
+                    self.value_arms(a, out);
+                    self.value_arms(b, out);
+                    return;
+                }
+            }
+            Some(NodeKind::MatchExpr) => {
+                // [scrutinee, arm..], an arm [ArmPattern, guard?, value]
+                for &arm in icx.kids_vec(n).iter().skip(1) {
+                    let ak = icx.kids_vec(arm);
+                    if ak.len() >= 2
+                        && let Some(&e) = ak.last()
+                    {
+                        self.value_arms(e, out);
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+        let chain = crate::threads::wrapper_chain(icx, n);
+        let core = chain.last().copied().unwrap_or(n);
+        let (a, end) = (icx.a(core), icx.end_tok(core));
+        if icx.kind(core) == Some(NodeKind::Primary)
+            && icx.is(a, Term::LParen)
+            && icx.close(a) == end
+            && !icx.is(end.saturating_sub(1), Term::Comma)
+            && let [inner] = icx.kids_vec(core)[..]
+        {
+            self.value_arms(inner, out);
+            return;
+        }
+        out.push(n);
+    }
+
     /// The effects fn type `want` denies beyond those fn type `t` denies, when that is the only
     /// reason `t` is not coercible to `want` (equal params and return type, features allowed).
     fn deny_widened(&self, t: TypeId, want: TypeId) -> Option<u8> {
@@ -1296,13 +1394,18 @@ impl<'a> Ck<'a> {
     }
 
     /// The token a fn value made by node `n` is known by: a closure literal's `fn` token, or the
-    /// token of a fn item's value target (`None` for any other expression).
+    /// token of the value target of the fn item `n` names ([`TypedBody::fn_items`]); `None` for
+    /// any other expression, whatever its last token is.
     fn made_fn_value(&self, n: u32) -> Option<u32> {
-        if crate::closures::closure_kind(&self.icx, n) == Some(crate::closures::ClosureKind::Literal) {
-            return Some(self.icx.a(n));
+        for c in crate::threads::wrapper_chain(&self.icx, n) {
+            if crate::closures::closure_kind(&self.icx, c) == Some(crate::closures::ClosureKind::Literal) {
+                return Some(self.icx.a(c));
+            }
+            if self.fn_items.contains(&c) {
+                return Some(self.icx.end_tok(c));
+            }
         }
-        let end = self.icx.end_tok(n);
-        self.targets.iter().rev().any(|(tok, t)| *tok == end && matches!(t, Target::Fn { .. })).then_some(end)
+        None
     }
 
     /// The features every value made in this body may assume: its `needs` and the target
@@ -1670,6 +1773,12 @@ impl<'a> Ck<'a> {
             drops: std::mem::take(&mut self.drops),
             denied: std::mem::take(&mut self.denied),
             valued: std::mem::take(&mut self.valued),
+            fn_items: {
+                let mut f = std::mem::take(&mut self.fn_items);
+                f.sort_unstable();
+                f.dedup();
+                f
+            },
             has_error,
             emulated: std::mem::take(&mut self.gates.emulated),
             contracts: self.contracts.take(),
@@ -2120,6 +2229,18 @@ impl<'a> Ck<'a> {
         let roles: Vec<(&str, Span)> =
             self.prog.decl(callee).map(|d| ("callee", d.name_span)).into_iter().collect();
         let d = mk("E0704", None, &[("callee", &path), ("feature", &feature)], at, &roles);
+        self.report(d);
+    }
+
+    /// E0704 case `value`: a call through a value of fn type `t`, which needs `features`, runs the
+    /// code of a fn with those features, so the caller must have them as for a direct call.
+    pub fn value_features_ok(&mut self, at: Span, t: TypeId, features: u64) {
+        let missing = features & !self.proven_features();
+        let Some(f) = stave_target::FeatureSet::from_bits(missing).and_then(|fs| fs.iter().next()) else {
+            return;
+        };
+        let ty = self.show(t);
+        let d = mk("E0704", Some("value"), &[("fn_type", &ty), ("feature", f.name())], at, &[]);
         self.report(d);
     }
 }

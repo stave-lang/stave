@@ -97,6 +97,7 @@ use stave_target::{Triple, X86Level};
 
 pub use decls::{Decl, DeclFlags, DeclKind};
 pub use diag::failures as diagnostic_build_failures;
+pub use diag::first_failure as first_diagnostic_build_failure;
 pub use dump::{dump_names, dump_strings, names_file_into, strings_into};
 pub use ids::{BindingRef, DeclId, GenericRef, ItemId, ModuleId, PackageId, Sym};
 pub use intern::Strings;

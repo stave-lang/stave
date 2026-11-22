@@ -8,9 +8,17 @@ reference for what a program may write and what it means.
 
 - A closure may return a borrow of a capture it holds by `&`, but not of one it holds by `&mut`,
   even through a dereference (E0512): the next call could change it or lend it again.
+- A closure value with captures points to its environment (the captured places' addresses),
+  which is in the frame of the body that evaluated the literal: a value holding it is not
+  returned from that body (E0512 case `env`), also when every capture is one an enclosing
+  closure holds by `&` (`fn() -> fn() -> u64 { return fn() -> u64 { return x; }; }`). Write the
+  inner closure where the captured locals live, or return a value. What a call of the inner
+  closure returns may leave if it holds no fn value (`return get();` with `get` returning `&x`, a
+  slice, an `Option<&T>`): captures are references, so it points to the captured places.
 - A `fn(..) needs(F)` value is usable as `fn(..) needs(G)` only if F ⊆ G ∪ the enclosing fn's
   needs ∪ the target baseline (E0707). Reason: CPU features never change while a program runs, so
-  a value made where F is proven stays callable.
+  a value made where F is proven stays callable. A call through a value whose type keeps
+  `needs(G)` needs G proven where the call is, as a direct call does (E0704 case `value`).
 - No operator applies to a fn value: the operator traits and fn types both belong to `std`, which
   implements none for a fn type, so `impl core.Add for fn()` elsewhere is E0420 and `f += g` on a
   fn-typed `f` has no impl. An operator over fn values goes through a Copy struct that holds them
@@ -315,6 +323,12 @@ safe code cannot deadlock on locks and joins. No `MutexGuard` may be held across
 sleeps the thread, and the task that holds it never resumes. No std fn has `park`, so no
 diagnostic checks this rule.
 
+## §3 Scope threads
+
+A `scope`'s threads run until it is left: after a `spawn`, its captures stay borrowed on every
+path through the block, also on one that never leaves it (a `-> never` call, a loop without
+`break`), so main writing, moving, or `&mut`-borrowing a captured local there is E0501.
+
 ## §3 Error trace
 
 `Result.unwrap` of an `Err` prints the task's trace under the panic line, oldest first:
@@ -463,15 +477,16 @@ the same features. The type checker decides them once per instance on the call g
   the drop of `vec.Vec` (it reads each element); `first<T>(xs: &[T]) -> Option<&T>` and
   `Vec.len` inherit nothing.
 - A fn value of an instance has the instance's declared features in its type, not the inherited
-  ones: it is made only where they are proven (the rule above), and a value made there stays
-  callable anywhere, as for E0707: CPU features never change while a program runs.
+  ones: it is made only where they are proven (the rule above), and a value made there whose
+  type drops them stays callable anywhere, as for E0707: CPU features never change while a
+  program runs.
 
 Every fn body, generic or not, closures included, is gated the same way (E0702): the values it
 holds by value, as above, whether their type is written or only inferred (a built-in's receiver
 and result inside a postfix chain count), hold no vector wider than the registers of the fn's
 own `needs` plus the target baseline: `needs(avx)` and `needs(fma)` give 128 bits, `needs(avx2)`
-256, any AArch64 feature 128. A fn value is callable without its features (§2 Fn types), so the result of
-a call through one is the caller's to hold. Lowering checks every fn, instance, and glue against
+256, any AArch64 feature 128. A fn value whose type has no `needs` is callable without its fn's features (§2 Fn types), so the
+result of a call through one is the caller's to hold. Lowering checks every fn, instance, and glue against
 its features again: a vector left outside them is an internal error, never code.
 
 Reason the instance and not the generic: a declared `needs` on a generic would make it uncallable
