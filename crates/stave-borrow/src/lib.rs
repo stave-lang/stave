@@ -77,6 +77,9 @@ pub struct Borrowck {
     pub locks: Vec<stave_sema::ranks::BodyLocks>,
     /// The types each checked body may drop, in body order.
     pub drops: Vec<stave_sema::ranks::BodyDrops>,
+    /// The drop schedule of each body a CFG was built for ([`stave_sema::drops`]): the lowering
+    /// checks every drop it emits against it.
+    pub schedules: stave_sema::drops::Schedules,
 }
 
 impl Borrowck {
@@ -102,6 +105,7 @@ struct One {
     rounds: u32,
     phases: [Duration; 3],
     locks: locks::Scan,
+    schedule: stave_sema::drops::Schedule,
 }
 
 /// Borrow-checks every fn body of the program without a type error.
@@ -138,8 +142,9 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
     });
     let mut out = Borrowck { skipped, ..Borrowck::default() };
     for (tb, r) in todo.iter().zip(results) {
-        let Some(r) = r else { continue };
+        let Some(mut r) = r else { continue };
         out.checked += 1;
+        out.schedules.insert(tb.decl, std::mem::take(&mut r.schedule));
         out.max_rounds = out.max_rounds.max(r.rounds);
         for (a, b) in out.phases.iter_mut().zip(r.phases) {
             *a += b;
@@ -223,6 +228,7 @@ fn check_body(
         rounds: 0,
         phases: [t0.elapsed(), Duration::ZERO, Duration::ZERO],
         locks: locks::Scan { drops: Some(Vec::new()), ..locks::Scan::default() },
+        schedule: schedule_of(&body),
     };
     if body.unsupported.is_none() && body.internal.is_none() {
         check_tree(&body, &mut tys, opts, tb.item.0, &mut one);
@@ -231,6 +237,20 @@ fn check_body(
         }
     }
     Some(one)
+}
+
+/// The drop schedule of `body` and the bodies nested in it, sorted.
+fn schedule_of(body: &cfg::Body) -> stave_sema::drops::Schedule {
+    fn add(b: &cfg::Body, out: &mut stave_sema::drops::Schedule) {
+        out.extend(&b.schedule);
+        for nb in &b.nested {
+            add(nb, out);
+        }
+    }
+    let mut out = stave_sema::drops::Schedule::default();
+    add(body, &mut out);
+    out.seal();
+    out
 }
 
 fn check_tree(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item: u32, one: &mut One) {

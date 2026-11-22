@@ -1,0 +1,103 @@
+//~ CHECK-ONLY
+// A pattern that binds a non-Copy part by value takes its whole value: the parts it ignores
+// (`_`, `l: _`) are dropped at its binding point. That drop is a row of the drop schedule, so
+// the lock check sees it (E1405 at the pattern): `Lk`'s destructor takes `M` (rank 1) while
+// the guard the pattern binds is held. In a callee that takes its param apart the same drop is
+// the callee's, so a caller holding the guard is rejected at the call. A destructor that joins
+// threads which take the lock is the same violation.
+import std.io;
+import std.sync;
+import std.vec;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+static N: sync.Mutex<u32, 2> = sync.Mutex::<u32, 2>.new(7);
+
+struct Lk { pub id: u32 }
+
+impl Drop for Lk {
+    fn drop(&mut self) {
+        let g = M.lock();
+    }
+}
+
+struct Jn { pub id: u32 }
+
+impl Drop for Jn {
+    fn drop(&mut self) {
+        let mut n: u32 = 0;
+        scope {
+            spawn { n = *M.lock().get(); }
+        }
+    }
+}
+
+view struct P { pub g: sync.MutexGuard<u32, 2>, pub l: Lk }
+
+view enum E { A(sync.MutexGuard<u32, 1>, Lk), B }
+
+fn let_tuple() {
+    let (g, _) = (M.lock(), Lk.{ id: 1 }); //~ ERROR E1405
+}
+
+fn let_tuple_guard_second() {
+    let (_, g) = (Lk.{ id: 1 }, N.lock()); //~ ERROR E1405
+}
+
+fn let_struct() {
+    let P.{ g, l: _ } = P.{ g: N.lock(), l: Lk.{ id: 1 } }; //~ ERROR E1405
+}
+
+fn let_nested() {
+    let ((g, _), n) = ((M.lock(), Lk.{ id: 1 }), 3u32); //~ ERROR E1405
+}
+
+fn local_scrutinee() {
+    let t = (M.lock(), Lk.{ id: 1 });
+    let (g, _) = t; //~ ERROR E1405
+}
+
+fn match_arm() {
+    match (M.lock(), Lk.{ id: 1 }) {
+        (g, _) => { io.print("arm\n"); } //~ ERROR E1405
+    }
+}
+
+fn match_enum() {
+    match E.A(M.lock(), Lk.{ id: 1 }) {
+        E.A(g, _) => { io.print("a\n"); } //~ ERROR E1405
+        E.B => {}
+    }
+}
+
+fn for_item() {
+    for (g, _) in [(M.lock(), Lk.{ id: 1 })] { //~ ERROR E1405
+        io.print("it\n");
+    }
+}
+
+fn join_in_ignored_part() {
+    let (g, _) = (M.lock(), Jn.{ id: 1 }); //~ ERROR E1405
+}
+
+fn callee(t: (vec.Vec<u32>, Lk)) {
+    let (v, _) = t;
+}
+
+fn caller() {
+    let w = vec.Vec::<u32>.new();
+    let g = M.lock();
+    callee((w, Lk.{ id: 1 })); //~ ERROR E1405
+}
+
+fn main() {
+    let_tuple();
+    let_tuple_guard_second();
+    let_struct();
+    let_nested();
+    local_scrutinee();
+    match_arm();
+    match_enum();
+    for_item();
+    join_in_ignored_part();
+    caller();
+}

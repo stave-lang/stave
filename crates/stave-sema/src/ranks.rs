@@ -28,12 +28,20 @@
 //! built-in package (`with_lock` calling `f` under its guard, `get_or_init` running `f`) is
 //! reported at the user call that leads there.
 //!
-//! **Drops.** A drop (scope end, temporary, partial drop, the old value an assignment
-//! overwrites) runs the dropped type's drop glue, a node of the graph: it is checked like a call,
-//! without the local it drops. Locals drop in reverse declaration order, so a value declared
-//! before a guard drops after the guard is released. A value moved into a callee and dropped there
-//! is that callee's drop: its own check covers the guards it holds, and every caller holding a
-//! guard is checked at the call, whose lowest rank includes the callee's drop edges.
+//! **Drops.** A drop (every row of the body's drop schedule, [`crate::drops`]: scope end,
+//! temporary, exit, a part a pattern ignores, the old value an assignment overwrites) runs the
+//! dropped type's drop glue, a node of the graph: it is checked like a call, without the local it
+//! drops. Locals drop in reverse declaration order, so a value declared before a guard drops
+//! after the guard is released. A value moved into a callee and dropped there is that callee's
+//! drop: its own check covers the guards it holds, and every caller holding a guard is checked at
+//! the call, whose lowest rank includes the callee's drop edges.
+//!
+//! **A value's own guards.** The glue of a value runs in steps ([`crate::drops::glue`]): the
+//! type's `Drop` impl, then its parts in declaration order. A guard inside the value is held
+//! until the glue reaches it: by the `Drop` impl of every type around it, and by the glue of
+//! every part dropped before it. Each step is checked against the guards still inside
+//! ([`Cx::own_conflict`], E1405 case `own`), at every drop of such a value. A `MutexGuard` behind
+//! an owning raw pointer (a `vec.Vec` element) counts as held while the owner's `Drop` runs.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::{Diagnostic, Span};
@@ -44,6 +52,7 @@ use crate::diag::mk;
 use crate::ids::DeclId;
 use crate::mono::InstKey;
 use crate::sigs::{GenericParam, LockItems, NameCx, Sigs};
+use crate::traits::World;
 use crate::typeck::Typeck;
 use crate::types::{ConstArg, GArg, Interner, TypeId, TypeKind};
 
@@ -85,6 +94,9 @@ pub struct HeldAt {
     pub at: At,
     pub span: Span,
     pub held: Vec<Held>,
+    /// A drop of a value that may hold a lock itself: where that value is from (its binding, or
+    /// the expression that made it). Its glue is checked against the guards inside it.
+    pub own: Option<Span>,
 }
 
 /// The locks a fn body (its closures and `spawn` bodies included) may hold: per call, join, and
@@ -321,7 +333,15 @@ impl Cx<'_> {
 
     /// Reports the acquisition by `targets` at `span` of node `p` while `held` is held (E1405);
     /// `join`: the targets are threads joined there (E1406).
-    fn report(&mut self, p: u32, span: Span, held: &Lock, targets: &[u32], join: bool, drop: bool) {
+    fn report(
+        &mut self,
+        p: u32,
+        span: Span,
+        held: &Lock,
+        targets: &[u32],
+        join: bool,
+        case: Option<&'static str>,
+    ) {
         let Some(&t) = targets.iter().min_by_key(|&&t| self.low[t as usize]) else { return };
         let Some((edges, end)) = self.chain(t, held.rank) else { return };
         let rank = self.own[end as usize];
@@ -352,7 +372,7 @@ impl Cx<'_> {
             roles.push((if e.kind == EdgeKind::Drop { "drop" } else { "call" }, e.site));
         }
         let code = if join { "E1406" } else { "E1405" };
-        let case = (drop && !join).then_some("drop");
+        let case = case.filter(|_| !join);
         self.out.extend(mk(code, case, &holes, primary, &roles));
     }
 
@@ -398,6 +418,77 @@ impl Cx<'_> {
             out.push(Lock { rank: e.rank, text: e.text.clone(), span: e.span });
         }
         out
+    }
+
+    /// The first step of the drop glue of a value of the concrete type `t` that may acquire a
+    /// lock at or below the rank of a guard the value still holds then: the step's node and
+    /// that guard (held `from`). While the type's `Drop` impl runs every part of the value is
+    /// alive; while a part is dropped the parts after it are; the same holds inside each part.
+    fn own_conflict(
+        &self,
+        tycx: &mut crate::types::Overlay<'_>,
+        glue: &FxHashMap<TypeId, u32>,
+        t: TypeId,
+        from: Span,
+    ) -> Option<(u32, Lock)> {
+        let w = World { prog: self.prog, sigs: &self.tc.sigs };
+        // the highest guard inside values of types `ts`
+        let top = |tycx: &mut crate::types::Overlay<'_>, ts: &[TypeId]| -> Option<Lock> {
+            let mut best: Option<Lock> = None;
+            for &t in ts {
+                for q in lock_parts(tycx, self.prog, &self.tc.sigs, &[], t) {
+                    if let Part::Guard { rank: ConstArg::Value(rank), text, .. } = q
+                        && best.as_ref().is_none_or(|b| rank > b.rank)
+                    {
+                        best = Some(Lock { rank, text, span: from });
+                    }
+                }
+            }
+            best
+        };
+        let mut seen: FxHashSet<TypeId> = FxHashSet::default();
+        let mut work = vec![t];
+        while let Some(t) = work.pop() {
+            if !seen.insert(t) {
+                continue;
+            }
+            // a type without a glue node drops nothing
+            let Some(&node) = glue.get(&t) else { continue };
+            let g = crate::drops::glue(&w, tycx, t);
+            if g.method.is_some() {
+                // the impl is the glue node's one successor that is a fn
+                let m = self
+                    .g
+                    .succ(node)
+                    .iter()
+                    .map(|e| e.to)
+                    .find(|&n| matches!(self.g.nodes[n as usize].kind, NodeKind::Fn { .. }));
+                if let (Some(m), Some(lock)) = (m, top(tycx, &[t]))
+                    && self.low[m as usize] <= lock.rank
+                {
+                    return Some((m, lock));
+                }
+            }
+            let rows: Vec<Vec<TypeId>> = match g.parts {
+                crate::drops::Parts::None => Vec::new(),
+                crate::drops::Parts::Fields(fs) => vec![fs],
+                crate::drops::Parts::Variants(vs) => vs,
+                // an element is dropped while the elements after it are alive
+                crate::drops::Parts::Elems(e, n) => vec![vec![e; n.min(2) as usize]],
+            };
+            for fs in rows {
+                for (i, &f) in fs.iter().enumerate() {
+                    let Some(&gn) = glue.get(&f) else { continue };
+                    if let Some(lock) = top(tycx, &fs[i + 1..])
+                        && self.low[gn as usize] <= lock.rank
+                    {
+                        return Some((gn, lock));
+                    }
+                    work.push(f);
+                }
+            }
+        }
+        None
     }
 
     fn is_thread_call(&self, targets: &[u32]) -> bool {
@@ -583,7 +674,7 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks], drops: &[BodyDro
                 continue;
             }
             let join = cx.is_thread_call(targets);
-            cx.report(p, span, &top, targets, join, false);
+            cx.report(p, span, &top, targets, join, None);
         }
         // the joins of the node's `scope` statements: the spawn bodies inside each statement
         let Some(b) = body else { continue };
@@ -605,26 +696,33 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks], drops: &[BodyDro
                 .collect();
             let low = kids.iter().map(|&c| cx.low[c as usize]).min().unwrap_or(NONE);
             if low <= top.rank {
-                cx.report(p, s.span, &top, &kids, true, false);
+                cx.report(p, s.span, &top, &kids, true, None);
             }
         }
         // the drops: the dropped type's glue, else (a type the graph has no glue for) every
         // drop the node and its closures make
         for s in &b.sites {
             let At::Drop(t) = s.at else { continue };
-            let held = cx.resolve(&s.held, &args, None);
-            let Some(top) = held.into_iter().max_by_key(|h| h.rank) else { continue };
             let ty = import(&mut tycx, &b.types, t).map(|t| tycx.subst(t, &args, None));
-            let targets: Vec<u32> = match ty.and_then(|t| glue.get(&t)) {
-                Some(&n) => vec![n],
-                None => (0..g.nodes.len() as u32)
-                    .filter(|&c| c == p || matches!(g.nodes[c as usize].kind, NodeKind::Closure { parent, .. } if parent == p))
-                    .flat_map(|c| g.succ(c).iter().filter(|e| e.kind == EdgeKind::Drop).map(|e| e.to))
-                    .collect(),
-            };
-            let low = targets.iter().map(|&n| cx.low[n as usize]).min().unwrap_or(NONE);
-            if low <= top.rank {
-                cx.report(p, s.span, &top, &targets, false, true);
+            let held = cx.resolve(&s.held, &args, None);
+            if let Some(top) = held.into_iter().max_by_key(|h| h.rank) {
+                let targets: Vec<u32> = match ty.and_then(|t| glue.get(&t)) {
+                    Some(&n) => vec![n],
+                    None => (0..g.nodes.len() as u32)
+                        .filter(|&c| c == p || matches!(g.nodes[c as usize].kind, NodeKind::Closure { parent, .. } if parent == p))
+                        .flat_map(|c| g.succ(c).iter().filter(|e| e.kind == EdgeKind::Drop).map(|e| e.to))
+                        .collect(),
+                };
+                let low = targets.iter().map(|&n| cx.low[n as usize]).min().unwrap_or(NONE);
+                if low <= top.rank {
+                    cx.report(p, s.span, &top, &targets, false, Some("drop"));
+                }
+            }
+            // the guards the dropped value holds itself
+            if let (Some(from), Some(ty)) = (s.own, ty)
+                && let Some((step, lock)) = cx.own_conflict(&mut tycx, &glue, ty, from)
+            {
+                cx.report(p, s.span, &lock, &[step], false, Some("own"));
             }
         }
     }

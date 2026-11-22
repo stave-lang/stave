@@ -6,12 +6,15 @@
 //! becomes initialized when it or a part of it is assigned (params and captures on entry), and
 //! stops being so when it is moved out, dropped as a whole, or dies (a value moves whole: a
 //! pattern that takes it apart moves its source). At a call, the locals the call's arguments move out as a whole are
-//! not counted: the callee holds them, and its own calls are checked in its body. A drop (a
-//! `Drop` statement, or the old value an assignment overwrites) runs the type's drop glue: it is
-//! checked like a call, without the local it drops. The types a body really drops (a drop of a
-//! value that may be initialized) are reported for every body: the call graph's drop edges
-//! (every type a body makes or owns) narrowed to them, a constructor that returns its value drops
-//! nothing.
+//! not counted: the callee holds them, and its own calls are checked in its body. A drop runs the
+//! type's drop glue: it is checked like a call, without the local it drops, and, when the dropped
+//! value itself may hold a lock, against the guards inside it ([`HeldAt::own`]). The drops are
+//! the CFG's drop statements, which are the body's drop schedule ([`stave_sema::drops`]): a
+//! scope or statement end, an exit, a part a pattern ignores, the old value of an assignment
+//! (behind a dereference the assignment itself stands for it). The types a body really drops (a
+//! drop of a value that may be initialized) are reported for every body: the call graph's drop
+//! edges (every type a body makes or owns) narrowed to them, a constructor that returns its value
+//! drops nothing.
 
 use stave_sema::ranks::{At, Held, HeldAt, Part};
 
@@ -66,9 +69,9 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
         for s in &b.stmts {
             match &s.kind {
                 StmtKind::Assign { rv: Rvalue::Call { tok, .. }, .. } => out.calls.push(*tok),
-                StmtKind::Drop(_) | StmtKind::Assign { init: false, .. } => drops_any = true,
                 _ => {}
             }
+            drops_any |= matches!(&s.kind, StmtKind::Drop(_) | StmtKind::Assign { init: false, .. });
         }
     }
     // the locals that may hold a lock, with their parts (each type walked once), first
@@ -169,17 +172,33 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
             .map(|i| Held { parts: parts[i].clone(), span: body.locals[local_of[i] as usize].span })
             .collect()
     };
+    // whether a value of a type may hold a lock itself
+    let mut own = |t: stave_sema::TypeId, tys: &mut Tys<'_>| -> bool {
+        if t.is_none() {
+            return false;
+        }
+        match memo.iter().find(|m| m.0 == t) {
+            Some(m) => !m.1.is_empty(),
+            None => {
+                let ps = stave_sema::ranks::lock_parts(&mut tys.ov, tys.prog, tys.sigs, tys.env, t);
+                let r = !ps.is_empty();
+                memo.push((t, ps));
+                r
+            }
+        }
+    };
     let mut dropped: Vec<stave_sema::TypeId> = Vec::new();
     let mut any = Bits::new(n);
     for &b in &flow.rpo {
         let Some(mut st) = entry[b as usize].clone() else { continue };
         for s in &body.blocks[b as usize].stmts {
             any.union_with(&st);
-            // the drops that may run, and what they drop (an overwrite drops the old value)
+            // the drops that may run, and what they drop (an assignment through a dereference
+            // drops the old value; any other has a drop statement before it)
             let drop = match &s.kind {
                 StmtKind::Drop(p) if live(&st, p.local) => Some((p.ty, Some(p))),
                 StmtKind::Assign { dest, init: false, .. }
-                    if live(&st, dest.local) && tys.needs_drop(dest.ty) =>
+                    if dest.has_deref() && live(&st, dest.local) && tys.needs_drop(dest.ty) =>
                 {
                     Some((dest.ty, None))
                 }
@@ -201,21 +220,30 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
                         }
                     }
                     if holding(&at) {
-                        out.sites.push(HeldAt { at: At::Call(*tok), span: s.span, held: held(&at) });
+                        out.sites.push(HeldAt {
+                            at: At::Call(*tok),
+                            span: s.span,
+                            held: held(&at),
+                            own: None,
+                        });
                     }
                 }
                 StmtKind::Read(o) if holding(&st) => {
                     if let Some(&(_, scope)) = body.joins.iter().find(|j| j.0 == o.place.local) {
-                        out.sites.push(HeldAt { at: At::Join(scope), span: s.span, held: held(&st) });
+                        out.sites.push(HeldAt {
+                            at: At::Join(scope),
+                            span: s.span,
+                            held: held(&st),
+                            own: None,
+                        });
                     }
                 }
                 _ => {}
             }
-            // a drop runs the type's drop glue: a call, holding all but what it drops; an
-            // overwriting assignment whose value is a call (a user compound operator) is both
-            if let Some((t, whole)) = drop
-                && holding(&st)
-            {
+            // a drop runs the type's drop glue: a call, holding all but what it drops, and
+            // what the dropped value holds itself until the glue reaches it
+            if let Some((t, whole)) = drop {
+                let inner = own(t, tys);
                 let mut at = st.clone();
                 if let Some(p) = whole
                     && p.proj.is_empty()
@@ -224,8 +252,13 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
                 {
                     at.remove(i as usize);
                 }
-                if holding(&at) {
-                    out.sites.push(HeldAt { at: At::Drop(t), span: s.span, held: held(&at) });
+                if holding(&at) || inner {
+                    let own = inner.then(|| match whole {
+                        Some(p) => body.locals[p.local as usize].span,
+                        None => s.span,
+                    });
+                    out.sites.push(HeldAt { at: At::Drop(t), span: s.span, held: held(&at), own });
+                    out.holds = true;
                 }
             }
             step(&s.kind, &mut st);

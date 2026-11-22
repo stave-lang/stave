@@ -1,0 +1,61 @@
+//~ CHECK-ONLY
+// An operand already evaluated is an owner until the expression consumes it: a `?` in a later
+// operand that leaves the fn drops it. That drop is on the exit's rows of the drop schedule, so
+// it is checked against the locks held (E1405 at the `?`): `Lk`'s destructor takes `M` while a
+// guard of `M` is held, whether the guard is a local or a temporary of the statement.
+import std.io;
+import std.mem;
+import std.sync;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+
+struct Lk { pub id: u32 }
+
+impl Drop for Lk {
+    fn drop(&mut self) {
+        let g = M.lock();
+    }
+}
+
+struct Pair { pub l: Lk, pub n: u32 }
+
+fn some(i: u32) -> Option<u32> { return if i == 0 then Option.None else Option.Some(i); }
+
+fn keep(l: Lk, n: u32) -> u32 { mem.forget(l); return n; }
+
+fn keep2(a: u32, l: Lk, n: u32) -> u32 { mem.forget(l); return a + n; }
+
+fn gv(g: &sync.MutexGuard<u32, 1>) -> u32 { return *g.get(); }
+
+fn call_argument(k: u32) -> Option<u32> {
+    let g = M.try_lock();
+    let x = keep(Lk.{ id: 1 }, some(k)?); //~ ERROR E1405
+    return Option.Some(x);
+}
+
+fn named_argument(k: u32) -> Option<u32> {
+    let l = Lk.{ id: 1 };
+    let g = M.try_lock();
+    let x = keep(l, some(k)?); //~ ERROR E1405
+    return Option.Some(x);
+}
+
+fn guard_temporary(k: u32) -> Option<u32> {
+    let x = keep2(gv(&M.lock()), Lk.{ id: 1 }, some(k)?); //~ ERROR E1405
+    return Option.Some(x);
+}
+
+fn literal_field(k: u32) -> Option<u32> {
+    let g = M.try_lock();
+    let p = Pair.{ l: Lk.{ id: 1 }, n: some(k)? }; //~ ERROR E1405
+    mem.forget(p);
+    return Option.Some(1);
+}
+
+fn main() {
+    let a = call_argument(1);
+    let b = named_argument(1);
+    let c = guard_temporary(1);
+    let d = literal_field(1);
+    io.print("done\n");
+}

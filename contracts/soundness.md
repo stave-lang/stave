@@ -95,7 +95,9 @@ after the statement's write: a borrow of one that the destination took is live t
 temporary kept past its statement conflicts (E0501 `temporary`).
 
 **Not claimed.** A destination that is never read again may take a borrow of its own old value:
-no reference is used. A destination with drop glue is read by its drop.
+no reference is used. A destination with drop glue is read by its drop: the drop of the old
+value is a statement of its own before the write ("Drops: one schedule" below), and the scope
+end drops the new one.
 
 **What would break it.** A statement that ends a value and gives a local a new one without this
 check. A transfer function that leaves out of the destination's set a loan the new value holds.
@@ -190,6 +192,43 @@ Copy where it is used (E0422 case `operand`; a bound `T: Add` without `Copy` is 
 an operator trait is implemented only for Copy types (E0422), so the CFG takes every operator
 operand as a copy and `p op= e` overwrites a value without drop glue.
 
+## Drops: one schedule for the checks and the code
+
+**Claim.** Every drop the generated code runs in a checked body is a drop the checks read: a
+use of what the dropped value borrows (E0501), and a call of its drop glue at that point for
+the lock-rank and join rules (E1405, E1406) and for the types a body drops.
+
+**Assumptions.** A body's drop schedule (stave-sema `drops`, contracts/lang-details.md
+"Drops") has one row per drop: point and owner. The builder of the borrow CFG makes each row
+together with the drop statement it stands for, in one function, and makes no drop statement
+elsewhere; for a write through a dereference the assignment statement stands for the drop of
+the old value (it uses the pointer, and the lock check reads it as a drop). The lowering emits
+a drop only through one function, which fails the build when the schedule of the body has no
+row for the point, the owner, and the outermost constructor of the dropped type (an instance
+is checked against its definition's schedule, whose keys are nodes and tokens of the source).
+Which parts a moving pattern ignores, in what order, and what a type's drop glue runs, in what
+order, are each one function called by both.
+
+**Argument.** A drop without a row cannot be emitted. A row exists only with its statement, and
+the checks read statements: the loan check takes a drop as a use of the dropped local, the lock
+check takes it as a call of the glue of its type while every other local that may hold a guard
+is counted, and the guards inside the dropped value are counted for each step of the glue
+that runs before the glue reaches them. Whether the drop runs is the owner's init bit in both:
+the CFG keeps a temporary on the drop list from the statement that makes it to the statement
+that moves it out, so an exit taken between an operand's evaluation and the expression that
+consumes it drops it; the lowering holds it as an owner over the same interval. The checks are
+then conservative in one direction only: a drop statement for a value that was moved on this
+path does nothing in the code and is at most a use the code does not make.
+
+**Not claimed.** That the rows are in the order the code runs them within one point, or that
+two temporaries of one statement with the same outermost type are told apart: the row is
+found by point, owner, and type constructor. Bodies the borrow checker does not build (const
+and `static mut` initializers) have no schedule and are not compared.
+
+**What would break it.** A drop emitted by code that does not ask the schedule (the one
+function refuses a drop nobody asked for). A row added without its statement. A statement the
+checks read as something weaker than a use of the value and a call of its glue.
+
 ## Whole moves: no value is left with a moved-out part
 
 **Claim.** In an accepted program a place is either wholly initialized or wholly moved-out:
@@ -198,8 +237,9 @@ no drop, destructor, read, or later move sees a value with a moved-out part.
 **Assumptions.** Every by-value use of a non-Copy place is built by one CFG builder step
 (`move_out`, through `op_of_place` for operands and receivers and `bind_name` for pattern
 bindings of `let`, `match`, and `for`). A pattern that binds a non-Copy part by value reads its
-parts into the bindings and then moves its source as one value; the lowering drops the parts it
-does not bind at that point (contracts/lang-details.md "Whole moves").
+parts into the bindings, drops the parts it does not bind (the same list in the CFG and in the
+lowering, "Drops: one schedule"), and then moves its source as one value
+(contracts/lang-details.md "Whole moves").
 
 **Argument.** Outside a pattern, a by-value use of a place with a field, tuple, or payload
 projection is E0504 case `part`; a projection through a reference, an index, a capture, or a
@@ -418,7 +458,11 @@ instance makes one) while the local may be initialized: params from entry, until
 dropped as a whole, and not at a call that moves it whole into the callee. `get_or_init` holds `R`
 at every call in its body (its `f`). At each call the highest held rank is below the lowest the
 callee acquires; at each `scope` join and each call of `thread.join` or `par_*`, below the lowest
-the joined threads acquire; at each drop, below the drop glue's. A call the borrow checker's CFG has
+the joined threads acquire; at each drop, below the drop glue's. The drops are the rows of the
+drop schedule ("Drops: one schedule"), so none the code runs is left out. A guard inside a value
+is held until the value's glue reaches it: the type's `Drop` impl and the glue of each part
+dropped before it are checked against it, at every drop of such a value (a guard behind an
+owning raw pointer counts as held while the owner's `Drop` runs). A call the borrow checker's CFG has
 no token for is checked against every lock the body may hold anywhere. **Guarantees.** Give a
 waiting thread the rank it waits for: the mutex's, or at a join the lowest the joined threads may
 take. Every lock it holds ranks below that, except inside `lock_pair`, whose second wait has the

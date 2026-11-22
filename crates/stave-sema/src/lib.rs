@@ -41,6 +41,7 @@ pub mod consteval;
 pub mod contracts;
 pub mod decls;
 mod dispatch;
+pub mod drops;
 pub mod effects;
 mod ffi;
 pub mod gates;

@@ -1,0 +1,94 @@
+//~ STDOUT pos_drop_schedule.stdout
+// The drops the checks read from the drop schedule, where the code runs them: a part a moving
+// pattern ignores at the binding point, the operand `select` does not pick at the end of the
+// statement, an operand already evaluated when a later `?` leaves, the parts of a value in
+// declaration order (a guard first is released before the next part's destructor takes the
+// lock), the old value of an assignment before the write.
+import std.io;
+import std.sync;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+
+struct D { pub id: u32 }
+
+impl Drop for D {
+    fn drop(&mut self) {
+        let id = self.id;
+        io.print(f"drop {id}\n");
+    }
+}
+
+struct Lk { pub id: u32 }
+
+impl Drop for Lk {
+    fn drop(&mut self) {
+        let g = M.lock();
+        let id = self.id;
+        io.print(f"lk {id}\n");
+    }
+}
+
+view struct R { pub r: &u64 }
+
+impl Drop for R {
+    fn drop(&mut self) {
+        let n = *self.r;
+        io.print(f"r {n}\n");
+    }
+}
+
+fn some(i: u32) -> Option<u32> { return if i == 0 then Option.None else Option.Some(i); }
+
+fn keep(a: D, n: u32) -> u32 { return n; }
+
+fn consume(r: R) {}
+
+fn pattern() {
+    let (a, _) = (D.{ id: 1 }, D.{ id: 2 });
+    io.print("bound\n");
+}
+
+fn pattern_lock() {
+    let (_, b) = (Lk.{ id: 3 }, D.{ id: 4 });
+    let g = M.lock();
+    io.print("locked\n");
+}
+
+fn select(c: bool) {
+    let d = c.select(D.{ id: 5 }, D.{ id: 6 });
+    io.print("picked\n");
+}
+
+fn try_exit(k: u32) -> Option<u32> {
+    let x = keep(D.{ id: 7 }, some(k)?);
+    io.print("kept\n");
+    return Option.Some(x);
+}
+
+fn own_guard() {
+    let t = (M.lock(), Lk.{ id: 8 });
+    io.print("made\n");
+}
+
+fn reassign() {
+    let z: u64 = 10;
+    let y: u64 = 11;
+    let mut h = R.{ r: &z };
+    h = R.{ r: &y };
+    io.print("again\n");
+    h = R.{ r: &z };
+    consume(h);
+    h = R.{ r: &y };
+}
+
+fn main() -> i32 {
+    pattern();
+    pattern_lock();
+    select(true);
+    select(false);
+    let a = try_exit(1);
+    let b = try_exit(0);
+    own_guard();
+    reassign();
+    return 0;
+}

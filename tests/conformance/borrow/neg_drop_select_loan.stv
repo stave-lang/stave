@@ -1,0 +1,49 @@
+//~ CHECK-ONLY
+// The operand `c.select(a, b)` does not pick lives to the end of the statement, where it is
+// dropped. Which operand that is is not known when the code is checked, so what either operand
+// borrows stays borrowed until then: a second `&mut` of it in the same statement is E0501, and
+// so is a read when the operand holds a `&mut`. After the statement the borrow is over.
+import std.io;
+
+view struct W { pub r: &mut u32 }
+
+impl Drop for W {
+    fn drop(&mut self) {
+        *self.r = *self.r + 100;
+    }
+}
+
+fn take(w: W) -> u32 { return 1; }
+
+fn set(x: &mut u32) -> u32 { *x = 7; return 0; }
+
+fn get(x: &u32) -> u32 { return *x; }
+
+fn second_mut(c: bool) -> u32 {
+    let mut x: u32 = 1;
+    let mut y: u32 = 2;
+    let n = take(c.select(W.{ r: &mut x }, W.{ r: &mut y })) + set(&mut x); //~ ERROR E0501
+    return n + x + y;
+}
+
+fn read_beside(c: bool) -> u32 {
+    let mut x: u32 = 1;
+    let mut y: u32 = 2;
+    let n = take(c.select(W.{ r: &mut x }, W.{ r: &mut y })) + get(&y); //~ ERROR E0501
+    return n + x + y;
+}
+
+fn next_statement(c: bool) -> u32 {
+    let mut x: u32 = 1;
+    let mut y: u32 = 2;
+    let n = take(c.select(W.{ r: &mut x }, W.{ r: &mut y }));
+    let m = set(&mut x) + get(&y);
+    return n + m + x + y;
+}
+
+fn main() {
+    let a = second_mut(false);
+    let b = read_beside(true);
+    let d = next_statement(false);
+    io.print(f"{a} {b} {d}\n");
+}

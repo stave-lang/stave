@@ -101,14 +101,15 @@ pub struct GraphLowering {
 
 /// Lowers the fn instances of call-graph nodes `nodes` and everything they request, as every
 /// build mode lowers each of them (lowering an instance does not depend on the mode), and maps
-/// the functions back to graph nodes.
+/// the functions back to graph nodes. `drops`: as for [`lower_mapped`].
 pub fn lower_graph_nodes(
     prog: &Program,
     tc: &Typeck,
     nodes: &[u32],
+    drops: Option<&crate::drops::Schedules>,
 ) -> (Result<GraphLowering, Vec<LowerError>>, LowerTimings) {
     crate::pool::on_big_stacks(|| {
-        let (r, tm) = lower_in_pool(prog, tc, Roots::Graph(nodes), false);
+        let (r, tm) = lower_in_pool(prog, tc, Roots::Graph(nodes), false, drops);
         let r = r.map(|a| {
             let nodes_of_func = graph_nodes_of(tc, &a);
             GraphLowering { module: a.module, nodes_of_func, site_pos: a.site_pos }
@@ -244,7 +245,7 @@ pub fn lower_timed(
     mode: Mode,
 ) -> (Result<Module, Vec<LowerError>>, LowerTimings) {
     crate::pool::on_big_stacks(|| {
-        let (r, tm) = lower_in_pool(prog, tc, Roots::Mode(mode), false);
+        let (r, tm) = lower_in_pool(prog, tc, Roots::Mode(mode), false, None);
         (r.map(|a| a.module), tm)
     })
 }
@@ -255,15 +256,18 @@ pub type Mapped = (Module, Vec<Vec<u32>>);
 /// [`lower_timed`] plus the call-graph nodes of each function, as [`GraphLowering::nodes_of_func`].
 /// `borrows`: each borrow expression gets an instruction of its own (an identity cast) and a row
 /// in its body's side table (`Body::borrows`), for the interpreter's borrow tracking; the
-/// module is then not the canonical checked IR.
+/// module is then not the canonical checked IR. `drops`: the drop schedules of the borrow-checked
+/// bodies ([`crate::drops`]); every drop the lowering emits in such a body must be on its
+/// schedule, else the lowering fails with an internal error.
 pub fn lower_mapped(
     prog: &Program,
     tc: &Typeck,
     mode: Mode,
     borrows: bool,
+    drops: Option<&crate::drops::Schedules>,
 ) -> (Result<Mapped, Vec<LowerError>>, LowerTimings) {
     crate::pool::on_big_stacks(|| {
-        let (r, tm) = lower_in_pool(prog, tc, Roots::Mode(mode), borrows);
+        let (r, tm) = lower_in_pool(prog, tc, Roots::Mode(mode), borrows, drops);
         let r = r.map(|a| {
             let nodes_of_func = graph_nodes_of(tc, &a);
             (a.module, nodes_of_func)
@@ -277,6 +281,7 @@ fn lower_in_pool(
     tc: &Typeck,
     roots: Roots<'_>,
     borrows: bool,
+    drops: Option<&crate::drops::Schedules>,
 ) -> (Result<Assembled, Vec<LowerError>>, LowerTimings) {
     let mut tm = LowerTimings::default();
     let err = |msg: &str| LowerError {
@@ -421,6 +426,7 @@ fn lower_in_pool(
                 any_requires,
                 borrows,
                 inherited: &inherited,
+                drops,
             };
             pending.par_iter().map(|j| lower_job(&g, any_item, j)).collect()
         };
@@ -666,6 +672,7 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 let mut cx = FnCx::new(g, icx, path.clone());
                 cx.has_body = true;
                 cx.tb = Some(tb);
+                cx.sched = g.drops.and_then(|m| m.get(&tb.decl));
                 cx.args = k.args.clone();
                 cx.cur_n_parent = sig.n_parent;
                 cx.raw_self_ty = if decl.kind == DeclKind::Method {

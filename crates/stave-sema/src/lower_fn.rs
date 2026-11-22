@@ -32,6 +32,7 @@ use stave_syntax::NodeKind;
 
 use crate::Program;
 use crate::decls::DeclKind;
+use crate::drops::{Owner, Point};
 use crate::ids::DeclId;
 use crate::itemcx::{Brackets, ItemCx};
 
@@ -68,6 +69,9 @@ pub(crate) struct G<'a> {
     pub borrows: bool,
     /// The features generic instances inherit from their type arguments, beyond their `needs`.
     pub inherited: &'a FxHashMap<InstKey, u64>,
+    /// The drop schedules of the checked bodies ([`crate::drops`]); `None`: the program was
+    /// lowered without a borrow check.
+    pub drops: Option<&'a crate::drops::Schedules>,
 }
 
 impl<'a> G<'a> {
@@ -221,6 +225,9 @@ pub(crate) struct Temp {
     pub seq: u32,
     pub home: Home,
     pub ends: Ends,
+    /// The innermost statement open when it was made ([`crate::temps`]): its owner key in the
+    /// drop schedule.
+    pub stmt: u32,
 }
 
 /// An owner that needs a dynamic drop flag: a local's binding node, or a temporary's creation
@@ -323,6 +330,10 @@ pub(crate) struct FnState {
     /// The site of an instruction that has none of its own: the statement's, with the borrow
     /// side table on (a report names source lines); else none.
     pub stmt_site: Site,
+    /// The exit being lowered, whose drops are the ones emitted now (else [`Point::End`]).
+    pub point: Point,
+    /// The drop about to be emitted was found on the schedule ([`FnCx::scheduled`]).
+    pub ticket: bool,
 }
 
 /// The write-back of a `&mut` chunk binding: the vector in `slot` goes to `s[i..i+N]`, only the
@@ -428,6 +439,8 @@ pub(crate) struct FnCx<'a> {
     /// Lowering a `requires` clause: no user-site stores, so a false clause reports the site
     /// the caller stored.
     pub hold_site: bool,
+    /// The drop schedule of the body being lowered, when the borrow checker made one.
+    pub sched: Option<&'a crate::drops::Schedule>,
 }
 
 impl<'a> FnCx<'a> {
@@ -475,6 +488,7 @@ impl<'a> FnCx<'a> {
             old_vals: FxHashMap::default(),
             result_local: None,
             hold_site: false,
+            sched: None,
         }
     }
 
@@ -985,7 +999,12 @@ impl<'a> FnCx<'a> {
             mem: true,
             drop: true,
             flag,
-            temp: Some(Temp { seq, home, ends }),
+            temp: Some(Temp {
+                seq,
+                home,
+                ends,
+                stmt: self.f.open.last().copied().unwrap_or(crate::temps::NONE),
+            }),
         });
         self.set_st(l, Init::Full);
         match ends {
@@ -1495,10 +1514,12 @@ impl<'a> FnCx<'a> {
 
     /// `place = v`: drops the old value of the place where it holds one, then writes it. An
     /// owner assigned as a whole holds its value afterwards.
-    pub fn assign(&mut self, p: &Place, v: Operand) {
+    /// `at`: the node of the destination expression.
+    pub fn assign(&mut self, p: &Place, v: Operand, at: u32) {
+        let key = (Point::Assign(at), Owner::Old);
         match p.root {
             Some(l) if self.locals[l].drop => {
-                self.drop_if_held(l, p);
+                self.drop_if_held(l, p, key);
                 self.write(p, v);
                 if p.proj.is_empty() {
                     self.set_st(l, Init::Full);
@@ -1507,34 +1528,58 @@ impl<'a> FnCx<'a> {
             }
             Some(_) => self.write(p, v),
             None => {
+                if self.needs_drop(p.ty) {
+                    self.scheduled(key.0, key.1, p.ty);
+                }
                 self.drop_place(p);
                 self.write(p, v);
             }
         }
     }
 
+    /// A drop of a value of type `t` is about to be emitted: the body's schedule
+    /// ([`crate::drops`]) must have it. A drop it lacks is one no check has seen.
+    pub fn scheduled(&mut self, point: Point, owner: Owner, t: Ty) {
+        self.f.ticket = true;
+        let Some(s) = self.sched else { return };
+        let head = crate::drops::head(&self.tys, t);
+        if !s.has(point, owner, head) {
+            let tok = self.has_body.then(|| self.icx.a(self.f.cur));
+            self.fail_at(tok, format!("a drop the schedule does not have: {owner:?} at {point:?}"));
+        }
+    }
+
+    /// The schedule key of owner `l` at the point being lowered.
+    fn owner_key(&self, l: usize) -> (Point, Owner) {
+        let owner = match self.locals[l].temp {
+            Some(t) => Owner::Temp(t.stmt),
+            None => Owner::Local(self.locals[l].node),
+        };
+        (self.f.point, owner)
+    }
+
     /// Drops the value in place `p`, which is owner `l` or a part of it, if the owner holds its
     /// value: its flag decides when it has one (a constant flag is folded), else the state.
-    fn drop_if_held(&mut self, l: usize, p: &Place) {
+    fn drop_if_held(&mut self, l: usize, p: &Place, key: (Point, Owner)) {
         if !self.needs_drop(p.ty) || !self.open() {
             return;
         }
         let Some(f) = self.locals[l].flag else {
             if self.st(l) == Init::Full {
-                self.drop_held(l, p);
+                self.drop_held(l, p, key);
             }
             return;
         };
         let Some(fv) = self.flag_val(f) else { return };
         match self.kval(fv) {
             Some(0) => {}
-            Some(_) => self.drop_held(l, p),
+            Some(_) => self.drop_held(l, p, key),
             None => {
                 let yes = self.f.b.create_block();
                 let cont = self.f.b.create_block();
                 self.f.b.cbr(fv, yes, &[], cont, &[]);
                 self.f.b.switch_to(yes);
-                self.drop_held(l, p);
+                self.drop_held(l, p, key);
                 if self.open() {
                     self.f.b.br(cont, &[]);
                 }
@@ -1545,7 +1590,8 @@ impl<'a> FnCx<'a> {
 
     /// Drops what owner `l` holds of its value in place `p`: all of it, or, of the array a `for`
     /// loop takes element by element, the elements the loop has not taken.
-    fn drop_held(&mut self, l: usize, p: &Place) {
+    fn drop_held(&mut self, l: usize, p: &Place, key: (Point, Owner)) {
+        self.scheduled(key.0, key.1, p.ty);
         match self.locals[l].temp {
             Some(Temp { home: Home::Rest(s, taken), .. }) => self.drop_rest(s, taken, p.ty),
             _ => self.drop_place(p),
@@ -1593,10 +1639,14 @@ impl<'a> FnCx<'a> {
         self.drop_ptr(a, p.ty);
     }
 
-    /// `drop(*a)` for a `&mut T` pointer `a`.
+    /// `drop(*a)` for a `&mut T` pointer `a`. In a checked body every drop is asked of the
+    /// schedule first ([`FnCx::scheduled`]).
     pub fn drop_ptr(&mut self, a: Operand, t: Ty) {
         if !self.needs_drop(t) {
             return;
+        }
+        if self.has_body && !std::mem::take(&mut self.f.ticket) {
+            self.fail_at(None, "a drop emitted without asking the schedule");
         }
         let w = self.g.world();
         let direct = match crate::mono::drop_method(&w, &mut self.tys, t) {
@@ -1639,7 +1689,8 @@ impl<'a> FnCx<'a> {
             }
             p => p,
         };
-        self.drop_if_held(l, &p);
+        let key = self.owner_key(l);
+        self.drop_if_held(l, &p, key);
         if let Some(Temp { home: Home::Slot(s) | Home::Rest(s, _), .. }) = self.locals[l].temp {
             // the slot of a temporary ends with it
             let pt = self.t_ref(true, self.locals[l].ty);
@@ -1784,6 +1835,15 @@ impl<'a> FnCx<'a> {
             self.f.slot_marks.get(from).copied().unwrap_or(self.f.stmt_slots.len())
         };
         self.end_slots(at);
+    }
+
+    /// The drops of exit `point`: the temporaries of the open statements from index `stmts` on,
+    /// then the locals of scopes `scopes..`.
+    pub fn exit_drops(&mut self, point: Point, stmts: usize, scopes: usize) {
+        let outer = std::mem::replace(&mut self.f.point, point);
+        self.exit_temps(stmts);
+        self.drop_scopes(scopes);
+        self.f.point = outer;
     }
 
     /// The end of the rvalue slots of the open statements from `stmt_slots[at]` on, last
@@ -1961,6 +2021,8 @@ impl FnState {
             stmt_slots: Vec::new(),
             slot_marks: Vec::new(),
             stmt_site: Site::NONE,
+            point: Point::End,
+            ticket: false,
             ensures_end: None,
         }
     }
