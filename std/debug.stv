@@ -30,38 +30,38 @@ impl core.Copy for Site {}
 impl Site {
     // The file as diagnostics name it (`std/vec.stv` for a std site).
     pub fn file(&self) -> &str {
-        return field_str(self.row, 0);
+        return unsafe("a row's file string is its fields at 0 and 8") field_str(self.row, 0);
     }
 
     // 1-based.
     pub fn line(&self) -> u32 {
-        return field_u32(self.row, 12);
+        return unsafe("a row's line is its u32 at 12") field_u32(self.row, 12);
     }
 
     // 1-based, in bytes.
     pub fn col(&self) -> u32 {
-        return field_u32(self.row, 28);
+        return unsafe("a row's col is its u32 at 28") field_u32(self.row, 28);
     }
 
     // The enclosing fn's path (`main.parse`).
     pub fn func(&self) -> &str {
-        return field_str(self.row, 16);
+        return unsafe("a row's fn string is its fields at 16 and 24") field_str(self.row, 16);
     }
 }
 
 // Site-table row fields (runtime.panic header): a string is a u64 address at `off` and a u32
 // byte length at `off + 8`.
-fn field_str(site: u32, off: usize) -> &str {
+unsafe("off is 0 or 16: a row's u64 string address at off and its u32 byte length at off + 8") fn field_str(site: u32, off: usize) -> &str {
     let r = panic.site_row(site);
     if r == 0 { return "<unknown>"; }
-    let parts: [usize; 2] = unsafe("a site-table row is read-only program data, 8-byte aligned") [*((r + off) as *const u64) as usize, *((r + off + 8) as *const u32) as usize];
+    let parts: [usize; 2] = unsafe("a site-table row is read-only program data, 8-byte aligned; off and off + 8 are its string fields (this fn's obligation)") [*((r + off) as *const u64) as usize, *((r + off + 8) as *const u32) as usize];
     return unsafe("the row's string is UTF-8 program data that lives as long as the program; a str reference is (data pointer, byte length)") *(&parts as *const [usize; 2] as *const &str);
 }
 
-fn field_u32(site: u32, off: usize) -> u32 {
+unsafe("off is the offset of a u32 field of a row: 8, 12, 24, or 28") fn field_u32(site: u32, off: usize) -> u32 {
     let r = panic.site_row(site);
     if r == 0 { return 0; }
-    return unsafe("a site-table row is read-only program data, 4-byte aligned") *((r + off) as *const u32);
+    return unsafe("a site-table row is read-only program data, 4-byte aligned; off is one of its u32 fields (this fn's obligation)") *((r + off) as *const u32);
 }
 
 // A copy of a task's error trace.

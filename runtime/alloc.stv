@@ -96,7 +96,7 @@ fn try_realloc(p: *mut u8, old_size: usize, alignment: usize, new_size: usize) -
         let lo = round_up(old_size, page);
         let ln = round_up(new_size, page);
         if lo == ln { return p; }
-        let r = unsafe("p..p+lo is a large mapping owned by the caller") os.mremap(p as usize, lo, ln, os.MREMAP_MAYMOVE);
+        let r = unsafe("p..p+lo is a large mapping owned by the caller that nothing else points into; MREMAP_MAYMOVE alone") os.mremap(p as usize, lo, ln, os.MREMAP_MAYMOVE);
         if r < 0 { return null(); }
         add_large(ln);
         sub_large(lo);
@@ -195,7 +195,7 @@ fn alloc_lock() -> *mut u32 {
 fn small_alloc(c: usize) -> *mut u8 {
     let w = alloc_lock();
     unsafe("w is the allocator lock word in the state block") { atomic.lock(w); }
-    let p = small_alloc_locked(c);
+    let p = unsafe("this thread holds the allocator lock (above)") small_alloc_locked(c);
     unsafe("this thread holds the allocator lock") { atomic.unlock(w); }
     return p;
 }
@@ -208,7 +208,7 @@ unsafe("p is a block of class c that nothing else uses") fn small_free(p: *mut u
 }
 
 // The bodies below run with the allocator lock held.
-fn small_alloc_locked(c: usize) -> *mut u8 {
+unsafe("this thread holds the allocator lock") fn small_alloc_locked(c: usize) -> *mut u8 {
     let st = state.get();
     let head = unsafe("st is runtime.state.STATE; the allocator lock is held") (*st).free[c];
     if head != 0 {
@@ -216,10 +216,10 @@ fn small_alloc_locked(c: usize) -> *mut u8 {
         unsafe("st is runtime.state.STATE; the allocator lock is held") { (*st).free[c] = next; }
         return head as *mut u8;
     }
-    return refill(c);
+    return unsafe("this thread holds the allocator lock (this fn's obligation)") refill(c);
 }
 
-unsafe("p is a block of class c that nothing else uses") fn small_free_locked(p: *mut u8, c: usize) {
+unsafe("this thread holds the allocator lock; p is a block of class c that nothing else uses") fn small_free_locked(p: *mut u8, c: usize) {
     let st = state.get();
     unsafe("st is runtime.state.STATE (allocator lock held); p is a dead block of class c (caller)") {
         *(p as *mut usize) = (*st).free[c];
@@ -229,8 +229,8 @@ unsafe("p is a block of class c that nothing else uses") fn small_free_locked(p:
 
 // Cuts one slab into class-c blocks: returns the first, pushes the rest (lowest address on top).
 // Null when no slab can be mapped.
-fn refill(c: usize) -> *mut u8 {
-    let slab = take_slab();
+unsafe("this thread holds the allocator lock") fn refill(c: usize) -> *mut u8 {
+    let slab = unsafe("this thread holds the allocator lock (this fn's obligation)") take_slab();
     if slab == 0 { return null(); }
     let size = CLASS[c];
     let n = SLAB / size;
@@ -238,13 +238,13 @@ fn refill(c: usize) -> *mut u8 {
     while i > 1 {
         i = i - 1;
         let b = slab + i * size;
-        unsafe("b is inside the fresh slab, a dead block of class c") { small_free_locked(b as *mut u8, c); }
+        unsafe("b is inside the fresh slab, a dead block of class c; this thread holds the allocator lock (this fn's obligation)") { small_free_locked(b as *mut u8, c); }
     }
     return slab as *mut u8;
 }
 
 // 0 when the next chunk cannot be mapped.
-fn take_slab() -> usize {
+unsafe("this thread holds the allocator lock") fn take_slab() -> usize {
     let st = state.get();
     let cur = unsafe("st is runtime.state.STATE; the allocator lock is held") (*st).arena_cur;
     let end = unsafe("st is runtime.state.STATE; the allocator lock is held") (*st).arena_end;
@@ -254,7 +254,7 @@ fn take_slab() -> usize {
     }
     let prot = os.PROT_READ | os.PROT_WRITE;
     let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS | os.MAP_NORESERVE;
-    let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, CHUNK, prot, flags, -1, 0);
+    let r = unsafe("no MAP_FIXED and fd -1: fresh anonymous pages the kernel picks") os.mmap(0, CHUNK, prot, flags, -1, 0);
     if r < 0 { return 0; }
     let base = r as% usize;
     unsafe("st is runtime.state.STATE; the allocator lock is held") {
@@ -273,7 +273,7 @@ fn large_alloc(size: usize, alignment: usize) -> *mut u8 {
     let prot = os.PROT_READ | os.PROT_WRITE;
     let flags = os.MAP_PRIVATE | os.MAP_ANONYMOUS | os.MAP_NORESERVE;
     if alignment <= page {
-        let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, len, prot, flags, -1, 0);
+        let r = unsafe("no MAP_FIXED and fd -1: fresh anonymous pages the kernel picks") os.mmap(0, len, prot, flags, -1, 0);
         if r < 0 { return null(); }
         add_large(len);
         return (r as% usize) as *mut u8;
@@ -281,7 +281,7 @@ fn large_alloc(size: usize, alignment: usize) -> *mut u8 {
     // Over-map by alignment, then return the unaligned head and the tail_len to the kernel, so the
     // mapping is exactly [p, p + len) as free() expects.
     if len > USIZE_MAX - alignment { return null(); }
-    let r = unsafe("no MAP_FIXED: the kernel picks fresh pages") os.mmap(0, len + alignment, prot, flags, -1, 0);
+    let r = unsafe("no MAP_FIXED and fd -1: fresh anonymous pages the kernel picks") os.mmap(0, len + alignment, prot, flags, -1, 0);
     if r < 0 { return null(); }
     let base = r as% usize;
     let p = round_up(base, alignment);
