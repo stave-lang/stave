@@ -712,6 +712,25 @@ impl<'a, 'b> Builder<'a, 'b> {
             self.body.guard_effects.push((span, GuardEffect::MutBorrow(place.clone())));
         }
         let ty = self.tys.ov.mk_ref(mutable, place.ty);
+        // A `&` of an immutable static's storage (it never ends, is never moved from, and is
+        // written only through interior mutability) borrows nothing: the reference is a
+        // constant, as a string literal is, wherever it flows.
+        if !mutable && self.body.locals.get(place.local as usize).is_some_and(|l| l.static_root) {
+            let t = self.new_local(ty, false, span, String::new(), true);
+            let c = Operand {
+                kind: OpKind::Const,
+                place: Place::local(0, TypeId::NONE),
+                span,
+                node: n,
+                site: u32::MAX,
+            };
+            self.push(
+                StmtKind::Assign { dest: Place::local(t, ty), rv: Rvalue::Use(c), init: true },
+                span,
+                n,
+            );
+            return (V::P(Place::local(t, ty)), None);
+        }
         let res = self.new_loan(&place, mutable && !two_phase, span, n, two_phase);
         let act = two_phase.then(|| self.new_loan(&place, true, span, n, false));
         let t = self.new_local(ty, false, span, String::new(), true);

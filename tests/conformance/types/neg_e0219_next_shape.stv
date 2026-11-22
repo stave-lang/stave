@@ -1,0 +1,118 @@
+//~ CHECK-ONLY
+// The loop calls `next` with the source alone, so only `fn next(&mut self) -> Option<X>` makes an
+// iterator: another receiver, another param, or another result is E0219 `next-shape`,
+// for a concrete source and through a bound alike (else the check passes and no call is built).
+struct Arg { i: u64 }
+struct ByRef { i: u64 }
+struct ByVal { i: u64 }
+struct NoSelf { i: u64 }
+struct NotOpt { i: u64 }
+
+impl Arg {
+    fn next(&mut self, k: u64) -> Option<u64> {
+        self.i = self.i + k;
+        return if self.i > 3 then Option.None else Option.Some(self.i);
+    }
+}
+
+impl ByRef {
+    fn next(&self) -> Option<u64> {
+        return Option.None;
+    }
+}
+
+impl ByVal {
+    fn next(self) -> Option<u64> {
+        return Option.None;
+    }
+}
+
+impl NoSelf {
+    fn next() -> Option<u64> {
+        return Option.None;
+    }
+}
+
+impl NotOpt {
+    fn next(&mut self) -> u64 {
+        return self.i;
+    }
+}
+
+
+trait TArg {
+    fn next(&mut self, k: u32) -> Option<u32>;
+}
+
+trait TByRef {
+    fn next(&self) -> Option<u32>;
+}
+
+trait TByVal {
+    fn next(self) -> Option<u32>;
+}
+
+trait TNoSelf {
+    fn next() -> Option<u32>;
+}
+
+impl TArg for Arg {
+    fn next(&mut self, k: u32) -> Option<u32> {
+        return Option.None;
+    }
+}
+
+fn concrete(a: Arg, b: ByRef, c: ByVal, d: NoSelf, e: NotOpt) {
+    for x in a { //~ ERROR E0219
+    }
+    for x in b { //~ ERROR E0219
+    }
+    for x in c { //~ ERROR E0219
+    }
+    for x in d { //~ ERROR E0219
+    }
+    for x in e { //~ ERROR E0219
+    }
+}
+
+fn by_mut(a: &mut Arg, b: &mut ByRef) {
+    for x in a { //~ ERROR E0219
+    }
+    for x in b { //~ ERROR E0219
+    }
+}
+
+fn bound_arg<T: TArg>(t: T) {
+    for x in t { //~ ERROR E0219
+    }
+}
+
+fn bound_ref<T: TByRef>(t: T) {
+    for x in t { //~ ERROR E0219
+    }
+}
+
+fn bound_val<T: TByVal>(t: T) {
+    for x in t { //~ ERROR E0219
+    }
+}
+
+fn bound_static<T: TNoSelf>(t: &mut T) {
+    for x in t { //~ ERROR E0219
+    }
+}
+
+fn main() -> i32 {
+    // called by name with its args, each is an ordinary method
+    let mut a = Arg.{ i: 0 };
+    loop {
+        match a.next(1u64) {
+            Option.Some(v) => {}
+            Option.None => {
+                break;
+            }
+        }
+    }
+    bound_arg(Arg.{ i: 0 });
+    return 0;
+}

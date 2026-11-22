@@ -213,6 +213,16 @@ The caller rule (every view the target reaches holds all the clause's sources fr
 applies also when the target holds no borrow at this instance (`Slot<u32>`): the sources still
 take the store.
 
+## §3 A borrow of a static
+
+A `&` of an immutable `static` or a part of it (`&A`, `&T[i]`, `&S.f`, the auto-ref of a
+`&self` method call on it) borrows nothing: the storage never ends, is never moved from, and
+changes only through interior mutability, so the reference is a constant like a string literal,
+wherever it flows: returned without `from`, stored through a `&mut` param, into a captured
+reference, a struct field, an `Option`, or a value another thread reads. Still rejected: `&mut A`
+(E0503), a `static mut` (E0809), a local or param that shadows the static, and a `const` (a
+temporary) are borrows of locals (E0512, E0513).
+
 ## §3 Drops
 
 Every value with drop glue is dropped exactly once, on every path, by the owner that holds it
@@ -318,9 +328,16 @@ resolved `next`), never the instance type. The list is closed: a type not listed
 | a reference to a reference (`&mut &mut It`, `&&mut It`, `& &[T]`, `&mut &[T; N]`, ..) | E0219 `ref-ref`: iterate the inner reference | E0219 `ref-ref` |
 | any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, or a reference to one) | E0219 `not-source` | E0219 `not-source` |
 
-An iterator type is a struct, enum, or generic parameter with `next(&mut self) -> Option<X>`
-(else E0219 `not-source`; a `vec.Vec` or a reference to one: E0219 `as-slice`, iterate
-`.as_slice()`). A generic `T` (or `&mut T`) source is always an iterator through its bound's
+An iterator type is a struct, enum, or generic parameter whose `next` (method lookup, for `T`
+its bounds) is exactly `fn next(&mut self) -> Option<X>`: the loop passes the source and nothing
+else. Another receiver (`&self`, `self`, none), another param, generic params of its own, or
+another result is E0219 `next-shape`; no `next` at all is E0219 `not-source` (a `vec.Vec` or a
+reference to one: `as-slice`, iterate `.as_slice()`). Two `next`s (two traits, or two instances
+of one trait: `T: Nx<u8> + Nx<u16>`) are E0908, as for a call, when one of them has that shape.
+The loop's call of `next` is checked as `recv.next()` is, through the same check of a method
+call: its `needs` against the enclosing fn's (E0704), its privacy (E0106), an `unsafe fn next`
+outside `unsafe(..)` (E0803), the instance's bounds; it is an edge of the call graph (effects,
+`without`, `rec`, lock ranks) and its `requires` runs at its entry. A generic `T` (or `&mut T`) source is always an iterator through its bound's
 `next`: each instance runs that trait method, whatever the instance type is (`T = [u64; 2]` does
 not become an array loop, `T = &mut It` runs `impl Next for &mut It`); a `T` without such a bound
 is E0219 at the definition. Element and binding types, a sequence's length, and the resolved
@@ -333,6 +350,11 @@ an expression whose last step is a field, tuple field, element `e[i]`, sub-slice
 `std.soa` column `ps.x` (of any base, `f().a` included); such an expression in parentheses or
 after `unsafe(..)`. Reason: a loop over a place reads (or writes) it while the body may change
 it; a reference makes the borrow visible and gives it one meaning in the checker and the code.
+
+By value: `for x in &a { let v = *x; .. }` reads each element of a Copy `T`. To move the
+elements of an array place out, make it a temporary: `for x in mem.replace(&mut a, b) { .. }`
+(or pass it through a fn that returns it). A `vec.Vec` gives up its elements by move through
+`pop()`, last first: `loop { match v.pop() { Option.Some(x) => { .. } Option.None => { break; } } }`.
 
 A `&` or `&mut` chunk binding (also the first `tail masked` binding) borrows a copy of the chunk
 that lives in its block; the chunk of the sequence stays borrowed until the block is left (its end, `break`, `continue`, `return`, `?`), where a

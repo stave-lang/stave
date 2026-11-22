@@ -2102,8 +2102,8 @@ impl<'a> Ck<'a> {
                 });
                 St::BoundAssoc { method, trait_args, self_ty, targs: ga }
             }
-            Lookup::Ambiguous { traits, methods, recv } => {
-                self.e0908(seg, recv, traits, methods);
+            Lookup::Ambiguous { traits, methods, refs, recv } => {
+                self.e0908(seg, recv, traits, methods, &refs);
                 St::Err
             }
             Lookup::NotInBounds { param } => {
@@ -2123,8 +2123,33 @@ impl<'a> Ck<'a> {
         }
     }
 
-    fn e0908(&mut self, seg: u32, recv: TypeId, traits: [DeclId; 2], methods: [DeclId; 2]) {
+    fn e0908(
+        &mut self,
+        seg: u32,
+        recv: TypeId,
+        traits: [DeclId; 2],
+        methods: [DeclId; 2],
+        refs: &[MethodRef; 2],
+    ) {
         let name = self.icx.tok_str(seg).to_string();
+        let at = self.icx.tok_span(seg);
+        self.e0908_at(&name, at, recv, traits, methods, refs, None);
+    }
+
+    /// E0908 for method `name` at `at`; `refs`: the two methods found. `source`: the text of a
+    /// `for` source whose implicit `next` it is, whether that source is a `&mut`, and which of
+    /// the two `next`s has the iterator shape (the fix advances the source through that one).
+    #[allow(clippy::too_many_arguments)]
+    fn e0908_at(
+        &mut self,
+        name: &str,
+        at: Span,
+        recv: TypeId,
+        traits: [DeclId; 2],
+        methods: [DeclId; 2],
+        refs: &[MethodRef; 2],
+        source: Option<(&str, bool, usize)>,
+    ) {
         let tn = self.show(recv);
         let (p1, p2) = (self.prog.decl_path(traits[0]), self.prog.decl_path(traits[1]));
         let mut roles: Vec<(&str, Span)> = Vec::new();
@@ -2138,19 +2163,124 @@ impl<'a> Ck<'a> {
         // a static fn has no receiver to give `Self` on a trait path: only a bound names one
         // impl then
         let stat = self.sigs.fn_sig(methods[0]).is_some_and(|s| s.self_kind.is_none());
+        // a `for` source gets the loop-shaped text, also for two instances of one trait
         let case = match (traits[0] == traits[1], stat) {
+            _ if source.is_some_and(|s| s.1) => Some("for-mut"),
+            _ if source.is_some() => Some("for"),
             (true, false) => Some("impls"),
             (true, true) => Some("impls-static"),
             _ => None,
         };
-        let d = mk(
-            "E0908",
-            case,
-            &[("name", &name), ("type", &tn), ("first", &p1), ("second", &p2)],
-            self.icx.tok_span(seg),
-            &roles,
-        );
+        // the fix's code names each trait instance as this module does (`Nx::<u8>` in a call,
+        // `Nx<u8>` in a bound), with the imports that takes
+        let mut imports: Vec<String> = Vec::new();
+        let [(path1, args1), (path2, args2)] =
+            [0, 1].map(|i| self.trait_instance(traits[i], &refs[i], &mut imports));
+        // the loop's text names the two suppliers: of one trait, its two instances
+        let (p1, p2) = if source.is_some() && traits[0] == traits[1] {
+            let inst = |p: &str, a: &str| if a.is_empty() { p.to_string() } else { format!("{p}<{a}>") };
+            (inst(&p1, &args1), inst(&p2, &args2))
+        } else {
+            (p1, p2)
+        };
+        let call = |p: &str, a: &str| if a.is_empty() { p.to_string() } else { format!("{p}::<{a}>") };
+        let (qual, qual2) = match source {
+            Some((_, _, 1)) => (call(&path2, &args2), call(&path1, &args1)),
+            _ => (call(&path1, &args1), call(&path2, &args2)),
+        };
+        imports.dedup();
+        let imports = if imports.is_empty() {
+            String::new()
+        } else {
+            format!(", after adding `{}` to the imports", imports.join(" "))
+        };
+        let mut holes = vec![
+            ("name", name),
+            ("type", &tn),
+            ("first", &p1),
+            ("second", &p2),
+            ("qual", &qual),
+            ("qual2", &qual2),
+            ("imports", &imports),
+        ];
+        if let Some((place, _, _)) = source {
+            holes.push(("place", place));
+        }
+        let pick = (case == Some("impls-static")).then(|| {
+            let bound = if args1.is_empty() { path1.clone() } else { format!("{path1}<{args1}>") };
+            let [params, ret, args] = self.pick_fix(&refs[0]).unwrap_or_default();
+            [bound, params, ret, args]
+        });
+        if let Some([bound, params, ret, args]) = &pick {
+            holes.extend([("bound", bound.as_str()), ("params", params), ("ret", ret), ("args", args)]);
+        }
+        let d = mk("E0908", case, &holes, at, &roles);
         self.report(d);
+    }
+
+    /// How this module names trait `tr` (the import that takes, if any, is pushed to
+    /// `imports`), and the trait args of the instance that supplies `m`, as written (empty for
+    /// a trait without params).
+    fn trait_instance(&mut self, tr: DeclId, m: &MethodRef, imports: &mut Vec<String>) -> (String, String) {
+        let (path, import) = self.prog.path_from(self.icx.res_module(), tr);
+        imports.extend(import);
+        let targs = self.w.trait_args_of(&mut self.tys, m).unwrap_or_default();
+        let shown: Vec<String> = targs
+            .iter()
+            .map(|a| match a {
+                GArg::Type(t) => self.show(*t),
+                GArg::Const(ConstArg::Value(v)) => v.to_string(),
+                GArg::Const(_) => "_".to_string(),
+            })
+            .collect();
+        (path, shown.join(", "))
+    }
+
+    /// The `impls-static` fix for method `m` (its container's args substituted): its params as
+    /// written (`x: u32, k: u8`), its result (` -> u32`, empty for `()`), and the param names as
+    /// call args (`x, k`).
+    fn pick_fix(&mut self, m: &MethodRef) -> Option<[String; 3]> {
+        let (sig, args, self_ty) = self.w.method_sig(m)?;
+        let (params, spans, ret) = (sig.params.clone(), sig.param_spans.clone(), sig.ret);
+        let params: Vec<TypeId> = params.iter().map(|&t| self.tys.subst(t, &args, self_ty)).collect();
+        let ret = self.tys.subst(ret, &args, self_ty);
+        let mut ps = Vec::new();
+        let mut names = Vec::new();
+        for (i, &t) in params.iter().enumerate() {
+            // the name is the identifier before the `:` that precedes the param's type
+            let n = spans.get(i).map_or(String::new(), |s| self.param_name_before(*s));
+            let n = if n.is_empty() { format!("a{i}") } else { n };
+            ps.push(format!("{n}: {}", self.show(t)));
+            names.push(n);
+        }
+        let ret = if ret == self.tys.fixed_ty(ids::UNIT) {
+            String::new()
+        } else {
+            format!(" -> {}", self.show(ret))
+        };
+        Some([ps.join(", "), ret, names.join(", ")])
+    }
+
+    /// The identifier written before `name:` ahead of the type at span `ty` (empty if none).
+    fn param_name_before(&self, ty: Span) -> String {
+        let Some(f) = self.prog.file(ty.file) else { return String::new() };
+        let b: &[u8] = &f.bytes;
+        let mut i = (ty.offset as usize).min(b.len());
+        while i > 0 && b[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        if i == 0 || b[i - 1] != b':' {
+            return String::new();
+        }
+        i -= 1;
+        while i > 0 && b[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        let end = i;
+        while i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
+            i -= 1;
+        }
+        String::from_utf8_lossy(&b[i..end]).into_owned()
     }
 
     // ---------- fields, index, try ----------
@@ -2722,7 +2852,7 @@ impl<'a> Ck<'a> {
                 if !self.arity(n, paren, sig.params.len(), args.len(), false) {
                     return self.args_only(args);
                 }
-                self.method_checks(method, cspan, ctok);
+                self.method_checks(method, cspan);
                 let np = sig.n_parent as usize;
                 let mut binds: Vec<Option<GArg>> = vec![None; sig.generics.len()];
                 if let Some(ia) = impl_args {
@@ -3276,8 +3406,40 @@ impl<'a> Ck<'a> {
                     .is_some_and(|t| t.trait_decl == drop))
     }
 
-    /// Unsafe, visibility, `Drop.drop` (E0909), and feature checks of a method call.
-    fn method_checks(&mut self, method: DeclId, at: Span, tok: u32) {
+    /// A call of method `m` (as lookup resolved it) with generic args `gargs` (the container's,
+    /// then the method's own) and receiver adjustment `adjust`, reported at `at`: every check of
+    /// a method call ([`Self::method_checks`]; the instance's bounds and its call site, through
+    /// [`Ck::site`]), and its target. `key`: the token the target is recorded at, the name of
+    /// `recv.m(..)`, or the `for` token for the `next` a loop calls (`implicit`).
+    #[allow(clippy::too_many_arguments)]
+    fn method_target(
+        &mut self,
+        key: u32,
+        implicit: bool,
+        m: MethodRef,
+        gargs: Vec<GArg>,
+        adjust: Adjust,
+        at: Span,
+    ) {
+        let (method, self_ty) = match &m {
+            MethodRef::Impl { method, .. } => (*method, None),
+            MethodRef::Bound { method, self_ty, .. } => (*method, Some(*self_ty)),
+            MethodRef::Builtin(_) => return,
+        };
+        self.method_checks(method, at);
+        let target = Target::Method { method: m, args: gargs.clone(), adjust };
+        if implicit {
+            self.implicit.push((key, target));
+        } else {
+            self.target(key, target);
+        }
+        let mut site_args = gargs;
+        site_args.extend(self_ty.map(GArg::Type));
+        self.site(key, at, method, &site_args);
+    }
+
+    /// Unsafe, visibility, `Drop.drop` (E0909), and feature checks of a method call at `at`.
+    fn method_checks(&mut self, method: DeclId, at: Span) {
         let Some(sig) = self.sigs.fn_sig(method) else { return };
         if sig.is_unsafe {
             self.unsafe_op(at);
@@ -3301,13 +3463,7 @@ impl<'a> Ck<'a> {
         {
             let module = self.prog.module(o.module).map_or(String::new(), |m| m.path_text.clone());
             let nm = self.prog.strings.get(md.name).to_string();
-            let d = mk(
-                "E0106",
-                None,
-                &[("name", &nm), ("module", &module)],
-                self.icx.tok_span(tok),
-                &[("decl", o.name_span)],
-            );
+            let d = mk("E0106", None, &[("name", &nm), ("module", &module)], at, &[("decl", o.name_span)]);
             self.report(d);
         }
     }
@@ -3333,7 +3489,7 @@ impl<'a> Ck<'a> {
         if !self.arity(n, paren, sig.params.len(), args.len(), false) {
             return self.args_only(args);
         }
-        self.method_checks(method, cspan, ctok);
+        self.method_checks(method, cspan);
         let ng = sig.generics.len();
         let np = sig.n_parent as usize;
         // `Self` is variable `ng`.
@@ -3494,7 +3650,6 @@ impl<'a> Ck<'a> {
                     if !self.arity(n, paren, sig.params.len() - 1, args.len(), false) {
                         return self.args_only(args);
                     }
-                    self.method_checks(method, sspan, seg);
                     let np = sig.n_parent as usize;
                     let mut binds: Vec<Option<GArg>> = vec![None; sig.generics.len()];
                     for (i, a) in impl_args.iter().enumerate().take(np) {
@@ -3517,8 +3672,7 @@ impl<'a> Ck<'a> {
                     if adjust.autoref == Some(true) && level == 0 {
                         self.static_mutation_upto(n, Some(seg - 1), sspan);
                     }
-                    self.target(seg, Target::Method { method: m.clone(), args: gargs.clone(), adjust });
-                    self.site(seg, sspan, method, &gargs);
+                    self.method_target(seg, false, m.clone(), gargs.clone(), adjust, sspan);
                     Ty::T(self.tys.subst(sig.ret, &gargs, None))
                 }
                 MethodRef::Bound { method, ref trait_args, self_ty } => {
@@ -3533,7 +3687,6 @@ impl<'a> Ck<'a> {
                     if !self.arity(n, paren, sig.params.len() - 1, args.len(), false) {
                         return self.args_only(args);
                     }
-                    self.method_checks(method, sspan, seg);
                     let np = sig.n_parent as usize;
                     let mut binds: Vec<Option<GArg>> = vec![None; sig.generics.len()];
                     for (i, a) in trait_args.iter().enumerate().take(np) {
@@ -3558,15 +3711,12 @@ impl<'a> Ck<'a> {
                     if adjust.autoref == Some(true) && level == 0 {
                         self.static_mutation_upto(n, Some(seg - 1), sspan);
                     }
-                    self.target(seg, Target::Method { method: m.clone(), args: gargs.clone(), adjust });
-                    let mut site_args = gargs.clone();
-                    site_args.push(GArg::Type(self_ty));
-                    self.site(seg, sspan, method, &site_args);
+                    self.method_target(seg, false, m.clone(), gargs.clone(), adjust, sspan);
                     Ty::T(self.tys.subst(ret, &gargs, None))
                 }
             },
-            Lookup::Ambiguous { traits, methods, recv: c } => {
-                self.e0908(seg, c, traits, methods);
+            Lookup::Ambiguous { traits, methods, refs, recv: c } => {
+                self.e0908(seg, c, traits, methods, &refs);
                 self.args_only(args)
             }
             Lookup::NotInBounds { param } => {
@@ -4130,8 +4280,6 @@ impl<'a> Ck<'a> {
         self.diags.len() > reported
     }
 
-    /// The element type of `for .. in iter` (`it`: the type of `iter`); an iterator's `next` is
-    /// recorded as an implicit call at `for_tok`.
     /// The element type of `for` loop `f` over `iter` (of type `it`); an iterator's `next` is
     /// recorded as an implicit call at the `for` token, and the loop's kind with the body.
     fn element_type(&mut self, f: u32, iter: u32, it: TypeId) -> TypeId {
@@ -4147,34 +4295,54 @@ impl<'a> Ck<'a> {
             // reported by `for_stmt`
             _ => return ids::ERROR,
         }
-        // an iterator: `fn next(&mut self) -> Option<X>`
+        // an iterator: its `next` has the one shape `for_next_elem` accepts, for a concrete source
+        // and through a bound alike
+        // the `next` found and why it makes no iterator
+        let mut bad_next: Option<(DeclId, crate::traits::NotNext)> = None;
         if let Some(next) = self.prog.strings.lookup("next") {
             let genv = self.genv();
             let from = self.package();
-            if let Lookup::Found { m, .. } = self.w.lookup_method(&mut self.tys, it, next, genv, from)
-                && let Some((sig, args, self_ty)) = self.w.method_sig(&m)
-            {
-                let ret = self.tys.subst(sig.ret, &args, self_ty);
-                // lowering resolves `next` with the impl's args (none of its own)
-                let call_args = match &m {
-                    MethodRef::Impl { impl_args, .. } => impl_args.clone(),
-                    _ => Vec::new(),
-                };
-                if let MethodRef::Impl { method, .. } = &m {
-                    self.check_instance(self.icx.node_span(iter), *method, &call_args);
+            let found = self.w.lookup_method(&mut self.tys, it, next, genv, from);
+            if let Lookup::Ambiguous { traits, methods, refs, recv } = found {
+                // the loop's unqualified call is ambiguous whatever the shapes; the fix needs a
+                // `next` the loop could call
+                let shapes = [0, 1].map(|i| self.w.for_next_elem(&mut self.tys, &refs[i]));
+                if let Some(pick) = shapes.iter().position(|s| s.is_ok()) {
+                    let at = self.icx.node_span(iter);
+                    let text = self.icx.node_text(iter).to_string();
+                    let by_mut = matches!(src, ForSource::IterMut { .. });
+                    self.e0908_at("next", at, recv, traits, methods, &refs, Some((&text, by_mut, pick)));
+                    return ids::ERROR;
                 }
-                self.implicit.push((
-                    for_tok,
-                    Target::Method { method: m, args: call_args, adjust: Adjust::default() },
-                ));
-                if let TypeKind::Adt { def, args } = self.tys.kind(ret).clone()
-                    && def == self.sigs.lang.option
-                    && let Some(GArg::Type(x)) = args.first()
-                {
-                    if let Some(k) = src.kind() {
-                        self.for_kinds.push((f, k));
+                if let Err(why) = shapes[0] {
+                    bad_next = Some((methods[0], why));
+                }
+            } else if let Lookup::Found { m, .. } = found {
+                match self.w.for_next_elem(&mut self.tys, &m) {
+                    Ok(x) => {
+                        // the call `recv.next()` would be, with the same checks (`next` has no
+                        // generic params of its own, so its args are its container's); the
+                        // loop takes the source's address itself, so no receiver adjustment
+                        let call_args = match &m {
+                            MethodRef::Impl { impl_args, .. } => impl_args.clone(),
+                            MethodRef::Bound { trait_args, .. } => trait_args.clone(),
+                            MethodRef::Builtin(_) => Vec::new(),
+                        };
+                        let at = self.icx.node_span(iter);
+                        self.method_target(for_tok, true, m, call_args, Adjust::default(), at);
+                        if let Some(k) = src.kind() {
+                            self.for_kinds.push((f, k));
+                        }
+                        return x;
                     }
-                    return *x;
+                    Err(why) => {
+                        bad_next = match &m {
+                            MethodRef::Impl { method, .. } | MethodRef::Bound { method, .. } => {
+                                Some((*method, why))
+                            }
+                            MethodRef::Builtin(_) => None,
+                        }
+                    }
                 }
             }
         }
@@ -4185,8 +4353,20 @@ impl<'a> Ck<'a> {
         }
         // no `next(&mut self) -> Option<X>`: no iterator (for a generic source, no bound gives one)
         let text = self.icx.node_text(iter).to_string();
-        let case = if self.has_as_slice(it) { "as-slice" } else { "not-source" };
-        let d = mk("E0219", Some(case), &[("place", &text)], self.icx.node_span(iter), &[]);
+        let at = self.icx.node_span(iter);
+        let d = match bad_next.and_then(|(m, why)| Some((self.prog.decl(m)?.name_span, why))) {
+            Some((decl, why)) => mk(
+                "E0219",
+                Some("next-shape"),
+                &[("place", &text), ("why", why.why())],
+                at,
+                &[("next", decl)],
+            ),
+            None => {
+                let case = if self.has_as_slice(it) { "as-slice" } else { "not-source" };
+                mk("E0219", Some(case), &[("place", &text)], at, &[])
+            }
+        };
         self.report(d);
         ids::ERROR
     }
