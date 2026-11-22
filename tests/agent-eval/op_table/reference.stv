@@ -1,0 +1,49 @@
+import std.io;
+
+fn add(a: i64, b: i64) -> i64 {
+    return a + b;
+}
+
+fn sub(a: i64, b: i64) -> i64 {
+    return a - b;
+}
+
+fn mul(a: i64, b: i64) -> i64 {
+    return a * b;
+}
+
+fn div(a: i64, b: i64) -> i64 {
+    return a / b;
+}
+
+fn rem(a: i64, b: i64) -> i64 {
+    return a % b;
+}
+
+fn pow(a: i64, b: i64) -> i64 {
+    let mut r: i64 = 1;
+    let mut i: i64 = 0;
+    while i < b {
+        r = r * a;
+        i = i + 1;
+    }
+    return r;
+}
+
+fn main() -> i32 {
+    let ops: [(char, i64, i64); 6] = [('+', 7, 5), ('-', 7, 5), ('*', 7, 5), ('/', 7, 5), ('%', 7, 5), ('^', 2, 10)];
+    for i in 0..ops.len() {
+        let (c, a, b) = ops[i];
+        let f: fn(i64, i64) -> i64 = match c {
+            '+' => add,
+            '-' => sub,
+            '*' => mul,
+            '/' => div,
+            '%' => rem,
+            _ => pow,
+        };
+        let r = f(a, b);
+        io.print(f"{a} {c} {b} = {r}\n");
+    }
+    return 0;
+}

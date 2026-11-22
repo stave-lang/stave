@@ -1,0 +1,30 @@
+import std.io;
+import std.mem;
+
+struct Noisy { id: u32 }
+
+impl Drop for Noisy {
+    fn drop(&mut self) {
+        io.print(f"drop {self.id}\n");
+    }
+}
+
+fn consume(n: Noisy) {
+    io.print(f"consume {n.id}\n");
+}
+
+fn main() -> i32 {
+    let a = Noisy.{ id: 1 };
+    {
+        let b = Noisy.{ id: 2 };
+        let c = Noisy.{ id: 3 };
+        io.print("inner end\n");
+    }
+    let mut d = Noisy.{ id: 4 };
+    d = Noisy.{ id: 5 };
+    consume(d);
+    let e = Noisy.{ id: 6 };
+    mem.drop(a);
+    io.print("main end\n");
+    return 0;
+}

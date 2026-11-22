@@ -1,0 +1,66 @@
+import std.io;
+
+struct Money { cents: u64 }
+
+impl Copy for Money {}
+
+impl Add for Money {
+    fn add(self, rhs: Self) -> Self {
+        return Money.{ cents: self.cents + rhs.cents };
+    }
+}
+
+struct Mod7 { v: u32 }
+
+impl Copy for Mod7 {}
+
+impl Add for Mod7 {
+    fn add(self, rhs: Self) -> Self {
+        return Mod7.{ v: (self.v + rhs.v) % 7 };
+    }
+}
+
+impl Mul for Mod7 {
+    fn mul(self, rhs: Self) -> Self {
+        return Mod7.{ v: (self.v * rhs.v) % 7 };
+    }
+}
+
+fn sum_all<T: Add + Copy>(xs: &[T], zero: T) -> T {
+    let mut s = zero;
+    for i in 0..xs.len() {
+        s = s + xs[i];
+    }
+    return s;
+}
+
+fn dot<T: Add + Mul + Copy>(a: &[T], b: &[T], zero: T) -> T {
+    let mut s = zero;
+    for i in 0..a.len() {
+        s = s + a[i] * b[i];
+    }
+    return s;
+}
+
+fn main() -> i32 {
+    let us: [u32; 5] = [1, 2, 3, 4, 5];
+    let u = sum_all(&us[0..5], 0u32);
+    io.print(f"u32 sum {u}\n");
+    let is: [i64; 3] = [4, -9, 2];
+    let s = sum_all(&is[0..3], 0i64);
+    io.print(f"i64 sum {s}\n");
+    let ms: [Money; 3] = [Money.{ cents: 1050 }, Money.{ cents: 299 }, Money.{ cents: 885 }];
+    let m = sum_all(&ms[0..3], Money.{ cents: 0 });
+    let dollars = m.cents / 100;
+    let cents = m.cents % 100;
+    io.print(f"money {dollars}.{cents}\n");
+    let a: [i64; 2] = [2, 3];
+    let b: [i64; 2] = [5, -4];
+    let d = dot(&a[0..2], &b[0..2], 0i64);
+    io.print(f"i64 dot {d}\n");
+    let x: [Mod7; 3] = [Mod7.{ v: 3 }, Mod7.{ v: 5 }, Mod7.{ v: 6 }];
+    let y: [Mod7; 3] = [Mod7.{ v: 4 }, Mod7.{ v: 2 }, Mod7.{ v: 6 }];
+    let z = dot(&x[0..3], &y[0..3], Mod7.{ v: 0 });
+    io.print(f"mod7 dot {z.v}\n");
+    return 0;
+}

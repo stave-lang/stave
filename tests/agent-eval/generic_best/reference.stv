@@ -1,0 +1,50 @@
+import std.io;
+
+trait Better {
+    fn better(&self, other: &Self) -> bool;
+}
+
+impl Better for u32 {
+    fn better(&self, other: &Self) -> bool {
+        return *self > *other;
+    }
+}
+
+struct Player { id: u32, score: u32 }
+
+impl Better for Player {
+    fn better(&self, other: &Self) -> bool {
+        if self.score != other.score {
+            return self.score > other.score;
+        }
+        return self.id < other.id;
+    }
+}
+
+fn best<T: Better>(xs: &[T]) -> usize {
+    let mut b: usize = 0;
+    for i in 1..xs.len() {
+        if xs[i].better(&xs[b]) {
+            b = i;
+        }
+    }
+    return b;
+}
+
+fn main() -> i32 {
+    let nums: [u32; 5] = [4, 19, 7, 19, 3];
+    let i = best(&nums[0..5]);
+    let n = nums[i];
+    io.print(f"best number {n} at {i}\n");
+    let ps: [Player; 4] = [
+        Player.{ id: 3, score: 70 },
+        Player.{ id: 7, score: 90 },
+        Player.{ id: 2, score: 90 },
+        Player.{ id: 5, score: 40 },
+    ];
+    let j = best(&ps[0..4]);
+    let id = ps[j].id;
+    let sc = ps[j].score;
+    io.print(f"best player {id} with {sc} at {j}\n");
+    return 0;
+}

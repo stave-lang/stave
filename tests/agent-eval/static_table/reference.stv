@@ -1,0 +1,25 @@
+import std.atomic;
+import std.io;
+
+static PRIMES: [u32; 8] = [2, 3, 5, 7, 11, 13, 17, 19];
+const SCALE: u32 = 10;
+static MAX_WEIGHT: u32 = 19 * SCALE;
+static CALLS: atomic.U64 = atomic.U64.new(0);
+
+fn weight(i: usize) -> u32 {
+    let _ = CALLS.fetch_add(1);
+    return PRIMES[i] * SCALE;
+}
+
+fn main() -> i32 {
+    let mut total: u32 = 0;
+    for i in 0..PRIMES.len() {
+        total = total + weight(i);
+    }
+    let m = MAX_WEIGHT;
+    let c = CALLS.load();
+    io.print(f"primes total {total}\n");
+    io.print(f"max weight {m}\n");
+    io.print(f"calls {c}\n");
+    return 0;
+}

@@ -1,0 +1,58 @@
+import std.io;
+
+view struct Cursor { xs: &[u32], pos: usize }
+
+fn cursor(xs: &[u32]) -> Cursor from xs {
+    return Cursor.{ xs: xs, pos: 0 };
+}
+
+impl Cursor {
+    fn next(&mut self) -> Option<u32> {
+        if self.pos >= self.xs.len() {
+            return Option.None;
+        }
+        let v = self.xs[self.pos];
+        self.pos = self.pos + 1;
+        return Option.Some(v);
+    }
+
+    fn rest(&self) -> &[u32] from copy self {
+        return &self.xs[self.pos..self.xs.len()];
+    }
+}
+
+fn longest_run(xs: &[u32]) -> &[u32] from xs {
+    let mut best_start: usize = 0;
+    let mut best_len: usize = 0;
+    let mut i: usize = 0;
+    while i < xs.len() {
+        let mut j = i + 1;
+        while j < xs.len() && xs[j] == xs[i] {
+            j = j + 1;
+        }
+        if j - i > best_len {
+            best_start = i;
+            best_len = j - i;
+        }
+        i = j;
+    }
+    return &xs[best_start..best_start + best_len];
+}
+
+fn main() -> i32 {
+    let data: [u32; 12] = [1, 1, 2, 2, 2, 3, 3, 3, 3, 1, 4, 4];
+    let mut c = cursor(&data[0..12]);
+    for k in 0u32..3 {
+        match c.next() {
+            Option.Some(v) => { io.print(f"next {v}\n"); }
+            Option.None => { io.print("end\n"); }
+        }
+    }
+    let s = c.rest().sum();
+    io.print(f"rest sum {s}\n");
+    let run = longest_run(&data[0..12]);
+    let v = run[0];
+    let n = run.len();
+    io.print(f"longest run: {v} x {n}\n");
+    return 0;
+}
