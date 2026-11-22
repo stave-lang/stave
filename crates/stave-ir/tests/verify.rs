@@ -548,3 +548,28 @@ fn static_address_words() {
     bad(vec![word(0, DataTarget::Str(s), 4)], vec![0; 16], "points past");
     bad(vec![word(0, DataTarget::Static(9), 0)], vec![0; 16], "no target");
 }
+
+/// A static's `init` is exactly its type's size; one with address words has a type aligned to
+/// a multiple of 8.
+#[test]
+fn static_size_and_alignment() {
+    use stave_ir::{DataRef, DataTarget, Static};
+    let mut m = Module::new();
+    let u64t = m.types.u64();
+    let u8t = m.types.u8();
+    let pair = m.types.array(u64t, 2);
+    let bytes = m.types.array(u8t, 16);
+    let s = m.add_string(b"abc".to_vec());
+    let refs = vec![DataRef { offset: 0, target: DataTarget::Str(s), addend: 0 }];
+    m.statics.push(Static { path: "t.S".into(), ty: pair, init: vec![0; 16], refs: refs.clone() });
+    m.statics.push(Static { path: "t.B".into(), ty: bytes, init: vec![7; 16], refs: Vec::new() });
+    assert!(errs(&m).is_empty(), "{:#?}", errs(&m));
+    let bad = |st: Static, needle: &str| {
+        let mut m = m.clone();
+        m.statics.push(st);
+        has(&m, needle);
+    };
+    bad(Static { path: "t.short".into(), ty: pair, init: vec![0; 8], refs: Vec::new() }, "8 initial bytes");
+    bad(Static { path: "t.long".into(), ty: u8t, init: vec![0; 2], refs: Vec::new() }, "2 initial bytes");
+    bad(Static { path: "t.byte_words".into(), ty: bytes, init: vec![0; 16], refs }, "aligned to 1");
+}

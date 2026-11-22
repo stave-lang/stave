@@ -11,7 +11,7 @@ use crate::types::{Interner, TypeId, TypeKind};
 /// What a `for` loop does with a source of a given type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForSource {
-    /// `a..b`, `a..=b`: the values.
+    /// `a..b`, `a..=b` of an integer type: the values.
     Range { elem: TypeId },
     /// An array value (a place is E0219): the loop's temporary, its elements by value.
     Array { elem: TypeId },
@@ -29,8 +29,8 @@ pub enum ForSource {
     /// A reference to a reference (`&mut &mut It`, `& &[T]`, `&mut &[T; N]`, ..): no source
     /// (E0219 `ref-ref`).
     RefRef,
-    /// Any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, `&` of one):
-    /// no source (E0219 `not-source`).
+    /// Any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a range of
+    /// a non-integer type such as `char`, `&` of one): no source (E0219 `not-source`).
     NotSource,
     /// The error type (already reported).
     Error,
@@ -75,7 +75,11 @@ pub fn for_source<I: Interner + ?Sized>(tys: &I, t: TypeId) -> ForSource {
         return ForSource::Error;
     }
     match tys.kind(t) {
-        TypeKind::Range { elem, .. } => ForSource::Range { elem: *elem },
+        // a counted loop steps an integer; a range of `char` (or of any other type) is none
+        TypeKind::Range { elem, .. } if matches!(tys.kind(*elem), TypeKind::Int { .. }) => {
+            ForSource::Range { elem: *elem }
+        }
+        TypeKind::Range { elem, .. } if elem.is_none() || tys.is_error_ty(*elem) => ForSource::Error,
         TypeKind::Array { elem, .. } => ForSource::Array { elem: *elem },
         TypeKind::Slice { .. } => ForSource::SlicePlace,
         TypeKind::Adt { .. } | TypeKind::Param(_) => ForSource::Iter,

@@ -10,11 +10,18 @@
 //! demand). Evaluation is linear in the expression size: every node is visited once.
 //!
 //! Type errors inside a const initializer are reported by the body checker (which also types
-//! const and `static` initializers for the `types` dump), so evaluation fails silently on them.
+//! const and `static` initializers for the `types` dump), so evaluation reports nothing for them.
+//! Every failure that reports nothing leaves a deferred diagnostic instead (the innermost one): a
+//! precise one where the form is known (a method call or a user operator is E0904 "a call"),
+//! else E0904 at the innermost node without a value. The owner of the expression reports it when
+//! the expression is otherwise well typed: the body checker for a const initializer,
+//! [`eval_u64`] itself for an array length or const argument. So an initializer that checks
+//! clean always has a value.
 //! Arithmetic overflow and division by zero in a const are errors (const contexts keep
 //! their errors): E0203 at the operation (no dedicated code). A shift amount at or above
 //! the bit width is E0205, reported by the body checker.
 
+use stave_diag::Diagnostic;
 use stave_syntax::{NodeKind, Term};
 
 use crate::decls::DeclKind;
@@ -84,34 +91,77 @@ struct Ev<'e, 'a, E: CEnv> {
     depth: u32,
     /// Inside a constructor body: its parameters (`Param` node, value).
     params: Vec<(u32, (TypeId, Val))>,
+    /// Diagnostics reported, plus failures explained by an error reported elsewhere.
+    nrep: u32,
+    /// The deferred diagnostic of the innermost failure that reported nothing.
+    stuck: Option<Diagnostic>,
+    /// A `~` of a pending literal with no expected type (`~5 == 250u8`): the comparison around
+    /// it evaluates that operand again with the other operand's type.
+    untyped: Option<u32>,
+    /// The values of the `if` conditions evaluated so far: a comparison evaluates a pending
+    /// operand twice, and memoized conditions keep that linear.
+    conds: rustc_hash::FxHashMap<u32, (TypeId, Val)>,
 }
 
 const MAX_DEPTH: u32 = 2000;
 
-/// Evaluates the initializer `e` of a const or `static` of type `ty`.
-pub(crate) fn eval_item_const<E: CEnv>(env: &mut E, te: &TyEnv<'_>, e: u32, ty: TypeId) -> Option<Val> {
-    let mut ev = Ev { env, te, depth: 0, params: Vec::new() };
-    let (t, v) = ev.eval(e, Some(ty))?;
-    ev.fix(e, t, v, ty)
+/// The most elements a `[e; n]` in a const-expr may have.
+const MAX_REPEAT: u64 = 1 << 24;
+
+/// The `what` of the E0904 at the innermost node without a value.
+const OUTSIDE: &str = "an expression outside the const-expr forms";
+
+/// Evaluates the initializer `e` of a const or `static` of type `ty`. Without a value: the
+/// deferred diagnostic (module doc), `None` when the evaluation reported one itself.
+pub(crate) fn eval_item_const<E: CEnv>(
+    env: &mut E,
+    te: &TyEnv<'_>,
+    e: u32,
+    ty: TypeId,
+) -> (Option<Val>, Option<Diagnostic>) {
+    let mut ev = Ev::new(env, te);
+    let v = ev.eval(e, Some(ty)).and_then(|(t, v)| ev.fix(e, t, v, ty));
+    match v {
+        Some(v) => (Some(v), None),
+        None => (None, ev.deferred(e)),
+    }
 }
 
 /// Evaluates an array length / const generic argument to a `u64` (or a const generic param).
+/// No other checker types these expressions, so a deferred diagnostic is reported here.
 pub(crate) fn eval_u64<E: CEnv>(env: &mut E, te: &TyEnv<'_>, n: u32, ty: TypeId) -> ConstArg {
+    let (c, d) = eval_u64_deferred(env, te, n, ty);
+    if d.is_some() {
+        env.report(d);
+    }
+    c
+}
+
+/// [`eval_u64`] returning the deferred diagnostic, for a length the body checker also types
+/// (`[e; n]`): reported only if that found no error.
+pub(crate) fn eval_u64_deferred<E: CEnv>(
+    env: &mut E,
+    te: &TyEnv<'_>,
+    n: u32,
+    ty: TypeId,
+) -> (ConstArg, Option<Diagnostic>) {
     // A bare const generic parameter.
     if let Some(p) = const_param_path(te, n) {
         if ty.is_none() {
-            return ConstArg::Param(p);
+            return (ConstArg::Param(p), None);
         }
-        return crate::sigs::const_param_arg(env, &te.icx, n, p, ty);
+        return (crate::sigs::const_param_arg(env, &te.icx, n, p, ty), None);
     }
-    let mut ev = Ev { env, te, depth: 0, params: Vec::new() };
-    let Some((t, v)) = ev.eval(n, Some(ty)) else { return ConstArg::Error };
-    let typed = !t.is_none() && t != ty && t != ev.fx(ids::NEVER) && !ev.env.is_error_ty(t);
+    let mut ev = Ev::new(env, te);
+    let Some((t, v)) = ev.eval(n, Some(ty)) else { return (ConstArg::Error, ev.deferred(n)) };
+    let float = t.is_none() && matches!(v, Val::Float(_));
+    let typed = float || !t.is_none() && t != ty && t != ev.fx(ids::NEVER) && !ev.env.is_error_ty(t);
     match ev.fix(n, t, v, ty) {
-        Some(Val::Int(i)) if i >= 0 && i <= u64::MAX as i128 => ConstArg::Value(i as u64),
+        Some(Val::Int(i)) if i >= 0 && i <= u64::MAX as i128 => (ConstArg::Value(i as u64), None),
         _ if typed => {
             let names = NameCx { prog: ev.env.prog(), generics: &[] };
-            let (e, f) = (types::display(ev.env, &names, ty), types::display(ev.env, &names, t));
+            let e = types::display(ev.env, &names, ty);
+            let f = if float { "{float}".to_string() } else { types::display(ev.env, &names, t) };
             let icx = te.icx;
             let text = icx.node_text(n).to_string();
             let d = mk(
@@ -121,10 +171,10 @@ pub(crate) fn eval_u64<E: CEnv>(env: &mut E, te: &TyEnv<'_>, n: u32, ty: TypeId)
                 icx.node_span(n),
                 &[],
             );
-            ev.env.report(d);
-            ConstArg::Error
+            ev.report(d);
+            (ConstArg::Error, None)
         }
-        _ => ConstArg::Error,
+        _ => (ConstArg::Error, ev.deferred(n)),
     }
 }
 
@@ -149,6 +199,55 @@ fn wrap_int(v: i128, signed: bool, bits: u32) -> i128 {
 }
 
 impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
+    fn new(env: &'e mut E, te: &'e TyEnv<'a>) -> Self {
+        Ev {
+            env,
+            te,
+            depth: 0,
+            params: Vec::new(),
+            nrep: 0,
+            stuck: None,
+            untyped: None,
+            conds: Default::default(),
+        }
+    }
+
+    fn report(&mut self, d: Option<Diagnostic>) {
+        self.nrep += 1;
+        self.env.report(d);
+    }
+
+    /// A failure explained by an error reported elsewhere (an unresolved name, an erroneous
+    /// type, a const without a value).
+    fn explained(&mut self) -> R {
+        self.nrep += 1;
+        None
+    }
+
+    /// A failure whose diagnostic `d` holds if the expression is otherwise well typed.
+    fn defer(&mut self, d: Option<Diagnostic>) -> R {
+        if self.stuck.is_none() {
+            self.stuck = d;
+        }
+        None
+    }
+
+    fn e0904_at(&self, n: u32, what: &str) -> Option<Diagnostic> {
+        mk("E0904", None, &[("what", what)], self.te.icx.node_span(n), &[])
+    }
+
+    /// After a failed evaluation of `top`: the deferred diagnostic, unless one was reported.
+    fn deferred(&mut self, top: u32) -> Option<Diagnostic> {
+        if self.nrep > 0 {
+            return None;
+        }
+        if let Some(d) = self.stuck.take() {
+            return Some(d);
+        }
+        let at = self.untyped.take().unwrap_or(top);
+        self.e0904_at(at, OUTSIDE)
+    }
+
     /// Well-known type `f` ([`ids`]) in the environment's table (it may be canonical).
     fn fx(&self, f: TypeId) -> TypeId {
         self.env.fixed_ty(f)
@@ -159,9 +258,8 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
     }
 
     fn e0904(&mut self, n: u32, what: &str) -> R {
-        let icx = self.te.icx;
-        let d = mk("E0904", None, &[("what", what)], icx.node_span(n), &[]);
-        self.env.report(d);
+        let d = self.e0904_at(n, what);
+        self.report(d);
         None
     }
 
@@ -177,7 +275,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
             icx.node_span(n),
             &[],
         );
-        self.env.report(d);
+        self.report(d);
         None
     }
 
@@ -218,11 +316,15 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
             self.depth -= 1;
             let icx = self.te.icx;
             let d = mk("E0904", Some("depth"), &[], icx.node_span(n), &[]);
-            self.env.report(d);
+            self.report(d);
             return None;
         }
+        let before = self.nrep;
         let r = self.eval_inner(n, want);
         self.depth -= 1;
+        if r.is_none() && self.nrep == before && self.untyped.is_none() && self.stuck.is_none() {
+            self.stuck = self.e0904_at(n, OUTSIDE);
+        }
         r
     }
 
@@ -232,7 +334,14 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         let k = icx.kind(n)?;
         match k {
             NodeKind::IfExpr => {
-                let (ct, cv) = self.eval(kids[0], Some(self.fx(ids::BOOL)))?;
+                let (ct, cv) = match self.conds.get(&kids[0]) {
+                    Some(c) => c.clone(),
+                    None => {
+                        let c = self.eval(kids[0], Some(self.fx(ids::BOOL)))?;
+                        self.conds.insert(kids[0], c.clone());
+                        c
+                    }
+                };
                 if ct != self.fx(ids::BOOL) {
                     return None;
                 }
@@ -326,7 +435,8 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                         self.unify(acc, r)?
                     };
                     let t = if t.is_none() { want.unwrap_or(TypeId::NONE) } else { t };
-                    let v = self.arith(n, op, t, a, b)?;
+                    let v = self.arith(n, op, t, a, b);
+                    let Some(v) = v else { return self.user_op(n, t) };
                     acc = (t, v);
                 }
                 Some(acc)
@@ -365,7 +475,7 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                             Some((ct, Val::Int(-i)))
                         }
                         Val::Float(f) => Some((ct, Val::Float(-f))),
-                        _ => None,
+                        _ => self.user_op(n, ct),
                     };
                 }
                 if t == Term::Bang as u8 {
@@ -379,11 +489,18 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                     let (ct, cv) = self.eval(c, want)?;
                     return match cv {
                         Val::Int(i) => {
-                            let tt = if ct.is_none() { want? } else { ct };
+                            let tt = match (ct.is_none(), want) {
+                                (false, _) => ct,
+                                (true, Some(w)) => w,
+                                (true, None) => {
+                                    self.untyped = Some(n);
+                                    return None;
+                                }
+                            };
                             let (signed, bits) = self.env.int(tt)?;
                             Some((tt, Val::Int(wrap_int(!i, signed, bits.bits()))))
                         }
-                        _ => None,
+                        _ => self.user_op(n, ct),
                     };
                 }
                 self.e0904(n, "a non-const item")
@@ -401,11 +518,31 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         }
     }
 
-    /// Evaluates two operands of one type.
+    /// Evaluates two operands of one type. A left operand of pending literals takes the type of
+    /// a typed right one, so it is evaluated again with that type (`200 + 100 == 44u8` overflows
+    /// `u8`, as the checker types it).
     fn pair(&mut self, l: u32, r: u32, want: Option<TypeId>) -> Option<(TypeId, Val, TypeId, Val)> {
-        let a = self.eval(l, want)?;
-        let w = if a.0.is_none() { want } else { Some(a.0) };
+        let outer = self.untyped.take();
+        let before = self.nrep;
+        let a = self.eval(l, want);
+        let need = a.is_none() && self.untyped.take().is_some();
+        self.untyped = outer;
+        if a.is_none() && !need || self.nrep != before {
+            return None;
+        }
+        let w = match &a {
+            Some(a) if !a.0.is_none() => Some(a.0),
+            _ => want,
+        };
         let b = self.eval(r, w)?;
+        let a = match a {
+            Some(a) if !(a.0.is_none() && !b.0.is_none()) => a,
+            _ if b.0.is_none() => {
+                self.untyped = Some(l);
+                return None;
+            }
+            _ => self.eval(l, Some(b.0))?,
+        };
         let (t, av, bv) = self.unify(a, b)?;
         Some((t, av, t, bv))
     }
@@ -485,7 +622,14 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 } else if p(Term::LtLt) || p(Term::LtLtPercent) || p(Term::GtGt) {
                     let amt = if p(Term::LtLtPercent) { y & (bw as i128 - 1) } else { y };
                     if amt < 0 || amt >= bw as i128 {
-                        return None;
+                        // the body checker reports E0205 for a literal or const amount itself
+                        let names = NameCx { prog: self.env.prog(), generics: &[] };
+                        let tn = types::display(self.env, &names, t);
+                        let case = if amt < 0 { Some("negative") } else { None };
+                        let holes = [("amount", amt.to_string()), ("bits", bw.to_string()), ("type", tn)];
+                        let holes: Vec<(&str, &str)> = holes.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                        let d = mk("E0205", case, &holes, self.te.icx.node_span(n), &[]);
+                        return self.defer(d).map(|x| x.1);
                     }
                     if p(Term::GtGt) {
                         let u = if signed { x } else { (x as u128 & ((1u128 << bw) - 1)) as i128 };
@@ -533,9 +677,32 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         }
     }
 
+    /// E0203 case `index`: the index `ie` of a const array of type `t` and length `len` is out
+    /// of range (it would trap `Bounds` at run time; a const keeps the error).
+    fn index_range(&mut self, ie: u32, t: TypeId, len: usize) -> R {
+        let icx = self.te.icx;
+        let text = icx.node_text(ie).to_string();
+        let tn = types::display(self.env, &NameCx { prog: self.env.prog(), generics: &[] }, t);
+        let max = (len as i128 - 1).to_string();
+        let holes = [("literal", text.as_str()), ("type", &tn), ("min", "0"), ("max", &max)];
+        let d = mk("E0203", Some("index"), &holes, icx.node_span(ie), &[]);
+        self.report(d);
+        None
+    }
+
+    /// An operator without a value: on a struct or enum it calls the operator trait's method
+    /// (E0904 "a call" if the impl exists, else the body checker's E0206).
+    fn user_op(&mut self, n: u32, t: TypeId) -> R {
+        if !t.is_none() && matches!(self.env.kind(t), TypeKind::Adt { .. }) {
+            let d = self.e0904_at(n, "a call");
+            return self.defer(d);
+        }
+        None
+    }
+
     fn cast(&mut self, op: u8, (t, v): (TypeId, Val), to: TypeId) -> R {
         if to == self.env.error_ty() {
-            return None;
+            return self.explained();
         }
         // A pending literal has no type: `5 as u8` is invalid (no context), left to the checker.
         if t.is_none() {
@@ -737,9 +904,12 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                     (et, ev)
                 };
                 let us = self.fx(ids::USIZE);
-                let len = eval_u64(self.env, self.te, kids[1], us);
-                let ConstArg::Value(len) = len else { return None };
-                if len > 1 << 24 {
+                let (lt, lv) = self.eval(kids[1], Some(us))?;
+                let Some(Val::Int(len)) = self.fix(kids[1], lt, lv, us) else { return None };
+                let len = u64::try_from(len).ok()?;
+                if len > MAX_REPEAT {
+                    let d = mk("E0904", Some("size"), &[], icx.node_span(n), &[]);
+                    self.report(d);
                     return None;
                 }
                 let at = self.env.intern(TypeKind::Array { elem: et, len: ConstArg::Value(len) });
@@ -784,14 +954,18 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
             Res::Decl(d) => {
                 let decl = *self.env.prog().decl(d)?;
                 match decl.kind {
-                    DeclKind::Const => self.env.const_value(d),
+                    // a const without a value has its own error
+                    DeclKind::Const => match self.env.const_value(d) {
+                        Some(v) => Some(v),
+                        None => self.explained(),
+                    },
                     DeclKind::Variant => self.variant_value(n, d, &[], want),
-                    DeclKind::Error => None,
+                    DeclKind::Error => self.explained(),
                     DeclKind::Fn | DeclKind::Method => self.e0904(n, "a non-const item"),
                     _ => self.e0904(n, "a non-const item"),
                 }
             }
-            Res::Unresolved => None,
+            Res::Unresolved => self.explained(),
             Res::Local(b) => match self.params.iter().find(|p| p.0 == b.node) {
                 Some(p) => Some(p.1.clone()),
                 None => self.e0904(n, "a non-const item"),
@@ -860,13 +1034,13 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
         };
         let Some(e) = e else { return self.e0904(n, "a call") };
         let te = TyEnv { icx, n_parent: 0, self_ty: None };
-        let mut inner = Ev {
-            env: &mut *self.env,
-            te: &te,
-            depth: self.depth,
-            params: pnodes.into_iter().zip(vals).collect(),
-        };
-        inner.eval(e, want)
+        let mut inner = Ev::new(&mut *self.env, &te);
+        inner.depth = self.depth;
+        inner.params = pnodes.into_iter().zip(vals).collect();
+        let r = inner.eval(e, want);
+        // a failure inside the body is deferred to the call (the body's nodes are another item's)
+        self.nrep += inner.nrep;
+        r
     }
 
     fn variant_value(&mut self, n: u32, v: DeclId, args: &[u32], want: Option<TypeId>) -> R {
@@ -918,14 +1092,17 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 return None;
             }
             let GArg::Type(t) = lower_garg(self.env, self.te, args[0], None) else { return None };
-            if t == self.env.error_ty() || self.env.has_params(t) {
+            if t == self.env.error_ty() {
+                return self.explained();
+            }
+            if self.env.has_params(t) {
                 return None;
             }
             let Some((size, align)) = self.env.layout(t) else {
                 let names = NameCx { prog: self.env.prog(), generics: &[] };
                 let tn = types::display(self.env, &names, t);
                 let d = mk("E0911", None, &[("type", &tn)], icx.node_span(n), &[]);
-                self.env.report(d);
+                self.report(d);
                 return None;
             };
             let v = if b == Builtin::SizeOf { size } else { align };
@@ -953,6 +1130,11 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                         kid += 1;
                     }
                     continue;
+                }
+                // a method call on a value (`G.len()`, `x.select(a, b)`)
+                if icx.is(p + 2, Term::LParen) || icx.is(p + 2, Term::ColonColon) {
+                    let d = self.e0904_at(n, "a call");
+                    return self.defer(d);
                 }
                 // a field of a value
                 let base = match cur.take() {
@@ -1029,7 +1211,10 @@ impl<'e, 'a, E: CEnv> Ev<'e, 'a, E> {
                 let Val::Int(i) = iv else { return None };
                 cur = Some(match (self.env.kind(base.0).clone(), base.1) {
                     (TypeKind::Array { elem, .. }, Val::Agg(vs)) => {
-                        (elem, vs.get(usize::try_from(i).ok()?)?.clone())
+                        match usize::try_from(i).ok().and_then(|i| vs.get(i)) {
+                            Some(v) => (elem, v.clone()),
+                            None => return self.index_range(ie, base.0, vs.len()),
+                        }
                     }
                     _ => return None,
                 });

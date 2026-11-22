@@ -1,0 +1,28 @@
+//~ CHECK-ONLY
+// A struct literal gives each field once (E0105 case `literal-field` at each later one), in a
+// fn body and in a const alike; each field once stays accepted.
+struct P { pub x: u32, pub y: u32 }
+enum E { Rec { a: u32 } }
+
+const C: P = P.{ x: 1, x: 2, y: 3 }; //~ ERROR E0105
+
+fn twice() -> P {
+    return P.{ x: 1, y: 2, x: 3 }; //~ ERROR E0105
+}
+
+fn three_times() -> P {
+    return P.{ x: 1, x: 2, x: 3, y: 4 }; //~ ERROR E0105
+    //~^ ERROR E0105
+}
+
+fn variant() -> E {
+    return E.Rec.{ a: 1, a: 2 }; //~ ERROR E0105
+}
+
+fn once() -> P {
+    return P.{ y: 2, x: 1 };
+}
+
+fn main() -> i32 {
+    return 0;
+}

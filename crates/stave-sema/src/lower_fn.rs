@@ -506,11 +506,6 @@ impl<'a> FnCx<'a> {
         self.error_at(LowerErrorKind::Unsupported, tok, msg.into())
     }
 
-    pub fn unsupported(&mut self, n: u32, msg: impl Into<String>) -> E {
-        let tok = Some(self.icx.a(n));
-        self.unsupported_at(tok, msg)
-    }
-
     /// Vector code, which stage0 does not generate yet; `what` names the construct.
     pub fn vector_unsupported(&mut self, tok: Option<u32>, what: &str) -> E {
         self.unsupported_at(tok, format!("vector code generation is not implemented yet: {what}"))

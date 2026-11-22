@@ -75,7 +75,37 @@ pub fn verify_types(m: &Module) -> Result<Vec<VerifyError>, Vec<VerifyError>> {
         }
     }
     errs.extend(verify_static_refs(m).into_iter().map(module_err));
+    if types_ok {
+        errs.extend(verify_static_layout(m).into_iter().map(module_err));
+    }
     if types_ok { Ok(errs) } else { Err(errs) }
+}
+
+/// Every static's `init` holds exactly its type's size, and a static with address words has a
+/// type aligned to a multiple of 8: each word is 8-aligned within the static, and the back ends
+/// place a static at its type's alignment, so only then is the word 8-aligned in memory.
+fn verify_static_layout(m: &Module) -> Vec<String> {
+    let mut errs = Vec::new();
+    if m.statics.is_empty() {
+        return errs;
+    }
+    let layouts = crate::layout::Layouts::compute(&m.types);
+    for (i, st) in m.statics.iter().enumerate() {
+        let l = match layouts.get_layout(st.ty) {
+            Ok(l) => l,
+            Err(e) => {
+                errs.push(format!("static {i}: type t{} has no layout ({e})", st.ty.0));
+                continue;
+            }
+        };
+        if st.init.len() as u64 != l.size {
+            errs.push(format!("static {i}: {} initial bytes for a type of size {}", st.init.len(), l.size));
+        }
+        if !st.refs.is_empty() && !l.align.is_multiple_of(8) {
+            errs.push(format!("static {i}: address words in a type aligned to {}", l.align));
+        }
+    }
+    errs
 }
 
 /// The address words of every static: ascending, non-overlapping, 8-aligned words wholly inside

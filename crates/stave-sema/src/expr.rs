@@ -96,6 +96,20 @@ const OPS: [(Term, &str); 13] = [
     (Term::LtLtPercent, "WrapShl"),
 ];
 
+/// Whether `==` on a value of kind `k` gives one `bool`: the scalar kinds. It is the test a
+/// literal or const pattern lowers to, so a pattern of any other type is E0206 case `pattern`.
+pub(crate) fn scalar_eq(k: &TypeKind) -> bool {
+    matches!(
+        k,
+        TypeKind::Int { .. }
+            | TypeKind::Float(_)
+            | TypeKind::Bool
+            | TypeKind::Char
+            | TypeKind::Ptr { .. }
+            | TypeKind::Fn { .. }
+    )
+}
+
 fn op_trait(op: u8) -> Option<&'static str> {
     if op == Term::GtGt as u8 {
         return Some("Shr");
@@ -228,7 +242,7 @@ impl<'a> Ck<'a> {
         let eq_only = op == Term::EqEq as u8 || op == Term::BangEq as u8;
         match self.tys.kind(t).clone() {
             TypeKind::Int { .. } | TypeKind::Float(_) | TypeKind::Bool | TypeKind::Char => Ty::T(ids::BOOL),
-            TypeKind::Ptr { .. } | TypeKind::Fn { .. } if eq_only => Ty::T(ids::BOOL),
+            ref k if eq_only && scalar_eq(k) => Ty::T(ids::BOOL),
             TypeKind::Vector { lane, n: lanes } => {
                 self.gate_compare(icx.a(opn), op, t);
                 let w = types::lane_bits(self.tys.kind(lane)) as u8;
@@ -1321,9 +1335,14 @@ impl<'a> Ck<'a> {
                 (Ty::Lit(_), Some(h)) => self.coerce(e, et, h, None),
                 (t, _) => self.force(t),
             };
+            let nd = self.diags.len();
             self.check_expr(cnt, ids::USIZE, None);
+            let typed = self.diags.len() == nd;
             let env = self.env();
-            let len = crate::consteval::eval_u64(self, &env, cnt, ids::USIZE);
+            let (len, deferred) = crate::consteval::eval_u64_deferred(self, &env, cnt, ids::USIZE);
+            if typed {
+                self.report(deferred);
+            }
             if et == ids::ERROR || len == ConstArg::Error {
                 return Ty::ERR;
             }
@@ -3958,7 +3977,7 @@ impl<'a> Ck<'a> {
                             .map_or(icx.tok_span(name_tok), |&x| icx.tok_span(icx.a(x).saturating_sub(2)));
                         let d = mk(
                             "E0105",
-                            None,
+                            Some("literal-field"),
                             &[("name", &nm), ("scope", &scope)],
                             icx.tok_span(name_tok),
                             &[("first", first)],
@@ -4239,12 +4258,14 @@ impl<'a> Ck<'a> {
                     self.mismatch(iter, Ty::T(it), want, None);
                 }
                 if let Some(tc) = tail {
+                    self.element_tail(tc, it);
                     self.tail_clause(tc, b, ids::ERROR, Lanes::Fixed(1));
                 }
             }
             b
         } else {
             if let Some(tc) = tail {
+                self.element_tail(tc, it);
                 self.tail_clause(tc, ids::ERROR, ids::ERROR, Lanes::Fixed(1));
             }
             self.element_type(f, iter, it)
@@ -4383,6 +4404,18 @@ impl<'a> Ck<'a> {
         let genv = self.genv();
         let from = self.package();
         matches!(self.w.lookup_method(&mut self.tys, base, name, genv, from), Lookup::Found { .. })
+    }
+
+    /// E0601 case `element`: tail clause `tc` on a loop over the elements of `it` (no vector
+    /// binding). Only a chunk loop leaves elements for a tail.
+    fn element_tail(&mut self, tc: u32, it: TypeId) {
+        if it == ids::ERROR || self.tys.has_error(it) {
+            return;
+        }
+        let tn = self.show(it);
+        let a = self.icx.a(tc);
+        let d = mk("E0601", Some("element"), &[("type", &tn)], self.icx.tok_span(a), &[]);
+        self.report(d);
     }
 
     fn tail_clause(&mut self, tc: u32, bind: TypeId, lane: TypeId, n: Lanes) {

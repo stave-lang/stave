@@ -1,0 +1,15 @@
+// A pending literal in a const comparison takes the other operand's type before it is
+// evaluated: `~5` is `~5u8`, so these all hold.
+//~ EXIT 7
+const TILDE: bool = ~5 == 250u8;
+const TILDE_SUM: bool = ~5 + 1 == 251u8;
+const RIGHT: bool = 250u8 == ~5;
+const IF_LIT: bool = (if true then 1 else 2) == 1u8;
+const NESTED: u8 = if ~0 == 255u8 then 7 else 2;
+
+fn main() -> i32 {
+    if TILDE && TILDE_SUM && RIGHT && IF_LIT {
+        return NESTED as i32;
+    }
+    return 1;
+}

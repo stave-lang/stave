@@ -1,0 +1,55 @@
+//~ CHECK-ONLY
+// A const-expr is an allow-list: every form outside it is rejected where it is written, never
+// left without a value. A method call on a value and an operator of a user impl are calls
+// (E0904); a const index past the end, an overflow, or a negative shift amount keeps its error.
+struct P { pub x: u32 }
+impl Copy for P {}
+impl Add for P { fn add(self, rhs: Self) -> Self { return P.{ x: self.x + rhs.x }; } }
+impl Neg for P { fn neg(self) -> Self { return self; } }
+struct Q { pub x: u32 }
+impl Copy for Q {}
+
+const G: &str = "hello";
+const T: [u8; 3] = [1, 2, 3];
+const KM1: i32 = -1;
+
+const LEN: usize = G.len(); //~ ERROR E0904
+const ARR_LEN: usize = T.len(); //~ ERROR E0904
+const PICK: u32 = true.select(1u32, 2u32); //~ ERROR E0904
+const WIDE: (u32, u32) = 5u32.mul_wide(7u32); //~ ERROR E0904
+const SUM: P = P.{ x: 1 } + P.{ x: 2 }; //~ ERROR E0904
+static SUM_S: P = P.{ x: 1 } + P.{ x: 2 }; //~ ERROR E0904
+const NEG: P = -P.{ x: 1 }; //~ ERROR E0904
+const IN_SOME: Option<usize> = Option.Some(G.len()); //~ ERROR E0904
+const TRY: u32 = Option.Some(1u32)?; //~ ERROR E0904
+const PAST: u8 = T[5]; //~ ERROR E0203
+const SHR: i32 = 1i32 >> KM1; //~ ERROR E0205
+const OVER: bool = 200 + 100 == 44u8; //~ ERROR E0203
+const HUGE: [u8; 20000000] = [0u8; 20000000]; //~ ERROR E0904
+// no operator impl: the operator's own error, and no second one for the const-expr
+const NO_IMPL: Q = Q.{ x: 1 } + Q.{ x: 2 }; //~ ERROR E0206
+// a const that depends on one without a value: the error is at that one only
+const AFTER: usize = LEN + 1;
+
+fn g<const N: usize>() -> usize { return N; }
+
+fn lengths() -> usize {
+    let a: [u8; G.len()] = [0u8; 5]; //~ ERROR E0904
+    let b = [0u8; G.len()]; //~ ERROR E0904
+    return g::<{G.len()}>(); //~ ERROR E0904
+}
+
+// Stay accepted: a pending literal takes the type of the other operand, also under `~` and in
+// an `if`; field access and indexing of const aggregates; `size_of`.
+const TILDE: bool = ~5 == 250u8;
+const TILDE_SUM: bool = ~5 + 1 == 251u8;
+const IF_LIT: bool = (if true then 1 else 2) == 1u8;
+const SUM_LIT: bool = 1 + 1 == 2u8;
+const FIELD: u32 = P.{ x: 4 }.x;
+const ELEM: u8 = T[2];
+const SIZE: usize = size_of::<P>() + align_of::<P>();
+const MASKED: u32 = 1u32 <<% 40u32;
+
+fn main() -> i32 {
+    return 0;
+}

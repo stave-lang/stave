@@ -312,6 +312,10 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
         DeclKind::Const => {
             let Some(c) = ck.sigs.konst(d) else { return Pat::Err };
             let ct = c.ty;
+            if ct != ids::ERROR && !ck.tys.has_error(ct) && !crate::expr::scalar_eq(ck.tys.kind(ct)) {
+                no_eq_pattern(ck, p, ct);
+                return Pat::Err;
+            }
             if pt != ct && ct != ids::ERROR && pt != ids::ERROR {
                 mismatch_pat(ck, p, ct, t);
                 return Pat::Err;
@@ -334,6 +338,13 @@ fn pattern_inner(ck: &mut Ck<'_>, p: u32, t: TypeId, mode: Mode) -> Pat {
             sub_err(ck, &kids)
         }
     }
+}
+
+/// E0206 case `pattern`: pattern `p` tests `==` on `t`, which has none.
+fn no_eq_pattern(ck: &mut Ck<'_>, p: u32, t: TypeId) {
+    let tn = ck.show(t);
+    let d = mk("E0206", Some("pattern"), &[("op", "=="), ("type", &tn)], ck.icx.node_span(p), &[]);
+    ck.report(d);
 }
 
 fn tuple_placeholder(ck: &mut Ck<'_>, n: usize) -> TypeId {
@@ -456,6 +467,10 @@ fn literal_pattern(ck: &mut Ck<'_>, p: u32, kids: &[u32], t: TypeId, mode: Mode)
         if let Ty::Lit(g) = found {
             let _ = ck.fix(g, ids::ERROR);
         }
+        return Pat::Err;
+    }
+    if !crate::expr::scalar_eq(ck.tys.kind(pt)) {
+        no_eq_pattern(ck, p, pt);
         return Pat::Err;
     }
     // ranges of int literals: range-check each end

@@ -178,6 +178,9 @@ pub struct ConstDef {
     pub ty: TypeId,
     /// `None` if the initializer is not a valid const-expr (diagnosed).
     pub value: Option<Val>,
+    /// Without a value and without a diagnostic of the evaluation: the one the body checker
+    /// reports if the initializer is otherwise well typed (`consteval` module doc).
+    pub deferred: Option<Diagnostic>,
 }
 
 /// A type alias.
@@ -1956,12 +1959,12 @@ impl<'p> SigBuilder<'p> {
         // The value: cycles report E0904 through `ensure` (InProgress).
         self.const_stack.push(d);
         // Publish the type before evaluating (a self-reference sees the type, not the value).
-        let value = match init {
+        let (value, deferred) = match init {
             Some(e) if ty != ids::ERROR && !e0413 => consteval::eval_item_const(self, &env, e, ty),
-            _ => None,
+            _ => (None, None),
         };
         self.const_stack.pop();
-        let c = ConstDef { ty, value };
+        let c = ConstDef { ty, value, deferred };
         if is_static { DeclSig::Static(c) } else { DeclSig::Const(c) }
     }
 

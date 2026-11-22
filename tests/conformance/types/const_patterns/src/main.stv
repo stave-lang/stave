@@ -1,0 +1,47 @@
+//~ CHECK-ONLY
+// A const pattern tests `==` like a literal one, so the const's type must have `==` (E0206 case
+// `pattern`): a `&str`, a struct, enum, tuple, or array const is none. Int, bool, char, and
+// float consts stay patterns, also behind a reference and inside a tuple pattern.
+import k;
+
+fn str_const(s: &str) -> u32 {
+    return match s { k.CS => 1u32, _ => 2u32 }; //~ ERROR E0206
+}
+
+fn tuple_const(t: (u8, u8)) -> u32 {
+    return match t { k.CT => 1u32, _ => 2u32 }; //~ ERROR E0206
+}
+
+fn tuple_const_by_ref(t: &(u8, u8)) -> u32 {
+    return match t { k.CT => 1u32, _ => 2u32 }; //~ ERROR E0206
+}
+
+fn struct_const(p: k.P) -> u32 {
+    return match p { k.CP => 1u32, _ => 2u32 }; //~ ERROR E0206
+}
+
+fn option_const(o: Option<u32>) -> u32 {
+    return match o { k.CO => 1u32, _ => 2u32 }; //~ ERROR E0206
+}
+
+fn enum_const(e: k.E) -> u32 {
+    return match e { k.CE => 1u32, _ => 2u32 }; //~ ERROR E0206
+}
+
+fn array_const(a: [u8; 2]) -> u32 {
+    return match a { k.CA => 1u32, _ => 2u32 }; //~ ERROR E0206
+}
+
+fn scalars(x: u32, b: bool, c: char, f: f32, r: &u32, t: (u32, u32)) -> u32 {
+    let a = match x { k.CI => 1u32, _ => 2u32 };
+    let d = match b { k.CB => 1u32, _ => 2u32 };
+    let e = match c { k.CC => 1u32, _ => 2u32 };
+    let g = match f { k.CF => 1u32, _ => 2u32 };
+    let h = match r { k.CI => 1u32, _ => 2u32 };
+    let i = match t { (k.CI, n) => n, _ => 2u32 };
+    return a + d + e + g + h + i;
+}
+
+fn main() -> i32 {
+    return 0;
+}

@@ -1461,10 +1461,6 @@ impl<'a> Ck<'a> {
         let tspan = kids.iter().find(|&&c| icx.kind(c) == Some(NodeKind::Type)).map(|&t| icx.node_span(t));
         self.check_expr(e, ty, tspan);
         self.rets.pop();
-        // A const initializer must be a const-expr: its value is computed by the signature phase.
-        if self.sigs.konst(self.decl).is_some_and(|c| c.value.is_none()) {
-            self.has_error = true;
-        }
         self.static_rules(n, ty, tspan);
     }
 
@@ -1577,6 +1573,16 @@ impl<'a> Ck<'a> {
             if r == g && self.lits[r as usize].fixed.is_none() {
                 self.e0202(g);
             }
+        }
+        // A const initializer must be a const-expr: the signature phase computes its value, and
+        // the diagnostic it deferred holds once the rest of the body checked clean.
+        if j.kind == JobKind::Const
+            && let Some(c) = self.sigs.konst(self.decl)
+            && c.value.is_none()
+        {
+            let d = if self.has_error { None } else { c.deferred.clone() };
+            self.has_error = true;
+            self.report(d);
         }
         let mut node_types = Vec::with_capacity(self.node_ty.len());
         for i in 0..self.node_ty.len() {

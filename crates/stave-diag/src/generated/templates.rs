@@ -863,7 +863,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0105",
         severity: Severity::Error,
         area: "resolve",
-        rule: "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern; case `pattern-field`: the struct pattern); reported at each later declaration, related span: the first declaration",
+        rule: "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern; case `literal-field`: the struct literal; case `pattern-field`: the struct pattern); reported at each later declaration, related span: the first declaration",
         retired: false,
         located: true,
         holes: &[
@@ -880,6 +880,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "rename this `{name}`, or remove one of the two declarations",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "literal-field",
+                message: "field `{name}` of `{scope}` is given twice in one struct literal",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`{name}` given again here" },
+                    LabelTemplate { at: "first", text: "`{name}` first given here" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "give `{name}` once: remove one of the two values",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1195,7 +1208,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0203",
         severity: Severity::Error,
         area: "types",
-        rule: "literal out of range for its type",
+        rule: "literal out of range for its type; also overflow and division by zero in a const-expr, and case `index`: a const-expr index past the end of its const array",
         retired: false,
         located: true,
         holes: &[
@@ -1225,6 +1238,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "write a value within the finite range of `{type}`, or use `f64`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "index",
+                message: "index `{literal}` is out of range for `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "past the end of the const array" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "index from {min} to {max}",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1273,7 +1298,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0205",
         severity: Severity::Error,
         area: "types",
-        rule: "constant shift amount >= bit width",
+        rule: "constant shift amount >= bit width; case `negative`: a negative amount in a const-expr",
         retired: false,
         located: true,
         holes: &[
@@ -1294,13 +1319,25 @@ pub(super) static ENTRIES: &[Entry] = &[
                     edits: &[],
                 }),
             },
+            Shape {
+                case: "negative",
+                message: "shift amount {amount} is negative",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "shift by {amount}" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "shift `{type}` by 0 to {bits} - 1, or use `<<%` to mask the amount of a left shift",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
         ],
     },
     Entry {
         code: "E0206",
         severity: Severity::Error,
         area: "types",
-        rule: "operator not defined for type (e.g. `+%` on a float)",
+        rule: "operator not defined for type (e.g. `+%` on a float). Case `pattern`: a literal or const pattern tests `==`, so its type must have `==` (a `&str` literal, a const of a struct, enum, tuple, or array type)",
         retired: false,
         located: true,
         holes: &[
@@ -1316,6 +1353,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "use an operator that `{type}` defines (floats: plain `+ - * /`), or convert the operands with `as` first",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "pattern",
+                message: "this pattern tests `==`, which is not defined for `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "`==` on `{type}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "bind the value with a name or take it apart with a struct, tuple, or variant pattern, and compare its parts in a guard (`x if x.a == 1 =>`)",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -1869,7 +1918,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0219",
         severity: Severity::Error,
         area: "types",
-        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `next-shape`: the source type's `next` (a generic type's from its bounds; of two ambiguous ones, when neither fits) is not exactly `fn next(&mut self) -> Option<T>`: another receiver, other params, generic params of its own, or another result (the call itself is then checked as `recv.next()` is: E0704, E0106, E0803, ..); case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one; a struct, enum, or generic type without a `next`), and a range or iterator as a chunk source",
+        rule: "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `next-shape`: the source type's `next` (a generic type's from its bounds; of two ambiguous ones, when neither fits) is not exactly `fn next(&mut self) -> Option<T>`: another receiver, other params, generic params of its own, or another result (the call itself is then checked as `recv.next()` is: E0704, E0106, E0803, ..); case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a range of a non-integer type such as `char`, a reference to one; a struct, enum, or generic type without a `next`), and a range or iterator as a chunk source",
         retired: false,
         located: true,
         holes: &[
@@ -1942,10 +1991,10 @@ pub(super) static ENTRIES: &[Entry] = &[
                 case: "not-source",
                 message: "`{place}` is not a `for` source",
                 labels: &[
-                    LabelTemplate { at: "primary", text: "not a range, an array value, a reference to an array or slice, or an iterator" },
+                    LabelTemplate { at: "primary", text: "not an integer range, an array value, a reference to an array or slice, or an iterator" },
                 ],
                 fix: Some(FixTemplate {
-                    description: "iterate a range, an array value, `&a` / `&mut a` of an array or slice, an iterator, or a `&mut` to one; a chunk loop takes an array value or a reference to an array or slice",
+                    description: "iterate an integer range, an array value, `&a` / `&mut a` of an array or slice, an iterator, or a `&mut` to one; a chunk loop takes an array value or a reference to an array or slice",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -3132,7 +3181,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0601",
         severity: Severity::Error,
         area: "simd",
-        rule: "chunk loop without a tail policy",
+        rule: "chunk loop without a tail policy; case `element`: a tail clause on a loop over elements (no vector binding), which leaves none",
         retired: false,
         located: true,
         holes: &[
@@ -3147,6 +3196,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "add a tail clause after the loop body: `tail masked (v, m) {{ ... }}`, `tail scalar (x) {{ ... }}`, or `tail exact;`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "element",
+                message: "tail clause on a `for` loop over the elements of `{type}`",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "only a chunk loop has a tail" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "remove the tail clause, or bind a vector type to make it a chunk loop: `for v: f32x8 in xs {{ .. }} tail ..`",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -4524,12 +4585,12 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0904",
         severity: Severity::Error,
         area: "generics",
-        rule: "const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value",
+        rule: "const-expr uses a call (a method call on a value and an operator of a user impl included), a loop, a non-const item, a form outside the const-expr list (at the innermost expression without a value), or a const that depends on itself (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value. Case `size`: a `[e; n]` of more than 2^24 elements",
         retired: false,
         located: true,
         holes: &[
             Hole { name: "name", kind: HoleKind::Name, choices: &[] },
-            Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["a call", "a loop", "a non-const item"] },
+            Hole { name: "what", kind: HoleKind::TextLiteral, choices: &["a call", "a loop", "a non-const item", "an expression outside the const-expr forms"] },
         ],
         shapes: &[
             Shape {
@@ -4565,6 +4626,18 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "split the expression into several consts",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "size",
+                message: "const-expr builds an array of more than 16,777,216 elements",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "too many elements to evaluate" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "use a smaller array, or fill a heap buffer (`vec.Vec`) at run time",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),

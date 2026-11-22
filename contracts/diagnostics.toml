@@ -399,11 +399,16 @@ fix = { description = "keep one `allocator` declaration in the binary and remove
 code = "E0105"
 severity = "error"
 area = "resolve"
-rule = "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern; case `pattern-field`: the struct pattern); reported at each later declaration, related span: the first declaration"
+rule = "duplicate declaration of `<name>` in `<scope>` (also a name bound twice by one pattern, and a field given twice by one struct literal or struct pattern; case `literal-field`: the struct literal; case `pattern-field`: the struct pattern); reported at each later declaration, related span: the first declaration"
 holes = { name = "name", scope = "path" }
 message = "duplicate declaration of `{name}` in `{scope}`"
 labels = [{ at = "primary", text = "`{name}` declared again here" }, { at = "first", text = "first declaration of `{name}`" }]
 fix = { description = "rename this `{name}`, or remove one of the two declarations" }
+
+[diag.cases.literal-field]
+message = "field `{name}` of `{scope}` is given twice in one struct literal"
+labels = [{ at = "primary", text = "`{name}` given again here" }, { at = "first", text = "`{name}` first given here" }]
+fix = { description = "give `{name}` once: remove one of the two values" }
 
 [diag.cases.pattern-field]
 message = "field `{name}` of `{scope}` is named twice in one pattern"
@@ -526,11 +531,16 @@ fix = { description = "give them with `::<..>` or annotate the binding: `let x: 
 code = "E0203"
 severity = "error"
 area = "types"
-rule = "literal out of range for its type"
+rule = "literal out of range for its type; also overflow and division by zero in a const-expr, and case `index`: a const-expr index past the end of its const array"
 holes = { literal = "source", type = "type", min = "int", max = "int" }
 message = "literal `{literal}` is out of range for `{type}`"
 labels = [{ at = "primary", text = "does not fit in `{type}`" }]
 fix = { description = "write a value from {min} to {max}, or use a wider type than `{type}`" }
+
+[diag.cases.index]
+message = "index `{literal}` is out of range for `{type}`"
+labels = [{ at = "primary", text = "past the end of the const array" }]
+fix = { description = "index from {min} to {max}" }
 
 [diag.cases.float]
 fix = { description = "write a value within the finite range of `{type}`, or use `f64`" }
@@ -554,21 +564,30 @@ fix = { description = "name the lossy conversion: `as%` wraps or truncates, `as|
 code = "E0205"
 severity = "error"
 area = "types"
-rule = "constant shift amount >= bit width"
+rule = "constant shift amount >= bit width; case `negative`: a negative amount in a const-expr"
 holes = { amount = "int", bits = "int", type = "type" }
 message = "shift amount {amount} is not less than the bit width {bits} of `{type}`"
 labels = [{ at = "primary", text = "shift by {amount}" }]
 fix = { description = "shift by less than {bits}, or use `<<%` to mask the amount of a left shift" }
 
+[diag.cases.negative]
+message = "shift amount {amount} is negative"
+fix = { description = "shift `{type}` by 0 to {bits} - 1, or use `<<%` to mask the amount of a left shift" }
+
 [[diag]]
 code = "E0206"
 severity = "error"
 area = "types"
-rule = "operator not defined for type (e.g. `+%` on a float)"
+rule = "operator not defined for type (e.g. `+%` on a float). Case `pattern`: a literal or const pattern tests `==`, so its type must have `==` (a `&str` literal, a const of a struct, enum, tuple, or array type)"
 holes = { op = "source", type = "type" }
 message = "operator `{op}` is not defined for `{type}`"
 labels = [{ at = "primary", text = "`{op}` on `{type}`" }]
 fix = { description = "use an operator that `{type}` defines (floats: plain `+ - * /`), or convert the operands with `as` first" }
+
+[diag.cases.pattern]
+message = "this pattern tests `==`, which is not defined for `{type}`"
+labels = [{ at = "primary", text = "`==` on `{type}`" }]
+fix = { description = "bind the value with a name or take it apart with a struct, tuple, or variant pattern, and compare its parts in a guard (`x if x.a == 1 =>`)" }
 
 [[diag]]
 code = "E0207"
@@ -783,7 +802,7 @@ fix = { description = "correct the arguments, or call only where the clause hold
 code = "E0219"
 severity = "error"
 area = "types"
-rule = "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `next-shape`: the source type's `next` (a generic type's from its bounds; of two ambiguous ones, when neither fits) is not exactly `fn next(&mut self) -> Option<T>`: another receiver, other params, generic params of its own, or another result (the call itself is then checked as `recv.next()` is: E0704, E0106, E0803, ..); case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a reference to one; a struct, enum, or generic type without a `next`), and a range or iterator as a chunk source"
+rule = "the source of a `for` loop is an array or `[T]` that is not a temporary: a local, param, `self`, or `static`; `*e`; an expression whose last step is a field, tuple field, element, sub-slice, or `std.soa` column (of any base, a call result too); such an expression in parentheses: iterate `&a` or `&mut a` (case `mut-binding`: under a `&mut` chunk binding, whose fix is `&mut a`); case `mut-chunk`: a `&mut` chunk binding over an array value (a temporary), which needs a `&mut` source; case `shared-iter`: an iterator behind a `&` reference (`next` takes `&mut self`); case `ref-ref`: a reference to a reference (`&mut &mut It`, `& &[T]`, ..); case `as-slice`: a container with an `as_slice` view (`vec.Vec`, a reference to one), which is no iterator; case `next-shape`: the source type's `next` (a generic type's from its bounds; of two ambiguous ones, when neither fits) is not exactly `fn next(&mut self) -> Option<T>`: another receiver, other params, generic params of its own, or another result (the call itself is then checked as `recv.next()` is: E0704, E0106, E0803, ..); case `not-source`: any other type (a scalar, vector, mask, `str`, tuple, raw pointer, fn value, a range of a non-integer type such as `char`, a reference to one; a struct, enum, or generic type without a `next`), and a range or iterator as a chunk source"
 holes = { place = "place", why = "text-literal" }
 choices = { why = ["it does not take `&mut self`", "it takes params besides `&mut self`", "it has generic params of its own", "it does not return an `Option`"] }
 message = "`for` cannot iterate the array or slice `{place}` by value: iterate a reference to it"
@@ -817,8 +836,8 @@ fix = { description = "iterate its slice: `{place}.as_slice()` (elements as `&T`
 
 [diag.cases.not-source]
 message = "`{place}` is not a `for` source"
-labels = [{ at = "primary", text = "not a range, an array value, a reference to an array or slice, or an iterator" }]
-fix = { description = "iterate a range, an array value, `&a` / `&mut a` of an array or slice, an iterator, or a `&mut` to one; a chunk loop takes an array value or a reference to an array or slice" }
+labels = [{ at = "primary", text = "not an integer range, an array value, a reference to an array or slice, or an iterator" }]
+fix = { description = "iterate an integer range, an array value, `&a` / `&mut a` of an array or slice, an iterator, or a `&mut` to one; a chunk loop takes an array value or a reference to an array or slice" }
 
 [diag.cases.next-shape]
 message = "`{place}` is not a `for` source: its `next` is not `fn next(&mut self) -> Option<T>`"
@@ -1269,11 +1288,16 @@ fix = { description = "write `from {param}` instead of `from copy {param}`" }
 code = "E0601"
 severity = "error"
 area = "simd"
-rule = "chunk loop without a tail policy"
+rule = "chunk loop without a tail policy; case `element`: a tail clause on a loop over elements (no vector binding), which leaves none"
 holes = { type = "type" }
 message = "chunk loop over `{type}` has no tail clause"
 labels = [{ at = "primary", text = "remaining elements are not handled" }]
 fix = { description = "add a tail clause after the loop body: `tail masked (v, m) {{ ... }}`, `tail scalar (x) {{ ... }}`, or `tail exact;`" }
+
+[diag.cases.element]
+message = "tail clause on a `for` loop over the elements of `{type}`"
+labels = [{ at = "primary", text = "only a chunk loop has a tail" }]
+fix = { description = "remove the tail clause, or bind a vector type to make it a chunk loop: `for v: f32x8 in xs {{ .. }} tail ..`" }
 
 [[diag]]
 code = "E0602"
@@ -1812,9 +1836,9 @@ fix = { description = "remove one of the two impls of `{trait}`, or narrow one s
 code = "E0904"
 severity = "error"
 area = "generics"
-rule = "const-expr uses a call, a loop, a non-const item, or a const that depends on itself (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value"
+rule = "const-expr uses a call (a method call on a value and an operator of a user impl included), a loop, a non-const item, a form outside the const-expr list (at the innermost expression without a value), or a const that depends on itself (the cycle is listed, starting at its smallest decl id). Case `depth`: the const-expr nests more than 2,000 levels deep (at the first operand past the limit); it has no value. Case `size`: a `[e; n]` of more than 2^24 elements"
 holes = { what = "text-literal", name = "name" }
-choices = { what = ["a call", "a loop", "a non-const item"] }
+choices = { what = ["a call", "a loop", "a non-const item", "an expression outside the const-expr forms"] }
 message = "const-expr contains {what}"
 labels = [{ at = "primary", text = "{what} in a const-expr" }]
 fix = { description = "compute the value with literals, consts, arithmetic, comparisons, `as`, `size_of`, and `if then else` only" }
@@ -1828,6 +1852,11 @@ fix = { description = "break the cycle: define one of these consts without using
 message = "const-expr nested more than 2,000 levels deep"
 labels = [{ at = "primary", text = "nesting limit of const evaluation exceeded here" }]
 fix = { description = "split the expression into several consts" }
+
+[diag.cases.size]
+message = "const-expr builds an array of more than 16,777,216 elements"
+labels = [{ at = "primary", text = "too many elements to evaluate" }]
+fix = { description = "use a smaller array, or fill a heap buffer (`vec.Vec`) at run time" }
 
 [[diag]]
 code = "E0905"

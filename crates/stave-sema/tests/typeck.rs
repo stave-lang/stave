@@ -655,6 +655,24 @@ fn e0105_in_a_pattern_says_name_the_field_once() {
     assert!(got[0].1.starts_with("name `n` once") && !got[0].1.contains("rename"), "{got:?}");
 }
 
+/// A field given twice in a struct literal is E0105 `literal-field`: a literal renames nothing,
+/// so the text says to remove one of the two values.
+#[test]
+fn e0105_in_a_literal_says_remove_one_value() {
+    let src = "struct H { n: u32, d: u32 }\n\
+         fn main() -> i32 { let h = H.{ n: 1u32, n: 3u32, d: 2u32 }; return h.d as% i32; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str)> = tc
+        .diagnostics
+        .iter()
+        .filter(|d| d.code() == "E0105")
+        .map(|d| (d.message(), d.fix().map_or("", |f| f.description.as_str())))
+        .collect();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "field `n` of `main.H` is given twice in one struct literal");
+    assert!(got[0].1.starts_with("give `n` once") && !got[0].1.contains("rename"), "{got:?}");
+}
+
 /// The E0908 fixes name each trait instance as the calling module does: a trait of this module
 /// by its name, a generic one with its args (`Nx::<u64>`), a trait of an imported module through
 /// the import (`geo.X1`), one of a module not imported with the `import` to add; `impls-static`

@@ -495,7 +495,7 @@ impl crate::typeck::Ck<'_> {
     pub(crate) fn div_const_divisor(&mut self, k: u32, lane: TypeId, vec: TypeId) -> Option<u64> {
         let (n, had_error) = (self.diags.len(), self.has_error);
         let env = self.env();
-        let v = crate::consteval::eval_item_const(self, &env, k, lane);
+        let (v, _) = crate::consteval::eval_item_const(self, &env, k, lane);
         // "not a const-expr" gives way to E0607; an error inside a const-expr (E0203) stays
         let kept: Vec<Diagnostic> = self.diags.drain(n..).filter(|d| d.code() != "E0904").collect();
         let failed = !kept.is_empty();

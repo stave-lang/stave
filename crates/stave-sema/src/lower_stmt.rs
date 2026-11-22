@@ -1419,8 +1419,9 @@ impl<'a> FnCx<'a> {
                 return;
             }
         }
+        // the checker rejects a tail clause on an element loop (E0601 case `element`)
         if tail.is_some() {
-            self.unsupported(f, "a tail clause on an element loop is not supported");
+            self.fail(f, "a tail clause on an element loop");
             return;
         }
         let it_ty = self.nty(iter);
@@ -1435,8 +1436,9 @@ impl<'a> FnCx<'a> {
                 self.fail(f, "a `for` over a range whose instance type is no range");
                 return;
             };
+            // only an integer range is a `for` source (`loops::for_source`)
             if !matches!(self.kind(elem), TypeKind::Int { .. }) {
-                self.unsupported(f, "char ranges in for loops are not supported yet");
+                self.fail(f, "a `for` over a range of non-integers");
                 return;
             }
             let bounds = if icx.kind(iter) == Some(NodeKind::RangeExpr) {
@@ -2714,8 +2716,9 @@ impl<'a> FnCx<'a> {
         if let Some(&l0) = kids.first()
             && icx.kind(l0) == Some(NodeKind::Literal)
         {
+            // the checker rejects a literal pattern of a type without a scalar `==` (E0206)
             if icx.is(icx.a(l0), Term::StrLit) {
-                self.unsupported(p, "string literal patterns are not supported yet");
+                self.fail(p, "a string literal pattern");
                 return false;
             }
             let Some((dp, _)) = self.peel(place, mode) else { return false };
