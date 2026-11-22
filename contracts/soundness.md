@@ -207,7 +207,10 @@ a drop only through one function, which fails the build when the schedule of the
 row for the point, the owner, and the outermost constructor of the dropped type (an instance
 is checked against its definition's schedule, whose keys are nodes and tokens of the source),
 or when the drops of one scope end, statement end, or exit are emitted in an order the rows of
-that point do not have.
+that point do not have. In the other direction, when a body is lowered every row of its
+schedule for a local, an overwritten value, or an ignored part must have been decided by that
+function's callers at its point (emitted, or left out because the owner holds no value there
+or the type has no drop glue in the instance): a row never decided fails the build.
 Which parts a moving pattern ignores, in what order, and what a type's drop glue runs, in what
 order, are each one function called by both.
 
@@ -224,7 +227,10 @@ path does nothing in the code and is at most a use the code does not make.
 
 **Not claimed.** That two temporaries of one statement with the same outermost type are told
 apart: a row is found by point, owner, and type constructor, and a temporary's owner key is
-its statement. Bodies the borrow checker does not build (const and `static mut` initializers)
+its statement. That a scheduled drop of a temporary is emitted: the CFG gives every value a
+temporary and keeps some the code never makes (the `Option` a `for` loop's `next` returned,
+a scrutinee an arm took), so a temporary's row may go unused, and a value the code would
+neither consume nor own would not be noticed by this check. Bodies the borrow checker does not build (const and `static mut` initializers)
 have no schedule and are not compared.
 
 **What would break it.** A drop emitted by code that does not ask the schedule (the one
@@ -453,8 +459,9 @@ type that is wrongly `Frozen`.
 **Assumes.** The acquisitions are the instances of `std.sync`'s `Mutex.lock`, `Once.get_or_init`,
 and `lock_pair`, found in the built-in package, each acquiring its const rank `R`; `try_lock` waits
 for nothing and acquires nothing. The lowest rank a node may acquire is the minimum over everything
-its edges reach (calls, fn values, spawns, drops; a body's drop edges narrowed to the types the
-borrow checker says it drops). A lock is held by a local whose type reaches a `MutexGuard` through
+its edges reach (calls, fn values, spawns, drops; the drop edges of each fn and closure node
+narrowed to the types the borrow checker says that node's own body drops, kept whole when that
+is not known). A lock is held by a local whose type reaches a `MutexGuard` through
 fields, payloads, tuple and array elements, or an ADT's raw-pointer pointee (or a `T: view` param an
 instance makes one) while the local may be initialized: params from entry, until moved out or
 dropped as a whole, and not at a call that moves it whole into the callee. `get_or_init` holds `R`
@@ -464,7 +471,9 @@ the joined threads acquire; at each drop, below the drop glue's. The drops are t
 drop schedule ("Drops: one schedule"), so none the code runs is left out. A guard inside a value
 is held until the value's glue reaches it: the type's `Drop` impl and the glue of each part
 dropped before it are checked against it, at every drop of such a value (a guard behind an
-owning raw pointer counts as held while the owner's `Drop` runs). A call the borrow checker's CFG has
+owning raw pointer counts as held while the owner's `Drop` runs). What a drop acquires is read
+from the type's glue node, or, for a type the graph has no node for, from the steps of its glue;
+a step without a node and a type that cannot be named count as acquiring any lock. A call the borrow checker's CFG has
 no token for is checked against every lock the body may hold anywhere. **Guarantees.** Give a
 waiting thread the rank it waits for: the mutex's, or at a join the lowest the joined threads may
 take. Every lock it holds ranks below that, except inside `lock_pair`, whose second wait has the

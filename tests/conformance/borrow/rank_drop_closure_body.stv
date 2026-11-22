@@ -1,0 +1,44 @@
+//~ CHECK-ONLY
+// What a closure's body drops is the closure's own: its drop edges are narrowed against its
+// body, not its fn's. A closure that takes its param apart and ignores a part drops that part,
+// so a call of it under the guard is E1405 although the fn around drops a value of the same
+// type itself. A closure that only makes a value and returns it drops nothing: calling it under
+// the guard (`with_lock`) is fine, although the fn drops the value later.
+import std.io;
+import std.sync;
+import std.vec;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+
+struct Lk { pub id: u32 }
+
+impl Drop for Lk {
+    fn drop(&mut self) {
+        let g = M.lock();
+    }
+}
+
+fn closure_drops_ignored_part() {
+    let f = fn(t: (vec.Vec<u32>, Lk)) {
+        let (v, _) = t;
+    };
+    let g = M.lock();
+    f((vec.Vec::<u32>.new(), Lk.{ id: 1 })); //~ ERROR E1405
+}
+
+fn closure_drops_whole_param() {
+    let f = fn(l: Lk) {};
+    let g = M.lock();
+    f(Lk.{ id: 1 }); //~ ERROR E1405
+}
+
+fn closure_only_makes() {
+    let l = M.with_lock(fn(v: &mut u32) -> Lk { return Lk.{ id: *v }; });
+    io.print("made\n");
+}
+
+fn main() {
+    closure_drops_ignored_part();
+    closure_drops_whole_param();
+    closure_only_makes();
+}

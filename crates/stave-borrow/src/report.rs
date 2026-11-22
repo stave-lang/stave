@@ -438,6 +438,7 @@ mod tests {
             ret: RetCheck::None,
             declared: Vec::new(),
             is_nested: false,
+            at: None,
             nested: Vec::new(),
             joins: Vec::new(),
             unsupported: None,

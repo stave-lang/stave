@@ -354,6 +354,9 @@ pub struct Body {
     pub declared: Vec<Store>,
     /// A closure or spawn body: its params and captures take no `from` clause.
     pub is_nested: bool,
+    /// A closure or spawn body: the span of its first token (the call graph's closure node has
+    /// the same).
+    pub at: Option<Span>,
     /// Bodies of closures and spawn blocks inside this one.
     pub nested: Vec<Body>,
     /// The join local of each `scope` statement with the statement's span: a read of it is the
@@ -482,6 +485,9 @@ pub struct Builder<'a, 'b> {
     /// temporary scrutinee the arm takes whole is still dropped at the statement's end on the
     /// other ways.
     arm_scrut: bool,
+    /// The scheduled drops with the block their statement is in: the ones in a block the
+    /// entry reaches are due ([`Schedule::require`]).
+    due: Vec<(BlockId, Point, Owner)>,
 }
 
 /// A by-reference chunk binding's store back (see `Builder::chunk_ref_bind`): the chunk of the
@@ -529,6 +535,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             ret: RetCheck::None,
             declared: Vec::new(),
             is_nested: range.is_some(),
+            at: None,
             nested: Vec::new(),
             joins: Vec::new(),
             unsupported: None,
@@ -566,10 +573,26 @@ impl<'a, 'b> Builder<'a, 'b> {
             chunk_temps: FxHashMap::default(),
             old_drops: Vec::new(),
             arm_scrut: false,
+            due: Vec::new(),
         }
     }
 
     fn finish(mut self) -> Body {
+        // a drop in a block the entry reaches is one the code must decide; a block nothing
+        // leads to (after a loop without `break`, a `scope` that never ends) may not be lowered
+        let mut reached = vec![false; self.body.blocks.len()];
+        let mut work: Vec<BlockId> = vec![0];
+        while let Some(b) = work.pop() {
+            if std::mem::replace(&mut reached[b as usize], true) {
+                continue;
+            }
+            work.extend_from_slice(self.body.blocks[b as usize].term.succs());
+        }
+        for &(b, point, owner) in &self.due {
+            if reached[b as usize] {
+                self.body.schedule.require(point, owner);
+            }
+        }
         prune_old_drops(&mut self.body, &self.old_drops);
         self.body
     }
@@ -650,6 +673,9 @@ impl<'a, 'b> Builder<'a, 'b> {
     fn drop_at(&mut self, p: Place, point: Point, owner: Owner, span: Span, node: u32) {
         let head = stave_sema::drops::head(&self.tys.ov, p.ty);
         self.body.schedule.add(Row { point, owner, head });
+        if let Some(b) = self.cur {
+            self.due.push((b, point, owner));
+        }
         self.push(StmtKind::Drop(p), span, node);
     }
 
@@ -1547,6 +1573,9 @@ impl<'a, 'b> Builder<'a, 'b> {
                 if lp.has_deref() {
                     let head = stave_sema::drops::head(&self.tys.ov, lp.ty);
                     self.body.schedule.add(Row { point: Point::Assign(lhs), owner: Owner::Old, head });
+                    if let Some(b) = self.cur {
+                        self.due.push((b, Point::Assign(lhs), Owner::Old));
+                    }
                 } else {
                     if let Some(b) = self.cur {
                         self.old_drops.push((b, self.body.blocks[b as usize].stmts.len()));
@@ -1872,8 +1901,17 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.loops.pop();
         self.body.loops.push((head, exit, self.body.blocks.len() as BlockId));
         self.switch_to(exit);
-        if let (Some(tc), Src::Elems(p, dk)) = (tail, &src) {
+        if let (Some(tc), Src::Elems(p, dk)) = (tail, &src)
+            && self.open()
+        {
+            // the tail runs for the elements the chunks left over, which may be none: what
+            // follows the loop is reached without it too, also when the tail never returns
+            let (tail_b, after) = (self.new_block(), self.new_block());
+            self.terminate(Terminator::Branch(vec![tail_b, after]));
+            self.switch_to(tail_b);
             self.tail_clause(tc, p.clone(), *dk, iter);
+            self.goto(after);
+            self.switch_to(after);
         }
     }
 
@@ -2469,6 +2507,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         nb.end_of_body(n);
         let caps = std::mem::take(&mut nb.captures);
         let mut inner = nb.finish();
+        inner.at = Some(icx.tok_span(icx.a(n)));
         // the capture analysis (stave-sema) decides the list and the modes, which the thread rules
         // read too: a capture the CFG writes, mutably borrows, or activates while the analysis
         // holds it by `&`, or one the analysis does not list, means the two disagree, and the

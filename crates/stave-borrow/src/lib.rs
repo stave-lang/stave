@@ -105,6 +105,8 @@ struct One {
     rounds: u32,
     phases: [Duration; 3],
     locks: locks::Scan,
+    /// The types each nested body may drop, by the span of the body's first token.
+    closures: Vec<(stave_diag::Span, Option<Vec<stave_sema::TypeId>>)>,
     schedule: stave_sema::drops::Schedule,
 }
 
@@ -159,7 +161,11 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
         }
         out.diagnostics.extend(r.diags);
         out.dump.extend(r.dump);
-        out.drops.push(stave_sema::ranks::BodyDrops { decl: tb.decl, types: r.locks.drops.clone() });
+        out.drops.push(stave_sema::ranks::BodyDrops {
+            decl: tb.decl,
+            types: r.locks.drops.clone(),
+            closures: std::mem::take(&mut r.closures),
+        });
         if r.locks.holds {
             let l = r.locks;
             out.locks.push(stave_sema::ranks::BodyLocks {
@@ -228,6 +234,7 @@ fn check_body(
         rounds: 0,
         phases: [t0.elapsed(), Duration::ZERO, Duration::ZERO],
         locks: locks::Scan { drops: Some(Vec::new()), ..locks::Scan::default() },
+        closures: Vec::new(),
         schedule: schedule_of(&body),
     };
     if body.unsupported.is_none() && body.internal.is_none() {
@@ -269,13 +276,11 @@ fn check_tree(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item: u32,
     one.locks.sites.extend(l.sites);
     one.locks.any.extend(l.any);
     one.locks.calls.extend(l.calls);
-    one.locks.drops = match (one.locks.drops.take(), l.drops) {
-        (Some(mut a), Some(b)) => {
-            a.extend(b);
-            Some(a)
-        }
-        _ => None,
-    };
+    // each body's drops are its own: a closure's are not its fn's
+    match body.at {
+        None => one.locks.drops = l.drops,
+        Some(at) => one.closures.push((at, l.drops)),
+    }
     for nb in &body.nested {
         check_tree(nb, tys, opts, item, one);
     }

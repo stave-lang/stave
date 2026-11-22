@@ -687,6 +687,7 @@ fn lower_job(g: &G<'_>, any_item: Option<ItemId>, job: &Job) -> JobOut {
                 cx.setup(decl.node);
                 let (ps, ret) = cx.inst_sig(k).unwrap_or((Vec::new(), TypeId::NONE));
                 let mut out = cx.lower_body(decl.node, &ps, ret);
+                cx.check_asked();
                 out.name_off = name;
                 let new: Vec<crate::lower_fn::FlagKey> =
                     cx.need_flag.iter().filter(|n| !flagged.contains(*n)).cloned().collect();

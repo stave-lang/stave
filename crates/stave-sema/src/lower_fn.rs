@@ -341,6 +341,9 @@ pub(crate) struct FnState {
     /// While the owners of one end or exit are dropped: the ones dropped so far, in order
     /// ([`FnCx::end_run`]).
     pub run: Option<Vec<Owner>>,
+    /// A closure or `spawn` body: the locals it captures. A capture is a reference to a local
+    /// of a fn around, which holds its value whenever the body runs.
+    pub captures: Vec<usize>,
 }
 
 /// The write-back of a `&mut` chunk binding: the vector in `slot` goes to `s[i..i+N]`, only the
@@ -448,6 +451,9 @@ pub(crate) struct FnCx<'a> {
     pub hold_site: bool,
     /// The drop schedule of the body being lowered, when the borrow checker made one.
     pub sched: Option<&'a crate::drops::Schedule>,
+    /// The scheduled drops the lowering decided: emitted, or left out because the owner holds
+    /// no value there or its type has no drop glue in this instance ([`FnCx::check_asked`]).
+    pub asked: FxHashSet<(Point, Owner)>,
 }
 
 impl<'a> FnCx<'a> {
@@ -496,6 +502,7 @@ impl<'a> FnCx<'a> {
             result_local: None,
             hold_site: false,
             sched: None,
+            asked: FxHashSet::default(),
         }
     }
 
@@ -1524,7 +1531,17 @@ impl<'a> FnCx<'a> {
     /// `at`: the node of the destination expression.
     pub fn assign(&mut self, p: &Place, v: Operand, at: u32) {
         let key = (Point::Assign(at), Owner::Old);
+        self.asked.insert(key);
         match p.root {
+            // a captured place always holds a value: the closure's own owner states say
+            // nothing about a local of the fn around
+            Some(l) if self.f.captures.contains(&l) => {
+                if self.needs_drop(p.ty) {
+                    self.scheduled(key.0, key.1, p.ty);
+                }
+                self.drop_place(p);
+                self.write(p, v);
+            }
             Some(l) if self.locals[l].drop => {
                 self.drop_if_held(l, p, key);
                 self.write(p, v);
@@ -1533,7 +1550,13 @@ impl<'a> FnCx<'a> {
                     self.set_flag(l, true);
                 }
             }
-            Some(_) => self.write(p, v),
+            // a part of a local without drop glue has none either
+            Some(_) => {
+                if self.needs_drop(p.ty) {
+                    self.fail_at(None, "an overwritten value with drop glue in a local without");
+                }
+                self.write(p, v);
+            }
             None => {
                 if self.needs_drop(p.ty) {
                     self.scheduled(key.0, key.1, p.ty);
@@ -1577,6 +1600,30 @@ impl<'a> FnCx<'a> {
             let tok = self.has_body.then(|| self.icx.a(self.f.cur));
             let point = self.f.point;
             self.fail_at(tok, format!("drops in an order the schedule does not have: {run:?} at {point:?}"));
+        }
+    }
+
+    /// Every drop the body's schedule has for a local, an overwritten value, or a part a
+    /// pattern ignores must have been decided by the lowering where it lowered that point
+    /// ([`FnCx::asked`]): a scheduled drop it never considered is a value it leaks. A local
+    /// whose type has no drop glue in this instance is none. Temporaries are not compared: the
+    /// schedule keys them by statement, and has ones the code never makes (a value it moves
+    /// on without a slot).
+    pub fn check_asked(&mut self) {
+        let Some(s) = self.sched else { return };
+        if self.err.is_some() {
+            return;
+        }
+        for &(point, owner) in s.due() {
+            let due = match owner {
+                Owner::Temp(_) => false,
+                Owner::Local(n) => self.by_node.get(&n).is_none_or(|&l| self.locals[l].drop),
+                Owner::Part(_) | Owner::Old => true,
+            };
+            if due && !self.asked.contains(&(point, owner)) {
+                self.fail_at(None, format!("a scheduled drop the lowering left out: {owner:?} at {point:?}"));
+                return;
+            }
         }
     }
 
@@ -1706,7 +1753,12 @@ impl<'a> FnCx<'a> {
     /// Drops owner `l` where it ends, if it holds its value (its state is kept: the caller knows
     /// whether the owner is left on this path only).
     pub fn drop_owner(&mut self, l: usize) {
-        if !self.locals[l].drop || !self.open() {
+        if !self.locals[l].drop {
+            return;
+        }
+        let key = self.owner_key(l);
+        self.asked.insert(key);
+        if !self.open() {
             return;
         }
         if self.locals[l].flag.is_none() && self.st(l) == Init::Gone {
@@ -2061,6 +2113,7 @@ impl FnState {
             point: Point::End,
             ticket: false,
             run: None,
+            captures: Vec::new(),
             ensures_end: None,
         }
     }

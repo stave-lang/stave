@@ -236,7 +236,9 @@ when that owner ends.
   borrows when its type has drop glue: those borrows are live up to the assignment (E0501 where
   a borrowed local ends before it, and where the old value borrows `x` itself). An `x` that
   holds no value there on any path (moved out, not assigned since) drops nothing and uses
-  nothing.
+  nothing. A captured place assigned inside a closure or `spawn` body is no exception: a
+  capture always holds a value when the body runs, so each run of the assignment drops the
+  old value (`o = Option.None;` in a closure releases a guard `o` held).
 - **`impl Drop`, order inside a value.** A value whose type has an `impl Drop` is dropped as a
   whole: its `drop` runs once, then its fields are dropped, in declaration order (tuple and
   array elements in index order; of an enum, the fields of the value's variant). No pattern
@@ -284,7 +286,11 @@ when that owner ends.
   with the borrow checker's control-flow graph, one per drop statement, so the borrow check,
   the move check, the lock-rank and join rules read exactly the scheduled drops; the code
   generator asks the schedule for every drop it emits, and a drop without a row, or the drops
-  of one end or exit in another order than their rows, stop the build as a compiler error. The parts a pattern ignores and the steps of a value's drop glue
+  of one end or exit in another order than their rows, stop the build as a compiler error. So
+  does a row the generator never decided: every scheduled drop of a local, of an overwritten
+  value, and of a part a pattern ignores must have been emitted or left out for a stated
+  reason (the owner holds no value there, the type has no drop glue in this instance) where the
+  generator lowered that point. Temporaries are compared in the first direction only. The parts a pattern ignores and the steps of a value's drop glue
   are each computed by one function both sides call. Whether a scheduled drop runs is the
   owner's init bit: one per owner, a temporary included.
 
@@ -328,6 +334,10 @@ inside the dropped value itself, each until the glue reaches it (case `own`): `(
 drops `L` while the guard is held, `(guard, L)` releases the guard first; a type's own `drop`
 runs while every field is alive. A guard a `vec.Vec` owns counts as held while the `Vec` is
 dropped. A destructor that joins threads (a `scope` in `drop`) takes what those threads take.
+The steps are read from the type itself, for any type (a tuple or array made in place too); a
+step the check cannot follow counts as taking any lock (case `opaque`). Array elements are
+judged by their type: `[E.G(guard), E.K(l)]` is rejected although this order is safe, since the
+check does not know which element holds which variant.
 
 Completion-queue waits (`park`) are `block` waits: like file waits they are outside the claim that
 safe code cannot deadlock on locks and joins. No `MutexGuard` may be held across a call that has

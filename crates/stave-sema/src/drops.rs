@@ -10,7 +10,11 @@
 //! joins) reads the schedule. The lowering asks the schedule for every drop it emits
 //! ([`Schedule::has`]) and for the order of the drops of each end and exit
 //! ([`Schedule::in_order`]): a drop without a row, or in another order, is code no check has
-//! seen, an internal error of the build. Whether a scheduled drop runs is the owner's init bit: the CFG's dataflow and the
+//! seen, an internal error of the build. The other way round, the rows of code that can run
+//! are due ([`Schedule::require`]): where the lowering lowers their point it must have decided
+//! each one for a local, an overwritten value, or an ignored part, so a drop it leaves out
+//! fails the build too. A temporary's row is not due: the CFG gives every value a temporary,
+//! the code only the ones that need a slot. Whether a scheduled drop runs is the owner's init bit: the CFG's dataflow and the
 //! lowering's owner states (or dynamic flags) both follow the moves.
 //!
 //! **Parts of a pattern.** A pattern that binds a non-Copy part by value takes its whole value;
@@ -102,6 +106,8 @@ pub struct Schedule {
     rows: Vec<Row>,
     /// The drops in the order they were scheduled; once sealed, grouped by point.
     order: Vec<(Point, Owner)>,
+    /// The drops the code must decide ([`Schedule::require`]).
+    due: Vec<(Point, Owner)>,
     sorted: bool,
 }
 
@@ -113,9 +119,22 @@ impl Schedule {
         self.sorted = false;
     }
 
+    /// The scheduled drop of `owner` at `point` is in code that can run: where the lowering
+    /// lowers that point it must decide the drop (emit it, or leave it out because the owner
+    /// holds no value or its type has no drop glue there).
+    pub fn require(&mut self, point: Point, owner: Owner) {
+        self.due.push((point, owner));
+    }
+
+    /// The drops the code must decide.
+    pub fn due(&self) -> &[(Point, Owner)] {
+        &self.due
+    }
+
     pub fn extend(&mut self, other: &Schedule) {
         self.rows.extend_from_slice(&other.rows);
         self.order.extend_from_slice(&other.order);
+        self.due.extend_from_slice(&other.due);
         self.sorted = false;
     }
 
@@ -125,6 +144,8 @@ impl Schedule {
         self.rows.dedup();
         // stable: the drops of a point stay in the order they run
         self.order.sort_by_key(|x| x.0);
+        self.due.sort_unstable();
+        self.due.dedup();
         self.sorted = true;
     }
 

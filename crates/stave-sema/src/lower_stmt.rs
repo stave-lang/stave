@@ -770,6 +770,7 @@ impl<'a> FnCx<'a> {
                 let a = self.op2(Op::FieldAddr, fp, ep, ix);
                 let p = Operand::Value(self.f.b.load(FnCx::ir(rt), a));
                 self.f.slot[l] = Some(p);
+                self.f.captures.push(l);
             }
         }
         self.make_slots(Some(n));
@@ -2486,6 +2487,7 @@ impl<'a> FnCx<'a> {
     fn ignored_parts(&mut self, p: u32, sp: &Place) -> Vec<(u32, Place)> {
         let mut out = Vec::new();
         for (k, path) in crate::drops::ignored_parts(self, p, sp.ty).into_iter().enumerate() {
+            self.asked.insert((Point::Bind(p), Owner::Part(k as u32)));
             let mut part = sp.clone();
             for Step { variant, field, ty } in path {
                 part.proj.push(match variant {

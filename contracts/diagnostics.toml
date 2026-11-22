@@ -2354,7 +2354,7 @@ fix = { description = "use one of `alloc`, `trap`, `recursive`, `lock`, `unsafe`
 code = "E1405"
 severity = "error"
 area = "effects"
-rule = "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there; case `drop`: a value whose drop glue acquires such a lock is dropped (any drop of the drop schedule: scope end, temporary, exit, a part a pattern ignores, overwritten old value) while the guard is held; case `own`: the dropped value holds the guard itself while its type's `Drop` impl, or the drop glue of a part dropped before the guard, acquires the lock"
+rule = "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there; case `drop`: a value whose drop glue acquires such a lock is dropped (any drop of the drop schedule: scope end, temporary, exit, a part a pattern ignores, overwritten old value) while the guard is held; case `own`: the dropped value holds the guard itself while its type's `Drop` impl, or the drop glue of a part dropped before the guard, acquires the lock; case `opaque`: such a value has a drop step the call graph has no node for, which counts as acquiring any lock"
 holes = { fn = "path", lock = "type", rank = "int", held = "type", held_rank = "int" }
 message = "`{fn}` acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank}): locks are taken in increasing rank order"
 labels = [{ at = "primary", text = "acquires rank {rank} here" }, { at = "held", text = "`{held}` held from here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }]
@@ -2364,6 +2364,11 @@ fix = { description = "release the guard before this call, give `{lock}` a rank 
 message = "`{fn}` drops a value whose drop acquires `{lock}` (rank {rank}) while it holds `{held}` (rank {held_rank})"
 labels = [{ at = "primary", text = "dropped here" }, { at = "held", text = "`{held}` held from here" }, { at = "call", text = "call on the way" }, { at = "drop", text = "drop on the way" }]
 fix = { description = "release the guard before the value is dropped (declare the value before the guard, or end the guard's block first), or give `{lock}` a rank above {held_rank}" }
+
+[diag.cases.opaque]
+message = "`{fn}` drops a value that holds `{held}` (rank {held_rank}) and whose drop the lock check cannot follow"
+labels = [{ at = "primary", text = "dropped here" }, { at = "held", text = "the value holding `{held}`" }]
+fix = { description = "release the guard before the value is dropped, or keep the guard out of the value" }
 
 [diag.cases.own]
 message = "`{fn}` drops a value whose drop acquires `{lock}` (rank {rank}) while the value itself still holds `{held}` (rank {held_rank})"
