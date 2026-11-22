@@ -1,11 +1,15 @@
 //~ STDOUT pos_closure_env.stdout
 // A closure value lives as long as the frame its literal was evaluated in: it may be called,
 // kept, and passed on there (also made in a loop); a closure may return a closure without
-// captures, or one it captured.
+// captures, or one it captured. What a call of an inner closure returns (`&`, a slice, an
+// `Option<&T>`, a field of a view) points to captured places, not into the environment: the
+// outer closure may return it.
 import std.io;
 import std.vec;
 
 view struct H { pub f: fn() -> u64 }
+
+view struct HR { pub f: fn() -> u64, pub r: &u64 }
 
 fn seven() -> u64 { return 7; }
 
@@ -35,5 +39,19 @@ fn main() -> i32 {
     let hv = H.{ f: fn() -> u64 { return x * 2; } };
     let t = call(g) + (hv.f)();
     io.print(f"{s} {t}\n");
+    let mut v = vec.Vec::<u64>.new();
+    v.push(5);
+    let by_ref = fn() -> &u64 { let get = fn() -> &u64 { return &x; }; return get(); };
+    let by_slice = fn() -> &[u64] { let get = fn() -> &[u64] { return v.as_slice(); }; return get(); };
+    let by_some = fn() -> Option<&u64> {
+        let get = fn() -> Option<&u64> { return Option.Some(&x); };
+        return get();
+    };
+    let by_field = fn() -> &u64 { let h = HR.{ f: fn() -> u64 { return x; }, r: &x }; return h.r; };
+    let kept = fn() -> &u64 { let get = fn() -> &u64 { return &x; }; let r = get(); return r; };
+    let (p, q) = (by_ref(), by_slice());
+    let (o, w, k) = (*by_some().unwrap(), *by_field(), *kept());
+    let (pv, ql) = (*p, q.len());
+    io.print(f"{pv} {ql} {o} {w} {k}\n");
     return 0;
 }

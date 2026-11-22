@@ -2498,7 +2498,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E0501",
         severity: Severity::Error,
         area: "borrow",
-        rule: "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check or the operand of `old(e)`; `temporary-loop`: the iterator value of a `for`, which ends with the loop",
+        rule: "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check or the operand of `old(e)`; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it)",
         retired: false,
         located: true,
         holes: &[
@@ -2592,6 +2592,19 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "bind the iterator to a local before the loop and iterate through `&mut`: `let mut t = {place};`, then `for .. in &mut t`",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "thread",
+                message: "cannot {access} `{place}`: it has a live {loan} borrow",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "{access} here" },
+                    LabelTemplate { at: "loan", text: "{loan} borrow of `{loaned}` by the thread spawned here: it may use `{loaned}` until the scope is left" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "leave the scope before this point (its threads are joined there), or use the place only inside the thread",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
@@ -2963,10 +2976,10 @@ pub(super) static ENTRIES: &[Entry] = &[
             },
             Shape {
                 case: "env",
-                message: "returned value holds a closure whose environment is in this body's frame",
+                message: "returned value holds a closure made in this body, and its environment is in this body's frame",
                 labels: &[
                     LabelTemplate { at: "primary", text: "returned here" },
-                    LabelTemplate { at: "closure", text: "this closure's environment (the addresses of its captures) is made in this frame and ends when it returns" },
+                    LabelTemplate { at: "closure", text: "the environment of this closure (the addresses of its captures) is made in this frame and ends when the frame returns" },
                 ],
                 fix: Some(FixTemplate {
                     description: "write the closure in the fn that owns the captured locals, or return a value computed from them instead of a closure",

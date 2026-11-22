@@ -12,7 +12,9 @@ reference for what a program may write and what it means.
   which is in the frame of the body that evaluated the literal: a value holding it is not
   returned from that body (E0512 case `env`), also when every capture is one an enclosing
   closure holds by `&` (`fn() -> fn() -> u64 { return fn() -> u64 { return x; }; }`). Write the
-  inner closure where the captured locals live, or return a value.
+  inner closure where the captured locals live, or return a value. What a call of the inner
+  closure returns may leave if it holds no fn value (`return get();` with `get` returning `&x`, a
+  slice, an `Option<&T>`): captures are references, so it points to the captured places.
 - A `fn(..) needs(F)` value is usable as `fn(..) needs(G)` only if F ⊆ G ∪ the enclosing fn's
   needs ∪ the target baseline (E0707). Reason: CPU features never change while a program runs, so
   a value made where F is proven stays callable.

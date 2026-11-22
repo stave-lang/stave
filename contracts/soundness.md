@@ -498,8 +498,10 @@ CFG keeps each spawn's capture loans in the scope's join local, read at each of 
 may use it: the join local is used on every path from the spawn on, also on one that never leaves
 the block. A path that stops in it (a block closed by a `-> never` call, also through a fn value or
 a closure, a trap, a `match` with no reachable arm, an inner scope that stops) uses the join local
-where it stops, and every edge back to the head of a loop inside the block uses it too, so a loop
-that is never left keeps the loans live through its whole body. Before the spawn the join local
+where it stops, and every edge back to the head of a loop inside the block whose head reaches no
+exit uses it too, so a loop that is never left keeps the loans live through its whole body. From
+a loop that can be left a path reaches its exit, and from there a join or one of these uses (by
+induction over the loops, innermost first). Before the spawn the join local
 holds none of its loans (they are made at the `spawn`), and those uses are no joins for the lock
 ranks. **What would break it.** A way to stop or cycle the CFG does not show as a closed block or a
 loop back edge, or a spawn whose loans go elsewhere than the join local.
@@ -513,9 +515,15 @@ that slot (a local of the evaluating body that is never written, moved, or ended
 value holding it is never returned from that body (E0512) nor stored where the body's locals cannot
 go (E0513), whatever the captures are: in a closure body they may all be the outer closure's `&`
 captures, which may themselves be returned. Within the frame the slot holds the same addresses at
-every evaluation, so values of earlier evaluations stay valid. **What would break it.** An
-environment placed elsewhere (a heap or caller slot) without changing the rule, or a fn value made
-from a literal that skips the closure path of the CFG.
+every evaluation, so values of earlier evaluations stay valid. A value whose type cannot be or
+reach a fn value (a call's result, a returned value) does not keep the loan: captures are
+references only (LANG.md, `CaptureMode` is `&` or `&mut`; lowering's `env_type` makes every
+element a pointer to the captured place), no expression names an environment or its elements,
+so what a closure body hands out through a capture points to the captured place, which the
+capture loan borrows; only a fn value points to an environment. **What would break it.** An
+environment placed elsewhere (a heap or caller slot) without changing the rule; a capture held by
+value in the environment (a reference into it could then leave through a call result); or a fn
+value made from a literal that skips the closure path of the CFG.
 
 ## Capture modes: one answer for every rule
 
