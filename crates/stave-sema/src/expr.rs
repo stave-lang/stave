@@ -639,14 +639,45 @@ impl<'a> Ck<'a> {
         };
         let forms = self.sigs.op_forms(self.prog, trait_name);
         let call = if op.ends_with('=') { &forms.compound_call } else { &forms.call };
+        let example = if case == "operand-args" { self.copy_bounds_of(t) } else { String::new() };
         let d = mk(
             "E0422",
             Some(case),
-            &[("op", &op), ("type", &tn), ("bound", trait_name), ("sig", &forms.sig), ("call", call)],
+            &[
+                ("op", &op),
+                ("type", &tn),
+                ("bound", trait_name),
+                ("sig", &forms.sig),
+                ("call", call),
+                ("example", &example),
+            ],
             self.icx.tok_span(tok),
             &roles,
         );
         self.report(d);
+    }
+
+    /// `` `A: Copy`, `B: Copy` `` for the type params `t` names, in the order of the generics in
+    /// scope; a general form when it names none.
+    fn copy_bounds_of(&self, t: TypeId) -> String {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stack = vec![t];
+        let mut kids = Vec::new();
+        while let Some(x) = stack.pop() {
+            let k = self.tys.kind(x);
+            if let TypeKind::Param(p) = k {
+                seen.insert(*p);
+            }
+            kids.clear();
+            k.children(&mut kids);
+            stack.extend_from_slice(&kids);
+        }
+        let bounds: Vec<String> = seen
+            .into_iter()
+            .filter_map(|p| self.genv().get(p as usize))
+            .map(|g| format!("`{}: Copy`", self.prog.strings.get(g.name)))
+            .collect();
+        if bounds.is_empty() { "`P: Copy` for each param `P`".to_string() } else { bounds.join(", ") }
     }
 
     pub fn e0901(&mut self, tok: u32, param: u32) {

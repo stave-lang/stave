@@ -48,6 +48,15 @@ fn cpu_and_auto_summary_lines() {
 }
 
 #[test]
+fn json_diagnostics_leave_no_summary_line() {
+    for cmd in ["check", "build"] {
+        let (c, _, err) = stave(&[cmd, &hello(), "--diagnostics", "json"]);
+        assert_eq!(c, 0, "{err}");
+        assert!(err.is_empty(), "{err}");
+    }
+}
+
+#[test]
 fn gpu_without_stage1_is_e1302() {
     for fmt in ["human", "json"] {
         let (c, out, err) = stave(&["build", &hello(), "--compiler", "gpu", "--diagnostics", fmt]);

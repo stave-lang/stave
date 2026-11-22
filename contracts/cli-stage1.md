@@ -12,7 +12,7 @@ run in stage0, whatever `--compiler` says. They compile no program and print no 
 `stave fix` checks in stage0 too (its rounds check edits that are not written yet); it takes no
 `--compiler` and prints no summary line.
 
-**Summary line** (always printed):
+**Summary line** (always printed, except under `--diagnostics json`):
 - `compiled on GPU (stage1, NVIDIA RTX A6000) in 412 ms`
 - `compiled on CPU (no usable GPU: <reason>)`, where `<reason>` is one of `stage1 image missing`,
   `no NVIDIA driver`, `no device`, `compute capability 7.5 < 8.6`, `daemon not reachable`, or

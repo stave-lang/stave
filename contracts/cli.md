@@ -266,7 +266,8 @@ Common flags come after the subcommand (`stave build --release`, not `stave --re
 `compiled on CPU (no usable GPU: <reason>)`; for steps 1 and 1a the reason stands alone,
 `compiled on CPU (target aarch64-linux not supported by stage1)`. It is never part of a compared
 dump. `stave run` of a file whose first line is a shebang line prints no summary line: the stderr
-of a script holds only diagnostics and what the program writes.
+of a script holds only diagnostics and what the program writes. With `--diagnostics json` the summary, the `emulated:` lines, and the stack lines are left out:
+stderr holds only the JSON objects.
 
 **Shipped library**: the built-in packages `std` and `runtime` are read from a *library
 directory* `D` (`D/std/`, holding `core.stv`, and `D/runtime/`). The compiler uses the first of:

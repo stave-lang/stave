@@ -2027,12 +2027,27 @@ impl<'a> Ck<'a> {
         if missing == 0 {
             return;
         }
-        let Some(fs) = stave_target::FeatureSet::from_bits(missing) else { return };
-        let Some(f) = fs.iter().next() else { return };
-        let path = self.prog.decl_path(callee);
+        // The names to add to the caller's `needs`: those of the callee's own list that it does
+        // not cover, in that order; for a fn value, the features of `missing` no other implies.
+        let mut names: Vec<&str> = Vec::new();
+        if let Some(sig) = self.sigs.fn_sig(callee) {
+            for (n, bits) in &sig.needs_named {
+                if bits & !self.proven_features() != 0 && !names.contains(&n.as_str()) {
+                    names.push(n);
+                }
+            }
+        }
+        if names.is_empty() {
+            names = crate::types::feature_names(missing);
+        }
+        if names.is_empty() {
+            return;
+        }
+        let feature = names.join(", ");
+        let path = crate::lower::fn_path(self.prog, self.sigs, callee);
         let roles: Vec<(&str, Span)> =
             self.prog.decl(callee).map(|d| ("callee", d.name_span)).into_iter().collect();
-        let d = mk("E0704", None, &[("callee", &path), ("feature", f.name())], at, &roles);
+        let d = mk("E0704", None, &[("callee", &path), ("feature", &feature)], at, &roles);
         self.report(d);
     }
 }
