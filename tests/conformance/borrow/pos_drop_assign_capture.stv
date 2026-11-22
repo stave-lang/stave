@@ -1,0 +1,110 @@
+//~ STDOUT pos_drop_assign_capture.stdout
+// An assignment to a captured place inside a closure drops the value the place holds, then
+// writes, as an assignment to any other place does: once per call of the closure (never when it
+// is not called), for a whole capture and for a field of one, through a closure nested in
+// another, in a loop, and before a `?` that leaves. A guard overwritten so is released: the
+// mutex can be locked again once the captured local has ended.
+import std.io;
+import std.sync;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+
+struct D { pub id: u32 }
+
+impl Drop for D {
+    fn drop(&mut self) {
+        let id = self.id;
+        io.print(f"drop {id}\n");
+    }
+}
+
+struct P { pub a: D, pub n: u32 }
+
+fn some(i: u32) -> Option<u32> { return if i == 0 then Option.None else Option.Some(i); }
+
+fn once() {
+    let mut d = D.{ id: 1 };
+    let mut f = fn() { d = D.{ id: 2 }; };
+    f();
+    io.print("once\n");
+}
+
+fn never_called() {
+    let mut d = D.{ id: 3 };
+    let mut f = fn() { d = D.{ id: 4 }; };
+    io.print("never\n");
+}
+
+fn many() {
+    let mut d = D.{ id: 10 };
+    let mut k: u32 = 11;
+    let mut f = fn() { d = D.{ id: k }; k = k + 1; };
+    f();
+    f();
+    f();
+    io.print("many\n");
+}
+
+fn field() {
+    let mut p = P.{ a: D.{ id: 20 }, n: 0 };
+    let mut f = fn() { p.a = D.{ id: 21 }; p.n = p.n + 1; };
+    f();
+    io.print("field\n");
+}
+
+fn nested() {
+    let mut d = D.{ id: 30 };
+    let mut f = fn() {
+        let mut g = fn() { d = D.{ id: 31 }; };
+        g();
+        io.print("inner\n");
+    };
+    f();
+    io.print("nested\n");
+}
+
+fn in_loop() {
+    let mut d = D.{ id: 40 };
+    let mut i: u32 = 41;
+    while i < 44 {
+        let mut f = fn() { d = D.{ id: i }; };
+        f();
+        if i == 42 { break; }
+        i = i + 1;
+    }
+    io.print("loop\n");
+}
+
+fn with_try(k: u32) -> Option<u32> {
+    let mut d = D.{ id: 50 };
+    let mut f = fn(v: u32) { d = D.{ id: v }; };
+    f(51);
+    let x = some(k)?;
+    f(52);
+    io.print("try\n");
+    return Option.Some(x);
+}
+
+fn relock() -> u32 {
+    {
+        let mut o = M.try_lock();
+        let mut f = fn() { o = Option.None; };
+        f();
+        io.print("released\n");
+    }
+    return *M.lock().get();
+}
+
+fn main() -> i32 {
+    once();
+    never_called();
+    many();
+    field();
+    nested();
+    in_loop();
+    let a = with_try(1);
+    let b = with_try(0);
+    let v = relock();
+    io.print(f"{v}\n");
+    return 0;
+}

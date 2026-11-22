@@ -1398,19 +1398,13 @@ impl<'a> Walk<'a> {
     fn expand_glue(&mut self, i: u32, t: TypeId) {
         let site = Site::At(self.nodes[i as usize].span);
         let w = World { prog: self.prog, sigs: self.sigs };
-        if let Some(k) = crate::mono::drop_method(&w, &mut self.cx, t)
+        let glue = crate::drops::glue(&w, &mut self.cx, t);
+        if let Some(k) = glue.method
             && let Some(n) = self.node_for(k, i)
         {
             self.edges.push((i, n, EdgeKind::Drop, site, 0));
         }
-        let parts: Vec<TypeId> = match self.cx.kind(t).clone() {
-            TypeKind::Adt { .. } => crate::mono::adt_fields(self.sigs, &mut self.cx, t)
-                .map_or_else(Vec::new, |vs| vs.into_iter().flatten().collect()),
-            TypeKind::Tuple(ts) => ts.to_vec(),
-            TypeKind::Array { elem, .. } => vec![elem],
-            _ => Vec::new(),
-        };
-        for p in parts {
+        for p in glue.parts.flat() {
             if self.needs_drop(p)
                 && let Some(g) = self.glue_node(p, i, site)
             {

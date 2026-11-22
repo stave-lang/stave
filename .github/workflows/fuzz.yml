@@ -28,6 +28,9 @@ jobs:
       # The interpreter leg runs in checking mode with borrow tracking: a memory error or a
       # borrow violation of an accepted program is an `oracle` finding.
       STAVE_INTERP_CHECK: borrow
+      # Every body is checked by both dataflows of the borrow checker: a difference is an `ice`
+      # finding.
+      STAVE_BORROW_DATAFLOW: both
     steps:
       - uses: actions/checkout@v4
       - run: cargo build --locked --release -p fuzz-classes
@@ -47,6 +50,18 @@ jobs:
             fuzz-out/summary.txt
             fuzz-out/programs.tsv
           if-no-files-found: ignore
+  # The borrow checker's two dataflows on every program of the repository, a generated corpus
+  # and the fuzz classes: identical diagnostics.
+  borrow-diff:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CI: "1"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh tools/ci-step/run.sh borrow-diff
   # The interpreter gate of `check` with the programs too slow for it (debug build).
   interp-gate-slow:
     runs-on: ubuntu-24.04

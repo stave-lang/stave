@@ -238,6 +238,14 @@ pub struct Options {
     /// Contents that stand in for source files on disk ([`stave_sema::Config::sources`]): a
     /// check of edits that are not written yet.
     pub sources: std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    /// The borrow checker's dataflow. Default: [`stave_borrow::Dataflow::from_env`].
+    pub borrow_dataflow: stave_borrow::Dataflow,
+}
+
+/// The borrow checker's dataflow that `STAVE_BORROW_DATAFLOW` names; an unknown name is an error
+/// ([`stave_borrow::Dataflow::named`]).
+pub fn borrow_dataflow_from_env() -> Result<stave_borrow::Dataflow, String> {
+    stave_borrow::Dataflow::named(std::env::var(stave_borrow::DATAFLOW_ENV).ok().as_deref())
 }
 
 impl Options {
@@ -256,6 +264,7 @@ impl Options {
             unchecked_borrows: false,
             effects_all: false,
             sources: std::collections::BTreeMap::new(),
+            borrow_dataflow: stave_borrow::Dataflow::from_env(),
         }
     }
 
@@ -550,7 +559,11 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
 
     // ---- borrowck (per body, parallel; bodies with a type error are skipped).
     let t0 = Instant::now();
-    let bc = stave_borrow::check(&program, &tc, stave_borrow::Options { dump: opts.borrow_dump });
+    let bc = stave_borrow::check(
+        &program,
+        &tc,
+        stave_borrow::Options { dump: opts.borrow_dump, dataflow: opts.borrow_dataflow },
+    );
     timings.push(timing(Stage::Borrowck, ms(t0.elapsed()), bc.checked));
     prof::part(".cfg-cpu", bc.phases[0]);
     prof::part(".dataflow-cpu", bc.phases[1]);
@@ -560,12 +573,22 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
         diagnostics.extend(bc.diagnostics.iter().cloned());
         diagnostics = stave_diag::canonical_order(diagnostics, &program.source_map);
     }
+    // The two borrow dataflows disagree on a body: the run fails as an internal error and
+    // reports nothing else, so that no diagnostic of another body hides it.
+    let differ = bc.differ.first().map(|&d| Failure::Internal {
+        stage: Stage::Borrowck,
+        message: format!("the sparse and the dense borrow dataflow disagree on `{}`", program.decl_path(d)),
+    });
+    if differ.is_some() {
+        diagnostics.clear();
+    }
 
     let mut has_errors = diagnostics.iter().any(|d| d.severity() == Severity::Error);
     // E0108: a build needs `main` (reported only without other errors: a dropped or invalid item
     // may be `main`)
     if opts.goal == Goal::Build
         && !has_errors
+        && differ.is_none()
         && let Some(d) = build::no_main(&program)
     {
         diagnostics.push(d);
@@ -577,6 +600,8 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     // An internal error of the checker stops the run whatever else it reported.
     let mut failure = if let Some(m) = tc.internal.first() {
         Some(Failure::Internal { stage: Stage::Typeck, message: m.clone() })
+    } else if differ.is_some() {
+        differ
     } else if has_errors {
         None
     } else {
@@ -588,7 +613,7 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     let mut effect_sets = None;
     if !has_errors && failure.is_none() {
         let t0 = Instant::now();
-        match crate::effects::run(&program, &tc, opts.effects_all) {
+        match crate::effects::run(&program, &tc, opts.effects_all, Some(&bc.schedules)) {
             Ok(r) => {
                 if !r.diagnostics.is_empty() {
                     has_errors |= r.diagnostics.iter().any(|d| d.severity() == Severity::Error);
@@ -646,7 +671,8 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
 
     // ---- mono + lower + verify + removal of the bounds checks with a checked witness.
     let t0 = Instant::now();
-    let lowered = build::lower(&out.program, &tc, opts.mode(), opts.borrow_marks);
+    let drops = out.borrowck.as_ref().map(|b| &b.schedules);
+    let lowered = build::lower(&out.program, &tc, opts.mode(), opts.borrow_marks, drops);
     let funcs = lowered.as_ref().map_or(0, |l| l.module.funcs.iter().filter(|f| f.body.is_some()).count());
     out.timings.push(timing(Stage::Lower, ms(t0.elapsed()), funcs as u64));
     out.typeck = Some(tc);
@@ -666,7 +692,7 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
         && !opts.borrow_marks
         && let Some(tc) = &out.typeck
     {
-        match build::lower(&out.program, tc, opts.mode(), true) {
+        match build::lower(&out.program, tc, opts.mode(), true, drops) {
             Ok(l) => out.tracked = Some(l.module),
             Err(f) => {
                 out.failure = Some(f);

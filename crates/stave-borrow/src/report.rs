@@ -15,9 +15,8 @@ use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
-use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, PartFix, Place, Proj, TempEnd};
-use crate::check::{Finding, Unfit, later_use};
-use crate::loans::Flow;
+use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, OpKind, PartFix, Place, Proj, StmtKind, TempEnd};
+use crate::check::{Access, Finding, Unfit};
 use crate::ty::Tys;
 
 /// The loan an E0501 names.
@@ -166,9 +165,37 @@ fn temp_case(end: Option<TempEnd>) -> (&'static str, &'static str) {
     }
 }
 
-/// The diagnostics of one body's findings.
-pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding>) -> Vec<Diagnostic> {
-    let body = flow.body;
+/// The statement the drop of `place` at statement `stmt` of `block` belongs to: the assignment
+/// that overwrites `place` (`true`), or the move of the value a pattern takes apart, which
+/// follows the drops of the parts the pattern ignores. Its index in the block.
+fn paired(body: &Body, block: u32, stmt: u32, place: &Place) -> Option<(u32, bool)> {
+    let stmts = &body.blocks.get(block as usize)?.stmts;
+    let rest = stmts.get(stmt as usize + 1..)?;
+    let skip = rest
+        .iter()
+        .take_while(|s| matches!(&s.kind, StmtKind::Drop(p) if p.local == place.local && !p.proj.is_empty()))
+        .count();
+    let j = stmt + 1 + skip as u32;
+    match &rest.get(skip)?.kind {
+        StmtKind::Assign { dest, init: false, .. } if skip == 0 && dest == place => Some((j, true)),
+        StmtKind::Read(o)
+            if o.kind == OpKind::Move && o.place.local == place.local && !place.proj.is_empty() =>
+        {
+            Some((j, false))
+        }
+        _ => None,
+    }
+}
+
+/// The diagnostics of one body's findings. `later_use`: the first use after a statement (block,
+/// index) of a value that holds a loan, and whether it is in a later iteration
+/// ([`crate::check::later_use`]).
+pub fn diagnostics(
+    body: &Body,
+    tys: &mut Tys<'_>,
+    findings: Vec<Finding>,
+    later_use: &mut dyn FnMut((u32, u32), LoanId) -> Option<(Span, bool)>,
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     // E0502: one per move site, at its first (smallest offset) use
     let mut moved: FxHashMap<u32, (Span, Place)> = FxHashMap::default();
@@ -210,16 +237,34 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
             out.extend(mk("E0502", None, &[("place", &text)], span, &[("move", *mspan)]));
         }
     }
+    // An assignment drops the value it overwrites, then writes; a pattern that takes a value
+    // apart drops the parts it ignores, then moves the value. Each pair is one access to the
+    // reader: the drop is reported only when the write or move is not, an old value's as the
+    // assignment it belongs to.
+    let hit: Vec<(u32, u32)> = findings
+        .iter()
+        .filter_map(|f| match f {
+            Finding::Conflict { access: Access::Write | Access::Move, block, stmt, .. } => {
+                Some((*block, *stmt))
+            }
+            _ => None,
+        })
+        .collect();
     for f in findings {
         match f {
             Finding::Conflict { block, stmt, access, place, span, loans } => {
+                let access = match (access, paired(body, block, stmt, &place)) {
+                    (Access::Drop, Some((j, _))) if hit.contains(&(block, j)) => continue,
+                    (Access::Drop, Some((_, true))) => Access::Write,
+                    _ => access,
+                };
                 let Some(l) = pick_loan(body, &loans) else { continue };
                 let loan = &body.loans[l as usize];
                 let kind = if loan.mutable && !loan.reserved { "`&mut`" } else { "`&`" };
                 let text = place_text(body, tys, &place);
                 let loaned = place_text(body, tys, &loan.place);
                 let mut roles = vec![("loan", loan.span)];
-                let later = later_use(flow, (block, stmt), l);
+                let later = later_use((block, stmt), l);
                 if let Some((u, _)) = later {
                     roles.push(("use", u));
                 }
@@ -391,6 +436,7 @@ mod tests {
             end: None,
             guard: false,
             static_root: false,
+            stmt: u32::MAX,
             env: false,
             node,
         };
@@ -405,11 +451,13 @@ mod tests {
             ret: RetCheck::None,
             declared: Vec::new(),
             is_nested: false,
+            at: None,
             nested: Vec::new(),
             joins: Vec::new(),
             unsupported: None,
             internal: None,
             loops: Vec::new(),
+            schedule: Default::default(),
         }
     }
 

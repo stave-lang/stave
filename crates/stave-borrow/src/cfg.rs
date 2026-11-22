@@ -17,6 +17,17 @@
 //! statement, after the drops of the ones with drop glue (`Builder::end_stmt_temps`), as
 //! lowered.
 //!
+//! **Drops.** Every drop statement is made by `Builder::drop_at`, with its row in the body's drop
+//! schedule ([`Body::schedule`], [`stave_sema::drops`]): what the checks read as dropped is what
+//! the schedule lists, and the lowering fails on a drop the schedule lacks. A value with drop
+//! glue is an owner from the statement that makes it to the statement that moves it out: a
+//! local on its scope's list, a temporary on its statement's (`Builder::push` takes it off only
+//! when a statement that moves it is added), and each end or exit drops what is on the lists.
+//! Whether such a drop runs is the dataflow's answer, one init bit per owner. Besides the
+//! owners' ends there are the drops of the parts a moving pattern ignores (at its binding
+//! point), of the value an assignment overwrites (before the write), and of the operand a
+//! `select` does not pick (a temporary of its own).
+//!
 //! Closures and `spawn` blocks are built as nested bodies ([`Body::nested`]) whose captured
 //! locals are params; the closure value (or the `scope`'s join local, which accumulates every
 //! spawn's loans and is read wherever the scope is left, and used on every path that stops or
@@ -35,6 +46,7 @@
 
 use rustc_hash::FxHashMap;
 use stave_diag::Span;
+use stave_sema::drops::{Owner, Point, Row, Schedule};
 use stave_sema::itemcx::ItemCx;
 use stave_sema::loops::ForKind;
 use stave_sema::traits::{Adjust, World};
@@ -257,6 +269,9 @@ pub struct Local {
     pub node: u32,
     /// What ends a temporary (`None`: no statement ends it, or no temporary).
     pub end: Option<TempEnd>,
+    /// A temporary: the innermost statement open when it was made ([`stave_sema::temps`]), its
+    /// owner key in the drop schedule.
+    pub stmt: u32,
     /// The local standing for the storage of an immutable `static` (never moved from). A
     /// `static mut` has a local of its own too, without this mark ([`Builder::path_val`]).
     pub static_root: bool,
@@ -348,6 +363,9 @@ pub struct Body {
     pub declared: Vec<Store>,
     /// A closure or spawn body: its params and captures take no `from` clause.
     pub is_nested: bool,
+    /// A closure or spawn body: the span of its first token (the call graph's closure node has
+    /// the same).
+    pub at: Option<Span>,
     /// Bodies of closures and spawn blocks inside this one.
     pub nested: Vec<Body>,
     /// The join local of each `scope` statement with the statement's span: a read of it is the
@@ -361,6 +379,9 @@ pub struct Body {
     /// The loops: (head, exit, end). The blocks of a loop are those from its head to `end`
     /// (exclusive) but its exit; an edge to the head from one of them starts the next iteration.
     pub loops: Vec<(BlockId, BlockId, BlockId)>,
+    /// The drop schedule of the body ([`stave_sema::drops`]): one row per drop statement made
+    /// ([`Builder::drop_at`]), and per assignment that overwrites a value with drop glue.
+    pub schedule: Schedule,
 }
 
 impl Body {
@@ -467,6 +488,15 @@ pub struct Builder<'a, 'b> {
     result: Option<LocalId>,
     /// The block temporaries of reference chunk bindings, with their store back.
     chunk_temps: FxHashMap<LocalId, ChunkWriteBack>,
+    /// The drops of the values assignments overwrite: (block, statement index).
+    old_drops: Vec<(BlockId, usize)>,
+    /// Binding an arm of a `match` that has another way on (a second arm, a guard): a
+    /// temporary scrutinee the arm takes whole is still dropped at the statement's end on the
+    /// other ways.
+    arm_scrut: bool,
+    /// The scheduled drops with the block their statement is in: the ones in a block the
+    /// entry reaches are due ([`Schedule::require`]).
+    due: Vec<(BlockId, Point, Owner)>,
     /// The environments of the closure literals this body evaluates ([`Builder::make_envs`]).
     envs: Vec<EnvSlot>,
 }
@@ -528,11 +558,13 @@ impl<'a, 'b> Builder<'a, 'b> {
             ret: RetCheck::None,
             declared: Vec::new(),
             is_nested: range.is_some(),
+            at: None,
             nested: Vec::new(),
             joins: Vec::new(),
             unsupported: None,
             internal: None,
             loops: Vec::new(),
+            schedule: Schedule::default(),
         };
         Builder {
             icx,
@@ -562,11 +594,30 @@ impl<'a, 'b> Builder<'a, 'b> {
             olds: FxHashMap::default(),
             result: None,
             chunk_temps: FxHashMap::default(),
+            old_drops: Vec::new(),
+            arm_scrut: false,
+            due: Vec::new(),
             envs: Vec::new(),
         }
     }
 
-    fn finish(self) -> Body {
+    fn finish(mut self) -> Body {
+        // a drop in a block the entry reaches is one the code must decide; a block nothing
+        // leads to (after a loop without `break`, a `scope` that never ends) may not be lowered
+        let mut reached = vec![false; self.body.blocks.len()];
+        let mut work: Vec<BlockId> = vec![0];
+        while let Some(b) = work.pop() {
+            if std::mem::replace(&mut reached[b as usize], true) {
+                continue;
+            }
+            work.extend_from_slice(self.body.blocks[b as usize].term.succs());
+        }
+        for &(b, point, owner) in &self.due {
+            if reached[b as usize] {
+                self.body.schedule.require(point, owner);
+            }
+        }
+        prune_old_drops(&mut self.body, &self.old_drops);
         self.body
     }
 
@@ -609,10 +660,47 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.cur = Some(b);
     }
 
+    /// Adds a statement. A temporary with drop glue is an owner from the statement that makes
+    /// it to the statement that moves it out: only then it leaves the drop list, so an exit
+    /// taken between its evaluation as an operand and the statement consuming it drops it.
     fn push(&mut self, kind: StmtKind, span: Span, node: u32) {
+        if !self.temps.is_empty() {
+            let mut moved: Vec<LocalId> = Vec::new();
+            let mut note = |o: &Operand| {
+                if o.kind == OpKind::Move && o.place.proj.is_empty() {
+                    moved.push(o.place.local);
+                }
+            };
+            match &kind {
+                StmtKind::Assign { rv, .. } => crate::loans::for_each_op(rv, &mut note),
+                StmtKind::Read(o) | StmtKind::Return(o) => note(o),
+                _ => {}
+            }
+            if !moved.is_empty() {
+                self.temps.retain(|t| !moved.contains(t));
+            }
+        }
         if let Some(b) = self.cur {
             self.body.blocks[b as usize].stmts.push(Stmt { kind, span, node });
         }
+    }
+
+    /// The owner key of local `l` in the drop schedule.
+    fn owner_of(&self, l: LocalId) -> Owner {
+        let loc = &self.body.locals[l as usize];
+        if loc.temp { Owner::Temp(loc.stmt) } else { Owner::Local(loc.node) }
+    }
+
+    /// The drop of the value in `p` at `point`: the statement every check reads, and its row in
+    /// the drop schedule, which the lowering's drop there is checked against. No other code
+    /// makes a drop statement.
+    fn drop_at(&mut self, p: Place, point: Point, owner: Owner, span: Span, node: u32) {
+        let head = stave_sema::drops::head(&self.tys.ov, p.ty);
+        self.body.schedule.add(Row { point, owner, head });
+        if let Some(b) = self.cur {
+            self.due.push((b, point, owner));
+        }
+        self.push(StmtKind::Drop(p), span, node);
     }
 
     // ---------- locals, temps, loans ----------
@@ -655,6 +743,7 @@ impl<'a, 'b> Builder<'a, 'b> {
             capture_mut: false,
             temp: temp.is_some(),
             end: temp.and_then(|n| self.tb.stmt_ends.bound(n)).map(TempEnd::Stmt),
+            stmt: self.stmts.last().copied().unwrap_or(stave_sema::temps::NONE),
             guard: false,
             node: u32::MAX,
             static_root: false,
@@ -901,11 +990,6 @@ impl<'a, 'b> Builder<'a, 'b> {
             self.body.bad_moves.push((p.clone(), span, why));
         }
         if movable {
-            if p.proj.is_empty()
-                && let Some(i) = self.temps.iter().rposition(|&t| t == p.local)
-            {
-                self.temps.remove(i);
-            }
             self.body.move_sites.push((p.clone(), span));
             let site = (self.body.move_sites.len() - 1) as u32;
             Operand { kind: OpKind::Move, place: p, span, node: n, site }
@@ -1106,12 +1190,13 @@ impl<'a, 'b> Builder<'a, 'b> {
     fn pop_scope(&mut self, at: Option<Span>) {
         let Some(s) = self.scopes.pop() else { return };
         for &l in s.iter().rev() {
-            self.end_local(l, true, at);
+            self.end_local(l, true, at, Point::End);
         }
     }
 
-    /// The drop and storage-dead of local `l` at `at` (default: its binding).
-    fn end_local(&mut self, l: LocalId, dead: bool, at: Option<Span>) {
+    /// The drop (at schedule point `point`) and storage-dead of local `l` at `at` (default: its
+    /// binding).
+    fn end_local(&mut self, l: LocalId, dead: bool, at: Option<Span>, point: Point) {
         let loc = &self.body.locals[l as usize];
         let (ty, node) = (loc.ty, loc.node);
         let span = at.unwrap_or(loc.span);
@@ -1121,7 +1206,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             self.chunk_write_back(w, span);
         }
         if self.tys.needs_drop(ty) {
-            self.push(StmtKind::Drop(Place::local(l, ty)), span, node);
+            let owner = self.owner_of(l);
+            self.drop_at(Place::local(l, ty), point, owner, span, node);
         }
         if dead {
             self.push(StmtKind::StorageDead(l), span, node);
@@ -1163,7 +1249,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.stmts.truncate(mark.open);
         let ts: Vec<LocalId> = self.temps.drain(mark.drops.min(self.temps.len())..).collect();
         for &t in ts.iter().rev() {
-            self.end_local(t, true, None);
+            self.end_local(t, true, None, Point::End);
         }
         let made: Vec<LocalId> = self.made.drain(mark.made.min(self.made.len())..).collect();
         for &t in made.iter().rev() {
@@ -1191,11 +1277,11 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// Drops on an exit path (temps and scopes above the marks), without forgetting them. A
     /// `scope` statement left on the way joins its threads before its own locals are dropped.
     /// Leaving to a loop's head or exit (`dead`) ends the temporaries of the statements left
-    /// as [`Self::end_stmt_temps`] does.
-    fn exit_path(&mut self, scopes: usize, temps: TempMark, dead: bool, at: Span) {
+    /// as [`Self::end_stmt_temps`] does. `point`: the exit, for the drop schedule.
+    fn exit_path(&mut self, scopes: usize, temps: TempMark, dead: bool, at: Span, point: Point) {
         let ts: Vec<LocalId> = self.temps.get(temps.drops..).unwrap_or(&[]).to_vec();
         for &t in ts.iter().rev() {
-            self.end_local(t, dead, Some(at));
+            self.end_local(t, dead, Some(at), point);
         }
         if dead {
             let made: Vec<LocalId> = self.made.get(temps.made..).unwrap_or(&[]).to_vec();
@@ -1213,7 +1299,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                 self.join_read(j, at, u32::MAX);
             }
             for &l in s.iter().rev() {
-                self.end_local(l, dead, Some(at));
+                self.end_local(l, dead, Some(at), point);
             }
         }
     }
@@ -1261,10 +1347,10 @@ impl<'a, 'b> Builder<'a, 'b> {
             let at = self.body_end(n);
             if self.result.is_some() {
                 let op = self.const_op(n);
-                self.leave(op, at);
+                self.leave(op, at, Point::End);
                 return;
             }
-            self.exit_path(0, TempMark { drops: 0, made: 0, open: 0 }, false, at);
+            self.exit_path(0, TempMark { drops: 0, made: 0, open: 0 }, false, at, Point::End);
             let op = self.const_op(n);
             let span = self.span(n);
             self.push(StmtKind::Return(op), span, n);
@@ -1334,18 +1420,18 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// Returns `op` from the fn at `at`. With `ensures` clauses the value goes to `result`, the
     /// scopes are left, the clauses run in order over the params as the body left them, and
     /// `result` is returned: it is live across the clauses, as is every `old(e)` a clause reads.
-    fn leave(&mut self, op: Operand, at: Span) {
+    fn leave(&mut self, op: Operand, at: Span, point: Point) {
         let op = self.env_free(op);
         let (span, node) = (op.span, op.node);
         let Some(res) = self.result else {
             self.push(StmtKind::Return(op), span, node);
-            self.exit_path(0, TempMark { drops: 0, made: 0, open: 0 }, false, at);
+            self.exit_path(0, TempMark { drops: 0, made: 0, open: 0 }, false, at, point);
             self.terminate(Terminator::Return);
             return;
         };
         let dest = Place::local(res, self.body.locals[res as usize].ty);
         self.push(StmtKind::Assign { dest: dest.clone(), rv: Rvalue::Use(op), init: true }, span, node);
-        self.exit_path(0, TempMark { drops: 0, made: 0, open: 0 }, false, at);
+        self.exit_path(0, TempMark { drops: 0, made: 0, open: 0 }, false, at, point);
         let tb = self.tb;
         let clauses = tb.contracts.as_deref().map_or(&[][..], |c| &c.ensures);
         // a clause is built once per return: the bindings of a `match` in it are fresh locals
@@ -1506,6 +1592,23 @@ impl<'a, 'b> Builder<'a, 'b> {
                 None => Rvalue::Use(r),
             };
             let span = self.span(lhs);
+            // The value the write replaces is dropped first, after the right side: a use of
+            // what it borrows. Behind a dereference the assignment itself stands for that drop
+            // (it uses the pointer, and the lock check reads it as the drop).
+            if self.tys.needs_drop(lp.ty) {
+                if lp.has_deref() {
+                    let head = stave_sema::drops::head(&self.tys.ov, lp.ty);
+                    self.body.schedule.add(Row { point: Point::Assign(lhs), owner: Owner::Old, head });
+                    if let Some(b) = self.cur {
+                        self.due.push((b, Point::Assign(lhs), Owner::Old));
+                    }
+                } else {
+                    if let Some(b) = self.cur {
+                        self.old_drops.push((b, self.body.blocks[b as usize].stmts.len()));
+                    }
+                    self.drop_at(lp.clone(), Point::Assign(lhs), Owner::Old, span, lhs);
+                }
+            }
             self.push(StmtKind::Assign { dest: lp, rv, init: false }, span, lhs);
             return;
         }
@@ -1584,7 +1687,8 @@ impl<'a, 'b> Builder<'a, 'b> {
         };
         let (target, sc, tm) = (if is_break { lp.exit } else { lp.head }, lp.scopes, lp.temps);
         let at = self.span(s);
-        self.exit_path(sc, tm, true, at);
+        let point = Point::Jump(self.icx.a(s));
+        self.exit_path(sc, tm, true, at, point);
         self.goto(target);
     }
 
@@ -1600,7 +1704,8 @@ impl<'a, 'b> Builder<'a, 'b> {
             None => self.const_op(s),
         };
         let at = self.span(s);
-        self.leave(op, at);
+        let point = Point::Return(self.icx.a(s));
+        self.leave(op, at, point);
     }
 
     // ---------- for ----------
@@ -1652,6 +1757,15 @@ impl<'a, 'b> Builder<'a, 'b> {
             Some(ForKind::Array) => {
                 let Some(op) = self.operand(iv, iter) else { return };
                 let V::P(p) = self.put_temp(Rvalue::Use(op), it_ty, iter) else { return };
+                // The loop owns the array, as it owns an iterator: what it has not handed out
+                // is dropped with the loop's scope, after the locals of a body that is left.
+                if let Some(i) = self.temps.iter().rposition(|&t| t == p.local) {
+                    self.temps.remove(i);
+                    self.past_stmt(p.local);
+                    if let Some(s) = self.scopes.last_mut() {
+                        s.push(p.local);
+                    }
+                }
                 Src::Elems(p, None)
             }
             // an iterator value or a `&mut` to one
@@ -1768,8 +1882,27 @@ impl<'a, 'b> Builder<'a, 'b> {
                 } else {
                     // by value over an owned array (the loop's temporary)
                     let saved = self.owned_elems.replace(ep.local);
-                    self.destructure(pat, ep, Mode::Move, iter);
+                    self.destructure(pat, ep.clone(), Mode::Move, iter);
                     self.owned_elems = saved;
+                    if self.open()
+                        && self.tys.needs_drop(ep.ty)
+                        && !stave_sema::drops::pat_moves(self, pat, ep.ty, stave_sema::drops::Mode::Move)
+                    {
+                        // an element the pattern only reads is this iteration's value: it is
+                        // dropped where the body ends or is left
+                        let et = ep.ty;
+                        let it = self.temp(et, iter);
+                        let span = self.span(iter);
+                        let op = Operand { kind: OpKind::Copy, place: ep, span, node: iter, site: u32::MAX };
+                        self.push(
+                            StmtKind::Assign { dest: Place::local(it, et), rv: Rvalue::Use(op), init: true },
+                            span,
+                            iter,
+                        );
+                        if let Some(s) = self.scopes.last_mut() {
+                            s.push(it);
+                        }
+                    }
                 }
             }
             (Src::Iter(..), Some(ip)) => {
@@ -1782,6 +1915,7 @@ impl<'a, 'b> Builder<'a, 'b> {
                     span,
                     iter,
                 );
+                self.own_item(pat, it, ip.ty);
                 self.destructure(pat, Place::local(it, ip.ty), Mode::Move, iter);
             }
             _ => {}
@@ -1793,8 +1927,17 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.loops.pop();
         self.body.loops.push((head, exit, self.body.blocks.len() as BlockId));
         self.switch_to(exit);
-        if let (Some(tc), Src::Elems(p, dk)) = (tail, &src) {
+        if let (Some(tc), Src::Elems(p, dk)) = (tail, &src)
+            && self.open()
+        {
+            // the tail runs for the elements the chunks left over, which may be none: what
+            // follows the loop is reached without it too, also when the tail never returns
+            let (tail_b, after) = (self.new_block(), self.new_block());
+            self.terminate(Terminator::Branch(vec![tail_b, after]));
+            self.switch_to(tail_b);
             self.tail_clause(tc, p.clone(), *dk, iter);
+            self.goto(after);
+            self.switch_to(after);
         }
     }
 
@@ -1984,7 +2127,9 @@ impl<'a, 'b> Builder<'a, 'b> {
                 self.terminate(Terminator::Branch(next));
                 self.switch_to(ok);
             }
+            self.arm_scrut = arms.len() > 1 || guard.is_some();
             self.bind_alts(&alts, &sp, Mode::Move, scrut);
+            self.arm_scrut = false;
             if is_expr {
                 let mark = self.open_stmt(body);
                 let v = self.expr(body);
@@ -2057,22 +2202,59 @@ impl<'a, 'b> Builder<'a, 'b> {
     /// `src` moves as one value (the parts it does not bind end there), so `src` itself must be
     /// a value that may move whole.
     fn destructure(&mut self, p: u32, src: Place, mode: Mode, n: u32) {
+        // where a temporary scrutinee is on its statement's drop list
+        let pos = if src.proj.is_empty() { self.temps.iter().rposition(|&t| t == src.local) } else { None };
         let saved = self.destr.replace((src.proj.len(), false));
         self.bind_pattern(p, src.clone(), mode, n);
         let took = self.destr.take().is_some_and(|(_, took)| took);
         self.destr = saved;
         if took && self.open() {
             let span = self.span(n);
-            // a temporary scrutinee stays on the statement's drop list: another arm may leave it
-            // whole (the drop of a moved value does nothing)
-            let pos = self.temps.iter().rposition(|&t| t == src.local && src.proj.is_empty());
-            let op = self.op_of_place(src, span, n, true);
-            if let Some(i) = pos
-                && !self.temps.contains(&op.place.local)
-            {
-                self.temps.insert(i, op.place.local);
+            // the parts the pattern does not bind are dropped here, in the schedule's order
+            if mode == Mode::Move {
+                let parts = stave_sema::drops::ignored_parts(self, p, src.ty);
+                for (k, path) in parts.into_iter().enumerate() {
+                    let mut part = src.clone();
+                    for st in path {
+                        let pr = match st.variant {
+                            Some(v) => Proj::EnumField(v, st.field),
+                            None => Proj::Field(st.field),
+                        };
+                        part = part.with(pr, st.ty);
+                    }
+                    if self.tys.needs_drop(part.ty) {
+                        let at = self.span(p);
+                        self.drop_at(part, Point::Bind(p), Owner::Part(k as u32), at, p);
+                    }
+                }
             }
+            let op = self.op_of_place(src.clone(), span, n, true);
             self.push(StmtKind::Read(op), span, n);
+        }
+        // A temporary scrutinee the pattern moved stays on the statement's drop list: another
+        // arm may leave it whole (the drop of a moved value does nothing). One an arm's name
+        // took whole has nothing left on this path: its storage ends here, so what it borrowed
+        // is the binding's from here on, and the drop at the statement's end uses nothing.
+        if let Some(i) = pos
+            && !self.temps.contains(&src.local)
+            && (took || self.arm_scrut)
+        {
+            self.temps.insert(i.min(self.temps.len()), src.local);
+            if !took && self.open() {
+                let span = self.span(n);
+                self.push(StmtKind::StorageDead(src.local), span, u32::MAX);
+            }
+        }
+    }
+
+    /// The value a `for` iteration is given (`it`, of type `ty`) is the iteration's own: unless
+    /// the loop's pattern moves it, it is dropped where the body ends or is left.
+    fn own_item(&mut self, pat: u32, it: LocalId, ty: TypeId) {
+        if self.tys.needs_drop(ty)
+            && !stave_sema::drops::pat_moves(self, pat, ty, stave_sema::drops::Mode::Move)
+            && let Some(s) = self.scopes.last_mut()
+        {
+            s.push(it);
         }
     }
 
@@ -2352,6 +2534,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         nb.end_of_body(n);
         let caps = std::mem::take(&mut nb.captures);
         let mut inner = nb.finish();
+        inner.at = Some(icx.tok_span(icx.a(n)));
         // the capture analysis (stave-sema) decides the list and the modes, which the thread rules
         // read too: a capture the CFG writes, mutably borrows, or activates while the analysis
         // holds it by `&`, or one the analysis does not list, means the two disagree, and the
@@ -3283,7 +3466,7 @@ impl<'a, 'b> Builder<'a, 'b> {
         self.terminate(Terminator::Branch(vec![cont, err]));
         self.switch_to(err);
         let rop = self.op_of_place(hold.clone(), span, n, true);
-        self.leave(rop, span);
+        self.leave(rop, span, Point::Try(tok));
         self.switch_to(cont);
         let pt = if last { self.nty(n) } else { self.tys.payload(bt) };
         let op = self.op_of_place(hold, span, n, true);
@@ -3522,7 +3705,167 @@ impl<'a, 'b> Builder<'a, 'b> {
             Some(s) => (self.sig_flows(ret, s), self.sig_stores(s, &ops)),
             None => (self.flows_if(ret, || Flows::AllArgs), Vec::new()),
         };
-        self.call_result(Rvalue::Call { args: ops, flows, stores, tok: seg }, ret, n, span)
+        let select = matches!(tgt, Some(Target::Builtin { .. }))
+            && args.len() == 2
+            && icx.tok_str(seg) == "select"
+            && self.tys.needs_drop(ret);
+        let v = self.call_result(Rvalue::Call { args: ops, flows, stores, tok: seg }, ret, n, span);
+        if select
+            && self.open()
+            && let V::P(rp) = &v
+        {
+            // `c.select(a, b)` evaluates both operands and moves the picked one out; the other
+            // is a temporary of the statement from here on. Which one it is is known only when
+            // the code runs: the temporary holds what either operand borrows.
+            let u = self.temp(ret, n);
+            self.body.locals[u as usize].span = span;
+            let op = Operand { kind: OpKind::Copy, place: rp.clone(), span, node: n, site: u32::MAX };
+            self.push(
+                StmtKind::Assign { dest: Place::local(u, ret), rv: Rvalue::Use(op), init: true },
+                span,
+                n,
+            );
+            // made before the result becomes a temporary itself, if it does
+            let at = self.temps.iter().rposition(|&t| t == rp.local).unwrap_or(self.temps.len());
+            self.temps.insert(at, u);
+        }
+        v
+    }
+}
+
+impl<'a> stave_sema::drops::PatCx<'a> for Builder<'a, '_> {
+    fn icx(&self) -> ItemCx<'a> {
+        self.icx
+    }
+
+    fn prog(&self) -> &'a stave_sema::Program {
+        self.tys.prog
+    }
+
+    fn sigs(&self) -> &'a stave_sema::sigs::Sigs {
+        self.tys.sigs
+    }
+
+    fn kind(&self, t: TypeId) -> TypeKind {
+        self.tys.kind(t)
+    }
+
+    fn fields(&mut self, t: TypeId) -> Option<Vec<Vec<TypeId>>> {
+        stave_sema::drops::adt_fields(self.tys.sigs, &mut self.tys.ov, t)
+    }
+
+    fn drop_impl(&mut self, t: TypeId) -> bool {
+        self.tys.has_drop_impl(t)
+    }
+
+    fn by_move(&mut self, b: u32) -> bool {
+        self.tb.binds_by_move(b)
+    }
+
+    /// A body with a rejected move (E0504) is reported for it; any other is a disagreement
+    /// with the type checker.
+    fn bug(&mut self, _: u32, why: &'static str) {
+        if self.body.bad_moves.is_empty() {
+            self.body.internal.get_or_insert(why);
+        }
+    }
+}
+
+/// Removes the drops `old` (of the values assignments overwrite, [`Builder::old_drops`]) whose
+/// local holds no value on any path there: it was moved out or dropped, and not assigned since.
+/// Such a drop does not run, so it uses nothing the moved value borrowed. Forward dataflow of
+/// "may hold a value" over the locals concerned, union at joins.
+fn prune_old_drops(body: &mut Body, old: &[(BlockId, usize)]) {
+    let whole = |body: &Body, &(b, i): &(BlockId, usize)| -> Option<LocalId> {
+        match body.blocks.get(b as usize)?.stmts.get(i).map(|s| &s.kind) {
+            Some(StmtKind::Drop(p)) if p.proj.is_empty() => Some(p.local),
+            _ => None,
+        }
+    };
+    let mut locals: Vec<LocalId> = old.iter().filter_map(|o| whole(body, o)).collect();
+    if locals.is_empty() {
+        return;
+    }
+    locals.sort_unstable();
+    locals.dedup();
+    let idx = |l: LocalId| locals.binary_search(&l).ok();
+    let n = locals.len();
+    let mut init = crate::bits::Bits::new(n);
+    for (k, &l) in locals.iter().enumerate() {
+        if body.locals[l as usize].param.is_some() {
+            init.insert(k);
+        }
+    }
+    let step = |k: &StmtKind, st: &mut crate::bits::Bits| {
+        let mut gone = |o: &Operand| {
+            if o.kind == OpKind::Move
+                && o.place.proj.is_empty()
+                && let Some(i) = idx(o.place.local)
+            {
+                st.remove(i);
+            }
+        };
+        match k {
+            StmtKind::Assign { rv, .. } => crate::loans::for_each_op(rv, &mut gone),
+            StmtKind::Read(o) | StmtKind::Return(o) => gone(o),
+            _ => {}
+        }
+        match k {
+            StmtKind::Assign { dest, .. } => {
+                if let Some(i) = idx(dest.local) {
+                    st.insert(i);
+                }
+            }
+            StmtKind::Drop(p) if p.proj.is_empty() => {
+                if let Some(i) = idx(p.local) {
+                    st.remove(i);
+                }
+            }
+            StmtKind::StorageDead(l) => {
+                if let Some(i) = idx(*l) {
+                    st.remove(i);
+                }
+            }
+            _ => {}
+        }
+    };
+    let mut entry: Vec<Option<crate::bits::Bits>> = vec![None; body.blocks.len()];
+    entry[0] = Some(init);
+    let mut work: Vec<BlockId> = vec![0];
+    while let Some(b) = work.pop() {
+        let Some(mut st) = entry[b as usize].clone() else { continue };
+        for s in &body.blocks[b as usize].stmts {
+            step(&s.kind, &mut st);
+        }
+        for &succ in body.blocks[b as usize].term.succs() {
+            let changed = match &mut entry[succ as usize] {
+                Some(e) => e.union_with(&st),
+                slot @ None => {
+                    *slot = Some(st.clone());
+                    true
+                }
+            };
+            if changed {
+                work.push(succ);
+            }
+        }
+    }
+    let mut dead: Vec<(BlockId, usize)> = Vec::new();
+    for o in old {
+        let Some(l) = whole(body, o) else { continue };
+        let Some(k) = idx(l) else { continue };
+        // an unreachable block runs nothing
+        let Some(mut st) = entry[o.0 as usize].clone() else { continue };
+        for s in &body.blocks[o.0 as usize].stmts[..o.1] {
+            step(&s.kind, &mut st);
+        }
+        if !st.contains(k) {
+            dead.push(*o);
+        }
+    }
+    dead.sort_unstable();
+    for &(b, i) in dead.iter().rev() {
+        body.blocks[b as usize].stmts.remove(i);
     }
 }
 

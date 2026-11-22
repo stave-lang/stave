@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+// The `tail` clause of a chunk loop runs for the elements the chunks leave over, which may be
+// none. What follows the loop is reached without it, so it is checked also when the tail never
+// returns: a use of a value moved before the loop is E0502 there.
+import std.io;
+import std.vec;
+
+fn mkv() -> vec.Vec<u64> {
+    let mut v = vec.Vec::<u64>.new();
+    v.push(7);
+    return v;
+}
+
+fn eat(v: vec.Vec<u64>) -> u64 { return v.len() as u64; }
+
+fn spin() -> never { loop { } }
+
+fn main() -> i32 {
+    let v = mkv();
+    let xs: [u32; 8] = [1u32; 8];
+    let a = eat(v);
+    for c: u32x4 in &xs { let s = c; } tail scalar (x) { spin(); }
+    let b = eat(v); //~ ERROR E0502
+    io.print(f"{a} {b}\n");
+    return 0;
+}

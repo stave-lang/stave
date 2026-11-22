@@ -9,6 +9,7 @@ use stave_ir::{Block, FuncBuilder, Op, Operand, Value, VecOp};
 use stave_syntax::{NodeKind, Term};
 
 use crate::decls::DeclKind;
+use crate::drops::{Mode, Owner, Point, Shape, Step, Sub};
 use crate::loops::ForKind;
 use crate::lower_fn::{
     Base, E, Env, Flag, FlagKey, FnCx, FnOut, FnState, Home, Init, LocalInfo, LoopCx, LoopKind, Place, Proj,
@@ -17,39 +18,10 @@ use crate::lower_fn::{
 use crate::mono::{InstKey, Req, Resolved};
 use crate::resolve::Res;
 use crate::typeck::{Coercion, Target};
-use crate::types::{ConstArg, GArg, Interner, TypeId, TypeKind};
+use crate::types::{GArg, Interner, TypeId, TypeKind};
 
 /// A closure environment: (tuple type, `&mut` tuple type, per capture (local, `&mut T` type)).
 pub(crate) type EnvType = (Ty, Ty, Vec<(usize, Ty)>);
-
-/// How a pattern binds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Mode {
-    Move,
-    Ref(bool),
-}
-
-/// A field's sub-pattern: a pattern, or a field named without one (a binding of that name).
-#[derive(Clone, Copy, Debug)]
-enum Sub {
-    Pat(u32),
-    Name(u32),
-}
-
-/// What a pattern is against a value.
-#[derive(Clone, Debug)]
-enum Shape {
-    /// `_`.
-    Wild,
-    /// One name: the binding node.
-    Name(u32),
-    /// A literal, a range, a constant: a test that binds nothing.
-    Test,
-    /// A tuple, struct or variant pattern against (peeled) type `ty`: per field of the tuple,
-    /// struct or variant its type and its sub-pattern (a pattern names every field, once).
-    /// `mode`: how names inside bind.
-    Parts { ty: Ty, mode: Mode, variant: Option<u32>, fields: Vec<(Ty, Sub)> },
-}
 
 /// The top-level test of a match arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +29,55 @@ enum Top {
     Value(i128),
     Any,
     Complex,
+}
+
+impl<'a> crate::drops::PatCx<'a> for FnCx<'a> {
+    fn icx(&self) -> crate::itemcx::ItemCx<'a> {
+        self.icx
+    }
+
+    fn prog(&self) -> &'a crate::Program {
+        self.g.prog
+    }
+
+    fn sigs(&self) -> &'a crate::sigs::Sigs {
+        self.g.sigs
+    }
+
+    fn kind(&self, t: TypeId) -> TypeKind {
+        FnCx::kind(self, t)
+    }
+
+    fn fields(&mut self, t: TypeId) -> Option<Vec<Vec<TypeId>>> {
+        self.adt_fields(t)
+    }
+
+    fn drop_impl(&mut self, t: TypeId) -> bool {
+        let w = self.g.world();
+        crate::mono::drop_method(&w, &mut self.tys, t).is_some()
+    }
+
+    /// The answer of the definition, the same for every instance. An instance may make a moved
+    /// value Copy, never the reverse.
+    fn by_move(&mut self, b: u32) -> bool {
+        if self.tb().binds_by_move(b) {
+            return true;
+        }
+        let Some(&l) = self.by_node.get(&b) else {
+            self.fail(b, "a pattern binding without a local");
+            return true;
+        };
+        let lt = self.locals[l].ty;
+        if !self.is_copy(lt) {
+            self.fail(b, "a binding that is Copy on the definition is not Copy in an instance");
+            return true;
+        }
+        false
+    }
+
+    fn bug(&mut self, n: u32, why: &'static str) {
+        self.fail(n, why);
+    }
 }
 
 impl<'a> FnCx<'a> {
@@ -784,6 +805,7 @@ impl<'a> FnCx<'a> {
                 let a = self.op2(Op::FieldAddr, fp, ep, ix);
                 let p = Operand::Value(self.f.b.load(FnCx::ir(rt), a));
                 self.f.slot[l] = Some(p);
+                self.f.captures.push(l);
             }
         }
         self.make_slots(Some(n));
@@ -927,55 +949,15 @@ impl<'a> FnCx<'a> {
             };
         };
         let w = self.g.world();
-        if let Some(k) = crate::mono::drop_method(&w, &mut self.tys, t) {
+        let glue = crate::drops::glue(&w, &mut self.tys, t);
+        if let Some(k) = glue.method {
             let f = self.req(Req::Inst(k));
             self.f.b.call(f, None, &[p]);
         }
-        match self.kind(t) {
-            TypeKind::Adt { def, .. } => {
-                let is_enum = self.g.sigs.adt(def).is_some_and(|a| a.is_enum);
-                let vs = self.adt_fields(t).unwrap_or_default();
-                if !is_enum {
-                    let fs = vs.into_iter().next().unwrap_or_default();
-                    for (i, f) in fs.into_iter().enumerate() {
-                        if self.needs_drop(f) {
-                            let fp = self.t_ref(true, f);
-                            let i = self.int(i as i128);
-                            let a = self.op2(Op::FieldAddr, fp, p, i);
-                            self.drop_ptr(a, f);
-                        }
-                    }
-                } else {
-                    let mut blocks = Vec::new();
-                    for (vi, fs) in vs.iter().enumerate() {
-                        if fs.iter().any(|&f| self.needs_drop(f)) {
-                            blocks.push((vi, self.f.b.create_block()));
-                        }
-                    }
-                    let end = self.f.b.create_block();
-                    let v = Operand::Value(self.f.b.load(FnCx::ir(t), p));
-                    let u32t = self.t_u32();
-                    let tag = self.op1(Op::EnumTag, u32t, v);
-                    let cases: Vec<(i128, Block, &[Operand])> =
-                        blocks.iter().map(|&(vi, b)| (vi as i128, b, &[][..])).collect();
-                    self.f.b.switch(tag, &cases, end, &[]);
-                    for (vi, b) in blocks {
-                        self.f.b.switch_to(b);
-                        for (fi, &f) in vs[vi].iter().enumerate() {
-                            if self.needs_drop(f) {
-                                let fp = self.t_ref(true, f);
-                                let (a, c) = (self.int(vi as i128), self.int(fi as i128));
-                                let addr = self.opn(Op::EnumFieldAddr, fp, &[p, a, c]);
-                                self.drop_ptr(addr, f);
-                            }
-                        }
-                        self.f.b.br(end, &[]);
-                    }
-                    self.f.b.switch_to(end);
-                }
-            }
-            TypeKind::Tuple(ts) => {
-                for (i, &f) in ts.iter().enumerate() {
+        match glue.parts {
+            crate::drops::Parts::None => {}
+            crate::drops::Parts::Fields(fs) => {
+                for (i, f) in fs.into_iter().enumerate() {
                     if self.needs_drop(f) {
                         let fp = self.t_ref(true, f);
                         let i = self.int(i as i128);
@@ -984,7 +966,35 @@ impl<'a> FnCx<'a> {
                     }
                 }
             }
-            TypeKind::Array { elem, len: ConstArg::Value(n) } => {
+            crate::drops::Parts::Variants(vs) => {
+                let mut blocks = Vec::new();
+                for (vi, fs) in vs.iter().enumerate() {
+                    if fs.iter().any(|&f| self.needs_drop(f)) {
+                        blocks.push((vi, self.f.b.create_block()));
+                    }
+                }
+                let end = self.f.b.create_block();
+                let v = Operand::Value(self.f.b.load(FnCx::ir(t), p));
+                let u32t = self.t_u32();
+                let tag = self.op1(Op::EnumTag, u32t, v);
+                let cases: Vec<(i128, Block, &[Operand])> =
+                    blocks.iter().map(|&(vi, b)| (vi as i128, b, &[][..])).collect();
+                self.f.b.switch(tag, &cases, end, &[]);
+                for (vi, b) in blocks {
+                    self.f.b.switch_to(b);
+                    for (fi, &f) in vs[vi].iter().enumerate() {
+                        if self.needs_drop(f) {
+                            let fp = self.t_ref(true, f);
+                            let (a, c) = (self.int(vi as i128), self.int(fi as i128));
+                            let addr = self.opn(Op::EnumFieldAddr, fp, &[p, a, c]);
+                            self.drop_ptr(addr, f);
+                        }
+                    }
+                    self.f.b.br(end, &[]);
+                }
+                self.f.b.switch_to(end);
+            }
+            crate::drops::Parts::Elems(elem, n) => {
                 let us = self.t_usize();
                 let (head, hv) = self.f.b.create_block_with(&[FnCx::ir(us)]);
                 let body = self.f.b.create_block();
@@ -1006,7 +1016,6 @@ impl<'a> FnCx<'a> {
                 self.f.b.br(head, &[next]);
                 self.f.b.switch_to(exit);
             }
-            _ => {}
         }
         self.f.b.ret(None);
         let body = self.finish_fn();
@@ -1257,7 +1266,7 @@ impl<'a> FnCx<'a> {
             if opt == Term::Eq as u8 {
                 let lt = lp.ty;
                 let Some(v) = self.val(rhs, Some(lt)) else { return };
-                self.assign(&lp, v);
+                self.assign(&lp, v, lhs);
             } else {
                 let bin = compound_op(opt);
                 let lt = lp.ty;
@@ -1266,7 +1275,7 @@ impl<'a> FnCx<'a> {
                 let tok = icx.a(op);
                 let Some(nv) = self.binop(tok, bin as u8, old, r, lt) else { return };
                 // operator operands are Copy (E0422), so the old value has no drop glue
-                self.assign(&lp, nv);
+                self.assign(&lp, nv, lhs);
             }
             return;
         }
@@ -1389,8 +1398,7 @@ impl<'a> FnCx<'a> {
         };
         // the statements opened inside the loop's body are left
         let from = self.f.scope_stmts.get(lp.scope).copied().unwrap_or(self.f.stmts.len());
-        self.exit_temps(from.max(1));
-        self.drop_scopes(lp.scope);
+        self.exit_drops(Point::Jump(tok), from.max(1), lp.scope);
         for s in (lp.scope..self.f.scopes.len()).rev() {
             let ls = self.f.scopes[s].clone();
             self.end_locals(&ls);
@@ -1426,8 +1434,7 @@ impl<'a> FnCx<'a> {
             }
             None => None,
         };
-        self.exit_temps(0);
-        self.drop_scopes(0);
+        self.exit_drops(Point::Return(at), 0, 0);
         self.ensures_checks(v, at);
         if self.open() {
             self.f.b.ret(v);
@@ -2414,7 +2421,7 @@ impl<'a> FnCx<'a> {
         }
         if self.pat_moves(p, sp.ty, Mode::Move) {
             let parts = self.ignored_parts(p, sp);
-            self.drop_parts(sp, parts);
+            self.drop_parts(p, sp, parts);
             self.moved_whole(sp);
         } else if self.reads_empty(&[p], sp) {
             self.moved_whole(sp);
@@ -2446,7 +2453,7 @@ impl<'a> FnCx<'a> {
             self.f.env = before.clone();
             self.f.b.switch_to(b);
             let parts = self.ignored_parts(q, sp);
-            self.drop_parts(sp, parts);
+            self.drop_parts(q, sp, parts);
             self.moved_whole(sp);
             if self.open() {
                 self.f.b.br(body, &[]);
@@ -2482,8 +2489,9 @@ impl<'a> FnCx<'a> {
         empty
     }
 
-    /// Drops the parts `parts` of scrutinee `sp`. An SSA scrutinee goes into a slot first.
-    fn drop_parts(&mut self, sp: &Place, parts: Vec<Place>) {
+    /// Drops the parts `parts` of scrutinee `sp` that pattern `pat` ignores, at its binding
+    /// point. An SSA scrutinee goes into a slot first.
+    fn drop_parts(&mut self, pat: u32, sp: &Place, parts: Vec<(u32, Place)>) {
         if parts.is_empty() {
             return;
         }
@@ -2494,224 +2502,42 @@ impl<'a> FnCx<'a> {
             }
             _ => None,
         };
-        for mut part in parts {
+        for (k, mut part) in parts {
             if let Some(b) = &base {
                 part.base = b.clone();
             }
+            self.scheduled(Point::Bind(pat), Owner::Part(k), part.ty);
             self.drop_place(&part);
         }
     }
 
-    /// The type a pattern that is not one name sees: references peeled, the binding mode
-    /// becoming by reference under one.
-    fn peel_ty(&self, mut t: Ty, mut mode: Mode) -> (Ty, Mode) {
-        for _ in 0..1_000_000 {
-            match self.tys.kind(t) {
-                TypeKind::Ref { mutable, inner } => {
-                    mode = match mode {
-                        Mode::Move => Mode::Ref(*mutable),
-                        Mode::Ref(m) => Mode::Ref(m && *mutable),
-                    };
-                    t = *inner;
-                }
-                _ => break,
-            }
-        }
-        (t, mode)
-    }
-
-    /// A pattern [`FnCx::pat_shape`] cannot read. Taking it for a test would leave its value
-    /// whole while its names took parts of it, so the job fails.
-    fn no_shape(&mut self, p: u32) -> Shape {
-        self.fail(p, "a pattern of no known shape");
-        Shape::Test
-    }
-
-    /// The shape of pattern `p` against a value of type `t`, as [`FnCx::pat`] reads it.
     fn pat_shape(&mut self, p: u32, t: Ty, mode: Mode) -> Shape {
-        let icx = self.icx;
-        let a = icx.a(p);
-        if icx.is(a, Term::Underscore) {
-            return Shape::Wild;
-        }
-        if icx.is(a, Term::KwMut) {
-            return Shape::Name(p);
-        }
-        let kids = icx.kids_vec(p);
-        if kids.first().is_some_and(|&l0| icx.kind(l0) == Some(NodeKind::Literal)) {
-            return Shape::Test;
-        }
-        if icx.is(a, Term::LParen) {
-            let close = icx.close(a);
-            if kids.len() == 1 && !icx.is(close - 1, Term::Comma) {
-                return self.pat_shape(kids[0], t, mode);
-            }
-            let (dt, pm) = self.peel_ty(t, mode);
-            let ets = match self.kind(dt) {
-                TypeKind::Tuple(ts) => ts.to_vec(),
-                _ => return self.no_shape(p),
-            };
-            if kids.len() != ets.len() {
-                return self.no_shape(p);
-            }
-            let fields = ets.iter().zip(&kids).map(|(&et, &k)| (et, Sub::Pat(k))).collect();
-            return Shape::Parts { ty: dt, mode: pm, variant: None, fields };
-        }
-        if !icx.is(a, Term::Ident) {
-            return self.no_shape(p);
-        }
-        let e = icx.chain_end(a);
-        let has_paren = icx.is(e + 1, Term::LParen);
-        let has_rec = icx.is(e + 1, Term::DotLBrace);
-        if e == a && !has_paren && !has_rec {
-            return Shape::Name(p);
-        }
-        let Some(Res::Decl(d)) = icx.uses(p).last().map(|u| u.res) else { return self.no_shape(p) };
-        let is_variant = match self.decl_kind(d) {
-            Some(DeclKind::Variant) => true,
-            Some(DeclKind::Struct) => false,
-            Some(DeclKind::Const) => return Shape::Test,
-            _ => return self.no_shape(p),
-        };
-        let (dt, pm) = self.peel_ty(t, mode);
-        let vi = if is_variant { self.g.prog.decl(d).map_or(0, |x| x.index) } else { 0 };
-        let Some(fts) = self.adt_fields(dt).and_then(|v| v.get(vi as usize).cloned()) else {
-            return self.no_shape(p);
-        };
-        let mut subs: Vec<Option<Sub>> = vec![None; fts.len()];
-        if has_rec {
-            let names: Vec<crate::ids::Sym> = match self.kind(dt) {
-                TypeKind::Adt { def, .. } => self
-                    .g
-                    .sigs
-                    .adt(def)
-                    .and_then(|ad| ad.variants.get(vi as usize))
-                    .map(|v| v.fields.iter().map(|f| f.name).collect())
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            };
-            for fp in kids {
-                if icx.kind(fp) != Some(NodeKind::FieldPat) {
-                    continue;
-                }
-                let name = icx.sym(icx.a(fp));
-                if let Some(fi) = names.iter().position(|&x| x == name)
-                    && fi < subs.len()
-                {
-                    if subs[fi].is_some() {
-                        self.fail(fp, "a pattern names a field twice");
-                    }
-                    subs[fi] = Some(match icx.child(fp, NodeKind::Pattern) {
-                        Some(sub) => Sub::Pat(sub),
-                        None => Sub::Name(fp),
-                    });
-                }
-            }
-        } else if has_paren {
-            for (fi, &k) in kids.iter().enumerate().take(subs.len()) {
-                subs[fi] = Some(Sub::Pat(k));
-            }
-        }
-        // the type checker rejects a pattern that leaves a field out (E0208)
-        let Some(subs) = subs.into_iter().collect::<Option<Vec<Sub>>>() else {
-            self.fail(p, "a pattern leaves a field out");
-            return Shape::Test;
-        };
-        let fields = fts.into_iter().zip(subs).collect();
-        Shape::Parts { ty: dt, mode: pm, variant: is_variant.then_some(vi), fields }
+        crate::drops::pat_shape(self, p, t, mode)
     }
 
-    /// Whether sub-pattern `sub` of a field of type `ft` binds a non-Copy part by value.
-    fn sub_moves(&mut self, sub: Sub, ft: Ty, mode: Mode) -> bool {
-        match sub {
-            Sub::Pat(q) => self.pat_moves(q, ft, mode),
-            Sub::Name(b) => self.name_moves(b, mode),
-        }
-    }
-
-    /// Whether binding node `b` takes a non-Copy value by value in mode `mode`: the answer of
-    /// the definition ([`crate::typeck::TypedBody::moves`]), the same for every instance. An
-    /// instance may make a moved value Copy, never the reverse.
-    fn name_moves(&mut self, b: u32, mode: Mode) -> bool {
-        if mode != Mode::Move {
-            return false;
-        }
-        if self.tb().binds_by_move(b) {
-            return true;
-        }
-        let Some(&l) = self.by_node.get(&b) else {
-            self.fail(b, "a pattern binding without a local");
-            return true;
-        };
-        let lt = self.locals[l].ty;
-        if !self.is_copy(lt) {
-            self.fail(b, "a binding that is Copy on the definition is not Copy in an instance");
-            return true;
-        }
-        false
-    }
-
-    /// Whether pattern `p` against a value of type `t` binds a non-Copy part by value: such a
-    /// pattern moves its scrutinee, any other only reads it.
     fn pat_moves(&mut self, p: u32, t: Ty, mode: Mode) -> bool {
-        match self.pat_shape(p, t, mode) {
-            Shape::Wild | Shape::Test => false,
-            Shape::Name(b) => self.name_moves(b, mode),
-            Shape::Parts { mode, fields, .. } => {
-                let mut any = false;
-                for (ft, sub) in fields {
-                    any |= self.sub_moves(sub, ft, mode);
-                }
-                any
-            }
-        }
+        crate::drops::pat_moves(self, p, t, mode)
     }
 
-    /// The parts of scrutinee `sp` that pattern `p`, which moves it, does not bind by value and
-    /// that have drop glue: in field order, a nested part in place of its field.
-    fn ignored_parts(&mut self, p: u32, sp: &Place) -> Vec<Place> {
+    /// The parts of scrutinee `sp` that pattern `p`, which moves it, does not bind by value
+    /// ([`crate::drops::ignored_parts`]) and that have drop glue, each with its index there.
+    fn ignored_parts(&mut self, p: u32, sp: &Place) -> Vec<(u32, Place)> {
         let mut out = Vec::new();
-        if self.pat_moves(p, sp.ty, Mode::Move) {
-            self.ignored(p, sp.clone(), Mode::Move, &mut out);
+        for (k, path) in crate::drops::ignored_parts(self, p, sp.ty).into_iter().enumerate() {
+            self.asked.insert((Point::Bind(p), Owner::Part(k as u32)));
+            let mut part = sp.clone();
+            for Step { variant, field, ty } in path {
+                part.proj.push(match variant {
+                    Some(vi) => Proj::EnumField(vi, field, ty),
+                    None => Proj::Field(field, ty),
+                });
+                part.ty = ty;
+            }
+            if self.needs_drop(part.ty) {
+                out.push((k as u32, part));
+            }
         }
         out
-    }
-
-    fn ignored(&mut self, p: u32, place: Place, mode: Mode, out: &mut Vec<Place>) {
-        // a part behind a reference is not the scrutinee's
-        if mode != Mode::Move || !self.needs_drop(place.ty) {
-            return;
-        }
-        if !self.pat_moves(p, place.ty, mode) {
-            out.push(place);
-            return;
-        }
-        let Shape::Parts { ty, mode, variant, fields } = self.pat_shape(p, place.ty, mode) else { return };
-        if mode != Mode::Move {
-            return;
-        }
-        let w = self.g.world();
-        if crate::mono::drop_method(&w, &mut self.tys, ty).is_some() {
-            self.fail(p, "a pattern takes apart a value whose type has a `Drop` impl");
-            return;
-        }
-        for (fi, (ft, sub)) in fields.into_iter().enumerate() {
-            let mut part = place.clone();
-            part.proj.push(match variant {
-                Some(vi) => Proj::EnumField(vi, fi as u32, ft),
-                None => Proj::Field(fi as u32, ft),
-            });
-            part.ty = ft;
-            match sub {
-                Sub::Pat(q) => self.ignored(q, part, mode, out),
-                Sub::Name(b) if self.name_moves(b, mode) => {}
-                Sub::Name(_) => {
-                    if self.needs_drop(ft) {
-                        out.push(part);
-                    }
-                }
-            }
-        }
     }
 
     /// Whether a value of type `t` that pattern `p` matched without binding a part by value

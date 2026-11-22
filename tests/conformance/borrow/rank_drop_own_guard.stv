@@ -1,0 +1,97 @@
+//~ CHECK-ONLY
+// The drop glue of a value runs in steps: the type's `Drop` impl, then its parts in declaration
+// order. A guard inside the value is held until the glue reaches it, so every step before it
+// is checked against it (E1405 case `own`, where the value is dropped): a field dropped before
+// the guard whose destructor takes the lock, a `Drop` impl that takes the lock its own field
+// holds, a destructor that joins threads which take it. The guard first is fine: it is released
+// before the other part is dropped.
+import std.io;
+import std.sync;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+
+struct Lk { pub id: u32 }
+
+impl Drop for Lk {
+    fn drop(&mut self) {
+        let g = M.lock();
+    }
+}
+
+struct Jn { pub id: u32 }
+
+impl Drop for Jn {
+    fn drop(&mut self) {
+        let mut n: u32 = 0;
+        scope {
+            spawn { n = *M.lock().get(); }
+        }
+    }
+}
+
+view struct T { pub g: sync.MutexGuard<u32, 1> }
+
+impl Drop for T {
+    fn drop(&mut self) {
+        let v = *M.lock().get();
+    }
+}
+
+view struct LG { pub l: Lk, pub g: sync.MutexGuard<u32, 1> }
+
+view struct GL { pub g: sync.MutexGuard<u32, 1>, pub l: Lk }
+
+fn tuple_scope_end() {
+    let t = (Lk.{ id: 1 }, M.lock());
+    io.print("made\n");
+} //~ ERROR E1405
+
+fn struct_scope_end() {
+    let t = LG.{ l: Lk.{ id: 1 }, g: M.lock() };
+} //~ ERROR E1405
+
+fn drop_impl_scope_end() {
+    let t = T.{ g: M.lock() };
+} //~ ERROR E1405
+
+fn join_scope_end() {
+    let t = (Jn.{ id: 1 }, M.lock());
+} //~ ERROR E1405
+
+fn peek(t: &(Lk, sync.MutexGuard<u32, 1>)) -> u32 { return 1; }
+
+fn temporary() -> u32 {
+    let n = peek(&(Lk.{ id: 1 }, M.lock())); //~ ERROR E1405
+    return n;
+}
+
+fn option_payload() {
+    let o = Option.Some((Lk.{ id: 1 }, M.lock()));
+} //~ ERROR E1405
+
+fn overwritten(a: (Lk, sync.MutexGuard<u32, 1>), b: (Lk, sync.MutexGuard<u32, 1>)) {
+    let mut t = a;
+    t = b; //~ ERROR E1405
+} //~ ERROR E1405
+
+fn dropped_in_callee(t: (Lk, sync.MutexGuard<u32, 1>)) {
+} //~ ERROR E1405
+
+fn guard_first() {
+    let t = (M.lock(), Lk.{ id: 1 });
+}
+
+fn guard_first_struct() {
+    let u = GL.{ g: M.lock(), l: Lk.{ id: 2 } };
+}
+
+fn main() {
+    tuple_scope_end();
+    struct_scope_end();
+    drop_impl_scope_end();
+    join_scope_end();
+    let n = temporary();
+    option_payload();
+    guard_first();
+    guard_first_struct();
+}

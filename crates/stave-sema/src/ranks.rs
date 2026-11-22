@@ -28,12 +28,27 @@
 //! built-in package (`with_lock` calling `f` under its guard, `get_or_init` running `f`) is
 //! reported at the user call that leads there.
 //!
-//! **Drops.** A drop (scope end, temporary, partial drop, the old value an assignment
-//! overwrites) runs the dropped type's drop glue, a node of the graph: it is checked like a call,
-//! without the local it drops. Locals drop in reverse declaration order, so a value declared
-//! before a guard drops after the guard is released. A value moved into a callee and dropped there
-//! is that callee's drop: its own check covers the guards it holds, and every caller holding a
-//! guard is checked at the call, whose lowest rank includes the callee's drop edges.
+//! **Drops.** A drop (every row of the body's drop schedule, [`crate::drops`]: scope end,
+//! temporary, exit, a part a pattern ignores, the old value an assignment overwrites) runs the
+//! dropped type's drop glue, a node of the graph: it is checked like a call, without the local it
+//! drops. Locals drop in reverse declaration order, so a value declared before a guard drops
+//! after the guard is released. A value moved into a callee and dropped there is that callee's
+//! drop: its own check covers the guards it holds, and every caller holding a guard is checked at
+//! the call, whose lowest rank includes the callee's drop edges.
+//!
+//! **A value's own guards.** The glue of a value runs in steps ([`crate::drops::glue`]): the
+//! type's `Drop` impl, then its parts in declaration order. A guard inside the value is held
+//! until the glue reaches it: by the `Drop` impl of every type around it, and by the glue of
+//! every part dropped before it. Each step is checked against the guards still inside
+//! ([`Cx::own_conflict`], E1405 case `own`), at every drop of such a value. A `MutexGuard` behind
+//! an owning raw pointer (a `vec.Vec` element) counts as held while the owner's `Drop` runs.
+//!
+//! **No answer is no pass.** What a drop may acquire is read from the dropped type's glue node
+//! when the graph has one, else from the steps of its glue ([`Cx::drop_low`]): the graph has glue
+//! nodes only for the types a body names, not for a tuple or array made in place. A step the
+//! graph has no node for, and a dropped type that cannot be named in the graph's types, count
+//! as acquiring any lock (E1405 case `opaque`). A body's drop edges are narrowed per node, a
+//! closure against its own body; a node whose body's drops are not known keeps every edge.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_diag::{Diagnostic, Span};
@@ -44,6 +59,7 @@ use crate::diag::mk;
 use crate::ids::DeclId;
 use crate::mono::InstKey;
 use crate::sigs::{GenericParam, LockItems, NameCx, Sigs};
+use crate::traits::World;
 use crate::typeck::Typeck;
 use crate::types::{ConstArg, GArg, Interner, TypeId, TypeKind};
 
@@ -85,6 +101,9 @@ pub struct HeldAt {
     pub at: At,
     pub span: Span,
     pub held: Vec<Held>,
+    /// A drop of a value that may hold a lock itself: where that value is from (its binding, or
+    /// the expression that made it). Its glue is checked against the guards inside it.
+    pub own: Option<Span>,
 }
 
 /// The locks a fn body (its closures and `spawn` bodies included) may hold: per call, join, and
@@ -220,6 +239,15 @@ struct Lock {
     span: Span,
 }
 
+/// What the own-guard check reads besides the graph: its types, the glue nodes by type, the fn
+/// nodes by instance, and the "has drop glue" answers so far.
+struct OwnCx<'a, 't> {
+    tycx: &'a mut crate::types::Overlay<'t>,
+    glue: &'a FxHashMap<TypeId, u32>,
+    insts: &'a FxHashMap<InstKey, u32>,
+    drops: FxHashMap<TypeId, bool>,
+}
+
 struct Cx<'a> {
     prog: &'a Program,
     tc: &'a Typeck,
@@ -321,7 +349,15 @@ impl Cx<'_> {
 
     /// Reports the acquisition by `targets` at `span` of node `p` while `held` is held (E1405);
     /// `join`: the targets are threads joined there (E1406).
-    fn report(&mut self, p: u32, span: Span, held: &Lock, targets: &[u32], join: bool, drop: bool) {
+    fn report(
+        &mut self,
+        p: u32,
+        span: Span,
+        held: &Lock,
+        targets: &[u32],
+        join: bool,
+        case: Option<&'static str>,
+    ) {
         let Some(&t) = targets.iter().min_by_key(|&&t| self.low[t as usize]) else { return };
         let Some((edges, end)) = self.chain(t, held.rank) else { return };
         let rank = self.own[end as usize];
@@ -352,7 +388,7 @@ impl Cx<'_> {
             roles.push((if e.kind == EdgeKind::Drop { "drop" } else { "call" }, e.site));
         }
         let code = if join { "E1406" } else { "E1405" };
-        let case = (drop && !join).then_some("drop");
+        let case = case.filter(|_| !join);
         self.out.extend(mk(code, case, &holes, primary, &roles));
     }
 
@@ -400,6 +436,122 @@ impl Cx<'_> {
         out
     }
 
+    /// The lowest rank the drop of a value of the concrete type `t` may acquire, and the node
+    /// that says so. Read from the type's glue node when the graph has one, else from the
+    /// glue's steps ([`crate::drops::glue`]): the `Drop` impl's node and the parts. A `Drop`
+    /// impl the graph has no node for may lock anything: rank 0, no node.
+    fn drop_low(&self, w: &mut OwnCx<'_, '_>, t: TypeId, depth: u32) -> (u64, Option<u32>) {
+        if let Some(&n) = w.glue.get(&t) {
+            return (self.low[n as usize], Some(n));
+        }
+        let world = World { prog: self.prog, sigs: &self.tc.sigs };
+        if !crate::mono::needs_drop(&world, w.tycx, t, &mut w.drops) {
+            return (NONE, None);
+        }
+        if depth > crate::typedepth::MAX_TYPE_DEPTH {
+            return (0, None);
+        }
+        let g = crate::drops::glue(&world, w.tycx, t);
+        let mut best = (NONE, None);
+        if let Some(k) = &g.method {
+            match w.insts.get(k) {
+                Some(&n) => best = (self.low[n as usize], Some(n)),
+                None => return (0, None),
+            }
+        }
+        for f in g.parts.flat() {
+            let r = self.drop_low(w, f, depth + 1);
+            if r.0 < best.0 {
+                best = r;
+            }
+        }
+        best
+    }
+
+    /// The first step of the drop glue of a value of the concrete type `t` that may acquire a
+    /// lock at or below the rank of a guard the value still holds then: the step's node (`None`:
+    /// a step the graph cannot follow, taken to lock anything) and that guard (held `from`).
+    /// While the type's `Drop` impl runs every part of the value is alive; while a part is
+    /// dropped the parts after it are; the same holds inside each part. The steps are the
+    /// type's glue ([`crate::drops::glue`]), whether or not the graph has a glue node for it.
+    fn own_conflict(&self, w: &mut OwnCx<'_, '_>, t: TypeId, from: Span) -> Option<(Option<u32>, Lock)> {
+        let world = World { prog: self.prog, sigs: &self.tc.sigs };
+        // the highest guard inside values of types `ts`
+        let top = |tycx: &mut crate::types::Overlay<'_>, ts: &[TypeId]| -> Option<Lock> {
+            let mut best: Option<Lock> = None;
+            for &t in ts {
+                for q in lock_parts(tycx, self.prog, &self.tc.sigs, &[], t) {
+                    if let Part::Guard { rank: ConstArg::Value(rank), text, .. } = q
+                        && best.as_ref().is_none_or(|b| rank > b.rank)
+                    {
+                        best = Some(Lock { rank, text, span: from });
+                    }
+                }
+            }
+            best
+        };
+        let mut seen: FxHashSet<TypeId> = FxHashSet::default();
+        let mut work = vec![t];
+        while let Some(t) = work.pop() {
+            if !seen.insert(t) || !crate::mono::needs_drop(&world, w.tycx, t, &mut w.drops) {
+                continue;
+            }
+            let g = crate::drops::glue(&world, w.tycx, t);
+            if let Some(k) = &g.method {
+                let (low, node) = match w.insts.get(k) {
+                    Some(&n) => (self.low[n as usize], Some(n)),
+                    None => (0, None),
+                };
+                if let Some(lock) = top(w.tycx, &[t])
+                    && low <= lock.rank
+                {
+                    return Some((node, lock));
+                }
+            }
+            let rows: Vec<Vec<TypeId>> = match g.parts {
+                crate::drops::Parts::None => Vec::new(),
+                crate::drops::Parts::Fields(fs) => vec![fs],
+                crate::drops::Parts::Variants(vs) => vs,
+                // an element is dropped while the elements after it are alive
+                crate::drops::Parts::Elems(e, n) => vec![vec![e; n.min(2) as usize]],
+            };
+            for fs in rows {
+                for (i, &f) in fs.iter().enumerate() {
+                    let Some(lock) = top(w.tycx, &fs[i + 1..]) else { continue };
+                    let (low, node) = self.drop_low(w, f, 0);
+                    if low <= lock.rank {
+                        return Some((node, lock));
+                    }
+                }
+                work.extend(fs);
+            }
+        }
+        None
+    }
+
+    /// E1405 case `opaque`: node `p` drops, at `span`, a value holding `held` whose drop glue has
+    /// a step the graph has no node for.
+    fn report_opaque(&mut self, p: u32, span: Span, held: &Lock) {
+        let (at_node, primary, inner) = self.user_site(p, span);
+        if !self.seen.insert((primary.file.0, primary.offset, 0, held.rank)) {
+            return;
+        }
+        let fn_path = self.g.source_names(self.prog, self.tc, &[at_node]).remove(0);
+        let held_s = held.rank.to_string();
+        let holes = [
+            ("fn", fn_path.as_str()),
+            ("lock", ""),
+            ("rank", "0"),
+            ("held", held.text.as_str()),
+            ("held_rank", held_s.as_str()),
+        ];
+        let mut roles: Vec<(&str, Span)> = Vec::new();
+        if held.span != primary && inner.is_none() {
+            roles.push(("held", held.span));
+        }
+        self.out.extend(mk("E1405", Some("opaque"), &holes, primary, &roles));
+    }
+
     fn is_thread_call(&self, targets: &[u32]) -> bool {
         targets.iter().any(|&t| {
             matches!(&self.g.nodes[t as usize].kind, NodeKind::Fn { inst, .. }
@@ -422,19 +574,24 @@ impl Cx<'_> {
     }
 }
 
-/// The types a fn body (its closures included) may drop, from the borrow checker: the values
-/// that may be initialized where a drop runs. `None`: not known (keep every drop edge).
+/// The types a fn body may drop, from the borrow checker (the drops of its drop schedule whose
+/// value may be initialized there): the fn's own body in `types`, and each closure or `spawn`
+/// body of it on its own, by the span of its first token. `None`: not known (keep every drop
+/// edge).
 #[derive(Clone, Debug)]
 pub struct BodyDrops {
     pub decl: DeclId,
     pub types: Option<Vec<TypeId>>,
+    pub closures: Vec<(Span, Option<Vec<TypeId>>)>,
 }
 
 /// Marks the drop edges of fn and closure nodes to the glue of types their body never drops
-/// (the graph's drop edges cover every type a body makes or owns, a returned one too). A body's
-/// edges are narrowed only when every type it drops is the glue target of one of its own drop
-/// edges; a dropped type without glue, or one reached only inside another glue (a part dropped
-/// after a partial move), keeps them all.
+/// (the graph's drop edges cover every type a body makes or owns, a returned one too). Each
+/// node is narrowed against its own body and its own edges: a closure's drops are not its fn's.
+/// A node's edges are narrowed only when every type its body drops is the glue target of one
+/// of its drop edges; a dropped type without glue, or one reached only inside another glue (a
+/// part dropped after a partial move), keeps them all, and so does a node whose body is not
+/// known (no dropped types reported, or no closure body at the node's span).
 fn unused_drops(
     g: &CallGraph,
     cx: &mut crate::types::Overlay<'_>,
@@ -442,21 +599,30 @@ fn unused_drops(
     drops: &[BodyDrops],
 ) -> Vec<bool> {
     let mut skip = vec![false; g.out.len()];
-    let by_decl: FxHashMap<DeclId, &Option<Vec<TypeId>>> = drops.iter().map(|d| (d.decl, &d.types)).collect();
-    // per fn node: the drop edges of it and its closures, (edge index, target)
-    let mut edges: FxHashMap<u32, Vec<(usize, u32)>> = FxHashMap::default();
+    let by_decl: FxHashMap<DeclId, &BodyDrops> = drops.iter().map(|d| (d.decl, d)).collect();
     for v in 0..g.nodes.len() as u32 {
         let Some(p) = g.fn_of(v) else { continue };
-        let base = g.out_start[v as usize] as usize;
-        for (k, e) in g.succ(v).iter().enumerate() {
-            if e.kind == EdgeKind::Drop {
-                edges.entry(p).or_default().push((base + k, e.to));
-            }
-        }
-    }
-    for (p, list) in edges {
         let NodeKind::Fn { inst, .. } = &g.nodes[p as usize].kind else { continue };
-        let Some(Some(types)) = by_decl.get(&inst.decl) else { continue };
+        let Some(d) = by_decl.get(&inst.decl) else { continue };
+        let types = if v == p {
+            d.types.as_ref()
+        } else {
+            let at = g.nodes[v as usize].span;
+            let mut own = d.closures.iter().filter(|c| c.0.file == at.file && c.0.offset == at.offset);
+            match (own.next(), own.next()) {
+                (Some(c), None) => c.1.as_ref(),
+                _ => None,
+            }
+        };
+        let Some(types) = types else { continue };
+        let base = g.out_start[v as usize] as usize;
+        let list: Vec<(usize, u32)> = g
+            .succ(v)
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.kind == EdgeKind::Drop)
+            .map(|(k, e)| (base + k, e.to))
+            .collect();
         let targets: FxHashSet<u32> = list.iter().map(|x| x.1).collect();
         let mut used: FxHashSet<u32> = FxHashSet::default();
         let all_mapped = types.iter().all(|&t| match glue.get(&cx.subst(t, &inst.args, None)) {
@@ -506,6 +672,14 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks], drops: &[BodyDro
             _ => None,
         })
         .collect();
+    // the node of each fn instance (the first, of a dispatch fn's)
+    let mut insts: FxHashMap<InstKey, u32> = FxHashMap::default();
+    for (i, n) in g.nodes.iter().enumerate() {
+        if let NodeKind::Fn { inst, .. } = &n.kind {
+            insts.entry(inst.clone()).or_insert(i as u32);
+        }
+    }
+    let mut own_drops: FxHashMap<TypeId, bool> = FxHashMap::default();
     let skip = unused_drops(g, &mut tycx, &glue, drops);
     let low = lowest(g, &own, &skip);
     let threads = [stave_ir::Known::ThreadJoin, stave_ir::Known::ParFor, stave_ir::Known::ParForMut]
@@ -583,7 +757,7 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks], drops: &[BodyDro
                 continue;
             }
             let join = cx.is_thread_call(targets);
-            cx.report(p, span, &top, targets, join, false);
+            cx.report(p, span, &top, targets, join, None);
         }
         // the joins of the node's `scope` statements: the spawn bodies inside each statement
         let Some(b) = body else { continue };
@@ -605,26 +779,57 @@ pub fn check(prog: &Program, tc: &Typeck, bodies: &[BodyLocks], drops: &[BodyDro
                 .collect();
             let low = kids.iter().map(|&c| cx.low[c as usize]).min().unwrap_or(NONE);
             if low <= top.rank {
-                cx.report(p, s.span, &top, &kids, true, false);
+                cx.report(p, s.span, &top, &kids, true, None);
             }
         }
         // the drops: the dropped type's glue, else (a type the graph has no glue for) every
         // drop the node and its closures make
         for s in &b.sites {
             let At::Drop(t) = s.at else { continue };
-            let held = cx.resolve(&s.held, &args, None);
-            let Some(top) = held.into_iter().max_by_key(|h| h.rank) else { continue };
             let ty = import(&mut tycx, &b.types, t).map(|t| tycx.subst(t, &args, None));
-            let targets: Vec<u32> = match ty.and_then(|t| glue.get(&t)) {
-                Some(&n) => vec![n],
-                None => (0..g.nodes.len() as u32)
-                    .filter(|&c| c == p || matches!(g.nodes[c as usize].kind, NodeKind::Closure { parent, .. } if parent == p))
-                    .flat_map(|c| g.succ(c).iter().filter(|e| e.kind == EdgeKind::Drop).map(|e| e.to))
-                    .collect(),
+            // what the drop may acquire: the glue node's answer, else the glue's steps; a type
+            // that cannot be named, or a step without a node, may acquire anything
+            let held = cx.resolve(&s.held, &args, None);
+            if let Some(top) = held.into_iter().max_by_key(|h| h.rank) {
+                let (low, node) = match ty {
+                    Some(t) => {
+                        let mut w = OwnCx {
+                            tycx: &mut tycx,
+                            glue: &glue,
+                            insts: &insts,
+                            drops: std::mem::take(&mut own_drops),
+                        };
+                        let r = cx.drop_low(&mut w, t, 0);
+                        own_drops = w.drops;
+                        r
+                    }
+                    None => (0, None),
+                };
+                if low <= top.rank {
+                    match node {
+                        Some(n) => cx.report(p, s.span, &top, &[n], false, Some("drop")),
+                        None => cx.report_opaque(p, s.span, &top),
+                    }
+                }
+            }
+            // the guards the dropped value holds itself; a type that cannot be named here is
+            // not followed, and counts as locking under every guard the body may hold
+            let Some(from) = s.own else { continue };
+            let Some(ty) = ty else {
+                let any = cx.resolve(&b.any, &args, None);
+                if let Some(top) = any.into_iter().max_by_key(|h| h.rank) {
+                    cx.report_opaque(p, s.span, &top);
+                }
+                continue;
             };
-            let low = targets.iter().map(|&n| cx.low[n as usize]).min().unwrap_or(NONE);
-            if low <= top.rank {
-                cx.report(p, s.span, &top, &targets, false, true);
+            let mut w =
+                OwnCx { tycx: &mut tycx, glue: &glue, insts: &insts, drops: std::mem::take(&mut own_drops) };
+            let found = cx.own_conflict(&mut w, ty, from);
+            own_drops = w.drops;
+            match found {
+                Some((Some(step), lock)) => cx.report(p, s.span, &lock, &[step], false, Some("own")),
+                Some((None, lock)) => cx.report_opaque(p, s.span, &lock),
+                None => {}
             }
         }
     }

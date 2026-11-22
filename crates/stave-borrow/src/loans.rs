@@ -83,21 +83,56 @@
 //! stores and the result of the call are those of the state after all of them.
 //!
 //! After a call's store a local may hold origins that the locals holding a loan of it do
-//! not: a loan is live while a live local reaches it ([`Flow::live_loans`] closes under
+//! not: a loan is live while a live local reaches it (the live loans are closed under
 //! [`Flow::reach`]), and a value read through a pointer to a local gets the local's set at
 //! that point ([`Flow::contents_of`]). A call through a fn value stores nothing: its params
 //! take no clause, so its body is held to the rules above with `decl` empty.
 //!
 //! **Fixpoint.** Forward dataflow in reverse postorder to a fixpoint (union at joins). The
 //! usual bound (loop depth + 1 rounds) holds for gen/kill problems; copies between locals
-//! inside a loop can need more, so the iteration runs to the fixpoint (monotone, finite) and the
-//! round count is reported ([`Flow::rounds`]).
+//! inside a loop can need more, so the iteration runs to the fixpoint (finite) and the round
+//! count is reported ([`Flow::rounds`]).
+//!
+//! **Storage.** One [`State`] is walked through the blocks and changed in place by
+//! [`Flow::apply`]; an origin set is an ascending list of atoms ([`Set`]) that a state names by
+//! its id in [`Flow::sets`]. A block has an entry state of its own ([`Saved`]) only when it
+//! cannot take the state the walk reached: every block but one whose single predecessor comes
+//! right before it in the reverse postorder (then the walk is at that predecessor's end when it
+//! gets there). An entry state keeps only what can still be read from the block's entry on
+//! ([`crate::live`]): the sets of the tracked locals live there and the moved marks of the
+//! locals some access may still test. A set that is not read before its local is redefined
+//! cannot change a set that is, so dropping it changes nothing that is read. The mark of a
+//! local that no access can test after one of its moves ([`Flow::tested_after_move`]) is never
+//! kept: every test of it finds it unset. Where a block has several successors the walked
+//! state drops what is dead at the block's end too ([`Flow::prune`]), so what the walk
+//! carries and copies follows the live locals, not the locals of the fn.
+//!
+//! The entry state of a block is the union of everything that reached it in any round. For a
+//! block without one, the walk has only what reaches it in the current round, which is the same
+//! while later rounds can only add to earlier ones: every step is monotone until a store grows
+//! a local ([`Flow::grown`]). From then on a loan's contents are read from the borrowed local's
+//! set at the point of the read ([`Flow::loan_holds`]) instead of the set taken when the loan
+//! was made, so in a body with a statement that can grow a local the entry states also keep
+//! the sets of the borrowed locals such a read can reach ([`Flow::lent`]).
+//!
+//! A read from the local's set can give LESS than the set taken when the loan was made (the
+//! local was written while borrowed). Then a round after the store finds less than a round
+//! before it did, and the union over the rounds holds what no single round does. Where no such
+//! read happens the rounds before the store found nothing the last round does not find again,
+//! and the walked state is again all an entry state would hold. So the last round compares,
+//! at every read of a borrowed local's set, that set with what the loan's contents were when
+//! the first store grew a local ([`Flow::pre`]); if one lacks an atom, the body is solved
+//! again with an entry state for every block, joined over all rounds ([`Flow::exact`]).
+
+use std::cell::Cell;
 
 use rustc_hash::FxHashMap;
 
 use crate::bits::Bits;
-use crate::cfg::{Body, LoanId, LocalId, OpKind, Operand, Place, Proj, Rvalue, StmtKind, Store};
-use crate::check::{Access, places_conflict};
+use crate::cfg::{Body, LoanId, LocalId, OpKind, Operand, Place, Proj, Rvalue, Stmt, StmtKind, Store};
+use crate::check::{Access, places_conflict, stmt_uses};
+use crate::live::{Liveness, liveness};
+use crate::set::{Set, SetTable};
 use crate::ty::{DerefKind, Flows, Tys};
 use stave_sema::types::TypeId;
 
@@ -132,21 +167,159 @@ impl Atoms {
     }
 }
 
-/// The dataflow state at a point: origin sets of tracked locals, maybe-moved locals (a value
-/// moves whole: one bit per local).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The dataflow state at the point a walk has reached: the origin set of every tracked local, as
+/// an id of [`Flow::sets`], and the maybe-moved locals (a value moves whole: one mark per local).
+/// A walk has one state and changes it in place.
 pub struct State {
-    pub o: Vec<Bits>,
-    pub moved: Bits,
+    o: Vec<u32>,
+    /// The tracked locals whose set may be non-empty, each once (`in_held`).
+    held: Vec<u32>,
+    in_held: Vec<bool>,
+    moved: Vec<bool>,
+    /// The locals whose mark may be set, each once (`in_marked`).
+    marked: Vec<LocalId>,
+    in_marked: Vec<bool>,
+    /// While `recording`: every change of a set, as the tracked local and the id it had.
+    log: Vec<(u32, u32)>,
+    recording: bool,
 }
 
 impl State {
-    pub fn union_with(&mut self, other: &State) -> bool {
-        let mut ch = false;
-        for (a, b) in self.o.iter_mut().zip(&other.o) {
-            ch |= a.union_with(b);
+    fn new(ntracked: usize, nlocals: usize) -> State {
+        State {
+            o: vec![0; ntracked],
+            held: Vec::new(),
+            in_held: vec![false; ntracked],
+            moved: vec![false; nlocals],
+            marked: Vec::new(),
+            in_marked: vec![false; nlocals],
+            log: Vec::new(),
+            recording: false,
         }
-        ch | self.moved.union_with(&other.moved)
+    }
+
+    /// The id of tracked local `t`'s set.
+    #[inline]
+    pub fn id(&self, t: u32) -> u32 {
+        self.o[t as usize]
+    }
+
+    /// The tracked locals whose set may be non-empty, each once.
+    pub fn held(&self) -> &[u32] {
+        &self.held
+    }
+
+    fn put(&mut self, t: u32, id: u32) {
+        let old = self.o[t as usize];
+        if old == id {
+            return;
+        }
+        if self.recording {
+            self.log.push((t, old));
+        }
+        self.write(t, id);
+    }
+
+    fn write(&mut self, t: u32, id: u32) {
+        if id != 0 && !self.in_held[t as usize] {
+            self.in_held[t as usize] = true;
+            self.held.push(t);
+        }
+        self.o[t as usize] = id;
+    }
+
+    pub fn is_moved(&self, l: LocalId) -> bool {
+        self.moved.get(l as usize).is_some_and(|&m| m)
+    }
+
+    fn set_moved(&mut self, l: LocalId, on: bool) {
+        if let Some(m) = self.moved.get_mut(l as usize) {
+            if on && !self.in_marked[l as usize] {
+                self.in_marked[l as usize] = true;
+                self.marked.push(l);
+            }
+            *m = on;
+        }
+    }
+
+    fn clear(&mut self) {
+        for t in self.held.drain(..) {
+            self.o[t as usize] = 0;
+            self.in_held[t as usize] = false;
+        }
+        for l in self.marked.drain(..) {
+            self.moved[l as usize] = false;
+            self.in_marked[l as usize] = false;
+        }
+        self.log.clear();
+        self.recording = false;
+    }
+
+    /// Starts a record of the changes of the sets.
+    pub fn record(&mut self) {
+        self.log.clear();
+        self.recording = true;
+    }
+
+    /// Ends the record and returns it: per change, the tracked local and the id it had.
+    pub fn recorded(&mut self) -> &[(u32, u32)] {
+        self.recording = false;
+        &self.log
+    }
+
+    /// Ends the record and takes back the changes it lists.
+    pub fn undo(&mut self) {
+        self.recording = false;
+        while let Some((t, old)) = self.log.pop() {
+            self.write(t, old);
+        }
+    }
+}
+
+/// A state as a block's entry keeps it: the non-empty sets of the tracked locals that can still
+/// be read there, and the moved locals among those whose mark can still be tested.
+#[derive(Clone, Debug, Default)]
+pub struct Saved {
+    o: Vec<(u32, u32)>,
+    moved: Vec<LocalId>,
+}
+
+/// What the dataflow of one body did, in counts that depend on the body alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cost {
+    /// The statements of the reachable blocks.
+    pub stmts: u64,
+    /// Statements applied to a state ([`Flow::apply`]).
+    pub applied: u64,
+    /// Sets and moved marks copied into a block's entry state or out of one.
+    pub copied: u64,
+    /// The (local, block) pairs with the local's set or moved mark live at the block's entry:
+    /// what the entry states can hold.
+    pub live: u64,
+    /// Bodies in which a store grew a local ([`Flow::grown`]).
+    pub grown: u64,
+    /// Bodies solved a second time, with an entry state per block ([`Flow::exact`]).
+    pub exact: u64,
+    /// Atoms of the sets entered into the set table or joined there.
+    pub atoms: u64,
+    /// Loans counted in or out of the live loans by the checks, and loans visited when the
+    /// loans reached through the live ones are found again.
+    pub counted: u64,
+    /// Times the checks found the loans reached through the live ones again.
+    pub rebuilt: u64,
+}
+
+impl Cost {
+    pub fn add(&mut self, o: Cost) {
+        self.stmts += o.stmts;
+        self.applied += o.applied;
+        self.copied += o.copied;
+        self.live += o.live;
+        self.grown += o.grown;
+        self.exact += o.exact;
+        self.atoms += o.atoms;
+        self.counted += o.counted;
+        self.rebuilt += o.rebuilt;
     }
 }
 
@@ -168,10 +341,10 @@ pub struct CallStore {
     /// Whether the target points to a ref-like type at this instance.
     pub into_view: bool,
     /// The target pointer's origins (empty when it points to no ref-like type).
-    pub ptr: Bits,
+    pub ptr: Set,
     /// The value's origins: the union over the clause's entries. One set per target, because
     /// the callee may store what any source borrows through any other source it keeps.
-    pub val: Bits,
+    pub val: Set,
 }
 
 /// The solved dataflow of one body.
@@ -182,11 +355,11 @@ pub struct Flow<'b> {
     pub tracked: Vec<u32>,
     pub ntracked: usize,
     /// Per loan: the origin set of the borrowed value.
-    pub contents: Vec<Bits>,
+    pub contents: Vec<Set>,
     /// Per loan: the origins of the pointers it was made through (empty for a loan of a place
     /// without a dereference). While a value holds the loan, those keep the borrowed place from
     /// being reached another way.
-    pub made: Vec<Bits>,
+    pub made: Vec<Set>,
     /// Ref-likeness of every type the body's places use.
     pub ref_like: FxHashMap<TypeId, bool>,
     /// Ref-like params whose type is a reference: `Pb` names one object.
@@ -200,15 +373,48 @@ pub struct Flow<'b> {
     /// Params that take a `from` clause: `&mut` to a ref-like type, in a fn body.
     pub clause_param: Bits,
     /// Per param: the atoms its `from` clause covers.
-    pub decl: Vec<Bits>,
+    pub decl: Vec<Set>,
     /// Whether a call's store added origins to a loan's contents: only then can a loan's
     /// contents hold what the locals holding the loan do not.
     pub grown: bool,
-    /// Block entry states (`None`: unreachable).
-    pub entry: Vec<Option<State>>,
+    /// The distinct sets the states hold.
+    pub sets: SetTable,
+    /// Liveness of the tracked locals (by tracked index): where their sets can still be read.
+    pub live: Liveness,
+    /// Per local: its index among the locals whose moved mark an access can test after a move
+    /// (`u32::MAX`: not one). Empty in a body without a move.
+    mvar: Vec<u32>,
+    /// Liveness of the moved marks (by `mvar` index): where an access may still test them.
+    mlive: Liveness,
+    /// Per tracked local: a loan's contents may be read from its set once a store has grown a
+    /// local ([`Flow::loan_holds`]). Empty in a body without a statement that can grow one.
+    lent: Vec<bool>,
+    /// Per loan: its contents when the first store grew a local, before that store.
+    pre: Vec<Set>,
+    /// Whether a round of [`Flow::iterate`] is on, and whether a read of a borrowed local's
+    /// set in it gave less than the loan's `pre`.
+    watch: bool,
+    short: Cell<bool>,
+    /// Whether every reachable block has an entry state (module doc, **Storage**).
+    exact: bool,
+    /// Per block: it takes the state the walk reached at the end of the block before it in
+    /// `rpo`, its only predecessor.
+    carried: Vec<bool>,
+    /// Block entry states (`None`: a carried or an unreachable block).
+    entry: Vec<Option<Saved>>,
     pub preds: Vec<Vec<u32>>,
     pub rpo: Vec<u32>,
+    /// Per block: its position in `rpo` (`u32::MAX`: unreachable).
+    rpo_at: Vec<u32>,
     pub rounds: u32,
+    pub cost: Cost,
+    /// A state no walk uses now.
+    spare: Option<State>,
+    /// Scratch of [`Flow::save`]: what the entry keeps; per tracked local and per local, its
+    /// place in the entry state being joined, plus one (0: not in it; made at the first join).
+    kept: Saved,
+    slot: Vec<u32>,
+    mslot: Vec<u32>,
 }
 
 impl<'b> Flow<'b> {
@@ -263,7 +469,7 @@ impl<'b> Flow<'b> {
                 clause_param.insert(p as usize);
             }
         }
-        let mut decl = vec![Bits::new(atoms.len()); nparams];
+        let mut decl = vec![Set::new(atoms.len()); nparams];
         for s in &body.declared {
             if s.target as usize >= nparams || s.source as usize >= nparams {
                 continue;
@@ -294,13 +500,17 @@ impl<'b> Flow<'b> {
             }
         }
         let rpo = rpo(body);
+        let mut rpo_at = vec![u32::MAX; n];
+        for (i, &b) in rpo.iter().enumerate() {
+            rpo_at[b as usize] = i as u32;
+        }
         Flow {
             body,
             atoms,
             tracked,
             ntracked,
-            contents: vec![Bits::new(atoms.len()); body.loans.len()],
-            made: vec![Bits::new(atoms.len()); body.loans.len()],
+            contents: vec![Set::new(atoms.len()); body.loans.len()],
+            made: vec![Set::new(atoms.len()); body.loans.len()],
             ref_like,
             ref_param,
             deep_param,
@@ -308,10 +518,26 @@ impl<'b> Flow<'b> {
             clause_param,
             decl,
             grown: false,
+            sets: SetTable::new(atoms.len()),
+            live: Liveness::default(),
+            mvar: Vec::new(),
+            mlive: Liveness::default(),
+            lent: Vec::new(),
+            pre: Vec::new(),
+            watch: false,
+            short: Cell::new(false),
+            exact: false,
+            carried: vec![false; n],
             entry: vec![None; n],
             preds,
             rpo,
+            rpo_at,
             rounds: 0,
+            cost: Cost::default(),
+            spare: None,
+            kept: Saved::default(),
+            slot: Vec::new(),
+            mslot: Vec::new(),
         }
     }
 
@@ -319,20 +545,8 @@ impl<'b> Flow<'b> {
         self.ref_like.get(&t).copied().unwrap_or(true)
     }
 
-    pub fn empty(&self) -> Bits {
-        Bits::new(self.atoms.len())
-    }
-
-    fn initial(&self) -> State {
-        let mut o = vec![self.empty(); self.ntracked];
-        for (i, l) in self.body.locals.iter().enumerate() {
-            if let (Some(p), t) = (l.param, self.tracked[i])
-                && t != u32::MAX
-            {
-                o[t as usize].insert(self.atoms.pb(p));
-            }
-        }
-        State { o, moved: Bits::new(self.body.locals.len()) }
+    pub fn empty(&self) -> Set {
+        Set::new(self.atoms.len())
     }
 
     /// Whether the body has no state to track: no ref-like local, no loan, no move site. Then no
@@ -344,38 +558,200 @@ impl<'b> Flow<'b> {
         self.ntracked == 0 && self.body.loans.is_empty() && self.body.move_sites.is_empty()
     }
 
+    /// Whether block `b` can be reached from the entry.
+    pub fn reached(&self, b: usize) -> bool {
+        self.rpo_at.get(b).is_some_and(|&i| i != u32::MAX)
+    }
+
+    /// Whether block `b` takes the state at the end of the block before it in `rpo`.
+    pub fn carried(&self, b: usize) -> bool {
+        self.carried[b]
+    }
+
+    /// What the dataflow did so far.
+    pub fn cost(&self) -> Cost {
+        Cost { atoms: self.sets.work(), ..self.cost }
+    }
+
+    /// A cleared state for a walk; [`Flow::recycle`] takes it back.
+    pub fn state(&mut self) -> State {
+        match self.spare.take() {
+            Some(mut st) => {
+                st.clear();
+                st
+            }
+            None => State::new(self.ntracked, self.body.locals.len()),
+        }
+    }
+
+    pub fn recycle(&mut self, st: State) {
+        self.spare = Some(st);
+    }
+
     /// Solves the forward dataflow.
     pub fn solve(&mut self) {
-        if self.body.blocks.is_empty() {
+        let body = self.body;
+        if body.blocks.is_empty() {
             return;
         }
+        self.cost.stmts = self.rpo.iter().map(|&b| body.blocks[b as usize].stmts.len() as u64).sum();
         if self.stateless() {
             // The fixpoint without iterating: the first round reaches every block of the reverse
             // postorder, and a second one finds nothing new if it set any entry but block 0's.
-            let init = self.initial();
             for &b in &self.rpo {
-                self.entry[b as usize] = Some(init.clone());
+                self.entry[b as usize] = Some(Saved::default());
             }
             self.rounds = if self.rpo.len() > 1 { 2 } else { 1 };
             return;
         }
-        self.entry[0] = Some(self.initial());
+        self.live =
+            liveness(body, &self.preds, &self.tracked, self.ntracked, |s, f| stmt_uses(s, |l, _| f(l)));
+        if !body.move_sites.is_empty() {
+            self.mvar = self.tested_after_move();
+            let nm = self.mvar.iter().filter(|&&v| v != u32::MAX).count();
+            self.mlive = liveness(body, &self.preds, &self.mvar, nm, |s, f| moved_tests(body, s, f));
+        }
+        self.cost.live = self.live.size() + self.mlive.size();
+        for i in 1..self.rpo.len() {
+            let b = self.rpo[i] as usize;
+            self.carried[b] = self.preds[b].len() == 1 && self.preds[b][0] == self.rpo[i - 1];
+        }
+        // a statement that can grow a local: a store through a dereference, a call that stores
+        let can_grow = body.blocks.iter().flat_map(|b| &b.stmts).any(|s| match &s.kind {
+            StmtKind::Assign { dest, rv, .. } => {
+                (dest.has_deref() && self.is_ref_like(dest.ty))
+                    || matches!(rv, Rvalue::Call { stores, .. } if !stores.is_empty())
+            }
+            _ => false,
+        });
+        if can_grow {
+            self.lent = vec![false; self.ntracked];
+            for l in &body.loans {
+                if !l.place.has_deref()
+                    && self.is_ref_like(l.place.ty)
+                    && let Some(&t) = self.tracked.get(l.place.local as usize)
+                    && t != u32::MAX
+                {
+                    self.lent[t as usize] = true;
+                }
+            }
+        }
+        self.iterate();
+        self.cost.grown = u64::from(self.grown);
+        if !(self.grown && self.short.get()) {
+            return;
+        }
+        // a round after the store read less than one before it found: only an entry state per
+        // block keeps what the earlier rounds found
+        self.exact = true;
+        self.cost.exact = 1;
+        self.grown = false;
+        self.pre = Vec::new();
+        self.carried.fill(false);
+        self.entry.fill(None);
+        let empty = self.empty();
+        self.contents.fill(empty.clone());
+        self.made.fill(empty);
+        self.iterate();
+    }
+
+    /// Whether a loan's contents may be read from the set of tracked local `t`.
+    pub fn is_lent(&self, t: u32) -> bool {
+        self.lent.get(t as usize).is_some_and(|&x| x)
+    }
+
+    /// Numbers the locals whose moved mark must be followed: those with an access that tests
+    /// the mark ([`moved_tests`]) and can run after one of their moves. The mark of any other
+    /// local is unset wherever it is tested.
+    ///
+    /// A path leads to later positions of the reverse postorder except over an edge that goes
+    /// back; so from a move, a test is reached only if it comes later in that order, or at
+    /// any position from the earliest one the edges going back from there on lead to.
+    fn tested_after_move(&self) -> Vec<u32> {
+        let body = self.body;
+        let n = self.rpo.len();
+        // per position: the earliest position an edge going back from it or a later one leads to
+        let mut back = vec![u32::MAX; n + 1];
+        for (i, &b) in self.rpo.iter().enumerate().rev() {
+            back[i] = back[i + 1];
+            for &succ in body.blocks[b as usize].term.succs() {
+                let to = self.rpo_at[succ as usize];
+                if to <= i as u32 {
+                    back[i] = back[i].min(to);
+                }
+            }
+        }
+        // per local: its first move and its last test, as (position, statement)
+        let none = (u32::MAX, u32::MAX);
+        let mut first_move = vec![none; body.locals.len()];
+        let mut last_test: Vec<Option<(u32, u32)>> = vec![None; body.locals.len()];
+        for (i, &b) in self.rpo.iter().enumerate() {
+            for (k, s) in body.blocks[b as usize].stmts.iter().enumerate() {
+                let at = (i as u32, k as u32);
+                stmt_moves(s, |l| first_move[l as usize] = first_move[l as usize].min(at));
+                moved_tests(body, s, &mut |l| last_test[l as usize] = last_test[l as usize].max(Some(at)));
+            }
+        }
+        let mut mvar = vec![u32::MAX; body.locals.len()];
+        let mut nm = 0;
+        for l in 0..body.locals.len() {
+            let (m, Some(t)) = (first_move[l], last_test[l]) else { continue };
+            if m == none {
+                continue;
+            }
+            let mut from = m.0;
+            while back[from as usize] < from {
+                from = back[from as usize];
+            }
+            let again = back[m.0 as usize] <= m.0;
+            if t > m || (again && t.0 >= from) {
+                mvar[l] = nm;
+                nm += 1;
+            }
+        }
+        mvar
+    }
+
+    /// Runs the rounds to the fixpoint.
+    fn iterate(&mut self) {
+        let body = self.body;
+        let mut st = self.state();
+        for (i, l) in body.locals.iter().enumerate() {
+            if let (Some(p), t) = (l.param, self.tracked[i])
+                && t != u32::MAX
+            {
+                let mut s = self.empty();
+                s.insert(self.atoms.pb(p));
+                self.put_o(&mut st, t, &s);
+            }
+        }
+        self.save(0, &st);
         let order = self.rpo.clone();
+        self.watch = true;
         for round in 1..=100_000u32 {
             self.rounds = round;
+            self.short.set(false);
             let mut changed = false;
+            // whether `st` is the state at the end of the block before
+            let mut have = false;
             for &b in &order {
-                let Some(mut st) = self.entry[b as usize].clone() else { continue };
-                for s in &self.body.blocks[b as usize].stmts {
+                let b = b as usize;
+                if !self.carried[b] {
+                    have = self.load(b, &mut st);
+                }
+                if !have {
+                    continue;
+                }
+                for s in &body.blocks[b].stmts {
                     changed |= self.apply(&s.kind, &mut st);
                 }
-                for &succ in self.body.blocks[b as usize].term.succs() {
-                    match &mut self.entry[succ as usize] {
-                        Some(e) => changed |= e.union_with(&st),
-                        slot @ None => {
-                            *slot = Some(st.clone());
-                            changed = true;
-                        }
+                let succs = body.blocks[b].term.succs();
+                if succs.len() > 1 && succs.iter().any(|&succ| !self.carried[succ as usize]) {
+                    self.prune(b, &mut st);
+                }
+                for &succ in succs {
+                    if !self.carried[succ as usize] {
+                        changed |= self.save(succ as usize, &st);
                     }
                 }
             }
@@ -383,30 +759,221 @@ impl<'b> Flow<'b> {
                 break;
             }
         }
+        self.watch = false;
+        self.recycle(st);
     }
 
-    pub fn local_o(&self, st: &State, l: LocalId) -> Bits {
+    /// The index of local `l` among the locals whose moved mark is followed (`u32::MAX`: not
+    /// one).
+    fn mvar_of(&self, l: LocalId) -> u32 {
+        self.mvar.get(l as usize).copied().unwrap_or(u32::MAX)
+    }
+
+    /// Drops from `st`, the state at the end of block `b`, what cannot be read from there on.
+    pub fn prune(&mut self, b: usize, st: &mut State) {
+        self.cost.copied += (st.held.len() + st.marked.len()) as u64;
+        let mut k = 0;
+        for i in 0..st.held.len() {
+            let t = st.held[i];
+            let read = self.live.live_out(t, b as u32) || self.is_lent(t);
+            if st.o[t as usize] != 0 && read {
+                st.held[k] = t;
+                k += 1;
+            } else {
+                st.o[t as usize] = 0;
+                st.in_held[t as usize] = false;
+            }
+        }
+        st.held.truncate(k);
+        let mut k = 0;
+        for i in 0..st.marked.len() {
+            let l = st.marked[i];
+            if st.moved[l as usize] && self.mlive.live_out(self.mvar_of(l), b as u32) {
+                st.marked[k] = l;
+                k += 1;
+            } else {
+                st.moved[l as usize] = false;
+                st.in_marked[l as usize] = false;
+            }
+        }
+        st.marked.truncate(k);
+    }
+
+    /// What the entry of block `b` keeps of state `st`.
+    pub fn keep(&mut self, b: usize, st: &State, out: &mut Saved) {
+        out.o.clear();
+        out.moved.clear();
+        for &t in &st.held {
+            let id = st.o[t as usize];
+            if id != 0 && (self.live.live_in(t, b as u32) || self.is_lent(t)) {
+                out.o.push((t, id));
+            }
+        }
+        for &l in &st.marked {
+            if st.moved[l as usize] && self.mlive.live_in(self.mvar_of(l), b as u32) {
+                out.moved.push(l);
+            }
+        }
+        self.cost.copied += (st.held.len() + st.marked.len()) as u64;
+    }
+
+    /// Adds state `st` to the entry state of block `b`; whether that changed.
+    fn save(&mut self, b: usize, st: &State) -> bool {
+        let mut kept = std::mem::take(&mut self.kept);
+        self.keep(b, st, &mut kept);
+        let changed = match self.entry[b].take() {
+            None => {
+                self.entry[b] = Some(kept.clone());
+                true
+            }
+            Some(mut e) => {
+                let changed = self.join(&mut e, &kept);
+                self.entry[b] = Some(e);
+                changed
+            }
+        };
+        self.kept = kept;
+        changed
+    }
+
+    /// `into |= from`; whether `into` changed.
+    fn join(&mut self, into: &mut Saved, from: &Saved) -> bool {
+        if from.o.is_empty() && from.moved.is_empty() {
+            return false;
+        }
+        self.cost.copied += (into.o.len() + into.moved.len()) as u64;
+        if self.slot.is_empty() {
+            self.slot = vec![0; self.ntracked];
+            self.mslot = vec![0; self.body.locals.len()];
+        }
+        let mut changed = false;
+        for (k, &(t, _)) in into.o.iter().enumerate() {
+            self.slot[t as usize] = k as u32 + 1;
+        }
+        for &(t, id) in &from.o {
+            let k = self.slot[t as usize];
+            if k == 0 {
+                into.o.push((t, id));
+                self.slot[t as usize] = into.o.len() as u32;
+                changed = true;
+            } else {
+                let have = &mut into.o[k as usize - 1].1;
+                let all = self.sets.union(*have, id);
+                changed |= all != *have;
+                *have = all;
+            }
+        }
+        for &(t, _) in &into.o {
+            self.slot[t as usize] = 0;
+        }
+        for &l in &into.moved {
+            self.mslot[l as usize] = 1;
+        }
+        for &l in &from.moved {
+            if self.mslot[l as usize] == 0 {
+                self.mslot[l as usize] = 1;
+                into.moved.push(l);
+                changed = true;
+            }
+        }
+        for &l in &into.moved {
+            self.mslot[l as usize] = 0;
+        }
+        changed
+    }
+
+    /// Sets `st` to the saved state `e`.
+    pub fn restore(&mut self, e: &Saved, st: &mut State) {
+        st.clear();
+        for &(t, id) in &e.o {
+            st.write(t, id);
+        }
+        for &l in &e.moved {
+            st.set_moved(l, true);
+        }
+        self.cost.copied += (e.o.len() + e.moved.len()) as u64;
+    }
+
+    /// Sets `st` to the entry state of block `b`, which has one; `false`: it has none yet.
+    pub fn load(&mut self, b: usize, st: &mut State) -> bool {
+        let Some(e) = self.entry[b].take() else { return false };
+        self.restore(&e, st);
+        self.entry[b] = Some(e);
+        true
+    }
+
+    /// Sets `st` to the state at the entry of block `b` of a solved body; `false`: the block is
+    /// unreachable. A block without an entry state gets the state walked from the nearest block
+    /// before it that has one.
+    pub fn enter(&mut self, b: usize, st: &mut State) -> bool {
+        if !self.reached(b) {
+            return false;
+        }
+        let mut walk: Vec<usize> = Vec::new();
+        let mut c = b;
+        while self.carried[c] {
+            c = self.preds[c][0] as usize;
+            walk.push(c);
+        }
+        if !self.load(c, st) {
+            return false;
+        }
+        let body = self.body;
+        for &x in walk.iter().rev() {
+            for s in &body.blocks[x].stmts {
+                self.apply(&s.kind, st);
+            }
+        }
+        true
+    }
+
+    pub fn local_o(&self, st: &State, l: LocalId) -> Set {
         match self.tracked.get(l as usize) {
-            Some(&t) if t != u32::MAX => st.o[t as usize].clone(),
+            Some(&t) if t != u32::MAX => self.sets.get(st.o[t as usize]).clone(),
             _ => self.empty(),
         }
+    }
+
+    /// Makes `s` the set of tracked local `t`.
+    fn put_o(&mut self, st: &mut State, t: u32, s: &Set) {
+        if self.sets.get(st.o[t as usize]) == s {
+            return;
+        }
+        let id = self.sets.id(s);
+        st.put(t, id);
+    }
+
+    /// Adds `s` to the set of tracked local `t`; whether it changed.
+    fn add_o(&mut self, st: &mut State, t: u32, s: &Set) -> bool {
+        let cur = self.sets.get(st.o[t as usize]);
+        if s.is_subset(cur) {
+            return false;
+        }
+        let mut all = cur.clone();
+        all.union_with(s);
+        self.put_o(st, t, &all);
+        true
     }
 
     /// The origins of the value in the place loan `l` borrows: the set taken when the loan was
     /// made, and once a store has grown a local, for a borrowed local what its set says in `st`
     /// (a store adds to it from the store on: what is stored later on the path is not in the
     /// place yet).
-    fn loan_holds(&self, st: &State, l: usize) -> Bits {
+    pub fn loan_holds(&self, st: &State, l: usize) -> Set {
         let place = &self.body.loans[l].place;
         if self.grown && !place.has_deref() && self.is_ref_like(place.ty) {
-            self.local_o(st, place.local)
+            let now = self.local_o(st, place.local);
+            if self.watch && !self.exact && self.pre.get(l).is_some_and(|was| !was.is_subset(&now)) {
+                self.short.set(true);
+            }
+            now
         } else {
             self.contents[l].clone()
         }
     }
 
     /// `contents(S)` in state `st`.
-    pub fn contents_of(&self, st: &State, s: &Bits) -> Bits {
+    pub fn contents_of(&self, st: &State, s: &Set) -> Set {
         let mut out = self.empty();
         for a in s.iter() {
             if a < self.atoms.nloans {
@@ -420,7 +987,7 @@ impl<'b> Flow<'b> {
 
     /// The origins of the value stored at `p` (after all its dereferences), and of the pointer
     /// of its last dereference (`None` without one).
-    pub fn place_origins(&self, st: &State, p: &Place) -> (Bits, Option<Bits>) {
+    pub fn place_origins(&self, st: &State, p: &Place) -> (Set, Option<Set>) {
         let mut cur = self.local_o(st, p.local);
         let mut ptr = None;
         for pr in &p.proj {
@@ -439,7 +1006,7 @@ impl<'b> Flow<'b> {
     /// origins `s` reaches in state `st`. A borrowed local holds what its set says in `st` (a
     /// store adds to it from the store on, so a borrow stored later on the path is not reached
     /// yet); a place behind a dereference, what it held when it was borrowed.
-    pub fn reach(&self, st: &State, s: &Bits) -> Bits {
+    pub fn reach(&self, st: &State, s: &Set) -> Set {
         let mut out = s.clone();
         if !self.grown {
             // every borrow carries the origins of the value it borrows: `s` is closed
@@ -460,7 +1027,7 @@ impl<'b> Flow<'b> {
     /// Whether the clause of some `&mut` param names param `i` and covers the origins `held`:
     /// the caller's store through that param's argument then grows every view the argument of
     /// `i` reaches, with at least `held`.
-    fn covered(&self, i: u32, held: &Bits) -> bool {
+    fn covered(&self, i: u32, held: &Set) -> bool {
         let pb = self.atoms.pb(i);
         self.clause_param.iter().any(|t| self.decl[t].contains(pb) && held.is_subset(&self.decl[t]))
     }
@@ -500,8 +1067,8 @@ impl<'b> Flow<'b> {
     pub fn store_fits(
         &self,
         st: &State,
-        ptr: &Bits,
-        val: &Bits,
+        ptr: &Set,
+        val: &Set,
         direct: Option<u32>,
         call: Option<bool>,
     ) -> Result<(), Misfit> {
@@ -528,7 +1095,7 @@ impl<'b> Flow<'b> {
         // whether an atom names a view object the pointer may point to
         let mut placed = false;
         // the one param whose clause lacks origins, with them
-        let mut want: Option<(u32, Bits)> = None;
+        let mut want: Option<(u32, Set)> = None;
         for a in targets.iter() {
             if let Some(l) = body.loans.get(a) {
                 if !l.mutable || l.place.has_deref() || !self.is_ref_like(l.place.ty) {
@@ -613,7 +1180,7 @@ impl<'b> Flow<'b> {
     }
 
     /// The `from` entries (param, `copy`) that cover the param atoms `missing`.
-    fn clause_entries(&self, missing: &Bits) -> Vec<(u32, bool)> {
+    fn clause_entries(&self, missing: &Set) -> Vec<(u32, bool)> {
         let mut out: Vec<(u32, bool)> = Vec::new();
         for m in missing.iter() {
             let Some((q, copy)) = self.atoms.param(m) else { continue };
@@ -656,7 +1223,7 @@ impl<'b> Flow<'b> {
     /// view object the pointer may point to or reach gains `val` (module doc, **Stores**).
     /// `call`: the store of a call, which also reaches what its sources reach. Whether a loan's
     /// contents changed, and whether a local's set did.
-    fn grow(&mut self, st: &mut State, ptr: &Bits, val: &Bits, call: bool) -> (bool, bool) {
+    fn grow(&mut self, st: &mut State, ptr: &Set, val: &Set, call: bool) -> (bool, bool) {
         let body = self.body;
         let mut targets = self.reach(st, ptr);
         if call {
@@ -681,14 +1248,18 @@ impl<'b> Flow<'b> {
                     add.remove(m);
                 }
             }
-            if self.contents[a].union_with(&add) {
-                contents = true;
+            if !add.is_subset(&self.contents[a]) {
+                if !self.grown && !self.exact {
+                    self.pre = self.contents.clone();
+                }
                 self.grown = true;
+                self.contents[a].union_with(&add);
+                contents = true;
             }
             if let Some(&t) = self.tracked.get(l.place.local as usize)
                 && t != u32::MAX
             {
-                state |= st.o[t as usize].union_with(&add);
+                state |= self.add_o(st, t, &add);
             }
         }
         (contents, state)
@@ -710,7 +1281,7 @@ impl<'b> Flow<'b> {
     /// ([`Flow::made`]), other than the reborrow of the temporary that holds exactly `m`: such
     /// a reference may point into the local, beside the place written, and only `m` keeps the
     /// local from being used directly while it is held.
-    fn cannot_hold(&self, target: usize, m: usize, val: &Bits) -> bool {
+    fn cannot_hold(&self, target: usize, m: usize, val: &Set) -> bool {
         let loans = &self.body.loans;
         let (Some(l), Some(x)) = (loans.get(target), loans.get(m)) else { return false };
         if m == target
@@ -729,7 +1300,7 @@ impl<'b> Flow<'b> {
 
     /// The origins of the pointers a borrow of `p` goes through (module doc, **Contents**): of
     /// every dereference after the last `&` one, and of that one.
-    fn through(&self, st: &State, p: &Place) -> Bits {
+    fn through(&self, st: &State, p: &Place) -> Set {
         let mut cur = self.local_o(st, p.local);
         let mut out = self.empty();
         for pr in &p.proj {
@@ -747,7 +1318,7 @@ impl<'b> Flow<'b> {
         out
     }
 
-    pub fn op_origins(&self, st: &State, op: &Operand) -> Bits {
+    pub fn op_origins(&self, st: &State, op: &Operand) -> Set {
         if op.kind == OpKind::Const || !self.is_ref_like(op.place.ty) {
             return self.empty();
         }
@@ -755,7 +1326,7 @@ impl<'b> Flow<'b> {
     }
 
     /// The origin set of an rvalue; `contents` of a created loan is recorded.
-    pub fn rv_origins(&mut self, st: &State, rv: &Rvalue, dest_ty: TypeId) -> (Bits, bool) {
+    pub fn rv_origins(&mut self, st: &State, rv: &Rvalue, dest_ty: TypeId) -> (Set, bool) {
         let mut changed = false;
         let s = match rv {
             Rvalue::Use(op) => self.op_origins(st, op),
@@ -818,6 +1389,7 @@ impl<'b> Flow<'b> {
 
     /// Applies statement `k` to `st`; whether a loan's contents changed.
     pub fn apply(&mut self, k: &StmtKind, st: &mut State) -> bool {
+        self.cost.applied += 1;
         let mut changed = false;
         match k {
             StmtKind::Assign { dest, rv, .. } => {
@@ -831,7 +1403,7 @@ impl<'b> Flow<'b> {
                 changed |= ch;
                 for_each_op(rv, |o| {
                     if o.kind == OpKind::Move {
-                        st.moved.insert(o.place.local as usize);
+                        st.set_moved(o.place.local, true);
                     }
                 });
                 // re-initialized: moves of the place or below it are undone
@@ -846,9 +1418,9 @@ impl<'b> Flow<'b> {
                     && t != u32::MAX
                 {
                     if dest.proj.is_empty() {
-                        st.o[t as usize] = s;
+                        self.put_o(st, t, &s);
                     } else {
-                        st.o[t as usize].union_with(&s);
+                        self.add_o(st, t, &s);
                     }
                 }
             }
@@ -856,10 +1428,12 @@ impl<'b> Flow<'b> {
                 if let Some(&t) = self.tracked.get(*local as usize)
                     && t != u32::MAX
                 {
-                    let o = &mut st.o[t as usize];
+                    let o = self.sets.get(st.o[t as usize]);
                     if o.contains(*reserved as usize) {
+                        let mut o = o.clone();
                         o.remove(*reserved as usize);
                         o.insert(*active as usize);
+                        self.put_o(st, t, &o);
                     }
                 }
                 let c = self.contents.get(*reserved as usize).cloned();
@@ -876,14 +1450,14 @@ impl<'b> Flow<'b> {
                 if let Some(&t) = self.tracked.get(*l as usize)
                     && t != u32::MAX
                 {
-                    st.o[t as usize].clear();
+                    st.put(t, 0);
                 }
                 let p = Place::local(*l, TypeId::NONE);
                 self.reinit(st, &p);
             }
             StmtKind::Return(o) | StmtKind::Read(o) => {
                 if o.kind == OpKind::Move {
-                    st.moved.insert(o.place.local as usize);
+                    st.set_moved(o.place.local, true);
                 }
             }
             StmtKind::Drop(_) => {}
@@ -895,23 +1469,12 @@ impl<'b> Flow<'b> {
     /// use of it (E0502).
     fn reinit(&self, st: &mut State, dest: &Place) {
         if dest.proj.is_empty() {
-            st.moved.remove(dest.local as usize);
+            st.set_moved(dest.local, false);
         }
     }
 
-    /// The loans the given live locals reach: those in their origin sets, and after a call's
-    /// store those in the contents of such loans.
-    pub fn live_loans(&self, st: &State, live: &Bits) -> Bits {
-        let mut out = self.empty();
-        for t in live.iter() {
-            if let Some(o) = st.o.get(t) {
-                out.union_with(o);
-            }
-        }
-        if self.grown { self.reach(st, &out) } else { out }
-    }
-
-    /// Whether local `l` reaches loan `loan` ([`Flow::live_loans`]).
+    /// Whether local `l` reaches loan `loan`: it holds it, or after a call's store holds a loan
+    /// whose contents reach it.
     pub fn holds(&self, st: &State, l: LocalId, loan: LoanId) -> bool {
         let o = self.local_o(st, l);
         o.contains(loan as usize) || (self.grown && self.reach(st, &o).contains(loan as usize))
@@ -919,6 +1482,50 @@ impl<'b> Flow<'b> {
 
     pub fn loan(&self, l: LoanId) -> &crate::cfg::Loan {
         &self.body.loans[l as usize]
+    }
+}
+
+/// The locals a statement's move operands move.
+fn stmt_moves(s: &Stmt, mut f: impl FnMut(LocalId)) {
+    match &s.kind {
+        StmtKind::Assign { rv, .. } => for_each_op(rv, |o| {
+            if o.kind == OpKind::Move {
+                f(o.place.local)
+            }
+        }),
+        StmtKind::Read(o) | StmtKind::Return(o) if o.kind == OpKind::Move => f(o.place.local),
+        _ => {}
+    }
+}
+
+/// The locals whose moved mark the accesses of a statement test ([`crate::check`]): every
+/// access but a drop, a storage-dead, and the write of a whole local.
+fn moved_tests(body: &Body, s: &Stmt, f: &mut dyn FnMut(LocalId)) {
+    match &s.kind {
+        StmtKind::Assign { dest, rv, init } => {
+            for_each_op(rv, |o| {
+                if o.kind != OpKind::Const {
+                    f(o.place.local)
+                }
+            });
+            if let Rvalue::Ref { place, .. } = rv {
+                f(place.local);
+            }
+            if !*init && !dest.proj.is_empty() {
+                f(dest.local);
+            }
+        }
+        StmtKind::Activate { reserved, .. } => {
+            if let Some(l) = body.loans.get(*reserved as usize) {
+                f(l.place.local);
+            }
+        }
+        StmtKind::Read(o) | StmtKind::Return(o) => {
+            if o.kind != OpKind::Const {
+                f(o.place.local)
+            }
+        }
+        StmtKind::Drop(_) | StmtKind::StorageDead(_) => {}
     }
 }
 

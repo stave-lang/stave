@@ -6,18 +6,21 @@
 //! becomes initialized when it or a part of it is assigned (params and captures on entry), and
 //! stops being so when it is moved out, dropped as a whole, or dies (a value moves whole: a
 //! pattern that takes it apart moves its source). At a call, the locals the call's arguments move out as a whole are
-//! not counted: the callee holds them, and its own calls are checked in its body. A drop (a
-//! `Drop` statement, or the old value an assignment overwrites) runs the type's drop glue: it is
-//! checked like a call, without the local it drops. The types a body really drops (a drop of a
-//! value that may be initialized) are reported for every body: the call graph's drop edges
-//! (every type a body makes or owns) narrowed to them, a constructor that returns its value drops
-//! nothing.
+//! not counted: the callee holds them, and its own calls are checked in its body. A drop runs the
+//! type's drop glue: it is checked like a call, without the local it drops, and, when the dropped
+//! value itself may hold a lock, against the guards inside it ([`HeldAt::own`]). The drops are
+//! the CFG's drop statements, which are the body's drop schedule ([`stave_sema::drops`]): a
+//! scope or statement end, an exit, a part a pattern ignores, the old value of an assignment
+//! (behind a dereference the assignment itself stands for it). The types a body really drops (a
+//! drop of a value that may be initialized) are reported for every body: the call graph's drop
+//! edges (every type a body makes or owns) narrowed to them, a constructor that returns its value
+//! drops nothing.
 
 use stave_sema::ranks::{At, Held, HeldAt, Part};
 
 use crate::bits::Bits;
 use crate::cfg::{Body, LocalId, OpKind, Rvalue, StmtKind};
-use crate::loans::{Flow, for_each_op};
+use crate::loans::for_each_op;
 use crate::ty::Tys;
 
 /// The locks of one body (nested bodies are scanned separately).
@@ -57,18 +60,39 @@ fn ended(k: &StmtKind, mut f: impl FnMut(LocalId)) {
     }
 }
 
-/// Scans `flow`'s body.
-pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
-    let body: &Body = flow.body;
+/// For the drop of part `p` of a value: when the statements after it (`rest`) are drops of other
+/// parts of the same local and then the move of that whole local, `p` is a part a pattern ignores
+/// (stave-borrow `cfg`, `destructure`): the types of the parts dropped after it.
+fn later_parts(rest: &[crate::cfg::Stmt], p: &crate::cfg::Place) -> Option<Vec<stave_sema::TypeId>> {
+    let mut out = Vec::new();
+    for s in rest {
+        match &s.kind {
+            StmtKind::Drop(q) if q.local == p.local && !q.proj.is_empty() => out.push(q.ty),
+            StmtKind::Read(o) if o.place.local == p.local && o.place.proj.is_empty() => {
+                return Some(out);
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Scans `body`: `rpo` is the reverse postorder of its reachable blocks, `ref_like` whether a
+/// type of one of its locals is ref-like.
+pub fn scan(
+    body: &Body,
+    rpo: &[u32],
+    ref_like: &dyn Fn(stave_sema::TypeId) -> bool,
+    tys: &mut Tys<'_>,
+) -> Scan {
     let mut out = Scan { drops: Some(Vec::new()), ..Scan::default() };
     let mut drops_any = false;
     for b in &body.blocks {
         for s in &b.stmts {
-            match &s.kind {
-                StmtKind::Assign { rv: Rvalue::Call { tok, .. }, .. } => out.calls.push(*tok),
-                StmtKind::Drop(_) | StmtKind::Assign { init: false, .. } => drops_any = true,
-                _ => {}
+            if let StmtKind::Assign { rv: Rvalue::Call { tok, .. }, .. } = &s.kind {
+                out.calls.push(*tok);
             }
+            drops_any |= matches!(&s.kind, StmtKind::Drop(_) | StmtKind::Assign { init: false, .. });
         }
     }
     // the locals that may hold a lock, with their parts (each type walked once), first
@@ -76,7 +100,7 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
     let mut idx: Vec<u32> = vec![u32::MAX; body.locals.len()];
     let mut memo: Vec<(stave_sema::TypeId, Vec<Part>)> = Vec::new();
     for (i, l) in body.locals.iter().enumerate() {
-        if l.ty.is_none() || !flow.is_ref_like(l.ty) {
+        if l.ty.is_none() || !ref_like(l.ty) {
             continue;
         }
         let ps = match memo.iter().find(|m| m.0 == l.ty) {
@@ -139,7 +163,7 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
     };
     loop {
         let mut changed = false;
-        for &b in &flow.rpo {
+        for &b in rpo {
             let Some(mut st) = entry[b as usize].clone() else { continue };
             for s in &body.blocks[b as usize].stmts {
                 step(&s.kind, &mut st);
@@ -169,17 +193,33 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
             .map(|i| Held { parts: parts[i].clone(), span: body.locals[local_of[i] as usize].span })
             .collect()
     };
+    // the parts of a value of a type that may hold a lock
+    let mut own = |t: stave_sema::TypeId, tys: &mut Tys<'_>| -> Vec<Part> {
+        if t.is_none() {
+            return Vec::new();
+        }
+        match memo.iter().find(|m| m.0 == t) {
+            Some(m) => m.1.clone(),
+            None => {
+                let ps = stave_sema::ranks::lock_parts(&mut tys.ov, tys.prog, tys.sigs, tys.env, t);
+                memo.push((t, ps.clone()));
+                ps
+            }
+        }
+    };
     let mut dropped: Vec<stave_sema::TypeId> = Vec::new();
     let mut any = Bits::new(n);
-    for &b in &flow.rpo {
+    for &b in rpo {
         let Some(mut st) = entry[b as usize].clone() else { continue };
-        for s in &body.blocks[b as usize].stmts {
+        let stmts = &body.blocks[b as usize].stmts;
+        for (si, s) in stmts.iter().enumerate() {
             any.union_with(&st);
-            // the drops that may run, and what they drop (an overwrite drops the old value)
+            // the drops that may run, and what they drop (an assignment through a dereference
+            // drops the old value; any other has a drop statement before it)
             let drop = match &s.kind {
                 StmtKind::Drop(p) if live(&st, p.local) => Some((p.ty, Some(p))),
                 StmtKind::Assign { dest, init: false, .. }
-                    if live(&st, dest.local) && tys.needs_drop(dest.ty) =>
+                    if dest.has_deref() && live(&st, dest.local) && tys.needs_drop(dest.ty) =>
                 {
                     Some((dest.ty, None))
                 }
@@ -201,31 +241,62 @@ pub fn scan(flow: &Flow<'_>, tys: &mut Tys<'_>) -> Scan {
                         }
                     }
                     if holding(&at) {
-                        out.sites.push(HeldAt { at: At::Call(*tok), span: s.span, held: held(&at) });
+                        out.sites.push(HeldAt {
+                            at: At::Call(*tok),
+                            span: s.span,
+                            held: held(&at),
+                            own: None,
+                        });
                     }
                 }
                 StmtKind::Read(o) if holding(&st) => {
                     if let Some(&(_, scope)) = body.joins.iter().find(|j| j.0 == o.place.local) {
-                        out.sites.push(HeldAt { at: At::Join(scope), span: s.span, held: held(&st) });
+                        out.sites.push(HeldAt {
+                            at: At::Join(scope),
+                            span: s.span,
+                            held: held(&st),
+                            own: None,
+                        });
                     }
                 }
                 _ => {}
             }
-            // a drop runs the type's drop glue: a call, holding all but what it drops; an
-            // overwriting assignment whose value is a call (a user compound operator) is both
-            if let Some((t, whole)) = drop
-                && holding(&st)
-            {
+            // a drop runs the type's drop glue: a call, holding all but what it drops, and
+            // what the dropped value holds itself until the glue reaches it
+            if let Some((t, whole)) = drop {
+                let inner = !own(t, tys).is_empty();
                 let mut at = st.clone();
+                // A part a pattern ignores is dropped where the pattern binds, before the value
+                // it takes apart moves. Of that value, the parts bound are the bindings' by
+                // then, the ignored parts before this one are gone, and the ones after it are
+                // still inside: those are held, the value as a whole is not.
+                let later =
+                    whole.filter(|p| !p.proj.is_empty()).and_then(|p| later_parts(&stmts[si + 1..], p));
+                let mut more: Vec<Held> = Vec::new();
                 if let Some(p) = whole
-                    && p.proj.is_empty()
+                    && (p.proj.is_empty() || later.is_some())
                     && let Some(&i) = idx.get(p.local as usize)
                     && i != u32::MAX
                 {
                     at.remove(i as usize);
                 }
-                if holding(&at) {
-                    out.sites.push(HeldAt { at: At::Drop(t), span: s.span, held: held(&at) });
+                if let (Some(p), Some(ts)) = (whole, later) {
+                    for q in ts {
+                        let parts = own(q, tys);
+                        if !parts.is_empty() {
+                            more.push(Held { parts, span: body.locals[p.local as usize].span });
+                        }
+                    }
+                }
+                if holding(&at) || inner || !more.is_empty() {
+                    let own = inner.then(|| match whole {
+                        Some(p) => body.locals[p.local as usize].span,
+                        None => s.span,
+                    });
+                    let mut held = held(&at);
+                    held.extend(more);
+                    out.sites.push(HeldAt { at: At::Drop(t), span: s.span, held, own });
+                    out.holds = true;
                 }
             }
             step(&s.kind, &mut st);
