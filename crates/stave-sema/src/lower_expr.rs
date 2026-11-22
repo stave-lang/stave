@@ -170,11 +170,13 @@ impl<'a> FnCx<'a> {
             self.depth -= 1;
             return self.fail(n, "expression nesting too deep");
         }
+        let outer = std::mem::replace(&mut self.f.cur, n);
         let e = self.expr_node(n, want);
         let e = match self.coercion_of(n) {
             Some(co) => self.coerce(e, co, want),
             None => e,
         };
+        self.f.cur = outer;
         self.depth -= 1;
         e
     }
@@ -738,13 +740,20 @@ impl<'a> FnCx<'a> {
         let Some(cv) = self.val(c, Some(bt)) else { return E::Never };
         self.f.b.cbr(cv, then, &[], els, &[]);
         let snap = self.f.env.clone();
+        // each branch is a statement of its own: its temporaries end before the join
         self.f.b.switch_to(then);
-        if let Some(v) = self.val(a, Some(vt)) {
+        self.begin_temps(a);
+        let v = self.val(a, Some(vt));
+        self.end_temps();
+        if let Some(v) = v {
             self.br_join(j, &[v]);
         }
         self.f.env = snap;
         self.f.b.switch_to(els);
-        if let Some(v) = self.val(b, Some(vt)) {
+        self.begin_temps(b);
+        let v = self.val(b, Some(vt));
+        self.end_temps();
+        if let Some(v) = v {
             self.br_join(j, &[v]);
         }
         let reached = self.f.joins[j].st.is_some();

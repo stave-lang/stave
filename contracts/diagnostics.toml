@@ -982,17 +982,37 @@ fix = { description = "use `{param}` in the self type, move it to the methods th
 code = "E0501"
 severity = "error"
 area = "borrow"
-rule = "borrow conflict (borrow site, conflicting access, later use); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement)"
-holes = { access = "text-literal", place = "place", loan = "text-literal", loaned = "place" }
-choices = { access = ["borrow mutably", "borrow", "move", "assign to", "drop"], loan = ["`&mut`", "`&`"] }
+rule = "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check or the operand of `old(e)`; `temporary-loop`: the iterator value of a `for`, which ends with the loop"
+holes = { access = "text-literal", place = "place", loan = "text-literal", loaned = "place", stmt = "text-literal", bind = "text-literal", tref = "text-literal", later = "text-literal" }
+choices = { access = ["borrow mutably", "borrow", "move", "assign to", "drop"], loan = ["`&mut`", "`&`"], stmt = ["statement", "condition", "guard", "branch", "arm", "check", "loop"], bind = ["let t", "let mut t"], tref = ["&t", "&mut t"], later = ["later here", "here, in the next iteration"] }
 message = "cannot {access} `{place}`: it has a live {loan} borrow"
 labels = [{ at = "primary", text = "{access} here" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used later here" }]
 fix = { description = "end the borrow before this point: move the later use before it, or copy the value out first" }
 
 [diag.cases.temporary]
-message = "the temporary `{place}` ends with its statement, but a {loan} borrow of it is used later"
-labels = [{ at = "primary", text = "temporary made here: it ends at the end of the statement" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used later here" }]
-fix = { description = "bind the value to a local first and borrow the local: `let t = {place};`, then `&t`" }
+message = "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later"
+labels = [{ at = "primary", text = "temporary made here: it ends at the end of its {stmt}" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used {later}" }]
+fix = { description = "bind the value to a local first and borrow the local: `{bind} = {place};`, then `{tref}`" }
+
+[diag.cases.temporary-branch]
+message = "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later"
+labels = [{ at = "primary", text = "temporary made here: it ends at the end of its {stmt}" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used {later}" }]
+fix = { description = "bind it with `let` before the `if`: `{bind} = {place};`, then `{tref}` in the branch" }
+
+[diag.cases.temporary-arm]
+message = "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later"
+labels = [{ at = "primary", text = "temporary made here: it ends at the end of its {stmt}" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used {later}" }]
+fix = { description = "bind it with `let` before the `match`: `{bind} = {place};`, then `{tref}` in the arm" }
+
+[diag.cases.temporary-clause]
+message = "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later"
+labels = [{ at = "primary", text = "temporary made here: it ends at the end of its {stmt}" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used {later}" }]
+fix = { description = "a contract clause binds no local: use the value `{place}`, not a borrow of it" }
+
+[diag.cases.temporary-loop]
+message = "the iterator `{place}` ends with its {stmt}, but a {loan} borrow of it is used later"
+labels = [{ at = "primary", text = "iterator made here: it ends at the end of its {stmt}" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used {later}" }]
+fix = { description = "bind the iterator to a local before the loop and iterate through `&mut`: `let mut t = {place};`, then `for .. in &mut t`" }
 
 [[diag]]
 code = "E0502"

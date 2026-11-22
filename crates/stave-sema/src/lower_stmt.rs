@@ -486,7 +486,7 @@ impl<'a> FnCx<'a> {
                 return;
             }
             let t = self.nty(e);
-            self.begin_temps();
+            self.begin_temps(e);
             let v = self.val(e, Some(t));
             self.end_temps();
             let Some(v) = v else { return };
@@ -518,14 +518,18 @@ impl<'a> FnCx<'a> {
         let Some(c) = self.contracts() else { return };
         let trace =
             if c.requires.iter().any(|cl| self.clause_calls(cl.expr)) { self.trace_save() } else { None };
-        for cl in &c.requires {
+        // each check of a clause is its own filter, in order, as in `contract_check`
+        let icx = self.icx;
+        let checks: Vec<u32> =
+            c.requires.iter().flat_map(|cl| crate::temps::conjuncts(&icx, cl.expr)).collect();
+        for e in checks {
             if !self.open() {
                 return;
             }
             let bt = self.t_bool();
             self.hold_site = true;
-            self.begin_temps();
-            let v = self.val(cl.expr, Some(bt));
+            self.begin_temps(e);
+            let v = self.val(e, Some(bt));
             self.end_temps();
             self.hold_site = false;
             let Some(v) = v else { return };
@@ -632,18 +636,13 @@ impl<'a> FnCx<'a> {
         at: Option<u32>,
         trace: Option<(Operand, Ty)>,
     ) {
-        let conjuncts = if self.nkind(cl.expr) == Some(NodeKind::AndExpr) {
-            self.kids(cl.expr).to_vec()
-        } else {
-            vec![cl.expr]
-        };
-        for e in conjuncts {
+        for e in crate::temps::conjuncts(&self.icx, cl.expr) {
             if !self.open() {
                 return;
             }
             let bt = self.t_bool();
             self.hold_site = at.is_none();
-            self.begin_temps();
+            self.begin_temps(e);
             let c = self.val(e, Some(bt));
             self.end_temps();
             self.hold_site = false;
@@ -1002,7 +1001,8 @@ impl<'a> FnCx<'a> {
         }
         let t = icx.tk(a);
         let kids = self.kids(s);
-        self.begin_temps();
+        let outer = std::mem::replace(&mut self.f.cur, s);
+        self.begin_temps(s);
         if t == Term::KwLet as u8 {
             self.let_stmt(&kids);
         } else if t == Term::KwIf as u8 {
@@ -1045,6 +1045,7 @@ impl<'a> FnCx<'a> {
             self.expr_stmt(e);
         }
         self.end_temps();
+        self.f.cur = outer;
     }
 
     /// `scope { .. }`: a thread-list handle (`usize`, 0 = empty) in a slot; the block's spawns
@@ -1259,7 +1260,7 @@ impl<'a> FnCx<'a> {
         let j = self.join(n, &[]);
         let bt = self.t_bool();
         // the condition's temporaries end before the branch
-        self.begin_temps();
+        self.begin_temps(c);
         let cv = self.val(c, Some(bt));
         self.end_temps();
         let Some(cv) = cv else { return };
@@ -1305,7 +1306,7 @@ impl<'a> FnCx<'a> {
         self.br_join(head, &[]);
         self.enter(head);
         let bt = self.t_bool();
-        self.begin_temps();
+        self.begin_temps(c);
         let cv = self.val(c, Some(bt));
         self.end_temps();
         let Some(cv) = cv else { return };
@@ -1879,6 +1880,8 @@ impl<'a> FnCx<'a> {
     /// instance's args: the instance type never picks another loop.
     fn iter_loop(&mut self, f: u32, pat: u32, body: u32, it: Place, kind: ForKind) {
         self.push_scope();
+        // the slot of an iterator without drop glue ends where a drop would end it
+        let mut bare: Option<(Operand, Ty)> = None;
         let it = match kind {
             ForKind::IterMut => {
                 let TypeKind::Ref { mutable: true, inner } = self.kind(it.ty) else {
@@ -1903,10 +1906,16 @@ impl<'a> FnCx<'a> {
                 // the loop ends or is left
                 let root =
                     if self.needs_drop(t) { Some(self.new_temp(t, Home::Slot(s), true)) } else { None };
+                if root.is_none() {
+                    bare = Some((s, st));
+                }
                 Place { base: Base::Mem(s, st), proj: Vec::new(), ty: t, root }
             }
         };
         self.iter_loop_over(f, pat, body, it);
+        if let Some((s, st)) = bare {
+            self.event(stave_ir::EventKind::End, s, st);
+        }
         self.pop_scope();
     }
 
@@ -2307,7 +2316,7 @@ impl<'a> FnCx<'a> {
                     let bound = self.f.env.clone();
                     let around = self.guard.replace((bound.st.clone(), false));
                     // the guard's temporaries end before the branch
-                    self.begin_temps();
+                    self.begin_temps(g);
                     let gv = self.val(g, Some(bt));
                     self.end_temps();
                     let moved = std::mem::replace(&mut self.guard, around).is_some_and(|w| w.1);
@@ -2337,7 +2346,7 @@ impl<'a> FnCx<'a> {
                 if is_expr {
                     let w = Some(vt);
                     // the arm's temporaries end with the arm
-                    self.begin_temps();
+                    self.begin_temps(a.body);
                     let v = self.val(a.body, w);
                     self.end_temps();
                     if let Some(v) = v {

@@ -64,6 +64,7 @@ pub mod prim;
 pub mod ranks;
 pub mod resolve;
 pub mod sigs;
+pub mod temps;
 pub mod testgen;
 mod threads;
 pub mod traits;

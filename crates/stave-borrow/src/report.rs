@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use stave_diag::{Diagnostic, Span};
 use stave_sema::types::{GArg, Interner, TypeId, TypeKind};
 
-use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, PartFix, Place, Proj};
+use crate::cfg::{Body, GuardEffect, LoanId, MoveOut, PartFix, Place, Proj, TempEnd};
 use crate::check::{Finding, Unfit, later_use};
 use crate::loans::Flow;
 use crate::ty::Tys;
@@ -152,6 +152,20 @@ pub fn failures() -> u64 {
     FAILURES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The E0501 case of a temporary that ends with live loans, and the word for what it ends with.
+fn temp_case(end: Option<TempEnd>) -> (&'static str, &'static str) {
+    use stave_sema::temps::Bound;
+    match end {
+        Some(TempEnd::Loop) => ("temporary-loop", "loop"),
+        Some(TempEnd::Stmt(Bound::Branch)) => ("temporary-branch", "branch"),
+        Some(TempEnd::Stmt(Bound::Arm)) => ("temporary-arm", "arm"),
+        Some(TempEnd::Stmt(Bound::Clause)) => ("temporary-clause", "check"),
+        Some(TempEnd::Stmt(Bound::Cond)) => ("temporary", "condition"),
+        Some(TempEnd::Stmt(Bound::Guard)) => ("temporary", "guard"),
+        Some(TempEnd::Stmt(Bound::Stmt)) | None => ("temporary", "statement"),
+    }
+}
+
 /// The diagnostics of one body's findings.
 pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding>) -> Vec<Diagnostic> {
     let body = flow.body;
@@ -205,17 +219,29 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                 let text = place_text(body, tys, &place);
                 let loaned = place_text(body, tys, &loan.place);
                 let mut roles = vec![("loan", loan.span)];
-                if let Some(u) = later_use(flow, (block, stmt), l) {
+                let later = later_use(flow, (block, stmt), l);
+                if let Some((u, _)) = later {
                     roles.push(("use", u));
                 }
-                let case = crate::check::temp_end(body, access, &place).then_some("temporary");
-                out.extend(mk(
-                    "E0501",
-                    case,
-                    &[("access", access.verb()), ("place", &text), ("loan", kind), ("loaned", &loaned)],
-                    span,
-                    &roles,
-                ));
+                let again = later.is_some_and(|x| x.1);
+                let holes =
+                    [("access", access.verb()), ("place", &text), ("loan", kind), ("loaned", &loaned)];
+                if crate::check::temp_end(body, access, &place) {
+                    // the temporary is where it was made, also when a `break` / `continue` ends it
+                    let t = &body.locals[place.local as usize];
+                    let (case, stmt) = temp_case(t.end);
+                    let m = loan.mutable && !loan.reserved;
+                    let more = [
+                        ("stmt", stmt),
+                        ("bind", if m { "let mut t" } else { "let t" }),
+                        ("tref", if m { "&mut t" } else { "&t" }),
+                        ("later", if again { "here, in the next iteration" } else { "later here" }),
+                    ];
+                    let all: Vec<(&str, &str)> = holes.iter().chain(&more).copied().collect();
+                    out.extend(mk("E0501", Some(case), &all, t.span, &roles));
+                } else {
+                    out.extend(mk("E0501", None, &holes, span, &roles));
+                }
             }
             Finding::Moved { .. } => {}
             Finding::Immutable { place, span, shared, blame, cast } => {
@@ -355,6 +381,7 @@ mod tests {
             capture: None,
             capture_mut: false,
             temp: false,
+            end: None,
             guard: false,
             static_root: false,
             node,
@@ -374,6 +401,7 @@ mod tests {
             joins: Vec::new(),
             unsupported: None,
             internal: None,
+            loops: Vec::new(),
         }
     }
 

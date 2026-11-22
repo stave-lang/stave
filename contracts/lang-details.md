@@ -201,9 +201,12 @@ when that owner ends.
   `p` without a drop. When `e` leaves by `?`, the old value is dropped once, with `p`, on that
   exit.
 - **Temporaries.** A temporary with drop glue is dropped at the end of its statement, the last
-  made first, and only if the operand that makes it ran (the right side of `&&` / `||`, a branch
-  of a value `if`). These are statements of their own for this rule: the condition of an `if` or
-  `while` (each evaluation), a `match` guard, and the body of an arm of a value `match`. The
+  made first, and only if the operand that makes it ran (the right side of `&&` / `||`). These
+  are statements of their own for this rule: the condition of an `if` or `while` (each
+  evaluation), a `match` guard, a branch of a value `if` (`then`, `else`; an `else if` is a value
+  `if` in the `else` branch), the body of an arm of a value `match`, and each check of a contract
+  clause (an operand of its top-level `&&`) and the `e` of `old(e)`. A branch or arm drops its
+  temporaries before its value goes to the rest of the statement. The
   temporaries of a `match` scrutinee and of a `for` header belong to the `match` / `for`
   statement: they live across the arms and the loop, and are dropped once after it. The
   iterator value a `for` is given is moved into the loop and, with drop glue, dropped once when
@@ -230,7 +233,8 @@ of a temporary may be used inside its statement; one used after it is E0501 case
 whatever holds it: a `let` (`let r = &f();`), an assignment, a field of a literal (`S.{ r: &f()
 }`), a tuple or array element, a call or method result that borrows it (`let r =
 mk().first();`), a binding of a `match` over `&mk()`, a value `if` / `match`. Write `let t =
-f(); let r = &t;`. There is no exception for constants: `&4u32`, `&[1, 2, 3]`, `&S.{ a: 1 }`,
+f(); let r = &t;`. A branch of a value `if` and an arm of a value `match` are statements, so
+`ok(if c then &f() else &x)` is E0501 too: bind `let t = f();` before the `if`. There is no exception for constants: `&4u32`, `&[1, 2, 3]`, `&S.{ a: 1 }`,
 `&()`, `&C` of a `const` item, `&size_of::<T>()`, and a variant without payload make a temporary
 at each evaluation, as `&f()` does; data that outlives the statement is a local or a `static`. A
 string literal is no temporary: it is a `&str` to static data. A `static` is a place.

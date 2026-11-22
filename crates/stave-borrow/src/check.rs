@@ -705,33 +705,70 @@ fn bad_moves(body: &Body, findings: &mut Vec<Finding>) {
     }
 }
 
-/// The span of the first use (smallest offset) reachable from statement `at` (inclusive) of a
-/// value whose origin set holds `loan` (E0501 "later use").
-pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<Span> {
+/// The first use, in the order the code runs, after statement `at` (inclusive) of a value whose
+/// origin set holds `loan` (E0501 "later use"): the use the fewest statements away on a path from
+/// `at`, the first in source order among those. `true` with it: the path to it goes back to the
+/// head of a loop that holds `at` and the use is in that loop: it is in a later iteration
+/// ([`Body::loops`]).
+pub fn later_use(flow: &mut Flow<'_>, at: (u32, u32), loan: LoanId) -> Option<(Span, bool)> {
+    use std::cmp::Reverse;
     let body = flow.body;
     let nb = body.blocks.len();
     let mut seen = vec![false; nb];
-    let mut best: Option<Span> = None;
-    let mut work: Vec<(u32, u32)> = vec![at];
-    while let Some((b, from)) = work.pop() {
+    // (statements from `at`, the loop whose head the path went back to, block, first statement)
+    let mut work = std::collections::BinaryHeap::new();
+    work.push(Reverse((0usize, usize::MAX, at.0, at.1)));
+    let mut best: Option<(usize, Span, bool)> = None;
+    while let Some(Reverse((d, again, b, from))) = work.pop() {
+        if best.is_some_and(|x| x.0 < d) {
+            break;
+        }
+        if from == 0 {
+            if seen[b as usize] {
+                continue;
+            }
+            seen[b as usize] = true;
+        }
         let Some(mut st) = flow.entry[b as usize].clone() else { continue };
         let stmts = &body.blocks[b as usize].stmts;
+        let mut found: Option<(usize, Span)> = None;
         for (i, s) in stmts.iter().enumerate() {
             if i as u32 >= from {
+                let mut here: Option<Span> = None;
                 stmt_uses(s, |l, span| {
-                    if flow.holds(&st, l, loan) && best.is_none_or(|x| span.offset < x.offset) {
-                        best = Some(span);
+                    if flow.holds(&st, l, loan) && here.is_none_or(|x| span.offset < x.offset) {
+                        here = Some(span);
                     }
                 });
+                if let Some(sp) = here {
+                    found = Some((d + i - from as usize, sp));
+                    break;
+                }
             }
             flow.apply(&s.kind, &mut st);
         }
-        for &succ in body.blocks[b as usize].term.succs() {
-            if !seen[succ as usize] {
-                seen[succ as usize] = true;
-                work.push((succ, 0));
+        if let Some((dd, sp)) = found {
+            let again = body.loops.get(again).is_some_and(|&l| in_loop(l, b));
+            if best.is_none_or(|x| (dd, again, sp.offset) < (x.0, x.2, x.1.offset)) {
+                best = Some((dd, sp, again));
             }
+            continue;
+        }
+        let len = stmts.len().saturating_sub(from as usize);
+        for &succ in body.blocks[b as usize].term.succs() {
+            let next = if again == usize::MAX { back_edge(body, b, succ) } else { again };
+            work.push(Reverse((d + len + 1, next, succ, 0)));
         }
     }
-    best
+    best.map(|x| (x.1, x.2))
+}
+
+/// The loop whose head the edge `from -> to` goes back to, from inside it (`usize::MAX`: none).
+fn back_edge(body: &Body, from: u32, to: u32) -> usize {
+    body.loops.iter().position(|&l| to == l.0 && in_loop(l, from)).unwrap_or(usize::MAX)
+}
+
+/// Whether block `b` is one of the blocks of loop `(head, exit, end)`.
+fn in_loop((head, exit, end): (u32, u32, u32), b: u32) -> bool {
+    b >= head && b < end && b != exit
 }

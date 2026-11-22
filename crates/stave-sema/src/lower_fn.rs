@@ -280,9 +280,13 @@ pub(crate) struct FnState {
     pub joins: Vec<Join>,
     /// The temporaries of the open statements, in creation order.
     pub temps: Vec<usize>,
-    /// Per open statement (or condition, guard, value arm, clause): where its temporaries start
-    /// in `temps`.
+    /// Per open statement (or condition, guard, value branch or arm, clause): where its
+    /// temporaries start in `temps`.
     pub stmts: Vec<usize>,
+    /// The node of each open statement ([`crate::temps`]), innermost last.
+    pub open: Vec<u32>,
+    /// The node being lowered: a temporary made now is made by it.
+    pub cur: u32,
     /// Per scope depth: the length of `stmts` when the scope at that depth was last pushed.
     pub scope_stmts: Vec<usize>,
     /// The owners from this number on are this fn's own temporaries; those below belong to the
@@ -988,9 +992,21 @@ impl<'a> FnCx<'a> {
                     s.push(l);
                 }
             }
-            Ends::Stmt(_) => self.f.temps.push(l),
+            Ends::Stmt(_) => {
+                self.made_at();
+                self.f.temps.push(l);
+            }
         }
         l
+    }
+
+    /// A temporary of the innermost open statement is made: that must be the statement the
+    /// table gives the node being lowered, the one whose end ends it.
+    fn made_at(&mut self) {
+        let open = self.f.open.last().copied().unwrap_or(crate::temps::NONE);
+        if self.tb().stmt_ends.of(self.f.cur) != open {
+            self.fail_at(None, "a temporary outside the statement that ends it");
+        }
     }
 
     /// A temporary for rvalue `v` in a slot of its own: the place.
@@ -1272,6 +1288,7 @@ impl<'a> FnCx<'a> {
             Base::Val(v, t) => {
                 let (s, st) = self.spill(*v, *t);
                 if self.g.borrows && !self.f.stmts.is_empty() {
+                    self.made_at();
                     self.f.stmt_slots.push((s, st));
                 }
                 (s, st)
@@ -1722,11 +1739,15 @@ impl<'a> FnCx<'a> {
         self.f.b.call(f, None, &[h]);
     }
 
-    /// Opens a statement (or a condition, a guard, a value arm, a clause): the temporaries made
-    /// from here on end at the matching [`FnCx::end_temps`].
-    pub fn begin_temps(&mut self) {
+    /// Opens statement `b` (a node [`crate::temps`] names): the temporaries made from here on
+    /// end at the matching [`FnCx::end_temps`].
+    pub fn begin_temps(&mut self, b: u32) {
+        if !self.tb().stmt_ends.is_stmt(b) {
+            self.fail(b, "a statement the temporaries table does not name");
+        }
         self.f.stmts.push(self.f.temps.len());
         self.f.slot_marks.push(self.f.stmt_slots.len());
+        self.f.open.push(b);
     }
 
     /// Ends the innermost open statement: drops its temporaries, last made first, then ends
@@ -1744,6 +1765,7 @@ impl<'a> FnCx<'a> {
         let at = self.f.slot_marks.pop().unwrap_or(0);
         self.end_slots(at);
         self.f.stmt_slots.truncate(at);
+        self.f.open.pop();
     }
 
     /// Drops, on a path that leaves them, the temporaries of the open statements from index
@@ -1921,6 +1943,8 @@ impl FnState {
             joins: Vec::new(),
             temps: Vec::new(),
             stmts: Vec::new(),
+            open: Vec::new(),
+            cur: crate::temps::NONE,
             scope_stmts: Vec::new(),
             own_temps: 0,
             ret,
@@ -1962,5 +1986,6 @@ fn empty_body() -> &'static TypedBody {
         emulated: Vec::new(),
         contracts: None,
         test_domain: None,
+        stmt_ends: crate::temps::StmtEnds::default(),
     })
 }

@@ -271,7 +271,9 @@ fn block_exit() -> u32 {
   `&(a + 1)`, `&4u32`, the receiver in `f().m()`) first evaluates its operands; then a new
   allocation begins. Every temporary ends with its statement, the ones with drop glue after
   their drop, in reverse order of creation; the condition of an `if` or `while`, a `match`
-  guard, and the body of an arm of a value `match` are statements of their own, and the header
+  guard, a branch of a value `if`, the body of an arm of a value `match`, and each check of a
+  contract clause are statements of their own (stave-sema `temps`, read by checker and
+  lowering), and the header
   of a `for` and a `match` scrutinee belong to the `for` / `match` statement (lang-details.md
   "Drops", "Temporaries end with their statement"). A constant is no exception: `&4u32` or
   `&TABLE` of a `const` begins a new allocation at each evaluation, which ends with its
@@ -666,6 +668,13 @@ temporaries, `free` and `try_realloc` end the block (M3); a borrow whose instruc
 pointer is a tag made through a raw pointer (M24).
 
 What the tracking mode does not see, or sees later than the rules say:
+
+- A borrow of a temporary used after its statement (E0501 `temporary`) is seen only by a read
+  of the referent's bytes. A read of a zero-size value (`&()`, `&Z.{}`, `&[]` of a `[T; 0]`)
+  touches none, and `len()` of a reference to an array (the type's constant) or of a `&str` / a
+  slice (the reference's own length word) reads none of the referent: neither is reported
+  (`tests/borrowcheck/holes/const_temp_unit.stv`, `temp_len_only.stv`). The iterator value of a
+  `for` ends when the loop ends or is left, with or without drop glue (`for_iter_no_drop.stv`).
 
 - The moves of a `match` arm that has a guard happen when the guard holds (the names are bound
   before it runs). Of an or-pattern with a guard they have no row: the block the guard runs in
