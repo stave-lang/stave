@@ -83,6 +83,9 @@ pub struct Borrowck {
     pub drops: Vec<stave_sema::ranks::BodyDrops>,
     /// What the sparse dataflow did, summed over the bodies.
     pub cost: loans::Cost,
+    /// [`Dataflow::Both`]: the bodies the two dataflows disagree on (nothing reported for them).
+    /// The run says nothing reliable about the program then, whatever else it reports.
+    pub differ: Vec<stave_sema::DeclId>,
 }
 
 impl Borrowck {
@@ -101,8 +104,8 @@ pub enum Dataflow {
     Sparse,
     /// [`old`].
     Dense,
-    /// Both: a body for which they give different diagnostics or dump lines is not checked and
-    /// fails the run as an internal error ([`Borrowck::internal`]).
+    /// Both: a body for which they give different diagnostics or dump lines fails the run
+    /// ([`Borrowck::differ`]).
     Both,
 }
 
@@ -152,6 +155,7 @@ struct One {
     phases: [Duration; 3],
     locks: locks::Scan,
     cost: loans::Cost,
+    differ: bool,
 }
 
 /// Borrow-checks every fn body of the program without a type error.
@@ -194,6 +198,10 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
         out.cost.add(r.cost);
         for (a, b) in out.phases.iter_mut().zip(r.phases) {
             *a += b;
+        }
+        if r.differ {
+            out.differ.push(tb.decl);
+            continue;
         }
         if let Some(why) = r.internal {
             out.internal.push((tb.decl, why));
@@ -275,6 +283,7 @@ fn check_body(
         phases: [t0.elapsed(), Duration::ZERO, Duration::ZERO],
         locks: locks::Scan { drops: Some(Vec::new()), ..locks::Scan::default() },
         cost: loans::Cost::default(),
+        differ: false,
     };
     if body.unsupported.is_none() && body.internal.is_none() {
         check_tree(&body, &mut tys, opts, tb.item.0, &mut one);
@@ -346,9 +355,7 @@ fn check_body_flow(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item:
             let (found, flow) = sparse(body, tys, opts.dump, &mut one.phases);
             if opts.dataflow == Dataflow::Both {
                 let (other, _) = dense(body, tys, opts.dump, &mut [Duration::ZERO; 3]);
-                if other != found {
-                    one.internal.get_or_insert("the sparse and the dense borrow dataflow disagree");
-                }
+                one.differ |= other != found;
             }
             one.cost.add(flow.cost());
             let l = locks::scan(body, &flow.rpo, &|t| flow.is_ref_like(t), tys);

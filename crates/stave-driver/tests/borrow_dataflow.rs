@@ -160,24 +160,29 @@ fn everything_agrees() {
     }
     let fuzzed = roots.len() - in_repo - generated;
     let bad = each(&roots, jobs(), differs);
-    // what the programs exercise: borrow diagnostics, bodies solved with an entry state per block
+    // what the programs exercise: borrow diagnostics, bodies in which a store grew a view,
+    // bodies solved with an entry state per block (and whether each such program has an E0501)
     let seen = each(&roots, jobs(), |r| {
         let out = check(r, Dataflow::Sparse, false, 1);
         let code = out.diagnostics.iter().any(|d| d.code().starts_with("E05"));
+        let conflict = out.diagnostics.iter().any(|d| d.code() == "E0501");
         let bc = out.borrowck.as_ref()?;
-        Some(format!("{} {} {}", u8::from(code), bc.checked, bc.cost.exact))
+        let quiet = u8::from(bc.cost.exact > 0 && !conflict);
+        Some(format!("{} {} {} {} {quiet}", u8::from(code), bc.checked, bc.cost.grown, bc.cost.exact))
     });
     let sum = |k: usize| -> u64 {
         seen.iter().map(|s| s.split(' ').nth(k).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0)).sum()
     };
     eprintln!(
         "programs: {} ({in_repo} of the repository, {generated} generated, {fuzzed} of the fuzz classes); \
-         {} with a borrow diagnostic; bodies checked: {}, {} of them with an entry state per block; \
-         differences: {}",
+         {} with a borrow diagnostic; bodies checked: {}, {} of them with a grown view, {} with an entry \
+         state per block ({} programs with such a body and no E0501); differences: {}",
         roots.len(),
         sum(0),
         sum(1),
         sum(2),
+        sum(3),
+        sum(4),
         bad.len()
     );
     assert!(bad.is_empty(), "{}", bad.join("\n"));

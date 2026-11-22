@@ -544,12 +544,22 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
         diagnostics.extend(bc.diagnostics.iter().cloned());
         diagnostics = stave_diag::canonical_order(diagnostics, &program.source_map);
     }
+    // The two borrow dataflows disagree on a body: the run fails as an internal error and
+    // reports nothing else, so that no diagnostic of another body hides it.
+    let differ = bc.differ.first().map(|&d| Failure::Internal {
+        stage: Stage::Borrowck,
+        message: format!("the sparse and the dense borrow dataflow disagree on `{}`", program.decl_path(d)),
+    });
+    if differ.is_some() {
+        diagnostics.clear();
+    }
 
     let mut has_errors = diagnostics.iter().any(|d| d.severity() == Severity::Error);
     // E0108: a build needs `main` (reported only without other errors: a dropped or invalid item
     // may be `main`)
     if opts.goal == Goal::Build
         && !has_errors
+        && differ.is_none()
         && let Some(d) = build::no_main(&program)
     {
         diagnostics.push(d);
@@ -558,7 +568,9 @@ fn run_inner(root: &Path, lib: &Library, opts: &Options) -> Output {
     }
     // A body the borrow checker could not model is not known to be sound: the run fails (check
     // and build alike) instead of accepting it without its E05xx diagnostics.
-    let mut failure = if has_errors {
+    let mut failure = if differ.is_some() {
+        differ
+    } else if has_errors {
         None
     } else {
         silent_error(&tc, |d| program.decl_path(d))
