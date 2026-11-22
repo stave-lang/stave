@@ -1,0 +1,115 @@
+//~ CHECK-ONLY
+// The threads of a `scope` run until it is left, also when its end cannot be reached: after a
+// `spawn`, the spawn's captures stay borrowed on every path through the body, one that stops
+// (a `-> never` call, also through a fn value, in a nested block, in one branch or every arm)
+// or loops for ever included.
+import std.vec;
+import std.mem;
+
+fn spin() -> never { loop { } }
+
+fn spin_on(v: &mut vec.Vec<u64>) -> never { loop { v.push(1); } }
+
+fn mkv() -> vec.Vec<u64> { let mut v = vec.Vec::<u64>.new(); v.push(7); return v; }
+
+fn moved(v: vec.Vec<u64>) {
+    scope {
+        spawn { let n = v.len(); }
+        mem.drop(v); //~ ERROR E0501
+        spin();
+    }
+}
+
+fn two_writers() {
+    let mut v = mkv();
+    scope {
+        spawn { v.push(1); }
+        v.push(2); //~ ERROR E0501
+        //~^ ERROR E0501
+        spin();
+    }
+}
+
+fn loop_write() {
+    let mut v = mkv();
+    scope {
+        spawn { let n = v.len(); }
+        loop { v = mkv(); } //~ ERROR E0501
+    }
+}
+
+fn one_branch(c: bool) {
+    let mut v = mkv();
+    scope {
+        spawn { let n = v.len(); }
+        if c { spin_on(&mut v); } //~ ERROR E0501
+    }
+}
+
+fn every_arm(k: u32) {
+    let mut v = mkv();
+    scope {
+        spawn { let n = v.len(); }
+        match k {
+            1 => { spin_on(&mut v); } //~ ERROR E0501
+            _ => { spin(); }
+        }
+    }
+}
+
+fn nested_block() {
+    let mut n: u64 = 0;
+    scope {
+        spawn { let a = n; }
+        {
+            n = 5; //~ ERROR E0501
+            spin();
+        }
+    }
+}
+
+fn through_value() {
+    let mut n: u64 = 0;
+    let f: fn() -> never = spin;
+    scope {
+        spawn { let a = n; }
+        n = 5; //~ ERROR E0501
+        f();
+    }
+}
+
+fn through_closure() {
+    let mut n: u64 = 0;
+    scope {
+        spawn { let a = n; }
+        let g = fn() -> never { spin(); };
+        n = 5; //~ ERROR E0501
+        g();
+    }
+}
+
+fn inner_scope() {
+    let mut n: u64 = 0;
+    scope {
+        spawn { let a = n; }
+        scope {
+            spawn { let b: u64 = 1; }
+            n = 5; //~ ERROR E0501
+            spin();
+        }
+    }
+}
+
+fn spawn_in_loop() {
+    let mut n: u64 = 0;
+    scope {
+        loop {
+            spawn { let a = n; }
+            n = n + 1; //~ ERROR E0501
+        }
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}

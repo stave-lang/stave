@@ -239,6 +239,10 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                     ];
                     let all: Vec<(&str, &str)> = holes.iter().chain(&more).copied().collect();
                     out.extend(mk("E0501", Some(case), &all, t.span, &roles));
+                } else if later.is_some_and(|(u, _)| body.joins.iter().any(|j| j.1 == u)) {
+                    // the later use stands for a thread of the scope, which runs until the scope
+                    // is left ([`crate::cfg`] `hold_spawns`): it is named at the spawn
+                    out.extend(mk("E0501", Some("thread"), &holes, span, &[("loan", loan.span)]));
                 } else {
                     out.extend(mk("E0501", None, &holes, span, &roles));
                 }
@@ -266,6 +270,9 @@ pub fn diagnostics(flow: &mut Flow<'_>, tys: &mut Tys<'_>, findings: Vec<Finding
                         span,
                         &[("capture", c)],
                     )),
+                    None if root.env => {
+                        out.extend(mk("E0512", Some("env"), &[], span, &[("closure", root.span)]))
+                    }
                     None => out.extend(mk("E0512", None, &[("place", &text)], span, &[("local", root.span)])),
                 }
             }
@@ -384,6 +391,7 @@ mod tests {
             end: None,
             guard: false,
             static_root: false,
+            env: false,
             node,
         };
         Body {

@@ -354,7 +354,10 @@ fn caller() -> u32 {
   `&` when every use in the body is a read, through any dereference (contracts/lang-details.md
   §1 Closure capture modes), else `&mut` (a write, a `&mut` borrow, a `&mut self` receiver, a
   `&mut` chunk or element binding over it, `*t.0 = ..` with `t.0: &mut T`). The fn value is the code and
-  these references, held by value like the fields of a view. It is not a temporary: values made
+  these references, held by value like the fields of a view. Natively the references are an
+  environment in the frame that evaluates the literal and the fn value points to it: a use of
+  the value after that frame returned reads freed stack (a checker rejects it as a returned
+  borrow of a local, E0512). It is not a temporary: values made
   by earlier evaluations of the literal keep their tags and stay usable. In the body a use of a
   captured local goes through its capture tag, and a borrow made there is a child of that tag.
   Such a borrow may leave in the result; it then falls under M1 to M3 like any reference: the
@@ -558,6 +561,8 @@ The oracle's regression set holds one program per shape. The rule that rejects t
 | `a as &T` with `T` the type of `a`, the result used after the referent's block; the same result returned from the referent's frame | M11 with M13 | (c) |
 | `r as &mut T`, then `r` and the result both used | M11 with M9 | (d) |
 | a closure returns `&mut` of a capture and is called twice; a closure changes a capture and returns `&` of it | M18 with M2 | (b), (a) |
+| a closure returns a closure literal with captures (of its own `&` captures too), in a struct, `Option`, or value `if`; the result called | M18 with M13 (frame returned) | (c) |
+| after a `spawn`, a `scope` block that is never left (a `-> never` call, also on one branch, a loop without `break`) writes, moves, or `&mut`-borrows a captured local | M22 with M1, M2, M9 | (a), (b), (c) |
 | a borrow of a temporary used after its statement (under `&`, as a call argument, in a literal's field, behind `if`, as a receiver, around a part of it, a constant) | M14 | (c) |
 | `[e; n]`, `n >= 2`, of a `&mut`, a `Vec`, a struct that owns one | M10 | (d) |
 | a view takes a borrow of another field of its own local (by a field assignment, through a pointer to the view or to a part of it, by a storing call on a field or tuple element, by a pattern binding), then that field is written | M16 with M2 | (a) |

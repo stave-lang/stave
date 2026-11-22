@@ -8,6 +8,13 @@ reference for what a program may write and what it means.
 
 - A closure may return a borrow of a capture it holds by `&`, but not of one it holds by `&mut`,
   even through a dereference (E0512): the next call could change it or lend it again.
+- A closure value with captures points to its environment (the captured places' addresses),
+  which is in the frame of the body that evaluated the literal: a value holding it is not
+  returned from that body (E0512 case `env`), also when every capture is one an enclosing
+  closure holds by `&` (`fn() -> fn() -> u64 { return fn() -> u64 { return x; }; }`). Write the
+  inner closure where the captured locals live, or return a value. What a call of the inner
+  closure returns may leave if it holds no fn value (`return get();` with `get` returning `&x`, a
+  slice, an `Option<&T>`): captures are references, so it points to the captured places.
 - A `fn(..) needs(F)` value is usable as `fn(..) needs(G)` only if F ⊆ G ∪ the enclosing fn's
   needs ∪ the target baseline (E0707). Reason: CPU features never change while a program runs, so
   a value made where F is proven stays callable. A call through a value whose type keeps
@@ -298,6 +305,12 @@ safe code cannot deadlock on locks and joins. No `MutexGuard` may be held across
 `park`: the guard stays with the OS thread, another task on that thread that wants the lock
 sleeps the thread, and the task that holds it never resumes. No std fn has `park`, so no
 diagnostic checks this rule.
+
+## §3 Scope threads
+
+A `scope`'s threads run until it is left: after a `spawn`, its captures stay borrowed on every
+path through the block, also on one that never leaves it (a `-> never` call, a loop without
+`break`), so main writing, moving, or `&mut`-borrowing a captured local there is E0501.
 
 ## §3 Error trace
 

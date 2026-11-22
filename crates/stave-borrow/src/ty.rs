@@ -305,6 +305,46 @@ impl<'a> Tys<'a> {
         false
     }
 
+    /// Whether a value of `t` can be or reach a fn value: through references, raw pointers,
+    /// elements, fields, and type arguments (unknown types and generic params: yes). Only a
+    /// fn value points to a closure environment ([`crate::cfg::Local::env`]).
+    pub fn may_hold_fn(&mut self, t: TypeId) -> bool {
+        let sigs = self.sigs;
+        let mut stack = vec![t];
+        let mut seen: Vec<TypeId> = Vec::new();
+        let mut kids = Vec::new();
+        while let Some(x) = stack.pop() {
+            if self.is_unknown(x) || seen.len() > 4096 {
+                return true;
+            }
+            if seen.contains(&x) {
+                continue;
+            }
+            seen.push(x);
+            match self.kind(x) {
+                TypeKind::Fn { .. } | TypeKind::Param(_) => return true,
+                TypeKind::Adt { def, args } => {
+                    for a in args.iter() {
+                        if let GArg::Type(a) = a {
+                            stack.push(*a);
+                        }
+                    }
+                    if let Some(a) = sigs.adt(def) {
+                        for f in a.variants.iter().flat_map(|v| v.fields.iter()) {
+                            stack.push(self.ov.subst(f.ty, &args, None));
+                        }
+                    }
+                }
+                k => {
+                    kids.clear();
+                    k.children(&mut kids);
+                    stack.extend_from_slice(&kids);
+                }
+            }
+        }
+        false
+    }
+
     /// Whether `t` is Copy (unknown types: yes, so nothing is reported for them).
     pub fn is_copy(&mut self, t: TypeId) -> bool {
         if self.is_unknown(t) {

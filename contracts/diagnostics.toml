@@ -1028,12 +1028,17 @@ fix = { description = "make `{type}` Copy with `impl Copy for {type} {{}}`, if a
 code = "E0501"
 severity = "error"
 area = "borrow"
-rule = "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check or the operand of `old(e)`; `temporary-loop`: the iterator value of a `for`, which ends with the loop"
+rule = "borrow conflict (borrow site, conflicting access, later use: the first use after the access, in the order the code runs); case `temporary`: a borrow of a temporary used after the statement that made it (every temporary ends with its statement: a statement, an `if` / `while` condition, a guard, a value-`if` branch, a value-`match` arm, a contract check); `temporary-branch`, `temporary-arm`: the statement is a value-`if` branch or a value-`match` arm; `temporary-clause`: a contract check or the operand of `old(e)`; `temporary-loop`: the iterator value of a `for`, which ends with the loop; case `thread`: the later use is by a thread of a `scope`, which runs until the scope is left (also on a path that never leaves it)"
 holes = { access = "text-literal", place = "place", loan = "text-literal", loaned = "place", stmt = "text-literal", bind = "text-literal", tref = "text-literal", later = "text-literal" }
 choices = { access = ["borrow mutably", "borrow", "move", "assign to", "drop"], loan = ["`&mut`", "`&`"], stmt = ["statement", "condition", "guard", "branch", "arm", "check", "loop"], bind = ["let t", "let mut t"], tref = ["&t", "&mut t"], later = ["later here", "here, in the next iteration"] }
 message = "cannot {access} `{place}`: it has a live {loan} borrow"
 labels = [{ at = "primary", text = "{access} here" }, { at = "loan", text = "{loan} borrow of `{loaned}` created here" }, { at = "use", text = "borrow used later here" }]
 fix = { description = "end the borrow before this point: move the later use before it, or copy the value out first" }
+
+[diag.cases.thread]
+message = "cannot {access} `{place}`: it has a live {loan} borrow"
+labels = [{ at = "primary", text = "{access} here" }, { at = "loan", text = "{loan} borrow of `{loaned}` by the thread spawned here: it may use `{loaned}` until the scope is left" }]
+fix = { description = "leave the scope before this point (its threads are joined there), or use the place only inside the thread" }
 
 [diag.cases.temporary]
 message = "the temporary `{place}` ends with its {stmt}, but a {loan} borrow of it is used later"
@@ -1196,7 +1201,7 @@ retired = true
 code = "E0512"
 severity = "error"
 area = "borrow"
-rule = "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows; a borrow of a `static` or a part of it borrows nothing); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again)"
+rule = "returned value borrows a local (also the block-local chunk a `&` / `&mut` chunk-loop binding borrows; a borrow of a `static` or a part of it borrows nothing); case `mut-capture`: a closure's returned value borrows a capture the closure holds by `&mut` (the next call could change it or lend it again); case `env`: the returned value holds a closure value made in this body, whose environment (the addresses of its captures) is in this body's frame"
 holes = { place = "place" }
 message = "returned value borrows local `{place}`"
 labels = [{ at = "primary", text = "returned here" }, { at = "local", text = "`{place}` is dropped when the function returns" }]
@@ -1206,6 +1211,11 @@ fix = { description = "return an owned value, or borrow from a parameter named i
 message = "returned value borrows `{place}` through a `&mut` capture of the closure"
 labels = [{ at = "primary", text = "returned here" }, { at = "capture", text = "the next call of this closure could change `{place}` or lend it again" }]
 fix = { description = "return a copy of the value, or borrow it before the closure (`let r = &{place};`) and return `r` from the closure" }
+
+[diag.cases.env]
+message = "returned value holds a closure made in this body, and its environment is in this body's frame"
+labels = [{ at = "primary", text = "returned here" }, { at = "closure", text = "the environment of this closure (the addresses of its captures) is made in this frame and ends when the frame returns" }]
+fix = { description = "write the closure in the fn that owns the captured locals, or return a value computed from them instead of a closure" }
 
 [[diag]]
 code = "E0513"

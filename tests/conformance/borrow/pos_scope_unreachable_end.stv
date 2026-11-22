@@ -1,0 +1,59 @@
+//~ CHECK-ONLY
+// A `scope` whose end cannot be reached: what its threads borrow is held from each spawn on,
+// not before it, and not past the scope; main may read what a thread reads, and use what no
+// thread captured.
+fn spin() -> never { loop { } }
+
+fn untouched() {
+    let mut n: u64 = 0;
+    scope {
+        spawn { n = 5; }
+        loop { }
+    }
+}
+
+fn after_join() {
+    let mut n: u64 = 0;
+    scope { spawn { n = 1; } }
+    n = n + 1;
+    spin();
+}
+
+fn shared_reads() {
+    let n: u64 = 3;
+    let mut s: u64 = 0;
+    scope {
+        spawn { let a = n; }
+        loop { s = s + n; }
+    }
+}
+
+fn before_spawn(c: bool) {
+    let mut n: u64 = 0;
+    scope {
+        let mut i: u32 = 0;
+        while i < 3 {
+            n = n + 1;
+            i = i + 1;
+        }
+        if c { n = 9; spin(); }
+        spawn { let a = n; }
+        spin();
+    }
+}
+
+fn spawn_on_one_path(c: bool) {
+    let mut n: u64 = 0;
+    scope {
+        if c {
+            spawn { let a = n; }
+            spin();
+        }
+        n = 2;
+        spin();
+    }
+}
+
+fn main() -> i32 {
+    return 0;
+}
