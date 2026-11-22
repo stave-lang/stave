@@ -245,11 +245,74 @@ impl<'a> Ck<'a> {
         }
     }
 
+    /// E0206 for operator token `tok` on type `t`; on a reference (case `ref-operand`) the fix
+    /// says to apply the operator to the value behind it.
     fn e0206(&mut self, tok: u32, t: TypeId) {
         let op = self.icx.tok_str(tok).to_string();
         let tn = self.show(t);
-        let d = mk("E0206", None, &[("op", &op), ("type", &tn)], self.icx.tok_span(tok), &[]);
+        let case = matches!(self.tys.kind(t), TypeKind::Ref { .. }).then_some("ref-operand");
+        let d = mk("E0206", case, &[("op", &op), ("type", &tn)], self.icx.tok_span(tok), &[]);
         self.report(d);
+    }
+
+    /// E0206 for unary `*` (token `tok`) on operand `c` of type `t`, which is no reference or
+    /// raw pointer. The fix names what `t` offers instead, read off its inherent impls: the
+    /// first method this module may call that takes `&self` and nothing else and returns a `&`
+    /// (reading), and the first that takes `&mut self` alone and returns a `&mut` (writing); with
+    /// neither, the value itself.
+    fn e0206_deref(&mut self, tok: u32, c: u32, t: TypeId) {
+        let (get, get_mut) = self.ref_accessors(t);
+        let ty = self.show(t);
+        let operand = self.icx.node_text(c).to_string();
+        let mut holes = vec![("op", "*"), ("type", ty.as_str()), ("operand", operand.as_str())];
+        let case = match (&get, &get_mut) {
+            (Some(g), Some(m)) => {
+                holes.push(("get", g.as_str()));
+                holes.push(("get_mut", m.as_str()));
+                "deref-accessors"
+            }
+            (Some(g), None) => {
+                holes.push(("get", g.as_str()));
+                "deref-read"
+            }
+            (None, Some(m)) => {
+                holes.push(("get_mut", m.as_str()));
+                "deref-write"
+            }
+            (None, None) => "deref",
+        };
+        let d = mk("E0206", Some(case), &holes, self.icx.tok_span(tok), &[]);
+        self.report(d);
+    }
+
+    /// The reference accessors of type `t` (see [`Ck::e0206_deref`]): the names of its first
+    /// `&self -> &U` and its first `&mut self -> &mut U` method, neither generic nor unsafe.
+    fn ref_accessors(&mut self, t: TypeId) -> (Option<String>, Option<String>) {
+        let genv = self.genv();
+        let from = self.package();
+        let methods = self.w.inherent_methods(&mut self.tys, t, genv, from);
+        let (mut read, mut write) = (None, None);
+        for m in methods {
+            let Some(d) = self.prog.decl(m) else { continue };
+            if !d.is_pub() && d.module != self.icx.res_module() {
+                continue;
+            }
+            let Some(sig) = self.sigs.fn_sig(m) else { continue };
+            if sig.is_unsafe || sig.params.len() != 1 || sig.generics.len() != sig.n_parent as usize {
+                continue;
+            }
+            let by_mut = match sig.self_kind {
+                Some(crate::sigs::SelfKind::Ref) => false,
+                Some(crate::sigs::SelfKind::RefMut) => true,
+                _ => continue,
+            };
+            let TypeKind::Ref { mutable, .. } = *self.tys.kind(sig.ret) else { continue };
+            let slot = if by_mut { &mut write } else { &mut read };
+            if mutable == by_mut && slot.is_none() {
+                *slot = Some(self.prog.strings.get(d.name).to_string());
+            }
+        }
+        (read, write)
     }
 
     /// Unifies two operands of one type (rule 4): a pending literal takes the other's type.
@@ -343,7 +406,7 @@ impl<'a> Ck<'a> {
                     let _ = self.fix(r2, ids::ERROR);
                     let d = mk(
                         "E0201",
-                        None,
+                        Some("no-cast"),
                         &[
                             ("expected", if self.lit_root(g1).1.float { "{float}" } else { "{integer}" }),
                             ("found", if self.lit_root(g2).1.float { "{float}" } else { "{integer}" }),
@@ -806,7 +869,7 @@ impl<'a> Ck<'a> {
                 }
                 TypeKind::Error => Ty::ERR,
                 _ => {
-                    self.e0206(a, ct);
+                    self.e0206_deref(a, c, ct);
                     Ty::ERR
                 }
             };
@@ -950,7 +1013,7 @@ impl<'a> Ck<'a> {
     }
 
     /// Cast table: the result type of `from <op> to`, `None` if not allowed (E0204).
-    fn cast_result(&mut self, op: u8, from: TypeId, to: TypeId) -> Option<TypeId> {
+    pub(crate) fn cast_result(&mut self, op: u8, from: TypeId, to: TypeId) -> Option<TypeId> {
         let plain = op == Term::KwAs as u8;
         let wrap = op == Term::AsPercent as u8;
         let sat = op == Term::AsPipe as u8;
@@ -1357,7 +1420,7 @@ impl<'a> Ck<'a> {
                     let operand = icx.node_text(n).to_string();
                     let d = mk(
                         "E0201",
-                        None,
+                        Some("no-cast"),
                         &[("expected", &expected), ("found", &found), ("operand", &operand)],
                         icx.node_span(n),
                         &[],
@@ -2570,7 +2633,7 @@ impl<'a> Ck<'a> {
             let roles: Vec<(&str, Span)> = rspan.map(|s| ("expected", s)).into_iter().collect();
             let d = mk(
                 "E0201",
-                None,
+                Some("no-cast"),
                 &[("expected", &expected), ("found", &found), ("operand", "?")],
                 self.icx.tok_span(tok),
                 &roles,

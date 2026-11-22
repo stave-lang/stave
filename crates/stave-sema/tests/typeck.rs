@@ -807,3 +807,86 @@ fn e0201_fn_arms_fixes_name_what_compiles() {
     assert!(got.iter().all(|(_, f)| !f.contains(" as fn")), "{got:?}");
     assert_eq!(got.len(), 4, "{got:?}");
 }
+
+/// E0201 offers plain `as` only where the cast table admits it; otherwise the fix names the form
+/// that gives the expected type (a marked cast, `Option.Some` / `Result.Ok`, taking the payload
+/// out, a borrow, a copy through `*`), and with none of them no conversion at all.
+#[test]
+fn e0201_fixes_name_a_conversion_that_exists() {
+    let src = "import std.vec;\n\
+         fn some(v: &vec.Vec<u32>) -> Option<&u32> from v { return v.get_ref(0); }\n\
+         fn lit() -> Option<u32> { return 5; }\n\
+         fn ok(x: u32) -> Result<u32, u8> { return x; }\n\
+         fn un(x: Option<u32>) -> u32 { return x; }\n\
+         fn unr(x: Result<u32, u8>) -> u32 { return x; }\n\
+         fn wide(x: u32) -> u64 { return x; }\n\
+         fn narrow(x: u64) -> u32 { return x; }\n\
+         fn sat(x: f64) -> i32 { return x; }\n\
+         fn round(x: u32) -> f32 { return x; }\n\
+         fn take(xs: &[u32]) -> usize { return xs.len(); }\n\
+         fn bump(x: &mut u32) { *x = *x + 1u32; }\n\
+         fn read(x: &u32) -> u32 { return x; }\n\
+         fn none(x: u32) -> bool { return x; }\n\
+         fn float() -> f64 { return 2; }\n\
+         fn main() -> i32 {\n\
+         let a: [u32; 2] = [1u32; 2];\n\
+         let n = take(a);\n\
+         let mut k: u32 = 0;\n\
+         bump(k);\n\
+         return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str)> =
+        tc.diagnostics.iter().map(|d| (d.code(), d.fix().map_or("", |f| f.description.as_str()))).collect();
+    let has = |needle: &str| got.iter().filter(|(c, f)| *c == "E0201" && f.contains(needle)).count();
+    assert_eq!(has("`Option.Some(v.get_ref(0))`"), 1, "{got:?}");
+    assert_eq!(has("`Option.Some(5)`"), 1, "{got:?}");
+    assert_eq!(has("`Result.Ok(x)`"), 1, "{got:?}");
+    assert_eq!(has("`x.unwrap()` (panics `Unwrap` on `Option.None`)"), 1, "{got:?}");
+    assert_eq!(has("`x.unwrap()` (panics `Unwrap` on `Result.Err`)"), 1, "{got:?}");
+    assert_eq!(has("`x as u64`"), 1, "{got:?}");
+    assert_eq!(has("`x as% u32`"), 1, "{got:?}");
+    assert_eq!(has("`x as| i32`"), 1, "{got:?}");
+    assert_eq!(has("`x as~ f32`"), 1, "{got:?}");
+    assert_eq!(has("borrow it: `&a`"), 1, "{got:?}");
+    assert_eq!(has("borrow it mutably: `&mut k`"), 1, "{got:?}");
+    assert_eq!(has("copy the value out: `*x`"), 1, "{got:?}");
+    assert_eq!(has("write a value of type `bool` here"), 1, "{got:?}");
+    assert_eq!(has("write a value of type `f64` here"), 1, "{got:?}");
+    assert!(got.iter().all(|(_, f)| !f.contains(" as Option") && !f.contains(" as Result")), "{got:?}");
+    assert!(got.iter().all(|(_, f)| !f.contains("`x as bool`") && !f.contains("`2 as f64`")), "{got:?}");
+    assert_eq!(got.len(), 14, "{got:?}");
+}
+
+/// E0206 for unary `*` on a value that is no reference names what the type offers: its first
+/// `&self -> &U` and `&mut self -> &mut U` methods (a lock guard's `get` / `get_mut`), one of
+/// them, or else the value itself; an operator on a reference says to apply it to the value
+/// behind it.
+#[test]
+fn e0206_deref_names_the_reference_accessors() {
+    let src = "import std.sync;\n\
+         struct R { v: u64 }\n\
+         impl R { pub fn get(&self) -> &u64 from self { return &self.v; } }\n\
+         struct W { v: u64 }\n\
+         impl W { pub fn put(&mut self, x: u64) { self.v = x; } pub fn slot(&mut self) -> &mut u64 from self { return &mut self.v; } }\n\
+         fn guard(m: &sync.Mutex<u64, 1>) -> u64 { let g = m.lock(); return *g; }\n\
+         fn read(r: R) -> u64 { return *r; }\n\
+         fn write(w: W) -> u64 { return *w; }\n\
+         fn plain(x: u64) -> u64 { return *x; }\n\
+         fn refs(a: &u64, b: &u64) -> u64 { return a + b; }\n\
+         fn main() -> i32 { return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str, &str)> = tc
+        .diagnostics
+        .iter()
+        .map(|d| (d.code(), d.message(), d.fix().map_or("", |f| f.description.as_str())))
+        .collect();
+    let has = |needle: &str| got.iter().filter(|(c, _, f)| *c == "E0206" && f.contains(needle)).count();
+    assert_eq!(has("read `*g.get()`; to change the value, `let r = g.get_mut();`"), 1, "{got:?}");
+    assert_eq!(has("`R` gives a `&` from its method `get`: read `*r.get()`"), 1, "{got:?}");
+    assert_eq!(has("`W` gives a `&mut` from its method `slot`: `let r = w.slot();`"), 1, "{got:?}");
+    assert_eq!(has("`x` is a value already: use it without `*`"), 1, "{got:?}");
+    assert_eq!(has("`&u64` is a reference: apply `+` to the value behind it"), 1, "{got:?}");
+    let deref = "`*` cannot dereference `MutexGuard<u64, 1>`: it is no reference or raw pointer";
+    assert!(got.iter().any(|(_, m, _)| *m == deref), "{got:?}");
+    assert_eq!(got.len(), 5, "{got:?}");
+}
