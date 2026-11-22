@@ -21,7 +21,10 @@ fn main() {
                 }
             }
         }
-        stave_cli::run(&argv, &mut std::io::stdout().lock(), &mut std::io::stderr().lock())
+        // stderr unlocked: the panic hook writes to it from whichever thread panics (the
+        // pipeline runs on pool threads), and a lock held here for the whole run would block
+        // that write forever
+        stave_cli::run(&argv, &mut std::io::stdout().lock(), &mut std::io::stderr())
     });
     std::process::exit(code);
 }
