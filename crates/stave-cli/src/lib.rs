@@ -381,7 +381,7 @@ fn compile_steps(a: &Args, threads: Option<usize>, selection: &Selection, err: &
     if a.timings {
         print_timings(&output, total_ms, a.diagnostics, err);
     }
-    if !runs_shebang_script(a, &path) {
+    if !runs_shebang_script(a, &path) && matches!(a.diagnostics, DiagFormat::Human) {
         for e in output.typeck.iter().flat_map(|t| t.emulated()) {
             let at = match output.files().locate(e.span) {
                 Ok(l) => format!("{}:{}:{}", l.path, l.line, l.col),

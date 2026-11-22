@@ -1,7 +1,9 @@
 //~ CHECK-ONLY
 // A struct with any private field has no pattern outside its module (E0106 case `pattern`, once
 // at the type name): whichever fields the pattern names, also none of the private ones, and with
-// no missing-field E0208 beside it. A struct with only `pub` fields has patterns everywhere.
+// no missing-field E0208 beside it, nor an unknown-field E0208 or a repeated-field E0105. A private
+// struct named through its module is reported once, at the path. A struct with only `pub` fields
+// has patterns everywhere.
 import shapes;
 import std.vec;
 
@@ -55,6 +57,21 @@ fn std_vec(v: &mut vec.Vec<u64>) {
     match v {
         vec.Vec.{ ptr: _, len, cap: _ } => { *len = 100000000; } //~ ERROR E0106
     }
+}
+
+fn unknown_field(m: shapes.Mixed) -> u32 {
+    let shapes.Mixed.{ a, zz } = m; //~ ERROR E0106
+    return a;
+}
+
+fn repeated_field(m: shapes.Mixed) -> u32 {
+    let shapes.Mixed.{ a: _, a: _, b: _ } = m; //~ ERROR E0106
+    return 0;
+}
+
+fn private_type() -> u32 {
+    let shapes.Veiled.{ v } = shapes.veiled(); //~ ERROR E0106
+    return v;
 }
 
 fn all_public(o: shapes.Open) -> u32 {

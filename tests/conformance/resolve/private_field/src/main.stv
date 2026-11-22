@@ -1,0 +1,21 @@
+//~ CHECK-ONLY
+// E0106: a struct field without `pub` is read, and the struct built by a literal, only inside the
+// module that declares it.
+import shapes;
+
+fn read_public(p: &shapes.P) -> u32 {
+    return p.a;
+}
+
+fn read_private(p: &shapes.P) -> u32 {
+    return p.b; //~ ERROR E0106
+}
+
+fn literal() -> shapes.P {
+    return shapes.P.{ a: 1, b: 2 }; //~ ERROR E0106
+}
+
+fn main() -> i32 {
+    let p = shapes.mk(1, 2);
+    return (read_public(&p) + read_private(&p) + shapes.both(&p) + literal().a) as% i32;
+}
