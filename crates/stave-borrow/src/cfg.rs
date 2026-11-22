@@ -17,6 +17,17 @@
 //! statement, after the drops of the ones with drop glue (`Builder::end_stmt_temps`), as
 //! lowered.
 //!
+//! **Drops.** Every drop statement is made by `Builder::drop_at`, with its row in the body's drop
+//! schedule ([`Body::schedule`], [`stave_sema::drops`]): what the checks read as dropped is what
+//! the schedule lists, and the lowering fails on a drop the schedule lacks. A value with drop
+//! glue is an owner from the statement that makes it to the statement that moves it out: a
+//! local on its scope's list, a temporary on its statement's (`Builder::push` takes it off only
+//! when a statement that moves it is added), and each end or exit drops what is on the lists.
+//! Whether such a drop runs is the dataflow's answer, one init bit per owner. Besides the
+//! owners' ends there are the drops of the parts a moving pattern ignores (at its binding
+//! point), of the value an assignment overwrites (before the write), and of the operand a
+//! `select` does not pick (a temporary of its own).
+//!
 //! Closures and `spawn` blocks are built as nested bodies ([`Body::nested`]) whose captured
 //! locals are params; the closure value (or the `scope`'s join local, which accumulates every
 //! spawn's loans and is read wherever the scope is left) holds one loan per captured local,

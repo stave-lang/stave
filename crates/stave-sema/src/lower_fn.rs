@@ -24,6 +24,10 @@
 //! owner is dropped where it ends: a local at the end of its scope (reverse declaration order),
 //! a temporary at the end of its statement (reverse creation order), both on every `break`,
 //! `continue`, `return`, and `?` that leaves them; a place is dropped before it is overwritten.
+//! Every drop of a checked body is asked of the body's drop schedule first ([`crate::drops`],
+//! [`FnCx::scheduled`]), and the drops of one end or exit of their order there: the schedule is
+//! what the borrow checker's CFG has, so a drop it lacks, or in another order, is a drop the
+//! checks did not read, and the job fails.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use stave_ir::ir::ConstId;
