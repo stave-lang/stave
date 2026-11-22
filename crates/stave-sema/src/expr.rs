@@ -139,15 +139,9 @@ fn is_shift(op: u8) -> bool {
 }
 
 impl<'a> Ck<'a> {
-    /// The declaration of struct field `f` when it is private to a module other than the one being
-    /// checked: field reads, struct literals, struct patterns, and columns all ask this. Enum
-    /// variant fields have no privacy.
+    /// [`crate::Program::hidden_field`] from the module being checked.
     pub(crate) fn hidden_field(&self, f: DeclId) -> Option<crate::decls::Decl> {
-        let fd = self.prog.decl(f).copied()?;
-        (!fd.is_pub()
-            && self.prog.decl(fd.parent).is_some_and(|p| p.kind == DeclKind::Struct)
-            && fd.module != self.icx.res_module())
-        .then_some(fd)
+        self.prog.hidden_field(f, self.icx.res_module())
     }
 
     /// Types expression node `n` with context type `hint` and records the type on `n`.
@@ -4146,6 +4140,11 @@ impl<'a> Ck<'a> {
         let tail = kids.iter().copied().find(|&c| icx.kind(c) == Some(NodeKind::TailClause));
         // `for i: T in a..b`: the binding type is the context of the range's literals
         let bt_pre = bind_ty.map(|b| self.lower_ty(b, false));
+        // the annotation's type is the binding's, also for a `_` pattern, which binds no local:
+        // the borrow checker reads it here
+        if let (Some(n), Some(t)) = (bind_ty, bt_pre) {
+            self.set(n, Ty::T(t));
+        }
         let it_hint = match bt_pre {
             Some(b) if !matches!(self.tys.kind(b), TypeKind::Vector { .. } | TypeKind::Ref { .. }) => {
                 Some(self.tys.intern(TypeKind::Range { elem: b, inclusive: false }))

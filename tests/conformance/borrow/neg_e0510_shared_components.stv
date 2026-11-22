@@ -1,0 +1,53 @@
+//~ CHECK-ONLY
+// A reference among repeated components (2^17 leaves) makes the value borrow: returned without
+// `from` it is E0510.
+type R0 = &u8;
+type R1 = (R0, R0);
+type R2 = (R1, R1);
+type R3 = (R2, R2);
+type R4 = (R3, R3);
+type R5 = (R4, R4);
+type R6 = (R5, R5);
+type R7 = (R6, R6);
+type R8 = (R7, R7);
+type R9 = (R8, R8);
+type R10 = (R9, R9);
+type R11 = (R10, R10);
+type R12 = (R11, R11);
+type R13 = (R12, R12);
+type R14 = (R13, R13);
+type R15 = (R14, R14);
+type R16 = (R15, R15);
+type R17 = (R16, R16);
+type U0 = u8;
+type U1 = (U0, U0);
+type U2 = (U1, U1);
+type U3 = (U2, U2);
+type U4 = (U3, U3);
+type U5 = (U4, U4);
+type U6 = (U5, U5);
+type U7 = (U6, U6);
+type U8 = (U7, U7);
+type U9 = (U8, U8);
+type U10 = (U9, U9);
+type U11 = (U10, U10);
+type U12 = (U11, U11);
+type U13 = (U12, U12);
+type U14 = (U13, U13);
+type U15 = (U14, U14);
+type U16 = (U15, U15);
+type U17 = (U16, U16);
+
+fn leaves(x: R17) -> R17 {
+    return x; //~ ERROR E0510
+}
+
+fn last(x: (U17, &u8)) -> (U17, &u8) {
+    return x; //~ ERROR E0510
+}
+
+fn first(x: (&u8, U17)) -> (&u8, U17) {
+    return x; //~ ERROR E0510
+}
+
+fn main() { }
