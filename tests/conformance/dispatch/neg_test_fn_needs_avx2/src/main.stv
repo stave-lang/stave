@@ -1,0 +1,20 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v2
+// E0709 case `test`: a `test fn` with or without params cannot declare `needs` (the harness runs
+// it on any CPU, once per generated input). The bodies are then checked without the features:
+// 256-bit vectors are E0702, and the call of a `needs(avx2)` fn is E0704.
+import std.io;
+fn wide(xs: &[f32]) -> f32 needs(avx2) { let v = f32x8.load(xs, 0); let w = v * v; return w.reduce_add(); }
+test fn wide_sum() needs(avx2) { //~ ERROR E0709
+    let a: [f32; 8] = [1.0; 8];
+    let v = f32x8.load(&a, 0) + f32x8.splat(1.0); //~ ERROR E0702
+    //~^ ERROR E0702
+    let s = v.reduce_add() + wide(&a); //~ ERROR E0704
+    io.print(f"{s}\n");
+}
+test fn wide_param(n: u32) needs(avx2) requires(n < 4) { //~ ERROR E0709
+    let v = f32x8.splat(n as~ f32); //~ ERROR E0702
+    let s = v.reduce_add();
+    io.print(f"{s}\n");
+}
+fn main() -> i32 { return 0; }

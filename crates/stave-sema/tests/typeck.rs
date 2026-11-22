@@ -752,3 +752,49 @@ fn e0219_next_shape_and_e0609_lane_type_say_why() {
     assert!(got.iter().any(|(c, m, _)| *c == "E0609" && *m == lane), "{got:?}");
     assert_eq!(got.len(), 3, "{got:?}");
 }
+
+/// E0704 case `value` names the missing features no other missing one implies, as for a direct
+/// call: `avx2` (not the baseline's `sse42` or the implied `avx`), and both of two.
+#[test]
+fn e0704_value_names_the_missing_features() {
+    let src = "fn one(f: fn(u32) -> u32 needs(avx2)) -> u32 { return f(1u32); }\n\
+         fn two(f: fn(u32) -> u32 needs(avx2, fma)) -> u32 needs(avx) { return f(1u32); }\n\
+         fn main() -> i32 { return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<&str> = tc.diagnostics.iter().filter(|d| d.code() == "E0704").map(|d| d.message()).collect();
+    let want = [
+        "a call through a value of type `fn(u32) -> u32 needs(avx2)` needs `avx2`, which the caller does not have",
+        "a call through a value of type `fn(u32) -> u32 needs(avx2, fma)` needs `avx2, fma`, which the caller \
+         does not have",
+    ];
+    assert_eq!(got, want, "{got:?}");
+}
+
+/// E0709 case `test` and E0705 case `dispatch` say what the rule is and how to write the code.
+#[test]
+fn e0709_test_and_e0705_dispatch_texts() {
+    let src = "fn base(x: u32) -> u32 { return x; }\n\
+         dispatch fn inner(x: u32) -> u32 { _ => base, }\n\
+         dispatch fn outer(x: u32) -> u32 { _ => inner, }\n\
+         test fn t() needs(avx2) { }\n\
+         fn main() -> i32 { return 0; }\n";
+    let (_, tc) = mem(src);
+    let got: Vec<(&str, &str, &str)> = tc
+        .diagnostics
+        .iter()
+        .map(|d| (d.code(), d.message(), d.fix().map_or("", |f| f.description.as_str())))
+        .collect();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(
+        got.iter().any(|(c, m, f)| *c == "E0705"
+            && *m == "dispatch arm names `dispatch fn` `main.inner`: an arm target is a fn with a body"
+            && f.starts_with("name the arms of `main.inner` in this dispatch directly")),
+        "{got:?}"
+    );
+    assert!(
+        got.iter().any(|(c, m, f)| *c == "E0709"
+            && *m == "a `test fn` cannot declare `needs`"
+            && f.contains("through a `dispatch` fn whose `_` arm")),
+        "{got:?}"
+    );
+}

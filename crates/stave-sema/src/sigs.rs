@@ -115,6 +115,14 @@ pub struct FnSig {
     pub node: u32,
 }
 
+impl FnSig {
+    /// Whether the target's arch owns every feature this fn needs: else it is not built there
+    /// (no body is checked, a dispatch has no arm chain), and no call of it runs there.
+    pub fn built_on(&self, arch: stave_target::Arch) -> bool {
+        stave_target::FeatureSet::from_bits(self.features).is_none_or(|fs| fs.is_owned_by(arch))
+    }
+}
+
 /// A struct field or variant payload field (tuple payloads: fields named by index, `name` NONE).
 #[derive(Clone, Debug)]
 pub struct FieldDef {
@@ -1119,6 +1127,8 @@ pub(crate) struct SigBuilder<'p> {
     ungated: bool,
     /// E0702 spans already reported.
     wide: Vec<Span>,
+    /// The program's entry points (E0709), found at the first fn with `needs`.
+    entries: Option<crate::mono::Entries>,
 }
 
 impl Interner for SigBuilder<'_> {
@@ -1216,6 +1226,7 @@ impl<'p> SigBuilder<'p> {
             bound_scope: None,
             ungated: false,
             wide: Vec::new(),
+            entries: None,
         };
         b.find_lang_items();
         b
@@ -1529,31 +1540,23 @@ impl<'p> SigBuilder<'p> {
         }
     }
 
-    /// What fn `d` is when it may not declare `needs` (E0709): `main` of the root package, a
-    /// method of a trait or of a trait impl, or an `extern` export.
+    /// What fn `d` is when it may not declare `needs` (E0709): an entry point
+    /// ([`crate::mono::Entry`]: it runs on any CPU of the target), or a method of a trait or of
+    /// a trait impl. Only a plain fn or an inherent method that is no entry point may.
     fn needs_forbidden(&mut self, d: DeclId, decl: &crate::decls::Decl) -> Option<&'static str> {
-        if decl.flags.has(DeclFlags::EXTERN_EXPORT) {
-            return Some("an `extern` export");
-        }
-        match decl.kind {
-            DeclKind::TraitMethod => Some("a trait method"),
+        let plain = match decl.kind {
+            DeclKind::Fn => true,
             DeclKind::Method => {
                 self.ensure(decl.parent);
-                match &self.sigs[decl.parent.idx()] {
-                    DeclSig::Impl(i) if i.trait_ref.is_some() => Some("a trait method"),
-                    _ => None,
-                }
+                matches!(&self.sigs[decl.parent.idx()], DeclSig::Impl(i) if i.trait_ref.is_none())
             }
-            DeclKind::Fn => {
-                let main = self.prog.strings.lookup("main")?;
-                let is_main = self.prog.packages.iter().any(|p| {
-                    p.is_root
-                        && p.root_module.get().is_some_and(|m| self.prog.module_item(m, main) == Some(d))
-                });
-                is_main.then_some("`main`")
-            }
-            _ => None,
+            _ => false,
+        };
+        if !plain {
+            return Some("a trait method");
         }
+        let entries = self.entries.get_or_insert_with(|| crate::mono::Entries::new(self.prog));
+        entries.of(self.prog, d).map(crate::mono::Entry::what)
     }
 
     fn build_fn(&mut self, d: DeclId) -> DeclSig {
@@ -1684,7 +1687,8 @@ impl<'p> SigBuilder<'p> {
         {
             // E0709; the fn is checked as if it had no `needs` (no second error from the trait
             // impl signature compare).
-            let dg = mk("E0709", None, &[("what", what)], icx.node_span(nd), &[]);
+            let case = decl.flags.has(DeclFlags::TEST).then_some("test");
+            let dg = mk("E0709", case, &[("what", what)], icx.node_span(nd), &[]);
             self.diags.extend(dg);
             features = 0;
             needs_named = Vec::new();
