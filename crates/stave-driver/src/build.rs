@@ -128,9 +128,16 @@ pub struct Lowered {
 }
 
 /// Lowers (mono + lower), verifies, and removes the bounds checks that have a checked witness.
-/// The program must have no error diagnostics.
-pub fn lower(prog: &Program, tc: &Typeck, mode: Mode, borrows: bool) -> Result<Lowered, Failure> {
-    let (lowered, tm) = stave_sema::lower_mapped(prog, tc, mode, borrows);
+/// The program must have no error diagnostics. `drops`: the borrow checker's drop schedules; a
+/// drop the lowering emits that its body's schedule lacks fails the build as a compiler bug.
+pub fn lower(
+    prog: &Program,
+    tc: &Typeck,
+    mode: Mode,
+    borrows: bool,
+    drops: Option<&stave_sema::drops::Schedules>,
+) -> Result<Lowered, Failure> {
+    let (lowered, tm) = stave_sema::lower_mapped(prog, tc, mode, borrows, drops);
     prof::part(".rounds", tm.rounds);
     prof::part(".assemble", tm.assemble);
     prof::mark("lower");

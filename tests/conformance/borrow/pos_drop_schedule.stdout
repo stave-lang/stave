@@ -1,0 +1,22 @@
+drop 2
+bound
+drop 1
+lk 3
+locked
+drop 4
+drop 6
+picked
+drop 5
+drop 5
+picked
+drop 6
+drop 7
+kept
+drop 7
+made
+lk 8
+r 10
+again
+r 11
+r 10
+r 11

@@ -1,0 +1,50 @@
+//~ CHECK-ONLY
+// A `match` scrutinee that is a temporary is dropped at the end of the statement on every way
+// through the `match` that leaves it whole. An arm that takes it whole by a name moves it on
+// that way only: when another arm, or the arm's own guard failing, leaves it, its drop at the
+// statement's end is checked against the locks held (E1405 at the scrutinee). With one arm and
+// no guard the value always moves, and nothing is dropped there.
+import std.io;
+import std.mem;
+import std.sync;
+
+static M: sync.Mutex<u32, 1> = sync.Mutex::<u32, 1>.new(5);
+
+struct Lk { pub id: u32 }
+
+impl Drop for Lk {
+    fn drop(&mut self) {
+        let g = M.lock();
+    }
+}
+
+fn mk() -> Lk { return Lk.{ id: 1 }; }
+
+fn guarded_name(k: u32) {
+    let g = M.lock();
+    match mk() { //~ ERROR E1405
+        x if k == 1 => { mem.forget(x); }
+        _ => { io.print("left whole\n"); }
+    }
+}
+
+fn test_then_name(k: u32) {
+    let g = M.lock();
+    match (mk(), k) { //~ ERROR E1405
+        (_, 0) => { io.print("left whole\n"); }
+        other => { mem.forget(other); }
+    }
+}
+
+fn always_moved() {
+    let g = M.lock();
+    match mk() {
+        x => { mem.forget(x); }
+    }
+}
+
+fn main() {
+    guarded_name(0);
+    test_then_name(0);
+    always_moved();
+}

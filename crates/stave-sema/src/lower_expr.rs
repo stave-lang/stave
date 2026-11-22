@@ -1537,8 +1537,7 @@ impl<'a> FnCx<'a> {
             let hook = self.g.lang.errtrace_push;
             self.errtrace_hook(hook, tok);
         }
-        self.exit_temps(0);
-        self.drop_scopes(0);
+        self.exit_drops(crate::drops::Point::Try(tok), 0, 0);
         self.ensures_checks(Some(r), tok);
         if self.open() {
             self.f.b.ret(Some(r));

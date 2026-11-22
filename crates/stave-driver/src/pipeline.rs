@@ -610,7 +610,7 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
     let mut effect_sets = None;
     if !has_errors && failure.is_none() {
         let t0 = Instant::now();
-        match crate::effects::run(&program, &tc, opts.effects_all) {
+        match crate::effects::run(&program, &tc, opts.effects_all, Some(&bc.schedules)) {
             Ok(r) => {
                 if !r.diagnostics.is_empty() {
                     has_errors |= r.diagnostics.iter().any(|d| d.severity() == Severity::Error);
@@ -668,7 +668,8 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
 
     // ---- mono + lower + verify + removal of the bounds checks with a checked witness.
     let t0 = Instant::now();
-    let lowered = build::lower(&out.program, &tc, opts.mode(), opts.borrow_marks);
+    let drops = out.borrowck.as_ref().map(|b| &b.schedules);
+    let lowered = build::lower(&out.program, &tc, opts.mode(), opts.borrow_marks, drops);
     let funcs = lowered.as_ref().map_or(0, |l| l.module.funcs.iter().filter(|f| f.body.is_some()).count());
     out.timings.push(timing(Stage::Lower, ms(t0.elapsed()), funcs as u64));
     out.typeck = Some(tc);
@@ -688,7 +689,7 @@ fn run_stages(root: &Path, lib: &Library, opts: &Options) -> Output {
         && !opts.borrow_marks
         && let Some(tc) = &out.typeck
     {
-        match build::lower(&out.program, tc, opts.mode(), true) {
+        match build::lower(&out.program, tc, opts.mode(), true, drops) {
             Ok(l) => out.tracked = Some(l.module),
             Err(f) => {
                 out.failure = Some(f);

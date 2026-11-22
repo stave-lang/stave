@@ -81,6 +81,9 @@ pub struct Borrowck {
     pub locks: Vec<stave_sema::ranks::BodyLocks>,
     /// The types each checked body may drop, in body order.
     pub drops: Vec<stave_sema::ranks::BodyDrops>,
+    /// The drop schedule of each body a CFG was built for ([`stave_sema::drops`]): the lowering
+    /// checks every drop it emits against it.
+    pub schedules: stave_sema::drops::Schedules,
     /// What the sparse dataflow did, summed over the bodies.
     pub cost: loans::Cost,
     /// [`Dataflow::Both`]: the bodies the two dataflows disagree on (nothing reported for them).
@@ -154,6 +157,9 @@ struct One {
     rounds: u32,
     phases: [Duration; 3],
     locks: locks::Scan,
+    /// The types each nested body may drop, by the span of the body's first token.
+    closures: Vec<(stave_diag::Span, Option<Vec<stave_sema::TypeId>>)>,
+    schedule: stave_sema::drops::Schedule,
     cost: loans::Cost,
     differ: bool,
 }
@@ -192,8 +198,9 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
     });
     let mut out = Borrowck { skipped, ..Borrowck::default() };
     for (tb, r) in todo.iter().zip(results) {
-        let Some(r) = r else { continue };
+        let Some(mut r) = r else { continue };
         out.checked += 1;
+        out.schedules.insert(tb.decl, std::mem::take(&mut r.schedule));
         out.max_rounds = out.max_rounds.max(r.rounds);
         out.cost.add(r.cost);
         for (a, b) in out.phases.iter_mut().zip(r.phases) {
@@ -213,7 +220,11 @@ pub fn check(prog: &Program, tc: &Typeck, opts: Options) -> Borrowck {
         }
         out.diagnostics.extend(r.diags);
         out.dump.extend(r.dump);
-        out.drops.push(stave_sema::ranks::BodyDrops { decl: tb.decl, types: r.locks.drops.clone() });
+        out.drops.push(stave_sema::ranks::BodyDrops {
+            decl: tb.decl,
+            types: r.locks.drops.clone(),
+            closures: std::mem::take(&mut r.closures),
+        });
         if r.locks.holds {
             let l = r.locks;
             out.locks.push(stave_sema::ranks::BodyLocks {
@@ -282,6 +293,8 @@ fn check_body(
         rounds: 0,
         phases: [t0.elapsed(), Duration::ZERO, Duration::ZERO],
         locks: locks::Scan { drops: Some(Vec::new()), ..locks::Scan::default() },
+        closures: Vec::new(),
+        schedule: schedule_of(&body),
         cost: loans::Cost::default(),
         differ: false,
     };
@@ -292,6 +305,20 @@ fn check_body(
         }
     }
     Some(one)
+}
+
+/// The drop schedule of `body` and the bodies nested in it, sorted.
+fn schedule_of(body: &cfg::Body) -> stave_sema::drops::Schedule {
+    fn add(b: &cfg::Body, out: &mut stave_sema::drops::Schedule) {
+        out.extend(&b.schedule);
+        for nb in &b.nested {
+            add(nb, out);
+        }
+    }
+    let mut out = stave_sema::drops::Schedule::default();
+    add(body, &mut out);
+    out.seal();
+    out
 }
 
 /// Checks `root` and then the bodies nested in it, each before the ones nested in it, in order.
@@ -374,13 +401,11 @@ fn check_body_flow(body: &cfg::Body, tys: &mut ty::Tys<'_>, opts: Options, item:
     one.locks.sites.extend(l.sites);
     one.locks.any.extend(l.any);
     one.locks.calls.extend(l.calls);
-    one.locks.drops = match (one.locks.drops.take(), l.drops) {
-        (Some(mut a), Some(b)) => {
-            a.extend(b);
-            Some(a)
-        }
-        _ => None,
-    };
+    // each body's drops are its own: a closure's are not its fn's
+    match body.at {
+        None => one.locks.drops = l.drops,
+        Some(at) => one.closures.push((at, l.drops)),
+    }
 }
 
 // ---------- big-stack workers (the builder recurses over expression nesting) ----------

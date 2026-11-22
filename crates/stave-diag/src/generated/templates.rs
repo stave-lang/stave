@@ -6005,7 +6005,7 @@ pub(super) static ENTRIES: &[Entry] = &[
         code: "E1405",
         severity: Severity::Error,
         area: "effects",
-        rule: "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there; case `drop`: a value whose drop glue acquires such a lock is dropped (scope end, temporary, overwritten old value) while the guard is held",
+        rule: "a lock acquired against rank order: while a guard of rank r may be held, a call acquires a lock of rank r or lower (`Mutex.lock`, `Once.get_or_init`, `lock_pair`, directly or through what it can call, fn values and `Once` inits included); checked per instance after the type and borrow checks pass; names the held and the acquired type and the call chain; inside `std` (`with_lock`, a `Once` init) at the user call that leads there; case `drop`: a value whose drop glue acquires such a lock is dropped (any drop of the drop schedule: scope end, temporary, exit, a part a pattern ignores, overwritten old value) while the guard is held; case `own`: the dropped value holds the guard itself while its type's `Drop` impl, or the drop glue of a part dropped before the guard, acquires the lock; case `opaque`: such a value has a drop step the call graph has no node for, which counts as acquiring any lock",
         retired: false,
         located: true,
         holes: &[
@@ -6042,6 +6042,34 @@ pub(super) static ENTRIES: &[Entry] = &[
                 ],
                 fix: Some(FixTemplate {
                     description: "release the guard before the value is dropped (declare the value before the guard, or end the guard's block first), or give `{lock}` a rank above {held_rank}",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "opaque",
+                message: "`{fn}` drops a value that holds `{held}` (rank {held_rank}) and whose drop the lock check cannot follow",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "dropped here" },
+                    LabelTemplate { at: "held", text: "the value holding `{held}`" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "release the guard before the value is dropped, or keep the guard out of the value",
+                    applicability: Applicability::Placeholder,
+                    edits: &[],
+                }),
+            },
+            Shape {
+                case: "own",
+                message: "`{fn}` drops a value whose drop acquires `{lock}` (rank {rank}) while the value itself still holds `{held}` (rank {held_rank})",
+                labels: &[
+                    LabelTemplate { at: "primary", text: "dropped here" },
+                    LabelTemplate { at: "held", text: "the value holding `{held}`" },
+                    LabelTemplate { at: "call", text: "call on the way" },
+                    LabelTemplate { at: "drop", text: "drop on the way" },
+                ],
+                fix: Some(FixTemplate {
+                    description: "let the guard be dropped first: put it before the part whose drop takes the lock (a type's `drop` runs first, then its fields in declaration order), or give `{lock}` a rank above {held_rank}",
                     applicability: Applicability::Placeholder,
                     edits: &[],
                 }),
