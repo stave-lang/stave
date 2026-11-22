@@ -362,11 +362,13 @@ reference to one: `as-slice`, iterate `.as_slice()`). Two `next`s (two traits, o
 of one trait: `T: Nx<u8> + Nx<u16>`) are E0908, as for a call, when one of them has that shape.
 The loop's call of `next` is checked as `recv.next()` is, through the same check of a method
 call: its `needs` against the enclosing fn's (E0704), its privacy (E0106), an `unsafe fn next`
-outside `unsafe(..)` (E0803), the instance's bounds; it is an edge of the call graph (effects,
-`without`, `rec`, lock ranks) and its `requires` runs at its entry. A generic `T` (or `&mut T`) source is always an iterator through its bound's
-`next`: each instance runs that trait method, whatever the instance type is (`T = [u64; 2]` does
-not become an array loop, `T = &mut It` runs `impl Next for &mut It`); a `T` without such a bound
-is E0219 at the definition. Element and binding types, a sequence's length, and the resolved
+outside `unsafe(..)` (E0803: the whole `for` must be inside, as the calls happen at each
+iteration; the source alone in `unsafe(..)` is not enough), the instance's bounds; it is an edge
+of the call graph (effects, `without`, `rec`, lock ranks) and its `requires` runs at its entry.
+A generic `T` (or `&mut T`) source is always an iterator through its bound's `next`: each
+instance runs that trait method, whatever the instance type is (`T = [u64; 2]` does not become
+an array loop, `T = &mut It` runs `impl Next for &mut It`); a `T` without such a bound is E0219
+at the definition. Element and binding types, a sequence's length, and the resolved
 `next` come from the instance; the kind, by reference or by value, and the chunk width come from
 the definition. A source behind a view field is classified by the field's
 type (`v.s: &mut [T]`: a reference to a slice; `v.it: &mut It`: a `&mut` to an iterator).
