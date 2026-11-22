@@ -463,8 +463,8 @@ fix = { description = "add `fn main() -> i32 {{ return 0; }}` to the root module
 code = "E0201"
 severity = "error"
 area = "types"
-rule = "mismatched types, with no implicit conversion"
-holes = { expected = "type", found = "type", operand = "source", count = "int", given = "int" }
+rule = "mismatched types, with no implicit conversion; cases `fn-arms`, `fn-arms-wanted`: value `if` / `match` arms of fn types that differ only in `needs` or `without`"
+holes = { expected = "type", found = "type", operand = "source", count = "int", given = "int", common = "type" }
 message = "mismatched types: expected `{expected}`, found `{found}`"
 labels = [{ at = "primary", text = "this is `{found}`" }, { at = "expected", text = "`{expected}` required by this" }]
 fix = { description = "convert explicitly: `{operand} as {expected}` (or `as%`, `as|`, `as?`, `as~` when lossy)", edits = [{ at = "primary", replacement = "{operand} as {expected}" }] }
@@ -498,6 +498,14 @@ fix = { description = "use a value here: a local, a const, a fn, or a variant" }
 message = "`{operand}` of type `{found}` cannot be called"
 labels = [{ at = "primary", text = "not a fn" }]
 fix = { description = "call a fn item, a method, a variant constructor, or a value of fn type" }
+
+[diag.cases.fn-arms]
+message = "the arms have different fn types: `{expected}` and `{found}`"
+fix = { description = "give the value a fn type both arms convert to: `let f: {common} = ..;` (`as` converts no fn value)" }
+
+[diag.cases.fn-arms-wanted]
+message = "arm of type `{found}` is not usable as `{expected}`: a fn item arm gains a `without` clause only alone"
+fix = { description = "convert the arm alone first: `let g: {expected} = {operand};`, then use `g` as the arm (`as` converts no fn value)" }
 
 [diag.cases.not-in-loop]
 message = "`{operand}` outside of a loop"
@@ -589,8 +597,8 @@ fix = { description = "end every path of `{name}` with a call of a `-> never` fn
 code = "E0208"
 severity = "error"
 area = "types"
-rule = "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern"
-holes = { name = "name", type = "type", missing = "pattern", added = "pattern" }
+rule = "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern; case `reserved`: a type-relative name reserved for a built-in stage0 does not compile (`TxN.load_first_fault`)"
+holes = { name = "name", type = "type", missing = "pattern", added = "pattern", mask = "type" }
 message = "no method or field `{name}` on type `{type}`"
 labels = [{ at = "primary", text = "`{type}` has no `{name}`" }]
 fix = { description = "correct the spelling, or convert the value to a type that has `{name}` (`stave explain E0208`)" }
@@ -609,6 +617,11 @@ fix = { description = "name each field, `f: _` for one the pattern ignores: add 
 message = "`{type}` has no column `{name}`: its columns are the fields of its row struct"
 labels = [{ at = "primary", text = "no field `{name}` in the row type" }]
 fix = { description = "name a field of the row struct, or add field `{name}` to it" }
+
+[diag.cases.reserved]
+message = "`{type}.{name}` is reserved: first-fault loads are not available yet"
+labels = [{ at = "primary", text = "reserved name" }]
+fix = { description = "load the lanes in bounds with a masked load: `{type}.load_masked(s, i, {mask}.first_n(s.len() -| i))` (inactive lanes read 0)" }
 
 [[diag]]
 code = "E0209"

@@ -1139,11 +1139,12 @@ impl<'a> Ck<'a> {
         let bt = self.expr(b, bh);
         let db = self.diverges;
         self.diverges = before || (da && db);
-        self.arms_unify(b, at, bt, hint)
+        self.arms_unify(Some(a), b, at, bt, hint)
     }
 
-    /// Unifies two arm types (rule 4), with the expected type when given.
-    fn arms_unify(&mut self, b: u32, at: Ty, bt: Ty, hint: Option<TypeId>) -> Ty {
+    /// Unifies two arm types (rule 4), with the expected type when given. `a`: an earlier arm of
+    /// type `at`, `b` the arm of type `bt`.
+    fn arms_unify(&mut self, a: Option<u32>, b: u32, at: Ty, bt: Ty, hint: Option<TypeId>) -> Ty {
         let (at, bt) = (self.resolve(at), self.resolve(bt));
         if at == Ty::T(ids::NEVER) {
             return bt;
@@ -1160,7 +1161,59 @@ impl<'a> Ck<'a> {
                 return Ty::T(h);
             }
         }
+        if let (Ty::T(x), Ty::T(y)) = (at, bt)
+            && x != y
+            && !self.tys.has_error(x)
+            && !self.tys.has_error(y)
+            && self.fn_shape_eq(x, y)
+        {
+            self.fn_arms_mismatch(a, b, x, y, hint);
+            return Ty::ERR;
+        }
         self.unify_operands(b, at, bt)
+    }
+
+    /// Whether `x` and `y` are fn types with the same params and return type (they may differ in
+    /// `needs` and `without`).
+    fn fn_shape_eq(&self, x: TypeId, y: TypeId) -> bool {
+        matches!(
+            (self.tys.kind(x), self.tys.kind(y)),
+            (TypeKind::Fn { params: p1, ret: r1, .. }, TypeKind::Fn { params: p2, ret: r2, .. })
+                if p1 == p2 && r1 == r2
+        )
+    }
+
+    /// E0201 for value arms of fn types `x` (arm `a`) and `y` (arm `b`) that differ only in
+    /// `needs` or `without`. An arm keeps its own fn type (a fn item gains a deny clause only
+    /// where it alone is converted), and `as` converts no fn value, so the fix names what
+    /// compiles: with a wanted fn type of that shape, converting the arm that is not usable as it
+    /// alone first (case `fn-arms-wanted`); else the fn type both arms convert to (case `fn-arms`).
+    fn fn_arms_mismatch(&mut self, a: Option<u32>, b: u32, x: TypeId, y: TypeId, hint: Option<TypeId>) {
+        if let Some(h) = hint
+            && self.fn_shape_eq(h, x)
+        {
+            let y_ok = y == h || self.coercible(y, h).is_some();
+            let (n, t) = if y_ok { (a.unwrap_or(b), x) } else { (b, y) };
+            let (expected, found) = (self.show(h), self.show(t));
+            let operand = self.icx.node_text(n).to_string();
+            let holes =
+                [("expected", expected.as_str()), ("found", found.as_str()), ("operand", operand.as_str())];
+            let d = mk("E0201", Some("fn-arms-wanted"), &holes, self.icx.node_span(n), &[]);
+            self.report(d);
+            return;
+        }
+        let (
+            TypeKind::Fn { params, ret, features: fx, deny: dx },
+            TypeKind::Fn { features: fy, deny: dy, .. },
+        ) = (self.tys.kind(x).clone(), self.tys.kind(y).clone())
+        else {
+            return;
+        };
+        let common = self.tys.intern(TypeKind::Fn { params, ret, features: fx | fy, deny: dx & dy });
+        let (expected, found, common) = (self.show(x), self.show(y), self.show(common));
+        let holes = [("expected", expected.as_str()), ("found", found.as_str()), ("common", common.as_str())];
+        let d = mk("E0201", Some("fn-arms"), &holes, self.icx.node_span(b), &[]);
+        self.report(d);
     }
 
     // ---------- literals and primaries ----------
@@ -2093,6 +2146,13 @@ impl<'a> Ck<'a> {
         let name = icx.sym(seg);
         let text = self.prog.strings.get(name);
         if base == ids::ERROR {
+            return St::Err;
+        }
+        if let Some(mask) = builtins::reserved_assoc(&mut self.tys, base, text) {
+            let (tn, mn) = (self.show(base), self.show(mask));
+            let holes = [("name", text), ("type", tn.as_str()), ("mask", mn.as_str())];
+            let d = mk("E0208", Some("reserved"), &holes, icx.tok_span(seg), &[]);
+            self.report(d);
             return St::Err;
         }
         if matches!(self.tys.kind(base), TypeKind::Vector { .. } | TypeKind::Mask { .. })
@@ -4096,7 +4156,11 @@ impl<'a> Ck<'a> {
             arm_ts.push((e, t));
             result = Some(match result {
                 None => t,
-                Some(r) => self.arms_unify(e, r, t, hint),
+                Some(r) => {
+                    let rt = self.resolve(r);
+                    let a = arm_ts.iter().find(|p| self.resolve(p.1) == rt).map(|p| p.0);
+                    self.arms_unify(a, e, r, t, hint)
+                }
             });
         }
         self.free_kids(kids);

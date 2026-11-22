@@ -1,0 +1,26 @@
+//~ CHECK-ONLY
+//~ TARGET x86_64-linux-v3
+//~ TARGET aarch64-linux+sve
+// E0208 case `reserved`: `TxN.load_first_fault` is a reserved name on every target, also where
+// the target table has the op (SVE) and inside `emulate { }`. The masked load of the lanes in
+// bounds (the fix) is accepted.
+fn first(s: &[f32], i: usize) -> f32x4 {
+    return f32x4.load_first_fault(s, i); //~ ERROR E0208
+}
+
+fn emulated(s: &[u8]) -> u8 {
+    let mut r = 0u8;
+    emulate {
+        let v = u8x16.load_first_fault(s, 0); //~ ERROR E0208
+        r = v.reduce_max();
+    }
+    return r;
+}
+
+fn bounded(s: &[f32], i: usize) -> f32x4 {
+    return f32x4.load_masked(s, i, mask32x4.first_n(s.len() -| i));
+}
+
+fn main() -> i32 {
+    return 0;
+}
