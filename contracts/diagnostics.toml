@@ -409,7 +409,7 @@ fix = { description = "rename this `{name}`, or remove one of the two declaratio
 code = "E0106"
 severity = "error"
 area = "resolve"
-rule = "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility)"
+rule = "item, field, or method used outside its module without `pub` (everything is private to its module unless `pub`; trait impl methods have the trait's visibility); case `pattern`: a struct pattern naming any struct with a private field outside its module, once at the type name"
 holes = { name = "name", module = "path" }
 message = "`{name}` is private to module `{module}`"
 labels = [{ at = "primary", text = "private `{name}` used here" }, { at = "decl", text = "`{name}` declared here without `pub`" }]
@@ -419,6 +419,11 @@ fix = { description = "mark `{name}` `pub` in `{module}`, or use it only inside 
 message = "column `{name}` is private to module `{module}`: its field of the row struct is not `pub`"
 labels = [{ at = "primary", text = "private column `{name}` used here" }, { at = "decl", text = "field `{name}` declared here without `pub`" }]
 fix = { description = "mark field `{name}` `pub` in `{module}`, or use the column only inside `{module}`" }
+
+[diag.cases.pattern]
+message = "struct `{name}` has a private field: its pattern outside module `{module}` is not allowed"
+labels = [{ at = "primary", text = "`{name}` cannot be taken apart outside `{module}`" }, { at = "decl", text = "field declared here without `pub`" }]
+fix = { description = "take `{name}` apart inside `{module}` (a `pub` fn there), or use its `pub` fields and methods outside it" }
 
 [[diag]]
 code = "E0107"
@@ -579,8 +584,8 @@ fix = { description = "end every path of `{name}` with a call of a `-> never` fn
 code = "E0208"
 severity = "error"
 area = "types"
-rule = "no method or field `<name>` on type `<T>`"
-holes = { name = "name", type = "type" }
+rule = "no method or field `<name>` on type `<T>`; case `missing-field`: a struct literal without a field; case `pattern-missing-field`: a struct or struct-like variant pattern that does not name every field (`f: _` ignores one), by value or through a reference, at the type name; not reported with a misspelled field of the same pattern"
+holes = { name = "name", type = "type", missing = "pattern", added = "pattern" }
 message = "no method or field `{name}` on type `{type}`"
 labels = [{ at = "primary", text = "`{type}` has no `{name}`" }]
 fix = { description = "correct the spelling, or convert the value to a type that has `{name}` (`stave explain E0208`)" }
@@ -589,6 +594,11 @@ fix = { description = "correct the spelling, or convert the value to a type that
 message = "missing field `{name}` in a literal of `{type}`"
 labels = [{ at = "primary", text = "`{name}` not given" }]
 fix = { description = "give every field: `{name}: <value>`" }
+
+[diag.cases.pattern-missing-field]
+message = "a pattern of `{type}` leaves fields out: `{missing}`"
+labels = [{ at = "primary", text = "a pattern names every field of `{type}`" }]
+fix = { description = "name each field, `f: _` for one the pattern ignores: add `{added}`" }
 
 [diag.cases.column]
 message = "`{type}` has no column `{name}`: its columns are the fields of its row struct"
@@ -1052,7 +1062,7 @@ fix = { description = "borrow it instead (`&{place}`), or take it out and leave 
 [diag.cases.part]
 message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"
 labels = [{ at = "primary", text = "a part moved here" }]
-fix = { description = "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` or left out is dropped there)" }
+fix = { description = "take `{owner}` apart with a pattern instead: `let {pattern} = {owner};` binds every part (a part written `_` is dropped there)" }
 
 [diag.cases.part-reborrow]
 message = "cannot move `{place}` out of `{owner}`: a value that is not `Copy` moves whole"

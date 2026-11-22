@@ -1,6 +1,6 @@
 //~ CHECK-ONLY
 // A non-Copy value is taken apart whole by a pattern: nested struct, tuple, and enum payload
-// patterns, `_` parts, a field the pattern does not name, arms that bind different parts, a
+// patterns, `_` parts, a field the pattern ignores (`b: _`), arms that bind different parts, a
 // temporary, a `for` over an owned array. A pattern that binds no non-Copy part by value only
 // reads: the value stays usable.
 import std.vec;
@@ -19,8 +19,8 @@ fn nested(w: W) -> usize {
     return v.len() + (n as usize) + (a.id as usize);
 }
 
-fn unnamed_field(s: S) -> u32 {
-    let S.{ a, n } = s;
+fn ignored_field(s: S) -> u32 {
+    let S.{ a, b: _, n } = s;
     return a.id + n;
 }
 

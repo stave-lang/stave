@@ -46,9 +46,9 @@ enum Shape {
     /// A literal, a range, a constant: a test that binds nothing.
     Test,
     /// A tuple, struct or variant pattern against (peeled) type `ty`: per field of the tuple,
-    /// struct or variant its type and its sub-pattern (none: not named; a pattern names a field
-    /// once). `mode`: how names inside bind.
-    Parts { ty: Ty, mode: Mode, variant: Option<u32>, fields: Vec<(Ty, Option<Sub>)> },
+    /// struct or variant its type and its sub-pattern (a pattern names every field, once).
+    /// `mode`: how names inside bind.
+    Parts { ty: Ty, mode: Mode, variant: Option<u32>, fields: Vec<(Ty, Sub)> },
 }
 
 /// The top-level test of a match arm.
@@ -2511,8 +2511,10 @@ impl<'a> FnCx<'a> {
                 TypeKind::Tuple(ts) => ts.to_vec(),
                 _ => return self.no_shape(p),
             };
-            let fields =
-                ets.iter().enumerate().map(|(i, &et)| (et, kids.get(i).map(|&k| Sub::Pat(k)))).collect();
+            if kids.len() != ets.len() {
+                return self.no_shape(p);
+            }
+            let fields = ets.iter().zip(&kids).map(|(&et, &k)| (et, Sub::Pat(k))).collect();
             return Shape::Parts { ty: dt, mode: pm, variant: None, fields };
         }
         if !icx.is(a, Term::Ident) {
@@ -2570,6 +2572,11 @@ impl<'a> FnCx<'a> {
                 subs[fi] = Some(Sub::Pat(k));
             }
         }
+        // the type checker rejects a pattern that leaves a field out (E0208)
+        let Some(subs) = subs.into_iter().collect::<Option<Vec<Sub>>>() else {
+            self.fail(p, "a pattern leaves a field out");
+            return Shape::Test;
+        };
         let fields = fts.into_iter().zip(subs).collect();
         Shape::Parts { ty: dt, mode: pm, variant: is_variant.then_some(vi), fields }
     }
@@ -2613,9 +2620,7 @@ impl<'a> FnCx<'a> {
             Shape::Parts { mode, fields, .. } => {
                 let mut any = false;
                 for (ft, sub) in fields {
-                    if let Some(sub) = sub {
-                        any |= self.sub_moves(sub, ft, mode);
-                    }
+                    any |= self.sub_moves(sub, ft, mode);
                 }
                 any
             }
@@ -2658,9 +2663,9 @@ impl<'a> FnCx<'a> {
             });
             part.ty = ft;
             match sub {
-                Some(Sub::Pat(q)) => self.ignored(q, part, mode, out),
-                Some(Sub::Name(b)) if self.name_moves(b, mode) => {}
-                Some(Sub::Name(_)) | None => {
+                Sub::Pat(q) => self.ignored(q, part, mode, out),
+                Sub::Name(b) if self.name_moves(b, mode) => {}
+                Sub::Name(_) => {
                     if self.needs_drop(ft) {
                         out.push(part);
                     }
@@ -2684,8 +2689,8 @@ impl<'a> FnCx<'a> {
         let mut empty = true;
         for (ft, sub) in fields {
             empty &= match sub {
-                Some(Sub::Pat(q)) => self.shape_empty(q, ft),
-                Some(Sub::Name(_)) | None => !self.needs_drop(ft),
+                Sub::Pat(q) => self.shape_empty(q, ft),
+                Sub::Name(_) => !self.needs_drop(ft),
             };
         }
         empty

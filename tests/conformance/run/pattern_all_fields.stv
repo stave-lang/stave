@@ -1,0 +1,86 @@
+//~ STDOUT pattern_all_fields.stdout
+// A struct pattern names every field; `f: _` ignores one. A moving pattern drops each non-Copy
+// part it ignores at its binding point, in field order, a nested part in place of its field: the
+// only destructors that run there are those of fields the pattern writes as `_`. A pattern
+// through `&` / `&mut` names every field too, and moves and drops nothing.
+import std.io;
+import std.mem;
+
+struct Loud { pub id: u32 }
+
+impl Drop for Loud {
+    fn drop(&mut self) {
+        let id = self.id;
+        io.print(f"drop {id}\n");
+    }
+}
+
+struct P { pub a: Loud, pub b: Loud }
+struct Q { pub p: P, pub c: Loud, pub n: u32 }
+struct G<T> { pub v: T, pub w: T }
+enum E { Rec { x: Loud, y: Loud }, Zero }
+
+fn mk(i: u32) -> Loud { return Loud.{ id: i }; }
+
+fn own(xs: [P; 2]) -> [P; 2] { return xs; }
+
+fn let_struct() {
+    let p = P.{ a: mk(1), b: mk(2) };
+    let P.{ a, b: _ } = p;
+    io.print("let\n");
+    mem.drop(a);
+}
+
+fn let_nested() {
+    let q = Q.{ p: P.{ a: mk(3), b: mk(4) }, c: mk(5), n: 7 };
+    let Q.{ p: P.{ a: _, b }, c: _, n } = q;
+    io.print(f"nested {n}\n");
+    mem.drop(b);
+}
+
+fn let_generic() {
+    let g = G.{ v: mk(6), w: mk(7) };
+    let G.{ v: _, w } = g;
+    io.print("generic\n");
+    mem.drop(w);
+}
+
+fn match_variant() {
+    let e = E.Rec.{ x: mk(8), y: mk(9) };
+    match e {
+        E.Rec.{ x: _, y } => {
+            io.print("arm\n");
+            mem.drop(y);
+        }
+        E.Zero => { }
+    }
+}
+
+fn for_items() {
+    for P.{ a, b: _ } in own([P.{ a: mk(10), b: mk(11) }, P.{ a: mk(12), b: mk(13) }]) {
+        io.print("iteration\n");
+        mem.drop(a);
+    }
+}
+
+fn by_reference() {
+    let r = P.{ a: mk(14), b: mk(15) };
+    let P.{ a: ra, b: _ } = &r;
+    let ri = ra.id;
+    io.print(f"by reference {ri}\n");
+    let mut m = G.{ v: mk(16), w: mk(17) };
+    match &mut m {
+        G.{ v, w: _ } => { v.id = 18; }
+    }
+    io.print("end\n");
+}
+
+fn main() -> i32 {
+    let_struct();
+    let_nested();
+    let_generic();
+    match_variant();
+    for_items();
+    by_reference();
+    return 0;
+}
